@@ -19,6 +19,7 @@ import {
   type Author,
   type ContextSnapshot,
   type ContractDocument,
+  type PropertyRecovery,
   type DeliveryState,
   type ExecutionPolicy,
   type ResultEnvelope,
@@ -45,6 +46,9 @@ import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { validateInputs } from '../validate.ts';
 import { WorkflowQueue } from './workflow.ts';
+import { analyzeRecovery, applyCases } from './recovery.ts';
+import { declarationProblems } from '../verification/checks.ts';
+import { staleArtifacts } from '../verification/confirm.ts';
 
 export interface HarnessOptions {
   /** Каталог состояния исполнения: база, worktrees, артефакты. */
@@ -133,6 +137,9 @@ export class Harness {
   ) {
     const subject = input.kind === 'plan' ? input.graph.id : input.contract.id;
     const digest = input.kind === 'plan' ? workGraphDigest(input.graph) : digestOf(input.contract);
+    // Структурные пропуски договора проверки и незакреплённые файлы — отказ до
+    // вызова модели: reviewer оценивает достаточность, а не наличие полей.
+    if (input.kind === 'contract') await this.assertContract(input.contract);
     const rounds = this.engine.reviews(input.kind, subject);
     const last = rounds.at(-1);
     // Назначение reviewer по текущей политике: прежний раунд подтверждает предмет
@@ -290,7 +297,70 @@ export class Harness {
         2,
       ),
     );
-    return this.engine.recordReview(redactDeep(record, execution.redact));
+    return this.engine.recordReview(
+      redactDeep(record, execution.redact),
+      input.kind === 'contract' ? input.contract : undefined,
+    );
+  }
+
+  private async assertContract(contract: ContractDocument) {
+    const repo =
+      this.policy.repositories.find((r) => r.id === (contract.repositoryId ?? '')) ??
+      (contract.repositoryId ? undefined : this.policy.repositories[0]);
+    if (!repo)
+      throw new HarnessError('INVALID_INPUT', 'Репозиторий не объявлен: ' + contract.repositoryId);
+    const problems = contract.checks
+      ? declarationProblems(contract.checks, {
+          gates: repo.gates,
+          repositoryId: repo.id,
+          artifacts: (contract.artifacts ?? []).map((a) => a.path),
+        })
+      : [];
+    const stale = await staleArtifacts(
+      this.repoPath(repo.path),
+      repo.targetRef,
+      contract.artifacts ?? [],
+    );
+    if (stale.length)
+      problems.push(
+        'закреплённые файлы не совпадают с целевой веткой ' +
+          repo.targetRef +
+          ': ' +
+          stale.join(', '),
+      );
+    if (problems.length)
+      throw new HarnessError('INVALID_INPUT', 'Договор проверки неполон: ' + problems.join('; '));
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Корпус подтверждённых случаев                                     */
+  /* ---------------------------------------------------------------- */
+
+  /** Корпус: принятые версии, решения, отложенные принятия. */
+  get corpus() {
+    return this.runner.corpus;
+  }
+  /** Подтвердить пример закреплённым эталоном; подтверждённый — новая версия корпуса. */
+  submitCase(input: unknown) {
+    return this.runner.submitCase(input);
+  }
+  /** Ручное техническое подтверждение принятия версии корпуса (operator mode). */
+  approveAdoption(suiteId: string, pendingId: string) {
+    return this.corpus.approveAdoption(suiteId, pendingId);
+  }
+  /** Решение эпизода по свойству человеком: CAS по версии записи. */
+  decideRecovery(
+    workId: string,
+    recoveryId: string,
+    decision: Omit<NonNullable<PropertyRecovery['decision']>, 'source' | 'decidedAt'>,
+    version: number,
+  ) {
+    return this.engine.recoveryDecide(
+      workId,
+      recoveryId,
+      { ...decision, source: { kind: 'operator' }, decidedAt: new Date().toISOString() },
+      version,
+    );
   }
 
   /** Согласование оператором (approvalMode: operator) графа, digest которого прошёл ревью. */
@@ -471,7 +541,7 @@ export class Harness {
           this.workflows.finish(job);
           continue;
         }
-        if (this.repair(job, graphId)) {
+        if ((await this.recoverProperties(job, graphId)) || this.repair(job, graphId)) {
           this.workflows.finish(job, true);
           continue;
         }
@@ -485,6 +555,117 @@ export class Harness {
         clearInterval(timer);
       }
     }
+  }
+
+  /**
+   * Эпизоды повторяющихся отказов по свойству. Возвращает true, когда
+   * разрешённое действие назначено и его результата нужно дождаться;
+   * останавливается с причиной там, где автоматического действия нет.
+   * Бюджет восстановлений и разбор эпизода учитываются одной транзакцией до
+   * вызова модели: рестарт и повтор бесплатного вызова не получают.
+   */
+  private async recoverProperties(job: WorkflowJob, graphId: string) {
+    const works = this.engine.read((v) =>
+      v.works(graphId).filter((w) => w.recovery && w.status !== 'cancelled'),
+    );
+    for (const work of works) {
+      const r = work.recovery!;
+      switch (r.status) {
+        case 'awaiting-lead': {
+          // Пауза человека, наступившая после старта работы, — его решение:
+          // разбор её не обходит.
+          const control = this.engine.read((v) => v.control());
+          if (control.paused && control.pauseReason === 'operator')
+            throw new Error(
+              `${work.id}: разбор свойства ${r.property} ждёт снятия паузы человеком`,
+            );
+          if ((job.repairs ?? 0) >= this.policy.repairBudget)
+            throw new Error(
+              `${work.id}: исчерпан бюджет восстановлений; разбор свойства ${r.property} — решение человека`,
+            );
+          const reserved = this.workflows.repair(job, `recovery:${r.property}`, () =>
+            this.engine.recoveryReserve(work.id, r.id),
+          );
+          if (reserved.status !== 'analyzing') throw new Error(`${work.id}: ${reserved.reason}`);
+          let decision;
+          try {
+            decision = await analyzeRecovery(
+              {
+                engine: this.engine,
+                policy: this.policy,
+                adapters: this.adapters,
+                stateDir: this.options.stateDir,
+                cwd: this.repoPath(
+                  this.policy.repositories.find((x) => x.id === work.order.repositoryId)!.path,
+                ),
+                ...(this.options.environment ? { environment: this.options.environment } : {}),
+              },
+              this.engine.read((v) => v.work(work.id)!),
+              job.authorRuntime,
+              AbortSignal.timeout(this.policy.runTimeoutMs + 5000),
+            );
+          } catch (error) {
+            this.engine.recoveryInterrupted(
+              work.id,
+              r.id,
+              'Разбор ведущего не дал решения: ' +
+                (error instanceof Error ? error.message : String(error)),
+            );
+            throw error;
+          }
+          this.workflows.guard(job);
+          const decided = this.engine.recoveryDecide(work.id, r.id, decision);
+          if (decided.status === 'applying') await this.applyRecovery(work.id);
+          return this.afterDecision(work.id);
+        }
+        case 'analyzing':
+          // Разбор оборвался без решения (рестарт): вызов уже учтён.
+          this.engine.recoveryInterrupted(
+            work.id,
+            r.id,
+            'Разбор ведущего прерван до решения; повторный автоматический вызов не выполняется.',
+          );
+          throw new Error(`${work.id}: разбор прерван до решения; нужен ведущий или человек`);
+        case 'applying':
+          // Добавление случаев идемпотентно по ключам эпизода.
+          await this.applyRecovery(work.id);
+          return this.afterDecision(work.id);
+        case 'retry':
+        case 'retrying':
+          return this.afterDecision(work.id);
+        default:
+          throw new Error(
+            `${work.id}: ${r.reason ?? 'разбор свойства ' + r.property + ' ждёт решения'}`,
+          );
+      }
+    }
+    return false;
+  }
+  private async applyRecovery(workId: string) {
+    const work = this.engine.read((v) => v.work(workId)!);
+    try {
+      this.engine.recoveryApplied(workId, work.recovery!.id, await applyCases(this.runner, work));
+    } catch (error) {
+      this.engine.recoveryInterrupted(
+        workId,
+        work.recovery!.id,
+        'Добавление случаев не завершилось: ' +
+          (error instanceof Error ? error.message : String(error)),
+      );
+      throw error;
+    }
+  }
+  private afterDecision(workId: string) {
+    const work = this.engine.read((v) => v.work(workId)!);
+    const r = work.recovery;
+    if (!r) return false;
+    if (r.status === 'retry' && ['failed', 'cancelled'].includes(work.status)) {
+      if (work.status === 'cancelled') throw new Error(`${workId}: поручение отменено человеком`);
+      this.engine.retry(workId);
+      return true;
+    }
+    if (r.status === 'retry' || r.status === 'retrying') return true;
+    throw new Error(`${workId}: ${r.reason ?? r.status}`);
   }
 
   /**

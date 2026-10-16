@@ -4,10 +4,12 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import {
   HarnessError,
+  digestOf,
   contextDigest,
   implementationResultSchema,
   reviewIssues,
   reviewResultSchema,
+  type ReviewResult,
   sha256,
   type AttemptState,
   type ContextSnapshot,
@@ -40,6 +42,9 @@ import { BlockedError, classifyFailure } from './classify.ts';
 import { TaskFailure } from './failure.ts';
 import type { Engine } from './engine.ts';
 import { prompt } from './prompt.ts';
+import { contractDocuments, orderCheckManifest } from '../verification/checks.ts';
+import { CorpusStore, localRoots } from '../verification/corpus.ts';
+import { submitCase } from '../verification/confirm.ts';
 import { measuredInvoke } from './measured.ts';
 import { continuableDraft, implementationBasis } from './reuse.ts';
 
@@ -94,10 +99,21 @@ export class Runner {
   private jobs = new Map<string, { promise: Promise<void>; controller: AbortController }>();
   private mergeTails = new Map<string, Promise<void>>();
 
+  /** Корпус подтверждённых случаев: принятие версий и закреплённые snapshot. */
+  readonly corpus: CorpusStore;
+
   constructor(readonly options: RunnerOptions) {
     this.engine = options.engine;
     this.policy = options.engine.policy;
     this.owner = options.owner ?? 'harness-' + randomUUID();
+    this.corpus = new CorpusStore(
+      this.engine,
+      localRoots([
+        options.stateDir,
+        options.baseDir,
+        ...this.policy.repositories.map((r) => this.repoPath(r)),
+      ]),
+    );
   }
 
   repoPath(repo: Repo) {
@@ -228,6 +244,9 @@ export class Runner {
     }
     this.keepLead();
     await this.recover();
+    // Отложенные принятия корпуса: поручение освободилось — принятие
+    // завершается до следующей выдачи.
+    this.corpus.resume();
     for (const [id, job] of this.jobs)
       if (this.engine.read((v) => v.attempt(id)?.status) !== 'active') job.controller.abort();
     while (this.jobs.size < this.policy.concurrency) {
@@ -474,7 +493,18 @@ export class Runner {
     const pinnedContext = (context?.sources ?? [])
       .filter((source) => source.repositoryId === repo.id)
       .flatMap((source) => [...source.files, ...source.references].map((f) => f.path));
-    const protectedList = [...repo.protectedPaths, ...repo.generatedPaths, ...pinnedContext];
+    // Закреплённые checker/oracle/generator контрактов поручения: попытка, которая
+    // правит эталон, подгоняла бы проверку под себя.
+    const checkers = this.engine
+      .read((v) => contractDocuments(work.order, v))
+      .filter((c) => (c.repositoryId ?? work.order.repositoryId) === repo.id)
+      .flatMap((c) => (c.artifacts ?? []).map((a) => a.path));
+    const protectedList = [
+      ...repo.protectedPaths,
+      ...repo.generatedPaths,
+      ...pinnedContext,
+      ...checkers,
+    ];
     const forbidden = changed.filter((p) => within(p, protectedList));
     if (forbidden.length)
       throw new TaskFailure(
@@ -819,6 +849,7 @@ export class Runner {
                           history: this.history(attempt),
                           context,
                           gates: gates.map((g) => ({ id: g.id, command: g.command })),
+                          notes: this.notes(attempt, false),
                         }),
                       },
                       signal,
@@ -914,7 +945,15 @@ export class Runner {
         // дерева и тратил попытку на сделанное.
         if (kind !== 'provider-auth')
           await this.keepDraft(attempt, await this.workOf(attempt), artifacts);
+        // Пример reviewer — гипотеза; эталон решает, станет ли он обязательным:
+        // подтверждение идёт до записи отказа, и принятие новой версии корпуса
+        // ждёт окончания этой попытки. В operator mode подтверждение — ручное.
+        if (kind === 'review' && this.policy.approvalMode === 'agent')
+          await this.confirmReproductions(attempt).catch(() => undefined);
         this.engine.fail(attempt.id, attempt.token, message, {
+          ...(error instanceof TaskFailure && error.properties
+            ? { properties: error.properties }
+            : {}),
           kind,
           blocked:
             (error instanceof BlockedError || kind === 'provider-auth') && !attempt.candidateSha,
@@ -960,6 +999,35 @@ export class Runner {
       execution,
       boundary: this.boundary(consumer?.dependencies ?? attempt.dependencies),
       ...(consumer ? { consumer: consumer.repositoryId } : {}),
+      ...(gate.property ? { property: this.propertyRun(attempt, gate, consumer) } : {}),
+    });
+  }
+
+  /**
+   * Ожидаемая проверка генеративного gate. Проверка потребителя исполняет
+   * свою объявленную область целиком: договор свойств поручения к
+   * одноимённому gate другого компонента не относится и не сужает его.
+   */
+  private propertyRun(attempt: AttemptState, gate: GatePolicy, consumer?: unknown) {
+    return this.engine.read((v) => {
+      const work = v.work(attempt.workId)!;
+      const contracts = contractDocuments(work.order, v);
+      const corpus =
+        !consumer && attempt.checks?.corpus
+          ? this.corpus.snapshot(v, attempt.checks.corpus)
+          : undefined;
+      const expected = consumer
+        ? undefined
+        : orderCheckManifest(work.order, contracts, gate.id, corpus);
+      return {
+        runId: attempt.id,
+        ...(expected ? { expected } : {}),
+        ...(corpus ? { corpus: { digest: corpus.digest, content: corpus.content } } : {}),
+        contracts: Object.fromEntries(work.order.contracts.map((c) => [c.id, c.digest])),
+        artifacts: contracts.flatMap((c) =>
+          (c.artifacts ?? []).map((a) => ({ path: a.path, blob: a.blob })),
+        ),
+      };
     });
   }
 
@@ -1144,6 +1212,7 @@ export class Runner {
           context,
           gates: gates.map((g) => ({ id: g.id, command: g.command })),
           review: { sha, phase, diff },
+          notes: this.notes(attempt, true),
         }),
       },
       signal,
@@ -1195,8 +1264,122 @@ export class Runner {
         line: f.line ?? null,
       })),
     });
-    if (!passed)
-      throw new TaskFailure('review', 'Независимое ревью отклонило результат: ' + redact(reason));
+    if (!passed) {
+      // Свойство находки — только объявленное поручением; свободная строка
+      // reviewer сохраняется для разбора, но эпизод не открывает.
+      const named = (parsed.success ? parsed.data.findings : [])
+        .map((f) => f.reproduction?.property)
+        .filter((p): p is string => !!p);
+      const declared = new Set(work.order.properties ?? []);
+      throw new TaskFailure(
+        'review',
+        'Независимое ревью отклонило результат: ' + redact(reason),
+        named.length
+          ? {
+              bound: [...new Set(named.filter((p) => declared.has(p)))],
+              unbound: [...new Set(named.filter((p) => !declared.has(p)))],
+            }
+          : undefined,
+      );
+    }
+  }
+
+  /**
+   * Обязательный корпус попытки (первые 20 случаев) и — исполнителю —
+   * решение разбора ведущего, под которым выдан повтор.
+   */
+  private notes(attempt: AttemptState, review: boolean) {
+    return this.engine.read((v) => {
+      const out: string[] = [];
+      const r = v.work(attempt.workId)?.recovery;
+      if (!review && r?.decision && r.status === 'retrying' && r.retryRun === attempt.id) {
+        const d = r.decision;
+        const source = `${d.source.kind}${d.source.runtime ? ' (' + d.source.runtime + ')' : ''}, recovery ${r.id}`;
+        out.push(
+          d.action === 'new-approach'
+            ? `Lead decision after two failures on property ${r.property} (source: ${source}): change the implementation approach. Hypothesis: ${d.hypothesis}. Verification plan: ${d.plan}. Reason: ${d.reason}`
+            : `Lead decision after two failures on property ${r.property} (source: ${source}): confirmed cases were added to the mandatory corpus. Reason: ${d.reason}. Fix the class of defect, not only these inputs.`,
+        );
+      }
+      const binding = attempt.checks?.corpus;
+      if (binding) {
+        const suite = this.corpus.get(v, binding.suite);
+        const version = suite.versions.find((x) => x.digest === binding.digest)!;
+        out.push(
+          `Mandatory corpus ${suite.id} version ${version.number} (sha256 ${version.digest}): ${version.cases.length} cases confirmed by the pinned oracle on defective commits. They are part of the gate and run before review on both phases.${version.cases.length > 20 ? ' First 20 shown.' : ''} Cases: ` +
+            JSON.stringify(
+              version.cases.slice(0, 20).map((id) => {
+                const c = suite.cases[id]!;
+                return { id, property: c.property, input: c.input, expected: c.expected };
+              }),
+            ),
+        );
+      }
+      return out;
+    });
+  }
+
+  /**
+   * Подтвердить пример закреплённым эталоном (быстрый маршрут корпуса). Ни
+   * команда воспроизведения, ни данные входа не исполняются.
+   */
+  submitCase(raw: unknown) {
+    return submitCase(
+      {
+        corpus: this.corpus,
+        policy: this.policy,
+        stateDir: this.options.stateDir,
+        repoPath: (repo) => this.repoPath(repo),
+        boundary: () => this.boundary(),
+        ...(this.options.environment ? { environment: this.options.environment } : {}),
+      },
+      raw,
+    );
+  }
+
+  /**
+   * Воспроизведения из отклонившего ревью попытки по объявленным свойствам —
+   * на подтверждение эталоном. Не больше пяти; отказ одного не мешает другим.
+   */
+  private async confirmReproductions(attempt: AttemptState) {
+    const { work, reviews } = this.engine.read((v) => ({
+      work: v.work(attempt.workId)!,
+      reviews: v.attempt(attempt.id)!.evidence.filter((e) => e.kind === 'review' && !e.passed),
+    }));
+    const declared = new Set(work.order.properties ?? []);
+    if (!declared.size) return;
+    const items: {
+      sha: string;
+      reproduction: NonNullable<ReviewResult['findings'][number]['reproduction']>;
+    }[] = [];
+    for (const e of reviews) {
+      const saved = reviewResultSchema.safeParse(
+        JSON.parse(await readFile(e.log, 'utf8').catch(() => 'null')),
+      );
+      if (!saved.success) continue;
+      for (const f of saved.data.findings)
+        if (f.reproduction?.property && declared.has(f.reproduction.property))
+          items.push({ sha: e.sha, reproduction: f.reproduction });
+    }
+    for (const item of items.slice(0, 5))
+      try {
+        await this.submitCase({
+          workId: work.id,
+          property: item.reproduction.property!,
+          input: item.reproduction.input,
+          expected: item.reproduction.expected,
+          actual: item.reproduction.actual,
+          sourceRunId: attempt.id,
+          sourceSha: item.sha,
+          // Ключ — по предмету примера: тот же пример из следующей попытки
+          // возвращает прежнее решение, а не второе подтверждение.
+          key: `rep-${digestOf([work.id, item.reproduction.property, item.reproduction.input]).slice(0, 40)}`,
+          origin: 'review',
+          runtime: attempt.reviewer,
+        });
+      } catch {
+        // Пример остаётся в артефакте ревью; эталон решит при следующем отказе.
+      }
   }
 
   private async integrate(

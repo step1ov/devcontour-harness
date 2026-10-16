@@ -101,6 +101,31 @@ export const eventPayloads = {
     state: z.enum(['exceeded', 'undetermined']),
     reason: text,
   }),
+  /** Задачи приняли версию корпуса; тела случаев в журнал не попадают. */
+  'corpus.adopted': z.strictObject({
+    suite: z.string().min(1).max(300),
+    pending: z.string().min(1).max(200),
+    version: z.number().int().min(0),
+    digest: digestSchema,
+    status: z.enum(['waiting', 'completed']),
+    accepted: z.array(idSchema).max(500),
+  }),
+  /** Эпизод повторяющихся отказов по свойству сменил состояние. */
+  'work.recovery': z.strictObject({
+    recoveryId: z.string().min(1).max(200),
+    property: z.string().min(1).max(200),
+    status: z.enum([
+      'awaiting-lead',
+      'analyzing',
+      'applying',
+      'retry',
+      'retrying',
+      'awaiting-user',
+      'stopped',
+      'closed',
+    ]),
+    reason: text.optional(),
+  }),
   'delivery.pending': z.strictObject(delivery),
   'delivery.delivered': z.strictObject({ ...delivery, receipt: z.string().max(1000).optional() }),
   'delivery.failed': z.strictObject({ ...delivery, error: text }),
@@ -200,5 +225,14 @@ export const transactionKinds = [
    * атрибуции прежних записей. Событий журнала нет.
    */
   'usage.recorded',
+  /**
+   * Только локальные записи корпуса (`check-suites`): начало, продление и
+   * завершение операции подтверждения, запись решения и версии. Событий
+   * журнала нет.
+   */
+  'checks.recorded',
+  'checks.adopted',
+  'checks.awaiting-operator',
+  'checks.adoption-abandoned',
 ] as const;
 export type TransactionKind = (typeof transactionKinds)[number];

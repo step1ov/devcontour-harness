@@ -35,3 +35,34 @@ export {
 } from './engine/budget.ts';
 export { measuredInvoke } from './engine/measured.ts';
 export { callDurationMs, callRecords, usageTotals } from './engine/usage.ts';
+/**
+ * Договор проверки, генеративные gates и корпус подтверждённых случаев:
+ * ожидаемая проверка поручения, сверка отчёта свойств, закреплённые версии
+ * корпуса, подтверждение примера эталоном и переносимая форма корпуса.
+ */
+export {
+  contractDocuments,
+  declarationProblems,
+  effectiveChecks,
+  orderCheckManifest,
+  orderPropertyProblems,
+} from './verification/checks.ts';
+export {
+  corpusWitness,
+  manifestDigest,
+  propertyCoverage,
+  propertyFailure,
+  propertySeed,
+  readPropertyReport,
+  type CheckManifest,
+} from './verification/property.ts';
+export {
+  CorpusStore,
+  canonicalJson,
+  portableSuite,
+  scrubLocalPaths,
+  scrubPortable,
+  verifySuite,
+  type PortableSuite,
+} from './verification/corpus.ts';
+export { caseInputSchema, staleArtifacts, type CaseRequest } from './verification/confirm.ts';

@@ -18,6 +18,7 @@ import {
   jointPassedSchema,
 } from './result.ts';
 import { reviewRecordSchema } from './review.ts';
+import { contractDocumentSchema } from './checks.ts';
 
 /**
  * Нейтральная модель исполнения — то, что ExecutionStore обязан хранить
@@ -859,6 +860,12 @@ export const localSchemas = {
   'check-suites': checkSuiteSchema,
   /** Техническая очередь ведущего (у DevContour — `lead`). */
   'workflow-jobs': workflowJobSchema,
+  /**
+   * Документы контрактов, прошедшие ревью, по digest: из них движок берёт
+   * договор проверки и закреплённые артефакты поручения (у DevContour —
+   * `contracts` состояния).
+   */
+  'contract-documents': contractDocumentSchema,
 } as const;
 export type LocalNamespace = keyof typeof localSchemas;
 export type LocalValue<N extends LocalNamespace> = z.infer<(typeof localSchemas)[N]>;

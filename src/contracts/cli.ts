@@ -6,7 +6,6 @@ import {
   idSchema,
   isoTimeSchema,
   runtimeNameSchema,
-  trimmedText,
 } from './primitives.ts';
 import { errorCodes, type ErrorCode } from './errors.ts';
 import { controlStateSchema, controllerLeaseSchema, workStatusSchema } from './execution.ts';
@@ -492,12 +491,5 @@ export type CliEnvelope<C extends CliCommand | 'version' = CliCommand | 'version
       error: z.infer<typeof cliErrorSchema>;
     };
 
-/** Входной документ контракта для `review-contract`. */
-export const contractDocumentSchema = z.strictObject({
-  apiVersion: z.literal(API_VERSION),
-  id: idSchema,
-  repositoryId: idSchema.optional(),
-  title: trimmedText(3, 180),
-  content: z.string().min(10).max(200000),
-});
-export type ContractDocument = z.infer<typeof contractDocumentSchema>;
+/** Входной документ контракта для `review-contract` — см. `checks.ts`. */
+export { contractDocumentSchema, type ContractDocument } from './checks.ts';

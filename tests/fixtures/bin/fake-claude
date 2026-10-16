@@ -25,7 +25,12 @@ const schema =
   runtime === 'codex'
     ? JSON.parse(readFileSync(arg('--output-schema'), 'utf8'))
     : JSON.parse(arg('--json-schema'));
-const role = schema?.properties?.approved ? 'reviewer' : 'writer';
+// Разбор ведущего (ответ с `action`) — отдельная роль сценария `lead`.
+const role = schema?.properties?.approved
+  ? 'reviewer'
+  : schema?.properties?.action
+    ? 'lead'
+    : 'writer';
 const counterPath = `${scenarioPath}.${runtime}.${role}.count`;
 const index = existsSync(counterPath) ? Number(readFileSync(counterPath, 'utf8')) : 0;
 writeFileSync(counterPath, String(index + 1));

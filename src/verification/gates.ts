@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, mkdtemp, rm, realpath, lstat } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, mkdtemp, rm, realpath, lstat, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep, delimiter, relative, dirname } from 'node:path';
 import { accessSync, constants, existsSync } from 'node:fs';
@@ -13,6 +13,15 @@ import {
 import { command, git } from '../environment/process.ts';
 import { isolation, isolatedCommand, isolationSupport } from '../environment/isolation.ts';
 import { TaskFailure, type FailureKind } from '../engine/failure.ts';
+import { redactDeep } from '../environment/redaction.ts';
+import {
+  manifestDigest,
+  propertyCoverage,
+  propertyFailure,
+  propertySeed,
+  readPropertyReport,
+  type CheckManifest,
+} from './property.ts';
 
 /** Длинное имя testcase заменяется хешем, а не обрезается: обрезка дала бы ложные совпадения. */
 export const TEST_ID_LIMIT = 1000;
@@ -364,6 +373,20 @@ export interface GateRun {
   boundary: { hidden: string[]; readable: string[] };
   /** Проверка потребителя: evidence несёт его компонент и не закрывает собственные gates. */
   consumer?: string;
+  /**
+   * Генеративный gate (`gate.property`): попытка, от которой seed, и
+   * ожидаемая проверка поручения. Без `expected` — прежний уровень (отчёт
+   * сверяется сам с собой и с JUnit).
+   */
+  property?: {
+    runId: string;
+    expected?: CheckManifest;
+    /** Закреплённый корпус попытки: материализуется вне worktree только для чтения. */
+    corpus?: { digest: string; content: string };
+    /** Контракты поручения по digest и их закреплённые файлы. */
+    contracts: Record<string, string>;
+    artifacts: { path: string; blob: string }[];
+  };
 }
 
 /**
@@ -385,6 +408,38 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   const reportPath = gate.report
     ? await prepareReportPath(cwd, gate.report.path, 'Report выходит из worktree')
     : undefined;
+  // Генеративная проверка: seed задаёт controller, поэтому он известен и
+  // тогда, когда проверка зависла и не успела ничего записать. Отчёт свойств
+  // лежит в каталоге controller вне worktree: проверка пишет внутрь него, но
+  // заменить сам каталог на ссылку наружу не может.
+  const property = gate.property && run.property ? run.property : undefined;
+  const propertyDir = property
+    ? await realpath(await mkdtemp(join(tmpdir(), 'harness-property-')))
+    : undefined;
+  const propertyPath = propertyDir ? join(propertyDir, 'report.json') : undefined;
+  const seed = property ? propertySeed(property.runId, phase, gate.id) : 0;
+  const expected = property?.expected;
+  // Корпус закреплён за попыткой при выдаче: его случаи материализуются из
+  // закреплённых байтов в каталоге controller вне worktree, только для чтения.
+  const corpus = expected?.corpus && property?.corpus ? property.corpus : undefined;
+  const corpusDir = corpus
+    ? await realpath(await mkdtemp(join(tmpdir(), 'harness-corpus-')))
+    : undefined;
+  const corpusPath = corpusDir ? join(corpusDir, 'corpus.json') : undefined;
+  if (corpusPath) {
+    await writeFile(corpusPath, corpus!.content);
+    await chmod(corpusPath, 0o444);
+  }
+  const propertyEnv: Record<string, string> = propertyPath
+    ? {
+        DEVCONTOUR_SEED: String(seed),
+        DEVCONTOUR_PROPERTY_REPORT: propertyPath,
+        ...(expected
+          ? { DEVCONTOUR_PROPERTIES: expected.properties.map((p) => p.id).join(',') }
+          : {}),
+        ...(corpusPath ? { DEVCONTOUR_CORPUS: corpusPath } : {}),
+      }
+    : {};
   let kind: FailureKind = 'gate';
   let passed = false,
     summary = '',
@@ -402,12 +457,16 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
           ...(reportPath
             ? { DEVCONTOUR_REPORT_PATH: reportPath, HARNESS_REPORT_PATH: reportPath }
             : {}),
+          ...propertyEnv,
+          ...Object.fromEntries(
+            Object.entries(propertyEnv).map(([k, v]) => [k.replace(/^DEVCONTOUR_/, 'HARNESS_'), v]),
+          ),
         },
         redact,
         timeoutMs: gate.timeoutMs,
         signal,
-        write: [cwd],
-        readable: run.boundary.readable,
+        write: [cwd, ...(propertyDir ? [propertyDir] : [])],
+        readable: [...run.boundary.readable, ...(corpusDir ? [corpusDir] : [])],
         controller: run.boundary.hidden,
         settingsDir: join(artifactDir, gate.id),
       },
@@ -460,6 +519,99 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     summary = redact(message);
     log += '\n' + summary;
   }
+  // Отчёт свойств читается при любом исходе: провал и таймаут — ровно те
+  // случаи, когда контрпример и вход нужны больше всего.
+  let propertyEvidence: EvidenceRecord['property'];
+  if (property && propertyPath) {
+    const read = await readPropertyReport(propertyPath, propertyDir!, redact);
+    // Уборка каталога — не повод потерять evidence: проверка могла снять с
+    // него права. Права возвращаются; если убрать всё же не удалось, это
+    // отказ gate с причиной, а не исключение до записи доказательства.
+    let cleanup: string | undefined;
+    try {
+      await rm(propertyDir!, { recursive: true, force: true });
+    } catch {
+      try {
+        await chmod(propertyDir!, 0o700);
+        await rm(propertyDir!, { recursive: true, force: true });
+      } catch (error) {
+        cleanup =
+          'каталог отчёта свойств не убран: ' +
+          redact(error instanceof Error ? error.message : String(error));
+      }
+    }
+    const join2 = (text: string) =>
+      summary && summary !== 'Команда завершилась успешно' ? `${summary}; ${text}` : text;
+    if (cleanup) {
+      passed = false;
+      summary = join2(cleanup);
+    }
+    // Корпус исполнялся из закреплённых байтов: проверка без песочницы могла
+    // бы их переписать, и тогда свидетельство относилось бы к другим случаям.
+    if (corpusDir) {
+      const intact = await readFile(corpusPath!, 'utf8')
+        .then((text) => text === corpus!.content)
+        .catch(() => false);
+      await chmod(corpusPath!, 0o600).catch(() => undefined);
+      await rm(corpusDir, { recursive: true, force: true }).catch(() => undefined);
+      if (!intact) {
+        passed = false;
+        summary = 'Проверка изменила файл закреплённого корпуса';
+      }
+    }
+    const failure = read.report ? propertyFailure(read.report) : '';
+    // Покрытие сверяется всегда, когда отчёт прочитан: зелёный код выхода при
+    // пустом отчёте, нуле входов или пропущенном свойстве не доказывает
+    // объявленного. Провал свойства уже назван — недобор при нём следствие.
+    const coverage = read.report
+      ? propertyCoverage(
+          read.report,
+          expected,
+          gate.report && manifest
+            ? { cases: manifest.cases, truncated: manifest.truncated }
+            : undefined,
+        )
+      : [];
+    if (failure) {
+      passed = false;
+      summary = join2(failure);
+    } else if (coverage.length) {
+      passed = false;
+      summary = join2('Генеративная проверка не подтвердила покрытие: ' + coverage.join('; '));
+    } else if (passed && read.problem) {
+      // Прошедшая команда без отчёта не доказывает свойство: зелёный код
+      // выхода был у неё и до реализации.
+      passed = false;
+      summary = `Генеративная проверка не отчиталась: ${read.problem}`;
+    }
+    propertyEvidence = {
+      seed,
+      reproduce: redact(`DEVCONTOUR_SEED=${seed} ${gate.command.join(' ')}`),
+      ...(read.report
+        ? { report: redactDeep(read.report, redact) }
+        : { problem: redact(read.problem) }),
+      ...(cleanup && read.report ? { problem: cleanup } : {}),
+      contracts: property.contracts,
+      artifacts: property.artifacts,
+      level: expected ? 'manifest' : 'legacy',
+      ...(expected
+        ? {
+            manifest: {
+              digest: manifestDigest(expected),
+              properties: expected.properties.map((p) => p.id),
+              ...(expected.corpus
+                ? {
+                    corpus: { digest: expected.corpus.digest, cases: expected.corpus.cases.length },
+                  }
+                : {}),
+            },
+          }
+        : {}),
+      ...(coverage.length ? { coverage } : {}),
+    };
+    if (!passed) log += '\n' + summary;
+  } else if (corpusDir)
+    await rm(corpusDir, { recursive: true, force: true }).catch(() => undefined);
   await mkdir(artifactDir, { recursive: true });
   const logPath = join(artifactDir, `${gate.id}.log`);
   log = redact(log);
@@ -478,11 +630,27 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     ...(manifest ? { tests: manifest.cases } : {}),
     ...(manifest?.truncated ? { testsTruncated: true } : {}),
     ...(run.consumer ? { consumer: run.consumer } : {}),
+    ...(propertyEvidence ? { property: propertyEvidence } : {}),
   });
-  if (!passed)
+  if (!passed) {
+    // Отказ связывается со свойствами по отчёту проверки, а не по тексту:
+    // объявленные поручением — для эпизода восстановления, прочие — для разбора.
+    const report = propertyEvidence?.report;
+    const failing = [
+      ...(report?.properties.filter((p) => p.status === 'failed').map((p) => p.testId) ?? []),
+      ...(report?.corpus?.failed.map((c) => c.property) ?? []),
+    ];
+    const declared = new Set(expected?.properties.map((p) => p.id) ?? []);
     throw new TaskFailure(
       kind,
       `${phase}/${run.consumer ? run.consumer + ':' : ''}${gate.id}: ${evidence.summary}`,
+      failing.length
+        ? {
+            bound: [...new Set(failing.filter((id) => declared.has(id)))],
+            unbound: [...new Set(failing.filter((id) => !declared.has(id)))],
+          }
+        : undefined,
     );
+  }
   return evidence;
 }

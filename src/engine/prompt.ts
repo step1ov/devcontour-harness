@@ -41,6 +41,8 @@ export function prompt(input: {
   context?: ContextSnapshot;
   gates: { id: string; command: string[] }[];
   review?: { sha: string; phase: string; diff: string };
+  /** Обязательный корпус и решение разбора, под которым выдан повтор. */
+  notes?: string[];
 }) {
   const { work, attempt, review } = input;
   const order = work.order;
@@ -78,6 +80,7 @@ export function prompt(input: {
       ? 'The specification or its contracts changed after that attempt: check the applied changes against the current approved specification and contracts above, not against the old ones.'
       : '',
     `Base commit: ${attempt.baseSha ?? ''}.${review ? ` Review commit: ${review.sha} (${review.phase}).` : ''}`,
+    ...(input.notes ?? []),
     contextText(input.context),
     review ? 'Exact diff to review:\n' + review.diff : '',
     'Never mark the work done yourself. No secrets in output. Explain actions and evidence, not private reasoning.',

@@ -10,6 +10,7 @@ import {
   type AttemptState,
   type Author,
   type CallRecord,
+  type ContractDocument,
   type EvidenceRecord,
   type ExecutionHost,
   type ExecutionPolicy,
@@ -19,6 +20,7 @@ import {
   type GraphState,
   type NotPromise,
   type Prerequisite,
+  type PropertyRecovery,
   type ReviewRecord,
   type TechnicalApproval,
   type TransactionKind,
@@ -40,6 +42,18 @@ import { callDurationMs, callOwner, callRecords, ownerGone } from './usage.ts';
 import { failureFingerprint, repairPolicy } from './failure.ts';
 import { reusableImplementation } from './reuse.ts';
 import { unprovenReason } from '../verification/proof.ts';
+import {
+  contractDocuments,
+  effectiveChecks,
+  episodeBasis,
+  orderPropertyProblems,
+} from '../verification/checks.ts';
+import {
+  afterFailure,
+  afterSuccess,
+  blocksClaim,
+  closeIfBasisChanged,
+} from './property-recovery.ts';
 import { REQUIREMENT_GATE } from '../verification/requirements.ts';
 
 /** Префикс причины неудавшегося продления: первая причина не затирается следствиями. */
@@ -183,12 +197,23 @@ export class Engine {
           );
         if (prior?.status === 'done' && contentDigest(prior.order) === contentDigest(order))
           continue;
+        // Принятая версия корпуса остаётся за поручением, пока оно ссылается на
+        // её контракт; эпизод восстановления и его история — тоже: закрывает их
+        // согласование нового основания, а не новая редакция источника.
+        const corpus =
+          prior?.checkVersion &&
+          order.contracts.some((c) => 'KS-' + c.id === prior.checkVersion!.suite)
+            ? prior.checkVersion
+            : undefined;
         tx.putWork({
           id: order.id,
           graphId: graph.id,
           order,
           status: 'draft',
           attempt: prior?.attempt ?? 0,
+          ...(corpus ? { checkVersion: corpus } : {}),
+          ...(prior?.recovery ? { recovery: prior.recovery } : {}),
+          ...(prior?.recoveryHistory ? { recoveryHistory: prior.recoveryHistory } : {}),
         });
       }
       for (const prior of existing ? tx.works(graph.id) : [])
@@ -205,8 +230,15 @@ export class Engine {
   }
 
   /** Раунд технического ревью плана или контракта сохраняется в истории предмета. */
-  recordReview(record: ReviewRecord) {
+  /**
+   * `document` — документ контракта, который ревью рассматривало: он
+   * сохраняется по своему digest, и из него движок берёт договор проверки.
+   */
+  recordReview(record: ReviewRecord, document?: ContractDocument) {
+    if (document && (record.kind !== 'contract' || digestOf(document) !== record.digest))
+      throw new HarnessError('INVALID_INPUT', 'Документ не соответствует ревью контракта');
     return this.tx('graph.reviewed', (tx) => {
+      if (document) tx.putLocal('contract-documents', WORKSPACE_OWNER, record.digest, document);
       const previous = tx
         .locals('reviews', WORKSPACE_OWNER)
         .map((r) => r.value)
@@ -314,6 +346,20 @@ export class Engine {
           'APPROVAL_REQUIRED',
           'Ревью плана проведено при другом назначении reviewer; нужен новый раунд',
         );
+      // Свойства поручений существуют в их договорах проверки и исполняются
+      // их генеративными gates: иначе ожидаемая проверка не определена.
+      const problems = tx.works(graphId).flatMap((w) => {
+        const repo = this.repository(w.order.repositoryId);
+        return orderPropertyProblems(w.order, contractDocuments(w.order, tx), {
+          configured: repo.gates,
+          ...(w.order.gates ? { scope: expandGateRefs(repo, w.order.gates) } : {}),
+        });
+      });
+      if (problems.length)
+        throw new HarnessError(
+          'INVALID_INPUT',
+          'Договор проверки поручений не согласован: ' + problems.join('; '),
+        );
       const policy = digestOf(this.policy);
       if (graph.approval?.digest === graph.digest && graph.policyDigest === policy)
         return { graph, changed: false };
@@ -329,14 +375,16 @@ export class Engine {
       tx.emit({ type: 'graph.approved', graphId, payload: { digest: graph.digest, actor } });
       for (const work of tx.works(graphId)) {
         if (work.status !== 'draft') continue;
-        const ready: WorkState = {
+        const ready: WorkState = structuredClone({
           ...work,
-          status: 'ready',
+          status: 'ready' as const,
           approvedAt: at,
           approvedDigest: this.host.basis.orderDigest(work, tx),
           approvedScope: this.host.basis.scopeDigest(work, tx),
           approval,
-        };
+        });
+        if (closeIfBasisChanged(ready, at))
+          this.recoveryEvent(tx, ready, ready.recoveryHistory!.at(-1)!);
         tx.putWork(ready);
         tx.emit({
           type: 'work.ready',
@@ -637,6 +685,16 @@ export class Engine {
     if (work.hold)
       out.push({ code: 'NOT_READY', message: 'Удержано операцией ' + work.hold.operation });
     if (work.budgetBlock) out.push({ code: 'BUDGET_EXHAUSTED', message: work.budgetBlock.reason });
+    if (blocksClaim(work))
+      out.push({
+        code: 'NOT_READY',
+        message: `Разбор свойства ${work.recovery!.property}: ${work.recovery!.reason ?? work.recovery!.status}`,
+      });
+    if (this.awaitsOperator(work, view))
+      out.push({
+        code: 'APPROVAL_REQUIRED',
+        message: 'Принятие версии корпуса ждёт подтверждения оператора',
+      });
     if (work.status === 'ready' && work.approvedDigest !== this.host.basis.orderDigest(work, view))
       out.push({ code: 'APPROVAL_STALE', message: 'Постановка изменилась после согласования' });
     const contract = this.contractBlocker(work, view);
@@ -664,8 +722,18 @@ export class Engine {
       const active = tx.attempts().filter((a) => a.status === 'active');
       if (active.length >= this.policy.concurrency) return undefined;
       this.budgetBlocks(tx);
+      for (const ready of tx.works().filter((w) => w.status === 'ready' && w.recovery)) {
+        const next = structuredClone(ready);
+        if (closeIfBasisChanged(next, iso(this.now()))) {
+          tx.putWork(next);
+          this.recoveryEvent(tx, next, next.recoveryHistory!.at(-1)!);
+        }
+      }
       const eligible = tx.works().filter((w) => {
         if (w.status !== 'ready' || w.hold || w.budgetBlock) return false;
+        // Два содержательных отказа по одному свойству: третья выдача — только
+        // после разбора. Принятие корпуса, ждущее оператора, удерживает выдачу.
+        if (blocksClaim(w) || this.awaitsOperator(w, tx)) return false;
         if (w.attempt >= this.policy.maxAttempts) return false;
         const graph = tx.graph(w.graphId);
         // Согласование привязано к graph digest и к политике, под которой оно дано.
@@ -758,17 +826,41 @@ export class Engine {
         ...(work.approvedAt ? { wait: { approvedAt: work.approvedAt } } : {}),
         engineVersion: this.version,
         ...(this.host.consumerVersion ? { consumerVersion: this.host.consumerVersion } : {}),
+        // Версия проверок закрепляется при выдаче: принятие нового корпуса
+        // посередине попытки ждёт её окончания, и evidence этой попытки
+        // относится к этой версии.
+        checks: {
+          effective: effectiveChecks(work, this.host.basis.policyDigest(work, tx)),
+          ...(work.checkVersion ? { corpus: work.checkVersion } : {}),
+        },
+        episodeBasis: episodeBasis(work),
         callsRecorded: true,
         evidence: [],
       };
       tx.putAttempt(attempt);
+      const recovery =
+        work.recovery?.status === 'retry'
+          ? {
+              ...structuredClone(work.recovery),
+              // Разрешённый разбором повтор выдан: второй раз он не выдаётся.
+              status: 'retrying' as const,
+              retryRun: attempt.id,
+              version: work.recovery.version + 1,
+              history: [
+                ...work.recovery.history,
+                { at: iso(at), event: 'retry-claimed', detail: attempt.id },
+              ],
+            }
+          : work.recovery;
       tx.putWork({
         ...work,
         status: 'running',
         attempt: attempt.attempt,
         activeRunId: attempt.id,
         failure: undefined,
+        ...(recovery ? { recovery } : {}),
       });
+      if (recovery && recovery !== work.recovery) this.recoveryEvent(tx, work, recovery);
       tx.emit({
         type: 'attempt.claimed',
         graphId: work.graphId,
@@ -1061,6 +1153,16 @@ export class Engine {
     return this.withAttempt(id, token, 'task.done', (a, w, tx) => {
       if (a.phase !== 'integrating' || !a.candidateSha || a.integrationSha !== sha)
         throw new HarnessError('NOT_READY', 'Нет интеграционного коммита');
+      // Принять можно только под той версией проверок, под которой шла
+      // попытка: новый корпус, принятый поручением, требует новой попытки.
+      if (
+        a.checks &&
+        effectiveChecks(w, this.host.basis.policyDigest(w, tx)) !== a.checks.effective
+      )
+        throw new HarnessError(
+          'APPROVAL_STALE',
+          'Версия проверок поручения изменилась; нужна новая попытка',
+        );
       const last = (
         kind: EvidenceRecord['kind'],
         phase: EvidenceRecord['phase'],
@@ -1123,8 +1225,12 @@ export class Engine {
       if (refusal) throw new HarnessError(refusal.code, refusal.message);
       const at = iso(this.now());
       tx.putAttempt({ ...a, status: 'succeeded', finishedAt: at });
+      const accepted = structuredClone(w);
+      const open = accepted.recovery;
+      afterSuccess(accepted, at);
+      if (open) this.recoveryEvent(tx, w, accepted.recoveryHistory!.at(-1)!);
       tx.putWork({
-        ...w,
+        ...accepted,
         status: 'done',
         resultSha: sha,
         activeRunId: undefined,
@@ -1155,7 +1261,13 @@ export class Engine {
     id: string,
     token: string,
     error: string,
-    options: { kind?: FailureKind; blocked?: boolean; heartbeatCause?: string } = {},
+    options: {
+      kind?: FailureKind;
+      blocked?: boolean;
+      heartbeatCause?: string;
+      /** Свойства отказа: `bound` — объявленные поручением, `unbound` — прочие названные. */
+      properties?: { bound: string[]; unbound: string[] };
+    } = {},
   ) {
     const kind = options.kind ?? 'unknown';
     return this.withAttempt(id, token, 'run.failed', (a, w, tx) => {
@@ -1167,7 +1279,17 @@ export class Engine {
           : undefined;
       const shown = prefix ? `${prefix}. ${error}` : error;
       const blocked = Boolean(options.blocked);
-      tx.putAttempt({
+      // Свойство отказа — только объявленное поручением: неизвестное
+      // сохраняется для разбора, но счётчик эпизода не выбирает.
+      const declared = new Set(w.order.properties ?? []);
+      const bound = [...new Set((options.properties?.bound ?? []).filter((p) => declared.has(p)))];
+      const unbound = [
+        ...new Set([
+          ...(options.properties?.unbound ?? []),
+          ...(options.properties?.bound ?? []).filter((p) => !declared.has(p)),
+        ]),
+      ];
+      const failed: AttemptState = {
         ...a,
         status: 'failed',
         error: shown,
@@ -1175,9 +1297,22 @@ export class Engine {
         failureKind: kind,
         failureFingerprint: fingerprint,
         finishedAt: iso(this.now()),
-      });
+        ...(bound.length ? { properties: bound } : {}),
+        ...(unbound.length ? { unboundProperties: unbound } : {}),
+      };
+      tx.putAttempt(failed);
+      const next = structuredClone(w);
+      const before = next.recovery?.status;
+      const episode = afterFailure(
+        next,
+        tx.attempts(w.id).map((x) => (x.id === id ? failed : x)),
+        failed,
+        iso(this.now()),
+      );
+      if (episode && (episode.status !== before || !w.recovery || w.recovery.id !== episode.id))
+        this.recoveryEvent(tx, w, episode);
       tx.putWork({
-        ...w,
+        ...next,
         status: 'failed',
         failure: shown,
         failureKind: kind,
@@ -1211,7 +1346,189 @@ export class Engine {
           },
         });
       }
-      return { workId: w.id, runId: id, kind, blocked };
+      return {
+        workId: w.id,
+        runId: id,
+        kind,
+        blocked,
+        ...(bound.length ? { properties: bound } : {}),
+        ...(episode ? { recovery: { id: episode.id, status: episode.status } } : {}),
+      };
+    });
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Эпизоды восстановления по свойству                                 */
+  /* ---------------------------------------------------------------- */
+
+  private recoveryEvent(tx: ExecutionTransaction, work: WorkState, r: PropertyRecovery) {
+    tx.emit({
+      type: 'work.recovery',
+      graphId: work.graphId,
+      workId: work.id,
+      payload: {
+        recoveryId: r.id,
+        property: r.property,
+        status: r.status,
+        ...(r.reason ? { reason: r.reason.slice(0, 4000) } : {}),
+      },
+    });
+  }
+
+  /** Принятие корпуса, ждущее оператора, удерживает выдачу поручения. */
+  private awaitsOperator(work: WorkState, view: ExecutionView) {
+    return view
+      .locals('check-suites', work.order.repositoryId)
+      .some((x) =>
+        x.value.pending.some(
+          (p) => p.status === 'waiting' && p.awaitingOperator && p.tasks.includes(work.id),
+        ),
+      );
+  }
+
+  private episode(
+    kind: TransactionKind,
+    workId: string,
+    recoveryId: string,
+    fn: (r: PropertyRecovery, w: WorkState) => string | undefined,
+  ): PropertyRecovery {
+    return this.tx(kind, (tx) => {
+      const w = tx.work(workId);
+      if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
+      if (!w.recovery || w.recovery.id !== recoveryId)
+        throw new HarnessError('NOT_FOUND', 'Эпизод восстановления не найден');
+      const r = structuredClone(w.recovery);
+      const event = fn(r, w);
+      if (event === undefined) return r;
+      r.version++;
+      r.history.push({
+        at: iso(this.now()),
+        event,
+        ...(r.reason ? { detail: r.reason.slice(0, 1000) } : {}),
+      });
+      tx.putWork({ ...w, recovery: r });
+      this.recoveryEvent(tx, w, r);
+      return r;
+    });
+  }
+
+  /**
+   * Учесть разбор ведущего до вызова модели. Один автоматический разбор на
+   * эпизод: повторная регистрация, рестарт или дубликат бесплатного вызова
+   * не получают. Исчерпанные попытки — решение человека.
+   */
+  recoveryReserve(workId: string, recoveryId: string) {
+    return this.episode('recovery.reserved', workId, recoveryId, (r, w) => {
+      if (r.status !== 'awaiting-lead')
+        throw new HarnessError('NOT_READY', `Эпизод ${r.id} не ждёт разбора: ${r.status}`);
+      if (r.calls >= 1) {
+        r.status = 'awaiting-user';
+        r.reason = 'Автоматический разбор эпизода уже использован; повторный вызов не выполняется.';
+      } else if (w.attempt >= this.policy.maxAttempts) {
+        r.status = 'awaiting-user';
+        r.reason =
+          'Попытки поручения исчерпаны: разрешённого повтора не осталось, сброс — решение человека.';
+      } else {
+        r.calls++;
+        r.status = 'analyzing';
+      }
+      return r.status === 'analyzing' ? 'analysis-reserved' : 'refused';
+    });
+  }
+
+  /**
+   * Записать решение разбора — ведущего или ручное — и перевести эпизод в
+   * состояние разрешённого действия. Ручное решение сверяет версию записи:
+   * устаревшее не применяется.
+   */
+  recoveryDecide(
+    workId: string,
+    recoveryId: string,
+    decision: NonNullable<PropertyRecovery['decision']>,
+    expectedVersion?: number,
+  ) {
+    if (decision.reason.trim().length < 10)
+      throw new HarnessError('INVALID_INPUT', 'Решение требует причины не короче 10 символов');
+    return this.episode('recovery.decided', workId, recoveryId, (r, w) => {
+      if (expectedVersion !== undefined && r.version !== expectedVersion)
+        throw new HarnessError('APPROVAL_STALE', 'Эпизод изменился; прочитайте его заново');
+      const manual = decision.source.kind === 'operator';
+      if (!manual && r.status !== 'analyzing')
+        throw new HarnessError('NOT_READY', `Эпизод ${r.id} не в разборе: ${r.status}`);
+      if (manual && !['awaiting-lead', 'awaiting-user', 'stopped', 'analyzing'].includes(r.status))
+        throw new HarnessError('NOT_READY', `Эпизод ${r.id} уже исполняет решение: ${r.status}`);
+      if (w.status === 'cancelled') throw new HarnessError('NOT_READY', 'Поручение отменено');
+      r.decision = decision;
+      const retryable = w.attempt < this.policy.maxAttempts;
+      switch (decision.action) {
+        case 'add-cases':
+          if (!decision.cases?.length)
+            throw new HarnessError('INVALID_INPUT', 'add-cases без случаев');
+          r.status = 'applying';
+          break;
+        case 'new-approach':
+          if (!decision.hypothesis?.trim() || !decision.plan?.trim())
+            throw new HarnessError(
+              'INVALID_INPUT',
+              'Новый подход требует гипотезы и плана проверки',
+            );
+          r.status = retryable ? 'retry' : 'awaiting-user';
+          if (!retryable) r.reason = 'Попытки исчерпаны: повтор с новой гипотезой невозможен.';
+          break;
+        case 'strengthen-checker':
+        case 'split-task':
+          if (!decision.proposal?.trim())
+            throw new HarnessError('INVALID_INPUT', 'Предложение для обычного ревью обязательно');
+          r.status = 'stopped';
+          r.reason = `Подготовлено предложение (${decision.action}); оно проходит обычное ревью или перепланирование и автоматически не применяется.`;
+          break;
+        case 'clarify-obligation':
+          r.status = 'awaiting-user';
+          r.reason = `Нужно решение человека: ${decision.conflict ?? decision.reason}`;
+          break;
+        case 'environment':
+          r.status = 'stopped';
+          r.reason = `Причина в среде или не установлена: ${decision.reason}`;
+          break;
+      }
+      return 'decided';
+    });
+  }
+
+  /** Итог добавления случаев: подтверждённый случай разрешает один повтор. */
+  recoveryApplied(
+    workId: string,
+    recoveryId: string,
+    outcomes: { outcome: string; reason: string }[],
+  ) {
+    return this.episode('recovery.applied', workId, recoveryId, (r, w) => {
+      if (r.status !== 'applying')
+        throw new HarnessError('NOT_READY', 'Эпизод не исполняет добавление случаев');
+      const confirmed = outcomes.filter((o) => o.outcome === 'confirmed').length;
+      if (confirmed && w.attempt < this.policy.maxAttempts) {
+        r.status = 'retry';
+        r.reason = `${confirmed} из ${outcomes.length} случаев подтверждено`;
+      } else {
+        r.status = 'stopped';
+        r.reason = confirmed
+          ? 'Случаи подтверждены, но попытки поручения исчерпаны.'
+          : 'Ни один предложенный случай не подтверждён эталоном: ' +
+            outcomes
+              .map((o) => o.reason)
+              .join('; ')
+              .slice(0, 800);
+      }
+      return 'applied';
+    });
+  }
+
+  /** Разбор прервался без решения: вызов учтён, повтор не бесплатен. */
+  recoveryInterrupted(workId: string, recoveryId: string, reason: string) {
+    return this.episode('recovery.interrupted', workId, recoveryId, (r) => {
+      if (!['analyzing', 'applying'].includes(r.status)) return undefined;
+      r.status = 'awaiting-user';
+      r.reason = reason.slice(0, 1000);
+      return 'interrupted';
     });
   }
 

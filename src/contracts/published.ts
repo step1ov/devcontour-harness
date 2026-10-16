@@ -6,7 +6,7 @@ import { jointVerificationSchema, resultEnvelopeSchema, runResultSchema } from '
 import { runEventSchema } from './events.ts';
 import { reviewRecordSchema } from './review.ts';
 import { executionDocumentSchema } from './execution.ts';
-import { contractDocumentSchema } from './cli.ts';
+import { contractDocumentSchema } from './checks.ts';
 
 /**
  * Схемы, публикуемые как JSON Schema (`schemas/<имя>.schema.json`).

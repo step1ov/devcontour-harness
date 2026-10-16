@@ -26,6 +26,353 @@
       "type": "string",
       "minLength": 10,
       "maxLength": 200000
+    },
+    "artifacts": {
+      "maxItems": 50,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+          },
+          "blob": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{40}([a-f0-9]{24})?$"
+          }
+        },
+        "required": [
+          "path",
+          "blob"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "checks": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "gate": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "obligations": {
+          "minItems": 1,
+          "maxItems": 30,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "property": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]{1,200}$"
+              },
+              "requirements": {
+                "minItems": 1,
+                "maxItems": 20,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                }
+              },
+              "promise": {
+                "type": "string",
+                "enum": [
+                  "functional",
+                  "accuracy",
+                  "optimality",
+                  "completeness",
+                  "performance",
+                  "invariant",
+                  "other"
+                ]
+              },
+              "explanation": {
+                "type": "string",
+                "minLength": 3,
+                "maxLength": 2000
+              },
+              "domain": {
+                "type": "object",
+                "properties": {
+                  "inputs": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 2000
+                  },
+                  "bounds": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 2000
+                  },
+                  "units": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 2000
+                  },
+                  "invalid": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 2000
+                  }
+                },
+                "required": [
+                  "inputs",
+                  "bounds",
+                  "invalid"
+                ],
+                "additionalProperties": false
+              },
+              "answer": {
+                "type": "object",
+                "properties": {
+                  "rules": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 2000
+                  },
+                  "ties": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 2000
+                  },
+                  "rounding": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 2000
+                  },
+                  "tolerance": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 2000
+                  },
+                  "refusals": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 2000
+                  }
+                },
+                "required": [
+                  "rules"
+                ],
+                "additionalProperties": false
+              },
+              "method": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "oracle",
+                      "certificate",
+                      "analytic",
+                      "invariant",
+                      "scenario",
+                      "other"
+                    ]
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 2000
+                  },
+                  "applicability": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 2000
+                  },
+                  "artifacts": {
+                    "default": [],
+                    "maxItems": 10,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500,
+                      "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "description",
+                  "applicability"
+                ],
+                "additionalProperties": false
+              },
+              "coverage": {
+                "type": "object",
+                "properties": {
+                  "families": {
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "typical",
+                            "boundary",
+                            "adversarial"
+                          ]
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 500
+                        },
+                        "minCases": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 1000000
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "kind",
+                        "description",
+                        "minCases"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "minCases": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000
+                  },
+                  "corpus": {
+                    "default": false,
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "families",
+                  "minCases"
+                ],
+                "additionalProperties": false
+              },
+              "resources": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 2000
+                  },
+                  "oracle": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 2000
+                  },
+                  "benchmark": {
+                    "type": "object",
+                    "properties": {
+                      "method": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 2000
+                      },
+                      "environment": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 2000
+                      }
+                    },
+                    "required": [
+                      "method",
+                      "environment"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "subject",
+                  "oracle"
+                ],
+                "additionalProperties": false
+              },
+              "hard": {
+                "default": false,
+                "type": "boolean"
+              },
+              "feasibility": {
+                "type": "object",
+                "properties": {
+                  "spike": {
+                    "type": "string",
+                    "pattern": "^SP-[A-Za-z0-9_-]{1,80}$"
+                  },
+                  "digest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "spike",
+                  "digest"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "property",
+              "requirements",
+              "promise",
+              "domain",
+              "answer",
+              "method",
+              "coverage",
+              "resources"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "corpus": {
+          "type": "object",
+          "properties": {
+            "format": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 2000
+            },
+            "extensible": {
+              "type": "boolean"
+            },
+            "maxCases": {
+              "default": 500,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000
+            }
+          },
+          "required": [
+            "format",
+            "extensible"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "gate",
+        "obligations"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [

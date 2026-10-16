@@ -127,7 +127,14 @@ SHA-256 и размер каждого файла и `sourceDigest` источн
 
 ### ContractDocument
 
-`{apiVersion, id, repositoryId?, title, content}` — вход `review-contract`.
+`{apiVersion, id, repositoryId?, title, content, artifacts?, checks?}` — вход
+`review-contract`. `artifacts` — закреплённые файлы контракта (`{path, blob}`,
+Git blob в репозитории `repositoryId`); `checks` — договор проверки
+(`checkDeclarationSchema`, `version: 1`): gate, обязательства по property ID
+(требования, тип обещания, область входов, правила ответа, способ проверки и
+его файлы, семейства и минимальные выборки, корпус) и политика расширения
+корпуса. Прошедший ревью документ хранится по digest (`contract-documents`):
+из него движок строит манифест генеративного gate поручения.
 
 ## Модель исполнения
 
@@ -147,7 +154,8 @@ SHA-256 и размер каждого файла и `sourceDigest` источн
 Локальные записи адресуются `(namespace, owner, key)`; пространства и их
 схемы — `localSchemas` (`usage`, `context-snapshots`, `run-keys`, `delivery`,
 `reviews`, `check-suites` — корпус подтверждённых случаев, `workflow-jobs` —
-техническая очередь ведущего). `owner` — репозиторий или `@workspace`.
+техническая очередь ведущего, `contract-documents` — документы контрактов,
+прошедшие ревью, по digest). `owner` — репозиторий или `@workspace`.
 
 ## Ответы исполнителей
 
@@ -205,6 +213,12 @@ manifestDigest, impact?, evidence[], error?}`. Смена любого SHA де�
 `usage.recorded` пишет только локальные записи учёта вызовов (`usage`): начало
 вызова вместе с проверкой бюджетов, ход и итог вызова, закрытие прерванных,
 закрепление атрибуции прежних записей; событий журнала не создаёт.
+`checks.recorded` пишет только локальные записи корпуса (`check-suites`):
+начало, продление и завершение операции подтверждения, решение и новую
+версию. `checks.adopted`, `checks.awaiting-operator` и
+`checks.adoption-abandoned` меняют принятую поручением версию корпуса и
+удержание выдачи (`work.held`, `corpus.adopted`). Эпизод по свойству меняется
+транзакциями `recovery.*`, отказом и выдачей (`work.recovery`).
 
 ## Порты
 
