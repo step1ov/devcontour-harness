@@ -1,0 +1,1193 @@
+{
+  "$id": "devcontour-harness/v1alpha1/execution-policy.schema.json",
+  "title": "execution-policy",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "policyVersion": {
+      "type": "number",
+      "const": 1
+    },
+    "repositories": {
+      "minItems": 1,
+      "maxItems": 10,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "default": "product",
+            "type": "string",
+            "enum": [
+              "product",
+              "library"
+            ]
+          },
+          "targetRef": {
+            "type": "string",
+            "pattern": "^refs\\/heads\\/[A-Za-z0-9][A-Za-z0-9/_.-]{0,200}$"
+          },
+          "dependsOn": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,80}$"
+            }
+          },
+          "gates": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "check",
+                    "test"
+                  ]
+                },
+                "command": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "timeoutMs": {
+                  "default": 120000,
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "report": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "const": "junit"
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "path"
+                  ],
+                  "additionalProperties": false
+                },
+                "property": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "dependsOn": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  }
+                },
+                "cwd": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "resources": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "gateGroups": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,80}$"
+            },
+            "additionalProperties": {
+              "minItems": 1,
+              "maxItems": 100,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^@?[A-Za-z0-9_-]{1,80}$"
+              }
+            }
+          },
+          "protectedPaths": {
+            "default": [
+              ".github/",
+              ".githooks/"
+            ],
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "generatedPaths": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "environment": {
+            "type": "object",
+            "properties": {
+              "inherit": {
+                "default": [],
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                }
+              },
+              "values": {
+                "default": {},
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                },
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "secrets": {
+                "default": {},
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "lifecycle": {
+            "type": "object",
+            "properties": {
+              "setup": {
+                "default": [],
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                    },
+                    "command": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "timeoutMs": {
+                      "default": 120000,
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 3600000
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "command"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "ready": {
+                "default": [],
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                    },
+                    "command": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "timeoutMs": {
+                      "default": 120000,
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 3600000
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "command"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "teardown": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                    },
+                    "command": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "timeoutMs": {
+                      "default": 120000,
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 3600000
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "command"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "teardown"
+            ],
+            "additionalProperties": false
+          },
+          "prepare": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                },
+                "command": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "timeoutMs": {
+                  "default": 120000,
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 3600000
+                }
+              },
+              "required": [
+                "id",
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "dependencyBuild": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                },
+                "command": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "timeoutMs": {
+                  "default": 120000,
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 3600000
+                }
+              },
+              "required": [
+                "id",
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "dependencyArtifacts": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "preflight": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                },
+                "command": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "timeoutMs": {
+                  "default": 120000,
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 3600000
+                }
+              },
+              "required": [
+                "id",
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "targetRef",
+          "gates"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "roles": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]{1,30}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "writer": {
+            "type": "object",
+            "properties": {
+              "runtime": {
+                "type": "string",
+                "enum": [
+                  "codex",
+                  "claude",
+                  "fixture"
+                ]
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "effort": {
+                "type": "string",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              },
+              "toolProfile": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+              }
+            },
+            "required": [
+              "runtime"
+            ],
+            "additionalProperties": false
+          },
+          "writePaths": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "review": {
+            "type": "object",
+            "properties": {
+              "reviewer": {
+                "type": "object",
+                "properties": {
+                  "runtime": {
+                    "type": "string",
+                    "enum": [
+                      "codex",
+                      "claude",
+                      "fixture"
+                    ]
+                  },
+                  "model": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "effort": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh"
+                    ]
+                  },
+                  "toolProfile": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  }
+                },
+                "required": [
+                  "runtime"
+                ],
+                "additionalProperties": false
+              },
+              "vendor": {
+                "default": "different-vendor",
+                "type": "string",
+                "enum": [
+                  "different-vendor",
+                  "same-vendor-allowed"
+                ]
+              }
+            },
+            "required": [
+              "reviewer"
+            ],
+            "additionalProperties": false
+          },
+          "requiresContract": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "writer"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "review": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "object",
+          "properties": {
+            "reviewer": {
+              "type": "object",
+              "properties": {
+                "runtime": {
+                  "type": "string",
+                  "enum": [
+                    "codex",
+                    "claude",
+                    "fixture"
+                  ]
+                },
+                "model": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "effort": {
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                },
+                "toolProfile": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                }
+              },
+              "required": [
+                "runtime"
+              ],
+              "additionalProperties": false
+            },
+            "vendor": {
+              "default": "different-vendor",
+              "type": "string",
+              "enum": [
+                "different-vendor",
+                "same-vendor-allowed"
+              ]
+            }
+          },
+          "required": [
+            "reviewer"
+          ],
+          "additionalProperties": false
+        },
+        "plan": {
+          "type": "object",
+          "properties": {
+            "reviewer": {
+              "type": "object",
+              "properties": {
+                "runtime": {
+                  "type": "string",
+                  "enum": [
+                    "codex",
+                    "claude",
+                    "fixture"
+                  ]
+                },
+                "model": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "effort": {
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                },
+                "toolProfile": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                }
+              },
+              "required": [
+                "runtime"
+              ],
+              "additionalProperties": false
+            },
+            "vendor": {
+              "default": "different-vendor",
+              "type": "string",
+              "enum": [
+                "different-vendor",
+                "same-vendor-allowed"
+              ]
+            }
+          },
+          "required": [
+            "reviewer"
+          ],
+          "additionalProperties": false
+        },
+        "contract": {
+          "type": "object",
+          "properties": {
+            "reviewer": {
+              "type": "object",
+              "properties": {
+                "runtime": {
+                  "type": "string",
+                  "enum": [
+                    "codex",
+                    "claude",
+                    "fixture"
+                  ]
+                },
+                "model": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "effort": {
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                },
+                "toolProfile": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                }
+              },
+              "required": [
+                "runtime"
+              ],
+              "additionalProperties": false
+            },
+            "vendor": {
+              "default": "different-vendor",
+              "type": "string",
+              "enum": [
+                "different-vendor",
+                "same-vendor-allowed"
+              ]
+            }
+          },
+          "required": [
+            "reviewer"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "code",
+        "plan",
+        "contract"
+      ],
+      "additionalProperties": false
+    },
+    "approvalMode": {
+      "default": "agent",
+      "type": "string",
+      "enum": [
+        "agent",
+        "operator"
+      ]
+    },
+    "isolation": {
+      "default": {
+        "mode": "os",
+        "domains": []
+      },
+      "type": "object",
+      "properties": {
+        "mode": {
+          "default": "os",
+          "type": "string",
+          "enum": [
+            "os",
+            "none"
+          ]
+        },
+        "domains": {
+          "default": [],
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "toolProfiles": {
+      "default": {},
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{1,80}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "runtime": {
+            "type": "string",
+            "enum": [
+              "codex",
+              "claude"
+            ]
+          },
+          "environment": {
+            "type": "object",
+            "properties": {
+              "inherit": {
+                "default": [],
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                }
+              },
+              "values": {
+                "default": {},
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                },
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "secrets": {
+                "default": {},
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "claudeTools": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "Read",
+                "Glob",
+                "Grep",
+                "Edit",
+                "Write",
+                "Bash"
+              ]
+            }
+          },
+          "claudeAllowedTools": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "codexShell": {
+            "default": true,
+            "type": "boolean"
+          },
+          "codexNetwork": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "runtime"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "environment": {
+      "type": "object",
+      "properties": {
+        "inherit": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          }
+        },
+        "values": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "secrets": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "lifecycle": {
+      "type": "object",
+      "properties": {
+        "setup": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+              },
+              "command": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "timeoutMs": {
+                "default": 120000,
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 3600000
+              }
+            },
+            "required": [
+              "id",
+              "command"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "ready": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+              },
+              "command": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "timeoutMs": {
+                "default": 120000,
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 3600000
+              }
+            },
+            "required": [
+              "id",
+              "command"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "teardown": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+              },
+              "command": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "timeoutMs": {
+                "default": 120000,
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 3600000
+              }
+            },
+            "required": [
+              "id",
+              "command"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "teardown"
+      ],
+      "additionalProperties": false
+    },
+    "resources": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "device",
+              "port",
+              "account",
+              "service"
+            ]
+          },
+          "value": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "value"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "concurrency": {
+      "default": 2,
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4
+    },
+    "leaseMs": {
+      "default": 30000,
+      "type": "integer",
+      "minimum": 5000,
+      "maximum": 9007199254740991
+    },
+    "runTimeoutMs": {
+      "default": 900000,
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 9007199254740991
+    },
+    "reviewProbes": {
+      "default": {
+        "commandTimeoutMs": 120000,
+        "budgetMs": 600000,
+        "reserveMs": 120000
+      },
+      "type": "object",
+      "properties": {
+        "commandTimeoutMs": {
+          "default": 120000,
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 9007199254740991
+        },
+        "budgetMs": {
+          "default": 600000,
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 9007199254740991
+        },
+        "reserveMs": {
+          "default": 120000,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "additionalProperties": false
+    },
+    "maxAttempts": {
+      "default": 3,
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10
+    },
+    "repairBudget": {
+      "default": 6,
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 50
+    },
+    "reuseImplementation": {
+      "default": true,
+      "type": "boolean"
+    },
+    "budgets": {
+      "type": "object",
+      "properties": {
+        "work": {
+          "type": "object",
+          "properties": {
+            "usd": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "timeMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "additionalProperties": false
+        },
+        "graph": {
+          "type": "object",
+          "properties": {
+            "usd": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "timeMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "additionalProperties": false
+        },
+        "total": {
+          "type": "object",
+          "properties": {
+            "usd": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "timeMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "additionalProperties": false
+        },
+        "onUnknown": {
+          "default": "stop",
+          "type": "string",
+          "enum": [
+            "stop",
+            "continue"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "prices": {
+      "default": [],
+      "maxItems": 100,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "runtime": {
+            "type": "string",
+            "enum": [
+              "codex",
+              "claude"
+            ]
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "effectiveAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "input": {
+            "type": "number",
+            "minimum": 0
+          },
+          "output": {
+            "type": "number",
+            "minimum": 0
+          },
+          "cacheRead": {
+            "type": "number",
+            "minimum": 0
+          },
+          "cacheWrite": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "runtime",
+          "model",
+          "effectiveAt",
+          "input",
+          "output",
+          "cacheRead",
+          "cacheWrite"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "policyVersion",
+    "repositories",
+    "roles",
+    "review"
+  ],
+  "additionalProperties": false
+}

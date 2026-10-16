@@ -1,0 +1,9 @@
+node_modules
+lib
+package-lock.json
+.idea
+.private
+evidence
+test-results
+# Генерируется из Zod-схем: формат задаёт scripts/build-schemas.ts.
+schemas

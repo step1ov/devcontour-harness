@@ -1,0 +1,26 @@
+{
+  "policyVersion": 1,
+  "repositories": [
+    {
+      "id": "app",
+      "path": ".",
+      "targetRef": "refs/heads/harness/accepted",
+      "gates": [
+        {
+          "id": "unit",
+          "kind": "test",
+          "command": ["npm", "test"],
+          "report": { "type": "junit", "path": "test-results/junit.xml" }
+        }
+      ]
+    }
+  ],
+  "roles": {
+    "developer": { "writer": { "runtime": "claude" } }
+  },
+  "review": {
+    "code": { "reviewer": { "runtime": "claude" }, "vendor": "same-vendor-allowed" },
+    "plan": { "reviewer": { "runtime": "claude" }, "vendor": "same-vendor-allowed" },
+    "contract": { "reviewer": { "runtime": "claude" }, "vendor": "same-vendor-allowed" }
+  }
+}

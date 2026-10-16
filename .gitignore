@@ -1,0 +1,15 @@
+node_modules/
+/lib/
+*.tgz
+!/fixtures/**/*.tgz
+.DS_Store
+.env*
+!.env.example
+
+# IDE и локальные материалы не являются исходниками пакета.
+.idea/
+*.iml
+/.private/
+/evidence/
+/test-results/
+/coverage/

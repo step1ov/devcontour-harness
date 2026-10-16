@@ -1,0 +1,57 @@
+{
+  "name": "devcontour-harness",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "description": "Headless execution harness: work graph, isolated attempts, gates, independent reviews and accepted results.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.3.0"
+  },
+  "bin": {
+    "harness": "lib/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./contracts": {
+      "types": "./lib/contracts/index.d.ts",
+      "default": "./lib/contracts/index.js"
+    },
+    "./package.json": "./package.json",
+    "./schemas/*": "./schemas/*"
+  },
+  "files": [
+    "lib",
+    "schemas",
+    "docs",
+    "examples",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node scripts/clean.mjs && tsc -p tsconfig.build.json",
+    "schemas": "node --import tsx scripts/build-schemas.ts",
+    "schemas:check": "node --import tsx scripts/build-schemas.ts --check",
+    "lint": "eslint .",
+    "test": "node --import tsx --test --test-concurrency=4 tests/*.test.ts",
+    "test:package": "npm run build && node scripts/smoke-package.mjs",
+    "check": "npm run lint && npm run typecheck && npm run schemas:check && npm run build && npm test && node scripts/smoke-package.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.5",
+    "eslint": "10.10.0",
+    "prettier": "3.9.7",
+    "tsx": "4.23.13",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.70.0"
+  }
+}
