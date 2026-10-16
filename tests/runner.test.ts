@@ -120,14 +120,14 @@ test('T08: невалидный ответ ревью, approved с блокир�
   const cases: [string, unknown, RegExp, string][] = [
     ['невалидный JSON', { raw: '{"approved": tru' }, /вне схемы|не прочитан/, 'review'],
     ['approved + blocking', blocking, /approved при блокирующей находке/, 'review'],
-    ['таймаут', { ...approve(), sleepMs: 8000 }, /лимит времени/, 'timeout'],
+    ['таймаут', { ...approve(), sleepMs: 15000 }, /лимит времени/, 'timeout'],
   ];
   for (const [name, reviewer, reason, kind] of cases) {
     const ctx = setup({
       scenario: { writer: implement(), reviewer },
       policy: (p) => {
         (p as { maxAttempts: number }).maxAttempts = 1;
-        if (name === 'таймаут') (p as { runTimeoutMs: number }).runTimeoutMs = 3000;
+        if (name === 'таймаут') (p as { runTimeoutMs: number }).runTimeoutMs = 8000;
       },
     });
     const before = target(ctx);
