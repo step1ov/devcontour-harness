@@ -51,11 +51,11 @@ test('Канонический JSON и digests примера равны зак�
   const graph = workGraphSchema.parse(example('graph'));
   assert.equal(
     workGraphDigest(graph),
-    '1328a41de2b74096de57553d096d2f7782b5b1e235bb0956d20ea78d6f266c2c',
+    '03c03e691a045303bd67c36feea3a01cf177f0331ebb39cf3e8d5468a190157f',
   );
   assert.equal(
     policyDigest(executionPolicySchema.parse(example('policy'))),
-    '85f4cf1781095bf157271cd6668a31b8a92203a0e8ca3e3f92670ed9e4c3c8c1',
+    'fe2c6fe7a4c099a27c1b32d2f2fd295a887abcb83ea6f8c41dd408b561e00279',
   );
   const reordered = Object.fromEntries(Object.entries(example('graph')).reverse());
   assert.equal(
@@ -75,7 +75,7 @@ test('Изменение каждого поля поручения меняет
     role: (o) => (o.role = 'tester'),
     repositoryId: (o) => (o.repositoryId = 'web'),
     relatedRepositories: (o) => (o.relatedRepositories = ['app', 'web']),
-    writeScope: (o) => (o.writeScope = ['src']),
+    writeScope: (o) => (o.writeScope = ['lib']),
     dependsOn: (o) => (o.dependsOn = ['x']),
     gates: (o) => (o.gates = []),
     consumers: (o) => (o.consumers = [{ repositoryId: 'web', gates: ['unit'] }]),

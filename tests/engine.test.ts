@@ -261,8 +261,16 @@ test('T14: пауза запрещает выдачу и не снимается
   engine.pause('shutdown');
   assert.equal(
     engine.read((v) => v.control().pauseReason),
+    'operator',
+    'штатная остановка не подменяет паузу человека',
+  );
+  engine.resume();
+  engine.pause('shutdown');
+  assert.equal(
+    engine.read((v) => v.control().pauseReason),
     'shutdown',
   );
+  assert.equal(engine.claim('c1'), undefined, 'shutdown тоже запрещает выдачу');
   engine.resume();
   assert.equal(
     engine.claim('c1')?.workId,
@@ -277,25 +285,54 @@ test('T14: пауза запрещает выдачу и не снимается
   );
 });
 
-test('T14: отказ провайдера ставит паузу runtime; resume оператора её не снимает', () => {
+test('T14: отказ провайдера ставит паузу runtime; recovery снимает только свой класс, решение человека — всё', () => {
   const { engine } = engineOf();
   ready(engine, graphOf({ a: [], b: [] }));
   const a = engine.claim('c1')!;
   engine.fail(a.id, a.token, 'Not logged in', { kind: 'provider-auth', blocked: true });
   const control = engine.read((v) => v.control());
   assert.equal(control.paused, true);
+  assert.equal(control.pauseReason, 'runtime');
   assert.deepEqual(control.pauseFailures, ['provider-auth']);
   assert.equal(
     engine.read((v) => v.work('a')?.attempt),
     0,
-    'отказ окружения до кандидата попытку не тратит',
+    'отказ провайдера до кандидата попытку не тратит',
   );
-  assert.throws(() => engine.resume(), refused('PAUSED'));
+  assert.equal(engine.claim('c1'), undefined);
+  engine.clearFailure(['environment']);
+  assert.equal(
+    engine.read((v) => v.control().paused),
+    true,
+    'чужой класс не снимает паузу',
+  );
   engine.clearFailure(['provider-auth']);
   assert.equal(
     engine.read((v) => v.control().paused),
     false,
     'устранённая причина снимает свою паузу',
+  );
+  // Пауза человека поверх отказа: recovery её не снимает; человек — снимает.
+  const b = engine.claim('c1')!;
+  engine.fail(b.id, b.token, 'Not logged in', { kind: 'provider-auth', blocked: true });
+  engine.pause('operator');
+  engine.clearFailure(['provider-auth']);
+  assert.equal(
+    engine.read((v) => v.control().pauseReason),
+    'operator',
+  );
+  assert.equal(
+    engine.read((v) => v.control().paused),
+    true,
+  );
+  engine.resume();
+  assert.equal(
+    engine.read((v) => v.control().paused),
+    false,
+  );
+  assert.equal(
+    engine.read((v) => v.control().pauseFailures),
+    undefined,
   );
 });
 

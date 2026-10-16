@@ -9,18 +9,44 @@
         {
           "id": "unit",
           "kind": "test",
-          "command": ["npm", "test"],
-          "report": { "type": "junit", "path": "test-results/junit.xml" }
+          "command": ["node", "test/run.js"],
+          "report": {
+            "type": "junit",
+            "path": "test-results/junit.xml"
+          }
         }
+      ],
+      "protectedPaths": [
+        ".github/",
+        "test/",
+        "policy.json",
+        "policy-same-vendor.json",
+        "graph.json"
       ]
     }
   ],
   "roles": {
-    "developer": { "writer": { "runtime": "claude" } }
+    "developer": {
+      "writer": {
+        "runtime": "claude"
+      }
+    }
   },
   "review": {
-    "code": { "reviewer": { "runtime": "codex" } },
-    "plan": { "reviewer": { "runtime": "codex" } },
-    "contract": { "reviewer": { "runtime": "codex" } }
+    "code": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    },
+    "plan": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    },
+    "contract": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    }
   }
 }

@@ -311,19 +311,28 @@ export class Engine {
     });
   }
 
-  /** Пауза оператора или штатной остановки: новые claims запрещены. */
+  /**
+   * Пауза оператора или штатной остановки: новые claims запрещены (семантика
+   * DevContour `pause`). Штатная остановка поверх существующей паузы её не
+   * подменяет, кроме паузы операции reconfigure. Пауза оператора — решение
+   * человека: она заменяет любую паузу, и классы отказов прежней паузы с ней
+   * не переживают.
+   */
   pause(reason: 'operator' | 'shutdown') {
     return this.tx('scheduler.paused', (tx) => {
       const control = tx.control();
-      if (control.paused && control.pauseReason === reason) return { control, changed: false };
-      // Пауза отказа runtime или операции сохраняет своё имя: снимать её вправе только они.
-      const next =
-        control.paused &&
-        control.pauseReason &&
-        !['operator', 'shutdown'].includes(control.pauseReason)
-          ? control
-          : { ...control, paused: true, pauseReason: reason, pausedAt: iso(this.now()) };
-      if (next === control) return { control, changed: false };
+      if (control.paused && reason === 'shutdown' && control.pauseReason !== 'reconfigure')
+        return { control, changed: false };
+      if (control.paused && control.pauseReason === reason && !control.pauseFailures?.length)
+        return { control, changed: false };
+      const next = {
+        ...control,
+        paused: true,
+        pauseReason: reason,
+        pausedAt: iso(this.now()),
+        pauseOperation: undefined,
+        pauseFailures: undefined,
+      };
       tx.setControl(next);
       tx.emit({ type: 'control.paused', payload: { reason } });
       return { control: next, changed: true };
@@ -331,23 +340,31 @@ export class Engine {
   }
 
   /**
-   * Снять паузу оператора или штатной остановки. Пауза отказа runtime
-   * (`pauseFailures`) и пауза операции не снимаются: `PAUSED`.
+   * Снять паузу — решение человека (семантика DevContour `pause(false)`):
+   * снимает паузу оператора, штатной остановки и отказа runtime вместе с её
+   * классами отказов. Паузу операции reconfigure снимает только сама
+   * операция: `PAUSED`.
    */
   resume() {
     return this.tx('scheduler.started', (tx) => {
       const control = tx.control();
       if (!control.paused) return { control, changed: false };
-      if (
-        control.pauseFailures?.length ||
-        (control.pauseReason && !['operator', 'shutdown'].includes(control.pauseReason))
-      )
+      if (control.pauseReason === 'reconfigure')
         throw new HarnessError(
           'PAUSED',
-          `Выдачу держит ${control.pauseFailures?.length ? 'отказ: ' + control.pauseFailures.join(', ') : 'операция: ' + control.pauseReason}; её снимает устранение причины`,
+          'Выдачу держит операция применения политики; её снимает сама операция',
         );
       const reason = control.pauseReason ?? 'operator';
-      const next = { ...control, paused: false, pauseReason: undefined, pausedAt: undefined };
+      const next = {
+        ...control,
+        paused: false,
+        pauseReason: undefined,
+        pausedAt: undefined,
+        pauseOperation: undefined,
+        pauseFailures: undefined,
+        waits: control.waits?.filter((w) => w.kind !== 'base-check'),
+      };
+      if (!next.waits?.length) delete next.waits;
       tx.setControl(next);
       tx.emit({ type: 'control.resumed', payload: { reason } });
       return { control: next, changed: true };

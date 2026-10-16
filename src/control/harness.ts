@@ -1,0 +1,517 @@
+import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { isAbsolute, join, resolve } from 'node:path';
+import {
+  API_VERSION,
+  HarnessError,
+  STATE_VERSION,
+  WORKSPACE_OWNER,
+  contextDigest,
+  contextIssues,
+  digestOf,
+  findingId,
+  reviewIssues,
+  reviewResultSchema,
+  selectReviewer,
+  workGraphDigest,
+  type Author,
+  type ContextSnapshot,
+  type ContractDocument,
+  type DeliveryState,
+  type ExecutionPolicy,
+  type ResultEnvelope,
+  type ResultSink,
+  type ReviewRecord,
+  type RuntimeAdapter,
+  type RuntimeName,
+  type WorkGraph,
+} from '../contracts/index.ts';
+import { cliAdapter } from '../agents/cli-adapter.ts';
+import { reviewOutputSchema } from '../agents/schemas.ts';
+import { executionEnvironment } from '../environment/lifecycle.ts';
+import { Engine } from '../engine/engine.ts';
+import { runResult } from '../engine/result.ts';
+import { Runner } from '../engine/runner.ts';
+import { standaloneHost } from '../engine/standalone.ts';
+import { HARNESS_VERSION } from '../package.ts';
+import { SqliteExecutionStore } from '../storage/sqlite.ts';
+import { validateInputs } from '../validate.ts';
+
+export interface HarnessOptions {
+  /** Каталог состояния исполнения: база, worktrees, артефакты. */
+  stateDir: string;
+  policy: ExecutionPolicy;
+  /** Каталог, от которого разрешаются относительные пути репозиториев политики. */
+  baseDir: string;
+  /** Подключённые runtime; по умолчанию — CLI codex и claude из PATH. */
+  adapters?: Partial<Record<RuntimeName, RuntimeAdapter>>;
+  /** Читающие операции не создают каталог состояния. */
+  readOnly?: boolean;
+  environment?: NodeJS.ProcessEnv;
+}
+
+const stateFile = (dir: string) => join(dir, 'state.sqlite');
+
+/**
+ * Доменные операции harness — общие для библиотеки и CLI. Здесь нет
+ * операции «передать PASS» или «принять без проверок»: приёмка возможна
+ * только через движок после evidence обеих фаз.
+ */
+export class Harness {
+  readonly engine: Engine;
+  readonly runner: Runner;
+  readonly store: SqliteExecutionStore;
+  readonly policy: ExecutionPolicy;
+  private readonly adapters: Partial<Record<RuntimeName, RuntimeAdapter>>;
+
+  static open(options: HarnessOptions) {
+    if (options.readOnly && !existsSync(stateFile(options.stateDir)))
+      throw new HarnessError('NOT_FOUND', 'Каталог состояния не найден: ' + options.stateDir);
+    return new Harness(options);
+  }
+
+  private constructor(readonly options: HarnessOptions) {
+    this.policy = options.policy;
+    if (!options.readOnly) mkdirSync(options.stateDir, { recursive: true });
+    this.store = new SqliteExecutionStore(
+      stateFile(options.stateDir),
+      'devcontour-harness@' + HARNESS_VERSION,
+    );
+    this.engine = new Engine({
+      host: standaloneHost(this.store, this.policy),
+      policy: this.policy,
+    });
+    this.adapters = options.adapters ?? {
+      codex: cliAdapter('codex', { toolProfiles: this.policy.toolProfiles }),
+      claude: cliAdapter('claude', { toolProfiles: this.policy.toolProfiles }),
+    };
+    this.runner = new Runner({
+      engine: this.engine,
+      stateDir: options.stateDir,
+      baseDir: options.baseDir,
+      adapters: this.adapters,
+      context: (work) => this.contextOf(work.graphId),
+      ...(options.environment ? { environment: options.environment } : {}),
+    });
+  }
+
+  close() {
+    this.store.close();
+  }
+
+  private repoPath(path: string) {
+    return isAbsolute(path) ? path : resolve(this.options.baseDir, path);
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Ревью плана и контракта                                           */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Раунд технического ревью предмета (граф или контракт) с конкретным
+   * digest. Тот же digest и автор, уже согласованные последним раундом, —
+   * тот же раунд без вызова модели. Reviewer — по правилу вендора политики;
+   * недопустимый автор — `REVIEWER_SAME_VENDOR` до вызова. Reviewer называет
+   * состояние каждой прежней открытой находки; история не переписывается.
+   */
+  async review(
+    input:
+      | { kind: 'plan'; graph: WorkGraph; context?: ContextSnapshot; author: Author }
+      | { kind: 'contract'; contract: ContractDocument; author: Author },
+  ) {
+    const subject = input.kind === 'plan' ? input.graph.id : input.contract.id;
+    const digest = input.kind === 'plan' ? workGraphDigest(input.graph) : digestOf(input.contract);
+    const rounds = this.engine.reviews(input.kind, subject);
+    const last = rounds.at(-1);
+    if (last && last.digest === digest && last.authorRuntime === input.author && last.approved)
+      return last;
+    if (rounds.length >= this.policy.maxAttempts * 2)
+      throw new HarnessError(
+        'ATTEMPTS_EXHAUSTED',
+        `Исчерпаны раунды ревью ${input.kind} ${subject}`,
+      );
+    const choice = selectReviewer(this.policy, input.kind, { runtime: input.author });
+    if (!choice.ok) throw new HarnessError(choice.code, choice.message);
+    const adapter = this.adapters[choice.reviewer.runtime];
+    if (!adapter)
+      throw new HarnessError(
+        'RUNTIME_UNAVAILABLE',
+        'Runtime не подключён: ' + choice.reviewer.runtime,
+      );
+    const open = (last?.findings ?? []).filter((f) => f.status === 'open');
+    const round = rounds.length + 1;
+    const dir = join(this.options.stateDir, 'reviews', `${input.kind}-${subject}-${round}`);
+    await mkdir(dir, { recursive: true });
+    const repo = this.policy.repositories[0]!;
+    const cwd = this.repoPath(repo.path);
+    const execution = executionEnvironment(
+      [this.policy.environment, repo.environment],
+      {},
+      this.options.environment ?? process.env,
+    );
+    const prompt = [
+      input.kind === 'plan'
+        ? 'You independently review a plan: a graph of executable work orders. Check that each order is complete, testable, scoped and that dependencies are right. Do not edit files.'
+        : 'You independently review a contract document. Check that every obligation is feasible and measurable. Do not edit files.',
+      `Subject: ${input.kind} ${subject}, digest ${digest}, round ${round}. Author: ${input.author}.`,
+      JSON.stringify(input.kind === 'plan' ? input.graph : input.contract, null, 2),
+      open.length
+        ? 'Previous open findings. For each, report its state in `previous` (closed, open or withdrawn) with a concrete basis: ' +
+          JSON.stringify(open.map((f) => ({ id: f.id, severity: f.severity, message: f.message })))
+        : '',
+      'Report execution.commands or an empty list with execution.noCommandsReason. Findings need a message; use null where a field does not apply.',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+    const response = await adapter.invoke(
+      {
+        callId: randomUUID(),
+        task: input.kind === 'plan' ? 'review-plan' : 'review-contract',
+        binding: choice.reviewer,
+        cwd,
+        prompt,
+        outputSchema: reviewOutputSchema,
+        session: { kind: 'fresh' },
+        sandbox: {
+          mode: this.policy.isolation.mode,
+          writable: [],
+          denied: [this.options.stateDir],
+          readable: [cwd],
+          network: { domains: this.policy.isolation.domains },
+        },
+        timeoutMs: this.policy.runTimeoutMs,
+        env: Object.fromEntries(
+          Object.entries(execution.env).filter((e): e is [string, string] => e[1] !== undefined),
+        ),
+        artifactDir: dir,
+        secrets: [...(execution.redact.secrets ?? [])],
+      },
+      AbortSignal.timeout(this.policy.runTimeoutMs + 5000),
+    );
+    if (response.status !== 'ok')
+      throw new HarnessError(
+        'RUNTIME_UNAVAILABLE',
+        `Ревью ${input.kind}: ${response.status}${response.diagnostics.reason ? ': ' + response.diagnostics.reason : ''}`,
+      );
+    const parsed = reviewResultSchema.safeParse(response.output);
+    const issues = parsed.success ? reviewIssues(parsed.data, open) : ['Ответ ревью вне схемы'];
+    const at = new Date().toISOString();
+    const transitions = new Map((parsed.success ? parsed.data.previous : []).map((t) => [t.id, t]));
+    const findings: ReviewRecord['findings'] = [
+      ...(last?.findings ?? []).map((f) => {
+        const t = transitions.get(f.id);
+        return f.status === 'open' && t
+          ? { ...f, status: t.status, changedIn: round, basis: t.basis.slice(0, 4000) }
+          : f;
+      }),
+      ...(parsed.success ? parsed.data.findings : [])
+        .map((f) => ({ ...f, id: findingId(subject, f) }))
+        .filter((f) => !(last?.findings ?? []).some((p) => p.id === f.id))
+        .map((f) => ({
+          id: f.id,
+          severity: f.severity,
+          message: execution.redact(f.message).slice(0, 12000),
+          ...(f.rule ? { rule: f.rule.slice(0, 200) } : {}),
+          path: f.path ?? null,
+          line: f.line ?? null,
+          status: 'open' as const,
+          openedIn: round,
+          changedIn: round,
+        })),
+    ];
+    const record: ReviewRecord = {
+      id: `RV-${input.kind}-${subject}-${round}`,
+      kind: input.kind,
+      subject,
+      digest,
+      round,
+      at,
+      approved: parsed.success && parsed.data.approved && !issues.length,
+      summary:
+        execution
+          .redact(parsed.success ? parsed.data.summary : 'Ответ ревью вне схемы')
+          .slice(0, 12000) + (issues.length ? ' / ' + issues.join('; ') : ''),
+      authorRuntime: input.author,
+      reviewerRuntime: choice.reviewer.runtime,
+      ...(response.model ? { reviewerModel: response.model } : {}),
+      sameVendor: choice.sameVendor,
+      findings,
+      artifact: join(dir, 'review.json'),
+    };
+    await writeFile(
+      record.artifact,
+      JSON.stringify({ response: parsed.success ? parsed.data : null, issues }, null, 2),
+    );
+    return this.engine.recordReview(record);
+  }
+
+  /** Согласование оператором (approvalMode: operator) графа, digest которого прошёл ревью. */
+  approve(subject: string, digest: string) {
+    const graph = this.engine.read((v) => v.graph(subject));
+    if (!graph) throw new HarnessError('NOT_FOUND', 'Граф не найден: ' + subject);
+    if (graph.digest !== digest)
+      throw new HarnessError('APPROVAL_STALE', 'Digest не совпадает с зарегистрированным графом');
+    const before = graph.approval?.digest === digest;
+    this.engine.approve(subject, 'operator');
+    const at = this.engine.read((v) => v.graph(subject)!.approval!.at);
+    return { subject, digest, at, changed: !before };
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Работа                                                            */
+  /* ---------------------------------------------------------------- */
+
+  private contextOf(graphId: string): ContextSnapshot | undefined {
+    const key = this.engine.read((v) => v.local('run-keys', WORKSPACE_OWNER, 'context:' + graphId));
+    if (!key) return undefined;
+    return this.engine.read((v) => v.local('context-snapshots', WORKSPACE_OWNER, key.digest));
+  }
+
+  /**
+   * Зарегистрировать граф (идемпотентно по редакции), в режиме `agent`
+   * провести ревью плана, если его нет, согласовать и вести очередь до
+   * простоя. Результаты доставляются получателю с идемпотентным ключом.
+   */
+  async run(input: {
+    graph: WorkGraph;
+    context?: ContextSnapshot;
+    author: Author;
+    sink?: ResultSink;
+    once?: boolean;
+  }) {
+    validateInputs({
+      graph: input.graph,
+      policy: this.policy,
+      ...(input.context ? { context: input.context } : {}),
+    });
+    const repos = new Map(this.policy.repositories.map((r) => [r.id, r]));
+    const registered = this.engine.register(input.graph, {
+      trusted: () => false,
+      reachable: (p) => {
+        const repo = repos.get(p.repositoryId);
+        if (!repo) return false;
+        try {
+          // Синхронная проверка: предпосылка доступна в целевой ветке.
+          execFileSync('git', ['merge-base', '--is-ancestor', p.resultSha, repo.targetRef], {
+            cwd: this.repoPath(repo.path),
+            stdio: 'ignore',
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    });
+    const graph = registered.graph;
+    if (input.context) {
+      const issues = contextIssues(input.context);
+      if (issues.length)
+        throw new HarnessError('INVALID_INPUT', 'Снимок контекста: ' + issues.join('; '));
+      const digest = contextDigest(input.context);
+      this.store.transact('run.context', (tx) => {
+        tx.putLocal('context-snapshots', WORKSPACE_OWNER, digest, input.context!);
+        tx.putLocal('run-keys', WORKSPACE_OWNER, 'context:' + graph.id, {
+          graphId: graph.id,
+          digest,
+          at: new Date().toISOString(),
+        });
+      });
+    }
+    if (
+      !graph.approval ||
+      graph.approval.digest !== graph.digest ||
+      graph.policyDigest !== digestOf(this.policy)
+    ) {
+      if (this.policy.approvalMode === 'agent') {
+        const record = await this.review({
+          kind: 'plan',
+          graph: input.graph,
+          author: input.author,
+          ...(input.context ? { context: input.context } : {}),
+        });
+        if (!record.approved)
+          throw new HarnessError(
+            'REVIEW_REJECTED',
+            'Ревью плана не одобрило граф: ' + record.summary,
+          );
+        this.engine.approve(graph.id, 'agent');
+      } else if (!this.engine.read((v) => v.graph(graph.id)?.approval))
+        throw new HarnessError(
+          'APPROVAL_REQUIRED',
+          'approvalMode: operator — выполните review-plan и approve',
+        );
+    }
+    await this.runner.init();
+    if (
+      this.engine.read(
+        (v) => v.control().paused && v.control().pauseReason === 'operator' && !v.attempts().length,
+      )
+    )
+      this.engine.resume();
+    if (input.once) await this.runner.tick();
+    else await this.runner.drain();
+    if (input.sink) await this.deliverAll(graph.id, input.sink);
+    return {
+      graphId: graph.id,
+      digest: graph.digest,
+      resumed: registered.resumed,
+      works: this.engine.read((v) =>
+        v.works(graph.id).map((w) => ({
+          id: w.id,
+          status: w.status,
+          ...(w.activeRunId ? { runId: w.activeRunId } : {}),
+          ...(w.resultSha ? { resultSha: w.resultSha } : {}),
+          blockers: this.engine.blockers(w, v),
+        })),
+      ),
+    };
+  }
+
+  status(graphId?: string) {
+    return this.engine.read((v) => ({
+      stateVersion: STATE_VERSION,
+      control: v.control(),
+      ...(v.controller() ? { controller: v.controller() } : {}),
+      graphs: v
+        .graphs()
+        .filter((g) => !graphId || g.id === graphId)
+        .map((g) => ({
+          id: g.id,
+          digest: g.digest,
+          source: g.graph.source,
+          approved: g.approval?.digest === g.digest,
+        })),
+      works: v.works(graphId).map((w) => ({
+        id: w.id,
+        graphId: w.graphId,
+        status: w.status,
+        attempt: w.attempt,
+        ...(w.activeRunId ? { activeRunId: w.activeRunId } : {}),
+        ...(w.resultSha ? { resultSha: w.resultSha } : {}),
+        blockers: this.engine.blockers(w, v),
+      })),
+    }));
+  }
+
+  events(after = 0, limit = 100) {
+    const events = this.store.events(after, Math.min(Math.max(limit, 1), 500));
+    return { events, next: events.at(-1)?.seq ?? after };
+  }
+
+  /** Результат последней завершённой попытки поручения и состояние его доставки. */
+  result(workId: string): ResultEnvelope {
+    return this.engine.read((v) => {
+      const work = v.work(workId);
+      if (!work) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
+      const attempt = v
+        .attempts(workId)
+        .filter((a) => a.status !== 'active')
+        .at(-1);
+      if (!attempt)
+        throw new HarnessError('NOT_FOUND', 'У поручения нет завершённой попытки: ' + workId);
+      const graph = v.graph(work.graphId)!;
+      const repo = this.policy.repositories.find((r) => r.id === work.order.repositoryId)!;
+      return {
+        apiVersion: API_VERSION,
+        result: runResult(graph, work, attempt, repo.targetRef, HARNESS_VERSION),
+        delivery: v
+          .locals('delivery', WORKSPACE_OWNER)
+          .map((d) => d.value)
+          .filter((d) => d.key.endsWith(':' + attempt.id)),
+      };
+    });
+  }
+
+  /**
+   * Доставка результата поручения получателю. Ключ — получатель, поручение и
+   * попытка: повтор не создаёт второй записи и не вызывает моделей или
+   * интеграции. Конфликт редакции записывается, результат её не закрывает.
+   */
+  async deliver(workId: string, sink: ResultSink) {
+    const envelope = this.result(workId);
+    const key = `${sink.id}:${workId}:${envelope.result.runId}`;
+    const prior = this.engine.read((v) => v.local('delivery', WORKSPACE_OWNER, key));
+    if (prior?.status === 'delivered') return this.result(workId);
+    const base: DeliveryState = prior ?? {
+      sink: sink.id,
+      key,
+      revision: envelope.result.source.revision,
+      status: 'pending',
+      attempts: 0,
+      updatedAt: new Date().toISOString(),
+    };
+    const save = (
+      state: DeliveryState,
+      type: 'delivery.pending' | 'delivery.delivered' | 'delivery.failed' | 'delivery.conflict',
+    ) =>
+      this.store.transact('delivery.recorded', (tx) => {
+        tx.putLocal('delivery', WORKSPACE_OWNER, key, state);
+        const payload = {
+          sink: state.sink,
+          key,
+          revision: state.revision,
+          attempts: state.attempts,
+        };
+        if (type === 'delivery.delivered')
+          tx.emit({
+            type,
+            workId,
+            payload: { ...payload, ...(state.receipt ? { receipt: state.receipt } : {}) },
+          });
+        else if (type === 'delivery.failed')
+          tx.emit({ type, workId, payload: { ...payload, error: state.lastError ?? 'ошибка' } });
+        else if (type === 'delivery.conflict')
+          tx.emit({
+            type,
+            workId,
+            payload: { ...payload, currentRevision: state.currentRevision ?? '?' },
+          });
+        else tx.emit({ type, workId, payload });
+      });
+    if (!prior) save(base, 'delivery.pending');
+    const attempt = { ...base, attempts: base.attempts + 1, updatedAt: new Date().toISOString() };
+    try {
+      const outcome = await sink.deliver({ key, result: envelope.result });
+      if (outcome.status === 'delivered')
+        save(
+          {
+            ...attempt,
+            status: 'delivered',
+            ...(outcome.receipt ? { receipt: outcome.receipt.slice(0, 1000) } : {}),
+          },
+          'delivery.delivered',
+        );
+      else
+        save(
+          {
+            ...attempt,
+            status: 'conflict',
+            currentRevision: outcome.currentRevision.slice(0, 200),
+          },
+          'delivery.conflict',
+        );
+    } catch (error) {
+      save(
+        {
+          ...attempt,
+          status: 'failed',
+          lastError: String(error instanceof Error ? error.message : error).slice(0, 4000),
+        },
+        'delivery.failed',
+      );
+    }
+    return this.result(workId);
+  }
+
+  private async deliverAll(graphId: string, sink: ResultSink) {
+    const ids = this.engine.read((v) =>
+      v
+        .works(graphId)
+        .filter((w) => v.attempts(w.id).some((a) => a.status !== 'active'))
+        .map((w) => w.id),
+    );
+    for (const id of ids) await this.deliver(id, sink);
+  }
+}

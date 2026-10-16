@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import {
+  contextDigest,
   implementationResultSchema,
   reviewIssues,
   reviewResultSchema,
@@ -361,6 +362,18 @@ export class Runner {
     try {
       const work = await this.workOf(attempt);
       const context = this.options.context?.(work);
+      if (context)
+        // Попытка закрепляет снимок контекста: writer и оба reviewer видят одни и те же байты.
+        this.engine.update(attempt.id, attempt.token, 'run.context', {
+          contextSnapshot: contextDigest(context),
+          context: context.sources.map((s) => ({
+            id: s.id,
+            version: s.version,
+            repositoryId: s.repositoryId ?? work.order.repositoryId,
+            revision: s.revision ?? s.digest,
+            digest: s.hostDigest ?? s.digest,
+          })),
+        });
       const base = await git(repoPath, 'rev-parse', repo.targetRef);
       await mkdir(join(this.options.stateDir, 'worktrees'), { recursive: true });
       await git(

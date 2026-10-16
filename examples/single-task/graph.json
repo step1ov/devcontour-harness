@@ -1,18 +1,26 @@
 {
   "apiVersion": "devcontour-harness/v1alpha1",
   "id": "greeting",
-  "source": { "connector": "files", "ref": "examples/single-task/graph.json", "revision": "1" },
+  "source": {
+    "connector": "files",
+    "ref": "graph.json",
+    "revision": "1"
+  },
   "orders": [
     {
       "apiVersion": "devcontour-harness/v1alpha1",
       "id": "add-greeting",
-      "source": { "connector": "files", "ref": "add-greeting", "revision": "1" },
+      "source": {
+        "connector": "files",
+        "ref": "add-greeting",
+        "revision": "1"
+      },
       "title": "Add a greeting function",
-      "goal": "Add greet(name) to src/greet.js returning 'Hello, <name>!' with a unit test.",
+      "goal": "Add greet(name) to src/greet.js returning 'Hello, <name>!'.",
       "acceptance": ["greet('Ada') returns 'Hello, Ada!'", "npm test passes with a JUnit report"],
       "role": "developer",
       "repositoryId": "app",
-      "writeScope": ["src", "test"],
+      "writeScope": ["src"],
       "gates": ["unit"]
     }
   ]

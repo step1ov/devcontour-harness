@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { policyIssues } from '../src/contracts/index.ts';
 import { approve, greet, implement, runAll, setup, target } from './runner-fixture.ts';
 
@@ -259,4 +261,95 @@ test('T11: отказ setup и обязательной очистки — пр�
     assert.match(work.failure!, reason);
     assert.equal(target(ctx), before);
   }
+});
+
+test('T14: штатная остановка посреди попытки — пауза shutdown, отказ окружения, не отмена; после рестарта работа доходит до конца', async () => {
+  const ctx = setup({
+    scenario: { writer: [{ ...implement(), sleepMs: 4000 }, implement()], reviewer: approve() },
+  });
+  await ctx.runner.init();
+  const { trustNone, review } = await import('./engine-fixture.ts');
+  const { graph } = ctx.engine.register(ctx.graph, trustNone);
+  ctx.engine.recordReview(review(graph, 1));
+  ctx.engine.approve(graph.id, 'agent');
+  ctx.engine.resume();
+  await ctx.runner.tick();
+  for (let i = 0; i < 100 && ctx.engine.read((v) => v.attempts()[0]?.phase) !== 'running'; i++)
+    await new Promise((r) => setTimeout(r, 20));
+  await ctx.runner.stop();
+  const control = ctx.engine.read((v) => v.control());
+  assert.equal(control.pauseReason, 'shutdown', 'остановка — не отмена и не пауза человека');
+  const first = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.equal(first.status, 'failed');
+  // Работа runtime уже началась: как в DevContour, это засчитанная попытка с отказом окружения.
+  assert.equal(first.failureKind, 'environment');
+  assert.equal(
+    ctx.engine.read((v) => v.work('add-greeting')!.status),
+    'failed',
+    'не cancelled: остановка — не отмена',
+  );
+  // Рестарт: новый процесс снимает паузу остановки, повторяет поручение явно и доводит его.
+  ctx.engine.resume();
+  ctx.engine.retry('add-greeting');
+  await ctx.runner.drain();
+  assert.equal(
+    ctx.engine.read((v) => v.work('add-greeting')!.status),
+    'done',
+  );
+});
+
+test('T10: merge conflict с продвинутой принятой веткой — класс merge, target с чужим коммитом не теряется', async () => {
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p) => ((p as { maxAttempts: number }).maxAttempts = 1),
+  });
+  await ctx.runner.init();
+  const { trustNone, review } = await import('./engine-fixture.ts');
+  const { graph } = ctx.engine.register(ctx.graph, trustNone);
+  ctx.engine.recordReview(review(graph, 1));
+  ctx.engine.approve(graph.id, 'agent');
+  ctx.engine.resume();
+  ctx.engine.lead('runner-1');
+  const ref = ctx.policy.repositories[0]!.targetRef;
+  const tick = ctx.runner.tick();
+  let foreign = '';
+  for (let i = 0; i < 400 && !foreign; i++) {
+    await new Promise((r) => setTimeout(r, 25));
+    if (ctx.engine.read((v) => v.attempts()[0]?.phase) === 'reviewing') {
+      // Чужая работа создаёт тот же файл с другим содержимым.
+      const blob = execFileSync('git', ['hash-object', '-w', '--stdin'], {
+        cwd: ctx.repo.dir,
+        input: 'exports.greet = () => 1;\n',
+        encoding: 'utf8',
+      }).trim();
+      const index = join(ctx.state, 'foreign-index');
+      const env = { ...process.env, GIT_INDEX_FILE: index };
+      execFileSync('git', ['read-tree', ref], { cwd: ctx.repo.dir, env });
+      execFileSync('git', ['update-index', '--add', '--cacheinfo', `100644,${blob},src/greet.js`], {
+        cwd: ctx.repo.dir,
+        env,
+      });
+      const tree = execFileSync('git', ['write-tree'], {
+        cwd: ctx.repo.dir,
+        env,
+        encoding: 'utf8',
+      }).trim();
+      foreign = ctx.repo.git(
+        'commit-tree',
+        tree,
+        '-p',
+        ctx.repo.git('rev-parse', ref),
+        '-m',
+        'foreign',
+      );
+      ctx.repo.git('update-ref', ref, foreign);
+    }
+  }
+  assert.ok(foreign);
+  await tick;
+  await ctx.runner.drain();
+  const work = ctx.engine.read((v) => v.work('add-greeting')!);
+  assert.equal(work.status, 'failed');
+  assert.equal(work.failureKind, 'merge', work.failure);
+  assert.equal(target(ctx), foreign, 'чужой коммит остался вершиной принятой ветки');
 });

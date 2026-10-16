@@ -60,7 +60,7 @@ test('validate: валидный вход — exit 0, digest примера, н�
   assert.equal(r.json.command, 'validate');
   assert.equal(
     r.json.data?.graphDigest,
-    '1328a41de2b74096de57553d096d2f7782b5b1e235bb0956d20ea78d6f266c2c',
+    '03c03e691a045303bd67c36feea3a01cf177f0331ebb39cf3e8d5468a190157f',
   );
   assert.equal(r.untouched, true, 'validate ничего не пишет');
 });
@@ -90,19 +90,22 @@ test('validate: неверный вход — exit 2, код и путь нар�
   assert.equal(harness(['validate', '--bogus']).status, 2);
 });
 
-test('Неизвестная и не реализованная команды — отказ входа без записи', () => {
+test('Неизвестная команда и читающие команды без состояния — отказ без записи', () => {
   const unknown = harness(['deploy']);
   assert.equal(unknown.status, 2);
   assert.equal(unknown.json.error?.code, 'UNSUPPORTED_COMMAND');
   assert.equal(unknown.json.command, null);
   assert.equal(unknown.untouched, true);
-  for (const command of ['run', 'status', 'pause', 'result']) {
-    const later = harness([command, '--state', 'state']);
-    assert.equal(later.status, 2, command);
-    assert.equal(later.json.command, command);
-    assert.equal(later.json.error?.code, 'UNSUPPORTED_COMMAND');
-    assert.equal(later.untouched, true, command + ' не создаёт каталог состояния');
+  for (const command of ['status', 'events', 'pause', 'result']) {
+    const read = harness([command, '--state', 'state', '--work', 'w']);
+    assert.equal(read.status, 3, command);
+    assert.equal(read.json.command, command);
+    assert.equal(read.json.error?.code, 'NOT_FOUND');
+    assert.equal(read.untouched, true, command + ' не создаёт каталог состояния');
   }
+  const run = harness(['run', '--state', 'state']);
+  assert.equal(run.status, 2, 'run без графа и политики — неверный вход');
+  assert.equal(run.untouched, true);
 });
 
 test('--version равна версии package.json', () => {
