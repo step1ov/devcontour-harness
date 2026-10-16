@@ -31,6 +31,7 @@ import {
 import { cliAdapter } from '../agents/cli-adapter.ts';
 import { reviewOutputSchema } from '../agents/schemas.ts';
 import { executionEnvironment } from '../environment/lifecycle.ts';
+import { redactDeep } from '../environment/redaction.ts';
 import { Engine } from '../engine/engine.ts';
 import { runResult } from '../engine/result.ts';
 import { Runner } from '../engine/runner.ts';
@@ -262,11 +263,17 @@ export class Harness {
       findings,
       artifact: join(dir, 'review.json'),
     };
+    // Сохраняемые представления маскируются полным окружением вызова: сырой
+    // структурированный ответ адаптера может нести значение секрета профиля.
     await writeFile(
       record.artifact,
-      JSON.stringify({ response: parsed.success ? parsed.data : null, issues }, null, 2),
+      JSON.stringify(
+        redactDeep({ response: parsed.success ? parsed.data : null, issues }, execution.redact),
+        null,
+        2,
+      ),
     );
-    return this.engine.recordReview(record);
+    return this.engine.recordReview(redactDeep(record, execution.redact));
   }
 
   /** Согласование оператором (approvalMode: operator) графа, digest которого прошёл ревью. */

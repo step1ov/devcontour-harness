@@ -17,6 +17,10 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { exitCodes, executionPolicySchema } from '../src/contracts/index.ts';
+import { Engine } from '../src/engine/engine.ts';
+import { standaloneHost } from '../src/engine/standalone.ts';
+import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import { approve, bin, implement } from './runner-fixture.ts';
 
 const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
@@ -249,4 +253,87 @@ test('T33: файловый контекст каталога графа зак�
   );
   const result = p.harness('result', '--state', p.state, '--work', 'add-greeting');
   assert.match(String(result.json.data.result.inputs.contextDigest), /^[a-f0-9]{64}$/);
+});
+
+test('S1-R2-03: run при действующей чужой роли controller — код отказа и CONTROLLER_BUSY; чужая роль цела', () => {
+  const p = project();
+  mkdirSync(p.state, { recursive: true });
+  const policy = executionPolicySchema.parse(
+    JSON.parse(readFileSync(join(p.app, 'policy.json'), 'utf8')),
+  );
+  const other = new Engine({
+    host: standaloneHost(new SqliteExecutionStore(join(p.state, 'state.sqlite'), 'other'), policy),
+    policy,
+  });
+  assert.equal(other.lead('occupied-controller'), true);
+  const run = p.harness(
+    'run',
+    '--graph',
+    'graph.json',
+    '--policy',
+    'policy.json',
+    '--state',
+    p.state,
+  );
+  assert.equal(run.status, exitCodes.refused, run.stderr);
+  assert.equal(run.json.error?.code, 'CONTROLLER_BUSY');
+  assert.equal(
+    other.read((v) => v.controller()?.owner),
+    'occupied-controller',
+  );
+  assert.equal(
+    other.read((v) => v.attempts().length),
+    0,
+  );
+  other.release('occupied-controller');
+  other.host.store.close();
+});
+
+test('T14: --once выполняет только выданный шаг; новый процесс продолжает очередь с того же состояния', () => {
+  const p = project();
+  const graphPath = join(p.app, 'graph.json');
+  const graph = JSON.parse(readFileSync(graphPath, 'utf8')) as { orders: any[] };
+  graph.orders.push({
+    ...graph.orders[0],
+    id: 'add-farewell',
+    source: { connector: 'files', ref: 'add-farewell', revision: '1' },
+    title: 'Add a farewell function',
+    dependsOn: ['add-greeting'],
+  });
+  writeFileSync(graphPath, JSON.stringify(graph));
+  writeFileSync(
+    join(p.root, 'scenario.json'),
+    JSON.stringify({
+      writer: [implement(), implement({ 'src/farewell.js': 'exports.bye = () => "Bye";\n' })],
+      reviewer: approve(),
+    }),
+  );
+  p.git('add', '-A');
+  p.git('commit', '-qm', 'two orders');
+  const args = ['run', '--graph', 'graph.json', '--policy', 'policy.json', '--state', p.state];
+  const once = p.harness(...args, '--once');
+  assert.equal(once.status, 0, once.stderr);
+  const after = p.harness('status', '--state', p.state).json.data.works as {
+    id: string;
+    status: string;
+  }[];
+  assert.deepEqual(
+    after.map((w) => [w.id, w.status]),
+    [
+      ['add-greeting', 'done'],
+      ['add-farewell', 'ready'],
+    ],
+    '--once не выдаёт ставшее свободным после шага',
+  );
+  const rest = p.harness(...args);
+  assert.equal(rest.status, 0, rest.stderr);
+  const final = p.harness('status', '--state', p.state).json.data.works as {
+    id: string;
+    status: string;
+  }[];
+  assert.deepEqual(
+    final.map((w) => w.status),
+    ['done', 'done'],
+    'новый процесс довёл очередь',
+  );
 });

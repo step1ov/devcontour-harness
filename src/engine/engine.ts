@@ -226,14 +226,20 @@ export class Engine {
 
   /**
    * Digest назначения reviewer вида `kind` для автора по текущей политике:
-   * runtime, модель, effort, профиль и правило вендора. Раунд ревью
+   * runtime, модель, effort, содержимое профиля и правило вендора. Раунд ревью
    * подтверждает предмет только при том же назначении.
    */
   reviewerBinding(kind: 'plan' | 'contract' | 'code', author: Author): string | undefined {
     const choice = selectReviewer(this.policy, kind, { runtime: author });
-    return choice.ok
-      ? digestOf({ reviewer: choice.reviewer, vendor: this.policy.review[kind].vendor })
-      : undefined;
+    if (!choice.ok) return undefined;
+    // Содержимое профиля, а не только его имя: другой набор инструментов —
+    // другое назначение.
+    const profile = choice.reviewer.toolProfile;
+    return digestOf({
+      reviewer: choice.reviewer,
+      vendor: this.policy.review[kind].vendor,
+      ...(profile ? { tools: this.policy.toolProfiles[profile] ?? null } : {}),
+    });
   }
 
   /**

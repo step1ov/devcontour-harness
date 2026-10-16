@@ -3,7 +3,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   API_VERSION,
@@ -228,6 +228,74 @@ test('S1-R1-03: требование с изменённым источнико�
   h.close();
 });
 
+test('S1-R2-01: источник требований, изменённый или удалённый во время ревью интеграции, — приёмки нет, target неподвижен', async () => {
+  const text = '## REQ-1 Приветствие\n\ngreet("Ada") возвращает Hello, Ada!';
+  for (const variant of ['change', 'delete'] as const) {
+    const ctx = hsetup({
+      scenario: { writer: implement(), reviewer: approve() },
+      files: { 'spec.md': text + '\n' },
+      graph: (g) =>
+        ((g as any).orders[0].requirements = [
+          {
+            id: 'REQ-1',
+            source: 'spec.md',
+            digest: sha256(text),
+            text,
+            gate: 'unit',
+            scenario: 'Приветствие по имени',
+            testId: 'greet.greets',
+          },
+        ]),
+      policy: (p) => ((p as any).maxAttempts = 1),
+    });
+    // Ревью интеграции (третий вызов reviewer: план, кандидат, интеграция)
+    // меняет источник отдельным коммитом основного checkout.
+    let reviews = 0;
+    const h = ctx.open(ctx.policy, (inner) => ({
+      runtime: inner.runtime,
+      capabilities: () => inner.capabilities(),
+      invoke: async (request, signal) => {
+        const response = await inner.invoke(request, signal);
+        if (inner.runtime === 'codex' && ++reviews === 3) {
+          if (variant === 'change') {
+            writeFileSync(join(ctx.repo.dir, 'spec.md'), '## REQ-1 Приветствие\n\nДругое.\n');
+            ctx.repo.git('commit', '-qam', 'spec changed');
+          } else {
+            ctx.repo.git('rm', '-q', 'spec.md');
+            ctx.repo.git('commit', '-qm', 'spec removed');
+          }
+        }
+        return response;
+      },
+    }));
+    const before = target(ctx);
+    await h.run({ graph: ctx.graph, author: 'claude' });
+    assert.equal(reviews, 3, 'изменение сделано во время ревью интеграции');
+    const a = h.engine.read((v) => v.attempts('add-greeting')[0]!);
+    assert.ok(
+      a.evidence.some(
+        (e) => e.gate === 'requirement-source' && e.phase === 'integration' && e.passed,
+      ),
+      'источник был актуален на проверке интеграции',
+    );
+    assert.equal(a.status, 'failed', variant);
+    assert.match(
+      a.error!,
+      variant === 'change'
+        ? /Требования изменились или удалены: REQ-1/
+        : /Источник требований должен быть обычным Git-файлом: spec\.md/,
+      variant,
+    );
+    assert.equal(target(ctx), before, 'target неподвижен: ' + variant);
+    assert.notEqual(
+      h.engine.read((v) => v.work('add-greeting')!.status),
+      'done',
+      variant,
+    );
+    h.close();
+  }
+});
+
 test('S1-R1-04: поручение со ссылкой на контракт без одобренного ревью этого digest не выдаётся', async () => {
   const doc: ContractDocument = {
     apiVersion: API_VERSION,
@@ -267,46 +335,86 @@ test('S1-R1-04: поручение со ссылкой на контракт б�
   h.close();
 });
 
-test('S1-R1-05/T31: прежний раунд ревью не подтверждает смену reviewer политикой; plan и contract ревью — настоящим subprocess обеих пар', async () => {
+test('S1-R1-05/T31: прежний раунд ревью не подтверждает смену reviewer политикой; plan и contract — обеих пар настоящим subprocess', async () => {
   const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
-  let h = ctx.open();
-  const r1 = await h.review({ kind: 'plan', graph: ctx.graph, author: 'claude' });
-  assert.equal(r1.reviewerRuntime, 'codex');
-  assert.equal(ctx.calls('codex', 'reviewer'), 1, 'ревью плана — вызов fixture runtime');
-  assert.equal(
-    await h.review({ kind: 'plan', graph: ctx.graph, author: 'claude' }).then((r) => r.round),
-    1,
-    'тот же digest и назначение — без вызова',
-  );
-  assert.equal(ctx.calls('codex', 'reviewer'), 1);
-  h.close();
-  const raw = structuredClone(ctx.policy) as any;
-  raw.review.plan = { reviewer: { runtime: 'claude' }, vendor: 'different-vendor' };
-  h = ctx.open(executionPolicySchema.parse(raw));
-  await assert.rejects(
-    h.review({ kind: 'plan', graph: ctx.graph, author: 'claude' }),
-    refused('REVIEWER_SAME_VENDOR'),
-  );
-  // Обратная пара: автор codex, reviewer claude — настоящий вызов claude.
-  const back = await h.review({ kind: 'plan', graph: ctx.graph, author: 'codex' });
-  assert.equal(back.reviewerRuntime, 'claude');
-  assert.equal(back.round, 2);
-  assert.equal(ctx.calls('claude', 'reviewer'), 1);
-  h.close();
-  raw.review.plan = { reviewer: { runtime: 'codex', model: 'other-model' } };
-  h = ctx.open(executionPolicySchema.parse(raw));
-  const changed = await h.review({ kind: 'plan', graph: ctx.graph, author: 'claude' });
-  assert.equal(changed.round, 3, 'смена модели reviewer — новый раунд, а не кэш');
   const doc: ContractDocument = {
     apiVersion: API_VERSION,
     id: 'api',
     title: 'API',
     content: 'Контракт API целиком.',
   };
-  const contract = await h.review({ kind: 'contract', contract: doc, author: 'claude' });
-  assert.equal(contract.reviewerRuntime, 'codex');
-  assert.equal(contract.sameVendor, false);
+  let h = ctx.open();
+  for (const kind of ['plan', 'contract'] as const) {
+    const input =
+      kind === 'plan'
+        ? { kind, graph: ctx.graph, author: 'claude' as const }
+        : { kind, contract: doc, author: 'claude' as const };
+    const before = ctx.calls('codex', 'reviewer');
+    const r1 = await h.review(input);
+    assert.equal(r1.reviewerRuntime, 'codex');
+    assert.equal(ctx.calls('codex', 'reviewer'), before + 1, kind + ': вызов fixture runtime');
+    assert.equal((await h.review(input)).round, 1, kind + ': то же назначение — без вызова');
+    assert.equal(ctx.calls('codex', 'reviewer'), before + 1);
+  }
   h.close();
+  // Обратная пара для обоих видов: автор codex, reviewer claude.
+  const raw = structuredClone(ctx.policy) as any;
+  for (const kind of ['plan', 'contract']) raw.review[kind] = { reviewer: { runtime: 'claude' } };
+  h = ctx.open(executionPolicySchema.parse(raw));
+  await assert.rejects(
+    h.review({ kind: 'plan', graph: ctx.graph, author: 'claude' }),
+    refused('REVIEWER_SAME_VENDOR'),
+  );
+  await assert.rejects(
+    h.review({ kind: 'contract', contract: doc, author: 'claude' }),
+    refused('REVIEWER_SAME_VENDOR'),
+  );
+  const backPlan = await h.review({ kind: 'plan', graph: ctx.graph, author: 'codex' });
+  const backContract = await h.review({ kind: 'contract', contract: doc, author: 'codex' });
+  assert.equal(backPlan.reviewerRuntime, 'claude');
+  assert.equal(backContract.reviewerRuntime, 'claude');
+  assert.equal(backContract.sameVendor, false);
+  assert.equal(ctx.calls('claude', 'reviewer'), 2, 'оба вида — настоящий вызов claude');
+  h.close();
+});
+
+test('S1-R2-02: смена только модели, только effort или только содержимого профиля reviewer — новый раунд plan и contract', async () => {
+  const ctx = hsetup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p: any) => {
+      p.toolProfiles = { rev: { runtime: 'codex', codexShell: true } };
+      for (const k of ['plan', 'contract']) p.review[k].reviewer.toolProfile = 'rev';
+    },
+  });
+  const doc: ContractDocument = {
+    apiVersion: API_VERSION,
+    id: 'api',
+    title: 'API',
+    content: 'Контракт API целиком.',
+  };
+  const inputs = [
+    { kind: 'plan' as const, graph: ctx.graph, author: 'claude' as const },
+    { kind: 'contract' as const, contract: doc, author: 'claude' as const },
+  ];
+  const variants: [string, (p: any) => void][] = [
+    ['исходное', () => {}],
+    ['модель', (p) => (p.review.plan.reviewer.model = p.review.contract.reviewer.model = 'm-2')],
+    ['effort', (p) => (p.review.plan.reviewer.effort = p.review.contract.reviewer.effort = 'low')],
+    ['tools', (p) => (p.toolProfiles.rev.codexShell = false)],
+  ];
+  const raw = structuredClone(ctx.policy) as any;
+  for (const [round, [name, change]] of variants.entries()) {
+    change(raw);
+    const h = ctx.open(executionPolicySchema.parse(raw));
+    for (const input of inputs) {
+      const before = ctx.calls('codex', 'reviewer');
+      const record = await h.review(input);
+      assert.equal(record.round, round + 1, `${input.kind}: ${name} — новый раунд`);
+      assert.equal(ctx.calls('codex', 'reviewer'), before + 1, `${input.kind}: ${name} — вызов`);
+      assert.equal((await h.review(input)).round, round + 1, `${input.kind}: ${name} — кэш`);
+    }
+    h.close();
+  }
 });
 
 test('S1-R1-06: пауза человека до первого запуска сохраняется; первый запуск очереди её не снимает', async () => {
@@ -333,7 +441,7 @@ test('S1-R1-06: пауза человека до первого запуска �
   h.close();
 });
 
-test('S1-R1-07/T04/T14: работающий controller продлевает роль; второй не захватывает её; завершившийся освобождает; новый процесс продолжает', async () => {
+test('S1-R1-07/T04: работающий controller продлевает роль; второй не захватывает её; завершившийся освобождает', async () => {
   const ctx = hsetup({
     scenario: { writer: { ...implement(), sleepMs: 7500 }, reviewer: approve() },
     policy: (p) => ((p as any).leaseMs = 5000),
@@ -359,6 +467,35 @@ test('S1-R1-07/T04/T14: работающий controller продлевает р�
   assert.equal(other.lead('other-process'), true);
   other.release('other-process');
   other.host.store.close();
+  h.close();
+});
+
+test('S1-R2-03: run при действующей чужой роли controller — явный CONTROLLER_BUSY; чужая роль сохранена, выдачи нет', async () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const other = new Engine({
+    host: standaloneHost(new SqliteExecutionStore(ctx.statePath, 'other'), ctx.policy),
+    policy: ctx.policy,
+  });
+  assert.equal(other.lead('occupied-controller'), true);
+  const h = ctx.open();
+  await assert.rejects(h.run({ graph: ctx.graph, author: 'claude' }), refused('CONTROLLER_BUSY'));
+  assert.equal(
+    h.engine.read((v) => v.attempts().length),
+    0,
+  );
+  assert.equal(ctx.calls('claude', 'writer'), 0);
+  assert.equal(
+    h.engine.read((v) => v.controller()?.owner),
+    'occupied-controller',
+  );
+  other.release('occupied-controller');
+  other.host.store.close();
+  await h.run({ graph: ctx.graph, author: 'claude' });
+  assert.equal(
+    h.engine.read((v) => v.work('add-greeting')!.status),
+    'done',
+    'после освобождения роли очередь продолжается',
+  );
   h.close();
 });
 
@@ -473,6 +610,72 @@ test('S1-R1-11: граф из 40 поручений согласуется ат�
   h.close();
 });
 
+test('S1-R2-04: секрет профиля из сырого ответа reviewer маскируется в review.json, evidence и результате (plan, contract, code)', async () => {
+  const canary = 'canary-7f3a9c-secret';
+  process.env.HARNESS_TEST_CANARY_7f3 = canary;
+  try {
+    const ctx = hsetup({
+      scenario: { writer: implement(), reviewer: approve() },
+      policy: (p: any) => {
+        p.toolProfiles = {
+          rev: {
+            runtime: 'codex',
+            environment: { secrets: { PROFILE_TOKEN: 'HARNESS_TEST_CANARY_7f3' } },
+          },
+        };
+        for (const k of ['plan', 'contract', 'code']) p.review[k].reviewer.toolProfile = 'rev';
+      },
+    });
+    // Допустимый библиотечный адаптер: сырой структурированный ответ несёт значение.
+    const h = ctx.open(ctx.policy, (inner) => ({
+      runtime: inner.runtime,
+      capabilities: () => inner.capabilities(),
+      invoke: async (request, signal) => {
+        const response = await inner.invoke(request, signal);
+        const token = request.env.PROFILE_TOKEN;
+        if (!token || response.status !== 'ok') return response;
+        const output = response.output as any;
+        return {
+          ...response,
+          output: {
+            ...output,
+            summary: `${output.summary} ${token}`,
+          },
+        };
+      },
+    }));
+    const doc: ContractDocument = {
+      apiVersion: API_VERSION,
+      id: 'api',
+      title: 'API',
+      content: 'Контракт API целиком.',
+    };
+    const contract = await h.review({ kind: 'contract', contract: doc, author: 'claude' });
+    await h.run({ graph: ctx.graph, author: 'claude' });
+    const plan = h.engine.reviews('plan', ctx.graph.id).at(-1)!;
+    const a = h.engine.read((v) => v.attempts('add-greeting')[0]!);
+    assert.equal(a.status, 'succeeded', a.error);
+    const persisted = [
+      readFileSync(plan.artifact, 'utf8'),
+      JSON.stringify(plan),
+      readFileSync(contract.artifact, 'utf8'),
+      JSON.stringify(contract),
+      JSON.stringify(a.evidence),
+      ...a.evidence.filter((e) => e.kind === 'review').map((e) => readFileSync(e.log, 'utf8')),
+      JSON.stringify(h.result('add-greeting').result),
+    ];
+    assert.ok(
+      persisted.join('\n').includes('[REDACTED]'),
+      'значение было в ответе и замаскировано',
+    );
+    for (const text of persisted)
+      assert.ok(!text.includes(canary), 'секрет сохранён: ' + text.slice(0, 200));
+    h.close();
+  } finally {
+    delete process.env.HARNESS_TEST_CANARY_7f3;
+  }
+});
+
 test('T02: предпосылка с результатом движка проверяется настоящей доступностью SHA в target ref', async () => {
   const ctx = hsetup({
     scenario: {
@@ -507,7 +710,16 @@ test('T02: предпосылка с результатом движка про�
         },
       ],
     });
-  // Результат движка с SHA, которого нет в target ref (кандидат), — отказ.
+  // Подтверждение движка корректно (тот же runId и его integration SHA),
+  // но SHA недоступен из target ref — отказ настоящей проверкой Git.
+  const ref = ctx.policy.repositories[0]!.targetRef;
+  ctx.repo.git('update-ref', ref, done.baseSha!);
+  await assert.rejects(
+    h.run({ graph: withPrereq(done.integrationSha!, 'g-unreachable'), author: 'claude' }),
+    refused('NOT_READY'),
+  );
+  ctx.repo.git('update-ref', ref, done.integrationSha!);
+  // Несовпадение SHA с подтверждением — тоже отказ.
   await assert.rejects(
     h.run({ graph: withPrereq(done.candidateSha!, 'g-wrong'), author: 'claude' }),
     refused('NOT_READY'),

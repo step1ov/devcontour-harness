@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import {
+  HarnessError,
   contextDigest,
   implementationResultSchema,
   reviewIssues,
@@ -20,7 +21,7 @@ import {
 } from '../contracts/index.ts';
 import { git } from '../environment/process.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
-import { redactDeep } from '../environment/redaction.ts';
+import { redactDeep, type Redactor } from '../environment/redaction.ts';
 import { implementationOutputSchema, reviewOutputSchema } from '../agents/schemas.ts';
 import { unobservedReview } from '../agents/inspect.ts';
 import { runGate } from '../verification/gates.ts';
@@ -198,6 +199,14 @@ export class Runner {
   async tick() {
     if (!this.engine.lead(this.owner)) {
       for (const job of this.jobs.values()) job.controller.abort();
+      // Без своих попыток вести нечего: занятость роли — явный отказ, а не пустой шаг.
+      if (!this.jobs.size) {
+        const lease = this.engine.read((v) => v.controller());
+        throw new HarnessError(
+          'CONTROLLER_BUSY',
+          `Очередь ведёт другой controller${lease ? ` (${lease.owner} до ${new Date(lease.leaseUntil).toISOString()})` : ''}`,
+        );
+      }
       return;
     }
     this.keepLead();
@@ -323,7 +332,7 @@ export class Runner {
       phase: string;
     },
     signal: AbortSignal,
-  ): Promise<RuntimeResponse> {
+  ): Promise<RuntimeResponse & { redact: Redactor }> {
     const review = input.task !== 'implement';
     const role = this.policy.roles[(await this.workOf(input.attempt)).order.role]!;
     const binding = review
@@ -388,7 +397,8 @@ export class Runner {
         message,
       );
     }
-    return response;
+    // Маска — полным окружением вызова, включая секреты его профиля.
+    return { ...response, redact: execution.redact };
   }
 
   private workOf(attempt: AttemptState) {
@@ -713,7 +723,6 @@ export class Runner {
         'Diff превышает лимит независимого ревью; разделите поручение',
       );
     const status = await git(cwd, 'status', '--porcelain', '--untracked-files=all');
-    const execution = this.environment(attempt, phase, cwd);
     const repo = this.repo(attempt.repositoryId);
     const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
     const response = await this.call(
@@ -735,7 +744,7 @@ export class Runner {
       },
       signal,
     );
-    const redact = execution.redact;
+    const redact = response.redact;
     const parsed = reviewResultSchema.safeParse(response.output);
     const clean =
       (await git(cwd, 'status', '--porcelain', '--untracked-files=all')) === status &&
@@ -860,6 +869,9 @@ export class Runner {
     // после update-ref, recovery сверит сохранённые evidence до приёмки.
     try {
       this.engine.finish(attempt.id, attempt.token, sha, () => {
+        // Источник требований мог измениться, пока шли проверки и ревью:
+        // актуальность — непосредственно перед продвижением target.
+        if (work.order.requirements.length) assertRequirements(work.order, repoPath);
         execFileSync('git', ['update-ref', repo.targetRef, sha, base], {
           cwd: repoPath,
           stdio: 'pipe',
