@@ -126,6 +126,33 @@ export const eventPayloads = {
     ]),
     reason: text.optional(),
   }),
+  /** Совместная проверка комбинации репозиториев началась (без manifest). */
+  'joint.started': z.strictObject({
+    verificationId: z.string().min(1).max(200),
+    workIds: z.array(idSchema).max(500),
+    policyDigest: digestSchema,
+  }),
+  /** Совместная проверка закончилась: `passed` — только с manifest. */
+  'joint.finished': z.strictObject({
+    verificationId: z.string().min(1).max(200),
+    status: z.enum(['passed', 'failed']),
+    manifestDigest: digestSchema.optional(),
+    error: text.optional(),
+  }),
+  /** Политика стала применённой: запуском процесса или операцией reconfigure. */
+  'policy.applied': z.strictObject({
+    digest: digestSchema,
+    generation: z.number().int().min(0),
+    by: z.string().min(1).max(300),
+    operation: z.string().min(1).max(200).optional(),
+  }),
+  /** Запрос операции применить политику с ожидаемым digest или его отказ. */
+  'policy.reconfigure': z.strictObject({
+    operation: z.string().min(1).max(200),
+    digest: digestSchema,
+    status: z.enum(['requested', 'failed', 'cleared']),
+    error: text.optional(),
+  }),
   'delivery.pending': z.strictObject(delivery),
   'delivery.delivered': z.strictObject({ ...delivery, receipt: z.string().max(1000).optional() }),
   'delivery.failed': z.strictObject({ ...delivery, error: text }),
@@ -217,6 +244,16 @@ export const transactionKinds = [
   'graph.reviewed',
   'graph.approved',
   'delivery.recorded',
+  'workspace.verification.started',
+  'workspace.manifest',
+  'workspace.evidence',
+  'workspace.verified',
+  'workspace.failed',
+  /**
+   * Сдвиг ref базы операцией внутри транзакции проверки её владения: только
+   * проверка и синхронный `git update-ref`, записей и событий нет.
+   */
+  'base.moved',
   /** Только локальные записи технической очереди (`workflow-jobs`); событий журнала нет. */
   'workflow.updated',
   /**

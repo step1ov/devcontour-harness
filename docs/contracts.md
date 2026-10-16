@@ -89,21 +89,29 @@ SHA-256 канонического JSON (`canonicalJson`: ключи по пор
 
 ### ExecutionPolicy
 
-| Поле                                                        | Смысл                                                                                                                                                                                                                                                        |
-| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `policyVersion`, `mode`                                     | `1`; `live` или `fixture` (runtime `fixture` только в нём)                                                                                                                                                                                                   |
-| `repositories[]`                                            | ID, путь, `targetRef` по правилам `git check-ref-format`, `dependsOn`, gates (`test` с обязательным JUnit внутри worktree, `check`), группы gates (≤100), защищённые и генерируемые пути, среда, lifecycle, шаги подготовки, сборки зависимостей и preflight |
-| `workspaceGates[]`, `verificationMode`                      | Gates совместной проверки комбинации репозиториев; `all` или `affected`                                                                                                                                                                                      |
-| `roles{}`                                                   | `writer`, `writePaths`, своё правило `review` кода, `requiresContract`                                                                                                                                                                                       |
-| `review.code / plan / contract`                             | `{reviewer, vendor}`; reviewer задан явно                                                                                                                                                                                                                    |
-| `approvalMode`                                              | `agent` или `operator` для технического согласования                                                                                                                                                                                                         |
-| `isolation`                                                 | `{mode: 'os' \| 'none', domains[]}`, по умолчанию `os`                                                                                                                                                                                                       |
-| `toolProfiles{}`, `environment`, `lifecycle`, `resources[]` | Инструменты, среда, ресурсы (порты 1024–65535)                                                                                                                                                                                                               |
-| `concurrency`, `leaseMs`, `runTimeoutMs`, `reviewProbes`    | Пределы исполнения                                                                                                                                                                                                                                           |
-| `maxAttempts`, `repairBudget`, `reuseImplementation`        | Повторы и повторное использование кандидата                                                                                                                                                                                                                  |
-| `budgets{work, group, total, onUnknown}`, `prices[]`        | Пределы USD и/или времени; тарифы                                                                                                                                                                                                                            |
+| Поле                                                         | Смысл                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `policyVersion`, `mode`                                      | `1`; `live` или `fixture` (runtime `fixture` только в нём)                                                                                                                                                                                                   |
+| `repositories[]`                                             | ID, путь, `targetRef` по правилам `git check-ref-format`, `dependsOn`, gates (`test` с обязательным JUnit внутри worktree, `check`), группы gates (≤100), защищённые и генерируемые пути, среда, lifecycle, шаги подготовки, сборки зависимостей и preflight |
+| `workspaceGates[]`, `verificationMode`, `workspaceLifecycle` | Gates совместной проверки комбинации репозиториев; `all` или `affected`; окружение совместной проверки                                                                                                                                                       |
+| `roles{}`                                                    | `writer`, `writePaths`, своё правило `review` кода, `requiresContract`                                                                                                                                                                                       |
+| `review.code / plan / contract`                              | `{reviewer, vendor}`; reviewer задан явно                                                                                                                                                                                                                    |
+| `approvalMode`                                               | `agent` или `operator` для технического согласования                                                                                                                                                                                                         |
+| `isolation`                                                  | `{mode: 'os' \| 'none', domains[]}`, по умолчанию `os`                                                                                                                                                                                                       |
+| `toolProfiles{}`, `environment`, `lifecycle`, `resources[]`  | Инструменты, среда, ресурсы (порты 1024–65535)                                                                                                                                                                                                               |
+| `concurrency`, `leaseMs`, `runTimeoutMs`, `reviewProbes`     | Пределы исполнения                                                                                                                                                                                                                                           |
+| `maxAttempts`, `repairBudget`, `reuseImplementation`         | Повторы и повторное использование кандидата                                                                                                                                                                                                                  |
+| `budgets{work, group, total, onUnknown}`, `prices[]`         | Пределы USD и/или времени; тарифы                                                                                                                                                                                                                            |
 
 Переменные `HARNESS_*` и `DEVCONTOUR_*` политика задать не может.
+
+`policyDigest(policy)` — digest загруженной политики целиком: им сверяются
+применённая политика (`control.appliedPolicy`) и запрос операции
+`control.reconfigure`. `executionDigest(policy)` — digest исполнительной
+части без `budgets` и `prices`: основание согласования графа
+(`GraphState.policyDigest`) и fencing попыток (`AttemptState.policyDigest`
+у standalone-хоста). Поднятый предел бюджета поэтому согласования не
+сбрасывает.
 
 Автор (`--author`): `codex`, `claude`, `fixture` или `external` — человек или
 инструмент вне harness; вендор `external` не совпадает ни с одним runtime.
@@ -197,7 +205,9 @@ delivery[]}`.
 `{id, status, policyDigest, specDigest, workIds[], manifest{repo: {sha, tree}},
 manifestDigest, impact?, evidence[], error?}`. Смена любого SHA делает
 результат устаревшим; атомарность продвижения нескольких репозиториев не
-заявляется. Продуктовое принятие комбинации решает хост.
+заявляется. Продуктовое принятие комбинации решает хост. Пока manifest не
+закреплён, `impact` может нести только ссылку на базовую проверку
+(`baseline`), выбранную хостом для режима `affected`.
 
 ### RunEvent
 
@@ -219,6 +229,12 @@ manifestDigest, impact?, evidence[], error?}`. Смена любого SHA де�
 `checks.adoption-abandoned` меняют принятую поручением версию корпуса и
 удержание выдачи (`work.held`, `corpus.adopted`). Эпизод по свойству меняется
 транзакциями `recovery.*`, отказом и выдачей (`work.recovery`).
+`workspace.verification.started`, `workspace.manifest`, `workspace.evidence`,
+`workspace.verified`, `workspace.failed` — транзакции совместной проверки
+(`joint.started`, `joint.finished`). `config.started`, `config.reconfigure-*`
+и `config.reconfigured` меняют применённую политику и запрос операции
+(`policy.applied`, `policy.reconfigure`). `base.moved` — проверка владения
+операцией и CAS-сдвиг ref базы; записей и событий не создаёт.
 
 ## Порты
 

@@ -5,6 +5,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  executionDigest,
   HarnessError,
   WORKSPACE_OWNER,
   executionPolicySchema,
@@ -93,11 +94,17 @@ function contour(budgets: Budgets, patch: (p: Record<string, unknown>) => void =
     engine,
     store,
     move: (workId: string, groupId: string) => moved.set(workId, groupId),
-    /** Тот же файл состояния под новой политикой (перезапуск процесса); граф согласуется заново; `null` — без бюджетов. */
+    /**
+     * Тот же файл состояния под новой политикой (перезапуск процесса тем же
+     * controller): его политика становится применённой. Пределы бюджетов в
+     * основание согласования не входят — граф остаётся согласованным.
+     * `null` — без бюджетов.
+     */
     reopen: (next: Budgets | null = budgets) => {
       const e = make(next ?? undefined);
-      for (const g of e.read((v) => v.graphs())) if (g.approval) e.approve(g.id, 'agent');
       e.lead('c1');
+      for (const g of e.read((v) => v.graphs()))
+        assert.equal(g.policyDigest, executionDigest(e.policy), 'согласование не устарело');
       return e;
     },
     close: () => store.close(),

@@ -20,6 +20,7 @@ import {
 import { HARNESS_VERSION } from './package.ts';
 import { validateInputs } from './validate.ts';
 import { Harness } from './control/harness.ts';
+import { policySourceOf, type PolicySource } from './control/provenance.ts';
 import { doctor } from './control/doctor.ts';
 import { cliAdapter } from './agents/cli-adapter.ts';
 import { FileContextSource, FileResultSink, FileWorkSource } from './connectors/files.ts';
@@ -41,7 +42,8 @@ Runtime: codex и claude из PATH; HARNESS_CODEX_BIN / HARNESS_CLAUDE_BIN по�
 (например, fixture executable в тестах — это не живая модель).
 `;
 
-const readJson = (path: string, what: string): unknown => {
+const readJson = (path: string, what: string): unknown => readJsonFile(path, what).value;
+const readJsonFile = (path: string, what: string): { text: string; value: unknown } => {
   let text: string;
   try {
     text = readFileSync(path, 'utf8');
@@ -52,7 +54,7 @@ const readJson = (path: string, what: string): unknown => {
     );
   }
   try {
-    return JSON.parse(text);
+    return { text, value: JSON.parse(text) as unknown };
   } catch (error) {
     throw new HarnessError(
       'INVALID_INPUT',
@@ -85,13 +87,17 @@ const parseWith = <T>(schema: Parser<T>, value: unknown, what: string): T => {
 interface Binding {
   policy: ExecutionPolicy;
   baseDir: string;
+  /** Файл, из которого загружена политика: право записать её применённой. */
+  source?: PolicySource;
 }
 const bindingFile = (state: string) => join(state, 'binding.json');
 
 function loadPolicy(path: string): Binding {
+  const file = readJsonFile(path, 'policy');
   return {
-    policy: parseWith(executionPolicySchema, readJson(path, 'policy'), 'policy'),
+    policy: parseWith(executionPolicySchema, file.value, 'policy'),
     baseDir: dirname(resolve(path)),
+    source: policySourceOf(path, file.text),
   };
 }
 function binding(state: string, policyPath?: string, write = false): Binding {
@@ -99,7 +105,10 @@ function binding(state: string, policyPath?: string, write = false): Binding {
     const b = loadPolicy(policyPath);
     if (write) {
       mkdirSync(state, { recursive: true });
-      writeFileSync(bindingFile(state), JSON.stringify(b, null, 2));
+      writeFileSync(
+        bindingFile(state),
+        JSON.stringify({ policy: b.policy, baseDir: b.baseDir }, null, 2),
+      );
     }
     return b;
   }
@@ -108,8 +117,13 @@ function binding(state: string, policyPath?: string, write = false): Binding {
       'NOT_FOUND',
       'Каталог состояния не найден или не инициализирован: ' + state,
     );
-  const raw = readJson(bindingFile(state), 'binding') as { policy: unknown; baseDir: string };
-  return { policy: parseWith(executionPolicySchema, raw.policy, 'policy'), baseDir: raw.baseDir };
+  const file = readJsonFile(bindingFile(state), 'binding');
+  const raw = file.value as { policy: unknown; baseDir: string };
+  return {
+    policy: parseWith(executionPolicySchema, raw.policy, 'policy'),
+    baseDir: raw.baseDir,
+    source: policySourceOf(bindingFile(state), file.text),
+  };
 }
 
 function adapters(policy: ExecutionPolicy) {
@@ -133,6 +147,7 @@ const open = (state: string, b: Binding, readOnly: boolean) =>
     baseDir: b.baseDir,
     adapters: adapters(b.policy),
     readOnly,
+    ...(b.source ? { policySource: b.source } : {}),
   });
 
 /**

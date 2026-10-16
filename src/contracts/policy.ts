@@ -182,6 +182,8 @@ export const executionPolicySchema = z.strictObject({
   mode: z.enum(['live', 'fixture']).default('live'),
   /** Gates совместной проверки закреплённой комбинации репозиториев. */
   workspaceGates: z.array(workspaceGateSchema).default([]),
+  /** Окружение совместной проверки: setup/ready/teardown вокруг её gates. */
+  workspaceLifecycle: lifecycleSchema.optional(),
   /** `affected` — только изменённые компоненты и их транзитивные потребители. */
   verificationMode: z.enum(['all', 'affected']).default('all'),
   /** Режим технического согласования плана/контракта: агент-ревьюер или оператор. */
@@ -234,6 +236,17 @@ export type ExecutionPolicy = z.infer<typeof executionPolicySchema>;
 export type ExecutionPolicyInput = z.input<typeof executionPolicySchema>;
 
 export const policyDigest = (policy: ExecutionPolicy) => digestOf(policy);
+
+/**
+ * Digest исполнительной части политики — основание согласования графа и
+ * fencing попыток. Пределы бюджетов и тарифы в него не входят: это учёт, а не
+ * условия исполнения, и поднятый предел действует сразу, без нового
+ * согласования (как в DevContour). `policyDigest` — digest загруженной
+ * политики целиком: им сверяются применение политики (`appliedPolicy`) и
+ * запрос операции reconfigure.
+ */
+export const executionDigest = (policy: ExecutionPolicy) =>
+  digestOf({ ...policy, budgets: undefined, prices: undefined });
 
 export type ReviewKind = 'code' | 'plan' | 'contract';
 

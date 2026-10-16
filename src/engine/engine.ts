@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import {
+  executionDigest,
   HarnessError,
   WORKSPACE_OWNER,
   digestOf,
   expandGateRefs,
+  policyDigest,
   graphIssues,
   selectReviewer,
   workGraphDigest,
@@ -18,6 +20,8 @@ import {
   type ExecutionView,
   type FailureKind,
   type GraphState,
+  type JointVerification,
+  type JointVerificationState,
   type NotPromise,
   type Prerequisite,
   type PropertyRecovery,
@@ -55,6 +59,13 @@ import {
   closeIfBasisChanged,
 } from './property-recovery.ts';
 import { REQUIREMENT_GATE } from '../verification/requirements.ts';
+import {
+  jointImpact,
+  jointPolicyDigest,
+  jointSpecDigest,
+  publicJoint,
+  sameWorks,
+} from '../verification/joint.ts';
 
 /** Префикс причины неудавшегося продления: первая причина не затирается следствиями. */
 export const HEARTBEAT_FAILED = 'Продление владения не удалось';
@@ -66,6 +77,12 @@ export interface EngineOptions {
   version?: string;
   now?: () => number;
   id?: () => string;
+  /**
+   * Источник политики не менялся с её загрузки: `undefined` — да, иначе
+   * причина. Без источника (политика передана объектом) право записать свою
+   * политику как применённую ограничено остальными условиями.
+   */
+  provenance?: () => string | undefined;
 }
 
 export type Phase = 'running' | 'verifying' | 'reviewing' | 'integrating';
@@ -88,6 +105,13 @@ export class Engine {
   readonly version: string;
   private readonly now: () => number;
   private readonly id: () => string;
+  /** Digest политики процесса на момент создания движка. */
+  readonly loadedPolicy: string;
+  /** Поколение применённой политики, которое процесс застал при запуске. */
+  private readonly observedGeneration: number;
+  private readonly provenance: () => string | undefined;
+  /** Владелец роли controller, под которым этот процесс её получил. */
+  private ownLeader?: string;
 
   constructor(options: EngineOptions) {
     this.host = options.host;
@@ -95,6 +119,11 @@ export class Engine {
     this.version = options.version ?? HARNESS_VERSION;
     this.now = options.now ?? Date.now;
     this.id = options.id ?? randomUUID;
+    this.provenance = options.provenance ?? (() => undefined);
+    this.loadedPolicy = policyDigest(this.policy);
+    this.observedGeneration = this.host.store.read(
+      (v) => v.control().appliedPolicy?.generation ?? 0,
+    );
   }
 
   /** Часы движка: по ним считаются сроки владения. */
@@ -184,7 +213,7 @@ export class Engine {
         id: graph.id,
         digest,
         graph,
-        policyDigest: digestOf(this.policy),
+        policyDigest: executionDigest(this.policy),
         registeredAt: at,
       };
       tx.putGraph(state);
@@ -324,6 +353,7 @@ export class Engine {
    */
   approve(graphId: string, actor: TechnicalApproval['actor']) {
     return this.tx('graph.approved', (tx) => {
+      this.assertCurrentPolicy(tx);
       const graph = tx.graph(graphId);
       if (!graph) throw new HarnessError('NOT_FOUND', 'Граф не найден: ' + graphId);
       if (actor !== this.policy.approvalMode)
@@ -360,7 +390,7 @@ export class Engine {
           'INVALID_INPUT',
           'Договор проверки поручений не согласован: ' + problems.join('; '),
         );
-      const policy = digestOf(this.policy);
+      const policy = executionDigest(this.policy);
       if (graph.approval?.digest === graph.digest && graph.policyDigest === policy)
         return { graph, changed: false };
       const at = iso(this.now());
@@ -411,10 +441,13 @@ export class Engine {
       tx.setController({ owner, leaseUntil: this.now() + this.policy.leaseMs });
       return true;
     });
-    if (result && acquired)
+    if (result) this.ownLeader = owner;
+    if (result && acquired) {
       this.tx('scheduler.started', (tx) =>
         tx.emit({ type: 'controller.acquired', payload: { owner } }),
       );
+      this.recordPolicy(owner);
+    }
     return result;
   }
 
@@ -661,10 +694,20 @@ export class Engine {
         code: 'PAUSED',
         message: 'Очередь на паузе: ' + (view.control().pauseReason ?? 'operator'),
       });
+    const reconfigure = this.reconfiguring(view);
+    if (reconfigure)
+      out.push({
+        code: 'PAUSED',
+        message: `Операция ${reconfigure.operation} применяет политику`,
+      });
+    const stale = this.staleReason(view);
+    if (stale) out.push({ code: 'APPROVAL_STALE', message: stale });
+    if (this.liveJoint(view))
+      out.push({ code: 'NOT_READY', message: 'Идёт совместная проверка репозиториев' });
     if (work.status === 'draft')
       out.push({ code: 'APPROVAL_REQUIRED', message: 'Граф не согласован' });
     const graph = view.graph(work.graphId);
-    if (graph?.approval && graph.policyDigest !== digestOf(this.policy))
+    if (graph?.approval && graph.policyDigest !== executionDigest(this.policy))
       out.push({
         code: 'APPROVAL_STALE',
         message: 'Политика изменилась после согласования; согласуйте заново',
@@ -719,6 +762,15 @@ export class Engine {
           'Выдавать попытки может только действующий controller',
         );
       if (tx.control().paused || this.host.guards.claimBarrier(tx)) return undefined;
+      // Пока операция применяет политику, попытки не выдаются, даже если
+      // человек снял паузу: попытка под прежней политикой не нужна.
+      if (this.reconfiguring(tx)) return undefined;
+      // Процесс с не применённой политикой не выдаёт: условия попытки
+      // разошлись бы с применёнными.
+      if (this.policyStale(tx)) return undefined;
+      // Идущая совместная проверка закрепила комбинацию SHA: новые попытки
+      // сдвинули бы target ref под ней.
+      if (this.liveJoint(tx)) return undefined;
       const active = tx.attempts().filter((a) => a.status === 'active');
       if (active.length >= this.policy.concurrency) return undefined;
       this.budgetBlocks(tx);
@@ -738,7 +790,7 @@ export class Engine {
         const graph = tx.graph(w.graphId);
         // Согласование привязано к graph digest и к политике, под которой оно дано.
         if (!graph?.approval || graph.approval.digest !== graph.digest) return false;
-        if (graph.policyDigest !== digestOf(this.policy)) return false;
+        if (graph.policyDigest !== executionDigest(this.policy)) return false;
         const external = new Set(graph.graph.prerequisites.map((p) => p.id));
         if (!w.order.dependsOn.every((d) => external.has(d) || tx.work(d)?.status === 'done'))
           return false;
@@ -1151,6 +1203,9 @@ export class Engine {
    */
   finish(id: string, token: string, sha: string, publish?: () => void) {
     return this.withAttempt(id, token, 'task.done', (a, w, tx) => {
+      // Процесс с не применённой политикой не принимает: сравнение двух его
+      // же старых digest актуальности не доказывает.
+      this.assertCurrentPolicy(tx);
       if (a.phase !== 'integrating' || !a.candidateSha || a.integrationSha !== sha)
         throw new HarnessError('NOT_READY', 'Нет интеграционного коммита');
       // Принять можно только под той версией проверок, под которой шла
@@ -1529,6 +1584,629 @@ export class Engine {
       r.status = 'awaiting-user';
       r.reason = reason.slice(0, 1000);
       return 'interrupted';
+    });
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Применённая политика и операция reconfigure                       */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Применённая политика в хранилище — единственный источник правды; у
+   * процесса нет своего «поколения», которое мог бы рассинхронизировать
+   * откат транзакции. Процесс текущий, только если его политика совпадает с
+   * применённой. Записать свою вместо применённой (перезапуск с другой
+   * политикой) он может, только если нет живого чужого controller, политика
+   * не менялась в памяти после создания движка, её источник не менялся с
+   * загрузки и после запуска процесса никто не применил другую: поколение
+   * считается по записям, а не по часам.
+   */
+  private mayAdopt(view: ExecutionView): string | undefined {
+    const lease = view.controller();
+    if (lease && lease.leaseUntil > this.now() && lease.owner !== this.ownLeader)
+      return `работает controller ${lease.owner} с другой политикой`;
+    if (policyDigest(this.policy) !== this.loadedPolicy)
+      return 'политика изменена в памяти после загрузки';
+    const applied = view.control().appliedPolicy;
+    if (applied && (applied.generation ?? 0) !== this.observedGeneration)
+      return `после запуска процесса применена политика поколения ${applied.generation ?? 0}`;
+    return this.provenance();
+  }
+
+  private adoptPolicy(tx: ExecutionTransaction, by: string, operation?: string) {
+    const control = tx.control();
+    const generation = (control.appliedPolicy?.generation ?? 0) + 1;
+    tx.setControl({
+      ...control,
+      appliedPolicy: { digest: this.loadedPolicy, generation, at: iso(this.now()), by },
+    });
+    tx.emit({
+      type: 'policy.applied',
+      payload: {
+        digest: this.loadedPolicy,
+        generation,
+        by,
+        ...(operation ? { operation } : {}),
+      },
+    });
+  }
+
+  /** Почему процесс не вправе действовать под своей политикой; `undefined` — вправе. */
+  private staleReason(view: ExecutionView): string | undefined {
+    const applied = view.control().appliedPolicy;
+    if (!applied || applied.digest === this.loadedPolicy) return undefined;
+    const refusal = this.mayAdopt(view);
+    return refusal
+      ? `Процесс работает не с применённой политикой (${refusal}); перезапустите его`
+      : undefined;
+  }
+  private policyStale(tx: ExecutionTransaction) {
+    try {
+      this.assertCurrentPolicy(tx);
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Общий барьер: в транзакциях выдачи, согласования, приёмки и совместной
+   * проверки процесс сверяет свою политику с применённой. Первый процесс,
+   * действующий после законной смены политики без живого controller,
+   * записывает свою как применённую в той же транзакции — откат отменит и её.
+   */
+  assertCurrentPolicy(tx: ExecutionTransaction) {
+    const applied = tx.control().appliedPolicy;
+    if (!applied || applied.digest === this.loadedPolicy) return;
+    const stale = this.staleReason(tx);
+    if (stale) throw new HarnessError('APPROVAL_STALE', stale);
+    this.adoptPolicy(tx, 'process');
+  }
+
+  /**
+   * Запуск controller записывает его политику применённой, если её ещё нет
+   * или процесс вправе её сменить. Неприменённый запрос операции остаётся.
+   */
+  private recordPolicy(owner: string) {
+    this.tx('config.started', (tx) => {
+      const lease = tx.controller();
+      if (lease?.owner !== owner || lease.leaseUntil <= this.now()) return;
+      const applied = tx.control().appliedPolicy;
+      if (applied?.digest === this.loadedPolicy) return;
+      if (applied && this.mayAdopt(tx)) return;
+      this.adoptPolicy(tx, owner);
+    });
+  }
+
+  private reconfiguring(view: ExecutionView) {
+    const request = view.control().reconfigure;
+    return request && !request.appliedAt ? request : undefined;
+  }
+
+  /** Сведения о политике процесса и применённой. */
+  policyState() {
+    return this.read((v) => ({
+      loaded: this.loadedPolicy,
+      ...(v.control().appliedPolicy ? { applied: v.control().appliedPolicy } : {}),
+      ...(v.control().reconfigure ? { reconfigure: v.control().reconfigure } : {}),
+      ...(this.staleReason(v) ? { stale: this.staleReason(v) } : {}),
+    }));
+  }
+
+  /**
+   * Пауза операции: ставится, только если очередь не остановлена, и
+   * помечается операцией. Пауза человека не перезаписывается.
+   */
+  operationPause(operation: string) {
+    return this.tx('scheduler.paused', (tx) => {
+      const control = tx.control();
+      if (control.paused) return false;
+      tx.setControl({
+        ...control,
+        paused: true,
+        pauseReason: 'reconfigure',
+        pauseOperation: operation,
+        pausedAt: iso(this.now()),
+      });
+      tx.emit({ type: 'control.paused', payload: { reason: 'reconfigure' } });
+      return true;
+    });
+  }
+
+  /** Снять паузу операции — только свою; паузу человека она не трогает. */
+  operationResume(operation: string) {
+    return this.tx('scheduler.started', (tx) => {
+      const control = tx.control();
+      if (
+        !control.paused ||
+        control.pauseReason !== 'reconfigure' ||
+        control.pauseOperation !== operation
+      )
+        return false;
+      tx.setControl({
+        ...control,
+        paused: false,
+        pauseReason: undefined,
+        pauseOperation: undefined,
+        pausedAt: undefined,
+      });
+      tx.emit({ type: 'control.resumed', payload: { reason: 'reconfigure' } });
+      return true;
+    });
+  }
+
+  /**
+   * Запросить применение политики с ожидаемым digest (`policyDigest`
+   * загруженной политики). Идемпотентно; повтор той же операцией сбрасывает
+   * прежний отказ — политику могли исправить. Пока запрос не применён, новые
+   * попытки не выдаются.
+   */
+  requestReconfigure(operation: string, digest: string) {
+    return this.tx('config.reconfigure-requested', (tx) => {
+      const control = tx.control();
+      const current = control.reconfigure;
+      if (current && current.operation === operation && current.digest === digest) {
+        if (!current.error) return { operation, digest, changed: false };
+        tx.setControl({ ...control, reconfigure: { ...current, error: undefined } });
+        tx.emit({
+          type: 'policy.reconfigure',
+          payload: { operation, digest, status: 'requested' },
+        });
+        return { operation, digest, changed: true, retried: true };
+      }
+      if (current && current.operation !== operation && !current.appliedAt)
+        throw new HarnessError(
+          'NOT_READY',
+          `Политику уже применяет операция ${current.operation}; дождитесь её`,
+        );
+      tx.setControl({
+        ...control,
+        reconfigure: { operation, digest, requestedAt: iso(this.now()) },
+      });
+      tx.emit({ type: 'policy.reconfigure', payload: { operation, digest, status: 'requested' } });
+      return { operation, digest, changed: true };
+    });
+  }
+
+  /**
+   * Работы, идущие под действующей политикой. Запись с истёкшим сроком не
+   * держит применение: её результат и так не будет принят (владение
+   * проверяется при каждой записи), а держать применение из-за неё значило
+   * бы ждать вечно.
+   */
+  busyWork(view: ExecutionView) {
+    const now = this.now();
+    return [
+      ...view
+        .attempts()
+        .filter((a) => a.status === 'active' && a.leaseUntil > now)
+        .map((a) => a.id),
+      ...view
+        .verifications()
+        .filter((v) => v.status === 'active' && v.leaseUntil > now)
+        .map((v) => v.id),
+      ...view
+        .locals('workflow-jobs')
+        .filter((j) => j.value.status === 'running' && (j.value.leaseUntil ?? 0) > now)
+        .map((j) => j.key),
+      ...view.locals('check-suites').flatMap(({ value }) =>
+        Object.values(value.operations)
+          .filter((op) => op.status === 'running' && (op.leaseUntil ?? 0) > now)
+          .map((op) => `${value.id}:${op.key}`),
+      ),
+    ];
+  }
+
+  /**
+   * Применить запрос этим процессом: только если его политика — ровно
+   * ожидаемая и работ под прежней не осталось. Политика другого digest —
+   * отказ с обоими digest (повтор операции его сбросит). Применение и снятие
+   * паузы операции — одна транзакция.
+   */
+  applyReconfigure(
+    by: string,
+  ):
+    | { status: 'none' }
+    | { status: 'busy'; busy: string[] }
+    | { status: 'waiting'; expected: string }
+    | { status: 'failed'; error: string }
+    | { status: 'applied'; generation: number } {
+    return this.tx('config.reconfigured', (tx) => {
+      const control = tx.control();
+      const request = control.reconfigure;
+      if (!request || request.appliedAt || request.error) return { status: 'none' as const };
+      const busy = this.busyWork(tx);
+      if (busy.length) return { status: 'busy' as const, busy };
+      if (request.digest !== this.loadedPolicy) {
+        const error = `Политика не совпадает с ожидаемой операцией: ожидался digest ${request.digest.slice(0, 16)}, загружен ${this.loadedPolicy.slice(0, 16)}`;
+        tx.setControl({ ...control, reconfigure: { ...request, error } });
+        tx.emit({
+          type: 'policy.reconfigure',
+          payload: {
+            operation: request.operation,
+            digest: request.digest,
+            status: 'failed',
+            error,
+          },
+        });
+        return { status: 'failed' as const, error };
+      }
+      const generation = (control.appliedPolicy?.generation ?? 0) + 1;
+      const at = iso(this.now());
+      const resume =
+        control.paused &&
+        control.pauseReason === 'reconfigure' &&
+        control.pauseOperation === request.operation;
+      tx.setControl({
+        ...control,
+        reconfigure: { ...request, appliedAt: at, appliedBy: by, error: undefined },
+        appliedPolicy: { digest: request.digest, generation, at, by },
+        ...(resume
+          ? {
+              paused: false,
+              pauseReason: undefined,
+              pauseOperation: undefined,
+              pausedAt: undefined,
+            }
+          : {}),
+      });
+      tx.emit({
+        type: 'policy.applied',
+        payload: { digest: request.digest, generation, by, operation: request.operation },
+      });
+      if (resume) tx.emit({ type: 'control.resumed', payload: { reason: 'reconfigure' } });
+      return { status: 'applied' as const, generation };
+    });
+  }
+
+  /**
+   * Процесс, работающий с прежней политикой, применить запрос не может: он
+   * ждёт перезапуска с ожидаемой. Такой процесс применение не отклоняет.
+   */
+  serveReconfigure(by: string) {
+    const request = this.read((v) => this.reconfiguring(v));
+    if (!request || request.error || request.digest !== this.loadedPolicy)
+      return { status: 'none' as const };
+    return this.applyReconfigure(by);
+  }
+
+  /** Снять завершённый или отменённый запрос операции. */
+  clearReconfigure(operation: string) {
+    return this.tx('config.reconfigure-cleared', (tx) => {
+      const control = tx.control();
+      if (control.reconfigure?.operation !== operation) return false;
+      tx.setControl({ ...control, reconfigure: undefined });
+      tx.emit({
+        type: 'policy.reconfigure',
+        payload: { operation, digest: control.reconfigure.digest, status: 'cleared' },
+      });
+      return true;
+    });
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Удержания операций                                                */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Удержать поручения от выдачи на время операции. Поручение, удерживаемое
+   * другой операцией, — конфликт: две операции не меняют одно поручение
+   * одновременно. Повтор той же операции ничего не меняет. `fence` —
+   * проверка владения операцией в той же транзакции: утративший владение
+   * ничего не пишет.
+   */
+  hold(ids: string[], operation: string, reason: string, fence?: (view: ExecutionView) => void) {
+    return this.tx('task.held', (tx) => {
+      fence?.(tx);
+      const works = ids.map((id) => {
+        const w = tx.work(id);
+        if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + id);
+        return w;
+      });
+      const busy = works.filter((w) => w.hold && w.hold.operation !== operation);
+      if (busy.length)
+        throw new HarnessError(
+          'NOT_READY',
+          'Поручения удерживает другая операция: ' +
+            busy.map((w) => `${w.id} (${w.hold!.operation})`).join(', '),
+        );
+      for (const w of works) {
+        if (w.hold?.operation === operation && w.hold.reason === reason) continue;
+        tx.putWork({ ...w, hold: { operation, reason } });
+        tx.emit({
+          type: 'work.held',
+          graphId: w.graphId,
+          workId: w.id,
+          payload: { operation, reason, released: false },
+        });
+      }
+      return works.map((w) => w.id);
+    });
+  }
+
+  /** Снять удержание операции — со всех или с перечисленных поручений; чужие не трогаются. */
+  releaseHold(operation: string, ids?: string[], fence?: (view: ExecutionView) => void) {
+    return this.tx('task.released', (tx) => {
+      fence?.(tx);
+      const released = tx
+        .works()
+        .filter((w) => w.hold?.operation === operation && (!ids || ids.includes(w.id)));
+      for (const w of released) {
+        tx.putWork({ ...w, hold: undefined });
+        tx.emit({
+          type: 'work.held',
+          graphId: w.graphId,
+          workId: w.id,
+          payload: { operation, reason: w.hold!.reason, released: true },
+        });
+      }
+      return released.map((w) => w.id);
+    });
+  }
+
+  /** Передать удержание от одной операции другой без окна выдачи. */
+  transferHold(from: string, to: string, reason: string, fence?: (view: ExecutionView) => void) {
+    return this.tx('task.hold-transferred', (tx) => {
+      fence?.(tx);
+      const moved = tx.works().filter((w) => w.hold?.operation === from);
+      for (const w of moved) {
+        tx.putWork({ ...w, hold: { operation: to, reason } });
+        tx.emit({
+          type: 'work.held',
+          graphId: w.graphId,
+          workId: w.id,
+          payload: { operation: to, reason, released: false },
+        });
+      }
+      return moved.map((w) => w.id);
+    });
+  }
+
+  /** Попытки, ещё владеющие поручениями (живой срок): операция ждёт их окончания. */
+  activeAttempts(workIds?: string[]) {
+    return this.read((v) =>
+      v
+        .attempts()
+        .filter(
+          (a) =>
+            a.status === 'active' &&
+            a.leaseUntil > this.now() &&
+            (!workIds || workIds.includes(a.workId)),
+        )
+        .map((a) => ({ id: a.id, workId: a.workId, leaseUntil: a.leaseUntil })),
+    );
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Совместная проверка комбинации репозиториев                       */
+  /* ---------------------------------------------------------------- */
+
+  private liveJoint(view: ExecutionView) {
+    return view.verifications().some((v) => v.status === 'active' && v.leaseUntil > this.now());
+  }
+
+  /**
+   * Начать совместную проверку набора принятых поручений. Нужны gates уровня
+   * workspace с JUnit, у каждого продуктового репозитория — свой; идущих
+   * попыток и другой живой проверки быть не должно; истёкшая проверка
+   * закрывается отказом. `baseline` — успешная проверка, которую хост принял
+   * (для режима `affected`).
+   */
+  jointStart(input: { workIds: string[]; baseline?: string }): JointVerificationState {
+    const gates = this.policy.workspaceGates;
+    if (!gates.some((g) => g.kind === 'test' && g.report))
+      throw new HarnessError(
+        'INVALID_INPUT',
+        'Настройте обязательные gates совместной проверки (workspaceGates) с JUnit',
+      );
+    for (const repo of this.policy.repositories.filter((r) => r.kind === 'product'))
+      if (!gates.some((g) => g.repositoryId === repo.id && g.kind === 'test' && g.report))
+        throw new HarnessError('INVALID_INPUT', `Нужна совместная проверка продукта ${repo.id}`);
+    if (!input.workIds.length || new Set(input.workIds).size !== input.workIds.length)
+      throw new HarnessError('INVALID_INPUT', 'Нужен непустой набор разных поручений');
+    return this.tx('workspace.verification.started', (tx) => {
+      this.assertCurrentPolicy(tx);
+      const reconfigure = this.reconfiguring(tx);
+      if (reconfigure)
+        throw new HarnessError(
+          'NOT_READY',
+          `Операция ${reconfigure.operation} применяет политику; дождитесь её`,
+        );
+      if (tx.attempts().some((a) => a.status === 'active' && a.leaseUntil > this.now()))
+        throw new HarnessError('NOT_READY', 'Дождитесь текущих попыток перед совместной проверкой');
+      for (const v of tx.verifications()) {
+        if (v.status !== 'active') continue;
+        if (v.leaseUntil > this.now())
+          throw new HarnessError('NOT_READY', 'Совместная проверка уже выполняется');
+        const error = 'Истёк срок владения проверкой';
+        tx.putVerification({ ...v, status: 'failed', error, finishedAt: iso(this.now()) });
+        tx.emit({
+          type: 'joint.finished',
+          payload: { verificationId: v.id, status: 'failed', error },
+        });
+      }
+      const previous = tx.verifications().filter((v) => sameWorks(v.workIds, input.workIds));
+      if (previous.length >= this.policy.maxAttempts)
+        throw new HarnessError(
+          'ATTEMPTS_EXHAUSTED',
+          'Исчерпан предел совместных проверок этого набора',
+        );
+      const works = input.workIds.map((id) => tx.work(id));
+      if (works.some((w) => !w || w.status !== 'done' || !w.resultSha))
+        throw new HarnessError('NOT_READY', 'Сначала завершите все поручения набора');
+      if (input.baseline && tx.verification(input.baseline)?.status !== 'passed')
+        throw new HarnessError('INVALID_INPUT', 'Базовая проверка не найдена или не успешна');
+      const at = this.now();
+      const v: JointVerificationState = {
+        apiVersion: 'devcontour-harness/v1alpha1',
+        id: this.id(),
+        token: this.id() + this.id(),
+        startedAt: iso(at),
+        leaseUntil: at + this.policy.leaseMs,
+        status: 'active',
+        policyDigest: jointPolicyDigest(this.policy),
+        specDigest: jointSpecDigest(tx, input.workIds),
+        workIds: [...input.workIds],
+        ...(input.baseline
+          ? {
+              impact: {
+                changed: [],
+                affected: [],
+                gateIds: [],
+                mode: 'all' as const,
+                reason: 'manifest ещё не закреплён',
+                baseline: input.baseline,
+              },
+            }
+          : {}),
+        evidence: [],
+      };
+      tx.putVerification(v);
+      tx.emit({
+        type: 'joint.started',
+        payload: { verificationId: v.id, workIds: v.workIds, policyDigest: v.policyDigest },
+      });
+      return v;
+    });
+  }
+
+  /**
+   * Fencing совместной проверки: активна, токен её, срок не истёк, политика
+   * и основание (поручения, их постановки и результаты) не изменились.
+   */
+  private jointUpdate<T>(
+    id: string,
+    token: string,
+    kind: TransactionKind,
+    fn: (v: JointVerificationState, tx: ExecutionTransaction) => NotPromise<T>,
+  ): T {
+    return this.tx(kind, (tx) => {
+      if (kind !== 'heartbeat') this.assertCurrentPolicy(tx);
+      const v = tx.verification(id);
+      if (!v || v.status !== 'active' || v.token !== token || v.leaseUntil <= this.now())
+        throw new HarnessError('LEASE_STALE', 'Устаревшая попытка совместной проверки');
+      if (
+        v.policyDigest !== jointPolicyDigest(this.policy) ||
+        v.specDigest !== jointSpecDigest(tx, v.workIds)
+      )
+        throw new HarnessError(
+          'APPROVAL_STALE',
+          'Состав набора или политика изменились; нужна новая проверка',
+        );
+      return fn(v, tx);
+    });
+  }
+
+  jointHeartbeat(id: string, token: string) {
+    this.jointUpdate(id, token, 'heartbeat', (v, tx) =>
+      tx.putVerification({ ...v, leaseUntil: this.now() + this.policy.leaseMs }),
+    );
+  }
+
+  /**
+   * Закрепить manifest: SHA и tree каждого репозитория политики. Закрепляется
+   * один раз; по нему же выбирается область проверки.
+   */
+  jointManifest(id: string, token: string, manifest: NonNullable<JointVerification['manifest']>) {
+    return this.jointUpdate(id, token, 'workspace.manifest', (v, tx) => {
+      if (v.manifest) throw new HarnessError('INVALID_INPUT', 'Manifest уже закреплён');
+      const ids = this.policy.repositories.map((r) => r.id).sort();
+      const sha = /^[a-f0-9]{40,64}$/;
+      if (
+        JSON.stringify(Object.keys(manifest).sort()) !== JSON.stringify(ids) ||
+        Object.values(manifest).some((m) => !sha.test(m.sha) || !sha.test(m.tree))
+      )
+        throw new HarnessError(
+          'INVALID_INPUT',
+          'Manifest должен фиксировать SHA и tree каждого репозитория',
+        );
+      const baseline = v.impact?.baseline ? tx.verification(v.impact.baseline) : undefined;
+      const impact = jointImpact(this.policy, manifest, v.policyDigest, baseline);
+      const next = { ...v, manifest, manifestDigest: digestOf(manifest), impact };
+      tx.putVerification(next);
+      return next;
+    });
+  }
+
+  jointEvidence(id: string, token: string, evidence: JointVerification['evidence'][number]) {
+    this.jointUpdate(id, token, 'workspace.evidence', (v, tx) => {
+      if (!v.manifest) throw new HarnessError('NOT_READY', 'Нет закреплённого manifest');
+      tx.putVerification({ ...v, evidence: [...v.evidence, evidence] });
+    });
+  }
+
+  private jointMissing(v: JointVerificationState) {
+    if (!v.manifest || digestOf(v.manifest) !== v.manifestDigest)
+      return 'Нет закреплённого manifest';
+    for (const gate of this.policy.workspaceGates.filter(
+      (g) => !v.impact || v.impact.gateIds.includes(g.id),
+    ))
+      if (!v.evidence.findLast((e) => e.gate === gate.id)?.passed) return `Нет PASS: ${gate.id}`;
+    return undefined;
+  }
+
+  jointFinish(id: string, token: string) {
+    return this.jointUpdate(id, token, 'workspace.verified', (v, tx) => {
+      const missing = this.jointMissing(v);
+      if (missing) throw new HarnessError('GATE_FAILED', missing);
+      const next: JointVerificationState = {
+        ...v,
+        status: 'passed',
+        manifest: v.manifest!,
+        manifestDigest: v.manifestDigest!,
+        finishedAt: iso(this.now()),
+      };
+      tx.putVerification(next);
+      tx.emit({
+        type: 'joint.finished',
+        payload: { verificationId: id, status: 'passed', manifestDigest: v.manifestDigest! },
+      });
+      return publicJoint(next);
+    });
+  }
+
+  /** Отказ проверки её владельцем; истёкший срок допустим, чужой токен — нет. */
+  jointFail(id: string, token: string, error: string) {
+    return this.tx('workspace.failed', (tx) => {
+      const v = tx.verification(id);
+      if (!v || v.status !== 'active' || v.token !== token) return false;
+      const message = error.slice(0, 4000) || 'Совместная проверка не прошла';
+      tx.putVerification({ ...v, status: 'failed', error: message, finishedAt: iso(this.now()) });
+      tx.emit({
+        type: 'joint.finished',
+        payload: { verificationId: id, status: 'failed', error: message },
+      });
+      return true;
+    });
+  }
+
+  /**
+   * Актуальный результат совместной проверки набора: последняя проверка этого
+   * набора, успешная, с целым manifest, под текущей политикой, на неизменном
+   * основании, с PASS каждого gate своей области. Иначе — причина; прежний
+   * результат как актуальный не выдаётся.
+   */
+  jointResult(workIds: string[]): {
+    verification?: JointVerification;
+    current: boolean;
+    reason?: string;
+  } {
+    return this.read((v) => {
+      const last = v
+        .verifications()
+        .filter((x) => sameWorks(x.workIds, workIds))
+        .at(-1);
+      if (!last) return { current: false, reason: 'Совместной проверки этого набора нет' };
+      const verification = publicJoint(last);
+      const reason =
+        last.status !== 'passed'
+          ? `Последняя проверка: ${last.status}${last.status === 'failed' ? ' — ' + last.error : ''}`
+          : last.policyDigest !== jointPolicyDigest(this.policy)
+            ? 'Политика совместной проверки изменилась'
+            : last.specDigest !== jointSpecDigest(v, last.workIds)
+              ? 'Поручения набора или их результаты изменились'
+              : this.jointMissing(last);
+      return reason ? { verification, current: false, reason } : { verification, current: true };
     });
   }
 

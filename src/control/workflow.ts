@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  executionDigest,
   HarnessError,
   WORKSPACE_OWNER,
   digestOf,
@@ -40,7 +41,7 @@ export class WorkflowQueue {
       kind,
       id,
       graph: graph.digest,
-      policy: digestOf(this.policy),
+      policy: executionDigest(this.policy),
       approvalMode: this.policy.approvalMode,
     });
   }

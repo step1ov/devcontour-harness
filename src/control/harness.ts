@@ -4,6 +4,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import {
+  executionDigest,
   API_VERSION,
   HarnessError,
   STATE_VERSION,
@@ -46,6 +47,9 @@ import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { validateInputs } from '../validate.ts';
 import { WorkflowQueue } from './workflow.ts';
+import { policySourceChanged, type PolicySource } from './provenance.ts';
+import { JointRunner } from '../engine/joint-runner.ts';
+import { git } from '../environment/process.ts';
 import { analyzeRecovery, applyCases } from './recovery.ts';
 import { declarationProblems } from '../verification/checks.ts';
 import { staleArtifacts } from '../verification/confirm.ts';
@@ -61,6 +65,14 @@ export interface HarnessOptions {
   /** Читающие операции не создают каталог состояния. */
   readOnly?: boolean;
   environment?: NodeJS.ProcessEnv;
+  /**
+   * Файл, из которого загружена политика. С ним процесс может записать свою
+   * политику применённой, только пока файл не менялся; без него политика —
+   * объект вызывающего, и право ограничено остальными условиями.
+   */
+  policySource?: PolicySource;
+  /** База блокировок ресурсов; по умолчанию — общая для машины. */
+  resourceDatabase?: string;
 }
 
 const stateFile = (dir: string) => join(dir, 'state.sqlite');
@@ -77,6 +89,8 @@ export class Harness {
   readonly policy: ExecutionPolicy;
   /** Техническая очередь: сохранённые стадии и ограниченное восстановление графа. */
   readonly workflows: WorkflowQueue;
+  /** Совместная проверка комбинации репозиториев. */
+  readonly joint: JointRunner;
   private readonly adapters: Partial<Record<RuntimeName, RuntimeAdapter>>;
 
   static open(options: HarnessOptions) {
@@ -92,9 +106,11 @@ export class Harness {
       stateFile(options.stateDir),
       'devcontour-harness@' + HARNESS_VERSION,
     );
+    const source = options.policySource;
     this.engine = new Engine({
       host: standaloneHost(this.store, this.policy),
       policy: this.policy,
+      ...(source ? { provenance: () => policySourceChanged(source) } : {}),
     });
     this.workflows = new WorkflowQueue(this.store, this.policy, () => this.engine.clock());
     this.adapters = options.adapters ?? {
@@ -108,11 +124,72 @@ export class Harness {
       adapters: this.adapters,
       context: (work) => this.contextOf(work.graphId),
       ...(options.environment ? { environment: options.environment } : {}),
+      ...(options.resourceDatabase ? { resourceDatabase: options.resourceDatabase } : {}),
+    });
+    this.joint = new JointRunner({
+      engine: this.engine,
+      stateDir: options.stateDir,
+      baseDir: options.baseDir,
+      ...(options.environment ? { environment: options.environment } : {}),
+      ...(options.resourceDatabase ? { resourceDatabase: options.resourceDatabase } : {}),
     });
   }
 
   close() {
     this.store.close();
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Совместная проверка и применение политики                         */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Совместная проверка набора принятых поручений на текущих target ref.
+   * Возвращает итог (`passed` или `failed` с причиной); продуктовое принятие
+   * комбинации решает хост.
+   */
+  verifyJoint(workIds: string[], options: { baseline?: string } = {}) {
+    return this.joint.verify(workIds, options);
+  }
+
+  /**
+   * Актуальность результата совместной проверки набора и свежесть его
+   * manifest: SHA каждого репозитория сравнивается с текущим target ref.
+   * Свежесть — наблюдение, а не запрет: решение о принятии — за хостом.
+   */
+  async jointResult(workIds: string[]) {
+    const result = this.engine.jointResult(workIds);
+    const manifest = result.verification?.manifest;
+    if (!manifest) return result;
+    const freshness = await Promise.all(
+      this.policy.repositories.map(async (repo) => {
+        const head = await git(this.repoPath(repo.path), 'rev-parse', repo.targetRef).catch(
+          () => undefined,
+        );
+        return {
+          repositoryId: repo.id,
+          sha: manifest[repo.id]!.sha,
+          ...(head ? { head } : {}),
+          fresh: head === manifest[repo.id]!.sha,
+        };
+      }),
+    );
+    return { ...result, freshness };
+  }
+
+  /** Запросить применение политики с digest `policyDigest(next)`; держит новые выдачи. */
+  requestReconfigure(operation: string, digest: string) {
+    this.engine.operationPause(operation);
+    return this.engine.requestReconfigure(operation, digest);
+  }
+
+  /** Применить запрос политикой этого процесса (после drain), см. `Engine.applyReconfigure`. */
+  applyReconfigure(by = 'harness') {
+    return this.engine.applyReconfigure(by);
+  }
+
+  policyState() {
+    return this.engine.policyState();
   }
 
   private repoPath(path: string) {
@@ -447,7 +524,7 @@ export class Harness {
     if (
       !graph.approval ||
       graph.approval.digest !== graph.digest ||
-      graph.policyDigest !== digestOf(this.policy)
+      graph.policyDigest !== executionDigest(this.policy)
     ) {
       if (this.policy.approvalMode === 'agent') {
         const record = await this.review({

@@ -1,4 +1,5 @@
 import {
+  executionDigest,
   digestOf,
   type ExecutionHost,
   type ExecutionPolicy,
@@ -10,7 +11,7 @@ import {
  * дополнительных условий нет, группа бюджета — граф.
  */
 export function standaloneHost(store: ExecutionStore, policy: ExecutionPolicy): ExecutionHost {
-  const policyDigest = digestOf(policy);
+  const policyDigest = executionDigest(policy);
   return {
     store,
     basis: {
