@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import {
   HarnessError,
@@ -31,6 +31,7 @@ import { BlockedError, classifyFailure } from './classify.ts';
 import { TaskFailure } from './failure.ts';
 import type { Engine } from './engine.ts';
 import { prompt } from './prompt.ts';
+import { continuableDraft, implementationBasis } from './reuse.ts';
 
 type Repo = ExecutionPolicy['repositories'][number];
 
@@ -414,8 +415,18 @@ export class Runner {
   }
 
   /** Область записи кандидата: защищённые пути, пустой результат, выход за область поручения и роли. */
-  private async assertScope(work: WorkState, repo: Repo, cwd: string, context?: ContextSnapshot) {
-    const changed = (await git(cwd, 'diff', '--cached', '--no-renames', '--name-only', '-z'))
+  private async assertScope(
+    work: WorkState,
+    repo: Repo,
+    cwd: string,
+    context?: ContextSnapshot,
+    range?: [string, string],
+  ) {
+    const changed = (
+      await (range
+        ? git(cwd, 'diff', '--no-renames', '--name-only', '-z', ...range)
+        : git(cwd, 'diff', '--cached', '--no-renames', '--name-only', '-z'))
+    )
       .split('\0')
       .filter(Boolean);
     // Закреплённый контекст из этого репозитория — норма, а не результат работы:
@@ -444,6 +455,158 @@ export class Runner {
         'scope-violation',
         'Изменены файлы вне области поручения/роли: ' + outside.join(', '),
       );
+  }
+
+  /** Стадия попытки с замером: начало, конец и исход записываются под fencing. */
+  private async timed<T>(attempt: AttemptState, stage: string, fn: () => Promise<T>) {
+    const id = this.engine.timingStarted(attempt.id, attempt.token, stage);
+    try {
+      const value = await fn();
+      this.engine.timingFinished(attempt.id, attempt.token, id, 'passed');
+      return value;
+    } catch (error) {
+      try {
+        this.engine.timingFinished(attempt.id, attempt.token, id, 'failed');
+      } catch {
+        /* Утраченное владение не публикует поздний замер. */
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Кандидат предыдущей попытки вместо новой реализации. Движок уже сверил
+   * основания; здесь проверяется сам коммит: ровно один поверх той же базы,
+   * рабочее дерево чистое, область прежняя. Проверки и ревью затем идут
+   * заново — переиспользуется только написанный код.
+   */
+  private async reuseCandidate(
+    attempt: AttemptState,
+    work: WorkState,
+    repo: Repo,
+    cwd: string,
+    base: string,
+    context?: ContextSnapshot,
+  ) {
+    const sha = await git(cwd, 'rev-parse', 'HEAD');
+    const parents = (await git(cwd, 'rev-list', '--parents', '-n', '1', sha)).split(' ').slice(1);
+    if (sha !== attempt.reusedFrom!.candidateSha || parents.length !== 1 || parents[0] !== base)
+      throw new TaskFailure(
+        'unknown',
+        `Кандидат ${attempt.reusedFrom!.candidateSha} не является одним коммитом поверх ${base}`,
+      );
+    if (await git(cwd, 'status', '--porcelain'))
+      throw new TaskFailure('unknown', 'Рабочее дерево взятого кандидата не чистое');
+    await this.assertScope(work, repo, cwd, context, [base, sha]);
+    return sha;
+  }
+
+  /**
+   * Время реализации кончилось раньше работы, или она оборвалась. Изменения
+   * в области поручения сохраняются патчем к базе: следующая попытка начнёт с
+   * них, а не с пустого дерева. Не удалось сохранить — попытка просто
+   * начнётся заново.
+   */
+  private async keepDraft(attempt: AttemptState, work: WorkState, artifacts: string) {
+    if (attempt.candidateSha || !attempt.worktree || !attempt.baseSha || !work.approvedDigest)
+      return;
+    try {
+      const dir = join(artifacts, 'implementation');
+      await mkdir(dir, { recursive: true });
+      const patch = join(dir, 'partial.patch');
+      // Только в области записи поручения: в дереве бывают и посторонние
+      // неотслеживаемые каталоги — кеш менеджера пакетов, отчёты.
+      const scope = ['--', ...work.order.writeScope];
+      await git(attempt.worktree, 'add', '-A', ...scope);
+      await git(
+        attempt.worktree,
+        'diff',
+        '--cached',
+        '--binary',
+        `--output=${patch}`,
+        attempt.baseSha,
+        ...scope,
+      );
+      const text = await readFile(patch, 'utf8');
+      if (!text.trim() || text.length > 5_000_000) return;
+      const files = (
+        await git(attempt.worktree, 'diff', '--cached', '--name-only', attempt.baseSha, ...scope)
+      )
+        .split('\n')
+        .filter(Boolean);
+      this.engine.recordPartial(attempt.id, attempt.token, {
+        patch,
+        digest: sha256(text),
+        files,
+        spec: work.approvedDigest,
+        contracts: Object.fromEntries(work.order.contracts.map((c) => [c.id, c.digest])),
+      });
+    } catch {
+      /* Черновик — удобство, а не условие: без него попытка начнётся с нуля. */
+    }
+  }
+
+  /** Накладывает черновик предыдущей попытки, если он есть и годится. */
+  private async continueDraft(
+    attempt: AttemptState,
+    work: WorkState,
+    repoPath: string,
+    cwd: string,
+  ): Promise<AttemptState> {
+    const draft = this.engine.read((v) => continuableDraft(v, work, attempt.id));
+    if (!draft) return attempt;
+    const dir = join(this.options.stateDir, 'artifacts', attempt.id, 'implementation');
+    await mkdir(dir, { recursive: true });
+    const scope = ['--', ...work.order.writeScope];
+    let applied = false;
+    let files: string[] = [];
+    try {
+      let patch: string;
+      if (draft.kind === 'unfinished') {
+        patch = draft.patch;
+        files = draft.files;
+        // Черновик подменённый или повреждённый не накладывается.
+        if (sha256(await readFile(patch, 'utf8')) !== draft.digest) throw new Error('digest');
+      } else {
+        // Кандидат лежит коммитом в репозитории; его изменения относительно
+        // своей базы переносятся на текущую.
+        patch = join(dir, 'rejected-candidate.patch');
+        await git(
+          repoPath,
+          'diff',
+          '--binary',
+          `--output=${patch}`,
+          draft.baseSha,
+          draft.candidateSha,
+          ...scope,
+        );
+        if (!(await readFile(patch, 'utf8')).trim()) throw new Error('empty');
+        files = (
+          await git(repoPath, 'diff', '--name-only', draft.baseSha, draft.candidateSha, ...scope)
+        )
+          .split('\n')
+          .filter(Boolean);
+      }
+      await git(cwd, 'apply', '--3way', '--whitespace=nowarn', patch);
+      // --3way кладёт изменения в индекс; исполнитель видит их как свою
+      // незакоммиченную работу.
+      await git(cwd, 'reset', '-q');
+      applied = true;
+    } catch {
+      await git(cwd, 'reset', '-q', '--hard').catch(() => undefined);
+      await git(cwd, 'clean', '-fdq').catch(() => undefined);
+    }
+    const continuedFrom = {
+      runId: draft.runId,
+      kind: draft.kind,
+      reason: draft.reason,
+      ...(draft.respecified ? { respecified: true } : {}),
+      applied,
+      files,
+    };
+    await writeFile(join(dir, 'continuation.json'), JSON.stringify(continuedFrom, null, 2));
+    this.engine.continuation(attempt.id, attempt.token, continuedFrom);
+    return { ...attempt, continuedFrom };
   }
 
   private async execute(claimed: AttemptState, controller: AbortController) {
@@ -523,6 +686,14 @@ export class Runner {
           // Постановка по устаревшему источнику требований не исполняется.
           if (work.order.requirements.length) assertRequirements(work.order, repoPath);
           const base = await git(repoPath, 'rev-parse', repo.targetRef);
+          // Основания записываются до реализации; в той же транзакции решается,
+          // берётся ли кандидат предыдущей попытки вместо нового кода.
+          const reuse = this.engine.implementationBasis(
+            attempt.id,
+            attempt.token,
+            implementationBasis(work, attempt, base, this.engine.version),
+          );
+          attempt = { ...attempt, ...(reuse.reusedFrom ? { reusedFrom: reuse.reusedFrom } : {}) };
           await mkdir(join(this.options.stateDir, 'worktrees'), { recursive: true });
           await git(
             repoPath,
@@ -531,7 +702,7 @@ export class Runner {
             '-b',
             `${this.options.branchPrefix ?? 'harness/run-'}${attempt.id}`,
             cwd,
-            base,
+            reuse.reusedFrom?.candidateSha ?? base,
           );
           worktrees.push(cwd);
           this.engine.phase(attempt.id, attempt.token, 'running', { baseSha: base, worktree: cwd });
@@ -552,52 +723,61 @@ export class Runner {
                 execution,
                 signal,
               );
-              const dir = join(artifacts, 'implementation');
-              await mkdir(dir, { recursive: true });
-              await writeFile(join(dir, 'work.json'), JSON.stringify(work.order, null, 2));
-              const response = await this.call(
-                this.adapter(attempt.runtime),
-                {
-                  task: 'implement',
-                  attempt,
-                  cwd,
-                  dir,
-                  phase: 'candidate',
-                  prompt: prompt({
-                    work,
-                    attempt,
-                    history: this.history(attempt),
-                    context,
-                    gates: gates.map((g) => ({ id: g.id, command: g.command })),
-                  }),
-                },
-                signal,
-              );
-              const result = implementationResultSchema.safeParse(response.output);
-              if (!result.success)
-                throw new Error('Ответ исполнителя вне схемы: ' + result.error.issues[0]?.message);
-              if (!result.data.completed)
-                throw new Error('Исполнитель сообщил о незавершённой работе');
-              this.engine.heartbeat(attempt.id, attempt.token);
-              signal.throwIfAborted();
-              if ((await git(cwd, 'rev-parse', 'HEAD')) !== base)
-                throw new TaskFailure(
-                  'scope-violation',
-                  'Исполнитель изменил HEAD; интеграцией владеет harness',
-                );
-              await git(cwd, 'add', '-A');
-              await this.assertScope(work, repo, cwd, context);
-              await git(
-                cwd,
-                '-c',
-                'core.hooksPath=/dev/null',
-                'commit',
-                '--no-gpg-sign',
-                '-q',
-                '-m',
-                `${work.id}: ${work.order.title}`,
-              );
-              const sha = await git(cwd, 'rev-parse', 'HEAD');
+              const sha = attempt.reusedFrom
+                ? await this.timed(attempt, 'implementation-reuse', () =>
+                    this.reuseCandidate(attempt, work, repo, cwd, base, context),
+                  )
+                : await this.timed(attempt, 'implementation', async () => {
+                    attempt = await this.continueDraft(attempt, work, repoPath, cwd);
+                    const dir = join(artifacts, 'implementation');
+                    await mkdir(dir, { recursive: true });
+                    await writeFile(join(dir, 'work.json'), JSON.stringify(work.order, null, 2));
+                    const response = await this.call(
+                      this.adapter(attempt.runtime),
+                      {
+                        task: 'implement',
+                        attempt,
+                        cwd,
+                        dir,
+                        phase: 'candidate',
+                        prompt: prompt({
+                          work,
+                          attempt,
+                          history: this.history(attempt),
+                          context,
+                          gates: gates.map((g) => ({ id: g.id, command: g.command })),
+                        }),
+                      },
+                      signal,
+                    );
+                    const result = implementationResultSchema.safeParse(response.output);
+                    if (!result.success)
+                      throw new Error(
+                        'Ответ исполнителя вне схемы: ' + result.error.issues[0]?.message,
+                      );
+                    if (!result.data.completed)
+                      throw new Error('Исполнитель сообщил о незавершённой работе');
+                    this.engine.heartbeat(attempt.id, attempt.token);
+                    signal.throwIfAborted();
+                    if ((await git(cwd, 'rev-parse', 'HEAD')) !== base)
+                      throw new TaskFailure(
+                        'scope-violation',
+                        'Исполнитель изменил HEAD; интеграцией владеет harness',
+                      );
+                    await git(cwd, 'add', '-A');
+                    await this.assertScope(work, repo, cwd, context);
+                    await git(
+                      cwd,
+                      '-c',
+                      'core.hooksPath=/dev/null',
+                      'commit',
+                      '--no-gpg-sign',
+                      '-q',
+                      '-m',
+                      `${work.id}: ${work.order.title}`,
+                    );
+                    return git(cwd, 'rev-parse', 'HEAD');
+                  });
               rearm();
               this.engine.phase(attempt.id, attempt.token, 'verifying', { candidateSha: sha });
               for (const gate of gates)
@@ -655,6 +835,11 @@ export class Runner {
       try {
         const kind =
           expired && !(error instanceof TaskFailure) ? 'timeout' : classifyFailure(error, message);
+        // Незакоммиченная работа сохраняется при любом отказе до кандидата:
+        // по времени, «не закончил», обрыв. Иначе повтор начинал с пустого
+        // дерева и тратил попытку на сделанное.
+        if (kind !== 'provider-auth')
+          await this.keepDraft(attempt, await this.workOf(attempt), artifacts);
         this.engine.fail(attempt.id, attempt.token, message, {
           kind,
           blocked:

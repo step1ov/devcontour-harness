@@ -65,6 +65,14 @@ export function prompt(input: {
     'Gates that prove this work: ' + JSON.stringify(input.gates),
     'Previous attempts, with the findings each review left. Address every finding that is still open first and say what you changed for it: ' +
       JSON.stringify(previousAttempts(input.history, attempt.id)),
+    !review && attempt.continuedFrom?.applied
+      ? attempt.continuedFrom.kind === 'unfinished'
+        ? `The previous attempt stopped before finishing (${attempt.continuedFrom.reason === 'timeout' ? 'ran out of time' : attempt.continuedFrom.reason}). Its unfinished, unverified changes are already applied in this worktree as uncommitted edits (${attempt.continuedFrom.files.join(', ')}). Continue from them: check what is done and what is broken, finish the work and make the gates pass. Treat them as a draft, not as reviewed work.`
+        : `The previous attempt produced a candidate that failed (${attempt.continuedFrom.reason === 'review' ? 'rejected by review' : attempt.continuedFrom.reason}); see its error and findings above. Its changes are already applied in this worktree as uncommitted edits (${attempt.continuedFrom.files.join(', ')}). Fix what failed on top of them; if the failure shows the approach itself is wrong, replace it rather than patching around it. The gates and a new independent review decide again.`
+      : '',
+    !review && attempt.continuedFrom?.applied && attempt.continuedFrom.respecified
+      ? 'The specification or its contracts changed after that attempt: check the applied changes against the current approved specification and contracts above, not against the old ones.'
+      : '',
     `Base commit: ${attempt.baseSha ?? ''}.${review ? ` Review commit: ${review.sha} (${review.phase}).` : ''}`,
     contextText(input.context),
     review ? 'Exact diff to review:\n' + review.diff : '',

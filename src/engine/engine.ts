@@ -26,6 +26,7 @@ import {
 } from '../contracts/index.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import { failureFingerprint, repairPolicy } from './failure.ts';
+import { reusableImplementation } from './reuse.ts';
 import { unprovenReason } from '../verification/proof.ts';
 import { REQUIREMENT_GATE } from '../verification/requirements.ts';
 
@@ -694,6 +695,56 @@ export class Engine {
     >,
   ) {
     this.withAttempt(id, token, kind, (a, _w, tx) => tx.putAttempt({ ...a, ...patch }));
+  }
+
+  /**
+   * Основания реализации записываются до неё: по ним следующая попытка решит,
+   * можно ли взять этого кандидата. В той же транзакции решается, берётся ли
+   * кандидат предыдущей попытки вместо новой реализации.
+   */
+  implementationBasis(id: string, token: string, basis: string) {
+    return this.withAttempt(id, token, 'run.implementation-basis', (a, w, tx) => {
+      const decision = this.policy.reuseImplementation
+        ? reusableImplementation(tx, w, id, basis)
+        : ({ reuse: false, reason: 'переиспользование выключено политикой' } as const);
+      const reusedFrom = decision.reuse
+        ? { runId: decision.from.id, candidateSha: decision.candidateSha }
+        : undefined;
+      tx.putAttempt({ ...a, implementationBasis: basis, ...(reusedFrom ? { reusedFrom } : {}) });
+      return reusedFrom ? { reusedFrom } : { reason: (decision as { reason: string }).reason };
+    });
+  }
+
+  /** Черновик реализации, оборванной до кандидата (см. `AttemptState.partial`). */
+  recordPartial(id: string, token: string, partial: NonNullable<AttemptState['partial']>) {
+    this.withAttempt(id, token, 'run.partial', (a, _w, tx) => tx.putAttempt({ ...a, partial }));
+  }
+
+  /** Попытка начала с черновика предыдущей (см. `AttemptState.continuedFrom`). */
+  continuation(id: string, token: string, from: NonNullable<AttemptState['continuedFrom']>) {
+    this.withAttempt(id, token, 'run.continuation', (a, _w, tx) =>
+      tx.putAttempt({ ...a, continuedFrom: from }),
+    );
+  }
+
+  /** Начало стадии попытки; `timingFinished` закрывает её исходом. */
+  timingStarted(id: string, token: string, stage: string) {
+    const timing = { id: this.id(), stage, startedAt: iso(this.now()) };
+    this.withAttempt(id, token, 'run.timing.started', (a, _w, tx) =>
+      tx.putAttempt({ ...a, timings: [...(a.timings ?? []), timing] }),
+    );
+    return timing.id;
+  }
+
+  timingFinished(id: string, token: string, timingId: string, outcome: 'passed' | 'failed') {
+    this.withAttempt(id, token, 'run.timing.finished', (a, _w, tx) =>
+      tx.putAttempt({
+        ...a,
+        timings: (a.timings ?? []).map((t) =>
+          t.id === timingId ? { ...t, finishedAt: iso(this.now()), outcome } : t,
+        ),
+      }),
+    );
   }
 
   evidence(

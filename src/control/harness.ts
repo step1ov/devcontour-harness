@@ -27,6 +27,7 @@ import {
   type RuntimeAdapter,
   type RuntimeName,
   type WorkGraph,
+  type WorkflowJob,
 } from '../contracts/index.ts';
 import { cliAdapter } from '../agents/cli-adapter.ts';
 import { reviewOutputSchema } from '../agents/schemas.ts';
@@ -34,11 +35,13 @@ import { executionEnvironment } from '../environment/lifecycle.ts';
 import { redactDeep } from '../environment/redaction.ts';
 import { Engine } from '../engine/engine.ts';
 import { runResult } from '../engine/result.ts';
+import { repairDecision } from '../engine/repair.ts';
 import { Runner } from '../engine/runner.ts';
 import { standaloneHost } from '../engine/standalone.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { validateInputs } from '../validate.ts';
+import { WorkflowQueue } from './workflow.ts';
 
 export interface HarnessOptions {
   /** Каталог состояния исполнения: база, worktrees, артефакты. */
@@ -65,6 +68,8 @@ export class Harness {
   readonly runner: Runner;
   readonly store: SqliteExecutionStore;
   readonly policy: ExecutionPolicy;
+  /** Техническая очередь: сохранённые стадии и ограниченное восстановление графа. */
+  readonly workflows: WorkflowQueue;
   private readonly adapters: Partial<Record<RuntimeName, RuntimeAdapter>>;
 
   static open(options: HarnessOptions) {
@@ -84,6 +89,7 @@ export class Harness {
       host: standaloneHost(this.store, this.policy),
       policy: this.policy,
     });
+    this.workflows = new WorkflowQueue(this.store, this.policy, () => this.engine.clock());
     this.adapters = options.adapters ?? {
       codex: cliAdapter('codex', { toolProfiles: this.policy.toolProfiles }),
       claude: cliAdapter('claude', { toolProfiles: this.policy.toolProfiles }),
@@ -380,12 +386,30 @@ export class Harness {
         );
     }
     await this.runner.init();
-    // Очередь, которую ещё не запускали, — пауза без причины: первый run её запускает.
-    // Пауза, поставленная человеком или остановкой, остаётся до явного resume.
-    if (this.engine.read((v) => v.control().paused && !v.control().pauseReason))
+    // Разрешение начать работу снимает только паузу «очередь ещё не запускали»
+    // (без причины) и штатную остановку: это не решения о работе. Пауза
+    // человека, отказа runtime, применения политики и проверки базы остаётся
+    // до явного продолжения.
+    if (
+      this.engine.read(
+        (v) =>
+          v.control().paused &&
+          (!v.control().pauseReason || v.control().pauseReason === 'shutdown'),
+      )
+    )
       this.engine.resume();
+    // В режиме agent работа над графом — задание технической очереди: его
+    // стадия сохраняется, а упавшие поручения чинятся в пределах бюджета.
+    // Оператор решает сам: автоматических повторов нет.
+    const job =
+      this.policy.approvalMode === 'agent' &&
+      !input.once &&
+      (input.author === 'codex' || input.author === 'claude')
+        ? this.workflows.start({ kind: 'graph', id: graph.id, authorRuntime: input.author })
+        : undefined;
     try {
       if (input.once) await this.runner.step();
+      else if (job) await this.advance(job.key, graph.id);
       else await this.runner.drain();
     } finally {
       this.runner.release();
@@ -395,6 +419,7 @@ export class Harness {
       graphId: graph.id,
       digest: graph.digest,
       resumed: registered.resumed,
+      ...(job ? { workflow: this.workflows.view(job.key) } : {}),
       works: this.engine.read((v) =>
         v.works(graph.id).map((w) => ({
           id: w.id,
@@ -405,6 +430,74 @@ export class Harness {
         })),
       ),
     };
+  }
+
+  /**
+   * Вести задание графа: стадия согласования уже пройдена синхронно; стадия
+   * исполнения — очередь до простоя, затем решение о восстановлении по
+   * записанному состоянию. Повтор назначается и списывается одной
+   * транзакцией; остановка записывает причину в задание.
+   */
+  private async advance(key: string, graphId: string) {
+    for (;;) {
+      await this.runner.drain();
+      const job = this.workflows.claim(key);
+      if (!job) return;
+      const timer = setInterval(
+        () => {
+          try {
+            this.workflows.heartbeat(job);
+          } catch {
+            /* Утраченное владение заданием проверит следующая запись. */
+          }
+        },
+        Math.max(1000, this.policy.leaseMs / 3),
+      );
+      try {
+        if (job.stage === 0) {
+          this.workflows.finish(job);
+          continue;
+        }
+        if (this.repair(job, graphId)) {
+          this.workflows.finish(job, true);
+          continue;
+        }
+        const done = this.engine.read((v) => v.works(graphId).every((w) => w.status === 'done'));
+        this.workflows.finish(job, !done);
+        return;
+      } catch (error) {
+        this.workflows.fail(job, error instanceof Error ? error.message : String(error));
+        return;
+      } finally {
+        clearInterval(timer);
+      }
+    }
+  }
+
+  /**
+   * Восстановление упавшего поручения группы. Решение и его исполнение — одна
+   * транзакция: между чтением и записью никто не успеет отменить поручение.
+   * Возвращает true, когда повтор назначен; остановка — исключение с причиной.
+   */
+  private repair(job: WorkflowJob, graphId: string) {
+    const decision = this.store.transact('task.retry', (tx) => {
+      const decided = repairDecision(tx, tx.works(graphId), {
+        budgetLeft: this.policy.repairBudget - (job.repairs ?? 0),
+        maxAttempts: this.policy.maxAttempts,
+      });
+      if (!decided || decided.action === 'stop') return decided;
+      this.workflows.repair(job, `repair:${decided.kind}`, () => {
+        this.engine.retry(decided.workId);
+        // Повтор признал причину разовой: своя причина паузы снимается. Выдача
+        // возвращается, только когда не осталось ни одной; пауза человека
+        // не снимается вовсе.
+        if (decided.blocksQueue) this.engine.clearFailure([decided.kind]);
+      });
+      return decided;
+    });
+    if (!decision) return false;
+    if (decision.action === 'stop') throw new Error(decision.reason);
+    return true;
   }
 
   status(graphId?: string) {

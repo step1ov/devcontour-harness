@@ -192,5 +192,7 @@ export const transactionKinds = [
   'graph.reviewed',
   'graph.approved',
   'delivery.recorded',
+  /** Только локальные записи технической очереди (`workflow-jobs`); событий журнала нет. */
+  'workflow.updated',
 ] as const;
 export type TransactionKind = (typeof transactionKinds)[number];

@@ -50,6 +50,24 @@ if (step.recordPrompt)
     `${scenarioPath}.${role}.${index}.prompt`,
     prompt + '\n---ARGS---\n' + JSON.stringify(args),
   );
+// Что исполнитель застал в дереве до своей работы: тесты проверяют наложенный черновик.
+if (step.observe)
+  writeFileSync(
+    `${scenarioPath}.${role}.${index}.observed`,
+    JSON.stringify(
+      Object.fromEntries(
+        step.observe.map((p) => [
+          p,
+          existsSync(join(process.cwd(), p)) ? readFileSync(join(process.cwd(), p), 'utf8') : null,
+        ]),
+      ),
+    ),
+  );
+// Изменения до долгого ожидания: попытку обрывают по времени посреди работы.
+for (const [path, text] of Object.entries(step.draftFiles ?? {})) {
+  mkdirSync(dirname(join(process.cwd(), path)), { recursive: true });
+  writeFileSync(join(process.cwd(), path), text);
+}
 if (step.sleepMs) await new Promise((r) => setTimeout(r, step.sleepMs));
 if (step.spawnHanging) {
   const { spawn } = await import('node:child_process');

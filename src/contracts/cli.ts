@@ -344,6 +344,26 @@ export const runDataSchema = z.strictObject({
       blockers: z.array(blocker),
     }),
   ),
+  /**
+   * Задание технической очереди графа (режим agent): сохранённая стадия,
+   * статус, использованные восстановления и причина остановки.
+   */
+  workflow: z
+    .strictObject({
+      key: digestSchema,
+      kind: idSchema,
+      id: idSchema,
+      stage: z.number().int().min(0),
+      status: z.enum(['queued', 'running', 'failed', 'stale', 'completed']),
+      attempts: z.number().int().min(0),
+      repairs: z.number().int().min(0),
+      repairBudget: z.number().int().min(0),
+      error: z.string().optional(),
+      history: z.array(
+        z.strictObject({ at: isoTimeSchema, stage: z.number().int().min(0), event: z.string() }),
+      ),
+    })
+    .optional(),
 });
 
 export const controlDataSchema = z.strictObject({

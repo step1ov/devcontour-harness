@@ -200,7 +200,8 @@ manifestDigest, impact?, evidence[], error?}`. Смена любого SHA де�
 
 `transactionKinds` — имена транзакций исполнения; совпадают с сохранёнными
 типами событий журнала хоста (`run.claimed`, `task.done`, `run.failed`,
-`scheduler.error`, …).
+`scheduler.error`, …). `workflow.updated` пишет только локальные записи
+технической очереди (`workflow-jobs`) и событий журнала не создаёт.
 
 ## Порты
 
@@ -246,7 +247,7 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `review-plan`     | `--state D --graph F --policy F --author A [--context F]`               | да    | `ReviewRecord`                                    | Тот же digest и автор, уже согласованные, — тот же раунд без вызова модели; автор, не допускаемый правилом вендора, — `REVIEWER_SAME_VENDOR` до вызова |
 | `review-contract` | `--state D --contract F --policy F --author A`                          | да    | `ReviewRecord`                                    | Как `review-plan`                                                                                                                                      |
 | `approve`         | `--state D --subject ID --digest H`                                     | да    | subject, digest, at                               | Тот же digest — без изменений; только `approvalMode: operator`                                                                                         |
-| `run`             | `--state D --graph F --policy F [--context F] [--sink file:D] [--once]` | да    | граф, поручения и их блокеры                      | Та же редакция продолжает работу; другой digest той же редакции — `REVISION_CONFLICT`                                                                  |
+| `run`             | `--state D --graph F --policy F [--context F] [--sink file:D] [--once]` | да    | граф, поручения и их блокеры, задание `workflow`  | Та же редакция продолжает работу; другой digest той же редакции — `REVISION_CONFLICT`                                                                  |
 | `status`          | `--state D [--graph ID]`                                                | нет   | очередь, графы, поручения с блокерами             | Только чтение                                                                                                                                          |
 | `events`          | `--state D [--after N] [--limit 1–500]`                                 | нет   | события, `next`                                   | Только чтение                                                                                                                                          |
 | `pause`           | `--state D`                                                             | да    | `ControlState`                                    | Без изменений                                                                                                                                          |
