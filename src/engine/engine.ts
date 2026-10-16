@@ -243,6 +243,9 @@ export class Engine {
           ...(corpus ? { checkVersion: corpus } : {}),
           ...(prior?.recovery ? { recovery: prior.recovery } : {}),
           ...(prior?.recoveryHistory ? { recoveryHistory: prior.recoveryHistory } : {}),
+          // Удержание операции принадлежит ей: новая редакция источника его не
+          // снимает — только release или передача владельцем.
+          ...(prior?.hold ? { hold: prior.hold } : {}),
         });
       }
       for (const prior of existing ? tx.works(graph.id) : [])
@@ -587,10 +590,17 @@ export class Engine {
    * Начало вызова модели: атрибуция на момент вызова и проверка бюджетов — в
    * одной транзакции с регистрацией идущего вызова. Превышенный или
    * неопределённый бюджет — отказ `budget` до вызова, без записи; два процесса
-   * не проходят проверку оба, не видя друг друга.
+   * не проходят проверку оба, не видя друг друга. Процесс не с применённой
+   * политикой — отказ `APPROVAL_STALE` до вызова.
    */
   beginCall(record: CallRecord, meta: CallMeta): CallRecord {
     return this.tx('usage.recorded', (tx) => {
+      // Барьер применённой политики — на границе каждого нового вызова, в той
+      // же транзакции: процесс, чью политику сменили (например, понизили
+      // бюджет), не начинает вызовов по прежним пределам. Идущий вызов
+      // завершается, но разрешением нового он не служит.
+      const stale = this.staleReason(tx);
+      if (stale) throw new HarnessError('APPROVAL_STALE', stale);
       const c = this.budgetContext();
       const started = { ...record, ...callAttribution(c, tx, meta) };
       if (this.policy.budgets) assertBudget(c, callBudgets(c, tx, meta, callRecords(tx)));
@@ -1079,7 +1089,7 @@ export class Engine {
   /**
    * Gates репозиториев, не пройденные на integration ни одним из принятых
    * поручений: покрытие — по фактическому собственному evidence на принятом
-   * SHA, для любой области. Evidence потребителя — проверка другого
+   * SHA попытки под текущим основанием политики, для любой области. Evidence потребителя — проверка другого
    * компонента и не в счёт; запись ревью не закрывает одноимённый test gate.
    * Решение о приёмке набора поручений — за хостом.
    */
@@ -1094,6 +1104,10 @@ export class Engine {
             .flatMap((w) =>
               v
                 .attempts(w.id)
+                // Покрытие — только evidence попытки под текущим основанием
+                // политики: тот же ID gate с другой командой или профилем —
+                // другая проверка.
+                .filter((a) => a.policyDigest === this.host.basis.policyDigest(w, v))
                 .flatMap((a) => a.evidence)
                 .filter(
                   (e) =>

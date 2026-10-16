@@ -141,6 +141,12 @@ export const reviewRecordSchema = z.strictObject({
    * при том же назначении; смена reviewer политикой требует нового раунда.
    */
   reviewerBinding: digestSchema.optional(),
+  /**
+   * Digest закреплённого снимка контекста, который получил reviewer плана.
+   * Раунд подтверждает граф только с тем же снимком: другой контекст — новый
+   * раунд, а не прежнее одобрение.
+   */
+  contextDigest: digestSchema.optional(),
   /** Все находки предмета на момент раунда: новые и прежние с их статусами. */
   findings: z.array(reviewFindingSchema),
   artifact: z.string().max(1000),

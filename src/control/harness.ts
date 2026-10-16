@@ -38,6 +38,7 @@ import { executionEnvironment } from '../environment/lifecycle.ts';
 import { redactDeep } from '../environment/redaction.ts';
 import { Engine } from '../engine/engine.ts';
 import { measuredInvoke } from '../engine/measured.ts';
+import { contextText } from '../engine/prompt.ts';
 import { budgetOverview } from '../engine/budget.ts';
 import { TaskFailure } from '../engine/failure.ts';
 import { runResult } from '../engine/result.ts';
@@ -193,6 +194,14 @@ export class Harness {
     return this.engine.policyState();
   }
 
+  /**
+   * Довести незавершённую очистку закончившейся попытки: повторить teardown по
+   * сохранённым receipt окружений и убрать её рабочие деревья и снимки.
+   */
+  cleanup(runId: string) {
+    return this.runner.finishCleanup(runId);
+  }
+
   private repoPath(path: string) {
     return isAbsolute(path) ? path : resolve(this.options.baseDir, path);
   }
@@ -200,6 +209,30 @@ export class Harness {
   /* ---------------------------------------------------------------- */
   /* Ревью плана и контракта                                           */
   /* ---------------------------------------------------------------- */
+
+  /**
+   * Снимок контекста для ревью плана: без нужного графу источника — отказ
+   * `NOT_READY`, нарушения снимка (digest, размер) — `INVALID_INPUT`.
+   * Поручения без контекста — снимок не нужен.
+   */
+  private planContext(graph: WorkGraph, context?: ContextSnapshot) {
+    const needed = [...new Set(graph.orders.flatMap((o) => o.context))];
+    if (!context) {
+      if (needed.length)
+        throw new HarnessError(
+          'NOT_READY',
+          'Поручения требуют контекст, снимок не передан: ' + needed.join(', '),
+        );
+      return undefined;
+    }
+    const issues = contextIssues(context);
+    if (issues.length)
+      throw new HarnessError('INVALID_INPUT', 'Снимок контекста: ' + issues.join('; '));
+    const absent = needed.filter((id) => !context.sources.some((s) => s.id === id));
+    if (absent.length)
+      throw new HarnessError('NOT_READY', 'В снимке нет нужного контекста: ' + absent.join(', '));
+    return context;
+  }
 
   /**
    * Раунд технического ревью предмета (граф или контракт) с конкретным
@@ -218,6 +251,11 @@ export class Harness {
     // Структурные пропуски договора проверки и незакреплённые файлы — отказ до
     // вызова модели: reviewer оценивает достаточность, а не наличие полей.
     if (input.kind === 'contract') await this.assertContract(input.contract);
+    // Закреплённый контекст плана: проверенный снимок с каждым нужным
+    // источником, иначе — отказ до вызова; его digest — часть основания раунда.
+    const context =
+      input.kind === 'plan' ? this.planContext(input.graph, input.context) : undefined;
+    const contextKey = context ? contextDigest(context) : undefined;
     const rounds = this.engine.reviews(input.kind, subject);
     const last = rounds.at(-1);
     // Назначение reviewer по текущей политике: прежний раунд подтверждает предмет
@@ -230,7 +268,8 @@ export class Harness {
       last.digest === digest &&
       last.authorRuntime === input.author &&
       last.approved &&
-      last.reviewerBinding === binding
+      last.reviewerBinding === binding &&
+      last.contextDigest === contextKey
     )
       return last;
     if (rounds.length >= this.policy.maxAttempts * 2)
@@ -273,6 +312,7 @@ export class Harness {
         : 'You independently review a contract document. Check that every obligation is feasible and measurable. Do not edit files.',
       `Subject: ${input.kind} ${subject}, digest ${digest}, round ${round}. Author: ${input.author}.`,
       JSON.stringify(input.kind === 'plan' ? input.graph : input.contract, null, 2),
+      context ? `Pinned context snapshot ${contextKey}.\n\n` + contextText(context) : '',
       open.length
         ? 'Previous open findings. For each, report its state in `previous` (closed, open or withdrawn) with a concrete basis: ' +
           JSON.stringify(open.map((f) => ({ id: f.id, severity: f.severity, message: f.message })))
@@ -308,7 +348,15 @@ export class Harness {
         secrets: [...(execution.redact.secrets ?? [])],
       },
       AbortSignal.timeout(this.policy.runTimeoutMs + 5000),
-      { subjectId: subject, stage: input.kind + '-review' },
+      {
+        subjectId: subject,
+        stage: input.kind + '-review',
+        // Расход ревью плана закрепляется за графом и его поручениями из входа:
+        // граф может быть ещё не зарегистрирован, а состав — измениться позже.
+        ...(input.kind === 'plan'
+          ? { group: { id: subject, workIds: input.graph.orders.map((o) => o.id) } }
+          : {}),
+      },
     ).catch((error: unknown) => {
       if (error instanceof TaskFailure && error.kind === 'budget')
         throw new HarnessError('BUDGET_EXHAUSTED', error.message);
@@ -362,6 +410,7 @@ export class Harness {
       ...(response.model ? { reviewerModel: response.model } : {}),
       sameVendor: choice.sameVendor,
       reviewerBinding: binding,
+      ...(contextKey ? { contextDigest: contextKey } : {}),
       findings,
       artifact: join(dir, 'review.json'),
     };
@@ -539,10 +588,20 @@ export class Harness {
         });
       });
     }
+    // Согласование относится к графу с тем контекстом, который видел reviewer
+    // плана: другой снимок при том же графе требует нового раунда.
+    const reviewed = this.engine
+      .reviews('plan', graph.id)
+      .filter((r) => r.approved && r.digest === graph.digest)
+      .at(-1);
+    const contextChanged =
+      !!reviewed &&
+      reviewed.contextDigest !== (input.context ? contextDigest(input.context) : undefined);
     if (
       !graph.approval ||
       graph.approval.digest !== graph.digest ||
-      graph.policyDigest !== executionDigest(this.policy)
+      graph.policyDigest !== executionDigest(this.policy) ||
+      contextChanged
     ) {
       if (this.policy.approvalMode === 'agent') {
         const record = await this.review({
@@ -557,10 +616,11 @@ export class Harness {
             'Ревью плана не одобрило граф: ' + record.summary,
           );
         this.engine.approve(graph.id, 'agent');
-      } else if (!this.engine.read((v) => v.graph(graph.id)?.approval))
+      } else if (!this.engine.read((v) => v.graph(graph.id)?.approval) || contextChanged)
         throw new HarnessError(
           'APPROVAL_REQUIRED',
-          'approvalMode: operator — выполните review-plan и approve',
+          'approvalMode: operator — выполните review-plan и approve' +
+            (contextChanged ? ' (контекст изменился после ревью плана)' : ''),
         );
     }
     await this.runner.init();

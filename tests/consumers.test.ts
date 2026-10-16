@@ -3,7 +3,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   HarnessError,
@@ -704,5 +705,77 @@ test('T22: снимок, изменённый очисткой окружени�
   assert.equal(a.status, 'failed');
   assert.match(a.error!, /Изменён закреплённый dependency snapshot: library/);
   assert.equal(a.integrationSha, undefined, 'интеграция не начиналась');
+  ctx.store.close();
+});
+
+test('S2-R1-08/T11/T21: незавершённая очистка provider или потребителя сохраняет все её входы; повторная очистка с доступными зависимостями убирает их, повтор идемпотентен', async () => {
+  for (const side of ['product', 'library'] as const) {
+    const flag = join(mkdtempSync(join(tmpdir(), 'harness-cleanup-flag-')), 'ok');
+    // Очистка интеграции видит каждое дерево окружения и проходит только с флагом.
+    const down = `const fs = require('fs');
+if (process.env.DEVCONTOUR_PHASE !== 'integration') process.exit(0);
+for (const p of Object.values(JSON.parse(process.env.DEVCONTOUR_COMPONENTS_JSON))) if (!fs.existsSync(p)) process.exit(3);
+process.exit(fs.existsSync(${JSON.stringify(flag)}) ? 0 : 9);`;
+    const ctx = components({
+      policy: (p: any) => {
+        p.maxAttempts = 1;
+        p.repositories.find((r: any) => r.id === side).lifecycle = {
+          setup: [],
+          ready: [],
+          teardown: [{ id: 'down', command: node(down), timeoutMs: 30_000 }],
+        };
+      },
+    });
+    const before = ctx.ref('library');
+    await drive(ctx);
+    const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+    assert.equal(a.status, 'failed', side);
+    assert.match(a.error!, /Очистка окружения не завершена/);
+    assert.equal(ctx.ref('library'), before, 'приёмки нет');
+    const pending = join(ctx.state, 'artifacts', a.id, 'cleanup-pending.json');
+    const kept = JSON.parse(readFileSync(pending, 'utf8')) as {
+      worktrees: { dir: string }[];
+    };
+    for (const tree of kept.worktrees) assert.ok(existsSync(tree.dir), side + ': ' + tree.dir);
+    assert.ok(ctx.worktrees('library') > 1, side + ': дерево интеграции provider сохранено');
+    if (side === 'product')
+      assert.equal(ctx.worktrees('product'), 2, 'дерево потребителя сохранено');
+    // Пока очистка не проходит, повтор её не завершает и входы остаются.
+    await assert.rejects(ctx.runner.finishCleanup(a.id));
+    assert.ok(existsSync(pending));
+    assert.ok(ctx.worktrees('library') > 1);
+    writeFileSync(flag, '');
+    assert.equal((await ctx.runner.finishCleanup(a.id)).status, 'cleaned');
+    assert.equal(ctx.worktrees('library'), 1, side + ': деревья provider убраны');
+    assert.equal(ctx.worktrees('product'), 1, side + ': деревья потребителя убраны');
+    assert.ok(!existsSync(pending));
+    assert.equal((await ctx.runner.finishCleanup(a.id)).status, 'nothing-pending');
+    ctx.store.close();
+  }
+});
+
+test('S2-R1-08: ошибка удаления рабочего дерева попытки не теряется — записана и доводится finishCleanup', async () => {
+  // Gate блокирует своё рабочее дерево: штатное удаление в конце попытки не пройдёт.
+  const lock = `require('child_process').execFileSync('git', ['worktree', 'lock', '.']);`;
+  const ctx = components({
+    policy: (p: any) => {
+      const gate = p.repositories.find((r: any) => r.id === 'library').gates[0];
+      gate.command = node(`${lock} require(process.cwd() + '/unit.js');`);
+    },
+  });
+  await drive(ctx);
+  const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.equal(a.status, 'succeeded', a.error);
+  const pending = join(ctx.state, 'artifacts', a.id, 'cleanup-pending.json');
+  const record = JSON.parse(readFileSync(pending, 'utf8')) as {
+    reason: string;
+    errors: string[];
+    worktrees: { dir: string }[];
+  };
+  assert.equal(record.reason, 'remove-failed');
+  assert.ok(record.errors.length, 'ошибка удаления записана');
+  for (const tree of record.worktrees) ctx.repos.library!.git('worktree', 'unlock', tree.dir);
+  assert.equal((await ctx.runner.finishCleanup(a.id)).status, 'cleaned');
+  assert.equal(ctx.worktrees('library'), 1);
   ctx.store.close();
 });

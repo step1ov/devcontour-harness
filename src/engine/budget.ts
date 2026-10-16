@@ -215,6 +215,26 @@ export interface CallMeta {
   runId?: string;
   subjectId?: string;
   stage: string;
+  /**
+   * Состав группы из входа вызова (ревью плана до регистрации графа): группа и
+   * её поручения закрепляются за расходом на момент вызова, а не по составу,
+   * который хранилище узнает позже.
+   */
+  group?: { id: string; workIds: string[] };
+}
+
+/** Группа вызова и её поручения: из входа вызова и по составу, известному хосту. */
+function callGroup(
+  c: BudgetContext,
+  view: ExecutionView,
+  meta: Pick<CallMeta, 'subjectId' | 'group'>,
+) {
+  const id =
+    meta.group?.id ??
+    (meta.subjectId && isGroup(c, view, meta.subjectId) ? meta.subjectId : undefined);
+  if (!id) return undefined;
+  const members = [...new Set([...(meta.group?.workIds ?? []), ...c.scopes.members(id, view)])];
+  return { id, members };
 }
 
 /**
@@ -225,7 +245,7 @@ export interface CallMeta {
 export function callBudgets(
   c: BudgetContext,
   view: ExecutionView,
-  meta: Pick<CallMeta, 'runId' | 'subjectId'>,
+  meta: Pick<CallMeta, 'runId' | 'subjectId' | 'group'>,
   records = callRecords(view),
   at = Date.now(),
 ) {
@@ -233,11 +253,11 @@ export function callBudgets(
     (meta.runId ? view.attempt(meta.runId)?.workId : undefined) ??
     (meta.subjectId && view.work(meta.subjectId) ? meta.subjectId : undefined);
   if (workId) return workBudgets(c, view, workId, records, at);
-  const group = meta.subjectId && isGroup(c, view, meta.subjectId) ? meta.subjectId : undefined;
-  const open = group ? c.scopes.members(group, view).filter((id) => !closed(view.work(id))) : [];
+  const group = callGroup(c, view, meta);
+  const open = group ? group.members.filter((id) => !closed(view.work(id))) : [];
   const seen = new Set<string>();
   return [
-    group ? budgetStatus(c, view, { kind: 'group', id: group }, records, at) : undefined,
+    group ? budgetStatus(c, view, { kind: 'group', id: group.id }, records, at) : undefined,
     ...open.flatMap((id) => workBudgets(c, view, id, records, at)),
     budgetStatus(c, view, { kind: 'total' }, records, at),
   ].filter((b): b is BudgetStatus => {
@@ -256,7 +276,7 @@ export function callBudgets(
 export function callAttribution(
   c: BudgetContext,
   view: ExecutionView,
-  meta: Pick<CallMeta, 'runId' | 'subjectId'>,
+  meta: Pick<CallMeta, 'runId' | 'subjectId' | 'group'>,
   all = false,
 ): Pick<CallRecord, 'workId' | 'groupId' | 'workIds'> {
   const workId =
@@ -266,11 +286,11 @@ export function callAttribution(
     const groupId = c.scopes.groupOf(workId, view);
     return { workId, ...(groupId ? { groupId } : {}) };
   }
-  if (!meta.subjectId || !isGroup(c, view, meta.subjectId)) return {};
-  const members = c.scopes.members(meta.subjectId, view);
+  const group = callGroup(c, view, meta);
+  if (!group) return {};
   return {
-    groupId: meta.subjectId,
-    workIds: all ? [...new Set(members)] : members.filter((id) => !closed(view.work(id))),
+    groupId: group.id,
+    workIds: all ? group.members : group.members.filter((id) => !closed(view.work(id))),
   };
 }
 

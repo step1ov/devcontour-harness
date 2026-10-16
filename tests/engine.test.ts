@@ -1,7 +1,11 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access --
+ * Тест правит сырой JSON политики до разбора схемой.
+ */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { HarnessError, digestOf, type ErrorCode } from '../src/contracts/index.ts';
-import type { Engine } from '../src/engine/engine.ts';
+import { Engine } from '../src/engine/engine.ts';
+import { standaloneHost } from '../src/engine/standalone.ts';
 import {
   engineOf,
   graphOf,
@@ -463,4 +467,80 @@ test('T10: повторы ограничены maxAttempts; после исче�
   assert.equal(engine.claim('c1'), undefined, 'исчерпанное не выдаётся');
   engine.retry('a', { reason: 'база обновлена вручную' });
   assert.equal(engine.claim('c1')?.attempt, 1, 'сброс начинает счёт заново');
+});
+
+test('S2-R1-10/T06: без PASS gate кандидата приёмки нет, даже если gate интеграции и оба ревью зелёные', () => {
+  const { engine } = engineOf();
+  ready(engine, graphOf({ a: [] }));
+  const a = engine.claim('c1')!;
+  engine.phase(a.id, a.token, 'verifying', { candidateSha: sha('a') });
+  engine.phase(a.id, a.token, 'integrating', { integrationSha: sha('b') });
+  const ev = (kind: 'test' | 'review', phase: 'candidate' | 'integration', at: string) =>
+    engine.evidence(a.id, a.token, {
+      kind,
+      phase,
+      sha: at,
+      gate: kind === 'test' ? 'unit' : 'independent-review',
+      passed: true,
+      command: [],
+      exitCode: 0,
+      log: '',
+      digest: digestOf(kind + phase),
+      summary: '',
+    });
+  ev('test', 'integration', sha('b'));
+  ev('review', 'candidate', sha('a'));
+  ev('review', 'integration', sha('b'));
+  assert.throws(() => engine.finish(a.id, a.token, sha('b')), refused('GATE_FAILED'));
+  assert.notEqual(
+    engine.read((v) => v.work('a')!.status),
+    'done',
+  );
+  ev('test', 'candidate', sha('a'));
+  engine.finish(a.id, a.token, sha('b'));
+  assert.equal(
+    engine.read((v) => v.work('a')!.status),
+    'done',
+  );
+});
+
+test('S2-R1-03/T03: новая редакция источника не снимает чужое удержание; снимает только release владельца, в том числе после перезапуска', () => {
+  const { engine, store, clock } = engineOf();
+  ready(engine, graphOf({ a: [] }));
+  engine.hold(['a'], 'contract-change-1', 'операция идёт');
+  assert.equal(engine.claim('c1'), undefined);
+  ready(engine, graphOf({ a: [] }, '2'));
+  assert.equal(
+    engine.read((v) => v.work('a')!.hold?.operation),
+    'contract-change-1',
+  );
+  assert.equal(engine.claim('c1'), undefined, 'новая редакция не открыла выдачу');
+  // Перезапуск: другой движок над тем же хранилищем, ещё одна редакция.
+  engine.release('c1');
+  const restarted = new Engine({
+    host: standaloneHost(store, policyOf()),
+    policy: policyOf(),
+    now: () => clock.now,
+  });
+  ready(restarted, graphOf({ a: [] }, '3'), 'c2');
+  assert.equal(restarted.claim('c2'), undefined);
+  restarted.releaseHold('other-operation');
+  assert.equal(restarted.claim('c2'), undefined, 'чужая операция не снимает удержание');
+  restarted.releaseHold('contract-change-1');
+  assert.equal(restarted.claim('c2')?.workId, 'a');
+});
+
+test('S2-R1-11/T23: покрытие gates не засчитывает evidence попытки под прежней политикой', () => {
+  const { engine, store, clock } = engineOf();
+  ready(engine, graphOf({ a: [] }));
+  const a = engine.claim('c1')!;
+  passEvidence(engine, a.id, a.token, sha('a'), sha('b'));
+  engine.finish(a.id, a.token, sha('b'));
+  engine.release('c1');
+  assert.deepEqual(engine.uncoveredGates(['a']), []);
+  const next = policyOf((p: any) => (p.repositories[0].gates[0].command = ['entirely-new-test']));
+  const n = new Engine({ host: standaloneHost(store, next), policy: next, now: () => clock.now });
+  n.lead('new');
+  assert.deepEqual(n.uncoveredGates(['a']), [{ repositoryId: 'app', gates: ['unit'] }]);
+  n.release('new');
 });

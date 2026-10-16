@@ -68,6 +68,10 @@
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
     },
+    "contextDigest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
     "findings": {
       "type": "array",
       "items": {

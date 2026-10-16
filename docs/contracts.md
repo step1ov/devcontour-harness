@@ -162,7 +162,7 @@ Git blob в репозитории `repositoryId`); `checks` — договор 
 | `ControlState`    | Пауза и её причина, классы отказов, ожидания, применённая политика, reconfigure                                                                                                                                                                                                               |
 | `ControllerLease` | Единственный действующий controller                                                                                                                                                                                                                                                           |
 | `CallRecord`      | Вызов модели: стадия, runtime, сообщённая модель, версия, исход, процесс, монотонное время, закреплённая атрибуция (`workId`, `groupId`, `workIds`), счётчики, стоимость и её источник                                                                                                        |
-| `ReviewRecord`    | Раунд ревью плана/контракта: предмет, digest, номер раунда, вердикт, все находки предмета со статусами `open/closed/withdrawn`                                                                                                                                                                |
+| `ReviewRecord`    | Раунд ревью плана/контракта: предмет, digest, номер раунда, вердикт, назначение reviewer, digest закреплённого контекста плана, все находки предмета со статусами `open/closed/withdrawn`                                                                                                     |
 
 Локальные записи адресуются `(namespace, owner, key)`; пространства и их
 схемы — `localSchemas` (`usage`, `context-snapshots`, `run-keys`, `delivery`,

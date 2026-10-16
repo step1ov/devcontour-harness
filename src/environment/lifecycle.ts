@@ -194,12 +194,15 @@ async function teardown(
 /**
  * Завершить очистку окружения, прерванную падением процесса: по сохранённому
  * receipt, только внутри разрешённых корней, только при той же политике
- * очистки и только когда процесс-владелец уже не существует.
+ * очистки и только когда процесс-владелец уже не существует (или это он сам,
+ * `options.owner`, после окончания попытки).
  */
 export async function cleanupEnvironment(
   receiptPath: string,
   policy: ExecutionPolicy,
   allowedRoots: string[],
+  /** `owner` — процесс, который вправе повторить очистку своего окружения сам. */
+  options: { owner?: number } = {},
 ) {
   const receipt = JSON.parse(await readFile(receiptPath, 'utf8')) as {
     cwd: string;
@@ -221,7 +224,7 @@ export async function cleanupEnvironment(
   if (!lifecycle)
     throw new Error('Политика очистки изменилась; сверьте сохранённое окружение вручную');
   if (receipt.status === 'cleaned') return { status: 'already-cleaned' as const };
-  if (receipt.ownerPid && processAlive(receipt.ownerPid))
+  if (receipt.ownerPid && receipt.ownerPid !== options.owner && processAlive(receipt.ownerPid))
     throw new Error('Процесс владельца окружения ещё существует; сначала остановите его');
   const execution = executionEnvironment([policy.environment, repo?.environment], {
     ...receipt.devcontourEnv,

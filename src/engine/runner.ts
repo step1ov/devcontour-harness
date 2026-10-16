@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import {
   HarnessError,
@@ -35,7 +36,7 @@ import {
   type DependencySnapshot,
   type Repositories,
 } from '../verification/dependencies.ts';
-import { CleanupFailure } from '../environment/lifecycle.ts';
+import { CleanupFailure, cleanupEnvironment } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { REQUIREMENT_GATE, assertRequirements } from '../verification/requirements.ts';
 import { BlockedError, classifyFailure } from './classify.ts';
@@ -100,6 +101,8 @@ export class Runner {
   private readonly policy: ExecutionPolicy;
   private jobs = new Map<string, { promise: Promise<void>; controller: AbortController }>();
   private mergeTails = new Map<string, Promise<void>>();
+  /** Входы незавершённой очистки проверок потребителей, по попыткам. */
+  private retained = new Map<string, Retained>();
 
   /** Корпус подтверждённых случаев: принятие версий и закреплённые snapshot. */
   readonly corpus: CorpusStore;
@@ -720,6 +723,7 @@ export class Runner {
     const artifacts = join(this.options.stateDir, 'artifacts', attempt.id);
     const worktrees: string[] = [];
     const snapshots: DependencySnapshot[] = [];
+    let preserve = false;
     try {
       // Ресурсы поручения, gates его репозитория и выбранных проверок
       // потребителей — одним резервированием на всю попытку.
@@ -932,6 +936,9 @@ export class Runner {
         },
       );
     } catch (error) {
+      // Незавершённая очистка окружения: рабочие деревья и снимки — входы её
+      // повторения (`environment.json` ссылается на них), их нельзя убирать.
+      preserve = error instanceof CleanupFailure;
       // Прерывание по лимиту времени называется лимитом времени, что бы ни выбросила прерванная операция.
       const expired =
         controller.signal.aborted &&
@@ -971,12 +978,87 @@ export class Runner {
       clearTimeout(timeout);
       clearInterval(heartbeat);
       // Рабочие деревья попытки убираются; ветка попытки и объекты остаются —
-      // по ним recovery и следующая попытка видят кандидата.
-      for (const dir of worktrees)
-        await git(repoPath, 'worktree', 'remove', '--force', dir).catch(() => undefined);
-      // Снимки зависимостей попытки: SHA, tree и artifacts записаны в попытке.
-      await removeSnapshots(this.repositories(), snapshots);
+      // по ним recovery и следующая попытка видят кандидата. Снимки
+      // зависимостей: SHA, tree и artifacts записаны в попытке. Что убрать не
+      // удалось или нельзя (незавершённая очистка), записывается для
+      // `finishCleanup` — ошибки удаления не теряются.
+      const retained = this.retained.get(attempt.id) ?? { worktrees: [], snapshots: [] };
+      this.retained.delete(attempt.id);
+      const pending: Retained = {
+        worktrees: [
+          ...worktrees.map((dir) => ({ checkout: repoPath, dir })),
+          ...retained.worktrees,
+        ],
+        snapshots: [...snapshots, ...retained.snapshots],
+      };
+      await this.removeTrees(artifacts, pending, preserve).catch(() => undefined);
     }
+  }
+
+  /**
+   * Убрать рабочие деревья и снимки попытки. При незавершённой очистке
+   * (`keep`) ничего не убирается; оставшееся записывается в
+   * `cleanup-pending.json` артефактов попытки.
+   */
+  private async removeTrees(artifacts: string, pending: Retained, keep: boolean) {
+    const left: Retained = keep ? pending : { worktrees: [], snapshots: [] };
+    const errors: string[] = [];
+    if (!keep) {
+      for (const tree of pending.worktrees)
+        await git(tree.checkout, 'worktree', 'remove', '--force', tree.dir).catch((e: unknown) => {
+          if (!existsSync(tree.dir)) return;
+          left.worktrees.push(tree);
+          errors.push(`${tree.dir}: ${e instanceof Error ? e.message : String(e)}`);
+        });
+      errors.push(...(await removeSnapshots(this.repositories(), pending.snapshots)));
+      left.snapshots.push(...pending.snapshots.filter((d) => existsSync(d.path)));
+    }
+    const file = join(artifacts, 'cleanup-pending.json');
+    if (!left.worktrees.length && !left.snapshots.length) return;
+    await mkdir(artifacts, { recursive: true });
+    await writeFile(
+      file,
+      JSON.stringify(
+        { reason: keep ? 'cleanup-failed' : 'remove-failed', errors, ...left },
+        null,
+        2,
+      ),
+    );
+  }
+
+  /**
+   * Довести очистку завершённой попытки: повторить незавершённый teardown по
+   * каждому сохранённому `environment.json` (входы на месте), затем убрать
+   * рабочие деревья и снимки. Идемпотентно: без записи — `nothing-pending`;
+   * отказ повторной очистки оставляет запись и входы.
+   */
+  async finishCleanup(attemptId: string) {
+    const attempt = this.engine.read((v) => v.attempt(attemptId));
+    if (!attempt) throw new HarnessError('NOT_FOUND', 'Попытка не найдена: ' + attemptId);
+    if (attempt.status === 'active' || this.jobs.has(attemptId))
+      throw new HarnessError('NOT_READY', 'Попытка ещё идёт: ' + attemptId);
+    const artifacts = join(this.options.stateDir, 'artifacts', attemptId);
+    const file = join(artifacts, 'cleanup-pending.json');
+    if (!existsSync(file)) return { status: 'nothing-pending' as const };
+    const pending = JSON.parse(await readFile(file, 'utf8')) as Retained & { reason: string };
+    const roots = [await realpath(this.options.stateDir)];
+    const cleaned: string[] = [];
+    for (const receipt of await receipts(artifacts)) {
+      const state = JSON.parse(await readFile(receipt, 'utf8')) as { status: string };
+      if (state.status !== 'cleanup-failed') continue;
+      // Владелец окружения — этот процесс, а попытка уже закончена.
+      await cleanupEnvironment(receipt, this.policy, roots, { owner: process.pid });
+      cleaned.push(receipt);
+    }
+    await rm(file);
+    await this.removeTrees(artifacts, pending, false);
+    if (existsSync(file))
+      throw new HarnessError(
+        'INTERNAL',
+        'Не удалось убрать рабочие деревья попытки: ' +
+          (JSON.parse(await readFile(file, 'utf8')) as { errors: string[] }).errors.join('; '),
+      );
+    return { status: 'cleaned' as const, receipts: cleaned };
   }
 
   private async gate(
@@ -1149,10 +1231,15 @@ export class Runner {
       }
       // Незавершённая очистка окружения потребителя: его рабочие деревья —
       // контекст повторной очистки по environment.json, их нельзя убирать.
-      if (failure instanceof CleanupFailure)
+      if (failure instanceof CleanupFailure) {
+        const retained = this.retained.get(attempt.id) ?? { worktrees: [], snapshots: [] };
+        retained.worktrees.push({ checkout, dir });
+        retained.snapshots.push(...dependencies.filter((d) => d.repositoryId !== provider));
+        this.retained.set(attempt.id, retained);
         throw new CleanupFailure(
           `${failure.message}; рабочие деревья проверки потребителя ${repo.id} сохранены для повторной очистки (${join(own, 'environment', 'environment.json')})`,
         );
+      }
       // Очистка — обязательная часть проверки: её отказ не скрывается и не
       // заслоняется отказом самой проверки.
       const leftovers = await removeSnapshots(
@@ -1526,4 +1613,21 @@ export class Runner {
       throw error;
     }
   }
+}
+
+/** Рабочие деревья (с их checkout) и снимки зависимостей, которые ещё нужно убрать. */
+interface Retained {
+  worktrees: { checkout: string; dir: string }[];
+  snapshots: DependencySnapshot[];
+}
+
+/** Сохранённые receipt окружений попытки (`environment.json`) в её артефактах. */
+async function receipts(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...(await receipts(path)));
+    else if (entry.name === 'environment.json') out.push(path);
+  }
+  return out;
 }
