@@ -6,13 +6,12 @@ import {
   HarnessError,
   digestOf,
   type CheckSuite,
-  type ContractDocument,
   type ExecutionTransaction,
   type ExecutionView,
   type WorkState,
 } from '../contracts/index.ts';
 import type { Engine } from '../engine/engine.ts';
-import { contractDocuments, obligationOf } from './checks.ts';
+import { contractDocuments, obligationOf, suiteBasis } from './checks.ts';
 
 /**
  * Версионируемый корпус подтверждённых случаев.
@@ -197,20 +196,7 @@ export function versionOf(suite: CheckSuite, ref: { number?: number; digest?: st
   return same[0]!;
 }
 
-/** Основание случаев корпуса: закреплённые файлы, gate и смысл обязательств. */
-export function suiteBasis(contract: ContractDocument) {
-  const declaration = contract.checks!;
-  return digestOf({
-    artifacts: (contract.artifacts ?? []).map((a) => ({ path: a.path, blob: a.blob })),
-    gate: declaration.gate,
-    obligations: declaration.obligations.map((o) => ({
-      property: o.property,
-      domain: o.domain,
-      answer: o.answer,
-      method: o.method,
-    })),
-  });
-}
+export { suiteBasis } from './checks.ts';
 
 const head = (suite: CheckSuite) =>
   [...suite.versions]
@@ -267,18 +253,24 @@ export class CorpusStore {
         `Свойство ${property} не объявлено в договорах поручения`,
       );
     const contract = found.contract;
-    const id = 'KS-' + contract.id;
     const repositoryId = work.order.repositoryId;
-    const existing = this.all(view, repositoryId).find((x) => x.id === id);
+    // Корпус принадлежит нормативному основанию договора, а не его ID: та же
+    // редакция ID с другими правилами ответа, областью или эталоном получает
+    // свой корпус, а случаи прежнего основания остаются его историей.
+    const basis = suiteBasis(contract);
+    const suites = this.all(view, repositoryId);
+    const existing = suites.find((x) => x.contractId === contract.id && x.basis === basis);
     if (existing)
       return { suite: structuredClone(existing), contract, obligation: found.obligation };
+    const first = 'KS-' + contract.id;
+    const id = suites.some((x) => x.id === first) ? `${first}-${basis.slice(0, 12)}` : first;
     const suite: CheckSuite = {
       id,
       repositoryId,
       contractId: contract.id,
       contractDigest: digestOf(contract),
       gate: contract.checks!.gate,
-      basis: suiteBasis(contract),
+      basis,
       cases: {},
       versions: [],
       decisions: [],

@@ -271,5 +271,6 @@ export const transactionKinds = [
   'checks.adopted',
   'checks.awaiting-operator',
   'checks.adoption-abandoned',
+  'checks.spike',
 ] as const;
 export type TransactionKind = (typeof transactionKinds)[number];

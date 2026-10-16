@@ -3,7 +3,7 @@
 // говорит по протоколу CLI, но ответы берёт из сценария, а не из модели.
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 
 const runtime = basename(process.argv[1]).includes('claude') ? 'claude' : 'codex';
 const args = process.argv.slice(2);
@@ -91,6 +91,17 @@ for (const [path, text] of Object.entries(step.files ?? {})) {
   writeFileSync(join(process.cwd(), path), text);
 }
 for (const path of step.remove ?? []) rmSync(join(process.cwd(), path), { force: true });
+// Самопроверка исполнителя: команда из запроса controller на рабочем дереве.
+if (step.selfCheck) {
+  const found = prompt.match(/Self-check: run `([^`]+)`/);
+  let record = { code: null, output: 'self-check не предложен' };
+  if (found) {
+    const [bin, ...rest] = found[1].split(' ');
+    const run = spawnSync(bin, rest, { cwd: process.cwd(), encoding: 'utf8' });
+    record = { code: run.status, output: (run.stdout ?? '') + (run.stderr ?? '') };
+  }
+  writeFileSync(`${scenarioPath}.${role}.${index}.selfcheck`, JSON.stringify(record));
+}
 if (step.commit)
   execFileSync('git', [
     '-c',

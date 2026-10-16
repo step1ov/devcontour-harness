@@ -48,6 +48,7 @@ import { reusableImplementation } from './reuse.ts';
 import { unprovenReason } from '../verification/proof.ts';
 import {
   contractDocuments,
+  corpusBindingHolds,
   effectiveChecks,
   episodeBasis,
   orderPropertyProblems,
@@ -59,6 +60,7 @@ import {
   closeIfBasisChanged,
 } from './property-recovery.ts';
 import { REQUIREMENT_GATE } from '../verification/requirements.ts';
+import { pinnedCorpus, propertyProofProblem } from '../verification/acceptance.ts';
 import {
   jointImpact,
   jointPolicyDigest,
@@ -226,12 +228,18 @@ export class Engine {
           );
         if (prior?.status === 'done' && contentDigest(prior.order) === contentDigest(order))
           continue;
-        // Принятая версия корпуса остаётся за поручением, пока оно ссылается на
-        // её контракт; эпизод восстановления и его история — тоже: закрывает их
+        // Принятая версия корпуса остаётся за поручением, пока среди его
+        // договоров есть договор этого корпуса с тем же нормативным основанием; эпизод восстановления и его история — тоже: закрывает их
         // согласование нового основания, а не новая редакция источника.
         const corpus =
           prior?.checkVersion &&
-          order.contracts.some((c) => 'KS-' + c.id === prior.checkVersion!.suite)
+          corpusBindingHolds(
+            tx
+              .locals('check-suites')
+              .map((x) => x.value)
+              .find((x) => x.id === prior.checkVersion!.suite),
+            contractDocuments(order, tx),
+          )
             ? prior.checkVersion
             : undefined;
         tx.putWork({
@@ -1308,6 +1316,19 @@ export class Engine {
       }
       const unproven = unprovenReason(w.order.requirements, a.evidence, sha);
       if (unproven) throw new HarnessError('GATE_FAILED', unproven);
+      // Договор проверки доказан манифестом и корпусом закреплённой версии на
+      // обеих фазах, а не только битом PASS: сохранённое evidence без них
+      // (в том числе при recovery) не принимается.
+      const proof = propertyProofProblem({
+        order: w.order,
+        contracts: contractDocuments(w.order, tx),
+        candidateSha: a.candidateSha,
+        resultSha: sha,
+        effective: a.checks?.effective,
+        corpus: a.checks?.corpus ? pinnedCorpus(tx, a.checks.corpus) : undefined,
+        evidence: a.evidence,
+      });
+      if (proof) throw new HarnessError('GATE_FAILED', proof);
       const contract = this.contractBlocker(w, tx);
       if (contract) throw new HarnessError('APPROVAL_STALE', contract);
       const refusal = this.host.guards.beforeAccept(w, a, tx);

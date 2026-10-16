@@ -54,6 +54,7 @@ import { JointRunner } from '../engine/joint-runner.ts';
 import { git } from '../environment/process.ts';
 import { analyzeRecovery, applyCases } from './recovery.ts';
 import { declarationProblems } from '../verification/checks.ts';
+import { spikeOf, spikesOf } from '../verification/spike.ts';
 import { staleArtifacts } from '../verification/confirm.ts';
 
 export interface HarnessOptions {
@@ -312,6 +313,7 @@ export class Harness {
         : 'You independently review a contract document. Check that every obligation is feasible and measurable. Do not edit files.',
       `Subject: ${input.kind} ${subject}, digest ${digest}, round ${round}. Author: ${input.author}.`,
       JSON.stringify(input.kind === 'plan' ? input.graph : input.contract, null, 2),
+      input.kind === 'contract' ? this.spikeNote(input.contract) : '',
       context ? `Pinned context snapshot ${contextKey}.\n\n` + contextText(context) : '',
       open.length
         ? 'Previous open findings. For each, report its state in `previous` (closed, open or withdrawn) with a concrete basis: ' +
@@ -430,6 +432,21 @@ export class Harness {
     );
   }
 
+  /**
+   * Эксперименты, на которые ссылаются тяжёлые обязательства: reviewer читает
+   * фактический результат, а не пересказ автора.
+   */
+  private spikeNote(contract: ContractDocument) {
+    const ids = new Set(contract.checks?.obligations.flatMap((o) => o.feasibility?.spike ?? []));
+    if (!ids.size) return '';
+    const repositoryId = contract.repositoryId ?? this.policy.repositories[0]!.id;
+    const spikes = this.engine.read((v) => spikesOf(v, repositoryId)).filter((x) => ids.has(x.id));
+    return (
+      'Feasibility spikes referenced by hard obligations (pinned by digest). For obligations marked hard, read the spike: a timeout is inconclusive for that method and budget — it neither proves hardness or impossibility nor allows weakening the obligation; success on a sample does not prove a bound for every input. Spikes: ' +
+      JSON.stringify(spikes)
+    );
+  }
+
   private async assertContract(contract: ContractDocument) {
     const repo =
       this.policy.repositories.find((r) => r.id === (contract.repositoryId ?? '')) ??
@@ -441,6 +458,8 @@ export class Harness {
           gates: repo.gates,
           repositoryId: repo.id,
           artifacts: (contract.artifacts ?? []).map((a) => a.path),
+          // Ссылка тяжёлого обязательства закрепляет digest эксперимента этого репозитория.
+          spike: (id) => this.engine.read((v) => spikeOf(v, repo.id, id)),
         })
       : [];
     const stale = await staleArtifacts(
@@ -466,6 +485,18 @@ export class Harness {
   /** Корпус: принятые версии, решения, отложенные принятия. */
   get corpus() {
     return this.runner.corpus;
+  }
+  /**
+   * Ограниченный эксперимент выполнимости до реализации тяжёлого обязательства.
+   * Таймаут — `inconclusive`: не доказательство невыполнимости и не основание
+   * ослаблять обязательство.
+   */
+  spike(input: unknown) {
+    return this.runner.spike(input);
+  }
+  /** Эксперименты выполнимости репозитория (по умолчанию — всех). */
+  spikes(repositoryId?: string) {
+    return this.engine.read((v) => spikesOf(v, repositoryId));
   }
   /** Подтвердить пример закреплённым эталоном; подтверждённый — новая версия корпуса. */
   submitCase(input: unknown) {

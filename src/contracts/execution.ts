@@ -18,7 +18,7 @@ import {
   jointPassedSchema,
 } from './result.ts';
 import { reviewRecordSchema } from './review.ts';
-import { contractDocumentSchema } from './checks.ts';
+import { contractDocumentSchema, spikeSchema } from './checks.ts';
 
 /**
  * Нейтральная модель исполнения — то, что ExecutionStore обязан хранить
@@ -866,6 +866,11 @@ export const localSchemas = {
    * `contracts` состояния).
    */
   'contract-documents': contractDocumentSchema,
+  /**
+   * Ограниченные эксперименты выполнимости по репозиториям: на них ссылаются
+   * тяжёлые обязательства договора проверки (у DevContour — `spikes`).
+   */
+  spikes: spikeSchema,
 } as const;
 export type LocalNamespace = keyof typeof localSchemas;
 export type LocalValue<N extends LocalNamespace> = z.infer<(typeof localSchemas)[N]>;

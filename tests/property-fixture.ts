@@ -236,6 +236,7 @@ export function propertySetup(options: {
   policy?: (p: Record<string, unknown>) => void;
   files?: Record<string, string>;
   writeScope?: string[];
+  now?: () => number;
 }) {
   const files: Record<string, string> = {
     'oracle.mjs': oracle,
@@ -263,6 +264,7 @@ export function propertySetup(options: {
       ? undefined
       : (options.properties ?? ['knapsack-optimal', 'reach-complete']);
   const ctx = setup({
+    ...(options.now ? { now: options.now } : {}),
     scenario: {
       writer: options.writer,
       reviewer: options.reviewer ?? approve(),

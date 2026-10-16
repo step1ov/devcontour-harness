@@ -43,9 +43,11 @@ export { callDurationMs, callRecords, usageTotals } from './engine/usage.ts';
 export {
   contractDocuments,
   declarationProblems,
+  corpusBindingHolds,
   effectiveChecks,
   orderCheckManifest,
   orderPropertyProblems,
+  suiteBasis,
 } from './verification/checks.ts';
 export {
   corpusWitness,
@@ -66,6 +68,14 @@ export {
   type PortableSuite,
 } from './verification/corpus.ts';
 export { caseInputSchema, staleArtifacts, type CaseRequest } from './verification/confirm.ts';
+export {
+  assertResult,
+  pinnedCorpus,
+  propertyProofProblem,
+  resultProblems,
+} from './verification/acceptance.ts';
+export { runSpike, spikeOf, spikesOf } from './verification/spike.ts';
+export { writeSelfCheck, type SelfCheckPlan } from './verification/self-check.ts';
 /**
  * Профили стека: разрешение встроенного или локального профиля (только чтение
  * манифестов), закрепление и сборка описания репозитория и ролей политики.

@@ -102,6 +102,39 @@
                 "checks": {
                   "type": "string",
                   "pattern": "^[a-f0-9]{64}$"
+                },
+                "corpus": {
+                  "type": "object",
+                  "properties": {
+                    "suite": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "number": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  },
+                  "required": [
+                    "suite",
+                    "number",
+                    "digest"
+                  ],
+                  "additionalProperties": false
+                },
+                "requiredGates": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
                 }
               },
               "required": [
@@ -366,6 +399,64 @@
                   "consumer": {
                     "type": "string",
                     "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  },
+                  "checks": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "property": {
+                    "type": "object",
+                    "properties": {
+                      "level": {
+                        "type": "string",
+                        "enum": [
+                          "manifest",
+                          "legacy"
+                        ]
+                      },
+                      "manifest": {
+                        "type": "object",
+                        "properties": {
+                          "digest": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "properties": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 200
+                            }
+                          },
+                          "corpus": {
+                            "type": "object",
+                            "properties": {
+                              "digest": {
+                                "type": "string",
+                                "pattern": "^[a-f0-9]{64}$"
+                              },
+                              "cases": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              }
+                            },
+                            "required": [
+                              "digest",
+                              "cases"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "digest",
+                          "properties"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "additionalProperties": false
                   },
                   "reviewer": {
                     "type": "object",
@@ -613,6 +704,39 @@
                 "checks": {
                   "type": "string",
                   "pattern": "^[a-f0-9]{64}$"
+                },
+                "corpus": {
+                  "type": "object",
+                  "properties": {
+                    "suite": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "number": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  },
+                  "required": [
+                    "suite",
+                    "number",
+                    "digest"
+                  ],
+                  "additionalProperties": false
+                },
+                "requiredGates": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
                 }
               },
               "required": [
@@ -877,6 +1001,64 @@
                   "consumer": {
                     "type": "string",
                     "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  },
+                  "checks": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "property": {
+                    "type": "object",
+                    "properties": {
+                      "level": {
+                        "type": "string",
+                        "enum": [
+                          "manifest",
+                          "legacy"
+                        ]
+                      },
+                      "manifest": {
+                        "type": "object",
+                        "properties": {
+                          "digest": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "properties": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 200
+                            }
+                          },
+                          "corpus": {
+                            "type": "object",
+                            "properties": {
+                              "digest": {
+                                "type": "string",
+                                "pattern": "^[a-f0-9]{64}$"
+                              },
+                              "cases": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              }
+                            },
+                            "required": [
+                              "digest",
+                              "cases"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "digest",
+                          "properties"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "additionalProperties": false
                   },
                   "reviewer": {
                     "type": "object",

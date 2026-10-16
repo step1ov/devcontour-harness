@@ -50,6 +50,15 @@ const ref = (e: EvidenceRecord, attempt: AttemptState) => ({
   digest: e.digest,
   summary: e.summary.slice(0, 4000),
   ...(e.consumer ? { consumer: e.consumer } : {}),
+  ...(e.checks ? { checks: e.checks } : {}),
+  ...(e.property && (e.property.level || e.property.manifest)
+    ? {
+        property: {
+          ...(e.property.level ? { level: e.property.level } : {}),
+          ...(e.property.manifest ? { manifest: e.property.manifest } : {}),
+        },
+      }
+    : {}),
   ...(e.kind === 'review'
     ? {
         reviewer: {
@@ -94,6 +103,8 @@ export function runResult(attempt: AttemptState, harnessVersion: string): RunRes
       policyDigest: attempt.policyDigest,
       ...(attempt.contextSnapshot ? { contextDigest: attempt.contextSnapshot } : {}),
       ...(attempt.checks ? { checks: attempt.checks.effective } : {}),
+      ...(attempt.checks?.corpus ? { corpus: attempt.checks.corpus } : {}),
+      ...(attempt.requiredGates ? { requiredGates: attempt.requiredGates } : {}),
     },
     checked: {
       dependencies: (attempt.dependencies ?? []).map(({ repositoryId, sha, tree, artifacts }) => ({

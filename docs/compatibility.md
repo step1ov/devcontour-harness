@@ -78,8 +78,9 @@ coordinator. `Store.change(type, fn)` открывает `BEGIN IMMEDIATE` (вл
 | `workflow-jobs`                                        | `lead`                    | `WorkflowJob` (техническая очередь ведущего: предмет, автор, digest входа, этап, попытки, ремонты, владение, история)               |
 | `context-snapshots`, `run-keys`, `delivery`, `reviews` | новые                     | Новые записи; прежних данных нет                                                                                                    |
 | `contract-documents`                                   | — (`contracts` состояния) | Документ контракта по digest; адаптер отдаёт его из контрактов DevContour (`checks`, `artifacts`) и не пишет отдельно               |
+| `spikes`                                               | `spikes`                  | `Spike` (эксперимент выполнимости: SHA, команда, seed, размеры, предел, исходы, пределы вывода, среда, digest)                      |
 
-Прочие пространства DevContour (`spikes`, `contract-change`, `signals`,
+Прочие пространства DevContour (`contract-change`, `signals`,
 `projection`) — продуктовые; движок их не читает и не пишет.
 
 ## Отображение записей

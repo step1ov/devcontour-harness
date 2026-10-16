@@ -35,6 +35,26 @@ export const evidenceRefSchema = z.strictObject({
   digest: digestSchema,
   summary: z.string().max(4000),
   consumer: idSchema.optional(),
+  /** Версия проверок, под которой получена запись (`checks.effective` попытки). */
+  checks: digestSchema.optional(),
+  /**
+   * Уровень доказательства генеративного gate и манифест исполненной проверки:
+   * без них получатель выдал бы сильный уровень за прежний.
+   */
+  property: z
+    .strictObject({
+      level: z.enum(['manifest', 'legacy']).optional(),
+      manifest: z
+        .strictObject({
+          digest: digestSchema,
+          properties: z.array(z.string().min(1).max(200)),
+          corpus: z
+            .strictObject({ digest: digestSchema, cases: z.number().int().min(0) })
+            .optional(),
+        })
+        .optional(),
+    })
+    .optional(),
   reviewer: z
     .strictObject({
       runtime: runtimeNameSchema,
@@ -110,6 +130,16 @@ const resultBase = {
     policyDigest: digestSchema,
     contextDigest: digestSchema.optional(),
     checks: digestSchema.optional(),
+    /** Закреплённая версия корпуса подтверждённых случаев. */
+    corpus: z
+      .strictObject({
+        suite: z.string().min(1).max(200),
+        number: z.number().int().min(0),
+        digest: digestSchema,
+      })
+      .optional(),
+    /** Обязательные gates попытки, раскрытые при выдаче. */
+    requiredGates: z.array(z.string().min(1).max(200)).optional(),
   }),
   checked: checkedInputsSchema,
   evidence: z.array(evidenceRefSchema),

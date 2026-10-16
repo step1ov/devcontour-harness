@@ -446,3 +446,191 @@ test('Переносимый корпус проверяется по своим
   };
   assert.throws(() => verifySuite(tampered), /не совпадает с её случаями/);
 });
+
+test('AC13/AC19: подтверждённый дефект останавливает следующего кандидата на gate до ревью; самопроверка исполнителя его ловит; полный корпус больше 20 случаев подсказки исполняется', async () => {
+  const ctx = propertySetup({
+    writer: [
+      implement({ 'src/knap.mjs': knap.zeroWeight }),
+      { ...implement({ 'src/knap.mjs': knap.zeroWeight }), selfCheck: true, recordPrompt: true },
+      { ...implement({ 'src/knap.mjs': knap.correct }), selfCheck: true },
+    ],
+  });
+  await ctx.runner.init();
+  await runAll(ctx);
+  const first = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.equal(first.failureKind, 'gate', first.error);
+  // 25 подтверждённых случаев одного класса: больше, чем показывает подсказка.
+  for (let v = 1; v <= 25; v++) {
+    const r = await ctx.runner.submitCase({
+      workId: 'add-greeting',
+      property: 'knapsack-optimal',
+      input: JSON.stringify({ items: [{ w: 0, v }], cap: 0 }),
+      expected: String(v),
+      key: `case-zero-${v}`,
+    });
+    assert.equal(r.decision.outcome, 'confirmed', r.decision.reason);
+  }
+  const bound = ctx.engine.read((v) => v.work('add-greeting')!.checkVersion)!;
+  assert.equal(ctx.runner.corpus.read(bound.suite).versions.at(-1)!.cases.length, 25);
+  const reviews = () => {
+    const file = `${ctx.scenarioPath}.codex.reviewer.count`;
+    return existsSync(file) ? Number(readFileSync(file, 'utf8')) : 0;
+  };
+  const before = reviews();
+  ctx.engine.retry('add-greeting');
+  await ctx.runner.drain();
+  const second = ctx.engine.read((v) => v.attempts('add-greeting')[1]!);
+  assert.equal(second.failureKind, 'gate', second.error);
+  assert.equal(reviews(), before, 'кандидат остановлен до нового ревью');
+  const gate = second.evidence.find((e) => e.gate === 'properties' && e.phase === 'candidate')!;
+  assert.equal(gate.passed, false);
+  assert.equal(gate.property?.manifest?.corpus?.cases, 25);
+  assert.equal(gate.property?.report?.corpus?.executed, 25);
+  assert.equal(second.checks?.corpus?.digest, bound.digest);
+  // Подсказка показала 20 случаев, а исполнялись все 25.
+  const prompt = readFileSync(`${ctx.scenarioPath}.writer.1.prompt`, 'utf8');
+  assert.match(prompt, /25 cases confirmed by the pinned oracle/);
+  assert.match(prompt, /First 20 shown/);
+  assert.match(prompt, /Self-check: run `/);
+  // Самопроверка исполнителя поймала тот же дефект на рабочем дереве.
+  const self = JSON.parse(readFileSync(`${ctx.scenarioPath}.writer.1.selfcheck`, 'utf8')) as {
+    code: number;
+    output: string;
+  };
+  assert.equal(self.code, 1, self.output);
+  assert.match(self.output, /FAIL knapsack-optimal: input=/);
+  assert.match(self.output, /CORPUS knapsack-optimal \[K-[a-f0-9]+\]: ожидалось \d+, получено 0/);
+  assert.match(self.output, /diagnostic|failing/);
+  // Два отказа по свойству подряд: третья выдача — только после решения.
+  const recovery = ctx.engine.read((v) => v.work('add-greeting')!.recovery)!;
+  assert.equal(recovery.status, 'awaiting-lead');
+  ctx.engine.recoveryDecide(
+    'add-greeting',
+    recovery.id,
+    {
+      action: 'new-approach',
+      reason: 'Ноль веса пропускается: такие предметы надо брать всегда.',
+      evidence: ['корпус: 25 случаев с нулевым весом'],
+      hypothesis: 'Предметы нулевого веса не тратят вместимость.',
+      plan: 'Полный корпус и генератор на кандидате.',
+      source: { kind: 'operator' },
+      decidedAt: new Date().toISOString(),
+    },
+    recovery.version,
+  );
+  ctx.engine.retry('add-greeting');
+  await ctx.runner.drain();
+  const done = ctx.engine.read((v) => v.attempts('add-greeting')[2]!);
+  assert.equal(done.status, 'succeeded', done.error);
+  for (const phase of ['candidate', 'integration'] as const) {
+    const e = done.evidence.find((x) => x.gate === 'properties' && x.phase === phase)!;
+    assert.equal(e.passed, true, e.summary);
+    assert.equal(e.property?.report?.corpus?.passed, 25);
+    assert.equal(e.checks, done.checks?.effective);
+  }
+  const fixed = JSON.parse(readFileSync(`${ctx.scenarioPath}.writer.2.selfcheck`, 'utf8')) as {
+    code: number;
+    output: string;
+  };
+  assert.equal(fixed.code, 0, fixed.output);
+});
+
+test('S2.5: без самопроверки gates те же: поручение без свойств не получает самопроверку, а поручение со свойствами без неё всё равно останавливается gate', async () => {
+  const ctx = propertySetup({
+    writer: { ...implement({ 'src/knap.mjs': knap.zeroWeight }), recordPrompt: true },
+    properties: false,
+  });
+  await ctx.runner.init();
+  await runAll(ctx);
+  const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  const prompt = readFileSync(`${ctx.scenarioPath}.writer.0.prompt`, 'utf8');
+  assert.doesNotMatch(prompt, /Self-check: run/, 'прежний уровень — без самопроверки');
+  // Gate исполняется независимо от самопроверки: дефект нулевого веса — отказ gate.
+  assert.equal(a.failureKind, 'gate', a.error);
+});
+
+test('AC05: эксперимент по таймауту — inconclusive и ничего не ослабляет; ограниченный успех хранит версии и пределы вывода; ссылка закрепляет digest, reviewer читает результат', async () => {
+  const ctx = propertySetup({
+    writer: implement({ 'src/knap.mjs': knap.correct }),
+    reviewer: { ...approve(), recordPrompt: true },
+    files: {
+      // Прототип: перебор растёт экспоненциально, на размере 40 не успевает.
+      'spike.mjs': `const n = Number(process.env.HARNESS_SPIKE_SIZE);
+let x = 0;
+for (let i = 0; i < 2 ** Math.min(n, 60); i++) x += i % 7;
+console.log('size', n, x);
+`,
+    },
+  });
+  const h = propertyHarness(ctx);
+  const head = ctx.repo.head();
+  const timedOut = await h.spike({
+    command: [process.execPath, 'spike.mjs'],
+    sizes: [4, 40, 50],
+    timeoutMs: 3000,
+    question: 'Успевает ли полный перебор на 40 предметах',
+  });
+  assert.equal(timedOut.outcome, 'inconclusive');
+  assert.deepEqual(
+    timedOut.results.map((r) => r.outcome),
+    ['ok', 'timeout'],
+    'после таймаута большие размеры не запускаются',
+  );
+  assert.match(timedOut.limits, /не доказательство невыполнимости/);
+  assert.equal(timedOut.sha, head);
+  const bounded = await h.spike({
+    command: [process.execPath, 'spike.mjs'],
+    sizes: [4, 8],
+    seed: 9,
+    timeoutMs: 20000,
+    question: 'Перебор на малых входах укладывается в бюджет',
+  });
+  assert.equal(bounded.outcome, 'feasible');
+  assert.equal(bounded.seed, 9);
+  assert.deepEqual(bounded.sizes, [4, 8]);
+  assert.match(bounded.limits, /Не доказывает верхней границы на любом входе/);
+  assert.equal(bounded.environment.node, process.version);
+  assert.match(bounded.digest, /^[a-f0-9]{64}$/);
+  assert.equal(h.spikes().length, 2);
+  const failing = await h.spike({
+    command: [process.execPath, '-e', 'process.exit(3)'],
+    sizes: [1],
+    timeoutMs: 5000,
+    question: 'Команда эксперимента с ошибкой',
+  });
+  assert.equal(failing.outcome, 'failed');
+  // Ссылка тяжёлого обязательства закрепляет digest эксперимента.
+  const withSpike = (spike: { id: string; digest: string }, id: string, digest?: string) => {
+    const doc = structuredClone(ctx.contract);
+    doc.id = id;
+    doc.checks!.obligations[0]!.hard = true;
+    doc.checks!.obligations[0]!.feasibility = { spike: spike.id, digest: digest ?? spike.digest };
+    return doc;
+  };
+  await assert.rejects(
+    h.review({
+      kind: 'contract',
+      contract: withSpike(bounded, 'knap-stale', 'f'.repeat(64)),
+      author: 'claude',
+    }),
+    /изменился после ссылки/,
+  );
+  await assert.rejects(
+    h.review({
+      kind: 'contract',
+      contract: withSpike({ id: 'SP-unknown', digest: 'a'.repeat(64) }, 'knap-unknown'),
+      author: 'claude',
+    }),
+    /эксперимент SP-unknown не найден/,
+  );
+  assert.equal(existsSync(ctx.scenarioPath + '.codex.reviewer.count'), false, 'до модели');
+  const hard = withSpike(timedOut, 'knap-hard');
+  const reviewed = await h.review({ kind: 'contract', contract: hard, author: 'claude' });
+  assert.equal(reviewed.approved, true, reviewed.summary);
+  const prompt = readFileSync(ctx.scenarioPath + '.reviewer.0.prompt', 'utf8');
+  assert.ok(prompt.includes(timedOut.id) && prompt.includes('inconclusive'));
+  assert.match(prompt, /a timeout is inconclusive/);
+  // Неопределённый эксперимент ничего не меняет в договоре сам.
+  assert.equal(hard.checks!.obligations[0]!.hard, true);
+  h.close();
+});

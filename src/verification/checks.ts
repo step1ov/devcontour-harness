@@ -2,6 +2,7 @@ import {
   WORKSPACE_OWNER,
   digestOf,
   type CheckDeclaration,
+  type CheckSuite,
   type ContractDocument,
   type ExecutionView,
   type GatePolicy,
@@ -38,6 +39,37 @@ function declared(contracts: ContractDocument[], gate?: string): Declared[] {
         ? c.checks!.obligations.map((o) => ({ contract: c, gate: c.checks!.gate, obligation: o }))
         : [],
     );
+}
+
+/** Основание случаев корпуса: закреплённые файлы, gate и смысл обязательств. */
+export function suiteBasis(contract: ContractDocument) {
+  const declaration = contract.checks!;
+  return digestOf({
+    artifacts: (contract.artifacts ?? []).map((a) => ({ path: a.path, blob: a.blob })),
+    gate: declaration.gate,
+    obligations: declaration.obligations.map((o) => ({
+      property: o.property,
+      domain: o.domain,
+      answer: o.answer,
+      method: o.method,
+    })),
+  });
+}
+
+/**
+ * Привязка поручения к версии корпуса остаётся в силе, только пока среди его
+ * договоров есть договор этого корпуса с тем же нормативным основанием.
+ * Изменение постороннего контракта её не снимает; новый ID или новые правила
+ * того же ID — снимают: ожидания прежнего основания не становятся нормой для
+ * новых правил.
+ */
+export function corpusBindingHolds(
+  suite: Pick<CheckSuite, 'contractId' | 'basis'> | undefined,
+  contracts: ContractDocument[],
+) {
+  if (!suite) return false;
+  const contract = contracts.find((c) => c.id === suite.contractId && c.checks);
+  return !!contract && suiteBasis(contract) === suite.basis;
 }
 
 /** Обязательство по property ID среди договоров поручения. */

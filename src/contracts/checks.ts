@@ -143,3 +143,61 @@ export const contractDocumentSchema = z.strictObject({
   checks: checkDeclarationSchema.optional(),
 });
 export type ContractDocument = z.infer<typeof contractDocumentSchema>;
+
+/**
+ * Ограниченный эксперимент выполнимости (spike).
+ *
+ * Невыполнимые или неизмеримые обязательства обнаруживались после серии
+ * попыток реализации. Для тяжёлого точного алгоритма или жёсткого времени до
+ * реализации запускается короткий эксперимент: команда эталона или прототипа
+ * на закреплённом SHA, seed и размеры входов, предел времени. Результат
+ * сохраняется с версиями и пределами вывода. Таймаут — `inconclusive` для
+ * выбранного способа и бюджета: он не доказывает трудность или
+ * невозможность и не даёт права менять требование. Успех на выборке не
+ * доказывает верхней границы на любом входе.
+ */
+export const spikeInputSchema = z.strictObject({
+  repositoryId: idSchema.optional(),
+  /** Commit эталона или прототипа; по умолчанию — HEAD репозитория. */
+  sha: gitShaSchema.optional(),
+  command: z.array(z.string().min(1)).min(1).max(50),
+  sizes: z.array(z.number().int().min(0).max(1_000_000_000)).min(1).max(20),
+  seed: z.number().int().min(0).max(4294967295).default(1),
+  /** Предел на один размер. */
+  timeoutMs: z.number().int().min(100).max(600000),
+  /** Что исследуется: набор входов и вопрос эксперимента. */
+  question: trimmedText(10, 2000),
+});
+export type SpikeInput = z.input<typeof spikeInputSchema>;
+
+export const spikeSchema = z.strictObject({
+  id: z.string().regex(/^SP-[A-Za-z0-9_-]{1,80}$/),
+  repositoryId: idSchema,
+  sha: gitShaSchema,
+  command: z.array(z.string().min(1)).min(1).max(50),
+  seed: z.number().int().min(0),
+  sizes: z.array(z.number().int().min(0)),
+  timeoutMs: z.number().int().min(1),
+  question: z.string().min(1).max(2000),
+  results: z.array(
+    z.strictObject({
+      size: z.number().int().min(0),
+      ms: z.number().int().min(0),
+      outcome: z.enum(['ok', 'timeout', 'error']),
+      exitCode: z.number().int(),
+    }),
+  ),
+  outcome: z.enum(['feasible', 'inconclusive', 'failed']),
+  /** Пределы вывода: что эксперимент показывает, а что — нет. */
+  limits: z.string().min(1).max(2000),
+  environment: z.strictObject({
+    platform: z.string(),
+    arch: z.string(),
+    node: z.string(),
+    cpus: z.number().int().min(0),
+    isolation: z.string(),
+  }),
+  at: z.string().min(1),
+  digest: digestSchema,
+});
+export type Spike = z.infer<typeof spikeSchema>;

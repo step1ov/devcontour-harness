@@ -46,6 +46,9 @@ import { prompt } from './prompt.ts';
 import { contractDocuments, orderCheckManifest } from '../verification/checks.ts';
 import { CorpusStore, localRoots } from '../verification/corpus.ts';
 import { submitCase } from '../verification/confirm.ts';
+import { runSpike } from '../verification/spike.ts';
+import { propertySeed } from '../verification/property.ts';
+import { selfCheckNote, writeSelfCheck, type SelfCheckPlan } from '../verification/self-check.ts';
 import { measuredInvoke } from './measured.ts';
 import { continuableDraft, implementationBasis } from './reuse.ts';
 
@@ -103,6 +106,8 @@ export class Runner {
   private mergeTails = new Map<string, Promise<void>>();
   /** Входы незавершённой очистки проверок потребителей, по попыткам. */
   private retained = new Map<string, Retained>();
+  /** Самопроверка исполнителя попытки: каталог (читаем writer) и план. */
+  private selfChecks = new Map<string, { dir: string; plan: SelfCheckPlan }>();
 
   /** Корпус подтверждённых случаев: принятие версий и закреплённые snapshot. */
   readonly corpus: CorpusStore;
@@ -426,7 +431,14 @@ export class Runner {
           mode: this.policy.isolation.mode,
           writable: review ? [] : [input.cwd],
           denied: boundary.hidden,
-          readable: [input.cwd, ...boundary.readable],
+          readable: [
+            input.cwd,
+            ...boundary.readable,
+            // Самопроверка исполнителя: план и полный корпус вне worktree.
+            ...(!review && this.selfChecks.has(input.attempt.id)
+              ? [this.selfChecks.get(input.attempt.id)!.dir]
+              : []),
+          ],
           network: { domains: this.policy.isolation.domains },
         },
         timeoutMs: this.policy.runTimeoutMs,
@@ -844,6 +856,7 @@ export class Runner {
                     const dir = join(artifacts, 'implementation');
                     await mkdir(dir, { recursive: true });
                     await writeFile(join(dir, 'work.json'), JSON.stringify(work.order, null, 2));
+                    await this.prepareSelfCheck(attempt, repo, join(artifacts, 'self-check'));
                     const response = await this.call(
                       this.adapter(attempt.runtime),
                       {
@@ -977,6 +990,7 @@ export class Runner {
     } finally {
       clearTimeout(timeout);
       clearInterval(heartbeat);
+      this.selfChecks.delete(attempt.id);
       // Рабочие деревья попытки убираются; ветка попытки и объекты остаются —
       // по ним recovery и следующая попытка видят кандидата. Снимки
       // зависимостей: SHA, tree и artifacts записаны в попытке. Что убрать не
@@ -1380,6 +1394,31 @@ export class Runner {
    * Обязательный корпус попытки (первые 20 случаев) и — исполнителю —
    * решение разбора ведущего, под которым выдан повтор.
    */
+  /**
+   * Самопроверка исполнителя для поручения со свойствами: закреплённый checker,
+   * полный корпус версии попытки и seed. Диагностика: gates от неё не зависят.
+   */
+  private async prepareSelfCheck(attempt: AttemptState, repo: Repo, dir: string) {
+    const input = this.engine.read((v) => {
+      const work = v.work(attempt.workId)!;
+      const corpus = attempt.checks?.corpus
+        ? this.corpus.snapshot(v, attempt.checks.corpus)
+        : undefined;
+      return {
+        order: work.order,
+        contracts: contractDocuments(work.order, v),
+        ...(corpus ? { corpus: { content: corpus.content, cases: corpus.cases.length } } : {}),
+      };
+    });
+    const plan = await writeSelfCheck({
+      ...input,
+      gates: repo.gates,
+      dir,
+      seed: propertySeed(attempt.id, 'self', attempt.workId),
+    });
+    if (plan) this.selfChecks.set(attempt.id, { dir, plan });
+  }
+
   private notes(attempt: AttemptState, review: boolean, sha?: string) {
     return this.engine.read((v) => {
       const out: string[] = [];
@@ -1422,6 +1461,8 @@ export class Runner {
             : `Lead decision after two failures on property ${r.property} (source: ${source}): confirmed cases were added to the mandatory corpus. Reason: ${d.reason}. Fix the class of defect, not only these inputs.`,
         );
       }
+      const self = this.selfChecks.get(attempt.id);
+      if (!review && self) out.push(selfCheckNote(self.plan));
       const binding = attempt.checks?.corpus;
       if (binding) {
         const suite = this.corpus.get(v, binding.suite);
@@ -1438,6 +1479,24 @@ export class Runner {
       }
       return out;
     });
+  }
+
+  /**
+   * Ограниченный эксперимент выполнимости тяжёлого обязательства: команда на
+   * закреплённом SHA под изоляцией gates, с пределом времени на размер.
+   */
+  spike(raw: unknown) {
+    return runSpike(
+      {
+        engine: this.engine,
+        policy: this.policy,
+        stateDir: this.options.stateDir,
+        repoPath: (repo) => this.repoPath(repo),
+        boundary: () => this.boundary(),
+        ...(this.options.environment ? { environment: this.options.environment } : {}),
+      },
+      raw,
+    );
   }
 
   /**

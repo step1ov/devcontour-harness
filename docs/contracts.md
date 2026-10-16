@@ -168,7 +168,8 @@ Git blob в репозитории `repositoryId`); `checks` — договор 
 схемы — `localSchemas` (`usage`, `context-snapshots`, `run-keys`, `delivery`,
 `reviews`, `check-suites` — корпус подтверждённых случаев, `workflow-jobs` —
 техническая очередь ведущего, `contract-documents` — документы контрактов,
-прошедшие ревью, по digest). `owner` — репозиторий или `@workspace`.
+прошедшие ревью, по digest, `spikes` — эксперименты выполнимости
+репозитория). `owner` — репозиторий или `@workspace`.
 
 ## Ответы исполнителей
 
@@ -195,7 +196,15 @@ Runtime возвращает сырой ответ; движок разбира�
 состояния, digests поручения, графа, политики, контекста, версия проверок),
 `checked` (снимки зависимостей, их свежесть, проверенная комбинация каждого
 потребителя), `evidence[]`, `findings[]`, `limitations[]`, `finishedAt`.
-Свежесть записывается, а не запрещает приёмку.
+Свежесть записывается, а не запрещает приёмку. Необязательные поля
+доказательства: `inputs.corpus` (закреплённая версия корпуса),
+`inputs.requiredGates` (раскрытые при выдаче gates), у ссылки на evidence —
+`checks` (версия проверок записи) и `property{level, manifest}` (уровень и
+манифест генеративного gate). Получатель проверяет результат
+`resultProblems(result, {order, contracts, suite})` / `assertResult`: PASS
+обязательных gates и gates свойств обеих фаз, одна версия проверок, манифест
+и корпус по своей копии; результат прежнего формата без этих полей читается
+на прежнем уровне только у поручения без договора проверки.
 
 ### DeliveryState и ResultEnvelope
 
@@ -230,7 +239,8 @@ manifestDigest, impact?, evidence[], error?}`. Смена любого SHA де�
 закрепление атрибуции прежних записей; событий журнала не создаёт.
 `checks.recorded` пишет только локальные записи корпуса (`check-suites`):
 начало, продление и завершение операции подтверждения, решение и новую
-версию. `checks.adopted`, `checks.awaiting-operator` и
+версию. `checks.spike` пишет только локальную запись эксперимента
+выполнимости (`spikes`). `checks.adopted`, `checks.awaiting-operator` и
 `checks.adoption-abandoned` меняют принятую поручением версию корпуса и
 удержание выдачи (`work.held`, `corpus.adopted`). Эпизод по свойству меняется
 транзакциями `recovery.*`, отказом и выдачей (`work.recovery`).
