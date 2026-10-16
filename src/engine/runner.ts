@@ -25,6 +25,15 @@ import { redactDeep, type Redactor } from '../environment/redaction.ts';
 import { implementationOutputSchema, reviewOutputSchema } from '../agents/schemas.ts';
 import { unobservedReview } from '../agents/inspect.ts';
 import { runGate } from '../verification/gates.ts';
+import {
+  assertDependencies,
+  dependencyFreshness,
+  removeSnapshots,
+  snapshotDependencies,
+  type DependencySnapshot,
+  type Repositories,
+} from '../verification/dependencies.ts';
+import { CleanupFailure } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { REQUIREMENT_GATE, assertRequirements } from '../verification/requirements.ts';
 import { BlockedError, classifyFailure } from './classify.ts';
@@ -99,13 +108,19 @@ export class Runner {
     if (!repo) throw new Error('Репозиторий не объявлен: ' + id);
     return repo;
   }
-  /** Закрыто процессам попытки: состояние controller и исходные checkout; открыт только их `.git`. */
-  private boundary() {
+  /**
+   * Закрыто процессам попытки: состояние controller и исходные checkout;
+   * открыты их `.git` и закреплённые снимки зависимостей — на чтение.
+   */
+  private boundary(dependencies: Pick<DependencySnapshot, 'path'>[] = []) {
     const repos = this.policy.repositories.map((r) => this.repoPath(r));
     return {
       hidden: [this.options.stateDir, ...repos],
-      readable: repos.map((r) => join(r, '.git')),
+      readable: [...repos.map((r) => join(r, '.git')), ...dependencies.map((d) => d.path)],
     };
+  }
+  private repositories(): Repositories {
+    return { repo: (id) => this.repo(id), path: (repo) => this.repoPath(repo) };
   }
 
   /** Подготовка репозиториев: целевая ветка существует и не открыта ни в одном worktree. */
@@ -316,8 +331,10 @@ export class Runner {
     phase: string,
     cwd: string,
     profiles: Parameters<typeof executionEnvironment>[0],
+    repositoryId = attempt.repositoryId,
+    dependencies = attempt.dependencies ?? [],
   ) {
-    const repo = this.repo(attempt.repositoryId);
+    const repo = this.repo(repositoryId);
     return executionEnvironment(
       profiles,
       {
@@ -326,8 +343,12 @@ export class Runner {
         DEVCONTOUR_TASK_ID: attempt.workId,
         DEVCONTOUR_PHASE: phase,
         DEVCONTOUR_RESOURCES_JSON: JSON.stringify(attempt.resources ?? []),
-        DEVCONTOUR_DEPENDENCIES_JSON: JSON.stringify(attempt.dependencies ?? []),
-        DEVCONTOUR_COMPONENTS_JSON: JSON.stringify({ [repo.id]: cwd }),
+        DEVCONTOUR_DEPENDENCIES_JSON: JSON.stringify(dependencies),
+        // Компоненты попытки: закреплённые зависимости и своё рабочее дерево.
+        DEVCONTOUR_COMPONENTS_JSON: JSON.stringify({
+          ...Object.fromEntries(dependencies.map((d) => [d.repositoryId, d.path])),
+          [repo.id]: cwd,
+        }),
       },
       this.options.environment ?? process.env,
     );
@@ -361,7 +382,7 @@ export class Runner {
       : role.writer;
     // Окружение вызова — с профилем инструментов его назначения.
     const execution = this.environment(input.attempt, input.phase, input.cwd, binding.toolProfile);
-    const boundary = this.boundary();
+    const boundary = this.boundary(input.attempt.dependencies);
     // Вызов под учётом: бюджет проверяется до вызова, расход закрепляется за попыткой.
     const response = await measuredInvoke(
       this.engine,
@@ -663,10 +684,18 @@ export class Runner {
     const integrationCwd = cwd + '-integration';
     const artifacts = join(this.options.stateDir, 'artifacts', attempt.id);
     const worktrees: string[] = [];
+    const snapshots: DependencySnapshot[] = [];
     try {
+      // Ресурсы поручения, gates его репозитория и выбранных проверок
+      // потребителей — одним резервированием на всю попытку.
       const reserve = [
         ...(claimed.workId ? ((await this.workOf(attempt)).order.resources ?? []) : []),
         ...repo.gates.flatMap((g) => g.resources ?? []),
+        ...(claimed.consumers ?? []).flatMap((c) =>
+          this.repo(c.repositoryId)
+            .gates.filter((g) => c.gates.includes(g.id))
+            .flatMap((g) => g.resources ?? []),
+        ),
       ];
       await withResources(
         {
@@ -704,6 +733,31 @@ export class Runner {
             throw new BlockedError('Обязательный контекст не закреплён: ' + missing.join(', '));
           // Постановка по устаревшему источнику требований не исполняется.
           if (work.order.requirements.length) assertRequirements(work.order, repoPath);
+          // Снимок зависимостей репозитория — до реализации: writer, gates и
+          // reviewer видят одни и те же закреплённые деревья и artifacts.
+          if (repo.dependsOn.length) {
+            const dependencies = await snapshotDependencies({
+              repos: this.repositories(),
+              repositoryId: repo.id,
+              dir: join(this.options.stateDir, 'dependencies', attempt.id),
+              artifacts,
+              runId: attempt.id,
+              policy: this.policy,
+              environment: this.options.environment ?? process.env,
+              signal,
+              predecessors: this.engine.read((v) =>
+                work.order.dependsOn.flatMap((id) => {
+                  const w = v.work(id);
+                  return w?.resultSha
+                    ? [{ repositoryId: w.order.repositoryId, resultSha: w.resultSha }]
+                    : [];
+                }),
+              ),
+            });
+            snapshots.push(...dependencies);
+            this.engine.dependencies(attempt.id, attempt.token, dependencies);
+            attempt = { ...attempt, dependencies };
+          }
           const base = await git(repoPath, 'rev-parse', repo.targetRef);
           // Основания записываются до реализации; в той же транзакции решается,
           // берётся ли кандидат предыдущей попытки вместо нового кода.
@@ -818,6 +872,7 @@ export class Runner {
               return sha;
             },
           );
+          await assertDependencies(attempt.dependencies ?? []);
           attempt = { ...attempt, candidateSha: candidate };
           const previous = this.mergeTails.get(repo.id) ?? Promise.resolve();
           let unlock!: () => void;
@@ -875,6 +930,8 @@ export class Runner {
       // по ним recovery и следующая попытка видят кандидата.
       for (const dir of worktrees)
         await git(repoPath, 'worktree', 'remove', '--force', dir).catch(() => undefined);
+      // Снимки зависимостей попытки: SHA, tree и artifacts записаны в попытке.
+      await removeSnapshots(this.repositories(), snapshots);
     }
   }
 
@@ -887,6 +944,7 @@ export class Runner {
     artifacts: string,
     signal: AbortSignal,
     execution: ReturnType<typeof executionEnvironment>,
+    consumer?: { repositoryId: string; dependencies: DependencySnapshot[] },
   ) {
     await runGate({
       policy: this.policy,
@@ -895,11 +953,153 @@ export class Runner {
       sha,
       phase,
       gate,
-      artifactDir: join(artifacts, phase),
+      artifactDir: consumer
+        ? join(artifacts, phase, 'consumer', consumer.repositoryId)
+        : join(artifacts, phase),
       signal,
       execution,
-      boundary: this.boundary(),
+      boundary: this.boundary(consumer?.dependencies ?? attempt.dependencies),
+      ...(consumer ? { consumer: consumer.repositoryId } : {}),
     });
+  }
+
+  /**
+   * Проверки потребителей поручения — на integration, в рабочем дереве
+   * каждого объявленного потребителя на голове его целевой ветки. Компонент
+   * поручения подставлен рабочим деревом integration (его интегрированным
+   * результатом), прочие зависимости потребителя — снимок их целевых веток,
+   * собранный уже против подстановки. Договор окружения потребителя — как у
+   * собственной integration: lifecycle, prepare, gates, cleanup. Что
+   * проверено, записывается; рабочие деревья убираются и при отказе, а отказ
+   * очистки не скрывается.
+   */
+  private async consumers(
+    attempt: AttemptState,
+    cwd: string,
+    sha: string,
+    artifacts: string,
+    signal: AbortSignal,
+  ) {
+    const provider = attempt.repositoryId;
+    for (const consumer of attempt.consumers ?? []) {
+      signal.throwIfAborted();
+      const repo = this.repo(consumer.repositoryId);
+      const checkout = this.repoPath(repo);
+      const id = `${attempt.id}-consumer-${repo.id}-${randomUUID().slice(0, 8)}`;
+      const dir = join(this.options.stateDir, 'consumers', id);
+      const own = join(artifacts, 'integration', 'consumer', repo.id);
+      await mkdir(join(this.options.stateDir, 'consumers'), { recursive: true });
+      await git(checkout, 'worktree', 'add', '--detach', dir, repo.targetRef);
+      let dependencies: DependencySnapshot[] = [];
+      let failure: Error | undefined;
+      try {
+        const consumerSha = await git(dir, 'rev-parse', 'HEAD');
+        // Проверяется закреплённая голова потребителя: подготовка, lifecycle и
+        // gates не подменяют её коммитом или правкой отслеживаемых файлов.
+        const pinned = async (step: string) => {
+          if ((await git(dir, 'rev-parse', 'HEAD')) !== consumerSha)
+            throw new Error(`Потребитель ${repo.id}: ${step} изменила HEAD`);
+          if (await git(dir, 'status', '--porcelain', '--untracked-files=no'))
+            throw new Error(`Потребитель ${repo.id}: ${step} изменила отслеживаемые файлы`);
+        };
+        dependencies = await snapshotDependencies({
+          repos: this.repositories(),
+          repositoryId: repo.id,
+          dir: join(this.options.stateDir, 'dependencies', id),
+          artifacts: own,
+          runId: attempt.id,
+          policy: this.policy,
+          environment: this.options.environment ?? process.env,
+          signal,
+          overrides: new Map([[provider, { path: cwd, sha }]]),
+        });
+        const execution = this.environmentOf(
+          attempt,
+          'integration',
+          dir,
+          [this.policy.environment, repo.environment],
+          repo.id,
+          dependencies,
+        );
+        await withEnvironment(
+          repo.lifecycle ?? this.policy.lifecycle,
+          dir,
+          join(own, 'environment'),
+          execution,
+          signal,
+          async () => {
+            await runSteps(repo.prepare, dir, join(own, 'prepare'), execution, signal);
+            await pinned('подготовка');
+            for (const gate of ordered(repo.gates, consumer.gates))
+              await this.gate(
+                attempt,
+                dir,
+                sha,
+                'integration',
+                gate,
+                artifacts,
+                signal,
+                execution,
+                {
+                  repositoryId: repo.id,
+                  dependencies,
+                },
+              );
+          },
+        );
+        await assertDependencies(dependencies);
+        await pinned('проверка');
+        // Свежесть фактических входов потребителя — прочих зависимостей и его
+        // самого — на момент окончания проверки.
+        const head = await git(checkout, 'rev-parse', repo.targetRef);
+        const freshness = [
+          ...(await dependencyFreshness(
+            this.repositories(),
+            dependencies.filter((d) => d.repositoryId !== provider),
+          )),
+          { repositoryId: repo.id, snapshot: consumerSha, head, fresh: head === consumerSha },
+        ];
+        this.engine.consumerChecked(attempt.id, attempt.token, repo.id, {
+          freshness,
+          observedAt: new Date().toISOString(),
+          sha: consumerSha,
+          tree: await git(dir, 'rev-parse', `${consumerSha}^{tree}`),
+          dependencies: dependencies.map((d) => ({
+            repositoryId: d.repositoryId,
+            sha: d.sha,
+            tree: d.tree,
+            artifacts: d.artifacts,
+          })),
+        });
+      } catch (error) {
+        failure = error instanceof Error ? error : new Error(String(error));
+      }
+      // Незавершённая очистка окружения потребителя: его рабочие деревья —
+      // контекст повторной очистки по environment.json, их нельзя убирать.
+      if (failure instanceof CleanupFailure)
+        throw new CleanupFailure(
+          `${failure.message}; рабочие деревья проверки потребителя ${repo.id} сохранены для повторной очистки (${join(own, 'environment', 'environment.json')})`,
+        );
+      // Очистка — обязательная часть проверки: её отказ не скрывается и не
+      // заслоняется отказом самой проверки.
+      const leftovers = await removeSnapshots(
+        this.repositories(),
+        dependencies.filter((d) => d.repositoryId !== provider),
+      );
+      await git(checkout, 'worktree', 'remove', '--force', dir).catch((e: unknown) =>
+        leftovers.push(`${repo.id}: ${e instanceof Error ? e.message : String(e)}`),
+      );
+      const cleanup = leftovers.length
+        ? `не удалось убрать рабочие деревья проверки потребителя: ${leftovers.join('; ')}`
+        : undefined;
+      if (failure && cleanup)
+        throw failure instanceof TaskFailure
+          ? new TaskFailure(failure.kind, `${failure.message}; ${cleanup}`)
+          : new Error(`${failure.message}; ${cleanup}`, { cause: failure });
+      if (failure) throw failure;
+      if (cleanup)
+        throw new TaskFailure('environment', cleanup[0]!.toUpperCase() + cleanup.slice(1));
+    }
   }
 
   /**
@@ -948,6 +1148,8 @@ export class Runner {
       },
       signal,
     );
+    // Reviewer не меняет закреплённые зависимости, как и своё дерево.
+    await assertDependencies(attempt.dependencies ?? []);
     const redact = response.redact;
     const parsed = reviewResultSchema.safeParse(response.output);
     const clean =
@@ -1048,6 +1250,7 @@ export class Runner {
         );
         for (const gate of gates)
           await this.gate(attempt, cwd, sha, 'integration', gate, artifacts, signal, execution);
+        await this.consumers(attempt, cwd, sha, artifacts, signal);
         this.requirements(attempt, work, repoPath, cwd, sha, 'integration');
         await this.review(
           attempt,
@@ -1067,6 +1270,15 @@ export class Runner {
       (await git(cwd, 'status', '--porcelain', '--untracked-files=no'))
     )
       throw new Error('Очистка окружения изменила проверенный код');
+    await assertDependencies(attempt.dependencies ?? []);
+    // Свежесть снимка зависимостей — фиксируется, не отклоняет: параллельная
+    // работа законно двигает ветки зависимостей.
+    if (attempt.dependencies?.length)
+      this.engine.dependencyFreshness(
+        attempt.id,
+        attempt.token,
+        await dependencyFreshness(this.repositories(), attempt.dependencies),
+      );
     signal.throwIfAborted();
     await this.assertTargetDetached(repo);
     // Fencing, CAS продвижения и приёмка — одна транзакция. Если процесс упадёт

@@ -91,6 +91,12 @@ export class Engine {
   private tx<T>(kind: TransactionKind, fn: (tx: ExecutionTransaction) => NotPromise<T>): T {
     return this.host.store.transact(kind, fn);
   }
+  private repository(id: string) {
+    const repo = this.policy.repositories.find((r) => r.id === id);
+    if (!repo) throw new HarnessError('INVALID_INPUT', 'Репозиторий не объявлен: ' + id);
+    return repo;
+  }
+
   read<T>(fn: (view: ExecutionView) => NotPromise<T>): T {
     return this.host.store.read(fn);
   }
@@ -724,6 +730,16 @@ export class Engine {
           ...expandGateRefs(repo, work.order.gates),
           ...(work.order.requirements.length ? [REQUIREMENT_GATE] : []),
         ],
+        // Проверки потребителей закрепляются раскрытыми: смена групп
+        // потребителя после выдачи не меняет состав, который доказывает попытка.
+        ...(work.order.consumers?.length
+          ? {
+              consumers: work.order.consumers.map((c) => ({
+                repositoryId: c.repositoryId,
+                gates: expandGateRefs(this.repository(c.repositoryId), c.gates),
+              })),
+            }
+          : {}),
         pinned: {
           graphId: work.graphId,
           graphDigest: tx.graph(work.graphId)!.digest,
@@ -854,6 +870,86 @@ export class Engine {
     >,
   ) {
     this.withAttempt(id, token, kind, (a, _w, tx) => tx.putAttempt({ ...a, ...patch }));
+  }
+
+  /** Снимок зависимостей, против которого идёт попытка; закрепляется до реализации. */
+  dependencies(id: string, token: string, snapshots: NonNullable<AttemptState['dependencies']>) {
+    this.withAttempt(id, token, 'run.dependencies', (a, _w, tx) =>
+      tx.putAttempt({ ...a, dependencies: snapshots }),
+    );
+  }
+
+  /** Свежесть снимка зависимостей на момент окончания: записывается, не отклоняет. */
+  dependencyFreshness(
+    id: string,
+    token: string,
+    freshness: NonNullable<AttemptState['dependencyFreshness']>,
+  ) {
+    this.withAttempt(id, token, 'run.dependency-freshness', (a, _w, tx) =>
+      tx.putAttempt({ ...a, dependencyFreshness: freshness }),
+    );
+  }
+
+  /** Что проверено у потребителя: его голова и снимок всех его зависимостей. */
+  consumerChecked(
+    id: string,
+    token: string,
+    repositoryId: string,
+    checked: NonNullable<NonNullable<AttemptState['consumers']>[number]['checked']>,
+  ) {
+    this.withAttempt(id, token, 'run.consumer-checked', (a, _w, tx) => {
+      if (!a.consumers?.some((c) => c.repositoryId === repositoryId))
+        throw new HarnessError(
+          'INVALID_INPUT',
+          'Потребитель не объявлен попыткой: ' + repositoryId,
+        );
+      tx.putAttempt({
+        ...a,
+        consumers: a.consumers.map((c) =>
+          c.repositoryId === repositoryId ? { ...c, checked } : c,
+        ),
+      });
+    });
+  }
+
+  /**
+   * Gates репозиториев, не пройденные на integration ни одним из принятых
+   * поручений: покрытие — по фактическому собственному evidence на принятом
+   * SHA, для любой области. Evidence потребителя — проверка другого
+   * компонента и не в счёт; запись ревью не закрывает одноимённый test gate.
+   * Решение о приёмке набора поручений — за хостом.
+   */
+  uncoveredGates(workIds: string[]) {
+    return this.read((v) => {
+      const works = workIds.map((id) => v.work(id)).filter((w): w is WorkState => !!w);
+      const result: { repositoryId: string; gates: string[] }[] = [];
+      for (const repositoryId of [...new Set(works.map((w) => w.order.repositoryId))]) {
+        const covered = new Set(
+          works
+            .filter((w) => w.order.repositoryId === repositoryId)
+            .flatMap((w) =>
+              v
+                .attempts(w.id)
+                .flatMap((a) => a.evidence)
+                .filter(
+                  (e) =>
+                    e.kind === 'test' &&
+                    e.phase === 'integration' &&
+                    e.passed &&
+                    !e.consumer &&
+                    w.resultSha !== undefined &&
+                    e.sha === w.resultSha,
+                )
+                .map((e) => e.gate),
+            ),
+        );
+        const missing = this.repository(repositoryId)
+          .gates.map((g) => g.id)
+          .filter((id) => !covered.has(id));
+        if (missing.length) result.push({ repositoryId, gates: missing });
+      }
+      return result;
+    });
   }
 
   /**
@@ -989,6 +1085,36 @@ export class Engine {
           !last('review', phase, phase === 'candidate' ? a.candidateSha : sha, 'independent-review')
         )
           throw new HarnessError('REVIEW_REJECTED', `Нет независимого ревью: ${phase}`);
+      // Проверки потребителей — на integration, против интегрированного
+      // результата: evidence потребителя закрывает только его проверку.
+      for (const consumer of a.consumers ?? []) {
+        for (const gate of consumer.gates)
+          if (
+            a.evidence.findLast(
+              (e) =>
+                e.kind === 'test' &&
+                e.phase === 'integration' &&
+                e.sha === sha &&
+                e.gate === gate &&
+                e.consumer === consumer.repositoryId &&
+                (!a.checks || e.checks === a.checks.effective),
+            )?.passed !== true
+          )
+            throw new HarnessError(
+              'GATE_FAILED',
+              `Нет PASS проверки потребителя: ${consumer.repositoryId}/${gate}`,
+            );
+        // Что проверено, обязано быть записано: иначе проверку потребителя не с
+        // чем сверить, и результат нельзя перенести.
+        const provider = consumer.checked?.dependencies.find(
+          (d) => d.repositoryId === a.repositoryId,
+        );
+        if (provider?.sha !== sha)
+          throw new HarnessError(
+            'GATE_FAILED',
+            `Проверка потребителя ${consumer.repositoryId} не записала снимок с интегрированным результатом`,
+          );
+      }
       const unproven = unprovenReason(w.order.requirements, a.evidence, sha);
       if (unproven) throw new HarnessError('GATE_FAILED', unproven);
       const contract = this.contractBlocker(w, tx);

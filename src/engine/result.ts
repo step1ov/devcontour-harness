@@ -103,7 +103,21 @@ export function runResult(attempt: AttemptState, harnessVersion: string): RunRes
         artifacts,
       })),
       freshness: attempt.dependencyFreshness ?? [],
-      consumers: [],
+      // Только записавшие, что проверено: недостающее не выдумывается.
+      consumers: (attempt.consumers ?? []).flatMap((c) =>
+        c.checked
+          ? [
+              {
+                repositoryId: c.repositoryId,
+                gates: c.gates,
+                sha: c.checked.sha,
+                tree: c.checked.tree,
+                dependencies: c.checked.dependencies,
+                freshness: c.checked.freshness ?? [],
+              },
+            ]
+          : [],
+      ),
     },
     evidence: attempt.evidence
       .filter((e) => e.sha === attempt.candidateSha || e.sha === attempt.integrationSha)

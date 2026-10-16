@@ -5,6 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   HarnessError,
+  digestOf,
+  expandGateRefs,
   executionPolicySchema,
   policyIssues,
   sha256,
@@ -206,6 +208,66 @@ const cases: [string, (g: Json, p: Json) => void, string, RegExp][] = [
     /требует build/,
   ],
   [
+    'цикл в группах gates',
+    (_, p) => (p.repositories[0].gateGroups = { loop: ['@loop2'], loop2: ['@loop'] }),
+    'GATE_GROUP_CYCLE',
+    /Цикл в группах gates/,
+  ],
+  [
+    'неизвестная группа в области',
+    (g) => (g.orders[0].gates = ['@missing']),
+    'GATE_UNKNOWN',
+    /missing/,
+  ],
+  [
+    'член группы вне профиля',
+    (_, p) => (p.repositories[0].gateGroups = { foreign: ['unit', 'absent'] }),
+    'GATE_UNKNOWN',
+    /absent/,
+  ],
+  [
+    'gate потребителя вне его профиля',
+    (g, p) => {
+      twoRepos(p);
+      g.orders[0].consumers = [{ repositoryId: 'web', gates: ['nightly'] }];
+    },
+    'GATE_UNKNOWN',
+    /nightly/,
+  ],
+  [
+    'область потребителя не замкнута по dependsOn',
+    (g, p) => {
+      twoRepos(p);
+      p.repositories[1].gates = [
+        { ...p.repositories[1].gates[0], id: 'build' },
+        { ...p.repositories[1].gates[0], dependsOn: ['build'] },
+      ];
+      g.orders[0].consumers = [{ repositoryId: 'web', gates: ['unit'] }];
+    },
+    'INVALID_INPUT',
+    /Область потребителя web: gate unit требует build/,
+  ],
+  [
+    'требование вне области поручения',
+    (g, p) => {
+      p.repositories[0].gates.push({ ...p.repositories[0].gates[0], id: 'engine' });
+      g.orders[0].gates = ['engine'];
+      const text = 'Текст требования';
+      g.orders[0].requirements = [
+        {
+          id: 'REQ-1',
+          source: 'docs/spec.md',
+          digest: sha256(text),
+          text,
+          gate: 'unit',
+          scenario: 'Сценарий',
+        },
+      ];
+    },
+    'INVALID_INPUT',
+    /вне области поручения/,
+  ],
+  [
     'репозиторий предпосылки неизвестен',
     (g) => {
       g.orders[0].dependsOn = ['external'];
@@ -289,4 +351,20 @@ test('Репозиторий только с check отклоняет сама �
     issues.some((i) => /test gate/.test(i.message) && i.path[0] === 'repositories'),
     JSON.stringify(issues),
   );
+});
+
+test('G01: общие подгруппы раскрываются один раз; определение группы входит в digest политики', () => {
+  const { policy } = inputs();
+  // Каждая группа дважды ссылается на предыдущую: без запоминания раскрытие обходит 2^40 путей.
+  const groups: Record<string, string[]> = { g0: ['unit'] };
+  for (let i = 1; i <= 40; i++) groups[`g${i}`] = [`@g${i - 1}`, `@g${i - 1}`];
+  policy.repositories[0].gateGroups = groups;
+  const started = Date.now();
+  const parsed = executionPolicySchema.parse(policy);
+  assert.deepEqual(expandGateRefs(parsed.repositories[0]!, ['@g40']), ['unit']);
+  assert.deepEqual(policyIssues(parsed), []);
+  assert.ok(Date.now() - started < 1_000);
+  const before = digestOf(parsed);
+  policy.repositories[0].gateGroups = { ...groups, g0: ['unit', 'unit'] };
+  assert.notEqual(digestOf(executionPolicySchema.parse(policy)), before);
 });

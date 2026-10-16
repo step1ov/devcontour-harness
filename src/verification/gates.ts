@@ -362,6 +362,8 @@ export interface GateRun {
   execution: { env: NodeJS.ProcessEnv; redact: (value: string) => string };
   /** Закрытое проверке (состояние controller, чужие checkout) и открытое внутри него. */
   boundary: { hidden: string[]; readable: string[] };
+  /** Проверка потребителя: evidence несёт его компонент и не закрывает собственные gates. */
+  consumer?: string;
 }
 
 /**
@@ -373,6 +375,9 @@ export interface GateRun {
 export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   const { cwd, sha, phase, gate, artifactDir, signal } = run;
   const redact = run.execution.redact;
+  // У проверки потребителя дерево — его голова, а `sha` — интегрированный
+  // результат провайдера: неизменной обязана остаться голова потребителя.
+  const expectedHead = run.consumer ? await git(cwd, 'rev-parse', 'HEAD') : sha;
   const root = await realpath(cwd);
   const gateCwd = gate.cwd ? await realpath(resolve(cwd, gate.cwd)) : root;
   if (gateCwd !== root && !gateCwd.startsWith(root + sep))
@@ -445,7 +450,8 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       await mkdir(artifactDir, { recursive: true });
       await writeFile(join(artifactDir, `${gate.id}.xml`), redact(counts.xml));
     } else summary = 'Команда завершилась успешно';
-    if ((await git(cwd, 'rev-parse', 'HEAD')) !== sha) throw new Error('Gate изменил HEAD');
+    if ((await git(cwd, 'rev-parse', 'HEAD')) !== expectedHead)
+      throw new Error('Gate изменил HEAD');
     if (await git(cwd, 'status', '--porcelain', '--untracked-files=no'))
       throw new Error('Gate изменил отслеживаемые файлы');
     passed = true;
@@ -471,7 +477,12 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     summary: redact(summary),
     ...(manifest ? { tests: manifest.cases } : {}),
     ...(manifest?.truncated ? { testsTruncated: true } : {}),
+    ...(run.consumer ? { consumer: run.consumer } : {}),
   });
-  if (!passed) throw new TaskFailure(kind, `${phase}/${gate.id}: ${evidence.summary}`);
+  if (!passed)
+    throw new TaskFailure(
+      kind,
+      `${phase}/${run.consumer ? run.consumer + ':' : ''}${gate.id}: ${evidence.summary}`,
+    );
   return evidence;
 }

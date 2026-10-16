@@ -62,6 +62,10 @@ export function prompt(input: {
       2,
     ),
     'Write scope: ' + JSON.stringify(order.writeScope),
+    attempt.dependencies?.length
+      ? 'Pinned dependencies (do not modify these worktrees or artifacts): ' +
+        JSON.stringify(attempt.dependencies)
+      : '',
     'Gates that prove this work: ' + JSON.stringify(input.gates),
     'Previous attempts, with the findings each review left. Address every finding that is still open first and say what you changed for it: ' +
       JSON.stringify(previousAttempts(input.history, attempt.id)),
