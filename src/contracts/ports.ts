@@ -148,6 +148,21 @@ export interface RuntimeRequest {
   artifactDir?: string;
   /** Значения, которые маскируются в тексте ответа, журнале и диагностике. */
   secrets?: string[];
+  /**
+   * Сервер проверок reviewer с пределами controller (только ревью кода).
+   * Адаптер подключает его к CLI как MCP-сервер; переменные окружения
+   * передаются серверу по имени, значения на диск не пишутся.
+   */
+  probe?: ProbeServer;
+}
+
+/** Команда запуска сервера проверок reviewer и его пределы. */
+export interface ProbeServer {
+  command: string;
+  args: string[];
+  /** Имена переменных окружения, которые CLI передаёт серверу. */
+  env: string[];
+  commandTimeoutMs: number;
 }
 
 export interface RuntimeResponse {

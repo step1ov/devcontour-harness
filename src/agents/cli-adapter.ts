@@ -4,6 +4,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { z } from 'zod';
 import type {
+  ProbeServer,
   RuntimeAdapter,
   RuntimeCapabilities,
   RuntimeRequest,
@@ -21,6 +22,7 @@ import {
 } from '../environment/isolation.ts';
 import { redactor } from '../environment/redaction.ts';
 import { inspectReview } from './inspect.ts';
+import { probeCallMs, probeServer, probeTool } from './review-probe.ts';
 import { claudeResult, runtimeEvents } from './runtime-events.ts';
 import { parseUsage, reportedModel, runtimeVersion, unknownUsage } from './usage.ts';
 
@@ -40,20 +42,67 @@ export function writerRunsChecks(runtime: 'codex' | 'claude', profile?: ToolProf
   return writerTools(profile).includes('Bash');
 }
 
-function codexTools(profile: ToolProfile | undefined, review: boolean) {
+const toml = (value: unknown): string => {
+  if (Array.isArray(value)) return '[' + value.map(toml).join(', ') + ']';
+  if (value && typeof value === 'object')
+    return (
+      '{ ' +
+      Object.entries(value)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => `${JSON.stringify(k)} = ${toml(v)}`)
+        .join(', ') +
+      ' }'
+    );
+  return JSON.stringify(value);
+};
+/**
+ * MCP-серверы прогона codex: только сервер проверок reviewer, если он дан.
+ * Глобальная конфигурация оператора и её серверы в прогон не попадают.
+ */
+export function codexServers(probe?: ProbeServer) {
+  return probe
+    ? `mcp_servers=${toml({
+        [probeServer]: {
+          enabled: true,
+          required: true,
+          enabled_tools: [probeTool],
+          command: probe.command,
+          args: probe.args,
+          env_vars: probe.env,
+          // По умолчанию codex обрывает вызов инструмента через минуту —
+          // раньше, чем controller остановил бы команду сам.
+          tool_timeout_sec: Math.ceil(probeCallMs(probe) / 1000),
+        },
+      })}`
+    : 'mcp_servers={}';
+}
+/** MCP-конфигурация claude с сервером проверок reviewer. */
+export function claudeMcp(probe: ProbeServer) {
+  return {
+    mcpServers: {
+      [probeServer]: {
+        type: 'stdio',
+        command: probe.command,
+        args: probe.args,
+        env: Object.fromEntries(probe.env.map((key) => [key, '${' + key + '}'])),
+      },
+    },
+  };
+}
+
+function codexTools(profile: ToolProfile | undefined, review: boolean, probe?: ProbeServer) {
   if (!profile)
-    // Пустой набор MCP: глобальная конфигурация оператора и её серверы в прогон не попадают.
     // Ревьюеру codex без профиля нужен shell для чтения; запись закрывает профиль прав.
     return [
       '--ignore-user-config',
       '-c',
-      'mcp_servers={}',
+      codexServers(probe),
       ...(review ? ['-c', 'features.shell_tool=true'] : []),
     ];
   return [
     '--ignore-user-config',
     '-c',
-    'mcp_servers={}',
+    codexServers(probe),
     '-c',
     `features.shell_tool=${profile.codexShell}`,
     '-c',
@@ -108,6 +157,11 @@ export function cliAdapter(
         : undefined;
       if (r.binding.toolProfile && !profile)
         throw new Error('Неизвестный профиль инструментов: ' + r.binding.toolProfile);
+      // Сервер проверок — только reviewer кода; writer его не получает.
+      const probe = review ? r.probe : undefined;
+      const mcpPath = join(dir, 'mcp.json');
+      if (runtime === 'claude' && probe)
+        await writeFile(mcpPath, JSON.stringify(claudeMcp(probe), null, 2));
       const policy: Isolation = isolation({
         write: r.sandbox.writable,
         controller: r.sandbox.denied,
@@ -128,7 +182,7 @@ export function cliAdapter(
               resultPath,
               ...(r.binding.model ? ['--model', r.binding.model] : []),
               ...(r.binding.effort ? ['-c', `model_reasoning_effort="${r.binding.effort}"`] : []),
-              ...codexTools(profile, review),
+              ...codexTools(profile, review, review ? r.probe : undefined),
               ...codexPermissions(policy, !review && !!profile?.codexNetwork),
               '-',
             ]
@@ -163,10 +217,13 @@ export function cliAdapter(
                     ].join(','),
                   ]
                 : []),
-              ...(profile?.claudeAllowedTools.length
+              ...(profile?.claudeAllowedTools.length || probe
                 ? [
                     '--allowedTools',
-                    profile.claudeAllowedTools
+                    [
+                      ...(profile?.claudeAllowedTools ?? []),
+                      ...(probe ? [`mcp__${probeServer}__${probeTool}`] : []),
+                    ]
                       .filter(
                         (rule) =>
                           !review ||
@@ -183,15 +240,28 @@ export function cliAdapter(
                   ]
                 : []),
               '--settings',
-              JSON.stringify(
-                (
+              JSON.stringify({
+                ...((
                   review
                     ? reviewerRunsChecks('claude', profile)
                     : writerRunsChecks('claude', profile)
                 )
                   ? claudeSandbox(policy, review, r.cwd)
-                  : { permissions: { deny: claudeFileDenies(policy, r.cwd) } },
-              ),
+                  : { permissions: { deny: claudeFileDenies(policy, r.cwd) } }),
+                // Сроки CLI для проверок reviewer: вызов инструмента проверок
+                // не обрывается раньше controller, а собственный Bash reviewer
+                // ограничен тем же пределом команды.
+                ...(probe
+                  ? {
+                      env: {
+                        MCP_TOOL_TIMEOUT: String(probeCallMs(probe)),
+                        BASH_DEFAULT_TIMEOUT_MS: String(probe.commandTimeoutMs),
+                        BASH_MAX_TIMEOUT_MS: String(probe.commandTimeoutMs),
+                      },
+                    }
+                  : {}),
+              }),
+              ...(probe ? ['--mcp-config', mcpPath] : []),
               '--setting-sources',
               '',
               '--strict-mcp-config',

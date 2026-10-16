@@ -19,6 +19,7 @@ import {
   type GatePolicy,
   type RuntimeAdapter,
   type RuntimeName,
+  type ProbeServer,
   type RuntimeResponse,
   type WorkState,
 } from '../contracts/index.ts';
@@ -27,6 +28,15 @@ import { executionEnvironment, runSteps, withEnvironment } from '../environment/
 import { redactDeep, type Redactor } from '../environment/redaction.ts';
 import { implementationOutputSchema, reviewOutputSchema } from '../agents/schemas.ts';
 import { unobservedReview } from '../agents/inspect.ts';
+import { reviewerRunsChecks } from '../agents/cli-adapter.ts';
+import {
+  observeReproductions,
+  probeCommand,
+  probeLimits,
+  probeRecords,
+  probeTool,
+  type ProbeSpec,
+} from '../agents/review-probe.ts';
 import { runGate } from '../verification/gates.ts';
 import {
   assertDependencies,
@@ -395,6 +405,8 @@ export class Runner {
       prompt: string;
       dir: string;
       phase: string;
+      /** Сервер проверок reviewer с пределами controller. */
+      probe?: ProbeServer;
     },
     signal: AbortSignal,
   ): Promise<RuntimeResponse & { redact: Redactor }> {
@@ -447,6 +459,7 @@ export class Runner {
         ),
         artifactDir: input.dir,
         secrets: [...(execution.redact.secrets ?? [])],
+        ...(review && input.probe ? { probe: input.probe } : {}),
       },
       signal,
       {
@@ -1281,6 +1294,58 @@ export class Runner {
    * находка, ответ вне схемы, изменение дерева или HEAD reviewer-ом. Ответ
    * reviewer маскируется целиком перед записью.
    */
+  /**
+   * Инструмент проверок reviewer с пределами controller — только тому, кто и
+   * так может запускать команды: права reviewer он не расширяет, а
+   * ограничивает срок. Спецификация лежит в каталоге ревью; значения
+   * переменных окружения CLI передаёт серверу по имени, на диск они не пишутся.
+   */
+  private async reviewProbe(
+    attempt: AttemptState,
+    work: WorkState,
+    cwd: string,
+    dir: string,
+    phase: string,
+  ) {
+    const role = this.policy.roles[work.order.role]!;
+    const name = (role.review ?? this.policy.review.code).reviewer.toolProfile;
+    const profile = name ? this.policy.toolProfiles[name] : undefined;
+    // Fixture runtime команд не запускает: инструмента ему не нужно.
+    if (attempt.reviewer === 'fixture' || !reviewerRunsChecks(attempt.reviewer, profile))
+      return undefined;
+    const limits = probeLimits(this.policy);
+    const boundary = this.boundary(attempt.dependencies);
+    const execution = this.environment(attempt, phase, cwd, name);
+    const secrets = new Set(execution.redact.secrets ?? []);
+    const spec: ProbeSpec = {
+      cwd,
+      controller: boundary.hidden,
+      readable: [cwd, ...boundary.readable],
+      isolation: this.policy.isolation,
+      commandTimeoutMs: limits.commandTimeoutMs,
+      budgetMs: limits.budgetMs,
+      deadline: Date.now() + this.policy.runTimeoutMs - limits.reserveMs,
+      env: Object.keys(execution.env).filter((k) => execution.env[k] !== undefined),
+      secrets: Object.entries(execution.env)
+        .filter(([, value]) => value !== undefined && secrets.has(value))
+        .map(([key]) => key),
+      settingsDir: join(dir, 'probe-settings'),
+      log: join(dir, 'probes.jsonl'),
+    };
+    const specPath = join(dir, 'probe.json');
+    await writeFile(specPath, JSON.stringify(spec, null, 2));
+    const seconds = (ms: number) => Math.round(ms / 1000);
+    return {
+      log: spec.log,
+      server: {
+        ...probeCommand(specPath),
+        env: spec.env,
+        commandTimeoutMs: limits.commandTimeoutMs,
+      } satisfies ProbeServer,
+      prompt: `Run checks with the ${probeTool} tool (argv, no shell; sources are read-only, temporary files go to TMPDIR). The controller stops each command after ${seconds(limits.commandTimeoutMs)} s and all checks share ${seconds(limits.budgetMs)} s; ${seconds(limits.reserveMs)} s stay reserved for your verdict. A timeout is an observation about that command on that input, not proof of a defect: name the input and the limit if you report it, and give your verdict with what you have when the budget runs out. When a finding rests on a run, put its runId into reproduction.run.`,
+    };
+  }
+
   private async review(
     attempt: AttemptState,
     work: WorkState,
@@ -1303,6 +1368,7 @@ export class Runner {
     const status = await git(cwd, 'status', '--porcelain', '--untracked-files=all');
     const repo = this.repo(attempt.repositoryId);
     const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
+    const probe = await this.reviewProbe(attempt, work, cwd, dir, phase);
     const response = await this.call(
       this.adapter(attempt.reviewer),
       {
@@ -1311,15 +1377,17 @@ export class Runner {
         cwd,
         dir,
         phase,
-        prompt: prompt({
-          work,
-          attempt: { ...attempt, baseSha: base },
-          history: this.history(attempt),
-          context,
-          gates: gates.map((g) => ({ id: g.id, command: g.command })),
-          review: { sha, phase, diff },
-          notes: this.notes(attempt, true, sha),
-        }),
+        prompt:
+          prompt({
+            work,
+            attempt: { ...attempt, baseSha: base },
+            history: this.history(attempt),
+            context,
+            gates: gates.map((g) => ({ id: g.id, command: g.command })),
+            review: { sha, phase, diff },
+            notes: this.notes(attempt, true, sha),
+          }) + (probe ? '\n\n' + probe.prompt : ''),
+        ...(probe ? { probe: probe.server } : {}),
       },
       signal,
     );
@@ -1336,13 +1404,16 @@ export class Runner {
       : ['Ответ ревью вне схемы: ' + (parsed.error.issues[0]?.message ?? '')];
     const passed = clean && parsed.success && parsed.data.approved && !issues.length;
     const inspection = response.inspection ?? unobservedReview();
+    // Проверки reviewer — по журналу controller, а не по самоотчёту модели.
+    const probes = probe ? await probeRecords(probe.log) : undefined;
     const record = redactDeep(
       {
         ...(parsed.success
-          ? parsed.data
+          ? { ...parsed.data, findings: observeReproductions(parsed.data.findings, probes, redact) }
           : { approved: false, summary: 'ответ вне схемы', findings: [] }),
         inspection,
         issues,
+        ...(probes ? { probes } : {}),
       },
       redact,
     );

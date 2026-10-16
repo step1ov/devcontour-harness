@@ -113,6 +113,72 @@ if (step.commit)
     'agent commit',
     '--allow-empty',
   ]);
+// Проверки reviewer через сервер probe — так, как его вызвал бы CLI: по
+// команде из конфигурации MCP (codex: -c mcp_servers=…, claude: --mcp-config),
+// построчным JSON-RPC по stdio. `$probe:N` в ответе заменяется runId запуска N.
+let probeRuns = [];
+if (role === 'reviewer' && step.probes) {
+  let server;
+  if (runtime === 'codex') {
+    const config = args.find((a) => a.startsWith('mcp_servers=') && a.includes('devcontour_probe'));
+    if (config)
+      server = {
+        command: JSON.parse(/"command" = ("(?:[^"\\]|\\.)*")/.exec(config)[1]),
+        args: JSON.parse(/"args" = (\[[^\]]*\])/.exec(config)[1]),
+      };
+  } else if (arg('--mcp-config')) {
+    server = JSON.parse(readFileSync(arg('--mcp-config'), 'utf8')).mcpServers?.devcontour_probe;
+  }
+  writeFileSync(`${scenarioPath}.${role}.${index}.probe-server`, JSON.stringify(server ?? null));
+  if (server) {
+    const { spawn } = await import('node:child_process');
+    const child = spawn(server.command, server.args, { stdio: ['pipe', 'pipe', 'inherit'] });
+    let buffer = '';
+    const waiting = new Map();
+    child.stdout.on('data', (chunk) => {
+      buffer += chunk.toString();
+      let i;
+      while ((i = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, i);
+        buffer = buffer.slice(i + 1);
+        if (!line.trim()) continue;
+        const message = JSON.parse(line);
+        waiting.get(message.id)?.(message);
+        waiting.delete(message.id);
+      }
+    });
+    let next = 1;
+    const request = (method, params) =>
+      new Promise((resolve) => {
+        const id = next++;
+        waiting.set(id, resolve);
+        child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+      });
+    await request('initialize', {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'fixture', version: '1' },
+    });
+    child.stdin.write(
+      JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n',
+    );
+    const call = (argv) =>
+      request('tools/call', { name: 'run_check', arguments: { argv } }).then(
+        (m) => m.result?.structuredContent ?? { error: m.error },
+      );
+    probeRuns = step.probesConcurrent
+      ? await Promise.all(step.probes.map(call))
+      : await step.probes.reduce(
+          (p, argv) => p.then(async (all) => [...all, await call(argv)]),
+          Promise.resolve([]),
+        );
+    child.kill();
+  }
+  writeFileSync(`${scenarioPath}.${role}.${index}.probes`, JSON.stringify(probeRuns));
+}
+const cite = (text) =>
+  text.replace(/\$probe:(\d+)/g, (_m, n) => probeRuns[Number(n)]?.runId ?? 'missing');
+if (step.result) step.result = JSON.parse(cite(JSON.stringify(step.result)));
 if (step.stderr) process.stderr.write(step.stderr + '\n');
 const started = step.started !== false;
 const out = (event) => process.stdout.write(JSON.stringify(event) + '\n');

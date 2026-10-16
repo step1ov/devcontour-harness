@@ -106,8 +106,14 @@ export function setup(options: {
     stateDir: state,
     baseDir: r.dir,
     adapters: {
-      claude: cliAdapter('claude', { executable: bin('fake-claude') }),
-      codex: cliAdapter('codex', { executable: bin('fake-codex') }),
+      claude: cliAdapter('claude', {
+        executable: bin('fake-claude'),
+        toolProfiles: policy.toolProfiles,
+      }),
+      codex: cliAdapter('codex', {
+        executable: bin('fake-codex'),
+        toolProfiles: policy.toolProfiles,
+      }),
     },
     owner: 'runner-1',
     resourceDatabase: join(state, 'resources.sqlite'),
