@@ -14,10 +14,12 @@ import type { ErrorIssue } from './errors.ts';
 
 const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
 /** Переменные `HARNESS_*` и исторические `DEVCONTOUR_*` задаёт сам harness, не политика. */
-const envKey = envName.refine(
-  (s) => !s.startsWith('HARNESS_') && !s.startsWith('DEVCONTOUR_'),
-  'HARNESS_* и DEVCONTOUR_* задаёт harness',
-);
+const envKey = z
+  .string()
+  .regex(
+    /^(?!HARNESS_|DEVCONTOUR_)[A-Za-z_][A-Za-z0-9_]*$/,
+    'HARNESS_* и DEVCONTOUR_* задаёт harness',
+  );
 export const environmentSchema = z.strictObject({
   inherit: z.array(envKey).default([]),
   values: z.record(envKey, z.string()).default({}),
@@ -35,25 +37,51 @@ export const lifecycleSchema = z.strictObject({
   teardown: z.array(stepSchema).min(1),
 });
 
-export const gateSchema = z.strictObject({
+const gateCommon = {
   id: idSchema,
-  kind: z.enum(['check', 'test']),
   command: z.array(z.string().min(1)).min(1),
   timeoutMs: z.number().positive().default(120000),
-  /** Отчёт testcases. Для `test` exit 0 без свежего непустого отчёта не принимается. */
-  report: z.strictObject({ type: z.literal('junit'), path: z.string().min(1) }).optional(),
   /** Генеративная проверка: путь отчёта свойств выбирает harness вне worktree. */
   property: z.strictObject({ path: relativePathSchema.optional() }).optional(),
   dependsOn: z.array(idSchema).optional(),
   cwd: relativePathSchema.optional(),
   resources: z.array(idSchema).optional(),
-});
+};
+/** Отчёт testcases внутри worktree. */
+const junitReport = z.strictObject({ type: z.literal('junit'), path: relativePathSchema });
+/**
+ * Gate. У `test` JUnit-отчёт обязателен: exit 0 без свежего непустого
+ * отчёта на точном SHA не принимается. `check` — проверка без testcases.
+ */
+export const gateSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ ...gateCommon, kind: z.literal('test'), report: junitReport }),
+  z.strictObject({ ...gateCommon, kind: z.literal('check'), report: junitReport.optional() }),
+]);
 export type GatePolicy = z.infer<typeof gateSchema>;
 
 /** Группы gates: не больше 100 групп по 100 ссылок, члены — gates или группы (`@имя`). */
 export const gateGroupsSchema = z
   .record(idSchema, z.array(gateRefSchema).min(1).max(100))
-  .refine((g) => Object.keys(g).length <= 100, 'Не больше 100 групп gates');
+  .check(z.refine((g) => Object.keys(g).length <= 100, 'Не больше 100 групп gates'))
+  .meta({ maxProperties: 100 });
+
+/** Gate совместной проверки: выполняется в дереве `repositoryId`, сохраняет `artifacts`. */
+export const workspaceGateSchema = z.discriminatedUnion('kind', [
+  z.strictObject({
+    ...gateCommon,
+    kind: z.literal('test'),
+    report: junitReport,
+    repositoryId: idSchema,
+    artifacts: z.array(relativePathSchema).default([]),
+  }),
+  z.strictObject({
+    ...gateCommon,
+    kind: z.literal('check'),
+    report: junitReport.optional(),
+    repositoryId: idSchema,
+    artifacts: z.array(relativePathSchema).default([]),
+  }),
+]);
 
 export const repositoryPolicySchema = z.strictObject({
   id: idSchema,
@@ -104,12 +132,11 @@ export const roleBindingSchema = z.strictObject({
   requiresContract: z.boolean().default(false),
 });
 
-const budgetLimitSchema = z
-  .strictObject({
-    usd: z.number().positive().optional(),
-    timeMs: z.number().int().positive().optional(),
-  })
-  .refine((l) => l.usd !== undefined || l.timeMs !== undefined, 'Задайте usd или timeMs');
+/** Предел расходов (USD) и/или времени вызовов; хотя бы одно поле — выражено вариантами. */
+const budgetLimitSchema = z.union([
+  z.strictObject({ usd: z.number().positive(), timeMs: z.number().int().positive().optional() }),
+  z.strictObject({ usd: z.number().positive().optional(), timeMs: z.number().int().positive() }),
+]);
 
 export const toolProfileSchema = z.strictObject({
   runtime: z.enum(['codex', 'claude']),
@@ -145,6 +172,16 @@ export const executionPolicySchema = z.strictObject({
     plan: reviewRuleSchema,
     contract: reviewRuleSchema,
   }),
+  /**
+   * `live` — настоящие runtime; `fixture` — управляемые ответы для тестов и
+   * демо. Runtime `fixture` допустим только в режиме `fixture`, и режим не
+   * выбирается сам при отсутствии учётных данных.
+   */
+  mode: z.enum(['live', 'fixture']).default('live'),
+  /** Gates совместной проверки закреплённой комбинации репозиториев. */
+  workspaceGates: z.array(workspaceGateSchema).default([]),
+  /** `affected` — только изменённые компоненты и их транзитивные потребители. */
+  verificationMode: z.enum(['all', 'affected']).default('all'),
   /** Режим технического согласования плана/контракта: агент-ревьюер или оператор. */
   approvalMode: z.enum(['agent', 'operator']).default('agent'),
   isolation: z
@@ -180,8 +217,11 @@ export const executionPolicySchema = z.strictObject({
   reuseImplementation: z.boolean().default(true),
   budgets: z
     .strictObject({
+      /** Поручение. */
       work: budgetLimitSchema.optional(),
-      graph: budgetLimitSchema.optional(),
+      /** Группа хоста (доска DevContour со всеми ревизиями; standalone — граф). */
+      group: budgetLimitSchema.optional(),
+      /** Вся установка. */
       total: budgetLimitSchema.optional(),
       onUnknown: z.enum(['stop', 'continue']).default('stop'),
     })
@@ -222,64 +262,171 @@ export function selectReviewer(
   return { ok: true, reviewer: rule.reviewer, sameVendor };
 }
 
+type Issue = ErrorIssue & { code: string };
+type Repo = z.infer<typeof repositoryPolicySchema>;
+
+/** Gates в порядке зависимостей; повтор, неизвестная зависимость и цикл — нарушения. */
+export function gateOrderIssues(
+  gates: { id: string; dependsOn?: string[] }[],
+): { code: string; message: string }[] {
+  const issues: { code: string; message: string }[] = [];
+  const byId = new Map<string, { id: string; dependsOn?: string[] }>();
+  for (const g of gates) {
+    if (byId.has(g.id)) issues.push({ code: 'INVALID_INPUT', message: 'Повтор gate ' + g.id });
+    byId.set(g.id, g);
+  }
+  const active = new Set<string>();
+  const seen = new Set<string>();
+  const visit = (id: string, from: string) => {
+    if (active.has(id)) {
+      issues.push({ code: 'GATE_GROUP_CYCLE', message: 'Цикл зависимостей gates: ' + id });
+      return;
+    }
+    if (seen.has(id)) return;
+    const gate = byId.get(id);
+    if (!gate) {
+      issues.push({ code: 'GATE_UNKNOWN', message: `Неизвестная зависимость gate ${from}: ${id}` });
+      return;
+    }
+    active.add(id);
+    for (const parent of gate.dependsOn ?? []) visit(parent, id);
+    active.delete(id);
+    seen.add(id);
+  };
+  for (const g of gates) visit(g.id, g.id);
+  return issues;
+}
+
 /**
- * Согласованность политики, которую не выразить схемой: роли ссылаются на
- * объявленные профили, группы gates раскрываются без циклов и неизвестных
- * членов, пары writer/reviewer допустимы правилом вендора.
+ * Согласованность политики, которую не выразить схемой, — проверки
+ * DevContour `validateWorkflow` и загрузки конфигурации, перенесённые без
+ * ослабления: компоненты без циклов, gates упорядочиваемы, у репозитория
+ * есть test gate, зарезервированный gate не объявлен, шаги уникальны,
+ * ресурсы известны и корректны, профили инструментов совместимы с runtime,
+ * `effort` только для codex, `fixture` только в режиме `fixture`, пары
+ * writer/reviewer допустимы правилом вендора.
  */
-export function policyIssues(policy: ExecutionPolicy): (ErrorIssue & { code: string })[] {
-  const issues: (ErrorIssue & { code: string })[] = [];
-  const repoIds = new Set<string>();
-  policy.repositories.forEach((repo, r) => {
-    if (repoIds.has(repo.id))
-      issues.push({
-        code: 'INVALID_INPUT',
-        path: ['repositories', r, 'id'],
-        message: 'Повтор репозитория',
-      });
-    repoIds.add(repo.id);
-    const gates = new Set<string>();
-    repo.gates.forEach((g, i) => {
-      if (gates.has(g.id))
-        issues.push({
-          code: 'INVALID_INPUT',
-          path: ['repositories', r, 'gates', i],
-          message: 'Повтор gate ' + g.id,
-        });
-      gates.add(g.id);
+export function policyIssues(policy: ExecutionPolicy): Issue[] {
+  const issues: Issue[] = [];
+  const add = (code: string, path: (string | number)[], message: string) =>
+    issues.push({ code, path, message });
+  const repos = new Map<string, Repo>();
+  const resourceIds = new Set<string>();
+  policy.resources.forEach((r, i) => {
+    if (resourceIds.has(r.id)) add('INVALID_INPUT', ['resources', i], 'Повтор ресурса ' + r.id);
+    resourceIds.add(r.id);
+    if (
+      r.kind === 'port' &&
+      (!/^\d+$/.test(r.value) || Number(r.value) < 1024 || Number(r.value) > 65535)
+    )
+      add(
+        'INVALID_INPUT',
+        ['resources', i, 'value'],
+        'Ресурс port должен содержать порт 1024–65535',
+      );
+  });
+  const gateChecks = (
+    gates: { id: string; dependsOn?: string[]; resources?: string[] }[],
+    path: (string | number)[],
+  ) => {
+    for (const issue of gateOrderIssues(gates)) add(issue.code, path, issue.message);
+    gates.forEach((g, i) => {
+      if (g.id === 'requirement-source')
+        add('INVALID_INPUT', [...path, i, 'id'], 'requirement-source — зарезервированный gate');
+      for (const r of g.resources ?? [])
+        if (!resourceIds.has(r))
+          add('INVALID_INPUT', [...path, i, 'resources'], 'Неизвестный ресурс: ' + r);
     });
+  };
+  policy.repositories.forEach((repo, r) => {
+    if (repos.has(repo.id))
+      add('INVALID_INPUT', ['repositories', r, 'id'], 'Повтор репозитория ' + repo.id);
+    repos.set(repo.id, repo);
+    gateChecks(repo.gates, ['repositories', r, 'gates']);
+    if (!repo.gates.some((g) => g.kind === 'test'))
+      add(
+        'INVALID_INPUT',
+        ['repositories', r, 'gates'],
+        'Нужен хотя бы один test gate с JUnit report',
+      );
     for (const group of Object.keys(repo.gateGroups ?? {}))
       try {
         expandGateRefs(repo, ['@' + group]);
       } catch (error) {
-        issues.push({
-          code: (error as { code?: string }).code ?? 'GATE_UNKNOWN',
-          path: ['repositories', r, 'gateGroups', group],
-          message: (error as Error).message,
-        });
+        add(
+          (error as { code?: string }).code ?? 'GATE_UNKNOWN',
+          ['repositories', r, 'gateGroups', group],
+          (error as Error).message,
+        );
       }
+    const lifecycle = repo.lifecycle ?? { setup: [], ready: [], teardown: [] };
+    for (const [name, steps] of Object.entries({
+      prepare: repo.prepare,
+      dependencyBuild: repo.dependencyBuild,
+      preflight: repo.preflight,
+      setup: lifecycle.setup,
+      ready: lifecycle.ready,
+      teardown: lifecycle.teardown,
+    }))
+      if (new Set(steps.map((s) => s.id)).size !== steps.length)
+        add('INVALID_INPUT', ['repositories', r, name], 'Step ids должны быть уникальны');
   });
   policy.repositories.forEach((repo, r) =>
     repo.dependsOn.forEach((dep, d) => {
-      if (!repoIds.has(dep))
-        issues.push({
-          code: 'INVALID_INPUT',
-          path: ['repositories', r, 'dependsOn', d],
-          message: 'Неизвестный репозиторий ' + dep,
-        });
+      if (!repos.has(dep))
+        add('INVALID_INPUT', ['repositories', r, 'dependsOn', d], 'Неизвестный репозиторий ' + dep);
     }),
   );
+  // Цикл компонентов.
+  const active = new Set<string>();
+  const seen = new Set<string>();
+  const visit = (id: string) => {
+    if (active.has(id)) {
+      add('INVALID_INPUT', ['repositories'], 'Цикл зависимостей компонентов: ' + id);
+      return;
+    }
+    if (seen.has(id) || !repos.has(id)) return;
+    active.add(id);
+    for (const dep of repos.get(id)!.dependsOn) visit(dep);
+    active.delete(id);
+    seen.add(id);
+  };
+  for (const id of repos.keys()) visit(id);
+  gateChecks(policy.workspaceGates, ['workspaceGates']);
+  policy.workspaceGates.forEach((g, i) => {
+    if (!repos.has(g.repositoryId))
+      add(
+        'INVALID_INPUT',
+        ['workspaceGates', i, 'repositoryId'],
+        'Неизвестный репозиторий ' + g.repositoryId,
+      );
+  });
+  const bindings: [string[], RuntimeBinding][] = [
+    ...(['code', 'plan', 'contract'] as const).map((k): [string[], RuntimeBinding] => [
+      ['review', k, 'reviewer'],
+      policy.review[k].reviewer,
+    ]),
+    ...Object.entries(policy.roles).flatMap(([role, b]): [string[], RuntimeBinding][] => [
+      [['roles', role, 'writer'], b.writer],
+      ...(b.review
+        ? [[['roles', role, 'review', 'reviewer'], b.review.reviewer] as [string[], RuntimeBinding]]
+        : []),
+    ]),
+  ];
+  for (const [path, b] of bindings) {
+    if (b.effort && b.runtime !== 'codex')
+      add('INVALID_INPUT', path, 'effort поддерживается только для codex');
+    if (b.runtime === 'fixture' && policy.mode !== 'fixture')
+      add('INVALID_INPUT', path, 'Runtime fixture допустим только в mode: fixture');
+    if (b.toolProfile) {
+      const profile = policy.toolProfiles[b.toolProfile];
+      if (!profile || profile.runtime !== b.runtime)
+        add('INVALID_INPUT', path, 'Неизвестный или несовместимый toolProfile: ' + b.toolProfile);
+    }
+  }
   for (const [role, binding] of Object.entries(policy.roles)) {
-    for (const b of [binding.writer, binding.review?.reviewer])
-      if (b?.toolProfile && !policy.toolProfiles[b.toolProfile])
-        issues.push({
-          code: 'INVALID_INPUT',
-          path: ['roles', role],
-          message: 'Неизвестный toolProfile ' + b.toolProfile,
-        });
     const choice = selectReviewer(policy, 'code', binding.writer, role);
-    if (!choice.ok)
-      issues.push({ code: choice.code, path: ['roles', role], message: choice.message });
+    if (!choice.ok) add(choice.code, ['roles', role], choice.message);
   }
   return issues;
 }

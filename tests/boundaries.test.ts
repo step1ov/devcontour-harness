@@ -34,6 +34,8 @@ test('Договоры не зависят от других модулей, п�
     "import { spawn } from 'node:child_process';\n",
     "import { readFileSync } from 'node:fs';\n",
     "import { DatabaseSync } from 'node:sqlite';\n",
+    "import { readFile } from 'node:fs/promises';\n",
+    "import { readFileSync } from 'fs';\n",
   ]) {
     const messages = await lint('src/contracts/work.ts', line);
     assert.equal(messages.length, 1, line);
@@ -65,6 +67,8 @@ test('Исходники не ссылаются на соседний checkout 
       else if (e.name.endsWith('.ts')) files.push(join(dir, e.name));
   };
   walk('src');
+  assert.ok(files.length >= 10, 'проверка видит исходники: ' + files.length);
+  assert.ok(files.includes(join('src', 'contracts', 'ports.ts')));
   for (const file of files) {
     const text = readFileSync(join(root, file), 'utf8');
     assert.doesNotMatch(text, /\.\.\/devcontour\b|PhpstormProjects|\/Users\//, file);

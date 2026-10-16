@@ -121,7 +121,8 @@
             "items": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 500
+              "maxLength": 500,
+              "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
             }
           },
           "dependsOn": {
@@ -198,7 +199,8 @@
                 "source": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 500
+                  "maxLength": 500,
+                  "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
                 },
                 "digest": {
                   "type": "string",

@@ -6,27 +6,11 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import {
-  API_VERSION,
-  contextSnapshotSchema,
-  executionPolicySchema,
-  resultEnvelopeSchema,
-  runEventSchema,
-  runResultSchema,
-  workGraphSchema,
-  workOrderSchema,
-} from '../src/contracts/index.ts';
+import { publishedSchemas } from '../src/contracts/published.ts';
+import { API_VERSION } from '../src/contracts/index.ts';
 
 const dir = fileURLToPath(new URL('../schemas/', import.meta.url));
-const schemas: Record<string, z.ZodType> = {
-  'work-order': workOrderSchema,
-  'work-graph': workGraphSchema,
-  'execution-policy': executionPolicySchema,
-  'context-snapshot': contextSnapshotSchema,
-  'run-result': runResultSchema,
-  'result-envelope': resultEnvelopeSchema,
-  'run-event': runEventSchema,
-};
+const schemas: Record<string, z.ZodType> = publishedSchemas;
 const check = process.argv.includes('--check');
 const stale: string[] = [];
 mkdirSync(dir, { recursive: true });

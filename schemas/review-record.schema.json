@@ -1,0 +1,168 @@
+{
+  "$id": "devcontour-harness/v1alpha1/review-record.schema.json",
+  "title": "review-record",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "plan",
+        "contract"
+      ]
+    },
+    "subject": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "round": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+    },
+    "approved": {
+      "type": "boolean"
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 12000
+    },
+    "authorRuntime": {
+      "type": "string",
+      "enum": [
+        "codex",
+        "claude",
+        "fixture"
+      ]
+    },
+    "reviewerRuntime": {
+      "type": "string",
+      "enum": [
+        "codex",
+        "claude",
+        "fixture"
+      ]
+    },
+    "reviewerModel": {
+      "type": "string"
+    },
+    "sameVendor": {
+      "type": "boolean"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "blocking",
+              "note"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 12000
+          },
+          "rule": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "closed",
+              "withdrawn"
+            ]
+          },
+          "openedIn": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "changedIn": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "basis": {
+            "type": "string",
+            "maxLength": 4000
+          }
+        },
+        "required": [
+          "id",
+          "severity",
+          "message",
+          "status",
+          "openedIn",
+          "changedIn"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "artifact": {
+      "type": "string",
+      "maxLength": 1000
+    }
+  },
+  "required": [
+    "id",
+    "kind",
+    "subject",
+    "digest",
+    "round",
+    "at",
+    "approved",
+    "summary",
+    "authorRuntime",
+    "reviewerRuntime",
+    "sameVendor",
+    "findings",
+    "artifact"
+  ],
+  "additionalProperties": false
+}

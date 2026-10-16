@@ -5,6 +5,7 @@ import {
   API_VERSION,
   HarnessError,
   cliCommands,
+  cliDataSchemas,
   exitCodeOf,
   exitCodes,
   type CliCommand,
@@ -18,10 +19,10 @@ const usage = `harness ${HARNESS_VERSION}
 Использование: harness <команда> [параметры]
 
 ${Object.entries(cliCommands)
-  .map(([name, text]) => `  ${name.padEnd(16)} ${text}`)
+  .map(([name, c]) => `  ${name.padEnd(16)} ${c.description}`)
   .join('\n')}
 
-  validate --graph <файл.json> --policy <файл.json>
+  validate --graph <файл.json> --policy <файл.json> [--context <файл.json>]
 
 stdout — JSON (${API_VERSION}); диагностика — stderr.
 Exit codes: 0 успех, 2 неверный вход, 3 отказ/блокировка, 4 инфраструктура.
@@ -67,7 +68,7 @@ function run(argv: string[]): { command: CliCommand | 'version'; data: unknown }
     );
   const { values } = parseArgs({
     args: rest,
-    options: { graph: { type: 'string' }, policy: { type: 'string' } },
+    options: { graph: { type: 'string' }, policy: { type: 'string' }, context: { type: 'string' } },
     strict: true,
   });
   if (!values.graph || !values.policy)
@@ -77,6 +78,7 @@ function run(argv: string[]): { command: CliCommand | 'version'; data: unknown }
     data: validateInputs({
       graph: readJson(values.graph, 'graph'),
       policy: readJson(values.policy, 'policy'),
+      ...(values.context ? { context: readJson(values.context, 'context') } : {}),
     }),
   };
 }
@@ -90,7 +92,13 @@ let envelope: CliEnvelope;
 let code: number = exitCodes.ok;
 try {
   const { command, data } = run(argv);
-  envelope = { apiVersion: API_VERSION, command, ok: true, data };
+  // Ответ проверяется схемой своей команды: CLI не может выдать данные вне договора.
+  envelope = {
+    apiVersion: API_VERSION,
+    command,
+    ok: true,
+    data: cliDataSchemas[command].parse(data),
+  };
 } catch (error) {
   const known =
     error instanceof HarnessError

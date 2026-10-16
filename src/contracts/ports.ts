@@ -6,11 +6,16 @@ import type { RunResult } from './result.ts';
 import type { RunEvent, RunEventDraft, TransactionKind } from './events.ts';
 import type {
   AttemptState,
+  CallRecord,
   ControlState,
   ControllerLease,
   GraphState,
+  JointVerificationState,
+  LocalNamespace,
+  LocalValue,
+  Usage,
   WorkState,
-} from './state.ts';
+} from './execution.ts';
 
 /* ------------------------------------------------------------------ */
 /* ExecutionStore                                                      */
@@ -26,13 +31,24 @@ export interface ExecutionView {
   works(graphId?: string): WorkState[];
   attempt(id: string): AttemptState | undefined;
   attempts(workId?: string): AttemptState[];
+  verification(id: string): JointVerificationState | undefined;
+  verifications(): JointVerificationState[];
   /**
-   * Локальные записи исполнения: idempotency-ключи, учёт вызовов, receipts
-   * доставки, решения ограниченного восстановления. Пространство имён
-   * задаёт движок; адаптер хранит их рядом с состоянием, в той же базе.
+   * Локальные записи исполнения, адресуемые `(namespace, owner, key)`.
+   * Пространства и схемы — `localSchemas`; `owner` — репозиторий, за которым
+   * закреплена запись, или `WORKSPACE_OWNER`. Адаптер хранит их в той же
+   * базе, что и состояние владельца, и проверяет схему при чтении и записи.
    */
-  local<T>(namespace: string, key: string): T | undefined;
-  locals<T>(namespace: string): Record<string, T>;
+  local<N extends LocalNamespace>(
+    namespace: N,
+    owner: string,
+    key: string,
+  ): LocalValue<N> | undefined;
+  /** Все записи пространства у владельца; без `owner` — у всех владельцев. */
+  locals<N extends LocalNamespace>(
+    namespace: N,
+    owner?: string,
+  ): { owner: string; key: string; value: LocalValue<N> }[];
 }
 
 /**
@@ -44,9 +60,15 @@ export interface ExecutionTransaction extends ExecutionView {
   putGraph(graph: GraphState): void;
   putWork(work: WorkState): void;
   putAttempt(attempt: AttemptState): void;
+  putVerification(verification: JointVerificationState): void;
   setControl(control: ControlState): void;
   setController(lease: ControllerLease | undefined): void;
-  putLocal(namespace: string, key: string, value: unknown): void;
+  putLocal<N extends LocalNamespace>(
+    namespace: N,
+    owner: string,
+    key: string,
+    value: LocalValue<N>,
+  ): void;
   emit(event: RunEventDraft): void;
 }
 
@@ -61,7 +83,11 @@ export type NotPromise<T> = T extends PromiseLike<unknown> ? never : T;
  *   записей друг друга, вторая транзакция видит результат первой;
  * - исключение внутри `fn` откатывает все изменения и события;
  * - `fn` синхронна; адаптер отклоняет возврат Promise;
- * - вложенный `transact` выполняется в той же транзакции (savepoint);
+ * - вложенный `transact` выполняется в той же транзакции и видит её
+ *   несохранённые изменения; исключение во вложенном откатывает только его
+ *   изменения и события; изменения вложенного и внешнего сохраняются оба;
+ * - события транзакции — только явно записанные `emit`; возвращаемое `fn`
+ *   значение в журнал не попадает (в нём бывают токены владения);
  * - `kind === 'heartbeat'` продлевает только сроки владения и не создаёт события;
  * - внутри `fn` допустим один синхронный внешний эффект — CAS продвижения
  *   target ref (`git update-ref <ref> <new> <old>`) при приёмке: он
@@ -96,16 +122,6 @@ export interface SandboxSpec {
   network: { domains: string[] };
 }
 
-export interface RuntimeUsage {
-  inputTokens: number | null;
-  outputTokens: number | null;
-  cacheReadTokens: number | null;
-  cacheWriteTokens: number | null;
-  reportedUsd: number | null;
-  complete: boolean;
-  source: 'codex-turn-events' | 'claude-result' | 'fixture' | 'unavailable';
-}
-
 export interface RuntimeRequest {
   /** Идентификатор вызова для учёта и диагностики. */
   callId: string;
@@ -127,12 +143,20 @@ export interface RuntimeRequest {
 
 export interface RuntimeResponse {
   status: 'ok' | 'failed' | 'timeout' | 'cancelled' | 'unavailable';
-  /** Разобранный структурированный ответ; `undefined`, если его нет или он невалиден. */
+  /**
+   * Сырой структурированный ответ — вход парсера. Движок разбирает его
+   * `implementationResultSchema`/`reviewResultSchema`; невалидный ответ —
+   * отказ, а не самооценка.
+   */
   output?: unknown;
+  /** Модель, о которой сообщил runtime (по ней выбирается тариф); `null` — не сообщил. */
+  model: string | null;
+  /** Версия CLI runtime (`<runtime> --version`); `null` — неизвестна. */
+  runtimeVersion: string | null;
   /** Текст ответа после маскирования секретов. */
   text: string;
   sessionId?: string;
-  usage: RuntimeUsage;
+  usage: Usage;
   /** Безопасная диагностика: код выхода, причина, путь сохранённого журнала. */
   diagnostics: { exitCode: number | null; reason?: string; log?: string };
 }
@@ -243,11 +267,34 @@ export interface HostGuards {
   beforeAccept(work: WorkState, attempt: AttemptState, view: ExecutionView): HostRefusal;
 }
 
-/** Хост, внутри которого работает движок: хранилище, основания и условия. */
+/**
+ * Области бюджетов. `work` — поручение; `group` — группировка хоста (у
+ * DevContour — доска со всеми её ревизиями; standalone — граф); `total` —
+ * вся установка. Атрибуция вызова закрепляется в `CallRecord` при вызове;
+ * этот порт даёт её для нового вызова и один раз — для прежних записей.
+ */
+export interface BudgetScopes {
+  /** Группа поручения сейчас; `undefined` — поручение вне группы. */
+  groupOf(workId: string, view: ExecutionView): string | undefined;
+  /** Все поручения группы, включая прежние редакции её состава. */
+  members(groupId: string, view: ExecutionView): string[];
+  /**
+   * Атрибуция записи без закреплённых `workId`/`groupId`/`workIds`
+   * (записи прежних версий): вычисляется по текущему графу один раз и
+   * записывается; повторно не пересчитывается.
+   */
+  legacy(
+    record: CallRecord,
+    view: ExecutionView,
+  ): Pick<CallRecord, 'workId' | 'groupId' | 'workIds'>;
+}
+
+/** Хост, внутри которого работает движок: хранилище, основания, условия и области бюджетов. */
 export interface ExecutionHost {
   store: ExecutionStore;
   basis: BasisProvider;
   guards: HostGuards;
+  budgets: BudgetScopes;
   /** Версия потребителя (например, DevContour); записывается в попытку рядом с версией движка. */
   consumerVersion?: string;
 }

@@ -1,0 +1,37 @@
+{
+  "$id": "devcontour-harness/v1alpha1/contract-document.schema.json",
+  "title": "contract-document",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "devcontour-harness/v1alpha1"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+    },
+    "repositoryId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 180
+    },
+    "content": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 200000
+    }
+  },
+  "required": [
+    "apiVersion",
+    "id",
+    "title",
+    "content"
+  ],
+  "additionalProperties": false
+}

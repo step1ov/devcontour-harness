@@ -16,31 +16,35 @@ export const gitShaSchema = z
 /** SHA-256 содержимого в hex. */
 export const digestSchema = z.string().regex(/^[a-f0-9]{64}$/, 'Ожидается SHA-256 hex');
 export const isoTimeSchema = z.iso.datetime({ offset: true });
-/** Имя ветки, которую двигает harness: только собственное пространство имён. */
+/**
+ * Полное имя ветки `refs/heads/<имя>` по правилам `git check-ref-format`:
+ * компоненты без ведущей точки и суффикса `.lock`, без `..`, `//`, `@{`,
+ * управляющих символов, пробела и `~^:?*[\`, имя не кончается `/` или `.`.
+ * Правило выражено одним регулярным выражением, чтобы JSON Schema
+ * проверяла то же, что Zod.
+ */
+export const targetRefPattern =
+  '^refs/heads/(?!.*(?:\\.\\.|//|@\\{|\\.lock(?:/|$)|/\\.|[.]$|/$))(?!\\.)[^\\x00-\\x20\\x7f~^:?*\\[\\\\]{1,200}$';
 export const targetRefSchema = z
   .string()
-  .regex(/^refs\/heads\/[A-Za-z0-9][A-Za-z0-9/_.-]{0,200}$/, 'Ожидается refs/heads/<имя>')
-  .refine((r) => !r.includes('..') && !r.endsWith('/') && !r.endsWith('.lock'), 'Недопустимый ref');
+  .regex(
+    new RegExp(targetRefPattern),
+    'Ожидается refs/heads/<имя> по правилам git check-ref-format',
+  );
 
 /**
  * Относительный путь внутри репозитория: без glob, `.`/`..`, абсолютных
- * префиксов, обратных слешей и NUL. Та же форма, что у области записи
- * DevContour: сохранённые поручения читаются без преобразования.
+ * префиксов, обратных слешей, `:` и NUL. Та же форма, что у области записи
+ * DevContour: сохранённые поручения читаются без преобразования. Правило —
+ * регулярное выражение, поэтому JSON Schema его не теряет.
  */
+export const relativePathPattern =
+  '^(?!/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*/)?\\.{1,2}(?:/|$))(?=.{1,500}$).+$';
 export const relativePathSchema = z
   .string()
   .min(1)
   .max(500)
-  .refine(
-    (p) =>
-      !p.startsWith('/') &&
-      !p.includes('\\') &&
-      !p.includes(':') &&
-      !/[*?[\]]/.test(p) &&
-      !p.split('/').some((part) => part === '..' || part === '.') &&
-      !p.includes('\0'),
-    'Ожидается относительный путь без glob, . или ..',
-  );
+  .regex(new RegExp(relativePathPattern), 'Ожидается относительный путь без glob, . или ..');
 
 /** Встроенные runtime. `fixture` — управляемые ответы для тестов и демо, не живая модель. */
 export const runtimeNames = ['codex', 'claude', 'fixture'] as const;

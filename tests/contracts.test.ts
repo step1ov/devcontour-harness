@@ -3,16 +3,27 @@ import assert from 'node:assert/strict';
 import {
   API_VERSION,
   HarnessError,
+  canonicalJson,
+  contextIssues,
   digestOf,
+  eventPayloads,
   executionPolicySchema,
   expandGateRefs,
+  findingId,
   graphIssues,
+  policyDigest,
   policyIssues,
+  reviewIssues,
+  reviewResultSchema,
   runEventSchema,
   runResultSchema,
   selectReviewer,
+  sha256,
+  sourceDigest,
   workGraphDigest,
   workGraphSchema,
+  type ContextSnapshot,
+  type EventType,
   type WorkGraphInput,
 } from '../src/contracts/index.ts';
 import { validateInputs } from '../src/validate.ts';
@@ -27,26 +38,67 @@ const order = (id: string, dependsOn: string[] = []) => ({
 const graphWith = (orders: object[], prerequisites: object[] = []) =>
   workGraphSchema.parse({ ...graphInput(), orders, prerequisites });
 
-test('Пример поручения и политики проходит validate и даёт стабильные digests', () => {
-  const a = validateInputs({ graph: example('graph'), policy: example('policy') });
+test('Канонический JSON и digests примера равны закреплённым значениям', () => {
+  // Эталоны: смена формулы digest — несовместимое изменение договора, а не рефакторинг.
+  assert.equal(
+    canonicalJson({ b: [1, { d: undefined, c: 'x' }], a: null }),
+    '{"a":null,"b":[1,{"c":"x"}]}',
+  );
+  const graph = workGraphSchema.parse(example('graph'));
+  assert.equal(
+    workGraphDigest(graph),
+    '1328a41de2b74096de57553d096d2f7782b5b1e235bb0956d20ea78d6f266c2c',
+  );
+  assert.equal(
+    policyDigest(executionPolicySchema.parse(example('policy'))),
+    '85f4cf1781095bf157271cd6668a31b8a92203a0e8ca3e3f92670ed9e4c3c8c1',
+  );
   const reordered = Object.fromEntries(Object.entries(example('graph')).reverse());
-  const b = validateInputs({ graph: reordered, policy: example('policy') });
-  assert.equal(a.graphDigest, b.graphDigest, 'порядок ключей не меняет digest');
-  assert.match(a.policyDigest, /^[a-f0-9]{64}$/);
-  assert.equal(a.orders, 1);
+  assert.equal(
+    validateInputs({ graph: reordered, policy: example('policy') }).graphDigest,
+    workGraphDigest(graph),
+  );
 });
 
-test('Изменение любого поля поручения меняет digest графа', () => {
-  const base = workGraphSchema.parse(graphInput());
-  for (const mutate of [
-    (g: WorkGraphInput) => (g.orders[0]!.acceptance = ['другой критерий']),
-    (g: WorkGraphInput) => (g.orders[0]!.writeScope = ['src']),
-    (g: WorkGraphInput) => (g.orders[0]!.gates = []),
-    (g: WorkGraphInput) => (g.orders[0]!.source.revision = '2'),
-  ]) {
+test('Изменение каждого поля поручения меняет digest графа', () => {
+  const base = workGraphDigest(workGraphSchema.parse(graphInput()));
+  const changes: Record<string, (o: Record<string, unknown>) => void> = {
+    id: (o) => (o.id = 'other-id'),
+    source: (o) => (o.source = { connector: 'files', ref: 'add-greeting', revision: '2' }),
+    title: (o) => (o.title = 'Другое название'),
+    goal: (o) => (o.goal = 'Другая цель поручения целиком.'),
+    acceptance: (o) => (o.acceptance = ['другой критерий']),
+    role: (o) => (o.role = 'tester'),
+    repositoryId: (o) => (o.repositoryId = 'web'),
+    relatedRepositories: (o) => (o.relatedRepositories = ['app', 'web']),
+    writeScope: (o) => (o.writeScope = ['src']),
+    dependsOn: (o) => (o.dependsOn = ['x']),
+    gates: (o) => (o.gates = []),
+    consumers: (o) => (o.consumers = [{ repositoryId: 'web', gates: ['unit'] }]),
+    properties: (o) => (o.properties = ['p1']),
+    resources: (o) => (o.resources = ['db']),
+    requirements: (o) =>
+      (o.requirements = [
+        {
+          id: 'REQ-1',
+          source: 'a.md',
+          digest: sha256('abc'),
+          text: 'abc',
+          gate: 'unit',
+          scenario: 'xyz',
+        },
+      ]),
+    contracts: (o) => (o.contracts = [{ id: 'api', digest: sha256('api') }]),
+    context: (o) => (o.context = ['rules']),
+  };
+  const fields = Object.keys(workGraphSchema.shape.orders.element.shape).filter(
+    (k) => k !== 'apiVersion',
+  );
+  assert.deepEqual(Object.keys(changes).sort(), fields.sort(), 'каждое поле поручения проверено');
+  for (const [field, change] of Object.entries(changes)) {
     const changed = graphInput();
-    mutate(changed);
-    assert.notEqual(workGraphDigest(workGraphSchema.parse(changed)), workGraphDigest(base));
+    change(changed.orders[0] as unknown as Record<string, unknown>);
+    assert.notEqual(workGraphDigest(workGraphSchema.parse(changed)), base, field);
   }
 });
 
@@ -62,7 +114,8 @@ test('Граф: повтор ID, неизвестная зависимость, 
   assert.deepEqual(codes(graphWith([order('a'), order('b', ['a'])])), []);
 });
 
-test('Внешняя зависимость принимается только подтверждённой предпосылкой с SHA', () => {
+test('Форма предпосылки: только receipt с полным SHA; отметка done не предпосылка', () => {
+  // Тест формы. Доверие receipt и наличие SHA в target ref проверяет движок (этап 1).
   const sha = 'a'.repeat(40);
   assert.deepEqual(
     graphIssues(
@@ -80,7 +133,6 @@ test('Внешняя зависимость принимается только 
     ),
     [],
   );
-  // Отметка «done» без receipt и SHA не является предпосылкой.
   assert.throws(() =>
     graphWith([order('b', ['a'])], [{ id: 'a', repositoryId: 'app', status: 'done' }]),
   );
@@ -100,12 +152,12 @@ test('Внешняя зависимость принимается только 
 });
 
 test('Поручение: путь вне репозитория, glob, лишнее поле и чужая apiVersion отклоняются', () => {
-  for (const writeScope of [['../x'], ['/abs'], ['src/*'], ['a\\b'], ['./src']]) {
+  for (const writeScope of [['../x'], ['/abs'], ['src/*'], ['a\\b'], ['./src'], ['a/../b']]) {
     const g = graphInput();
     g.orders[0]!.writeScope = writeScope;
     assert.equal(workGraphSchema.safeParse(g).success, false, writeScope[0]);
   }
-  const extra = graphInput() as WorkGraphInput & { status?: string };
+  const extra = graphInput();
   (extra.orders[0] as Record<string, unknown>).status = 'done';
   assert.equal(workGraphSchema.safeParse(extra).success, false, 'поручение не несёт статус');
   const version = graphInput();
@@ -113,18 +165,27 @@ test('Поручение: путь вне репозитория, glob, лишн
   assert.equal(workGraphSchema.safeParse(version).success, false);
 });
 
-test('Reviewer: по умолчанию тот же вендор отклонён, явно разрешённый — проходит', () => {
-  const cross = executionPolicySchema.parse(example('policy'));
-  const same = executionPolicySchema.parse(example('policy-same-vendor'));
-  for (const kind of ['code', 'plan', 'contract'] as const) {
-    const ok = selectReviewer(cross, kind, { runtime: 'claude' }, 'developer');
-    assert.equal(ok.ok && ok.reviewer.runtime, 'codex');
-    const refused = selectReviewer(cross, kind, { runtime: 'codex' }, 'developer');
-    assert.equal(!refused.ok && refused.code, 'REVIEWER_SAME_VENDOR');
-    const allowed = selectReviewer(same, kind, { runtime: 'claude' }, 'developer');
-    assert.equal(allowed.ok && allowed.sameVendor, true);
-  }
-  // Политика с недопустимой парой не проходит validate до запуска.
+test('Reviewer: все четыре пары writer/reviewer по правилу вендора, для code, plan и contract', () => {
+  const withReviewer = (runtime: 'codex' | 'claude', vendor?: string) => {
+    const p = clone(example('policy')) as { review: Record<string, unknown> };
+    for (const k of ['code', 'plan', 'contract'])
+      p.review[k] = { reviewer: { runtime }, ...(vendor ? { vendor } : {}) };
+    return executionPolicySchema.parse(p);
+  };
+  for (const kind of ['code', 'plan', 'contract'] as const)
+    for (const writer of ['claude', 'codex'] as const)
+      for (const reviewer of ['claude', 'codex'] as const) {
+        const same = writer === reviewer;
+        const strict = selectReviewer(withReviewer(reviewer), kind, { runtime: writer });
+        assert.equal(strict.ok, !same, `${kind} ${writer}→${reviewer} по умолчанию`);
+        if (!strict.ok) assert.equal(strict.code, 'REVIEWER_SAME_VENDOR');
+        const allowed = selectReviewer(withReviewer(reviewer, 'same-vendor-allowed'), kind, {
+          runtime: writer,
+        });
+        assert.equal(allowed.ok, true, `${kind} ${writer}→${reviewer} с разрешением`);
+        assert.equal(allowed.ok && allowed.sameVendor, same);
+        assert.equal(allowed.ok && allowed.reviewer.runtime, reviewer);
+      }
   const bad = clone(example('policy')) as { review: { code: { reviewer: { runtime: string } } } };
   bad.review.code.reviewer.runtime = 'claude';
   assert.deepEqual(
@@ -150,43 +211,52 @@ test('Группы gates: раскрытие по одному разу, цик�
     () => expandGateRefs({ ...repo, gateGroups: { a: ['@b'], b: ['@a'] } }, ['@a']),
     (e: Error & { code?: string }) => e.code === 'GATE_GROUP_CYCLE',
   );
-  assert.throws(
-    () => expandGateRefs(repo, ['@missing']),
-    (e: Error & { code?: string }) => e.code === 'GATE_UNKNOWN',
-  );
-  assert.throws(
-    () => expandGateRefs(repo, ['deploy']),
-    (e: Error & { code?: string }) => e.code === 'GATE_UNKNOWN',
-  );
-});
-
-test('Событие не может нести токен владения или секрет', () => {
-  const event = {
-    apiVersion: API_VERSION,
-    seq: 1,
-    at: '2026-01-01T00:00:00.000Z',
-    type: 'attempt.claimed',
-    runId: 'r1',
-    payload: { owner: 'controller-1', attempt: 1 },
-  };
-  assert.equal(runEventSchema.safeParse(event).success, true);
-  for (const payload of [
-    { token: 'x' },
-    { leaseToken: 'x' },
-    { nested: { apiKey: 'x' } },
-    { list: [{ password: 'x' }] },
-  ])
-    assert.equal(
-      runEventSchema.safeParse({ ...event, payload }).success,
-      false,
-      JSON.stringify(payload),
+  for (const ref of ['@missing', 'deploy'])
+    assert.throws(
+      () => expandGateRefs(repo, [ref]),
+      (e: Error & { code?: string }) => e.code === 'GATE_UNKNOWN',
     );
 });
 
-test('Результат accepted требует integration и result SHA, отказ — причину', () => {
-  const sha = 'b'.repeat(40);
-  const digest = digestOf('x');
-  const base = {
+const event = (type: string, payload: unknown) => ({
+  apiVersion: API_VERSION,
+  seq: 1,
+  at: '2026-01-01T00:00:00.000Z',
+  type,
+  runId: 'r1',
+  payload,
+});
+
+test('Нагрузка каждого типа события закрыта: токен и произвольные поля отклоняются', () => {
+  const claimed = {
+    owner: 'controller-1',
+    runtime: 'claude',
+    reviewer: 'codex',
+    policyDigest: digestOf('p'),
+    engineVersion: '0.1.0',
+  };
+  assert.equal(runEventSchema.safeParse(event('attempt.claimed', claimed)).success, true);
+  assert.equal(
+    runEventSchema.safeParse(event('attempt.claimed', { arbitrary: 'x' })).success,
+    false,
+  );
+  assert.equal(
+    runEventSchema.safeParse(event('attempt.claimed', { ...claimed, token: 'x' })).success,
+    false,
+  );
+  // Ни у одного типа нет поля, куда пролез бы токен.
+  for (const type of Object.keys(eventPayloads) as EventType[])
+    assert.equal(
+      eventPayloads[type].safeParse({ token: 'secret-token-value' }).success,
+      false,
+      type,
+    );
+  assert.equal(runEventSchema.safeParse(event('run.claimed', claimed)).success, false);
+});
+
+const resultBase = () => {
+  const d = digestOf('x');
+  return {
     apiVersion: API_VERSION,
     workOrderId: 'add-greeting',
     graphId: 'greeting',
@@ -198,36 +268,120 @@ test('Результат accepted требует integration и result SHA, от
     inputs: {
       harnessVersion: '0.1.0-alpha.0',
       stateVersion: 1,
-      workOrderDigest: digest,
-      graphDigest: digest,
-      policyDigest: digest,
+      workOrderDigest: d,
+      graphDigest: d,
+      policyDigest: d,
     },
+    checked: { dependencies: [], freshness: [], consumers: [] },
     evidence: [],
     finishedAt: '2026-01-01T00:00:00.000Z',
   };
+};
+
+test('Результат accepted требует все SHA, иной исход — причину с кодом и без result SHA', () => {
+  const sha = 'b'.repeat(40);
+  const all = { base: sha, candidate: sha, integration: sha, result: sha };
+  const ok = (v: object) => runResultSchema.safeParse({ ...resultBase(), ...v }).success;
+  assert.equal(ok({ outcome: 'accepted', shas: all }), true);
+  for (const missing of ['base', 'candidate', 'integration', 'result']) {
+    const shas: Record<string, string> = { ...all };
+    delete shas[missing];
+    assert.equal(ok({ outcome: 'accepted', shas }), false, missing);
+  }
+  assert.equal(ok({ outcome: 'rejected', shas: {} }), false);
   assert.equal(
-    runResultSchema.safeParse({ ...base, outcome: 'accepted', shas: { candidate: sha } }).success,
+    ok({ outcome: 'rejected', shas: {}, stopReason: { code: 'NO_SUCH', message: 'x' } }),
     false,
   );
   assert.equal(
-    runResultSchema.safeParse({
-      ...base,
-      outcome: 'accepted',
-      shas: { candidate: sha, integration: sha, result: sha },
-    }).success,
+    ok({ outcome: 'rejected', shas: {}, stopReason: { code: 'GATE_FAILED', message: 'unit' } }),
     true,
   );
   assert.equal(
-    runResultSchema.safeParse({ ...base, outcome: 'rejected', shas: {} }).success,
-    false,
-  );
-  assert.equal(
-    runResultSchema.safeParse({
-      ...base,
+    ok({
       outcome: 'rejected',
-      shas: {},
-      stopReason: { code: 'GATE_FAILED', message: 'unit failed' },
-    }).success,
-    true,
+      shas: { result: sha },
+      stopReason: { code: 'GATE_FAILED', message: 'x' },
+    }),
+    false,
+  );
+});
+
+const file = (path: string, text: string) => ({
+  path,
+  digest: sha256(text),
+  bytes: Buffer.byteLength(text),
+  content: { encoding: 'utf8' as const, data: text },
+});
+const snapshot = (files = [file('rules.md', 'Правило один.')]): ContextSnapshot => {
+  const entry = { id: 'rules', kind: 'files', version: '1', required: true, files, references: [] };
+  return {
+    apiVersion: API_VERSION,
+    sources: [{ ...entry, digest: sourceDigest(entry) }],
+    missing: [],
+  };
+};
+
+test('Контекст: содержимое сверяется с digest, размером и digest источника', () => {
+  assert.deepEqual(contextIssues(snapshot()), []);
+  const forged = snapshot();
+  forged.sources[0]!.files[0]!.content = { encoding: 'utf8', data: 'Подменённое правило.' };
+  assert.match(contextIssues(forged).join('\n'), /digest не совпадает с содержимым/);
+  const resized = snapshot();
+  resized.sources[0]!.files[0]!.bytes += 1;
+  assert.match(contextIssues(resized).join('\n'), /размер не совпадает/);
+  const swapped = snapshot();
+  swapped.sources[0]!.files = [file('rules.md', 'Другое правило.')];
+  assert.match(contextIssues(swapped).join('\n'), /digest источника не совпадает/);
+  const graph = clone(example('graph')) as { orders: { context?: string[] }[] };
+  graph.orders[0]!.context = ['rules', 'missing'];
+  assert.throws(
+    () => validateInputs({ graph, policy: example('policy'), context: snapshot() }),
+    (e: unknown) => e instanceof HarnessError && /missing/.test(JSON.stringify(e.issues)),
+  );
+  graph.orders[0]!.context = ['rules'];
+  assert.match(
+    String(validateInputs({ graph, policy: example('policy'), context: snapshot() }).contextDigest),
+    /^[a-f0-9]{64}$/,
+  );
+});
+
+test('Ревью: approved при блокирующей находке и неназванная прежняя находка — отказ', () => {
+  const blocking = { severity: 'blocking' as const, message: 'Нет отказа на цикл' };
+  const prev = [{ id: findingId('graph-1', blocking), severity: 'blocking' as const }];
+  assert.equal(findingId('graph-1', blocking), findingId('graph-1', { ...blocking }));
+  assert.notEqual(findingId('graph-1', blocking), findingId('graph-2', blocking));
+  const parse = (v: object) => reviewResultSchema.parse({ summary: 's', findings: [], ...v });
+  assert.deepEqual(reviewIssues(parse({ approved: true, findings: [blocking] }), []), [
+    'approved при блокирующей находке',
+  ]);
+  assert.match(
+    reviewIssues(parse({ approved: true }), prev).join('\n'),
+    /Не названо состояние прежней находки/,
+  );
+  const transition = (status: string, basis: string) => [{ id: prev[0]!.id, status, basis }];
+  assert.match(
+    reviewIssues(
+      parse({ approved: true, previous: transition('open', 'не исправлено') }),
+      prev,
+    ).join('\n'),
+    /approved при блокирующей находке/,
+  );
+  assert.deepEqual(
+    reviewIssues(
+      parse({ approved: true, previous: transition('closed', 'добавлен отказ на цикл') }),
+      prev,
+    ),
+    [],
+  );
+  assert.match(
+    reviewIssues(
+      parse({
+        approved: false,
+        previous: [{ id: digestOf('чужая'), status: 'closed', basis: 'xxx' }],
+      }),
+      [],
+    ).join('\n'),
+    /неизвестной находки/,
   );
 });

@@ -12,7 +12,7 @@ import { sourceRefSchema } from './work.ts';
 import { errorCodes, type ErrorCode } from './errors.ts';
 
 export const findingSchema = z.strictObject({
-  /** Уровень находки как его назвал reviewer; блокирующие: `blocking`, `critical`, `high`. */
+  /** Уровень находки как его назвал reviewer: `blocking` или `note`. */
   severity: z.string().min(1).max(40),
   message: z.string().min(1).max(4000),
   path: z.string().max(500).nullable().optional(),
@@ -34,7 +34,6 @@ export const evidenceRefSchema = z.strictObject({
   passed: z.boolean(),
   digest: digestSchema,
   summary: z.string().max(4000),
-  /** Компонент-потребитель, в дереве которого выполнена проверка. */
   consumer: idSchema.optional(),
   reviewer: z
     .strictObject({
@@ -46,58 +45,109 @@ export const evidenceRefSchema = z.strictObject({
 });
 export type EvidenceRef = z.infer<typeof evidenceRefSchema>;
 
+const artifactPin = z.strictObject({ path: z.string().min(1), digest: digestSchema });
+const freshness = z.strictObject({
+  repositoryId: idSchema,
+  snapshot: gitShaSchema,
+  head: gitShaSchema,
+  fresh: z.boolean(),
+});
+
+/**
+ * Против чего проверена попытка: снимки зависимостей и их свежесть на момент
+ * окончания, проверенная комбинация каждого потребителя. Свежесть
+ * записывается, а не запрещает приёмку: устаревший снимок — сведение для
+ * получателя, а не отказ (семантика DevContour сохраняется).
+ */
+export const checkedInputsSchema = z.strictObject({
+  dependencies: z.array(
+    z.strictObject({
+      repositoryId: idSchema,
+      sha: gitShaSchema,
+      tree: gitShaSchema,
+      artifacts: z.array(artifactPin),
+    }),
+  ),
+  freshness: z.array(freshness),
+  consumers: z.array(
+    z.strictObject({
+      repositoryId: idSchema,
+      gates: z.array(idSchema),
+      sha: gitShaSchema,
+      tree: gitShaSchema,
+      dependencies: z.array(
+        z.strictObject({
+          repositoryId: idSchema,
+          sha: gitShaSchema,
+          tree: gitShaSchema,
+          artifacts: z.array(artifactPin),
+        }),
+      ),
+      freshness: z.array(freshness),
+    }),
+  ),
+});
+
 export const outcomes = ['accepted', 'rejected', 'blocked', 'cancelled', 'stopped'] as const;
+const stopCode = z.enum(Object.keys(errorCodes) as [ErrorCode, ...ErrorCode[]]);
+
+const resultBase = {
+  apiVersion: z.literal(API_VERSION),
+  workOrderId: idSchema,
+  graphId: idSchema,
+  source: sourceRefSchema,
+  runId: z.string().min(1).max(200),
+  attempt: z.number().int().positive(),
+  repositoryId: idSchema,
+  targetRef: targetRefSchema,
+  /** Версии и digests входов, под которыми получен результат. */
+  inputs: z.strictObject({
+    harnessVersion: z.string().min(1),
+    consumerVersion: z.string().min(1).optional(),
+    stateVersion: z.literal(STATE_VERSION),
+    workOrderDigest: digestSchema,
+    graphDigest: digestSchema,
+    policyDigest: digestSchema,
+    contextDigest: digestSchema.optional(),
+    checks: digestSchema.optional(),
+  }),
+  checked: checkedInputsSchema,
+  evidence: z.array(evidenceRefSchema),
+  findings: z.array(findingSchema).default([]),
+  /** Чего результат не доказывает: недоступный дополнительный контекст, необязательные проверки. */
+  limitations: z.array(z.string().min(1).max(1000)).default([]),
+  finishedAt: isoTimeSchema,
+};
 
 /**
  * Итог работы над одной редакцией поручения. `accepted` — result SHA уже в
- * target ref, evidence обеих фаз записано; остальные исходы называют причину
- * остановки кодом из договора ошибок.
+ * target ref (result = integration), evidence обеих фаз записано; остальные
+ * исходы называют причину остановки кодом из договора ошибок. Различие
+ * выражено вариантами, а не проверкой после разбора, поэтому JSON Schema
+ * задаёт то же правило.
  */
-export const runResultSchema = z
-  .strictObject({
-    apiVersion: z.literal(API_VERSION),
-    outcome: z.enum(outcomes),
-    workOrderId: idSchema,
-    graphId: idSchema,
-    source: sourceRefSchema,
-    runId: z.string().min(1).max(200),
-    attempt: z.number().int().positive(),
-    repositoryId: idSchema,
-    targetRef: targetRefSchema,
+export const runResultSchema = z.discriminatedUnion('outcome', [
+  z.strictObject({
+    ...resultBase,
+    outcome: z.literal('accepted'),
+    shas: z.strictObject({
+      base: gitShaSchema,
+      candidate: gitShaSchema,
+      integration: gitShaSchema,
+      result: gitShaSchema,
+    }),
+  }),
+  z.strictObject({
+    ...resultBase,
+    outcome: z.enum(['rejected', 'blocked', 'cancelled', 'stopped']),
     shas: z.strictObject({
       base: gitShaSchema.optional(),
       candidate: gitShaSchema.optional(),
       integration: gitShaSchema.optional(),
-      result: gitShaSchema.optional(),
     }),
-    /** Версии и digests входов, под которыми получен результат. */
-    inputs: z.strictObject({
-      harnessVersion: z.string().min(1),
-      stateVersion: z.literal(STATE_VERSION),
-      workOrderDigest: digestSchema,
-      graphDigest: digestSchema,
-      policyDigest: digestSchema,
-      contextDigest: digestSchema.optional(),
-      checks: digestSchema.optional(),
-    }),
-    evidence: z.array(evidenceRefSchema),
-    findings: z.array(findingSchema).default([]),
-    /** Чего результат не доказывает: недоступный дополнительный контекст, необязательные проверки. */
-    limitations: z.array(z.string().min(1).max(1000)).default([]),
-    stopReason: z
-      .strictObject({
-        code: z.enum(Object.keys(errorCodes) as [ErrorCode, ...ErrorCode[]]),
-        message: z.string().min(1).max(4000),
-      })
-      .optional(),
-    finishedAt: isoTimeSchema,
-  })
-  .superRefine((r, ctx) => {
-    if (r.outcome === 'accepted' && (!r.shas.result || !r.shas.integration))
-      ctx.addIssue({ code: 'custom', message: 'accepted требует result и integration SHA' });
-    if (r.outcome !== 'accepted' && !r.stopReason)
-      ctx.addIssue({ code: 'custom', message: 'Неуспешный исход требует stopReason' });
-  });
+    stopReason: z.strictObject({ code: stopCode, message: z.string().min(1).max(4000) }),
+  }),
+]);
 export type RunResult = z.infer<typeof runResultSchema>;
 
 /**
@@ -108,10 +158,12 @@ export type RunResult = z.infer<typeof runResultSchema>;
 export const deliveryStateSchema = z.strictObject({
   sink: idSchema,
   key: z.string().min(1).max(300),
+  /** Редакция источника, к которой относится результат. */
+  revision: z.string().min(1).max(200),
   status: z.enum(['pending', 'delivered', 'failed', 'conflict']),
   attempts: z.number().int().nonnegative(),
   lastError: z.string().max(4000).optional(),
-  /** Редакция источника, которую получатель считает текущей, при конфликте. */
+  /** Редакция, которую получатель считает текущей, при конфликте. */
   currentRevision: z.string().max(200).optional(),
   receipt: z.string().max(1000).optional(),
   updatedAt: isoTimeSchema,
@@ -125,3 +177,58 @@ export const resultEnvelopeSchema = z.strictObject({
   delivery: z.array(deliveryStateSchema),
 });
 export type ResultEnvelope = z.infer<typeof resultEnvelopeSchema>;
+
+/* ------------------------------------------------------------------ */
+/* Совместная проверка комбинации репозиториев                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Совместная проверка закреплённой комбинации SHA нескольких репозиториев
+ * gates уровня workspace (`policy.workspaceGates`). Это техническая
+ * проверка; решение о продуктовом принятии (ChangeSet, релиз) принимает
+ * хост. Атомарность продвижения нескольких Git-репозиториев не заявляется:
+ * результат привязан к manifest, и смена любого SHA делает его устаревшим.
+ */
+export const jointManifestSchema = z.record(
+  idSchema,
+  z.strictObject({ sha: gitShaSchema, tree: gitShaSchema }),
+);
+
+export const jointEvidenceSchema = z.strictObject({
+  gate: idSchema,
+  passed: z.boolean(),
+  command: z.array(z.string()),
+  exitCode: z.number().int(),
+  log: z.string(),
+  digest: digestSchema,
+  summary: z.string(),
+  artifacts: z.array(artifactPin),
+  durationMs: z.number().min(0).optional(),
+});
+
+export const jointImpactSchema = z.strictObject({
+  changed: z.array(idSchema),
+  affected: z.array(idSchema),
+  gateIds: z.array(idSchema),
+  mode: z.enum(['all', 'affected']),
+  reason: z.string(),
+  baseline: z.string().optional(),
+});
+
+export const jointVerificationSchema = z.strictObject({
+  apiVersion: z.literal(API_VERSION),
+  id: z.string().min(1).max(200),
+  status: z.enum(['active', 'passed', 'failed']),
+  startedAt: isoTimeSchema,
+  finishedAt: isoTimeSchema.optional(),
+  policyDigest: digestSchema,
+  /** Digest постановок поручений, входящих в проверку (основание хоста). */
+  specDigest: digestSchema,
+  workIds: z.array(idSchema),
+  manifest: jointManifestSchema,
+  manifestDigest: digestSchema,
+  impact: jointImpactSchema.optional(),
+  evidence: z.array(jointEvidenceSchema),
+  error: z.string().optional(),
+});
+export type JointVerification = z.infer<typeof jointVerificationSchema>;

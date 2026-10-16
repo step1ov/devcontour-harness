@@ -1,64 +1,143 @@
 import { z } from 'zod';
 import { API_VERSION } from './version.ts';
-import { idSchema, isoTimeSchema } from './primitives.ts';
+import {
+  digestSchema,
+  gitShaSchema,
+  idSchema,
+  isoTimeSchema,
+  runtimeNameSchema,
+} from './primitives.ts';
+import { sourceRefSchema } from './work.ts';
+import { failureKindSchema, workStatusSchema } from './execution.ts';
 
-export const eventTypes = [
-  'graph.registered',
-  'graph.reviewed',
-  'graph.approved',
-  'work.ready',
-  'work.held',
-  'attempt.claimed',
-  'attempt.phase',
-  'attempt.gate',
-  'attempt.review',
-  'attempt.failed',
-  'attempt.expired',
-  'attempt.cancelled',
-  'attempt.recovered',
-  'work.accepted',
-  'work.blocked',
-  'control.paused',
-  'control.resumed',
-  'controller.acquired',
-  'controller.released',
-  'budget.blocked',
-  'delivery.pending',
-  'delivery.delivered',
-  'delivery.failed',
-  'delivery.conflict',
-] as const;
-export type EventType = (typeof eventTypes)[number];
+const sha = gitShaSchema;
+const text = z.string().max(4000);
+const runtime = runtimeNameSchema;
+const phase = z.enum(['candidate', 'integration']);
+const delivery = {
+  sink: idSchema,
+  key: z.string().min(1).max(300),
+  revision: z.string().min(1).max(200),
+  attempts: z.number().int().min(0),
+};
 
 /**
- * Ключи, которых не бывает в нагрузке события: токены владения, секреты и
- * учётные данные. Событие читают внешние получатели и CLI; fencing-токен в
- * нём позволил бы стороннему процессу завершить чужую попытку.
+ * Нагрузка каждого типа события — закрытая схема: лишних полей нет, и
+ * поэтому в событие нельзя положить fencing-токен, секрет или произвольный
+ * объект попытки. Событие читают внешние получатели и CLI.
  */
-const forbiddenKey = /token|secret|password|passwd|credential|api[-_]?key|authorization|cookie/i;
-const safeScalar = z.union([z.string().max(4000), z.number(), z.boolean(), z.null()]);
-const safeValue: z.ZodType<unknown> = z.lazy(() =>
-  z.union([safeScalar, z.array(safeValue).max(200), safeRecord]),
-);
-const safeRecord: z.ZodType<Record<string, unknown>> = z
-  .record(z.string().max(100), safeValue)
-  .refine((r) => Object.keys(r).every((k) => !forbiddenKey.test(k)), 'Запрещённый ключ в событии');
+export const eventPayloads = {
+  'graph.registered': z.strictObject({
+    digest: digestSchema,
+    orders: z.number().int().positive(),
+    source: sourceRefSchema,
+  }),
+  'graph.reviewed': z.strictObject({
+    kind: z.enum(['plan', 'contract']),
+    subject: idSchema,
+    digest: digestSchema,
+    round: z.number().int().positive(),
+    approved: z.boolean(),
+    open: z.number().int().min(0),
+  }),
+  'graph.approved': z.strictObject({ digest: digestSchema, actor: z.enum(['operator', 'agent']) }),
+  'work.ready': z.strictObject({ orderDigest: digestSchema }),
+  'work.held': z.strictObject({
+    operation: z.string().min(1).max(200),
+    reason: text,
+    released: z.boolean(),
+  }),
+  'attempt.claimed': z.strictObject({
+    owner: z.string().min(1).max(300),
+    runtime,
+    reviewer: runtime,
+    policyDigest: digestSchema,
+    engineVersion: z.string().min(1),
+  }),
+  'attempt.phase': z.strictObject({ phase: workStatusSchema, sha: sha.optional() }),
+  'attempt.gate': z.strictObject({
+    phase,
+    gate: idSchema,
+    sha,
+    passed: z.boolean(),
+    evidenceId: z.string().min(1).max(200),
+    consumer: idSchema.optional(),
+  }),
+  'attempt.review': z.strictObject({
+    phase,
+    sha,
+    passed: z.boolean(),
+    evidenceId: z.string().min(1).max(200),
+    reviewer: runtime,
+    sameVendor: z.boolean(),
+    blocking: z.number().int().min(0),
+  }),
+  'attempt.failed': z.strictObject({
+    failureKind: failureKindSchema,
+    message: text,
+    blocked: z.boolean(),
+  }),
+  'attempt.expired': z.strictObject({ leaseUntil: z.number().int().min(0) }),
+  'attempt.cancelled': z.strictObject({ reason: text }),
+  'attempt.recovered': z.strictObject({
+    integrationSha: sha,
+    accepted: z.boolean(),
+    reason: text.optional(),
+  }),
+  'work.accepted': z.strictObject({ resultSha: sha, integrationSha: sha }),
+  'work.blocked': z.strictObject({ code: z.string().min(1).max(60), message: text }),
+  'control.paused': z.strictObject({
+    reason: z.enum(['operator', 'shutdown', 'runtime', 'base-check', 'reconfigure']),
+    failures: z.array(failureKindSchema).optional(),
+  }),
+  'control.resumed': z.strictObject({
+    reason: z.enum(['operator', 'shutdown', 'runtime', 'base-check', 'reconfigure']),
+  }),
+  'controller.acquired': z.strictObject({ owner: z.string().min(1).max(300) }),
+  'controller.released': z.strictObject({ owner: z.string().min(1).max(300) }),
+  'budget.blocked': z.strictObject({
+    scope: z.enum(['work', 'group', 'total']),
+    scopeId: z.string().max(200).optional(),
+    state: z.enum(['exceeded', 'undetermined']),
+    reason: text,
+  }),
+  'delivery.pending': z.strictObject(delivery),
+  'delivery.delivered': z.strictObject({ ...delivery, receipt: z.string().max(1000).optional() }),
+  'delivery.failed': z.strictObject({ ...delivery, error: text }),
+  'delivery.conflict': z.strictObject({ ...delivery, currentRevision: z.string().min(1).max(200) }),
+} as const;
+export type EventType = keyof typeof eventPayloads;
+export const eventTypes = Object.keys(eventPayloads) as EventType[];
 
-export const runEventSchema = z.strictObject({
+const envelope = {
   apiVersion: z.literal(API_VERSION),
   /** Строго возрастающий номер в пределах ExecutionStore. */
   seq: z.number().int().positive(),
   at: isoTimeSchema,
-  type: z.enum(eventTypes),
   graphId: idSchema.optional(),
   workId: idSchema.optional(),
   runId: z.string().min(1).max(200).optional(),
   attempt: z.number().int().positive().optional(),
-  payload: safeRecord,
-});
-export type RunEvent = z.infer<typeof runEventSchema>;
-export type RunEventDraft = Omit<RunEvent, 'apiVersion' | 'seq' | 'at'>;
-export const isForbiddenEventKey = (key: string) => forbiddenKey.test(key);
+};
+const envelopeSchema = z.strictObject(envelope);
+type Envelope = z.infer<typeof envelopeSchema>;
+const variants = (Object.keys(eventPayloads) as EventType[]).map((type) =>
+  envelopeSchema.extend({ type: z.literal(type), payload: eventPayloads[type] }),
+);
+/** Событие: общий конверт и нагрузка своего типа (дискриминатор `type`). */
+export const runEventSchema = z.discriminatedUnion(
+  'type',
+  variants as [(typeof variants)[number], ...(typeof variants)[number][]],
+);
+export type RunEvent = {
+  [T in EventType]: Envelope & { type: T; payload: z.infer<(typeof eventPayloads)[T]> };
+}[EventType];
+export type RunEventDraft = {
+  [T in EventType]: Omit<Envelope, 'apiVersion' | 'seq' | 'at'> & {
+    type: T;
+    payload: z.infer<(typeof eventPayloads)[T]>;
+  };
+}[EventType];
 
 /**
  * Типы транзакций исполнения. Это сохранённые строки: DevContour пишет их
