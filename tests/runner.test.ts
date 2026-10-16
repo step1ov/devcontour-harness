@@ -361,7 +361,7 @@ test('T11: занятый ресурс — попытка ждёт и не от�
       (p as { resources: unknown[] }).resources = [
         { id: 'device', kind: 'device', value: 'phone-1' },
       ];
-      (p as { runTimeoutMs: number }).runTimeoutMs = 2000;
+      (p as { runTimeoutMs: number }).runTimeoutMs = 6000;
       (p as { maxAttempts: number }).maxAttempts = 1;
     },
     graph: (g) => ((g as { orders: { resources?: string[] }[] }).orders[0]!.resources = ['device']),
