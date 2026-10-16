@@ -1,0 +1,108 @@
+#!/usr/bin/env node
+// FIXTURE ONLY. Подставной CLI codex/claude для тестов механики harness:
+// говорит по протоколу CLI, но ответы берёт из сценария, а не из модели.
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { dirname, join, basename } from 'node:path';
+import { execFileSync } from 'node:child_process';
+
+const runtime = basename(process.argv[1]).includes('claude') ? 'claude' : 'codex';
+const args = process.argv.slice(2);
+if (args.includes('--version')) {
+  console.log(`fake-${runtime} 0.0.1 (fixture)`);
+  process.exit(0);
+}
+const scenarioPath = process.env.FIXTURE_SCENARIO;
+if (!scenarioPath) {
+  console.error('Not logged in: FIXTURE_SCENARIO is not set');
+  process.exit(1);
+}
+const scenario = JSON.parse(readFileSync(scenarioPath, 'utf8'));
+const arg = (name) => {
+  const i = args.indexOf(name);
+  return i >= 0 ? args[i + 1] : undefined;
+};
+const schema =
+  runtime === 'codex'
+    ? JSON.parse(readFileSync(arg('--output-schema'), 'utf8'))
+    : JSON.parse(arg('--json-schema'));
+const role = schema?.properties?.approved ? 'reviewer' : 'writer';
+const counterPath = `${scenarioPath}.${runtime}.${role}.count`;
+const index = existsSync(counterPath) ? Number(readFileSync(counterPath, 'utf8')) : 0;
+writeFileSync(counterPath, String(index + 1));
+const steps = scenario[role] ?? scenario[`${runtime}-${role}`];
+const step = Array.isArray(steps) ? steps[Math.min(index, steps.length - 1)] : steps;
+if (!step) {
+  console.error(`fixture: no ${role} step`);
+  process.exit(2);
+}
+const prompt = readFileSync(0, 'utf8');
+if (step.recordPrompt)
+  writeFileSync(
+    `${scenarioPath}.${role}.${index}.prompt`,
+    prompt + '\n---ARGS---\n' + JSON.stringify(args),
+  );
+if (step.sleepMs) await new Promise((r) => setTimeout(r, step.sleepMs));
+if (step.spawnHanging) {
+  const { spawn } = await import('node:child_process');
+  spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
+}
+for (const [path, text] of Object.entries(step.files ?? {})) {
+  mkdirSync(dirname(join(process.cwd(), path)), { recursive: true });
+  writeFileSync(join(process.cwd(), path), text);
+}
+for (const path of step.remove ?? []) rmSync(join(process.cwd(), path), { force: true });
+if (step.commit)
+  execFileSync('git', [
+    '-c',
+    'user.name=x',
+    '-c',
+    'user.email=x@x',
+    'commit',
+    '-qam',
+    'agent commit',
+    '--allow-empty',
+  ]);
+if (step.stderr) process.stderr.write(step.stderr + '\n');
+const started = step.started !== false;
+const out = (event) => process.stdout.write(JSON.stringify(event) + '\n');
+if (runtime === 'codex') {
+  out({ type: 'thread.started', thread_id: 'fixture' });
+  if (started) out({ type: 'item.completed', item: { type: 'agent_message', text: 'fixture' } });
+  if (role === 'reviewer' && step.observedCommand)
+    out({
+      type: 'item.completed',
+      item: {
+        type: 'command_execution',
+        command: step.observedCommand,
+        exit_code: 0,
+        aggregated_output: 'ok',
+        status: 'completed',
+      },
+    });
+  out({
+    type: 'turn.completed',
+    usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 0 },
+  });
+  if (step.exit) process.exit(step.exit);
+  writeFileSync(arg('--output-last-message'), step.raw ?? JSON.stringify(step.result));
+} else {
+  out({ type: 'system', subtype: 'init', model: step.model ?? 'claude-fixture' });
+  if (started)
+    out({ type: 'assistant', message: { content: [{ type: 'text', text: 'fixture' }] } });
+  if (step.exit) {
+    out({ type: 'result', is_error: true, result: step.stderr ?? 'failed' });
+    process.exit(step.exit);
+  }
+  out({
+    type: 'result',
+    is_error: false,
+    structured_output: step.raw !== undefined ? step.raw : step.result,
+    usage: {
+      input_tokens: 10,
+      output_tokens: 5,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    },
+    total_cost_usd: 0,
+  });
+}

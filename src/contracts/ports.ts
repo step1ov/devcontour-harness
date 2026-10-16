@@ -7,6 +7,7 @@ import type { RunEvent, RunEventDraft, TransactionKind } from './events.ts';
 import type {
   AttemptState,
   CallRecord,
+  EvidenceRecord,
   ControlState,
   ControllerLease,
   GraphState,
@@ -121,6 +122,8 @@ export interface SandboxSpec {
   writable: string[];
   /** Пути, закрытые и на чтение: состояние controller, учётные данные, чужие checkout. */
   denied: string[];
+  /** Что внутри закрытого снова открыто на чтение (свой worktree внутри каталога состояния). */
+  readable?: string[];
   network: { domains: string[] };
 }
 
@@ -141,6 +144,10 @@ export interface RuntimeRequest {
   sandbox: SandboxSpec;
   timeoutMs: number;
   env: Record<string, string>;
+  /** Каталог служебных файлов вызова (схема ответа, журнал); вне worktree. */
+  artifactDir?: string;
+  /** Значения, которые маскируются в тексте ответа, журнале и диагностике. */
+  secrets?: string[];
 }
 
 export interface RuntimeResponse {
@@ -161,6 +168,8 @@ export interface RuntimeResponse {
   usage: Usage;
   /** Безопасная диагностика: код выхода, причина, путь сохранённого журнала. */
   diagnostics: { exitCode: number | null; reason?: string; log?: string };
+  /** Что reviewer выполнил по событиям runtime (только для ревью). */
+  inspection?: NonNullable<EvidenceRecord['inspection']>;
 }
 
 export interface RuntimeCapabilities {

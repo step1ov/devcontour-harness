@@ -67,6 +67,11 @@ export class Engine {
     this.id = options.id ?? randomUUID;
   }
 
+  /** Часы движка: по ним считаются сроки владения. */
+  clock() {
+    return this.now();
+  }
+
   private tx<T>(kind: TransactionKind, fn: (tx: ExecutionTransaction) => NotPromise<T>): T {
     return this.host.store.transact(kind, fn);
   }
