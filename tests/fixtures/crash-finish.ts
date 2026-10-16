@@ -8,9 +8,7 @@ import { Engine } from '../../src/engine/engine.ts';
 import { standaloneHost } from '../../src/engine/standalone.ts';
 import { SqliteExecutionStore } from '../../src/storage/sqlite.ts';
 
-const [state, policyPath, repo, id, token, integration, base, ref] = process.argv.slice(
-  2,
-);
+const [state, policyPath, repo, id, token, integration, base, ref] = process.argv.slice(2);
 const policy = executionPolicySchema.parse(JSON.parse(readFileSync(policyPath!, 'utf8')));
 const store = new SqliteExecutionStore(state!, 'crash');
 const engine = new Engine({ host: standaloneHost(store, policy), policy });
