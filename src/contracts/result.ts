@@ -232,27 +232,30 @@ const jointCommon = {
  * числе до получения manifest; `passed` — только с manifest и его digest.
  * Выдумывать manifest для ранних состояний нельзя.
  */
+export const jointActiveSchema = z.strictObject({
+  ...jointCommon,
+  status: z.literal('active'),
+  manifest: jointManifestSchema.optional(),
+  manifestDigest: digestSchema.optional(),
+});
+export const jointFailedSchema = z.strictObject({
+  ...jointCommon,
+  status: z.literal('failed'),
+  finishedAt: isoTimeSchema,
+  manifest: jointManifestSchema.optional(),
+  manifestDigest: digestSchema.optional(),
+  error: z.string().min(1),
+});
+export const jointPassedSchema = z.strictObject({
+  ...jointCommon,
+  status: z.literal('passed'),
+  finishedAt: isoTimeSchema,
+  manifest: jointManifestSchema,
+  manifestDigest: digestSchema,
+});
 export const jointVerificationSchema = z.discriminatedUnion('status', [
-  z.strictObject({
-    ...jointCommon,
-    status: z.literal('active'),
-    manifest: jointManifestSchema.optional(),
-    manifestDigest: digestSchema.optional(),
-  }),
-  z.strictObject({
-    ...jointCommon,
-    status: z.literal('failed'),
-    finishedAt: isoTimeSchema,
-    manifest: jointManifestSchema.optional(),
-    manifestDigest: digestSchema.optional(),
-    error: z.string().min(1),
-  }),
-  z.strictObject({
-    ...jointCommon,
-    status: z.literal('passed'),
-    finishedAt: isoTimeSchema,
-    manifest: jointManifestSchema,
-    manifestDigest: digestSchema,
-  }),
+  jointActiveSchema,
+  jointFailedSchema,
+  jointPassedSchema,
 ]);
 export type JointVerification = z.infer<typeof jointVerificationSchema>;

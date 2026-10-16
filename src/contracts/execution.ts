@@ -11,7 +11,12 @@ import {
 } from './primitives.ts';
 import { workGraphSchema, workOrderSchema } from './work.ts';
 import { contextPinSchema, contextSnapshotSchema } from './context.ts';
-import { deliveryStateSchema, jointVerificationSchema } from './result.ts';
+import {
+  deliveryStateSchema,
+  jointActiveSchema,
+  jointFailedSchema,
+  jointPassedSchema,
+} from './result.ts';
 import { reviewRecordSchema } from './review.ts';
 
 /**
@@ -849,14 +854,11 @@ export type LocalValue<N extends LocalNamespace> = z.infer<(typeof localSchemas)
  * владения наружу не выдаются (`JointVerification` их не содержит).
  */
 const ownership = { token: z.string().min(16).max(200), leaseUntil: z.number().int().min(0) };
-export const jointVerificationStateSchema = z.discriminatedUnion(
-  'status',
-  jointVerificationSchema.options.map((o) => o.extend(ownership)) as unknown as [
-    ReturnType<(typeof jointVerificationSchema.options)[0]['extend']>,
-    ReturnType<(typeof jointVerificationSchema.options)[1]['extend']>,
-    ReturnType<(typeof jointVerificationSchema.options)[2]['extend']>,
-  ],
-);
+export const jointVerificationStateSchema = z.discriminatedUnion('status', [
+  jointActiveSchema.extend(ownership),
+  jointFailedSchema.extend(ownership),
+  jointPassedSchema.extend(ownership),
+]);
 export type JointVerificationState = z.infer<typeof jointVerificationStateSchema>;
 
 /** Документ состояния standalone SQLite. DevContour хранит свой документ, а не этот. */
