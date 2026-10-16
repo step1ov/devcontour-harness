@@ -19,3 +19,19 @@ export { runResult } from './engine/result.ts';
 export { SqliteExecutionStore } from './storage/sqlite.ts';
 export { cliAdapter, type CliAdapterOptions } from './agents/cli-adapter.ts';
 export { FileContextSource, FileResultSink, FileWorkSource } from './connectors/files.ts';
+/**
+ * Бюджеты и учёт вызовов: статус области по сохранённым записям, обзор и
+ * вызов runtime под учётом (бюджет проверяется до вызова).
+ */
+export {
+  budgetOverview,
+  budgetStatus,
+  budgetView,
+  workBudgets,
+  type BudgetContext,
+  type BudgetScope,
+  type BudgetStatus,
+  type CallMeta,
+} from './engine/budget.ts';
+export { measuredInvoke } from './engine/measured.ts';
+export { callDurationMs, callRecords, usageTotals } from './engine/usage.ts';

@@ -9,6 +9,7 @@ import {
   workGraphDigest,
   type AttemptState,
   type Author,
+  type CallRecord,
   type EvidenceRecord,
   type ExecutionHost,
   type ExecutionPolicy,
@@ -25,6 +26,17 @@ import {
   type WorkState,
 } from '../contracts/index.ts';
 import { HARNESS_VERSION } from '../package.ts';
+import {
+  assertBudget,
+  blockingBudget,
+  budgetOverview,
+  callAttribution,
+  callBudgets,
+  workBudgets,
+  type BudgetContext,
+  type CallMeta,
+} from './budget.ts';
+import { callDurationMs, callOwner, callRecords, ownerGone } from './usage.ts';
 import { failureFingerprint, repairPolicy } from './failure.ts';
 import { reusableImplementation } from './reuse.ts';
 import { unprovenReason } from '../verification/proof.ts';
@@ -439,10 +451,155 @@ export class Engine {
     });
   }
 
+  /* ---------------------------------------------------------------- */
+  /* Бюджеты и учёт вызовов                                            */
+  /* ---------------------------------------------------------------- */
+
+  /** Правила и области бюджетов: политика движка и группы хоста. */
+  budgetContext(): BudgetContext {
+    return { policy: this.policy, scopes: this.host.budgets };
+  }
+
+  /**
+   * Бюджетное удержание готовых поручений. Бюджеты считаются по сохранённым
+   * записям вызовов: сброс попыток и перезапуск их не уменьшают. Удержанное
+   * поручение несёт причину, пока бюджет не позволит снова; выключенные
+   * бюджеты удержание снимают.
+   */
+  private budgetBlocks(tx: ExecutionTransaction) {
+    const ready = tx.works().filter((w) => w.status === 'ready');
+    if (!this.policy.budgets) {
+      for (const w of ready) if (w.budgetBlock) tx.putWork({ ...w, budgetBlock: undefined });
+      return;
+    }
+    const c = this.budgetContext();
+    const records = callRecords(tx);
+    for (const w of ready) {
+      const blocking = blockingBudget(c, workBudgets(c, tx, w.id, records));
+      if (!blocking) {
+        if (w.budgetBlock) tx.putWork({ ...w, budgetBlock: undefined });
+        continue;
+      }
+      if (w.budgetBlock?.reason === blocking.reason) continue;
+      tx.putWork({ ...w, budgetBlock: { reason: blocking.reason!, at: iso(this.now()) } });
+      tx.emit({
+        type: 'budget.blocked',
+        graphId: w.graphId,
+        workId: w.id,
+        payload: {
+          scope: blocking.scope.kind,
+          ...(blocking.scope.id ? { scopeId: blocking.scope.id } : {}),
+          state: blocking.state as 'exceeded' | 'undetermined',
+          reason: blocking.reason!.slice(0, 4000),
+        },
+      });
+    }
+  }
+
+  /**
+   * Начало вызова модели: атрибуция на момент вызова и проверка бюджетов — в
+   * одной транзакции с регистрацией идущего вызова. Превышенный или
+   * неопределённый бюджет — отказ `budget` до вызова, без записи; два процесса
+   * не проходят проверку оба, не видя друг друга.
+   */
+  beginCall(record: CallRecord, meta: CallMeta): CallRecord {
+    return this.tx('usage.recorded', (tx) => {
+      const c = this.budgetContext();
+      const started = { ...record, ...callAttribution(c, tx, meta) };
+      if (this.policy.budgets) assertBudget(c, callBudgets(c, tx, meta, callRecords(tx)));
+      tx.putLocal('usage', callOwner(started), started.id, started);
+      return started;
+    });
+  }
+
+  /** Ход или итог вызова: запись заменяется целиком. */
+  saveCall(record: CallRecord) {
+    this.tx('usage.recorded', (tx) => tx.putLocal('usage', callOwner(record), record.id, record));
+  }
+
+  /**
+   * Закрывает записи вызовов, чей процесс умер, исходом `abandoned`. Запись
+   * без процесса закрывается, когда её попытка уже не активна, а без попытки —
+   * спустя два предела времени вызова. Под транзакцией запись перечитывается:
+   * вызов мог завершиться между сканированием и закрытием, и его исход и
+   * стоимость не затираются устаревшим снимком.
+   */
+  abandonCalls(at = Date.now()): string[] {
+    const dead = (r: CallRecord, view: ExecutionView) =>
+      r.outcome === 'active' &&
+      (r.process
+        ? ownerGone(r)
+        : r.runId
+          ? view.attempt(r.runId)?.status !== 'active'
+          : at - Date.parse(r.startedAt) > 2 * this.policy.runTimeoutMs);
+    const candidates = this.read((v) => callRecords(v).filter((r) => dead(r, v)));
+    if (!candidates.length) return [];
+    return this.tx('usage.recorded', (tx) => {
+      const closedIds: string[] = [];
+      for (const seen of candidates) {
+        const r = tx.local('usage', callOwner(seen), seen.id);
+        if (!r || !dead(r, tx)) continue;
+        // Время прерванного вызова фиксируется монотонно (часы ОС, сохранённый
+        // замер), пока запись ещё идущая; измерить нельзя — время неизвестно,
+        // а не берётся по системным часам, которые могли откатиться.
+        const elapsed = callDurationMs(r, at);
+        tx.putLocal('usage', callOwner(r), r.id, {
+          ...r,
+          ...(elapsed !== null ? { durationMs: elapsed } : { durationUnknown: true as const }),
+          outcome: 'abandoned',
+          abandonedAt: iso(at),
+        });
+        closedIds.push(r.id);
+      }
+      return closedIds;
+    });
+  }
+
+  /**
+   * Закрепляет атрибуцию прежних записей вызовов (без закреплённых поручения и
+   * группы) по текущему составу — до того, как новая редакция графа его
+   * изменит: иначе перенос поручения снял бы или разделил учтённый расход
+   * группы. Уже закреплённое не меняется; запись перечитывается под
+   * транзакцией.
+   */
+  pinLegacyCalls(): number {
+    const unpinned = (r: CallRecord) => !r.workIds && (!r.workId || !r.groupId);
+    const legacy = this.read((v) => callRecords(v).filter(unpinned));
+    if (!legacy.length) return 0;
+    return this.tx('usage.recorded', (tx) => {
+      let pinned = 0;
+      for (const seen of legacy) {
+        const r = tx.local('usage', callOwner(seen), seen.id);
+        if (!r || !unpinned(r)) continue;
+        const found = this.host.budgets.legacy(r, tx);
+        if (!(r.groupId ?? found.groupId)) continue;
+        const next: CallRecord = { ...r, groupId: r.groupId ?? found.groupId };
+        const workId = r.workId ?? found.workId;
+        if (workId) next.workId = workId;
+        if (!next.workId && found.workIds) next.workIds = found.workIds;
+        if (!next.workId && !next.workIds) continue;
+        tx.putLocal('usage', callOwner(next), next.id, next);
+        pinned++;
+      }
+      return pinned;
+    });
+  }
+
+  /** Обзор бюджетов для статуса; `undefined` — бюджеты не заданы. */
+  budgets() {
+    return this.read((v) => budgetOverview(this.budgetContext(), v));
+  }
+
   /** Почему поручение сейчас не выдаётся; пусто — может быть выдано. */
   blockers(work: WorkState, view: ExecutionView) {
     const out: {
-      code: 'NOT_READY' | 'PAUSED' | 'ATTEMPTS_EXHAUSTED' | 'APPROVAL_STALE' | 'APPROVAL_REQUIRED';
+      code:
+        | 'NOT_READY'
+        | 'PAUSED'
+        | 'ATTEMPTS_EXHAUSTED'
+        | 'APPROVAL_STALE'
+        | 'APPROVAL_REQUIRED'
+        | 'BUDGET_EXHAUSTED';
       message: string;
     }[] = [];
     if (view.control().paused)
@@ -473,6 +630,7 @@ export class Engine {
       });
     if (work.hold)
       out.push({ code: 'NOT_READY', message: 'Удержано операцией ' + work.hold.operation });
+    if (work.budgetBlock) out.push({ code: 'BUDGET_EXHAUSTED', message: work.budgetBlock.reason });
     if (work.status === 'ready' && work.approvedDigest !== this.host.basis.orderDigest(work, view))
       out.push({ code: 'APPROVAL_STALE', message: 'Постановка изменилась после согласования' });
     const contract = this.contractBlocker(work, view);
@@ -499,6 +657,7 @@ export class Engine {
       if (tx.control().paused || this.host.guards.claimBarrier(tx)) return undefined;
       const active = tx.attempts().filter((a) => a.status === 'active');
       if (active.length >= this.policy.concurrency) return undefined;
+      this.budgetBlocks(tx);
       const eligible = tx.works().filter((w) => {
         if (w.status !== 'ready' || w.hold || w.budgetBlock) return false;
         if (w.attempt >= this.policy.maxAttempts) return false;

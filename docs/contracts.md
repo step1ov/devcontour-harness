@@ -202,6 +202,9 @@ manifestDigest, impact?, evidence[], error?}`. Смена любого SHA де�
 типами событий журнала хоста (`run.claimed`, `task.done`, `run.failed`,
 `scheduler.error`, …). `workflow.updated` пишет только локальные записи
 технической очереди (`workflow-jobs`) и событий журнала не создаёт.
+`usage.recorded` пишет только локальные записи учёта вызовов (`usage`): начало
+вызова вместе с проверкой бюджетов, ход и итог вызова, закрытие прерванных,
+закрепление атрибуции прежних записей; событий журнала не создаёт.
 
 ## Порты
 
@@ -248,7 +251,7 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `review-contract` | `--state D --contract F --policy F --author A`                          | да    | `ReviewRecord`                                    | Как `review-plan`                                                                                                                                      |
 | `approve`         | `--state D --subject ID --digest H`                                     | да    | subject, digest, at                               | Тот же digest — без изменений; только `approvalMode: operator`                                                                                         |
 | `run`             | `--state D --graph F --policy F [--context F] [--sink file:D] [--once]` | да    | граф, поручения и их блокеры, задание `workflow`  | Та же редакция продолжает работу; другой digest той же редакции — `REVISION_CONFLICT`                                                                  |
-| `status`          | `--state D [--graph ID]`                                                | нет   | очередь, графы, поручения с блокерами             | Только чтение                                                                                                                                          |
+| `status`          | `--state D [--graph ID]`                                                | нет   | очередь, графы, поручения с блокерами, бюджеты    | Только чтение                                                                                                                                          |
 | `events`          | `--state D [--after N] [--limit 1–500]`                                 | нет   | события, `next`                                   | Только чтение                                                                                                                                          |
 | `pause`           | `--state D`                                                             | да    | `ControlState`                                    | Без изменений                                                                                                                                          |
 | `resume`          | `--state D`                                                             | да    | `ControlState`                                    | Решение человека: снимает паузу оператора, штатной остановки и отказа runtime вместе с её классами; паузу операции reconfigure — `PAUSED`              |

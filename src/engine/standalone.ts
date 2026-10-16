@@ -28,7 +28,20 @@ export function standaloneHost(store: ExecutionStore, policy: ExecutionPolicy): 
     budgets: {
       groupOf: (workId, view) => view.work(workId)?.graphId,
       members: (groupId, view) => view.works(groupId).map((w) => w.id),
-      legacy: () => ({}),
+      // Прежняя запись без атрибуции — по попытке или предмету по текущему
+      // составу; у вызова о графе — все его поручения.
+      legacy: (record, view) => {
+        const workId =
+          (record.runId ? view.attempt(record.runId)?.workId : undefined) ??
+          (record.subjectId && view.work(record.subjectId) ? record.subjectId : undefined);
+        if (workId) {
+          const groupId = view.work(workId)?.graphId;
+          return { workId, ...(groupId ? { groupId } : {}) };
+        }
+        const graphId = record.groupId ?? record.subjectId;
+        if (!graphId || !view.graph(graphId)) return {};
+        return { groupId: graphId, workIds: view.works(graphId).map((w) => w.id) };
+      },
     },
   };
 }

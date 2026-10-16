@@ -194,5 +194,11 @@ export const transactionKinds = [
   'delivery.recorded',
   /** Только локальные записи технической очереди (`workflow-jobs`); событий журнала нет. */
   'workflow.updated',
+  /**
+   * Только локальные записи учёта вызовов (`usage`): начало вызова вместе с
+   * проверкой бюджета, ход и итог вызова, закрытие прерванных, закрепление
+   * атрибуции прежних записей. Событий журнала нет.
+   */
+  'usage.recorded',
 ] as const;
 export type TransactionKind = (typeof transactionKinds)[number];

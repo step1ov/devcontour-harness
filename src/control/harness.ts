@@ -34,6 +34,9 @@ import { reviewOutputSchema } from '../agents/schemas.ts';
 import { executionEnvironment } from '../environment/lifecycle.ts';
 import { redactDeep } from '../environment/redaction.ts';
 import { Engine } from '../engine/engine.ts';
+import { measuredInvoke } from '../engine/measured.ts';
+import { budgetOverview } from '../engine/budget.ts';
+import { TaskFailure } from '../engine/failure.ts';
 import { runResult } from '../engine/result.ts';
 import { repairDecision } from '../engine/repair.ts';
 import { Runner } from '../engine/runner.ts';
@@ -193,7 +196,10 @@ export class Harness {
     ]
       .filter(Boolean)
       .join('\n\n');
-    const response = await adapter.invoke(
+    // Вызов под учётом: о графе — расход группы и её поручений, о контракте — общий.
+    const response = await measuredInvoke(
+      this.engine,
+      adapter,
       {
         callId: randomUUID(),
         task: input.kind === 'plan' ? 'review-plan' : 'review-contract',
@@ -217,7 +223,12 @@ export class Harness {
         secrets: [...(execution.redact.secrets ?? [])],
       },
       AbortSignal.timeout(this.policy.runTimeoutMs + 5000),
-    );
+      { subjectId: subject, stage: input.kind + '-review' },
+    ).catch((error: unknown) => {
+      if (error instanceof TaskFailure && error.kind === 'budget')
+        throw new HarnessError('BUDGET_EXHAUSTED', error.message);
+      throw error;
+    });
     if (response.status !== 'ok')
       throw new HarnessError(
         'RUNTIME_UNAVAILABLE',
@@ -329,6 +340,8 @@ export class Harness {
       ...(input.context ? { context: input.context } : {}),
     });
     const repos = new Map(this.policy.repositories.map((r) => [r.id, r]));
+    // Атрибуция прежних записей вызовов закрепляется до смены состава графа.
+    this.engine.pinLegacyCalls();
     const registered = this.engine.register(input.graph, {
       trusted: () => false,
       reachable: (p) => {
@@ -523,6 +536,9 @@ export class Harness {
         ...(w.resultSha ? { resultSha: w.resultSha } : {}),
         blockers: this.engine.blockers(w, v),
       })),
+      ...((budgets) => (budgets ? { budgets } : {}))(
+        budgetOverview(this.engine.budgetContext(), v),
+      ),
     }));
   }
 

@@ -313,6 +313,18 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
   const add = (code: string, path: (string | number)[], message: string) =>
     issues.push({ code, path, message });
   const repos = new Map<string, Repo>();
+  // Тариф однозначен: у модели не бывает двух тарифов на один момент.
+  const tariffs = new Set<string>();
+  policy.prices.forEach((p, i) => {
+    const key = JSON.stringify([p.runtime, p.model, Date.parse(p.effectiveAt)]);
+    if (tariffs.has(key))
+      add(
+        'INVALID_INPUT',
+        ['prices', i],
+        `Повтор тарифа ${p.runtime}/${p.model} на ${p.effectiveAt}`,
+      );
+    tariffs.add(key);
+  });
   const resourceIds = new Set<string>();
   policy.resources.forEach((r, i) => {
     if (resourceIds.has(r.id)) add('INVALID_INPUT', ['resources', i], 'Повтор ресурса ' + r.id);

@@ -130,6 +130,7 @@ if (runtime === 'codex') {
       cache_read_input_tokens: 0,
       cache_creation_input_tokens: 0,
     },
-    total_cost_usd: 0,
+    // Стоимость, о которой сообщает провайдер: тесты бюджетов задают её шагом сценария.
+    total_cost_usd: step.costUsd ?? 0,
   });
 }

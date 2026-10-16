@@ -31,6 +31,7 @@ import { BlockedError, classifyFailure } from './classify.ts';
 import { TaskFailure } from './failure.ts';
 import type { Engine } from './engine.ts';
 import { prompt } from './prompt.ts';
+import { measuredInvoke } from './measured.ts';
 import { continuableDraft, implementationBasis } from './reuse.ts';
 
 type Repo = ExecutionPolicy['repositories'][number];
@@ -250,7 +251,17 @@ export class Runner {
    * иначе она истекает с отказом окружения. Повторный recovery ничего не
    * дублирует: принятая попытка уже не активна.
    */
+  /** Когда recovery последний раз искал прерванные вызовы. */
+  private abandonScanAt = 0;
+
   async recover() {
+    // Поиск прерванных вызовов читает всю историю вызовов: при старте и затем
+    // не чаще раза в минуту, а не на каждом такте.
+    if (Date.now() - this.abandonScanAt >= 60_000) {
+      this.abandonScanAt = Date.now();
+      this.engine.abandonCalls();
+      this.engine.pinLegacyCalls();
+    }
     const now = this.engine.clock();
     const stale = this.engine.read((v) =>
       v.attempts().filter((a) => a.status === 'active' && a.leaseUntil <= now),
@@ -351,7 +362,10 @@ export class Runner {
     // Окружение вызова — с профилем инструментов его назначения.
     const execution = this.environment(input.attempt, input.phase, input.cwd, binding.toolProfile);
     const boundary = this.boundary();
-    const response = await adapter.invoke(
+    // Вызов под учётом: бюджет проверяется до вызова, расход закрепляется за попыткой.
+    const response = await measuredInvoke(
+      this.engine,
+      adapter,
       {
         callId: randomUUID(),
         task: input.task,
@@ -375,6 +389,11 @@ export class Runner {
         secrets: [...(execution.redact.secrets ?? [])],
       },
       signal,
+      {
+        repositoryId: input.attempt.repositoryId,
+        runId: input.attempt.id,
+        stage: review ? input.phase + '-review' : 'implementation',
+      },
     );
     if (response.model && !review && response.model !== input.attempt.model)
       this.engine.update(input.attempt.id, input.attempt.token, 'run.model', {

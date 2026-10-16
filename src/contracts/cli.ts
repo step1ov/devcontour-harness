@@ -322,6 +322,40 @@ export const statusDataSchema = z.strictObject({
       blockers: z.array(blocker),
     }),
   ),
+  /**
+   * Бюджеты по сохранённым записям вызовов: общий, групп с незавершённой
+   * работой и незавершённых поручений. Нет поля — бюджеты не заданы.
+   * `remainingUsd`/`remainingMs` — `null`, когда расход не известен полностью.
+   */
+  budgets: z
+    .strictObject({
+      onUnknown: z.enum(['stop', 'continue']),
+      budgets: z.array(
+        z.strictObject({
+          scope: z.strictObject({
+            kind: z.enum(['work', 'group', 'total']),
+            id: z.string().max(200).optional(),
+          }),
+          state: z.enum(['within', 'exceeded', 'undetermined']),
+          limit: z.strictObject({
+            usd: z.number().positive().optional(),
+            timeMs: z.number().int().positive().optional(),
+          }),
+          reportedUsd: z.number().min(0),
+          estimatedUsd: z.number().min(0),
+          unknownCalls: z.number().int().min(0),
+          unfinishedCalls: z.number().int().min(0),
+          abandonedCalls: z.number().int().min(0),
+          errorCalls: z.number().int().min(0),
+          uncoveredRuns: z.number().int().min(0),
+          durationMs: z.number().min(0),
+          remainingUsd: z.number().min(0).nullable(),
+          remainingMs: z.number().min(0).nullable(),
+          reason: z.string().optional(),
+        }),
+      ),
+    })
+    .optional(),
 });
 
 export const eventsDataSchema = z.strictObject({
