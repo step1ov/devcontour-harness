@@ -156,6 +156,12 @@ export const cliCommands = {
         required: false,
         description: 'Один шаг очереди вместо работы до простоя',
       },
+      {
+        name: '--author',
+        value: 'id',
+        required: false,
+        description: 'Автор графа для ревью плана; по умолчанию external',
+      },
     ],
     refusals: [
       'APPROVAL_REQUIRED',

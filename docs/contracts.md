@@ -250,7 +250,7 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `status`          | `--state D [--graph ID]`                                                | нет   | очередь, графы, поручения с блокерами             | Только чтение                                                                                                                                          |
 | `events`          | `--state D [--after N] [--limit 1–500]`                                 | нет   | события, `next`                                   | Только чтение                                                                                                                                          |
 | `pause`           | `--state D`                                                             | да    | `ControlState`                                    | Без изменений                                                                                                                                          |
-| `resume`          | `--state D`                                                             | да    | `ControlState`                                    | Снимает паузу оператора/остановки; паузу отказа runtime или операции — `PAUSED`                                                                        |
+| `resume`          | `--state D`                                                             | да    | `ControlState`                                    | Решение человека: снимает паузу оператора, штатной остановки и отказа runtime вместе с её классами; паузу операции reconfigure — `PAUSED`              |
 | `cancel`          | `--state D --work ID [--reason T]`                                      | да    | статус поручения                                  | Отменённое — без изменений; это не retry                                                                                                               |
 | `retry`           | `--state D --work ID [--reset --reason T]`                              | да    | статус поручения                                  | В пределах `maxAttempts` и бюджета; `--reset` с причиной сбрасывает счётчик попыток, но не учёт расходов                                               |
 | `result`          | `--state D --work ID`                                                   | нет   | `ResultEnvelope`                                  | Только чтение                                                                                                                                          |
@@ -259,7 +259,6 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `--version`       | —                                                                       | нет   | версия пакета и API                               | —                                                                                                                                                      |
 
 Полная форма каждой команды — `cliCommands` (аргументы, обязательность,
-идемпотентность, отказы exit 3). В `0.1.0-alpha.0` реализованы `validate` и
-`--version`; остальные отвечают `UNSUPPORTED_COMMAND` (exit 2) без записи.
+идемпотентность, отказы exit 3). Все команды реализованы. `run` принимает `--author` (по умолчанию `external`) — автора графа для ревью плана. `HARNESS_CODEX_BIN` и `HARNESS_CLAUDE_BIN` подменяют исполняемые файлы runtime (fixture executables в тестах).
 После приёмки договора имена и параметры меняются только совместимо или
 отдельным согласованным изменением.

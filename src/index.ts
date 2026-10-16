@@ -10,3 +10,12 @@ export { HARNESS_VERSION } from './package.ts';
  * `contextIssues`. Отказ — `HarnessError` с кодом и путями нарушений.
  */
 export { validateInputs, crossIssues, withinPaths } from './validate.ts';
+export { Harness, type HarnessOptions } from './control/harness.ts';
+export { doctor } from './control/doctor.ts';
+export { Engine, type EngineOptions } from './engine/engine.ts';
+export { Runner, type RunnerOptions } from './engine/runner.ts';
+export { standaloneHost } from './engine/standalone.ts';
+export { runResult } from './engine/result.ts';
+export { SqliteExecutionStore } from './storage/sqlite.ts';
+export { cliAdapter, type CliAdapterOptions } from './agents/cli-adapter.ts';
+export { FileContextSource, FileResultSink, FileWorkSource } from './connectors/files.ts';
