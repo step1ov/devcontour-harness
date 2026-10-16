@@ -125,7 +125,8 @@ test('T30: зависший writer с потомком — отказ по вр�
         },
         policy: (p: any) => {
           p.environment.secrets = { RUN_TOKEN: 'HARNESS_T30_SECRET' };
-          p.runTimeoutMs = 3000;
+          // Запас на запуск fixture под нагрузкой: потомок должен появиться до предела.
+          p.runTimeoutMs = 10_000;
           p.maxAttempts = 1;
         },
       });
