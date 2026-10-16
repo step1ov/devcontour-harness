@@ -24,6 +24,7 @@ import { redactDeep } from '../environment/redaction.ts';
 import { implementationOutputSchema, reviewOutputSchema } from '../agents/schemas.ts';
 import { unobservedReview } from '../agents/inspect.ts';
 import { runGate } from '../verification/gates.ts';
+import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { BlockedError, classifyFailure } from './classify.ts';
 import { TaskFailure } from './failure.ts';
 import type { Engine } from './engine.ts';
@@ -45,6 +46,8 @@ export interface RunnerOptions {
   branchPrefix?: string;
   /** Внешние значения окружения (секреты политики); по умолчанию — окружение процесса. */
   environment?: NodeJS.ProcessEnv;
+  /** База блокировок ресурсов; по умолчанию общая для машины. */
+  resourceDatabase?: string;
 }
 
 const ordered = (gates: GatePolicy[], ids: string[]) => {
@@ -324,7 +327,6 @@ export class Runner {
   }
 
   private async execute(claimed: AttemptState, controller: AbortController) {
-    const signal = controller.signal;
     let attempt = claimed;
     const repo = this.repo(attempt.repositoryId);
     const repoPath = this.repoPath(repo);
@@ -360,130 +362,170 @@ export class Runner {
     const artifacts = join(this.options.stateDir, 'artifacts', attempt.id);
     const worktrees: string[] = [];
     try {
-      const work = await this.workOf(attempt);
-      const context = this.options.context?.(work);
-      if (context)
-        // Попытка закрепляет снимок контекста: writer и оба reviewer видят одни и те же байты.
-        this.engine.update(attempt.id, attempt.token, 'run.context', {
-          contextSnapshot: contextDigest(context),
-          context: context.sources.map((s) => ({
-            id: s.id,
-            version: s.version,
-            repositoryId: s.repositoryId ?? work.order.repositoryId,
-            revision: s.revision ?? s.digest,
-            digest: s.hostDigest ?? s.digest,
-          })),
-        });
-      const base = await git(repoPath, 'rev-parse', repo.targetRef);
-      await mkdir(join(this.options.stateDir, 'worktrees'), { recursive: true });
-      await git(
-        repoPath,
-        'worktree',
-        'add',
-        '-b',
-        `${this.options.branchPrefix ?? 'harness/run-'}${attempt.id}`,
-        cwd,
-        base,
-      );
-      worktrees.push(cwd);
-      this.engine.phase(attempt.id, attempt.token, 'running', { baseSha: base, worktree: cwd });
-      attempt = { ...attempt, baseSha: base, worktree: cwd };
-      const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
-      const execution = this.environment(attempt, 'candidate', cwd);
-      const candidate = await withEnvironment(
-        repo.lifecycle,
-        cwd,
-        join(artifacts, 'candidate', 'environment'),
-        execution,
-        signal,
-        async () => {
-          await runSteps(
-            repo.prepare,
+      const reserve = [
+        ...(claimed.workId ? ((await this.workOf(attempt)).order.resources ?? []) : []),
+        ...repo.gates.flatMap((g) => g.resources ?? []),
+      ];
+      await withResources(
+        {
+          resources: this.policy.resources,
+          leaseMs: this.policy.leaseMs,
+          resourceDatabase: this.options.resourceDatabase ?? defaultResourceDatabase(),
+        },
+        [...new Set(reserve)],
+        `${this.options.stateDir}:${attempt.id}`,
+        controller.signal,
+        async (signal, resources) => {
+          if (resources.length)
+            this.engine.update(attempt.id, attempt.token, 'run.context', { resources });
+          attempt = { ...attempt, resources };
+          const work = await this.workOf(attempt);
+          const context = this.options.context?.(work);
+          if (context)
+            // Попытка закрепляет снимок контекста: writer и оба reviewer видят одни и те же байты.
+            this.engine.update(attempt.id, attempt.token, 'run.context', {
+              contextSnapshot: contextDigest(context),
+              context: context.sources.map((s) => ({
+                id: s.id,
+                version: s.version,
+                repositoryId: s.repositoryId ?? work.order.repositoryId,
+                revision: s.revision ?? s.digest,
+                digest: s.hostDigest ?? s.digest,
+              })),
+            });
+          const base = await git(repoPath, 'rev-parse', repo.targetRef);
+          await mkdir(join(this.options.stateDir, 'worktrees'), { recursive: true });
+          await git(
+            repoPath,
+            'worktree',
+            'add',
+            '-b',
+            `${this.options.branchPrefix ?? 'harness/run-'}${attempt.id}`,
             cwd,
-            join(artifacts, 'candidate', 'prepare'),
+            base,
+          );
+          worktrees.push(cwd);
+          this.engine.phase(attempt.id, attempt.token, 'running', { baseSha: base, worktree: cwd });
+          attempt = { ...attempt, baseSha: base, worktree: cwd };
+          const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
+          const execution = this.environment(attempt, 'candidate', cwd);
+          const candidate = await withEnvironment(
+            repo.lifecycle,
+            cwd,
+            join(artifacts, 'candidate', 'environment'),
             execution,
             signal,
-          );
-          const dir = join(artifacts, 'implementation');
-          await mkdir(dir, { recursive: true });
-          await writeFile(join(dir, 'work.json'), JSON.stringify(work.order, null, 2));
-          const response = await this.call(
-            this.adapter(attempt.runtime),
-            {
-              task: 'implement',
-              attempt,
-              cwd,
-              dir,
-              env: execution.env,
-              secrets: execution.redact.secrets ?? [],
-              prompt: prompt({
-                work,
+            async () => {
+              await runSteps(
+                repo.prepare,
+                cwd,
+                join(artifacts, 'candidate', 'prepare'),
+                execution,
+                signal,
+              );
+              const dir = join(artifacts, 'implementation');
+              await mkdir(dir, { recursive: true });
+              await writeFile(join(dir, 'work.json'), JSON.stringify(work.order, null, 2));
+              const response = await this.call(
+                this.adapter(attempt.runtime),
+                {
+                  task: 'implement',
+                  attempt,
+                  cwd,
+                  dir,
+                  env: execution.env,
+                  secrets: execution.redact.secrets ?? [],
+                  prompt: prompt({
+                    work,
+                    attempt,
+                    history: this.history(attempt),
+                    context,
+                    gates: gates.map((g) => ({ id: g.id, command: g.command })),
+                  }),
+                },
+                signal,
+              );
+              const result = implementationResultSchema.safeParse(response.output);
+              if (!result.success)
+                throw new Error('Ответ исполнителя вне схемы: ' + result.error.issues[0]?.message);
+              if (!result.data.completed)
+                throw new Error('Исполнитель сообщил о незавершённой работе');
+              this.engine.heartbeat(attempt.id, attempt.token);
+              signal.throwIfAborted();
+              if ((await git(cwd, 'rev-parse', 'HEAD')) !== base)
+                throw new TaskFailure(
+                  'scope-violation',
+                  'Исполнитель изменил HEAD; интеграцией владеет harness',
+                );
+              await git(cwd, 'add', '-A');
+              await this.assertScope(work, repo, cwd);
+              await git(
+                cwd,
+                '-c',
+                'core.hooksPath=/dev/null',
+                'commit',
+                '--no-gpg-sign',
+                '-q',
+                '-m',
+                `${work.id}: ${work.order.title}`,
+              );
+              const sha = await git(cwd, 'rev-parse', 'HEAD');
+              rearm();
+              this.engine.phase(attempt.id, attempt.token, 'verifying', { candidateSha: sha });
+              for (const gate of gates)
+                await this.gate(attempt, cwd, sha, 'candidate', gate, artifacts, signal, execution);
+              rearm();
+              this.engine.phase(attempt.id, attempt.token, 'reviewing');
+              await this.review(
                 attempt,
-                history: this.history(attempt),
+                work,
+                cwd,
+                base,
+                sha,
+                'candidate',
+                artifacts,
+                signal,
                 context,
-                gates: gates.map((g) => ({ id: g.id, command: g.command })),
-              }),
+              );
+              return sha;
             },
-            signal,
           );
-          const result = implementationResultSchema.safeParse(response.output);
-          if (!result.success)
-            throw new Error('Ответ исполнителя вне схемы: ' + result.error.issues[0]?.message);
-          if (!result.data.completed) throw new Error('Исполнитель сообщил о незавершённой работе');
-          this.engine.heartbeat(attempt.id, attempt.token);
-          signal.throwIfAborted();
-          if ((await git(cwd, 'rev-parse', 'HEAD')) !== base)
-            throw new TaskFailure(
-              'scope-violation',
-              'Исполнитель изменил HEAD; интеграцией владеет harness',
+          attempt = { ...attempt, candidateSha: candidate };
+          const previous = this.mergeTails.get(repo.id) ?? Promise.resolve();
+          let unlock!: () => void;
+          this.mergeTails.set(repo.id, new Promise<void>((r) => (unlock = r)));
+          await previous;
+          try {
+            rearm();
+            await this.integrate(
+              attempt,
+              work,
+              repo,
+              integrationCwd,
+              worktrees,
+              artifacts,
+              signal,
+              context,
             );
-          await git(cwd, 'add', '-A');
-          await this.assertScope(work, repo, cwd);
-          await git(
-            cwd,
-            '-c',
-            'core.hooksPath=/dev/null',
-            'commit',
-            '--no-gpg-sign',
-            '-q',
-            '-m',
-            `${work.id}: ${work.order.title}`,
-          );
-          const sha = await git(cwd, 'rev-parse', 'HEAD');
-          rearm();
-          this.engine.phase(attempt.id, attempt.token, 'verifying', { candidateSha: sha });
-          for (const gate of gates)
-            await this.gate(attempt, cwd, sha, 'candidate', gate, artifacts, signal, execution);
-          rearm();
-          this.engine.phase(attempt.id, attempt.token, 'reviewing');
-          await this.review(attempt, work, cwd, base, sha, 'candidate', artifacts, signal, context);
-          return sha;
+          } finally {
+            unlock();
+          }
         },
       );
-      attempt = { ...attempt, candidateSha: candidate };
-      const previous = this.mergeTails.get(repo.id) ?? Promise.resolve();
-      let unlock!: () => void;
-      this.mergeTails.set(repo.id, new Promise<void>((r) => (unlock = r)));
-      await previous;
-      try {
-        rearm();
-        await this.integrate(
-          attempt,
-          work,
-          repo,
-          integrationCwd,
-          worktrees,
-          artifacts,
-          signal,
-          context,
-        );
-      } finally {
-        unlock();
-      }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      // Прерывание по лимиту времени называется лимитом времени, что бы ни выбросила прерванная операция.
+      const expired =
+        controller.signal.aborted &&
+        (controller.signal.reason as Error | undefined)?.name === 'TimeoutError';
+      const message =
+        expired && !(error instanceof TaskFailure)
+          ? `Исчерпан лимит времени попытки (${Math.round(this.policy.runTimeoutMs / 1000)} с)`
+          : error instanceof Error
+            ? error.message
+            : String(error);
       try {
-        const kind = classifyFailure(error, message);
+        const kind =
+          expired && !(error instanceof TaskFailure) ? 'timeout' : classifyFailure(error, message);
         this.engine.fail(attempt.id, attempt.token, message, {
           kind,
           blocked:

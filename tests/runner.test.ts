@@ -353,3 +353,59 @@ test('T10: merge conflict с продвинутой принятой ветко�
   assert.equal(work.failureKind, 'merge', work.failure);
   assert.equal(target(ctx), foreign, 'чужой коммит остался вершиной принятой ветки');
 });
+
+test('T11: занятый ресурс — попытка ждёт и не отнимает его по сроку; после освобождения ресурс снова свободен', async () => {
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p) => {
+      (p as { resources: unknown[] }).resources = [
+        { id: 'device', kind: 'device', value: 'phone-1' },
+      ];
+      (p as { runTimeoutMs: number }).runTimeoutMs = 2000;
+      (p as { maxAttempts: number }).maxAttempts = 1;
+    },
+    graph: (g) => ((g as { orders: { resources?: string[] }[] }).orders[0]!.resources = ['device']),
+  });
+  const { ResourcePool } = await import('../src/environment/resources.ts');
+  const pool = new ResourcePool(join(ctx.state, 'resources.sqlite'));
+  assert.equal(
+    pool.tryAcquire(
+      [{ id: 'device', kind: 'device', value: 'phone-1' }],
+      'other',
+      'other-token',
+      5000,
+    ),
+    true,
+  );
+  await runAll(ctx);
+  const work = ctx.engine.read((v) => v.work('add-greeting')!);
+  assert.equal(work.status, 'failed');
+  assert.equal(work.failureKind, 'timeout', work.failure);
+  assert.equal(pool.list().length, 1, 'чужая аренда не отнята');
+  assert.equal(pool.list()[0]!.owner, 'other');
+  pool.release('other-token');
+  ctx.engine.retry('add-greeting', { reason: 'ресурс освобождён' });
+  await ctx.runner.drain();
+  assert.equal(
+    ctx.engine.read((v) => v.work('add-greeting')!.status),
+    'done',
+  );
+  assert.deepEqual(pool.list(), [], 'ресурс освобождён после попытки');
+  assert.deepEqual(
+    ctx.engine.read((v) => v.attempts('add-greeting').at(-1)!.resources)?.map((r) => r.id),
+    ['device'],
+  );
+  pool.close();
+});
+
+test('T07: reviewer, изменивший дерево, не одобряет — даже при approved', async () => {
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: { ...approve(), files: { 'src/extra.js': 'x' } } },
+    policy: (p) => ((p as { maxAttempts: number }).maxAttempts = 1),
+  });
+  await runAll(ctx);
+  const work = ctx.engine.read((v) => v.work('add-greeting')!);
+  assert.equal(work.status, 'failed');
+  assert.match(work.failure!, /reviewer изменил дерево или HEAD/);
+  assert.equal(work.failureKind, 'review');
+});

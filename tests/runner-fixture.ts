@@ -110,6 +110,7 @@ export function setup(options: {
       codex: cliAdapter('codex', { executable: bin('fake-codex') }),
     },
     owner: 'runner-1',
+    resourceDatabase: join(state, 'resources.sqlite'),
   });
   const graphRaw = structuredClone(example('graph')) as Record<string, any>;
   graphRaw.orders[0].writeScope = ['src'];
