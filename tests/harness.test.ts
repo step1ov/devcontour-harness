@@ -626,13 +626,16 @@ test('S1-R2-04: секрет профиля из сырого ответа revie
         for (const k of ['plan', 'contract', 'code']) p.review[k].reviewer.toolProfile = 'rev';
       },
     });
-    // Допустимый библиотечный адаптер: сырой структурированный ответ несёт значение.
+    // Допустимый библиотечный адаптер: сырой структурированный ответ несёт
+    // значение в summary и в сохраняемых полях находки (path, rule).
+    const received = new Set<string>();
     const h = ctx.open(ctx.policy, (inner) => ({
       runtime: inner.runtime,
       capabilities: () => inner.capabilities(),
       invoke: async (request, signal) => {
         const response = await inner.invoke(request, signal);
         const token = request.env.PROFILE_TOKEN;
+        if (token === canary) received.add(request.task);
         if (!token || response.status !== 'ok') return response;
         const output = response.output as any;
         return {
@@ -640,6 +643,18 @@ test('S1-R2-04: секрет профиля из сырого ответа revie
           output: {
             ...output,
             summary: `${output.summary} ${token}`,
+            findings: [
+              ...(output.findings ?? []),
+              {
+                severity: 'note',
+                message: 'заметка',
+                path: `src/${token}.js`,
+                line: null,
+                rule: `rule-${token}`,
+                consequence: null,
+                evidence: null,
+              },
+            ],
           },
         };
       },
@@ -655,21 +670,35 @@ test('S1-R2-04: секрет профиля из сырого ответа revie
     const plan = h.engine.reviews('plan', ctx.graph.id).at(-1)!;
     const a = h.engine.read((v) => v.attempts('add-greeting')[0]!);
     assert.equal(a.status, 'succeeded', a.error);
-    const persisted = [
-      readFileSync(plan.artifact, 'utf8'),
-      JSON.stringify(plan),
-      readFileSync(contract.artifact, 'utf8'),
-      JSON.stringify(contract),
-      JSON.stringify(a.evidence),
-      ...a.evidence.filter((e) => e.kind === 'review').map((e) => readFileSync(e.log, 'utf8')),
-      JSON.stringify(h.result('add-greeting').result),
+    // Секрет профиля получил каждый вид reviewer.
+    assert.deepEqual([...received].sort(), ['review-code', 'review-contract', 'review-plan']);
+    // Каждое сохраняемое представление проверяется отдельно: значение в нём
+    // было и замаскировано.
+    const persisted: [string, string][] = [
+      ['артефакт плана', readFileSync(plan.artifact, 'utf8')],
+      ['запись плана', JSON.stringify(plan)],
+      ['артефакт контракта', readFileSync(contract.artifact, 'utf8')],
+      ['запись контракта', JSON.stringify(contract)],
+      ['evidence кода', JSON.stringify(a.evidence.filter((e) => e.kind === 'review'))],
+      ...a.evidence
+        .filter((e) => e.kind === 'review')
+        .map((e): [string, string] => [
+          'артефакт ревью кода ' + e.phase,
+          readFileSync(e.log, 'utf8'),
+        ]),
     ];
-    assert.ok(
-      persisted.join('\n').includes('[REDACTED]'),
-      'значение было в ответе и замаскировано',
-    );
-    for (const text of persisted)
-      assert.ok(!text.includes(canary), 'секрет сохранён: ' + text.slice(0, 200));
+    for (const [name, text] of persisted) {
+      assert.ok(text.includes('[REDACTED]'), name + ': значение было и замаскировано');
+      assert.ok(!text.includes(canary), name + ': секрет сохранён');
+    }
+    for (const record of [plan, contract])
+      assert.ok(
+        record.findings.some(
+          (f) => f.path?.includes('[REDACTED]') && f.rule?.includes('[REDACTED]'),
+        ),
+        record.kind + ': path и rule находки замаскированы',
+      );
+    assert.ok(!JSON.stringify(h.result('add-greeting').result).includes(canary), 'результат');
     h.close();
   } finally {
     delete process.env.HARNESS_TEST_CANARY_7f3;
