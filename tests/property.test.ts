@@ -355,3 +355,54 @@ test('T18: новая версия корпуса не меняет принят
   assert.deepEqual(after.checkVersion, done.checkVersion);
   assert.equal(after.resultSha, done.resultSha);
 });
+
+test('Gate, переписавший файл закреплённого корпуса, не проходит: свидетельство относилось бы к другим случаям', async () => {
+  // Сама проверка (закреплённый артефакт контракта) после прогона переписывает
+  // корпус; режим изоляции none, права файла ей это позволяют.
+  const tamper = `${check()}
+const fs = await import('node:fs');
+if (process.env.DEVCONTOUR_CORPUS) {
+  fs.chmodSync(process.env.DEVCONTOUR_CORPUS, 0o644);
+  fs.writeFileSync(process.env.DEVCONTOUR_CORPUS, '{"cases":[]}');
+}
+`;
+  const ctx = propertySetup({
+    writer: [
+      implement({ 'src/knap.mjs': knap.firstThree }),
+      implement({ 'src/knap.mjs': knap.correct }),
+    ],
+    files: { 'check.mjs': tamper },
+  });
+  await runAll(ctx);
+  const failed = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.equal(failed.status, 'failed');
+  const result = await ctx.runner.submitCase({
+    workId: 'add-greeting',
+    property: 'knapsack-optimal',
+    input: JSON.stringify({
+      items: [
+        { w: 1, v: 1 },
+        { w: 1, v: 1 },
+        { w: 1, v: 1 },
+        { w: 1, v: 9 },
+      ],
+      cap: 4,
+    }),
+    expected: '12',
+    sourceSha: failed.candidateSha,
+    key: 'case-tamper',
+  });
+  assert.equal(result.decision.outcome, 'confirmed');
+  ctx.engine.retry('add-greeting');
+  await ctx.runner.drain();
+  const second = ctx.engine.read((v) => v.attempts('add-greeting').at(-1)!);
+  assert.ok(second.checks?.corpus, 'попытка закрепила корпус');
+  assert.equal(second.status, 'failed');
+  const gate = second.evidence.find((e) => e.gate === 'properties' && e.phase === 'candidate')!;
+  assert.equal(gate.passed, false);
+  assert.match(gate.summary, /Проверка изменила файл закреплённого корпуса/);
+  assert.notEqual(
+    ctx.engine.read((v) => v.work('add-greeting')!.status),
+    'done',
+  );
+});

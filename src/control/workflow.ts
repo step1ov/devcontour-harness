@@ -122,7 +122,13 @@ export class WorkflowQueue {
    */
   claim(key: string) {
     return this.store.transact('workflow.updated', (tx) => {
-      if (tx.control().pauseReason === 'reconfigure') return undefined;
+      // Пока политика применяется — и до паузы операции, по самому запросу, — стадии не начинаются.
+      const control = tx.control();
+      if (
+        control.pauseReason === 'reconfigure' ||
+        (control.reconfigure && !control.reconfigure.appliedAt)
+      )
+        return undefined;
       const job = tx.local('workflow-jobs', WORKSPACE_OWNER, key);
       if (!job) throw new HarnessError('NOT_FOUND', 'Задание не найдено: ' + key);
       if (

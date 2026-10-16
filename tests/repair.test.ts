@@ -276,6 +276,28 @@ test('T15/T27: смена политики делает задание stale —
   assert.equal(flow.get(other.key).attempts, 0);
 });
 
+test('T27: неприменённый запрос reconfigure держит стадии и до паузы операции; после применения — продолжаются', () => {
+  const { engine, store, clock } = engineOf();
+  ready(engine, graphOf({ a: [] }));
+  const flow = new WorkflowQueue(store, engine.policy, () => clock.now);
+  const job = flow.start({ kind: 'graph', id: 'g', authorRuntime: 'codex' });
+  engine.requestReconfigure('op-1', engine.policyState().loaded);
+  assert.notEqual(
+    store.read((v) => v.control().pauseReason),
+    'reconfigure',
+    'паузы операции ещё нет',
+  );
+  assert.equal(flow.claim(job.key), undefined, 'запрос держит стадии');
+  assert.equal(flow.get(job.key).attempts, 0);
+  store.transact('config.started', (tx) =>
+    tx.setControl({
+      ...tx.control(),
+      reconfigure: { ...tx.control().reconfigure!, appliedAt: new Date(clock.now).toISOString() },
+    }),
+  );
+  assert.ok(flow.claim(job.key), 'применённый запрос стадии не держит');
+});
+
 test('T15: сорванное восстановление не оставляет ни учёта без повтора, ни повтора без учёта', () => {
   const { engine, store, clock } = engineOf();
   ready(engine, graphOf({ a: [] }));

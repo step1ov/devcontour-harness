@@ -196,5 +196,5 @@ const accepted = execFileSync('git', ['rev-parse', 'refs/heads/harness/accepted'
 if (envelope.data?.result?.outcome !== 'accepted' || envelope.data.result.shas.result !== accepted)
   fail('результат примера не принят или SHA не совпадает с target ref: ' + outcome.stdout);
 console.log(
-  `smoke-package: ${packed.filename} (${packed.files.length} файлов) установлен и работает; sha512 ${packed.integrity}`,
+  `smoke-package: ${packed.filename} (${packed.files.length} файлов) установлен, полный цикл пройден на fixture runtime (механика, не качество модели); sha512 ${packed.integrity}`,
 );

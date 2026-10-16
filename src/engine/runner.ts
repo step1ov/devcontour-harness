@@ -93,6 +93,8 @@ const within = (path: string, prefixes: string[]) =>
  * приёмку с CAS продвижения target ref внутри транзакции приёмки.
  */
 export class Runner {
+  /** Предел git update-ref приёмки внутри транзакции; конечный и короче lease. */
+  static refTimeoutMs = 15000;
   readonly owner: string;
   private readonly engine: Engine;
   private readonly policy: ExecutionPolicy;
@@ -1215,7 +1217,7 @@ export class Runner {
           context,
           gates: gates.map((g) => ({ id: g.id, command: g.command })),
           review: { sha, phase, diff },
-          notes: this.notes(attempt, true),
+          notes: this.notes(attempt, true, sha),
         }),
       },
       signal,
@@ -1291,9 +1293,38 @@ export class Runner {
    * Обязательный корпус попытки (первые 20 случаев) и — исполнителю —
    * решение разбора ведущего, под которым выдан повтор.
    */
-  private notes(attempt: AttemptState, review: boolean) {
+  private notes(attempt: AttemptState, review: boolean, sha?: string) {
     return this.engine.read((v) => {
       const out: string[] = [];
+      // Согласованные контракты поручения — их текстом, по закреплённому digest.
+      const contracts = contractDocuments(v.work(attempt.workId)!.order, v);
+      if (contracts.length)
+        out.push(
+          'Approved contracts: ' +
+            JSON.stringify(
+              contracts.map((c) => ({ id: c.id, title: c.title, content: c.content })),
+            ),
+        );
+      // Reviewer видит, что controller сам записал о проверяемом SHA: gates и
+      // их итоги, а не пересказ исполнителя.
+      if (review && sha) {
+        const evidence = (v.attempt(attempt.id)?.evidence ?? []).filter(
+          (e) => e.sha === sha && e.kind !== 'review',
+        );
+        out.push(
+          'Evidence the controller recorded for the review commit (gate, phase, passed, summary): ' +
+            JSON.stringify(
+              evidence.map((e) => ({
+                gate: e.gate,
+                phase: e.phase,
+                passed: e.passed,
+                summary: e.summary,
+                ...(e.consumer ? { consumer: e.consumer } : {}),
+              })),
+            ),
+          'Where a requirement names a testId, open that test. Reject it when the test does not exercise the stated scenario, or when it would still pass if the behaviour it claims to prove were broken. A matching name is not proof.',
+        );
+      }
       const r = v.work(attempt.workId)?.recovery;
       if (!review && r?.decision && r.status === 'retrying' && r.retryRun === attempt.id) {
         const d = r.decision;
@@ -1474,10 +1505,13 @@ export class Runner {
         // Источник требований мог измениться, пока шли проверки и ревью:
         // актуальность — непосредственно перед продвижением target.
         if (work.order.requirements.length) assertRequirements(work.order, repoPath);
-        execFileSync('git', ['update-ref', repo.targetRef, sha, base], {
-          cwd: repoPath,
-          stdio: 'pipe',
-        });
+        // Внутри транзакции: без hooks репозитория (они исполнили бы чужой код
+        // под блокировкой записи) и с конечным пределом, короче lease.
+        execFileSync(
+          'git',
+          ['-c', 'core.hooksPath=/dev/null', 'update-ref', repo.targetRef, sha, base],
+          { cwd: repoPath, stdio: 'pipe', timeout: Runner.refTimeoutMs },
+        );
       });
     } catch (error) {
       const text =

@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Runner } from '../src/engine/runner.ts';
 import { policyIssues } from '../src/contracts/index.ts';
 import { approve, greet, implement, runAll, setup, target } from './runner-fixture.ts';
 
@@ -425,4 +427,54 @@ test('T07: reviewer, изменивший дерево, не одобряет �
   assert.equal(work.status, 'failed');
   assert.match(work.failure!, /reviewer изменил дерево или HEAD/);
   assert.equal(work.failureKind, 'review');
+});
+
+test('CAS приёмки не исполняет hooks репозитория: hook reference-transaction на target ref не запускается и не может сорвать приёмку', async () => {
+  const ctx = setup({ scenario: { writer: implement(), reviewer: approve() } });
+  const marker = join(ctx.state, 'hook-ran');
+  const ref = ctx.policy.repositories[0]!.targetRef;
+  // Hook реагирует только на target ref: ветки кандидата и worktree его не трогают.
+  const hook = join(ctx.repo.dir, '.git', 'hooks', 'reference-transaction');
+  writeFileSync(
+    hook,
+    `#!/bin/sh\nif grep -q ' ${ref}$'; then touch ${JSON.stringify(marker)}; exit 1; fi\nexit 0\n`,
+  );
+  chmodSync(hook, 0o755);
+  await runAll(ctx);
+  const work = ctx.engine.read((v) => v.work('add-greeting')!);
+  assert.equal(work.status, 'done', work.failure);
+  assert.equal(target(ctx), work.resultSha);
+  assert.equal(existsSync(marker), false, 'hook внутри транзакции приёмки не запускался');
+});
+
+test('Зависший git update-ref приёмки останавливается своим пределом: принятия нет, target неподвижен', async () => {
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p) => ((p as { maxAttempts: number }).maxAttempts = 1),
+  });
+  const shim = mkdtempSync(join(tmpdir(), 'harness-git-shim-'));
+  const realGit = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
+  const ref = ctx.policy.repositories[0]!.targetRef;
+  // Зависает только продвижение target ref приёмкой.
+  writeFileSync(
+    join(shim, 'git'),
+    `#!/bin/sh\nfor a in "$@"; do [ "$a" = ${JSON.stringify(ref)} ] && [ "$3" = update-ref ] && exec sleep 60; done\nexec ${JSON.stringify(realGit)} "$@"\n`,
+  );
+  chmodSync(join(shim, 'git'), 0o755);
+  const before = target(ctx);
+  const path = process.env.PATH;
+  const limit = Runner.refTimeoutMs;
+  Runner.refTimeoutMs = 2000;
+  process.env.PATH = `${shim}:${path}`;
+  const started = Date.now();
+  try {
+    await runAll(ctx);
+  } finally {
+    process.env.PATH = path;
+    Runner.refTimeoutMs = limit;
+  }
+  assert.ok(Date.now() - started < 50_000, 'приёмка не ждала зависший git');
+  const work = ctx.engine.read((v) => v.work('add-greeting')!);
+  assert.notEqual(work.status, 'done');
+  assert.equal(target(ctx), before, 'target неподвижен');
 });

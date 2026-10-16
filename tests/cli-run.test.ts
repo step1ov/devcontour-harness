@@ -337,3 +337,52 @@ test('T14: --once выполняет только выданный шаг; но�
     'новый процесс довёл очередь',
   );
 });
+
+test('T27: CLI передаёт источник политики барьеру — файл, изменённый после загрузки, не становится применённой политикой', () => {
+  const p = project();
+  const args = ['run', '--graph', 'graph.json', '--policy', 'policy.json', '--state', p.state];
+  assert.equal(p.harness(...args).status, 0);
+  const applied = () => {
+    const store = new SqliteExecutionStore(join(p.state, 'state.sqlite'), 'probe');
+    try {
+      return store.read((v) => v.control().appliedPolicy);
+    } finally {
+      store.close();
+    }
+  };
+  const first = applied()!;
+  // Новая политика процесса 2 и новая редакция графа: процессу нужно согласование.
+  const policyPath = join(p.app, 'policy.json');
+  const policy = JSON.parse(readFileSync(policyPath, 'utf8')) as Record<string, unknown>;
+  policy.maxAttempts = 5;
+  writeFileSync(policyPath, JSON.stringify(policy, null, 2));
+  const graphPath = join(p.app, 'graph.json');
+  const graph = JSON.parse(readFileSync(graphPath, 'utf8')) as {
+    source: { revision: string };
+    orders: { source: { revision: string }; goal: string }[];
+  };
+  graph.source.revision = '2';
+  graph.orders[0]!.source.revision = '2';
+  graph.orders[0]!.goal += ' Вторая редакция.';
+  writeFileSync(graphPath, JSON.stringify(graph));
+  // Ревью плана процесса 2 (вызов reviewer 3) переписывает файл политики после её загрузки.
+  const changed = { ...policy, maxAttempts: 6 };
+  writeFileSync(
+    join(p.root, 'scenario.json'),
+    JSON.stringify({
+      writer: implement(),
+      reviewer: [
+        approve(),
+        approve(),
+        approve(),
+        { ...approve(), files: { 'policy.json': JSON.stringify(changed, null, 2) } },
+        approve(),
+      ],
+    }),
+  );
+  const second = p.harness(...args);
+  assert.equal(second.status, exitCodes.refused, second.stderr);
+  assert.equal(second.json.error?.code, 'APPROVAL_STALE');
+  assert.match(JSON.stringify(second.json.error), /policy\.json изменился после загрузки/);
+  assert.deepEqual(applied(), first, 'применённой осталась прежняя политика');
+});

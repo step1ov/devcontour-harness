@@ -73,11 +73,19 @@ for (const [path, text] of Object.entries(step.draftFiles ?? {})) {
   mkdirSync(dirname(join(process.cwd(), path)), { recursive: true });
   writeFileSync(join(process.cwd(), path), text);
 }
-if (step.sleepMs) await new Promise((r) => setTimeout(r, step.sleepMs));
+// Ранний вывод и зависший потомок — до ожидания: тесты прерывают вызов по
+// времени и проверяют, что потомок остановлен, а вывод замаскирован.
+if (step.earlyStderr) process.stderr.write(step.earlyStderr + '\n');
 if (step.spawnHanging) {
   const { spawn } = await import('node:child_process');
-  spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
+  const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {
+    stdio: 'ignore',
+    detached: step.spawnHanging === 'detached',
+  });
+  writeFileSync(`${scenarioPath}.${role}.${index}.child.pid`, String(child.pid));
+  if (step.spawnHanging === 'detached') child.unref();
 }
+if (step.sleepMs) await new Promise((r) => setTimeout(r, step.sleepMs));
 for (const [path, text] of Object.entries(step.files ?? {})) {
   mkdirSync(dirname(join(process.cwd(), path)), { recursive: true });
   writeFileSync(join(process.cwd(), path), text);
