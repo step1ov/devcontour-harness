@@ -1,0 +1,50 @@
+{
+  "id": "react-native",
+  "version": "0.4.0",
+  "extends": [
+    "node-checks",
+    "mobile-maestro"
+  ],
+  "capabilities": [
+    "react-native"
+  ],
+  "protectedPaths": [
+    "app.json",
+    "babel.config.js",
+    "metro.config.js"
+  ],
+  "roles": {
+    "mobile": {
+      "runtime": "claude",
+      "title": "Мобильный разработчик",
+      "requiresContract": true,
+      "reviewer": {
+        "runtime": "codex"
+      }
+    },
+    "qa-mobile": {
+      "runtime": "codex",
+      "title": "Тестировщик приложения",
+      "reviewer": {
+        "runtime": "claude"
+      }
+    }
+  },
+  "contextPacks": [
+    {
+      "id": "design-system",
+      "version": "1.0.0",
+      "roles": [
+        "frontend",
+        "mobile",
+        "ui-tokens",
+        "ui-web",
+        "ui-mobile"
+      ],
+      "files": [
+        ".agents/context/design-system.md",
+        ".agents/context/design.md"
+      ]
+    }
+  ]
+}

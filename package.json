@@ -32,6 +32,9 @@
     "schemas",
     "docs",
     "examples",
+    "profiles",
+    "skills",
+    "templates",
     "LICENSE",
     "README.md"
   ],

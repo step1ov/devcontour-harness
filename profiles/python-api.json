@@ -1,0 +1,32 @@
+{
+  "id": "python-api",
+  "version": "0.1.0",
+  "capabilities": ["python", "api", "pytest"],
+  "protectedPaths": ["pyproject.toml", "uv.lock", ".python-version"],
+  "gates": [
+    {
+      "id": "install",
+      "kind": "check",
+      "command": ["uv", "sync", "--locked"],
+      "timeoutMs": 240000
+    },
+    {
+      "id": "lint",
+      "kind": "check",
+      "command": ["uv", "run", "--no-sync", "ruff", "check", "."],
+      "timeoutMs": 240000,
+      "dependsOn": ["install"]
+    },
+    {
+      "id": "acceptance",
+      "kind": "test",
+      "command": ["uv", "run", "--no-sync", "pytest", "--junitxml=.reports/junit.xml"],
+      "timeoutMs": 240000,
+      "dependsOn": ["lint"],
+      "report": {
+        "type": "junit",
+        "path": ".reports/junit.xml"
+      }
+    }
+  ]
+}

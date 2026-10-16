@@ -1,0 +1,15 @@
+{
+  "id": "expo-mobile",
+  "version": "0.2.0",
+  "extends": [
+    "react-native"
+  ],
+  "capabilities": [
+    "expo"
+  ],
+  "protectedPaths": [
+    "app.config.js",
+    "app.config.ts",
+    "eas.json"
+  ]
+}

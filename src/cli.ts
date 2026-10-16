@@ -22,6 +22,7 @@ import { validateInputs } from './validate.ts';
 import { Harness } from './control/harness.ts';
 import { policySourceOf, type PolicySource } from './control/provenance.ts';
 import { doctor } from './control/doctor.ts';
+import { profilePin, resolveProfile } from './profiles/resolve.ts';
 import { cliAdapter } from './agents/cli-adapter.ts';
 import { FileContextSource, FileResultSink, FileWorkSource } from './connectors/files.ts';
 
@@ -188,6 +189,8 @@ const options = {
   limit: { type: 'string' },
   reset: { type: 'boolean' },
   once: { type: 'boolean' },
+  profile: { type: 'string' },
+  repository: { type: 'string' },
 } as const;
 
 async function run(
@@ -331,6 +334,12 @@ async function run(
       } finally {
         h.close();
       }
+    }
+    case 'profile': {
+      const profile = resolveProfile(need('profile'), {
+        ...(v.repository ? { repository: v.repository } : {}),
+      });
+      return { command, data: { pin: profilePin(profile), profile } };
     }
     case 'doctor': {
       const b = v.policy ? loadPolicy(v.policy) : v.state ? binding(v.state) : undefined;

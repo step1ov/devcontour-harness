@@ -1,0 +1,22 @@
+{
+  "apiVersion": "devcontour-harness/v1alpha1",
+  "id": "first-graph",
+  "source": { "connector": "files", "ref": "graph.json", "revision": "1" },
+  "orders": [
+    {
+      "apiVersion": "devcontour-harness/v1alpha1",
+      "id": "first-order",
+      "source": { "connector": "files", "ref": "first-order", "revision": "1" },
+      "title": "Describe the change in one line",
+      "goal": "State the outcome the order must reach and where it lives.",
+      "acceptance": [
+        "An observable, testable criterion",
+        "The unit gate passes with a JUnit report"
+      ],
+      "role": "developer",
+      "repositoryId": "app",
+      "writeScope": ["src"],
+      "gates": ["unit"]
+    }
+  ]
+}

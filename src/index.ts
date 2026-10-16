@@ -66,3 +66,16 @@ export {
   type PortableSuite,
 } from './verification/corpus.ts';
 export { caseInputSchema, staleArtifacts, type CaseRequest } from './verification/confirm.ts';
+/**
+ * Профили стека: разрешение встроенного или локального профиля (только чтение
+ * манифестов), закрепление и сборка описания репозитория и ролей политики.
+ */
+export {
+  builtinProfiles,
+  builtinProfilesRoot,
+  profilePin,
+  profileRoles,
+  repositoryFromProfile,
+  resolveProfile,
+  type ResolveProfileOptions,
+} from './profiles/resolve.ts';

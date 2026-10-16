@@ -7,6 +7,7 @@ import { runEventSchema } from './events.ts';
 import { reviewRecordSchema } from './review.ts';
 import { executionDocumentSchema } from './execution.ts';
 import { contractDocumentSchema } from './checks.ts';
+import { stackProfileSchema } from './profiles.ts';
 
 /**
  * Схемы, публикуемые как JSON Schema (`schemas/<имя>.schema.json`).
@@ -31,4 +32,5 @@ export const publishedSchemas = {
   'review-record': reviewRecordSchema,
   'joint-verification': jointVerificationSchema,
   'execution-document': executionDocumentSchema,
+  'stack-profile': stackProfileSchema,
 } as const satisfies Record<string, z.ZodType>;

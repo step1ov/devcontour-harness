@@ -1,0 +1,29 @@
+{
+  "id": "mobile-maestro",
+  "version": "0.1.0",
+  "capabilities": ["mobile", "maestro", "device-lease-required"],
+  "concurrency": 1,
+  "gates": [
+    {
+      "id": "build-and-install",
+      "kind": "check",
+      "command": ["npm", "run", "mobile:devcontour:prepare"],
+      "timeoutMs": 600000
+    },
+    {
+      "id": "mobile-acceptance",
+      "kind": "test",
+      "command": [
+        "maestro",
+        "test",
+        ".maestro/",
+        "--format",
+        "junit",
+        "--output",
+        ".reports/junit.xml"
+      ],
+      "timeoutMs": 600000,
+      "report": { "type": "junit", "path": ".reports/junit.xml" }
+    }
+  ]
+}

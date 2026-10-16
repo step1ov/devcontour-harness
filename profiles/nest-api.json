@@ -1,0 +1,26 @@
+{
+  "id": "nest-api",
+  "version": "0.1.0",
+  "extends": ["node-checks"],
+  "capabilities": ["nestjs", "api", "integration-tests"],
+  "gates": [
+    {
+      "id": "build",
+      "kind": "check",
+      "command": ["npm", "run", "build"],
+      "timeoutMs": 240000,
+      "dependsOn": ["typecheck"]
+    },
+    {
+      "id": "api-acceptance",
+      "kind": "test",
+      "command": ["npm", "run", "test:devcontour:integration"],
+      "timeoutMs": 240000,
+      "dependsOn": ["build"],
+      "report": {
+        "type": "junit",
+        "path": ".reports/integration.xml"
+      }
+    }
+  ]
+}

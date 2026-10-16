@@ -7,3 +7,6 @@ evidence
 test-results
 # Генерируется из Zod-схем: формат задаёт scripts/build-schemas.ts.
 schemas
+
+# Встроенные профили переносятся побайтно: их digest — sha256 байтов файла.
+profiles/

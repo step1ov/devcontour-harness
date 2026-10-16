@@ -1,0 +1,72 @@
+{
+  "id": "next-product",
+  "version": "0.2.0",
+  "capabilities": [
+    "react-ssr",
+    "seo",
+    "design-tokens",
+    "playwright"
+  ],
+  "gates": [
+    {
+      "id": "install",
+      "kind": "check",
+      "command": [
+        "npm",
+        "ci"
+      ],
+      "timeoutMs": 240000
+    },
+    {
+      "id": "typecheck",
+      "kind": "check",
+      "command": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "timeoutMs": 120000
+    },
+    {
+      "id": "production-build",
+      "kind": "check",
+      "command": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "timeoutMs": 240000
+    },
+    {
+      "id": "acceptance",
+      "kind": "test",
+      "command": [
+        "npm",
+        "run",
+        "test:devcontour"
+      ],
+      "timeoutMs": 240000,
+      "report": {
+        "type": "junit",
+        "path": ".reports/junit.xml"
+      }
+    }
+  ],
+  "contextPacks": [
+    {
+      "id": "design-system",
+      "version": "1.0.0",
+      "roles": [
+        "frontend",
+        "mobile",
+        "ui-tokens",
+        "ui-web",
+        "ui-mobile"
+      ],
+      "files": [
+        ".agents/context/design-system.md",
+        ".agents/context/design.md"
+      ]
+    }
+  ]
+}

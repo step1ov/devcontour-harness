@@ -13,6 +13,7 @@ import { runEventSchema } from './events.ts';
 import { resultEnvelopeSchema } from './result.ts';
 import { reviewRecordSchema } from './review.ts';
 import { sourceRefSchema } from './work.ts';
+import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
 
 /**
  * Договор CLI `harness`.
@@ -266,6 +267,27 @@ export const cliCommands = {
     ],
     refusals: ['NOT_FOUND', 'REVISION_CONFLICT'],
   },
+  profile: {
+    description:
+      'Разрешить профиль стека (встроенный ID или ./file.json репозитория): слои, gates, закрепление; только чтение манифестов, без команд проекта',
+    writes: false,
+    idempotency: 'Чистая функция файлов профиля',
+    args: [
+      {
+        name: '--profile',
+        value: 'text',
+        required: true,
+        description: 'Встроенный ID профиля или относительный ./file.json',
+      },
+      {
+        name: '--repository',
+        value: 'dir',
+        required: false,
+        description: 'Корень репозитория для локального профиля',
+      },
+    ],
+    refusals: [],
+  },
   doctor: {
     description:
       'Версии, наличие runtime и их capabilities, OS-sandbox, совместимость каталога состояния; без live-вызова модели',
@@ -444,6 +466,11 @@ export const doctorDataSchema = z.strictObject({
   problems: z.array(z.string()),
 });
 
+export const profileDataSchema = z.strictObject({
+  pin: profilePinSchema,
+  profile: resolvedProfileSchema,
+});
+
 export const versionDataSchema = z.strictObject({
   harness: z.string(),
   apiVersion: z.literal(API_VERSION),
@@ -464,6 +491,7 @@ export const cliDataSchemas = {
   retry: workActionDataSchema,
   result: resultEnvelopeSchema,
   deliver: resultEnvelopeSchema,
+  profile: profileDataSchema,
   doctor: doctorDataSchema,
   version: versionDataSchema,
 } as const satisfies Record<CliCommand | 'version', z.ZodType>;

@@ -1,0 +1,15 @@
+{
+  "id": "go-api",
+  "version": "0.1.0",
+  "capabilities": ["go", "openapi", "integration-tests"],
+  "gates": [
+    { "id": "vet", "kind": "check", "command": ["go", "vet", "./..."], "timeoutMs": 120000 },
+    {
+      "id": "acceptance",
+      "kind": "test",
+      "command": ["gotestsum", "--junitfile", ".reports/junit.xml", "--", "-race", "./..."],
+      "timeoutMs": 240000,
+      "report": { "type": "junit", "path": ".reports/junit.xml" }
+    }
+  ]
+}

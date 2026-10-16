@@ -270,6 +270,28 @@ exit code CLI.
 Exit 1 не используется: им Node завершает процесс при необработанном
 исключении.
 
+### StackProfile
+
+Переносимый профиль стека (`schemas/stack-profile.schema.json`):
+`{id, version, extends[], capabilities[], gates[], prepare[], environment?, lifecycle?, protectedPaths[], generatedPaths[], concurrency?, runTimeoutMs?, roles{}, contextPacks[]}`.
+`extends` — встроенный ID (`profiles/<id>.json` пакета) или относительный
+`./file.json` внутри репозитория; не глубже 16 слоёв и не больше 32 файлов,
+без symlink и выхода за корень, файл до 128 KiB. `resolveProfile` только
+читает манифесты: gates, подготовка, возможности и пути складываются,
+окружение и lifecycle задаёт один слой (иначе конфликт), параллельность —
+наименьшая, время попытки — наибольшее, роли и `contextPacks` — по ID.
+Итог обязан иметь test gate с JUnit; `requirement-source` зарезервирован.
+Файлы локальных слоёв становятся защищёнными путями. Digest: один встроенный
+файл — sha256 его байтов (так закреплены прежние потребители, встроенные
+профили перенесены побайтно), иначе — sha256 замыкания `[{ref, digest}]`.
+`repositoryFromProfile` собирает описание репозитория политики (собственные
+значения сильнее, переопределённые поля названы в `shadowed`),
+`profileRoles` — роли в форме политики. `contextPacks` — инструкции стека для
+хоста: harness их не читает, закрепляет их `ContextSource`. Встроенные
+профили сохраняют имена скриптов проекта, которые закреплены у прежних
+потребителей (например, `npm run test:devcontour`); для другого проекта
+подходит локальный профиль.
+
 ## CLI
 
 stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` или
@@ -294,6 +316,7 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `retry`           | `--state D --work ID [--reset --reason T]`                              | да    | статус поручения                                  | В пределах `maxAttempts` и бюджета; `--reset` с причиной сбрасывает счётчик попыток, но не учёт расходов                                               |
 | `result`          | `--state D --work ID`                                                   | нет   | `ResultEnvelope`                                  | Только чтение                                                                                                                                          |
 | `deliver`         | `--state D --work ID --sink file:D`                                     | да    | `ResultEnvelope`                                  | Доставленное не доставляется повторно; моделей и интеграции нет                                                                                        |
+| `profile`         | `--profile ID\|./F [--repository D]`                                    | нет   | закрепление (`pin`) и разрешённый профиль         | Чистая функция файлов профиля; команды проекта не исполняются                                                                                          |
 | `doctor`          | `[--state D] [--policy F]`                                              | нет   | версии, runtime, sandbox, совместимость состояния | Без live-вызова модели                                                                                                                                 |
 | `--version`       | —                                                                       | нет   | версия пакета и API                               | —                                                                                                                                                      |
 
