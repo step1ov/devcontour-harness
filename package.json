@@ -48,6 +48,8 @@
     "format:check": "prettier --check ."
   },
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.77",
+    "fast-xml-parser": "5.11.1",
     "zod": "4.6.5"
   },
   "devDependencies": {

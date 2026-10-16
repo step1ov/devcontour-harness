@@ -154,7 +154,8 @@ export class Engine {
             'REVISION_CONFLICT',
             `Поручение ${order.id} уже принадлежит другому графу`,
           );
-        if (prior?.status === 'done' && contentDigest(prior.order) === contentDigest(order)) continue;
+        if (prior?.status === 'done' && contentDigest(prior.order) === contentDigest(order))
+          continue;
         tx.putWork({
           id: order.id,
           graphId: graph.id,
