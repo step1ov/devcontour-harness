@@ -189,6 +189,7 @@ export const transactionKinds = [
   'config.reconfigure-requested',
   'config.reconfigure-cleared',
   'graph.registered',
+  'graph.reviewed',
   'graph.approved',
   'delivery.recorded',
 ] as const;

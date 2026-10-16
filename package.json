@@ -21,7 +21,11 @@
       "default": "./lib/contracts/index.js"
     },
     "./package.json": "./package.json",
-    "./schemas/*": "./schemas/*"
+    "./schemas/*": "./schemas/*",
+    "./testing": {
+      "types": "./lib/testing/index.d.ts",
+      "default": "./lib/testing/index.js"
+    }
   },
   "files": [
     "lib",
