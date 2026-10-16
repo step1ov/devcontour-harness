@@ -8,6 +8,8 @@ import {
   runtimeNameSchema,
   targetRefSchema,
   vendorOf,
+  type Author,
+  trimmedText,
 } from './primitives.ts';
 import { digestOf } from './digest.ts';
 import type { ErrorIssue } from './errors.ts';
@@ -198,7 +200,7 @@ export const executionPolicySchema = z.strictObject({
       z.strictObject({
         id: idSchema,
         kind: z.enum(['device', 'port', 'account', 'service']),
-        value: z.string().trim().min(1).max(300),
+        value: trimmedText(1, 300),
       }),
     )
     .default([]),
@@ -242,7 +244,7 @@ export type ReviewKind = 'code' | 'plan' | 'contract';
 export function selectReviewer(
   policy: ExecutionPolicy,
   kind: ReviewKind,
-  writer: { runtime: RuntimeBinding['runtime'] },
+  writer: { runtime: Author },
   role?: string,
 ):
   | { ok: true; reviewer: RuntimeBinding; sameVendor: boolean }

@@ -46,7 +46,8 @@
       "enum": [
         "codex",
         "claude",
-        "fixture"
+        "fixture",
+        "external"
       ]
     },
     "reviewerRuntime": {

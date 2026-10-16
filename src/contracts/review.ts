@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  authorSchema,
   digestSchema,
   idSchema,
   isoTimeSchema,
@@ -125,7 +126,12 @@ export const reviewRecordSchema = z.strictObject({
   at: isoTimeSchema,
   approved: z.boolean(),
   summary: z.string().max(12000),
-  authorRuntime: runtimeNameSchema,
+  /**
+   * Автор предложения, заданный вызовом ревью (`--author`) и закреплённый за
+   * предметом и digest: повтор с тем же digest и другим автором — новый
+   * раунд, а не согласованный прежний.
+   */
+  authorRuntime: authorSchema,
   reviewerRuntime: runtimeNameSchema,
   reviewerModel: z.string().optional(),
   sameVendor: z.boolean(),

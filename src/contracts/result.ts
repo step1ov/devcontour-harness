@@ -215,20 +215,44 @@ export const jointImpactSchema = z.strictObject({
   baseline: z.string().optional(),
 });
 
-export const jointVerificationSchema = z.strictObject({
+const jointCommon = {
   apiVersion: z.literal(API_VERSION),
   id: z.string().min(1).max(200),
-  status: z.enum(['active', 'passed', 'failed']),
   startedAt: isoTimeSchema,
-  finishedAt: isoTimeSchema.optional(),
   policyDigest: digestSchema,
   /** Digest постановок поручений, входящих в проверку (основание хоста). */
   specDigest: digestSchema,
   workIds: z.array(idSchema),
-  manifest: jointManifestSchema,
-  manifestDigest: digestSchema,
   impact: jointImpactSchema.optional(),
   evidence: z.array(jointEvidenceSchema),
-  error: z.string().optional(),
-});
+};
+/**
+ * Состояния совместной проверки. `active` — начата, manifest ещё может
+ * отсутствовать (снимок SHA делается после старта); `failed` — отказ, в том
+ * числе до получения manifest; `passed` — только с manifest и его digest.
+ * Выдумывать manifest для ранних состояний нельзя.
+ */
+export const jointVerificationSchema = z.discriminatedUnion('status', [
+  z.strictObject({
+    ...jointCommon,
+    status: z.literal('active'),
+    manifest: jointManifestSchema.optional(),
+    manifestDigest: digestSchema.optional(),
+  }),
+  z.strictObject({
+    ...jointCommon,
+    status: z.literal('failed'),
+    finishedAt: isoTimeSchema,
+    manifest: jointManifestSchema.optional(),
+    manifestDigest: digestSchema.optional(),
+    error: z.string().min(1),
+  }),
+  z.strictObject({
+    ...jointCommon,
+    status: z.literal('passed'),
+    finishedAt: isoTimeSchema,
+    manifest: jointManifestSchema,
+    manifestDigest: digestSchema,
+  }),
+]);
 export type JointVerification = z.infer<typeof jointVerificationSchema>;

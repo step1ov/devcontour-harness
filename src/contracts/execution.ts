@@ -7,6 +7,7 @@ import {
   isoTimeSchema,
   relativePathSchema,
   runtimeNameSchema,
+  trimmedText,
 } from './primitives.ts';
 import { workGraphSchema, workOrderSchema } from './work.ts';
 import { contextPinSchema, contextSnapshotSchema } from './context.ts';
@@ -277,7 +278,7 @@ export const continuationSchema = z.strictObject({
 export const resourceSchema = z.strictObject({
   id: idSchema,
   kind: z.enum(['device', 'port', 'account', 'service']),
-  value: z.string().trim().min(1).max(300),
+  value: trimmedText(1, 300),
 });
 
 /**
@@ -538,6 +539,38 @@ export type ControllerLease = z.infer<typeof controllerLeaseSchema>;
 /* Учёт вызовов моделей                                                */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Диагностика процесса runtime — форма `RuntimeDiagnostics` DevContour:
+ * время, последний вывод, код и сигнал, таймаут/отмена, хвосты потоков
+ * (уже замаскированные), дерево процессов.
+ */
+export const runtimeDiagnosticsSchema = z.strictObject({
+  startedAt: isoTimeSchema,
+  finishedAt: isoTimeSchema,
+  lastOutputAt: isoTimeSchema.nullable(),
+  exitCode: z.number().int().nullable(),
+  signal: z.string().nullable(),
+  timedOut: z.boolean(),
+  aborted: z.boolean(),
+  stdoutTail: z.string(),
+  stderrTail: z.string(),
+  processTree: z
+    .strictObject({
+      available: z.boolean(),
+      reason: z.string().optional(),
+      processes: z.array(
+        z.strictObject({
+          pid: z.number().int(),
+          parentPid: z.number().int(),
+          groupPid: z.number().int(),
+          name: z.string(),
+        }),
+      ),
+    })
+    .optional(),
+});
+export type RuntimeDiagnostics = z.infer<typeof runtimeDiagnosticsSchema>;
+
 const tokenCount = z.number().int().nonnegative().nullable();
 export const usageSchema = z.strictObject({
   inputTokens: tokenCount,
@@ -602,15 +635,179 @@ export const callRecordSchema = z.strictObject({
       cacheWrite: z.number().nonnegative(),
     })
     .optional(),
-  diagnostics: z
-    .strictObject({
-      exitCode: z.number().int().nullable(),
-      reason: z.string().max(4000).optional(),
-      log: z.string().max(4000).optional(),
-    })
-    .optional(),
+  diagnostics: runtimeDiagnosticsSchema.optional(),
 });
 export type CallRecord = z.infer<typeof callRecordSchema>;
+
+/* ------------------------------------------------------------------ */
+/* Корпус подтверждённых случаев                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Набор корпуса одного gate договора проверки — форма `CheckSuite`
+ * DevContour. Случаи, версии, решения, принятия, отложенные принятия и
+ * операции подтверждения под владением (token/lease); `revision` — CAS для
+ * конкурентных добавок. История решений только дополняется.
+ */
+const corpusCaseSchema = z.strictObject({
+  id: z.string().min(1).max(200),
+  property: z.string().min(1).max(200),
+  /** Канонический JSON входа. */
+  input: z.string(),
+  /** Ответ закреплённого эталона, а не слова reviewer. */
+  expected: z.string(),
+  source: z.strictObject({
+    kind: z.literal('oracle'),
+    decision: z.string().min(1),
+    sha: gitShaSchema,
+    runId: z.string().optional(),
+    taskId: idSchema.optional(),
+    reproduction: z.string().optional(),
+  }),
+  addedAt: isoTimeSchema,
+});
+const corpusVersionSchema = z.strictObject({
+  number: z.number().int().min(0),
+  digest: digestSchema,
+  previous: digestSchema.nullable(),
+  cases: z.array(z.string()),
+  blob: gitShaSchema,
+  createdAt: isoTimeSchema,
+  reason: z.string(),
+  decisions: z.array(z.string()),
+});
+const caseDecisionSchema = z.strictObject({
+  id: z.string().min(1),
+  key: z.string().optional(),
+  property: z.string().min(1).max(200),
+  input: z.string(),
+  inputHash: digestSchema,
+  outcome: z.enum(['confirmed', 'refuted', 'inconclusive', 'rejected']),
+  reason: z.string(),
+  claimed: z
+    .strictObject({
+      expected: z.string().nullable(),
+      actual: z.string().nullable(),
+      reproduction: z.string().optional(),
+    })
+    .optional(),
+  source: z.strictObject({
+    sha: gitShaSchema,
+    runId: z.string().optional(),
+    taskId: idSchema.optional(),
+  }),
+  observed: z
+    .strictObject({
+      expected: z.string().optional(),
+      actual: z.string().optional(),
+      equal: z.boolean().optional(),
+      repeats: z.number().int().min(0),
+      durationsMs: z.array(z.number().min(0)),
+    })
+    .optional(),
+  method: z
+    .strictObject({
+      gate: idSchema,
+      command: z.array(z.string()),
+      artifacts: z.array(z.strictObject({ path: relativePathSchema, blob: gitShaSchema })),
+      contract: z.string().min(1),
+      basis: z.string().min(1),
+    })
+    .optional(),
+  caseId: z.string().optional(),
+  version: z.number().int().min(0).optional(),
+  origin: z.strictObject({
+    kind: z.enum(['review', 'lead', 'agent', 'operator']),
+    runtime: z.string().optional(),
+  }),
+  at: isoTimeSchema,
+});
+const versionRefSchema = z.strictObject({ number: z.number().int().min(0), digest: digestSchema });
+export const checkSuiteSchema = z.strictObject({
+  id: z.string().min(1).max(300),
+  repositoryId: idSchema,
+  contractId: idSchema,
+  contractDigest: digestSchema,
+  gate: idSchema,
+  basis: z.string().min(1),
+  cases: z.record(z.string(), corpusCaseSchema),
+  versions: z.array(corpusVersionSchema),
+  decisions: z.array(caseDecisionSchema),
+  adoptions: z.array(
+    z.strictObject({
+      id: z.string().min(1),
+      taskId: idSchema,
+      from: versionRefSchema.nullable(),
+      to: versionRefSchema,
+      actor: z.string().min(1),
+      reason: z.string(),
+      operation: z.string().min(1),
+      at: isoTimeSchema,
+    }),
+  ),
+  pending: z.array(
+    z.strictObject({
+      id: z.string().min(1),
+      version: z.number().int().min(0),
+      digest: digestSchema.optional(),
+      awaitingOperator: z.boolean().optional(),
+      tasks: z.array(idSchema),
+      status: z.enum(['waiting', 'completed']),
+      results: z.record(z.string(), z.string()),
+      actor: z.string().min(1),
+      reason: z.string(),
+      requestedAt: isoTimeSchema,
+      completedAt: isoTimeSchema.optional(),
+    }),
+  ),
+  operations: z.record(
+    z.string(),
+    z.strictObject({
+      key: z.string().min(1),
+      status: z.enum(['running', 'completed']),
+      token: z.string().optional(),
+      leaseUntil: z.number().int().min(0).optional(),
+      decision: z.string().optional(),
+      startedAt: isoTimeSchema,
+    }),
+  ),
+  revision: z.number().int().min(0),
+});
+export type CheckSuite = z.infer<typeof checkSuiteSchema>;
+
+/* ------------------------------------------------------------------ */
+/* Техническая очередь ведущего                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Задание технической очереди — форма `WorkflowJob` DevContour: предмет
+ * (вид и ID группы, у DevContour — доска или ChangeSet), закреплённый runtime
+ * автора, digest входа (смена входа делает задание `stale`), этап, попытки,
+ * число ремонтов, владение (token/lease) и история. Постановка идемпотентна
+ * по ключу; повтор с другим автором отклоняется.
+ */
+export const workflowJobSchema = z.strictObject({
+  kind: idSchema,
+  id: idSchema,
+  authorRuntime: z.enum(['codex', 'claude']),
+  maxAttempts: z.number().int().min(1).max(5),
+  key: digestSchema,
+  owner: z.string().optional(),
+  inputDigest: digestSchema,
+  stage: z.number().int().min(0),
+  attempts: z.number().int().min(0),
+  status: z.enum(['queued', 'running', 'failed', 'stale', 'completed']),
+  repairs: z.number().int().min(0).optional(),
+  token: z.string().optional(),
+  leaseUntil: z.number().int().min(0).optional(),
+  startedAt: isoTimeSchema,
+  finishedAt: isoTimeSchema.optional(),
+  error: z.string().optional(),
+  history: z.array(
+    z.strictObject({ at: isoTimeSchema, stage: z.number().int().min(0), event: z.string() }),
+  ),
+});
+export type WorkflowJob = z.infer<typeof workflowJobSchema>;
 
 /* ------------------------------------------------------------------ */
 /* Локальные записи                                                    */
@@ -635,6 +832,10 @@ export const localSchemas = {
   delivery: deliveryStateSchema,
   /** История технического ревью плана и контрактов. */
   reviews: reviewRecordSchema,
+  /** Наборы корпуса подтверждённых случаев (у DevContour — `check-suites`). */
+  'check-suites': checkSuiteSchema,
+  /** Техническая очередь ведущего (у DevContour — `lead`). */
+  'workflow-jobs': workflowJobSchema,
 } as const;
 export type LocalNamespace = keyof typeof localSchemas;
 export type LocalValue<N extends LocalNamespace> = z.infer<(typeof localSchemas)[N]>;
@@ -647,10 +848,15 @@ export type LocalValue<N extends LocalNamespace> = z.infer<(typeof localSchemas)
  * Совместная проверка в состоянии: результат и владение ею. Токен и срок
  * владения наружу не выдаются (`JointVerification` их не содержит).
  */
-export const jointVerificationStateSchema = jointVerificationSchema.extend({
-  token: z.string().min(16).max(200),
-  leaseUntil: z.number().int().min(0),
-});
+const ownership = { token: z.string().min(16).max(200), leaseUntil: z.number().int().min(0) };
+export const jointVerificationStateSchema = z.discriminatedUnion(
+  'status',
+  jointVerificationSchema.options.map((o) => o.extend(ownership)) as unknown as [
+    ReturnType<(typeof jointVerificationSchema.options)[0]['extend']>,
+    ReturnType<(typeof jointVerificationSchema.options)[1]['extend']>,
+    ReturnType<(typeof jointVerificationSchema.options)[2]['extend']>,
+  ],
+);
 export type JointVerificationState = z.infer<typeof jointVerificationStateSchema>;
 
 /** Документ состояния standalone SQLite. DevContour хранит свой документ, а не этот. */

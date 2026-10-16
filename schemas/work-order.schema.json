@@ -40,12 +40,14 @@
     "title": {
       "type": "string",
       "minLength": 3,
-      "maxLength": 180
+      "maxLength": 180,
+      "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
     },
     "goal": {
       "type": "string",
       "minLength": 10,
-      "maxLength": 12000
+      "maxLength": 12000,
+      "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
     },
     "acceptance": {
       "minItems": 1,
@@ -54,7 +56,8 @@
       "items": {
         "type": "string",
         "minLength": 3,
-        "maxLength": 1500
+        "maxLength": 1500,
+        "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
       }
     },
     "role": {

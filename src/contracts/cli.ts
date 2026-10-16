@@ -6,6 +6,7 @@ import {
   idSchema,
   isoTimeSchema,
   runtimeNameSchema,
+  trimmedText,
 } from './primitives.ts';
 import { errorCodes, type ErrorCode } from './errors.ts';
 import { controlStateSchema, controllerLeaseSchema, workStatusSchema } from './execution.ts';
@@ -71,6 +72,13 @@ const context: CliArgument = {
   required: false,
   description: 'ContextSnapshot JSON; без него — файловый ContextSource каталога графа',
 };
+const author: CliArgument = {
+  name: '--author',
+  value: 'id',
+  required: true,
+  description:
+    'Автор предложения: codex, claude, fixture или external (человек/инструмент вне harness); по нему применяется правило вендора',
+};
 const work: CliArgument = {
   name: '--work',
   value: 'id',
@@ -92,8 +100,8 @@ export const cliCommands = {
       'Техническое ревью плана (графа) с конкретным digest; новый раунд сохраняет историю находок предмета',
     writes: true,
     idempotency:
-      'Повтор для digest, уже согласованного последним раундом, возвращает этот раунд без вызова модели; иначе — новый раунд в пределах maxAttempts',
-    args: [state, graph, policy, context],
+      'Повтор с тем же digest и тем же автором, уже согласованный последним раундом, возвращает этот раунд без вызова модели; иначе — новый раунд в пределах maxAttempts. Автор, не допускаемый правилом вендора, — REVIEWER_SAME_VENDOR до вызова модели',
+    args: [state, graph, policy, context, author],
     refusals: ['REVIEW_REJECTED', 'ATTEMPTS_EXHAUSTED', 'BUDGET_EXHAUSTED', 'BUDGET_UNKNOWN'],
   },
   'review-contract': {
@@ -104,6 +112,7 @@ export const cliCommands = {
       state,
       { name: '--contract', value: 'path', required: true, description: 'ContractDocument JSON' },
       policy,
+      author,
     ],
     refusals: ['REVIEW_REJECTED', 'ATTEMPTS_EXHAUSTED', 'BUDGET_EXHAUSTED', 'BUDGET_UNKNOWN'],
   },
@@ -428,7 +437,7 @@ export const contractDocumentSchema = z.strictObject({
   apiVersion: z.literal(API_VERSION),
   id: idSchema,
   repositoryId: idSchema.optional(),
-  title: z.string().trim().min(3).max(180),
+  title: trimmedText(3, 180),
   content: z.string().min(10).max(200000),
 });
 export type ContractDocument = z.infer<typeof contractDocumentSchema>;

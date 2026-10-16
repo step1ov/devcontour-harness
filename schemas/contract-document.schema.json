@@ -19,7 +19,8 @@
     "title": {
       "type": "string",
       "minLength": 3,
-      "maxLength": 180
+      "maxLength": 180,
+      "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
     },
     "content": {
       "type": "string",

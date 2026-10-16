@@ -52,9 +52,38 @@ export const runtimeNameSchema = z.enum(runtimeNames);
 export type RuntimeName = (typeof runtimeNames)[number];
 
 /**
- * Вендор runtime. Политика ревью сравнивает вендоров, а не имена runtime:
- * одинаковый вендор у writer и reviewer допустим только явным разрешением.
+ * Автор проверяемого предложения (плана, контракта, кода). Кроме runtime
+ * harness, автором может быть `external` — человек или инструмент вне
+ * harness; его вендор не совпадает ни с одним runtime.
  */
-export const vendorOf = (runtime: RuntimeName) =>
-  runtime === 'codex' ? 'openai' : runtime === 'claude' ? 'anthropic' : 'fixture';
+export const authorSchema = z.enum([...runtimeNames, 'external']);
+export type Author = z.infer<typeof authorSchema>;
+
+/**
+ * Вендор runtime. Политика ревью сравнивает вендоров, а не имена runtime:
+ * одинаковый вендор у автора и reviewer допустим только явным разрешением.
+ */
+export const vendorOf = (runtime: Author) =>
+  runtime === 'codex'
+    ? 'openai'
+    : runtime === 'claude'
+      ? 'anthropic'
+      : runtime === 'fixture'
+        ? 'fixture'
+        : 'external';
 export type Vendor = ReturnType<typeof vendorOf>;
+
+/**
+ * Текст без пробельных символов по краям. Zod `.trim()` нормализует значение,
+ * а JSON Schema нормализовать не умеет — и тогда «   » проходило бы одну схему
+ * и не проходило другую. Поэтому harness не нормализует, а требует уже
+ * обрезанный текст: правило выражено регулярным выражением в обеих схемах.
+ * Адаптер хоста передаёт обрезанные значения.
+ */
+export const trimmedTextPattern = '^\\S(?:[\\s\\S]*\\S)?$';
+export const trimmedText = (min: number, max: number) =>
+  z
+    .string()
+    .min(min)
+    .max(max)
+    .regex(new RegExp(trimmedTextPattern), 'Текст без пробелов по краям и не пустой');

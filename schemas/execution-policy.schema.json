@@ -1314,7 +1314,8 @@
           "value": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 300
+            "maxLength": 300,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
           }
         },
         "required": [

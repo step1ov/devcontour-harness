@@ -87,15 +87,28 @@ const refused = run([
 if (refused.status !== 2)
   fail('неверная политика должна давать exit 2, получено ' + refused.status);
 
-const lib = spawnSync(
-  process.execPath,
-  [
-    '--input-type=module',
-    '-e',
-    "const m = await import('devcontour-harness'); const c = await import('devcontour-harness/contracts'); if (m.API_VERSION !== c.API_VERSION || typeof m.graphIssues !== 'function') process.exit(3); console.log(m.HARNESS_VERSION);",
-  ],
-  { cwd: consumer, encoding: 'utf8' },
-);
+// Публичный API из установленного архива: экспорты проверки и отрицательный сценарий.
+const libCheck = `
+const m = await import('devcontour-harness');
+const c = await import('devcontour-harness/contracts');
+if (m.API_VERSION !== c.API_VERSION) throw new Error('API_VERSION');
+for (const name of ['validateInputs', 'crossIssues', 'graphIssues', 'policyIssues', 'contextIssues', 'reviewIssues', 'selectReviewer'])
+  if (typeof m[name] !== 'function') throw new Error('нет экспорта ' + name);
+const { readFileSync } = await import('node:fs');
+const dir = './node_modules/devcontour-harness/examples/single-task/';
+const graph = JSON.parse(readFileSync(dir + 'graph.json', 'utf8'));
+const policy = JSON.parse(readFileSync(dir + 'policy.json', 'utf8'));
+if (m.validateInputs({ graph, policy }).orders !== 1) throw new Error('validateInputs примера');
+policy.roles.developer.writePaths = ['docs'];
+let code;
+try { m.validateInputs({ graph, policy }); } catch (e) { code = e.code; }
+if (code !== 'INVALID_INPUT') throw new Error('crossIssues через публичный API: ' + code);
+console.log(m.HARNESS_VERSION);
+`;
+const lib = spawnSync(process.execPath, ['--input-type=module', '-e', libCheck], {
+  cwd: consumer,
+  encoding: 'utf8',
+});
 if (lib.status !== 0 || lib.stdout.trim() !== packed.version)
   fail('импорт библиотеки: ' + lib.stderr);
 console.log(

@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {
   API_VERSION,
   HarnessError,
+  CONTEXT_LIMITS,
   canonicalJson,
+  pinnedBytes,
   contextIssues,
   digestOf,
   eventPayloads,
@@ -23,11 +25,13 @@ import {
   workGraphDigest,
   workGraphSchema,
   type ContextSnapshot,
+  type PinnedFile,
   type EventType,
   type WorkGraphInput,
 } from '../src/contracts/index.ts';
 import { validateInputs } from '../src/validate.ts';
 import { clone, example } from './fixtures.ts';
+import { validPayloads } from './fixtures-events.ts';
 
 const graphInput = () => clone(example('graph')) as unknown as WorkGraphInput;
 const order = (id: string, dependsOn: string[] = []) => ({
@@ -186,6 +190,9 @@ test('Reviewer: все четыре пары writer/reviewer по правилу
         assert.equal(allowed.ok && allowed.sameVendor, same);
         assert.equal(allowed.ok && allowed.reviewer.runtime, reviewer);
       }
+  // Автор вне harness: его вендор не совпадает ни с одним runtime.
+  for (const reviewer of ['claude', 'codex'] as const)
+    assert.equal(selectReviewer(withReviewer(reviewer), 'plan', { runtime: 'external' }).ok, true);
   const bad = clone(example('policy')) as { review: { code: { reviewer: { runtime: string } } } };
   bad.review.code.reviewer.runtime = 'claude';
   assert.deepEqual(
@@ -227,31 +234,30 @@ const event = (type: string, payload: unknown) => ({
   payload,
 });
 
-test('Нагрузка каждого типа события закрыта: токен и произвольные поля отклоняются', () => {
-  const claimed = {
-    owner: 'controller-1',
-    runtime: 'claude',
-    reviewer: 'codex',
-    policyDigest: digestOf('p'),
-    engineVersion: '0.1.0',
-  };
-  assert.equal(runEventSchema.safeParse(event('attempt.claimed', claimed)).success, true);
-  assert.equal(
-    runEventSchema.safeParse(event('attempt.claimed', { arbitrary: 'x' })).success,
-    false,
+test('Нагрузка каждого типа события закрыта: валидная принимается, с токеном или лишним полем — нет', () => {
+  assert.deepEqual(
+    Object.keys(validPayloads).sort(),
+    Object.keys(eventPayloads).sort(),
+    'фикстура на каждый тип',
   );
-  assert.equal(
-    runEventSchema.safeParse(event('attempt.claimed', { ...claimed, token: 'x' })).success,
-    false,
-  );
-  // Ни у одного типа нет поля, куда пролез бы токен.
-  for (const type of Object.keys(eventPayloads) as EventType[])
+  for (const type of Object.keys(eventPayloads) as EventType[]) {
+    const valid = validPayloads[type];
+    assert.equal(runEventSchema.safeParse(event(type, valid)).success, true, type + ': валидная');
     assert.equal(
-      eventPayloads[type].safeParse({ token: 'secret-token-value' }).success,
+      runEventSchema.safeParse(event(type, { ...valid, token: 'secret-token' })).success,
       false,
-      type,
+      type + ': token',
     );
-  assert.equal(runEventSchema.safeParse(event('run.claimed', claimed)).success, false);
+    assert.equal(
+      runEventSchema.safeParse(event(type, { ...valid, arbitrary: 'x' })).success,
+      false,
+      type + ': лишнее поле',
+    );
+  }
+  assert.equal(
+    runEventSchema.safeParse(event('run.claimed', validPayloads['attempt.claimed'])).success,
+    false,
+  );
 });
 
 const resultBase = () => {
@@ -313,7 +319,7 @@ const file = (path: string, text: string) => ({
   bytes: Buffer.byteLength(text),
   content: { encoding: 'utf8' as const, data: text },
 });
-const snapshot = (files = [file('rules.md', 'Правило один.')]): ContextSnapshot => {
+const snapshot = (files: PinnedFile[] = [file('rules.md', 'Правило один.')]): ContextSnapshot => {
   const entry = { id: 'rules', kind: 'files', version: '1', required: true, files, references: [] };
   return {
     apiVersion: API_VERSION,
@@ -339,6 +345,23 @@ test('Контекст: содержимое сверяется с digest, ра�
     () => validateInputs({ graph, policy: example('policy'), context: snapshot() }),
     (e: unknown) => e instanceof HarnessError && /missing/.test(JSON.stringify(e.issues)),
   );
+  const duplicate = snapshot([file('rules.md', 'а'), file('rules.md', 'б')]);
+  assert.match(contextIssues(duplicate).join('\n'), /повтор файла/);
+  const big = 'x'.repeat(CONTEXT_LIMITS.fileBytes + 1);
+  assert.match(contextIssues(snapshot([file('big.md', big)])).join('\n'), /больше предела/);
+  const bytes = Buffer.from([0, 1, 2, 255]);
+  const binary = {
+    path: 'blob.bin',
+    digest: sha256(bytes),
+    bytes: 4,
+    content: { encoding: 'base64' as const, data: bytes.toString('base64') },
+  };
+  assert.deepEqual(contextIssues(snapshot([binary])), [], 'base64 сверяется по байтам');
+  assert.deepEqual([...pinnedBytes(binary)], [0, 1, 2, 255]);
+  assert.throws(
+    () => pinnedBytes({ ...binary, content: { encoding: 'base64', data: 'AAAA' } }),
+    /не совпадает/,
+  );
   graph.orders[0]!.context = ['rules'];
   assert.match(
     String(validateInputs({ graph, policy: example('policy'), context: snapshot() }).contextDigest),
@@ -351,6 +374,14 @@ test('Ревью: approved при блокирующей находке и не�
   const prev = [{ id: findingId('graph-1', blocking), severity: 'blocking' as const }];
   assert.equal(findingId('graph-1', blocking), findingId('graph-1', { ...blocking }));
   assert.notEqual(findingId('graph-1', blocking), findingId('graph-2', blocking));
+  assert.notEqual(
+    findingId('graph-1', blocking),
+    findingId('graph-1', { ...blocking, rule: 'feasibility' }),
+  );
+  assert.notEqual(
+    findingId('graph-1', blocking),
+    findingId('graph-1', { message: 'Другой текст' }),
+  );
   const parse = (v: object) => reviewResultSchema.parse({ summary: 's', findings: [], ...v });
   assert.deepEqual(reviewIssues(parse({ approved: true, findings: [blocking] }), []), [
     'approved при блокирующей находке',
@@ -373,6 +404,27 @@ test('Ревью: approved при блокирующей находке и не�
       prev,
     ),
     [],
+  );
+  assert.deepEqual(
+    reviewIssues(
+      parse({
+        approved: true,
+        previous: transition('withdrawn', 'находка ошибочна: цикл уже отклонён'),
+      }),
+      prev,
+    ),
+    [],
+    'снятая находка не блокирует',
+  );
+  assert.match(
+    reviewIssues(
+      parse({
+        approved: false,
+        previous: [...transition('closed', 'исправлено'), ...transition('open', 'нет')],
+      }),
+      prev,
+    ).join('\n'),
+    /названо дважды/,
   );
   assert.match(
     reviewIssues(

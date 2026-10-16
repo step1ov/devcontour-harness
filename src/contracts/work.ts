@@ -7,6 +7,7 @@ import {
   idSchema,
   relativePathSchema,
   roleIdSchema,
+  trimmedText,
 } from './primitives.ts';
 import { digestOf } from './digest.ts';
 import type { ErrorIssue } from './errors.ts';
@@ -57,9 +58,9 @@ export const workOrderSchema = z.strictObject({
   apiVersion: z.literal(API_VERSION),
   id: idSchema,
   source: sourceRefSchema,
-  title: z.string().trim().min(3).max(180),
-  goal: z.string().trim().min(10).max(12000),
-  acceptance: z.array(z.string().trim().min(3).max(1500)).min(1).max(30),
+  title: trimmedText(3, 180),
+  goal: trimmedText(10, 12000),
+  acceptance: z.array(trimmedText(3, 1500)).min(1).max(30),
   role: roleIdSchema,
   repositoryId: idSchema,
   /** Связанные репозитории поручения уровня workspace; пусто — один репозиторий. */

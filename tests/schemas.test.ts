@@ -110,6 +110,9 @@ const corpus: [Name, string, unknown, boolean][] = [
   ['work-graph', 'writeScope glob', withOrder({ writeScope: ['src/*'] }), false],
   ['work-graph', 'writeScope ./src', withOrder({ writeScope: ['./src'] }), false],
   ['work-graph', 'лишнее поле status', withOrder({ status: 'done' }), false],
+  ['work-graph', 'title из пробелов', withOrder({ title: '   ' }), false],
+  ['work-graph', 'title с пробелом по краю', withOrder({ title: ' Add greeting' }), false],
+  ['work-graph', 'критерий из пробелов', withOrder({ acceptance: ['     '] }), false],
   ['execution-policy', 'пример', policy, true],
   ['execution-policy', 'пустой предел бюджета', { ...policy, budgets: { work: {} } }, false],
   [

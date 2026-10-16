@@ -3,7 +3,12 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { HarnessError, sha256 } from '../src/contracts/index.ts';
+import {
+  HarnessError,
+  executionPolicySchema,
+  policyIssues,
+  sha256,
+} from '../src/contracts/index.ts';
 import { validateInputs } from '../src/validate.ts';
 import { example } from './fixtures.ts';
 
@@ -274,4 +279,14 @@ test('Без мутаций пример проходит: отказы выше
   twoRepos(policy);
   graph.orders[0].consumers = [{ repositoryId: 'web', gates: ['unit'] }];
   assert.equal(validateInputs({ graph, policy }).orders, 1);
+});
+
+test('Репозиторий только с check отклоняет сама политика, а не только связь поручения', () => {
+  const { policy } = inputs();
+  policy.repositories[0].gates[0] = { id: 'unit', kind: 'check', command: ['true'] };
+  const issues = policyIssues(executionPolicySchema.parse(policy));
+  assert.ok(
+    issues.some((i) => /test gate/.test(i.message) && i.path[0] === 'repositories'),
+    JSON.stringify(issues),
+  );
 });
