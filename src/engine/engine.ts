@@ -686,7 +686,10 @@ export class Engine {
         | 'ATTEMPTS_EXHAUSTED'
         | 'APPROVAL_STALE'
         | 'APPROVAL_REQUIRED'
-        | 'BUDGET_EXHAUSTED';
+        | 'BUDGET_EXHAUSTED'
+        | 'REVIEWER_SAME_VENDOR'
+        | 'REVIEWER_MISSING'
+        | 'INVALID_INPUT';
       message: string;
     }[] = [];
     if (view.control().paused)
@@ -742,9 +745,24 @@ export class Engine {
       out.push({ code: 'APPROVAL_STALE', message: 'Постановка изменилась после согласования' });
     const contract = this.contractBlocker(work, view);
     if (contract) out.push({ code: 'APPROVAL_REQUIRED', message: contract });
+    const reviewer = this.reviewerBlocker(work);
+    if (reviewer) out.push(reviewer);
     const refusal = this.host.guards.claimable(work, view);
     if (refusal) out.push(refusal);
     return out;
+  }
+
+  /**
+   * Назначение ревью кода для роли поручения недопустимо политикой (reviewer
+   * того же вендора без явного разрешения, нет reviewer или роли). Такое
+   * поручение не выдаётся и видно блокером; остальная очередь идёт дальше.
+   */
+  private reviewerBlocker(work: WorkState) {
+    const role = this.policy.roles[work.order.role];
+    if (!role)
+      return { code: 'INVALID_INPUT' as const, message: 'Роль не объявлена: ' + work.order.role };
+    const reviewer = selectReviewer(this.policy, 'code', role.writer, work.order.role);
+    return reviewer.ok ? undefined : { code: reviewer.code, message: reviewer.message };
   }
 
   /**
@@ -796,6 +814,8 @@ export class Engine {
           return false;
         // Контракты поручения согласованы ревью своего digest при текущем назначении reviewer.
         if (this.contractBlocker(w, tx)) return false;
+        // Недопустимое назначение reviewer держит только это поручение.
+        if (this.reviewerBlocker(w)) return false;
         return !this.host.guards.claimable(w, tx);
       });
       const work = eligible[0];

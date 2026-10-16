@@ -84,8 +84,10 @@ SHA-256 канонического JSON (`canonicalJson`: ключи по пор
 состава и зависимостей одного согласования; `workGraphDigest` закрепляет
 согласование. Предпосылка — `{id, repositoryId, resultSha, receipt}`,
 `receipt` — `{kind: 'engine', runId}` или `{kind: 'trusted', issuer, digest}`.
-Доверие к `trusted` решает `WorkSource.trusts`; в обоих случаях движок
-проверяет, что result SHA доступен в target ref.
+Доверие к `trusted` решает `WorkSource.trusts`: `Harness.run({ source })`
+спрашивает источник графа (его `id` обязан совпасть с `graph.source.connector`);
+без источника доверенных receipt нет. В обоих случаях движок проверяет, что
+result SHA доступен в target ref.
 
 ### ExecutionPolicy
 
@@ -119,7 +121,10 @@ SHA-256 канонического JSON (`canonicalJson`: ключи по пор
 **Выбор reviewer** — только `selectReviewer(policy, kind, writer, role)`:
 `different-vendor` (умолчание) отклоняет reviewer того же вендора
 (`REVIEWER_SAME_VENDOR`), `same-vendor-allowed` разрешает его. Неявного
-«противоположного runtime» нет.
+«противоположного runtime» нет. Проверка входов отклоняет такую политику
+целиком; хост, ведущий движок без неё, получает блокер
+`REVIEWER_SAME_VENDOR` только у поручений этой роли — остальная очередь
+выдаётся.
 
 ### ContextSnapshot
 

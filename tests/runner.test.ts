@@ -61,7 +61,7 @@ test('T31: cross-vendor пары claude → codex и codex → claude прохо
     assert.equal(a.runtime, writer);
     assert.equal(a.reviewer, reviewer);
   }
-  // Один вендор без явного разрешения: отказ политики и отказ выдачи, а не тихий запуск.
+  // Один вендор без явного разрешения: отказ политики и блокер выдачи, а не тихий запуск.
   const same = setup({
     writer: 'claude',
     reviewer: 'claude',
@@ -71,7 +71,11 @@ test('T31: cross-vendor пары claude → codex и codex → claude прохо
     policyIssues(same.policy).map((i) => i.code),
     ['REVIEWER_SAME_VENDOR'],
   );
-  await assert.rejects(runAll(same), /вендора/);
+  await runAll(same);
+  assert.deepEqual(
+    same.engine.read((v) => same.engine.blockers(v.work('add-greeting')!, v).map((b) => b.code)),
+    ['REVIEWER_SAME_VENDOR'],
+  );
   assert.equal(
     same.engine.read((v) => v.attempts().length),
     0,
@@ -477,4 +481,48 @@ test('Зависший git update-ref приёмки останавливает�
   const work = ctx.engine.read((v) => v.work('add-greeting')!);
   assert.notEqual(work.status, 'done');
   assert.equal(target(ctx), before, 'target неподвижен');
+});
+
+test('S2.3: хост без проверки политики — недопустимое назначение reviewer одной роли держит только её поручение', async () => {
+  // Engine используется хостом напрямую (без validateInputs): блокер поручения
+  // вместо отказа всей выдачи.
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p) => {
+      (p as { roles: Record<string, unknown> }).roles.ops = {
+        writer: { runtime: 'codex' },
+        review: { reviewer: { runtime: 'codex' } },
+      };
+    },
+    graph: (g) => {
+      const orders = (g as { orders: Record<string, unknown>[] }).orders;
+      orders.unshift({
+        ...structuredClone(orders[0]!),
+        id: 'ops-first',
+        source: { connector: 'files', ref: 'ops-first', revision: '1' },
+        title: 'Ops order',
+        role: 'ops',
+      });
+    },
+  });
+  await runAll(ctx);
+  assert.equal(
+    ctx.engine.read((v) => v.work('add-greeting')!.status),
+    'done',
+    'допустимая пара выдана',
+  );
+  const blockers = ctx.engine.read((v) => ctx.engine.blockers(v.work('ops-first')!, v));
+  const blocker = blockers.find((b) => b.code === 'REVIEWER_SAME_VENDOR');
+  assert.ok(blocker, 'блокер назначения reviewer');
+  assert.match(blocker.message, /same-vendor-allowed/);
+  assert.equal(
+    ctx.engine.read((v) => v.attempts('ops-first').length),
+    0,
+    'ops не выдано',
+  );
+  assert.equal(
+    existsSync(ctx.scenarioPath + '.codex.writer.count'),
+    false,
+    'writer ops не вызывался',
+  );
 });

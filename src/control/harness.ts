@@ -25,6 +25,7 @@ import {
   type ExecutionPolicy,
   type ResultEnvelope,
   type ResultSink,
+  type WorkSource,
   type ReviewRecord,
   type RuntimeAdapter,
   type RuntimeName,
@@ -473,6 +474,13 @@ export class Harness {
     author: Author;
     sink?: ResultSink;
     once?: boolean;
+    /**
+     * Источник, из которого прочитан граф. Его решение `trusts` — единственное
+     * основание принять внешнюю предпосылку с receipt `trusted`; доступность
+     * result SHA в target ref проверяется в любом случае. Без источника
+     * доверенных receipt нет.
+     */
+    source?: WorkSource;
   }) {
     // Обязательный контекст — одинаково для библиотеки и CLI: без снимка нужных источников граф не исполняется.
     const needed = [...new Set(input.graph.orders.flatMap((o) => o.context))];
@@ -487,10 +495,20 @@ export class Harness {
       ...(input.context ? { context: input.context } : {}),
     });
     const repos = new Map(this.policy.repositories.map((r) => [r.id, r]));
+    if (input.source && input.source.id !== input.graph.source.connector)
+      throw new HarnessError(
+        'INVALID_INPUT',
+        `Граф из источника ${input.graph.source.connector}, передан источник ${input.source.id}`,
+      );
+    // Решения источника собираются до транзакции регистрации: порт асинхронный.
+    const trusted = new Set<string>();
+    for (const p of input.graph.prerequisites)
+      if (p.receipt.kind === 'trusted' && input.source && (await input.source.trusts(p)))
+        trusted.add(p.id);
     // Атрибуция прежних записей вызовов закрепляется до смены состава графа.
     this.engine.pinLegacyCalls();
     const registered = this.engine.register(input.graph, {
-      trusted: () => false,
+      trusted: (p) => trusted.has(p.id),
       reachable: (p) => {
         const repo = repos.get(p.repositoryId);
         if (!repo) return false;
