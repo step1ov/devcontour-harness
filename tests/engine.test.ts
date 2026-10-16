@@ -2,7 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { HarnessError, digestOf, type ErrorCode } from '../src/contracts/index.ts';
 import type { Engine } from '../src/engine/engine.ts';
-import { engineOf, graphOf, policyOf, ready, review, sha, trustNone } from './engine-fixture.ts';
+import {
+  engineOf,
+  graphOf,
+  policyOf,
+  ready,
+  planReview,
+  sha,
+  trustNone,
+} from './engine-fixture.ts';
 
 const refused = (code: ErrorCode) => (e: unknown) => {
   assert.ok(e instanceof HarnessError, String(e));
@@ -158,7 +166,7 @@ test('T03: изменённая постановка — новая редакц
     refused('APPROVAL_REQUIRED'),
     'ревью прежнего digest не годится',
   );
-  engine.recordReview(review(v2.graph, 2));
+  engine.recordReview(planReview(engine, v2.graph, 2));
   engine.approve('g', 'agent');
   assert.equal(engine.claim('c1')?.workId, 'b');
   assert.equal(
@@ -406,16 +414,53 @@ test('Приёмка требует PASS gates и ревью в обеих фа�
 test('Согласование: в operator mode агент не согласует; отклонённый раунд не согласует', () => {
   const op = engineOf(policyOf((p) => ((p as { approvalMode: string }).approvalMode = 'operator')));
   const g = op.engine.register(graphOf({ a: [] }), trustNone).graph;
-  op.engine.recordReview(review(g, 1));
+  op.engine.recordReview(planReview(op.engine, g, 1));
   assert.throws(() => op.engine.approve('g', 'agent'), refused('APPROVAL_REQUIRED'));
   op.engine.approve('g', 'operator');
   const ag = engineOf();
   const g2 = ag.engine.register(graphOf({ a: [] }), trustNone).graph;
-  ag.engine.recordReview(review(g2, 1, false));
+  ag.engine.recordReview(planReview(ag.engine, g2, 1, false));
   assert.throws(() => ag.engine.approve('g', 'agent'), refused('REVIEW_REJECTED'));
   assert.throws(
-    () => ag.engine.recordReview(review(g2, 3)),
+    () => ag.engine.recordReview(planReview(ag.engine, g2, 3)),
     refused('INVALID_INPUT'),
     'раунды подряд',
   );
+});
+
+test('T04: поздний finish прежнего владельца после передачи попытки отклоняется', () => {
+  const { engine, clock } = engineOf();
+  ready(engine, graphOf({ a: [] }));
+  const a = engine.claim('c1')!;
+  passEvidence(engine, a.id, a.token, sha('a'), sha('b'));
+  clock.now += 31_000;
+  const adopted = engine.adopt(a.id, 'c2');
+  assert.throws(
+    () => engine.finish(a.id, a.token, sha('b')),
+    refused('LEASE_STALE'),
+    'старый токен не принимает',
+  );
+  assert.equal(
+    engine.read((v) => v.work('a')!.status),
+    'integrating',
+  );
+  engine.finish(adopted.id, adopted.token, sha('b'));
+  assert.equal(
+    engine.read((v) => v.work('a')!.status),
+    'done',
+  );
+});
+
+test('T10: повторы ограничены maxAttempts; после исчерпания — только явный сброс с причиной', () => {
+  const { engine } = engineOf(policyOf((p) => ((p as { maxAttempts: number }).maxAttempts = 2)));
+  ready(engine, graphOf({ a: [] }));
+  for (let i = 0; i < 2; i++) {
+    const a = engine.claim('c1')!;
+    engine.fail(a.id, a.token, 'cannot lock ref', { kind: 'stale-base' });
+    if (i === 0) engine.retry('a');
+  }
+  assert.throws(() => engine.retry('a'), refused('ATTEMPTS_EXHAUSTED'));
+  assert.equal(engine.claim('c1'), undefined, 'исчерпанное не выдаётся');
+  engine.retry('a', { reason: 'база обновлена вручную' });
+  assert.equal(engine.claim('c1')?.attempt, 1, 'сброс начинает счёт заново');
 });

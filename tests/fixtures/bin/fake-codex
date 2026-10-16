@@ -36,6 +36,15 @@ if (!step) {
   process.exit(2);
 }
 const prompt = readFileSync(0, 'utf8');
+// Ключи окружения вызова (значения — только у FIXTURE_/PROFILE_): тесты проверяют, что профиль применён.
+writeFileSync(
+  `${scenarioPath}.${runtime}.${role}.${index}.env`,
+  JSON.stringify(
+    Object.keys(process.env)
+      .sort()
+      .map((k) => [k, k.startsWith('PROFILE_') || k.startsWith('FIXTURE_') ? process.env[k] : '-']),
+  ),
+);
 if (step.recordPrompt)
   writeFileSync(
     `${scenarioPath}.${role}.${index}.prompt`,
@@ -79,10 +88,11 @@ if (runtime === 'codex') {
         status: 'completed',
       },
     });
-  out({
-    type: 'turn.completed',
-    usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 0 },
-  });
+  if (started)
+    out({
+      type: 'turn.completed',
+      usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 0 },
+    });
   if (step.exit) process.exit(step.exit);
   writeFileSync(arg('--output-last-message'), step.raw ?? JSON.stringify(step.result));
 } else {

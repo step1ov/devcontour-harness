@@ -2012,6 +2012,60 @@
               "additionalProperties": false
             }
           },
+          "pinned": {
+            "type": "object",
+            "properties": {
+              "graphId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+              },
+              "graphDigest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "orderDigest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "targetRef": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source": {
+                "type": "object",
+                "properties": {
+                  "connector": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  },
+                  "ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  },
+                  "revision": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "connector",
+                  "ref",
+                  "revision"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "graphId",
+              "graphDigest",
+              "orderDigest",
+              "targetRef",
+              "source"
+            ],
+            "additionalProperties": false
+          },
           "engineVersion": {
             "type": "string",
             "minLength": 1

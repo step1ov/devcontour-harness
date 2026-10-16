@@ -9,14 +9,18 @@ import {
   type WorkState,
 } from '../contracts/index.ts';
 
-/** Пустой документ: очередь на паузе оператора, пока её не запустили явно. */
+/**
+ * Пустой документ: очередь ещё не запускалась — пауза без причины. Причина
+ * появляется только у решения (оператор, штатная остановка, отказ, операция):
+ * так первый запуск отличим от паузы, которую поставил человек.
+ */
 export const emptyDocument = (): ExecutionDocument => ({
   stateVersion: STATE_VERSION,
   graphs: [],
   works: [],
   attempts: [],
   verifications: [],
-  control: { paused: true, pauseReason: 'operator' },
+  control: { paused: true },
   sequence: 0,
 });
 

@@ -25,6 +25,7 @@ import { implementationOutputSchema, reviewOutputSchema } from '../agents/schema
 import { unobservedReview } from '../agents/inspect.ts';
 import { runGate } from '../verification/gates.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
+import { REQUIREMENT_GATE, assertRequirements } from '../verification/requirements.ts';
 import { BlockedError, classifyFailure } from './classify.ts';
 import { TaskFailure } from './failure.ts';
 import type { Engine } from './engine.ts';
@@ -55,7 +56,8 @@ const ordered = (gates: GatePolicy[], ids: string[]) => {
   const out: GatePolicy[] = [];
   const seen = new Set<string>();
   const visit = (id: string) => {
-    if (seen.has(id)) return;
+    // Псевдо-gate (актуальность требований) проверяется отдельно, а не командой.
+    if (seen.has(id) || !byId.has(id)) return;
     seen.add(id);
     for (const dep of byId.get(id)?.dependsOn ?? []) if (ids.includes(dep)) visit(dep);
     out.push(byId.get(id)!);
@@ -125,12 +127,80 @@ export class Runner {
     return this.jobs.size;
   }
 
+  /**
+   * Актуальность требований на фазе: источник на HEAD репозитория и на
+   * проверенном SHA совпадает с закреплённым; evidence псевдо-gate
+   * `requirement-source` записывается только при совпадении.
+   */
+  private requirements(
+    attempt: AttemptState,
+    work: WorkState,
+    repoPath: string,
+    cwd: string,
+    sha: string,
+    phase: 'candidate' | 'integration',
+  ) {
+    if (!work.order.requirements.length) return;
+    assertRequirements(work.order, repoPath);
+    assertRequirements(work.order, cwd, sha);
+    this.engine.evidence(attempt.id, attempt.token, {
+      kind: 'test',
+      phase,
+      sha,
+      gate: REQUIREMENT_GATE,
+      passed: true,
+      command: ['harness', 'requirements-check'],
+      exitCode: 0,
+      log: '',
+      digest: sha256(JSON.stringify(work.order.requirements)),
+      summary: 'Закреплённые требования совпадают с источником на HEAD и на проверенном SHA',
+    });
+  }
+
+  private leaseTimer?: ReturnType<typeof setInterval>;
+  /**
+   * Роль controller продлевается, пока у процесса есть работа; утрата роли
+   * прерывает его попытки — новый controller не делит очередь с прежним.
+   */
+  private keepLead() {
+    if (this.leaseTimer) return;
+    this.leaseTimer = setInterval(
+      () => {
+        if (this.engine.lead(this.owner)) return;
+        for (const job of this.jobs.values()) job.controller.abort();
+      },
+      Math.max(500, this.policy.leaseMs / 3),
+    );
+    this.leaseTimer.unref();
+  }
+  private stopLead() {
+    if (this.leaseTimer) clearInterval(this.leaseTimer);
+    this.leaseTimer = undefined;
+  }
+
+  /** Освободить роль controller: процесс больше не ведёт очередь. */
+  release() {
+    this.stopLead();
+    this.engine.release(this.owner);
+  }
+
+  /** Один шаг очереди до конца: выдать свободные слоты и довести выданное, без новых выдач. */
+  async step() {
+    await this.tick();
+    try {
+      await Promise.all([...this.jobs.values()].map((j) => j.promise));
+    } finally {
+      this.stopLead();
+    }
+  }
+
   /** Один шаг: роль controller, recovery, выдача свободных слотов. */
   async tick() {
     if (!this.engine.lead(this.owner)) {
       for (const job of this.jobs.values()) job.controller.abort();
       return;
     }
+    this.keepLead();
     await this.recover();
     for (const [id, job] of this.jobs)
       if (this.engine.read((v) => v.attempt(id)?.status) !== 'active') job.controller.abort();
@@ -145,10 +215,14 @@ export class Runner {
 
   /** Вести очередь, пока есть работа, которую можно выдать или довести. */
   async drain() {
-    while (true) {
-      await this.tick();
-      if (!this.jobs.size) break;
-      await Promise.all([...this.jobs.values()].map((j) => j.promise));
+    try {
+      while (true) {
+        await this.tick();
+        if (!this.jobs.size) break;
+        await Promise.all([...this.jobs.values()].map((j) => j.promise));
+      }
+    } finally {
+      this.stopLead();
     }
   }
 
@@ -157,7 +231,7 @@ export class Runner {
     this.engine.pause('shutdown');
     for (const job of this.jobs.values()) job.controller.abort();
     await Promise.all([...this.jobs.values()].map((j) => j.promise));
-    this.engine.release(this.owner);
+    this.release();
   }
 
   /**
@@ -175,6 +249,12 @@ export class Runner {
       if (!a.integrationSha) continue;
       const repo = this.repo(a.repositoryId);
       try {
+        // Восстанавливается только попытка под текущей политикой и требованиями.
+        const work = this.engine.read((v) => v.work(a.workId)!);
+        const policy = this.engine.read((v) => this.engine.host.basis.policyDigest(work, v));
+        if (a.policyDigest !== policy)
+          throw new Error('Политика изменилась; попытка под прежней не принимается');
+        if (work.order.requirements.length) assertRequirements(work.order, this.repoPath(repo));
         await git(
           this.repoPath(repo),
           'merge-base',
@@ -191,10 +271,34 @@ export class Runner {
     this.engine.expire();
   }
 
-  private environment(attempt: AttemptState, phase: string, cwd: string) {
+  /**
+   * Окружение фазы: политика, репозиторий и — для вызова runtime — профиль
+   * инструментов его назначения. Недостающий секрет — отказ окружения до
+   * вызова, а не запуск без него.
+   */
+  private environment(attempt: AttemptState, phase: string, cwd: string, profile?: string) {
+    const repo = this.repo(attempt.repositoryId);
+    const tools = profile ? this.policy.toolProfiles[profile] : undefined;
+    if (profile && !tools) throw new BlockedError('Неизвестный профиль инструментов: ' + profile);
+    try {
+      return this.environmentOf(attempt, phase, cwd, [
+        this.policy.environment,
+        repo.environment,
+        tools?.environment,
+      ]);
+    } catch (error) {
+      throw new BlockedError(error instanceof Error ? error.message : String(error));
+    }
+  }
+  private environmentOf(
+    attempt: AttemptState,
+    phase: string,
+    cwd: string,
+    profiles: Parameters<typeof executionEnvironment>[0],
+  ) {
     const repo = this.repo(attempt.repositoryId);
     return executionEnvironment(
-      [this.policy.environment, repo.environment],
+      profiles,
       {
         DEVCONTOUR_REPOSITORY_ID: repo.id,
         DEVCONTOUR_RUN_ID: attempt.id,
@@ -216,8 +320,7 @@ export class Runner {
       cwd: string;
       prompt: string;
       dir: string;
-      env: NodeJS.ProcessEnv;
-      secrets: readonly string[];
+      phase: string;
     },
     signal: AbortSignal,
   ): Promise<RuntimeResponse> {
@@ -235,6 +338,8 @@ export class Runner {
             : {}),
         }
       : role.writer;
+    // Окружение вызова — с профилем инструментов его назначения.
+    const execution = this.environment(input.attempt, input.phase, input.cwd, binding.toolProfile);
     const boundary = this.boundary();
     const response = await adapter.invoke(
       {
@@ -254,10 +359,10 @@ export class Runner {
         },
         timeoutMs: this.policy.runTimeoutMs,
         env: Object.fromEntries(
-          Object.entries(input.env).filter((e): e is [string, string] => e[1] !== undefined),
+          Object.entries(execution.env).filter((e): e is [string, string] => e[1] !== undefined),
         ),
         artifactDir: input.dir,
-        secrets: [...input.secrets],
+        secrets: [...(execution.redact.secrets ?? [])],
       },
       signal,
     );
@@ -299,11 +404,16 @@ export class Runner {
   }
 
   /** Область записи кандидата: защищённые пути, пустой результат, выход за область поручения и роли. */
-  private async assertScope(work: WorkState, repo: Repo, cwd: string) {
+  private async assertScope(work: WorkState, repo: Repo, cwd: string, context?: ContextSnapshot) {
     const changed = (await git(cwd, 'diff', '--cached', '--no-renames', '--name-only', '-z'))
       .split('\0')
       .filter(Boolean);
-    const protectedList = [...repo.protectedPaths, ...repo.generatedPaths];
+    // Закреплённый контекст из этого репозитория — норма, а не результат работы:
+    // исполнитель, правящий его, подгонял бы свои же правила.
+    const pinnedContext = (context?.sources ?? [])
+      .filter((source) => source.repositoryId === repo.id)
+      .flatMap((source) => [...source.files, ...source.references].map((f) => f.path));
+    const protectedList = [...repo.protectedPaths, ...repo.generatedPaths, ...pinnedContext];
     const forbidden = changed.filter((p) => within(p, protectedList));
     if (forbidden.length)
       throw new TaskFailure(
@@ -393,6 +503,15 @@ export class Runner {
                 digest: s.hostDigest ?? s.digest,
               })),
             });
+          // Обязательный контекст поручения должен быть закреплён до работы:
+          // без него исполнение не начинается (отказ окружения).
+          const missing = work.order.context.filter(
+            (id) => !context?.sources.some((s) => s.id === id),
+          );
+          if (missing.length)
+            throw new BlockedError('Обязательный контекст не закреплён: ' + missing.join(', '));
+          // Постановка по устаревшему источнику требований не исполняется.
+          if (work.order.requirements.length) assertRequirements(work.order, repoPath);
           const base = await git(repoPath, 'rev-parse', repo.targetRef);
           await mkdir(join(this.options.stateDir, 'worktrees'), { recursive: true });
           await git(
@@ -410,7 +529,7 @@ export class Runner {
           const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
           const execution = this.environment(attempt, 'candidate', cwd);
           const candidate = await withEnvironment(
-            repo.lifecycle,
+            repo.lifecycle ?? this.policy.lifecycle,
             cwd,
             join(artifacts, 'candidate', 'environment'),
             execution,
@@ -433,8 +552,7 @@ export class Runner {
                   attempt,
                   cwd,
                   dir,
-                  env: execution.env,
-                  secrets: execution.redact.secrets ?? [],
+                  phase: 'candidate',
                   prompt: prompt({
                     work,
                     attempt,
@@ -458,7 +576,7 @@ export class Runner {
                   'Исполнитель изменил HEAD; интеграцией владеет harness',
                 );
               await git(cwd, 'add', '-A');
-              await this.assertScope(work, repo, cwd);
+              await this.assertScope(work, repo, cwd, context);
               await git(
                 cwd,
                 '-c',
@@ -474,6 +592,7 @@ export class Runner {
               this.engine.phase(attempt.id, attempt.token, 'verifying', { candidateSha: sha });
               for (const gate of gates)
                 await this.gate(attempt, cwd, sha, 'candidate', gate, artifacts, signal, execution);
+              this.requirements(attempt, work, repoPath, cwd, sha, 'candidate');
               rearm();
               this.engine.phase(attempt.id, attempt.token, 'reviewing');
               await this.review(
@@ -604,8 +723,7 @@ export class Runner {
         attempt,
         cwd,
         dir,
-        env: execution.env,
-        secrets: execution.redact.secrets ?? [],
+        phase,
         prompt: prompt({
           work,
           attempt: { ...attempt, baseSha: base },
@@ -702,7 +820,7 @@ export class Runner {
     const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
     const execution = this.environment(attempt, 'integration', cwd);
     await withEnvironment(
-      repo.lifecycle,
+      repo.lifecycle ?? this.policy.lifecycle,
       cwd,
       join(artifacts, 'integration', 'environment'),
       execution,
@@ -717,6 +835,7 @@ export class Runner {
         );
         for (const gate of gates)
           await this.gate(attempt, cwd, sha, 'integration', gate, artifacts, signal, execution);
+        this.requirements(attempt, work, repoPath, cwd, sha, 'integration');
         await this.review(
           attempt,
           work,

@@ -128,6 +128,10 @@ export async function runAll(ctx: ReturnType<typeof setup>) {
       ...review(graph, ctx.engine.reviews('plan', graph.id).length + 1),
       authorRuntime: ctx.policy.roles.developer!.writer.runtime,
       reviewerRuntime: ctx.policy.review.plan.reviewer.runtime,
+      reviewerBinding: ctx.engine.reviewerBinding(
+        'plan',
+        ctx.policy.roles.developer!.writer.runtime,
+      )!,
     });
   ctx.engine.approve(graph.id, 'agent');
   ctx.engine.resume();

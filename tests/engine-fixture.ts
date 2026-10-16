@@ -79,12 +79,24 @@ export const review = (
   artifact: 'reviews/' + round + '.json',
 });
 
+/** Раунд ревью плана при текущем назначении reviewer движка (автор claude). */
+export const planReview = (
+  e: Engine | { engine: Engine },
+  graph: { id: string; digest: string },
+  round: number,
+  approved = true,
+): ReviewRecord => {
+  const engine = e instanceof Engine ? e : e.engine;
+  const binding = engine.reviewerBinding('plan', 'claude');
+  return { ...review(graph, round, approved), ...(binding ? { reviewerBinding: binding } : {}) };
+};
+
 export const trustNone = { trusted: () => false, reachable: () => true };
 
 /** Зарегистрировать, провести ревью, согласовать и запустить очередь. */
 export function ready(e: Engine, graph: WorkGraph, owner = 'c1') {
   const { graph: state } = e.register(graph, trustNone);
-  e.recordReview(review(state, e.reviews('plan', state.id).length + 1));
+  e.recordReview(planReview(e, state, e.reviews('plan', state.id).length + 1));
   e.approve(state.id, 'agent');
   e.lead(owner);
   e.resume();

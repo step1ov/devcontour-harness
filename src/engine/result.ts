@@ -1,15 +1,13 @@
 import {
   API_VERSION,
+  HarnessError,
   STATE_VERSION,
-  digestOf,
   runResultSchema,
-  workGraphDigest,
+  vendorOf,
   type AttemptState,
   type ErrorCode,
   type EvidenceRecord,
-  type GraphState,
   type RunResult,
-  type WorkState,
 } from '../contracts/index.ts';
 
 const stopCode = (attempt: AttemptState): ErrorCode => {
@@ -37,7 +35,7 @@ const stopCode = (attempt: AttemptState): ErrorCode => {
   }
 };
 
-const ref = (e: EvidenceRecord, sameVendor: boolean, reviewer: AttemptState['reviewer']) => ({
+const ref = (e: EvidenceRecord, attempt: AttemptState) => ({
   id: e.id,
   kind:
     e.kind === 'review'
@@ -52,56 +50,47 @@ const ref = (e: EvidenceRecord, sameVendor: boolean, reviewer: AttemptState['rev
   digest: e.digest,
   summary: e.summary.slice(0, 4000),
   ...(e.consumer ? { consumer: e.consumer } : {}),
-  ...(e.kind === 'review' ? { reviewer: { runtime: reviewer, sameVendor } } : {}),
+  ...(e.kind === 'review'
+    ? {
+        reviewer: {
+          runtime: attempt.reviewer,
+          sameVendor: vendorOf(attempt.reviewer) === vendorOf(attempt.runtime),
+        },
+      }
+    : {}),
 });
 
-/** Общая часть результата: входы, проверенное, evidence, находки — из записанного состояния. */
-function common(
-  graph: GraphState,
-  work: WorkState,
-  attempt: AttemptState,
-  targetRef: string,
-  harnessVersion: string,
-) {
-  const sameVendor =
-    (attempt.runtime === 'codex'
-      ? 'openai'
-      : attempt.runtime === 'claude'
-        ? 'anthropic'
-        : 'fixture') ===
-    (attempt.reviewer === 'codex'
-      ? 'openai'
-      : attempt.reviewer === 'claude'
-        ? 'anthropic'
-        : 'fixture');
-  const repo = graph.graph.orders.find((o) => o.id === work.id)!;
-  const evidence = attempt.evidence
-    .filter((e) => e.sha === attempt.candidateSha || e.sha === attempt.integrationSha)
-    .map((e) => ref(e, sameVendor, attempt.reviewer));
-  const findings = attempt.evidence
-    .filter((e) => e.kind === 'review' && !e.passed)
-    .flatMap((e) => e.findings ?? [])
-    .map((f) => ({
-      severity: f.severity,
-      message: f.message.slice(0, 4000) || '—',
-      ...(f.path !== undefined ? { path: f.path } : {}),
-      ...(f.line !== undefined ? { line: f.line } : {}),
-    }));
-  const value = {
+/**
+ * Машинный результат завершённой попытки. Строится только из записей самой
+ * попытки и оснований, закреплённых за ней при выдаче (`pinned`): новая
+ * редакция графа, изменение или удаление поручения не переписывают
+ * завершённую историю. `accepted` — только успешная попытка: её integration
+ * SHA — result SHA. Недостающие сведения не выдумываются.
+ */
+export function runResult(attempt: AttemptState, harnessVersion: string): RunResult {
+  if (!attempt.pinned)
+    throw new HarnessError(
+      'NOT_FOUND',
+      `Попытка ${attempt.id} выдана без закреплённых оснований; результат не строится`,
+    );
+  if (attempt.status === 'active')
+    throw new HarnessError('NOT_READY', 'Попытка ещё идёт: ' + attempt.id);
+  const pinned = attempt.pinned;
+  const base = {
     apiVersion: API_VERSION,
-    workOrderId: work.id,
-    graphId: graph.id,
-    source: work.order.source,
+    workOrderId: attempt.workId,
+    graphId: pinned.graphId,
+    source: pinned.source,
     runId: attempt.id,
     attempt: attempt.attempt,
-    repositoryId: repo.repositoryId,
-    targetRef,
+    repositoryId: attempt.repositoryId,
+    targetRef: pinned.targetRef,
     inputs: {
       harnessVersion: attempt.engineVersion ?? harnessVersion,
       ...(attempt.consumerVersion ? { consumerVersion: attempt.consumerVersion } : {}),
       stateVersion: STATE_VERSION,
-      workOrderDigest: digestOf(work.order),
-      graphDigest: workGraphDigest(graph.graph),
+      workOrderDigest: pinned.orderDigest,
+      graphDigest: pinned.graphDigest,
       policyDigest: attempt.policyDigest,
       ...(attempt.contextSnapshot ? { contextDigest: attempt.contextSnapshot } : {}),
       ...(attempt.checks ? { checks: attempt.checks.effective } : {}),
@@ -116,61 +105,52 @@ function common(
       freshness: attempt.dependencyFreshness ?? [],
       consumers: [],
     },
-    evidence,
-    findings,
+    evidence: attempt.evidence
+      .filter((e) => e.sha === attempt.candidateSha || e.sha === attempt.integrationSha)
+      .map((e) => ref(e, attempt)),
+    findings: attempt.evidence
+      .filter((e) => e.kind === 'review' && !e.passed)
+      .flatMap((e) => e.findings ?? [])
+      .map((f) => ({
+        severity: f.severity,
+        message: f.message.slice(0, 4000) || '—',
+        ...(f.path !== undefined ? { path: f.path } : {}),
+        ...(f.line !== undefined ? { line: f.line } : {}),
+      })),
     limitations: [] as string[],
-    finishedAt: attempt.finishedAt ?? new Date().toISOString(),
+    finishedAt: attempt.finishedAt ?? attempt.startedAt,
   };
-  return value;
-}
-
-/**
- * Машинный результат завершённой попытки поручения. `accepted` — только если
- * попытка успешна и поручение `done` с её integration SHA. Поля берутся из
- * записанного состояния; недостающие не выдумываются.
- */
-export function runResult(
-  graph: GraphState,
-  work: WorkState,
-  attempt: AttemptState,
-  targetRef: string,
-  harnessVersion: string,
-): RunResult {
-  const base = common(graph, work, attempt, targetRef, harnessVersion);
-  const accepted =
-    attempt.status === 'succeeded' &&
-    work.status === 'done' &&
-    work.resultSha === attempt.integrationSha;
-  const value = accepted
-    ? {
-        ...base,
-        outcome: 'accepted' as const,
-        shas: {
-          base: attempt.baseSha!,
-          candidate: attempt.candidateSha!,
-          integration: attempt.integrationSha!,
-          result: work.resultSha!,
-        },
-      }
-    : {
-        ...base,
-        outcome:
-          attempt.status === 'cancelled'
-            ? ('cancelled' as const)
-            : attempt.blocked
-              ? ('blocked' as const)
-              : attempt.status === 'expired'
-                ? ('stopped' as const)
-                : ('rejected' as const),
-        shas: {
-          ...(attempt.baseSha ? { base: attempt.baseSha } : {}),
-          ...(attempt.candidateSha ? { candidate: attempt.candidateSha } : {}),
-          ...(attempt.integrationSha ? { integration: attempt.integrationSha } : {}),
-        },
-        stopReason: {
-          code: stopCode(attempt),
-          message: (attempt.error ?? 'Попытка не завершена').slice(0, 4000),
-        },
-      };
+  const value =
+    attempt.status === 'succeeded'
+      ? {
+          ...base,
+          outcome: 'accepted' as const,
+          shas: {
+            base: attempt.baseSha!,
+            candidate: attempt.candidateSha!,
+            integration: attempt.integrationSha!,
+            result: attempt.integrationSha!,
+          },
+        }
+      : {
+          ...base,
+          outcome:
+            attempt.status === 'cancelled'
+              ? ('cancelled' as const)
+              : attempt.blocked
+                ? ('blocked' as const)
+                : attempt.status === 'expired'
+                  ? ('stopped' as const)
+                  : ('rejected' as const),
+          shas: {
+            ...(attempt.baseSha ? { base: attempt.baseSha } : {}),
+            ...(attempt.candidateSha ? { candidate: attempt.candidateSha } : {}),
+            ...(attempt.integrationSha ? { integration: attempt.integrationSha } : {}),
+          },
+          stopReason: {
+            code: stopCode(attempt),
+            message: (attempt.error ?? 'Попытка не завершена').slice(0, 4000),
+          },
+        };
   return runResultSchema.parse(value);
 }

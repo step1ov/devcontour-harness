@@ -125,15 +125,24 @@ export class Harness {
     const digest = input.kind === 'plan' ? workGraphDigest(input.graph) : digestOf(input.contract);
     const rounds = this.engine.reviews(input.kind, subject);
     const last = rounds.at(-1);
-    if (last && last.digest === digest && last.authorRuntime === input.author && last.approved)
+    // Назначение reviewer по текущей политике: прежний раунд подтверждает предмет
+    // только при том же назначении; недопустимый автор — отказ до вызова.
+    const choice = selectReviewer(this.policy, input.kind, { runtime: input.author });
+    if (!choice.ok) throw new HarnessError(choice.code, choice.message);
+    const binding = this.engine.reviewerBinding(input.kind, input.author)!;
+    if (
+      last &&
+      last.digest === digest &&
+      last.authorRuntime === input.author &&
+      last.approved &&
+      last.reviewerBinding === binding
+    )
       return last;
     if (rounds.length >= this.policy.maxAttempts * 2)
       throw new HarnessError(
         'ATTEMPTS_EXHAUSTED',
         `Исчерпаны раунды ревью ${input.kind} ${subject}`,
       );
-    const choice = selectReviewer(this.policy, input.kind, { runtime: input.author });
-    if (!choice.ok) throw new HarnessError(choice.code, choice.message);
     const adapter = this.adapters[choice.reviewer.runtime];
     if (!adapter)
       throw new HarnessError(
@@ -146,11 +155,23 @@ export class Harness {
     await mkdir(dir, { recursive: true });
     const repo = this.policy.repositories[0]!;
     const cwd = this.repoPath(repo.path);
-    const execution = executionEnvironment(
-      [this.policy.environment, repo.environment],
-      {},
-      this.options.environment ?? process.env,
-    );
+    // Окружение reviewer — с профилем инструментов его назначения; недостающий секрет — отказ до вызова.
+    const tools = choice.reviewer.toolProfile
+      ? this.policy.toolProfiles[choice.reviewer.toolProfile]
+      : undefined;
+    let execution: ReturnType<typeof executionEnvironment>;
+    try {
+      execution = executionEnvironment(
+        [this.policy.environment, repo.environment, tools?.environment],
+        {},
+        this.options.environment ?? process.env,
+      );
+    } catch (error) {
+      throw new HarnessError(
+        'RUNTIME_UNAVAILABLE',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
     const prompt = [
       input.kind === 'plan'
         ? 'You independently review a plan: a graph of executable work orders. Check that each order is complete, testable, scoped and that dependencies are right. Do not edit files.'
@@ -237,6 +258,7 @@ export class Harness {
       reviewerRuntime: choice.reviewer.runtime,
       ...(response.model ? { reviewerModel: response.model } : {}),
       sameVendor: choice.sameVendor,
+      reviewerBinding: binding,
       findings,
       artifact: join(dir, 'review.json'),
     };
@@ -281,6 +303,13 @@ export class Harness {
     sink?: ResultSink;
     once?: boolean;
   }) {
+    // Обязательный контекст — одинаково для библиотеки и CLI: без снимка нужных источников граф не исполняется.
+    const needed = [...new Set(input.graph.orders.flatMap((o) => o.context))];
+    if (needed.length && !input.context)
+      throw new HarnessError(
+        'NOT_READY',
+        'Поручения требуют контекст, снимок не передан: ' + needed.join(', '),
+      );
     validateInputs({
       graph: input.graph,
       policy: this.policy,
@@ -344,14 +373,16 @@ export class Harness {
         );
     }
     await this.runner.init();
-    if (
-      this.engine.read(
-        (v) => v.control().paused && v.control().pauseReason === 'operator' && !v.attempts().length,
-      )
-    )
+    // Очередь, которую ещё не запускали, — пауза без причины: первый run её запускает.
+    // Пауза, поставленная человеком или остановкой, остаётся до явного resume.
+    if (this.engine.read((v) => v.control().paused && !v.control().pauseReason))
       this.engine.resume();
-    if (input.once) await this.runner.tick();
-    else await this.runner.drain();
+    try {
+      if (input.once) await this.runner.step();
+      else await this.runner.drain();
+    } finally {
+      this.runner.release();
+    }
     if (input.sink) await this.deliverAll(graph.id, input.sink);
     return {
       graphId: graph.id,
@@ -400,22 +431,20 @@ export class Harness {
     return { events, next: events.at(-1)?.seq ?? after };
   }
 
-  /** Результат последней завершённой попытки поручения и состояние его доставки. */
-  result(workId: string): ResultEnvelope {
+  /** Результат завершённой попытки поручения (последней или `runId`) и состояние его доставки. */
+  result(workId: string, runId?: string): ResultEnvelope {
     return this.engine.read((v) => {
       const work = v.work(workId);
       if (!work) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
       const attempt = v
         .attempts(workId)
-        .filter((a) => a.status !== 'active')
+        .filter((a) => a.status !== 'active' && (!runId || a.id === runId))
         .at(-1);
       if (!attempt)
         throw new HarnessError('NOT_FOUND', 'У поручения нет завершённой попытки: ' + workId);
-      const graph = v.graph(work.graphId)!;
-      const repo = this.policy.repositories.find((r) => r.id === work.order.repositoryId)!;
       return {
         apiVersion: API_VERSION,
-        result: runResult(graph, work, attempt, repo.targetRef, HARNESS_VERSION),
+        result: runResult(attempt, HARNESS_VERSION),
         delivery: v
           .locals('delivery', WORKSPACE_OWNER)
           .map((d) => d.value)

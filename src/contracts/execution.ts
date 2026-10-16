@@ -374,6 +374,24 @@ export const attemptStateSchema = z.strictObject({
       }),
     )
     .optional(),
+  /**
+   * Основания, под которыми выдана попытка: graph и поручение (digest),
+   * target ref, редакция источника. Результат попытки строится из них, а не
+   * из текущего графа: новая редакция не переписывает завершённую историю.
+   */
+  pinned: z
+    .strictObject({
+      graphId: idSchema,
+      graphDigest: digestSchema,
+      orderDigest: digestSchema,
+      targetRef: z.string().min(1),
+      source: z.strictObject({
+        connector: idSchema,
+        ref: z.string().min(1).max(300),
+        revision: z.string().min(1).max(200),
+      }),
+    })
+    .optional(),
   /** Версия движка, выдавшего попытку: входит в основание reuse и recovery. Нет у прежних попыток. */
   engineVersion: z.string().min(1).optional(),
   /** Версия потребителя, через который выдана попытка; не заменяет engineVersion. */

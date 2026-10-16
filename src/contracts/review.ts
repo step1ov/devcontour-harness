@@ -135,6 +135,12 @@ export const reviewRecordSchema = z.strictObject({
   reviewerRuntime: runtimeNameSchema,
   reviewerModel: z.string().optional(),
   sameVendor: z.boolean(),
+  /**
+   * Digest назначения reviewer (runtime, модель, effort, профиль, правило
+   * вендора) по политике на момент раунда. Раунд подтверждает предмет только
+   * при том же назначении; смена reviewer политикой требует нового раунда.
+   */
+  reviewerBinding: digestSchema.optional(),
   /** Все находки предмета на момент раунда: новые и прежние с их статусами. */
   findings: z.array(reviewFindingSchema),
   artifact: z.string().max(1000),

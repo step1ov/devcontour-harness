@@ -8,6 +8,7 @@ import {
   selectReviewer,
   workGraphDigest,
   type AttemptState,
+  type Author,
   type EvidenceRecord,
   type ExecutionHost,
   type ExecutionPolicy,
@@ -25,6 +26,8 @@ import {
 } from '../contracts/index.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import { failureFingerprint, repairPolicy } from './failure.ts';
+import { unprovenReason } from '../verification/proof.ts';
+import { REQUIREMENT_GATE } from '../verification/requirements.ts';
 
 /** Префикс причины неудавшегося продления: первая причина не затирается следствиями. */
 export const HEARTBEAT_FAILED = 'Продление владения не удалось';
@@ -222,6 +225,41 @@ export class Engine {
   }
 
   /**
+   * Digest назначения reviewer вида `kind` для автора по текущей политике:
+   * runtime, модель, effort, профиль и правило вендора. Раунд ревью
+   * подтверждает предмет только при том же назначении.
+   */
+  reviewerBinding(kind: 'plan' | 'contract' | 'code', author: Author): string | undefined {
+    const choice = selectReviewer(this.policy, kind, { runtime: author });
+    return choice.ok
+      ? digestOf({ reviewer: choice.reviewer, vendor: this.policy.review[kind].vendor })
+      : undefined;
+  }
+
+  /**
+   * Контракты поручения: последний раунд ревью каждого контракта — его digest,
+   * одобрен, при текущем назначении reviewer. Иначе поручение не выдаётся и не
+   * принимается.
+   */
+  contractBlocker(work: WorkState, view: ExecutionView): string | undefined {
+    for (const ref of work.order.contracts) {
+      const last = view
+        .locals('reviews', WORKSPACE_OWNER)
+        .map((r) => r.value)
+        .filter((r) => r.kind === 'contract' && r.subject === ref.id)
+        .sort((a, b) => a.round - b.round)
+        .at(-1);
+      if (!last) return `Контракт ${ref.id} не проходил технического ревью`;
+      if (last.digest !== ref.digest)
+        return `Контракт ${ref.id}: последнее ревью относится к другому digest`;
+      if (!last.approved) return `Контракт ${ref.id}: последний раунд ревью не одобрил его`;
+      if (last.reviewerBinding !== this.reviewerBinding('contract', last.authorRuntime))
+        return `Контракт ${ref.id}: ревью проведено при другом назначении reviewer`;
+    }
+    return undefined;
+  }
+
+  /**
    * Согласование графа. Привязано к digest проверенного предложения: в
    * режиме `agent` нужен одобренный последний раунд ревью этого digest, в
    * режиме `operator` — проведённое ревью этого digest и решение оператора.
@@ -246,6 +284,11 @@ export class Engine {
         throw new HarnessError('APPROVAL_REQUIRED', 'Нет ревью плана для текущего digest графа');
       if (actor === 'agent' && !last.approved)
         throw new HarnessError('REVIEW_REJECTED', 'Последний раунд ревью плана не одобрил граф');
+      if (last.reviewerBinding !== this.reviewerBinding('plan', last.authorRuntime))
+        throw new HarnessError(
+          'APPROVAL_REQUIRED',
+          'Ревью плана проведено при другом назначении reviewer; нужен новый раунд',
+        );
       const policy = digestOf(this.policy);
       if (graph.approval?.digest === graph.digest && graph.policyDigest === policy)
         return { graph, changed: false };
@@ -425,6 +468,8 @@ export class Engine {
       out.push({ code: 'NOT_READY', message: 'Удержано операцией ' + work.hold.operation });
     if (work.status === 'ready' && work.approvedDigest !== this.host.basis.orderDigest(work, view))
       out.push({ code: 'APPROVAL_STALE', message: 'Постановка изменилась после согласования' });
+    const contract = this.contractBlocker(work, view);
+    if (contract) out.push({ code: 'APPROVAL_REQUIRED', message: contract });
     const refusal = this.host.guards.claimable(work, view);
     if (refusal) out.push(refusal);
     return out;
@@ -457,6 +502,8 @@ export class Engine {
         const external = new Set(graph.graph.prerequisites.map((p) => p.id));
         if (!w.order.dependsOn.every((d) => external.has(d) || tx.work(d)?.status === 'done'))
           return false;
+        // Контракты поручения согласованы ревью своего digest при текущем назначении reviewer.
+        if (this.contractBlocker(w, tx)) return false;
         return !this.host.guards.claimable(w, tx);
       });
       const work = eligible[0];
@@ -507,7 +554,17 @@ export class Engine {
         phase: 'running',
         startedAt: iso(at),
         leaseUntil: at + this.policy.leaseMs,
-        requiredGates: expandGateRefs(repo, work.order.gates),
+        requiredGates: [
+          ...expandGateRefs(repo, work.order.gates),
+          ...(work.order.requirements.length ? [REQUIREMENT_GATE] : []),
+        ],
+        pinned: {
+          graphId: work.graphId,
+          graphDigest: tx.graph(work.graphId)!.digest,
+          orderDigest: digestOf(work.order),
+          targetRef: repo.targetRef,
+          source: work.order.source,
+        },
         dispatch: {
           policy: 'fifo-ready-v1',
           at: iso(at),
@@ -716,6 +773,10 @@ export class Engine {
           !last('review', phase, phase === 'candidate' ? a.candidateSha : sha, 'independent-review')
         )
           throw new HarnessError('REVIEW_REJECTED', `Нет независимого ревью: ${phase}`);
+      const unproven = unprovenReason(w.order.requirements, a.evidence, sha);
+      if (unproven) throw new HarnessError('GATE_FAILED', unproven);
+      const contract = this.contractBlocker(w, tx);
+      if (contract) throw new HarnessError('APPROVAL_STALE', contract);
       const refusal = this.host.guards.beforeAccept(w, a, tx);
       if (refusal) throw new HarnessError(refusal.code, refusal.message);
       const at = iso(this.now());

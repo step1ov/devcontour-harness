@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   cpSync,
+  mkdirSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -192,4 +193,60 @@ test('T33/T34: старый результат не закрывает нову�
     ['delivery.pending', 'delivery.conflict'],
     'никаких попыток и интеграции',
   );
+});
+
+test('S1-R1-08: run --once доводит выданный шаг до конца и не оставляет активной попытки', () => {
+  const p = project();
+  const once = p.harness(
+    'run',
+    '--graph',
+    'graph.json',
+    '--policy',
+    'policy.json',
+    '--state',
+    p.state,
+    '--once',
+  );
+  assert.equal(once.status, 0, once.stderr);
+  const status = p.harness('status', '--state', p.state);
+  assert.equal(status.json.data.works[0].status, 'done');
+  assert.equal(status.json.data.works[0].activeRunId, undefined);
+  assert.equal(status.json.data.controller, undefined, 'роль controller освобождена');
+});
+
+test('T33: файловый контекст каталога графа закрепляется за попыткой и попадает в запрос исполнителю', () => {
+  const p = project();
+  const graph = JSON.parse(readFileSync(join(p.app, 'graph.json'), 'utf8')) as {
+    orders: { context: string[] }[];
+  };
+  graph.orders[0]!.context = ['norms'];
+  writeFileSync(join(p.app, 'graph.json'), JSON.stringify(graph));
+  mkdirSync(join(p.app, 'context', 'norms'), { recursive: true });
+  writeFileSync(join(p.app, 'context', 'norms', 'rules.md'), 'Правило: экспорт через exports.\n');
+  const scenarioPath = join(p.root, 'scenario.json');
+  const scenario = JSON.parse(readFileSync(scenarioPath, 'utf8')) as {
+    writer: Record<string, unknown>;
+  };
+  scenario.writer.recordPrompt = true;
+  writeFileSync(scenarioPath, JSON.stringify(scenario));
+  p.git('add', '-A');
+  p.git('commit', '-qm', 'context');
+  const run = p.harness(
+    'run',
+    '--graph',
+    'graph.json',
+    '--policy',
+    'policy.json',
+    '--state',
+    p.state,
+  );
+  assert.equal(run.status, 0, run.stderr);
+  const prompt = readFileSync(scenarioPath + '.writer.0.prompt', 'utf8');
+  assert.match(
+    prompt,
+    /Правило: экспорт через exports\./,
+    'содержимое закреплённого файла в запросе',
+  );
+  const result = p.harness('result', '--state', p.state, '--work', 'add-greeting');
+  assert.match(String(result.json.data.result.inputs.contextDigest), /^[a-f0-9]{64}$/);
 });

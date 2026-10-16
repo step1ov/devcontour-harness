@@ -64,6 +64,10 @@
     "sameVendor": {
       "type": "boolean"
     },
+    "reviewerBinding": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
     "findings": {
       "type": "array",
       "items": {

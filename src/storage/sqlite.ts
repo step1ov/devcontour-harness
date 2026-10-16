@@ -24,7 +24,7 @@ import {
 import { DocumentView, emptyDocument } from './document.ts';
 
 /** Сколько событий одной транзакции допускается (договор курсора адаптеров). */
-const MAX_EVENTS_PER_TRANSACTION = 16;
+const MAX_EVENTS_PER_TRANSACTION = 1024;
 
 interface Frame {
   doc: ExecutionDocument;

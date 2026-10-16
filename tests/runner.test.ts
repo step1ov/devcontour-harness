@@ -155,9 +155,9 @@ test('T09: кандидат зелёный, интеграция красная 
   await ctx.runner.init();
   const marker = ctx.repo.git('rev-parse', 'HEAD');
   ctx.repo.git('checkout', '-q', 'main');
-  const { trustNone, review } = await import('./engine-fixture.ts');
+  const { trustNone, planReview } = await import('./engine-fixture.ts');
   const { graph } = ctx.engine.register(ctx.graph, trustNone);
-  ctx.engine.recordReview(review(graph, 1));
+  ctx.engine.recordReview(planReview(ctx.engine, graph, 1));
   ctx.engine.approve(graph.id, 'agent');
   ctx.engine.resume();
   // Между выдачей и интеграцией принятая ветка продвигается маркером (кандидат его не видит).
@@ -196,9 +196,9 @@ test('T10: чужое продвижение target ref перед CAS — не�
   scenario.reviewer[1] = { ...approve(), files: {} };
   fs.writeFileSync(path, JSON.stringify(scenario));
   await ctx.runner.init();
-  const { trustNone, review } = await import('./engine-fixture.ts');
+  const { trustNone, planReview } = await import('./engine-fixture.ts');
   const { graph } = ctx.engine.register(ctx.graph, trustNone);
-  ctx.engine.recordReview(review(graph, 1));
+  ctx.engine.recordReview(planReview(ctx.engine, graph, 1));
   ctx.engine.approve(graph.id, 'agent');
   ctx.engine.resume();
   ctx.engine.lead('runner-1');
@@ -268,9 +268,9 @@ test('T14: штатная остановка посреди попытки — �
     scenario: { writer: [{ ...implement(), sleepMs: 4000 }, implement()], reviewer: approve() },
   });
   await ctx.runner.init();
-  const { trustNone, review } = await import('./engine-fixture.ts');
+  const { trustNone, planReview } = await import('./engine-fixture.ts');
   const { graph } = ctx.engine.register(ctx.graph, trustNone);
-  ctx.engine.recordReview(review(graph, 1));
+  ctx.engine.recordReview(planReview(ctx.engine, graph, 1));
   ctx.engine.approve(graph.id, 'agent');
   ctx.engine.resume();
   await ctx.runner.tick();
@@ -304,9 +304,9 @@ test('T10: merge conflict с продвинутой принятой ветко�
     policy: (p) => ((p as { maxAttempts: number }).maxAttempts = 1),
   });
   await ctx.runner.init();
-  const { trustNone, review } = await import('./engine-fixture.ts');
+  const { trustNone, planReview } = await import('./engine-fixture.ts');
   const { graph } = ctx.engine.register(ctx.graph, trustNone);
-  ctx.engine.recordReview(review(graph, 1));
+  ctx.engine.recordReview(planReview(ctx.engine, graph, 1));
   ctx.engine.approve(graph.id, 'agent');
   ctx.engine.resume();
   ctx.engine.lead('runner-1');
