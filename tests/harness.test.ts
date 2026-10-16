@@ -800,3 +800,110 @@ test('T08/T09: ревьюер недоступен — отказ окружен
   assert.equal(target(red), before);
   h.close();
 });
+
+test('T28: повторное ревью плана — каждая прежняя находка получает состояние с основанием; история не стирается', async () => {
+  const blocking = {
+    severity: 'blocking',
+    message: 'Нет критерия для ошибки ввода',
+    path: null,
+    line: null,
+    rule: 'ac-missing',
+    consequence: null,
+    evidence: null,
+  };
+  const note = {
+    severity: 'note',
+    message: 'Заголовок можно сократить',
+    path: null,
+    line: null,
+    rule: null,
+    consequence: null,
+    evidence: null,
+  };
+  const reject = (findings: unknown[], previous: unknown[] = []) => ({
+    result: {
+      approved: false,
+      summary: 'Есть замечания',
+      findings,
+      discoveries: [],
+      execution: { commands: [], noCommandsReason: 'Ревью плана' },
+      previous,
+    },
+  });
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const subject = ctx.graph.id;
+  const { findingId } = await import('../src/contracts/index.ts');
+  const idB = findingId(subject, blocking);
+  const idN = findingId(subject, note);
+  const steps = [
+    reject([blocking, note]),
+    // Раунд 2 молчит о прежней блокирующей находке и «переименовывает» её — не согласует.
+    {
+      result: {
+        ...approve().result,
+        findings: [{ ...blocking, message: 'Нет критерия для ошибки ввода (уточнено)' }],
+        previous: [{ id: idN, status: 'withdrawn', basis: 'не относится к плану' }],
+      },
+    },
+    // Раунд 3 называет состояние каждой открытой находки с основанием.
+    {
+      result: {
+        ...approve().result,
+        previous: [
+          { id: idB, status: 'closed', basis: 'добавлен критерий: greet("") возвращает ошибку' },
+          {
+            id: findingId(subject, {
+              rule: 'ac-missing',
+              message: 'Нет критерия для ошибки ввода (уточнено)',
+            }),
+            status: 'closed',
+            basis: 'то же исправление',
+          },
+        ],
+      },
+    },
+  ];
+  writeFileSync(ctx.scenarioPath, JSON.stringify({ writer: implement(), reviewer: steps }));
+  const h = ctx.open();
+  const r1 = await h.review({ kind: 'plan', graph: ctx.graph, author: 'claude' });
+  assert.equal(r1.approved, false);
+  const fixed = graphWith(ctx.graph, (o, g) => {
+    g.source.revision = '2';
+    o.source.revision = '2';
+    o.acceptance = [...o.acceptance, 'greet("") возвращает ошибку'];
+  });
+  const r2 = await h.review({ kind: 'plan', graph: fixed, author: 'claude' });
+  assert.equal(r2.round, 2);
+  assert.equal(r2.approved, false, 'прежняя блокирующая находка без состояния');
+  assert.match(r2.summary, new RegExp('Не названо состояние прежней находки ' + idB));
+  assert.equal(r2.findings.find((f) => f.id === idN)?.status, 'withdrawn');
+  assert.equal(r2.findings.find((f) => f.id === idN)?.basis, 'не относится к плану');
+  assert.equal(r2.findings.find((f) => f.id === idB)?.status, 'open', 'не закрыта молчанием');
+  assert.equal(
+    h.engine.read((v) => v.graph(subject)?.approval),
+    undefined,
+    'неодобренный раунд не согласует граф',
+  );
+  const r3 = await h.review({ kind: 'plan', graph: fixed, author: 'claude' });
+  assert.equal(r3.round, 3);
+  assert.equal(r3.approved, true, r3.summary);
+  const closed = r3.findings.find((f) => f.id === idB)!;
+  assert.equal(closed.status, 'closed');
+  assert.equal(closed.openedIn, 1);
+  assert.equal(closed.changedIn, 3);
+  assert.match(closed.basis!, /добавлен критерий/);
+  assert.equal(
+    r3.findings.find((f) => f.id === idN)?.changedIn,
+    2,
+    'история прежнего раунда сохранена',
+  );
+  assert.deepEqual(
+    h.engine.reviews('plan', subject).map((r) => [r.round, r.approved]),
+    [
+      [1, false],
+      [2, false],
+      [3, true],
+    ],
+  );
+  h.close();
+});
