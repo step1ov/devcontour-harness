@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access --
+ * Фикстура правит сырой JSON примера до разбора схемой.
+ */
 import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -76,7 +79,7 @@ export function setup(options: {
   const state = realpathSync(mkdtempSync(join(tmpdir(), 'harness-state-')));
   const scenarioPath = join(state, '..', 'scenario-' + state.split('-').at(-1) + '.json');
   writeFileSync(scenarioPath, JSON.stringify(options.scenario));
-  const raw = structuredClone(example('policy')) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const raw = structuredClone(example('policy')) as Record<string, any>;
   raw.repositories[0].path = r.dir;
   raw.repositories[0].gates[0].command = [process.execPath, 'test/run.js'];
   raw.roles.developer.writer.runtime = options.writer ?? 'claude';
@@ -108,7 +111,7 @@ export function setup(options: {
     },
     owner: 'runner-1',
   });
-  const graphRaw = structuredClone(example('graph')) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const graphRaw = structuredClone(example('graph')) as Record<string, any>;
   graphRaw.orders[0].writeScope = ['src'];
   options.graph?.(graphRaw);
   const graph: WorkGraph = workGraphSchema.parse(graphRaw);
