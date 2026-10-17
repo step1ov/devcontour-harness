@@ -70,7 +70,9 @@ export function runtimeVersion(executable: string, env?: NodeJS.ProcessEnv) {
   if (!versions.has(key))
     versions.set(
       key,
-      command([executable, '--version'], tmpdir(), { timeoutMs: 5000, env })
+      // Предел с запасом: версия спрашивается один раз на процесс, а под
+      // нагрузкой запуск интерпретатора runtime занимает секунды.
+      command([executable, '--version'], tmpdir(), { timeoutMs: 15_000, env })
         .then((r) => (r.code ? null : (r.stdout.trim().split('\n')[0] ?? '').slice(0, 200) || null))
         .catch(() => null),
     );
