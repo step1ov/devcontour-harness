@@ -56,39 +56,84 @@ const toml = (value: unknown): string => {
   return JSON.stringify(value);
 };
 /**
- * MCP-серверы прогона codex: только сервер проверок reviewer, если он дан.
- * Глобальная конфигурация оператора и её серверы в прогон не попадают.
+ * MCP-серверы прогона codex: серверы профиля инструментов назначения и сервер
+ * проверок reviewer, если он дан. Глобальная конфигурация оператора и её
+ * серверы в прогон не попадают.
  */
-export function codexServers(probe?: ProbeServer) {
-  return probe
-    ? `mcp_servers=${toml({
-        [probeServer]: {
+export function codexServers(probe?: ProbeServer, profile?: ToolProfile) {
+  const servers = {
+    ...Object.fromEntries(
+      Object.entries(profile?.mcp ?? {}).map(([id, s]) => [
+        id,
+        {
           enabled: true,
           required: true,
-          enabled_tools: [probeTool],
-          command: probe.command,
-          args: probe.args,
-          env_vars: probe.env,
-          // По умолчанию codex обрывает вызов инструмента через минуту —
-          // раньше, чем controller остановил бы команду сам.
-          tool_timeout_sec: Math.ceil(probeCallMs(probe) / 1000),
+          enabled_tools: s.tools,
+          ...(s.transport === 'stdio'
+            ? { command: s.command, args: s.args, env_vars: s.env }
+            : { url: s.url, bearer_token_env_var: s.bearerTokenEnv }),
         },
-      })}`
-    : 'mcp_servers={}';
+      ]),
+    ),
+    ...(probe
+      ? {
+          [probeServer]: {
+            enabled: true,
+            required: true,
+            enabled_tools: [probeTool],
+            command: probe.command,
+            args: probe.args,
+            env_vars: probe.env,
+            // По умолчанию codex обрывает вызов инструмента через минуту —
+            // раньше, чем controller остановил бы команду сам.
+            tool_timeout_sec: Math.ceil(probeCallMs(probe) / 1000),
+          },
+        }
+      : {}),
+  };
+  return Object.keys(servers).length ? `mcp_servers=${toml(servers)}` : 'mcp_servers={}';
 }
-/** MCP-конфигурация claude с сервером проверок reviewer. */
-export function claudeMcp(probe: ProbeServer) {
+/** MCP-конфигурация claude: серверы профиля и сервер проверок reviewer. */
+export function claudeMcp(probe?: ProbeServer, profile?: ToolProfile) {
   return {
     mcpServers: {
-      [probeServer]: {
-        type: 'stdio',
-        command: probe.command,
-        args: probe.args,
-        env: Object.fromEntries(probe.env.map((key) => [key, '${' + key + '}'])),
-      },
+      ...Object.fromEntries(
+        Object.entries(profile?.mcp ?? {}).map(([id, s]) => [
+          id,
+          s.transport === 'stdio'
+            ? {
+                type: 'stdio',
+                command: s.command,
+                args: s.args,
+                env: Object.fromEntries(s.env.map((key) => [key, '${' + key + '}'])),
+              }
+            : {
+                type: 'http',
+                url: s.url,
+                ...(s.bearerTokenEnv
+                  ? { headers: { Authorization: 'Bearer ${' + s.bearerTokenEnv + '}' } }
+                  : {}),
+              },
+        ]),
+      ),
+      ...(probe
+        ? {
+            [probeServer]: {
+              type: 'stdio',
+              command: probe.command,
+              args: probe.args,
+              env: Object.fromEntries(probe.env.map((key) => [key, '${' + key + '}'])),
+            },
+          }
+        : {}),
     },
   };
 }
+/** Разрешения claude на инструменты MCP-серверов профиля. */
+const mcpRules = (profile?: ToolProfile) =>
+  Object.entries(profile?.mcp ?? {}).flatMap(([id, s]) =>
+    s.tools.map((tool) => `mcp__${id}__${tool}`),
+  );
 
 function codexTools(profile: ToolProfile | undefined, review: boolean, probe?: ProbeServer) {
   if (!profile)
@@ -102,7 +147,7 @@ function codexTools(profile: ToolProfile | undefined, review: boolean, probe?: P
   return [
     '--ignore-user-config',
     '-c',
-    codexServers(probe),
+    codexServers(probe, profile),
     '-c',
     `features.shell_tool=${profile.codexShell}`,
     '-c',
@@ -160,8 +205,9 @@ export function cliAdapter(
       // Сервер проверок — только reviewer кода; writer его не получает.
       const probe = review ? r.probe : undefined;
       const mcpPath = join(dir, 'mcp.json');
-      if (runtime === 'claude' && probe)
-        await writeFile(mcpPath, JSON.stringify(claudeMcp(probe), null, 2));
+      const mcp = !!probe || Object.keys(profile?.mcp ?? {}).length > 0;
+      if (runtime === 'claude' && mcp)
+        await writeFile(mcpPath, JSON.stringify(claudeMcp(probe, profile), null, 2));
       const policy: Isolation = isolation({
         write: r.sandbox.writable,
         controller: r.sandbox.denied,
@@ -217,11 +263,12 @@ export function cliAdapter(
                     ].join(','),
                   ]
                 : []),
-              ...(profile?.claudeAllowedTools.length || probe
+              ...(profile?.claudeAllowedTools.length || mcp
                 ? [
                     '--allowedTools',
                     [
                       ...(profile?.claudeAllowedTools ?? []),
+                      ...mcpRules(profile),
                       ...(probe ? [`mcp__${probeServer}__${probeTool}`] : []),
                     ]
                       .filter(
@@ -261,7 +308,7 @@ export function cliAdapter(
                     }
                   : {}),
               }),
-              ...(probe ? ['--mcp-config', mcpPath] : []),
+              ...(mcp ? ['--mcp-config', mcpPath] : []),
               '--setting-sources',
               '',
               '--strict-mcp-config',

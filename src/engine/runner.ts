@@ -4,6 +4,9 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import {
+  roleBinding,
+  codeReview,
+  mcpEnvironment,
   HarnessError,
   digestOf,
   contextDigest,
@@ -98,7 +101,7 @@ const ordered = (gates: GatePolicy[], ids: string[]) => {
 };
 
 const within = (path: string, prefixes: string[]) =>
-  prefixes.some((p) => path === p || path.startsWith(p.endsWith('/') ? p : p + '/'));
+  prefixes.some((p) => p === '.' || path === p || path.startsWith(p.endsWith('/') ? p : p + '/'));
 
 /**
  * Исполнитель очереди. Один действующий controller; попытка проходит
@@ -363,6 +366,8 @@ export class Runner {
         this.policy.environment,
         repo.environment,
         tools?.environment,
+        // MCP-серверы профиля получают свои переменные по имени.
+        ...(tools ? [mcpEnvironment(tools)] : []),
       ]);
     } catch (error) {
       throw new BlockedError(error instanceof Error ? error.message : String(error));
@@ -411,7 +416,9 @@ export class Runner {
     signal: AbortSignal,
   ): Promise<RuntimeResponse & { redact: Redactor }> {
     const review = input.task !== 'implement';
-    const role = this.policy.roles[(await this.workOf(input.attempt)).order.role]!;
+    const work = await this.workOf(input.attempt);
+    const role = roleBinding(this.policy, work.order.role, work.order.repositoryId)!;
+    const rule = codeReview(this.policy, work.order.role, work.order.repositoryId);
     const binding = review
       ? {
           runtime: input.attempt.reviewer,
@@ -419,9 +426,7 @@ export class Runner {
           ...(input.attempt.reviewerEffort
             ? { effort: input.attempt.reviewerEffort as 'high' }
             : {}),
-          ...((role.review ?? this.policy.review.code).reviewer.toolProfile
-            ? { toolProfile: (role.review ?? this.policy.review.code).reviewer.toolProfile }
-            : {}),
+          ...(rule.reviewer.toolProfile ? { toolProfile: rule.reviewer.toolProfile } : {}),
         }
       : role.writer;
     // Окружение вызова — с профилем инструментов его назначения.
@@ -549,7 +554,7 @@ export class Runner {
         'empty-result',
         'Изменений нет: поручение отчиталось о выполнении пустым коммитом',
       );
-    const role = this.policy.roles[work.order.role]?.writePaths;
+    const role = roleBinding(this.policy, work.order.role, work.order.repositoryId)?.writePaths;
     const outside = changed.filter(
       (p) => !within(p, work.order.writeScope) || (role && !within(p, role)),
     );
@@ -1307,8 +1312,8 @@ export class Runner {
     dir: string,
     phase: string,
   ) {
-    const role = this.policy.roles[work.order.role]!;
-    const name = (role.review ?? this.policy.review.code).reviewer.toolProfile;
+    const name = codeReview(this.policy, work.order.role, work.order.repositoryId).reviewer
+      .toolProfile;
     const profile = name ? this.policy.toolProfiles[name] : undefined;
     // Fixture runtime команд не запускает: инструмента ему не нужно.
     if (attempt.reviewer === 'fixture' || !reviewerRunsChecks(attempt.reviewer, profile))

@@ -1,4 +1,5 @@
 import {
+  roleBinding,
   HarnessError,
   digestOf,
   expandGateRefs,
@@ -574,12 +575,18 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
   // Ревью: writer — роли поручения в политике получателя; reviewer решающих
   // записей обеих фаз — тот, кого политика назначает этому writer, и правило
   // вендора соблюдено (тот же вендор — только явным разрешением).
-  const role = policy.roles[order.role];
+  const role = roleBinding(policy, order.role, order.repositoryId);
   if (!role) return [`роль ${order.role} не описана в политике получателя`];
   const writer = result.inputs.writer?.runtime ?? role.writer.runtime;
   if (writer !== role.writer.runtime)
     problems.push(`writer ${writer} не назначен ролью ${order.role} в политике получателя`);
-  const choice = selectReviewer(policy as ExecutionPolicy, 'code', { runtime: writer }, order.role);
+  const choice = selectReviewer(
+    policy,
+    'code',
+    { runtime: writer },
+    order.role,
+    order.repositoryId,
+  );
   if (!choice.ok) problems.push(`ревью результата: ${choice.message}`);
   for (const phase of ['candidate', 'integration'] as const) {
     const decisive = result.evidence.findLast(

@@ -315,12 +315,26 @@ export interface BudgetScopes {
   ): Pick<CallRecord, 'workId' | 'groupId' | 'workIds'>;
 }
 
+/**
+ * Согласование контрактов хостом. Хост, который сам ведёт согласование
+ * контрактов (у DevContour — утверждённая редакция контракта с её историей
+ * ревью), подтверждает, что редакция этого digest согласована: `null` —
+ * согласована, иначе причина. Без порта согласованием служит одобренный
+ * последний раунд технического ревью этого digest (`reviews`) при текущем
+ * назначении reviewer. Записи ревью из сведений хоста не выдумываются.
+ */
+export interface ContractApprovals {
+  approved(ref: { id: string; digest: string }, view: ExecutionView): HostRefusal;
+}
+
 /** Хост, внутри которого работает движок: хранилище, основания, условия и области бюджетов. */
 export interface ExecutionHost {
   store: ExecutionStore;
   basis: BasisProvider;
   guards: HostGuards;
   budgets: BudgetScopes;
+  /** Согласование контрактов хоста; нет — по раундам технического ревью. */
+  contracts?: ContractApprovals;
   /** Версия потребителя (например, DevContour); записывается в попытку рядом с версией движка. */
   consumerVersion?: string;
 }

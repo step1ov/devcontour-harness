@@ -73,6 +73,8 @@ export {
   pinnedCorpus,
   propertyProofProblem,
   resultProblems,
+  type ReceiverContext,
+  type ReceiverPolicy,
 } from './verification/acceptance.ts';
 export { runSpike, spikeOf, spikesOf } from './verification/spike.ts';
 export { writeSelfCheck, type SelfCheckPlan } from './verification/self-check.ts';

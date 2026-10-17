@@ -19,6 +19,175 @@
             "type": "string",
             "pattern": "^[A-Za-z0-9_-]{1,80}$"
           },
+          "roles": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]{1,30}$"
+            },
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "writer": {
+                  "type": "object",
+                  "properties": {
+                    "runtime": {
+                      "type": "string",
+                      "enum": [
+                        "codex",
+                        "claude",
+                        "fixture"
+                      ]
+                    },
+                    "model": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "effort": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh"
+                      ]
+                    },
+                    "toolProfile": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                    }
+                  },
+                  "required": [
+                    "runtime"
+                  ],
+                  "additionalProperties": false
+                },
+                "writePaths": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                  }
+                },
+                "review": {
+                  "type": "object",
+                  "properties": {
+                    "reviewer": {
+                      "type": "object",
+                      "properties": {
+                        "runtime": {
+                          "type": "string",
+                          "enum": [
+                            "codex",
+                            "claude",
+                            "fixture"
+                          ]
+                        },
+                        "model": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "effort": {
+                          "type": "string",
+                          "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh"
+                          ]
+                        },
+                        "toolProfile": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                        }
+                      },
+                      "required": [
+                        "runtime"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "vendor": {
+                      "default": "different-vendor",
+                      "type": "string",
+                      "enum": [
+                        "different-vendor",
+                        "same-vendor-allowed"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "reviewer"
+                  ],
+                  "additionalProperties": false
+                },
+                "requiresContract": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "writer"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "review": {
+            "type": "object",
+            "properties": {
+              "reviewer": {
+                "type": "object",
+                "properties": {
+                  "runtime": {
+                    "type": "string",
+                    "enum": [
+                      "codex",
+                      "claude",
+                      "fixture"
+                    ]
+                  },
+                  "model": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "effort": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh"
+                    ]
+                  },
+                  "toolProfile": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  }
+                },
+                "required": [
+                  "runtime"
+                ],
+                "additionalProperties": false
+              },
+              "vendor": {
+                "default": "different-vendor",
+                "type": "string",
+                "enum": [
+                  "different-vendor",
+                  "same-vendor-allowed"
+                ]
+              }
+            },
+            "required": [
+              "reviewer"
+            ],
+            "additionalProperties": false
+          },
           "path": {
             "type": "string",
             "minLength": 1
@@ -1217,6 +1386,66 @@
               }
             },
             "additionalProperties": false
+          },
+          "mcp": {
+            "default": {},
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$"
+            },
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "transport": {
+                  "type": "string",
+                  "enum": [
+                    "stdio",
+                    "http"
+                  ]
+                },
+                "command": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "args": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "env": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(?!HARNESS_|DEVCONTOUR_)[A-Za-z_][A-Za-z0-9_]*$"
+                  }
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                },
+                "bearerTokenEnv": {
+                  "type": "string",
+                  "pattern": "^(?!HARNESS_|DEVCONTOUR_)[A-Za-z_][A-Za-z0-9_]*$"
+                },
+                "tools": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]+$"
+                  }
+                }
+              },
+              "required": [
+                "transport",
+                "tools"
+              ],
+              "additionalProperties": false
+            }
           },
           "claudeTools": {
             "type": "array",

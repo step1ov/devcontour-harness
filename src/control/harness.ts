@@ -4,6 +4,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import {
+  mcpEnvironment,
   executionDigest,
   API_VERSION,
   HarnessError,
@@ -297,7 +298,12 @@ export class Harness {
     let execution: ReturnType<typeof executionEnvironment>;
     try {
       execution = executionEnvironment(
-        [this.policy.environment, repo.environment, tools?.environment],
+        [
+          this.policy.environment,
+          repo.environment,
+          tools?.environment,
+          ...(tools ? [mcpEnvironment(tools)] : []),
+        ],
         {},
         this.options.environment ?? process.env,
       );

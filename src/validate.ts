@@ -1,5 +1,6 @@
 import type { z } from 'zod';
 import {
+  roleBinding,
   HarnessError,
   executionPolicySchema,
   expandGateRefs,
@@ -35,7 +36,7 @@ const parse = <S extends z.ZodType>(schema: S, value: unknown, root: string): z.
 
 /** Путь внутри одного из префиксов (как `withinPaths` DevContour). */
 export const withinPaths = (path: string, prefixes: string[]) =>
-  prefixes.some((p) => path === p || path.startsWith(p.endsWith('/') ? p : p + '/'));
+  prefixes.some((p) => p === '.' || path === p || path.startsWith(p.endsWith('/') ? p : p + '/'));
 
 /**
  * Связь поручений с политикой — проверки DevContour `validateTaskContext`,
@@ -84,7 +85,7 @@ export function crossIssues(graph: WorkGraph, policy: ExecutionPolicy): CodedIss
       );
       return;
     }
-    const role = policy.roles[order.role];
+    const role = roleBinding(policy, order.role, order.repositoryId);
     if (!role) add('INVALID_INPUT', at('role'), 'Роль не объявлена политикой: ' + order.role);
     for (const r of order.resources ?? [])
       if (!resources.has(r)) add('INVALID_INPUT', at('resources'), 'Неизвестный ресурс: ' + r);

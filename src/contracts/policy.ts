@@ -85,25 +85,6 @@ export const workspaceGateSchema = z.discriminatedUnion('kind', [
   }),
 ]);
 
-export const repositoryPolicySchema = z.strictObject({
-  id: idSchema,
-  /** Путь к checkout репозитория; относительный — от каталога политики. */
-  path: z.string().min(1),
-  kind: z.enum(['product', 'library']).default('product'),
-  targetRef: targetRefSchema,
-  dependsOn: z.array(idSchema).default([]),
-  gates: z.array(gateSchema).min(1),
-  gateGroups: gateGroupsSchema.optional(),
-  protectedPaths: z.array(z.string().min(1)).default(['.github/', '.githooks/']),
-  generatedPaths: z.array(relativePathSchema).default([]),
-  environment: environmentSchema.optional(),
-  lifecycle: lifecycleSchema.optional(),
-  prepare: z.array(stepSchema).default([]),
-  dependencyBuild: z.array(stepSchema).default([]),
-  dependencyArtifacts: z.array(relativePathSchema).default([]),
-  preflight: z.array(stepSchema).default([]),
-});
-
 export const runtimeBindingSchema = z.strictObject({
   runtime: runtimeNameSchema,
   model: z.string().min(1).max(200).optional(),
@@ -134,15 +115,69 @@ export const roleBindingSchema = z.strictObject({
   requiresContract: z.boolean().default(false),
 });
 
+export const repositoryPolicySchema = z.strictObject({
+  id: idSchema,
+  /**
+   * Роли, переопределённые репозиторием: привязка роли с этим ID для
+   * поручений репозитория целиком заменяет привязку `roles` политики.
+   */
+  roles: z.record(roleIdSchema, roleBindingSchema).optional(),
+  /** Ревью кода репозитория по умолчанию: важнее `review.code`, уступает правилу роли. */
+  review: reviewRuleSchema.optional(),
+  /** Путь к checkout репозитория; относительный — от каталога политики. */
+  path: z.string().min(1),
+  kind: z.enum(['product', 'library']).default('product'),
+  targetRef: targetRefSchema,
+  dependsOn: z.array(idSchema).default([]),
+  gates: z.array(gateSchema).min(1),
+  gateGroups: gateGroupsSchema.optional(),
+  protectedPaths: z.array(z.string().min(1)).default(['.github/', '.githooks/']),
+  generatedPaths: z.array(relativePathSchema).default([]),
+  environment: environmentSchema.optional(),
+  lifecycle: lifecycleSchema.optional(),
+  prepare: z.array(stepSchema).default([]),
+  dependencyBuild: z.array(stepSchema).default([]),
+  dependencyArtifacts: z.array(relativePathSchema).default([]),
+  preflight: z.array(stepSchema).default([]),
+});
+
 /** Предел расходов (USD) и/или времени вызовов; хотя бы одно поле — выражено вариантами. */
 const budgetLimitSchema = z.union([
   z.strictObject({ usd: z.number().positive(), timeMs: z.number().int().positive().optional() }),
   z.strictObject({ usd: z.number().positive().optional(), timeMs: z.number().int().positive() }),
 ]);
 
+/**
+ * MCP-сервер профиля инструментов: stdio-команда либо http-адрес. Учётные
+ * данные — только именами переменных окружения (`env`, `bearerTokenEnv`):
+ * значения в политику не входят и в URL не допускаются.
+ */
+export const mcpServerSchema = z
+  .strictObject({
+    transport: z.enum(['stdio', 'http']),
+    command: z.string().min(1).optional(),
+    args: z.array(z.string()).default([]),
+    env: z.array(envKey).default([]),
+    url: z.url().optional(),
+    bearerTokenEnv: envKey.optional(),
+    tools: z.array(z.string().regex(/^[A-Za-z0-9_-]+$/)).min(1),
+  })
+  .superRefine((s, ctx) => {
+    if (s.transport === 'stdio' ? !s.command || s.url : !s.url || s.command)
+      ctx.addIssue({ code: 'custom', message: 'MCP требует command для stdio либо url для http' });
+    if (s.url && (new URL(s.url).username || new URL(s.url).password))
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Учётные данные MCP передаются через bearerTokenEnv',
+      });
+  });
+export type McpServer = z.infer<typeof mcpServerSchema>;
+
 export const toolProfileSchema = z.strictObject({
   runtime: z.enum(['codex', 'claude']),
   environment: environmentSchema.optional(),
+  /** MCP-серверы вызова: только перечисленные инструменты, без глобальной конфигурации CLI. */
+  mcp: z.record(z.string().regex(/^[A-Za-z0-9_-]+$/), mcpServerSchema).default({}),
   claudeTools: z.array(z.enum(['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'])).optional(),
   claudeAllowedTools: z.array(z.string().min(1)).default([]),
   codexShell: z.boolean().default(true),
@@ -250,21 +285,46 @@ export const executionDigest = (policy: ExecutionPolicy) =>
 
 export type ReviewKind = 'code' | 'plan' | 'contract';
 
+type RoleBinding = z.infer<typeof roleBindingSchema>;
+/**
+ * Привязка роли для поручения репозитория: роль, переопределённая
+ * репозиторием, целиком заменяет роль политики. Единственная точка поиска
+ * роли: правила записи, writer и ревью не расходятся между собой.
+ */
+export function roleBinding(
+  policy: Pick<ExecutionPolicy, 'roles' | 'repositories'>,
+  role: string,
+  repositoryId?: string,
+): RoleBinding | undefined {
+  const repo = repositoryId ? policy.repositories.find((r) => r.id === repositoryId) : undefined;
+  return repo?.roles?.[role] ?? policy.roles[role];
+}
+/** Правило ревью кода роли: своё у роли, иначе репозитория, иначе политики. */
+export function codeReview(
+  policy: Pick<ExecutionPolicy, 'roles' | 'review' | 'repositories'>,
+  role: string,
+  repositoryId?: string,
+): ReviewRule {
+  const repo = repositoryId ? policy.repositories.find((r) => r.id === repositoryId) : undefined;
+  return roleBinding(policy, role, repositoryId)?.review ?? repo?.review ?? policy.review.code;
+}
+
 /**
  * Единственная точка выбора reviewer. Возвращает назначение или отказ с
  * кодом; другого пути назначить reviewer у движка нет.
  */
 export function selectReviewer(
-  policy: ExecutionPolicy,
+  policy: Pick<ExecutionPolicy, 'roles' | 'review' | 'repositories'>,
   kind: ReviewKind,
   writer: { runtime: Author },
   role?: string,
+  repositoryId?: string,
 ):
   | { ok: true; reviewer: RuntimeBinding; sameVendor: boolean }
   | { ok: false; code: 'REVIEWER_SAME_VENDOR' | 'REVIEWER_MISSING'; message: string } {
   const rule =
     kind === 'code' && role !== undefined
-      ? (policy.roles[role]?.review ?? policy.review.code)
+      ? codeReview(policy, role, repositoryId)
       : policy.review[kind];
   if (!rule) return { ok: false, code: 'REVIEWER_MISSING', message: 'Не задан reviewer: ' + kind };
   const sameVendor = vendorOf(rule.reviewer.runtime) === vendorOf(writer.runtime);
@@ -439,6 +499,27 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
         ? [[['roles', role, 'review', 'reviewer'], b.review.reviewer] as [string[], RuntimeBinding]]
         : []),
     ]),
+    ...policy.repositories.flatMap((repo, i): [string[], RuntimeBinding][] => [
+      ...(repo.review
+        ? [
+            [['repositories', String(i), 'review', 'reviewer'], repo.review.reviewer] as [
+              string[],
+              RuntimeBinding,
+            ],
+          ]
+        : []),
+      ...Object.entries(repo.roles ?? {}).flatMap(([role, b]): [string[], RuntimeBinding][] => [
+        [['repositories', String(i), 'roles', role, 'writer'], b.writer],
+        ...(b.review
+          ? [
+              [
+                ['repositories', String(i), 'roles', role, 'review', 'reviewer'],
+                b.review.reviewer,
+              ] as [string[], RuntimeBinding],
+            ]
+          : []),
+      ]),
+    ]),
   ];
   for (const [path, b] of bindings) {
     if (b.effort && b.runtime !== 'codex')
@@ -455,6 +536,12 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
     const choice = selectReviewer(policy, 'code', binding.writer, role);
     if (!choice.ok) add(choice.code, ['roles', role], choice.message);
   }
+  policy.repositories.forEach((repo, i) => {
+    for (const [role, binding] of Object.entries(repo.roles ?? {})) {
+      const choice = selectReviewer(policy, 'code', binding.writer, role, repo.id);
+      if (!choice.ok) add(choice.code, ['repositories', i, 'roles', role], choice.message);
+    }
+  });
   return issues;
 }
 
@@ -493,3 +580,17 @@ export function expandGateRefs(
   for (const ref of refs) visit(ref, []);
   return out;
 }
+
+/** Имена переменных, которые MCP-серверы профиля получают по имени от CLI. */
+export const mcpEnvironment = (profile?: { mcp: Record<string, McpServer> }) => ({
+  inherit: [
+    ...new Set(
+      Object.values(profile?.mcp ?? {}).flatMap((s) => [
+        ...s.env,
+        ...(s.bearerTokenEnv ? [s.bearerTokenEnv] : []),
+      ]),
+    ),
+  ],
+  values: {},
+  secrets: {},
+});

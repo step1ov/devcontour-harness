@@ -65,8 +65,18 @@ export const workOrderSchema = z.strictObject({
   repositoryId: idSchema,
   /** Связанные репозитории поручения уровня workspace; пусто — один репозиторий. */
   relatedRepositories: z.array(idSchema).max(10).default([]),
-  /** Область записи: изменения вне неё отклоняют попытку. */
-  writeScope: z.array(relativePathSchema).min(1).max(100),
+  /**
+   * Область записи: изменения вне неё отклоняют попытку. `["."]` — весь
+   * репозиторий (защищённые и генерируемые пути и область роли по-прежнему
+   * ограничивают запись); `.` допустим только как единственный элемент.
+   */
+  writeScope: z
+    .array(z.union([z.literal('.'), relativePathSchema]))
+    .min(1)
+    .max(100)
+    .refine((paths) => !paths.includes('.') || paths.length === 1, {
+      message: 'Весь репозиторий (".") — единственный элемент области записи',
+    }),
   dependsOn: z.array(idSchema).max(100).default([]),
   /** Область доказательства: подмножество gates/групп политики. Нет поля — все gates репозитория. */
   gates: z.array(gateRefSchema).max(20).optional(),

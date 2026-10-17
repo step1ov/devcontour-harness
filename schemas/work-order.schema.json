@@ -82,10 +82,18 @@
       "maxItems": 100,
       "type": "array",
       "items": {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 500,
-        "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+        "anyOf": [
+          {
+            "type": "string",
+            "const": "."
+          },
+          {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+          }
+        ]
       }
     },
     "dependsOn": {

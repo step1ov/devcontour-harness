@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  roleBinding,
   executionDigest,
   HarnessError,
   WORKSPACE_OWNER,
@@ -351,11 +352,18 @@ export class Engine {
 
   /**
    * Контракты поручения: последний раунд ревью каждого контракта — его digest,
-   * одобрен, при текущем назначении reviewer. Иначе поручение не выдаётся и не
+   * одобрен, при текущем назначении reviewer; у хоста с портом `contracts` —
+   * редакция этого digest согласована хостом. Иначе поручение не выдаётся и не
    * принимается.
    */
   contractBlocker(work: WorkState, view: ExecutionView): string | undefined {
     for (const ref of work.order.contracts) {
+      // Хост, ведущий согласование контрактов сам, подтверждает редакцию по digest.
+      if (this.host.contracts) {
+        const refusal = this.host.contracts.approved(ref, view);
+        if (refusal) return refusal.message;
+        continue;
+      }
       const last = view
         .locals('reviews', WORKSPACE_OWNER)
         .map((r) => r.value)
@@ -810,10 +818,16 @@ export class Engine {
    * поручение не выдаётся и видно блокером; остальная очередь идёт дальше.
    */
   private reviewerBlocker(work: WorkState) {
-    const role = this.policy.roles[work.order.role];
+    const role = roleBinding(this.policy, work.order.role, work.order.repositoryId);
     if (!role)
       return { code: 'INVALID_INPUT' as const, message: 'Роль не объявлена: ' + work.order.role };
-    const reviewer = selectReviewer(this.policy, 'code', role.writer, work.order.role);
+    const reviewer = selectReviewer(
+      this.policy,
+      'code',
+      role.writer,
+      work.order.role,
+      work.order.repositoryId,
+    );
     return reviewer.ok ? undefined : { code: reviewer.code, message: reviewer.message };
   }
 
@@ -884,9 +898,15 @@ export class Engine {
         );
       const current = this.host.guards.current(work, undefined, tx);
       if (current) throw new HarnessError(current.code, current.message);
-      const role = this.policy.roles[work.order.role];
+      const role = roleBinding(this.policy, work.order.role, work.order.repositoryId);
       if (!role) throw new HarnessError('INVALID_INPUT', 'Роль не объявлена: ' + work.order.role);
-      const reviewer = selectReviewer(this.policy, 'code', role.writer, work.order.role);
+      const reviewer = selectReviewer(
+        this.policy,
+        'code',
+        role.writer,
+        work.order.role,
+        work.order.repositoryId,
+      );
       if (!reviewer.ok) throw new HarnessError(reviewer.code, reviewer.message);
       const repo = this.policy.repositories.find((r) => r.id === work.order.repositoryId);
       if (!repo)
