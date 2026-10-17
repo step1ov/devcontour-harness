@@ -167,9 +167,13 @@ test('G04: непокрытые gates — по собственному integrat
     evidence(engine, a, 'unit', phase);
     evidence(engine, a, 'independent-review', phase);
   }
-  // nightly прошёл только как проверка потребителя, engine — только записью ревью.
+  // nightly прошёл только как проверка потребителя; запись ревью под именем
+  // gate engine движок не принимает вовсе.
   evidence(engine, a, 'nightly', 'integration', { consumer: 'web' });
-  evidence(engine, a, 'engine', 'integration', { kind: 'review' });
+  assert.throws(
+    () => evidence(engine, a, 'engine', 'integration', { kind: 'review' }),
+    /не может относиться к gate engine/,
+  );
   // До приёмки поручение ничего не покрывает: учитывается принятый SHA.
   assert.deepEqual(engine.uncoveredGates(['a']), [
     { repositoryId: 'app', gates: ['unit', 'nightly', 'engine'] },

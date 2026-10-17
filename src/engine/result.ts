@@ -110,6 +110,7 @@ export function runResult(attempt: AttemptState, harnessVersion: string): RunRes
       ...(attempt.checks ? { checks: attempt.checks.effective } : {}),
       ...(attempt.checks?.corpus ? { corpus: attempt.checks.corpus } : {}),
       ...(attempt.requiredGates ? { requiredGates: attempt.requiredGates } : {}),
+      writer: { runtime: attempt.runtime, ...(attempt.model ? { model: attempt.model } : {}) },
     },
     checked: {
       dependencies: (attempt.dependencies ?? []).map(({ repositoryId, sha, tree, artifacts }) => ({

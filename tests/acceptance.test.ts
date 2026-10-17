@@ -7,22 +7,22 @@ import {
   HarnessError,
   digestOf,
   runResultSchema,
-  sha256,
   type ErrorCode,
-  type EvidenceRecord,
   type RunResult,
 } from '../src/contracts/index.ts';
-import {
-  contractDocuments,
-  effectiveChecks,
-  orderCheckManifest,
-} from '../src/verification/checks.ts';
+import { effectiveChecks, orderCheckManifest } from '../src/verification/checks.ts';
 import { manifestDigest } from '../src/verification/property.ts';
-import { CorpusStore } from '../src/verification/corpus.ts';
-import { pinnedCorpus, resultProblems } from '../src/verification/acceptance.ts';
+import { resultProblems, type ReceiverContext } from '../src/verification/acceptance.ts';
 import { runResult } from '../src/engine/result.ts';
-import { engineOf, graphOf, ready, sha } from './engine-fixture.ts';
-import { propertySetup } from './property-fixture.ts';
+import { engineOf, graphOf, policyOf, ready, sha } from './engine-fixture.ts';
+import {
+  acceptedProperty,
+  integrate,
+  manifestOf,
+  manifestProperty,
+  prove,
+  propertyAttempt,
+} from './receipt-fixtures.ts';
 import { target } from './runner-fixture.ts';
 
 const refused = (code: ErrorCode, pattern?: RegExp) => (e: unknown) => {
@@ -31,123 +31,6 @@ const refused = (code: ErrorCode, pattern?: RegExp) => (e: unknown) => {
   if (pattern) assert.match(e.message, pattern);
   return true;
 };
-
-/**
- * Согласованное property-поручение с принятой версией корпуса из одного
- * подтверждённого случая и выданной попыткой (без запуска checker: решение
- * подаётся управляемо, как запись после двойного подтверждения).
- */
-function propertyAttempt(options: { corpus?: boolean; now?: () => number } = {}) {
-  const ctx = propertySetup({ writer: {}, ...(options.now ? { now: options.now } : {}) });
-  const e = ctx.engine;
-  ready(e, ctx.graph);
-  if (options.corpus !== false) {
-    const corpus = new CorpusStore(e);
-    const ref = e.read((v) => corpus.suiteFor(v, v.work('add-greeting')!, 'knapsack-optimal'));
-    const begun = corpus.begin(ref.suite, 'acceptance-case');
-    const input = JSON.stringify({ items: [{ w: 0, v: 5 }], cap: 0 });
-    const recorded = corpus.record(
-      ref.suite,
-      'acceptance-case',
-      begun.token!,
-      {
-        property: 'knapsack-optimal',
-        input,
-        inputHash: sha256(input),
-        outcome: 'confirmed',
-        reason: 'управляемое подтверждение',
-        source: { sha: ctx.repo.head() },
-        origin: { kind: 'agent' },
-        observed: { expected: '5', actual: '0', equal: false, repeats: 2, durationsMs: [1, 1] },
-      },
-      () => sha('b'),
-      { works: ['add-greeting'], actor: 'agent' },
-    );
-    corpus.adopt(ref.suite.id, recorded.pending!.id);
-  }
-  const a = e.claim('c1')!;
-  return { ctx, e, a };
-}
-
-type Manifest = NonNullable<NonNullable<EvidenceRecord['property']>['manifest']>;
-
-/** Манифест, который настоящий gate записал бы для этой попытки. */
-function manifestOf(ctx: ReturnType<typeof propertyAttempt>): Manifest {
-  const { e, a } = ctx;
-  return e.read((v) => {
-    const work = v.work(a.workId)!;
-    const corpus = a.checks?.corpus ? pinnedCorpus(v, a.checks.corpus)! : undefined;
-    const expected = orderCheckManifest(
-      work.order,
-      contractDocuments(work.order, v),
-      'properties',
-      corpus,
-    )!;
-    return {
-      digest: manifestDigest(expected),
-      properties: expected.properties.map((p) => p.id),
-      ...(expected.corpus
-        ? { corpus: { digest: expected.corpus.digest, cases: expected.corpus.cases.length } }
-        : {}),
-    };
-  });
-}
-
-/** Evidence обеих фаз; `property` — запись генеративного gate или её отсутствие. */
-function prove(
-  ctx: ReturnType<typeof propertyAttempt>,
-  shas: { candidate: string; integration: string },
-  property: (phase: 'candidate' | 'integration') => EvidenceRecord['property'] | undefined,
-  options: { phases?: ('candidate' | 'integration')[]; review?: boolean } = {},
-) {
-  const { e, a } = ctx;
-  for (const phase of options.phases ?? (['candidate', 'integration'] as const)) {
-    const at = shas[phase];
-    const prop = property(phase);
-    e.evidence(a.id, a.token, {
-      kind: 'test',
-      phase,
-      sha: at,
-      gate: 'properties',
-      passed: true,
-      command: ['controlled'],
-      exitCode: 0,
-      log: '',
-      digest: digestOf(['test', phase, prop ?? null]),
-      summary: 'controlled',
-      ...(prop ? { property: prop } : {}),
-    });
-    if (options.review !== false)
-      e.evidence(a.id, a.token, {
-        kind: 'review',
-        phase,
-        sha: at,
-        gate: 'independent-review',
-        passed: true,
-        command: ['codex', 'review-code'],
-        exitCode: 0,
-        log: '',
-        digest: digestOf(['review', phase]),
-        summary: 'ok',
-      });
-  }
-}
-
-const manifestProperty = (manifest: Manifest): EvidenceRecord['property'] => ({
-  seed: 1,
-  reproduce: 'DEVCONTOUR_SEED=1 node check.mjs',
-  contracts: {},
-  artifacts: [],
-  level: 'manifest',
-  manifest,
-});
-
-function integrate(ctx: ReturnType<typeof propertyAttempt>) {
-  const { e, a } = ctx;
-  e.phase(a.id, a.token, 'verifying', { baseSha: sha('a'), candidateSha: sha('c') });
-  e.phase(a.id, a.token, 'integrating', { integrationSha: sha('b') });
-  return { candidate: sha('c'), integration: sha('b') };
-}
 
 test('S2-R1-09/F02: finish не принимает property-поручение без манифеста свойств или на прежнем уровне; с полным манифестом — принимает', () => {
   const ctx = propertyAttempt();
@@ -299,30 +182,6 @@ test('S2-R1-09: recovery не принимает сохранённое evidence
   });
 });
 
-/** Принятое property-поручение и его переносимый результат. */
-function acceptedProperty() {
-  const ctx = propertyAttempt();
-  const shas = integrate(ctx);
-  prove(ctx, shas, () => manifestProperty(manifestOf(ctx)));
-  ctx.e.finish(ctx.a.id, ctx.a.token, shas.integration);
-  const { result, order, contracts, suites, checkVersion } = ctx.e.read((v) => ({
-    result: runResult(v.attempt(ctx.a.id)!, '0.1.0-test'),
-    order: v.work('add-greeting')!.order,
-    contracts: contractDocuments(v.work('add-greeting')!.order, v),
-    suites: v.locals('check-suites').map((x) => x.value),
-    checkVersion: v.work('add-greeting')!.checkVersion,
-  }));
-  ctx.ctx.store.close();
-  const context = {
-    order,
-    contracts,
-    suite: (id: string) => suites.find((s) => s.id === id),
-    repository: ctx.ctx.policy.repositories[0]!,
-    checkVersion: checkVersion ? { suite: checkVersion.suite, digest: checkVersion.digest } : null,
-  };
-  return { result, context };
-}
-
 const tamper = (result: RunResult, change: (r: RunResult & { outcome: 'accepted' }) => void) => {
   const copy = structuredClone(result) as RunResult & { outcome: 'accepted' };
   change(copy);
@@ -344,13 +203,17 @@ test('S2-R1-09/AC23: переносимый результат нового фо
       (r) => r.evidence.forEach((e) => delete e.property),
       /без манифеста свойств/,
     ],
-    ['AC23: без версии проверок', (r) => delete r.inputs.checks, /без версии проверок/],
+    [
+      'AC23: без версии проверок',
+      (r) => delete r.inputs.checks,
+      /без версии проверок|другой версией проверок/,
+    ],
     [
       'F02: смешанные версии',
       (r) =>
         (r.evidence.find((e) => e.phase === 'integration' && e.kind === 'review')!.checks =
           'f'.repeat(64)),
-      /integration\/independent-review получен под другой версией проверок/,
+      /получена? под другой версией проверок/,
     ],
     [
       'F13: корпус удалён',
@@ -423,7 +286,13 @@ test('AC23: результат прежнего формата у поручен
     order: v.work('a')!.order,
   }));
   store.close();
-  const context = { order, contracts: [] };
+  const context: ReceiverContext = {
+    order,
+    graphId: 'g',
+    contracts: [],
+    policy: policyOf(),
+    contextDigest: null,
+  };
   assert.deepEqual(resultProblems(result, context), []);
   // Прежний формат: без версии проверок и без записей версий evidence.
   const legacy = tamper(result, (r) => {
@@ -433,7 +302,9 @@ test('AC23: результат прежнего формата у поручен
   });
   assert.deepEqual(resultProblems(legacy, context), []);
   const mixed = tamper(legacy, (r) => (r.evidence[0]!.checks = 'f'.repeat(64)));
-  assert.ok(resultProblems(mixed, context).some((p) => /разными версиями/.test(p)));
+  assert.ok(
+    resultProblems(mixed, context).some((p) => /разными версиями|другой версией проверок/.test(p)),
+  );
   const missing = tamper(
     legacy,
     (r) => (r.evidence = r.evidence.filter((e) => e.phase !== 'integration' || e.kind !== 'test')),
@@ -513,7 +384,13 @@ test('S2-R2-03/T20: получатель раскрывает область п�
   }));
   store.close();
   assert.deepEqual(order.gates, ['unit']);
-  const context = { order, contracts: [], repository };
+  const context: ReceiverContext = {
+    order,
+    graphId: 'g',
+    contracts: [],
+    policy: e.policy,
+    contextDigest: null,
+  };
   assert.deepEqual(resultProblems(result, context), [], 'новый формат');
   // Пустой список и ни одной записи test — отказ.
   const empty = tamper(result, (r) => {
@@ -522,7 +399,7 @@ test('S2-R2-03/T20: получатель раскрывает область п�
   });
   const problems = resultProblems(empty, context);
   assert.ok(
-    problems.some((p) => /область поручения требует unit/.test(p)),
+    problems.some((p) => /ожидалась ровно \[unit\]/.test(p)),
     problems.join('; '),
   );
   assert.ok(problems.some((p) => /Нет PASS: candidate\/unit/.test(p)));
@@ -544,9 +421,14 @@ test('S2-R2-03/T20: получатель раскрывает область п�
     r.inputs.workOrderDigest = digestOf(grouped);
     r.inputs.requiredGates = ['unit'];
   });
-  const scoped = resultProblems(partial, { order: grouped, contracts: [], repository: groupRepo });
+  const groupContext: ReceiverContext = {
+    ...context,
+    order: grouped,
+    policy: { ...e.policy, repositories: [groupRepo] },
+  };
+  const scoped = resultProblems(partial, groupContext);
   assert.ok(
-    scoped.some((p) => /область поручения требует lint/.test(p)),
+    scoped.some((p) => /ожидалась ровно \[unit, lint\]/.test(p)),
     scoped.join('; '),
   );
   // Имя группы не принимается за имя проверки: PASS «@ci» ничего не доказывает.
@@ -555,15 +437,15 @@ test('S2-R2-03/T20: получатель раскрывает область п�
     for (const x of [...r.evidence])
       if (x.gate === 'unit') r.evidence.push({ ...x, id: x.id + '-g', gate: '@ci' });
   });
-  const byName = resultProblems(named, { order: grouped, contracts: [], repository: groupRepo });
+  const byName = resultProblems(named, groupContext);
   assert.ok(
-    byName.some((p) => /требует unit, lint|требует lint/.test(p)),
+    byName.some((p) => /ожидалась ровно \[unit, lint\]|Нет PASS: candidate\/lint/.test(p)),
     byName.join('; '),
   );
-  // Без политики получателя поручение с группой не подтверждается.
+  // Без описания репозитория в политике получателя поручение не подтверждается.
   assert.ok(
-    resultProblems(partial, { order: grouped, contracts: [] }).some((p) =>
-      /нужна политика репозитория получателя/.test(p),
+    resultProblems(partial, { ...groupContext, policy: { ...e.policy, repositories: [] } }).some(
+      (p) => /не описан в политике получателя/.test(p),
     ),
   );
 });

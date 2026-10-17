@@ -135,6 +135,26 @@
                     "minLength": 1,
                     "maxLength": 200
                   }
+                },
+                "writer": {
+                  "type": "object",
+                  "properties": {
+                    "runtime": {
+                      "type": "string",
+                      "enum": [
+                        "codex",
+                        "claude",
+                        "fixture"
+                      ]
+                    },
+                    "model": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "runtime"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "required": [
@@ -769,6 +789,26 @@
                     "minLength": 1,
                     "maxLength": 200
                   }
+                },
+                "writer": {
+                  "type": "object",
+                  "properties": {
+                    "runtime": {
+                      "type": "string",
+                      "enum": [
+                        "codex",
+                        "claude",
+                        "fixture"
+                      ]
+                    },
+                    "model": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "runtime"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "required": [

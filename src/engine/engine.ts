@@ -11,6 +11,7 @@ import {
   policyDigest,
   graphIssues,
   selectReviewer,
+  vendorOf,
   workGraphDigest,
   type AttemptState,
   type Author,
@@ -1269,6 +1270,14 @@ export class Engine {
     return this.withAttempt(id, token, 'evidence.recorded', (a, w, tx) => {
       if (evidence.checks !== undefined && evidence.checks !== a.checks?.effective)
         throw new HarnessError('APPROVAL_STALE', 'Evidence другой версии проверок, чем у попытки');
+      // Вид записи согласован с gate: ревью — только `independent-review`, и
+      // это имя не принадлежит проверке. Иначе запись ревью под именем gate
+      // доказывала бы его (и названный testcase).
+      if ((evidence.kind === 'review') !== (evidence.gate === 'independent-review'))
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `Evidence вида ${evidence.kind} не может относиться к gate ${evidence.gate}`,
+        );
       const record: EvidenceRecord = {
         ...evidence,
         ...(a.checks ? { checks: a.checks.effective } : {}),
@@ -1288,7 +1297,7 @@ export class Engine {
             passed: record.passed,
             evidenceId: record.id,
             reviewer: a.reviewer,
-            sameVendor: a.reviewer === a.runtime,
+            sameVendor: vendorOf(a.reviewer) === vendorOf(a.runtime),
             blocking: (record.findings ?? []).filter((f) => f.severity === 'blocking').length,
           },
         });
@@ -1387,7 +1396,7 @@ export class Engine {
             `Проверка потребителя ${consumer.repositoryId} не записала снимок с интегрированным результатом`,
           );
       }
-      const unproven = unprovenReason(w.order.requirements, a.evidence, sha);
+      const unproven = unprovenReason(w.order.requirements, a.evidence, sha, a.checks?.effective);
       if (unproven) throw new HarnessError('GATE_FAILED', unproven);
       // Договор проверки доказан манифестом и корпусом закреплённой версии на
       // обеих фазах, а не только битом PASS: сохранённое evidence без них

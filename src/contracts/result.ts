@@ -155,6 +155,11 @@ const resultBase = {
       .optional(),
     /** Обязательные gates попытки, раскрытые при выдаче. */
     requiredGates: z.array(z.string().min(1).max(200)).optional(),
+    /**
+     * Writer попытки: получатель сверяет его с ролью своей политики и по нему
+     * судит о допустимости reviewer (правило вендора).
+     */
+    writer: z.strictObject({ runtime: runtimeNameSchema, model: z.string().optional() }).optional(),
   }),
   checked: checkedInputsSchema,
   evidence: z.array(evidenceRefSchema),

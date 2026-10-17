@@ -1,88 +1,14 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-argument --
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return --
  * Тесты подделывают переносимый результат как сырой JSON.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  digestOf,
-  runResultSchema,
-  sha256,
-  type ExecutionPolicy,
-  type RunResult,
-  type WorkGraph,
-} from '../src/contracts/index.ts';
-import { runResult } from '../src/engine/result.ts';
-import { resultProblems } from '../src/verification/acceptance.ts';
-import { engineOf, graphOf, policyOf, ready, sha } from './engine-fixture.ts';
+import { sha256 } from '../src/contracts/index.ts';
+import { resultProblems, type ReceiverContext } from '../src/verification/acceptance.ts';
+import { graphOf, policyOf, sha } from './engine-fixture.ts';
+import { attempt, consumerAttempt, forge } from './receipt-fixtures.ts';
 
-/**
- * Проверка переносимого результата получателем: каждое условие приёмки,
- * проверяемое по результату, повторяется против того, что знает получатель.
- * Попытка проводится управляемо через engine (запись evidence — как после
- * настоящих gates и ревью); результат строится и сериализуется штатно.
- */
-function attempt(graph: WorkGraph, policy: ExecutionPolicy = policyOf()) {
-  const { engine: e, store } = engineOf(policy);
-  ready(e, graph);
-  const a = e.claim('c1')!;
-  e.phase(a.id, a.token, 'verifying', { baseSha: sha('a'), candidateSha: sha('c') });
-  e.phase(a.id, a.token, 'integrating', { integrationSha: sha('b') });
-  const evidence = (
-    gate: string,
-    phase: 'candidate' | 'integration',
-    extra: Record<string, unknown> = {},
-  ) =>
-    e.evidence(a.id, a.token, {
-      kind: gate === 'independent-review' ? 'review' : 'test',
-      phase,
-      sha: sha(phase === 'candidate' ? 'c' : 'b'),
-      gate,
-      passed: true,
-      command: ['controlled'],
-      exitCode: 0,
-      log: '',
-      digest: digestOf(gate + phase),
-      summary: 'ok',
-      ...extra,
-    } as any);
-  for (const phase of ['candidate', 'integration'] as const) {
-    evidence('unit', phase);
-    evidence('independent-review', phase);
-    if (graph.orders[0]!.requirements.length) evidence('requirement-source', phase);
-  }
-  const done = () => {
-    e.finish(a.id, a.token, sha('b'));
-    const result = runResultSchema.parse(
-      JSON.parse(
-        JSON.stringify(
-          runResult(
-            e.read((v) => v.attempt(a.id)!),
-            e.version,
-          ),
-        ),
-      ),
-    );
-    const repo = (id: string) => policy.repositories.find((r) => r.id === id)!;
-    return {
-      result,
-      context: {
-        order: e.read((v) => v.work(a.workId)!.order),
-        contracts: [],
-        repository: repo('app'),
-        consumerRepository: repo,
-      },
-    };
-  };
-  return { e, store, a, evidence, done };
-}
-
-const forge = (result: RunResult, change: (r: any) => void) => {
-  const forged = structuredClone(result) as any;
-  change(forged);
-  return runResultSchema.parse(forged);
-};
-
-test('S2-R3-02: неявная область gates (все gates репозитория) у получателя без политики — отказ; с политикой — нужны все gates', () => {
+test('S2-R3-02: неявная область gates (все gates репозитория) раскрывается по политике получателя; репозитория нет в политике — отказ', () => {
   const graph = graphOf({ a: [] });
   delete (graph.orders[0] as any).gates;
   const f = attempt(graph);
@@ -92,22 +18,18 @@ test('S2-R3-02: неявная область gates (все gates репозит
     r.inputs.requiredGates = [];
     r.evidence = r.evidence.filter((x: any) => x.kind === 'review');
   });
+  assert.match(resultProblems(forged, context).join('; '), /unit/, 'unit обязателен по политике');
+  const blind = { ...context, policy: { ...context.policy, repositories: [] } };
   assert.match(
-    resultProblems(forged, { order: context.order, contracts: [] }).join('; '),
-    /нужна политика репозитория получателя/,
-    'без политики неявную область не доказать',
+    resultProblems(result, blind).join('; '),
+    /не описан в политике получателя/,
+    'без описания репозитория область не доказать',
   );
-  assert.match(
-    resultProblems(result, { order: context.order, contracts: [] }).join('; '),
-    /нужна политика репозитория получателя/,
-    'и штатный результат без политики не принимается за PASS',
-  );
-  assert.match(resultProblems(forged, context).join('; '), /unit/, 'с политикой — unit обязателен');
   // Прежний формат (без requiredGates) с явной областью — прежний уровень.
   const explicit = attempt(graphOf({ a: [] }));
   const legacy = explicit.done();
   const old = forge(legacy.result, (r) => delete r.inputs.requiredGates);
-  assert.deepEqual(resultProblems(old, { order: legacy.context.order, contracts: [] }), []);
+  assert.deepEqual(resultProblems(old, legacy.context), []);
   f.store.close();
   explicit.store.close();
 });
@@ -132,39 +54,6 @@ test('S2-R3-03: запись check, property или consumer без потреб
   assert.match(resultProblems(owned, context).join('; '), /не согласован/);
   f.store.close();
 });
-
-/** Поручение app, проверяемое потребителем web (gates — группой) против своего результата. */
-function consumerAttempt() {
-  const policy = policyOf((p: any) => {
-    const app = p.repositories[0];
-    p.repositories.push({
-      ...structuredClone(app),
-      id: 'web',
-      path: 'web',
-      targetRef: 'refs/heads/web-accepted',
-      dependsOn: ['app'],
-      gates: [
-        { ...app.gates[0], id: 'e2e' },
-        { ...app.gates[0], id: 'smoke' },
-      ],
-      gateGroups: { ci: ['e2e', 'smoke'] },
-    });
-  });
-  const graph = graphOf({ a: [] });
-  graph.orders[0]!.consumers = [{ repositoryId: 'web', gates: ['@ci'] }];
-  const f = attempt(graph, policy);
-  f.evidence('e2e', 'integration', { consumer: 'web' });
-  f.evidence('smoke', 'integration', { consumer: 'web' });
-  f.e.consumerChecked(f.a.id, f.a.token, 'web', {
-    sha: sha('d'),
-    tree: sha('e'),
-    dependencies: [{ repositoryId: 'app', sha: sha('b'), tree: sha('e'), artifacts: [] }],
-    // Голова потребителя ушла вперёд: снимок устарел, но описан правдиво.
-    freshness: [{ repositoryId: 'web', snapshot: sha('d'), head: sha('f'), fresh: false }],
-    observedAt: '2026-01-01T00:00:00.000Z',
-  });
-  return f;
-}
 
 test('S2-R3-04/T21/T22: объявленный потребитель — описан, его gates (группой) прошли на integration против результата провайдера; устаревший, но правдивый снимок не отказ', () => {
   const f = consumerAttempt();
@@ -203,9 +92,15 @@ test('S2-R3-04/T21/T22: объявленный потребитель — опи
   };
   for (const [name, change] of Object.entries(variants))
     assert.notDeepEqual(resultProblems(forge(result, change), context), [], name);
-  // Группа gates потребителя без его политики у получателя — отказ, а не PASS.
-  const blind = { ...context, consumerRepository: undefined };
-  assert.match(resultProblems(result, blind).join('; '), /нужна его политика/);
+  // Потребитель, которого нет в политике получателя, — отказ, а не PASS.
+  const blind = {
+    ...context,
+    policy: {
+      ...context.policy,
+      repositories: context.policy.repositories.filter((r) => r.id !== 'web'),
+    },
+  };
+  assert.match(resultProblems(result, blind).join('; '), /потребитель web не описан/);
   f.store.close();
 });
 
@@ -313,8 +208,284 @@ test('Получатель повторяет каждое проверяемо�
   };
   for (const [name, change] of Object.entries(variants))
     assert.notDeepEqual(resultProblems(forge(result, change), context), [], name);
-  // Прямая зависимость репозитория получателя обязана иметь снимок.
-  const withDependency = { ...context, repository: { ...context.repository, dependsOn: ['lib'] } };
-  assert.match(resultProblems(result, withDependency).join('; '), /снимок зависимости lib/);
+  // Зависимость репозитория в политике получателя обязана иметь снимок.
+  const withDependency = {
+    ...context,
+    policy: {
+      ...context.policy,
+      repositories: [
+        ...context.policy.repositories.map((r) =>
+          r.id === 'app' ? { ...r, dependsOn: ['lib'] } : r,
+        ),
+        { ...context.policy.repositories[0]!, id: 'lib', path: 'lib', dependsOn: [] },
+      ],
+    },
+  };
+  assert.match(resultProblems(result, withDependency).join('; '), /ожидались ровно \[lib\]/);
   f.store.close();
+});
+
+const withRepos = (context: ReceiverContext, patch: (repos: any[]) => any[]): ReceiverContext => ({
+  ...context,
+  policy: { ...context.policy, repositories: patch(structuredClone(context.policy.repositories)) },
+});
+const libRepo = (context: ReceiverContext) => ({
+  ...structuredClone(context.policy.repositories[0]!),
+  id: 'lib',
+  path: 'lib',
+  targetRef: 'refs/heads/lib-accepted',
+  dependsOn: [],
+});
+
+test('S2-R4-01: результат другого репозитория, источника, редакции, графа, ветки или контекста — отказ получателя', () => {
+  const f = attempt(graphOf({ a: [] }));
+  const { result, context } = f.done();
+  assert.deepEqual(resultProblems(result, context), [], 'положительный round-trip');
+  const variants: Record<string, (r: any) => void> = {
+    'identity-repository': (r) => (r.repositoryId = 'foreign'),
+    'identity-source-connector': (r) => (r.source.connector = 'other'),
+    'identity-source-ref': (r) => (r.source.ref = 'other'),
+    'identity-source-revision': (r) => (r.source.revision = 'unrelated-new-revision'),
+    'identity-target': (r) => (r.targetRef = 'refs/heads/unrelated'),
+    'identity-graph': (r) => (r.graphId = 'other-graph'),
+    'identity-context': (r) => (r.inputs.contextDigest = 'c'.repeat(64)),
+  };
+  for (const [name, change] of Object.entries(variants))
+    assert.notDeepEqual(resultProblems(forge(result, change), context), [], name);
+  // Контекст: получатель знает согласованный снимок — результат без него отклонён.
+  const bound = { ...context, contextDigest: 'c'.repeat(64) };
+  assert.match(resultProblems(result, bound).join('; '), /снимок контекста/);
+  assert.deepEqual(
+    resultProblems(
+      forge(result, (r) => (r.inputs.contextDigest = 'c'.repeat(64))),
+      bound,
+    ),
+    [],
+  );
+  f.store.close();
+});
+
+test('S2-R4-02: testcase подтверждает только решающая test-запись нужной версии; ревью под именем gate и чужая версия — отказ', () => {
+  const graph = graphOf({ a: [] });
+  const text = 'The named scenario must run.';
+  graph.orders[0]!.requirements = [
+    {
+      id: 'REQ-1',
+      source: 'requirements.md',
+      text,
+      digest: sha256(text),
+      gate: 'unit',
+      scenario: 'Named scenario',
+      testId: 'required-test',
+    },
+  ];
+  const f = attempt(graph);
+  f.evidence('unit', 'integration', { tests: [{ id: 'required-test', status: 'passed' }] });
+  const { result, context } = f.done();
+  assert.deepEqual(resultProblems(result, context), []);
+  const variants: Record<string, (r: any) => void> = {
+    'named-test-via-review-kind': (r) => {
+      const proof = r.evidence.findLast((x: any) => x.tests);
+      const forged = { ...structuredClone(proof), id: 'forged-review', kind: 'review' };
+      delete proof.tests;
+      r.evidence.push(forged);
+    },
+    'named-test-via-stale-version': (r) => {
+      const proof = r.evidence.findLast((x: any) => x.tests);
+      const forged = { ...structuredClone(proof), id: 'stale-proof', checks: 'f'.repeat(64) };
+      delete proof.tests;
+      r.evidence.unshift(forged);
+    },
+    'named-test-via-earlier-run': (r) => {
+      const proof = r.evidence.findLast((x: any) => x.tests);
+      const earlier = { ...structuredClone(proof), id: 'earlier' };
+      delete proof.tests;
+      r.evidence.splice(r.evidence.indexOf(proof), 0, earlier);
+    },
+  };
+  for (const [name, change] of Object.entries(variants))
+    assert.notDeepEqual(resultProblems(forge(result, change), context), [], name);
+  // Каждое правило целостности записи — отдельно: лишняя запись нарушает
+  // только его, решающие записи не тронуты.
+  const extra = (r: any, record: Record<string, unknown>) =>
+    r.evidence.push({ ...structuredClone(r.evidence[0]), id: 'extra', ...record });
+  const integrity: Record<string, [(r: any) => void, RegExp]> = {
+    'ревью под именем gate': [
+      (r) =>
+        extra(r, {
+          kind: 'review',
+          gate: 'unit',
+          reviewer: { runtime: 'codex', sameVendor: false },
+        }),
+      /не согласован с gate unit/,
+    ],
+    'test под именем ревью': [
+      (r) => extra(r, { kind: 'test', gate: 'independent-review' }),
+      /не согласован с gate independent-review/,
+    ],
+    'список тестов у записи кандидата': [
+      (r) =>
+        (r.evidence.find((x: any) => x.gate === 'unit' && x.phase === 'candidate').tests = [
+          { id: 'x', status: 'passed' },
+        ]),
+      /список тестов у записи не собственной проверки интеграции/,
+    ],
+  };
+  for (const [name, [change, pattern]] of Object.entries(integrity))
+    assert.match(resultProblems(forge(result, change), context).join('; '), pattern, name);
+  // То же на стороне движка: запись ревью под именем gate не записывается.
+  const g = attempt(graphOf({ a: [] }));
+  assert.throws(
+    () => g.evidence('unit', 'integration', { kind: 'review' }),
+    /не может относиться к gate unit/,
+  );
+  assert.throws(
+    () => g.evidence('independent-review', 'integration', { kind: 'test' }),
+    /не может относиться к gate independent-review/,
+  );
+  f.store.close();
+  g.store.close();
+});
+
+test('S2-R4-03: область и входы потребителя — ровно по политике получателя; лишнее, повтор, пропуск и противоречие — отказ', () => {
+  const f = consumerAttempt();
+  const { result, context } = f.done();
+  assert.deepEqual(resultProblems(result, context), []);
+  const variants: Record<string, (r: any) => void> = {
+    'consumer-extra-gate-without-PASS': (r) => r.checked.consumers[0].gates.push('not-run'),
+    'consumer-duplicate-gate': (r) => r.checked.consumers[0].gates.push('e2e'),
+    'consumer-empty-freshness': (r) => (r.checked.consumers[0].freshness = []),
+    'consumer-unknown-freshness': (r) =>
+      r.checked.consumers[0].freshness.push({
+        repositoryId: 'foreign',
+        snapshot: sha('a'),
+        head: sha('a'),
+        fresh: true,
+      }),
+    'consumer-duplicate-provider-with-other-SHA': (r) =>
+      r.checked.consumers[0].dependencies.push({
+        ...r.checked.consumers[0].dependencies[0],
+        sha: sha('a'),
+      }),
+  };
+  for (const [name, change] of Object.entries(variants))
+    assert.notDeepEqual(resultProblems(forge(result, change), context), [], name);
+  // Потребитель зависит и от lib: полный closure принимается, неполный — нет.
+  const consumerLib = withRepos(context, (repos) => [
+    ...repos.map((r) => (r.id === 'web' ? { ...r, dependsOn: ['app', 'lib'] } : r)),
+    libRepo(context),
+  ]);
+  const complete = forge(result, (r) => {
+    r.checked.consumers[0].dependencies.push({
+      repositoryId: 'lib',
+      sha: sha('a'),
+      tree: sha('a'),
+      artifacts: [],
+    });
+    r.checked.consumers[0].freshness.push({
+      repositoryId: 'lib',
+      snapshot: sha('a'),
+      head: sha('a'),
+      fresh: true,
+    });
+  });
+  assert.deepEqual(resultProblems(complete, consumerLib), [], 'полный closure потребителя');
+  assert.notDeepEqual(
+    resultProblems(
+      forge(complete, (r) => {
+        r.checked.consumers[0].dependencies = r.checked.consumers[0].dependencies.filter(
+          (x: any) => x.repositoryId !== 'lib',
+        );
+        r.checked.consumers[0].freshness = r.checked.consumers[0].freshness.filter(
+          (x: any) => x.repositoryId !== 'lib',
+        );
+      }),
+      consumerLib,
+    ),
+    [],
+    'consumer-dependency-omitted',
+  );
+  // Транзитивная зависимость: web → app → lib требует снимка lib у потребителя.
+  const transitive = withRepos(context, (repos) => [
+    ...repos.map((r) => (r.id === 'app' ? { ...r, dependsOn: ['lib'] } : r)),
+    libRepo(context),
+  ]);
+  assert.match(
+    resultProblems(result, transitive).join('; '),
+    /потребитель web: снимки зависимостей \[app\] — ожидались ровно \[lib, app\]/,
+  );
+  // Потребитель, который в политике получателя не зависит от провайдера, — отказ.
+  const unrelated = withRepos(context, (repos) =>
+    repos.map((r) => (r.id === 'web' ? { ...r, dependsOn: [] } : r)),
+  );
+  assert.match(resultProblems(result, unrelated).join('; '), /потребитель web не зависит от app/);
+  // Собственная зависимость lib: два снимка и снимок без свежести — отказ.
+  const ownLib = withRepos(context, (repos) => [
+    ...repos.map((r) => (r.id === 'app' ? { ...r, dependsOn: ['lib'] } : r)),
+    libRepo(context),
+  ]);
+  const ownVariants: Record<string, (r: any) => void> = {
+    'own-duplicate-dependency': (r) =>
+      (r.checked.dependencies = [
+        { repositoryId: 'lib', sha: sha('a'), tree: sha('a'), artifacts: [] },
+        { repositoryId: 'lib', sha: sha('b'), tree: sha('b'), artifacts: [] },
+      ]),
+    'own-dependency-without-freshness': (r) =>
+      (r.checked.dependencies = [
+        { repositoryId: 'lib', sha: sha('a'), tree: sha('a'), artifacts: [] },
+      ]),
+  };
+  for (const [name, change] of Object.entries(ownVariants))
+    assert.notDeepEqual(resultProblems(forge(result, change), ownLib), [], name);
+  f.store.close();
+});
+
+test('S2-R4-04: ревью подтверждено reviewer-ом политики получателя; тот же вендор — только явным разрешением; reviewer пропал или противоречит — отказ', () => {
+  const f = attempt(graphOf({ a: [] }));
+  const { result, context } = f.done();
+  assert.deepEqual(resultProblems(result, context), [], 'claude → codex');
+  assert.equal(result.inputs.writer?.runtime, 'claude');
+  const reviews = (r: any, change: (x: any) => void) =>
+    r.evidence.forEach((x: any) => x.kind === 'review' && change(x));
+  const variants: Record<string, (r: any) => void> = {
+    'review-same-vendor-without-permission': (r) =>
+      reviews(r, (x) => (x.reviewer = { runtime: 'claude', sameVendor: true })),
+    'review-without-identity': (r) => reviews(r, (x) => delete x.reviewer),
+    'review-identity-contradicts-vendor': (r) => reviews(r, (x) => (x.reviewer.sameVendor = true)),
+    'review-other-reviewer': (r) =>
+      reviews(r, (x) => (x.reviewer = { runtime: 'claude', sameVendor: false })),
+    'writer-not-assigned': (r) => (r.inputs.writer = { runtime: 'codex' }),
+    'reviewer-on-test-record': (r) =>
+      (r.evidence.find((x: any) => x.kind === 'test').reviewer = {
+        runtime: 'codex',
+        sameVendor: false,
+      }),
+  };
+  for (const [name, change] of Object.entries(variants))
+    assert.notDeepEqual(resultProblems(forge(result, change), context), [], name);
+  f.store.close();
+  // Явное разрешение того же вендора: обе пары проходят; без разрешения у
+  // получателя тот же результат отклонён.
+  for (const runtime of ['claude', 'codex'] as const) {
+    const allowed = policyOf((p: any) => {
+      p.roles.developer.writer.runtime = runtime;
+      p.review.code = { reviewer: { runtime }, vendor: 'same-vendor-allowed' };
+    });
+    const same = attempt(graphOf({ a: [] }), allowed);
+    const done = same.done();
+    assert.deepEqual(resultProblems(done.result, done.context), [], `${runtime} → ${runtime}`);
+    assert.ok(done.result.evidence.some((x) => x.reviewer?.sameVendor === true));
+    const strict = {
+      ...done.context,
+      policy: {
+        ...done.context.policy,
+        review: {
+          ...done.context.policy.review,
+          code: { reviewer: { runtime }, vendor: 'different-vendor' as const },
+        },
+      },
+    };
+    assert.match(resultProblems(done.result, strict).join('; '), /того же вендора/);
+    same.store.close();
+  }
 });
