@@ -83,3 +83,30 @@ export function redactDeep<T>(value: T, redact?: (text: string) => string): T {
           : v;
   return walk(value) as T;
 }
+
+/**
+ * Безопасная форма ошибки: маскируются сообщение, стек, причина и все
+ * собственные поля (у ошибки процесса — `path`, `spawnargs`, `cmd`, `stderr`
+ * и др.), класс и код сохраняются. Исходный объект не возвращается: его
+ * сырые поля несли бы известные значения дальше.
+ */
+export function redactError(error: unknown, redact: (text: string) => string): unknown {
+  if (!(error instanceof Error)) return typeof error === 'string' ? redact(error) : error;
+  const safe = Object.create(Object.getPrototypeOf(error) as object) as Error;
+  for (const key of Object.getOwnPropertyNames(error)) {
+    const value: unknown = (error as unknown as Record<string, unknown>)[key];
+    const masked =
+      key === 'cause'
+        ? redactError(value, redact)
+        : Buffer.isBuffer(value)
+          ? redact(value.toString('utf8'))
+          : redactDeep(value, redact);
+    Object.defineProperty(safe, key, {
+      value: masked,
+      writable: true,
+      configurable: true,
+      enumerable: Object.prototype.propertyIsEnumerable.call(error, key),
+    });
+  }
+  return safe;
+}

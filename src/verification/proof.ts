@@ -3,6 +3,16 @@ import type { EvidenceRecord, WorkOrder } from '../contracts/index.ts';
 type Requirement = WorkOrder['requirements'][number];
 
 /**
+ * Что нужно доказательству от записи evidence: сама запись controller или её
+ * переносимая форма в результате (у получателя).
+ */
+export type ProofRecord = Pick<EvidenceRecord, 'gate' | 'phase' | 'sha' | 'passed'> & {
+  consumer?: string | undefined;
+  tests?: EvidenceRecord['tests'];
+  testsTruncated?: boolean | undefined;
+};
+
+/**
  * Уровни доказательства критерия. `testcase` — названный тест выполнился на
  * принятом SHA и прошёл; `gate` — известно лишь, что проверка зелёная;
  * `none` — подтверждения нет, причина названа. Доказательство — только
@@ -12,7 +22,7 @@ export type ProofLevel = 'testcase' | 'gate' | 'none';
 
 export function requirementProof(
   link: Pick<Requirement, 'id' | 'gate' | 'testId'>,
-  evidence: readonly EvidenceRecord[],
+  evidence: readonly ProofRecord[],
   resultSha: string | undefined,
 ): { id: string; level: ProofLevel; reason: string; testId?: string } {
   const base = { id: link.id, ...(link.testId ? { testId: link.testId } : {}) };
@@ -74,7 +84,7 @@ export function requirementProof(
 /** Причина, по которой названные сценарии не подтверждены, или undefined. */
 export function unprovenReason(
   requirements: readonly Requirement[] | undefined,
-  evidence: readonly EvidenceRecord[],
+  evidence: readonly ProofRecord[],
   resultSha: string | undefined,
 ) {
   const unproven = (requirements ?? [])

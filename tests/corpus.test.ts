@@ -15,6 +15,7 @@ import {
 import { planReview } from './engine-fixture.ts';
 import { caseHooks } from '../src/verification/confirm.ts';
 import { approve, implement, runAll, target } from './runner-fixture.ts';
+import { Harness } from '../src/control/harness.ts';
 import { knap, propertyHarness, propertySetup, rejection } from './property-fixture.ts';
 
 const refused = (code: ErrorCode) => (e: unknown) => {
@@ -698,4 +699,52 @@ test('S2-R2-06/T30: эксперимент не сохраняет и не во�
   assert.equal(h2.spikes().length, 0);
   assert.ok(!existsSync(join(missing.state, 'spikes')), 'worktree не создавался');
   h2.close();
+});
+
+test('S2-R3-06/T30: отказ запуска эксперимента не несёт известного значения ни в одном поле ошибки — path, spawnargs, stack, сериализация; класс и код ENOENT сохранены', async () => {
+  const secret = 'spike-error"66328';
+  const forms = [secret, JSON.stringify(secret).slice(1, -1), encodeURIComponent(secret)];
+  const ctx = propertySetup({
+    writer: implement({ 'src/knap.mjs': knap.correct }),
+    policy: (p: any) => (p.environment.secrets = { TOKEN: 'HARNESS_SPIKE_ERROR_SECRET' }),
+  });
+  ctx.store.close();
+  const h = Harness.open({
+    policy: ctx.policy,
+    stateDir: ctx.state,
+    baseDir: ctx.repo.dir,
+    environment: { ...process.env, HARNESS_SPIKE_ERROR_SECRET: secret },
+    adapters: {},
+  });
+  const error = await h
+    .spike({
+      command: ['/nonexistent/spike-' + secret, '--token=' + secret],
+      sizes: [1],
+      timeoutMs: 5000,
+      question: 'Отказ запуска',
+    })
+    .then(
+      () => assert.fail('команда не могла запуститься'),
+      (e: unknown) => e,
+    );
+  assert.ok(error instanceof Error, 'класс ошибки сохранён');
+  const fields = error as NodeJS.ErrnoException & { spawnargs?: string[] };
+  assert.equal(fields.code, 'ENOENT', 'код отказа сохранён');
+  const views = [
+    error.message,
+    String(error.stack),
+    String(fields.path),
+    JSON.stringify(fields.spawnargs),
+    JSON.stringify(error),
+    JSON.stringify(
+      Object.getOwnPropertyNames(error).map(
+        (k) => (error as unknown as Record<string, unknown>)[k],
+      ),
+    ),
+  ];
+  for (const text of views)
+    for (const form of forms) assert.ok(!text.includes(form), `значение в ошибке: ${text}`);
+  assert.match(JSON.stringify(error), /\[REDACTED\]/, 'поля ошибки замаскированы, а не удалены');
+  assert.equal(h.spikes().length, 0);
+  h.close();
 });

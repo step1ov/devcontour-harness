@@ -14,7 +14,7 @@ import {
 import type { Engine } from '../engine/engine.ts';
 import { git } from '../environment/process.ts';
 import { executionEnvironment } from '../environment/lifecycle.ts';
-import { redactDeep } from '../environment/redaction.ts';
+import { redactDeep, redactError } from '../environment/redaction.ts';
 import { runCheck } from './gates.ts';
 
 /** Что нужно эксперименту от controller. */
@@ -108,9 +108,8 @@ export async function runSpike(ctx: SpikeContext, raw: unknown): Promise<Spike> 
       if (result.timedOut) break;
     }
   } catch (error) {
-    // Класс отказа сохраняется, известные значения из текста — нет.
-    if (error instanceof Error) error.message = redact(error.message);
-    throw error;
+    // Класс и код отказа сохраняются, известные значения — ни в одном поле.
+    throw redactError(error, redact);
   } finally {
     await git(path, 'worktree', 'remove', '--force', dir).catch(() => undefined);
   }

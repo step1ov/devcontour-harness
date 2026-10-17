@@ -41,6 +41,7 @@ import {
   budgetOverview,
   callAttribution,
   callBudgets,
+  legacyGroupCall,
   workBudgets,
   type BudgetContext,
   type CallMeta,
@@ -698,7 +699,9 @@ export class Engine {
         const found = this.host.budgets.legacy(r, tx);
         if (!(r.groupId ?? found.groupId)) continue;
         const next: CallRecord = { ...r, groupId: r.groupId ?? found.groupId };
-        const workId = r.workId ?? found.workId;
+        // Прежний вызов о группе остаётся расходом её участников, даже если
+        // хост по совпавшему ID назвал его вызовом поручения.
+        const workId = r.workId ?? (legacyGroupCall(r) ? undefined : found.workId);
         if (workId) next.workId = workId;
         if (!next.workId && found.workIds) next.workIds = found.workIds;
         if (!next.workId && !next.workIds) continue;

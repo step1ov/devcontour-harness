@@ -38,6 +38,21 @@ export const evidenceRefSchema = z.strictObject({
   /** Версия проверок, под которой получена запись (`checks.effective` попытки). */
   checks: digestSchema.optional(),
   /**
+   * Выполненные тесты записи (фаза интеграции, собственные gates): получатель
+   * проверяет по ним названный testcase так же, как приёмка. Без списка
+   * доказательство уровня testcase у получателя не восстанавливается.
+   */
+  tests: z
+    .array(
+      z.strictObject({
+        id: z.string().min(1),
+        status: z.enum(['passed', 'failed', 'skipped']),
+        opaque: z.literal(true).optional(),
+      }),
+    )
+    .optional(),
+  testsTruncated: z.boolean().optional(),
+  /**
    * Уровень доказательства генеративного gate и манифест исполненной проверки:
    * без них получатель выдал бы сильный уровень за прежний.
    */

@@ -397,6 +397,38 @@
                 "type": "string",
                 "pattern": "^[a-f0-9]{64}$"
               },
+              "tests": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "passed",
+                        "failed",
+                        "skipped"
+                      ]
+                    },
+                    "opaque": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "testsTruncated": {
+                "type": "boolean"
+              },
               "property": {
                 "type": "object",
                 "properties": {
@@ -998,6 +1030,38 @@
               "checks": {
                 "type": "string",
                 "pattern": "^[a-f0-9]{64}$"
+              },
+              "tests": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "passed",
+                        "failed",
+                        "skipped"
+                      ]
+                    },
+                    "opaque": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "testsTruncated": {
+                "type": "boolean"
               },
               "property": {
                 "type": "object",

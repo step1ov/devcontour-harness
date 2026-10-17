@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   API_VERSION,
+  WORKSPACE_OWNER,
   HarnessError,
   sha256,
   sourceDigest,
@@ -22,7 +23,7 @@ import { Harness } from '../src/control/harness.ts';
 import { Engine } from '../src/engine/engine.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
 import { callRecords } from '../src/engine/usage.ts';
-import { graphOf, policyOf } from './engine-fixture.ts';
+import { graphOf, policyOf, ready } from './engine-fixture.ts';
 
 const refused = (code: ErrorCode) => (e: unknown) => {
   assert.ok(e instanceof HarnessError, String(e));
@@ -413,4 +414,54 @@ test('S2-R2-02: вызов о группе засчитывается её уч�
     .budgets.find((b) => b.scope.kind === 'work' && b.scope.id === 'b')!;
   assert.equal(work.reportedUsd, 2, 'у b только его доля ревью плана');
   h.close();
+});
+
+test('S2-R3-01/T25/T26: прежняя запись вызова о группе (группа закреплена, вида и состава нет) при совпавшем ID остаётся расходом всех участников — до закрепления, после, после перезапуска; закреплённый workId не меняется', async () => {
+  const { requests, adapters } = reviewers(2);
+  const policy = policyOf((p: any) => (p.budgets = { work: { usd: 1 } }));
+  const { h, stateDir } = open(policy, adapters);
+  const graph = graphOf({ g: [], b: [] });
+  h.engine.register(graph, { trusted: () => false, reachable: () => true });
+  await h.review({ kind: 'plan', graph, author: 'claude' });
+  const spent = (engine: Engine, id: string) =>
+    engine.budgets()!.budgets.find((b) => b.scope.kind === 'work' && b.scope.id === id)!
+      .reportedUsd;
+  const original = h.engine.read((v) => callRecords(v)[0]!);
+  // Прежняя форма записи: группа закреплена при вызове, вида предмета и состава нет.
+  const legacy = { ...original };
+  delete legacy.subjectKind;
+  delete legacy.workIds;
+  // И прежняя запись вызова о поручении g с закреплённым workId — она остаётся за g.
+  const workCall = { ...legacy, id: 'legacy-work-call', workId: 'g' };
+  h.store.transact('usage.recorded', (tx) => {
+    tx.putLocal('usage', WORKSPACE_OWNER, legacy.id, legacy);
+    tx.putLocal('usage', WORKSPACE_OWNER, workCall.id, workCall);
+  });
+  assert.equal(spent(h.engine, 'b'), 2, 'до закрепления: расход группы у b');
+  h.engine.pinLegacyCalls();
+  const pinned = h.engine.read((v) => callRecords(v).find((r) => r.id === legacy.id)!);
+  assert.equal(pinned.workId, undefined, 'вызов группы не стал вызовом поручения g');
+  assert.deepEqual([...(pinned.workIds ?? [])].sort(), ['b', 'g'], 'дописан состав группы');
+  assert.equal(
+    h.engine.read((v) => callRecords(v).find((r) => r.id === workCall.id)!.workId),
+    'g',
+    'закреплённый workId прежнего вызова не меняется',
+  );
+  assert.equal(spent(h.engine, 'b'), 2, 'после закрепления');
+  h.close();
+  const again = open(policy, adapters, stateDir).h;
+  assert.equal(spent(again.engine, 'b'), 2, 'после перезапуска');
+  // Новая редакция графа с новым участником c: закреплённый состав не
+  // меняется — расход остаётся за g и b, новый участник его не получает.
+  const grown = graphOf({ g: [], b: [], c: [] }, '2');
+  ready(again.engine, grown, 'controller');
+  assert.equal(spent(again.engine, 'b'), 2, 'после смены состава');
+  assert.equal(spent(again.engine, 'c'), 0, 'новый участник не получает прежний расход');
+  assert.equal(
+    again.engine.claim('controller')?.workId,
+    'c',
+    'исчерпанные участники g и b не выдаются; выдан только c',
+  );
+  assert.equal(requests.length, 1);
+  again.close();
 });

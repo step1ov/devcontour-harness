@@ -5,6 +5,7 @@ import {
   type ExecutionPolicy,
   type ExecutionStore,
 } from '../contracts/index.ts';
+import { legacyGroupCall } from './budget.ts';
 
 /**
  * Хост самостоятельного harness: основания — digest нейтральных структур,
@@ -30,15 +31,17 @@ export function standaloneHost(store: ExecutionStore, policy: ExecutionPolicy): 
       groupOf: (workId, view) => view.work(workId)?.graphId,
       members: (groupId, view) => view.works(groupId).map((w) => w.id),
       // Прежняя запись без атрибуции — по попытке или предмету по текущему
-      // составу; у вызова о графе — все его поручения.
+      // составу; у вызова о графе (в том числе с уже закреплённой группой без
+      // поручения) — все его поручения.
       legacy: (record, view) => {
-        const workId =
-          (record.runId ? view.attempt(record.runId)?.workId : undefined) ??
-          (record.subjectId &&
-          (!record.subjectKind || record.subjectKind === 'work') &&
-          view.work(record.subjectId)
-            ? record.subjectId
-            : undefined);
+        const workId = legacyGroupCall(record)
+          ? undefined
+          : ((record.runId ? view.attempt(record.runId)?.workId : undefined) ??
+            (record.subjectId &&
+            (!record.subjectKind || record.subjectKind === 'work') &&
+            view.work(record.subjectId)
+              ? record.subjectId
+              : undefined));
         if (workId) {
           const groupId = view.work(workId)?.graphId;
           return { workId, ...(groupId ? { groupId } : {}) };

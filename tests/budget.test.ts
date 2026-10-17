@@ -1019,3 +1019,40 @@ test('T25: расход writer исчерпывает бюджет поруче�
     h.close();
   }
 });
+
+test('S2-R3-01: хост, называющий прежний вызов о группе вызовом поручения с совпавшим ID, не переносит расход группы на одно поручение', () => {
+  const policy = policyOf((p) => (p.budgets = { work: { usd: 1 } }));
+  const store = new SqliteExecutionStore(
+    join(mkdtempSync(join(tmpdir(), 'harness-legacy-host-')), 'state.sqlite'),
+    'test',
+  );
+  const host = standaloneHost(store, policy);
+  // Хост сопоставляет прежние записи по совпавшему ID — так, как сделал бы наивный адаптер.
+  const naive = {
+    ...host,
+    budgets: {
+      ...host.budgets,
+      legacy: (r: CallRecord) => ({
+        ...(r.subjectId ? { workId: r.subjectId } : {}),
+        ...(r.groupId ? { groupId: r.groupId } : {}),
+      }),
+    },
+  };
+  const e = new Engine({ host: naive, policy });
+  ready(e, graphOf({ g: [], b: [] }));
+  save(e, {
+    ...base,
+    id: 'legacy-group',
+    subjectId: 'g',
+    groupId: 'g',
+    outcome: 'returned',
+    usage: usage(true, 2),
+    costUsd: 2,
+    costSource: 'provider-reported',
+  });
+  e.pinLegacyCalls();
+  const pinned = records(e).find((r) => r.id === 'legacy-group')!;
+  assert.equal(pinned.workId, undefined, 'вызов о группе не закреплён за поручением g');
+  assert.equal(status(e, { kind: 'work', id: 'b' })?.state, 'exceeded', 'расход группы у b');
+  store.close();
+});

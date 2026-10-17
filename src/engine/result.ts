@@ -51,6 +51,11 @@ const ref = (e: EvidenceRecord, attempt: AttemptState) => ({
   summary: e.summary.slice(0, 4000),
   ...(e.consumer ? { consumer: e.consumer } : {}),
   ...(e.checks ? { checks: e.checks } : {}),
+  // Список тестов собственной проверки интеграции — для доказательства
+  // названного testcase у получателя.
+  ...(e.kind === 'test' && !e.consumer && e.phase === 'integration' && e.tests
+    ? { tests: e.tests, ...(e.testsTruncated ? { testsTruncated: true } : {}) }
+    : {}),
   ...(e.property && (e.property.level || e.property.manifest)
     ? {
         property: {

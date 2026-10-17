@@ -41,12 +41,34 @@ const isGroup = (c: BudgetContext, view: ExecutionView, id: string) =>
  */
 function subjectWork(
   view: ExecutionView,
-  meta: { runId?: string; subjectId?: string; subjectKind?: CallRecord['subjectKind'] },
+  meta: {
+    runId?: string;
+    subjectId?: string;
+    subjectKind?: CallRecord['subjectKind'];
+    groupId?: string;
+    workId?: string;
+  },
 ) {
   const byRun = meta.runId ? view.attempt(meta.runId)?.workId : undefined;
   if (byRun) return byRun;
   if (meta.subjectKind && meta.subjectKind !== 'work') return undefined;
+  if (legacyGroupCall(meta)) return undefined;
   return meta.subjectId && view.work(meta.subjectId) ? meta.subjectId : undefined;
+}
+
+/**
+ * Прежняя запись вызова о группе: вида предмета нет, но при вызове закреплена
+ * группа без поручения и без попытки. Вызов о поручении закреплял его
+ * `workId`, поэтому совпадение ID предмета с поручением такую запись не
+ * делает расходом одного поручения — она остаётся расходом группы.
+ */
+export function legacyGroupCall(r: {
+  runId?: string;
+  subjectKind?: CallRecord['subjectKind'];
+  groupId?: string;
+  workId?: string;
+}) {
+  return !r.subjectKind && !r.runId && !!r.groupId && !r.workId;
 }
 
 /** Поручение записи: закреплённое при вызове, у прежних записей — по попытке. */
