@@ -3,7 +3,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sha256 } from '../src/contracts/index.ts';
+import { runResultSchema, sha256 } from '../src/contracts/index.ts';
 import { resultProblems, type ReceiverContext } from '../src/verification/acceptance.ts';
 import { graphOf, policyOf, sha } from './engine-fixture.ts';
 import { attempt, consumerAttempt, forge } from './receipt-fixtures.ts';
@@ -488,4 +488,42 @@ test('S2-R4-04: ревью подтверждено reviewer-ом политик
     assert.match(resultProblems(done.result, strict).join('; '), /того же вендора/);
     same.store.close();
   }
+});
+
+test('S2-R5-01: генеративный gate потребителя (legacy) переносим; его запись не доказывает договор свойств провайдера', () => {
+  const f = consumerAttempt();
+  const { result, context } = f.done();
+  const own = structuredClone(result) as any;
+  own.evidence.find((x: any) => x.consumer && x.gate === 'e2e').property = { level: 'legacy' };
+  assert.deepEqual(
+    resultProblems(runResultSchema.parse(own), context),
+    [],
+    'штатный результат с property gate потребителя подтверждается',
+  );
+  const manifest = { digest: 'a'.repeat(64), properties: ['p'] };
+  const variants: Record<string, (r: any) => void> = {
+    'уровень manifest у потребителя': (r) =>
+      (r.evidence.find((x: any) => x.consumer && x.gate === 'e2e').property = {
+        level: 'manifest',
+        manifest,
+      }),
+    'манифест при уровне legacy': (r) =>
+      (r.evidence.find((x: any) => x.consumer && x.gate === 'e2e').property = {
+        level: 'legacy',
+        manifest,
+      }),
+    'сведения о свойствах у ревью': (r) =>
+      (r.evidence.find((x: any) => x.kind === 'review').property = { level: 'legacy' }),
+  };
+  for (const [name, change] of Object.entries(variants)) {
+    const forged = structuredClone(own);
+    change(forged);
+    // Отказ схемы — тоже отказ получателя.
+    const parsed = runResultSchema.safeParse(forged);
+    assert.ok(
+      !parsed.success || resultProblems(parsed.data, context).length,
+      name + ': подделка подтверждена',
+    );
+  }
+  f.store.close();
 });

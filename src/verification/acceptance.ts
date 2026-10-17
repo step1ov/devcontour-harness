@@ -330,8 +330,11 @@ export const receiptTrust = {
   'evidence[].tests[].status': ['expected', 'названный testcase прошёл'],
   'evidence[].tests[].opaque': ['expected', 'имя названного testcase не скрыто'],
   'evidence[].testsTruncated': ['expected', 'список решающей записи полон'],
-  'evidence[].property': ['expected', 'доказательство договора проверки'],
-  'evidence[].property.level': ['expected', 'уровень manifest'],
+  'evidence[].property': [
+    'expected',
+    'доказательство договора проверки; у записи потребителя — только legacy без манифеста',
+  ],
+  'evidence[].property.level': ['expected', 'уровень manifest; у записи потребителя — legacy'],
   'evidence[].property.manifest': ['expected', 'манифест договора поручения'],
   'evidence[].property.manifest.digest': ['expected', 'манифест, вычисленный получателем'],
   'evidence[].property.manifest.properties': ['expected', 'свойства поручения'],
@@ -501,8 +504,16 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
       (e.kind !== 'test' || e.phase !== 'integration')
     )
       integrity.push(`запись ${e.id}: список тестов у записи не собственной проверки интеграции`);
-    if (e.property !== undefined && e.kind !== 'test')
-      integrity.push(`запись ${e.id}: манифест свойств у записи вида ${e.kind}`);
+    // Сведения о свойствах: у собственной записи — доказательство договора
+    // поручения; у записи потребителя — только уровень его собственного gate
+    // (`legacy`, без манифеста): договор свойств провайдера к потребителю не
+    // применяется, и его запись ничего о провайдере не доказывает.
+    if (
+      e.property !== undefined &&
+      e.kind !== 'test' &&
+      !(e.kind === 'consumer' && e.property.level === 'legacy' && !e.property.manifest)
+    )
+      integrity.push(`запись ${e.id}: сведения о свойствах недопустимы у записи вида ${e.kind}`);
     if ((e.reviewer !== undefined) !== (e.kind === 'review'))
       integrity.push(`запись ${e.id}: сведения о reviewer не согласованы с видом записи`);
   }

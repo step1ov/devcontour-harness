@@ -341,7 +341,21 @@ export function maximalAttempt() {
       artifacts: [{ path: 'dist/lib.js', digest: digestOf('lib-artifact') }],
     },
   ]);
-  f.evidence('e2e', 'integration', { consumer: 'web' });
+  // Генеративный gate потребителя: его собственный уровень, без договора провайдера.
+  f.evidence('e2e', 'integration', {
+    consumer: 'web',
+    property: {
+      seed: 1347595868,
+      reproduce: 'DEVCONTOUR_SEED=1347595868 controlled',
+      report: {
+        version: 1,
+        properties: [{ testId: 'consumer-property', status: 'passed', cases: 100 }],
+      },
+      contracts: {},
+      artifacts: [],
+      level: 'legacy',
+    },
+  });
   f.evidence('smoke', 'integration', { consumer: 'web' });
   f.e.consumerChecked(f.a.id, f.a.token, 'web', {
     sha: sha('d'),

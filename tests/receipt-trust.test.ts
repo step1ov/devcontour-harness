@@ -121,6 +121,10 @@ function forgeries(result: RunResult, testId: string): Forgery[] {
       const element = at(result, path.slice(0, testsAt + 2));
       if (element.id !== testId) trust = 'informative';
     }
+    // Сведения о свойствах у записи потребителя: допустим только legacy без
+    // манифеста — любая подмена противоречит виду записи.
+    if (path[0] === 'evidence' && path[2] === 'property' && at(result, path.slice(0, 2)).consumer)
+      trust = 'consistency';
     return trust;
   };
   const visit = (value: any, path: (string | number)[]) => {
@@ -196,7 +200,15 @@ function forgeries(result: RunResult, testId: string): Forgery[] {
           path: p,
           how: 'поле удалено',
           forged,
-          trust: absentEquivalent.has(p) ? 'informative' : trustOf(next, p),
+          // Запись потребителя без сведений о свойствах целиком остаётся допустимой.
+          trust:
+            absentEquivalent.has(p) ||
+            (next.length === 3 &&
+              next[0] === 'evidence' &&
+              next[2] === 'property' &&
+              at(result, next.slice(0, 2)).consumer)
+              ? 'informative'
+              : trustOf(next, p),
         });
       }
       removable(child, next, value[k]);

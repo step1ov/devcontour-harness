@@ -330,8 +330,8 @@ Schema строит подделку каждого поля (другое зн�
 | `evidence[].tests[].status`                             | ожидание получателя | названный testcase прошёл                                                                             |
 | `evidence[].tests[].opaque`                             | ожидание получателя | имя названного testcase не скрыто                                                                     |
 | `evidence[].testsTruncated`                             | ожидание получателя | список решающей записи полон                                                                          |
-| `evidence[].property`                                   | ожидание получателя | доказательство договора проверки                                                                      |
-| `evidence[].property.level`                             | ожидание получателя | уровень manifest                                                                                      |
+| `evidence[].property`                                   | ожидание получателя | доказательство договора проверки; у записи потребителя — только legacy без манифеста                  |
+| `evidence[].property.level`                             | ожидание получателя | уровень manifest; у записи потребителя — legacy                                                       |
 | `evidence[].property.manifest`                          | ожидание получателя | манифест договора поручения                                                                           |
 | `evidence[].property.manifest.digest`                   | ожидание получателя | манифест, вычисленный получателем                                                                     |
 | `evidence[].property.manifest.properties`               | ожидание получателя | свойства поручения                                                                                    |
