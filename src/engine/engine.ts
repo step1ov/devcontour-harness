@@ -90,6 +90,14 @@ export interface EngineOptions {
    * политику как применённую ограничено остальными условиями.
    */
   provenance?: () => string | undefined;
+  /**
+   * Тождество применённой политики по формуле хоста — digest (64 hex),
+   * например, файла конфигурации, из которого хост строит политику. По умолчанию —
+   * `policyDigest(policy)`. Им сравниваются применённая и загруженная
+   * политика в барьере и reconfigure; изменение политики в памяти после
+   * создания движка проверяется по-прежнему по её содержимому.
+   */
+  policyIdentity?: string;
 }
 
 export type Phase = 'running' | 'verifying' | 'reviewing' | 'integrating';
@@ -114,6 +122,8 @@ export class Engine {
   private readonly id: () => string;
   /** Digest политики процесса на момент создания движка. */
   readonly loadedPolicy: string;
+  /** Содержимое политики при создании движка: изменение в памяти — отказ применения. */
+  private readonly loadedContent: string;
   /** Поколение применённой политики, которое процесс застал при запуске. */
   private readonly observedGeneration: number;
   private readonly provenance: () => string | undefined;
@@ -127,7 +137,8 @@ export class Engine {
     this.now = options.now ?? Date.now;
     this.id = options.id ?? randomUUID;
     this.provenance = options.provenance ?? (() => undefined);
-    this.loadedPolicy = policyDigest(this.policy);
+    this.loadedContent = policyDigest(this.policy);
+    this.loadedPolicy = options.policyIdentity ?? this.loadedContent;
     this.observedGeneration = this.host.store.read(
       (v) => v.control().appliedPolicy?.generation ?? 0,
     );
@@ -1750,7 +1761,7 @@ export class Engine {
     const lease = view.controller();
     if (lease && lease.leaseUntil > this.now() && lease.owner !== this.ownLeader)
       return `работает controller ${lease.owner} с другой политикой`;
-    if (policyDigest(this.policy) !== this.loadedPolicy)
+    if (policyDigest(this.policy) !== this.loadedContent)
       return 'политика изменена в памяти после загрузки';
     const applied = view.control().appliedPolicy;
     if (applied && (applied.generation ?? 0) !== this.observedGeneration)

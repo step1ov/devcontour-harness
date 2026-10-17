@@ -28,7 +28,11 @@ const refused = (code: ErrorCode, message?: RegExp) => (e: unknown) => {
 function processOf(
   dir: string,
   policy: ExecutionPolicy,
-  options: { now?: () => number; provenance?: () => string | undefined } = {},
+  options: {
+    now?: () => number;
+    provenance?: () => string | undefined;
+    policyIdentity?: string;
+  } = {},
 ) {
   const store = new SqliteExecutionStore(join(dir, 'state.sqlite'), 'test');
   let n = 0;
@@ -38,6 +42,7 @@ function processOf(
     now: options.now ?? (() => Date.parse('2026-01-01T00:00:00.000Z')),
     id: () => `p-${String(++n).padStart(6, '0')}-${Math.random().toString(16).slice(2, 8)}`,
     ...(options.provenance ? { provenance: options.provenance } : {}),
+    ...(options.policyIdentity ? { policyIdentity: options.policyIdentity } : {}),
   });
 }
 
@@ -302,4 +307,32 @@ test('Пределы бюджетов и тарифы не входят в ос�
       .read((v) => changed.blockers(v.work('a')!, v))
       .some((b) => b.code === 'APPROVAL_STALE' && /согласуйте заново/.test(b.message)),
   );
+});
+
+const [C1, C2, C3] = ['config-1', 'config-2', 'config-3'].map((c) => digestOf(c));
+
+test('T27: тождество политики по формуле хоста — применяется и сравнивается оно, а не содержимое нейтральной политики', () => {
+  const { engine: first, dir } = engineOf(A);
+  ready(first, graphOf({ a: [] }));
+  first.release('c1');
+  // Хост строит ту же нейтральную политику из другой конфигурации: это другая политика.
+  const host1 = processOf(dir, A, { policyIdentity: C1 });
+  assert.equal(host1.lead('c2'), true);
+  assert.equal(host1.policyState().applied?.digest, C1);
+  assert.equal(host1.policyState().loaded, C1);
+  const host2 = processOf(dir, A, { policyIdentity: C2 });
+  assert.equal(host2.lead('c3'), false, 'роль у работающего');
+  assert.match(host2.policyState().stale ?? '', /работает controller c2/);
+  assert.throws(() => host2.approve('g', 'agent'), refused('APPROVAL_STALE'));
+  // Тот же идентификатор — та же политика, независимо от процесса.
+  const same = processOf(dir, A, { policyIdentity: C1 });
+  assert.equal(same.policyState().stale, undefined);
+  // Изменение политики в памяти по-прежнему проверяется по содержимому.
+  host1.release('c2');
+  const policy = policyOf();
+  const mutated = processOf(dir, policy, { policyIdentity: C3 });
+  (policy as { maxAttempts: number }).maxAttempts = 9;
+  mutated.lead('c4');
+  assert.equal(mutated.policyState().applied?.digest, C1);
+  assert.match(mutated.policyState().stale ?? '', /изменена в памяти/);
 });

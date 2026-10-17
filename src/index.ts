@@ -89,3 +89,31 @@ export {
   resolveProfile,
   type ResolveProfileOptions,
 } from './profiles/resolve.ts';
+/**
+ * Строительные блоки для хоста, который ведёт движок поверх своего хранилища
+ * (например, продукт с собственной очередью, ревью и операциями): очередь
+ * технических заданий, совместная проверка, перенос базы под владением,
+ * исполнение gate, доказательство testcase, наблюдение команд reviewer,
+ * маскирование и ограниченный разбор по свойству.
+ */
+export { WorkflowQueue, GRAPH_STAGES } from './control/workflow.ts';
+export { JointRunner, type JointRunnerOptions } from './engine/joint-runner.ts';
+export { moveBase, fencedRefMove, type BaseMoved, type RefMove } from './control/base-move.ts';
+export { runGate, runCheck } from './verification/gates.ts';
+export { requirementProof, unprovenReason } from './verification/proof.ts';
+export { ReviewProbes, probeLimits, observeReproductions } from './agents/review-probe.ts';
+export {
+  composeRedactors,
+  outputRedactor,
+  redactDeep,
+  redactError,
+  redactor,
+  type Redactor,
+} from './environment/redaction.ts';
+export {
+  analyzeRecovery,
+  applyCases,
+  recoveryBrief,
+  recoveryOutputSchema,
+  recoveryResultSchema,
+} from './control/recovery.ts';

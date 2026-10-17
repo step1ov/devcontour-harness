@@ -115,6 +115,13 @@ result SHA доступен в target ref.
 у standalone-хоста). Поднятый предел бюджета поэтому согласования не
 сбрасывает.
 
+Хост, который строит политику из собственной конфигурации, может передать
+движку своё тождество применённой политики (`EngineOptions.policyIdentity`,
+digest по формуле хоста — например, файла конфигурации). Тогда применённая
+политика и запрос операции сверяются с ним, а не с `policyDigest(policy)`;
+изменение политики в памяти после создания движка по-прежнему проверяется по
+её содержимому.
+
 Автор (`--author`): `codex`, `claude`, `fixture` или `external` — человек или
 инструмент вне harness; вендор `external` не совпадает ни с одним runtime.
 
@@ -416,6 +423,14 @@ manifestDigest, impact?, evidence[], error?}`. Смена любого SHA де�
 | `WorkSource`                             | `fetch(ref)` с редакцией; `revision(ref)`; `trusts(prerequisite)`, по умолчанию нет                                                                                                                                                                                                                                                                                                                                                                                            |
 | `ContextSource`                          | `snapshot(ids, at)` — `ContextSnapshot` с содержимым                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `ResultSink`                             | `deliver({key, result})` идемпотентно по ключу: `delivered` или `conflict` с текущей редакцией                                                                                                                                                                                                                                                                                                                                                                                 |
+
+Хост, ведущий движок поверх своего хранилища, собирает исполнение из
+экспортов корня пакета: `Engine`, `Runner`, `WorkflowQueue`, `JointRunner`,
+`moveBase`/`fencedRefMove`, `runGate`/`runCheck`, `unprovenReason`,
+`ReviewProbes`, маскирование (`redactor`, `redactDeep`, `redactError`),
+ограниченный разбор по свойству (`analyzeRecovery`, `applyCases`), проверка
+переносимого результата (`resultProblems`). Глубокие импорты `lib/...` не
+поддерживаются.
 
 ## Ошибки и exit codes
 

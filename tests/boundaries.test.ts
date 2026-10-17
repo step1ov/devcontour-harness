@@ -75,3 +75,26 @@ test('Исходники не ссылаются на соседний checkout 
     assert.doesNotMatch(text, /import\(\s*[^'"]/, file + ': динамический import вычисленного пути');
   }
 });
+
+test('Корень пакета экспортирует строительные блоки хоста', async () => {
+  const api = await import('../src/index.ts');
+  for (const name of [
+    'Engine',
+    'Runner',
+    'WorkflowQueue',
+    'JointRunner',
+    'moveBase',
+    'fencedRefMove',
+    'runGate',
+    'unprovenReason',
+    'ReviewProbes',
+    'redactDeep',
+    'redactor',
+    'executionDigest',
+    'policyDigest',
+    'expandGateRefs',
+    'analyzeRecovery',
+    'resultProblems',
+  ])
+    assert.ok(name in api, 'нет экспорта ' + name);
+});
