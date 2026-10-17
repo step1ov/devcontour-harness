@@ -544,3 +544,35 @@ test('S2-R1-11/T23: покрытие gates не засчитывает evidence 
   assert.deepEqual(n.uncoveredGates(['a']), [{ repositoryId: 'app', gates: ['unit'] }]);
   n.release('new');
 });
+
+test('S2-R2-01: согласование, связанное с контекстом, не принимает попытку прежнего снимка; попытка нового снимка принимается', () => {
+  const { engine } = engineOf();
+  const { graph } = engine.register(graphOf({ a: [] }), trustNone);
+  const round = (n: number, context: string) =>
+    engine.recordReview({ ...planReview(engine, graph, n), contextDigest: context });
+  round(1, digestOf('A'));
+  engine.approve(graph.id, 'agent', { bindContext: true });
+  engine.lead('c1');
+  engine.resume();
+  const old = engine.claim('c1')!;
+  engine.update(old.id, old.token, 'run.context', { contextSnapshot: digestOf('A') });
+  passEvidence(engine, old.id, old.token, sha('a'), sha('b'));
+  // Пока шла попытка, согласован другой снимок контекста.
+  round(2, digestOf('B'));
+  engine.approve(graph.id, 'agent', { bindContext: true });
+  assert.throws(() => engine.finish(old.id, old.token, sha('b')), refused('APPROVAL_STALE'));
+  assert.notEqual(
+    engine.read((v) => v.work('a')!.status),
+    'done',
+  );
+  engine.fail(old.id, old.token, 'основание изменилось', { kind: 'stale-base' });
+  engine.retry('a');
+  const next = engine.claim('c1')!;
+  engine.update(next.id, next.token, 'run.context', { contextSnapshot: digestOf('B') });
+  passEvidence(engine, next.id, next.token, sha('a'), sha('c'));
+  engine.finish(next.id, next.token, sha('c'));
+  assert.equal(
+    engine.read((v) => v.work('a')!.status),
+    'done',
+  );
+});

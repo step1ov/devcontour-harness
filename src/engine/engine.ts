@@ -3,6 +3,9 @@ import {
   executionDigest,
   HarnessError,
   WORKSPACE_OWNER,
+  MAX_REPRODUCTIONS,
+  sha256,
+  type ReproductionRecord,
   digestOf,
   expandGateRefs,
   policyDigest,
@@ -362,7 +365,17 @@ export class Engine {
    * режиме `operator` — проведённое ревью этого digest и решение оператора.
    * Другого способа сделать поручения готовыми к выдаче нет.
    */
-  approve(graphId: string, actor: TechnicalApproval['actor']) {
+  approve(
+    graphId: string,
+    actor: TechnicalApproval['actor'],
+    options: {
+      /**
+       * Связать согласование со снимком контекста последнего раунда ревью
+       * плана: другой снимок при том же графе — новое согласование.
+       */
+      bindContext?: boolean;
+    } = {},
+  ) {
     return this.tx('graph.approved', (tx) => {
       this.assertCurrentPolicy(tx);
       const graph = tx.graph(graphId);
@@ -402,7 +415,12 @@ export class Engine {
           'Договор проверки поручений не согласован: ' + problems.join('; '),
         );
       const policy = executionDigest(this.policy);
-      if (graph.approval?.digest === graph.digest && graph.policyDigest === policy)
+      const context = options.bindContext ? { digest: last.contextDigest ?? null } : undefined;
+      if (
+        graph.approval?.digest === graph.digest &&
+        graph.policyDigest === policy &&
+        graph.approval.context?.digest === context?.digest
+      )
         return { graph, changed: false };
       const at = iso(this.now());
       const approval: TechnicalApproval = {
@@ -411,6 +429,7 @@ export class Engine {
         authorRuntime: last.authorRuntime === 'external' ? undefined : last.authorRuntime,
         reviewerRuntime: last.reviewerRuntime,
         artifact: last.artifact,
+        ...(context ? { context } : {}),
       };
       tx.putGraph({ ...graph, policyDigest: policy, approval: { ...approval, at } });
       tx.emit({ type: 'graph.approved', graphId, payload: { digest: graph.digest, actor } });
@@ -1188,6 +1207,57 @@ export class Engine {
     );
   }
 
+  /**
+   * Записать воспроизведения из находок ревью попытки. Одно свойство на одном
+   * входе — одна запись поручения: повтор добавляет прогон, а не запись;
+   * подтверждение запуском не отменяется последующим неподтверждённым.
+   * Реестр ограничен: старые записи вытесняются, а не копятся без предела.
+   */
+  recordReproductions(
+    id: string,
+    token: string,
+    sha: string,
+    items: Omit<ReproductionRecord, 'key' | 'inputHash' | 'runs'>[],
+  ) {
+    return this.withAttempt(id, token, 'reproduction.recorded', (a, w, tx) => {
+      const registry = tx.local('reproductions', WORKSPACE_OWNER, w.id) ?? {
+        workId: w.id,
+        items: [],
+      };
+      const list = registry.items.map((x) => structuredClone(x));
+      const at = iso(this.now());
+      for (const item of items) {
+        const inputHash = sha256(item.input);
+        const key = digestOf({ workId: w.id, property: item.property, inputHash });
+        const run = { runId: a.id, sha, at };
+        const existing = list.find((x) => x.key === key);
+        if (existing) {
+          if (!existing.runs.some((r) => r.runId === a.id)) existing.runs.push(run);
+          existing.runs = existing.runs.slice(-200);
+          // Подтверждённый запуском — с командой и id этого запуска вместе.
+          if (item.observed && !existing.observed) {
+            existing.observed = true;
+            existing.run = item.run;
+            existing.command = item.command;
+          }
+          existing.claimed ||= item.claimed;
+          continue;
+        }
+        list.push({ ...item, key, inputHash, runs: [run] });
+      }
+      tx.putLocal('reproductions', WORKSPACE_OWNER, w.id, {
+        workId: w.id,
+        items: list.slice(-MAX_REPRODUCTIONS),
+      });
+      return list.length;
+    });
+  }
+
+  /** Воспроизведения поручения, от старых к новым. */
+  reproductions(workId: string): ReproductionRecord[] {
+    return this.read((v) => v.local('reproductions', WORKSPACE_OWNER, workId)?.items ?? []);
+  }
+
   evidence(
     id: string,
     token: string,
@@ -1331,6 +1401,14 @@ export class Engine {
       if (proof) throw new HarnessError('GATE_FAILED', proof);
       const contract = this.contractBlocker(w, tx);
       if (contract) throw new HarnessError('APPROVAL_STALE', contract);
+      // Согласование, связанное с контекстом, принимает только попытку на
+      // том же снимке: новый одобренный контекст требует новой попытки.
+      const bound = tx.graph(w.graphId)?.approval?.context;
+      if (bound && (a.contextSnapshot ?? null) !== bound.digest)
+        throw new HarnessError(
+          'APPROVAL_STALE',
+          'Согласованный контекст изменился после выдачи; нужна новая попытка',
+        );
       const refusal = this.host.guards.beforeAccept(w, a, tx);
       if (refusal) throw new HarnessError(refusal.code, refusal.message);
       const at = iso(this.now());

@@ -1,6 +1,7 @@
 import {
   HarnessError,
   digestOf,
+  expandGateRefs,
   type CheckSuite,
   type ContractDocument,
   type EvidenceRecord,
@@ -8,7 +9,13 @@ import {
   type RunResult,
   type WorkOrder,
 } from '../contracts/index.ts';
-import { obligationOf, orderCheckManifest, type CorpusSnapshot } from './checks.ts';
+import {
+  corpusBindingHolds,
+  effectiveChecks,
+  obligationOf,
+  orderCheckManifest,
+  type CorpusSnapshot,
+} from './checks.ts';
 import { manifestDigest } from './property.ts';
 
 /**
@@ -149,7 +156,18 @@ export function resultProblems(
     order: WorkOrder;
     contracts: ContractDocument[];
     /** Корпус по id из копии получателя. */
-    suite?: (id: string) => Pick<CheckSuite, 'versions' | 'cases'> | undefined;
+    suite?: (
+      id: string,
+    ) => Pick<CheckSuite, 'versions' | 'cases' | 'contractId' | 'basis'> | undefined;
+    /**
+     * Политика репозитория поручения у получателя: область gates раскрывается
+     * по его группам. Без неё поручение с группой gates не проверяется.
+     */
+    repository?: Parameters<typeof expandGateRefs>[0];
+    /** Digest согласованной постановки у хоста получателя; по умолчанию — digest поручения. */
+    specDigest?: string;
+    /** Закреплённая за поручением версия корпуса, известная получателю (`null` — без корпуса). */
+    checkVersion?: { suite: string; digest: string } | null;
   },
 ): string[] {
   const problems: string[] = [];
@@ -181,12 +199,23 @@ export function resultProblems(
     );
   const gates = propertyGates(order, context.contracts);
   if (gates.problem) return [gates.problem];
-  const required = [
-    ...new Set([
-      ...(result.inputs.requiredGates ?? order.gates ?? []),
-      ...(gates.byGate?.keys() ?? []),
-    ]),
-  ];
+  // Область поручения раскрывается у получателя: присланный список не может
+  // её сократить, а имя группы не принимается за имя проверки.
+  let own: string[];
+  if (context.repository)
+    try {
+      own = expandGateRefs(context.repository, order.gates);
+    } catch (error) {
+      return ['область gates поручения: ' + (error as Error).message];
+    }
+  else if ((order.gates ?? []).some((g) => g.startsWith('@')))
+    return ['поручение ссылается на группу gates; нужна политика репозитория получателя'];
+  else own = order.gates ?? [];
+  const declared = result.inputs.requiredGates;
+  const missingOwn = declared ? own.filter((g) => !declared.includes(g)) : [];
+  if (missingOwn.length)
+    problems.push(`область поручения требует ${missingOwn.join(', ')}, а результат их не проверял`);
+  const required = [...new Set([...(declared ?? []), ...own, ...(gates.byGate?.keys() ?? [])])];
   const decisiveAll = (['candidate', 'integration'] as const).flatMap((phase) => [
     ...required.map((gate) => ({ phase, gate, check: last('test', phase, gate) })),
     { phase, gate: 'independent-review', check: last('review', phase, 'independent-review') },
@@ -208,13 +237,39 @@ export function resultProblems(
       problems.push(`${phase}/${gate} получен под другой версией проверок`);
   if (problems.length) return problems;
   const binding = result.inputs.corpus;
+  // Версия проверок вычисляется получателем из постановки, контрактов,
+  // политики и корпуса результата: согласованная, но произвольная версия, как
+  // и удаление корпуса вместе с его привязкой, её не воспроизводит.
+  const expected = effectiveChecks(
+    {
+      approvedDigest: context.specDigest ?? digestOf(order),
+      order,
+      ...(binding ? { checkVersion: { ...binding } } : {}),
+    },
+    result.inputs.policyDigest,
+  );
+  if (expected !== effective)
+    return ['версия проверок не соответствует постановке, контрактам, политике и корпусу'];
+  // Пересчитанные вместе версия, манифест и корпус согласованы сами с собой:
+  // какой корпус обязателен, знает только получатель.
+  if (order.properties?.length && context.checkVersion === undefined)
+    return ['поручение с договором проверки: получатель не передал закреплённую версию корпуса'];
+  if (
+    context.checkVersion !== undefined &&
+    (context.checkVersion?.digest ?? null) !== (binding?.digest ?? null)
+  )
+    return ['корпус результата не совпадает с закреплённым за поручением у получателя'];
   let corpus: CorpusSnapshot | undefined;
   if (binding) {
-    const found = suiteCorpus(context.suite?.(binding.suite), binding.digest);
+    const suite = context.suite?.(binding.suite);
+    const found = suiteCorpus(suite, binding.digest);
     if (!found)
       return [
         `результат ссылается на версию корпуса ${binding.suite}#${binding.number}, которой нет у получателя`,
       ];
+    // Корпус относится к договору поручения с тем же нормативным основанием.
+    if (suite?.contractId !== undefined && !corpusBindingHolds(suite, context.contracts))
+      return [`корпус ${binding.suite} не относится к договорам поручения`];
     corpus = found;
   }
   const proof = propertyProofProblem({

@@ -483,6 +483,13 @@ for (const reviewer of ['codex', 'claude'] as const)
         const spec = readFileSync(join(e.log, '..', 'probe.json'), 'utf8');
         assert.ok(spec.includes('"RUN_TOKEN"') && !spec.includes(secret), 'значения не на диске');
       }
+      // Реестр поручения: воспроизведение наблюдено по журналу controller, с
+      // командой, которая действительно запускалась, без секрета.
+      const registered = ctx.engine.reproductions('add-greeting');
+      assert.ok(registered.length >= 1);
+      assert.equal(registered[0]!.observed, true);
+      assert.equal(registered[0]!.command![0], process.execPath);
+      assert.ok(!JSON.stringify(registered).includes(secret));
       // Writer инструмента проверок не получает.
       const writerPrompt = readFileSync(`${ctx.scenarioPath}.writer.0.prompt`, 'utf8');
       assert.doesNotMatch(writerPrompt, /devcontour_probe|run_check/);

@@ -220,6 +220,7 @@ export async function analyzeRecovery(
     {
       runId: work.recovery!.runs.at(-1)!,
       subjectId: work.id,
+      subjectKind: 'work',
       stage: 'property-recovery',
     },
   ).catch((error: unknown) => {

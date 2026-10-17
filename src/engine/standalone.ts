@@ -34,12 +34,17 @@ export function standaloneHost(store: ExecutionStore, policy: ExecutionPolicy): 
       legacy: (record, view) => {
         const workId =
           (record.runId ? view.attempt(record.runId)?.workId : undefined) ??
-          (record.subjectId && view.work(record.subjectId) ? record.subjectId : undefined);
+          (record.subjectId &&
+          (!record.subjectKind || record.subjectKind === 'work') &&
+          view.work(record.subjectId)
+            ? record.subjectId
+            : undefined);
         if (workId) {
           const groupId = view.work(workId)?.graphId;
           return { workId, ...(groupId ? { groupId } : {}) };
         }
-        const graphId = record.groupId ?? record.subjectId;
+        const graphId =
+          record.groupId ?? (record.subjectKind === 'other' ? undefined : record.subjectId);
         if (!graphId || !view.graph(graphId)) return {};
         return { groupId: graphId, workIds: view.works(graphId).map((w) => w.id) };
       },

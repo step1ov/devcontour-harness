@@ -1419,6 +1419,29 @@ export class Runner {
     );
     const log = join(dir, 'review.json');
     await writeFile(log, JSON.stringify(record, null, 2));
+    // Находки с воспроизводимым входом — в реестр поручения, уже
+    // замаскированными; наблюдение — только по журналу controller. Команда из
+    // текста находки не исполняется.
+    const reproductions = (record.findings ?? []).flatMap((f) => {
+      // Наблюдение проставляет `observeReproductions` по журналу controller.
+      const r: (typeof f.reproduction & { observed?: boolean }) | null | undefined = f.reproduction;
+      if (!r) return [];
+      return [
+        {
+          property: r.property,
+          input: r.input,
+          expected: r.expected,
+          actual: r.actual,
+          command: r.command,
+          message: f.message.slice(0, 4000),
+          claimed: r.executed,
+          observed: r.observed === true,
+          run: r.observed === true ? (r.run ?? null) : null,
+        },
+      ];
+    });
+    if (reproductions.length)
+      this.engine.recordReproductions(attempt.id, attempt.token, sha, reproductions);
     const reason = !clean
       ? 'reviewer изменил дерево или HEAD'
       : issues.join('; ') || record.summary;
@@ -1491,8 +1514,28 @@ export class Runner {
   }
 
   private notes(attempt: AttemptState, review: boolean, sha?: string) {
+    const reproductions = this.engine.reproductions(attempt.workId);
     return this.engine.read((v) => {
       const out: string[] = [];
+      // Воспроизведения прошлых ревью — входы, на которых поручение уже
+      // ломалось. Диагностика: gate они не расширяют.
+      if (reproductions.length)
+        out.push(
+          'Reproductions recorded by earlier reviews of this work order (diagnostic, not a gate; "observed" means the controller saw the reviewer run the command). Check the change against each input: ' +
+            JSON.stringify(
+              reproductions
+                .slice(-20)
+                .map(({ property, input, expected, actual, command, observed, runs }) => ({
+                  property,
+                  input,
+                  expected,
+                  actual,
+                  command,
+                  observed,
+                  seen: runs.length,
+                })),
+            ),
+        );
       // Согласованные контракты поручения — их текстом, по закреплённому digest.
       const contracts = contractDocuments(v.work(attempt.workId)!.order, v);
       if (contracts.length)
@@ -1501,6 +1544,10 @@ export class Runner {
             JSON.stringify(
               contracts.map((c) => ({ id: c.id, title: c.title, content: c.content })),
             ),
+        );
+      if (review)
+        out.push(
+          'When a finding fails on a concrete input, fill reproduction: property (the testId or acceptance criterion it violates), input (the exact input as JSON text), expected and actual, and command (argv) that shows it. If you ran it through the controller check tool, set run to the runId it returned and executed=true; the controller confirms the run from its own log and records the command that actually ran. Otherwise run=null and it is a hypothesis. Use null for findings without such an input.',
         );
       // Reviewer видит, что controller сам записал о проверяемом SHA: gates и
       // их итоги, а не пересказ исполнителя.

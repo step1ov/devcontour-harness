@@ -14,6 +14,7 @@ import {
 import type { Engine } from '../engine/engine.ts';
 import { git } from '../environment/process.ts';
 import { executionEnvironment } from '../environment/lifecycle.ts';
+import { redactDeep } from '../environment/redaction.ts';
 import { runCheck } from './gates.ts';
 
 /** Что нужно эксперименту от controller. */
@@ -50,6 +51,23 @@ export async function runSpike(ctx: SpikeContext, raw: unknown): Promise<Spike> 
     ? ctx.policy.repositories.find((r) => r.id === input.repositoryId)
     : ctx.policy.repositories[0];
   if (!repo) throw new HarnessError('NOT_FOUND', 'Репозиторий не объявлен: ' + input.repositoryId);
+  // Окружение и его маска — до любой работы: недостающий секрет — отказ без
+  // worktree и записи, а известные значения не попадают в сохраняемую запись.
+  const environmentOf = (size: number) =>
+    executionEnvironment(
+      [ctx.policy.environment, repo.environment],
+      { DEVCONTOUR_SPIKE_SIZE: String(size), DEVCONTOUR_SEED: String(input.seed) },
+      ctx.environment ?? process.env,
+    );
+  let redact: (text: string) => string;
+  try {
+    redact = environmentOf(input.sizes[0]!).redact;
+  } catch (error) {
+    throw new HarnessError(
+      'RUNTIME_UNAVAILABLE',
+      'Окружение эксперимента: ' + (error instanceof Error ? error.message : String(error)),
+    );
+  }
   const path = ctx.repoPath(repo);
   const sha = input.sha ?? (await git(path, 'rev-parse', 'HEAD'));
   await git(path, 'cat-file', '-e', `${sha}^{commit}`).catch(() => {
@@ -64,11 +82,7 @@ export async function runSpike(ctx: SpikeContext, raw: unknown): Promise<Spike> 
   try {
     const boundary = ctx.boundary();
     for (const size of input.sizes) {
-      const environment = executionEnvironment(
-        [ctx.policy.environment, repo.environment],
-        { DEVCONTOUR_SPIKE_SIZE: String(size), DEVCONTOUR_SEED: String(input.seed) },
-        ctx.environment ?? process.env,
-      );
+      const environment = environmentOf(size);
       const started = Date.now();
       const result = await runCheck(
         { config: ctx.policy },
@@ -93,6 +107,10 @@ export async function runSpike(ctx: SpikeContext, raw: unknown): Promise<Spike> 
       });
       if (result.timedOut) break;
     }
+  } catch (error) {
+    // Класс отказа сохраняется, известные значения из текста — нет.
+    if (error instanceof Error) error.message = redact(error.message);
+    throw error;
   } finally {
     await git(path, 'worktree', 'remove', '--force', dir).catch(() => undefined);
   }
@@ -129,7 +147,9 @@ export async function runSpike(ctx: SpikeContext, raw: unknown): Promise<Spike> 
     },
     at: new Date().toISOString(),
   } satisfies Omit<Spike, 'digest'>;
-  const spike = spikeSchema.parse({ ...record, digest: digestOf(record) });
+  // Сохраняется и возвращается маскированная форма; digest — от неё.
+  const safe = redactDeep(record, redact);
+  const spike = spikeSchema.parse({ ...safe, digest: digestOf(safe) });
   ctx.engine.host.store.transact('checks.spike', (tx) => tx.putLocal('spikes', repo.id, id, spike));
   return spike;
 }

@@ -1,7 +1,11 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access --
+ * Тест правит сырой JSON политики до разбора схемой.
+ */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
-import { HarnessError, workGraphSchema, type ErrorCode } from '../src/contracts/index.ts';
+import { join } from 'node:path';
+import { HarnessError, digestOf, workGraphSchema, type ErrorCode } from '../src/contracts/index.ts';
 import {
   CorpusStore,
   portableSuite,
@@ -633,4 +637,65 @@ console.log('size', n, x);
   // Неопределённый эксперимент ничего не меняет в договоре сам.
   assert.equal(hard.checks!.obligations[0]!.hard, true);
   h.close();
+});
+
+test('S2-R2-06/T30: эксперимент не сохраняет и не возвращает известные значения окружения — в argv, вопросе и в кодированной форме; без секрета — отказ до worktree и записи', async () => {
+  const secret = 'spike"secret-99012';
+  process.env.HARNESS_SPIKE_SECRET = secret;
+  try {
+    const ctx = propertySetup({
+      writer: implement({ 'src/knap.mjs': knap.correct }),
+      policy: (p: any) => (p.environment.secrets = { TOKEN: 'HARNESS_SPIKE_SECRET' }),
+    });
+    const h = propertyHarness(ctx);
+    const spike = await h.spike({
+      command: [process.execPath, '-e', 'process.exit(0)', '--', '--token=' + secret],
+      sizes: [1],
+      timeoutMs: 20000,
+      question: 'Укладывается ли перебор с токеном ' + JSON.stringify(secret),
+    });
+    assert.equal(spike.outcome, 'feasible');
+    assert.equal(spike.command.at(-1), '--token=[REDACTED]', 'команда сохранена маскированной');
+    assert.match(spike.question, /\[REDACTED\]/);
+    const forms = [secret, JSON.stringify(secret).slice(1, -1), encodeURIComponent(secret)];
+    for (const text of [JSON.stringify(spike), JSON.stringify(h.spikes())])
+      for (const form of forms) assert.ok(!text.includes(form), 'значение в записи: ' + form);
+    const { digest, ...rest } = spike;
+    assert.equal(digest, digestOf(rest), 'digest — от сохранённой маскированной формы');
+    // Путь отказа: команда, которую нельзя запустить, — в ошибке или записи значения нет.
+    const broken = await h
+      .spike({
+        command: ['/nonexistent-' + secret],
+        sizes: [1],
+        timeoutMs: 5000,
+        question: 'Отказ запуска',
+      })
+      .then(
+        (x) => JSON.stringify(x),
+        (e: unknown) => String((e as Error).message) + ' [error]',
+      );
+    assert.match(broken, /\[error\]$/, 'запуск невозможной команды — отказ');
+    for (const form of forms) assert.ok(!broken.includes(form), 'значение на пути отказа');
+    h.close();
+  } finally {
+    delete process.env.HARNESS_SPIKE_SECRET;
+  }
+  // Секрет окружения не задан — отказ до эксперимента, без записи.
+  const missing = propertySetup({
+    writer: implement({ 'src/knap.mjs': knap.correct }),
+    policy: (p: any) => (p.environment.secrets = { TOKEN: 'HARNESS_SPIKE_NOT_SET_41' }),
+  });
+  const h2 = propertyHarness(missing);
+  await assert.rejects(
+    h2.spike({
+      command: [process.execPath, '-e', '0'],
+      sizes: [1],
+      timeoutMs: 5000,
+      question: 'Без секрета окружения',
+    }),
+    (e: unknown) => e instanceof HarnessError && e.code === 'RUNTIME_UNAVAILABLE',
+  );
+  assert.equal(h2.spikes().length, 0);
+  assert.ok(!existsSync(join(missing.state, 'spikes')), 'worktree не создавался');
+  h2.close();
 });

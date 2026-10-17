@@ -87,6 +87,12 @@ export const technicalApprovalSchema = z.strictObject({
   /** Ссылка на сохранённый ответ reviewer. */
   artifact: z.string().max(1000).optional(),
   digest: digestSchema.optional(),
+  /**
+   * Снимок контекста, который видел reviewer согласованного плана (`null` —
+   * без контекста). Есть, когда хост связывает согласование с контекстом:
+   * исполняется и принимается только этот снимок.
+   */
+  context: z.strictObject({ digest: digestSchema.nullable() }).optional(),
 });
 export type TechnicalApproval = z.infer<typeof technicalApprovalSchema>;
 
@@ -619,6 +625,12 @@ export const callRecordSchema = z.strictObject({
   repositoryId: idSchema.optional(),
   runId: z.string().optional(),
   subjectId: z.string().optional(),
+  /**
+   * Чем является предмет вызова: поручение, группа или прочее (контракт).
+   * Явный вид важнее совпадения строки с ID поручения; у прежних записей
+   * его нет — тогда предмет ищется по ID.
+   */
+  subjectKind: z.enum(['work', 'group', 'other']).optional(),
   stage: z.string().min(1).max(100),
   runtime: z.string().min(1),
   /** Модель, о которой сообщил runtime; по ней выбирается тариф. */
@@ -845,6 +857,39 @@ export type WorkflowJob = z.infer<typeof workflowJobSchema>;
  * пространство движок не пишет и не читает.
  */
 export const WORKSPACE_OWNER = '@workspace';
+/**
+ * Воспроизведение из находки ревью: вход, на котором поручение ломалось.
+ * Один и тот же вход одного свойства — одна запись, повтор добавляет прогон.
+ * `observed` — запуск подтверждён журналом controller (probe); иначе это
+ * гипотеза reviewer. Диагностика: gate не расширяет, корпусом не становится
+ * без подтверждения эталоном.
+ */
+export const reproductionRecordSchema = z.strictObject({
+  key: digestSchema,
+  property: z.string().max(200).nullable(),
+  inputHash: digestSchema,
+  input: z.string().min(1).max(8000),
+  expected: z.string().max(2000).nullable(),
+  actual: z.string().max(2000).nullable(),
+  command: z.array(z.string()).max(64).nullable(),
+  message: z.string().max(4000),
+  /** Reviewer сообщил, что запускал команду. */
+  claimed: z.boolean(),
+  observed: z.boolean(),
+  run: z.string().nullable(),
+  runs: z
+    .array(z.strictObject({ runId: z.string().min(1), sha: gitShaSchema, at: isoTimeSchema }))
+    .max(200),
+});
+export type ReproductionRecord = z.infer<typeof reproductionRecordSchema>;
+
+/** Реестр воспроизведений поручения; ограничен — старые записи вытесняются. */
+export const reproductionRegistrySchema = z.strictObject({
+  workId: idSchema,
+  items: z.array(reproductionRecordSchema).max(500),
+});
+export const MAX_REPRODUCTIONS = 500;
+
 export const localSchemas = {
   /** Учёт вызовов моделей. */
   usage: callRecordSchema,
@@ -871,6 +916,12 @@ export const localSchemas = {
    * тяжёлые обязательства договора проверки (у DevContour — `spikes`).
    */
   spikes: spikeSchema,
+  /**
+   * Реестр воспроизведений из находок ревью по поручениям (у DevContour —
+   * `reproductions` состояния): входы, на которых поручение ломалось,
+   * передаются следующей попытке.
+   */
+  reproductions: reproductionRegistrySchema,
 } as const;
 export type LocalNamespace = keyof typeof localSchemas;
 export type LocalValue<N extends LocalNamespace> = z.infer<(typeof localSchemas)[N]>;

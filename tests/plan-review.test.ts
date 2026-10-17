@@ -246,3 +246,171 @@ test('S2-R1-01/T27: процесс, чью политику сменили на 
   next.release('new');
   h.close();
 });
+
+/** Reviewer плана с решением на каждый вызов; `hold` — вызов ждёт снаружи. */
+function decidingReviewer(decisions: (boolean | 'fail' | 'hold')[]) {
+  const requests: RuntimeRequest[] = [];
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  const adapter = (runtime: RuntimeName): RuntimeAdapter => ({
+    runtime,
+    capabilities: () => Promise.resolve({ runtime, available: true } as any),
+    invoke: async (request) => {
+      requests.push(request);
+      const decision = decisions.shift() ?? true;
+      if (decision === 'hold') await held;
+      if (decision === 'fail')
+        return {
+          status: 'failed',
+          text: '',
+          model: null,
+          diagnostics: { exitCode: 1 },
+        } as unknown as Awaited<ReturnType<RuntimeAdapter['invoke']>>;
+      return {
+        status: 'ok',
+        text: '',
+        model: null,
+        runtimeVersion: 'controlled',
+        output: { approved: decision !== false, summary: 'решение', findings: [], previous: [] },
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reportedUsd: 0,
+          complete: true,
+          source: 'claude-result',
+        },
+        diagnostics: { exitCode: 0 },
+      };
+    },
+  });
+  return { requests, release, adapters: { codex: adapter('codex'), claude: adapter('claude') } };
+}
+
+test('S2-R2-01/S2.4: снимок контекста действует только вместе с согласованием — отклонённый, упавший, ожидающий и операторский не исполняются, и после перезапуска', async () => {
+  const graph = needsNorms();
+  const a = snapshot('APPROVED-CONTEXT');
+  const b = snapshot('REJECTED-CONTEXT-NEW');
+  const { adapters, release } = decidingReviewer([true, false, 'fail', 'hold', true]);
+  const { h, stateDir } = open(policyOf(), adapters);
+  const effective = (x: Harness) =>
+    (x as unknown as { contextOf(id: string): ContextSnapshot | undefined }).contextOf(graph.id);
+  const claimed = (x: Harness) => {
+    const issued = x.engine.claim('probe');
+    if (issued) x.engine.cancel(issued.workId, 'проверка выдачи');
+    return issued?.workId;
+  };
+  // Очередь на паузе человека: run регистрирует и согласует, но не исполняет.
+  h.engine.pause('operator');
+  await h.run({ graph, context: a, author: 'claude' });
+  assert.equal(effective(h)?.sources[0]!.files[0]!.content!.data, 'APPROVED-CONTEXT');
+  // Отклонённый новый снимок не становится действующим.
+  await assert.rejects(h.run({ graph, context: b, author: 'claude' }), refused('REVIEW_REJECTED'));
+  assert.equal(effective(h)?.sources[0]!.files[0]!.content!.data, 'APPROVED-CONTEXT');
+  // Отказ runtime reviewer — тоже.
+  await assert.rejects(h.run({ graph, context: b, author: 'claude' }));
+  assert.equal(effective(h)?.sources[0]!.files[0]!.content!.data, 'APPROVED-CONTEXT');
+  // Пока идёт ревью нового снимка, выдача видит прежний согласованный.
+  h.engine.lead('probe');
+  h.engine.resume();
+  const pending = h.review({ kind: 'plan', graph, context: b, author: 'claude' });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(claimed(h), 'a', 'выдача продолжается по прежнему основанию');
+  assert.equal(effective(h)?.sources[0]!.files[0]!.content!.data, 'APPROVED-CONTEXT');
+  release();
+  const approvedB = await pending;
+  assert.equal(approvedB.approved, true);
+  // Одобренный раунд без согласования ещё не делает снимок действующим.
+  assert.equal(effective(h)?.sources[0]!.files[0]!.content!.data, 'APPROVED-CONTEXT');
+  h.engine.release('probe');
+  h.close();
+  // Перезапуск: действующий снимок прежний.
+  const reopened = Harness.open({ policy: policyOf(), stateDir, baseDir: process.cwd(), adapters });
+  assert.equal(effective(reopened)?.sources[0]!.files[0]!.content!.data, 'APPROVED-CONTEXT');
+  // Законное согласование нового снимка делает его действующим.
+  reopened.engine.approve(graph.id, 'agent', { bindContext: true });
+  assert.equal(effective(reopened)?.sources[0]!.files[0]!.content!.data, 'REJECTED-CONTEXT-NEW');
+  reopened.close();
+});
+
+test('S2-R2-01: в режиме operator новый снимок не действует до approve', async () => {
+  const graph = needsNorms();
+  const { adapters } = decidingReviewer([true, true]);
+  const policy = policyOf((p: any) => (p.approvalMode = 'operator'));
+  const { h } = open(policy, adapters);
+  const effective = () =>
+    (h as unknown as { contextOf(id: string): ContextSnapshot | undefined }).contextOf(graph.id)
+      ?.sources[0]!.files[0]!.content!.data;
+  h.engine.pause('operator');
+  await assert.rejects(
+    h.run({ graph, context: snapshot('v1'), author: 'claude' }),
+    refused('APPROVAL_REQUIRED'),
+  );
+  await h.review({ kind: 'plan', graph, context: snapshot('v1'), author: 'claude' });
+  const digest = h.engine.read((v) => v.graph(graph.id)!.digest);
+  h.approve(graph.id, digest);
+  assert.equal(effective(), 'v1');
+  await assert.rejects(
+    h.run({ graph, context: snapshot('v2'), author: 'claude' }),
+    refused('APPROVAL_REQUIRED'),
+  );
+  assert.equal(effective(), 'v1', 'run не подменил действующий снимок');
+  await h.review({ kind: 'plan', graph, context: snapshot('v2'), author: 'claude' });
+  assert.equal(effective(), 'v1', 'одобренный раунд без approve оператора');
+  h.approve(graph.id, digest);
+  assert.equal(effective(), 'v2');
+  h.close();
+});
+
+test('S2-R2-02/T25: ID графа, совпавший с ID поручения, не обходит бюджет остальных участников; и после перезапуска', async () => {
+  const { requests, adapters } = reviewers(2);
+  const policy = policyOf((p: any) => (p.budgets = { work: { usd: 1 } }));
+  const { h, stateDir } = open(policy, adapters);
+  // Ревью ещё не зарегистрированного графа g с поручением b исчерпывает бюджет b.
+  await h.review({ kind: 'plan', graph: graphOf({ b: [] }), author: 'claude' });
+  assert.deepEqual(h.engine.read((v) => callRecords(v))[0]!.workIds, ['b']);
+  // Новая редакция того же графа содержит поручение с ID графа.
+  const collided = graphOf({ g: [], b: [] }, '2');
+  h.engine.register(collided, { trusted: () => false, reachable: () => true });
+  await assert.rejects(
+    h.review({ kind: 'plan', graph: collided, author: 'claude' }),
+    refused('BUDGET_EXHAUSTED'),
+    'ревью группы проверяет исчерпанного участника b',
+  );
+  assert.equal(requests.length, 1, 'второго вызова reviewer нет');
+  h.close();
+  const again = open(policy, adapters, stateDir).h;
+  await assert.rejects(
+    again.review({ kind: 'plan', graph: collided, author: 'claude' }),
+    refused('BUDGET_EXHAUSTED'),
+  );
+  assert.equal(requests.length, 1);
+  again.close();
+});
+
+test('S2-R2-02: вызов о группе засчитывается её участникам, а не поручению с тем же ID; контракт с ID поручения — не расход поручения', async () => {
+  const { adapters } = reviewers(2);
+  const policy = policyOf((p: any) => (p.budgets = { work: { usd: 3 }, total: { usd: 100 } }));
+  const { h } = open(policy, adapters);
+  const graph = graphOf({ g: [], b: [] });
+  h.engine.register(graph, { trusted: () => false, reachable: () => true });
+  await h.review({ kind: 'plan', graph, author: 'claude' });
+  const plan = h.engine.read((v) => callRecords(v))[0]!;
+  assert.equal(plan.subjectKind, 'group');
+  assert.equal(plan.workId, undefined, 'вызов о графе не стал вызовом поручения g');
+  assert.deepEqual([...plan.workIds!].sort(), ['b', 'g']);
+  await h.review({
+    kind: 'contract',
+    contract: { apiVersion: API_VERSION, id: 'b', title: 'API', content: 'Контракт API целиком.' },
+    author: 'claude',
+  });
+  const contract = h.engine.read((v) => callRecords(v)).find((r) => r.stage === 'contract-review')!;
+  assert.equal(contract.subjectKind, 'other');
+  assert.equal(contract.workId, undefined, 'контракт с ID поручения не тратит его бюджет');
+  const work = h.engine
+    .budgets()!
+    .budgets.find((b) => b.scope.kind === 'work' && b.scope.id === 'b')!;
+  assert.equal(work.reportedUsd, 2, 'у b только его доля ревью плана');
+  h.close();
+});

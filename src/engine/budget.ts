@@ -34,16 +34,29 @@ const closed = (w: WorkState | undefined) => !!w && ['done', 'cancelled'].includ
 const isGroup = (c: BudgetContext, view: ExecutionView, id: string) =>
   c.scopes.members(id, view).length > 0;
 
+/**
+ * Предмет вызова — поручение: по попытке либо по ID предмета, если вид
+ * предмета не назван иначе. Вызов о группе или контракте с ID, совпавшим с
+ * поручением, этим поручением не становится.
+ */
+function subjectWork(
+  view: ExecutionView,
+  meta: { runId?: string; subjectId?: string; subjectKind?: CallRecord['subjectKind'] },
+) {
+  const byRun = meta.runId ? view.attempt(meta.runId)?.workId : undefined;
+  if (byRun) return byRun;
+  if (meta.subjectKind && meta.subjectKind !== 'work') return undefined;
+  return meta.subjectId && view.work(meta.subjectId) ? meta.subjectId : undefined;
+}
+
 /** Поручение записи: закреплённое при вызове, у прежних записей — по попытке. */
-const recordWork = (view: ExecutionView, r: CallRecord) =>
-  r.workId ??
-  (r.runId ? view.attempt(r.runId)?.workId : undefined) ??
-  (r.subjectId && view.work(r.subjectId) ? r.subjectId : undefined);
+const recordWork = (view: ExecutionView, r: CallRecord) => r.workId ?? subjectWork(view, r);
 
 /** Группа записи: закреплённая при вызове, у прежних записей — по текущему составу. */
 function recordGroup(c: BudgetContext, view: ExecutionView, r: CallRecord) {
   if (r.groupId) return r.groupId;
-  if (r.subjectId && isGroup(c, view, r.subjectId)) return r.subjectId;
+  if (r.subjectId && (!r.subjectKind || r.subjectKind === 'group') && isGroup(c, view, r.subjectId))
+    return r.subjectId;
   const work = recordWork(view, r);
   return work ? c.scopes.groupOf(work, view) : undefined;
 }
@@ -214,6 +227,8 @@ export interface CallMeta {
   repositoryId?: string;
   runId?: string;
   subjectId?: string;
+  /** Вид предмета: явный вид важнее совпадения ID с поручением. */
+  subjectKind?: CallRecord['subjectKind'];
   stage: string;
   /**
    * Состав группы из входа вызова (ревью плана до регистрации графа): группа и
@@ -227,11 +242,15 @@ export interface CallMeta {
 function callGroup(
   c: BudgetContext,
   view: ExecutionView,
-  meta: Pick<CallMeta, 'subjectId' | 'group'>,
+  meta: Pick<CallMeta, 'subjectId' | 'subjectKind' | 'group'>,
 ) {
   const id =
     meta.group?.id ??
-    (meta.subjectId && isGroup(c, view, meta.subjectId) ? meta.subjectId : undefined);
+    (meta.subjectId &&
+    (!meta.subjectKind || meta.subjectKind === 'group') &&
+    isGroup(c, view, meta.subjectId)
+      ? meta.subjectId
+      : undefined);
   if (!id) return undefined;
   const members = [...new Set([...(meta.group?.workIds ?? []), ...c.scopes.members(id, view)])];
   return { id, members };
@@ -245,13 +264,11 @@ function callGroup(
 export function callBudgets(
   c: BudgetContext,
   view: ExecutionView,
-  meta: Pick<CallMeta, 'runId' | 'subjectId' | 'group'>,
+  meta: Pick<CallMeta, 'runId' | 'subjectId' | 'subjectKind' | 'group'>,
   records = callRecords(view),
   at = Date.now(),
 ) {
-  const workId =
-    (meta.runId ? view.attempt(meta.runId)?.workId : undefined) ??
-    (meta.subjectId && view.work(meta.subjectId) ? meta.subjectId : undefined);
+  const workId = meta.group ? undefined : subjectWork(view, meta);
   if (workId) return workBudgets(c, view, workId, records, at);
   const group = callGroup(c, view, meta);
   const open = group ? group.members.filter((id) => !closed(view.work(id))) : [];
@@ -276,12 +293,10 @@ export function callBudgets(
 export function callAttribution(
   c: BudgetContext,
   view: ExecutionView,
-  meta: Pick<CallMeta, 'runId' | 'subjectId' | 'group'>,
+  meta: Pick<CallMeta, 'runId' | 'subjectId' | 'subjectKind' | 'group'>,
   all = false,
 ): Pick<CallRecord, 'workId' | 'groupId' | 'workIds'> {
-  const workId =
-    (meta.runId ? view.attempt(meta.runId)?.workId : undefined) ??
-    (meta.subjectId && view.work(meta.subjectId) ? meta.subjectId : undefined);
+  const workId = meta.group ? undefined : subjectWork(view, meta);
   if (workId) {
     const groupId = c.scopes.groupOf(workId, view);
     return { workId, ...(groupId ? { groupId } : {}) };

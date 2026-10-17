@@ -55,6 +55,7 @@ export async function measuredInvoke(
       ...(meta.repositoryId ? { repositoryId: meta.repositoryId } : {}),
       ...(meta.runId ? { runId: meta.runId } : {}),
       ...(meta.subjectId ? { subjectId: meta.subjectId } : {}),
+      ...(meta.subjectKind ? { subjectKind: meta.subjectKind } : {}),
       id: request.callId,
       stage: meta.stage,
       runtime: adapter.runtime,

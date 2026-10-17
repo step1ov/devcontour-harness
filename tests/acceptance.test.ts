@@ -12,7 +12,11 @@ import {
   type EvidenceRecord,
   type RunResult,
 } from '../src/contracts/index.ts';
-import { contractDocuments, orderCheckManifest } from '../src/verification/checks.ts';
+import {
+  contractDocuments,
+  effectiveChecks,
+  orderCheckManifest,
+} from '../src/verification/checks.ts';
 import { manifestDigest } from '../src/verification/property.ts';
 import { CorpusStore } from '../src/verification/corpus.ts';
 import { pinnedCorpus, resultProblems } from '../src/verification/acceptance.ts';
@@ -301,14 +305,21 @@ function acceptedProperty() {
   const shas = integrate(ctx);
   prove(ctx, shas, () => manifestProperty(manifestOf(ctx)));
   ctx.e.finish(ctx.a.id, ctx.a.token, shas.integration);
-  const { result, order, contracts, suites } = ctx.e.read((v) => ({
+  const { result, order, contracts, suites, checkVersion } = ctx.e.read((v) => ({
     result: runResult(v.attempt(ctx.a.id)!, '0.1.0-test'),
     order: v.work('add-greeting')!.order,
     contracts: contractDocuments(v.work('add-greeting')!.order, v),
     suites: v.locals('check-suites').map((x) => x.value),
+    checkVersion: v.work('add-greeting')!.checkVersion,
   }));
   ctx.ctx.store.close();
-  const context = { order, contracts, suite: (id: string) => suites.find((s) => s.id === id) };
+  const context = {
+    order,
+    contracts,
+    suite: (id: string) => suites.find((s) => s.id === id),
+    repository: ctx.ctx.policy.repositories[0]!,
+    checkVersion: checkVersion ? { suite: checkVersion.suite, digest: checkVersion.digest } : null,
+  };
   return { result, context };
 }
 
@@ -357,7 +368,7 @@ test('S2-R1-09/AC23: переносимый результат нового фо
     [
       'AC23: версия корпуса, которой нет у получателя',
       (r) => (r.inputs.corpus!.digest = 'e'.repeat(64)),
-      /которой нет у получателя/,
+      /которой нет у получателя|версия проверок не соответствует/,
     ],
     [
       'F12: gate свойства исключён и подменён другим PASS',
@@ -428,4 +439,131 @@ test('AC23: результат прежнего формата у поручен
     (r) => (r.evidence = r.evidence.filter((e) => e.phase !== 'integration' || e.kind !== 'test')),
   );
   assert.ok(resultProblems(missing, context).some((p) => /Нет PASS: integration\/unit/.test(p)));
+});
+
+test('S2-R2-04/F13: согласованная, но чужая версия проверок и корпус, убранный вместе с привязкой и пересчитанным манифестом, — отклонены', () => {
+  const { result, context } = acceptedProperty();
+  assert.deepEqual(resultProblems(result, context), []);
+  // Одна и та же произвольная версия во всех полях.
+  const wrong = tamper(result, (r) => {
+    r.inputs.checks = 'f'.repeat(64);
+    r.evidence.forEach((e) => (e.checks = 'f'.repeat(64)));
+  });
+  assert.ok(
+    resultProblems(wrong, context).some((p) => /версия проверок не соответствует/.test(p)),
+    resultProblems(wrong, context).join('; '),
+  );
+  // Корпус убран вместе с привязкой; манифест и версия пересчитаны так, как
+  // будто корпуса не было, — результат согласован сам с собой.
+  const withoutCorpus = tamper(result, (r) => {
+    delete r.inputs.corpus;
+    const expected = orderCheckManifest(context.order, context.contracts, 'properties', undefined)!;
+    for (const e of r.evidence)
+      if (e.property?.manifest) {
+        delete e.property.manifest.corpus;
+        e.property.manifest.digest = manifestDigest(expected);
+      }
+    const effective = effectiveChecks(
+      { approvedDigest: digestOf(context.order), order: context.order },
+      r.inputs.policyDigest,
+    );
+    r.inputs.checks = effective;
+    r.evidence.forEach((e) => (e.checks = effective));
+  });
+  const problems = resultProblems(withoutCorpus, context);
+  assert.ok(
+    problems.some((p) => /корпус результата не совпадает с закреплённым/.test(p)),
+    problems.join('; '),
+  );
+  // Без сведений получателя о закреплённом корпусе такой результат не подтверждается.
+  const { checkVersion: _pin, ...blind } = context;
+  void _pin;
+  assert.ok(
+    resultProblems(withoutCorpus, blind).some((p) =>
+      /не передал закреплённую версию корпуса/.test(p),
+    ),
+  );
+});
+
+test('S2-R2-03/T20: получатель раскрывает область поручения сам — пустой или сокращённый список, подмена группы отклонены; прежний и новый формат проходят', () => {
+  const { engine: e, store } = engineOf();
+  ready(e, graphOf({ a: [] }));
+  const a = e.claim('c1')!;
+  e.phase(a.id, a.token, 'verifying', { baseSha: sha('a'), candidateSha: sha('c') });
+  e.phase(a.id, a.token, 'integrating', { integrationSha: sha('b') });
+  for (const phase of ['candidate', 'integration'] as const)
+    for (const gate of ['unit', 'independent-review'])
+      e.evidence(a.id, a.token, {
+        kind: gate === 'unit' ? 'test' : 'review',
+        phase,
+        sha: sha(phase === 'candidate' ? 'c' : 'b'),
+        gate,
+        passed: true,
+        command: ['x'],
+        exitCode: 0,
+        log: '',
+        digest: digestOf(gate + phase),
+        summary: 'ok',
+      });
+  e.finish(a.id, a.token, sha('b'));
+  const { result, order, repository } = e.read((v) => ({
+    result: runResult(v.attempt(a.id)!, '0.1.0-test'),
+    order: v.work('a')!.order,
+    repository: e.policy.repositories[0]!,
+  }));
+  store.close();
+  assert.deepEqual(order.gates, ['unit']);
+  const context = { order, contracts: [], repository };
+  assert.deepEqual(resultProblems(result, context), [], 'новый формат');
+  // Пустой список и ни одной записи test — отказ.
+  const empty = tamper(result, (r) => {
+    r.inputs.requiredGates = [];
+    r.evidence = r.evidence.filter((x) => x.kind === 'review');
+  });
+  const problems = resultProblems(empty, context);
+  assert.ok(
+    problems.some((p) => /область поручения требует unit/.test(p)),
+    problems.join('; '),
+  );
+  assert.ok(problems.some((p) => /Нет PASS: candidate\/unit/.test(p)));
+  // Прежний формат: без версий и без requiredGates — по области получателя.
+  const legacy = tamper(result, (r) => {
+    delete r.inputs.checks;
+    delete r.inputs.requiredGates;
+    r.evidence.forEach((x) => delete x.checks);
+  });
+  assert.deepEqual(resultProblems(legacy, context), [], 'прежний формат');
+  // Группа gates у получателя: результат проверял только часть её состава.
+  const grouped = { ...order, gates: ['@ci'] };
+  const groupRepo = {
+    ...repository,
+    gates: [...repository.gates, { ...repository.gates[0]!, id: 'lint' }],
+    gateGroups: { ci: ['unit', 'lint'] },
+  };
+  const partial = tamper(legacy, (r) => {
+    r.inputs.workOrderDigest = digestOf(grouped);
+    r.inputs.requiredGates = ['unit'];
+  });
+  const scoped = resultProblems(partial, { order: grouped, contracts: [], repository: groupRepo });
+  assert.ok(
+    scoped.some((p) => /область поручения требует lint/.test(p)),
+    scoped.join('; '),
+  );
+  // Имя группы не принимается за имя проверки: PASS «@ci» ничего не доказывает.
+  const named = tamper(partial, (r) => {
+    r.inputs.requiredGates = ['@ci'];
+    for (const x of [...r.evidence])
+      if (x.gate === 'unit') r.evidence.push({ ...x, id: x.id + '-g', gate: '@ci' });
+  });
+  const byName = resultProblems(named, { order: grouped, contracts: [], repository: groupRepo });
+  assert.ok(
+    byName.some((p) => /требует unit, lint|требует lint/.test(p)),
+    byName.join('; '),
+  );
+  // Без политики получателя поручение с группой не подтверждается.
+  assert.ok(
+    resultProblems(partial, { order: grouped, contracts: [] }).some((p) =>
+      /нужна политика репозитория получателя/.test(p),
+    ),
+  );
 });

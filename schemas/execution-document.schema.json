@@ -429,6 +429,26 @@
                 "type": "string",
                 "pattern": "^[a-f0-9]{64}$"
               },
+              "context": {
+                "type": "object",
+                "properties": {
+                  "digest": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "digest"
+                ],
+                "additionalProperties": false
+              },
               "at": {
                 "type": "string",
                 "format": "date-time",
@@ -810,6 +830,26 @@
               "digest": {
                 "type": "string",
                 "pattern": "^[a-f0-9]{64}$"
+              },
+              "context": {
+                "type": "object",
+                "properties": {
+                  "digest": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "digest"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [

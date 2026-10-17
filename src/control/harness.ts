@@ -352,6 +352,7 @@ export class Harness {
       AbortSignal.timeout(this.policy.runTimeoutMs + 5000),
       {
         subjectId: subject,
+        subjectKind: input.kind === 'plan' ? 'group' : 'other',
         stage: input.kind + '-review',
         // Расход ревью плана закрепляется за графом и его поручениями из входа:
         // граф может быть ещё не зарегистрирован, а состав — измениться позже.
@@ -426,6 +427,12 @@ export class Harness {
         2,
       ),
     );
+    // Снимок, который видел reviewer, хранится по digest: согласование этого
+    // раунда делает его действующим контекстом графа.
+    if (context && contextKey)
+      this.store.transact('run.context', (tx) =>
+        tx.putLocal('context-snapshots', WORKSPACE_OWNER, contextKey, context),
+      );
     return this.engine.recordReview(
       redactDeep(record, execution.redact),
       input.kind === 'contract' ? input.contract : undefined,
@@ -528,7 +535,7 @@ export class Harness {
     if (graph.digest !== digest)
       throw new HarnessError('APPROVAL_STALE', 'Digest не совпадает с зарегистрированным графом');
     const before = graph.approval?.digest === digest;
-    this.engine.approve(subject, 'operator');
+    this.engine.approve(subject, 'operator', { bindContext: true });
     const at = this.engine.read((v) => v.graph(subject)!.approval!.at);
     return { subject, digest, at, changed: !before };
   }
@@ -537,10 +544,15 @@ export class Harness {
   /* Работа                                                            */
   /* ---------------------------------------------------------------- */
 
+  /**
+   * Действующий контекст графа — снимок, связанный с его согласованием, а не
+   * последний переданный: отклонённый или ещё не согласованный снимок не
+   * исполняется.
+   */
   private contextOf(graphId: string): ContextSnapshot | undefined {
-    const key = this.engine.read((v) => v.local('run-keys', WORKSPACE_OWNER, 'context:' + graphId));
-    if (!key) return undefined;
-    return this.engine.read((v) => v.local('context-snapshots', WORKSPACE_OWNER, key.digest));
+    const digest = this.engine.read((v) => v.graph(graphId)?.approval?.context?.digest);
+    if (!digest) return undefined;
+    return this.engine.read((v) => v.local('context-snapshots', WORKSPACE_OWNER, digest));
   }
 
   /**
@@ -609,25 +621,12 @@ export class Harness {
       const issues = contextIssues(input.context);
       if (issues.length)
         throw new HarnessError('INVALID_INPUT', 'Снимок контекста: ' + issues.join('; '));
-      const digest = contextDigest(input.context);
-      this.store.transact('run.context', (tx) => {
-        tx.putLocal('context-snapshots', WORKSPACE_OWNER, digest, input.context!);
-        tx.putLocal('run-keys', WORKSPACE_OWNER, 'context:' + graph.id, {
-          graphId: graph.id,
-          digest,
-          at: new Date().toISOString(),
-        });
-      });
     }
-    // Согласование относится к графу с тем контекстом, который видел reviewer
-    // плана: другой снимок при том же графе требует нового раунда.
-    const reviewed = this.engine
-      .reviews('plan', graph.id)
-      .filter((r) => r.approved && r.digest === graph.digest)
-      .at(-1);
-    const contextChanged =
-      !!reviewed &&
-      reviewed.contextDigest !== (input.context ? contextDigest(input.context) : undefined);
+    // Согласование связано с контекстом, который видел reviewer плана: снимок
+    // хранится по digest, но действующим становится только вместе с
+    // согласованием. Другой снимок при том же графе требует нового раунда.
+    const contextKey = input.context ? contextDigest(input.context) : null;
+    const contextChanged = (graph.approval?.context?.digest ?? null) !== contextKey;
     if (
       !graph.approval ||
       graph.approval.digest !== graph.digest ||
@@ -646,7 +645,7 @@ export class Harness {
             'REVIEW_REJECTED',
             'Ревью плана не одобрило граф: ' + record.summary,
           );
-        this.engine.approve(graph.id, 'agent');
+        this.engine.approve(graph.id, 'agent', { bindContext: true });
       } else if (!this.engine.read((v) => v.graph(graph.id)?.approval) || contextChanged)
         throw new HarnessError(
           'APPROVAL_REQUIRED',
