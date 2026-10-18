@@ -576,3 +576,52 @@ test('S2-R2-01: согласование, связанное с контекст
     'done',
   );
 });
+
+test('expire(at): владение, истекающее к моменту at, снимается; живое сейчас — нет без at', () => {
+  const { engine } = engineOf();
+  ready(engine, graphOf({ a: [] }));
+  const a = engine.claim('c1')!;
+  assert.deepEqual(engine.expire(), [], 'lease ещё действует');
+  assert.deepEqual(engine.expire(Number.MAX_SAFE_INTEGER), [a.id]);
+  assert.equal(
+    engine.read((v) => v.attempt(a.id)!.status),
+    'expired',
+  );
+});
+
+test('Версия проверок по формуле хоста: попытка закрепляет её, приёмка сверяет с текущей формулой', () => {
+  const policy = policyOf();
+  const { store } = engineOf(policy);
+  let salt = 'v1';
+  const base = standaloneHost(store, policy);
+  const engine = new Engine({
+    host: {
+      ...base,
+      basis: {
+        ...base.basis,
+        checksDigest: (work, policyDigest) => digestOf({ host: salt, work: work.id, policyDigest }),
+      },
+    },
+    policy,
+  });
+  ready(engine, graphOf({ a: [] }));
+  const a = engine.claim('c1')!;
+  const expected = digestOf({
+    host: 'v1',
+    work: 'a',
+    policyDigest: base.basis.policyDigest(
+      engine.read((v) => v.work('a')!),
+      engine.read((v) => v),
+    ),
+  });
+  assert.equal(a.checks?.effective, expected, 'формула хоста при выдаче');
+  passEvidence(engine, a.id, a.token, sha('a'), sha('b'));
+  salt = 'v2';
+  assert.throws(() => engine.finish(a.id, a.token, sha('b')), /Версия проверок/);
+  salt = 'v1';
+  engine.finish(a.id, a.token, sha('b'));
+  assert.equal(
+    engine.read((v) => v.work('a')!.status),
+    'done',
+  );
+});

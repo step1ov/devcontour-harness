@@ -1,3 +1,4 @@
+import { HarnessError, type ErrorCode } from '../contracts/index.ts';
 import { TaskFailure, type FailureKind } from './failure.ts';
 
 /** Отказ окружения до начала работы: попытка не засчитывается. */
@@ -15,8 +16,19 @@ export const providerRefusal = (message: string) =>
   );
 
 /** Класс отказа для случаев, где он не поставлен в точке обнаружения. */
+/** Отказ движка с кодом, который сам называет класс отказа попытки. */
+const byCode: Partial<Record<ErrorCode, FailureKind>> = {
+  GATE_FAILED: 'gate',
+  REVIEW_REJECTED: 'review',
+  SCOPE_VIOLATION: 'scope-violation',
+  BUDGET_EXHAUSTED: 'budget',
+};
+
 export function classifyFailure(error: unknown, message: string): FailureKind {
   if (error instanceof TaskFailure) return error.kind;
+  // Приёмка отказала по правилу (нет доказательства, ревью, область): класс —
+  // это правило, а не «неизвестно».
+  if (error instanceof HarnessError && byCode[error.code]) return byCode[error.code]!;
   if (providerRefusal(message)) return 'provider-auth';
   if (/исчерпан лимит времени|истёк|истек|тайм-?аут|timeout|превысил/i.test(message))
     return 'timeout';

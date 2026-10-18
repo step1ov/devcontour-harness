@@ -14,7 +14,7 @@ import {
 } from '../src/contracts/index.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { Engine } from '../src/engine/engine.ts';
-import { Runner } from '../src/engine/runner.ts';
+import { Runner, type RunnerOptions } from '../src/engine/runner.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import { review, trustNone } from './engine-fixture.ts';
@@ -74,6 +74,8 @@ export function setup(options: {
   files?: Record<string, string>;
   graph?: (g: Record<string, unknown>) => void;
   now?: () => number;
+  /** Дополнительные параметры Runner (хуки хоста, контекст). */
+  runner?: Partial<RunnerOptions>;
 }) {
   const r = repo({ 'README.md': 'app\n', 'test/run.js': testRunner, ...options.files });
   const state = realpathSync(mkdtempSync(join(tmpdir(), 'harness-state-')));
@@ -117,6 +119,7 @@ export function setup(options: {
     },
     owner: 'runner-1',
     resourceDatabase: join(state, 'resources.sqlite'),
+    ...options.runner,
   });
   const graphRaw = structuredClone(example('graph')) as Record<string, any>;
   graphRaw.orders[0].writeScope = ['src'];

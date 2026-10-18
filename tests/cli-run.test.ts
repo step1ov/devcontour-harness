@@ -253,6 +253,18 @@ test('T33: файловый контекст каталога графа зак�
   );
   const result = p.harness('result', '--state', p.state, '--work', 'add-greeting');
   assert.match(String(result.json.data.result.inputs.contextDigest), /^[a-f0-9]{64}$/);
+  // Снимок сохранён артефактом попытки — тем же содержимым.
+  const pinned = readFileSync(
+    join(
+      p.state,
+      'artifacts',
+      String(result.json.data.result.runId),
+      'implementation',
+      'context.json',
+    ),
+    'utf8',
+  );
+  assert.match(pinned, /Правило: экспорт через exports\./);
 });
 
 test('S1-R2-03: run при действующей чужой роли controller — код отказа и CONTROLLER_BUSY; чужая роль цела', () => {

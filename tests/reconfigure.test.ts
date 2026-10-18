@@ -336,3 +336,26 @@ test('T27: тождество политики по формуле хоста �
   assert.equal(mutated.policyState().applied?.digest, C1);
   assert.match(mutated.policyState().stale ?? '', /изменена в памяти/);
 });
+
+test('recordPolicyOnLead: false — получение роли не записывает применённую политику; барьер прежний', () => {
+  const policy = policyOf();
+  const { store } = engineOf(policy);
+  const engine = new Engine({
+    host: standaloneHost(store, policy),
+    policy,
+    recordPolicyOnLead: false,
+  });
+  assert.equal(engine.lead('host-controller'), true);
+  assert.equal(
+    engine.read((v) => v.control().appliedPolicy),
+    undefined,
+  );
+  const recording = new Engine({ host: standaloneHost(store, policy), policy });
+  recording.release('host-controller');
+  engine.release('host-controller');
+  assert.equal(recording.lead('other'), true);
+  assert.ok(
+    recording.read((v) => v.control().appliedPolicy),
+    'по умолчанию записывает',
+  );
+});

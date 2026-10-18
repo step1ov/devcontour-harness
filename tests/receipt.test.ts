@@ -527,3 +527,19 @@ test('S2-R5-01: генеративный gate потребителя (legacy) п
   }
   f.store.close();
 });
+
+test('Формула версии проверок хоста получателя: своя формула сверяет результат вместо формулы harness', () => {
+  const f = attempt(graphOf({ a: [] }));
+  const { result, context } = f.done();
+  const own = result.inputs.checks!;
+  assert.deepEqual(
+    resultProblems(result, { ...context, checksDigest: () => own }),
+    [],
+    'формула хоста воспроизводит версию',
+  );
+  assert.match(
+    resultProblems(result, { ...context, checksDigest: () => sha256('другая формула') }).join('; '),
+    /версия проверок не соответствует/,
+  );
+  f.store.close();
+});

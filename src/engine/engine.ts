@@ -99,6 +99,13 @@ export interface EngineOptions {
    * создания движка проверяется по-прежнему по её содержимому.
    */
   policyIdentity?: string;
+  /**
+   * Записывать политику процесса применённой при получении роли controller
+   * (по умолчанию — да). Хост, который записывает применённую политику сам
+   * при запуске своего планировщика, выключает это: прямая выдача попытки
+   * без запуска очереди тогда не меняет применённую политику.
+   */
+  recordPolicyOnLead?: boolean;
 }
 
 export type Phase = 'running' | 'verifying' | 'reviewing' | 'integrating';
@@ -131,6 +138,7 @@ export class Engine {
   /** Владелец роли controller, под которым этот процесс её получил. */
   private ownLeader?: string;
 
+  private readonly recordOnLead: boolean;
   constructor(options: EngineOptions) {
     this.host = options.host;
     this.policy = options.policy;
@@ -138,6 +146,7 @@ export class Engine {
     this.now = options.now ?? Date.now;
     this.id = options.id ?? randomUUID;
     this.provenance = options.provenance ?? (() => undefined);
+    this.recordOnLead = options.recordPolicyOnLead !== false;
     this.loadedContent = policyDigest(this.policy);
     this.loadedPolicy = options.policyIdentity ?? this.loadedContent;
     this.observedGeneration = this.host.store.read(
@@ -148,6 +157,12 @@ export class Engine {
   /** Часы движка: по ним считаются сроки владения. */
   clock() {
     return this.now();
+  }
+
+  /** Версия проверок поручения: формула хоста, если он её задал, иначе harness. */
+  private checksOf(work: WorkState, view: ExecutionView) {
+    const policy = this.host.basis.policyDigest(work, view);
+    return this.host.basis.checksDigest?.(work, policy, view) ?? effectiveChecks(work, policy);
   }
 
   private tx<T>(kind: TransactionKind, fn: (tx: ExecutionTransaction) => NotPromise<T>): T {
@@ -497,7 +512,7 @@ export class Engine {
       this.tx('scheduler.started', (tx) =>
         tx.emit({ type: 'controller.acquired', payload: { owner } }),
       );
-      this.recordPolicy(owner);
+      if (this.recordOnLead) this.recordPolicy(owner);
     }
     return result;
   }
@@ -974,7 +989,7 @@ export class Engine {
         // посередине попытки ждёт её окончания, и evidence этой попытки
         // относится к этой версии.
         checks: {
-          effective: effectiveChecks(work, this.host.basis.policyDigest(work, tx)),
+          effective: this.checksOf(work, tx),
           ...(work.checkVersion ? { corpus: work.checkVersion } : {}),
         },
         episodeBasis: episodeBasis(work),
@@ -1365,10 +1380,7 @@ export class Engine {
         throw new HarnessError('NOT_READY', 'Нет интеграционного коммита');
       // Принять можно только под той версией проверок, под которой шла
       // попытка: новый корпус, принятый поручением, требует новой попытки.
-      if (
-        a.checks &&
-        effectiveChecks(w, this.host.basis.policyDigest(w, tx)) !== a.checks.effective
-      )
+      if (a.checks && this.checksOf(w, tx) !== a.checks.effective)
         throw new HarnessError(
           'APPROVAL_STALE',
           'Версия проверок поручения изменилась; нужна новая попытка',
@@ -2387,11 +2399,15 @@ export class Engine {
   }
 
   /** Истёкшие попытки: отказ окружения, работа ждёт явного повтора. */
-  expire() {
+  /**
+   * Истечение владения на момент `at` (по умолчанию — сейчас). Хост передаёт
+   * момент в будущем, когда снимает всё владение восстановленной копии.
+   */
+  expire(at = this.now()) {
     return this.tx('runs.expired', (tx) => {
       const ids: string[] = [];
       for (const a of tx.attempts())
-        if (a.status === 'active' && a.leaseUntil <= this.now()) {
+        if (a.status === 'active' && a.leaseUntil <= at) {
           const error =
             (a.error?.startsWith(HEARTBEAT_FAILED) ? a.error + '. ' : '') +
             'Истёк срок владения. Повторите явно.';

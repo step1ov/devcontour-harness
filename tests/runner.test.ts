@@ -5,6 +5,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Runner } from '../src/engine/runner.ts';
+import { BlockedError } from '../src/engine/classify.ts';
 import { policyIssues } from '../src/contracts/index.ts';
 import { approve, greet, implement, runAll, setup, target } from './runner-fixture.ts';
 
@@ -525,4 +526,176 @@ test('S2.3: хост без проверки политики — недопус
     false,
     'writer ops не вызывался',
   );
+});
+
+test('Хуки хоста: сведения в запросах writer и reviewer, отчёт writer после коммита кандидата; асинхронный контекст; отказ хука — отказ попытки', async () => {
+  const seen: { sha: string; summary: string }[] = [];
+  const ctx = setup({
+    scenario: {
+      writer: { ...implement(), recordPrompt: true },
+      reviewer: { ...approve(), recordPrompt: true },
+    },
+    runner: {
+      context: () => Promise.resolve(undefined),
+      hooks: {
+        notes: ({ review }) =>
+          Promise.resolve([review ? 'HOST-REVIEWER-NOTE' : 'HOST-WRITER-NOTE']),
+        implemented: ({ output, sha }) => {
+          seen.push({ sha, summary: output.summary });
+        },
+      },
+    },
+  });
+  await runAll(ctx);
+  const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.equal(a.status, 'succeeded', a.error);
+  const writer = readFileSync(ctx.scenarioPath + '.writer.0.prompt', 'utf8');
+  assert.match(writer, /HOST-WRITER-NOTE/);
+  assert.doesNotMatch(writer, /HOST-REVIEWER-NOTE/);
+  // Ревью плана в фикстуре записано без вызова: ревью кандидата — первый вызов reviewer.
+  assert.match(readFileSync(ctx.scenarioPath + '.reviewer.0.prompt', 'utf8'), /HOST-REVIEWER-NOTE/);
+  assert.deepEqual(seen, [{ sha: a.candidateSha, summary: 'Добавлена greet' }]);
+
+  const failing = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p) => ((p as { maxAttempts: number }).maxAttempts = 1),
+    runner: {
+      hooks: {
+        implemented: () => {
+          throw new Error('хост не записал находки');
+        },
+      },
+    },
+  });
+  const before = target(failing);
+  await runAll(failing);
+  const f = failing.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.equal(f.status, 'failed');
+  assert.match(f.error!, /хост не записал находки/);
+  assert.equal(target(failing), before, 'без приёмки');
+});
+
+test('Хуки хоста prepared и failed, предмет вызова runtime: отказ prepared — отказ окружения до worktree; failed видит класс отказа', async () => {
+  const subjects: unknown[] = [];
+  const failures: { kind: string; message: string }[] = [];
+  const bases: string[] = [];
+  let refuse = false;
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p) => ((p as { maxAttempts: number }).maxAttempts = 2),
+    runner: {
+      hooks: {
+        prepared: ({ baseSha }) => {
+          bases.push(baseSha);
+          if (refuse) throw new BlockedError('база без закреплённого файла хоста');
+        },
+        failed: ({ kind, message }) => {
+          failures.push({ kind, message });
+        },
+      },
+    },
+  });
+  // Предмет вызова виден адаптеру: поручение, попытка, фаза.
+  for (const [name, adapter] of Object.entries(ctx.runner.options.adapters)) {
+    const inner = adapter;
+    (ctx.runner.options.adapters as Record<string, unknown>)[name] = {
+      ...inner,
+      invoke: (request: { subject?: unknown }, signal: AbortSignal) => {
+        subjects.push(request.subject);
+        return inner.invoke(request as never, signal);
+      },
+    };
+  }
+  refuse = true;
+  await runAll(ctx);
+  const first = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.equal(first.status, 'failed');
+  assert.equal(first.failureKind, 'environment');
+  assert.equal(first.worktree, undefined, 'работа не начиналась');
+  assert.deepEqual(failures, [
+    { kind: 'environment', message: 'база без закреплённого файла хоста' },
+  ]);
+  assert.equal(bases[0], target(ctx));
+  refuse = false;
+  // Отказ окружения остановил выдачу (он повторился бы на любой работе).
+  assert.equal(
+    ctx.engine.read((v) => v.control().paused),
+    true,
+  );
+  ctx.engine.retry('add-greeting');
+  ctx.engine.resume();
+  await ctx.runner.drain();
+  const second = ctx.engine.read((v) => v.attempts('add-greeting')[1]!);
+  assert.equal(second.status, 'succeeded', second.error);
+  assert.deepEqual(subjects[0], {
+    workId: 'add-greeting',
+    attemptId: second.id,
+    phase: 'candidate',
+  });
+  assert.ok(
+    subjects.some((s) => (s as { phase: string }).phase === 'integration'),
+    'ревью интеграции — с фазой',
+  );
+});
+
+test('Замеры стадий попытки: реализация, gates и ревью каждой фазы, ожидание интеграции', async () => {
+  const ctx = setup({ scenario: { writer: implement(), reviewer: approve() } });
+  await runAll(ctx);
+  const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.equal(a.status, 'succeeded', a.error);
+  const stages = (a.timings ?? []).map((t) => [t.stage, t.outcome]);
+  for (const stage of [
+    'implementation',
+    'candidate-test:unit',
+    'candidate-review',
+    'integration-wait',
+    'integration-test:unit',
+    'integration-review',
+  ])
+    assert.ok(
+      stages.some(([s, o]) => s === stage && o === 'passed'),
+      `${stage}: ${JSON.stringify(stages)}`,
+    );
+});
+
+test('Короткий секрет маскирует текст ревью, но не служебные значения записи (вид наблюдения, источник)', async () => {
+  // Часть служебного значения вида наблюдения («diff-only»); JSON ответа CLI не задевает.
+  process.env.HARNESS_TEST_SHORT_SECRET = 'f-on';
+  try {
+    const ctx = setup({
+      scenario: { writer: implement(), reviewer: approve() },
+      policy: (p) => {
+        (p as { environment: { secrets: Record<string, string> } }).environment.secrets = {
+          SHORT: 'HARNESS_TEST_SHORT_SECRET',
+        };
+      },
+    });
+    await runAll(ctx);
+    const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+    assert.equal(a.status, 'succeeded', a.error);
+    const reviews = a.evidence.filter((e) => e.kind === 'review');
+    assert.equal(reviews.length, 2);
+    for (const e of reviews) {
+      assert.match(e.inspection?.source ?? '', /^(codex-events|unavailable)$/);
+      assert.equal(e.inspection?.mode, 'diff-only', 'вид наблюдения не замаскирован');
+      const stored = JSON.parse(readFileSync(e.log, 'utf8')) as { inspection: { source: string } };
+      assert.equal(stored.inspection.source, e.inspection?.source);
+    }
+  } finally {
+    delete process.env.HARNESS_TEST_SHORT_SECRET;
+  }
+});
+
+test('stateDirFor: рабочие деревья и артефакты попытки — в каталоге её репозитория', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-component-'));
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    runner: { stateDirFor: () => dir },
+  });
+  await runAll(ctx);
+  const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.equal(a.status, 'succeeded', a.error);
+  assert.ok(a.worktree!.startsWith(join(dir, 'worktrees')), a.worktree);
+  assert.ok(existsSync(join(dir, 'artifacts', a.id)), 'артефакты попытки у репозитория');
+  assert.equal(existsSync(join(ctx.state, 'artifacts', a.id)), false);
 });

@@ -13,7 +13,7 @@ export { validateInputs, crossIssues, withinPaths } from './validate.ts';
 export { Harness, type HarnessOptions } from './control/harness.ts';
 export { doctor } from './control/doctor.ts';
 export { Engine, type EngineOptions } from './engine/engine.ts';
-export { Runner, type RunnerOptions } from './engine/runner.ts';
+export { Runner, type RunnerHooks, type RunnerOptions } from './engine/runner.ts';
 export { standaloneHost } from './engine/standalone.ts';
 export { runResult } from './engine/result.ts';
 export { SqliteExecutionStore } from './storage/sqlite.ts';
@@ -67,7 +67,12 @@ export {
   verifySuite,
   type PortableSuite,
 } from './verification/corpus.ts';
-export { caseInputSchema, staleArtifacts, type CaseRequest } from './verification/confirm.ts';
+export {
+  caseHooks,
+  caseInputSchema,
+  staleArtifacts,
+  type CaseRequest,
+} from './verification/confirm.ts';
 export {
   assertResult,
   pinnedCorpus,
@@ -119,3 +124,13 @@ export {
   recoveryOutputSchema,
   recoveryResultSchema,
 } from './control/recovery.ts';
+
+// Классы отказов и правила отказов: хост бросает их из своих хуков и
+// читает класс отказа попытки теми же правилами, что и движок.
+export { BlockedError, classifyFailure, providerRefusal } from './engine/classify.ts';
+export {
+  TaskFailure,
+  failureFingerprint,
+  repairPolicy,
+  type RepairRule,
+} from './engine/failure.ts';

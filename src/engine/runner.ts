@@ -13,6 +13,7 @@ import {
   implementationResultSchema,
   reviewIssues,
   reviewResultSchema,
+  type ImplementationResult,
   type ReviewResult,
   sha256,
   type AttemptState,
@@ -53,7 +54,7 @@ import { CleanupFailure, cleanupEnvironment } from '../environment/lifecycle.ts'
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { REQUIREMENT_GATE, assertRequirements } from '../verification/requirements.ts';
 import { BlockedError, classifyFailure } from './classify.ts';
-import { TaskFailure } from './failure.ts';
+import { TaskFailure, type FailureKind } from './failure.ts';
 import type { Engine } from './engine.ts';
 import { prompt } from './prompt.ts';
 import { contractDocuments, orderCheckManifest } from '../verification/checks.ts';
@@ -71,11 +72,19 @@ export interface RunnerOptions {
   engine: Engine;
   /** Каталог состояния: worktrees, артефакты попыток. Закрыт исполнителю, reviewer и gates. */
   stateDir: string;
+  /**
+   * Каталог рабочих деревьев, артефактов и снимков попыток репозитория; без
+   * него — `stateDir`. Хост, хранящий данные компонента рядом с ним, кладёт
+   * туда и его попытки.
+   */
+  stateDirFor?: (repositoryId: string) => string;
   /** Каталог, от которого разрешаются относительные пути репозиториев политики. */
   baseDir: string;
   adapters: Partial<Record<RuntimeName, RuntimeAdapter>>;
-  /** Закреплённый контекст поручения; без него — пустой снимок. */
-  context?: (work: WorkState) => ContextSnapshot | undefined;
+  /** Закреплённый контекст поручения; без него — пустой снимок. Хост может собирать его асинхронно. */
+  context?: (work: WorkState) => ContextSnapshot | undefined | Promise<ContextSnapshot | undefined>;
+  /** Дополнения хоста: сведения в запросах и отчёт исполнителя. В приёмке не участвуют. */
+  hooks?: RunnerHooks;
   owner?: string;
   /** Префикс веток попыток; DevContour передаёт свой прежний `devcontour/run-`. */
   branchPrefix?: string;
@@ -83,6 +92,45 @@ export interface RunnerOptions {
   environment?: NodeJS.ProcessEnv;
   /** База блокировок ресурсов; по умолчанию общая для машины. */
   resourceDatabase?: string;
+}
+
+/**
+ * Точки расширения хоста. Они добавляют данные и записи хоста, но не решают
+ * приёмку: gates, ревью, fencing и CAS остаются за движком и runner. Отказ
+ * хука — отказ попытки, а не пропуск проверки.
+ */
+export interface RunnerHooks {
+  /**
+   * База попытки известна, работа ещё не начата: хост проверяет свои условия
+   * (например, что база содержит закреплённые им файлы) и закрепляет свои
+   * сведения. Отказ — отказ попытки; `BlockedError` — отказ окружения.
+   */
+  prepared?(input: {
+    work: WorkState;
+    attempt: AttemptState;
+    baseSha: string;
+  }): void | Promise<void>;
+  /** Дополнительные части запроса writer (`review: false`) или reviewer — данные хоста. */
+  notes?(input: {
+    work: WorkState;
+    attempt: AttemptState;
+    review: boolean;
+  }): string[] | Promise<string[]>;
+  /**
+   * Отказ попытки записан движком (класс, пауза очереди при отказе, который
+   * повторится на любой работе): хост отражает его в своём журнале.
+   */
+  failed?(input: {
+    attempt: AttemptState;
+    kind: FailureKind;
+    message: string;
+  }): void | Promise<void>;
+  /** Ответ writer закоммичен кандидатом `sha`: хост записывает сведения из отчёта (попутные находки). */
+  implemented?(input: {
+    attempt: AttemptState;
+    output: ImplementationResult;
+    sha: string;
+  }): void | Promise<void>;
 }
 
 const ordered = (gates: GatePolicy[], ids: string[]) => {
@@ -134,9 +182,15 @@ export class Runner {
       localRoots([
         options.stateDir,
         options.baseDir,
+        ...this.policy.repositories.map((r) => this.dirOf(r.id)),
         ...this.policy.repositories.map((r) => this.repoPath(r)),
       ]),
     );
+  }
+
+  /** Каталог попыток репозитория. */
+  private dirOf(repositoryId: string) {
+    return this.options.stateDirFor?.(repositoryId) ?? this.options.stateDir;
   }
 
   repoPath(repo: Repo) {
@@ -154,7 +208,13 @@ export class Runner {
   private boundary(dependencies: Pick<DependencySnapshot, 'path'>[] = []) {
     const repos = this.policy.repositories.map((r) => this.repoPath(r));
     return {
-      hidden: [this.options.stateDir, ...repos],
+      hidden: [
+        ...new Set([
+          this.options.stateDir,
+          ...this.policy.repositories.map((r) => this.dirOf(r.id)),
+          ...repos,
+        ]),
+      ],
       readable: [...repos.map((r) => join(r, '.git')), ...dependencies.map((d) => d.path)],
     };
   }
@@ -182,6 +242,16 @@ export class Runner {
 
   get active() {
     return this.jobs.size;
+  }
+
+  /** Дождаться завершения выданных попыток (без новых выдач): хост ведёт свой цикл поверх `tick`. */
+  async settled() {
+    try {
+      await Promise.all([...this.jobs.values()].map((j) => j.promise));
+    } finally {
+      // Продление роли нужно, пока идёт работа; следующий `tick` его возобновит.
+      this.stopLead();
+    }
   }
 
   /**
@@ -439,6 +509,11 @@ export class Runner {
       {
         callId: randomUUID(),
         task: input.task,
+        subject: {
+          workId: input.attempt.workId,
+          attemptId: input.attempt.id,
+          phase: input.phase,
+        },
         binding,
         cwd: input.cwd,
         prompt: input.prompt,
@@ -663,7 +738,7 @@ export class Runner {
   ): Promise<AttemptState> {
     const draft = this.engine.read((v) => continuableDraft(v, work, attempt.id));
     if (!draft) return attempt;
-    const dir = join(this.options.stateDir, 'artifacts', attempt.id, 'implementation');
+    const dir = join(this.dirOf(attempt.repositoryId), 'artifacts', attempt.id, 'implementation');
     await mkdir(dir, { recursive: true });
     const scope = ['--', ...work.order.writeScope];
     let applied = false;
@@ -748,9 +823,9 @@ export class Runner {
       },
       Math.max(1000, this.policy.leaseMs / 3),
     );
-    const cwd = join(this.options.stateDir, 'worktrees', attempt.id);
+    const cwd = join(this.dirOf(repo.id), 'worktrees', attempt.id);
     const integrationCwd = cwd + '-integration';
-    const artifacts = join(this.options.stateDir, 'artifacts', attempt.id);
+    const artifacts = join(this.dirOf(repo.id), 'artifacts', attempt.id);
     const worktrees: string[] = [];
     const snapshots: DependencySnapshot[] = [];
     let preserve = false;
@@ -780,7 +855,7 @@ export class Runner {
             this.engine.update(attempt.id, attempt.token, 'run.context', { resources });
           attempt = { ...attempt, resources };
           const work = await this.workOf(attempt);
-          const context = this.options.context?.(work);
+          const context = await this.options.context?.(work);
           if (context)
             // Попытка закрепляет снимок контекста: writer и оба reviewer видят одни и те же байты.
             this.engine.update(attempt.id, attempt.token, 'run.context', {
@@ -808,7 +883,7 @@ export class Runner {
             const dependencies = await snapshotDependencies({
               repos: this.repositories(),
               repositoryId: repo.id,
-              dir: join(this.options.stateDir, 'dependencies', attempt.id),
+              dir: join(this.dirOf(repo.id), 'dependencies', attempt.id),
               artifacts,
               runId: attempt.id,
               policy: this.policy,
@@ -828,6 +903,7 @@ export class Runner {
             attempt = { ...attempt, dependencies };
           }
           const base = await git(repoPath, 'rev-parse', repo.targetRef);
+          await this.options.hooks?.prepared?.({ work, attempt, baseSha: base });
           // Основания записываются до реализации; в той же транзакции решается,
           // берётся ли кандидат предыдущей попытки вместо нового кода.
           const reuse = this.engine.implementationBasis(
@@ -836,7 +912,7 @@ export class Runner {
             implementationBasis(work, attempt, base, this.engine.version),
           );
           attempt = { ...attempt, ...(reuse.reusedFrom ? { reusedFrom: reuse.reusedFrom } : {}) };
-          await mkdir(join(this.options.stateDir, 'worktrees'), { recursive: true });
+          await mkdir(join(this.dirOf(repo.id), 'worktrees'), { recursive: true });
           await git(
             repoPath,
             'worktree',
@@ -874,6 +950,9 @@ export class Runner {
                     const dir = join(artifacts, 'implementation');
                     await mkdir(dir, { recursive: true });
                     await writeFile(join(dir, 'work.json'), JSON.stringify(work.order, null, 2));
+                    // Закреплённый снимок контекста — тем же байтам, что видят writer и reviewer.
+                    if (context)
+                      await writeFile(join(dir, 'context.json'), JSON.stringify(context, null, 2));
                     await this.prepareSelfCheck(attempt, repo, join(artifacts, 'self-check'));
                     const response = await this.call(
                       this.adapter(attempt.runtime),
@@ -889,7 +968,10 @@ export class Runner {
                           history: this.history(attempt),
                           context,
                           gates: gates.map((g) => ({ id: g.id, command: g.command })),
-                          notes: this.notes(attempt, false),
+                          notes: [
+                            ...this.notes(attempt, false),
+                            ...(await this.hostNotes(work, attempt, false)),
+                          ],
                         }),
                       },
                       signal,
@@ -920,7 +1002,13 @@ export class Runner {
                       '-m',
                       `${work.id}: ${work.order.title}`,
                     );
-                    return git(cwd, 'rev-parse', 'HEAD');
+                    const committed = await git(cwd, 'rev-parse', 'HEAD');
+                    await this.options.hooks?.implemented?.({
+                      attempt,
+                      output: result.data,
+                      sha: committed,
+                    });
+                    return committed;
                   });
               rearm();
               this.engine.phase(attempt.id, attempt.token, 'verifying', { candidateSha: sha });
@@ -942,13 +1030,14 @@ export class Runner {
               );
               return sha;
             },
+            (stage, action) => this.timed(attempt, 'candidate-environment:' + stage, action),
           );
           await assertDependencies(attempt.dependencies ?? []);
           attempt = { ...attempt, candidateSha: candidate };
           const previous = this.mergeTails.get(repo.id) ?? Promise.resolve();
           let unlock!: () => void;
           this.mergeTails.set(repo.id, new Promise<void>((r) => (unlock = r)));
-          await previous;
+          await this.timed(attempt, 'integration-wait', () => previous);
           try {
             rearm();
             await this.integrate(
@@ -1002,6 +1091,7 @@ export class Runner {
             (error instanceof BlockedError || kind === 'provider-auth') && !attempt.candidateSha,
           ...(heartbeatCause ? { heartbeatCause } : {}),
         });
+        await this.options.hooks?.failed?.({ attempt, kind, message });
       } catch {
         // Отменённая или потерявшая владение попытка не публикует поздний отказ.
       }
@@ -1069,11 +1159,16 @@ export class Runner {
     if (!attempt) throw new HarnessError('NOT_FOUND', 'Попытка не найдена: ' + attemptId);
     if (attempt.status === 'active' || this.jobs.has(attemptId))
       throw new HarnessError('NOT_READY', 'Попытка ещё идёт: ' + attemptId);
-    const artifacts = join(this.options.stateDir, 'artifacts', attemptId);
+    const artifacts = join(this.dirOf(attempt.repositoryId), 'artifacts', attemptId);
     const file = join(artifacts, 'cleanup-pending.json');
     if (!existsSync(file)) return { status: 'nothing-pending' as const };
     const pending = JSON.parse(await readFile(file, 'utf8')) as Retained & { reason: string };
-    const roots = [await realpath(this.options.stateDir)];
+    const roots = [
+      ...new Set([
+        await realpath(this.options.stateDir),
+        await realpath(this.dirOf(attempt.repositoryId)),
+      ]),
+    ];
     const cleaned: string[] = [];
     for (const receipt of await receipts(artifacts)) {
       const state = JSON.parse(await readFile(receipt, 'utf8')) as { status: string };
@@ -1094,6 +1189,27 @@ export class Runner {
   }
 
   private async gate(
+    attempt: AttemptState,
+    cwd: string,
+    sha: string,
+    phase: EvidenceRecord['phase'],
+    gate: GatePolicy,
+    artifacts: string,
+    signal: AbortSignal,
+    execution: ReturnType<typeof executionEnvironment>,
+    consumer?: { repositoryId: string; dependencies: DependencySnapshot[] },
+  ) {
+    // Время проверок потребителя — отдельная стадия: в метриках области оно
+    // не смешивается с собственными gates поручения.
+    const stage = consumer
+      ? `${phase}-consumer:${consumer.repositoryId}:${gate.id}`
+      : `${phase}-test:${gate.id}`;
+    await this.timed(attempt, stage, () =>
+      this.runOneGate(attempt, cwd, sha, phase, gate, artifacts, signal, execution, consumer),
+    );
+  }
+
+  private async runOneGate(
     attempt: AttemptState,
     cwd: string,
     sha: string,
@@ -1173,9 +1289,9 @@ export class Runner {
       const repo = this.repo(consumer.repositoryId);
       const checkout = this.repoPath(repo);
       const id = `${attempt.id}-consumer-${repo.id}-${randomUUID().slice(0, 8)}`;
-      const dir = join(this.options.stateDir, 'consumers', id);
+      const dir = join(this.dirOf(repo.id), 'consumers', id);
       const own = join(artifacts, 'integration', 'consumer', repo.id);
-      await mkdir(join(this.options.stateDir, 'consumers'), { recursive: true });
+      await mkdir(join(this.dirOf(repo.id), 'consumers'), { recursive: true });
       await git(checkout, 'worktree', 'add', '--detach', dir, repo.targetRef);
       let dependencies: DependencySnapshot[] = [];
       let failure: Error | undefined;
@@ -1192,7 +1308,7 @@ export class Runner {
         dependencies = await snapshotDependencies({
           repos: this.repositories(),
           repositoryId: repo.id,
-          dir: join(this.options.stateDir, 'dependencies', id),
+          dir: join(this.dirOf(repo.id), 'dependencies', id),
           artifacts: own,
           runId: attempt.id,
           policy: this.policy,
@@ -1233,6 +1349,8 @@ export class Runner {
                 },
               );
           },
+          (stage, action) =>
+            this.timed(attempt, `integration-consumer-environment:${repo.id}:${stage}`, action),
         );
         await assertDependencies(dependencies);
         await pinned('проверка');
@@ -1362,6 +1480,22 @@ export class Runner {
     signal: AbortSignal,
     context?: ContextSnapshot,
   ) {
+    await this.timed(attempt, phase + '-review', () =>
+      this.reviewOnce(attempt, work, cwd, base, sha, phase, artifacts, signal, context),
+    );
+  }
+
+  private async reviewOnce(
+    attempt: AttemptState,
+    work: WorkState,
+    cwd: string,
+    base: string,
+    sha: string,
+    phase: EvidenceRecord['phase'],
+    artifacts: string,
+    signal: AbortSignal,
+    context?: ContextSnapshot,
+  ) {
     const dir = join(artifacts, phase, 'review');
     await mkdir(dir, { recursive: true });
     const diff = await git(cwd, 'diff', '--no-ext-diff', '--no-textconv', base, sha);
@@ -1390,7 +1524,10 @@ export class Runner {
             context,
             gates: gates.map((g) => ({ id: g.id, command: g.command })),
             review: { sha, phase, diff },
-            notes: this.notes(attempt, true, sha),
+            notes: [
+              ...this.notes(attempt, true, sha),
+              ...(await this.hostNotes(work, attempt, true)),
+            ],
           }) + (probe ? '\n\n' + probe.prompt : ''),
         ...(probe ? { probe: probe.server } : {}),
       },
@@ -1422,6 +1559,14 @@ export class Runner {
       },
       redact,
     );
+    // Служебные значения записи — перечисления контура, а не текст reviewer:
+    // короткий секрет, совпавший с их частью, их не маскирует.
+    record.inspection = { ...record.inspection, mode: inspection.mode, source: inspection.source };
+    if (parsed.success)
+      record.findings = record.findings.map((f, i) => ({
+        ...f,
+        severity: parsed.data.findings[i]?.severity ?? f.severity,
+      }));
     const log = join(dir, 'review.json');
     await writeFile(log, JSON.stringify(record, null, 2));
     // Находки с воспроизводимым входом — в реестр поручения, уже
@@ -1516,6 +1661,11 @@ export class Runner {
       seed: propertySeed(attempt.id, 'self', attempt.workId),
     });
     if (plan) this.selfChecks.set(attempt.id, { dir, plan });
+  }
+
+  /** Сведения хоста в запросе: данные, а не правила приёмки. */
+  private async hostNotes(work: WorkState, attempt: AttemptState, review: boolean) {
+    return (await this.options.hooks?.notes?.({ work, attempt, review })) ?? [];
   }
 
   private notes(attempt: AttemptState, review: boolean, sha?: string) {
@@ -1750,6 +1900,7 @@ export class Runner {
           context,
         );
       },
+      (stage, action) => this.timed(attempt, 'integration-environment:' + stage, action),
     );
     if (
       (await git(cwd, 'rev-parse', 'HEAD')) !== sha ||

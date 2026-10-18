@@ -185,6 +185,16 @@ export interface ReceiverContext {
   specDigest?: string;
   /** Закреплённая за поручением версия корпуса у получателя (`null` — без корпуса). */
   checkVersion?: { suite: string; digest: string } | null;
+  /**
+   * Формула версии проверок хоста получателя (как `BasisProvider.checksDigest`);
+   * без неё — формула harness.
+   */
+  checksDigest?(input: {
+    specDigest: string;
+    order: WorkOrder;
+    policyDigest: string;
+    corpus?: { suite: string; digest: string };
+  }): string;
 }
 
 /**
@@ -712,14 +722,22 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
   // Версия проверок вычисляется получателем из постановки, контрактов,
   // политики и корпуса результата: согласованная, но произвольная версия, как
   // и удаление корпуса вместе с его привязкой, её не воспроизводит.
-  const expectedChecks = effectiveChecks(
-    {
-      approvedDigest: context.specDigest ?? digestOf(order),
-      order,
-      ...(binding ? { checkVersion: { ...binding } } : {}),
-    },
-    result.inputs.policyDigest,
-  );
+  const specDigest = context.specDigest ?? digestOf(order);
+  const expectedChecks = context.checksDigest
+    ? context.checksDigest({
+        specDigest,
+        order,
+        policyDigest: result.inputs.policyDigest,
+        ...(binding ? { corpus: { suite: binding.suite, digest: binding.digest } } : {}),
+      })
+    : effectiveChecks(
+        {
+          approvedDigest: specDigest,
+          order,
+          ...(binding ? { checkVersion: { ...binding } } : {}),
+        },
+        result.inputs.policyDigest,
+      );
   if (expectedChecks !== effective)
     return ['версия проверок не соответствует постановке, контрактам, политике и корпусу'];
   // Какой корпус обязателен, знает только получатель.

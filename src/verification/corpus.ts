@@ -4,6 +4,7 @@ import { homedir, tmpdir } from 'node:os';
 import { isAbsolute } from 'node:path';
 import {
   HarnessError,
+  WORKSPACE_OWNER,
   digestOf,
   type CheckSuite,
   type ExecutionTransaction,
@@ -268,7 +269,10 @@ export class CorpusStore {
       id,
       repositoryId,
       contractId: contract.id,
-      contractDigest: digestOf(contract),
+      // Digest договора — ссылка поручения, под которой хранится документ (у
+      // хоста — его формула digest), а не пересчёт документа.
+      contractDigest:
+        work.order.contracts.find((c) => c.id === contract.id)?.digest ?? digestOf(contract),
       gate: contract.checks!.gate,
       basis,
       cases: {},
@@ -483,10 +487,9 @@ export class CorpusStore {
     });
   }
   private declarationOf(view: ExecutionView, suite: CheckSuite) {
-    return view
-      .locals('contract-documents')
-      .map((x) => x.value)
-      .find((c) => c.id === suite.contractId && digestOf(c) === suite.contractDigest)?.checks;
+    // Документ хранится под digest ссылки поручения (формула хоста).
+    const stored = view.local('contract-documents', WORKSPACE_OWNER, suite.contractDigest);
+    return stored?.id === suite.contractId ? stored.checks : undefined;
   }
 
   /**

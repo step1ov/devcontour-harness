@@ -313,3 +313,48 @@ test('Настоящий обрыв по лимиту времени: проце
   assert.deepEqual(first!.partial?.files, ['src/greet.js']);
   assert.match(readFileSync(first!.partial.patch, 'utf8'), /Hel/);
 });
+
+test('Черновик берётся у последней содержательной попытки; прерванная окружением и пустая пропускаются; переутверждение помечает', () => {
+  const work = {
+    id: 'w',
+    approvedDigest: 'a'.repeat(64),
+    approvedAt: '2026-01-01T00:00:00.000Z',
+    order: { contracts: [] },
+  } as unknown as Parameters<typeof continuableDraft>[1];
+  const attempt = (id: string, over: Record<string, unknown>) =>
+    ({
+      id,
+      workId: 'w',
+      status: 'failed',
+      startedAt: '2026-01-02T00:00:00.000Z',
+      ...over,
+    }) as never;
+  const viewOf = (attempts: unknown[]) =>
+    ({ attempts: () => attempts }) as unknown as Parameters<typeof continuableDraft>[0];
+  const rejected = attempt('R1', {
+    failureKind: 'review',
+    candidateSha: 'c'.repeat(40),
+    baseSha: 'b'.repeat(40),
+  });
+  const interrupted = attempt('R2', { failureKind: 'environment' });
+  assert.equal(continuableDraft(viewOf([rejected, interrupted]), work, 'R3')?.runId, 'R1');
+  assert.equal(continuableDraft(viewOf([rejected, interrupted]), work, 'R3')?.respecified, false);
+  const reapproved = { ...work, approvedAt: '2026-01-03T00:00:00.000Z' };
+  assert.equal(continuableDraft(viewOf([rejected]), reapproved, 'R3')?.respecified, true);
+  const empty = attempt('R2b', { failureKind: 'unknown' });
+  assert.equal(continuableDraft(viewOf([rejected, empty]), work, 'R3')?.runId, 'R1');
+  const drafted = attempt('R2c', {
+    failureKind: 'unknown',
+    partial: {
+      patch: '/p',
+      digest: 'd'.repeat(64),
+      files: ['a.ts'],
+      spec: work.approvedDigest,
+      contracts: {},
+    },
+  });
+  const draft = continuableDraft(viewOf([rejected, drafted]), work, 'R3');
+  assert.equal(draft?.runId, 'R2c');
+  assert.equal(draft?.kind, 'unfinished');
+  assert.equal(draft?.reason, 'unknown');
+});

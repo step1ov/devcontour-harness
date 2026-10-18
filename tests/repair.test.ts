@@ -114,6 +114,15 @@ test('Классификатор узнаёт настоящие тексты о
     classifyFailure(new TaskFailure('gate', 'candidate/tests: 401 Unauthorized в ответе'), 'x'),
     'gate',
   );
+  // Отказ приёмки движка называет класс своим кодом.
+  for (const [code, kind] of [
+    ['GATE_FAILED', 'gate'],
+    ['REVIEW_REJECTED', 'review'],
+    ['SCOPE_VIOLATION', 'scope-violation'],
+    ['BUDGET_EXHAUSTED', 'budget'],
+  ] as const)
+    assert.equal(classifyFailure(new HarnessError(code, 'x'), 'x'), kind, code);
+  assert.equal(classifyFailure(new HarnessError('NOT_READY', 'x'), 'x'), 'unknown');
 });
 
 test('T15: класс и отпечаток отказа записаны на попытке и поручении — решение принимается по состоянию', () => {

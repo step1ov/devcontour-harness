@@ -131,6 +131,11 @@ export interface RuntimeRequest {
   /** Идентификатор вызова для учёта и диагностики. */
   callId: string;
   task: RuntimeTask;
+  /**
+   * Предмет вызова исполнения: поручение, попытка и фаза. Адаптер хоста
+   * может найти по нему свои сведения о задаче; в запросе модели их нет.
+   */
+  subject?: { workId: string; attemptId: string; phase: string };
   binding: RuntimeBinding;
   cwd: string;
   prompt: string;
@@ -264,6 +269,12 @@ export interface BasisProvider {
   scopeDigest(work: WorkState, view: ExecutionView): string;
   /** Digest политики для попытки этого поручения. */
   policyDigest(work: WorkState, view: ExecutionView): string;
+  /**
+   * Версия проверок попытки по формуле хоста; без неё — формула harness
+   * (`effectiveChecks`). Хост с принятой историей держит свою формулу: ею
+   * подписаны его записи и receipts.
+   */
+  checksDigest?(work: WorkState, policyDigest: string, view: ExecutionView): string;
 }
 
 /** Причина, по которой хост не разрешает действие; `null` — разрешено. */
