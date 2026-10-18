@@ -7,6 +7,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   HarnessError,
+  sha256,
   workGraphSchema,
   type ErrorCode,
   type ExecutionPolicy,
@@ -361,4 +362,109 @@ fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase name=
   } finally {
     delete process.env.HARNESS_TEST_JOINT_SECRET;
   }
+});
+
+test('T24: формулы хоста — digest политики и основания совместной проверки по хосту; их смена делает проверку устаревшей', () => {
+  const policy = policyOf((p: any) => {
+    p.workspaceGates = [workspaceGate('combo', 'app')];
+    p.maxAttempts = 3;
+  });
+  const dir = engineOf(policy).dir;
+  let hostPolicy = sha256('host-policy-1');
+  let hostSpec = sha256('host-spec-1');
+  const seen: (string | undefined)[] = [];
+  const store = new SqliteExecutionStore(join(dir, 'state.sqlite'), 'test');
+  const host = standaloneHost(store, policy);
+  const engine = new Engine({
+    host: {
+      ...host,
+      basis: {
+        ...host.basis,
+        jointPolicyDigest: () => hostPolicy,
+        jointSpecDigest: (_ids, _view, id) => (seen.push(id), hostSpec),
+      },
+    },
+    policy,
+    now: () => Date.parse('2026-01-01T00:00:00.000Z'),
+  });
+  ready(engine, graphOf({ a: [] }));
+  accept(engine, { a: sha('1') });
+  const v = engine.jointStart({ workIds: ['a'] });
+  assert.equal(v.policyDigest, sha256('host-policy-1'));
+  assert.equal(v.specDigest, sha256('host-spec-1'));
+  assert.equal(seen[0], undefined, 'при начале проверки её id ещё нет');
+  engine.jointManifest(v.id, v.token, manifestOf(policy));
+  assert.ok(seen.includes(v.id), 'при сверке хост получает id проверки');
+  engine.jointEvidence(v.id, v.token, {
+    gate: 'combo',
+    command: ['node', 'combo.js'],
+    passed: true,
+    exitCode: 0,
+    log: 'combo.log',
+    digest: sha256('log'),
+    summary: 'ok',
+    artifacts: [],
+    durationMs: 1,
+  });
+  hostSpec = sha256('host-spec-2');
+  assert.throws(() => engine.jointFinish(v.id, v.token), refused('APPROVAL_STALE'));
+  hostSpec = sha256('host-spec-1');
+  engine.jointFinish(v.id, v.token);
+  assert.equal(engine.jointResult(['a']).current, true);
+  hostPolicy = sha256('host-policy-2');
+  assert.match(engine.jointResult(['a']).reason ?? '', /Политика совместной проверки изменилась/);
+  store.close();
+});
+
+test('T24: хост начинает проверку сам и передаёт её runner; каталог, окружение и подготовка хоста; продуктовое условие держит manifest', async () => {
+  const markGate = `const fs = require('fs');
+console.log('host mark=' + process.env.HOST_MARK);
+fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase name="combo"/></testsuite>');
+`;
+  const ctx = jointContour(markGate);
+  await ctx.runner.init();
+  ready(ctx.engine, ctx.graph, 'runner-1');
+  await ctx.runner.drain();
+  const set = ['add-greeting'];
+  let refusal: { code: 'NOT_READY'; message: string } | null = null;
+  const kinds: string[] = [];
+  const manifests: boolean[] = [];
+  const guards = ctx.engine.host.guards as unknown as Record<string, unknown>;
+  guards.joint = (v: JointVerificationState, _view: unknown, kind: string) => {
+    kinds.push(kind);
+    // Условие видит состояние после записи: закреплённый manifest.
+    if (kind === 'workspace.manifest') manifests.push(!!v.manifest);
+    return refusal;
+  };
+  let prepared = 0;
+  const runner = new JointRunner({
+    engine: ctx.engine,
+    stateDir: ctx.state,
+    baseDir: ctx.state,
+    resourceDatabase: join(ctx.state, 'resources.sqlite'),
+    directory: (v) => join(ctx.state, 'host-checks', v.id),
+    env: () => ({ HOST_MARK: 'cs-1' }),
+    prepare: () => Promise.resolve(void prepared++),
+  });
+  // Продуктовое условие отказало — manifest не закрепляется, проверка не проходит.
+  refusal = { code: 'NOT_READY', message: 'ChangeSet уже принят' };
+  const held = await runner.run(ctx.engine.jointStart({ workIds: set }));
+  assert.equal(held.status, 'failed');
+  assert.match(held.status === 'failed' ? held.error : '', /ChangeSet уже принят/);
+  assert.equal(held.manifest, undefined, 'manifest не закреплён: отказ откатил запись');
+  assert.deepEqual(manifests, [true], 'условие проверило закрепляемый manifest');
+  assert.ok(kinds.includes('workspace.manifest'));
+  assert.ok(!kinds.includes('heartbeat'), 'продление срока условием не проверяется');
+  refusal = null;
+  const v = ctx.engine.jointStart({ workIds: set });
+  const passed = await runner.run(v);
+  assert.equal(passed.status, 'passed');
+  assert.equal(prepared, 2, 'подготовка хоста перед каждой проверкой');
+  const log = readFileSync(join(ctx.state, 'host-checks', v.id, 'combo.log'), 'utf8');
+  assert.match(log, /host mark=cs-1/, 'окружение хоста передано gate');
+  assert.ok(!existsSync(join(ctx.state, 'joint', v.id)), 'каталог хоста вместо умолчания');
+  // Оценка указанной проверки, а не последней набора.
+  assert.equal(ctx.engine.jointResult(set, held.id).current, false);
+  assert.equal(ctx.engine.jointResult(set, v.id).current, true);
+  assert.match(ctx.engine.jointResult(['other'], v.id).reason ?? '', /другому набору/);
 });

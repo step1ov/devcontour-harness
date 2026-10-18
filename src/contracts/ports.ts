@@ -275,6 +275,17 @@ export interface BasisProvider {
    * подписаны его записи и receipts.
    */
   checksDigest?(work: WorkState, policyDigest: string, view: ExecutionView): string;
+  /**
+   * Digest политики совместной проверки по формуле хоста; без неё — формула
+   * harness. Хост с принятыми проверками держит свою: ею подписаны его записи.
+   */
+  jointPolicyDigest?(view: ExecutionView): string;
+  /**
+   * Основание совместной проверки набора по формуле хоста (у DevContour — снимок
+   * ChangeSet: доски и задачи). `verificationId` — проверка, основание которой
+   * сверяется; при начале проверки её ещё нет.
+   */
+  jointSpecDigest?(workIds: string[], view: ExecutionView, verificationId?: string): string;
 }
 
 /** Причина, по которой хост не разрешает действие; `null` — разрешено. */
@@ -302,6 +313,18 @@ export interface HostGuards {
   current(work: WorkState, attempt: AttemptState | undefined, view: ExecutionView): HostRefusal;
   /** Последняя проверка перед приёмкой, в транзакции приёмки, до CAS. */
   beforeAccept(work: WorkState, attempt: AttemptState, view: ExecutionView): HostRefusal;
+  /**
+   * Работы хоста, идущие под действующей политикой (поставка, preview):
+   * применение новой политики их дожидается так же, как попыток движка.
+   */
+  busy?(view: ExecutionView): string[];
+  /**
+   * Продуктовые условия совместной проверки (у DevContour — ChangeSet не
+   * принят, закреплённая проверка продуктового релиза): в каждой её записи,
+   * кроме продления срока, на состоянии после записи (закреплённый manifest,
+   * итог), в той же транзакции; отказ откатывает запись.
+   */
+  joint?(verification: JointVerificationState, view: ExecutionView, kind: string): HostRefusal;
 }
 
 /**

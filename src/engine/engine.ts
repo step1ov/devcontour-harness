@@ -1854,8 +1854,9 @@ export class Engine {
   /**
    * Запуск controller записывает его политику применённой, если её ещё нет
    * или процесс вправе её сменить. Неприменённый запрос операции остаётся.
+   * Хост с `recordPolicyOnLead: false` вызывает это сам при запуске controller.
    */
-  private recordPolicy(owner: string) {
+  recordPolicy(owner: string) {
     this.tx('config.started', (tx) => {
       const lease = tx.controller();
       if (lease?.owner !== owner || lease.leaseUntil <= this.now()) return;
@@ -1982,6 +1983,7 @@ export class Engine {
           .filter((op) => op.status === 'running' && (op.leaseUntil ?? 0) > now)
           .map((op) => `${value.id}:${op.key}`),
       ),
+      ...(this.host.guards.busy?.(view) ?? []),
     ];
   }
 
@@ -2056,6 +2058,27 @@ export class Engine {
     if (!request || request.error || request.digest !== this.loadedPolicy)
       return { status: 'none' as const };
     return this.applyReconfigure(by);
+  }
+
+  /**
+   * Записать отказ применения с причиной хоста (например, файл политики не
+   * читается или не совпадает с ожидаемым). Только для неприменённого запроса
+   * той же операции и digest; повтор операции сбрасывает отказ.
+   */
+  rejectReconfigure(operation: string, digest: string, error: string) {
+    return this.tx('config.reconfigured', (tx) => {
+      const control = tx.control();
+      const request = control.reconfigure;
+      if (!request || request.operation !== operation || request.digest !== digest) return false;
+      if (request.appliedAt) return false;
+      const message = error.slice(0, 4000) || 'Политика не применена';
+      tx.setControl({ ...control, reconfigure: { ...request, error: message } });
+      tx.emit({
+        type: 'policy.reconfigure',
+        payload: { operation, digest, status: 'failed', error: message },
+      });
+      return true;
+    });
   }
 
   /** Снять завершённый или отменённый запрос операции. */
@@ -2169,6 +2192,19 @@ export class Engine {
   /* Совместная проверка комбинации репозиториев                       */
   /* ---------------------------------------------------------------- */
 
+  /** Digest политики совместной проверки: формула хоста, если он её задаёт. */
+  private jointPolicy(view: ExecutionView) {
+    return this.host.basis.jointPolicyDigest?.(view) ?? jointPolicyDigest(this.policy);
+  }
+
+  /** Основание совместной проверки набора: формула хоста, если он её задаёт. */
+  private jointSpec(view: ExecutionView, workIds: string[], verificationId?: string) {
+    return (
+      this.host.basis.jointSpecDigest?.(workIds, view, verificationId) ??
+      jointSpecDigest(view, workIds)
+    );
+  }
+
   private liveJoint(view: ExecutionView) {
     return view.verifications().some((v) => v.status === 'active' && v.leaseUntil > this.now());
   }
@@ -2232,8 +2268,8 @@ export class Engine {
         startedAt: iso(at),
         leaseUntil: at + this.policy.leaseMs,
         status: 'active',
-        policyDigest: jointPolicyDigest(this.policy),
-        specDigest: jointSpecDigest(tx, input.workIds),
+        policyDigest: this.jointPolicy(tx),
+        specDigest: this.jointSpec(tx, input.workIds),
         workIds: [...input.workIds],
         ...(input.baseline
           ? {
@@ -2273,15 +2309,24 @@ export class Engine {
       const v = tx.verification(id);
       if (!v || v.status !== 'active' || v.token !== token || v.leaseUntil <= this.now())
         throw new HarnessError('LEASE_STALE', 'Устаревшая попытка совместной проверки');
+
       if (
-        v.policyDigest !== jointPolicyDigest(this.policy) ||
-        v.specDigest !== jointSpecDigest(tx, v.workIds)
+        v.policyDigest !== this.jointPolicy(tx) ||
+        v.specDigest !== this.jointSpec(tx, v.workIds, v.id)
       )
         throw new HarnessError(
           'APPROVAL_STALE',
           'Состав набора или политика изменились; нужна новая проверка',
         );
-      return fn(v, tx);
+      const out = fn(v, tx);
+      // Продуктовые условия хоста — на состоянии после записи (закреплённый
+      // manifest, итог): отказ откатывает всю запись.
+      if (kind !== 'heartbeat') {
+        const after = tx.verification(id)!;
+        const refusal = this.host.guards.joint?.(after, tx, kind);
+        if (refusal) throw new HarnessError(refusal.code, refusal.message);
+      }
+      return out;
     });
   }
 
@@ -2374,24 +2419,32 @@ export class Engine {
    * основании, с PASS каждого gate своей области. Иначе — причина; прежний
    * результат как актуальный не выдаётся.
    */
-  jointResult(workIds: string[]): {
+  jointResult(
+    workIds: string[],
+    /** Оценить эту проверку набора, а не последнюю (хост выбирает её сам). */
+    verificationId?: string,
+  ): {
     verification?: JointVerification;
     current: boolean;
     reason?: string;
   } {
     return this.read((v) => {
-      const last = v
-        .verifications()
-        .filter((x) => sameWorks(x.workIds, workIds))
-        .at(-1);
+      const last = verificationId
+        ? v.verification(verificationId)
+        : v
+            .verifications()
+            .filter((x) => sameWorks(x.workIds, workIds))
+            .at(-1);
+      if (last && !sameWorks(last.workIds, workIds))
+        return { current: false, reason: 'Проверка относится к другому набору' };
       if (!last) return { current: false, reason: 'Совместной проверки этого набора нет' };
       const verification = publicJoint(last);
       const reason =
         last.status !== 'passed'
           ? `Последняя проверка: ${last.status}${last.status === 'failed' ? ' — ' + last.error : ''}`
-          : last.policyDigest !== jointPolicyDigest(this.policy)
+          : last.policyDigest !== this.jointPolicy(v)
             ? 'Политика совместной проверки изменилась'
-            : last.specDigest !== jointSpecDigest(v, last.workIds)
+            : last.specDigest !== this.jointSpec(v, last.workIds, last.id)
               ? 'Поручения набора или их результаты изменились'
               : this.jointMissing(last);
       return reason ? { verification, current: false, reason } : { verification, current: true };

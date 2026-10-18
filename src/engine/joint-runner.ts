@@ -27,6 +27,12 @@ export interface JointRunnerOptions {
   baseDir: string;
   environment?: NodeJS.ProcessEnv;
   resourceDatabase?: string;
+  /** Каталог проверки (по умолчанию `<stateDir>/joint/<id>`). */
+  directory?: (verification: JointVerificationState) => string;
+  /** Дополнительные переменные окружения gates этой проверки (у хоста — его идентификаторы). */
+  env?: (verification: JointVerificationState) => Record<string, string>;
+  /** Подготовка хоста перед снимками (например, резерв репозиториев). */
+  prepare?: (signal: AbortSignal) => Promise<void>;
 }
 
 type Repo = ExecutionPolicy['repositories'][number];
@@ -59,6 +65,14 @@ export class JointRunner {
     return this.execute(v, options.signal);
   }
 
+  /**
+   * Провести уже начатую проверку. Хост, начинающий проверку в своей
+   * транзакции (с продуктовыми условиями), передаёт её сюда.
+   */
+  run(v: JointVerificationState, signal?: AbortSignal) {
+    return this.execute(v, signal);
+  }
+
   private async execute(
     v: JointVerificationState,
     outer?: AbortSignal,
@@ -76,7 +90,7 @@ export class JointRunner {
       },
       Math.max(1000, this.policy.leaseMs / 3),
     );
-    const dir = join(this.options.stateDir, 'joint', v.id);
+    const dir = this.options.directory?.(v) ?? join(this.options.stateDir, 'joint', v.id);
     const worktrees: { repo: string; cwd: string }[] = [];
     const source = this.options.environment ?? process.env;
     // Незавершённая очистка окружения оставляет снимки: их разбирает cleanup.
@@ -92,6 +106,7 @@ export class JointRunner {
         `${this.options.stateDir}:${v.id}`,
         signal,
         async (signal, resources) => {
+          await this.options.prepare?.(signal);
           await mkdir(join(dir, 'components'), { recursive: true });
           const works = this.engine.read((view) => v.workIds.map((id) => view.work(id)!));
           const manifest: NonNullable<JointVerification['manifest']> = {};
@@ -148,6 +163,7 @@ export class JointRunner {
                 throw new Error(`Проверка изменила исходники компонента ${id}`);
           };
           const common = {
+            ...this.options.env?.(v),
             DEVCONTOUR_RUN_ID: v.id,
             DEVCONTOUR_RESOURCES_JSON: JSON.stringify(resources),
             DEVCONTOUR_MANIFEST_PATH: manifestPath,
@@ -295,7 +311,7 @@ export class JointRunner {
       if (!preserve) {
         for (const w of worktrees)
           await git(w.repo, 'worktree', 'remove', '--force', w.cwd).catch(() => undefined);
-        if (dir.startsWith(join(this.options.stateDir, 'joint') + sep))
+        if (dir.startsWith(this.options.stateDir + sep))
           await rm(join(dir, 'components'), { recursive: true, force: true }).catch(
             () => undefined,
           );

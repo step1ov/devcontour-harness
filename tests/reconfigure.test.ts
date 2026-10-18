@@ -359,3 +359,66 @@ test('recordPolicyOnLead: false — получение роли не запис�
     'по умолчанию записывает',
   );
 });
+
+test('T27: работы хоста держат применение; отказ применения записывается с причиной хоста; повтор операции его сбрасывает', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-host-busy-'));
+  let hostBusy = ['delivery-1'];
+  const hostOf = (policy: ExecutionPolicy) => {
+    const store = new SqliteExecutionStore(join(dir, 'state.sqlite'), 'test');
+    const host = standaloneHost(store, policy);
+    return new Engine({
+      host: { ...host, guards: { ...host.guards, busy: () => hostBusy } },
+      policy,
+      now: () => Date.parse('2026-01-01T00:00:00.000Z'),
+    });
+  };
+  const old = hostOf(A);
+  old.lead('c1');
+  old.requestReconfigure('op-1', policyDigest(B));
+  const next = hostOf(B);
+  const busy = next.applyReconfigure('p2');
+  assert.deepEqual(
+    busy.status === 'busy' && busy.busy,
+    ['delivery-1'],
+    'поставка хоста держит применение',
+  );
+  hostBusy = [];
+  // Хост не смог прочитать файл политики — отказ с его причиной, не применение.
+  assert.equal(
+    old.rejectReconfigure('op-1', policyDigest(B), 'Файл конфигурации не читается'),
+    true,
+  );
+  assert.equal(old.policyState().reconfigure?.error, 'Файл конфигурации не читается');
+  assert.equal(next.applyReconfigure('p2').status, 'none', 'отклонённый запрос не применяется');
+  assert.equal(
+    old.rejectReconfigure('op-2', policyDigest(B), 'x'),
+    false,
+    'чужая операция не отклоняет',
+  );
+  old.requestReconfigure('op-1', policyDigest(B));
+  assert.equal(old.policyState().reconfigure?.error, undefined, 'повтор сбрасывает отказ');
+  assert.equal(next.applyReconfigure('p2').status, 'applied');
+  assert.equal(
+    next.rejectReconfigure('op-1', policyDigest(B), 'поздно'),
+    false,
+    'применённый запрос не отклоняется',
+  );
+});
+
+test('recordPolicy: хост с recordPolicyOnLead: false записывает применённую политику сам, только действующим controller', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-record-'));
+  const store = new SqliteExecutionStore(join(dir, 'state.sqlite'), 'test');
+  const engine = new Engine({
+    host: standaloneHost(store, A),
+    policy: A,
+    recordPolicyOnLead: false,
+    now: () => Date.parse('2026-01-01T00:00:00.000Z'),
+  });
+  engine.recordPolicy('c1');
+  assert.equal(engine.policyState().applied, undefined, 'без роли controller не записывает');
+  engine.lead('c1');
+  assert.equal(engine.policyState().applied, undefined, 'получение роли само не записывает');
+  engine.recordPolicy('c1');
+  assert.equal(engine.policyState().applied?.digest, policyDigest(A));
+  assert.equal(engine.policyState().applied?.by, 'c1');
+});
