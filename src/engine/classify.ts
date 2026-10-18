@@ -1,10 +1,12 @@
-import { HarnessError, type ErrorCode } from '../contracts/index.ts';
-import { TaskFailure, type FailureKind } from './failure.ts';
+import {
+  BlockedError,
+  HarnessError,
+  TaskFailure,
+  type ErrorCode,
+  type FailureKind,
+} from '../contracts/index.ts';
 
-/** Отказ окружения до начала работы: попытка не засчитывается. */
-export class BlockedError extends Error {
-  override name = 'BlockedError';
-}
+export { BlockedError };
 
 /**
  * Отказ провайдера, а не работы: он повторится на любой следующей выдаче.

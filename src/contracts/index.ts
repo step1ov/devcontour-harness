@@ -14,3 +14,4 @@ export * from './profiles.ts';
 export * from './ports.ts';
 export * from './cli.ts';
 export * from './published.ts';
+export * from './failure.ts';
