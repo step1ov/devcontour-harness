@@ -1,6 +1,6 @@
 {
   "name": "devcontour-harness",
-  "version": "0.1.0-alpha.0.s3.2",
+  "version": "0.1.0-alpha.0.s3.3",
   "private": true,
   "description": "Headless execution harness: work graph, isolated attempts, gates, independent reviews and accepted results.",
   "type": "module",
