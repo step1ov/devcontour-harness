@@ -165,6 +165,15 @@ export class Engine {
     return this.host.basis.checksDigest?.(work, policy, view) ?? effectiveChecks(work, policy);
   }
 
+  /**
+   * Основание эпизода разбора по свойству: формула хоста, если он её задал,
+   * иначе harness. Хост с принятой историей держит свою — ею подписаны его
+   * прежние эпизоды и попытки, и они не закрываются как «новое основание».
+   */
+  episodeOf(work: WorkState, view: ExecutionView) {
+    return this.host.basis.episodeBasis?.(work, view) ?? episodeBasis(work);
+  }
+
   private tx<T>(kind: TransactionKind, fn: (tx: ExecutionTransaction) => NotPromise<T>): T {
     return this.host.store.transact(kind, fn);
   }
@@ -479,7 +488,7 @@ export class Engine {
           approvedScope: this.host.basis.scopeDigest(work, tx),
           approval,
         });
-        if (closeIfBasisChanged(ready, at))
+        if (closeIfBasisChanged(ready, at, this.episodeOf(ready, tx)))
           this.recoveryEvent(tx, ready, ready.recoveryHistory!.at(-1)!);
         tx.putWork(ready);
         tx.emit({
@@ -875,7 +884,7 @@ export class Engine {
       this.budgetBlocks(tx);
       for (const ready of tx.works().filter((w) => w.status === 'ready' && w.recovery)) {
         const next = structuredClone(ready);
-        if (closeIfBasisChanged(next, iso(this.now()))) {
+        if (closeIfBasisChanged(next, iso(this.now()), this.episodeOf(next, tx))) {
           tx.putWork(next);
           this.recoveryEvent(tx, next, next.recoveryHistory!.at(-1)!);
         }
@@ -992,7 +1001,7 @@ export class Engine {
           effective: this.checksOf(work, tx),
           ...(work.checkVersion ? { corpus: work.checkVersion } : {}),
         },
-        episodeBasis: episodeBasis(work),
+        episodeBasis: this.episodeOf(work, tx),
         callsRecorded: true,
         evidence: [],
       };
@@ -1551,6 +1560,7 @@ export class Engine {
         tx.attempts(w.id).map((x) => (x.id === id ? failed : x)),
         failed,
         iso(this.now()),
+        this.episodeOf(next, tx),
       );
       if (episode && (episode.status !== before || !w.recovery || w.recovery.id !== episode.id))
         this.recoveryEvent(tx, w, episode);

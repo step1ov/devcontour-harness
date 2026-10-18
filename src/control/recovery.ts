@@ -10,6 +10,7 @@ import {
   type ExecutionView,
   type PropertyRecovery,
   type RuntimeAdapter,
+  type RuntimeBinding,
   type WorkState,
 } from '../contracts/index.ts';
 import { executionEnvironment } from '../environment/lifecycle.ts';
@@ -170,6 +171,14 @@ export async function analyzeRecovery(
     stateDir: string;
     cwd: string;
     environment?: NodeJS.ProcessEnv;
+    /**
+     * Назначение вызова сверх runtime автора (модель, профиль инструментов) —
+     * у хоста с собственным выбором модели и профиля ведущего. Окружение
+     * вызова получает окружение профиля.
+     */
+    binding?: Omit<RuntimeBinding, 'runtime'>;
+    /** Дополнительно закрытое и открытое на чтение вызову. */
+    boundary?: { hidden: string[]; readable: string[] };
   },
   work: WorkState,
   author: 'codex' | 'claude',
@@ -186,8 +195,12 @@ export async function analyzeRecovery(
     JSON.stringify(brief, null, 2),
   ].join('\n\n');
   await writeFile(join(dir, 'prompt.txt'), prompt);
+  const profile = ctx.binding?.toolProfile;
+  const tools = profile ? ctx.policy.toolProfiles[profile] : undefined;
+  if (profile && !tools)
+    throw new HarnessError('INVALID_INPUT', 'Неизвестный профиль инструментов: ' + profile);
   const execution = executionEnvironment(
-    [ctx.policy.environment],
+    [ctx.policy.environment, tools?.environment],
     {},
     ctx.environment ?? process.env,
   );
@@ -197,7 +210,13 @@ export async function analyzeRecovery(
     {
       callId: randomUUID(),
       task: 'plan',
-      binding: { runtime: author },
+      binding: { ...ctx.binding, runtime: author },
+      // Предмет вызова: хост находит по нему поручение и вид вызова.
+      subject: {
+        workId: work.id,
+        attemptId: work.recovery!.runs.at(-1)!,
+        phase: 'property-recovery',
+      },
       cwd: ctx.cwd,
       prompt,
       outputSchema: recoveryOutputSchema,
@@ -205,8 +224,8 @@ export async function analyzeRecovery(
       sandbox: {
         mode: ctx.policy.isolation.mode,
         writable: [],
-        denied: [ctx.stateDir],
-        readable: [ctx.cwd],
+        denied: [ctx.stateDir, ...(ctx.boundary?.hidden ?? [])],
+        readable: [ctx.cwd, ...(ctx.boundary?.readable ?? [])],
         network: { domains: ctx.policy.isolation.domains },
       },
       timeoutMs: ctx.policy.runTimeoutMs,

@@ -94,7 +94,20 @@ test('Корень пакета экспортирует строительны�
     'policyDigest',
     'expandGateRefs',
     'analyzeRecovery',
+    'applyCases',
+    'recoveryBrief',
     'resultProblems',
+    'CorpusStore',
+    'submitCase',
+    'junitSummary',
+    'prepareReportPath',
+    'sandboxBlockedHosts',
+    'runCheck',
+    'caseId',
+    'corpusFile',
+    'parseCanonical',
+    'versionOf',
+    'closeIfBasisChanged',
   ])
     assert.ok(name in api, 'нет экспорта ' + name);
 });

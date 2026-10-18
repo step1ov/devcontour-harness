@@ -66,8 +66,12 @@ function verifiedPass(a: AttemptState, property: string) {
  * Последовательные содержательные отказы по свойству в текущем эпизоде,
  * от последней попытки к первой.
  */
-export function propertyStreak(work: WorkState, attempts: AttemptState[], property: string) {
-  const basis = episodeBasis(work);
+export function propertyStreak(
+  work: WorkState,
+  attempts: AttemptState[],
+  property: string,
+  basis = episodeBasis(work),
+) {
   const runs: string[] = [];
   const own = attempts.filter((a) => a.workId === work.id && a.status !== 'active');
   for (let i = own.length - 1; i >= 0; i--) {
@@ -102,6 +106,8 @@ export function afterFailure(
   attempts: AttemptState[],
   failed: AttemptState,
   at: string,
+  /** Основание эпизода по формуле хоста; без неё — формула harness. */
+  basis = episodeBasis(work),
 ): PropertyRecovery | undefined {
   const current = work.recovery;
   // Разрешённый повтор завершился: повторный провал по тому же свойству
@@ -125,11 +131,11 @@ export function afterFailure(
     return current;
   }
   if (current && current.status !== 'closed') {
-    if (current.basis !== episodeBasis(work)) close(work, at, 'основание поручения изменилось');
+    if (current.basis !== basis) close(work, at, 'основание поручения изменилось');
     else return undefined;
   }
   for (const property of failed.properties ?? []) {
-    const streak = propertyStreak(work, attempts, property);
+    const streak = propertyStreak(work, attempts, property, basis);
     if (streak.runs.length < RECOVERY_THRESHOLD) continue;
     // Тот же эпизод уже разбирался: повторная регистрация бюджета не даёт.
     const previous = work.recoveryHistory?.find(
@@ -164,8 +170,8 @@ export function afterFailure(
  * эпизод. Проверяется при согласовании и перед выдачей: иначе блокировка
  * старого эпизода не давала дойти до попытки, где её снял бы отказ.
  */
-export function closeIfBasisChanged(work: WorkState, at: string) {
-  if (work.recovery && work.approvedDigest && work.recovery.basis !== episodeBasis(work)) {
+export function closeIfBasisChanged(work: WorkState, at: string, basis = episodeBasis(work)) {
+  if (work.recovery && work.approvedDigest && work.recovery.basis !== basis) {
     close(work, at, 'согласовано новое основание поручения');
     return true;
   }

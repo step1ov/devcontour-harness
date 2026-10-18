@@ -286,6 +286,12 @@ export interface BasisProvider {
    * сверяется; при начале проверки её ещё нет.
    */
   jointSpecDigest?(workIds: string[], view: ExecutionView, verificationId?: string): string;
+  /**
+   * Основание эпизода разбора по свойству (постановка и контракты поручения)
+   * по формуле хоста; без неё — формула harness (`episodeBasis`). Хост с
+   * прежними эпизодами держит свою: ею подписаны их основания.
+   */
+  episodeBasis?(work: WorkState, view: ExecutionView): string;
 }
 
 /** Причина, по которой хост не разрешает действие; `null` — разрешено. */

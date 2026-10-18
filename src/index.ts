@@ -61,6 +61,10 @@ export {
 export {
   CorpusStore,
   canonicalJson,
+  caseId,
+  corpusFile,
+  parseCanonical,
+  versionOf,
   portableSuite,
   scrubLocalPaths,
   scrubPortable,
@@ -71,7 +75,9 @@ export {
   caseHooks,
   caseInputSchema,
   staleArtifacts,
+  submitCase,
   type CaseRequest,
+  type ConfirmContext,
 } from './verification/confirm.ts';
 export {
   assertResult,
@@ -108,7 +114,14 @@ export { repairDecision, type RepairDecision } from './engine/repair.ts';
 export { technicalReview, type TechnicalReviewInput } from './control/review.ts';
 export { JointRunner, type JointRunnerOptions } from './engine/joint-runner.ts';
 export { moveBase, fencedRefMove, type BaseMoved, type RefMove } from './control/base-move.ts';
-export { runGate, runCheck } from './verification/gates.ts';
+export {
+  junitSummary,
+  prepareReportPath,
+  runCheck,
+  runGate,
+  sandboxBlockedHosts,
+  type GateRun,
+} from './verification/gates.ts';
 export { requirementProof, unprovenReason } from './verification/proof.ts';
 export { ReviewProbes, probeLimits, observeReproductions } from './agents/review-probe.ts';
 export {
@@ -119,6 +132,7 @@ export {
   redactor,
   type Redactor,
 } from './environment/redaction.ts';
+export { closeIfBasisChanged } from './engine/property-recovery.ts';
 export {
   analyzeRecovery,
   applyCases,

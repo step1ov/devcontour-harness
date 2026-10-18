@@ -312,3 +312,123 @@ test('T16/AC28: пауза человека и предложение для о�
   );
   h.close();
 });
+
+test('Основание эпизода — формула хоста: эпизод, подписанный хостом, не закрывается выдачей как «новое основание»; формула harness закрыла бы его', async () => {
+  const ctx = approved();
+  const { Engine } = await import('../src/engine/engine.ts');
+  const { sha256 } = await import('../src/contracts/index.ts');
+  const hostBasis = (w: { approvedDigest?: string }) => sha256('host:' + (w.approvedDigest ?? ''));
+  const host = new Engine({
+    host: {
+      ...ctx.engine.host,
+      basis: { ...ctx.engine.host.basis, episodeBasis: (w) => hostBasis(w) },
+    },
+    policy: ctx.engine.policy,
+  });
+  const first = failAs(host, 'gate', [P]);
+  assert.equal(
+    host.read((v) => v.attempt(first.attempt.id)!.episodeBasis),
+    hostBasis(work(host)),
+    'попытка подписана формулой хоста',
+  );
+  host.retry('add-greeting');
+  failAs(host, 'gate', [P]);
+  const opened = work(host).recovery!;
+  assert.equal(opened.basis, hostBasis(work(host)));
+  host.retry('add-greeting');
+  assert.equal(host.claim('c1'), undefined, 'эпизод хоста держит выдачу');
+  assert.equal(work(host).recovery?.id, opened.id, 'и не закрыт как новое основание');
+  // Тот же эпизод под формулой harness — «новое основание»: закрывается выдачей.
+  assert.ok(ctx.engine.claim('c1'), 'формула harness отличается и эпизод закрывает');
+  assert.match(work(ctx.engine).recoveryHistory!.at(-1)!.reason!, /новое основание/);
+});
+
+test('Разбор ведущего: назначение хоста (модель, профиль инструментов) и его границы доходят до вызова; окружение — с окружением профиля', async () => {
+  const ctx = approved();
+  const { engine } = ctx;
+  failAs(engine, 'gate', [P]);
+  engine.retry('add-greeting');
+  failAs(engine, 'gate', [P]);
+  assert.ok(work(engine).recovery);
+  const { analyzeRecovery } = await import('../src/control/recovery.ts');
+  const { executionPolicySchema } = await import('../src/contracts/index.ts');
+  const policy = executionPolicySchema.parse({
+    ...engine.policy,
+    toolProfiles: {
+      lead: { runtime: 'codex', environment: { values: { PROFILE_MARKER: 'lead-profile' } } },
+    },
+  });
+  const seen: import('../src/contracts/index.ts').RuntimeRequest[] = [];
+  const decision = await analyzeRecovery(
+    {
+      engine,
+      policy,
+      adapters: {
+        codex: {
+          runtime: 'codex',
+          capabilities: () =>
+            Promise.resolve({
+              runtime: 'codex',
+              structuredOutput: true,
+              sandbox: ['none'],
+              cancellation: true,
+              usage: true,
+              fixture: true,
+            }),
+          invoke: (request) => {
+            seen.push(request);
+            return Promise.resolve({
+              status: 'ok' as const,
+              output: {
+                action: 'environment',
+                reason: 'Причина в окружении проверки.',
+                evidence: ['лог'],
+                hypothesis: null,
+                plan: null,
+                cases: null,
+                proposal: null,
+                conflict: null,
+              },
+              model: 'lead-model',
+              runtimeVersion: null,
+              text: '',
+              usage: {
+                inputTokens: 1,
+                outputTokens: 1,
+                cacheReadTokens: 0,
+                cacheWriteTokens: 0,
+                reportedUsd: null,
+                complete: true,
+                source: 'fixture',
+              },
+              diagnostics: { exitCode: 0 },
+            });
+          },
+        },
+      },
+      stateDir: ctx.state,
+      cwd: ctx.repo.dir,
+      binding: { model: 'lead-model', toolProfile: 'lead' },
+      boundary: { hidden: ['/secret/area'], readable: ['/shared/notes'] },
+    },
+    work(engine),
+    'codex',
+    AbortSignal.timeout(10_000),
+  );
+  assert.equal(decision.action, 'environment');
+  const request = seen[0]!;
+  assert.deepEqual(request.binding, { model: 'lead-model', toolProfile: 'lead', runtime: 'codex' });
+  assert.equal(request.env.PROFILE_MARKER, 'lead-profile', 'окружение профиля');
+  assert.ok(request.sandbox.denied.includes('/secret/area'));
+  assert.ok(request.sandbox.readable?.includes('/shared/notes'));
+  assert.deepEqual(request.sandbox.writable, [], 'разбор не правит файлы');
+  assert.deepEqual(
+    request.subject,
+    {
+      workId: 'add-greeting',
+      attemptId: work(engine).recovery!.runs.at(-1),
+      phase: 'property-recovery',
+    },
+    'предмет вызова — поручение эпизода',
+  );
+});
