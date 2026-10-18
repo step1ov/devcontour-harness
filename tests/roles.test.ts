@@ -264,3 +264,61 @@ test('S2.4/T32: same-vendor reviewer — свежая сессия без ист
     h.close();
   }
 });
+
+test('S2.3: запасные reviewer правила — первый допустимый по вендору для автора; без неявного противоположного runtime', async () => {
+  const { selectReviewer, policyIssues } = await import('../src/contracts/index.ts');
+  for (const author of ['claude', 'codex'] as const) {
+    const ctx = hsetup({
+      writer: author,
+      reviewer: 'claude',
+      scenario: { writer: implement(), reviewer: approve() },
+      policy: (p: any) => {
+        for (const k of ['code', 'plan', 'contract'])
+          p.review[k].alternates = [{ runtime: 'codex' }];
+      },
+    });
+    const expected = author === 'claude' ? 'codex' : 'claude';
+    for (const kind of ['code', 'plan', 'contract'] as const) {
+      const choice = selectReviewer(
+        ctx.policy,
+        kind,
+        { runtime: author },
+        kind === 'code' ? 'developer' : undefined,
+      );
+      assert.ok(choice.ok);
+      assert.equal(choice.reviewer.runtime, expected, `${author}/${kind}`);
+      assert.equal(choice.sameVendor, false);
+    }
+    const h = ctx.open();
+    await h.run({ graph: ctx.graph, author });
+    const a = h.engine.read((v) => v.attempts('add-greeting')[0]!);
+    assert.equal(a.status, 'succeeded', a.error);
+    assert.equal(a.reviewer, expected, 'ревью кода — запасной reviewer другого вендора');
+    assert.equal(h.engine.reviews('plan', ctx.graph.id).at(-1)!.reviewerRuntime, expected);
+    const contract = await h.review({ kind: 'contract', contract: doc, author });
+    assert.equal(contract.reviewerRuntime, expected);
+    h.close();
+  }
+  // Ни один кандидат не допустим — прежний понятный отказ до вызова.
+  const strict = hsetup({
+    writer: 'claude',
+    reviewer: 'claude',
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p: any) => (p.review.contract.alternates = [{ runtime: 'claude', model: 'other' }]),
+  });
+  const h = strict.open();
+  await assert.rejects(
+    h.review({ kind: 'contract', contract: doc, author: 'claude' }),
+    refused('REVIEWER_SAME_VENDOR'),
+  );
+  assert.equal(strict.calls('claude', 'reviewer'), 0);
+  h.close();
+  // Запасной reviewer проверяется так же, как основной.
+  const raw = structuredClone(strict.policy) as any;
+  raw.review.plan.alternates = [{ runtime: 'claude', effort: 'high' }];
+  assert.ok(
+    policyIssues(executionPolicySchema.parse(raw)).some(
+      (i) => i.path.join('.') === 'review.plan.alternates.0' && /effort/.test(i.message),
+    ),
+  );
+});

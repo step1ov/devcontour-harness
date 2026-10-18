@@ -1,10 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import {
-  mcpEnvironment,
   executionDigest,
   API_VERSION,
   HarnessError,
@@ -13,10 +10,6 @@ import {
   contextDigest,
   contextIssues,
   digestOf,
-  findingId,
-  reviewIssues,
-  reviewResultSchema,
-  selectReviewer,
   workGraphDigest,
   type Author,
   type ContextSnapshot,
@@ -27,21 +20,14 @@ import {
   type ResultEnvelope,
   type ResultSink,
   type WorkSource,
-  type ReviewRecord,
   type RuntimeAdapter,
   type RuntimeName,
   type WorkGraph,
   type WorkflowJob,
 } from '../contracts/index.ts';
 import { cliAdapter } from '../agents/cli-adapter.ts';
-import { reviewOutputSchema } from '../agents/schemas.ts';
-import { executionEnvironment } from '../environment/lifecycle.ts';
-import { redactDeep } from '../environment/redaction.ts';
 import { Engine } from '../engine/engine.ts';
-import { measuredInvoke } from '../engine/measured.ts';
-import { contextText } from '../engine/prompt.ts';
 import { budgetOverview } from '../engine/budget.ts';
-import { TaskFailure } from '../engine/failure.ts';
 import { runResult } from '../engine/result.ts';
 import { repairDecision } from '../engine/repair.ts';
 import { Runner } from '../engine/runner.ts';
@@ -50,6 +36,7 @@ import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { validateInputs } from '../validate.ts';
 import { WorkflowQueue } from './workflow.ts';
+import { technicalReview } from './review.ts';
 import { policySourceChanged, type PolicySource } from './provenance.ts';
 import { JointRunner } from '../engine/joint-runner.ts';
 import { git } from '../environment/process.ts';
@@ -257,192 +244,39 @@ export class Harness {
     // источником, иначе — отказ до вызова; его digest — часть основания раунда.
     const context =
       input.kind === 'plan' ? this.planContext(input.graph, input.context) : undefined;
-    const contextKey = context ? contextDigest(context) : undefined;
-    const rounds = this.engine.reviews(input.kind, subject);
-    const last = rounds.at(-1);
-    // Назначение reviewer по текущей политике: прежний раунд подтверждает предмет
-    // только при том же назначении; недопустимый автор — отказ до вызова.
-    const choice = selectReviewer(this.policy, input.kind, { runtime: input.author });
-    if (!choice.ok) throw new HarnessError(choice.code, choice.message);
-    const binding = this.engine.reviewerBinding(input.kind, input.author)!;
-    if (
-      last &&
-      last.digest === digest &&
-      last.authorRuntime === input.author &&
-      last.approved &&
-      last.reviewerBinding === binding &&
-      last.contextDigest === contextKey
-    )
-      return last;
-    if (rounds.length >= this.policy.maxAttempts * 2)
-      throw new HarnessError(
-        'ATTEMPTS_EXHAUSTED',
-        `Исчерпаны раунды ревью ${input.kind} ${subject}`,
-      );
-    const adapter = this.adapters[choice.reviewer.runtime];
-    if (!adapter)
-      throw new HarnessError(
-        'RUNTIME_UNAVAILABLE',
-        'Runtime не подключён: ' + choice.reviewer.runtime,
-      );
-    const open = (last?.findings ?? []).filter((f) => f.status === 'open');
-    const round = rounds.length + 1;
-    const dir = join(this.options.stateDir, 'reviews', `${input.kind}-${subject}-${round}`);
-    await mkdir(dir, { recursive: true });
     const repo = this.policy.repositories[0]!;
-    const cwd = this.repoPath(repo.path);
-    // Окружение reviewer — с профилем инструментов его назначения; недостающий секрет — отказ до вызова.
-    const tools = choice.reviewer.toolProfile
-      ? this.policy.toolProfiles[choice.reviewer.toolProfile]
-      : undefined;
-    let execution: ReturnType<typeof executionEnvironment>;
-    try {
-      execution = executionEnvironment(
-        [
-          this.policy.environment,
-          repo.environment,
-          tools?.environment,
-          ...(tools ? [mcpEnvironment(tools)] : []),
-        ],
-        {},
-        this.options.environment ?? process.env,
-      );
-    } catch (error) {
-      throw new HarnessError(
-        'RUNTIME_UNAVAILABLE',
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-    const prompt = [
-      input.kind === 'plan'
-        ? 'You independently review a plan: a graph of executable work orders. Check that each order is complete, testable, scoped and that dependencies are right. Do not edit files.'
-        : 'You independently review a contract document. Check that every obligation is feasible and measurable. Do not edit files.',
-      `Subject: ${input.kind} ${subject}, digest ${digest}, round ${round}. Author: ${input.author}.`,
-      JSON.stringify(input.kind === 'plan' ? input.graph : input.contract, null, 2),
-      input.kind === 'contract' ? this.spikeNote(input.contract) : '',
-      context ? `Pinned context snapshot ${contextKey}.\n\n` + contextText(context) : '',
-      open.length
-        ? 'Previous open findings. For each, report its state in `previous` (closed, open or withdrawn) with a concrete basis: ' +
-          JSON.stringify(open.map((f) => ({ id: f.id, severity: f.severity, message: f.message })))
-        : '',
-      'Report execution.commands or an empty list with execution.noCommandsReason. Findings need a message; use null where a field does not apply.',
-    ]
-      .filter(Boolean)
-      .join('\n\n');
-    // Вызов под учётом: о графе — расход группы и её поручений, о контракте — общий.
-    const response = await measuredInvoke(
-      this.engine,
-      adapter,
-      {
-        callId: randomUUID(),
-        task: input.kind === 'plan' ? 'review-plan' : 'review-contract',
-        binding: choice.reviewer,
-        cwd,
-        prompt,
-        outputSchema: reviewOutputSchema,
-        session: { kind: 'fresh' },
-        sandbox: {
-          mode: this.policy.isolation.mode,
-          writable: [],
-          denied: [this.options.stateDir],
-          readable: [cwd],
-          network: { domains: this.policy.isolation.domains },
-        },
-        timeoutMs: this.policy.runTimeoutMs,
-        env: Object.fromEntries(
-          Object.entries(execution.env).filter((e): e is [string, string] => e[1] !== undefined),
-        ),
-        artifactDir: dir,
-        secrets: [...(execution.redact.secrets ?? [])],
-      },
-      AbortSignal.timeout(this.policy.runTimeoutMs + 5000),
-      {
+    const round = this.engine.reviews(input.kind, subject).length + 1;
+    return technicalReview(this.engine, this.policy, this.adapters, {
+      kind: input.kind,
+      subject,
+      digest,
+      author: input.author,
+      instructions: [
+        input.kind === 'plan'
+          ? 'You independently review a plan: a graph of executable work orders. Check that each order is complete, testable, scoped and that dependencies are right. Do not edit files.'
+          : 'You independently review a contract document. Check that every obligation is feasible and measurable. Do not edit files.',
+        JSON.stringify(input.kind === 'plan' ? input.graph : input.contract, null, 2),
+        input.kind === 'contract' ? this.spikeNote(input.contract) : '',
+      ],
+      ...(context ? { context } : {}),
+      ...(input.kind === 'contract' ? { contract: input.contract } : {}),
+      repositoryId: repo.id,
+      cwd: this.repoPath(repo.path),
+      artifactDir: join(this.options.stateDir, 'reviews', `${input.kind}-${subject}-${round}`),
+      denied: [this.options.stateDir],
+      // Вызов под учётом: о графе — расход группы и её поручений, о контракте — общий.
+      meta: {
         subjectId: subject,
         subjectKind: input.kind === 'plan' ? 'group' : 'other',
-        stage: input.kind + '-review',
         // Расход ревью плана закрепляется за графом и его поручениями из входа:
         // граф может быть ещё не зарегистрирован, а состав — измениться позже.
         ...(input.kind === 'plan'
           ? { group: { id: subject, workIds: input.graph.orders.map((o) => o.id) } }
           : {}),
       },
-    ).catch((error: unknown) => {
-      if (error instanceof TaskFailure && error.kind === 'budget')
-        throw new HarnessError('BUDGET_EXHAUSTED', error.message);
-      throw error;
+      maxRounds: this.policy.maxAttempts * 2,
+      ...(this.options.environment ? { environment: this.options.environment } : {}),
     });
-    if (response.status !== 'ok')
-      throw new HarnessError(
-        'RUNTIME_UNAVAILABLE',
-        `Ревью ${input.kind}: ${response.status}${response.diagnostics.reason ? ': ' + response.diagnostics.reason : ''}`,
-      );
-    const parsed = reviewResultSchema.safeParse(response.output);
-    const issues = parsed.success ? reviewIssues(parsed.data, open) : ['Ответ ревью вне схемы'];
-    const at = new Date().toISOString();
-    const transitions = new Map((parsed.success ? parsed.data.previous : []).map((t) => [t.id, t]));
-    const findings: ReviewRecord['findings'] = [
-      ...(last?.findings ?? []).map((f) => {
-        const t = transitions.get(f.id);
-        return f.status === 'open' && t
-          ? { ...f, status: t.status, changedIn: round, basis: t.basis.slice(0, 4000) }
-          : f;
-      }),
-      ...(parsed.success ? parsed.data.findings : [])
-        .map((f) => ({ ...f, id: findingId(subject, f) }))
-        .filter((f) => !(last?.findings ?? []).some((p) => p.id === f.id))
-        .map((f) => ({
-          id: f.id,
-          severity: f.severity,
-          message: execution.redact(f.message).slice(0, 12000),
-          ...(f.rule ? { rule: f.rule.slice(0, 200) } : {}),
-          path: f.path ?? null,
-          line: f.line ?? null,
-          status: 'open' as const,
-          openedIn: round,
-          changedIn: round,
-        })),
-    ];
-    const record: ReviewRecord = {
-      id: `RV-${input.kind}-${subject}-${round}`,
-      kind: input.kind,
-      subject,
-      digest,
-      round,
-      at,
-      approved: parsed.success && parsed.data.approved && !issues.length,
-      summary:
-        execution
-          .redact(parsed.success ? parsed.data.summary : 'Ответ ревью вне схемы')
-          .slice(0, 12000) + (issues.length ? ' / ' + issues.join('; ') : ''),
-      authorRuntime: input.author,
-      reviewerRuntime: choice.reviewer.runtime,
-      ...(response.model ? { reviewerModel: response.model } : {}),
-      sameVendor: choice.sameVendor,
-      reviewerBinding: binding,
-      ...(contextKey ? { contextDigest: contextKey } : {}),
-      findings,
-      artifact: join(dir, 'review.json'),
-    };
-    // Сохраняемые представления маскируются полным окружением вызова: сырой
-    // структурированный ответ адаптера может нести значение секрета профиля.
-    await writeFile(
-      record.artifact,
-      JSON.stringify(
-        redactDeep({ response: parsed.success ? parsed.data : null, issues }, execution.redact),
-        null,
-        2,
-      ),
-    );
-    // Снимок, который видел reviewer, хранится по digest: согласование этого
-    // раунда делает его действующим контекстом графа.
-    if (context && contextKey)
-      this.store.transact('run.context', (tx) =>
-        tx.putLocal('context-snapshots', WORKSPACE_OWNER, contextKey, context),
-      );
-    return this.engine.recordReview(
-      redactDeep(record, execution.redact),
-      input.kind === 'contract' ? input.contract : undefined,
-    );
   }
 
   /**

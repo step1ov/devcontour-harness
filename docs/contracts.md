@@ -137,6 +137,20 @@ digest по формуле хоста — например, файла конф�
 `REVIEWER_SAME_VENDOR` только у поручений этой роли — остальная очередь
 выдаётся.
 
+Правило может перечислить запасных reviewer (`alternates`, по порядку):
+берётся первый из `[reviewer, ...alternates]`, допустимый правилом вендора
+для этого автора. Так хост явно задаёт «reviewer другого вендора, чем
+автор», не полагаясь на неявный выбор. Запасные reviewer проверяются
+`policyIssues` так же, как основной.
+
+**Раунд технического ревью** плана или контракта — `technicalReview(engine,
+policy, adapters, input)`: та же реализация, что у `Harness.review`. Хост
+передаёт предмет (ID, digest, автор), свои разделы запроса, рабочий каталог
+reviewer и учёт вызова; harness выбирает reviewer, вызывает его под
+бюджетом, требует состояние каждой прежней открытой находки и записывает
+`ReviewRecord`. Предел раундов (`maxRounds`) задаёт вызывающий:
+`Harness.review` — `2 × maxAttempts`.
+
 ### ContextSnapshot
 
 `{apiVersion, sources[], missing[]}`. Источник —
@@ -456,8 +470,16 @@ manifestDigest, impact?, evidence[], error?}`. Смена любого SHA де�
 ограниченный разбор по свойству (`analyzeRecovery`, `applyCases`), проверка
 переносимого результата (`resultProblems`), классы и правила отказов
 (`BlockedError`, `TaskFailure`, `classifyFailure`, `failureFingerprint`,
-`repairPolicy`), точка сбоя подтверждения корпуса для тестов (`caseHooks`). Глубокие импорты `lib/...` не
-поддерживаются.
+`repairPolicy`, `repairDecision`), раунд технического ревью
+(`technicalReview`), точка сбоя подтверждения корпуса для тестов
+(`caseHooks`). Глубокие импорты `lib/...` не поддерживаются.
+
+Очередь технических заданий хоста — `new WorkflowQueue(store, policy, now,
+subjects)`: `subjects.input(kind, id, view)` задаёт digest входа и владельца
+задания для предметов хоста (доска, набор изменений); задание хранится за
+этим владельцем, недопустимый вход (`HarnessError`) отклоняет постановку его
+текстом и делает поставленное задание устаревшим, смена владельца — тоже.
+Число стадий задаёт `finish(job, wait, stages)`.
 
 ## Ошибки и exit codes
 

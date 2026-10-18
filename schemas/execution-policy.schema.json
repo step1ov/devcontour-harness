@@ -111,6 +111,44 @@
                       ],
                       "additionalProperties": false
                     },
+                    "alternates": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "runtime": {
+                            "type": "string",
+                            "enum": [
+                              "codex",
+                              "claude",
+                              "fixture"
+                            ]
+                          },
+                          "model": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "effort": {
+                            "type": "string",
+                            "enum": [
+                              "low",
+                              "medium",
+                              "high",
+                              "xhigh"
+                            ]
+                          },
+                          "toolProfile": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                          }
+                        },
+                        "required": [
+                          "runtime"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
                     "vendor": {
                       "default": "different-vendor",
                       "type": "string",
@@ -173,6 +211,44 @@
                   "runtime"
                 ],
                 "additionalProperties": false
+              },
+              "alternates": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "runtime": {
+                      "type": "string",
+                      "enum": [
+                        "codex",
+                        "claude",
+                        "fixture"
+                      ]
+                    },
+                    "model": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "effort": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh"
+                      ]
+                    },
+                    "toolProfile": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                    }
+                  },
+                  "required": [
+                    "runtime"
+                  ],
+                  "additionalProperties": false
+                }
               },
               "vendor": {
                 "default": "different-vendor",
@@ -777,6 +853,44 @@
                 ],
                 "additionalProperties": false
               },
+              "alternates": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "runtime": {
+                      "type": "string",
+                      "enum": [
+                        "codex",
+                        "claude",
+                        "fixture"
+                      ]
+                    },
+                    "model": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "effort": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh"
+                      ]
+                    },
+                    "toolProfile": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                    }
+                  },
+                  "required": [
+                    "runtime"
+                  ],
+                  "additionalProperties": false
+                }
+              },
               "vendor": {
                 "default": "different-vendor",
                 "type": "string",
@@ -843,6 +957,44 @@
               ],
               "additionalProperties": false
             },
+            "alternates": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "runtime": {
+                    "type": "string",
+                    "enum": [
+                      "codex",
+                      "claude",
+                      "fixture"
+                    ]
+                  },
+                  "model": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "effort": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh"
+                    ]
+                  },
+                  "toolProfile": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  }
+                },
+                "required": [
+                  "runtime"
+                ],
+                "additionalProperties": false
+              }
+            },
             "vendor": {
               "default": "different-vendor",
               "type": "string",
@@ -895,6 +1047,44 @@
               ],
               "additionalProperties": false
             },
+            "alternates": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "runtime": {
+                    "type": "string",
+                    "enum": [
+                      "codex",
+                      "claude",
+                      "fixture"
+                    ]
+                  },
+                  "model": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "effort": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh"
+                    ]
+                  },
+                  "toolProfile": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  }
+                },
+                "required": [
+                  "runtime"
+                ],
+                "additionalProperties": false
+              }
+            },
             "vendor": {
               "default": "different-vendor",
               "type": "string",
@@ -946,6 +1136,44 @@
                 "runtime"
               ],
               "additionalProperties": false
+            },
+            "alternates": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "runtime": {
+                    "type": "string",
+                    "enum": [
+                      "codex",
+                      "claude",
+                      "fixture"
+                    ]
+                  },
+                  "model": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "effort": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh"
+                    ]
+                  },
+                  "toolProfile": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  }
+                },
+                "required": [
+                  "runtime"
+                ],
+                "additionalProperties": false
+              }
             },
             "vendor": {
               "default": "different-vendor",

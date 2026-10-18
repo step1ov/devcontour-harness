@@ -5,7 +5,7 @@ import { mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promi
 import { isAbsolute, join, resolve } from 'node:path';
 import {
   roleBinding,
-  codeReview,
+  selectReviewer,
   mcpEnvironment,
   HarnessError,
   digestOf,
@@ -488,7 +488,16 @@ export class Runner {
     const review = input.task !== 'implement';
     const work = await this.workOf(input.attempt);
     const role = roleBinding(this.policy, work.order.role, work.order.repositoryId)!;
-    const rule = codeReview(this.policy, work.order.role, work.order.repositoryId);
+    // Профиль reviewer — того назначения, которое выбрано для этой попытки
+    // (основной или запасной reviewer правила).
+    const chosen = selectReviewer(
+      this.policy,
+      'code',
+      { runtime: input.attempt.runtime },
+      work.order.role,
+      work.order.repositoryId,
+    );
+    const reviewerProfile = chosen.ok ? chosen.reviewer.toolProfile : undefined;
     const binding = review
       ? {
           runtime: input.attempt.reviewer,
@@ -496,7 +505,7 @@ export class Runner {
           ...(input.attempt.reviewerEffort
             ? { effort: input.attempt.reviewerEffort as 'high' }
             : {}),
-          ...(rule.reviewer.toolProfile ? { toolProfile: rule.reviewer.toolProfile } : {}),
+          ...(reviewerProfile ? { toolProfile: reviewerProfile } : {}),
         }
       : role.writer;
     // Окружение вызова — с профилем инструментов его назначения.
@@ -1431,8 +1440,14 @@ export class Runner {
     dir: string,
     phase: string,
   ) {
-    const name = codeReview(this.policy, work.order.role, work.order.repositoryId).reviewer
-      .toolProfile;
+    const chosen = selectReviewer(
+      this.policy,
+      'code',
+      { runtime: attempt.runtime },
+      work.order.role,
+      work.order.repositoryId,
+    );
+    const name = chosen.ok ? chosen.reviewer.toolProfile : undefined;
     const profile = name ? this.policy.toolProfiles[name] : undefined;
     // Fixture runtime команд не запускает: инструмента ему не нужно.
     if (attempt.reviewer === 'fixture' || !reviewerRunsChecks(attempt.reviewer, profile))

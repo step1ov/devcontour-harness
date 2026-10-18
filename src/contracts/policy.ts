@@ -102,6 +102,13 @@ export type RuntimeBinding = z.infer<typeof runtimeBindingSchema>;
  */
 export const reviewRuleSchema = z.strictObject({
   reviewer: runtimeBindingSchema,
+  /**
+   * Запасные reviewer по порядку: берётся первый из `[reviewer, ...alternates]`,
+   * допустимый правилом вендора для этого автора. Явный упорядоченный список —
+   * так хост выражает «reviewer другого вендора, чем автор» без неявного
+   * противоположного runtime.
+   */
+  alternates: z.array(runtimeBindingSchema).optional(),
   vendor: z.enum(['different-vendor', 'same-vendor-allowed']).default('different-vendor'),
 });
 export type ReviewRule = z.infer<typeof reviewRuleSchema>;
@@ -327,14 +334,16 @@ export function selectReviewer(
       ? codeReview(policy, role, repositoryId)
       : policy.review[kind];
   if (!rule) return { ok: false, code: 'REVIEWER_MISSING', message: 'Не задан reviewer: ' + kind };
-  const sameVendor = vendorOf(rule.reviewer.runtime) === vendorOf(writer.runtime);
-  if (sameVendor && rule.vendor !== 'same-vendor-allowed')
-    return {
-      ok: false,
-      code: 'REVIEWER_SAME_VENDOR',
-      message: `Ревью ${kind}: reviewer ${rule.reviewer.runtime} того же вендора, что writer ${writer.runtime}; разрешите vendor: same-vendor-allowed явно`,
-    };
-  return { ok: true, reviewer: rule.reviewer, sameVendor };
+  for (const reviewer of [rule.reviewer, ...(rule.alternates ?? [])]) {
+    const sameVendor = vendorOf(reviewer.runtime) === vendorOf(writer.runtime);
+    if (!sameVendor || rule.vendor === 'same-vendor-allowed')
+      return { ok: true, reviewer, sameVendor };
+  }
+  return {
+    ok: false,
+    code: 'REVIEWER_SAME_VENDOR',
+    message: `Ревью ${kind}: reviewer ${rule.reviewer.runtime} того же вендора, что writer ${writer.runtime}; разрешите vendor: same-vendor-allowed явно`,
+  };
 }
 
 type Issue = ErrorIssue & { code: string };
@@ -521,6 +530,28 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
       ]),
     ]),
   ];
+  // Запасные reviewer правил проверяются так же, как основной.
+  const rules: [string[], ReviewRule][] = [
+    ...(['code', 'plan', 'contract'] as const).map((k): [string[], ReviewRule] => [
+      ['review', k],
+      policy.review[k],
+    ]),
+    ...Object.entries(policy.roles).flatMap(([role, b]): [string[], ReviewRule][] =>
+      b.review ? [[['roles', role, 'review'], b.review]] : [],
+    ),
+    ...policy.repositories.flatMap((repo, i): [string[], ReviewRule][] => [
+      ...(repo.review
+        ? [[['repositories', String(i), 'review'], repo.review] as [string[], ReviewRule]]
+        : []),
+      ...Object.entries(repo.roles ?? {}).flatMap(([role, b]): [string[], ReviewRule][] =>
+        b.review ? [[['repositories', String(i), 'roles', role, 'review'], b.review]] : [],
+      ),
+    ]),
+  ];
+  for (const [path, rule] of rules)
+    (rule.alternates ?? []).forEach((b, j) =>
+      bindings.push([[...path, 'alternates', String(j)], b]),
+    );
   for (const [path, b] of bindings) {
     if (b.effort && b.runtime !== 'codex')
       add('INVALID_INPUT', path, 'effort поддерживается только для codex');

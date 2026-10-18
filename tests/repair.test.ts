@@ -544,3 +544,52 @@ test('Оператор: run без согласования отклоняетс
   );
   h.close();
 });
+
+test('Очередь хоста: свои предметы и владелец задания — те же правила fencing, устаревания и попыток', () => {
+  const { engine, store, clock } = engineOf();
+  let digest = 'a'.repeat(64);
+  let refuse: string | undefined;
+  const flow = new WorkflowQueue(store, engine.policy, () => clock.now, {
+    input: (kind) => {
+      if (kind !== 'board') return undefined;
+      if (refuse) throw new HarnessError('INVALID_INPUT', refuse);
+      return { digest, owner: 'lib' };
+    },
+  });
+  const job = flow.start({ kind: 'board', id: 'B-1', authorRuntime: 'claude' });
+  assert.equal(job.owner, 'lib');
+  assert.deepEqual(flow.list().length, 0, 'задание хранится за владельцем, а не в общих');
+  assert.equal(flow.list('lib')[0]?.key, job.key);
+  assert.equal(flow.start({ kind: 'board', id: 'B-1', authorRuntime: 'claude' }).key, job.key);
+  assert.throws(() => flow.start({ kind: 'other', id: 'X', authorRuntime: 'claude' }), /не найден/);
+  const claimed = flow.claim(job.key, 'lib')!;
+  assert.equal(claimed.status, 'running');
+  flow.heartbeat(claimed);
+  const next = flow.finish(claimed, false, 3);
+  assert.equal(next.stage, 1);
+  assert.equal(next.status, 'queued', 'три стадии хоста: после первой работа продолжается');
+  // Недопустимый вход: постановка отклоняется его текстом, поставленное задание устаревает.
+  refuse = 'Доска потеряла подготовку';
+  assert.throws(
+    () => flow.start({ kind: 'board', id: 'B-2', authorRuntime: 'claude' }),
+    /Доска потеряла подготовку/,
+  );
+  assert.equal(flow.claim(job.key, 'lib'), undefined);
+  assert.equal(flow.get(job.key, 'lib').status, 'stale');
+  // Изменившийся digest входа — тоже устаревшее задание.
+  refuse = undefined;
+  const second = flow.start({ kind: 'board', id: 'B-3', authorRuntime: 'codex' });
+  digest = 'b'.repeat(64);
+  assert.equal(flow.claim(second.key, 'lib'), undefined);
+  assert.equal(flow.get(second.key, 'lib').status, 'stale');
+  // Предмет перешёл к другому владельцу при том же digest — задание устарело.
+  let owner = 'lib';
+  const moving = new WorkflowQueue(store, engine.policy, () => clock.now, {
+    input: () => ({ digest: 'c'.repeat(64), owner }),
+  });
+  const third = moving.start({ kind: 'board', id: 'B-4', authorRuntime: 'claude' });
+  owner = 'app';
+  assert.equal(moving.claim(third.key, 'lib'), undefined);
+  assert.equal(moving.get(third.key, 'lib').status, 'stale');
+  store.close();
+});

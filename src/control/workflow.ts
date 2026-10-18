@@ -24,45 +24,87 @@ const iso = (ms: number) => new Date(ms).toISOString();
  * автоматические восстановления считаются в задании и списываются в одной
  * транзакции с самим повтором.
  */
+/**
+ * Предметы заданий хоста. Хост, у которого свои предметы (например, доска
+ * или набор изменений продукта), задаёт digest их входа и владельца, за
+ * которым хранится задание; правила очереди — те же.
+ */
+export interface WorkflowSubjects {
+  /**
+   * Digest входа и владелец задания; нет предмета — `undefined`.
+   * Недопустимый вход — `HarnessError`: постановка отклоняется с его текстом,
+   * а уже поставленное задание считается устаревшим.
+   */
+  input(
+    kind: string,
+    id: string,
+    view: ExecutionView,
+  ): { digest: string; owner?: string } | undefined;
+}
+
 export class WorkflowQueue {
   constructor(
     private readonly store: ExecutionStore,
     private readonly policy: ExecutionPolicy,
     private readonly now: () => number = Date.now,
+    private readonly subjects?: WorkflowSubjects,
   ) {}
 
-  /** Digest входа задания: граф, политика и режим согласования. Нет графа — входа нет. */
-  input(kind: string, id: string, view: ExecutionView) {
+  /** Вход задания. Без предметов хоста — граф: его digest, политика и режим согласования. */
+  private bound(kind: string, id: string, view: ExecutionView) {
+    if (this.subjects) return this.subjects.input(kind, id, view);
     if (kind !== 'graph')
       throw new HarnessError('INVALID_INPUT', 'Неизвестный вид задания: ' + kind);
     const graph = view.graph(id);
     if (!graph) return undefined;
-    return digestOf({
-      kind,
-      id,
-      graph: graph.digest,
-      policy: executionDigest(this.policy),
-      approvalMode: this.policy.approvalMode,
-    });
+    return {
+      digest: digestOf({
+        kind,
+        id,
+        graph: graph.digest,
+        policy: executionDigest(this.policy),
+        approvalMode: this.policy.approvalMode,
+      }),
+    };
+  }
+
+  /** Digest входа задания; нет предмета — `undefined`. */
+  input(kind: string, id: string, view: ExecutionView) {
+    return this.bound(kind, id, view)?.digest;
   }
 
   private current(job: WorkflowJob, view: ExecutionView) {
-    return this.input(job.kind, job.id, view) === job.inputDigest;
+    try {
+      const bound = this.bound(job.kind, job.id, view);
+      return bound?.digest === job.inputDigest && bound.owner === job.owner;
+    } catch (error) {
+      // Удалённый или ставший недопустимым предмет — устаревшее задание, а не
+      // повод блокировать все следующие.
+      if (error instanceof HarnessError) return false;
+      throw error;
+    }
   }
 
-  list() {
-    return this.store.read((v) => v.locals('workflow-jobs', WORKSPACE_OWNER).map((r) => r.value));
+  private static owner(owner?: string) {
+    return owner ?? WORKSPACE_OWNER;
   }
 
-  get(key: string) {
-    const job = this.store.read((v) => v.local('workflow-jobs', WORKSPACE_OWNER, key));
+  /** Задания владельца (по умолчанию — общие). */
+  list(owner?: string) {
+    return this.store.read((v) =>
+      v.locals('workflow-jobs', WorkflowQueue.owner(owner)).map((r) => r.value),
+    );
+  }
+
+  get(key: string, owner?: string) {
+    const job = this.store.read((v) => v.local('workflow-jobs', WorkflowQueue.owner(owner), key));
     if (!job) throw new HarnessError('NOT_FOUND', 'Задание не найдено: ' + key);
     return job;
   }
 
   /** Безопасное представление задания: без токена и срока владения. */
-  view(key: string) {
-    const job = this.get(key);
+  view(key: string, owner?: string) {
+    const job = this.get(key, owner);
     return {
       key: job.key,
       kind: job.kind,
@@ -79,16 +121,17 @@ export class WorkflowQueue {
 
   /** Поставить задание; повтор того же входа возвращает прежнее, другой автор — отказ. */
   start(input: {
-    kind: 'graph';
+    kind: string;
     id: string;
     authorRuntime: WorkflowJob['authorRuntime'];
     maxAttempts?: number;
   }) {
     return this.store.transact('workflow.updated', (tx) => {
-      const digest = this.input(input.kind, input.id, tx);
-      if (!digest) throw new HarnessError('NOT_FOUND', 'Предмет задания не найден: ' + input.id);
+      const bound = this.bound(input.kind, input.id, tx);
+      if (!bound) throw new HarnessError('NOT_FOUND', 'Предмет задания не найден: ' + input.id);
+      const digest = bound.digest;
       const key = digestOf({ kind: input.kind, id: input.id, input: digest });
-      const old = tx.local('workflow-jobs', WORKSPACE_OWNER, key);
+      const old = tx.local('workflow-jobs', WorkflowQueue.owner(bound.owner), key);
       if (old) {
         if (old.authorRuntime !== input.authorRuntime)
           throw new HarnessError(
@@ -103,6 +146,7 @@ export class WorkflowQueue {
         authorRuntime: input.authorRuntime,
         maxAttempts: input.maxAttempts ?? 3,
         key,
+        ...(bound.owner ? { owner: bound.owner } : {}),
         inputDigest: digest,
         stage: 0,
         attempts: 0,
@@ -110,7 +154,7 @@ export class WorkflowQueue {
         startedAt: iso(this.now()),
         history: [],
       };
-      tx.putLocal('workflow-jobs', WORKSPACE_OWNER, key, job);
+      tx.putLocal('workflow-jobs', WorkflowQueue.owner(job.owner), key, job);
       return job;
     });
   }
@@ -120,7 +164,7 @@ export class WorkflowQueue {
    * они читали бы прежний контекст. Изменившийся вход — `stale`; исчерпанные
    * попытки стадии — `failed`. Чужое действующее владение не перехватывается.
    */
-  claim(key: string) {
+  claim(key: string, owner?: string) {
     return this.store.transact('workflow.updated', (tx) => {
       // Пока политика применяется — и до паузы операции, по самому запросу, — стадии не начинаются.
       const control = tx.control();
@@ -129,7 +173,7 @@ export class WorkflowQueue {
         (control.reconfigure && !control.reconfigure.appliedAt)
       )
         return undefined;
-      const job = tx.local('workflow-jobs', WORKSPACE_OWNER, key);
+      const job = tx.local('workflow-jobs', WorkflowQueue.owner(owner), key);
       if (!job) throw new HarnessError('NOT_FOUND', 'Задание не найдено: ' + key);
       if (
         !['queued', 'running'].includes(job.status) ||
@@ -154,7 +198,7 @@ export class WorkflowQueue {
         next.attempts = job.attempts + 1;
       }
       next.history.push({ at: iso(this.now()), stage: job.stage, event: next.status });
-      tx.putLocal('workflow-jobs', WORKSPACE_OWNER, key, next);
+      tx.putLocal('workflow-jobs', WorkflowQueue.owner(owner), key, next);
       return next.status === 'running' ? next : undefined;
     });
   }
@@ -162,7 +206,7 @@ export class WorkflowQueue {
   /** Владение заданием и актуальность входа; иначе — отказ. */
   guard(job: WorkflowJob, view?: ExecutionView) {
     const check = (v: ExecutionView) => {
-      const current = v.local('workflow-jobs', WORKSPACE_OWNER, job.key);
+      const current = v.local('workflow-jobs', WorkflowQueue.owner(job.owner), job.key);
       if (
         current?.status !== 'running' ||
         current.token !== job.token ||
@@ -178,7 +222,7 @@ export class WorkflowQueue {
   heartbeat(job: WorkflowJob) {
     this.store.transact('workflow.updated', (tx) => {
       const current = this.guard(job, tx);
-      tx.putLocal('workflow-jobs', WORKSPACE_OWNER, job.key, {
+      tx.putLocal('workflow-jobs', WorkflowQueue.owner(job.owner), job.key, {
         ...current,
         leaseUntil: this.now() + this.policy.leaseMs,
       });
@@ -209,7 +253,7 @@ export class WorkflowQueue {
       delete next.leaseUntil;
       delete next.error;
       if (!wait) next.history.push({ at: iso(this.now()), stage: job.stage, event: 'completed' });
-      tx.putLocal('workflow-jobs', WORKSPACE_OWNER, job.key, next);
+      tx.putLocal('workflow-jobs', WorkflowQueue.owner(job.owner), job.key, next);
       return next;
     });
   }
@@ -217,7 +261,7 @@ export class WorkflowQueue {
   /** Отказ стадии: прерванная — снова в очереди, изменившийся вход — `stale`, иначе `failed`. */
   fail(job: WorkflowJob, message: string, interrupted = false) {
     this.store.transact('workflow.updated', (tx) => {
-      const current = tx.local('workflow-jobs', WORKSPACE_OWNER, job.key);
+      const current = tx.local('workflow-jobs', WorkflowQueue.owner(job.owner), job.key);
       if (!current || current.token !== job.token || current.status !== 'running') return;
       const next: WorkflowJob = {
         ...current,
@@ -226,7 +270,7 @@ export class WorkflowQueue {
       };
       delete next.token;
       delete next.leaseUntil;
-      tx.putLocal('workflow-jobs', WORKSPACE_OWNER, job.key, next);
+      tx.putLocal('workflow-jobs', WorkflowQueue.owner(job.owner), job.key, next);
     });
   }
 
@@ -238,7 +282,7 @@ export class WorkflowQueue {
   repair<T>(job: WorkflowJob, event: string, apply: () => NotPromise<T>) {
     return this.store.transact('task.retry', (tx) => {
       const current = this.guard(job, tx);
-      tx.putLocal('workflow-jobs', WORKSPACE_OWNER, job.key, {
+      tx.putLocal('workflow-jobs', WorkflowQueue.owner(job.owner), job.key, {
         ...current,
         repairs: (current.repairs ?? 0) + 1,
         history: [...current.history, { at: iso(this.now()), stage: job.stage, event }],
@@ -248,9 +292,9 @@ export class WorkflowQueue {
   }
 
   /** Повтор остановленного задания — решение человека, в пределах попыток стадии. */
-  retry(key: string) {
+  retry(key: string, owner?: string) {
     return this.store.transact('workflow.updated', (tx) => {
-      const job = tx.local('workflow-jobs', WORKSPACE_OWNER, key);
+      const job = tx.local('workflow-jobs', WorkflowQueue.owner(owner), key);
       if (!job) throw new HarnessError('NOT_FOUND', 'Задание не найдено: ' + key);
       if (job.status !== 'failed' || job.attempts >= job.maxAttempts)
         throw new HarnessError(
@@ -261,7 +305,7 @@ export class WorkflowQueue {
         throw new HarnessError('APPROVAL_STALE', 'Вход задания изменился: нужно новое задание');
       const next: WorkflowJob = { ...job, status: 'queued' };
       delete next.error;
-      tx.putLocal('workflow-jobs', WORKSPACE_OWNER, key, next);
+      tx.putLocal('workflow-jobs', WorkflowQueue.owner(owner), key, next);
       return next;
     });
   }
