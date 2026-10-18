@@ -1049,6 +1049,7 @@ export class Runner {
               artifacts,
               signal,
               context,
+              rearm,
             );
           } finally {
             unlock();
@@ -1844,6 +1845,8 @@ export class Runner {
     artifacts: string,
     signal: AbortSignal,
     context?: ContextSnapshot,
+    /** Новый предел фазы: ревью интеграции не получает остаток времени её проверок. */
+    rearm: () => void = () => {},
   ) {
     this.engine.heartbeat(attempt.id, attempt.token);
     signal.throwIfAborted();
@@ -1888,6 +1891,7 @@ export class Runner {
           await this.gate(attempt, cwd, sha, 'integration', gate, artifacts, signal, execution);
         await this.consumers(attempt, cwd, sha, artifacts, signal);
         this.requirements(attempt, work, repoPath, cwd, sha, 'integration');
+        rearm();
         await this.review(
           attempt,
           work,

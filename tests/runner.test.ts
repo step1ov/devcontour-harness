@@ -699,3 +699,23 @@ test('stateDirFor: рабочие деревья и артефакты попы�
   assert.ok(existsSync(join(dir, 'artifacts', a.id)), 'артефакты попытки у репозитория');
   assert.equal(existsSync(join(ctx.state, 'artifacts', a.id)), false);
 });
+
+test('Предел времени — на фазу: ревью интеграции не получает остаток времени её проверок', async () => {
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: { ...approve(), sleepMs: 2500 } },
+    policy: (raw) => {
+      const p = raw as { runTimeoutMs: number; repositories: { gates: { command: string[] }[] }[] };
+      p.runTimeoutMs = 4000;
+      // Проверка интеграции и её ревью вместе дольше предела, каждая — короче.
+      p.repositories[0]!.gates[0]!.command = [
+        'sh',
+        '-c',
+        'sleep 2 && "$0" test/run.js',
+        process.execPath,
+      ];
+    },
+  });
+  await runAll(ctx);
+  const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.equal(a.status, 'succeeded', a.error);
+});
