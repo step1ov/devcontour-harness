@@ -303,7 +303,8 @@ test('Настоящий обрыв по лимиту времени: проце
       reviewer: approve(),
     },
     policy: (p) => {
-      (p as { runTimeoutMs: number }).runTimeoutMs = 2000;
+      // Запас на загруженной машине: черновик пишется до обрыва, сон writer — 30 с.
+      (p as { runTimeoutMs: number }).runTimeoutMs = 8000;
       (p as { maxAttempts: number }).maxAttempts = 1;
     },
   });
