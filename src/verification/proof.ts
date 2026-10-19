@@ -107,3 +107,45 @@ export function unprovenReason(
         unproven.map((p) => `${p.id} — ${p.reason}`).join('; ')
     : undefined;
 }
+
+/**
+ * Gates репозиториев, которые не прошли на integration ни одно из принятых
+ * поручений набора. Покрывает gate только собственная (не потребителя)
+ * запись вида `test` фазы интеграции на принятом SHA поручения: запись ревью
+ * одноимённый test gate не закрывает. Какие записи относятся к поручению
+ * (попытки под текущим основанием, переносимый результат другого clone), —
+ * решает вызывающий; правило покрытия — одно.
+ */
+export function uncoveredGates(
+  repositories: readonly { id: string; gates: readonly { id: string }[] }[],
+  works: readonly {
+    repositoryId: string;
+    resultSha: string | undefined;
+    evidence: readonly ProofRecord[];
+  }[],
+) {
+  const result: { repositoryId: string; gates: string[] }[] = [];
+  for (const repositoryId of [...new Set(works.map((w) => w.repositoryId))]) {
+    const covered = new Set(
+      works
+        .filter((w) => w.repositoryId === repositoryId)
+        .flatMap((w) =>
+          w.evidence
+            .filter(
+              (e) =>
+                e.kind === 'test' &&
+                e.phase === 'integration' &&
+                e.passed &&
+                !e.consumer &&
+                w.resultSha !== undefined &&
+                e.sha === w.resultSha,
+            )
+            .map((e) => e.gate),
+        ),
+    );
+    const repository = repositories.find((r) => r.id === repositoryId);
+    const missing = (repository?.gates ?? []).map((g) => g.id).filter((id) => !covered.has(id));
+    if (missing.length) result.push({ repositoryId, gates: missing });
+  }
+  return result;
+}

@@ -122,7 +122,7 @@ export {
   sandboxBlockedHosts,
   type GateRun,
 } from './verification/gates.ts';
-export { requirementProof, unprovenReason } from './verification/proof.ts';
+export { requirementProof, uncoveredGates, unprovenReason } from './verification/proof.ts';
 export { ReviewProbes, probeLimits, observeReproductions } from './agents/review-probe.ts';
 export {
   composeRedactors,

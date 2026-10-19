@@ -159,6 +159,13 @@ export interface CliAdapterOptions {
   /** Исполняемый файл runtime; по умолчанию — имя runtime из PATH. Тесты подставляют fixture executable. */
   executable?: string;
   toolProfiles?: Record<string, ToolProfile>;
+  /**
+   * Имена элементов каталога состояния хоста (конфигурация, журналы, решения),
+   * которые закрываются для runtime и тогда, когда появляются после старта
+   * вызова. Каталог над открытым worktree закрывается поэлементно, и элемент,
+   * которого нет в снимке и в этом перечне, остался бы открытым.
+   */
+  controllerEntries?: string[];
 }
 
 /**
@@ -213,6 +220,7 @@ export function cliAdapter(
         controller: r.sandbox.denied,
         readable: [...(r.sandbox.readable ?? []), ...(review ? [r.cwd] : [])],
         domains: r.sandbox.network.domains,
+        ...(options.controllerEntries ? { entries: options.controllerEntries } : {}),
       });
       const argv =
         runtime === 'codex'

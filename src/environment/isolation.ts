@@ -29,6 +29,11 @@ export interface Isolation {
   hidden: string[];
   readable: string[];
   domains: string[];
+  /**
+   * Имена элементов каталога контура, которые хост создаёт по ходу работы
+   * (конфигурация, журналы). Закрываются заранее вместе с известными harness.
+   */
+  entries?: string[];
 }
 
 /**
@@ -59,6 +64,8 @@ export function isolation(options: {
   controller: string[];
   readable?: string[];
   domains?: string[];
+  /** Элементы каталога контура хоста, которые закрываются и до своего появления. */
+  entries?: string[];
 }): Isolation {
   // Песочница сравнивает настоящие пути: временный каталог macOS лежит за
   // symlink (/var → /private/var), и правило для записанного пути иначе не
@@ -86,6 +93,7 @@ export function isolation(options: {
       join(homedir(), '.codex', 'packages'),
     ]),
     domains: options.domains ?? [],
+    ...(options.entries?.length ? { entries: [...new Set(options.entries)] } : {}),
   };
 }
 
@@ -181,9 +189,9 @@ function closedEntries(policy: Isolation) {
       // Известные элементы каталога контура закрываются и тогда, когда их
       // ещё нет: база, её журналы и рабочие каталоги появляются по ходу
       // работы, а правило, построенное по снимку, их бы пропустило.
-      entries = [...new Set([...readdirSync(hidden), ...controllerEntries])].map((name) =>
-        join(hidden, name),
-      );
+      entries = [
+        ...new Set([...readdirSync(hidden), ...controllerEntries, ...(policy.entries ?? [])]),
+      ].map((name) => join(hidden, name));
     } catch {
       return [];
     }

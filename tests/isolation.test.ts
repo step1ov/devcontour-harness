@@ -1,9 +1,17 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access -- тест правит сырой JSON политики. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { isolationSupport } from '../src/environment/isolation.ts';
+import {
+  claudeFileDenies,
+  codexPermissions,
+  isolation,
+  isolationSupport,
+} from '../src/environment/isolation.ts';
+import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { isolationBackend } from '../src/verification/gates.ts';
 import { approve, implement, runAll, setup } from './runner-fixture.ts';
 
@@ -121,4 +129,90 @@ test('T29: без механизма песочницы обязательная
   ];
   await runAll(none);
   assert.equal(existsSync(marker), true, 'isolation.mode: none — команда исполнена на хосте');
+});
+
+test('Элементы каталога контура хоста закрыты для runtime и до своего появления', async () => {
+  // Каталог контура над worktree codex и claude закрывают поэлементно: иначе
+  // `git status` в worktree падал бы на lstat предка. Конфигурация и журналы
+  // хоста появляются по ходу работы; если их нет в снимке, закрыть их можно
+  // только по заранее названному имени.
+  const root = realpathSync(await mkdtemp(join(tmpdir(), 'harness-entries-')));
+  try {
+    const controller = join(root, 'controller'),
+      worktree = join(controller, 'worktrees', 'R1');
+    await mkdir(worktree, { recursive: true });
+    const late = ['config.json', 'journal', 'decisions'];
+    const level = (argv: string, path: string) =>
+      new RegExp(`${JSON.stringify(path).replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}="(\\w+)"`).exec(
+        argv,
+      )?.[1];
+
+    const plain = codexPermissions(
+      isolation({ write: [worktree], controller: [controller] }),
+      false,
+    ).join(' ');
+    assert.equal(
+      level(plain, join(controller, 'config.json')),
+      undefined,
+      'без перечня хоста не закрыт',
+    );
+    assert.equal(
+      level(plain, join(controller, 'state.sqlite')),
+      'none',
+      'известное harness закрыто',
+    );
+
+    const policy = isolation({ write: [worktree], controller: [controller], entries: late });
+    const named = codexPermissions(policy, false).join(' ');
+    for (const name of late) assert.equal(level(named, join(controller, name)), 'none', name);
+    assert.equal(level(named, controller), undefined, 'предок worktree не закрыт целиком');
+    assert.equal(level(named, worktree), 'write');
+    const denies = claudeFileDenies(policy, worktree);
+    for (const name of late)
+      assert.ok(denies.includes(`Read(/${join(controller, name)}/**)`), name);
+
+    // Адаптер передаёт перечень хоста в политику каждого вызова.
+    const argsFile = join(root, 'args.json');
+    const bin = join(root, 'record-cli');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+const fs=require('fs');const a=process.argv.slice(2);
+if(a.includes('--version')){console.log('record 0.0.1');process.exit(0)}
+fs.writeFileSync(process.env.ARGS_FILE,JSON.stringify(a));
+const out=a.indexOf('--output-last-message');if(out>=0)fs.writeFileSync(a[out+1],'{}');
+`,
+      { mode: 0o755 },
+    );
+    for (const runtime of ['codex', 'claude'] as const) {
+      await cliAdapter(runtime, { executable: bin, controllerEntries: late }).invoke(
+        {
+          callId: 'c1',
+          task: 'implement',
+          binding: { runtime },
+          cwd: worktree,
+          prompt: 'p',
+          session: { kind: 'fresh' },
+          sandbox: {
+            mode: 'os',
+            writable: [worktree],
+            denied: [controller],
+            network: { domains: [] },
+          },
+          timeoutMs: 20_000,
+          env: { PATH: process.env.PATH ?? '', ARGS_FILE: argsFile },
+          artifactDir: join(root, 'call-' + runtime),
+        },
+        new AbortController().signal,
+      );
+      const args = readFileSync(argsFile, 'utf8');
+      for (const name of late)
+        assert.ok(
+          args.includes(JSON.stringify(join(controller, name)).slice(1, -1)),
+          `${runtime}: ${name} закрыт в аргументах вызова`,
+        );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

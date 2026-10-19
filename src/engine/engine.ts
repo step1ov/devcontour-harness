@@ -51,7 +51,7 @@ import {
 import { callDurationMs, callOwner, callRecords, ownerGone } from './usage.ts';
 import { failureFingerprint, repairPolicy } from './failure.ts';
 import { reusableImplementation } from './reuse.ts';
-import { unprovenReason } from '../verification/proof.ts';
+import { uncoveredGates, unprovenReason } from '../verification/proof.ts';
 import {
   contractDocuments,
   corpusBindingHolds,
@@ -1183,37 +1183,23 @@ export class Engine {
   uncoveredGates(workIds: string[]) {
     return this.read((v) => {
       const works = workIds.map((id) => v.work(id)).filter((w): w is WorkState => !!w);
-      const result: { repositoryId: string; gates: string[] }[] = [];
-      for (const repositoryId of [...new Set(works.map((w) => w.order.repositoryId))]) {
-        const covered = new Set(
-          works
-            .filter((w) => w.order.repositoryId === repositoryId)
-            .flatMap((w) =>
-              v
-                .attempts(w.id)
-                // Покрытие — только evidence попытки под текущим основанием
-                // политики: тот же ID gate с другой командой или профилем —
-                // другая проверка.
-                .filter((a) => a.policyDigest === this.host.basis.policyDigest(w, v))
-                .flatMap((a) => a.evidence)
-                .filter(
-                  (e) =>
-                    e.kind === 'test' &&
-                    e.phase === 'integration' &&
-                    e.passed &&
-                    !e.consumer &&
-                    w.resultSha !== undefined &&
-                    e.sha === w.resultSha,
-                )
-                .map((e) => e.gate),
-            ),
-        );
-        const missing = this.repository(repositoryId)
-          .gates.map((g) => g.id)
-          .filter((id) => !covered.has(id));
-        if (missing.length) result.push({ repositoryId, gates: missing });
-      }
-      return result;
+      const repositories = [...new Set(works.map((w) => w.order.repositoryId))].map((id) =>
+        this.repository(id),
+      );
+      return uncoveredGates(
+        repositories,
+        works.map((w) => ({
+          repositoryId: w.order.repositoryId,
+          resultSha: w.resultSha,
+          // Покрытие — только evidence попытки под текущим основанием
+          // политики: тот же ID gate с другой командой или профилем —
+          // другая проверка.
+          evidence: v
+            .attempts(w.id)
+            .filter((a) => a.policyDigest === this.host.basis.policyDigest(w, v))
+            .flatMap((a) => a.evidence),
+        })),
+      );
     });
   }
 

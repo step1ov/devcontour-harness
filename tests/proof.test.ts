@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { requirementProof, unprovenReason, type ProofRecord } from '../src/verification/proof.ts';
+import {
+  requirementProof,
+  uncoveredGates,
+  unprovenReason,
+  type ProofRecord,
+} from '../src/verification/proof.ts';
 import { junitSummary } from '../src/verification/gates.ts';
 import { redactor } from '../src/environment/redaction.ts';
 import { sha } from './engine-fixture.ts';
@@ -156,5 +161,37 @@ test('Имя, изменённое redaction или хешем, не подтв�
       sha('b'),
     ).level,
     'testcase',
+  );
+});
+
+test('T23: gate покрывает только собственная запись test фазы интеграции на принятом SHA поручения', () => {
+  const repositories = [{ id: 'app', gates: [{ id: 'unit' }, { id: 'lint' }] }];
+  const gap = (evidence: ProofRecord[], resultSha: string | undefined = sha('b')) =>
+    uncoveredGates(repositories, [{ repositoryId: 'app', resultSha, evidence }]);
+  const unaccepted = (evidence: ProofRecord[]) =>
+    uncoveredGates(repositories, [{ repositoryId: 'app', resultSha: undefined, evidence }]);
+  const lint = record({ gate: 'lint' });
+  assert.deepEqual(gap([record(), lint]), [], 'оба gate пройдены');
+  assert.deepEqual(gap([record()]), [{ repositoryId: 'app', gates: ['lint'] }], 'пробел назван');
+  for (const [name, bad] of [
+    ['запись ревью', record({ gate: 'lint', kind: 'review' })],
+    ['фаза кандидата', record({ gate: 'lint', phase: 'candidate' })],
+    ['не прошёл', record({ gate: 'lint', passed: false })],
+    ['запись потребителя', record({ gate: 'lint', consumer: 'web' })],
+    ['другой SHA', record({ gate: 'lint', sha: sha('c') })],
+  ] as const)
+    assert.deepEqual(gap([record(), bad]), [{ repositoryId: 'app', gates: ['lint'] }], name);
+  assert.deepEqual(
+    unaccepted([record(), lint]),
+    [{ repositoryId: 'app', gates: ['unit', 'lint'] }],
+    'без принятого SHA ничего не покрыто',
+  );
+  // Покрытие считается по репозиторию: поручение другого репозитория не помогает.
+  assert.deepEqual(
+    uncoveredGates(repositories, [
+      { repositoryId: 'app', resultSha: sha('b'), evidence: [record()] },
+      { repositoryId: 'web', resultSha: sha('b'), evidence: [lint] },
+    ]),
+    [{ repositoryId: 'app', gates: ['lint'] }],
   );
 });
