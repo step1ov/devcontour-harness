@@ -432,3 +432,38 @@ test('Разбор ведущего: назначение хоста (модел
     'предмет вызова — поручение эпизода',
   );
 });
+
+test('Основание корпуса — формула хоста: прежний корпус KS-<id> хоста находится и сохраняет привязку; формула harness дала бы новый корпус', async () => {
+  const ctx = approved();
+  const { Engine } = await import('../src/engine/engine.ts');
+  const { CorpusStore } = await import('../src/verification/corpus.ts');
+  const { corpusBindingHolds, contractDocuments } = await import('../src/verification/checks.ts');
+  const { sha256 } = await import('../src/contracts/index.ts');
+  const hostBasis = (c: { id: string }) => sha256('host-basis:' + c.id);
+  const host = new Engine({
+    host: { ...ctx.engine.host, basis: { ...ctx.engine.host.basis, suiteBasis: hostBasis } },
+    policy: ctx.engine.policy,
+  });
+  const hostCorpus = new CorpusStore(host);
+  const w = work(host);
+  const ref = host.read((v) => hostCorpus.suiteFor(v, w, P));
+  assert.equal(ref.suite.id, 'KS-knap');
+  assert.equal(ref.suite.basis, hostBasis({ id: 'knap' }), 'основание — формула хоста');
+  // Корпус, записанный хостом прежде (его формулой основания).
+  host.host.store.transact('checks.recorded', (tx) =>
+    tx.putLocal('check-suites', ref.suite.repositoryId, ref.suite.id, {
+      ...ref.suite,
+      revision: 1,
+    }),
+  );
+  const again = host.read((v) => hostCorpus.suiteFor(v, w, P));
+  assert.equal(again.suite.id, 'KS-knap', 'хост находит свой прежний корпус');
+  assert.equal(again.suite.revision, 1);
+  const contracts = host.read((v) => contractDocuments(w.order, v));
+  assert.ok(corpusBindingHolds(again.suite, contracts, hostBasis), 'привязка держится');
+  // Формула harness для того же корпуса — «другое основание»: новый корпус.
+  const plain = new CorpusStore(ctx.engine);
+  const other = ctx.engine.read((v) => plain.suiteFor(v, w, P));
+  assert.notEqual(other.suite.id, 'KS-knap');
+  assert.equal(corpusBindingHolds(again.suite, contracts), false);
+});

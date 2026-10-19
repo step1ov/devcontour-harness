@@ -280,6 +280,7 @@ export class Engine {
               .map((x) => x.value)
               .find((x) => x.id === prior.checkVersion!.suite),
             contractDocuments(order, tx),
+            this.host.basis.suiteBasis && ((c) => this.host.basis.suiteBasis!(c)),
           )
             ? prior.checkVersion
             : undefined;

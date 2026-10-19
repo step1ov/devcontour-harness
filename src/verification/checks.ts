@@ -66,10 +66,12 @@ export function suiteBasis(contract: ContractDocument) {
 export function corpusBindingHolds(
   suite: Pick<CheckSuite, 'contractId' | 'basis'> | undefined,
   contracts: ContractDocument[],
+  /** Основание корпуса по формуле хоста; без неё — формула harness. */
+  basisOf: (contract: ContractDocument) => string = suiteBasis,
 ) {
   if (!suite) return false;
   const contract = contracts.find((c) => c.id === suite.contractId && c.checks);
-  return !!contract && suiteBasis(contract) === suite.basis;
+  return !!contract && basisOf(contract) === suite.basis;
 }
 
 /** Обязательство по property ID среди договоров поручения. */

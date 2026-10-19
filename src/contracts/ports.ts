@@ -2,6 +2,7 @@ import type { RuntimeName } from './primitives.ts';
 import type { RuntimeBinding } from './policy.ts';
 import type { WorkGraph, Prerequisite, SourceRef } from './work.ts';
 import type { ContextSnapshot } from './context.ts';
+import type { ContractDocument } from './checks.ts';
 import type { RunResult } from './result.ts';
 import type { RunEvent, RunEventDraft, TransactionKind } from './events.ts';
 import type {
@@ -292,6 +293,12 @@ export interface BasisProvider {
    * прежними эпизодами держит свою: ею подписаны их основания.
    */
   episodeBasis?(work: WorkState, view: ExecutionView): string;
+  /**
+   * Нормативное основание корпуса договора проверки по формуле хоста; без неё —
+   * формула harness (`suiteBasis`). Хост с прежними корпусами держит свою: ею
+   * записано основание его корпусов и ID их случаев.
+   */
+  suiteBasis?(contract: ContractDocument): string;
 }
 
 /** Причина, по которой хост не разрешает действие; `null` — разрешено. */

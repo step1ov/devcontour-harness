@@ -195,6 +195,8 @@ export interface ReceiverContext {
     policyDigest: string;
     corpus?: { suite: string; digest: string };
   }): string;
+  /** Основание корпуса по формуле хоста получателя (как `BasisProvider.suiteBasis`). */
+  suiteBasis?(contract: ContractDocument): string;
 }
 
 /**
@@ -765,7 +767,14 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
         `номер версии корпуса ${binding.suite}#${binding.number} не совпадает с копией получателя`,
       ];
     // Корпус относится к договору поручения с тем же нормативным основанием.
-    if (suite?.contractId !== undefined && !corpusBindingHolds(suite, context.contracts))
+    if (
+      suite?.contractId !== undefined &&
+      !corpusBindingHolds(
+        suite,
+        context.contracts,
+        context.suiteBasis && ((c) => context.suiteBasis!(c)),
+      )
+    )
       return [`корпус ${binding.suite} не относится к договорам поручения`];
     corpus = found;
   }

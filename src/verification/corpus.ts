@@ -258,7 +258,7 @@ export class CorpusStore {
     // Корпус принадлежит нормативному основанию договора, а не его ID: та же
     // редакция ID с другими правилами ответа, областью или эталоном получает
     // свой корпус, а случаи прежнего основания остаются его историей.
-    const basis = suiteBasis(contract);
+    const basis = this.engine.host.basis.suiteBasis?.(contract) ?? suiteBasis(contract);
     const suites = this.all(view, repositoryId);
     const existing = suites.find((x) => x.contractId === contract.id && x.basis === basis);
     if (existing)
