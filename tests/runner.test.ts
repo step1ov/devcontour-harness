@@ -702,15 +702,16 @@ test('stateDirFor: рабочие деревья и артефакты попы�
 
 test('Предел времени — на фазу: ревью интеграции не получает остаток времени её проверок', async () => {
   const ctx = setup({
-    scenario: { writer: implement(), reviewer: { ...approve(), sleepMs: 2500 } },
+    scenario: { writer: implement(), reviewer: { ...approve(), sleepMs: 5000 } },
     policy: (raw) => {
       const p = raw as { runTimeoutMs: number; repositories: { gates: { command: string[] }[] }[] };
-      p.runTimeoutMs = 4000;
+      // Запас на запуск fixture под нагрузкой: каждая фаза короче предела на секунды.
+      p.runTimeoutMs = 8000;
       // Проверка интеграции и её ревью вместе дольше предела, каждая — короче.
       p.repositories[0]!.gates[0]!.command = [
         'sh',
         '-c',
-        'sleep 2 && "$0" test/run.js',
+        'sleep 4 && "$0" test/run.js',
         process.execPath,
       ];
     },
