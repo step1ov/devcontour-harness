@@ -213,7 +213,8 @@ test('T10: чужое продвижение target ref перед CAS — не�
   // Ждём фазу integrating и двигаем ref чужим коммитом, пока идёт integration review.
   const tick = ctx.runner.tick();
   let foreign = '';
-  for (let i = 0; i < 400 && !foreign; i++) {
+  // Запас под нагрузкой полного check: до integrating может пройти больше 10 с.
+  for (let i = 0; i < 2400 && !foreign; i++) {
     await new Promise((r) => setTimeout(r, 25));
     const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]);
     if (a?.phase === 'integrating') {
@@ -320,7 +321,8 @@ test('T10: merge conflict с продвинутой принятой ветко�
   const ref = ctx.policy.repositories[0]!.targetRef;
   const tick = ctx.runner.tick();
   let foreign = '';
-  for (let i = 0; i < 400 && !foreign; i++) {
+  // Запас под нагрузкой полного check: до integrating может пройти больше 10 с.
+  for (let i = 0; i < 2400 && !foreign; i++) {
     await new Promise((r) => setTimeout(r, 25));
     if (ctx.engine.read((v) => v.attempts()[0]?.phase) === 'reviewing') {
       // Чужая работа создаёт тот же файл с другим содержимым.
