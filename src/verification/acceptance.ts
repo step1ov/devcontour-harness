@@ -1,4 +1,5 @@
 import {
+  codeReview,
   roleBinding,
   HarnessError,
   digestOf,
@@ -197,6 +198,42 @@ export interface ReceiverContext {
   }): string;
   /** Основание корпуса по формуле хоста получателя (как `BasisProvider.suiteBasis`). */
   suiteBasis?(contract: ContractDocument): string;
+  /**
+   * Результат прежнего формата хоста, в котором входы попытки не
+   * наблюдались: `dependencies` — снимков собственных зависимостей и их
+   * свежести нет; `consumers` — у потребителей нет свежести. Тогда пустые
+   * списки не сверяются с замыканием — их нет, и проверке они не подлежат;
+   * непустые, снимки зависимостей потребителя, провайдер и всё остальное
+   * сверяются как обычно. Какой результат имеет прежний формат, решает хост
+   * по своим правилам формата.
+   */
+  unobserved?: { dependencies?: boolean; consumers?: boolean };
+  /**
+   * Чем подтверждено ревью: `current` (по умолчанию) — writer и reviewer
+   * назначены текущей политикой получателя; `recorded` — результат несёт
+   * своё назначение (writer и reviewer записаны при приёмке) и хост
+   * перепроверяет его позже, когда назначение ролей могло смениться: тогда
+   * оба должны быть runtime политики получателя, а правило вендора роли —
+   * соблюдено.
+   */
+  assignment?: 'current' | 'recorded';
+}
+
+/** Runtime, которые политика получателя назначает writer-ами и reviewer-ами. */
+function policyRuntimes(policy: ReceiverPolicy) {
+  const rules = (r?: { reviewer: { runtime: string }; alternates?: { runtime: string }[] }) =>
+    r ? [r.reviewer.runtime, ...(r.alternates ?? []).map((a) => a.runtime)] : [];
+  const roles = [
+    ...Object.values(policy.roles),
+    ...policy.repositories.flatMap((r) => Object.values(r.roles ?? {})),
+  ];
+  return new Set([
+    ...roles.flatMap((r) => [r.writer.runtime, ...rules(r.review)]),
+    ...policy.repositories.flatMap((r) => rules(r.review)),
+    ...rules(policy.review.code),
+    ...rules(policy.review.plan),
+    ...rules(policy.review.contract),
+  ]);
 }
 
 /**
@@ -586,12 +623,21 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
     if (!check?.passed) problems.push(`Нет PASS: ${phase}/${gate}`);
   // Ревью: writer — роли поручения в политике получателя; reviewer решающих
   // записей обеих фаз — тот, кого политика назначает этому writer, и правило
-  // вендора соблюдено (тот же вендор — только явным разрешением).
+  // вендора соблюдено (тот же вендор — только явным разрешением). Для
+  // результата с записанным назначением (`assignment: 'recorded'`) writer и
+  // reviewer — записанные: они не сверяются с текущим назначением роли, но
+  // оба — runtime политики получателя, и правило вендора роли соблюдено.
   const role = roleBinding(policy, order.role, order.repositoryId);
   if (!role) return [`роль ${order.role} не описана в политике получателя`];
+  const recorded = context.assignment === 'recorded';
+  if (recorded && !result.inputs.writer) return ['результат с записанным назначением без writer'];
   const writer = result.inputs.writer?.runtime ?? role.writer.runtime;
-  if (writer !== role.writer.runtime)
+  const known = policyRuntimes(policy);
+  if (recorded && !known.has(writer))
+    problems.push(`writer ${writer} не используется политикой получателя`);
+  if (!recorded && writer !== role.writer.runtime)
     problems.push(`writer ${writer} не назначен ролью ${order.role} в политике получателя`);
+  const rule = codeReview(policy, order.role, order.repositoryId);
   const choice = selectReviewer(
     policy,
     'code',
@@ -599,7 +645,7 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
     order.role,
     order.repositoryId,
   );
-  if (!choice.ok) problems.push(`ревью результата: ${choice.message}`);
+  if (!recorded && !choice.ok) problems.push(`ревью результата: ${choice.message}`);
   for (const phase of ['candidate', 'integration'] as const) {
     const decisive = result.evidence.findLast(
       (e) => e.kind === 'review' && e.phase === phase && e.sha === sha(phase),
@@ -607,11 +653,21 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
     // Сведения о reviewer у записи ревью обязательны (проверено выше).
     const reviewer = decisive?.reviewer;
     if (!reviewer) continue;
-    if (choice.ok && reviewer.runtime !== choice.reviewer.runtime)
+    const same = vendorOf(reviewer.runtime) === vendorOf(writer);
+    if (recorded) {
+      if (!known.has(reviewer.runtime))
+        problems.push(
+          `ревью ${phase}: reviewer ${reviewer.runtime} не используется политикой получателя`,
+        );
+      if (same && rule.vendor !== 'same-vendor-allowed')
+        problems.push(
+          `ревью ${phase}: reviewer ${reviewer.runtime} того же вендора, что writer ${writer}; правило роли этого не разрешает`,
+        );
+    } else if (choice.ok && reviewer.runtime !== choice.reviewer.runtime)
       problems.push(
         `ревью ${phase}: reviewer ${reviewer.runtime} не назначен политикой получателя (${choice.reviewer.runtime})`,
       );
-    if (reviewer.sameVendor !== (vendorOf(reviewer.runtime) === vendorOf(writer)))
+    if (reviewer.sameVendor !== same)
       problems.push(`ревью ${phase}: признак того же вендора противоречит writer и reviewer`);
   }
   // Потребители: каждый объявленный описан ровно один раз; его область,
@@ -665,16 +721,25 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
     const provider = entry.dependencies.find((d) => d.repositoryId === result.repositoryId);
     if (provider?.sha !== result.shas.result)
       problems.push(`проверка потребителя ${id} выполнена не против интегрированного результата`);
+    const unobserved = context.unobserved?.consumers && !entry.freshness.length;
     problems.push(
-      ...inputsProblems(`потребитель ${id}`, entry.dependencies, entry.freshness, closure, [
-        ...closure
-          .filter((d) => d !== result.repositoryId)
-          .map((d) => ({
-            repositoryId: d,
-            sha: entry.dependencies.find((x) => x.repositoryId === d)?.sha,
-          })),
-        { repositoryId: id, sha: entry.sha },
-      ]),
+      ...inputsProblems(
+        `потребитель ${id}`,
+        entry.dependencies,
+        entry.freshness,
+        closure,
+        unobserved
+          ? []
+          : [
+              ...closure
+                .filter((d) => d !== result.repositoryId)
+                .map((d) => ({
+                  repositoryId: d,
+                  sha: entry.dependencies.find((x) => x.repositoryId === d)?.sha,
+                })),
+              { repositoryId: id, sha: entry.sha },
+            ],
+      ),
     );
   }
   // Снимки зависимостей самой попытки — ровно замыкание зависимостей её
@@ -685,18 +750,23 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
   } catch (error) {
     return [...problems, 'зависимости репозитория: ' + (error as Error).message];
   }
-  problems.push(
-    ...inputsProblems(
-      'попытка',
-      result.checked.dependencies,
-      result.checked.freshness,
-      ownClosure,
-      ownClosure.map((d) => ({
-        repositoryId: d,
-        sha: result.checked.dependencies.find((x) => x.repositoryId === d)?.sha,
-      })),
-    ),
-  );
+  const ownUnobserved =
+    context.unobserved?.dependencies &&
+    !result.checked.dependencies.length &&
+    !result.checked.freshness.length;
+  if (!ownUnobserved)
+    problems.push(
+      ...inputsProblems(
+        'попытка',
+        result.checked.dependencies,
+        result.checked.freshness,
+        ownClosure,
+        ownClosure.map((d) => ({
+          repositoryId: d,
+          sha: result.checked.dependencies.find((x) => x.repositoryId === d)?.sha,
+        })),
+      ),
+    );
   if (problems.length) return problems;
   // Названный testcase доказан решающей записью интеграции на принятом SHA под
   // версией проверок результата.

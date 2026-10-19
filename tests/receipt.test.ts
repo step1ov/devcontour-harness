@@ -440,6 +440,66 @@ test('S2-R4-03: область и входы потребителя — ровн
   f.store.close();
 });
 
+test('Входы прежнего формата хоста: пустые снимки и свежесть не сверяются только по решению хоста; непустые и остальное — как обычно', () => {
+  const f = consumerAttempt();
+  const { result, context } = f.done();
+  const ownLib = withRepos(context, (repos) => [
+    ...repos.map((r) => (r.id === 'app' ? { ...r, dependsOn: ['lib'] } : r)),
+    libRepo(context),
+  ]);
+  // Результат без наблюдения входов: своих снимков нет, у потребителя нет
+  // свежести; снимки потребителя — полное замыкание (web → app → lib).
+  const unobserved = forge(result, (r) => {
+    r.checked.consumers[0].freshness = [];
+    r.checked.consumers[0].dependencies.unshift({
+      repositoryId: 'lib',
+      sha: sha('a'),
+      tree: sha('a'),
+      artifacts: [],
+    });
+  });
+  assert.match(
+    resultProblems(unobserved, ownLib).join('; '),
+    /попытка: снимки зависимостей \[\] — ожидались ровно \[lib\]/,
+  );
+  assert.match(resultProblems(unobserved, ownLib).join('; '), /потребитель web: свежесть \[\]/);
+  // Каждый признак снимает только свою сверку пустого списка.
+  assert.match(
+    resultProblems(unobserved, { ...ownLib, unobserved: { dependencies: true } }).join('; '),
+    /потребитель web: свежесть \[\]/,
+  );
+  assert.match(
+    resultProblems(unobserved, { ...ownLib, unobserved: { consumers: true } }).join('; '),
+    /попытка: снимки зависимостей \[\]/,
+  );
+  const legacy = { ...ownLib, unobserved: { dependencies: true, consumers: true } };
+  assert.deepEqual(resultProblems(unobserved, legacy), []);
+  // Описанные входы сверяются и в прежнем формате.
+  const variants: Record<string, (r: any) => void> = {
+    'own-dependency-without-freshness': (r) =>
+      (r.checked.dependencies = [
+        { repositoryId: 'lib', sha: sha('a'), tree: sha('a'), artifacts: [] },
+      ]),
+    'own-freshness-without-dependency': (r) =>
+      (r.checked.freshness = [
+        { repositoryId: 'lib', snapshot: sha('a'), head: sha('a'), fresh: true },
+      ]),
+    'consumer-unknown-freshness': (r) =>
+      r.checked.consumers[0].freshness.push({
+        repositoryId: 'foreign',
+        snapshot: sha('a'),
+        head: sha('a'),
+        fresh: true,
+      }),
+    'consumer-dependency-omitted': (r) => r.checked.consumers[0].dependencies.shift(),
+    'consumer-provider-other-SHA': (r) => (r.checked.consumers[0].dependencies[1].sha = sha('a')),
+    'consumer-gate-without-PASS': (r) => r.checked.consumers[0].gates.push('not-run'),
+  };
+  for (const [name, change] of Object.entries(variants))
+    assert.notDeepEqual(resultProblems(forge(unobserved, change), legacy), [], name);
+  f.store.close();
+});
+
 test('S2-R4-04: ревью подтверждено reviewer-ом политики получателя; тот же вендор — только явным разрешением; reviewer пропал или противоречит — отказ', () => {
   const f = attempt(graphOf({ a: [] }));
   const { result, context } = f.done();
@@ -488,6 +548,71 @@ test('S2-R4-04: ревью подтверждено reviewer-ом политик
     assert.match(resultProblems(done.result, strict).join('; '), /того же вендора/);
     same.store.close();
   }
+});
+
+test('Записанное назначение ревью: смена ролей у получателя не отменяет прежний результат; вендор и runtime политики сверяются', () => {
+  const f = attempt(graphOf({ a: [] }));
+  const { result, context } = f.done();
+  // Получатель сменил назначение: роль пишет codex, ревьюирует claude.
+  const swapped = {
+    ...context,
+    policy: {
+      ...context.policy,
+      roles: {
+        ...context.policy.roles,
+        developer: { ...context.policy.roles.developer!, writer: { runtime: 'codex' as const } },
+      },
+      review: {
+        ...context.policy.review,
+        code: { reviewer: { runtime: 'claude' as const }, vendor: 'different-vendor' as const },
+      },
+    },
+  };
+  assert.match(resultProblems(result, swapped).join('; '), /не назначен ролью/);
+  const recorded = { ...swapped, assignment: 'recorded' as const };
+  assert.deepEqual(resultProblems(result, recorded), [], 'claude → codex по записи');
+  const reviews = (r: any, change: (x: any) => void) =>
+    r.evidence.forEach((x: any) => x.kind === 'review' && change(x));
+  const variants: Record<string, [(r: any) => void, RegExp]> = {
+    'same-vendor-without-permission': [
+      (r) => reviews(r, (x) => (x.reviewer = { runtime: 'claude', sameVendor: true })),
+      /того же вендора/,
+    ],
+    'writer-outside-policy': [
+      (r) => {
+        r.inputs.writer = { runtime: 'fixture' };
+        reviews(r, (x) => (x.reviewer.sameVendor = false));
+      },
+      /writer fixture не используется политикой/,
+    ],
+    'reviewer-outside-policy': [
+      (r) => reviews(r, (x) => (x.reviewer = { runtime: 'fixture', sameVendor: false })),
+      /reviewer fixture не используется политикой/,
+    ],
+    'writer-missing': [(r) => delete r.inputs.writer, /без writer/],
+    'vendor-flag-contradicts': [
+      (r) => reviews(r, (x) => (x.reviewer.sameVendor = true)),
+      /признак того же вендора/,
+    ],
+  };
+  for (const [name, [change, pattern]] of Object.entries(variants))
+    assert.match(resultProblems(forge(result, change), recorded).join('; '), pattern, name);
+  // Тот же вендор по записи — только если правило роли получателя это разрешает.
+  const same = forge(result, (r) =>
+    reviews(r, (x) => (x.reviewer = { runtime: 'claude', sameVendor: true })),
+  );
+  const allowed = {
+    ...recorded,
+    policy: {
+      ...recorded.policy,
+      review: {
+        ...recorded.policy.review,
+        code: { reviewer: { runtime: 'claude' as const }, vendor: 'same-vendor-allowed' as const },
+      },
+    },
+  };
+  assert.deepEqual(resultProblems(same, allowed), []);
+  f.store.close();
 });
 
 test('S2-R5-01: генеративный gate потребителя (legacy) переносим; его запись не доказывает договор свойств провайдера', () => {
