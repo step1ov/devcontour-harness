@@ -828,7 +828,7 @@ export function verifySuite(suite: PortableSuite) {
   const local: CheckSuite = {
     ...suite,
     cases: Object.fromEntries(suite.cases.map((c) => [c.id, c])),
-    decisions: suite.decisions as CaseDecision[],
+    decisions: suite.decisions,
     pending: [],
     operations: {},
     revision: 0,

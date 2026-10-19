@@ -431,6 +431,9 @@ test('Разбор ведущего: назначение хоста (модел
     },
     'предмет вызова — поручение эпизода',
   );
+  const { callRecords } = await import('../src/engine/usage.ts');
+  const call = engine.read((v) => callRecords(v).find((c) => c.stage === 'property-recovery'));
+  assert.equal(call?.repositoryId, 'app', 'вызов учтён у владельца поручения');
 });
 
 test('Основание корпуса — формула хоста: прежний корпус KS-<id> хоста находится и сохраняет привязку; формула harness дала бы новый корпус', async () => {
@@ -466,4 +469,39 @@ test('Основание корпуса — формула хоста: преж�
   const other = ctx.engine.read((v) => plain.suiteFor(v, w, P));
   assert.notEqual(other.suite.id, 'KS-knap');
   assert.equal(corpusBindingHolds(again.suite, contracts), false);
+});
+
+test('Решение корпуса, полученное из Git другого клона, — без локальной команды checker — читается', async () => {
+  const ctx = approved();
+  const { CorpusStore } = await import('../src/verification/corpus.ts');
+  const corpus = new CorpusStore(ctx.engine);
+  const w = work(ctx.engine);
+  const ref = ctx.engine.read((v) => corpus.suiteFor(v, w, P));
+  const decision = {
+    id: 'CF-imported',
+    property: P,
+    input: '{"cap":0,"items":[]}',
+    inputHash: 'a'.repeat(64),
+    outcome: 'rejected' as const,
+    reason: 'импорт',
+    claimed: { expected: null, actual: null },
+    source: { sha: 'b'.repeat(40) },
+    method: {
+      gate: ref.suite.gate,
+      artifacts: [],
+      contract: ref.suite.contractId,
+      basis: ref.suite.basis,
+    },
+    origin: { kind: 'agent' as const },
+    at: '2026-01-01T00:00:00.000Z',
+  };
+  ctx.engine.host.store.transact('checks.recorded', (tx) =>
+    tx.putLocal('check-suites', ref.suite.repositoryId, ref.suite.id, {
+      ...ref.suite,
+      decisions: [decision],
+      revision: 1,
+    }),
+  );
+  const read = corpus.read(ref.suite.id);
+  assert.equal(read.decisions[0]!.method?.command, undefined);
 });

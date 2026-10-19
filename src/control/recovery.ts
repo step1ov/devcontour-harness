@@ -237,6 +237,7 @@ export async function analyzeRecovery(
     },
     signal,
     {
+      repositoryId: work.order.repositoryId,
       runId: work.recovery!.runs.at(-1)!,
       subjectId: work.id,
       subjectKind: 'work',

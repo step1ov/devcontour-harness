@@ -744,7 +744,10 @@ const caseDecisionSchema = z.strictObject({
   method: z
     .strictObject({
       gate: idSchema,
-      command: z.array(z.string()),
+      // Команда checker — локальная политика установки: в переносимую форму
+      // корпуса она не входит, и решение, полученное из Git другого клона,
+      // её не имеет.
+      command: z.array(z.string()).optional(),
       artifacts: z.array(z.strictObject({ path: relativePathSchema, blob: gitShaSchema })),
       contract: z.string().min(1),
       basis: z.string().min(1),
