@@ -700,23 +700,68 @@ test('stateDirFor: рабочие деревья и артефакты попы�
   assert.equal(existsSync(join(ctx.state, 'artifacts', a.id)), false);
 });
 
-test('Предел времени — на фазу: ревью интеграции не получает остаток времени её проверок', async () => {
+test('Предел времени — на фазу: ревью интеграции не получает остаток времени её проверок', async (t) => {
+  const budget = 8000;
   const ctx = setup({
-    scenario: { writer: implement(), reviewer: { ...approve(), sleepMs: 5000 } },
+    scenario: { writer: implement(), reviewer: approve() },
     policy: (raw) => {
-      const p = raw as { runTimeoutMs: number; repositories: { gates: { command: string[] }[] }[] };
-      // Запас на запуск fixture под нагрузкой: каждая фаза короче предела на секунды.
-      p.runTimeoutMs = 8000;
-      // Проверка интеграции и её ревью вместе дольше предела, каждая — короче.
-      p.repositories[0]!.gates[0]!.command = [
-        'sh',
-        '-c',
-        'sleep 4 && "$0" test/run.js',
-        process.execPath,
-      ];
+      (raw as { runTimeoutMs: number }).runTimeoutMs = budget;
     },
   });
-  await runAll(ctx);
-  const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
-  assert.equal(a.status, 'succeeded', a.error);
+  // Управляем таймерами с лимитом runTimeoutMs только в этом тесте. Git,
+  // gate и CLI-reviewer реальны; время учитываем по их настоящему evidence.
+  // Gate тратит 4 с, review — 5 с: вместе больше 8 с, по отдельности меньше.
+  const nativeSetTimeout = globalThis.setTimeout;
+  const nativeClearTimeout = globalThis.clearTimeout;
+  const recordEvidence = ctx.engine.evidence.bind(ctx.engine);
+  const timers = new Map<NodeJS.Timeout, { at: number; fire: () => void }>();
+  const phases: string[] = [];
+  let clock = 0;
+  try {
+    t.mock.method(
+      globalThis,
+      'setTimeout',
+      (callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+        if (ms !== budget) return nativeSetTimeout(callback, ms, ...args);
+        const timer = nativeSetTimeout(() => {}, 2 ** 31 - 1);
+        timer.unref();
+        timers.set(timer, { at: clock + budget, fire: () => callback(...args) });
+        return timer;
+      },
+    );
+    t.mock.method(globalThis, 'clearTimeout', (timer: Parameters<typeof clearTimeout>[0]) => {
+      if (timer && typeof timer === 'object') timers.delete(timer);
+      nativeClearTimeout(timer);
+    });
+    t.mock.method(ctx.engine, 'evidence', (...args: Parameters<typeof ctx.engine.evidence>) => {
+      const result = recordEvidence(...args);
+      const evidence = args[2];
+      if (evidence.kind === 'test' || evidence.kind === 'review') {
+        phases.push(`${evidence.phase}:${evidence.kind}`);
+        assert.ok(timers.size > 0, 'таймер бюджета действительно установлен');
+        clock += evidence.kind === 'test' ? 4000 : 5000;
+        for (const [timer, pending] of timers) {
+          if (pending.at > clock) continue;
+          timers.delete(timer);
+          nativeClearTimeout(timer);
+          pending.fire();
+        }
+      }
+      return result;
+    });
+    await runAll(ctx);
+    const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+    assert.equal(a.status, 'succeeded', a.error);
+    assert.deepEqual(phases, [
+      'candidate:test',
+      'candidate:review',
+      'integration:test',
+      'integration:review',
+    ]);
+    assert.ok(clock > budget, 'сумма фаз превысила один бюджет');
+    assert.equal(timers.size, 0, 'таймер завершённой попытки снят');
+  } finally {
+    for (const timer of timers.keys()) nativeClearTimeout(timer);
+    t.mock.restoreAll();
+  }
 });

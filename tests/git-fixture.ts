@@ -1,7 +1,17 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+
+// Immutable, process-local initial repositories. Copy files (including .git),
+// never hardlink or share an object database: hooks, refs and worktrees in one
+// test must not affect another. Different initial contents get different seeds.
+const seeds = new Map<string, string>();
+// This helper can be dynamically imported inside a test. A test-scoped after
+// hook would delete the process cache before the next test uses it.
+process.once('exit', () => {
+  for (const seed of seeds.values()) rmSync(seed, { recursive: true, force: true });
+});
 
 /** Настоящий временный Git-репозиторий с первым коммитом. */
 export function repo(files: Record<string, string> = { 'README.md': 'app\n' }) {
@@ -18,10 +28,19 @@ export function repo(files: Record<string, string> = { 'README.md': 'app\n' }) {
         GIT_COMMITTER_EMAIL: 't@t',
       },
     }).trim();
-  git('init', '-q', '-b', 'main');
-  write(dir, files);
-  git('add', '-A');
-  git('commit', '-q', '-m', 'init');
+  const key = JSON.stringify(Object.entries(files).sort(([a], [b]) => a.localeCompare(b)));
+  const cached = seeds.get(key);
+  if (cached) {
+    cpSync(cached, dir, { recursive: true });
+  } else {
+    git('init', '-q', '-b', 'main');
+    write(dir, files);
+    git('add', '-A');
+    git('commit', '-q', '-m', 'init');
+    const seed = realpathSync(mkdtempSync(join(tmpdir(), 'harness-git-seed-')));
+    cpSync(dir, seed, { recursive: true });
+    seeds.set(key, seed);
+  }
   return { dir, git, head: () => git('rev-parse', 'HEAD') };
 }
 
