@@ -548,8 +548,10 @@ export class Engine {
       const control = tx.control();
       if (control.paused && reason === 'shutdown' && control.pauseReason !== 'reconfigure')
         return { control, changed: false };
-      if (control.paused && control.pauseReason === reason && !control.pauseFailures?.length)
-        return { control, changed: false };
+      // Повторная пауза человека — его новое решение: время паузы обновляется.
+      // Хост сравнивает его с началом своей работы (пауза до старта снимается
+      // циклом, после — нет), и сохранённое прежнее время выдало бы свежее
+      // решение за давнее.
       const next = {
         ...control,
         paused: true,

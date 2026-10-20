@@ -625,3 +625,24 @@ test('Версия проверок по формуле хоста: попытк
     'done',
   );
 });
+
+test('T14: повторная пауза человека — новое решение со своим временем; повтор штатной остановки ничего не меняет', () => {
+  const { engine, clock } = engineOf();
+  engine.pause('operator');
+  const first = engine.read((v) => v.control().pausedAt);
+  clock.now += 60_000;
+  assert.equal(engine.pause('operator').changed, true);
+  const again = engine.read((v) => v.control());
+  assert.equal(again.pauseReason, 'operator');
+  assert.notEqual(again.pausedAt, first, 'время паузы — время последнего решения');
+  assert.equal(again.pausedAt, new Date(clock.now).toISOString());
+  engine.resume();
+  engine.pause('shutdown');
+  const stopped = engine.read((v) => v.control().pausedAt);
+  clock.now += 60_000;
+  assert.equal(engine.pause('shutdown').changed, false);
+  assert.equal(
+    engine.read((v) => v.control().pausedAt),
+    stopped,
+  );
+});

@@ -406,3 +406,68 @@ if (process.env.DEVCONTOUR_CORPUS) {
     'done',
   );
 });
+
+// Перенесено из потребителя (DevContour property-coverage AC03, check-contract
+// AC06): отрицательная диагностика отчёта и выбор свойств поручения — правила
+// генеративного gate harness.
+
+test('AC03: зависшая проверка сохраняет отчёт «running» с текущим входом и seed; отказ свойства — диагностика, а не недобор', async () => {
+  const hang = check().replace(
+    "import { solve } from './src/knap.mjs';",
+    'const solve = () => { for (;;) {} };',
+  );
+  const hung = propertySetup({
+    writer: implement({ 'src/knap.mjs': knap.correct }),
+    properties: ['knapsack-optimal'],
+    files: { 'check.mjs': hang },
+    policy: (p) => {
+      const policy = p as {
+        maxAttempts: number;
+        repositories: { gates: { timeoutMs: number }[] }[];
+      };
+      policy.maxAttempts = 1;
+      policy.repositories[0]!.gates[0]!.timeoutMs = 3000;
+    },
+  });
+  await runAll(hung);
+  const a = hung.engine.read((v) => v.attempts('add-greeting')[0]!);
+  const e = a.evidence.find((x) => x.gate === 'properties')!;
+  assert.equal(e.passed, false);
+  const entry = e.property?.report?.properties[0];
+  assert.equal(entry?.status, 'running');
+  assert.equal(entry?.cases, 0);
+  assert.ok(entry?.current, 'вход, на котором шла проверка, сохранён');
+  assert.equal(typeof e.property?.seed, 'number');
+  assert.match(e.summary, /timeout/);
+
+  const failed = propertySetup({
+    writer: implement({ 'src/knap.mjs': knap.zeroWeight }),
+    properties: ['knapsack-optimal'],
+    policy: (p) => (p.maxAttempts = 1),
+  });
+  await runAll(failed);
+  const f = failed.engine.read((v) => v.attempts('add-greeting')[0]!);
+  const g = f.evidence.find((x) => x.gate === 'properties')!;
+  assert.equal(g.passed, false);
+  assert.match(g.summary, /свойство knapsack-optimal нарушено/);
+  assert.equal(g.property?.coverage, undefined, 'отказ с контрпримером — не недобор выборки');
+});
+
+test('AC06: поручение исполняет только свои свойства общего файла проверки; невыбранное свойство не мешает приёмке', async () => {
+  const ctx = propertySetup({
+    writer: implement({ 'src/knap.mjs': knap.correct }),
+    properties: ['knapsack-optimal'],
+    // Реализация второго свойства ещё заглушка: её свойство не выбрано.
+    files: { 'src/reach.mjs': 'export function reach() { throw new Error("todo"); }\n' },
+  });
+  await runAll(ctx);
+  const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.equal(a.status, 'succeeded', a.error);
+  const gates = a.evidence.filter((e) => e.gate === 'properties');
+  assert.equal(gates.length, 2, 'кандидат и интеграция');
+  for (const e of gates)
+    assert.deepEqual(
+      e.property?.report?.properties.map((x) => x.testId),
+      ['knapsack-optimal'],
+    );
+});

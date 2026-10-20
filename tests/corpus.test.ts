@@ -3,11 +3,14 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { HarnessError, digestOf, workGraphSchema, type ErrorCode } from '../src/contracts/index.ts';
+import { tmpdir } from 'node:os';
 import {
   CorpusStore,
+  canonicalJson,
   portableSuite,
   scrubLocalPaths,
   verifySuite,
@@ -747,4 +750,189 @@ test('S2-R3-06/T30: отказ запуска эксперимента не не
   assert.match(JSON.stringify(error), /\[REDACTED\]/, 'поля ошибки замаскированы, а не удалены');
   assert.equal(h.spikes().length, 0);
   h.close();
+});
+
+// Перенесено из потребителя (DevContour check-findings F17/F19/F22 и остатки
+// F09/F16): очистка переносимой записи — правило harness.
+
+test('F17: очистка сохраняет законный текст: маршруты, URL с запросом, другие схемы, Unicode, даты и дроби', () => {
+  const roots = ['/data/Synthetic Space/project', '/tmp'];
+  for (const text of [
+    'route /api/users and /api/v1/tasks/7 answered 404',
+    'see https://example.com/~/api/v1 and https://example.com/home/page',
+    'redirect https://example.test/?next=/tmp/file.json kept',
+    'profile://example.test/a and git+ssh://host/x stay',
+    'relative src/модуль/файл.mjs, пример/tmp/file and tests/a b.mjs',
+    'on 2026/10/08 the ratio was 1/2; /tmpfoo, /tmp-file and /tmp2 are not roots',
+    'paths outside known roots stay: /data/input.json and /secret.json',
+  ])
+    assert.equal(scrubLocalPaths(text, roots), text);
+  assert.equal(scrubLocalPaths('at /tmp/x.json', roots), 'at <local-path>/x.json');
+  assert.equal(scrubLocalPaths('file:///tmp/x.json', roots), '<local-path>');
+});
+
+test('F19: очистка идемпотентна, в том числе при двойных разделителях и корне, повторённом внутри пути', () => {
+  const roots = ['/data/project', '/data/Synthetic Space/project', tmpdir(), '/tmp'];
+  for (const text of [
+    'historic /data//cache//nested/private.json',
+    'Error at /data/project/data/project/data/project/input.json',
+    'at /data/Synthetic Space/project//nested//x.json and /Users/a//b.json',
+    'file:////host//share and C:\\\\Users\\\\x and <local-path>/x',
+    `${tmpdir()}${tmpdir()}${tmpdir()}/a and ${tmpdir()}//b`,
+  ]) {
+    const once = scrubLocalPaths(text, roots);
+    assert.equal(scrubLocalPaths(once, roots), once, text);
+  }
+});
+
+test('F09/F16/F17: путь после экранированного перевода строки или двоеточия снят; комбинируемые знаки и рамка ссылки сохранены', () => {
+  const ws = '/srv/synthetic-ws';
+  const roots = [ws, '/tmp'];
+  const actual = canonicalJson({
+    error: `Error:\n${ws}/private.json\n\tC:\\Users\\Synthetic\\private.json`,
+  });
+  const out = scrubLocalPaths(actual, roots);
+  assert.equal(out.includes('synthetic'), false, out);
+  assert.equal(out.includes('Synthetic'), false, out);
+  assert.equal(scrubLocalPaths('ENOENT:/tmp/x.json', roots), 'ENOENT:<local-path>/x.json');
+  const combining = 'café/tmp/file';
+  assert.equal(scrubLocalPaths(combining, roots), combining);
+  assert.equal(
+    scrubLocalPaths('see [input](file:///tmp/input.json), then', roots),
+    'see [input](<local-path>), then',
+  );
+  for (const text of [out, 'see [input](<local-path>), then'])
+    assert.equal(scrubLocalPaths(text, roots), text);
+});
+
+test('F22: file:// после экранированных \\n, \\r, \\t снимается, а не читается другой схемой', () => {
+  for (const escape of ['n', 'r', 't']) {
+    const actual = canonicalJson({ error: `Error:\\${escape}file:///srv/synthetic/private.json` });
+    const raw = JSON.stringify({
+      error: `Error:${escape === 'n' ? '\n' : escape === 'r' ? '\r' : '\t'}file:///srv/synthetic/private.json`,
+    });
+    for (const text of [actual, raw]) {
+      const out = scrubLocalPaths(text, []);
+      assert.equal(out.includes('synthetic'), false, out);
+      assert.equal(scrubLocalPaths(out, []), out);
+    }
+  }
+  const kept = JSON.stringify({ see: 'line\nhttps://example.com/a?b=1' });
+  assert.equal(scrubLocalPaths(kept, []), kept);
+});
+
+// Перенесено из потребителя (DevContour check-corpus AC14, AC18): правила
+// корпуса и генеративного gate — правила harness.
+
+test('AC14: реализация, подогнанная под подтверждённый случай, ловится генератором на другом входе класса; контрпример воспроизводится по seed', async () => {
+  const fitted = knap.fitted(
+    JSON.parse(input) as { items: { w: number; v: number }[]; cap: number },
+    12,
+  );
+  const ctx = propertySetup({
+    writer: [implement({ 'src/knap.mjs': knap.firstThree }), implement({ 'src/knap.mjs': fitted })],
+  });
+  await ctx.runner.init();
+  await runAll(ctx);
+  const ok = await ctx.runner.submitCase({
+    workId: 'add-greeting',
+    property: 'knapsack-optimal',
+    input,
+    expected: '12',
+    key: 'case-first-three',
+  });
+  assert.equal(ok.decision.outcome, 'confirmed', ok.decision.reason);
+  ctx.engine.retry('add-greeting');
+  await ctx.runner.drain();
+  const a = ctx.engine.read((v) => v.attempts('add-greeting')[1]!);
+  const gate = a.evidence.find((e) => e.gate === 'properties' && e.phase === 'candidate')!;
+  assert.equal(gate.passed, false, 'подгонка не проходит');
+  const report = gate.property!.report!;
+  // Корпус пройден, но покрытие класса — генератор, и он нашёл другой вход.
+  assert.equal(report.corpus?.passed, 1);
+  assert.deepEqual(report.corpus?.failed, []);
+  const entry = report.properties.find((p) => p.testId === 'knapsack-optimal')!;
+  assert.equal(entry.status, 'failed');
+  assert.equal(entry.counterexample?.case, undefined, 'вход генератора, не случай корпуса');
+  assert.notEqual(
+    JSON.stringify(entry.counterexample?.original),
+    JSON.stringify(JSON.parse(input)),
+  );
+  // Тот же seed воспроизводит тот же контрпример вне контура.
+  const root = mkdtempSync(join(tmpdir(), 'harness-replay-'));
+  const tree = join(root, 'tree');
+  ctx.repo.git('worktree', 'add', '--detach', tree, a.candidateSha!);
+  try {
+    const out = join(root, 'replay.json');
+    // Отказ свойства — ненулевой код выхода; отчёт при этом записан.
+    spawnSync(process.execPath, ['check.mjs'], {
+      cwd: tree,
+      env: {
+        PATH: process.env.PATH,
+        DEVCONTOUR_SEED: String(gate.property!.seed),
+        DEVCONTOUR_PROPERTIES: 'knapsack-optimal',
+        DEVCONTOUR_PROPERTY_REPORT: out,
+      },
+      stdio: 'ignore',
+    });
+    const replay = JSON.parse(readFileSync(out, 'utf8')) as typeof report;
+    assert.deepEqual(replay.properties[0]!.counterexample, entry.counterexample);
+  } finally {
+    ctx.repo.git('worktree', 'remove', '--force', tree);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('AC18: быстрый маршрут не удаляет, не заменяет ожидание и не меняет checker; тот же вход с другим ожиданием — конфликт, принятое не переписано', async () => {
+  const ctx = propertySetup({ writer: implement({ 'src/knap.mjs': knap.firstThree }) });
+  await ctx.runner.init();
+  await runAll(ctx);
+  const ok = await ctx.runner.submitCase({
+    workId: 'add-greeting',
+    property: 'knapsack-optimal',
+    input,
+    expected: '12',
+    key: 'case-confirmed',
+  });
+  assert.equal(ok.decision.outcome, 'confirmed', ok.decision.reason);
+  for (const change of ['remove', 'replace-expected', 'tolerance', 'coverage', 'checker'])
+    await assert.rejects(
+      ctx.runner.submitCase({
+        workId: 'add-greeting',
+        property: 'knapsack-optimal',
+        input,
+        key: 'case-change-' + change,
+        change,
+      }),
+      (e: unknown) =>
+        e instanceof HarnessError &&
+        e.code === 'INVALID_INPUT' &&
+        /только добавляет подтверждённые случаи/.test(e.message),
+    );
+  const corpus = ctx.runner.corpus;
+  const suite = corpus.read(ok.suite);
+  const begun = corpus.begin(suite, 'case-conflict');
+  assert.ok(begun.token);
+  const conflict = corpus.record(
+    corpus.read(ok.suite),
+    'case-conflict',
+    begun.token,
+    {
+      property: 'knapsack-optimal',
+      input,
+      inputHash: 'a'.repeat(64),
+      outcome: 'confirmed',
+      reason: 'подделка',
+      source: { sha: 'c'.repeat(40) },
+      observed: { expected: '6', actual: '0', equal: false, repeats: 2, durationsMs: [] },
+      origin: { kind: 'agent' },
+    },
+    () => 'f'.repeat(40),
+    { works: ['add-greeting'], actor: 'agent' },
+  );
+  assert.equal(conflict.decision.outcome, 'inconclusive');
+  assert.match(conflict.decision.reason, /конфликт ожиданий/);
+  const after = corpus.read(ok.suite);
+  assert.equal(after.versions.length, 1, 'новой версии нет');
+  assert.equal(after.cases[ok.decision.caseId!]!.expected, '12', 'принятое не переписано');
 });

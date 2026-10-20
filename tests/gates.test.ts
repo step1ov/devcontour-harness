@@ -1,12 +1,27 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { EvidenceRecord, GatePolicy } from '../src/contracts/index.ts';
+import { failureFingerprint } from '../src/contracts/failure.ts';
 import { redactor } from '../src/environment/redaction.ts';
 import { TaskFailure } from '../src/engine/failure.ts';
-import { runGate } from '../src/verification/gates.ts';
+import {
+  junitSummary,
+  prepareReportPath,
+  runGate,
+  sandboxBlockedHosts,
+} from '../src/verification/gates.ts';
+import { requirementProof } from '../src/verification/proof.ts';
 import { junit, nodeGate, repo, write } from './git-fixture.ts';
 
 const policy = { isolation: { mode: 'none' as const, domains: [] } };
@@ -148,4 +163,201 @@ test('Отчёт за пределами worktree и cwd вне worktree отк�
       }),
     /Report выходит из worktree/,
   );
+});
+
+// Перенесено из потребителя (DevContour runner.test, proof.test): правила
+// чтения отчёта, границы пути отчёта, распознавания отказа сети и причины
+// провала gate — правила harness, и проверяются здесь напрямую.
+
+test('JUnit: пустой, повреждённый и с DOCTYPE отчёт отклоняется; пропуск — не прохождение', () => {
+  assert.throws(() => junitSummary('<testsuite tests="999"/>'), /testcases/);
+  assert.throws(() => junitSummary('not xml'));
+  assert.throws(() => junitSummary('<!DOCTYPE xml><testsuite/>'));
+  assert.throws(() => junitSummary('<testsuite'), /Некорректный JUnit/);
+  const summary = junitSummary(
+    '<testsuites><testsuite><testcase name="a"/><testcase name="b"><skipped/></testcase><testcase name="c"><failure/></testcase></testsuite></testsuites>',
+  );
+  assert.deepEqual(summary, {
+    tests: 3,
+    failures: 1,
+    skipped: 1,
+    failed: ['c'],
+    // Без сообщения о провале остаётся одно имя testcase.
+    failedDetails: ['c'],
+    cases: [
+      { id: 'a', status: 'passed' },
+      { id: 'b', status: 'skipped' },
+      { id: 'c', status: 'failed' },
+    ],
+    truncated: false,
+  });
+});
+
+test('Манифест JUnit называет каждый testcase с classname и исходом', () => {
+  const summary = junitSummary(`<?xml version="1.0"?>
+<testsuite tests="3" failures="1" skipped="1">
+  <testcase classname="cart.total" name="applies discount"/>
+  <testcase classname="cart.total" name="rejects negative"><failure message="boom"/></testcase>
+  <testcase classname="cart.total" name="pending"><skipped/></testcase>
+</testsuite>`);
+  assert.deepEqual(summary.cases, [
+    { id: 'cart.total.applies discount', status: 'passed' },
+    { id: 'cart.total.rejects negative', status: 'failed' },
+    { id: 'cart.total.pending', status: 'skipped' },
+  ]);
+  assert.equal(summary.truncated, false);
+});
+
+test('Манифест на пределе 2000 testcases полон; за пределом обрезан и не подтверждает отсутствующий тест', () => {
+  const report = (count: number) =>
+    '<testsuite>' +
+    Array.from({ length: count }, (_, i) => `<testcase name="case-${i}"/>`).join('') +
+    '</testsuite>';
+  const full = junitSummary(report(2000));
+  assert.equal(full.cases.length, 2000);
+  assert.equal(full.truncated, false);
+  const over = junitSummary(report(2001));
+  assert.equal(over.cases.length, 2000);
+  assert.equal(over.truncated, true);
+  assert.equal(over.tests, 2001, 'счётчик считает все выполненные testcases');
+  const sha = 'a'.repeat(40);
+  const proof = requirementProof(
+    { id: 'REQ-1', gate: 'unit', testId: 'case-2000' },
+    [
+      {
+        kind: 'test',
+        gate: 'unit',
+        phase: 'integration',
+        sha,
+        passed: true,
+        tests: over.cases,
+        testsTruncated: true,
+      },
+    ],
+    sha,
+  );
+  assert.equal(proof.level, 'none');
+  assert.match(proof.reason, /обрезан/);
+});
+
+test('Путь отчёта через symlink отвергается до любой записи снаружи', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-report-'));
+  try {
+    const worktree = join(root, 'worktree'),
+      outside = join(root, 'outside');
+    mkdirSync(worktree);
+    mkdirSync(outside);
+    symlinkSync(outside, join(worktree, '.reports'));
+    await assert.rejects(
+      () => prepareReportPath(worktree, '.reports/new/report.xml', 'Report выходит из worktree'),
+      /Report выходит из worktree/,
+    );
+    assert.equal(existsSync(join(outside, 'new')), false, 'снаружи ничего не создано');
+    await assert.rejects(
+      () => prepareReportPath(worktree, '../escape.xml', 'Report выходит из worktree'),
+      /Report выходит/,
+    );
+    const path = await prepareReportPath(worktree, 'reports/unit/report.xml', 'x');
+    assert.ok(existsSync(join(worktree, 'reports', 'unit')));
+    assert.ok(path.endsWith(join('reports', 'unit', 'report.xml')));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Отказ сети песочницы узнаётся по выводу и называет домен; упоминание URL и локальный сервис — нет', () => {
+  const pnpm =
+    'candidate/install: Код выхода 1: ERR_PNPM_FETCH_403  GET https://registry.npmjs.org/@types/node/-/node-24.3.0.tgz: Forbidden - 403 | No authorization header was set for the request.';
+  assert.deepEqual(sandboxBlockedHosts(pnpm, []), ['registry.npmjs.org']);
+  assert.deepEqual(sandboxBlockedHosts(pnpm, ['npmjs.org']), [], 'поддомен разрешённого открыт');
+  assert.deepEqual(
+    sandboxBlockedHosts('connect EPERM 104.16.0.1:443 https://api.example.test/v1', []),
+    ['api.example.test'],
+  );
+  assert.deepEqual(
+    sandboxBlockedHosts('expected link https://example.com/docs to be rendered', []),
+    [],
+  );
+  assert.deepEqual(sandboxBlockedHosts('GET http://127.0.0.1:4000/x 403 Forbidden', []), []);
+});
+
+const reportScript = (xml: string, exit: number, extra = '') =>
+  `require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,${JSON.stringify(xml)});${extra}process.exit(${exit})`;
+
+test('Провал gate несёт свою причину: разные ошибки — разные отпечатки, в том числе из отчёта и из любого потока', async () => {
+  const r = repo();
+  const failing = (name: string) =>
+    `<testsuite><testcase classname="total" name="ok"/><testcase classname="total" name="${name}"><failure message="${name} broke"/></testcase></testsuite>`;
+  const scenarios: [string, (m: string) => string[]][] = [
+    ['stderr и код 1', (m) => ['sh', '-c', `echo ${m} >&2; exit 1`]],
+    ['отчёт и код 1 без вывода', (m) => nodeGate(reportScript(failing(m), 1))],
+    [
+      'ошибка в stdout, предупреждение в stderr',
+      (m) =>
+        nodeGate(
+          `console.log('error: ${m}');console.error('Warning: experimental runtime feature');process.exit(1)`,
+        ),
+    ],
+    [
+      'длинный stdout и предупреждения stderr не вытесняют ошибку',
+      (m) =>
+        nodeGate(
+          `for(let i=0;i<4;i++)console.log('progress '+'o'.repeat(300));for(let i=0;i<3;i++)console.error('warning '+'w'.repeat(300));console.error('error: ${m}');process.exit(1)`,
+        ),
+    ],
+  ];
+  for (const [label, command] of scenarios) {
+    const prints: string[] = [];
+    for (const marker of ['EXPECTED_TOTAL_WRONG', 'MISSING_REQUIRED_FIELD']) {
+      const { evidence, failure } = await gate(r.dir, r.head(), { command: command(marker) });
+      assert.ok(failure, label);
+      assert.match(failure.message, new RegExp(marker), `${label}: причина в отказе`);
+      assert.match(evidence.summary, new RegExp(marker), `${label}: причина в evidence`);
+      assert.match(evidence.summary, /Код выхода 1/, `${label}: код выхода остаётся провалом`);
+      prints.push(failureFingerprint(failure.kind, failure.message));
+    }
+    assert.notEqual(prints[0], prints[1], `${label}: разные причины — разные отпечатки`);
+  }
+});
+
+test('Повреждённый отчёт не затирает ошибку команды; секрет снят, объём ограничен', async () => {
+  const r = repo();
+  const secret = 'gate-secret-value-5821';
+  const { evidence, failure } = await gate(
+    r.dir,
+    r.head(),
+    {
+      command: nodeGate(
+        `require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase');` +
+          `console.log('x'.repeat(5000));console.log('stdout-cause: schema mismatch');console.error('fatal: token '+process.env.SECRET+' rejected');process.exit(2)`,
+      ),
+    },
+    secret,
+  );
+  assert.match(evidence.summary, /Код выхода 2/, 'исходный код выхода сохранён');
+  assert.match(evidence.summary, /fatal: token .* rejected/, 'ошибка команды не затёрта отчётом');
+  assert.match(evidence.summary, /stdout-cause: schema mismatch/, 'stdout входит в причину');
+  assert.doesNotMatch(evidence.summary, /Некорректный JUnit/);
+  assert.ok(!evidence.summary.includes(secret) && !failure!.message.includes(secret));
+  assert.ok(evidence.summary.length < 1000, `объём ограничен: ${evidence.summary.length}`);
+});
+
+test('Текст провала из отчёта проходит тот же redact: сообщение на границе обрезки и имя testcase', async () => {
+  const r = repo();
+  const secret = 'gate-secret-value-7310-abcdefgh';
+  const { evidence, failure } = await gate(
+    r.dir,
+    r.head(),
+    {
+      command: nodeGate(
+        `const t=process.env.SECRET;require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase classname="auth" name="LEAKS_TOKEN"><failure message="'+'p'.repeat(184)+t+'"/></testcase><testcase name="case-'+t+'"><failure message="named"/></testcase></testsuite>');process.exit(1)`,
+      ),
+    },
+    secret,
+  );
+  assert.match(evidence.summary, /LEAKS_TOKEN/, 'причина из отчёта дошла');
+  assert.ok(evidence.tests?.length, 'манифест упавшей проверки записан');
+  const stored = JSON.stringify(evidence) + failure!.message + readFileSync(evidence.log, 'utf8');
+  for (const piece of [secret, secret.slice(0, 12)])
+    assert.ok(!stored.includes(piece), `нигде нет «${piece}»`);
 });
