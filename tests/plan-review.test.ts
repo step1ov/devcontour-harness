@@ -465,3 +465,90 @@ test('S2-R3-01/T25/T26: прежняя запись вызова о группе
   assert.equal(requests.length, 1);
   again.close();
 });
+
+test('S3-R1-03: раунды хоста до harness — история первого раунда движка: прежние находки в запросе, нумерация продолжается, без выдуманного одобрения', async () => {
+  const { technicalReview } = await import('../src/control/review.ts');
+  const { findingId } = await import('../src/contracts/review.ts');
+  const prompts: string[] = [];
+  let output: unknown;
+  const adapter = (runtime: RuntimeName): RuntimeAdapter => ({
+    runtime,
+    capabilities: () => Promise.resolve({ runtime, available: true } as any),
+    invoke: (request) => {
+      prompts.push(request.prompt);
+      return Promise.resolve({
+        status: 'ok',
+        text: '',
+        model: null,
+        runtimeVersion: 'controlled',
+        output,
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reportedUsd: 0,
+          complete: true,
+          source: 'claude-result',
+        },
+        diagnostics: { exitCode: 0 },
+      });
+    },
+  });
+  const adapters = { codex: adapter('codex'), claude: adapter('claude') };
+  const policy = policyOf();
+  const { h, stateDir } = open(policy, adapters);
+  const legacy = { severity: 'blocking' as const, message: 'Legacy finding must survive' };
+  const id = findingId('g', legacy);
+  const round = (digestChar: string, history?: Parameters<typeof technicalReview>[3]['history']) =>
+    technicalReview(h.engine, policy, adapters, {
+      kind: 'plan',
+      subject: 'g',
+      digest: digestChar.repeat(64),
+      author: 'claude',
+      instructions: ['Review the plan.'],
+      cwd: process.cwd(),
+      artifactDir: join(stateDir, 'r-' + digestChar),
+      denied: [stateDir],
+      meta: { subjectId: 'g', subjectKind: 'other' },
+      ...(history ? { history } : {}),
+    });
+  // Ответ без состояния прежней находки не одобряет предмет.
+  output = { approved: true, summary: 'ok', findings: [], previous: [] };
+  const silent = await round('a', { rounds: 2, findings: [legacy] });
+  assert.equal(silent.round, 3, 'нумерация продолжает раунды хоста');
+  assert.equal(silent.approved, false, 'прежняя находка без состояния — не одобрение');
+  assert.match(prompts[0]!, /Legacy finding must survive/);
+  assert.match(prompts[0]!, /round 3/);
+  const carried = silent.findings.find((f) => f.id === id)!;
+  assert.deepEqual(
+    { status: carried.status, openedIn: carried.openedIn },
+    { status: 'open', openedIn: 2 },
+  );
+  // Дальше история движка: находка остаётся, история хоста больше не учитывается.
+  output = {
+    approved: true,
+    summary: 'ok',
+    findings: [],
+    previous: [{ id, status: 'closed', basis: 'Addressed in the plan' }],
+  };
+  const next = await round('b', { rounds: 9, findings: [] });
+  assert.equal(next.round, 4);
+  assert.equal(next.approved, true);
+  assert.match(prompts[1]!, /Legacy finding must survive/);
+  const closed = next.findings.find((f) => f.id === id)!;
+  assert.deepEqual(
+    { status: closed.status, openedIn: closed.openedIn, changedIn: closed.changedIn },
+    { status: 'closed', openedIn: 2, changedIn: 4 },
+  );
+  assert.deepEqual(
+    h.engine.reviews('plan', 'g').map((r) => r.round),
+    [3, 4],
+  );
+  // Номер вне последовательности движок не записывает.
+  assert.throws(
+    () => h.engine.recordReview({ ...next, id: 'RV-plan-g-9', round: 9 }),
+    refused('INVALID_INPUT'),
+  );
+  h.close();
+});

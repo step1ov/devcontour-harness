@@ -384,4 +384,12 @@ export interface ExecutionHost {
   contracts?: ContractApprovals;
   /** Версия потребителя (например, DevContour); записывается в попытку рядом с версией движка. */
   consumerVersion?: string;
+  /**
+   * Когда поручение стало готово к выдаче (согласовано и дождалось
+   * зависимостей) — по сведениям хоста, например с учётом результатов,
+   * полученных из другого clone. Записывается в `wait.readyAt` новой попытки в
+   * транзакции выдачи; нет порта или `undefined` — время неизвестно и не
+   * выдумывается.
+   */
+  readyAt?(work: WorkState, view: ExecutionView): string | undefined;
 }

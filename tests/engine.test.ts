@@ -3,9 +3,13 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { HarnessError, digestOf, type ErrorCode } from '../src/contracts/index.ts';
 import { Engine } from '../src/engine/engine.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
+import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import {
   engineOf,
   graphOf,
@@ -645,4 +649,29 @@ test('T14: повторная пауза человека — новое реш�
     engine.read((v) => v.control().pausedAt),
     stopped,
   );
+});
+
+test('S3-R1-05: время готовности поручения от хоста записывается в новую попытку при выдаче; без порта — не выдумывается', () => {
+  const policy = policyOf();
+  const dir = mkdtempSync(join(tmpdir(), 'harness-engine-'));
+  const store = new SqliteExecutionStore(join(dir, 'state.sqlite'), 'test');
+  const asked: string[] = [];
+  const host = {
+    ...standaloneHost(store, policy),
+    readyAt: (work: { id: string }) => {
+      asked.push(work.id);
+      return '2026-01-01T00:00:05.000Z';
+    },
+  };
+  const engine = new Engine({ host, policy, now: () => Date.parse('2026-01-01T00:00:10.000Z') });
+  ready(engine, graphOf({ a: [] }));
+  const attempt = engine.claim('c1')!;
+  assert.deepEqual(asked, ['a']);
+  assert.equal(attempt.wait?.readyAt, '2026-01-01T00:00:05.000Z');
+  assert.equal(engine.read((v) => v.attempt(attempt.id))?.wait?.readyAt, attempt.wait?.readyAt);
+  const plain = engineOf();
+  ready(plain.engine, graphOf({ a: [] }));
+  const other = plain.engine.claim('c1')!;
+  assert.ok(other.wait?.approvedAt);
+  assert.equal(other.wait?.readyAt, undefined);
 });

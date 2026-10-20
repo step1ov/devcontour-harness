@@ -316,7 +316,12 @@ export class Engine {
    * `document` — документ контракта, который ревью рассматривало: он
    * сохраняется по своему digest, и из него движок берёт договор проверки.
    */
-  recordReview(record: ReviewRecord, document?: ContractDocument) {
+  /**
+   * `historyRounds` — раунды предмета, проведённые хостом до harness
+   * (`TechnicalReviewInput.history`): первый раунд движка следует за ними, и
+   * дальше нумерация идёт подряд от него.
+   */
+  recordReview(record: ReviewRecord, document?: ContractDocument, historyRounds = 0) {
     if (document && (record.kind !== 'contract' || digestOf(document) !== record.digest))
       throw new HarnessError('INVALID_INPUT', 'Документ не соответствует ревью контракта');
     return this.tx('graph.reviewed', (tx) => {
@@ -325,10 +330,13 @@ export class Engine {
         .locals('reviews', WORKSPACE_OWNER)
         .map((r) => r.value)
         .filter((r) => r.kind === record.kind && r.subject === record.subject);
-      if (record.round !== previous.length + 1)
+      const offset = previous.length
+        ? Math.min(...previous.map((r) => r.round)) - 1
+        : historyRounds;
+      if (record.round !== offset + previous.length + 1)
         throw new HarnessError(
           'INVALID_INPUT',
-          `Раунд ${record.round} не следует за ${previous.length}`,
+          `Раунд ${record.round} не следует за ${offset + previous.length}`,
         );
       tx.putLocal('reviews', WORKSPACE_OWNER, record.id, record);
       tx.emit({
@@ -947,6 +955,7 @@ export class Engine {
         attempt: w.attempt,
       }));
       const at = this.now();
+      const ready = work.approvedAt ? this.host.readyAt?.(work, tx) : undefined;
       const attempt: AttemptState = {
         id: this.id(),
         workId: work.id,
@@ -994,7 +1003,14 @@ export class Engine {
           concurrency: this.policy.concurrency,
           inputDigest: digestOf(candidates),
         },
-        ...(work.approvedAt ? { wait: { approvedAt: work.approvedAt } } : {}),
+        ...(work.approvedAt
+          ? {
+              wait: {
+                approvedAt: work.approvedAt,
+                ...(ready ? { readyAt: ready } : {}),
+              },
+            }
+          : {}),
         engineVersion: this.version,
         ...(this.host.consumerVersion ? { consumerVersion: this.host.consumerVersion } : {}),
         // Версия проверок закрепляется при выдаче: принятие нового корпуса

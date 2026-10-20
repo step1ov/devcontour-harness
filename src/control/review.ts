@@ -64,6 +64,17 @@ export interface TechnicalReviewInput {
   meta: Omit<CallMeta, 'stage'> & { stage?: string };
   /** Предел раундов предмета; нет — без предела. */
   maxRounds?: number;
+  /**
+   * Раунды предмета, которые хост провёл до harness и хранит сам. Учитываются,
+   * только пока у предмета нет раундов в движке: нумерация продолжается после
+   * них, а находки последнего из них — прежние открытые находки, состояние
+   * которых reviewer обязан назвать. Это история, а не одобрение: у прежних
+   * раундов нет digest, назначения и PASS, и ничего из этого не выводится.
+   */
+  history?: {
+    rounds: number;
+    findings: { severity: 'blocking' | 'note'; message: string; rule?: string }[];
+  };
   /** Источник значений окружения (по умолчанию `process.env`). */
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
@@ -79,6 +90,25 @@ export async function technicalReview(
   const contextKey = context ? contextDigest(context) : undefined;
   const rounds = engine.reviews(kind, subject);
   const last = rounds.at(-1);
+  const prior = rounds.length ? undefined : input.history;
+  // Раунды подряд: последний номер — число проведённых, с прежними хоста.
+  const before = last ? last.round : (prior?.rounds ?? 0);
+  // Находки последнего раунда: движка или, до первого раунда в нём, прежнего хоста.
+  const lastFindings: ReviewRecord['findings'] =
+    last?.findings ??
+    (prior?.rounds
+      ? prior.findings.map((f) => ({
+          id: findingId(subject, f),
+          severity: f.severity,
+          message: f.message.slice(0, 12000),
+          ...(f.rule ? { rule: f.rule.slice(0, 200) } : {}),
+          path: null,
+          line: null,
+          status: 'open' as const,
+          openedIn: prior.rounds,
+          changedIn: prior.rounds,
+        }))
+      : []);
   // Назначение reviewer по текущей политике: прежний раунд подтверждает предмет
   // только при том же назначении; недопустимый автор — отказ до вызова.
   const choice = selectReviewer(policy, kind, { runtime: input.author });
@@ -93,7 +123,7 @@ export async function technicalReview(
     last.contextDigest === contextKey
   )
     return last;
-  if (input.maxRounds !== undefined && rounds.length >= input.maxRounds)
+  if (input.maxRounds !== undefined && before >= input.maxRounds)
     throw new HarnessError('ATTEMPTS_EXHAUSTED', `Исчерпаны раунды ревью ${kind} ${subject}`);
   const adapter = adapters[choice.reviewer.runtime];
   if (!adapter)
@@ -101,8 +131,8 @@ export async function technicalReview(
       'RUNTIME_UNAVAILABLE',
       'Runtime не подключён: ' + choice.reviewer.runtime,
     );
-  const open = (last?.findings ?? []).filter((f) => f.status === 'open');
-  const round = rounds.length + 1;
+  const open = lastFindings.filter((f) => f.status === 'open');
+  const round = before + 1;
   const dir = input.artifactDir;
   await mkdir(dir, { recursive: true });
   const repo =
@@ -184,7 +214,7 @@ export async function technicalReview(
   const issues = parsed.success ? reviewIssues(parsed.data, open) : ['Ответ ревью вне схемы'];
   const transitions = new Map((parsed.success ? parsed.data.previous : []).map((t) => [t.id, t]));
   const findings: ReviewRecord['findings'] = [
-    ...(last?.findings ?? []).map((f) => {
+    ...lastFindings.map((f) => {
       const t = transitions.get(f.id);
       return f.status === 'open' && t
         ? { ...f, status: t.status, changedIn: round, basis: t.basis.slice(0, 4000) }
@@ -192,7 +222,7 @@ export async function technicalReview(
     }),
     ...(parsed.success ? parsed.data.findings : [])
       .map((f) => ({ ...f, id: findingId(subject, f) }))
-      .filter((f) => !(last?.findings ?? []).some((p) => p.id === f.id))
+      .filter((f) => !lastFindings.some((p) => p.id === f.id))
       .map((f) => ({
         id: f.id,
         severity: f.severity,
@@ -249,5 +279,9 @@ export async function technicalReview(
     engine.host.store.transact('run.context', (tx) =>
       tx.putLocal('context-snapshots', WORKSPACE_OWNER, contextKey, context),
     );
-  return engine.recordReview(redactDeep(record, execution.redact), input.contract);
+  return engine.recordReview(
+    redactDeep(record, execution.redact),
+    input.contract,
+    prior?.rounds ?? 0,
+  );
 }
