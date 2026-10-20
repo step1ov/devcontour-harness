@@ -245,7 +245,10 @@ export class Harness {
     const context =
       input.kind === 'plan' ? this.planContext(input.graph, input.context) : undefined;
     const repo = this.policy.repositories[0]!;
-    const round = this.engine.reviews(input.kind, subject).length + 1;
+    // Номер следующего раунда — от последнего записанного, а не от числа записей:
+    // раунды хоста до harness сдвигают нумерацию, и каталог по числу записей
+    // совпал бы с каталогом прежнего раунда.
+    const round = (this.engine.reviews(input.kind, subject).at(-1)?.round ?? 0) + 1;
     return technicalReview(this.engine, this.policy, this.adapters, {
       kind: input.kind,
       subject,

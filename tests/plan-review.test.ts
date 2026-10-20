@@ -552,3 +552,61 @@ test('S3-R1-03: раунды хоста до harness — история перв
   );
   h.close();
 });
+
+test('S3-R2-01: после раундов хоста Harness.review пишет каждый раунд в свой каталог и не меняет артефакт прежнего', async () => {
+  const { technicalReview } = await import('../src/control/review.ts');
+  const { workGraphDigest } = await import('../src/contracts/work.ts');
+  const { readFileSync } = await import('node:fs');
+  let calls = 0;
+  const adapter = (runtime: RuntimeName): RuntimeAdapter => ({
+    runtime,
+    capabilities: () => Promise.resolve({ runtime, available: true } as any),
+    invoke: () => {
+      calls++;
+      return Promise.resolve({
+        status: 'ok',
+        text: '',
+        model: null,
+        runtimeVersion: 'controlled',
+        // Отказ: успешное ревью того же основания сократило бы вызовы.
+        output: { approved: false, summary: `response ${calls}`, findings: [], previous: [] },
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reportedUsd: 0,
+          complete: true,
+          source: 'claude-result',
+        },
+        diagnostics: { exitCode: 0 },
+      });
+    },
+  });
+  const adapters = { codex: adapter('codex'), claude: adapter('claude') };
+  const policy = policyOf();
+  const { h, stateDir } = open(policy, adapters);
+  const graph = graphOf({ a: [] });
+  // Первый раунд движка после двух раундов хоста — в каталоге по обычному имени.
+  const first = await technicalReview(h.engine, policy, adapters, {
+    kind: 'plan',
+    subject: graph.id,
+    digest: workGraphDigest(graph),
+    author: 'claude',
+    instructions: ['Review the plan.'],
+    cwd: process.cwd(),
+    artifactDir: join(stateDir, 'reviews', `plan-${graph.id}-3`),
+    denied: [stateDir],
+    meta: { subjectId: graph.id, subjectKind: 'group' },
+    history: { rounds: 2, findings: [] },
+  });
+  const original = readFileSync(first.artifact, 'utf8');
+  const second = await h.review({ kind: 'plan', graph, author: 'claude' });
+  const third = await h.review({ kind: 'plan', graph, author: 'claude' });
+  assert.deepEqual([first.round, second.round, third.round], [3, 4, 5]);
+  const paths = [first, second, third].map((r) => r.artifact);
+  assert.equal(new Set(paths).size, 3, `каждый раунд — свой артефакт: ${paths.join(', ')}`);
+  assert.match(second.artifact, new RegExp(`plan-${graph.id}-4`));
+  assert.equal(readFileSync(first.artifact, 'utf8'), original, 'артефакт раунда 3 не изменён');
+  h.close();
+});
