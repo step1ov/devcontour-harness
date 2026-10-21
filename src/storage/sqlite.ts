@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
   API_VERSION,
@@ -23,6 +23,25 @@ import {
 } from '../contracts/index.ts';
 import { DocumentView, emptyDocument } from './document.ts';
 
+/**
+ * Строгая схема: поле, которого эта версия не знает (например, записанное
+ * более новой версией), — отказ до любой записи и выдачи, а не молчаливая
+ * потеря при перезаписи документа.
+ */
+function parseDocument(data: string): ExecutionDocument {
+  const parsed = executionDocumentSchema.safeParse(JSON.parse(data));
+  if (!parsed.success)
+    throw new HarnessError(
+      'STATE_VERSION_UNSUPPORTED',
+      'Состояние не соответствует формату этой версии пакета (возможно, его записала более новая версия): обновите пакет или восстановите согласованную копию',
+      parsed.error.issues.slice(0, 20).map((i) => ({
+        path: i.path.filter((k): k is string | number => typeof k !== 'symbol'),
+        message: i.message,
+      })),
+    );
+  return parsed.data;
+}
+
 /** Сколько событий одной транзакции допускается (договор курсора адаптеров). */
 const MAX_EVENTS_PER_TRANSACTION = 1024;
 
@@ -45,35 +64,33 @@ interface Frame {
  */
 export class SqliteExecutionStore implements ExecutionStore {
   readonly stateVersion = STATE_VERSION;
-  private db: DatabaseSync;
+  private db!: DatabaseSync;
   private frame?: Frame;
   private savepoint = 0;
 
   constructor(
     readonly file: string,
     readonly writer: string,
+    readonly options: { readOnly?: boolean } = {},
   ) {
+    // Существующее состояние сначала проверяется целиком через отдельное
+    // соединение только для чтения: версия формата и документ строгой схемой.
+    // Несовместимый вход отклоняется до DDL, записи автора и смены journal
+    // mode — файл остаётся байт в байт прежним.
+    const existing = file !== ':memory:' && existsSync(file) && statSync(file).size > 0;
+    if (existing) SqliteExecutionStore.preflight(file);
+    else if (options.readOnly)
+      throw new HarnessError('STATE_VERSION_UNSUPPORTED', 'Состояние не найдено');
+    if (options.readOnly) {
+      // Диагностическое открытие: ни автор, ни PRAGMA, ни схема не меняются.
+      this.db = new DatabaseSync(file, { readOnly: true });
+      this.db.exec('PRAGMA busy_timeout=20000;');
+      return;
+    }
     if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
     this.db = new DatabaseSync(file);
-    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=20000; PRAGMA synchronous=FULL;');
     try {
-      const meta = this.db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'")
-        .get();
-      if (meta) {
-        const row = this.db.prepare("SELECT value FROM meta WHERE key='stateVersion'").get() as
-          { value: string } | undefined;
-        const version = Number(row?.value);
-        if (!(SUPPORTED_STATE_VERSIONS as readonly number[]).includes(version))
-          throw new HarnessError(
-            'STATE_VERSION_UNSUPPORTED',
-            `Формат состояния ${row?.value ?? 'неизвестен'} не поддерживается этой версией (${SUPPORTED_STATE_VERSIONS.join(', ')})`,
-          );
-      } else if (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().length)
-        throw new HarnessError(
-          'STATE_VERSION_UNSUPPORTED',
-          'Файл содержит чужую базу, а не состояние harness',
-        );
+      this.db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=20000; PRAGMA synchronous=FULL;');
       this.db.exec(`BEGIN IMMEDIATE;
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL);
@@ -94,22 +111,47 @@ export class SqliteExecutionStore implements ExecutionStore {
     }
   }
 
+  /** Проверка существующего файла без единой записи; отказ — HarnessError. */
+  private static preflight(file: string) {
+    const db = new DatabaseSync(file, { readOnly: true });
+    try {
+      db.exec('PRAGMA busy_timeout=20000;');
+      const tables = new Set(
+        (
+          db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as {
+            name: string;
+          }[]
+        ).map((t) => t.name),
+      );
+      if (!tables.has('meta')) {
+        if (tables.size)
+          throw new HarnessError(
+            'STATE_VERSION_UNSUPPORTED',
+            'Файл содержит чужую базу, а не состояние harness',
+          );
+        return;
+      }
+      const row = db.prepare("SELECT value FROM meta WHERE key='stateVersion'").get() as
+        { value: string } | undefined;
+      const version = Number(row?.value);
+      if (!(SUPPORTED_STATE_VERSIONS as readonly number[]).includes(version))
+        throw new HarnessError(
+          'STATE_VERSION_UNSUPPORTED',
+          `Формат состояния ${row?.value ?? 'неизвестен'} не поддерживается этой версией (${SUPPORTED_STATE_VERSIONS.join(', ')})`,
+        );
+      if (tables.has('state')) {
+        const state = db.prepare('SELECT data FROM state WHERE id=1').get() as
+          { data: string } | undefined;
+        if (state) parseDocument(state.data);
+      }
+    } finally {
+      db.close();
+    }
+  }
+
   private load(): ExecutionDocument {
     const row = this.db.prepare('SELECT data FROM state WHERE id=1').get() as { data: string };
-    const parsed = executionDocumentSchema.safeParse(JSON.parse(row.data));
-    // Строгая схема: поле, которого эта версия не знает (например, записанное
-    // более новой версией), — отказ до любой записи и выдачи, а не молчаливая
-    // потеря при перезаписи документа.
-    if (!parsed.success)
-      throw new HarnessError(
-        'STATE_VERSION_UNSUPPORTED',
-        'Состояние не соответствует формату этой версии пакета (возможно, его записала более новая версия): обновите пакет или восстановите согласованную копию',
-        parsed.error.issues.slice(0, 20).map((i) => ({
-          path: i.path.filter((k): k is string | number => typeof k !== 'symbol'),
-          message: i.message,
-        })),
-      );
-    return parsed.data;
+    return parseDocument(row.data);
   }
 
   read<T>(fn: (view: ExecutionView) => NotPromise<T>): T {
@@ -126,6 +168,8 @@ export class SqliteExecutionStore implements ExecutionStore {
   }
 
   transact<T>(kind: TransactionKind, fn: (tx: ExecutionTransaction) => NotPromise<T>): T {
+    if (this.options.readOnly)
+      throw new HarnessError('STATE_VERSION_UNSUPPORTED', 'Состояние открыто только для чтения');
     const outer = this.frame;
     const point = 'harness_' + ++this.savepoint;
     this.db.exec(outer ? `SAVEPOINT ${point}` : 'BEGIN IMMEDIATE');

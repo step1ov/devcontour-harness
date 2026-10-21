@@ -61,22 +61,15 @@ test('Поле состояния, которого версия не знает
   db.prepare('UPDATE state SET data=? WHERE id=1').run(JSON.stringify(doc));
   const before = (db.prepare('SELECT data FROM state').get() as { data: string }).data;
   db.close();
-  const store = new SqliteExecutionStore(file, 'test');
   const unsupported = (e: unknown) =>
     e instanceof HarnessError &&
     e.code === 'STATE_VERSION_UNSUPPORTED' &&
     e.issues.some((i) => i.path.includes('controller'));
-  assert.throws(() => store.read((v) => v.controller()), unsupported);
-  assert.throws(
-    () => store.transact('heartbeat', (tx) => tx.setController(undefined)),
-    unsupported,
-  );
-  assert.throws(
-    () => store.transact('heartbeat', (tx) => tx.setController(undefined)),
-    unsupported,
-    'повторная транзакция — тот же отказ, а не «транзакция уже открыта»',
-  );
-  store.close();
+  // Отказ — уже при открытии, до записи автора и схемы; повторное открытие —
+  // тот же отказ. Отказ транзакции над документом, испорченным после
+  // открытия, и отсутствие зависшего BEGIN — в state-open.test.ts.
+  assert.throws(() => new SqliteExecutionStore(file, 'test'), unsupported);
+  assert.throws(() => new SqliteExecutionStore(file, 'test'), unsupported);
   const after = new DatabaseSync(file);
   assert.equal((after.prepare('SELECT data FROM state').get() as { data: string }).data, before);
   after.close();

@@ -721,3 +721,43 @@ test('Роль controller записывает версию движка; жив
   );
   engine.release('c1');
 });
+
+test('S4-R1-02: движок другой версии не продолжает активную попытку прежним token до истечения срока', () => {
+  const { engine: newer, store, clock } = engineOf();
+  const older = new Engine({
+    host: standaloneHost(store, policyOf()),
+    policy: policyOf(),
+    now: () => clock.now,
+    version: '0.0.1-older',
+  });
+  ready(older, graphOf({ a: [] }));
+  assert.equal(older.lead('c1'), true);
+  const a = older.claim('c1')!;
+  assert.equal(a.engineVersion, '0.0.1-older');
+  const before = () => JSON.stringify(newer.read((v) => v.attempt(a.id)));
+  const snapshot = before();
+  // Срок попытки и роли не истёк; новая версия не получила роль.
+  assert.equal(newer.lead('c1'), false);
+  for (const op of [
+    () => newer.heartbeat(a.id, a.token),
+    () => newer.phase(a.id, a.token, 'verifying', { candidateSha: sha('a') }),
+    () => newer.finish(a.id, a.token, sha('a')),
+    () => newer.fail(a.id, a.token, 'чужая версия'),
+  ])
+    assert.throws(op, refused('LEASE_STALE'));
+  assert.equal(newer.heartbeatFailed(a.id, a.token, 'x'), false);
+  assert.equal(before(), snapshot, 'попытка прежней версии изменена новым движком');
+  // Своя версия по-прежнему ведёт попытку.
+  older.heartbeat(a.id, a.token);
+  // Запись без версии (до появления поля) тоже не продолжается новым движком.
+  store.transact('heartbeat', (tx) => {
+    const legacy = { ...tx.attempt(a.id)! };
+    delete legacy.engineVersion;
+    tx.putAttempt(legacy);
+  });
+  assert.throws(() => newer.heartbeat(a.id, a.token), refused('LEASE_STALE'));
+  // Восстановление — только истечением и новой попыткой с новым владением.
+  clock.now += 3_600_000;
+  newer.expire();
+  assert.equal(newer.read((v) => v.attempt(a.id))?.status, 'expired');
+});

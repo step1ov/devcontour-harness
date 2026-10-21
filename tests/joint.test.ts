@@ -468,3 +468,34 @@ fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase name=
   assert.equal(ctx.engine.jointResult(set, v.id).current, true);
   assert.match(ctx.engine.jointResult(['other'], v.id).reason ?? '', /другому набору/);
 });
+
+test('S4-R1-02: совместную проверку, начатую движком другой версии, новая версия не продолжает её token', () => {
+  const policy = policyOf((p: any) => {
+    p.workspaceGates = [workspaceGate('combo', 'app')];
+  });
+  const { engine, clock, dir } = engineOf(policy);
+  ready(engine, graphOf({ a: [] }));
+  accept(engine, { a: sha('1') });
+  const v = engine.jointStart({ workIds: ['a'] });
+  assert.equal(
+    engine.read((x) => x.verification(v.id)?.engineVersion),
+    engine.version,
+  );
+  const newer = new Engine({
+    host: standaloneHost(new SqliteExecutionStore(join(dir, 'state.sqlite'), 't'), policy),
+    policy,
+    now: () => clock.now,
+    version: '9.9.9-newer',
+  });
+  assert.throws(() => newer.jointHeartbeat(v.id, v.token), refused('LEASE_STALE', /версии|движок/));
+  assert.throws(
+    () => newer.jointManifest(v.id, v.token, manifestOf(policy)),
+    refused('LEASE_STALE'),
+  );
+  assert.equal(newer.jointFail(v.id, v.token, 'чужая версия'), false);
+  assert.equal(
+    engine.read((x) => x.verification(v.id)?.status),
+    'active',
+  );
+  engine.jointHeartbeat(v.id, v.token);
+});

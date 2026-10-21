@@ -1112,6 +1112,14 @@ export class Engine {
         work.activeRunId !== attempt.id
       )
         throw new HarnessError('LEASE_STALE', 'Устаревшая попытка: владение утрачено');
+      // Попытку ведёт только движок той версии, что её выдал. Прежняя (или
+      // без версии, записанная до неё) не продолжается новой прежним token:
+      // только истечение и recovery с новым владением.
+      if (attempt.engineVersion !== this.version)
+        throw new HarnessError(
+          'LEASE_STALE',
+          `Попытку выдал движок ${attempt.engineVersion ?? 'прежней версии'}, а работает ${this.version}: продолжение прежним token запрещено, нужна новая попытка`,
+        );
       if (attempt.policyDigest !== this.host.basis.policyDigest(work, tx))
         throw new HarnessError('APPROVAL_STALE', 'Политика изменилась; нужна новая попытка');
       const refusal = this.host.guards.current(work, attempt, tx);
@@ -1130,7 +1138,12 @@ export class Engine {
   heartbeatFailed(id: string, token: string, reason: string) {
     return this.tx('run.heartbeat-failed', (tx) => {
       const a = tx.attempt(id);
-      if (a?.status !== 'active' || a.token !== token || a.error?.startsWith(HEARTBEAT_FAILED))
+      if (
+        a?.status !== 'active' ||
+        a.token !== token ||
+        a.engineVersion !== this.version ||
+        a.error?.startsWith(HEARTBEAT_FAILED)
+      )
         return false;
       tx.putAttempt({ ...a, error: `${HEARTBEAT_FAILED}: ${reason.slice(0, 500)}` });
       return true;
@@ -2304,6 +2317,7 @@ export class Engine {
         apiVersion: 'devcontour-harness/v1alpha1',
         id: this.id(),
         token: this.id() + this.id(),
+        engineVersion: this.version,
         startedAt: iso(at),
         leaseUntil: at + this.policy.leaseMs,
         status: 'active',
@@ -2348,6 +2362,11 @@ export class Engine {
       const v = tx.verification(id);
       if (!v || v.status !== 'active' || v.token !== token || v.leaseUntil <= this.now())
         throw new HarnessError('LEASE_STALE', 'Устаревшая попытка совместной проверки');
+      if (v.engineVersion !== this.version)
+        throw new HarnessError(
+          'LEASE_STALE',
+          `Совместную проверку начал движок ${v.engineVersion ?? 'прежней версии'}, а работает ${this.version}: нужна новая проверка`,
+        );
 
       if (
         v.policyDigest !== this.jointPolicy(tx) ||
@@ -2441,7 +2460,8 @@ export class Engine {
   jointFail(id: string, token: string, error: string) {
     return this.tx('workspace.failed', (tx) => {
       const v = tx.verification(id);
-      if (!v || v.status !== 'active' || v.token !== token) return false;
+      if (!v || v.status !== 'active' || v.token !== token || v.engineVersion !== this.version)
+        return false;
       const message = error.slice(0, 4000) || 'Совместная проверка не прошла';
       tx.putVerification({ ...v, status: 'failed', error: message, finishedAt: iso(this.now()) });
       tx.emit({

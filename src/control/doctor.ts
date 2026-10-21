@@ -52,6 +52,8 @@ export async function doctor(
       const store = new SqliteExecutionStore(
         join(stateDir, 'state.sqlite'),
         'devcontour-harness@' + HARNESS_VERSION,
+        // Диагностика не становится писателем: автор, PRAGMA и данные прежние.
+        { readOnly: true },
       );
       let engineVersions;
       try {

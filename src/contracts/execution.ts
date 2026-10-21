@@ -943,7 +943,12 @@ export type LocalValue<N extends LocalNamespace> = z.infer<(typeof localSchemas)
  * Совместная проверка в состоянии: результат и владение ею. Токен и срок
  * владения наружу не выдаются (`JointVerification` их не содержит).
  */
-const ownership = { token: z.string().min(16).max(200), leaseUntil: z.number().int().min(0) };
+const ownership = {
+  token: z.string().min(16).max(200),
+  leaseUntil: z.number().int().min(0),
+  /** Версия движка, начавшего проверку: другая версия её не продолжает. */
+  engineVersion: z.string().min(1).max(100).optional(),
+};
 export const jointVerificationStateSchema = z.discriminatedUnion('status', [
   jointActiveSchema.extend(ownership),
   jointFailedSchema.extend(ownership),
