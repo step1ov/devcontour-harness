@@ -470,6 +470,32 @@ test('S1-R1-07/T04: работающий controller продлевает рол�
   h.close();
 });
 
+test('run при живой роли controller другой версии движка — CONTROLLER_BUSY с обеими версиями; выдачи нет', async () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const other = new Engine({
+    host: standaloneHost(new SqliteExecutionStore(ctx.statePath, 'other'), ctx.policy),
+    policy: ctx.policy,
+    version: '0.0.1-older',
+  });
+  assert.equal(other.lead('older-controller'), true);
+  const h = ctx.open();
+  await assert.rejects(
+    h.run({ graph: ctx.graph, author: 'claude' }),
+    (e: unknown) =>
+      refused('CONTROLLER_BUSY')(e) &&
+      (e as Error).message.includes('0.0.1-older') &&
+      (e as Error).message.includes(h.engine.version),
+  );
+  assert.equal(
+    h.engine.read((v) => v.attempts().length),
+    0,
+  );
+  assert.equal(ctx.calls('claude', 'writer'), 0);
+  other.release('older-controller');
+  other.host.store.close();
+  h.close();
+});
+
 test('S1-R2-03: run при действующей чужой роли controller — явный CONTROLLER_BUSY; чужая роль сохранена, выдачи нет', async () => {
   const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
   const other = new Engine({

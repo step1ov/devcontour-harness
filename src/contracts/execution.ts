@@ -562,6 +562,12 @@ export type ControlState = z.infer<typeof controlStateSchema>;
 export const controllerLeaseSchema = z.strictObject({
   owner: z.string().min(1).max(300),
   leaseUntil: z.number().int().min(0),
+  /**
+   * Версия движка, под которой процесс держит роль. Живую роль другой версии
+   * (или роль без версии, записанную прежним движком) процесс не перенимает:
+   * попытки прежней версии не продолжаются незаметно под новой.
+   */
+  engineVersion: z.string().min(1).max(100).optional(),
 });
 export type ControllerLease = z.infer<typeof controllerLeaseSchema>;
 

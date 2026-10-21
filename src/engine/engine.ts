@@ -15,6 +15,7 @@ import {
   vendorOf,
   workGraphDigest,
   type AttemptState,
+  type ControllerLease,
   type Author,
   type CallRecord,
   type ContractDocument,
@@ -515,14 +516,36 @@ export class Engine {
   /* Controller и очередь                                              */
   /* ---------------------------------------------------------------- */
 
+  /**
+   * Роль принадлежит этому процессу: тот же владелец и та же версия движка
+   * (роль прежней версии под тем же именем держит другой процесс); живая,
+   * если не `expired`.
+   */
+  private mine(lease: ControllerLease | undefined, owner: string | undefined, expired = false) {
+    return (
+      !!lease &&
+      lease.owner === owner &&
+      lease.engineVersion === this.version &&
+      (expired || lease.leaseUntil > this.now())
+    );
+  }
+
   /** Захват или продление роли единственного controller. */
   lead(owner: string): boolean {
     let acquired = false;
     const result = this.tx('heartbeat', (tx) => {
       const lease = tx.controller();
-      if (lease && lease.owner !== owner && lease.leaseUntil > this.now()) return false;
-      acquired = !lease || lease.owner !== owner || lease.leaseUntil <= this.now();
-      tx.setController({ owner, leaseUntil: this.now() + this.policy.leaseMs });
+      const live = !!lease && lease.leaseUntil > this.now();
+      if (live && lease.owner !== owner) return false;
+      // Живая роль другой версии движка — другой процесс, даже под тем же
+      // именем владельца: роль переходит только после истечения срока.
+      if (live && lease.engineVersion !== this.version) return false;
+      acquired = !live || lease.owner !== owner;
+      tx.setController({
+        owner,
+        leaseUntil: this.now() + this.policy.leaseMs,
+        engineVersion: this.version,
+      });
       return true;
     });
     if (result) this.ownLeader = owner;
@@ -537,7 +560,8 @@ export class Engine {
 
   release(owner: string) {
     return this.tx('scheduler.released', (tx) => {
-      if (tx.controller()?.owner !== owner) return false;
+      // Роль прежней версии под тем же именем держит другой процесс.
+      if (!this.mine(tx.controller(), owner, true)) return false;
       tx.setController(undefined);
       tx.emit({ type: 'controller.released', payload: { owner } });
       return true;
@@ -875,7 +899,7 @@ export class Engine {
   claim(owner: string): AttemptState | undefined {
     return this.tx('run.claimed', (tx) => {
       const lease = tx.controller();
-      if (!lease || lease.owner !== owner || lease.leaseUntil <= this.now())
+      if (!this.mine(lease, owner))
         throw new HarnessError(
           'CONTROLLER_BUSY',
           'Выдавать попытки может только действующий controller',
@@ -1806,7 +1830,7 @@ export class Engine {
    */
   private mayAdopt(view: ExecutionView): string | undefined {
     const lease = view.controller();
-    if (lease && lease.leaseUntil > this.now() && lease.owner !== this.ownLeader)
+    if (lease && lease.leaseUntil > this.now() && !this.mine(lease, this.ownLeader))
       return `работает controller ${lease.owner} с другой политикой`;
     if (policyDigest(this.policy) !== this.loadedContent)
       return 'политика изменена в памяти после загрузки';
@@ -1874,7 +1898,7 @@ export class Engine {
   recordPolicy(owner: string) {
     this.tx('config.started', (tx) => {
       const lease = tx.controller();
-      if (lease?.owner !== owner || lease.leaseUntil <= this.now()) return;
+      if (!this.mine(lease, owner)) return;
       const applied = tx.control().appliedPolicy;
       if (applied?.digest === this.loadedPolicy) return;
       if (applied && this.mayAdopt(tx)) return;

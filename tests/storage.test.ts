@@ -47,3 +47,37 @@ test('Неизвестная версия формата и чужая база 
   writeFileSync(join(dir, 'garbage.sqlite'), 'not a database');
   assert.throws(() => new SqliteExecutionStore(join(dir, 'garbage.sqlite'), 'test'));
 });
+
+test('Поле состояния, которого версия не знает, — отказ до записи и выдачи; транзакция не остаётся открытой', () => {
+  const dir = temp();
+  const file = join(dir, 'state.sqlite');
+  new SqliteExecutionStore(file, 'test').close();
+  const db = new DatabaseSync(file);
+  const doc = JSON.parse(
+    (db.prepare('SELECT data FROM state').get() as { data: string }).data,
+  ) as Record<string, unknown>;
+  // Роль controller более новой версии с полем, которого эта версия не знает.
+  doc.controller = { owner: 'c1', leaseUntil: 1, engineVersion: 'x', futureField: true };
+  db.prepare('UPDATE state SET data=? WHERE id=1').run(JSON.stringify(doc));
+  const before = (db.prepare('SELECT data FROM state').get() as { data: string }).data;
+  db.close();
+  const store = new SqliteExecutionStore(file, 'test');
+  const unsupported = (e: unknown) =>
+    e instanceof HarnessError &&
+    e.code === 'STATE_VERSION_UNSUPPORTED' &&
+    e.issues.some((i) => i.path.includes('controller'));
+  assert.throws(() => store.read((v) => v.controller()), unsupported);
+  assert.throws(
+    () => store.transact('heartbeat', (tx) => tx.setController(undefined)),
+    unsupported,
+  );
+  assert.throws(
+    () => store.transact('heartbeat', (tx) => tx.setController(undefined)),
+    unsupported,
+    'повторная транзакция — тот же отказ, а не «транзакция уже открыта»',
+  );
+  store.close();
+  const after = new DatabaseSync(file);
+  assert.equal((after.prepare('SELECT data FROM state').get() as { data: string }).data, before);
+  after.close();
+});

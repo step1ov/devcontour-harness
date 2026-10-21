@@ -675,3 +675,49 @@ test('S3-R1-05: время готовности поручения от хост
   assert.ok(other.wait?.approvedAt);
   assert.equal(other.wait?.readyAt, undefined);
 });
+
+test('Роль controller записывает версию движка; живую роль другой версии не перенимает даже тот же владелец', () => {
+  const { engine, store, clock } = engineOf();
+  assert.equal(engine.lead('c1'), true);
+  assert.equal(
+    engine.read((v) => v.controller()?.engineVersion),
+    engine.version,
+  );
+  engine.release('c1');
+  assert.equal(
+    engine.read((v) => v.controller()),
+    undefined,
+    'штатное освобождение снимает роль целиком',
+  );
+  const older = new Engine({
+    host: standaloneHost(store, policyOf()),
+    policy: policyOf(),
+    now: () => clock.now,
+    version: '0.0.1-older',
+  });
+  assert.equal(older.lead('c1'), true);
+  assert.equal(engine.lead('c1'), false, 'тот же владелец, другая версия — другой процесс');
+  assert.throws(() => engine.claim('c1'), refused('CONTROLLER_BUSY'));
+  assert.equal(
+    engine.read((v) => v.controller()?.engineVersion),
+    '0.0.1-older',
+    'чужая роль цела',
+  );
+  assert.equal(engine.release('c1'), false, 'роль прежней версии не снимается чужим процессом');
+  assert.equal(
+    engine.read((v) => v.controller()?.owner),
+    'c1',
+  );
+  // Роль, записанная движком без версии, — тоже прежний процесс.
+  store.transact('heartbeat', (tx) =>
+    tx.setController({ owner: 'c1', leaseUntil: clock.now + 30_000 }),
+  );
+  assert.equal(engine.lead('c1'), false, 'живая роль без версии не перенимается');
+  clock.now += 31_000;
+  assert.equal(engine.lead('c1'), true, 'после истечения роль переходит штатно');
+  assert.equal(
+    engine.read((v) => v.controller()?.engineVersion),
+    engine.version,
+  );
+  engine.release('c1');
+});

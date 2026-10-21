@@ -328,9 +328,13 @@ export class Runner {
       // Без своих попыток вести нечего: занятость роли — явный отказ, а не пустой шаг.
       if (!this.jobs.size) {
         const lease = this.engine.read((v) => v.controller());
+        const other = lease && lease.engineVersion !== this.engine.version;
         throw new HarnessError(
           'CONTROLLER_BUSY',
-          `Очередь ведёт другой controller${lease ? ` (${lease.owner} до ${new Date(lease.leaseUntil).toISOString()})` : ''}`,
+          `Очередь ведёт другой controller${lease ? ` (${lease.owner} до ${new Date(lease.leaseUntil).toISOString()})` : ''}` +
+            (other
+              ? `: версия движка ${lease.engineVersion ?? 'прежняя, без записи версии'}, у этого процесса ${this.engine.version}`
+              : ''),
         );
       }
       return;

@@ -96,7 +96,20 @@ export class SqliteExecutionStore implements ExecutionStore {
 
   private load(): ExecutionDocument {
     const row = this.db.prepare('SELECT data FROM state WHERE id=1').get() as { data: string };
-    return executionDocumentSchema.parse(JSON.parse(row.data));
+    const parsed = executionDocumentSchema.safeParse(JSON.parse(row.data));
+    // Строгая схема: поле, которого эта версия не знает (например, записанное
+    // более новой версией), — отказ до любой записи и выдачи, а не молчаливая
+    // потеря при перезаписи документа.
+    if (!parsed.success)
+      throw new HarnessError(
+        'STATE_VERSION_UNSUPPORTED',
+        'Состояние не соответствует формату этой версии пакета (возможно, его записала более новая версия): обновите пакет или восстановите согласованную копию',
+        parsed.error.issues.slice(0, 20).map((i) => ({
+          path: i.path.filter((k): k is string | number => typeof k !== 'symbol'),
+          message: i.message,
+        })),
+      );
+    return parsed.data;
   }
 
   read<T>(fn: (view: ExecutionView) => NotPromise<T>): T {
@@ -116,7 +129,14 @@ export class SqliteExecutionStore implements ExecutionStore {
     const outer = this.frame;
     const point = 'harness_' + ++this.savepoint;
     this.db.exec(outer ? `SAVEPOINT ${point}` : 'BEGIN IMMEDIATE');
-    const frame: Frame = outer ?? { doc: this.load(), drafts: [], depth: 0 };
+    let loaded: ExecutionDocument | undefined;
+    try {
+      if (!outer) loaded = this.load();
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    const frame: Frame = outer ?? { doc: loaded!, drafts: [], depth: 0 };
     const saved = outer ? structuredClone(frame.doc) : undefined;
     const drafts = frame.drafts.length;
     frame.depth++;
