@@ -15,7 +15,10 @@ import { SqliteExecutionStore } from '../storage/sqlite.ts';
 /**
  * Проверка среды без live-вызова модели: версия пакета и Node, наличие
  * runtime (по `--version`) и их возможности, OS-sandbox, совместимость
- * каталога состояния. Каталог состояния открывается только если он есть.
+ * каталога состояния. Каталог состояния открывается только если он есть;
+ * для совместимого состояния называются версии движка, встреченные в нём
+ * (роль controller и попытки), — перед обновлением и откатом видно, какая
+ * версия последней писала состояние.
  */
 export async function doctor(
   policy: ExecutionPolicy | undefined,
@@ -37,14 +40,36 @@ export async function doctor(
   }
   const sandbox = isolationSupport();
   if (!sandbox.ok && policy?.isolation.mode === 'os') problems.push(sandbox.detail);
-  let state: { stateVersion: number; compatible: boolean; writer?: string } | undefined;
+  let state:
+    | {
+        stateVersion: number;
+        compatible: boolean;
+        engineVersions?: { controller?: string; attempts: string[] };
+      }
+    | undefined;
   if (stateDir && existsSync(join(stateDir, 'state.sqlite'))) {
     try {
-      new SqliteExecutionStore(
+      const store = new SqliteExecutionStore(
         join(stateDir, 'state.sqlite'),
         'devcontour-harness@' + HARNESS_VERSION,
-      ).close();
-      state = { stateVersion: STATE_VERSION, compatible: true };
+      );
+      let engineVersions;
+      try {
+        engineVersions = store.read((view) => {
+          const controller = view.controller()?.engineVersion;
+          return {
+            ...(controller ? { controller } : {}),
+            attempts: [
+              ...new Set(
+                view.attempts().flatMap((a) => (a.engineVersion ? [a.engineVersion] : [])),
+              ),
+            ].sort(),
+          };
+        });
+      } finally {
+        store.close();
+      }
+      state = { stateVersion: STATE_VERSION, compatible: true, engineVersions };
     } catch (error) {
       state = { stateVersion: -1, compatible: false };
       problems.push(error instanceof HarnessError ? error.message : String(error));
