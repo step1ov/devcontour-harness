@@ -399,7 +399,11 @@ export const attemptStateSchema = z.strictObject({
       }),
     })
     .optional(),
-  /** Версия движка, выдавшего попытку: входит в основание reuse и recovery. Нет у прежних попыток. */
+  /**
+   * Версия движка, ведущего попытку: выдавшего её или принявшего владение при
+   * recovery (`adopt`). Только он продолжает попытку. Входит в основание reuse
+   * и recovery. Нет у прежних попыток.
+   */
   engineVersion: z.string().min(1).optional(),
   /** Версия потребителя, через который выдана попытка; не заменяет engineVersion. */
   consumerVersion: z.string().min(1).optional(),

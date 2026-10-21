@@ -2562,10 +2562,12 @@ export class Engine {
       if (!a) throw new HarnessError('NOT_FOUND', 'Попытка не найдена: ' + id);
       if (a.status !== 'active' || a.leaseUntil > this.now())
         throw new HarnessError('LEASE_STALE', 'Попытка ещё принадлежит владельцу');
+      // Новое владение — под этим движком: дальше попытку ведёт он (и только он).
       const adopted = {
         ...a,
         token: this.id() + this.id(),
         owner,
+        engineVersion: this.version,
         leaseUntil: this.now() + this.policy.leaseMs,
       };
       tx.putAttempt(adopted);

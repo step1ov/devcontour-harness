@@ -758,6 +758,9 @@ test('S4-R1-02: движок другой версии не продолжает
   assert.throws(() => newer.heartbeat(a.id, a.token), refused('LEASE_STALE'));
   // Восстановление — только истечением и новой попыткой с новым владением.
   clock.now += 3_600_000;
-  newer.expire();
-  assert.equal(newer.read((v) => v.attempt(a.id))?.status, 'expired');
+  const adopted = newer.adopt(a.id, 'c2');
+  assert.equal(adopted.engineVersion, newer.version, 'новое владение — под новым движком');
+  assert.throws(() => newer.heartbeat(a.id, a.token), refused('LEASE_STALE'));
+  newer.heartbeat(a.id, adopted.token);
+  assert.throws(() => older.heartbeat(a.id, adopted.token), refused('LEASE_STALE'));
 });
