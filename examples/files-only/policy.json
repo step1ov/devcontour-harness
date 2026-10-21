@@ -1,0 +1,30 @@
+{
+  "policyVersion": 1,
+  "repositories": [
+    {
+      "id": "app",
+      "path": ".",
+      "targetRef": "refs/heads/harness/accepted",
+      "gates": [
+        {
+          "id": "unit",
+          "kind": "test",
+          "command": ["npm", "test"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "protectedPaths": [".github/", "package-lock.json", "policy.json", "graph.json"]
+    }
+  ],
+  "roles": {
+    "developer": { "writer": { "runtime": "claude" }, "writePaths": ["src", "test"] }
+  },
+  "review": {
+    "code": { "reviewer": { "runtime": "codex" } },
+    "plan": { "reviewer": { "runtime": "codex" }, "alternates": [{ "runtime": "claude" }] },
+    "contract": { "reviewer": { "runtime": "codex" }, "alternates": [{ "runtime": "claude" }] }
+  },
+  "maxAttempts": 3,
+  "budgets": { "work": { "usd": 5 }, "total": { "usd": 50 }, "onUnknown": "stop" }
+}

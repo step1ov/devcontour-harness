@@ -1,0 +1,23 @@
+{
+  "apiVersion": "devcontour-harness/v1alpha1",
+  "id": "notes",
+  "source": { "connector": "files", "ref": "graph.json", "revision": "1" },
+  "orders": [
+    {
+      "apiVersion": "devcontour-harness/v1alpha1",
+      "id": "add-tags",
+      "source": { "connector": "files", "ref": "add-tags", "revision": "1" },
+      "title": "Add tags to notes",
+      "goal": "Notes accept a list of tags; tags are trimmed and deduplicated.",
+      "acceptance": [
+        "createNote({ tags: [' a', 'a', 'b'] }) stores ['a', 'b']",
+        "npm test passes with a JUnit report"
+      ],
+      "role": "developer",
+      "repositoryId": "app",
+      "writeScope": ["src", "test"],
+      "gates": ["unit"],
+      "context": ["norms"]
+    }
+  ]
+}

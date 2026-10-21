@@ -48,7 +48,8 @@
     "test:package": "npm run build && node scripts/smoke-package.mjs",
     "check": "npm run lint && npm run typecheck && npm run schemas:check && npm run build && npm test && node scripts/smoke-package.mjs",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "check:install": "node scripts/install-check.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.77",

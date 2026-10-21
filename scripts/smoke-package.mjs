@@ -1,37 +1,85 @@
 /**
  * Проверка настоящего архива: состав по whitelist, установка без dev
  * зависимостей и скриптов в независимый каталог, запуск CLI и импорт
- * библиотеки из чужого cwd. Исходный checkout после упаковки не читается.
+ * библиотеки из чужого cwd. Исходный checkout после упаковки не читается:
+ * каждый процесс установленного пакета пишет журнал загруженных модулей и
+ * открытых файлов, и ни один путь журнала не может вести в checkout.
+ *
+ * `--archive F` проверяет уже выпущенный архив вместо свежей упаковки,
+ * `--offline` ставит его без сети (из кэша npm).
  */
+import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   copyFileSync,
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
   realpathSync,
   rmSync,
+  statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { basename, join, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { parseArgs } from 'node:util';
 
-const root = fileURLToPath(new URL('..', import.meta.url));
+const { values: options } = parseArgs({
+  options: { archive: { type: 'string' }, offline: { type: 'boolean', default: false } },
+});
+const root = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'harness-smoke-')));
 const fail = (message) => {
   console.error('smoke-package: ' + message);
   process.exit(1);
 };
 
-const [packed] = JSON.parse(
-  execFileSync('npm', ['pack', '--json', '--ignore-scripts', '--pack-destination', scratch], {
-    cwd: root,
-    encoding: 'utf8',
-  }),
+/** Архив: свежая упаковка checkout либо указанный выпуск (его байты не меняются). */
+const archived = (file) => {
+  const copy = join(scratch, basename(file));
+  copyFileSync(file, copy);
+  const manifest = JSON.parse(
+    execFileSync('tar', ['-xOzf', copy, 'package/package.json'], { encoding: 'utf8' }),
+  );
+  const files = execFileSync('tar', ['-tzf', copy], { encoding: 'utf8' })
+    .split('\n')
+    .filter((p) => p && !p.endsWith('/'))
+    .map((p) => ({ path: p.replace(/^package\//, '') }));
+  return {
+    filename: basename(copy),
+    version: manifest.version,
+    files,
+    integrity: 'sha512-' + createHash('sha512').update(readFileSync(copy)).digest('base64'),
+  };
+};
+const [packed] = options.archive
+  ? [archived(resolve(options.archive))]
+  : JSON.parse(
+      execFileSync('npm', ['pack', '--json', '--ignore-scripts', '--pack-destination', scratch], {
+        cwd: root,
+        encoding: 'utf8',
+      }),
+    );
+
+// Содержимое архива без путей машины автора, приватных каталогов и ключей.
+const unpacked = join(scratch, 'unpacked');
+mkdirSync(unpacked);
+execFileSync('tar', ['-xzf', join(scratch, packed.filename), '-C', unpacked]);
+const forbidden = [root, process.env.HOME, '/.private/', 'PRIVATE KEY-----'].filter(
+  (s) => s && s.length > 6,
 );
+for (const entry of readdirSync(unpacked, { recursive: true })) {
+  const file = join(unpacked, entry);
+  if (!statSync(file).isFile()) continue;
+  const text = readFileSync(file, 'utf8');
+  const hit = forbidden.find((s) => text.includes(s));
+  if (hit) fail(`архив содержит «${hit}»: ${entry}`);
+}
 const allowed = [
   /^package\.json$/,
   /^LICENSE$/,
@@ -40,7 +88,10 @@ const allowed = [
   /^schemas\/[a-z-]+\.schema\.json$/,
   /^docs\/[a-z-]+\.md$/,
   /^examples\/[a-z-]+\/[a-z-]+\.json$/,
+  /^examples\/README\.md$/,
   /^examples\/[a-z-]+\/README\.md$/,
+  /^examples\/external-connector\/connector\.mjs$/,
+  /^examples\/files-only\/context\/[a-z-]+\/[a-z-]+\.md$/,
   /^examples\/[a-z-]+\/test\/[a-z-]+\.js$/,
   /^examples\/[a-z-]+\/src\/\.gitkeep$/,
   /^profiles\/[a-z0-9-]+\.json$/,
@@ -59,6 +110,9 @@ for (const required of [
   'skills/harness/SKILL.md',
   'templates/policy.json',
   'templates/graph.json',
+  'docs/upgrade.md',
+  'docs/quickstart.md',
+  'examples/README.md',
 ])
   if (!packed.files.some((f) => f.path === required)) fail('нет файла ' + required);
 
@@ -76,11 +130,39 @@ execFileSync(
     '--ignore-scripts',
     '--no-audit',
     '--no-fund',
-    '--prefer-offline',
+    options.offline ? '--offline' : '--prefer-offline',
     join(scratch, packed.filename),
   ],
   { cwd: consumer, stdio: 'inherit' },
 );
+
+// Журнал чтения: каждый node-процесс установленного пакета (CLI, библиотека,
+// fixture runtime) загружает модуль, который записывает пути загруженных
+// модулей и открытых файлов. Модуль лежит во временном каталоге, не в checkout.
+const traceLog = join(scratch, 'reads.log');
+const trace = join(scratch, 'trace.mjs');
+writeFileSync(
+  trace,
+  `import fs from 'node:fs';
+import { registerHooks, syncBuiltinESMExports } from 'node:module';
+const log = ${JSON.stringify(traceLog)};
+const append = fs.appendFileSync.bind(fs);
+const note = (p) => { try { append(log, String(p instanceof URL ? p.pathname : p) + '\\n'); } catch {} };
+registerHooks({ resolve(specifier, context, next) { const r = next(specifier, context); if (r.url.startsWith('file:')) note(new URL(r.url)); return r; } });
+for (const name of ['readFileSync', 'openSync', 'readdirSync', 'existsSync', 'statSync', 'readFile', 'open', 'readdir', 'cpSync', 'copyFileSync']) {
+  const original = fs[name];
+  fs[name] = function (p, ...rest) { if (typeof p === 'string' || p instanceof URL) note(p); return original.call(this, p, ...rest); };
+}
+for (const name of ['readFile', 'open', 'readdir', 'stat']) {
+  const original = fs.promises[name];
+  fs.promises[name] = function (p, ...rest) { if (typeof p === 'string' || p instanceof URL) note(p); return original.call(this, p, ...rest); };
+}
+syncBuiltinESMExports();
+`,
+);
+process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, '--import ' + pathToFileURL(trace).href]
+  .filter(Boolean)
+  .join(' ');
 const installed = join(consumer, 'node_modules', 'devcontour-harness');
 const bin = join(consumer, 'node_modules', '.bin', 'harness');
 const run = (args) => spawnSync(bin, args, { cwd: scratch, encoding: 'utf8' });
@@ -306,6 +388,16 @@ const blocked = busy.run();
 if (blocked.status !== 3 || JSON.parse(blocked.stdout).error?.code !== 'CONTROLLER_BUSY')
   fail('занятая роль controller: ' + blocked.status + ' ' + blocked.stdout);
 
+// Ни один процесс пакета не читал checkout: журнал есть и не ведёт в него.
+if (!existsSync(traceLog)) fail('журнал чтения пуст: модуль трассировки не загружался');
+const reads = readFileSync(traceLog, 'utf8').split('\n').filter(Boolean);
+const leaked = [...new Set(reads.map((p) => resolve(scratch, p)))].filter(
+  (p) => p === root || p.startsWith(root + sep),
+);
+if (leaked.length) fail('пакет читал файлы checkout: ' + leaked.slice(0, 5).join(', '));
+if (!reads.some((p) => p.includes(join('node_modules', 'devcontour-harness', 'lib'))))
+  fail('журнал чтения не содержит модулей установленного пакета');
+
 console.log(
-  `smoke-package: ${packed.filename} (${packed.files.length} файлов) установлен; профили, шаблоны, полный цикл и отказы gate/области/controller без каталога skills пройдены на fixture runtime (механика, не качество модели); sha512 ${packed.integrity}`,
+  `smoke-package: ${packed.filename} (${packed.files.length} файлов) установлен; профили, шаблоны, полный цикл и отказы gate/области/controller без каталога skills пройдены на fixture runtime (механика, не качество модели); ${reads.length} чтений вне checkout; sha512 ${packed.integrity}`,
 );
