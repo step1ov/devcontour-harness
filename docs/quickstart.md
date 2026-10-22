@@ -8,15 +8,24 @@
 - Node.js ≥ 24.3.0 и Git.
 - Установленные и авторизованные CLI `claude` и `codex` — writer и reviewer
   примера. `harness doctor` проверяет их без вызова модели.
-- Архив пакета `devcontour-harness-<version>.tgz`.
+- npm (идёт с Node.js) — для установки из registry или из локального архива.
 
 ```sh
 mkdir harness-demo && cd harness-demo
 npm init -y >/dev/null
-npm install --omit=dev --ignore-scripts ./devcontour-harness-<version>.tgz
+npm install --save-exact devcontour-harness@0.1.0-alpha.5
 npx harness --version
 npx harness doctor
 ```
+
+Вместо точной версии можно взять текущую alpha: `devcontour-harness@alpha`.
+Без registry пакет ставится из архива:
+`npm install --omit=dev --ignore-scripts ./devcontour-harness-<version>.tgz`.
+
+CLI установлен локально, в `node_modules/.bin` каталога `harness-demo`.
+`npx harness` находит его из этого каталога и его подкаталогов (дальше
+работа идёт в `harness-demo/greeting`); глобальная команда `harness` не
+нужна.
 
 ## 2. Репозиторий и входы
 

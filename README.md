@@ -5,10 +5,12 @@ Headless-движок исполнения инженерных поручени
 интеграция с принятой веткой через compare-and-swap и машинный результат с SHA
 и доказательствами.
 
-> Статус: `0.1.0-alpha.1`. Файл → ревью плана → кандидат → интеграция →
-> принятие → результат JSON, с ограниченным восстановлением, повторным
-> использованием кандидата, бюджетами, потребителями, свойствами и корпусом,
-> совместной проверкой репозиториев и явным режимом одного вендора.
+> Статус: `0.1.0-alpha.5` — предварительный выпуск (alpha). Договоры
+> `v1alpha1` могут измениться между alpha-версиями; закрепляйте точную версию.
+> Файл → ревью плана → кандидат → интеграция → принятие → результат JSON, с
+> ограниченным восстановлением, повторным использованием кандидата, бюджетами,
+> потребителями, свойствами и корпусом, совместной проверкой репозиториев и
+> явным режимом одного вендора.
 
 Пакет включает встроенные профили стеков (`profiles/`), skill
 `skills/harness/SKILL.md` и шаблоны политики, графа и инструкции агентам
@@ -22,29 +24,49 @@ Headless-движок исполнения инженерных поручени
 
 ## Установка
 
-Пакет поставляется архивом `devcontour-harness-<version>.tgz` (registry не
-используется):
+Из npm — точная версия (воспроизводимо) или последняя alpha по тегу:
 
 ```sh
-npm install --omit=dev --ignore-scripts ./devcontour-harness-<version>.tgz
+npm install --save-exact devcontour-harness@0.1.0-alpha.5   # точная версия
+# или: npm install --save-exact devcontour-harness@alpha     # текущая alpha
 npx harness --version
 ```
 
-Проверка установленного архива целиком — `npm run check:install -- <архив>`
-из checkout пакета: установка в отдельный каталог без сети, CLI, библиотека,
-профили, полный цикл на fixture runtime и отказы.
+Выпуски публикуются под тегом `alpha`; ставьте точную версию или `@alpha`,
+а не версию по умолчанию без тега.
+
+Из локального архива `devcontour-harness-<version>.tgz` (поддерживаемый
+способ без registry):
+
+```sh
+npm install --omit=dev --ignore-scripts ./devcontour-harness-<version>.tgz
+```
+
+В архиве уже собраны JavaScript, декларации и JSON-схемы: установка не
+выполняет скриптов и не требует devDependencies (`--omit=dev
+--ignore-scripts` допустимы и для установки из npm). Проверка архива
+целиком — `npm run check:install -- <архив>` из checkout пакета: установка в
+отдельный каталог без сети, CLI, библиотека, профили, полный цикл на fixture
+runtime и отказы.
+
+CLI ставится локально: `npx harness` находит его в `node_modules/.bin`
+ближайшего каталога установки (в том числе из его подкаталогов). Вне этого
+каталога `npx harness` предложит скачать другой пакет с именем `harness` —
+откажитесь; глобальная команда `harness` в `PATH` не предполагается.
 
 ## Быстрый старт
 
 Пример — вымышленный репозиторий с одной задачей: добавить `greet(name)`.
+Команды выполняются из каталога, где установлен пакет; `harness` в таблице
+ниже — тот же CLI (`npx harness …`).
 
 ```sh
 cp -R node_modules/devcontour-harness/examples/single-task greeting && cd greeting
 git init -q && git add -A && git commit -qm init
-harness validate --graph graph.json --policy policy.json
-harness run --graph graph.json --policy policy.json --state ../greeting-state \
+npx harness validate --graph graph.json --policy policy.json
+npx harness run --graph graph.json --policy policy.json --state ../greeting-state \
   --author external --sink file:../greeting-results
-harness result --state ../greeting-state --work add-greeting
+npx harness result --state ../greeting-state --work add-greeting
 git rev-parse refs/heads/harness/accepted   # совпадает с data.result.shas.result
 ```
 
@@ -89,6 +111,30 @@ import { Harness, validateInputs } from 'devcontour-harness';
 PASS» нет. Адаптеры хоста реализуют порты `ExecutionStore`, `WorkSource`,
 `ContextSource`, `ResultSink`; набор проверок договора хранилища —
 `devcontour-harness/testing`.
+
+Пакет поставляет декларации TypeScript (`lib/**/*.d.ts`) для `.`,
+`/contracts` и `/testing`; JSON-схемы входов и выходов —
+`devcontour-harness/schemas/<имя>.schema.json`. Декларации используют типы
+Node.js: TypeScript-потребителю нужен `@types/node` (или `skipLibCheck`).
+
+## Выпуск 0.1.0-alpha.5
+
+Первая публикация в npm. Движок, форматы состояния, политики и договоры — те
+же, что в `0.1.0-alpha.4`; меняется поставка: пакет публикуется под тегом
+`alpha`, архив собирается со свежей сборкой и проверенными схемами. Номер
+версии движка при этом меняется, поэтому обновление с alpha.4 проходит по
+процедуре [docs/upgrade.md](docs/upgrade.md): остановка writers, копия
+состояния, активные попытки alpha.4 не продолжаются новой версией, а
+завершаются через recovery.
+
+Ограничения выпуска:
+
+- Тесты и проверка архива используют fixture runtime: они подтверждают
+  механику (gates, область записи, fencing, recovery, результат), но не
+  качество живой модели.
+- Готовых коннекторов к внешним сервисам задач, памяти и обмена сообщениями
+  выпуск не содержит: источники и получатели подключаются через порты библиотеки
+  ([examples/external-connector](examples/external-connector/README.md)).
 
 ## Документация
 

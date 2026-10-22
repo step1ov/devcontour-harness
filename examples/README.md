@@ -4,9 +4,9 @@
 моделей и записи, из каталога `examples/`:
 
 ```sh
-harness validate --graph single-task/graph.json --policy two-vendors/policy.json
-harness validate --graph single-task/graph.json --policy one-vendor/policy.json
-harness validate --graph files-only/graph.json --policy files-only/policy.json
+npx harness validate --graph single-task/graph.json --policy two-vendors/policy.json
+npx harness validate --graph single-task/graph.json --policy one-vendor/policy.json
+npx harness validate --graph files-only/graph.json --policy files-only/policy.json
 ```
 
 У `files-only/` свой граф с контекстом; политики `two-vendors/` и

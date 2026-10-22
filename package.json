@@ -1,10 +1,17 @@
 {
   "name": "devcontour-harness",
-  "version": "0.1.0-alpha.4",
-  "private": true,
+  "version": "0.1.0-alpha.5",
   "description": "Headless execution harness: work graph, isolated attempts, gates, independent reviews and accepted results.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/step1ov/devcontour-harness.git"
+  },
+  "homepage": "https://github.com/step1ov/devcontour-harness#readme",
+  "bugs": {
+    "url": "https://github.com/step1ov/devcontour-harness/issues"
+  },
   "engines": {
     "node": ">=24.3.0"
   },
@@ -38,9 +45,15 @@
     "LICENSE",
     "README.md"
   ],
+  "publishConfig": {
+    "access": "public",
+    "tag": "alpha",
+    "registry": "https://registry.npmjs.org/"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "node scripts/clean.mjs && tsc -p tsconfig.build.json",
+    "prepack": "npm run schemas:check && npm run build",
     "schemas": "node --import tsx scripts/build-schemas.ts",
     "schemas:check": "node --import tsx scripts/build-schemas.ts --check",
     "lint": "eslint .",

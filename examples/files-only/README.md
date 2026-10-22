@@ -11,10 +11,10 @@ notes-app/
 ```
 
 ```sh
-harness validate --graph graph.json --policy policy.json
-harness run --graph graph.json --policy policy.json --state ../notes-state \
+npx harness validate --graph graph.json --policy policy.json
+npx harness run --graph graph.json --policy policy.json --state ../notes-state \
   --sink file:../notes-results
-harness result --state ../notes-state --work add-tags
+npx harness result --state ../notes-state --work add-tags
 ```
 
 Без `--context` CLI собирает снимок из `context/` рядом с графом: каждый

@@ -7,9 +7,9 @@
 ```sh
 cp -R node_modules/devcontour-harness/examples/single-task greeting && cd greeting
 git init -q && git add -A && git commit -qm init
-harness validate --graph graph.json --policy policy.json
-harness run --graph graph.json --policy policy.json --state ../greeting-state --author external --sink file:../greeting-results
-harness result --state ../greeting-state --work add-greeting
+npx harness validate --graph graph.json --policy policy.json
+npx harness run --graph graph.json --policy policy.json --state ../greeting-state --author external --sink file:../greeting-results
+npx harness result --state ../greeting-state --work add-greeting
 git rev-parse refs/heads/harness/accepted   # совпадает с result.shas.result
 ```
 
