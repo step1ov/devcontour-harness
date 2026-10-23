@@ -73,6 +73,19 @@ export class WorkflowQueue {
     return this.bound(kind, id, view)?.digest;
   }
 
+  /**
+   * Продолжит ли задание работу при следующей выдаче: активно, вход не
+   * изменился, попытки стадии не исчерпаны. Те же условия, что у `claim`,
+   * но без записи: им пользуется диагностика.
+   */
+  continues(job: WorkflowJob, view: ExecutionView) {
+    return (
+      ['queued', 'running'].includes(job.status) &&
+      job.attempts < job.maxAttempts &&
+      this.current(job, view)
+    );
+  }
+
   private current(job: WorkflowJob, view: ExecutionView) {
     try {
       const bound = this.bound(job.kind, job.id, view);

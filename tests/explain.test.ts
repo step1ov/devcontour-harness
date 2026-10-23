@@ -774,3 +774,57 @@ test('H1-03: решение группы «остановка» (отмена и
   assert.equal(stopped.retryPlanned, false);
   assert.deepEqual([stopped.actor, stopped.action], ['lead', 'diagnose-failure']);
 });
+
+test('H1-03 (H1-F002): задание прежней редакции графа ещё queued — retry не обещается; диагностика задание не трогает', () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const h = ctx.open();
+  try {
+    const first = ready(h.engine, ctx.graph, 'old-controller');
+    const oldJob = h.workflows.start({ kind: 'graph', id: first.id, authorRuntime: 'claude' });
+    h.engine.release('old-controller');
+    const revised = structuredClone(ctx.graph);
+    revised.source.revision = '2';
+    revised.orders[0]!.source.revision = '2';
+    revised.orders[0]!.title += ' revised';
+    ready(h.engine, revised, 'new-controller');
+    const a = h.engine.claim('new-controller')!;
+    h.engine.fail(a.id, a.token, 'environment fixture', { kind: 'environment' });
+    h.engine.release('new-controller');
+    const before = h.workflows.list();
+    assert.equal(before[0]!.status, 'queued');
+    const [d] = stopInputsOf(h, { maxAttempts: 3, repairBudget: 6 })
+      .filter((i): i is WorkInput => i.kind === 'work')
+      .map(explainStop);
+    assert.equal(d!.retryPlanned, false);
+    assert.deepEqual([d!.actor, d!.action], ['user', 'fix-environment']);
+    assert.deepEqual(h.workflows.list(), before, 'read-only: задание не помечено stale');
+    // Движок действительно не продолжит старое задание.
+    assert.equal(h.workflows.claim(oldJob.key), undefined);
+  } finally {
+    h.close();
+  }
+});
+
+test('H1-03 (H1-F002): попытки стадии задания исчерпаны — retry не обещается', () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const h = ctx.open();
+  try {
+    const graph = ready(h.engine, ctx.graph, 'controller');
+    const job = h.workflows.start({ kind: 'graph', id: graph.id, authorRuntime: 'claude' });
+    const a = h.engine.claim('controller')!;
+    h.engine.fail(a.id, a.token, 'environment fixture', { kind: 'environment' });
+    h.engine.release('controller');
+    for (let i = 0; i < job.maxAttempts; i++)
+      h.workflows.fail(h.workflows.claim(job.key)!, `interruption ${i + 1}`, true);
+    assert.equal(h.workflows.get(job.key).status, 'queued');
+    const [d] = stopInputsOf(h, { maxAttempts: 3, repairBudget: 6 })
+      .filter((i): i is WorkInput => i.kind === 'work')
+      .map(explainStop);
+    assert.equal(d!.retryPlanned, false);
+    assert.notEqual(d!.action, 'retry');
+    assert.equal(h.workflows.claim(job.key), undefined);
+    assert.equal(h.workflows.get(job.key).error, 'Исчерпаны попытки стадии');
+  } finally {
+    h.close();
+  }
+});

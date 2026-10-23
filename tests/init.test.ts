@@ -572,3 +572,56 @@ test('H1-02: --state внутри репозитория в ином регис�
   assert.deepEqual(error.issues, [{ path: ['--state'], message: 'state-inside-repository' }]);
   assert.equal(existsSync(join(p.root, '.harness')), false);
 });
+
+test('H1-02 (H1-F001): прерывание после записи политики с writer codex — новая сессия без --writer продолжает это решение', async () => {
+  const p = project();
+  const planned = await planProject(p.opts({ writer: 'codex' }));
+  for (const intent of planned.intents.slice(0, 3)) {
+    mkdirSync(join(intent.path, '..'), { recursive: true });
+    writeFileSync(intent.path, intent.content);
+  }
+  const data = await initProject(p.opts());
+  assert.deepEqual(data.manifest.runtimes, { writer: 'codex', reviewer: 'claude' });
+  assert.deepEqual(
+    data.facts.roles.map((r) => r.runtime),
+    ['codex'],
+  );
+  const run = data.next.find((n) => n.command === 'run')!;
+  assert.equal(run.args[run.args.indexOf('--author') + 1], 'codex');
+  // Явно иной writer при сохранённой политике — конфликт, а не manifest поверх неё.
+  const q = project();
+  const first = await planProject(q.opts({ writer: 'codex' }));
+  for (const intent of first.intents.slice(0, 3)) {
+    mkdirSync(join(intent.path, '..'), { recursive: true });
+    writeFileSync(intent.path, intent.content);
+  }
+  const before = outside(q.root);
+  const plan = await initProject(q.opts({ writer: 'claude', plan: true }));
+  const policyPath = join(q.root, '.harness/policy.json');
+  assert.ok(
+    plan.files.some(
+      (f) => f.path === policyPath && f.action === 'conflict' && f.conflict === 'content-differs',
+    ),
+  );
+  const error = await refusal(initProject(q.opts({ writer: 'claude' })), 'PATH_CONFLICT');
+  assert.deepEqual(error.issues, [{ path: [policyPath], message: 'content-differs' }]);
+  assert.equal(existsSync(join(q.root, '.harness/project.json')), false);
+  assert.deepEqual(outside(q.root), before);
+});
+
+test('H1-02 (H1-F003): конфликты файла и рабочего каталога вместе — отказ apply называет оба', async () => {
+  const p = project();
+  mkdirSync(join(p.root, '.harness/README.md'), { recursive: true });
+  const outsideDir = join(p.scratch, 'outside');
+  mkdirSync(outsideDir);
+  symlinkSync(outsideDir, join(p.root, '.harness/work'));
+  const plan = await initProject(p.opts({ plan: true }));
+  const conflicts = plan.files.filter((f) => f.action === 'conflict');
+  assert.equal(plan.conflicts, 2);
+  const error = await refusal(initProject(p.opts()), 'PATH_CONFLICT');
+  assert.deepEqual(
+    error.issues,
+    conflicts.map((f) => ({ path: [f.conflictPath ?? f.path], message: f.conflict })),
+  );
+  assert.deepEqual(readdirSync(outsideDir), []);
+});

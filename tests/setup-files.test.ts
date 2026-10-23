@@ -391,3 +391,30 @@ test('H1-02: гонка план→применение — каталог по�
     ]),
   );
 });
+
+test('H1-02 (H1-F004): назначение совпадает с корнем — корень-файл отклоняется; каталог и symlink на каталог допустимы', async () => {
+  const { real } = await sandbox();
+  const file = join(real, 'root-file');
+  await writeFile(file, 'user');
+  const conflict = refusal('PATH_CONFLICT', 'Родитель не является каталогом: ' + file, [
+    { path: [file], message: 'ancestor-not-directory' },
+  ]);
+  await assert.rejects(checkDestination(file, { root: file }), conflict);
+  const files = [{ path: file, content: 'new' }];
+  const plan = await planFileWrites({ root: file, files });
+  assert.equal(plan.conflicts, 1);
+  assert.deepEqual(plan.entries[0], {
+    path: file,
+    action: 'conflict',
+    conflict: 'ancestor-not-directory',
+    conflictPath: file,
+  });
+  await assert.rejects(applyFileWrites(plan, files), conflict);
+  assert.equal(await readFile(file, 'utf8'), 'user');
+  const dir = join(real, 'root-dir');
+  await mkdir(dir);
+  await checkDestination(dir, { root: dir });
+  const link = join(real, 'root-link');
+  await symlink(dir, link);
+  await checkDestination(link, { root: link });
+});

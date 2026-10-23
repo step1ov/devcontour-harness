@@ -55,8 +55,8 @@ realpath корня, поэтому повтор и новая сессия на
 `package.json` и не делает коммитов. Ответ `data` (`cliDataSchemas.init`):
 `mode`, `status` до вызова (`new`, `partial`, `complete`), `files` с действием
 по каждому файлу, `conflicts`, `created`, `preserved`, `manifest`, `profile`,
-`facts` (репозиторий, target ref, роли, gates, каталоги работы и заметок,
-путь шаблона графа пакета), `toolchain` и `next` — готовые вызовы `doctor`,
+`facts` (репозиторий, target ref, роли, gates, каталоги работы, контекста и
+заметок), `toolchain` и `next` — готовые вызовы `doctor`,
 `validate`, `run`, `status`, `explain`.
 
 Отказы, все до записи, в этом порядке:

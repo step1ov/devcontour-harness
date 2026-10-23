@@ -56,11 +56,9 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
       const identical = fingerprint
         ? attempts.filter((a) => a.failureFingerprint === fingerprint).length
         : 0;
-      // Чинит только действующее задание графа; остановленное или устаревшее
-      // (в том числе прежней редакции графа с тем же id) повторов не назначит.
-      const job = jobs.find(
-        (j) => j.id === work.graphId && (j.status === 'queued' || j.status === 'running'),
-      );
+      // Чинит только задание, которое продолжит работу: активное, по текущей
+      // редакции графа и с непотраченными попытками стадии (как `claim`).
+      const job = jobs.find((j) => j.id === work.graphId && h.workflows.continues(j, v));
       const decision = job
         ? repairDecision(v, v.works(work.graphId), {
             budgetLeft: options.repairBudget - (job.repairs ?? 0),

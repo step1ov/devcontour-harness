@@ -66,6 +66,12 @@ const realish = (path: string) => {
   }
 };
 
+/** Writer сохранённой политики: runtime первой роли, если это claude или codex. */
+const writerOf = (policy: ExecutionPolicy | undefined) => {
+  const runtime = policy ? Object.values(policy.roles)[0]?.writer.runtime : undefined;
+  return runtime === 'claude' || runtime === 'codex' ? runtime : undefined;
+};
+
 /** `p-` + первые 16 hex sha256 от realpath корня: тот же проект — тот же id. */
 export function projectIdOf(root: string): string {
   return 'p-' + sha256(realpathSync(root)).slice(0, 16);
@@ -245,7 +251,6 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
     ref = detected.id;
   }
   const profile = resolveProfile(ref, { repository: root, repositoryId: PROJECT_REPOSITORY_ID });
-  const writer = options.writer ?? saved?.runtimes.writer ?? 'claude';
   const projectId = projectIdOf(root);
   // 6. Состояние — вне репозитория.
   const state = options.state
@@ -262,6 +267,14 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
       [{ path: ['--state'], message: 'state-inside-repository' }],
     );
   // 7. Сохранённая политика сильнее сгенерированной: агент мог её настроить.
+  // Сохранённая политика — решение, уже записанное прерванной подготовкой:
+  // её writer продолжает выбор, если manifest ещё не записан.
+  const savedPolicyPath = projectFile(root, PROJECT_POLICY_PATH);
+  const savedPolicy = savedPolicyPath
+    ? parseFile(savedPolicyPath, executionPolicySchema, 'Политика проекта')
+    : undefined;
+  const policyWriter = writerOf(savedPolicy);
+  const writer = options.writer ?? saved?.runtimes.writer ?? policyWriter ?? 'claude';
   const declared = packageManagerField(new Manifests(root), '.');
   const generated = generatePolicy({
     profile,
@@ -269,10 +282,7 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
     ...(declared ? { packageManager: { name: declared.name, version: declared.version } } : {}),
   });
   const policyPath = join(root, PROJECT_POLICY_PATH);
-  const savedPolicyPath = projectFile(root, PROJECT_POLICY_PATH);
-  const policy = savedPolicyPath
-    ? parseFile(savedPolicyPath, executionPolicySchema, 'Политика проекта')
-    : executionPolicySchema.parse(generated.input);
+  const policy = savedPolicy ?? executionPolicySchema.parse(generated.input);
 
   const pin = profilePin(profile);
   const manifest: ProjectManifest = {
@@ -305,6 +315,11 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
   ];
   const plan = await planFileWrites({ files: intents, root });
   const workConflicts: FilePlanEntry[] = [];
+  // Иной writer, чем у сохранённой политики, — решение меняется явно, а не
+  // manifest, противоречащий политике.
+  // При записанном manifest то же расхождение называет конфликт manifest.
+  if (!saved && savedPolicy && policyWriter && writer !== policyWriter)
+    workConflicts.push({ path: policyPath, action: 'conflict', conflict: 'content-differs' });
   const harnessDir = join(root, HARNESS_PROJECT_DIR);
   if (!plan.entries.some((e) => e.conflictPath === harnessDir))
     try {
@@ -441,12 +456,24 @@ export async function initProject(options: InitOptions): Promise<InitData> {
   const planned = await planProject(options);
   if (options.plan) return dataOf(planned, 'plan', { created: [], preserved: [] });
   // 8. Конфликты: applyFileWrites отказывает PATH_CONFLICT со всеми конфликтами, ничего не записав.
-  if (planned.plan.conflicts > 0) await applyFileWrites(planned.plan, planned.intents);
-  if (planned.workConflicts.length)
+  // Отказ один и называет все конфликты плана — и файлов, и рабочих каталогов.
+  const extra = planned.workConflicts.map((e) => ({ path: [e.path], message: e.conflict! }));
+  if (planned.plan.conflicts > 0)
+    try {
+      await applyFileWrites(planned.plan, planned.intents);
+    } catch (error) {
+      if (error instanceof HarnessError && error.code === 'PATH_CONFLICT')
+        throw new HarnessError('PATH_CONFLICT', error.message, [...error.issues, ...extra]);
+      throw error;
+    }
+  const first = planned.workConflicts[0];
+  if (first)
     throw new HarnessError(
       'PATH_CONFLICT',
-      `Рабочий каталог .harness — не каталог внутри проекта: ${planned.workConflicts[0]!.path}`,
-      planned.workConflicts.map((e) => ({ path: [e.path], message: e.conflict! })),
+      first.conflict === 'content-differs'
+        ? `Сохранённая политика задаёт другого writer: решение меняется явно, а не manifest поверх неё: ${first.path}`
+        : `Рабочий каталог .harness — не каталог внутри проекта: ${first.path}`,
+      extra,
     );
   // 9. Toolchain действующей политики — в формате preflight `run`.
   const problems = planned.toolchain.flatMap((r) => r.problems);

@@ -128,8 +128,9 @@ async function destinationConflict(path: string, root?: string): Promise<Found |
     if (parent === cursor) break;
     cursor = parent;
   }
-  if (base !== undefined && base !== target) {
-    // Сам корень доверен (может быть symlink'ом), но обязан быть каталогом.
+  if (base !== undefined) {
+    // Сам корень доверен (может быть symlink'ом), но обязан быть каталогом —
+    // и тогда, когда назначение совпадает с корнем.
     const info = await inspectInWalk(base, true);
     if (info && !info.isDirectory())
       return { conflict: 'ancestor-not-directory', path: target, conflictPath: base };
