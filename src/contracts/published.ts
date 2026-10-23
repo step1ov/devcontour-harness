@@ -8,6 +8,8 @@ import { reviewRecordSchema } from './review.ts';
 import { executionDocumentSchema } from './execution.ts';
 import { contractDocumentSchema } from './checks.ts';
 import { stackProfileSchema } from './profiles.ts';
+import { projectManifestSchema } from './project.ts';
+import { stopDiagnosisSchema } from './diagnosis.ts';
 
 /**
  * Схемы, публикуемые как JSON Schema (`schemas/<имя>.schema.json`).
@@ -33,4 +35,6 @@ export const publishedSchemas = {
   'joint-verification': jointVerificationSchema,
   'execution-document': executionDocumentSchema,
   'stack-profile': stackProfileSchema,
+  'project-manifest': projectManifestSchema,
+  'stop-diagnosis': stopDiagnosisSchema,
 } as const satisfies Record<string, z.ZodType>;

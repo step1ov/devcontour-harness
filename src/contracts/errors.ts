@@ -24,6 +24,8 @@ export const errorCodes = {
   GATE_GROUP_CYCLE: 'input',
   REVIEWER_SAME_VENDOR: 'input',
   REVIEWER_MISSING: 'input',
+  /** Ответ не помещается в предел транспорта даже одним элементом. */
+  RESPONSE_TOO_LARGE: 'input',
   APPROVAL_STALE: 'refused',
   APPROVAL_REQUIRED: 'refused',
   LEASE_STALE: 'refused',
@@ -39,6 +41,8 @@ export const errorCodes = {
   REVISION_CONFLICT: 'refused',
   CANCELLED: 'refused',
   NOT_FOUND: 'refused',
+  /** Подготовка файлов не пишет через symlink, поверх не-файла и вне корня; путь — в issues. */
+  PATH_CONFLICT: 'refused',
   STATE_VERSION_UNSUPPORTED: 'infrastructure',
   RUNTIME_UNAVAILABLE: 'infrastructure',
   /** Ответ reviewer нарушил протокол ревью, повторы reviewer исчерпаны (docs/review-protocol.md). */

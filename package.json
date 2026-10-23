@@ -27,6 +27,10 @@
       "types": "./lib/contracts/index.d.ts",
       "default": "./lib/contracts/index.js"
     },
+    "./projections": {
+      "types": "./lib/projections/index.d.ts",
+      "default": "./lib/projections/index.js"
+    },
     "./package.json": "./package.json",
     "./schemas/*": "./schemas/*",
     "./testing": {

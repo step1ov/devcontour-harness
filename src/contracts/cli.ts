@@ -6,6 +6,7 @@ import {
   idSchema,
   isoTimeSchema,
   runtimeNameSchema,
+  targetRefSchema,
 } from './primitives.ts';
 import { errorCodes, type ErrorCode } from './errors.ts';
 import { controlStateSchema, controllerLeaseSchema, workStatusSchema } from './execution.ts';
@@ -14,6 +15,8 @@ import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
 import { reviewRecordSchema } from './review.ts';
 import { sourceRefSchema } from './work.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
+import { filePlanEntrySchema, projectManifestSchema } from './project.ts';
+import { stopDiagnosisSchema } from './diagnosis.ts';
 import { toolchainReportSchema } from './toolchain.ts';
 
 /**
@@ -25,7 +28,9 @@ import { toolchainReportSchema } from './toolchain.ts';
  *   попыток). Создаётся только командами, которые пишут (`run`,
  *   `review-*`, `approve`); читающие команды на отсутствующем каталоге
  *   отвечают `NOT_FOUND` и ничего не создают.
- * - stdout — ровно один JSON `CliEnvelope`; диагностика — stderr.
+ * - stdout — ровно один JSON `CliEnvelope`; диагностика — stderr. Явный
+ *   `--human` (init, explain) заменяет успешный ответ текстом; отказ — тот же
+ *   JSON на stdout, exit code одинаков в обоих режимах.
  * - Exit: 0 — успех; 2 — неверный вход; 3 — отказ или блокировка по
  *   правилам; 4 — инфраструктура. Exit 1 не используется.
  *
@@ -343,6 +348,71 @@ export const cliCommands = {
       { ...policy, required: false },
     ],
     refusals: [],
+  },
+  init: {
+    description:
+      'Подготовить существующий Git npm/pnpm-репозиторий: план или create-only запись .harness/ (политика из профиля и toolchain inspection, manifest последним); чужие файлы не меняются',
+    writes: true,
+    idempotency:
+      'Повтор с теми же решениями ничего не пишет (created пуст); после прерывания дописывает недостающее; иные решения при существующем manifest — PATH_CONFLICT content-differs',
+    args: [
+      {
+        name: '--repository',
+        value: 'dir',
+        required: true,
+        description: 'Корень Git-репозитория проекта',
+      },
+      {
+        name: '--profile',
+        value: 'text',
+        required: false,
+        description:
+          'Встроенный профиль или ./file.json репозитория; без него — из manifest, иначе по lockfile (npm-ci | pnpm-frozen)',
+      },
+      {
+        name: '--writer',
+        value: 'id',
+        required: false,
+        description: 'Runtime writer: claude (по умолчанию) или codex; reviewer — другой вендор',
+      },
+      {
+        name: '--state',
+        value: 'dir',
+        required: false,
+        description:
+          'Каталог состояния вне репозитория; по умолчанию <state home>/projects/<projectId>',
+      },
+      { name: '--plan', value: 'flag', required: false, description: 'Только план, без записи' },
+      {
+        name: '--human',
+        value: 'flag',
+        required: false,
+        description: 'Текст для человека вместо JSON',
+      },
+    ],
+    refusals: ['PATH_CONFLICT', 'CONTROLLER_BUSY', 'NOT_READY'],
+  },
+  explain: {
+    description:
+      'Объяснить остановки: код, причина, фаза, кто действует, допустимый следующий шаг и evidence; без повторов, вызовов моделей и изменений состояния',
+    writes: false,
+    idempotency: 'Только чтение',
+    args: [
+      state,
+      {
+        ...policy,
+        required: true,
+        description: 'ExecutionPolicy JSON: maxAttempts, repairBudget и runtime политики',
+      },
+      { name: '--work', value: 'id', required: false, description: 'ID поручения' },
+      {
+        name: '--human',
+        value: 'flag',
+        required: false,
+        description: 'Текст для человека вместо JSON',
+      },
+    ],
+    refusals: ['NOT_FOUND'],
   },
   'source-check': {
     description:
@@ -743,6 +813,46 @@ export const cleanupDataSchema = z.discriminatedUnion('status', [
   z.strictObject({ status: z.literal('cleaned'), receipts: z.array(z.string()) }),
 ]);
 
+/** `init`: план или результат подготовки проекта. */
+export const initDataSchema = z.strictObject({
+  mode: z.enum(['plan', 'apply']),
+  /** Состояние до вызова. */
+  status: z.enum(['new', 'partial', 'complete']),
+  projectId: z.string(),
+  root: z.string(),
+  manifestPath: z.string(),
+  manifest: projectManifestSchema,
+  files: z.array(filePlanEntrySchema),
+  conflicts: z.number().int().min(0),
+  created: z.array(z.string()),
+  preserved: z.array(z.string()),
+  profile: profilePinSchema,
+  shadowed: z.array(z.string()),
+  facts: z.strictObject({
+    repositoryId: idSchema,
+    targetRef: targetRefSchema,
+    roles: z.array(
+      z.strictObject({
+        id: z.string(),
+        runtime: z.enum(['claude', 'codex']),
+        writePaths: z.array(z.string()).optional(),
+      }),
+    ),
+    gates: z.array(z.strictObject({ id: idSchema, kind: z.enum(['check', 'test']) })),
+    workDir: z.string(),
+    contextDir: z.string(),
+    notesDir: z.string(),
+    graphTemplate: z.string(),
+  }),
+  toolchain: z.strictObject({ ready: z.boolean(), problems: z.array(z.string()) }),
+  next: z.array(
+    z.strictObject({ command: z.string(), args: z.array(z.string()), why: z.string() }),
+  ),
+});
+
+/** `explain`: объяснения остановок. */
+export const explainDataSchema = z.strictObject({ diagnoses: z.array(stopDiagnosisSchema) });
+
 /** Схема `data` каждой команды. */
 export const cliDataSchemas = {
   validate: validateDataSchema,
@@ -761,6 +871,8 @@ export const cliDataSchemas = {
   cleanup: cleanupDataSchema,
   profile: profileDataSchema,
   doctor: doctorDataSchema,
+  init: initDataSchema,
+  explain: explainDataSchema,
   'source-check': sourceCheckDataSchema,
   'source-snapshot': sourceSnapshotDataSchema,
   'source-status': sourceStatusDataSchema,

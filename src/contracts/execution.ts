@@ -599,6 +599,7 @@ export const pauseReasons = [
   'base-check',
   'reconfigure',
 ] as const;
+export type PauseReason = (typeof pauseReasons)[number];
 
 export const controlStateSchema = z.strictObject({
   paused: z.boolean(),

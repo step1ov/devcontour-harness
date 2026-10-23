@@ -93,4 +93,30 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // Проекции исполняются и в браузере потребителя: без node:*, zod и
+    // движка. Из договоров — только типы и таблицы без ввода-вывода.
+    files: ['src/projections/**/*.ts'],
+    rules: {
+      'no-restricted-imports': 'off',
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            ...foreign,
+            {
+              group: ['node:*', 'fs', 'fs/*', 'child_process', 'path', 'crypto', 'zod'],
+              message: 'Проекции не зависят от Node и zod: их импортирует браузер.',
+            },
+            {
+              regex: '^\\.\\./(?!contracts/(errors|repair-policy)\\.ts$)',
+              allowTypeImports: true,
+              message:
+                'Проекции импортируют из harness только типы и contracts/errors, contracts/repair-policy.',
+            },
+          ],
+        },
+      ],
+    },
+  },
 );

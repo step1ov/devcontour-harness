@@ -1,0 +1,167 @@
+{
+  "$id": "devcontour-harness/v1alpha1/project-manifest.schema.json",
+  "title": "project-manifest",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "devcontour-harness/v1alpha1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "harness-project"
+    },
+    "manifestVersion": {
+      "type": "number",
+      "const": 1
+    },
+    "projectId": {
+      "type": "string",
+      "pattern": "^p-[0-9a-f]{16}$"
+    },
+    "root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repository": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "targetRef": {
+          "type": "string",
+          "pattern": "^refs\\/heads\\/(?!.*(?:\\.\\.|\\/\\/|@\\{|\\.lock(?:\\/|$)|\\/\\.|[.]$|\\/$))(?!\\.)[^\\x00-\\x20\\x7f~^:?*\\[\\\\]{1,200}$"
+        }
+      },
+      "required": [
+        "id",
+        "targetRef"
+      ],
+      "additionalProperties": false
+    },
+    "profile": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pin": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,80}$"
+            },
+            "version": {
+              "type": "string",
+              "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[A-Za-z0-9.-]+)?$"
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "repositoryId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                },
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                }
+              },
+              "required": [
+                "repositoryId",
+                "path"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "version",
+            "digest"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "ref",
+        "pin"
+      ],
+      "additionalProperties": false
+    },
+    "runtimes": {
+      "type": "object",
+      "properties": {
+        "writer": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "codex"
+          ]
+        },
+        "reviewer": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "codex"
+          ]
+        }
+      },
+      "required": [
+        "writer",
+        "reviewer"
+      ],
+      "additionalProperties": false
+    },
+    "paths": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "type": "string",
+          "const": ".harness/policy.json"
+        },
+        "work": {
+          "type": "string",
+          "const": ".harness/work"
+        },
+        "notes": {
+          "type": "string",
+          "const": ".harness/work/context/notes"
+        },
+        "state": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "policy",
+        "work",
+        "notes",
+        "state"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "manifestVersion",
+    "projectId",
+    "root",
+    "repository",
+    "profile",
+    "runtimes",
+    "paths"
+  ],
+  "additionalProperties": false
+}

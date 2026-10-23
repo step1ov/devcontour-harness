@@ -150,3 +150,26 @@ export {
   repairPolicy,
   type RepairRule,
 } from './engine/failure.ts';
+export * from './projections/index.ts';
+export {
+  inspectPath,
+  checkDestination,
+  listRegularFiles,
+  planFileWrites,
+  applyFileWrites,
+  type FileConflict,
+  type FileIntent,
+  type FileWriteInput,
+  type FilePlanEntry,
+  type FilePlan,
+} from './setup/files.ts';
+export {
+  initProject,
+  readProjectManifest,
+  defaultStateDir,
+  projectIdOf,
+  type InitOptions,
+  type InitData,
+} from './init/project.ts';
+export { diagnoseState, type DiagnoseOptions } from './explain/diagnose.ts';
+export { stopInputsOf, type StopInputOptions } from './explain/state.ts';

@@ -27,6 +27,8 @@ import { doctor } from './control/doctor.ts';
 import { assertToolchainReady, inspectPolicy } from './toolchains/inspect.ts';
 import { profilePin, resolveProfile } from './profiles/resolve.ts';
 import { cliAdapter } from './agents/cli-adapter.ts';
+import { initProject, initText } from './init/project.ts';
+import { diagnoseState, explainText } from './explain/diagnose.ts';
 import type { RunnerHooks } from './engine/runner.ts';
 import { FileContextSource, FileResultSink, FileWorkSource } from './connectors/files.ts';
 
@@ -245,7 +247,19 @@ const options = {
   operation: { type: 'string' },
   decision: { type: 'string' },
   run: { type: 'string' },
+  plan: { type: 'boolean' },
+  human: { type: 'boolean' },
+  writer: { type: 'string' },
 } as const;
+
+/** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
+const flagOwners = { plan: ['init'], writer: ['init'], human: ['init', 'explain'] } as const;
+
+/** Явное человеческое представление успешного ответа (`--human`). */
+const presenters: Partial<Record<CliCommand, (data: never) => string>> = {
+  init: initText,
+  explain: explainText,
+};
 
 async function run(
   argv: string[],
@@ -260,6 +274,9 @@ async function run(
     );
   const command = name as CliCommand;
   const { values: v } = parseArgs({ args: rest, options, strict: true });
+  for (const [flag, owners] of Object.entries(flagOwners))
+    if (v[flag as keyof typeof v] !== undefined && !(owners as readonly string[]).includes(command))
+      throw new HarnessError('INVALID_INPUT', `--${flag} поддерживают: ${owners.join(', ')}`);
   const need = (key: keyof typeof v) => {
     const value = v[key];
     if (value === undefined || value === '')
@@ -501,6 +518,35 @@ async function run(
         connector.close();
       }
     }
+    case 'init': {
+      if (v.writer !== undefined && v.writer !== 'claude' && v.writer !== 'codex')
+        throw new HarnessError('INVALID_INPUT', '--writer: ожидается claude или codex', [
+          { path: ['--writer'], message: v.writer },
+        ]);
+      const data = await initProject({
+        repository: need('repository'),
+        ...(v.profile ? { profile: v.profile } : {}),
+        ...(v.writer ? { writer: v.writer } : {}),
+        ...(v.state ? { state: v.state } : {}),
+        ...(v.plan ? { plan: true } : {}),
+      });
+      // План с конфликтами или неготовым toolchain — отказ по существу с данными.
+      const blocked = data.mode === 'plan' && (data.conflicts > 0 || !data.toolchain.ready);
+      return { command, data, ...(blocked ? { code: exitCodes.refused } : {}) };
+    }
+    case 'explain': {
+      const b = loadPolicy(need('policy'));
+      return {
+        command,
+        data: await diagnoseState({
+          stateDir: need('state'),
+          policy: b.policy,
+          baseDir: b.baseDir,
+          ...(v.work ? { workId: v.work } : {}),
+          adapters: adapters(b.policy),
+        }),
+      };
+    }
     case 'doctor': {
       const b = v.policy ? loadPolicy(v.policy) : v.state ? binding(v.state) : undefined;
       return {
@@ -532,6 +578,7 @@ if (argv[0] === '--help' || argv[0] === 'help') {
 }
 let envelope: CliEnvelope;
 let code: number = exitCodes.ok;
+let text: string | undefined;
 try {
   const result = await run(argv);
   // Ответ проверяется схемой своей команды: CLI не может выдать данные вне договора.
@@ -542,6 +589,8 @@ try {
     data: cliDataSchemas[result.command].parse(result.data),
   };
   code = result.code ?? exitCodes.ok;
+  const present = result.command !== 'version' ? presenters[result.command] : undefined;
+  if (present && argv.includes('--human')) text = present(envelope.data as never);
 } catch (error) {
   const known =
     error instanceof HarnessError
@@ -557,5 +606,5 @@ try {
   for (const issue of known.issues)
     process.stderr.write(`  ${issue.path.join('.')}: ${issue.message}\n`);
 }
-process.stdout.write(JSON.stringify(envelope) + '\n');
+process.stdout.write(text ?? JSON.stringify(envelope) + '\n');
 process.exitCode = code;

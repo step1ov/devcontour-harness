@@ -9,33 +9,9 @@ import {
   type EvidenceRecord,
   type RunResult,
 } from '../contracts/index.ts';
+import { stopCodeOf } from '../projections/stop.ts';
 
-const stopCode = (attempt: AttemptState): ErrorCode => {
-  switch (attempt.failureKind) {
-    case 'gate':
-    case 'empty-result':
-      return 'GATE_FAILED';
-    case 'review':
-      return 'REVIEW_REJECTED';
-    case 'review-protocol':
-      return 'REVIEW_PROTOCOL_INVALID';
-    case 'scope-violation':
-      return 'SCOPE_VIOLATION';
-    case 'budget':
-      return 'BUDGET_EXHAUSTED';
-    case 'cancelled':
-      return 'CANCELLED';
-    case 'provider-auth':
-    case 'environment':
-    case 'timeout':
-      return 'RUNTIME_UNAVAILABLE';
-    case 'stale-base':
-    case 'merge':
-      return 'GIT_FAILED';
-    default:
-      return 'INTERNAL';
-  }
-};
+const stopCode = (attempt: AttemptState): ErrorCode => stopCodeOf(attempt.failureKind);
 
 /**
  * Причины ошибок протокола предыдущих вызовов того же логического ревью

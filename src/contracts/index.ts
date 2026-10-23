@@ -16,3 +16,5 @@ export * from './ports.ts';
 export * from './cli.ts';
 export * from './published.ts';
 export * from './failure.ts';
+export * from './project.ts';
+export * from './diagnosis.ts';
