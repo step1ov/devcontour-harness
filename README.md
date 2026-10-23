@@ -5,7 +5,7 @@ Headless-движок исполнения инженерных поручени
 интеграция с принятой веткой через compare-and-swap и машинный результат с SHA
 и доказательствами.
 
-> Статус: `0.1.0-alpha.7` — предварительный выпуск (alpha). Договоры
+> Статус: `0.1.0-alpha.8` — предварительный выпуск (alpha). Договоры
 > `v1alpha1` могут измениться между alpha-версиями; закрепляйте точную версию.
 > Файл → ревью плана → кандидат → интеграция → принятие → результат JSON, с
 > ограниченным восстановлением, повторным использованием кандидата, бюджетами,
@@ -27,7 +27,7 @@ Headless-движок исполнения инженерных поручени
 Из npm — точная версия (воспроизводимо) или последняя alpha по тегу:
 
 ```sh
-npm install --save-exact devcontour-harness@0.1.0-alpha.7   # точная версия
+npm install --save-exact devcontour-harness@0.1.0-alpha.8   # точная версия
 # или: npm install --save-exact devcontour-harness@alpha     # текущая alpha
 npx harness --version
 ```
@@ -116,6 +116,23 @@ PASS» нет. Адаптеры хоста реализуют порты `Execut
 `/contracts` и `/testing`; JSON-схемы входов и выходов —
 `devcontour-harness/schemas/<имя>.schema.json`. Декларации используют типы
 Node.js: TypeScript-потребителю нужен `@types/node` (или `skipLibCheck`).
+
+## Выпуск 0.1.0-alpha.8
+
+Самостоятельный маршрут для агента пользователя и общие операции для хостов.
+Подробно — [заметки выпуска](docs/release-notes/0.1.0-alpha.8.md).
+
+- `harness init` готовит существующий Git npm/pnpm-репозиторий create-only:
+  `.harness/` с политикой из профиля и toolchain inspection, state вне
+  репозитория, повтор и продолжение после прерывания без перезаписи
+  ([standalone](docs/standalone.md)).
+- `harness explain` объясняет остановки: код, причина, фаза, кто действует,
+  допустимый шаг и evidence — только чтение, без повторов и вызовов моделей.
+- Отказы TLS/DNS/соединения (`EPROTO`, `ECONNREFUSED`, `ENOTFOUND`,
+  `EAI_AGAIN`, `ETIMEDOUT`, `EHOSTUNREACH`, `ENETUNREACH`, `TLS handshake
+failed/timeout`) — класс `environment` с обычным ограниченным повтором.
+- Общие операции для хостов: безопасная подготовка файлов и проекции
+  диагностики (`devcontour-harness/projections`, без `node:*`).
 
 ## Выпуск 0.1.0-alpha.7
 

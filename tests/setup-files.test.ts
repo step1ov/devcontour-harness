@@ -418,3 +418,39 @@ test('H1-02 (H1-F004): назначение совпадает с корнем �
   await symlink(dir, link);
   await checkDestination(link, { root: link });
 });
+
+test('H1-02 (H1-F008): корень — symlink в никуда или под обычным файлом — PATH_CONFLICT, а не сырой errno; ничего не записано', async () => {
+  const { real } = await sandbox();
+  const dangling = join(real, 'dangling');
+  await symlink(join(real, 'missing-target'), dangling);
+  const file = join(real, 'file');
+  await writeFile(file, 'keep');
+  for (const [root, offending] of [
+    [dangling, dangling],
+    [join(file, 'missing'), file],
+  ] as const) {
+    const target = join(root, 'new.txt');
+    const conflict = refusal('PATH_CONFLICT', 'Родитель не является каталогом: ' + offending, [
+      { path: [offending], message: 'ancestor-not-directory' },
+    ]);
+    await assert.rejects(checkDestination(target, { root }), conflict);
+    const files = [{ path: target, content: 'new' }];
+    const plan = await planFileWrites({ root, files });
+    assert.deepEqual(plan.entries, [
+      {
+        path: target,
+        action: 'conflict',
+        conflict: 'ancestor-not-directory',
+        conflictPath: offending,
+      },
+    ]);
+    await assert.rejects(applyFileWrites(plan, files), conflict);
+  }
+  assert.deepEqual((await readdir(real)).sort(), ['dangling', 'file']);
+  assert.equal(await readFile(file, 'utf8'), 'keep');
+  // Отсутствующий корень с каталогом-предком по-прежнему допустим.
+  const absent = join(real, 'absent-root');
+  const files = [{ path: join(absent, 'x.txt'), content: 'x' }];
+  const plan = await planFileWrites({ root: absent, files });
+  assert.equal(plan.conflicts, 0);
+});

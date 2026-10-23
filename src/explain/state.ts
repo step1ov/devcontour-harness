@@ -151,6 +151,8 @@ function outlookOf(
   if (!decision || decision.action === 'stop') return all('stop');
   // Очередь сломанных — в порядке repairDecision; каждый повтор тратит бюджет группы.
   const broken = works.filter((w) => w.status === 'failed' && !w.recovery);
+  // Первая работа очереди без повтора останавливает задание: всем за ней — тоже stop.
+  let stopped = false;
   broken.forEach((w, i) => {
     const kind = w.failureKind ?? 'unknown';
     const rule = repairPolicy[kind];
@@ -162,7 +164,9 @@ function outlookOf(
       identical - 1 < rule.repeats &&
       w.attempt < options.maxAttempts &&
       repairsUsed + i < options.repairBudget;
-    out.set(w.id, w.id === decision.workId ? 'retry' : retry ? 'retry' : 'stop');
+    const outlook = w.id === decision.workId || (retry && !stopped) ? 'retry' : 'stop';
+    if (outlook === 'stop') stopped = true;
+    out.set(w.id, outlook);
   });
   return out;
 }

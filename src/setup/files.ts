@@ -130,10 +130,25 @@ async function destinationConflict(path: string, root?: string): Promise<Found |
   }
   if (base !== undefined) {
     // Сам корень доверен (может быть symlink'ом), но обязан быть каталогом —
-    // и тогда, когда назначение совпадает с корнем.
-    const info = await inspectInWalk(base, true);
-    if (info && !info.isDirectory())
-      return { conflict: 'ancestor-not-directory', path: target, conflictPath: base };
+    // и тогда, когда назначение совпадает с корнем. Существующий корень,
+    // который не разрешается в каталог (symlink в никуда), — тоже конфликт.
+    const own = await inspectInWalk(base);
+    if (own) {
+      const info = own.isSymbolicLink() ? await inspectInWalk(base, true) : own;
+      if (!info?.isDirectory())
+        return { conflict: 'ancestor-not-directory', path: target, conflictPath: base };
+    } else {
+      // Корня нет: его ближайший существующий предок обязан быть каталогом.
+      for (let up = dirname(base); ; up = dirname(up)) {
+        const info = await inspectInWalk(up, true);
+        if (info) {
+          if (!info.isDirectory())
+            return { conflict: 'ancestor-not-directory', path: target, conflictPath: up };
+          break;
+        }
+        if (dirname(up) === up) break;
+      }
+    }
   }
   return undefined;
 }

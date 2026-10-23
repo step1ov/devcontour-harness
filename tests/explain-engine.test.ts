@@ -272,3 +272,60 @@ test('H1-03: explain = движок — разбор в статусе retry п�
     h.close();
   }
 });
+
+test('H1-03 (H1-F007): explain = движок — известная остановка посередине группы останавливает и тех, кто за ней', async () => {
+  const ctx = hsetup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p: Record<string, unknown>) => {
+      p.repairBudget = 6;
+    },
+    graph: (raw: Record<string, unknown>) => {
+      const orders = raw.orders as Record<string, unknown>[];
+      for (const id of ['second', 'third'])
+        orders.push({
+          ...orders[0],
+          id,
+          source: { connector: 'files', ref: id, revision: '1' },
+          title: 'Independent work ' + id,
+          writeScope: ['lib/' + id],
+          dependsOn: [],
+        });
+    },
+  });
+  const h = ctx.open();
+  try {
+    const key = started(ctx, h);
+    for (const i of [0, 1, 2]) {
+      const a = h.engine.claim('controller')!;
+      h.engine.fail(a.id, a.token, 'fixture failure ' + i, {
+        kind: i === 1 ? 'review-protocol' : 'timeout',
+      });
+    }
+    h.engine.release('controller');
+    assert.deepEqual(diagnose(ctx, h), [
+      { workId: 'add-greeting', retryPlanned: true, actor: 'controller', action: 'retry' },
+      { workId: 'second', retryPlanned: false, actor: 'user', action: 'user-decision' },
+      { workId: 'third', retryPlanned: false, actor: 'user', action: 'fix-environment' },
+    ]);
+    const result = await h.run({ graph: ctx.graph, author: 'claude' });
+    assert.deepEqual(
+      result.works.map((w) => [w.id, w.status]),
+      [
+        ['add-greeting', 'done'],
+        ['second', 'failed'],
+        ['third', 'failed'],
+      ],
+    );
+    const job = h.workflows.get(key);
+    assert.equal(job.repairs, 1);
+    assert.match(job.error!, /second/);
+    assert.equal(
+      h.engine.read((v) => v.work('third')!.attempt),
+      1,
+      'third не повторялась',
+    );
+    assert.equal(ctx.calls('claude', 'writer'), 1);
+  } finally {
+    h.close();
+  }
+});
