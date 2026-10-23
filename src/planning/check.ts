@@ -3,6 +3,7 @@ import {
   HarnessError,
   digestOf,
   idSchema,
+  relativePathSchema,
   workGraphDigest,
   type CodedIssue,
   type ContextSnapshot,
@@ -64,9 +65,14 @@ export function planRequestOf(
           `--requirements: репозиторий не объявлен в политике: ${repositoryId}`,
           [{ path: ['--requirements', i], message: repositoryId }],
         );
+      // Тот же разбор отказов, что у plan-check: путь — вход, Git — готовность.
+      const snapshot = snapshotOf(facts, repositoryId, source);
+      if (snapshot instanceof HarnessError)
+        throw new HarnessError(snapshot.code, `--requirements: ${snapshot.message}`, [
+          { path: ['--requirements', i], message: source },
+        ]);
       // В факт — без sha: prompt зависит только от текста требований.
-      const { requirements: found } = requirementSnapshot(path, source, 'HEAD');
-      return { repositoryId, source, requirements: found };
+      return { repositoryId, source, requirements: snapshot.requirements };
     },
   );
   const request = planningRequest({
@@ -231,6 +237,11 @@ function snapshotOf(
   const path = repositoryPath(facts, repositoryId);
   if (path === undefined)
     return new HarnessError('INVALID_INPUT', `Репозиторий не объявлен: ${repositoryId}`);
+  if (!relativePathSchema.safeParse(source).success)
+    return new HarnessError(
+      'INVALID_INPUT',
+      `Источник требований — относительный путь внутри репозитория: ${source}`,
+    );
   try {
     return requirementSnapshot(path, source, 'HEAD');
   } catch (error) {

@@ -83,6 +83,14 @@ export function draftToGraph(
         message:
           'Задача уровня component не называет связанных репозиториев: для нескольких компонентов — scope workspace',
       });
+    // Задача workspace без связанных репозиториев молча стала бы задачей компонента.
+    if (task.scope === 'workspace' && !task.relatedRepositories?.length)
+      issues.push({
+        code: 'INVALID_INPUT',
+        path: ['tasks', i, 'relatedRepositories'],
+        message:
+          'Задача уровня workspace называет связанные репозитории; для одного репозитория — scope component',
+      });
     return {
       apiVersion: API_VERSION,
       id,

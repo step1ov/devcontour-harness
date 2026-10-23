@@ -289,13 +289,23 @@ const optional = <K extends string, T>(key: K, value: T | undefined) =>
   (value === undefined ? {} : { [key]: value }) as Partial<Record<K, T>>;
 
 /** Каталог ContractDocument JSON: `*.json` по имени, каждый по схеме. */
-const contractsIn = (dir: string | undefined) =>
-  dir === undefined
-    ? undefined
-    : readdirSync(resolve(dir))
-        .filter((f) => f.endsWith('.json'))
-        .sort()
-        .map((f) => parseWith(contractDocumentSchema, readJson(join(dir, f), f), f));
+const contractsIn = (dir: string | undefined) => {
+  if (dir === undefined) return undefined;
+  let names: string[];
+  try {
+    names = readdirSync(resolve(dir));
+  } catch (error) {
+    throw new HarnessError(
+      'INVALID_INPUT',
+      `--contracts: каталог не прочитан ${dir}: ${(error as Error).message}`,
+      [{ path: ['--contracts'], message: dir }],
+    );
+  }
+  return names
+    .filter((f) => f.endsWith('.json'))
+    .sort()
+    .map((f) => parseWith(contractDocumentSchema, readJson(join(dir, f), f), f));
+};
 
 /**
  * Контекст планирования по умолчанию: каталоги `<каталог политики>/work/context/<id>`

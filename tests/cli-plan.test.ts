@@ -473,3 +473,18 @@ test('H2-01: данные CLI plan-request/plan-check равны библиот�
   }
   assert.deepEqual(p.trapCalls(), []);
 });
+
+test('H2-02: нечитаемые входы plan-request — INVALID_INPUT, exit 2, а не INTERNAL', () => {
+  const p = planningProject();
+  const briefPath = brief(p);
+  for (const [args, path] of [
+    [['--contracts', join(p.scratch, 'no-such-dir')], '--contracts'],
+    [['--requirements', '/etc/passwd'], '--requirements'],
+    [['--requirements', '../outside.md'], '--requirements'],
+  ] as const) {
+    const r = p.planning('plan-request', '--brief', briefPath, '--policy', p.policyPath, ...args);
+    assert.equal(r.status, 2, args.join(' '));
+    assert.equal(r.json.error.code, 'INVALID_INPUT', args.join(' '));
+    assert.equal(r.json.error.issues[0].path[0], path);
+  }
+});

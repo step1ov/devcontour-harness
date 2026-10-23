@@ -93,3 +93,12 @@ function sortKeys(value: unknown): unknown {
       .map((k) => [k, sortKeys((value as Record<string, unknown>)[k])]),
   );
 }
+
+test('H2-01: ожидания consumer-h2 — байтовые копии фикстур схемы (§4, п. 4)', () => {
+  for (const name of ['devcontour-plan-schema.json', 'devcontour-plan-input-schema.json'])
+    assert.equal(
+      readFileSync(new URL(`./fixtures/consumer-h2/expected/${name}`, import.meta.url), 'utf8'),
+      fixture(name),
+      name,
+    );
+});

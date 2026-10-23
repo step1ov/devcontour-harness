@@ -499,3 +499,13 @@ test('H2-01: планы 16 и 30 задач принимаются, 31 — не�
   assert.equal(wide.tasks[0]!.dependsOn.length, 40);
   assert.equal(wide.tasks[0]!.contracts.length, 40);
 });
+
+test('H2-02: draftToGraph — задача workspace без связанных репозиториев — issue, а не тихая задача компонента', () => {
+  const r = draftToGraph(draftOf(task({ key: 'T1', scope: 'workspace' })), {
+    graphId: 'g1',
+    source,
+    facts,
+  });
+  assert.equal(r.graph, undefined);
+  assert.deepEqual(brief(r.issues), [['INVALID_INPUT', 'tasks.0.relatedRepositories']]);
+});
