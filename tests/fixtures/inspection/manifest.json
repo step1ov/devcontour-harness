@@ -1,0 +1,42 @@
+{
+  "description": "Исторические проекции review.json.probes живого пилота L2 (alpha.6) для IN02/IN03. Тесты читают только эти файлы, не checkout демо.",
+  "sourceRepository": "devcontour-herness-demo",
+  "fixtures": [
+    {
+      "id": "IN02",
+      "file": "l2-ui-candidate-probes.json",
+      "source": "docs/recorded-runs/20261023-072016-live-pilot-006d/state/artifacts/741578f5-95a3-4a5f-b83b-190fb92182c0/candidate/review/review.json",
+      "sourceSha256": "e5f670acba631e04f147864ae958f773242bdeaf0de89cae87c0511f23e6aef3",
+      "pointer": "/probes",
+      "count": 8,
+      "context": {
+        "attempt": "741578f5-95a3-4a5f-b83b-190fb92182c0",
+        "phase": "candidate",
+        "sha": "67bc83c1d6047e9d27ea1207b48f92ef95a15dcb",
+        "call": 1
+      },
+      "sha256": "8147d22077cc3052df39b529fdd140f586fd8fb636df016ad885bc8d290b6b43"
+    },
+    {
+      "id": "IN03",
+      "file": "l2-domain-integration-probes.json",
+      "source": "docs/recorded-runs/20261023-072016-live-pilot-006d/state/artifacts/c7b5cbf3-8a5e-4777-9a29-afb145a35b9d/integration/review/review.json",
+      "sourceSha256": "6b74097ae70bfac10335f2e29c231ebd29b07c20fdb96124c490cfe6a280f7a8",
+      "pointer": "/probes",
+      "count": 7,
+      "context": {
+        "attempt": "c7b5cbf3-8a5e-4777-9a29-afb145a35b9d",
+        "phase": "integration",
+        "sha": "0b85200e55c9ffcd1b67df189d65e6b0856cb99d",
+        "call": 1
+      },
+      "sha256": "956936e58fb2bbabb29666cc9e7647cb71abf6347c3b531681a789047e4f0e3b"
+    }
+  ],
+  "transformations": [
+    "Из review.json взят только массив по JSON pointer /probes; значения, порядок элементов и ключей не менялись.",
+    "Файл переформатирован: JSON.stringify(probes, null, 2), затем prettier проекта (только пробелы и переносы); JSON.parse fixture deep-equal массиву probes источника (проверено при создании).",
+    "Абсолютные пути в источнике уже обезличены записью recorded run (плейсхолдеры <run> и <tmp> в log, gate.artifacts, gate.scratch, gate.report.path); дополнительных замен не делалось.",
+    "Вызов reviewer (call) в исходном пути не указан: один журнал probes.jsonl фазы без каталога call-N, поэтому context.call = 1."
+  ]
+}

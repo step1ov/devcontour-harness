@@ -288,11 +288,26 @@ export async function runCheck(
     readable: string[];
     controller: string[];
     settingsDir: string;
+    /**
+     * Запуск проверки подтверждён: без песочницы — порождён её процесс, в
+     * песочнице — обёртка создала метку старта перед exec. Запуск самой
+     * обёртки песочницы запуском проверки не считается. Вызывается не более
+     * одного раза, в том числе когда проверка затем завершилась исключением.
+     */
+    onStart?: () => void;
   },
 ) {
+  let launched = false;
+  const confirm = () => {
+    if (launched) return;
+    launched = true;
+    options.onStart?.();
+  };
   let argv = options.argv,
     env = options.env,
-    started: string | undefined;
+    started: string | undefined,
+    result: Awaited<ReturnType<typeof command>> | undefined,
+    attempts = 1;
   const scratch = await realpath(await mkdtemp(join(tmpdir(), 'dc-gate-')));
   // Метка старта — вне TMPDIR команды: проверка, чистящая свой временный
   // каталог, не должна стирать признак того, что она уже начиналась.
@@ -318,9 +333,14 @@ export async function runCheck(
       argv = wrapped.argv;
       env = { ...env, ...wrapped.env };
     }
-    const execute = () =>
-      command(argv, options.cwd, {
+    const execute = () => {
+      // Уже отменённый вызов не запускается: слушатель отмены на отменённом
+      // сигнале не срабатывает, и команда шла бы до таймаута.
+      if (options.signal.aborted)
+        throw Object.assign(new Error('Проверка отменена до запуска'), { name: 'AbortError' });
+      return command(argv, options.cwd, {
         signal: options.signal,
+        ...(started === undefined ? { onSpawn: confirm } : {}),
         timeoutMs: options.timeoutMs,
         env,
         redact: options.redact,
@@ -330,27 +350,54 @@ export async function runCheck(
         // во время проверки, — её потомок, даже без метки и родства.
         contain: { dirs: [...options.write, scratch, marks] },
       });
-    let result = await execute(),
-      attempts = 1;
-    // sandbox-runtime ищет shell через `which` с таймаутом в секунду и под
-    // нагрузкой отказывает до запуска команды. Повтор допустим, только если
-    // команда точно не начиналась: метки старта нет.
-    for (; attempts < 3 && sandboxNotStarted(result, started); attempts++) {
-      await new Promise((r) => setTimeout(r, 500 * attempts));
+    };
+    try {
       result = await execute();
+      // sandbox-runtime ищет shell через `which` с таймаутом в секунду и под
+      // нагрузкой отказывает до запуска команды. Повтор допустим, только если
+      // команда точно не начиналась: метки старта нет.
+      for (; attempts < 3 && sandboxNotStarted(result, started); attempts++) {
+        await new Promise((r) => setTimeout(r, 500 * attempts));
+        result = await execute();
+      }
+    } finally {
+      // Факт старта читается до удаления метки — и при исключении после него.
+      if (started !== undefined && existsSync(started)) confirm();
     }
-    return { ...result, attempts };
+    // Без песочницы завершившийся процесс точно порождался.
+    if (started === undefined) confirm();
+    return { ...result, attempts, started: launched };
   } finally {
     // Каждый каталог убирается независимо: отказ уборки временного каталога
     // проверки (она могла снять с него права) не должен оставлять и метки.
     const removed = await Promise.allSettled([
-      rm(scratch, { recursive: true, force: true }),
-      rm(marks, { recursive: true, force: true }),
+      checkCleanup.remove(scratch),
+      checkCleanup.remove(marks),
     ]);
     const failed = removed.find((r) => r.status === 'rejected');
-    if (failed) throw failed.reason;
+    if (failed) {
+      // Отказ уборки после завершения не стирает исход проверки: код и
+      // вывод доступны вызывающему через ошибку (`completedCheck`).
+      const error =
+        failed.reason instanceof Error ? failed.reason : new Error(String(failed.reason));
+       
+      throw result
+        ? Object.assign(error, { [checkResult]: { ...result, attempts, started: launched } })
+        : error;
+    }
   }
 }
+const checkResult = Symbol('runCheck.result');
+/** Исход проверки, завершившейся до исключения (например, отказа уборки), если он есть. */
+export function completedCheck(error: unknown) {
+  return error && typeof error === 'object' && checkResult in error
+    ? (error as Record<typeof checkResult, Awaited<ReturnType<typeof runCheck>>>)[checkResult]
+    : undefined;
+}
+/** Уборка каталогов проверки; тест подменяет её, чтобы проверить отказ после исхода. */
+export const checkCleanup = {
+  remove: (dir: string) => rm(dir, { recursive: true, force: true }),
+};
 /** Проверка механизма песочницы; тест подменяет её, чтобы проверить отказ. */
 export const isolationBackend = { check: isolationSupport };
 /**

@@ -168,14 +168,81 @@ export const propertyEvidenceSchema = z.strictObject({
   coverage: z.array(z.string().max(1000)).optional(),
 });
 
-/** Что reviewer действительно выполнил — по событиям runtime, не по словам модели. */
+/** Происхождение подтверждённой команды: событие runtime или запуск probe controller. */
+export const inspectionOriginSchema = z.discriminatedUnion('type', [
+  z.strictObject({
+    type: z.literal('runtime'),
+    /** Имя runtime reviewer (`codex`, `claude`, …). */
+    runtime: z.string().min(1).max(100),
+    /** ID item в потоке событий runtime; `null` — runtime его не дал. */
+    item: z.string().min(1).max(200).nullable(),
+  }),
+  z.strictObject({
+    type: z.literal('controller'),
+    /** runId запуска probe в журнале controller (не runId попытки). */
+    runId: z.string().min(1).max(200),
+  }),
+]);
+
+/**
+ * Что reviewer действительно выполнил — по событиям runtime и журналу
+ * проверок controller одного вызова reviewer, не по словам модели
+ * (docs/review-probes.md). Поля после `reason` появились в alpha.7 и
+ * необязательны: записи прежних версий читаются как есть.
+ */
 export const reviewInspectionSchema = z.strictObject({
   mode: z.enum(['commands', 'diff-only']),
-  source: z.enum(['codex-events', 'unavailable']),
+  source: z.enum(['codex-events', 'unavailable', 'controller-probes', 'runtime-and-controller']),
   commands: z.array(
-    z.strictObject({ command: z.string(), exitCode: z.number().int(), output: z.string() }),
+    z.strictObject({
+      command: z.string(),
+      /** `null` — код неизвестен: таймаут/отмена после старта, старая проекция без кода. */
+      exitCode: z.number().int().nullable(),
+      output: z.string(),
+      origins: z.array(inspectionOriginSchema).min(1).max(8).optional(),
+      /** Исход: `completed`/`failed` — runtime; остальные — статус probe controller. */
+      status: z.enum(['completed', 'passed', 'failed', 'timeout', 'cancelled', 'error']).optional(),
+      /** Неуспех не в проверяемом коде: среда или отчёт (как у probe). */
+      failure: z.enum(['environment', 'report']).optional(),
+      /** ID объявленного gate, запущенного через probe. */
+      gate: z.string().min(1).max(200).optional(),
+      note: z.string().max(2000).optional(),
+    }),
   ),
   reason: z.string().nullable(),
+  /** Вызов reviewer, которому принадлежит итог. */
+  context: z
+    .strictObject({
+      /** ID попытки harness (runId evidence). */
+      attempt: z.string().min(1).max(200),
+      phase: z.enum(['candidate', 'integration']),
+      sha: gitShaSchema,
+      call: z.number().int().positive(),
+    })
+    .optional(),
+  /** Число всех подтверждённых операций, в том числе не вошедших в `commands`. */
+  total: z.number().int().min(0).optional(),
+  /** Записи журнала, не засчитанные выполнением: почему (не более 100). */
+  excluded: z
+    .array(
+      z.strictObject({
+        runId: z.string().min(1).max(200),
+        status: z.string().max(40).nullable(),
+        reason: z.enum([
+          'not-started',
+          'legacy-unconfirmed',
+          'foreign-scope',
+          'unknown-status',
+          'unfinished',
+          'abandoned',
+        ]),
+      }),
+    )
+    .max(100)
+    .optional(),
+  excludedTotal: z.number().int().min(0).optional(),
+  /** Строки журнала без формы исхода (битый JSON, `{}`): не запуски. */
+  invalid: z.number().int().min(0).optional(),
 });
 
 export const evidenceFindingSchema = z.strictObject({

@@ -19,6 +19,7 @@ import {
   type RuntimeName,
 } from '../contracts/index.ts';
 import { reviewOutputSchema } from '../agents/schemas.ts';
+import { redactInspection } from '../agents/inspect.ts';
 import { executionEnvironment } from '../environment/lifecycle.ts';
 import { redactDeep } from '../environment/redaction.ts';
 import type { CallMeta } from '../engine/budget.ts';
@@ -266,17 +267,20 @@ export async function technicalReview(
   };
   // Сохраняемые представления маскируются полным окружением вызова: сырой
   // структурированный ответ адаптера может нести значение секрета профиля.
+  const artifact = redactDeep(
+    { response: parsed.success ? parsed.data : null, issues, inspection: null },
+    execution.redact,
+  );
+  // Inspection маскируется по полям: служебные значения не текст reviewer.
   await writeFile(
     record.artifact,
     JSON.stringify(
-      redactDeep(
-        {
-          response: parsed.success ? parsed.data : null,
-          issues,
-          inspection: response.inspection ?? null,
-        },
-        execution.redact,
-      ),
+      {
+        ...artifact,
+        inspection: response.inspection
+          ? redactInspection(response.inspection, execution.redact)
+          : null,
+      },
       null,
       2,
     ),

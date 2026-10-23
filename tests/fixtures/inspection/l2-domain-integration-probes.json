@@ -1,0 +1,107 @@
+[
+  {
+    "runId": "101c2d21-7511-4456-9b4a-a3e0ec741332",
+    "argv": [
+      "git",
+      "diff",
+      "16e6e7215c249de874bec8659becfb3b8269ac64",
+      "0b85200e55c9ffcd1b67df189d65e6b0856cb99d",
+      "--stat"
+    ],
+    "status": "passed",
+    "durationMs": 845,
+    "limitMs": 240000,
+    "log": "<run>/state/artifacts/c7b5cbf3-8a5e-4777-9a29-afb145a35b9d/integration/review/probes.jsonl"
+  },
+  {
+    "runId": "b19b3d04-9a52-4363-be1b-eb98e5a776e6",
+    "argv": [
+      "node",
+      "-e",
+      "const fs=require('fs'); for(const p of ['src/domain/booking.js','src/domain/rooms.js','test/run-tests.mjs',...fs.readdirSync('test').filter(x=>x.includes('domain')).map(x=>'test/'+x)]) {console.log('\\nFILE '+p+'\\n'+fs.readFileSync(p,'utf8'))}"
+    ],
+    "status": "passed",
+    "durationMs": 634,
+    "limitMs": 240000,
+    "log": "<run>/state/artifacts/c7b5cbf3-8a5e-4777-9a29-afb145a35b9d/integration/review/probes.jsonl"
+  },
+  {
+    "runId": "c7f9d805-ae11-44fa-ba85-de4dd43c68d5",
+    "argv": ["node", "test/run-tests.mjs", "domain"],
+    "status": "passed",
+    "durationMs": 820,
+    "limitMs": 90000,
+    "gate": {
+      "id": "domain",
+      "phase": "integration",
+      "sha": "0b85200e55c9ffcd1b67df189d65e6b0856cb99d",
+      "cwd": ".",
+      "argv": ["node", "test/run-tests.mjs", "domain"],
+      "controllerEnv": [
+        "CI",
+        "TURBO_FORCE",
+        "GOFLAGS",
+        "DEVCONTOUR_REPORT_PATH",
+        "HARNESS_REPORT_PATH"
+      ],
+      "artifacts": "<run>/state/artifacts/c7b5cbf3-8a5e-4777-9a29-afb145a35b9d/integration/review/probe-runs/c7f9d805-ae11-44fa-ba85-de4dd43c68d5",
+      "scratch": "<tmp>/dc-probe-report-3pgDiy",
+      "report": {
+        "status": "fresh",
+        "tests": 53,
+        "failures": 0,
+        "skipped": 0,
+        "path": "<run>/state/artifacts/c7b5cbf3-8a5e-4777-9a29-afb145a35b9d/integration/review/probe-runs/c7f9d805-ae11-44fa-ba85-de4dd43c68d5/domain.xml",
+        "digest": "d2fac8151c0d26b347adbe3b69d6699501269c75199dba81ee66a797380cb2be"
+      },
+      "scratchRemoved": true
+    },
+    "log": "<run>/state/artifacts/c7b5cbf3-8a5e-4777-9a29-afb145a35b9d/integration/review/probe-runs/c7f9d805-ae11-44fa-ba85-de4dd43c68d5/domain.log"
+  },
+  {
+    "runId": "739b821f-d763-4e92-9f43-0b3bea7f88e1",
+    "argv": [
+      "node",
+      "--input-type=module",
+      "-e",
+      "import {parseTime,createBookingStore} from './src/domain/booking.js'; for (const start of ['10:00\\n','10:00\\r','10:00\\r\\n','10:00\\u2028']) {const store=createBookingStore();console.log(JSON.stringify({start,parsed:parseTime(start),result:store.create({roomId:'alpha',start,end:'11:00'})}));}"
+    ],
+    "status": "passed",
+    "durationMs": 713,
+    "limitMs": 240000,
+    "log": "<run>/state/artifacts/c7b5cbf3-8a5e-4777-9a29-afb145a35b9d/integration/review/probes.jsonl"
+  },
+  {
+    "runId": "a9f5f475-0bb7-44d7-aa21-e7ae7409ad83",
+    "argv": [
+      "node",
+      "-e",
+      "const fs=require('fs'); console.log(fs.readFileSync('src/domain/booking.js','utf8'));console.log(fs.readFileSync('test/domain.test.mjs','utf8').slice(0,3200));"
+    ],
+    "status": "passed",
+    "durationMs": 696,
+    "limitMs": 240000,
+    "log": "<run>/state/artifacts/c7b5cbf3-8a5e-4777-9a29-afb145a35b9d/integration/review/probes.jsonl"
+  },
+  {
+    "runId": "e26eb119-96fd-4b1f-bceb-55e63f219e44",
+    "argv": [
+      "node",
+      "--input-type=module",
+      "-e",
+      "import assert from 'node:assert/strict'; import {parseTime,validateBookingInput,createBookingStore} from './src/domain/booking.js'; for(let m=0;m<1440;m++){const s=String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');assert.equal(parseTime(s),m);} for(const [input,code] of [[{roomId:'missing',start:'bad',end:'bad'},'UNKNOWN_ROOM'],[{roomId:'alpha',start:'bad',end:'19:00'},'INVALID_TIME_FORMAT'],[{roomId:'alpha',start:'08:00',end:'07:00'},'OUTSIDE_WORKING_HOURS'],[{roomId:'alpha',start:'12:00',end:'11:00'},'INVALID_RANGE']]){assert.equal(validateBookingInput(input).error.code,code);} const s=createBookingStore();const r=s.create({roomId:'alpha',start:'10:00',end:'11:00'});r.booking.start='09:00';assert.equal(s.list()[0].start,'10:00');console.log('1440 valid times, validation precedence, and create-result isolation passed');"
+    ],
+    "status": "passed",
+    "durationMs": 696,
+    "limitMs": 240000,
+    "log": "<run>/state/artifacts/c7b5cbf3-8a5e-4777-9a29-afb145a35b9d/integration/review/probes.jsonl"
+  },
+  {
+    "runId": "c363e5a5-31ca-44ea-8632-2cdb9f9d729d",
+    "argv": ["git", "status", "--short"],
+    "status": "passed",
+    "durationMs": 647,
+    "limitMs": 240000,
+    "log": "<run>/state/artifacts/c7b5cbf3-8a5e-4777-9a29-afb145a35b9d/integration/review/probes.jsonl"
+  }
+]

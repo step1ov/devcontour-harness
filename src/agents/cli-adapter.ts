@@ -338,9 +338,16 @@ export function cliAdapter(
         diagnostics: { exitCode: null, reason: redact(reason).slice(0, 500), log: logPath },
       });
       let result;
+      // События runtime для inspection разбираются до маскирования (иначе
+      // короткий секрет портит `item.completed`), текст полей маскируется
+      // при разборе; сырой поток только в памяти и не сохраняется.
+      let raw = '';
       try {
         result = await command(argv, r.cwd, {
           contain: { dirs: review ? [] : r.sandbox.writable },
+          ...(review
+            ? { onRawStdout: (text: string) => void (raw = (raw + text).slice(-2_000_000)) }
+            : {}),
           onOutput: (stream, text) => {
             if (logged >= 10_000_000) return;
             const entry = `[${new Date().toISOString()} ${stream}] ${text}`;
@@ -396,7 +403,7 @@ export function cliAdapter(
         model,
         runtimeVersion: version,
         usage,
-        ...(review ? { inspection: inspectReview(runtime, result.stdout) } : {}),
+        ...(review ? { inspection: inspectReview(runtime, raw, redact) } : {}),
       };
       const diagnostics = (why?: string) => ({
         exitCode: result.code,

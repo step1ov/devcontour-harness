@@ -227,9 +227,9 @@ if (runtime === 'codex') {
       item: {
         type: 'command_execution',
         command: step.observedCommand,
-        exit_code: 0,
-        aggregated_output: 'ok',
-        status: 'completed',
+        exit_code: step.observedExitCode ?? 0,
+        aggregated_output: step.observedOutput ?? 'ok',
+        status: step.observedExitCode ? 'failed' : 'completed',
       },
     });
   if (started)

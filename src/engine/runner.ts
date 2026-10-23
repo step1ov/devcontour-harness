@@ -42,7 +42,7 @@ import { git } from '../environment/process.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
 import { redactDeep, type Redactor } from '../environment/redaction.ts';
 import { implementationOutputSchema, reviewOutputSchema } from '../agents/schemas.ts';
-import { unobservedReview } from '../agents/inspect.ts';
+import { reviewInspection } from '../agents/inspect.ts';
 import { reviewerRunsChecks } from '../agents/cli-adapter.ts';
 import {
   gateProbePrompt,
@@ -50,7 +50,8 @@ import {
   probeCommand,
   probeGates,
   probeLimits,
-  probeRecords,
+  probeRecord,
+  readProbeJournal,
   recoverProbeLog,
   probeTool,
   type ProbeSpec,
@@ -1569,6 +1570,8 @@ export class Runner {
     phase: string,
     sha: string,
     gates: GatePolicy[],
+    /** Номер вызова reviewer логического ревью: записывается в каждый запуск probe. */
+    call: number,
     /**
      * Повтор reviewer того же логического ревью: срок и остаток бюджета
      * проверок переходят от первого вызова, а не выдаются заново.
@@ -1613,6 +1616,7 @@ export class Runner {
       gates: probeGates(gates),
       phase,
       sha,
+      scope: { attempt: attempt.id, phase, sha, call },
       artifacts: join(dir, 'probe-runs'),
     };
     const specPath = join(dir, 'probe.json');
@@ -1783,7 +1787,17 @@ export class Runner {
       }
       const callDir = call === 1 ? dir : join(dir, `call-${call}`);
       await mkdir(callDir, { recursive: true });
-      const probe = await this.reviewProbe(attempt, work, cwd, callDir, phase, sha, gates, shared);
+      const probe = await this.reviewProbe(
+        attempt,
+        work,
+        cwd,
+        callDir,
+        phase,
+        sha,
+        gates,
+        call,
+        shared,
+      );
       const response = await this.call(
         this.adapter(attempt.reviewer),
         {
@@ -1830,9 +1844,17 @@ export class Runner {
           }
         : checkCodeReview(response.output, history, { runId: attempt.id, phase, sha }, { legacy });
       const result = verdict.result;
-      const inspection = response.inspection ?? unobservedReview();
       // Проверки reviewer — по журналу controller, а не по самоотчёту модели.
-      const probes = probe ? await probeRecords(probe.log) : undefined;
+      const journal = probe ? await readProbeJournal(probe.log) : undefined;
+      const probes = journal?.records.map(probeRecord);
+      // Один итог вызова: события runtime и журнал controller этого вызова,
+      // уже замаскированный; он же — в review.json и во всех ветках evidence.
+      const inspection = reviewInspection({
+        runtime: response.inspection,
+        journal,
+        context: { attempt: attempt.id, phase, sha, call },
+        redact,
+      });
       const protocol: ReviewRound['protocol'] = !clean
         ? 'unsafe'
         : verdict.valid
@@ -1864,13 +1886,10 @@ export class Runner {
         },
         redact,
       );
-      // Служебные значения записи — перечисления контура, а не текст reviewer:
-      // короткий секрет, совпавший с их частью, их не маскирует.
-      record.inspection = {
-        ...record.inspection,
-        mode: inspection.mode,
-        source: inspection.source,
-      };
+      // Итог уже замаскирован до обрезки; его перечисления и идентификаторы
+      // controller — не текст reviewer: короткий секрет, совпавший с их
+      // частью, их не маскирует.
+      record.inspection = inspection;
       if (result)
         record.findings = record.findings.map((f, i) => ({
           ...f,

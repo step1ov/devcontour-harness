@@ -27,6 +27,7 @@ import {
 } from '../contracts/index.ts';
 import { redactor } from '../environment/redaction.ts';
 import {
+  completedCheck,
   freshnessEnv,
   junitSummary,
   runCheck,
@@ -89,6 +90,19 @@ export const probeSpec = z.object({
   /** Фаза и SHA ревью: записываются в каждый запуск gate. */
   phase: z.string().optional(),
   sha: z.string().optional(),
+  /**
+   * Вызов reviewer, которому принадлежит журнал: попытка harness, фаза, SHA
+   * и номер вызова. Записывается в каждый исход — по нему итог ревью не
+   * присваивает себе запуски чужого вызова.
+   */
+  scope: z
+    .strictObject({
+      attempt: z.string().min(1),
+      phase: z.string().min(1),
+      sha: z.string().min(1),
+      call: z.number().int().positive(),
+    })
+    .optional(),
   /** Каталог controller для отчётов и журналов запусков gate; вне проверяемого дерева. */
   artifacts: z.string().optional(),
 });
@@ -177,6 +191,15 @@ export type ProbeResult = {
   gate?: ProbeGateRun;
   /** Журнал controller, в котором записан этот запуск. */
   log?: string;
+  /**
+   * Запуск проверки подтверждён на границе исполнения (`runCheck`): процесс
+   * порождён или обёртка песочницы создала метку старта. `false` — команда
+   * не начиналась (отказ до старта, бюджет, неизвестный gate, отмена до
+   * запуска). У записей alpha.6 и ранее поля нет.
+   */
+  started: boolean;
+  /** Вызов reviewer, которому принадлежит запуск (из спецификации probe). */
+  scope?: ProbeSpec['scope'];
 };
 
 const tail = (text: string) => (text.length > 8000 ? '…' + text.slice(-8000) : text);
@@ -282,6 +305,8 @@ type Outcome = Pick<
   ProbeResult,
   'status' | 'exitCode' | 'stdout' | 'stderr' | 'note' | 'failure' | 'gate' | 'log'
 >;
+/** Факт старта, который исполнитель отмечает сразу на границе запуска. */
+type Launch = { started: boolean };
 
 export class ReviewProbes {
   private spent = 0;
@@ -333,10 +358,22 @@ export class ReviewProbes {
       limitMs,
       stdout: '',
       stderr: '',
+      started: false,
+      ...(this.spec.scope ? { scope: this.spec.scope } : {}),
     };
     const budgetLeft = () => Math.max(0, this.spec.budgetMs - this.spent);
     let result: ProbeResult;
-    if (input.gate !== undefined && (!gate || gate.property))
+    if (signal.aborted)
+      // Отменённый до запуска вызов не исполняется и не резервирует бюджет.
+      result = {
+        ...base,
+        status: 'cancelled',
+        exitCode: null,
+        durationMs: 0,
+        budgetLeftMs: budgetLeft(),
+        note: 'Вызов отменён до запуска; команда не исполнялась.',
+      };
+    else if (input.gate !== undefined && (!gate || gate.property))
       // Неизвестный ID не исполняется и не тратит бюджет: модель не выбирает
       // команду, только объявленный gate.
       result = {
@@ -377,6 +414,9 @@ export class ReviewProbes {
       // засчитывает незавершённый запуск целиком (R3-F01). Без записи
       // проверка не запускается.
       const reserved = reserveProbe(this.spec.log, runId, limitMs, base.argv, gate?.id);
+      // Факт старта отмечается на границе исполнения и переживает исключение
+      // после неё: упавшее сохранение отчёта не делает запуск «не бывшим».
+      const launch: Launch = { started: false };
       let outcome: Outcome;
       try {
         if (reserved) throw reserved;
@@ -384,23 +424,53 @@ export class ReviewProbes {
         // останавливает процессы проверки, пережившие controller.
         const marked = { ...env, [probeRunEnv]: runId };
         outcome = gate
-          ? await this.gate(gate, runId, limitMs, marked, redact, signal)
-          : await this.command(argv, runId, limitMs, marked, redact, signal);
+          ? await this.gate(gate, runId, limitMs, marked, redact, signal, launch)
+          : await this.command(argv, runId, limitMs, marked, redact, signal, launch);
       } catch (error) {
-        outcome = {
-          status: 'error',
-          exitCode: null,
-          stdout: '',
-          stderr: '',
-          failure: 'environment',
-          note:
-            'Команда не запустилась — это отказ среды, а не результат проверки: ' +
-            redact(error instanceof Error ? error.message : String(error)),
-        };
+        const message = redact(error instanceof Error ? error.message : String(error));
+        // Проверка завершилась, а исключение пришло после (уборка): её код
+        // и вывод — исход, который не теряется.
+        const done = completedCheck(error);
+        outcome = done
+          ? {
+              status: 'error',
+              failure: 'environment',
+              exitCode: done.timedOut || signal.aborted ? null : done.code,
+              stdout: tail(done.stdout),
+              stderr: tail(done.stderr),
+              note:
+                'Проверка завершилась, но controller не убрал её временные каталоги — отказ среды после исхода: ' +
+                message,
+            }
+          : signal.aborted && !launch.started
+            ? {
+                status: 'cancelled',
+                exitCode: null,
+                stdout: '',
+                stderr: '',
+                note: 'Вызов отменён до запуска; команда не исполнялась.',
+              }
+            : {
+                status: 'error',
+                exitCode: null,
+                stdout: '',
+                stderr: '',
+                failure: 'environment',
+                note: launch.started
+                  ? 'Проверка запустилась, но её исход не получен — отказ среды, а не результат проверки: ' +
+                    message
+                  : 'Команда не запустилась — это отказ среды, а не результат проверки: ' + message,
+              };
       }
       const durationMs = this.now() - started;
       this.spent += durationMs - limitMs;
-      result = { ...base, ...outcome, durationMs, budgetLeftMs: budgetLeft() };
+      result = {
+        ...base,
+        ...outcome,
+        started: launch.started,
+        durationMs,
+        budgetLeftMs: budgetLeft(),
+      };
     }
     // Журнал — наблюдение controller, а не самоотчёт модели. Строка исхода
     // разрешает записанный ранее резерв фактической длительностью.
@@ -423,11 +493,13 @@ export class ReviewProbes {
     env: NodeJS.ProcessEnv,
     redact: (text: string) => string,
     signal: AbortSignal,
+    launch: Launch,
   ): Promise<Outcome> {
     const r = await runCheck(
       { config: { isolation: this.spec.isolation } },
       {
         argv,
+        onStart: () => (launch.started = true),
         cwd: this.spec.cwd,
         env: { ...env, CI: '1' },
         redact,
@@ -497,6 +569,7 @@ export class ReviewProbes {
     env: NodeJS.ProcessEnv,
     redact: (text: string) => string,
     signal: AbortSignal,
+    launch: Launch,
   ): Promise<Outcome> {
     const meta: ProbeGateRun = {
       id: gate.id,
@@ -571,11 +644,13 @@ export class ReviewProbes {
     let outcome: Outcome;
     let header = `# harness probe gate ${gate.id}: run=${runId} phase=${meta.phase ?? '-'} sha=${meta.sha ?? '-'} cwd=${relative(root, gateCwd) || '.'} argv=${JSON.stringify(meta.argv)} env=${meta.controllerEnv.join(',')}\n`;
     let output = '';
+    let finished: Awaited<ReturnType<typeof runCheck>> | undefined;
     try {
       const r = await runCheck(
         { config: { isolation: this.spec.isolation } },
         {
           argv: gate.command,
+          onStart: () => (launch.started = true),
           cwd: gateCwd,
           env: { ...env, ...controllerEnv },
           redact,
@@ -589,6 +664,7 @@ export class ReviewProbes {
           settingsDir: join(this.spec.settingsDir, runId),
         },
       );
+      finished = r;
       output = r.stdout + '\n' + r.stderr;
       // Отчёт читается и сохраняется до удаления scratch — при любом исходе.
       const read = gate.report
@@ -672,25 +748,61 @@ export class ReviewProbes {
           note: `${report ? `${report.tests} tests, 0 failures, 0 skipped. ` : ''}${observation}`,
         };
     } catch (error) {
-      outcome = environment(
-        `Gate не запустился: ${redact(error instanceof Error ? error.message : String(error))}.`,
-      );
+      const message = redact(error instanceof Error ? error.message : String(error));
+      // Сбой после старта (например, сохранения отчёта) не стирает исход
+      // процесса: код и вывод завершившейся проверки остаются в результате.
+      outcome = launch.started
+        ? {
+            ...environment(`Gate запустился, но его evidence не сохранено: ${message}.`),
+            ...((finished ??= completedCheck(error))
+              ? {
+                  exitCode: finished.timedOut || signal.aborted ? null : finished.code,
+                  stdout: tail(finished.stdout),
+                  stderr: tail(finished.stderr),
+                }
+              : {}),
+          }
+        : signal.aborted
+          ? {
+              ...empty,
+              status: 'cancelled',
+              note: 'Вызов отменён до запуска gate; gate не исполнялся.',
+            }
+          : environment(`Gate не запустился: ${message}.`);
     } finally {
       meta.scratchRemoved = await removeScratch(scratch);
     }
     header += `# status=${outcome.status}${outcome.failure ? ` failure=${outcome.failure}` : ''} exit=${outcome.exitCode ?? '-'} report=${meta.report?.status ?? '-'}${meta.report?.digest ? ` digest=${meta.report.digest}` : ''} scratchRemoved=${meta.scratchRemoved}\n`;
-    await writeFile(logPath, redact(header + output + (outcome.note ? '\n' + outcome.note : '')), {
-      flag: 'wx',
-    });
-    await writeFile(
-      join(runDir, 'run.json'),
-      JSON.stringify(
-        { runId, status: outcome.status, failure: outcome.failure, gate: meta },
-        null,
-        2,
-      ),
-      { flag: 'wx' },
-    );
+    try {
+      await writeFile(
+        logPath,
+        redact(header + output + (outcome.note ? '\n' + outcome.note : '')),
+        { flag: 'wx' },
+      );
+      await writeFile(
+        join(runDir, 'run.json'),
+        JSON.stringify(
+          {
+            runId,
+            status: outcome.status,
+            failure: outcome.failure,
+            started: launch.started,
+            gate: meta,
+          },
+          null,
+          2,
+        ),
+        { flag: 'wx' },
+      );
+    } catch (error) {
+      // Исход уже получен: отказ записи evidence не стирает код и вывод.
+      outcome = {
+        ...outcome,
+        status: 'error',
+        failure: 'environment',
+        note: `${outcome.note ?? ''} Evidence запуска не сохранено: ${redact(error instanceof Error ? error.message : String(error))}.`.trim(),
+      };
+    }
     return { ...outcome, gate: meta, log: logPath };
   }
 }
@@ -854,35 +966,126 @@ export interface ProbeRecord {
   gate?: ProbeGateRun;
   /** Журнал controller, где записан запуск (у gate — собственный файл). */
   log?: string;
+  /** Код процесса; `null` — неизвестен (таймаут, отмена, не запускался). */
+  exitCode?: number | null;
+  /** Подтверждённый старт; нет у записей alpha.6 и ранее. */
+  started?: boolean;
+  /** Вызов reviewer, которому принадлежит запуск. */
+  scope?: ProbeResult['scope'];
+  /** Пояснение controller (ограничено). */
+  note?: string;
+}
+
+/** Запись журнала с выводом команды — вход итога `inspection`. */
+export interface ProbeJournalRecord extends ProbeRecord {
+  stdout?: string;
+  stderr?: string;
+}
+
+/** Журнал проверок вызова reviewer, как его читает controller. */
+export interface ProbeJournal {
+  /** Строки исхода в порядке журнала; повтор одного runId — одна запись (первая). */
+  records: ProbeJournalRecord[];
+  /** Строки, не являющиеся ни исходом, ни учётом бюджета: битый JSON, `{}`, чужая форма. */
+  invalid: number;
+  /** Резервы без строки исхода: учёт бюджета и recovery, не запуски. */
+  reservations: { runId: string; abandoned: boolean }[];
+}
+
+const NOTE_LIMIT = 2000;
+/** Статусы исхода probe; иной статус — диагностика, а не исход. */
+export const probeStatuses: ReadonlySet<string> = new Set<ProbeResult['status']>([
+  'passed',
+  'failed',
+  'timeout',
+  'budget-exhausted',
+  'error',
+  'rejected',
+  'cancelled',
+]);
+const text = (v: unknown) => (typeof v === 'string' ? v : undefined);
+
+/**
+ * Журнал проверок reviewer: по записи на запуск. Нечитаемая строка, объект
+ * без формы исхода (`runId`, `argv`, `status`) и строки резерва/списания —
+ * не запуски; они не роняют чтение остальных строк.
+ */
+export async function readProbeJournal(log: string): Promise<ProbeJournal> {
+  const content = await readFile(log, 'utf8').catch(() => '');
+  const records: ProbeJournalRecord[] = [];
+  const seen = new Set<string>();
+  const starts = new Map<string, boolean>();
+  let invalid = 0;
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    let p: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+        throw new Error('not an object');
+      p = parsed as Record<string, unknown>;
+    } catch {
+      invalid++;
+      continue;
+    }
+    const runId = text(p.runId);
+    // Строки резерва и списания — учёт бюджета, а не запуски.
+    if (p.type !== undefined) {
+      if (runId && p.type === 'start' && !starts.has(runId)) starts.set(runId, false);
+      else if (runId && p.type === 'abandoned') starts.set(runId, true);
+      else invalid++;
+      continue;
+    }
+    const argv =
+      Array.isArray(p.argv) && p.argv.every((a) => typeof a === 'string') ? p.argv : undefined;
+    const status = text(p.status);
+    if (!runId || !argv || !status) {
+      invalid++;
+      continue;
+    }
+    // Повтор runId — одна запись; запись с неизвестным статусом runId не
+    // занимает: следующий валидный исход того же запуска сохраняется.
+    if (seen.has(runId)) continue;
+    if (probeStatuses.has(status)) seen.add(runId);
+    const exitCode =
+      p.exitCode === null || Number.isInteger(p.exitCode)
+        ? (p.exitCode as number | null)
+        : undefined;
+    records.push({
+      runId,
+      argv,
+      status: status as ProbeResult['status'],
+      durationMs: Number(p.durationMs) || 0,
+      limitMs: Number(p.limitMs) || 0,
+      ...(p.failure === 'environment' || p.failure === 'report' ? { failure: p.failure } : {}),
+      ...(p.gate && typeof p.gate === 'object' ? { gate: p.gate as ProbeGateRun } : {}),
+      ...(text(p.log) ? { log: text(p.log) } : {}),
+      ...(exitCode !== undefined ? { exitCode } : {}),
+      ...(typeof p.started === 'boolean' ? { started: p.started } : {}),
+      ...(p.scope && typeof p.scope === 'object' ? { scope: p.scope as ProbeResult['scope'] } : {}),
+      ...(text(p.note) ? { note: text(p.note) } : {}),
+      ...(text(p.stdout) !== undefined ? { stdout: text(p.stdout) } : {}),
+      ...(text(p.stderr) !== undefined ? { stderr: text(p.stderr) } : {}),
+    });
+  }
+  const reservations = [...starts]
+    .filter(([runId]) => !seen.has(runId))
+    .map(([runId, abandoned]) => ({ runId, abandoned }));
+  return { records, invalid, reservations };
+}
+
+/** Запуск в виде `review.json.probes`: без потоков вывода, пояснение ограничено. */
+export function probeRecord(record: ProbeJournalRecord): ProbeRecord {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { stdout, stderr, ...rest } = record;
+  return rest.note && rest.note.length > NOTE_LIMIT
+    ? { ...rest, note: rest.note.slice(0, NOTE_LIMIT) + '…' }
+    : rest;
 }
 
 /** Журнал проверок reviewer: по записи на запуск; нечитаемая строка — не запуск. */
 export async function probeRecords(log: string): Promise<ProbeRecord[]> {
-  const text = await readFile(log, 'utf8').catch(() => '');
-  return text
-    .split('\n')
-    .filter(Boolean)
-    .flatMap((line) => {
-      try {
-        const p = JSON.parse(line) as ProbeRecord & { type?: string };
-        // Строки резерва и списания — учёт бюджета, а не запуски.
-        if (p.type) return [];
-        return [
-          {
-            runId: String(p.runId),
-            argv: p.argv,
-            status: p.status,
-            durationMs: p.durationMs,
-            limitMs: p.limitMs,
-            ...(p.failure ? { failure: p.failure } : {}),
-            ...(p.gate ? { gate: p.gate } : {}),
-            ...(p.log ? { log: p.log } : {}),
-          },
-        ];
-      } catch {
-        return [];
-      }
-    });
+  return (await readProbeJournal(log)).records.map(probeRecord);
 }
 
 /** Переменная окружения с runId проверки: её наследуют все процессы запуска. */
@@ -1067,6 +1270,7 @@ export function observeReproductions<
     // кода: на нём наблюдение не ставится.
     const ran =
       !!cited &&
+      cited.started !== false &&
       ['passed', 'failed', 'timeout'].includes(cited.status) &&
       cited.failure !== 'environment';
     return {

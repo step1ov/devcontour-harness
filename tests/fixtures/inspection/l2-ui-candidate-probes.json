@@ -1,0 +1,153 @@
+[
+  {
+    "runId": "8c1d675a-d851-4505-b992-e45702ea0ef0",
+    "argv": [
+      "git",
+      "diff",
+      "--stat",
+      "e87ec495a68ae1861055d424b34af68355fc6b3e",
+      "67bc83c1d6047e9d27ea1207b48f92ef95a15dcb"
+    ],
+    "status": "passed",
+    "durationMs": 669,
+    "limitMs": 240000,
+    "log": "<run>/state/artifacts/741578f5-95a3-4a5f-b83b-190fb92182c0/candidate/review/probes.jsonl"
+  },
+  {
+    "runId": "527a529f-7c8f-4b43-89ba-ff5eb10b6b39",
+    "argv": ["rg", "--files", "test"],
+    "status": "passed",
+    "durationMs": 602,
+    "limitMs": 240000,
+    "log": "<run>/state/artifacts/741578f5-95a3-4a5f-b83b-190fb92182c0/candidate/review/probes.jsonl"
+  },
+  {
+    "runId": "07bb82cb-fcba-493b-bb00-a688989d1e56",
+    "argv": ["cat", "test/browser.test.mjs", "src/ui/app.js"],
+    "status": "passed",
+    "durationMs": 576,
+    "limitMs": 240000,
+    "log": "<run>/state/artifacts/741578f5-95a3-4a5f-b83b-190fb92182c0/candidate/review/probes.jsonl"
+  },
+  {
+    "runId": "f4bd6d39-4dd0-412c-b083-7df152ac9d3c",
+    "argv": ["node", "test/run-tests.mjs", "browser"],
+    "status": "passed",
+    "durationMs": 3558,
+    "limitMs": 240000,
+    "gate": {
+      "id": "browser",
+      "phase": "candidate",
+      "sha": "67bc83c1d6047e9d27ea1207b48f92ef95a15dcb",
+      "cwd": ".",
+      "argv": ["node", "test/run-tests.mjs", "browser"],
+      "controllerEnv": [
+        "CI",
+        "TURBO_FORCE",
+        "GOFLAGS",
+        "DEVCONTOUR_REPORT_PATH",
+        "HARNESS_REPORT_PATH"
+      ],
+      "artifacts": "<run>/state/artifacts/741578f5-95a3-4a5f-b83b-190fb92182c0/candidate/review/probe-runs/f4bd6d39-4dd0-412c-b083-7df152ac9d3c",
+      "scratch": "<tmp>/dc-probe-report-5zLJoa",
+      "report": {
+        "status": "fresh",
+        "tests": 5,
+        "failures": 0,
+        "skipped": 0,
+        "path": "<run>/state/artifacts/741578f5-95a3-4a5f-b83b-190fb92182c0/candidate/review/probe-runs/f4bd6d39-4dd0-412c-b083-7df152ac9d3c/browser.xml",
+        "digest": "7a1b17b120735cf36c74751e9cb44ebc0d6c7db3aff479c2d29d1c063ccf9372"
+      },
+      "scratchRemoved": true
+    },
+    "log": "<run>/state/artifacts/741578f5-95a3-4a5f-b83b-190fb92182c0/candidate/review/probe-runs/f4bd6d39-4dd0-412c-b083-7df152ac9d3c/browser.log"
+  },
+  {
+    "runId": "6db72949-f06f-460b-8a17-092fdc40a457",
+    "argv": ["node", "test/run-tests.mjs", "domain"],
+    "status": "passed",
+    "durationMs": 700,
+    "limitMs": 90000,
+    "gate": {
+      "id": "domain",
+      "phase": "candidate",
+      "sha": "67bc83c1d6047e9d27ea1207b48f92ef95a15dcb",
+      "cwd": ".",
+      "argv": ["node", "test/run-tests.mjs", "domain"],
+      "controllerEnv": [
+        "CI",
+        "TURBO_FORCE",
+        "GOFLAGS",
+        "DEVCONTOUR_REPORT_PATH",
+        "HARNESS_REPORT_PATH"
+      ],
+      "artifacts": "<run>/state/artifacts/741578f5-95a3-4a5f-b83b-190fb92182c0/candidate/review/probe-runs/6db72949-f06f-460b-8a17-092fdc40a457",
+      "scratch": "<tmp>/dc-probe-report-VX5SSx",
+      "report": {
+        "status": "fresh",
+        "tests": 53,
+        "failures": 0,
+        "skipped": 0,
+        "path": "<run>/state/artifacts/741578f5-95a3-4a5f-b83b-190fb92182c0/candidate/review/probe-runs/6db72949-f06f-460b-8a17-092fdc40a457/domain.xml",
+        "digest": "e2371a24f768816d26eba14df500352dcc0547900822a7980dc93f545a7b360b"
+      },
+      "scratchRemoved": true
+    },
+    "log": "<run>/state/artifacts/741578f5-95a3-4a5f-b83b-190fb92182c0/candidate/review/probe-runs/6db72949-f06f-460b-8a17-092fdc40a457/domain.log"
+  },
+  {
+    "runId": "b54eddb7-769a-43c0-b7a3-dcb109dd2a66",
+    "argv": ["node", "test/run-tests.mjs", "api"],
+    "status": "passed",
+    "durationMs": 5160,
+    "limitMs": 120000,
+    "gate": {
+      "id": "api",
+      "phase": "candidate",
+      "sha": "67bc83c1d6047e9d27ea1207b48f92ef95a15dcb",
+      "cwd": ".",
+      "argv": ["node", "test/run-tests.mjs", "api"],
+      "controllerEnv": [
+        "CI",
+        "TURBO_FORCE",
+        "GOFLAGS",
+        "DEVCONTOUR_REPORT_PATH",
+        "HARNESS_REPORT_PATH"
+      ],
+      "artifacts": "<run>/state/artifacts/741578f5-95a3-4a5f-b83b-190fb92182c0/candidate/review/probe-runs/b54eddb7-769a-43c0-b7a3-dcb109dd2a66",
+      "scratch": "<tmp>/dc-probe-report-SL0lCT",
+      "report": {
+        "status": "fresh",
+        "tests": 65,
+        "failures": 0,
+        "skipped": 0,
+        "path": "<run>/state/artifacts/741578f5-95a3-4a5f-b83b-190fb92182c0/candidate/review/probe-runs/b54eddb7-769a-43c0-b7a3-dcb109dd2a66/api.xml",
+        "digest": "911edd10caa41e71b71f396a6a1223a6f96e9f5bee1ce7ef3c3bab001015bf74"
+      },
+      "scratchRemoved": true
+    },
+    "log": "<run>/state/artifacts/741578f5-95a3-4a5f-b83b-190fb92182c0/candidate/review/probe-runs/b54eddb7-769a-43c0-b7a3-dcb109dd2a66/api.log"
+  },
+  {
+    "runId": "6786e5ce-4ac7-4423-bd37-97d3114d9c48",
+    "argv": [
+      "git",
+      "diff",
+      "--check",
+      "e87ec495a68ae1861055d424b34af68355fc6b3e",
+      "67bc83c1d6047e9d27ea1207b48f92ef95a15dcb"
+    ],
+    "status": "passed",
+    "durationMs": 632,
+    "limitMs": 240000,
+    "log": "<run>/state/artifacts/741578f5-95a3-4a5f-b83b-190fb92182c0/candidate/review/probes.jsonl"
+  },
+  {
+    "runId": "eec7c7cd-be23-44a8-abd1-361fe5410598",
+    "argv": ["git", "rev-parse", "HEAD"],
+    "status": "passed",
+    "durationMs": 530,
+    "limitMs": 240000,
+    "log": "<run>/state/artifacts/741578f5-95a3-4a5f-b83b-190fb92182c0/candidate/review/probes.jsonl"
+  }
+]
