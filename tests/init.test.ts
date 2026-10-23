@@ -22,6 +22,7 @@ import {
   executionPolicySchema,
   initDataSchema,
   projectManifestSchema,
+  selectReviewer,
 } from '../src/contracts/index.ts';
 import { resolveProfile } from '../src/profiles/resolve.ts';
 import type { ToolProbe } from '../src/toolchains/probe.ts';
@@ -624,4 +625,42 @@ test('H1-02 (H1-F003): конфликты файла и рабочего кат�
     conflicts.map((f) => ({ path: [f.conflictPath ?? f.path], message: f.conflict })),
   );
   assert.deepEqual(readdirSync(outsideDir), []);
+});
+
+test('H1-02 (H1-F005): роли профиля со своими writers — продолжение сохраняет выбранного writer, конфликта нет', async () => {
+  const p = project();
+  mkdirSync(join(p.root, '.harness'));
+  const profile = {
+    id: 'custom-roles',
+    version: '0.1.0',
+    extends: ['npm-ci'],
+    roles: {
+      mobile: { runtime: 'claude', reviewer: { runtime: 'codex' } },
+      'qa-mobile': { runtime: 'codex', reviewer: { runtime: 'claude' } },
+    },
+  };
+  writeFileSync(join(p.root, '.harness/profile.json'), JSON.stringify(profile, null, 2) + '\n');
+  const opts = (extra: Partial<InitOptions> = {}) =>
+    p.opts({ profile: './.harness/profile.json', ...extra });
+  const planned = await planProject(opts({ writer: 'codex' }));
+  for (const intent of planned.intents.slice(0, 3)) {
+    mkdirSync(join(intent.path, '..'), { recursive: true });
+    writeFileSync(intent.path, intent.content, { flag: 'wx' });
+  }
+  const policyPath = join(p.root, '.harness/policy.json');
+  const bytes = readFileSync(policyPath, 'utf8');
+  // Прежний writer явно — не конфликт.
+  const same = await initProject(opts({ writer: 'codex', plan: true }));
+  assert.equal(same.conflicts, 0);
+  const data = await initProject(opts());
+  assert.deepEqual(data.manifest.runtimes, { writer: 'codex', reviewer: 'claude' });
+  const policy = executionPolicySchema.parse(JSON.parse(readFileSync(policyPath, 'utf8')));
+  assert.equal(
+    selectReviewer(policy, 'plan', { runtime: data.manifest.runtimes.writer }).ok,
+    true,
+    'reviewer другого вендора, чем writer manifest',
+  );
+  const run = data.next.find((n) => n.command === 'run')!;
+  assert.equal(run.args[run.args.indexOf('--author') + 1], 'codex');
+  assert.equal(readFileSync(policyPath, 'utf8'), bytes, 'политика не перезаписана');
 });

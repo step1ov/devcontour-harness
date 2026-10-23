@@ -74,16 +74,16 @@ export class WorkflowQueue {
   }
 
   /**
-   * Продолжит ли задание работу при следующей выдаче: активно, вход не
-   * изменился, попытки стадии не исчерпаны. Те же условия, что у `claim`,
-   * но без записи: им пользуется диагностика.
+   * Продолжит ли задание работу: вход не изменился и либо стадию сейчас ведёт
+   * действующий владелец (выданная попытка уже засчитана), либо следующая
+   * выдача ещё разрешена — те же условия, что у `claim`, но без записи.
+   * Им пользуется диагностика.
    */
   continues(job: WorkflowJob, view: ExecutionView) {
-    return (
-      ['queued', 'running'].includes(job.status) &&
-      job.attempts < job.maxAttempts &&
-      this.current(job, view)
-    );
+    const held = job.status === 'running' && job.leaseUntil! > this.now();
+    const claimable =
+      (job.status === 'queued' || job.status === 'running') && job.attempts < job.maxAttempts;
+    return (held || claimable) && this.current(job, view);
   }
 
   private current(job: WorkflowJob, view: ExecutionView) {

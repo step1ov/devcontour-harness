@@ -828,3 +828,42 @@ test('H1-03 (H1-F002): попытки стадии задания исчерпа
     h.close();
   }
 });
+
+test('H1-03 (H1-F006): последняя стадия уже выполняется действующим владельцем — retry обещается, как его выполняет run', async () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const h = ctx.open();
+  try {
+    const graph = ready(h.engine, ctx.graph, 'controller');
+    const job = h.workflows.start({ kind: 'graph', id: graph.id, authorRuntime: 'claude' });
+    h.workflows.finish(h.workflows.claim(job.key)!);
+    const a = h.engine.claim('controller')!;
+    h.engine.fail(a.id, a.token, 'environment fixture', { kind: 'environment' });
+    h.engine.release('controller');
+    for (let i = 0; i < job.maxAttempts - 1; i++)
+      h.workflows.fail(h.workflows.claim(job.key)!, `interruption ${i + 1}`, true);
+    let seen: { held: boolean; expired: boolean; retryPlanned: boolean } | undefined;
+    const claim = h.workflows.claim.bind(h.workflows);
+    // Наблюдение на публичной границе claim настоящего run; результат не меняется.
+    h.workflows.claim = (...args) => {
+      const claimed = claim(...args);
+      if (claimed?.stage === 1 && claimed.attempts === claimed.maxAttempts && !seen) {
+        const [d] = stopInputsOf(h, { maxAttempts: 3, repairBudget: 6 })
+          .filter((i): i is WorkInput => i.kind === 'work')
+          .map(explainStop);
+        seen = {
+          held: h.engine.read((v) => h.workflows.continues(claimed, v)),
+          // Та же последняя стадия с истёкшей арендой уже не продолжится.
+          expired: h.engine.read((v) => h.workflows.continues({ ...claimed, leaseUntil: 0 }, v)),
+          retryPlanned: d!.retryPlanned,
+        };
+      }
+      return claimed;
+    };
+    const result = await h.run({ graph: ctx.graph, author: 'claude' });
+    assert.deepEqual(seen, { held: true, expired: false, retryPlanned: true });
+    assert.equal(h.workflows.get(job.key).repairs, 1, 'run действительно назначил repair');
+    assert.equal(result.works[0]!.status, 'done');
+  } finally {
+    h.close();
+  }
+});

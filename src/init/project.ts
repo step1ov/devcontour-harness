@@ -66,10 +66,14 @@ const realish = (path: string) => {
   }
 };
 
-/** Writer сохранённой политики: runtime первой роли, если это claude или codex. */
+/**
+ * Writer, выбранный при генерации сохранённой политики. Роли профиля задают
+ * своих writers сами, поэтому выбор читается по reviewer плана: generatePolicy
+ * всегда назначает ему другой вендор, чем выбранный writer.
+ */
 const writerOf = (policy: ExecutionPolicy | undefined) => {
-  const runtime = policy ? Object.values(policy.roles)[0]?.writer.runtime : undefined;
-  return runtime === 'claude' || runtime === 'codex' ? runtime : undefined;
+  const reviewer = policy?.review.plan?.reviewer.runtime;
+  return reviewer === 'codex' ? 'claude' : reviewer === 'claude' ? 'codex' : undefined;
 };
 
 /** `p-` + первые 16 hex sha256 от realpath корня: тот же проект — тот же id. */
