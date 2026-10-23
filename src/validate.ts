@@ -14,12 +14,11 @@ import {
   type ContextSnapshot,
   workGraphDigest,
   workGraphSchema,
-  type ErrorIssue,
+  type CodedIssue,
+  type ErrorCode,
   type ExecutionPolicy,
   type WorkGraph,
 } from './contracts/index.ts';
-
-type CodedIssue = ErrorIssue & { code: string };
 
 const parse = <S extends z.ZodType>(schema: S, value: unknown, root: string): z.infer<S> => {
   const parsed = schema.safeParse(value);
@@ -74,7 +73,7 @@ export function crossIssues(graph: WorkGraph, policy: ExecutionPolicy): CodedIss
   });
   graph.orders.forEach((order, i) => {
     const at = (...p: (string | number)[]) => ['graph', 'orders', i, ...p];
-    const add = (code: string, path: (string | number)[], message: string) =>
+    const add = (code: ErrorCode, path: (string | number)[], message: string) =>
       issues.push({ code, path, message });
     const repo = repos.get(order.repositoryId);
     if (!repo) {
@@ -111,7 +110,7 @@ export function crossIssues(graph: WorkGraph, policy: ExecutionPolicy): CodedIss
       try {
         gates = expandGateRefs(r, refs);
       } catch (error) {
-        add((error as { code?: string }).code ?? 'GATE_UNKNOWN', path, (error as Error).message);
+        add((error as { code?: ErrorCode }).code ?? 'GATE_UNKNOWN', path, (error as Error).message);
         return undefined;
       }
       for (const id of gates)
@@ -231,6 +230,23 @@ function contextSnapshotIssues(graph: WorkGraph, context: ContextSnapshot): Code
 }
 
 /**
+ * Все нарушения графа, политики, их связи и контекста — в том порядке, в
+ * котором `validateInputs` называет первое. Ничего не бросает.
+ */
+export function validationIssues(
+  graph: WorkGraph,
+  policy: ExecutionPolicy,
+  context?: ContextSnapshot,
+): CodedIssue[] {
+  return [
+    ...(context ? contextSnapshotIssues(graph, context) : []),
+    ...graphIssues(graph).map((i) => ({ ...i, path: ['graph', ...i.path] })),
+    ...policyIssues(policy).map((i) => ({ ...i, path: ['policy', ...i.path] })),
+    ...crossIssues(graph, policy),
+  ];
+}
+
+/**
  * Проверка входов без вызова моделей и без записи состояния. Ошибки
  * собираются все сразу; код первой определяет класс отказа.
  */
@@ -241,15 +257,10 @@ export function validateInputs(input: { graph: unknown; policy: unknown; context
     input.context === undefined
       ? undefined
       : parse(contextSnapshotSchema, input.context, 'context');
-  const issues = [
-    ...(context ? contextSnapshotIssues(graph, context) : []),
-    ...graphIssues(graph).map((i) => ({ ...i, path: ['graph', ...i.path] })),
-    ...policyIssues(policy).map((i) => ({ ...i, path: ['policy', ...i.path] })),
-    ...crossIssues(graph, policy),
-  ];
+  const issues = validationIssues(graph, policy, context);
   if (issues.length)
     throw new HarnessError(
-      issues[0]!.code as never,
+      issues[0]!.code,
       `Найдено нарушений: ${issues.length}`,
       issues.map(({ path, message }) => ({ path, message })),
     );

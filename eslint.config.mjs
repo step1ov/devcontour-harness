@@ -119,4 +119,30 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // Планирование — чистая подготовка draft: ни модели, ни движка, ни хранилища.
+    // Ведущий агент планирует сам; внутреннего вызова planner нет (H2-03).
+    files: ['src/planning/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            ...foreign,
+            {
+              group: [
+                '../agents/*',
+                '../engine/*',
+                '../control/*',
+                '../storage/*',
+                '../integrations/*',
+                '../environment/*',
+              ],
+              message: 'Планирование не вызывает runtime, движок и хранилище.',
+            },
+          ],
+        },
+      ],
+    },
+  },
 );

@@ -60,6 +60,9 @@ export interface ErrorIssue {
   message: string;
 }
 
+/** Нарушение с кодом отказа: один элемент списка проблем проверки. */
+export type CodedIssue = ErrorIssue & { code: ErrorCode };
+
 export class HarnessError extends Error {
   readonly class: ErrorClass;
   constructor(

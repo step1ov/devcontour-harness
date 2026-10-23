@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+  mkdirSync,
+} from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import {
   API_VERSION,
@@ -29,6 +36,7 @@ import { profilePin, resolveProfile } from './profiles/resolve.ts';
 import { cliAdapter } from './agents/cli-adapter.ts';
 import { initProject, initText } from './init/project.ts';
 import { diagnoseState, explainText } from './explain/diagnose.ts';
+import { planCheck, planRequestOf } from './planning/check.ts';
 import type { RunnerHooks } from './engine/runner.ts';
 import { FileContextSource, FileResultSink, FileWorkSource } from './connectors/files.ts';
 
@@ -250,15 +258,70 @@ const options = {
   plan: { type: 'boolean' },
   human: { type: 'boolean' },
   writer: { type: 'string' },
+  draft: { type: 'string' },
+  brief: { type: 'string' },
+  basis: { type: 'string' },
+  contracts: { type: 'string' },
+  requirements: { type: 'string', multiple: true },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
-const flagOwners = { plan: ['init'], writer: ['init'], human: ['init', 'explain'] } as const;
+const flagOwners = {
+  plan: ['init'],
+  writer: ['init'],
+  human: ['init', 'explain', 'plan-request'],
+  draft: ['plan-check'],
+  basis: ['plan-check'],
+  brief: ['plan-request', 'plan-check'],
+  contracts: ['plan-request', 'plan-check'],
+  requirements: ['plan-request'],
+} as const;
 
 /** Явное человеческое представление успешного ответа (`--human`). */
 const presenters: Partial<Record<CliCommand, (data: never) => string>> = {
   init: initText,
   explain: explainText,
+  'plan-request': (data: { prompt: string }) => data.prompt + '\n',
+};
+
+/** Поле объекта только при заданном значении (exactOptionalPropertyTypes). */
+const optional = <K extends string, T>(key: K, value: T | undefined) =>
+  (value === undefined ? {} : { [key]: value }) as Partial<Record<K, T>>;
+
+/** Каталог ContractDocument JSON: `*.json` по имени, каждый по схеме. */
+const contractsIn = (dir: string | undefined) =>
+  dir === undefined
+    ? undefined
+    : readdirSync(resolve(dir))
+        .filter((f) => f.endsWith('.json'))
+        .sort()
+        .map((f) => parseWith(contractDocumentSchema, readJson(join(dir, f), f), f));
+
+/**
+ * Контекст планирования по умолчанию: каталоги `<каталог политики>/work/context/<id>`
+ * (не symlink). Каталога нет — контекста нет.
+ */
+const planningContext = async (contextPath: string | undefined, baseDir: string) => {
+  if (contextPath)
+    return parseWith(contextSnapshotSchema, readJson(contextPath, 'context'), 'context');
+  const dir = join(baseDir, 'work', 'context');
+  if (!existsSync(dir) || !lstatSync(dir).isDirectory()) return undefined;
+  const ids = readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .sort();
+  return ids.length ? await new FileContextSource(dir).snapshot(ids) : undefined;
+};
+
+const readText = (path: string, what: string) => {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (error) {
+    throw new HarnessError(
+      'INVALID_INPUT',
+      `${what}: не прочитан ${path}: ${(error as Error).message}`,
+    );
+  }
 };
 
 async function run(
@@ -551,6 +614,48 @@ async function run(
           adapters: adapters(b.policy),
         }),
       };
+    }
+    case 'plan-request': {
+      const b = loadPolicy(need('policy'));
+      const first = b.policy.repositories[0]?.id ?? 'main';
+      return {
+        command,
+        data: planRequestOf({
+          policy: b.policy,
+          baseDir: b.baseDir,
+          brief: readText(need('brief'), '--brief'),
+          ...optional('context', await planningContext(v.context, b.baseDir)),
+          ...optional('contracts', contractsIn(v.contracts)),
+          requirementSources: (v.requirements ?? []).map((spec) => {
+            const at = spec.indexOf(':');
+            return at > 0
+              ? { repositoryId: spec.slice(0, at), source: spec.slice(at + 1) }
+              : { repositoryId: first, source: spec };
+          }),
+        }),
+      };
+    }
+    case 'plan-check': {
+      const b = loadPolicy(need('policy'));
+      const draftPath = need('draft');
+      if (v.basis !== undefined && v.brief === undefined)
+        throw new HarnessError('INVALID_INPUT', 'plan-check: --basis требует --brief', [
+          { path: ['--basis'], message: 'requires --brief' },
+        ]);
+      const graphId = basename(draftPath).replace(/(\.draft)?\.json$/, '');
+      const data = planCheck({
+        policy: b.policy,
+        baseDir: b.baseDir,
+        draft: readJson(draftPath, 'draft'),
+        graphId,
+        ...optional('context', await planningContext(v.context, b.baseDir)),
+        ...optional('contracts', contractsIn(v.contracts)),
+        ...optional('brief', v.brief === undefined ? undefined : readText(v.brief, '--brief')),
+        ...optional('basis', v.basis),
+      });
+      // Ответ с проблемами — данные; exit по классу первой проблемы.
+      const first = data.issues[0];
+      return { command, data, ...(first ? { code: exitCodes[errorCodes[first.code]] } : {}) };
     }
     case 'doctor': {
       const b = v.policy ? loadPolicy(v.policy) : v.state ? binding(v.state) : undefined;

@@ -12,7 +12,7 @@ import {
   trimmedText,
 } from './primitives.ts';
 import { digestOf } from './digest.ts';
-import type { ErrorIssue } from './errors.ts';
+import type { CodedIssue, ErrorCode } from './errors.ts';
 import { toolchainSchema } from './toolchain.ts';
 
 const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
@@ -356,14 +356,14 @@ export function selectReviewer(
   };
 }
 
-type Issue = ErrorIssue & { code: string };
+type Issue = CodedIssue;
 type Repo = z.infer<typeof repositoryPolicySchema>;
 
 /** Gates в порядке зависимостей; повтор, неизвестная зависимость и цикл — нарушения. */
 export function gateOrderIssues(
   gates: { id: string; dependsOn?: string[] }[],
-): { code: string; message: string }[] {
-  const issues: { code: string; message: string }[] = [];
+): Omit<CodedIssue, 'path'>[] {
+  const issues: Omit<CodedIssue, 'path'>[] = [];
   const byId = new Map<string, { id: string; dependsOn?: string[] }>();
   for (const g of gates) {
     if (byId.has(g.id)) issues.push({ code: 'INVALID_INPUT', message: 'Повтор gate ' + g.id });
@@ -402,7 +402,7 @@ export function gateOrderIssues(
  */
 export function policyIssues(policy: ExecutionPolicy): Issue[] {
   const issues: Issue[] = [];
-  const add = (code: string, path: (string | number)[], message: string) =>
+  const add = (code: ErrorCode, path: (string | number)[], message: string) =>
     issues.push({ code, path, message });
   const repos = new Map<string, Repo>();
   // Тариф однозначен: у модели не бывает двух тарифов на один момент.
@@ -460,7 +460,7 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
         expandGateRefs(repo, ['@' + group]);
       } catch (error) {
         add(
-          (error as { code?: string }).code ?? 'GATE_UNKNOWN',
+          (error as { code?: ErrorCode }).code ?? 'GATE_UNKNOWN',
           ['repositories', r, 'gateGroups', group],
           (error as Error).message,
         );

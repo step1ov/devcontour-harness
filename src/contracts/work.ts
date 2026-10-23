@@ -10,7 +10,7 @@ import {
   trimmedText,
 } from './primitives.ts';
 import { digestOf } from './digest.ts';
-import type { ErrorIssue } from './errors.ts';
+import type { CodedIssue } from './errors.ts';
 
 /**
  * Откуда пришло поручение: коннектор, ключ записи в нём и её редакция.
@@ -133,8 +133,8 @@ export const workGraphDigest = (graph: WorkGraph) => digestOf(graph);
  * зависимость, цикл. Зависимость разрешается поручением этого графа либо
  * подтверждённой предпосылкой; другого способа считать её выполненной нет.
  */
-export function graphIssues(graph: WorkGraph): (ErrorIssue & { code: string })[] {
-  const issues: (ErrorIssue & { code: string })[] = [];
+export function graphIssues(graph: WorkGraph): CodedIssue[] {
+  const issues: CodedIssue[] = [];
   const ids = new Map<string, number>();
   graph.orders.forEach((order, index) => {
     if (ids.has(order.id))

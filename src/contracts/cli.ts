@@ -17,6 +17,7 @@ import { sourceRefSchema } from './work.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
 import { filePlanEntrySchema, projectManifestSchema } from './project.ts';
 import { stopDiagnosisSchema } from './diagnosis.ts';
+import { planCheckDataSchema, planRequestDataSchema } from './planning.ts';
 import { toolchainReportSchema } from './toolchain.ts';
 
 /**
@@ -413,6 +414,78 @@ export const cliCommands = {
       },
     ],
     refusals: ['NOT_FOUND'],
+  },
+  'plan-request': {
+    description:
+      'Собрать read-only запрос планирования из постановки и фактов проекта (роли, gates, репозитории, контекст, ресурсы, контракты, требования) для ведущего агента; модель не вызывается, ничего не пишется',
+    writes: false,
+    idempotency: 'Чистая функция входов: те же постановка и факты дают тот же prompt и basis',
+    args: [
+      {
+        name: '--brief',
+        value: 'path',
+        required: true,
+        description: 'Постановка пользователя, UTF-8',
+      },
+      policy,
+      {
+        ...context,
+        description:
+          'ContextSnapshot JSON; без него — каталоги <каталог политики>/work/context/<id>',
+      },
+      {
+        name: '--contracts',
+        value: 'dir',
+        required: false,
+        description: 'Каталог ContractDocument JSON, на которые может ссылаться план',
+      },
+      {
+        name: '--requirements',
+        value: 'path',
+        required: false,
+        description:
+          'Закоммиченный файл с разделами ## REQ-*: [<repositoryId>:]<путь от корня репозитория>; можно повторять',
+      },
+      {
+        name: '--human',
+        value: 'flag',
+        required: false,
+        description: 'Только текст prompt вместо JSON',
+      },
+    ],
+    refusals: ['NOT_READY'],
+  },
+  'plan-check': {
+    description:
+      'Проверить draft плана против фактов проекта и собрать WorkGraph без вызова моделей, ревью и записи; согласования не выдаёт',
+    writes: false,
+    idempotency: 'Чистая функция входов и HEAD источников требований',
+    args: [
+      {
+        name: '--draft',
+        value: 'path',
+        required: true,
+        description:
+          'Draft JSON (schemas/plan-draft.schema.json); ID графа — имя файла без .draft.json/.json',
+      },
+      policy,
+      context,
+      { name: '--contracts', value: 'dir', required: false, description: 'Как у plan-request' },
+      {
+        name: '--brief',
+        value: 'path',
+        required: false,
+        description: 'Постановка: revision графа = basis',
+      },
+      {
+        name: '--basis',
+        value: 'digest',
+        required: false,
+        description:
+          'basis из plan-request, по которому составлен draft; расхождение — APPROVAL_STALE',
+      },
+    ],
+    refusals: ['APPROVAL_STALE', 'NOT_READY'],
   },
   'source-check': {
     description:
@@ -872,6 +945,8 @@ export const cliDataSchemas = {
   doctor: doctorDataSchema,
   init: initDataSchema,
   explain: explainDataSchema,
+  'plan-request': planRequestDataSchema,
+  'plan-check': planCheckDataSchema,
   'source-check': sourceCheckDataSchema,
   'source-snapshot': sourceSnapshotDataSchema,
   'source-status': sourceStatusDataSchema,

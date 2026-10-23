@@ -10,6 +10,7 @@ import { contractDocumentSchema } from './checks.ts';
 import { stackProfileSchema } from './profiles.ts';
 import { projectManifestSchema } from './project.ts';
 import { stopDiagnosisSchema } from './diagnosis.ts';
+import { planDraftSchema } from './planning.ts';
 
 /**
  * Схемы, публикуемые как JSON Schema (`schemas/<имя>.schema.json`).
@@ -37,4 +38,5 @@ export const publishedSchemas = {
   'stack-profile': stackProfileSchema,
   'project-manifest': projectManifestSchema,
   'stop-diagnosis': stopDiagnosisSchema,
+  'plan-draft': planDraftSchema,
 } as const satisfies Record<string, z.ZodType>;

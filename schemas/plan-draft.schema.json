@@ -1,0 +1,217 @@
+{
+  "$id": "devcontour-harness/v1alpha1/plan-draft.schema.json",
+  "title": "plan-draft",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 180
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 5000
+    },
+    "tasks": {
+      "minItems": 1,
+      "maxItems": 30,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "requirements": {
+            "maxItems": 30,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^REQ-[A-Za-z0-9_-]{1,64}$"
+                },
+                "source": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 12000
+                },
+                "gate": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                },
+                "scenario": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 1500
+                },
+                "testId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                }
+              },
+              "required": [
+                "id",
+                "source",
+                "digest",
+                "text",
+                "gate",
+                "scenario"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "scope": {
+            "default": "component",
+            "type": "string",
+            "enum": [
+              "component",
+              "workspace"
+            ]
+          },
+          "relatedRepositories": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,80}$"
+            }
+          },
+          "contextPacks": {
+            "maxItems": 30,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,80}$"
+            }
+          },
+          "writePaths": {
+            "minItems": 1,
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "gates": {
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^@?[A-Za-z0-9_-]{1,80}$"
+            }
+          },
+          "properties": {
+            "maxItems": 30,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,200}$"
+            }
+          },
+          "resources": {
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,80}$"
+            }
+          },
+          "repositoryId": {
+            "default": "main",
+            "type": "string"
+          },
+          "key": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 180
+          },
+          "description": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 12000
+          },
+          "role": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{1,30}$"
+          },
+          "dependsOn": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "acceptance": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 3
+            }
+          },
+          "contracts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "consumers": {
+            "maxItems": 10,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "repositoryId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                },
+                "gates": {
+                  "minItems": 1,
+                  "maxItems": 20,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^@?[A-Za-z0-9_-]{1,80}$"
+                  }
+                }
+              },
+              "required": [
+                "repositoryId",
+                "gates"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "key",
+          "title",
+          "description",
+          "role",
+          "dependsOn",
+          "acceptance",
+          "contracts"
+        ]
+      }
+    }
+  },
+  "required": [
+    "title",
+    "description",
+    "tasks"
+  ]
+}
