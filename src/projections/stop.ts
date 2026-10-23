@@ -86,7 +86,17 @@ export type StopInput =
         recovery?: boolean;
       };
       maxAttempts: number;
-      repair: { sameFailureRepairs: number; groupRepairsUsed: number; groupRepairBudget: number };
+      repair: {
+        sameFailureRepairs: number;
+        groupRepairsUsed: number;
+        groupRepairBudget: number;
+        /**
+         * Движок группы больше не чинит: задание графа не активно (остановлено,
+         * устарело) или решение по группе — остановка (отмена, класс stop у
+         * первого сломанного). Тогда повтора не будет, как бы ни сходились счётчики.
+         */
+        groupStopped?: boolean;
+      };
       control: { paused: boolean; pauseReason?: PauseReason; pauseFailures?: FailureKind[] };
       phase?: StopPhase;
       runId?: string;
@@ -172,7 +182,7 @@ const message = (cause: StopCause, ...parts: (string | undefined)[]) =>
  */
 function retryPlannedOf(input: Extract<StopInput, { kind: 'work' }>) {
   const { work, repair, maxAttempts } = input;
-  if (work.status !== 'failed' || work.recovery) return false;
+  if (work.status !== 'failed' || work.recovery || repair.groupStopped) return false;
   const rule = repairPolicy[work.failureKind ?? 'unknown'];
   return (
     rule.action === 'retry' &&

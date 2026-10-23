@@ -31,6 +31,7 @@ const harness = (args: string[]) => {
   });
   return {
     status: r.status,
+    stdout: r.stdout,
     json: JSON.parse(r.stdout) as { ok: boolean; error?: { code: string } },
   };
 };
@@ -89,4 +90,23 @@ test('H1-03: stopCodeOf — прежняя таблица stopReason (environmen
   assert.equal(projections.stopCodeOf('gate'), 'GATE_FAILED');
   assert.equal(projections.stopCodeOf('unknown'), 'INTERNAL');
   assert.equal(projections.stopCodeOf(undefined), 'INTERNAL');
+});
+
+test('H1-05: прежние команды отвечают тем же конвертом — одна строка JSON, те же ключи и exit', () => {
+  const cases: [string[], number, string[]][] = [
+    [['version'], 0, ['apiVersion', 'command', 'ok', 'data']],
+    [['profile', '--profile', 'npm-ci'], 0, ['apiVersion', 'command', 'ok', 'data']],
+    [
+      ['status', '--state', '/nonexistent-harness-state'],
+      3,
+      ['apiVersion', 'command', 'ok', 'error'],
+    ],
+    [['no-such-command'], 2, ['apiVersion', 'command', 'ok', 'error']],
+  ];
+  for (const [args, status, keys] of cases) {
+    const r = harness(args);
+    assert.equal(r.status, status, args.join(' '));
+    assert.equal(r.stdout.trimEnd().split('\n').length, 1, 'ровно одна строка');
+    assert.deepEqual(Object.keys(r.json), keys, args.join(' '));
+  }
 });

@@ -2,6 +2,7 @@ import { HarnessError } from '../contracts/errors.ts';
 import { repairPolicy } from '../contracts/repair-policy.ts';
 import type { WorkStatus } from '../contracts/index.ts';
 import type { Harness } from '../control/harness.ts';
+import { repairDecision } from '../engine/repair.ts';
 import type { EvidenceLink, StopInput, StopPhase } from '../projections/stop.ts';
 
 export interface StopInputOptions {
@@ -55,7 +56,17 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
       const identical = fingerprint
         ? attempts.filter((a) => a.failureFingerprint === fingerprint).length
         : 0;
-      const job = jobs.find((j) => j.id === work.graphId);
+      // Чинит только действующее задание графа; остановленное или устаревшее
+      // (в том числе прежней редакции графа с тем же id) повторов не назначит.
+      const job = jobs.find(
+        (j) => j.id === work.graphId && (j.status === 'queued' || j.status === 'running'),
+      );
+      const decision = job
+        ? repairDecision(v, v.works(work.graphId), {
+            budgetLeft: options.repairBudget - (job.repairs ?? 0),
+            maxAttempts: options.maxAttempts,
+          })
+        : undefined;
       const evidence: EvidenceLink[] = last
         ? [
             { kind: 'attempt', id: last.id },
@@ -83,6 +94,7 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
           sameFailureRepairs: fingerprint ? identical - 1 : repairPolicy[kind].repeats,
           groupRepairsUsed: job?.repairs ?? 0,
           groupRepairBudget: job ? options.repairBudget : 0,
+          groupStopped: !job || decision?.action === 'stop',
         },
         control: {
           paused: control.paused,

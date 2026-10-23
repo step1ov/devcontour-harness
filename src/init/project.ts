@@ -24,7 +24,14 @@ import { profilePin, resolveProfile } from '../profiles/resolve.ts';
 import { Manifests, packageManagerField } from '../toolchains/manifests.ts';
 import { inspectPolicy, problemLines, type ToolchainReport } from '../toolchains/inspect.ts';
 import type { ToolProbe } from '../toolchains/probe.ts';
-import { applyFileWrites, planFileWrites, type FileIntent, type FilePlan } from '../setup/files.ts';
+import {
+  applyFileWrites,
+  checkDestination,
+  planFileWrites,
+  type FileIntent,
+  type FilePlan,
+  type FilePlanEntry,
+} from '../setup/files.ts';
 import {
   PROJECT_REPOSITORY_ID,
   PROJECT_TARGET_REF,
@@ -55,7 +62,7 @@ const realish = (path: string) => {
   const tail: string[] = [];
   for (let cursor = resolve(path); ; cursor = dirname(cursor)) {
     try {
-      return join(realpathSync(cursor), ...tail.reverse());
+      return join(realpathSync.native(cursor), ...tail.reverse());
     } catch {
       if (dirname(cursor) === cursor) return resolve(path);
       tail.push(basename(cursor));
@@ -140,6 +147,11 @@ export interface InitPlanned {
   manifest: ProjectManifest;
   intents: FileIntent[];
   plan: FilePlan;
+  /**
+   * Конфликты рабочих каталогов `.harness/work…`, куда агент пишет графы и
+   * заметки: init их не создаёт, но не выдаёт агенту путь через symlink.
+   */
+  workConflicts: FilePlanEntry[];
   policy: ExecutionPolicy;
   profile: ProfilePin;
   shadowed: string[];
@@ -243,7 +255,11 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
   const state = options.state
     ? resolve(options.state)
     : (saved?.paths.state ?? defaultStateDir(projectId, env));
-  if (inside(resolve(state), root) || inside(realish(state), root))
+  if (
+    inside(resolve(state), root) ||
+    inside(realish(state), root) ||
+    inside(realish(state), realish(root))
+  )
     throw new HarnessError(
       'INVALID_INPUT',
       `Каталог состояния ${state} внутри репозитория ${root}: worktrees попыток не вкладываются в checkout`,
@@ -292,6 +308,23 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
     },
   ];
   const plan = await planFileWrites({ files: intents, root });
+  const workConflicts: FilePlanEntry[] = [];
+  const harnessDir = join(root, HARNESS_PROJECT_DIR);
+  if (!plan.entries.some((e) => e.conflictPath === harnessDir))
+    try {
+      // Пробный путь внутри notes проверяет каждый уровень work → context → notes.
+      await checkDestination(join(root, PROJECT_NOTES_DIR, '.probe'), { root });
+    } catch (error) {
+      const issue = error instanceof HarnessError ? error.issues[0] : undefined;
+      if (!issue) throw error;
+      const at = String(issue.path[0]);
+      workConflicts.push({
+        path: at,
+        action: 'conflict',
+        conflict: issue.message as NonNullable<FilePlanEntry['conflict']>,
+        conflictPath: at,
+      });
+    }
   const status = saved ? 'complete' : lstat(join(root, HARNESS_PROJECT_DIR)) ? 'partial' : 'new';
   const toolchain = await inspectPolicy(policy, join(root, HARNESS_PROJECT_DIR), {
     configSource: policyPath,
@@ -305,6 +338,7 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
     manifest,
     intents,
     plan,
+    workConflicts,
     policy,
     profile: pin,
     shadowed: generated.shadowed,
@@ -333,13 +367,13 @@ function dataOf(
     root,
     manifestPath: join(root, PROJECT_MANIFEST_PATH),
     manifest,
-    files: planned.plan.entries.map((e) => ({
+    files: [...planned.plan.entries, ...planned.workConflicts].map((e) => ({
       path: e.path,
       action: e.action,
       ...(e.conflict ? { conflict: e.conflict } : {}),
       ...(e.conflictPath ? { conflictPath: e.conflictPath } : {}),
     })),
-    conflicts: planned.plan.conflicts,
+    conflicts: planned.plan.conflicts + planned.workConflicts.length,
     created: written.created,
     preserved: written.preserved,
     profile: planned.profile,
@@ -413,6 +447,12 @@ export async function initProject(options: InitOptions): Promise<InitData> {
   if (options.plan) return dataOf(planned, 'plan', { created: [], preserved: [] });
   // 8. Конфликты: applyFileWrites отказывает PATH_CONFLICT со всеми конфликтами, ничего не записав.
   if (planned.plan.conflicts > 0) await applyFileWrites(planned.plan, planned.intents);
+  if (planned.workConflicts.length)
+    throw new HarnessError(
+      'PATH_CONFLICT',
+      `Рабочий каталог .harness — не каталог внутри проекта: ${planned.workConflicts[0]!.path}`,
+      planned.workConflicts.map((e) => ({ path: [e.path], message: e.conflict! })),
+    );
   // 9. Toolchain действующей политики — в формате preflight `run`.
   const problems = planned.toolchain.flatMap((r) => r.problems);
   if (problems.length)

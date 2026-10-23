@@ -602,6 +602,8 @@ test('H1-03: stopInputsOf — phase, runId и evidence из последней �
       sameFailureRepairs: 1,
       groupRepairsUsed: 0,
       groupRepairBudget: 6,
+      // Тот же отпечаток уже чинился: решение группы — остановка.
+      groupStopped: true,
     });
     assert.equal(input.work.failureKind, 'environment');
     assert.deepEqual(input.control, {
@@ -732,4 +734,43 @@ test('H1-03: работа под восстановлением свойства
     explainStop({ ...input, work: { ...input.work, recovery: false } }).retryPlanned,
     true,
   );
+});
+
+test('H1-03: остановленное задание графа не назначит повтор — explain не обещает retry, run подтверждает', async () => {
+  const { ctx, h, graphId } = failedState({ kind: 'gate', job: true });
+  try {
+    const job = h.workflows.list().find((j) => j.kind === 'graph' && j.id === graphId)!;
+    // Так задание оставляет advance после решения «остановка» или исчерпания стадии.
+    h.store.transact('workflow.updated', (tx) =>
+      tx.putLocal('workflow-jobs', WORKSPACE_OWNER, job.key, { ...job, status: 'failed' }),
+    );
+    const explain = () =>
+      stopInputsOf(h, { maxAttempts: 3, repairBudget: 6 })
+        .filter((i): i is WorkInput => i.kind === 'work')
+        .map(explainStop);
+    const [before] = explain();
+    assert.equal(before!.retryPlanned, false);
+    assert.notEqual(before!.action, 'retry');
+    assert.deepEqual([before!.actor, before!.action], ['lead', 'diagnose-failure']);
+    const writerCalls = ctx.calls('claude', 'writer');
+    await h.run({ graph: ctx.graph, author: 'claude' });
+    assert.equal(ctx.calls('claude', 'writer'), writerCalls, 'движок действительно не повторил');
+    assert.deepEqual(explain(), [before]);
+  } finally {
+    h.close();
+  }
+});
+
+test('H1-03: решение группы «остановка» (отмена или класс stop у соседа) снимает retryPlanned', () => {
+  const input = {
+    kind: 'work',
+    work: { id: 'b', status: 'failed', attempt: 1, failureKind: 'gate' },
+    maxAttempts: 3,
+    repair: { sameFailureRepairs: 0, groupRepairsUsed: 0, groupRepairBudget: 6 },
+    control: { paused: false },
+  } as const;
+  assert.equal(explainStop(input).retryPlanned, true);
+  const stopped = explainStop({ ...input, repair: { ...input.repair, groupStopped: true } });
+  assert.equal(stopped.retryPlanned, false);
+  assert.deepEqual([stopped.actor, stopped.action], ['lead', 'diagnose-failure']);
 });

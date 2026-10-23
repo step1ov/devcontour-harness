@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   HarnessError,
@@ -535,4 +535,41 @@ test('H1-02: порядок отказов — state (6) раньше policy (7)
   rmSync(join(p.root, '.harness/README.md'), { recursive: true });
   await refusal(initProject(p.opts()), 'NOT_READY');
   assert.deepEqual(readdirSync(join(p.root, '.harness')), []);
+});
+
+test('H1-02: .harness/work или notes — symlink наружу → конфликт плана и PATH_CONFLICT; агенту путь наружу не выдаётся', async () => {
+  for (const dir of ['.harness/work', '.harness/work/context/notes']) {
+    const p = project();
+    const outsideDir = join(p.scratch, 'elsewhere');
+    mkdirSync(outsideDir);
+    mkdirSync(join(p.root, dirname(dir)), { recursive: true });
+    symlinkSync(outsideDir, join(p.root, dir));
+    const before = outside(p.root);
+    const plan = await initProject(p.opts({ plan: true }));
+    const conflict = plan.files.find((f) => f.action === 'conflict');
+    assert.deepEqual(conflict, {
+      path: join(p.root, dir),
+      action: 'conflict',
+      conflict: 'symlink',
+      conflictPath: join(p.root, dir),
+    });
+    assert.equal(plan.conflicts, 1);
+    const error = await refusal(initProject(p.opts()), 'PATH_CONFLICT');
+    assert.deepEqual(error.issues, [{ path: [join(p.root, dir)], message: 'symlink' }]);
+    assert.equal(existsSync(join(p.root, '.harness', 'project.json')), false, 'ничего не записано');
+    assert.deepEqual(readdirSync(outsideDir), []);
+    assert.deepEqual(outside(p.root), before);
+  }
+});
+
+test('H1-02: --state внутри репозитория в ином регистре на нечувствительной к регистру ФС — тоже отказ', async (t) => {
+  const p = project();
+  const upper = join(dirname(p.root), basename(p.root).toUpperCase());
+  if (!existsSync(upper)) return t.skip('ФС различает регистр: другой путь — другой каталог');
+  const error = await refusal(
+    initProject(p.opts({ state: join(upper, 'state') })),
+    'INVALID_INPUT',
+  );
+  assert.deepEqual(error.issues, [{ path: ['--state'], message: 'state-inside-repository' }]);
+  assert.equal(existsSync(join(p.root, '.harness')), false);
 });
