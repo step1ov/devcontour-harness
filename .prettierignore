@@ -12,3 +12,5 @@ schemas
 
 # Встроенные профили переносятся побайтно: их digest — sha256 байтов файла.
 profiles/
+tests/fixtures/planning/
+tests/fixtures/consumer-h2/expected/

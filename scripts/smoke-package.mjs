@@ -10,6 +10,12 @@
  * самостоятельного проекта из установленного bin: init → граф из facts →
  * validate → run → принятый SHA → explain → повтор init.
  *
+ * H2: `planDraft` корня и `/contracts` — один объект; DevContour-подобный
+ * потребитель планирования (`tests/fixtures/consumer-h2`: байты схемы плана,
+ * prompt с host-инструкциями, статусы импорта плана) и маршрут планирования
+ * из установленного bin: init → plan-request (без вызовов runtime и state) →
+ * draft ведущего агента → plan-check → validate → review-plan.
+ *
  * `--archive F` проверяет уже выпущенный архив вместо свежей упаковки,
  * `--offline` ставит его без сети (из кэша npm).
  */
@@ -141,6 +147,11 @@ for (const required of [
   'schemas/project-manifest.schema.json',
   'schemas/stop-diagnosis.schema.json',
   'docs/standalone.md',
+  // H2: планирование ведущим агентом.
+  'lib/planning/check.js',
+  'lib/contracts/planning.js',
+  'schemas/plan-draft.schema.json',
+  'templates/plan-draft.json',
 ])
   if (!packed.files.some((f) => f.path === required)) fail('нет файла ' + required);
 
@@ -209,6 +220,25 @@ execFileSync(
   ],
   { cwd: consumerH1, stdio: 'inherit' },
 );
+// Потребитель планирования: архив и собственный zod той же версии (одна копия).
+const consumerH2 = join(scratch, 'consumer-h2');
+cpSync(join(root, 'tests', 'fixtures', 'consumer-h2'), consumerH2, {
+  recursive: true,
+  filter: (p) => !p.includes('node_modules'),
+});
+execFileSync(
+  'npm',
+  [
+    'install',
+    '--omit=dev',
+    '--ignore-scripts',
+    '--no-audit',
+    '--no-fund',
+    options.offline ? '--offline' : '--prefer-offline',
+    join(scratch, packed.filename),
+  ],
+  { cwd: consumerH2, stdio: 'inherit' },
+);
 
 // Журнал чтения: каждый node-процесс установленного пакета (CLI, библиотека,
 // fixture runtime) загружает модуль, который записывает пути загруженных
@@ -269,7 +299,7 @@ const libCheck = `
 const m = await import('devcontour-harness');
 const c = await import('devcontour-harness/contracts');
 if (m.API_VERSION !== c.API_VERSION) throw new Error('API_VERSION');
-for (const name of ['validateInputs', 'crossIssues', 'graphIssues', 'policyIssues', 'contextIssues', 'reviewIssues', 'selectReviewer'])
+for (const name of ['validateInputs', 'validationIssues', 'crossIssues', 'graphIssues', 'policyIssues', 'contextIssues', 'reviewIssues', 'selectReviewer'])
   if (typeof m[name] !== 'function') throw new Error('нет экспорта ' + name);
 const { readFileSync } = await import('node:fs');
 const dir = './node_modules/devcontour-harness/examples/single-task/';
@@ -299,6 +329,12 @@ if (differ.length) throw new Error('разные объекты: ' + differ.join
 for (const name of ['chainRoots', 'workProgress', 'nextAction', 'queueStop', 'explainStop', 'stopCodeOf', 'clipText', 'clipDeep'])
   if (typeof p[name] !== 'function') throw new Error('нет экспорта ./projections ' + name);
 for (const name of ['inspectPath', 'checkDestination', 'listRegularFiles', 'planFileWrites', 'applyFileWrites', 'initProject', 'diagnoseState'])
+  if (typeof m[name] !== 'function') throw new Error('нет экспорта ' + name);
+// H2: схема draft — одна реализация в корне и /contracts.
+const c = await import('devcontour-harness/contracts');
+for (const name of ['planDraft', 'planDraftJsonSchema', 'planDraftTaskShape', 'planDraftSchema', 'planningFactsSchema', 'planRequestDataSchema', 'planCheckDataSchema'])
+  if (m[name] === undefined || m[name] !== c[name]) throw new Error('корень и /contracts: разные ' + name);
+for (const name of ['planningRequest', 'planningBasis', 'planningFactsOf', 'standaloneInstructions', 'draftIssues', 'checkGaps', 'draftToGraph', 'planCheck', 'planRequestOf'])
   if (typeof m[name] !== 'function') throw new Error('нет экспорта ' + name);
 console.log(Object.keys(p).length);
 `;
@@ -333,6 +369,40 @@ for (const name of [
 ])
   if (!hostReport.checks.some((c) => c.name === name && c.ok))
     fail('consumer-h1: нет проверки ' + name);
+// Хост планирования: байты схемы плана, prompt с host-инструкциями, статусы импорта.
+const hostH2 = spawnSync(process.execPath, ['src/run.mjs'], { cwd: consumerH2, encoding: 'utf8' });
+let hostH2Report;
+try {
+  hostH2Report = JSON.parse(hostH2.stdout);
+} catch {
+  fail('consumer-h2: ответ не JSON: ' + hostH2.stderr + hostH2.stdout);
+}
+if (hostH2.status !== 0 || hostH2Report.ok !== true || !(hostH2Report.total > 0))
+  fail('consumer-h2: ' + JSON.stringify(hostH2Report.failed) + ' ' + hostH2.stderr);
+for (const name of [
+  'zod: one copy for host and package',
+  'identity: root === ./contracts',
+  'M-5 planSchema bytes (draft-7)',
+  'M-5 plan input schema bytes (catalogDigest)',
+  'K1 without keyOrder bytes differ',
+  'OP-PLAN-01 S1 without product planner',
+  'OP-PLAN-01 S12 host block before brief, brief last',
+  'OP-PLAN-01 host instructions once, not in shared sections',
+  'M-4 contracts whole in prompt',
+  'C6 duplicate key → 400',
+  'C6 unknown dependency → 404',
+  'cycle → host assertDag 409',
+  'AC14 host metadata roundtrip, extra keys dropped',
+])
+  if (!hostH2Report.checks.some((c) => c.name === name && c.ok))
+    fail('consumer-h2: нет проверки ' + name);
+for (const name of ['devcontour-plan-schema.json', 'devcontour-plan-input-schema.json'])
+  if (
+    !readFileSync(join(consumerH2, 'expected', name)).equals(
+      readFileSync(join(root, 'tests', 'fixtures', 'planning', name)),
+    )
+  )
+    fail('consumer-h2: expected/' + name + ' не байтовая копия снимка');
 // Профили, skills и шаблоны из установленного архива: встроенный профиль
 // разрешается из пакета с digest байтов своего файла, шаблоны проходят validate.
 const profileCheck = `
@@ -741,6 +811,254 @@ if (
 if (execFileSync('git', ['rev-parse', 'HEAD'], { cwd: h1, encoding: 'utf8' }).trim() !== h1Head)
   fail('маршрут H1 сдвинул HEAD основной ветки');
 
+// Маршрут H2 из установленного bin: ведущий агент планирует сам. Отдельная
+// копия npm-app с закоммиченной постановкой REQ-greet; plan-request и
+// plan-check идут с runtime-ловушками (любой вызов пишет строку журнала) и
+// не создают state; draft — из шаблона пакета и ответа plan-request.
+const h2 = join(scratch, 'npm-app-h2');
+cpSync(join(root, 'tests', 'fixtures', 'standalone', 'npm-app'), h2, { recursive: true });
+writeFileSync(join(h2, 'package.json'), JSON.stringify(appPkg, null, 2) + '\n');
+mkdirSync(join(h2, 'docs'));
+writeFileSync(
+  join(h2, 'docs', 'spec.md'),
+  '# Greeting\n\n## REQ-greet: greet a person\n\ngreet(name) returns "Hello, <name>!".\n',
+);
+execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: h2, env: gitEnv });
+execFileSync('git', ['add', '-A'], { cwd: h2, env: gitEnv });
+execFileSync('git', ['commit', '-qm', 'init'], { cwd: h2, env: gitEnv });
+const trapLog = join(scratch, 'h2-runtime-trap.log');
+const traps = join(scratch, 'traps');
+mkdirSync(traps);
+for (const name of ['claude', 'codex']) {
+  writeFileSync(
+    join(traps, name),
+    `#!/bin/sh\necho "${name} $*" >> ${JSON.stringify(trapLog)}\nexit 97\n`,
+  );
+  chmodSync(join(traps, name), 0o755);
+}
+const trapCalls = () =>
+  existsSync(trapLog) ? readFileSync(trapLog, 'utf8').split('\n').filter(Boolean).length : 0;
+const h2Base = { ...process.env, HARNESS_STATE_HOME: join(scratch, 'state-home-h2') };
+const h2Run = (env, ...args) => {
+  const r = spawnSync(bin, args, { cwd: scratch, encoding: 'utf8', env: { ...h2Base, ...env } });
+  let json;
+  try {
+    json = JSON.parse(r.stdout);
+  } catch {
+    json = undefined;
+  }
+  return { ...r, json };
+};
+const trapped = {
+  HARNESS_CLAUDE_BIN: join(traps, 'claude'),
+  HARNESS_CODEX_BIN: join(traps, 'codex'),
+};
+const fixtureBins = {
+  HARNESS_CLAUDE_BIN: join(fixtures, 'fake-claude'),
+  HARNESS_CODEX_BIN: join(fixtures, 'fake-codex'),
+};
+const h2Init = h2Run(trapped, 'init', '--repository', h2);
+if (h2Init.status !== 0 || h2Init.json?.data?.mode !== 'apply')
+  fail('H2 init: ' + h2Init.status + ' ' + h2Init.stdout + h2Init.stderr);
+const h2State = h2Init.json.data.manifest.paths.state;
+const h2Facts = h2Init.json.data.facts;
+const h2PolicyPath = join(h2, '.harness', 'policy.json');
+const h2Scenario = join(scratch, 'npm-app-h2.scenario.json');
+writeFileSync(h2Scenario, JSON.stringify({ reviewer: { result: approve } }));
+const h2Policy = JSON.parse(readFileSync(h2PolicyPath, 'utf8'));
+h2Policy.isolation = { mode: 'none', domains: [] };
+h2Policy.environment = { values: { FIXTURE_SCENARIO: h2Scenario } };
+writeFileSync(h2PolicyPath, JSON.stringify(h2Policy, null, 2) + '\n');
+const h2Work = resolve(h2, h2Facts.workDir);
+mkdirSync(h2Work, { recursive: true });
+const briefPath = join(h2Work, 'greeting.brief.md');
+writeFileSync(briefPath, 'Implement greet(name) so that it returns "Hello, <name>!".\n');
+const gitView = () =>
+  ['status --porcelain --untracked-files=all', 'for-each-ref']
+    .map((a) => execFileSync('git', a.split(' '), { cwd: h2, encoding: 'utf8' }))
+    .join('\n---\n');
+const h2GitBefore = gitView();
+
+const request = h2Run(
+  trapped,
+  'plan-request',
+  '--brief',
+  briefPath,
+  '--policy',
+  h2PolicyPath,
+  '--requirements',
+  'docs/spec.md',
+);
+const requestData = request.json?.data;
+if (
+  request.status !== 0 ||
+  requestData?.readOnly !== true ||
+  requestData.draftSchema !== 'plan-draft' ||
+  requestData.maxTasks !== 30 ||
+  !/^[a-f0-9]{64}$/.test(requestData.basis ?? '') ||
+  !requestData.prompt.includes(JSON.stringify(requestData.facts.roles)) ||
+  !h2Facts.roles.every((r) => requestData.prompt.includes(`"role":"${r.id}"`)) ||
+  !h2Facts.gates.every((g) => requestData.prompt.includes(`"id":"${g.id}"`)) ||
+  !requestData.prompt.includes(`"id":"${h2Facts.repositoryId}"`) ||
+  !requestData.prompt.endsWith('User brief:\n' + readFileSync(briefPath, 'utf8'))
+)
+  fail('plan-request: ' + request.status + ' ' + request.stdout + request.stderr);
+const requestHuman = h2Run(
+  trapped,
+  'plan-request',
+  '--brief',
+  briefPath,
+  '--policy',
+  h2PolicyPath,
+  '--requirements',
+  'docs/spec.md',
+  '--human',
+);
+if (requestHuman.status !== 0 || requestHuman.stdout !== requestData.prompt + '\n')
+  fail('plan-request --human: ' + requestHuman.status + ' ' + requestHuman.stdout.slice(0, 500));
+if (trapCalls() !== 0) fail('plan-request вызвал runtime: ' + readFileSync(trapLog, 'utf8'));
+if (existsSync(h2State)) fail('plan-request создал state: ' + h2State);
+if (gitView() !== h2GitBefore) fail('plan-request изменил репозиторий или refs');
+
+// Draft пишет ведущий агент: шаблон пакета, факты и снимок требований из prompt.
+const snapshotSection = requestData.prompt
+  .split('\n\n')
+  .find((s) => s.startsWith('Requirement snapshots at HEAD'));
+if (!snapshotSection) fail('plan-request: нет снимка требований в prompt');
+const snapshots = JSON.parse(snapshotSection.slice(snapshotSection.indexOf('): ') + 3));
+const reqGreet = snapshots
+  .flatMap((s) => s.requirements.map((r) => ({ ...r, source: s.source })))
+  .find((r) => r.id === 'REQ-greet');
+if (!reqGreet) fail('plan-request: REQ-greet нет в снимке ' + snapshotSection);
+const draftTemplate = JSON.parse(
+  readFileSync(join(installed, 'templates', 'plan-draft.json'), 'utf8'),
+);
+const testGate = h2Facts.gates.find((g) => g.kind === 'test');
+const draft = {
+  ...draftTemplate,
+  title: 'Greeting',
+  description: 'Implement greet(name) for the npm application.',
+  approved: true,
+  tasks: [
+    {
+      ...draftTemplate.tasks[0],
+      key: 'add-greeting',
+      title: 'Implement greet',
+      description: 'src/greet.js exports greet(name) returning "Hello, <name>!"',
+      role: h2Facts.roles[0].id,
+      repositoryId: h2Facts.repositoryId,
+      writePaths: ['src'],
+      gates: h2Facts.gates.map((g) => g.id),
+      acceptance: ['greet("Ada") returns "Hello, Ada!"', 'The test gate passes with JUnit'],
+      requirements: [
+        {
+          id: reqGreet.id,
+          source: reqGreet.source,
+          text: reqGreet.text,
+          digest: reqGreet.digest,
+          gate: testGate.id,
+          scenario: 'greet("Ada") returns "Hello, Ada!"',
+          testId: 'greet.greets',
+        },
+      ],
+      approved: true,
+      status: 'done',
+    },
+  ],
+};
+const draftPath = join(h2Work, 'greeting.draft.json');
+writeFileSync(draftPath, JSON.stringify(draft, null, 2) + '\n');
+// Новый файл draft агента — единственное изменение рабочего дерева до plan-check.
+const h2GitDraft = gitView();
+const checked = h2Run(
+  trapped,
+  'plan-check',
+  '--draft',
+  draftPath,
+  '--policy',
+  h2PolicyPath,
+  '--brief',
+  briefPath,
+  '--basis',
+  requestData.basis,
+);
+const checkData = checked.json?.data;
+const order = checkData?.graph?.orders?.[0];
+if (
+  checked.status !== 0 ||
+  checkData.issues.length !== 0 ||
+  checkData.checkPlan.length !== 0 ||
+  checkData.graph.id !== 'greeting' ||
+  checkData.basis !== requestData.basis ||
+  !/^[a-f0-9]{64}$/.test(checkData.graphDigest ?? '') ||
+  order?.id !== 'add-greeting' ||
+  order.goal !== draft.tasks[0].description ||
+  JSON.stringify(order.writeScope) !== '["src"]' ||
+  order.requirements?.[0]?.digest !== reqGreet.digest ||
+  'approved' in order ||
+  'status' in order ||
+  'approved' in checkData.graph
+)
+  fail('plan-check: ' + checked.status + ' ' + checked.stdout + checked.stderr);
+const stale = h2Run(
+  trapped,
+  'plan-check',
+  '--draft',
+  draftPath,
+  '--policy',
+  h2PolicyPath,
+  '--brief',
+  briefPath,
+  '--basis',
+  '0'.repeat(64),
+);
+if (
+  stale.status !== 3 ||
+  stale.json?.data?.issues?.[0]?.code !== 'APPROVAL_STALE' ||
+  stale.json.data.graph !== undefined
+)
+  fail('plan-check с устаревшим basis: ' + stale.status + ' ' + stale.stdout);
+if (trapCalls() !== 0) fail('plan-check вызвал runtime: ' + readFileSync(trapLog, 'utf8'));
+if (existsSync(h2State)) fail('plan-check создал state: ' + h2State);
+if (existsSync(join(h2, '.reports'))) fail('plan-check запускал gates (.reports/)');
+if (gitView() !== h2GitDraft) fail('plan-check изменил репозиторий или refs');
+
+// Граф сохраняет агент; validate и review-plan относятся к тому же digest.
+const h2GraphPath = join(h2Work, 'greeting.json');
+writeFileSync(h2GraphPath, JSON.stringify(checkData.graph, null, 2) + '\n');
+const h2Valid = h2Run(fixtureBins, 'validate', '--graph', h2GraphPath, '--policy', h2PolicyPath);
+if (h2Valid.status !== 0 || h2Valid.json?.data?.graphDigest !== checkData.graphDigest)
+  fail('validate графа plan-check: ' + h2Valid.stdout + h2Valid.stderr);
+const reviewed = h2Run(
+  fixtureBins,
+  'review-plan',
+  '--state',
+  h2State,
+  '--graph',
+  h2GraphPath,
+  '--policy',
+  h2PolicyPath,
+  '--author',
+  'claude',
+);
+const record = reviewed.json?.data;
+if (
+  reviewed.status !== 0 ||
+  record?.kind !== 'plan' ||
+  record.subject !== 'greeting' ||
+  record.approved !== true ||
+  record.digest !== checkData.graphDigest
+)
+  fail(
+    'review-plan графа plan-check: ' + reviewed.status + ' ' + reviewed.stdout + reviewed.stderr,
+  );
+const reviewerCalls = ['codex', 'claude'].map((r) => {
+  const counter = `${h2Scenario}.${r}.reviewer.count`;
+  return existsSync(counter) ? Number(readFileSync(counter, 'utf8')) : 0;
+});
+if (reviewerCalls[0] !== 1 || reviewerCalls[1] !== 0 || trapCalls() !== 0)
+  fail('review-plan: ожидался один вызов reviewer codex, получено ' + reviewerCalls);
+
 // Ни один процесс пакета не читал checkout: журнал есть и не ведёт в него.
 if (!existsSync(traceLog)) fail('журнал чтения пуст: модуль трассировки не загружался');
 const reads = readFileSync(traceLog, 'utf8').split('\n').filter(Boolean);
@@ -752,5 +1070,5 @@ if (!reads.some((p) => p.includes(join('node_modules', 'devcontour-harness', 'li
   fail('журнал чтения не содержит модулей установленного пакета');
 
 console.log(
-  `smoke-package: ${packed.filename} (${packed.files.length} файлов) установлен; профили, шаблоны, полный цикл и отказы gate/области/controller без каталога skills пройдены на fixture runtime (механика, не качество модели); ./projections без node: (${projectionFiles.size} модулей), одна реализация с корнем, consumer-h1 ${hostReport.total} проверок; маршрут H1 init → run → accepted ${h1Accepted.slice(0, 12)}, explain, повтор init без записи; ${reads.length} чтений вне checkout; sha512 ${packed.integrity}`,
+  `smoke-package: ${packed.filename} (${packed.files.length} файлов) установлен; профили, шаблоны, полный цикл и отказы gate/области/controller без каталога skills пройдены на fixture runtime (механика, не качество модели); ./projections без node: (${projectionFiles.size} модулей), одна реализация с корнем, consumer-h1 ${hostReport.total} проверок, consumer-h2 ${hostH2Report.total} проверок; маршрут H1 init → run → accepted ${h1Accepted.slice(0, 12)}, explain, повтор init без записи; маршрут H2 init → plan-request → draft → plan-check → validate → review-plan ${record.digest.slice(0, 12)} без вызовов runtime при планировании; ${reads.length} чтений вне checkout; sha512 ${packed.integrity}`,
 );

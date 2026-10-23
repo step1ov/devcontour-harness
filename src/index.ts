@@ -9,7 +9,7 @@ export { HARNESS_VERSION } from './package.ts';
  * схемы, `graphIssues`, `policyIssues`, `crossIssues` и, если передан,
  * `contextIssues`. Отказ — `HarnessError` с кодом и путями нарушений.
  */
-export { validateInputs, crossIssues, withinPaths } from './validate.ts';
+export { validateInputs, validationIssues, crossIssues, withinPaths } from './validate.ts';
 export { Harness, type HarnessOptions } from './control/harness.ts';
 export { doctor } from './control/doctor.ts';
 export { Engine, type EngineOptions } from './engine/engine.ts';

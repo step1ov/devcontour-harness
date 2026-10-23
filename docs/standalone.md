@@ -2,7 +2,8 @@
 
 Как подготовить существующий Git-репозиторий npm или pnpm к работе с harness
 без внешнего хоста: пользователь называет репозиторий, цель и ограничения,
-остальное агент получает от `harness init`. Пошаговый маршрут для агента —
+остальное агент получает от `harness init`, а план составляет сам через
+`harness plan-request` и `harness plan-check`. Пошаговый маршрут для агента —
 skill [`skills/harness/SKILL.md`](../skills/harness/SKILL.md).
 
 ## Установка вне проекта
@@ -87,10 +88,76 @@ realpath корня, поэтому повтор и новая сессия на
 дописывает недостающее; `status: complete` — только при валидных manifest и
 политике.
 
+## Планирование
+
+План составляет сам ведущий агент: отдельная модель-планировщик не
+вызывается, ни `plan-request`, ни `plan-check` не запускают runtime, не
+открывают state и ничего не пишут. Draft ничего не согласовывает:
+согласование — только `review-plan` / `approve` / `run`.
+
+```sh
+$H plan-request --brief .harness/work/<id>.brief.md --policy .harness/policy.json \
+  [--requirements [<repositoryId>:]docs/spec.md] [--contracts <dir>] [--context F] [--human]
+$H plan-check --draft .harness/work/<id>.draft.json --policy .harness/policy.json \
+  [--brief .harness/work/<id>.brief.md --basis <basis>] [--contracts <dir>] [--context F]
+```
+
+1. Постановка пользователя — файл `.harness/work/<id>.brief.md`.
+   Неоднозначности цели разрешаются вопросами человеку, ответ входит в
+   постановку.
+2. `plan-request` (`cliDataSchemas['plan-request']`) возвращает `prompt`,
+   `readOnly: true`, `recommendedTasks` (15), `maxTasks` (30), `facts`
+   (`PlanningFacts`: репозитории, роли с `writePaths` и `requiresContract`,
+   gates и группы, пакеты контекста, ресурсы, контракты с digest) и `basis` —
+   digest постановки и фактов. `--requirements` называет закоммиченный файл
+   с разделами `## REQ-*`: снимок требований на `HEAD` входит в prompt; файл
+   вне Git — `NOT_READY`. Контекст по умолчанию — каталоги
+   `<каталог политики>/work/context/<id>`. `--human` печатает только prompt.
+3. Draft пишется по `schemas/plan-draft.schema.json`; пример —
+   `templates/plan-draft.json` установленного пакета. Ключ задачи становится
+   ID поручения, `description` — его целью, `writePaths` — областью записи
+   (без них — весь репозиторий). Роли, gates, контракты, ресурсы и пакеты
+   контекста берутся только из `facts`; требования копируются из снимка без
+   изменений. Лишние ключи (например `approved`, `status`) отбрасываются.
+4. `plan-check` (`cliDataSchemas['plan-check']`) проверяет draft против
+   фактов и собирает `WorkGraph`: ответ `ok: true` с `issues`, `checkPlan`, а
+   без проблем — `graph`, `graphDigest` и `basis`. ID графа — имя файла без
+   `.draft.json`. Exit — 0 без проблем, иначе по классу первой проблемы.
+5. Граф без изменений сохраняется в `.harness/work/<id>.json`; дальше —
+   `validate`, `review-plan`, `run`. Digest записи ревью равен `graphDigest`.
+
+| Проблема                                                                                  | Код                                              | Exit | Действие                                                                           |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------ | ---- | ---------------------------------------------------------------------------------- |
+| неизвестная роль, репозиторий, контракт, ресурс, пакет контекста; область записи вне роли | `INVALID_INPUT`                                  | 2    | исправить draft; ID и digest не подставляются                                      |
+| требование не найдено в источнике на `HEAD` или его digest выдуман                        | `INVALID_INPUT`                                  | 2    | скопировать требование из снимка `plan-request`                                    |
+| неизвестный gate или группа, цикл групп; в области задачи нет test gate                   | `GATE_UNKNOWN`, `GATE_GROUP_CYCLE` + `checkPlan` | 2    | подготовить проверку (`declare-gate`, `add-test-gate`), а не удалять gate из draft |
+| постановка или факты изменились после `plan-request` (`--basis`); требование изменилось   | `APPROVAL_STALE`                                 | 3    | повторить `plan-request` и составить draft заново                                  |
+| источник требований не обычный Git-файл                                                   | `NOT_READY`                                      | 3    | закоммитить источник                                                               |
+
+`checkPlan` — что подготовить, прежде чем согласовывать основную работу:
+`gate-undeclared` / `declare-gate` (gate, как он написан в draft) или
+`test-gate-missing` / `add-test-gate`, со списком объявленных test gates
+репозитория. Gate объявляется в `.harness/policy.json` или локальном профиле
+(проверка — `doctor --policy` или `init --plan`), либо отдельный bootstrap-граф,
+доказанный уже объявленными gates. Смена политики меняет факты, а с ними
+`basis`: draft составляется заново.
+
+`plan-check` не запускает gates и не проверяет наличие `testId`: gates
+исполняются только на кандидате и интеграции, никогда на base. Новый тест
+пишется в той же задаче, что и поведение, которое он доказывает, и
+связывается требованием (test gate, сценарий, `testId`): до реализации он
+может падать, на принятом коммите обязан пройти. Задача, чьи gates заведомо
+красные, не планируется; проект, падающий уже на base, — отдельная первая
+задача.
+
+Без `--basis` новая постановка даёт новый `source.revision` графа и, значит,
+новый `graphDigest`: прежнее ревью к нему не относится.
+
 ## Граф, запуск, результат
 
-Граф пишется в `.harness/work/<id>.json` по шаблону `templates/graph.json` установленного пакета;
-`repositoryId`, роль, gates и область записи берутся только из `facts`.
+Граф — `data.graph` из `plan-check`, сохранённый в `.harness/work/<id>.json`.
+Граф можно написать и вручную по шаблону `templates/graph.json` установленного
+пакета; `repositoryId`, роль, gates и область записи берутся только из `facts`.
 
 ```sh
 $H validate --graph .harness/work/<id>.json --policy .harness/policy.json
@@ -131,7 +198,7 @@ $H explain --state <state> --policy .harness/policy.json [--work <id>] [--human]
 передаются только действия `user`: `fix-access`, `fix-environment`,
 `raise-budget`, `reset-attempts`, `user-decision`, `resume-queue`.
 
-`--human` (только `init` и `explain`) печатает текст вместо успешного
+`--human` (только `init`, `explain` и `plan-request`) печатает текст вместо успешного
 конверта; отказ остаётся JSON-конвертом. Exit code одинаков в обоих режимах.
 
 ## Новая сессия

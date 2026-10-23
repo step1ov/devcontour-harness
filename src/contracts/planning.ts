@@ -105,7 +105,7 @@ export function planDraft<E extends z.ZodRawShape = Record<never, never>>(
 export const planDraftSchema = planDraft({
   consumers: z.array(consumerSchema).max(10).optional(),
 });
-export type PlanDraft = z.output<ReturnType<typeof planDraft>>;
+export type PlanDraft = z.output<ReturnType<typeof planDraft<Record<never, never>>>>;
 export type StandalonePlanDraft = z.output<typeof planDraftSchema>;
 
 /** JSON Schema draft для `--output-schema` runtime и для агента. */

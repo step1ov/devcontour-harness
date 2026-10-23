@@ -1,0 +1,35 @@
+{
+  "title": "Describe the plan in one line",
+  "description": "What the user asked for and which first slice this draft covers.",
+  "tasks": [
+    {
+      "key": "first-task",
+      "title": "Describe the change in one line",
+      "description": "State the outcome the task must reach and where it lives.",
+      "role": "developer",
+      "repositoryId": "app",
+      "scope": "component",
+      "writePaths": ["src"],
+      "gates": ["unit"],
+      "dependsOn": [],
+      "acceptance": [
+        "An observable, testable criterion",
+        "The unit gate passes with a JUnit report"
+      ],
+      "contracts": []
+    },
+    {
+      "key": "second-task",
+      "title": "Describe the dependent change in one line",
+      "description": "State what this task adds on top of first-task and where it lives.",
+      "role": "developer",
+      "repositoryId": "app",
+      "scope": "component",
+      "writePaths": ["src"],
+      "gates": ["unit"],
+      "dependsOn": ["first-task"],
+      "acceptance": ["An observable criterion of the dependent change"],
+      "contracts": []
+    }
+  ]
+}

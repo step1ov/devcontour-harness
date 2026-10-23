@@ -1,0 +1,10 @@
+{
+  "name": "consumer-h2",
+  "version": "0.0.0",
+  "private": true,
+  "description": "H2 fixture: a host shaped like DevContour that builds its plan schema, planning prompt and plan import on the shared planning operations; it imports only devcontour-harness, devcontour-harness/contracts and zod.",
+  "type": "module",
+  "dependencies": {
+    "zod": "4.6.5"
+  }
+}

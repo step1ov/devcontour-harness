@@ -1,6 +1,6 @@
 ---
 name: harness
-description: Drive engineering work orders through the headless execution harness — install the exact package, prepare an existing npm/pnpm Git repository with `harness init`, write and validate a work graph, run isolated attempts with gates and independent review, explain stops and read accepted results. Use when a task should be executed and accepted by `harness` rather than edited directly.
+description: Drive engineering work orders through the headless execution harness — install the exact package, prepare an existing npm/pnpm Git repository with `harness init`, plan the work graph yourself and check it, run isolated attempts with gates and independent review, explain stops and read accepted results. Use when a task should be executed and accepted by `harness` rather than edited directly.
 ---
 
 # Harness
@@ -15,7 +15,7 @@ fencing, write scope and budgets are enforced by the harness itself, whether or
 not this file is installed.
 
 Every command takes explicit paths and prints one JSON envelope on stdout
-(`ok` with `data`, or `error`). `--human` (only `init` and `explain`) prints
+(`ok` with `data`, or `error`). `--human` (only `init`, `explain` and `plan-request`) prints
 text instead of a successful envelope; a refusal stays JSON. Exit codes:
 0 success, 2 invalid input, 3 refusal or block, 4 infrastructure. The tool
 keeps no "current project".
@@ -75,13 +75,65 @@ and lockfile stay untouched.
 | `NOT_READY` toolchain problems                      | missing scripts, wrong tool versions                                                                 | fix the project or hand it to the user; never weaken the policy                                                             |
 | `CONTROLLER_BUSY`                                   | the repository is already owned by another controller                                                | stop: a second controller and state are not created                                                                         |
 
-### 4. Write the graph
+### 4. Plan the graph
 
-Write `.harness/work/<graph-id>.json` from the template shipped in the
-installed package (`<tooldir>/node_modules/devcontour-harness/templates/graph.json`). Take `repositoryId`, `role`, `gates` and the write
-scope only from `data.facts`; do not invent ids. Acceptance criteria are
-observable (a command, an output, a file). Add context or notes only when the
-order needs them.
+You are the planner: write the draft yourself. No other model is called for
+planning, and the draft approves nothing.
+
+1. Write the user's goal and constraints to `.harness/work/<graph-id>.brief.md`.
+   Ask the user a short question for every real ambiguity instead of
+   guessing; the answer goes into the brief. A changed brief makes an earlier
+   draft stale.
+2. Build the planning request (read only: no model call, no state, no writes):
+
+   ```sh
+   $H plan-request --brief .harness/work/<graph-id>.brief.md \
+     --policy .harness/policy.json [--requirements docs/spec.md]
+   ```
+
+   Read `data.prompt` (roles, gates, repositories, context, resources and
+   contracts of the project; requirement snapshots at `HEAD` when
+   `--requirements` names a committed file with `## REQ-*` sections) and keep
+   `data.basis`. `--human` prints only the prompt.
+
+3. Write `.harness/work/<graph-id>.draft.json` matching
+   `schemas/plan-draft.schema.json` of the installed package; the example is
+   `<tooldir>/node_modules/devcontour-harness/templates/plan-draft.json`, whose
+   ids (`app`, `developer`, `unit`) are placeholders to replace. Take
+   `repositoryId`, `role`, `gates`, `contextPacks`, `resources` and
+   `contracts` only from the request; copy requirement `id`, `source`, `text`
+   and `digest` exactly, never invent ids or digests. Task keys become order
+   ids; `description` becomes the goal; omitted `writePaths` mean the whole
+   repository. A new feature test belongs to the task whose behaviour it
+   proves, bound by a requirement (test gate, scenario, `testId`): it may fail
+   before the implementation and must pass on the accepted commit.
+4. Check the draft (read only, no gates run):
+
+   ```sh
+   $H plan-check --draft .harness/work/<graph-id>.draft.json \
+     --policy .harness/policy.json \
+     --brief .harness/work/<graph-id>.brief.md --basis <data.basis>
+   ```
+
+   The graph id is the file name without `.draft.json`. Exit 0 returns
+   `data.graph` and `data.graphDigest`; otherwise read `data.issues` and
+   `data.checkPlan`:
+
+   | Code                                                                                    | Action                                                                                                                                                                                           |
+   | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+   | `GATE_UNKNOWN`, or any issue with a `checkPlan` entry (`declare-gate`, `add-test-gate`) | prepare the check: declare the gate in the policy or a local profile, or run a bootstrap graph proven by existing gates; then repeat `plan-request`. Never drop the gate or swap in a weaker one |
+   | `APPROVAL_STALE`                                                                        | the brief, the project facts or a requirement changed: run `plan-request` again and redo the draft                                                                                               |
+   | `INVALID_INPUT`                                                                         | fix the draft at the issue path (unknown role, gate scope, contract, requirement, write paths, order limits)                                                                                     |
+   | `NOT_READY`                                                                             | the requirement source is not a committed Git file: the user commits it                                                                                                                          |
+
+5. Save `data.graph` unchanged to `.harness/work/<graph-id>.json`, then
+   validate, review and run it (steps 5–7). The review record of the plan
+   carries the same digest as `data.graphDigest`.
+
+A hand-written graph is still possible: start from
+`<tooldir>/node_modules/devcontour-harness/templates/graph.json` and take
+`repositoryId`, `role`, `gates` and the write scope only from `data.facts` of
+`init`.
 
 ### 5. Validate
 
@@ -163,6 +215,12 @@ not copy acceptance logs or attempt state into notes.
   integration).
 
 ## Don'ts
+
+- Do not call a separate model to plan, and do not mark a plan or draft as
+  approved: approval comes only from `review-plan` / `approve` / `run`.
+- Do not weaken or remove gates or requirements so that a new feature test
+  is green before its implementation; a project already failing on its base
+  is a separate first task.
 
 - Do not edit the target ref or the attempt worktrees yourself; acceptance
   happens only through `harness run`.
