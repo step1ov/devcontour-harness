@@ -17,6 +17,17 @@ export const providerRefusal = (message: string) =>
     message,
   );
 
+/**
+ * Транспортный отказ до провайдера: TLS/DNS/соединение. Код распознаётся
+ * отдельным словом, а не внутри идентификатора; голые «TLS», «DNS», «network»
+ * сюда не входят. Проверяется до общего timeout: `connect ETIMEDOUT` — сеть,
+ * а не исчерпанный срок попытки.
+ */
+const transportFailure = (message: string) =>
+  /\b(?:eproto|econnrefused|enotfound|eai_again|etimedout|ehostunreach|enetunreach)\b|\btls handshake (?:failed|timeout)\b/i.test(
+    message,
+  );
+
 /** Класс отказа для случаев, где он не поставлен в точке обнаружения. */
 /** Отказ движка с кодом, который сам называет класс отказа попытки. */
 const byCode: Partial<Record<ErrorCode, FailureKind>> = {
@@ -33,6 +44,7 @@ export function classifyFailure(error: unknown, message: string): FailureKind {
   // это правило, а не «неизвестно».
   if (error instanceof HarnessError && byCode[error.code]) return byCode[error.code]!;
   if (providerRefusal(message)) return 'provider-auth';
+  if (transportFailure(message)) return 'environment';
   if (/исчерпан лимит времени|истёк|истек|тайм-?аут|timeout|превысил/i.test(message))
     return 'timeout';
   if (
