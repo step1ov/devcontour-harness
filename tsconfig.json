@@ -13,7 +13,8 @@
     "types": ["node"],
     "paths": {
       "devcontour-harness": ["./src/index.ts"],
-      "devcontour-harness/contracts": ["./src/contracts/index.ts"]
+      "devcontour-harness/contracts": ["./src/contracts/index.ts"],
+      "devcontour-harness/projections": ["./src/projections/index.ts"]
     }
   },
   "include": ["src", "tests", "scripts"]

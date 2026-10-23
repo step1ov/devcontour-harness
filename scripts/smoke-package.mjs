@@ -5,6 +5,11 @@
  * каждый процесс установленного пакета пишет журнал загруженных модулей и
  * открытых файлов, и ни один путь журнала не может вести в checkout.
  *
+ * H1: проекции без node:* и одна реализация с корнем, DevContour-подобный
+ * потребитель общих операций (`tests/fixtures/consumer-h1`) и маршрут
+ * самостоятельного проекта из установленного bin: init → граф из facts →
+ * validate → run → принятый SHA → explain → повтор init.
+ *
  * `--archive F` проверяет уже выпущенный архив вместо свежей упаковки,
  * `--offline` ставит его без сети (из кэша npm).
  */
@@ -27,7 +32,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { parseArgs } from 'node:util';
+import { isDeepStrictEqual, parseArgs } from 'node:util';
 
 const { values: options } = parseArgs({
   options: { archive: { type: 'string' }, offline: { type: 'boolean', default: false } },
@@ -128,8 +133,41 @@ for (const required of [
   'docs/upgrade.md',
   'docs/quickstart.md',
   'examples/README.md',
+  // H1: общие операции, init, explain и их схемы.
+  'lib/projections/index.js',
+  'lib/setup/files.js',
+  'lib/init/project.js',
+  'lib/explain/diagnose.js',
+  'schemas/project-manifest.schema.json',
+  'schemas/stop-diagnosis.schema.json',
+  'docs/standalone.md',
 ])
   if (!packed.files.some((f) => f.path === required)) fail('нет файла ' + required);
+
+// ./projections годится для браузерного бандла: всё, что достижимо от
+// lib/projections/index.js, лежит в lib/projections/** или в двух
+// разрешённых листах contracts и не импортирует node:* (Q3, K1).
+const libDir = join(unpacked, 'package', 'lib');
+const projectionFiles = new Set();
+const walk = (file) => {
+  if (projectionFiles.has(file)) return;
+  projectionFiles.add(file);
+  const rel = file.slice(libDir.length + 1);
+  if (
+    !rel.startsWith('projections/') &&
+    rel !== 'contracts/errors.js' &&
+    rel !== 'contracts/repair-policy.js'
+  )
+    fail('./projections достигает ' + rel);
+  const text = readFileSync(file, 'utf8');
+  if (/['"`]node:/.test(text)) fail('./projections содержит node: в ' + rel);
+  for (const [, spec] of text.matchAll(/(?:\bfrom\s*|\bimport\s*\(?\s*)['"]([^'"]+)['"]/g)) {
+    if (!spec.startsWith('.')) fail(`./projections импортирует «${spec}» в ${rel}`);
+    walk(resolve(file, '..', spec));
+  }
+};
+walk(join(libDir, 'projections', 'index.js'));
+if (projectionFiles.size < 2) fail('граф импортов ./projections пуст');
 
 const consumer = join(scratch, 'consumer');
 execFileSync('mkdir', [consumer]);
@@ -149,6 +187,27 @@ execFileSync(
     join(scratch, packed.filename),
   ],
   { cwd: consumer, stdio: 'inherit' },
+);
+
+// DevContour-подобный потребитель общих операций ставится тем же архивом
+// (до журнала чтения: сам npm не относится к процессам пакета).
+const consumerH1 = join(scratch, 'consumer-h1');
+cpSync(join(root, 'tests', 'fixtures', 'consumer-h1'), consumerH1, {
+  recursive: true,
+  filter: (p) => !p.includes('node_modules'),
+});
+execFileSync(
+  'npm',
+  [
+    'install',
+    '--omit=dev',
+    '--ignore-scripts',
+    '--no-audit',
+    '--no-fund',
+    options.offline ? '--offline' : '--prefer-offline',
+    join(scratch, packed.filename),
+  ],
+  { cwd: consumerH1, stdio: 'inherit' },
 );
 
 // Журнал чтения: каждый node-процесс установленного пакета (CLI, библиотека,
@@ -229,6 +288,51 @@ const lib = spawnSync(process.execPath, ['--input-type=module', '-e', libCheck],
 });
 if (lib.status !== 0 || lib.stdout.trim() !== packed.version)
   fail('импорт библиотеки: ' + lib.stderr);
+
+// Одна реализация: каждый экспорт ./projections — тот же объект, что в корне.
+const identityCheck = `
+const m = await import('devcontour-harness');
+const p = await import('devcontour-harness/projections');
+if (m.chainRoots !== p.chainRoots) throw new Error('chainRoots: корень и ./projections — разные функции');
+const differ = Object.keys(p).filter((k) => m[k] !== p[k]);
+if (differ.length) throw new Error('разные объекты: ' + differ.join(', '));
+for (const name of ['chainRoots', 'workProgress', 'nextAction', 'queueStop', 'explainStop', 'stopCodeOf', 'clipText', 'clipDeep'])
+  if (typeof p[name] !== 'function') throw new Error('нет экспорта ./projections ' + name);
+for (const name of ['inspectPath', 'checkDestination', 'listRegularFiles', 'planFileWrites', 'applyFileWrites', 'initProject', 'diagnoseState'])
+  if (typeof m[name] !== 'function') throw new Error('нет экспорта ' + name);
+console.log(Object.keys(p).length);
+`;
+const identity = spawnSync(process.execPath, ['--input-type=module', '-e', identityCheck], {
+  cwd: consumer,
+  encoding: 'utf8',
+});
+if (identity.status !== 0) fail('корень и ./projections: ' + identity.stderr);
+
+// Хост на общих операциях: прежние строки OP-DIAG-01…04 и порядок отказов setup M-2.
+const host = spawnSync(process.execPath, ['src/run.mjs'], { cwd: consumerH1, encoding: 'utf8' });
+let hostReport;
+try {
+  hostReport = JSON.parse(host.stdout);
+} catch {
+  fail('consumer-h1: ответ не JSON: ' + host.stderr + host.stdout);
+}
+if (host.status !== 0 || hostReport.ok !== true || !(hostReport.total > 0))
+  fail('consumer-h1: ' + JSON.stringify(hostReport.failed) + ' ' + host.stderr);
+for (const name of [
+  'identity: root === ./projections',
+  'OP-DIAG-01 host exhausted',
+  'OP-DIAG-01 host kinds',
+  'OP-DIAG-04 runtime latest',
+  'OP-DIAG-04 M-3 latest without message',
+  'OP-DIAG-03 steps',
+  'OP-DIAG-02 progress',
+  'M-2 profile content-differs',
+  'M-2 host checks before profile',
+  'M-2 symlink before host checks',
+  'OP-SETUP-04 create-only and repeat',
+])
+  if (!hostReport.checks.some((c) => c.name === name && c.ok))
+    fail('consumer-h1: нет проверки ' + name);
 // Профили, skills и шаблоны из установленного архива: встроенный профиль
 // разрешается из пакета с digest байтов своего файла, шаблоны проходят validate.
 const profileCheck = `
@@ -403,6 +507,241 @@ const blocked = busy.run();
 if (blocked.status !== 3 || JSON.parse(blocked.stdout).error?.code !== 'CONTROLLER_BUSY')
   fail('занятая роль controller: ' + blocked.status + ' ' + blocked.stdout);
 
+// explain из установленного bin: только чтение, данные CLI равны библиотеке.
+const explainOf = (state, policyPath, ...extra) =>
+  spawnSync(bin, ['explain', '--state', state, '--policy', policyPath, ...extra], {
+    cwd: scratch,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      HARNESS_CLAUDE_BIN: join(fixtures, 'fake-claude'),
+      HARNESS_CODEX_BIN: join(fixtures, 'fake-codex'),
+    },
+  });
+const sha256 = (file) => createHash('sha256').update(readFileSync(file)).digest('hex');
+const exhausted = project('explain-gate', { 'src/greet.js': "exports.greet = () => 'Hi';\n" });
+exhausted.run();
+const stateDb = join(exhausted.state, 'state.sqlite');
+const dbBefore = sha256(stateDb);
+const explained = explainOf(exhausted.state, exhausted.policyPath);
+const diagnoses = explained.status === 0 ? JSON.parse(explained.stdout).data?.diagnoses : undefined;
+const gateStop = diagnoses?.find((d) => d.workId === 'add-greeting');
+// maxAttempts 1: сбой gate исчерпал попытки — сброс решает человек.
+if (
+  gateStop?.code !== 'ATTEMPTS_EXHAUSTED' ||
+  gateStop.cause !== 'gate' ||
+  gateStop.actor !== 'user' ||
+  gateStop.action !== 'reset-attempts' ||
+  !gateStop.evidence.some((e) => e.kind === 'attempt')
+)
+  fail(
+    'explain после GATE_FAILED: ' + explained.status + ' ' + explained.stdout + explained.stderr,
+  );
+const human = explainOf(exhausted.state, exhausted.policyPath, '--human');
+if (
+  human.status !== explained.status ||
+  !human.stdout.includes('add-greeting ATTEMPTS_EXHAUSTED [gate/') ||
+  human.stdout.trimStart().startsWith('{')
+)
+  fail('explain --human: ' + human.status + ' ' + human.stdout);
+if (sha256(stateDb) !== dbBefore) fail('explain изменил state.sqlite');
+const libExplain = `
+const m = await import('devcontour-harness');
+const { readFileSync } = await import('node:fs');
+const policy = m.executionPolicySchema.parse(JSON.parse(readFileSync(${JSON.stringify(exhausted.policyPath)}, 'utf8')));
+const adapters = {
+  codex: m.cliAdapter('codex', { toolProfiles: policy.toolProfiles, executable: ${JSON.stringify(join(fixtures, 'fake-codex'))} }),
+  claude: m.cliAdapter('claude', { toolProfiles: policy.toolProfiles, executable: ${JSON.stringify(join(fixtures, 'fake-claude'))} }),
+};
+const data = await m.diagnoseState({ stateDir: ${JSON.stringify(exhausted.state)}, policy, baseDir: ${JSON.stringify(exhausted.app)}, adapters });
+process.stdout.write(JSON.stringify(data));
+`;
+const fromLib = spawnSync(process.execPath, ['--input-type=module', '-e', libExplain], {
+  cwd: consumer,
+  encoding: 'utf8',
+});
+if (
+  fromLib.status !== 0 ||
+  !isDeepStrictEqual(JSON.parse(fromLib.stdout), JSON.parse(explained.stdout).data)
+)
+  fail('данные explain CLI ≠ diagnoseState библиотеки: ' + fromLib.stderr + fromLib.stdout);
+const busyStop = explainOf(busy.state, busy.policyPath);
+if (
+  busyStop.status !== 0 ||
+  !JSON.parse(busyStop.stdout).data.diagnoses.some(
+    (d) => d.code === 'CONTROLLER_BUSY' && d.actor === 'lead' && d.action === 'wait',
+  )
+)
+  fail('explain занятой роли controller: ' + busyStop.stdout + busyStop.stderr);
+const missingState = join(scratch, 'never-run-state');
+const missing = explainOf(missingState, exhausted.policyPath);
+if (missing.status !== 3 || JSON.parse(missing.stdout).error?.code !== 'NOT_FOUND')
+  fail('explain без state: ' + missing.status + ' ' + missing.stdout);
+if (existsSync(missingState)) fail('explain создал каталог state');
+
+// Маршрут H1 из установленного bin: существующее npm-приложение в своём Git,
+// init (план, запись), overlay fixture runtime, граф только из facts и
+// шаблона пакета, validate, run, принятый SHA, explain, повтор init.
+const h1 = join(scratch, 'npm-app');
+cpSync(join(root, 'tests', 'fixtures', 'standalone', 'npm-app'), h1, { recursive: true });
+// npm — не процесс пакета: без журнала чтения и вне checkout.
+const npmVersion = execFileSync('npm', ['--version'], {
+  cwd: scratch,
+  encoding: 'utf8',
+  env: { ...process.env, NODE_OPTIONS: '' },
+}).trim();
+const appPkg = JSON.parse(readFileSync(join(h1, 'package.json'), 'utf8'));
+appPkg.packageManager = 'npm@' + npmVersion;
+writeFileSync(join(h1, 'package.json'), JSON.stringify(appPkg, null, 2) + '\n');
+execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: h1, env: gitEnv });
+execFileSync('git', ['add', '-A'], { cwd: h1, env: gitEnv });
+execFileSync('git', ['commit', '-qm', 'init'], { cwd: h1, env: gitEnv });
+const h1Head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: h1, encoding: 'utf8' }).trim();
+const stateHome = join(scratch, 'state-home');
+const h1Env = {
+  ...process.env,
+  HARNESS_STATE_HOME: stateHome,
+  HARNESS_CLAUDE_BIN: join(fixtures, 'fake-claude'),
+  HARNESS_CODEX_BIN: join(fixtures, 'fake-codex'),
+};
+const h1Run = (...args) => {
+  const r = spawnSync(bin, args, { cwd: scratch, encoding: 'utf8', env: h1Env });
+  let json;
+  try {
+    json = JSON.parse(r.stdout);
+  } catch {
+    json = undefined;
+  }
+  return { ...r, json };
+};
+const h1Plan = h1Run('init', '--repository', h1, '--plan');
+if (
+  h1Plan.status !== 0 ||
+  h1Plan.json?.data?.mode !== 'plan' ||
+  h1Plan.json.data.status !== 'new' ||
+  h1Plan.json.data.conflicts !== 0 ||
+  !h1Plan.json.data.toolchain.ready
+)
+  fail('init --plan: ' + h1Plan.status + ' ' + h1Plan.stdout + h1Plan.stderr);
+if (existsSync(join(h1, '.harness'))) fail('init --plan записал .harness/');
+const h1Init = h1Run('init', '--repository', h1);
+const h1Data = h1Init.json?.data;
+if (h1Init.status !== 0 || h1Data?.mode !== 'apply')
+  fail('init: ' + h1Init.status + ' ' + h1Init.stdout + h1Init.stderr);
+const createdRel = h1Data.created.map((f) => f.slice(h1.length + 1));
+if (
+  JSON.stringify(createdRel) !==
+  JSON.stringify([
+    '.harness/.gitignore',
+    '.harness/README.md',
+    '.harness/policy.json',
+    '.harness/project.json',
+  ])
+)
+  fail('init: порядок записи ' + JSON.stringify(createdRel));
+const h1State = h1Data.manifest.paths.state;
+if (!h1State.startsWith(join(stateHome, 'projects') + sep) || existsSync(h1State))
+  fail('init: state вне state home или создан заранее: ' + h1State);
+if (h1Data.profile.id !== 'npm-ci') fail('init: профиль ' + h1Data.profile.id);
+const facts = h1Data.facts;
+if (facts.graphTemplate !== join(installed, 'templates', 'graph.json'))
+  fail('init: шаблон графа не из установленного пакета: ' + facts.graphTemplate);
+const changedOutside = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], {
+  cwd: h1,
+  encoding: 'utf8',
+})
+  .split('\n')
+  .filter((l) => l && !l.startsWith('?? .harness/'));
+if (changedOutside.length) fail('init изменил файлы вне .harness/: ' + changedOutside.join(', '));
+
+// Overlay fixture runtime — адаптация для подставных CLI, как у примеров выше.
+const h1Scenario = join(scratch, 'npm-app.scenario.json');
+writeFileSync(
+  h1Scenario,
+  JSON.stringify({
+    writer: {
+      files: { 'src/greet.js': "exports.greet = (name) => 'Hello, ' + name + '!';\n" },
+      result: { completed: true, summary: 'greet', discoveries: [] },
+    },
+    reviewer: { result: approve },
+  }),
+);
+const h1PolicyPath = join(h1, '.harness', 'policy.json');
+const h1Policy = JSON.parse(readFileSync(h1PolicyPath, 'utf8'));
+h1Policy.isolation = { mode: 'none', domains: [] };
+h1Policy.environment = { values: { FIXTURE_SCENARIO: h1Scenario } };
+writeFileSync(h1PolicyPath, JSON.stringify(h1Policy, null, 2) + '\n');
+
+// Граф: только facts init и шаблон пакета.
+const graphTemplate = JSON.parse(readFileSync(facts.graphTemplate, 'utf8'));
+const h1Graph = {
+  ...graphTemplate,
+  id: 'greeting',
+  source: { connector: 'files', ref: 'greeting.json', revision: '1' },
+  orders: [
+    {
+      ...graphTemplate.orders[0],
+      id: 'add-greeting',
+      source: { connector: 'files', ref: 'add-greeting', revision: '1' },
+      title: 'Implement greet',
+      goal: 'src/greet.js exports greet(name) returning "Hello, <name>!"',
+      acceptance: ['greet("Ada") returns "Hello, Ada!"', 'The test gate passes with JUnit'],
+      role: facts.roles[0].id,
+      repositoryId: facts.repositoryId,
+      writeScope: ['src'],
+      gates: facts.gates.map((g) => g.id),
+    },
+  ],
+};
+const workDir = resolve(h1, facts.workDir);
+mkdirSync(workDir, { recursive: true });
+const h1GraphPath = join(workDir, 'greeting.json');
+writeFileSync(h1GraphPath, JSON.stringify(h1Graph, null, 2) + '\n');
+const h1Valid = h1Run('validate', '--graph', h1GraphPath, '--policy', h1PolicyPath);
+if (h1Valid.status !== 0) fail('validate графа из facts: ' + h1Valid.stdout + h1Valid.stderr);
+const h1Cycle = h1Run(
+  'run',
+  '--graph',
+  h1GraphPath,
+  '--policy',
+  h1PolicyPath,
+  '--state',
+  h1State,
+  '--author',
+  'claude',
+);
+if (h1Cycle.status !== 0) fail('run маршрута H1: ' + h1Cycle.stdout + h1Cycle.stderr);
+const h1Result = h1Run('result', '--state', h1State, '--work', 'add-greeting').json?.data?.result;
+const h1Accepted = execFileSync('git', ['rev-parse', 'refs/heads/harness/accepted'], {
+  cwd: h1,
+  encoding: 'utf8',
+}).trim();
+if (h1Result?.outcome !== 'accepted' || h1Result.shas.result !== h1Accepted)
+  fail('маршрут H1: не принят или SHA ≠ target ref: ' + JSON.stringify(h1Result));
+const h1Explain = h1Run('explain', '--state', h1State, '--policy', h1PolicyPath);
+if (
+  h1Explain.status !== 0 ||
+  !Array.isArray(h1Explain.json?.data?.diagnoses) ||
+  h1Explain.json.data.diagnoses.some(
+    (d) => d.workId === 'add-greeting' || d.code === 'RUNTIME_UNAVAILABLE',
+  )
+)
+  fail('explain принятого маршрута: ' + h1Explain.stdout + h1Explain.stderr);
+const h1Human = h1Run('explain', '--state', h1State, '--policy', h1PolicyPath, '--human');
+if (h1Human.status !== 0 || h1Human.json !== undefined || !h1Human.stdout.trim())
+  fail('explain --human маршрута: ' + h1Human.status + ' ' + h1Human.stdout);
+const h1Again = h1Run('init', '--repository', h1);
+if (
+  h1Again.status !== 0 ||
+  h1Again.json?.data?.created?.length !== 0 ||
+  h1Again.json.data.status !== 'complete' ||
+  h1Again.json.data.projectId !== h1Data.projectId ||
+  h1Again.json.data.manifest.paths.state !== h1State
+)
+  fail('повтор init: ' + h1Again.stdout + h1Again.stderr);
+if (execFileSync('git', ['rev-parse', 'HEAD'], { cwd: h1, encoding: 'utf8' }).trim() !== h1Head)
+  fail('маршрут H1 сдвинул HEAD основной ветки');
+
 // Ни один процесс пакета не читал checkout: журнал есть и не ведёт в него.
 if (!existsSync(traceLog)) fail('журнал чтения пуст: модуль трассировки не загружался');
 const reads = readFileSync(traceLog, 'utf8').split('\n').filter(Boolean);
@@ -414,5 +753,5 @@ if (!reads.some((p) => p.includes(join('node_modules', 'devcontour-harness', 'li
   fail('журнал чтения не содержит модулей установленного пакета');
 
 console.log(
-  `smoke-package: ${packed.filename} (${packed.files.length} файлов) установлен; профили, шаблоны, полный цикл и отказы gate/области/controller без каталога skills пройдены на fixture runtime (механика, не качество модели); ${reads.length} чтений вне checkout; sha512 ${packed.integrity}`,
+  `smoke-package: ${packed.filename} (${packed.files.length} файлов) установлен; профили, шаблоны, полный цикл и отказы gate/области/controller без каталога skills пройдены на fixture runtime (механика, не качество модели); ./projections без node: (${projectionFiles.size} модулей), одна реализация с корнем, consumer-h1 ${hostReport.total} проверок; маршрут H1 init → run → accepted ${h1Accepted.slice(0, 12)}, explain, повтор init без записи; ${reads.length} чтений вне checkout; sha512 ${packed.integrity}`,
 );

@@ -1,0 +1,7 @@
+{
+  "name": "consumer-h1",
+  "version": "0.0.0",
+  "private": true,
+  "description": "H1-05 fixture: a host shaped like DevContour that maps its tasks, events and setup onto the shared harness operations; it imports only devcontour-harness and devcontour-harness/projections.",
+  "type": "module"
+}

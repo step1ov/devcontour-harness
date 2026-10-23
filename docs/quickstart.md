@@ -173,6 +173,9 @@ git show --stat refs/heads/harness/accepted    # изменения только
 - Один вендор: запустите с `--policy policy-same-vendor.json` — reviewer того
   же вендора допускается только потому, что политика это явно разрешает.
 - Другие конфигурации — в `examples/` этого руководства.
+- Свой существующий npm/pnpm-репозиторий: `harness init` готовит `.harness/`
+  (политика из профиля, state вне репозитория), `harness explain` объясняет
+  остановки — [standalone](standalone.md).
 
 Исход без принятия (`rejected`, `blocked`, `stopped`, `cancelled`) несёт
 `stopReason{code, message}`; result SHA у него нет. Exit codes: 0 успех,

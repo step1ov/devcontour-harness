@@ -1,5 +1,4 @@
 import type { PauseReason } from './enums.ts';
-import { notImplemented } from './stub.ts';
 
 export interface QueueStopInput {
   paused: boolean;
@@ -12,8 +11,22 @@ export interface QueueStopView {
   detail?: string;
 }
 
-/** Причина остановки очереди (OP-DIAG-04). */
+/**
+ * Причина остановки очереди (OP-DIAG-04). Пауза без причины — прежние записи
+ * паузы рантайма, она означает runtime. Пауза оператора и прочие причины не
+ * называют сбой. Для runtime берётся ошибка с наибольшим `seq`; если у неё нет
+ * сообщения, `detail` нет: более старая ошибка за причину не выдаётся.
+ */
 export function queueStop(input: QueueStopInput): QueueStopView {
-  void input;
-  return notImplemented('queueStop');
+  if (!input.paused) return { paused: false };
+  const reason: PauseReason = input.pauseReason ?? 'runtime';
+  if (reason !== 'runtime') return { paused: true, reason };
+  const latest = input.errors.reduce<QueueStopInput['errors'][number] | undefined>(
+    (a, e) => (!a || e.seq > a.seq ? e : a),
+    undefined,
+  );
+  const message = latest?.message;
+  return message
+    ? { paused: true, reason, detail: message.replace(/^(Error|TaskFailure):\s*/, '') }
+    : { paused: true, reason };
 }

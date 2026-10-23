@@ -1,0 +1,9 @@
+{
+  "name": "npm-app",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "check": "node --check src/greet.js",
+    "test": "node test/greet.test.js"
+  }
+}

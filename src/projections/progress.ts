@@ -1,5 +1,4 @@
 import type { WorkStatus } from './enums.ts';
-import { notImplemented } from './stub.ts';
 
 export const progressReasons = [
   'plan-review-required',
@@ -25,8 +24,27 @@ export interface ProgressView {
   eligible: boolean;
 }
 
-/** Почему работа сейчас не выдаётся (OP-DIAG-02). */
+/**
+ * Почему работа сейчас не выдаётся (OP-DIAG-02): общие ветви. Продуктовые
+ * причины хоста приходят в `hostReasons` и влияют только на `eligible`;
+ * их место в итоговом перечне определяет хост.
+ */
 export function workProgress(input: ProgressInput): ProgressView {
-  void input;
-  return notImplemented('workProgress');
+  const { work, statusOf, maxAttempts } = input;
+  const dependencies = work.dependsOn.filter((id) => statusOf(id) !== 'done');
+  const reasons: ProgressReason[] = [];
+  if (work.status === 'draft') reasons.push('plan-review-required');
+  if (work.status === 'failed')
+    reasons.push(work.attempt >= maxAttempts ? 'attempts-exhausted' : 'failure-requires-diagnosis');
+  if (work.status === 'ready') {
+    if (dependencies.length) reasons.push('dependencies-incomplete');
+    if (work.attempt >= maxAttempts) reasons.push('attempts-exhausted');
+    if (input.paused) reasons.push('queue-paused');
+    if (input.activeRuns >= input.concurrency) reasons.push('workers-busy');
+  }
+  return {
+    dependencies,
+    reasons,
+    eligible: work.status === 'ready' && !reasons.length && !(input.hostReasons ?? []).length,
+  };
 }
