@@ -17,6 +17,8 @@ const stopCode = (attempt: AttemptState): ErrorCode => {
       return 'GATE_FAILED';
     case 'review':
       return 'REVIEW_REJECTED';
+    case 'review-protocol':
+      return 'REVIEW_PROTOCOL_INVALID';
     case 'scope-violation':
       return 'SCOPE_VIOLATION';
     case 'budget':
@@ -33,6 +35,28 @@ const stopCode = (attempt: AttemptState): ErrorCode => {
     default:
       return 'INTERNAL';
   }
+};
+
+/**
+ * Причины ошибок протокола предыдущих вызовов того же логического ревью
+ * (фаза, SHA, область), записанные до этой записи.
+ */
+const priorIssues = (e: EvidenceRecord, attempt: AttemptState) => {
+  const r = e.reviewRound;
+  if (!r || r.protocol !== 'valid' || r.call < 2) return [];
+  const at = attempt.evidence.indexOf(e);
+  return attempt.evidence
+    .slice(0, at)
+    .filter(
+      (x) =>
+        x.kind === 'review' &&
+        x.phase === e.phase &&
+        x.sha === e.sha &&
+        x.reviewRound?.scope === r.scope &&
+        x.reviewRound.protocol === 'invalid',
+    )
+    .flatMap((x) => x.reviewRound?.issues ?? [])
+    .slice(-50);
 };
 
 const ref = (e: EvidenceRecord, attempt: AttemptState) => ({
@@ -69,6 +93,33 @@ const ref = (e: EvidenceRecord, attempt: AttemptState) => ({
         reviewer: {
           runtime: attempt.reviewer,
           sameVendor: vendorOf(attempt.reviewer) === vendorOf(attempt.runtime),
+        },
+      }
+    : {}),
+  // Раунд ревью кода: ошибка протокола и применённые переходы видны отдельно
+  // от вердикта. Прежние записи этих сведений не имеют — их нет и в ссылке.
+  ...(e.kind === 'review' && e.reviewRound
+    ? {
+        review: {
+          round: e.reviewRound.round,
+          call: e.reviewRound.call,
+          protocol: e.reviewRound.protocol,
+          // У невалидной записи — её причины; у валидного вердикта повтора —
+          // причины предыдущих вызовов того же логического ревью.
+          ...((issues) => (issues.length ? { issues } : {}))(
+            e.reviewRound.protocol === 'valid'
+              ? priorIssues(e, attempt)
+              : (e.reviewRound.issues ?? []),
+          ),
+          ...(e.reviewRound.transitions?.length
+            ? {
+                transitions: e.reviewRound.transitions.map(({ id, from, to }) => ({
+                  id,
+                  from,
+                  to,
+                })),
+              }
+            : {}),
         },
       }
     : {}),
@@ -138,6 +189,10 @@ export function runResult(attempt: AttemptState, harnessVersion: string): RunRes
     },
     evidence: attempt.evidence
       .filter((e) => e.sha === attempt.candidateSha || e.sha === attempt.integrationSha)
+      // Принятый результат несёт решающие записи: вызов reviewer с ошибкой
+      // протокола виден причинами у валидного вердикта (`review.issues`), а
+      // не отдельной записью, которую получатель не проверяет.
+      .filter((e) => attempt.status !== 'succeeded' || e.reviewRound?.protocol !== 'invalid')
       .map((e) => ref(e, attempt)),
     findings: attempt.evidence
       .filter((e) => e.kind === 'review' && !e.passed)
@@ -147,6 +202,8 @@ export function runResult(attempt: AttemptState, harnessVersion: string): RunRes
         message: f.message.slice(0, 4000) || '—',
         ...(f.path !== undefined ? { path: f.path } : {}),
         ...(f.line !== undefined ? { line: f.line } : {}),
+        ...(f.id !== undefined ? { id: f.id } : {}),
+        ...(f.status !== undefined ? { status: f.status } : {}),
       })),
     limitations: [] as string[],
     finishedAt: attempt.finishedAt ?? attempt.startedAt,

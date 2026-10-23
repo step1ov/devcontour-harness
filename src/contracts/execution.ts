@@ -17,7 +17,7 @@ import {
   jointFailedSchema,
   jointPassedSchema,
 } from './result.ts';
-import { reviewRecordSchema } from './review.ts';
+import { findingStatuses, reviewRecordSchema, reviewRoundSchema } from './review.ts';
 import { contractDocumentSchema, spikeSchema } from './checks.ts';
 
 /**
@@ -55,6 +55,8 @@ export const failureKinds = [
   'scope-violation',
   'gate',
   'review',
+  /** Ответ reviewer нарушил протокол ревью и разрешённые повторы reviewer исчерпаны. */
+  'review-protocol',
   'merge',
   'cancelled',
   'budget',
@@ -181,6 +183,10 @@ export const evidenceFindingSchema = z.strictObject({
   message: z.string().max(12000),
   path: z.string().max(500).nullable().optional(),
   line: z.number().int().positive().nullable().optional(),
+  /** ID находки, выданный controller (раунды протокола `reviewRound`); нет у прежних записей. */
+  id: digestSchema.optional(),
+  /** Статус находки на момент раунда. */
+  status: z.enum(findingStatuses).optional(),
 });
 
 export const evidenceRecordSchema = z.strictObject({
@@ -202,6 +208,8 @@ export const evidenceRecordSchema = z.strictObject({
   consumer: idSchema.optional(),
   inspection: reviewInspectionSchema.optional(),
   findings: z.array(evidenceFindingSchema).optional(),
+  /** Раунд ревью кода: область истории, вызов, протокол, переходы (docs/review-protocol.md). */
+  reviewRound: reviewRoundSchema.optional(),
   tests: z
     .array(
       z.strictObject({

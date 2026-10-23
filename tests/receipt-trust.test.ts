@@ -247,7 +247,18 @@ function judge(result: RunResult, context: ReceiverContext, testId: string) {
 function withInformative(result: RunResult) {
   const r = structuredClone(result) as any;
   r.inputs.consumerVersion = 'host-1';
-  r.findings = [{ severity: 'note', message: 'замечание', path: 'src/a.js', line: 3, rule: 'r-1' }];
+  r.findings = [
+    {
+      severity: 'note',
+      message: 'замечание',
+      path: 'src/a.js',
+      line: 3,
+      rule: 'r-1',
+      // ID и статус находки протокола ревью (docs/review-protocol.md).
+      id: 'f'.repeat(64),
+      status: 'open',
+    },
+  ];
   r.limitations = ['не проверено на устройстве'];
   for (const e of r.evidence) if (e.kind === 'review') e.reviewer.model = 'reviewer-model';
   return runResultSchema.parse(r);

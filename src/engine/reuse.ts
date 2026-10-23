@@ -17,7 +17,12 @@ import {
 // попытку с нуля.
 
 /** Отказы, которые ничего не говорят о коде кандидата. */
-export const reusableFailures: readonly FailureKind[] = ['environment', 'timeout'];
+export const reusableFailures: readonly FailureKind[] = [
+  'environment',
+  'timeout',
+  // Ответ reviewer вне протокола о коде кандидата ничего не говорит.
+  'review-protocol',
+];
 
 /**
  * Основания фазы реализации: всё, от чего зависел написанный код. Знания

@@ -1,4 +1,5 @@
 import { spawn, spawnSync, execFile } from 'node:child_process';
+import { osTool } from './os-tools.ts';
 import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
@@ -213,7 +214,7 @@ function captureProcessTree(pid?: number): RuntimeDiagnostics['processTree'] {
       reason: 'Process inventory unavailable on this platform',
       processes: [],
     };
-  const result = spawnSync('ps', ['-axo', 'pid=,ppid=,pgid=,comm='], {
+  const result = spawnSync(osTool('ps'), ['-axo', 'pid=,ppid=,pgid=,comm='], {
     encoding: 'utf8',
     timeout: 250,
     maxBuffer: 1_000_000,
@@ -280,7 +281,7 @@ async function marked(mark: string): Promise<number[]> {
     });
   }
   // macOS: -E добавляет окружение к команде для процессов своего пользователя.
-  const stdout = await output('ps', ['-Eww', '-ax', '-o', 'pid=,command='], 10000);
+  const stdout = await output(osTool('ps'), ['-Eww', '-ax', '-o', 'pid=,command='], 10000);
   if (stdout === null) throw new Error('Не удалось перечислить процессы проверки');
   return stdout.split('\n').flatMap((line) => {
     const m = /^\s*(\d+)\s+(.*)$/.exec(line);
@@ -289,7 +290,7 @@ async function marked(mark: string): Promise<number[]> {
 }
 /** Живые процессы: PID, родитель, время старта. */
 async function processTable(): Promise<{ pid: number; ppid: number; start: string }[]> {
-  const stdout = await output('ps', ['-axo', 'pid=,ppid=,lstart='], 10000);
+  const stdout = await output(osTool('ps'), ['-axo', 'pid=,ppid=,lstart='], 10000);
   if (stdout === null) return [];
   return stdout.split('\n').flatMap((line) => {
     const m = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line);
@@ -341,7 +342,7 @@ async function inside(dirs: string[], since: number): Promise<number[]> {
       }
     });
   const stdout = await output(
-    'lsof',
+    osTool('lsof'),
     ['-a', '-d', 'cwd', '-Fpn', '-u', String(process.getuid?.())],
     15000,
   );

@@ -192,6 +192,8 @@ export function cliAdapter(
         cancellation: true,
         usage: true,
         fixture: false,
+        // Запрос и wire-схема несут протокол переходов находок (docs/review-protocol.md).
+        reviewProtocol: 1,
       };
     },
     async invoke(r: RuntimeRequest, signal: AbortSignal): Promise<RuntimeResponse> {

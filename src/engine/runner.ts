@@ -11,7 +11,18 @@ import {
   digestOf,
   contextDigest,
   implementationResultSchema,
-  reviewIssues,
+  codeReviewHistory,
+  codeReviewScope,
+  checkCodeReview,
+  logicalReview,
+  type CallRecord,
+  type StartedReviewCalls,
+  DEFAULT_REVIEW_PROTOCOL_RETRIES,
+  type ProtocolIssue,
+  type ReviewRound,
+  type CodeReviewVerdict,
+  type CodeReviewHistory,
+  type ReviewRequestFindings,
   reviewResultSchema,
   type ImplementationResult,
   type ReviewResult,
@@ -34,10 +45,13 @@ import { implementationOutputSchema, reviewOutputSchema } from '../agents/schema
 import { unobservedReview } from '../agents/inspect.ts';
 import { reviewerRunsChecks } from '../agents/cli-adapter.ts';
 import {
+  gateProbePrompt,
   observeReproductions,
   probeCommand,
+  probeGates,
   probeLimits,
   probeRecords,
+  recoverProbeLog,
   probeTool,
   type ProbeSpec,
 } from '../agents/review-probe.ts';
@@ -486,9 +500,13 @@ export class Runner {
       phase: string;
       /** Сервер проверок reviewer с пределами controller. */
       probe?: ProbeServer;
+      /** История находок для адаптера с протоколом переходов. */
+      findings?: ReviewRequestFindings;
+      /** Остаток срока логического ревью: вызов не получает больше. */
+      timeoutMs?: number;
     },
     signal: AbortSignal,
-  ): Promise<RuntimeResponse & { redact: Redactor }> {
+  ): Promise<RuntimeResponse & { redact: Redactor; unreadable?: string }> {
     const review = input.task !== 'implement';
     const work = await this.workOf(input.attempt);
     const role = roleBinding(this.policy, work.order.role, work.order.repositoryId)!;
@@ -546,13 +564,14 @@ export class Runner {
           ],
           network: { domains: this.policy.isolation.domains },
         },
-        timeoutMs: this.policy.runTimeoutMs,
+        timeoutMs: Math.min(this.policy.runTimeoutMs, input.timeoutMs ?? Infinity),
         env: Object.fromEntries(
           Object.entries(execution.env).filter((e): e is [string, string] => e[1] !== undefined),
         ),
         artifactDir: input.dir,
         secrets: [...(execution.redact.secrets ?? [])],
         ...(review && input.probe ? { probe: input.probe } : {}),
+        ...(review && input.findings ? { findings: input.findings } : {}),
       },
       signal,
       {
@@ -572,6 +591,22 @@ export class Runner {
     if (response.status === 'timeout')
       throw new TaskFailure('timeout', `${adapter.runtime}: исчерпан лимит времени прогона`);
     if (response.status === 'cancelled') throw new Error(`${adapter.runtime}: прогон прерван`);
+    // Runtime завершился штатно, но его структурированный ответ не прочитан
+    // (не JSON): у reviewer это ошибка формата ответа — протокол ревью, а не
+    // содержательный отказ и не отказ runtime (docs/review-protocol.md).
+    if (
+      review &&
+      response.status === 'failed' &&
+      response.diagnostics.exitCode === 0 &&
+      response.diagnostics.reason?.startsWith('структурированный ответ не прочитан')
+    )
+      return {
+        ...response,
+        status: 'ok',
+        output: undefined,
+        unreadable: response.diagnostics.reason,
+        redact: execution.redact,
+      };
     if (response.status === 'failed') {
       const message = `${adapter.runtime}: runtime завершился отказом${response.diagnostics.reason ? ': ' + response.diagnostics.reason : ''}`;
       throw new TaskFailure(
@@ -592,6 +627,28 @@ export class Runner {
   }
   private history(attempt: AttemptState) {
     return this.engine.read((v) => v.attempts(attempt.workId));
+  }
+  /** Поддержка протокола переходов находок адаптером reviewer, по runtime. */
+  private protocols = new Map<RuntimeName, Promise<boolean>>();
+  /**
+   * Адаптер передаёт reviewer протокол переходов находок
+   * (`RuntimeCapabilities.reviewProtocol`, docs/review-protocol.md). Читается
+   * асинхронно до вызова, вне транзакций хранилища; адаптер без поля (или с
+   * отказом capabilities) — прежняя семантика alpha.5.
+   */
+  private reviewProtocol(runtime: RuntimeName) {
+    let known = this.protocols.get(runtime);
+    if (!known) {
+      const adapter = this.options.adapters[runtime];
+      known = adapter
+        ? adapter.capabilities().then(
+            (c) => c.reviewProtocol === 1,
+            () => false,
+          )
+        : Promise.resolve(false);
+      this.protocols.set(runtime, known);
+    }
+    return known;
   }
   private adapter(runtime: RuntimeName) {
     const adapter = this.options.adapters[runtime];
@@ -985,6 +1042,19 @@ export class Runner {
                             ...this.notes(attempt, false),
                             ...(await this.hostNotes(work, attempt, false)),
                           ],
+                          // Открытые находки ревью с выданными ID — из истории
+                          // поручения; только когда reviewer ведёт протокол
+                          // переходов (иначе их никто не закроет).
+                          ...((await this.reviewProtocol(attempt.reviewer))
+                            ? {
+                                findings: this.engine.read((v) =>
+                                  codeReviewHistory(
+                                    v.attempts(attempt.workId),
+                                    codeReviewScope(attempt.repositoryId, attempt.workId),
+                                  ),
+                                ),
+                              }
+                            : {}),
                         }),
                       },
                       signal,
@@ -1169,14 +1239,68 @@ export class Runner {
    * отказ повторной очистки оставляет запись и входы.
    */
   async finishCleanup(attemptId: string) {
-    const attempt = this.engine.read((v) => v.attempt(attemptId));
+    let attempt = this.engine.read((v) => v.attempt(attemptId));
     if (!attempt) throw new HarnessError('NOT_FOUND', 'Попытка не найдена: ' + attemptId);
+    // Попытка упавшего процесса: срок владения истёк, а recovery ещё не
+    // проходил. Истечение — то же, что сделал бы recovery; живую попытку
+    // (свой job или непросроченная аренда) очистка не трогает.
+    if (
+      attempt.status === 'active' &&
+      !this.jobs.has(attemptId) &&
+      attempt.leaseUntil <= this.engine.clock()
+    ) {
+      this.engine.expire();
+      attempt = this.engine.read((v) => v.attempt(attemptId))!;
+    }
     if (attempt.status === 'active' || this.jobs.has(attemptId))
       throw new HarnessError('NOT_READY', 'Попытка ещё идёт: ' + attemptId);
     const artifacts = join(this.dirOf(attempt.repositoryId), 'artifacts', attemptId);
     const file = join(artifacts, 'cleanup-pending.json');
-    if (!existsSync(file)) return { status: 'nothing-pending' as const };
-    const pending = JSON.parse(await readFile(file, 'utf8')) as Retained & { reason: string };
+    // Процесс, упавший при активном окружении, не успел записать
+    // cleanup-pending.json: его receipt остался `active`. Такое окружение
+    // очищается так же; cleanupEnvironment проверит, что владельца уже нет.
+    const interrupted: { receipt: string; cwd: string; repositoryId?: string }[] = [];
+    for (const receipt of await receipts(artifacts)) {
+      const state = JSON.parse(await readFile(receipt, 'utf8')) as {
+        status: string;
+        cwd: string;
+        devcontourEnv?: Record<string, string>;
+      };
+      if (state.status === 'active')
+        interrupted.push({
+          receipt,
+          cwd: state.cwd,
+          repositoryId: state.devcontourEnv?.DEVCONTOUR_REPOSITORY_ID,
+        });
+    }
+    if (!existsSync(file) && !interrupted.length) return { status: 'nothing-pending' as const };
+    const pending: Retained & { reason: string } = existsSync(file)
+      ? (JSON.parse(await readFile(file, 'utf8')) as Retained & { reason: string })
+      : {
+          reason: 'interrupted',
+          // Рабочие деревья прерванной попытки: каталоги её окружений и
+          // её собственные деревья candidate/integration, если остались.
+          worktrees: [
+            ...new Map(
+              [
+                ...interrupted.map((i) => ({
+                  checkout: this.repoPath(this.repo(i.repositoryId ?? attempt.repositoryId)),
+                  dir: i.cwd,
+                })),
+                ...(attempt.worktree
+                  ? [attempt.worktree, attempt.worktree + '-integration']
+                  : []
+                ).map((dir) => ({
+                  checkout: this.repoPath(this.repo(attempt.repositoryId)),
+                  dir,
+                })),
+              ]
+                .filter((t) => existsSync(t.dir))
+                .map((t) => [t.dir, t]),
+            ).values(),
+          ],
+          snapshots: [],
+        };
     const roots = [
       ...new Set([
         await realpath(this.options.stateDir),
@@ -1186,12 +1310,12 @@ export class Runner {
     const cleaned: string[] = [];
     for (const receipt of await receipts(artifacts)) {
       const state = JSON.parse(await readFile(receipt, 'utf8')) as { status: string };
-      if (state.status !== 'cleanup-failed') continue;
+      if (state.status !== 'cleanup-failed' && state.status !== 'active') continue;
       // Владелец окружения — этот процесс, а попытка уже закончена.
       await cleanupEnvironment(receipt, this.policy, roots, { owner: process.pid });
       cleaned.push(receipt);
     }
-    await rm(file);
+    await rm(file, { force: true });
     await this.removeTrees(artifacts, pending, false);
     if (existsSync(file))
       throw new HarnessError(
@@ -1443,6 +1567,13 @@ export class Runner {
     cwd: string,
     dir: string,
     phase: string,
+    sha: string,
+    gates: GatePolicy[],
+    /**
+     * Повтор reviewer того же логического ревью: срок и остаток бюджета
+     * проверок переходят от первого вызова, а не выдаются заново.
+     */
+    shared?: { deadline: number; spentMs: number },
   ) {
     const chosen = selectReviewer(
       this.policy,
@@ -1457,6 +1588,10 @@ export class Runner {
     if (attempt.reviewer === 'fixture' || !reviewerRunsChecks(attempt.reviewer, profile))
       return undefined;
     const limits = probeLimits(this.policy);
+    const budgetMs = limits.budgetMs - (shared?.spentMs ?? 0);
+    const deadline = shared?.deadline ?? Date.now() + this.policy.runTimeoutMs - limits.reserveMs;
+    // Общий бюджет проверок логического ревью исчерпан: повтору инструмента не дают.
+    if (budgetMs < 1000 || deadline - Date.now() < 1000) return undefined;
     const boundary = this.boundary(attempt.dependencies);
     const execution = this.environment(attempt, phase, cwd, name);
     const secrets = new Set(execution.redact.secrets ?? []);
@@ -1466,26 +1601,32 @@ export class Runner {
       readable: [cwd, ...boundary.readable],
       isolation: this.policy.isolation,
       commandTimeoutMs: limits.commandTimeoutMs,
-      budgetMs: limits.budgetMs,
-      deadline: Date.now() + this.policy.runTimeoutMs - limits.reserveMs,
+      budgetMs,
+      deadline,
       env: Object.keys(execution.env).filter((k) => execution.env[k] !== undefined),
       secrets: Object.entries(execution.env)
         .filter(([, value]) => value !== undefined && secrets.has(value))
         .map(([key]) => key),
       settingsDir: join(dir, 'probe-settings'),
       log: join(dir, 'probes.jsonl'),
+      // Объявленные gates — по ID: argv, cwd и путь отчёта выбирает controller.
+      gates: probeGates(gates),
+      phase,
+      sha,
+      artifacts: join(dir, 'probe-runs'),
     };
     const specPath = join(dir, 'probe.json');
     await writeFile(specPath, JSON.stringify(spec, null, 2));
     const seconds = (ms: number) => Math.round(ms / 1000);
     return {
       log: spec.log,
+      deadline,
       server: {
         ...probeCommand(specPath),
         env: spec.env,
         commandTimeoutMs: limits.commandTimeoutMs,
       } satisfies ProbeServer,
-      prompt: `Run checks with the ${probeTool} tool (argv, no shell; sources are read-only, temporary files go to TMPDIR). The controller stops each command after ${seconds(limits.commandTimeoutMs)} s and all checks share ${seconds(limits.budgetMs)} s; ${seconds(limits.reserveMs)} s stay reserved for your verdict. A timeout is an observation about that command on that input, not proof of a defect: name the input and the limit if you report it, and give your verdict with what you have when the budget runs out. When a finding rests on a run, put its runId into reproduction.run.`,
+      prompt: `Run checks with the ${probeTool} tool (argv, no shell; sources are read-only, temporary files go to TMPDIR). The controller stops each command after ${seconds(limits.commandTimeoutMs)} s and all checks share ${seconds(budgetMs)} s; ${seconds(limits.reserveMs)} s stay reserved for your verdict. A timeout is an observation about that command on that input, not proof of a defect: name the input and the limit if you report it, and give your verdict with what you have when the budget runs out. When a finding rests on a run, put its runId into reproduction.run.${spec.gates?.length ? ' ' + gateProbePrompt(spec.gates) : ''}`,
     };
   }
 
@@ -1503,6 +1644,36 @@ export class Runner {
     await this.timed(attempt, phase + '-review', () =>
       this.reviewOnce(attempt, work, cwd, base, sha, phase, artifacts, signal, context),
     );
+  }
+
+  /**
+   * Логическое ревью точного SHA (docs/review-protocol.md). Ответ reviewer
+   * проверяется целиком против истории находок поручения до любой записи;
+   * валидный раунд записывается одной транзакцией под fencing. Ошибка
+   * протокола — ограниченный повтор только reviewer на том же SHA, diff,
+   * контексте, назначении и наборе открытых находок; writer не вызывается.
+   * Изменение дерева/HEAD, отмена, утрата владения и отказ runtime в повтор
+   * не превращаются.
+   */
+  /**
+   * Время проверок reviewer, уже израсходованное вызовами логического ревью
+   * (журналы probe). Запуск без строки исхода — controller погиб посреди
+   * команды — засчитывается всем резервом, записанным до запуска, а его
+   * пережившие процессы останавливаются (R3-F01).
+   */
+  private async probeSpent(runs: string[], repositoryId: string, phase: string) {
+    let spent = 0;
+    for (const runId of runs) {
+      const dir = join(this.dirOf(repositoryId), 'artifacts', runId, phase, 'review');
+      const logs = [
+        join(dir, 'probes.jsonl'),
+        ...(await readdir(dir).catch(() => []))
+          .filter((name) => name.startsWith('call-'))
+          .map((name) => join(dir, name, 'probes.jsonl')),
+      ];
+      for (const log of logs) spent += (await recoverProbeLog(log)).spentMs;
+    }
+    return spent;
   }
 
   private async reviewOnce(
@@ -1527,131 +1698,335 @@ export class Runner {
     const status = await git(cwd, 'status', '--porcelain', '--untracked-files=all');
     const repo = this.repo(attempt.repositoryId);
     const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
-    const probe = await this.reviewProbe(attempt, work, cwd, dir, phase);
-    const response = await this.call(
-      this.adapter(attempt.reviewer),
-      {
-        task: 'review-code',
-        attempt,
-        cwd,
-        dir,
-        phase,
-        prompt:
-          prompt({
-            work,
-            attempt: { ...attempt, baseSha: base },
-            history: this.history(attempt),
-            context,
-            gates: gates.map((g) => ({ id: g.id, command: g.command })),
-            review: { sha, phase, diff },
-            notes: [
-              ...this.notes(attempt, true, sha),
-              ...(await this.hostNotes(work, attempt, true)),
-            ],
-          }) + (probe ? '\n\n' + probe.prompt : ''),
-        ...(probe ? { probe: probe.server } : {}),
-      },
-      signal,
-    );
-    // Reviewer не меняет закреплённые зависимости, как и своё дерево.
-    await assertDependencies(attempt.dependencies ?? []);
-    const redact = response.redact;
-    const parsed = reviewResultSchema.safeParse(response.output);
-    const clean =
-      (await git(cwd, 'status', '--porcelain', '--untracked-files=all')) === status &&
-      !(await git(cwd, 'status', '--porcelain', '--untracked-files=no')) &&
-      (await git(cwd, 'rev-parse', 'HEAD')) === sha;
-    const issues = parsed.success
-      ? reviewIssues(parsed.data, [])
-      : ['Ответ ревью вне схемы: ' + (parsed.error.issues[0]?.message ?? '')];
-    const passed = clean && parsed.success && parsed.data.approved && !issues.length;
-    const inspection = response.inspection ?? unobservedReview();
-    // Проверки reviewer — по журналу controller, а не по самоотчёту модели.
-    const probes = probe ? await probeRecords(probe.log) : undefined;
-    const record = redactDeep(
-      {
-        ...(parsed.success
-          ? { ...parsed.data, findings: observeReproductions(parsed.data.findings, probes, redact) }
-          : { approved: false, summary: 'ответ вне схемы', findings: [] }),
-        inspection,
-        issues,
-        ...(probes ? { probes } : {}),
-      },
-      redact,
-    );
-    // Служебные значения записи — перечисления контура, а не текст reviewer:
-    // короткий секрет, совпавший с их частью, их не маскирует.
-    record.inspection = { ...record.inspection, mode: inspection.mode, source: inspection.source };
-    if (parsed.success)
-      record.findings = record.findings.map((f, i) => ({
-        ...f,
-        severity: parsed.data.findings[i]?.severity ?? f.severity,
-      }));
-    const log = join(dir, 'review.json');
-    await writeFile(log, JSON.stringify(record, null, 2));
-    // Находки с воспроизводимым входом — в реестр поручения, уже
-    // замаскированными; наблюдение — только по журналу controller. Команда из
-    // текста находки не исполняется.
-    const reproductions = (record.findings ?? []).flatMap((f) => {
-      // Наблюдение проставляет `observeReproductions` по журналу controller.
-      const r: (typeof f.reproduction & { observed?: boolean }) | null | undefined = f.reproduction;
-      if (!r) return [];
-      return [
-        {
-          property: r.property,
-          input: r.input,
-          expected: r.expected,
-          actual: r.actual,
-          command: r.command,
-          message: f.message.slice(0, 4000),
-          claimed: r.executed,
-          observed: r.observed === true,
-          run: r.observed === true ? (r.run ?? null) : null,
-        },
-      ];
+    const scope = codeReviewScope(attempt.repositoryId, attempt.workId);
+    const calls = 1 + (this.policy.reviewProtocolRetries ?? DEFAULT_REVIEW_PROTOCOL_RETRIES);
+    // Адаптер без протокола переходов: переходы не требуются (alpha.5), ошибка
+    // формата ответа и противоречивый approved — по-прежнему ошибка протокола.
+    const legacy = !(await this.reviewProtocol(attempt.reviewer));
+    // История находок и счёт вызовов — по записанному состоянию всех попыток
+    // поручения: новая попытка, фаза и рестарт их не обнуляют.
+    const { history, lastIssues, spec } = this.engine.read((v) => {
+      const attempts = v.attempts(attempt.workId);
+      const last = attempts
+        .flatMap((a) => a.evidence)
+        .findLast(
+          (e) =>
+            e.kind === 'review' &&
+            e.phase === phase &&
+            e.sha === sha &&
+            e.reviewRound?.scope === scope &&
+            e.reviewRound.protocol === 'invalid',
+        );
+      return {
+        history: codeReviewHistory(attempts, scope),
+        lastIssues: last?.reviewRound?.issues ?? [],
+        spec: v.work(attempt.workId)?.approvedDigest,
+      };
     });
-    if (reproductions.length)
-      this.engine.recordReproductions(attempt.id, attempt.token, sha, reproductions);
-    const reason = !clean
-      ? 'reviewer изменил дерево или HEAD'
-      : issues.join('; ') || record.summary;
-    this.engine.evidence(attempt.id, attempt.token, {
-      kind: 'review',
-      inspection: record.inspection,
-      phase,
-      sha,
-      gate: 'independent-review',
-      passed,
-      command: [attempt.reviewer, 'review-code'],
-      exitCode: passed ? 0 : 1,
-      log,
-      digest: sha256(JSON.stringify(record)),
-      summary: redact(`[${inspection.mode}] ${passed ? record.summary : reason}`).slice(0, 4000),
-      findings: (record.findings ?? []).map((f) => ({
-        severity: f.severity,
-        message: f.message,
-        path: f.path ?? null,
-        line: f.line ?? null,
-      })),
-    });
-    if (!passed) {
-      // Свойство находки — только объявленное поручением; свободная строка
-      // reviewer сохраняется для разбора, но эпизод не открывает.
-      const named = (parsed.success ? parsed.data.findings : [])
-        .map((f) => f.reproduction?.property)
-        .filter((p): p is string => !!p);
-      const declared = new Set(work.order.properties ?? []);
-      throw new TaskFailure(
-        'review',
-        'Независимое ревью отклонило результат: ' + redact(reason),
-        named.length
-          ? {
-              bound: [...new Set(named.filter((p) => declared.has(p)))],
-              unbound: [...new Set(named.filter((p) => !declared.has(p)))],
-            }
-          : undefined,
+    const expected = legacy
+      ? []
+      : history.findings.filter((f) => f.status === 'open').map((f) => f.id);
+    const round = history.round + 1;
+    // Запрос одинаков для всех вызовов логического ревью: меняется только
+    // диагностика ошибки протокола.
+    const notes = [
+      ...this.notes(attempt, true, sha),
+      ...(await this.hostNotes(work, attempt, true)),
+    ];
+    let issues: ProtocolIssue[] = lastIssues;
+    const stage = phase + '-review';
+    const reserveMs = probeLimits(this.policy).reserveMs;
+    let started = 0;
+    for (;;) {
+      // Счёт вызовов, срок и расход логического ревью — по записанному
+      // состоянию: запись учёта вызова создаётся до внешнего invoke, поэтому
+      // вызов, прерванный падением controller, засчитан и после рестарта.
+      const logical = this.engine.read((v) =>
+        logicalReview(v.attempts(attempt.workId), scope, phase, sha, (runId) =>
+          startedCalls(v, attempt.repositoryId, runId, stage),
+        ),
       );
+      started = logical.used;
+      const call = logical.used + 1;
+      if (call > calls) break;
+      // Срок логического ревью — от первого начатого вызова, в том числе
+      // прежнего процесса: повтор и рестарт нового срока не получают.
+      const deadline = (logical.firstStartMs ?? Date.now()) + this.policy.runTimeoutMs;
+      const remaining = deadline - Date.now();
+      // Срок исчерпан (в том числе прежним процессом): явная остановка без
+      // вызова. Класс `review-protocol` — без автоматического повтора: иначе
+      // обычный повтор по времени выдал бы тому же SHA новый срок.
+      if (remaining < 1000)
+        throw new TaskFailure(
+          'review-protocol',
+          `REVIEW_PROTOCOL_INVALID: исчерпан срок логического ревью ${phase} ${sha} (${Math.round(this.policy.runTimeoutMs / 1000)} с от первого вызова; начато вызовов reviewer ${logical.used} из ${calls}, попытка ${attempt.id}); нового вызова нет`,
+        );
+      // Бюджет проверок — общий на логическое ревью: расход прежних вызовов
+      // (в том числе прерванных) — по их журналам проверок на диске.
+      const shared =
+        logical.firstStartMs === undefined
+          ? undefined
+          : {
+              deadline: deadline - reserveMs,
+              spentMs: await this.probeSpent(logical.runs, attempt.repositoryId, phase),
+            };
+      if (call > 1) {
+        // Повтор — только пока попытка своя, не отменена и основание прежнее.
+        this.engine.heartbeat(attempt.id, attempt.token);
+        signal.throwIfAborted();
+        const current = this.engine.read((v) => v.work(attempt.workId)?.approvedDigest);
+        if (current !== spec)
+          throw new HarnessError(
+            'APPROVAL_STALE',
+            'Постановка поручения изменилась во время ревью; повтор reviewer не выполняется',
+          );
+      }
+      const callDir = call === 1 ? dir : join(dir, `call-${call}`);
+      await mkdir(callDir, { recursive: true });
+      const probe = await this.reviewProbe(attempt, work, cwd, callDir, phase, sha, gates, shared);
+      const response = await this.call(
+        this.adapter(attempt.reviewer),
+        {
+          task: 'review-code',
+          attempt,
+          cwd,
+          dir: callDir,
+          phase,
+          prompt:
+            prompt({
+              work,
+              attempt: { ...attempt, baseSha: base },
+              history: this.history(attempt),
+              context,
+              gates: gates.map((g) => ({ id: g.id, command: g.command })),
+              review: { sha, phase, diff },
+              notes,
+              ...(legacy ? {} : { findings: history }),
+              ...(call > 1 ? { retry: { call, calls, issues } } : {}),
+            }) + (probe ? '\n\n' + probe.prompt : ''),
+          ...(probe ? { probe: probe.server } : {}),
+          ...(legacy ? {} : { findings: requestFindings(history) }),
+          timeoutMs: remaining,
+        },
+        signal,
+      );
+      // Reviewer не меняет закреплённые зависимости, как и своё дерево.
+      await assertDependencies(attempt.dependencies ?? []);
+      const redact = response.redact;
+      const clean =
+        (await git(cwd, 'status', '--porcelain', '--untracked-files=all')) === status &&
+        !(await git(cwd, 'status', '--porcelain', '--untracked-files=no')) &&
+        (await git(cwd, 'rev-parse', 'HEAD')) === sha;
+      const verdict: CodeReviewVerdict = response.unreadable
+        ? {
+            valid: false,
+            issues: [
+              {
+                path: '(response)',
+                reason: 'schema',
+                message: response.unreadable.slice(0, 1000),
+              },
+            ],
+          }
+        : checkCodeReview(response.output, history, { runId: attempt.id, phase, sha }, { legacy });
+      const result = verdict.result;
+      const inspection = response.inspection ?? unobservedReview();
+      // Проверки reviewer — по журналу controller, а не по самоотчёту модели.
+      const probes = probe ? await probeRecords(probe.log) : undefined;
+      const protocol: ReviewRound['protocol'] = !clean
+        ? 'unsafe'
+        : verdict.valid
+          ? 'valid'
+          : 'invalid';
+      const callIssues = verdict.valid ? [] : verdict.issues;
+      const record = redactDeep(
+        {
+          ...(result
+            ? { ...result, findings: observeReproductions(result.findings, probes, redact) }
+            : { approved: false, summary: 'ответ вне схемы', findings: [] }),
+          inspection,
+          issues: callIssues.map((i) => `${i.path}: ${i.reason}: ${i.message}`),
+          protocol: {
+            scope,
+            round,
+            call,
+            calls,
+            status: protocol,
+            expected,
+            issues: callIssues,
+            ...(verdict.valid
+              ? { ids: verdict.findings.map((f) => f.id), transitions: verdict.transitions }
+              : {}),
+          },
+          // Ответ вне схемы сохраняется как есть (замаскированным) для разбора.
+          ...(result ? {} : { raw: response.output ?? null }),
+          ...(probes ? { probes } : {}),
+        },
+        redact,
+      );
+      // Служебные значения записи — перечисления контура, а не текст reviewer:
+      // короткий секрет, совпавший с их частью, их не маскирует.
+      record.inspection = {
+        ...record.inspection,
+        mode: inspection.mode,
+        source: inspection.source,
+      };
+      if (result)
+        record.findings = record.findings.map((f, i) => ({
+          ...f,
+          severity: result.findings[i]?.severity ?? f.severity,
+        }));
+      // Каждый вызов — свой каталог и свой review.json: байты прежнего вызова
+      // не перезаписываются, digest evidence указывает на них.
+      const log = join(callDir, 'review.json');
+      await writeFile(log, JSON.stringify(record, null, 2), { flag: 'wx' });
+      const digest = sha256(JSON.stringify(record));
+      const reviewRound = {
+        version: 1 as const,
+        scope,
+        round,
+        call,
+        calls,
+        protocol,
+        expected,
+        ...(spec ? { spec } : {}),
+        ...(legacy ? { mode: 'legacy' as const } : {}),
+      };
+      if (!clean) {
+        // Отказ безопасности: вердикт не применяется, протокольного повтора нет.
+        this.engine.evidence(attempt.id, attempt.token, {
+          kind: 'review',
+          inspection: record.inspection,
+          phase,
+          sha,
+          gate: 'independent-review',
+          passed: false,
+          command: [attempt.reviewer, 'review-code'],
+          exitCode: 1,
+          log,
+          digest,
+          summary: redact(`[${inspection.mode}] reviewer изменил дерево или HEAD`).slice(0, 4000),
+          findings: (record.findings ?? []).map((f) => ({
+            severity: f.severity,
+            message: f.message,
+            path: f.path ?? null,
+            line: f.line ?? null,
+          })),
+          reviewRound,
+        });
+        throw new TaskFailure(
+          'review',
+          'Независимое ревью отклонило результат: reviewer изменил дерево или HEAD',
+        );
+      }
+      if (!verdict.valid) {
+        issues = verdict.issues.map((i) => ({ ...i, message: redact(i.message) }));
+        // Ошибка протокола — диагностика: история не меняется, находок нет.
+        this.engine.evidence(attempt.id, attempt.token, {
+          kind: 'review',
+          inspection: record.inspection,
+          phase,
+          sha,
+          gate: 'independent-review',
+          passed: false,
+          command: [attempt.reviewer, 'review-code'],
+          exitCode: 1,
+          log,
+          digest,
+          summary: redact(
+            `[${inspection.mode}] REVIEW_PROTOCOL_INVALID (вызов ${call} из ${calls}): ` +
+              protocolText(issues),
+          ).slice(0, 4000),
+          findings: [],
+          reviewRound: { ...reviewRound, issues },
+        });
+        continue;
+      }
+      // Ответ валиден целиком: находки с воспроизводимым входом — в реестр
+      // поручения, уже замаскированными; наблюдение — только по журналу
+      // controller. Команда из текста находки не исполняется.
+      const reproductions = (record.findings ?? []).flatMap((f) => {
+        // Наблюдение проставляет `observeReproductions` по журналу controller.
+        const r: (typeof f.reproduction & { observed?: boolean }) | null | undefined =
+          f.reproduction;
+        if (!r) return [];
+        return [
+          {
+            property: r.property,
+            input: r.input,
+            expected: r.expected,
+            actual: r.actual,
+            command: r.command,
+            message: f.message.slice(0, 4000),
+            claimed: r.executed,
+            observed: r.observed === true,
+            run: r.observed === true ? (r.run ?? null) : null,
+          },
+        ];
+      });
+      if (reproductions.length)
+        this.engine.recordReproductions(attempt.id, attempt.token, sha, reproductions);
+      const passed = verdict.result.approved;
+      // Вердикт, новые находки с выданными ID и переходы прежних — одна запись
+      // под fencing: попытка, утратившая владение, их не сохраняет.
+      this.engine.evidence(attempt.id, attempt.token, {
+        kind: 'review',
+        inspection: record.inspection,
+        phase,
+        sha,
+        gate: 'independent-review',
+        passed,
+        command: [attempt.reviewer, 'review-code'],
+        exitCode: passed ? 0 : 1,
+        log,
+        digest,
+        summary: redact(`[${inspection.mode}] ${record.summary}`).slice(0, 4000),
+        findings: (record.findings ?? []).map((f, i) => ({
+          severity: f.severity,
+          message: f.message,
+          path: f.path ?? null,
+          line: f.line ?? null,
+          id: verdict.findings[i]!.id,
+          status: 'open' as const,
+        })),
+        reviewRound: {
+          ...reviewRound,
+          round: verdict.round,
+          transitions: verdict.transitions.map((t) => ({
+            ...t,
+            basis: redact(t.basis).slice(0, 4000),
+          })),
+        },
+      });
+      if (!passed) {
+        // Свойство находки — только объявленное поручением; свободная строка
+        // reviewer сохраняется для разбора, но эпизод не открывает.
+        const named = verdict.result.findings
+          .map((f) => f.reproduction?.property)
+          .filter((p): p is string => !!p);
+        const declared = new Set(work.order.properties ?? []);
+        throw new TaskFailure(
+          'review',
+          'Независимое ревью отклонило результат: ' + redact(record.summary),
+          named.length
+            ? {
+                bound: [...new Set(named.filter((p) => declared.has(p)))],
+                unbound: [...new Set(named.filter((p) => !declared.has(p)))],
+              }
+            : undefined,
+        );
+      }
+      return;
     }
+    // Вызовы исчерпаны (включая прерванные рестартом): остановка с причиной,
+    // без нового вызова и без новой реализации.
+    throw new TaskFailure(
+      'review-protocol',
+      `REVIEW_PROTOCOL_INVALID: ответ reviewer нарушил протокол ревью (${phase} ${sha}, начато вызовов ${started} из ${calls}, попытка ${attempt.id}): ` +
+        (issues.length
+          ? protocolText(issues)
+          : 'последний вызов прерван до ответа (рестарт controller); вердикта нет'),
+    );
   }
 
   /**
@@ -1817,7 +2192,15 @@ export class Runner {
   private async confirmReproductions(attempt: AttemptState) {
     const { work, reviews } = this.engine.read((v) => ({
       work: v.work(attempt.workId)!,
-      reviews: v.attempt(attempt.id)!.evidence.filter((e) => e.kind === 'review' && !e.passed),
+      // Только применённые вердикты: ответ с ошибкой протокола — диагностика.
+      reviews: v
+        .attempt(attempt.id)!
+        .evidence.filter(
+          (e) =>
+            e.kind === 'review' &&
+            !e.passed &&
+            (!e.reviewRound || e.reviewRound.protocol === 'valid'),
+        ),
     }));
     const declared = new Set(work.order.properties ?? []);
     if (!declared.size) return;
@@ -1986,4 +2369,67 @@ async function receipts(dir: string): Promise<string[]> {
     else if (entry.name === 'environment.json') out.push(path);
   }
   return out;
+}
+
+/** Причины ошибки протокола для сообщения: путь, класс, пояснение. */
+function protocolText(issues: ProtocolIssue[]) {
+  return (
+    issues
+      .slice(0, 10)
+      .map((i) => `${i.path} ${i.reason}: ${i.message}`)
+      .join('; ') || 'причина не записана'
+  ).slice(0, 3000);
+}
+
+/** Структурированная история находок для запроса reviewer (`RuntimeRequest.findings`). */
+function requestFindings(history: CodeReviewHistory): ReviewRequestFindings {
+  const item = (f: CodeReviewHistory['findings'][number]) => ({
+    id: f.id,
+    severity: f.severity,
+    message: f.message,
+    path: f.path,
+    line: f.line,
+    status: f.status,
+    origin: {
+      runId: f.origin.runId,
+      phase: f.origin.phase,
+      sha: f.origin.sha,
+      round: f.origin.round,
+    },
+    ...(f.basis ? { basis: f.basis } : {}),
+  });
+  return {
+    scope: history.scope,
+    open: history.findings.filter((f) => f.status === 'open').map(item),
+    closed: history.findings.filter((f) => f.status !== 'open').map(item),
+  };
+}
+
+/**
+ * Начатые вызовы reviewer попытки на стадии ревью фазы — по записям учёта
+ * вызовов (`usage`), которые `measuredInvoke` создаёт до внешнего вызова.
+ */
+function startedCalls(
+  view: { locals(namespace: 'usage', owner?: string): { value: unknown }[] },
+  repositoryId: string,
+  runId: string,
+  stage: string,
+): StartedReviewCalls {
+  const records = view
+    .locals('usage', repositoryId)
+    .map((x) => x.value as CallRecord)
+    .filter((r) => r.runId === runId && r.stage === stage);
+  const starts = records.map((r) => Date.parse(r.startedAt)).filter((t) => !Number.isNaN(t));
+  return {
+    count: records.length,
+    ...(starts.length ? { firstStartMs: Math.min(...starts) } : {}),
+    spentMs: records.reduce(
+      (n, r) =>
+        n +
+        (r.durationMs ??
+          r.elapsedMs ??
+          (r.outcome === 'active' ? Math.max(0, Date.now() - Date.parse(r.startedAt)) : 0)),
+      0,
+    ),
+  };
 }

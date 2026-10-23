@@ -65,6 +65,26 @@ const entities = (text: string) =>
  * Изменённое так имя не совпадёт с названным критерием, и подтверждения
  * не будет: для секрета в имени теста это правильный исход.
  */
+/**
+ * Значение атрибута XML: парсер работает без обработки сущностей (DOCTYPE
+ * запрещён, внешних сущностей нет), поэтому предопределённые сущности и
+ * числовые ссылки раскрываются здесь — один раз, без рекурсии. Иначе testcase
+ * `a["b"]` сохранялся как `a[&quot;b&quot;]` и не совпадал с названным
+ * testId требования или критерия. Репортер JUnit Node.js экранирует `"`
+ * дважды (`&amp;quot;`); оставшийся после раскрытия `&quot;` поэтому тоже
+ * читается как `"`.
+ */
+export function xmlAttribute(value: string): string {
+  const named: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+  return value
+    .replace(/&(#x[0-9a-fA-F]+|#[0-9]+|amp|lt|gt|quot|apos);/g, (all, ref: string) => {
+      if (!ref.startsWith('#')) return named[ref] ?? all;
+      const code = ref.startsWith('#x') ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : all;
+    })
+    .replace(/&quot;/g, '"');
+}
+
 export function junitSummary(
   xml: string,
   redact: (value: string) => string = (value) => value,
@@ -105,7 +125,10 @@ export function junitSummary(
       summary.tests++;
       if (value && typeof value === 'object') {
         const named = value as Record<string, unknown>;
-        const raw = [named['@_classname'], named['@_name']].filter(Boolean).join('.');
+        const raw = [named['@_classname'], named['@_name']]
+          .filter(Boolean)
+          .map((v) => xmlAttribute(String(v)))
+          .join('.');
         const redacted = redact(raw);
         // Длинное имя заменяется хешем: обрезка дала бы коллизии и ложные
         // совпадения, а без замены receipt не перенёс бы манифест.
@@ -356,6 +379,17 @@ export function sandboxBlockedHosts(output: string, allowed: string[]) {
   );
 }
 
+/**
+ * Окружение свежести test gate: те же переменные у gate движка и у gate,
+ * запущенного проверкой reviewer, — иначе probe мог бы прочитать cache там,
+ * где gate исполняет тесты заново.
+ */
+export function freshnessEnv(kind: GatePolicy['kind'], env: NodeJS.ProcessEnv) {
+  return kind === 'test'
+    ? { TURBO_FORCE: 'true', GOFLAGS: [env.GOFLAGS, '-count=1'].filter(Boolean).join(' ') }
+    : ({} as Record<string, string>);
+}
+
 /** Что нужно для запуска gate попытки. */
 export interface GateRun {
   policy: Pick<ExecutionPolicy, 'isolation'>;
@@ -440,10 +474,17 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         ...(corpusPath ? { DEVCONTOUR_CORPUS: corpusPath } : {}),
       }
     : {};
+  // Test gate исполняет тесты заново, через какую бы обёртку (package
+  // script, task runner) ни шла команда: Turbo не читает cache (`TURBO_FORCE`),
+  // Go не берёт результат из кэша тестов (`-count=1` в GOFLAGS, последним).
+  // Восстановленный из cache зелёный отчёт иначе выглядел бы свежим.
+  const freshness = freshnessEnv(gate.kind, run.execution.env);
   let kind: FailureKind = 'gate';
+  // Заголовок лога — фактические каталог и argv запуска: digest лога входит в
+  // evidence, и запись называет, где и чем проверка исполнялась.
   let passed = false,
     summary = '',
-    log = '',
+    log = `# harness gate ${gate.id}: cwd=${relative(root, gateCwd) || '.'} argv=${JSON.stringify(gate.command.map(redact))}${gate.kind === 'test' ? ` fresh=${redact(JSON.stringify(freshness))}` : ''}\n`,
     exitCode = -1,
     manifest: ReturnType<typeof junitSummary> | undefined;
   try {
@@ -454,6 +495,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         cwd: gateCwd,
         env: {
           ...run.execution.env,
+          ...freshness,
           ...(reportPath
             ? { DEVCONTOUR_REPORT_PATH: reportPath, HARNESS_REPORT_PATH: reportPath }
             : {}),
@@ -472,7 +514,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       },
     );
     exitCode = result.code;
-    log = result.stdout + '\n' + result.stderr;
+    log += result.stdout + '\n' + result.stderr;
     if (result.timedOut || signal.aborted)
       throw new Error('Проверка прервана или превысила timeout');
     if (result.code !== 0) {

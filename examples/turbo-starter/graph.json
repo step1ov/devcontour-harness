@@ -1,0 +1,32 @@
+{
+  "apiVersion": "devcontour-harness/v1alpha1",
+  "id": "turbo-starter-issued-at",
+  "source": { "connector": "files", "ref": "graph.json", "revision": "1" },
+  "orders": [
+    {
+      "apiVersion": "devcontour-harness/v1alpha1",
+      "id": "issued-at",
+      "source": { "connector": "files", "ref": "issued-at", "revision": "1" },
+      "title": "Expose AccessTokenDto.issuedAt end to end",
+      "goal": "Add a required date-time field issuedAt (the JWT iat) to the backend AccessTokenDto and the session service, regenerate OpenAPI and both REST SDKs with `pnpm rest-api-sdk:generate`, and add a typed web consumer type AccessTokenIssuedAt = AccessTokenDto['issuedAt'] in apps/next-web-app/src/infra/client-api/types/access-token-issued-at.type.ts.",
+      "acceptance": [
+        "client and admin OpenAPI AccessTokenDto declare issuedAt as a required date-time string",
+        "client and admin SDK AccessTokenDto declare issuedAt: string",
+        "committed OpenAPI/SDK outputs equal the pinned generator output (sdk-generation gate)",
+        "backend and web type checks pass",
+        "the web consumer type reads AccessTokenDto['issuedAt'] from the client SDK"
+      ],
+      "role": "developer",
+      "repositoryId": "starter",
+      "writeScope": [
+        "apps/nest-backend/src/infrastructure/auth",
+        "apps/nest-backend/openapi",
+        "packages/client-rest-api-sdk/src/generated",
+        "packages/admin-rest-api-sdk/src/generated",
+        "apps/next-web-app/src/infra/client-api/types"
+      ],
+      "gates": ["backend-types", "sdk-generation", "sdk-build", "web-types", "acceptance"],
+      "context": ["controller-mode"]
+    }
+  ]
+}

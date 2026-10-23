@@ -125,8 +125,20 @@ test('T08: невалидный ответ ревью, approved с блокир�
     },
   ];
   const cases: [string, unknown, RegExp, string][] = [
-    ['невалидный JSON', { raw: '{"approved": tru' }, /вне схемы|не прочитан/, 'review'],
-    ['approved + blocking', blocking, /approved при блокирующей находке/, 'review'],
+    // Ошибка протокола (docs/review-protocol.md): повтор reviewer, затем
+    // остановка REVIEW_PROTOCOL_INVALID — не содержательный отказ и не accepted.
+    [
+      'невалидный JSON',
+      { raw: '{"approved": tru' },
+      /REVIEW_PROTOCOL_INVALID.*(schema|не прочитан)/,
+      'review-protocol',
+    ],
+    [
+      'approved + blocking',
+      blocking,
+      /REVIEW_PROTOCOL_INVALID.*approved-with-blocking/,
+      'review-protocol',
+    ],
     ['таймаут', { ...approve(), sleepMs: 15000 }, /лимит времени/, 'timeout'],
   ];
   for (const [name, reviewer, reason, kind] of cases) {

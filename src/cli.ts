@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -10,6 +11,7 @@ import {
   cliDataSchemas,
   contextSnapshotSchema,
   contractDocumentSchema,
+  errorCodes,
   executionPolicySchema,
   exitCodeOf,
   exitCodes,
@@ -22,8 +24,10 @@ import { validateInputs } from './validate.ts';
 import { Harness } from './control/harness.ts';
 import { policySourceOf, type PolicySource } from './control/provenance.ts';
 import { doctor } from './control/doctor.ts';
+import { assertToolchainReady, inspectPolicy } from './toolchains/inspect.ts';
 import { profilePin, resolveProfile } from './profiles/resolve.ts';
 import { cliAdapter } from './agents/cli-adapter.ts';
+import type { RunnerHooks } from './engine/runner.ts';
 import { FileContextSource, FileResultSink, FileWorkSource } from './connectors/files.ts';
 
 const usage = `harness ${HARNESS_VERSION}
@@ -39,6 +43,8 @@ ${Object.entries(cliCommands)
 
 stdout — JSON (${API_VERSION}); диагностика — stderr.
 Exit codes: 0 успех, 2 неверный вход, 3 отказ/блокировка, 4 инфраструктура.
+run: отказ по существу (GATE_FAILED, REVIEW_REJECTED, …) — 3; остановка после исчерпания
+повторов reviewer при ошибке протокола его ответа (REVIEW_PROTOCOL_INVALID) — 4.
 Runtime: codex и claude из PATH; HARNESS_CODEX_BIN / HARNESS_CLAUDE_BIN подменяют исполняемый файл
 (например, fixture executable в тестах — это не живая модель).
 `;
@@ -141,15 +147,58 @@ function adapters(policy: ExecutionPolicy) {
   };
 }
 
-const open = (state: string, b: Binding, readOnly: boolean) =>
+const open = (state: string, b: Binding, readOnly: boolean | 'state', hooks?: RunnerHooks) =>
   Harness.open({
     stateDir: resolve(state),
     policy: b.policy,
     baseDir: b.baseDir,
     adapters: adapters(b.policy),
-    readOnly,
+    readOnly: Boolean(readOnly),
+    ...(readOnly === 'state' ? { readOnlyState: true } : {}),
     ...(b.source ? { policySource: b.source } : {}),
+    ...(hooks ? { hooks } : {}),
   });
+
+/**
+ * Exit code упавшего run: отказ по существу — 3; остановка из-за ошибки
+ * протокола ответа reviewer после исчерпания повторов (класс отказа
+ * `review-protocol`, код REVIEW_PROTOCOL_INVALID) — инфраструктурный 4.
+ */
+const runExit = (h: Harness, works: { id: string }[]) =>
+  h.engine.read((v) => works.some((w) => v.work(w.id)?.failureKind === 'review-protocol'))
+    ? exitCodes[errorCodes.REVIEW_PROTOCOL_INVALID]
+    : exitCodes.refused;
+
+/** Result SHA предпосылки доступен в target ref её репозитория (как при регистрации в run). */
+const reachableIn = (b: Binding, repositoryId: string, sha: string) => {
+  const repo = b.policy.repositories.find((r) => r.id === repositoryId);
+  if (!repo) return false;
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', sha, repo.targetRef], {
+      cwd: resolve(b.baseDir, repo.path),
+      stdio: 'ignore',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Коннектор внешнего хранилища задач (opt-in): модуль и адаптер provider
+ * загружаются только для команд с `--source`.
+ */
+const connectorOf = async (path: string, state: string, policy?: ExecutionPolicy) => {
+  const { openConnector } = await import('./integrations/connector/commands.ts');
+  const { policySecrets } = await import('./integrations/connector/redact.ts');
+  // Без явной политики — политика каталога состояния, если он уже инициализирован.
+  const known = policy ?? (existsSync(bindingFile(state)) ? binding(state).policy : undefined);
+  return openConnector(path, {
+    stateDir: resolve(state),
+    // Значения секретов политики (на любом уровне) маскируются в диагностике и итогах.
+    secrets: policySecrets(known),
+  });
+};
 
 /**
  * Получатель-каталог. Текущая редакция поручения читается из файла графа,
@@ -191,6 +240,11 @@ const options = {
   once: { type: 'boolean' },
   profile: { type: 'string' },
   repository: { type: 'string' },
+  source: { type: 'string' },
+  out: { type: 'string' },
+  operation: { type: 'string' },
+  decision: { type: 'string' },
+  run: { type: 'string' },
 } as const;
 
 async function run(
@@ -243,7 +297,28 @@ async function run(
         if (command === 'review-plan') {
           const { graph, ctx } = await graphAndContext();
           validateInputs({ graph, policy: b.policy, ...(ctx ? { context: ctx } : {}) });
-          h.engine.register(graph, { trusted: () => false, reachable: () => true });
+          if (v.source) {
+            // Источник задан: внешние предпосылки допускаются по тем же правилам,
+            // что в run — решение источника `trusts` и доступность SHA в target ref.
+            const connector = await connectorOf(v.source, need('state'), b.policy);
+            try {
+              if (connector.id !== graph.source.connector)
+                throw new HarnessError(
+                  'INVALID_INPUT',
+                  `Граф из источника ${graph.source.connector}, передан источник ${connector.id}`,
+                );
+              const trusted = new Set<string>();
+              for (const p of graph.prerequisites)
+                if (p.receipt.kind === 'trusted' && (await connector.source.trusts(p)))
+                  trusted.add(p.id);
+              h.engine.register(graph, {
+                trusted: (p) => trusted.has(p.id),
+                reachable: (p) => reachableIn(b, p.repositoryId, p.resultSha),
+              });
+            } finally {
+              connector.close();
+            }
+          } else h.engine.register(graph, { trusted: () => false, reachable: () => true });
           record = await h.review({
             kind: 'plan',
             graph,
@@ -272,7 +347,30 @@ async function run(
       }
     }
     case 'run': {
+      // Обязательный preflight toolchain: проблема — отказ до записи binding,
+      // открытия состояния и любого вызова runtime.
+      const loaded = loadPolicy(need('policy'));
+      await assertToolchainReady(loaded.policy, loaded.baseDir, {
+        configSource: resolve(need('policy')),
+        protectedRoots: [resolve(need('state'))],
+      });
       const b = binding(need('state'), need('policy'), true);
+      if (v.source) {
+        // Источник — коннектор задач: свежая сверка снимка и eligibility до runtime.
+        const connector = await connectorOf(v.source, need('state'), b.policy);
+        const h = open(need('state'), b, false, connector.hooks());
+        try {
+          const data = await connector.run(h, {
+            author: parseWith(authorSchema, v.author ?? 'external', 'author'),
+            ...(v.once ? { once: true } : {}),
+          });
+          const failed = data.works.some((w) => w.status === 'failed' || w.status === 'cancelled');
+          return { command, data, code: failed ? runExit(h, data.works) : exitCodes.ok };
+        } finally {
+          h.close();
+          connector.close();
+        }
+      }
       const h = open(need('state'), b, false);
       try {
         const { graph, ctx } = await graphAndContext();
@@ -285,7 +383,7 @@ async function run(
           ...(v.once ? { once: true } : {}),
         });
         const failed = data.works.some((w) => w.status === 'failed' || w.status === 'cancelled');
-        return { command, data, code: failed ? exitCodes.refused : exitCodes.ok };
+        return { command, data, code: failed ? runExit(h, data.works) : exitCodes.ok };
       } finally {
         h.close();
       }
@@ -293,7 +391,7 @@ async function run(
     case 'status':
     case 'events':
     case 'result': {
-      const h = open(need('state'), binding(need('state')), true);
+      const h = open(need('state'), binding(need('state')), 'state');
       try {
         if (command === 'status') return { command, data: h.status(v.graph) };
         if (command === 'events')
@@ -335,11 +433,73 @@ async function run(
         h.close();
       }
     }
+    case 'cleanup': {
+      // Пишет состояние (истечение прерванной попытки, записи очистки): не только чтение.
+      const h = open(need('state'), binding(need('state')), false);
+      try {
+        return { command, data: await h.cleanup(need('run')) };
+      } finally {
+        h.close();
+      }
+    }
     case 'profile': {
       const profile = resolveProfile(need('profile'), {
         ...(v.repository ? { repository: v.repository } : {}),
       });
       return { command, data: { pin: profilePin(profile), profile } };
+    }
+    case 'source-check': {
+      const policyOf = v.policy ? loadPolicy(v.policy).policy : undefined;
+      const connector = await connectorOf(need('source'), v.state ?? '.', policyOf);
+      try {
+        const data = await connector.check(policyOf);
+        const ok = data.connected && data.projectMatches && data.problems.length === 0;
+        return { command, data, code: ok ? exitCodes.ok : exitCodes.refused };
+      } finally {
+        connector.close();
+      }
+    }
+    case 'source-snapshot': {
+      const connector = await connectorOf(
+        need('source'),
+        need('state'),
+        v.policy ? loadPolicy(v.policy).policy : undefined,
+      );
+      try {
+        const { snapshot, ...data } = await connector.snapshot(v.out);
+        void snapshot;
+        return { command, data, code: data.eligible ? exitCodes.ok : exitCodes.refused };
+      } finally {
+        connector.close();
+      }
+    }
+    case 'source-status':
+    case 'source-deliver':
+    case 'source-reconcile': {
+      const state = need('state');
+      const b = binding(state);
+      const connector = await connectorOf(need('source'), state, b.policy);
+      const h = open(state, b, command === 'source-status');
+      try {
+        if (command === 'source-status') return { command, data: await connector.status(h) };
+        if (command === 'source-deliver') {
+          const data = await connector.deliver(h, v.work);
+          const settled = data.deliveries.every((d) =>
+            d.delivery.every((x) => x.status === 'delivered'),
+          );
+          return { command, data, code: settled ? exitCodes.ok : exitCodes.refused };
+        }
+        const { Connector } = await import('./integrations/connector/commands.ts');
+        const data = await connector.reconcile(
+          h,
+          need('operation'),
+          Connector.decision(v.decision),
+        );
+        return { command, data, code: data.resolved ? exitCodes.ok : exitCodes.refused };
+      } finally {
+        h.close();
+        connector.close();
+      }
     }
     case 'doctor': {
       const b = v.policy ? loadPolicy(v.policy) : v.state ? binding(v.state) : undefined;
@@ -349,6 +509,16 @@ async function run(
           b?.policy,
           adapters(b?.policy ?? ({ toolProfiles: {} } as ExecutionPolicy)),
           v.state,
+          b
+            ? {
+                baseDir: b.baseDir,
+                inspect: (policy, baseDir) =>
+                  inspectPolicy(policy, baseDir, {
+                    configSource: v.policy ? resolve(v.policy) : bindingFile(v.state!),
+                    ...(v.state ? { protectedRoots: [resolve(v.state)] } : {}),
+                  }),
+              }
+            : undefined,
         ),
       };
     }

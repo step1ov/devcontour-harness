@@ -1,0 +1,9 @@
+{
+  "name": "@fx/checker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "fx-check": "./check.mjs"
+  }
+}

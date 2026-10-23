@@ -1,0 +1,7 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "tasks": {
+    "check": { "inputs": ["src/**", "test/**", "package.json"] },
+    "test": { "dependsOn": ["check"], "outputs": [".reports/**"] }
+  }
+}

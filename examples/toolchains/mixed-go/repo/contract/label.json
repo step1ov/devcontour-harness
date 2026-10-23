@@ -1,0 +1,9 @@
+{
+  "prefix": "item-",
+  "width": 3,
+  "examples": [
+    [7, "item-007"],
+    [42, "item-042"],
+    [1234, "item-1234"]
+  ]
+}

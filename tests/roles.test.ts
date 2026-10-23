@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment --
  * Тесты правят сырой JSON политики и читают записанные fixture запросы как есть.
  */
+import { close, verdict } from './review-fixture.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
@@ -195,7 +196,8 @@ test('S2.4/T32: same-vendor reviewer — свежая сессия без ист
           approve(),
           approve(),
           { ...reject, recordPrompt: true },
-          { ...approve(), recordPrompt: true },
+          // Кандидат попытки 2 называет выданную находку (протокол переходов).
+          { ...verdict(true, { previous: [close(0)] }), recordPrompt: true },
           { ...approve(), recordPrompt: true },
         ],
       },

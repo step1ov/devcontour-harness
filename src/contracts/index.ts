@@ -11,6 +11,7 @@ export * from './execution.ts';
 export * from './review.ts';
 export * from './checks.ts';
 export * from './profiles.ts';
+export * from './toolchain.ts';
 export * from './ports.ts';
 export * from './cli.ts';
 export * from './published.ts';

@@ -1,0 +1,13 @@
+{
+  "name": "fx-label-npm",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/label.js && node --check test/label.test.js",
+    "test": "node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=.reports/junit.xml test/*.test.js"
+  },
+  "devDependencies": {
+    "picocolors": "1.1.1"
+  }
+}

@@ -1,0 +1,114 @@
+{
+  "policyVersion": 1,
+  "repositories": [
+    {
+      "id": "starter",
+      "path": "turbo-starter",
+      "targetRef": "refs/heads/harness/accepted",
+      "lifecycle": {
+        "setup": [
+          {
+            "id": "compose-setup",
+            "command": [
+              "node",
+              ".harness/compose-bridge.mjs",
+              "setup",
+              "--port",
+              "POSTGRES_PORT",
+              "--env",
+              ".harness/env/compose.env.template:compose.env",
+              "--env",
+              ".harness/env/backend.env.template:backend.env",
+              "--secret",
+              "HX_DB_PASSWORD"
+            ],
+            "timeoutMs": 300000
+          }
+        ],
+        "ready": [
+          {
+            "id": "compose-ready",
+            "command": [
+              "node",
+              ".harness/compose-bridge.mjs",
+              "ready",
+              "--timeout-ms",
+              "120000",
+              "--secret",
+              "HX_DB_PASSWORD"
+            ],
+            "timeoutMs": 240000
+          }
+        ],
+        "teardown": [
+          {
+            "id": "compose-teardown",
+            "command": [
+              "node",
+              ".harness/compose-bridge.mjs",
+              "teardown",
+              "--secret",
+              "HX_DB_PASSWORD"
+            ],
+            "timeoutMs": 180000
+          }
+        ]
+      },
+      "gates": [
+        {
+          "id": "db-isolation",
+          "kind": "test",
+          "command": [
+            "node",
+            ".harness/compose-bridge.mjs",
+            "exec",
+            "--",
+            "node",
+            "--test",
+            "--test-reporter=junit",
+            "--test-reporter-destination=.artifacts/junit/db-isolation.xml",
+            ".harness/acceptance/db-isolation.test.mjs"
+          ],
+          "report": { "type": "junit", "path": ".artifacts/junit/db-isolation.xml" },
+          "timeoutMs": 900000
+        }
+      ],
+      "protectedPaths": [
+        ".github/",
+        ".githooks/",
+        ".harness/",
+        ".npmrc",
+        "AGENTS.md",
+        "package.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "turbo.json",
+        "scripts/",
+        "infra/"
+      ],
+      "environment": {
+        "values": {
+          "HX_DB_USER": "harness",
+          "HX_DB_NAME": "acceptance"
+        },
+        "secrets": {
+          "HX_DB_PASSWORD": "HX_DB_PASSWORD_SOURCE"
+        }
+      }
+    }
+  ],
+  "roles": {
+    "developer": {
+      "writer": { "runtime": "claude" }
+    }
+  },
+  "review": {
+    "code": { "reviewer": { "runtime": "codex" } },
+    "plan": { "reviewer": { "runtime": "codex" } },
+    "contract": { "reviewer": { "runtime": "codex" } }
+  },
+  "isolation": { "mode": "none", "domains": [] },
+  "concurrency": 2,
+  "maxAttempts": 1,
+  "runTimeoutMs": 1800000
+}

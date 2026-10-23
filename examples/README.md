@@ -19,6 +19,7 @@ npx harness validate --graph files-only/graph.json --policy files-only/policy.js
 | `one-vendor/`         | writer и reviewer одного вендора — только с явным `same-vendor-allowed` |
 | `files-only/`         | поручение, контекст и результат только файлами, без внешних сервисов    |
 | `external-connector/` | источник поручений и получатель результата через порты библиотеки       |
+| `turbo-starter/`      | pnpm/Turborepo-проект с генерацией SDK и Docker lifecycle (см. README)  |
 
 Reviewer задаётся правилом ревью явно; неявного «противоположного runtime»
 нет. При `different-vendor` (умолчание) reviewer того же вендора, что автор,

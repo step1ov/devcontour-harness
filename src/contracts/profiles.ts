@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { idSchema, relativePathSchema, roleIdSchema } from './primitives.ts';
 import { environmentSchema, gateSchema, lifecycleSchema, stepSchema } from './policy.ts';
+import { toolchainSchema } from './toolchain.ts';
 
 /**
  * Профиль стека — переносимый файл, из которого собирается описание
@@ -72,6 +73,8 @@ export const stackProfileSchema = z.strictObject({
   prepare: z.array(stepSchema).max(100).default([]),
   environment: environmentSchema.optional(),
   lifecycle: lifecycleSchema.optional(),
+  /** Версии инструментов и выбор менеджера пакетов; слои объединяются без противоречий. */
+  toolchain: toolchainSchema.optional(),
   protectedPaths: z.array(relativePathSchema).max(100).default([]),
   generatedPaths: z.array(relativePathSchema).max(100).default([]),
   concurrency: z.number().int().min(1).max(4).optional(),
@@ -106,6 +109,7 @@ export const resolvedProfileSchema = z.strictObject({
   prepare: z.array(stepSchema),
   environment: environmentSchema.optional(),
   lifecycle: lifecycleSchema.optional(),
+  toolchain: toolchainSchema.optional(),
   protectedPaths: z.array(relativePathSchema),
   generatedPaths: z.array(relativePathSchema),
   concurrency: z.number().int().optional(),

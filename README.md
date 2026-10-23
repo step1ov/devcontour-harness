@@ -5,7 +5,7 @@ Headless-движок исполнения инженерных поручени
 интеграция с принятой веткой через compare-and-swap и машинный результат с SHA
 и доказательствами.
 
-> Статус: `0.1.0-alpha.5` — предварительный выпуск (alpha). Договоры
+> Статус: `0.1.0-alpha.6` — предварительный выпуск (alpha). Договоры
 > `v1alpha1` могут измениться между alpha-версиями; закрепляйте точную версию.
 > Файл → ревью плана → кандидат → интеграция → принятие → результат JSON, с
 > ограниченным восстановлением, повторным использованием кандидата, бюджетами,
@@ -27,7 +27,7 @@ Headless-движок исполнения инженерных поручени
 Из npm — точная версия (воспроизводимо) или последняя alpha по тегу:
 
 ```sh
-npm install --save-exact devcontour-harness@0.1.0-alpha.5   # точная версия
+npm install --save-exact devcontour-harness@0.1.0-alpha.6   # точная версия
 # или: npm install --save-exact devcontour-harness@alpha     # текущая alpha
 npx harness --version
 ```
@@ -116,6 +116,28 @@ PASS» нет. Адаптеры хоста реализуют порты `Execut
 `/contracts` и `/testing`; JSON-схемы входов и выходов —
 `devcontour-harness/schemas/<имя>.schema.json`. Декларации используют типы
 Node.js: TypeScript-потребителю нужен `@types/node` (или `skipLibCheck`).
+
+## Выпуск 0.1.0-alpha.6
+
+Ядро работает как прежде; всё новое подключается явно. Подробно —
+[заметки выпуска](docs/release-notes/0.1.0-alpha.6.md).
+
+- Инструменты целевого проекта: npm, pnpm, Turborepo, Go/gotestsum,
+  Python/uv — явными шагами `prepare`, gates и `repositories[].toolchain`;
+  `doctor` и обязательный preflight `run` ([toolchains](docs/toolchains.md)).
+- Рецепт Turbo Starter с lifecycle-мостом Docker
+  ([turbo-starter](docs/turbo-starter.md)).
+- Коннектор задач с транспортами Relay v1 и Relay-2: команды `source-*`,
+  `run --source`, доставка с намерением, read-back и явным разбором
+  неизвестного исхода ([connectors](docs/connectors.md)).
+- Протокол ревью кода: ID и переходы находок, ограниченный повтор reviewer,
+  `REVIEW_PROTOCOL_INVALID` ([review-protocol](docs/review-protocol.md));
+  объявленные gates в проверках reviewer ([review-probes](docs/review-probes.md)).
+- Точка подключения внешней памяти — договор без готового адаптера
+  ([hindsight](docs/integrations/hindsight.md)).
+
+Состояние alpha.5 читается без преобразования. Standalone-состояние с новыми записями
+alpha.5 не читает; прежний DevContour его открывает без отказа — откат только через копию ([upgrade](docs/upgrade.md)).
 
 ## Выпуск 0.1.0-alpha.5
 

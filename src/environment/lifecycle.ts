@@ -125,6 +125,12 @@ export async function withEnvironment<T>(
 ): Promise<T> {
   if (!lifecycle) return action();
   await mkdir(dir, { recursive: true });
+  // Каталог окружения фазы — вне worktree, рядом с receipt: шаги lifecycle
+  // хранят в нём своё состояние (env-файлы, снимок ресурсов), а prepare и
+  // gates той же фазы находят его по переменной. Попадает в receipt, поэтому
+  // повторная очистка в новом процессе видит тот же каталог.
+  execution.env.DEVCONTOUR_ENVIRONMENT_DIR = dir;
+  execution.env.HARNESS_ENVIRONMENT_DIR = dir;
   const receiptPath = join(dir, 'environment.json');
   const receipt = {
     version: 1,

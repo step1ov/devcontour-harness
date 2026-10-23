@@ -1,0 +1,25 @@
+{
+  "title": "Pad item labels to three digits",
+  "goal": "Change label(n) in label/label.go so the number is zero-padded to three digits (item-007), keeping longer numbers unchanged.",
+  "acceptance": [
+    "label(7) is item-007 and label(42) is item-042",
+    "label(1234) is item-1234",
+    "All gates pass with fresh JUnit reports"
+  ],
+  "writeScope": ["label"],
+  "gates": ["vet", "acceptance"],
+  "requirements": [
+    {
+      "id": "REQ-LABEL-PAD",
+      "gate": "acceptance",
+      "testId": "example.com/fxlabel/label.TestLabelPadsOneDigit",
+      "scenario": "example.com/fxlabel/label.TestLabelPadsOneDigit runs and passes on the accepted SHA"
+    },
+    {
+      "id": "REQ-LABEL-LONG",
+      "gate": "acceptance",
+      "testId": "example.com/fxlabel/label.TestLabelKeepsLong",
+      "scenario": "example.com/fxlabel/label.TestLabelKeepsLong runs and passes on the accepted SHA"
+    }
+  ]
+}

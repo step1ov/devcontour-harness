@@ -1,0 +1,13 @@
+{
+  "name": "fx-label-turbo",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "pnpm@10.12.3",
+  "scripts": {
+    "check": "turbo run check",
+    "test": "turbo run test --force"
+  },
+  "devDependencies": {
+    "turbo": "2.11.10"
+  }
+}

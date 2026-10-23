@@ -298,6 +298,49 @@
       ],
       "additionalProperties": false
     },
+    "toolchain": {
+      "type": "object",
+      "properties": {
+        "tools": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^(>=)?\\d+(\\.\\d+){0,2}$"
+          }
+        },
+        "packageManagers": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "."
+              },
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500,
+                "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+              }
+            ]
+          },
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "npm",
+              "pnpm"
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "protectedPaths": {
       "default": [],
       "maxItems": 100,

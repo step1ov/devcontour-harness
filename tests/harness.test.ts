@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment --
  * Тесты портят сырой JSON политики и графа до разбора схемой.
  */
+import { issuedFindings } from './review-fixture.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -664,10 +665,21 @@ test('S1-R2-04: секрет профиля из сырого ответа revie
         if (token === canary) received.add(request.task);
         if (!token || response.status !== 'ok') return response;
         const output = response.output as any;
+        // Ревью кода называет каждую выданную открытую находку (протокол
+        // переходов): заметка прошлой фазы остаётся открытой явно.
+        const previous =
+          request.task === 'review-code'
+            ? issuedFindings(request.prompt).map((f) => ({
+                id: f.id,
+                status: 'open',
+                basis: 'Заметка остаётся, не блокирует',
+              }))
+            : (output.previous ?? []);
         return {
           ...response,
           output: {
             ...output,
+            previous,
             summary: `${output.summary} ${token}`,
             findings: [
               ...(output.findings ?? []),
@@ -872,19 +884,14 @@ test('T28: повторное ревью плана — каждая прежн�
       },
     },
     // Раунд 3 называет состояние каждой открытой находки с основанием.
+    // Невалидный раунд 2 ничего не применил (docs/review-protocol.md, §8):
+    // открыты обе находки раунда 1, «уточнённой» находки нет.
     {
       result: {
         ...approve().result,
         previous: [
           { id: idB, status: 'closed', basis: 'добавлен критерий: greet("") возвращает ошибку' },
-          {
-            id: findingId(subject, {
-              rule: 'ac-missing',
-              message: 'Нет критерия для ошибки ввода (уточнено)',
-            }),
-            status: 'closed',
-            basis: 'то же исправление',
-          },
+          { id: idN, status: 'withdrawn', basis: 'не относится к плану' },
         ],
       },
     },
@@ -902,9 +909,20 @@ test('T28: повторное ревью плана — каждая прежн�
   assert.equal(r2.round, 2);
   assert.equal(r2.approved, false, 'прежняя блокирующая находка без состояния');
   assert.match(r2.summary, new RegExp('Не названо состояние прежней находки ' + idB));
-  assert.equal(r2.findings.find((f) => f.id === idN)?.status, 'withdrawn');
-  assert.equal(r2.findings.find((f) => f.id === idN)?.basis, 'не относится к плану');
+  // Невалидный ответ целиком не применяется: снятие idN из того же ответа не
+  // записано, новая находка невалидного ответа не заведена.
+  assert.equal(
+    r2.findings.find((f) => f.id === idN)?.status,
+    'open',
+    'невалидный ответ не снимает',
+  );
+  assert.equal(r2.findings.find((f) => f.id === idN)?.basis, undefined);
   assert.equal(r2.findings.find((f) => f.id === idB)?.status, 'open', 'не закрыта молчанием');
+  assert.deepEqual(
+    r2.findings.map((f) => [f.id, f.status, f.changedIn]),
+    r1.findings.map((f) => [f.id, f.status, f.changedIn]),
+    'история после невалидного раунда прежняя',
+  );
   assert.equal(
     h.engine.read((v) => v.graph(subject)?.approval),
     undefined,
@@ -918,11 +936,12 @@ test('T28: повторное ревью плана — каждая прежн�
   assert.equal(closed.openedIn, 1);
   assert.equal(closed.changedIn, 3);
   assert.match(closed.basis!, /добавлен критерий/);
-  assert.equal(
-    r3.findings.find((f) => f.id === idN)?.changedIn,
-    2,
-    'история прежнего раунда сохранена',
+  const withdrawn = r3.findings.find((f) => f.id === idN)!;
+  assert.deepEqual(
+    [withdrawn.status, withdrawn.openedIn, withdrawn.changedIn],
+    ['withdrawn', 1, 3],
   );
+  assert.equal(r3.findings.length, 2, 'история не стирается и не пополняется невалидным ответом');
   assert.deepEqual(
     h.engine.reviews('plan', subject).map((r) => [r.round, r.approved]),
     [

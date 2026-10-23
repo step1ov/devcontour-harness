@@ -103,6 +103,7 @@ result SHA доступен в target ref.
 | `toolProfiles{}`, `environment`, `lifecycle`, `resources[]`  | Инструменты (у профиля — встроенные инструменты claude, shell и сеть codex, MCP-серверы `mcp{}`: stdio-команда или http-адрес, только перечисленные `tools`, учётные данные — именами переменных `env`/`bearerTokenEnv`, передаются CLI по имени), среда, ресурсы (порты 1024–65535) |
 | `concurrency`, `leaseMs`, `runTimeoutMs`, `reviewProbes`     | Пределы исполнения                                                                                                                                                                                                                                                                   |
 | `maxAttempts`, `repairBudget`, `reuseImplementation`         | Повторы и повторное использование кандидата                                                                                                                                                                                                                                          |
+| `reviewProtocolRetries`                                      | Необязательное: дополнительные вызовы reviewer кода при ошибке протокола ответа (0–2; нет поля — 1, умолчание не подставляется и digest политики не меняет), [review-protocol.md](review-protocol.md)                                                                                |
 | `budgets{work, group, total, onUnknown}`, `prices[]`         | Пределы USD и/или времени; тарифы                                                                                                                                                                                                                                                    |
 
 Переменные `HARNESS_*` и `DEVCONTOUR_*` политика задать не может.
@@ -211,7 +212,17 @@ Runtime возвращает сырой ответ; движок разбира�
 а не самооценка writer. Reviewer называет состояние каждой прежней открытой
 находки (`previous[]`); `reviewIssues` отклоняет `approved` при блокирующей
 находке, в том числе прежней открытой, неназванную прежнюю находку и ссылку на
-неизвестную. Идентичность находки — `findingId(subject, {rule, message})`.
+неизвестную. Идентичность находки плана/контракта — `findingId(subject, {rule, message})`;
+невалидный ответ раунд не применяет (переходы и новые находки не записываются).
+
+Ревью кода ведёт историю находок поручения с ID, выданными controller
+(`codeReviewHistory`, `checkCodeReview`): reviewer называет ровно один переход
+каждой открытой находки, ошибка протокола (`REVIEW_PROTOCOL_INVALID`,
+причина и путь поля, например `previous[0].id`) отделена от содержательного
+отказа (`REVIEW_REJECTED`) и даёт ограниченный повтор только reviewer
+(`reviewProtocolRetries`, 0–2, по умолчанию 1). Evidence ревью несёт
+аддитивное поле `reviewRound`, находки — `id`/`status`, ссылки результата —
+`review`. Правила — [docs/review-protocol.md](review-protocol.md).
 
 ## Выходы
 
@@ -282,7 +293,7 @@ Runtime возвращает сырой ответ; движок разбира�
 
 Подлинность SHA, деревьев, artifacts и записей (их наличие в Git и в
 хранилище исполнителя) получатель не удостоверяет — это транспорт хоста.
-Таблица — проверяемое утверждение: `tests/receipt-trust.test.ts` по JSON
+Таблица — проверяемое утверждение: <!-- repo-only -->`tests/receipt-trust.test.ts`<!-- /repo-only --> по JSON
 Schema строит подделку каждого поля (другое значение, удаление
 необязательного поля, пустой массив, повтор и удаление элемента) на двух
 фикстурах и требует отказа для первых двух категорий и того же вердикта для
@@ -386,6 +397,20 @@ Schema строит подделку каждого поля (другое зн�
 | `evidence[].reviewer.runtime`                           | ожидание получателя | reviewer роли в политике получателя                                                                   |
 | `evidence[].reviewer.model`                             | сведение            | модель reviewer                                                                                       |
 | `evidence[].reviewer.sameVendor`                        | согласованность     | вендоры writer и reviewer                                                                             |
+| `evidence[].review`                                     | сведение            | раунд протокола ревью кода                                                                            |
+| `evidence[].review.round`                               | сведение            | раунд протокола ревью кода                                                                            |
+| `evidence[].review.call`                                | сведение            | раунд протокола ревью кода                                                                            |
+| `evidence[].review.protocol`                            | сведение            | раунд протокола ревью кода                                                                            |
+| `evidence[].review.issues`                              | сведение            | раунд протокола ревью кода                                                                            |
+| `evidence[].review.issues[]`                            | сведение            | раунд протокола ревью кода                                                                            |
+| `evidence[].review.issues[].path`                       | сведение            | раунд протокола ревью кода                                                                            |
+| `evidence[].review.issues[].reason`                     | сведение            | раунд протокола ревью кода                                                                            |
+| `evidence[].review.issues[].message`                    | сведение            | раунд протокола ревью кода                                                                            |
+| `evidence[].review.transitions`                         | сведение            | раунд протокола ревью кода                                                                            |
+| `evidence[].review.transitions[]`                       | сведение            | раунд протокола ревью кода                                                                            |
+| `evidence[].review.transitions[].id`                    | сведение            | раунд протокола ревью кода                                                                            |
+| `evidence[].review.transitions[].from`                  | сведение            | раунд протокола ревью кода                                                                            |
+| `evidence[].review.transitions[].to`                    | сведение            | раунд протокола ревью кода                                                                            |
 | `findings`                                              | сведение            | сводка находок может относиться к отклонённым раундам                                                 |
 | `findings[]`                                            | сведение            | сводка находок                                                                                        |
 | `findings[].severity`                                   | сведение            | сводка находок                                                                                        |
@@ -393,6 +418,8 @@ Schema строит подделку каждого поля (другое зн�
 | `findings[].path`                                       | сведение            | сводка находок                                                                                        |
 | `findings[].line`                                       | сведение            | сводка находок                                                                                        |
 | `findings[].rule`                                       | сведение            | сводка находок                                                                                        |
+| `findings[].id`                                         | сведение            | сводка находок                                                                                        |
+| `findings[].status`                                     | сведение            | сводка находок                                                                                        |
 | `limitations`                                           | сведение            | чего результат не доказывает                                                                          |
 | `limitations[]`                                         | сведение            | чего результат не доказывает                                                                          |
 | `finishedAt`                                            | сведение            | время окончания                                                                                       |
@@ -479,8 +506,9 @@ manifestDigest, impact?, evidence[], error?}`. Смена любого SHA де�
 (`implementation`, `<фаза>-test:<gate>`, `<фаза>-consumer:<репозиторий>:<gate>`,
 `<фаза>-review`, `<фаза>-environment:<шаг>`, `integration-wait`) и сохраняет
 снимок контекста артефактом `implementation/context.json`. Отказ приёмки с
-кодом `GATE_FAILED`, `REVIEW_REJECTED`, `SCOPE_VIOLATION` или
-`BUDGET_EXHAUSTED` записывается классом отказа этого правила.
+кодом `GATE_FAILED`, `REVIEW_REJECTED`, `REVIEW_PROTOCOL_INVALID`,
+`SCOPE_VIOLATION` или `BUDGET_EXHAUSTED` записывается классом отказа этого
+правила.
 
 Хост, ведущий движок поверх своего хранилища, собирает исполнение из
 экспортов корня пакета: `Engine`, `Runner`, `WorkflowQueue`, `JointRunner`,
@@ -514,7 +542,7 @@ exit code CLI.
 | 0    | успех            | —                                                                                                                                                                                                                                                              |
 | 2    | `input`          | `INVALID_INPUT`, `UNSUPPORTED_COMMAND`, `UNSUPPORTED_VERSION`, `GRAPH_*`, `GATE_*`, `REVIEWER_*`                                                                                                                                                               |
 | 3    | `refused`        | `APPROVAL_STALE`, `APPROVAL_REQUIRED`, `LEASE_STALE`, `CONTROLLER_BUSY`, `PAUSED`, `NOT_READY`, `SCOPE_VIOLATION`, `GATE_FAILED`, `REVIEW_REJECTED`, `BUDGET_EXHAUSTED`, `BUDGET_UNKNOWN`, `ATTEMPTS_EXHAUSTED`, `REVISION_CONFLICT`, `CANCELLED`, `NOT_FOUND` |
-| 4    | `infrastructure` | `STATE_VERSION_UNSUPPORTED`, `RUNTIME_UNAVAILABLE`, `SANDBOX_UNAVAILABLE`, `GIT_FAILED`, `STORAGE_FAILED`, `DELIVERY_FAILED`, `INTERNAL`                                                                                                                       |
+| 4    | `infrastructure` | `STATE_VERSION_UNSUPPORTED`, `RUNTIME_UNAVAILABLE`, `REVIEW_PROTOCOL_INVALID`, `SANDBOX_UNAVAILABLE`, `GIT_FAILED`, `STORAGE_FAILED`, `DELIVERY_FAILED`, `INTERNAL`                                                                                            |
 
 Exit 1 не используется: им Node завершает процесс при необработанном
 исключении.

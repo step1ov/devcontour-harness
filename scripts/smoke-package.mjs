@@ -94,6 +94,21 @@ const allowed = [
   /^examples\/files-only\/context\/[a-z-]+\/[a-z-]+\.md$/,
   /^examples\/[a-z-]+\/test\/[a-z-]+\.js$/,
   /^examples\/[a-z-]+\/src\/\.gitkeep$/,
+  // Fixtures toolchains (T01): target-проект, политика, поручение и реализации fixture writer.
+  /^examples\/toolchains\/README\.md$/,
+  /^examples\/toolchains\/[a-z-]+\/(policy|task)\.json$/,
+  /^examples\/toolchains\/[a-z-]+\/(repo|good|bad)\/[A-Za-z0-9_.\/-]+$/,
+  // Документация интеграций и заметки выпусков (alpha.6).
+  /^docs\/(integrations|release-notes)\/[a-z0-9.-]+\.md$/,
+  // Рецепт Turbo Starter (S01–S06): политика, мост compose, приёмочные тесты, шаблоны env, патчи.
+  /^examples\/turbo-starter\/(setup|cleanup)\.mjs$/,
+  /^examples\/turbo-starter\/[a-z.-]+\.json$/,
+  /^examples\/turbo-starter\/harness\/[a-z.-]+\.(mjs|yml)$/,
+  /^examples\/turbo-starter\/harness\/acceptance\/[a-z-]+\.test\.mjs$/,
+  /^examples\/turbo-starter\/harness\/env\/[a-z-]+\.env\.template$/,
+  /^examples\/turbo-starter\/changes\/[a-z-]+\.patch$/,
+  // Шаблоны controller mode.
+  /^templates\/controller-mode\/([A-Za-z.-]+\.md|[a-z-]+\.json)$/,
   /^profiles\/[a-z0-9-]+\.json$/,
   /^skills\/[a-z-]+\/SKILL\.md$/,
   /^templates\/(AGENTS\.md|[a-z-]+\.json)$/,

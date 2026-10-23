@@ -1,0 +1,6 @@
+node_modules/
+.reports/
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/

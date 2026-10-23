@@ -1,3 +1,4 @@
+import { close, verdict } from './review-fixture.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -13,6 +14,8 @@ const crash = {
 };
 // Runtime сам оборвал работу по своему пределу времени, успев изменить файлы.
 const outOfTime = { exit: 143, stderr: 'исчерпан лимит времени прогона: 900 с', started: false };
+/** Ревью исправленного кандидата закрывает выданную находку (ID — из запроса). */
+const closing = verdict(true, { previous: [close(0, 'Поведение добавлено')] });
 const reject = {
   result: {
     ...approve().result,
@@ -87,7 +90,9 @@ test('T19: после обрыва reviewer повтор берёт готово
 });
 
 test('T19: кандидат не берётся при сдвинутой базе, после отказа ревью по существу и при другой версии движка', async () => {
-  const f = fixture([crash, crash, reject, crash, approve()]);
+  // После отказа по существу ревью кандидата называет выданную находку
+  // (протокол переходов, docs/review-protocol.md): закрыта на исправленном коде.
+  const f = fixture([crash, crash, reject, crash, closing, approve()]);
   // Сдвинутая база: основания разошлись — код пишется с нуля.
   await runAll(f.ctx);
   const ref = f.ctx.policy.repositories[0]!.targetRef;
@@ -270,7 +275,7 @@ test('Кандидат, отклонённый ревью, — отправна�
   const ctx = setup({
     scenario: {
       writer: [implement(), { observe: ['src/greet.js'], recordPrompt: true, ...implement() }],
-      reviewer: [reject, approve()],
+      reviewer: [reject, closing, approve()],
     },
   });
   await runAll(ctx);

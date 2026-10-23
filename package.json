@@ -1,6 +1,6 @@
 {
   "name": "devcontour-harness",
-  "version": "0.1.0-alpha.5",
+  "version": "0.1.0-alpha.6",
   "description": "Headless execution harness: work graph, isolated attempts, gates, independent reviews and accepted results.",
   "type": "module",
   "license": "MIT",
@@ -32,6 +32,26 @@
     "./testing": {
       "types": "./lib/testing/index.d.ts",
       "default": "./lib/testing/index.js"
+    },
+    "./toolchains": {
+      "types": "./lib/toolchains/index.d.ts",
+      "default": "./lib/toolchains/index.js"
+    },
+    "./integrations/connector": {
+      "types": "./lib/integrations/connector/index.d.ts",
+      "default": "./lib/integrations/connector/index.js"
+    },
+    "./integrations/relay-v1": {
+      "types": "./lib/integrations/relay-v1/index.d.ts",
+      "default": "./lib/integrations/relay-v1/index.js"
+    },
+    "./integrations/relay-v2": {
+      "types": "./lib/integrations/relay-v2/index.d.ts",
+      "default": "./lib/integrations/relay-v2/index.js"
+    },
+    "./integrations/memory": {
+      "types": "./lib/integrations/memory/index.d.ts",
+      "default": "./lib/integrations/memory/index.js"
     }
   },
   "files": [
@@ -58,6 +78,7 @@
     "schemas:check": "node --import tsx scripts/build-schemas.ts --check",
     "lint": "eslint .",
     "test": "node scripts/test.mjs",
+    "test:integration": "node --import tsx --test --test-concurrency=1 --test-timeout=1800000 tests/integration/*.test.ts",
     "test:package": "npm run build && node scripts/smoke-package.mjs",
     "check": "npm run lint && npm run typecheck && npm run schemas:check && npm run build && npm test && node scripts/smoke-package.mjs",
     "format": "prettier --write .",

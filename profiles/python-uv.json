@@ -1,0 +1,26 @@
+{
+  "id": "python-uv",
+  "version": "0.1.0",
+  "capabilities": ["python", "uv", "pytest"],
+  "protectedPaths": ["pyproject.toml", "uv.lock", ".python-version"],
+  "toolchain": {
+    "tools": { "uv": "0.11.28" }
+  },
+  "prepare": [{ "id": "install", "command": ["uv", "sync", "--locked"], "timeoutMs": 600000 }],
+  "gates": [
+    {
+      "id": "lint",
+      "kind": "check",
+      "command": ["uv", "run", "--no-sync", "ruff", "check", "."],
+      "timeoutMs": 240000
+    },
+    {
+      "id": "acceptance",
+      "kind": "test",
+      "command": ["uv", "run", "--no-sync", "pytest", "--junitxml=.reports/junit.xml"],
+      "timeoutMs": 240000,
+      "dependsOn": ["lint"],
+      "report": { "type": "junit", "path": ".reports/junit.xml" }
+    }
+  ]
+}

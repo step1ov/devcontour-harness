@@ -1,0 +1,22 @@
+{
+  "id": "npm-ci",
+  "version": "0.1.0",
+  "capabilities": ["node", "npm", "unit-tests"],
+  "protectedPaths": ["package.json", "package-lock.json"],
+  "toolchain": {
+    "tools": { "npm": "11.4.2" },
+    "packageManagers": { ".": "npm" }
+  },
+  "prepare": [{ "id": "install", "command": ["npm", "ci"], "timeoutMs": 600000 }],
+  "gates": [
+    { "id": "check", "kind": "check", "command": ["npm", "run", "check"], "timeoutMs": 240000 },
+    {
+      "id": "unit-tests",
+      "kind": "test",
+      "command": ["npm", "run", "test"],
+      "timeoutMs": 240000,
+      "dependsOn": ["check"],
+      "report": { "type": "junit", "path": ".reports/junit.xml" }
+    }
+  ]
+}

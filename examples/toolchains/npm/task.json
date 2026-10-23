@@ -1,0 +1,25 @@
+{
+  "title": "Pad item labels to three digits",
+  "goal": "Change label(n) in src/label.js so the number is zero-padded to three digits (item-007), keeping longer numbers unchanged.",
+  "acceptance": [
+    "label(7) is item-007 and label(42) is item-042",
+    "label(1234) is item-1234",
+    "All gates pass with fresh JUnit reports"
+  ],
+  "writeScope": ["src"],
+  "gates": ["check", "unit-tests"],
+  "requirements": [
+    {
+      "id": "REQ-LABEL-PAD",
+      "gate": "unit-tests",
+      "testId": "test.label pads one digit to three",
+      "scenario": "test.label pads one digit to three runs and passes on the accepted SHA"
+    },
+    {
+      "id": "REQ-LABEL-LONG",
+      "gate": "unit-tests",
+      "testId": "test.label keeps long numbers",
+      "scenario": "test.label keeps long numbers runs and passes on the accepted SHA"
+    }
+  ]
+}

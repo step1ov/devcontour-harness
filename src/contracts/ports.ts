@@ -160,6 +160,33 @@ export interface RuntimeRequest {
    * передаются серверу по имени, значения на диск не пишутся.
    */
   probe?: ProbeServer;
+  /**
+   * История находок ревью кода в структурированном виде (docs/review-protocol.md)
+   * — те же данные, что раздел запроса: адаптеру без модели не нужно разбирать
+   * текст. Передаётся только адаптеру с `RuntimeCapabilities.reviewProtocol`.
+   * `open` — находки, каждой из которых ответ обязан назвать ровно один переход
+   * в `previous` (`{id, status: open|closed|withdrawn, basis}`); `closed` —
+   * история: повторно — только явное открытие (`status: open`).
+   */
+  findings?: ReviewRequestFindings;
+}
+
+/** Находки ревью кода, выданные controller, для запроса reviewer. */
+export interface ReviewRequestFindings {
+  scope: string;
+  open: ReviewRequestFinding[];
+  closed: ReviewRequestFinding[];
+}
+export interface ReviewRequestFinding {
+  /** ID, выданный controller (SHA-256 hex): только им ссылается ответ. */
+  id: string;
+  severity: string;
+  message: string;
+  path: string | null;
+  line: number | null;
+  status: 'open' | 'closed' | 'withdrawn';
+  origin: { runId: string; phase: 'candidate' | 'integration'; sha: string; round: number };
+  basis?: string;
 }
 
 /** Команда запуска сервера проверок reviewer и его пределы. */
@@ -202,6 +229,14 @@ export interface RuntimeCapabilities {
   usage: boolean;
   /** Это управляемая подделка (fixture), а не живая модель. */
   fixture: boolean;
+  /**
+   * Версия протокола переходов находок ревью кода, которую адаптер передаёт
+   * reviewer (docs/review-protocol.md): запрос с выданными controller ID
+   * находок и ответ с переходом каждой. Нет поля — адаптер прежней версии:
+   * переходы не требуются (семантика alpha.5), ошибка формата ответа
+   * по-прежнему отделена от содержательного отказа. Необязательное поле.
+   */
+  reviewProtocol?: 1;
 }
 
 export interface RuntimeAdapter {
@@ -239,7 +274,15 @@ export interface ContextSource {
 }
 
 export type DeliveryOutcome =
-  { status: 'delivered'; receipt?: string } | { status: 'conflict'; currentRevision: string };
+  | { status: 'delivered'; receipt?: string }
+  | { status: 'conflict'; currentRevision: string }
+  /**
+   * Необязательный вариант (opt-in): мутация получателя могла примениться, но
+   * доказать исход нельзя. Автоматический повтор запрещён; `operation` —
+   * ключ операции для явного разбора (reconcile). Прежние получатели его не
+   * возвращают.
+   */
+  | { status: 'uncertain'; operation: string; reason: string };
 
 /**
  * Получатель результата. Доставка идемпотентна по `key`: повтор с тем же

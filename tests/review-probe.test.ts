@@ -82,9 +82,15 @@ test('Зависшая проверка reviewer останавливается 
     const missing = await probes.run({ argv: ['harness-no-such-command'] });
     assert.notEqual(missing.status, 'passed');
 
-    // Журнал controller — по записи на каждую команду, без значения секрета.
+    // Журнал controller — по записи на каждую команду, без значения секрета;
+    // до каждой команды — строка её резерва (R3-F01).
     const log = await readFile(s.spec.log, 'utf8');
-    assert.equal(log.trim().split('\n').length, 4);
+    const lines = log
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { type?: string });
+    assert.equal(lines.filter((l) => !l.type).length, 4);
+    assert.equal(lines.filter((l) => l.type === 'start').length, 4);
     assert.equal(log.includes('probe-secret-7731'), false);
   } finally {
     delete process.env.HARNESS_TEST_PROBE_SECRET;
@@ -370,6 +376,15 @@ test('Наблюдено — только по единственному сос
   assert.equal(masked[0].reproduction.run, 'run-k3');
 });
 
+/** Тот же шаг reviewer, называющий открытую находку прошлой фазы (`$open:0` — ID из запроса). */
+const notedAgain = <T extends { result: Record<string, unknown> }>(step: T): T => ({
+  ...step,
+  result: {
+    ...step.result,
+    previous: [{ id: '$open:0', status: 'open', basis: 'Заметка остаётся, не блокирует' }],
+  },
+});
+
 /** Политика сценария с пределами проверок, укладывающимися в срок теста. */
 const probePolicy = (p: any) => {
   p.runTimeoutMs = 60_000;
@@ -418,7 +433,9 @@ for (const reviewer of ['codex', 'claude'] as const)
         reviewer,
         scenario: {
           writer: { ...implement(), recordPrompt: true },
-          reviewer: probing(secret),
+          // Integration называет открытую заметку кандидата явным переходом
+          // (протокол находок, docs/review-protocol.md); прочее — как у кандидата.
+          reviewer: [probing(secret), notedAgain(probing(secret))],
         },
         policy: (p: any) => {
           probePolicy(p);

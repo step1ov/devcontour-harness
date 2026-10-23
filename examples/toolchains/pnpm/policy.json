@@ -1,0 +1,85 @@
+{
+  "policyVersion": 1,
+  "repositories": [
+    {
+      "id": "app",
+      "path": "repo",
+      "targetRef": "refs/heads/harness/accepted",
+      "prepare": [
+        {
+          "id": "install",
+          "command": ["pnpm", "install", "--frozen-lockfile"],
+          "timeoutMs": 600000
+        }
+      ],
+      "gates": [
+        {
+          "id": "check",
+          "kind": "check",
+          "command": ["pnpm", "run", "check"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "unit-tests",
+          "kind": "test",
+          "command": ["pnpm", "run", "test"],
+          "timeoutMs": 240000,
+          "dependsOn": ["check"],
+          "report": {
+            "type": "junit",
+            "path": ".reports/junit.xml"
+          }
+        }
+      ],
+      "toolchain": {
+        "tools": {
+          "pnpm": "10.12.3"
+        },
+        "packageManagers": {
+          ".": "pnpm"
+        }
+      },
+      "protectedPaths": [
+        ".github/",
+        ".githooks/",
+        "package.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "packages/label/test/",
+        "packages/label/package.json",
+        "packages/checker/",
+        "REQUIREMENTS.md"
+      ]
+    }
+  ],
+  "roles": {
+    "developer": {
+      "writer": {
+        "runtime": "claude"
+      }
+    }
+  },
+  "review": {
+    "code": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    },
+    "plan": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    },
+    "contract": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    }
+  },
+  "isolation": {
+    "mode": "none",
+    "domains": []
+  },
+  "maxAttempts": 2,
+  "runTimeoutMs": 900000
+}

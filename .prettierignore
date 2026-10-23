@@ -1,6 +1,8 @@
 node_modules
 lib
 package-lock.json
+# Lockfiles fixtures toolchains переносятся побайтно: их пишет менеджер пакетов.
+pnpm-lock.yaml
 .idea
 .private
 evidence

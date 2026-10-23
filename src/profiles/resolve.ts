@@ -161,6 +161,7 @@ export function resolveProfile(ref: string, options: ResolveProfileOptions = {})
   };
   const environment = single('environment');
   const lifecycle = single('lifecycle');
+  const toolchain = mergeToolchains(layers);
   for (const steps of lifecycle ? [lifecycle.setup, lifecycle.ready, lifecycle.teardown] : [])
     if (new Set(steps.map((s) => s.id)).size !== steps.length) refuse('Повтор lifecycle step ID');
   const limits = layers.flatMap((p) => (p.concurrency ? [p.concurrency] : []));
@@ -177,6 +178,7 @@ export function resolveProfile(ref: string, options: ResolveProfileOptions = {})
     prepare,
     ...(environment ? { environment } : {}),
     ...(lifecycle ? { lifecycle } : {}),
+    ...(toolchain ? { toolchain } : {}),
     protectedPaths: [...new Set([...layers.flatMap((p) => p.protectedPaths), ...files])],
     generatedPaths: [...new Set(layers.flatMap((p) => p.generatedPaths))],
     ...(limits.length ? { concurrency: Math.min(...limits) } : {}),
@@ -188,6 +190,37 @@ export function resolveProfile(ref: string, options: ResolveProfileOptions = {})
     ...(source ? { source } : {}),
     closure,
   };
+}
+
+/**
+ * Требования toolchain слоёв: инструменты и выбор менеджера пакетов
+ * объединяются, но одно имя с разными значениями — конфликт композиции, а не
+ * молчаливая победа последнего слоя.
+ */
+function mergeToolchains(layers: StackProfile[]): StackProfile['toolchain'] {
+  const present = layers.flatMap((p) => (p.toolchain ? [p.toolchain] : []));
+  if (!present.length) return undefined;
+  const merged = {
+    tools: {} as Record<string, string>,
+    packageManagers: {} as Record<string, 'npm' | 'pnpm'>,
+  };
+  for (const t of present) {
+    for (const [tool, version] of Object.entries(t.tools)) {
+      if (merged.tools[tool] !== undefined && merged.tools[tool] !== version)
+        refuse(
+          `Конфликт частей профиля: toolchain.tools.${tool} (${merged.tools[tool]} и ${version})`,
+        );
+      merged.tools[tool] = version;
+    }
+    for (const [dir, manager] of Object.entries(t.packageManagers)) {
+      if (merged.packageManagers[dir] !== undefined && merged.packageManagers[dir] !== manager)
+        refuse(
+          `Конфликт частей профиля: toolchain.packageManagers.${dir} (${merged.packageManagers[dir]} и ${manager})`,
+        );
+      merged.packageManagers[dir] = manager;
+    }
+  }
+  return merged;
 }
 
 export const profilePin = (p: ResolvedProfile): ProfilePin => ({
@@ -205,6 +238,7 @@ const profiledKeys = [
   'lifecycle',
   'protectedPaths',
   'generatedPaths',
+  'toolchain',
 ] as const;
 type RepositoryInput = z.input<typeof repositoryPolicySchema>;
 
@@ -227,6 +261,7 @@ export function repositoryFromProfile(
     prepare: profile.prepare,
     ...(profile.environment ? { environment: profile.environment } : {}),
     ...(profile.lifecycle ? { lifecycle: profile.lifecycle } : {}),
+    ...(profile.toolchain ? { toolchain: profile.toolchain } : {}),
     // Защищённые пути профиля дополняют умолчание политики, а не заменяют его.
     protectedPaths: [
       ...new Set([

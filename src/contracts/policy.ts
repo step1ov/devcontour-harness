@@ -13,6 +13,7 @@ import {
 } from './primitives.ts';
 import { digestOf } from './digest.ts';
 import type { ErrorIssue } from './errors.ts';
+import { toolchainSchema } from './toolchain.ts';
 
 const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
 /** Переменные `HARNESS_*` и исторические `DEVCONTOUR_*` задаёт сам harness, не политика. */
@@ -146,6 +147,8 @@ export const repositoryPolicySchema = z.strictObject({
   dependencyBuild: z.array(stepSchema).default([]),
   dependencyArtifacts: z.array(relativePathSchema).default([]),
   preflight: z.array(stepSchema).default([]),
+  /** Проверенные версии инструментов и явный выбор менеджера пакетов; читает preflight. */
+  toolchain: toolchainSchema.optional(),
 });
 
 /** Предел расходов (USD) и/или времени вызовов; хотя бы одно поле — выражено вариантами. */
@@ -258,6 +261,13 @@ export const executionPolicySchema = z.strictObject({
       reserveMs: z.number().int().min(0).default(120000),
     })
     .default({ commandTimeoutMs: 120000, budgetMs: 600000, reserveMs: 120000 }),
+  /**
+   * Дополнительные вызовы reviewer кода на одно логическое ревью при ошибке
+   * протокола его ответа (0–2; 0 — без повтора). Нет поля — один повтор
+   * (`DEFAULT_REVIEW_PROTOCOL_RETRIES`). Умолчание не подставляется в политику:
+   * digest и pins прежней политики не меняются. См. docs/review-protocol.md.
+   */
+  reviewProtocolRetries: z.number().int().min(0).max(2).optional(),
   maxAttempts: z.number().int().min(1).max(10).default(3),
   repairBudget: z.number().int().min(0).max(50).default(6),
   reuseImplementation: z.boolean().default(true),

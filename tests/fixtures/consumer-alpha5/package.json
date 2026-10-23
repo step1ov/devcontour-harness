@@ -1,0 +1,7 @@
+{
+  "name": "consumer-alpha5",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A01 fixture: a consumer written against the devcontour-harness 0.1.0-alpha.5 public API (old-style ports).",
+  "type": "module"
+}

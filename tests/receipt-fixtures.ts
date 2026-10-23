@@ -27,7 +27,14 @@ import { propertySetup } from './property-fixture.ts';
 export function attempt(
   graph: WorkGraph,
   policy: ExecutionPolicy = policyOf(),
-  options: { unitTests?: NonNullable<EvidenceRecord['tests']> } = {},
+  options: {
+    unitTests?: NonNullable<EvidenceRecord['tests']>;
+    /** Записи ревью фазы: предшествующие решающей и дополнения решающей. */
+    review?: (phase: 'candidate' | 'integration') => {
+      before?: Record<string, unknown>[];
+      decisive?: Record<string, unknown>;
+    };
+  } = {},
 ) {
   const { engine: e, store } = engineOf(policy);
   ready(e, graph);
@@ -58,7 +65,9 @@ export function attempt(
       phase,
       phase === 'integration' && options.unitTests ? { tests: options.unitTests } : {},
     );
-    evidence('independent-review', phase);
+    const review = options.review?.(phase) ?? {};
+    for (const extra of review.before ?? []) evidence('independent-review', phase, extra);
+    evidence('independent-review', phase, review.decisive ?? {});
     if (graph.orders[0]!.requirements.length) evidence('requirement-source', phase);
   }
   const done = () => {
@@ -324,11 +333,57 @@ export function maximalAttempt() {
       testId: 'required-test',
     },
   ];
+  // Раунды протокола ревью кода (docs/review-protocol.md): ошибка протокола
+  // перед валидным вердиктом кандидата; решает последняя запись фазы.
+  const finding = digestOf('finding-1');
+  const round = (extra: Record<string, unknown>) => ({
+    version: 1,
+    scope: digestOf('scope'),
+    calls: 2,
+    expected: [finding],
+    ...extra,
+  });
   const f = attempt(graph, policy, {
     unitTests: [
       { id: 'required-test', status: 'passed' },
       { id: 'other-test', status: 'passed' },
     ],
+    review: (phase) =>
+      phase === 'candidate'
+        ? {
+            before: [
+              {
+                passed: false,
+                exitCode: 1,
+                findings: [],
+                reviewRound: round({
+                  round: 2,
+                  call: 1,
+                  protocol: 'invalid',
+                  issues: [{ path: 'previous[0].id', reason: 'unknown', message: 'не выдан' }],
+                }),
+              },
+            ],
+            decisive: {
+              reviewRound: round({
+                round: 2,
+                call: 2,
+                protocol: 'valid',
+                transitions: [{ id: finding, from: 'open', to: 'closed', basis: 'исправлено' }],
+              }),
+            },
+          }
+        : {
+            decisive: {
+              reviewRound: round({
+                round: 3,
+                call: 1,
+                protocol: 'valid',
+                expected: [],
+                transitions: [],
+              }),
+            },
+          },
   });
   const contextDigest = digestOf('context-snapshot');
   f.e.update(f.a.id, f.a.token, 'run.context', { contextSnapshot: contextDigest });

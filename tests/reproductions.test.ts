@@ -52,6 +52,18 @@ const rejecting = (secret: string) => ({
   },
 });
 
+const stillOpen = <T extends { result: Record<string, unknown> }>(step: T, n: number): T => ({
+  ...step,
+  result: {
+    ...step.result,
+    previous: Array.from({ length: n }, (_, i) => ({
+      id: `$open:${i}`,
+      status: 'open',
+      basis: 'Дефект на том же входе остаётся',
+    })),
+  },
+});
+
 test('S2-R2-05/T28: воспроизведения ревью — реестр поручения без дублей, гипотезы не наблюдены, замаскированы; следующая попытка получает входы, и после перезапуска', async () => {
   const secret = 'repro-secret-5c1e';
   process.env.HARNESS_REPRO_SECRET = secret;
@@ -59,7 +71,9 @@ test('S2-R2-05/T28: воспроизведения ревью — реестр �
     const ctx = setup({
       scenario: {
         writer: { ...implement(), recordPrompt: true },
-        reviewer: rejecting(secret),
+        // Второе отклонение называет состояние выданных находок (протокол
+        // переходов, docs/review-protocol.md): они остаются открытыми.
+        reviewer: [rejecting(secret), stillOpen(rejecting(secret), 3)],
       },
       policy: (p: any) => {
         p.environment.secrets = { TOKEN: 'HARNESS_REPRO_SECRET' };

@@ -791,6 +791,7 @@
               "scope-violation",
               "gate",
               "review",
+              "review-protocol",
               "merge",
               "cancelled",
               "budget",
@@ -1471,6 +1472,7 @@
               "scope-violation",
               "gate",
               "review",
+              "review-protocol",
               "merge",
               "cancelled",
               "budget",
@@ -1919,6 +1921,7 @@
                   "scope-violation",
                   "gate",
                   "review",
+                  "review-protocol",
                   "merge",
                   "cancelled",
                   "budget",
@@ -2294,6 +2297,18 @@
                             "type": "null"
                           }
                         ]
+                      },
+                      "id": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "open",
+                          "closed",
+                          "withdrawn"
+                        ]
                       }
                     },
                     "required": [
@@ -2302,6 +2317,145 @@
                     ],
                     "additionalProperties": false
                   }
+                },
+                "reviewRound": {
+                  "type": "object",
+                  "properties": {
+                    "version": {
+                      "type": "number",
+                      "const": 1
+                    },
+                    "scope": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "round": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "call": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "calls": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 3
+                    },
+                    "protocol": {
+                      "type": "string",
+                      "enum": [
+                        "valid",
+                        "invalid",
+                        "unsafe"
+                      ]
+                    },
+                    "expected": {
+                      "maxItems": 500,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    },
+                    "issues": {
+                      "maxItems": 50,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "type": "string",
+                            "maxLength": 300
+                          },
+                          "reason": {
+                            "type": "string",
+                            "enum": [
+                              "schema",
+                              "unknown",
+                              "duplicate",
+                              "not-open",
+                              "missing",
+                              "approved-with-blocking"
+                            ]
+                          },
+                          "message": {
+                            "type": "string",
+                            "maxLength": 1000
+                          }
+                        },
+                        "required": [
+                          "path",
+                          "reason",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "transitions": {
+                      "maxItems": 500,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "from": {
+                            "type": "string",
+                            "enum": [
+                              "open",
+                              "closed",
+                              "withdrawn"
+                            ]
+                          },
+                          "to": {
+                            "type": "string",
+                            "enum": [
+                              "open",
+                              "closed",
+                              "withdrawn"
+                            ]
+                          },
+                          "basis": {
+                            "type": "string",
+                            "maxLength": 4000
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "from",
+                          "to",
+                          "basis"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "spec": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "strict",
+                        "legacy"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "version",
+                    "scope",
+                    "round",
+                    "call",
+                    "calls",
+                    "protocol",
+                    "expected"
+                  ],
+                  "additionalProperties": false
                 },
                 "tests": {
                   "type": "array",
@@ -3355,6 +3509,7 @@
               "scope-violation",
               "gate",
               "review",
+              "review-protocol",
               "merge",
               "cancelled",
               "budget",

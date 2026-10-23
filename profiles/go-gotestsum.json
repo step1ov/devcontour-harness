@@ -1,0 +1,21 @@
+{
+  "id": "go-gotestsum",
+  "version": "0.1.0",
+  "capabilities": ["go", "unit-tests"],
+  "protectedPaths": ["go.mod", "go.sum"],
+  "toolchain": {
+    "tools": { "gotestsum": "1.12.3" }
+  },
+  "prepare": [{ "id": "install", "command": ["go", "mod", "download"], "timeoutMs": 600000 }],
+  "gates": [
+    { "id": "vet", "kind": "check", "command": ["go", "vet", "./..."], "timeoutMs": 240000 },
+    {
+      "id": "acceptance",
+      "kind": "test",
+      "command": ["gotestsum", "--junitfile", ".reports/junit.xml", "--", "-count=1", "./..."],
+      "timeoutMs": 240000,
+      "dependsOn": ["vet"],
+      "report": { "type": "junit", "path": ".reports/junit.xml" }
+    }
+  ]
+}

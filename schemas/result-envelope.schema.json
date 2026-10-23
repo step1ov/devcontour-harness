@@ -533,6 +533,97 @@
                       "sameVendor"
                     ],
                     "additionalProperties": false
+                  },
+                  "review": {
+                    "type": "object",
+                    "properties": {
+                      "round": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "call": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "protocol": {
+                        "type": "string",
+                        "enum": [
+                          "valid",
+                          "invalid",
+                          "unsafe"
+                        ]
+                      },
+                      "issues": {
+                        "maxItems": 50,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "maxLength": 300
+                            },
+                            "reason": {
+                              "type": "string",
+                              "maxLength": 40
+                            },
+                            "message": {
+                              "type": "string",
+                              "maxLength": 1000
+                            }
+                          },
+                          "required": [
+                            "path",
+                            "reason",
+                            "message"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "transitions": {
+                        "maxItems": 500,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            },
+                            "from": {
+                              "type": "string",
+                              "enum": [
+                                "open",
+                                "closed",
+                                "withdrawn"
+                              ]
+                            },
+                            "to": {
+                              "type": "string",
+                              "enum": [
+                                "open",
+                                "closed",
+                                "withdrawn"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "from",
+                            "to"
+                          ],
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "required": [
+                      "round",
+                      "call",
+                      "protocol"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -590,6 +681,18 @@
                   "rule": {
                     "type": "string",
                     "maxLength": 100
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "open",
+                      "closed",
+                      "withdrawn"
+                    ]
                   }
                 },
                 "required": [
@@ -1187,6 +1290,97 @@
                       "sameVendor"
                     ],
                     "additionalProperties": false
+                  },
+                  "review": {
+                    "type": "object",
+                    "properties": {
+                      "round": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "call": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "protocol": {
+                        "type": "string",
+                        "enum": [
+                          "valid",
+                          "invalid",
+                          "unsafe"
+                        ]
+                      },
+                      "issues": {
+                        "maxItems": 50,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "maxLength": 300
+                            },
+                            "reason": {
+                              "type": "string",
+                              "maxLength": 40
+                            },
+                            "message": {
+                              "type": "string",
+                              "maxLength": 1000
+                            }
+                          },
+                          "required": [
+                            "path",
+                            "reason",
+                            "message"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "transitions": {
+                        "maxItems": 500,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            },
+                            "from": {
+                              "type": "string",
+                              "enum": [
+                                "open",
+                                "closed",
+                                "withdrawn"
+                              ]
+                            },
+                            "to": {
+                              "type": "string",
+                              "enum": [
+                                "open",
+                                "closed",
+                                "withdrawn"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "from",
+                            "to"
+                          ],
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "required": [
+                      "round",
+                      "call",
+                      "protocol"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -1244,6 +1438,18 @@
                   "rule": {
                     "type": "string",
                     "maxLength": 100
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "open",
+                      "closed",
+                      "withdrawn"
+                    ]
                   }
                 },
                 "required": [
@@ -1327,6 +1533,7 @@
                     "NOT_FOUND",
                     "STATE_VERSION_UNSUPPORTED",
                     "RUNTIME_UNAVAILABLE",
+                    "REVIEW_PROTOCOL_INVALID",
                     "SANDBOX_UNAVAILABLE",
                     "GIT_FAILED",
                     "STORAGE_FAILED",
@@ -1393,7 +1600,8 @@
               "pending",
               "delivered",
               "failed",
-              "conflict"
+              "conflict",
+              "uncertain"
             ]
           },
           "attempts": {
@@ -1404,6 +1612,10 @@
           "lastError": {
             "type": "string",
             "maxLength": 4000
+          },
+          "operation": {
+            "type": "string",
+            "maxLength": 300
           },
           "currentRevision": {
             "type": "string",

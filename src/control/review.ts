@@ -212,16 +212,24 @@ export async function technicalReview(
     );
   const parsed = reviewResultSchema.safeParse(response.output);
   const issues = parsed.success ? reviewIssues(parsed.data, open) : ['Ответ ревью вне схемы'];
-  const transitions = new Map((parsed.success ? parsed.data.previous : []).map((t) => [t.id, t]));
+  // Ответ применяется только целиком валидным (docs/review-protocol.md, §8):
+  // невалидный не закрывает прежних находок и не заводит новых — раунд
+  // записывается неодобренным с причинами, история остаётся прежней.
+  const applied = parsed.success && !issues.length ? parsed.data : undefined;
+  const transitions = new Map((applied?.previous ?? []).map((t) => [t.id, t]));
+  const reported = (applied?.findings ?? []).map((f) => ({ ...f, id: findingId(subject, f) }));
   const findings: ReviewRecord['findings'] = [
     ...lastFindings.map((f) => {
       const t = transitions.get(f.id);
-      return f.status === 'open' && t
-        ? { ...f, status: t.status, changedIn: round, basis: t.basis.slice(0, 4000) }
-        : f;
+      if (f.status === 'open' && t)
+        return { ...f, status: t.status, changedIn: round, basis: t.basis.slice(0, 4000) };
+      // Повторно найденная закрытая/снятая находка открывается снова, а не
+      // теряется как дубликат по ID.
+      if (f.status !== 'open' && reported.some((r) => r.id === f.id))
+        return { ...f, status: 'open' as const, changedIn: round, basis: 'найдена снова' };
+      return f;
     }),
-    ...(parsed.success ? parsed.data.findings : [])
-      .map((f) => ({ ...f, id: findingId(subject, f) }))
+    ...reported
       .filter((f) => !lastFindings.some((p) => p.id === f.id))
       .map((f) => ({
         id: f.id,

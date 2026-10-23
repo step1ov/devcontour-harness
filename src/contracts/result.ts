@@ -18,6 +18,10 @@ export const findingSchema = z.strictObject({
   path: z.string().max(500).nullable().optional(),
   line: z.number().int().positive().nullable().optional(),
   rule: z.string().max(100).optional(),
+  /** ID находки, выданный controller (docs/review-protocol.md); нет у прежних записей. */
+  id: digestSchema.optional(),
+  /** Статус находки на момент раунда, в котором она записана. */
+  status: z.enum(['open', 'closed', 'withdrawn']).optional(),
 });
 export type Finding = z.infer<typeof findingSchema>;
 
@@ -75,6 +79,37 @@ export const evidenceRefSchema = z.strictObject({
       runtime: runtimeNameSchema,
       model: z.string().optional(),
       sameVendor: z.boolean(),
+    })
+    .optional(),
+  /**
+   * Раунд ревью кода: номер вызова reviewer, валидность протокола, причины
+   * ошибки протокола и применённые переходы находок. Нет у прежних записей.
+   */
+  review: z
+    .strictObject({
+      round: z.number().int().positive(),
+      call: z.number().int().positive(),
+      protocol: z.enum(['valid', 'invalid', 'unsafe']),
+      issues: z
+        .array(
+          z.strictObject({
+            path: z.string().max(300),
+            reason: z.string().max(40),
+            message: z.string().max(1000),
+          }),
+        )
+        .max(50)
+        .optional(),
+      transitions: z
+        .array(
+          z.strictObject({
+            id: digestSchema,
+            from: z.enum(['open', 'closed', 'withdrawn']),
+            to: z.enum(['open', 'closed', 'withdrawn']),
+          }),
+        )
+        .max(500)
+        .optional(),
     })
     .optional(),
 });
@@ -210,9 +245,16 @@ export const deliveryStateSchema = z.strictObject({
   key: z.string().min(1).max(300),
   /** Редакция источника, к которой относится результат. */
   revision: z.string().min(1).max(200),
-  status: z.enum(['pending', 'delivered', 'failed', 'conflict']),
+  /**
+   * `uncertain` — исход мутации получателя не доказан (только у получателей,
+   * которые сообщают его явно); повтор доставки не отправляет мутацию до
+   * разбора (reconcile).
+   */
+  status: z.enum(['pending', 'delivered', 'failed', 'conflict', 'uncertain']),
   attempts: z.number().int().nonnegative(),
   lastError: z.string().max(4000).optional(),
+  /** Ключ операции получателя для разбора неизвестного исхода. */
+  operation: z.string().max(300).optional(),
   /** Редакция, которую получатель считает текущей, при конфликте. */
   currentRevision: z.string().max(200).optional(),
   receipt: z.string().max(1000).optional(),

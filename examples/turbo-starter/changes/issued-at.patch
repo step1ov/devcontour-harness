@@ -1,0 +1,130 @@
+diff --git a/apps/nest-backend/openapi/admin.openapi.json b/apps/nest-backend/openapi/admin.openapi.json
+index 7d98313..a11c859 100644
+--- a/apps/nest-backend/openapi/admin.openapi.json
++++ b/apps/nest-backend/openapi/admin.openapi.json
+@@ -6958,13 +6958,19 @@
+             "type": "string",
+             "format": "date-time",
+             "description": "Фиксированный срок окончания сессии, совпадающий с exp JWT. Сессия может быть отозвана раньше при выходе, смене credentials или отзыве доступа."
++          },
++          "issuedAt": {
++            "type": "string",
++            "format": "date-time",
++            "description": "Момент выдачи JWT, совпадающий с iat."
+           }
+         },
+         "required": [
+           "accessToken",
+           "tokenType",
+           "expiresIn",
+-          "sessionExpiresAt"
++          "sessionExpiresAt",
++          "issuedAt"
+         ]
+       },
+       "AdminUserDto": {
+diff --git a/apps/nest-backend/openapi/client.openapi.json b/apps/nest-backend/openapi/client.openapi.json
+index 89003d9..f2e6dee 100644
+--- a/apps/nest-backend/openapi/client.openapi.json
++++ b/apps/nest-backend/openapi/client.openapi.json
+@@ -3179,13 +3179,19 @@
+             "type": "string",
+             "format": "date-time",
+             "description": "Фиксированный срок окончания сессии, совпадающий с exp JWT. Сессия может быть отозвана раньше при выходе, смене credentials или отзыве доступа."
++          },
++          "issuedAt": {
++            "type": "string",
++            "format": "date-time",
++            "description": "Момент выдачи JWT, совпадающий с iat."
+           }
+         },
+         "required": [
+           "accessToken",
+           "tokenType",
+           "expiresIn",
+-          "sessionExpiresAt"
++          "sessionExpiresAt",
++          "issuedAt"
+         ]
+       },
+       "UpdateClientUserProfileDto": {
+diff --git a/apps/nest-backend/src/infrastructure/auth/auth.dto.ts b/apps/nest-backend/src/infrastructure/auth/auth.dto.ts
+index c69eb4c..4d1ea19 100644
+--- a/apps/nest-backend/src/infrastructure/auth/auth.dto.ts
++++ b/apps/nest-backend/src/infrastructure/auth/auth.dto.ts
+@@ -48,4 +48,11 @@ export class AccessTokenDto {
+       'Фиксированный срок окончания сессии, совпадающий с exp JWT. Сессия может быть отозвана раньше при выходе, смене credentials или отзыве доступа.',
+   })
+   sessionExpiresAt!: Date;
++
++  @ApiProperty({
++    type: String,
++    format: 'date-time',
++    description: 'Момент выдачи JWT, совпадающий с iat.',
++  })
++  issuedAt!: Date;
+ }
+diff --git a/apps/nest-backend/src/infrastructure/auth/session.service.ts b/apps/nest-backend/src/infrastructure/auth/session.service.ts
+index 32c52f1..f62e1b5 100644
+--- a/apps/nest-backend/src/infrastructure/auth/session.service.ts
++++ b/apps/nest-backend/src/infrastructure/auth/session.service.ts
+@@ -14,6 +14,7 @@ export interface IssuedAccessToken {
+   tokenType: 'Bearer';
+   expiresIn: number;
+   sessionExpiresAt: Date;
++  issuedAt: Date;
+ }
+ 
+ @Injectable()
+@@ -104,6 +105,7 @@ export class SessionService {
+       tokenType: 'Bearer',
+       expiresIn,
+       sessionExpiresAt: session.expiresAt,
++      issuedAt: new Date(issuedAt * 1000),
+     };
+   }
+ }
+diff --git a/apps/next-web-app/src/infra/client-api/types/access-token-issued-at.type.ts b/apps/next-web-app/src/infra/client-api/types/access-token-issued-at.type.ts
+new file mode 100644
+index 0000000..2df3a5e
+--- /dev/null
++++ b/apps/next-web-app/src/infra/client-api/types/access-token-issued-at.type.ts
+@@ -0,0 +1,6 @@
++import type { AccessTokenDto } from '@oim/client-rest-api-sdk/data-contracts'
++
++/**
++ * Момент выдачи токена из ответа входа (ISO date-time).
++ */
++export type AccessTokenIssuedAt = AccessTokenDto['issuedAt']
+diff --git a/packages/admin-rest-api-sdk/src/generated/data-contracts.ts b/packages/admin-rest-api-sdk/src/generated/data-contracts.ts
+index 782cd48..29941ec 100644
+--- a/packages/admin-rest-api-sdk/src/generated/data-contracts.ts
++++ b/packages/admin-rest-api-sdk/src/generated/data-contracts.ts
+@@ -520,6 +520,11 @@ export interface AccessTokenDto {
+    * @format date-time
+    */
+   sessionExpiresAt: string;
++  /**
++   * Момент выдачи JWT, совпадающий с iat.
++   * @format date-time
++   */
++  issuedAt: string;
+ }
+ 
+ export interface AdminUserDto {
+diff --git a/packages/client-rest-api-sdk/src/generated/data-contracts.ts b/packages/client-rest-api-sdk/src/generated/data-contracts.ts
+index 888aba5..b2f9e59 100644
+--- a/packages/client-rest-api-sdk/src/generated/data-contracts.ts
++++ b/packages/client-rest-api-sdk/src/generated/data-contracts.ts
+@@ -258,6 +258,11 @@ export interface AccessTokenDto {
+    * @format date-time
+    */
+   sessionExpiresAt: string;
++  /**
++   * Момент выдачи JWT, совпадающий с iat.
++   * @format date-time
++   */
++  issuedAt: string;
+ }
+ 
+ export interface UpdateClientUserProfileDto {

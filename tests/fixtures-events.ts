@@ -66,4 +66,5 @@ export const validPayloads: Record<EventType, Record<string, unknown>> = {
   'delivery.delivered': { ...delivery, receipt: 'ok' },
   'delivery.failed': { ...delivery, error: 'sink down' },
   'delivery.conflict': { ...delivery, currentRevision: '2' },
+  'delivery.uncertain': { ...delivery, operation: 'op-1', reason: 'timeout' },
 };

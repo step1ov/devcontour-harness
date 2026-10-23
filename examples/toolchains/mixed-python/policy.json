@@ -1,0 +1,121 @@
+{
+  "policyVersion": 1,
+  "repositories": [
+    {
+      "id": "app",
+      "path": "repo",
+      "targetRef": "refs/heads/harness/accepted",
+      "prepare": [
+        {
+          "id": "frontend-install",
+          "command": ["pnpm", "--dir", "frontend", "install", "--frozen-lockfile"],
+          "timeoutMs": 600000
+        },
+        {
+          "id": "backend-install",
+          "command": ["uv", "sync", "--locked", "--directory", "backend"],
+          "timeoutMs": 600000
+        }
+      ],
+      "toolchain": {
+        "tools": {
+          "pnpm": "10.12.3",
+          "uv": "0.11.28"
+        },
+        "packageManagers": {
+          "frontend": "pnpm"
+        }
+      },
+      "gates": [
+        {
+          "id": "frontend-check",
+          "kind": "check",
+          "cwd": "frontend",
+          "command": ["pnpm", "run", "check"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "frontend-tests",
+          "kind": "test",
+          "cwd": "frontend",
+          "command": ["pnpm", "run", "test"],
+          "timeoutMs": 240000,
+          "dependsOn": ["frontend-check"],
+          "report": {
+            "type": "junit",
+            "path": ".reports/frontend.xml"
+          }
+        },
+        {
+          "id": "contract",
+          "kind": "check",
+          "cwd": "frontend",
+          "command": ["pnpm", "run", "contract"],
+          "timeoutMs": 60000
+        },
+        {
+          "id": "backend-lint",
+          "kind": "check",
+          "cwd": "backend",
+          "command": ["uv", "run", "--no-sync", "ruff", "check", "."],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "backend-tests",
+          "kind": "test",
+          "cwd": "backend",
+          "command": ["uv", "run", "--no-sync", "pytest", "--junitxml=../.reports/backend.xml"],
+          "timeoutMs": 240000,
+          "dependsOn": ["backend-lint"],
+          "report": {
+            "type": "junit",
+            "path": ".reports/backend.xml"
+          }
+        }
+      ],
+      "protectedPaths": [
+        ".github/",
+        ".githooks/",
+        "contract/",
+        "frontend/package.json",
+        "frontend/pnpm-lock.yaml",
+        "frontend/test/",
+        "REQUIREMENTS.md",
+        "backend/pyproject.toml",
+        "backend/uv.lock",
+        "backend/.python-version",
+        "backend/tests/"
+      ]
+    }
+  ],
+  "roles": {
+    "developer": {
+      "writer": {
+        "runtime": "claude"
+      }
+    }
+  },
+  "review": {
+    "code": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    },
+    "plan": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    },
+    "contract": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    }
+  },
+  "isolation": {
+    "mode": "none",
+    "domains": []
+  },
+  "maxAttempts": 2,
+  "runTimeoutMs": 900000
+}

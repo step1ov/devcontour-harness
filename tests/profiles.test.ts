@@ -83,11 +83,15 @@ const refused = (pattern: RegExp) => (e: unknown) => {
 const goldenDigests: Record<string, string> = {
   'expo-mobile': 'ae3794dfeeca31741dd63a733b79c54bb5c3c764dd98fc49c5cb28a1c4ff4c70',
   'go-api': 'cdd8c2155365ac60294515974dea8116dd53bce38b6b79ffa846c73f2422dfaf',
+  'go-gotestsum': '15e7fc4d3e8a6eb6e970b9228a8b8e32aa733aa7428277820a1fb55f57ffe15b',
   'mobile-maestro': '063daa6f8bc7180dfdbf47efb87a827de63614744e2a3c3b26849a1d94d23fd7',
   'nest-api': 'a72eee6195a1a1b0e5b579fe1f7369c2fa237602baa8563f31e3ab954526aecc',
   'next-product': '385213844ba38d5339eae909f4d8547ebaaf8c21cbb18c9a5cbfdd0a0a417fa7',
   'node-checks': '1d6a4838d99907b322ede91cce4598dc2628c79cdae3389a45b8bfb3adf38cdf',
+  'npm-ci': 'ef037e96c8b1a1eeae8760c9391ca8b0bfe75bbd8b433ec55ad7c373c2759829',
+  'pnpm-frozen': '4e7899fa99d665e129e9f2dcb9f02566694c5086e13e036c8e18605acd84de38',
   'python-api': 'f24cea4f71b6757dcd89746d996c6695bf2a0058c62dc881eebfbd931d02d777',
+  'python-uv': '603dd02d2dad2e8bfb3925c3f8a23f575e87cf20983b1dfbaf99b9a704b6e0c9',
   'react-native': '1cd7cc3969deed0c80cf40cfecaf4df02352ee567637bbd167c5545355431eaf',
   'react-vite-admin': 'c38cfdb83adaee6fd14bb6494a580729150ad98dcc0c2158939b923630d83ce9',
 };

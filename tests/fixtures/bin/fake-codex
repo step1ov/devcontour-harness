@@ -162,10 +162,26 @@ if (role === 'reviewer' && step.probes) {
     child.stdin.write(
       JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n',
     );
+    // Элемент — argv исследовательской команды или готовые аргументы вызова
+    // (например, `{ gate: 'domain' }` — объявленный gate по ID).
     const call = (argv) =>
-      request('tools/call', { name: 'run_check', arguments: { argv } }).then(
+      request('tools/call', {
+        name: 'run_check',
+        arguments: Array.isArray(argv) ? { argv } : argv,
+      }).then(
         (m) => m.result?.structuredContent ?? { error: m.error },
       );
+    // Барьер аварии внутри выполняющейся проверки: первый вызов начат, через
+    // crashDuringProbe мс controller и сервер проверок убиты SIGKILL, исхода
+    // проверки в журнале нет.
+    if (step.crashDuringProbe) {
+      void call(step.probes[0]);
+      await new Promise((r) => setTimeout(r, step.crashDuringProbe));
+      writeFileSync(`${scenarioPath}.${role}.${index}.crashed`, String(process.ppid));
+      process.kill(process.ppid, 'SIGKILL');
+      child.kill('SIGKILL');
+      process.exit(9);
+    }
     probeRuns = step.probesConcurrent
       ? await Promise.all(step.probes.map(call))
       : await step.probes.reduce(
@@ -176,10 +192,30 @@ if (role === 'reviewer' && step.probes) {
   }
   writeFileSync(`${scenarioPath}.${role}.${index}.probes`, JSON.stringify(probeRuns));
 }
+// ID находок — только из фактически полученного запроса controller:
+// `$open:N` / `$closed:N` — N-я открытая/закрытая находка раздела истории.
+const section = (header) => {
+  const m = prompt.match(new RegExp('^' + header + '[^\\n]*\\n(\\[.*\\])$', 'm'));
+  return m ? JSON.parse(m[1]) : [];
+};
+const issued = {
+  open: section('Open review findings issued by the controller'),
+  closed: section('Closed or withdrawn review findings \\(history\\)'),
+};
+writeFileSync(`${scenarioPath}.${role}.${index}.findings`, JSON.stringify(issued));
 const cite = (text) =>
-  text.replace(/\$probe:(\d+)/g, (_m, n) => probeRuns[Number(n)]?.runId ?? 'missing');
+  text
+    .replace(/\$probe:(\d+)/g, (_m, n) => probeRuns[Number(n)]?.runId ?? 'missing')
+    .replace(/\$(open|closed):(\d+)/g, (_m, k, n) => issued[k][Number(n)]?.id ?? `missing-${k}-${n}`);
 if (step.result) step.result = JSON.parse(cite(JSON.stringify(step.result)));
 if (step.stderr) process.stderr.write(step.stderr + '\n');
+// Аварийное завершение controller посреди логического ревью (барьер теста
+// рестарта): процесс harness убит до получения этого ответа.
+if (step.crashHarness) {
+  writeFileSync(`${scenarioPath}.${role}.${index}.crashed`, String(process.ppid));
+  process.kill(process.ppid, 'SIGKILL');
+  process.exit(9);
+}
 const started = step.started !== false;
 const out = (event) => process.stdout.write(JSON.stringify(event) + '\n');
 if (runtime === 'codex') {

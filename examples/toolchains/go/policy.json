@@ -1,0 +1,79 @@
+{
+  "policyVersion": 1,
+  "repositories": [
+    {
+      "id": "app",
+      "path": "repo",
+      "targetRef": "refs/heads/harness/accepted",
+      "prepare": [
+        {
+          "id": "install",
+          "command": ["go", "mod", "download"],
+          "timeoutMs": 600000
+        }
+      ],
+      "gates": [
+        {
+          "id": "vet",
+          "kind": "check",
+          "command": ["go", "vet", "./..."],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "acceptance",
+          "kind": "test",
+          "command": ["gotestsum", "--junitfile", ".reports/junit.xml", "--", "-count=1", "./..."],
+          "timeoutMs": 240000,
+          "dependsOn": ["vet"],
+          "report": {
+            "type": "junit",
+            "path": ".reports/junit.xml"
+          }
+        }
+      ],
+      "toolchain": {
+        "tools": {
+          "gotestsum": "1.12.3"
+        }
+      },
+      "protectedPaths": [
+        ".github/",
+        ".githooks/",
+        "go.mod",
+        "go.sum",
+        "label/label_test.go",
+        "REQUIREMENTS.md"
+      ]
+    }
+  ],
+  "roles": {
+    "developer": {
+      "writer": {
+        "runtime": "claude"
+      }
+    }
+  },
+  "review": {
+    "code": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    },
+    "plan": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    },
+    "contract": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    }
+  },
+  "isolation": {
+    "mode": "none",
+    "domains": []
+  },
+  "maxAttempts": 2,
+  "runTimeoutMs": 900000
+}

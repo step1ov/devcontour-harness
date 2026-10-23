@@ -30,7 +30,7 @@ import { Engine } from '../engine/engine.ts';
 import { budgetOverview } from '../engine/budget.ts';
 import { runResult } from '../engine/result.ts';
 import { repairDecision } from '../engine/repair.ts';
-import { Runner } from '../engine/runner.ts';
+import { Runner, type RunnerHooks } from '../engine/runner.ts';
 import { standaloneHost } from '../engine/standalone.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
@@ -55,6 +55,11 @@ export interface HarnessOptions {
   adapters?: Partial<Record<RuntimeName, RuntimeAdapter>>;
   /** Читающие операции не создают каталог состояния. */
   readOnly?: boolean;
+  /**
+   * Открыть базу состояния только для чтения (status, events, result): процесс
+   * не записывает даже метку писателя. Любая запись — отказ.
+   */
+  readOnlyState?: boolean;
   environment?: NodeJS.ProcessEnv;
   /**
    * Файл, из которого загружена политика. С ним процесс может записать свою
@@ -64,6 +69,12 @@ export interface HarnessOptions {
   policySource?: PolicySource;
   /** База блокировок ресурсов; по умолчанию — общая для машины. */
   resourceDatabase?: string;
+  /**
+   * Дополнения хоста к попыткам (например, история работы внешнего
+   * хранилища задач до исполнения). Приёмку не решают: отказ хука — отказ
+   * попытки.
+   */
+  hooks?: RunnerHooks;
 }
 
 const stateFile = (dir: string) => join(dir, 'state.sqlite');
@@ -96,6 +107,8 @@ export class Harness {
     this.store = new SqliteExecutionStore(
       stateFile(options.stateDir),
       'devcontour-harness@' + HARNESS_VERSION,
+      // Только чтение состояния: процесс не становится писателем (meta, PRAGMA и данные прежние).
+      { readOnly: Boolean(options.readOnlyState) },
     );
     const source = options.policySource;
     this.engine = new Engine({
@@ -116,6 +129,7 @@ export class Harness {
       context: (work) => this.contextOf(work.graphId),
       ...(options.environment ? { environment: options.environment } : {}),
       ...(options.resourceDatabase ? { resourceDatabase: options.resourceDatabase } : {}),
+      ...(options.hooks ? { hooks: options.hooks } : {}),
     });
     this.joint = new JointRunner({
       engine: this.engine,
@@ -798,9 +812,21 @@ export class Harness {
     };
     const save = (
       state: DeliveryState,
-      type: 'delivery.pending' | 'delivery.delivered' | 'delivery.failed' | 'delivery.conflict',
+      type:
+        | 'delivery.pending'
+        | 'delivery.delivered'
+        | 'delivery.failed'
+        | 'delivery.conflict'
+        | 'delivery.uncertain',
     ) =>
       this.store.transact('delivery.recorded', (tx) => {
+        // Подтверждённую доставку не перезаписывает поздний итог другого
+        // процесса (например, отказ «владелец занят» при параллельной доставке).
+        if (
+          state.status !== 'delivered' &&
+          tx.local('delivery', WORKSPACE_OWNER, key)?.status === 'delivered'
+        )
+          return;
         tx.putLocal('delivery', WORKSPACE_OWNER, key, state);
         const payload = {
           sink: state.sink,
@@ -816,6 +842,16 @@ export class Harness {
           });
         else if (type === 'delivery.failed')
           tx.emit({ type, workId, payload: { ...payload, error: state.lastError ?? 'ошибка' } });
+        else if (type === 'delivery.uncertain')
+          tx.emit({
+            type,
+            workId,
+            payload: {
+              ...payload,
+              operation: state.operation ?? 'unknown',
+              reason: state.lastError ?? 'исход не доказан',
+            },
+          });
         else if (type === 'delivery.conflict')
           tx.emit({
             type,
@@ -836,6 +872,18 @@ export class Harness {
             ...(outcome.receipt ? { receipt: outcome.receipt.slice(0, 1000) } : {}),
           },
           'delivery.delivered',
+        );
+      else if (outcome.status === 'uncertain')
+        // Неизвестный исход — не успех и не отказ: повтор не посылает мутацию
+        // до явного разбора получателем (reconcile).
+        save(
+          {
+            ...attempt,
+            status: 'uncertain',
+            operation: outcome.operation.slice(0, 300),
+            lastError: ('Исход не доказан: ' + outcome.reason).slice(0, 4000),
+          },
+          'delivery.uncertain',
         );
       else
         save(

@@ -1,0 +1,24 @@
+{
+  "id": "pnpm-frozen",
+  "version": "0.1.0",
+  "capabilities": ["node", "pnpm", "unit-tests"],
+  "protectedPaths": ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"],
+  "toolchain": {
+    "tools": { "pnpm": "10.12.3" },
+    "packageManagers": { ".": "pnpm" }
+  },
+  "prepare": [
+    { "id": "install", "command": ["pnpm", "install", "--frozen-lockfile"], "timeoutMs": 600000 }
+  ],
+  "gates": [
+    { "id": "check", "kind": "check", "command": ["pnpm", "run", "check"], "timeoutMs": 240000 },
+    {
+      "id": "unit-tests",
+      "kind": "test",
+      "command": ["pnpm", "run", "test"],
+      "timeoutMs": 240000,
+      "dependsOn": ["check"],
+      "report": { "type": "junit", "path": ".reports/junit.xml" }
+    }
+  ]
+}

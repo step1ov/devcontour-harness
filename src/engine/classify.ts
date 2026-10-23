@@ -22,6 +22,7 @@ export const providerRefusal = (message: string) =>
 const byCode: Partial<Record<ErrorCode, FailureKind>> = {
   GATE_FAILED: 'gate',
   REVIEW_REJECTED: 'review',
+  REVIEW_PROTOCOL_INVALID: 'review-protocol',
   SCOPE_VIOLATION: 'scope-violation',
   BUDGET_EXHAUSTED: 'budget',
 };

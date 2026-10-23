@@ -41,6 +41,8 @@ export const errorCodes = {
   NOT_FOUND: 'refused',
   STATE_VERSION_UNSUPPORTED: 'infrastructure',
   RUNTIME_UNAVAILABLE: 'infrastructure',
+  /** Ответ reviewer нарушил протокол ревью, повторы reviewer исчерпаны (docs/review-protocol.md). */
+  REVIEW_PROTOCOL_INVALID: 'infrastructure',
   SANDBOX_UNAVAILABLE: 'infrastructure',
   GIT_FAILED: 'infrastructure',
   STORAGE_FAILED: 'infrastructure',

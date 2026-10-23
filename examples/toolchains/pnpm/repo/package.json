@@ -1,0 +1,10 @@
+{
+  "name": "fx-label-pnpm",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "pnpm@10.12.3",
+  "scripts": {
+    "check": "pnpm --filter @fx/label run check",
+    "test": "pnpm --filter @fx/label run test"
+  }
+}

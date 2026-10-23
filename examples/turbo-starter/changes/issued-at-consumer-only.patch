@@ -1,0 +1,12 @@
+diff --git a/apps/next-web-app/src/infra/client-api/types/access-token-issued-at.type.ts b/apps/next-web-app/src/infra/client-api/types/access-token-issued-at.type.ts
+new file mode 100644
+index 0000000..2df3a5e
+--- /dev/null
++++ b/apps/next-web-app/src/infra/client-api/types/access-token-issued-at.type.ts
+@@ -0,0 +1,6 @@
++import type { AccessTokenDto } from '@oim/client-rest-api-sdk/data-contracts'
++
++/**
++ * Момент выдачи токена из ответа входа (ISO date-time).
++ */
++export type AccessTokenIssuedAt = AccessTokenDto['issuedAt']

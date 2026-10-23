@@ -157,6 +157,15 @@ export const eventPayloads = {
   'delivery.delivered': z.strictObject({ ...delivery, receipt: z.string().max(1000).optional() }),
   'delivery.failed': z.strictObject({ ...delivery, error: text }),
   'delivery.conflict': z.strictObject({ ...delivery, currentRevision: z.string().min(1).max(200) }),
+  /**
+   * Исход мутации получателя не доказан (только получатели, сообщающие это
+   * явно): повтор не отправляет мутацию до разбора (reconcile).
+   */
+  'delivery.uncertain': z.strictObject({
+    ...delivery,
+    operation: z.string().min(1).max(300),
+    reason: text,
+  }),
 } as const;
 export type EventType = keyof typeof eventPayloads;
 export const eventTypes = Object.keys(eventPayloads) as EventType[];

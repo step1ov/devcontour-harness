@@ -1,0 +1,80 @@
+{
+  "policyVersion": 1,
+  "repositories": [
+    {
+      "id": "app",
+      "path": "repo",
+      "targetRef": "refs/heads/harness/accepted",
+      "prepare": [
+        {
+          "id": "install",
+          "command": ["uv", "sync", "--locked"],
+          "timeoutMs": 600000
+        }
+      ],
+      "gates": [
+        {
+          "id": "lint",
+          "kind": "check",
+          "command": ["uv", "run", "--no-sync", "ruff", "check", "."],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "acceptance",
+          "kind": "test",
+          "command": ["uv", "run", "--no-sync", "pytest", "--junitxml=.reports/junit.xml"],
+          "timeoutMs": 240000,
+          "dependsOn": ["lint"],
+          "report": {
+            "type": "junit",
+            "path": ".reports/junit.xml"
+          }
+        }
+      ],
+      "toolchain": {
+        "tools": {
+          "uv": "0.11.28"
+        }
+      },
+      "protectedPaths": [
+        ".github/",
+        ".githooks/",
+        "pyproject.toml",
+        "uv.lock",
+        ".python-version",
+        "tests/",
+        "REQUIREMENTS.md"
+      ]
+    }
+  ],
+  "roles": {
+    "developer": {
+      "writer": {
+        "runtime": "claude"
+      }
+    }
+  },
+  "review": {
+    "code": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    },
+    "plan": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    },
+    "contract": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    }
+  },
+  "isolation": {
+    "mode": "none",
+    "domains": []
+  },
+  "maxAttempts": 2,
+  "runTimeoutMs": 900000
+}

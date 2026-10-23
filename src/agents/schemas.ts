@@ -1,3 +1,5 @@
+import { FINDING_BASIS_PATTERN, FINDING_ID_PATTERN, findingStatuses } from '../contracts/review.ts';
+
 /**
  * JSON Schema структурированного ответа для CLI runtime. Codex требует
  * закрытые объекты, где каждое свойство обязательно (необязательность —
@@ -109,10 +111,13 @@ export const reviewOutputSchema = {
       items: {
         type: 'object',
         additionalProperties: false,
+        // ID и основание — те же правила, что у Zod (`findingTransitionSchema`):
+        // ответ, допустимый для runtime, не отбрасывается поздним парсером.
+        // Длина строк structured output не выражается — только `pattern`.
         properties: {
-          id: { type: 'string' },
-          status: { type: 'string', enum: ['open', 'closed', 'withdrawn'] },
-          basis: { type: 'string' },
+          id: { type: 'string', pattern: FINDING_ID_PATTERN },
+          status: { type: 'string', enum: [...findingStatuses] },
+          basis: { type: 'string', pattern: FINDING_BASIS_PATTERN },
         },
         required: ['id', 'status', 'basis'],
       },

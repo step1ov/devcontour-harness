@@ -10,10 +10,11 @@ import {
 import { errorCodes, type ErrorCode } from './errors.ts';
 import { controlStateSchema, controllerLeaseSchema, workStatusSchema } from './execution.ts';
 import { runEventSchema } from './events.ts';
-import { resultEnvelopeSchema } from './result.ts';
+import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
 import { reviewRecordSchema } from './review.ts';
 import { sourceRefSchema } from './work.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
+import { toolchainReportSchema } from './toolchain.ts';
 
 /**
  * Договор CLI `harness`.
@@ -86,6 +87,13 @@ const work: CliArgument = {
   description: 'ID поручения',
 };
 
+const source: CliArgument = {
+  name: '--source',
+  value: 'path',
+  required: true,
+  description: 'Конфигурация коннектора задач (provider relay-v1-http | relay-v2-cli)',
+};
+
 export const cliCommands = {
   validate: {
     description:
@@ -101,8 +109,27 @@ export const cliCommands = {
     writes: true,
     idempotency:
       'Повтор с тем же digest и тем же автором, уже согласованный последним раундом, возвращает этот раунд без вызова модели; иначе — новый раунд в пределах maxAttempts. Автор, не допускаемый правилом вендора, — REVIEWER_SAME_VENDOR до вызова модели',
-    args: [state, graph, policy, context, author],
-    refusals: ['REVIEW_REJECTED', 'ATTEMPTS_EXHAUSTED', 'BUDGET_EXHAUSTED', 'BUDGET_UNKNOWN'],
+    args: [
+      state,
+      graph,
+      policy,
+      context,
+      author,
+      {
+        name: '--source',
+        value: 'path',
+        required: false,
+        description:
+          'Конфигурация коннектора задач: внешние предпосылки графа допускаются по решению источника (trusts) и доступности SHA в target ref; без неё доверенных receipt нет',
+      },
+    ],
+    refusals: [
+      'REVIEW_REJECTED',
+      'ATTEMPTS_EXHAUSTED',
+      'BUDGET_EXHAUSTED',
+      'BUDGET_UNKNOWN',
+      'NOT_READY',
+    ],
   },
   'review-contract': {
     description: 'Техническое ревью контракта с конкретным digest',
@@ -141,9 +168,16 @@ export const cliCommands = {
       'Тот же граф той же редакции продолжает прежнюю работу; другой digest для той же редакции источника — REVISION_CONFLICT',
     args: [
       state,
-      graph,
+      { ...graph, required: false, description: 'WorkGraph JSON; не нужен с --source' },
       policy,
       context,
+      {
+        name: '--source',
+        value: 'path',
+        required: false,
+        description:
+          'Конфигурация коннектора (relay-v1-http | relay-v2-cli): перед запуском задачи перечитываются, semantic digest сверяется с закреплённым снимком и eligibility — до любого вызова runtime; результат доставляется в исходную задачу',
+      },
       {
         name: '--sink',
         value: 'sink',
@@ -267,6 +301,17 @@ export const cliCommands = {
     ],
     refusals: ['NOT_FOUND', 'REVISION_CONFLICT'],
   },
+  cleanup: {
+    description:
+      'Довести незавершённую очистку закончившейся попытки: повторить teardown по сохранённым receipt окружений и убрать её рабочие деревья; модели, gates и Git-приёмка не вызываются',
+    writes: true,
+    idempotency: 'Повтор после успешной очистки отвечает nothing-pending и ничего не меняет',
+    args: [
+      state,
+      { name: '--run', value: 'id', required: true, description: 'ID попытки (runId)' },
+    ],
+    refusals: ['NOT_FOUND', 'NOT_READY'],
+  },
   profile: {
     description:
       'Разрешить профиль стека (встроенный ID или ./file.json репозитория): слои, gates, закрепление; только чтение манифестов, без команд проекта',
@@ -298,6 +343,90 @@ export const cliCommands = {
       { ...policy, required: false },
     ],
     refusals: [],
+  },
+  'source-check': {
+    description:
+      'Коннектор задач: подключение, идентичность и capabilities backend, совпадение проекта, проверка mapping; без мутаций, записи истории и создания состояния',
+    writes: false,
+    idempotency: 'Только чтение получателя',
+    args: [
+      source,
+      { ...state, required: false },
+      {
+        ...policy,
+        required: false,
+        description: 'ExecutionPolicy JSON для сверки gates/ролей mapping',
+      },
+    ],
+    refusals: ['NOT_READY'],
+  },
+  'source-snapshot': {
+    description:
+      'Коннектор задач: согласованное чтение задач, предпросмотр и закрепление снимка (graph/context/manifest) для review-plan и approve',
+    writes: true,
+    idempotency:
+      'Неизменная постановка — тот же semantic digest, тот же граф и контекст; новых записей у получателя нет',
+    args: [
+      source,
+      state,
+      {
+        ...policy,
+        required: false,
+        description: 'ExecutionPolicy JSON: её секреты маскируются в диагностике',
+      },
+      {
+        name: '--out',
+        value: 'dir',
+        required: false,
+        description: 'Каталог graph.json, context.json, manifest.json',
+      },
+    ],
+    refusals: ['NOT_READY'],
+  },
+  'source-status': {
+    description:
+      'Коннектор задач: локально принято / доставлено / конфликт / неизвестный исход и независимое чтение получателя',
+    writes: false,
+    idempotency: 'Только чтение',
+    args: [source, state],
+    refusals: ['NOT_FOUND'],
+  },
+  'source-deliver': {
+    description:
+      'Коннектор задач: доставить или продолжить доставку принятых результатов с тем же ключом операции; модели, gates и Git не вызываются',
+    writes: true,
+    idempotency:
+      'Подтверждённая доставка не повторяется; неизвестный исход не отправляется повторно до source-reconcile',
+    args: [
+      source,
+      state,
+      { ...work, required: false, description: 'ID поручения; без него — все с результатом' },
+    ],
+    refusals: ['NOT_FOUND', 'CONTROLLER_BUSY', 'REVISION_CONFLICT'],
+  },
+  'source-reconcile': {
+    description:
+      'Коннектор задач: разобрать неизвестный исход или конфликт операции доставки по фактам получателя; неоднозначность — только явным решением',
+    writes: true,
+    idempotency: 'Разобранная операция не меняется; мутаций без решения и фактов нет',
+    args: [
+      source,
+      state,
+      {
+        name: '--operation',
+        value: 'digest',
+        required: true,
+        description: 'Ключ операции из source-status',
+      },
+      {
+        name: '--decision',
+        value: 'text',
+        required: false,
+        description:
+          'resend (записи у получателя нет), adopt:<id> (одна из нескольких записей с маркером), recheck (CAS-конфликт без изменения постановки)',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'CONTROLLER_BUSY'],
   },
 } as const satisfies Record<string, CliCommandContract>;
 export type CliCommand = keyof typeof cliCommands;
@@ -461,8 +590,13 @@ export const doctorDataSchema = z.strictObject({
       stateVersion: z.number().int(),
       compatible: z.boolean(),
       writer: z.string().optional(),
+      engineVersions: z
+        .strictObject({ controller: z.string().optional(), attempts: z.array(z.string()) })
+        .optional(),
     })
     .optional(),
+  /** Диагностика toolchain репозиториев политики; есть, когда задана политика. */
+  toolchains: z.array(toolchainReportSchema).optional(),
   problems: z.array(z.string()),
 });
 
@@ -475,6 +609,139 @@ export const versionDataSchema = z.strictObject({
   harness: z.string(),
   apiVersion: z.literal(API_VERSION),
 });
+
+const providerSchema = z.enum(['relay-v1-http', 'relay-v2-cli']);
+const ownershipSchema = z.strictObject({
+  stateDir: z.string(),
+  store: z.string(),
+  note: z.string(),
+});
+
+export const sourceCheckDataSchema = z.strictObject({
+  provider: providerSchema,
+  projectId: z.string(),
+  connector: idSchema,
+  connected: z.boolean(),
+  projectMatches: z.boolean(),
+  identity: z
+    .strictObject({ capabilities: z.array(z.string()), build: z.record(z.string(), z.string()) })
+    .optional(),
+  history: z.strictObject({ enabled: z.boolean(), capability: z.boolean() }),
+  mapping: z.array(
+    z.strictObject({ ref: z.string(), key: z.string().optional(), problems: z.array(z.string()) }),
+  ),
+  ownership: ownershipSchema,
+  problems: z.array(z.string()),
+});
+
+export const sourceSnapshotDataSchema = z.strictObject({
+  connector: idSchema,
+  graphId: idSchema,
+  graphDigest: digestSchema,
+  contextDigest: digestSchema,
+  /** Semantic digest набора задач (`graph.source.revision`); не Git SHA. */
+  revision: digestSchema,
+  created: z.boolean(),
+  eligible: z.boolean(),
+  problems: z.array(z.string()),
+  truncated: z.array(z.string()),
+  tasks: z.array(
+    z.strictObject({
+      identity: z.string(),
+      key: z.string(),
+      orderId: idSchema,
+      semanticDigest: digestSchema,
+      casRevision: z.number().int(),
+      column: z.string(),
+    }),
+  ),
+  files: z.strictObject({ graph: z.string(), context: z.string(), manifest: z.string() }),
+});
+
+const operationViewSchema = z.strictObject({
+  key: digestSchema,
+  runId: z.string(),
+  outcome: z.string(),
+  status: z.enum(['intent', 'in-progress', 'delivered', 'conflict', 'uncertain', 'failed']),
+  reason: z.string().optional(),
+  currentRevision: z.string().optional(),
+  steps: z.array(
+    z.strictObject({
+      n: z.number().int(),
+      kind: z.string(),
+      status: z.string(),
+      marker: z.string(),
+    }),
+  ),
+  lease: z.strictObject({ owner: z.string(), expiresAt: isoTimeSchema }).optional(),
+});
+
+export const sourceStatusDataSchema = z.strictObject({
+  connector: idSchema,
+  provider: providerSchema,
+  projectId: z.string(),
+  snapshot: z.strictObject({ revision: digestSchema, graphId: idSchema }).optional(),
+  ownership: ownershipSchema,
+  tasks: z.array(
+    z.strictObject({
+      index: z.number().int(),
+      ref: z.string(),
+      key: z.string().optional(),
+      identity: z.string().optional(),
+      workId: idSchema,
+      local: z.strictObject({
+        status: z.string(),
+        attempt: z.number().int().optional(),
+        resultSha: gitShaSchema.optional(),
+      }),
+      deliveries: z.array(
+        z.strictObject({ status: z.string(), key: z.string(), operation: z.string().optional() }),
+      ),
+      operations: z.array(operationViewSchema),
+      remote: z.union([
+        z.strictObject({
+          reachable: z.literal(true),
+          column: z.string(),
+          casRevision: z.number().int(),
+          semanticDigest: digestSchema,
+          matchesSnapshot: z.boolean(),
+          criteria: z.array(
+            z.strictObject({ id: z.string(), title: z.string(), completed: z.boolean() }),
+          ),
+          markers: z.record(z.string(), z.number().int()),
+        }),
+        z.strictObject({ reachable: z.literal(false), error: z.string() }),
+      ]),
+    }),
+  ),
+});
+
+export const sourceDeliverDataSchema = z.strictObject({
+  connector: idSchema,
+  deliveries: z.array(
+    z.strictObject({
+      workId: idSchema,
+      outcome: z.string(),
+      delivery: z.array(deliveryStateSchema),
+    }),
+  ),
+});
+
+export const sourceReconcileDataSchema = z.strictObject({
+  operation: digestSchema,
+  workId: idSchema,
+  before: z.string(),
+  after: z.string(),
+  resolved: z.boolean(),
+  facts: z.array(z.string()),
+  delivery: z.array(deliveryStateSchema).optional(),
+});
+
+export const cleanupDataSchema = z.discriminatedUnion('status', [
+  z.strictObject({ status: z.literal('nothing-pending') }),
+  /** Очищено: receipts окружений, по которым повторён teardown. */
+  z.strictObject({ status: z.literal('cleaned'), receipts: z.array(z.string()) }),
+]);
 
 /** Схема `data` каждой команды. */
 export const cliDataSchemas = {
@@ -491,8 +758,14 @@ export const cliDataSchemas = {
   retry: workActionDataSchema,
   result: resultEnvelopeSchema,
   deliver: resultEnvelopeSchema,
+  cleanup: cleanupDataSchema,
   profile: profileDataSchema,
   doctor: doctorDataSchema,
+  'source-check': sourceCheckDataSchema,
+  'source-snapshot': sourceSnapshotDataSchema,
+  'source-status': sourceStatusDataSchema,
+  'source-deliver': sourceDeliverDataSchema,
+  'source-reconcile': sourceReconcileDataSchema,
   version: versionDataSchema,
 } as const satisfies Record<CliCommand | 'version', z.ZodType>;
 

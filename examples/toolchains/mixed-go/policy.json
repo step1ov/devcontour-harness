@@ -1,0 +1,126 @@
+{
+  "policyVersion": 1,
+  "repositories": [
+    {
+      "id": "app",
+      "path": "repo",
+      "targetRef": "refs/heads/harness/accepted",
+      "prepare": [
+        {
+          "id": "frontend-install",
+          "command": ["pnpm", "--dir", "frontend", "install", "--frozen-lockfile"],
+          "timeoutMs": 600000
+        },
+        {
+          "id": "backend-install",
+          "command": ["go", "-C", "backend", "mod", "download"],
+          "timeoutMs": 600000
+        }
+      ],
+      "toolchain": {
+        "tools": {
+          "pnpm": "10.12.3",
+          "gotestsum": "1.12.3"
+        },
+        "packageManagers": {
+          "frontend": "pnpm"
+        }
+      },
+      "gates": [
+        {
+          "id": "frontend-check",
+          "kind": "check",
+          "cwd": "frontend",
+          "command": ["pnpm", "run", "check"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "frontend-tests",
+          "kind": "test",
+          "cwd": "frontend",
+          "command": ["pnpm", "run", "test"],
+          "timeoutMs": 240000,
+          "dependsOn": ["frontend-check"],
+          "report": {
+            "type": "junit",
+            "path": ".reports/frontend.xml"
+          }
+        },
+        {
+          "id": "contract",
+          "kind": "check",
+          "cwd": "frontend",
+          "command": ["pnpm", "run", "contract"],
+          "timeoutMs": 60000
+        },
+        {
+          "id": "backend-vet",
+          "kind": "check",
+          "cwd": "backend",
+          "command": ["go", "vet", "./..."],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "backend-tests",
+          "kind": "test",
+          "cwd": "backend",
+          "command": [
+            "gotestsum",
+            "--junitfile",
+            "../.reports/backend.xml",
+            "--",
+            "-count=1",
+            "./..."
+          ],
+          "timeoutMs": 240000,
+          "dependsOn": ["backend-vet"],
+          "report": {
+            "type": "junit",
+            "path": ".reports/backend.xml"
+          }
+        }
+      ],
+      "protectedPaths": [
+        ".github/",
+        ".githooks/",
+        "contract/",
+        "frontend/package.json",
+        "frontend/pnpm-lock.yaml",
+        "frontend/test/",
+        "REQUIREMENTS.md",
+        "backend/go.mod",
+        "backend/label/label_test.go"
+      ]
+    }
+  ],
+  "roles": {
+    "developer": {
+      "writer": {
+        "runtime": "claude"
+      }
+    }
+  },
+  "review": {
+    "code": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    },
+    "plan": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    },
+    "contract": {
+      "reviewer": {
+        "runtime": "codex"
+      }
+    }
+  },
+  "isolation": {
+    "mode": "none",
+    "domains": []
+  },
+  "maxAttempts": 2,
+  "runTimeoutMs": 900000
+}

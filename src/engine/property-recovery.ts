@@ -40,6 +40,8 @@ const neutral: FailureKind[] = [
   'merge',
   'cancelled',
   'unknown',
+  // Ошибка формата ответа reviewer о свойстве ничего не говорит.
+  'review-protocol',
   'empty-result',
   'scope-violation',
 ];

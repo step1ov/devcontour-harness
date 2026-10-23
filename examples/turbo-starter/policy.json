@@ -1,0 +1,109 @@
+{
+  "policyVersion": 1,
+  "repositories": [
+    {
+      "id": "starter",
+      "path": "turbo-starter",
+      "targetRef": "refs/heads/harness/accepted",
+      "prepare": [
+        {
+          "id": "install",
+          "command": ["pnpm", "install", "--frozen-lockfile", "--offline"],
+          "timeoutMs": 900000
+        }
+      ],
+      "gates": [
+        {
+          "id": "backend-types",
+          "kind": "check",
+          "command": ["pnpm", "--filter", "@oim/nest-backend", "check-types"],
+          "timeoutMs": 600000
+        },
+        {
+          "id": "sdk-generation",
+          "kind": "test",
+          "command": [
+            "node",
+            "--test",
+            "--test-reporter=junit",
+            "--test-reporter-destination=.artifacts/junit/sdk-generation.xml",
+            ".harness/acceptance/generation.test.mjs"
+          ],
+          "report": { "type": "junit", "path": ".artifacts/junit/sdk-generation.xml" },
+          "timeoutMs": 600000
+        },
+        {
+          "id": "sdk-build",
+          "kind": "check",
+          "command": ["pnpm", "--filter", "@oim/client-rest-api-sdk", "run", "build"],
+          "timeoutMs": 600000
+        },
+        {
+          "id": "web-types",
+          "kind": "check",
+          "command": ["pnpm", "--filter", "@oim/next-web-app", "run", "check-types"],
+          "dependsOn": ["sdk-build"],
+          "timeoutMs": 600000
+        },
+        {
+          "id": "acceptance",
+          "kind": "test",
+          "command": [
+            "node",
+            "--test",
+            "--test-reporter=junit",
+            "--test-reporter-destination=.artifacts/junit/acceptance.xml",
+            ".harness/acceptance/issued-at.test.mjs"
+          ],
+          "report": { "type": "junit", "path": ".artifacts/junit/acceptance.xml" },
+          "timeoutMs": 120000
+        }
+      ],
+      "protectedPaths": [
+        ".github/",
+        ".githooks/",
+        ".harness/",
+        ".npmrc",
+        "AGENTS.md",
+        "package.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "turbo.json",
+        "scripts/",
+        "infra/",
+        "apps/nest-backend/AGENTS.md",
+        "apps/nest-backend/package.json",
+        "apps/nest-backend/src/export-openapi.ts",
+        "apps/next-web-app/AGENTS.md",
+        "apps/next-web-app/package.json",
+        "packages/client-rest-api-sdk/package.json",
+        "packages/admin-rest-api-sdk/package.json"
+      ],
+      "generatedPaths": ["apps/nest-backend/src/generated"],
+      "environment": {
+        "values": {
+          "DOTENV_CONFIG_PATH": "/dev/null",
+          "CHECKPOINT_DISABLE": "1"
+        }
+      },
+      "toolchain": {
+        "tools": { "pnpm": "11.25.0", "node": ">=24.3" },
+        "packageManagers": { ".": "pnpm" }
+      }
+    }
+  ],
+  "roles": {
+    "developer": {
+      "writer": { "runtime": "claude" }
+    }
+  },
+  "review": {
+    "code": { "reviewer": { "runtime": "codex" } },
+    "plan": { "reviewer": { "runtime": "codex" } },
+    "contract": { "reviewer": { "runtime": "codex" } }
+  },
+  "isolation": { "mode": "none", "domains": [] },
+  "concurrency": 1,
+  "maxAttempts": 1,
+  "runTimeoutMs": 2700000
+}
