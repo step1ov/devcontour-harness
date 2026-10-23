@@ -306,23 +306,24 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
     },
   };
   projectManifestSchema.parse(manifest);
-  // Порядок create-only записей: manifest последним — признак завершённой подготовки.
+  // Порядок create-only записей: manifest — решения (профиль, writer, state) —
+  // до политики, которая из них выводится; политика последней — признак
+  // завершённой подготовки. Прерванная подготовка продолжается по manifest.
   const intents: FileIntent[] = [
     { path: join(root, HARNESS_PROJECT_DIR, '.gitignore'), content: '/project.json\n' },
     { path: join(root, HARNESS_PROJECT_DIR, 'README.md'), content: readme },
-    { path: policyPath, content: generated.text },
     {
       path: join(root, PROJECT_MANIFEST_PATH),
       content: JSON.stringify(manifest, null, 2) + '\n',
       onExisting: 'require-identical',
     },
+    { path: policyPath, content: generated.text },
   ];
   const plan = await planFileWrites({ files: intents, root });
   const workConflicts: FilePlanEntry[] = [];
-  // Иной writer, чем у сохранённой политики, — решение меняется явно, а не
-  // manifest, противоречащий политике.
-  // При записанном manifest то же расхождение называет конфликт manifest.
-  if (!saved && savedPolicy && policyWriter && writer !== policyWriter)
+  // Writer сохранённой политики расходится с решением (manifest или явный
+  // --writer): решение меняется явно, а не manifest, противоречащий политике.
+  if (savedPolicy && policyWriter && writer !== policyWriter)
     workConflicts.push({ path: policyPath, action: 'conflict', conflict: 'content-differs' });
   const harnessDir = join(root, HARNESS_PROJECT_DIR);
   if (!plan.entries.some((e) => e.conflictPath === harnessDir))
@@ -340,7 +341,8 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
         conflictPath: at,
       });
     }
-  const status = saved ? 'complete' : lstat(join(root, HARNESS_PROJECT_DIR)) ? 'partial' : 'new';
+  const status =
+    saved && savedPolicy ? 'complete' : lstat(join(root, HARNESS_PROJECT_DIR)) ? 'partial' : 'new';
   const toolchain = await inspectPolicy(policy, join(root, HARNESS_PROJECT_DIR), {
     configSource: policyPath,
     protectedRoots: [state],
@@ -453,7 +455,8 @@ function dataOf(
 }
 
 /**
- * `harness init`: план или create-only запись `.harness/`, manifest последним.
+ * `harness init`: план или create-only запись `.harness/`: manifest решений до
+ * политики, политика последней.
  * Без `plan` конфликты (8) и проблемы toolchain (9) — отказ до любой записи.
  */
 export async function initProject(options: InitOptions): Promise<InitData> {

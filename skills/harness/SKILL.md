@@ -54,10 +54,12 @@ and lockfile stay untouched.
    Exit 3 means the plan has conflicts or the toolchain is not ready.
 2. Fix what you may fix, or hand it to the user (see the table).
 3. `$H init --repository <repo>` is create-only: `.harness/.gitignore`,
-   `.harness/README.md`, `.harness/policy.json`, and `.harness/project.json`
-   last. No other file of the repository changes and nothing is committed. A
+   `.harness/README.md`, `.harness/project.json` (the decisions: profile,
+   writer, state), and `.harness/policy.json` last. No other file of the
+   repository changes and nothing is committed. A
    repeat with the same decisions writes nothing (`created: []`); after an
-   interruption it writes only what is missing.
+   interruption it resumes from the saved manifest decisions and writes only
+   what is missing.
 
 | Conflict or refusal                                 | Meaning                                                                                              | Action                                                                                                                      |
 | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
@@ -66,6 +68,7 @@ and lockfile stay untouched.
 | `not-regular-file`                                  | the destination exists and is not a regular file                                                     | ask the user                                                                                                                |
 | `outside-root`                                      | the destination resolves outside the repository                                                      | ask the user                                                                                                                |
 | `content-differs` on `.harness/project.json`        | an explicit `--writer` or `--profile` differs from the saved manifest                                | keep the saved decision, or the user confirms the change explicitly                                                         |
+| `content-differs` on `.harness/policy.json`         | the saved policy's writer differs from the manifest or explicit `--writer`                           | keep the saved decision, or the user confirms the change explicitly                                                         |
 | `INVALID_INPUT` with a path                         | not a Git root, invalid manifest or policy (also a truncated write), `--state` inside the repository | read the issue path; a broken file is removed by a human, not overwritten                                                   |
 | `NOT_READY` `no-commits`                            | the repository has no commits                                                                        | the user commits first                                                                                                      |
 | `NOT_READY` `stack-ambiguous` / `stack-unsupported` | both lockfiles, or none                                                                              | pass `--profile`; when profile gates do not fit, write `.harness/profile.json` and pass `--profile ./.harness/profile.json` |

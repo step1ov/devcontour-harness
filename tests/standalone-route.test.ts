@@ -131,7 +131,7 @@ test('H1-01/H1-02/H1-04: npm-приложение → init → граф из fac
   assert.equal(data.mode, 'apply');
   assert.deepEqual(
     data.created.map((f: string) => f.slice(p.app.length + 1)),
-    ['.harness/.gitignore', '.harness/README.md', '.harness/policy.json', '.harness/project.json'],
+    ['.harness/.gitignore', '.harness/README.md', '.harness/project.json', '.harness/policy.json'],
   );
   const state: string = data.manifest.paths.state;
   assert.ok(state.startsWith(join(p.stateHome, 'projects') + '/'), state);

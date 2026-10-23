@@ -118,8 +118,20 @@ const refusal = async (promise: Promise<unknown>, code: string) => {
   assert.fail('ожидался отказ ' + code);
 };
 const rel = (root: string, paths: string[]) => paths.map((p) => p.slice(root.length + 1));
-const ORDER = ['.harness/.gitignore', '.harness/README.md', '.harness/policy.json'];
-const ALL = [...ORDER, '.harness/project.json'];
+/** Порядок create-only записей: manifest решений до политики, политика последней. */
+const ALL = [
+  '.harness/.gitignore',
+  '.harness/README.md',
+  '.harness/project.json',
+  '.harness/policy.json',
+];
+/** Записать первые k намерений плана — прерванная подготовка. */
+const interrupt = (intents: { path: string; content: string }[], k: number) => {
+  for (const intent of intents.slice(0, k)) {
+    mkdirSync(dirname(intent.path), { recursive: true });
+    writeFileSync(intent.path, intent.content, { flag: 'wx' });
+  }
+};
 
 test('H1-02: projectIdOf/defaultStateDir/detectProfile детерминированы', () => {
   const p = project();
@@ -190,7 +202,7 @@ test('H1-02: generatePolicy — профиль, .harness/ защищён, review
   assert.equal(executionPolicySchema.parse(other.input).repositories[0]!.toolchain?.tools.npm, NPM);
 });
 
-test('H1-02: первый запуск — порядок created, manifest последним, данные по схеме', async () => {
+test('H1-02: первый запуск — порядок created, manifest до политики, политика последней, данные по схеме', async () => {
   const p = project();
   const before = outside(p.root);
   const data = await initProject(p.opts());
@@ -298,23 +310,35 @@ test('H1-02: иной --writer или профиль при существующ
   await initProject(p.opts());
   const manifestPath = join(p.root, '.harness/project.json');
   const bytes = readFileSync(manifestPath, 'utf8');
+  const policyPath = join(p.root, '.harness/policy.json');
+  const policyBytes = readFileSync(policyPath, 'utf8');
   const before = outside(p.root);
+  // Иной writer расходится и с manifest, и с writer сохранённой политики.
   const plan = await initProject(p.opts({ writer: 'codex', plan: true }));
-  assert.equal(plan.conflicts, 1);
-  assert.deepEqual(plan.files.at(-1), {
-    path: manifestPath,
-    action: 'conflict',
-    conflict: 'content-differs',
-  });
+  assert.equal(plan.conflicts, 2);
+  assert.deepEqual(
+    plan.files.filter((f) => f.action === 'conflict'),
+    [
+      { path: manifestPath, action: 'conflict', conflict: 'content-differs' },
+      { path: policyPath, action: 'conflict', conflict: 'content-differs' },
+    ],
+  );
   const error = await refusal(initProject(p.opts({ writer: 'codex' })), 'PATH_CONFLICT');
-  assert.deepEqual(error.issues, [{ path: [manifestPath], message: 'content-differs' }]);
-  await refusal(initProject(p.opts({ profile: 'node-checks' })), 'PATH_CONFLICT');
-  await refusal(initProject(p.opts({ state: join(p.scratch, 'elsewhere') })), 'PATH_CONFLICT');
+  assert.deepEqual(error.issues, [
+    { path: [manifestPath], message: 'content-differs' },
+    { path: [policyPath], message: 'content-differs' },
+  ]);
+  // Иной профиль или state при том же writer — конфликт только manifest.
+  for (const extra of [{ profile: 'node-checks' }, { state: join(p.scratch, 'elsewhere') }]) {
+    const other = await refusal(initProject(p.opts(extra)), 'PATH_CONFLICT');
+    assert.deepEqual(other.issues, [{ path: [manifestPath], message: 'content-differs' }]);
+  }
   assert.equal(readFileSync(manifestPath, 'utf8'), bytes);
+  assert.equal(readFileSync(policyPath, 'utf8'), policyBytes);
   assert.deepEqual(outside(p.root), before);
 });
 
-test('H1-02: прерывание после k записей (k=1..3) — partial, дописывается недостающее, manifest последним', async () => {
+test('H1-02: прерывание после k записей (k=1..3) — partial, дописывается недостающее, политика последней', async () => {
   for (const k of [1, 2, 3]) {
     const p = project();
     const planned = await planProject(p.opts());
@@ -326,39 +350,50 @@ test('H1-02: прерывание после k записей (k=1..3) — parti
       ),
       ALL,
     );
-    for (const intent of planned.intents.slice(0, k)) {
-      mkdirSync(join(intent.path, '..'), { recursive: true });
-      writeFileSync(intent.path, intent.content);
-    }
+    interrupt(planned.intents, k);
     const before = outside(p.root);
+    // k=3: manifest записан, политики нет — ещё не complete.
+    const resumePlan = await planProject(p.opts());
+    assert.equal(resumePlan.status, 'partial', 'k=' + k);
+    assert.equal(resumePlan.plan.conflicts + resumePlan.workConflicts.length, 0, 'k=' + k);
     const data = await initProject(p.opts());
     assert.equal(data.status, 'partial', 'k=' + k);
     assert.deepEqual(rel(p.root, data.created), ALL.slice(k), 'k=' + k);
     assert.deepEqual(rel(p.root, data.preserved), ALL.slice(0, k), 'k=' + k);
     assert.equal(data.projectId, planned.manifest.projectId);
     assert.equal(data.manifest.paths.state, planned.manifest.paths.state);
+    assert.deepEqual(data.manifest, planned.manifest, 'k=' + k);
+    assert.equal(
+      readFileSync(join(p.root, '.harness/policy.json'), 'utf8'),
+      planned.intents[3]!.content,
+      'политика выведена из тех же решений, k=' + k,
+    );
+    assert.equal((await planProject(p.opts())).status, 'complete', 'k=' + k);
     assert.deepEqual(outside(p.root), before);
   }
 });
 
 test('H1-02: обрезанный policy.json → INVALID_INPUT с путём, файл не перезаписан', async () => {
-  const p = project();
-  const planned = await planProject(p.opts());
-  const [gitignore, readme, policy] = planned.intents;
-  mkdirSync(join(p.root, '.harness'));
-  for (const i of [gitignore!, readme!]) writeFileSync(i.path, i.content);
-  const torn = policy!.content.slice(0, 40);
-  writeFileSync(policy!.path, torn);
-  const before = outside(p.root);
-  const error = await refusal(initProject(p.opts()), 'INVALID_INPUT');
-  assert.deepEqual(error.issues[0]?.path, [policy!.path]);
-  assert.equal(readFileSync(policy!.path, 'utf8'), torn);
-  assert.equal(existsSync(join(p.root, '.harness/project.json')), false);
-  // Валидный JSON, но не политика — тоже отказ с путём.
-  writeFileSync(policy!.path, '{"policyVersion":1}');
-  const schema = await refusal(initProject(p.opts({ plan: true })), 'INVALID_INPUT');
-  assert.equal(schema.issues[0]?.path[0], policy!.path);
-  assert.deepEqual(outside(p.root), before);
+  // Обрыв на записи политики (manifest уже записан) и политика без manifest.
+  for (const withManifest of [true, false]) {
+    const p = project();
+    const planned = await planProject(p.opts());
+    const [gitignore, readme, manifest, policy] = planned.intents;
+    interrupt([gitignore!, readme!, ...(withManifest ? [manifest!] : [])], 3);
+    const torn = policy!.content.slice(0, 40);
+    writeFileSync(policy!.path, torn);
+    const before = outside(p.root);
+    const error = await refusal(initProject(p.opts()), 'INVALID_INPUT');
+    assert.deepEqual(error.issues[0]?.path, [policy!.path]);
+    assert.equal(readFileSync(policy!.path, 'utf8'), torn);
+    if (withManifest) assert.equal(readFileSync(manifest!.path, 'utf8'), manifest!.content);
+    else assert.equal(existsSync(manifest!.path), false);
+    // Валидный JSON, но не политика — тоже отказ с путём.
+    writeFileSync(policy!.path, '{"policyVersion":1}');
+    const schema = await refusal(initProject(p.opts({ plan: true })), 'INVALID_INPUT');
+    assert.equal(schema.issues[0]?.path[0], policy!.path);
+    assert.deepEqual(outside(p.root), before);
+  }
 });
 
 test('H1-02: невалидный manifest → INVALID_INPUT с путём (раньше выбора профиля)', async () => {
@@ -574,40 +609,59 @@ test('H1-02: --state внутри репозитория в ином регис�
   assert.equal(existsSync(join(p.root, '.harness')), false);
 });
 
-test('H1-02 (H1-F001): прерывание после записи политики с writer codex — новая сессия без --writer продолжает это решение', async () => {
-  const p = project();
-  const planned = await planProject(p.opts({ writer: 'codex' }));
-  for (const intent of planned.intents.slice(0, 3)) {
-    mkdirSync(join(intent.path, '..'), { recursive: true });
-    writeFileSync(intent.path, intent.content);
+test('H1-02 (H1-F001): прерывание после записи manifest с writer codex — новая сессия без --writer продолжает это решение', async () => {
+  // Новый порядок: manifest (k=3) — решение; прежний: политика без manifest.
+  const shapes = {
+    manifest: (intents: { path: string; content: string }[]) => interrupt(intents, 3),
+    'policy-only': (intents: { path: string; content: string }[]) =>
+      interrupt([intents[0]!, intents[1]!, intents[3]!], 3),
+  };
+  for (const [shape, write] of Object.entries(shapes)) {
+    const p = project();
+    const planned = await planProject(p.opts({ writer: 'codex' }));
+    write(planned.intents);
+    const data = await initProject(p.opts());
+    assert.deepEqual(data.manifest.runtimes, { writer: 'codex', reviewer: 'claude' }, shape);
+    assert.deepEqual(
+      data.facts.roles.map((r) => r.runtime),
+      ['codex'],
+      shape,
+    );
+    const run = data.next.find((n) => n.command === 'run')!;
+    assert.equal(run.args[run.args.indexOf('--author') + 1], 'codex', shape);
+    const policy = executionPolicySchema.parse(
+      JSON.parse(readFileSync(join(p.root, '.harness/policy.json'), 'utf8')),
+    );
+    assert.equal(policy.roles.developer?.writer.runtime, 'codex', shape);
+    assert.equal((await planProject(p.opts())).status, 'complete', shape);
   }
-  const data = await initProject(p.opts());
-  assert.deepEqual(data.manifest.runtimes, { writer: 'codex', reviewer: 'claude' });
-  assert.deepEqual(
-    data.facts.roles.map((r) => r.runtime),
-    ['codex'],
-  );
-  const run = data.next.find((n) => n.command === 'run')!;
-  assert.equal(run.args[run.args.indexOf('--author') + 1], 'codex');
-  // Явно иной writer при сохранённой политике — конфликт, а не manifest поверх неё.
-  const q = project();
-  const first = await planProject(q.opts({ writer: 'codex' }));
-  for (const intent of first.intents.slice(0, 3)) {
-    mkdirSync(join(intent.path, '..'), { recursive: true });
-    writeFileSync(intent.path, intent.content);
+  // Явно иной writer при записанном решении — конфликт с точным путём, ничего не пишется.
+  const conflicts = {
+    manifest: ['.harness/project.json'],
+    'policy-only': ['.harness/policy.json'],
+  };
+  for (const [shape, write] of Object.entries(shapes)) {
+    const q = project();
+    const first = await planProject(q.opts({ writer: 'codex' }));
+    write(first.intents);
+    const harnessBefore = readdirSync(join(q.root, '.harness')).sort();
+    const before = outside(q.root);
+    const paths = conflicts[shape as keyof typeof conflicts].map((r) => join(q.root, r));
+    const plan = await initProject(q.opts({ writer: 'claude', plan: true }));
+    assert.deepEqual(
+      plan.files.filter((f) => f.action === 'conflict'),
+      paths.map((path) => ({ path, action: 'conflict', conflict: 'content-differs' })),
+      shape,
+    );
+    const error = await refusal(initProject(q.opts({ writer: 'claude' })), 'PATH_CONFLICT');
+    assert.deepEqual(
+      error.issues,
+      paths.map((path) => ({ path: [path], message: 'content-differs' })),
+      shape,
+    );
+    assert.deepEqual(readdirSync(join(q.root, '.harness')).sort(), harnessBefore, shape);
+    assert.deepEqual(outside(q.root), before);
   }
-  const before = outside(q.root);
-  const plan = await initProject(q.opts({ writer: 'claude', plan: true }));
-  const policyPath = join(q.root, '.harness/policy.json');
-  assert.ok(
-    plan.files.some(
-      (f) => f.path === policyPath && f.action === 'conflict' && f.conflict === 'content-differs',
-    ),
-  );
-  const error = await refusal(initProject(q.opts({ writer: 'claude' })), 'PATH_CONFLICT');
-  assert.deepEqual(error.issues, [{ path: [policyPath], message: 'content-differs' }]);
-  assert.equal(existsSync(join(q.root, '.harness/project.json')), false);
-  assert.deepEqual(outside(q.root), before);
 });
 
 test('H1-02 (H1-F003): конфликты файла и рабочего каталога вместе — отказ apply называет оба', async () => {
@@ -627,9 +681,9 @@ test('H1-02 (H1-F003): конфликты файла и рабочего кат�
   assert.deepEqual(readdirSync(outsideDir), []);
 });
 
-test('H1-02 (H1-F005): роли профиля со своими writers — продолжение сохраняет выбранного writer, конфликта нет', async () => {
-  const p = project();
-  mkdirSync(join(p.root, '.harness'));
+/** Локальный профиль с ролями, у которых свои writers. */
+const customProfile = (root: string) => {
+  mkdirSync(join(root, '.harness'));
   const profile = {
     id: 'custom-roles',
     version: '0.1.0',
@@ -639,28 +693,141 @@ test('H1-02 (H1-F005): роли профиля со своими writers — п�
       'qa-mobile': { runtime: 'codex', reviewer: { runtime: 'claude' } },
     },
   };
-  writeFileSync(join(p.root, '.harness/profile.json'), JSON.stringify(profile, null, 2) + '\n');
-  const opts = (extra: Partial<InitOptions> = {}) =>
-    p.opts({ profile: './.harness/profile.json', ...extra });
-  const planned = await planProject(opts({ writer: 'codex' }));
-  for (const intent of planned.intents.slice(0, 3)) {
-    mkdirSync(join(intent.path, '..'), { recursive: true });
-    writeFileSync(intent.path, intent.content, { flag: 'wx' });
+  writeFileSync(join(root, '.harness/profile.json'), JSON.stringify(profile, null, 2) + '\n');
+};
+
+test('H1-02 (H1-F005): роли профиля со своими writers — продолжение сохраняет выбранного writer, конфликта нет', async () => {
+  for (const shape of ['manifest', 'policy-only'] as const) {
+    const p = project();
+    customProfile(p.root);
+    const opts = (extra: Partial<InitOptions> = {}) =>
+      p.opts({ profile: './.harness/profile.json', ...extra });
+    const planned = await planProject(opts({ writer: 'codex' }));
+    const [gitignore, readme, manifest, generated] = planned.intents;
+    interrupt(
+      shape === 'manifest' ? [gitignore!, readme!, manifest!] : [gitignore!, readme!, generated!],
+      3,
+    );
+    const policyPath = join(p.root, '.harness/policy.json');
+    // Прежний writer явно — не конфликт.
+    const same = await initProject(opts({ writer: 'codex', plan: true }));
+    assert.equal(same.conflicts, 0, shape);
+    const data = await initProject(opts());
+    assert.deepEqual(data.manifest.runtimes, { writer: 'codex', reviewer: 'claude' }, shape);
+    const policy = executionPolicySchema.parse(JSON.parse(readFileSync(policyPath, 'utf8')));
+    assert.equal(
+      selectReviewer(policy, 'plan', { runtime: data.manifest.runtimes.writer }).ok,
+      true,
+      'reviewer другого вендора, чем writer manifest: ' + shape,
+    );
+    const run = data.next.find((n) => n.command === 'run')!;
+    assert.equal(run.args[run.args.indexOf('--author') + 1], 'codex', shape);
+    assert.equal(
+      readFileSync(policyPath, 'utf8'),
+      generated!.content,
+      'политика решений: ' + shape,
+    );
+    // Завершённая подготовка: writer политики (по reviewer плана) совпадает с manifest.
+    const again = await initProject(opts());
+    assert.equal(again.status, 'complete', shape);
+    assert.equal(again.conflicts, 0, shape);
+    assert.deepEqual(again.created, [], shape);
   }
-  const policyPath = join(p.root, '.harness/policy.json');
-  const bytes = readFileSync(policyPath, 'utf8');
-  // Прежний writer явно — не конфликт.
-  const same = await initProject(opts({ writer: 'codex', plan: true }));
-  assert.equal(same.conflicts, 0);
-  const data = await initProject(opts());
-  assert.deepEqual(data.manifest.runtimes, { writer: 'codex', reviewer: 'claude' });
-  const policy = executionPolicySchema.parse(JSON.parse(readFileSync(policyPath, 'utf8')));
-  assert.equal(
-    selectReviewer(policy, 'plan', { runtime: data.manifest.runtimes.writer }).ok,
-    true,
-    'reviewer другого вендора, чем writer manifest',
+});
+
+test('H1-02 (B1): прерывание после manifest с явным --profile — продолжение без аргументов сохраняет ref и pin профиля', async () => {
+  const p = project();
+  customProfile(p.root);
+  const state = join(p.scratch, 'my-state');
+  const explicit = { profile: './.harness/profile.json', state };
+  const planned = await planProject(p.opts(explicit));
+  assert.equal(planned.manifest.profile.pin.id, 'custom-roles');
+  interrupt(planned.intents, 3);
+  // Новая сессия, как в README: без аргументов.
+  const resumed = await initProject(p.opts());
+  assert.equal(resumed.status, 'partial');
+  assert.equal(resumed.conflicts, 0);
+  assert.deepEqual(rel(p.root, resumed.created), ['.harness/policy.json']);
+  assert.deepEqual(resumed.manifest.profile, planned.manifest.profile);
+  assert.equal(resumed.profile.id, 'custom-roles');
+  const policy = executionPolicySchema.parse(
+    JSON.parse(readFileSync(join(p.root, '.harness/policy.json'), 'utf8')),
   );
-  const run = data.next.find((n) => n.command === 'run')!;
-  assert.equal(run.args[run.args.indexOf('--author') + 1], 'codex');
-  assert.equal(readFileSync(policyPath, 'utf8'), bytes, 'политика не перезаписана');
+  assert.ok('mobile' in policy.roles && 'qa-mobile' in policy.roles, 'роли выбранного профиля');
+  assert.deepEqual(
+    resumed.facts.roles.map((r) => r.id),
+    Object.keys(policy.roles),
+  );
+  assert.equal(
+    readFileSync(join(p.root, '.harness/policy.json'), 'utf8'),
+    planned.intents[3]!.content,
+  );
+  // Повтор исходных явных аргументов — не конфликт.
+  const again = await initProject(p.opts(explicit));
+  assert.equal(again.status, 'complete');
+  assert.equal(again.conflicts, 0);
+  assert.deepEqual(again.created, []);
+});
+
+test('H1-02 (B2): прерывание после manifest с явным --state — продолжение без аргументов сохраняет state', async () => {
+  const p = project();
+  const state = join(p.scratch, 'my-state');
+  const planned = await planProject(p.opts({ state }));
+  interrupt(planned.intents, 3);
+  const plan = await initProject(p.opts({ plan: true }));
+  assert.equal(plan.status, 'partial');
+  assert.equal(plan.conflicts, 0);
+  assert.equal(plan.manifest.paths.state, state);
+  const resumed = await initProject(p.opts());
+  assert.equal(resumed.manifest.paths.state, state);
+  assert.notEqual(state, defaultStateDir(projectIdOf(p.root), p.env));
+  assert.deepEqual(resumed.manifest, planned.manifest);
+  for (const n of resumed.next.filter((n) => n.args.includes('--state')))
+    assert.equal(n.args[n.args.indexOf('--state') + 1], state, n.command);
+  assert.equal(existsSync(state), false, 'init не создаёт state');
+  // Повтор с исходным --state — не конфликт; иной --state — конфликт manifest.
+  const again = await initProject(p.opts({ state }));
+  assert.equal(again.status, 'complete');
+  assert.equal(again.conflicts, 0);
+  const other = await refusal(
+    initProject(p.opts({ state: join(p.scratch, 'elsewhere') })),
+    'PATH_CONFLICT',
+  );
+  assert.deepEqual(other.issues, [
+    { path: [join(p.root, '.harness/project.json')], message: 'content-differs' },
+  ]);
+});
+
+test('H1-02 (B3): политика отредактирована на writer codex при manifest claude — повтор init даёт конфликт policy.json', async () => {
+  const p = project();
+  const first = await initProject(p.opts());
+  assert.equal(first.manifest.runtimes.writer, 'claude');
+  const policyPath = join(p.root, '.harness/policy.json');
+  const manifestPath = join(p.root, '.harness/project.json');
+  const edited = JSON.parse(readFileSync(policyPath, 'utf8')) as {
+    roles: { developer: { writer: { runtime: string } } };
+    review: Record<'code' | 'plan' | 'contract', { reviewer: { runtime: string } }>;
+  };
+  edited.roles.developer.writer.runtime = 'codex';
+  for (const k of ['code', 'plan', 'contract'] as const)
+    edited.review[k].reviewer.runtime = 'claude';
+  const text = JSON.stringify(edited, null, 2) + '\n';
+  writeFileSync(policyPath, text);
+  const manifestBytes = readFileSync(manifestPath, 'utf8');
+  const before = outside(p.root);
+  const plan = await initProject(p.opts({ plan: true }));
+  assert.equal(plan.conflicts, 1);
+  assert.deepEqual(
+    plan.files.filter((f) => f.action === 'conflict'),
+    [{ path: policyPath, action: 'conflict', conflict: 'content-differs' }],
+  );
+  const error = await refusal(initProject(p.opts()), 'PATH_CONFLICT');
+  assert.deepEqual(error.issues, [{ path: [policyPath], message: 'content-differs' }]);
+  assert.match(error.message, /другого writer/);
+  // Явный --writer codex совпадает с политикой, но расходится с manifest.
+  const codex = await refusal(initProject(p.opts({ writer: 'codex' })), 'PATH_CONFLICT');
+  assert.deepEqual(codex.issues, [{ path: [manifestPath], message: 'content-differs' }]);
+  assert.equal(readFileSync(policyPath, 'utf8'), text);
+  assert.equal(readFileSync(manifestPath, 'utf8'), manifestBytes);
+  assert.deepEqual(outside(p.root), before);
 });

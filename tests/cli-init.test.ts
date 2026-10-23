@@ -110,7 +110,10 @@ test('H1-02: init --plan → exit 0 без записи; init → created; по�
   const init = p.harness('init', '--repository', p.root);
   assert.equal(init.status, exitCodes.ok, init.stderr + init.stdout);
   assert.equal(init.json.data.created.length, 4);
-  assert.ok(init.json.data.created.at(-1).endsWith('/.harness/project.json'));
+  assert.deepEqual(
+    init.json.data.created.map((f: string) => f.slice(p.root.length + 1)),
+    ['.harness/.gitignore', '.harness/README.md', '.harness/project.json', '.harness/policy.json'],
+  );
   const again = p.harness('init', '--repository', p.root);
   assert.equal(again.status, exitCodes.ok);
   assert.deepEqual(again.json.data.created, []);
@@ -153,17 +156,20 @@ test('H1-02: конфликт плана — --plan даёт данные с exi
   assert.deepEqual(readdirSync(outsideDir), []);
 });
 
-test('H1-02: иной --writer → PATH_CONFLICT content-differs на project.json', () => {
+test('H1-02: иной --writer → PATH_CONFLICT content-differs на project.json и policy.json', () => {
   const p = project();
   assert.equal(p.harness('init', '--repository', p.root).status, exitCodes.ok);
   const manifest = readFileSync(join(p.root, '.harness/project.json'), 'utf8');
+  const policy = readFileSync(join(p.root, '.harness/policy.json'), 'utf8');
   const other = p.harness('init', '--repository', p.root, '--writer', 'codex');
   assert.equal(other.status, exitCodes.refused);
   assert.equal(other.json.error.code, 'PATH_CONFLICT');
   assert.deepEqual(other.json.error.issues, [
     { path: [join(p.root, '.harness/project.json')], message: 'content-differs' },
+    { path: [join(p.root, '.harness/policy.json')], message: 'content-differs' },
   ]);
   assert.equal(readFileSync(join(p.root, '.harness/project.json'), 'utf8'), manifest);
+  assert.equal(readFileSync(join(p.root, '.harness/policy.json'), 'utf8'), policy);
   const bad = p.harness('init', '--repository', p.root, '--writer', 'fixture');
   assert.equal(bad.status, exitCodes.input);
 });

@@ -59,12 +59,9 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
       // Чинит только задание, которое продолжит работу: активное, по текущей
       // редакции графа и с непотраченными попытками стадии (как `claim`).
       const job = jobs.find((j) => j.id === work.graphId && h.workflows.continues(j, v));
-      const decision = job
-        ? repairDecision(v, v.works(work.graphId), {
-            budgetLeft: options.repairBudget - (job.repairs ?? 0),
-            maxAttempts: options.maxAttempts,
-          })
-        : undefined;
+      const outlook = job
+        ? outlookOf(v, work.graphId, job.repairs ?? 0, options, control).get(work.id)
+        : 'stop';
       const evidence: EvidenceLink[] = last
         ? [
             { kind: 'attempt', id: last.id },
@@ -85,14 +82,14 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
             ? { hold: { operation: work.hold.operation, reason: work.hold.reason } }
             : {}),
           ...(work.budgetBlock ? { budgetBlock: { reason: work.budgetBlock.reason } } : {}),
-          ...(work.recovery ? { recovery: true } : {}),
+          ...(work.recovery ? { recovery: { status: work.recovery.status } } : {}),
         },
         maxAttempts: options.maxAttempts,
         repair: {
           sameFailureRepairs: fingerprint ? identical - 1 : repairPolicy[kind].repeats,
           groupRepairsUsed: job?.repairs ?? 0,
           groupRepairBudget: job ? options.repairBudget : 0,
-          groupStopped: !job || decision?.action === 'stop',
+          ...(outlook ? { outlook } : {}),
         },
         control: {
           paused: control.paused,
@@ -105,4 +102,67 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
     }
     return inputs;
   });
+}
+
+type View = Parameters<Parameters<Harness['engine']['read']>[0]>[0];
+type Outlook = 'retry' | 'wait' | 'stop';
+
+/**
+ * Что сделает движок с каждой сломанной работой группы при следующей стадии —
+ * тем же порядком, что `Harness.advance`: сначала первый эпизод восстановления
+ * свойства (его разбор решает за группу), затем `repairDecision`; бюджет
+ * восстановлений группы общий, поэтому работы дальше в очереди получают
+ * повтор, только если его хватит и на тех, кто впереди.
+ */
+function outlookOf(
+  v: View,
+  graphId: string,
+  repairsUsed: number,
+  options: StopInputOptions,
+  control: ReturnType<View['control']>,
+): Map<string, Outlook> {
+  const works = v.works(graphId);
+  const out = new Map<string, Outlook>();
+  const all = (o: Outlook) => {
+    for (const w of works) out.set(w.id, o);
+    return out;
+  };
+  const episode = works.find((w) => w.recovery && w.status !== 'cancelled');
+  if (episode) {
+    const status = episode.recovery!.status;
+    if (status === 'awaiting-lead') {
+      const blocked =
+        (control.paused && control.pauseReason === 'operator') ||
+        repairsUsed >= options.repairBudget;
+      return all(blocked ? 'stop' : 'wait');
+    }
+    if (status === 'retry') {
+      all('wait');
+      if (episode.status === 'failed') out.set(episode.id, 'retry');
+      return out;
+    }
+    if (status === 'applying' || status === 'retrying') return all('wait');
+    return all('stop');
+  }
+  const decision = repairDecision(v, works, {
+    budgetLeft: options.repairBudget - repairsUsed,
+    maxAttempts: options.maxAttempts,
+  });
+  if (!decision || decision.action === 'stop') return all('stop');
+  // Очередь сломанных — в порядке repairDecision; каждый повтор тратит бюджет группы.
+  const broken = works.filter((w) => w.status === 'failed' && !w.recovery);
+  broken.forEach((w, i) => {
+    const kind = w.failureKind ?? 'unknown';
+    const rule = repairPolicy[kind];
+    const identical = w.failureFingerprint
+      ? v.attempts(w.id).filter((a) => a.failureFingerprint === w.failureFingerprint).length
+      : rule.repeats + 1;
+    const retry =
+      rule.action === 'retry' &&
+      identical - 1 < rule.repeats &&
+      w.attempt < options.maxAttempts &&
+      repairsUsed + i < options.repairBudget;
+    out.set(w.id, w.id === decision.workId ? 'retry' : retry ? 'retry' : 'stop');
+  });
+  return out;
 }

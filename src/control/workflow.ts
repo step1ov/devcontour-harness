@@ -80,6 +80,13 @@ export class WorkflowQueue {
    * Им пользуется диагностика.
    */
   continues(job: WorkflowJob, view: ExecutionView) {
+    // Пока применяется политика, стадии не начинаются (как в `claim`).
+    const control = view.control();
+    if (
+      control.pauseReason === 'reconfigure' ||
+      (control.reconfigure && !control.reconfigure.appliedAt)
+    )
+      return false;
     const held = job.status === 'running' && job.leaseUntil! > this.now();
     const claimable =
       (job.status === 'queued' || job.status === 'running') && job.attempts < job.maxAttempts;

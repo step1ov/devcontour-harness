@@ -634,8 +634,8 @@ if (
   JSON.stringify([
     '.harness/.gitignore',
     '.harness/README.md',
-    '.harness/policy.json',
     '.harness/project.json',
+    '.harness/policy.json',
   ])
 )
   fail('init: порядок записи ' + JSON.stringify(createdRel));

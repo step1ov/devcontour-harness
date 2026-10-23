@@ -82,8 +82,11 @@ export type StopInput =
         failure?: string;
         hold?: { operation: string; reason: string };
         budgetBlock?: { reason: string };
-        /** Работа ведётся восстановлением свойства: штатный repair её не повторяет. */
-        recovery?: boolean;
+        /**
+         * Эпизод восстановления свойства: работу ведёт его разбор, а не штатный
+         * repair. Статус — как в `PropertyRecovery.status`.
+         */
+        recovery?: { status: string };
       };
       maxAttempts: number;
       repair: {
@@ -91,11 +94,13 @@ export type StopInput =
         groupRepairsUsed: number;
         groupRepairBudget: number;
         /**
-         * Движок группы больше не чинит: задание графа не активно (остановлено,
-         * устарело) или решение по группе — остановка (отмена, класс stop у
-         * первого сломанного). Тогда повтора не будет, как бы ни сходились счётчики.
+         * Что движок сделает с этой работой, когда продолжит задание графа
+         * (вычисляется тем же порядком решений, что `advance`): `retry` —
+         * назначит повтор, `wait` — сначала занят другим (разбор свойства,
+         * другое поручение группы), `stop` — автоматического действия нет.
+         * Не задано — решение выводится из счётчиков.
          */
-        groupStopped?: boolean;
+        outlook?: 'retry' | 'wait' | 'stop';
       };
       control: { paused: boolean; pauseReason?: PauseReason; pauseFailures?: FailureKind[] };
       phase?: StopPhase;
@@ -182,7 +187,9 @@ const message = (cause: StopCause, ...parts: (string | undefined)[]) =>
  */
 function retryPlannedOf(input: Extract<StopInput, { kind: 'work' }>) {
   const { work, repair, maxAttempts } = input;
-  if (work.status !== 'failed' || work.recovery || repair.groupStopped) return false;
+  if (work.status !== 'failed') return false;
+  if (work.recovery) return work.recovery.status === 'retry' && repair.outlook === 'retry';
+  if (repair.outlook !== undefined && repair.outlook !== 'retry') return false;
   const rule = repairPolicy[work.failureKind ?? 'unknown'];
   return (
     rule.action === 'retry' &&
@@ -205,6 +212,36 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       actor: null,
       action: 'none',
       note: 'Поручение принято.',
+    };
+  if (work.status === 'failed' && work.recovery && !retry) {
+    // Работу ведёт разбор свойства: шаг определяет его статус, а не класс отказа.
+    const automatic = input.repair.outlook === 'wait';
+    return automatic
+      ? {
+          code: stopCodeOf(kind),
+          cause: kind,
+          phase,
+          actor: 'controller',
+          action: 'wait',
+          note: `Идёт восстановление свойства (${work.recovery.status}): движок продолжит его сам.`,
+        }
+      : {
+          code: stopCodeOf(kind),
+          cause: kind,
+          phase,
+          actor: 'user',
+          action: 'user-decision',
+          note: `Восстановление свойства (${work.recovery.status}) ждёт решения человека.`,
+        };
+  }
+  if (work.status === 'failed' && !retry && input.repair.outlook === 'wait')
+    return {
+      code: stopCodeOf(kind),
+      cause: kind,
+      phase,
+      actor: 'controller',
+      action: 'wait',
+      note: 'Движок сначала занят другим поручением группы.',
     };
   if (work.status === 'failed') {
     if (work.attempt >= maxAttempts)

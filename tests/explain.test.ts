@@ -603,7 +603,7 @@ test('H1-03: stopInputsOf — phase, runId и evidence из последней �
       groupRepairsUsed: 0,
       groupRepairBudget: 6,
       // Тот же отпечаток уже чинился: решение группы — остановка.
-      groupStopped: true,
+      outlook: 'stop',
     });
     assert.equal(input.work.failureKind, 'environment');
     assert.deepEqual(input.control, {
@@ -721,19 +721,26 @@ test('H1-03: explainText — строка на диагноз, сообщени�
   );
 });
 
-test('H1-03: работа под восстановлением свойства не получает retryPlanned — как repairDecision', () => {
-  const input = {
-    kind: 'work',
-    work: { id: 'w', status: 'failed', attempt: 1, failureKind: 'environment', recovery: true },
-    maxAttempts: 3,
-    repair: { sameFailureRepairs: 0, groupRepairsUsed: 0, groupRepairBudget: 6 },
-    control: { paused: false },
-  } as const;
-  assert.equal(explainStop(input).retryPlanned, false);
-  assert.equal(
-    explainStop({ ...input, work: { ...input.work, recovery: false } }).retryPlanned,
-    true,
-  );
+test('H1-03: работа под восстановлением свойства — шаг по статусу эпизода, а не по классу отказа', () => {
+  const at = (status: string, outlook: 'retry' | 'wait' | 'stop') =>
+    explainStop({
+      kind: 'work',
+      work: {
+        id: 'w',
+        status: 'failed',
+        attempt: 1,
+        failureKind: 'environment',
+        recovery: { status },
+      },
+      maxAttempts: 3,
+      repair: { sameFailureRepairs: 0, groupRepairsUsed: 0, groupRepairBudget: 6, outlook },
+      control: { paused: false },
+    });
+  const brief = (d: ReturnType<typeof at>) => [d.actor, d.action, d.retryPlanned];
+  assert.deepEqual(brief(at('retry', 'retry')), ['controller', 'retry', true]);
+  assert.deepEqual(brief(at('awaiting-lead', 'wait')), ['controller', 'wait', false]);
+  assert.deepEqual(brief(at('awaiting-lead', 'stop')), ['user', 'user-decision', false]);
+  assert.deepEqual(brief(at('awaiting-user', 'stop')), ['user', 'user-decision', false]);
 });
 
 test('H1-03: остановленное задание графа не назначит повтор — explain не обещает retry, run подтверждает', async () => {
@@ -761,7 +768,7 @@ test('H1-03: остановленное задание графа не назн�
   }
 });
 
-test('H1-03: решение группы «остановка» (отмена или класс stop у соседа) снимает retryPlanned', () => {
+test('H1-03: прогноз движка для группы — stop снимает retryPlanned, wait — controller ждёт', () => {
   const input = {
     kind: 'work',
     work: { id: 'b', status: 'failed', attempt: 1, failureKind: 'gate' },
@@ -770,9 +777,14 @@ test('H1-03: решение группы «остановка» (отмена и
     control: { paused: false },
   } as const;
   assert.equal(explainStop(input).retryPlanned, true);
-  const stopped = explainStop({ ...input, repair: { ...input.repair, groupStopped: true } });
+  const stopped = explainStop({ ...input, repair: { ...input.repair, outlook: 'stop' } });
   assert.equal(stopped.retryPlanned, false);
   assert.deepEqual([stopped.actor, stopped.action], ['lead', 'diagnose-failure']);
+  const waiting = explainStop({ ...input, repair: { ...input.repair, outlook: 'wait' } });
+  assert.deepEqual(
+    [waiting.actor, waiting.action, waiting.retryPlanned],
+    ['controller', 'wait', false],
+  );
 });
 
 test('H1-03 (H1-F002): задание прежней редакции графа ещё queued — retry не обещается; диагностика задание не трогает', () => {
