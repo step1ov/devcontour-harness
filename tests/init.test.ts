@@ -221,7 +221,6 @@ test('H1-02: первый запуск — порядок created, manifest по
     { id: 'unit-tests', kind: 'test' },
   ]);
   assert.equal(data.facts.notesDir, join(p.root, '.harness/work/context/notes'));
-  assert.ok(existsSync(data.facts.graphTemplate));
   assert.deepEqual(
     data.next.map((n) => n.command),
     ['doctor', 'validate', 'run', 'status', 'explain'],

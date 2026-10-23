@@ -84,7 +84,7 @@ realpath корня, поэтому повтор и новая сессия на
 
 ## Граф, запуск, результат
 
-Граф пишется в `.harness/work/<id>.json` по шаблону `facts.graphTemplate`;
+Граф пишется в `.harness/work/<id>.json` по шаблону `templates/graph.json` установленного пакета;
 `repositoryId`, роль, gates и область записи берутся только из `facts`.
 
 ```sh

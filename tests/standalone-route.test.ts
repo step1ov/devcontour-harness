@@ -152,10 +152,9 @@ test('H1-01/H1-02/H1-04: npm-приложение → init → граф из fac
 
   // Граф: только facts init и шаблон пакета; содержание поручения — решение агента.
   const facts = data.facts;
-  const template = JSON.parse(readFileSync(facts.graphTemplate, 'utf8'));
-  assert.equal(
-    facts.graphTemplate,
-    fileURLToPath(new URL('../templates/graph.json', import.meta.url)),
+  // Шаблон графа — документация пакета; init на него не ссылается (S2.5).
+  const template = JSON.parse(
+    readFileSync(fileURLToPath(new URL('../templates/graph.json', import.meta.url)), 'utf8'),
   );
   const graph = {
     ...template,

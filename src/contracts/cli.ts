@@ -842,7 +842,6 @@ export const initDataSchema = z.strictObject({
     workDir: z.string(),
     contextDir: z.string(),
     notesDir: z.string(),
-    graphTemplate: z.string(),
   }),
   toolchain: z.strictObject({ ready: z.boolean(), problems: z.array(z.string()) }),
   next: z.array(

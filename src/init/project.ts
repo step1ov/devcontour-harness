@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { z } from 'zod';
 import {
   API_VERSION,
@@ -40,9 +39,6 @@ import {
 } from './policy.ts';
 
 export type InitData = z.infer<typeof initDataSchema>;
-
-/** Шаблон графа установленного пакета (`templates/graph.json` рядом с `lib/`). */
-const graphTemplate = fileURLToPath(new URL('../../templates/graph.json', import.meta.url));
 
 /** Маркеры репозитория DevContour: второй controller и state не создаются. */
 const devcontourMarkers = ['devcontour.config.json', '.devcontour-local'];
@@ -396,7 +392,6 @@ function dataOf(
       workDir,
       contextDir: join(workDir, 'context'),
       notesDir: join(root, PROJECT_NOTES_DIR),
-      graphTemplate,
     },
     toolchain: { ready: problems.length === 0, problems },
     next: [
@@ -408,7 +403,7 @@ function dataOf(
       {
         command: 'validate',
         args: ['--graph', graph, '--policy', policyPath],
-        why: `Проверить граф, записанный в ${workDir} по шаблону ${graphTemplate}`,
+        why: `Проверить граф, записанный агентом в ${workDir}`,
       },
       {
         command: 'run',

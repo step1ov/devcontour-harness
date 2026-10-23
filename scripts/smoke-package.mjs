@@ -644,8 +644,6 @@ if (!h1State.startsWith(join(stateHome, 'projects') + sep) || existsSync(h1State
   fail('init: state вне state home или создан заранее: ' + h1State);
 if (h1Data.profile.id !== 'npm-ci') fail('init: профиль ' + h1Data.profile.id);
 const facts = h1Data.facts;
-if (facts.graphTemplate !== join(installed, 'templates', 'graph.json'))
-  fail('init: шаблон графа не из установленного пакета: ' + facts.graphTemplate);
 const changedOutside = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], {
   cwd: h1,
   encoding: 'utf8',
@@ -673,7 +671,8 @@ h1Policy.environment = { values: { FIXTURE_SCENARIO: h1Scenario } };
 writeFileSync(h1PolicyPath, JSON.stringify(h1Policy, null, 2) + '\n');
 
 // Граф: только facts init и шаблон пакета.
-const graphTemplate = JSON.parse(readFileSync(facts.graphTemplate, 'utf8'));
+// Шаблон — из установленного пакета (документация, не вход init).
+const graphTemplate = JSON.parse(readFileSync(join(installed, 'templates', 'graph.json'), 'utf8'));
 const h1Graph = {
   ...graphTemplate,
   id: 'greeting',

@@ -74,8 +74,8 @@ and lockfile stay untouched.
 
 ### 4. Write the graph
 
-Write `.harness/work/<graph-id>.json` from the template at
-`data.facts.graphTemplate`. Take `repositoryId`, `role`, `gates` and the write
+Write `.harness/work/<graph-id>.json` from the template shipped in the
+installed package (`<tooldir>/node_modules/devcontour-harness/templates/graph.json`). Take `repositoryId`, `role`, `gates` and the write
 scope only from `data.facts`; do not invent ids. Acceptance criteria are
 observable (a command, an output, a file). Add context or notes only when the
 order needs them.
