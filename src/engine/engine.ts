@@ -210,7 +210,7 @@ export class Engine {
     const issues = graphIssues(graph);
     if (issues.length)
       throw new HarnessError(
-        issues[0]!.code as 'GRAPH_CYCLE',
+        issues[0]!.code,
         `Граф отклонён: ${issues.length} нарушений`,
         issues.map(({ path, message }) => ({ path: ['graph', ...path], message })),
       );
