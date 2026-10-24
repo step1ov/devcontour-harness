@@ -633,3 +633,78 @@ for (const mode of ['env', 'operator'] as const) {
     }
   });
 }
+
+test('H1-03 (H1-F009): explain = движок — готовый повтор эпизода не выдаётся на паузе runtime; следующий эпизод не обещает продолжения (только диагноз)', () => {
+  // h.run здесь не вызывается: движок зацикливается в этом состоянии (FI-002, отдельное задание).
+  const ctx = hsetup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p: Record<string, unknown>) => {
+      p.maxAttempts = 5;
+      p.repairBudget = 6;
+    },
+    graph: (raw: Record<string, unknown>) => {
+      const orders = raw.orders as Record<string, unknown>[];
+      orders.push({
+        ...orders[0],
+        id: 'second',
+        source: { connector: 'files', ref: 'second', revision: '1' },
+        title: 'Second independent work',
+        dependsOn: [],
+        writeScope: ['lib'],
+      });
+    },
+  });
+  const h = ctx.open();
+  try {
+    started(ctx, h);
+    const runs = [0, 1].map((i) => {
+      const a = h.engine.claim('controller')!;
+      h.engine.fail(a.id, a.token, 'review property fixture ' + i, { kind: 'review' });
+      return a;
+    });
+    const at = new Date(h.engine.clock()).toISOString();
+    for (const a of runs)
+      h.store.transact('task.retry', (tx) => {
+        const w = tx.work(a.workId)!;
+        tx.putWork({
+          ...w,
+          recovery: {
+            id: 'RC-' + w.id,
+            property: 'p1',
+            basis: h.engine.episodeOf(w, tx),
+            runs: [a.id],
+            openedAt: at,
+            status: 'awaiting-lead',
+            calls: 0,
+            history: [{ at, event: 'opened' }],
+            version: 1,
+          },
+        });
+      });
+    h.engine.recoveryDecide('add-greeting', 'RC-add-greeting', {
+      action: 'new-approach',
+      reason: 'operator decided a new approach',
+      evidence: [],
+      hypothesis: 'h',
+      plan: 'p',
+      source: { kind: 'operator' },
+      decidedAt: at,
+    });
+    h.engine.retry('add-greeting');
+    const retried = h.engine.claim('controller')!;
+    h.engine.fail(retried.id, retried.token, 'getaddrinfo ENOTFOUND fixture', {
+      kind: 'environment',
+    });
+    h.engine.retry('add-greeting');
+    h.engine.release('controller');
+    assert.equal(h.engine.read((v) => v.control()).pauseReason, 'runtime');
+    const d = diagnose(ctx, h);
+    assert.deepEqual(d, [
+      { workId: 'add-greeting', retryPlanned: false, actor: 'user', action: 'fix-environment' },
+      // Группа стоит на паузе runtime: шаг человека — устранить её причину.
+      { workId: 'second', retryPlanned: false, actor: 'user', action: 'fix-environment' },
+    ]);
+  } finally {
+    h.close();
+  }
+});

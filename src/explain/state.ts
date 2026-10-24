@@ -182,8 +182,10 @@ function outlookOf(
         );
       case 'retry':
         // Разрешённый повтор, который очередь не выдаст: пауза, удержание, бюджет.
+        // Для упавшей работы — до engine.retry, для готовой — уже после него.
         return (
-          w.status === 'failed' && (control.paused || Boolean(w.hold) || Boolean(w.budgetBlock))
+          (w.status === 'failed' || w.status === 'ready') &&
+          (control.paused || Boolean(w.hold) || Boolean(w.budgetBlock))
         );
       case 'retrying':
         // Повтор уже упал, а эпизод не закрыт: автоматического шага нет.

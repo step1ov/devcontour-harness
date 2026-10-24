@@ -225,7 +225,7 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
     if (
       !automatic &&
       control.paused &&
-      work.status === 'failed' &&
+      (work.status === 'failed' || (work.status === 'ready' && work.recovery.status === 'retry')) &&
       (work.recovery.status === 'awaiting-lead' || work.recovery.status === 'retry')
     )
       // Разрешённый повтор не выдаётся, пока очередь стоит: сначала снять паузу.
