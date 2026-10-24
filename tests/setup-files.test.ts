@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -417,6 +418,24 @@ test('H1-02 (H1-F004): назначение совпадает с корнем �
   const link = join(real, 'root-link');
   await symlink(dir, link);
   await checkDestination(link, { root: link });
+});
+
+test('H1-02 (H1-F019): отсутствующий корень, совпадающий с назначением, — конфликт до записи; вложенное назначение создаёт корень каталогом', async () => {
+  const { real } = await sandbox();
+  const root = join(real, 'absent-root');
+  const conflict = refusal('PATH_CONFLICT', 'Родитель не является каталогом: ' + root, [
+    { path: [root], message: 'ancestor-not-directory' },
+  ]);
+  await assert.rejects(checkDestination(root, { root }), conflict);
+  const files = [{ path: root, content: 'new' }];
+  const plan = await planFileWrites({ root, files });
+  assert.equal(plan.conflicts, 1);
+  await assert.rejects(applyFileWrites(plan, files), conflict);
+  await assert.rejects(lstat(root), { code: 'ENOENT' });
+  const nested = [{ path: join(root, 'a.md'), content: 'x' }];
+  await applyFileWrites(await planFileWrites({ root, files: nested }), nested);
+  assert.ok((await lstat(root)).isDirectory());
+  assert.equal(await readFile(join(root, 'a.md'), 'utf8'), 'x');
 });
 
 test('H1-02 (H1-F008): корень — symlink в никуда или под обычным файлом — PATH_CONFLICT, а не сырой errno; ничего не записано', async () => {

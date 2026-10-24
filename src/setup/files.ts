@@ -141,7 +141,10 @@ async function destinationConflict(path: string, root?: string): Promise<Found |
       if (!info?.isDirectory())
         return { conflict: 'ancestor-not-directory', path: target, conflictPath: base };
     } else {
-      // Корня нет: его ближайший существующий предок обязан быть каталогом.
+      // Корня нет. Назначение, совпадающее с ним, создало бы корень файлом.
+      if (target === base)
+        return { conflict: 'ancestor-not-directory', path: target, conflictPath: base };
+      // Его ближайший существующий предок обязан быть каталогом.
       for (let up = dirname(base); ; up = dirname(up)) {
         const own = await inspectInWalk(up);
         if (own) {

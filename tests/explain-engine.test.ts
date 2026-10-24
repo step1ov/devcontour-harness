@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import { existsSync, readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
+import { executionPolicySchema, workGraphSchema } from '../src/contracts/index.ts';
 import { policyDigest } from '../src/contracts/policy.ts';
 import { stopInputsOf } from '../src/explain/state.ts';
 import { explainStop } from '../src/projections/stop.ts';
@@ -1544,6 +1545,419 @@ test('H1-03 (H1-F018): explain = движок — расход уже превы
     for (const runtime of ['claude', 'codex'])
       for (const role of ['writer', 'reviewer'])
         assert.equal(countOf(ctx.scenarioPath, runtime, role), 0, runtime + ':' + role);
+  } finally {
+    h.close();
+  }
+});
+
+test('H1-03 (H1-F021): explain = движок — эпизод ready/retry за отменённой предпосылкой останавливает следующий эпизод', async () => {
+  const ctx = propertySetup({
+    writer: implement({ 'src/knap.mjs': knap.correct }),
+    policy: (p) => {
+      p.maxAttempts = 5;
+      p.repairBudget = 6;
+    },
+  });
+  const a = ctx.graph.orders[0]!;
+  a.dependsOn = ['parent'];
+  for (const id of ['parent', 'later'])
+    ctx.graph.orders.push({
+      ...structuredClone(a),
+      id,
+      source: { connector: 'files', ref: id, revision: '1' },
+      title: id,
+      dependsOn: [],
+    });
+  const h = propertyHarness(ctx);
+  try {
+    ready(h.engine, ctx.graph, 'controller');
+    h.engine.hold(['add-greeting', 'later'], 'setup', 'isolate prerequisite');
+    h.engine.release('controller');
+    await h.run({ graph: ctx.graph, author: 'claude', once: true });
+    assert.equal(
+      h.engine.read((v) => v.work('parent')!.status),
+      'done',
+    );
+    assert.ok(h.engine.lead('controller'));
+    h.engine.releaseHold('setup');
+    h.engine.hold(['later'], 'setup', 'natural episode of add-greeting');
+    const episode = (workId: string) => {
+      for (let i = 0; i < 2; i++) {
+        const run = h.engine.claim('controller')!;
+        assert.equal(run.workId, workId);
+        h.engine.phase(run.id, run.token, 'reviewing', {
+          candidateSha: ctx.repo.git('rev-parse', 'HEAD'),
+        });
+        h.engine.fail(run.id, run.token, `property review failure ${i}`, {
+          kind: 'review',
+          properties: { bound: ['knapsack-optimal'], unbound: [] },
+        });
+        if (i === 0) h.engine.retry(workId);
+      }
+      const w = h.engine.read((v) => v.work(workId)!);
+      assert.equal(w.recovery?.status, 'awaiting-lead');
+      h.engine.recoveryDecide(workId, w.recovery.id, {
+        action: 'new-approach',
+        reason: 'new approach',
+        evidence: [],
+        hypothesis: 'new approach',
+        plan: 'check property',
+        source: { kind: 'operator' },
+        decidedAt: new Date(h.engine.clock()).toISOString(),
+      });
+    };
+    episode('add-greeting');
+    h.engine.releaseHold('setup');
+    // Новая редакция меняет только предпосылку: эпизод A сохраняется, A — ready/retry.
+    ctx.graph.source.revision = '2';
+    const parent = ctx.graph.orders.find((w) => w.id === 'parent')!;
+    parent.title = 'Parent revised requirement';
+    parent.source.revision = '2';
+    const graph = ready(h.engine, ctx.graph, 'controller');
+    assert.equal(
+      h.engine.read((v) => v.work('add-greeting')!.recovery?.status),
+      'retry',
+    );
+    const job = h.workflows.start({ kind: 'graph', id: graph.id, authorRuntime: 'claude' });
+    h.workflows.finish(h.workflows.claim(job.key)!);
+    h.engine.cancel('parent', 'revised prerequisite cancelled');
+    episode('later');
+    h.engine.release('controller');
+    assert.equal(
+      h.engine.read((v) => v.work('later')!.recovery?.status),
+      'retry',
+    );
+
+    const diags = diagnosisOf(ctx.policy, h);
+    const later = diags.find((d) => d.workId === 'later')!;
+    assert.equal(later.retryPlanned, false, JSON.stringify(later));
+    assert.notEqual(later.actor, 'controller', JSON.stringify(later));
+    assert.deepEqual(diagnosisOf(ctx.policy, h, 'later'), [later], 'фильтр --work later');
+    console.log('F021 later', JSON.stringify(later));
+
+    const writer = countOf(ctx.scenarioPath, 'claude', 'writer');
+    const retries: string[] = [];
+    const retry = h.engine.retry.bind(h.engine);
+    h.engine.retry = (...args: Parameters<typeof retry>) => {
+      retries.push(args[0]);
+      return retry(...args);
+    };
+    await runGuarded(h, () => h.run({ graph: ctx.graph, author: 'claude' }));
+    assert.equal(retries.includes('later'), false, 'движок повтор later не выдаёт');
+    assert.equal(countOf(ctx.scenarioPath, 'claude', 'writer'), writer);
+    assert.equal(
+      h.engine.read((v) => v.work('later')!.attempt),
+      2,
+    );
+  } finally {
+    h.close();
+  }
+});
+
+test('H1-03 (H1-F020): explain = движок — записанный budgetBlock после повышения бюджета — лишь кэш; диагноз берёт текущий расчёт', async () => {
+  for (const change of ['raised', 'disabled'] as const) {
+    const ctx = hsetup({
+      scenario: { writer: implement(), reviewer: approve() },
+      policy: (p) => {
+        p.maxAttempts = 5;
+        p.budgets = { work: { usd: 3 }, onUnknown: 'continue' };
+      },
+    });
+    let h = ctx.open();
+    try {
+      const graph = ready(h.engine, ctx.graph, 'controller');
+      const job = h.workflows.start({ kind: 'graph', id: graph.id, authorRuntime: 'claude' });
+      h.workflows.finish(h.workflows.claim(job.key)!);
+      const a = h.engine.claim('controller')!;
+      await measuredInvoke(
+        h.engine,
+        {
+          runtime: 'codex',
+          capabilities: () =>
+            Promise.resolve({
+              runtime: 'codex',
+              structuredOutput: true,
+              sandbox: ['none'],
+              cancellation: true,
+              usage: true,
+              fixture: true,
+            }),
+          invoke: () =>
+            Promise.resolve({
+              status: 'ok',
+              model: 'fixture',
+              runtimeVersion: 'fixture',
+              text: '',
+              usage: {
+                inputTokens: 1,
+                outputTokens: 1,
+                cacheReadTokens: 0,
+                cacheWriteTokens: 0,
+                reportedUsd: 5,
+                complete: true,
+                source: 'fixture',
+              },
+              diagnostics: { exitCode: 0 },
+            }),
+        },
+        {
+          callId: 'fixture-cost',
+          task: 'review-code',
+          binding: { runtime: 'codex' },
+          cwd: ctx.repo.dir,
+          prompt: 'fixture',
+          session: { kind: 'fresh' },
+          sandbox: { mode: 'none', writable: [], denied: [], network: { domains: [] } },
+          timeoutMs: 60000,
+          env: {},
+        },
+        new AbortController().signal,
+        { repositoryId: 'app', runId: a.id, stage: 'candidate-review' },
+      );
+      h.engine.fail(a.id, a.token, 'timeout', { kind: 'timeout' });
+      h.engine.retry(a.workId);
+      assert.equal(h.engine.claim('controller'), undefined);
+      assert.ok(
+        h.engine.read((v) => v.work(a.workId)!.budgetBlock),
+        'кэш записан claim',
+      );
+      h.engine.release('controller');
+      assert.equal(diagnosisOf(ctx.policy, h)[0]!.action, 'raise-budget', 'до смены политики');
+    } finally {
+      h.close();
+    }
+    const raw = structuredClone(ctx.policy);
+    if (change === 'disabled') delete raw.budgets;
+    else raw.budgets!.work = { usd: 100 };
+    const policy = executionPolicySchema.parse(raw);
+    h = ctx.open(policy);
+    try {
+      assert.ok(
+        h.engine.read((v) => v.work('add-greeting')!.budgetBlock),
+        'кэш ещё записан',
+      );
+      const diag = diagnosisOf(policy, h)[0]!;
+      assert.notEqual(diag.action, 'raise-budget', change + ': ' + JSON.stringify(diag));
+      assert.equal(diag.actor, 'controller', change + ': ' + JSON.stringify(diag));
+      await h.run({ graph: ctx.graph, author: 'claude' });
+      assert.equal(
+        h.engine.read((v) => v.work('add-greeting')!.status),
+        'done',
+        change,
+      );
+    } finally {
+      h.close();
+    }
+  }
+});
+
+/** Детерминированный локальный вызов с сообщённым расходом $5 (без провайдера). */
+const spend5 = (h: H, ctx: Ctx, runId: string) =>
+  measuredInvoke(
+    h.engine,
+    {
+      runtime: 'codex',
+      capabilities: () =>
+        Promise.resolve({
+          runtime: 'codex',
+          structuredOutput: true,
+          sandbox: ['none'],
+          cancellation: true,
+          usage: true,
+          fixture: true,
+        }),
+      invoke: () =>
+        Promise.resolve({
+          status: 'ok',
+          model: 'fixture',
+          runtimeVersion: 'fixture',
+          text: '',
+          usage: {
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            reportedUsd: 5,
+            complete: true,
+            source: 'fixture',
+          },
+          diagnostics: { exitCode: 0 },
+        }),
+    },
+    {
+      callId: 'fixture-cost-' + runId,
+      task: 'review-code',
+      binding: { runtime: 'codex' },
+      cwd: ctx.repo.dir,
+      prompt: 'fixture',
+      session: { kind: 'fresh' },
+      sandbox: { mode: 'none', writable: [], denied: [], network: { domains: [] } },
+      timeoutMs: 60000,
+      env: {},
+    },
+    new AbortController().signal,
+    { repositoryId: 'app', runId, stage: 'candidate-review' },
+  );
+
+test('H1-03 (H1-F020): explain = движок — сломанная без эпизода, которую бюджет не выдаст, не получает обещания повтора', async () => {
+  const ctx = hsetup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p) => {
+      p.maxAttempts = 5;
+      p.budgets = { work: { usd: 3 }, onUnknown: 'continue' };
+    },
+  });
+  const h = ctx.open();
+  try {
+    const graph = ready(h.engine, ctx.graph, 'controller');
+    const job = h.workflows.start({ kind: 'graph', id: graph.id, authorRuntime: 'claude' });
+    h.workflows.finish(h.workflows.claim(job.key)!);
+    const a = h.engine.claim('controller')!;
+    await spend5(h, ctx, a.id);
+    h.engine.fail(a.id, a.token, 'timeout', { kind: 'timeout' });
+    h.engine.release('controller');
+    const held = {
+      workId: 'add-greeting',
+      retryPlanned: false,
+      actor: 'user',
+      action: 'raise-budget',
+    };
+    assert.deepEqual(diagnosisOf(ctx.policy, h), [held]);
+    const writer = ctx.calls('claude', 'writer');
+    await h.run({ graph: ctx.graph, author: 'claude' });
+    const w = h.engine.read((v) => v.work('add-greeting')!);
+    assert.equal(w.status, 'ready');
+    assert.ok(w.budgetBlock, 'claim не выдал повтор: бюджет');
+    assert.equal(ctx.calls('claude', 'writer'), writer);
+    assert.deepEqual(diagnosisOf(ctx.policy, h), [held], 'после run — тот же шаг человека');
+  } finally {
+    h.close();
+  }
+});
+
+test('H1-03 (H1-F020): status().blockers берёт текущий бюджетный расчёт, а не записанный budgetBlock', async () => {
+  const ctx = hsetup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p) => {
+      p.maxAttempts = 5;
+      p.budgets = { work: { usd: 3 }, onUnknown: 'continue' };
+    },
+  });
+  let h = ctx.open();
+  const codes = () => h.status().works[0]!.blockers.map((b) => b.code);
+  try {
+    ready(h.engine, ctx.graph, 'controller');
+    const a = h.engine.claim('controller')!;
+    await spend5(h, ctx, a.id);
+    h.engine.fail(a.id, a.token, 'timeout', { kind: 'timeout' });
+    h.engine.retry(a.workId);
+    assert.equal(
+      h.engine.read((v) => v.work(a.workId)!.budgetBlock),
+      undefined,
+    );
+    assert.ok(codes().includes('BUDGET_EXHAUSTED'), 'расход превышен до записи поля');
+    assert.equal(h.engine.claim('controller'), undefined);
+    h.engine.release('controller');
+  } finally {
+    h.close();
+  }
+  const raw = structuredClone(ctx.policy);
+  raw.budgets!.work = { usd: 100 };
+  h = ctx.open(executionPolicySchema.parse(raw));
+  try {
+    assert.ok(
+      h.engine.read((v) => v.work('add-greeting')!.budgetBlock),
+      'кэш ещё записан',
+    );
+    assert.equal(codes().includes('BUDGET_EXHAUSTED'), false, 'после повышения бюджета');
+  } finally {
+    h.close();
+  }
+});
+
+test('H1-03 (H1-F021): внешняя предпосылка с id отменённой работы другого графа не держит повтор эпизода', async () => {
+  const ctx = hsetup({
+    scenario: {
+      writer: [implement(), implement({ 'lib/farewell.js': 'exports.bye = () => "Bye";\n' })],
+      reviewer: approve(),
+    },
+    policy: (p) => {
+      p.maxAttempts = 5;
+      p.repairBudget = 5;
+    },
+  });
+  const h = ctx.open();
+  try {
+    ready(h.engine, ctx.graph, 'controller');
+    h.engine.release('controller');
+    await h.run({ graph: ctx.graph, author: 'claude' });
+    const run = h.engine.read((v) =>
+      v.attempts('add-greeting').find((a) => a.status === 'succeeded')!,
+    );
+    // Новая редакция первого графа отменяет add-greeting; второй граф опирается
+    // на принятый результат как на внешнюю предпосылку с тем же id.
+    const revised = structuredClone(ctx.graph);
+    revised.source.revision = '2';
+    revised.orders[0]!.title = 'Revised greeting';
+    revised.orders[0]!.source.revision = '2';
+    ready(h.engine, workGraphSchema.parse(revised), 'controller');
+    h.engine.cancel('add-greeting', 'revision dropped');
+    const g2raw = structuredClone(ctx.graph);
+    g2raw.id = 'g2';
+    g2raw.source = { ...g2raw.source, ref: 'g2', revision: '1' };
+    g2raw.orders = [
+      {
+        ...g2raw.orders[0]!,
+        id: 'w2',
+        source: { connector: 'files', ref: 'w2', revision: '1' },
+        title: 'farewell',
+        writeScope: ['lib'],
+        dependsOn: ['add-greeting'],
+      },
+    ];
+    g2raw.prerequisites = [
+      {
+        id: 'add-greeting',
+        repositoryId: 'app',
+        resultSha: run.integrationSha!,
+        receipt: { kind: 'engine', runId: run.id },
+      },
+    ];
+    const g2 = workGraphSchema.parse(g2raw);
+    const gs = ready(h.engine, g2, 'controller');
+    const job = h.workflows.start({ kind: 'graph', id: gs.id, authorRuntime: 'claude' });
+    h.workflows.finish(h.workflows.claim(job.key)!);
+    const a = h.engine.claim('controller')!;
+    assert.equal(a.workId, 'w2', 'claim считает внешнюю предпосылку выполненной');
+    h.engine.fail(a.id, a.token, 'review fail', { kind: 'review' });
+    // Эпизод в состоянии retry (форма после решения ведущего), записан напрямую.
+    const at = new Date(h.engine.clock()).toISOString();
+    h.store.transact('task.retry', (tx) => {
+      const w = tx.work('w2')!;
+      tx.putWork({
+        ...w,
+        recovery: {
+          id: 'RC-probe',
+          property: 'p1',
+          basis: 'a'.repeat(64),
+          runs: [a.id],
+          openedAt: at,
+          status: 'retry',
+          calls: 1,
+          history: [{ at, event: 'opened' }],
+          version: 1,
+        },
+      });
+    });
+    h.engine.release('controller');
+    assert.deepEqual(diagnosisOf(ctx.policy, h, 'w2'), [
+      { workId: 'w2', retryPlanned: true, actor: 'controller', action: 'retry' },
+    ]);
+    await h.run({ graph: g2, author: 'claude' });
+    assert.equal(
+      h.engine.read((v) => v.work('w2')!.status),
+      'done',
+    );
   } finally {
     h.close();
   }

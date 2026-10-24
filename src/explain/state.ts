@@ -59,10 +59,14 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
     const control: typeof raw = lifted
       ? { ...raw, paused: false, pauseReason: undefined, pauseFailures: undefined }
       : raw;
-    // Бюджет держит выдачу по записанному budgetBlock или по тому же расчёту,
-    // которым следующий claim его поставит (расход уже превышен, поле ещё нет).
+    // Бюджет держит выдачу по тому же расчёту, которым следующий claim ставит
+    // или снимает budgetBlock; записанное поле — лишь кэш этого расчёта
+    // (после повышения бюджета оно устаревает, выключенные бюджеты не держат).
     const budgetReason = (w: WorkState) => h.engine.budgetBlockOf(w.id, v);
-    const budgetHeld = (w: WorkState) => Boolean(w.budgetBlock) || Boolean(budgetReason(w));
+    const budgetHeld = (w: WorkState) => Boolean(budgetReason(w));
+    // Внешние предпосылки графа claim не проверяет, даже если id совпал с работой.
+    const external = (graphId: string) =>
+      new Set(v.graph(graphId)?.graph.prerequisites.map((p) => p.id) ?? []);
     const pauseLifts = (group: Map<string, Outlook>) =>
       control.pauseReason === 'runtime' &&
       (control.pauseFailures ?? []).length > 0 &&
@@ -127,6 +131,7 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
       const stops = (id: string, seen = new Set<string>()): boolean => {
         if (seen.has(id)) return false;
         seen.add(id);
+        if (external(work.graphId).has(id)) return false;
         const dep = v.work(id);
         if (!dep || dep.status === 'done') return false;
         // Сломанная без автоматического шага.
@@ -167,9 +172,7 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
           ...(work.hold
             ? { hold: { operation: work.hold.operation, reason: work.hold.reason } }
             : {}),
-          ...(work.budgetBlock || budgetReason(work)
-            ? { budgetBlock: { reason: work.budgetBlock?.reason ?? budgetReason(work)! } }
-            : {}),
+          ...(budgetReason(work) ? { budgetBlock: { reason: budgetReason(work)! } } : {}),
           ...(work.recovery ? { recovery: { status: work.recovery.status } } : {}),
           ...(waitingOn.length ? { waitingOn } : {}),
           ...(approvalStale ? { approvalStale } : {}),
@@ -222,14 +225,40 @@ function outlookOf(
   const out = new Map<string, Outlook>();
   for (const w of works) out.set(w.id, 'stop');
   let used = repairsUsed;
+  // Предпосылка, которая не станет принятой, пока движок идёт по эпизодам:
+  // отменённая, сломанная без обещанного раньше в проходе шага, готовая, которую
+  // claim не выдаст, — или ждущая такую (транзитивно). Внешние не держат.
+  const external = new Set(v.graph(graphId)?.graph.prerequisites.map((p) => p.id) ?? []);
+  const depStops = (id: string, seen = new Set<string>()): boolean => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    if (external.has(id)) return false;
+    const dep = v.work(id);
+    if (!dep || dep.status === 'done') return false;
+    if (dep.status === 'cancelled') return true;
+    if (dep.status === 'failed') return out.get(id) === 'stop';
+    if (dep.status !== 'ready') return false;
+    return (
+      Boolean(dep.hold) ||
+      budgetHeld(dep) ||
+      dep.attempt >= options.maxAttempts ||
+      (dep.recovery !== undefined && !['retry', 'closed'].includes(dep.recovery.status)) ||
+      dep.order.dependsOn.some((d) => depStops(d, seen))
+    );
+  };
+  // Повтор не будет выдан: пауза, hold, бюджет или предпосылка, на которой claim встанет.
   const unclaimable = (w: (typeof works)[number]) =>
-    control.paused || Boolean(w.hold) || budgetHeld(w);
+    control.paused ||
+    Boolean(w.hold) ||
+    budgetHeld(w) ||
+    w.order.dependsOn.some((d) => depStops(d));
   const episodes = works.filter((w) => w.recovery && w.status !== 'cancelled');
   for (const w of episodes) {
     const r = w.recovery!;
     let step: Outlook | undefined;
     // Шаг эпизода, который ведёт к повтору, продолжает группу, только если этот
-    // повтор будет выдан: afterDecision паузу не снимает, hold и budgetBlock держат.
+    // повтор будет выдан: afterDecision паузу не снимает, hold, budgetBlock и
+    // остановленная предпосылка держат.
     let continues = true;
     const active = ['running', 'verifying', 'reviewing', 'integrating'].includes(w.status);
     switch (r.status) {
@@ -293,6 +322,9 @@ function outlookOf(
       w.attempt < options.maxAttempts &&
       used + i < options.repairBudget;
     if (!retry) break;
+    // Повтор состоится и займёт единицу бюджета, но бюджет поручения его не
+    // выдаст: работе — stop (raise-budget), остальные идут дальше.
+    if (budgetHeld(w)) continue;
     out.set(w.id, ahead);
   }
   return out;

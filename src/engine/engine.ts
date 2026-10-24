@@ -860,7 +860,9 @@ export class Engine {
       });
     if (work.hold)
       out.push({ code: 'NOT_READY', message: 'Удержано операцией ' + work.hold.operation });
-    if (work.budgetBlock) out.push({ code: 'BUDGET_EXHAUSTED', message: work.budgetBlock.reason });
+    // Записанный budgetBlock — кэш расчёта claim: готовую работу держит текущий расчёт.
+    const budget = work.status === 'ready' ? this.budgetBlockOf(work.id, view) : undefined;
+    if (budget) out.push({ code: 'BUDGET_EXHAUSTED', message: budget });
     if (blocksClaim(work))
       out.push({
         code: 'NOT_READY',
