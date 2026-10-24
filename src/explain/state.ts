@@ -45,7 +45,20 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
           message: `Роль controller держит ${lease.owner} до ${new Date(lease.leaseUntil).toISOString()}.`,
         },
       });
-    const control = v.control();
+    // Control таким, каким его увидит следующий run этого процесса: run снимает
+    // паузу «не запускали» и штатную остановку, а применимый запрос политики
+    // применяет до выдачи стадии (с ним снимается и его пауза).
+    const raw = v.control();
+    const reconfigureApplies = h.engine.reconfigureApplies(v);
+    const liftsReconfigure =
+      reconfigureApplies &&
+      raw.pauseReason === 'reconfigure' &&
+      raw.pauseOperation === raw.reconfigure?.operation;
+    const lifted =
+      raw.paused && (!raw.pauseReason || raw.pauseReason === 'shutdown' || liftsReconfigure);
+    const control: typeof raw = lifted
+      ? { ...raw, paused: false, pauseReason: undefined, pauseFailures: undefined }
+      : raw;
     // Бюджет держит выдачу по записанному budgetBlock или по тому же расчёту,
     // которым следующий claim его поставит (расход уже превышен, поле ещё нет).
     const budgetReason = (w: WorkState) => h.engine.budgetBlockOf(w.id, v);
@@ -63,6 +76,36 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
             group.get(w.id) === 'retry',
         ),
       );
+    // Согласование графа, устаревшее для этой политики: в режиме agent run сам
+    // пересогласует план и начнёт новое задание (бюджет восстановлений с нуля),
+    // в режиме operator работа не выдаётся до согласования человеком.
+    const agentMode = h.policy.approvalMode === 'agent';
+    const staleOf = (w: WorkState) =>
+      h.engine.blockers(w, v).find((b) => b.code === 'APPROVAL_STALE')?.message;
+    const jobOf = (graphId: string, w: WorkState) => {
+      const live = jobs.find(
+        (j) => j.id === graphId && h.workflows.continues(j, v, { reconfigureApplies }),
+      );
+      if (live) return live;
+      if (agentMode && staleOf(w) && jobs.some((j) => j.id === graphId)) return { repairs: 0 };
+      return undefined;
+    };
+    // Прогноз по каждому графу; снятие паузы runtime — глобальное (clearFailure).
+    const groups = new Map<string, Map<string, Outlook>>();
+    const groupOf = (graphId: string, w: WorkState) => {
+      if (!groups.has(graphId)) {
+        const job = jobOf(graphId, w);
+        groups.set(
+          graphId,
+          job
+            ? outlookOf(v, graphId, job.repairs ?? 0, options, control, budgetHeld)
+            : new Map<string, Outlook>(),
+        );
+      }
+      return groups.get(graphId)!;
+    };
+    for (const w of works) groupOf(w.graphId, w);
+    const everyGroup = new Map([...groups.values()].flatMap((g) => [...g]));
     for (const work of works) {
       if (work.status === 'done') continue;
       if (options.workId !== undefined && work.id !== options.workId) continue;
@@ -75,10 +118,9 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
         : 0;
       // Чинит только задание, которое продолжит работу: активное, по текущей
       // редакции графа и с непотраченными попытками стадии (как `claim`).
-      const job = jobs.find((j) => j.id === work.graphId && h.workflows.continues(j, v));
-      const group = job
-        ? outlookOf(v, work.graphId, job.repairs ?? 0, options, control, budgetHeld)
-        : new Map<string, Outlook>();
+      const job = jobOf(work.graphId, work);
+      const group = groupOf(work.graphId, work);
+      const approvalStale = !agentMode ? staleOf(work) : undefined;
       // Готовая работа ждёт предпосылку, на которой движок остановит задание:
       // сломанную без автоматического шага или саму ждущую такую (транзитивно).
       // Готовая и выдаваемая предпосылка движок не останавливает.
@@ -104,11 +146,8 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
         return dep.status === 'ready' && dep.order.dependsOn.some((d) => stops(d, seen));
       };
       const waitingOn = work.status === 'ready' ? work.order.dependsOn.filter((d) => stops(d)) : [];
-      const outlook: Outlook | undefined = !job
-        ? 'stop'
-        : waitingOn.length
-          ? 'stop'
-          : group.get(work.id);
+      const outlook: Outlook | undefined =
+        !job || approvalStale ? 'stop' : waitingOn.length ? 'stop' : group.get(work.id);
       const evidence: EvidenceLink[] = last
         ? [
             { kind: 'attempt', id: last.id },
@@ -133,6 +172,7 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
             : {}),
           ...(work.recovery ? { recovery: { status: work.recovery.status } } : {}),
           ...(waitingOn.length ? { waitingOn } : {}),
+          ...(approvalStale ? { approvalStale } : {}),
         },
         maxAttempts: options.maxAttempts,
         repair: {
@@ -144,7 +184,7 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
         control: {
           // Пауза runtime, все причины которой снимет назначенный repair группы
           // (clearFailure блокирующего класса), для остальных работ не держит выдачу.
-          paused: control.paused && !(work.status !== 'failed' && pauseLifts(group)),
+          paused: control.paused && !(work.status !== 'failed' && pauseLifts(everyGroup)),
           ...(control.pauseReason ? { pauseReason: control.pauseReason } : {}),
           ...(control.pauseFailures ? { pauseFailures: [...control.pauseFailures] } : {}),
         },

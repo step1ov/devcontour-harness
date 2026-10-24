@@ -2116,6 +2116,20 @@ export class Engine {
    * Процесс, работающий с прежней политикой, применить запрос не может: он
    * ждёт перезапуска с ожидаемой. Такой процесс применение не отклоняет.
    */
+  /**
+   * Применит ли этот процесс ожидающий запрос политики при следующем шаге —
+   * те же условия, что у `serveReconfigure`/`applyReconfigure`. Только чтение.
+   */
+  reconfigureApplies(view: ExecutionView) {
+    const request = this.reconfiguring(view);
+    return Boolean(
+      request &&
+      !request.error &&
+      request.digest === this.loadedPolicy &&
+      this.busyWork(view).length === 0,
+    );
+  }
+
   serveReconfigure(by: string) {
     const request = this.read((v) => this.reconfiguring(v));
     if (!request || request.error || request.digest !== this.loadedPolicy)

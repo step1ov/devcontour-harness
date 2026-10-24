@@ -89,6 +89,8 @@ export type StopInput =
         recovery?: { status: string };
         /** Незавершённые предпосылки, на которых движок остановит задание. */
         waitingOn?: string[];
+        /** Согласование графа устарело для этой политики (режим operator). */
+        approvalStale?: string;
       };
       maxAttempts: number;
       repair: {
@@ -214,6 +216,15 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       actor: null,
       action: 'none',
       note: 'Поручение принято.',
+    };
+  if (work.approvalStale)
+    return {
+      code: 'APPROVAL_STALE',
+      cause: 'approval-required',
+      phase: 'claim',
+      actor: 'lead',
+      action: 'review-plan',
+      note: work.approvalStale,
     };
   const automatic = input.repair.outlook === 'wait';
   if (

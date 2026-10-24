@@ -79,12 +79,14 @@ export class WorkflowQueue {
    * выдача ещё разрешена — те же условия, что у `claim`, но без записи.
    * Им пользуется диагностика.
    */
-  continues(job: WorkflowJob, view: ExecutionView) {
-    // Пока применяется политика, стадии не начинаются (как в `claim`).
+  continues(job: WorkflowJob, view: ExecutionView, options: { reconfigureApplies?: boolean } = {}) {
+    // Пока применяется политика, стадии не начинаются (как в `claim`) — если
+    // только этот процесс не применит запрос сам до выдачи стадии.
     const control = view.control();
     if (
-      control.pauseReason === 'reconfigure' ||
-      (control.reconfigure && !control.reconfigure.appliedAt)
+      !options.reconfigureApplies &&
+      (control.pauseReason === 'reconfigure' ||
+        (control.reconfigure && !control.reconfigure.appliedAt))
     )
       return false;
     const held = job.status === 'running' && job.leaseUntil! > this.now();
