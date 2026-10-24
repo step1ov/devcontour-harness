@@ -275,7 +275,12 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
           note: `Восстановление свойства (${work.recovery.status}) ждёт решения человека.`,
         };
   }
-  if (work.status === 'failed' && !retry && input.repair.outlook === 'wait')
+  if (
+    work.status === 'failed' &&
+    !retry &&
+    work.attempt < maxAttempts &&
+    input.repair.outlook === 'wait'
+  )
     return {
       code: stopCodeOf(kind),
       cause: kind,

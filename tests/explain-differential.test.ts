@@ -4,20 +4,41 @@
  * (`h.run` с fixture runtimes), на множестве сгенерированных состояний группы.
  *
  * Генератор детерминирован (seed). Каждое состояние строится публичными
- * операциями движка (claim/fail/retry/cancel/hold/pause, решение по эпизоду);
- * эпизод свойства вводится через `store.transact`, как его открывает
- * `afterFailure()` (так же, как в explain-engine.test.ts). Модели не вызываются.
+ * операциями движка (claim/phase/fail/retry/cancel/hold/pause, решение по
+ * эпизоду). Эпизод свойства открывается двумя путями:
+ *  - естественно — режим `property` (propertySetup): первая работа связана со
+ *    свойством `knapsack-optimal`, два отказа ревью по связанному свойству
+ *    открывают эпизод в `afterFailure()`; дальше — публичные recoveryDecide
+ *    (new-approach / add-cases), retry, claim и fail;
+ *  - вводом через `store.transact`, как его открывает `afterFailure()` (так же,
+ *    как в explain-engine.test.ts), — для остальных работ группы.
+ * Модели не вызываются.
+ *
+ * Помимо случайного базового состояния генератор (вторым, независимым потоком
+ * seed, чтобы прежние базовые состояния не сдвигались) строит шаблоны форм,
+ * которых базовое распределение почти не даёт, и их соседей: отменённая
+ * работа с эпизодом (cancel после открытия — recovery сохраняется), пауза
+ * runtime от отказа в группе одновременно с эпизодами awaiting-lead (calls 0),
+ * эпизод `applying` (add-cases) на попытке < max и == max, `retrying` с
+ * работой, вновь готовой через `engine.retry`, удержание бюджетом
+ * (budgetBlock: попытка отказана классом budget, затем retry), цепочки
+ * зависимых работ за каждой из этих форм.
  *
  * Наблюдение за движком (только во время `h.run`): вызовы `engine.retry`,
- * `engine.recoveryReserve` (и его итог), вызовы writer/lead по поручению
+ * `engine.recoveryReserve` (и его итог), `engine.recoveryApplied` (add-cases), вызовы writer/lead по поручению
  * (обёртка адаптера), новые попытки и их исход, итоговые статусы, статус и
  * ошибка задания графа. Защита от известных зацикливаний движка (FI-001/FI-002):
  * обёртка `workflows.claim` обрывает прогон после MAX_CLAIMS стадий —
- * такой случай классифицируется `engine-loop` и не сравнивается.
+ * такой случай классифицируется `engine-loop`. За MAX_CLAIMS стадий движок
+ * успевает сделать всё, что сделал бы сам, поэтому R1–R3 проверяются и в нём
+ * (правило помечается «in engine-loop»; R4 — нет, задание не завершилось):
+ * в известных циклах диагноз обязан называть шаг человека, а не обещать
+ * продолжение, которого цикл не даёт. Повтор engine.retry без последующей
+ * выдачи или разбора в цикле автоматическим действием не считается (FI-001).
  *
  * Правила сравнения (на работу X; «автоматическое действие над X» = движок
- * вызвал engine.retry(X), успешно зарезервировал разбор X (`analyzing`) или
- * выдал X исполнителю):
+ * вызвал engine.retry(X), успешно зарезервировал разбор X (`analyzing`),
+ * исполнил добавление случаев X (`recoveryApplied`) или выдал X исполнителю):
  *
  *  R1 retry-promised-not-done: диагноз X — retryPlanned / controller:retry,
  *     а движок ни разу не вызвал engine.retry(X). Не считается расхождением,
@@ -40,26 +61,31 @@
  *     (controller), без возмущения — дополнительная улика к R1/R3.
  *
  * Не расхождения, а отдельные счётчики: `engine-loop/diag-human` и
- * `engine-loop/diag-controller` (прогон оборван защитой; FI-001/FI-002),
+ * `engine-loop/diag-controller` (прогон оборван защитой, FI-001/FI-002, и
+ * расхождений R1–R3 до обрыва нет),
  * заметки FI-003 (резервирование разбора отказано после списания бюджета) и
  * «engine.retry threw» (afterDecision зовёт retry на исчерпанных попытках —
  * повтор не состоялся и автоматическим действием не считается).
  *
  * Все расхождения собираются за полный проход, тест падает со списком
- * (seed + компактное описание состояния) и печатает счётчики по категориям.
+ * (seed + компактное описание состояния) и печатает счётчики по категориям
+ * и по шаблонам генератора.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import type { FailureKind, RuntimeAdapter } from '../src/contracts/index.ts';
+import { cliAdapter } from '../src/agents/cli-adapter.ts';
+import { Harness } from '../src/control/harness.ts';
 import { stopInputsOf } from '../src/explain/state.ts';
 import { explainStop } from '../src/projections/stop.ts';
 import { ready } from './engine-fixture.ts';
 import { hsetup } from './harness-fixture.ts';
-import { approve, greet, implement, type Scenario } from './runner-fixture.ts';
+import { knap, propertySetup } from './property-fixture.ts';
+import { approve, bin, greet, implement, type Scenario, type setup } from './runner-fixture.ts';
 
-type Ctx = ReturnType<typeof hsetup>;
-type H = ReturnType<Ctx['open']>;
+type Ctx = ReturnType<typeof setup>;
+type H = Harness;
 
 const N = Number(process.env.DIFF_N ?? 100);
 const SEED0 = Number(process.env.DIFF_SEED ?? 1);
@@ -91,12 +117,25 @@ type Kind = (typeof KINDS)[number];
 type EpisodeSpec =
   | { status: 'awaiting-lead'; calls: 0 | 1 }
   | { status: 'retry'; work: 'failed' | 'ready' }
-  | { status: 'retrying'; kind: Kind }
+  /** `ready` — после отказа дополнительной попытки работа снова готова (engine.retry). */
+  | { status: 'retrying'; kind: Kind; ready?: boolean }
   | { status: 'awaiting-user' | 'stopped'; ready: boolean };
+/** Продолжение естественного эпизода свойства (режим property, первая работа). */
+const PROPERTY_THEN = [
+  'awaiting-lead',
+  'retry-failed',
+  'retry-ready',
+  'applying',
+  'retrying-failed',
+  'retrying-ready',
+] as const;
+type PropertyThen = (typeof PROPERTY_THEN)[number];
 type WorkSpec =
   | { id: string; target: 'done' }
   | { id: string; target: 'ready'; hold?: boolean }
   | { id: string; target: 'cancelled' }
+  /** Готова, удержана бюджетом: попытка отказана классом budget, затем retry. */
+  | { id: string; target: 'budget' }
   | {
       id: string;
       target: 'failed';
@@ -105,23 +144,42 @@ type WorkSpec =
       sameFingerprint: boolean;
       episode?: EpisodeSpec;
       hold?: boolean;
-    };
+      /** Отменена после открытия эпизода (engine.cancel сохраняет recovery). */
+      cancel?: boolean;
+    }
+  | { id: string; target: 'property'; then: PropertyThen; hold?: boolean; cancel?: boolean };
+type Failed = Extract<WorkSpec, { target: 'failed' }>;
 interface CaseSpec {
   seed: number;
+  /** Шаблон генератора (`base` — случайное базовое состояние). */
+  template: string;
+  /** property: первая работа связана со свойством, эпизод открывается естественно. */
+  mode: 'plain' | 'property';
   maxAttempts: 2 | 3 | 5;
   repairBudget: 0 | 1 | 2 | 6;
-  /** w1 зависит от w0. */
-  dependency: boolean;
+  /** [зависимая, предпосылка]. */
+  deps: [string, string][];
   works: WorkSpec[];
   operatorPause: boolean;
+  /** Бюджет поручения (work.usd = 3) — для удержания бюджетом. */
+  budgets: boolean;
 }
 
+const IDS = ['add-greeting', 'w1', 'w2', 'w3'];
 const pick = <T>(r: () => number, xs: readonly T[]) => xs[Math.floor(r() * xs.length)]!;
+const shuffle = <T>(r: () => number, xs: T[]) => {
+  for (let i = xs.length - 1; i > 0; i--) {
+    const j = Math.floor(r() * (i + 1));
+    [xs[i], xs[j]] = [xs[j]!, xs[i]!];
+  }
+  return xs;
+};
 
-function generate(seed: number): CaseSpec {
+/** Случайное базовое состояние (прежний генератор; поток seed не меняется). */
+function base(seed: number): CaseSpec {
   const r = mulberry32(seed);
   const count = 2 + Math.floor(r() * 3);
-  const ids = ['add-greeting', 'w1', 'w2', 'w3'].slice(0, count);
+  const ids = IDS.slice(0, count);
   const maxAttempts = pick(r, [2, 3, 5] as const);
   const repairBudget = pick(r, [0, 1, 2, 6] as const);
   const dependency = r() < 0.25;
@@ -168,15 +226,225 @@ function generate(seed: number): CaseSpec {
   for (const w of works)
     if (w.target === 'failed' && w.episode?.status === 'retrying' && w.attempts + 1 > maxAttempts)
       w.episode = { status: 'retry', work: 'failed' };
-  return { seed, maxAttempts, repairBudget, dependency, works, operatorPause: r() < 0.15 };
+  return {
+    seed,
+    template: 'base',
+    mode: 'plain',
+    maxAttempts,
+    repairBudget,
+    deps: dependency ? [['w1', 'add-greeting']] : [],
+    works,
+    operatorPause: r() < 0.15,
+    budgets: false,
+  };
+}
+
+const plainFailed = (r: () => number, id: string, kinds: readonly Kind[] = KINDS): Failed => ({
+  id,
+  target: 'failed',
+  kind: pick(r, kinds),
+  attempts: r() < 0.5 ? 1 : 2,
+  sameFingerprint: r() < 0.6,
+});
+const episodeFailed = (id: string, episode: EpisodeSpec, extra: Partial<Failed> = {}): Failed => ({
+  id,
+  target: 'failed',
+  kind: 'review',
+  attempts: 2,
+  sameFingerprint: true,
+  episode,
+  ...extra,
+});
+const randomEpisode = (r: () => number, max: number): EpisodeSpec => {
+  const e = r();
+  if (e < 0.3) return { status: 'awaiting-lead', calls: r() < 0.7 ? 0 : 1 };
+  if (e < 0.55) return { status: 'retry', work: r() < 0.5 ? 'failed' : 'ready' };
+  if (e < 0.8 && max >= 3)
+    return {
+      status: 'retrying',
+      kind: pick(r, KINDS),
+      ...(max >= 4 && r() < 0.5 ? { ready: true } : {}),
+    };
+  return { status: r() < 0.5 ? 'awaiting-user' : 'stopped', ready: r() < 0.3 };
+};
+
+/**
+ * Сосед формы на свободном месте: зависимая готовая (цепочка за одной из
+ * уже размещённых работ), готовая, сломанная без эпизода, принятая или
+ * отменённая.
+ */
+function neighbour(
+  r: () => number,
+  id: string,
+  placed: WorkSpec[],
+  deps: [string, string][],
+): WorkSpec {
+  const x = r();
+  const parents = placed.filter((w) => w.target !== 'done' && w.target !== 'cancelled');
+  if (x < 0.4 && parents.length) {
+    // Предпочтительно за последней размещённой работой — так растут цепочки.
+    const parent = r() < 0.6 ? parents.at(-1)! : pick(r, parents);
+    deps.push([id, parent.id]);
+    return { id, target: 'ready', ...(r() < 0.1 ? { hold: true } : {}) };
+  }
+  if (x < 0.55) return { id, target: 'ready' };
+  if (x < 0.85) return plainFailed(r, id);
+  if (x < 0.93) return { id, target: 'done' };
+  return { id, target: 'cancelled' };
+}
+
+/** Раскладка ролей формы по местам: ведущие работы — в начале, соседи — после. */
+function layout(
+  r: () => number,
+  core: ((id: string) => WorkSpec)[],
+  first: WorkSpec[] = [],
+): { works: WorkSpec[]; deps: [string, string][] } {
+  const deps: [string, string][] = [];
+  const works = [...first];
+  for (const make of core) works.push(make(IDS[works.length]!));
+  const total = Math.min(
+    IDS.length,
+    works.length + Math.floor(r() * (IDS.length - works.length + 1)),
+  );
+  while (works.length < total) works.push(neighbour(r, IDS[works.length]!, works, deps));
+  return { works, deps };
+}
+
+const TEMPLATES = [
+  'cancel-episode',
+  'pause-lead',
+  'applying',
+  'ready-retrying',
+  'natural',
+  'budget',
+] as const;
+
+function template(seed: number, r: () => number, name: (typeof TEMPLATES)[number]): CaseSpec {
+  const common = {
+    seed,
+    template: name,
+    operatorPause: r() < 0.08,
+    budgets: false,
+    repairBudget: pick(r, [1, 2, 6, 6] as const) as CaseSpec['repairBudget'],
+  };
+  switch (name) {
+    case 'cancel-episode': {
+      // Эпизод A (повтор), отменённая B с эпизодом, сломанная C без эпизода — в любом порядке.
+      const maxAttempts = pick(r, [3, 5] as const);
+      const roles = shuffle(r, [
+        (id: string) =>
+          r() < 0.8
+            ? episodeFailed(id, { status: 'retry', work: r() < 0.5 ? 'failed' : 'ready' })
+            : plainFailed(r, id),
+        (id: string) => episodeFailed(id, randomEpisode(r, maxAttempts), { cancel: true }),
+        (id: string) => plainFailed(r, id, ['timeout', 'gate', 'unknown', 'review']),
+      ]);
+      return { ...common, mode: 'plain', maxAttempts, ...layout(r, roles) };
+    }
+    case 'pause-lead': {
+      // Эпизоды awaiting-lead (calls 0) и отказ среды/доступа, ставящий паузу runtime.
+      const maxAttempts = pick(r, [3, 5] as const);
+      const roles = shuffle(r, [
+        (id: string) => episodeFailed(id, { status: 'awaiting-lead', calls: 0 }),
+        (id: string) =>
+          r() < 0.6
+            ? episodeFailed(id, { status: 'awaiting-lead', calls: 0 })
+            : r() < 0.5
+              ? episodeFailed(id, randomEpisode(r, maxAttempts))
+              : plainFailed(r, id),
+        (id: string) => ({
+          ...plainFailed(r, id, ['environment', 'provider-auth']),
+          attempts: 1 as const,
+        }),
+      ]);
+      return { ...common, mode: 'plain', maxAttempts, ...layout(r, roles) };
+    }
+    case 'applying': {
+      // add-cases на естественном эпизоде: попытка 2 == max (2) или < max.
+      const maxAttempts = pick(r, [2, 2, 3, 5] as const);
+      const first: WorkSpec[] = [
+        { id: IDS[0]!, target: 'property', then: 'applying', ...(r() < 0.1 ? { hold: true } : {}) },
+      ];
+      return { ...common, mode: 'property', maxAttempts, ...layout(r, [], first) };
+    }
+    case 'ready-retrying': {
+      // retrying, работа которого снова готова через engine.retry (без активной попытки).
+      const maxAttempts = 5 as const;
+      if (r() < 0.5) {
+        const first: WorkSpec[] = [{ id: IDS[0]!, target: 'property', then: 'retrying-ready' }];
+        return { ...common, mode: 'property', maxAttempts, ...layout(r, [], first) };
+      }
+      const roles = [
+        (id: string) =>
+          episodeFailed(id, { status: 'retrying', kind: pick(r, KINDS), ready: true }),
+      ];
+      return { ...common, mode: 'plain', maxAttempts, ...layout(r, roles) };
+    }
+    case 'natural': {
+      let then = pick(r, PROPERTY_THEN);
+      const maxAttempts = pick(r, [2, 3, 5] as const);
+      // Дополнительная попытка эпизода требует свободной попытки.
+      if (then.startsWith('retrying') && maxAttempts < 3) then = 'retry-failed';
+      if (then === 'retrying-ready' && maxAttempts < 4) then = 'retrying-failed';
+      if (then === 'retry-ready' && maxAttempts < 3) then = 'retry-failed';
+      const first: WorkSpec[] = [
+        {
+          id: IDS[0]!,
+          target: 'property',
+          then,
+          ...(r() < 0.12 ? { cancel: true } : r() < 0.1 ? { hold: true } : {}),
+        },
+      ];
+      const roles =
+        r() < 0.3
+          ? [
+              (id: string) => ({
+                ...plainFailed(r, id, ['environment', 'provider-auth']),
+                attempts: 1 as const,
+              }),
+            ]
+          : r() < 0.3
+            ? [(id: string) => episodeFailed(id, randomEpisode(r, maxAttempts))]
+            : [];
+      return { ...common, mode: 'property', maxAttempts, ...layout(r, roles, first) };
+    }
+    case 'budget': {
+      const maxAttempts = pick(r, [3, 5] as const);
+      const roles = shuffle(r, [
+        (id: string): WorkSpec => ({ id, target: 'budget' }),
+        (id: string) =>
+          r() < 0.5 ? plainFailed(r, id) : episodeFailed(id, randomEpisode(r, maxAttempts)),
+      ]);
+      return { ...common, mode: 'plain', maxAttempts, budgets: true, ...layout(r, roles) };
+    }
+  }
+}
+
+const TEMPLATE_SHARE = 0.5;
+
+function generate(seed: number): CaseSpec {
+  const spec = base(seed);
+  // Второй поток: шаблоны и дополнения не сдвигают базовые состояния прежних seed.
+  const r = mulberry32((seed * 0x9e3779b1) ^ 0x5bd1e995);
+  if (r() < TEMPLATE_SHARE) return template(seed, r, pick(r, TEMPLATES));
+  for (const w of spec.works) {
+    if (w.target !== 'failed' || !w.episode) continue;
+    if (r() < 0.12) w.cancel = true;
+    if (w.episode.status === 'retrying' && w.attempts + 2 <= spec.maxAttempts && r() < 0.4)
+      w.episode.ready = true;
+  }
+  return spec;
 }
 
 const describe = (c: CaseSpec) =>
-  `max=${c.maxAttempts} budget=${c.repairBudget}${c.dependency ? ' dep(w1→add-greeting)' : ''}${c.operatorPause ? ' PAUSE(operator)' : ''} | ` +
+  `[${c.template}${c.mode === 'property' ? ' property' : ''}] max=${c.maxAttempts} budget=${c.repairBudget}` +
+  `${c.budgets ? ' budgets(work $3)' : ''}${c.deps.map(([a, b]) => ` dep(${a}→${b})`).join('')}` +
+  `${c.operatorPause ? ' PAUSE(operator)' : ''} | ` +
   c.works
     .map((w) => {
-      if (w.target !== 'failed')
-        return `${w.id}:${w.target}${'hold' in w && w.hold ? '+hold' : ''}`;
+      const flags = `${'hold' in w && w.hold ? '+hold' : ''}${'cancel' in w && w.cancel ? '+cancel' : ''}`;
+      if (w.target === 'property') return `${w.id}:property(natural→${w.then})${flags}`;
+      if (w.target !== 'failed') return `${w.id}:${w.target}${flags}`;
       const ep = w.episode
         ? ' ep=' +
           w.episode.status +
@@ -185,7 +453,7 @@ const describe = (c: CaseSpec) =>
           ('kind' in w.episode ? `(then ${w.episode.kind})` : '') +
           ('ready' in w.episode && w.episode.ready ? '(+retry→ready)' : '')
         : '';
-      return `${w.id}:failed ${w.kind}×${w.attempts}${w.attempts > 1 ? (w.sameFingerprint ? ' same-fp' : ' diff-fp') : ''}${ep}${w.hold ? '+hold' : ''}`;
+      return `${w.id}:failed ${w.kind}×${w.attempts}${w.attempts > 1 ? (w.sameFingerprint ? ' same-fp' : ' diff-fp') : ''}${ep}${flags}`;
     })
     .join(', ');
 
@@ -210,43 +478,81 @@ interface Observed {
   retried: Map<string, number>;
   retryThrew: Map<string, number>;
   reserved: Map<string, string[]>;
+  /** Итог engine.recoveryApplied (подтверждение добавленных случаев). */
+  applied: Map<string, string[]>;
   writer: Map<string, number>;
   lead: Map<string, number>;
   claims: number;
   active: boolean;
 }
 
+const UNIT_GATE = {
+  id: 'unit',
+  kind: 'test',
+  command: [process.execPath, 'test/run.js'],
+  report: { type: 'junit', path: 'test-results/junit.xml' },
+};
+
 function build(spec: CaseSpec) {
   const ids = spec.works.map((w) => w.id);
-  // Роль lead fixture читает из того же сценария (Scenario её не объявляет).
-  const scenario: Scenario = { writer: implement(), reviewer: approve(), ...{ lead: LEAD } };
-  const ctx = hsetup({
-    scenario,
-    files: { 'src/greet.js': greet },
-    policy: (p) => {
-      p.maxAttempts = spec.maxAttempts;
-      p.repairBudget = spec.repairBudget;
-      // Постройка выдаёт все последние попытки сразу (до 4 работ).
-      p.concurrency = 4;
-    },
-    graph: (raw) => {
-      const orders = raw.orders as Record<string, unknown>[];
-      orders[0]!.writeScope = ['lib/add-greeting'];
-      for (const id of ids.slice(1))
-        orders.push({
-          ...orders[0],
-          id,
-          source: { connector: 'files', ref: id, revision: '1' },
-          title: 'Independent work ' + id,
-          writeScope: ['lib/' + id],
-          dependsOn: spec.dependency && id === 'w1' ? [orders[0]!.id] : [],
-        });
-    },
+  const dependsOn = (id: string) => spec.deps.filter(([a]) => a === id).map(([, b]) => b);
+  const policy = (p: Record<string, unknown>) => {
+    p.maxAttempts = spec.maxAttempts;
+    p.repairBudget = spec.repairBudget;
+    // Постройка выдаёт все последние попытки сразу (до 4 работ).
+    p.concurrency = 4;
+    if (spec.budgets) p.budgets = { work: { usd: 3 }, onUnknown: 'continue' };
+  };
+  const order = (first: Record<string, unknown>, id: string) => ({
+    ...first,
+    id,
+    source: { connector: 'files', ref: id, revision: '1' },
+    title: 'Independent work ' + id,
+    writeScope: ['lib/' + id],
+    dependsOn: dependsOn(id),
   });
+  let ctx: Ctx;
+  if (spec.mode === 'property') {
+    // Первая работа — со свойством knapsack-optimal и gate properties; остальные — на unit.
+    ctx = propertySetup({
+      writer: implement({ 'src/knap.mjs': knap.correct }),
+      lead: LEAD,
+      files: { 'src/greet.js': greet },
+      policy: (p) => {
+        policy(p);
+        (p.repositories as { gates: unknown[] }[])[0]!.gates.push(UNIT_GATE);
+      },
+    });
+    const orders = ctx.graph.orders as unknown as Record<string, unknown>[];
+    for (const id of ids.slice(1)) {
+      const o: Record<string, unknown> = {
+        ...order(orders[0]!, id),
+        gates: ['unit'],
+        contracts: [],
+      };
+      delete o.properties;
+      orders.push(o);
+    }
+    ctx.store.close();
+  } else {
+    // Роль lead fixture читает из того же сценария (Scenario её не объявляет).
+    const scenario: Scenario = { writer: implement(), reviewer: approve(), ...{ lead: LEAD } };
+    ctx = hsetup({
+      scenario,
+      files: { 'src/greet.js': greet },
+      policy,
+      graph: (raw) => {
+        const orders = raw.orders as Record<string, unknown>[];
+        orders[0]!.writeScope = ['lib/add-greeting'];
+        for (const id of ids.slice(1)) orders.push(order(orders[0]!, id));
+      },
+    });
+  }
   const obs: Observed = {
     retried: new Map(),
     retryThrew: new Map(),
     reserved: new Map(),
+    applied: new Map(),
     writer: new Map(),
     lead: new Map(),
     claims: 0,
@@ -254,15 +560,21 @@ function build(spec: CaseSpec) {
   };
   const inc = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) ?? 0) + 1);
   // Сценарий writer по поручению: каждая работа пишет в свою область.
-  for (const id of ids)
+  for (const w of spec.works) {
+    const files =
+      w.target === 'property'
+        ? { 'src/knap.mjs': knap.correct }
+        : { [`lib/${w.id}/impl.js`]: `exports.id = ${JSON.stringify(w.id)};\n` };
     writeFileSync(
-      `${ctx.scenarioPath}.${id}.json`,
+      `${ctx.scenarioPath}.${w.id}.json`,
       JSON.stringify({
-        writer: implement({ [`lib/${id}/impl.js`]: `exports.id = ${JSON.stringify(id)};\n` }),
+        // Удержание бюджетом: расход writer выше предела поручения ($3).
+        writer: { ...implement(files), ...(w.target === 'budget' ? { costUsd: 5 } : {}) },
         reviewer: approve(),
         lead: LEAD,
       }),
     );
+  }
   const wrap = (a: RuntimeAdapter): RuntimeAdapter => ({
     runtime: a.runtime,
     capabilities: () => a.capabilities(),
@@ -282,7 +594,25 @@ function build(spec: CaseSpec) {
       return a.invoke(request, signal);
     },
   });
-  const h = ctx.open(ctx.policy, wrap);
+  const h = Harness.open({
+    stateDir: ctx.state,
+    policy: ctx.policy,
+    baseDir: ctx.repo.dir,
+    adapters: {
+      claude: wrap(
+        cliAdapter('claude', {
+          executable: bin('fake-claude'),
+          toolProfiles: ctx.policy.toolProfiles,
+        }),
+      ),
+      codex: wrap(
+        cliAdapter('codex', {
+          executable: bin('fake-codex'),
+          toolProfiles: ctx.policy.toolProfiles,
+        }),
+      ),
+    },
+  });
   return { ctx, h, obs, inc };
 }
 
@@ -318,8 +648,9 @@ const injectEpisode = (
   return at;
 };
 
-const decideNewApproach = (h: H, workId: string, at: string) =>
-  h.engine.recoveryDecide(workId, 'RC-' + workId, {
+const now = (h: H) => new Date(h.engine.clock()).toISOString();
+const decideNewApproach = (h: H, workId: string, at: string, recoveryId = 'RC-' + workId) =>
+  h.engine.recoveryDecide(workId, recoveryId, {
     action: 'new-approach',
     reason: 'operator decided a new approach',
     evidence: [],
@@ -328,8 +659,31 @@ const decideNewApproach = (h: H, workId: string, at: string) =>
     source: { kind: 'operator' },
     decidedAt: at,
   });
+/** Подтверждаемый контрпример рюкзака: заглушка в HEAD на нём падает. */
+const decideAddCases = (h: H, workId: string, recoveryId: string) =>
+  h.engine.recoveryDecide(workId, recoveryId, {
+    action: 'add-cases',
+    reason: 'Add a confirmed knapsack counterexample',
+    evidence: [],
+    cases: [
+      {
+        input: JSON.stringify({
+          items: [
+            { w: 1, v: 1 },
+            { w: 1, v: 1 },
+            { w: 1, v: 1 },
+            { w: 1, v: 9 },
+          ],
+          cap: 4,
+        }),
+        expected: '12',
+      },
+    ],
+    source: { kind: 'operator' },
+    decidedAt: now(h),
+  });
 
-const message = (w: Extract<WorkSpec, { target: 'failed' }>, n: number, kind: Kind) =>
+const message = (w: Failed, n: number, kind: Kind) =>
   kind === 'environment'
     ? `getaddrinfo ENOTFOUND fixture ${w.sameFingerprint ? 'same' : ['alpha', 'beta', 'gamma'][n]}`
     : `fixture ${kind} failure ${w.sameFingerprint ? 'same' : ['alpha', 'beta', 'gamma'][n]}`;
@@ -348,9 +702,10 @@ function construct(spec: CaseSpec, ctx: Ctx, h: H) {
   const graph = ready(h.engine, ctx.graph, 'controller');
   const job = h.workflows.start({ kind: 'graph', id: graph.id, authorRuntime: 'claude' });
   h.workflows.finish(h.workflows.claim(job.key)!);
-  const others = spec.works.filter((w) => w.target !== 'done').map((w) => w.id);
-  // 1) Принятые работы: настоящий прогон одного шага, остальные удержаны.
-  if (spec.works.some((w) => w.target === 'done')) {
+  // Шаг 1 — настоящий прогон: принятые работы и попытки, отказанные бюджетом.
+  const live: WorkSpec[] = spec.works.filter((w) => w.target === 'done' || w.target === 'budget');
+  const others = spec.works.filter((w) => !live.includes(w)).map((w) => w.id);
+  if (live.length) {
     if (others.length) h.engine.hold(others, 'setup', 'differential setup');
     h.engine.release('controller');
     return { job, pending: true as const, others };
@@ -358,32 +713,86 @@ function construct(spec: CaseSpec, ctx: Ctx, h: H) {
   return { job, pending: false as const, others };
 }
 
+/** Естественный эпизод свойства: два отказа ревью по связанному свойству, затем решение. */
+function propertyEpisode(
+  ctx: Ctx,
+  h: H,
+  spec: CaseSpec,
+  w: Extract<WorkSpec, { target: 'property' }>,
+) {
+  const boundFail = (n: number) => {
+    const a = claimOf(h, w.id);
+    h.engine.phase(a.id, a.token, 'verifying', { candidateSha: ctx.repo.git('rev-parse', 'HEAD') });
+    h.engine.fail(a.id, a.token, 'property failure ' + n, {
+      kind: 'review',
+      properties: { bound: ['knapsack-optimal'], unbound: [] },
+    });
+  };
+  const read = () => h.engine.read((v) => v.work(w.id)!);
+  boundFail(0);
+  h.engine.retry(w.id);
+  boundFail(1);
+  const opened = read().recovery;
+  assert.equal(opened?.status, 'awaiting-lead', 'setup: natural episode ' + w.id);
+  const rid = opened.id;
+  const free = () => read().attempt < spec.maxAttempts;
+  switch (w.then) {
+    case 'awaiting-lead':
+      break;
+    case 'retry-failed':
+    case 'retry-ready':
+      decideNewApproach(h, w.id, now(h), rid);
+      if (w.then === 'retry-ready' && free()) h.engine.retry(w.id);
+      break;
+    case 'applying':
+      decideAddCases(h, w.id, rid);
+      assert.equal(read().recovery?.status, 'applying', 'setup: applying ' + w.id);
+      break;
+    case 'retrying-failed':
+    case 'retrying-ready': {
+      decideNewApproach(h, w.id, now(h), rid);
+      h.engine.retry(w.id);
+      const a = claimOf(h, w.id);
+      // Отказ, не связанный со свойством: эпизод остаётся retrying.
+      h.engine.fail(a.id, a.token, 'gate failed unrelated to property', { kind: 'gate' });
+      assert.equal(read().recovery?.status, 'retrying', 'setup: retrying ' + w.id);
+      if (w.then === 'retrying-ready' && free()) h.engine.retry(w.id);
+      break;
+    }
+  }
+}
+
 async function constructRest(spec: CaseSpec, ctx: Ctx, h: H, others: string[], pending: boolean) {
   if (pending) {
     // Шаг за шагом: зависимая принятая работа выдаётся после своей предпосылки.
-    for (let i = 0; i < 3; i++) {
+    const settled = () =>
+      spec.works.every((w) => {
+        const s = h.engine.read((v) => v.work(w.id)!.status);
+        return w.target === 'done' ? s === 'done' : w.target === 'budget' ? s === 'failed' : true;
+      });
+    for (let i = 0; i < 4 && !settled(); i++)
       await h.run({ graph: ctx.graph, author: 'claude', once: true });
-      if (
-        spec.works.every(
-          (w) => w.target !== 'done' || h.engine.read((v) => v.work(w.id)!.status) === 'done',
-        )
-      )
-        break;
-    }
-    for (const w of spec.works)
+    for (const w of spec.works) {
       if (w.target === 'done')
         assert.equal(
           h.engine.read((v) => v.work(w.id)!.status),
           'done',
           'setup: done ' + w.id,
         );
+      if (w.target === 'budget') {
+        const s = h.engine.read((v) => v.work(w.id)!);
+        assert.equal(s.status, 'failed', 'setup: budget ' + w.id);
+        assert.equal(s.failureKind, 'budget', 'setup: budget kind ' + w.id);
+        h.engine.retry(w.id);
+      }
+    }
     if (others.length) h.engine.releaseHold('setup');
     assert.ok(h.engine.lead('controller'), 'setup: lead');
   }
-  const failed = spec.works.filter(
-    (w): w is Extract<WorkSpec, { target: 'failed' }> => w.target === 'failed',
+  const failed = spec.works.filter((w): w is Failed => w.target === 'failed');
+  const idle: WorkSpec[] = spec.works.filter(
+    (w) => w.target === 'ready' || w.target === 'cancelled' || w.target === 'budget',
   );
-  const idle = spec.works.filter((w) => w.target === 'ready' || w.target === 'cancelled');
   // Не участвующие в попытках — удержаны, чтобы claim выдавал по порядку только нужные.
   const holdIdle = () =>
     idle.length &&
@@ -393,11 +802,24 @@ async function constructRest(spec: CaseSpec, ctx: Ctx, h: H, others: string[], p
       'differential setup',
     );
   holdIdle();
+  // 1a) Естественный эпизод свойства (первая работа), остальные сломанные удержаны.
+  for (const w of spec.works) {
+    if (w.target !== 'property') continue;
+    if (failed.length)
+      h.engine.hold(
+        failed.map((x) => x.id),
+        'setup3',
+        'differential setup',
+      );
+    propertyEpisode(ctx, h, spec, w);
+    if (failed.length) h.engine.releaseHold('setup3');
+  }
+  const properties = spec.works.filter((w) => w.target === 'property').map((w) => w.id);
   // 2) Предварительные попытки (вторая попытка или эпизод retrying).
   for (const w of failed) {
     const pre = w.attempts - 1;
+    const others2 = [...properties, ...failed.filter((x) => x.id !== w.id).map((x) => x.id)];
     for (let i = 0; i < pre; i++) {
-      const others2 = failed.filter((x) => x.id !== w.id).map((x) => x.id);
       if (others2.length) h.engine.hold(others2, 'setup2', 'differential setup');
       const a = claimOf(h, w.id);
       h.engine.fail(a.id, a.token, message(w, i, w.kind), { kind: w.kind });
@@ -405,7 +827,6 @@ async function constructRest(spec: CaseSpec, ctx: Ctx, h: H, others: string[], p
       if (others2.length) h.engine.releaseHold('setup2');
     }
     if (w.episode?.status === 'retrying') {
-      const others2 = failed.filter((x) => x.id !== w.id).map((x) => x.id);
       if (others2.length) h.engine.hold(others2, 'setup2', 'differential setup');
       const a = claimOf(h, w.id);
       h.engine.fail(a.id, a.token, message(w, 2, 'review'), { kind: 'review' });
@@ -415,6 +836,7 @@ async function constructRest(spec: CaseSpec, ctx: Ctx, h: H, others: string[], p
     }
   }
   // 3) Последние попытки: все выдаются, пока очередь не на паузе, затем отказы по порядку.
+  if (properties.length) h.engine.hold(properties, 'setup3', 'differential setup');
   const c = h.engine.read((v) => v.control());
   if (c.paused && c.pauseReason === 'runtime') h.engine.clearFailure([...(c.pauseFailures ?? [])]);
   const claimed = failed.map((w) => {
@@ -428,24 +850,39 @@ async function constructRest(spec: CaseSpec, ctx: Ctx, h: H, others: string[], p
     const kind = w.episode?.status === 'retrying' ? w.episode.kind : w.kind;
     h.engine.fail(a.id, a.token, message(w, w.attempts - 1, kind), { kind });
   }
+  // Удержание бюджетом закрепляется выдачей: claim пересчитывает budgetBlock готовых.
+  if (spec.works.some((w) => w.target === 'budget')) {
+    const rest = spec.works
+      .filter((w) => !idle.includes(w) && w.target !== 'done' && !properties.includes(w.id))
+      .map((w) => w.id);
+    if (rest.length) h.engine.hold(rest, 'setup4', 'differential setup');
+    assert.equal(h.engine.claim('controller'), undefined, 'setup: budget claim');
+    if (rest.length) h.engine.releaseHold('setup4');
+  }
+  if (properties.length) h.engine.releaseHold('setup3');
   if (idle.length) h.engine.releaseHold('setup');
   // 4) Эпизоды и решения человека над итоговым состоянием.
   for (const w of failed) {
     const e = w.episode;
-    if (!e || e.status === 'retrying') continue;
-    if (e.status === 'awaiting-lead') injectEpisode(h, w.id, 'awaiting-lead', e.calls);
+    if (!e) continue;
+    const free = () => h.engine.read((v) => v.work(w.id)!.attempt) < spec.maxAttempts;
+    if (e.status === 'retrying') {
+      // retrying с готовой работой: engine.retry без активной попытки.
+      if (e.ready && free()) h.engine.retry(w.id);
+    } else if (e.status === 'awaiting-lead') injectEpisode(h, w.id, 'awaiting-lead', e.calls);
     else if (e.status === 'retry') {
       decideNewApproach(h, w.id, injectEpisode(h, w.id, 'awaiting-lead', 0));
       // Готовым эпизод бывает только со свободной попыткой (иначе retry требует сброса).
-      if (e.work === 'ready' && h.engine.read((v) => v.work(w.id)!.attempt) < spec.maxAttempts)
-        h.engine.retry(w.id);
+      if (e.work === 'ready' && free()) h.engine.retry(w.id);
     } else {
       injectEpisode(h, w.id, e.status, 1);
-      if (e.ready && h.engine.read((v) => v.work(w.id)!.attempt) < spec.maxAttempts)
-        h.engine.retry(w.id);
+      if (e.ready && free()) h.engine.retry(w.id);
     }
   }
-  for (const w of spec.works) if (w.target === 'cancelled') h.engine.cancel(w.id);
+  // Отмена: и без попыток, и после открытия эпизода (recovery сохраняется).
+  for (const w of spec.works)
+    if (w.target === 'cancelled' || ('cancel' in w && w.cancel))
+      h.engine.cancel(w.id, 'differential cancel');
   const held = spec.works.filter((w) => 'hold' in w && w.hold).map((w) => w.id);
   if (held.length) h.engine.hold(held, 'probe-op', 'operation in progress');
   if (spec.operatorPause) h.engine.pause('operator');
@@ -498,6 +935,7 @@ function workShape(h: H, id: string, spec: CaseSpec) {
       `a${w.attempt}/${spec.maxAttempts}`,
       w.recovery ? `ep:${w.recovery.status}` : 'noep',
       w.hold ? 'hold' : '',
+      w.budgetBlock ? 'budgetBlock' : '',
       c.paused ? `paused:${c.pauseReason ?? '?'}` : '',
     ]
       .filter(Boolean)
@@ -566,6 +1004,16 @@ async function runCase(seed: number): Promise<CaseResult> {
       obs.reserved.set(id, [...(obs.reserved.get(id) ?? []), r.status]);
       return r;
     };
+    // Исполнение add-cases (applying): движок сам подтверждает случаи эталоном —
+    // автоматическое действие над X, как и резервирование разбора.
+    const origApplied = engine.recoveryApplied!.bind(h.engine);
+    engine.recoveryApplied = (...args: unknown[]) => {
+      const r = origApplied(...args) as { recovery?: { status: string } };
+      const id = args[0] as string;
+      const status = h.engine.read((v) => v.work(id)?.recovery?.status ?? '-');
+      obs.applied.set(id, [...(obs.applied.get(id) ?? []), status]);
+      return r;
+    };
     const wf = h.workflows as unknown as Record<string, (...a: unknown[]) => unknown>;
     const origClaim = wf.claim!.bind(h.workflows);
     wf.claim = (...args: unknown[]) => {
@@ -581,24 +1029,24 @@ async function runCase(seed: number): Promise<CaseResult> {
       runError = (error as Error).message;
     }
     obs.active = false;
-    if (runError === 'DIFF_ENGINE_LOOP')
-      return {
-        seed,
-        // Известные зацикливания движка (FI-001/FI-002) не сравниваются; отдельно
-        // считаются те, где диагноз обещал автоматическое продолжение (controller).
-        category: diags.some((d) => d.actor === 'controller')
-          ? 'engine-loop/diag-controller'
-          : 'engine-loop/diag-human',
-        mismatches: [],
-        notes: [
-          `${seed}: engine-loop | ${state} | diag ${diags.map((d) => `${d.workId}=${d.actor}:${d.action}`).join(' ')} | before loop: ${diags
-            .map(
-              (d) =>
-                `${d.workId} retry×${obs.retried.get(d.workId) ?? 0} lead×${obs.lead.get(d.workId) ?? 0} writer×${obs.writer.get(d.workId) ?? 0}`,
-            )
-            .join(', ')}`,
-        ],
-      };
+    // Прогон оборван защитой (известные зацикливания FI-001/FI-002). До обрыва
+    // движок прошёл MAX_CLAIMS стадий: всё, что он сделал бы сам, уже сделано.
+    // Поэтому R1–R3 сравниваются и здесь (правило с пометкой «in engine-loop»):
+    // диагноз в таких состояниях обязан называть шаг человека, а не обещать
+    // продолжение, которого цикл не даёт (H1-F015/F017). R4 — нет: задание не
+    // завершилось.
+    const loop = runError === 'DIFF_ENGINE_LOOP';
+    if (loop) {
+      runError = undefined;
+      notes.push(
+        `${seed}: engine-loop | ${state} | diag ${diags.map((d) => `${d.workId}=${d.actor}:${d.action}`).join(' ')} | before loop: ${diags
+          .map(
+            (d) =>
+              `${d.workId} retry×${obs.retried.get(d.workId) ?? 0} lead×${obs.lead.get(d.workId) ?? 0} writer×${obs.writer.get(d.workId) ?? 0}`,
+          )
+          .join(', ')}`,
+      );
+    }
     const job = h.workflows.list().find((j) => j.kind === 'graph')!;
     const jobError = job.error ?? runError ?? '';
     // Возмущение: новая попытка прогона не принята, разбор ведущего не дал решения
@@ -620,6 +1068,7 @@ async function runCase(seed: number): Promise<CaseResult> {
       [
         `retry×${obs.retried.get(id) ?? 0}${obs.retryThrew.get(id) ? `(threw×${obs.retryThrew.get(id)})` : ''}`,
         `reserve=${(obs.reserved.get(id) ?? []).join('/') || '-'}`,
+        obs.applied.get(id) ? `applied→${obs.applied.get(id)!.join('/')}` : '',
         `writer×${obs.writer.get(id) ?? 0}`,
         `lead×${obs.lead.get(id) ?? 0}`,
         `${statusBefore.get(id)}→${finalStatus.get(id)}`,
@@ -635,15 +1084,25 @@ async function runCase(seed: number): Promise<CaseResult> {
       const id = d.workId;
       const retried = (obs.retried.get(id) ?? 0) > 0;
       const analyzed = (obs.reserved.get(id) ?? []).includes('analyzing');
+      // Только исполнение, после которого движок продолжает (эпизод → retry).
+      // applied→stopped (случаи подтверждены, попытки исчерпаны) — детерминированная
+      // остановка движка: шаг человека (reset-attempts) остаётся, R2 не про неё.
+      const applied = (obs.applied.get(id) ?? []).some((s) => s !== 'stopped');
       const refusedReserve = (obs.reserved.get(id) ?? []).some((s) => s !== 'analyzing');
       const executed = (obs.writer.get(id) ?? 0) > 0;
-      const automatic = retried || analyzed || executed;
+      // В оборванном цикле engine.retry, за которым не последовало ни выдачи, ни
+      // разбора, — это сам механизм FI-001 (afterDecision повторяет под паузой
+      // runtime и «ждёт»): работа стала ready, но движок её не выдаёт, пока
+      // человек не снимет причину паузы. Диагноз «fix-environment/fix-access»
+      // при этом верен, поэтому такой retry действием над X не считается (иначе
+      // R2 — ложное срабатывание оракула). Вне цикла правило прежнее.
+      const automatic = (loop ? false : retried) || analyzed || applied || executed;
       const human = d.actor === 'user' || d.actor === 'lead';
       const controller = d.actor === 'controller';
       const add = (rule: string) =>
         mismatches.push({
           seed,
-          rule,
+          rule: loop ? rule + ' (in engine-loop)' : rule,
           workId: id,
           state,
           diag: `${d.actor}:${d.action}${d.retryPlanned ? ' (retryPlanned)' : ''} [${d.code}]`,
@@ -683,6 +1142,7 @@ async function runCase(seed: number): Promise<CaseResult> {
         add(held ? 'R3h wait-on-hold (semantic)' : 'R3 wait-promised-nothing-happened');
       }
       if (
+        !loop &&
         controller &&
         !disturbed.length &&
         job.status === 'failed' &&
@@ -692,13 +1152,28 @@ async function runCase(seed: number): Promise<CaseResult> {
         add('R4 job-stopped-on-promised-work');
     }
     void controlBefore;
+    if (process.env.DIFF_VERBOSE)
+      notes.push(
+        `${seed}: ${state}\n` +
+          diags
+            .map(
+              (d) =>
+                `      ${d.workId} [${shapes.get(d.workId)}] diag ${d.actor}:${d.action}${d.retryPlanned ? ' (retryPlanned)' : ''} [${d.code}] | engine ${engineOf(d.workId)}`,
+            )
+            .join('\n'),
+      );
+    const failing = mismatches.some((m) => !m.rule.startsWith('R3h'));
     return {
       seed,
-      category: mismatches.some((m) => !m.rule.startsWith('R3h'))
+      category: failing
         ? 'mismatch'
-        : mismatches.length
-          ? 'semantic-only'
-          : 'ok',
+        : loop
+          ? diags.some((d) => d.actor === 'controller')
+            ? 'engine-loop/diag-controller'
+            : 'engine-loop/diag-human'
+          : mismatches.length
+            ? 'semantic-only'
+            : 'ok',
       mismatches,
       notes,
     };
@@ -724,6 +1199,12 @@ test(
     await Promise.all(Array.from({ length: Number(process.env.DIFF_JOBS ?? 10) }, worker));
     const counts: Record<string, number> = {};
     for (const r of results) counts[r.category] = (counts[r.category] ?? 0) + 1;
+    // Категории по шаблонам генератора (template → category → count).
+    const byTemplate: Record<string, Record<string, number>> = {};
+    for (const r of results) {
+      const t = (byTemplate[generate(r.seed).template] ??= {});
+      t[r.category] = (t[r.category] ?? 0) + 1;
+    }
     const rules: Record<string, number> = {};
     const all = results.flatMap((r) => r.mismatches);
     for (const m of all) rules[m.rule] = (rules[m.rule] ?? 0) + 1;
@@ -734,6 +1215,7 @@ test(
     }
     const lines = [
       `cases=${results.length} ${JSON.stringify(counts)}`,
+      ...Object.entries(byTemplate).map(([t, c]) => `  ${t}: ${JSON.stringify(c)}`),
       `mismatch rules: ${JSON.stringify(rules)}`,
       `distinct patterns: ${patterns.size}`,
       ...[...patterns.entries()].map(

@@ -86,11 +86,13 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
         // Сломанная без автоматического шага.
         if (dep.status === 'failed' || dep.status === 'cancelled')
           return !job || group.get(id) === 'stop';
-        // Готовая, которую эпизод не даёт выдать (как blocksClaim движка).
+        // Готовая, которую движок не выдаст: эпизод (blocksClaim), бюджет
+        // (budgetBlock) или исчерпанные попытки.
         if (
           dep.status === 'ready' &&
-          dep.recovery &&
-          !['retry', 'closed'].includes(dep.recovery.status)
+          ((dep.recovery && !['retry', 'closed'].includes(dep.recovery.status)) ||
+            Boolean(dep.budgetBlock) ||
+            dep.attempt >= options.maxAttempts)
         )
           return true;
         return dep.status === 'ready' && dep.order.dependsOn.some((d) => stops(d, seen));
@@ -177,6 +179,10 @@ function outlookOf(
   for (const w of episodes) {
     const r = w.recovery!;
     let step: Outlook | undefined;
+    // Шаг эпизода, который ведёт к повтору, продолжает группу, только если этот
+    // повтор будет выдан: afterDecision паузу не снимает, hold и budgetBlock держат.
+    let continues = true;
+    const active = ['running', 'verifying', 'reviewing', 'integrating'].includes(w.status);
     switch (r.status) {
       case 'awaiting-lead':
         // Условия резервирования разбора; разбор тратит единицу общего бюджета.
@@ -188,6 +194,14 @@ function outlookOf(
         ) {
           used++;
           step = 'wait';
+          continues = !unclaimable(w);
+        }
+        break;
+      case 'applying':
+        // После подтверждения случаев нужен повтор: без свободной попытки — остановка.
+        if (w.attempt < options.maxAttempts) {
+          step = 'wait';
+          continues = !unclaimable(w);
         }
         break;
       case 'retry':
@@ -196,18 +210,18 @@ function outlookOf(
           step = w.status === 'failed' ? 'retry' : 'wait';
         break;
       case 'retrying':
-        if (w.status !== 'failed') step = 'wait';
-        break;
-      case 'applying':
-        step = 'wait';
+        // Повтор идёт, только пока попытка действует; готовую работу эпизод не выдаёт.
+        if (active) step = 'wait';
         break;
     }
     // Эпизод, на котором движок не действует сам, завершает задание.
     if (!step) return out;
     out.set(w.id, step);
+    if (!continues) return out;
   }
   const plain = works.filter((w) => w.status === 'failed' && !w.recovery);
-  if (works.some((w) => w.status === 'cancelled' && !w.recovery)) return out;
+  // Любая отмена останавливает repair группы (repairDecision), и с эпизодом тоже.
+  if (works.some((w) => w.status === 'cancelled')) return out;
   if (!episodes.length) {
     const decision = repairDecision(v, works, {
       budgetLeft: options.repairBudget - used,
