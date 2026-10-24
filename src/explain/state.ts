@@ -322,9 +322,6 @@ function outlookOf(
       w.attempt < options.maxAttempts &&
       used + i < options.repairBudget;
     if (!retry) break;
-    // Повтор состоится и займёт единицу бюджета, но бюджет поручения его не
-    // выдаст: работе — stop (raise-budget), остальные идут дальше.
-    if (budgetHeld(w)) continue;
     out.set(w.id, ahead);
   }
   return out;

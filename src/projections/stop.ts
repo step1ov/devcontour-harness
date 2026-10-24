@@ -190,15 +190,10 @@ const message = (cause: StopCause, ...parts: (string | undefined)[]) =>
  * восстановлений группы не исчерпан. Только описание: ничего не планирует.
  */
 function retryPlannedOf(input: Extract<StopInput, { kind: 'work' }>) {
-  const { work, repair } = input;
+  const { work, repair, maxAttempts } = input;
   if (work.status !== 'failed') return false;
   if (work.recovery) return work.recovery.status === 'retry' && repair.outlook === 'retry';
   if (repair.outlook !== undefined && repair.outlook !== 'retry') return false;
-  return retryAllowed(input);
-}
-
-/** Правила repair разрешают повтор (без прогноза группы). */
-function retryAllowed({ work, repair, maxAttempts }: Extract<StopInput, { kind: 'work' }>) {
   const rule = repairPolicy[work.failureKind ?? 'unknown'];
   return (
     rule.action === 'retry' &&
@@ -332,16 +327,6 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
         actor: 'controller',
         action: 'retry',
         note: 'Движок назначит повтор в пределах бюджетов.',
-      };
-    // Повтор по правилам repair состоится, но бюджет поручения его не выдаст.
-    if (work.budgetBlock && retryAllowed(input))
-      return {
-        code: 'BUDGET_EXHAUSTED',
-        cause: 'budget',
-        phase: 'claim',
-        actor: 'user',
-        action: 'raise-budget',
-        note: work.budgetBlock.reason,
       };
     switch (kind) {
       case 'provider-auth':

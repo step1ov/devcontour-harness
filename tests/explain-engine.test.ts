@@ -1799,7 +1799,7 @@ const spend5 = (h: H, ctx: Ctx, runId: string) =>
     { repositoryId: 'app', runId, stage: 'candidate-review' },
   );
 
-test('H1-03 (H1-F020): explain = движок — сломанная без эпизода, которую бюджет не выдаст, не получает обещания повтора', async () => {
+test('H1-03 (H1-F020): explain = движок — сломанная без эпизода под превышенным бюджетом: сначала повтор движка, затем raise-budget', async () => {
   const ctx = hsetup({
     scenario: { writer: implement(), reviewer: approve() },
     policy: (p) => {
@@ -1822,7 +1822,10 @@ test('H1-03 (H1-F020): explain = движок — сломанная без эп
       actor: 'user',
       action: 'raise-budget',
     };
-    assert.deepEqual(diagnosisOf(ctx.policy, h), [held]);
+    // Следующий шаг — автоматический повтор repair; выдачу затем держит бюджет.
+    assert.deepEqual(diagnosisOf(ctx.policy, h), [
+      { workId: 'add-greeting', retryPlanned: true, actor: 'controller', action: 'retry' },
+    ]);
     const writer = ctx.calls('claude', 'writer');
     await h.run({ graph: ctx.graph, author: 'claude' });
     const w = h.engine.read((v) => v.work('add-greeting')!);
