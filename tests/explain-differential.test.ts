@@ -28,6 +28,15 @@
  * упала — с эпизодом или без, — поэтому claim ещё не поставил budgetBlock),
  * цепочки зависимых работ за каждой из этих форм.
  *
+ * Смена политики (четвёртым независимым потоком seed, ~15% случаев): после
+ * постройки state закрывается и открывается заново под законно изменённой
+ * политикой — предел попыток ниже прежнего (часть работ на пределе или за
+ * ним, H1-F022) или, для бюджетных форм, бюджет поручения поднят до $100 /
+ * бюджеты отключены после записанного budgetBlock (H1-F020). Граф одобряется
+ * заново, при новом входе задания начинается текущее задание; диагноз
+ * (`stopInputsOf` с maxAttempts/repairBudget новой политики) и прогон — под
+ * новой политикой. В описании случая — ` policy(max 5→3)` и т. п.
+ *
  * Наблюдение за движком (только во время `h.run`): вызовы `engine.retry`,
  * `engine.recoveryReserve` (и его итог), `engine.recoveryApplied` (add-cases), вызовы writer/lead по поручению
  * (обёртка адаптера), новые попытки и их исход, итоговые статусы, статус и
@@ -78,7 +87,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
-import type { FailureKind, RuntimeAdapter } from '../src/contracts/index.ts';
+import {
+  executionPolicySchema,
+  type ExecutionPolicy,
+  type FailureKind,
+  type RuntimeAdapter,
+} from '../src/contracts/index.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { Harness } from '../src/control/harness.ts';
 import { measuredInvoke } from '../src/engine/measured.ts';
@@ -178,7 +192,18 @@ interface CaseSpec {
   operatorPause: boolean;
   /** Бюджет поручения (work.usd = 3) — для удержания бюджетом. */
   budgets: boolean;
+  /**
+   * Смена политики после постройки: state закрывается и открывается заново
+   * под законно изменённой политикой (граф одобряется заново, начинается
+   * текущее задание), диагноз и прогон — под новой политикой.
+   */
+  policyChange?: PolicyChange;
 }
+type PolicyChange =
+  /** Ужесточение попыток: новый предел ниже прежнего (≥ 1). */
+  | { maxAttempts: number }
+  /** Бюджет поручения поднят до $100 или бюджеты отключены. */
+  | { budgets: 'raised' | 'disabled' };
 
 const IDS = ['add-greeting', 'w1', 'w2', 'w3'];
 const pick = <T>(r: () => number, xs: readonly T[]) => xs[Math.floor(r() * xs.length)]!;
@@ -482,8 +507,109 @@ function overspent(seed: number, r: () => number): CaseSpec {
 
 const TEMPLATE_SHARE = 0.5;
 const OVERSPENT_SHARE = 0.15;
+const POLICY_CHANGE_SHARE = 0.15;
+/** Бюджетные формы редки (~20%): смена бюджета над ними — чаще. */
+const BUDGET_CHANGE_SHARE = 0.4;
+
+/**
+ * Четвёртый независимый поток seed: смена политики между постройкой и
+ * диагнозом не сдвигает прежние состояния. Попытки — ниже прежнего предела
+ * (часть работ оказывается на пределе или за ним, H1-F022); бюджет —
+ * поднят или отключён после записанного budgetBlock (H1-F020).
+ */
+function policyChange(spec: CaseSpec): CaseSpec {
+  const r = mulberry32((spec.seed * 0x27d4eb2f) ^ 0x165667b1);
+  if (r() >= (spec.budgets ? BUDGET_CHANGE_SHARE : POLICY_CHANGE_SHARE)) return spec;
+  if (spec.budgets && r() < 0.7)
+    return { ...spec, policyChange: { budgets: r() < 0.5 ? 'raised' : 'disabled' } };
+  if (r() < 0.4) return tightened(spec.seed, r);
+  // Новый предел — текущая попытка одной из работ (она оказывается на пределе),
+  // иногда на единицу ниже (за пределом); работы с эпизодом — вдвое чаще.
+  const targets = spec.works.flatMap((w) => {
+    const a = attemptsOf(w);
+    if (a < 1 || a >= spec.maxAttempts) return [];
+    return hasEpisode(w) ? [a, a] : [a];
+  });
+  let max = targets.length ? pick(r, targets) : 1 + Math.floor(r() * (spec.maxAttempts - 1));
+  if (max > 1 && r() < 0.25) max--;
+  return { ...spec, policyChange: { maxAttempts: max } };
+}
+
+/**
+ * Форма H1-F022 под ужесточением: работа, снова готовая в эпизоде (повтор
+ * выдан), оказывается на новом пределе попыток, а за ней — сломанная работа
+ * с эпизодом retry ниже предела (её повтор движок не выдаст: группа встанет
+ * на первой). Прежний предел — 5, новый — попытка готовой работы.
+ */
+function tightened(seed: number, r: () => number): CaseSpec {
+  const common = {
+    seed,
+    template: 'tightened',
+    operatorPause: r() < 0.05,
+    budgets: false,
+    repairBudget: pick(r, [1, 2, 6, 6] as const) as CaseSpec['repairBudget'],
+    maxAttempts: 5 as const,
+  };
+  const x = r();
+  const property = x < 0.35;
+  const exhausted: WorkSpec = property
+    ? { id: IDS[0]!, target: 'property', then: r() < 0.5 ? 'retry-ready' : 'retrying-ready' }
+    : x < 0.6
+      ? episodeFailed(IDS[0]!, { status: 'retry', work: 'ready' })
+      : x < 0.8
+        ? episodeFailed(IDS[0]!, { status: 'retrying', kind: pick(r, KINDS), ready: true })
+        : episodeFailed(IDS[0]!, { status: r() < 0.5 ? 'awaiting-user' : 'stopped', ready: true });
+  const max = attemptsOf(exhausted);
+  // Позже по группе — эпизод retry ниже нового предела (или иная сломанная).
+  const later = (id: string): WorkSpec => {
+    const y = r();
+    if (y < 0.6) return episodeFailed(id, { status: 'retry', work: 'failed' }, { attempts: 1 });
+    if (y < 0.75 && max >= 3) return episodeFailed(id, { status: 'retry', work: 'failed' });
+    if (y < 0.9) return episodeFailed(id, { status: 'awaiting-lead', calls: 0 }, { attempts: 1 });
+    return { ...plainFailed(r, id), attempts: 1 };
+  };
+  const { works, deps } = layout(r, [later], [exhausted]);
+  // Иногда готовая работа на пределе — не первая в группе (в режиме property
+  // работа со свойством всегда первая). Места переименовываются по порядку.
+  if (!property && works.length > 2 && r() < 0.25) {
+    const ids = works.map((w) => w.id);
+    const k = 1 + Math.floor(r() * (works.length - 1));
+    [works[0], works[k]] = [works[k]!, works[0]!];
+    works.forEach((w, n) => (w.id = ids[n]!));
+    deps.length = 0;
+  }
+  return {
+    ...common,
+    mode: property ? 'property' : 'plain',
+    deps,
+    works,
+    policyChange: { maxAttempts: max },
+  };
+}
+
+/** Число попыток работы после постройки (как его оставляет constructRest). */
+const attemptsOf = (w: WorkSpec): number => {
+  switch (w.target) {
+    case 'done':
+    case 'budget':
+      return 1;
+    case 'ready':
+    case 'cancelled':
+      return 0;
+    case 'property':
+      return w.then.startsWith('retrying') ? 3 : 2;
+    case 'failed':
+      return w.attempts + (w.episode?.status === 'retrying' ? 1 : 0);
+  }
+};
+const hasEpisode = (w: WorkSpec) =>
+  w.target === 'property' || (w.target === 'failed' && !!w.episode);
 
 function generate(seed: number): CaseSpec {
+  return policyChange(generateState(seed));
+}
+
+function generateState(seed: number): CaseSpec {
   // Третий поток: шаблон overspent не сдвигает прежние случаи остальных seed.
   const r3 = mulberry32((seed * 0x85ebca6b) ^ 0xc2b2ae35);
   if (r3() < OVERSPENT_SHARE) return overspent(seed, r3);
@@ -500,10 +626,20 @@ function generate(seed: number): CaseSpec {
   return spec;
 }
 
+const policyText = (c: CaseSpec) => {
+  const p = c.policyChange;
+  if (!p) return '';
+  if ('maxAttempts' in p) return ` policy(max ${c.maxAttempts}→${p.maxAttempts})`;
+  return p.budgets === 'raised' ? ' policy(work $3→$100)' : ' policy(budgets off)';
+};
+/** Предел попыток, под которым идут диагноз и прогон. */
+const effectiveMax = (c: CaseSpec) =>
+  c.policyChange && 'maxAttempts' in c.policyChange ? c.policyChange.maxAttempts : c.maxAttempts;
+
 const describe = (c: CaseSpec) =>
   `[${c.template}${c.mode === 'property' ? ' property' : ''}] max=${c.maxAttempts} budget=${c.repairBudget}` +
   `${c.budgets ? ' budgets(work $3)' : ''}${c.deps.map(([a, b]) => ` dep(${a}→${b})`).join('')}` +
-  `${c.operatorPause ? ' PAUSE(operator)' : ''} | ` +
+  `${c.operatorPause ? ' PAUSE(operator)' : ''}${policyText(c)} | ` +
   c.works
     .map((w) => {
       const flags = `${'hold' in w && w.hold ? '+hold' : ''}${'cancel' in w && w.cancel ? '+cancel' : ''}${'overspend' in w && w.overspend ? '+overspent($5>$3)' : ''}`;
@@ -658,26 +794,27 @@ function build(spec: CaseSpec) {
       return a.invoke(request, signal);
     },
   });
-  const h = Harness.open({
-    stateDir: ctx.state,
-    policy: ctx.policy,
-    baseDir: ctx.repo.dir,
-    adapters: {
-      claude: wrap(
-        cliAdapter('claude', {
-          executable: bin('fake-claude'),
-          toolProfiles: ctx.policy.toolProfiles,
-        }),
-      ),
-      codex: wrap(
-        cliAdapter('codex', {
-          executable: bin('fake-codex'),
-          toolProfiles: ctx.policy.toolProfiles,
-        }),
-      ),
-    },
-  });
-  return { ctx, h, obs, inc };
+  const open = (policy: ExecutionPolicy) =>
+    Harness.open({
+      stateDir: ctx.state,
+      policy,
+      baseDir: ctx.repo.dir,
+      adapters: {
+        claude: wrap(
+          cliAdapter('claude', {
+            executable: bin('fake-claude'),
+            toolProfiles: policy.toolProfiles,
+          }),
+        ),
+        codex: wrap(
+          cliAdapter('codex', {
+            executable: bin('fake-codex'),
+            toolProfiles: policy.toolProfiles,
+          }),
+        ),
+      },
+    });
+  return { ctx, h: open(ctx.policy), open, obs, inc };
 }
 
 const injectEpisode = (
@@ -1010,6 +1147,32 @@ async function constructRest(spec: CaseSpec, ctx: Ctx, h: H, others: string[], p
   h.engine.release('controller');
 }
 
+/**
+ * Смена политики над построенным state (как H1-F022/H1-F020): закрыть,
+ * открыть тот же каталог под законно изменённой политикой, заново одобрить
+ * граф и начать текущее задание (стадия 0 завершена), освободить controller.
+ */
+function changedPolicy(spec: CaseSpec, ctx: Ctx) {
+  const change = spec.policyChange!;
+  const raw = structuredClone(ctx.policy);
+  if ('maxAttempts' in change) raw.maxAttempts = change.maxAttempts;
+  else if (change.budgets === 'disabled') delete raw.budgets;
+  else raw.budgets!.work = { usd: 100 };
+  return executionPolicySchema.parse(raw);
+}
+
+function reapprove(ctx: Ctx, h: H, previous: string) {
+  const graph = ready(h.engine, ctx.graph, 'controller');
+  const job = h.workflows.start({ kind: 'graph', id: graph.id, authorRuntime: 'claude' });
+  // Бюджеты не входят в executionDigest: прежнее задание остаётся текущим (H1-F020).
+  if (job.key !== previous) {
+    assert.equal(job.stage, 0, 'setup: policy change gives a fresh current job');
+    h.workflows.finish(h.workflows.claim(job.key)!);
+  }
+  h.engine.release('controller');
+  return job.key;
+}
+
 /* ------------------------------------------------------------------ */
 /* Сравнение                                                            */
 /* ------------------------------------------------------------------ */
@@ -1053,7 +1216,7 @@ function workShape(h: H, id: string, spec: CaseSpec) {
     return [
       w.status,
       w.failureKind ?? '-',
-      `a${w.attempt}/${spec.maxAttempts}`,
+      `a${w.attempt}/${effectiveMax(spec)}`,
       w.recovery ? `ep:${w.recovery.status}` : 'noep',
       w.hold ? 'hold' : '',
       w.budgetBlock ? 'budgetBlock' : '',
@@ -1067,12 +1230,23 @@ function workShape(h: H, id: string, spec: CaseSpec) {
 async function runCase(seed: number): Promise<CaseResult> {
   const spec = generate(seed);
   const state = describe(spec);
-  const { ctx, h, obs, inc } = build(spec);
+  const built = build(spec);
+  const { ctx, open, obs, inc } = built;
+  let h = built.h;
+  let policy = ctx.policy;
+  let jobKey: string | undefined;
   const notes: string[] = [];
   try {
     try {
-      const { pending, others } = construct(spec, ctx, h);
+      const { job, pending, others } = construct(spec, ctx, h);
+      jobKey = job.key;
       await constructRest(spec, ctx, h, others, pending);
+      if (spec.policyChange) {
+        policy = changedPolicy(spec, ctx);
+        h.close();
+        h = open(policy);
+        jobKey = reapprove(ctx, h, jobKey);
+      }
     } catch (error) {
       return {
         seed,
@@ -1082,8 +1256,8 @@ async function runCase(seed: number): Promise<CaseResult> {
       };
     }
     const diags: Diag[] = stopInputsOf(h, {
-      maxAttempts: ctx.policy.maxAttempts,
-      repairBudget: ctx.policy.repairBudget,
+      maxAttempts: policy.maxAttempts,
+      repairBudget: policy.repairBudget,
     })
       .filter((i) => i.kind === 'work')
       .map(explainStop)
@@ -1168,7 +1342,8 @@ async function runCase(seed: number): Promise<CaseResult> {
           .join(', ')}`,
       );
     }
-    const job = h.workflows.list().find((j) => j.kind === 'graph')!;
+    // Текущее задание графа (после смены политики прежнее остаётся в списке).
+    const job = h.workflows.list().find((j) => j.key === jobKey)!;
     const jobError = job.error ?? runError ?? '';
     // Возмущение: новая попытка прогона не принята, разбор ведущего не дал решения
     // или прогон упал не по решению движка.
@@ -1327,7 +1502,8 @@ test(
     // Категории по шаблонам генератора (template → category → count).
     const byTemplate: Record<string, Record<string, number>> = {};
     for (const r of results) {
-      const t = (byTemplate[generate(r.seed).template] ??= {});
+      const c = generate(r.seed);
+      const t = (byTemplate[c.template + (c.policyChange ? '+policy' : '')] ??= {});
       t[r.category] = (t[r.category] ?? 0) + 1;
     }
     const rules: Record<string, number> = {};

@@ -15,7 +15,9 @@ import { ready } from './engine-fixture.ts';
 import { hsetup } from './harness-fixture.ts';
 import { knap, propertyHarness, propertySetup } from './property-fixture.ts';
 import { measuredInvoke } from '../src/engine/measured.ts';
-import { approve, implement } from './runner-fixture.ts';
+import { approve, bin, implement } from './runner-fixture.ts';
+import { Harness } from '../src/control/harness.ts';
+import { cliAdapter } from '../src/agents/cli-adapter.ts';
 
 type Ctx = ReturnType<typeof hsetup>;
 type H = ReturnType<Ctx['open']>;
@@ -1960,6 +1962,127 @@ test('H1-03 (H1-F021): внешняя предпосылка с id отменё�
     assert.equal(
       h.engine.read((v) => v.work('w2')!.status),
       'done',
+    );
+  } finally {
+    h.close();
+  }
+});
+
+test('H1-03 (H1-F022): explain = движок — первый эпизод ready/retry на исчерпанных попытках останавливает прогноз группы', async () => {
+  const ctx = propertySetup({
+    writer: implement({ 'src/knap.mjs': knap.correct }),
+    policy: (p) => {
+      p.maxAttempts = 5;
+      p.repairBudget = 6;
+    },
+  });
+  ctx.graph.orders.push({
+    ...structuredClone(ctx.graph.orders[0]!),
+    id: 'later',
+    source: { connector: 'files', ref: 'later', revision: '1' },
+    title: 'later',
+    dependsOn: [],
+  });
+  let h = propertyHarness(ctx);
+  try {
+    const graph = ready(h.engine, ctx.graph, 'controller');
+    const job = h.workflows.start({ kind: 'graph', id: graph.id, authorRuntime: 'claude' });
+    h.workflows.finish(h.workflows.claim(job.key)!);
+    h.engine.hold(['later'], 'setup', 'isolate first natural episode');
+    const episode = (workId: string) => {
+      for (let i = 0; i < 2; i++) {
+        const run = h.engine.claim('controller')!;
+        assert.equal(run.workId, workId);
+        h.engine.phase(run.id, run.token, 'reviewing', {
+          candidateSha: ctx.repo.git('rev-parse', 'HEAD'),
+        });
+        h.engine.fail(run.id, run.token, 'property review failure ' + i, {
+          kind: 'review',
+          properties: { bound: ['knapsack-optimal'], unbound: [] },
+        });
+        if (i === 0) h.engine.retry(workId);
+      }
+      const w = h.engine.read((v) => v.work(workId)!);
+      assert.equal(w.recovery?.status, 'awaiting-lead');
+      h.engine.recoveryDecide(workId, w.recovery.id, {
+        action: 'new-approach',
+        reason: 'new approach',
+        evidence: [],
+        hypothesis: 'new approach',
+        plan: 'check property',
+        source: { kind: 'operator' },
+        decidedAt: new Date(h.engine.clock()).toISOString(),
+      });
+    };
+    episode('add-greeting');
+    h.engine.retry('add-greeting');
+    const third = h.engine.claim('controller')!;
+    // Нейтральный отказ возвращает эпизод в retry; повтор — готовая, attempt 3.
+    h.engine.fail(third.id, third.token, 'timeout in third attempt', { kind: 'timeout' });
+    h.engine.retry('add-greeting');
+    h.engine.releaseHold('setup');
+    h.engine.hold(['add-greeting'], 'setup-later', 'isolate later natural episode');
+    episode('later');
+    h.engine.releaseHold('setup-later');
+    h.engine.release('controller');
+    h.close();
+    // Тот же state под законной политикой maxAttempts=3: у A попытки исчерпаны.
+    const policy = executionPolicySchema.parse({ ...ctx.policy, maxAttempts: 3 });
+    h = Harness.open({
+      stateDir: ctx.state,
+      policy,
+      baseDir: ctx.repo.dir,
+      adapters: {
+        claude: cliAdapter('claude', { executable: bin('fake-claude') }),
+        codex: cliAdapter('codex', { executable: bin('fake-codex') }),
+      },
+    });
+    ready(h.engine, ctx.graph, 'controller');
+    const current = h.workflows.start({ kind: 'graph', id: graph.id, authorRuntime: 'claude' });
+    h.workflows.finish(h.workflows.claim(current.key)!);
+    h.engine.release('controller');
+    assert.deepEqual(
+      h.engine.read((v) =>
+        [v.work('add-greeting')!, v.work('later')!].map((w) => [
+          w.status,
+          w.attempt,
+          w.recovery?.status,
+        ]),
+      ),
+      [
+        ['ready', 3, 'retry'],
+        ['failed', 2, 'retry'],
+      ],
+    );
+
+    const diags = diagnosisOf(policy, h);
+    assert.deepEqual(
+      diags.find((d) => d.workId === 'add-greeting'),
+      {
+        workId: 'add-greeting',
+        retryPlanned: false,
+        actor: 'user',
+        action: 'reset-attempts',
+      },
+    );
+    const later = diags.find((d) => d.workId === 'later')!;
+    assert.equal(later.retryPlanned, false, JSON.stringify(later));
+    assert.notEqual(later.actor, 'controller', JSON.stringify(later));
+    assert.deepEqual(diagnosisOf(policy, h, 'later'), [later], 'фильтр --work later');
+
+    const retries: string[] = [];
+    const retry = h.engine.retry.bind(h.engine);
+    h.engine.retry = (...args: Parameters<typeof retry>) => {
+      retries.push(args[0]);
+      return retry(...args);
+    };
+    const writer = countOf(ctx.scenarioPath, 'claude', 'writer');
+    await runGuarded(h, () => h.run({ graph: ctx.graph, author: 'claude' }));
+    assert.deepEqual(retries, [], 'движок повтор later не выдаёт');
+    assert.equal(countOf(ctx.scenarioPath, 'claude', 'writer'), writer);
+    assert.equal(
+      h.engine.read((v) => v.work('later')!.attempt),
+      2,
     );
   } finally {
     h.close();

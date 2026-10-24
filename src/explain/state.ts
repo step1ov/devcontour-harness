@@ -246,10 +246,12 @@ function outlookOf(
       dep.order.dependsOn.some((d) => depStops(d, seen))
     );
   };
-  // Повтор не будет выдан: пауза, hold, бюджет или предпосылка, на которой claim встанет.
+  // Повтор не будет выдан: пауза, hold, бюджет, исчерпанные попытки (claim их
+  // проверяет и у готовой работы) или предпосылка, на которой claim встанет.
   const unclaimable = (w: (typeof works)[number]) =>
     control.paused ||
     Boolean(w.hold) ||
+    w.attempt >= options.maxAttempts ||
     budgetHeld(w) ||
     w.order.dependsOn.some((d) => depStops(d));
   const episodes = works.filter((w) => w.recovery && w.status !== 'cancelled');
@@ -286,7 +288,7 @@ function outlookOf(
         break;
       case 'retry':
         // Повтор из эпизода: engine.retry требует свободной попытки, выдача — очереди.
-        if (!unclaimable(w) && (w.status !== 'failed' || w.attempt < options.maxAttempts))
+        if (!unclaimable(w))
           step = w.status === 'failed' ? 'retry' : 'wait';
         break;
       case 'retrying':
