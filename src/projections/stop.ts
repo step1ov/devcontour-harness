@@ -257,6 +257,15 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
             action: 'resume-queue',
             note: `Восстановление свойства (${work.recovery.status}) ждёт снятия паузы.`,
           };
+    if (!automatic && work.budgetBlock)
+      return {
+        code: 'BUDGET_EXHAUSTED',
+        cause: 'budget',
+        phase: 'claim',
+        actor: 'user',
+        action: 'raise-budget',
+        note: `Восстановление свойства (${work.recovery.status}) не продолжится: ${work.budgetBlock.reason}`,
+      };
     return automatic
       ? {
           code: stopCodeOf(kind),

@@ -1,6 +1,6 @@
 import { HarnessError } from '../contracts/errors.ts';
 import { repairPolicy } from '../contracts/repair-policy.ts';
-import type { WorkStatus } from '../contracts/index.ts';
+import type { WorkState, WorkStatus } from '../contracts/index.ts';
 import type { Harness } from '../control/harness.ts';
 import { repairDecision } from '../engine/repair.ts';
 import type { EvidenceLink, StopInput, StopPhase } from '../projections/stop.ts';
@@ -46,6 +46,10 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
         },
       });
     const control = v.control();
+    // Бюджет держит выдачу по записанному budgetBlock или по тому же расчёту,
+    // которым следующий claim его поставит (расход уже превышен, поле ещё нет).
+    const budgetReason = (w: WorkState) => h.engine.budgetBlockOf(w.id, v);
+    const budgetHeld = (w: WorkState) => Boolean(w.budgetBlock) || Boolean(budgetReason(w));
     const pauseLifts = (group: Map<string, Outlook>) =>
       control.pauseReason === 'runtime' &&
       (control.pauseFailures ?? []).length > 0 &&
@@ -73,7 +77,7 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
       // редакции графа и с непотраченными попытками стадии (как `claim`).
       const job = jobs.find((j) => j.id === work.graphId && h.workflows.continues(j, v));
       const group = job
-        ? outlookOf(v, work.graphId, job.repairs ?? 0, options, control)
+        ? outlookOf(v, work.graphId, job.repairs ?? 0, options, control, budgetHeld)
         : new Map<string, Outlook>();
       // Готовая работа ждёт предпосылку, на которой движок остановит задание:
       // сломанную без автоматического шага или саму ждущую такую (транзитивно).
@@ -84,14 +88,16 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
         const dep = v.work(id);
         if (!dep || dep.status === 'done') return false;
         // Сломанная без автоматического шага.
+        // Сломанная без автоматического шага — или такая, которую повтор переведёт
+        // в готовую, но бюджет её не выдаст.
         if (dep.status === 'failed' || dep.status === 'cancelled')
-          return !job || group.get(id) === 'stop';
+          return !job || group.get(id) === 'stop' || budgetHeld(dep);
         // Готовая, которую движок не выдаст: эпизод (blocksClaim), бюджет
         // (budgetBlock) или исчерпанные попытки.
         if (
           dep.status === 'ready' &&
           ((dep.recovery && !['retry', 'closed'].includes(dep.recovery.status)) ||
-            Boolean(dep.budgetBlock) ||
+            budgetHeld(dep) ||
             dep.attempt >= options.maxAttempts)
         )
           return true;
@@ -122,7 +128,9 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
           ...(work.hold
             ? { hold: { operation: work.hold.operation, reason: work.hold.reason } }
             : {}),
-          ...(work.budgetBlock ? { budgetBlock: { reason: work.budgetBlock.reason } } : {}),
+          ...(work.budgetBlock || budgetReason(work)
+            ? { budgetBlock: { reason: work.budgetBlock?.reason ?? budgetReason(work)! } }
+            : {}),
           ...(work.recovery ? { recovery: { status: work.recovery.status } } : {}),
           ...(waitingOn.length ? { waitingOn } : {}),
         },
@@ -168,13 +176,14 @@ function outlookOf(
   repairsUsed: number,
   options: StopInputOptions,
   control: ReturnType<View['control']>,
+  budgetHeld: (w: WorkState) => boolean,
 ): Map<string, Outlook> {
   const works = v.works(graphId);
   const out = new Map<string, Outlook>();
   for (const w of works) out.set(w.id, 'stop');
   let used = repairsUsed;
   const unclaimable = (w: (typeof works)[number]) =>
-    control.paused || Boolean(w.hold) || Boolean(w.budgetBlock);
+    control.paused || Boolean(w.hold) || budgetHeld(w);
   const episodes = works.filter((w) => w.recovery && w.status !== 'cancelled');
   for (const w of episodes) {
     const r = w.recovery!;
@@ -190,7 +199,9 @@ function outlookOf(
           !(control.paused && control.pauseReason === 'operator') &&
           used < options.repairBudget &&
           w.attempt < options.maxAttempts &&
-          r.calls < 1
+          r.calls < 1 &&
+          // Вызов ведущего проверяет бюджет поручения: превышенный — отказ.
+          !budgetHeld(w)
         ) {
           used++;
           step = 'wait';

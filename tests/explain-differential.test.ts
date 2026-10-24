@@ -21,8 +21,12 @@
  * runtime от отказа в группе одновременно с эпизодами awaiting-lead (calls 0),
  * эпизод `applying` (add-cases) на попытке < max и == max, `retrying` с
  * работой, вновь готовой через `engine.retry`, удержание бюджетом
- * (budgetBlock: попытка отказана классом budget, затем retry), цепочки
- * зависимых работ за каждой из этих форм.
+ * (budgetBlock: попытка отказана классом budget, затем retry), расход,
+ * уже превысивший бюджет поручения до записи budgetBlock (шаблон `overspent`,
+ * третьим независимым потоком seed: стоимость последней попытки сохраняется
+ * публичным measuredInvoke с локальным детерминированным адаптером, работа
+ * упала — с эпизодом или без, — поэтому claim ещё не поставил budgetBlock),
+ * цепочки зависимых работ за каждой из этих форм.
  *
  * Наблюдение за движком (только во время `h.run`): вызовы `engine.retry`,
  * `engine.recoveryReserve` (и его итог), `engine.recoveryApplied` (add-cases), вызовы writer/lead по поручению
@@ -77,6 +81,7 @@ import { writeFileSync } from 'node:fs';
 import type { FailureKind, RuntimeAdapter } from '../src/contracts/index.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { Harness } from '../src/control/harness.ts';
+import { measuredInvoke } from '../src/engine/measured.ts';
 import { stopInputsOf } from '../src/explain/state.ts';
 import { explainStop } from '../src/projections/stop.ts';
 import { ready } from './engine-fixture.ts';
@@ -146,8 +151,18 @@ type WorkSpec =
       hold?: boolean;
       /** Отменена после открытия эпизода (engine.cancel сохраняет recovery). */
       cancel?: boolean;
+      /** Последняя попытка израсходовала $5 при бюджете поручения $3 (budgetBlock ещё нет). */
+      overspend?: boolean;
     }
-  | { id: string; target: 'property'; then: PropertyThen; hold?: boolean; cancel?: boolean };
+  | {
+      id: string;
+      target: 'property';
+      then: PropertyThen;
+      hold?: boolean;
+      cancel?: boolean;
+      /** Второй отказ ревью (открывающий эпизод) израсходовал $5 при бюджете $3. */
+      overspend?: boolean;
+    };
 type Failed = Extract<WorkSpec, { target: 'failed' }>;
 interface CaseSpec {
   seed: number;
@@ -420,9 +435,58 @@ function template(seed: number, r: () => number, name: (typeof TEMPLATES)[number
   }
 }
 
+/**
+ * Расход уже превысил бюджет поручения, а budgetBlock не записан: работа упала
+ * (claim ставит поле только готовым). Ведущей — естественный эпизод свойства
+ * (как в H1-F018) или сломанная работа с эпизодом/без; соседи — за ней.
+ */
+function overspent(seed: number, r: () => number): CaseSpec {
+  const common = {
+    seed,
+    template: 'overspent',
+    operatorPause: r() < 0.05,
+    budgets: true,
+    repairBudget: pick(r, [1, 2, 6, 6] as const) as CaseSpec['repairBudget'],
+  };
+  const maxAttempts = pick(r, [3, 5] as const);
+  if (r() < 0.5) {
+    // Повтор эпизода (retrying) потребовал бы выдачи при превышенном бюджете.
+    const then = pick(r, ['awaiting-lead', 'retry-failed', 'retry-ready', 'applying'] as const);
+    const first: WorkSpec[] = [
+      {
+        id: IDS[0]!,
+        target: 'property',
+        then,
+        overspend: true,
+        ...(r() < 0.08 ? { cancel: true } : {}),
+      },
+    ];
+    const roles =
+      r() < 0.3 ? [(id: string) => episodeFailed(id, randomEpisode(r, maxAttempts))] : [];
+    return { ...common, mode: 'property', maxAttempts, ...layout(r, roles, first) };
+  }
+  const roles = [
+    (id: string): WorkSpec =>
+      r() < 0.5
+        ? { ...plainFailed(r, id), overspend: true }
+        : episodeFailed(id, randomEpisode(r, maxAttempts), { overspend: true }),
+    ...(r() < 0.4
+      ? [
+          (id: string) =>
+            r() < 0.5 ? plainFailed(r, id) : episodeFailed(id, randomEpisode(r, maxAttempts)),
+        ]
+      : []),
+  ];
+  return { ...common, mode: 'plain', maxAttempts, ...layout(r, roles) };
+}
+
 const TEMPLATE_SHARE = 0.5;
+const OVERSPENT_SHARE = 0.15;
 
 function generate(seed: number): CaseSpec {
+  // Третий поток: шаблон overspent не сдвигает прежние случаи остальных seed.
+  const r3 = mulberry32((seed * 0x85ebca6b) ^ 0xc2b2ae35);
+  if (r3() < OVERSPENT_SHARE) return overspent(seed, r3);
   const spec = base(seed);
   // Второй поток: шаблоны и дополнения не сдвигают базовые состояния прежних seed.
   const r = mulberry32((seed * 0x9e3779b1) ^ 0x5bd1e995);
@@ -442,7 +506,7 @@ const describe = (c: CaseSpec) =>
   `${c.operatorPause ? ' PAUSE(operator)' : ''} | ` +
   c.works
     .map((w) => {
-      const flags = `${'hold' in w && w.hold ? '+hold' : ''}${'cancel' in w && w.cancel ? '+cancel' : ''}`;
+      const flags = `${'hold' in w && w.hold ? '+hold' : ''}${'cancel' in w && w.cancel ? '+cancel' : ''}${'overspend' in w && w.overspend ? '+overspent($5>$3)' : ''}`;
       if (w.target === 'property') return `${w.id}:property(natural→${w.then})${flags}`;
       if (w.target !== 'failed') return `${w.id}:${w.target}${flags}`;
       const ep = w.episode
@@ -688,6 +752,58 @@ const message = (w: Failed, n: number, kind: Kind) =>
     ? `getaddrinfo ENOTFOUND fixture ${w.sameFingerprint ? 'same' : ['alpha', 'beta', 'gamma'][n]}`
     : `fixture ${kind} failure ${w.sameFingerprint ? 'same' : ['alpha', 'beta', 'gamma'][n]}`;
 
+/**
+ * Расход попытки $5 (бюджет поручения $3), как его сохраняет отвергающий
+ * candidate review: публичный measuredInvoke с локальным детерминированным
+ * адаптером (без провайдера/модели), привязка к попытке и стадии.
+ */
+const overspend = (ctx: Ctx, h: H, runId: string) =>
+  measuredInvoke(
+    h.engine,
+    {
+      runtime: 'codex',
+      capabilities: () =>
+        Promise.resolve({
+          runtime: 'codex',
+          structuredOutput: true,
+          sandbox: ['none'],
+          cancellation: true,
+          usage: true,
+          fixture: true,
+        }),
+      invoke: () =>
+        Promise.resolve({
+          status: 'ok',
+          model: 'fixture',
+          runtimeVersion: 'fixture',
+          text: '',
+          usage: {
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            reportedUsd: 5,
+            complete: true,
+            source: 'fixture',
+          },
+          diagnostics: { exitCode: 0 },
+        }),
+    },
+    {
+      callId: 'fixture-cost-' + runId,
+      task: 'review-code',
+      binding: { runtime: 'codex' },
+      cwd: ctx.repo.dir,
+      prompt: 'fixture',
+      session: { kind: 'fresh' },
+      sandbox: { mode: 'none', writable: [], denied: [], network: { domains: [] } },
+      timeoutMs: 60000,
+      env: {},
+    },
+    new AbortController().signal,
+    { repositoryId: ctx.policy.repositories[0]!.id, runId, stage: 'candidate-review' },
+  );
+
 /** Попытка через claim; пауза runtime от прежних отказов снимается на время постройки. */
 const claimOf = (h: H, workId: string) => {
   const c = h.engine.read((v) => v.control());
@@ -714,24 +830,28 @@ function construct(spec: CaseSpec, ctx: Ctx, h: H) {
 }
 
 /** Естественный эпизод свойства: два отказа ревью по связанному свойству, затем решение. */
-function propertyEpisode(
+async function propertyEpisode(
   ctx: Ctx,
   h: H,
   spec: CaseSpec,
   w: Extract<WorkSpec, { target: 'property' }>,
 ) {
-  const boundFail = (n: number) => {
+  const boundFail = async (n: number) => {
     const a = claimOf(h, w.id);
-    h.engine.phase(a.id, a.token, 'verifying', { candidateSha: ctx.repo.git('rev-parse', 'HEAD') });
+    const spent = n === 1 && w.overspend;
+    h.engine.phase(a.id, a.token, spent ? 'reviewing' : 'verifying', {
+      candidateSha: ctx.repo.git('rev-parse', 'HEAD'),
+    });
+    if (spent) await overspend(ctx, h, a.id);
     h.engine.fail(a.id, a.token, 'property failure ' + n, {
       kind: 'review',
       properties: { bound: ['knapsack-optimal'], unbound: [] },
     });
   };
   const read = () => h.engine.read((v) => v.work(w.id)!);
-  boundFail(0);
+  await boundFail(0);
   h.engine.retry(w.id);
-  boundFail(1);
+  await boundFail(1);
   const opened = read().recovery;
   assert.equal(opened?.status, 'awaiting-lead', 'setup: natural episode ' + w.id);
   const rid = opened.id;
@@ -811,7 +931,7 @@ async function constructRest(spec: CaseSpec, ctx: Ctx, h: H, others: string[], p
         'setup3',
         'differential setup',
       );
-    propertyEpisode(ctx, h, spec, w);
+    await propertyEpisode(ctx, h, spec, w);
     if (failed.length) h.engine.releaseHold('setup3');
   }
   const properties = spec.works.filter((w) => w.target === 'property').map((w) => w.id);
@@ -848,6 +968,7 @@ async function constructRest(spec: CaseSpec, ctx: Ctx, h: H, others: string[], p
   for (const [i, w] of failed.entries()) {
     const a = claimed[i]!;
     const kind = w.episode?.status === 'retrying' ? w.episode.kind : w.kind;
+    if (w.overspend) await overspend(ctx, h, a.id);
     h.engine.fail(a.id, a.token, message(w, w.attempts - 1, kind), { kind });
   }
   // Удержание бюджетом закрепляется выдачей: claim пересчитывает budgetBlock готовых.
@@ -1083,7 +1204,11 @@ async function runCase(seed: number): Promise<CaseResult> {
     for (const d of diags) {
       const id = d.workId;
       const retried = (obs.retried.get(id) ?? 0) > 0;
-      const analyzed = (obs.reserved.get(id) ?? []).includes('analyzing');
+      // Резерв разбора — действие, только если ведущий реально вызван: резерв,
+      // за которым вызов ведущего отказал по бюджету поручения, — механизм
+      // FI-003 (единица списана без разбора), а не автоматический прогресс.
+      const analyzed =
+        (obs.reserved.get(id) ?? []).includes('analyzing') && (obs.lead.get(id) ?? 0) > 0;
       // Только исполнение, после которого движок продолжает (эпизод → retry).
       // applied→stopped (случаи подтверждены, попытки исчерпаны) — детерминированная
       // остановка движка: шаг человека (reset-attempts) остаётся, R2 не про неё.

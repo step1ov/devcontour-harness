@@ -13,6 +13,7 @@ import { explainStop } from '../src/projections/stop.ts';
 import { ready } from './engine-fixture.ts';
 import { hsetup } from './harness-fixture.ts';
 import { knap, propertyHarness, propertySetup } from './property-fixture.ts';
+import { measuredInvoke } from '../src/engine/measured.ts';
 import { approve, implement } from './runner-fixture.ts';
 
 type Ctx = ReturnType<typeof hsetup>;
@@ -1409,6 +1410,140 @@ test('H1-03 (H1-F017): explain = движок — готовая работа с
       1,
     );
     assert.equal(countOf(ctx.scenarioPath, 'claude', 'writer'), 0);
+  } finally {
+    h.close();
+  }
+});
+
+test('H1-03 (H1-F018): explain = движок — расход уже превышен до записи budgetBlock; следующая работа не обещает продолжения', async () => {
+  const ctx = propertySetup({
+    writer: implement({ 'src/knap.mjs': knap.correct }),
+    policy: (p) => {
+      p.maxAttempts = 5;
+      p.repairBudget = 6;
+      p.concurrency = 2;
+      p.budgets = { work: { usd: 3 }, onUnknown: 'continue' };
+    },
+  });
+  ctx.graph.orders.push({
+    ...structuredClone(ctx.graph.orders[0]!),
+    id: 'later',
+    source: { connector: 'files', ref: 'later', revision: '1' },
+    title: 'Later independent work',
+  });
+  const h = propertyHarness(ctx);
+  try {
+    const graph = ready(h.engine, ctx.graph, 'controller');
+    const job = h.workflows.start({ kind: 'graph', id: graph.id, authorRuntime: 'claude' });
+    h.workflows.finish(h.workflows.claim(job.key)!);
+    const a1 = h.engine.claim('controller')!;
+    const b1 = h.engine.claim('controller')!;
+    assert.equal(a1.workId, 'add-greeting');
+    assert.equal(b1.workId, 'later');
+    const failProperty = (a: typeof a1, n: number) => {
+      h.engine.phase(a.id, a.token, 'reviewing', {
+        candidateSha: ctx.repo.git('rev-parse', 'HEAD'),
+      });
+      h.engine.fail(a.id, a.token, 'natural property failure ' + n, {
+        kind: 'review',
+        properties: { bound: ['knapsack-optimal'], unbound: [] },
+      });
+    };
+    failProperty(a1, 1);
+    h.engine.fail(b1.id, b1.token, 'timeout of later work', { kind: 'timeout' });
+    h.engine.retry('add-greeting');
+    const a2 = h.engine.claim('controller')!;
+    assert.equal(a2.workId, 'add-greeting');
+    // Отвергающий candidate review превысил бюджет работы: расход записан
+    // (детерминированный локальный адаптер, без провайдера), budgetBlock — ещё нет.
+    h.engine.phase(a2.id, a2.token, 'reviewing', {
+      candidateSha: ctx.repo.git('rev-parse', 'HEAD'),
+    });
+    await measuredInvoke(
+      h.engine,
+      {
+        runtime: 'codex',
+        capabilities: () =>
+          Promise.resolve({
+            runtime: 'codex',
+            structuredOutput: true,
+            sandbox: ['none'],
+            cancellation: true,
+            usage: true,
+            fixture: true,
+          }),
+        invoke: () =>
+          Promise.resolve({
+            status: 'ok',
+            model: 'fixture',
+            runtimeVersion: 'fixture',
+            text: '',
+            usage: {
+              inputTokens: 1,
+              outputTokens: 1,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              reportedUsd: 5,
+              complete: true,
+              source: 'fixture',
+            },
+            diagnostics: { exitCode: 0 },
+          }),
+      },
+      {
+        callId: 'fixture-cost-a2',
+        task: 'review-code',
+        binding: { runtime: 'codex' },
+        cwd: ctx.repo.dir,
+        prompt: 'fixture',
+        session: { kind: 'fresh' },
+        sandbox: { mode: 'none', writable: [], denied: [], network: { domains: [] } },
+        timeoutMs: 60000,
+        env: {},
+      },
+      new AbortController().signal,
+      { repositoryId: 'app', runId: a2.id, stage: 'candidate-review' },
+    );
+    failProperty(a2, 2);
+    const a = h.engine.read((v) => v.work('add-greeting')!);
+    assert.equal(a.recovery?.status, 'awaiting-lead', 'эпизод открыт естественно');
+    h.engine.recoveryDecide('add-greeting', a.recovery.id, {
+      action: 'new-approach',
+      reason: 'Operator approves a new implementation approach',
+      evidence: [],
+      hypothesis: 'new approach',
+      plan: 'verify properties',
+      source: { kind: 'operator' },
+      decidedAt: new Date().toISOString(),
+    });
+    h.engine.release('controller');
+    assert.equal(
+      h.engine.read((v) => v.work('add-greeting')!.budgetBlock),
+      undefined,
+      'у упавшей работы budgetBlock ещё не записан',
+    );
+
+    const later = {
+      workId: 'later',
+      retryPlanned: false,
+      actor: 'user',
+      action: 'fix-environment',
+    };
+    assert.deepEqual(
+      diagnosisOf(ctx.policy, h).find((d) => d.workId === 'later'),
+      later,
+    );
+    assert.deepEqual(diagnosisOf(ctx.policy, h, 'later'), [later], 'фильтр --work later');
+
+    const error = await runGuarded(h, () => h.run({ graph: ctx.graph, author: 'claude' }));
+    assert.equal(error, 'PROBE_LOOP_GUARD');
+    assert.equal(
+      h.engine.read((v) => v.work('later')!.attempt),
+      1,
+    );
+    for (const runtime of ['claude', 'codex'])
+      for (const role of ['writer', 'reviewer'])
+        assert.equal(countOf(ctx.scenarioPath, runtime, role), 0, runtime + ':' + role);
   } finally {
     h.close();
   }

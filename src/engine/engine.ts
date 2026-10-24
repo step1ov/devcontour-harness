@@ -796,6 +796,17 @@ export class Engine {
     return this.read((v) => budgetOverview(this.budgetContext(), v));
   }
 
+  /**
+   * Причина, по которой бюджет не даст выдать поручение при следующем claim, —
+   * тот же расчёт, которым claim ставит `budgetBlock` (и до того, как поле
+   * записано). Только чтение; бюджеты выключены — `undefined`.
+   */
+  budgetBlockOf(workId: string, view: ExecutionView) {
+    if (!this.policy.budgets) return undefined;
+    const c = this.budgetContext();
+    return blockingBudget(c, workBudgets(c, view, workId, callRecords(view)))?.reason;
+  }
+
   /** Почему поручение сейчас не выдаётся; пусто — может быть выдано. */
   blockers(work: WorkState, view: ExecutionView) {
     const out: {
