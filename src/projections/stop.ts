@@ -219,7 +219,17 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
   if (
     work.recovery &&
     !retry &&
-    (work.status === 'failed' || (work.status === 'ready' && !automatic))
+    // Исчерпанные попытки — раньше эпизода: движок откажет в повторе по ним.
+    !(work.status === 'failed' && work.attempt >= maxAttempts) &&
+    (work.status === 'failed' ||
+      // Готовую работу эпизод держит, только если не разрешает выдачу (как
+      // blocksClaim движка) или разрешённый повтор не выдаётся очередью.
+      (work.status === 'ready' &&
+        !automatic &&
+        (!['retry', 'closed'].includes(work.recovery.status) ||
+          control.paused ||
+          Boolean(work.hold) ||
+          Boolean(work.budgetBlock))))
   ) {
     // Работу ведёт разбор свойства: шаг определяет его статус, а не класс отказа.
     if (

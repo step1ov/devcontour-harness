@@ -265,8 +265,13 @@ async function run(
   argv: string[],
 ): Promise<{ command: CliCommand | 'version'; data: unknown; code?: number }> {
   const [name, ...rest] = argv;
-  if (name === '--version' || name === 'version')
+  if (name === '--version' || name === 'version') {
+    // Прочие аргументы version по-прежнему игнорирует; новые флаги — только у своих команд.
+    for (const [flag, owners] of Object.entries(flagOwners))
+      if (rest.some((arg) => arg === `--${flag}` || arg.startsWith(`--${flag}=`)))
+        throw new HarnessError('INVALID_INPUT', `--${flag} поддерживают: ${owners.join(', ')}`);
     return { command: 'version', data: { harness: HARNESS_VERSION, apiVersion: API_VERSION } };
+  }
   if (!name || !(name in cliCommands))
     throw new HarnessError(
       'UNSUPPORTED_COMMAND',

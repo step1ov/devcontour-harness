@@ -110,3 +110,19 @@ test('H1-05: прежние команды отвечают тем же конв
     assert.deepEqual(Object.keys(r.json), keys, args.join(' '));
   }
 });
+
+test('H1-05 (H1-F013): version отклоняет новые флаги других команд; без них — прежний ответ', () => {
+  for (const args of [
+    ['version', '--human'],
+    ['version', '--plan'],
+    ['version', '--writer', 'claude'],
+    ['--version', '--human'],
+  ]) {
+    const r = harness(args);
+    assert.equal(r.status, 2, args.join(' '));
+    assert.equal(r.json.error?.code, 'INVALID_INPUT', args.join(' '));
+  }
+  const plain = harness(['version']);
+  assert.equal(plain.status, 0);
+  assert.equal(plain.json.ok, true);
+});

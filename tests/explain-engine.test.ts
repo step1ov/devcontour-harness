@@ -398,7 +398,7 @@ const second = (dep: boolean) => (raw: Record<string, unknown>) => {
   });
 };
 
-test('H1-03: explain = движок — эпизод awaiting-lead на последней разрешённой попытке → решение человека', async () => {
+test('H1-03: explain = движок — эпизод awaiting-lead на последней разрешённой попытке → сброс попыток (решение человека)', async () => {
   const ctx = hsetup({
     scenario: { writer: implement(), reviewer: approve() },
     policy: (p) => {
@@ -422,7 +422,7 @@ test('H1-03: explain = движок — эпизод awaiting-lead на посл
     assert.deepEqual([w.status, w.attempt], ['failed', ctx.policy.maxAttempts]);
 
     assert.deepEqual(diagnose(ctx, h), [
-      { workId: 'add-greeting', retryPlanned: false, actor: 'user', action: 'user-decision' },
+      { workId: 'add-greeting', retryPlanned: false, actor: 'user', action: 'reset-attempts' },
     ]);
 
     const result = await h.run({ graph: ctx.graph, author: 'claude' });
@@ -704,6 +704,295 @@ test('H1-03 (H1-F009): explain = движок — готовый повтор э
       // Группа стоит на паузе runtime: шаг человека — устранить её причину.
       { workId: 'second', retryPlanned: false, actor: 'user', action: 'fix-environment' },
     ]);
+  } finally {
+    h.close();
+  }
+});
+
+/** Второе независимое поручение `second` в той же группе (как в пробах приёмки). */
+const secondWork = (raw: Record<string, unknown>) => {
+  const orders = raw.orders as Record<string, unknown>[];
+  orders.push({
+    ...orders[0],
+    id: 'second',
+    source: { connector: 'files', ref: 'second', revision: '1' },
+    title: 'Second independent work',
+    dependsOn: [],
+    writeScope: ['lib'],
+  });
+};
+
+/** По две review-неудачи у каждой из двух работ и эпизоды awaiting-lead, как в afterFailure. */
+const twoEpisodes = (h: H) => {
+  const runs: { workId: string; ids: string[] }[] = [];
+  for (let i = 0; i < 2; i++) {
+    const a = h.engine.claim('controller')!;
+    h.engine.fail(a.id, a.token, 'review property fixture first ' + i, { kind: 'review' });
+    h.engine.retry(a.workId);
+    const b = h.engine.claim('controller')!;
+    assert.equal(b.workId, a.workId);
+    h.engine.fail(b.id, b.token, 'review property fixture second ' + i, { kind: 'review' });
+    runs.push({ workId: a.workId, ids: [a.id, b.id] });
+  }
+  assert.deepEqual(
+    runs.map((r) => r.workId),
+    ['add-greeting', 'second'],
+  );
+  const at = new Date(h.engine.clock()).toISOString();
+  for (const r of runs)
+    h.store.transact('task.retry', (tx) => {
+      const w = tx.work(r.workId)!;
+      tx.putWork({
+        ...w,
+        recovery: {
+          id: 'RC-' + w.id,
+          property: 'p1',
+          basis: h.engine.episodeOf(w, tx),
+          runs: r.ids,
+          openedAt: at,
+          status: 'awaiting-lead',
+          calls: 0,
+          history: [{ at, event: 'opened' }],
+          version: 1,
+        },
+      });
+    });
+  return at;
+};
+
+/** Решение оператора new-approach по эпизоду `RC-<workId>`. */
+const operatorNewApproach = (h: H, workId: string, at: string) =>
+  h.engine.recoveryDecide(workId, 'RC-' + workId, {
+    action: 'new-approach',
+    reason: 'operator decided a new approach',
+    evidence: [],
+    hypothesis: 'h',
+    plan: 'p',
+    source: { kind: 'operator' },
+    decidedAt: at,
+  });
+
+/** Диагноз одной работы, как `harness explain --work`. */
+const diagnoseOne = (ctx: Ctx, h: H, workId: string) =>
+  stopInputsOf(h, {
+    maxAttempts: ctx.policy.maxAttempts,
+    repairBudget: ctx.policy.repairBudget,
+    workId,
+  })
+    .filter((i) => i.kind === 'work')
+    .map(explainStop)
+    .map((d) => ({
+      workId: d.workId,
+      retryPlanned: d.retryPlanned,
+      actor: d.actor,
+      action: d.action,
+    }));
+
+test('H1-03 (H1-F010): explain = движок — последний разрешённый повтор эпизода упал, попытки исчерпаны → следующий эпизод не обещает продолжения', async () => {
+  const ctx = hsetup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p) => {
+      p.maxAttempts = 3;
+      p.repairBudget = 6;
+    },
+    graph: secondWork,
+  });
+  const h = ctx.open();
+  try {
+    const key = started(ctx, h);
+    const at = twoEpisodes(h);
+    operatorNewApproach(h, 'add-greeting', at);
+    h.engine.retry('add-greeting');
+    const retried = h.engine.claim('controller')!;
+    assert.equal(retried.workId, 'add-greeting');
+    h.engine.fail(retried.id, retried.token, 'timeout on last permitted recovery retry', {
+      kind: 'timeout',
+    });
+    h.engine.release('controller');
+    const w = h.engine.read((v) => v.work('add-greeting')!);
+    assert.deepEqual(
+      [w.status, w.recovery?.status, w.attempt],
+      ['failed', 'retry', ctx.policy.maxAttempts],
+    );
+    assert.equal(
+      h.engine.read((v) => v.work('second')!.recovery?.status),
+      'awaiting-lead',
+    );
+
+    const second = {
+      workId: 'second',
+      retryPlanned: false,
+      actor: 'user',
+      action: 'user-decision',
+    };
+    assert.deepEqual(diagnose(ctx, h), [
+      { workId: 'add-greeting', retryPlanned: false, actor: 'user', action: 'reset-attempts' },
+      second,
+    ]);
+    assert.deepEqual(codes(ctx, h)[0], ['add-greeting', 'ATTEMPTS_EXHAUSTED']);
+    assert.deepEqual(diagnoseOne(ctx, h, 'second'), [second], 'фильтр --work second');
+
+    await h.run({ graph: ctx.graph, author: 'claude' });
+    const job = h.workflows.get(key);
+    assert.equal(job.status, 'failed');
+    assert.match(job.error ?? '', /Исчерпан лимит попыток/);
+    assert.equal(
+      h.engine.read((v) => v.work('second')!.recovery?.status),
+      'awaiting-lead',
+    );
+    assert.equal(ctx.calls('claude', 'writer'), 0);
+    assert.equal(ctx.calls('codex', 'reviewer'), 0);
+  } finally {
+    h.close();
+  }
+});
+
+test('H1-03 (H1-F011): explain = движок — два эпизода awaiting-lead на одну единицу общего бюджета → второй ждёт решения человека', async () => {
+  // Локальный lead fixture (как в пробе приёмки): разбор выбирает new-approach.
+  const scenario = {
+    writer: implement(),
+    reviewer: approve(),
+    lead: {
+      result: {
+        action: 'new-approach',
+        reason: 'Use another implementation approach',
+        evidence: ['saved attempts'],
+        hypothesis: 'a new hypothesis',
+        plan: 'verify configured gate',
+        cases: null,
+        proposal: null,
+        conflict: null,
+      },
+    },
+  };
+  const ctx = hsetup({
+    scenario,
+    policy: (p) => {
+      p.maxAttempts = 3;
+      p.repairBudget = 1;
+    },
+    graph: secondWork,
+  });
+  const h = ctx.open();
+  try {
+    const key = started(ctx, h);
+    twoEpisodes(h);
+    h.engine.release('controller');
+
+    const second = {
+      workId: 'second',
+      retryPlanned: false,
+      actor: 'user',
+      action: 'user-decision',
+    };
+    assert.deepEqual(diagnose(ctx, h), [
+      { workId: 'add-greeting', retryPlanned: false, actor: 'controller', action: 'wait' },
+      second,
+    ]);
+    assert.deepEqual(diagnoseOne(ctx, h, 'second'), [second], 'фильтр --work second');
+
+    await h.run({ graph: ctx.graph, author: 'claude' });
+    const job = h.workflows.get(key);
+    assert.equal(job.status, 'failed');
+    assert.equal(job.repairs, 1);
+    assert.match(job.error ?? '', /исчерпан бюджет восстановлений/);
+    assert.equal(ctx.calls('claude', 'writer'), 1);
+    const w = h.engine.read((v) => v.work('second')!);
+    assert.deepEqual([w.recovery?.status, w.recovery?.calls], ['awaiting-lead', 0]);
+  } finally {
+    h.close();
+  }
+});
+
+test('H1-03 (H1-F012): explain = движок — после эпизода retry отменённая работа останавливает группу до обычного повтора', async () => {
+  const ctx = hsetup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p) => {
+      p.maxAttempts = 5;
+      p.repairBudget = 6;
+    },
+    graph: (raw) => {
+      const orders = raw.orders as Record<string, unknown>[];
+      for (const id of ['cancelled', 'third'])
+        orders.push({
+          ...orders[0],
+          id,
+          source: { connector: 'files', ref: id, revision: '1' },
+          title: 'independent ' + id,
+          dependsOn: [],
+          writeScope: ['lib/' + id],
+        });
+    },
+  });
+  const h = ctx.open();
+  try {
+    const key = started(ctx, h);
+    const a = h.engine.claim('controller')!;
+    assert.equal(a.workId, 'add-greeting');
+    h.engine.fail(a.id, a.token, 'review failure first', { kind: 'review' });
+    h.engine.retry(a.workId);
+    const b = h.engine.claim('controller')!;
+    h.engine.fail(b.id, b.token, 'review failure second', { kind: 'review' });
+    const at = new Date(h.engine.clock()).toISOString();
+    h.store.transact('task.retry', (tx) => {
+      const w = tx.work(a.workId)!;
+      tx.putWork({
+        ...w,
+        recovery: {
+          id: 'RC-' + w.id,
+          property: 'p1',
+          basis: h.engine.episodeOf(w, tx),
+          runs: [a.id, b.id],
+          openedAt: at,
+          status: 'awaiting-lead',
+          calls: 0,
+          history: [{ at, event: 'opened' }],
+          version: 1,
+        },
+      });
+    });
+    operatorNewApproach(h, a.workId, at);
+    h.engine.cancel('cancelled', 'operator cancelled task');
+    const c = h.engine.claim('controller')!;
+    assert.equal(c.workId, 'third');
+    h.engine.fail(c.id, c.token, 'timeout third', { kind: 'timeout' });
+    h.engine.release('controller');
+    const thirdAttempt = h.engine.read((v) => v.work('third')!.attempt);
+
+    const diags = diagnose(ctx, h);
+    assert.deepEqual(
+      diags.find((d) => d.workId === 'add-greeting'),
+      { workId: 'add-greeting', retryPlanned: true, actor: 'controller', action: 'retry' },
+    );
+    const third = {
+      workId: 'third',
+      retryPlanned: false,
+      actor: 'user',
+      action: 'fix-environment',
+    };
+    assert.deepEqual(
+      diags.find((d) => d.workId === 'third'),
+      third,
+    );
+    assert.deepEqual(diagnoseOne(ctx, h, 'third'), [third], 'фильтр --work third');
+
+    const result = await h.run({ graph: ctx.graph, author: 'claude' });
+    assert.deepEqual(
+      result.works.map((w) => [w.id, w.status]),
+      [
+        ['add-greeting', 'done'],
+        ['cancelled', 'cancelled'],
+        ['third', 'failed'],
+      ],
+    );
+    const job = h.workflows.get(key);
+    assert.equal(job.status, 'failed');
+    assert.match(job.error ?? '', /cancelled/);
+    assert.equal(
+      h.engine.read((v) => v.work('third')!.attempt),
+      thirdAttempt,
+    );
+    assert.equal(ctx.calls('claude', 'writer'), 1);
   } finally {
     h.close();
   }

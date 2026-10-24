@@ -46,6 +46,19 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
         },
       });
     const control = v.control();
+    const pauseLifts = (group: Map<string, Outlook>) =>
+      control.pauseReason === 'runtime' &&
+      (control.pauseFailures ?? []).length > 0 &&
+      (control.pauseFailures ?? []).every((kind) =>
+        works.some(
+          (w) =>
+            w.status === 'failed' &&
+            !w.recovery &&
+            w.failureKind === kind &&
+            repairPolicy[kind].blocksQueue === true &&
+            group.get(w.id) === 'retry',
+        ),
+      );
     for (const work of works) {
       if (work.status === 'done') continue;
       if (options.workId !== undefined && work.id !== options.workId) continue;
@@ -62,14 +75,27 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
       const group = job
         ? outlookOf(v, work.graphId, job.repairs ?? 0, options, control)
         : new Map<string, Outlook>();
-      // Готовая работа ждёт предпосылку, на которой движок остановит задание.
-      const waitingOn =
-        work.status === 'ready'
-          ? work.order.dependsOn.filter((d) => {
-              const dep = v.work(d);
-              return dep && dep.status !== 'done' && (!job || group.get(d) === 'stop');
-            })
-          : [];
+      // Готовая работа ждёт предпосылку, на которой движок остановит задание:
+      // сломанную без автоматического шага или саму ждущую такую (транзитивно).
+      // Готовая и выдаваемая предпосылка движок не останавливает.
+      const stops = (id: string, seen = new Set<string>()): boolean => {
+        if (seen.has(id)) return false;
+        seen.add(id);
+        const dep = v.work(id);
+        if (!dep || dep.status === 'done') return false;
+        // Сломанная без автоматического шага.
+        if (dep.status === 'failed' || dep.status === 'cancelled')
+          return !job || group.get(id) === 'stop';
+        // Готовая, которую эпизод не даёт выдать (как blocksClaim движка).
+        if (
+          dep.status === 'ready' &&
+          dep.recovery &&
+          !['retry', 'closed'].includes(dep.recovery.status)
+        )
+          return true;
+        return dep.status === 'ready' && dep.order.dependsOn.some((d) => stops(d, seen));
+      };
+      const waitingOn = work.status === 'ready' ? work.order.dependsOn.filter((d) => stops(d)) : [];
       const outlook: Outlook | undefined = !job
         ? 'stop'
         : waitingOn.length
@@ -106,7 +132,9 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
           ...(outlook ? { outlook } : {}),
         },
         control: {
-          paused: control.paused,
+          // Пауза runtime, все причины которой снимет назначенный repair группы
+          // (clearFailure блокирующего класса), для остальных работ не держит выдачу.
+          paused: control.paused && !(work.status !== 'failed' && pauseLifts(group)),
           ...(control.pauseReason ? { pauseReason: control.pauseReason } : {}),
           ...(control.pauseFailures ? { pauseFailures: [...control.pauseFailures] } : {}),
         },
@@ -122,11 +150,15 @@ type View = Parameters<Parameters<Harness['engine']['read']>[0]>[0];
 type Outlook = 'retry' | 'wait' | 'stop';
 
 /**
- * Что сделает движок с каждой сломанной работой группы при следующей стадии —
- * тем же порядком, что `Harness.advance`: сначала первый эпизод восстановления
- * свойства (его разбор решает за группу), затем `repairDecision`; бюджет
- * восстановлений группы общий, поэтому работы дальше в очереди получают
- * повтор, только если его хватит и на тех, кто впереди.
+ * Что сделает движок с каждой работой группы, если каждое его автоматическое
+ * действие удастся, — проходом в порядке `Harness.advance`. Сначала эпизоды
+ * восстановления свойств по порядку: разбор ведущего тратит единицу общего
+ * бюджета, разрешённый повтор требует свободной попытки и выдачи; первый
+ * эпизод, на котором движок действовать не может, завершает задание — ему и
+ * всему, что за ним, stop. Затем repair: отмена в группе останавливает его
+ * целиком (как `repairDecision`); сломанные по очереди получают повтор, пока
+ * хватает общего бюджета, первая без повтора останавливает остальных.
+ * Обещается только то, что движок сделает без человека.
  */
 function outlookOf(
   v: View,
@@ -137,85 +169,66 @@ function outlookOf(
 ): Map<string, Outlook> {
   const works = v.works(graphId);
   const out = new Map<string, Outlook>();
-  const all = (o: Outlook) => {
-    for (const w of works) out.set(w.id, o);
-    return out;
-  };
-  // Сломанные работы без эпизода — в порядке repairDecision. Первая без повтора
-  // останавливает задание: ей и всем за ней — stop.
-  const queue = (first: Outlook, rest: Outlook) => {
-    let stopped = false;
-    works
-      .filter((w) => w.status === 'failed' && !w.recovery)
-      .forEach((w, i) => {
-        const outlook =
-          !stopped && retryable(w, repairsUsed + i) ? (i === 0 ? first : rest) : 'stop';
-        if (outlook === 'stop') stopped = true;
-        out.set(w.id, outlook);
-      });
-  };
-  const retryable = (w: (typeof works)[number], used: number) => {
+  for (const w of works) out.set(w.id, 'stop');
+  let used = repairsUsed;
+  const unclaimable = (w: (typeof works)[number]) =>
+    control.paused || Boolean(w.hold) || Boolean(w.budgetBlock);
+  const episodes = works.filter((w) => w.recovery && w.status !== 'cancelled');
+  for (const w of episodes) {
+    const r = w.recovery!;
+    let step: Outlook | undefined;
+    switch (r.status) {
+      case 'awaiting-lead':
+        // Условия резервирования разбора; разбор тратит единицу общего бюджета.
+        if (
+          !(control.paused && control.pauseReason === 'operator') &&
+          used < options.repairBudget &&
+          w.attempt < options.maxAttempts &&
+          r.calls < 1
+        ) {
+          used++;
+          step = 'wait';
+        }
+        break;
+      case 'retry':
+        // Повтор из эпизода: engine.retry требует свободной попытки, выдача — очереди.
+        if (!unclaimable(w) && (w.status !== 'failed' || w.attempt < options.maxAttempts))
+          step = w.status === 'failed' ? 'retry' : 'wait';
+        break;
+      case 'retrying':
+        if (w.status !== 'failed') step = 'wait';
+        break;
+      case 'applying':
+        step = 'wait';
+        break;
+    }
+    // Эпизод, на котором движок не действует сам, завершает задание.
+    if (!step) return out;
+    out.set(w.id, step);
+  }
+  const plain = works.filter((w) => w.status === 'failed' && !w.recovery);
+  if (works.some((w) => w.status === 'cancelled' && !w.recovery)) return out;
+  if (!episodes.length) {
+    const decision = repairDecision(v, works, {
+      budgetLeft: options.repairBudget - used,
+      maxAttempts: options.maxAttempts,
+    });
+    if (!decision || decision.action === 'stop') return out;
+  }
+  // Пока идут эпизоды, сломанные без эпизода ждут; дальше — повтор по очереди.
+  const ahead: Outlook = episodes.length ? 'wait' : 'retry';
+  for (const [i, w] of plain.entries()) {
     const rule = repairPolicy[w.failureKind ?? 'unknown'];
     const identical = w.failureFingerprint
       ? v.attempts(w.id).filter((a) => a.failureFingerprint === w.failureFingerprint).length
       : rule.repeats + 1;
-    return (
+    const retry =
       rule.action === 'retry' &&
       identical - 1 < rule.repeats &&
       w.attempt < options.maxAttempts &&
-      used < options.repairBudget
-    );
-  };
-  // Эпизоды разбираются раньше repair, по порядку; первый, на котором движок не
-  // может действовать сам, завершает задание.
-  const blocking = (w: (typeof works)[number]) => {
-    const r = w.recovery!;
-    switch (r.status) {
-      case 'awaiting-lead':
-        // Те же условия, что у резервирования разбора: пауза человека, бюджет,
-        // попытки поручения, уже потраченный вызов.
-        return (
-          (control.paused && control.pauseReason === 'operator') ||
-          repairsUsed >= options.repairBudget ||
-          w.attempt >= options.maxAttempts ||
-          r.calls >= 1
-        );
-      case 'retry':
-        // Разрешённый повтор, который очередь не выдаст: пауза, удержание, бюджет.
-        // Для упавшей работы — до engine.retry, для готовой — уже после него.
-        return (
-          (w.status === 'failed' || w.status === 'ready') &&
-          (control.paused || Boolean(w.hold) || Boolean(w.budgetBlock))
-        );
-      case 'retrying':
-        // Повтор уже упал, а эпизод не закрыт: автоматического шага нет.
-        return w.status === 'failed';
-      case 'applying':
-        return false;
-      default:
-        return true;
-    }
-  };
-  const episodes = works.filter((w) => w.recovery && w.status !== 'cancelled');
-  const [episode] = episodes;
-  if (episode) {
-    if (blocking(episode)) return all('stop');
-    all('wait');
-    if (episode.recovery!.status === 'retry' && episode.status === 'failed')
-      out.set(episode.id, 'retry');
-    if (episodes.slice(1).some(blocking)) {
-      for (const w of works) if (w.id !== episode.id) out.set(w.id, 'stop');
-      return out;
-    }
-    // Остальные сломанные ждут эпизод; известная остановка среди них — stop.
-    queue('wait', 'wait');
-    return out;
+      used + i < options.repairBudget;
+    if (!retry) break;
+    out.set(w.id, ahead);
   }
-  const decision = repairDecision(v, works, {
-    budgetLeft: options.repairBudget - repairsUsed,
-    maxAttempts: options.maxAttempts,
-  });
-  if (!decision || decision.action === 'stop') return all('stop');
-  queue('retry', 'retry');
   return out;
 }
