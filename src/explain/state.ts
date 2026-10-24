@@ -59,9 +59,22 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
       // Чинит только задание, которое продолжит работу: активное, по текущей
       // редакции графа и с непотраченными попытками стадии (как `claim`).
       const job = jobs.find((j) => j.id === work.graphId && h.workflows.continues(j, v));
-      const outlook = job
-        ? outlookOf(v, work.graphId, job.repairs ?? 0, options, control).get(work.id)
-        : 'stop';
+      const group = job
+        ? outlookOf(v, work.graphId, job.repairs ?? 0, options, control)
+        : new Map<string, Outlook>();
+      // Готовая работа ждёт предпосылку, на которой движок остановит задание.
+      const waitingOn =
+        work.status === 'ready'
+          ? work.order.dependsOn.filter((d) => {
+              const dep = v.work(d);
+              return dep && dep.status !== 'done' && (!job || group.get(d) === 'stop');
+            })
+          : [];
+      const outlook: Outlook | undefined = !job
+        ? 'stop'
+        : waitingOn.length
+          ? 'stop'
+          : group.get(work.id);
       const evidence: EvidenceLink[] = last
         ? [
             { kind: 'attempt', id: last.id },
@@ -83,6 +96,7 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
             : {}),
           ...(work.budgetBlock ? { budgetBlock: { reason: work.budgetBlock.reason } } : {}),
           ...(work.recovery ? { recovery: { status: work.recovery.status } } : {}),
+          ...(waitingOn.length ? { waitingOn } : {}),
         },
         maxAttempts: options.maxAttempts,
         repair: {
@@ -127,46 +141,79 @@ function outlookOf(
     for (const w of works) out.set(w.id, o);
     return out;
   };
-  const episode = works.find((w) => w.recovery && w.status !== 'cancelled');
-  if (episode) {
-    const status = episode.recovery!.status;
-    if (status === 'awaiting-lead') {
-      const blocked =
-        (control.paused && control.pauseReason === 'operator') ||
-        repairsUsed >= options.repairBudget;
-      return all(blocked ? 'stop' : 'wait');
+  // Сломанные работы без эпизода — в порядке repairDecision. Первая без повтора
+  // останавливает задание: ей и всем за ней — stop.
+  const queue = (first: Outlook, rest: Outlook) => {
+    let stopped = false;
+    works
+      .filter((w) => w.status === 'failed' && !w.recovery)
+      .forEach((w, i) => {
+        const outlook =
+          !stopped && retryable(w, repairsUsed + i) ? (i === 0 ? first : rest) : 'stop';
+        if (outlook === 'stop') stopped = true;
+        out.set(w.id, outlook);
+      });
+  };
+  const retryable = (w: (typeof works)[number], used: number) => {
+    const rule = repairPolicy[w.failureKind ?? 'unknown'];
+    const identical = w.failureFingerprint
+      ? v.attempts(w.id).filter((a) => a.failureFingerprint === w.failureFingerprint).length
+      : rule.repeats + 1;
+    return (
+      rule.action === 'retry' &&
+      identical - 1 < rule.repeats &&
+      w.attempt < options.maxAttempts &&
+      used < options.repairBudget
+    );
+  };
+  // Эпизоды разбираются раньше repair, по порядку; первый, на котором движок не
+  // может действовать сам, завершает задание.
+  const blocking = (w: (typeof works)[number]) => {
+    const r = w.recovery!;
+    switch (r.status) {
+      case 'awaiting-lead':
+        // Те же условия, что у резервирования разбора: пауза человека, бюджет,
+        // попытки поручения, уже потраченный вызов.
+        return (
+          (control.paused && control.pauseReason === 'operator') ||
+          repairsUsed >= options.repairBudget ||
+          w.attempt >= options.maxAttempts ||
+          r.calls >= 1
+        );
+      case 'retry':
+        // Разрешённый повтор, который очередь не выдаст: пауза, удержание, бюджет.
+        return (
+          w.status === 'failed' && (control.paused || Boolean(w.hold) || Boolean(w.budgetBlock))
+        );
+      case 'retrying':
+        // Повтор уже упал, а эпизод не закрыт: автоматического шага нет.
+        return w.status === 'failed';
+      case 'applying':
+        return false;
+      default:
+        return true;
     }
-    if (status === 'retry') {
-      all('wait');
-      if (episode.status === 'failed') out.set(episode.id, 'retry');
+  };
+  const episodes = works.filter((w) => w.recovery && w.status !== 'cancelled');
+  const [episode] = episodes;
+  if (episode) {
+    if (blocking(episode)) return all('stop');
+    all('wait');
+    if (episode.recovery!.status === 'retry' && episode.status === 'failed')
+      out.set(episode.id, 'retry');
+    if (episodes.slice(1).some(blocking)) {
+      for (const w of works) if (w.id !== episode.id) out.set(w.id, 'stop');
       return out;
     }
-    if (status === 'applying' || status === 'retrying') return all('wait');
-    return all('stop');
+    // Остальные сломанные ждут эпизод; известная остановка среди них — stop.
+    queue('wait', 'wait');
+    return out;
   }
   const decision = repairDecision(v, works, {
     budgetLeft: options.repairBudget - repairsUsed,
     maxAttempts: options.maxAttempts,
   });
   if (!decision || decision.action === 'stop') return all('stop');
-  // Очередь сломанных — в порядке repairDecision; каждый повтор тратит бюджет группы.
-  const broken = works.filter((w) => w.status === 'failed' && !w.recovery);
-  // Первая работа очереди без повтора останавливает задание: всем за ней — тоже stop.
-  let stopped = false;
-  broken.forEach((w, i) => {
-    const kind = w.failureKind ?? 'unknown';
-    const rule = repairPolicy[kind];
-    const identical = w.failureFingerprint
-      ? v.attempts(w.id).filter((a) => a.failureFingerprint === w.failureFingerprint).length
-      : rule.repeats + 1;
-    const retry =
-      rule.action === 'retry' &&
-      identical - 1 < rule.repeats &&
-      w.attempt < options.maxAttempts &&
-      repairsUsed + i < options.repairBudget;
-    const outlook = w.id === decision.workId || (retry && !stopped) ? 'retry' : 'stop';
-    if (outlook === 'stop') stopped = true;
-    out.set(w.id, outlook);
-  });
+  queue('retry', 'retry');
   return out;
 }

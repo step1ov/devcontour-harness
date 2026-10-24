@@ -87,6 +87,8 @@ export type StopInput =
          * repair. Статус — как в `PropertyRecovery.status`.
          */
         recovery?: { status: string };
+        /** Незавершённые предпосылки, на которых движок остановит задание. */
+        waitingOn?: string[];
       };
       maxAttempts: number;
       repair: {
@@ -213,9 +215,38 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       action: 'none',
       note: 'Поручение принято.',
     };
-  if (work.status === 'failed' && work.recovery && !retry) {
+  const automatic = input.repair.outlook === 'wait';
+  if (
+    work.recovery &&
+    !retry &&
+    (work.status === 'failed' || (work.status === 'ready' && !automatic))
+  ) {
     // Работу ведёт разбор свойства: шаг определяет его статус, а не класс отказа.
-    const automatic = input.repair.outlook === 'wait';
+    if (
+      !automatic &&
+      control.paused &&
+      work.status === 'failed' &&
+      (work.recovery.status === 'awaiting-lead' || work.recovery.status === 'retry')
+    )
+      // Разрешённый повтор не выдаётся, пока очередь стоит: сначала снять паузу.
+      return control.pauseReason === 'runtime'
+        ? {
+            code: stopCodeOf(control.pauseFailures?.[0] ?? 'environment'),
+            cause: control.pauseFailures?.[0] ?? 'environment',
+            phase: 'claim',
+            actor: 'user',
+            action:
+              control.pauseFailures?.[0] === 'provider-auth' ? 'fix-access' : 'fix-environment',
+            note: `Восстановление свойства (${work.recovery.status}) ждёт снятия паузы runtime.`,
+          }
+        : {
+            code: 'PAUSED',
+            cause: 'operator-pause',
+            phase: 'claim',
+            actor: 'user',
+            action: 'resume-queue',
+            note: `Восстановление свойства (${work.recovery.status}) ждёт снятия паузы.`,
+          };
     return automatic
       ? {
           code: stopCodeOf(kind),
@@ -316,6 +347,15 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
         };
     }
   }
+  if (work.status === 'ready' && work.waitingOn?.length)
+    return {
+      code: 'NOT_READY',
+      cause: 'not-ready',
+      phase: 'claim',
+      actor: 'lead',
+      action: 'diagnose-failure',
+      note: `Ждёт ${work.waitingOn.join(', ')}: на них движок остановится; следующий шаг — по их диагнозу.`,
+    };
   if (work.status === 'cancelled')
     return {
       code: 'CANCELLED',

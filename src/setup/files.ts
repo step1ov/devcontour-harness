@@ -86,7 +86,8 @@ async function inspectInWalk(path: string, follow = false): Promise<Stats | unde
     return await (follow ? stat(path) : lstat(path));
   } catch (error) {
     const code = errnoOf(error);
-    if (code === 'ENOENT' || code === 'ENOTDIR') return undefined;
+    // Цикл symlink'ов тоже не разрешается в путь: отказ назовёт ближайший предок.
+    if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP') return undefined;
     throw error;
   }
 }
@@ -104,7 +105,9 @@ async function baseOf(path: string, root: string): Promise<string | undefined> {
   try {
     real = await realpath(resolved);
   } catch (error) {
-    if (errnoOf(error) === 'ENOENT') return undefined;
+    // Корень, который не разрешается (нет, под файлом, цикл), — путь вне него.
+    const code = errnoOf(error);
+    if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP') return undefined;
     throw error;
   }
   return isWithin(real, path) ? real : undefined;
@@ -140,9 +143,11 @@ async function destinationConflict(path: string, root?: string): Promise<Found |
     } else {
       // Корня нет: его ближайший существующий предок обязан быть каталогом.
       for (let up = dirname(base); ; up = dirname(up)) {
-        const info = await inspectInWalk(up, true);
-        if (info) {
-          if (!info.isDirectory())
+        const own = await inspectInWalk(up);
+        if (own) {
+          // Существующий предок — каталог или symlink, разрешающийся в каталог.
+          const info = own.isSymbolicLink() ? await inspectInWalk(up, true) : own;
+          if (!info?.isDirectory())
             return { conflict: 'ancestor-not-directory', path: target, conflictPath: up };
           break;
         }
@@ -188,12 +193,23 @@ function validateIntents(files: FileIntent[]): void {
       messages.push(`Путь файла должен быть абсолютным: ${file.path}`);
       return;
     }
-    const key = resolve(file.path);
+    // Сравнение без регистра: на нечувствительной к регистру ФС это один файл.
+    const key = resolve(file.path).toLowerCase();
     if (seen.has(key)) {
       issues.push({ path: ['files', index, 'path'], message: 'duplicate' });
       messages.push(`Путь файла повторяется: ${file.path}`);
     }
     seen.add(key);
+  });
+  // Файл не может быть каталогом другого намерения того же плана.
+  const keys = files.filter((f) => isAbsolute(f.path)).map((f) => resolve(f.path).toLowerCase());
+  files.forEach((file, index) => {
+    if (!isAbsolute(file.path)) return;
+    const key = resolve(file.path).toLowerCase();
+    if (keys.some((other) => other.startsWith(key + sep))) {
+      issues.push({ path: ['files', index, 'path'], message: 'nested' });
+      messages.push(`Путь файла — каталог другого файла плана: ${file.path}`);
+    }
   });
   const [first] = messages;
   if (first !== undefined) throw new HarnessError('INVALID_INPUT', first, issues);

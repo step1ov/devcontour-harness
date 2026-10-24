@@ -454,3 +454,100 @@ test('H1-02 (H1-F008): корень — symlink в никуда или под о
   const plan = await planFileWrites({ root: absent, files });
   assert.equal(plan.conflicts, 0);
 });
+
+test('H1-02: корень под обычным файлом, путь вне него → outside-root, а не сырой ENOTDIR', async () => {
+  const { real } = await sandbox();
+  await writeFile(join(real, 'file'), 'x');
+  await mkdir(join(real, 'elsewhere'));
+  const path = join(real, 'elsewhere', 'a');
+  await assert.rejects(
+    checkDestination(path, { root: join(real, 'file', 'root') }),
+    refusal('PATH_CONFLICT', `Путь вне корня проекта: ${path}`, [
+      { path: [path], message: 'outside-root' },
+    ]),
+  );
+});
+
+test('H1-02: корень — symlink на самого себя, путь внутри → ancestor-not-directory, а не ELOOP', async () => {
+  const { real } = await sandbox();
+  const loop = join(real, 'loop');
+  await symlink(loop, loop);
+  await assert.rejects(
+    checkDestination(join(loop, 'a'), { root: loop }),
+    refusal('PATH_CONFLICT', `Родитель не является каталогом: ${loop}`, [
+      { path: [loop], message: 'ancestor-not-directory' },
+    ]),
+  );
+});
+
+test('H1-02: отсутствующий корень под висячим symlink-предком → конфликт плана, ничего не записано', async () => {
+  const { real } = await sandbox();
+  const dangling = join(real, 'dangling');
+  await symlink(join(real, 'nowhere'), dangling);
+  const root = join(dangling, 'proj');
+  const target = join(root, '.harness', 'a');
+  const files = [{ path: target, content: 'a' }];
+  const plan = await planFileWrites({ root, files });
+  assert.deepEqual(plan.entries, [
+    {
+      path: target,
+      action: 'conflict',
+      conflict: 'ancestor-not-directory',
+      conflictPath: dangling,
+    },
+  ]);
+  assert.equal(plan.conflicts, 1);
+  await assert.rejects(
+    applyFileWrites(plan, files),
+    refusal('PATH_CONFLICT', `Родитель не является каталогом: ${dangling}`, [
+      { path: [dangling], message: 'ancestor-not-directory' },
+    ]),
+  );
+  assert.deepEqual(await readdir(real), ['dangling']);
+});
+
+test('H1-02: вложенные намерения (файл — каталог другого файла) → INVALID_INPUT nested до записи', async () => {
+  const { real } = await sandbox();
+  const a = join(real, 'r', 'a');
+  const b = join(real, 'r', 'a', 'b');
+  for (const [files, index] of [
+    [
+      [
+        { path: a, content: 'file' },
+        { path: b, content: 'child' },
+      ],
+      0,
+    ],
+    [
+      [
+        { path: b, content: 'child' },
+        { path: a, content: 'file' },
+      ],
+      1,
+    ],
+  ] as const) {
+    const nested = refusal('INVALID_INPUT', `Путь файла — каталог другого файла плана: ${a}`, [
+      { path: ['files', index, 'path'], message: 'nested' },
+    ]);
+    await assert.rejects(planFileWrites({ root: real, files: [...files] }), nested);
+    await assert.rejects(
+      applyFileWrites({ entries: [], conflicts: 0, root: real }, [...files]),
+      nested,
+    );
+  }
+  assert.deepEqual(await readdir(real), [], 'ничего не записано');
+});
+
+test('H1-02: пути, различающиеся только регистром → INVALID_INPUT duplicate', async () => {
+  const { real } = await sandbox();
+  const files: FileIntent[] = [
+    { path: join(real, 'README.md'), content: 'one' },
+    { path: join(real, 'readme.md'), content: 'two', onExisting: 'require-identical' },
+  ];
+  const dup = refusal('INVALID_INPUT', `Путь файла повторяется: ${join(real, 'readme.md')}`, [
+    { path: ['files', 1, 'path'], message: 'duplicate' },
+  ]);
+  await assert.rejects(planFileWrites({ root: real, files }), dup);
+  await assert.rejects(applyFileWrites({ entries: [], conflicts: 0, root: real }, files), dup);
+  assert.deepEqual(await readdir(real), []);
+});
