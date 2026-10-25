@@ -16,6 +16,12 @@
  * из установленного bin: init → plan-request (без вызовов runtime и state) →
  * draft ведущего агента → plan-check → validate → review-plan.
  *
+ * H3: каталог `operationCatalogSchema` корня и `/contracts` — один объект;
+ * установленный bin `capabilities` = `harnessCapabilities()` установленной
+ * библиотеки; `plan-request` с постановкой ~1.1 MB — явный
+ * `RESPONSE_TOO_LARGE` без усечения; DevContour-подобный потребитель каталога,
+ * байтовых границ и pager-ов (`tests/fixtures/consumer-h3`).
+ *
  * `--archive F` проверяет уже выпущенный архив вместо свежей упаковки,
  * `--offline` ставит его без сети (из кэша npm).
  */
@@ -152,6 +158,10 @@ for (const required of [
   'lib/contracts/planning.js',
   'schemas/plan-draft.schema.json',
   'templates/plan-draft.json',
+  // H3: каталог общих операций и границы ответа.
+  'lib/catalog/index.js',
+  'lib/catalog/page.js',
+  'lib/contracts/catalog.js',
 ])
   if (!packed.files.some((f) => f.path === required)) fail('нет файла ' + required);
 
@@ -238,6 +248,25 @@ execFileSync(
     join(scratch, packed.filename),
   ],
   { cwd: consumerH2, stdio: 'inherit' },
+);
+// Потребитель каталога: архив и собственный zod той же версии (одна копия).
+const consumerH3 = join(scratch, 'consumer-h3');
+cpSync(join(root, 'tests', 'fixtures', 'consumer-h3'), consumerH3, {
+  recursive: true,
+  filter: (p) => !p.includes('node_modules'),
+});
+execFileSync(
+  'npm',
+  [
+    'install',
+    '--omit=dev',
+    '--ignore-scripts',
+    '--no-audit',
+    '--no-fund',
+    options.offline ? '--offline' : '--prefer-offline',
+    join(scratch, packed.filename),
+  ],
+  { cwd: consumerH3, stdio: 'inherit' },
 );
 
 // Журнал чтения: каждый node-процесс установленного пакета (CLI, библиотека,
@@ -336,6 +365,11 @@ for (const name of ['planDraft', 'planDraftJsonSchema', 'planDraftTaskShape', 'p
   if (m[name] === undefined || m[name] !== c[name]) throw new Error('корень и /contracts: разные ' + name);
 for (const name of ['planningRequest', 'planningBasis', 'planningFactsOf', 'standaloneInstructions', 'draftIssues', 'checkGaps', 'draftToGraph', 'planCheck', 'planRequestOf'])
   if (typeof m[name] !== 'function') throw new Error('нет экспорта ' + name);
+// H3: схемы каталога — одна реализация в корне и /contracts.
+for (const name of ['operationCatalogSchema', 'catalogToolSchema'])
+  if (m[name] === undefined || m[name] !== c[name]) throw new Error('корень и /contracts: разные ' + name);
+for (const name of ['utf8Bytes', 'jsonBytes', 'checkJsonBytes', 'pageItems', 'operationCatalog', 'harnessCapabilities', 'cliInputSchema', 'isSharedOperation'])
+  if (typeof m[name] !== 'function') throw new Error('нет экспорта ' + name);
 console.log(Object.keys(p).length);
 `;
 const identity = spawnSync(process.execPath, ['--input-type=module', '-e', identityCheck], {
@@ -403,6 +437,82 @@ for (const name of ['devcontour-plan-schema.json', 'devcontour-plan-input-schema
     )
   )
     fail('consumer-h2: expected/' + name + ' не байтовая копия снимка');
+// Хост каталога: clip, байтовые проверки, pager-ы, каталог и /api/capabilities = legacy.
+const hostH3 = spawnSync(process.execPath, ['src/run.mjs'], { cwd: consumerH3, encoding: 'utf8' });
+let hostH3Report;
+try {
+  hostH3Report = JSON.parse(hostH3.stdout);
+} catch {
+  fail('consumer-h3: ответ не JSON: ' + hostH3.stderr + hostH3.stdout);
+}
+if (hostH3.status !== 0 || hostH3Report.ok !== true || !(hostH3Report.total > 0))
+  fail('consumer-h3: ' + JSON.stringify(hostH3Report.failed) + ' ' + hostH3.stderr);
+for (const name of [
+  'zod: one copy for host and package',
+  'identity: root === ./projections clip, catalog exports',
+  'M04 short/clip = legacy',
+  'M05 byte guards = legacy',
+  'M05 context page = legacy',
+  'M05 context page errors 400/400/409/409/413',
+  'Q4 observability page = legacy',
+  'Q4 observability errors 409/409/413',
+  'AC19 pages reassemble without loss',
+  'AC18 catalog = legacy builder',
+  'AC18 snapshot tools bytes (21)',
+  'AC18 catalogDigest subset = legacy',
+  'AC18 /api/capabilities body = legacy (HTTP)',
+  'H3-01 host and harness catalogs separate',
+  'Q5 leafContent and digest',
+  'outputSchema absent without output',
+])
+  if (!hostH3Report.checks.some((c) => c.name === name && c.ok))
+    fail('consumer-h3: нет проверки ' + name);
+for (const name of ['devcontour-capabilities.json', 'devcontour-builtin-profiles.json'])
+  if (
+    !readFileSync(join(consumerH3, 'expected', name)).equals(
+      readFileSync(join(root, 'tests', 'fixtures', 'catalog', name)),
+    )
+  )
+    fail('consumer-h3: expected/' + name + ' не байтовая копия снимка');
+
+// H3: каталог установленного bin = harnessCapabilities() установленной библиотеки.
+const capabilities = run(['capabilities']);
+let capabilitiesEnvelope;
+try {
+  capabilitiesEnvelope = JSON.parse(capabilities.stdout);
+} catch {
+  fail('capabilities: ответ не JSON: ' + capabilities.stdout + capabilities.stderr);
+}
+const libCapabilities = spawnSync(
+  process.execPath,
+  [
+    '--input-type=module',
+    '-e',
+    "const m = await import('devcontour-harness'); process.stdout.write(JSON.stringify(m.harnessCapabilities()));",
+  ],
+  { cwd: consumer, encoding: 'utf8' },
+);
+const catalog = capabilitiesEnvelope.data;
+if (
+  capabilities.status !== 0 ||
+  capabilitiesEnvelope.ok !== true ||
+  libCapabilities.status !== 0 ||
+  !isDeepStrictEqual(catalog, JSON.parse(libCapabilities.stdout)) ||
+  catalog.name !== 'devcontour-harness' ||
+  catalog.version !== packed.version ||
+  catalog.maxInputBytes !== 100000 ||
+  catalog.maxResultBytes !== 1048576 ||
+  JSON.stringify(catalog.tools.map((t) => t.name)) !==
+    JSON.stringify(['init', 'explain', 'plan-request', 'plan-check', 'capabilities'])
+)
+  fail(
+    'capabilities: ' +
+      capabilities.status +
+      ' ' +
+      capabilities.stdout.slice(0, 500) +
+      capabilities.stderr +
+      libCapabilities.stderr,
+  );
 // Профили, skills и шаблоны из установленного архива: встроенный профиль
 // разрешается из пакета с digest байтов своего файла, шаблоны проходят validate.
 const profileCheck = `
@@ -1059,6 +1169,29 @@ const reviewerCalls = ['codex', 'claude'].map((r) => {
 if (reviewerCalls[0] !== 1 || reviewerCalls[1] !== 0 || trapCalls() !== 0)
   fail('review-plan: ожидался один вызов reviewer codex, получено ' + reviewerCalls);
 
+// H3: на той же копии npm-app после init ответ plan-request с постановкой
+// ~1.1 MB не помещается в предел транспорта — явный RESPONSE_TOO_LARGE, exit 2,
+// stdout — один конверт отказа без частичных данных. Постановка вне репозитория.
+const hugeLine = 'Implement greet(name) for the npm app; keep the brief verbatim.\n';
+const hugeBrief = join(scratch, 'huge.brief.md');
+writeFileSync(hugeBrief, hugeLine.repeat(Math.ceil(1_100_000 / hugeLine.length)));
+const tooLarge = h2Run(trapped, 'plan-request', '--brief', hugeBrief, '--policy', h2PolicyPath);
+if (
+  tooLarge.status !== 2 ||
+  tooLarge.json?.ok !== false ||
+  tooLarge.json.error?.code !== 'RESPONSE_TOO_LARGE' ||
+  Buffer.byteLength(tooLarge.stdout) >= 1048576 ||
+  tooLarge.stdout.includes('keep the brief verbatim')
+)
+  fail(
+    'plan-request сверх предела: ' +
+      tooLarge.status +
+      ' ' +
+      tooLarge.stdout.slice(0, 500) +
+      tooLarge.stderr,
+  );
+if (trapCalls() !== 0) fail('plan-request сверх предела вызвал runtime');
+
 // Ни один процесс пакета не читал checkout: журнал есть и не ведёт в него.
 if (!existsSync(traceLog)) fail('журнал чтения пуст: модуль трассировки не загружался');
 const reads = readFileSync(traceLog, 'utf8').split('\n').filter(Boolean);
@@ -1070,5 +1203,5 @@ if (!reads.some((p) => p.includes(join('node_modules', 'devcontour-harness', 'li
   fail('журнал чтения не содержит модулей установленного пакета');
 
 console.log(
-  `smoke-package: ${packed.filename} (${packed.files.length} файлов) установлен; профили, шаблоны, полный цикл и отказы gate/области/controller без каталога skills пройдены на fixture runtime (механика, не качество модели); ./projections без node: (${projectionFiles.size} модулей), одна реализация с корнем, consumer-h1 ${hostReport.total} проверок, consumer-h2 ${hostH2Report.total} проверок; маршрут H1 init → run → accepted ${h1Accepted.slice(0, 12)}, explain, повтор init без записи; маршрут H2 init → plan-request → draft → plan-check → validate → review-plan ${record.digest.slice(0, 12)} без вызовов runtime при планировании; ${reads.length} чтений вне checkout; sha512 ${packed.integrity}`,
+  `smoke-package: ${packed.filename} (${packed.files.length} файлов) установлен; профили, шаблоны, полный цикл и отказы gate/области/controller без каталога skills пройдены на fixture runtime (механика, не качество модели); ./projections без node: (${projectionFiles.size} модулей), одна реализация с корнем, consumer-h1 ${hostReport.total} проверок, consumer-h2 ${hostH2Report.total} проверок, consumer-h3 ${hostH3Report.total} проверок; capabilities ${catalog.tools.length} операций; маршрут H1 init → run → accepted ${h1Accepted.slice(0, 12)}, explain, повтор init без записи; маршрут H2 init → plan-request → draft → plan-check → validate → review-plan ${record.digest.slice(0, 12)} без вызовов runtime при планировании, plan-request сверх предела — RESPONSE_TOO_LARGE; ${reads.length} чтений вне checkout; sha512 ${packed.integrity}`,
 );

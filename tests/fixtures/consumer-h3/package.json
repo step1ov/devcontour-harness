@@ -1,0 +1,10 @@
+{
+  "name": "consumer-h3",
+  "version": "0.0.0",
+  "private": true,
+  "description": "H3 fixture: a host shaped like DevContour that builds its agent catalog, byte guards, pagers and profile digest on the shared catalog operations; it imports only devcontour-harness, devcontour-harness/contracts, devcontour-harness/projections and zod.",
+  "type": "module",
+  "dependencies": {
+    "zod": "4.6.5"
+  }
+}

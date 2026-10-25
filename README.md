@@ -207,7 +207,7 @@ alpha.5 не читает; прежний DevContour его открывает �
 ## Документация
 
 - [Быстрый старт по шагам](docs/quickstart.md)
-- [Самостоятельный проект: init, планирование (plan-request, plan-check), explain, проекции](docs/standalone.md)
+- [Самостоятельный проект: init, планирование (plan-request, plan-check), explain, capabilities, проекции](docs/standalone.md)
 - [Архитектура и границы доверия](docs/architecture.md)
 - [Договоры: входы, выходы, порты, ошибки, CLI](docs/contracts.md)
 - [Совместимость форматов](docs/compatibility.md)
