@@ -245,3 +245,6 @@ CLI — второй копии описаний нет. Ответ общей �
 устаревший cursor — `REVISION_CONFLICT`, элемент, не помещающийся в страницу,
 — `RESPONSE_TOO_LARGE`). `resolveProfile(ref, { includeLeafContent: true })`
 дополнительно возвращает текст файла листа (`leafContent`); digest не меняется.
+`resolveProfile(ref, { layerSchema })` разбирает профили схемой файла хоста
+(закреплённые у хоста профили своей формы) при прежних сложении, проверках
+gates и digest.

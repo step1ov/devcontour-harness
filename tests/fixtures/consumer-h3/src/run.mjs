@@ -7,7 +7,8 @@
  * процессе.
  */
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
@@ -713,6 +714,99 @@ const host = hostCapabilities();
     'Q5 leafContent and digest',
     { problems, nine: Object.keys(shas).length },
     { problems: [], nine: 9 },
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Q5: профиль в форме хоста (layerSchema)                              */
+/* ------------------------------------------------------------------ */
+
+{
+  // Форма роли DevContour: runtime demo, reviewVendor, нестрогий объект.
+  const binding = z.object({
+    runtime: z.enum(['codex', 'claude', 'demo']),
+    model: z.string().optional(),
+  });
+  const layerSchema = z.strictObject({
+    id: z.string(),
+    version: z.string(),
+    extends: z.array(z.string()).default([]),
+    capabilities: z.array(z.string()).default([]),
+    gates: z
+      .array(
+        z.object({
+          id: z.string(),
+          kind: z.enum(['check', 'test']),
+          command: z.array(z.string()),
+          dependsOn: z.array(z.string()).optional(),
+          report: z.object({ type: z.literal('junit'), path: z.string() }).optional(),
+        }),
+      )
+      .default([]),
+    prepare: z.array(z.object({ id: z.string(), command: z.array(z.string()) })).default([]),
+    protectedPaths: z.array(z.string()).default([]),
+    generatedPaths: z.array(z.string()).default([]),
+    roles: z
+      .record(
+        z.string(),
+        binding.extend({
+          reviewer: binding.optional(),
+          reviewVendor: z.enum(['different-vendor', 'same-vendor-allowed']).optional(),
+        }),
+      )
+      .default({}),
+    contextPacks: z
+      .array(
+        z.object({ id: z.string(), files: z.array(z.string()), revision: z.string().optional() }),
+      )
+      .default([]),
+  });
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), 'consumer-h3-profile-')));
+  mkdirSync(join(repo, 'p'));
+  const text = JSON.stringify({
+    id: 'host',
+    version: '1.0.0',
+    gates: [
+      { id: 'tests', kind: 'test', command: ['true'], report: { type: 'junit', path: 't.xml' } },
+    ],
+    prepare: [{ id: 's'.repeat(100), command: ['true'] }],
+    roles: { mobile: { runtime: 'demo', reviewVendor: 'same-vendor-allowed', extra: 1 } },
+    contextPacks: [{ id: 'rn', files: ['rn.md'], revision: 'a'.repeat(40) }],
+  });
+  writeFileSync(join(repo, 'p/host.json'), text);
+  const refusalOf = (fn) => {
+    try {
+      fn();
+      return null;
+    } catch (e) {
+      return e.code;
+    }
+  };
+  const p = root.resolveProfile('./p/host.json', {
+    repository: repo,
+    layerSchema,
+    includeLeafContent: true,
+  });
+  check(
+    'Q5 host layerSchema',
+    {
+      strict: refusalOf(() => root.resolveProfile('./p/host.json', { repository: repo })),
+      roles: p.roles,
+      contextPacks: p.contextPacks,
+      step: p.prepare[0].id.length,
+      leaf: p.leafContent === text,
+      digest: p.digest === sha256(JSON.stringify(p.closure)),
+      badSchema: refusalOf(() => root.resolveProfile('node-checks', { layerSchema: null })),
+    },
+    {
+      strict: 'INVALID_INPUT',
+      roles: { mobile: { runtime: 'demo', reviewVendor: 'same-vendor-allowed' } },
+      contextPacks: [{ id: 'rn', files: ['rn.md'], revision: 'a'.repeat(40) }],
+      step: 100,
+      leaf: true,
+      digest: true,
+      badSchema: 'INVALID_INPUT',
+    },
   );
 }
 

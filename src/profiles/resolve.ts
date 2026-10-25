@@ -13,6 +13,7 @@ import {
   repositoryPolicySchema,
   roleBindingSchema,
   stackProfileSchema,
+  toolchainSchema,
   type ProfilePin,
   type ResolvedProfile,
   type ResolvedProfileWithLeaf,
@@ -39,6 +40,87 @@ export interface ResolveProfileOptions {
   /** Вернуть текст файла листа (`leafContent`) — для хоста, который хранит его сам. */
   includeLeafContent?: boolean;
 }
+
+/**
+ * Слой профиля, который складывает resolver: поля, от которых зависит
+ * сложение и проверки gates. Схема файла хоста (`layerSchema`) обязана давать
+ * их; прочие поля ролей, gates, шагов и инструкций — форма хоста, harness их
+ * переносит как есть.
+ */
+export interface ProfileLayer {
+  id: string;
+  version: string;
+  extends: string[];
+  capabilities: string[];
+  gates: { id: string; kind: 'check' | 'test'; dependsOn?: string[]; report?: unknown }[];
+  prepare: { id: string }[];
+  environment?: unknown;
+  lifecycle?: { setup: { id: string }[]; ready: { id: string }[]; teardown: { id: string }[] };
+  toolchain?: StackProfile['toolchain'];
+  protectedPaths: string[];
+  generatedPaths: string[];
+  concurrency?: number;
+  runTimeoutMs?: number;
+  roles: Record<string, unknown>;
+  contextPacks: { id: string }[];
+}
+
+/** Профиль, разрешённый по схеме файла хоста: поля слоёв — в форме хоста. */
+export type ResolvedProfileOf<L extends ProfileLayer> = Omit<
+  ResolvedProfile,
+  'gates' | 'prepare' | 'environment' | 'lifecycle' | 'toolchain' | 'roles' | 'contextPacks'
+> & {
+  gates: L['gates'];
+  prepare: L['prepare'];
+  environment?: NonNullable<L['environment']>;
+  lifecycle?: NonNullable<L['lifecycle']>;
+  toolchain?: NonNullable<L['toolchain']>;
+  roles: L['roles'];
+  contextPacks: L['contextPacks'];
+};
+
+/**
+ * Опции разрешения по схеме файла хоста. Профили, закреплённые у хоста, могут
+ * иметь свою форму (другие runtime ролей, свои поля, нестрогие вложенные
+ * объекты): `layerSchema` разбирает каждый файл вместо `stackProfileSchema`.
+ * Безопасность файлов, обход `extends`, сложение слоёв, проверки gates и
+ * digest — прежние.
+ */
+export interface ResolveProfileLayerOptions<L extends ProfileLayer> extends ResolveProfileOptions {
+  layerSchema: z.ZodType<L>;
+}
+
+const layerId = z.string().min(1);
+const layerStep = z.looseObject({ id: layerId });
+/** Проверка формы слоя хоста: то, без чего сложение не работает. */
+const profileLayerShape = z.looseObject({
+  id: layerId,
+  version: z.string(),
+  extends: z.array(z.string()),
+  capabilities: z.array(z.string()),
+  gates: z.array(
+    z.looseObject({
+      id: layerId,
+      kind: z.enum(['check', 'test']),
+      dependsOn: z.array(z.string()).optional(),
+    }),
+  ),
+  prepare: z.array(layerStep),
+  lifecycle: z
+    .looseObject({
+      setup: z.array(layerStep),
+      ready: z.array(layerStep),
+      teardown: z.array(layerStep),
+    })
+    .optional(),
+  toolchain: toolchainSchema.optional(),
+  protectedPaths: z.array(z.string()),
+  generatedPaths: z.array(z.string()),
+  concurrency: z.number().optional(),
+  runTimeoutMs: z.number().optional(),
+  roles: z.record(z.string(), z.unknown()),
+  contextPacks: z.array(z.looseObject({ id: layerId })),
+});
 
 /** ID встроенных профилей пакета. */
 export function builtinProfiles(root = builtinProfilesRoot) {
@@ -69,22 +151,25 @@ function safeFile(root: string, file: string) {
   return readFileSync(file, 'utf8');
 }
 
-function parseManifest(content: string, name: string): StackProfile {
+const issuesText = (issues: readonly z.core.$ZodIssue[]) =>
+  issues.map((i) => `${i.path.join('.') || '(корень)'}: ${i.message}`).join('; ');
+
+function parseManifest(content: string, name: string, schema: z.ZodType): ProfileLayer {
   let raw: unknown;
   try {
     raw = JSON.parse(content);
   } catch {
     return refuse(`Профиль ${name}: не JSON`);
   }
-  const parsed = stackProfileSchema.safeParse(raw);
-  if (!parsed.success)
-    refuse(
-      `Профиль ${name}: ` +
-        parsed.error.issues
-          .map((i) => `${i.path.join('.') || '(корень)'}: ${i.message}`)
-          .join('; '),
-    );
-  return parsed.data!;
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) refuse(`Профиль ${name}: ` + issuesText(parsed.error.issues));
+  if (schema !== stackProfileSchema) {
+    // Схема хоста — вызов хоста: форма, без которой сложение не работает, — INVALID_INPUT, не TypeError.
+    const shape = profileLayerShape.safeParse(parsed.data);
+    if (!shape.success)
+      refuse(`layerSchema: слой ${name} не даёт форму профиля: ` + issuesText(shape.error.issues));
+  }
+  return parsed.data as ProfileLayer;
 }
 
 /**
@@ -98,7 +183,18 @@ function parseManifest(content: string, name: string): StackProfile {
  * наибольшее; роли и инструкции стека — по ID, надстройка уточняет базу.
  * Итоговый профиль обязан иметь test gate с JUnit: зелёный выход без отчёта
  * ничего не доказывает. Файлы локальных слоёв становятся защищёнными путями.
+ *
+ * С `layerSchema` файлы разбирает схема хоста, а gates, роли, шаги и
+ * инструкции остаются в её форме (см. `ResolveProfileLayerOptions`).
  */
+export function resolveProfile<L extends ProfileLayer>(
+  ref: string,
+  options: ResolveProfileLayerOptions<L> & { includeLeafContent: true },
+): ResolvedProfileOf<L> & { leafContent: string };
+export function resolveProfile<L extends ProfileLayer>(
+  ref: string,
+  options: ResolveProfileLayerOptions<L>,
+): ResolvedProfileOf<L>;
 export function resolveProfile(
   ref: string,
   options: ResolveProfileOptions & { includeLeafContent: true },
@@ -106,19 +202,31 @@ export function resolveProfile(
 export function resolveProfile(ref: string, options?: ResolveProfileOptions): ResolvedProfile;
 export function resolveProfile(
   ref: string,
-  options: ResolveProfileOptions = {},
+  options: ResolveProfileOptions & { layerSchema?: unknown } = {},
 ): ResolvedProfile | ResolvedProfileWithLeaf {
+  // Схема по умолчанию — только при отсутствующем поле; null и не-Zod — отказ.
+  const custom = options.layerSchema !== undefined;
+  if (
+    custom &&
+    (typeof options.layerSchema !== 'object' ||
+      options.layerSchema === null ||
+      !('_zod' in options.layerSchema))
+  )
+    throw new HarnessError('INVALID_INPUT', 'resolveProfile: layerSchema — схема Zod', [
+      { path: ['options', 'layerSchema'], message: 'layerSchema — схема Zod' },
+    ]);
+  const schema = custom ? (options.layerSchema as z.ZodType) : stackProfileSchema;
   const builtinRoot = realpathSync(options.builtinRoot ?? builtinProfilesRoot);
   const root = options.repository ? realpathSync(options.repository) : undefined;
   const repositoryId = options.repositoryId ?? 'main';
   const active = new Set<string>();
   const seen = new Set<string>();
   const closure: { ref: string; digest: string }[] = [];
-  const layers: StackProfile[] = [];
+  const layers: ProfileLayer[] = [];
   const files: string[] = [];
   let source: ResolvedProfile['source'];
   let leafContent = '';
-  const visit = (reference: string, parent?: string, depth = 0): StackProfile => {
+  const visit = (reference: string, parent?: string, depth = 0): ProfileLayer => {
     if (depth > PROFILE_DEPTH_LIMIT) refuse('Слишком глубокое наследование профилей');
     const builtin = builtinId.test(reference);
     if (!builtin && !reference.startsWith('./') && !reference.startsWith('../'))
@@ -132,7 +240,7 @@ export function resolveProfile(
     const key = builtin ? 'builtin:' + reference : 'local:' + relative(root!, file);
     if (active.has(key)) refuse('Цикл наследования профилей: ' + key);
     const content = safeFile(owner, file);
-    const manifest = parseManifest(content, key);
+    const manifest = parseManifest(content, key, schema);
     if (builtin && manifest.id !== reference) refuse('ID встроенного профиля не совпадает: ' + key);
     if (depth === 0) {
       leafContent = content;
@@ -160,12 +268,13 @@ export function resolveProfile(
     if (gate.id === REQUIREMENT_GATE) refuse('Зарезервированный gate: ' + REQUIREMENT_GATE);
     if (gate.kind === 'test' && !gate.report) refuse('Test gate требует JUnit: ' + gate.id);
   }
-  const gates = declared.map((g) => gateSchema.parse(g));
+  // Gates схемы хоста остаются в её форме; проверки выше — общие.
+  const gates = custom ? declared : declared.map((g) => gateSchema.parse(g));
   if (!gates.some((g) => g.kind === 'test' && g.report))
     refuse('Итоговый профиль требует test gate с JUnit');
   const prepare = layers.flatMap((p) => p.prepare);
   if (new Set(prepare.map((s) => s.id)).size !== prepare.length) refuse('Повтор prepare step ID');
-  const single = <K extends 'environment' | 'lifecycle'>(key: K): StackProfile[K] => {
+  const single = <K extends 'environment' | 'lifecycle'>(key: K): ProfileLayer[K] => {
     const values = layers.map((p) => p[key]).filter((v) => v !== undefined);
     if (values.length > 1) refuse('Конфликт частей профиля: ' + key);
     return values[0];
@@ -177,7 +286,7 @@ export function resolveProfile(
     if (new Set(steps.map((s) => s.id)).size !== steps.length) refuse('Повтор lifecycle step ID');
   const limits = layers.flatMap((p) => (p.concurrency ? [p.concurrency] : []));
   const timeouts = layers.flatMap((p) => (p.runTimeoutMs ? [p.runTimeoutMs] : []));
-  return {
+  const resolved: ResolvedProfileOf<ProfileLayer> & { leafContent?: string } = {
     id: leaf.id,
     version: leaf.version,
     // Один встроенный файл — digest его байтов: так закреплены прежние
@@ -194,7 +303,7 @@ export function resolveProfile(
     generatedPaths: [...new Set(layers.flatMap((p) => p.generatedPaths))],
     ...(limits.length ? { concurrency: Math.min(...limits) } : {}),
     ...(timeouts.length ? { runTimeoutMs: Math.max(...timeouts) } : {}),
-    roles: Object.assign({}, ...layers.map((p) => p.roles)) as StackProfile['roles'],
+    roles: Object.assign({}, ...layers.map((p) => p.roles)) as ProfileLayer['roles'],
     contextPacks: [
       ...new Map(layers.flatMap((p) => p.contextPacks).map((pack) => [pack.id, pack])).values(),
     ],
@@ -202,6 +311,8 @@ export function resolveProfile(
     closure,
     ...(options.includeLeafContent ? { leafContent } : {}),
   };
+  // Без layerSchema слои — `stackProfileSchema`, gates — `gateSchema`: это ResolvedProfile.
+  return resolved as ResolvedProfile;
 }
 
 /**
@@ -209,7 +320,7 @@ export function resolveProfile(
  * объединяются, но одно имя с разными значениями — конфликт композиции, а не
  * молчаливая победа последнего слоя.
  */
-function mergeToolchains(layers: StackProfile[]): StackProfile['toolchain'] {
+function mergeToolchains(layers: ProfileLayer[]): StackProfile['toolchain'] {
   const present = layers.flatMap((p) => (p.toolchain ? [p.toolchain] : []));
   if (!present.length) return undefined;
   const merged = {

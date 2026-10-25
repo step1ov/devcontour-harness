@@ -100,6 +100,9 @@ export {
   profileRoles,
   repositoryFromProfile,
   resolveProfile,
+  type ProfileLayer,
+  type ResolvedProfileOf,
+  type ResolveProfileLayerOptions,
   type ResolveProfileOptions,
 } from './profiles/resolve.ts';
 /**

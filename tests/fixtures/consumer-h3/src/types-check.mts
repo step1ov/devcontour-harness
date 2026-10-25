@@ -100,3 +100,27 @@ const plain: ResolvedProfile = resolveProfile('node-checks');
 // @ts-expect-error без includeLeafContent поля leafContent нет
 const missing: string = resolveProfile('node-checks').leafContent;
 void [leaf, plain, missing];
+
+// Профиль в форме хоста: поля ролей — из схемы хоста.
+const hostRole = z.object({
+  runtime: z.enum(['codex', 'claude', 'demo']),
+  reviewVendor: z.string().optional(),
+});
+const hostLayer = z.object({
+  id: z.string(),
+  version: z.string(),
+  extends: z.array(z.string()),
+  capabilities: z.array(z.string()),
+  gates: z.array(z.object({ id: z.string(), kind: z.enum(['check', 'test']) })),
+  prepare: z.array(z.object({ id: z.string() })),
+  protectedPaths: z.array(z.string()),
+  generatedPaths: z.array(z.string()),
+  roles: z.record(z.string(), hostRole),
+  contextPacks: z.array(z.object({ id: z.string(), revision: z.string().optional() })),
+});
+const hosted = resolveProfile('node-checks', { layerSchema: hostLayer, includeLeafContent: true });
+const vendor: string | undefined = hosted.roles['mobile']?.reviewVendor;
+const runtime: 'codex' | 'claude' | 'demo' | undefined = hosted.roles['mobile']?.runtime;
+const hostedLeaf: string = hosted.leafContent;
+const revision: string | undefined = hosted.contextPacks[0]?.revision;
+void [vendor, runtime, hostedLeaf, revision];
