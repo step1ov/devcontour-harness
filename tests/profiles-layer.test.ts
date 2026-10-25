@@ -302,6 +302,15 @@ test('H3-fix: stackProfileSchema как layerSchema — тот же резуль
     );
 });
 
+test('H3-fix: полный toolchain схемы хоста складывается как у harness', () => {
+  const layerSchema = hostLayer.transform((v) => ({
+    ...v,
+    toolchain: { tools: { node: '24.3.0' }, packageManagers: { '.': 'npm' as const } },
+  }));
+  const p = resolveProfile('node-checks', { layerSchema });
+  assert.deepEqual(p.toolchain, { tools: { node: '24.3.0' }, packageManagers: { '.': 'npm' } });
+});
+
 test('H3-fix: layerSchema — только схема Zod; отсутствующий ключ — схема harness', () => {
   for (const bad of [null, {}, 'schema', 1, [], { safeParse: () => ({ success: true }) }]) {
     const error = refusal(() =>
@@ -322,6 +331,14 @@ test('H3-fix: схема хоста без формы профиля — INVALID
     hostLayer.transform((v) => ({ ...v, gates: v.gates.map((g) => ({ ...g, kind: 'other' })) })),
     hostLayer.transform((v) => ({ ...v, roles: [] })),
     hostLayer.transform(() => null),
+    // Неполный toolchain (H3-F003): без умолчаний схемы harness.
+    hostLayer.transform((v) => ({ ...v, toolchain: {} })),
+    hostLayer.transform((v) => ({ ...v, toolchain: { tools: { node: '24' } } })),
+    hostLayer.transform((v) => ({ ...v, toolchain: { packageManagers: { '.': 'npm' } } })),
+    hostLayer.transform((v) => ({
+      ...v,
+      toolchain: { tools: {}, packageManagers: { '.': 'yarn' } },
+    })),
   ];
   for (const layerSchema of schemas) {
     const error = refusal(() =>
@@ -329,4 +346,38 @@ test('H3-fix: схема хоста без формы профиля — INVALID
     );
     assert.match(error.message, /^layerSchema: слой builtin:node-checks не даёт форму профиля: /);
   }
+});
+
+test('H3-fix: любое поле сложения неверного типа — INVALID_INPUT, не TypeError', () => {
+  const root = hostRepo();
+  const fields = [
+    'id',
+    'version',
+    'extends',
+    'capabilities',
+    'gates',
+    'prepare',
+    'lifecycle',
+    'toolchain',
+    'protectedPaths',
+    'generatedPaths',
+    'concurrency',
+    'runTimeoutMs',
+    'roles',
+    'contextPacks',
+  ];
+  const values: unknown[] = [null, {}, [], 'x', 1, [null], [{}], [1], { a: null }];
+  for (const field of fields)
+    for (const value of values) {
+      const layerSchema = hostLayer.transform((v) => ({ ...v, [field]: value }));
+      for (const ref of ['node-checks', './profiles/mobile.json'])
+        try {
+          resolveProfile(ref, { repository: root, layerSchema });
+        } catch (error) {
+          assert.ok(
+            error instanceof HarnessError && error.code === 'INVALID_INPUT',
+            `${field}=${JSON.stringify(value)} (${ref}): ${String(error)}`,
+          );
+        }
+    }
 });

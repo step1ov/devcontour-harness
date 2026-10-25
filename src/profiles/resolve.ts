@@ -14,7 +14,6 @@ import {
   roleBindingSchema,
   relativePathSchema,
   stackProfileSchema,
-  toolchainSchema,
   type ProfilePin,
   type ResolvedProfile,
   type ResolvedProfileWithLeaf,
@@ -114,7 +113,13 @@ const profileLayerShape = z.looseObject({
       teardown: z.array(layerStep),
     })
     .optional(),
-  toolchain: toolchainSchema.optional(),
+  // Без умолчаний: проверяется сам слой хоста, а не его разобранная копия.
+  toolchain: z
+    .looseObject({
+      tools: z.record(z.string(), z.string()),
+      packageManagers: z.record(z.string(), z.enum(['npm', 'pnpm'])),
+    })
+    .optional(),
   protectedPaths: z.array(z.string()),
   generatedPaths: z.array(z.string()),
   concurrency: z.number().optional(),
