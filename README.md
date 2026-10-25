@@ -5,7 +5,7 @@ Headless-движок исполнения инженерных поручени
 интеграция с принятой веткой через compare-and-swap и машинный результат с SHA
 и доказательствами.
 
-> Статус: `0.1.0-alpha.9` — предварительный выпуск (alpha). Договоры
+> Статус: `0.1.0-alpha.10` — предварительный выпуск (alpha). Договоры
 > `v1alpha1` могут измениться между alpha-версиями; закрепляйте точную версию.
 > Файл → ревью плана → кандидат → интеграция → принятие → результат JSON, с
 > ограниченным восстановлением, повторным использованием кандидата, бюджетами,
@@ -27,7 +27,7 @@ Headless-движок исполнения инженерных поручени
 Из npm — точная версия (воспроизводимо) или последняя alpha по тегу:
 
 ```sh
-npm install --save-exact devcontour-harness@0.1.0-alpha.9   # точная версия
+npm install --save-exact devcontour-harness@0.1.0-alpha.10   # точная версия
 # или: npm install --save-exact devcontour-harness@alpha     # текущая alpha
 npx harness --version
 ```
@@ -116,6 +116,17 @@ PASS» нет. Адаптеры хоста реализуют порты `Execut
 `/contracts` и `/testing`; JSON-схемы входов и выходов —
 `devcontour-harness/schemas/<имя>.schema.json`. Декларации используют типы
 Node.js: TypeScript-потребителю нужен `@types/node` (или `skipLibCheck`).
+
+## Выпуск 0.1.0-alpha.10
+
+Каталог общих операций и границы ответа. Подробно —
+[заметки выпуска](docs/release-notes/0.1.0-alpha.10.md).
+
+- `harness capabilities` — каталог общих операций из одной декларации:
+  описание, `readOnly`, схемы входа и ответа, пределы байт.
+- Ответ общей операции сверх предела — `RESPONSE_TOO_LARGE` без усечения.
+- Для хостов: `operationCatalog`, `jsonBytes`/`checkJsonBytes`, `pageItems`,
+  `resolveProfile({ includeLeafContent })`.
 
 ## Выпуск 0.1.0-alpha.9
 
