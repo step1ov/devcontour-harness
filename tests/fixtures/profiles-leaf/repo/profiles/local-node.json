@@ -1,0 +1,7 @@
+{
+  "id": "local-node",
+  "version": "1.0.0",
+  "extends": ["node-checks"],
+  "capabilities": ["кириллица", "emoji-✓"],
+  "protectedPaths": ["docs/заметки.md"]
+}

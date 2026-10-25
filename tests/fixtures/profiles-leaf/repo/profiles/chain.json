@@ -1,0 +1,6 @@
+{
+  "id": "chain",
+  "version": "3.0.0",
+  "extends": ["./base.json"],
+  "protectedPaths": ["verify.py"]
+}

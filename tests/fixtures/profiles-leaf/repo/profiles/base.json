@@ -1,0 +1,13 @@
+{
+  "id": "base",
+  "version": "2.0.0",
+  "capabilities": ["python"],
+  "gates": [
+    {
+      "id": "tests",
+      "kind": "test",
+      "command": ["python3", "verify.py"],
+      "report": { "type": "junit", "path": ".reports/tests.xml" }
+    }
+  ]
+}
