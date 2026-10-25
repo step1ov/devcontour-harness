@@ -13,7 +13,7 @@
 ```sh
 mkdir harness-demo && cd harness-demo
 npm init -y >/dev/null
-npm install --save-exact devcontour-harness@0.1.0-alpha.10
+npm install --save-exact devcontour-harness@0.1.0-alpha.11
 npx harness --version
 npx harness doctor
 ```

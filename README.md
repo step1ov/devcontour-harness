@@ -5,7 +5,7 @@ Headless-движок исполнения инженерных поручени
 интеграция с принятой веткой через compare-and-swap и машинный результат с SHA
 и доказательствами.
 
-> Статус: `0.1.0-alpha.10` — предварительный выпуск (alpha). Договоры
+> Статус: `0.1.0-alpha.11` — предварительный выпуск (alpha). Договоры
 > `v1alpha1` могут измениться между alpha-версиями; закрепляйте точную версию.
 > Файл → ревью плана → кандидат → интеграция → принятие → результат JSON, с
 > ограниченным восстановлением, повторным использованием кандидата, бюджетами,
@@ -27,7 +27,7 @@ Headless-движок исполнения инженерных поручени
 Из npm — точная версия (воспроизводимо) или последняя alpha по тегу:
 
 ```sh
-npm install --save-exact devcontour-harness@0.1.0-alpha.10   # точная версия
+npm install --save-exact devcontour-harness@0.1.0-alpha.11   # точная версия
 # или: npm install --save-exact devcontour-harness@alpha     # текущая alpha
 npx harness --version
 ```
@@ -116,6 +116,14 @@ PASS» нет. Адаптеры хоста реализуют порты `Execut
 `/contracts` и `/testing`; JSON-схемы входов и выходов —
 `devcontour-harness/schemas/<имя>.schema.json`. Декларации используют типы
 Node.js: TypeScript-потребителю нужен `@types/node` (или `skipLibCheck`).
+
+## Выпуск 0.1.0-alpha.11
+
+Профили в форме хоста. Подробно —
+[заметки выпуска](docs/release-notes/0.1.0-alpha.11.md).
+
+- `resolveProfile(ref, { layerSchema })` — слои профиля разбирает схема файла
+  хоста; сложение, проверки gates и digest прежние.
 
 ## Выпуск 0.1.0-alpha.10
 
