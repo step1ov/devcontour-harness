@@ -22,6 +22,7 @@ import {
   harnessCapabilities,
   jsonBytes,
   operationCatalog,
+  pageItems,
   sharedOperationNames,
   sharedOperations,
   utf8Bytes,
@@ -601,4 +602,85 @@ test('H3-02: clipDeep не ограничивает размер — объек�
     '413 Ответ превышает 64 KiB; сузьте запрос или используйте CLI-отчёт',
   );
   assert.equal(Object.keys(clipped).length, 100);
+});
+
+test('H3-01/H3-02: вход неверной формы — INVALID_INPUT с путём, не TypeError (pageItems, operationCatalog)', () => {
+  const refused = (f: () => unknown, path: (string | number)[]) =>
+    assert.throws(
+      f,
+      (e: Error & { code?: string; issues?: { path: unknown[] }[] }) =>
+        e instanceof HarnessError &&
+        e.code === 'INVALID_INPUT' &&
+        JSON.stringify(e.issues?.[0]?.path) === JSON.stringify(path),
+      JSON.stringify(path),
+    );
+  const base = { revision: 'r', binding: 'b', limit: 5 };
+  refused(() => pageItems(null as never, {}, base), ['items']);
+  refused(() => pageItems('abc' as never, {}, base), ['items']);
+  refused(() => pageItems([1], null as never, base), ['header']);
+  refused(() => pageItems([1], [] as never, base), ['header']);
+  refused(() => pageItems([1], {}, null as never), ['options']);
+  refused(
+    () => pageItems([1], {}, { ...base, cursorFormat: 'x' as never }),
+    ['options', 'cursorFormat'],
+  );
+  refused(() => pageItems([1], {}, { ...base, measure: 'x' as never }), ['options', 'measure']);
+  refused(() => pageItems([1], {}, { ...base, revision: 5 as never }), ['options', 'revision']);
+  refused(() => pageItems([1], {}, { revision: 'r', limit: 5 } as never), ['options', 'binding']);
+  refused(
+    () =>
+      pageItems([1], {}, {
+        cursorFormat: 'digest-offset',
+        revision: 'a'.repeat(64),
+        binding: 'b',
+        limit: 5,
+      } as never),
+    ['options', 'binding'],
+  );
+  refused(() => pageItems([1], {}, { ...base, cursor: 5 as never }), ['cursor']);
+  refused(
+    () =>
+      pageItems(
+        [1],
+        {},
+        { cursorFormat: 'digest-offset', revision: 'a'.repeat(64), limit: 5, cursor: 5 as never },
+      ),
+    ['cursor'],
+  );
+  // null — первая страница, как у прежних pager хоста.
+  assert.deepEqual(pageItems([1], {}, { ...base, cursor: null as never }).items, [1]);
+
+  const cat = { name: 'n', version: '1', protocolVersion: 1, maxInputBytes: 1, maxResultBytes: 1 };
+  const op = { description: 'd', readOnly: true, input: z.object({}) };
+  refused(() => operationCatalog(null as never), []);
+  refused(() => operationCatalog({ ...cat, name: 1 as never, operations: {} }), ['name']);
+  refused(
+    () => operationCatalog({ ...cat, protocolVersion: 0, operations: {} }),
+    ['protocolVersion'],
+  );
+  refused(
+    () => operationCatalog({ ...cat, maxResultBytes: 1.5, operations: {} }),
+    ['maxResultBytes'],
+  );
+  refused(() => operationCatalog({ ...cat, operations: null as never }), ['operations']);
+  refused(
+    () => operationCatalog({ ...cat, operations: { a: null as never } }),
+    ['operations', 'a'],
+  );
+  refused(
+    () => operationCatalog({ ...cat, operations: { a: { ...op, description: 1 as never } } }),
+    ['operations', 'a', 'description'],
+  );
+  refused(
+    () => operationCatalog({ ...cat, operations: { a: { ...op, readOnly: 'yes' as never } } }),
+    ['operations', 'a', 'readOnly'],
+  );
+  refused(
+    () => operationCatalog({ ...cat, operations: { a: { ...op, input: 5 as never } } }),
+    ['operations', 'a', 'input'],
+  );
+  refused(
+    () => operationCatalog({ ...cat, operations: { a: { ...op, output: 'x' as never } } }),
+    ['operations', 'a', 'output'],
+  );
 });

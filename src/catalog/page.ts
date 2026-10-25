@@ -39,6 +39,15 @@ const cursorSchema = z.strictObject({
   offset: z.number().int().nonnegative(),
 });
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+const inputError = (path: string[], message: string): never => {
+  throw new HarnessError(
+    'INVALID_INPUT',
+    path[0] === 'cursor' ? message : `pageItems: ${message}`,
+    [{ path, message }],
+  );
+};
 const optionError = (key: string, message: string): never => {
   throw new HarnessError('INVALID_INPUT', `pageItems: ${message}`, [
     { path: ['options', key], message },
@@ -72,8 +81,26 @@ export function pageItems<T, H extends Record<string, unknown> = Record<never, n
   header: H,
   options: PageOptions,
 ): Page<T, H> {
+  // Форма входа — до любых расчётов: неверный вызов хоста — INVALID_INPUT, не TypeError.
+  if (!Array.isArray(items)) inputError(['items'], 'items — массив');
+  if (!isRecord(header)) inputError(['header'], 'header — объект');
+  if (!isRecord(options)) inputError(['options'], 'options — объект');
   const { limit, maxBytes = 65536, reserveBytes = 2048, measure = 'page', revision } = options;
-  const digestOffset = options.cursorFormat === 'digest-offset';
+  const format = options.cursorFormat ?? 'json-base64url';
+  if (format !== 'json-base64url' && format !== 'digest-offset')
+    optionError('cursorFormat', 'cursorFormat — json-base64url или digest-offset');
+  const digestOffset = format === 'digest-offset';
+  if (measure !== 'page' && measure !== 'items') optionError('measure', 'measure — page или items');
+  if (typeof revision !== 'string') optionError('revision', 'revision — строка');
+  const binding = (options as { binding?: unknown }).binding;
+  if (digestOffset ? binding !== undefined : typeof binding !== 'string')
+    optionError(
+      'binding',
+      digestOffset ? 'binding не задаётся кодеку digest-offset' : 'binding — строка',
+    );
+  // null и '' — первая страница, как у прежних pager хоста.
+  if (options.cursor != null && typeof options.cursor !== 'string')
+    inputError(['cursor'], 'Некорректный cursor');
   if (!Number.isSafeInteger(limit) || limit < 1) optionError('limit', 'limit — целое ≥ 1');
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1)
     optionError('maxBytes', 'maxBytes — целое ≥ 1');
@@ -90,7 +117,6 @@ export function pageItems<T, H extends Record<string, unknown> = Record<never, n
     offset = Number(match![2]);
     if (!Number.isSafeInteger(offset) || offset > items.length) badOffset();
   } else if (cursor) {
-    const binding = (options as { binding: string }).binding;
     let parsed: z.infer<typeof cursorSchema>;
     try {
       parsed = cursorSchema.parse(JSON.parse(Buffer.from(cursor, 'base64url').toString()));
@@ -134,7 +160,7 @@ export function pageItems<T, H extends Record<string, unknown> = Record<never, n
         : Buffer.from(
             JSON.stringify({
               revision,
-              binding: (options as { binding: string }).binding,
+              binding,
               offset: end,
             }),
           ).toString('base64url');
