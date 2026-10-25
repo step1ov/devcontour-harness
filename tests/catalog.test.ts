@@ -604,7 +604,7 @@ test('H3-02: clipDeep не ограничивает размер — объек�
   assert.equal(Object.keys(clipped).length, 100);
 });
 
-test('H3-01/H3-02: вход неверной формы — INVALID_INPUT с путём, не TypeError (pageItems, operationCatalog)', () => {
+test('H3-01/H3-02/H3-F001: вход неверной формы — INVALID_INPUT с путём, не TypeError (pageItems, operationCatalog)', () => {
   const refused = (f: () => unknown, path: (string | number)[]) =>
     assert.throws(
       f,
@@ -625,6 +625,18 @@ test('H3-01/H3-02: вход неверной формы — INVALID_INPUT с п�
     ['options', 'cursorFormat'],
   );
   refused(() => pageItems([1], {}, { ...base, measure: 'x' as never }), ['options', 'measure']);
+  // H3-F001: null — не «нет поля»: кодек и мера по умолчанию только при отсутствующем ключе.
+  refused(
+    () => pageItems([1], {}, { ...base, cursorFormat: null as never }),
+    ['options', 'cursorFormat'],
+  );
+  refused(() => pageItems([1], {}, { ...base, measure: null as never }), ['options', 'measure']);
+  refused(() => pageItems([1], {}, { ...base, maxBytes: null as never }), ['options', 'maxBytes']);
+  refused(
+    () => pageItems([1], {}, { ...base, reserveBytes: null as never }),
+    ['options', 'reserveBytes'],
+  );
+  assert.deepEqual(pageItems([1, 2], {}, { ...base, limit: 1 }).items, [1]);
   refused(() => pageItems([1], {}, { ...base, revision: 5 as never }), ['options', 'revision']);
   refused(() => pageItems([1], {}, { revision: 'r', limit: 5 } as never), ['options', 'binding']);
   refused(

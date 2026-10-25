@@ -86,7 +86,8 @@ export function pageItems<T, H extends Record<string, unknown> = Record<never, n
   if (!isRecord(header)) inputError(['header'], 'header — объект');
   if (!isRecord(options)) inputError(['options'], 'options — объект');
   const { limit, maxBytes = 65536, reserveBytes = 2048, measure = 'page', revision } = options;
-  const format = options.cursorFormat ?? 'json-base64url';
+  // Кодек по умолчанию — только при отсутствующем поле; null и прочее — отказ.
+  const format = options.cursorFormat === undefined ? 'json-base64url' : options.cursorFormat;
   if (format !== 'json-base64url' && format !== 'digest-offset')
     optionError('cursorFormat', 'cursorFormat — json-base64url или digest-offset');
   const digestOffset = format === 'digest-offset';
