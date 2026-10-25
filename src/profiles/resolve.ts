@@ -12,6 +12,7 @@ import {
   gateSchema,
   repositoryPolicySchema,
   roleBindingSchema,
+  relativePathSchema,
   stackProfileSchema,
   toolchainSchema,
   type ProfilePin,
@@ -267,6 +268,14 @@ export function resolveProfile(
   for (const gate of declared) {
     if (gate.id === REQUIREMENT_GATE) refuse('Зарезервированный gate: ' + REQUIREMENT_GATE);
     if (gate.kind === 'test' && !gate.report) refuse('Test gate требует JUnit: ' + gate.id);
+    // Путь отчёта — внутри worktree: схема хоста могла принять любую строку.
+    if (gate.report !== undefined) {
+      const report: unknown = gate.report;
+      const path =
+        typeof report === 'object' && report !== null && 'path' in report ? report.path : undefined;
+      if (!relativePathSchema.safeParse(path).success)
+        refuse(`Путь JUnit gate ${gate.id}: ожидается относительный путь без glob, . или ..`);
+    }
   }
   // Gates схемы хоста остаются в её форме; проверки выше — общие.
   const gates = custom ? declared : declared.map((g) => gateSchema.parse(g));

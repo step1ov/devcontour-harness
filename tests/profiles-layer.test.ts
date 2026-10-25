@@ -117,7 +117,7 @@ function hostRepo() {
   json('base.json', {
     id: 'base',
     version: '1.0.0',
-    gates: [{ ...testGate, report: { ...junit, path: '/abs/junit.xml' }, legacy: true }],
+    gates: [{ ...testGate, legacy: true }],
     prepare: [{ id: longStep, command: ['npm', 'ci'], note: 'host key' }],
     environment: { inherit: ['HARNESS_HOME'], values: { HARNESS_MODE: 'x' } },
   });
@@ -158,6 +158,22 @@ function hostRepo() {
     version: '1.0.0',
     gates: [testGate],
     environment: { inherit: ['DEVCONTOUR_STATE'] },
+  });
+  // Схема хоста принимает любую строку пути JUnit; resolver требует путь внутри worktree.
+  for (const [file, path] of [
+    ['junit-up.json', '../out.xml'],
+    ['junit-abs.json', '/abs/out.xml'],
+    ['junit-backslash.json', 'a\\b.xml'],
+    ['junit-glob.json', 'out/*.xml'],
+  ] as const)
+    json(file, { id: 'j', version: '1.0.0', gates: [{ ...testGate, report: { ...junit, path } }] });
+  json('junit-check.json', {
+    id: 'jc',
+    version: '1.0.0',
+    gates: [
+      testGate,
+      { id: 'lint', kind: 'check', command: ['true'], report: { ...junit, path: '../l.xml' } },
+    ],
   });
   json('cycle-a.json', { id: 'a', version: '1.0.0', extends: ['./cycle-b.json'] });
   json('cycle-b.json', { id: 'b', version: '1.0.0', extends: ['./cycle-a.json'] });
@@ -204,14 +220,14 @@ test('H3-fix: форму хоста stackProfileSchema отвергает, layer
       revision: sha40,
     },
   ]);
-  // Gates — в форме хоста (лишние ключи сняты схемой хоста, путь отчёта — как у хоста).
+  // Gates — в форме хоста (лишние ключи сняты схемой хоста).
   assert.deepEqual(p.gates, [
     {
       id: 'tests',
       kind: 'test',
       command: ['true'],
       timeoutMs: 120000,
-      report: { type: 'junit', path: '/abs/junit.xml' },
+      report: { type: 'junit', path: '.reports/t.xml' },
     },
     { id: 'lint', kind: 'check', command: ['true'], dependsOn: ['tests'], timeoutMs: 120000 },
   ]);
@@ -240,6 +256,11 @@ test('H3-fix: с layerSchema отказы K10 и проверки gates преж
     ['./profiles/no-junit.json', 'Test gate требует JUnit: tests'],
     ['./profiles/unknown-dep.json', 'Неизвестная зависимость gate lint'],
     ['./profiles/cycle-a.json', 'Цикл наследования профилей: local:profiles/cycle-a.json'],
+    ['./profiles/junit-up.json', 'Путь JUnit gate tests: '],
+    ['./profiles/junit-abs.json', 'Путь JUnit gate tests: '],
+    ['./profiles/junit-backslash.json', 'Путь JUnit gate tests: '],
+    ['./profiles/junit-glob.json', 'Путь JUnit gate tests: '],
+    ['./profiles/junit-check.json', 'Путь JUnit gate lint: '],
     ['./profiles/missing.json', 'Профиль не найден: profiles/missing.json'],
     // Правило окружения — схемы хоста: DEVCONTOUR_* отвергает она.
     ['./profiles/devcontour-env.json', 'Профиль local:profiles/devcontour-env.json: environment'],

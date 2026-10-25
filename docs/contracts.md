@@ -568,7 +568,8 @@ Exit 1 не используется: им Node завершает процес�
 передаёт `resolveProfile(ref, { layerSchema })` — схему Zod своего файла:
 она разбирает каждый слой вместо `StackProfile`, а gates, шаги, роли и
 `contextPacks` остаются в её форме. Безопасность файлов, обход `extends`,
-сложение слоёв, проверки gates и digest — прежние; слой, который не даёт
+сложение слоёв, проверки gates (в том числе путь JUnit — относительный, внутри
+worktree) и digest — прежние; слой, который не даёт
 полей сложения (`ProfileLayer`), и не-Zod `layerSchema` — `INVALID_INPUT`.
 `contextPacks` — инструкции стека для
 хоста: harness их не читает, закрепляет их `ContextSource`. Встроенные
