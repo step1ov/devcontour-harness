@@ -37,6 +37,9 @@ import { cliAdapter } from './agents/cli-adapter.ts';
 import { initProject, initText } from './init/project.ts';
 import { diagnoseState, explainText } from './explain/diagnose.ts';
 import { planCheck, planRequestOf } from './planning/check.ts';
+import { checkJsonBytes } from './catalog/bytes.ts';
+import { isSharedOperation, sharedOperations } from './catalog/shared.ts';
+import { harnessCapabilities } from './catalog/harness.ts';
 import type { RunnerHooks } from './engine/runner.ts';
 import { FileContextSource, FileResultSink, FileWorkSource } from './connectors/files.ts';
 
@@ -355,6 +358,17 @@ async function run(
   for (const [flag, owners] of Object.entries(flagOwners))
     if (v[flag as keyof typeof v] !== undefined && !(owners as readonly string[]).includes(command))
       throw new HarnessError('INVALID_INPUT', `--${flag} поддерживают: ${owners.join(', ')}`);
+  if (isSharedOperation(command)) {
+    // Транспортная граница общей операции: значения аргументов в UTF-8 байтах.
+    const limit = sharedOperations[command].limits.maxInputBytes;
+    const { bytes, within } = checkJsonBytes(v, limit);
+    if (!within)
+      throw new HarnessError(
+        'INVALID_INPUT',
+        `Аргументы ${command}: ${bytes} байт UTF-8 больше предела ${limit}`,
+        [{ path: ['argv'], message: `${bytes} > ${limit}` }],
+      );
+  }
   const need = (key: keyof typeof v) => {
     const value = v[key];
     if (value === undefined || value === '')
@@ -667,6 +681,8 @@ async function run(
       const first = data.issues[0];
       return { command, data, ...(first ? { code: exitCodes[errorCodes[first.code]] } : {}) };
     }
+    case 'capabilities':
+      return { command, data: harnessCapabilities() };
     case 'doctor': {
       const b = v.policy ? loadPolicy(v.policy) : v.state ? binding(v.state) : undefined;
       return {
@@ -725,6 +741,27 @@ try {
   process.stderr.write(`harness: ${known.code}: ${known.message}\n`);
   for (const issue of known.issues)
     process.stderr.write(`  ${issue.path.join('.')}: ${issue.message}\n`);
+}
+// Ответ общей операции сверх предела транспорта — явный отказ, данные не усекаются.
+if (envelope.command && isSharedOperation(envelope.command)) {
+  const limit = sharedOperations[envelope.command].limits.maxResultBytes;
+  const { bytes, within } = checkJsonBytes(envelope, limit);
+  if (!within) {
+    const known = new HarnessError(
+      'RESPONSE_TOO_LARGE',
+      `Ответ ${envelope.command}: ${bytes} байт UTF-8 больше предела транспорта ${limit}; данные не усечены — сузьте вход`,
+      [{ path: [envelope.ok ? 'data' : 'error'], message: `${bytes} > ${limit}` }],
+    );
+    envelope = {
+      apiVersion: API_VERSION,
+      command: envelope.command,
+      ok: false,
+      error: known.toJSON(),
+    };
+    code = exitCodeOf(known);
+    text = undefined;
+    process.stderr.write(`harness: ${known.code}: ${known.message}\n`);
+  }
 }
 process.stdout.write(text ?? JSON.stringify(envelope) + '\n');
 process.exitCode = code;

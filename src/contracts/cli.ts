@@ -19,6 +19,7 @@ import { filePlanEntrySchema, projectManifestSchema } from './project.ts';
 import { stopDiagnosisSchema } from './diagnosis.ts';
 import { planCheckDataSchema, planRequestDataSchema } from './planning.ts';
 import { toolchainReportSchema } from './toolchain.ts';
+import { operationCatalogSchema } from './catalog.ts';
 
 /**
  * Договор CLI `harness`.
@@ -43,6 +44,8 @@ export interface CliArgument {
   value: 'path' | 'dir' | 'id' | 'digest' | 'number' | 'text' | 'flag' | 'sink';
   required: boolean;
   description: string;
+  /** Аргумент можно повторить; значения — список. */
+  multiple?: true;
 }
 export interface CliCommandContract {
   description: string;
@@ -352,7 +355,7 @@ export const cliCommands = {
   },
   init: {
     description:
-      'Подготовить существующий Git npm/pnpm-репозиторий: план или create-only запись .harness/ (политика из профиля и toolchain inspection, manifest последним); чужие файлы не меняются',
+      'Подготовить существующий Git npm/pnpm-репозиторий: план или create-only запись .harness/ (политика из профиля и toolchain inspection; manifest до политики, политика последней); чужие файлы не меняются',
     writes: true,
     idempotency:
       'Повтор с теми же решениями ничего не пишет (created пуст); после прерывания дописывает недостающее; иные решения при существующем manifest — PATH_CONFLICT content-differs',
@@ -445,6 +448,7 @@ export const cliCommands = {
         required: false,
         description:
           'Закоммиченный файл с разделами ## REQ-*: [<repositoryId>:]<путь от корня репозитория>; можно повторять',
+        multiple: true,
       },
       {
         name: '--human',
@@ -486,6 +490,14 @@ export const cliCommands = {
       },
     ],
     refusals: ['APPROVAL_STALE', 'NOT_READY'],
+  },
+  capabilities: {
+    description:
+      'Каталог общих операций harness для агента: имя, версия, protocolVersion, пределы UTF-8 байт и для каждой операции описание, readOnly, JSON Schema входа и данных ответа; только чтение',
+    writes: false,
+    idempotency: 'Чистая функция установленной версии пакета',
+    args: [],
+    refusals: [],
   },
   'source-check': {
     description:
@@ -947,6 +959,7 @@ export const cliDataSchemas = {
   explain: explainDataSchema,
   'plan-request': planRequestDataSchema,
   'plan-check': planCheckDataSchema,
+  capabilities: operationCatalogSchema,
   'source-check': sourceCheckDataSchema,
   'source-snapshot': sourceSnapshotDataSchema,
   'source-status': sourceStatusDataSchema,

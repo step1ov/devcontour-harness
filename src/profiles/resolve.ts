@@ -15,6 +15,7 @@ import {
   stackProfileSchema,
   type ProfilePin,
   type ResolvedProfile,
+  type ResolvedProfileWithLeaf,
   type StackProfile,
 } from '../contracts/index.ts';
 import { REQUIREMENT_GATE } from '../verification/requirements.ts';
@@ -35,6 +36,8 @@ export interface ResolveProfileOptions {
   repositoryId?: string;
   /** Каталог встроенных профилей; по умолчанию — профили пакета. */
   builtinRoot?: string;
+  /** Вернуть текст файла листа (`leafContent`) — для хоста, который хранит его сам. */
+  includeLeafContent?: boolean;
 }
 
 /** ID встроенных профилей пакета. */
@@ -96,7 +99,15 @@ function parseManifest(content: string, name: string): StackProfile {
  * Итоговый профиль обязан иметь test gate с JUnit: зелёный выход без отчёта
  * ничего не доказывает. Файлы локальных слоёв становятся защищёнными путями.
  */
-export function resolveProfile(ref: string, options: ResolveProfileOptions = {}): ResolvedProfile {
+export function resolveProfile(
+  ref: string,
+  options: ResolveProfileOptions & { includeLeafContent: true },
+): ResolvedProfileWithLeaf;
+export function resolveProfile(ref: string, options?: ResolveProfileOptions): ResolvedProfile;
+export function resolveProfile(
+  ref: string,
+  options: ResolveProfileOptions = {},
+): ResolvedProfile | ResolvedProfileWithLeaf {
   const builtinRoot = realpathSync(options.builtinRoot ?? builtinProfilesRoot);
   const root = options.repository ? realpathSync(options.repository) : undefined;
   const repositoryId = options.repositoryId ?? 'main';
@@ -189,6 +200,7 @@ export function resolveProfile(ref: string, options: ResolveProfileOptions = {})
     ],
     ...(source ? { source } : {}),
     closure,
+    ...(options.includeLeafContent ? { leafContent } : {}),
   };
 }
 

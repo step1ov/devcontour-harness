@@ -145,4 +145,35 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // Каталог и границы ответа — чистые функции над договором: без файлов,
+    // процессов, движка и хранилища (H3).
+    files: ['src/catalog/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            ...foreign,
+            {
+              group: ['node:fs', 'node:fs/*', 'node:child_process'],
+              message: 'Каталог не читает файлы и не запускает процессы.',
+            },
+            {
+              group: [
+                '../agents/*',
+                '../engine/*',
+                '../control/*',
+                '../storage/*',
+                '../integrations/*',
+                '../environment/*',
+                '../planning/*',
+              ],
+              message: 'Каталог строится только из договора.',
+            },
+          ],
+        },
+      ],
+    },
+  },
 );

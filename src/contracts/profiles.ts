@@ -120,3 +120,5 @@ export const resolvedProfileSchema = z.strictObject({
   closure: z.array(z.strictObject({ ref: z.string(), digest: z.string().regex(/^[a-f0-9]{64}$/) })),
 });
 export type ResolvedProfile = z.infer<typeof resolvedProfileSchema>;
+/** Профиль с текстом файла листа (`resolveProfile(..., { includeLeafContent: true })`). */
+export type ResolvedProfileWithLeaf = ResolvedProfile & { leafContent: string };

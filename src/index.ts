@@ -174,3 +174,4 @@ export {
 export { diagnoseState, type DiagnoseOptions } from './explain/diagnose.ts';
 export { stopInputsOf, type StopInputOptions } from './explain/state.ts';
 export * from './planning/index.ts';
+export * from './catalog/index.ts';
