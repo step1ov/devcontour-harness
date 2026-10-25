@@ -46,6 +46,10 @@ and lockfile stay untouched.
 
 `$H doctor` — runtime availability and versions, OS sandbox. No model call.
 
+`$H capabilities` — the catalog of the shared operations (`init`, `explain`,
+`plan-request`, `plan-check`, `capabilities`): description, `readOnly`, JSON
+Schema of input and response, and the byte limits. Read only.
+
 ### 3. Prepare the repository
 
 1. `$H init --repository <repo> --plan` writes nothing. Read `data.files`
@@ -232,5 +236,10 @@ not copy acceptance logs or attempt state into notes.
 - Do not weaken gates, isolation, budgets or the reviewer rule to get a pass.
   A reviewer of the same vendor as the writer is refused unless the policy says
   `same-vendor-allowed` for that review kind.
+- `RESPONSE_TOO_LARGE` (exit 2) means the response of a shared operation is
+  over the transport limit; nothing was truncated. Narrow the input
+  (`explain --work <id>`, a shorter brief or fewer requirement files) instead
+  of retrying. Clipped strings in a response are not the full data: follow the
+  evidence ids (`events`, `result`) for details.
 - Fixture runtimes (`policy.mode: fixture`, `HARNESS_*_BIN` overrides) test the
   mechanics of the harness; they say nothing about the quality of live models.

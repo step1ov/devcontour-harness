@@ -537,12 +537,12 @@ subjects)`: `subjects.input(kind, id, view)` задаёт digest входа и �
 `HarnessError {code, class, message, issues[{path, message}]}`; класс задаёт
 exit code CLI.
 
-| Exit | Класс            | Коды                                                                                                                                                                                                                                                           |
-| ---- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | успех            | —                                                                                                                                                                                                                                                              |
-| 2    | `input`          | `INVALID_INPUT`, `UNSUPPORTED_COMMAND`, `UNSUPPORTED_VERSION`, `GRAPH_*`, `GATE_*`, `REVIEWER_*`                                                                                                                                                               |
-| 3    | `refused`        | `APPROVAL_STALE`, `APPROVAL_REQUIRED`, `LEASE_STALE`, `CONTROLLER_BUSY`, `PAUSED`, `NOT_READY`, `SCOPE_VIOLATION`, `GATE_FAILED`, `REVIEW_REJECTED`, `BUDGET_EXHAUSTED`, `BUDGET_UNKNOWN`, `ATTEMPTS_EXHAUSTED`, `REVISION_CONFLICT`, `CANCELLED`, `NOT_FOUND` |
-| 4    | `infrastructure` | `STATE_VERSION_UNSUPPORTED`, `RUNTIME_UNAVAILABLE`, `REVIEW_PROTOCOL_INVALID`, `SANDBOX_UNAVAILABLE`, `GIT_FAILED`, `STORAGE_FAILED`, `DELIVERY_FAILED`, `INTERNAL`                                                                                            |
+| Exit | Класс            | Коды                                                                                                                                                                                                                                                                            |
+| ---- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | успех            | —                                                                                                                                                                                                                                                                               |
+| 2    | `input`          | `INVALID_INPUT`, `UNSUPPORTED_COMMAND`, `UNSUPPORTED_VERSION`, `GRAPH_*`, `GATE_*`, `REVIEWER_*`, `RESPONSE_TOO_LARGE`                                                                                                                                                          |
+| 3    | `refused`        | `APPROVAL_STALE`, `APPROVAL_REQUIRED`, `LEASE_STALE`, `CONTROLLER_BUSY`, `PAUSED`, `NOT_READY`, `SCOPE_VIOLATION`, `GATE_FAILED`, `REVIEW_REJECTED`, `BUDGET_EXHAUSTED`, `BUDGET_UNKNOWN`, `ATTEMPTS_EXHAUSTED`, `REVISION_CONFLICT`, `CANCELLED`, `NOT_FOUND`, `PATH_CONFLICT` |
+| 4    | `infrastructure` | `STATE_VERSION_UNSUPPORTED`, `RUNTIME_UNAVAILABLE`, `REVIEW_PROTOCOL_INVALID`, `SANDBOX_UNAVAILABLE`, `GIT_FAILED`, `STORAGE_FAILED`, `DELIVERY_FAILED`, `INTERNAL`                                                                                                             |
 
 Exit 1 не используется: им Node завершает процесс при необработанном
 исключении.
@@ -599,10 +599,24 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `explain`         | `--state D --policy F [--work ID]`                                                     | нет   | `diagnoses[]` (`StopDiagnosis`)                                                          | Только чтение: без повторов, вызовов моделей и изменений состояния                                                                                     |
 | `plan-request`    | `--brief F --policy F [--context F] [--contracts D] [--requirements [R:]F]… [--human]` | нет   | `prompt`, `readOnly`, `recommendedTasks`, `maxTasks`, `basis`, `facts` (`PlanningFacts`) | Чистая функция входов: та же постановка и те же факты — тот же prompt и `basis`; модель не вызывается                                                  |
 | `plan-check`      | `--draft F --policy F [--context F] [--contracts D] [--brief F [--basis H]]`           | нет   | `issues`, `checkPlan`; без проблем — `graph`, `graphDigest`, `basis`                     | Чистая функция входов и `HEAD` источников требований; согласования не выдаёт, gates не запускает; расхождение `--basis` — `APPROVAL_STALE`             |
+| `capabilities`    | —                                                                                      | нет   | каталог общих операций (`OperationCatalog`)                                              | Чистая функция установленной версии пакета                                                                                                             |
 | `--version`       | —                                                                                      | нет   | версия пакета и API                                                                      | —                                                                                                                                                      |
 
 Полная форма каждой команды — `cliCommands` (аргументы, обязательность,
 идемпотентность, отказы exit 3). Все команды реализованы. `run` принимает `--author` (по умолчанию `external`) — автора графа для ревью плана. `HARNESS_CODEX_BIN` и `HARNESS_CLAUDE_BIN` подменяют исполняемые файлы runtime (fixture executables в тестах).
 `init --plan` ничего не пишет (exit 3 при конфликтах или неготовом toolchain). `--human` принимают только `init`, `explain` и `plan-request` (печатает prompt): успешный ответ — текст для человека, отказ — тот же JSON-конверт, exit code одинаков; у прочих команд флаг — `INVALID_INPUT`. `plan-check` с проблемами отвечает `ok: true` с данными, exit — по классу первой проблемы; draft — `schemas/plan-draft.schema.json` (`planDraftSchema`). Маршрут самостоятельного проекта и планирование — [standalone](standalone.md).
+
+**Общие операции и граница транспорта.** `init`, `explain`, `plan-request`,
+`plan-check` и `capabilities` — общие операции агентского слоя
+(`sharedOperations`): описание, `readOnly` (= `!writes`), вход (по `args`) и
+схема ответа (`cliDataSchemas`) берутся из одной декларации — договора CLI;
+`capabilities` возвращает их каталог (`operationCatalog`, тот же построитель,
+что у каталога хоста). У этих команд CLI проверяет UTF-8 байты: значения
+аргументов больше `maxInputBytes` (100000) — `INVALID_INPUT` с путём `argv`;
+конверт ответа больше `maxResultBytes` (1048576) — `RESPONSE_TOO_LARGE`, exit
+2, данные не усекаются, и с `--human` тот же JSON. Содержимое файлов-входов и
+прочие команды граница не ограничивает. Усечение строк (`clipText`,
+`clipDeep`) — отдельная операция и размер объекта не ограничивает; страницы с
+cursor — `pageItems`, байты — `jsonBytes`/`checkJsonBytes`/`utf8Bytes`.
 После приёмки договора имена и параметры меняются только совместимо или
 отдельным согласованным изменением.

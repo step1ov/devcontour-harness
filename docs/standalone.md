@@ -226,3 +226,22 @@ $H explain --state <state> --policy .harness/policy.json [--work <id>] [--human]
 `inspectPath`, `checkDestination`, `listRegularFiles`, `planFileWrites`,
 `applyFileWrites` из корня: план показывает все конфликты сразу, применение
 только создаёт файлы и повторно проверяет назначение перед каждой записью.
+
+## Каталог и пределы ответа
+
+`harness capabilities` возвращает каталог общих операций (`init`, `explain`,
+`plan-request`, `plan-check`, `capabilities`): для каждой — описание,
+`readOnly`, JSON Schema входа и данных ответа, а также пределы UTF-8 байт
+(`maxInputBytes` 100000, `maxResultBytes` 1048576). Каталог строится из договора
+CLI — второй копии описаний нет. Ответ общей операции сверх предела — отказ
+`RESPONSE_TOO_LARGE` (exit 2) без усечения данных: сузьте вход (`--work`,
+постановка, файлы требований).
+
+Для хостов: `operationCatalog` строит каталог из своих операций и схем (тем
+же построителем, что `capabilities`, но отдельно от каталога harness);
+`jsonBytes`, `checkJsonBytes` и `utf8Bytes` — байтовые проверки транспорта
+(отказ формирует хост); `pageItems` — страницы с cursor (`json-base64url` с
+привязкой к ревизии и запросу или `digest-offset` по ревизии; чужой или
+устаревший cursor — `REVISION_CONFLICT`, элемент, не помещающийся в страницу,
+— `RESPONSE_TOO_LARGE`). `resolveProfile(ref, { includeLeafContent: true })`
+дополнительно возвращает текст файла листа (`leafContent`); digest не меняется.
