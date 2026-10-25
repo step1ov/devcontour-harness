@@ -477,7 +477,7 @@ test('H2-01: planDraft — расширение хоста, коллизия с 
     );
 });
 
-test('H2-F001: keyOrder и расширение — только собственные ключи формы, унаследованные имена объекта не принимаются', () => {
+test('H2-F001/H2-F002: keyOrder и расширение — только собственные ключи формы, унаследованные имена объекта не принимаются', () => {
   const shared = Object.keys(planDraft().shape.tasks.element.shape);
   for (const inherited of ['toString', 'constructor', '__proto__', 'hasOwnProperty'])
     assert.throws(
@@ -486,6 +486,37 @@ test('H2-F001: keyOrder и расширение — только собстве�
         e.code === 'INVALID_INPUT' &&
         e.message === 'keyOrder: ожидается перестановка всех ключей задачи draft',
       inherited,
+    );
+  // H2-F002: разреженный массив, не массив, не строки — тот же договорный отказ.
+  const sparse = new Array<string>(shared.length);
+  shared.forEach((k, i) => {
+    if (k !== 'gates') sparse[i] = k;
+  });
+  const notArray: unknown = Object.assign(Object.create(null) as object, shared, {
+    length: shared.length,
+  });
+  for (const keyOrder of [
+    sparse,
+    shared.map((k, i) => (i === 0 ? 1 : k)),
+    shared.map((k, i) => (i === 0 ? undefined : k)),
+    notArray,
+    shared.join(','),
+    '',
+    null,
+  ])
+    assert.throws(
+      () => planDraft({}, { keyOrder: keyOrder as never }),
+      (e: Error & { code?: string }) =>
+        e.code === 'INVALID_INPUT' &&
+        e.message === 'keyOrder: ожидается перестановка всех ключей задачи draft',
+    );
+  // Поле расширения — схема Zod; иное значение — INVALID_INPUT, а не сырая ошибка zod.
+  for (const value of [5, null, 'x', {}])
+    assert.throws(
+      () => planDraft({ featureId: value } as never),
+      (e: Error & { code?: string }) =>
+        e.code === 'INVALID_INPUT' &&
+        e.message === 'Расширение задачи draft: поле не схема Zod: featureId',
     );
   // Поле хоста с именем свойства Object.prototype — не коллизия с общим полем.
   const host = planDraft({ toString: z.string().optional() });

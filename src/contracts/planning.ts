@@ -69,27 +69,32 @@ export function planDraft<E extends z.ZodRawShape = Record<never, never>>(
   options: { keyOrder?: readonly string[] } = {},
 ) {
   const extension = (taskExtension ?? {}) as E;
-  for (const key of Object.keys(extension))
+  for (const [key, value] of Object.entries(extension)) {
     if (Object.hasOwn(planDraftTaskShape, key))
       throw new HarnessError(
         'INVALID_INPUT',
         'Расширение задачи draft не переопределяет общее поле: ' + key,
       );
+    if (!(value instanceof z.ZodType))
+      throw new HarnessError('INVALID_INPUT', 'Расширение задачи draft: поле не схема Zod: ' + key);
+  }
   const merged: Record<string, unknown> = { ...planDraftTaskShape, ...extension };
   let shape = merged;
-  if (options.keyOrder) {
-    const order = options.keyOrder;
+  if (options.keyOrder !== undefined) {
+    // Плотная копия: дыра разреженного массива становится undefined и не
+    // проходит проверку (every пропускает дыры).
+    const order: unknown[] = Array.isArray(options.keyOrder) ? Array.from(options.keyOrder) : [];
     const keys = Object.keys(merged);
     if (
       order.length !== keys.length ||
       new Set(order).size !== order.length ||
-      !order.every((k) => Object.hasOwn(merged, k))
+      !order.every((k) => typeof k === 'string' && Object.hasOwn(merged, k))
     )
       throw new HarnessError(
         'INVALID_INPUT',
         'keyOrder: ожидается перестановка всех ключей задачи draft',
       );
-    shape = Object.fromEntries(order.map((k) => [k, merged[k]!]));
+    shape = Object.fromEntries((order as string[]).map((k) => [k, merged[k]!]));
   }
   return z.object({
     title: z.string().min(3).max(180),
