@@ -70,7 +70,7 @@ export function planDraft<E extends z.ZodRawShape = Record<never, never>>(
 ) {
   const extension = (taskExtension ?? {}) as E;
   for (const key of Object.keys(extension))
-    if (key in planDraftTaskShape)
+    if (Object.hasOwn(planDraftTaskShape, key))
       throw new HarnessError(
         'INVALID_INPUT',
         'Расширение задачи draft не переопределяет общее поле: ' + key,
@@ -83,7 +83,7 @@ export function planDraft<E extends z.ZodRawShape = Record<never, never>>(
     if (
       order.length !== keys.length ||
       new Set(order).size !== order.length ||
-      !order.every((k) => k in merged)
+      !order.every((k) => Object.hasOwn(merged, k))
     )
       throw new HarnessError(
         'INVALID_INPUT',

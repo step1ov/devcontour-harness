@@ -477,6 +477,21 @@ test('H2-01: planDraft — расширение хоста, коллизия с 
     );
 });
 
+test('H2-F001: keyOrder и расширение — только собственные ключи формы, унаследованные имена объекта не принимаются', () => {
+  const shared = Object.keys(planDraft().shape.tasks.element.shape);
+  for (const inherited of ['toString', 'constructor', '__proto__', 'hasOwnProperty'])
+    assert.throws(
+      () => planDraft({}, { keyOrder: shared.map((k) => (k === 'gates' ? inherited : k)) }),
+      (e: Error & { code?: string }) =>
+        e.code === 'INVALID_INPUT' &&
+        e.message === 'keyOrder: ожидается перестановка всех ключей задачи draft',
+      inherited,
+    );
+  // Поле хоста с именем свойства Object.prototype — не коллизия с общим полем.
+  const host = planDraft({ toString: z.string().optional() });
+  assert.equal(Object.keys(host.shape.tasks.element.shape).at(-1), 'toString');
+});
+
 test('H2-01: планы 16 и 30 задач принимаются, 31 — нет; 40 acceptance/dependsOn/contracts парсятся (M-6)', () => {
   const tasks = (n: number) => Array.from({ length: n }, (_, i) => task({ key: `T${i}` }));
   for (const schema of [planDraftSchema, planDraft()]) {
