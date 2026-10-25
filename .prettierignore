@@ -14,3 +14,5 @@ schemas
 profiles/
 tests/fixtures/planning/
 tests/fixtures/consumer-h2/expected/
+tests/fixtures/catalog/*.json
+tests/fixtures/consumer-h3/expected/
