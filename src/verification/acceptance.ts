@@ -76,7 +76,7 @@ export function propertyGates(order: Pick<WorkOrder, 'properties'>, contracts: C
   for (const id of order.properties ?? []) {
     const found = obligationOf(contracts, id);
     if (!found) return { problem: `свойство ${id} не объявлено в договорах поручения` };
-    byGate.set(found.gate, [...(byGate.get(found.gate) ?? []), id]);
+    for (const gate of found.gates) byGate.set(gate, [...(byGate.get(gate) ?? []), id]);
   }
   return { byGate };
 }

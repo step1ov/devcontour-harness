@@ -45,12 +45,16 @@ export {
   declarationProblems,
   corpusBindingHolds,
   effectiveChecks,
+  isReference,
+  obligationGates,
   orderCheckManifest,
   orderPropertyProblems,
+  referenceNote,
   suiteBasis,
 } from './verification/checks.ts';
 export {
   corpusWitness,
+  expectsReference,
   manifestDigest,
   propertyCoverage,
   propertyFailure,

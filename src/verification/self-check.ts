@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ContractDocument, GatePolicy, WorkOrder } from '../contracts/index.ts';
-import { obligationOf } from './checks.ts';
+import { isReference, obligationOf } from './checks.ts';
 
 /**
  * Самопроверка исполнителя: тот же закреплённый checker, полный корпус
@@ -30,15 +30,18 @@ export async function writeSelfCheck(input: {
   const gates = new Map<string, { command: string[]; cwd?: string; properties: string[] }>();
   for (const id of input.order.properties ?? []) {
     const found = obligationOf(input.contracts, id);
-    const gate = found && input.gates.find((g) => g.id === found.gate && g.property);
-    if (!gate) continue;
-    const entry = gates.get(gate.id) ?? {
-      command: gate.command,
-      ...(gate.cwd ? { cwd: gate.cwd } : {}),
-      properties: [],
-    };
-    entry.properties.push(id);
-    gates.set(gate.id, entry);
+    // Gate эталонных наборов отчитывается тем же отчётом свойств.
+    for (const gate of input.gates.filter(
+      (g) => found?.gates.includes(g.id) && (g.property || isReference(found.obligation)),
+    )) {
+      const entry = gates.get(gate.id) ?? {
+        command: gate.command,
+        ...(gate.cwd ? { cwd: gate.cwd } : {}),
+        properties: [],
+      };
+      entry.properties.push(id);
+      gates.set(gate.id, entry);
+    }
   }
   if (!gates.size) return undefined;
   await mkdir(input.dir, { recursive: true });
@@ -57,7 +60,7 @@ export async function writeSelfCheck(input: {
     ...(corpus ? { corpus } : {}),
     cases: input.corpus?.cases ?? 0,
     seed: input.seed,
-    properties: [...gates.values()].flatMap((g) => g.properties),
+    properties: [...new Set([...gates.values()].flatMap((g) => g.properties))],
   };
 }
 

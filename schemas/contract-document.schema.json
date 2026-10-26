@@ -306,6 +306,156 @@
                 ],
                 "additionalProperties": false
               },
+              "gates": {
+                "minItems": 1,
+                "maxItems": 10,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                }
+              },
+              "verification": {
+                "type": "string",
+                "enum": [
+                  "property",
+                  "reference"
+                ]
+              },
+              "reference": {
+                "type": "object",
+                "properties": {
+                  "oracle": {
+                    "type": "object",
+                    "properties": {
+                      "description": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 2000
+                      },
+                      "limits": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 2000
+                      }
+                    },
+                    "required": [
+                      "description",
+                      "limits"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "crossChecks": {
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "family": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 200
+                        },
+                        "against": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 500
+                        },
+                        "matches": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 100000000
+                        },
+                        "total": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 100000000
+                        }
+                      },
+                      "required": [
+                        "family",
+                        "against",
+                        "matches",
+                        "total"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "sets": {
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "gate": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                        },
+                        "artifacts": {
+                          "minItems": 1,
+                          "maxItems": 10,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500,
+                            "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                          }
+                        },
+                        "minCases": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 1000000
+                        },
+                        "families": {
+                          "default": [],
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                              },
+                              "minCases": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 1000000
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "minCases"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "gate",
+                        "artifacts",
+                        "minCases"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "gaps": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 2000
+                  }
+                },
+                "required": [
+                  "oracle",
+                  "crossChecks",
+                  "sets",
+                  "gaps"
+                ],
+                "additionalProperties": false
+              },
               "hard": {
                 "default": false,
                 "type": "boolean"

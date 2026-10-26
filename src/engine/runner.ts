@@ -76,7 +76,7 @@ import { contractDocuments, orderCheckManifest } from '../verification/checks.ts
 import { CorpusStore, localRoots } from '../verification/corpus.ts';
 import { submitCase } from '../verification/confirm.ts';
 import { runSpike } from '../verification/spike.ts';
-import { propertySeed } from '../verification/property.ts';
+import { expectsReference, propertySeed } from '../verification/property.ts';
 import { selfCheckNote, writeSelfCheck, type SelfCheckPlan } from '../verification/self-check.ts';
 import { measuredInvoke } from './measured.ts';
 import { continuableDraft, implementationBasis } from './reuse.ts';
@@ -1359,6 +1359,10 @@ export class Runner {
     execution: ReturnType<typeof executionEnvironment>,
     consumer?: { repositoryId: string; dependencies: DependencySnapshot[] },
   ) {
+    // Генеративный gate — всегда; gate эталонных наборов — когда манифест
+    // поручения ждёт от него отчёта (без договора — прежний уровень).
+    const run = this.propertyRun(attempt, gate, consumer);
+    const property = gate.property || expectsReference(run.expected) ? run : undefined;
     await runGate({
       policy: this.policy,
       record: (e) => this.engine.evidence(attempt.id, attempt.token, e),
@@ -1373,7 +1377,7 @@ export class Runner {
       execution,
       boundary: this.boundary(consumer?.dependencies ?? attempt.dependencies),
       ...(consumer ? { consumer: consumer.repositoryId } : {}),
-      ...(gate.property ? { property: this.propertyRun(attempt, gate, consumer) } : {}),
+      ...(property ? { property } : {}),
     });
   }
 

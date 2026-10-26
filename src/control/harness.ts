@@ -41,7 +41,7 @@ import { policySourceChanged, type PolicySource } from './provenance.ts';
 import { JointRunner } from '../engine/joint-runner.ts';
 import { git } from '../environment/process.ts';
 import { analyzeRecovery, applyCases } from './recovery.ts';
-import { declarationProblems } from '../verification/checks.ts';
+import { declarationProblems, referenceNote } from '../verification/checks.ts';
 import { spikeOf, spikesOf } from '../verification/spike.ts';
 import { staleArtifacts } from '../verification/confirm.ts';
 
@@ -274,6 +274,7 @@ export class Harness {
           : 'You independently review a contract document. Check that every obligation is feasible and measurable. Do not edit files.',
         JSON.stringify(input.kind === 'plan' ? input.graph : input.contract, null, 2),
         input.kind === 'contract' ? this.spikeNote(input.contract) : '',
+        input.kind === 'contract' ? referenceNote(input.contract.checks) : '',
       ],
       ...(context ? { context } : {}),
       ...(input.kind === 'contract' ? { contract: input.contract } : {}),

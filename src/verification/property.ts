@@ -69,9 +69,22 @@ export function propertyFailure(report: PropertyReport) {
  * reviewer.
  */
 export interface CheckManifest {
-  properties: { id: string; minCases: number; families: { id: string; minCases: number }[] }[];
+  properties: {
+    id: string;
+    minCases: number;
+    families: { id: string; minCases: number }[];
+    /**
+     * Эталонная проверка: доля gate в наборах и их закреплённые файлы. Поле
+     * есть только у эталонных свойств — digest прежних манифестов прежний.
+     */
+    reference?: { artifacts: string[] };
+  }[];
   corpus?: { digest: string; cases: { id: string; property: string }[] };
 }
+
+/** Манифест ожидает эталонной проверки: путь отчёта нужен и gate без генератора. */
+export const expectsReference = (manifest: CheckManifest | undefined) =>
+  !!manifest?.properties.some((p) => p.reference);
 
 /** Свидетельство выполнения корпуса: hash отсортированных строк `id:pass|fail`. */
 export function corpusWitness(cases: { id: string; passed: boolean }[]) {

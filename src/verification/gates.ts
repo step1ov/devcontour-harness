@@ -15,6 +15,7 @@ import { isolation, isolatedCommand, isolationSupport } from '../environment/iso
 import { TaskFailure, type FailureKind } from '../engine/failure.ts';
 import { redactDeep } from '../environment/redaction.ts';
 import {
+  expectsReference,
   manifestDigest,
   propertyCoverage,
   propertyFailure,
@@ -380,7 +381,7 @@ export async function runCheck(
       // вывод доступны вызывающему через ошибку (`completedCheck`).
       const error =
         failed.reason instanceof Error ? failed.reason : new Error(String(failed.reason));
-       
+
       throw result
         ? Object.assign(error, { [checkResult]: { ...result, attempts, started: launched } })
         : error;
@@ -493,7 +494,13 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   // тогда, когда проверка зависла и не успела ничего записать. Отчёт свойств
   // лежит в каталоге controller вне worktree: проверка пишет внутрь него, но
   // заменить сам каталог на ссылку наружу не может.
-  const property = gate.property && run.property ? run.property : undefined;
+  // Эталонная проверка поручения отчитывается тем же отчётом свойств и
+  // получает его путь и селектор и у gate без генератора.
+  const property =
+    run.property && (gate.property || expectsReference(run.property.expected))
+      ? run.property
+      : undefined;
+  const label = gate.property ? 'Генеративная проверка' : 'Проверка по эталонным наборам';
   const propertyDir = property
     ? await realpath(await mkdtemp(join(tmpdir(), 'harness-property-')))
     : undefined;
@@ -666,12 +673,12 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       summary = join2(failure);
     } else if (coverage.length) {
       passed = false;
-      summary = join2('Генеративная проверка не подтвердила покрытие: ' + coverage.join('; '));
+      summary = join2(`${label} не подтвердила покрытие: ` + coverage.join('; '));
     } else if (passed && read.problem) {
       // Прошедшая команда без отчёта не доказывает свойство: зелёный код
       // выхода был у неё и до реализации.
       passed = false;
-      summary = `Генеративная проверка не отчиталась: ${read.problem}`;
+      summary = `${label} не отчиталась: ${read.problem}`;
     }
     propertyEvidence = {
       seed,

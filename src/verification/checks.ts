@@ -28,16 +28,33 @@ export function contractDocuments(
     .filter((d): d is ContractDocument => !!d);
 }
 
-type Declared = { contract: ContractDocument; gate: string; obligation: Obligation };
+type Declared = {
+  contract: ContractDocument;
+  /** Первый gate обязательства (у обязательства без `gates` — gate договора). */
+  gate: string;
+  gates: string[];
+  obligation: Obligation;
+};
+
+/** Gates обязательства: свои `gates` или gate договора. */
+export function obligationGates(declaration: Pick<CheckDeclaration, 'gate'>, o: Obligation) {
+  return o.gates?.length ? o.gates : [declaration.gate];
+}
+
+/** Обязательство проверяется закреплёнными эталонными наборами. */
+export const isReference = (o: Obligation) => o.verification === 'reference';
 
 /** Обязательства договоров поручения, исполняемые данным gate. */
 function declared(contracts: ContractDocument[], gate?: string): Declared[] {
   return contracts
     .filter((c) => c.checks)
     .flatMap((c) =>
-      c.checks!.gate === gate || gate === undefined
-        ? c.checks!.obligations.map((o) => ({ contract: c, gate: c.checks!.gate, obligation: o }))
-        : [],
+      c.checks!.obligations.flatMap((o) => {
+        const gates = obligationGates(c.checks!, o);
+        return gate === undefined || gates.includes(gate)
+          ? [{ contract: c, gate: gates[0]!, gates, obligation: o }]
+          : [];
+      }),
     );
 }
 
@@ -47,11 +64,16 @@ export function suiteBasis(contract: ContractDocument) {
   return digestOf({
     artifacts: (contract.artifacts ?? []).map((a) => ({ path: a.path, blob: a.blob })),
     gate: declaration.gate,
+    // Поля эталонной проверки и gates обязательства входят, только когда
+    // объявлены: основание прежних договоров и их корпусов не меняется.
     obligations: declaration.obligations.map((o) => ({
       property: o.property,
       domain: o.domain,
       answer: o.answer,
       method: o.method,
+      ...(o.gates ? { gates: o.gates } : {}),
+      ...(o.verification ? { verification: o.verification } : {}),
+      ...(o.reference ? { reference: o.reference } : {}),
     })),
   });
 }
@@ -77,6 +99,65 @@ export function corpusBindingHolds(
 /** Обязательство по property ID среди договоров поручения. */
 export function obligationOf(contracts: ContractDocument[], id: string) {
   return declared(contracts).find((x) => x.obligation.property === id);
+}
+
+/**
+ * Структурные пропуски эталонной проверки. Наборы — артефакты контракта;
+ * каждый gate обязательства сверяет хотя бы один набор, а доли наборов
+ * покрывают общий минимум и минимум каждого семейства: иначе gates прошли бы,
+ * не доказав объявленного покрытия. Сверка эталона с расхождениями — не
+ * основание для эталона.
+ */
+function referenceProblems(o: Obligation, gates: string[], artifacts: string[]) {
+  const at = `свойство ${o.property}`;
+  const r = o.reference;
+  if (!r) return [`${at}: для способа reference опишите эталонные наборы (reference)`];
+  const problems: string[] = [];
+  for (const c of r.crossChecks)
+    if (c.matches > c.total)
+      problems.push(`${at}: сверка эталона «${c.family}»: совпало ${c.matches} из ${c.total}`);
+    else if (c.matches < c.total)
+      problems.push(
+        `${at}: сверка эталона «${c.family}» расходится (${c.matches} из ${c.total}): эталон с расхождениями не закрепляет ответы`,
+      );
+  const families = new Map(o.coverage.families.map((f) => [f.id, 0]));
+  let total = 0;
+  for (const [i, set] of r.sets.entries()) {
+    const label = `${at}, набор ${i + 1}`;
+    if (!gates.includes(set.gate))
+      problems.push(
+        `${label}: gate ${set.gate} не среди gates обязательства (${gates.join(', ')})`,
+      );
+    for (const path of set.artifacts)
+      if (!artifacts.includes(path))
+        problems.push(`${label}: ${path} не объявлен артефактом контракта и не закреплён`);
+    const ids = set.families.map((f) => f.id);
+    if (new Set(ids).size !== ids.length) problems.push(`${label}: id семейств повторяются`);
+    const own = set.families.reduce((n, f) => n + f.minCases, 0);
+    if (own > set.minCases)
+      problems.push(
+        `${label}: семейства требуют ${own} входов, больше минимума набора ${set.minCases}`,
+      );
+    for (const f of set.families)
+      if (!families.has(f.id)) problems.push(`${label}: семейство ${f.id} не объявлено в покрытии`);
+      else families.set(f.id, families.get(f.id)! + f.minCases);
+    total += set.minCases;
+  }
+  for (const id of gates)
+    if (!r.sets.some((s) => s.gate === id))
+      problems.push(`${at}: gate ${id} не сверяет ни одного эталонного набора`);
+  if (total < o.coverage.minCases)
+    problems.push(
+      `${at}: наборы требуют ${total} входов, меньше общего минимума ${o.coverage.minCases}`,
+    );
+  for (const f of o.coverage.families) {
+    const seen = families.get(f.id) ?? 0;
+    if (seen < f.minCases)
+      problems.push(
+        `${at}, семейство ${f.id}: наборы требуют ${seen} входов, меньше минимума семейства ${f.minCases}`,
+      );
+  }
+  return problems;
 }
 
 /**
@@ -115,6 +196,17 @@ export function declarationProblems(
     for (const path of o.method.artifacts)
       if (!context.artifacts.includes(path))
         problems.push(`${at}: ${path} не объявлен артефактом контракта и не закреплён`);
+    const gates = obligationGates(declaration, o);
+    if (new Set(gates).size !== gates.length) problems.push(`${at}: gates повторяются`);
+    const configured = (id: string) => context.gates.find((g) => g.id === id);
+    if (o.gates)
+      for (const id of new Set(o.gates))
+        if (id !== declaration.gate && !configured(id))
+          problems.push(`${at}: gate ${id} не настроен в репозитории ${context.repositoryId}`);
+    const reference = isReference(o);
+    if (reference) problems.push(...referenceProblems(o, gates, context.artifacts));
+    else if (o.reference)
+      problems.push(`${at}: эталонные наборы объявлены, но способ исполнения не reference`);
     if (strongPromises.has(o.promise)) {
       if (!['oracle', 'certificate', 'analytic', 'invariant'].includes(o.method.kind))
         problems.push(
@@ -122,13 +214,25 @@ export function declarationProblems(
         );
       if (!o.method.artifacts.length && o.method.kind !== 'analytic')
         problems.push(`${at}: способ проверки не ссылается на закреплённый checker или эталон`);
-      if (gate && !gate.property)
-        problems.push(`${at}: gate ${gate.id} не генеративный (нет property)`);
+      // Генеративность нужна генератору: эталонная проверка сверяет
+      // реализацию с закреплёнными наборами и отчитывается тем же отчётом.
+      if (!reference)
+        for (const id of new Set(gates)) {
+          const g = configured(id);
+          if (g && !g.property) problems.push(`${at}: gate ${g.id} не генеративный (нет property)`);
+        }
     }
     if (o.promise === 'performance' && !o.resources.benchmark)
       problems.push(`${at}: для производительности укажите метод измерения и среду`);
     if (o.coverage.corpus && !declaration.corpus)
       problems.push(`${at}: корпус включён, но политика расширения корпуса не описана`);
+    // Случай корпуса подтверждает и исполняет один gate договора.
+    if (o.coverage.corpus && (reference || gates.some((id) => id !== declaration.gate)))
+      problems.push(
+        reference
+          ? `${at}: корпус пополняет генератор; эталонные наборы закреплены артефактами контракта`
+          : `${at}: корпус исполняет gate договора ${declaration.gate}, а не свои gates обязательства`,
+      );
     if (o.hard) {
       if (!o.feasibility)
         problems.push(
@@ -143,6 +247,35 @@ export function declarationProblems(
     }
   }
   return problems;
+}
+
+/**
+ * Подсказка reviewer контракта об эталонных обязательствах: что наборы
+ * доказывают, чего — нет (`gaps`), чем сверен эталон. Пустая строка — таких
+ * обязательств нет. Reviewer видит пределы способа рядом с самим договором,
+ * а не выводит их из длинного описания.
+ */
+export function referenceNote(declaration: CheckDeclaration | undefined) {
+  const list = (declaration?.obligations ?? []).filter((o) => isReference(o) && o.reference);
+  if (!list.length) return '';
+  return (
+    'Reference-set obligations (verification "reference"): the gates replay pinned reference answer sets (contract artifacts) against the implementation and report the replayed inputs per property and family; the controller requires each gate to reach its declared share. Judge them as follows: the oracle must be independent of the implementation and its stated limits must not silently bias the sets toward easy inputs; a cross-check with mismatches or on an unrelated family is not evidence; the sets prove the answer only on the inputs they contain. The "gaps" of each obligation state what the sets do not prove (generalization beyond the set, input classes outside it): a promise that rests on a gap without another declared method (a generative property, an invariant or an analytic argument) is a blocking finding. Obligations: ' +
+    JSON.stringify(
+      list.map((o) => ({
+        property: o.property,
+        promise: o.promise,
+        gates: obligationGates(declaration!, o),
+        oracle: o.reference!.oracle,
+        crossChecks: o.reference!.crossChecks,
+        sets: o.reference!.sets.map((s) => ({
+          gate: s.gate,
+          artifacts: s.artifacts,
+          minCases: s.minCases,
+        })),
+        gaps: o.reference!.gaps,
+      })),
+    )
+  );
 }
 
 /**
@@ -168,26 +301,32 @@ export function orderPropertyProblems(
     }
     if (found.length > 1)
       problems.push(`${order.id}: свойство ${id} объявлено в нескольких договорах`);
-    const gate = found[0]!.gate;
-    if (gates.scope && !gates.scope.includes(gate))
-      problems.push(`${order.id}: свойство ${id} проверяет gate ${gate}, которого нет в поручении`);
-    // Селектор свойств передаёт controller, а исполняет harness генеративного
-    // gate: без него область поручения в общем файле проверок не выбрать.
-    const configured = gates.configured.find((g) => g.id === gate);
-    if (!configured) problems.push(`${order.id}: gate ${gate} свойства ${id} не настроен`);
-    else if (!configured.property)
-      problems.push(
-        `${order.id}: gate ${gate} свойства ${id} не генеративный — селектор свойств не подготовлен`,
-      );
+    const { gates: own, obligation } = found[0]!;
+    for (const gate of own) {
+      if (gates.scope && !gates.scope.includes(gate))
+        problems.push(
+          `${order.id}: свойство ${id} проверяет gate ${gate}, которого нет в поручении`,
+        );
+      // Селектор свойств передаёт controller, а исполняет harness генеративного
+      // gate: без него область поручения в общем файле проверок не выбрать.
+      // Эталонная проверка получает тот же селектор и путь отчёта от
+      // controller по манифесту поручения, без генератора.
+      const configured = gates.configured.find((g) => g.id === gate);
+      if (!configured) problems.push(`${order.id}: gate ${gate} свойства ${id} не настроен`);
+      else if (!configured.property && !isReference(obligation))
+        problems.push(
+          `${order.id}: gate ${gate} свойства ${id} не генеративный — селектор свойств не подготовлен`,
+        );
+    }
   }
   // Сценарий, названный тем же id, проверяет тот же gate: иначе требование
   // ссылается на свойство, а подтверждается другой проверкой.
   for (const link of order.requirements ?? []) {
     if (!link.testId) continue;
     const found = all.find((x) => x.obligation.property === link.testId);
-    if (found && found.gate !== link.gate)
+    if (found && !found.gates.includes(link.gate))
       problems.push(
-        `${order.id}: ${link.id} ссылается на свойство ${link.testId}, но через gate ${link.gate}, а не ${found.gate}`,
+        `${order.id}: ${link.id} ссылается на свойство ${link.testId}, но через gate ${link.gate}, а не ${found.gates.join(' или ')}`,
       );
   }
   return problems;
@@ -217,12 +356,34 @@ export function orderCheckManifest(
   const ids = new Set(obligations.map((x) => x.obligation.property));
   const cases = corpus?.cases.filter((c) => ids.has(c.property)) ?? [];
   return {
-    properties: obligations.map(({ obligation: o }) => ({
-      id: o.property,
-      minCases: o.coverage.minCases,
-      families: o.coverage.families.map((f) => ({ id: f.id, minCases: f.minCases })),
-    })),
+    properties: obligations.map(({ obligation: o }) =>
+      isReference(o) && o.reference
+        ? referenceShare(o, gate)
+        : {
+            id: o.property,
+            minCases: o.coverage.minCases,
+            families: o.coverage.families.map((f) => ({ id: f.id, minCases: f.minCases })),
+          },
+    ),
     ...(corpus && cases.length ? { corpus: { digest: corpus.digest, cases } } : {}),
+  };
+}
+
+/**
+ * Доля gate в эталонной проверке: сумма минимумов его наборов и их семейств
+ * и закреплённые файлы этих наборов. Отчёт gate обязан подтвердить именно
+ * её — общий минимум обязательства складывается из долей его gates.
+ */
+function referenceShare(o: Obligation, gate: string): CheckManifest['properties'][number] {
+  const sets = o.reference!.sets.filter((s) => s.gate === gate);
+  const families = new Map<string, number>();
+  for (const s of sets)
+    for (const f of s.families) families.set(f.id, (families.get(f.id) ?? 0) + f.minCases);
+  return {
+    id: o.property,
+    minCases: sets.reduce((n, s) => n + s.minCases, 0),
+    families: [...families].map(([id, minCases]) => ({ id, minCases })),
+    reference: { artifacts: [...new Set(sets.flatMap((s) => s.artifacts))] },
   };
 }
 

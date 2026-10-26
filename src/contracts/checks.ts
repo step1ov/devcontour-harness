@@ -38,6 +38,60 @@ export const strongPromises: ReadonlySet<string> = new Set([
   'completeness',
   'performance',
 ]);
+/**
+ * Проверка по закреплённым эталонным наборам (`verification: 'reference'`).
+ *
+ * Ответы независимого эталона (решатель, полный перебор, таблица DP)
+ * получены заранее, сверены с другим способом на семействах входов и
+ * закреплены артефактами контракта. Gate сверяет реализацию с наборами и
+ * отчитывается тем же отчётом свойств: число проверенных входов по свойству
+ * и по семействам. Каждый набор принадлежит одному gate: его минимум и
+ * минимумы семейств — доля этого gate в покрытии обязательства. Обобщения за
+ * пределы наборов такой способ не доказывает — это называет `gaps`.
+ */
+export const referenceSchema = z.strictObject({
+  /** Эталон и его пределы: версия, предел времени, что исключено из наборов. */
+  oracle: z.strictObject({ description: text(), limits: text() }),
+  /** Сверка эталона с другим способом: семейство, способ, совпало из всего. */
+  crossChecks: z
+    .array(
+      z.strictObject({
+        family: text(200),
+        against: text(500),
+        matches: z.number().int().min(0).max(100_000_000),
+        total: z.number().int().min(1).max(100_000_000),
+      }),
+    )
+    .min(1)
+    .max(10),
+  sets: z
+    .array(
+      z.strictObject({
+        /** Gate, который сверяет реализацию с этим набором. */
+        gate: idSchema,
+        /** Файлы набора — среди артефактов контракта. */
+        artifacts: z.array(relativePathSchema).min(1).max(10),
+        /** Сколько входов набора gate обязан проверить за прогон. */
+        minCases: z.number().int().min(1).max(1_000_000),
+        /** Доля семейств покрытия обязательства в этом наборе. */
+        families: z
+          .array(
+            z.strictObject({
+              id: familyIdSchema,
+              minCases: z.number().int().min(1).max(1_000_000),
+            }),
+          )
+          .max(20)
+          .default([]),
+      }),
+    )
+    .min(1)
+    .max(20),
+  /** Чего наборы не доказывают: обобщение за пределы входов, классы вне наборов. */
+  gaps: text(),
+});
+export type ReferenceVerification = z.infer<typeof referenceSchema>;
+
 export const obligationSchema = z.strictObject({
   property: propertyIdSchema,
   /** Существующие требования или критерии приёмки, которые обязательство уточняет. */
@@ -88,6 +142,15 @@ export const obligationSchema = z.strictObject({
     oracle: text(),
     benchmark: z.strictObject({ method: text(), environment: text() }).optional(),
   }),
+  /**
+   * Gates, исполняющие обязательство; без поля — gate договора. У
+   * генеративного обязательства каждый из них проверяет полное покрытие, у
+   * эталонного — свои наборы.
+   */
+  gates: z.array(idSchema).min(1).max(10).optional(),
+  /** Способ исполнения: `property` (без поля) — генератор; `reference` — эталонные наборы. */
+  verification: z.enum(['property', 'reference']).optional(),
+  reference: referenceSchema.optional(),
   /** Тяжёлый точный алгоритм или жёсткое время: до реализации нужен ограниченный эксперимент. */
   hard: z.boolean().default(false),
   feasibility: z
@@ -101,7 +164,10 @@ export type Obligation = z.infer<typeof obligationSchema>;
 
 export const checkDeclarationSchema = z.strictObject({
   version: z.literal(1),
-  /** Gate, который исполняет проверку (генеративный, с закреплённым checker). */
+  /**
+   * Gate проверки по умолчанию: исполняет обязательства без своих `gates`
+   * (генеративный, с закреплённым checker).
+   */
   gate: idSchema,
   obligations: z.array(obligationSchema).min(1).max(30),
   /**

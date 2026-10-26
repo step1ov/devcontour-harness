@@ -235,6 +235,10 @@ export function propertySetup(options: {
   cases?: number;
   policy?: (p: Record<string, unknown>) => void;
   files?: Record<string, string>;
+  /** Закреплённые файлы контракта; по умолчанию — эталон, checker и harness. */
+  artifacts?: string[];
+  /** Gates поручения; по умолчанию — генеративный `properties`. */
+  gates?: string[];
   writeScope?: string[];
   now?: () => number;
 }) {
@@ -253,7 +257,7 @@ export function propertySetup(options: {
     repositoryId: 'app',
     title: 'Knapsack',
     content: 'Оптимум рюкзака и полнота сумм по oracle.mjs.',
-    artifacts: ['oracle.mjs', 'check.mjs', 'harness.mjs'].map((path) => ({
+    artifacts: (options.artifacts ?? ['oracle.mjs', 'check.mjs', 'harness.mjs']).map((path) => ({
       path,
       blob: blob(files[path]!),
     })),
@@ -278,7 +282,7 @@ export function propertySetup(options: {
       options.policy?.(p as Record<string, unknown>);
     },
     graph: (g: any) => {
-      g.orders[0].gates = ['properties'];
+      g.orders[0].gates = options.gates ?? ['properties'];
       g.orders[0].writeScope = options.writeScope ?? ['src'];
       g.orders[0].contracts = [{ id: 'knap', digest: digestOf(contract) }];
       if (properties) g.orders[0].properties = properties;
