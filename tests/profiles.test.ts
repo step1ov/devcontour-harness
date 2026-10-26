@@ -455,7 +455,19 @@ test('Skill harness-setup: команды существуют в договор
   // Полный вызов — `$H`/`$N` (CLI установленной и проверяемой версии); упоминание
   // в тексте — команда договора в начале inline-кода, без обязательных флагов.
   const calls = [...text.matchAll(/(\$[HN] |`)(--version|[a-z][a-z-]*)([^`\n;]*)/g)];
-  const external = new Set(['claude', 'codex', 'npm', 'git', 'node', 'shasum', 'mv', 'cp']);
+  const external = new Set([
+    'claude',
+    'codex',
+    'npm',
+    'pnpm',
+    'turbo',
+    'relay',
+    'git',
+    'node',
+    'shasum',
+    'mv',
+    'cp',
+  ]);
   let full = 0;
   for (const [, prefix, command, tail] of calls) {
     const call = prefix !== '`';
@@ -476,6 +488,10 @@ test('Skill harness-setup: команды существуют в договор
       assert.ok(flags.includes(arg.name), `$H ${command}: нет обязательного ${arg.name}`);
   }
   assert.ok(full >= 20, 'skill называет полные вызовы через $H');
+  // Пути установленного пакета, на которые ссылается skill, существуют в поставке.
+  const paths = [...skill.matchAll(/<pkg>\/([A-Za-z0-9_./-]+[A-Za-z0-9_-])/g)].map(([, p]) => p!);
+  assert.ok(paths.length >= 5, 'skill ссылается на файлы пакета');
+  for (const path of paths) assert.ok(existsSync(join(root, path)), `нет в пакете: <pkg>/${path}`);
 });
 
 test('S2.5: исполнение не читает skills, шаблоны и профили — удаление skill ничего не отключает', () => {
