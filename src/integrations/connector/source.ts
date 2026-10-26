@@ -31,7 +31,13 @@ import { TransportError, type RelayTransport } from './transport.ts';
 export class RelayWorkSource implements WorkSource {
   readonly id: string;
   constructor(
-    readonly options: { config: ConnectorConfig; transport: RelayTransport; store: ConnectorStore },
+    readonly options: {
+      config: ConnectorConfig;
+      transport: RelayTransport;
+      store: ConnectorStore;
+      /** Абсолютный каталог пакетов `tasks[].context`. */
+      contextDir?: string;
+    },
   ) {
     this.id = connectorIdOf(options.config.provider, options.config.projectId);
   }
@@ -42,6 +48,7 @@ export class RelayWorkSource implements WorkSource {
       config: this.options.config,
       transport: this.options.transport,
       receiptOf: (orderId) => this.options.store.receipts(orderId).at(-1),
+      ...(this.options.contextDir ? { contextDir: this.options.contextDir } : {}),
       ...(signal ? { signal } : {}),
     });
   }

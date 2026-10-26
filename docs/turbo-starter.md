@@ -224,7 +224,8 @@ controller. Оверлей `templates/controller-mode/AGENTS.controller.md` v1
   читает живые файлы своего worktree;
 - `context/controller-mode/provenance.json` содержит версию и sha256
   оверлея, baseline SHA и blob каждого product AGENTS.md;
-- в каждом поручении указан `"context": ["controller-mode"]`.
+- в каждом поручении указан `"context": ["controller-mode"]`; для задач
+  Relay — в `tasks[].context` коннектора ([connectors](connectors.md#локальные-пакеты-контекста)).
 
 Оверлей перечисляет правила, делегированные controller-у: worktree, commit,
 merge, история Relay, `pnpm run setup`, вложенные оркестраторы и `harness`.

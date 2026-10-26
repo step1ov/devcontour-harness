@@ -27,6 +27,11 @@ not a file committed to the target repository. Some projects forbid new
 4. Add `"context": ["controller-mode"]` to every order of the graph. Writer
    and reviewers then see the same pinned bytes, and a changed overlay
    requires a new plan approval.
+   For tasks read from Relay, list the pack in the connector instead:
+   `"context": ["controller-mode"]` on each entry of `tasks[]`, with the
+   directory at `<contextDir>/controller-mode` (`contextDir` defaults to
+   `work/context` next to `connector.json`). The snapshot pins it the same
+   way, and a changed overlay needs a new snapshot and approval.
 5. Protect the product AGENTS.md files and the harness setup through the
    policy's `protectedPaths`. The worker cannot change the rules it runs
    under.

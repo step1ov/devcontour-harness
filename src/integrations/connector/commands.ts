@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
+  API_VERSION,
   HarnessError,
   type Author,
   type ContextSnapshot,
@@ -24,6 +25,8 @@ import { createTransportFor } from './registry.ts';
 import {
   assertEligible,
   checkIdentity,
+  contextLimitIssues,
+  localContext,
   matchCriterion,
   readStable,
   semanticDigest,
@@ -90,6 +93,11 @@ export class Connector {
     return this.loaded.config;
   }
 
+  /** Каталог пакетов `tasks[].context`: `contextDir` конфигурации, иначе `work/context` рядом с ней. */
+  get contextDir() {
+    return resolveFrom(this.loaded.baseDir, this.config.contextDir ?? 'work/context');
+  }
+
   /** Состояние коннектора (создаётся при первой записи). */
   get store(): ConnectorStore {
     this.storeInstance ??= new ConnectorStore(
@@ -116,6 +124,7 @@ export class Connector {
       config: this.config,
       transport: this.transport,
       store: this.store,
+      contextDir: this.contextDir,
     });
   }
 
@@ -171,6 +180,15 @@ export class Connector {
       return this.checkReport(undefined, false, [message], []);
     }
     const mapping: { ref: string; key?: string; problems: string[] }[] = [];
+    try {
+      const local = await localContext(config, this.contextDir);
+      if (local.length)
+        problems.push(
+          ...contextLimitIssues({ apiVersion: API_VERSION, sources: local, missing: [] }),
+        );
+    } catch (error) {
+      problems.push(this.redact(error instanceof Error ? error.message : String(error)));
+    }
     try {
       const { reads } = await readStable(
         this.transport,
@@ -275,6 +293,7 @@ export class Connector {
       graphId: snapshot.graph.id,
       graphDigest: snapshot.manifest.graphDigest,
       contextDigest: snapshot.manifest.contextDigest,
+      ...(snapshot.manifest.localContext ? { localContext: snapshot.manifest.localContext } : {}),
       revision: snapshot.revision,
       created,
       eligible: snapshot.problems.length === 0,

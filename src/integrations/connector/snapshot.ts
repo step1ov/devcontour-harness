@@ -1,13 +1,17 @@
+import { existsSync, statSync } from 'node:fs';
 import {
   API_VERSION,
   HarnessError,
+  CONTEXT_LIMITS,
   contextDigest,
+  contextIssues,
   digestOf,
   sha256,
   sourceDigest,
   workGraphDigest,
   workGraphSchema,
   type ContextSnapshot,
+  type ContextSourceEntry,
   type PinnedFile,
   type Prerequisite,
   type WorkGraph,
@@ -32,6 +36,7 @@ import {
   type TaskRead,
   type TransportIdentity,
 } from './transport.ts';
+import { FileContextSource } from '../../connectors/files.ts';
 
 /**
  * Снимок задач backend: чтение без смешения редакций, semantic digest,
@@ -108,6 +113,16 @@ export interface SnapshotManifest {
   tasks: TaskManifest[];
   truncated: string[];
   problems: SnapshotProblem[];
+  /** Закреплённые локальные пакеты `tasks[].context`; без них поля нет. */
+  localContext?: LocalContextManifest[];
+}
+
+export interface LocalContextManifest {
+  id: string;
+  digest: string;
+  files: number;
+  references: number;
+  bytes: number;
 }
 
 export interface BuiltSnapshot {
@@ -284,6 +299,8 @@ export function buildSnapshot(input: {
   rounds: number;
   /** Доверенный receipt этого коннектора для задачи-зависимости вне графа. */
   receiptOf: (orderId: string) => ReceiptRecord | undefined;
+  /** Закреплённые локальные пакеты `tasks[].context` (localContext). */
+  local?: ContextSourceEntry[];
 }): BuiltSnapshot {
   const { config, identity, reads } = input;
   const connector = connectorIdOf(config.provider, config.projectId);
@@ -294,6 +311,8 @@ export function buildSnapshot(input: {
   const missing: ContextSnapshot['missing'] = [];
   const prerequisites = new Map<string, Prerequisite>();
   const tasks: TaskManifest[] = [];
+  /** Какие локальные пакеты у какой задачи (по порядку): часть ревизии набора. */
+  const packsByTask: [string, string[]][] = [];
   const truncated: string[] = [];
   let totalBytes = 0;
   const limits = config.limits;
@@ -534,8 +553,9 @@ export function buildSnapshot(input: {
       ...(mapping.gates ? { gates: mapping.gates } : {}),
       requirements: [],
       contracts: [],
-      context: [entry.id],
+      context: [entry.id, ...(mapping.context ?? [])],
     });
+    packsByTask.push([identityOf, mapping.context ?? []]);
 
     tasks.push({
       ref: mapping.ref,
@@ -572,6 +592,15 @@ export function buildSnapshot(input: {
     connector,
     tasks: tasks.map((t) => [t.identity, t.semanticDigest]),
     prerequisites: prereqs,
+    // Без локальных пакетов ревизия та же, что до их появления. С ними —
+    // содержимое пакетов и их распределение по задачам: перенос пакета между
+    // задачами или смена порядка — тоже новое согласование.
+    ...(input.local?.length || packsByTask.some(([, ids]) => ids.length)
+      ? {
+          context: (input.local ?? []).map((s) => [s.id, s.digest]),
+          contextBy: [...packsByTask].sort(([a], [b]) => (a < b ? -1 : 1)),
+        }
+      : {}),
   });
   const joined = `${config.provider}:${config.projectId}:${taskIds.join('+')}`;
   const graph = workGraphSchema.parse({
@@ -585,7 +614,15 @@ export function buildSnapshot(input: {
     orders,
     prerequisites: prereqs,
   });
-  const context: ContextSnapshot = { apiVersion: API_VERSION, sources, missing };
+  const context: ContextSnapshot = {
+    apiVersion: API_VERSION,
+    sources: [...sources, ...(input.local ?? [])],
+    missing,
+  };
+  // Пределы снимка контекста проверяются здесь, а не только при запуске:
+  // source-snapshot и source-check называют их как отказ eligibility.
+  for (const issue of contextLimitIssues(context))
+    problems.push({ code: 'LIMIT_EXCEEDED', taskId: '', key: 'context', message: issue });
   const manifest: SnapshotManifest = {
     version: 1,
     provider: config.provider,
@@ -603,8 +640,57 @@ export function buildSnapshot(input: {
     tasks,
     truncated,
     problems,
+    ...(input.local?.length ? { localContext: input.local.map(localManifest) } : {}),
   };
   return { graph, context, manifest, revision, problems };
+}
+
+const CONTEXT_SOURCES_MAX = 30;
+
+/** Нарушения пределов снимка контекста: число источников, размер файла и сумма. */
+export function contextLimitIssues(context: ContextSnapshot): string[] {
+  const issues = contextIssues(context);
+  if (context.sources.length > CONTEXT_SOURCES_MAX)
+    issues.push(
+      `Источников контекста ${context.sources.length} при пределе ${CONTEXT_SOURCES_MAX} (задачи и локальные пакеты)`,
+    );
+  return issues.map((i) =>
+    /больше предела/.test(i)
+      ? `${i} (fileBytes=${CONTEXT_LIMITS.fileBytes}, totalBytes=${CONTEXT_LIMITS.totalBytes})`
+      : i,
+  );
+}
+
+const localManifest = (s: ContextSourceEntry): LocalContextManifest => ({
+  id: s.id,
+  digest: s.digest,
+  files: s.files.length,
+  references: s.references.length,
+  bytes: [...s.files, ...s.references].reduce((n, f) => n + f.bytes, 0),
+});
+
+/**
+ * Локальные пакеты `tasks[].context` из `contextDir`: те же правила, что у
+ * файлового контекста графа (каталог `<contextDir>/<id>`, `references/` —
+ * справки). Нет каталога или пакета — NOT_READY до чтения backend.
+ */
+export async function localContext(
+  config: ConnectorConfig,
+  contextDir: string | undefined,
+): Promise<ContextSourceEntry[]> {
+  const ids = [...new Set(config.tasks.flatMap((t) => t.context ?? []))].sort();
+  if (!ids.length) return [];
+  if (!contextDir)
+    throw new HarnessError(
+      'INVALID_INPUT',
+      'source: tasks[].context требует каталог пакетов (contextDir)',
+    );
+  if (!existsSync(contextDir) || !statSync(contextDir).isDirectory())
+    throw new HarnessError(
+      'NOT_READY',
+      `Каталог пакетов контекста ${contextDir} не найден (tasks[].context: ${ids.join(', ')})`,
+    );
+  return (await new FileContextSource(contextDir).snapshot(ids)).sources;
 }
 
 /** Прочитать, собрать и проверить идентичность: общий путь `source-snapshot` и `run --source`. */
@@ -612,8 +698,11 @@ export async function takeSnapshot(input: {
   config: ConnectorConfig;
   transport: RelayTransport;
   receiptOf: (orderId: string) => ReceiptRecord | undefined;
+  /** Абсолютный каталог пакетов `tasks[].context`. */
+  contextDir?: string;
   signal?: AbortSignal;
 }): Promise<BuiltSnapshot> {
+  const local = await localContext(input.config, input.contextDir);
   const identity = await checkIdentity(input.transport, input.config, input.signal);
   const { reads, rounds } = await readStable(
     input.transport,
@@ -627,6 +716,7 @@ export async function takeSnapshot(input: {
     reads,
     rounds,
     receiptOf: input.receiptOf,
+    ...(local.length ? { local } : {}),
   });
 }
 

@@ -53,8 +53,11 @@ export declare function changeFiles(
   fixture: Pick<StarterFixture, 'repo' | 'baselineSha'>,
   patch: string,
 ): Record<string, string>;
+/** `upstream: null` — обычный репозиторий проекта, не копия starter (skill harness-setup). */
 export declare function controllerContext(
-  fixture: Pick<StarterFixture, 'repo' | 'baselineSha' | 'upstream'>,
+  fixture: Pick<StarterFixture, 'repo' | 'baselineSha'> & {
+    upstream: StarterFixture['upstream'] | null;
+  },
   dir: string,
 ): { dir: string; provenance: any };
 export declare const approve: (summary?: string) => { result: Record<string, unknown> };

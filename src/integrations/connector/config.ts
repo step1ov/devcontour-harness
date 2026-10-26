@@ -71,6 +71,13 @@ export const taskMappingSchema = z.strictObject({
   criteria: z.array(criterionMappingSchema).max(100).default([]),
   /** Документы, без которых запуск блокируется (ID, ключ или имя). Остальные — дополнительные. */
   requiredDocuments: z.array(z.string().min(1).max(200)).max(30).default([]),
+  /**
+   * Локальные пакеты контекста поручения — каталоги `<contextDir>/<id>` (например,
+   * оверлей controller-mode). Закрепляются в снимке вместе с контекстом задачи;
+   * изменение набора или содержимого пакетов — новый снимок и новое
+   * согласование; semantic digest задачи от них не зависит.
+   */
+  context: z.array(idSchema).min(1).max(10).optional(),
 });
 export type TaskMapping = z.infer<typeof taskMappingSchema>;
 
@@ -86,6 +93,8 @@ const common = {
    * для процессов, разделяющих этот каталог.
    */
   stateDir: z.string().min(1).max(1000).optional(),
+  /** Каталог пакетов `tasks[].context` (относительно файла конфигурации); по умолчанию `work/context`. */
+  contextDir: z.string().min(1).max(1000).optional(),
   repository: z.strictObject({
     id: idSchema,
     /** Путь репозитория для сверки с политикой (относительно файла конфигурации). */
@@ -194,6 +203,15 @@ export function parseConfig(value: unknown, baseDir: string, file?: string): Loa
   const refs = parsed.data.tasks.map((t) => t.ref);
   const dup = refs.find((r, i) => refs.indexOf(r) !== i);
   if (dup) throw new HarnessError('INVALID_INPUT', 'source: задача указана дважды: ' + dup);
+  // ID контекста задачи — `c` + 20 hex (contextIdOf): локальный пакет не может его занять.
+  const taken = parsed.data.tasks
+    .flatMap((t) => t.context ?? [])
+    .find((id) => /^c[0-9a-f]{20}$/.test(id));
+  if (taken)
+    throw new HarnessError(
+      'INVALID_INPUT',
+      `source: пакет контекста ${taken} совпадает по форме с ID контекста задачи; выберите другое имя`,
+    );
   return { config: parsed.data, baseDir, ...(file ? { file } : {}) };
 }
 
@@ -251,7 +269,9 @@ export const graphIdOf = (provider: ProviderId, projectId: string, taskIds: stri
 /** Digest сопоставления задачи: входит в semantic digest — смена mapping требует нового согласования. */
 export const mappingDigest = (config: ConnectorConfig, mapping: TaskMapping) =>
   digestOf({
-    mapping: { ...mapping, ref: undefined },
+    // Пакеты контекста — не постановка задачи: их ID и digest входят в ревизию
+    // набора (новое согласование), но доставку принятого результата не меняют.
+    mapping: { ...mapping, ref: undefined, context: undefined },
     repository: config.repository.id,
     completion: config.completion,
   });

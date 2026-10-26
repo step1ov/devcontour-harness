@@ -41,6 +41,8 @@ export {
   checkIdentity,
   readStable,
   semanticDigest,
+  contextLimitIssues,
+  localContext,
   takeSnapshot,
   assertEligible,
   type BuiltSnapshot,

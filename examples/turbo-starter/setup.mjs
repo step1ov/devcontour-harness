@@ -34,7 +34,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -257,10 +257,17 @@ export function changeFiles(fixture, patch) {
  */
 export function controllerContext(fixture, dir) {
   const target = join(dir, 'controller-mode');
+  // Пересборка начинается с пустого каталога: справки удалённых AGENTS.md не
+  // остаются, а закоммиченный пакет и .harness/ не попадают в свои же справки.
+  rmSync(target, { recursive: true, force: true });
   mkdirSync(join(target, 'references'), { recursive: true });
   const overlay = readFileSync(join(CONTROLLER_TEMPLATE, 'AGENTS.controller.md'));
   writeFileSync(join(target, 'AGENTS.controller.md'), overlay);
-  const product = git(fixture.repo, ['ls-files', '--', 'AGENTS.md', '**/AGENTS.md'])
+  const inside = relative(fixture.repo, resolve(target));
+  const exclude = [':(exclude).harness/**'];
+  if (inside && !inside.startsWith('..') && !isAbsolute(inside))
+    exclude.push(`:(exclude)${inside.split(sep).join('/')}/**`);
+  const product = git(fixture.repo, ['ls-files', '--', 'AGENTS.md', '**/AGENTS.md', ...exclude])
     .split('\n')
     .filter(Boolean);
   const references = product.map((path) => {

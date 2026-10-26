@@ -11,6 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FileContextSource, validateInputs, withinPaths } from '../src/index.ts';
@@ -126,6 +127,34 @@ test('S02: выходы генерации разрешены поручение
       scope.some((s) => withinPaths(f, [s])),
       'вне области: ' + f,
     );
+});
+
+test('controllerContext: пересборка внутри репозитория после коммита пакета — только справки продукта, без своих копий и удалённых файлов', () => {
+  const r = repo({
+    'AGENTS.md': '# Rules\n',
+    'apps/web/AGENTS.md': '# Web\n',
+    'apps/old/AGENTS.md': '# Old\n',
+  });
+  const dir = join(r.dir, '.harness', 'work', 'context');
+  const build = (): string[] =>
+    controllerContext(
+      { repo: r.dir, baselineSha: r.head(), upstream: null },
+      dir,
+    ).provenance.product.files.map((f: { path: string }) => f.path) as string[];
+  assert.deepEqual(build(), ['AGENTS.md', 'apps/old/AGENTS.md', 'apps/web/AGENTS.md']);
+  r.git('add', '-A');
+  r.git('commit', '-qm', 'pack');
+  r.git('rm', '-q', 'apps/old/AGENTS.md');
+  r.git('commit', '-qm', 'drop old');
+  assert.deepEqual(build(), ['AGENTS.md', 'apps/web/AGENTS.md']);
+  const listed = execFileSync('find', [join(dir, 'controller-mode', 'references'), '-type', 'f'], {
+    encoding: 'utf8',
+  })
+    .split('\n')
+    .filter(Boolean)
+    .map((f) => f.slice(join(dir, 'controller-mode', 'references').length + 1))
+    .sort();
+  assert.deepEqual(listed, ['AGENTS.md', 'apps/web/AGENTS.md']);
 });
 
 test('S05: оверлей controller mode закреплён контекстом; product AGENTS.md — справки с provenance, без конфликта commit', async () => {

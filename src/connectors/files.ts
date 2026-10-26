@@ -91,6 +91,8 @@ export class FileContextSource implements ContextSource {
     const base = realpathSync(this.dir);
     const sources = [...new Set(ids)].map((id) => {
       const root = resolve(base, id);
+      if (root.startsWith(base + sep) && existsSync(root) && lstatSync(root).isSymbolicLink())
+        throw new HarnessError('INVALID_INPUT', `Контекст не читается через symlink: ${id}`);
       if (!root.startsWith(base + sep) || !existsSync(root) || !lstatSync(root).isDirectory())
         throw new HarnessError('NOT_READY', `Источник контекста ${id} не найден в ${this.dir}`);
       const pin = (path: string) => {
