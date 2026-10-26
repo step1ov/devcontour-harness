@@ -140,6 +140,7 @@ for (const required of [
   'schemas/stack-profile.schema.json',
   'profiles/node-checks.json',
   'skills/harness/SKILL.md',
+  'skills/harness-setup/SKILL.md',
   'templates/policy.json',
   'templates/graph.json',
   'docs/upgrade.md',
@@ -548,7 +549,11 @@ const template = run([
   join(installed, 'templates/policy.json'),
 ]);
 if (template.status !== 0) fail('validate шаблонов: ' + template.stdout);
-for (const file of ['skills/harness/SKILL.md', 'templates/AGENTS.md'])
+for (const file of [
+  'skills/harness/SKILL.md',
+  'skills/harness-setup/SKILL.md',
+  'templates/AGENTS.md',
+])
   if (!readFileSync(join(installed, file), 'utf8').includes('harness')) fail('пустой ' + file);
 
 // Skills только объясняют: без каталога skills те же gates, область записи

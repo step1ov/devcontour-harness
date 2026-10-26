@@ -4,19 +4,40 @@
 без внешнего хоста: пользователь называет репозиторий, цель и ограничения,
 остальное агент получает от `harness init`, а план составляет сам через
 `harness plan-request` и `harness plan-check`. Пошаговый маршрут для агента —
-skill [`skills/harness/SKILL.md`](../skills/harness/SKILL.md).
+skill [`skills/harness/SKILL.md`](../skills/harness/SKILL.md); установку,
+первую настройку и обновление версии ведёт skill
+[`skills/harness-setup/SKILL.md`](../skills/harness-setup/SKILL.md).
 
-## Установка вне проекта
+## Установка
 
 Пакет ставится в отдельный каталог инструментов, а не в зависимости проекта:
-`package.json` и lockfile проекта не меняются.
+`package.json` и lockfile проекта не меняются. Каталог — снаружи
+репозитория или внутри него, в `.harness-tools/`.
 
 ```sh
-npm install --prefix <tooldir> --omit=dev --ignore-scripts ./devcontour-harness-<version>.tgz
+npm install --prefix <tooldir> --save-exact --omit=dev --ignore-scripts devcontour-harness@<version>
+# или из архива: npm install --prefix <tooldir> --omit=dev --ignore-scripts ./devcontour-harness-<version>.tgz
 H=<tooldir>/node_modules/.bin/harness
 $H --version
 $H doctor
 ```
+
+Внутри проекта (`<tooldir>` = `<repo>/.harness-tools`) версию закрепляют
+`.harness-tools/package.json` и `package-lock.json`: их коммитят вместе с
+`.harness/`, а `node_modules/` исключает `.harness-tools/.gitignore`. Чтобы
+поручение не могло изменить инструмент, которым его проверяют, каталог
+добавляют в `protectedPaths` политики. Установка из архива записывает в
+`package.json` локальный путь `file:` — такой каталог целиком исключают через
+`.git/info/exclude`. Worktrees попыток создаются из Git, поэтому
+неотслеживаемый каталог инструментов в них не попадает. Состояние исполнения
+в любом случае остаётся вне репозитория.
+
+Обновление — смена закреплённой версии в том же каталоге по процедуре
+[upgrade](upgrade.md): остановка writers, копия state, проверка копии новой
+версией, установка, `doctor --state`, `init --plan`, `validate` графов,
+`resume`. Новая версия не перегенерирует политику: если изменился встроенный
+профиль, `init --plan` сообщает `content-differs` на `project.json`, и решение
+принимает человек.
 
 ## `harness init`
 

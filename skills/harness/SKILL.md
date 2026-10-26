@@ -39,8 +39,10 @@ shasum -a 256 <file.tgz>
 ```
 
 Use the exact tarball (or exact registry version) you were given and record
-its sha256. Do not install it into the project: the project `package.json`
-and lockfile stay untouched.
+its sha256. Do not install it into the project's dependencies: the project
+`package.json` and lockfile stay untouched. `<tooldir>` is outside the
+repository or `<repo>/.harness-tools`; the `harness-setup` skill of the
+package covers both, the version pin and upgrades.
 
 ### 2. Check the machine
 
@@ -65,19 +67,19 @@ Schema of input and response, and the byte limits. Read only.
    interruption it resumes from the saved manifest decisions and writes only
    what is missing.
 
-| Conflict or refusal                                 | Meaning                                                                                              | Action                                                                                                                      |
-| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `symlink`                                           | the path or an ancestor (`conflictPath`) is a symlink                                                | never write through it; the user replaces the link                                                                          |
-| `ancestor-not-directory`                            | an ancestor of the path is a file                                                                    | ask the user; never delete their files                                                                                      |
-| `not-regular-file`                                  | the destination exists and is not a regular file                                                     | ask the user                                                                                                                |
-| `outside-root`                                      | the destination resolves outside the repository                                                      | ask the user                                                                                                                |
-| `content-differs` on `.harness/project.json`        | an explicit `--writer` or `--profile` differs from the saved manifest                                | keep the saved decision, or the user confirms the change explicitly                                                         |
-| `content-differs` on `.harness/policy.json`         | the saved policy's writer differs from the manifest or explicit `--writer`                           | keep the saved decision, or the user confirms the change explicitly                                                         |
-| `INVALID_INPUT` with a path                         | not a Git root, invalid manifest or policy (also a truncated write), `--state` inside the repository | read the issue path; a broken file is removed by a human, not overwritten                                                   |
-| `NOT_READY` `no-commits`                            | the repository has no commits                                                                        | the user commits first                                                                                                      |
-| `NOT_READY` `stack-ambiguous` / `stack-unsupported` | both lockfiles, or none                                                                              | pass `--profile`; when profile gates do not fit, write `.harness/profile.json` and pass `--profile ./.harness/profile.json` |
-| `NOT_READY` toolchain problems                      | missing scripts, wrong tool versions                                                                 | fix the project or hand it to the user; never weaken the policy                                                             |
-| `CONTROLLER_BUSY`                                   | the repository is already owned by another controller                                                | stop: a second controller and state are not created                                                                         |
+| Conflict or refusal                                 | Meaning                                                                                                                                                 | Action                                                                                                                      |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `symlink`                                           | the path or an ancestor (`conflictPath`) is a symlink                                                                                                   | never write through it; the user replaces the link                                                                          |
+| `ancestor-not-directory`                            | an ancestor of the path is a file                                                                                                                       | ask the user; never delete their files                                                                                      |
+| `not-regular-file`                                  | the destination exists and is not a regular file                                                                                                        | ask the user                                                                                                                |
+| `outside-root`                                      | the destination resolves outside the repository                                                                                                         | ask the user                                                                                                                |
+| `content-differs` on `.harness/project.json`        | an explicit `--writer` or `--profile` differs from the saved manifest; after an upgrade or a move, also a changed built-in profile, root or API version | keep the saved decision, or the user confirms the change explicitly                                                         |
+| `content-differs` on `.harness/policy.json`         | the saved policy's writer differs from the manifest or explicit `--writer`                                                                              | keep the saved decision, or the user confirms the change explicitly                                                         |
+| `INVALID_INPUT` with a path                         | not a Git root, invalid manifest or policy (also a truncated write), `--state` inside the repository                                                    | read the issue path; a broken file is removed by a human, not overwritten                                                   |
+| `NOT_READY` `no-commits`                            | the repository has no commits                                                                                                                           | the user commits first                                                                                                      |
+| `NOT_READY` `stack-ambiguous` / `stack-unsupported` | both lockfiles, or none                                                                                                                                 | pass `--profile`; when profile gates do not fit, write `.harness/profile.json` and pass `--profile ./.harness/profile.json` |
+| `NOT_READY` toolchain problems                      | missing scripts, wrong tool versions                                                                                                                    | fix the project or hand it to the user; never weaken the policy                                                             |
+| `CONTROLLER_BUSY`                                   | the repository is already owned by another controller                                                                                                   | stop: a second controller and state are not created                                                                         |
 
 ### 4. Plan the graph
 

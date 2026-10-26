@@ -32,6 +32,7 @@ import {
   repositoryFromProfile,
   resolveProfile,
 } from '../src/profiles/resolve.ts';
+import { cliCommands } from '../src/contracts/cli.ts';
 import { implement, approve, runAll, setup } from './runner-fixture.ts';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -437,6 +438,44 @@ test('Skills и шаблоны: шаблоны проходят validate; инс
     assert.doesNotMatch(text, /devcontour|relay|панел|памят|\bmemory\b|\bmcp\b|panel/i, file);
     assert.match(text, /enforce|checked by the harness/i, file + ': проверки принадлежат harness');
   }
+  // Skill установки называет Relay как источник задач пакета, остальное — то же правило.
+  const setup = readFileSync(join(root, 'skills/harness-setup/SKILL.md'), 'utf8').replaceAll(
+    'devcontour-harness',
+    '',
+  );
+  assert.doesNotMatch(setup, /devcontour|панел|памят|\bmemory\b|\bmcp\b|panel/i);
+  assert.match(setup, /enforced by the harness itself/);
+});
+
+test('Skill harness-setup: команды существуют в договоре CLI, принимают названные флаги и получают обязательные', () => {
+  const skill = readFileSync(join(root, 'skills/harness-setup/SKILL.md'), 'utf8');
+  assert.match(skill, /^---\nname: harness-setup\ndescription: .+\n---\n/);
+  const text = skill.replaceAll(/\\\n\s*/g, ' ');
+  const commands = cliCommands as Record<string, { args: { name: string; required: boolean }[] }>;
+  // Полный вызов — `$H`/`$N` (CLI установленной и проверяемой версии); упоминание
+  // в тексте — команда договора в начале inline-кода, без обязательных флагов.
+  const calls = [...text.matchAll(/(\$[HN] |`)(--version|[a-z][a-z-]*)([^`\n;]*)/g)];
+  const external = new Set(['claude', 'codex', 'npm', 'git', 'node', 'shasum', 'mv', 'cp']);
+  let full = 0;
+  for (const [, prefix, command, tail] of calls) {
+    const call = prefix !== '`';
+    if (command === '--version') continue;
+    const spec = commands[command!];
+    // Inline-код без флагов — не обязательно команда (`node_modules/`, `app`).
+    if (!call && !spec && (!/^ --/.test(tail!) || external.has(command!))) continue;
+    assert.ok(spec, `неизвестная команда: $H ${command}`);
+    const flags = [...tail!.split('#')[0]!.matchAll(/--[a-z-]+/g)].map(([f]) => f);
+    for (const flag of flags)
+      assert.ok(
+        spec.args.some((a) => a.name === flag),
+        `${command}: неизвестный флаг ${flag}`,
+      );
+    if (!call) continue;
+    full++;
+    for (const arg of spec.args.filter((a) => a.required))
+      assert.ok(flags.includes(arg.name), `$H ${command}: нет обязательного ${arg.name}`);
+  }
+  assert.ok(full >= 20, 'skill называет полные вызовы через $H');
 });
 
 test('S2.5: исполнение не читает skills, шаблоны и профили — удаление skill ничего не отключает', () => {
