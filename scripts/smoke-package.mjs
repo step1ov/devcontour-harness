@@ -698,6 +698,16 @@ const explainOf = (state, policyPath, ...extra) =>
       HARNESS_CODEX_BIN: join(fixtures, 'fake-codex'),
     },
   });
+// Сразу после отказа run, пока чужая lease действует: explain называет её
+// CONTROLLER_BUSY только при живой lease.
+const busyStop = explainOf(busy.state, busy.policyPath);
+if (
+  busyStop.status !== 0 ||
+  !JSON.parse(busyStop.stdout).data.diagnoses.some(
+    (d) => d.code === 'CONTROLLER_BUSY' && d.actor === 'lead' && d.action === 'wait',
+  )
+)
+  fail('explain занятой роли controller: ' + busyStop.stdout + busyStop.stderr);
 const sha256 = (file) => createHash('sha256').update(readFileSync(file)).digest('hex');
 const exhausted = project('explain-gate', { 'src/greet.js': "exports.greet = () => 'Hi';\n" });
 exhausted.run();
@@ -745,14 +755,6 @@ if (
   !isDeepStrictEqual(JSON.parse(fromLib.stdout), JSON.parse(explained.stdout).data)
 )
   fail('данные explain CLI ≠ diagnoseState библиотеки: ' + fromLib.stderr + fromLib.stdout);
-const busyStop = explainOf(busy.state, busy.policyPath);
-if (
-  busyStop.status !== 0 ||
-  !JSON.parse(busyStop.stdout).data.diagnoses.some(
-    (d) => d.code === 'CONTROLLER_BUSY' && d.actor === 'lead' && d.action === 'wait',
-  )
-)
-  fail('explain занятой роли controller: ' + busyStop.stdout + busyStop.stderr);
 const missingState = join(scratch, 'never-run-state');
 const missing = explainOf(missingState, exhausted.policyPath);
 if (missing.status !== 3 || JSON.parse(missing.stdout).error?.code !== 'NOT_FOUND')
