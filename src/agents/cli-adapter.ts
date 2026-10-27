@@ -24,7 +24,7 @@ import { redactor } from '../environment/redaction.ts';
 import { inspectReview } from './inspect.ts';
 import { probeCallMs, probeServer, probeTool } from './review-probe.ts';
 import { claudeResult, runtimeEvents } from './runtime-events.ts';
-import { parseUsage, reportedModel, runtimeVersion, unknownUsage } from './usage.ts';
+import { runtimeVersion, unknownUsage, usageStream } from './usage.ts';
 
 type ToolProfile = z.infer<typeof toolProfileSchema>;
 
@@ -342,12 +342,16 @@ export function cliAdapter(
       // короткий секрет портит `item.completed`), текст полей маскируется
       // при разборе; сырой поток только в памяти и не сохраняется.
       let raw = '';
+      // Телеметрия — по всему потоку, независимо от пределов журнала и
+      // хвоста stdout: итоговое событие долгого вызова лежит за ними.
+      const telemetry = usageStream(runtime);
       try {
         result = await command(argv, r.cwd, {
           contain: { dirs: review ? [] : r.sandbox.writable },
-          ...(review
-            ? { onRawStdout: (text: string) => void (raw = (raw + text).slice(-2_000_000)) }
-            : {}),
+          onRawStdout: (text: string) => {
+            telemetry.push(text);
+            if (review) raw = (raw + text).slice(-2_000_000);
+          },
           onOutput: (stream, text) => {
             if (logged >= 10_000_000) return;
             const entry = `[${new Date().toISOString()} ${stream}] ${text}`;
@@ -370,16 +374,14 @@ export function cliAdapter(
           return unavailable(`${runtime}: runtime не запускается: ${String(error)}`);
         throw error;
       }
-      await writeFile(join(dir, 'runtime.json'), JSON.stringify(result.diagnostics, null, 2));
-      const usage = parseUsage(
-        runtime,
-        result.stdout,
-        result.code === 0 &&
-          !result.timedOut &&
-          !signal.aborted &&
-          result.stdout.length < 2_000_000,
+      const usage = telemetry.usage(result.code === 0 && !result.timedOut && !signal.aborted);
+      const model = telemetry.model();
+      // Сообщённые runtime счётчики и стоимость — и в диагностике вызова:
+      // runtime.log ограничен и итоговой строки может не содержать.
+      await writeFile(
+        join(dir, 'runtime.json'),
+        JSON.stringify({ ...result.diagnostics, usage }, null, 2),
       );
-      const model = reportedModel(result.stdout);
       const bookkeeping = ['system', 'result', 'error', 'session.created', 'thread.started'];
       const started =
         result.timedOut ||

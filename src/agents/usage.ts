@@ -79,14 +79,94 @@ export function runtimeVersion(executable: string, env?: NodeJS.ProcessEnv) {
   return versions.get(key)!;
 }
 
+/** Модель события runtime: событие system у claude, ключи modelUsage у codex. */
+function eventModel(event: Record<string, unknown>): string | null {
+  if (typeof event.model === 'string' && event.model && event.model !== '<synthetic>')
+    return event.model;
+  const usage = event.modelUsage as Record<string, unknown> | undefined;
+  const [name] = Object.keys(usage ?? {});
+  return name ?? null;
+}
+
 /** Модель, которую runtime выбрал на самом деле: событие system у claude, ключи modelUsage у codex. */
 export function reportedModel(stdout: string): string | null {
   for (const event of runtimeEvents(stdout).events) {
-    if (typeof event.model === 'string' && event.model && event.model !== '<synthetic>')
-      return event.model;
-    const usage = event.modelUsage as Record<string, unknown> | undefined;
-    const [name] = Object.keys(usage ?? {});
-    if (name) return name;
+    const model = eventModel(event);
+    if (model) return model;
   }
   return null;
+}
+
+/** Строка потока длиннее — не разбирается и делает телеметрию неполной. */
+const LINE_LIMIT = 64_000_000;
+
+/**
+ * Телеметрия, собранная по ходу потока runtime, а не из хвоста вывода. Хвост
+ * stdout и журнал вызова ограничены, и у долгого вызова итоговое событие
+ * `result` (стоимость и счётчики claude) или ранние `turn.completed` codex
+ * оказывались за пределом: стоимость, сообщённая провайдером, терялась или
+ * учитывалась неполной. Здесь каждая строка разбирается сразу; хранятся
+ * только поля телеметрии — последнее событие `result`, события
+ * `turn.completed` и первая сообщённая модель, — а не текст вывода.
+ */
+export function usageStream(runtime: 'codex' | 'claude') {
+  let partial = '',
+    overflow = false,
+    malformed = false,
+    model: string | null = null,
+    result: string | undefined;
+  const turns: string[] = [];
+  const line = (text: string) => {
+    if (!text.trim()) return;
+    let event: unknown;
+    try {
+      event = JSON.parse(text);
+    } catch {
+      malformed = true;
+      return;
+    }
+    if (!event || typeof event !== 'object' || Array.isArray(event)) {
+      malformed = true;
+      return;
+    }
+    const e = event as Record<string, unknown>;
+    model ??= eventModel(e);
+    if (runtime === 'claude' && e.type === 'result')
+      result = JSON.stringify({ type: e.type, usage: e.usage, total_cost_usd: e.total_cost_usd });
+    if (runtime === 'codex' && e.type === 'turn.completed')
+      turns.push(JSON.stringify({ type: e.type, usage: e.usage }));
+  };
+  const flush = () => {
+    if (overflow) malformed = true;
+    else line(partial);
+    partial = '';
+    overflow = false;
+  };
+  return {
+    /** Очередной фрагмент stdout runtime (без маски: берутся только числа). */
+    push(text: string) {
+      let start = 0;
+      for (let end = text.indexOf('\n'); end >= 0; end = text.indexOf('\n', start)) {
+        if (!overflow) partial += text.slice(start, end);
+        flush();
+        start = end + 1;
+      }
+      if (overflow) return;
+      partial += text.slice(start);
+      if (partial.length > LINE_LIMIT) {
+        partial = '';
+        overflow = true;
+      }
+    },
+    /** Телеметрия всего потока; `completed` — вызов завершился штатно. */
+    usage(completed: boolean): Usage {
+      flush();
+      return parseUsage(
+        runtime,
+        [...turns, ...(result ? [result] : [])].join('\n'),
+        completed && !malformed,
+      );
+    },
+    model: () => model,
+  };
 }
