@@ -72,7 +72,12 @@ import { BlockedError, classifyFailure } from './classify.ts';
 import { TaskFailure, type FailureKind } from './failure.ts';
 import type { Engine } from './engine.ts';
 import { prompt } from './prompt.ts';
-import { contractDocuments, orderCheckManifest } from '../verification/checks.ts';
+import {
+  contractDocuments,
+  orderCheckManifest,
+  referenceCodeNote,
+  referenceSetFiles,
+} from '../verification/checks.ts';
 import { CorpusStore, localRoots } from '../verification/corpus.ts';
 import { submitCase } from '../verification/confirm.ts';
 import { runSpike } from '../verification/spike.ts';
@@ -695,6 +700,25 @@ export class Runner {
         'scope-violation',
         `Изменены защищённые файлы: ${forbidden.join(', ')}`,
       );
+    // Ответы эталонных наборов лежат в рабочем дереве: изменённый файл
+    // реализации, который называет файл набора, читает эталон, а не решает.
+    const sets = this.engine.read((v) =>
+      referenceSetFiles(contractDocuments(work.order, v), repo.id),
+    );
+    if (sets.length) {
+      const named: string[] = [];
+      for (const path of changed) {
+        const text = await git(cwd, 'show', `${range ? range[1] : ''}:${path}`).catch(() => '');
+        if (text.length > 4 * 1024 * 1024) continue;
+        const hit = sets.find((s) => text.includes(s) || text.includes(s.split('/').at(-1)!));
+        if (hit) named.push(`${path} → ${hit}`);
+      }
+      if (named.length)
+        throw new TaskFailure(
+          'scope-violation',
+          `Реализация ссылается на файлы эталонных наборов: ${named.join(', ')}`,
+        );
+    }
     if (!changed.length)
       throw new TaskFailure(
         'empty-result',
@@ -2111,6 +2135,8 @@ export class Runner {
         );
       // Согласованные контракты поручения — их текстом, по закреплённому digest.
       const contracts = contractDocuments(v.work(attempt.workId)!.order, v);
+      const sets = referenceCodeNote(referenceSetFiles(contracts), review);
+      if (sets) out.push(sets);
       if (contracts.length)
         out.push(
           'Approved contracts: ' +

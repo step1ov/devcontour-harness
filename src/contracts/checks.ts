@@ -60,6 +60,11 @@ export const referenceSchema = z.strictObject({
         against: text(500),
         matches: z.number().int().min(0).max(100_000_000),
         total: z.number().int().min(1).max(100_000_000),
+        /**
+         * Закреплённые файлы, воспроизводящие сверку (скрипт, журнал) — среди
+         * артефактов контракта. Без них числа — утверждение автора.
+         */
+        artifacts: z.array(relativePathSchema).min(1).max(10).optional(),
       }),
     )
     .min(1)

@@ -49,7 +49,9 @@ export {
   obligationGates,
   orderCheckManifest,
   orderPropertyProblems,
+  referenceCodeNote,
   referenceNote,
+  referenceSetFiles,
   suiteBasis,
 } from './verification/checks.ts';
 export {

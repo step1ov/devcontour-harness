@@ -1,5 +1,6 @@
 import { test } from 'node:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
@@ -15,12 +16,16 @@ import {
   declarationProblems,
   orderCheckManifest,
   orderPropertyProblems,
+  referenceCodeNote,
   referenceNote,
+  referenceSetFiles,
   suiteBasis,
 } from '../src/verification/checks.ts';
+import { junitSummary } from '../src/verification/gates.ts';
+import { propertyCoverage } from '../src/verification/property.ts';
 import { propertyGates } from '../src/verification/acceptance.ts';
 import { writeSelfCheck } from '../src/verification/self-check.ts';
-import { implement, runAll } from './runner-fixture.ts';
+import { approve, implement, runAll } from './runner-fixture.ts';
 import { declaration as knapDeclaration, knap, oracle, propertySetup } from './property-fixture.ts';
 
 /**
@@ -111,9 +116,17 @@ test('Эталонное обязательство на gates без генер
   assert.deepEqual(problems(declaration()), []);
   const generative = { ...reference(), verification: undefined, reference: undefined };
   assert.deepEqual(problems(declaration(generative)), [
-    'свойство knapsack-optimal: gate golden-a не генеративный (нет property)',
-    'свойство knapsack-optimal: gate golden-b не генеративный (нет property)',
+    'свойство knapsack-optimal: gate golden-a не генеративный (нет property) — поручение не сможет выбрать это свойство; нужен генеративный gate или verification reference',
+    'свойство knapsack-optimal: gate golden-b не генеративный (нет property) — поручение не сможет выбрать это свойство; нужен генеративный gate или verification reference',
   ]);
+  // Инвариант на gate без генератора: обещание не вычислительное, но
+  // поручение его всё равно не выберет — договор отклоняется сразу.
+  assert.deepEqual(
+    problems(declaration({ ...generative, promise: 'invariant', gates: ['golden-a'] })),
+    [
+      'свойство knapsack-optimal: gate golden-a не генеративный (нет property) — поручение не сможет выбрать это свойство; нужен генеративный gate или verification reference',
+    ],
+  );
 });
 
 test('Структурные пропуски эталонной проверки называются до вызова модели', () => {
@@ -162,6 +175,10 @@ test('Структурные пропуски эталонной проверк�
     [
       { reference: { ...r, crossChecks: [{ ...r.crossChecks[0]!, matches: 799 }] } },
       /сверка эталона «малые входы» расходится \(799 из 800\)/,
+    ],
+    [
+      { reference: { ...r, crossChecks: [{ ...r.crossChecks[0]!, artifacts: ['cross.log'] }] } },
+      /сверка эталона «малые входы»: cross\.log не объявлен артефактом контракта/,
     ],
     [
       { reference: { ...r, crossChecks: [{ ...r.crossChecks[0]!, matches: 801 }] } },
@@ -259,6 +276,10 @@ test('Манифест gate — его доля наборов; генерати
       })),
     }),
   );
+  // `gates`, равные gate договора, — то же основание, что без поля.
+  const named = knapDeclaration();
+  named.obligations = named.obligations.map((o) => ({ ...o, gates: ['properties'] }));
+  assert.equal(suiteBasis(contract(named)), suiteBasis(contract(knapDeclaration())));
   assert.notEqual(
     suiteBasis(contract(declaration())),
     suiteBasis(
@@ -299,7 +320,53 @@ test('Reviewer контракта видит пределы наборов (gaps
   assert.match(note, /Входы больше 8 предметов и вместимость больше 30 наборы не покрывают/);
   assert.match(note, /"matches":800,"total":800/);
   assert.match(note, /a promise that rests on a gap/);
+  assert.match(note, /without "artifacts" .* is an unverified claim of the author/);
   assert.equal(referenceNote(knapDeclaration()), '');
+});
+
+test('Файлы эталонных наборов называются writer и reviewer кода', () => {
+  const files = referenceSetFiles([contract(declaration()), contract(knapDeclaration())]);
+  assert.deepEqual(files, ['golden-a.json', 'golden-b.json']);
+  assert.match(
+    referenceCodeNote(files, true),
+    /\["golden-a\.json","golden-b\.json"\].*is a blocking finding/,
+  );
+  assert.match(referenceCodeNote(files, false), /Do not read them from implementation code/);
+  assert.equal(referenceCodeNote(referenceSetFiles([contract(knapDeclaration())]), true), '');
+});
+
+test('ID testcase node:test — classname.name: property ID test.<имя> сходится с JUnit, голое имя — нет, с подсказкой', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-reference-junit-'));
+  try {
+    writeFileSync(
+      join(dir, 'golden.test.mjs'),
+      "import { test } from 'node:test';\ntest('knapsack-optimal', () => {});\n",
+    );
+    const out = join(dir, 'junit.xml');
+    execFileSync(
+      process.execPath,
+      ['--test', '--test-reporter=junit', `--test-reporter-destination=${out}`, 'golden.test.mjs'],
+      // Вложенный запуск node:test без NODE_TEST_CONTEXT: иначе он пишет в родительский.
+      { cwd: dir, env: { ...process.env, NODE_TEST_CONTEXT: undefined } },
+    );
+    const junit = junitSummary(readFileSync(out, 'utf8'));
+    assert.deepEqual(
+      junit.cases.map((c) => c.id),
+      ['test.knapsack-optimal'],
+    );
+    const check = (id: string) =>
+      propertyCoverage(
+        { version: 1, properties: [{ testId: id, status: 'passed', cases: 40 }] },
+        { properties: [{ id, minCases: 40, families: [] }] },
+        junit,
+      );
+    assert.deepEqual(check('test.knapsack-optimal'), []);
+    assert.deepEqual(check('knapsack-optimal'), [
+      'testcase knapsack-optimal отсутствует в JUnit (есть test.knapsack-optimal: ID testcase — classname.name, property ID должен совпадать с ним)',
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('Самопроверка исполнителя прогоняет и gates эталонных наборов, свойство — один раз', async () => {
@@ -370,11 +437,15 @@ if (report && mode !== 'silent')
     cases: Object.values(families).reduce((a, b) => a + b, 0), families,
     ...(counterexample ? { counterexample } : {}) }] }));
 out(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite name="golden" tests="1" failures="' + (counterexample ? 1 : 0) +
-  '"><testcase name="knapsack-optimal">' + (counterexample ? '<failure message="mismatch"/>' : '') + '</testcase></testsuite>');
+  '"><testcase name="' + (mode === 'junit-other' ? 'other' : 'knapsack-optimal') + '">' + (counterexample ? '<failure message="mismatch"/>' : '') + '</testcase></testsuite>');
 process.exit(counterexample ? 1 : 0);
 `;
 
-function referenceSetup(options: { writer: unknown; args?: Record<string, string[]> }) {
+function referenceSetup(options: {
+  writer: unknown;
+  reviewer?: unknown;
+  args?: Record<string, string[]>;
+}) {
   const files = {
     'replay.mjs': replay,
     'oracle.mjs': oracle,
@@ -383,6 +454,7 @@ function referenceSetup(options: { writer: unknown; args?: Record<string, string
   };
   return propertySetup({
     writer: options.writer,
+    ...(options.reviewer ? { reviewer: options.reviewer } : {}),
     properties: ['knapsack-optimal'],
     declaration: declaration(),
     files,
@@ -407,7 +479,10 @@ const attempt = (ctx: ReturnType<typeof referenceSetup>) =>
   ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
 
 test('Gates эталонных наборов без генератора получают путь отчёта и доводят поручение до приёмки', async () => {
-  const ctx = referenceSetup({ writer: implement({ 'src/knap.mjs': knap.correct }) });
+  const ctx = referenceSetup({
+    writer: { ...implement({ 'src/knap.mjs': knap.correct }), recordPrompt: true },
+    reviewer: { ...approve(), recordPrompt: true },
+  });
   await runAll(ctx);
   const a = attempt(ctx);
   assert.equal(a.status, 'succeeded', a.error);
@@ -420,6 +495,43 @@ test('Gates эталонных наборов без генератора пол
       assert.equal(x.property?.report?.properties[0]?.cases, 40);
     }
   }
+  // Writer и reviewer кода знают файлы наборов и правило против подгонки.
+  const writer = readFileSync(ctx.scenarioPath + '.writer.0.prompt', 'utf8');
+  assert.match(
+    writer,
+    /Reference answer sets pinned by the contracts: \["golden-a\.json","golden-b\.json"\]/,
+  );
+  const reviewer = readFileSync(ctx.scenarioPath + '.reviewer.0.prompt', 'utf8');
+  assert.match(reviewer, /hard-codes their inputs or expected answers.*is a blocking finding/);
+});
+
+test('Реализация, читающая файл эталонного набора, отклоняется до gates', async () => {
+  const ctx = referenceSetup({
+    writer: implement({
+      'src/knap.mjs':
+        "import { readFileSync } from 'node:fs';\nconst set = JSON.parse(readFileSync(new URL('../golden-a.json', import.meta.url)));\nexport function solve() { return set[0].expected; }\n",
+    }),
+  });
+  await runAll(ctx);
+  const a = attempt(ctx);
+  assert.equal(a.failureKind, 'scope-violation');
+  assert.match(
+    a.error!,
+    /Реализация ссылается на файлы эталонных наборов: src\/knap\.mjs → golden-a\.json/,
+  );
+  assert.equal(a.evidence.filter((x) => x.kind === 'test').length, 0, 'gates не запускались');
+});
+
+test('Testcase JUnit с другим ID не подтверждает эталонное свойство', async () => {
+  const ctx = referenceSetup({
+    writer: implement({ 'src/knap.mjs': knap.correct }),
+    args: { 'golden-a': ['0', 'junit-other'] },
+  });
+  await runAll(ctx);
+  const e = attempt(ctx).evidence.find((x) => x.gate === 'golden-a')!;
+  assert.equal(e.exitCode, 0);
+  assert.equal(e.passed, false);
+  assert.match(e.summary, /testcase knapsack-optimal отсутствует в JUnit/);
 });
 
 test('Зелёный JUnit и код 0 не заменяют доли набора: недобор входов — отказ gate', async () => {

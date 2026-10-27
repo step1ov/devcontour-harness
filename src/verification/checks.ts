@@ -58,6 +58,37 @@ function declared(contracts: ContractDocument[], gate?: string): Declared[] {
     );
 }
 
+const sameGates = (gates: string[], gate: string) => gates.every((g) => g === gate);
+
+/**
+ * Файлы эталонных наборов договоров поручения (в репозитории `repositoryId`).
+ * Ответы наборов лежат в рабочем дереве: реализация, которая читает их или
+ * повторяет их ответы, прошла бы каждый набор, ничего не решив.
+ */
+export function referenceSetFiles(contracts: ContractDocument[], repositoryId?: string) {
+  return [
+    ...new Set(
+      contracts
+        .filter(
+          (c) => c.checks && (!repositoryId || !c.repositoryId || c.repositoryId === repositoryId),
+        )
+        .flatMap((c) =>
+          c.checks!.obligations.flatMap((o) =>
+            isReference(o) && o.reference ? o.reference.sets.flatMap((s) => s.artifacts) : [],
+          ),
+        ),
+    ),
+  ];
+}
+
+/** Подсказка writer или reviewer кода о файлах эталонных наборов; пусто — их нет. */
+export function referenceCodeNote(files: string[], review: boolean) {
+  if (!files.length) return '';
+  return review
+    ? `Reference answer sets pinned by the contracts (the gates compare the implementation with them): ${JSON.stringify(files)}. Implementation code that reads these files (by path, basename or a computed name), embeds or hard-codes their inputs or expected answers, or special-cases their inputs is a blocking finding: it would pass every set without solving the problem. Tests and checkers that are contract artifacts may read them.`
+    : `Reference answer sets pinned by the contracts: ${JSON.stringify(files)}. The gates compare your implementation with them. Do not read them from implementation code and do not copy their answers or special-case their inputs: the controller refuses a candidate whose changed files name a set file, and the reviewer rejects hard-coded answers.`;
+}
+
 /** Основание случаев корпуса: закреплённые файлы, gate и смысл обязательств. */
 export function suiteBasis(contract: ContractDocument) {
   const declaration = contract.checks!;
@@ -71,7 +102,8 @@ export function suiteBasis(contract: ContractDocument) {
       domain: o.domain,
       answer: o.answer,
       method: o.method,
-      ...(o.gates ? { gates: o.gates } : {}),
+      // `gates`, равные gate договора, — то же, что поле не указано.
+      ...(o.gates && !sameGates(o.gates, declaration.gate) ? { gates: o.gates } : {}),
       ...(o.verification ? { verification: o.verification } : {}),
       ...(o.reference ? { reference: o.reference } : {}),
     })),
@@ -113,13 +145,19 @@ function referenceProblems(o: Obligation, gates: string[], artifacts: string[]) 
   const r = o.reference;
   if (!r) return [`${at}: для способа reference опишите эталонные наборы (reference)`];
   const problems: string[] = [];
-  for (const c of r.crossChecks)
+  for (const c of r.crossChecks) {
+    for (const path of c.artifacts ?? [])
+      if (!artifacts.includes(path))
+        problems.push(
+          `${at}: сверка эталона «${c.family}»: ${path} не объявлен артефактом контракта и не закреплён`,
+        );
     if (c.matches > c.total)
       problems.push(`${at}: сверка эталона «${c.family}»: совпало ${c.matches} из ${c.total}`);
     else if (c.matches < c.total)
       problems.push(
         `${at}: сверка эталона «${c.family}» расходится (${c.matches} из ${c.total}): эталон с расхождениями не закрепляет ответы`,
       );
+  }
   const families = new Map(o.coverage.families.map((f) => [f.id, 0]));
   let total = 0;
   for (const [i, set] of r.sets.entries()) {
@@ -214,14 +252,19 @@ export function declarationProblems(
         );
       if (!o.method.artifacts.length && o.method.kind !== 'analytic')
         problems.push(`${at}: способ проверки не ссылается на закреплённый checker или эталон`);
-      // Генеративность нужна генератору: эталонная проверка сверяет
-      // реализацию с закреплёнными наборами и отчитывается тем же отчётом.
-      if (!reference)
-        for (const id of new Set(gates)) {
-          const g = configured(id);
-          if (g && !g.property) problems.push(`${at}: gate ${g.id} не генеративный (нет property)`);
-        }
     }
+    // Генеративность нужна генератору: эталонная проверка сверяет
+    // реализацию с закреплёнными наборами и отчитывается тем же отчётом.
+    // Обязательство любого обещания на gate без генератора поручение выбрать
+    // не может (orderPropertyProblems): оно стало бы мёртвым договором.
+    if (!reference)
+      for (const id of new Set(gates)) {
+        const g = configured(id);
+        if (g && !g.property)
+          problems.push(
+            `${at}: gate ${g.id} не генеративный (нет property) — поручение не сможет выбрать это свойство; нужен генеративный gate или verification reference`,
+          );
+      }
     if (o.promise === 'performance' && !o.resources.benchmark)
       problems.push(`${at}: для производительности укажите метод измерения и среду`);
     if (o.coverage.corpus && !declaration.corpus)
@@ -259,7 +302,7 @@ export function referenceNote(declaration: CheckDeclaration | undefined) {
   const list = (declaration?.obligations ?? []).filter((o) => isReference(o) && o.reference);
   if (!list.length) return '';
   return (
-    'Reference-set obligations (verification "reference"): the gates replay pinned reference answer sets (contract artifacts) against the implementation and report the replayed inputs per property and family; the controller requires each gate to reach its declared share. Judge them as follows: the oracle must be independent of the implementation and its stated limits must not silently bias the sets toward easy inputs; a cross-check with mismatches or on an unrelated family is not evidence; the sets prove the answer only on the inputs they contain. The "gaps" of each obligation state what the sets do not prove (generalization beyond the set, input classes outside it): a promise that rests on a gap without another declared method (a generative property, an invariant or an analytic argument) is a blocking finding. Obligations: ' +
+    'Reference-set obligations (verification "reference"): the gates replay pinned reference answer sets (contract artifacts) against the implementation and report the replayed inputs per property and family; the controller requires each gate to reach its declared share. Judge them as follows: the oracle must be independent of the implementation and its stated limits must not silently bias the sets toward easy inputs; a cross-check with mismatches or on an unrelated family is not evidence; a cross-check without "artifacts" (a pinned script or log that reproduces it) is an unverified claim of the author — weigh it as such and ask for the artifact where the promise rests on it; the sets prove the answer only on the inputs they contain. The "gaps" of each obligation state what the sets do not prove (generalization beyond the set, input classes outside it): a promise that rests on a gap without another declared method (a generative property, an invariant or an analytic argument) is a blocking finding. Obligations: ' +
     JSON.stringify(
       list.map((o) => ({
         property: o.property,

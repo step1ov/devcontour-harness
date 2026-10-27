@@ -202,8 +202,18 @@ export function propertyCoverage(
       for (const id of required) {
         const found = junit.cases.filter((c) => !c.opaque && c.id === id);
         const p = entry(id);
-        if (!found.length) problems.push(`testcase ${id} отсутствует в JUnit`);
-        else if (found.length > 1) problems.push(`testcase ${id} встречается ${found.length} раза`);
+        if (!found.length) {
+          // ID testcase — `classname.name`: node:test пишет classname="test",
+          // и свойство `x` там видно как `test.x`. Подсказка называет его.
+          const near = junit.cases.find((c) => !c.opaque && c.id.endsWith('.' + id));
+          problems.push(
+            `testcase ${id} отсутствует в JUnit` +
+              (near
+                ? ` (есть ${near.id}: ID testcase — classname.name, property ID должен совпадать с ним)`
+                : ''),
+          );
+        } else if (found.length > 1)
+          problems.push(`testcase ${id} встречается ${found.length} раза`);
         else if (p?.status === 'passed' && found[0]!.status !== 'passed')
           problems.push(`testcase ${id}: ${found[0]!.status}, хотя отчёт свойств сообщает passed`);
       }

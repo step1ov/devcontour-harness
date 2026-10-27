@@ -500,7 +500,12 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     run.property && (gate.property || expectsReference(run.property.expected))
       ? run.property
       : undefined;
-  const label = gate.property ? 'Генеративная проверка' : 'Проверка по эталонным наборам';
+  const reference = expectsReference(run.property?.expected);
+  const label = !gate.property
+    ? 'Проверка по эталонным наборам'
+    : reference
+      ? 'Проверка свойств и эталонных наборов'
+      : 'Генеративная проверка';
   const propertyDir = property
     ? await realpath(await mkdtemp(join(tmpdir(), 'harness-property-')))
     : undefined;
