@@ -74,9 +74,14 @@ const h2Commands = [
 /**
  * SHA-256 `JSON.stringify(cliCommands)` и JSON Schema данных
  * (`{io:'output', unrepresentable:'any'}`) всех команд на `5077625`.
+ * Данные с тех пор расширены только аддитивно — значениями перечней классов
+ * отказа и причин остановки `unfinished` (незавершённая работа) и `needs-lead`
+ * (пустой результат без механического основания); без них — те же байты.
  */
 const H2_COMMANDS_SHA = '58efd5e554cd5b015538ef1d4e7dd8d20f24205ef24e28c5b27394642bc20e25';
 const H2_DATA_SHA = '95016c62e6e7fb134ab3dcde4aff35679951fe1b9037452bc86846230ffa5682';
+/** Аддитивные значения перечней после H2. */
+const ADDITIVE_ENUM_VALUES = new Set(['unfinished', 'needs-lead']);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
   'Подготовить существующий Git npm/pnpm-репозиторий: план или create-only запись .harness/ (политика из профиля и toolchain inspection, manifest последним); чужие файлы не меняются';
@@ -215,8 +220,14 @@ test('H3-01: прежние команды и схемы их данных не 
         z.toJSONSchema(s as z.ZodType, { io: 'output', unrepresentable: 'any' }),
       ]),
   );
-  // Порядок ключей cliDataSchemas H2 — без capabilities.
-  assert.equal(sha256(JSON.stringify(data)), H2_DATA_SHA);
+  // Порядок ключей cliDataSchemas H2 — без capabilities; аддитивные значения
+  // перечней убираются, остальное — байты H2.
+  const h2 = JSON.stringify(data, (_k, v: unknown) =>
+    Array.isArray(v) ? v.filter((x) => !(typeof x === 'string' && ADDITIVE_ENUM_VALUES.has(x))) : v,
+  );
+  assert.equal(sha256(h2), H2_DATA_SHA);
+  for (const value of ADDITIVE_ENUM_VALUES)
+    assert.ok(JSON.stringify(data).includes(JSON.stringify(value)), value + ' объявлен');
 });
 
 test('H3-01: --help называет capabilities; прежние команды и capabilities отвечают тем же конвертом', () => {

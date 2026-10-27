@@ -15,6 +15,8 @@ export function stopCodeOf(kind: FailureKind | undefined): ErrorCode {
       return 'GATE_FAILED';
     case 'review':
       return 'REVIEW_REJECTED';
+    case 'needs-lead':
+      return 'APPROVAL_REQUIRED';
     case 'review-protocol':
       return 'REVIEW_PROTOCOL_INVALID';
     case 'scope-violation':
@@ -49,6 +51,7 @@ export const stopCauses = [
   'merge',
   'cancelled',
   'budget',
+  'needs-lead',
   'unknown',
   'runtime-missing',
   'controller-busy',
@@ -142,6 +145,8 @@ const causeText: Record<StopCause, string> = {
   merge: 'Слияние с веткой интеграции не сошлось.',
   cancelled: 'Работа отменена человеком.',
   budget: 'Бюджет расходов или времени исчерпан либо не определён.',
+  'needs-lead':
+    'Пустой результат без механического основания считать работу сделанной: решение ведущего.',
   unknown: 'Класс отказа не определён.',
   'runtime-missing': 'Назначенный политикой runtime не найден или не отвечает на --version.',
   'controller-busy': 'Очередь ведёт другой процесс controller.',
@@ -158,6 +163,7 @@ const failurePhase: Record<FailureKind, StopPhase> = {
   unknown: 'implementation',
   'empty-result': 'implementation',
   unfinished: 'implementation',
+  'needs-lead': 'review',
   gate: 'gates',
   review: 'review',
   'review-protocol': 'review',
@@ -348,6 +354,14 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
           phase,
           actor: 'user',
           action: 'fix-environment',
+        };
+      case 'needs-lead':
+        return {
+          code: stopCodeOf(kind),
+          cause: kind,
+          phase,
+          actor: 'lead',
+          action: 'diagnose-failure',
         };
       case 'review-protocol':
       case 'unknown':

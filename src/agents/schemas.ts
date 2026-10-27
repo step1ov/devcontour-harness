@@ -135,3 +135,30 @@ export const reviewOutputSchema = {
   },
   required: ['approved', 'summary', 'findings', 'discoveries', 'execution', 'previous'],
 };
+
+/**
+ * Ответ reviewer попытки без изменений: тот же протокол и обязательное
+ * `alreadySatisfied` (`null` — подтверждения нет). Обычное ревью этого поля
+ * не получает: его вид ответа не меняется.
+ */
+export const alreadySatisfiedReviewOutputSchema = {
+  ...reviewOutputSchema,
+  properties: {
+    ...reviewOutputSchema.properties,
+    alreadySatisfied: {
+      anyOf: [
+        { type: 'null' },
+        {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            gates: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'string' } },
+            evidence: { type: 'string' },
+          },
+          required: ['gates', 'evidence'],
+        },
+      ],
+    },
+  },
+  required: [...reviewOutputSchema.required, 'alreadySatisfied'],
+};

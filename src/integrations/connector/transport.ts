@@ -147,13 +147,7 @@ export interface CheckpointInput {
  * - `unsupported` — нужной операции/capability у backend нет.
  */
 export type TransportErrorKind =
-  | 'conflict'
-  | 'refused'
-  | 'not-found'
-  | 'unavailable'
-  | 'protocol'
-  | 'uncertain'
-  | 'unsupported';
+  'conflict' | 'refused' | 'not-found' | 'unavailable' | 'protocol' | 'uncertain' | 'unsupported';
 
 export class TransportError extends Error {
   override name = 'TransportError';

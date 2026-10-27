@@ -53,6 +53,7 @@ import { callDurationMs, callOwner, callRecords, ownerGone } from './usage.ts';
 import { MAX_NEUTRAL_FAILURES, failureFingerprint, repairPolicy } from './failure.ts';
 import { reusableImplementation } from './reuse.ts';
 import { uncoveredGates, unprovenReason } from '../verification/proof.ts';
+import { alreadySatisfiedVerdict, contractCheckGates } from '../verification/already-satisfied.ts';
 import {
   contractDocuments,
   corpusBindingHolds,
@@ -1488,6 +1489,55 @@ export class Engine {
           !last('review', phase, phase === 'candidate' ? a.candidateSha : sha, 'independent-review')
         )
           throw new HarnessError('REVIEW_REJECTED', `Нет независимого ревью: ${phase}`);
+      // Попытка без изменений (кандидат — база) принимается только с
+      // подтверждением reviewer обеих фаз, что приёмка уже выполнена.
+      if (a.candidateSha === a.baseSha)
+        for (const phase of ['candidate', 'integration'] as const) {
+          const decisive = a.evidence.findLast(
+            (e) =>
+              e.kind === 'review' &&
+              e.phase === phase &&
+              e.sha === (phase === 'candidate' ? a.candidateSha : sha) &&
+              e.gate === 'independent-review' &&
+              e.consumer === undefined &&
+              (!a.checks || e.checks === a.checks.effective),
+          );
+          const confirmed = decisive?.alreadySatisfied;
+          // Правило повторяется целиком по записанному: область задачи,
+          // договор поручения и основание по зависимости, сверенное с её
+          // принятой попыткой.
+          const basis = confirmed?.basis;
+          const dependency =
+            basis?.kind === 'dependency' &&
+            tx
+              .attempts(basis.workId)
+              .some(
+                (x) =>
+                  x.status === 'succeeded' &&
+                  x.candidateSha === basis.sha &&
+                  x.candidateSha !== x.baseSha &&
+                  tx.work(basis.workId)?.resultSha === x.integrationSha,
+              )
+              ? basis
+              : undefined;
+          const repo = this.repository(a.repositoryId);
+          const verdict = confirmed
+            ? alreadySatisfiedVerdict({
+                scope: repo.gates.filter((g) => (a.requiredGates ?? []).includes(g.id)),
+                contractGates: contractCheckGates(contractDocuments(w.order, tx)),
+                writeScope: w.order.writeScope,
+                dependsOn: w.order.dependsOn,
+                claim: { gates: confirmed.gates, evidence: confirmed.evidence },
+                ...(dependency ? { dependency } : {}),
+              })
+            : undefined;
+          if (!verdict?.ok)
+            throw new HarnessError(
+              'REVIEW_REJECTED',
+              `Изменений нет, а ревью ${phase} не подтвердило, что приёмка уже выполнена` +
+                (verdict ? ': ' + verdict.problem : ''),
+            );
+        }
       // Проверки потребителей — на integration, против интегрированного
       // результата: evidence потребителя закрывает только его проверку.
       for (const consumer of a.consumers ?? []) {

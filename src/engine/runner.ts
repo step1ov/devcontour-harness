@@ -26,6 +26,7 @@ import {
   reviewResultSchema,
   type ImplementationResult,
   type ReviewResult,
+  type AlreadySatisfied,
   sha256,
   type AttemptState,
   type ContextSnapshot,
@@ -41,7 +42,11 @@ import {
 import { git } from '../environment/process.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
 import { redactDeep, type Redactor } from '../environment/redaction.ts';
-import { implementationOutputSchema, reviewOutputSchema } from '../agents/schemas.ts';
+import {
+  alreadySatisfiedReviewOutputSchema,
+  implementationOutputSchema,
+  reviewOutputSchema,
+} from '../agents/schemas.ts';
 import { reviewInspection } from '../agents/inspect.ts';
 import { reviewerRunsChecks } from '../agents/cli-adapter.ts';
 import {
@@ -57,6 +62,12 @@ import {
   type ProbeSpec,
 } from '../agents/review-probe.ts';
 import { runGate } from '../verification/gates.ts';
+import {
+  alreadySatisfiedVerdict,
+  contractCheckGates,
+  withinWriteScope,
+  type AlreadySatisfiedBasis,
+} from '../verification/already-satisfied.ts';
 import {
   assertDependencies,
   dependencyFreshness,
@@ -153,6 +164,14 @@ export interface RunnerHooks {
     sha: string;
   }): void | Promise<void>;
 }
+
+/** Честный путь исполнителя, когда работу уже сделала зависимость. */
+const ALREADY_SATISFIED_WRITER_NOTE =
+  'Implement the task. Only if the work is verifiably already present on the base commit — a dependency of this task already changed the files of its write scope, or the approved check contract of this task already passes — leave the tree unchanged and report completed: true, naming the commit and the files in the summary. An unchanged tree is never accepted on a generic passing test alone: without such a basis it stops for the lead, and a wrong claim is an empty result.';
+
+/** Указание reviewer попытки без изменений (кандидат — база). */
+const ALREADY_SATISFIED_REVIEW_NOTE =
+  'The writer made no changes: the candidate is the base commit itself. Approve only if the acceptance criteria are already satisfied on it (for example, by a dependency). Then set "alreadySatisfied" to the ids of the gates of this task whose passing evidence on this SHA shows it — at least one test gate and every gate of the approved check contracts — and "evidence" to what in that evidence and in the code proves each criterion. Otherwise set approved: false and alreadySatisfied: null; the attempt is then an empty result.';
 
 const ordered = (gates: GatePolicy[], ids: string[]) => {
   const byId = new Map(gates.map((g) => [g.id, g]));
@@ -519,6 +538,8 @@ export class Runner {
       findings?: ReviewRequestFindings;
       /** Остаток срока логического ревью: вызов не получает больше. */
       timeoutMs?: number;
+      /** Схема ответа вместо обычной для задачи вызова. */
+      outputSchema?: Record<string, unknown>;
     },
     signal: AbortSignal,
   ): Promise<RuntimeResponse & { redact: Redactor; unreadable?: string }> {
@@ -563,7 +584,8 @@ export class Runner {
         binding,
         cwd: input.cwd,
         prompt: input.prompt,
-        outputSchema: review ? reviewOutputSchema : implementationOutputSchema,
+        outputSchema:
+          input.outputSchema ?? (review ? reviewOutputSchema : implementationOutputSchema),
         session: { kind: 'fresh' },
         sandbox: {
           mode: this.policy.isolation.mode,
@@ -678,7 +700,9 @@ export class Runner {
     cwd: string,
     context?: ContextSnapshot,
     range?: [string, string],
-  ) {
+    /** Пустой результат допустим (возможное «приёмка уже выполнена»): вернуть true вместо отказа. */
+    allowEmpty = false,
+  ): Promise<boolean> {
     const changed = (
       await (range
         ? git(cwd, 'diff', '--no-renames', '--name-only', '-z', ...range)
@@ -730,11 +754,13 @@ export class Runner {
           `Реализация ссылается на файлы эталонных наборов: ${named.join(', ')}`,
         );
     }
-    if (!changed.length)
+    if (!changed.length) {
+      if (allowEmpty) return true;
       throw new TaskFailure(
         'empty-result',
         'Изменений нет: поручение отчиталось о выполнении пустым коммитом',
       );
+    }
     const role = roleBinding(this.policy, work.order.role, work.order.repositoryId)?.writePaths;
     const outside = changed.filter(
       (p) => !within(p, work.order.writeScope) || (role && !within(p, role)),
@@ -744,6 +770,7 @@ export class Runner {
         'scope-violation',
         'Изменены файлы вне области поручения/роли: ' + outside.join(', '),
       );
+    return false;
   }
 
   /** Стадия попытки с замером: начало, конец и исход записываются под fencing. */
@@ -1077,6 +1104,7 @@ export class Runner {
                           notes: [
                             ...this.notes(attempt, false),
                             ...(await this.hostNotes(work, attempt, false)),
+                            ALREADY_SATISFIED_WRITER_NOTE,
                           ],
                           // Открытые находки ревью с выданными ID — из истории
                           // поручения; только когда reviewer ведёт протокол
@@ -1116,7 +1144,18 @@ export class Runner {
                         'Исполнитель изменил HEAD; интеграцией владеет harness',
                       );
                     await git(cwd, 'add', '-A');
-                    await this.assertScope(work, repo, cwd, context);
+                    // Пустой результат — не отказ сразу: приёмку могла уже
+                    // выполнить зависимость. Кандидат — сама база (без
+                    // коммита); gates задачи на ней и подтверждение reviewer
+                    // (`alreadySatisfied`) решают, принять ли его.
+                    if (await this.assertScope(work, repo, cwd, context, undefined, true)) {
+                      await this.options.hooks?.implemented?.({
+                        attempt,
+                        output: result.data,
+                        sha: base,
+                      });
+                      return base;
+                    }
                     await git(
                       cwd,
                       '-c',
@@ -1138,7 +1177,24 @@ export class Runner {
               rearm();
               this.engine.phase(attempt.id, attempt.token, 'verifying', { candidateSha: sha });
               for (const gate of gates)
-                await this.gate(attempt, cwd, sha, 'candidate', gate, artifacts, signal, execution);
+                await this.gate(
+                  attempt,
+                  cwd,
+                  sha,
+                  'candidate',
+                  gate,
+                  artifacts,
+                  signal,
+                  execution,
+                ).catch((error: unknown) => {
+                  // Без изменений непрошедший gate значит одно: работа не
+                  // сделана, — это пустой результат, а не дефект кода.
+                  if (sha !== base || !(error instanceof TaskFailure)) throw error;
+                  throw new TaskFailure(
+                    'empty-result',
+                    'Изменений нет, а проверки задачи на базе не проходят: ' + error.message,
+                  );
+                });
               this.requirements(attempt, work, repoPath, cwd, sha, 'candidate');
               rearm();
               this.engine.phase(attempt.id, attempt.token, 'reviewing');
@@ -1737,6 +1793,58 @@ export class Runner {
    * команды — засчитывается всем резервом, записанным до запуска, а его
    * пережившие процессы останавливаются (R3-F01).
    */
+  /**
+   * Решение по подтверждению «приёмка уже выполнена» (`alreadySatisfiedVerdict`).
+   * Основание по зависимости controller ищет сам: зависимость поручения,
+   * чей принятый результат входит в проверяемый SHA, а её собственный
+   * кандидат (база → кандидат) изменил файлы области записи поручения.
+   */
+  private async alreadySatisfied(
+    work: WorkState,
+    repoPath: string,
+    sha: string,
+    gates: GatePolicy[],
+    claim: AlreadySatisfied | undefined,
+  ) {
+    const { contractGates, dependencies } = this.engine.read((v) => ({
+      contractGates: contractCheckGates(contractDocuments(work.order, v)),
+      dependencies: work.order.dependsOn.flatMap((id) => {
+        const w = v.work(id);
+        const a = v
+          .attempts(id)
+          .findLast((x) => x.status === 'succeeded' && x.integrationSha === w?.resultSha);
+        return w?.resultSha && a?.baseSha && a.candidateSha && a.candidateSha !== a.baseSha
+          ? [{ workId: id, resultSha: w.resultSha, base: a.baseSha, candidate: a.candidateSha }]
+          : [];
+      }),
+    }));
+    let dependency: Extract<AlreadySatisfiedBasis, { kind: 'dependency' }> | undefined;
+    for (const d of dependencies) {
+      const inBase = await git(repoPath, 'merge-base', '--is-ancestor', d.resultSha, sha)
+        .then(() => true)
+        .catch(() => false);
+      if (!inBase) continue;
+      const paths = (
+        await git(repoPath, 'diff', '--no-renames', '--name-only', '-z', d.base, d.candidate)
+      )
+        .split('\0')
+        .filter((p) => p && withinWriteScope(p, work.order.writeScope))
+        .slice(0, 50);
+      if (paths.length) {
+        dependency = { kind: 'dependency', workId: d.workId, sha: d.candidate, paths };
+        break;
+      }
+    }
+    return alreadySatisfiedVerdict({
+      scope: gates,
+      contractGates,
+      writeScope: work.order.writeScope,
+      dependsOn: work.order.dependsOn,
+      claim,
+      ...(dependency ? { dependency } : {}),
+    });
+  }
+
   private async probeSpent(runs: string[], repositoryId: string, phase: string) {
     let spent = 0;
     for (const runId of runs) {
@@ -1805,9 +1913,14 @@ export class Runner {
     const round = history.round + 1;
     // Запрос одинаков для всех вызовов логического ревью: меняется только
     // диагностика ошибки протокола.
+    // Попытка без изменений: кандидат — сама база. Принять её можно только
+    // по явному подтверждению reviewer, что приёмка уже выполнена.
+    const unchanged =
+      phase === 'candidate' ? base === sha : attempt.candidateSha === attempt.baseSha;
     const notes = [
       ...this.notes(attempt, true, sha),
       ...(await this.hostNotes(work, attempt, true)),
+      ...(unchanged ? [ALREADY_SATISFIED_REVIEW_NOTE] : []),
     ];
     let issues: ProtocolIssue[] = lastIssues;
     const stage = phase + '-review';
@@ -1893,6 +2006,7 @@ export class Runner {
           ...(probe ? { probe: probe.server } : {}),
           ...(legacy ? {} : { findings: requestFindings(history) }),
           timeoutMs: remaining,
+          ...(unchanged ? { outputSchema: alreadySatisfiedReviewOutputSchema } : {}),
         },
         signal,
       );
@@ -2058,7 +2172,15 @@ export class Runner {
       });
       if (reproductions.length)
         this.engine.recordReproductions(attempt.id, attempt.token, sha, reproductions);
-      const passed = verdict.result.approved;
+      // Без изменений одобрение засчитывается только с подтверждением
+      // `alreadySatisfied`, которое опирается на прошедшее evidence этой фазы.
+      const claim = verdict.result.alreadySatisfied ?? undefined;
+      const decision =
+        unchanged && verdict.result.approved
+          ? await this.alreadySatisfied(work, this.repoPath(repo), sha, gates, claim)
+          : undefined;
+      const unconfirmed = decision && !decision.ok ? decision.problem : undefined;
+      const passed = verdict.result.approved && !unconfirmed;
       // Вердикт, новые находки с выданными ID и переходы прежних — одна запись
       // под fencing: попытка, утратившая владение, их не сохраняет.
       this.engine.evidence(attempt.id, attempt.token, {
@@ -2072,7 +2194,19 @@ export class Runner {
         exitCode: passed ? 0 : 1,
         log,
         digest,
-        summary: redact(`[${inspection.mode}] ${record.summary}`).slice(0, 4000),
+        summary: redact(
+          `[${inspection.mode}] ${record.summary}` +
+            (unconfirmed ? ` (не подтверждено, что приёмка уже выполнена: ${unconfirmed})` : ''),
+        ).slice(0, 4000),
+        ...(unchanged && passed && claim && decision?.ok
+          ? {
+              alreadySatisfied: {
+                gates: claim.gates,
+                evidence: redact(claim.evidence).slice(0, 4000),
+                basis: decision.basis,
+              },
+            }
+          : {}),
         findings: (record.findings ?? []).map((f, i) => ({
           severity: f.severity,
           message: f.message,
@@ -2097,6 +2231,15 @@ export class Runner {
           .map((f) => f.reproduction?.property)
           .filter((p): p is string => !!p);
         const declared = new Set(work.order.properties ?? []);
+        // Без изменений отказ ревью — пустой результат: работа не сделана.
+        if (unchanged)
+          throw new TaskFailure(
+            decision && !decision.ok ? decision.kind : 'empty-result',
+            unconfirmed
+              ? 'Изменений нет, и ревью не подтвердило, что приёмка уже выполнена: ' + unconfirmed
+              : 'Изменений нет, и ревью не подтвердило, что приёмка уже выполнена: ' +
+                  redact(record.summary),
+          );
         // Класс входов — из замаскированной записи: он попадает в состояние.
         const classes = inputClassesOf(record.findings ?? []);
         const pairs = classifiedOf(record.findings ?? []);

@@ -45,6 +45,7 @@ const neutral: FailureKind[] = [
   'empty-result',
   // Незавершённая работа свойство не проверяла.
   'unfinished',
+  'needs-lead',
   'scope-violation',
 ];
 const substantive = (a: AttemptState) => a.failureKind === 'gate' || a.failureKind === 'review';
