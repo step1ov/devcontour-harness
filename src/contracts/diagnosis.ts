@@ -25,6 +25,7 @@ export const diagnosisCauses = [
   'timeout',
   'stale-base',
   'empty-result',
+  'unfinished',
   'scope-violation',
   'gate',
   'review',

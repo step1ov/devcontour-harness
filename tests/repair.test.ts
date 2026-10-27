@@ -2,6 +2,7 @@
  * Тесты портят сырой JSON политики до разбора схемой.
  */
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import {
   HarnessError,
@@ -557,6 +558,48 @@ test('Пробел приёмки в run: второй отказ ревью п�
   assert.equal(data.workflow?.status, 'failed');
   assert.equal(data.workflow?.repairs, 1);
   assert.match(data.workflow.error!, /пробел приёмки.*REQ-greeting/);
+  h.close();
+});
+
+test('Незавершённая работа: completed:false — класс unfinished, run сам повторяет с черновика; попытка засчитана, повтор — продолжение', async () => {
+  const half = "exports.greet = (name) => 'Hel'; // половина работы\n";
+  const ctx = hsetup({
+    scenario: {
+      writer: [
+        {
+          files: { 'src/greet.js': half },
+          result: { completed: false, summary: 'Успел половину', discoveries: [] },
+        },
+        { ...implement(), observe: ['src/greet.js'] },
+      ],
+      reviewer: approve(),
+    },
+    policy: (p: any) => (p.maxAttempts = 3),
+  });
+  const h = ctx.open();
+  const data = await h.run({ graph: ctx.graph, author: 'claude' });
+  const [first, second] = h.engine.read((v) => v.attempts('add-greeting'));
+  assert.equal(first!.failureKind, 'unfinished', first!.error);
+  assert.match(first!.error!, /незавершённой работе: Успел половину/);
+  assert.deepEqual(first!.partial?.files, ['src/greet.js'], 'черновик сохранён');
+  assert.equal(repairPolicy.unfinished.action, 'retry');
+  assert.equal(data.workflow?.status, 'completed', data.workflow?.error);
+  assert.equal(data.workflow?.repairs, 1, 'один автоматический повтор');
+  assert.equal(second!.status, 'succeeded', second!.error);
+  assert.deepEqual(second!.continuedFrom, {
+    runId: first!.id,
+    kind: 'unfinished',
+    reason: 'unfinished',
+    applied: true,
+    files: ['src/greet.js'],
+  });
+  const observed = JSON.parse(readFileSync(`${ctx.scenarioPath}.writer.1.observed`, 'utf8')) as {
+    'src/greet.js': string | null;
+  };
+  assert.equal(observed['src/greet.js'], half, 'повтор начался с черновика');
+  const work = h.engine.read((v) => v.work('add-greeting')!);
+  assert.equal(work.status, 'done');
+  assert.equal(work.attempt, 2, 'незавершённая попытка — работа, она засчитана');
   h.close();
 });
 

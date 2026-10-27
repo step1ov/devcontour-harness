@@ -1100,8 +1100,14 @@ export class Runner {
                       throw new Error(
                         'Ответ исполнителя вне схемы: ' + result.error.issues[0]?.message,
                       );
+                    // Не доделано — свой класс: повтор продолжит с черновика,
+                    // а не остановится как неизвестный отказ.
                     if (!result.data.completed)
-                      throw new Error('Исполнитель сообщил о незавершённой работе');
+                      throw new TaskFailure(
+                        'unfinished',
+                        'Исполнитель сообщил о незавершённой работе: ' +
+                          result.data.summary.slice(0, 500),
+                      );
                     this.engine.heartbeat(attempt.id, attempt.token);
                     signal.throwIfAborted();
                     if ((await git(cwd, 'rev-parse', 'HEAD')) !== base)

@@ -52,6 +52,8 @@ export const failureKinds = [
   'timeout',
   'stale-base',
   'empty-result',
+  /** Исполнитель сообщил `completed: false`: работа не доделана, черновик сохранён. */
+  'unfinished',
   'scope-violation',
   'gate',
   'review',
