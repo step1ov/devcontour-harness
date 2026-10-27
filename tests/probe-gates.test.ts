@@ -619,3 +619,27 @@ test('HP08/engine: успешный probe не заменяет gates и не д
     })),
   });
 });
+
+test('HP08/property-report: путь отчёта свойств под probe — в scratch controller, а не прежний путь в дереве только для чтения', async () => {
+  requireSandbox();
+  const c = candidate();
+  try {
+    // Проверка пишет отчёт свойств по пути controller, а без него — по
+    // прежнему пути в дереве, как и JUnit; в дереве probe это EPERM.
+    const script = `const fs = require('fs');
+const target = process.env.DEVCONTOUR_PROPERTY_REPORT ?? '.reports/property.json';
+fs.writeFileSync(target, JSON.stringify({ version: 1, properties: [{ testId: 'p', status: 'passed', cases: 3 }] }));
+fs.writeFileSync(process.env.HARNESS_REPORT_PATH, '<testsuite><testcase name="p"/></testsuite>');`;
+    const probes = new ReviewProbes(probeSpecFor(c, { gates: [gate('props', node(script))] }));
+    const r = await probes.run({ gate: 'props' });
+    assert.equal(r.status, 'passed', `${r.note}\n${r.stderr}`);
+    assert.ok(r.gate?.controllerEnv.includes('DEVCONTOUR_PROPERTY_REPORT'));
+    assert.ok(r.gate?.controllerEnv.includes('HARNESS_PROPERTY_REPORT'));
+    const saved = JSON.parse(readFileSync(r.gate!.propertyReport!, 'utf8'));
+    assert.equal(saved.properties[0].cases, 3);
+    assert.equal(r.gate?.scratchRemoved, true);
+    assert.equal(existsSync(join(c.dir, '.reports', 'property.json')), false);
+  } finally {
+    c.cleanup();
+  }
+});
