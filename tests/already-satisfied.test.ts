@@ -90,6 +90,31 @@ test('работу сделала зависимость: задача done бе
       { kind: 'dependency', workId: 'dep', sha: depCandidate, paths: ['src/greet.js'] },
     ]),
   );
+
+  // Основание по зависимости — только когда её принятый результат входит в
+  // проверяемый SHA. Тот же дерево, но коммит мимо результата зависимости:
+  // основания нет, решение — за ведущим.
+  const decide = (checked: string) =>
+    (
+      ctx.runner as unknown as {
+        alreadySatisfied(...args: unknown[]): Promise<{ ok: boolean; kind?: string }>;
+      }
+    ).alreadySatisfied(work, ctx.repo.dir, checked, ctx.policy.repositories[0]!.gates, {
+      gates: ['unit'],
+      evidence: 'unit passes on the base: greet returns Hello, Ada!',
+    });
+  assert.equal((await decide(dep.resultSha!)).ok, true, 'результат зависимости в SHA — основание');
+  const sibling = ctx.repo.git(
+    'commit-tree',
+    `${dep.resultSha}^{tree}`,
+    '-p',
+    ctx.engine.read((v) => v.attempts('dep')[0]!.baseSha!),
+    '-m',
+    'same tree, not on top of the dependency result',
+  );
+  const outside = await decide(sibling);
+  assert.equal(outside.ok, false, 'результат зависимости не в SHA — основания нет');
+  assert.equal(outside.kind, 'needs-lead');
 });
 
 test('пустой результат без подтверждения, с негодным подтверждением, с красными gates на базе или без подтверждения integration — empty-result', async () => {
