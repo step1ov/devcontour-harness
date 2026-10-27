@@ -98,7 +98,21 @@ export function reportedModel(stdout: string): string | null {
 }
 
 /** Строка потока длиннее — не разбирается и делает телеметрию неполной. */
-const LINE_LIMIT = 64_000_000;
+export const LINE_LIMIT = 8_000_000;
+
+/**
+ * Только числовые поля верхнего уровня `usage`: вложенная структура любой
+ * глубины не хранится и не сериализуется (глубокая вложенность роняла бы
+ * `JSON.stringify` в обработчике вывода процесса).
+ */
+const flatUsage = (usage: unknown) =>
+  usage && typeof usage === 'object' && !Array.isArray(usage)
+    ? Object.fromEntries(
+        Object.entries(usage).filter(([, v]) => typeof v === 'number' || v === null),
+      )
+    : usage === undefined
+      ? undefined
+      : {};
 
 /**
  * Телеметрия, собранная по ходу потока runtime, а не из хвоста вывода. Хвост
@@ -132,9 +146,13 @@ export function usageStream(runtime: 'codex' | 'claude') {
     const e = event as Record<string, unknown>;
     model ??= eventModel(e);
     if (runtime === 'claude' && e.type === 'result')
-      result = JSON.stringify({ type: e.type, usage: e.usage, total_cost_usd: e.total_cost_usd });
+      result = JSON.stringify({
+        type: e.type,
+        usage: flatUsage(e.usage),
+        total_cost_usd: typeof e.total_cost_usd === 'number' ? e.total_cost_usd : null,
+      });
     if (runtime === 'codex' && e.type === 'turn.completed')
-      turns.push(JSON.stringify({ type: e.type, usage: e.usage }));
+      turns.push(JSON.stringify({ type: e.type, usage: flatUsage(e.usage) }));
   };
   const flush = () => {
     if (overflow) malformed = true;
@@ -142,18 +160,33 @@ export function usageStream(runtime: 'codex' | 'claude') {
     partial = '';
     overflow = false;
   };
+  const append = (piece: string) => {
+    if (overflow) return;
+    if (partial.length + piece.length > LINE_LIMIT) {
+      partial = '';
+      overflow = true;
+    } else partial += piece;
+  };
+  const consume = (text: string) => {
+    let start = 0;
+    for (let end = text.indexOf('\n'); end >= 0; end = text.indexOf('\n', start)) {
+      append(text.slice(start, end));
+      flush();
+      start = end + 1;
+    }
+    append(text.slice(start));
+  };
   return {
-    /** Очередной фрагмент stdout runtime (без маски: берутся только числа). */
+    /**
+     * Очередной фрагмент stdout runtime (без маски: берутся только числа).
+     * Вызывается из обработчика вывода процесса и не бросает: сбой разбора —
+     * неполная телеметрия, а не падение controller.
+     */
     push(text: string) {
-      let start = 0;
-      for (let end = text.indexOf('\n'); end >= 0; end = text.indexOf('\n', start)) {
-        if (!overflow) partial += text.slice(start, end);
-        flush();
-        start = end + 1;
-      }
-      if (overflow) return;
-      partial += text.slice(start);
-      if (partial.length > LINE_LIMIT) {
+      try {
+        consume(text);
+      } catch {
+        malformed = true;
         partial = '';
         overflow = true;
       }

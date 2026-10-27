@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WORKSPACE_OWNER, type RuntimeRequest } from '../src/contracts/index.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
-import { parseUsage, usageStream } from '../src/agents/usage.ts';
+import { LINE_LIMIT, parseUsage, usageStream } from '../src/agents/usage.ts';
 import { measuredInvoke } from '../src/engine/measured.ts';
 import { callRecords, priceUsage, usageTotals } from '../src/engine/usage.ts';
 import { engineOf, graphOf, ready } from './engine-fixture.ts';
@@ -254,4 +254,101 @@ test('Телеметрия потока: строки, разорванные м
   const codex = usageStream('codex');
   codex.push(turn + '\n' + turn + '\n');
   assert.equal(codex.usage(true).inputTokens, 10);
+});
+
+test('Телеметрия потока: учитывается последнее result и первая модель; слишком длинная строка — неполный учёт', () => {
+  const result = (usd: number) =>
+    JSON.stringify({
+      type: 'result',
+      total_cost_usd: usd,
+      usage: {
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_read_input_tokens: 3,
+        cache_creation_input_tokens: 4,
+      },
+    });
+  const two = usageStream('claude');
+  two.push(
+    [
+      JSON.stringify({ type: 'system', model: 'first' }),
+      result(1),
+      JSON.stringify({ type: 'system', model: 'second' }),
+      result(2),
+      '',
+    ].join('\n'),
+  );
+  assert.equal(two.usage(true).reportedUsd, 2);
+  assert.equal(two.model(), 'first');
+  const long = usageStream('claude');
+  long.push('{"type":"assistant","text":"' + 'x'.repeat(LINE_LIMIT));
+  long.push('"}\n' + result(3) + '\n');
+  assert.equal(long.usage(true).reportedUsd, 3);
+  assert.equal(long.usage(true).complete, false, 'строка длиннее предела не разобрана');
+  assert.ok(LINE_LIMIT <= 8_000_000);
+});
+
+test('Телеметрия потока: глубоко вложенный usage не роняет обработчик вывода', () => {
+  const depth = 200_000;
+  const deep = '{"a":'.repeat(depth) + '1' + '}'.repeat(depth);
+  const stream = usageStream('claude');
+  assert.doesNotThrow(() =>
+    stream.push('{"type":"result","total_cost_usd":1.5,"usage":' + deep + '}\n'),
+  );
+  assert.equal(stream.usage(true).reportedUsd, 1.5);
+  const codex = usageStream('codex');
+  assert.doesNotThrow(() => codex.push('{"type":"turn.completed","usage":' + deep + '}\n'));
+});
+
+test('Прерванный вызов, завершившийся кодом 0, — неполная телеметрия, а стоимость сохранена', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-usage-'));
+  const bin = join(dir, 'claude');
+  writeFileSync(
+    bin,
+    `#!${process.execPath}
+if (process.argv.includes('--version')) console.log('claude fixture-only');
+else {
+  process.stdin.resume();
+  process.stdin.on('end', () => {
+    process.stdout.write(JSON.stringify({ type: 'system', model: 'm' }) + '\\n');
+    setInterval(() => {}, 1000);
+  });
+  process.on('SIGTERM', () => {
+    process.stdout.write(JSON.stringify({ type: 'result', structured_output: {}, total_cost_usd: 0.4, usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }) + '\\n', () => process.exit(0));
+  });
+}
+`,
+  );
+  chmodSync(bin, 0o755);
+  const controller = new AbortController();
+  const artifactDir = join(dir, 'artifacts');
+  const pending = cliAdapter('claude', { executable: bin }).invoke(
+    {
+      callId: 'call-abort',
+      task: 'implement',
+      binding: { runtime: 'claude' },
+      cwd: dir,
+      prompt: 'task',
+      session: { kind: 'fresh' },
+      sandbox: { mode: 'none', writable: [dir], denied: [], network: { domains: [] } },
+      timeoutMs: 60_000,
+      env: { PATH: process.env.PATH ?? '' },
+      artifactDir,
+    },
+    controller.signal,
+  );
+  // Прерывание — после того, как runtime начал отвечать.
+  for (let i = 0; i < 200; i++) {
+    await new Promise((done) => setTimeout(done, 50));
+    try {
+      if (readFileSync(join(artifactDir, 'runtime.log'), 'utf8').includes('"system"')) break;
+    } catch {
+      /* журнал ещё не создан */
+    }
+  }
+  controller.abort();
+  const response = await pending;
+  assert.equal(response.status, 'cancelled');
+  assert.equal(response.usage.reportedUsd, 0.4);
+  assert.equal(response.usage.complete, false);
 });
