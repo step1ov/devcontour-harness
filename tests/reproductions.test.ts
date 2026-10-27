@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
+import { reviewOutputSchema } from '../src/agents/schemas.ts';
 import { Engine } from '../src/engine/engine.ts';
 import { Runner } from '../src/engine/runner.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
@@ -199,4 +200,73 @@ test('S2-R2-05: подтверждение запуском не отменяе�
     engine.recordReproductions(a.id, a.token, 'd'.repeat(40), [item('y', false)]),
   );
   store.close();
+});
+
+test('Класс входов: reviewer обязан его назвать, он записан на попытке и в реестре, следующий исполнитель чинит класс, а не экземпляр', async () => {
+  const secret = 'class-secret-9a2f';
+  process.env.HARNESS_REPRO_SECRET = secret;
+  try {
+    const classed = (inputClass: string | null, severity = 'blocking') => ({
+      ...finding('Равные оптимумы теряются', {
+        property: 'REQ-optimal',
+        input: '{"items":[[1,1],[1,1]]}',
+        inputClass,
+        expected: '2',
+        actual: '1',
+        command: null,
+        executed: false,
+        run: null,
+      }),
+      severity,
+    });
+    const step = {
+      result: {
+        ...approve().result,
+        approved: false,
+        summary: 'Теряет равные оптимумы',
+        findings: [
+          classed(`  равные оптимумы при числе предметов больше шести ${secret}  `),
+          // Класс замечания не блокирует и в класс отказа не входит.
+          { ...classed('класс замечания', 'note'), message: 'Замечание о стиле' },
+        ],
+      },
+      recordPrompt: true,
+    };
+    const ctx = setup({
+      scenario: {
+        writer: { ...implement(), recordPrompt: true },
+        reviewer: [step, stillOpen(step, 2)],
+      },
+      policy: (p: any) => {
+        p.environment.secrets = { TOKEN: 'HARNESS_REPRO_SECRET' };
+        p.maxAttempts = 3;
+      },
+    });
+    await runAll(ctx);
+    const [first] = ctx.engine.read((v) => v.attempts('add-greeting'));
+    assert.equal(first!.failureKind, 'review');
+    assert.deepEqual(first!.unboundProperties, ['REQ-optimal']);
+    assert.deepEqual(first!.inputClasses, [
+      'равные оптимумы при числе предметов больше шести [REDACTED]',
+    ]);
+    const [record] = ctx.engine.reproductions('add-greeting');
+    assert.equal(record!.inputClass, 'равные оптимумы при числе предметов больше шести [REDACTED]');
+    // Reviewer получает обязанность назвать класс и в тексте, и в схеме ответа.
+    const reviewPrompt = readFileSync(`${ctx.scenarioPath}.reviewer.0.prompt`, 'utf8');
+    assert.match(reviewPrompt, /inputClass \(the class of inputs/);
+    const wire = (
+      reviewOutputSchema.properties.findings.items.properties.reproduction.anyOf[1] as any
+    ).required as string[];
+    assert.ok(wire.includes('inputClass'), 'структурный ответ требует поле класса');
+    ctx.engine.retry('add-greeting');
+    ctx.engine.resume();
+    await ctx.runner.drain();
+    const next = readFileSync(`${ctx.scenarioPath}.writer.1.prompt`, 'utf8');
+    assert.match(next, /fix the whole inputClass/);
+    assert.ok(next.includes('равные оптимумы при числе предметов больше шести'));
+    assert.ok(!next.includes(secret));
+    ctx.store.close();
+  } finally {
+    delete process.env.HARNESS_REPRO_SECRET;
+  }
 });

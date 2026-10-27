@@ -1572,8 +1572,11 @@ export class Engine {
       kind?: FailureKind;
       blocked?: boolean;
       heartbeatCause?: string;
-      /** Свойства отказа: `bound` — объявленные поручением, `unbound` — прочие названные. */
-      properties?: { bound: string[]; unbound: string[] };
+      /**
+       * Свойства отказа: `bound` — объявленные поручением, `unbound` — прочие
+       * названные; `classes` — классы входов, названные ревьюером.
+       */
+      properties?: { bound: string[]; unbound: string[]; classes?: string[] };
     } = {},
   ) {
     const kind = options.kind ?? 'unknown';
@@ -1606,6 +1609,9 @@ export class Engine {
         finishedAt: iso(this.now()),
         ...(bound.length ? { properties: bound } : {}),
         ...(unbound.length ? { unboundProperties: unbound } : {}),
+        ...(options.properties?.classes?.length
+          ? { inputClasses: options.properties.classes.slice(0, 20) }
+          : {}),
       };
       tx.putAttempt(failed);
       const next = structuredClone(w);

@@ -36,6 +36,13 @@ export type ImplementationResult = z.infer<typeof implementationResultSchema>;
 export const reproductionSchema = z.object({
   property: z.string().max(200).nullable(),
   input: z.string().min(1).max(8000),
+  /**
+   * Класс входов, к которому относится пример: генератор или семейство, а не
+   * экземпляр. Следующая попытка чинит класс; два отказа подряд по одному
+   * классу — пробел приёмки (`repairDecision`). Длина не ограничивается
+   * схемой: длинный ответ обрезается при записи, а не отбрасывает пример.
+   */
+  inputClass: z.string().nullable().optional(),
   expected: z.string().max(2000).nullable(),
   actual: z.string().max(2000).nullable(),
   command: z.array(z.string()).max(64).nullable(),

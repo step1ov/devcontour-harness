@@ -418,6 +418,8 @@ export const attemptStateSchema = z.strictObject({
   dependencyFreshness: z.array(freshnessSchema).optional(),
   properties: z.array(z.string()).optional(),
   unboundProperties: z.array(z.string()).optional(),
+  /** Классы входов, названные отклонившим ревью (`reproduction.inputClass`). */
+  inputClasses: z.array(z.string().max(500)).max(20).optional(),
   episodeBasis: digestSchema.optional(),
   implementationBasis: digestSchema.optional(),
   reusedFrom: z
@@ -958,6 +960,8 @@ export const reproductionRecordSchema = z.strictObject({
   property: z.string().max(200).nullable(),
   inputHash: digestSchema,
   input: z.string().min(1).max(8000),
+  /** Класс входов, названный reviewer; у записей прежних версий нет. */
+  inputClass: z.string().max(500).nullable().optional(),
   expected: z.string().max(2000).nullable(),
   actual: z.string().max(2000).nullable(),
   command: z.array(z.string()).max(64).nullable(),

@@ -2004,6 +2004,7 @@ export class Runner {
           {
             property: r.property,
             input: r.input,
+            ...(r.inputClass?.trim() ? { inputClass: r.inputClass.trim().slice(0, 500) } : {}),
             expected: r.expected,
             actual: r.actual,
             command: r.command,
@@ -2055,13 +2056,16 @@ export class Runner {
           .map((f) => f.reproduction?.property)
           .filter((p): p is string => !!p);
         const declared = new Set(work.order.properties ?? []);
+        // Класс входов — из замаскированной записи: он попадает в состояние.
+        const classes = inputClassesOf(record.findings ?? []);
         throw new TaskFailure(
           'review',
           'Независимое ревью отклонило результат: ' + redact(record.summary),
-          named.length
+          named.length || classes.length
             ? {
                 bound: [...new Set(named.filter((p) => declared.has(p)))],
                 unbound: [...new Set(named.filter((p) => !declared.has(p)))],
+                ...(classes.length ? { classes } : {}),
               }
             : undefined,
         );
@@ -2121,19 +2125,22 @@ export class Runner {
       // ломалось. Диагностика: gate они не расширяют.
       if (reproductions.length)
         out.push(
-          'Reproductions recorded by earlier reviews of this work order (diagnostic, not a gate; "observed" means the controller saw the reviewer run the command). Check the change against each input: ' +
+          'Reproductions recorded by earlier reviews of this work order (diagnostic, not a gate; "observed" means the controller saw the reviewer run the command). Check the change against each input, and fix the whole inputClass it names rather than the single instance: ' +
             JSON.stringify(
               reproductions
                 .slice(-20)
-                .map(({ property, input, expected, actual, command, observed, runs }) => ({
-                  property,
-                  input,
-                  expected,
-                  actual,
-                  command,
-                  observed,
-                  seen: runs.length,
-                })),
+                .map(
+                  ({ property, input, inputClass, expected, actual, command, observed, runs }) => ({
+                    property,
+                    input,
+                    ...(inputClass ? { inputClass } : {}),
+                    expected,
+                    actual,
+                    command,
+                    observed,
+                    seen: runs.length,
+                  }),
+                ),
             ),
         );
       // Согласованные контракты поручения — их текстом, по закреплённому digest.
@@ -2149,7 +2156,7 @@ export class Runner {
         );
       if (review)
         out.push(
-          'When a finding fails on a concrete input, fill reproduction: property (the testId or acceptance criterion it violates), input (the exact input as JSON text), expected and actual, and command (argv) that shows it. If you ran it through the controller check tool, set run to the runId it returned and executed=true; the controller confirms the run from its own log and records the command that actually ran. Otherwise run=null and it is a hypothesis. Use null for findings without such an input.',
+          'When a finding fails on a concrete input, fill reproduction: property (the testId or acceptance criterion it violates; required for a blocking finding), input (the exact input as JSON text), inputClass (the class of inputs this one belongs to: the generator or family that produces such failures, e.g. "ties between equal optima with more than 6 items", not the instance itself; required for a blocking finding), expected and actual, and command (argv) that shows it. If you ran it through the controller check tool, set run to the runId it returned and executed=true; the controller confirms the run from its own log and records the command that actually ran. Otherwise run=null and it is a hypothesis. Use null for findings without such an input.',
         );
       // Reviewer видит, что controller сам записал о проверяемом SHA: gates и
       // их итоги, а не пересказ исполнителя.
@@ -2484,4 +2491,15 @@ function startedCalls(
       0,
     ),
   };
+}
+
+/** Классы входов блокирующих находок: без пустых и повторов, в пределах записи попытки. */
+function inputClassesOf(
+  findings: { severity: string; reproduction?: { inputClass?: string | null } | null }[],
+) {
+  const classes = findings.flatMap((f) => {
+    const c = f.severity === 'blocking' ? f.reproduction?.inputClass?.trim() : undefined;
+    return c ? [c.slice(0, 500)] : [];
+  });
+  return [...new Set(classes)].slice(0, 20);
 }

@@ -24,9 +24,10 @@ export class TaskFailure extends Error {
     /**
      * Свойства, с которыми связан отказ: `bound` — объявленные задачей
      * property ID, `unbound` — названные проверкой или ревьюером, но не
-     * объявленные (только для разбора, счётчик эпизода они не выбирают).
+     * объявленные (только для разбора, счётчик эпизода они не выбирают);
+     * `classes` — классы входов, названные ревьюером.
      */
-    readonly properties?: { bound: string[]; unbound: string[] },
+    readonly properties?: { bound: string[]; unbound: string[]; classes?: string[] },
   ) {
     super(message);
     this.name = 'TaskFailure';

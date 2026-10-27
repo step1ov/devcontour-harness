@@ -1827,6 +1827,14 @@
               "type": "string"
             }
           },
+          "inputClasses": {
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 500
+            }
+          },
           "episodeBasis": {
             "type": "string",
             "pattern": "^[a-f0-9]{64}$"
