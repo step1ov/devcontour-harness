@@ -52,6 +52,7 @@ export {
   referenceCodeNote,
   referenceNote,
   referenceSetFiles,
+  setFileReference,
   suiteBasis,
 } from './verification/checks.ts';
 export {

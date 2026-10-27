@@ -81,12 +81,77 @@ export function referenceSetFiles(contracts: ContractDocument[], repositoryId?: 
   ];
 }
 
+/** Файлы без кода: упоминание набора в них ничего не читает. */
+const PROSE = /\.(md|markdown|mdx|txt|rst|adoc)$/i;
+
+/** Содержимое строковых литералов `'…'`, `"…"`, `` `…` `` вне комментариев `//` и `/* *\/`. */
+function stringLiterals(text: string) {
+  const out: string[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i]!;
+    if (c === '/' && text[i + 1] === '/') {
+      const end = text.indexOf('\n', i);
+      i = end < 0 ? text.length : end + 1;
+    } else if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      i = end < 0 ? text.length : end + 2;
+    } else if (c === "'" || c === '"' || c === '`') {
+      let j = i + 1;
+      let value = '';
+      let closed = false;
+      while (j < text.length) {
+        if (text[j] === c) {
+          closed = true;
+          break;
+        }
+        if (text[j] === '\\') j++;
+        // Обычная строка не переходит строку: непарная кавычка (апостроф в
+        // регулярном выражении) — не литерал, разбор идёт со следующего знака.
+        else if (text[j] === '\n' && c !== '`') break;
+        else value += text[j];
+        j++;
+      }
+      if (closed) {
+        out.push(value);
+        i = j + 1;
+      } else i++;
+    } else i++;
+  }
+  return out;
+}
+
+/** Вхождение `needle` целым токеном: по краям нет буквы, цифры, `_`, `-` и `.`. */
+function token(haystack: string, needle: string) {
+  const word = /[A-Za-z0-9_.-]/;
+  for (let at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + 1)) {
+    const before = haystack[at - 1];
+    const after = haystack[at + needle.length];
+    if ((!before || !word.test(before)) && (!after || !word.test(after))) return true;
+  }
+  return false;
+}
+
+/**
+ * Какой файл набора называет изменённый файл: имя файла набора (и, значит,
+ * его путь) целым токеном внутри строкового литерала. Комментарии и файлы без кода не
+ * считаются — упоминание набора в них ничего не читает. Имя, собранное во
+ * время исполнения, так не видно: это остаётся ревью кода.
+ */
+export function setFileReference(path: string, text: string, sets: string[]) {
+  if (PROSE.test(path) || path.startsWith('docs/')) return undefined;
+  const literals = stringLiterals(text);
+  // Полный путь кончается именем файла после `/`: имени целым токеном
+  // достаточно и для пути, и для `../имя` или `${root}/путь`.
+  return sets.find((s) => literals.some((l) => token(l, s.split('/').at(-1)!)));
+}
+
 /** Подсказка writer или reviewer кода о файлах эталонных наборов; пусто — их нет. */
 export function referenceCodeNote(files: string[], review: boolean) {
   if (!files.length) return '';
   return review
     ? `Reference answer sets pinned by the contracts (the gates compare the implementation with them): ${JSON.stringify(files)}. Implementation code that reads these files (by path, basename or a computed name), embeds or hard-codes their inputs or expected answers, or special-cases their inputs is a blocking finding: it would pass every set without solving the problem. Tests and checkers that are contract artifacts may read them.`
-    : `Reference answer sets pinned by the contracts: ${JSON.stringify(files)}. The gates compare your implementation with them. Do not read them from implementation code and do not copy their answers or special-case their inputs: the controller refuses a candidate whose changed files name a set file, and the reviewer rejects hard-coded answers.`;
+    : `Reference answer sets pinned by the contracts: ${JSON.stringify(files)}. The gates compare your implementation with them. Do not read them from implementation code and do not copy their answers or special-case their inputs: the controller refuses a candidate whose changed code names a set file in a string literal, and the reviewer rejects hard-coded answers.`;
 }
 
 /** Основание случаев корпуса: закреплённые файлы, gate и смысл обязательств. */
@@ -310,10 +375,19 @@ export function referenceNote(declaration: CheckDeclaration | undefined) {
         gates: obligationGates(declaration!, o),
         oracle: o.reference!.oracle,
         crossChecks: o.reference!.crossChecks,
+        coverage: {
+          minCases: o.coverage.minCases,
+          families: o.coverage.families.map((f) => ({
+            id: f.id,
+            kind: f.kind,
+            minCases: f.minCases,
+          })),
+        },
         sets: o.reference!.sets.map((s) => ({
           gate: s.gate,
           artifacts: s.artifacts,
           minCases: s.minCases,
+          families: s.families,
         })),
         gaps: o.reference!.gaps,
       })),

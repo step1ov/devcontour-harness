@@ -77,6 +77,7 @@ import {
   orderCheckManifest,
   referenceCodeNote,
   referenceSetFiles,
+  setFileReference,
 } from '../verification/checks.ts';
 import { CorpusStore, localRoots } from '../verification/corpus.ts';
 import { submitCase } from '../verification/confirm.ts';
@@ -700,8 +701,10 @@ export class Runner {
         'scope-violation',
         `Изменены защищённые файлы: ${forbidden.join(', ')}`,
       );
-    // Ответы эталонных наборов лежат в рабочем дереве: изменённый файл
-    // реализации, который называет файл набора, читает эталон, а не решает.
+    // Ответы эталонных наборов лежат в рабочем дереве: изменённый код,
+    // который называет файл набора строковым литералом, читает эталон, а не
+    // решает. Тесты исполнителя (не артефакты контракта) проверяются так же:
+    // через них ответы тоже можно подать реализации.
     const sets = this.engine.read((v) =>
       referenceSetFiles(contractDocuments(work.order, v), repo.id),
     );
@@ -710,7 +713,7 @@ export class Runner {
       for (const path of changed) {
         const text = await git(cwd, 'show', `${range ? range[1] : ''}:${path}`).catch(() => '');
         if (text.length > 4 * 1024 * 1024) continue;
-        const hit = sets.find((s) => text.includes(s) || text.includes(s.split('/').at(-1)!));
+        const hit = setFileReference(path, text, sets);
         if (hit) named.push(`${path} → ${hit}`);
       }
       if (named.length)

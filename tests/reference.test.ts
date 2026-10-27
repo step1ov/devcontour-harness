@@ -19,6 +19,7 @@ import {
   referenceCodeNote,
   referenceNote,
   referenceSetFiles,
+  setFileReference,
   suiteBasis,
 } from '../src/verification/checks.ts';
 import { junitSummary } from '../src/verification/gates.ts';
@@ -321,7 +322,40 @@ test('Reviewer контракта видит пределы наборов (gaps
   assert.match(note, /"matches":800,"total":800/);
   assert.match(note, /a promise that rests on a gap/);
   assert.match(note, /without "artifacts" .* is an unverified claim of the author/);
+  // Минимумы семейств — и обязательства, и долей наборов.
+  assert.match(note, /"families":\[\{"id":"boundary","kind":"boundary","minCases":20\}/);
+  assert.match(note, /"gate":"golden-b".*"families":\[\{"id":"adversarial","minCases":30\}\]/);
   assert.equal(referenceNote(knapDeclaration()), '');
+});
+
+test('Файл набора — только строковым литералом целым токеном: комментарии, тексты и похожие имена не отклоняются', () => {
+  const sets = ['golden-a.json', 'data/a.json', 'fixtures/cases.json'];
+  const ok: [string, string][] = [
+    ['src/knap.mjs', '// Checked against golden-a.json\nexport const x = 1;\n'],
+    ['src/knap.mjs', "// compare with 'golden-a.json' later\nexport const x = 1;\n"],
+    ['src/knap.mjs', '/* see "golden-a.json" and `fixtures/cases.json` */\nexport const x = 1;\n'],
+    ['src/load.mjs', 'const f = \'data.json\';\nconst g = "testcases.json";\n'],
+    ['README.md', 'Сверено с `golden-a.json`.\n'],
+    ['docs/notes.txt', "'golden-a.json'\n"],
+    ['src/knap.mjs', "const name = 'golden-a.jsonl';\nconst other = `xgolden-a.json`;\n"],
+    ['src/re.mjs', "const re = /it's/; // golden-a.json\nexport const y = 2;\n"],
+  ];
+  for (const [path, text] of ok)
+    assert.equal(setFileReference(path, text, sets), undefined, `${path}: ${text}`);
+  const refused: [string, string, string][] = [
+    ['src/knap.mjs', "readFileSync(new URL('../golden-a.json', import.meta.url))", 'golden-a.json'],
+    ['src/knap.mjs', 'const f = "golden-a.json";', 'golden-a.json'],
+    ['src/knap.mjs', 'load(`${root}/data/a.json`)', 'data/a.json'],
+    ['src/knap.mjs', "read('../cases.json')", 'fixtures/cases.json'],
+    // Тест исполнителя, не артефакт контракта, мог бы подать ответы реализации.
+    [
+      'test/own.test.mjs',
+      "import cases from './fixtures/cases.json' with { type: 'json' };",
+      'fixtures/cases.json',
+    ],
+  ];
+  for (const [path, text, set] of refused)
+    assert.equal(setFileReference(path, text, sets), set, `${path}: ${text}`);
 });
 
 test('Файлы эталонных наборов называются writer и reviewer кода', () => {
