@@ -60,6 +60,11 @@ export const failureKinds = [
   'merge',
   'cancelled',
   'budget',
+  /**
+   * Исполнитель не изменил ни файла, а основания считать работу уже
+   * сделанной механически нет: решение — за ведущим, не повтор.
+   */
+  'needs-lead',
   'unknown',
 ] as const;
 export const failureKindSchema = z.enum(failureKinds);
@@ -298,6 +303,22 @@ export const evidenceRecordSchema = z.strictObject({
     .strictObject({
       gates: z.array(z.string().min(1).max(200)).min(1).max(20),
       evidence: z.string().min(1).max(4000),
+      /** Механическое основание, найденное controller (`alreadySatisfiedVerdict`). */
+      basis: z
+        .discriminatedUnion('kind', [
+          z.strictObject({
+            kind: z.literal('contract'),
+            gates: z.array(z.string().min(1).max(200)).min(1).max(30),
+          }),
+          z.strictObject({
+            kind: z.literal('dependency'),
+            workId: idSchema,
+            /** Кандидат зависимости, изменивший область записи. */
+            sha: gitShaSchema,
+            paths: z.array(z.string().min(1).max(1000)).min(1).max(50),
+          }),
+        ])
+        .optional(),
     })
     .optional(),
 });

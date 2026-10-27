@@ -53,6 +53,7 @@ import { callDurationMs, callOwner, callRecords, ownerGone } from './usage.ts';
 import { failureFingerprint, repairPolicy } from './failure.ts';
 import { reusableImplementation } from './reuse.ts';
 import { uncoveredGates, unprovenReason } from '../verification/proof.ts';
+import { alreadySatisfiedVerdict, contractCheckGates } from '../verification/already-satisfied.ts';
 import {
   contractDocuments,
   corpusBindingHolds,
@@ -1486,10 +1487,40 @@ export class Engine {
               e.consumer === undefined &&
               (!a.checks || e.checks === a.checks.effective),
           );
-          if (!decisive?.alreadySatisfied)
+          const confirmed = decisive?.alreadySatisfied;
+          // Правило повторяется целиком по записанному: область задачи,
+          // договор поручения и основание по зависимости, сверенное с её
+          // принятой попыткой.
+          const basis = confirmed?.basis;
+          const dependency =
+            basis?.kind === 'dependency' &&
+            tx
+              .attempts(basis.workId)
+              .some(
+                (x) =>
+                  x.status === 'succeeded' &&
+                  x.candidateSha === basis.sha &&
+                  x.candidateSha !== x.baseSha &&
+                  tx.work(basis.workId)?.resultSha === x.integrationSha,
+              )
+              ? basis
+              : undefined;
+          const repo = this.repository(a.repositoryId);
+          const verdict = confirmed
+            ? alreadySatisfiedVerdict({
+                scope: repo.gates.filter((g) => (a.requiredGates ?? []).includes(g.id)),
+                contractGates: contractCheckGates(contractDocuments(w.order, tx)),
+                writeScope: w.order.writeScope,
+                dependsOn: w.order.dependsOn,
+                claim: { gates: confirmed.gates, evidence: confirmed.evidence },
+                ...(dependency ? { dependency } : {}),
+              })
+            : undefined;
+          if (!verdict?.ok)
             throw new HarnessError(
               'REVIEW_REJECTED',
-              `Изменений нет, а ревью ${phase} не подтвердило, что приёмка уже выполнена`,
+              `Изменений нет, а ревью ${phase} не подтвердило, что приёмка уже выполнена` +
+                (verdict ? ': ' + verdict.problem : ''),
             );
         }
       // Проверки потребителей — на integration, против интегрированного

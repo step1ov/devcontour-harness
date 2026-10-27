@@ -804,6 +804,7 @@
                 "merge",
                 "cancelled",
                 "budget",
+                "needs-lead",
                 "unknown"
               ]
             },
@@ -1231,6 +1232,7 @@
                   "merge",
                   "cancelled",
                   "budget",
+                  "needs-lead",
                   "unknown"
                 ]
               }

@@ -288,8 +288,7 @@ function outlookOf(
         break;
       case 'retry':
         // Повтор из эпизода: engine.retry требует свободной попытки, выдача — очереди.
-        if (!unclaimable(w))
-          step = w.status === 'failed' ? 'retry' : 'wait';
+        if (!unclaimable(w)) step = w.status === 'failed' ? 'retry' : 'wait';
         break;
       case 'retrying':
         // Повтор идёт, только пока попытка действует; готовую работу эпизод не выдаёт.

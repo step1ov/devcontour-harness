@@ -795,6 +795,7 @@
               "merge",
               "cancelled",
               "budget",
+              "needs-lead",
               "unknown"
             ]
           },
@@ -1476,6 +1477,7 @@
               "merge",
               "cancelled",
               "budget",
+              "needs-lead",
               "unknown"
             ]
           },
@@ -1925,6 +1927,7 @@
                   "merge",
                   "cancelled",
                   "budget",
+                  "needs-lead",
                   "unknown"
                 ]
               },
@@ -2967,6 +2970,68 @@
                       "type": "string",
                       "minLength": 1,
                       "maxLength": 4000
+                    },
+                    "basis": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "contract"
+                            },
+                            "gates": {
+                              "minItems": 1,
+                              "maxItems": 30,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200
+                              }
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "gates"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "dependency"
+                            },
+                            "workId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                            },
+                            "sha": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{40}([a-f0-9]{24})?$"
+                            },
+                            "paths": {
+                              "minItems": 1,
+                              "maxItems": 50,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 1000
+                              }
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "workId",
+                            "sha",
+                            "paths"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -3724,6 +3789,7 @@
               "merge",
               "cancelled",
               "budget",
+              "needs-lead",
               "unknown"
             ]
           }

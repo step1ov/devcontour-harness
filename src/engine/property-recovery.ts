@@ -43,6 +43,7 @@ const neutral: FailureKind[] = [
   // Ошибка формата ответа reviewer о свойстве ничего не говорит.
   'review-protocol',
   'empty-result',
+  'needs-lead',
   'scope-violation',
 ];
 const substantive = (a: AttemptState) => a.failureKind === 'gate' || a.failureKind === 'review';

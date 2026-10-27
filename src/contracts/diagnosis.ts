@@ -32,6 +32,7 @@ export const diagnosisCauses = [
   'merge',
   'cancelled',
   'budget',
+  'needs-lead',
   'unknown',
   'runtime-missing',
   'controller-busy',

@@ -74,9 +74,11 @@ const h2Commands = [
 /**
  * SHA-256 `JSON.stringify(cliCommands)` и JSON Schema данных
  * (`{io:'output', unrepresentable:'any'}`) всех команд на `5077625`.
+ * Данные изменены одной намеренной аддитивной правкой: класс отказа и причина
+ * остановки `needs-lead` (пустой результат без механического основания).
  */
 const H2_COMMANDS_SHA = '58efd5e554cd5b015538ef1d4e7dd8d20f24205ef24e28c5b27394642bc20e25';
-const H2_DATA_SHA = '95016c62e6e7fb134ab3dcde4aff35679951fe1b9037452bc86846230ffa5682';
+const H2_DATA_SHA = '19dc6d6a9f5e921387e6b1aaa28a7707896bb661ac86bf2b6c09f5f73f987b57';
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
   'Подготовить существующий Git npm/pnpm-репозиторий: план или create-only запись .harness/ (политика из профиля и toolchain inspection, manifest последним); чужие файлы не меняются';
