@@ -111,6 +111,56 @@ test('H1-03: explain = движок — общий бюджет группы rep
   }
 });
 
+test('Пробел приёмки: explain = движок — сосед за повтором не обещает третьей слепой попытки', async () => {
+  const ctx = hsetup({
+    scenario: { writer: [implement()], reviewer: approve() },
+    policy: (p) => {
+      p.maxAttempts = 5;
+      p.repairBudget = 5;
+    },
+    graph: farewell,
+  });
+  const h = ctx.open();
+  try {
+    const key = started(ctx, h);
+    const a = h.engine.claim('controller')!;
+    const reject = (text: string) => {
+      const b = h.engine.claim('controller')!;
+      assert.equal(b.workId, 'add-farewell');
+      h.engine.fail(b.id, b.token, `Независимое ревью отклонило результат: ${text}`, {
+        kind: 'review',
+        properties: { bound: [], unbound: ['REQ-bye'], classes: [] },
+      });
+    };
+    reject('пустое имя');
+    h.engine.retry('add-farewell');
+    reject('имя из пробелов');
+    h.engine.fail(a.id, a.token, 'timeout A', { kind: 'timeout' });
+    h.engine.release('controller');
+
+    const diags = diagnose(ctx, h);
+    assert.deepEqual(
+      diags.map((d) => [d.workId, d.retryPlanned]),
+      [
+        ['add-greeting', true],
+        ['add-farewell', false],
+      ],
+    );
+    const result = await h.run({ graph: ctx.graph, author: 'claude' });
+    assert.deepEqual(
+      result.works.map((w) => [w.id, w.status]),
+      [
+        ['add-greeting', 'done'],
+        ['add-farewell', 'failed'],
+      ],
+    );
+    assert.match(h.workflows.get(key).error ?? '', /пробел приёмки/);
+    assert.equal(ctx.calls('claude', 'writer'), 1, 'add-farewell третьей попытки не получила');
+  } finally {
+    h.close();
+  }
+});
+
 for (const mode of ['pause', 'awaiting-user'] as const) {
   test(`H1-03: explain = движок — открытый разбор свойства у соседа (${mode}) блокирует повтор`, async () => {
     const ctx = hsetup({

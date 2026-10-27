@@ -1,5 +1,6 @@
-import type { ExecutionView, FailureKind, WorkState } from '../contracts/index.ts';
+import type { AttemptState, ExecutionView, FailureKind, WorkState } from '../contracts/index.ts';
 import { repairPolicy } from './failure.ts';
+import { RECOVERY_THRESHOLD, isNeutral } from './property-recovery.ts';
 
 export type RepairDecision =
   | {
@@ -11,7 +12,60 @@ export type RepairDecision =
       blocksQueue: boolean;
       reason: string;
     }
-  | { action: 'stop'; workId?: string; kind?: FailureKind; reason: string };
+  | {
+      action: 'stop';
+      workId?: string;
+      kind?: FailureKind;
+      reason: string;
+      /** Остановка — пробел приёмки, а не исчерпанный бюджет (`acceptanceGap`). */
+      gap?: AcceptanceGap;
+    };
+
+/** Свойство или класс входов, по которому ревью отклонило подряд, и эти попытки. */
+export interface AcceptanceGap {
+  /** `property:<id>` — названное, но не объявленное свойство; `class:<текст>` — класс входов. */
+  key: string;
+  runs: string[];
+}
+
+/** Что отклонившее ревью назвало в попытке: необъявленные свойства и классы входов. */
+function namedBy(a: AttemptState) {
+  return new Set([
+    ...(a.unboundProperties ?? []).map((p) => 'property:' + p),
+    ...(a.inputClasses ?? []).map((c) => 'class:' + c.trim().toLowerCase().replace(/\s+/g, ' ')),
+  ]);
+}
+
+/**
+ * Пробел приёмки: последний отказ поручения — отказ ревью, и
+ * {@link RECOVERY_THRESHOLD} содержательных отказа ревью подряд, считая его,
+ * назвали одно и то же свойство или
+ * класс входов. Каждая попытка закрывала конкретный пример, ревью находило
+ * следующий из того же класса: зелёные gates этот класс не проверяют, и
+ * третья слепая попытка ничего не даст. Объявленные свойства сюда не входят —
+ * их ведёт эпизод разбора (`property-recovery.ts`).
+ *
+ * Счёт — как у эпизода: инфраструктурный отказ не увеличивает и не обнуляет
+ * его; прохождение, отказ gate или ревью без этого названия, смена основания
+ * поручения (постановки или контрактов) обрывают серию.
+ */
+export function acceptanceGap(view: ExecutionView, work: WorkState): AcceptanceGap | undefined {
+  const own = view.attempts(work.id).filter((a) => a.status !== 'active');
+  const last = own.at(-1);
+  if (!last || last.status !== 'failed' || last.failureKind !== 'review') return undefined;
+  for (const key of namedBy(last)) {
+    const runs: string[] = [];
+    for (let i = own.length - 1; i >= 0 && runs.length < RECOVERY_THRESHOLD; i--) {
+      const a = own[i]!;
+      if (a.episodeBasis !== last.episodeBasis) break;
+      if (isNeutral(a)) continue;
+      if (a.status !== 'failed' || a.failureKind !== 'review' || !namedBy(a).has(key)) break;
+      runs.push(a.id);
+    }
+    if (runs.length >= RECOVERY_THRESHOLD) return { key, runs: runs.reverse() };
+  }
+  return undefined;
+}
 
 /**
  * Что делать с упавшим поручением группы.
@@ -81,6 +135,18 @@ export function repairDecision(
       workId: work.id,
       kind,
       reason: `${work.id}: исчерпан бюджет попыток поручения. Устраните причину и повторите со сбросом, указав его.${detail}`,
+    };
+
+  // Тексты отказов ревью разные, и предел одинаковых отпечатков их не
+  // ловит; одно и то же нарушенное свойство или класс входов — ловит.
+  const gap = acceptanceGap(view, work);
+  if (gap)
+    return {
+      action: 'stop',
+      workId: work.id,
+      kind,
+      gap,
+      reason: `${work.id}: пробел приёмки — ревью ${gap.runs.length} раза подряд отклонило по одному и тому же ${gap.key.startsWith('property:') ? 'свойству' : 'классу входов'} «${gap.key.replace(/^(property|class):/, '').slice(0, 200)}» при зелёных проверках (попытки ${gap.runs.join(', ')}). Третья слепая попытка не выдаётся: приёмка этот класс не проверяет. Решение ведущего — закрепить класс проверкой (корпус, эталонный набор, свойство в договоре проверки) или разделить задачу.${detail}`,
     };
 
   const fingerprint = work.failureFingerprint;

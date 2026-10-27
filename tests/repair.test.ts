@@ -177,6 +177,108 @@ test('T15: одна и та же причина чинится до предел
   assert.equal(decide(engine, options)!.action, 'retry');
 });
 
+/** Отказ ревью с разным текстом, но названным свойством или классом входов. */
+function rejectBy(
+  engine: Engine,
+  text: string,
+  named: { unbound?: string[]; classes?: string[]; kind?: FailureKind } = {},
+) {
+  const a = engine.claim('c1')!;
+  engine.fail(a.id, a.token, `Независимое ревью отклонило результат: ${text}`, {
+    kind: named.kind ?? 'review',
+    properties: { bound: [], unbound: named.unbound ?? [], classes: named.classes ?? [] },
+  });
+  return a;
+}
+
+test('Пробел приёмки: два отказа ревью подряд по одному свойству останавливают слепые повторы, хотя тексты разные', () => {
+  const { engine } = engineOf(policyOf((p) => ((p as any).maxAttempts = 10)));
+  ready(engine, graphOf({ a: [] }));
+  const options = { budgetLeft: 20, maxAttempts: 10 };
+  const first = rejectBy(engine, 'теряет оптимум на входе [1,2]', { unbound: ['REQ-optimal'] });
+  assert.equal(decide(engine, options)!.action, 'retry', 'первый отказ — обычный повтор');
+  engine.retry('a');
+  const second = rejectBy(engine, 'теряет оптимум на входе [3,3,4]', { unbound: ['REQ-optimal'] });
+  const stop = decide(engine, options)!;
+  assert.equal(stop.action, 'stop');
+  assert.equal(stop.kind, 'review');
+  assert.deepEqual(stop.action === 'stop' && stop.gap, {
+    key: 'property:REQ-optimal',
+    runs: [first.id, second.id],
+  });
+  assert.match(stop.reason, /пробел приёмки/);
+  assert.match(stop.reason, /свойству «REQ-optimal»/);
+  // Отпечатки разные: прежний предел одинаковых причин этого не поймал бы.
+  const prints = engine.read((v) => v.attempts('a').map((x) => x.failureFingerprint));
+  assert.notEqual(prints[0], prints[1]);
+});
+
+test('Пробел приёмки: разные свойства, отказ gate между ними и смена основания серию обрывают; окружение — нет', () => {
+  const options = { budgetLeft: 20, maxAttempts: 10 };
+  {
+    const { engine } = engineOf(policyOf((p) => ((p as any).maxAttempts = 10)));
+    ready(engine, graphOf({ a: [] }));
+    rejectBy(engine, 'x', { unbound: ['REQ-a'] });
+    engine.retry('a');
+    rejectBy(engine, 'y', { unbound: ['REQ-b'] });
+    assert.equal(decide(engine, options)!.action, 'retry', 'другое свойство — новая гипотеза');
+    engine.retry('a');
+    breakWork(engine, 'a', 'gate', 'candidate/tests: упал');
+    engine.retry('a');
+    rejectBy(engine, 'z', { unbound: ['REQ-b'] });
+    assert.equal(decide(engine, options)!.action, 'retry', 'отказ gate между отказами ревью');
+  }
+  {
+    const { engine } = engineOf(policyOf((p) => ((p as any).maxAttempts = 10)));
+    ready(engine, graphOf({ a: [] }));
+    rejectBy(engine, 'x', { unbound: ['REQ-a'] });
+    engine.retry('a');
+    breakWork(engine, 'a', 'environment', 'connection reset by peer');
+    engine.retry('a');
+    engine.clearFailure(['environment']);
+    rejectBy(engine, 'y', { unbound: ['REQ-a'] });
+    const stop = decide(engine, options)!;
+    assert.equal(stop.action, 'stop', 'обрыв окружения серию не обнуляет');
+    assert.ok(stop.action === 'stop' && stop.gap);
+  }
+  {
+    const { engine, store } = engineOf(policyOf((p) => ((p as any).maxAttempts = 10)));
+    ready(engine, graphOf({ a: [] }));
+    rejectBy(engine, 'x', { unbound: ['REQ-a'] });
+    engine.retry('a');
+    // Согласовано новое основание поручения: прежняя серия к нему не относится.
+    store.transact('run.phase', (tx) => {
+      const [a] = tx.attempts('a');
+      tx.putAttempt({ ...a!, episodeBasis: 'f'.repeat(64) });
+    });
+    rejectBy(engine, 'y', { unbound: ['REQ-a'] });
+    assert.equal(decide(engine, options)!.action, 'retry');
+  }
+});
+
+test('Пробел приёмки: класс входов без свойства сравнивается без регистра и лишних пробелов; замечания класс не дают', () => {
+  const { engine } = engineOf(policyOf((p) => ((p as any).maxAttempts = 10)));
+  ready(engine, graphOf({ a: [] }));
+  const options = { budgetLeft: 20, maxAttempts: 10 };
+  rejectBy(engine, 'x', { classes: ['Равные оптимумы,  больше шести предметов'] });
+  engine.retry('a');
+  rejectBy(engine, 'y', { classes: ['равные оптимумы, больше шести предметов '] });
+  const stop = decide(engine, options)!;
+  assert.equal(stop.action, 'stop');
+  assert.equal(
+    stop.action === 'stop' && stop.gap?.key,
+    'class:равные оптимумы, больше шести предметов',
+  );
+  assert.match(stop.reason, /классу входов/);
+  // Без названного свойства и класса — прежнее правило одинаковых отпечатков.
+  const plain = engineOf(policyOf((p) => ((p as any).maxAttempts = 10)));
+  ready(plain.engine, graphOf({ a: [] }));
+  rejectBy(plain.engine, 'x');
+  plain.engine.retry('a');
+  rejectBy(plain.engine, 'y');
+  assert.equal(decide(plain.engine, options)!.action, 'retry');
+});
+
 test('T15/T14: отмена человеком не превращается в повтор, даже рядом с чинимым поручением', () => {
   const { engine } = engineOf();
   ready(engine, graphOf({ a: [], b: [] }));
@@ -378,6 +480,61 @@ test('T15: одна и та же причина сверх предела кла
   assert.equal(data.workflow?.status, 'failed');
   assert.equal(data.workflow?.repairs, repairPolicy.gate.repeats);
   assert.match(data.workflow.error!, /одна и та же причина/);
+  h.close();
+});
+
+test('Пробел приёмки в run: второй отказ ревью по тому же свойству останавливает задание — третьей попытки нет', async () => {
+  const rejecting = (input: string, open: number) => ({
+    result: {
+      ...approve().result,
+      approved: false,
+      summary: `Неверный ответ на входе ${input}`,
+      findings: [
+        {
+          severity: 'blocking',
+          message: `greet ломается на ${input}`,
+          path: null,
+          line: null,
+          rule: 'acceptance',
+          consequence: null,
+          evidence: null,
+          reproduction: {
+            property: 'REQ-greeting',
+            input,
+            inputClass: 'имена с пробелами по краям',
+            expected: null,
+            actual: null,
+            command: null,
+            executed: false,
+            run: null,
+          },
+        },
+      ],
+      previous: Array.from({ length: open }, (_, i) => ({
+        id: `$open:${i}`,
+        status: 'open',
+        basis: 'Дефект класса остаётся',
+      })),
+    },
+  });
+  const ctx = hsetup({
+    scenario: {
+      writer: implement(),
+      // Первый шаг reviewer — ревью плана.
+      reviewer: [approve(), rejecting('" Ada"', 0), rejecting('"Ada  "', 1), approve()],
+    },
+    policy: (p: any) => (p.maxAttempts = 6),
+  });
+  const h = ctx.open();
+  const data = await h.run({ graph: ctx.graph, author: 'claude' });
+  const attempts = h.engine.read((v) => v.attempts('add-greeting'));
+  assert.equal(attempts.length, 2, 'третья слепая попытка не выдана');
+  assert.notEqual(attempts[0]!.failureFingerprint, attempts[1]!.failureFingerprint);
+  assert.deepEqual(attempts[1]!.unboundProperties, ['REQ-greeting']);
+  assert.equal(data.works[0]!.status, 'failed');
+  assert.equal(data.workflow?.status, 'failed');
+  assert.equal(data.workflow?.repairs, 1);
+  assert.match(data.workflow.error!, /пробел приёмки.*REQ-greeting/);
   h.close();
 });
 

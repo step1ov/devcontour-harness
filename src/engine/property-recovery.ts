@@ -46,7 +46,7 @@ const neutral: FailureKind[] = [
   'scope-violation',
 ];
 const substantive = (a: AttemptState) => a.failureKind === 'gate' || a.failureKind === 'review';
-const isNeutral = (a: AttemptState) =>
+export const isNeutral = (a: AttemptState) =>
   a.blocked || a.status === 'expired' || (a.failureKind && neutral.includes(a.failureKind));
 
 /** Свойство прошло проверку в попытке: его gate зелёный, отказа по нему нет. */

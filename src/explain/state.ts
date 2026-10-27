@@ -2,7 +2,7 @@ import { HarnessError } from '../contracts/errors.ts';
 import { repairPolicy } from '../contracts/repair-policy.ts';
 import type { WorkState, WorkStatus } from '../contracts/index.ts';
 import type { Harness } from '../control/harness.ts';
-import { repairDecision } from '../engine/repair.ts';
+import { acceptanceGap, repairDecision } from '../engine/repair.ts';
 import type { EvidenceLink, StopInput, StopPhase } from '../projections/stop.ts';
 
 export interface StopInputOptions {
@@ -288,8 +288,7 @@ function outlookOf(
         break;
       case 'retry':
         // Повтор из эпизода: engine.retry требует свободной попытки, выдача — очереди.
-        if (!unclaimable(w))
-          step = w.status === 'failed' ? 'retry' : 'wait';
+        if (!unclaimable(w)) step = w.status === 'failed' ? 'retry' : 'wait';
         break;
       case 'retrying':
         // Повтор идёт, только пока попытка действует; готовую работу эпизод не выдаёт.
@@ -321,6 +320,7 @@ function outlookOf(
     const retry =
       rule.action === 'retry' &&
       identical - 1 < rule.repeats &&
+      !acceptanceGap(v, w) &&
       w.attempt < options.maxAttempts &&
       used + i < options.repairBudget;
     if (!retry) break;

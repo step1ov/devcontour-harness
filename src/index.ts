@@ -120,7 +120,12 @@ export {
  * маскирование и ограниченный разбор по свойству.
  */
 export { WorkflowQueue, GRAPH_STAGES, type WorkflowSubjects } from './control/workflow.ts';
-export { repairDecision, type RepairDecision } from './engine/repair.ts';
+export {
+  acceptanceGap,
+  repairDecision,
+  type AcceptanceGap,
+  type RepairDecision,
+} from './engine/repair.ts';
 export { technicalReview, type TechnicalReviewInput } from './control/review.ts';
 export { JointRunner, type JointRunnerOptions } from './engine/joint-runner.ts';
 export { moveBase, fencedRefMove, type BaseMoved, type RefMove } from './control/base-move.ts';
