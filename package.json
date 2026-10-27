@@ -1,6 +1,6 @@
 {
   "name": "devcontour-harness",
-  "version": "0.1.0-alpha.17",
+  "version": "0.1.0-alpha.18",
   "description": "Headless execution harness: work graph, isolated attempts, gates, independent reviews and accepted results.",
   "type": "module",
   "license": "MIT",
