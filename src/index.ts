@@ -143,6 +143,7 @@ export {
   type GatesAtInput,
   type GatesAtResult,
 } from './verification/gates-at.ts';
+export { gatePrerequisites, orderedScope, standaloneScope } from './verification/gate-scope.ts';
 export { requirementProof, uncoveredGates, unprovenReason } from './verification/proof.ts';
 export { ReviewProbes, probeLimits, observeReproductions } from './agents/review-probe.ts';
 export {

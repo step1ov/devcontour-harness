@@ -1,18 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import {
-  HarnessError,
-  type EvidenceRecord,
-  type ExecutionPolicy,
-  type GatePolicy,
-} from '../contracts/index.ts';
+import { HarnessError, type EvidenceRecord, type ExecutionPolicy } from '../contracts/index.ts';
 import { TaskFailure } from '../engine/failure.ts';
 import { git } from '../environment/process.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { removeSnapshots, snapshotDependencies, type DependencySnapshot } from './dependencies.ts';
 import { runGate } from './gates.ts';
+import { gatePrerequisites, orderedScope, standaloneScope } from './gate-scope.ts';
 
 type Repo = ExecutionPolicy['repositories'][number];
 
@@ -50,25 +46,14 @@ export interface GatesAtResult {
   /** Исполненные gates в порядке исполнения (с предпосылками). */
   gates: string[];
   evidence: EvidenceRecord[];
-  /** Первый непрошедший gate и причина; после него проверка не продолжается. */
+  /** Первый непрошедший gate и причина (то же, что `failures[0]`). */
   failure?: { gate: string; message: string };
-}
-
-/** Gates с предпосылками в порядке профиля зависимостей (как у попытки). */
-function closure(repo: Repo, ids: string[]): GatePolicy[] {
-  const byId = new Map(repo.gates.map((g) => [g.id, g]));
-  const out: GatePolicy[] = [];
-  const seen = new Set<string>();
-  const visit = (id: string) => {
-    if (seen.has(id)) return;
-    const gate = byId.get(id);
-    if (!gate) throw new HarnessError('NOT_FOUND', `Gate ${id} не объявлен в ${repo.id}`);
-    seen.add(id);
-    for (const dep of gate.dependsOn ?? []) visit(dep);
-    out.push(gate);
-  };
-  ids.forEach(visit);
-  return out;
+  /**
+   * Все непрошедшие gates. Провал не останавливает проверку: исполняются все
+   * названные gates, кроме тех, чья предпосылка не прошла (они названы здесь
+   * с этой причиной и evidence не получают).
+   */
+  failures: { gate: string; message: string }[];
 }
 
 /**
@@ -88,7 +73,12 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
   const repo = ctx.policy.repositories.find((r) => r.id === input.repositoryId);
   if (!repo) throw new HarnessError('NOT_FOUND', 'Репозиторий не объявлен: ' + input.repositoryId);
   if (!input.gates.length) throw new HarnessError('INVALID_INPUT', 'Не названы gates проверки');
-  const gates = closure(repo, input.gates);
+  for (const gid of input.gates)
+    if (!repo.gates.some((g) => g.id === gid))
+      throw new HarnessError('NOT_FOUND', `Gate ${gid} не объявлен в ${repo.id}`);
+  // Та же область и тот же порядок, что исполнила бы попытка с областью из
+  // этих gates и их предпосылок (`standaloneScope`, `orderedScope`).
+  const gates = orderedScope(repo.gates, standaloneScope(repo.gates, input.gates));
   const id = input.id ?? 'GA-' + randomUUID();
   const path = ctx.repoPath(repo);
   await git(path, 'cat-file', '-e', `${input.sha}^{commit}`).catch(() => {
@@ -101,7 +91,8 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
   const signal = input.signal ? AbortSignal.any([input.signal, timeout]) : timeout;
   const source = ctx.environment ?? process.env;
   const evidence: EvidenceRecord[] = [];
-  let failure: GatesAtResult['failure'];
+  const failures: GatesAtResult['failures'] = [];
+  const failed = new Set<string>();
   let snapshots: DependencySnapshot[] = [];
   let added = false;
   await mkdir(root, { recursive: true });
@@ -162,6 +153,15 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
           async () => {
             await runSteps(repo.prepare, cwd, join(artifacts, 'prepare'), execution, signal);
             for (const gate of gates) {
+              const blocked = gatePrerequisites(repo.gates, gate.id).filter((g) => failed.has(g));
+              if (blocked.length) {
+                failed.add(gate.id);
+                failures.push({
+                  gate: gate.id,
+                  message: 'не исполнен: не прошла предпосылка ' + blocked.join(', '),
+                });
+                continue;
+              }
               try {
                 await runGate({
                   policy: ctx.policy,
@@ -197,8 +197,8 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
                 // Провал gate записан (`record`); прочие ошибки — отказ проверки.
                 if (!(error instanceof TaskFailure) || evidence.at(-1)?.gate !== gate.id)
                   throw error;
-                failure = { gate: gate.id, message: error.message };
-                return;
+                failed.add(gate.id);
+                failures.push({ gate: gate.id, message: error.message });
               }
             }
           },
@@ -226,6 +226,7 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
     sha: input.sha,
     gates: gates.map((g) => g.id),
     evidence,
-    ...(failure ? { failure } : {}),
+    ...(failures.length ? { failure: failures[0] } : {}),
+    failures,
   };
 }

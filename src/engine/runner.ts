@@ -62,6 +62,7 @@ import {
   type ProbeSpec,
 } from '../agents/review-probe.ts';
 import { runGate } from '../verification/gates.ts';
+import { orderedScope } from '../verification/gate-scope.ts';
 import {
   alreadySatisfiedVerdict,
   contractCheckGates,
@@ -173,20 +174,8 @@ const ALREADY_SATISFIED_WRITER_NOTE =
 const ALREADY_SATISFIED_REVIEW_NOTE =
   'The writer made no changes: the candidate is the base commit itself. Approve only if the acceptance criteria are already satisfied on it (for example, by a dependency). Then set "alreadySatisfied" to the ids of the gates of this task whose passing evidence on this SHA shows it — at least one test gate and every gate of the approved check contracts — and "evidence" to what in that evidence and in the code proves each criterion. Otherwise set approved: false and alreadySatisfied: null; the attempt is then an empty result.';
 
-const ordered = (gates: GatePolicy[], ids: string[]) => {
-  const byId = new Map(gates.map((g) => [g.id, g]));
-  const out: GatePolicy[] = [];
-  const seen = new Set<string>();
-  const visit = (id: string) => {
-    // Псевдо-gate (актуальность требований) проверяется отдельно, а не командой.
-    if (seen.has(id) || !byId.has(id)) return;
-    seen.add(id);
-    for (const dep of byId.get(id)?.dependsOn ?? []) if (ids.includes(dep)) visit(dep);
-    out.push(byId.get(id)!);
-  };
-  ids.forEach(visit);
-  return out;
-};
+/** Порядок области gates — общий с проверкой на SHA вне попытки (`orderedScope`). */
+const ordered = orderedScope;
 
 const within = (path: string, prefixes: string[]) =>
   prefixes.some((p) => p === '.' || path === p || path.startsWith(p.endsWith('/') ? p : p + '/'));
