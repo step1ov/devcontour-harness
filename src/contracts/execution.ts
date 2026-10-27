@@ -428,6 +428,15 @@ export const attemptStateSchema = z.strictObject({
   interrupted: z.literal('shutdown').optional(),
   /** Классы входов, названные отклонившим ревью (`reproduction.inputClass`). */
   inputClasses: z.array(z.string().max(500)).max(20).optional(),
+  /**
+   * Пары «необъявленное свойство или критерий — класс входов» блокирующих
+   * находок отклонившего ревью: по ним `acceptanceGap` узнаёт один и тот же
+   * дефект в разных попытках.
+   */
+  classified: z
+    .array(z.strictObject({ property: z.string().max(200), inputClass: z.string().max(500) }))
+    .max(20)
+    .optional(),
   episodeBasis: digestSchema.optional(),
   implementationBasis: digestSchema.optional(),
   reusedFrom: z

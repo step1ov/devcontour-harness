@@ -2090,6 +2090,7 @@ export class Runner {
         const declared = new Set(work.order.properties ?? []);
         // Класс входов — из замаскированной записи: он попадает в состояние.
         const classes = inputClassesOf(record.findings ?? []);
+        const pairs = classifiedOf(record.findings ?? []);
         throw new TaskFailure(
           'review',
           'Независимое ревью отклонило результат: ' + redact(record.summary),
@@ -2098,6 +2099,7 @@ export class Runner {
                 bound: [...new Set(named.filter((p) => declared.has(p)))],
                 unbound: [...new Set(named.filter((p) => !declared.has(p)))],
                 ...(classes.length ? { classes } : {}),
+                ...(pairs.length ? { pairs } : {}),
               }
             : undefined,
         );
@@ -2523,6 +2525,24 @@ function startedCalls(
       0,
     ),
   };
+}
+
+/** Свойство и класс одной блокирующей находки: оба названы. */
+function classifiedOf(
+  findings: {
+    severity: string;
+    reproduction?: { property?: string | null; inputClass?: string | null } | null;
+  }[],
+) {
+  const out = new Map<string, { property: string; inputClass: string }>();
+  for (const f of findings) {
+    const property = f.reproduction?.property?.trim();
+    const inputClass = f.reproduction?.inputClass?.trim();
+    if (f.severity !== 'blocking' || !property || !inputClass) continue;
+    const pair = { property: property.slice(0, 200), inputClass: inputClass.slice(0, 500) };
+    out.set(JSON.stringify(pair), pair);
+  }
+  return [...out.values()].slice(0, 20);
 }
 
 /** Классы входов блокирующих находок: без пустых и повторов, в пределах записи попытки. */

@@ -1841,6 +1841,28 @@
               "maxLength": 500
             }
           },
+          "classified": {
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "property": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "inputClass": {
+                  "type": "string",
+                  "maxLength": 500
+                }
+              },
+              "required": [
+                "property",
+                "inputClass"
+              ],
+              "additionalProperties": false
+            }
+          },
           "episodeBasis": {
             "type": "string",
             "pattern": "^[a-f0-9]{64}$"

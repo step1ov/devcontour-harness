@@ -23,18 +23,34 @@ export type RepairDecision =
 
 /** Свойство или класс входов, по которому ревью отклонило подряд, и эти попытки. */
 export interface AcceptanceGap {
-  /** `property:<id>` — названное, но не объявленное свойство; `class:<текст>` — класс входов. */
+  /**
+   * `pair:<свойство>␀<класс>` — одно и то же необъявленное свойство с тем же
+   * классом входов; `property:<id>` — только свойство; `class:<текст>` —
+   * только класс входов.
+   */
   key: string;
   runs: string[];
 }
 
-/** Что отклонившее ревью назвало в попытке: необъявленные свойства и классы входов. */
+const normalized = (c: string) => c.trim().toLowerCase().replace(/\s+/g, ' ');
+
+/** Что отклонившее ревью назвало в попытке: пары, необъявленные свойства и классы входов. */
 function namedBy(a: AttemptState) {
   return new Set([
+    ...(a.classified ?? []).map((p) => 'pair:' + p.property + '\u0000' + normalized(p.inputClass)),
     ...(a.unboundProperties ?? []).map((p) => 'property:' + p),
-    ...(a.inputClasses ?? []).map((c) => 'class:' + c.trim().toLowerCase().replace(/\s+/g, ' ')),
+    ...(a.inputClasses ?? []).map((c) => 'class:' + normalized(c)),
   ]);
 }
+
+/**
+ * Сколько отказов подряд нужно для остановки. Одно и то же свойство с тем же
+ * классом — один и тот же дефект: двух хватает. Только свойство или только
+ * класс (общий класс вроде «граничные случаи» у двух разных дефектов) — слабее,
+ * ложная остановка дороже лишнего повтора: нужно три.
+ */
+const thresholdOf = (key: string) =>
+  key.startsWith('pair:') ? RECOVERY_THRESHOLD : RECOVERY_THRESHOLD + 1;
 
 /**
  * Пробел приёмки: последний отказ поручения — отказ ревью, и
@@ -55,16 +71,28 @@ export function acceptanceGap(view: ExecutionView, work: WorkState): AcceptanceG
   if (!last || last.status !== 'failed' || last.failureKind !== 'review') return undefined;
   for (const key of namedBy(last)) {
     const runs: string[] = [];
-    for (let i = own.length - 1; i >= 0 && runs.length < RECOVERY_THRESHOLD; i--) {
+    const threshold = thresholdOf(key);
+    for (let i = own.length - 1; i >= 0 && runs.length < threshold; i--) {
       const a = own[i]!;
       if (a.episodeBasis !== last.episodeBasis) break;
       if (isNeutral(a)) continue;
       if (a.status !== 'failed' || a.failureKind !== 'review' || !namedBy(a).has(key)) break;
       runs.push(a.id);
     }
-    if (runs.length >= RECOVERY_THRESHOLD) return { key, runs: runs.reverse() };
+    if (runs.length >= threshold) return { key, runs: runs.reverse() };
   }
   return undefined;
+}
+
+/** Предмет серии словами: свойство и класс, только свойство или только класс. */
+function gapSubject(key: string) {
+  const [kind, rest] = [key.slice(0, key.indexOf(':')), key.slice(key.indexOf(':') + 1)];
+  const clip = (s: string) => s.slice(0, 200);
+  if (kind === 'pair') {
+    const [property, inputClass] = rest.split('\u0000');
+    return `свойству «${clip(property!)}» с классом входов «${clip(inputClass!)}»`;
+  }
+  return kind === 'property' ? `свойству «${clip(rest)}»` : `классу входов «${clip(rest)}»`;
 }
 
 /**
@@ -146,7 +174,7 @@ export function repairDecision(
       workId: work.id,
       kind,
       gap,
-      reason: `${work.id}: пробел приёмки — ревью ${gap.runs.length} раза подряд отклонило по одному и тому же ${gap.key.startsWith('property:') ? 'свойству' : 'классу входов'} «${gap.key.replace(/^(property|class):/, '').slice(0, 200)}» при зелёных проверках (попытки ${gap.runs.join(', ')}). Третья слепая попытка не выдаётся: приёмка этот класс не проверяет. Решение ведущего — закрепить класс проверкой (корпус, эталонный набор, свойство в договоре проверки) или разделить задачу.${detail}`,
+      reason: `${work.id}: пробел приёмки — ревью ${gap.runs.length} раза подряд отклонило по одному и тому же ${gapSubject(gap.key)} при зелёных проверках (попытки ${gap.runs.join(', ')}). Третья слепая попытка не выдаётся: приёмка этот класс не проверяет. Решение ведущего — закрепить класс проверкой (корпус, эталонный набор, свойство в договоре проверки) или разделить задачу.${detail}`,
     };
 
   const fingerprint = work.failureFingerprint;

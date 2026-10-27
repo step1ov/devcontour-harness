@@ -1586,7 +1586,12 @@ export class Engine {
        * Свойства отказа: `bound` — объявленные поручением, `unbound` — прочие
        * названные; `classes` — классы входов, названные ревьюером.
        */
-      properties?: { bound: string[]; unbound: string[]; classes?: string[] };
+      properties?: {
+        bound: string[];
+        unbound: string[];
+        classes?: string[];
+        pairs?: { property: string; inputClass: string }[];
+      };
       /**
        * Попытку прервала штатная остановка controller: отказ окружения без
        * паузы по классу; поручение возвращается в очередь (`ready`), а не
@@ -1609,6 +1614,9 @@ export class Engine {
       // Свойство отказа — только объявленное поручением: неизвестное
       // сохраняется для разбора, но счётчик эпизода не выбирает.
       const declared = new Set(w.order.properties ?? []);
+      const pairs = (options.properties?.pairs ?? [])
+        .filter((p) => !declared.has(p.property))
+        .slice(0, 20);
       const bound = [...new Set((options.properties?.bound ?? []).filter((p) => declared.has(p)))];
       const unbound = [
         ...new Set([
@@ -1629,6 +1637,8 @@ export class Engine {
         ...(options.properties?.classes?.length
           ? { inputClasses: options.properties.classes.slice(0, 20) }
           : {}),
+        // Пары по объявленным свойствам ведёт эпизод разбора, не пробел приёмки.
+        ...(pairs.length ? { classified: pairs } : {}),
         ...(interrupted ? { interrupted: 'shutdown' as const } : {}),
       };
       tx.putAttempt(failed);

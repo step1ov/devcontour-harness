@@ -129,7 +129,12 @@ test('Пробел приёмки: explain = движок — сосед за п
       assert.equal(b.workId, 'add-farewell');
       h.engine.fail(b.id, b.token, `Независимое ревью отклонило результат: ${text}`, {
         kind: 'review',
-        properties: { bound: [], unbound: ['REQ-bye'], classes: [] },
+        properties: {
+          bound: [],
+          unbound: ['REQ-bye'],
+          classes: ['пустые имена'],
+          pairs: [{ property: 'REQ-bye', inputClass: 'пустые имена' }],
+        },
       });
     };
     reject('пустое имя');
