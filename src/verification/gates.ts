@@ -432,6 +432,12 @@ export function sandboxBlockedHosts(output: string, allowed: string[]) {
  * запущенного проверкой reviewer, — иначе probe мог бы прочитать cache там,
  * где gate исполняет тесты заново.
  */
+/**
+ * Переменная пути отчёта свойств. Ту же и только её выставляет и probe
+ * reviewer (путь — в его scratch): проверка видит одно имя в обоих запусках.
+ */
+export const propertyReportEnv = 'DEVCONTOUR_PROPERTY_REPORT';
+
 export function freshnessEnv(kind: GatePolicy['kind'], env: NodeJS.ProcessEnv) {
   return kind === 'test'
     ? { TURBO_FORCE: 'true', GOFLAGS: [env.GOFLAGS, '-count=1'].filter(Boolean).join(' ') }
@@ -526,7 +532,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   const propertyEnv: Record<string, string> = propertyPath
     ? {
         DEVCONTOUR_SEED: String(seed),
-        DEVCONTOUR_PROPERTY_REPORT: propertyPath,
+        [propertyReportEnv]: propertyPath,
         ...(expected
           ? { DEVCONTOUR_PROPERTIES: expected.properties.map((p) => p.id).join(',') }
           : {}),

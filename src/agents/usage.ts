@@ -79,14 +79,127 @@ export function runtimeVersion(executable: string, env?: NodeJS.ProcessEnv) {
   return versions.get(key)!;
 }
 
+/** Модель события runtime: событие system у claude, ключи modelUsage у codex. */
+function eventModel(event: Record<string, unknown>): string | null {
+  if (typeof event.model === 'string' && event.model && event.model !== '<synthetic>')
+    return event.model;
+  const usage = event.modelUsage as Record<string, unknown> | undefined;
+  const [name] = Object.keys(usage ?? {});
+  return name ?? null;
+}
+
 /** Модель, которую runtime выбрал на самом деле: событие system у claude, ключи modelUsage у codex. */
 export function reportedModel(stdout: string): string | null {
   for (const event of runtimeEvents(stdout).events) {
-    if (typeof event.model === 'string' && event.model && event.model !== '<synthetic>')
-      return event.model;
-    const usage = event.modelUsage as Record<string, unknown> | undefined;
-    const [name] = Object.keys(usage ?? {});
-    if (name) return name;
+    const model = eventModel(event);
+    if (model) return model;
   }
   return null;
+}
+
+/** Строка потока длиннее — не разбирается и делает телеметрию неполной. */
+export const LINE_LIMIT = 8_000_000;
+
+/**
+ * Только числовые поля верхнего уровня `usage`: вложенная структура любой
+ * глубины не хранится и не сериализуется (глубокая вложенность роняла бы
+ * `JSON.stringify` в обработчике вывода процесса).
+ */
+const flatUsage = (usage: unknown) =>
+  usage && typeof usage === 'object' && !Array.isArray(usage)
+    ? Object.fromEntries(
+        Object.entries(usage).filter(([, v]) => typeof v === 'number' || v === null),
+      )
+    : usage === undefined
+      ? undefined
+      : {};
+
+/**
+ * Телеметрия, собранная по ходу потока runtime, а не из хвоста вывода. Хвост
+ * stdout и журнал вызова ограничены, и у долгого вызова итоговое событие
+ * `result` (стоимость и счётчики claude) или ранние `turn.completed` codex
+ * оказывались за пределом: стоимость, сообщённая провайдером, терялась или
+ * учитывалась неполной. Здесь каждая строка разбирается сразу; хранятся
+ * только поля телеметрии — последнее событие `result`, события
+ * `turn.completed` и первая сообщённая модель, — а не текст вывода.
+ */
+export function usageStream(runtime: 'codex' | 'claude') {
+  let partial = '',
+    overflow = false,
+    malformed = false,
+    model: string | null = null,
+    result: string | undefined;
+  const turns: string[] = [];
+  const line = (text: string) => {
+    if (!text.trim()) return;
+    let event: unknown;
+    try {
+      event = JSON.parse(text);
+    } catch {
+      malformed = true;
+      return;
+    }
+    if (!event || typeof event !== 'object' || Array.isArray(event)) {
+      malformed = true;
+      return;
+    }
+    const e = event as Record<string, unknown>;
+    model ??= eventModel(e);
+    if (runtime === 'claude' && e.type === 'result')
+      result = JSON.stringify({
+        type: e.type,
+        usage: flatUsage(e.usage),
+        total_cost_usd: typeof e.total_cost_usd === 'number' ? e.total_cost_usd : null,
+      });
+    if (runtime === 'codex' && e.type === 'turn.completed')
+      turns.push(JSON.stringify({ type: e.type, usage: flatUsage(e.usage) }));
+  };
+  const flush = () => {
+    if (overflow) malformed = true;
+    else line(partial);
+    partial = '';
+    overflow = false;
+  };
+  const append = (piece: string) => {
+    if (overflow) return;
+    if (partial.length + piece.length > LINE_LIMIT) {
+      partial = '';
+      overflow = true;
+    } else partial += piece;
+  };
+  const consume = (text: string) => {
+    let start = 0;
+    for (let end = text.indexOf('\n'); end >= 0; end = text.indexOf('\n', start)) {
+      append(text.slice(start, end));
+      flush();
+      start = end + 1;
+    }
+    append(text.slice(start));
+  };
+  return {
+    /**
+     * Очередной фрагмент stdout runtime (без маски: берутся только числа).
+     * Вызывается из обработчика вывода процесса и не бросает: сбой разбора —
+     * неполная телеметрия, а не падение controller.
+     */
+    push(text: string) {
+      try {
+        consume(text);
+      } catch {
+        malformed = true;
+        partial = '';
+        overflow = true;
+      }
+    },
+    /** Телеметрия всего потока; `completed` — вызов завершился штатно. */
+    usage(completed: boolean): Usage {
+      flush();
+      return parseUsage(
+        runtime,
+        [...turns, ...(result ? [result] : [])].join('\n'),
+        completed && !malformed,
+      );
+    },
+    model: () => model,
+  };
 }

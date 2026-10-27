@@ -29,13 +29,19 @@ To run a declared gate, call run_check with exactly {"gate":"domain"}, {"gate":"
 3. Если путь отчёта зашит в argv (см. ниже) — не запускает, возвращает ошибку среды с рецептом.
 4. Создаёт каталог evidence `<каталог ревью>/probe-runs/<runId>/` (вне дерева, без перезаписи) и
    уникальный scratch `dc-probe-report-*` во временном каталоге системы.
-5. Выставляет `HARNESS_REPORT_PATH` и `DEVCONTOUR_REPORT_PATH` = `<scratch>/<id>.xml`, `CI=1`;
-   у `test` gate ещё `TURBO_FORCE=true` и `GOFLAGS=… -count=1`, как у gate движка.
+5. Выставляет `HARNESS_REPORT_PATH` и `DEVCONTOUR_REPORT_PATH` = `<scratch>/<id>.xml`,
+   `DEVCONTOUR_PROPERTY_REPORT` = `<scratch>/<id>.property.json` (то же имя, что у gate движка),
+   `CI=1`; у `test` gate ещё `TURBO_FORCE=true` и `GOFLAGS=… -count=1`, как у gate движка.
+   Проверка, которая пишет отчёт свойств по пути из переменной, под probe пишет его в scratch, а
+   не получает EPERM в дереве только для чтения. `DEVCONTOUR_SEED`, `DEVCONTOUR_PROPERTIES` и
+   `DEVCONTOUR_CORPUS` probe не выставляет: генеративные gate он не исполняет.
 6. Запускает команду в песочнице: запись — только в scratch и `TMPDIR`; дерево, `.git`,
    каталог controller и прежние `.reports/*.xml` закрыты на запись.
 7. Читает отчёт: symlink, жёсткая ссылка, путь вне scratch — `unsafe` (не читается); файл старше
    запуска — `stale`; не JUnit или без testcases — `corrupt`; нет файла — `missing`.
-8. Сохраняет замаскированную копию отчёта (`<id>.xml`), журнал (`<id>.log`) и `run.json`, затем
+8. Сохраняет замаскированную копию отчёта (`<id>.xml`), отчёта свойств, если он записан
+   (`<id>.property.json`, `gate.propertyReport` = `{path, scope: "probe-only"}`: движок его не
+   читает), журнал (`<id>.log`) и `run.json`, затем
    удаляет scratch. Таймаут и отмена (`notifications/cancelled`) останавливают процессы проверки,
    evidence сохраняется тоже.
 
