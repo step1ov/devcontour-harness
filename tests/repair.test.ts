@@ -177,6 +177,23 @@ test('T15: одна и та же причина чинится до предел
   assert.equal(decide(engine, options)!.action, 'retry');
 });
 
+test('Бюджет попыток: отказ окружения и провайдера не засчитывается и после кандидата; содержательный — засчитывается', () => {
+  const { engine } = engineOf(policyOf((p) => ((p as any).maxAttempts = 10)));
+  ready(engine, graphOf({ a: [] }));
+  const attempt = () => engine.read((v) => v.work('a')!.attempt);
+  for (const kind of ['environment', 'provider-auth'] as const) {
+    const a = engine.claim('c1')!;
+    // Кандидат уже записан: отказ случился на проверке, а не до работы.
+    engine.phase(a.id, a.token, 'verifying', { candidateSha: 'c'.repeat(40) });
+    engine.fail(a.id, a.token, `отказ ${kind}`, { kind });
+    assert.equal(attempt(), 0, kind);
+    engine.retry('a');
+    engine.resume();
+  }
+  breakWork(engine, 'a', 'review', 'Независимое ревью отклонило результат');
+  assert.equal(attempt(), 1, 'отказ ревью — содержательный');
+});
+
 /** Отказ ревью с разным текстом, но названным свойством или классом входов. */
 function rejectBy(
   engine: Engine,
@@ -319,6 +336,11 @@ test('T15/T04: потерянное владение чинится как ок�
   assert.equal(
     engine.read((v) => v.work('a')!.failureKind),
     'environment',
+  );
+  assert.equal(
+    engine.read((v) => v.work('a')!.attempt),
+    1,
+    'истёкшее владение попытку не засчитывает: остаётся только отказ gate',
   );
   const decision = decide(engine)!;
   assert.equal(decision.action, 'retry');

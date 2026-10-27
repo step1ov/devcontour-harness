@@ -123,6 +123,16 @@ const contentDigest = (order: WorkState['order']) =>
  * решения неразделимы. Хост может только добавить запрет (`HostGuards`) и
  * дать основания (`BasisProvider`); снять отказ движка он не может.
  */
+/**
+ * Отказ, который ничего не говорит о работе, бюджет попыток поручения не
+ * тратит: окружение или провайдер не дали исполнить или проверить её.
+ * Бесконечного цикла это не открывает: такие отказы держат выдачу
+ * (`repairPolicy.blocksQueue`), а повтор ограничен пределом одинаковых
+ * отпечатков и общим бюджетом восстановлений.
+ */
+const uncounted = (kind: FailureKind, blocked: boolean) =>
+  blocked || kind === 'environment' || kind === 'provider-auth';
+
 export class Engine {
   readonly host: ExecutionHost;
   readonly policy: ExecutionPolicy;
@@ -1632,7 +1642,7 @@ export class Engine {
         failureKind: kind,
         failureFingerprint: fingerprint,
         activeRunId: undefined,
-        attempt: blocked && w.attempt > 0 ? w.attempt - 1 : w.attempt,
+        attempt: uncounted(kind, blocked) && w.attempt > 0 ? w.attempt - 1 : w.attempt,
       });
       tx.emit({
         type: 'attempt.failed',
@@ -2574,6 +2584,8 @@ export class Engine {
               failureKind: 'environment',
               failureFingerprint: fingerprint,
               activeRunId: undefined,
+              // Владение истекло не по вине кода: попытка не засчитывается.
+              attempt: w.attempt > 0 ? w.attempt - 1 : w.attempt,
             });
           tx.emit({
             type: 'attempt.expired',

@@ -171,8 +171,9 @@ test('NET08: writer exit 1 с EPROTO — environment, один repair:environmen
   assert.equal(atFailure.work.failure, L3, 'точный текст L3 с префиксом runner');
   assert.equal(atFailure.attempts.length, 1);
   assert.equal(atFailure.attempts[0]!.failureKind, 'environment');
-  assert.notEqual(atFailure.attempts[0]!.blocked, true, 'запущенный CLI расходует попытку');
-  assert.equal(atFailure.work.attempt, 1, 'попытка засчитана');
+  assert.notEqual(atFailure.attempts[0]!.blocked, true, 'CLI запускался: это не отказ до работы');
+  // Обрыв сети ничего не говорит о работе: бюджет попыток поручения не тратится.
+  assert.equal(atFailure.work.attempt, 0, 'попытка не засчитана');
 
   // Сохранённые записи после всего прогона.
   const greeting = attemptsOf(h, GREETING);
@@ -330,9 +331,33 @@ test('NET09: CLI run — окончательно отклонённая сет�
   assert.equal(git('rev-parse', 'refs/heads/harness/accepted'), initial, 'ref не продвинут');
 });
 
-test('NET10: maxAttempts=1 и отдельно repairBudget=0 — первый отказ environment, повтора нет, лимит не сброшен, ref не продвинут', async () => {
+test('NET10: maxAttempts=1 — отказ environment попытку не тратит: повтор и принятие; лимит не повышен', async () => {
+  const ctx = hsetup({
+    scenario: { writer: [networkDown, implement()], reviewer: approve() },
+    policy: (p: any) => {
+      Object.assign(p, { maxAttempts: 1, repairBudget: 6 });
+    },
+  });
+  const h = openWith(ctx);
+  const data = await h.run({ graph: ctx.graph, author: 'claude' });
+  const attempts = attemptsOf(h, GREETING);
+  assert.deepEqual(
+    attempts.map((a) => [a.status, a.failureKind]),
+    [
+      ['failed', 'environment'],
+      ['succeeded', undefined],
+    ],
+  );
+  const work = h.engine.read((v) => v.work(GREETING)!);
+  assert.equal(work.status, 'done');
+  assert.equal(work.attempt, 1, 'засчитана только попытка, исполнившая работу');
+  assert.equal(h.policy.maxAttempts, 1, 'лимит не повышен');
+  assert.equal(data.workflow?.repairs, 1);
+  h.close();
+});
+
+test('NET10: repairBudget=0 — первый отказ environment, повтора нет, ref не продвинут', async () => {
   for (const [label, limits, reason] of [
-    ['maxAttempts=1', { maxAttempts: 1, repairBudget: 6 }, /исчерпан бюджет попыток поручения/],
     [
       'repairBudget=0',
       { maxAttempts: 3, repairBudget: 0 },
@@ -356,7 +381,7 @@ test('NET10: maxAttempts=1 и отдельно repairBudget=0 — первый �
     const work = h.engine.read((v) => v.work(GREETING)!);
     assert.equal(work.status, 'failed', label);
     assert.equal(work.failureKind, 'environment', label);
-    assert.equal(work.attempt, 1, label + ': счётчик попыток не сброшен');
+    assert.equal(work.attempt, 0, label + ': отказ окружения попытку не засчитал');
     assert.equal(h.policy.maxAttempts, limits.maxAttempts, label + ': лимит не повышен');
     assert.equal(data.workflow?.repairs ?? 0, 0, label);
     assert.deepEqual(repairEvents(h, data), [], label);
