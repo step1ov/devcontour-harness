@@ -25,40 +25,65 @@ export function orderedScope<T extends Pick<GatePolicy, 'id' | 'dependsOn'>>(
   return out;
 }
 
+/** Явные предпосылки gate: замыкание по `dependsOn`, ids в порядке профиля. */
+export function explicitPrerequisites(gates: Gate[], id: string): string[] {
+  const byId = new Map(gates.map((g) => [g.id, g]));
+  if (!byId.has(id)) throw new HarnessError('NOT_FOUND', `Gate ${id} не объявлен`);
+  const out = new Set<string>();
+  const stack = [...(byId.get(id)!.dependsOn ?? [])];
+  while (stack.length) {
+    const gid = stack.pop()!;
+    if (gid === id || out.has(gid)) continue;
+    const gate = byId.get(gid);
+    if (!gate) throw new HarnessError('NOT_FOUND', `Gate ${gid} не объявлен`);
+    out.add(gid);
+    stack.push(...(gate.dependsOn ?? []));
+  }
+  return gates.map((g) => g.id).filter((g) => out.has(g));
+}
+
 /**
  * Предпосылки gate при исполнении вне области задачи (проверка доски на её
  * итоговом SHA). Область задачи предпосылки называет явно, и попытка
  * исполняет ровно её. Проверке на SHA области нет, поэтому предпосылки
  * выводятся из профиля:
  *
- * - gate с `dependsOn` (режим графа) — замыкание по `dependsOn`;
- * - gate без `dependsOn` (режим порядка массива, где профиль сам задаёт
- *   последовательность) — все gates вида `check`, стоящие в профиле раньше
- *   него, с их замыканием: установка, сборка и статические проверки, на
- *   которые опирается каждый следующий gate. Более ранние test gates не
- *   добавляются: тесты друг от друга не зависят, и их повтор лишь удлинил бы
- *   проверку.
+ * - явные — замыкание по `dependsOn` (`explicitPrerequisites`); объявленный
+ *   `dependsOn`, в том числе пустой, — режим графа: других предпосылок нет;
+ * - неявные — у gate без поля `dependsOn` (режим порядка массива, где профиль
+ *   сам задаёт последовательность) все более ранние gates вида `check`
+ *   (установка, сборка, статические проверки) со своими предпосылками. Более
+ *   ранние test gates не добавляются: тесты друг от друга не зависят.
  *
- * Результат — ids в порядке профиля, сам gate последним среди равных.
+ * Каждый gate посещается один раз, поэтому `dependsOn` на более поздний
+ * gate вместе с неявным ребром к более ранним не зацикливается. Сам gate в
+ * результат не входит. Результат — ids в порядке профиля.
  */
 export function gatePrerequisites(gates: Gate[], id: string): string[] {
-  const index = gates.findIndex((g) => g.id === id);
-  if (index < 0) throw new HarnessError('NOT_FOUND', `Gate ${id} не объявлен`);
   const byId = new Map(gates.map((g) => [g.id, g]));
+  if (!byId.has(id)) throw new HarnessError('NOT_FOUND', `Gate ${id} не объявлен`);
   const out = new Set<string>();
-  const visit = (gid: string) => {
+  const seen = new Set<string>([id]);
+  const queue = [id];
+  while (queue.length) {
+    const gid = queue.shift()!;
     const gate = byId.get(gid);
     if (!gate) throw new HarnessError('NOT_FOUND', `Gate ${gid} не объявлен`);
-    if (gate.dependsOn?.length) {
-      for (const dep of gate.dependsOn) if (!out.has(dep)) visit(dep);
-    } else {
-      const at = gates.findIndex((g) => g.id === gid);
-      for (const earlier of gates.slice(0, at))
-        if (earlier.kind === 'check' && !out.has(earlier.id)) visit(earlier.id);
+    const next =
+      gate.dependsOn !== undefined
+        ? gate.dependsOn
+        : gates
+            .slice(0, gates.indexOf(gate))
+            .filter((g) => g.kind === 'check')
+            .map((g) => g.id);
+    for (const n of next) {
+      if (seen.has(n)) continue;
+      seen.add(n);
+      out.add(n);
+      queue.push(n);
     }
-    if (gid !== id) out.add(gid);
-  };
-  visit(id);
+  }
+  out.delete(id);
   return gates.map((g) => g.id).filter((g) => out.has(g));
 }
 

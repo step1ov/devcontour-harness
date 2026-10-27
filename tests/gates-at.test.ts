@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { runGatesAt, type GatesAtContext } from '../src/verification/gates-at.ts';
-import { gatePrerequisites } from '../src/verification/gate-scope.ts';
+import { explicitPrerequisites, gatePrerequisites } from '../src/verification/gate-scope.ts';
 import type { EvidenceRecord } from '../src/contracts/index.ts';
 import { greet, setup } from './runner-fixture.ts';
 import { write } from './git-fixture.ts';
@@ -152,6 +152,11 @@ test('gates на SHA в режиме порядка массива: исполн
             "require('fs').mkdirSync('.deps',{recursive:true});require('fs').writeFileSync('.deps/ok','1')",
           ),
         },
+        {
+          id: 'lint',
+          kind: 'check',
+          command: node('process.exit(1)'),
+        },
         testGate('early', 'false'),
         testGate('needs-install', "fs.existsSync('.deps/ok')"),
         testGate('broken', 'false'),
@@ -166,7 +171,10 @@ test('gates на SHA в режиме порядка массива: исполн
     boundary: () => ({ hidden: [ctx.state], readable: [join(ctx.repo.dir, '.git')] }),
     resourceDatabase: join(ctx.state, 'resources.sqlite'),
   };
-  assert.deepEqual(gatePrerequisites(ctx.policy.repositories[0]!.gates, 'broken'), ['install']);
+  assert.deepEqual(gatePrerequisites(ctx.policy.repositories[0]!.gates, 'broken'), [
+    'install',
+    'lint',
+  ]);
   const sha = ctx.repo.head();
   const recorded: EvidenceRecord[] = [];
   const result = await runGatesAt(context, {
@@ -176,19 +184,77 @@ test('gates на SHA в режиме порядка массива: исполн
     gates: ['needs-install', 'broken', 'also-needs-install'],
     record: (e) => recorded.push(e),
   });
-  assert.deepEqual(result.gates, ['install', 'needs-install', 'broken', 'also-needs-install']);
+  assert.deepEqual(result.gates, [
+    'install',
+    'lint',
+    'needs-install',
+    'broken',
+    'also-needs-install',
+  ]);
   assert.deepEqual(
     recorded.map((e) => [e.gate, e.passed, e.sha]),
     [
       ['install', true, sha],
+      ['lint', false, sha],
       ['needs-install', true, sha],
       ['broken', false, sha],
       ['also-needs-install', true, sha],
     ],
-    'ранний тест не исполнен, провал broken не останавливает проверку',
+    'ранний тест не исполнен; провалы неявной предпосылки lint и broken не скрывают исход остальных',
   );
   assert.deepEqual(
     result.failures.map((f) => f.gate),
-    ['broken'],
+    ['lint', 'broken'],
+  );
+});
+
+test('предпосылки gate: явный dependsOn (и пустой) — граф, без поля — ранние check gates; цепочки и петли через неявное ребро', () => {
+  const g = (id: string, kind: 'check' | 'test', dependsOn?: string[]) => ({
+    id,
+    kind,
+    ...(dependsOn ? { dependsOn } : {}),
+  });
+  // dependsOn на более поздний gate и неявное ребро к нему же: не зацикливается.
+  assert.deepEqual(
+    gatePrerequisites([g('A', 'check', ['B']), g('B', 'check'), g('T', 'test')], 'T'),
+    ['A', 'B'],
+  );
+  // Пустой dependsOn — режим графа: предпосылок нет.
+  assert.deepEqual(gatePrerequisites([g('install', 'check'), g('T', 'test', [])], 'T'), []);
+  // Трёхуровневая цепочка dependsOn.
+  assert.deepEqual(
+    gatePrerequisites(
+      [g('a', 'check', []), g('b', 'check', ['a']), g('c', 'check', ['b']), g('d', 'test', ['c'])],
+      'd',
+    ),
+    ['a', 'b', 'c'],
+  );
+  // Двухуровневая цепочка dependsOn.
+  assert.deepEqual(
+    gatePrerequisites([g('a', 'check', []), g('b', 'check', ['a']), g('c', 'test', ['b'])], 'c'),
+    ['a', 'b'],
+  );
+  assert.deepEqual(
+    explicitPrerequisites(
+      [g('a', 'check', []), g('b', 'check', ['a']), g('c', 'test', ['b'])],
+      'c',
+    ),
+    ['a', 'b'],
+  );
+  assert.deepEqual(
+    explicitPrerequisites(
+      [g('setup', 'check'), g('early', 'test'), g('x', 'check'), g('t', 'test', ['x'])],
+      't',
+    ),
+    ['x'],
+    'неявные ранние check gates — не явные предпосылки',
+  );
+  // Смешанная: явная предпосылка без поля dependsOn тянет свои ранние check gates.
+  assert.deepEqual(
+    gatePrerequisites(
+      [g('setup', 'check'), g('early', 'test'), g('x', 'check'), g('t', 'test', ['x'])],
+      't',
+    ),
+    ['setup', 'x'],
   );
 });

@@ -8,7 +8,7 @@ import { executionEnvironment, runSteps, withEnvironment } from '../environment/
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { removeSnapshots, snapshotDependencies, type DependencySnapshot } from './dependencies.ts';
 import { runGate } from './gates.ts';
-import { gatePrerequisites, orderedScope, standaloneScope } from './gate-scope.ts';
+import { explicitPrerequisites, orderedScope, standaloneScope } from './gate-scope.ts';
 
 type Repo = ExecutionPolicy['repositories'][number];
 
@@ -153,7 +153,13 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
           async () => {
             await runSteps(repo.prepare, cwd, join(artifacts, 'prepare'), execution, signal);
             for (const gate of gates) {
-              const blocked = gatePrerequisites(repo.gates, gate.id).filter((g) => failed.has(g));
+              // Пропускается только gate, чья явная предпосылка (`dependsOn`) не
+              // прошла. Провал неявной (более ранний check gate в режиме
+              // порядка массива) не скрывает исход тестов: исполняются и
+              // названы оба.
+              const blocked = explicitPrerequisites(repo.gates, gate.id).filter((g) =>
+                failed.has(g),
+              );
               if (blocked.length) {
                 failed.add(gate.id);
                 failures.push({
