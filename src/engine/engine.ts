@@ -1587,6 +1587,12 @@ export class Engine {
        * названные; `classes` — классы входов, названные ревьюером.
        */
       properties?: { bound: string[]; unbound: string[]; classes?: string[] };
+      /**
+       * Попытку прервала штатная остановка controller: отказ окружения без
+       * паузы по классу; поручение возвращается в очередь (`ready`), а не
+       * ждёт восстановления. Интегрированная попытка так не возвращается.
+       */
+      interrupted?: boolean;
     } = {},
   ) {
     const kind = options.kind ?? 'unknown';
@@ -1599,6 +1605,7 @@ export class Engine {
           : undefined;
       const shown = prefix ? `${prefix}. ${error}` : error;
       const blocked = Boolean(options.blocked);
+      const interrupted = Boolean(options.interrupted) && !a.integrationSha && !!w.approvedDigest;
       // Свойство отказа — только объявленное поручением: неизвестное
       // сохраняется для разбора, но счётчик эпизода не выбирает.
       const declared = new Set(w.order.properties ?? []);
@@ -1622,6 +1629,7 @@ export class Engine {
         ...(options.properties?.classes?.length
           ? { inputClasses: options.properties.classes.slice(0, 20) }
           : {}),
+        ...(interrupted ? { interrupted: 'shutdown' as const } : {}),
       };
       tx.putAttempt(failed);
       const next = structuredClone(w);
@@ -1637,12 +1645,23 @@ export class Engine {
         this.recoveryEvent(tx, w, episode);
       tx.putWork({
         ...next,
-        status: 'failed',
-        failure: shown,
-        failureKind: kind,
-        failureFingerprint: fingerprint,
+        // Прерванная остановкой работа не упала: она снова в очереди.
+        ...(interrupted
+          ? {
+              status: 'ready' as const,
+              failure: undefined,
+              failureKind: undefined,
+              failureFingerprint: undefined,
+            }
+          : {
+              status: 'failed' as const,
+              failure: shown,
+              failureKind: kind,
+              failureFingerprint: fingerprint,
+            }),
         activeRunId: undefined,
-        attempt: uncounted(kind, blocked) && w.attempt > 0 ? w.attempt - 1 : w.attempt,
+        attempt:
+          (interrupted || uncounted(kind, blocked)) && w.attempt > 0 ? w.attempt - 1 : w.attempt,
       });
       tx.emit({
         type: 'attempt.failed',
@@ -1652,7 +1671,8 @@ export class Engine {
         attempt: a.attempt,
         payload: { failureKind: kind, message: shown.slice(0, 4000), blocked },
       });
-      if (repairPolicy[kind].blocksQueue) {
+      // Остановка — не неисправность окружения: её пауза уже стоит.
+      if (repairPolicy[kind].blocksQueue && !interrupted) {
         const control = tx.control();
         const failures = [...new Set([...(control.pauseFailures ?? []), kind])];
         tx.setControl({

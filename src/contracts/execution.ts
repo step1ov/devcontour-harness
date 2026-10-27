@@ -418,6 +418,12 @@ export const attemptStateSchema = z.strictObject({
   dependencyFreshness: z.array(freshnessSchema).optional(),
   properties: z.array(z.string()).optional(),
   unboundProperties: z.array(z.string()).optional(),
+  /**
+   * Попытку прервала штатная остановка controller: работа не исполнена до
+   * конца, но и не отклонена — поручение вернулось в очередь, следующая
+   * попытка продолжает с её кандидата или черновика.
+   */
+  interrupted: z.literal('shutdown').optional(),
   /** Классы входов, названные отклонившим ревью (`reproduction.inputClass`). */
   inputClasses: z.array(z.string().max(500)).max(20).optional(),
   episodeBasis: digestSchema.optional(),

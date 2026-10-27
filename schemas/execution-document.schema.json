@@ -1827,6 +1827,10 @@
               "type": "string"
             }
           },
+          "interrupted": {
+            "type": "string",
+            "const": "shutdown"
+          },
           "inputClasses": {
             "maxItems": 20,
             "type": "array",

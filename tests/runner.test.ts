@@ -283,9 +283,16 @@ test('T11: отказ setup и обязательной очистки — пр�
   }
 });
 
-test('T14: штатная остановка посреди попытки — пауза shutdown, отказ окружения, не отмена; после рестарта работа доходит до конца', async () => {
+test('T14: штатная остановка посреди попытки — пауза shutdown, работа снова в очереди без траты попытки; после рестарта продолжается с черновика', async () => {
+  const draft = "exports.greet = (name) => 'Hello, ' + name; // черновик\n";
   const ctx = setup({
-    scenario: { writer: [{ ...implement(), sleepMs: 4000 }, implement()], reviewer: approve() },
+    scenario: {
+      writer: [
+        { ...implement(), draftFiles: { 'src/greet.js': draft }, sleepMs: 15000 },
+        { ...implement(), observe: ['src/greet.js'] },
+      ],
+      reviewer: approve(),
+    },
   });
   await ctx.runner.init();
   const { trustNone, planReview } = await import('./engine-fixture.ts');
@@ -296,26 +303,35 @@ test('T14: штатная остановка посреди попытки — �
   await ctx.runner.tick();
   for (let i = 0; i < 100 && ctx.engine.read((v) => v.attempts()[0]?.phase) !== 'running'; i++)
     await new Promise((r) => setTimeout(r, 20));
+  // Черновик исполнителя уже в дереве, когда приходит остановка.
+  const tree = () => ctx.engine.read((v) => v.attempts()[0]?.worktree);
+  for (let i = 0; i < 200 && !(tree() && existsSync(join(tree()!, 'src/greet.js'))); i++)
+    await new Promise((r) => setTimeout(r, 25));
   await ctx.runner.stop();
   const control = ctx.engine.read((v) => v.control());
   assert.equal(control.pauseReason, 'shutdown', 'остановка — не отмена и не пауза человека');
+  assert.equal(control.pauseFailures, undefined, 'остановка — не неисправность окружения');
   const first = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
   assert.equal(first.status, 'failed');
-  // Работа runtime уже началась: как в DevContour, это засчитанная попытка с отказом окружения.
   assert.equal(first.failureKind, 'environment');
-  assert.equal(
-    ctx.engine.read((v) => v.work('add-greeting')!.status),
-    'failed',
-    'не cancelled: остановка — не отмена',
-  );
-  // Рестарт: новый процесс снимает паузу остановки, повторяет поручение явно и доводит его.
+  assert.equal(first.interrupted, 'shutdown');
+  assert.ok(first.partial, 'черновик прерванной попытки сохранён');
+  const work = ctx.engine.read((v) => v.work('add-greeting')!);
+  assert.equal(work.status, 'ready', 'не failed и не cancelled: работа снова в очереди');
+  assert.equal(work.attempt, 0, 'прерванная попытка не засчитана');
+  assert.equal(work.failure, undefined);
+  // Рестарт: снятая пауза остановки сразу выдаёт работу — без retry и сброса.
   ctx.engine.resume();
-  ctx.engine.retry('add-greeting');
   await ctx.runner.drain();
-  assert.equal(
-    ctx.engine.read((v) => v.work('add-greeting')!.status),
-    'done',
-  );
+  const done = ctx.engine.read((v) => v.work('add-greeting')!);
+  assert.equal(done.status, 'done');
+  assert.equal(done.attempt, 1);
+  const second = ctx.engine.read((v) => v.attempts('add-greeting')[1]!);
+  assert.equal(second.continuedFrom?.runId, first.id, 'продолжение прерванной попытки');
+  const observed = JSON.parse(
+    readFileSync(`${ctx.scenarioPath}.writer.1.observed`, 'utf8'),
+  ) as Record<string, string | null>;
+  assert.equal(observed['src/greet.js'], draft, 'следующий исполнитель застал черновик');
 });
 
 test('T10: merge conflict с продвинутой принятой веткой — класс merge, target с чужим коммитом не теряется', async () => {

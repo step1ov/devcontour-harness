@@ -184,7 +184,10 @@ export class Runner {
   readonly owner: string;
   private readonly engine: Engine;
   private readonly policy: ExecutionPolicy;
-  private jobs = new Map<string, { promise: Promise<void>; controller: AbortController }>();
+  private jobs = new Map<
+    string,
+    { promise: Promise<void>; controller: AbortController; shutdown?: boolean }
+  >();
   private mergeTails = new Map<string, Promise<void>>();
   /** Входы незавершённой очистки проверок потребителей, по попыткам. */
   private retained = new Map<string, Retained>();
@@ -395,7 +398,12 @@ export class Runner {
   /** Штатная остановка: пауза `shutdown`, прерывание попыток, освобождение роли controller. */
   async stop() {
     this.engine.pause('shutdown');
-    for (const job of this.jobs.values()) job.controller.abort();
+    // Прерванная остановкой попытка не упала: поручение вернётся в очередь
+    // и продолжится с кандидата или черновика (см. catch в `execute`).
+    for (const job of this.jobs.values()) {
+      job.shutdown = true;
+      job.controller.abort();
+    }
     await Promise.all([...this.jobs.values()].map((j) => j.promise));
     this.release();
   }
@@ -1181,6 +1189,24 @@ export class Runner {
           : error instanceof Error
             ? error.message
             : String(error);
+      // Штатная остановка оборвала попытку: что бы ни выбросила прерванная
+      // операция, это не отказ работы. Черновик сохраняется, поручение
+      // возвращается в очередь, бюджет попыток не тратится.
+      const shutdown = controller.signal.aborted && this.jobs.get(attempt.id)?.shutdown === true;
+      if (shutdown)
+        try {
+          await this.keepDraft(attempt, await this.workOf(attempt), artifacts);
+          this.engine.fail(
+            attempt.id,
+            attempt.token,
+            'Попытку прервала штатная остановка controller; поручение возвращено в очередь и продолжится с кандидата или черновика',
+            { kind: 'environment', interrupted: true },
+          );
+          return;
+        } catch {
+          // Потерявшая владение попытка не публикует поздний отказ.
+          return;
+        }
       try {
         const kind =
           expired && !(error instanceof TaskFailure) ? 'timeout' : classifyFailure(error, message);
