@@ -81,6 +81,13 @@ export const findingTransitionSchema = z.strictObject({
  * — отказ; `previous` обязан назвать состояние каждой прежней открытой
  * находки этого предмета (см. `reviewIssues`).
  */
+/** Основание «приёмка уже выполнена»: названные gates и что их evidence показывает. */
+export const alreadySatisfiedSchema = z.strictObject({
+  gates: z.array(z.string().min(1).max(200)).min(1).max(20),
+  evidence: z.string().min(1).max(4000),
+});
+export type AlreadySatisfied = z.infer<typeof alreadySatisfiedSchema>;
+
 export const reviewResultSchema = z.object({
   execution: reviewExecutionSchema.optional(),
   approved: z.boolean(),
@@ -100,6 +107,13 @@ export const reviewResultSchema = z.object({
     }),
   ),
   previous: z.array(findingTransitionSchema).default([]),
+  /**
+   * Подтверждение reviewer, что приёмка поручения уже выполнена на базе без
+   * изменений (исполнитель сдал пустой результат): gates, чьё прошедшее
+   * evidence это показывает, и основание. Учитывается только для попытки без
+   * изменений; там без него принятие не засчитывается (`empty-result`).
+   */
+  alreadySatisfied: alreadySatisfiedSchema.nullable().optional(),
 });
 export type ReviewResult = z.infer<typeof reviewResultSchema>;
 

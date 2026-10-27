@@ -26,6 +26,7 @@ import {
   reviewResultSchema,
   type ImplementationResult,
   type ReviewResult,
+  type AlreadySatisfied,
   sha256,
   type AttemptState,
   type ContextSnapshot,
@@ -41,7 +42,11 @@ import {
 import { git } from '../environment/process.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
 import { redactDeep, type Redactor } from '../environment/redaction.ts';
-import { implementationOutputSchema, reviewOutputSchema } from '../agents/schemas.ts';
+import {
+  alreadySatisfiedReviewOutputSchema,
+  implementationOutputSchema,
+  reviewOutputSchema,
+} from '../agents/schemas.ts';
 import { reviewInspection } from '../agents/inspect.ts';
 import { reviewerRunsChecks } from '../agents/cli-adapter.ts';
 import {
@@ -74,6 +79,7 @@ import type { Engine } from './engine.ts';
 import { prompt } from './prompt.ts';
 import {
   contractDocuments,
+  obligationGates,
   orderCheckManifest,
   referenceCodeNote,
   referenceSetFiles,
@@ -153,6 +159,14 @@ export interface RunnerHooks {
     sha: string;
   }): void | Promise<void>;
 }
+
+/** Честный путь исполнителя, когда работу уже сделала зависимость. */
+const ALREADY_SATISFIED_WRITER_NOTE =
+  'If the acceptance criteria are already satisfied on the base commit (for example, a dependency did this work), make no changes and report completed: true with the reason in the summary. The task gates then run on the base, and the reviewer must confirm from their evidence that the acceptance is already met; otherwise the attempt is an empty result.';
+
+/** Указание reviewer попытки без изменений (кандидат — база). */
+const ALREADY_SATISFIED_REVIEW_NOTE =
+  'The writer made no changes: the candidate is the base commit itself. Approve only if the acceptance criteria are already satisfied on it (for example, by a dependency). Then set "alreadySatisfied" to the ids of the gates of this task whose passing evidence on this SHA shows it — at least one test gate and every gate of the approved check contracts — and "evidence" to what in that evidence and in the code proves each criterion. Otherwise set approved: false and alreadySatisfied: null; the attempt is then an empty result.';
 
 const ordered = (gates: GatePolicy[], ids: string[]) => {
   const byId = new Map(gates.map((g) => [g.id, g]));
@@ -511,6 +525,8 @@ export class Runner {
       findings?: ReviewRequestFindings;
       /** Остаток срока логического ревью: вызов не получает больше. */
       timeoutMs?: number;
+      /** Схема ответа вместо обычной для задачи вызова. */
+      outputSchema?: Record<string, unknown>;
     },
     signal: AbortSignal,
   ): Promise<RuntimeResponse & { redact: Redactor; unreadable?: string }> {
@@ -555,7 +571,8 @@ export class Runner {
         binding,
         cwd: input.cwd,
         prompt: input.prompt,
-        outputSchema: review ? reviewOutputSchema : implementationOutputSchema,
+        outputSchema:
+          input.outputSchema ?? (review ? reviewOutputSchema : implementationOutputSchema),
         session: { kind: 'fresh' },
         sandbox: {
           mode: this.policy.isolation.mode,
@@ -670,7 +687,9 @@ export class Runner {
     cwd: string,
     context?: ContextSnapshot,
     range?: [string, string],
-  ) {
+    /** Пустой результат допустим (возможное «приёмка уже выполнена»): вернуть true вместо отказа. */
+    allowEmpty = false,
+  ): Promise<boolean> {
     const changed = (
       await (range
         ? git(cwd, 'diff', '--no-renames', '--name-only', '-z', ...range)
@@ -722,11 +741,13 @@ export class Runner {
           `Реализация ссылается на файлы эталонных наборов: ${named.join(', ')}`,
         );
     }
-    if (!changed.length)
+    if (!changed.length) {
+      if (allowEmpty) return true;
       throw new TaskFailure(
         'empty-result',
         'Изменений нет: поручение отчиталось о выполнении пустым коммитом',
       );
+    }
     const role = roleBinding(this.policy, work.order.role, work.order.repositoryId)?.writePaths;
     const outside = changed.filter(
       (p) => !within(p, work.order.writeScope) || (role && !within(p, role)),
@@ -736,6 +757,7 @@ export class Runner {
         'scope-violation',
         'Изменены файлы вне области поручения/роли: ' + outside.join(', '),
       );
+    return false;
   }
 
   /** Стадия попытки с замером: начало, конец и исход записываются под fencing. */
@@ -1069,6 +1091,7 @@ export class Runner {
                           notes: [
                             ...this.notes(attempt, false),
                             ...(await this.hostNotes(work, attempt, false)),
+                            ALREADY_SATISFIED_WRITER_NOTE,
                           ],
                           // Открытые находки ревью с выданными ID — из истории
                           // поручения; только когда reviewer ведёт протокол
@@ -1102,7 +1125,18 @@ export class Runner {
                         'Исполнитель изменил HEAD; интеграцией владеет harness',
                       );
                     await git(cwd, 'add', '-A');
-                    await this.assertScope(work, repo, cwd, context);
+                    // Пустой результат — не отказ сразу: приёмку могла уже
+                    // выполнить зависимость. Кандидат — сама база (без
+                    // коммита); gates задачи на ней и подтверждение reviewer
+                    // (`alreadySatisfied`) решают, принять ли его.
+                    if (await this.assertScope(work, repo, cwd, context, undefined, true)) {
+                      await this.options.hooks?.implemented?.({
+                        attempt,
+                        output: result.data,
+                        sha: base,
+                      });
+                      return base;
+                    }
                     await git(
                       cwd,
                       '-c',
@@ -1124,7 +1158,24 @@ export class Runner {
               rearm();
               this.engine.phase(attempt.id, attempt.token, 'verifying', { candidateSha: sha });
               for (const gate of gates)
-                await this.gate(attempt, cwd, sha, 'candidate', gate, artifacts, signal, execution);
+                await this.gate(
+                  attempt,
+                  cwd,
+                  sha,
+                  'candidate',
+                  gate,
+                  artifacts,
+                  signal,
+                  execution,
+                ).catch((error: unknown) => {
+                  // Без изменений непрошедший gate значит одно: работа не
+                  // сделана, — это пустой результат, а не дефект кода.
+                  if (sha !== base || !(error instanceof TaskFailure)) throw error;
+                  throw new TaskFailure(
+                    'empty-result',
+                    'Изменений нет, а проверки задачи на базе не проходят: ' + error.message,
+                  );
+                });
               this.requirements(attempt, work, repoPath, cwd, sha, 'candidate');
               rearm();
               this.engine.phase(attempt.id, attempt.token, 'reviewing');
@@ -1696,6 +1747,39 @@ export class Runner {
    * команды — засчитывается всем резервом, записанным до запуска, а его
    * пережившие процессы останавливаются (R3-F01).
    */
+  /**
+   * Почему подтверждение «приёмка уже выполнена» не принимается, или
+   * undefined. Reviewer обязан назвать gates области задачи — хотя бы один
+   * test gate и каждую проверку договоров поручения — и дать основание.
+   * Ревью идёт после gates фазы: все gates области к этому моменту на этом
+   * SHA прошли (иначе попытка уже остановлена), а `finish` требует их PASS.
+   */
+  private alreadySatisfiedProblem(
+    work: WorkState,
+    gates: GatePolicy[],
+    claim: AlreadySatisfied | undefined,
+  ): string | undefined {
+    if (!claim) return 'ответ не содержит alreadySatisfied';
+    if (claim.evidence.replace(/\s+/g, '').length < 20)
+      return 'основание alreadySatisfied.evidence короче 20 знаков';
+    const scope = new Set(gates.map((g) => g.id));
+    const outside = claim.gates.filter((g) => !scope.has(g));
+    if (outside.length) return 'названы gates вне области задачи: ' + outside.join(', ');
+    if (!claim.gates.some((id) => gates.some((g) => g.id === id && g.kind === 'test')))
+      return 'не назван ни один test gate';
+    const contractGates = this.engine.read((v) =>
+      contractDocuments(work.order, v).flatMap((c) =>
+        c.checks ? c.checks.obligations.flatMap((o) => obligationGates(c.checks!, o)) : [],
+      ),
+    );
+    const missingContract = [...new Set(contractGates)].filter(
+      (g) => scope.has(g) && !claim.gates.includes(g),
+    );
+    if (missingContract.length)
+      return 'не названы проверки договора поручения: ' + missingContract.join(', ');
+    return undefined;
+  }
+
   private async probeSpent(runs: string[], repositoryId: string, phase: string) {
     let spent = 0;
     for (const runId of runs) {
@@ -1764,9 +1848,14 @@ export class Runner {
     const round = history.round + 1;
     // Запрос одинаков для всех вызовов логического ревью: меняется только
     // диагностика ошибки протокола.
+    // Попытка без изменений: кандидат — сама база. Принять её можно только
+    // по явному подтверждению reviewer, что приёмка уже выполнена.
+    const unchanged =
+      phase === 'candidate' ? base === sha : attempt.candidateSha === attempt.baseSha;
     const notes = [
       ...this.notes(attempt, true, sha),
       ...(await this.hostNotes(work, attempt, true)),
+      ...(unchanged ? [ALREADY_SATISFIED_REVIEW_NOTE] : []),
     ];
     let issues: ProtocolIssue[] = lastIssues;
     const stage = phase + '-review';
@@ -1852,6 +1941,7 @@ export class Runner {
           ...(probe ? { probe: probe.server } : {}),
           ...(legacy ? {} : { findings: requestFindings(history) }),
           timeoutMs: remaining,
+          ...(unchanged ? { outputSchema: alreadySatisfiedReviewOutputSchema } : {}),
         },
         signal,
       );
@@ -2016,7 +2106,14 @@ export class Runner {
       });
       if (reproductions.length)
         this.engine.recordReproductions(attempt.id, attempt.token, sha, reproductions);
-      const passed = verdict.result.approved;
+      // Без изменений одобрение засчитывается только с подтверждением
+      // `alreadySatisfied`, которое опирается на прошедшее evidence этой фазы.
+      const claim = verdict.result.alreadySatisfied ?? undefined;
+      const unconfirmed =
+        unchanged && verdict.result.approved
+          ? this.alreadySatisfiedProblem(work, gates, claim)
+          : undefined;
+      const passed = verdict.result.approved && !unconfirmed;
       // Вердикт, новые находки с выданными ID и переходы прежних — одна запись
       // под fencing: попытка, утратившая владение, их не сохраняет.
       this.engine.evidence(attempt.id, attempt.token, {
@@ -2030,7 +2127,18 @@ export class Runner {
         exitCode: passed ? 0 : 1,
         log,
         digest,
-        summary: redact(`[${inspection.mode}] ${record.summary}`).slice(0, 4000),
+        summary: redact(
+          `[${inspection.mode}] ${record.summary}` +
+            (unconfirmed ? ` (не подтверждено, что приёмка уже выполнена: ${unconfirmed})` : ''),
+        ).slice(0, 4000),
+        ...(unchanged && passed && claim
+          ? {
+              alreadySatisfied: {
+                gates: claim.gates,
+                evidence: redact(claim.evidence).slice(0, 4000),
+              },
+            }
+          : {}),
         findings: (record.findings ?? []).map((f, i) => ({
           severity: f.severity,
           message: f.message,
@@ -2055,6 +2163,15 @@ export class Runner {
           .map((f) => f.reproduction?.property)
           .filter((p): p is string => !!p);
         const declared = new Set(work.order.properties ?? []);
+        // Без изменений отказ ревью — пустой результат: работа не сделана.
+        if (unchanged)
+          throw new TaskFailure(
+            'empty-result',
+            unconfirmed
+              ? 'Изменений нет, и ревью не подтвердило, что приёмка уже выполнена: ' + unconfirmed
+              : 'Изменений нет, и ревью не подтвердило, что приёмка уже выполнена: ' +
+                  redact(record.summary),
+          );
         throw new TaskFailure(
           'review',
           'Независимое ревью отклонило результат: ' + redact(record.summary),

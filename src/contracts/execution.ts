@@ -290,6 +290,16 @@ export const evidenceRecordSchema = z.strictObject({
   property: propertyEvidenceSchema.optional(),
   /** Действующая версия проверок, под которой получено evidence. */
   checks: digestSchema.optional(),
+  /**
+   * Ревью попытки без изменений подтвердило, что приёмка уже выполнена на
+   * базе: gates, на которые сослался reviewer, и его основание.
+   */
+  alreadySatisfied: z
+    .strictObject({
+      gates: z.array(z.string().min(1).max(200)).min(1).max(20),
+      evidence: z.string().min(1).max(4000),
+    })
+    .optional(),
 });
 export type EvidenceRecord = z.infer<typeof evidenceRecordSchema>;
 

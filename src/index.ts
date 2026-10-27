@@ -132,6 +132,12 @@ export {
   sandboxBlockedHosts,
   type GateRun,
 } from './verification/gates.ts';
+export {
+  runGatesAt,
+  type GatesAtContext,
+  type GatesAtInput,
+  type GatesAtResult,
+} from './verification/gates-at.ts';
 export { requirementProof, uncoveredGates, unprovenReason } from './verification/proof.ts';
 export { ReviewProbes, probeLimits, observeReproductions } from './agents/review-probe.ts';
 export {

@@ -1473,6 +1473,25 @@ export class Engine {
           !last('review', phase, phase === 'candidate' ? a.candidateSha : sha, 'independent-review')
         )
           throw new HarnessError('REVIEW_REJECTED', `Нет независимого ревью: ${phase}`);
+      // Попытка без изменений (кандидат — база) принимается только с
+      // подтверждением reviewer обеих фаз, что приёмка уже выполнена.
+      if (a.candidateSha === a.baseSha)
+        for (const phase of ['candidate', 'integration'] as const) {
+          const decisive = a.evidence.findLast(
+            (e) =>
+              e.kind === 'review' &&
+              e.phase === phase &&
+              e.sha === (phase === 'candidate' ? a.candidateSha : sha) &&
+              e.gate === 'independent-review' &&
+              e.consumer === undefined &&
+              (!a.checks || e.checks === a.checks.effective),
+          );
+          if (!decisive?.alreadySatisfied)
+            throw new HarnessError(
+              'REVIEW_REJECTED',
+              `Изменений нет, а ревью ${phase} не подтвердило, что приёмка уже выполнена`,
+            );
+        }
       // Проверки потребителей — на integration, против интегрированного
       // результата: evidence потребителя закрывает только его проверку.
       for (const consumer of a.consumers ?? []) {
