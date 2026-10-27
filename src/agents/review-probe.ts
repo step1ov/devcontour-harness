@@ -29,6 +29,7 @@ import { redactor } from '../environment/redaction.ts';
 import {
   completedCheck,
   freshnessEnv,
+  propertyReportEnv,
   junitSummary,
   runCheck,
   sandboxBlockedHosts,
@@ -151,10 +152,11 @@ export type ProbeGateRun = {
   controllerEnv: string[];
   report?: ProbeReport;
   /**
-   * Сохранённая копия отчёта свойств, если проверка записала его в
-   * `HARNESS_PROPERTY_REPORT`/`DEVCONTOUR_PROPERTY_REPORT` scratch.
+   * Копия отчёта свойств, если проверка записала его по пути
+   * `DEVCONTOUR_PROPERTY_REPORT` в scratch. Только evidence probe: движок
+   * этот отчёт не читает, и свойства по нему не засчитываются.
    */
-  propertyReport?: string;
+  propertyReport?: { path: string; scope: 'probe-only' };
   /** Каталог evidence запуска в каталоге ревью controller. */
   artifacts?: string;
   /** Временный каталог отчёта; убран после сохранения evidence. */
@@ -245,14 +247,14 @@ async function savePropertyReport(
   runDir: string,
   id: string,
   redact: (text: string) => string,
-): Promise<string | undefined> {
+): Promise<ProbeGateRun['propertyReport']> {
   const stat = await lstat(path).catch(() => undefined);
   if (!stat?.isFile() || stat.nlink > 1 || stat.size > REPORT_LIMIT) return undefined;
   const real = await realpath(path);
   if (!within(dirname(real), scratch)) return undefined;
   const saved = join(runDir, `${id}.property.json`);
   await writeFile(saved, redact(await readFile(real, 'utf8')), { flag: 'wx' });
-  return saved;
+  return { path: saved, scope: 'probe-only' as const };
 }
 
 /**
@@ -657,9 +659,10 @@ export class ReviewProbes {
     }
     meta.scratch = scratch;
     const reportPath = join(scratch, `${gate.id}.xml`);
-    // Отчёт свойств — тоже в scratch: controller передаёт его путь и gate
-    // без генератора (эталонные наборы), и проверка, пишущая отчёт свойств
-    // по прежнему пути в дереве, под probe получала бы EPERM.
+    // Отчёт свойств — тоже в scratch, под тем же именем переменной, что и у
+    // gate движка (`propertyReportEnv`): проверка, пишущая отчёт свойств по
+    // прежнему пути в дереве, под probe получала бы EPERM. Seed, селектор и
+    // корпус probe не выставляет: генеративные gate он не исполняет.
     const propertyPath = join(scratch, `${gate.id}.property.json`);
     const controllerEnv: Record<string, string> = {
       CI: '1',
@@ -667,8 +670,7 @@ export class ReviewProbes {
       ...(gate.report
         ? { DEVCONTOUR_REPORT_PATH: reportPath, HARNESS_REPORT_PATH: reportPath }
         : {}),
-      DEVCONTOUR_PROPERTY_REPORT: propertyPath,
-      HARNESS_PROPERTY_REPORT: propertyPath,
+      [propertyReportEnv]: propertyPath,
     };
     meta.controllerEnv = Object.keys(controllerEnv);
     const started = Date.now();

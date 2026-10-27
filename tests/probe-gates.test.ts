@@ -17,6 +17,7 @@ import {
   type ProbeResult,
 } from '../src/agents/review-probe.ts';
 import { isolationSupport } from '../src/environment/isolation.ts';
+import { propertyReportEnv } from '../src/verification/gates.ts';
 import { redactor } from '../src/environment/redaction.ts';
 import { approve, implement, runAll, setup, target } from './runner-fixture.ts';
 import {
@@ -633,13 +634,63 @@ fs.writeFileSync(process.env.HARNESS_REPORT_PATH, '<testsuite><testcase name="p"
     const probes = new ReviewProbes(probeSpecFor(c, { gates: [gate('props', node(script))] }));
     const r = await probes.run({ gate: 'props' });
     assert.equal(r.status, 'passed', `${r.note}\n${r.stderr}`);
-    assert.ok(r.gate?.controllerEnv.includes('DEVCONTOUR_PROPERTY_REPORT'));
-    assert.ok(r.gate?.controllerEnv.includes('HARNESS_PROPERTY_REPORT'));
-    const saved = JSON.parse(readFileSync(r.gate!.propertyReport!, 'utf8'));
+    // Имя переменной — то же и только то, что выставляет gate движка.
+    assert.equal(propertyReportEnv, 'DEVCONTOUR_PROPERTY_REPORT');
+    assert.deepEqual(
+      r.gate?.controllerEnv.filter((name) => /PROPERTY|SEED|CORPUS/.test(name)),
+      [propertyReportEnv],
+    );
+    assert.equal(r.gate?.propertyReport?.scope, 'probe-only');
+    const saved = JSON.parse(readFileSync(r.gate.propertyReport.path, 'utf8'));
     assert.equal(saved.properties[0].cases, 3);
     assert.equal(r.gate?.scratchRemoved, true);
     assert.equal(existsSync(join(c.dir, '.reports', 'property.json')), false);
   } finally {
+    c.cleanup();
+  }
+});
+
+test('HP08/property-report-unsafe: symlink и жёсткая ссылка вместо отчёта свойств не сохраняются', async () => {
+  const c = candidate();
+  const outside = await mkdtemp(join(tmpdir(), 'harness-probe-outside-'));
+  try {
+    const secret = join(outside, 'secret.json');
+    await writeFile(secret, '{"secret":true}');
+    const junit = `require('fs').writeFileSync(process.env.HARNESS_REPORT_PATH, '<testsuite><testcase name="p"/></testsuite>')`;
+    const probes = new ReviewProbes(
+      probeSpecFor(c, {
+        isolation: { mode: 'none', domains: [] },
+        gates: [
+          gate(
+            'symlink',
+            node(
+              `require('fs').symlinkSync(${JSON.stringify(secret)}, process.env.DEVCONTOUR_PROPERTY_REPORT);${junit}`,
+            ),
+          ),
+          gate(
+            'hardlink',
+            node(
+              `require('fs').linkSync(${JSON.stringify(secret)}, process.env.DEVCONTOUR_PROPERTY_REPORT);${junit}`,
+            ),
+          ),
+          // Symlink на файл в самом scratch — тоже не отчёт.
+          gate(
+            'inner',
+            node(
+              `const fs=require('fs'),p=require('path');const t=p.join(p.dirname(process.env.DEVCONTOUR_PROPERTY_REPORT),'inner.json');fs.writeFileSync(t,'{}');fs.symlinkSync(t, process.env.DEVCONTOUR_PROPERTY_REPORT);${junit}`,
+            ),
+          ),
+        ],
+      }),
+    );
+    for (const id of ['symlink', 'hardlink', 'inner']) {
+      const r = await probes.run({ gate: id });
+      assert.equal(r.status, 'passed', `${id}: ${r.note}\n${r.stderr}`);
+      assert.equal(r.gate?.propertyReport, undefined, id);
+      assert.equal(existsSync(join(r.gate!.artifacts!, `${id}.property.json`)), false, id);
+    }
+  } finally {
+    await rm(outside, { recursive: true, force: true });
     c.cleanup();
   }
 });
