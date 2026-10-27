@@ -588,6 +588,12 @@ export const workStateSchema = z.strictObject({
   checkVersion: checkVersionSchema.optional(),
   recovery: propertyRecoverySchema.optional(),
   recoveryHistory: z.array(propertyRecoverySchema).optional(),
+  /**
+   * Отказы окружения, провайдера и истёкшего владения после начала работы:
+   * попытку они не засчитывают, но ограничены своим пределом
+   * (`MAX_NEUTRAL_FAILURES`); сброс — вместе со сбросом попыток.
+   */
+  neutralFailures: z.number().int().min(0).optional(),
 });
 export type WorkState = z.infer<typeof workStateSchema>;
 

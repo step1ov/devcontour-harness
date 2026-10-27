@@ -71,4 +71,4 @@ export function failureFingerprint(kind: FailureKind, message: string) {
     .slice(0, 16);
 }
 
-export { repairPolicy, type RepairRule } from './repair-policy.ts';
+export { MAX_NEUTRAL_FAILURES, repairPolicy, type RepairRule } from './repair-policy.ts';

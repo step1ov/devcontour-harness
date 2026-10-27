@@ -5,6 +5,7 @@ export {
   failureFingerprint,
   failureKinds,
   repairPolicy,
+  MAX_NEUTRAL_FAILURES,
   type FailureKind,
   type RepairRule,
 } from '../contracts/index.ts';

@@ -1,5 +1,5 @@
 import type { AttemptState, ExecutionView, FailureKind, WorkState } from '../contracts/index.ts';
-import { repairPolicy } from './failure.ts';
+import { MAX_NEUTRAL_FAILURES, repairPolicy } from './failure.ts';
 import { RECOVERY_THRESHOLD, isNeutral } from './property-recovery.ts';
 
 export type RepairDecision =
@@ -163,6 +163,15 @@ export function repairDecision(
       workId: work.id,
       kind,
       reason: `${work.id}: исчерпан бюджет попыток поручения. Устраните причину и повторите со сбросом, указав его.${detail}`,
+    };
+
+  // Отказы окружения попытку не тратят, но их предел — свой.
+  if ((work.neutralFailures ?? 0) >= MAX_NEUTRAL_FAILURES)
+    return {
+      action: 'stop',
+      workId: work.id,
+      kind,
+      reason: `${work.id}: ${work.neutralFailures} отказов окружения или провайдера после начала работы — предел ${MAX_NEUTRAL_FAILURES}. Это неисправность среды; устраните её и повторите со сбросом, указав его.${detail}`,
     };
 
   // Тексты отказов ревью разные, и предел одинаковых отпечатков их не

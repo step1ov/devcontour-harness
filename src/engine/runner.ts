@@ -1202,12 +1202,21 @@ export class Runner {
       if (shutdown)
         try {
           await this.keepDraft(attempt, await this.workOf(attempt), artifacts);
-          this.engine.fail(
-            attempt.id,
-            attempt.token,
-            'Попытку прервала штатная остановка controller; поручение возвращено в очередь и продолжится с кандидата или черновика',
-            { kind: 'environment', interrupted: true },
-          );
+          const message =
+            'Попытку прервала штатная остановка controller; поручение возвращено в очередь и продолжится с кандидата или черновика';
+          const failed = this.engine.fail(attempt.id, attempt.token, message, {
+            kind: 'environment',
+            interrupted: true,
+          });
+          // Интегрированную попытку движок в очередь не вернул: это обычный
+          // отказ, и хост называет его причину.
+          if (!failed.interrupted)
+            await this.options.hooks?.failed?.({
+              attempt,
+              kind: 'environment',
+              message:
+                'Штатная остановка прервала интегрированную попытку; нужна проверка recovery',
+            });
           return;
         } catch {
           // Потерявшая владение попытка не публикует поздний отказ.

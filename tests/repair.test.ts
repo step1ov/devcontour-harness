@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import {
   HarnessError,
+  MAX_NEUTRAL_FAILURES,
   WORKSPACE_OWNER,
   type ErrorCode,
   type FailureKind,
@@ -196,6 +197,80 @@ test('Бюджет попыток: отказ окружения и провай
 });
 
 /** Отказ ревью с разным текстом, но названным свойством или классом входов. */
+test('Предел незасчитанных отказов: кандидат → обрыв окружения → повтор не идёт бесконечно; сброс человека его снимает', () => {
+  const { engine, clock, store } = engineOf(policyOf((p) => ((p as any).maxAttempts = 3)));
+  ready(engine, graphOf({ a: [] }));
+  const neutral = () => engine.read((v) => v.work('a')!.neutralFailures ?? 0);
+  let issued = 0;
+  for (let cycle = 0; cycle < 25; cycle++) {
+    const a = engine.claim('c1');
+    if (!a) break;
+    issued++;
+    engine.phase(a.id, a.token, 'verifying', { candidateSha: 'c'.repeat(40) });
+    if (cycle === 1) {
+      // Истёкшее владение — тот же класс незасчитанных отказов.
+      clock.now += 10 * 60_000;
+      engine.lead('c1');
+      engine.expire();
+    } else engine.fail(a.id, a.token, `connection reset #${cycle}`, { kind: 'environment' });
+    engine.clearFailure(['environment']);
+    try {
+      engine.retry('a');
+    } catch (e) {
+      assert.ok(e instanceof HarnessError && e.code === 'ATTEMPTS_EXHAUSTED', String(e));
+      break;
+    }
+  }
+  assert.equal(issued, MAX_NEUTRAL_FAILURES, 'выдач не больше предела');
+  assert.equal(neutral(), MAX_NEUTRAL_FAILURES);
+  assert.equal(
+    engine.read((v) => v.work('a')!.attempt),
+    0,
+    'бюджет попыток не тронут',
+  );
+  const stop = decide(engine, { budgetLeft: 20, maxAttempts: 3 })!;
+  assert.equal(stop.action, 'stop');
+  assert.match(stop.reason, /предел 3/);
+  // Готовую работу на пределе выдача тоже не берёт.
+  store.transact('run.phase', (tx) => tx.putWork({ ...tx.work('a')!, status: 'ready' }));
+  assert.equal(engine.claim('c1'), undefined, 'claim не выдаёт работу на пределе');
+  engine.retry('a', { reason: 'сеть починили' });
+  assert.equal(neutral(), 0, 'сброс снимает предел');
+  assert.ok(engine.claim('c1'), 'после сброса выдача идёт');
+});
+
+test('Штатная остановка: неинтегрированная попытка возвращается в очередь, интегрированная — обычный отказ', () => {
+  const { engine } = engineOf(policyOf((p) => ((p as any).maxAttempts = 3)));
+  ready(engine, graphOf({ a: [] }));
+  const a = engine.claim('c1')!;
+  engine.phase(a.id, a.token, 'verifying', { candidateSha: 'c'.repeat(40) });
+  const first = engine.fail(a.id, a.token, 'остановка', { kind: 'environment', interrupted: true });
+  assert.equal(first.interrupted, true);
+  assert.equal(
+    engine.read((v) => v.work('a')!.status),
+    'ready',
+  );
+  assert.equal(
+    engine.read((v) => v.attempt(a.id)!.interrupted),
+    'shutdown',
+  );
+  const b = engine.claim('c1')!;
+  engine.phase(b.id, b.token, 'integrating', { integrationSha: 'd'.repeat(40) });
+  const second = engine.fail(b.id, b.token, 'остановка', {
+    kind: 'environment',
+    interrupted: true,
+  });
+  assert.equal(second.interrupted, false, 'интегрированная попытка не возвращается в очередь');
+  assert.equal(
+    engine.read((v) => v.work('a')!.status),
+    'failed',
+  );
+  assert.equal(
+    engine.read((v) => v.attempt(b.id)!.interrupted),
+    undefined,
+  );
+});
+
 /** Отказ ревью с разным текстом, но названным свойством и/или классом входов. */
 function rejectBy(
   engine: Engine,

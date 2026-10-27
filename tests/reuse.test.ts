@@ -139,7 +139,10 @@ test('T19: кандидат не берётся при сдвинутой баз
     resourceDatabase: join(f.ctx.state, 'resources.sqlite'),
   });
   f.ctx.runner.release();
-  engine.retry('add-greeting');
+  // Три обрыва окружения после кандидата — предел незасчитанных отказов:
+  // дальше повтор — только со сбросом человека.
+  assert.throws(() => engine.retry('add-greeting'), /сбросом/);
+  engine.retry('add-greeting', { reason: 'среда исправлена' });
   engine.resume();
   await runner.drain();
   assert.equal(f.writes(), 4, 'другая версия движка — новая реализация');

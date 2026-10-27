@@ -166,6 +166,49 @@ test('Пробел приёмки: explain = движок — сосед за п
   }
 });
 
+test('Предел незасчитанных отказов: explain = движок — сосед на пределе не обещает повтора', async () => {
+  const ctx = hsetup({
+    scenario: { writer: [implement()], reviewer: approve() },
+    policy: (p) => {
+      p.maxAttempts = 5;
+      p.repairBudget = 5;
+    },
+    graph: farewell,
+  });
+  const h = ctx.open();
+  try {
+    const key = started(ctx, h);
+    const a = h.engine.claim('controller')!;
+    for (let i = 0; i < 3; i++) {
+      const b = h.engine.claim('controller')!;
+      assert.equal(b.workId, 'add-farewell');
+      h.engine.fail(b.id, b.token, `connection reset ${'x'.repeat(i)}`, { kind: 'environment' });
+      h.engine.clearFailure(['environment']);
+      if (i < 2) h.engine.retry('add-farewell');
+    }
+    h.engine.fail(a.id, a.token, 'timeout A', { kind: 'timeout' });
+    h.engine.release('controller');
+    assert.deepEqual(
+      diagnose(ctx, h).map((d) => [d.workId, d.retryPlanned]),
+      [
+        ['add-greeting', true],
+        ['add-farewell', false],
+      ],
+    );
+    const result = await h.run({ graph: ctx.graph, author: 'claude' });
+    assert.deepEqual(
+      result.works.map((w) => [w.id, w.status]),
+      [
+        ['add-greeting', 'done'],
+        ['add-farewell', 'failed'],
+      ],
+    );
+    assert.match(h.workflows.get(key).error ?? '', /предел 3/);
+  } finally {
+    h.close();
+  }
+});
+
 for (const mode of ['pause', 'awaiting-user'] as const) {
   test(`H1-03: explain = движок — открытый разбор свойства у соседа (${mode}) блокирует повтор`, async () => {
     const ctx = hsetup({

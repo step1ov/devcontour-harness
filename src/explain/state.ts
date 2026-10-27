@@ -1,5 +1,5 @@
 import { HarnessError } from '../contracts/errors.ts';
-import { repairPolicy } from '../contracts/repair-policy.ts';
+import { MAX_NEUTRAL_FAILURES, repairPolicy } from '../contracts/repair-policy.ts';
 import type { WorkState, WorkStatus } from '../contracts/index.ts';
 import type { Harness } from '../control/harness.ts';
 import { acceptanceGap, repairDecision } from '../engine/repair.ts';
@@ -321,6 +321,7 @@ function outlookOf(
       rule.action === 'retry' &&
       identical - 1 < rule.repeats &&
       !acceptanceGap(v, w) &&
+      (w.neutralFailures ?? 0) < MAX_NEUTRAL_FAILURES &&
       w.attempt < options.maxAttempts &&
       used + i < options.repairBudget;
     if (!retry) break;

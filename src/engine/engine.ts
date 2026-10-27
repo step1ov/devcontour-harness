@@ -50,7 +50,7 @@ import {
   type CallMeta,
 } from './budget.ts';
 import { callDurationMs, callOwner, callRecords, ownerGone } from './usage.ts';
-import { failureFingerprint, repairPolicy } from './failure.ts';
+import { MAX_NEUTRAL_FAILURES, failureFingerprint, repairPolicy } from './failure.ts';
 import { reusableImplementation } from './reuse.ts';
 import { uncoveredGates, unprovenReason } from '../verification/proof.ts';
 import {
@@ -132,6 +132,10 @@ const contentDigest = (order: WorkState['order']) =>
  */
 const uncounted = (kind: FailureKind, blocked: boolean) =>
   blocked || kind === 'environment' || kind === 'provider-auth';
+
+/** Поручение исчерпало предел незасчитанных отказов: повтор — только со сбросом. */
+export const neutralExhausted = (w: Pick<WorkState, 'neutralFailures'>) =>
+  (w.neutralFailures ?? 0) >= MAX_NEUTRAL_FAILURES;
 
 export class Engine {
   readonly host: ExecutionHost;
@@ -953,6 +957,7 @@ export class Engine {
         // после разбора. Принятие корпуса, ждущее оператора, удерживает выдачу.
         if (blocksClaim(w) || this.awaitsOperator(w, tx)) return false;
         if (w.attempt >= this.policy.maxAttempts) return false;
+        if (neutralExhausted(w)) return false;
         const graph = tx.graph(w.graphId);
         // Согласование привязано к graph digest и к политике, под которой оно дано.
         if (!graph?.approval || graph.approval.digest !== graph.digest) return false;
@@ -1672,6 +1677,10 @@ export class Engine {
         activeRunId: undefined,
         attempt:
           (interrupted || uncounted(kind, blocked)) && w.attempt > 0 ? w.attempt - 1 : w.attempt,
+        // Отказ до работы (blocked) и штатная остановка предел не тратят.
+        ...(uncounted(kind, blocked) && !blocked && !interrupted
+          ? { neutralFailures: (w.neutralFailures ?? 0) + 1 }
+          : {}),
       });
       tx.emit({
         type: 'attempt.failed',
@@ -1705,6 +1714,8 @@ export class Engine {
         runId: id,
         kind,
         blocked,
+        /** Работа возвращена в очередь (штатная остановка); иначе — обычный отказ. */
+        interrupted,
         ...(bound.length ? { properties: bound } : {}),
         ...(episode ? { recovery: { id: episode.id, status: episode.status } } : {}),
       };
@@ -2614,8 +2625,10 @@ export class Engine {
               failureKind: 'environment',
               failureFingerprint: fingerprint,
               activeRunId: undefined,
-              // Владение истекло не по вине кода: попытка не засчитывается.
+              // Владение истекло не по вине кода: попытка не засчитывается,
+              // но предел незасчитанных отказов тратится.
               attempt: w.attempt > 0 ? w.attempt - 1 : w.attempt,
+              neutralFailures: (w.neutralFailures ?? 0) + 1,
             });
           tx.emit({
             type: 'attempt.expired',
@@ -2716,7 +2729,7 @@ export class Engine {
     return this.tx('task.retry', (tx) => {
       const w = tx.work(workId);
       if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
-      const exhausted = w.attempt >= this.policy.maxAttempts;
+      const exhausted = w.attempt >= this.policy.maxAttempts || neutralExhausted(w);
       if (w.status === 'ready' && !exhausted) return { work: w, changed: false };
       if (!['failed', 'cancelled'].includes(w.status) && !(exhausted && !w.activeRunId))
         throw new HarnessError('NOT_READY', 'Повтор доступен после отказа или отмены');
@@ -2729,6 +2742,7 @@ export class Engine {
         ...w,
         status: w.approvedDigest ? 'ready' : 'draft',
         attempt: exhausted ? 0 : w.attempt,
+        neutralFailures: exhausted ? undefined : w.neutralFailures,
         failure: undefined,
         failureKind: undefined,
         failureFingerprint: undefined,
