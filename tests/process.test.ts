@@ -1,9 +1,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access -- тест правит сырой JSON политики. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { command } from '../src/environment/process.ts';
 import { composeRedactors, outputRedactor, redactor } from '../src/environment/redaction.ts';
 import { approve, implement, runAll, setup } from './runner-fixture.ts';
@@ -144,6 +146,97 @@ test('T30: отсоединившийся потомок с очищенным �
       if (pid > 0 && alive(pid)) process.kill(pid, 'SIGKILL');
       if (dir.startsWith(join(tmpdir(), prefix))) rmSync(dir, { recursive: true, force: true });
     }
+  }
+});
+
+test('T30: в ru_RU процесс в каталоге проверки, запущенный до неё, не останавливается; её собственный потомок — останавливается', async () => {
+  // Время старта читается и при локали пользователя ru_RU: отсечение по нему
+  // работает, а не подменяется остановкой всего, что в каталоге.
+  const prefix = 'harness-before-';
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const saved = { LANG: process.env.LANG, LC_ALL: process.env.LC_ALL };
+  const before = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {
+    cwd: dir,
+    env: {},
+    stdio: 'ignore',
+    detached: true,
+  });
+  before.unref();
+  let pid = 0;
+  try {
+    assert.ok(before.pid && before.pid > 0);
+    await new Promise((r) => setTimeout(r, 2500));
+    process.env.LANG = 'ru_RU.UTF-8';
+    process.env.LC_ALL = 'ru_RU.UTF-8';
+    const script = `
+      const { spawn } = require('child_process');
+      const c = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { cwd: ${JSON.stringify(dir)}, env: {}, stdio: 'ignore', detached: true });
+      c.unref();
+      console.log('PID=' + c.pid);`;
+    const result = await command([process.execPath, '-e', script], process.cwd(), {
+      timeoutMs: 30000,
+      contain: { dirs: [dir] },
+    });
+    pid = Number(/PID=(\d+)/.exec(result.stdout)?.[1]);
+    assert.ok(pid > 0, result.stdout);
+    assert.ok(await gone(pid, 2000), 'потомок проверки остановлен');
+    assert.ok(alive(before.pid), 'процесс, запущенный до проверки, жив');
+  } finally {
+    for (const [key, value] of Object.entries(saved))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    for (const p of [pid, before.pid ?? 0]) if (p > 0 && alive(p)) process.kill(p, 'SIGKILL');
+    if (dir.startsWith(join(tmpdir(), prefix))) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('T30: нечитаемое время старта не освобождает процесс в каталоге проверки от остановки', () => {
+  // Вывод ps подменяется в отдельном процессе: время старта каждой строки
+  // нечитаемо. Потомок проверки в её каталоге всё равно останавливается.
+  const prefix = 'harness-nostart-';
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const source = fileURLToPath(new URL('../src/environment/process.ts', import.meta.url));
+  const script = `
+    import { mock } from 'node:test';
+    const real = await import('node:child_process');
+    const execFile = (file, args, options, callback) =>
+      real.execFile(file, args, options, (error, stdout, stderr) =>
+        callback(error, args.join(' ').includes('lstart=')
+          ? String(stdout).replace(/^(\\s*\\d+\\s+\\d+\\s+).+$/gm, '$1неизвестно')
+          : stdout, stderr));
+    mock.module('node:child_process', { namedExports: { ...real, execFile }, defaultExport: real.default });
+    const { command } = await import(${JSON.stringify(source)});
+    const script = "const c = require('child_process').spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { cwd: " + JSON.stringify(${JSON.stringify(dir)}) + ", env: {}, stdio: 'ignore', detached: true }); c.unref(); console.log('PID=' + c.pid);";
+    const r = await command([process.execPath, '-e', script], process.cwd(), { contain: { dirs: [${JSON.stringify(dir)}] }, timeoutMs: 30000 });
+    const pid = Number(/PID=(\\d+)/.exec(r.stdout)?.[1]);
+    await new Promise((done) => setTimeout(done, 1000));
+    let alive = true;
+    try { process.kill(pid, 0); } catch { alive = false; }
+    console.log(JSON.stringify({ pid, alive }));
+  `;
+  let pid = 0;
+  try {
+    const r = spawnSync(
+      process.execPath,
+      [
+        '--experimental-test-module-mocks',
+        '--no-warnings',
+        '--import',
+        import.meta.resolve('tsx'),
+        '--input-type=module',
+        '-e',
+        script,
+      ],
+      { encoding: 'utf8', timeout: 60_000 },
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout.trim().split('\n').at(-1)!) as { pid: number; alive: boolean };
+    pid = out.pid;
+    assert.ok(pid > 0, r.stdout);
+    assert.equal(out.alive, false, 'потомок с нечитаемым временем старта остановлен');
+  } finally {
+    if (pid > 0 && alive(pid)) process.kill(pid, 'SIGKILL');
+    if (dir.startsWith(join(tmpdir(), prefix))) rmSync(dir, { recursive: true, force: true });
   }
 });
 
