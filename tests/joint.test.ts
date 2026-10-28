@@ -3,7 +3,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   HarnessError,
@@ -498,4 +499,28 @@ test('S4-R1-02: совместную проверку, начатую движк
     'active',
   );
   engine.jointHeartbeat(v.id, v.token);
+});
+
+test('T24: корень рабочих деревьев задан — компоненты под ним, каталог проверки хоста создан (impact.json, логи)', async () => {
+  const okGate = `require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase name="combo"/></testsuite>');`;
+  const ctx = jointContour(okGate);
+  await ctx.runner.init();
+  ready(ctx.engine, ctx.graph, 'runner-1');
+  await ctx.runner.drain();
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-joint-root-')));
+  const runner = new JointRunner({
+    engine: ctx.engine,
+    stateDir: ctx.state,
+    baseDir: ctx.state,
+    checkoutRoot: root,
+    resourceDatabase: join(ctx.state, 'resources.sqlite'),
+    directory: (v) => join(ctx.state, 'workspace-checks', v.id),
+  });
+  const v = ctx.engine.jointStart({ workIds: ['add-greeting'] });
+  const passed = await runner.run(v);
+  assert.equal(passed.status, 'passed', passed.status === 'failed' ? passed.error : '');
+  assert.ok(existsSync(join(ctx.state, 'workspace-checks', v.id, 'impact.json')));
+  assert.ok(existsSync(join(ctx.state, 'workspace-checks', v.id, 'combo.log')));
+  assert.ok(!existsSync(join(ctx.state, 'workspace-checks', v.id, 'components')));
+  assert.ok(!existsSync(join(root, '.joint', v.id)), 'компоненты под корнем убраны');
 });

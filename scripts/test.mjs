@@ -1,4 +1,6 @@
 import { readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from 'node:test';
 import { spec } from 'node:test/reporters';
@@ -63,9 +65,29 @@ if (args.length === 1 && args[0] === '--list') {
       process.exitCode ||= 1;
     }
   });
+  // Тесты не пишут в настоящий кэш пользователя (корни рабочих деревьев,
+  // src/environment/checkout-root.ts): новый элемент в нём — провал прогона.
+  const xdg = process.env.XDG_CACHE_HOME;
+  const cache =
+    process.platform === 'darwin'
+      ? join(homedir(), 'Library', 'Caches', 'devcontour-harness')
+      : join(xdg && isAbsolute(xdg) ? xdg : join(homedir(), '.cache'), 'devcontour-harness');
+  const entries = () => {
+    try {
+      return readdirSync(cache);
+    } catch {
+      return [];
+    }
+  };
+  const before = new Set(entries());
   results.once('end', () => {
     process.removeListener('SIGINT', interrupt);
     process.removeListener('SIGTERM', terminate);
+    const added = entries().filter((name) => !before.has(name));
+    if (added.length) {
+      console.error(`Tests wrote into the user cache ${cache}: ${added.join(', ')}`);
+      process.exitCode ||= 1;
+    }
   });
   results.compose(spec).pipe(process.stdout);
 }

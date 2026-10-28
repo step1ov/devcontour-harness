@@ -125,6 +125,9 @@ export class JointRunner {
         signal,
         async (signal, resources) => {
           await this.options.prepare?.(signal);
+          // Каталог проверки (impact, manifest, логи) — и тогда, когда
+          // компоненты лежат под корнем вне дерева.
+          await mkdir(dir, { recursive: true });
           await mkdir(components, { recursive: true });
           const works = this.engine.read((view) => v.workIds.map((id) => view.work(id)!));
           const manifest: NonNullable<JointVerification['manifest']> = {};

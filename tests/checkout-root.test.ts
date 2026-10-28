@@ -8,7 +8,6 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
-  rmdirSync,
   statSync,
   symlinkSync,
   writeFileSync,
@@ -507,15 +506,21 @@ test(
 );
 
 test(
-  'CR08: без checkoutRoot встроенное размещение выбирает кэш пользователя вне дерева',
+  'CR08: без checkoutRoot встроенное размещение выбирает кэш пользователя вне дерева (HOME — во временном каталоге)',
   { skip: noSandbox },
   async () => {
-    const { ctx, state } = embedded();
-    const base = checkoutCacheBase();
-    const root = join(base, stateHash(state));
-    const hadBase = existsSync(base);
-    assert.equal(existsSync(root), false, 'каталог этого теста ещё не создан');
+    // Настоящий кэш пользователя тест не трогает: HOME и XDG_CACHE_HOME — свои.
+    const saved = { HOME: process.env.HOME, XDG_CACHE_HOME: process.env.XDG_CACHE_HOME };
+    const home = tmp('harness-cr-home-');
+    mkdirSync(join(home, 'Library', 'Caches'), { recursive: true });
+    mkdirSync(join(home, '.cache'));
+    process.env.HOME = home;
+    delete process.env.XDG_CACHE_HOME;
     try {
+      const { ctx, state } = embedded();
+      const base = checkoutCacheBase();
+      assert.ok(base.startsWith(home + sep), base);
+      const root = join(base, stateHash(state));
       assert.deepEqual(ctx.runner.checkoutRoot().root, root);
       assert.equal(ctx.runner.checkoutRoot().placement, 'cache');
       await runAll(ctx);
@@ -524,11 +529,9 @@ test(
       assert.ok(a.worktree!.startsWith(root + sep), a.worktree);
       assert.ok(!existsSync(join(state, 'worktrees')));
     } finally {
-      // Убирается только каталог, созданный этим тестом (уникальный хэш его
-      // временного каталога), и пустой общий каталог кэша, если его не было.
-      if (root.startsWith(base + sep) && root.length > base.length + 1)
-        rmSync(root, { recursive: true, force: true });
-      if (!hadBase && existsSync(base) && !readdirSync(base).length) rmdirSync(base);
+      for (const [k, v] of Object.entries(saved))
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
     }
   },
 );
