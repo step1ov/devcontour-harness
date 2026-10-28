@@ -41,6 +41,7 @@ import { checkJsonBytes } from './catalog/bytes.ts';
 import { isSharedOperation, sharedOperations } from './catalog/shared.ts';
 import { harnessCapabilities } from './catalog/harness.ts';
 import type { RunnerHooks } from './engine/runner.ts';
+import { hostGitArgs } from './environment/process.ts';
 import { FileContextSource, FileResultSink, FileWorkSource } from './connectors/files.ts';
 
 const usage = `harness ${HARNESS_VERSION}
@@ -187,10 +188,19 @@ const reachableIn = (b: Binding, repositoryId: string, sha: string) => {
   const repo = b.policy.repositories.find((r) => r.id === repositoryId);
   if (!repo) return false;
   try {
-    execFileSync('git', ['merge-base', '--is-ancestor', sha, repo.targetRef], {
-      cwd: resolve(b.baseDir, repo.path),
-      stdio: 'ignore',
-    });
+    execFileSync(
+      'git',
+      hostGitArgs(resolve(b.baseDir, repo.path), [
+        'merge-base',
+        '--is-ancestor',
+        sha,
+        repo.targetRef,
+      ]),
+      {
+        cwd: resolve(b.baseDir, repo.path),
+        stdio: 'ignore',
+      },
+    );
     return true;
   } catch {
     return false;

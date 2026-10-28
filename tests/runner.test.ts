@@ -556,10 +556,11 @@ test('Зависший git update-ref приёмки останавливает�
   const shim = mkdtempSync(join(tmpdir(), 'harness-git-shim-'));
   const realGit = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
   const ref = ctx.policy.repositories[0]!.targetRef;
-  // Зависает только продвижение target ref приёмкой.
+  // Зависает только продвижение target ref приёмкой. Подкоманда ищется среди
+  // аргументов: перед ней стоят флаги `-c` git хоста.
   writeFileSync(
     join(shim, 'git'),
-    `#!/bin/sh\nfor a in "$@"; do [ "$a" = ${JSON.stringify(ref)} ] && [ "$3" = update-ref ] && exec sleep 60; done\nexec ${JSON.stringify(realGit)} "$@"\n`,
+    `#!/bin/sh\nu=\nfor a in "$@"; do [ "$a" = update-ref ] && u=1; done\nfor a in "$@"; do [ -n "$u" ] && [ "$a" = ${JSON.stringify(ref)} ] && exec sleep 60; done\nexec ${JSON.stringify(realGit)} "$@"\n`,
   );
   chmodSync(join(shim, 'git'), 0o755);
   const before = target(ctx);

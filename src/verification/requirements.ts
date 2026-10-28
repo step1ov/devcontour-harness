@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { HarnessError, relativePathSchema, sha256, type WorkOrder } from '../contracts/index.ts';
+import { hostGitArgs } from '../environment/process.ts';
 
 /** Требование заканчивается на следующем заголовке уровня 1–2; примеры в fenced-блоках не считаются. */
 export function parseRequirements(markdown: string) {
@@ -43,7 +44,11 @@ export function requirementSnapshot(cwd: string, source: string, ref = 'HEAD') {
   if (!/^(HEAD|[a-f0-9]{40,64})$/.test(ref))
     throw new HarnessError('INVALID_INPUT', 'Нужен HEAD или точный SHA');
   const git = (...args: string[]) =>
-    execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 1_100_000 }).trimEnd();
+    execFileSync('git', hostGitArgs(cwd, args), {
+      cwd,
+      encoding: 'utf8',
+      maxBuffer: 1_100_000,
+    }).trimEnd();
   const sha = git('rev-parse', '--verify', ref + '^{commit}');
   if (!/^100(644|755) blob /.test(git('ls-tree', sha, '--', source)))
     throw new HarnessError(

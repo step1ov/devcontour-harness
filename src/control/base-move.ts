@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { ExecutionPolicy, ExecutionStore, ExecutionView } from '../contracts/index.ts';
-import { git } from '../environment/process.ts';
+import { git, hostGitArgs } from '../environment/process.ts';
 
 /** Сдвиг ref: репозиторий, ref, новое и ожидаемое прежнее значение. */
 export type RefMove = (
@@ -26,7 +26,7 @@ export function fencedRefMove(
   return (repoPath, target, to, from) =>
     store.transact('base.moved', (tx) => {
       fence(tx);
-      execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'update-ref', target, to, from], {
+      execFileSync('git', hostGitArgs(repoPath, ['update-ref', target, to, from]), {
         cwd: repoPath,
         timeout: timeoutMs,
         stdio: 'pipe',
