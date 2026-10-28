@@ -7,6 +7,8 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,6 +20,8 @@ import {
   isolationSupport,
   mandatoryDenyRule,
   parseSandboxLog,
+  protectedChanges,
+  protectedSnapshot,
   protectedWriteDenies,
   sandboxDenials,
 } from '../src/environment/isolation.ts';
@@ -320,4 +324,93 @@ test('SBX05: явные запреты — каталоги IDE вне node_modu
   assert.equal(denies.includes(`${root}/src/deep/er/*/.idea`), false);
   // Корень с символами глоба шаблоном не записать: srt остаётся с полным запретом.
   assert.equal(protectedWriteDenies([join(root, 'a[1]')]), undefined);
+});
+
+test('SBX06: сверка защищённых путей — пустые служебные каталоги (.claude/.cc-writes) не нарушение; файл, ссылка или правка прежнего — нарушение', () => {
+  const r = repo({ 'apps/mobile/src/store/index.ts': 'x\n' });
+  const root = realpathSync(r.dir);
+  /** Нарушения после правки `change` поверх чистого снимка дерева. */
+  const after = (change: () => void) => {
+    const before = protectedSnapshot(root);
+    change();
+    return protectedChanges(before, root).map((p) => p.slice(root.length + 1));
+  };
+  const dir = (p: string) => mkdirSync(join(root, p), { recursive: true, mode: 0o700 });
+  const file = (p: string, text = 'x') => {
+    mkdirSync(join(root, p, '..'), { recursive: true });
+    writeFileSync(join(root, p), text);
+  };
+
+  // Как у CLI исполнителя: пустой `.claude/.cc-writes` в корне и рядом с файлами.
+  assert.deepEqual(
+    after(() => {
+      dir('.claude/.cc-writes');
+      dir('apps/mobile/.claude/.cc-writes');
+      dir('apps/mobile/src/store/.claude/.cc-writes');
+      dir('.vscode');
+    }),
+    [],
+  );
+  // Поверх уже пустых — снова пустые каталоги: нарушения нет.
+  assert.deepEqual(
+    after(() => dir('.claude/.cc-writes/nested')),
+    [],
+  );
+  // Любой файл или ссылка внутри — нарушение, как раньше.
+  assert.deepEqual(
+    after(() => file('.claude/settings.json', '{}')),
+    ['.claude'],
+  );
+  assert.deepEqual(
+    after(() => file('apps/mobile/.claude/.cc-writes/x')),
+    ['apps/mobile/.claude'],
+  );
+  assert.deepEqual(
+    after(() => symlinkSync('/etc', join(root, 'apps/mobile/src/store/.claude/.cc-writes/l'))),
+    ['apps/mobile/src/store/.claude'],
+  );
+  assert.deepEqual(
+    after(() => file('.vscode/tasks.json', '{}')),
+    ['.vscode'],
+  );
+  // Прежний `.claude` с файлом: правка содержимого и удаление файла — нарушение.
+  assert.deepEqual(
+    after(() => file('.claude/settings.json', '{"hooks":{}}')),
+    ['.claude'],
+  );
+  assert.deepEqual(
+    after(() => rmSync(join(root, '.claude/settings.json'))),
+    ['.claude'],
+  );
+  // `.git` хоста: в hooks с файлами (образцы git init) нарушение — и
+  // подложенный hook, и даже пустой каталог.
+  assert.deepEqual(
+    after(() => dir('.git/hooks/empty.d')),
+    ['.git/hooks'],
+  );
+  assert.deepEqual(
+    after(() => file('.git/hooks/pre-commit', '#!/bin/sh\n')),
+    ['.git/hooks'],
+  );
+});
+
+test('SBX07: файл .git worktree, заменённый каталогом (даже пустым), подложенный .git/config и вложенный .git-файл — нарушение', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-sbx-gitfile-')));
+  const rel = (paths: string[]) => paths.map((p) => p.slice(root.length + 1));
+  const gitFile = () => writeFileSync(join(root, '.git'), 'gitdir: /elsewhere\n');
+  gitFile();
+  let before = protectedSnapshot(root);
+  rmSync(join(root, '.git'));
+  mkdirSync(join(root, '.git', 'hooks'), { recursive: true, mode: 0o700 });
+  assert.deepEqual(rel(protectedChanges(before, root)), ['.git']);
+  writeFileSync(join(root, '.git', 'config'), '[core]\n\tfsmonitor = x\n');
+  assert.deepEqual(rel(protectedChanges(before, root)), ['.git', '.git/config']);
+  // Вложенный `.git`-файл вместо пустого каталога — нарушение.
+  rmSync(join(root, '.git'), { recursive: true });
+  gitFile();
+  mkdirSync(join(root, 'pkg', '.git'), { recursive: true });
+  before = protectedSnapshot(root);
+  rmSync(join(root, 'pkg', '.git'), { recursive: true });
+  writeFileSync(join(root, 'pkg', '.git'), 'gitdir: /elsewhere\n');
+  assert.deepEqual(rel(protectedChanges(before, root)), ['pkg/.git']);
 });

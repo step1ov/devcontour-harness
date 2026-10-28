@@ -5,6 +5,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Runner } from '../src/engine/runner.ts';
+import { isolationSupport } from '../src/environment/isolation.ts';
 import { BlockedError } from '../src/engine/classify.ts';
 import {
   TaskFailure,
@@ -114,6 +115,42 @@ test('T05: выход за область записи и правка защи�
     assert.equal(target(ctx), before, 'target ref не продвинут');
   }
 });
+
+test(
+  'T05: пустые служебные каталоги CLI исполнителя (.claude/.cc-writes) под песочницей ОС попытку не отклоняют; файл в .claude — отклоняет',
+  { skip: isolationSupport().ok ? false : 'песочница ОС недоступна' },
+  async () => {
+    const dirs = ['.claude/.cc-writes', 'src/.claude/.cc-writes'];
+    for (const [extra, done] of [
+      [{}, true],
+      [{ '.claude/settings.json': '{}' }, false],
+    ] as const) {
+      const ctx = setup({
+        scenario: {
+          writer: { ...implement({ 'src/greet.js': greet, ...extra }), dirs },
+          reviewer: approve(),
+        },
+        policy: (p) => {
+          (p as { maxAttempts: number }).maxAttempts = 1;
+          p.isolation = { mode: 'os', domains: [] };
+        },
+      });
+      const before = target(ctx);
+      await runAll(ctx);
+      const work = ctx.engine.read((v) => v.work('add-greeting')!);
+      if (done) assert.equal(work.status, 'done', work.failure);
+      else {
+        assert.equal(work.status, 'failed');
+        assert.equal(work.failureKind, 'scope-violation');
+        assert.match(
+          work.failure!,
+          /защищённые пути \(конфигурация IDE, shell, git или Claude\): \.claude$/,
+        );
+        assert.equal(target(ctx), before, 'target ref не продвинут');
+      }
+    }
+  },
+);
 
 test('T08: невалидный ответ ревью, approved с блокирующей находкой и таймаут ревьюера — не принято, без самооценки writer', async () => {
   const blocking = approve();

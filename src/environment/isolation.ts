@@ -487,6 +487,8 @@ export function sandboxDenials(violations: SandboxViolation[], policy: Isolation
 /** Имена, которые проверка и исполнитель не создают и не меняют. */
 const protectedNames = new Set<string>([...DANGEROUS_FILES, ...ideDirectories, '.claude', '.git']);
 const snapshotLimit = 200_000;
+/** Подпись каталога, в дереве которого нет ни файлов, ни символьных ссылок. */
+const emptyTree = 'd:empty';
 /**
  * Защищённые элементы checkout вне `node_modules`: путь → подпись.
  *
@@ -514,10 +516,12 @@ export function protectedSnapshot(root: string) {
     }
     if (stat.isSymbolicLink()) return 'l:' + readlinkSync(path);
     if (!stat.isDirectory()) return `f:${stat.size}:${stat.mtimeMs}:${stat.ino}`;
-    const inner = readdirSync(path)
-      .sort()
-      .map((name) => `${name}=${signature(join(path, name))}`);
-    return `d:${stat.ino}[${inner.join(',')}]`;
+    const names = readdirSync(path).sort();
+    const inner = names.map((name) => signature(join(path, name)));
+    // Дерево из одних каталогов не несёт ни конфигурации, ни ссылки наружу:
+    // его подпись одна для любого такого дерева (см. `protectedChanges`).
+    if (inner.every((sig) => sig === emptyTree)) return emptyTree;
+    return `d:${stat.ino}[${names.map((name, i) => `${name}=${inner[i]}`).join(',')}]`;
   };
   const walk = (dir: string) => {
     let entries: import('node:fs').Dirent[];
@@ -531,7 +535,10 @@ export function protectedSnapshot(root: string) {
       const path = join(dir, entry.name);
       if (entry.name === '.git' && dir === root && entry.isDirectory()) {
         // Обычный `.git`: объекты и индекс меняет и git хоста; сверяются
-        // только конфигурация, hooks и перенаправления.
+        // только конфигурация, hooks и перенаправления. Сам вид элемента
+        // тоже: файл `.git` worktree, заменённый каталогом, — изменение,
+        // даже если внутри одни пустые каталоги.
+        found.set(path, 'd:git');
         for (const name of ['config', 'hooks', ...gitRedirects])
           found.set(join(path, name), signature(join(path, name)));
         continue;
@@ -546,11 +553,24 @@ export function protectedSnapshot(root: string) {
   walk(root);
   return found;
 }
-/** Защищённые пути, которые появились или изменились после снимка `before`. */
+/**
+ * Защищённые пути, которые появились или изменились после снимка `before`.
+ *
+ * Пустые каталоги (только каталоги, рекурсивно) нарушением не считаются,
+ * если до снимка пути не было или он тоже был без файлов: исполняемой
+ * конфигурации в них нет, а CLI исполнителя создаёт такие служебные каталоги
+ * (`.claude/.cc-writes`) рядом с каждым записанным файлом. Путь, где раньше
+ * были файлы, по-прежнему нарушение при любом изменении.
+ */
 export function protectedChanges(before: Map<string, string>, root: string) {
   const after = protectedSnapshot(root);
   return [...after]
-    .filter(([path, sig]) => sig !== 'missing' && before.get(path) !== sig)
+    .filter(([path, sig]) => {
+      if (sig === 'missing') return false;
+      const was = before.get(path) ?? 'missing';
+      if (sig === emptyTree && (was === 'missing' || was === emptyTree)) return false;
+      return was !== sig;
+    })
     .map(([path]) => path);
 }
 

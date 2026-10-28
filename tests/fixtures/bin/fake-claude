@@ -90,6 +90,9 @@ for (const [path, text] of Object.entries(step.files ?? {})) {
   mkdirSync(dirname(join(process.cwd(), path)), { recursive: true });
   writeFileSync(join(process.cwd(), path), text);
 }
+// Пустые служебные каталоги, как у настоящего CLI (`.claude/.cc-writes`).
+for (const path of step.dirs ?? [])
+  mkdirSync(join(process.cwd(), path), { recursive: true, mode: 0o700 });
 for (const path of step.remove ?? []) rmSync(join(process.cwd(), path), { force: true });
 // Самопроверка исполнителя: команда из запроса controller на рабочем дереве.
 if (step.selfCheck) {
