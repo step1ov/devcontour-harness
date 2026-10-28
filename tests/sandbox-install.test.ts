@@ -508,7 +508,7 @@ test(
   },
 );
 
-test('SBX10: пустой защищённый каталог, открытый на запись группе или всем, — нарушение', () => {
+test('SBX10: пустой защищённый каталог, открытый на запись всем, — нарушение; открытый группе (umask 002) — нет', () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-sbx-mode-')));
   const after = (change: () => void) => {
     const before = protectedSnapshot(root);
@@ -519,7 +519,7 @@ test('SBX10: пустой защищённый каталог, открытый 
     mkdirSync(join(root, p), { recursive: true });
     chmodSync(join(root, p), mode);
   };
-  // Закрытые для чужой записи — как у CLI исполнителя.
+  // Закрытые для записи всем — как у CLI исполнителя (и при umask 002).
   assert.deepEqual(
     after(() => {
       dir('.claude/.cc-writes', 0o700);
@@ -534,8 +534,17 @@ test('SBX10: пустой защищённый каталог, открытый 
   chmodSync(join(root, '.claude/.cc-writes'), 0o700);
   assert.deepEqual(
     after(() => chmodSync(join(root, '.claude'), 0o775)),
+    [],
+  );
+  assert.deepEqual(
+    after(() => dir('src/.claude/.cc-writes', 0o775)),
+    [],
+  );
+  assert.deepEqual(
+    after(() => chmodSync(join(root, '.claude'), 0o777)),
     ['.claude'],
   );
+  chmodSync(join(root, '.claude'), 0o755);
   assert.deepEqual(
     after(() => dir('pkg/.vscode', 0o757)),
     ['pkg/.vscode'],
