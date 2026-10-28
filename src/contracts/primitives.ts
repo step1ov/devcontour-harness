@@ -6,6 +6,24 @@ export const idSchema = z
   .regex(/^[A-Za-z0-9_-]{1,80}$/, 'Ожидается ID [A-Za-z0-9_-]{1,80}');
 /** Ссылка на gate или на именованную группу gates (`@имя`). */
 export const gateRefSchema = z.string().regex(/^@?[A-Za-z0-9_-]{1,80}$/);
+/**
+ * Предел ссылок на gates в одной области (задача, поручение, потребитель,
+ * основание ревью). Он равен пределу gates профиля стека: область задачи
+ * может назвать весь профиль, и включение каждого gate в задачу выполнимо
+ * одной задачей.
+ */
+export const GATE_SCOPE_LIMIT = 100;
+/** Превышение предела области gates — понятный отказ с величиной и исправлением. */
+export const gateScopeTooBig = (issue: { input?: unknown }) => {
+  const actual = Array.isArray(issue.input) ? issue.input.length : GATE_SCOPE_LIMIT + 1;
+  return (
+    `область gates: ${actual} при пределе ${GATE_SCOPE_LIMIT}, лишних ${actual - GATE_SCOPE_LIMIT}. ` +
+    'Назовите группу gates (@имя) или уберите повторы'
+  );
+};
+/** Ссылки на gates одной области: не больше `GATE_SCOPE_LIMIT`. */
+export const gateScopeSchema = <T extends z.ZodType<string>>(item: T) =>
+  z.array(item).max(GATE_SCOPE_LIMIT, { error: gateScopeTooBig });
 export const roleIdSchema = z
   .string()
   .regex(/^[a-z][a-z0-9-]{1,30}$/, 'Идентификатор роли: строчные латинские буквы, цифры и дефис');

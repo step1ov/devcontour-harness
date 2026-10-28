@@ -197,6 +197,67 @@ test('T09: кандидат зелёный, интеграция красная 
     'интеграция красная',
   );
   assert.equal(target(ctx), marker, 'target остался на чужом коммите');
+  // Стойкий провал повторён один раз на том же SHA и подтверждён: обе записи
+  // остаются, класс отказа прежний.
+  const integration = a.evidence.filter((e) => e.phase === 'integration' && e.kind === 'test');
+  assert.equal(integration.length, 2, 'один повтор, не больше');
+  assert.equal(integration[1]!.sha, integration[0]!.sha);
+  assert.deepEqual(integration[1]!.recheck, { of: integration[0]!.id, outcome: 'confirmed' });
+  assert.equal(a.failureKind, 'gate');
+});
+
+test('Провал gate интеграции из-за среды повторяется на том же кандидате: повтор прошёл — принятие без новой реализации, первая запись помечена flaky', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'harness-flaky-'));
+  const counter = join(state, 'integration-runs');
+  // Gate падает на первом запуске интеграции (счётчик вне worktree), дальше — обычный тест.
+  const flaky = `
+const fs = require('fs');
+const n = fs.existsSync(${JSON.stringify(counter)}) ? Number(fs.readFileSync(${JSON.stringify(counter)}, 'utf8')) : 0;
+if (process.env.DEVCONTOUR_PHASE === 'integration') fs.writeFileSync(${JSON.stringify(counter)}, String(n + 1));
+if (process.env.DEVCONTOUR_PHASE === 'integration' && n === 0) {
+  fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase classname="greet" name="greets"><failure message="budget exceeded"/></testcase></testsuite>');
+  process.exit(1);
+}
+require('./run.js');
+`;
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    files: { 'test/flaky.js': flaky },
+    policy: (p) => {
+      const raw = p as { maxAttempts: number; repositories: { gates: { command: string[] }[] }[] };
+      raw.maxAttempts = 1;
+      raw.repositories[0]!.gates[0]!.command = [process.execPath, 'test/flaky.js'];
+    },
+  });
+  await runAll(ctx);
+  const work = ctx.engine.read((v) => v.work('add-greeting')!);
+  assert.equal(work.status, 'done', work.failure);
+  const attempts = ctx.engine.read((v) => v.attempts('add-greeting'));
+  assert.equal(attempts.length, 1, 'повтор не стоил новой попытки и реализации');
+  const a = attempts[0]!;
+  const integration = a.evidence.filter((e) => e.phase === 'integration' && e.kind === 'test');
+  assert.equal(integration.length, 2);
+  assert.equal(integration[0]!.passed, false);
+  assert.equal(integration[1]!.passed, true);
+  assert.equal(integration[1]!.sha, a.integrationSha);
+  assert.deepEqual(integration[1]!.recheck, { of: integration[0]!.id, outcome: 'flaky' });
+  assert.notEqual(integration[0]!.log, integration[1]!.log, 'лог первого запуска сохранён');
+  assert.match(readFileSync(integration[0]!.log, 'utf8'), /budget exceeded|1 failures/);
+  assert.equal(readFileSync(counter, 'utf8'), '2');
+  type GatePayload = { phase: string; recheck?: { outcome: string } };
+  const gateEvents = ctx.store
+    .events()
+    .filter((e) => e.type === 'attempt.gate')
+    .map((e) => e.payload as GatePayload)
+    .filter((p) => p.phase === 'integration');
+  assert.deepEqual(
+    gateEvents.map((p) => p.recheck?.outcome ?? null),
+    [null, 'flaky'],
+  );
+  assert.ok(
+    a.timings?.some((t) => t.stage.startsWith('integration-recheck:')),
+    'повтор — отдельная стадия замеров',
+  );
 });
 
 test('T10: чужое продвижение target ref перед CAS — нет потери чужого коммита и ложного done; повтор от актуальной базы', async () => {

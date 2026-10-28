@@ -581,6 +581,36 @@ test('S2-R2-01: согласование, связанное с контекст
   );
 });
 
+test('Истечение без истёкших попыток не открывает транзакцию записи; активные берутся быстрым путём представления', () => {
+  const { engine, store } = engineOf();
+  ready(engine, graphOf({ a: [] }));
+  const a = engine.claim('c1')!;
+  const kinds: string[] = [];
+  const transact = store.transact.bind(store);
+  store.transact = ((kind, fn) => {
+    kinds.push(kind);
+    return transact(kind, fn);
+  });
+  const read = store.read.bind(store);
+  let fast = 0;
+  store.read = ((fn) =>
+    read((v) =>
+      fn(
+        Object.assign(Object.create(v) as typeof v, {
+          activeAttempts: () => {
+            fast++;
+            return v.attempts().filter((x) => x.status === 'active');
+          },
+        }),
+      ),
+    ));
+  assert.deepEqual(engine.expire(), []);
+  assert.deepEqual(kinds, [], 'без истёкших — ни одной транзакции');
+  assert.ok(fast > 0, 'активные попытки — через activeAttempts представления');
+  assert.deepEqual(engine.expire(Number.MAX_SAFE_INTEGER), [a.id]);
+  assert.deepEqual(kinds, ['runs.expired']);
+});
+
 test('expire(at): владение, истекающее к моменту at, снимается; живое сейчас — нет без at', () => {
   const { engine } = engineOf();
   ready(engine, graphOf({ a: [] }));

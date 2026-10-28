@@ -8,6 +8,7 @@ import {
   relativePathSchema,
   roleIdSchema,
   trimmedText,
+  gateScopeSchema,
 } from './primitives.ts';
 import { digestOf } from './digest.ts';
 import type { CodedIssue } from './errors.ts';
@@ -46,7 +47,7 @@ export const contractRefSchema = z.strictObject({ id: idSchema, digest: digestSc
 /** Проверка потребителя: компонент и его gates против integration результата. */
 export const consumerSchema = z.strictObject({
   repositoryId: idSchema,
-  gates: z.array(gateRefSchema).min(1).max(20),
+  gates: gateScopeSchema(gateRefSchema).min(1),
 });
 
 /**
@@ -79,7 +80,7 @@ export const workOrderSchema = z.strictObject({
     }),
   dependsOn: z.array(idSchema).max(100).default([]),
   /** Область доказательства: подмножество gates/групп политики. Нет поля — все gates репозитория. */
-  gates: z.array(gateRefSchema).max(20).optional(),
+  gates: gateScopeSchema(gateRefSchema).optional(),
   consumers: z.array(consumerSchema).max(10).optional(),
   /** Свойства договора проверки, которые поручение подтверждает сейчас. */
   properties: z.array(propertyIdSchema).max(30).optional(),

@@ -166,7 +166,7 @@
                       }
                     },
                     "gates": {
-                      "maxItems": 20,
+                      "maxItems": 100,
                       "type": "array",
                       "items": {
                         "type": "string",
@@ -185,7 +185,7 @@
                           },
                           "gates": {
                             "minItems": 1,
-                            "maxItems": 20,
+                            "maxItems": 100,
                             "type": "array",
                             "items": {
                               "type": "string",
@@ -603,7 +603,7 @@
                 }
               },
               "gates": {
-                "maxItems": 20,
+                "maxItems": 100,
                 "type": "array",
                 "items": {
                   "type": "string",
@@ -622,7 +622,7 @@
                     },
                     "gates": {
                       "minItems": 1,
-                      "maxItems": 20,
+                      "maxItems": 100,
                       "type": "array",
                       "items": {
                         "type": "string",
@@ -2249,6 +2249,28 @@
                   "type": "string",
                   "pattern": "^[A-Za-z0-9_-]{1,80}$"
                 },
+                "recheck": {
+                  "type": "object",
+                  "properties": {
+                    "of": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "outcome": {
+                      "type": "string",
+                      "enum": [
+                        "flaky",
+                        "confirmed"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "of",
+                    "outcome"
+                  ],
+                  "additionalProperties": false
+                },
                 "inspection": {
                   "type": "object",
                   "properties": {
@@ -3000,7 +3022,7 @@
                   "properties": {
                     "gates": {
                       "minItems": 1,
-                      "maxItems": 20,
+                      "maxItems": 100,
                       "type": "array",
                       "items": {
                         "type": "string",

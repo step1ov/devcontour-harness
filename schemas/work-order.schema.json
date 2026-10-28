@@ -106,7 +106,7 @@
       }
     },
     "gates": {
-      "maxItems": 20,
+      "maxItems": 100,
       "type": "array",
       "items": {
         "type": "string",
@@ -125,7 +125,7 @@
           },
           "gates": {
             "minItems": 1,
-            "maxItems": 20,
+            "maxItems": 100,
             "type": "array",
             "items": {
               "type": "string",

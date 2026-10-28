@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { idSchema, relativePathSchema, roleIdSchema } from './primitives.ts';
+import { GATE_SCOPE_LIMIT, idSchema, relativePathSchema, roleIdSchema } from './primitives.ts';
 import { environmentSchema, gateSchema, lifecycleSchema, stepSchema } from './policy.ts';
 import { toolchainSchema } from './toolchain.ts';
 
@@ -69,7 +69,7 @@ export const stackProfileSchema = z.strictObject({
   /** Встроенный ID или относительный `./file.json` внутри репозитория. */
   extends: z.array(z.string().min(1)).max(PROFILE_DEPTH_LIMIT).default([]),
   capabilities: z.array(z.string().min(1).max(100)).max(100).default([]),
-  gates: z.array(profileGateSchema).max(100).default([]),
+  gates: z.array(profileGateSchema).max(GATE_SCOPE_LIMIT).default([]),
   prepare: z.array(stepSchema).max(100).default([]),
   environment: environmentSchema.optional(),
   lifecycle: lifecycleSchema.optional(),

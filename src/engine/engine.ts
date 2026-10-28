@@ -138,6 +138,11 @@ const uncounted = (kind: FailureKind, blocked: boolean) =>
 export const neutralExhausted = (w: Pick<WorkState, 'neutralFailures'>) =>
   (w.neutralFailures ?? 0) >= MAX_NEUTRAL_FAILURES;
 
+/** Активные попытки снимка: быстрый путь адаптера или фильтр всех. */
+export function activeOf(v: ExecutionView): AttemptState[] {
+  return v.activeAttempts ? v.activeAttempts() : v.attempts().filter((a) => a.status === 'active');
+}
+
 export class Engine {
   readonly host: ExecutionHost;
   readonly policy: ExecutionPolicy;
@@ -1404,6 +1409,29 @@ export class Engine {
           'INVALID_INPUT',
           `Evidence вида ${evidence.kind} не может относиться к gate ${evidence.gate}`,
         );
+      // Повтор ссылается на провал того же gate этой попытки на том же SHA, и
+      // попытка повторяет не больше одного провала.
+      if (evidence.recheck) {
+        const of = evidence.recheck.of;
+        const first = a.evidence.find((e) => e.id === of);
+        if (
+          evidence.kind !== 'test' ||
+          !first ||
+          first.passed ||
+          first.kind !== 'test' ||
+          first.gate !== evidence.gate ||
+          first.phase !== evidence.phase ||
+          first.sha !== evidence.sha ||
+          first.consumer !== evidence.consumer ||
+          a.evidence.some((e) => e.recheck)
+        )
+          throw new HarnessError(
+            'INVALID_INPUT',
+            'Повтор gate не относится к провалу этой попытки',
+          );
+        if (evidence.recheck.outcome !== (evidence.passed ? 'flaky' : 'confirmed'))
+          throw new HarnessError('INVALID_INPUT', 'Исход повтора gate не согласован с записью');
+      }
       const record: EvidenceRecord = {
         ...evidence,
         ...(a.checks ? { checks: a.checks.effective } : {}),
@@ -1438,6 +1466,7 @@ export class Engine {
             passed: record.passed,
             evidenceId: record.id,
             ...(record.consumer ? { consumer: record.consumer } : {}),
+            ...(record.recheck ? { recheck: record.recheck } : {}),
           },
         });
       return record;
@@ -2650,9 +2679,12 @@ export class Engine {
    * момент в будущем, когда снимает всё владение восстановленной копии.
    */
   expire(at = this.now()) {
+    // Такт очереди вызывает истечение постоянно: без истёкших попыток
+    // транзакции записи (и её снимка состояния) нет.
+    if (!this.read((v) => activeOf(v).some((a) => a.leaseUntil <= at))) return [];
     return this.tx('runs.expired', (tx) => {
       const ids: string[] = [];
-      for (const a of tx.attempts())
+      for (const a of activeOf(tx))
         if (a.status === 'active' && a.leaseUntil <= at) {
           const error =
             (a.error?.startsWith(HEARTBEAT_FAILED) ? a.error + '. ' : '') +

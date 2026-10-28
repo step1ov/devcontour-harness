@@ -569,6 +569,8 @@ test('IN18: отказ обязательного gate не принимаетс
     [
       ['candidate', true],
       ['integration', false],
+      // Стойкий провал интеграции повторён один раз на том же SHA и подтверждён.
+      ['integration', false],
     ],
   );
   const result = checkResult(a);

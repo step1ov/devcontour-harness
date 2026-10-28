@@ -601,6 +601,8 @@ test('HP08/engine: успешный probe не заменяет gates и не д
     [
       ['candidate', 'unit', true],
       ['integration', 'unit', false],
+      // Стойкий провал интеграции повторён один раз на том же SHA и подтверждён.
+      ['integration', 'unit', false],
     ],
   );
   assert.ok(tests.every((e) => !e.log.includes('probe-runs')));

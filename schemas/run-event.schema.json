@@ -627,6 +627,28 @@
             "consumer": {
               "type": "string",
               "pattern": "^[A-Za-z0-9_-]{1,80}$"
+            },
+            "recheck": {
+              "type": "object",
+              "properties": {
+                "of": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": [
+                    "flaky",
+                    "confirmed"
+                  ]
+                }
+              },
+              "required": [
+                "of",
+                "outcome"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
