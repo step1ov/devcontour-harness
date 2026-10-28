@@ -286,8 +286,8 @@ export class Runner {
     const repos = this.policy.repositories.map((r) => this.repoPath(r));
     const root = this.checkoutRoot().root;
     return {
-      // Чужие рабочие деревья под корнем вне дерева закрыты поэлементно:
-      // предки своего checkout открыты.
+      // Корень вне дерева закрыт целиком, как каталог состояния: свои
+      // деревья открыты более конкретным разрешением.
       checkouts: root ? [root] : [],
       hidden: [
         ...new Set([

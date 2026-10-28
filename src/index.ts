@@ -180,7 +180,6 @@ export {
   checkoutCacheBase,
   checkoutPath,
   chooseCheckoutRoot,
-  closedCheckouts,
   type CheckoutPlacement,
   type CheckoutRoot,
   type CheckoutRootInput,

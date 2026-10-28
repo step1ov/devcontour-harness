@@ -77,7 +77,7 @@ export const probeSpec = z.object({
   /** Закрытое проверке и открытое на чтение — граница reviewer. */
   controller: z.array(z.string()),
   readable: z.array(z.string()),
-  /** Корни рабочих деревьев вне каталога состояния (закрыты поэлементно). */
+  /** Корни рабочих деревьев вне каталога состояния (закрыты целиком). */
   checkouts: z.array(z.string()).optional(),
   isolation: z.object({ mode: z.enum(['os', 'none']), domains: z.array(z.string()) }),
   commandTimeoutMs: z.number().int().min(1000),

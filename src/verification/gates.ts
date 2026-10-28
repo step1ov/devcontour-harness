@@ -300,7 +300,7 @@ export async function runCheck(
     write: string[];
     readable: string[];
     controller: string[];
-    /** Корни рабочих деревьев вне каталога состояния: закрыты поэлементно (`closedCheckouts`). */
+    /** Корни рабочих деревьев вне каталога состояния: закрыты целиком, свои деревья открыты. */
     checkouts?: string[];
     settingsDir: string;
     /**
@@ -510,7 +510,7 @@ export function freshnessEnv(kind: GatePolicy['kind'], env: NodeJS.ProcessEnv) {
 /**
  * Граница проверки: закрытое (состояние controller, исходные checkout),
  * открытое внутри него и корни рабочих деревьев вне каталога состояния,
- * которые закрываются поэлементно.
+ * закрытые целиком (свои деревья проверки открыты).
  */
 export interface Boundary {
   hidden: string[];
@@ -703,6 +703,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
               result.violations,
               result.isolation,
               result.stdout + '\n' + result.stderr,
+              gateCwd,
             )
           : [];
       if (denied.length) {

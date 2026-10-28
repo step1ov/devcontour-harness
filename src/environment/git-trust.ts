@@ -88,6 +88,9 @@ export function assertTrustedCheckout(cwd: string): string | undefined {
       /* нет `.git` на этом уровне */
     }
     const nested = insideKnown(dir);
+    // Файл `.git` созданного хостом дерева удалён: git ушёл бы в репозиторий
+    // предка (каталог состояния внутри checkout человека, чужой `.git` выше).
+    if (!stat && knownWorktrees.has(dir)) refuse(`${dotgit} рабочего дерева удалён`);
     if (stat) {
       if (nested) refuse(`вложенный репозиторий ${dotgit} внутри рабочего дерева ${nested}`);
       if (stat.isSymbolicLink()) refuse(`${dotgit} — символическая ссылка`);

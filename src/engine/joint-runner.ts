@@ -30,7 +30,7 @@ export interface JointRunnerOptions {
   environment?: NodeJS.ProcessEnv;
   resourceDatabase?: string;
   /**
-   * Корень снимков компонентов (`<checkoutRoot>/joint/<id>/components`); без
+   * Корень снимков компонентов (`<checkoutRoot>/.joint/<id>/components`: ID репозитория с точки не начинается); без
    * него — `chooseCheckoutRoot` по каталогу состояния и каталогу проверки.
    */
   checkoutRoot?: string;
@@ -107,7 +107,7 @@ export class JointRunner {
       ...(this.options.checkoutRoot ? { configured: this.options.checkoutRoot } : {}),
     });
     const components = placement.root
-      ? join(placement.root, 'joint', v.id, 'components')
+      ? join(placement.root, '.joint', v.id, 'components')
       : join(dir, 'components');
     const worktrees: { repo: string; cwd: string }[] = [];
     const source = this.options.environment ?? process.env;

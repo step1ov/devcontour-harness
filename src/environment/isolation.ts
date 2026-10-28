@@ -5,7 +5,6 @@ import { writeFile, mkdir } from 'node:fs/promises';
 import { existsSync, lstatSync, readlinkSync, realpathSync, readdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
-import { closedCheckouts } from './checkout-root.ts';
 import {
   DANGEROUS_FILES,
   getDangerousDirectories,
@@ -74,7 +73,12 @@ export function isolation(options: {
   entries?: string[];
   /**
    * Корни рабочих деревьев вне каталога состояния (`checkout-root.ts`):
-   * закрываются поэлементно, кроме открытых путей и их предков.
+   * закрыты целиком, как каталог состояния; свои деревья проверки открыты
+   * более конкретным разрешением (`write`, `readable`). Деревья других
+   * попыток закрыты, и появившиеся после построения политики тоже. Поиск
+   * конфигурации вверх по дереву не ломается: в корне нет файлов
+   * конфигурации, а `stat` отсутствующего файла под запретом Seatbelt
+   * отвечает ENOENT, метаданные каталогов-предков открыты.
    */
   checkouts?: string[];
 }): Isolation {
@@ -94,11 +98,7 @@ export function isolation(options: {
   ];
   return {
     write: real(options.write),
-    hidden: real([
-      ...options.controller,
-      ...closedCheckouts(options.checkouts ?? [], [...options.write, ...(options.readable ?? [])]),
-      ...credentialPaths(),
-    ]),
+    hidden: real([...options.controller, ...(options.checkouts ?? []), ...credentialPaths()]),
     // Установленные пакеты рантайма лежат внутри закрытого каталога его
     // учётных данных: без них codex не запускает даже помощника своей
     // песочницы. Более конкретный путь открыт; токены и сессии — нет.
@@ -517,20 +517,30 @@ const mentions = (output: string, path: string) =>
  *
  * - Запись: обязательная политика в открытых проверке каталогах. Запись вне
  *   открытых каталогов — ошибка кода проверки, а не среды: её здесь нет.
- * - Чтение (и `stat`): закрытый путь, на котором проверка упала с EPERM.
- *   Инструменты ищут конфигурацию вверх по дереву и на EPERM (в отличие от
- *   ENOENT) падают. Нужны оба признака — запись ядра для тега этой проверки
- *   и EPERM с этим путём в её выводе (`output`): отказ, который проверка
- *   пережила, и обычный провал тестов отказом среды не становятся.
+ * - Чтение (и `stat`): закрытый файл в предке рабочего каталога проверки
+ *   (`cwd`), на котором она упала с EPERM. Инструменты ищут конфигурацию
+ *   вверх по дереву и на EPERM (в отличие от ENOENT) падают. Нужны все
+ *   признаки — запись ядра для тега этой проверки, форма поиска вверх
+ *   (каталог файла — строгий предок `cwd`) и EPERM с этим путём в выводе
+ *   (`output`). Чтение другого закрытого пути (`~/.ssh/id_rsa`), отказ,
+ *   который проверка пережила, и обычный провал тестов отказом среды не
+ *   становятся: отказ среды не тратит попытку и останавливает очередь.
  */
-export function sandboxDenials(violations: SandboxViolation[], policy: Isolation, output?: string) {
+export function sandboxDenials(
+  violations: SandboxViolation[],
+  policy: Isolation,
+  output?: string,
+  cwd?: string,
+) {
   const found = new Map<string, string>();
   const eperm = output !== undefined && /\bEPERM\b|operation not permitted/i.test(output);
+  // Поиск вверх: файл лежит прямо в строгом предке рабочего каталога.
+  const walkUp = (path: string) => cwd !== undefined && cwd.startsWith(dirname(path) + sep);
   for (const v of violations) {
     if (found.has(v.path)) continue;
     const rule = v.operation.startsWith('file-write')
       ? mandatoryDenyRule(policy, v.path)
-      : v.operation.startsWith('file-read') && eperm && mentions(output, v.path)
+      : v.operation.startsWith('file-read') && eperm && walkUp(v.path) && mentions(output, v.path)
         ? hiddenReadRule(policy, v.path)
         : undefined;
     if (rule) found.set(v.path, rule);

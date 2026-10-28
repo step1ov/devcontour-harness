@@ -210,8 +210,8 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
                   boundary: {
                     hidden: boundary.hidden,
                     readable: [...boundary.readable, ...snapshots.map((d) => d.path)],
-                    // Чужие деревья под корнем вне дерева закрыты поэлементно,
-                    // и тогда, когда хост его в своей границе не назвал.
+                    // Корень вне дерева закрыт (свои деревья открыты), и тогда,
+                    // когда хост его в своей границе не назвал.
                     checkouts: [
                       ...new Set([
                         ...(boundary.checkouts ?? []),
