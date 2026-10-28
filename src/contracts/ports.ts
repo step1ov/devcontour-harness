@@ -33,6 +33,12 @@ export interface ExecutionView {
   works(graphId?: string): WorkState[];
   attempt(id: string): AttemptState | undefined;
   attempts(workId?: string): AttemptState[];
+  /**
+   * Только активные попытки. Необязательный быстрый путь: такт очереди ищет
+   * истёкшие среди активных, и адаптеру с длинной историей не нужно строить
+   * все прежние попытки. Без метода — `attempts()` с фильтром по статусу.
+   */
+  activeAttempts?(): AttemptState[];
   verification(id: string): JointVerificationState | undefined;
   verifications(): JointVerificationState[];
   /**

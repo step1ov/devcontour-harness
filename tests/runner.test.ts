@@ -6,7 +6,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Runner } from '../src/engine/runner.ts';
 import { BlockedError } from '../src/engine/classify.ts';
-import { policyIssues } from '../src/contracts/index.ts';
+import {
+  TaskFailure,
+  policyIssues,
+  type AttemptState,
+  type EvidenceRecord,
+} from '../src/contracts/index.ts';
 import { approve, greet, implement, runAll, setup, target } from './runner-fixture.ts';
 
 test('T01: поручение с тестами и двумя ревью принимается ровно один раз; result SHA в target ref; evidence обеих фаз', async () => {
@@ -197,6 +202,67 @@ test('T09: кандидат зелёный, интеграция красная 
     'интеграция красная',
   );
   assert.equal(target(ctx), marker, 'target остался на чужом коммите');
+  // Стойкий провал повторён один раз на том же SHA и подтверждён: обе записи
+  // остаются, класс отказа прежний.
+  const integration = a.evidence.filter((e) => e.phase === 'integration' && e.kind === 'test');
+  assert.equal(integration.length, 2, 'один повтор, не больше');
+  assert.equal(integration[1]!.sha, integration[0]!.sha);
+  assert.deepEqual(integration[1]!.recheck, { of: integration[0]!.id, outcome: 'confirmed' });
+  assert.equal(a.failureKind, 'gate');
+});
+
+test('Провал gate интеграции из-за среды повторяется на том же кандидате: повтор прошёл — принятие без новой реализации, повтор помечен flaky со ссылкой на первую запись', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'harness-flaky-'));
+  const counter = join(state, 'integration-runs');
+  // Gate падает на первом запуске интеграции (счётчик вне worktree), дальше — обычный тест.
+  const flaky = `
+const fs = require('fs');
+const n = fs.existsSync(${JSON.stringify(counter)}) ? Number(fs.readFileSync(${JSON.stringify(counter)}, 'utf8')) : 0;
+if (process.env.DEVCONTOUR_PHASE === 'integration') fs.writeFileSync(${JSON.stringify(counter)}, String(n + 1));
+if (process.env.DEVCONTOUR_PHASE === 'integration' && n === 0) {
+  fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase classname="greet" name="greets"><failure message="budget exceeded"/></testcase></testsuite>');
+  process.exit(1);
+}
+require('./run.js');
+`;
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    files: { 'test/flaky.js': flaky },
+    policy: (p) => {
+      const raw = p as { maxAttempts: number; repositories: { gates: { command: string[] }[] }[] };
+      raw.maxAttempts = 1;
+      raw.repositories[0]!.gates[0]!.command = [process.execPath, 'test/flaky.js'];
+    },
+  });
+  await runAll(ctx);
+  const work = ctx.engine.read((v) => v.work('add-greeting')!);
+  assert.equal(work.status, 'done', work.failure);
+  const attempts = ctx.engine.read((v) => v.attempts('add-greeting'));
+  assert.equal(attempts.length, 1, 'повтор не стоил новой попытки и реализации');
+  const a = attempts[0]!;
+  const integration = a.evidence.filter((e) => e.phase === 'integration' && e.kind === 'test');
+  assert.equal(integration.length, 2);
+  assert.equal(integration[0]!.passed, false);
+  assert.equal(integration[1]!.passed, true);
+  assert.equal(integration[1]!.sha, a.integrationSha);
+  assert.deepEqual(integration[1]!.recheck, { of: integration[0]!.id, outcome: 'flaky' });
+  assert.notEqual(integration[0]!.log, integration[1]!.log, 'лог первого запуска сохранён');
+  assert.match(readFileSync(integration[0]!.log, 'utf8'), /budget exceeded|1 failures/);
+  assert.equal(readFileSync(counter, 'utf8'), '2');
+  type GatePayload = { phase: string; recheck?: { outcome: string } };
+  const gateEvents = ctx.store
+    .events()
+    .filter((e) => e.type === 'attempt.gate')
+    .map((e) => e.payload as GatePayload)
+    .filter((p) => p.phase === 'integration');
+  assert.deepEqual(
+    gateEvents.map((p) => p.recheck?.outcome ?? null),
+    [null, 'flaky'],
+  );
+  assert.ok(
+    a.timings?.some((t) => t.stage.startsWith('integration-recheck:')),
+    'повтор — отдельная стадия замеров',
+  );
 });
 
 test('T10: чужое продвижение target ref перед CAS — нет потери чужого коммита и ложного done; повтор от актуальной базы', async () => {
@@ -794,4 +860,109 @@ test('Предел времени — на фазу: ревью интеграц
     for (const timer of timers.keys()) nativeClearTimeout(timer);
     t.mock.restoreAll();
   }
+});
+
+test('Повтор gate интеграции: только после зелёного кандидата, один на кандидата и не при контрпримере свойства или корпуса', async () => {
+  const candidateSha = 'c'.repeat(40);
+  const sha = 'd'.repeat(40);
+  const attempt = { id: 'r1', workId: 'w', candidateSha } as AttemptState;
+  const record = (phase: 'candidate' | 'integration', passed: boolean, extra = {}) =>
+    ({
+      id: `${phase}-${passed}`,
+      kind: 'test',
+      gate: 'unit',
+      phase,
+      sha: phase === 'candidate' ? candidateSha : sha,
+      passed,
+      ...extra,
+    }) as EvidenceRecord;
+  const report = (failed: { property?: boolean; corpus?: boolean }) => ({
+    property: {
+      report: {
+        version: 1,
+        properties: [{ testId: 'p', status: failed.property ? 'failed' : 'passed', cases: 3 }],
+        corpus: {
+          executed: 1,
+          passed: failed.corpus ? 0 : 1,
+          failed: failed.corpus ? [{ id: 'k1', property: 'p' }] : [],
+        },
+      },
+    },
+  });
+  type IntegrationGate = (...args: unknown[]) => Promise<void>;
+  const integrationGate = (Runner.prototype as unknown as { integrationGate: IntegrationGate })
+    .integrationGate;
+  /** Повторы, которые запросил разбор провала: ID повторённой записи по порядку запусков. */
+  const runs = async (
+    evidence: EvidenceRecord[],
+    others: { candidateSha: string; evidence: Partial<EvidenceRecord>[] }[] = [],
+    budget = { recheck: true },
+  ) => {
+    const calls: unknown[] = [];
+    const fake = {
+      engine: {
+        read: (fn: (v: unknown) => unknown) =>
+          fn({
+            attempt: () => ({ evidence }),
+            attempts: () => [{ candidateSha, evidence }, ...others],
+          }),
+      },
+      gate: (...args: unknown[]) => {
+        calls.push(args[9]);
+        return Promise.reject(new TaskFailure('gate', 'integration/unit: red'));
+      },
+    };
+    await assert.rejects(
+      integrationGate.call(
+        fake,
+        attempt,
+        '/w',
+        sha,
+        { id: 'unit' },
+        '/a',
+        new AbortController().signal,
+        {},
+        budget,
+      ),
+      TaskFailure,
+    );
+    return calls;
+  };
+  const green = record('candidate', true);
+  const red = record('integration', false);
+  assert.deepEqual(await runs([green, red]), [undefined, red.id], 'обычный провал повторён');
+  assert.deepEqual(await runs([record('candidate', false), red]), [undefined], 'красный кандидат');
+  assert.deepEqual(await runs([red]), [undefined], 'кандидат не проверен');
+  assert.deepEqual(
+    await runs(
+      [green, red],
+      [{ candidateSha, evidence: [{ recheck: { of: 'x', outcome: 'confirmed' } }] }],
+    ),
+    [undefined],
+    'тот же кандидат уже повторялся в другой попытке',
+  );
+  assert.deepEqual(
+    await runs(
+      [green, red],
+      [{ candidateSha: 'e'.repeat(40), evidence: [{ recheck: { of: 'x', outcome: 'flaky' } }] }],
+    ),
+    [undefined, red.id],
+    'повтор другого кандидата бюджет не тратит',
+  );
+  assert.deepEqual(
+    await runs([green, red], [], { recheck: false }),
+    [undefined],
+    'бюджет интеграции исчерпан',
+  );
+  for (const failed of [{ property: true }, { corpus: true }])
+    assert.deepEqual(
+      await runs([green, record('integration', false, report(failed))]),
+      [undefined],
+      `контрпример не повторяется: ${JSON.stringify(failed)}`,
+    );
+  assert.deepEqual(
+    await runs([green, record('integration', false, report({}))]),
+    [undefined, red.id],
+    'отчёт свойств без провалов не мешает повтору',
+  );
 });

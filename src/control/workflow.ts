@@ -271,6 +271,12 @@ export class WorkflowQueue {
       }
       next.status = next.stage >= stages ? 'completed' : 'queued';
       if (next.status === 'completed') next.finishedAt = iso(this.now());
+      // Счётчик попыток — бюджет текущей стадии, и следующая стадия начинает
+      // его с нуля. У завершённого задания следующей стадии нет: счётчик
+      // показывает, сколько попыток стадий задание израсходовало всего (захваты
+      // `running` в истории; захват стадии, ответившей «жду», из неё снят).
+      if (next.status === 'completed')
+        next.attempts = next.history.filter((h) => h.event === 'running').length;
       delete next.token;
       delete next.leaseUntil;
       delete next.error;

@@ -496,6 +496,23 @@ test('T15: задание ставится идемпотентно; истёк�
   assert.notEqual(flow.start(request).key, job.key);
 });
 
+test('Завершённое задание сохраняет израсходованные попытки стадий, а не сброшенный счётчик', () => {
+  const { engine, store, clock } = engineOf();
+  ready(engine, graphOf({ a: [] }));
+  const flow = new WorkflowQueue(store, engine.policy, () => clock.now);
+  const job = flow.start({ kind: 'graph', id: 'g', authorRuntime: 'codex', maxAttempts: 3 });
+  // Стадия 0: первая попытка прервана, вторая завершена.
+  flow.fail(flow.claim(job.key)!, 'обрыв', true);
+  flow.finish(flow.claim(job.key)!);
+  assert.equal(flow.get(job.key).attempts, 0, 'новая стадия начинает бюджет с нуля');
+  // Стадия 1: ответ «жду» попытку не тратит, затем завершение.
+  flow.finish(flow.claim(job.key)!, true);
+  flow.finish(flow.claim(job.key)!);
+  const done = flow.view(job.key);
+  assert.equal(done.status, 'completed');
+  assert.equal(done.attempts, 3);
+});
+
 test('T15/T27: смена политики делает задание stale — и ожидающее, и прерванное; применение политики стадии не начинает', () => {
   const { engine, store, clock } = engineOf();
   ready(engine, graphOf({ a: [] }));

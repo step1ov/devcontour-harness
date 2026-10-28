@@ -82,7 +82,7 @@ import { defaultResourceDatabase, withResources } from '../environment/resources
 import { REQUIREMENT_GATE, assertRequirements } from '../verification/requirements.ts';
 import { BlockedError, classifyFailure } from './classify.ts';
 import { TaskFailure, type FailureKind } from './failure.ts';
-import type { Engine } from './engine.ts';
+import { activeOf, namesFailingCases, type Engine } from './engine.ts';
 import { prompt } from './prompt.ts';
 import {
   contractDocuments,
@@ -434,9 +434,7 @@ export class Runner {
       this.engine.pinLegacyCalls();
     }
     const now = this.engine.clock();
-    const stale = this.engine.read((v) =>
-      v.attempts().filter((a) => a.status === 'active' && a.leaseUntil <= now),
-    );
+    const stale = this.engine.read((v) => activeOf(v).filter((a) => a.leaseUntil <= now));
     for (const a of stale) {
       if (!a.integrationSha) continue;
       const repo = this.repo(a.repositoryId);
@@ -1450,15 +1448,96 @@ export class Runner {
     signal: AbortSignal,
     execution: ReturnType<typeof executionEnvironment>,
     consumer?: { repositoryId: string; dependencies: DependencySnapshot[] },
+    /** ID записи провала, которую повторяет этот запуск (`recheckIntegration`). */
+    recheck?: string,
   ) {
     // Время проверок потребителя — отдельная стадия: в метриках области оно
-    // не смешивается с собственными gates поручения.
+    // не смешивается с собственными gates поручения. Повтор — тоже своя
+    // стадия: оценка длительности gate не удваивается из-за него.
     const stage = consumer
       ? `${phase}-consumer:${consumer.repositoryId}:${gate.id}`
-      : `${phase}-test:${gate.id}`;
+      : recheck
+        ? `${phase}-recheck:${gate.id}`
+        : `${phase}-test:${gate.id}`;
     await this.timed(attempt, stage, () =>
-      this.runOneGate(attempt, cwd, sha, phase, gate, artifacts, signal, execution, consumer),
+      this.runOneGate(
+        attempt,
+        cwd,
+        sha,
+        phase,
+        gate,
+        artifacts,
+        signal,
+        execution,
+        consumer,
+        recheck,
+      ),
     );
+  }
+
+  /**
+   * Gate интеграции с одним повтором на кандидата. Провал собственного gate на
+   * integration, когда тот же gate прошёл на кандидате, часто вызван средой
+   * (бюджет времени под конкуренцией за CPU), а не кодом; без повтора такой
+   * провал оплачивался новой реализацией. Повтор — тот же gate на том же
+   * integration SHA, один раз за интеграцию кандидата; обе записи остаются,
+   * у повтора — `recheck` со ссылкой на первую и исходом (`flaky` — повтор
+   * прошёл, `confirmed` — провал подтвердился и засчитывается как прежде).
+   */
+  private async integrationGate(
+    attempt: AttemptState,
+    cwd: string,
+    sha: string,
+    gate: GatePolicy,
+    artifacts: string,
+    signal: AbortSignal,
+    execution: ReturnType<typeof executionEnvironment>,
+    budget: { recheck: boolean },
+  ) {
+    try {
+      await this.gate(attempt, cwd, sha, 'integration', gate, artifacts, signal, execution);
+    } catch (error) {
+      if (!budget.recheck || signal.aborted || !(error instanceof TaskFailure)) throw error;
+      if (error.kind !== 'gate') throw error;
+      const { failed, candidatePassed, spent } = this.engine.read((v) => {
+        const evidence = v.attempt(attempt.id)?.evidence ?? [];
+        const own = (e: EvidenceRecord, phase: EvidenceRecord['phase'], at?: string) =>
+          e.kind === 'test' &&
+          e.gate === gate.id &&
+          e.phase === phase &&
+          e.sha === at &&
+          !e.consumer;
+        return {
+          failed: evidence.findLast((e) => own(e, 'integration', sha)),
+          candidatePassed:
+            evidence.findLast((e) => own(e, 'candidate', attempt.candidateSha))?.passed === true,
+          // Один повтор на кандидата: переиспользованный следующей попыткой
+          // кандидат второго не получает.
+          spent: v
+            .attempts(attempt.workId)
+            .some(
+              (x) => x.candidateSha === attempt.candidateSha && x.evidence.some((e) => e.recheck),
+            ),
+        };
+      });
+      // Контрпример свойства или провал случая корпуса не повторяется: удачный
+      // второй запуск недетерминированной проверки не отменяет найденного входа.
+      if (!failed || failed.passed || namesFailingCases(failed) || !candidatePassed || spent)
+        throw error;
+      budget.recheck = false;
+      await this.gate(
+        attempt,
+        cwd,
+        sha,
+        'integration',
+        gate,
+        artifacts,
+        signal,
+        execution,
+        undefined,
+        failed.id,
+      );
+    }
   }
 
   private async runOneGate(
@@ -1471,6 +1550,7 @@ export class Runner {
     signal: AbortSignal,
     execution: ReturnType<typeof executionEnvironment>,
     consumer?: { repositoryId: string; dependencies: DependencySnapshot[] },
+    recheck?: string,
   ) {
     // Генеративный gate — всегда; gate эталонных наборов — когда манифест
     // поручения ждёт от него отчёта (без договора — прежний уровень).
@@ -1483,9 +1563,14 @@ export class Runner {
       sha,
       phase,
       gate,
+      // Лог и отчёт повтора — в своём каталоге: первая запись ссылается на
+      // свой лог по digest, и повтор его не перезаписывает.
       artifactDir: consumer
         ? join(artifacts, phase, 'consumer', consumer.repositoryId)
-        : join(artifacts, phase),
+        : recheck
+          ? join(artifacts, phase, 'recheck')
+          : join(artifacts, phase),
+      ...(recheck ? { recheck } : {}),
       signal,
       execution,
       boundary: this.boundary(consumer?.dependencies ?? attempt.dependencies),
@@ -2523,8 +2608,9 @@ export class Runner {
           execution,
           signal,
         );
+        const budget = { recheck: true };
         for (const gate of gates)
-          await this.gate(attempt, cwd, sha, 'integration', gate, artifacts, signal, execution);
+          await this.integrationGate(attempt, cwd, sha, gate, artifacts, signal, execution, budget);
         await this.consumers(attempt, cwd, sha, artifacts, signal);
         this.requirements(attempt, work, repoPath, cwd, sha, 'integration');
         rearm();

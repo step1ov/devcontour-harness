@@ -7,12 +7,21 @@
  *     > tests/fixtures/planning/devcontour-plan-schema.json
  *   node --import tsx -e "Promise.all([import('./src/core/plan.ts'),import('zod')]).then(([m,{z}])=>process.stdout.write(JSON.stringify(z.toJSONSchema(m.planResult,{io:'input'}))))" \
  *     > tests/fixtures/planning/devcontour-plan-input-schema.json
+ *
+ * С тех пор в фикстурах изменён только предел области gates задачи
+ * (`maxItems` 20 → `GATE_SCOPE_LIMIT`, предел gates профиля).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
-import { planDraft, planDraftJsonSchema, sha256 } from '../src/contracts/index.ts';
+import {
+  GATE_SCOPE_LIMIT,
+  planDraft,
+  planDraftJsonSchema,
+  sha256,
+  workOrderSchema,
+} from '../src/contracts/index.ts';
 
 const fixture = (name: string) =>
   readFileSync(new URL(`./fixtures/planning/${name}`, import.meta.url), 'utf8');
@@ -53,10 +62,10 @@ const keyOrder = [
 const planResult = planDraft(hostExtension, { keyOrder });
 
 test('H2-01: фикстуры схемы плана DevContour — те самые байты (§4)', () => {
-  assert.equal(Buffer.byteLength(runtime), 2394);
-  assert.equal(sha256(runtime), 'b6461127f7f0831181187c2d2d9c87671f5a196ecf97d9010120a86b7e46179e');
-  assert.equal(Buffer.byteLength(input), 2318);
-  assert.equal(sha256(input), '36c5ec758791d049f5929522d60dd730363d925c07cedc144f682703db4f05f7');
+  assert.equal(Buffer.byteLength(runtime), 2395);
+  assert.equal(sha256(runtime), '5e05430223e4b076be18b02902987b50df8a3027f2f1f86048fb74bc878d3bda');
+  assert.equal(Buffer.byteLength(input), 2319);
+  assert.equal(sha256(input), 'e35ec7ad5494f9fe00d5007dbeda4c842a80b499afc7e6b85ab9a01c90c01031');
   assert.equal(runtime.endsWith('\n'), false);
   assert.equal(input.endsWith('\n'), false);
 });
@@ -101,4 +110,35 @@ test('H2-01: ожидания consumer-h2 — байтовые копии фик
       fixture(name),
       name,
     );
+});
+
+test('Область gates задачи вмещает весь профиль (до предела gates профиля); превышение — понятный отказ', () => {
+  assert.equal(GATE_SCOPE_LIMIT, 100);
+  const plan = (gates: string[]) => ({
+    title: 'План',
+    description: '',
+    tasks: [
+      {
+        key: 'all-gates',
+        title: 'Задача со всем профилем',
+        description: 'Задача называет каждый gate профиля.',
+        role: 'developer',
+        dependsOn: [],
+        acceptance: ['Все gates зелёные'],
+        contracts: [],
+        gates,
+      },
+    ],
+  });
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => `gate-${i}`);
+  assert.equal(planResult.parse(plan(ids(25))).tasks[0]!.gates!.length, 25);
+  assert.equal(planResult.parse(plan(ids(100))).tasks[0]!.gates!.length, 100);
+  const over = planResult.safeParse(plan(ids(103)));
+  assert.equal(over.success, false);
+  assert.equal(
+    over.error.issues[0]!.message,
+    'область gates: 103 при пределе 100, лишних 3. Назовите группу gates (@имя) или уберите повторы',
+  );
+  const order = workOrderSchema.shape.gates.safeParse(ids(25));
+  assert.equal(order.success, true);
 });

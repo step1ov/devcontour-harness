@@ -62,6 +62,13 @@ export const eventPayloads = {
     passed: z.boolean(),
     evidenceId: z.string().min(1).max(200),
     consumer: idSchema.optional(),
+    /** Повтор провала интеграции: повторённая запись и исход. */
+    recheck: z
+      .strictObject({
+        of: z.string().min(1).max(200),
+        outcome: z.enum(['flaky', 'confirmed']),
+      })
+      .optional(),
   }),
   'attempt.review': z.strictObject({
     phase,

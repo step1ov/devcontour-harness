@@ -16,6 +16,7 @@ import { z } from 'zod';
 import {
   cliCommands,
   cliDataSchemas,
+  GATE_SCOPE_LIMIT,
   operationCatalogSchema,
   type CliArgument,
 } from '../src/contracts/index.ts';
@@ -76,10 +77,27 @@ const h2Commands = [
  * (`{io:'output', unrepresentable:'any'}`) всех команд на `5077625`.
  * Данные с тех пор расширены только аддитивно — значениями перечней классов
  * отказа и причин остановки `unfinished` (незавершённая работа) и `needs-lead`
- * (пустой результат без механического основания); без них — те же байты.
+ * (пустой результат без механического основания), полем `recheck` записи
+ * evidence и пределом области gates `GATE_SCOPE_LIMIT` вместо 20; без них —
+ * те же байты.
  */
 const H2_COMMANDS_SHA = '58efd5e554cd5b015538ef1d4e7dd8d20f24205ef24e28c5b27394642bc20e25';
 const H2_DATA_SHA = '95016c62e6e7fb134ab3dcde4aff35679951fe1b9037452bc86846230ffa5682';
+/**
+ * Область gates (ссылки на gates или ID gates основания ревью) с пределом
+ * `GATE_SCOPE_LIMIT`: в H2 предел был 20.
+ */
+function gateScope(v: unknown): v is Record<string, unknown> {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as { type?: unknown; maxItems?: unknown; items?: Record<string, unknown> };
+  return (
+    o.type === 'array' &&
+    o.maxItems === GATE_SCOPE_LIMIT &&
+    !!o.items &&
+    (o.items.pattern === '^@?[A-Za-z0-9_-]{1,80}$' ||
+      (o.items.type === 'string' && o.items.minLength === 1 && o.items.maxLength === 200))
+  );
+}
 /** Аддитивные значения перечней после H2. */
 const ADDITIVE_ENUM_VALUES = new Set(['unfinished', 'needs-lead']);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
@@ -222,9 +240,21 @@ test('H3-01: прежние команды и схемы их данных не 
   );
   // Порядок ключей cliDataSchemas H2 — без capabilities; аддитивные значения
   // перечней убираются, остальное — байты H2.
-  const h2 = JSON.stringify(data, (_k, v: unknown) =>
-    Array.isArray(v) ? v.filter((x) => !(typeof x === 'string' && ADDITIVE_ENUM_VALUES.has(x))) : v,
-  );
+  const h2 = JSON.stringify(data, (k, v: unknown) => {
+    if (Array.isArray(v))
+      return (v as unknown[]).filter(
+        (x) => !(typeof x === 'string' && ADDITIVE_ENUM_VALUES.has(x)),
+      );
+    // Аддитивное поле записи evidence — повтор провала gate интеграции.
+    if (k === 'properties' && v && typeof v === 'object' && 'recheck' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.recheck;
+      return rest;
+    }
+    // Ослабленный предел области gates (20 → предел gates профиля).
+    if (gateScope(v)) return { ...v, maxItems: 20 };
+    return v;
+  });
   assert.equal(sha256(h2), H2_DATA_SHA);
   for (const value of ADDITIVE_ENUM_VALUES)
     assert.ok(JSON.stringify(data).includes(JSON.stringify(value)), value + ' объявлен');

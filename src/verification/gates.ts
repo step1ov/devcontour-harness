@@ -461,6 +461,8 @@ export interface GateRun {
   boundary: { hidden: string[]; readable: string[] };
   /** Проверка потребителя: evidence несёт его компонент и не закрывает собственные gates. */
   consumer?: string;
+  /** Повтор провала: ID записи, которую повторяет запуск; исход пишется в `recheck`. */
+  recheck?: string;
   /**
    * Генеративный gate (`gate.property`): попытка, от которой seed, и
    * ожидаемая проверка поручения. Без `expected` — прежний уровень (отчёт
@@ -738,6 +740,14 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     ...(manifest?.truncated ? { testsTruncated: true } : {}),
     ...(run.consumer ? { consumer: run.consumer } : {}),
     ...(propertyEvidence ? { property: propertyEvidence } : {}),
+    ...(run.recheck
+      ? {
+          recheck: {
+            of: run.recheck,
+            outcome: passed ? ('flaky' as const) : ('confirmed' as const),
+          },
+        }
+      : {}),
   });
   if (!passed) {
     // Отказ связывается со свойствами по отчёту проверки, а не по тексту:

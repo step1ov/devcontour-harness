@@ -6,6 +6,7 @@ import {
   idSchema,
   relativePathPattern,
   roleIdSchema,
+  gateScopeSchema,
 } from './primitives.ts';
 import { consumerSchema, propertyIdSchema, workGraphSchema } from './work.ts';
 
@@ -45,7 +46,7 @@ export const planDraftTaskShape = {
   relatedRepositories: z.array(idSchema).optional(),
   contextPacks: z.array(idSchema).max(30).optional(),
   writePaths: z.array(draftPathSchema).min(1).max(100).optional(),
-  gates: z.array(gateRefSchema).max(20).optional(),
+  gates: gateScopeSchema(gateRefSchema).optional(),
   properties: z.array(propertyIdSchema).max(30).optional(),
   resources: z.array(idSchema).max(20).optional(),
   repositoryId: z.string().default('main'),

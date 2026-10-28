@@ -8,6 +8,7 @@ import {
   relativePathSchema,
   runtimeNameSchema,
   trimmedText,
+  gateScopeSchema,
 } from './primitives.ts';
 import { workGraphSchema, workOrderSchema } from './work.ts';
 import { contextPinSchema, contextSnapshotSchema } from './context.ts';
@@ -280,6 +281,17 @@ export const evidenceRecordSchema = z.strictObject({
   summary: z.string(),
   /** Проверка потребителя: компонент, в дереве которого она выполнена. */
   consumer: idSchema.optional(),
+  /**
+   * Повтор провала gate интеграции на том же SHA: `of` — ID повторённой
+   * записи; `flaky` — повтор прошёл (первый провал вызван средой), `confirmed`
+   * — провал подтвердился.
+   */
+  recheck: z
+    .strictObject({
+      of: z.string().min(1).max(200),
+      outcome: z.enum(['flaky', 'confirmed']),
+    })
+    .optional(),
   inspection: reviewInspectionSchema.optional(),
   findings: z.array(evidenceFindingSchema).optional(),
   /** Раунд ревью кода: область истории, вызов, протокол, переходы (docs/review-protocol.md). */
@@ -303,7 +315,7 @@ export const evidenceRecordSchema = z.strictObject({
    */
   alreadySatisfied: z
     .strictObject({
-      gates: z.array(z.string().min(1).max(200)).min(1).max(20),
+      gates: gateScopeSchema(z.string().min(1).max(200)).min(1),
       evidence: z.string().min(1).max(4000),
       /** Механическое основание, найденное controller (`alreadySatisfiedVerdict`). */
       basis: z
@@ -976,6 +988,7 @@ export const workflowJobSchema = z.strictObject({
   owner: z.string().optional(),
   inputDigest: digestSchema,
   stage: z.number().int().min(0),
+  /** Попытки текущей стадии; у завершённого задания — все израсходованные попытки стадий. */
   attempts: z.number().int().min(0),
   status: z.enum(['queued', 'running', 'failed', 'stale', 'completed']),
   repairs: z.number().int().min(0).optional(),

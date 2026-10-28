@@ -9,6 +9,7 @@ import {
   relativePathSchema,
   roleIdSchema,
   sha256,
+  gateScopeSchema,
 } from '../../contracts/index.ts';
 import type { ProviderId, TaskColumn } from './transport.ts';
 
@@ -67,7 +68,7 @@ export const taskMappingSchema = z.strictObject({
     .array(z.union([z.literal('.'), relativePathSchema]))
     .min(1)
     .max(100),
-  gates: z.array(gateRefSchema).max(20).optional(),
+  gates: gateScopeSchema(gateRefSchema).optional(),
   criteria: z.array(criterionMappingSchema).max(100).default([]),
   /** Документы, без которых запуск блокируется (ID, ключ или имя). Остальные — дополнительные. */
   requiredDocuments: z.array(z.string().min(1).max(200)).max(30).default([]),

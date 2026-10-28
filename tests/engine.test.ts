@@ -581,6 +581,36 @@ test('S2-R2-01: согласование, связанное с контекст
   );
 });
 
+test('Истечение без истёкших попыток не открывает транзакцию записи; активные берутся быстрым путём представления', () => {
+  const { engine, store } = engineOf();
+  ready(engine, graphOf({ a: [] }));
+  const a = engine.claim('c1')!;
+  const kinds: string[] = [];
+  const transact = store.transact.bind(store);
+  store.transact = (kind, fn) => {
+    kinds.push(kind);
+    return transact(kind, fn);
+  };
+  const read = store.read.bind(store);
+  let fast = 0;
+  store.read = (fn) =>
+    read((v) =>
+      fn(
+        Object.assign(Object.create(v) as typeof v, {
+          activeAttempts: () => {
+            fast++;
+            return v.attempts().filter((x) => x.status === 'active');
+          },
+        }),
+      ),
+    );
+  assert.deepEqual(engine.expire(), []);
+  assert.deepEqual(kinds, [], 'без истёкших — ни одной транзакции');
+  assert.ok(fast > 0, 'активные попытки — через activeAttempts представления');
+  assert.deepEqual(engine.expire(Number.MAX_SAFE_INTEGER), [a.id]);
+  assert.deepEqual(kinds, ['runs.expired']);
+});
+
 test('expire(at): владение, истекающее к моменту at, снимается; живое сейчас — нет без at', () => {
   const { engine } = engineOf();
   ready(engine, graphOf({ a: [] }));
@@ -763,4 +793,52 @@ test('S4-R1-02: движок другой версии не продолжает
   assert.throws(() => newer.heartbeat(a.id, a.token), refused('LEASE_STALE'));
   newer.heartbeat(a.id, adopted.token);
   assert.throws(() => older.heartbeat(a.id, adopted.token), refused('LEASE_STALE'));
+});
+
+test('Повтор gate интеграции: один на попытку, исход согласован с записью, контрпример свойства не повторяется', () => {
+  const { engine } = engineOf();
+  ready(engine, graphOf({ a: [] }));
+  const a = engine.claim('c1')!;
+  engine.phase(a.id, a.token, 'verifying', { candidateSha: sha('a') });
+  engine.phase(a.id, a.token, 'integrating', { integrationSha: sha('b') });
+  const gate = (passed: boolean, extra: Record<string, unknown> = {}) =>
+    engine.evidence(a.id, a.token, {
+      kind: 'test',
+      phase: 'integration',
+      sha: sha('b'),
+      gate: 'unit',
+      passed,
+      command: [],
+      exitCode: passed ? 0 : 1,
+      log: '',
+      digest: digestOf(JSON.stringify([passed, extra])),
+      summary: '',
+      ...extra,
+    } as never);
+  const property = {
+    seed: 1,
+    reproduce: '',
+    contracts: {},
+    artifacts: [],
+    report: { version: 1, properties: [{ testId: 'p', status: 'failed', cases: 2 }] },
+  };
+  const counterexample = gate(false, { property });
+  assert.throws(
+    () => gate(true, { recheck: { of: counterexample.id, outcome: 'flaky' } }),
+    refused('INVALID_INPUT'),
+    'контрпример свойства не повторяется',
+  );
+  const first = gate(false);
+  assert.throws(
+    () => gate(true, { recheck: { of: first.id, outcome: 'confirmed' } }),
+    refused('INVALID_INPUT'),
+    'исход противоречит записи',
+  );
+  gate(false, { recheck: { of: first.id, outcome: 'confirmed' } });
+  const second = gate(false);
+  assert.throws(
+    () => gate(true, { recheck: { of: second.id, outcome: 'flaky' } }),
+    refused('INVALID_INPUT'),
+    'второй повтор в той же попытке',
+  );
 });

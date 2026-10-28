@@ -6,6 +6,7 @@ import {
   isoTimeSchema,
   relativePathSchema,
   runtimeNameSchema,
+  gateScopeSchema,
 } from './primitives.ts';
 import { digestOf } from './digest.ts';
 
@@ -90,7 +91,7 @@ export const findingTransitionSchema = z.strictObject({
  */
 /** Основание «приёмка уже выполнена»: названные gates и что их evidence показывает. */
 export const alreadySatisfiedSchema = z.strictObject({
-  gates: z.array(z.string().min(1).max(200)).min(1).max(20),
+  gates: gateScopeSchema(z.string().min(1).max(200)).min(1),
   evidence: z.string().min(1).max(4000),
 });
 export type AlreadySatisfied = z.infer<typeof alreadySatisfiedSchema>;
