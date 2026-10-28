@@ -5,13 +5,16 @@
 ## Проверки
 
 ```sh
-npm run check   # lint, typecheck, schemas:check, build, весь suite, package smoke
-npm run schemas # после изменения Zod-договоров; сгенерированные schemas/ коммитятся
+npm run test:affected   # на каждое исправление: тесты, затронутые изменением
+npm run test:fast       # весь suite без медленного яруса (> ~60 с)
+npm run check           # release check: lint, typecheck, schemas:check, build, весь suite, package smoke
+npm run schemas         # после изменения Zod-договоров; сгенерированные schemas/ коммитятся
 node --disable-warning=ExperimentalWarning --import tsx --test tests/<file>.test.ts
 ```
 
-Во время работы прогонять затронутые тесты; на конечном состоянии — один полный
-`npm run check`. Новые тесты — в `tests/*.test.ts` (их запускает `scripts/test.mjs`).
+Во время работы прогонять `npm run test:affected` (выбор и причина печатаются;
+при сомнении он сам запускает весь suite); на конечном состоянии — один полный
+`npm run check`. Уровни описаны в README, раздел «Разработка». Новые тесты — в `tests/*.test.ts` (их запускает `scripts/test.mjs`).
 `spawn EPERM` и отказ sandbox/сети — не PASS и не доказанный дефект: повторить
 штатным способом окружения или указать `blocked` с командой и сообщением.
 
