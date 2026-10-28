@@ -16,6 +16,8 @@ import { redactor } from '../src/environment/redaction.ts';
 import {
   isolation,
   isolationSupport,
+  mandatoryDenyRule,
+  parseSandboxLog,
   protectedWriteDenies,
   sandboxDenials,
 } from '../src/environment/isolation.ts';
@@ -195,32 +197,39 @@ async function gate(dir: string, sha: string, script: string) {
 }
 
 test(
-  'SBX03: отказ песочницы в проверке — класс environment с путём и правилом; собственный отказ кода — gate',
+  'SBX03: отказ обязательного запрета, подтверждённый журналом ядра, — environment с путём и правилом; напечатанный отказ и запись вне дерева — gate',
   {
     skip: noSandbox,
   },
   async () => {
     const r = repo();
     const sha = r.head();
-    const outside = join(realpathSync(tmpdir()), 'harness-sbx-outside-' + process.pid + '.txt');
     const write = (p: string) =>
       `try{require('fs').mkdirSync(require('path').dirname(${JSON.stringify(p)}),{recursive:true});require('fs').writeFileSync(${JSON.stringify(p)},'x')}catch(e){console.error(e.message);process.exit(1)}`;
-
-    const outsideRun = await gate(r.dir, sha, write(outside));
-    assert.equal(outsideRun.failure?.kind, 'environment', outsideRun.evidence.summary);
-    assert.match(outsideRun.failure.message, /песочница проверки отказала в доступе/);
-    assert.ok(outsideRun.failure.message.includes(outside), outsideRun.failure.message);
-    assert.match(outsideRun.failure.message, /allowWrite/);
-    assert.equal(existsSync(outside), false);
 
     if (mac) {
       const ide = await gate(r.dir, sha, write(join(r.dir, '.idea', 'workspace.xml')));
       assert.equal(ide.failure?.kind, 'environment', ide.evidence.summary);
       assert.match(
         ide.failure.message,
-        /\.idea(\/workspace\.xml)? — обязательный запрет записи sandbox-runtime: каталог IDE \.idea/,
+        /песочница проверки отказала в доступе: \.idea(\/workspace\.xml)? — обязательный запрет записи sandbox-runtime: каталог IDE \.idea/,
       );
     }
+
+    // Проверка сама печатает «отказ песочницы» на закрытом пути: текст не
+    // свидетельство, класс остаётся gate и очередь не встаёт.
+    const forged = await gate(
+      r.dir,
+      sha,
+      `console.error("Error: EPERM: operation not permitted, open '${join(r.dir, '.idea', 'workspace.xml')}'");process.exit(1)`,
+    );
+    assert.equal(forged.failure?.kind, 'gate', forged.evidence.summary);
+
+    // Запись вне каталогов проверки — ошибка кода, а не среды.
+    const outside = join(realpathSync(tmpdir()), 'harness-sbx-outside-' + process.pid + '.txt');
+    const outsideRun = await gate(r.dir, sha, write(outside));
+    assert.equal(outsideRun.failure?.kind, 'gate', outsideRun.evidence.summary);
+    assert.equal(existsSync(outside), false);
 
     // Код сам снял права с файла в своём дереве: это не отказ песочницы.
     const own = join(r.dir, 'locked.txt');
@@ -235,44 +244,46 @@ test(
   },
 );
 
-test('SBX04: разбор отказов песочницы — пути и правила без песочницы', () => {
+test('SBX04: журнал ядра — только отказы своей проверки; правило — только обязательные запреты внутри дерева', () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-sbx-parse-')));
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'harness-sbx-scratch-')));
-  const hidden = join(root, '..', 'harness-controller-' + process.pid);
-  const policy = isolation({ write: [root, scratch], controller: [hidden] });
-  const out = [
-    `EPERM: operation not permitted, mkdir '${root}/node_modules/.pnpm/text-codec@0.6.3/node_modules/text-codec_tmp_29787/.idea/codeStyles'`,
-    `Error: EPERM: operation not permitted, open '${root}/.vscode/tasks.json'`,
-    `fs.writeFileSync failed: EPERM: operation not permitted, open "${root}/.git/hooks/pre-commit"`,
-    `/bin/sh: ${root}/src/.zshrc: Operation not permitted`,
-    `EACCES: permission denied, open '${root}/src/locked.txt'`,
-    `Error: EPERM: operation not permitted, open '/Users/x/Library/LaunchAgents/com.example.watcher.plist'`,
-    `cat: ${hidden}/state.sqlite: Operation not permitted`,
-    `connect EPERM /tmp/socket`,
-    `wrote ${scratch}/ok and EPERM elsewhere`,
+  const policy = isolation({ write: [root, scratch], controller: [] });
+  const cmd = (text: string) => `CMD64_${Buffer.from(text).toString('base64')}_END__abc_SBX`;
+  const mine = cmd(`/bin/sh -c ': dcmytoken1; : > "$0"`);
+  const foreign = cmd(`/bin/sh -c ': dcothertok; : > "$0"`);
+  const entry = (op: string, path: string, tag: string) =>
+    `2026-10-28 12:34:52.273 E  kernel[0:1] (Sandbox) Sandbox: node(42) deny(1) ${op} ${path}\n${tag}`;
+  const log = [
+    'Filtering the log data using "composedMessage ENDSWITH "_SBX""',
+    entry('file-write-create', `${root}/.vscode/tasks.json`, mine),
+    entry('file-write-create', `${root}/.git/hooks/pre-commit`, mine),
+    entry('file-write-create', `${root}/src/.zshrc`, mine),
+    entry('file-write-create', `${root}/.git`, mine),
+    entry('file-write-create', `${root}/sub/.git`, mine),
+    entry('file-write-create', `${root}/node_modules/pkg/.idea/x.xml`, mine),
+    entry('file-write-create', `/Users/x/Library/LaunchAgents/w.plist`, mine),
+    entry('file-read-data', `${root}/.idea/secret`, mine),
+    entry('file-write-create', `${root}/.idea/foreign.xml`, foreign),
   ].join('\n');
-  const found = Object.fromEntries(sandboxDenials(out, policy).map((d) => [d.path, d.rule]));
+  const parsed = parseSandboxLog(log, 'dcmytoken1');
+  assert.equal(parsed.length, 8, 'чужая песочница не попадает в отказы проверки');
+  const found = Object.fromEntries(sandboxDenials(parsed, policy).map((d) => [d.path, d.rule]));
   assert.deepEqual(
     Object.keys(found).sort(),
     [
+      `${root}/.git`,
       `${root}/.git/hooks/pre-commit`,
       `${root}/.vscode/tasks.json`,
       `${root}/src/.zshrc`,
-      '/Users/x/Library/LaunchAgents/com.example.watcher.plist',
-      join(hidden, 'state.sqlite'),
+      `${root}/sub/.git`,
     ].sort(),
   );
   assert.match(found[`${root}/.vscode/tasks.json`]!, /каталог IDE \.vscode/);
   assert.match(found[`${root}/.git/hooks/pre-commit`]!, /\.git\/hooks/);
-  assert.match(found[`${root}/src/.zshrc`]!, /\.zshrc/);
-  assert.match(
-    found['/Users/x/Library/LaunchAgents/com.example.watcher.plist']!,
-    /вне каталогов, открытых проверке на запись/,
-  );
-  assert.match(
-    Object.entries(found).find(([p]) => p.endsWith('state.sqlite'))![1],
-    /закрыт на чтение/,
-  );
+  assert.match(found[`${root}/.git`]!, /файл \.git рабочего дерева/);
+  assert.match(found[`${root}/sub/.git`]!, /вложенный репозиторий/);
+  assert.equal(mandatoryDenyRule(policy, `${root}/src/index.js`), undefined);
+  assert.match(mandatoryDenyRule(policy, `${root}/.git/commondir`)!, /\.git\/commondir/);
 });
 
 test('SBX05: явные запреты — каталоги IDE вне node_modules и прежние имена на любой глубине', () => {

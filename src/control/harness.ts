@@ -39,7 +39,7 @@ import { WorkflowQueue } from './workflow.ts';
 import { technicalReview } from './review.ts';
 import { policySourceChanged, type PolicySource } from './provenance.ts';
 import { JointRunner } from '../engine/joint-runner.ts';
-import { git } from '../environment/process.ts';
+import { git, hostGitArgs } from '../environment/process.ts';
 import { analyzeRecovery, applyCases } from './recovery.ts';
 import { declarationProblems, referenceNote } from '../verification/checks.ts';
 import { spikeOf, spikesOf } from '../verification/spike.ts';
@@ -464,10 +464,19 @@ export class Harness {
         if (!repo) return false;
         try {
           // Синхронная проверка: предпосылка доступна в целевой ветке.
-          execFileSync('git', ['merge-base', '--is-ancestor', p.resultSha, repo.targetRef], {
-            cwd: this.repoPath(repo.path),
-            stdio: 'ignore',
-          });
+          execFileSync(
+            'git',
+            hostGitArgs(this.repoPath(repo.path), [
+              'merge-base',
+              '--is-ancestor',
+              p.resultSha,
+              repo.targetRef,
+            ]),
+            {
+              cwd: this.repoPath(repo.path),
+              stdio: 'ignore',
+            },
+          );
           return true;
         } catch {
           return false;

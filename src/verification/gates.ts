@@ -2,7 +2,7 @@ import { readFile, writeFile, mkdir, mkdtemp, rm, realpath, lstat, chmod } from 
 import { tmpdir } from 'node:os';
 import { join, resolve, sep, delimiter, relative, dirname } from 'node:path';
 import { accessSync, constants, existsSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import {
   sha256,
@@ -15,9 +15,15 @@ import {
   isolation,
   isolatedCommand,
   isolationSupport,
+  protectedChanges,
+  protectedSnapshot,
+  SandboxPolicyError,
   sandboxDenials,
+  watchSandboxLog,
   type Isolation,
+  type SandboxViolation,
 } from '../environment/isolation.ts';
+import { UntrustedCheckoutError } from '../environment/git-trust.ts';
 import { TaskFailure, type FailureKind } from '../engine/failure.ts';
 import { redactDeep } from '../environment/redaction.ts';
 import {
@@ -296,6 +302,11 @@ export async function runCheck(
     controller: string[];
     settingsDir: string;
     /**
+     * Собрать отказы песочницы из журнала ядра (macOS): по ним, а не по
+     * тексту вывода, отказ среды отличается от ошибки кода.
+     */
+    violations?: boolean;
+    /**
      * Запуск проверки подтверждён: без песочницы — порождён её процесс, в
      * песочнице — обёртка создала метку старта перед exec. Запуск самой
      * обёртки песочницы запуском проверки не считается. Вызывается не более
@@ -316,6 +327,8 @@ export async function runCheck(
     policy: Isolation | undefined,
     started: string | undefined,
     result: Awaited<ReturnType<typeof command>> | undefined,
+    monitor: Awaited<ReturnType<typeof watchSandboxLog>>,
+    violations: SandboxViolation[] | undefined,
     attempts = 1;
   const scratch = await realpath(await mkdtemp(join(tmpdir(), 'dc-gate-')));
   // Метка старта — вне TMPDIR команды: проверка, чистящая свой временный
@@ -342,6 +355,7 @@ export async function runCheck(
       // только для её рабочего каталога: gate из подкаталога иначе оставлял
       // корень дерева без них.
       const workdir = await realpath(options.cwd);
+      const tag = options.violations ? 'dc' + randomUUID().replace(/-/g, '').slice(0, 16) : '';
       const roots = isolation({ write: options.write, controller: [] }).write.filter(
         (w) => workdir === w || workdir.startsWith(w + sep),
       );
@@ -353,10 +367,13 @@ export async function runCheck(
         started,
         workdir,
         roots.length ? roots : [workdir],
+        process.platform,
+        tag,
       );
       argv = wrapped.argv;
       env = { ...env, ...wrapped.env };
       cwd = wrapped.cwd;
+      if (tag) monitor = await watchSandboxLog(tag);
     }
     const execute = () => {
       // Уже отменённый вызов не запускается: слушатель отмены на отменённом
@@ -388,11 +405,22 @@ export async function runCheck(
     } finally {
       // Факт старта читается до удаления метки — и при исключении после него.
       if (started !== undefined && existsSync(started)) confirm();
+      // Отказы нужны только для разбора провала: успешной проверке ждать
+      // записей ядра незачем.
+      violations = await monitor?.stop(result && result.code !== 0 ? 400 : 0);
     }
     // Без песочницы завершившийся процесс точно порождался.
     if (started === undefined) confirm();
-    return { ...result, attempts, started: launched, ...(policy ? { isolation: policy } : {}) };
+    return {
+      ...result,
+      attempts,
+      started: launched,
+      ...(policy ? { isolation: policy } : {}),
+      ...(violations ? { violations } : {}),
+    };
   } finally {
+    // Наблюдение за журналом не переживает проверку и при исключении.
+    if (monitor && violations === undefined) await monitor.stop(0);
     // Каждый каталог убирается независимо: отказ уборки временного каталога
     // проверки (она могла снять с него права) не должен оставлять и метки.
     const removed = await Promise.allSettled([
@@ -413,6 +441,7 @@ export async function runCheck(
               attempts,
               started: launched,
               ...(policy ? { isolation: policy } : {}),
+              ...(violations ? { violations } : {}),
             },
           })
         : error;
@@ -584,6 +613,9 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     exitCode = -1,
     manifest: ReturnType<typeof junitSummary> | undefined;
   try {
+    // Снимок защищённых путей до проверки: запреты песочницы видят только
+    // путь операции, перенос готового каталога ими не закрыт.
+    const before = run.policy.isolation.mode === 'os' ? protectedSnapshot(root) : undefined;
     const result = await runCheck(
       { config: run.policy },
       {
@@ -607,10 +639,23 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         readable: [...run.boundary.readable, ...(corpusDir ? [corpusDir] : [])],
         controller: run.boundary.hidden,
         settingsDir: join(artifactDir, gate.id),
+        violations: true,
       },
     );
     exitCode = result.code;
     log += result.stdout + '\n' + result.stderr;
+    const planted = before ? protectedChanges(before, root) : [];
+    if (planted.length) {
+      kind = 'scope-violation';
+      throw new Error(
+        'проверка создала или изменила защищённые пути (конфигурация IDE, shell, git или Claude): ' +
+          planted
+            .slice(0, 5)
+            .map((p) => relative(root, p))
+            .join(', ') +
+          (planted.length > 5 ? ` и ещё ${planted.length - 5}` : ''),
+      );
+    }
     if (result.timedOut || signal.aborted)
       throw new Error('Проверка прервана или превысила timeout');
     if (result.code !== 0) {
@@ -627,9 +672,10 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       }
       // Отказ файловой песочницы — отказ среды: правка кода его не снимет,
       // а класс gate сжигал бы бюджет ремонтов.
-      const denied = result.isolation
-        ? sandboxDenials(result.stdout + '\n' + result.stderr, result.isolation)
-        : [];
+      const denied =
+        result.isolation && result.violations
+          ? sandboxDenials(result.violations, result.isolation)
+          : [];
       if (denied.length) {
         kind = 'environment';
         throw new Error(
@@ -673,6 +719,10 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       throw new Error('Gate изменил отслеживаемые файлы');
     passed = true;
   } catch (error) {
+    // Сборка политики не удалась — отказ среды; checkout, который увёл бы
+    // git хоста в чужую конфигурацию, — нарушение области.
+    if (error instanceof SandboxPolicyError) kind = 'environment';
+    if (error instanceof UntrustedCheckoutError) kind = 'scope-violation';
     const message = error instanceof Error ? error.message : String(error);
     summary = redact(message);
     log += '\n' + summary;

@@ -3,6 +3,15 @@ import { osTool } from './os-tools.ts';
 import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
+import { resolve } from 'node:path';
+import {
+  assertTrustedCheckout,
+  forgetWorktree,
+  worktreeKey,
+  gitHardening,
+  rememberWorktree,
+  worktreeAddPath,
+} from './git-trust.ts';
 import { outputRedactor, type Redactor } from './redaction.ts';
 import type { RuntimeDiagnostics } from '../contracts/index.ts';
 export interface CommandResult {
@@ -254,8 +263,22 @@ function captureProcessTree(pid?: number): RuntimeDiagnostics['processTree'] {
   }
   return { available: true, processes: rows.filter((r) => ids.has(r.pid)).slice(0, 100) };
 }
+/**
+ * Аргументы git хоста над `cwd`: репозиторий сверен (`assertTrustedCheckout`),
+ * исполняемые настройки сняты. Один путь для всех вызовов git хоста.
+ */
+export function hostGitArgs(cwd: string, args: string[]) {
+  assertTrustedCheckout(cwd);
+  return [...gitHardening, ...args];
+}
 export async function git(cwd: string, ...args: string[]) {
-  const result = await command(['git', ...args], cwd, {
+  const added = worktreeAddPath(args);
+  // Путь убираемого дерева — до удаления: потом настоящий путь уже не узнать.
+  const removed =
+    args[0] === 'worktree' && args[1] === 'remove'
+      ? worktreeKey(resolve(cwd, args.at(-1)!))
+      : undefined;
+  const result = await command(['git', ...hostGitArgs(cwd, args)], cwd, {
     env: {
       ...process.env,
       GIT_TERMINAL_PROMPT: '0',
@@ -267,6 +290,8 @@ export async function git(cwd: string, ...args: string[]) {
   });
   if (result.code !== 0)
     throw new Error(`git ${args[0]}: ${result.stderr.trim() || result.stdout.trim()}`);
+  if (added) rememberWorktree(resolve(cwd, added));
+  if (removed) forgetWorktree(removed);
   return result.stdout.trim();
 }
 

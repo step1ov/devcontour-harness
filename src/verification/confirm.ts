@@ -11,7 +11,7 @@ import {
   type WorkState,
 } from '../contracts/index.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
-import { git } from '../environment/process.ts';
+import { git, hostGitArgs } from '../environment/process.ts';
 import { contractDocuments, obligationOf } from './checks.ts';
 import {
   MAX_CASE_BYTES,
@@ -211,7 +211,7 @@ export async function submitCase(ctx: ConfirmContext, raw: unknown) {
         origin,
       },
       (content) =>
-        execFileSync('git', ['hash-object', '-w', '--stdin'], {
+        execFileSync('git', hostGitArgs(ctx.repoPath(repo), ['hash-object', '-w', '--stdin']), {
           cwd: ctx.repoPath(repo),
           input: content,
         })

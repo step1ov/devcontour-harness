@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   roleBinding,
   selectReviewer,
@@ -39,7 +39,8 @@ import {
   type RuntimeResponse,
   type WorkState,
 } from '../contracts/index.ts';
-import { git } from '../environment/process.ts';
+import { git, hostGitArgs } from '../environment/process.ts';
+import { protectedChanges, protectedSnapshot } from '../environment/isolation.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
 import { redactDeep, type Redactor } from '../environment/redaction.ts';
 import {
@@ -1076,6 +1077,11 @@ export class Runner {
                     if (context)
                       await writeFile(join(dir, 'context.json'), JSON.stringify(context, null, 2));
                     await this.prepareSelfCheck(attempt, repo, join(artifacts, 'self-check'));
+                    // Защищённые пути до работы исполнителя: перенос каталога,
+                    // собранного там, где запрет песочницы не действует, виден
+                    // только сверкой.
+                    const guarded =
+                      this.policy.isolation.mode === 'os' ? protectedSnapshot(cwd) : undefined;
                     const response = await this.call(
                       this.adapter(attempt.runtime),
                       {
@@ -1127,6 +1133,16 @@ export class Runner {
                       );
                     this.engine.heartbeat(attempt.id, attempt.token);
                     signal.throwIfAborted();
+                    const planted = guarded ? protectedChanges(guarded, cwd) : [];
+                    if (planted.length)
+                      throw new TaskFailure(
+                        'scope-violation',
+                        'Исполнитель создал или изменил защищённые пути (конфигурация IDE, shell, git или Claude): ' +
+                          planted
+                            .slice(0, 5)
+                            .map((p) => relative(cwd, p))
+                            .join(', '),
+                      );
                     if ((await git(cwd, 'rev-parse', 'HEAD')) !== base)
                       throw new TaskFailure(
                         'scope-violation',
@@ -2567,11 +2583,11 @@ export class Runner {
         if (work.order.requirements.length) assertRequirements(work.order, repoPath);
         // Внутри транзакции: без hooks репозитория (они исполнили бы чужой код
         // под блокировкой записи) и с конечным пределом, короче lease.
-        execFileSync(
-          'git',
-          ['-c', 'core.hooksPath=/dev/null', 'update-ref', repo.targetRef, sha, base],
-          { cwd: repoPath, stdio: 'pipe', timeout: Runner.refTimeoutMs },
-        );
+        execFileSync('git', hostGitArgs(repoPath, ['update-ref', repo.targetRef, sha, base]), {
+          cwd: repoPath,
+          stdio: 'pipe',
+          timeout: Runner.refTimeoutMs,
+        });
       });
     } catch (error) {
       const text =
