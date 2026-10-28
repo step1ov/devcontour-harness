@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // FIXTURE ONLY. Подставной CLI codex/claude для тестов механики harness:
 // говорит по протоколу CLI, но ответы берёт из сценария, а не из модели.
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, chmodSync } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 
@@ -93,6 +93,9 @@ for (const [path, text] of Object.entries(step.files ?? {})) {
 // Пустые служебные каталоги, как у настоящего CLI (`.claude/.cc-writes`).
 for (const path of step.dirs ?? [])
   mkdirSync(join(process.cwd(), path), { recursive: true, mode: 0o700 });
+// Права после записи: каталог, открытый всем, или закрытый от чтения.
+for (const [path, mode] of Object.entries(step.modes ?? {}))
+  chmodSync(join(process.cwd(), path), mode);
 for (const path of step.remove ?? []) rmSync(join(process.cwd(), path), { force: true });
 // Самопроверка исполнителя: команда из запроса controller на рабочем дереве.
 if (step.selfCheck) {

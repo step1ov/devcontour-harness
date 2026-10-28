@@ -272,6 +272,15 @@ export function isolationSupport() {
  *   «кроме node_modules», поэтому дерево перечисляется: новый каталог глубже
  *   существующего уровня не закрыт (у srt на Linux закрыты только уже
  *   существующие файлы до глубины 3).
+ * - Регистр. Правила srt (`subpath`, `regex`) записаны в нижнем регистре, но
+ *   Seatbelt на нечувствительном к регистру томе (APFS по умолчанию)
+ *   сравнивает путь без регистра: проба под песочницей отказывает в записи в
+ *   `.IDEA/x`, `.VSCode/x`, `.Bashrc`, `.Claude/commands/x` и `x/.GIT/hooks/x`
+ *   так же, как в именах нижнего регистра. На Linux ФС обычно различает
+ *   регистр, и `.Claude` хост не читает как `.claude`. Имена, которых в
+ *   запретах нет (`.claude/settings.json` в любом регистре), и пути глубже
+ *   перечисленных уровней ловит сверка снимков (`protectedSnapshot`) — она
+ *   сравнивает имена без регистра везде.
  *
  * Путь с символами глоба нельзя записать шаблоном без риска не совпасть ни
  * с чем; тогда возвращается `undefined`, и srt остаётся в прежнем каталоге с
@@ -377,7 +386,11 @@ export function linuxWriteDenies(roots: string[]) {
 export function mandatoryDenyRule(policy: Isolation, path: string) {
   const root = policy.write.find((w) => path === w || path.startsWith(w + sep));
   if (!root) return undefined;
-  const parts = relative(root, path).split(sep);
+  const raw = relative(root, path).split(sep);
+  // Seatbelt на нечувствительном к регистру томе (APFS по умолчанию) отказывает
+  // и в `.IDEA/x`, и в `.Claude/commands`: имена сравниваются без регистра.
+  // `node_modules` — как в перечислении `protectedWriteDenies`, точно.
+  const parts = raw.map((p) => p.toLowerCase());
   const at = (i: number, ...names: string[]) => names.every((n, k) => parts[i + k] === n);
   const rule = (what: string) => `обязательный запрет записи sandbox-runtime: ${what}`;
   for (let i = 0; i < parts.length; i++) {
@@ -385,16 +398,16 @@ export function mandatoryDenyRule(policy: Isolation, path: string) {
     if ((DANGEROUS_FILES as readonly string[]).includes(name) && i === parts.length - 1)
       return rule(name);
     // Каталоги IDE внутри дерева зависимостей открыты (`protectedWriteDenies`).
-    if (ideDirectories.includes(name) && !parts.slice(0, i).includes('node_modules'))
+    if (ideDirectories.includes(name) && !raw.slice(0, i).includes('node_modules'))
       return rule(`каталог IDE ${name}`);
     if (at(i, '.git', 'hooks') || at(i, '.git', 'config'))
-      return rule(parts.slice(i, i + 2).join('/'));
+      return rule(raw.slice(i, i + 2).join('/'));
     if (name === '.git' && i === 0 && parts.length === 1) return rule('файл .git рабочего дерева');
     if (name === '.git' && i === 0 && gitRedirects.includes(parts[1] ?? ''))
-      return rule(`.git/${parts[1]}`);
+      return rule(`.git/${raw[1]}`);
     if (name === '.git' && i > 0) return rule('вложенный репозиторий .git');
     if (at(i, '.claude', 'commands') || at(i, '.claude', 'agents'))
-      return rule(parts.slice(i, i + 2).join('/'));
+      return rule(raw.slice(i, i + 2).join('/'));
   }
   return undefined;
 }
@@ -484,11 +497,32 @@ export function sandboxDenials(violations: SandboxViolation[], policy: Isolation
   return [...found].map(([path, rule]) => ({ path, rule }));
 }
 
-/** Имена, которые проверка и исполнитель не создают и не меняют. */
+/**
+ * Имена, которые проверка и исполнитель не создают и не меняют.
+ *
+ * Сравниваются без регистра на любой платформе: на APFS и NTFS `.Claude`,
+ * `.VSCode` или `.Bashrc` хост читает как `.claude`, `.vscode`, `.bashrc`.
+ * На чувствительной к регистру ФС такое имя никто не читает, но и создавать
+ * его незачем — лишняя строгость дешевле развилки по ФС.
+ */
 const protectedNames = new Set<string>([...DANGEROUS_FILES, ...ideDirectories, '.claude', '.git']);
+const isProtected = (name: string) => protectedNames.has(name.toLowerCase());
 const snapshotLimit = 200_000;
-/** Подпись каталога, в дереве которого нет ни файлов, ни символьных ссылок. */
+/**
+ * Подпись каталога, в дереве которого нет ни файлов, ни символьных ссылок, и
+ * ни один каталог не открыт на запись группе или всем (`mode & 0o022`):
+ * такой каталог — место, куда другой пользователь положит конфигурацию
+ * после сверки.
+ */
 const emptyTree = 'd:empty';
+/** Ошибка доступа к пути, которую сверка не может обойти: отказ, а не пропуск. */
+const unreadable = (root: string, path: string, error: unknown): never => {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code ?? String(error);
+  throw new SandboxPolicyError(
+    `сверка защищённых путей не выполнена: нет доступа к ${relative(root, path) || '.'} (${code}) — путь, который нельзя прочитать, мог скрыть конфигурацию IDE, shell, git или Claude`,
+  );
+};
+const missing = (error: unknown) => (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
 /**
  * Защищённые элементы checkout вне `node_modules`: путь → подпись.
  *
@@ -509,31 +543,49 @@ export function protectedSnapshot(root: string) {
   const signature = (path: string): string => {
     count();
     let stat;
+    // Только ENOENT значит «пути нет». Любой другой отказ (EACCES под
+    // каталогом без права поиска, каталог mode 000) — отказ сверки: иначе
+    // `chmod 0444 sub` спрятал бы `sub/.claude/settings.json`.
     try {
       stat = lstatSync(path);
-    } catch {
-      return 'missing';
+    } catch (error) {
+      if (missing(error)) return 'missing';
+      return unreadable(root, path, error);
     }
-    if (stat.isSymbolicLink()) return 'l:' + readlinkSync(path);
-    if (!stat.isDirectory()) return `f:${stat.size}:${stat.mtimeMs}:${stat.ino}`;
-    const names = readdirSync(path).sort();
-    const inner = names.map((name) => signature(join(path, name)));
-    // Дерево из одних каталогов не несёт ни конфигурации, ни ссылки наружу:
-    // его подпись одна для любого такого дерева (см. `protectedChanges`).
-    if (inner.every((sig) => sig === emptyTree)) return emptyTree;
-    return `d:${stat.ino}[${names.map((name, i) => `${name}=${inner[i]}`).join(',')}]`;
+    try {
+      if (stat.isSymbolicLink()) return 'l:' + readlinkSync(path);
+      // Не каталог и не ссылка — файл, FIFO, сокет, устройство: всё это
+      // содержимое, пустым деревом не бывает.
+      if (!stat.isDirectory()) return `f:${stat.size}:${stat.mtimeMs}:${stat.ino}`;
+      const mode = stat.mode & 0o7777;
+      const names = readdirSync(path).sort();
+      const inner = names.map((name) => signature(join(path, name)));
+      // Дерево из одних закрытых для чужой записи каталогов не несёт ни
+      // конфигурации, ни ссылки наружу: его подпись одна для любого такого
+      // дерева (см. `protectedChanges`). Открытый группе или всем каталог
+      // подписывается с правами и потому виден как изменение.
+      if ((mode & 0o022) === 0 && inner.every((sig) => sig === emptyTree)) return emptyTree;
+      return `d:${stat.ino}:${mode.toString(8)}[${names.map((name, i) => `${name}=${inner[i]}`).join(',')}]`;
+    } catch (error) {
+      if (error instanceof SandboxPolicyError) throw error;
+      if (missing(error)) return 'missing';
+      return unreadable(root, path, error);
+    }
   };
   const walk = (dir: string) => {
     let entries: import('node:fs').Dirent[];
     try {
       entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
+    } catch (error) {
+      // Исчезнувший каталог сверять нечего; непрочитанный мог спрятать
+      // защищённое имя — отказ.
+      if (missing(error)) return;
+      return unreadable(root, dir, error);
     }
     for (const entry of entries) {
       count();
       const path = join(dir, entry.name);
-      if (entry.name === '.git' && dir === root && entry.isDirectory()) {
+      if (entry.name.toLowerCase() === '.git' && dir === root && entry.isDirectory()) {
         // Обычный `.git`: объекты и индекс меняет и git хоста; сверяются
         // только конфигурация, hooks и перенаправления. Сам вид элемента
         // тоже: файл `.git` worktree, заменённый каталогом, — изменение,
@@ -543,7 +595,7 @@ export function protectedSnapshot(root: string) {
           found.set(join(path, name), signature(join(path, name)));
         continue;
       }
-      if (protectedNames.has(entry.name)) {
+      if (isProtected(entry.name)) {
         found.set(path, signature(path));
         continue;
       }
@@ -556,11 +608,16 @@ export function protectedSnapshot(root: string) {
 /**
  * Защищённые пути, которые появились или изменились после снимка `before`.
  *
- * Пустые каталоги (только каталоги, рекурсивно) нарушением не считаются,
- * если до снимка пути не было или он тоже был без файлов: исполняемой
- * конфигурации в них нет, а CLI исполнителя создаёт такие служебные каталоги
- * (`.claude/.cc-writes`) рядом с каждым записанным файлом. Путь, где раньше
- * были файлы, по-прежнему нарушение при любом изменении.
+ * Путь, который сверка не может прочитать (кроме ENOENT), — `SandboxPolicyError`
+ * из снимка, а не пропуск: вызывающий решает, отказ ли это среды (снимок до
+ * работы) или нарушение области (после).
+ *
+ * Пустые каталоги (только каталоги, рекурсивно, без записи группе и всем)
+ * нарушением не считаются, если до снимка пути не было или он тоже был без
+ * файлов: исполняемой конфигурации в них нет, а CLI исполнителя создаёт
+ * такие служебные каталоги (`.claude/.cc-writes`) рядом с каждым записанным
+ * файлом. Путь, где раньше были файлы, по-прежнему нарушение при любом
+ * изменении.
  */
 export function protectedChanges(before: Map<string, string>, root: string) {
   const after = protectedSnapshot(root);

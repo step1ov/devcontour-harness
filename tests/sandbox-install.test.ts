@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -23,6 +24,7 @@ import {
   protectedChanges,
   protectedSnapshot,
   protectedWriteDenies,
+  SandboxPolicyError,
   sandboxDenials,
 } from '../src/environment/isolation.ts';
 import { TaskFailure } from '../src/engine/failure.ts';
@@ -382,6 +384,12 @@ test('SBX06: сверка защищённых путей — пустые сл�
     after(() => rmSync(join(root, '.claude/settings.json'))),
     ['.claude'],
   );
+  // FIFO, сокет и прочие не-каталоги — содержимое, а не пустое дерево.
+  assert.deepEqual(
+    after(() => execFileSync('mkfifo', [join(root, '.claude/.cc-writes/pipe')])),
+    ['.claude'],
+  );
+  rmSync(join(root, '.claude/.cc-writes/pipe'));
   // `.git` хоста: в hooks с файлами (образцы git init) нарушение — и
   // подложенный hook, и даже пустой каталог.
   assert.deepEqual(
@@ -393,6 +401,207 @@ test('SBX06: сверка защищённых путей — пустые сл�
     ['.git/hooks'],
   );
 });
+
+/** Нечувствительная к регистру ФС: `.Claude` и `.claude` — одно имя. */
+const foldsCase = (dir: string) => {
+  const probe = join(dir, 'harness-case-probe');
+  writeFileSync(probe, '');
+  try {
+    return existsSync(join(dir, 'HARNESS-CASE-PROBE'));
+  } finally {
+    rmSync(probe);
+  }
+};
+const root0 = process.getuid?.() === 0;
+
+test('SBX08: сверка защищённых путей без регистра — .Claude, .VSCode, вложенный .GIT, .Bashrc — нарушение; обязательный запрет из журнала узнаётся в любом регистре', () => {
+  const r = repo({ 'sub/index.ts': 'x\n' });
+  const root = realpathSync(r.dir);
+  const after = (change: () => void) => {
+    const before = protectedSnapshot(root);
+    change();
+    return protectedChanges(before, root).map((p) => p.slice(root.length + 1));
+  };
+  const file = (p: string, text = 'x') => {
+    mkdirSync(join(root, p, '..'), { recursive: true });
+    writeFileSync(join(root, p), text);
+  };
+  assert.deepEqual(
+    after(() => file('.Claude/settings.json', '{"hooks":{}}')),
+    ['.Claude'],
+  );
+  assert.deepEqual(
+    after(() => file('.VSCode/tasks.json', '{}')),
+    ['.VSCode'],
+  );
+  assert.deepEqual(
+    after(() => file('sub/.GIT', 'gitdir: /elsewhere\n')),
+    ['sub/.GIT'],
+  );
+  assert.deepEqual(
+    after(() => file('.Bashrc', 'curl x | sh\n')),
+    ['.Bashrc'],
+  );
+  assert.deepEqual(
+    after(() => file('sub/.MCP.json', '{}')),
+    ['sub/.MCP.json'],
+  );
+  // Пустой служебный каталог в другом регистре — так же не нарушение.
+  assert.deepEqual(
+    after(() => mkdirSync(join(root, 'sub/.CLAUDE/.cc-writes'), { recursive: true, mode: 0o700 })),
+    [],
+  );
+  if (foldsCase(root))
+    // Хост читает `.Claude/settings.json` как `.claude/settings.json`.
+    assert.equal(readFileSync(join(root, '.claude/settings.json'), 'utf8'), '{"hooks":{}}');
+
+  // Seatbelt на APFS отказывает и в записи в `.IDEA/x`: правило называется.
+  const policy = isolation({ write: [root], controller: [] });
+  assert.match(mandatoryDenyRule(policy, `${root}/.IDEA/workspace.xml`)!, /каталог IDE \.idea/);
+  assert.match(mandatoryDenyRule(policy, `${root}/src/.VSCode/tasks.json`)!, /каталог IDE/);
+  assert.match(mandatoryDenyRule(policy, `${root}/.Claude/Commands/x.md`)!, /\.Claude\/Commands/);
+  assert.match(mandatoryDenyRule(policy, `${root}/x/.GIT/hooks/pre-commit`)!, /вложенный|hooks/);
+  assert.match(mandatoryDenyRule(policy, `${root}/src/.ZSHRC`)!, /\.zshrc/);
+  assert.equal(mandatoryDenyRule(policy, `${root}/node_modules/p/.IDEA/x`), undefined);
+});
+
+test(
+  'SBX09: путь, который сверка не может прочитать, — отказ с путём, а не пропуск',
+  { skip: root0 ? 'root читает каталоги без прав' : false },
+  () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-sbx-unreadable-')));
+    const locked: string[] = [];
+    const lock = (p: string, mode: number) => {
+      chmodSync(join(root, p), mode);
+      locked.push(join(root, p));
+    };
+    const fails = (before: Map<string, string>, path: string) =>
+      assert.throws(
+        () => protectedChanges(before, root),
+        (e: unknown) =>
+          e instanceof SandboxPolicyError && e.message.includes(`нет доступа к ${path} (EACCES)`),
+      );
+    try {
+      mkdirSync(join(root, 'sub'));
+      let before = protectedSnapshot(root);
+      // Каталог без права поиска прятал бы `sub/.claude/settings.json`.
+      mkdirSync(join(root, 'sub/.claude'));
+      writeFileSync(join(root, 'sub/.claude/settings.json'), '{}');
+      lock('sub', 0o444);
+      fails(before, 'sub/.claude');
+      chmodSync(join(root, 'sub'), 0o755);
+      rmSync(join(root, 'sub/.claude'), { recursive: true });
+      // Каталог, который нельзя перечислить, — то же.
+      mkdirSync(join(root, 'other'));
+      before = protectedSnapshot(root);
+      lock('other', 0o000);
+      fails(before, 'other');
+      chmodSync(join(root, 'other'), 0o755);
+      // Пустой `.claude` с mode 000 пустым деревом не назвать: внутрь не заглянуть.
+      before = protectedSnapshot(root);
+      mkdirSync(join(root, '.claude'));
+      lock('.claude', 0o000);
+      fails(before, '.claude');
+    } finally {
+      for (const p of locked) chmodSync(p, 0o755);
+    }
+  },
+);
+
+test('SBX10: пустой защищённый каталог, открытый на запись группе или всем, — нарушение', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-sbx-mode-')));
+  const after = (change: () => void) => {
+    const before = protectedSnapshot(root);
+    change();
+    return protectedChanges(before, root).map((p) => p.slice(root.length + 1));
+  };
+  const dir = (p: string, mode: number) => {
+    mkdirSync(join(root, p), { recursive: true });
+    chmodSync(join(root, p), mode);
+  };
+  // Закрытые для чужой записи — как у CLI исполнителя.
+  assert.deepEqual(
+    after(() => {
+      dir('.claude/.cc-writes', 0o700);
+      chmodSync(join(root, '.claude'), 0o755);
+    }),
+    [],
+  );
+  assert.deepEqual(
+    after(() => chmodSync(join(root, '.claude/.cc-writes'), 0o777)),
+    ['.claude'],
+  );
+  chmodSync(join(root, '.claude/.cc-writes'), 0o700);
+  assert.deepEqual(
+    after(() => chmodSync(join(root, '.claude'), 0o775)),
+    ['.claude'],
+  );
+  assert.deepEqual(
+    after(() => dir('pkg/.vscode', 0o757)),
+    ['pkg/.vscode'],
+  );
+  // Каталог с файлами: смена прав без смены содержимого — тоже изменение.
+  writeFileSync(join(root, 'pkg/.vscode/settings.json'), '{}');
+  assert.deepEqual(
+    after(() => chmodSync(join(root, 'pkg/.vscode'), 0o700)),
+    ['pkg/.vscode'],
+  );
+});
+
+test(
+  'SBX11: под песочницей ОС — .IDEA закрыт ядром и назван правилом, .Claude/settings.json и спрятанный chmod-ом .claude — scope-violation',
+  { skip: noSandbox },
+  async () => {
+    const write = (paths: Record<string, string>, chmod: Record<string, number> = {}) =>
+      `const fs=require('fs'),path=require('path');try{for(const [p,t] of Object.entries(${JSON.stringify(paths)})){fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,t)}for(const [p,m] of Object.entries(${JSON.stringify(chmod)}))fs.chmodSync(p,m)}catch(e){console.error(e.message);process.exit(1)}`;
+    const fresh = () => {
+      const r = repo({ 'sub/index.ts': 'x\n' });
+      return { r, at: (p: string) => join(realpathSync(r.dir), p) };
+    };
+    if (mac) {
+      // Seatbelt сравнивает путь без регистра: `.IDEA` закрыт правилом для `.idea`.
+      const { r, at } = fresh();
+      const ide = await gate(r.dir, r.head(), write({ [at('.IDEA/workspace.xml')]: '<x/>' }));
+      assert.ok(ide.failure, ide.evidence.summary);
+      assert.match(ide.failure.message, /EPERM.*\.IDEA/);
+      assert.equal(existsSync(at('.IDEA')), false);
+      // Класс отказа приходит из журнала ядра (SBX03); когда журнал виден,
+      // правило названо и для имени в другом регистре (SBX08 — без журнала).
+      if (ide.failure.kind === 'environment')
+        assert.match(
+          ide.failure.message,
+          /\.IDEA(\/workspace\.xml)? — обязательный запрет записи sandbox-runtime: каталог IDE \.idea/,
+        );
+      else assert.equal(ide.failure.kind, 'gate');
+    }
+    if (mac) {
+      // Создать `.Claude` ядро не даёт (предок запрета `.claude/commands`);
+      // в уже существующий каталог запись проходит — её находит сверка.
+      const { r, at } = fresh();
+      const denied = await gate(r.dir, r.head(), write({ [at('.Claude/settings.json')]: '{}' }));
+      assert.match(denied.failure?.message ?? '', /EPERM.*\.Claude/);
+      assert.equal(existsSync(at('.claude')), false);
+      mkdirSync(at('.claude/.cc-writes'), { recursive: true, mode: 0o700 });
+      const planted = await gate(r.dir, r.head(), write({ [at('.Claude/settings.json')]: '{}' }));
+      assert.equal(planted.failure?.kind, 'scope-violation', planted.evidence.summary);
+      assert.match(planted.failure.message, /защищённые пути .*: \.claude$/);
+    }
+    if (!root0) {
+      const { r, at } = fresh();
+      try {
+        const hidden = await gate(
+          r.dir,
+          r.head(),
+          write({ [at('sub/.claude/settings.json')]: '{}' }, { [at('sub')]: 0o444 }),
+        );
+        assert.equal(hidden.failure?.kind, 'scope-violation', hidden.evidence.summary);
+        assert.match(hidden.failure.message, /нет доступа к sub\/\.claude \(EACCES\)/);
+      } finally {
+        chmodSync(at('sub'), 0o755);
+      }
+    }
+  },
+);
 
 test('SBX07: файл .git worktree, заменённый каталогом (даже пустым), подложенный .git/config и вложенный .git-файл — нарушение', () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-sbx-gitfile-')));

@@ -40,7 +40,11 @@ import {
   type WorkState,
 } from '../contracts/index.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
-import { protectedChanges, protectedSnapshot } from '../environment/isolation.ts';
+import {
+  protectedChanges,
+  protectedSnapshot,
+  SandboxPolicyError,
+} from '../environment/isolation.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
 import { redactDeep, type Redactor } from '../environment/redaction.ts';
 import {
@@ -1078,8 +1082,16 @@ export class Runner {
                     // Защищённые пути до работы исполнителя: перенос каталога,
                     // собранного там, где запрет песочницы не действует, виден
                     // только сверкой.
-                    const guarded =
-                      this.policy.isolation.mode === 'os' ? protectedSnapshot(cwd) : undefined;
+                    // Непрочитанный до работы путь — отказ среды: исполнитель
+                    // его ещё не трогал.
+                    let guarded: Map<string, string> | undefined;
+                    try {
+                      if (this.policy.isolation.mode === 'os') guarded = protectedSnapshot(cwd);
+                    } catch (error) {
+                      if (error instanceof SandboxPolicyError)
+                        throw new TaskFailure('environment', error.message);
+                      throw error;
+                    }
                     const response = await this.call(
                       this.adapter(attempt.runtime),
                       {
@@ -1131,7 +1143,16 @@ export class Runner {
                       );
                     this.engine.heartbeat(attempt.id, attempt.token);
                     signal.throwIfAborted();
-                    const planted = guarded ? protectedChanges(guarded, cwd) : [];
+                    // После работы непрочитанный путь закрыл исполнитель —
+                    // нарушение области, как и созданный защищённый путь.
+                    let planted: string[] = [];
+                    try {
+                      if (guarded) planted = protectedChanges(guarded, cwd);
+                    } catch (error) {
+                      if (error instanceof SandboxPolicyError)
+                        throw new TaskFailure('scope-violation', error.message);
+                      throw error;
+                    }
                     if (planted.length)
                       throw new TaskFailure(
                         'scope-violation',

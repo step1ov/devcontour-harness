@@ -117,17 +117,25 @@ test('T05: выход за область записи и правка защи�
 });
 
 test(
-  'T05: пустые служебные каталоги CLI исполнителя (.claude/.cc-writes) под песочницей ОС попытку не отклоняют; файл в .claude — отклоняет',
+  'T05: пустые служебные каталоги CLI исполнителя (.claude/.cc-writes) под песочницей ОС попытку не отклоняют; файл в .claude (в любом регистре), каталог, открытый всем, и непрочитанный .claude — отклоняют',
   { skip: isolationSupport().ok ? false : 'песочница ОС недоступна' },
   async () => {
     const dirs = ['.claude/.cc-writes', 'src/.claude/.cc-writes'];
-    for (const [extra, done] of [
-      [{}, true],
-      [{ '.claude/settings.json': '{}' }, false],
+    const folds = process.platform === 'darwin' || process.platform === 'win32';
+    for (const [extra, modes, reason] of [
+      [{}, {}, undefined],
+      [{ '.claude/settings.json': '{}' }, {}, /\): \.claude$/],
+      // На нечувствительной к регистру ФС хост читает это как `.claude/settings.json`.
+      ...(folds ? [[{ '.Claude/settings.json': '{}' }, {}, /\): \.Claude$/] as const] : []),
+      [{}, { '.claude/.cc-writes': 0o777 }, /\): \.claude$/],
+      // Без права чтения сверка не видит содержимого: отказ, а не пропуск.
+      ...(process.getuid?.() === 0
+        ? []
+        : [[{}, { 'src/.claude': 0 }, /нет доступа к src\/\.claude \(EACCES\)/] as const]),
     ] as const) {
       const ctx = setup({
         scenario: {
-          writer: { ...implement({ 'src/greet.js': greet, ...extra }), dirs },
+          writer: { ...implement({ 'src/greet.js': greet, ...extra }), dirs, modes },
           reviewer: approve(),
         },
         policy: (p) => {
@@ -138,14 +146,11 @@ test(
       const before = target(ctx);
       await runAll(ctx);
       const work = ctx.engine.read((v) => v.work('add-greeting')!);
-      if (done) assert.equal(work.status, 'done', work.failure);
+      if (!reason) assert.equal(work.status, 'done', work.failure);
       else {
         assert.equal(work.status, 'failed');
-        assert.equal(work.failureKind, 'scope-violation');
-        assert.match(
-          work.failure!,
-          /защищённые пути \(конфигурация IDE, shell, git или Claude\): \.claude$/,
-        );
+        assert.equal(work.failureKind, 'scope-violation', work.failure);
+        assert.match(work.failure!, reason);
         assert.equal(target(ctx), before, 'target ref не продвинут');
       }
     }

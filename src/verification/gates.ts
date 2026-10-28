@@ -646,7 +646,15 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     );
     exitCode = result.code;
     log += result.stdout + '\n' + result.stderr;
-    const planted = before ? protectedChanges(before, root) : [];
+    // Путь, который после проверки не прочитать, проверка и закрыла: это
+    // нарушение области, а не отказ среды (снимок до проверки прочитался).
+    let planted: string[] = [];
+    try {
+      if (before) planted = protectedChanges(before, root);
+    } catch (error) {
+      if (error instanceof SandboxPolicyError) kind = 'scope-violation';
+      throw error instanceof SandboxPolicyError ? new Error(error.message) : error;
+    }
     if (planted.length) {
       kind = 'scope-violation';
       throw new Error(
