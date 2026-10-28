@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import {
   API_VERSION,
   HarnessError,
@@ -8,7 +8,8 @@ import {
   type RuntimeAdapter,
   type RuntimeName,
 } from '../contracts/index.ts';
-import { isolationSupport } from '../environment/isolation.ts';
+import { credentialPaths, isolationSupport } from '../environment/isolation.ts';
+import { chooseCheckoutRoot } from '../environment/checkout-root.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import type { ToolchainReport } from '../toolchains/inspect.ts';
@@ -59,6 +60,12 @@ export async function doctor(
    * пакета не тянет модуль toolchains сам.
    */
   toolchain?: { baseDir: string; inspect: ToolchainInspect },
+  /**
+   * Корень рабочих деревьев: выбор по каталогу состояния и репозиториям
+   * политики (`chooseCheckoutRoot`) или заданный хостом. Нужны политика и
+   * каталог состояния.
+   */
+  checkouts?: { baseDir: string; checkoutRoot?: string },
 ) {
   const problems: string[] = [];
   const runtimes = [];
@@ -119,6 +126,17 @@ export async function doctor(
       problems.push(error instanceof HarnessError ? error.message : String(error));
     }
   }
+  const checkoutRoot =
+    policy && stateDir && checkouts
+      ? chooseCheckoutRoot({
+          stateDirs: [stateDir],
+          repositories: policy.repositories.map((r) =>
+            isAbsolute(r.path) ? r.path : resolve(checkouts.baseDir, r.path),
+          ),
+          hidden: credentialPaths(),
+          ...(checkouts.checkoutRoot ? { configured: checkouts.checkoutRoot } : {}),
+        })
+      : undefined;
   const toolchains =
     policy && toolchain ? await toolchain.inspect(policy, toolchain.baseDir) : undefined;
   for (const r of toolchains ?? [])
@@ -134,6 +152,7 @@ export async function doctor(
     runtimes,
     sandbox: { os: sandbox.ok, ...(sandbox.ok ? {} : { reason: sandbox.detail }) },
     ...(state ? { state } : {}),
+    ...(checkoutRoot ? { checkouts: checkoutRoot } : {}),
     ...(toolchains ? { toolchains } : {}),
     problems,
   };

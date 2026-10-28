@@ -750,6 +750,17 @@ export const doctorDataSchema = z.strictObject({
         .optional(),
     })
     .optional(),
+  /**
+   * Корень рабочих деревьев попыток: вне дерева (`cache`, `configured`) или
+   * прежнее место (`in-place`, `cross-volume` — кэш на другом томе).
+   */
+  checkouts: z
+    .strictObject({
+      placement: z.enum(['configured', 'in-place', 'cache', 'cross-volume']),
+      root: z.string().optional(),
+      note: z.string().optional(),
+    })
+    .optional(),
   /** Диагностика toolchain репозиториев политики; есть, когда задана политика. */
   toolchains: z.array(toolchainReportSchema).optional(),
   problems: z.array(z.string()),

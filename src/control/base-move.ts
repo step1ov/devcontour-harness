@@ -1,7 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { isAbsolute, join, resolve } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { ExecutionPolicy, ExecutionStore, ExecutionView } from '../contracts/index.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
+import { checkoutPath, chooseCheckoutRoot } from '../environment/checkout-root.ts';
+import { credentialPaths } from '../environment/isolation.ts';
 
 /** Сдвиг ref: репозиторий, ref, новое и ожидаемое прежнее значение. */
 export type RefMove = (
@@ -58,6 +61,8 @@ export async function moveBase(input: {
   policy: ExecutionPolicy;
   baseDir: string;
   stateDir: string;
+  /** Корень дерева слияния (`checkout-root.ts`); без него — выбор по каталогу состояния. */
+  checkoutRoot?: string;
   only?: Record<string, string>;
   move?: RefMove;
 }) {
@@ -67,6 +72,12 @@ export async function moveBase(input: {
       git(repoPath, 'update-ref', target, to, from).then(() => undefined));
   const path = (p: string) => (isAbsolute(p) ? p : resolve(input.baseDir, p));
   const updated: BaseMoved[] = [];
+  const placement = chooseCheckoutRoot({
+    stateDirs: [input.stateDir],
+    repositories: input.policy.repositories.map((r) => path(r.path)),
+    hidden: credentialPaths(),
+    ...(input.checkoutRoot ? { configured: input.checkoutRoot } : {}),
+  });
   for (const repo of input.policy.repositories.filter((r) => !input.only || r.id in input.only)) {
     const repoPath = path(repo.path);
     const head = input.only?.[repo.id] ?? (await git(repoPath, 'rev-parse', 'HEAD'));
@@ -90,7 +101,15 @@ export async function moveBase(input: {
     }
     // Обе линии несут работу: сводятся слиянием в отдельном worktree — target
     // ref checkout-веткой быть не может и продвигается только через CAS.
-    const cwd = join(input.stateDir, 'worktrees', `base-${repo.id}-${Date.now()}`);
+    const name = `base-${repo.id}-${Date.now()}`;
+    const cwd = checkoutPath(
+      placement,
+      join(input.stateDir, 'worktrees', name),
+      repo.id,
+      'base',
+      name,
+    );
+    await mkdir(dirname(cwd), { recursive: true });
     await git(repoPath, 'worktree', 'add', '--detach', cwd, tip);
     try {
       await git(

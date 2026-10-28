@@ -83,7 +83,8 @@ export PATH="$PWD/node_modules/.bin:$PATH"
 ## Cache и изменяемые каталоги
 
 Каждая попытка исполняется в своём worktree (`<state>/repos/<repo>/worktrees/<attempt>` и
-`…-integration`), и `prepare` устанавливает зависимости заново в нём. Изменяемые артефакты
+`…-integration`; если каталог состояния лежит внутри репозитория — под корнем вне дерева
+`<checkoutRoot>/<repo>/worktrees/<attempt>`), и `prepare` устанавливает зависимости заново в нём. Изменяемые артефакты
 одной попытки другой не видны.
 
 | Допустимый общий cache (content-addressed, вне worktree)                                               | Изменяемое, только внутри worktree попытки                       |

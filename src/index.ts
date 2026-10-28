@@ -172,6 +172,19 @@ export {
   worktreeAddPath,
   worktreeKey,
 } from './environment/git-trust.ts';
+/**
+ * Корень рабочих деревьев попыток: хост выбирает его сам (`checkoutRoot`)
+ * или показывает в диагностике выбор по умолчанию.
+ */
+export {
+  checkoutCacheBase,
+  checkoutPath,
+  chooseCheckoutRoot,
+  closedCheckouts,
+  type CheckoutPlacement,
+  type CheckoutRoot,
+  type CheckoutRootInput,
+} from './environment/checkout-root.ts';
 export { closeIfBasisChanged } from './engine/property-recovery.ts';
 export {
   analyzeRecovery,

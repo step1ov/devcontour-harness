@@ -711,6 +711,7 @@ async function run(
                   }),
               }
             : undefined,
+          b && v.state ? { baseDir: b.baseDir } : undefined,
         ),
       };
     }

@@ -21,7 +21,7 @@ import {
   type CaseDecision,
   type CorpusStore,
 } from './corpus.ts';
-import { runCheck } from './gates.ts';
+import { runCheck, type Boundary } from './gates.ts';
 
 /**
  * Быстрый маршрут: подтверждённый пример становится обязательным случаем.
@@ -91,7 +91,12 @@ export interface ConfirmContext {
   stateDir: string;
   repoPath(repo: ExecutionPolicy['repositories'][number]): string;
   /** Закрытое проверке и открытое внутри него. */
-  boundary(): { hidden: string[]; readable: string[] };
+  boundary(): Boundary;
+  /**
+   * Каталог рабочего дерева вида `kind` (корень вне дерева, `checkout-root.ts`);
+   * без него — прежнее место в каталоге состояния.
+   */
+  checkout?(repositoryId: string, kind: string, id: string): string;
   /** Источник переменных окружения (по умолчанию — процесс). */
   environment?: NodeJS.ProcessEnv;
 }
@@ -344,8 +349,9 @@ async function decide(
     };
   const runs: z.infer<typeof caseResult>[] = [];
   const durations: number[] = [];
-  await mkdir(join(ctx.stateDir, 'case-checks'), { recursive: true });
-  const dir = await realpath(await mkdtemp(join(ctx.stateDir, 'case-checks', 'case-')));
+  const cases = ctx.checkout?.(repo.id, 'case-checks', '') ?? join(ctx.stateDir, 'case-checks');
+  await mkdir(cases, { recursive: true });
+  const dir = await realpath(await mkdtemp(join(cases, 'case-')));
   await rm(dir, { recursive: true, force: true });
   await git(repoPath, 'worktree', 'add', '--detach', dir, source.sha);
   const io = await realpath(await mkdtemp(join(tmpdir(), 'harness-case-')));
@@ -395,6 +401,7 @@ async function decide(
               write: [dir, io],
               readable: boundary.readable,
               controller: boundary.hidden,
+              ...(boundary.checkouts?.length ? { checkouts: boundary.checkouts } : {}),
               settingsDir: join(io, `settings-${i}`),
             },
           );

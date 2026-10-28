@@ -5,6 +5,7 @@ import { writeFile, mkdir } from 'node:fs/promises';
 import { existsSync, lstatSync, readlinkSync, realpathSync, readdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
+import { closedCheckouts } from './checkout-root.ts';
 import {
   DANGEROUS_FILES,
   getDangerousDirectories,
@@ -71,6 +72,11 @@ export function isolation(options: {
   domains?: string[];
   /** Элементы каталога контура хоста, которые закрываются и до своего появления. */
   entries?: string[];
+  /**
+   * Корни рабочих деревьев вне каталога состояния (`checkout-root.ts`):
+   * закрываются поэлементно, кроме открытых путей и их предков.
+   */
+  checkouts?: string[];
 }): Isolation {
   // Песочница сравнивает настоящие пути: временный каталог macOS лежит за
   // symlink (/var → /private/var), и правило для записанного пути иначе не
@@ -88,7 +94,11 @@ export function isolation(options: {
   ];
   return {
     write: real(options.write),
-    hidden: real([...options.controller, ...credentialPaths()]),
+    hidden: real([
+      ...options.controller,
+      ...closedCheckouts(options.checkouts ?? [], [...options.write, ...(options.readable ?? [])]),
+      ...credentialPaths(),
+    ]),
     // Установленные пакеты рантайма лежат внутри закрытого каталога его
     // учётных данных: без них codex не запускает даже помощника своей
     // песочницы. Более конкретный путь открыт; токены и сессии — нет.
@@ -483,16 +493,47 @@ export async function watchSandboxLog(tag: string) {
   };
 }
 /**
- * Отказы обязательной политики в открытых проверке каталогах, которые
- * подтвердило ядро. Запись вне открытых каталогов — ошибка кода проверки,
- * а не среды: её здесь нет.
+ * Запрет чтения, которым песочница закрыла путь: путь внутри закрытого и не
+ * внутри более конкретного открытого (srt: открытое внутри закрытого
+ * побеждает, закрытое внутри открытого — снова закрыто).
  */
-export function sandboxDenials(violations: SandboxViolation[], policy: Isolation) {
+export function hiddenReadRule(policy: Isolation, path: string) {
+  const within = (p: string, root: string) => p === root || p.startsWith(root + sep);
+  const longest = (paths: string[]) =>
+    paths.filter((p) => within(path, p)).reduce((a, b) => (b.length > a.length ? b : a), '');
+  const hidden = longest(policy.hidden);
+  if (!hidden) return undefined;
+  if (longest([...policy.readable, ...policy.write]).length >= hidden.length) return undefined;
+  return `запрет чтения песочницы: ${hidden} закрыт проверке`;
+}
+
+/** Путь в выводе проверки в любом написании (macOS: /private/var и /var). */
+const mentions = (output: string, path: string) =>
+  output.includes(path) ||
+  (path.startsWith('/private/') && output.includes(path.slice('/private'.length)));
+
+/**
+ * Отказы песочницы, которые подтвердило ядро и которые правкой кода не снять.
+ *
+ * - Запись: обязательная политика в открытых проверке каталогах. Запись вне
+ *   открытых каталогов — ошибка кода проверки, а не среды: её здесь нет.
+ * - Чтение (и `stat`): закрытый путь, на котором проверка упала с EPERM.
+ *   Инструменты ищут конфигурацию вверх по дереву и на EPERM (в отличие от
+ *   ENOENT) падают. Нужны оба признака — запись ядра для тега этой проверки
+ *   и EPERM с этим путём в её выводе (`output`): отказ, который проверка
+ *   пережила, и обычный провал тестов отказом среды не становятся.
+ */
+export function sandboxDenials(violations: SandboxViolation[], policy: Isolation, output?: string) {
   const found = new Map<string, string>();
+  const eperm = output !== undefined && /\bEPERM\b|operation not permitted/i.test(output);
   for (const v of violations) {
-    if (!v.operation.startsWith('file-write')) continue;
-    const rule = mandatoryDenyRule(policy, v.path);
-    if (rule && !found.has(v.path)) found.set(v.path, rule);
+    if (found.has(v.path)) continue;
+    const rule = v.operation.startsWith('file-write')
+      ? mandatoryDenyRule(policy, v.path)
+      : v.operation.startsWith('file-read') && eperm && mentions(output, v.path)
+        ? hiddenReadRule(policy, v.path)
+        : undefined;
+    if (rule) found.set(v.path, rule);
   }
   return [...found].map(([path, rule]) => ({ path, rule }));
 }

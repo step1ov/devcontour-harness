@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { isAbsolute, join, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import {
   digestOf,
   type ExecutionPolicy,
@@ -8,6 +8,8 @@ import {
   type JointVerificationState,
 } from '../contracts/index.ts';
 import { git } from '../environment/process.ts';
+import { chooseCheckoutRoot } from '../environment/checkout-root.ts';
+import { credentialPaths } from '../environment/isolation.ts';
 import {
   CleanupFailure,
   availableRedactor,
@@ -27,6 +29,11 @@ export interface JointRunnerOptions {
   baseDir: string;
   environment?: NodeJS.ProcessEnv;
   resourceDatabase?: string;
+  /**
+   * Корень снимков компонентов (`<checkoutRoot>/joint/<id>/components`); без
+   * него — `chooseCheckoutRoot` по каталогу состояния и каталогу проверки.
+   */
+  checkoutRoot?: string;
   /** Каталог проверки (по умолчанию `<stateDir>/joint/<id>`). */
   directory?: (verification: JointVerificationState) => string;
   /** Дополнительные переменные окружения gates этой проверки (у хоста — его идентификаторы). */
@@ -91,6 +98,17 @@ export class JointRunner {
       Math.max(1000, this.policy.leaseMs / 3),
     );
     const dir = this.options.directory?.(v) ?? join(this.options.stateDir, 'joint', v.id);
+    // Снимки компонентов — вне дерева, если каталог проверки лежит внутри
+    // репозитория: gate, ищущий конфигурацию вверх, не упирается в закрытый checkout.
+    const placement = chooseCheckoutRoot({
+      stateDirs: [this.options.stateDir, dir],
+      repositories: this.policy.repositories.map((r) => this.repoPath(r)),
+      hidden: credentialPaths(),
+      ...(this.options.checkoutRoot ? { configured: this.options.checkoutRoot } : {}),
+    });
+    const components = placement.root
+      ? join(placement.root, 'joint', v.id, 'components')
+      : join(dir, 'components');
     const worktrees: { repo: string; cwd: string }[] = [];
     const source = this.options.environment ?? process.env;
     // Незавершённая очистка окружения оставляет снимки: их разбирает cleanup.
@@ -107,7 +125,7 @@ export class JointRunner {
         signal,
         async (signal, resources) => {
           await this.options.prepare?.(signal);
-          await mkdir(join(dir, 'components'), { recursive: true });
+          await mkdir(components, { recursive: true });
           const works = this.engine.read((view) => v.workIds.map((id) => view.work(id)!));
           const manifest: NonNullable<JointVerification['manifest']> = {};
           const paths: Record<string, string> = {};
@@ -119,7 +137,7 @@ export class JointRunner {
               await git(path, 'merge-base', '--is-ancestor', w.resultSha!, sha).catch(() => {
                 throw new Error(`Результат ${w.id} отсутствует в ${repo.targetRef} ${repo.id}`);
               });
-            const cwd = join(dir, 'components', repo.id);
+            const cwd = join(components, repo.id);
             await git(path, 'worktree', 'add', '--detach', cwd, sha);
             worktrees.push({ repo: path, cwd });
             manifest[repo.id] = { sha, tree: await git(cwd, 'rev-parse', 'HEAD^{tree}') };
@@ -225,6 +243,7 @@ export class JointRunner {
                         this.options.stateDir,
                         ...this.policy.repositories.map((r) => this.repoPath(r)),
                       ],
+                      ...(placement.root ? { checkouts: [placement.root] } : {}),
                       settingsDir: join(dir, gate.id),
                       env: {
                         ...environment.env,
@@ -311,10 +330,14 @@ export class JointRunner {
       if (!preserve) {
         for (const w of worktrees)
           await git(w.repo, 'worktree', 'remove', '--force', w.cwd).catch(() => undefined);
-        if (dir.startsWith(this.options.stateDir + sep))
-          await rm(join(dir, 'components'), { recursive: true, force: true }).catch(
-            () => undefined,
-          );
+        // Убирается только каталог, созданный здесь: в каталоге состояния или
+        // под корнем вне дерева.
+        const owned = placement.root ?? this.options.stateDir;
+        if (components.startsWith(owned + sep))
+          await rm(placement.root ? dirname(components) : components, {
+            recursive: true,
+            force: true,
+          }).catch(() => undefined);
       }
     }
   }

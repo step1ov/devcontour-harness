@@ -300,6 +300,8 @@ export async function runCheck(
     write: string[];
     readable: string[];
     controller: string[];
+    /** Корни рабочих деревьев вне каталога состояния: закрыты поэлементно (`closedCheckouts`). */
+    checkouts?: string[];
     settingsDir: string;
     /**
      * Собрать отказы песочницы из журнала ядра (macOS): по ним, а не по
@@ -349,6 +351,7 @@ export async function runCheck(
         controller: options.controller,
         readable: options.readable,
         domains: h.config.isolation.domains,
+        ...(options.checkouts?.length ? { checkouts: options.checkouts } : {}),
       });
       started = join(marks, 'started');
       // Обязательные запреты записи — для checkout проверки целиком, а не
@@ -504,6 +507,17 @@ export function freshnessEnv(kind: GatePolicy['kind'], env: NodeJS.ProcessEnv) {
     : ({} as Record<string, string>);
 }
 
+/**
+ * Граница проверки: закрытое (состояние controller, исходные checkout),
+ * открытое внутри него и корни рабочих деревьев вне каталога состояния,
+ * которые закрываются поэлементно.
+ */
+export interface Boundary {
+  hidden: string[];
+  readable: string[];
+  checkouts?: string[];
+}
+
 /** Что нужно для запуска gate попытки. */
 export interface GateRun {
   policy: Pick<ExecutionPolicy, 'isolation'>;
@@ -518,7 +532,7 @@ export interface GateRun {
   /** Окружение фазы: переменные и маска секретов. */
   execution: { env: NodeJS.ProcessEnv; redact: (value: string) => string };
   /** Закрытое проверке (состояние controller, чужие checkout) и открытое внутри него. */
-  boundary: { hidden: string[]; readable: string[] };
+  boundary: Boundary;
   /** Проверка потребителя: evidence несёт его компонент и не закрывает собственные gates. */
   consumer?: string;
   /** Повтор провала: ID записи, которую повторяет запуск; исход пишется в `recheck`. */
@@ -640,6 +654,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         write: [cwd, ...(propertyDir ? [propertyDir] : [])],
         readable: [...run.boundary.readable, ...(corpusDir ? [corpusDir] : [])],
         controller: run.boundary.hidden,
+        ...(run.boundary.checkouts?.length ? { checkouts: run.boundary.checkouts } : {}),
         settingsDir: join(artifactDir, gate.id),
         violations: true,
       },
@@ -684,7 +699,11 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       // а класс gate сжигал бы бюджет ремонтов.
       const denied =
         result.isolation && result.violations
-          ? sandboxDenials(result.violations, result.isolation)
+          ? sandboxDenials(
+              result.violations,
+              result.isolation,
+              result.stdout + '\n' + result.stderr,
+            )
           : [];
       if (denied.length) {
         kind = 'environment';

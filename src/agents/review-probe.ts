@@ -77,6 +77,8 @@ export const probeSpec = z.object({
   /** Закрытое проверке и открытое на чтение — граница reviewer. */
   controller: z.array(z.string()),
   readable: z.array(z.string()),
+  /** Корни рабочих деревьев вне каталога состояния (закрыты поэлементно). */
+  checkouts: z.array(z.string()).optional(),
   isolation: z.object({ mode: z.enum(['os', 'none']), domains: z.array(z.string()) }),
   commandTimeoutMs: z.number().int().min(1000),
   budgetMs: z.number().int().min(1000),
@@ -538,6 +540,7 @@ export class ReviewProbes {
         write: [],
         readable: this.spec.readable,
         controller: this.spec.controller,
+        ...(this.spec.checkouts?.length ? { checkouts: this.spec.checkouts } : {}),
         // Настройки песочницы — свои у каждого запуска: одновременные
         // вызовы иначе переписывали друг другу границы записи.
         settingsDir: join(this.spec.settingsDir, runId),
@@ -695,6 +698,7 @@ export class ReviewProbes {
           write: [scratch],
           readable: this.spec.readable,
           controller: this.spec.controller,
+          ...(this.spec.checkouts?.length ? { checkouts: this.spec.checkouts } : {}),
           settingsDir: join(this.spec.settingsDir, runId),
         },
       );

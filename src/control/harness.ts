@@ -70,6 +70,12 @@ export interface HarnessOptions {
   /** База блокировок ресурсов; по умолчанию — общая для машины. */
   resourceDatabase?: string;
   /**
+   * Корень рабочих деревьев попыток и совместных проверок; без него —
+   * `chooseCheckoutRoot` (кэш пользователя, если каталог состояния внутри
+   * репозитория, иначе каталог состояния).
+   */
+  checkoutRoot?: string;
+  /**
    * Дополнения хоста к попыткам (например, история работы внешнего
    * хранилища задач до исполнения). Приёмку не решают: отказ хука — отказ
    * попытки.
@@ -130,6 +136,7 @@ export class Harness {
       ...(options.environment ? { environment: options.environment } : {}),
       ...(options.resourceDatabase ? { resourceDatabase: options.resourceDatabase } : {}),
       ...(options.hooks ? { hooks: options.hooks } : {}),
+      ...(options.checkoutRoot ? { checkoutRoot: options.checkoutRoot } : {}),
     });
     this.joint = new JointRunner({
       engine: this.engine,
@@ -137,6 +144,7 @@ export class Harness {
       baseDir: options.baseDir,
       ...(options.environment ? { environment: options.environment } : {}),
       ...(options.resourceDatabase ? { resourceDatabase: options.resourceDatabase } : {}),
+      ...(options.checkoutRoot ? { checkoutRoot: options.checkoutRoot } : {}),
     });
   }
 

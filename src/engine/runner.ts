@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   roleBinding,
   selectReviewer,
@@ -46,6 +46,13 @@ import {
   SandboxPolicyError,
 } from '../environment/isolation.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
+import {
+  checkoutPath,
+  chooseCheckoutRoot,
+  realish,
+  type CheckoutRoot,
+} from '../environment/checkout-root.ts';
+import { credentialPaths } from '../environment/isolation.ts';
 import { redactDeep, type Redactor } from '../environment/redaction.ts';
 import {
   alreadySatisfiedReviewOutputSchema,
@@ -116,6 +123,15 @@ export interface RunnerOptions {
    * туда и его попытки.
    */
   stateDirFor?: (repositoryId: string) => string;
+  /**
+   * Корень рабочих деревьев, снимков зависимостей и проверок потребителей
+   * (`<checkoutRoot>/<repositoryId>/worktrees/<attempt>`…). Без него —
+   * `chooseCheckoutRoot`: каталог кэша пользователя, если каталог состояния
+   * лежит внутри репозитория, иначе прежнее место в каталоге состояния.
+   * Лучше на том же томе, что репозитории: менеджеры пакетов ставят
+   * зависимости жёсткими ссылками и reflink.
+   */
+  checkoutRoot?: string;
   /** Каталог, от которого разрешаются относительные пути репозиториев политики. */
   baseDir: string;
   adapters: Partial<Record<RuntimeName, RuntimeAdapter>>;
@@ -230,6 +246,30 @@ export class Runner {
     return this.options.stateDirFor?.(repositoryId) ?? this.options.stateDir;
   }
 
+  private placement?: CheckoutRoot;
+  /**
+   * Действующий корень рабочих деревьев (`checkout-root.ts`): хост
+   * показывает его в диагностике. Выбирается один раз на исполнитель.
+   */
+  checkoutRoot(): CheckoutRoot {
+    return (this.placement ??= chooseCheckoutRoot({
+      stateDirs: [this.options.stateDir, ...this.policy.repositories.map((r) => this.dirOf(r.id))],
+      repositories: this.policy.repositories.map((r) => this.repoPath(r)),
+      hidden: credentialPaths(),
+      ...(this.options.checkoutRoot ? { configured: this.options.checkoutRoot } : {}),
+    }));
+  }
+  /** Каталог рабочего дерева вида `kind`: вне дерева или прежний в каталоге попыток. */
+  private checkout(repositoryId: string, kind: string, ...rest: string[]) {
+    return checkoutPath(
+      this.checkoutRoot(),
+      join(this.dirOf(repositoryId), kind, ...rest),
+      repositoryId,
+      kind,
+      ...rest,
+    );
+  }
+
   repoPath(repo: Repo) {
     return isAbsolute(repo.path) ? repo.path : resolve(this.options.baseDir, repo.path);
   }
@@ -244,7 +284,11 @@ export class Runner {
    */
   private boundary(dependencies: Pick<DependencySnapshot, 'path'>[] = []) {
     const repos = this.policy.repositories.map((r) => this.repoPath(r));
+    const root = this.checkoutRoot().root;
     return {
+      // Чужие рабочие деревья под корнем вне дерева закрыты поэлементно:
+      // предки своего checkout открыты.
+      checkouts: root ? [root] : [],
       hidden: [
         ...new Set([
           this.options.stateDir,
@@ -583,6 +627,7 @@ export class Runner {
           mode: this.policy.isolation.mode,
           writable: review ? [] : [input.cwd],
           denied: boundary.hidden,
+          ...(boundary.checkouts.length ? { checkouts: boundary.checkouts } : {}),
           readable: [
             input.cwd,
             ...boundary.readable,
@@ -948,7 +993,7 @@ export class Runner {
       },
       Math.max(1000, this.policy.leaseMs / 3),
     );
-    const cwd = join(this.dirOf(repo.id), 'worktrees', attempt.id);
+    const cwd = this.checkout(repo.id, 'worktrees', attempt.id);
     const integrationCwd = cwd + '-integration';
     const artifacts = join(this.dirOf(repo.id), 'artifacts', attempt.id);
     const worktrees: string[] = [];
@@ -1008,7 +1053,7 @@ export class Runner {
             const dependencies = await snapshotDependencies({
               repos: this.repositories(),
               repositoryId: repo.id,
-              dir: join(this.dirOf(repo.id), 'dependencies', attempt.id),
+              dir: this.checkout(repo.id, 'dependencies', attempt.id),
               artifacts,
               runId: attempt.id,
               policy: this.policy,
@@ -1037,7 +1082,7 @@ export class Runner {
             implementationBasis(work, attempt, base, this.engine.version),
           );
           attempt = { ...attempt, ...(reuse.reusedFrom ? { reusedFrom: reuse.reusedFrom } : {}) };
-          await mkdir(join(this.dirOf(repo.id), 'worktrees'), { recursive: true });
+          await mkdir(dirname(cwd), { recursive: true });
           await git(
             repoPath,
             'worktree',
@@ -1450,10 +1495,14 @@ export class Runner {
           ],
           snapshots: [],
         };
+    // Окружения прежних попыток лежат в каталоге состояния, новых — под
+    // корнем рабочих деревьев вне дерева.
+    const outside = this.checkoutRoot().root;
     const roots = [
       ...new Set([
         await realpath(this.options.stateDir),
         await realpath(this.dirOf(attempt.repositoryId)),
+        ...(outside ? [realish(outside)] : []),
       ]),
     ];
     const cleaned: string[] = [];
@@ -1667,9 +1716,9 @@ export class Runner {
       const repo = this.repo(consumer.repositoryId);
       const checkout = this.repoPath(repo);
       const id = `${attempt.id}-consumer-${repo.id}-${randomUUID().slice(0, 8)}`;
-      const dir = join(this.dirOf(repo.id), 'consumers', id);
+      const dir = this.checkout(repo.id, 'consumers', id);
       const own = join(artifacts, 'integration', 'consumer', repo.id);
-      await mkdir(join(this.dirOf(repo.id), 'consumers'), { recursive: true });
+      await mkdir(dirname(dir), { recursive: true });
       await git(checkout, 'worktree', 'add', '--detach', dir, repo.targetRef);
       let dependencies: DependencySnapshot[] = [];
       let failure: Error | undefined;
@@ -1686,7 +1735,7 @@ export class Runner {
         dependencies = await snapshotDependencies({
           repos: this.repositories(),
           repositoryId: repo.id,
-          dir: join(this.dirOf(repo.id), 'dependencies', id),
+          dir: this.checkout(repo.id, 'dependencies', id),
           artifacts: own,
           runId: attempt.id,
           policy: this.policy,
@@ -1841,6 +1890,7 @@ export class Runner {
       cwd,
       controller: boundary.hidden,
       readable: [cwd, ...boundary.readable],
+      ...(boundary.checkouts.length ? { checkouts: boundary.checkouts } : {}),
       isolation: this.policy.isolation,
       commandTimeoutMs: limits.commandTimeoutMs,
       budgetMs,
@@ -2517,6 +2567,13 @@ export class Runner {
         stateDir: this.options.stateDir,
         repoPath: (repo) => this.repoPath(repo),
         boundary: () => this.boundary(),
+        // Прежнее место эксперимента — общий каталог состояния: меняется только корень вне дерева.
+        ...(this.checkoutRoot().root
+          ? {
+              checkout: (repositoryId: string, kind: string, id: string) =>
+                this.checkout(repositoryId, kind, id),
+            }
+          : {}),
         ...(this.options.environment ? { environment: this.options.environment } : {}),
       },
       raw,
@@ -2535,6 +2592,13 @@ export class Runner {
         stateDir: this.options.stateDir,
         repoPath: (repo) => this.repoPath(repo),
         boundary: () => this.boundary(),
+        // Прежнее место эксперимента — общий каталог состояния: меняется только корень вне дерева.
+        ...(this.checkoutRoot().root
+          ? {
+              checkout: (repositoryId: string, kind: string, id: string) =>
+                this.checkout(repositoryId, kind, id),
+            }
+          : {}),
         ...(this.options.environment ? { environment: this.options.environment } : {}),
       },
       raw,

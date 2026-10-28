@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { arch, cpus, platform } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   HarnessError,
   digestOf,
@@ -15,7 +15,7 @@ import type { Engine } from '../engine/engine.ts';
 import { git } from '../environment/process.ts';
 import { executionEnvironment } from '../environment/lifecycle.ts';
 import { redactDeep, redactError } from '../environment/redaction.ts';
-import { runCheck } from './gates.ts';
+import { runCheck, type Boundary } from './gates.ts';
 
 /** Что нужно эксперименту от controller. */
 export interface SpikeContext {
@@ -24,7 +24,12 @@ export interface SpikeContext {
   stateDir: string;
   repoPath(repo: ExecutionPolicy['repositories'][number]): string;
   /** Закрытое проверке и открытое внутри него. */
-  boundary(): { hidden: string[]; readable: string[] };
+  boundary(): Boundary;
+  /**
+   * Каталог рабочего дерева вида `kind` (корень вне дерева, `checkout-root.ts`);
+   * без него — прежнее место в каталоге состояния.
+   */
+  checkout?(repositoryId: string, kind: string, id: string): string;
   environment?: NodeJS.ProcessEnv;
 }
 
@@ -75,8 +80,9 @@ export async function runSpike(ctx: SpikeContext, raw: unknown): Promise<Spike> 
   });
   const id = 'SP-' + randomUUID();
   const root = join(ctx.stateDir, 'spikes');
-  const dir = join(root, id);
+  const dir = ctx.checkout?.(repo.id, 'spikes', id) ?? join(root, id);
   await mkdir(root, { recursive: true });
+  await mkdir(dirname(dir), { recursive: true });
   await git(path, 'worktree', 'add', '--detach', dir, sha);
   const results: Spike['results'] = [];
   try {
@@ -96,6 +102,7 @@ export async function runSpike(ctx: SpikeContext, raw: unknown): Promise<Spike> 
           write: [dir],
           readable: boundary.readable,
           controller: boundary.hidden,
+          ...(boundary.checkouts?.length ? { checkouts: boundary.checkouts } : {}),
           settingsDir: join(root, `${id}-settings`),
         },
       );

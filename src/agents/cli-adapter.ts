@@ -223,6 +223,7 @@ export function cliAdapter(
         readable: [...(r.sandbox.readable ?? []), ...(review ? [r.cwd] : [])],
         domains: r.sandbox.network.domains,
         ...(options.controllerEntries ? { entries: options.controllerEntries } : {}),
+        ...(r.sandbox.checkouts?.length ? { checkouts: r.sandbox.checkouts } : {}),
       });
       const argv =
         runtime === 'codex'

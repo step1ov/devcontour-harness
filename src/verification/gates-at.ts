@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, rm, rmdir } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { HarnessError, type EvidenceRecord, type ExecutionPolicy } from '../contracts/index.ts';
 import { TaskFailure } from '../engine/failure.ts';
 import { git } from '../environment/process.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { removeSnapshots, snapshotDependencies, type DependencySnapshot } from './dependencies.ts';
-import { runGate } from './gates.ts';
+import { runGate, type Boundary } from './gates.ts';
+import { checkoutPath, chooseCheckoutRoot } from '../environment/checkout-root.ts';
+import { credentialPaths } from '../environment/isolation.ts';
 import { explicitPrerequisites, orderedScope, standaloneScope } from './gate-scope.ts';
 
 type Repo = ExecutionPolicy['repositories'][number];
@@ -15,11 +17,17 @@ type Repo = ExecutionPolicy['repositories'][number];
 /** Что нужно проверке на SHA от controller (как у эксперимента выполнимости). */
 export interface GatesAtContext {
   policy: ExecutionPolicy;
-  /** Каталог состояния: здесь рабочее дерево, снимки зависимостей и логи. */
+  /** Каталог состояния: здесь логи, а при прежнем размещении — и рабочее дерево со снимками. */
   stateDir: string;
+  /**
+   * Корень рабочего дерева и снимков зависимостей проверки
+   * (`<checkoutRoot>/<repositoryId>/gates-at/<id>`). Без него —
+   * `chooseCheckoutRoot` по каталогу состояния и репозиториям политики.
+   */
+  checkoutRoot?: string;
   repoPath(repo: Repo): string;
   /** Закрытое проверке и открытое внутри него — та же граница, что у gates попыток. */
-  boundary(): { hidden: string[]; readable: string[] };
+  boundary(): Boundary;
   environment?: NodeJS.ProcessEnv;
   resourceDatabase?: string;
 }
@@ -85,7 +93,16 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
     throw new HarnessError('NOT_FOUND', `Commit ${input.sha} недоступен в ${repo.id}`);
   });
   const root = join(ctx.stateDir, 'gates-at', id);
-  const cwd = join(root, 'worktree');
+  // Рабочее дерево и снимки — под корнем вне дерева, если каталог состояния
+  // лежит внутри репозитория; логи остаются в каталоге состояния.
+  const placement = chooseCheckoutRoot({
+    stateDirs: [ctx.stateDir],
+    repositories: ctx.policy.repositories.map((r) => ctx.repoPath(r)),
+    hidden: [...ctx.boundary().hidden, ...credentialPaths()],
+    ...(ctx.checkoutRoot ? { configured: ctx.checkoutRoot } : {}),
+  });
+  const trees = checkoutPath(placement, root, repo.id, 'gates-at', id);
+  const cwd = join(trees, 'worktree');
   const artifacts = join(root, 'artifacts');
   const timeout = AbortSignal.timeout(ctx.policy.runTimeoutMs);
   const signal = input.signal ? AbortSignal.any([input.signal, timeout]) : timeout;
@@ -96,6 +113,7 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
   let snapshots: DependencySnapshot[] = [];
   let added = false;
   await mkdir(root, { recursive: true });
+  await mkdir(dirname(cwd), { recursive: true });
   try {
     await withResources(
       {
@@ -119,7 +137,7 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
           snapshots = await snapshotDependencies({
             repos,
             repositoryId: repo.id,
-            dir: join(root, 'dependencies'),
+            dir: join(trees, 'dependencies'),
             artifacts,
             runId: id,
             policy: ctx.policy,
@@ -192,6 +210,14 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
                   boundary: {
                     hidden: boundary.hidden,
                     readable: [...boundary.readable, ...snapshots.map((d) => d.path)],
+                    // Чужие деревья под корнем вне дерева закрыты поэлементно,
+                    // и тогда, когда хост его в своей границе не назвал.
+                    checkouts: [
+                      ...new Set([
+                        ...(boundary.checkouts ?? []),
+                        ...(placement.root ? [placement.root] : []),
+                      ]),
+                    ],
                   },
                   // Генеративный gate получает seed от этой проверки; договора
                   // поручения у неё нет — прежний уровень отчёта свойств.
@@ -225,7 +251,12 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
       },
       snapshots,
     );
-    await rm(join(root, 'worktree'), { recursive: true, force: true }).catch(() => undefined);
+    await rm(cwd, { recursive: true, force: true }).catch(() => undefined);
+    // Пустой каталог проверки вне дерева не копится; непустой (снимок, который
+    // не удалось убрать) остаётся как есть.
+    if (trees !== root)
+      for (const dir of [join(trees, 'dependencies'), trees])
+        await rmdir(dir).catch(() => undefined);
   }
   return {
     id,
