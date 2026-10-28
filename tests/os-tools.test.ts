@@ -20,7 +20,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { OS_TOOL_CANDIDATES, osTool } from '../src/environment/os-tools.ts';
+import { OS_TOOL_CANDIDATES, lsofName, osTool, osToolEnv } from '../src/environment/os-tools.ts';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 
@@ -84,3 +84,22 @@ test(
     }
   },
 );
+
+test('A02/os-tools: локаль утилит — даты и числа в C, кодировка символов пользователя; экранирование lsof снимается', () => {
+  const env = osToolEnv({ PATH: '/bin', LANG: 'ru_RU.UTF-8', LC_ALL: 'ru_RU.UTF-8' });
+  assert.equal(env.LC_ALL, undefined, 'LC_ALL перекрыл бы LC_TIME');
+  assert.equal(env.LC_TIME, 'C');
+  assert.equal(env.LC_CTYPE, 'ru_RU.UTF-8', 'LC_CTYPE берётся из LC_ALL');
+  assert.equal(env.PATH, '/bin');
+  assert.equal(osToolEnv({ LC_CTYPE: 'en_US.UTF-8' }).LC_CTYPE, 'en_US.UTF-8');
+  if (process.platform === 'darwin') {
+    const out = spawnSync(osTool('ps'), ['-o', 'lstart=', '-p', String(process.pid)], {
+      encoding: 'utf8',
+      env: osToolEnv({ ...process.env, LANG: 'ru_RU.UTF-8', LC_ALL: 'ru_RU.UTF-8' }),
+    }).stdout;
+    assert.ok(Number.isFinite(Date.parse(out.trim())), `время старта читается: ${out}`);
+  }
+  assert.equal(lsofName('/tmp/\\xd0\\xbb\\xd0\\xbe\\xd0\\xba'), '/tmp/лок');
+  assert.equal(lsofName('/tmp/a\\\\x41b'), '/tmp/a\\x41b', 'экранированная обратная косая');
+  assert.equal(lsofName('/tmp/лок a'), '/tmp/лок a');
+});

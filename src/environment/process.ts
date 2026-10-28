@@ -1,5 +1,5 @@
 import { spawn, spawnSync, execFile } from 'node:child_process';
-import { osTool } from './os-tools.ts';
+import { lsofName, osTool, osToolEnv } from './os-tools.ts';
 import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
@@ -238,6 +238,7 @@ function captureProcessTree(pid?: number): RuntimeDiagnostics['processTree'] {
     };
   const result = spawnSync(osTool('ps'), ['-axo', 'pid=,ppid=,pgid=,comm='], {
     encoding: 'utf8',
+    env: osToolEnv(),
     timeout: 250,
     maxBuffer: 1_000_000,
   });
@@ -295,11 +296,17 @@ export async function git(cwd: string, ...args: string[]) {
   return result.stdout.trim();
 }
 
-/** Вывод команды или null, если она не выполнилась. Не блокирует event loop. */
+/**
+ * Вывод системной утилиты или null, если она не выполнилась. Не блокирует
+ * event loop. Локаль фиксирована (`osToolEnv`): вывод разбирается.
+ */
 function output(command: string, args: string[], timeout: number): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile(command, args, { encoding: 'utf8', timeout, maxBuffer: 64_000_000 }, (error, stdout) =>
-      resolve(error ? null : stdout),
+    execFile(
+      command,
+      args,
+      { encoding: 'utf8', env: osToolEnv(), timeout, maxBuffer: 64_000_000 },
+      (error, stdout) => resolve(error ? null : stdout),
     );
   });
 }
@@ -366,7 +373,17 @@ async function inside(dirs: string[], since: number): Promise<number[]> {
     }
   });
   const started = new Map((await processTable()).map((r) => [r.pid, Date.parse(r.start)]));
-  const fresh = (pid: number) => (started.get(pid) ?? 0) >= since - 1000;
+  // Нечитаемое время старта — не повод оставить процесс: каталоги принадлежат
+  // только этой команде, и утечка её потомка хуже ошибочной остановки.
+  // Отсекается только процесс, о котором точно известно, что он старше
+  // команды. Процесса нет в снимке — он запущен после снимка; это и сам
+  // lsof с текущим каталогом внутри, поэтому такой процесс не берётся: его
+  // потомка найдёт следующий проход.
+  const fresh = (pid: number) => {
+    if (!started.has(pid)) return false;
+    const at = started.get(pid)!;
+    return !Number.isFinite(at) || at >= since - 1000;
+  };
   const within = (path: string) => dirs.some((d) => path === d || path.startsWith(d + '/'));
   if (process.platform === 'linux')
     return readdirSync('/proc').flatMap((entry) => {
@@ -388,7 +405,12 @@ async function inside(dirs: string[], since: number): Promise<number[]> {
   let pid = 0;
   for (const line of (stdout ?? '').split('\n')) {
     if (line.startsWith('p')) pid = Number(line.slice(1));
-    else if (line.startsWith('n') && within(line.slice(1)) && pid !== process.pid && fresh(pid))
+    else if (
+      line.startsWith('n') &&
+      within(lsofName(line.slice(1))) &&
+      pid !== process.pid &&
+      fresh(pid)
+    )
       pids.push(pid);
   }
   return pids;

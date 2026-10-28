@@ -1,7 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access -- тест правит сырой JSON политики. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { command } from '../src/environment/process.ts';
 import { composeRedactors, outputRedactor, redactor } from '../src/environment/redaction.ts';
@@ -105,6 +106,44 @@ test('T30: таймаут и отмена останавливают всех п
     }).catch(() => undefined);
     assert.ok(child > 0, 'отменённый запуск сообщил потомка');
     assert.ok(await gone(child), `потомок (detached=${detached}) остановлен отменой`);
+  }
+});
+
+test('T30: отсоединившийся потомок с очищенным окружением, найденный только по каталогу, останавливается при любой локали пользователя', async () => {
+  // Локаль наследуют ps и lsof: в ru_RU время старта из ps не читалось, и
+  // потомок считался старше команды; в C lsof экранировал кириллицу пути.
+  const cases = [
+    { locale: 'ru_RU.UTF-8', prefix: 'harness-locale-' },
+    { locale: 'C', prefix: 'harness-локаль-' },
+  ];
+  const saved = { LANG: process.env.LANG, LC_ALL: process.env.LC_ALL };
+  for (const { locale, prefix } of cases) {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
+    let pid = 0;
+    process.env.LANG = locale;
+    process.env.LC_ALL = locale;
+    try {
+      // Команда выходит раньше первого опроса дерева, потомок без метки
+      // окружения: узнать его можно только по текущему каталогу.
+      const script = `
+        const { spawn } = require('child_process');
+        const c = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { cwd: ${JSON.stringify(dir)}, env: {}, stdio: 'ignore', detached: true });
+        c.unref();
+        console.log('PID=' + c.pid);`;
+      const result = await command([process.execPath, '-e', script], process.cwd(), {
+        timeoutMs: 30000,
+        contain: { dirs: [dir] },
+      });
+      pid = Number(/PID=(\d+)/.exec(result.stdout)?.[1]);
+      assert.ok(pid > 0, result.stdout);
+      assert.ok(await gone(pid, 2000), `потомок остановлен (локаль ${locale})`);
+    } finally {
+      for (const [key, value] of Object.entries(saved))
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      if (pid > 0 && alive(pid)) process.kill(pid, 'SIGKILL');
+      if (dir.startsWith(join(tmpdir(), prefix))) rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { osTool } from './os-tools.ts';
+import { osTool, osToolEnv } from './os-tools.ts';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { registerMonotonic, registerProcess, type CallOwner } from '../engine/usage.ts';
@@ -10,7 +10,7 @@ export function processStartedAt(pid: number): number | undefined {
   try {
     const out = execFileSync(osTool('ps'), ['-o', 'lstart=', '-p', String(pid)], {
       encoding: 'utf8',
-      env: { ...process.env, LC_ALL: 'C' },
+      env: osToolEnv(),
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 2000,
     }).trim();
@@ -59,6 +59,7 @@ export const BOOT_ID = ((): string | undefined => {
     try {
       const out = execFileSync(osTool('sysctl'), ['-n', 'kern.boottime'], {
         encoding: 'utf8',
+        env: osToolEnv(),
         stdio: ['ignore', 'pipe', 'ignore'],
         timeout: 2000,
       });

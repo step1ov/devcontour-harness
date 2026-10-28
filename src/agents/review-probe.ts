@@ -25,6 +25,7 @@ import {
   type GatePolicy,
   type ProbeServer,
 } from '../contracts/index.ts';
+import { osToolEnv } from '../environment/os-tools.ts';
 import { redactor } from '../environment/redaction.ts';
 import {
   completedCheck,
@@ -1234,7 +1235,7 @@ async function probeProcesses(runId: string): Promise<{ pid: number; pgid: numbe
     execFile(
       'ps',
       ['-Eww', '-ax', '-o', 'pid=,pgid=,command='],
-      { encoding: 'utf8', maxBuffer: 64_000_000, timeout: 10000 },
+      { encoding: 'utf8', env: osToolEnv(), maxBuffer: 64_000_000, timeout: 10000 },
       (error, out) => resolve(error ? '' : out),
     ),
   );
