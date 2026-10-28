@@ -108,6 +108,12 @@ test('Корень пакета экспортирует строительны�
     'parseCanonical',
     'versionOf',
     'closeIfBasisChanged',
+    'hostGitArgs',
+    'assertTrustedCheckout',
+    'UntrustedCheckoutError',
+    'gitHardening',
+    'rememberWorktree',
+    'worktreeAddPath',
   ])
     assert.ok(name in api, 'нет экспорта ' + name);
 });

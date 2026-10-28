@@ -159,6 +159,19 @@ export {
   redactor,
   type Redactor,
 } from './environment/redaction.ts';
+// Git хоста над checkout, где исполнялся чужой код: хост, запускающий свой
+// git над теми же деревьями, сверяет репозиторий теми же правилами.
+export { hostGitArgs } from './environment/process.ts';
+export {
+  UntrustedCheckoutError,
+  assertTrustedCheckout,
+  forgetWorktree,
+  gitHardening,
+  rememberWorktree,
+  resetGitTrust,
+  worktreeAddPath,
+  worktreeKey,
+} from './environment/git-trust.ts';
 export { closeIfBasisChanged } from './engine/property-recovery.ts';
 export {
   analyzeRecovery,

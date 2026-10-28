@@ -615,6 +615,9 @@ manifestDigest, impact?, evidence[], error?}`. Смена любого SHA де�
 `moveBase`/`fencedRefMove`, `runGate`/`runCheck` (и разбор отчёта
 `junitSummary`, `prepareReportPath`, `sandboxBlockedHosts`), `unprovenReason`,
 `ReviewProbes`, маскирование (`redactor`, `redactDeep`, `redactError`),
+git хоста над checkout с чужим кодом (`hostGitArgs`, `assertTrustedCheckout`,
+`UntrustedCheckoutError`, `gitHardening`, учёт деревьев `rememberWorktree`/
+`forgetWorktree`/`worktreeKey`/`worktreeAddPath`, `resetGitTrust` для тестов),
 корпус (`CorpusStore`, подтверждение случая `submitCase` с `ConfirmContext`),
 ограниченный разбор по свойству (`analyzeRecovery`, `applyCases`,
 `recoveryBrief`; назначение хоста — модель и профиль ведущего — передаётся
