@@ -6,7 +6,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Runner } from '../src/engine/runner.ts';
 import { BlockedError } from '../src/engine/classify.ts';
-import { policyIssues } from '../src/contracts/index.ts';
+import {
+  TaskFailure,
+  policyIssues,
+  type AttemptState,
+  type EvidenceRecord,
+} from '../src/contracts/index.ts';
 import { approve, greet, implement, runAll, setup, target } from './runner-fixture.ts';
 
 test('T01: поручение с тестами и двумя ревью принимается ровно один раз; result SHA в target ref; evidence обеих фаз', async () => {
@@ -206,7 +211,7 @@ test('T09: кандидат зелёный, интеграция красная 
   assert.equal(a.failureKind, 'gate');
 });
 
-test('Провал gate интеграции из-за среды повторяется на том же кандидате: повтор прошёл — принятие без новой реализации, первая запись помечена flaky', async () => {
+test('Провал gate интеграции из-за среды повторяется на том же кандидате: повтор прошёл — принятие без новой реализации, повтор помечен flaky со ссылкой на первую запись', async () => {
   const state = mkdtempSync(join(tmpdir(), 'harness-flaky-'));
   const counter = join(state, 'integration-runs');
   // Gate падает на первом запуске интеграции (счётчик вне worktree), дальше — обычный тест.
@@ -855,4 +860,109 @@ test('Предел времени — на фазу: ревью интеграц
     for (const timer of timers.keys()) nativeClearTimeout(timer);
     t.mock.restoreAll();
   }
+});
+
+test('Повтор gate интеграции: только после зелёного кандидата, один на кандидата и не при контрпримере свойства или корпуса', async () => {
+  const candidateSha = 'c'.repeat(40);
+  const sha = 'd'.repeat(40);
+  const attempt = { id: 'r1', workId: 'w', candidateSha } as AttemptState;
+  const record = (phase: 'candidate' | 'integration', passed: boolean, extra = {}) =>
+    ({
+      id: `${phase}-${passed}`,
+      kind: 'test',
+      gate: 'unit',
+      phase,
+      sha: phase === 'candidate' ? candidateSha : sha,
+      passed,
+      ...extra,
+    }) as EvidenceRecord;
+  const report = (failed: { property?: boolean; corpus?: boolean }) => ({
+    property: {
+      report: {
+        version: 1,
+        properties: [{ testId: 'p', status: failed.property ? 'failed' : 'passed', cases: 3 }],
+        corpus: {
+          executed: 1,
+          passed: failed.corpus ? 0 : 1,
+          failed: failed.corpus ? [{ id: 'k1', property: 'p' }] : [],
+        },
+      },
+    },
+  });
+  type IntegrationGate = (...args: unknown[]) => Promise<void>;
+  const integrationGate = (Runner.prototype as unknown as { integrationGate: IntegrationGate })
+    .integrationGate;
+  /** Повторы, которые запросил разбор провала: ID повторённой записи по порядку запусков. */
+  const runs = async (
+    evidence: EvidenceRecord[],
+    others: { candidateSha: string; evidence: Partial<EvidenceRecord>[] }[] = [],
+    budget = { recheck: true },
+  ) => {
+    const calls: unknown[] = [];
+    const fake = {
+      engine: {
+        read: (fn: (v: unknown) => unknown) =>
+          fn({
+            attempt: () => ({ evidence }),
+            attempts: () => [{ candidateSha, evidence }, ...others],
+          }),
+      },
+      gate: (...args: unknown[]) => {
+        calls.push(args[9]);
+        return Promise.reject(new TaskFailure('gate', 'integration/unit: red'));
+      },
+    };
+    await assert.rejects(
+      integrationGate.call(
+        fake,
+        attempt,
+        '/w',
+        sha,
+        { id: 'unit' },
+        '/a',
+        new AbortController().signal,
+        {},
+        budget,
+      ),
+      TaskFailure,
+    );
+    return calls;
+  };
+  const green = record('candidate', true);
+  const red = record('integration', false);
+  assert.deepEqual(await runs([green, red]), [undefined, red.id], 'обычный провал повторён');
+  assert.deepEqual(await runs([record('candidate', false), red]), [undefined], 'красный кандидат');
+  assert.deepEqual(await runs([red]), [undefined], 'кандидат не проверен');
+  assert.deepEqual(
+    await runs(
+      [green, red],
+      [{ candidateSha, evidence: [{ recheck: { of: 'x', outcome: 'confirmed' } }] }],
+    ),
+    [undefined],
+    'тот же кандидат уже повторялся в другой попытке',
+  );
+  assert.deepEqual(
+    await runs(
+      [green, red],
+      [{ candidateSha: 'e'.repeat(40), evidence: [{ recheck: { of: 'x', outcome: 'flaky' } }] }],
+    ),
+    [undefined, red.id],
+    'повтор другого кандидата бюджет не тратит',
+  );
+  assert.deepEqual(
+    await runs([green, red], [], { recheck: false }),
+    [undefined],
+    'бюджет интеграции исчерпан',
+  );
+  for (const failed of [{ property: true }, { corpus: true }])
+    assert.deepEqual(
+      await runs([green, record('integration', false, report(failed))]),
+      [undefined],
+      `контрпример не повторяется: ${JSON.stringify(failed)}`,
+    );
+  assert.deepEqual(
+    await runs([green, record('integration', false, report({}))]),
+    [undefined, red.id],
+    'отчёт свойств без провалов не мешает повтору',
+  );
 });

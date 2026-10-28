@@ -82,7 +82,7 @@ import { defaultResourceDatabase, withResources } from '../environment/resources
 import { REQUIREMENT_GATE, assertRequirements } from '../verification/requirements.ts';
 import { BlockedError, classifyFailure } from './classify.ts';
 import { TaskFailure, type FailureKind } from './failure.ts';
-import { activeOf, type Engine } from './engine.ts';
+import { activeOf, namesFailingCases, type Engine } from './engine.ts';
 import { prompt } from './prompt.ts';
 import {
   contractDocuments,
@@ -1520,7 +1520,10 @@ export class Runner {
             ),
         };
       });
-      if (!failed || failed.passed || !candidatePassed || spent) throw error;
+      // Контрпример свойства или провал случая корпуса не повторяется: удачный
+      // второй запуск недетерминированной проверки не отменяет найденного входа.
+      if (!failed || failed.passed || namesFailingCases(failed) || !candidatePassed || spent)
+        throw error;
       budget.recheck = false;
       await this.gate(
         attempt,

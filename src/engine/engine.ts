@@ -138,6 +138,20 @@ const uncounted = (kind: FailureKind, blocked: boolean) =>
 export const neutralExhausted = (w: Pick<WorkState, 'neutralFailures'>) =>
   (w.neutralFailures ?? 0) >= MAX_NEUTRAL_FAILURES;
 
+/**
+ * Провал, названный свойством или случаем корпуса, — найденный контрпример, а
+ * не сбой среды: генеративная проверка недетерминирована, и удачный повтор
+ * не отменяет найденного входа. Такой провал не повторяется.
+ */
+export function namesFailingCases(e: Pick<EvidenceRecord, 'property'>) {
+  const report = e.property?.report;
+  return (
+    !!report &&
+    (report.properties.some((p) => p.status === 'failed') ||
+      (report.corpus?.failed.length ?? 0) > 0)
+  );
+}
+
 /** Активные попытки снимка: быстрый путь адаптера или фильтр всех. */
 export function activeOf(v: ExecutionView): AttemptState[] {
   return v.activeAttempts ? v.activeAttempts() : v.attempts().filter((a) => a.status === 'active');
@@ -1423,6 +1437,7 @@ export class Engine {
           first.phase !== evidence.phase ||
           first.sha !== evidence.sha ||
           first.consumer !== evidence.consumer ||
+          namesFailingCases(first) ||
           a.evidence.some((e) => e.recheck)
         )
           throw new HarnessError(
