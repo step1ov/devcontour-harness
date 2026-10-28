@@ -11,7 +11,13 @@ import {
   type GatePolicy,
 } from '../contracts/index.ts';
 import { command, git } from '../environment/process.ts';
-import { isolation, isolatedCommand, isolationSupport } from '../environment/isolation.ts';
+import {
+  isolation,
+  isolatedCommand,
+  isolationSupport,
+  sandboxDenials,
+  type Isolation,
+} from '../environment/isolation.ts';
 import { TaskFailure, type FailureKind } from '../engine/failure.ts';
 import { redactDeep } from '../environment/redaction.ts';
 import {
@@ -306,6 +312,8 @@ export async function runCheck(
   };
   let argv = options.argv,
     env = options.env,
+    cwd = options.cwd,
+    policy: Isolation | undefined,
     started: string | undefined,
     result: Awaited<ReturnType<typeof command>> | undefined,
     attempts = 1;
@@ -323,23 +331,39 @@ export async function runCheck(
       // Отсутствующая команда внутри песочницы выглядела бы как «код 127»
       // от обёртки. Причина та же, что и без неё, — называем её так же.
       assertExecutable(argv[0]!, env.PATH, options.cwd);
-      const policy = isolation({
+      policy = isolation({
         write: [...options.write, scratch, marks],
         controller: options.controller,
         readable: options.readable,
         domains: h.config.isolation.domains,
       });
       started = join(marks, 'started');
-      const wrapped = await isolatedCommand(policy, argv, options.settingsDir, scratch, started);
+      // Обязательные запреты записи — для checkout проверки целиком, а не
+      // только для её рабочего каталога: gate из подкаталога иначе оставлял
+      // корень дерева без них.
+      const workdir = await realpath(options.cwd);
+      const roots = isolation({ write: options.write, controller: [] }).write.filter(
+        (w) => workdir === w || workdir.startsWith(w + sep),
+      );
+      const wrapped = await isolatedCommand(
+        policy,
+        argv,
+        options.settingsDir,
+        scratch,
+        started,
+        workdir,
+        roots.length ? roots : [workdir],
+      );
       argv = wrapped.argv;
       env = { ...env, ...wrapped.env };
+      cwd = wrapped.cwd;
     }
     const execute = () => {
       // Уже отменённый вызов не запускается: слушатель отмены на отменённом
       // сигнале не срабатывает, и команда шла бы до таймаута.
       if (options.signal.aborted)
         throw Object.assign(new Error('Проверка отменена до запуска'), { name: 'AbortError' });
-      return command(argv, options.cwd, {
+      return command(argv, cwd, {
         signal: options.signal,
         ...(started === undefined ? { onSpawn: confirm } : {}),
         timeoutMs: options.timeoutMs,
@@ -367,7 +391,7 @@ export async function runCheck(
     }
     // Без песочницы завершившийся процесс точно порождался.
     if (started === undefined) confirm();
-    return { ...result, attempts, started: launched };
+    return { ...result, attempts, started: launched, ...(policy ? { isolation: policy } : {}) };
   } finally {
     // Каждый каталог убирается независимо: отказ уборки временного каталога
     // проверки (она могла снять с него права) не должен оставлять и метки.
@@ -383,7 +407,14 @@ export async function runCheck(
         failed.reason instanceof Error ? failed.reason : new Error(String(failed.reason));
 
       throw result
-        ? Object.assign(error, { [checkResult]: { ...result, attempts, started: launched } })
+        ? Object.assign(error, {
+            [checkResult]: {
+              ...result,
+              attempts,
+              started: launched,
+              ...(policy ? { isolation: policy } : {}),
+            },
+          })
         : error;
     }
   }
@@ -592,6 +623,26 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         throw new Error(
           `песочница проверки закрыла сеть к ${blocked.join(', ')}: этих доменов нет в isolation.domains. ` +
             `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
+        );
+      }
+      // Отказ файловой песочницы — отказ среды: правка кода его не снимет,
+      // а класс gate сжигал бы бюджет ремонтов.
+      const denied = result.isolation
+        ? sandboxDenials(result.stdout + '\n' + result.stderr, result.isolation)
+        : [];
+      if (denied.length) {
+        kind = 'environment';
+        throw new Error(
+          `песочница проверки отказала в доступе: ` +
+            denied
+              .slice(0, 3)
+              .map(
+                (d) =>
+                  `${relative(root, d.path).startsWith('..') ? d.path : relative(root, d.path)} — ${d.rule}`,
+              )
+              .join('; ') +
+            (denied.length > 3 ? ` и ещё ${denied.length - 3}` : '') +
+            `. Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
         );
       }
       const counts = reportPath
