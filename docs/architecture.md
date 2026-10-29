@@ -621,7 +621,7 @@ executable. Live smoke — отдельный opt-in с явно заданны�
   куда git придёт: файл `.git` дерева, созданного `worktree add`, не изменён;
   gitdir и общий каталог лежат вне дерева и согласованы; `commondir`/`gitdir`
   в обычном `.git` и вложенный репозиторий внутри известного дерева — отказ
-  (`scope-violation` в gate). Поверх — `-c core.fsmonitor=false -c
+  (`scope-violation` в gate). Поверх — `-c core.fsmonitor= -c
 core.hooksPath=/dev/null -c protocol.ext.allow=never`: hooks репозитория при
   коммитах harness не исполняются.
 - **Чего ещё нет.** Регрессионных тестов в песочнице для запретов `.git`, для
