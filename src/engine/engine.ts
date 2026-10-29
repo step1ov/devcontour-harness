@@ -75,6 +75,7 @@ import {
   jointSpecDigest,
   publicJoint,
   sameWorks,
+  jointBudgetAttempts,
 } from '../verification/joint.ts';
 
 /** Префикс причины неудавшегося продления: первая причина не затирается следствиями. */
@@ -2479,7 +2480,13 @@ export class Engine {
           payload: { verificationId: v.id, status: 'failed', error },
         });
       }
-      const previous = tx.verifications().filter((v) => sameWorks(v.workIds, input.workIds));
+      const previous = jointBudgetAttempts(
+        tx,
+        input.workIds,
+        this.host.basis.jointBudgetCheckpoints
+          ? this.host.basis.jointBudgetCheckpoints([...input.workIds], tx)
+          : [],
+      );
       if (previous.length >= this.policy.maxAttempts)
         throw new HarnessError(
           'ATTEMPTS_EXHAUSTED',

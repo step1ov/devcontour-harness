@@ -311,6 +311,14 @@ export interface ResultSink {
 /* ExecutionHost                                                       */
 /* ------------------------------------------------------------------ */
 
+/** Принятая доверенным хостом граница завершённого цикла совместной проверки. */
+export interface JointBudgetCheckpoint {
+  /** Успешная проверка, которую хост действительно принял. */
+  readonly verificationId: string;
+  /** Неизменяемый снимок завершённых проверок при принятии, включая verificationId. */
+  readonly settledVerificationIds: readonly string[];
+}
+
 /**
  * Основания согласования и попыток. Формулы digest — договор хоста:
  * DevContour вычисляет их по сохранённым формулам (они включают поля
@@ -342,6 +350,16 @@ export interface BasisProvider {
    * сверяется; при начале проверки её ещё нет.
    */
   jointSpecDigest?(workIds: string[], view: ExecutionView, verificationId?: string): string;
+  /**
+   * Принятые хостом циклы проверки этого набора. Только доверенная локальная
+   * acceptance закрывает их бюджет: один passed без принятия недостаточен.
+   * Снимки фиксируются при acceptance и не расширяются при чтении. Все
+   * последующие проверки набора разделяют бюджет вне объединения снимков,
+   * независимо от ID набора хоста, политики, постановки и порядка истории.
+   * Без hook сохраняется предел всей истории sameWorks. Вызывается внутри
+   * транзакции jointStart; исключение откатывает начало проверки.
+   */
+  jointBudgetCheckpoints?(workIds: string[], view: ExecutionView): readonly JointBudgetCheckpoint[];
   /**
    * Основание эпизода разбора по свойству (постановка и контракты поручения)
    * по формуле хоста; без неё — формула harness (`episodeBasis`). Хост с

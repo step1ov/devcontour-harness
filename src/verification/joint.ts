@@ -1,9 +1,11 @@
 import {
   digestOf,
+  HarnessError,
   type ExecutionPolicy,
   type ExecutionView,
   type JointVerification,
   type JointVerificationState,
+  type JointBudgetCheckpoint,
 } from '../contracts/index.ts';
 
 /**
@@ -51,6 +53,53 @@ export function jointSpecDigest(view: ExecutionView, workIds: string[]) {
 /** Один и тот же набор поручений — один предмет проверки, независимо от порядка. */
 export const sameWorks = (a: string[], b: string[]) =>
   JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+
+/** Незакрытые принятием попытки; checkpoints доверенного хоста проверяются целиком. */
+export function jointBudgetAttempts(
+  view: ExecutionView,
+  workIds: string[],
+  checkpoints: readonly JointBudgetCheckpoint[],
+) {
+  const invalid = () => {
+    throw new HarnessError(
+      'INVALID_INPUT',
+      'Невалидная принятая граница бюджета совместных проверок',
+    );
+  };
+  if (!Array.isArray(checkpoints)) invalid();
+  const settled = new Set<string>();
+  const anchors = new Set<string>();
+  for (const checkpoint of checkpoints) {
+    if (
+      !checkpoint ||
+      typeof checkpoint.verificationId !== 'string' ||
+      !checkpoint.verificationId.length ||
+      !Array.isArray(checkpoint.settledVerificationIds)
+    )
+      invalid();
+    const { verificationId, settledVerificationIds: ids } = checkpoint;
+    const anchor = view.verification(verificationId);
+    if (
+      anchors.has(verificationId) ||
+      !anchor ||
+      anchor.status !== 'passed' ||
+      !sameWorks(anchor.workIds, workIds) ||
+      !ids.length ||
+      new Set(ids).size !== ids.length ||
+      !ids.includes(verificationId)
+    )
+      invalid();
+    anchors.add(verificationId);
+    for (const id of ids) {
+      if (typeof id !== 'string' || !id.length) invalid();
+      const v = view.verification(id);
+      if (!v || (v.status !== 'passed' && v.status !== 'failed') || !sameWorks(v.workIds, workIds))
+        invalid();
+      settled.add(id);
+    }
+  }
+  return view.verifications().filter((v) => sameWorks(v.workIds, workIds) && !settled.has(v.id));
+}
 
 /** Gates совместной проверки в порядке их зависимостей. */
 export function orderedWorkspaceGates(gates: ExecutionPolicy['workspaceGates']) {

@@ -684,6 +684,16 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     if (result.timedOut || signal.aborted)
       throw new Error('Проверка прервана или превысила timeout');
     if (result.code !== 0) {
+      // Сохраняем валидный отчёт и при отказе команды, до классификации
+      // песочницы: после очистки worktree иначе остаётся только хвост лога.
+      const counts = reportPath
+        ? await readReport(reportPath, cwd, redact).catch(() => undefined)
+        : undefined;
+      if (counts) {
+        manifest = counts;
+        await mkdir(artifactDir, { recursive: true });
+        await writeFile(join(artifactDir, `${gate.id}.xml`), redact(counts.xml));
+      }
       const blocked =
         run.policy.isolation.mode === 'os'
           ? sandboxBlockedHosts(result.stdout + '\n' + result.stderr, run.policy.isolation.domains)
@@ -721,10 +731,6 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
             `. Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
         );
       }
-      const counts = reportPath
-        ? await readReport(reportPath, cwd, redact).catch(() => undefined)
-        : undefined;
-      if (counts) manifest = counts;
       throw new Error(
         [
           `Код выхода ${result.code}`,

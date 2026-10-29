@@ -34,7 +34,11 @@ export const CLOSED_FINDINGS_HEADER = 'Closed or withdrawn review findings (hist
  * writer — открытые находки, которые нужно устранить.
  */
 export function findingsText(history: CodeReviewHistory | undefined, review: boolean) {
-  if (!history?.findings.length) return '';
+  if (!history) return '';
+  if (!history.findings.length)
+    return review
+      ? 'There are no controller-issued review findings. Return `previous` as exactly []. Historical attempt errors and gate observations are not review findings: do not invent or compute ids for them.'
+      : '';
   const open = history.findings.filter((f) => f.status === 'open');
   const closed = history.findings.filter((f) => f.status !== 'open');
   const brief = (f: CodeReviewHistory['findings'][number]) => ({
@@ -140,7 +144,9 @@ export function prompt(input: {
         JSON.stringify(attempt.dependencies)
       : '',
     'Gates that prove this work: ' + JSON.stringify(input.gates),
-    'Previous attempts, with the findings each review left. Address every finding that is still open first and say what you changed for it: ' +
+    (review && input.findings
+      ? 'Historical attempt errors and gate observations (diagnostic context only). Only controller-issued ids in the review findings sections below may appear in `previous`; do not derive ids from this history: '
+      : 'Previous attempts, with the findings each review left. Address every finding that is still open first and say what you changed for it: ') +
       JSON.stringify(previousAttempts(input.history, attempt.id)),
     findingsText(input.findings, !!review),
     !review && attempt.continuedFrom?.applied

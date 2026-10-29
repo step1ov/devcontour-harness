@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import type { EvidenceRecord, GatePolicy } from '../src/contracts/index.ts';
 import { failureFingerprint } from '../src/contracts/failure.ts';
 import { redactor } from '../src/environment/redaction.ts';
+import { isolationSupport } from '../src/environment/isolation.ts';
 import { TaskFailure } from '../src/engine/failure.ts';
 import {
   junitSummary,
@@ -31,6 +32,7 @@ async function gate(
   sha: string,
   g: Partial<GatePolicy> & { command: string[] },
   secret?: string,
+  isolationMode: 'none' | 'os' = 'none',
 ) {
   const recorded: Omit<EvidenceRecord, 'id' | 'runId' | 'createdAt'>[] = [];
   const full = {
@@ -40,10 +42,11 @@ async function gate(
     report: { type: 'junit', path: 'test-results/junit.xml' },
     ...g,
   } as GatePolicy;
+  const artifactDir = mkdtempSync(join(tmpdir(), 'harness-art-'));
   let failure: TaskFailure | undefined;
   try {
     await runGate({
-      policy,
+      policy: { isolation: { ...policy.isolation, mode: isolationMode } },
       record: (e) => {
         recorded.push(e);
         return { ...e, id: 'e', runId: 'r', createdAt: new Date().toISOString() };
@@ -52,7 +55,7 @@ async function gate(
       sha,
       phase: 'candidate',
       gate: full,
-      artifactDir: mkdtempSync(join(tmpdir(), 'harness-art-')),
+      artifactDir,
       signal: new AbortController().signal,
       execution: {
         env: { ...process.env, SECRET: secret ?? '' },
@@ -65,8 +68,79 @@ async function gate(
     failure = error;
   }
   assert.equal(recorded.length, 1, 'evidence записывается при любом исходе');
-  return { evidence: recorded[0]!, failure };
+  return { evidence: recorded[0]!, failure, artifactDir };
 }
+
+test('Failed JUnit survives exit 1 with an incidental npmrc warning and retains redaction', async () => {
+  const r = repo();
+  const secret = 'synthetic-report-secret-7318';
+  const { evidence, failure, artifactDir } = await gate(
+    r.dir,
+    r.head(),
+    {
+      command: nodeGate(
+        `${junit(`<testcase name="fails-${secret}"><failure message="expected 0 ${secret}"/></testcase>`)};console.error("WARN Issue while reading '/synthetic/home/.npmrc': EPERM");process.exit(1)`,
+      ),
+    },
+    secret,
+  );
+  assert.equal(failure?.kind, 'gate');
+  assert.equal(evidence.exitCode, 1);
+  assert.equal(evidence.passed, false);
+  assert.match(evidence.summary, /упали.*fails-.*expected 0/);
+  assert.deepEqual(
+    evidence.tests?.map((t) => t.status),
+    ['failed'],
+  );
+  const xml = readFileSync(join(artifactDir, 'unit.xml'), 'utf8');
+  assert.equal(junitSummary(xml).failures, 1);
+  assert.match(xml, /expected 0/);
+  assert.ok(!xml.includes(secret));
+  assert.ok(!JSON.stringify(evidence).includes(secret));
+});
+
+const sandbox = isolationSupport();
+test(
+  'A genuine sandbox denial remains environment while its valid failing report is retained',
+  { skip: sandbox.ok ? false : 'песочница ОС недоступна: ' + sandbox.detail },
+  async () => {
+    const r = repo();
+    const { evidence, failure, artifactDir } = await gate(
+      r.dir,
+      r.head(),
+      {
+        command: nodeGate(
+          `${junit('<testcase name="blocked"><error message="sandbox denied write"/></testcase>')};try{require('fs').mkdirSync('.idea')}catch(e){console.error(e.message);process.exit(1)}`,
+        ),
+      },
+      undefined,
+      'os',
+    );
+    assert.equal(failure?.kind, 'environment', evidence.summary);
+    assert.equal(evidence.passed, false);
+    assert.equal(evidence.exitCode, 1);
+    assert.equal(junitSummary(readFileSync(join(artifactDir, 'unit.xml'), 'utf8')).failures, 1);
+  },
+);
+
+test('Nonzero exit does not retain a malformed or escaped JUnit report', async () => {
+  const r = repo();
+  const outside = mkdtempSync(join(tmpdir(), 'harness-report-outside-'));
+  const path = join(outside, 'secret.xml');
+  writeFileSync(path, '<testsuite><testcase name="outside"/></testsuite>');
+  for (const script of [
+    `require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase')`,
+    `require('fs').symlinkSync(${JSON.stringify(path)}, process.env.DEVCONTOUR_REPORT_PATH)`,
+  ]) {
+    const { evidence, failure, artifactDir } = await gate(r.dir, r.head(), {
+      command: nodeGate(`${script};console.error('assertion failed');process.exit(1)`),
+    });
+    assert.equal(failure?.kind, 'gate');
+    assert.match(evidence.summary, /assertion failed/);
+    assert.equal(existsSync(join(artifactDir, 'unit.xml')), false);
+    assert.equal(evidence.tests, undefined);
+  }
+});
 
 test('T06: test gate принимается только по свежему непустому JUnit без отказов', async () => {
   const r = repo();
