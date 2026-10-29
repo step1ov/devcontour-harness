@@ -168,9 +168,7 @@ if (role === 'reviewer' && step.probes) {
       request('tools/call', {
         name: 'run_check',
         arguments: Array.isArray(argv) ? { argv } : argv,
-      }).then(
-        (m) => m.result?.structuredContent ?? { error: m.error },
-      );
+      }).then((m) => m.result?.structuredContent ?? { error: m.error });
     // Барьер аварии внутри выполняющейся проверки: первый вызов начат, через
     // crashDuringProbe мс controller и сервер проверок убиты SIGKILL, исхода
     // проверки в журнале нет.
@@ -206,7 +204,10 @@ writeFileSync(`${scenarioPath}.${role}.${index}.findings`, JSON.stringify(issued
 const cite = (text) =>
   text
     .replace(/\$probe:(\d+)/g, (_m, n) => probeRuns[Number(n)]?.runId ?? 'missing')
-    .replace(/\$(open|closed):(\d+)/g, (_m, k, n) => issued[k][Number(n)]?.id ?? `missing-${k}-${n}`);
+    .replace(
+      /\$(open|closed):(\d+)/g,
+      (_m, k, n) => issued[k][Number(n)]?.id ?? `missing-${k}-${n}`,
+    );
 if (step.result) step.result = JSON.parse(cite(JSON.stringify(step.result)));
 if (step.stderr) process.stderr.write(step.stderr + '\n');
 // Аварийное завершение controller посреди логического ревью (барьер теста
