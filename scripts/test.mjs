@@ -123,9 +123,6 @@ if (flags.list) {
 } else if (!files.length) {
   console.log('test:affected: нет затронутых тест-файлов');
 } else {
-  // Полный размер оракула H1 (100 случаев) — только в release check; без
-  // переменной тест берёт 20 детерминированных случаев с тех же seed.
-  if (flags.release) process.env.HARNESS_RELEASE_CHECK = '1';
   // Node's CLI sorts file arguments alphabetically. The public run API preserves
   // the supplied order while retaining the normal Node test runner semantics.
   const controller = new AbortController();
@@ -150,9 +147,9 @@ if (flags.list) {
   results.on('test:fail', () => (process.exitCode ||= 1));
   results.on('test:pass', ({ name, skip, todo }) => {
     slowPatterns.forEach((p, i) => p.test(name) && matched.add(i));
-    // В --fast пропуск медленного яруса ожидаем; в остальных режимах skip/todo
-    // по-прежнему ошибка.
-    if ((skip || todo) && !flags.fast) {
+    // Pattern-filtered tests are not emitted as skipped; explicit skip/todo
+    // remains an error in every tier.
+    if (skip || todo) {
       console.error('Full test suite must not contain skipped or todo tests.');
       process.exitCode ||= 1;
     }

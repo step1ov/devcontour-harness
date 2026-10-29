@@ -106,10 +106,7 @@ import { approve, bin, greet, implement, type Scenario, type setup } from './run
 type Ctx = ReturnType<typeof setup>;
 type H = Harness;
 
-// Размер выборки: 100 случаев в release check (`npm run check` ставит
-// HARNESS_RELEASE_CHECK=1 через `scripts/test.mjs --release`), 20 — в обычных,
-// быстрых и выборочных прогонах. Seed те же (SEED0…), 20 — префикс сотни.
-const N = Number(process.env.DIFF_N ?? (process.env.HARNESS_RELEASE_CHECK === '1' ? 100 : 20));
+const N = Number(process.env.DIFF_N ?? 100);
 const SEED0 = Number(process.env.DIFF_SEED ?? 1);
 const ONLY = process.env.DIFF_ONLY ? process.env.DIFF_ONLY.split(',').map(Number) : undefined;
 const MAX_CLAIMS = 50;

@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { checkProcesses } from './check-processes.mjs';
 
 // Статические шаги `npm run check` параллельно: lint, typecheck и
 // schemas:check только читают исходники (tsc --noEmit, eslint без --fix,
@@ -8,19 +8,21 @@ import { spawn } from 'node:child_process';
 const steps = process.argv.slice(2);
 if (!steps.length) steps.push('lint', 'typecheck', 'schemas:check');
 const npm = process.env.npm_execpath;
+const processes = checkProcesses();
 
 const runStep = (name) =>
   new Promise((resolve) => {
     const started = Date.now();
     // npm_execpath есть при запуске из npm-скрипта; иначе — npm из PATH.
     const child = npm
-      ? spawn(process.execPath, [npm, 'run', '--silent', name], {
+      ? processes.spawn(process.execPath, [npm, 'run', '--silent', name], {
           stdio: ['ignore', 'pipe', 'pipe'],
         })
-      : spawn('npm', ['run', '--silent', name], {
+      : processes.spawn('npm', ['run', '--silent', name], {
           stdio: ['ignore', 'pipe', 'pipe'],
           shell: process.platform === 'win32',
         });
+    if (!child) return resolve({ name, code: 1, signal: null, ms: 0, out: Buffer.alloc(0) });
     const out = [];
     child.stdout.on('data', (d) => out.push(d));
     child.stderr.on('data', (d) => out.push(d));
@@ -36,4 +38,6 @@ for (const r of results) {
   console.log(`\n> ${r.name}: ${status}, ${(r.ms / 1000).toFixed(1)} s`);
   if (r.out.length) process.stdout.write(r.out);
 }
-if (results.some((r) => r.code !== 0)) process.exitCode = 1;
+if (results.some((r) => r.code !== 0)) process.exitCode ||= 1;
+
+processes.dispose();
