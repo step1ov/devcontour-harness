@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { doctor } from '../src/control/doctor.ts';
 import { HARNESS_VERSION } from '../src/package.ts';
-import { engineOf, graphOf, ready } from './engine-fixture.ts';
+import { engineOf, graphOf, policyOf, ready } from './engine-fixture.ts';
 
 test('doctor называет версии движка, записавшие состояние, и отклоняет состояние более новой версии без записи', async () => {
   const { engine, store, dir } = engineOf();
@@ -53,4 +55,31 @@ test('doctor называет версии движка, записавшие с
   assert.equal(refused.state?.engineVersions, undefined);
   assert.ok(refused.problems.some((p) => /более новая версия|формату этой версии/.test(p)));
   assert.equal(data(), before, 'doctor изменил состояние');
+});
+
+test('doctor показывает будущий корень checkout без создания кэша или заданного корня', async () => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'harness-doctor-home-')));
+  const previous = { HOME: process.env.HOME, XDG_CACHE_HOME: process.env.XDG_CACHE_HOME };
+  process.env.HOME = home;
+  delete process.env.XDG_CACHE_HOME;
+  try {
+    const policy = policyOf();
+    policy.repositories[0]!.path = join(home, 'project');
+    const state = join(home, 'project', '.harness-state');
+    for (const checkoutRoot of [undefined, join(home, 'configured', 'checkouts')]) {
+      const report = await doctor(policy, {}, state, undefined, {
+        baseDir: home,
+        ...(checkoutRoot ? { checkoutRoot } : {}),
+      });
+      assert.equal(report.checkouts?.placement, checkoutRoot ? 'configured' : 'cache');
+      assert.ok(report.checkouts?.root);
+      assert.equal(existsSync(report.checkouts.root), false);
+      assert.deepEqual(readdirSync(home), [], 'doctor изменил домашний каталог');
+    }
+  } finally {
+    for (const [key, value] of Object.entries(previous))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    rmSync(home, { recursive: true, force: true });
+  }
 });

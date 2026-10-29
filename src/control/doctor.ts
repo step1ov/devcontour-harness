@@ -134,6 +134,7 @@ export async function doctor(
             isAbsolute(r.path) ? r.path : resolve(checkouts.baseDir, r.path),
           ),
           hidden: credentialPaths(),
+          create: false,
           ...(checkouts.checkoutRoot ? { configured: checkouts.checkoutRoot } : {}),
         })
       : undefined;

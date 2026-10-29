@@ -23,6 +23,7 @@ import {
 } from '../src/environment/checkout-root.ts';
 import {
   hiddenReadRule,
+  credentialPaths,
   isolation,
   isolationSupport,
   parseSandboxLog,
@@ -159,6 +160,65 @@ test('CR01: выбор корня — macOS и Linux, устойчивый хэ�
     join(mac.root, 'app', 'worktrees', 'R1'),
   );
   assert.equal(checkoutPath({ placement: 'in-place' }, '/legacy', 'app', 'worktrees'), '/legacy');
+});
+
+test('CR14: отказ чтения учётных данных не становится отказом среды даже при форме поиска вверх', () => {
+  for (const path of credentialPaths()) {
+    const cwd = join(dirname(path), 'project', 'checkout');
+    const policy = { write: [cwd], readable: [cwd], hidden: [path], domains: [] };
+    for (const operation of ['file-read-metadata', 'file-read-data'])
+      assert.deepEqual(
+        sandboxDenials(
+          [{ operation, path }],
+          policy,
+          `EPERM: operation not permitted, stat '${path}'`,
+          cwd,
+        ),
+        [],
+        path,
+      );
+  }
+});
+
+test('CR15: заданный корень не содержит репозиторий, состояние или закрытый путь; новый корень закрыт правами 0700', () => {
+  const base = tmp('harness-cr-parent-');
+  const w = join(base, 'repository');
+  mkdirSync(w);
+  const state = tmp('harness-cr-state-');
+  for (const config of [
+    { repositories: [w], stateDirs: [state] },
+    { repositories: [state], stateDirs: [w] },
+    { repositories: [state], stateDirs: [state], hidden: [join(w, 'credentials')] },
+  ]) {
+    for (const configured of [base, sep])
+      assert.throws(() => chooseCheckoutRoot({ ...config, configured }), /содержит/);
+  }
+  const configured = join(base, 'new', 'checkouts');
+  const input = { repositories: [w], stateDirs: [state], configured };
+  assert.equal(chooseCheckoutRoot({ ...input, create: false }).root, configured);
+  assert.equal(existsSync(join(base, 'new')), false, 'диагностика не создаёт родителей');
+  assert.equal(chooseCheckoutRoot(input).root, configured);
+  for (const path of [dirname(configured), configured])
+    assert.equal(statSync(path).mode & 0o777, 0o700, path);
+  const alias = join(base, 'alias');
+  symlinkSync(configured, alias);
+  assert.throws(() => chooseCheckoutRoot({ ...input, configured: alias }), /символическая ссылка/);
+});
+
+test('CR16: отсутствующий каталог кэша пользователя создаётся, диагностика ничего не записывает', () => {
+  const w = tmp('harness-cr-w-');
+  const state = join(w, '.devcontour-local');
+  for (const platform of ['linux', 'darwin'] as const) {
+    const home = tmp('harness-cr-home-');
+    const input = { repositories: [w], stateDirs: [state], platform, env: {}, home };
+    const planned = chooseCheckoutRoot({ ...input, create: false });
+    assert.equal(planned.placement, 'cache');
+    assert.deepEqual(readdirSync(home), []);
+    const actual = chooseCheckoutRoot(input);
+    assert.deepEqual(actual, planned);
+    for (let dir = actual.root!; dir !== home; dir = dirname(dir))
+      assert.equal(statSync(dir).mode & 0o777, 0o700, dir);
+  }
 });
 
 test('CR02: кэш на другом томе, чем репозиторий, — прежнее место и пояснение для doctor', () => {

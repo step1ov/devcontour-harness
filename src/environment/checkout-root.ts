@@ -19,7 +19,8 @@ import { HarnessError } from '../contracts/index.ts';
  *
  * Поэтому корень рабочих деревьев выбирается так:
  * - корень, заданный хостом (`checkoutRoot`), — как есть, если он не внутри
- *   репозитория, закрытого пути или каталога состояния (иначе отказ);
+ *   репозитория, закрытого пути или каталога состояния и не содержит их
+ *   (иначе отказ); недостающий корень и его родители создаются с mode 0700;
  * - каталог состояния внутри репозитория политики или внутри закрытого
  *   песочницей пути — каталог кэша пользователя вне дерева: macOS
  *   `~/Library/Caches/devcontour-harness/<hash>`, Linux
@@ -64,7 +65,7 @@ export interface CheckoutRootInput {
   /** Номер тома пути (`stat.dev`); тест подменяет его. */
   device?: (path: string) => number | undefined;
   /**
-   * Создать каталоги кэша (0700). Без записи (`false`, диагностика) —
+   * Создать корень и недостающих родителей (0700). Без записи (`false`, диагностика) —
    * только проверка существующих.
    */
   create?: boolean;
@@ -83,7 +84,8 @@ export function realish(path: string): string {
   }
 }
 
-const within = (path: string, root: string) => path === root || path.startsWith(root + sep);
+const within = (path: string, root: string) =>
+  path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
 
 /** Номер тома ближайшего существующего предка пути. */
 function deviceOf(path: string): number | undefined {
@@ -121,10 +123,12 @@ function unsafeDir(path: string, create: boolean, uid: number | undefined): stri
   let stat;
   try {
     stat = lstatSync(path);
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+      return `${path} не прочитан: ${(error as NodeJS.ErrnoException).code ?? String(error)}`;
     if (!create) return undefined;
     try {
-      mkdirSync(path, { mode: 0o700 });
+      mkdirSync(path, { recursive: true, mode: 0o700 });
       stat = lstatSync(path);
     } catch (error) {
       return `${path} не создан: ${(error as NodeJS.ErrnoException).code ?? String(error)}`;
@@ -143,6 +147,7 @@ export function chooseCheckoutRoot(input: CheckoutRootInput): CheckoutRoot {
   // Корень внутри репозитория, закрытого пути или каталога состояния вернул
   // бы ту же вложенность (или открыл бы закрытое).
   const enclosing = (root: string) => [...repos, ...hidden, ...states].find((p) => within(root, p));
+  const enclosed = (root: string) => [...repos, ...hidden, ...states].find((p) => within(p, root));
   const uid = input.uid !== undefined ? input.uid : process.getuid?.();
   const create = input.create ?? true;
   if (input.configured) {
@@ -153,7 +158,13 @@ export function chooseCheckoutRoot(input: CheckoutRootInput): CheckoutRoot {
         'INVALID_INPUT',
         `checkoutRoot ${root} внутри ${inside}: корень рабочих деревьев должен лежать вне репозиториев, закрытых путей и каталога состояния`,
       );
-    const unsafe = unsafeDir(root, false, uid);
+    const contains = enclosed(root);
+    if (contains)
+      throw new HarnessError(
+        'INVALID_INPUT',
+        `checkoutRoot ${root} содержит ${contains}: корень рабочих деревьев не должен быть предком репозиториев, закрытых путей или каталога состояния`,
+      );
+    const unsafe = unsafeDir(resolve(input.configured), create, uid);
     if (unsafe) throw new HarnessError('INVALID_INPUT', 'checkoutRoot: ' + unsafe);
     return { root, placement: 'configured' };
   }
@@ -171,6 +182,8 @@ export function chooseCheckoutRoot(input: CheckoutRootInput): CheckoutRoot {
   });
   const inside = enclosing(realish(root));
   if (inside) return stay(`каталог кэша ${root} внутри ${inside}`);
+  const contains = enclosed(realish(root));
+  if (contains) return stay(`каталог кэша ${root} содержит ${contains}`);
   const device = input.device ?? deviceOf;
   const at = device(root);
   const other = repos.find((r) => {
@@ -182,8 +195,8 @@ export function chooseCheckoutRoot(input: CheckoutRootInput): CheckoutRoot {
       placement: 'cross-volume',
       note: `каталог кэша ${root} на другом томе, чем репозиторий ${other}: жёсткие ссылки и reflink менеджера пакетов там не работают, рабочие деревья остаются в каталоге состояния ${nested} (внутри закрытого дерева инструменты, ищущие конфигурацию вверх по дереву, получат EPERM); задайте checkoutRoot на томе репозитория`,
     };
-  // Общий каталог кэша — только существующий предок: создаются и
-  // проверяются каталог harness и каталог этого состояния.
+  // Недостающие родители кэша создаются с теми же закрытыми правами;
+  // существующие каталоги пользователя не меняются.
   for (const dir of [base, root]) {
     const unsafe = unsafeDir(dir, create, uid);
     if (unsafe) return stay('каталог кэша небезопасен: ' + unsafe);

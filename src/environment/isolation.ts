@@ -522,7 +522,8 @@ const mentions = (output: string, path: string) =>
  *   вверх по дереву и на EPERM (в отличие от ENOENT) падают. Нужны все
  *   признаки — запись ядра для тега этой проверки, форма поиска вверх
  *   (каталог файла — строгий предок `cwd`) и EPERM с этим путём в выводе
- *   (`output`). Чтение другого закрытого пути (`~/.ssh/id_rsa`), отказ,
+ *   (`output`). Учётные данные исключены даже при такой форме пути
+ *   (`~/.npmrc` тоже лежит в предке checkout). Чтение другого закрытого пути (`~/.ssh/id_rsa`), отказ,
  *   который проверка пережила, и обычный провал тестов отказом среды не
  *   становятся: отказ среды не тратит попытку и останавливает очередь.
  */
@@ -534,13 +535,26 @@ export function sandboxDenials(
 ) {
   const found = new Map<string, string>();
   const eperm = output !== undefined && /\bEPERM\b|operation not permitted/i.test(output);
+  const credentials = credentialPaths().flatMap((path) => {
+    try {
+      return [path, realpathSync(path)];
+    } catch {
+      return [path];
+    }
+  });
+  const credential = (path: string) =>
+    credentials.some((root) => path === root || path.startsWith(root + sep));
   // Поиск вверх: файл лежит прямо в строгом предке рабочего каталога.
   const walkUp = (path: string) => cwd !== undefined && cwd.startsWith(dirname(path) + sep);
   for (const v of violations) {
     if (found.has(v.path)) continue;
     const rule = v.operation.startsWith('file-write')
       ? mandatoryDenyRule(policy, v.path)
-      : v.operation.startsWith('file-read') && eperm && walkUp(v.path) && mentions(output, v.path)
+      : v.operation.startsWith('file-read') &&
+          !credential(v.path) &&
+          eperm &&
+          walkUp(v.path) &&
+          mentions(output, v.path)
         ? hiddenReadRule(policy, v.path)
         : undefined;
     if (rule) found.set(v.path, rule);
