@@ -188,13 +188,20 @@ export async function command(
         return;
       }
       if (mark) {
-        const bounded = await Promise.race([
-          closed.then(() => true),
-          new Promise<boolean>((r) => setTimeout(() => r(false), 3000)),
-        ]);
-        if (!bounded) {
-          child.stdout.destroy();
-          child.stderr.destroy();
+        let pipeTimer: NodeJS.Timeout | undefined;
+        try {
+          const bounded = await Promise.race([
+            closed.then(() => true),
+            new Promise<boolean>((r) => {
+              pipeTimer = setTimeout(() => r(false), 3000);
+            }),
+          ]);
+          if (!bounded) {
+            child.stdout.destroy();
+            child.stderr.destroy();
+          }
+        } finally {
+          if (pipeTimer) clearTimeout(pipeTimer);
         }
       }
       const rest = stdoutDecoder.end();
