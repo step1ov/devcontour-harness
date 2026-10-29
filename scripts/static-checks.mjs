@@ -40,4 +40,4 @@ for (const r of results) {
 }
 if (results.some((r) => r.code !== 0)) process.exitCode ||= 1;
 
-processes.dispose();
+await processes.dispose();

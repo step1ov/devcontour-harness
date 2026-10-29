@@ -90,7 +90,8 @@ function targetsOf(root, target, literal) {
   if (target.split(sep).includes('node_modules')) return [];
   if (isDir(target)) {
     const named = literal === undefined || !/(?:^|\/)\.\.?\/?$/.test(literal);
-    return named && target.startsWith(join(root, 'src') + sep) ? walk(target) : [];
+    const src = join(root, 'src');
+    return named && (target === src || target.startsWith(src + sep)) ? walk(target) : [];
   }
   if (!SOURCE.test(target)) return [];
   if (isFile(target)) return [target];

@@ -23,38 +23,42 @@ async function until(check: () => boolean, detail: string) {
   assert.ok(check(), detail);
 }
 
-for (const mode of ['failure', 'signal'] as const)
-  test(
-    `Parallel check ${mode} stops a descendant that ignores SIGTERM`,
-    { timeout: 20_000 },
-    async () => {
-      const root = await mkdtemp(join(tmpdir(), 'check-runner-'));
-      let pid: number | undefined;
-      const scripts = join(root, 'scripts');
-      await mkdir(scripts);
-      for (const file of ['static-checks.mjs', 'check-processes.mjs'])
-        await copyFile(join(source, 'scripts', file), join(scripts, file));
-      await writeFile(
-        join(root, 'package.json'),
-        JSON.stringify({
-          type: 'module',
-          scripts: {
-            lint: 'node step.mjs lint',
-            typecheck: 'node step.mjs typecheck',
-            'test:affected': 'node step.mjs unexpected-next-stage',
-          },
-        }),
-      );
-      await writeFile(
-        join(root, 'step.mjs'),
-        `
+for (const detached of [false, true])
+  for (const mode of ['failure', 'signal'] as const)
+    test(
+      `Parallel check ${mode} stops a ${detached ? 'detached' : 'grouped'} descendant that ignores SIGTERM`,
+      { timeout: 20_000 },
+      async () => {
+        const root = await mkdtemp(join(tmpdir(), 'check-runner-'));
+        let pid: number | undefined;
+        const unrelated = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {
+          stdio: 'ignore',
+        });
+        const scripts = join(root, 'scripts');
+        await mkdir(scripts);
+        for (const file of ['static-checks.mjs', 'check-processes.mjs'])
+          await copyFile(join(source, 'scripts', file), join(scripts, file));
+        await writeFile(
+          join(root, 'package.json'),
+          JSON.stringify({
+            type: 'module',
+            scripts: {
+              lint: 'node step.mjs lint',
+              typecheck: 'node step.mjs typecheck',
+              'test:affected': 'node step.mjs unexpected-next-stage',
+            },
+          }),
+        );
+        await writeFile(
+          join(root, 'step.mjs'),
+          `
       import {spawn} from 'node:child_process';
       import {existsSync,writeFileSync} from 'node:fs';
       const name=process.argv[2];
       if(name==='typecheck') {
         spawn(process.execPath,['-e',
           "const fs=require('node:fs');process.on('SIGTERM',()=>{});fs.writeFileSync('descendant.pid',String(process.pid));setInterval(()=>{},1000)"
-        ],{stdio:'ignore'});
+        ],{stdio:'ignore',detached:${detached}});
         setInterval(()=>{},1000);
       } else if(name==='lint') {
         const timer=setInterval(()=>{
@@ -65,40 +69,42 @@ for (const mode of ['failure', 'signal'] as const)
         },20);
       } else writeFileSync('unexpected-stage','started');
     `,
-      );
-      const child = spawn(
-        process.execPath,
-        [join(scripts, 'static-checks.mjs'), ...['lint', 'typecheck']],
-        {
-          cwd: root,
-          stdio: ['ignore', 'pipe', 'pipe'],
-        },
-      );
-      let output = '';
-      child.stdout.on('data', (chunk) => (output += String(chunk)));
-      child.stderr.on('data', (chunk) => (output += String(chunk)));
-      const closed = new Promise<number | null>((resolve, reject) => {
-        child.once('error', reject);
-        child.once('close', resolve);
-      });
-      try {
-        await until(() => existsSync(join(root, 'descendant.pid')), 'descendant started');
-        pid = Number(await readFile(join(root, 'descendant.pid'), 'utf8'));
-        if (mode === 'signal') child.kill('SIGTERM');
-        assert.equal(await closed, mode === 'signal' ? 143 : 1, output);
-        await until(() => !alive(pid!), 'descendant terminated after the check stopped');
-        assert.equal(
-          existsSync(join(root, 'unexpected-stage')),
-          false,
-          'later stages never started',
         );
-      } finally {
-        child.kill('SIGKILL');
-        if (pid && alive(pid)) process.kill(pid, 'SIGKILL');
-        await rm(root, { recursive: true, force: true });
-      }
-    },
-  );
+        const child = spawn(
+          process.execPath,
+          [join(scripts, 'static-checks.mjs'), ...['lint', 'typecheck']],
+          {
+            cwd: root,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        );
+        let output = '';
+        child.stdout.on('data', (chunk) => (output += String(chunk)));
+        child.stderr.on('data', (chunk) => (output += String(chunk)));
+        const closed = new Promise<number | null>((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        try {
+          await until(() => existsSync(join(root, 'descendant.pid')), 'descendant started');
+          pid = Number(await readFile(join(root, 'descendant.pid'), 'utf8'));
+          if (mode === 'signal') child.kill('SIGTERM');
+          assert.equal(await closed, mode === 'signal' ? 143 : 1, output);
+          await until(() => !alive(pid!), 'descendant terminated after the check stopped');
+          assert.ok(alive(unrelated.pid!), 'an unrelated process is left running');
+          assert.equal(
+            existsSync(join(root, 'unexpected-stage')),
+            false,
+            'later stages never started',
+          );
+        } finally {
+          unrelated.kill('SIGKILL');
+          child.kill('SIGKILL');
+          if (pid && alive(pid)) process.kill(pid, 'SIGKILL');
+          await rm(root, { recursive: true, force: true });
+        }
+      },
+    );
 
 test('Fast tier omits its named slow test but still refuses explicit skip and todo', async () => {
   const root = await mkdtemp(join(tmpdir(), 'test-tier-refusal-'));
@@ -132,4 +138,55 @@ test('Fast tier omits its named slow test but still refuses explicit skip and to
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('Check cleanup never signals a reused PID or follows its unrelated children', async () => {
+  const module: string = '../scripts/check-processes.mjs';
+  const { ownedProcesses, signalSameProcesses } = (await import(module)) as {
+    ownedProcesses(
+      this: void,
+      rows: { pid: number; ppid: number; start: string; marked: boolean }[],
+      seen: Map<number, string>,
+    ): Map<number, string>;
+    signalSameProcesses(
+      this: void,
+      candidates: Map<number, string>,
+      current: Map<number, string>,
+      signal: string,
+      kill: (pid: number, signal: string) => void,
+    ): void;
+  };
+  const seen = new Map([
+    [901, 'old'],
+    [902, 'owned'],
+  ]);
+  const candidates = ownedProcesses(
+    [
+      { pid: 901, ppid: 1, start: 'reused', marked: false },
+      { pid: 903, ppid: 901, start: 'unrelated-child', marked: false },
+      { pid: 902, ppid: 1, start: 'owned', marked: false },
+      { pid: 904, ppid: 1, start: 'tagged-orphan', marked: true },
+    ],
+    seen,
+  );
+  assert.deepEqual(
+    [...candidates],
+    [
+      [902, 'owned'],
+      [904, 'tagged-orphan'],
+    ],
+  );
+  const killed: number[] = [];
+  signalSameProcesses(
+    candidates,
+    new Map([
+      [902, 'reused-after-inventory'],
+      [904, 'tagged-orphan'],
+    ]),
+    'SIGKILL',
+    (pid) => {
+      killed.push(pid);
+    },
+  );
+  assert.deepEqual(killed, [904], 'identity changed after discovery: do not signal that PID');
 });

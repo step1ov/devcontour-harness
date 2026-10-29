@@ -4,7 +4,14 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
-import { changedFiles, closures, defaultBase, selectTests } from '../scripts/affected.mjs';
+import { fileURLToPath } from 'node:url';
+import {
+  changedFiles,
+  closures,
+  defaultBase,
+  selectTests,
+  suiteFiles,
+} from '../scripts/affected.mjs';
 
 /**
  * Выбор `npm run test:affected` на временном дереве: замыкание через barrel
@@ -180,6 +187,35 @@ test('affected: изменения из Git — коммиты от merge-base, 
       'src/later.ts',
       'src/new.ts',
     ]);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('affected: root-src walk and readdir observe sources absent from the barrel', () => {
+  const { root, tests } = fixture();
+  try {
+    for (const [name, source] of [
+      ['root-walk', "walk('src');"],
+      ['root-readdir', "readdirSync(join(root, 'src'));"],
+    ] as const) {
+      const file = join(root, 'tests', name + '.test.ts');
+      writeFileSync(file, source);
+      tests.push(file);
+    }
+    const selected = selectTests(root, ['src/orphan.ts'], tests);
+    assert.equal(selected.full, false);
+    assert.deepEqual([...selected.files.keys()].sort(), [
+      'tests/root-readdir.test.ts',
+      'tests/root-walk.test.ts',
+    ]);
+    const actual = fileURLToPath(new URL('../', import.meta.url)).replace(/\/$/, '');
+    const real = selectTests(actual, ['src/integrations/relay-v2/protocol.ts'], suiteFiles(actual));
+    assert.equal(real.full, false);
+    assert.ok(
+      real.files.has('tests/boundaries.test.ts'),
+      'whole-source boundary check observes the changed source',
+    );
   } finally {
     cleanup(root);
   }
