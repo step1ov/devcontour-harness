@@ -7,6 +7,8 @@ import {
   mkdirSync,
   mkdtempSync,
   realpathSync,
+  readFileSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -133,4 +135,34 @@ test('GT06: обычные пути работают: дерево, его уд�
   assert.equal(await git(bare, 'rev-parse', '--is-bare-repository'), 'true');
   resetGitTrust();
   assert.equal(await git(wt, 'rev-parse', 'HEAD'), r.head());
+});
+
+test('GT07: отключённый fsmonitor не запускает ни hook репозитория, ни программу false на старом Git', () => {
+  const r = repo();
+  const tools = tmp('harness-fsmonitor-');
+  try {
+    const marker = join(tools, 'executed');
+    const hook = join(tools, 'monitor');
+    const trace = join(tools, 'trace.jsonl');
+    writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\n`);
+    chmodSync(hook, 0o755);
+    raw(r.dir, 'config', 'core.fsmonitor', hook);
+    execFileSync('git', hostGitArgs(r.dir, ['status', '--porcelain']), {
+      cwd: r.dir,
+      env: { ...process.env, GIT_TRACE2_EVENT: trace },
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+    assert.equal(existsSync(marker), false, 'hook из конфигурации не исполнен');
+    const children = readFileSync(trace, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { event: string; argv?: string[] })
+      .filter(({ event }) => event === 'child_start')
+      .map(({ argv }) => argv);
+    assert.deepEqual(children, [], 'status не запускает fsmonitor, включая исполняемый false');
+  } finally {
+    rmSync(tools, { recursive: true, force: true });
+    rmSync(r.dir, { recursive: true, force: true });
+  }
 });

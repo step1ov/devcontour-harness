@@ -21,7 +21,9 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
  */
 export const gitHardening = [
   '-c',
-  'core.fsmonitor=false',
+  // Older Git treats 'false' as a hook executable; empty disables the hook
+  // there and is false for versions supporting the built-in fsmonitor.
+  'core.fsmonitor=',
   '-c',
   'core.hooksPath=/dev/null',
   '-c',
