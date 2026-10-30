@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HarnessError, cliDataSchemas, digestOf, type WorkGraph } from '../src/contracts/index.ts';
@@ -494,6 +494,14 @@ test('B10: файл конфигурации с baseline вне защиты п�
     assert.equal(outside.baselineIssue(s.policy, baseDir), undefined);
     await outside.snapshot(join(s.root, 'snapshot'));
     await outside.prepareRun(handle.h);
+    // Файл исчез после загрузки: понятный отказ, не внутренняя ошибка.
+    rmSync(join(s.root, 'connector.json'));
+    assert.match(outside.baselineIssue(s.policy, baseDir) ?? '', /недоступна после загрузки/);
+    await assert.rejects(
+      outside.prepareRun(handle.h),
+      refused('NOT_READY', /недоступна после загрузки/),
+    );
+    assert.match((await outside.check(s.policy, baseDir)).problems.join('; '), /недоступна/);
     outside.close();
 
     // Без baseline расположение файла не ограничено (прежнее поведение).
