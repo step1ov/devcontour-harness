@@ -78,8 +78,9 @@ const h2Commands = [
  * Данные с тех пор расширены только аддитивно — значениями перечней классов
  * отказа и причин остановки `unfinished` (незавершённая работа) и `needs-lead`
  * (пустой результат без механического основания), полем `recheck` записи
- * evidence, пределом области gates `GATE_SCOPE_LIMIT` вместо 20 и полем
- * `checkouts` ответа doctor; без них — те же байты.
+ * evidence, пределом области gates `GATE_SCOPE_LIMIT` вместо 20, полем
+ * `checkouts` ответа doctor и полем `baseline` ответов коннектора; без них —
+ * те же байты.
  */
 const H2_COMMANDS_SHA = '58efd5e554cd5b015538ef1d4e7dd8d20f24205ef24e28c5b27394642bc20e25';
 const H2_DATA_SHA = '95016c62e6e7fb134ab3dcde4aff35679951fe1b9037452bc86846230ffa5682';
@@ -255,6 +256,12 @@ test('H3-01: прежние команды и схемы их данных не 
     if (k === 'properties' && v && typeof v === 'object' && 'checkouts' in v && 'sandbox' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.checkouts;
+      return rest;
+    }
+    // Аддитивное поле ответов коннектора — зависимости, принятые по базовой линии.
+    if (k === 'properties' && v && typeof v === 'object' && 'baseline' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.baseline;
       return rest;
     }
     // Ослабленный предел области gates (20 → предел gates профиля).

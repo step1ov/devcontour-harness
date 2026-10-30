@@ -669,11 +669,19 @@ export const eventsDataSchema = z.strictObject({
   next: z.number().int().min(0),
 });
 
+/** Зависимости, принятые человеком по базовой линии: решение, а не доказательство. */
+const baselineViewSchema = z.strictObject({
+  sha: gitShaSchema,
+  reason: z.string(),
+  tasks: z.array(z.string()),
+});
+
 export const runDataSchema = z.strictObject({
   graphId: idSchema,
   digest: digestSchema,
   /** Граф уже был зарегистрирован этой редакцией: работа продолжена. */
   resumed: z.boolean(),
+  baseline: baselineViewSchema.optional(),
   works: z.array(
     z.strictObject({
       id: idSchema,
@@ -811,6 +819,7 @@ export const sourceSnapshotDataSchema = z.strictObject({
   eligible: z.boolean(),
   problems: z.array(z.string()),
   truncated: z.array(z.string()),
+  baseline: baselineViewSchema.optional(),
   tasks: z.array(
     z.strictObject({
       identity: z.string(),
@@ -846,7 +855,13 @@ export const sourceStatusDataSchema = z.strictObject({
   connector: idSchema,
   provider: providerSchema,
   projectId: z.string(),
-  snapshot: z.strictObject({ revision: digestSchema, graphId: idSchema }).optional(),
+  snapshot: z
+    .strictObject({
+      revision: digestSchema,
+      graphId: idSchema,
+      baseline: baselineViewSchema.optional(),
+    })
+    .optional(),
   ownership: ownershipSchema,
   tasks: z.array(
     z.strictObject({

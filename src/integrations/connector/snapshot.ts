@@ -18,6 +18,7 @@ import {
   type WorkOrder,
 } from '../../contracts/index.ts';
 import {
+  baselineRecord,
   connectorIdOf,
   contextIdOf,
   graphIdOf,
@@ -90,7 +91,15 @@ export interface TaskManifest {
   column: string;
   consistency: { before: string; after: string };
   criteria: { id: string; title: string; mapped: boolean; completed: boolean }[];
-  dependencies: { id: string; key: string; column: string; finished: boolean; inGraph: boolean }[];
+  dependencies: {
+    id: string;
+    key: string;
+    column: string;
+    finished: boolean;
+    inGraph: boolean;
+    /** Основание внешней зависимости: `receipt` доказан, `baseline` принят человеком. */
+    proof?: 'receipt' | 'baseline';
+  }[];
   children: { id: string; key: string; column: string; finished: boolean }[];
   documents: DocumentManifest[];
 }
@@ -115,6 +124,14 @@ export interface SnapshotManifest {
   problems: SnapshotProblem[];
   /** Закреплённые локальные пакеты `tasks[].context`; без них поля нет. */
   localContext?: LocalContextManifest[];
+  /** Зависимости, принятые человеком по базовой линии; без них поля нет. */
+  baseline?: BaselineManifest;
+}
+
+export interface BaselineManifest {
+  sha: string;
+  reason: string;
+  tasks: string[];
 }
 
 export interface LocalContextManifest {
@@ -310,6 +327,7 @@ export function buildSnapshot(input: {
   const sources: ContextSnapshot['sources'] = [];
   const missing: ContextSnapshot['missing'] = [];
   const prerequisites = new Map<string, Prerequisite>();
+  const accepted = new Set<string>();
   const tasks: TaskManifest[] = [];
   /** Какие локальные пакеты у какой задачи (по порядку): часть ревизии набора. */
   const packsByTask: [string, string[]][] = [];
@@ -347,12 +365,20 @@ export function buildSnapshot(input: {
       else mapped.add(found[0]!.id);
     });
 
-    // Зависимости: внутри графа — dependsOn; вне — только с доверенным receipt.
+    // Зависимости: внутри графа — dependsOn; вне — с доверенным receipt или,
+    // если receipt нет, по явной записи базовой линии.
     const dependsOn: string[] = [];
     const deps: TaskManifest['dependencies'] = [];
     for (const dep of read.dependencies) {
       const inGraph = graphTasks.has(dep.id);
-      deps.push({ id: dep.id, key: dep.key, column: dep.column, finished: dep.finished, inGraph });
+      const entry: TaskManifest['dependencies'][number] = {
+        id: dep.id,
+        key: dep.key,
+        column: dep.column,
+        finished: dep.finished,
+        inGraph,
+      };
+      deps.push(entry);
       const depOrder = orderIdOf(config.provider, config.projectId, dep.id);
       if (inGraph) {
         dependsOn.push(depOrder);
@@ -364,12 +390,36 @@ export function buildSnapshot(input: {
       }
       const receipt = input.receiptOf(depOrder);
       if (!receipt) {
-        problem(
-          'DEPENDENCY_UNPROVEN',
-          `Зависимость ${dep.key} в done, но проверяемого receipt этого коннектора нет: статус done не доказывает результат`,
-        );
+        const repositoryId = mapping.repositoryId ?? config.repository.id;
+        const prior = prerequisites.get(depOrder);
+        if (!config.baseline?.tasks.includes(dep.key)) {
+          problem(
+            'DEPENDENCY_UNPROVEN',
+            `Зависимость ${dep.key} в done, но проверяемого receipt этого коннектора нет: статус done не доказывает результат. Если она закрыта до внедрения harness, человек может принять её явно: добавьте ${dep.key} в baseline.tasks конфигурации коннектора (baseline: sha, tasks, reason; docs/connectors.md)`,
+          );
+        } else if (prior && prior.repositoryId !== repositoryId) {
+          problem(
+            'DEPENDENCY_UNPROVEN',
+            `Зависимость ${dep.key} в baseline, но её требуют задачи разных репозиториев (${prior.repositoryId}, ${repositoryId}); baseline — один коммит`,
+          );
+        } else {
+          dependsOn.push(depOrder);
+          entry.proof = 'baseline';
+          accepted.add(dep.key);
+          prerequisites.set(depOrder, {
+            id: depOrder,
+            repositoryId,
+            resultSha: config.baseline.sha,
+            receipt: {
+              kind: 'trusted',
+              issuer: connector,
+              digest: digestOf(baselineRecord(config, dep.key, depOrder, repositoryId)),
+            },
+          });
+        }
         continue;
       }
+      entry.proof = 'receipt';
       dependsOn.push(depOrder);
       prerequisites.set(depOrder, {
         id: depOrder,
@@ -592,6 +642,8 @@ export function buildSnapshot(input: {
     connector,
     tasks: tasks.map((t) => [t.identity, t.semanticDigest]),
     prerequisites: prereqs,
+    // Любая правка базовой линии — новое согласование; без неё ревизия прежняя.
+    ...(config.baseline ? { baseline: digestOf(config.baseline) } : {}),
     // Без локальных пакетов ревизия та же, что до их появления. С ними —
     // содержимое пакетов и их распределение по задачам: перенос пакета между
     // задачами или смена порядка — тоже новое согласование.
@@ -641,6 +693,15 @@ export function buildSnapshot(input: {
     truncated,
     problems,
     ...(input.local?.length ? { localContext: input.local.map(localManifest) } : {}),
+    ...(accepted.size
+      ? {
+          baseline: {
+            sha: config.baseline!.sha,
+            reason: config.baseline!.reason,
+            tasks: [...accepted].sort(),
+          },
+        }
+      : {}),
   };
   return { graph, context, manifest, revision, problems };
 }

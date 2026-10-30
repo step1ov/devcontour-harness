@@ -33,6 +33,8 @@ export function summaryText(input: {
   criteria: CriterionOutcome[];
   completion: string;
   historical?: boolean;
+  /** Зависимости задачи, принятые человеком по базовой линии (не доказаны). */
+  baseline?: { tasks: string[]; sha: string; reason: string };
   redact?: Redactor;
 }): { title: string; body: string } {
   const r = input.result;
@@ -60,6 +62,11 @@ export function summaryText(input: {
       ? [`- Причина: ${r.stopReason.code}: ${r.stopReason.message.slice(0, 500)}`]
       : []),
     `- Снимок постановки: ${input.task.identity} @ ${input.snapshot.revision} (CAS ${input.snapshot.casRevision})`,
+    ...(input.baseline
+      ? [
+          `- Зависимости без доказательства: ${input.baseline.tasks.join(', ')} приняты человеком по базовой линии @ ${shortSha(input.baseline.sha)}: ${input.baseline.reason}`,
+        ]
+      : []),
     '',
     '**Gates**',
     ...(gates.length ? gates : ['- нет записей']),

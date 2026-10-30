@@ -17,7 +17,7 @@ import {
 } from './config.ts';
 import type { HistoryRecorder } from './history.ts';
 import { maskError, redactingTransport } from './redact.ts';
-import { matchCriterion, readFailure, semanticDigest } from './snapshot.ts';
+import { matchCriterion, readFailure, semanticDigest, type SnapshotManifest } from './snapshot.ts';
 import {
   StepConflict,
   StepRetry,
@@ -239,7 +239,20 @@ export class RelaySink implements ResultSink {
             ? 'задача уже завершена другим участником'
             : undefined;
     const identity = `${this.config.provider}:${this.config.projectId}:${read.task.id}`;
-    const base = { casRevision: read.task.revision, taskKey: read.task.key, identity };
+    // Принятое без доказательства остаётся видно в итоге: только этой постановки.
+    const pinned = store.latestSnapshot(result.graphId)?.manifest as SnapshotManifest | undefined;
+    const accepted = pinned?.tasks
+      .find((t) => t.id === read.task.id && t.semanticDigest === digest)
+      ?.dependencies.filter((d) => d.proof === 'baseline')
+      .map((d) => d.key);
+    const base = {
+      casRevision: read.task.revision,
+      taskKey: read.task.key,
+      identity,
+      ...(accepted?.length && pinned?.baseline
+        ? { baseline: { ...pinned.baseline, tasks: accepted } }
+        : {}),
+    };
     if (problem) {
       // Текущая задача не закрывается старым результатом; допустим только явно исторический комментарий.
       const steps =
@@ -504,6 +517,9 @@ export class RelaySink implements ResultSink {
           criteria: (step.input.criteria as CriterionOutcome[] | undefined) ?? [],
           completion: (op.receipt?.completion as string | undefined) ?? op.reason ?? '',
           historical: step.kind === 'historical-comment',
+          ...(step.input.baseline
+            ? { baseline: step.input.baseline as { tasks: string[]; sha: string; reason: string } }
+            : {}),
           redact: this.redact,
         });
         return {

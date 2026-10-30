@@ -87,7 +87,11 @@ SHA-256 канонического JSON (`canonicalJson`: ключи по пор
 Доверие к `trusted` решает `WorkSource.trusts`: `Harness.run({ source })`
 спрашивает источник графа (его `id` обязан совпасть с `graph.source.connector`);
 без источника доверенных receipt нет. В обоих случаях движок проверяет, что
-result SHA доступен в target ref.
+result SHA доступен в target ref. Коннектор задач выдаёт `trusted` и для
+явной записи человека (`baseline`, см. [connectors.md](connectors.md)): форма
+предпосылки та же, происхождение (`proof: 'receipt' | 'baseline'`) записано в
+manifest снимка и в необязательном поле `baseline` ответов `source-snapshot`,
+`source-status` и `run --source`.
 
 ### ExecutionPolicy
 

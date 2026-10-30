@@ -1157,11 +1157,31 @@ export function connectorSuite(backend: SuiteBackend, options: SuiteOptions = {}
             snapD.problems.some((p) => p.includes('DEPENDENCY_UNPROVEN')),
             snapD.problems.join('; '),
           );
+          assert.ok(
+            snapD.problems.some((p) => p.includes('baseline.tasks')),
+            'отказ называет выход: явное решение человека',
+          );
           const writer = s.calls.writer;
           await assert.rejects(connD.run(opened.h, { author: 'claude' }), refusedWith('NOT_READY'));
           assert.equal(s.calls.writer, writer);
         } finally {
           connD.close();
+        }
+        // Человек принимает задачу явно: ключ backend, полный SHA, причина.
+        const sha = s.target();
+        cfgD.baseline = { sha, tasks: [c.key], reason: 'Closed before adoption' };
+        const connE = await openConnector(parseConfig(cfgD, s.root), {
+          stateDir: s.state,
+          transport: s.project.transport(),
+        });
+        try {
+          const snapE = await connE.snapshot(join(s.root, 'snapshot-e'));
+          assert.equal(snapE.eligible, true, snapE.problems.join('; '));
+          const accepted = snapE.snapshot.graph.prerequisites[0]!;
+          assert.equal(accepted.resultSha, sha);
+          assert.equal(await connE.source.trusts(accepted), true, 'ключ разрешён backend');
+        } finally {
+          connE.close();
         }
       } finally {
         await s.cleanup();
