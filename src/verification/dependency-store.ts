@@ -25,9 +25,16 @@ import { checkoutPath, type CheckoutRoot } from '../environment/checkout-root.ts
 import { snapshotLimit } from '../environment/isolation.ts';
 import type { executionEnvironment } from '../environment/lifecycle.ts';
 import { osTool } from '../environment/os-tools.ts';
-import { command, git } from '../environment/process.ts';
+import { command, gitOutput, processStart } from '../environment/process.ts';
 import { ResourcePool, resourceKey } from '../environment/resources.ts';
-import { defaultProbe, PROBE_TIMEOUT_MS } from '../toolchains/probe.ts';
+import {
+  declaredManagerVersion,
+  defaultProbe,
+  dependencyStoreSupports,
+  dependencyStoreVersions,
+  PROBE_TIMEOUT_MS,
+  versionOf,
+} from '../toolchains/probe.ts';
 import { runCheck, type Boundary } from './gates.ts';
 
 /**
@@ -38,8 +45,8 @@ import { runCheck, type Boundary } from './gates.ts';
  * Граница доверия:
  *
  * - Seed собирается только из lockfile целевой ветки — принятой истории.
- *   Кандидат не запускает сборку и не выбирает, что в неё войдёт: его lockfile
- *   только сравнивается с seed (частичное попадание).
+ *   Сам harness не даёт кандидату запустить сборку или выбрать её содержимое:
+ *   его lockfile только сравнивается с seed (частичное попадание).
  * - Сборка идёт в песочнице проверок с её `isolation.domains`, в каталоге из
  *   одного lockfile: `.npmrc`, `.pnpmfile.cjs` и `pnpm-workspace.yaml` проекта
  *   туда не попадают, и его хуки не исполняются.
@@ -52,6 +59,12 @@ import { runCheck, type Boundary } from './gates.ts';
  *   дерева seed. Несовпадение — отказ от seed с причиной в квитанции.
  * - Байты, докачанные менеджером при частичном попадании, защищены не seed, а
  *   lockfile: в дереве кандидата они доверены не больше, чем `node_modules`.
+ *
+ * Условие границы: шаги `prepare` и `lifecycle` идут на хосте вне песочницы, а на
+ * integration — над слитым деревом. Если они исполняют код кандидата (скрипт из
+ * репозитория), он работает с правами controller и может изменить seed и базу
+ * закреплений: граница seed держится только там, где эти шаги кода кандидата не
+ * исполняют. `doctor` предупреждает о хранилище рядом с непустым `prepare`.
  *
  * Отсутствие seed, отказ сборки и частичное попадание сводятся к обычной
  * установке: хранилище — ускорение, и проверка из-за него не падает.
@@ -67,6 +80,8 @@ interface Manager {
   fetch(store: string): string[];
   /** Окружение процессов checkout: менеджер берёт хранилище именно отсюда. */
   env(store: string): NodeJS.ProcessEnv;
+  /** Отказ сборки, который повторится на том же lockfile при любой сети. */
+  permanent: RegExp;
   /** Окружение сборки: конфигурация и кэш хоста в seed не попадают. */
   buildEnv(work: string): NodeJS.ProcessEnv;
   buildFiles: Record<string, string>;
@@ -86,6 +101,8 @@ const managers: Record<DependencyStorePolicy['manager'], Manager> = {
       '--store-dir=' + store,
     ],
     env: (store) => ({ npm_config_store_dir: store }),
+    // Патчи лежат в репозитории, а сборка видит только lockfile.
+    permanent: /ERR_PNPM_(?:PATCH_NOT_FOUND|BROKEN_LOCKFILE|LOCKFILE_BREAKING_CHANGE)/,
     buildEnv: (work) => ({
       npm_config_userconfig: join(work, 'npmrc'),
       npm_config_cache_dir: join(work, 'cache'),
@@ -106,8 +123,11 @@ const CLONE_BATCH_DEPTH = 3;
 const FAILED_BUILD_COOLDOWN_MS = 10 * 60 * 1000;
 /** Запас свободного места поверх размера seed при обычном копировании. */
 const COPY_HEADROOM = 1.1;
-/** Ожидание чужой сборки дольше её предела: сверка seed идёт уже после неё. */
-const LOCK_MARGIN_MS = 60000;
+/**
+ * Какую долю остатка времени фазы могут занять сборка и ожидание чужой сборки:
+ * только эти шаги зависят от сети. Остальное время — работе, которая её ждёт.
+ */
+const STORE_TIME_SHARE = 1 / 3;
 
 export interface StoreContext {
   policy: Pick<ExecutionPolicy, 'isolation'>;
@@ -117,6 +137,8 @@ export interface StoreContext {
   /** Граница сборки seed — та же, что у проверок этого контура. */
   boundary: Pick<Boundary, 'hidden' | 'checkouts'>;
   resourceDatabase: string;
+  /** Момент (ms), когда истекает время фазы; от остатка считается бюджет хранилища. */
+  deadline: number;
 }
 
 export interface StoreReceipt {
@@ -166,7 +188,11 @@ interface Store {
   manager: Manager;
   root: string;
   execution: Execution;
+  /** Отмена попытки или оператора: она одна прерывает фазу. */
+  outer: AbortSignal;
+  /** `outer` и бюджет хранилища: его истечение — промах, а не отказ фазы. */
   signal: AbortSignal;
+  budgetMs: number;
   logDir: string;
   identity: Identity;
   receipt: Pick<StoreReceipt, 'refused' | 'built'> & { reason?: string };
@@ -228,9 +254,10 @@ class SeedRefused extends Error {}
 
 async function fingerprint(root: string) {
   const list = await regularFiles(root);
-  const files: Manifest['files'] = {};
+  // Map, а не объект: файл `__proto__` не должен исчезнуть из отпечатка.
+  const files = new Map<string, Manifest['files'][string]>();
   await within(list, FILE_CONCURRENCY, async (f) => {
-    files[f.rel] = [sha256(await readFile(join(root, f.rel))), f.mode];
+    files.set(f.rel, [sha256(await readFile(join(root, f.rel))), f.mode]);
   });
   return { files, bytes: list.reduce((sum, f) => sum + f.size, 0) };
 }
@@ -239,13 +266,11 @@ async function fingerprint(root: string) {
 async function assertMatches(root: string, manifest: Manifest) {
   const { files } = await fingerprint(root);
   const expected = Object.keys(manifest.files);
-  if (Object.keys(files).length !== expected.length)
-    throw new SeedRefused(
-      `набор файлов изменён: ${Object.keys(files).length} вместо ${expected.length}`,
-    );
+  if (files.size !== expected.length)
+    throw new SeedRefused(`набор файлов изменён: ${files.size} вместо ${expected.length}`);
   for (const rel of expected) {
     const [hash, mode] = manifest.files[rel]!;
-    const found = files[rel];
+    const found = files.get(rel);
     if (!found) throw new SeedRefused(`нет файла ${rel}`);
     if (found[0] !== hash) throw new SeedRefused(`изменено содержимое ${rel}`);
     if (found[1] !== mode) throw new SeedRefused(`изменены права ${rel}`);
@@ -259,6 +284,13 @@ export const storeTree = {
    * путей. Seed больше неё превратил бы ускорение в отказ каждой проверки.
    */
   maxFiles: Math.floor(snapshotLimit * 0.75),
+  /**
+   * Предел элементов checkout вместе с копией seed. Запас — на то, что проверки
+   * допишут в дерево после развёртывания.
+   */
+  maxEntries: Math.floor(snapshotLimit * 0.9),
+  /** Запись `.gitignore` хранилища; тест подменяет её, чтобы проверить отказ. */
+  ignore: (dest: string) => writeFile(join(dest, '.gitignore'), '*\n'),
   /**
    * Том клонирует файлы. `cp -c` на другом томе молча копирует, поэтому способ
    * выясняется заранее: от него зависит проверка свободного места.
@@ -318,6 +350,20 @@ export const storeTree = {
     );
   },
 };
+
+/** Элементы дерева вне `node_modules` и `.git`: столько же насчитает сверка защищённых путей. */
+async function treeEntries(root: string) {
+  let count = 0;
+  const walk = async (dir: string) => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name === '.git') continue;
+      count++;
+      if (entry.isDirectory()) await walk(join(dir, entry.name));
+    }
+  };
+  await walk(root);
+  return count;
+}
 
 /** Развернуть seed в `to` и сверить результат; способ — клон, иначе копия. */
 async function place(seed: Seed, to: string, signal: AbortSignal) {
@@ -389,7 +435,10 @@ async function newestSeed(s: Store) {
   const seeds: Seed[] = [];
   for (const key of await seedKeys(s)) {
     const seed = await readSeed(s, key);
-    if (seed && sameIdentity(seed.manifest.identity, s.identity)) seeds.push(seed);
+    // Ключ содержит формат, но основа выбирается перебором: seed другого формата
+    // не подходит и основой.
+    if (seed?.manifest.format === FORMAT && sameIdentity(seed.manifest.identity, s.identity))
+      seeds.push(seed);
   }
   return seeds.sort((a, b) => b.manifest.builtAt.localeCompare(a.manifest.builtAt))[0];
 }
@@ -398,8 +447,14 @@ async function newestSeed(s: Store) {
  * Эксклюзивная секция сборки между процессами: аренда `ResourcePool`, брошенная
  * упавшим процессом снимается штатным `clearAbandoned`. Корректность на ней не
  * держится (публикация атомарна): она только не даёт качать одно и то же дважды.
- * Истёк срок ожидания — `undefined`.
+ * Живую аренду не отнимает ни срок, ни бюджет. Истёк бюджет — `undefined`.
+ *
+ * В `owner` записан момент запуска владельца: pid после перезапуска контейнера
+ * занимает другой процесс, и `clearAbandoned` по одному pid ждал бы вечно.
+ * Запись своя у этой аренды, поведение других ресурсов не меняется.
  */
+const LEASE_OWNER = 'dependency-store-started:';
+
 async function exclusive<T>(s: Store, work: () => Promise<T>): Promise<T | undefined> {
   const resource = {
     id: 'dependency-store',
@@ -408,20 +463,38 @@ async function exclusive<T>(s: Store, work: () => Promise<T>): Promise<T | undef
   };
   const key = resourceKey(resource);
   const token = randomUUID();
-  const deadline = Date.now() + s.spec.timeoutMs + LOCK_MARGIN_MS;
+  const owner = LEASE_OWNER + ((await processStart(process.pid)) ?? '');
+  const compared = new Set<string>();
   const leases = new ResourcePool(s.ctx.resourceDatabase);
   try {
-    while (!leases.tryAcquire([resource], s.root, token, s.spec.timeoutMs + LOCK_MARGIN_MS)) {
+    while (!leases.tryAcquire([resource], owner, token, s.budgetMs)) {
       const lease = leases.list().find((l) => l.key === key);
-      if (lease)
+      if (lease) {
         try {
           leases.clearAbandoned(key, lease.token);
           continue;
         } catch {
-          /* Владелец жив (или аренда уже снята): ждём. */
+          /* Процесс с этим pid есть (или аренда уже снята): чей он — ниже. */
         }
-      if (Date.now() > deadline) return undefined;
-      await delay(200, undefined, { signal: s.signal });
+        const started = lease.owner.startsWith(LEASE_OWNER)
+          ? lease.owner.slice(LEASE_OWNER.length)
+          : '';
+        if (started && !compared.has(lease.token)) {
+          compared.add(lease.token);
+          const actual = await processStart(lease.pid);
+          // Сравнить не с чем — владелец считается живым.
+          if (actual && actual !== started) {
+            leases.release(lease.token);
+            continue;
+          }
+        }
+      }
+      try {
+        await delay(200, undefined, { signal: s.signal });
+      } catch (error) {
+        if (s.outer.aborted) throw error;
+        return undefined;
+      }
     }
     return await work();
   } finally {
@@ -432,15 +505,31 @@ async function exclusive<T>(s: Store, work: () => Promise<T>): Promise<T | undef
 
 const failedMark = (s: Store, key: string) => join(s.root, 'failed', key);
 
-async function cooling(s: Store, key: string) {
-  const st = await stat(failedMark(s, key)).catch(() => undefined);
-  return st !== undefined && Date.now() - st.mtimeMs < FAILED_BUILD_COOLDOWN_MS;
+interface FailedBuild {
+  reason: string;
+  /** Повторится на том же lockfile: сборка не идёт, пока он не изменится. */
+  permanent: boolean;
 }
 
-async function markFailed(s: Store, key: string, reason: string) {
+/** Действующая пометка отказа сборки этого ключа. */
+async function failedBuild(s: Store, key: string) {
+  const path = failedMark(s, key);
+  const raw = await readFile(path, 'utf8').catch(() => undefined);
+  if (raw === undefined) return undefined;
+  const mark = JSON.parse(raw) as FailedBuild;
+  if (mark.permanent) return mark;
+  const st = await stat(path).catch(() => undefined);
+  return st && Date.now() - st.mtimeMs < FAILED_BUILD_COOLDOWN_MS ? mark : undefined;
+}
+
+const failedReason = (mark: FailedBuild) =>
+  (mark.permanent ? 'сборка этого lockfile невозможна: ' : 'недавняя сборка не удалась: ') +
+  mark.reason;
+
+async function markFailed(s: Store, key: string, reason: string, permanent = false) {
   s.receipt.reason = reason;
   await mkdir(join(s.root, 'failed'), { recursive: true });
-  await writeFile(failedMark(s, key), reason);
+  await writeFile(failedMark(s, key), JSON.stringify({ reason, permanent }));
 }
 
 /** Один проход сборки в каталоге `work`; итог — дерево с отпечатком или причина отказа. */
@@ -452,7 +541,7 @@ async function fetchInto(s: Store, work: string, lock: string, settings: string,
   await writeFile(join(project, s.spec.lockfile.split('/').at(-1)!), lock + '\n');
   for (const [name, text] of Object.entries(s.manager.buildFiles))
     await writeFile(join(name === 'package.json' ? project : work, name), text);
-  if (base) await place(base, store, s.signal);
+  if (base) await place(base, store, s.outer);
   const result = await runCheck(
     { config: s.ctx.policy },
     {
@@ -461,7 +550,7 @@ async function fetchInto(s: Store, work: string, lock: string, settings: string,
       env: { ...s.execution.env, ...s.manager.buildEnv(work) },
       redact: s.execution.redact,
       signal: s.signal,
-      timeoutMs: s.spec.timeoutMs,
+      timeoutMs: s.budgetMs,
       write: [work],
       readable: [],
       controller: s.ctx.boundary.hidden,
@@ -474,14 +563,26 @@ async function fetchInto(s: Store, work: string, lock: string, settings: string,
     join(s.logDir, 'dependency-store.log'),
     s.execution.redact(result.stdout + '\n' + result.stderr),
   );
-  if (result.code || result.timedOut)
-    throw new Error(
-      `сборка seed: код ${result.code}${result.timedOut ? ', предел времени' : ''}: ${s.execution
-        .redact(result.stderr || result.stdout)
-        .trim()
-        .slice(-500)}`,
+  // Прерванный менеджер мог выйти и без кода ошибки: его store не итог сборки.
+  if (result.code || result.timedOut || s.signal.aborted) {
+    const output = s.execution.redact(result.stderr || result.stdout).trim();
+    throw new BuildFailed(
+      `сборка seed: код ${result.code}${result.timedOut ? ', предел времени' : ''}: ${output.slice(-500)}`,
+      !result.timedOut &&
+        !s.signal.aborted &&
+        s.manager.permanent.test(result.stdout + result.stderr),
     );
+  }
   return { store, ...(await fingerprint(store)) };
+}
+
+class BuildFailed extends Error {
+  constructor(
+    message: string,
+    readonly permanent: boolean,
+  ) {
+    super(message);
+  }
 }
 
 /** Сборка seed и атомарная публикация; отказ — причина и пометка, не исключение. */
@@ -506,15 +607,16 @@ async function buildSeed(s: Store, key: string, lock: string, lockSha256: string
       if (built.bytes <= s.spec.maxBytes || !base) break;
       base = undefined;
     }
-    if (built.bytes > s.spec.maxBytes) {
-      await markFailed(s, key, `seed ${built.bytes} байт больше предела ${s.spec.maxBytes}`);
-      return undefined;
-    }
-    const files = Object.keys(built.files).length;
-    if (files > storeTree.maxFiles) {
-      await markFailed(s, key, `seed из ${files} файлов больше предела ${storeTree.maxFiles}`);
-      return undefined;
-    }
+    if (built.bytes > s.spec.maxBytes)
+      throw new BuildFailed(`seed ${built.bytes} байт больше предела ${s.spec.maxBytes}`, true);
+    if (built.files.size > storeTree.maxFiles)
+      throw new BuildFailed(
+        `seed из ${built.files.size} файлов больше предела ${storeTree.maxFiles}`,
+        true,
+      );
+    // Менеджер мог выйти с кодом 0 и ничего не сохранить: такой seed не ускоряет
+    // ничего, а выглядел бы попаданием.
+    if (!built.files.size) throw new BuildFailed('менеджер не сохранил ни одного файла', true);
     const manifest: Manifest = {
       format: FORMAT,
       key,
@@ -522,7 +624,7 @@ async function buildSeed(s: Store, key: string, lock: string, lockSha256: string
       lockSha256,
       builtAt: new Date().toISOString(),
       bytes: built.bytes,
-      files: built.files,
+      files: Object.fromEntries(built.files),
     };
     const raw = JSON.stringify(manifest);
     const staged = join(tmp, 'seed');
@@ -533,13 +635,24 @@ async function buildSeed(s: Store, key: string, lock: string, lockSha256: string
     // Закрепление раньше публикации: читатель не застаёт незакреплённый seed.
     pool(s, (p) => p.setSeedPin(s.root, key, sha256(raw)));
     await rename(staged, join(s.root, 'seeds', key));
-    await rm(failedMark(s, key), { force: true });
+    // Новый seed значит новый lockfile: прежние отказы к нему не относятся.
+    await rm(join(s.root, 'failed'), { recursive: true, force: true });
     s.receipt.built = true;
     await collect(s, key);
     return { key, store: join(s.root, 'seeds', key, 'store'), manifest };
   } catch (error) {
-    if (s.signal.aborted) throw error;
-    await markFailed(s, key, error instanceof Error ? error.message : String(error));
+    if (s.outer.aborted) throw error;
+    await markFailed(
+      s,
+      key,
+      s.signal.aborted
+        ? `бюджет хранилища ${s.budgetMs} мс истёк`
+        : error instanceof Error
+          ? error.message
+          : String(error),
+      // Истёкший бюджет говорит о сети, а не о lockfile: сборка ещё будет.
+      error instanceof BuildFailed && error.permanent && !s.signal.aborted,
+    );
     return undefined;
   } finally {
     await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
@@ -582,7 +695,7 @@ async function collect(s: Store, current: string) {
 
 /** Точный seed целевой ветки (собирается при нужде), иначе свежий seed той же среды. */
 async function chooseSeed(s: Store) {
-  const lock = await git(
+  const lock = await gitOutput(
     s.ctx.repoPath(s.repo),
     'show',
     `${s.repo.targetRef}:${s.spec.lockfile}`,
@@ -595,14 +708,18 @@ async function chooseSeed(s: Store) {
   const key = digestOf({ format: FORMAT, identity: s.identity, lockSha256 });
   const exact = await readSeed(s, key);
   if (exact) return exact;
-  if (await cooling(s, key)) {
-    s.receipt.reason =
-      'недавняя сборка не удалась: ' + (await readFile(failedMark(s, key), 'utf8'));
-  } else {
-    const built = await exclusive(
-      s,
-      async () => (await readSeed(s, key)) ?? buildSeed(s, key, lock, lockSha256),
-    );
+  const failed = await failedBuild(s, key);
+  if (failed) s.receipt.reason = failedReason(failed);
+  else {
+    const built = await exclusive(s, async () => {
+      const seed = await readSeed(s, key);
+      if (seed) return seed;
+      // Проверка под арендой: очередь за упавшей сборкой не повторяет её.
+      const refused = await failedBuild(s, key);
+      if (!refused) return buildSeed(s, key, lock, lockSha256);
+      s.receipt.reason = failedReason(refused);
+      return undefined;
+    });
     if (built) return built;
     s.receipt.reason ??= 'не дождались чужой сборки seed';
   }
@@ -615,7 +732,7 @@ async function identityOf(manager: Manager, spec: DependencyStorePolicy, env: No
       defaultProbe(argv, { timeoutMs: PROBE_TIMEOUT_MS, env }),
     ),
   );
-  if (tool!.code || node!.code) throw new Error(`Не найден ${manager.version[0]} или node`);
+  if (tool!.code || node!.code) return undefined;
   return {
     manager: spec.manager,
     version: tool!.stdout.trim(),
@@ -623,6 +740,20 @@ async function identityOf(manager: Manager, spec: DependencyStorePolicy, env: No
     platform: process.platform,
     arch: process.arch,
   };
+}
+
+/** Почему этой версией менеджера хранилище не пользуется, или `undefined`. */
+async function unsupported(identity: Identity, spec: DependencyStorePolicy, cwd: string) {
+  const { from, below } = dependencyStoreVersions[spec.manager];
+  const pinned = await readFile(join(cwd, 'package.json'), 'utf8')
+    .then((raw) => (JSON.parse(raw) as { packageManager?: unknown }).packageManager)
+    .catch(() => undefined);
+  const versions = [
+    versionOf(identity.version) ?? identity.version,
+    declaredManagerVersion(pinned, spec.manager),
+  ].filter((v) => v !== undefined);
+  const wrong = versions.find((v) => !dependencyStoreSupports(spec.manager, v));
+  return wrong && `${spec.manager} ${wrong} вне проверенных версий ${from} … <${below}`;
 }
 
 /** Lockfile checkout: обычный файл внутри дерева или ничего. */
@@ -660,7 +791,7 @@ export async function materializeStore(
   // менеджер всё равно создаёт его здесь, и проект не обязан его игнорировать.
   const seal = async () => {
     await mkdir(dest, { recursive: true });
-    await writeFile(join(dest, '.gitignore'), '*\n');
+    await storeTree.ignore(dest);
     env = manager.env(dest);
     Object.assign(input.execution.env, env);
   };
@@ -672,46 +803,76 @@ export async function materializeStore(
     else if (await lstat(dest).catch(() => undefined))
       summary.reason = `${manager.dir} уже есть в дереве`;
     else {
-      const lock = await checkoutLock(input.cwd, spec.lockfile);
-      if (lock === undefined) summary.reason = `в дереве нет файла ${spec.lockfile}`;
+      const identity = await identityOf(manager, spec, input.execution.env);
+      const refusal = identity
+        ? await unsupported(identity, spec, input.cwd)
+        : `не найден ${manager.version[0]} или node`;
+      // Вне проверенных версий окружение и дерево остаются как без хранилища.
+      if (refusal || !identity) summary.reason = refusal;
       else {
-        const s: Store = {
-          ctx,
-          repo: input.repo,
-          spec,
-          manager,
-          root: ctx.root(input.repo.id),
-          execution: input.execution,
-          signal: input.signal,
-          logDir: input.dir,
-          identity: await identityOf(manager, spec, input.execution.env),
-          receipt: summary,
-        };
-        for (let round = 0; round < 2 && !summary.outcome; round++) {
-          const seed = await chooseSeed(s);
-          if (!seed) break;
-          try {
-            summary.mode = await place(seed, dest, input.signal);
-            await utimes(join(s.root, 'seeds', seed.key, 'manifest.json'), new Date(), new Date());
-            summary.outcome = seed.manifest.lockSha256 === lock ? 'hit' : 'partial';
-            summary.seed = seed.key;
-            summary.files = Object.keys(seed.manifest.files).length;
-            summary.bytes = seed.manifest.bytes;
-          } catch (error) {
-            await rm(dest, { recursive: true, force: true });
-            if (!(error instanceof SeedRefused)) throw error;
-            await refuse(s, seed.key, error.message);
+        const lock = await checkoutLock(input.cwd, spec.lockfile);
+        if (lock === undefined) summary.reason = `в дереве нет файла ${spec.lockfile}`;
+        else {
+          const budgetMs = Math.max(
+            1,
+            Math.floor(Math.min(spec.timeoutMs, (ctx.deadline - Date.now()) * STORE_TIME_SHARE)),
+          );
+          const s: Store = {
+            ctx,
+            repo: input.repo,
+            spec,
+            manager,
+            root: ctx.root(input.repo.id),
+            execution: input.execution,
+            outer: input.signal,
+            signal: AbortSignal.any([input.signal, AbortSignal.timeout(budgetMs)]),
+            budgetMs,
+            logDir: input.dir,
+            identity,
+            receipt: summary,
+          };
+          const present = await treeEntries(input.cwd);
+          for (let round = 0; round < 2 && !summary.outcome; round++) {
+            const seed = await chooseSeed(s);
+            if (!seed) break;
+            const entries = Object.keys(seed.manifest.files).length + present;
+            if (entries > storeTree.maxEntries) {
+              // Копия не влезла бы в сверку защищённых путей: проверка упала бы.
+              summary.reason = `checkout с копией seed — ${entries} элементов, предел ${storeTree.maxEntries}`;
+              break;
+            }
+            try {
+              summary.mode = await place(seed, dest, input.signal);
+              await utimes(
+                join(s.root, 'seeds', seed.key, 'manifest.json'),
+                new Date(),
+                new Date(),
+              );
+              summary.outcome = seed.manifest.lockSha256 === lock ? 'hit' : 'partial';
+              summary.seed = seed.key;
+              summary.files = Object.keys(seed.manifest.files).length;
+              summary.bytes = seed.manifest.bytes;
+            } catch (error) {
+              await rm(dest, { recursive: true, force: true });
+              delete summary.mode;
+              if (!(error instanceof SeedRefused)) throw error;
+              await refuse(s, seed.key, error.message);
+            }
           }
         }
+        await seal();
       }
-      await seal();
     }
   } catch (error) {
     if (input.signal.aborted) throw error;
-    delete summary.mode;
+    // Квитанция не обещает то, чего в дереве уже нет.
+    for (const field of ['outcome', 'mode', 'seed', 'files', 'bytes'] as const)
+      delete summary[field];
     summary.reason = error instanceof Error ? error.message : String(error);
+    env = {};
     await rm(dest, { recursive: true, force: true }).catch(() => undefined);
-    await seal().catch(() => undefined);
+    // Не вышло и это — в дереве ничего не остаётся, как без хранилища.
+    await seal().catch(() => rm(dest, { recursive: true, force: true }).catch(() => undefined));
   }
   const receipt: StoreReceipt = {
     outcome: 'miss',
@@ -720,7 +881,11 @@ export async function materializeStore(
     durationMs: Date.now() - started,
     env,
   };
-  await mkdir(input.dir, { recursive: true });
-  await writeFile(join(input.dir, 'dependency-store.json'), JSON.stringify(receipt, null, 2));
+  // Квитанция — наблюдение, а не условие работы: полный диск не отказ фазы.
+  await mkdir(input.dir, { recursive: true })
+    .then(() =>
+      writeFile(join(input.dir, 'dependency-store.json'), JSON.stringify(receipt, null, 2)),
+    )
+    .catch(() => undefined);
   return receipt;
 }

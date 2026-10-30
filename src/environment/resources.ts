@@ -86,7 +86,8 @@ export class ResourcePool {
   /**
    * Digest манифеста seed зависимостей (`verification/dependency-store.ts`).
    * Лежит здесь, а не рядом с seed: подмена seed вместе с его манифестом не
-   * совпадёт с записью, а песочнице база на запись закрыта.
+   * совпадёт с записью, а песочнице база на запись закрыта. От кода с правами
+   * хоста (`prepare`, `lifecycle`) закрепление не защищает.
    */
   seedPin(root: string, key: string) {
     this.seedPins();

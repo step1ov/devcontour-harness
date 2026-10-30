@@ -125,6 +125,7 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
       ],
     },
     resourceDatabase: ctx.resourceDatabase ?? defaultResourceDatabase(),
+    deadline: Date.now() + ctx.policy.runTimeoutMs,
   };
   await mkdir(root, { recursive: true });
   await mkdir(dirname(cwd), { recursive: true });

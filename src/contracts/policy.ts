@@ -138,7 +138,10 @@ export const dependencyStoreSchema = z.strictObject({
     .int()
     .min(1024 * 1024)
     .default(8 * 1024 * 1024 * 1024),
-  /** Предел сборки seed; проверка, ждущая чужую сборку, ждёт столько же. */
+  /**
+   * Верхний предел сборки seed вместе с ожиданием чужой сборки. Действует ещё и
+   * доля остатка времени фазы: хранилище не расходует время попытки до отказа.
+   */
   timeoutMs: z.number().int().positive().max(3_600_000).default(600000),
 });
 export type DependencyStorePolicy = z.infer<typeof dependencyStoreSchema>;

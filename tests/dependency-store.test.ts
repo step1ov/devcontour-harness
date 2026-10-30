@@ -22,6 +22,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { DatabaseSync } from 'node:sqlite';
 import { executionPolicySchema, type EvidenceRecord } from '../src/contracts/index.ts';
 import { JointRunner } from '../src/engine/joint-runner.ts';
 import { chooseCheckoutRoot } from '../src/environment/checkout-root.ts';
@@ -32,8 +33,9 @@ import {
   isolationSupport,
 } from '../src/environment/isolation.ts';
 import { executionEnvironment } from '../src/environment/lifecycle.ts';
+import { processStart } from '../src/environment/process.ts';
 import { ResourcePool, resourceKey } from '../src/environment/resources.ts';
-import { inspectPolicy } from '../src/toolchains/inspect.ts';
+import { assertToolchainReady, inspectPolicy } from '../src/toolchains/inspect.ts';
 import { resolveExecutable } from '../src/toolchains/probe.ts';
 import {
   dependencyStoreRoot,
@@ -46,6 +48,7 @@ import { components } from './components-fixture.ts';
 import { ready } from './engine-fixture.ts';
 import { example } from './fixtures.ts';
 import { write } from './git-fixture.ts';
+import { knap, propertySetup } from './property-fixture.ts';
 import { approve, greet, implement, runAll, setup, target } from './runner-fixture.ts';
 
 /**
@@ -105,7 +108,7 @@ const TARBALLS = new Map<string, Buffer>(
 
 /** Реестр на 127.0.0.1; `downloads` — успешно отданные tarball, `failNext` — отказать N раз. */
 async function registry(t: TestContext) {
-  const state = { downloads: [] as string[], failNext: 0, delayMs: 0, url: '' };
+  const state = { downloads: [] as string[], failNext: 0, stallNext: 0, delayMs: 0, url: '' };
   const server = createServer((req, res) => {
     const path = decodeURIComponent(req.url ?? '/');
     const body = TARBALLS.get(path);
@@ -116,6 +119,11 @@ async function registry(t: TestContext) {
         return;
       }
       state.downloads.push(path.split('/').at(-1)!);
+      // Реестр, принявший запрос и не отвечающий: сеть, которая не падает, а висит.
+      if (state.stallNext > 0) {
+        state.stallNext--;
+        return;
+      }
       setTimeout(
         () => res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(body),
         state.delayMs,
@@ -155,7 +163,10 @@ async function registry(t: TestContext) {
   });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
   state.url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
-  t.after(() => server.close());
+  t.after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
   return state;
 }
 
@@ -456,6 +467,11 @@ for (const [name, tamper, why] of [
     /набор файлов/,
   ],
   [
+    'файл __proto__',
+    (s: { store: string }) => writeFileSync(join(s.store, '__proto__'), 'подложено'),
+    /набор файлов/,
+  ],
+  [
     'символическая ссылка',
     (s: { store: string }) => {
       const file = casOf(s.store, CONTENT('dep-a', '1.0.0'));
@@ -668,6 +684,71 @@ test(
   },
 );
 
+test(
+  'DS23: pid занят другим процессом — аренда снимается; живой владелец не теряет её ни по сроку, ни по бюджету',
+  { skip: unavailable, timeout: 120000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
+    const database = join(ctx.state, 'resources.sqlite');
+    const root = join(ctx.state, 'dependency-store', ctx.repoPolicy.id);
+    const hold = (owner: string, expires: number) => {
+      const db = new DatabaseSync(database);
+      db.exec(
+        'CREATE TABLE IF NOT EXISTS leases (key TEXT PRIMARY KEY, resource TEXT NOT NULL, owner TEXT NOT NULL, token TEXT NOT NULL, pid INTEGER NOT NULL, expires INTEGER NOT NULL)',
+      );
+      const { key, resource } = leaseRow(root);
+      db.prepare('INSERT INTO leases VALUES (?,?,?,?,?,?)').run(
+        key,
+        resource,
+        owner,
+        'other-token',
+        process.pid,
+        expires,
+      );
+      db.close();
+    };
+    // pid жив, но запущен в другой момент: это другой процесс.
+    hold('dependency-store-started:Thu Jan  1 00:00:00 1970', Date.now() + 3600000);
+    const reused = await ctx.check(ctx.repo.head());
+    gatesPassed(reused);
+    assert.equal(reused.receipt.built, true);
+
+    // Тот же процесс, истёкший срок: аренда живого владельца не отнимается.
+    const live = await contour(
+      reg.url,
+      { 'dep-a': '1.0.0' },
+      {
+        policy: (p) => {
+          p.runTimeoutMs = 9000;
+        },
+      },
+    );
+    const liveRoot = join(live.state, 'dependency-store', live.repoPolicy.id);
+    const started = await processStart(process.pid);
+    const db = new DatabaseSync(join(live.state, 'resources.sqlite'));
+    db.exec(
+      'CREATE TABLE IF NOT EXISTS leases (key TEXT PRIMARY KEY, resource TEXT NOT NULL, owner TEXT NOT NULL, token TEXT NOT NULL, pid INTEGER NOT NULL, expires INTEGER NOT NULL)',
+    );
+    const { key, resource } = leaseRow(liveRoot);
+    db.prepare('INSERT INTO leases VALUES (?,?,?,?,?,?)').run(
+      key,
+      resource,
+      'dependency-store-started:' + started!,
+      'live-token',
+      process.pid,
+      Date.now() - 1000,
+    );
+    db.close();
+    const waited = await live.check(live.repo.head());
+    assert.equal(waited.receipt.outcome, 'miss');
+    assert.match(waited.receipt.reason, /не дождались/);
+    const check = new ResourcePool(join(live.state, 'resources.sqlite'));
+    assert.equal(check.list().length, 1, 'аренда осталась');
+    check.close();
+  },
+);
+
 function leaseRow(root: string) {
   const resource = {
     id: 'dependency-store',
@@ -875,6 +956,7 @@ test(
         repoPath: () => ctx.repo.dir,
         boundary: { hidden: [ctx.state] },
         resourceDatabase: join(ctx.state, 'resources.sqlite'),
+        deadline: Date.now() + 60000,
       },
       {
         repo: ctx.repoPolicy,
@@ -902,38 +984,426 @@ test(
   },
 );
 
-test('DS16: снимок зависимости и проверка потребителя разворачивают своё хранилище', async () => {
-  const ctx = components({
-    chain: true,
-    policy: (p) => {
-      for (const r of p.repositories) r.dependencyStore = { manager: 'pnpm' };
-    },
-  });
-  await ctx.runner.init();
-  ready(ctx.engine, ctx.graph, 'runner-1');
-  await ctx.runner.drain();
-  const work = ctx.engine.read((v) => v.work(ctx.graph.orders[0]!.id)!);
-  assert.equal(work.status, 'done', work.failure);
-  const receipts = readdirSync(ctx.state, { recursive: true })
-    .map(String)
-    .filter((path) => path.endsWith('dependency-store.json'));
-  const at = (pattern: RegExp) => receipts.some((path) => pattern.test(path));
-  assert.ok(at(/dependency-build\/mid\/dependency-store\.json$/), receipts.join('\n'));
-  assert.ok(at(/integration\/consumer\/product\/dependency-store\.json$/), receipts.join('\n'));
-});
+/** Шаг хоста: записать своё хранилище и фазу в журнал вне дерева. */
+const recordStore = (log: string, label: string) => [
+  'node',
+  '-e',
+  `require('fs').appendFileSync(${JSON.stringify(log)},${JSON.stringify(label)}+' '+process.cwd()+' '+process.env.npm_config_store_dir+'\\n')`,
+];
+const storeLines = (log: string) =>
+  readFileSync(log, 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => line.split(' '));
 
-test('DS15: doctor называет отсутствующий lockfile и менеджер хранилища', async () => {
+test(
+  'DS16: снимок зависимости и проверка потребителя получают хранилище своего дерева в окружении команд',
+  { skip: unavailable, timeout: 120000 },
+  async () => {
+    const log = join(realpathSync(mkdtempSync(join(tmpdir(), 'harness-log-'))), 'stores');
+    const ctx = components({
+      chain: true,
+      policy: (p) => {
+        p.isolation = { mode: 'os', domains: [] };
+        for (const r of p.repositories) r.dependencyStore = { manager: 'pnpm' };
+        const mid = p.repositories.find((r: any) => r.id === 'mid');
+        mid.dependencyBuild.unshift({ id: 'record', command: recordStore(log, 'snapshot') });
+        const product = p.repositories.find((r: any) => r.id === 'product');
+        product.prepare = [{ id: 'record', command: recordStore(log, 'consumer') }];
+      },
+    });
+    await ctx.runner.init();
+    ready(ctx.engine, ctx.graph, 'runner-1');
+    await ctx.runner.drain();
+    const work = ctx.engine.read((v) => v.work(ctx.graph.orders[0]!.id)!);
+    assert.equal(work.status, 'done', work.failure);
+    const lines = storeLines(log);
+    for (const label of ['snapshot', 'consumer']) {
+      const row = lines.find((l) => l[0] === label);
+      assert.ok(row, label + ': команда не запускалась');
+      assert.equal(row[2], row[1] + '/.pnpm-store', label);
+    }
+  },
+);
+
+test(
+  'DS21: проверка примера разворачивает хранилище в своём дереве',
+  { skip: unavailable, timeout: 180000 },
+  async () => {
+    const log = join(realpathSync(mkdtempSync(join(tmpdir(), 'harness-log-'))), 'stores');
+    const ctx = propertySetup({
+      writer: [
+        implement({ 'src/knap.mjs': knap.firstThree }),
+        implement({ 'src/knap.mjs': knap.correct }),
+      ],
+      policy: (p: Record<string, any>) => {
+        p.isolation = { mode: 'os', domains: [] };
+        p.repositories[0].dependencyStore = { manager: 'pnpm' };
+        p.repositories[0].prepare = [
+          {
+            id: 'record',
+            command: [
+              'node',
+              '-e',
+              `if(process.env.DEVCONTOUR_PHASE==='case')${recordStore(log, 'case')[2]}`,
+            ],
+          },
+        ];
+      },
+    });
+    await ctx.runner.init();
+    await runAll(ctx);
+    await ctx.runner.submitCase({
+      workId: 'add-greeting',
+      property: 'knapsack-optimal',
+      input: JSON.stringify({ items: [{ w: 1, v: 1 }], cap: 4 }),
+      expected: '1',
+      key: 'store-case',
+    });
+    const [row] = storeLines(log);
+    assert.equal(row![0], 'case');
+    assert.match(row![2]!, /\/\.pnpm-store$/);
+    assert.ok(row![2]!.startsWith(row![1]!), 'хранилище в дереве примера');
+  },
+);
+
+test('DS15: doctor предупреждает, а не останавливает запуск', async () => {
   const ctx = setup({
     scenario: {},
     policy: (p: Record<string, any>) => {
       p.repositories[0].dependencyStore = { manager: 'pnpm' };
+      p.repositories[0].prepare = [{ id: 'build', command: ['node', '--version'] }];
     },
   });
-  const [report] = await inspectPolicy(ctx.policy, ctx.repo.dir);
-  const field = report!.problems.find((x) => x.code === 'LOCKFILE_MISSING');
-  assert.equal(field?.path, 'pnpm-lock.yaml');
-  assert.ok(report!.tools.some((x) => x.name === 'pnpm'));
+  const options = {
+    probe: () =>
+      Promise.resolve({ code: 0, stdout: '12.16.1\n', stderr: '', timedOut: false as const }),
+  };
+  const [report] = await inspectPolicy(ctx.policy, ctx.repo.dir, options);
+  const warned = report!.warnings.map((w) => w.code);
+  assert.ok(warned.includes('LOCKFILE_MISSING'), 'lockfile');
+  assert.equal(report!.problems.filter((x) => x.code === 'LOCKFILE_MISSING').length, 0);
+  const notes = report!.warnings.map((w) => w.message).join('\n');
+  assert.match(notes, /12\.16\.1 вне проверенных версий/);
+  assert.match(notes, /код кандидата/);
+  await assertToolchainReady(ctx.policy, ctx.repo.dir, options);
+
+  const missing = await inspectPolicy(ctx.policy, ctx.repo.dir, { env: { PATH: '/nonexistent' } });
+  assert.ok(missing[0]!.warnings.some((w) => w.code === 'TOOL_MISSING'));
+  assert.equal(missing[0]!.problems.filter((x) => x.message.includes('pnpm')).length, 0);
 });
+
+test(
+  'DS17: lockfile больше предела вывода команды читается целиком; seed без файлов не публикуется',
+  { skip: unavailable, timeout: 120000 },
+  async (t) => {
+    const reg = await registry(t);
+    const lock = await lockFor(reg.url, { 'dep-a': '1.0.0' });
+    const big = '# заполнитель заполнитель\n'.repeat(120000) + lock;
+    assert.ok(big.length > 2_500_000);
+    const ctx = await contour(
+      reg.url,
+      { 'dep-a': '1.0.0' },
+      {
+        files: { 'pnpm-lock.yaml': big },
+      },
+    );
+    const first = await ctx.check(ctx.repo.head());
+    gatesPassed(first);
+    assert.equal(first.receipt.outcome, 'hit', first.receipt.reason);
+    assert.ok(first.receipt.files > 0);
+
+    const empty = await contour(reg.url, {});
+    const r = await empty.check(empty.repo.head());
+    gatesPassed(r);
+    assert.equal(r.receipt.outcome, 'miss');
+    assert.match(r.receipt.reason, /ни одного файла/);
+    assert.equal(existsSync(empty.seeds) ? readdirSync(empty.seeds).length : 0, 0);
+    const again = await empty.check(empty.repo.head());
+    assert.match(again.receipt.reason, /сборка этого lockfile невозможна/);
+  },
+);
+
+test(
+  'DS18: висящий реестр не расходует попытку: сборку ограничивает доля времени, очередь не повторяет отказ',
+  { skip: unavailable, timeout: 180000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(
+      reg.url,
+      { 'dep-a': '1.0.0' },
+      {
+        scenario: { writer: implement(), reviewer: approve() },
+        policy: (p) => {
+          p.runTimeoutMs = 45000;
+        },
+      },
+    );
+    // Настоящая попытка: при `timeoutMs` 10 минут сборка съела бы весь её предел.
+    reg.stallNext = 1;
+    await ctx.runner.init();
+    ready(ctx.engine, ctx.graph, 'runner-1');
+    await ctx.runner.drain();
+    const work = ctx.engine.read((v) => v.work(ctx.graph.orders[0]!.id)!);
+    assert.equal(work.status, 'done', work.failure);
+    const attempts = ctx.engine.read((v) => v.attempts(work.id));
+    assert.equal(attempts.length, 1, 'попытка не потрачена');
+
+    const queue = await contour(reg.url, { 'dep-b': '1.0.0' });
+    const direct = (name: string, budget: number) => {
+      const cwd = join(queue.state, name);
+      queue.repo.git('worktree', 'add', '-q', '--detach', cwd, 'HEAD');
+      return materializeStore(
+        {
+          policy: queue.policy,
+          root: (id) => join(queue.state, 'dependency-store', id),
+          repoPath: () => queue.repo.dir,
+          boundary: { hidden: [queue.state] },
+          resourceDatabase: join(queue.state, 'resources.sqlite'),
+          deadline: Date.now() + budget * 3,
+        },
+        {
+          repo: queue.repoPolicy,
+          cwd,
+          execution: executionEnvironment([queue.policy.environment], {}, process.env),
+          signal: new AbortController().signal,
+          dir: join(queue.state, name + '-out'),
+        },
+      );
+    };
+    reg.downloads.length = 0;
+    reg.stallNext = 10;
+    const started = Date.now();
+    const building = direct('a', 6000);
+    // Вторая проверка встаёт в очередь, когда сборка уже идёт.
+    while (!reg.downloads.length) await new Promise((r) => setTimeout(r, 50));
+    const [first, waiting] = await Promise.all([building, direct('b', 30000)]);
+    assert.equal(first!.outcome, 'miss');
+    assert.match(first!.reason!, /бюджет хранилища/);
+    assert.equal(waiting!.outcome, 'miss');
+    assert.match(waiting!.reason!, /недавняя сборка/);
+    assert.equal(reg.downloads.length, 1, 'ожидавшая проверка сборку не повторила');
+    assert.ok(Date.now() - started < 25000, 'ожидание не заняло бюджет целиком');
+    // Истёкший бюджет — про сеть, а не про lockfile: срок вышел — сборка идёт снова.
+    const marks = join(queue.state, 'dependency-store', queue.repoPolicy.id, 'failed');
+    for (const name of readdirSync(marks)) {
+      assert.equal(JSON.parse(readFileSync(join(marks, name), 'utf8')).permanent, false);
+      const old = new Date(Date.now() - 3600_000);
+      utimesSync(join(marks, name), old, old);
+    }
+
+    // Отмена попытки — единственное, что прерывает фазу.
+    const controller = new AbortController();
+    const cwd = join(queue.state, 'c');
+    queue.repo.git('worktree', 'add', '-q', '--detach', cwd, 'HEAD');
+    const failed = join(queue.state, 'dependency-store', queue.repoPolicy.id, 'failed');
+    rmSync(failed, { recursive: true, force: true });
+    const pending = materializeStore(
+      {
+        policy: queue.policy,
+        root: (id) => join(queue.state, 'dependency-store', id),
+        repoPath: () => queue.repo.dir,
+        boundary: { hidden: [queue.state] },
+        resourceDatabase: join(queue.state, 'resources.sqlite'),
+        deadline: Date.now() + 90000,
+      },
+      {
+        repo: queue.repoPolicy,
+        cwd,
+        execution: executionEnvironment([queue.policy.environment], {}, process.env),
+        signal: controller.signal,
+        dir: join(queue.state, 'c-out'),
+      },
+    );
+    setTimeout(() => controller.abort(new Error('отмена оператора')), 1500);
+    await assert.rejects(pending);
+
+    // Реестр ожил: lockfile не списан, seed собирается.
+    reg.stallNext = 0;
+    const recovered = await direct('rebuilt', 30000);
+    assert.equal(recovered!.outcome, 'hit', recovered!.reason);
+  },
+);
+
+test(
+  'DS19: версия вне проверенных: окружение и дерево как без хранилища, gate проходит',
+  { skip: unavailable, timeout: 120000 },
+  async (t) => {
+    const reg = await registry(t);
+    const bin = realpathSync(mkdtempSync(join(tmpdir(), 'harness-pnpm-')));
+    writeFileSync(
+      join(bin, 'pnpm'),
+      `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 12.16.1; exit 0; fi\nexec ${JSON.stringify(pnpm)} "$@"\n`,
+      { mode: 0o755 },
+    );
+    const noStore = {
+      id: 'no-store',
+      kind: 'check',
+      command: [
+        'node',
+        '-e',
+        `if(process.env.npm_config_store_dir!==undefined){console.error('вмешательство');process.exit(1)}`,
+      ],
+    };
+    const ctx = await contour(
+      reg.url,
+      { 'dep-a': '1.0.0' },
+      {
+        extraGates: [noStore],
+        policy: (p) => {
+          p.environment.values.PATH = bin + ':' + process.env.PATH;
+        },
+      },
+    );
+    const r = await ctx.check(ctx.repo.head(), ['install', 'no-store']);
+    gatesPassed(r);
+    assert.equal(r.receipt.outcome, 'miss');
+    assert.match(r.receipt.reason, /12\.16\.1 вне проверенных версий/);
+    assert.deepEqual(r.receipt.env, {});
+    assert.equal(existsSync(ctx.seeds), false, 'seed не собирался');
+
+    // Версия, закреплённая проектом, важнее найденной в PATH.
+    const pinned = await contour(
+      reg.url,
+      { 'dep-a': '1.0.0' },
+      {
+        extraGates: [noStore],
+        files: {
+          'package.json': JSON.stringify({
+            ...JSON.parse(manifest({ 'dep-a': '1.0.0' })),
+            packageManager: 'pnpm@11.25.0',
+          }),
+        },
+        policy: (p) => {
+          p.environment.values.npm_config_manage_package_manager_versions = 'false';
+        },
+      },
+    );
+    const declared = await pinned.check(pinned.repo.head(), ['no-store']);
+    gatesPassed(declared);
+    assert.match(declared.receipt.reason, /11\.25\.0 вне проверенных версий/);
+  },
+);
+
+test(
+  'DS20: неизбежный отказ сборки не повторяется, пока lockfile не изменится',
+  { skip: unavailable, timeout: 120000 },
+  async (t) => {
+    const reg = await registry(t);
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'harness-patched-')));
+    const deps = { 'dep-a': '1.0.0' };
+    const patch = `diff --git a/index.js b/index.js
+--- a/index.js
++++ b/index.js
+@@ -1 +1 @@
+-${CONTENT('dep-a', '1.0.0').trim()}
++module.exports = 'patched';
+`;
+    const pkg = JSON.stringify({
+      ...JSON.parse(manifest(deps)),
+      pnpm: { patchedDependencies: { 'dep-a@1.0.0': 'patches/dep-a.patch' } },
+    });
+    mkdirSync(join(dir, 'patches'));
+    writeFileSync(join(dir, 'patches', 'dep-a.patch'), patch);
+    writeFileSync(join(dir, 'package.json'), pkg);
+    await promisify(execFile)(
+      'pnpm',
+      ['install', '--lockfile-only', '--ignore-workspace', `--registry=${reg.url}`],
+      { cwd: dir, env: { ...process.env, CI: '' } },
+    );
+    const ctx = await contour(reg.url, deps, {
+      files: {
+        'package.json': pkg,
+        'pnpm-lock.yaml': readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8'),
+        'patches/dep-a.patch': patch,
+      },
+    });
+    const first = await ctx.check(ctx.repo.head());
+    gatesPassed(first);
+    assert.equal(first.receipt.outcome, 'miss');
+    assert.match(first.receipt.reason, /PATCH_NOT_FOUND/);
+    const root = join(ctx.state, 'dependency-store', ctx.repoPolicy.id, 'failed');
+    const old = new Date(Date.now() - 3600_000);
+    for (const name of readdirSync(root)) utimesSync(join(root, name), old, old);
+    const later = await ctx.check(ctx.repo.head());
+    assert.match(later.receipt.reason, /сборка этого lockfile невозможна/);
+  },
+);
+
+test(
+  'DS22: seed другого формата не основа; предел элементов; отказ квитанции и .gitignore не роняют фазу',
+  { skip: unavailable, timeout: 120000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
+    gatesPassed(await ctx.check(ctx.repo.head()));
+    const seed = ctx.seedOf();
+    const path = join(seed.dir, 'manifest.json');
+    const old = JSON.parse(readFileSync(path, 'utf8'));
+    old.format = 0;
+    writeFileSync(path, JSON.stringify(old));
+    const database = join(ctx.state, 'resources.sqlite');
+    const root = join(ctx.state, 'dependency-store', ctx.repoPolicy.id);
+    const pool = new ResourcePool(database);
+    pool.setSeedPin(root, seed.key, createHash('sha256').update(readFileSync(path)).digest('hex'));
+    pool.close();
+    reg.downloads.length = 0;
+    const moved = await ctx.check(await ctx.commit({ 'dep-a': '1.0.0', 'dep-b': '1.0.0' }));
+    gatesPassed(moved);
+    assert.equal(moved.receipt.outcome, 'hit');
+    assert.deepEqual(
+      reg.downloads.sort(),
+      ['dep-a-1.0.0.tgz', 'dep-b-1.0.0.tgz'],
+      'основой стал пустой store, а не seed другого формата',
+    );
+
+    const entries = storeTree.maxEntries;
+    storeTree.maxEntries = 2;
+    t.after(() => {
+      storeTree.maxEntries = entries;
+    });
+    const over = await ctx.check(ctx.repo.head());
+    gatesPassed(over);
+    assert.equal(over.receipt.outcome, 'miss');
+    assert.match(over.receipt.reason, /элементов, предел 2/);
+    storeTree.maxEntries = entries;
+
+    // Каталог квитанции — файл, запись `.gitignore` отказывает: фаза идёт дальше.
+    const cwd = join(ctx.state, 'held');
+    ctx.repo.git('worktree', 'add', '-q', '--detach', cwd, 'HEAD');
+    const blocked = join(ctx.state, 'not-a-dir');
+    writeFileSync(blocked, '');
+    const ignore = storeTree.ignore;
+    storeTree.ignore = () => Promise.reject(new Error('нет места'));
+    t.after(() => {
+      storeTree.ignore = ignore;
+    });
+    const execution = executionEnvironment([ctx.policy.environment], {}, process.env);
+    const receipt = await materializeStore(
+      {
+        policy: ctx.policy,
+        root: (id) => join(ctx.state, 'dependency-store', id),
+        repoPath: () => ctx.repo.dir,
+        boundary: { hidden: [ctx.state] },
+        resourceDatabase: database,
+        deadline: Date.now() + 60000,
+      },
+      {
+        repo: ctx.repoPolicy,
+        cwd,
+        execution,
+        signal: new AbortController().signal,
+        dir: join(blocked, 'x'),
+      },
+    );
+    storeTree.ignore = ignore;
+    assert.equal(receipt!.outcome, 'miss', 'копии нет — квитанция не говорит hit');
+    assert.equal(receipt!.seed, undefined);
+    assert.deepEqual(receipt!.env, {});
+    assert.equal(execution.env.npm_config_store_dir, undefined);
+    assert.equal(existsSync(join(cwd, '.pnpm-store')), false);
+  },
+);
 
 test('DS11: выключено по умолчанию: политика без поля та же, этапа и файлов нет', async () => {
   const parsed = executionPolicySchema.parse(structuredClone(example('policy')));
@@ -947,6 +1417,7 @@ test('DS11: выключено по умолчанию: политика без 
       repoPath: () => ctx.repo.dir,
       boundary: { hidden: [ctx.state] },
       resourceDatabase: join(ctx.state, 'resources.sqlite'),
+      deadline: Date.now() + 60000,
     } satisfies StoreContext,
     {
       repo: ctx.policy.repositories[0]!,

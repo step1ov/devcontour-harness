@@ -88,6 +88,7 @@ export class JointRunner {
     const controller = new AbortController();
     const signal = outer ? AbortSignal.any([outer, controller.signal]) : controller.signal;
     const timer = setTimeout(() => controller.abort(), this.policy.runTimeoutMs);
+    const deadline = Date.now() + this.policy.runTimeoutMs;
     const heartbeat = setInterval(
       () => {
         try {
@@ -221,6 +222,7 @@ export class JointRunner {
                       ...(placement.root ? { checkouts: [placement.root] } : {}),
                     },
                     resourceDatabase: this.options.resourceDatabase ?? defaultResourceDatabase(),
+                    deadline,
                   },
                   {
                     repo,

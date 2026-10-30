@@ -254,6 +254,8 @@ export class Runner {
   }
 
   private placement?: CheckoutRoot;
+  /** Когда истекает текущий предел времени попытки: от остатка считается бюджет хранилища. */
+  private phaseDeadlines = new Map<string, number>();
   /**
    * Действующий корень рабочих деревьев (`checkout-root.ts`): хост
    * показывает его в диагностике. Выбирается один раз на исполнитель.
@@ -267,13 +269,14 @@ export class Runner {
     }));
   }
   /** Хранилище зависимостей: те же корень и граница, что у деревьев попытки. */
-  private storeContext(): StoreContext {
+  private storeContext(attempt: AttemptState): StoreContext {
     return {
       policy: this.policy,
       root: (id) => dependencyStoreRoot(this.checkoutRoot(), this.options.stateDir, id),
       repoPath: (repo) => this.repoPath(repo),
       boundary: this.boundary(),
       resourceDatabase: this.options.resourceDatabase ?? defaultResourceDatabase(),
+      deadline: this.phaseDeadlines.get(attempt.id) ?? Date.now() + this.policy.runTimeoutMs,
     };
   }
   /** Каталог рабочего дерева вида `kind`: вне дерева или прежний в каталоге попыток. */
@@ -451,7 +454,10 @@ export class Runner {
       const attempt = this.engine.claim(this.owner);
       if (!attempt) break;
       const controller = new AbortController();
-      const promise = this.execute(attempt, controller).finally(() => this.jobs.delete(attempt.id));
+      const promise = this.execute(attempt, controller).finally(() => {
+        this.jobs.delete(attempt.id);
+        this.phaseDeadlines.delete(attempt.id);
+      });
       this.jobs.set(attempt.id, { promise, controller });
     }
   }
@@ -827,7 +833,6 @@ export class Runner {
     return false;
   }
 
-  /** Стадия попытки с замером: начало, конец и исход записываются под fencing. */
   /** Хранилище зависимостей checkout до `prepare`; без него этапа нет и в замерах. */
   private async dependencyStore(
     attempt: AttemptState,
@@ -839,10 +844,11 @@ export class Runner {
   ) {
     if (!repo.dependencyStore) return;
     await this.timed(attempt, 'dependency-store', () =>
-      materializeStore(this.storeContext(), { repo, cwd, execution, signal, dir }),
+      materializeStore(this.storeContext(attempt), { repo, cwd, execution, signal, dir }),
     );
   }
 
+  /** Стадия попытки с замером: начало, конец и исход записываются под fencing. */
   private async timed<T>(attempt: AttemptState, stage: string, fn: () => Promise<T>) {
     const id = this.engine.timingStarted(attempt.id, attempt.token, stage);
     try {
@@ -1001,6 +1007,7 @@ export class Runner {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     const rearm = () => {
       clearTimeout(timeout);
+      this.phaseDeadlines.set(attempt.id, Date.now() + this.policy.runTimeoutMs);
       timeout = setTimeout(
         () => controller.abort(new DOMException('Исчерпан лимит времени прогона', 'TimeoutError')),
         this.policy.runTimeoutMs,
@@ -1099,7 +1106,7 @@ export class Runner {
                     : [];
                 }),
               ),
-              store: this.storeContext(),
+              store: this.storeContext(attempt),
             });
             snapshots.push(...dependencies);
             this.engine.dependencies(attempt.id, attempt.token, dependencies);
@@ -1783,7 +1790,7 @@ export class Runner {
           environment: this.options.environment ?? process.env,
           signal,
           overrides: new Map([[provider, { path: cwd, sha }]]),
-          store: this.storeContext(),
+          store: this.storeContext(attempt),
         });
         const execution = this.environmentOf(
           attempt,

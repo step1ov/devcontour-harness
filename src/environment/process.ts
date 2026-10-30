@@ -279,6 +279,37 @@ export function hostGitArgs(cwd: string, args: string[]) {
   assertTrustedCheckout(cwd);
   return [...gitHardening, ...args];
 }
+const gitEnv = () => ({
+  ...process.env,
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_AUTHOR_NAME: 'devcontour-harness',
+  GIT_AUTHOR_EMAIL: 'harness@localhost',
+  GIT_COMMITTER_NAME: 'devcontour-harness',
+  GIT_COMMITTER_EMAIL: 'harness@localhost',
+});
+
+/**
+ * Вывод git целиком. `git` хранит только хвост вывода (предел `command`): для
+ * содержимого файла, которое разбирают, усечение незаметно и опасно.
+ */
+export async function gitOutput(cwd: string, ...args: string[]) {
+  let text = '';
+  const result = await command(['git', ...hostGitArgs(cwd, args)], cwd, {
+    env: gitEnv(),
+    onRawStdout: (chunk) => {
+      text += chunk;
+    },
+  });
+  if (result.code !== 0) throw new Error(`git ${args[0]}: ${result.stderr.trim()}`);
+  return text.trim();
+}
+
+/** Момент запуска процесса в тексте ОС: вместе с pid отличает его от занявшего тот же pid. */
+export async function processStart(pid: number) {
+  const stdout = await output(osTool('ps'), ['-o', 'lstart=', '-p', String(pid)], 10000);
+  return stdout?.trim() || undefined;
+}
+
 export async function git(cwd: string, ...args: string[]) {
   const added = worktreeAddPath(args);
   // Путь убираемого дерева — до удаления: потом настоящий путь уже не узнать.
@@ -286,16 +317,7 @@ export async function git(cwd: string, ...args: string[]) {
     args[0] === 'worktree' && args[1] === 'remove'
       ? worktreeKey(resolve(cwd, args.at(-1)!))
       : undefined;
-  const result = await command(['git', ...hostGitArgs(cwd, args)], cwd, {
-    env: {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: '0',
-      GIT_AUTHOR_NAME: 'devcontour-harness',
-      GIT_AUTHOR_EMAIL: 'harness@localhost',
-      GIT_COMMITTER_NAME: 'devcontour-harness',
-      GIT_COMMITTER_EMAIL: 'harness@localhost',
-    },
-  });
+  const result = await command(['git', ...hostGitArgs(cwd, args)], cwd, { env: gitEnv() });
   if (result.code !== 0)
     throw new Error(`git ${args[0]}: ${result.stderr.trim() || result.stdout.trim()}`);
   if (added) rememberWorktree(resolve(cwd, added));

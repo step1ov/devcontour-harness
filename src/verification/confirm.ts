@@ -372,7 +372,9 @@ async function decide(
       },
       ctx.environment ?? process.env,
     );
-    const signal = AbortSignal.timeout(gate.timeoutMs * 3 + 120000);
+    const limitMs = gate.timeoutMs * 3 + 120000;
+    const deadline = Date.now() + limitMs;
+    const signal = AbortSignal.timeout(limitMs);
     await withEnvironment(
       repo.lifecycle ?? ctx.policy.lifecycle,
       dir,
@@ -390,6 +392,7 @@ async function decide(
             repoPath: (r) => ctx.repoPath(r),
             boundary,
             resourceDatabase: ctx.resourceDatabase ?? defaultResourceDatabase(),
+            deadline,
           },
           { repo, cwd: dir, execution, signal, dir: io },
         );
