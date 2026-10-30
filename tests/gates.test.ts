@@ -489,7 +489,7 @@ test('Compiler diagnostic survives aggregate and warning tails into the next wri
     assert.equal(evidence.passed, false);
     assert.match(evidence.summary, /src\/widget.ts\(33,23\): error TS2742/);
     assert.match(failure.message, /error TS2742/);
-    assert.doesNotMatch(evidence.summary, /npmrc|Summary:/);
+    assert.match(evidence.summary, /npmrc/);
     const { engine } = engineOf();
     ready(engine, graphOf({ a: [] }), 'writer');
     const attempt = engine.claim('writer')!;
@@ -524,7 +524,7 @@ test('Without a compiler diagnostic the existing last-four-lines fallback remain
   assert.equal(evidence.summary, 'Код выхода 2: tail-2 | tail-3 | tail-4 | tail-5');
 });
 
-test('Compiler selection keeps the first and last error per stream, bounded and redacted before clipping', async () => {
+test('Compiler cause precedes the unchanged tail per stream, bounded and redacted', async () => {
   const r = repo();
   const secret = 'synthetic-compiler-secret-5193';
   const { evidence, failure } = await gate(
@@ -540,10 +540,9 @@ test('Compiler selection keeps the first and last error per stream, bounded and 
   assert.equal(failure?.kind, 'gate');
   assert.equal(evidence.exitCode, 3);
   assert.match(evidence.summary, /widget.c:1:2: error:/);
-  assert.match(evidence.summary, /ещё ошибок компилятора: 6/);
+  assert.doesNotMatch(evidence.summary, /widget.c:[2-4]:2/);
   assert.match(evidence.summary, /widget.c:8:2: error:/);
-  assert.doesNotMatch(evidence.summary, /widget.c:[2-7]:2/);
-  assert.ok(evidence.summary.length <= 'Код выхода 3: '.length + 290 * 2 + 3);
+  assert.ok(evidence.summary.length <= 'Код выхода 3: '.length + (141 + 3 + 291) * 2 + 3);
   for (const value of [evidence.summary, failure.message, readFileSync(evidence.log, 'utf8')]) {
     assert.ok(!value.includes(secret));
     assert.ok(!value.includes(secret.slice(0, 10)), 'no secret prefix at clipping boundary');
@@ -557,50 +556,54 @@ const diagnosticOf = async (lines: string[]) => {
   });
   return evidence.summary;
 };
+const noise = ['Found 1 error.', 'Failed', 'WARN one', 'WARN two'];
+const ending = noise.join(' | ');
 
-test('Compiler diagnostic is found in pretty, colored and pnpm recursive output', async () => {
-  const cause = 'src/a.ts:3:7 - error TS2322: Type string is not assignable.';
-  const noise = ['Found 1 error.', 'Failed', 'WARN one', 'WARN two', 'WARN three', 'WARN four'];
+test('Compiler cause is found in pretty, colored and package manager output', async () => {
+  const pretty = 'src/a.ts:3:7 - error TS2322: Type string';
   for (const [first, expected] of [
-    [cause, cause],
+    [pretty, pretty],
     [
-      `\u001b[96msrc/a.ts\u001b[0m:\u001b[93m3\u001b[0m:\u001b[93m7\u001b[0m - \u001b[91merror\u001b[0m\u001b[90m TS2322: \u001b[0mType string`,
-      'src/a.ts:3:7 - error TS2322: Type string',
+      '\u001b[96msrc/a.ts\u001b[0m:\u001b[93m3\u001b[0m:\u001b[93m7\u001b[0m - \u001b[91merror\u001b[0m\u001b[90m TS2322: \u001b[0mType string',
+      pretty,
     ],
-    [`packages/a typecheck: ${cause}`, `packages/a typecheck: ${cause}`],
-    ['src/a.ts(3,7): error TS2322: Type string\r', 'src/a.ts(3,7): error TS2322: Type string'],
+    ['\u001b[01m\u001b[Ksrc/a.c:3:7:\u001b[m\u001b[K error: nope', 'src/a.c:3:7: error: nope'],
+    [`packages/a typecheck: ${pretty}`, `packages/a typecheck: ${pretty}`],
+    [`web:typecheck: ${pretty}`, `web:typecheck: ${pretty}`],
+    ['app/(shop)/page.tsx(3,7): error TS1: x\r', 'app/(shop)/page.tsx(3,7): error TS1: x'],
     ['src/a.c:3: fatal error: missing.h', 'src/a.c:3: fatal error: missing.h'],
   ] as const) {
-    const summary = await diagnosticOf([first, ...noise]);
-    assert.equal(summary, `Код выхода 1: ${expected}`);
+    assert.equal(
+      await diagnosticOf([first, 'filler', 'filler', ...noise]),
+      `Код выхода 1: ${expected} | ${ending}`,
+    );
   }
 });
 
-test('Non-compiler lines keep the tail fallback', async () => {
+test('A compiler line already in the tail is not repeated', async () => {
+  const line = 'src/a.ts(1,1): error TS1: same';
+  assert.equal(
+    await diagnosticOf(['build', line, 'Failed']),
+    `Код выхода 1: build | ${line} | Failed`,
+  );
+});
+
+test('Non-compiler lines leave the tail as it was', async () => {
   for (const line of [
     '12:34:56 ERROR: request failed',
     'localhost:5432: error: connection refused',
-    'ok 1 - reports src/x.ts(1,2): error TS1234: expected text',
     'x'.repeat(500) + ' src/x.ts(1,2): error TS1: too far',
-  ]) {
-    const summary = await diagnosticOf([line, 'not ok 2 - real failure']);
-    assert.match(summary, /not ok 2 - real failure/);
-  }
+  ])
+    assert.equal(await diagnosticOf([line, 'a', 'b', ...noise]), `Код выхода 1: ${ending}`);
 });
 
-test('Compiler progress changes the failure fingerprint', async () => {
-  const errors = (n: number) =>
-    Array.from(
-      { length: n },
-      (_, i) => `src/f${'ab'[i % 2]}${i}.ts(1,1): error TS${1000 + i}: m${'xyzw'[i % 4]}`,
+test('A quoted compiler line cannot hide different failures from the fingerprint', async () => {
+  const quoted = 'src/x.ts(1,2): error TS1234: expected';
+  const run = (name: string) =>
+    diagnosticOf([quoted, 'a', 'b', 'c', 'd', `FAIL t > ${name}`]).then((summary) =>
+      failureFingerprint('gate', summary),
     );
-  const twelve = await diagnosticOf(errors(12));
-  const six = await diagnosticOf(errors(6));
-  assert.notEqual(failureFingerprint('gate', twelve), failureFingerprint('gate', six));
-  assert.equal(
-    await diagnosticOf(['src/a.ts(1,1): error TS1: same', 'src/a.ts(1,1): error TS1: same']),
-    'Код выхода 1: src/a.ts(1,1): error TS1: same',
-  );
+  assert.notEqual(await run('login'), await run('cart'));
 });
 
 test('A long spaced line stays cheap to scan', async () => {

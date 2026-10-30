@@ -184,14 +184,10 @@ export function junitSummary(
   if (!summary.tests) throw new Error('JUnit не содержит выполненных testcases');
   return summary;
 }
-const ansiColor = /\u001b\[[0-9;]*m/g;
-/**
- * Строка компилятора: путь с расширением в начале, после необязательного
- * префикса `каталог скрипт: ` от pnpm -r. Якорь и путь отсекают время в логах,
- * адрес с портом и текст ошибки внутри успешного теста.
- */
+const ansiEscape = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+/** Путь с расширением и координаты, после необязательного префикса `пакет скрипт: `. */
 const compilerError =
-  /^(?:\S+ \S+: )?[^\s:()]+\.[A-Za-z][A-Za-z0-9]{0,4}(?:\(\d+,\d+\): |:\d+(?::\d+)?(?:: | - ))(?:fatal )?error(?: [A-Z]+\d+)?:/;
+  /^(?:\S+(?: \S+)?: )?[^\s:]+?\.[A-Za-z][A-Za-z0-9]{0,9}(?:\(\d+,\d+\): |:\d+(?::\d+)?(?:: | - ))(?:fatal )?error(?: [A-Z]+\d+)?:/;
 /**
  * Короткая выжимка вывода провалившейся проверки.
  *
@@ -199,8 +195,8 @@ const compilerError =
  * доступен, а в отказ попадал только «Код выхода 1». Два разных провала одной
  * проверки выглядели одной причиной — предел одинаковых повторов исчерпывался
  * на несвязанных ошибках, и подсказка повтора не содержала ничего, кроме кода
- * возврата. Берутся ошибки компилятора с координатами, иначе последние
- * содержательные строки обоих потоков: ошибку
+ * возврата. Берутся последние содержательные строки обоих потоков и первая
+ * ошибка компилятора с координатами перед ними: ошибку
  * одни инструменты пишут в stdout, другие в stderr, и одинаковое
  * предупреждение в одном потоке не должно закрывать ошибку в другом. Секреты
  * снимаются тем же redact, что и в логе; объём ограничен.
@@ -209,27 +205,24 @@ function diagnostic(stderr: string, stdout: string, redact?: (value: string) => 
   // У каждого потока свой бюджет: общий лимит, заполняемый по очереди,
   // позволял нескольким длинным строкам одного потока вытеснить ошибку
   // другого. Redact — до обрезки, иначе префикс секрета остаётся.
+  const clip = (line: string) => (line.length > 140 ? line.slice(0, 140) + '…' : line);
   const tail = (text: string) => {
     const lines = text
       .split('\n')
-      .map((line) => (redact ? redact(line) : line).replace(ansiColor, '').trim())
-      .filter(Boolean)
-      .map((line) => (line.length > 140 ? line.slice(0, 140) + '…' : line));
-    // Компилятор печатает причину раньше итогов package manager: хвост
-    // вытеснил бы путь и код ошибки. Проверяется обрезанная строка — найденное
-    // обязано попасть в итог. Последняя ошибка различает прогресс: отпечаток
-    // отказа не видит чисел, а 12 ошибок и 6 с той же первой — разные провалы.
-    const errors = [...new Set(lines.filter((line) => compilerError.test(line)))];
-    if (!errors.length) {
-      const joined = lines.slice(-4).join(' | ');
-      return joined.length > 290 ? '…' + joined.slice(-290) : joined;
-    }
-    const selected =
-      errors.length > 2
-        ? [errors[0], `ещё ошибок компилятора: ${errors.length - 2}`, errors.at(-1)]
-        : errors;
-    const joined = selected.join(' | ');
-    return joined.length > 290 ? joined.slice(0, 289) + '…' : joined;
+      .map((line) => (redact ? redact(line) : line).trim())
+      .filter(Boolean);
+    const last = lines.slice(-4);
+    const joined = last.map(clip).join(' | ');
+    const ending = joined.length > 290 ? '…' + joined.slice(-290) : joined;
+    // Компилятор печатает причину раньше итогов package manager, и хвост её
+    // вытесняет. Первая ошибка дописывается к хвосту, а не заменяет его: отпечаток
+    // отказа различает провалы по хвосту, а распознавание по строке — эвристика.
+    // Проверяется обрезанная строка: это ограничивает разбор и гарантирует, что
+    // найденное попадёт в итог.
+    const cause = lines
+      .map((line) => clip(line.replace(ansiEscape, '')))
+      .find((line, index) => compilerError.test(line) && index < lines.length - last.length);
+    return cause ? cause + ' | ' + ending : ending;
   };
   return [tail(stdout), tail(stderr)].filter(Boolean).join(' | ');
 }
