@@ -16,6 +16,8 @@ import { failureFingerprint } from '../src/contracts/failure.ts';
 import { redactor } from '../src/environment/redaction.ts';
 import { isolationSupport, watchSandboxLog } from '../src/environment/isolation.ts';
 import { TaskFailure } from '../src/engine/failure.ts';
+import { previousAttempts } from '../src/engine/prompt.ts';
+import { engineOf, graphOf, ready } from './engine-fixture.ts';
 import {
   junitSummary,
   prepareReportPath,
@@ -468,4 +470,76 @@ test('Текст провала из отчёта проходит тот же r
   const stored = JSON.stringify(evidence) + failure!.message + readFileSync(evidence.log, 'utf8');
   for (const piece of [secret, secret.slice(0, 12)])
     assert.ok(!stored.includes(piece), `нигде нет «${piece}»`);
+});
+
+test('Compiler diagnostic survives aggregate and warning tails into the next writer history', async () => {
+  const r = repo();
+  const primary =
+    'src/widget.ts(33,23): error TS2742: A portable return type annotation is necessary.';
+  for (const stream of ['log', 'error']) {
+    const { evidence, failure } = await gate(r.dir, r.head(), {
+      command: nodeGate(
+        `console.${stream}(${JSON.stringify(primary)});` +
+          `for(let i=0;i<8;i++)console.${stream}("Summary: 1 fails, 8 passes");` +
+          `console.${stream}("WARN Issue while reading '/synthetic/home/.npmrc': EPERM");process.exit(1)`,
+      ),
+    });
+    assert.equal(failure?.kind, 'gate');
+    assert.equal(evidence.exitCode, 1);
+    assert.equal(evidence.passed, false);
+    assert.match(evidence.summary, /src\/widget.ts\(33,23\): error TS2742/);
+    assert.match(failure!.message, /error TS2742/);
+    assert.doesNotMatch(evidence.summary, /npmrc|Summary:/);
+    const { engine } = engineOf();
+    ready(engine, graphOf({ a: [] }));
+    const attempt = engine.claim('writer')!;
+    const history = previousAttempts(
+      [
+        {
+          ...attempt,
+          id: 'previous',
+          error: failure!.message,
+          evidence: [{ ...evidence, id: 'e', runId: 'previous', createdAt: attempt.startedAt }],
+        },
+      ],
+      'next',
+    );
+    assert.match(history[0].error!, /TS2742/);
+    assert.match(history[0].evidence[0].summary, /src\/widget.ts\(33,23\): error TS2742/);
+  }
+});
+
+test('Without a compiler diagnostic the existing last-four-lines fallback remains', async () => {
+  const r = repo();
+  const { evidence } = await gate(r.dir, r.head(), {
+    command: nodeGate(
+      `console.log('earliest');for(let i=1;i<=5;i++)console.log('tail-'+i);process.exit(2)`,
+    ),
+  });
+  assert.equal(evidence.summary, 'Код выхода 2: tail-2 | tail-3 | tail-4 | tail-5');
+});
+
+test('Compiler selection keeps two earliest errors per stream, bounded and redacted before clipping', async () => {
+  const r = repo();
+  const secret = 'synthetic-compiler-secret-5193';
+  const { evidence, failure } = await gate(
+    r.dir,
+    r.head(),
+    {
+      command: nodeGate(
+        `for(const stream of ['log','error'])for(let i=1;i<=8;i++)console[stream]('src/widget.c:'+i+':2: error: '+'x'.repeat(90)+process.env.SECRET+'z'.repeat(500));process.exit(3)`,
+      ),
+    },
+    secret,
+  );
+  assert.equal(failure?.kind, 'gate');
+  assert.equal(evidence.exitCode, 3);
+  assert.match(evidence.summary, /widget.c:1:2: error:/);
+  assert.match(evidence.summary, /widget.c:2:2: error:/);
+  assert.doesNotMatch(evidence.summary, /widget.c:[3-8]:2/);
+  assert.ok(evidence.summary.length <= 'Код выхода 3: '.length + 290 * 2 + 3);
+  for (const value of [evidence.summary, failure!.message, readFileSync(evidence.log, 'utf8')]) {
+    assert.ok(!value.includes(secret));
+    assert.ok(!value.includes(secret.slice(0, 10)), 'no secret prefix at clipping boundary');
+  }
 });
