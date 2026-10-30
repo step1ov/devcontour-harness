@@ -412,38 +412,39 @@ test('tasks[].context: ответы всех команд коннектора �
   }
 });
 
-test('tasks[].context: пакет вне договора источника виден в снимке и source-check; запуск отказывает до runtime', async () => {
-  const s = await scenario(fakeSuiteBackend(), {
-    config: (c) => withContext(c, ['controller-mode']),
+for (const [title, extras, name, cause] of [
+  ['слишком много файлов', 30, 'note.md', 'files'],
+  ['имя файла вне договора', 0, 'bad*name.md', 'bad*name.md'],
+] as const)
+  test(`tasks[].context: ${title} — пакет виден в снимке и source-check; запуск отказывает до runtime`, async () => {
+    const s = await scenario(fakeSuiteBackend(), {
+      config: (c) => withContext(c, ['controller-mode']),
+    });
+    try {
+      const dir = pack(s.root);
+      for (let i = 0; i < extras; i++) writeFileSync(join(dir, `extra-${i}.md`), 'x\n');
+      writeFileSync(join(dir, name), 'x\n');
+      const o = await s.open();
+      const snap = await o.connector.snapshot(join(s.root, 'snap'));
+      assert.equal(snap.eligible, false);
+      assert.ok(
+        snap.problems.some(
+          (p) => /LIMIT_EXCEEDED/.test(p) && p.includes('controller-mode/' + cause),
+        ),
+        snap.problems.join('; '),
+      );
+      const report = await o.connector.check();
+      assert.ok(report.problems.some((p: string) => p.includes('controller-mode/' + cause)));
+      await assert.rejects(
+        () => o.connector.prepareRun(o.h),
+        (e: unknown) => e instanceof HarnessError && e.code === 'NOT_READY',
+      );
+      assert.equal(s.calls.writer, 0);
+      o.close();
+    } finally {
+      await s.cleanup();
+    }
   });
-  try {
-    const dir = pack(s.root);
-    for (let i = 0; i < 30; i++) writeFileSync(join(dir, `extra-${i}.md`), 'x\n');
-    writeFileSync(join(dir, 'bad*name.md'), 'x\n');
-    const o = await s.open();
-    const snap = await o.connector.snapshot(join(s.root, 'snap'));
-    assert.equal(snap.eligible, false);
-    const named = (p: string) => /LIMIT_EXCEEDED/.test(p) && p.includes('controller-mode/');
-    assert.ok(
-      snap.problems.some((p) => named(p) && p.includes('files')),
-      snap.problems.join('; '),
-    );
-    assert.ok(
-      snap.problems.some((p) => named(p) && p.includes('bad*name.md')),
-      snap.problems.join('; '),
-    );
-    const report = await o.connector.check();
-    assert.ok(report.problems.some((p: string) => p.includes('controller-mode/bad*name.md')));
-    await assert.rejects(
-      () => o.connector.prepareRun(o.h),
-      (e: unknown) => e instanceof HarnessError && e.code === 'NOT_READY',
-    );
-    assert.equal(s.calls.writer, 0);
-    o.close();
-  } finally {
-    await s.cleanup();
-  }
-});
 
 test('снимок: граф, не собранный из данных задач, — NOT_READY с причиной и полем, а не ZodError', () => {
   const config = parseConfig(
