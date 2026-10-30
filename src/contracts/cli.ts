@@ -310,6 +310,22 @@ export const cliCommands = {
     ],
     refusals: ['NOT_FOUND', 'REVISION_CONFLICT'],
   },
+  'worktree-cleanup': {
+    description:
+      'Убрать рабочие деревья закончившихся попыток: ветки и артефакты остаются, неподтверждённые правки сохраняются патчем в артефактах попытки; идущие и восстановимые попытки отказываются поимённо; модель не вызывается',
+    writes: true,
+    idempotency: 'Повтор не находит уже убранных деревьев и ничего не меняет',
+    args: [
+      state,
+      {
+        name: '--dry-run',
+        value: 'flag',
+        required: false,
+        description: 'Только показать, что было бы убрано и почему отказано; ничего не пишет',
+      },
+    ],
+    refusals: ['NOT_FOUND'],
+  },
   cleanup: {
     description:
       'Довести незавершённую очистку закончившейся попытки: повторить teardown по сохранённым receipt окружений и убрать её рабочие деревья; модели, gates и Git-приёмка не вызываются',
@@ -936,6 +952,38 @@ export const cleanupDataSchema = z.discriminatedUnion('status', [
   z.strictObject({ status: z.literal('cleaned'), receipts: z.array(z.string()) }),
 ]);
 
+export const worktreeCleanupDataSchema = z.strictObject({
+  dryRun: z.boolean(),
+  removed: z.number().int(),
+  removable: z.number().int(),
+  refused: z.number().int(),
+  failed: z.number().int(),
+  reclaimedKb: z.number().int(),
+  worktrees: z.array(
+    z.strictObject({
+      path: z.string(),
+      repositoryId: z.string(),
+      attemptId: z.string().optional(),
+      action: z.enum(['remove', 'removed', 'refused', 'failed']),
+      reason: z
+        .enum([
+          'active',
+          'recoverable',
+          'cleanup-pending',
+          'unknown-attempt',
+          'untrusted',
+          'embedded-repository',
+        ])
+        .optional(),
+      error: z.string().optional(),
+      head: z.string().optional(),
+      sizeKb: z.number().int().optional(),
+      uncommitted: z.number().int().optional(),
+      patch: z.string().optional(),
+    }),
+  ),
+});
+
 /** `init`: план или результат подготовки проекта. */
 export const initDataSchema = z.strictObject({
   mode: z.enum(['plan', 'apply']),
@@ -991,6 +1039,7 @@ export const cliDataSchemas = {
   result: resultEnvelopeSchema,
   deliver: resultEnvelopeSchema,
   cleanup: cleanupDataSchema,
+  'worktree-cleanup': worktreeCleanupDataSchema,
   profile: profileDataSchema,
   doctor: doctorDataSchema,
   init: initDataSchema,

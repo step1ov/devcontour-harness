@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   roleBinding,
   selectReviewer,
@@ -41,6 +41,19 @@ import {
   type WorkState,
 } from '../contracts/index.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
+import { worktreeKey } from '../environment/git-trust.ts';
+import {
+  attemptRefusal,
+  cleanupUnfinished,
+  isWithin,
+  recordRemoval,
+  registered,
+  savePatch,
+  sizeKb,
+  trusted,
+  uncommittedPaths,
+  type WorktreeCleanupEntry,
+} from './worktree-cleanup.ts';
 import {
   protectedChanges,
   protectedSnapshot,
@@ -1524,6 +1537,114 @@ export class Runner {
           (JSON.parse(await readFile(file, 'utf8')) as { errors: string[] }).errors.join('; '),
       );
     return { status: 'cleaned' as const, receipts: cleaned };
+  }
+
+  /**
+   * Убрать рабочие деревья закончившихся попыток. Ветки, объекты и артефакты
+   * остаются; неподтверждённые правки сохраняются патчем в артефактах попытки
+   * до удаления. Идущая попытка, последняя попытка незакрытой работы и попытка
+   * с незавершённой очисткой отказываются поимённо, не срывая остальные.
+   * `dryRun` ничего не пишет.
+   */
+  async cleanupWorktrees({ dryRun = false }: { dryRun?: boolean } = {}) {
+    const worktrees: WorktreeCleanupEntry[] = [];
+    const attempts = this.engine.read((v) =>
+      v.attempts().map((attempt) => {
+        const work = v.work(attempt.workId);
+        const latest = v.attempts(attempt.workId).every((a) => a.attempt <= attempt.attempt);
+        return {
+          attempt,
+          refusal: attemptRefusal(attempt, work, latest, this.jobs.has(attempt.id)),
+        };
+      }),
+    );
+    for (const repo of this.policy.repositories) {
+      const repoPath = this.repoPath(repo);
+      const live = await registered(repoPath);
+      const owners = new Map<string, (typeof attempts)[number]>();
+      for (const item of attempts.filter((i) => i.attempt.repositoryId === repo.id)) {
+        const dir = this.checkout(repo.id, 'worktrees', item.attempt.id);
+        for (const path of [
+          dir,
+          dir + '-integration',
+          ...(item.attempt.worktree
+            ? [item.attempt.worktree, item.attempt.worktree + '-integration']
+            : []),
+        ])
+          owners.set(worktreeKey(path), item);
+      }
+      const roots = [
+        this.checkout(repo.id, 'worktrees'),
+        join(this.dirOf(repo.id), 'worktrees'),
+      ].map(worktreeKey);
+      for (const [path, head] of live) {
+        if (!existsSync(path) || !roots.some((root) => isWithin(path, root))) continue;
+        const owner = owners.get(path);
+        const entry: WorktreeCleanupEntry = {
+          path,
+          repositoryId: repo.id,
+          action: 'refused',
+          ...(owner ? { attemptId: owner.attempt.id } : {}),
+          ...(head ? { head } : {}),
+        };
+        worktrees.push(entry);
+        if (!owner) {
+          entry.reason = 'unknown-attempt';
+          continue;
+        }
+        entry.sizeKb = await sizeKb(path);
+        const artifacts = join(this.dirOf(repo.id), 'artifacts', owner.attempt.id);
+        const refusal =
+          owner.refusal ??
+          ((await cleanupUnfinished(artifacts, await receipts(artifacts)))
+            ? 'cleanup-pending'
+            : undefined);
+        if (refusal) {
+          entry.reason = refusal;
+          continue;
+        }
+        if (!trusted(path, repoPath)) {
+          entry.reason = 'untrusted';
+          continue;
+        }
+        try {
+          entry.uncommitted = await uncommittedPaths(path);
+          if (dryRun) {
+            entry.action = 'remove';
+            continue;
+          }
+          if (entry.uncommitted) {
+            await mkdir(artifacts, { recursive: true });
+            const patch = join(artifacts, `uncommitted-${basename(path)}.patch`);
+            if (!(await savePatch(path, patch))) {
+              await rm(patch, { force: true });
+              entry.reason = 'embedded-repository';
+              continue;
+            }
+            entry.patch = patch;
+          }
+          await git(repoPath, 'worktree', 'remove', '--force', path);
+          entry.action = 'removed';
+          await recordRemoval(artifacts, entry);
+        } catch (error) {
+          entry.action = 'failed';
+          entry.error = error instanceof Error ? error.message : String(error);
+        }
+      }
+    }
+    const count = (action: WorktreeCleanupEntry['action']) =>
+      worktrees.filter((w) => w.action === action).length;
+    return {
+      dryRun,
+      removed: count('removed'),
+      removable: count('remove'),
+      refused: count('refused'),
+      failed: count('failed'),
+      reclaimedKb: worktrees
+        .filter((w) => w.action === 'remove' || w.action === 'removed')
+        .reduce((sum, w) => sum + (w.sizeKb ?? 0), 0),
+      worktrees,
+    };
   }
 
   private async gate(

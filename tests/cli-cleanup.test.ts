@@ -67,6 +67,28 @@ test('cleanup: CLI доводит незавершённую очистку по
     const noState = harness('cleanup', '--state', join(s.root, 'missing'), '--run', runId);
     assert.equal(noState.json.error?.code, 'NOT_FOUND');
     assert.equal(existsSync(join(s.root, 'missing')), false, 'состояние не создаётся');
+
+    // worktree-cleanup: та же граница CLI; у закончившейся попытки деревьев не осталось.
+    const worktrees = () =>
+      spawnSync(
+        process.execPath,
+        [
+          '--import',
+          import.meta.resolve('tsx'),
+          cli,
+          'worktree-cleanup',
+          '--state',
+          s.state,
+          '--dry-run',
+        ],
+        { cwd: s.root, encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '' } },
+      );
+    const plan = worktrees();
+    assert.equal(plan.status, 0, plan.stderr);
+    const data = cliDataSchemas['worktree-cleanup'].parse(
+      (JSON.parse(plan.stdout) as { data: unknown }).data,
+    );
+    assert.deepEqual([data.dryRun, data.removable, data.refused], [true, 0, 0]);
   } finally {
     await s.cleanup();
   }

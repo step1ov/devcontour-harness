@@ -213,6 +213,11 @@ export class Harness {
     return this.runner.finishCleanup(runId);
   }
 
+  /** Убрать рабочие деревья закончившихся попыток; ветки и артефакты остаются. */
+  cleanupWorktrees(options: { dryRun?: boolean } = {}) {
+    return this.runner.cleanupWorktrees(options);
+  }
+
   private repoPath(path: string) {
     return isAbsolute(path) ? path : resolve(this.options.baseDir, path);
   }
