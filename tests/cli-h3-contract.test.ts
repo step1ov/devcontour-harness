@@ -260,7 +260,12 @@ test('H3-01: прежние команды и схемы их данных не 
     }
     // Аддитивные поля ответов коннектора: пакеты `tasks[].context` (alpha.13) и
     // зависимости, принятые по базовой линии.
-    if (k === 'properties' && v && typeof v === 'object' && ('localContext' in v || 'baseline' in v)) {
+    if (
+      k === 'properties' &&
+      v &&
+      typeof v === 'object' &&
+      ('localContext' in v || 'baseline' in v)
+    ) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.localContext;
       delete rest.baseline;
