@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import type { EvidenceRecord, GatePolicy } from '../src/contracts/index.ts';
 import { failureFingerprint } from '../src/contracts/failure.ts';
 import { redactor } from '../src/environment/redaction.ts';
-import { isolationSupport } from '../src/environment/isolation.ts';
+import { isolationSupport, watchSandboxLog } from '../src/environment/isolation.ts';
 import { TaskFailure } from '../src/engine/failure.ts';
 import {
   junitSummary,
@@ -101,25 +101,59 @@ test('Failed JUnit survives exit 1 with an incidental npmrc warning and retains 
 
 const sandbox = isolationSupport();
 test(
-  'A genuine sandbox denial remains environment while its valid failing report is retained',
+  'OS report retention distinguishes a kernel-observed macOS denial from a nuisance warning',
   { skip: sandbox.ok ? false : 'песочница ОС недоступна: ' + sandbox.detail },
   async () => {
     const r = repo();
-    const { evidence, failure, artifactDir } = await gate(
+    if (process.platform === 'darwin') {
+      // Classification requires a tagged kernel record, not EPERM in stderr.
+      // Node's denied mkdir does not always emit that record on macOS; use the
+      // system utility, as the ancestor-read regression uses /usr/bin/stat.
+      const { evidence, failure, artifactDir } = await gate(
+        r.dir,
+        r.head(),
+        {
+          command: nodeGate(
+            `${junit('<testcase name="blocked"><error message="sandbox denied write"/></testcase>')};const result=require('child_process').spawnSync('/bin/mkdir',['.idea'],{stdio:'inherit'});process.exit(result.status??1)`,
+          ),
+        },
+        undefined,
+        'os',
+      );
+      assert.equal(failure?.kind, 'environment', evidence.summary);
+      assert.match(
+        failure.message,
+        /песочница проверки отказала в доступе: \.idea — обязательный запрет записи/,
+      );
+      assert.equal(evidence.passed, false);
+      assert.equal(evidence.exitCode, 1);
+      assert.equal(junitSummary(readFileSync(join(artifactDir, 'unit.xml'), 'utf8')).failures, 1);
+    } else {
+      // The runtime explicitly has no kernel observer on other platforms;
+      // they cannot promise this evidence-backed environment classification.
+      assert.equal(await watchSandboxLog('unsupportedplatform'), undefined);
+    }
+
+    // A nuisance warning and assertion failure under the same OS policy
+    // cannot obtain environment classification by printing a closed path.
+    const nuisance = await gate(
       r.dir,
       r.head(),
       {
         command: nodeGate(
-          `${junit('<testcase name="blocked"><error message="sandbox denied write"/></testcase>')};try{require('fs').mkdirSync('.idea')}catch(e){console.error(e.message);process.exit(1)}`,
+          `${junit('<testcase name="assertion"><failure message="expected 0"/></testcase>')};console.error("WARN EPERM: open '/synthetic/home/.npmrc'; assertion expected 0");process.exit(1)`,
         ),
       },
       undefined,
       'os',
     );
-    assert.equal(failure?.kind, 'environment', evidence.summary);
-    assert.equal(evidence.passed, false);
-    assert.equal(evidence.exitCode, 1);
-    assert.equal(junitSummary(readFileSync(join(artifactDir, 'unit.xml'), 'utf8')).failures, 1);
+    assert.equal(nuisance.failure?.kind, 'gate', nuisance.evidence.summary);
+    assert.equal(nuisance.evidence.exitCode, 1);
+    assert.match(nuisance.evidence.summary, /упали assertion: expected 0/);
+    assert.equal(
+      junitSummary(readFileSync(join(nuisance.artifactDir, 'unit.xml'), 'utf8')).failures,
+      1,
+    );
   },
 );
 
