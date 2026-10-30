@@ -307,13 +307,19 @@ export async function git(cwd: string, ...args: string[]) {
  * Вывод системной утилиты или null, если она не выполнилась. Не блокирует
  * event loop. Локаль фиксирована (`osToolEnv`): вывод разбирается.
  */
-function output(command: string, args: string[], timeout: number): Promise<string | null> {
+function output(
+  command: string,
+  args: string[],
+  timeout: number,
+  /** Код выхода, при котором вывод остаётся верным (lsof: часть процессов уже завершилась). */
+  partial?: number,
+): Promise<string | null> {
   return new Promise((resolve) => {
     execFile(
       command,
       args,
       { encoding: 'utf8', env: osToolEnv(), timeout, maxBuffer: 64_000_000 },
-      (error, stdout) => resolve(error ? null : stdout),
+      (error, stdout) => resolve(error && (!partial || error.code !== partial) ? null : stdout),
     );
   });
 }
@@ -369,7 +375,11 @@ async function descendants(root: number, known: Map<number, string>) {
  * одного из её каталогов. Время старта отсекает процессы пользователя —
  * например, терминал, открытый в worktree раньше.
  */
-async function inside(dirs: string[], since: number): Promise<number[]> {
+async function inside(
+  dirs: string[],
+  since: number,
+  table: { pid: number; start: string }[],
+): Promise<number[]> {
   if (!dirs.length) return [];
   // lsof и /proc сообщают настоящие пути; временный каталог macOS — за symlink.
   dirs = dirs.map((d) => {
@@ -379,7 +389,7 @@ async function inside(dirs: string[], since: number): Promise<number[]> {
       return d;
     }
   });
-  const started = new Map((await processTable()).map((r) => [r.pid, Date.parse(r.start)]));
+  const started = new Map(table.map((r) => [r.pid, Date.parse(r.start)]));
   // Нечитаемое время старта — не повод оставить процесс: каталоги принадлежат
   // только этой команде, и утечка её потомка хуже ошибочной остановки.
   // Отсекается только процесс, о котором точно известно, что он старше
@@ -403,10 +413,15 @@ async function inside(dirs: string[], since: number): Promise<number[]> {
         return [];
       }
     });
+  // Только процессы моложе команды: обход всех процессов пользователя занимает
+  // сотни миллисекунд на каждую команду. Код 1 — часть из них уже завершилась.
+  const candidates = [...started.keys()].filter((pid) => pid !== process.pid && fresh(pid));
+  if (!candidates.length) return [];
   const stdout = await output(
     osTool('lsof'),
-    ['-a', '-d', 'cwd', '-Fpn', '-u', String(process.getuid?.())],
+    ['-a', '-d', 'cwd', '-Fpn', '-u', String(process.getuid?.()), '-p', candidates.join(',')],
     15000,
+    1,
   );
   const pids: number[] = [];
   let pid = 0;
@@ -432,14 +447,15 @@ async function sweep(
   let left: number[] = [];
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
-      const table = new Map((await processTable()).map((r) => [r.pid, r.start]));
+      const rows = await processTable();
+      const table = new Map(rows.map((r) => [r.pid, r.start]));
       left = [
         ...new Set([
           ...(await marked(mark)),
           // Замеченный опросом потомок — только если это тот же процесс, а
           // не новый, получивший освободившийся PID.
           ...[...seen].filter(([pid, start]) => table.get(pid) === start).map(([pid]) => pid),
-          ...(await inside(dirs, since)),
+          ...(await inside(dirs, since, rows)),
         ]),
       ];
     } catch {
