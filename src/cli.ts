@@ -10,12 +10,14 @@ import {
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
+import { z } from 'zod';
 import {
   API_VERSION,
   HarnessError,
   authorSchema,
   cliCommands,
   cliDataSchemas,
+  contractViolation,
   contextSnapshotSchema,
   contractDocumentSchema,
   errorCodes,
@@ -745,7 +747,9 @@ try {
       : error instanceof TypeError &&
           (error as { code?: string }).code?.startsWith('ERR_PARSE_ARGS')
         ? new HarnessError('INVALID_INPUT', error.message)
-        : new HarnessError('INTERNAL', (error as Error)?.message ?? String(error));
+        : error instanceof z.ZodError
+          ? contractViolation(error)
+          : new HarnessError('INTERNAL', (error as Error)?.message ?? String(error));
   code = exitCodeOf(known);
   const command = argv[0] && argv[0] in cliCommands ? (argv[0] as CliCommand) : null;
   envelope = { apiVersion: API_VERSION, command, ok: false, error: known.toJSON() };

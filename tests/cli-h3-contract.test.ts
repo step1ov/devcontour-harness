@@ -78,8 +78,9 @@ const h2Commands = [
  * Данные с тех пор расширены только аддитивно — значениями перечней классов
  * отказа и причин остановки `unfinished` (незавершённая работа) и `needs-lead`
  * (пустой результат без механического основания), полем `recheck` записи
- * evidence, пределом области gates `GATE_SCOPE_LIMIT` вместо 20 и полем
- * `checkouts` ответа doctor; без них — те же байты.
+ * evidence, пределом области gates `GATE_SCOPE_LIMIT` вместо 20, полем
+ * `checkouts` ответа doctor и полем `localContext` ответа source-snapshot;
+ * без них — те же байты.
  */
 const H2_COMMANDS_SHA = '58efd5e554cd5b015538ef1d4e7dd8d20f24205ef24e28c5b27394642bc20e25';
 const H2_DATA_SHA = '95016c62e6e7fb134ab3dcde4aff35679951fe1b9037452bc86846230ffa5682';
@@ -257,6 +258,12 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.checkouts;
       return rest;
     }
+    // Аддитивное поле source-snapshot — пакеты `tasks[].context` (alpha.13).
+    if (k === 'properties' && v && typeof v === 'object' && 'localContext' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.localContext;
+      return rest;
+    }
     // Ослабленный предел области gates (20 → предел gates профиля).
     if (gateScope(v)) return { ...v, maxItems: 20 };
     return v;
@@ -265,6 +272,10 @@ test('H3-01: прежние команды и схемы их данных не 
   assert.ok(
     JSON.stringify(data.doctor).includes('"checkouts"'),
     'doctor объявляет корень рабочих деревьев',
+  );
+  assert.ok(
+    JSON.stringify(data['source-snapshot']).includes('"localContext"'),
+    'source-snapshot объявляет пакеты контекста',
   );
   for (const value of ADDITIVE_ENUM_VALUES)
     assert.ok(JSON.stringify(data).includes(JSON.stringify(value)), value + ' объявлен');

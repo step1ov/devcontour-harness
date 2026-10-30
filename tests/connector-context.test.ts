@@ -11,13 +11,21 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { HarnessError, contextDigest, workGraphDigest } from '../src/contracts/index.ts';
+import { z } from 'zod';
+import {
+  HarnessError,
+  cliDataSchemas,
+  contextDigest,
+  contractViolation,
+  workGraphDigest,
+} from '../src/contracts/index.ts';
 import {
   ConnectorStore,
   RelayWorkSource,
   openConnector,
   parseConfig,
 } from '../src/integrations/connector/index.ts';
+import { buildSnapshot } from '../src/integrations/connector/snapshot.ts';
 import {
   FakeAdmin,
   FakeRelayTransport,
@@ -381,4 +389,143 @@ test('tasks[].context: перенос пакета между задачами �
     store.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('tasks[].context: ответы всех команд коннектора — по договору CLI, в том числе с пакетом и после доставки', async () => {
+  const s = await scenario(fakeSuiteBackend(), {
+    config: (c) => withContext(c, ['controller-mode']),
+  });
+  try {
+    pack(s.root);
+    const { opened } = await s.snapshotAndRun();
+    const { snapshot, ...snap } = await opened.connector.snapshot(join(s.root, 'snap'));
+    assert.ok(snapshot.manifest.localContext);
+    cliDataSchemas['source-snapshot'].parse(snap);
+    cliDataSchemas['source-check'].parse(await opened.connector.check(s.policy));
+    cliDataSchemas['source-status'].parse(await opened.connector.status(opened.h));
+    cliDataSchemas['source-deliver'].parse(await opened.connector.deliver(opened.h, s.workId));
+    const op = opened.connector.store.operations({ workId: s.workId })[0]!;
+    cliDataSchemas['source-reconcile'].parse(await opened.connector.reconcile(opened.h, op.key));
+    opened.close();
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test('tasks[].context: пакет вне договора источника виден в снимке и source-check; запуск отказывает до runtime', async () => {
+  const s = await scenario(fakeSuiteBackend(), {
+    config: (c) => withContext(c, ['controller-mode']),
+  });
+  try {
+    const dir = pack(s.root);
+    for (let i = 0; i < 30; i++) writeFileSync(join(dir, `extra-${i}.md`), 'x\n');
+    writeFileSync(join(dir, 'bad*name.md'), 'x\n');
+    const o = await s.open();
+    const snap = await o.connector.snapshot(join(s.root, 'snap'));
+    assert.equal(snap.eligible, false);
+    const named = (p: string) => /LIMIT_EXCEEDED/.test(p) && p.includes('controller-mode/');
+    assert.ok(
+      snap.problems.some((p) => named(p) && p.includes('files')),
+      snap.problems.join('; '),
+    );
+    assert.ok(
+      snap.problems.some((p) => named(p) && p.includes('bad*name.md')),
+      snap.problems.join('; '),
+    );
+    const report = await o.connector.check();
+    assert.ok(report.problems.some((p: string) => p.includes('controller-mode/bad*name.md')));
+    await assert.rejects(
+      () => o.connector.prepareRun(o.h),
+      (e: unknown) => e instanceof HarnessError && e.code === 'NOT_READY',
+    );
+    assert.equal(s.calls.writer, 0);
+    o.close();
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test('снимок: граф, не собранный из данных задач, — NOT_READY с причиной и полем, а не ZodError', () => {
+  const config = parseConfig(
+    {
+      version: 1,
+      provider: 'relay-v1-http',
+      projectId: 'p1',
+      actor: 'harness',
+      relay: { endpoint: 'http://127.0.0.1:1' },
+      repository: { id: 'app' },
+      tasks: [{ ref: 'T1', writeScope: ['src'] }],
+    },
+    '/project',
+  ).config;
+  const dependencies = Array.from({ length: 101 }, (_, i) => ({
+    id: 'D' + i,
+    key: 'D-' + i,
+    title: 'Dep',
+    column: 'done' as const,
+    revision: 1,
+    finished: true,
+  }));
+  assert.throws(
+    () =>
+      buildSnapshot({
+        config,
+        identity: { provider: 'relay-v1-http', projectId: 'p1', capabilities: [], build: {} },
+        reads: [
+          {
+            task: {
+              id: 'T1',
+              key: 'K-1',
+              title: 'Greet',
+              description: 'Add greet(name)',
+              column: 'ready',
+              revision: 1,
+              parentId: null,
+              dependencies: dependencies.map((d) => d.id),
+              criteria: [],
+            },
+            children: [],
+            dependencies,
+            documents: [],
+            consistency: { before: 'x', after: 'x' },
+          },
+        ],
+        rounds: 2,
+        receiptOf: (orderId) => ({
+          issuer: 'i',
+          orderId,
+          taskId: 'D',
+          repositoryId: 'app',
+          resultSha: '1'.repeat(40),
+          workId: 'w',
+          runId: 'r',
+          operation: 'o',
+        }),
+      }),
+    (e: unknown) =>
+      e instanceof HarnessError &&
+      e.code === 'NOT_READY' &&
+      /dependsOn/.test(e.message) &&
+      e.issues.some((i) => i.path.join('.') === 'source.orders.0.dependsOn'),
+  );
+});
+
+test('договор CLI: нарушение схемы — INTERNAL с путями полей, сообщение не дамп ZodError', () => {
+  const parsed = z
+    .strictObject({ a: z.strictObject({ b: z.string() }) })
+    .safeParse({ a: { b: 1 } });
+  assert.ok(!parsed.success);
+  const known = contractViolation(parsed.error);
+  assert.equal(known.code, 'INTERNAL');
+  assert.deepEqual(known.issues[0]?.path, ['a', 'b']);
+  assert.match(known.message, /a\.b: /);
+  assert.doesNotMatch(known.message, /"code"/);
+  const thrown = (() => {
+    try {
+      z.string().parse(1);
+    } catch (error) {
+      return error;
+    }
+  })();
+  assert.ok(thrown instanceof z.ZodError, 'то, что бросает .parse, распознаёт CLI');
 });

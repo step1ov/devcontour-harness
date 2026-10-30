@@ -6,10 +6,10 @@ import {
   digestOf,
   gateRefSchema,
   idSchema,
-  relativePathSchema,
   roleIdSchema,
   sha256,
   gateScopeSchema,
+  writeScopeSchema,
 } from '../../contracts/index.ts';
 import type { ProviderId, TaskColumn } from './transport.ts';
 
@@ -64,10 +64,7 @@ export const taskMappingSchema = z.strictObject({
   ref: z.string().min(1).max(200),
   role: roleIdSchema.default('developer'),
   repositoryId: idSchema.optional(),
-  writeScope: z
-    .array(z.union([z.literal('.'), relativePathSchema]))
-    .min(1)
-    .max(100),
+  writeScope: writeScopeSchema,
   gates: gateScopeSchema(gateRefSchema).optional(),
   criteria: z.array(criterionMappingSchema).max(100).default([]),
   /** Документы, без которых запуск блокируется (ID, ключ или имя). Остальные — дополнительные. */

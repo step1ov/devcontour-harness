@@ -8,7 +8,7 @@ import {
   runtimeNameSchema,
   targetRefSchema,
 } from './primitives.ts';
-import { errorCodes, type ErrorCode } from './errors.ts';
+import { HarnessError, errorCodes, type ErrorCode } from './errors.ts';
 import { controlStateSchema, controllerLeaseSchema, workStatusSchema } from './execution.ts';
 import { runEventSchema } from './events.ts';
 import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
@@ -800,11 +800,23 @@ export const sourceCheckDataSchema = z.strictObject({
   problems: z.array(z.string()),
 });
 
+/** Закреплённый локальный пакет `tasks[].context`: то, что называет manifest снимка. */
+export const localContextManifestSchema = z.strictObject({
+  id: idSchema,
+  digest: digestSchema,
+  files: z.number().int().nonnegative(),
+  references: z.number().int().nonnegative(),
+  bytes: z.number().int().nonnegative(),
+});
+export type LocalContextManifest = z.infer<typeof localContextManifestSchema>;
+
 export const sourceSnapshotDataSchema = z.strictObject({
   connector: idSchema,
   graphId: idSchema,
   graphDigest: digestSchema,
   contextDigest: digestSchema,
+  /** Пакеты `tasks[].context`; без них поля нет. */
+  localContext: z.array(localContextManifestSchema).optional(),
   /** Semantic digest набора задач (`graph.source.revision`); не Git SHA. */
   revision: digestSchema,
   created: z.boolean(),
@@ -987,6 +999,22 @@ export const cliErrorSchema = z.strictObject({
     z.strictObject({ path: z.array(z.union([z.string(), z.number()])), message: z.string() }),
   ),
 });
+
+/**
+ * Нарушение схемы внутри harness (ответ команды вне договора, собственная
+ * запись) — дефект, а не ошибка ввода: INTERNAL с путями полей вместо дампа
+ * ZodError в сообщении.
+ */
+export const contractViolation = (error: z.ZodError) =>
+  new HarnessError(
+    'INTERNAL',
+    'Данные harness не соответствуют его договору (дефект harness, а не настроек): ' +
+      error.issues.map((i) => `${i.path.join('.') || '(корень)'}: ${i.message}`).join('; '),
+    error.issues.map((i) => ({
+      path: i.path.filter((p): p is string | number => typeof p !== 'symbol'),
+      message: i.message,
+    })),
+  );
 
 export type CliEnvelope<C extends CliCommand | 'version' = CliCommand | 'version'> =
   | {
