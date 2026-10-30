@@ -324,6 +324,16 @@ Runtime возвращает сырой ответ; движок разбира�
 аддитивное поле `reviewRound`, находки — `id`/`status`, ссылки результата —
 `review`. Правила — [docs/review-protocol.md](review-protocol.md).
 
+Ответ runtime ограничен на границе приёма. В `reviewResultSchema` — не больше
+500 элементов в `findings` и в `previous` (`REVIEW_ITEMS_LIMIT`; те же
+`maxItems` объявляет wire-схема CLI runtime); файл ответа codex — не больше
+4 МиБ (`CODEX_RESULT_LIMIT`), читается с границей, без перехода по symlink, а
+файл больше предела удаляется: он не прошёл маскирование. Сверх предела — обычный
+отказ попытки: у reviewer ошибка протокола `schema`, у исполнителя класс
+`unknown` без автоматического повтора. Записанное прежними версиями читается
+без этих пределов: `review.json` — `storedReviewResultSchema`, а `ReviewRecord`
+и evidence пределов не получили.
+
 ## Выходы
 
 ### RunResult

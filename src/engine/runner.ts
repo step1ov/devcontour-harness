@@ -23,7 +23,8 @@ import {
   type CodeReviewVerdict,
   type CodeReviewHistory,
   type ReviewRequestFindings,
-  reviewResultSchema,
+  REVIEW_ITEMS_LIMIT,
+  storedReviewResultSchema,
   type ImplementationResult,
   type ReviewResult,
   type AlreadySatisfied,
@@ -64,6 +65,7 @@ import { reviewerRunsChecks } from '../agents/cli-adapter.ts';
 import {
   gateProbePrompt,
   observeReproductions,
+  assertProbeSpec,
   probeCommand,
   probeGates,
   probeLimits,
@@ -1908,6 +1910,7 @@ export class Runner {
       scope: { attempt: attempt.id, phase, sha, call },
       artifacts: join(dir, 'probe-runs'),
     };
+    assertProbeSpec(spec);
     const specPath = join(dir, 'probe.json');
     await writeFile(specPath, JSON.stringify(spec, null, 2));
     const seconds = (ms: number) => Math.round(ms / 1000);
@@ -2071,6 +2074,12 @@ export class Runner {
     const expected = legacy
       ? []
       : history.findings.filter((f) => f.status === 'open').map((f) => f.id);
+    // Раунд с таким списком не записался бы: остановка до вызова reviewer.
+    if (expected.length > REVIEW_ITEMS_LIMIT)
+      throw new TaskFailure(
+        'review-protocol',
+        `REVIEW_PROTOCOL_INVALID: открытых находок ${expected.length}, предел раунда ревью ${REVIEW_ITEMS_LIMIT} (попытка ${attempt.id}); нового вызова нет`,
+      );
     const round = history.round + 1;
     // Запрос одинаков для всех вызовов логического ревью: меняется только
     // диагностика ошибки протокола.
@@ -2629,7 +2638,7 @@ export class Runner {
       reproduction: NonNullable<ReviewResult['findings'][number]['reproduction']>;
     }[] = [];
     for (const e of reviews) {
-      const saved = reviewResultSchema.safeParse(
+      const saved = storedReviewResultSchema.safeParse(
         JSON.parse(await readFile(e.log, 'utf8').catch(() => 'null')),
       );
       if (!saved.success) continue;

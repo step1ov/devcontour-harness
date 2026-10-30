@@ -1,4 +1,9 @@
-import { FINDING_BASIS_PATTERN, FINDING_ID_PATTERN, findingStatuses } from '../contracts/review.ts';
+import {
+  FINDING_BASIS_PATTERN,
+  FINDING_ID_PATTERN,
+  REVIEW_ITEMS_LIMIT,
+  findingStatuses,
+} from '../contracts/review.ts';
 
 /**
  * JSON Schema структурированного ответа для CLI runtime. Codex требует
@@ -63,6 +68,7 @@ export const reviewOutputSchema = {
     discoveries: { type: 'array', maxItems: 20, items: discovery },
     findings: {
       type: 'array',
+      maxItems: REVIEW_ITEMS_LIMIT,
       items: {
         type: 'object',
         additionalProperties: false,
@@ -118,6 +124,7 @@ export const reviewOutputSchema = {
     },
     previous: {
       type: 'array',
+      maxItems: REVIEW_ITEMS_LIMIT,
       items: {
         type: 'object',
         additionalProperties: false,

@@ -24,6 +24,7 @@ import {
   type ExecutionPolicy,
   type GatePolicy,
   type ProbeServer,
+  TaskFailure,
 } from '../contracts/index.ts';
 import { osToolEnv } from '../environment/os-tools.ts';
 import { redactor } from '../environment/redaction.ts';
@@ -59,11 +60,18 @@ import {
 export const probeServer = 'devcontour_probe';
 export const probeTool = 'run_check';
 
+/**
+ * Предел списков спецификации probe. Спецификацию пишет controller, но она
+ * читается отдельным процессом: файл, выросший сверх любой разумной политики,
+ * не разворачивается в ошибку на каждый элемент.
+ */
+const PROBE_LIST_LIMIT = 10_000;
+
 /** Объявленный gate в виде, в каком его исполняет probe: копия из эффективной политики. */
 export const probeGate = z.strictObject({
   id: idSchema,
   kind: z.enum(['test', 'check']),
-  command: z.array(z.string().min(1)).min(1),
+  command: z.array(z.string().min(1)).min(1).max(PROBE_LIST_LIMIT),
   cwd: relativePathSchema.optional(),
   timeoutMs: z.number().positive(),
   report: z.strictObject({ type: z.literal('junit'), path: relativePathSchema }).optional(),
@@ -75,22 +83,25 @@ export type ProbeGate = z.infer<typeof probeGate>;
 export const probeSpec = z.object({
   cwd: z.string().min(1),
   /** Закрытое проверке и открытое на чтение — граница reviewer. */
-  controller: z.array(z.string()),
-  readable: z.array(z.string()),
+  controller: z.array(z.string()).max(PROBE_LIST_LIMIT),
+  readable: z.array(z.string()).max(PROBE_LIST_LIMIT),
   /** Корни рабочих деревьев вне каталога состояния (закрыты целиком). */
-  checkouts: z.array(z.string()).optional(),
-  isolation: z.object({ mode: z.enum(['os', 'none']), domains: z.array(z.string()) }),
+  checkouts: z.array(z.string()).max(PROBE_LIST_LIMIT).optional(),
+  isolation: z.object({
+    mode: z.enum(['os', 'none']),
+    domains: z.array(z.string()).max(PROBE_LIST_LIMIT),
+  }),
   commandTimeoutMs: z.number().int().min(1000),
   budgetMs: z.number().int().min(1000),
   /** Момент, к которому ревью должно быть готово дать заключение (epoch ms). */
   deadline: z.number().int(),
   /** Переменные окружения, передаваемые по имени; значения на диск не пишутся. */
-  env: z.array(z.string()),
-  secrets: z.array(z.string()),
+  env: z.array(z.string()).max(PROBE_LIST_LIMIT),
+  secrets: z.array(z.string()).max(PROBE_LIST_LIMIT),
   settingsDir: z.string().min(1),
   log: z.string().min(1),
   /** Объявленные gates, которые reviewer может запустить по ID. */
-  gates: z.array(probeGate).optional(),
+  gates: z.array(probeGate).max(PROBE_LIST_LIMIT).optional(),
   /** Фаза и SHA ревью: записываются в каждый запуск gate. */
   phase: z.string().optional(),
   sha: z.string().optional(),
@@ -111,6 +122,20 @@ export const probeSpec = z.object({
   artifacts: z.string().optional(),
 });
 export type ProbeSpec = z.infer<typeof probeSpec>;
+
+/**
+ * Спецификация вне пределов — отказ среды, названный controller до запуска:
+ * иначе сервер проверок упал бы при старте, и reviewer получил бы отказ без причины.
+ */
+export function assertProbeSpec(spec: ProbeSpec) {
+  const parsed = probeSpec.safeParse(spec);
+  if (parsed.success) return;
+  const issue = parsed.error.issues[0];
+  throw new TaskFailure(
+    'environment',
+    `Спецификация проверок ревью вне схемы: ${issue?.path.join('.')}: ${issue?.message}`,
+  );
+}
 
 export const probeInput = z
   .strictObject({

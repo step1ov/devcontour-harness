@@ -8,6 +8,7 @@ import {
   findingId,
   mcpEnvironment,
   reviewIssues,
+  issuePath,
   reviewResultSchema,
   selectReviewer,
   type Author,
@@ -212,7 +213,14 @@ export async function technicalReview(
       `Ревью ${kind}: ${response.status}${response.diagnostics.reason ? ': ' + response.diagnostics.reason : ''}`,
     );
   const parsed = reviewResultSchema.safeParse(response.output);
-  const issues = parsed.success ? reviewIssues(parsed.data, open) : ['Ответ ревью вне схемы'];
+  const issue = parsed.error?.issues[0];
+  const issues = parsed.success
+    ? reviewIssues(parsed.data, open)
+    : [
+        execution
+          .redact(`Ответ ревью вне схемы: ${issuePath(issue?.path ?? [])}: ${issue?.message}`)
+          .slice(0, 500),
+      ];
   // Ответ применяется только целиком валидным (docs/review-protocol.md, §8):
   // невалидный не закрывает прежних находок и не заводит новых — раунд
   // записывается неодобренным с причинами, история остаётся прежней.

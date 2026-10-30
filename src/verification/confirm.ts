@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -10,6 +10,7 @@ import {
   type ExecutionPolicy,
   type WorkState,
 } from '../contracts/index.ts';
+import { OversizedFile, readBounded } from '../environment/bounded-read.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
 import { contractDocuments, obligationOf } from './checks.ts';
@@ -74,6 +75,8 @@ export type CaseRequest = z.input<typeof caseInputSchema>;
 /** Точка после записи версии и до принятия: тест моделирует в ней сбой. */
 export const caseHooks = { afterRecord: (): void => undefined };
 
+/** Файл результата пишет проверяемый код; случай корпуса — не больше 64 КиБ. */
+const CASE_RESULT_LIMIT = 1024 * 1024;
 const caseResult = z.object({
   property: z.string(),
   valid: z.boolean().optional(),
@@ -410,9 +413,11 @@ async function decide(
             runs.push({ property: input.property, error: 'timeout' });
             break;
           }
-          const parsed = caseResult.safeParse(
-            JSON.parse(await readFile(out, 'utf8').catch(() => 'null')),
-          );
+          const raw = await readBounded(out, CASE_RESULT_LIMIT).catch((error: unknown) => {
+            if (error instanceof OversizedFile) throw error;
+            return 'null';
+          });
+          const parsed = caseResult.safeParse(JSON.parse(raw));
           runs.push(
             parsed.success ? parsed.data : { property: input.property, error: 'нет результата' },
           );

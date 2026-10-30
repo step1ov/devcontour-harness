@@ -93,6 +93,9 @@ const envelopeSchema = z.union([
   }),
 ]);
 
+/** Предел массива в ответе Relay: страница запрашивается по 100 элементов. */
+const MAX_ITEMS = 10_000;
+
 const columnSchema = z.enum(['inbox', 'ready', 'in-progress', 'review', 'done', 'cancelled']);
 const revisionSchema = z.number().int().nonnegative();
 const idString = z.string().min(1);
@@ -104,14 +107,14 @@ const taskSummarySchema = z.object({
   column: columnSchema,
   revision: revisionSchema,
   parentId: z.string().nullable(),
-  dependencies: z.array(z.string()),
+  dependencies: z.array(z.string()).max(MAX_ITEMS),
   canComplete: z.boolean().optional(),
 });
 const taskViewSchema = taskSummarySchema.extend({ description: z.string() });
 
 const offsetPage = <T extends z.ZodTypeAny>(item: T) =>
   z.object({
-    items: z.array(item),
+    items: z.array(item).max(MAX_ITEMS),
     total: z.number().int().nonnegative(),
     nextOffset: z.number().int().nonnegative().nullable(),
     version: z.string().min(1),
@@ -143,7 +146,7 @@ const commentSummarySchema = z.object({
 });
 const commentSchema = commentSummarySchema.extend({ description: z.string() });
 const commentsPageSchema = z.object({
-  items: z.array(commentSummarySchema),
+  items: z.array(commentSummarySchema).max(MAX_ITEMS),
   nextCursor: z.string().nullable(),
   snapshot: z.number().int().nonnegative(),
 });
@@ -165,7 +168,7 @@ const documentDetailSchema = entitySummarySchema.extend({
 const healthSchema = z.object({ status: z.string(), contractVersion: z.number().int() });
 const contextSchema = z.object({
   projectId: z.string().min(1),
-  capabilities: z.array(z.string()).optional(),
+  capabilities: z.array(z.string()).max(MAX_ITEMS).optional(),
 });
 
 const sessionSchema = z.object({

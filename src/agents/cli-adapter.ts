@@ -1,5 +1,5 @@
 import { appendFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { z } from 'zod';
@@ -11,6 +11,7 @@ import type {
   RuntimeResponse,
   toolProfileSchema,
 } from '../contracts/index.ts';
+import { OversizedFile, readBounded } from '../environment/bounded-read.ts';
 import { command } from '../environment/process.ts';
 import {
   claudeFileDenies,
@@ -27,6 +28,13 @@ import { claudeResult, runtimeEvents } from './runtime-events.ts';
 import { runtimeVersion, unknownUsage, usageStream } from './usage.ts';
 
 type ToolProfile = z.infer<typeof toolProfileSchema>;
+
+/**
+ * Предел файла ответа codex: вдвое выше хвоста stdout, в котором приходит ответ
+ * claude (2 000 000 символов). Ответ модели на порядки меньше, а разбор
+ * файла на пределе занимает меньше 100 МБ кучи.
+ */
+export const CODEX_RESULT_LIMIT = 4 * 1024 * 1024;
 
 /** Встроенные инструменты исполнителя claude, когда профиль их не называет; shell — в песочнице ОС. */
 export const claudeWriterTools = ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'] as const;
@@ -432,7 +440,7 @@ export function cliAdapter(
       let output: unknown;
       try {
         if (runtime === 'codex') {
-          const cleaned = redact(await readFile(resultPath, 'utf8'));
+          const cleaned = redact(await readBounded(resultPath, CODEX_RESULT_LIMIT));
           await writeFile(resultPath, cleaned);
           output = JSON.parse(cleaned);
         } else {
@@ -448,6 +456,9 @@ export function cliAdapter(
           output = final.structured_output;
         }
       } catch (error) {
+        // Непрочитанный файл не замаскирован: на диске он не остаётся.
+        if (error instanceof OversizedFile)
+          await rm(resultPath, { force: true }).catch(() => undefined);
         return {
           ...base,
           status: 'failed',

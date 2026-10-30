@@ -96,25 +96,32 @@ export const alreadySatisfiedSchema = z.strictObject({
 });
 export type AlreadySatisfied = z.infer<typeof alreadySatisfiedSchema>;
 
+const reviewResultFindingSchema = z.object({
+  severity: z.enum(['blocking', 'note']),
+  message: z.string(),
+  path: z.string().nullable().optional(),
+  line: z.number().int().positive().nullable().optional(),
+  rule: z.string().nullable().optional(),
+  consequence: z.string().nullable().optional(),
+  evidence: z.string().nullable().optional(),
+  // Негодное воспроизведение отбрасывает только его, а не весь оплаченный вердикт.
+  reproduction: reproductionSchema.nullable().optional().catch(null),
+});
+
+/**
+ * Предел находок и переходов в одном ответе reviewer и в раунде истории. Без
+ * предела каждый лишний элемент ответа давал отдельные ошибки разбора и
+ * гигабайты кучи. Реальные ответы на порядки меньше.
+ */
+export const REVIEW_ITEMS_LIMIT = 500;
+
 export const reviewResultSchema = z.object({
   execution: reviewExecutionSchema.optional(),
   approved: z.boolean(),
   summary: z.string(),
   discoveries: z.array(discoverySchema).max(20).default([]),
-  findings: z.array(
-    z.object({
-      severity: z.enum(['blocking', 'note']),
-      message: z.string(),
-      path: z.string().nullable().optional(),
-      line: z.number().int().positive().nullable().optional(),
-      rule: z.string().nullable().optional(),
-      consequence: z.string().nullable().optional(),
-      evidence: z.string().nullable().optional(),
-      // Негодное воспроизведение отбрасывает только его, а не весь оплаченный вердикт.
-      reproduction: reproductionSchema.nullable().optional().catch(null),
-    }),
-  ),
-  previous: z.array(findingTransitionSchema).default([]),
+  findings: z.array(reviewResultFindingSchema).max(REVIEW_ITEMS_LIMIT),
+  previous: z.array(findingTransitionSchema).max(REVIEW_ITEMS_LIMIT).default([]),
   /**
    * Подтверждение reviewer, что приёмка поручения уже выполнена на базе без
    * изменений (исполнитель сдал пустой результат): gates, чьё прошедшее
@@ -124,6 +131,15 @@ export const reviewResultSchema = z.object({
   alreadySatisfied: alreadySatisfiedSchema.nullable().optional(),
 });
 export type ReviewResult = z.infer<typeof reviewResultSchema>;
+
+/**
+ * Записанный ответ reviewer (`review.json`). Предел `reviewResultSchema` —
+ * граница приёма: файлы прежних версий с длинными списками читаются и дальше.
+ */
+export const storedReviewResultSchema = reviewResultSchema.extend({
+  findings: z.array(reviewResultFindingSchema),
+  previous: z.array(findingTransitionSchema).default([]),
+});
 
 /** Идентичность находки: предмет, класс и текст. Новый текст — новая находка. */
 export const findingId = (subject: string, finding: { rule?: string | null; message: string }) =>
@@ -260,7 +276,7 @@ export const reviewRoundSchema = z.strictObject({
    */
   protocol: z.enum(['valid', 'invalid', 'unsafe']),
   /** Открытые находки, состояние которых reviewer должен был назвать. */
-  expected: z.array(digestSchema).max(500),
+  expected: z.array(digestSchema).max(REVIEW_ITEMS_LIMIT),
   issues: z.array(protocolIssueSchema).max(50).optional(),
   transitions: z
     .array(
@@ -271,7 +287,7 @@ export const reviewRoundSchema = z.strictObject({
         basis: z.string().max(4000),
       }),
     )
-    .max(500)
+    .max(REVIEW_ITEMS_LIMIT)
     .optional(),
   /** Согласованная постановка поручения на момент раунда. */
   spec: digestSchema.optional(),

@@ -38,6 +38,9 @@ export const columnSchema = z.enum([
   'cancelled',
 ]);
 
+/** Предел массива в ответе Relay-2: размер всего ответа ограничен транспортом. */
+const MAX_ITEMS = 10_000;
+
 /** Общий envelope записи: `{id, kind, key, revision, …, data}`. */
 const envelope = <T extends z.ZodTypeAny>(kind: string, data: T) =>
   z.object({
@@ -73,16 +76,16 @@ export const taskSchema = envelope(
     description: nullableText,
     column: columnSchema,
     parentId: z.string().nullable(),
-    dependencies: z.array(z.string()),
-    acceptanceCriteria: z.array(criterionSchema),
-    comments: z.array(commentSchema).optional(),
+    dependencies: z.array(z.string()).max(MAX_ITEMS),
+    acceptanceCriteria: z.array(criterionSchema).max(MAX_ITEMS),
+    comments: z.array(commentSchema).max(MAX_ITEMS).optional(),
   }),
 );
 
 export const progressSchema = z.object({
   completed: z.boolean(),
   canComplete: z.boolean(),
-  blockers: z.array(z.string()),
+  blockers: z.array(z.string()).max(MAX_ITEMS),
 });
 
 export const documentSchema = envelope(
@@ -126,7 +129,7 @@ export const doctorSchema = z.object({
   projectId: z.string().min(1),
   generation: z.number().int().nonnegative(),
   valid: z.boolean(),
-  issues: z.array(z.unknown()),
+  issues: z.array(z.unknown()).max(MAX_ITEMS),
 });
 
 export const pageMetaSchema = z.object({
@@ -136,7 +139,7 @@ export const pageMetaSchema = z.object({
   }),
 });
 
-export const itemsSchema = z.object({ items: z.array(z.unknown()) });
+export const itemsSchema = z.object({ items: z.array(z.unknown()).max(MAX_ITEMS) });
 
 /** Стабильный код Relay-2 → класс отказа транспорта. Exit code — только грубый класс. */
 export function classifyCode(
