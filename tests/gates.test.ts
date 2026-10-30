@@ -491,7 +491,7 @@ test('Compiler diagnostic survives aggregate and warning tails into the next wri
     assert.match(failure.message, /error TS2742/);
     assert.doesNotMatch(evidence.summary, /npmrc|Summary:/);
     const { engine } = engineOf();
-    ready(engine, graphOf({ a: [] }));
+    ready(engine, graphOf({ a: [] }), 'writer');
     const attempt = engine.claim('writer')!;
     const history = previousAttempts(
       [
