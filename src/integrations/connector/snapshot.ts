@@ -5,6 +5,7 @@ import {
   CONTEXT_LIMITS,
   contextDigest,
   contextIssues,
+  contextSnapshotSchema,
   digestOf,
   sha256,
   sourceDigest,
@@ -12,6 +13,7 @@ import {
   workGraphSchema,
   type ContextSnapshot,
   type ContextSourceEntry,
+  type LocalContextManifest,
   type PinnedFile,
   type Prerequisite,
   type WorkGraph,
@@ -115,14 +117,6 @@ export interface SnapshotManifest {
   problems: SnapshotProblem[];
   /** Закреплённые локальные пакеты `tasks[].context`; без них поля нет. */
   localContext?: LocalContextManifest[];
-}
-
-export interface LocalContextManifest {
-  id: string;
-  digest: string;
-  files: number;
-  references: number;
-  bytes: number;
 }
 
 export interface BuiltSnapshot {
@@ -603,7 +597,7 @@ export function buildSnapshot(input: {
       : {}),
   });
   const joined = `${config.provider}:${config.projectId}:${taskIds.join('+')}`;
-  const graph = workGraphSchema.parse({
+  const parsed = workGraphSchema.safeParse({
     apiVersion: API_VERSION,
     id: graphId,
     source: {
@@ -614,6 +608,19 @@ export function buildSnapshot(input: {
     orders,
     prerequisites: prereqs,
   });
+  // Конфигурация уже проверена: сюда доходит только то, что зависит от данных
+  // задач (например, число зависимостей), и причина называется, а не теряется.
+  if (!parsed.success)
+    throw new HarnessError(
+      'NOT_READY',
+      'Поручения не собираются из задач: ' +
+        parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      parsed.error.issues.map((i) => ({
+        path: ['source', ...(i.path as (string | number)[])],
+        message: i.message,
+      })),
+    );
+  const graph = parsed.data;
   const context: ContextSnapshot = {
     apiVersion: API_VERSION,
     sources: [...sources, ...(input.local ?? [])],
@@ -647,9 +654,27 @@ export function buildSnapshot(input: {
 
 const CONTEXT_SOURCES_MAX = 30;
 
-/** Нарушения пределов снимка контекста: число источников, размер файла и сумма. */
+/**
+ * Нарушения договора источника (число файлов и справок, имя файла): запуск
+ * проверяет снимок той же схемой, поэтому они видны здесь, а не после approve.
+ * Число источников называет `contextLimitIssues`.
+ */
+function sourceSchemaIssues(context: ContextSnapshot): string[] {
+  const parsed = contextSnapshotSchema.safeParse(context);
+  if (parsed.success) return [];
+  return parsed.error.issues
+    .filter((i) => i.path[0] === 'sources' && i.path.length > 2)
+    .map((i) => {
+      const [, index, field, file] = i.path as [string, number, 'files' | 'references', number?];
+      const source = context.sources[index]!;
+      const name = file === undefined ? field : (source[field]?.[file]?.path ?? field);
+      return `${source.id}/${name}: ${i.message}`;
+    });
+}
+
+/** Нарушения пределов снимка контекста: число источников, размер файла, сумма и договор источника. */
 export function contextLimitIssues(context: ContextSnapshot): string[] {
-  const issues = contextIssues(context);
+  const issues = [...contextIssues(context), ...sourceSchemaIssues(context)];
   if (context.sources.length > CONTEXT_SOURCES_MAX)
     issues.push(
       `Источников контекста ${context.sources.length} при пределе ${CONTEXT_SOURCES_MAX} (задачи и локальные пакеты)`,
