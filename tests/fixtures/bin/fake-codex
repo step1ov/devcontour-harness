@@ -91,6 +91,11 @@ for (const [path, text] of Object.entries(step.files ?? {})) {
   writeFileSync(join(process.cwd(), path), text);
 }
 for (const path of step.remove ?? []) rmSync(join(process.cwd(), path), { force: true });
+// Замена файла только для чтения: снять его и записать другое содержимое.
+for (const [path, text] of Object.entries(step.replace ?? {})) {
+  rmSync(join(process.cwd(), path), { force: true });
+  writeFileSync(join(process.cwd(), path), text);
+}
 // Самопроверка исполнителя: команда из запроса controller на рабочем дереве.
 if (step.selfCheck) {
   const found = prompt.match(/Self-check: run `([^`]+)`/);

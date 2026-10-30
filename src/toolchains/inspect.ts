@@ -808,6 +808,20 @@ export async function inspectRepository(
   steps('prepare', repo.prepare, [...field, 'prepare']);
   steps('dependencyBuild', repo.dependencyBuild, [...field, 'dependencyBuild']);
   steps('preflight', repo.preflight, [...field, 'preflight']);
+  // Хранилище зависимостей: промах не останавливает работу, но и не ускоряет её —
+  // причину лучше увидеть в диагностике, чем в квитанции каждой попытки.
+  if (repo.dependencyStore) {
+    const store = repo.dependencyStore;
+    const storeField = [...field, 'dependencyStore'];
+    tool(store.manager, 'path', [...storeField, 'manager']);
+    if (!m.isFile(store.lockfile))
+      problem(
+        'LOCKFILE_MISSING',
+        [...storeField, 'lockfile'],
+        'Хранилищу зависимостей нужен lockfile: ' + store.lockfile,
+        store.lockfile,
+      );
+  }
   const lifecycle = repo.lifecycle ?? options.lifecycle;
   const lifecycleField = repo.lifecycle ? [...field, 'lifecycle'] : ['lifecycle'];
   if (lifecycle)

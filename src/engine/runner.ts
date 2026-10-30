@@ -48,6 +48,11 @@ import {
 } from '../environment/isolation.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
 import {
+  dependencyStoreRoot,
+  materializeStore,
+  type StoreContext,
+} from '../verification/dependency-store.ts';
+import {
   checkoutPath,
   chooseCheckoutRoot,
   realish,
@@ -260,6 +265,16 @@ export class Runner {
       hidden: credentialPaths(),
       ...(this.options.checkoutRoot ? { configured: this.options.checkoutRoot } : {}),
     }));
+  }
+  /** Хранилище зависимостей: те же корень и граница, что у деревьев попытки. */
+  private storeContext(): StoreContext {
+    return {
+      policy: this.policy,
+      root: (id) => dependencyStoreRoot(this.checkoutRoot(), this.options.stateDir, id),
+      repoPath: (repo) => this.repoPath(repo),
+      boundary: this.boundary(),
+      resourceDatabase: this.options.resourceDatabase ?? defaultResourceDatabase(),
+    };
   }
   /** Каталог рабочего дерева вида `kind`: вне дерева или прежний в каталоге попыток. */
   private checkout(repositoryId: string, kind: string, ...rest: string[]) {
@@ -813,6 +828,21 @@ export class Runner {
   }
 
   /** Стадия попытки с замером: начало, конец и исход записываются под fencing. */
+  /** Хранилище зависимостей checkout до `prepare`; без него этапа нет и в замерах. */
+  private async dependencyStore(
+    attempt: AttemptState,
+    repo: Repo,
+    cwd: string,
+    execution: ReturnType<typeof executionEnvironment>,
+    signal: AbortSignal,
+    dir: string,
+  ) {
+    if (!repo.dependencyStore) return;
+    await this.timed(attempt, 'dependency-store', () =>
+      materializeStore(this.storeContext(), { repo, cwd, execution, signal, dir }),
+    );
+  }
+
   private async timed<T>(attempt: AttemptState, stage: string, fn: () => Promise<T>) {
     const id = this.engine.timingStarted(attempt.id, attempt.token, stage);
     try {
@@ -1069,6 +1099,7 @@ export class Runner {
                     : [];
                 }),
               ),
+              store: this.storeContext(),
             });
             snapshots.push(...dependencies);
             this.engine.dependencies(attempt.id, attempt.token, dependencies);
@@ -1106,6 +1137,14 @@ export class Runner {
             execution,
             signal,
             async () => {
+              await this.dependencyStore(
+                attempt,
+                repo,
+                cwd,
+                execution,
+                signal,
+                join(artifacts, 'candidate'),
+              );
               await runSteps(
                 repo.prepare,
                 cwd,
@@ -1744,6 +1783,7 @@ export class Runner {
           environment: this.options.environment ?? process.env,
           signal,
           overrides: new Map([[provider, { path: cwd, sha }]]),
+          store: this.storeContext(),
         });
         const execution = this.environmentOf(
           attempt,
@@ -1760,6 +1800,7 @@ export class Runner {
           execution,
           signal,
           async () => {
+            await this.dependencyStore(attempt, repo, dir, execution, signal, own);
             await runSteps(repo.prepare, dir, join(own, 'prepare'), execution, signal);
             await pinned('подготовка');
             for (const gate of ordered(repo.gates, consumer.gates))
@@ -2609,6 +2650,9 @@ export class Runner {
             }
           : {}),
         ...(this.options.environment ? { environment: this.options.environment } : {}),
+        ...(this.options.resourceDatabase
+          ? { resourceDatabase: this.options.resourceDatabase }
+          : {}),
       },
       raw,
     );
@@ -2711,6 +2755,14 @@ export class Runner {
       execution,
       signal,
       async () => {
+        await this.dependencyStore(
+          attempt,
+          repo,
+          cwd,
+          execution,
+          signal,
+          join(artifacts, 'integration'),
+        );
         await runSteps(
           repo.prepare,
           cwd,

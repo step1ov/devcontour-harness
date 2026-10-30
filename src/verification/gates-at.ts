@@ -9,6 +9,7 @@ import { defaultResourceDatabase, withResources } from '../environment/resources
 import { removeSnapshots, snapshotDependencies, type DependencySnapshot } from './dependencies.ts';
 import { runGate, type Boundary } from './gates.ts';
 import { checkoutPath, chooseCheckoutRoot } from '../environment/checkout-root.ts';
+import { dependencyStoreRoot, materializeStore, type StoreContext } from './dependency-store.ts';
 import { credentialPaths } from '../environment/isolation.ts';
 import { explicitPrerequisites, orderedScope, standaloneScope } from './gate-scope.ts';
 
@@ -112,6 +113,19 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
   const failed = new Set<string>();
   let snapshots: DependencySnapshot[] = [];
   let added = false;
+  const boundaryOf = ctx.boundary();
+  const store: StoreContext = {
+    policy: ctx.policy,
+    root: (rid) => dependencyStoreRoot(placement, ctx.stateDir, rid),
+    repoPath: (r) => ctx.repoPath(r),
+    boundary: {
+      hidden: boundaryOf.hidden,
+      checkouts: [
+        ...new Set([...(boundaryOf.checkouts ?? []), ...(placement.root ? [placement.root] : [])]),
+      ],
+    },
+    resourceDatabase: ctx.resourceDatabase ?? defaultResourceDatabase(),
+  };
   await mkdir(root, { recursive: true });
   await mkdir(dirname(cwd), { recursive: true });
   try {
@@ -143,6 +157,7 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
             policy: ctx.policy,
             environment: source,
             signal,
+            store,
           });
         await git(path, 'worktree', 'add', '--detach', cwd, input.sha);
         added = true;
@@ -169,6 +184,7 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
           execution,
           signal,
           async () => {
+            await materializeStore(store, { repo, cwd, execution, signal, dir: artifacts });
             await runSteps(repo.prepare, cwd, join(artifacts, 'prepare'), execution, signal);
             for (const gate of gates) {
               // Пропускается только gate, чья явная предпосылка (`dependsOn`) не

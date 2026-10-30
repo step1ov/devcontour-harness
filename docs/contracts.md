@@ -112,6 +112,23 @@ manifest снимка и в необязательном поле `baseline` о�
 
 Переменные `HARNESS_*` и `DEVCONTOUR_*` политика задать не может.
 
+`repositories[].dependencyStore` — необязательное хранилище зависимостей
+репозитория: `{manager: 'pnpm', lockfile, maxBytes, timeoutMs}`. Умолчания:
+`pnpm-lock.yaml`, 8 ГиБ, 600 000 мс. Без поля поведение и digest политики прежние.
+С полем harness сам держит seed по lockfile `targetRef` и разворачивает его в
+каждый checkout: попытка, integration, потребители, `runGatesAt`, проверка
+примера, снимки с `dependencyBuild` и совместная проверка, где `prepare` нет.
+Проекту не нужны ни свой скрипт, ни шаг `prepare`, ни запись в `.gitignore`;
+gate установки остаётся обычным `pnpm install --frozen-lockfile`.
+Подробности и граница доверия — [toolchains](toolchains.md#хранилище-зависимостей).
+
+Квитанция `dependency-store.json` лежит в артефактах фазы: `outcome`
+(`hit` — lockfile checkout равен lockfile seed; `partial` — seed другого
+lockfile, установка докачивает разницу; `miss` — обычная установка), `seed`,
+`mode` (`clone` или `copy`), `built`, `files`, `bytes`, `durationMs`, `reason`,
+`refused[]`. Попытка получает этап `dependency-store` в `timings`. Экспорт:
+`materializeStore`, `dependencyStoreRoot`, типы `StoreContext`, `StoreReceipt`.
+
 `policyDigest(policy)` — digest загруженной политики целиком: им сверяются
 применённая политика (`control.appliedPolicy`) и запрос операции
 `control.reconfigure`. `executionDigest(policy)` — digest исполнительной

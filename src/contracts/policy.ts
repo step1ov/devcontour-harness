@@ -123,6 +123,26 @@ export const roleBindingSchema = z.strictObject({
   requiresContract: z.boolean().default(false),
 });
 
+/**
+ * Хранилище зависимостей репозитория: harness сам держит seed менеджера пакетов
+ * по lockfile целевой ветки и разворачивает его в каждый checkout (см.
+ * `verification/dependency-store.ts`). Нет поля — поведение и digest прежние.
+ */
+export const dependencyStoreSchema = z.strictObject({
+  manager: z.enum(['pnpm']),
+  /** Lockfile относительно корня репозитория. */
+  lockfile: relativePathSchema.default('pnpm-lock.yaml'),
+  /** Предел логического размера seeds репозитория на диске. */
+  maxBytes: z
+    .number()
+    .int()
+    .min(1024 * 1024)
+    .default(8 * 1024 * 1024 * 1024),
+  /** Предел сборки seed; проверка, ждущая чужую сборку, ждёт столько же. */
+  timeoutMs: z.number().int().positive().max(3_600_000).default(600000),
+});
+export type DependencyStorePolicy = z.infer<typeof dependencyStoreSchema>;
+
 export const repositoryPolicySchema = z.strictObject({
   id: idSchema,
   /**
@@ -144,6 +164,8 @@ export const repositoryPolicySchema = z.strictObject({
   environment: environmentSchema.optional(),
   lifecycle: lifecycleSchema.optional(),
   prepare: z.array(stepSchema).default([]),
+  /** Необязательное поле без умолчания: политика без него сохраняет digest. */
+  dependencyStore: dependencyStoreSchema.optional(),
   dependencyBuild: z.array(stepSchema).default([]),
   dependencyArtifacts: z.array(relativePathSchema).default([]),
   preflight: z.array(stepSchema).default([]),

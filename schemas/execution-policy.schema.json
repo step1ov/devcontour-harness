@@ -677,6 +677,40 @@
               "additionalProperties": false
             }
           },
+          "dependencyStore": {
+            "type": "object",
+            "properties": {
+              "manager": {
+                "type": "string",
+                "enum": [
+                  "pnpm"
+                ]
+              },
+              "lockfile": {
+                "default": "pnpm-lock.yaml",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500,
+                "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+              },
+              "maxBytes": {
+                "default": 8589934592,
+                "type": "integer",
+                "minimum": 1048576,
+                "maximum": 9007199254740991
+              },
+              "timeoutMs": {
+                "default": 600000,
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 3600000
+              }
+            },
+            "required": [
+              "manager"
+            ],
+            "additionalProperties": false
+          },
           "dependencyBuild": {
             "default": [],
             "type": "array",
