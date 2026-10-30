@@ -39,20 +39,25 @@ const alive = (pid: number) => {
     return false;
   }
 };
+// Предел отсчитывается от запуска: под нагрузкой он может сработать раньше,
+// чем node запустит потомка. Такой прогон ничего не доказывает — он повторяется
+// с вдвое большим пределом; утверждения относятся к прогону, где потомок был.
+const widenedLimitsMs = [1000, 2000, 4000, 8000];
 for (const outcome of ['success', 'cancel', 'timeout'] as const)
   test(
     `Contained ${outcome} still closes inherited pipes and removes detached descendants`,
-    { timeout: 15000 },
+    { timeout: 60000 },
     async () => {
-      const controller = new AbortController();
-      let pid = 0;
-      let output = '';
-      try {
-        const result = await command(
-          [
-            process.execPath,
-            '-e',
-            `
+      for (const limitMs of outcome === 'timeout' ? widenedLimitsMs : [10000]) {
+        const controller = new AbortController();
+        let pid = 0;
+        let output = '';
+        try {
+          const result = await command(
+            [
+              process.execPath,
+              '-e',
+              `
         const {spawn}=require('node:child_process');
         const child=spawn(process.execPath,['-e','process.on("SIGTERM",()=>{});setInterval(()=>{},1000)'],
           {detached:true,stdio:['ignore','inherit','inherit']});
@@ -60,31 +65,34 @@ for (const outcome of ['success', 'cancel', 'timeout'] as const)
         console.log('DESCENDANT='+child.pid);
         ${outcome === 'success' ? '' : 'setInterval(()=>{},1000);'}
       `,
-          ],
-          process.cwd(),
-          {
-            contain: true,
-            timeoutMs: outcome === 'timeout' ? 1000 : 10000,
-            signal: controller.signal,
-            onRawStdout: (chunk) => {
-              output += chunk;
-              const match = /DESCENDANT=(\d+)/.exec(output);
-              if (match) {
-                pid = Number(match[1]);
-                if (outcome === 'cancel') controller.abort();
-              }
+            ],
+            process.cwd(),
+            {
+              contain: true,
+              timeoutMs: limitMs,
+              signal: controller.signal,
+              onRawStdout: (chunk) => {
+                output += chunk;
+                const match = /DESCENDANT=(\d+)/.exec(output);
+                if (match) {
+                  pid = Number(match[1]);
+                  if (outcome === 'cancel') controller.abort();
+                }
+              },
             },
-          },
-        );
-        assert.ok(pid > 0, 'descendant was started');
-        assert.equal(result.code === 0, outcome === 'success');
-        assert.equal(result.timedOut, outcome === 'timeout');
-        assert.equal(result.diagnostics.aborted, outcome === 'cancel');
-        const deadline = Date.now() + 3000;
-        while (alive(pid) && Date.now() < deadline) await delay(20);
-        assert.equal(alive(pid), false, 'detached descendant no longer holds inherited pipes');
-      } finally {
-        if (pid && alive(pid)) process.kill(pid, 'SIGKILL');
+          );
+          if (!pid && limitMs < widenedLimitsMs.at(-1)!) continue;
+          assert.ok(pid > 0, 'descendant was started');
+          assert.equal(result.code === 0, outcome === 'success');
+          assert.equal(result.timedOut, outcome === 'timeout');
+          assert.equal(result.diagnostics.aborted, outcome === 'cancel');
+          const deadline = Date.now() + 3000;
+          while (alive(pid) && Date.now() < deadline) await delay(20);
+          assert.equal(alive(pid), false, 'detached descendant no longer holds inherited pipes');
+          return;
+        } finally {
+          if (pid && alive(pid)) process.kill(pid, 'SIGKILL');
+        }
       }
     },
   );

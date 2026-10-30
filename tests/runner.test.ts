@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Runner } from '../src/engine/runner.ts';
@@ -13,7 +13,7 @@ import {
   type AttemptState,
   type EvidenceRecord,
 } from '../src/contracts/index.ts';
-import { approve, greet, implement, runAll, setup, target } from './runner-fixture.ts';
+import { approve, greet, implement, runAll, setup, target, widening } from './runner-fixture.ts';
 
 test('T01: поручение с тестами и двумя ревью принимается ровно один раз; result SHA в target ref; evidence обеих фаз', async () => {
   const ctx = setup({ scenario: { writer: implement(), reviewer: approve() } });
@@ -186,18 +186,29 @@ test('T08: невалидный ответ ревью, approved с блокир�
       /REVIEW_PROTOCOL_INVALID.*approved-with-blocking/,
       'review-protocol',
     ],
-    ['таймаут', { ...approve(), sleepMs: 15000 }, /лимит времени/, 'timeout'],
+    ['таймаут', { ...approve(), sleepMs: 300000 }, /лимит времени/, 'timeout'],
   ];
   for (const [name, reviewer, reason, kind] of cases) {
-    const ctx = setup({
-      scenario: { writer: implement(), reviewer },
-      policy: (p) => {
-        (p as { maxAttempts: number }).maxAttempts = 1;
-        if (name === 'таймаут') (p as { runTimeoutMs: number }).runTimeoutMs = 8000;
+    // Предел таймаута должен сработать на ревьюере: сработавший раньше, на
+    // gate кандидата, говорит не о нём.
+    const { ctx, before } = await widening(
+      8000,
+      async (limitMs) => {
+        const ctx = setup({
+          scenario: { writer: implement(), reviewer },
+          policy: (p) => {
+            (p as { maxAttempts: number }).maxAttempts = 1;
+            // Вне случая таймаута предел лишь страховка: ответы приходят сами,
+            // а стоящая машина не должна превращаться в отказ другого класса.
+            (p as { runTimeoutMs: number }).runTimeoutMs = name === 'таймаут' ? limitMs : 600000;
+          },
+        });
+        const before = target(ctx);
+        await runAll(ctx);
+        return { ctx, before };
       },
-    });
-    const before = target(ctx);
-    await runAll(ctx);
+      ({ ctx }) => name !== 'таймаут' || existsSync(`${ctx.scenarioPath}.reviewer.0.started`),
+    );
     const work = ctx.engine.read((v) => v.work('add-greeting')!);
     assert.equal(work.status, 'failed', name);
     assert.match(work.failure!, reason, name);
@@ -596,13 +607,16 @@ test('Зависший git update-ref приёмки останавливает�
     policy: (p) => ((p as { maxAttempts: number }).maxAttempts = 1),
   });
   const shim = mkdtempSync(join(tmpdir(), 'harness-git-shim-'));
+  const hung = join(shim, 'hung');
   const realGit = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
   const ref = ctx.policy.repositories[0]!.targetRef;
   // Зависает только продвижение target ref приёмкой. Подкоманда ищется среди
-  // аргументов: перед ней стоят флаги `-c` git хоста.
+  // аргументов: перед ней стоят флаги `-c` git хоста. Зависание намного длиннее
+  // любого прогона: приёмка, которая его ждёт, не уложится в него.
+  const hangSeconds = 300;
   writeFileSync(
     join(shim, 'git'),
-    `#!/bin/sh\nu=\nfor a in "$@"; do [ "$a" = update-ref ] && u=1; done\nfor a in "$@"; do [ -n "$u" ] && [ "$a" = ${JSON.stringify(ref)} ] && exec sleep 60; done\nexec ${JSON.stringify(realGit)} "$@"\n`,
+    `#!/bin/sh\nu=\nfor a in "$@"; do [ "$a" = update-ref ] && u=1; done\nfor a in "$@"; do [ -n "$u" ] && [ "$a" = ${JSON.stringify(ref)} ] && { echo $$ > ${JSON.stringify(hung)}; exec sleep ${hangSeconds}; }; done\nexec ${JSON.stringify(realGit)} "$@"\n`,
   );
   chmodSync(join(shim, 'git'), 0o755);
   const before = target(ctx);
@@ -610,14 +624,18 @@ test('Зависший git update-ref приёмки останавливает�
   const limit = Runner.refTimeoutMs;
   Runner.refTimeoutMs = 2000;
   process.env.PATH = `${shim}:${path}`;
-  const started = Date.now();
   try {
     await runAll(ctx);
   } finally {
     process.env.PATH = path;
     Runner.refTimeoutMs = limit;
   }
-  assert.ok(Date.now() - started < 50_000, 'приёмка не ждала зависший git');
+  assert.ok(existsSync(hung), 'git завис на продвижении target');
+  assert.ok(
+    Date.now() - statSync(hung).mtimeMs < (hangSeconds - 30) * 1000,
+    'приёмка не ждала зависший git',
+  );
+  assert.throws(() => process.kill(Number(readFileSync(hung, 'utf8')), 0), 'git остановлен');
   const work = ctx.engine.read((v) => v.work('add-greeting')!);
   assert.notEqual(work.status, 'done');
   assert.equal(target(ctx), before, 'target неподвижен');

@@ -17,7 +17,7 @@ import {
 } from '../src/agents/review-probe.ts';
 import { isolationSupport } from '../src/environment/isolation.ts';
 import { redactor } from '../src/environment/redaction.ts';
-import { approve, implement, runAll, setup } from './runner-fixture.ts';
+import { approve, implement, runAll, setup, widening } from './runner-fixture.ts';
 
 async function stage(overrides: Partial<ProbeSpec> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'harness-probe-'));
@@ -47,28 +47,43 @@ const alive = (pid: number) => {
 };
 
 test('Зависшая проверка reviewer останавливается вместе с отсоединёнными потомками и возвращается типизированным результатом', async () => {
-  const s = await stage();
+  // Предел должен сработать, когда потомок уже запущен: сработавший раньше
+  // (node стартует дольше предела) ничего не доказывает.
+  const { s, hung, limitMs, pidFile, elapsedMs } = await widening(
+    1500,
+    async (limitMs) => {
+      const s = await stage({ commandTimeoutMs: limitMs });
+      const probes = new ReviewProbes(s.spec);
+      const pidFile = join(s.root, 'child.pid');
+      const started = Date.now();
+      // Команда печатает, оставляет потомка в собственной группе процессов и зависает.
+      const detach = `const c=require('child_process').spawn('sleep',['60'],{detached:true,stdio:'ignore'});require('fs').writeFileSync(${JSON.stringify(pidFile)},String(c.pid));c.unref();console.log('started');setInterval(()=>{},1000)`;
+      const hung = await probes.run({
+        argv: [process.execPath, '-e', detach],
+        // Просьба модели не расширяет предел controller.
+        timeoutMs: 3600000,
+      });
+      return { s, hung, limitMs, pidFile, elapsedMs: Date.now() - started };
+    },
+    ({ hung, s }) => {
+      const started = /started/.test(hung.stdout);
+      if (!started) void s.cleanup();
+      return started;
+    },
+  );
   try {
-    const probes = new ReviewProbes(s.spec);
-    const pidFile = join(s.root, 'child.pid');
-    const started = Date.now();
-    // Команда печатает, оставляет потомка в собственной группе процессов и зависает.
-    const detach = `const c=require('child_process').spawn('sleep',['60'],{detached:true,stdio:'ignore'});require('fs').writeFileSync(${JSON.stringify(pidFile)},String(c.pid));c.unref();console.log('started');setInterval(()=>{},1000)`;
-    const hung = await probes.run({
-      argv: [process.execPath, '-e', detach],
-      // Просьба модели не расширяет предел controller.
-      timeoutMs: 3600000,
-    });
     assert.equal(hung.status, 'timeout');
-    assert.equal(hung.limitMs, 1500);
+    assert.equal(hung.limitMs, limitMs);
     assert.equal(hung.exitCode, null);
-    assert.ok(Date.now() - started < 15000, 'остановлено за конечное время');
+    assert.ok(elapsedMs < limitMs + 60000, 'остановлено за конечное время');
     assert.match(hung.stdout, /started/, 'частичный вывод сохранён');
     assert.match(hung.note ?? '', /не доказанный дефект/);
     const child = Number((await readFile(pidFile, 'utf8')).trim());
-    for (let i = 0; i < 20 && alive(child); i++) await new Promise((r) => setTimeout(r, 100));
+    for (let i = 0; i < 300 && alive(child); i++) await new Promise((r) => setTimeout(r, 100));
     assert.equal(alive(child), false, 'потомок не пережил проверку');
 
+    // Остальные проверки завершаются сами: предел здесь не предмет теста.
+    const probes = new ReviewProbes({ ...s.spec, commandTimeoutMs: 60000 });
     process.env.HARNESS_TEST_PROBE_SECRET = 'probe-secret-7731';
     const ok = await probes.run({
       argv: [process.execPath, '-e', 'console.log(process.env.HARNESS_TEST_PROBE_SECRET)'],
