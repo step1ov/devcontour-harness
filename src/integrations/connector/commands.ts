@@ -294,7 +294,8 @@ export class Connector {
   /**
    * Прочитать и предпросмотреть снимок; записать graph/context/manifest для
    * `review-plan`/`approve`. Снимок закрепляется в состоянии коннектора по
-   * semantic digest: повтор неизменной постановки ничего не меняет.
+   * semantic digest: повтор неизменной постановки ничего не меняет, а возврат
+   * к прежней редакции снова закрепляет её запись (`created: false`).
    */
   async snapshot(outDir?: string) {
     const snapshot = await this.source.snapshot();

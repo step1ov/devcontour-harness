@@ -682,6 +682,70 @@ test('B11: CLI review-plan --source доверяет baseline; без --source, 
   }
 });
 
+test('B13: возврат baseline и задачи к прежней редакции снимается source-snapshot; запись снимка та же', async () => {
+  const s = await scenario(backend);
+  try {
+    const { dep, task, sha } = await listed(s);
+    const pin = async () => {
+      const o = await s.open();
+      try {
+        return await o.connector.snapshot(join(s.root, 'snapshot'));
+      } finally {
+        o.close();
+      }
+    };
+    const runnable = async () => {
+      const o = await s.open();
+      try {
+        return (await o.connector.prepareRun(o.h)).graph.source?.revision;
+      } finally {
+        o.close();
+      }
+    };
+    const first = await pin();
+    assert.equal(first.created, true);
+    assert.equal(await runnable(), first.revision);
+
+    // Правка записи baseline и возврат: закреплена последняя редакция.
+    setBaseline(s, { sha, tasks: [dep.key], reason: reason + '!' });
+    const edited = await pin();
+    assert.equal(edited.created, true);
+    assert.equal(await runnable(), edited.revision);
+    setBaseline(s, { sha, tasks: [dep.key], reason });
+    const opened = await s.open();
+    await assert.rejects(opened.connector.prepareRun(opened.h), refused('APPROVAL_STALE'));
+    const stored = opened.connector.store.snapshot(first.revision)!;
+    opened.close();
+    const back = await pin();
+    assert.equal(back.created, false);
+    assert.equal(back.revision, first.revision);
+    assert.equal(await runnable(), first.revision);
+
+    // Повтор и запись остаются прежними: само закрепление не создаёт редакцию.
+    assert.equal((await pin()).created, false);
+    const o = await s.open();
+    assert.deepEqual(o.connector.store.snapshot(first.revision), stored);
+    assert.equal(o.connector.store.latestSnapshot(first.graphId)!.revision, first.revision);
+    assert.equal((await o.connector.status()).snapshot?.revision, first.revision);
+    o.close();
+
+    // Та же правка и возврат в самой задаче.
+    await s.project.admin.updateTask(task.id, { title: 'Use greeting, edited' });
+    const retitled = await pin();
+    assert.notEqual(retitled.revision, first.revision);
+    await s.project.admin.updateTask(task.id, { title: 'Use greeting' });
+    assert.equal(await pin().then((p) => p.revision), first.revision);
+    assert.equal(await runnable(), first.revision);
+
+    // Возвращённая редакция исполняется обычным путём.
+    const { opened: last, run } = await s.snapshotAndRun();
+    assert.equal(run.works[0]!.status, 'done');
+    last.close();
+  } finally {
+    await s.cleanup();
+  }
+});
+
 test('B12: снимок без baseline не меняется: digest прежней версии, старый manifest читается', async () => {
   // Значения получены на версии до появления baseline; вход закреплён здесь.
   const config = parseConfig(
