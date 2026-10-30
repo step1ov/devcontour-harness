@@ -488,7 +488,7 @@ test('Compiler diagnostic survives aggregate and warning tails into the next wri
     assert.equal(evidence.exitCode, 1);
     assert.equal(evidence.passed, false);
     assert.match(evidence.summary, /src\/widget.ts\(33,23\): error TS2742/);
-    assert.match(failure!.message, /error TS2742/);
+    assert.match(failure.message, /error TS2742/);
     assert.doesNotMatch(evidence.summary, /npmrc|Summary:/);
     const { engine } = engineOf();
     ready(engine, graphOf({ a: [] }));
@@ -498,14 +498,19 @@ test('Compiler diagnostic survives aggregate and warning tails into the next wri
         {
           ...attempt,
           id: 'previous',
-          error: failure!.message,
+          error: failure.message,
           evidence: [{ ...evidence, id: 'e', runId: 'previous', createdAt: attempt.startedAt }],
         },
       ],
       'next',
     );
-    assert.match(history[0].error!, /TS2742/);
-    assert.match(history[0].evidence[0].summary, /src\/widget.ts\(33,23\): error TS2742/);
+    const previous = history[0];
+    assert.ok(previous);
+    assert.ok(previous.error);
+    assert.match(previous.error, /TS2742/);
+    const previousEvidence = previous.evidence[0];
+    assert.ok(previousEvidence);
+    assert.match(previousEvidence.summary, /src\/widget.ts\(33,23\): error TS2742/);
   }
 });
 
@@ -538,7 +543,7 @@ test('Compiler selection keeps two earliest errors per stream, bounded and redac
   assert.match(evidence.summary, /widget.c:2:2: error:/);
   assert.doesNotMatch(evidence.summary, /widget.c:[3-8]:2/);
   assert.ok(evidence.summary.length <= 'Код выхода 3: '.length + 290 * 2 + 3);
-  for (const value of [evidence.summary, failure!.message, readFileSync(evidence.log, 'utf8')]) {
+  for (const value of [evidence.summary, failure.message, readFileSync(evidence.log, 'utf8')]) {
     assert.ok(!value.includes(secret));
     assert.ok(!value.includes(secret.slice(0, 10)), 'no secret prefix at clipping boundary');
   }
