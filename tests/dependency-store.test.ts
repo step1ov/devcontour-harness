@@ -42,6 +42,7 @@ import {
   type StoreContext,
 } from '../src/verification/dependency-store.ts';
 import { runGatesAt, type GatesAtContext } from '../src/verification/gates-at.ts';
+import { components } from './components-fixture.ts';
 import { ready } from './engine-fixture.ts';
 import { example } from './fixtures.ts';
 import { write } from './git-fixture.ts';
@@ -104,7 +105,7 @@ const TARBALLS = new Map<string, Buffer>(
 
 /** Реестр на 127.0.0.1; `downloads` — успешно отданные tarball, `failNext` — отказать N раз. */
 async function registry(t: TestContext) {
-  const state = { downloads: [] as string[], failNext: 0, url: '' };
+  const state = { downloads: [] as string[], failNext: 0, delayMs: 0, url: '' };
   const server = createServer((req, res) => {
     const path = decodeURIComponent(req.url ?? '/');
     const body = TARBALLS.get(path);
@@ -115,7 +116,10 @@ async function registry(t: TestContext) {
         return;
       }
       state.downloads.push(path.split('/').at(-1)!);
-      res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(body);
+      setTimeout(
+        () => res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(body),
+        state.delayMs,
+      );
       return;
     }
     const name = path.slice(1);
@@ -610,8 +614,12 @@ test(
     const reg = await registry(t);
     const ctx = await contour(reg.url, { 'dep-a': '1.0.0', 'dep-b': '1.1.0' });
     const base = ctx.repo.head();
+    // Медленный реестр: сборка идёт, пока стартуют остальные проверки.
+    reg.delayMs = 3000;
     const all = await Promise.all([ctx.check(base), ctx.check(base), ctx.check(base)]);
+    reg.delayMs = 0;
     for (const r of all) gatesPassed(r);
+    for (const r of all) assert.equal(r.receipt.reason, undefined, r.receipt.reason);
     assert.deepEqual(
       all.map((r) => r.receipt.outcome),
       ['hit', 'hit', 'hit'],
@@ -619,6 +627,8 @@ test(
     assert.equal(all.filter((r) => r.receipt.built).length, 1, 'сборка одна');
     assert.deepEqual(reg.downloads.sort(), ['dep-a-1.0.0.tgz', 'dep-b-1.1.0.tgz']);
     assert.equal(readdirSync(ctx.seeds).length, 1);
+    const failed = join(ctx.state, 'dependency-store', ctx.repoPolicy.id, 'failed');
+    assert.equal(existsSync(failed), false, 'ни одна сборка не отказала');
   },
 );
 
@@ -694,6 +704,7 @@ test(
                 'node',
                 '-e',
                 useGate('dep-a', '1.0.0') +
+                  `;if(process.env.npm_config_store_dir!==process.cwd()+'/.pnpm-store'){console.error('нет хранилища в окружении');process.exit(1)}` +
                   `;require('fs').mkdirSync('reports',{recursive:true});require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="use"/></testsuite>')`,
               ],
               report: { type: 'junit', path: 'reports/joint-use.xml' },
@@ -890,6 +901,26 @@ test(
     assert.equal(readFileSync(seedFile, 'utf8'), text);
   },
 );
+
+test('DS16: снимок зависимости и проверка потребителя разворачивают своё хранилище', async () => {
+  const ctx = components({
+    chain: true,
+    policy: (p) => {
+      for (const r of p.repositories) r.dependencyStore = { manager: 'pnpm' };
+    },
+  });
+  await ctx.runner.init();
+  ready(ctx.engine, ctx.graph, 'runner-1');
+  await ctx.runner.drain();
+  const work = ctx.engine.read((v) => v.work(ctx.graph.orders[0]!.id)!);
+  assert.equal(work.status, 'done', work.failure);
+  const receipts = readdirSync(ctx.state, { recursive: true })
+    .map(String)
+    .filter((path) => path.endsWith('dependency-store.json'));
+  const at = (pattern: RegExp) => receipts.some((path) => pattern.test(path));
+  assert.ok(at(/dependency-build\/mid\/dependency-store\.json$/), receipts.join('\n'));
+  assert.ok(at(/integration\/consumer\/product\/dependency-store\.json$/), receipts.join('\n'));
+});
 
 test('DS15: doctor называет отсутствующий lockfile и менеджер хранилища', async () => {
   const ctx = setup({
