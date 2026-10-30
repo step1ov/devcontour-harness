@@ -588,6 +588,32 @@ test('A compiler line already in the tail is not repeated', async () => {
   );
 });
 
+test('A compiler line cut out of the tail by its limit is still reported', async () => {
+  const line = `src/i.ts(3,14): error TS2322: Type '{ ${'first: string; '.repeat(16)}}'`;
+  const summary = await diagnosticOf([line, 'x'.repeat(130), 'y'.repeat(130)]);
+  assert.ok(summary.startsWith('Код выхода 1: src/i.ts(3,14): error TS2322'), summary);
+});
+
+test('A secret split by color codes does not survive clipping in the compiler cause', async () => {
+  const r = repo();
+  const secret = 'synthetic-secret-abcdefghijklmnopqrstuv';
+  const split = secret.slice(0, 5) + '\u001b[0m' + secret.slice(5);
+  const line = 'src/a.ts(1,1): error TS1: ' + 'p'.repeat(100) + split;
+  const { evidence, failure } = await gate(
+    r.dir,
+    r.head(),
+    {
+      command: nodeGate(
+        `console.log(${JSON.stringify([line, 'a', 'b', 'c', 'd', 'e'].join('\n'))});process.exit(1)`,
+      ),
+    },
+    secret,
+  );
+  assert.match(evidence.summary, /error TS1/);
+  for (const value of [evidence.summary, failure?.message ?? ''])
+    assert.ok(!value.includes(secret.slice(0, 12)), value);
+});
+
 test('Non-compiler lines leave the tail as it was', async () => {
   for (const line of [
     '12:34:56 ERROR: request failed',

@@ -217,12 +217,16 @@ function diagnostic(stderr: string, stdout: string, redact?: (value: string) => 
     // Компилятор печатает причину раньше итогов package manager, и хвост её
     // вытесняет. Первая ошибка дописывается к хвосту, а не заменяет его: отпечаток
     // отказа различает провалы по хвосту, а распознавание по строке — эвристика.
+    // Цвет снимается до redact, иначе обрезка оставит склеенный им префикс секрета.
     // Проверяется обрезанная строка: это ограничивает разбор и гарантирует, что
     // найденное попадёт в итог.
-    const cause = lines
-      .map((line) => clip(line.replace(ansiEscape, '')))
-      .find((line, index) => compilerError.test(line) && index < lines.length - last.length);
-    return cause ? cause + ' | ' + ending : ending;
+    const cause = text
+      .split('\n')
+      .map((line) => line.replace(ansiEscape, ''))
+      .map((line) => clip((redact ? redact(line) : line).trim()))
+      .find((line) => compilerError.test(line));
+    const visible = cause && ending.replace(ansiEscape, '').includes(cause.replace(/…$/, ''));
+    return cause && !visible ? cause + ' | ' + ending : ending;
   };
   return [tail(stdout), tail(stderr)].filter(Boolean).join(' | ');
 }
