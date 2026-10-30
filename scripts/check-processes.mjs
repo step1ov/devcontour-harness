@@ -60,6 +60,11 @@ async function inventory(mark) {
     '-o',
     'pid=,ppid=,lstart=,stat=,command=',
   ]);
+  return parsePsInventory(stdout, mark);
+}
+
+/** Darwin ps lstart is second-granularity; retain invocation ownership too. */
+export function parsePsInventory(stdout, mark) {
   const needle = mark ? new RegExp(`(?:^|\\s)${MARK}=${mark}(?:\\s|$)`) : undefined;
   return stdout.split('\n').flatMap((line) => {
     const row = /^\s*(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s+(\S+)\s+(.*)$/.exec(line);
@@ -76,7 +81,7 @@ async function inventory(mark) {
   });
 }
 
-/** Reused PIDs are not owned merely because an earlier process had that PID. */
+/** Historical identities discover candidates; only a fresh ownership chain permits signaling. */
 export function ownedProcesses(rows, seen) {
   const owned = new Map(
     rows
@@ -91,8 +96,11 @@ export function ownedProcesses(rows, seen) {
   return owned;
 }
 
-/** A second identity snapshot immediately precedes each batch of individual signals. */
-export function signalSameProcesses(candidates, current, signal, kill = process.kill) {
+/** Fresh marker/parent ownership and start identity precede each individual signal batch.
+ * ps snapshots and kill are not atomic. A remembered PID/start alone never authorizes a signal.
+ */
+export function signalSameProcesses(candidates, rows, signal, kill = process.kill) {
+  const current = ownedProcesses(rows, new Map());
   for (const [pid, start] of candidates)
     if (pid !== process.pid && current.get(pid) === start)
       try {
@@ -122,7 +130,9 @@ export function checkProcesses() {
       const candidates = await sample(true);
       if (!candidates.size) return;
       // Do not signal an old PID/group after a grace timer: re-read identities.
-      const current = new Map((await inventory()).map((r) => [r.pid, r.start]));
+      // Keep the invocation marker in this fresh snapshot. Coarse lstart plus
+      // a historical PID can describe an unrelated replacement process.
+      const current = await inventory(mark);
       signalSameProcesses(
         candidates,
         current,

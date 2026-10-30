@@ -151,7 +151,7 @@ test('Check cleanup never signals a reused PID or follows its unrelated children
     signalSameProcesses(
       this: void,
       candidates: Map<number, string>,
-      current: Map<number, string>,
+      current: { pid: number; ppid: number; start: string; marked: boolean }[],
       signal: string,
       kill: (pid: number, signal: string) => void,
     ): void;
@@ -179,14 +179,70 @@ test('Check cleanup never signals a reused PID or follows its unrelated children
   const killed: number[] = [];
   signalSameProcesses(
     candidates,
-    new Map([
-      [902, 'reused-after-inventory'],
-      [904, 'tagged-orphan'],
-    ]),
+    [
+      { pid: 902, ppid: 1, start: 'reused-after-inventory', marked: false },
+      { pid: 904, ppid: 1, start: 'tagged-orphan', marked: true },
+    ],
     'SIGKILL',
     (pid) => {
       killed.push(pid);
     },
   );
   assert.deepEqual(killed, [904], 'identity changed after discovery: do not signal that PID');
+});
+
+test('Darwin process snapshots do not signal same-second PID replacements with a different invocation marker', async () => {
+  const module: string = '../scripts/check-processes.mjs';
+  type Row = { pid: number; ppid: number; start: string; marked: boolean };
+  const { parsePsInventory, ownedProcesses, signalSameProcesses } = (await import(module)) as {
+    parsePsInventory(this: void, stdout: string, mark: string): Row[];
+    ownedProcesses(this: void, rows: Row[], seen: Map<number, string>): Map<number, string>;
+    signalSameProcesses(
+      this: void,
+      candidates: Map<number, string>,
+      rows: Row[],
+      signal: string,
+      kill: (pid: number, signal: string) => void,
+    ): void;
+  };
+  const row = (pid: number, ppid: number, marker = '') =>
+    `${pid} ${ppid} Fri Oct 30 08:00:00 2026 S node fixture ${marker ? 'DEVCONTOUR_CHECK_INVOCATION=' + marker : ''}`;
+  const discovered = parsePsInventory(row(901, 1, 'owned'), 'owned');
+  const candidates = ownedProcesses(discovered, new Map());
+  const replacement = parsePsInventory(
+    [row(901, 1, 'different'), row(902, 901)].join('\n'),
+    'owned',
+  );
+  assert.equal(
+    discovered[0].start,
+    replacement[0].start,
+    'real ps format cannot distinguish these start times',
+  );
+  const killed: number[] = [];
+  signalSameProcesses(candidates, replacement, 'SIGKILL', (pid) => {
+    killed.push(pid);
+  });
+  assert.deepEqual(killed, [], 'fresh invocation ownership is required even when PID/start match');
+
+  const current = parsePsInventory([row(901, 1, 'owned'), row(902, 901)].join('\n'), 'owned');
+  const owned = ownedProcesses(current, new Map());
+  signalSameProcesses(owned, current, 'SIGTERM', (pid) => {
+    killed.push(pid);
+  });
+  assert.deepEqual(
+    killed,
+    [901, 902],
+    'tagged orphans and their current untagged children still terminate',
+  );
+
+  const rememberedOrphan = new Map([[903, current[0].start]]);
+  signalSameProcesses(
+    rememberedOrphan,
+    parsePsInventory(row(903, 1), 'owned'),
+    'SIGKILL',
+    (pid) => {
+      killed.push(pid);
+    },
+  );
+  assert.deepEqual(killed, [901, 902], 'history alone cannot authorize killing an unmarked orphan');
 });
