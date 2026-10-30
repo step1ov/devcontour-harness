@@ -64,7 +64,7 @@ export function failureFingerprint(kind: FailureKind, message: string) {
     // Предел выше всей диагностики проверки (оба потока и упавшие testcases,
     // каждое со своим лимитом): при прежних 300 символах ошибка stderr
     // оказывалась за пределом, и разные провалы получали один отпечаток.
-    .slice(0, 2000);
+    .slice(0, 4000);
   return createHash('sha256')
     .update(kind + '\n' + normalized)
     .digest('hex')

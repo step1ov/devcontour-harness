@@ -16,6 +16,8 @@ import { failureFingerprint } from '../src/contracts/failure.ts';
 import { redactor } from '../src/environment/redaction.ts';
 import { isolationSupport, watchSandboxLog } from '../src/environment/isolation.ts';
 import { TaskFailure } from '../src/engine/failure.ts';
+import { previousAttempts } from '../src/engine/prompt.ts';
+import { engineOf, graphOf, ready } from './engine-fixture.ts';
 import {
   junitSummary,
   prepareReportPath,
@@ -468,4 +470,171 @@ test('Текст провала из отчёта проходит тот же r
   const stored = JSON.stringify(evidence) + failure!.message + readFileSync(evidence.log, 'utf8');
   for (const piece of [secret, secret.slice(0, 12)])
     assert.ok(!stored.includes(piece), `нигде нет «${piece}»`);
+});
+
+test('Compiler diagnostic survives aggregate and warning tails into the next writer history', async () => {
+  const r = repo();
+  const primary =
+    'src/widget.ts(33,23): error TS2742: A portable return type annotation is necessary.';
+  for (const stream of ['log', 'error']) {
+    const { evidence, failure } = await gate(r.dir, r.head(), {
+      command: nodeGate(
+        `console.${stream}(${JSON.stringify(primary)});` +
+          `for(let i=0;i<8;i++)console.${stream}("Summary: 1 fails, 8 passes");` +
+          `console.${stream}("WARN Issue while reading '/synthetic/home/.npmrc': EPERM");process.exit(1)`,
+      ),
+    });
+    assert.equal(failure?.kind, 'gate');
+    assert.equal(evidence.exitCode, 1);
+    assert.equal(evidence.passed, false);
+    assert.match(evidence.summary, /src\/widget.ts\(33,23\): error TS2742/);
+    assert.match(failure.message, /error TS2742/);
+    assert.match(evidence.summary, /npmrc/);
+    const { engine } = engineOf();
+    ready(engine, graphOf({ a: [] }), 'writer');
+    const attempt = engine.claim('writer')!;
+    const history = previousAttempts(
+      [
+        {
+          ...attempt,
+          id: 'previous',
+          error: failure.message,
+          evidence: [{ ...evidence, id: 'e', runId: 'previous', createdAt: attempt.startedAt }],
+        },
+      ],
+      'next',
+    );
+    const previous = history[0];
+    assert.ok(previous);
+    assert.ok(previous.error);
+    assert.match(previous.error, /TS2742/);
+    const previousEvidence = previous.evidence[0];
+    assert.ok(previousEvidence);
+    assert.match(previousEvidence.summary, /src\/widget.ts\(33,23\): error TS2742/);
+  }
+});
+
+test('Without a compiler diagnostic the existing last-four-lines fallback remains', async () => {
+  const r = repo();
+  const { evidence } = await gate(r.dir, r.head(), {
+    command: nodeGate(
+      `console.log('earliest');for(let i=1;i<=5;i++)console.log('tail-'+i);process.exit(2)`,
+    ),
+  });
+  assert.equal(evidence.summary, 'Код выхода 2: tail-2 | tail-3 | tail-4 | tail-5');
+});
+
+test('Compiler cause precedes the unchanged tail per stream, bounded and redacted', async () => {
+  const r = repo();
+  const secret = 'synthetic-compiler-secret-5193';
+  const { evidence, failure } = await gate(
+    r.dir,
+    r.head(),
+    {
+      command: nodeGate(
+        `for(const stream of ['log','error'])for(let i=1;i<=8;i++)console[stream]('src/widget.c:'+i+':2: error: '+'x'.repeat(90)+process.env.SECRET+'z'.repeat(500));process.exit(3)`,
+      ),
+    },
+    secret,
+  );
+  assert.equal(failure?.kind, 'gate');
+  assert.equal(evidence.exitCode, 3);
+  assert.match(evidence.summary, /widget.c:1:2: error:/);
+  assert.doesNotMatch(evidence.summary, /widget.c:[2-4]:2/);
+  assert.match(evidence.summary, /widget.c:8:2: error:/);
+  assert.ok(evidence.summary.length <= 'Код выхода 3: '.length + (141 + 3 + 291) * 2 + 3);
+  for (const value of [evidence.summary, failure.message, readFileSync(evidence.log, 'utf8')]) {
+    assert.ok(!value.includes(secret));
+    assert.ok(!value.includes(secret.slice(0, 10)), 'no secret prefix at clipping boundary');
+  }
+});
+
+const diagnosticOf = async (lines: string[]) => {
+  const r = repo();
+  const { evidence } = await gate(r.dir, r.head(), {
+    command: nodeGate(`console.log(${JSON.stringify(lines.join('\n'))});process.exit(1)`),
+  });
+  return evidence.summary;
+};
+const noise = ['Found 1 error.', 'Failed', 'WARN one', 'WARN two'];
+const ending = noise.join(' | ');
+
+test('Compiler cause is found in pretty, colored and package manager output', async () => {
+  const pretty = 'src/a.ts:3:7 - error TS2322: Type string';
+  for (const [first, expected] of [
+    [pretty, pretty],
+    [
+      '\u001b[96msrc/a.ts\u001b[0m:\u001b[93m3\u001b[0m:\u001b[93m7\u001b[0m - \u001b[91merror\u001b[0m\u001b[90m TS2322: \u001b[0mType string',
+      pretty,
+    ],
+    ['\u001b[01m\u001b[Ksrc/a.c:3:7:\u001b[m\u001b[K error: nope', 'src/a.c:3:7: error: nope'],
+    [`packages/a typecheck: ${pretty}`, `packages/a typecheck: ${pretty}`],
+    [`web:typecheck: ${pretty}`, `web:typecheck: ${pretty}`],
+    ['app/(shop)/page.tsx(3,7): error TS1: x\r', 'app/(shop)/page.tsx(3,7): error TS1: x'],
+    ['src/a.c:3: fatal error: missing.h', 'src/a.c:3: fatal error: missing.h'],
+  ] as const) {
+    assert.equal(
+      await diagnosticOf([first, 'filler', 'filler', ...noise]),
+      `Код выхода 1: ${expected} | ${ending}`,
+    );
+  }
+});
+
+test('A compiler line already in the tail is not repeated', async () => {
+  const line = 'src/a.ts(1,1): error TS1: same';
+  assert.equal(
+    await diagnosticOf(['build', line, 'Failed']),
+    `Код выхода 1: build | ${line} | Failed`,
+  );
+});
+
+test('A compiler line cut out of the tail by its limit is still reported', async () => {
+  const line = `src/i.ts(3,14): error TS2322: Type '{ ${'first: string; '.repeat(16)}}'`;
+  const summary = await diagnosticOf([line, 'x'.repeat(130), 'y'.repeat(130)]);
+  assert.ok(summary.startsWith('Код выхода 1: src/i.ts(3,14): error TS2322'), summary);
+});
+
+test('A secret split by color codes does not survive clipping in the compiler cause', async () => {
+  const r = repo();
+  const secret = 'synthetic-secret-abcdefghijklmnopqrstuv';
+  const split = secret.slice(0, 5) + '\u001b[0m' + secret.slice(5);
+  const line = 'src/a.ts(1,1): error TS1: ' + 'p'.repeat(100) + split;
+  const { evidence, failure } = await gate(
+    r.dir,
+    r.head(),
+    {
+      command: nodeGate(
+        `console.log(${JSON.stringify([line, 'a', 'b', 'c', 'd', 'e'].join('\n'))});process.exit(1)`,
+      ),
+    },
+    secret,
+  );
+  assert.match(evidence.summary, /error TS1/);
+  for (const value of [evidence.summary, failure?.message ?? ''])
+    assert.ok(!value.includes(secret.slice(0, 12)), value);
+});
+
+test('Non-compiler lines leave the tail as it was', async () => {
+  for (const line of [
+    '12:34:56 ERROR: request failed',
+    'localhost:5432: error: connection refused',
+    'x'.repeat(500) + ' src/x.ts(1,2): error TS1: too far',
+  ])
+    assert.equal(await diagnosticOf([line, 'a', 'b', ...noise]), `Код выхода 1: ${ending}`);
+});
+
+test('A quoted compiler line cannot hide different failures from the fingerprint', async () => {
+  const quoted = 'src/x.ts(1,2): error TS1234: expected';
+  const run = (name: string) =>
+    diagnosticOf([quoted, 'a', 'b', 'c', 'd', `FAIL t > ${name}`]).then((summary) =>
+      failureFingerprint('gate', summary),
+    );
+  assert.notEqual(await run('login'), await run('cart'));
+});
+
+test('A long spaced line stays cheap to scan', async () => {
+  const started = performance.now();
+  const summary = await diagnosticOf(['a:1' + ' '.repeat(1_500_000) + 'b']);
+  assert.ok(performance.now() - started < 5000);
+  assert.ok(summary.length < 400);
 });

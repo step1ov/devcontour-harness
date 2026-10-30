@@ -184,6 +184,10 @@ export function junitSummary(
   if (!summary.tests) throw new Error('JUnit не содержит выполненных testcases');
   return summary;
 }
+const ansiEscape = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+/** Путь с расширением и координаты, после необязательного префикса `пакет скрипт: `. */
+const compilerError =
+  /^(?:\S+(?: \S+)?: )?[^\s:]+?\.[A-Za-z][A-Za-z0-9]{0,9}(?:\(\d+,\d+\): |:\d+(?::\d+)?(?:: | - ))(?:fatal )?error(?: [A-Z]+\d+)?:/;
 /**
  * Короткая выжимка вывода провалившейся проверки.
  *
@@ -191,7 +195,8 @@ export function junitSummary(
  * доступен, а в отказ попадал только «Код выхода 1». Два разных провала одной
  * проверки выглядели одной причиной — предел одинаковых повторов исчерпывался
  * на несвязанных ошибках, и подсказка повтора не содержала ничего, кроме кода
- * возврата. Берутся последние содержательные строки обоих потоков: ошибку
+ * возврата. Берутся последние содержательные строки обоих потоков и первая
+ * ошибка компилятора с координатами перед ними: ошибку
  * одни инструменты пишут в stdout, другие в stderr, и одинаковое
  * предупреждение в одном потоке не должно закрывать ошибку в другом. Секреты
  * снимаются тем же redact, что и в логе; объём ограничен.
@@ -200,15 +205,28 @@ function diagnostic(stderr: string, stdout: string, redact?: (value: string) => 
   // У каждого потока свой бюджет: общий лимит, заполняемый по очереди,
   // позволял нескольким длинным строкам одного потока вытеснить ошибку
   // другого. Redact — до обрезки, иначе префикс секрета остаётся.
+  const clip = (line: string) => (line.length > 140 ? line.slice(0, 140) + '…' : line);
   const tail = (text: string) => {
-    const joined = text
+    const lines = text
       .split('\n')
       .map((line) => (redact ? redact(line) : line).trim())
-      .filter(Boolean)
-      .slice(-4)
-      .map((line) => (line.length > 140 ? line.slice(0, 140) + '…' : line))
-      .join(' | ');
-    return joined.length > 290 ? '…' + joined.slice(-290) : joined;
+      .filter(Boolean);
+    const last = lines.slice(-4);
+    const joined = last.map(clip).join(' | ');
+    const ending = joined.length > 290 ? '…' + joined.slice(-290) : joined;
+    // Компилятор печатает причину раньше итогов package manager, и хвост её
+    // вытесняет. Первая ошибка дописывается к хвосту, а не заменяет его: отпечаток
+    // отказа различает провалы по хвосту, а распознавание по строке — эвристика.
+    // Цвет снимается до redact, иначе обрезка оставит склеенный им префикс секрета.
+    // Проверяется обрезанная строка: это ограничивает разбор и гарантирует, что
+    // найденное попадёт в итог.
+    const cause = text
+      .split('\n')
+      .map((line) => line.replace(ansiEscape, ''))
+      .map((line) => clip((redact ? redact(line) : line).trim()))
+      .find((line) => compilerError.test(line));
+    const visible = cause && ending.replace(ansiEscape, '').includes(cause.replace(/…$/, ''));
+    return cause && !visible ? cause + ' | ' + ending : ending;
   };
   return [tail(stdout), tail(stderr)].filter(Boolean).join(' | ');
 }
