@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   API_VERSION,
   HarnessError,
@@ -11,6 +11,7 @@ import {
 import type { Harness } from '../../control/harness.ts';
 import type { RunnerHooks } from '../../engine/runner.ts';
 import { redactor, type Redactor } from '../../environment/redaction.ts';
+import { withinPaths } from '../../validate.ts';
 import {
   connectorIdOf,
   loadConfig,
@@ -30,6 +31,7 @@ import {
   matchCriterion,
   readStable,
   semanticDigest,
+  type BaselineManifest,
   type SnapshotManifest,
 } from './snapshot.ts';
 import { RelayWorkSource } from './source.ts';
@@ -160,6 +162,31 @@ export class Connector {
     this.storeInstance = undefined;
   }
 
+  /**
+   * `baseline` — решение человека, поэтому файл конфигурации не должен быть
+   * доступен писателю поручения: он вне репозиториев политики или в их
+   * `protectedPaths` (runner отказывает попытке, которая их меняет).
+   */
+  baselineIssue(policy: ExecutionPolicy, baseDir: string): string | undefined {
+    const file = this.loaded.file;
+    if (!this.config.baseline || !file) return undefined;
+    const real = realpathSync(file);
+    for (const repo of policy.repositories) {
+      const root = resolveFrom(baseDir, repo.path);
+      if (!existsSync(root)) continue;
+      const path = relative(realpathSync(root), real);
+      if (path === '..' || path.startsWith('..' + sep) || isAbsolute(path)) continue;
+      if (!withinPaths(path, repo.protectedPaths))
+        return `Конфигурация коннектора с baseline лежит в репозитории ${repo.id} вне protectedPaths (${path}): писатель поручения мог бы выдать себе baseline; перенесите файл или защитите путь в политике`;
+    }
+    return undefined;
+  }
+
+  assertBaselineProtected(policy: ExecutionPolicy, baseDir: string) {
+    const issue = this.baselineIssue(policy, baseDir);
+    if (issue) throw new HarnessError('NOT_READY', issue);
+  }
+
   /* ---------------------------------------------------------------- */
   /* source-check                                                      */
   /* ---------------------------------------------------------------- */
@@ -169,9 +196,11 @@ export class Connector {
    * только чтением: без мутаций backend, без записи истории и без создания
    * состояния коннектора.
    */
-  async check(policy?: ExecutionPolicy) {
+  async check(policy?: ExecutionPolicy, baseDir?: string) {
     const config = this.config;
     const problems: string[] = [];
+    const unprotected = policy && baseDir && this.baselineIssue(policy, baseDir);
+    if (unprotected) problems.push(unprotected);
     let identity;
     try {
       identity = await checkIdentity(this.transport, config);
@@ -299,6 +328,7 @@ export class Connector {
       eligible: snapshot.problems.length === 0,
       problems: snapshot.problems.map((p) => `${p.key}: ${p.code}: ${p.message}`),
       truncated: snapshot.manifest.truncated,
+      ...(snapshot.manifest.baseline ? { baseline: snapshot.manifest.baseline } : {}),
       tasks: snapshot.manifest.tasks.map((t) => ({
         identity: t.identity,
         key: t.key,
@@ -322,7 +352,12 @@ export class Connector {
    * выполняться. Иначе отказ до любого вызова runtime. Исполняется ровно
    * закреплённый граф и контекст (те же байты, что видел reviewer плана).
    */
-  async prepareRun(h: Harness): Promise<{ graph: WorkGraph; context: ContextSnapshot }> {
+  async prepareRun(h: Harness): Promise<{
+    graph: WorkGraph;
+    context: ContextSnapshot;
+    baseline?: BaselineManifest;
+  }> {
+    this.assertBaselineProtected(h.policy, h.options.baseDir);
     const fresh = await this.source.snapshot();
     const stored = this.store.latestSnapshot(fresh.graph.id);
     if (!stored)
@@ -356,12 +391,17 @@ export class Connector {
         .some((o) => o.status === 'delivered' && o.revision === digest);
     };
     assertEligible({ ...fresh, problems: fresh.problems.filter((p) => !own(p)) });
-    return { graph: stored.graph as WorkGraph, context: stored.context as ContextSnapshot };
+    const { baseline } = stored.manifest as SnapshotManifest;
+    return {
+      graph: stored.graph as WorkGraph,
+      context: stored.context as ContextSnapshot,
+      ...(baseline ? { baseline } : {}),
+    };
   }
 
   async run(h: Harness, options: { author?: Author; once?: boolean } = {}) {
-    const { graph, context } = await this.prepareRun(h);
-    return h.run({
+    const { graph, context, baseline } = await this.prepareRun(h);
+    const data = await h.run({
       graph,
       context,
       author: options.author ?? 'external',
@@ -369,6 +409,7 @@ export class Connector {
       sink: this.sink,
       ...(options.once ? { once: true } : {}),
     });
+    return { ...data, ...(baseline ? { baseline } : {}) };
   }
 
   /* ---------------------------------------------------------------- */
@@ -471,7 +512,13 @@ export class Connector {
         provider: this.config.provider,
         projectId: this.config.projectId,
         ...(manifest
-          ? { snapshot: { revision: manifest.revision, graphId: manifest.graphId } }
+          ? {
+              snapshot: {
+                revision: manifest.revision,
+                graphId: manifest.graphId,
+                ...(manifest.baseline ? { baseline: manifest.baseline } : {}),
+              },
+            }
           : {}),
         ownership: { stateDir: this.stateDir, store: this.storeFile, note: OWNERSHIP_NOTE },
         tasks,

@@ -6,7 +6,13 @@ import {
   type SourceRef,
   type WorkSource,
 } from '../../contracts/index.ts';
-import { connectorIdOf, parseIdentity, type ConnectorConfig } from './config.ts';
+import {
+  baselineRecord,
+  connectorIdOf,
+  orderIdOf,
+  parseIdentity,
+  type ConnectorConfig,
+} from './config.ts';
 import {
   assertEligible,
   readFailure,
@@ -25,8 +31,9 @@ import { TransportError, type RelayTransport } from './transport.ts';
  * - `revision` — текущий semantic digest задачи (или набора) для обнаружения
  *   конфликта; ошибка сети/CLI — исключение, а не «записи нет»;
  * - `trusts` — только receipt, выданный этим коннектором (`issuer` = его ID),
- *   digest которого совпадает с записью в его состоянии. Статус задачи done
- *   доверием не является.
+ *   digest которого совпадает с записью в его состоянии, либо запись базовой
+ *   линии текущей конфигурации для задачи, которую подтверждает backend.
+ *   Статус задачи done доверием не является.
  */
 export class RelayWorkSource implements WorkSource {
   readonly id: string;
@@ -87,9 +94,9 @@ export class RelayWorkSource implements WorkSource {
     return mapping ? semanticDigest(config, mapping, read) : undefined;
   }
 
-  trusts(prerequisite: Prerequisite): Promise<boolean> {
+  async trusts(prerequisite: Prerequisite): Promise<boolean> {
     const receipt = prerequisite.receipt;
-    if (receipt.kind !== 'trusted' || receipt.issuer !== this.id) return Promise.resolve(false);
+    if (receipt.kind !== 'trusted' || receipt.issuer !== this.id) return false;
     const stored = this.options.store
       .receipts(prerequisite.id)
       .find(
@@ -99,6 +106,32 @@ export class RelayWorkSource implements WorkSource {
           r.resultSha === prerequisite.resultSha &&
           r.repositoryId === prerequisite.repositoryId,
       );
-    return Promise.resolve(Boolean(stored));
+    return Boolean(stored) || this.trustsBaseline(prerequisite, receipt.digest);
+  }
+
+  /**
+   * Предпосылка базовой линии сверяется с загруженной конфигурацией целиком.
+   * Digest не секрет: что ключ — именно задача предпосылки, подтверждает backend.
+   */
+  private async trustsBaseline(prerequisite: Prerequisite, digest: string) {
+    const config = this.options.config;
+    if (prerequisite.resultSha !== config.baseline?.sha) return false;
+    const repositories = config.tasks.map((m) => m.repositoryId ?? config.repository.id);
+    if (!repositories.includes(prerequisite.repositoryId)) return false;
+    const key = config.baseline.tasks.find(
+      (k) =>
+        digestOf(baselineRecord(config, k, prerequisite.id, prerequisite.repositoryId)) === digest,
+    );
+    if (!key) return false;
+    try {
+      const { task } = await this.options.transport.readTask(key);
+      return (
+        task.key === key &&
+        orderIdOf(config.provider, config.projectId, task.id) === prerequisite.id
+      );
+    } catch (error) {
+      if (error instanceof TransportError && error.kind === 'not-found') return false;
+      throw readFailure(error, 'Задача ' + key);
+    }
   }
 }

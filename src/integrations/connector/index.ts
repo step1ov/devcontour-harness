@@ -6,6 +6,7 @@
 export * from './transport.ts';
 export {
   connectorConfigSchema,
+  baselineSchema,
   criterionMappingSchema,
   taskMappingSchema,
   loadConfig,
@@ -19,6 +20,7 @@ export {
   mappingDigest,
   completionColumn,
   storeFileOf,
+  type Baseline,
   type ConnectorConfig,
   type ConnectorConfigInput,
   type CriterionMapping,
@@ -45,6 +47,7 @@ export {
   localContext,
   takeSnapshot,
   assertEligible,
+  type BaselineManifest,
   type BuiltSnapshot,
   type SnapshotManifest,
   type SnapshotProblem,

@@ -428,6 +428,7 @@ async function run(
                   'INVALID_INPUT',
                   `Граф из источника ${graph.source.connector}, передан источник ${connector.id}`,
                 );
+              connector.assertBaselineProtected(b.policy, b.baseDir);
               const trusted = new Set<string>();
               for (const p of graph.prerequisites)
                 if (p.receipt.kind === 'trusted' && (await connector.source.trusts(p)))
@@ -570,10 +571,10 @@ async function run(
       return { command, data: { pin: profilePin(profile), profile } };
     }
     case 'source-check': {
-      const policyOf = v.policy ? loadPolicy(v.policy).policy : undefined;
-      const connector = await connectorOf(need('source'), v.state ?? '.', policyOf);
+      const loaded = v.policy ? loadPolicy(v.policy) : undefined;
+      const connector = await connectorOf(need('source'), v.state ?? '.', loaded?.policy);
       try {
-        const data = await connector.check(policyOf);
+        const data = await connector.check(loaded?.policy, loaded?.baseDir);
         const ok = data.connected && data.projectMatches && data.problems.length === 0;
         return { command, data, code: ok ? exitCodes.ok : exitCodes.refused };
       } finally {

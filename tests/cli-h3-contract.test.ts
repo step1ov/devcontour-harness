@@ -79,8 +79,8 @@ const h2Commands = [
  * отказа и причин остановки `unfinished` (незавершённая работа) и `needs-lead`
  * (пустой результат без механического основания), полем `recheck` записи
  * evidence, пределом области gates `GATE_SCOPE_LIMIT` вместо 20, полем
- * `checkouts` ответа doctor и полем `localContext` ответа source-snapshot;
- * без них — те же байты.
+ * `checkouts` ответа doctor, полем `localContext` ответа source-snapshot и
+ * полем `baseline` ответов коннектора; без них — те же байты.
  */
 const H2_COMMANDS_SHA = '58efd5e554cd5b015538ef1d4e7dd8d20f24205ef24e28c5b27394642bc20e25';
 const H2_DATA_SHA = '95016c62e6e7fb134ab3dcde4aff35679951fe1b9037452bc86846230ffa5682';
@@ -258,10 +258,12 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.checkouts;
       return rest;
     }
-    // Аддитивное поле source-snapshot — пакеты `tasks[].context` (alpha.13).
-    if (k === 'properties' && v && typeof v === 'object' && 'localContext' in v) {
+    // Аддитивные поля ответов коннектора: пакеты `tasks[].context` (alpha.13) и
+    // зависимости, принятые по базовой линии.
+    if (k === 'properties' && v && typeof v === 'object' && ('localContext' in v || 'baseline' in v)) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.localContext;
+      delete rest.baseline;
       return rest;
     }
     // Ослабленный предел области gates (20 → предел gates профиля).

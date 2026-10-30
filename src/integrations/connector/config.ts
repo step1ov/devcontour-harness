@@ -79,6 +79,29 @@ export const taskMappingSchema = z.strictObject({
 });
 export type TaskMapping = z.infer<typeof taskMappingSchema>;
 
+/**
+ * Базовая линия: зависимости, закрытые до внедрения harness, принимает человек.
+ * Только явные ключи задач и один полный SHA: без шаблонов, дат и общего
+ * переключателя. Это решение оператора, а не доказательство результата.
+ */
+export const baselineSchema = z.strictObject({
+  /** Полный SHA коммита; движок проверяет его доступность в target ref. */
+  sha: z.string().regex(/^[a-f0-9]{40}$/, 'Ожидается полный SHA коммита (40 hex)'),
+  tasks: z
+    .array(
+      z
+        .string()
+        .max(200)
+        .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Ожидается точный ключ задачи, без шаблонов'),
+    )
+    .min(1)
+    .max(500)
+    .refine((keys) => new Set(keys).size === keys.length, { message: 'Ключ задачи указан дважды' }),
+  /** Почему человек принимает эти задачи без receipt. */
+  reason: z.string().trim().min(1).max(1000),
+});
+export type Baseline = z.infer<typeof baselineSchema>;
+
 const relaySettings = z.record(z.string(), z.unknown());
 
 const common = {
@@ -99,6 +122,7 @@ const common = {
     path: z.string().min(1).max(1000).optional(),
   }),
   tasks: z.array(taskMappingSchema).min(1).max(50),
+  baseline: baselineSchema.optional(),
   completion: z
     .strictObject({
       /** `complete` — закрыть задачу по правилам backend; `review-only` — оставить на проверку человеку. */
@@ -201,6 +225,12 @@ export function parseConfig(value: unknown, baseDir: string, file?: string): Loa
   const refs = parsed.data.tasks.map((t) => t.ref);
   const dup = refs.find((r, i) => refs.indexOf(r) !== i);
   if (dup) throw new HarnessError('INVALID_INPUT', 'source: задача указана дважды: ' + dup);
+  const own = parsed.data.baseline?.tasks.find((key) => refs.includes(key));
+  if (own)
+    throw new HarnessError(
+      'INVALID_INPUT',
+      `source: задача ${own} исполняется этой конфигурацией и не может быть в baseline`,
+    );
   // ID контекста задачи — `c` + 20 hex (contextIdOf): локальный пакет не может его занять.
   const taken = parsed.data.tasks
     .flatMap((t) => t.context ?? [])
@@ -273,6 +303,24 @@ export const mappingDigest = (config: ConnectorConfig, mapping: TaskMapping) =>
     repository: config.repository.id,
     completion: config.completion,
   });
+
+/**
+ * Запись базовой линии для зависимости; её digest — receipt предпосылки. Вся
+ * `baseline` внутри: любая её правка отзывает выданные предпосылки.
+ */
+export const baselineRecord = (
+  config: ConnectorConfig,
+  key: string,
+  orderId: string,
+  repositoryId: string,
+) => ({
+  kind: 'baseline',
+  issuer: connectorIdOf(config.provider, config.projectId),
+  key,
+  orderId,
+  repositoryId,
+  baseline: config.baseline,
+});
 
 /** Колонка завершения по правилам конфигурации. */
 export const completionColumn = (config: ConnectorConfig): TaskColumn =>

@@ -158,6 +158,7 @@ Standalone-хост использует `digestOf` (SHA-256 каноничес�
 | Отчёт свойств, договор проверки, корпус | `version: 1`                                                                                                                                                                                                                                       |
 | Владение репозиторием                   | `<git-common-dir>/devcontour-owner.json`                                                                                                                                                                                                           |
 | Ресурсы                                 | Отдельная база блокировок ресурсов `resources.sqlite`: блокировки устройств и портов, а не состояние исполнения                                                                                                                                    |
+| Снимок коннектора                       | Поля `proof` и `baseline` manifest необязательны: прежние записи читаются как есть. Без `baseline` в конфигурации ревизия, graph digest и context digest те же, что в прежних версиях                                                              |
 | Probe ревьюера                          | MCP-сервер `devcontour_probe`, инструмент `run_check`; протокол — построчный JSON-RPC (stdio), журнал `probes.jsonl`                                                                                                                               |
 
 ## Переменные окружения gates
