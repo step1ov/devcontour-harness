@@ -617,6 +617,39 @@ test('ревью плана и контракта: открытых находо
   assert.equal(limit.findings.filter((f) => f.status === 'open').length, 500);
 });
 
+test('ревью плана: файл ответа больше предела — RUNTIME_UNAVAILABLE с причиной, раунд не записан', async () => {
+  const dir = scratch();
+  const payload = join(dir, 'payload');
+  writeFileSync(payload, ' '.repeat(CODEX_RESULT_LIMIT + 1));
+  const adapter = (runtime: RuntimeName): RuntimeAdapter => ({
+    runtime,
+    capabilities: () => Promise.resolve({ runtime, available: true } as any),
+    invoke: () => invoke(dir, payload),
+  });
+  const adapters = { codex: adapter('codex'), claude: adapter('claude') };
+  const policy = policyOf();
+  const h = Harness.open({ policy, stateDir: dir, baseDir: process.cwd(), adapters });
+  const { technicalReview } = await import('../src/control/review.ts');
+  await assert.rejects(
+    technicalReview(h.engine, policy, adapters, {
+      kind: 'plan',
+      subject: 'g',
+      digest: 'a'.repeat(64),
+      author: 'claude',
+      instructions: ['Review.'],
+      cwd: process.cwd(),
+      artifactDir: join(dir, 'plan'),
+      denied: [dir],
+      meta: { subjectId: 'g', subjectKind: 'other' },
+    }),
+    (error: unknown) =>
+      error instanceof HarnessError &&
+      error.code === 'RUNTIME_UNAVAILABLE' &&
+      new RegExp(`не прочитан.*${CODEX_RESULT_LIMIT} байт`).test(error.message),
+  );
+  assert.deepEqual(h.engine.reviews('plan', 'g'), []);
+});
+
 const probe = (over: Partial<ProbeSpec> = {}): ProbeSpec => ({
   cwd: '/w',
   controller: [],
