@@ -213,6 +213,8 @@ test('Darwin process snapshots do not signal same-second PID replacements with a
     [row(901, 1, 'different'), row(902, 901)].join('\n'),
     'owned',
   );
+  assert.ok(discovered[0]);
+  assert.ok(replacement[0]);
   assert.equal(
     discovered[0].start,
     replacement[0].start,
@@ -222,7 +224,11 @@ test('Darwin process snapshots do not signal same-second PID replacements with a
   signalSameProcesses(candidates, replacement, 'SIGKILL', (pid) => {
     killed.push(pid);
   });
-  assert.deepEqual(killed, [], 'fresh invocation ownership is required even when PID/start match');
+  assert.equal(
+    killed.length,
+    0,
+    'fresh invocation ownership is required even when PID/start match',
+  );
 
   const current = parsePsInventory([row(901, 1, 'owned'), row(902, 901)].join('\n'), 'owned');
   const owned = ownedProcesses(current, new Map());
@@ -235,6 +241,7 @@ test('Darwin process snapshots do not signal same-second PID replacements with a
     'tagged orphans and their current untagged children still terminate',
   );
 
+  assert.ok(current[0]);
   const rememberedOrphan = new Map([[903, current[0].start]]);
   signalSameProcesses(
     rememberedOrphan,
