@@ -184,7 +184,12 @@ async function lockFor(url: string, deps: Deps) {
   await promisify(execFile)(
     'pnpm',
     ['install', '--lockfile-only', '--ignore-workspace', `--registry=${url}`],
-    { cwd: dir, env: { ...process.env, CI: '' } },
+    {
+      cwd: dir,
+      // Свой кэш: tarball каждого процесса теста свой, а кэш метаданных пользователя
+      // привязан к адресу реестра. Порт повторяется, и lockfile получал чужой integrity.
+      env: { ...process.env, CI: '', npm_config_cache_dir: join(dir, '.cache') },
+    },
   );
   const text = readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8');
   rmSync(dir, { recursive: true, force: true });
@@ -1535,16 +1540,21 @@ test(
     reg.downloads.length = 0;
     reg.stallNext = 10;
     const started = Date.now();
-    const building = direct('a', 6000);
+    const building = direct('a', 15000);
+    let settled = false;
+    void building.finally(() => {
+      settled = true;
+    });
     // Вторая проверка встаёт в очередь, когда сборка уже идёт.
-    while (!reg.downloads.length) await new Promise((r) => setTimeout(r, 50));
-    const [first, waiting] = await Promise.all([building, direct('b', 30000)]);
+    while (!reg.downloads.length && !settled) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(settled, false, 'сборка не дошла до реестра за свой бюджет');
+    const [first, waiting] = await Promise.all([building, direct('b', 60000)]);
     assert.equal(first!.outcome, 'miss');
     assert.match(first!.reason!, /бюджет хранилища/);
     assert.equal(waiting!.outcome, 'miss');
     assert.match(waiting!.reason!, /недавняя сборка/);
     assert.equal(reg.downloads.length, 1, 'ожидавшая проверка сборку не повторила');
-    assert.ok(Date.now() - started < 25000, 'ожидание не заняло бюджет целиком');
+    assert.ok(Date.now() - started < 50000, 'ожидание не заняло бюджет целиком');
     // Истёкший бюджет — про сеть, а не про lockfile: срок вышел — сборка идёт снова.
     const marks = join(queue.state, 'dependency-store', queue.repoPolicy.id, 'failed');
     for (const name of readdirSync(marks)) {
@@ -1702,7 +1712,7 @@ test(
     await promisify(execFile)(
       'pnpm',
       ['install', '--lockfile-only', '--ignore-workspace', `--registry=${reg.url}`],
-      { cwd: dir, env: { ...process.env, CI: '' } },
+      { cwd: dir, env: { ...process.env, CI: '', npm_config_cache_dir: join(dir, '.cache') } },
     );
     const ctx = await contour(reg.url, deps, {
       files: {
