@@ -127,8 +127,7 @@ gate установки остаётся обычным `pnpm install --frozen-l
 lockfile, установка докачивает разницу; `miss` — обычная установка), `seed`,
 `mode` (`clone` или `copy`), `built`, `files`, `bytes`, `durationMs`, `reason`,
 `refused[]`. Попытка получает этап `dependency-store` в `timings`. Экспорт:
-`materializeStore`, `dependencyStoreRoot`, типы `StoreContext`, `StoreReceipt`. `StoreContext.deadline`
-— момент окончания времени фазы: сборка и ожидание чужой сборки занимают не больше трети остатка.
+`materializeStore`, `dependencyStoreRoot`, типы `StoreContext`, `StoreReceipt`. `StoreContext.deadline` — момент окончания времени фазы, `phaseMs` — полная длина её предела: сборка и ожидание чужой сборки занимают не больше трети остатка.
 Исключение `materializeStore` бросает только при отмене переданного `signal`. Коды `doctor`:
 предупреждения `LOCKFILE_MISSING`, `TOOL_MISSING`, `DEPENDENCY_STORE`.
 

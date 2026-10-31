@@ -71,12 +71,13 @@ export function satisfies(version: string, required: string) {
 
 /**
  * Версии менеджера, на которых хранилище зависимостей проверено настоящим
- * прогоном в песочнице. Граница сверху — не осторожность: pnpm 11 кладёт в store
- * символические ссылки на проекты (seed такого вида отклоняется), а 12 не читает
- * `npm_config_store_dir`. Вне диапазона хранилище не вмешивается в окружение.
+ * прогоном. Граница сверху — не осторожность: с pnpm 10.27.0 `pnpm fetch` кладёт
+ * в store символическую ссылку `<store>/v10/projects/<hash>`, а seed с ссылками
+ * отклоняется; с 11.0.0 pnpm ещё и не читает `npm_config_store_dir`. Вне диапазона
+ * хранилище не вмешивается в окружение.
  */
 export const dependencyStoreVersions = {
-  pnpm: { from: '9.15.0', below: '11.0.0' },
+  pnpm: { from: '9.15.0', below: '10.27.0' },
 } as const;
 
 export function dependencyStoreSupports(

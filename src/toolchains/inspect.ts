@@ -832,6 +832,12 @@ export async function inspectRepository(
         env: { ...env, PATH },
       }).catch(() => undefined);
       const version = versionOf(found?.stdout ?? '');
+      if (!version)
+        warning(
+          'DEPENDENCY_STORE',
+          [...storeField, 'manager'],
+          `Версия ${store.manager} не определена: хранилище не действует, установка обычная`,
+        );
       const declared = packageManagerField(m, '.');
       for (const v of [version, declared?.name === store.manager ? declared.version : undefined])
         if (v && !dependencyStoreSupports(store.manager, v))
