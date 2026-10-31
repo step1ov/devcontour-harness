@@ -2,6 +2,9 @@ import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
+// Read once at load: a run points TMPDIR at its own directory afterwards.
+const parent = tmpdir();
+
 /**
  * A test run's own temporary directory. Fixtures leave their directories behind:
  * hundreds of thousands of them in the shared directory slow everything that
@@ -10,7 +13,7 @@ import { basename, dirname, join } from 'node:path';
  * /private/var, which production paths meet as well.
  */
 export function createScratch(prefix) {
-  return mkdtempSync(join(tmpdir(), prefix));
+  return mkdtempSync(join(parent, prefix));
 }
 
 /**
@@ -21,7 +24,7 @@ export function createScratch(prefix) {
 export function removeScratch(path, prefix, warn = console.error) {
   if (!existsSync(path)) return false;
   const real = realpathSync(path);
-  if (dirname(real) !== realpathSync(tmpdir()) || !basename(real).startsWith(prefix)) {
+  if (dirname(real) !== realpathSync(parent) || !basename(real).startsWith(prefix)) {
     warn(`Not a run directory, left in place: ${path}`);
     return false;
   }

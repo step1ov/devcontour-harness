@@ -34,6 +34,18 @@ test('Run cleanup cannot touch the parent or anything but a run directory', () =
   }
 });
 
+test('A run removes its directory while TMPDIR still points into it', () => {
+  const run = createScratch(prefix);
+  const saved = process.env.TMPDIR;
+  process.env.TMPDIR = run;
+  try {
+    assert.equal(removeScratch(run, prefix), true);
+    assert.equal(existsSync(run), false);
+  } finally {
+    process.env.TMPDIR = saved;
+  }
+});
+
 test('A leftover that cannot be removed warns instead of failing the run', () => {
   const run = createScratch(prefix);
   const closed = join(run, 'closed');
