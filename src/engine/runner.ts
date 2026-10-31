@@ -45,13 +45,17 @@ import { worktreeKey } from '../environment/git-trust.ts';
 import {
   attemptRefusal,
   cleanupUnfinished,
+  inspectTree,
   isWithin,
+  lockCleanup,
+  readRemoval,
   recordRemoval,
   registered,
+  removeTree,
   savePatch,
   sizeKb,
+  treeState,
   trusted,
-  uncommittedPaths,
   type WorktreeCleanupEntry,
 } from './worktree-cleanup.ts';
 import {
@@ -1539,14 +1543,29 @@ export class Runner {
     return { status: 'cleaned' as const, receipts: cleaned };
   }
 
+  /** Предел обхода дерева при очистке: дошедший до него обход отказывает. */
+  static cleanupScanLimit = 2_000_000;
+  /** Предел удаления одного дерева: большие деревья удаляются минутами. */
+  static cleanupRemovalMs = 1_800_000;
+
   /**
-   * Убрать рабочие деревья закончившихся попыток. Ветки, объекты и артефакты
+   * Убрать рабочие деревья закончившихся попыток. Ветки и достижимые коммиты
    * остаются; неподтверждённые правки сохраняются патчем в артефактах попытки
-   * до удаления. Идущая попытка, последняя попытка незакрытой работы и попытка
-   * с незавершённой очисткой отказываются поимённо, не срывая остальные.
-   * `dryRun` ничего не пишет.
+   * до удаления. В сомнении дерево остаётся: отказ назван поимённо и не срывает
+   * остальные деревья. Один запуск на каталог состояния; `dryRun` ничего не пишет.
    */
   async cleanupWorktrees({ dryRun = false }: { dryRun?: boolean } = {}) {
+    const unlock = dryRun
+      ? undefined
+      : await lockCleanup(join(this.options.stateDir, 'worktree-cleanup.lock'));
+    try {
+      return await this.sweepWorktrees(dryRun);
+    } finally {
+      await unlock?.();
+    }
+  }
+
+  private async sweepWorktrees(dryRun: boolean) {
     const worktrees: WorktreeCleanupEntry[] = [];
     const attempts = this.engine.read((v) =>
       v.attempts().map((attempt) => {
@@ -1577,9 +1596,13 @@ export class Runner {
         this.checkout(repo.id, 'worktrees'),
         join(this.dirOf(repo.id), 'worktrees'),
       ].map(worktreeKey);
-      for (const [path, head] of live) {
+      // Дерево без регистрации (удаление оборвалось после неё) git больше не
+      // покажет: о нём знает только попытка.
+      const paths = new Set([...live.keys(), ...owners.keys()]);
+      for (const path of paths) {
         if (!existsSync(path) || !roots.some((root) => isWithin(path, root))) continue;
         const owner = owners.get(path);
+        const head = live.get(path);
         const entry: WorktreeCleanupEntry = {
           path,
           repositoryId: repo.id,
@@ -1592,40 +1615,57 @@ export class Runner {
           entry.reason = 'unknown-attempt';
           continue;
         }
-        entry.sizeKb = await sizeKb(path);
         const artifacts = join(this.dirOf(repo.id), 'artifacts', owner.attempt.id);
-        const refusal =
-          owner.refusal ??
-          ((await cleanupUnfinished(artifacts, await receipts(artifacts)))
-            ? 'cleanup-pending'
-            : undefined);
-        if (refusal) {
-          entry.reason = refusal;
-          continue;
-        }
-        if (!trusted(path, repoPath)) {
-          entry.reason = 'untrusted';
-          continue;
-        }
         try {
-          entry.uncommitted = await uncommittedPaths(path);
+          entry.sizeKb = await sizeKb(path);
+          const prior = await readRemoval(artifacts, path);
+          let refusal = owner.refusal;
+          if (!refusal)
+            try {
+              if (await cleanupUnfinished(artifacts, await receipts(artifacts)))
+                refusal = 'cleanup-pending';
+            } catch {
+              refusal = 'cleanup-unreadable';
+            }
+          if (prior && prior.status !== 'removed') {
+            refusal ??= 'removal-incomplete';
+            if (prior.patch) entry.patch = prior.patch;
+          }
+          if (!live.has(path)) refusal ??= 'not-registered';
+          if (!refusal && !trusted(path, repoPath)) refusal = 'untrusted';
+          if (!refusal) {
+            const seen = await inspectTree(path, head, Runner.cleanupScanLimit);
+            refusal = seen.refusal;
+            if (seen.uncommitted !== undefined) entry.uncommitted = seen.uncommitted;
+            if (seen.ignored) entry.ignored = seen.ignored;
+          }
+          if (refusal) {
+            entry.reason = refusal;
+            continue;
+          }
           if (dryRun) {
             entry.action = 'remove';
             continue;
           }
           if (entry.uncommitted) {
-            await mkdir(artifacts, { recursive: true });
-            const patch = join(artifacts, `uncommitted-${basename(path)}.patch`);
-            if (!(await savePatch(path, patch))) {
-              await rm(patch, { force: true });
-              entry.reason = 'embedded-repository';
+            const saved = await savePatch(path, artifacts, `uncommitted-${basename(path)}`);
+            if (saved.refusal) {
+              entry.reason = saved.refusal;
               continue;
             }
-            entry.patch = patch;
+            entry.patch = saved.patch!;
           }
-          await git(repoPath, 'worktree', 'remove', '--force', path);
+          await recordRemoval(artifacts, entry, 'removing', prior);
+          entry.removalStarted = true;
+          try {
+            await removeTree(repoPath, path, Runner.cleanupRemovalMs);
+          } catch (error) {
+            Object.assign(entry, await treeState(repoPath, path));
+            await recordRemoval(artifacts, entry, 'incomplete', prior);
+            throw error;
+          }
           entry.action = 'removed';
-          await recordRemoval(artifacts, entry);
+          await recordRemoval(artifacts, entry, 'removed', prior);
         } catch (error) {
           entry.action = 'failed';
           entry.error = error instanceof Error ? error.message : String(error);

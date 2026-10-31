@@ -568,7 +568,7 @@ async function run(
     }
     case 'worktree-cleanup': {
       const dryRun = !!v['dry-run'];
-      const h = open(need('state'), binding(need('state')), dryRun);
+      const h = open(need('state'), binding(need('state')), dryRun ? 'state' : false);
       try {
         const data = await h.cleanupWorktrees({ dryRun });
         return { command, data, ...(data.failed ? { code: 4 } : {}) };

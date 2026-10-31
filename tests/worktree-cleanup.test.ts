@@ -4,17 +4,24 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Runner } from '../src/engine/runner.ts';
+import { savePatch } from '../src/engine/worktree-cleanup.ts';
 import { trustNone, planReview } from './engine-fixture.ts';
 import { approve, implement, runAll, setup } from './runner-fixture.ts';
 
@@ -27,6 +34,10 @@ function retain(ctx: Ctx) {
   ctx.repo.git('worktree', 'add', '-q', attempt.worktree!, branchOf(attempt.id));
   return { attempt, dir: attempt.worktree! };
 }
+const commit = (dir: string, message: string) =>
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', message], {
+    cwd: dir,
+  });
 const artifactsOf = (ctx: Ctx, id: string) => join(ctx.state, 'artifacts', id);
 const entryFor = (result: Awaited<ReturnType<Ctx['runner']['cleanupWorktrees']>>, path: string) =>
   result.worktrees.find((w) => w.path === path);
@@ -38,6 +49,8 @@ test('worktree-cleanup: dry run ничего не меняет; удаление
   const integration = dir + '-integration';
   ctx.repo.git('worktree', 'add', '-q', '--detach', integration, branchOf(attempt.id));
   writeFileSync(join(dir, '.gitignore'), 'node_modules/\n');
+  execFileSync('git', ['add', '.gitignore'], { cwd: dir });
+  commit(dir, 'ignore dependencies');
   mkdirSync(join(dir, 'node_modules'));
   writeFileSync(join(dir, 'node_modules', 'dep.js'), 'ignored\n');
   writeFileSync(join(dir, 'README.md'), 'edited\n');
@@ -52,7 +65,8 @@ test('worktree-cleanup: dry run ничего не меняет; удаление
   assert.ok(plan.reclaimedKb > 0, 'размер показан');
   const planned = entryFor(plan, dir)!;
   assert.equal(planned.action, 'remove');
-  assert.equal(planned.uncommitted, 3, '.gitignore, README и неотслеживаемый файл');
+  assert.equal(planned.uncommitted, 2, 'README и неотслеживаемый файл');
+  assert.deepEqual(planned.ignored, { count: 1, paths: ['node_modules'] }, 'игнорируемое названо');
   assert.equal(planned.head, head);
   assert.equal(planned.patch, undefined);
   assert.ok(existsSync(dir) && existsSync(integration), 'деревья на месте');
@@ -175,6 +189,7 @@ test('worktree-cleanup: незавершённая очистка, чужое д
   writeFileSync(receipt, JSON.stringify({ status: 'active', cwd: dir }));
   assert.equal(entryFor(await ctx.runner.cleanupWorktrees(), dir)?.reason, 'cleanup-pending');
   writeFileSync(receipt, JSON.stringify({ status: 'done', cwd: dir }));
+  rmSync(pending);
 
   const foreign = join(dir, '..', 'not-an-attempt');
   ctx.repo.git('worktree', 'add', '-q', '--detach', foreign, 'HEAD');
@@ -194,9 +209,7 @@ test('worktree-cleanup: незавершённая очистка, чужое д
   execFileSync('git', ['init', '-q'], { cwd: nested });
   writeFileSync(join(nested, 'work.txt'), 'only here\n');
   execFileSync('git', ['add', '-A'], { cwd: nested });
-  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'nested'], {
-    cwd: nested,
-  });
+  commit(nested, 'nested');
   const embedded = await ctx.runner.cleanupWorktrees();
   assert.equal(entryFor(embedded, dir)?.reason, 'embedded-repository');
   assert.ok(existsSync(join(nested, 'work.txt')), 'содержимое вложенного репозитория на месте');
@@ -206,4 +219,421 @@ test('worktree-cleanup: незавершённая очистка, чужое д
     'неполный патч не остаётся',
   );
   ctx.repo.git('worktree', 'remove', '--force', foreign);
+});
+
+/* ---------------- Что нельзя потерять: дерево остаётся, отказ назван ---------------- */
+
+async function finished() {
+  const ctx = setup({ scenario: { writer: implement(), reviewer: approve() } });
+  await runAll(ctx);
+  return { ctx, ...retain(ctx) };
+}
+const inTree = (dir: string, ...args: string[]) =>
+  execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' }).trim();
+function nestedRepo(path: string) {
+  mkdirSync(path, { recursive: true });
+  inTree(path, 'init', '-q');
+  writeFileSync(join(path, 'work.txt'), 'only here\n');
+  inTree(path, 'add', '-A');
+  commit(path, 'nested');
+}
+async function assertRefused(ctx: Ctx, dir: string, reason: string) {
+  const plan = await ctx.runner.cleanupWorktrees({ dryRun: true });
+  assert.equal(entryFor(plan, dir)?.reason, reason, 'dry run называет отказ');
+  const done = await ctx.runner.cleanupWorktrees();
+  const entry = entryFor(done, dir)!;
+  assert.equal(entry.action, 'refused');
+  assert.equal(entry.reason, reason);
+  assert.equal(done.removed, 0);
+  assert.ok(existsSync(join(dir, '.git')), 'дерево на месте');
+  return entry;
+}
+/** `git` на PATH с вмешательством в один шаг; остальное — настоящий git. */
+function shimGit(step: string) {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-git-shim-'));
+  const real = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
+  writeFileSync(join(dir, 'git'), `#!/bin/bash\n${step}\nexec ${JSON.stringify(real)} "$@"\n`, {
+    mode: 0o755,
+  });
+  const path = process.env.PATH;
+  process.env.PATH = `${dir}:${path}`;
+  return () => {
+    process.env.PATH = path;
+  };
+}
+
+test('worktree-cleanup H1: вложенный репозиторий в игнорируемом каталоге — отказ, хотя правок нет', async () => {
+  const { ctx, dir } = await finished();
+  writeFileSync(join(dir, '.gitignore'), 'vendor/\n');
+  inTree(dir, 'add', '.gitignore');
+  commit(dir, 'ignore vendor');
+  nestedRepo(join(dir, 'vendor', 'lib'));
+  const entry = await assertRefused(ctx, dir, 'embedded-repository');
+  assert.equal(entry.patch, undefined);
+  assert.ok(existsSync(join(dir, 'vendor/lib/work.txt')));
+});
+
+test('worktree-cleanup H1: чистый gitlink и грязный вместе с обычной правкой — отказ', async () => {
+  const { ctx, dir } = await finished();
+  nestedRepo(join(dir, 'sub'));
+  inTree(dir, 'add', 'sub');
+  commit(dir, 'gitlink');
+  await assertRefused(ctx, dir, 'embedded-repository');
+  writeFileSync(join(dir, 'sub', 'work.txt'), 'uncommitted in sub\n');
+  writeFileSync(join(dir, 'README.md'), 'edited\n');
+  await assertRefused(ctx, dir, 'embedded-repository');
+});
+
+test('worktree-cleanup H1: gitlink индекса без каталога .git виден по индексу', async () => {
+  const { ctx, dir } = await finished();
+  const sha = inTree(dir, 'rev-parse', 'HEAD');
+  inTree(dir, 'update-index', '--add', '--cacheinfo', `160000,${sha},sub`);
+  mkdirSync(join(dir, 'sub'));
+  await assertRefused(ctx, dir, 'embedded-repository');
+});
+
+test('worktree-cleanup H1: .git файлом, голый репозиторий и репозиторий в node_modules — отказ', async () => {
+  for (const make of [
+    (dir: string) => {
+      mkdirSync(join(dir, 'linked'));
+      writeFileSync(join(dir, 'linked', '.git'), 'gitdir: /elsewhere\n');
+    },
+    (dir: string) => inTree(dir, 'init', '-q', '--bare', join(dir, 'mirror')),
+    (dir: string) => nestedRepo(join(dir, 'node_modules', 'patched-dep')),
+  ]) {
+    const { ctx, dir } = await finished();
+    make(dir);
+    await assertRefused(ctx, dir, 'embedded-repository');
+  }
+});
+
+test('worktree-cleanup H1: обход до предела и нечитаемый каталог не доказывают чистоту — отказ', async () => {
+  const { ctx, dir } = await finished();
+  const limit = Runner.cleanupScanLimit;
+  Runner.cleanupScanLimit = 2;
+  try {
+    await assertRefused(ctx, dir, 'scan-limit');
+  } finally {
+    Runner.cleanupScanLimit = limit;
+  }
+  const closed = join(dir, 'closed');
+  mkdirSync(closed);
+  chmodSync(closed, 0);
+  try {
+    await assertRefused(ctx, dir, 'scan-failed');
+  } finally {
+    chmodSync(closed, 0o755);
+  }
+});
+
+test('worktree-cleanup H2: вывод больше 2 МБ не обрезается ни в подсчёте, ни в проверке вложенного репозитория', async () => {
+  const { ctx, dir } = await finished();
+  const deep = join('zz', 'a'.repeat(120), 'b'.repeat(120));
+  mkdirSync(join(dir, deep), { recursive: true });
+  const files = 11000;
+  for (let n = 0; n < files; n++) writeFileSync(join(dir, deep, `file-${n}.txt`), String(n));
+  writeFileSync(join(dir, 'aaa-first.txt'), 'sorted first\n');
+  const plan = await ctx.runner.cleanupWorktrees({ dryRun: true });
+  assert.equal(entryFor(plan, dir)?.uncommitted, files + 1, 'число правок точное');
+  // Обход дерева перехватил бы репозиторий раньше: проверка сохранения патча — сама по себе.
+  const nested = join(dir, 'aaa-nested');
+  nestedRepo(nested);
+  const artifacts = mkdtempSync(join(tmpdir(), 'harness-artifacts-'));
+  assert.deepEqual(await savePatch(dir, artifacts, 'uncommitted-x'), {
+    refusal: 'embedded-repository',
+  });
+  assert.deepEqual(readdirSync(artifacts), [], 'патча нет');
+  rmSync(nested, { recursive: true });
+  const done = await ctx.runner.cleanupWorktrees();
+  const entry = entryFor(done, dir)!;
+  assert.equal(entry.action, 'removed', entry.error);
+  assert.match(
+    readFileSync(entry.patch!, 'utf8').slice(0, 2000),
+    /aaa-first/,
+    'начало вывода цело',
+  );
+});
+
+test('worktree-cleanup H3: .gitignore из одной звезды не прячет работу', async () => {
+  const { ctx, dir } = await finished();
+  writeFileSync(join(dir, '.gitignore'), '*\n');
+  writeFileSync(join(dir, 'new-module.js'), 'valuable uncommitted\n');
+  await assertRefused(ctx, dir, 'ignore-rules-changed');
+  assert.ok(existsSync(join(dir, 'new-module.js')));
+});
+
+test('worktree-cleanup H3: изменённый, удалённый и вложенный .gitignore — отказ', async () => {
+  const { ctx, dir } = await finished();
+  writeFileSync(join(dir, '.gitignore'), 'dist/\n');
+  inTree(dir, 'add', '.gitignore');
+  commit(dir, 'ignore dist');
+  writeFileSync(join(dir, '.gitignore'), 'dist/\nsecret-work/\n');
+  await assertRefused(ctx, dir, 'ignore-rules-changed');
+  rmSync(join(dir, '.gitignore'));
+  await assertRefused(ctx, dir, 'ignore-rules-changed');
+  inTree(dir, 'checkout', '--', '.gitignore');
+  mkdirSync(join(dir, 'newdir'));
+  writeFileSync(join(dir, 'newdir', '.gitignore'), '*\n');
+  writeFileSync(join(dir, 'newdir', 'work.txt'), 'hidden by its own rule\n');
+  await assertRefused(ctx, dir, 'ignore-rules-changed');
+});
+
+test('worktree-cleanup H3: правило info/exclude, скрывающее путь в дереве, — отказ; правило без пути не мешает', async () => {
+  const { ctx, dir } = await finished();
+  const exclude = join(ctx.repo.dir, '.git', 'info', 'exclude');
+  writeFileSync(exclude, '# comment\n.DS_Store\nsecret-work/\n');
+  assert.equal(
+    entryFor(await ctx.runner.cleanupWorktrees({ dryRun: true }), dir)?.action,
+    'remove',
+    'правила шаблона git без своих путей не отказывают',
+  );
+  mkdirSync(join(dir, 'secret-work'));
+  writeFileSync(join(dir, 'secret-work', 'notes.txt'), 'hidden by exclude\n');
+  await assertRefused(ctx, dir, 'ignore-rules-changed');
+  assert.ok(existsSync(join(dir, 'secret-work', 'notes.txt')));
+});
+
+test('worktree-cleanup H3: .gitignore пакета внутри игнорируемого каталога не мешает; .env назван в отчёте', async () => {
+  const { ctx, dir } = await finished();
+  writeFileSync(join(dir, '.gitignore'), 'node_modules/\n.env\n');
+  inTree(dir, 'add', '.gitignore');
+  commit(dir, 'ignore');
+  mkdirSync(join(dir, 'node_modules', 'pkg'), { recursive: true });
+  writeFileSync(join(dir, 'node_modules', 'pkg', '.gitignore'), '*\n');
+  writeFileSync(join(dir, '.env'), 'SECRET=1\n');
+  const plan = entryFor(await ctx.runner.cleanupWorktrees({ dryRun: true }), dir)!;
+  assert.equal(plan.action, 'remove');
+  assert.deepEqual(plan.ignored, { count: 2, paths: ['.env', 'node_modules'] });
+  const done = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
+  assert.equal(done.action, 'removed', done.error);
+  assert.deepEqual(done.ignored, { count: 2, paths: ['.env', 'node_modules'] });
+});
+
+test('worktree-cleanup: assume-unchanged и skip-worktree прячут правку от статуса — отказ', async () => {
+  for (const flag of ['--assume-unchanged', '--skip-worktree']) {
+    const { ctx, dir } = await finished();
+    inTree(dir, 'update-index', flag, 'README.md');
+    writeFileSync(join(dir, 'README.md'), 'hidden edit\n');
+    await assertRefused(ctx, dir, 'hidden-changes');
+  }
+});
+
+test('worktree-cleanup H4: --dry-run не пишет каталог состояния', async () => {
+  const { ctx, dir } = await finished();
+  writeFileSync(join(dir, 'README.md'), 'edited\n');
+  writeFileSync(
+    join(ctx.state, 'binding.json'),
+    JSON.stringify({ policy: ctx.policy, baseDir: ctx.repo.dir }),
+  );
+  ctx.store.close();
+  const stateFile = join(ctx.state, 'state.sqlite');
+  const wal = () => (existsSync(`${stateFile}-wal`) ? statSync(`${stateFile}-wal`).size : 0);
+  const look = () => ({
+    wal: wal(),
+    sha: createHash('sha256').update(readFileSync(stateFile)).digest('hex'),
+    mtime: statSync(stateFile).mtimeMs,
+  });
+  const before = look();
+  const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
+  const r = spawnSync(
+    process.execPath,
+    [
+      '--import',
+      import.meta.resolve('tsx'),
+      cli,
+      'worktree-cleanup',
+      '--state',
+      ctx.state,
+      '--dry-run',
+    ],
+    { encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '' } },
+  );
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal((JSON.parse(r.stdout) as { data: { removable: number } }).data.removable, 1);
+  // Читатель WAL-базы создаёт пустые служебные -wal и -shm; записей в них нет.
+  assert.deepEqual(look(), before);
+});
+
+test('worktree-cleanup H5: сохранённый патч не перезаписывается и не удаляется', async () => {
+  const { ctx, dir, attempt } = await finished();
+  const artifacts = artifactsOf(ctx, attempt.id);
+  const first = join(artifacts, `uncommitted-${attempt.id}.patch`);
+  writeFileSync(first, 'precious earlier patch\n');
+  writeFileSync(join(dir, 'README.md'), 'edited\n');
+  const entry = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
+  assert.equal(entry.action, 'removed', entry.error);
+  assert.equal(entry.patch, join(artifacts, `uncommitted-${attempt.id}-2.patch`));
+  assert.equal(readFileSync(first, 'utf8'), 'precious earlier patch\n');
+  assert.deepEqual(
+    readdirSync(artifacts).filter((name) => name.endsWith('.tmp')),
+    [],
+    'временных файлов нет',
+  );
+});
+
+test('worktree-cleanup H5: отказ сохранения не трогает прежний патч', async () => {
+  const { ctx, dir, attempt } = await finished();
+  const first = join(artifactsOf(ctx, attempt.id), `uncommitted-${attempt.id}.patch`);
+  writeFileSync(first, 'precious earlier patch\n');
+  writeFileSync(join(dir, 'README.md'), 'edited\n');
+  const restore = shimGit('for a in "$@"; do [ "$a" = apply ] && exit 1; done');
+  try {
+    const entry = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
+    assert.equal(entry.reason, 'patch-unusable');
+  } finally {
+    restore();
+  }
+  assert.equal(readFileSync(first, 'utf8'), 'precious earlier patch\n');
+});
+
+test('worktree-cleanup H5: одновременные запуски на один каталог состояния — второй отказывает', async () => {
+  const { ctx, dir } = await finished();
+  writeFileSync(join(dir, 'README.md'), 'edited\n');
+  const [first, second] = await Promise.allSettled([
+    ctx.runner.cleanupWorktrees(),
+    ctx.runner.cleanupWorktrees(),
+  ]);
+  assert.equal(first.status, 'fulfilled');
+  assert.ok(second.status === 'rejected');
+  assert.equal((second.reason as { code: string }).code, 'NOT_READY');
+  assert.equal(existsSync(join(ctx.state, 'worktree-cleanup.lock')), false, 'замок снят');
+  // Замок умершего процесса не держит очистку.
+  const dead = spawnSync(process.execPath, ['-p', 'process.pid'], { encoding: 'utf8' });
+  writeFileSync(join(ctx.state, 'worktree-cleanup.lock'), dead.stdout.trim());
+  assert.equal((await ctx.runner.cleanupWorktrees()).failed, 0);
+});
+
+test('worktree-cleanup H5: удаление большого дерева идёт со своим пределом', async () => {
+  assert.ok(Runner.cleanupRemovalMs > 120000, 'длиннее предела команды по умолчанию');
+  const { ctx, dir } = await finished();
+  const limit = Runner.cleanupRemovalMs;
+  Runner.cleanupRemovalMs = 200;
+  const restore = shimGit('for a in "$@"; do [ "$a" = remove ] && exec sleep 30; done');
+  try {
+    const entry = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
+    assert.equal(entry.action, 'failed');
+    assert.equal(entry.removalStarted, true);
+  } finally {
+    restore();
+    Runner.cleanupRemovalMs = limit;
+  }
+  assert.ok(existsSync(dir));
+});
+
+test('worktree-cleanup H6: вершина, недостижимая из ref, — отказ: коммит не пропадёт после gc', async () => {
+  const { ctx, dir } = await finished();
+  inTree(dir, 'checkout', '-q', '--detach');
+  writeFileSync(join(dir, 'committed.txt'), 'committed on detached head\n');
+  inTree(dir, 'add', '-A');
+  commit(dir, 'detached work');
+  const sha = inTree(dir, 'rev-parse', 'HEAD');
+  writeFileSync(join(dir, 'README.md'), 'edited\n');
+  await assertRefused(ctx, dir, 'unreachable-head');
+  inTree(ctx.repo.dir, 'cat-file', '-e', sha);
+});
+
+test('worktree-cleanup H7: настройки пользователя не меняют формат патча; патч применяется', async () => {
+  const { ctx, dir } = await finished();
+  const config = join(mkdtempSync(join(tmpdir(), 'harness-gitconfig-')), 'gitconfig');
+  writeFileSync(
+    config,
+    '[color]\n\tui = always\n[diff]\n\tnoprefix = true\n\tmnemonicPrefix = true\n\tcontext = 0\n',
+  );
+  const head = inTree(dir, 'rev-parse', 'HEAD');
+  writeFileSync(join(dir, 'README.md'), 'edited\n');
+  const saved = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = config;
+  let patch: string;
+  try {
+    patch = entryFor(await ctx.runner.cleanupWorktrees(), dir)!.patch!;
+  } finally {
+    if (saved === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = saved;
+  }
+  assert.match(readFileSync(patch, 'utf8'), /^diff --git a\/README.md b\/README.md/);
+  const restored = mkdtempSync(join(tmpdir(), 'harness-restored-'));
+  ctx.repo.git('worktree', 'add', '-q', '--detach', restored, head);
+  execFileSync('git', ['apply', '--index', patch], { cwd: restored });
+  assert.equal(readFileSync(join(restored, 'README.md'), 'utf8'), 'edited\n');
+  ctx.repo.git('worktree', 'remove', '--force', restored);
+});
+
+test('worktree-cleanup H7: патч, не прошедший проверку наложением, — отказ, патча нет', async () => {
+  const { ctx, dir, attempt } = await finished();
+  writeFileSync(join(dir, 'README.md'), 'edited\n');
+  const restore = shimGit('for a in "$@"; do [ "$a" = apply ] && exit 1; done');
+  try {
+    const entry = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
+    assert.equal(entry.reason, 'patch-unusable');
+    assert.equal(entry.action, 'refused');
+  } finally {
+    restore();
+  }
+  assert.ok(existsSync(dir));
+  assert.deepEqual(
+    readdirSync(artifactsOf(ctx, attempt.id)).filter((n) => n.startsWith('uncommitted-')),
+    [],
+  );
+});
+
+test('worktree-cleanup H8: каталог только для чтения — отказ до удаления, дерево цело', async () => {
+  const { ctx, dir } = await finished();
+  const readOnly = join(dir, 'ro');
+  mkdirSync(readOnly);
+  writeFileSync(join(readOnly, 'x'), 'x');
+  chmodSync(readOnly, 0o555);
+  try {
+    await assertRefused(ctx, dir, 'read-only-path');
+  } finally {
+    chmodSync(readOnly, 0o755);
+  }
+});
+
+test('worktree-cleanup H8: оборванное удаление — истинное состояние, указатель на патч, повтор не трогает дерево', async () => {
+  const { ctx, dir, attempt } = await finished();
+  writeFileSync(join(dir, 'README.md'), 'edited\n');
+  const admin = join(ctx.repo.dir, '.git', 'worktrees', attempt.id);
+  const restore = shimGit(
+    `for a in "$@"; do [ "$a" = remove ] && { rm -f ${JSON.stringify(join(dir, 'README.md'))}; rm -rf ${JSON.stringify(admin)}; echo "error: failed to delete" >&2; exit 1; }; done`,
+  );
+  let entry;
+  try {
+    entry = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
+  } finally {
+    restore();
+  }
+  assert.equal(entry.action, 'failed');
+  assert.equal(entry.removalStarted, true);
+  assert.equal(entry.registered, false, 'регистрации уже нет');
+  assert.equal(entry.treePresent, true, 'часть дерева осталась');
+  assert.ok(existsSync(entry.patch!));
+  const record = JSON.parse(
+    readFileSync(join(artifactsOf(ctx, attempt.id), `worktree-cleanup-${attempt.id}.json`), 'utf8'),
+  ) as { status: string; patch: string };
+  assert.deepEqual([record.status, record.patch], ['incomplete', entry.patch]);
+
+  const again = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
+  assert.equal(again.action, 'refused', 'дерево без регистрации всё ещё названо');
+  assert.equal(again.reason, 'removal-incomplete');
+  assert.equal(again.patch, entry.patch);
+  assert.ok(existsSync(dir));
+});
+
+test('worktree-cleanup H8: дерево без регистрации и без записи — отказ', async () => {
+  const { ctx, dir, attempt } = await finished();
+  rmSync(join(ctx.repo.dir, '.git', 'worktrees', attempt.id), { recursive: true });
+  const entry = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
+  assert.equal(entry.reason, 'not-registered');
+  assert.ok(existsSync(dir));
+});
+
+test('worktree-cleanup H9: нечитаемая запись очистки — отказ этой попытки, сводка возвращается', async () => {
+  for (const file of ['cleanup-pending.json', 'environment.json']) {
+    const { ctx, dir, attempt } = await finished();
+    writeFileSync(join(artifactsOf(ctx, attempt.id), file), '{oops');
+    const result = await ctx.runner.cleanupWorktrees();
+    assert.equal(entryFor(result, dir)?.reason, 'cleanup-unreadable');
+    assert.equal(result.refused, 1);
+    assert.ok(existsSync(dir));
+  }
 });

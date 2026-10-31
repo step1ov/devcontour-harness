@@ -312,7 +312,7 @@ export const cliCommands = {
   },
   'worktree-cleanup': {
     description:
-      'Убрать рабочие деревья закончившихся попыток: ветки и артефакты остаются, неподтверждённые правки сохраняются патчем в артефактах попытки; идущие и восстановимые попытки отказываются поимённо; модель не вызывается',
+      'Убрать рабочие деревья закончившихся попыток: ветки и достижимые коммиты остаются, неподтверждённые правки сохраняются проверенным патчем в артефактах попытки, игнорируемые файлы не сохраняются и перечисляются в ответе; в сомнении дерево остаётся, а отказ назван; модель не вызывается',
     writes: true,
     idempotency: 'Повтор не находит уже убранных деревьев и ничего не меняет',
     args: [
@@ -321,10 +321,11 @@ export const cliCommands = {
         name: '--dry-run',
         value: 'flag',
         required: false,
-        description: 'Только показать, что было бы убрано и почему отказано; ничего не пишет',
+        description:
+          'Только показать, что было бы убрано, что исчезнет (игнорируемое) и почему отказано; ничего не пишет',
       },
     ],
-    refusals: ['NOT_FOUND'],
+    refusals: ['NOT_FOUND', 'NOT_READY'],
   },
   cleanup: {
     description:
@@ -970,15 +971,29 @@ export const worktreeCleanupDataSchema = z.strictObject({
           'active',
           'recoverable',
           'cleanup-pending',
+          'cleanup-unreadable',
           'unknown-attempt',
           'untrusted',
           'embedded-repository',
+          'scan-limit',
+          'scan-failed',
+          'read-only-path',
+          'ignore-rules-changed',
+          'hidden-changes',
+          'unreachable-head',
+          'patch-unusable',
+          'removal-incomplete',
+          'not-registered',
         ])
         .optional(),
       error: z.string().optional(),
       head: z.string().optional(),
       sizeKb: z.number().int().optional(),
       uncommitted: z.number().int().optional(),
+      ignored: z.strictObject({ count: z.number().int(), paths: z.array(z.string()) }).optional(),
+      removalStarted: z.boolean().optional(),
+      registered: z.boolean().optional(),
+      treePresent: z.boolean().optional(),
       patch: z.string().optional(),
     }),
   ),
