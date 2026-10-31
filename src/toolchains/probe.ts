@@ -68,3 +68,28 @@ export function satisfies(version: string, required: string) {
   const have = parse(version);
   return want.every((n, i) => have[i] === n);
 }
+
+/**
+ * Версии менеджера, на которых хранилище зависимостей проверено настоящим
+ * прогоном. Граница сверху — не осторожность: с pnpm 10.27.0 `pnpm fetch` кладёт
+ * в store символическую ссылку `<store>/v10/projects/<hash>`, а seed с ссылками
+ * отклоняется; с 11.0.0 pnpm ещё и не читает `npm_config_store_dir`. Вне диапазона
+ * хранилище не вмешивается в окружение.
+ */
+export const dependencyStoreVersions = {
+  pnpm: { from: '9.15.0', below: '10.27.0' },
+} as const;
+
+export function dependencyStoreSupports(
+  manager: keyof typeof dependencyStoreVersions,
+  version: string,
+) {
+  const { from, below } = dependencyStoreVersions[manager];
+  return satisfies(version, '>=' + from) && !satisfies(version, '>=' + below);
+}
+
+/** Версия менеджера из поля `packageManager`: `pnpm@10.12.3+sha512…` → `10.12.3`. */
+export function declaredManagerVersion(field: unknown, manager: string) {
+  if (typeof field !== 'string' || !field.startsWith(manager + '@')) return undefined;
+  return /^\d+\.\d+\.\d+/.exec(field.slice(manager.length + 1))?.[0];
+}

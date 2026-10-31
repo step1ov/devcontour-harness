@@ -5,6 +5,7 @@ import type { ExecutionPolicy } from '../contracts/index.ts';
 import type { AttemptState } from '../contracts/index.ts';
 import { git } from '../environment/process.ts';
 import { executionEnvironment, runSteps } from '../environment/lifecycle.ts';
+import { materializeStore, type StoreContext } from './dependency-store.ts';
 
 type Repo = ExecutionPolicy['repositories'][number];
 export type DependencySnapshot = NonNullable<AttemptState['dependencies']>[number];
@@ -65,6 +66,8 @@ export async function snapshotDependencies(input: {
   signal: AbortSignal;
   predecessors?: { repositoryId: string; resultSha: string }[];
   overrides?: Map<string, { path: string; sha: string }>;
+  /** Хранилище зависимостей для `dependencyBuild` снимков. */
+  store?: StoreContext;
 }) {
   const { repos, signal } = input;
   const ids = dependencyOrder(repos, repos.repo(input.repositoryId).dependsOn);
@@ -117,6 +120,16 @@ export async function snapshotDependencies(input: {
         },
         input.environment,
       );
+      // Подставленное дерево (`overrides`) снимку не принадлежит: его хранилище
+      // уже развёрнуто на своей фазе.
+      if (input.store && repo.dependencyBuild.length && created.includes(snapshot))
+        await materializeStore(input.store, {
+          repo,
+          cwd: snapshot.path,
+          execution,
+          signal,
+          dir: join(input.artifacts, 'dependency-build', repo.id),
+        });
       await runSteps(
         repo.dependencyBuild,
         snapshot.path,

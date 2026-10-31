@@ -188,6 +188,7 @@ const controllerEntries = [
   'resources.sqlite',
   'artifacts',
   'dependencies',
+  'dependency-store',
   'deliveries',
 ];
 function closedEntries(policy: Isolation) {
@@ -572,7 +573,7 @@ export function sandboxDenials(
  */
 const protectedNames = new Set<string>([...DANGEROUS_FILES, ...ideDirectories, '.claude', '.git']);
 const isProtected = (name: string) => protectedNames.has(name.toLowerCase());
-const snapshotLimit = 200_000;
+export const snapshotLimit = 200_000;
 /**
  * Подпись каталога, в дереве которого нет ни файлов, ни символьных ссылок, и
  * ни один каталог не открыт на запись всем (`mode & 0o002`): такой каталог —

@@ -144,6 +144,12 @@ export {
   type GatesAtResult,
 } from './verification/gates-at.ts';
 export {
+  dependencyStoreRoot,
+  materializeStore,
+  type StoreContext,
+  type StoreReceipt,
+} from './verification/dependency-store.ts';
+export {
   explicitPrerequisites,
   gatePrerequisites,
   orderedScope,

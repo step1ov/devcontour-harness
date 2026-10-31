@@ -23,6 +23,8 @@ import {
 import {
   PROBE_TIMEOUT_MS,
   defaultProbe,
+  dependencyStoreSupports,
+  dependencyStoreVersions,
   moduleVersionOf,
   resolveExecutable,
   satisfies,
@@ -60,6 +62,7 @@ export const toolchainProblemCodes = [
   'PROJECT_FILE_MISSING',
   'SCRIPT_UNRESOLVED',
   'TOOL_IN_PROJECT',
+  'DEPENDENCY_STORE',
 ] as const;
 export type ToolchainProblemCode = (typeof toolchainProblemCodes)[number];
 
@@ -808,6 +811,49 @@ export async function inspectRepository(
   steps('prepare', repo.prepare, [...field, 'prepare']);
   steps('dependencyBuild', repo.dependencyBuild, [...field, 'dependencyBuild']);
   steps('preflight', repo.preflight, [...field, 'preflight']);
+  // Хранилище зависимостей — ускорение: что мешает ему, остаётся предупреждением,
+  // и работа идёт с обычной установкой.
+  if (repo.dependencyStore) {
+    const store = repo.dependencyStore;
+    const storeField = [...field, 'dependencyStore'];
+    if (!m.isFile(store.lockfile))
+      warning(
+        'LOCKFILE_MISSING',
+        [...storeField, 'lockfile'],
+        'Хранилищу зависимостей нужен lockfile: ' + store.lockfile,
+      );
+    const { from, below } = dependencyStoreVersions[store.manager];
+    const executable = resolveExecutable(store.manager, PATH);
+    if (!executable)
+      warning('TOOL_MISSING', [...storeField, 'manager'], `Не найден ${store.manager}`);
+    else {
+      const found = await probe([store.manager, '--version'], {
+        timeoutMs,
+        env: { ...env, PATH },
+      }).catch(() => undefined);
+      const version = versionOf(found?.stdout ?? '');
+      if (!version)
+        warning(
+          'DEPENDENCY_STORE',
+          [...storeField, 'manager'],
+          `Версия ${store.manager} не определена: хранилище не действует, установка обычная`,
+        );
+      const declared = packageManagerField(m, '.');
+      for (const v of [version, declared?.name === store.manager ? declared.version : undefined])
+        if (v && !dependencyStoreSupports(store.manager, v))
+          warning(
+            'DEPENDENCY_STORE',
+            [...storeField, 'manager'],
+            `${store.manager} ${v} вне проверенных версий ${from} … <${below}: хранилище не действует, установка обычная`,
+          );
+    }
+    if (repo.prepare.length)
+      warning(
+        'DEPENDENCY_STORE',
+        [...storeField],
+        'prepare идёт на хосте, на integration — над слитым деревом: если шаг исполняет код кандидата, он может изменить seed',
+      );
+  }
   const lifecycle = repo.lifecycle ?? options.lifecycle;
   const lifecycleField = repo.lifecycle ? [...field, 'lifecycle'] : ['lifecycle'];
   if (lifecycle)

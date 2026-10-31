@@ -83,6 +83,31 @@ export class ResourcePool {
     if (processAlive(lease.pid)) throw new Error('Владелец ресурса ещё работает');
     this.db.prepare('DELETE FROM leases WHERE key=? AND token=?').run(key, token);
   }
+  /**
+   * Digest манифеста seed зависимостей (`verification/dependency-store.ts`).
+   * Лежит здесь, а не рядом с seed: подмена seed вместе с его манифестом не
+   * совпадёт с записью, а песочнице база на запись закрыта. От кода с правами
+   * хоста (`prepare`, `lifecycle`) закрепление не защищает.
+   */
+  seedPin(root: string, key: string) {
+    this.seedPins();
+    const row = this.db
+      .prepare('SELECT digest FROM seed_pins WHERE root=? AND key=?')
+      .get(root, key) as { digest: string } | undefined;
+    return row?.digest;
+  }
+  setSeedPin(root: string, key: string, digest: string | undefined) {
+    this.seedPins();
+    if (digest === undefined)
+      this.db.prepare('DELETE FROM seed_pins WHERE root=? AND key=?').run(root, key);
+    else this.db.prepare('INSERT OR REPLACE INTO seed_pins VALUES (?,?,?)').run(root, key, digest);
+  }
+  // Таблица создаётся при первом обращении: база установок без хранилища не меняется.
+  private seedPins() {
+    this.db.exec(
+      'CREATE TABLE IF NOT EXISTS seed_pins (root TEXT NOT NULL, key TEXT NOT NULL, digest TEXT NOT NULL, PRIMARY KEY (root, key))',
+    );
+  }
   close() {
     this.db.close();
   }

@@ -1,8 +1,8 @@
 import { accessSync, constants } from 'node:fs';
 
 /**
- * Системные утилиты, которыми ядро наблюдает процессы (`ps`, `lsof`) и
- * владение вызовами (`sysctl`). Они ищутся по фиксированным абсолютным путям
+ * Системные утилиты, которыми ядро наблюдает процессы (`ps`, `lsof`),
+ * владение вызовами (`sysctl`) и клонирует хранилище зависимостей (`cp`, `df`). Они ищутся по фиксированным абсолютным путям
  * ОС раньше PATH: урезанный PATH (только node и git) не лишает ядро
  * containment, а файл из проекта или worktree с тем же именем не
  * запускается. PATH — только запасной путь, когда ни одного штатного
@@ -12,6 +12,8 @@ export const OS_TOOL_CANDIDATES = {
   ps: ['/bin/ps', '/usr/bin/ps'],
   lsof: ['/usr/sbin/lsof', '/usr/bin/lsof', '/sbin/lsof', '/bin/lsof'],
   sysctl: ['/usr/sbin/sysctl', '/sbin/sysctl', '/usr/bin/sysctl'],
+  cp: ['/bin/cp', '/usr/bin/cp'],
+  df: ['/bin/df', '/usr/bin/df'],
 } as const;
 export type OsTool = keyof typeof OS_TOOL_CANDIDATES;
 

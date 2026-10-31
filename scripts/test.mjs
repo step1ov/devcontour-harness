@@ -29,6 +29,7 @@ const slowFirst = [
   'review-probe',
   'property',
   'recovery',
+  'dependency-store',
 ];
 
 // Медленный ярус: тесты дольше ~60 с хотя бы в двух из последних полных

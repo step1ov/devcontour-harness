@@ -18,6 +18,7 @@ import {
 } from '../environment/lifecycle.ts';
 import { composeRedactors, type Redactor } from '../environment/redaction.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
+import { dependencyStoreRoot, materializeStore } from '../verification/dependency-store.ts';
 import { junitSummary, prepareReportPath, runCheck } from '../verification/gates.ts';
 import { orderedWorkspaceGates, publicJoint } from '../verification/joint.ts';
 import type { Engine } from './engine.ts';
@@ -87,6 +88,7 @@ export class JointRunner {
     const controller = new AbortController();
     const signal = outer ? AbortSignal.any([outer, controller.signal]) : controller.signal;
     const timer = setTimeout(() => controller.abort(), this.policy.runTimeoutMs);
+    const deadline = Date.now() + this.policy.runTimeoutMs;
     const heartbeat = setInterval(
       () => {
         try {
@@ -198,9 +200,46 @@ export class JointRunner {
             executionEnvironment([this.policy.environment], common, source),
             signal,
             async () => {
-              for (const gate of orderedWorkspaceGates(this.policy.workspaceGates).filter((g) =>
+              const gates = orderedWorkspaceGates(this.policy.workspaceGates).filter((g) =>
                 impact.gateIds.includes(g.id),
-              )) {
+              );
+              // У совместной проверки нет `prepare`: хранилище разворачивается
+              // здесь, в компоненты, чьи gates будут исполняться.
+              const stores: Record<string, NodeJS.ProcessEnv> = {};
+              for (const repo of this.policy.repositories) {
+                if (!repo.dependencyStore || !gates.some((g) => g.repositoryId === repo.id))
+                  continue;
+                const receipt = await materializeStore(
+                  {
+                    policy: this.policy,
+                    root: (id) => dependencyStoreRoot(placement, this.options.stateDir, id),
+                    repoPath: (r) => this.repoPath(r),
+                    boundary: {
+                      hidden: [
+                        this.options.stateDir,
+                        ...this.policy.repositories.map((r) => this.repoPath(r)),
+                      ],
+                      ...(placement.root ? { checkouts: [placement.root] } : {}),
+                    },
+                    resourceDatabase: this.options.resourceDatabase ?? defaultResourceDatabase(),
+                    deadline,
+                    phaseMs: this.policy.runTimeoutMs,
+                  },
+                  {
+                    repo,
+                    cwd: paths[repo.id]!,
+                    execution: executionEnvironment(
+                      [this.policy.environment, repo.environment],
+                      common,
+                      source,
+                    ),
+                    signal,
+                    dir: join(dir, 'dependency-store', repo.id),
+                  },
+                );
+                stores[repo.id] = receipt!.env;
+              }
+              for (const gate of gates) {
                 if (signal.aborted) throw new Error('Совместная проверка отменена');
                 const cwd = paths[gate.repositoryId];
                 if (!cwd) throw new Error('Неизвестный repositoryId совместной проверки');
@@ -250,6 +289,7 @@ export class JointRunner {
                       settingsDir: join(dir, gate.id),
                       env: {
                         ...environment.env,
+                        ...stores[gate.repositoryId],
                         ...(reportPath
                           ? { DEVCONTOUR_REPORT_PATH: reportPath, HARNESS_REPORT_PATH: reportPath }
                           : {}),

@@ -13,6 +13,7 @@ import {
 import { OversizedFile, readBounded } from '../environment/bounded-read.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
+import { defaultResourceDatabase } from '../environment/resources.ts';
 import { contractDocuments, obligationOf } from './checks.ts';
 import {
   MAX_CASE_BYTES,
@@ -22,6 +23,7 @@ import {
   type CaseDecision,
   type CorpusStore,
 } from './corpus.ts';
+import { materializeStore } from './dependency-store.ts';
 import { runCheck, type Boundary } from './gates.ts';
 
 /**
@@ -102,6 +104,8 @@ export interface ConfirmContext {
   checkout?(repositoryId: string, kind: string, id: string): string;
   /** Источник переменных окружения (по умолчанию — процесс). */
   environment?: NodeJS.ProcessEnv;
+  /** База закреплений и аренд хранилища зависимостей. */
+  resourceDatabase?: string;
 }
 
 type Verdict = {
@@ -368,7 +372,9 @@ async function decide(
       },
       ctx.environment ?? process.env,
     );
-    const signal = AbortSignal.timeout(gate.timeoutMs * 3 + 120000);
+    const limitMs = gate.timeoutMs * 3 + 120000;
+    const deadline = Date.now() + limitMs;
+    const signal = AbortSignal.timeout(limitMs);
     await withEnvironment(
       repo.lifecycle ?? ctx.policy.lifecycle,
       dir,
@@ -376,13 +382,27 @@ async function decide(
       execution,
       signal,
       async () => {
+        const boundary = ctx.boundary();
+        await materializeStore(
+          {
+            policy: ctx.policy,
+            root: (id) =>
+              ctx.checkout?.(id, 'dependency-store', '') ??
+              join(ctx.stateDir, 'dependency-store', id),
+            repoPath: (r) => ctx.repoPath(r),
+            boundary,
+            resourceDatabase: ctx.resourceDatabase ?? defaultResourceDatabase(),
+            deadline,
+            phaseMs: limitMs,
+          },
+          { repo, cwd: dir, execution, signal, dir: io },
+        );
         await runSteps(repo.prepare, dir, join(io, 'prepare'), execution, signal);
         const request = join(io, 'case.json');
         await writeFile(
           request,
           JSON.stringify({ property: input.property, input: JSON.parse(text) as unknown }),
         );
-        const boundary = ctx.boundary();
         for (let i = 0; i < 2; i++) {
           const out = join(io, `result-${i}.json`);
           const started = Date.now();
