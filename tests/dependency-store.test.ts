@@ -14,6 +14,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  truncateSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -1257,6 +1258,12 @@ test(
     });
     assert.equal(linked.receipt.outcome, 'miss');
     assert.match(linked.receipt.reason!, /нет файла/);
+    // Обычный файл сверх предела: память не занимается, хранилище не действует.
+    const huge = await placed(ctx, 'huge', {
+      prepare: (cwd) => truncateSync(join(cwd, 'pnpm-lock.yaml'), 65 * 1024 * 1024),
+    });
+    assert.equal(huge.receipt.outcome, 'miss');
+    assert.match(huge.receipt.reason!, /нет файла/);
   },
 );
 
