@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Runner } from '../src/engine/runner.ts';
-import { savePatch } from '../src/engine/worktree-cleanup.ts';
+import { lockCleanup, savePatch } from '../src/engine/worktree-cleanup.ts';
 import { trustNone, planReview } from './engine-fixture.ts';
 import { approve, implement, runAll, setup } from './runner-fixture.ts';
 
@@ -248,11 +248,11 @@ async function assertRefused(ctx: Ctx, dir: string, reason: string) {
   assert.ok(existsSync(join(dir, '.git')), 'дерево на месте');
   return entry;
 }
+const realGit = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
 /** `git` на PATH с вмешательством в один шаг; остальное — настоящий git. */
 function shimGit(step: string) {
   const dir = mkdtempSync(join(tmpdir(), 'harness-git-shim-'));
-  const real = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
-  writeFileSync(join(dir, 'git'), `#!/bin/bash\n${step}\nexec ${JSON.stringify(real)} "$@"\n`, {
+  writeFileSync(join(dir, 'git'), `#!/bin/bash\n${step}\nexec ${JSON.stringify(realGit)} "$@"\n`, {
     mode: 0o755,
   });
   const path = process.env.PATH;
@@ -339,9 +339,12 @@ test('worktree-cleanup H2: вывод больше 2 МБ не обрезает�
   const nested = join(dir, 'aaa-nested');
   nestedRepo(nested);
   const artifacts = mkdtempSync(join(tmpdir(), 'harness-artifacts-'));
-  assert.deepEqual(await savePatch(dir, artifacts, 'uncommitted-x'), {
-    refusal: 'embedded-repository',
-  });
+  assert.deepEqual(
+    await savePatch(dir, artifacts, 'uncommitted-x', inTree(dir, 'rev-parse', 'HEAD')),
+    {
+      refusal: 'embedded-repository',
+    },
+  );
   assert.deepEqual(readdirSync(artifacts), [], 'патча нет');
   rmSync(nested, { recursive: true });
   const done = await ctx.runner.cleanupWorktrees();
@@ -623,6 +626,7 @@ test('worktree-cleanup H8: оборванное удаление — истин�
   assert.equal(again.action, 'refused', 'дерево без регистрации всё ещё названо');
   assert.equal(again.reason, 'removal-incomplete');
   assert.equal(again.patch, entry.patch);
+  assert.equal(again.record, recordPath, 'запись названа: её снимают вручную');
   assert.ok(existsSync(dir));
 });
 
@@ -653,4 +657,199 @@ test('worktree-cleanup H9: нечитаемая запись очистки — 
     assert.equal(result.refused, 1);
     assert.ok(existsSync(dir));
   }
+});
+
+/** Дерево попытки с отсоединённой вершиной, которую держит только сама работа. */
+async function detachedWork() {
+  const ctx = setup({ scenario: { writer: implement(), reviewer: approve() } });
+  await runAll(ctx);
+  const attempt = attemptOf(ctx);
+  const dir = attempt.worktree!;
+  ctx.repo.git('worktree', 'add', '-q', '--detach', dir, branchOf(attempt.id));
+  writeFileSync(join(dir, 'work.txt'), 'precious\n');
+  inTree(dir, 'add', 'work.txt');
+  commit(dir, 'detached work');
+  return { ctx, dir, sha: inTree(dir, 'rev-parse', 'HEAD') };
+}
+
+test('worktree-cleanup: ref рабочего дерева не держит вершину — он исчезнет вместе с деревом', async () => {
+  for (const ref of ['refs/worktree/keep', 'refs/bisect/bad', 'refs/rewritten/step']) {
+    const { ctx, dir, sha } = await detachedWork();
+    inTree(dir, 'update-ref', ref, sha);
+    await assertRefused(ctx, dir, 'unreachable-head');
+    inTree(ctx.repo.dir, 'cat-file', '-e', sha);
+  }
+});
+
+test('worktree-cleanup: ref общего репозитория держит вершину', async () => {
+  const { ctx, dir, sha } = await detachedWork();
+  inTree(dir, 'update-ref', 'refs/heads/kept', sha);
+  const entry = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
+  assert.equal(entry.action, 'removed', entry.error);
+  assert.equal(entry.head, sha);
+  assert.equal(inTree(ctx.repo.dir, 'rev-parse', 'refs/heads/kept'), sha);
+});
+
+test('worktree-cleanup: вершина читается в самом дереве, а не из общего списка', async () => {
+  const { ctx, dir } = await finished();
+  inTree(dir, 'checkout', '-q', '--detach');
+  const flag = join(ctx.state, 'once');
+  const restore = shimGit(
+    `if [[ " $* " == *" worktree list "* ]] && [ ! -e ${JSON.stringify(flag)} ]; then touch ${JSON.stringify(flag)}; "${realGit}" "$@"; cd ${JSON.stringify(dir)}; echo late > late.txt; "${realGit}" add late.txt; "${realGit}" -c user.name=t -c user.email=t@t commit -qm late; exit 0; fi`,
+  );
+  try {
+    const entry = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
+    assert.equal(entry.reason, 'unreachable-head', 'коммит после списка деревьев виден');
+  } finally {
+    restore();
+  }
+  assert.ok(existsSync(join(dir, 'late.txt')));
+});
+
+test('worktree-cleanup: коммит и файл, появившиеся после проверок, — отказ tree-changed', async () => {
+  for (const late of [
+    `echo late > late.txt; "${realGit}" add late.txt; "${realGit}" -c user.name=t -c user.email=t@t commit -qm late`,
+    'echo late > late.txt',
+  ]) {
+    const { ctx, dir } = await finished();
+    const flag = join(ctx.state, 'once');
+    const restore = shimGit(
+      `if [[ " $* " == *" ls-tree "* ]] && [ ! -e ${JSON.stringify(flag)} ]; then touch ${JSON.stringify(flag)}; ( cd ${JSON.stringify(dir)}; ${late} ); fi`,
+    );
+    try {
+      const entry = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
+      assert.equal(entry.reason, 'tree-changed', late);
+      assert.equal(entry.action, 'refused');
+    } finally {
+      restore();
+    }
+    assert.ok(existsSync(join(dir, 'late.txt')));
+  }
+});
+
+test('worktree-cleanup: новая правка уже изменённого файла, статус тот же, — отказ tree-changed', async () => {
+  const { ctx, dir } = await finished();
+  writeFileSync(join(dir, 'README.md'), 'edited\n');
+  const flag = join(ctx.state, 'once');
+  const restore = shimGit(
+    `if [[ " $* " == *" apply "* ]] && [ ! -e ${JSON.stringify(flag)} ]; then touch ${JSON.stringify(flag)}; echo more >> ${JSON.stringify(join(dir, 'README.md'))}; fi`,
+  );
+  try {
+    assert.equal(entryFor(await ctx.runner.cleanupWorktrees(), dir)?.reason, 'tree-changed');
+  } finally {
+    restore();
+  }
+  assert.match(readFileSync(join(dir, 'README.md'), 'utf8'), /more/);
+});
+
+test('worktree-cleanup: патч строится от закреплённой вершины, даже если HEAD сдвинулся', async () => {
+  const { ctx, dir } = await finished();
+  writeFileSync(join(dir, 'README.md'), 'edited\n');
+  const pinned = inTree(dir, 'rev-parse', 'HEAD');
+  const flag = join(ctx.state, 'once');
+  const restore = shimGit(
+    `if [[ " $* " == *" read-tree "* ]] && [ ! -e ${JSON.stringify(flag)} ]; then touch ${JSON.stringify(flag)}; ( cd ${JSON.stringify(dir)}; echo late > late.txt; "${realGit}" add late.txt; "${realGit}" -c user.name=t -c user.email=t@t commit -qm late ); fi`,
+  );
+  let entry;
+  try {
+    entry = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
+  } finally {
+    restore();
+  }
+  assert.equal(entry.reason, 'tree-changed');
+  assert.equal(entry.head, pinned);
+  const text = readFileSync(entry.patch!, 'utf8');
+  assert.match(text, /late\.txt/, 'патч от закреплённой вершины содержит и поздний файл');
+});
+
+test('worktree-cleanup: запертое дерево отказывает сразу, записи нет; после unlock убирается', async () => {
+  const { ctx, dir, attempt } = await finished();
+  inTree(ctx.repo.dir, 'worktree', 'lock', dir);
+  await assertRefused(ctx, dir, 'worktree-locked');
+  assert.equal(
+    existsSync(join(artifactsOf(ctx, attempt.id), `worktree-cleanup-${attempt.id}.json`)),
+    false,
+    'removal-incomplete не наступает',
+  );
+  inTree(ctx.repo.dir, 'worktree', 'unlock', dir);
+  assert.equal(entryFor(await ctx.runner.cleanupWorktrees(), dir)?.action, 'removed');
+});
+
+test('worktree-cleanup: путь под настроенным clean-фильтром — отказ; без пути фильтр не мешает', async () => {
+  const { ctx, dir } = await finished();
+  ctx.repo.git('config', 'filter.drop.clean', 'cat >/dev/null');
+  assert.equal(
+    entryFor(await ctx.runner.cleanupWorktrees({ dryRun: true }), dir)?.action,
+    'remove',
+    'настройка без пути ничего не значит',
+  );
+  writeFileSync(join(dir, '.gitattributes'), 'secret.txt filter=drop\n');
+  writeFileSync(join(dir, 'secret.txt'), 'precious\n');
+  await assertRefused(ctx, dir, 'clean-filter');
+  assert.equal(readFileSync(join(dir, 'secret.txt'), 'utf8'), 'precious\n');
+});
+
+test('worktree-cleanup: имя, которое нельзя передать git байт в байт, — отказ', async () => {
+  const { ctx, dir } = await finished();
+  writeFileSync(join(dir, 'broken-\uFFFD-name'), 'x');
+  await assertRefused(ctx, dir, 'undecodable-path');
+});
+
+test('worktree-cleanup: отказ последней записи не лишает ответ истинного состояния', async () => {
+  const { ctx, dir, attempt } = await finished();
+  const artifacts = artifactsOf(ctx, attempt.id);
+  const restore = shimGit(
+    `if [[ " $* " == *" worktree remove "* ]]; then chmod 555 ${JSON.stringify(artifacts)}; fi`,
+  );
+  let entry;
+  try {
+    entry = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
+  } finally {
+    restore();
+    chmodSync(artifacts, 0o755);
+  }
+  assert.equal(entry.action, 'failed');
+  assert.equal(entry.removalStarted, true);
+  assert.equal(entry.registered, false);
+  assert.equal(entry.treePresent, false);
+  assert.match(entry.error!, /запись не обновлена/);
+});
+
+test('worktree-cleanup: замок умершего процесса забирает ровно один из претендентов', async () => {
+  const dead = spawnSync(process.execPath, ['-p', 'process.pid'], { encoding: 'utf8' });
+  const file = join(mkdtempSync(join(tmpdir(), 'harness-lock-')), 'lock');
+  for (let round = 0; round < 20; round++) {
+    writeFileSync(file, dead.stdout.trim());
+    const tries = await Promise.allSettled(Array.from({ length: 6 }, () => lockCleanup(file)));
+    const held = tries.filter((t) => t.status === 'fulfilled');
+    assert.equal(held.length, 1, `раунд ${round}`);
+    await held[0]!.value();
+    assert.equal(existsSync(file), false);
+  }
+});
+
+test('worktree-cleanup: пустой замок, живой PID и файл захвата остаются и называют файл', async () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'harness-lock-')), 'lock');
+  const busy = (e: unknown, path: string) => {
+    const error = e as { code: string; message: string };
+    return (
+      error.code === 'NOT_READY' && error.message.includes(path) && /удалите/.test(error.message)
+    );
+  };
+  for (const content of ['', String(process.pid)]) {
+    writeFileSync(file, content);
+    await assert.rejects(lockCleanup(file), (e) => busy(e, file));
+    assert.equal(readFileSync(file, 'utf8'), content, 'замок не тронут');
+  }
+  writeFileSync(file, '999999');
+  writeFileSync(`${file}.takeover`, '');
+  await assert.rejects(lockCleanup(file), (e) => busy(e, `${file}.takeover`));
+});
+
+test('worktree-cleanup: снимается только свой замок', async () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'harness-lock-')), 'lock');
+  const unlock = await lockCleanup(file);
+  writeFileSync(file, 'another owner');
+  await unlock();
+  assert.equal(readFileSync(file, 'utf8'), 'another owner');
 });

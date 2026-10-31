@@ -58,7 +58,8 @@ test('A run removes its directory while TMPDIR still points into it', () => {
     assert.equal(removeScratch(run, prefix), true);
     assert.equal(existsSync(run), false);
   } finally {
-    process.env.TMPDIR = saved;
+    if (saved === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = saved;
   }
 });
 

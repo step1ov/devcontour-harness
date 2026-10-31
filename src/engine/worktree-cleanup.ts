@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
   link,
@@ -38,6 +38,10 @@ export type WorktreeRefusal =
   | 'scan-limit'
   | 'scan-failed'
   | 'read-only-path'
+  | 'undecodable-path'
+  | 'worktree-locked'
+  | 'clean-filter'
+  | 'tree-changed'
   | 'ignore-rules-changed'
   | 'hidden-changes'
   | 'unreachable-head'
@@ -66,7 +70,10 @@ export interface WorktreeCleanupEntry {
   ignored?: { count: number; paths: string[] };
   /** Патч этих правок (не для dry run): `git apply --index` поверх `head`. */
   patch?: string;
+  /** Запись об удалении: при `removal-incomplete` её снимают вручную. */
+  record?: string;
   removalStarted?: boolean;
+  /** Отсутствует, только если git не смог ответить. */
   registered?: boolean;
   treePresent?: boolean;
 }
@@ -132,20 +139,43 @@ function gitOutput(
   });
 }
 
-/** Зарегистрированные рабочие деревья репозитория: настоящий путь → HEAD. */
+/** Зарегистрированные рабочие деревья репозитория: настоящий путь → заперто ли. */
 export async function registered(repoPath: string) {
   const out = await gitOutput(repoPath, ['worktree', 'list', '--porcelain']);
-  const found = new Map<string, string | undefined>();
+  const found = new Map<string, { locked: boolean }>();
   for (const block of out.split('\n\n')) {
     const path = /^worktree (.+)$/m.exec(block)?.[1];
-    if (path) found.set(worktreeKey(path), /^HEAD ([0-9a-f]+)$/m.exec(block)?.[1]);
+    if (path) found.set(worktreeKey(path), { locked: /^locked\b/m.test(block) });
   }
   return found;
+}
+
+/** Вершина самого дерева: список деревьев снят раньше, а работа в дереве могла идти. */
+export const treeHead = (dir: string) =>
+  gitOutput(dir, ['rev-parse', '--verify', 'HEAD']).then(
+    (out) => out.trim(),
+    () => undefined,
+  );
+
+/**
+ * Вершину держит ref, который переживёт дерево. Запрос идёт из общего репозитория,
+ * а не из дерева: `refs/worktree`, `refs/bisect` и `refs/rewritten` принадлежат
+ * рабочему дереву и исчезают вместе с ним.
+ */
+async function headSurvives(repoPath: string, head: string) {
+  const refs = await gitOutput(repoPath, [
+    'for-each-ref',
+    '--contains',
+    head,
+    '--format=%(refname)',
+  ]);
+  return refs.split('\n').some((r) => r && !/^refs\/(worktree|bisect|rewritten)\//.test(r));
 }
 
 export interface TreeScan {
   embedded?: string;
   readOnly?: string;
+  undecodable?: string;
   limited: boolean;
   /** Пути `.gitignore` относительно дерева. */
   ignoreFiles: string[];
@@ -176,6 +206,8 @@ export async function scanTree(root: string, limit: number): Promise<TreeScan> {
     )
       return { ...scan, embedded: rel };
     for (const item of items) {
+      // Имя не в UTF-8 дошло бы до git уже другими байтами.
+      if (item.name.includes('\uFFFD')) scan.undecodable ??= join(rel, item.name);
       if (item.name === '.git') continue;
       if (item.name === '.gitignore') scan.ignoreFiles.push(join(rel, item.name));
       if (item.isDirectory()) stack.push(join(dir, item.name));
@@ -253,6 +285,29 @@ async function ignoreRulesChanged(dir: string, head: string, files: string[], pr
   return dirs.some((d) => !inert.has(d));
 }
 
+/**
+ * Путь дерева идёт через настроенный clean-фильтр: `git add` сохранил бы его
+ * вывод, а не файл, и проверка патча этого не заметит — фильтр потерял бы данные
+ * на обеих сторонах сравнения.
+ */
+async function cleanFilterApplies(dir: string) {
+  const names = await gitOutput(
+    dir,
+    ['config', '--name-only', '-z', '--get-regexp', '^filter\\..*\\.(clean|process)$'],
+    { allowed: 1 },
+  );
+  const configured = new Set(
+    names.split('\0').flatMap((key) => /^filter\.(.+)\.(clean|process)$/s.exec(key)?.[1] ?? []),
+  );
+  if (!configured.size) return false;
+  const paths = await gitOutput(dir, ['ls-files', '-z', '--cached', '--others']);
+  const fields = (
+    await gitOutput(dir, ['check-attr', '--stdin', '-z', 'filter'], { input: paths })
+  ).split('\0');
+  for (let i = 2; i < fields.length; i += 3) if (configured.has(fields[i]!)) return true;
+  return false;
+}
+
 /** Неподтверждённые правки и игнорируемое без записи в индекс дерева. */
 async function treeStatus(dir: string) {
   const out = await gitOutput(dir, [
@@ -273,6 +328,7 @@ async function treeStatus(dir: string) {
   }
   const top = new Set(entries.map((path) => path.split('/')[0]!));
   return {
+    raw: out,
     entries,
     uncommitted,
     ignored: { count: entries.length, paths: [...top].sort().slice(0, IGNORED_PATHS) },
@@ -282,12 +338,15 @@ async function treeStatus(dir: string) {
 /** Что мешает удалить дерево, и что в нём лежит. Ничего не пишет. */
 export async function inspectTree(
   dir: string,
+  repoPath: string,
   head: string | undefined,
   limit: number,
 ): Promise<{
   refusal?: WorktreeRefusal;
   uncommitted?: number;
   ignored?: WorktreeCleanupEntry['ignored'];
+  /** Статус, по которому принято решение: перед удалением он сверяется. */
+  status?: string;
 }> {
   let scan: TreeScan;
   try {
@@ -297,15 +356,17 @@ export async function inspectTree(
   }
   if (scan.limited) return { refusal: 'scan-limit' };
   if (scan.embedded) return { refusal: 'embedded-repository' };
-  const { entries, ...status } = await treeStatus(dir);
+  if (scan.undecodable) return { refusal: 'undecodable-path' };
+  const { entries, raw, ...counts } = await treeStatus(dir);
+  const status = { ...counts, status: raw };
   const refused = (refusal: WorktreeRefusal) => ({ refusal, ...status });
   const flags = await indexFlags(dir);
   if (flags.gitlink) return refused('embedded-repository');
-  if (!head || !(await gitOutput(dir, ['for-each-ref', '--contains', head, '--count=1'])).trim())
-    return refused('unreachable-head');
+  if (!head || !(await headSurvives(repoPath, head))) return refused('unreachable-head');
   if (await ignoreRulesChanged(dir, head, scan.ignoreFiles, entries))
     return refused('ignore-rules-changed');
   if (flags.hidden) return refused('hidden-changes');
+  if (await cleanFilterApplies(dir)) return refused('clean-filter');
   if (scan.readOnly) return refused('read-only-path');
   return status;
 }
@@ -323,24 +384,50 @@ async function publish(temporary: string, directory: string, name: string) {
   }
 }
 
+/** Дерево всех неигнорируемых файлов поверх вершины; индекс попытки не меняется. */
+async function editsTree(dir: string, head: string, env: NodeJS.ProcessEnv) {
+  await gitOutput(dir, ['read-tree', head], { env });
+  await gitOutput(dir, ['add', '-A', '--', '.'], { env });
+  return (await gitOutput(dir, ['write-tree'], { env })).trim();
+}
+
 /**
- * Неподтверждённые правки дерева — патчем к его HEAD. Индекс попытки не
+ * Дерево то же, что при проверках: та же вершина, тот же статус, те же правки.
+ * Узкое окно до удаления остаётся: запись после этой сверки не будет замечена.
+ */
+export async function treeUnchanged(
+  dir: string,
+  head: string,
+  status: string,
+  edits: string | undefined,
+) {
+  if ((await treeHead(dir)) !== head || (await treeStatus(dir)).raw !== status) return false;
+  if (!edits) return true;
+  const scratch = await mkdtemp(join(tmpdir(), 'harness-worktree-index-'));
+  try {
+    return (await editsTree(dir, head, { GIT_INDEX_FILE: join(scratch, 'index') })) === edits;
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Неподтверждённые правки дерева — патчем к закреплённой вершине `head`, той же,
+ * что в записи об удалении. Индекс попытки не
  * меняется: всё идёт через временные индексы. Формат закреплён против настроек
  * пользователя, а патч проверен до удаления: наложенный на HEAD, он обязан дать
  * то же дерево, что и правки. Иначе отказ, и дерево остаётся.
  */
-export async function savePatch(dir: string, artifacts: string, name: string) {
+export async function savePatch(dir: string, artifacts: string, name: string, head: string) {
   const scratch = await mkdtemp(join(tmpdir(), 'harness-worktree-index-'));
   const temporary = join(artifacts, `.${name}.${process.pid}.tmp`);
   try {
     await mkdir(artifacts, { recursive: true });
     const inIndex = (file: string, ...args: string[]) =>
       gitOutput(dir, args, { env: { GIT_INDEX_FILE: join(scratch, file) } });
-    await inIndex('edits', 'read-tree', 'HEAD');
-    await inIndex('edits', 'add', '-A', '--', '.');
-    if (/^:\d+ 160000 /m.test(await inIndex('edits', 'diff', '--cached', '--raw', 'HEAD')))
+    const edits = await editsTree(dir, head, { GIT_INDEX_FILE: join(scratch, 'edits') });
+    if (/^:\d+ 160000 /m.test(await inIndex('edits', 'diff', '--cached', '--raw', head)))
       return { refusal: 'embedded-repository' as const };
-    const edits = (await inIndex('edits', 'write-tree')).trim();
     await inIndex(
       'edits',
       '-c',
@@ -362,17 +449,17 @@ export async function savePatch(dir: string, artifacts: string, name: string) {
       '--src-prefix=a/',
       '--dst-prefix=b/',
       `--output=${temporary}`,
-      'HEAD',
+      head,
     );
     try {
-      await inIndex('proof', 'read-tree', 'HEAD');
+      await inIndex('proof', 'read-tree', head);
       await inIndex('proof', 'apply', '--cached', '--whitespace=nowarn', temporary);
       if ((await inIndex('proof', 'write-tree')).trim() !== edits)
         return { refusal: 'patch-unusable' as const };
     } catch {
       return { refusal: 'patch-unusable' as const };
     }
-    return { patch: await publish(temporary, artifacts, name) };
+    return { edits, patch: await publish(temporary, artifacts, name) };
   } finally {
     await rm(temporary, { force: true });
     await rm(scratch, { recursive: true, force: true });
@@ -399,7 +486,7 @@ export async function removeTree(repoPath: string, path: string, timeoutMs: numb
   forgetWorktree(path);
 }
 
-const recordFile = (artifacts: string, path: string) =>
+export const recordFile = (artifacts: string, path: string) =>
   join(artifacts, `worktree-cleanup-${basename(path)}.json`);
 
 export interface RemovalRecord extends WorktreeCleanupEntry {
@@ -452,31 +539,73 @@ const alive = (pid: number) => {
   }
 };
 
+const lockBusy = (file: string) =>
+  new HarnessError(
+    'NOT_READY',
+    `Очистка деревьев уже идёт или прервана: ${file}. Если запуска нет, удалите этот файл`,
+  );
+
 /**
- * Один запуск очистки на каталог состояния: два запуска делили бы патчи и записи.
- * Замок умершего процесса снимается; замок без читаемого PID — занят.
+ * Снять замок умершего процесса. Снимают по одному: иначе второй претендент,
+ * прочитавший тот же умерший PID, удалил бы уже новый замок. Служебный файл
+ * захвата держится миллисекунды; файл замка переносится под уникальное имя и
+ * сверяется. Пустой замок и живой PID (в том числе занятый другим процессом)
+ * не снимаются: это решение человека.
  */
-export async function lockCleanup(file: string) {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const handle = await open(file, 'wx');
-      await handle.writeFile(String(process.pid));
-      await handle.close();
-      return () => rm(file, { force: true });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const pid = Number((await readFile(file, 'utf8').catch(() => '')).trim());
-      if (!pid || alive(pid)) break;
-      await rm(file, { force: true });
+async function takeOver(file: string) {
+  const claim = `${file}.takeover`;
+  const handle = await open(claim, 'wx').catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'EEXIST') throw lockBusy(claim);
+    throw error;
+  });
+  try {
+    await handle.close();
+    const seen = await readFile(file, 'utf8').catch(() => undefined);
+    if (seen === undefined) return;
+    const pid = Number(seen.trim().split(' ')[0]);
+    if (!pid || alive(pid)) throw lockBusy(file);
+    const moved = `${file}.stale.${randomUUID()}`;
+    await rename(file, moved);
+    if ((await readFile(moved, 'utf8')) !== seen) {
+      await link(moved, file).catch(() => undefined);
+      await rm(moved, { force: true });
+      throw lockBusy(file);
     }
+    await rm(moved, { force: true });
+  } finally {
+    await rm(claim, { force: true });
   }
-  throw new HarnessError('NOT_READY', `Очистка деревьев уже идёт: ${file}`);
 }
 
-export const treeState = async (repoPath: string, path: string) => ({
-  registered: (await registered(repoPath)).has(worktreeKey(path)),
-  treePresent: existsSync(path),
-});
+/** Один запуск очистки на каталог состояния: два запуска делили бы патчи и записи. */
+export async function lockCleanup(file: string) {
+  const mine = `${process.pid} ${randomUUID()}`;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const handle = await open(file, 'wx');
+      await handle.writeFile(mine);
+      await handle.close();
+      // Снимается только свой замок: чужой человек мог заменить его вручную.
+      return async () => {
+        if ((await readFile(file, 'utf8').catch(() => '')) === mine)
+          await rm(file, { force: true });
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      await takeOver(file);
+    }
+  }
+  throw lockBusy(file);
+}
+
+/** Что осталось после отказа удаления; `registered` — только если git ответил. */
+export async function treeState(repoPath: string, path: string) {
+  const live = await registered(repoPath).catch(() => undefined);
+  return {
+    ...(live ? { registered: live.has(worktreeKey(path)) } : {}),
+    treePresent: existsSync(path),
+  };
+}
 
 export const isWithin = (path: string, root: string) => {
   const rest = relative(root, path);

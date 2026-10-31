@@ -49,13 +49,17 @@ import {
   isWithin,
   lockCleanup,
   readRemoval,
+  recordFile,
   recordRemoval,
   registered,
   removeTree,
   savePatch,
   sizeKb,
+  treeHead,
   treeState,
+  treeUnchanged,
   trusted,
+  type RemovalRecord,
   type WorktreeCleanupEntry,
 } from './worktree-cleanup.ts';
 import {
@@ -1602,13 +1606,11 @@ export class Runner {
       for (const path of paths) {
         if (!existsSync(path) || !roots.some((root) => isWithin(path, root))) continue;
         const owner = owners.get(path);
-        const head = live.get(path);
         const entry: WorktreeCleanupEntry = {
           path,
           repositoryId: repo.id,
           action: 'refused',
           ...(owner ? { attemptId: owner.attempt.id } : {}),
-          ...(head ? { head } : {}),
         };
         worktrees.push(entry);
         if (!owner) {
@@ -1616,9 +1618,10 @@ export class Runner {
           continue;
         }
         const artifacts = join(this.dirOf(repo.id), 'artifacts', owner.attempt.id);
+        let prior: RemovalRecord | undefined;
         try {
           entry.sizeKb = await sizeKb(path);
-          const prior = await readRemoval(artifacts, path);
+          prior = await readRemoval(artifacts, path);
           let refusal = owner.refusal;
           if (!refusal)
             try {
@@ -1629,13 +1632,20 @@ export class Runner {
             }
           if (prior && prior.status !== 'removed') {
             refusal ??= 'removal-incomplete';
+            entry.record = recordFile(artifacts, path);
             if (prior.patch) entry.patch = prior.patch;
           }
           if (!live.has(path)) refusal ??= 'not-registered';
+          if (live.get(path)?.locked) refusal ??= 'worktree-locked';
           if (!refusal && !trusted(path, repoPath)) refusal = 'untrusted';
+          let head: string | undefined;
+          let decided: string | undefined;
           if (!refusal) {
-            const seen = await inspectTree(path, head, Runner.cleanupScanLimit);
+            head = await treeHead(path);
+            if (head) entry.head = head;
+            const seen = await inspectTree(path, repoPath, head, Runner.cleanupScanLimit);
             refusal = seen.refusal;
+            decided = seen.status;
             if (seen.uncommitted !== undefined) entry.uncommitted = seen.uncommitted;
             if (seen.ignored) entry.ignored = seen.ignored;
           }
@@ -1647,28 +1657,34 @@ export class Runner {
             entry.action = 'remove';
             continue;
           }
+          let edits: string | undefined;
           if (entry.uncommitted) {
-            const saved = await savePatch(path, artifacts, `uncommitted-${basename(path)}`);
+            const saved = await savePatch(path, artifacts, `uncommitted-${basename(path)}`, head!);
             if (saved.refusal) {
               entry.reason = saved.refusal;
               continue;
             }
             entry.patch = saved.patch!;
+            edits = saved.edits;
+          }
+          if (!(await treeUnchanged(path, head!, decided!, edits))) {
+            entry.reason = 'tree-changed';
+            continue;
           }
           await recordRemoval(artifacts, entry, 'removing', prior);
           entry.removalStarted = true;
-          try {
-            await removeTree(repoPath, path, Runner.cleanupRemovalMs);
-          } catch (error) {
-            Object.assign(entry, await treeState(repoPath, path));
-            await recordRemoval(artifacts, entry, 'incomplete', prior);
-            throw error;
-          }
+          await removeTree(repoPath, path, Runner.cleanupRemovalMs);
           entry.action = 'removed';
           await recordRemoval(artifacts, entry, 'removed', prior);
         } catch (error) {
           entry.action = 'failed';
           entry.error = error instanceof Error ? error.message : String(error);
+          if (entry.removalStarted) {
+            Object.assign(entry, await treeState(repoPath, path));
+            await recordRemoval(artifacts, entry, 'incomplete', prior).catch((e: unknown) => {
+              entry.error += `; запись не обновлена: ${e instanceof Error ? e.message : String(e)}`;
+            });
+          }
         }
       }
     }
