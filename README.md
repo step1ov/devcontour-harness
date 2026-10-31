@@ -5,7 +5,7 @@ Headless-движок исполнения инженерных поручени
 интеграция с принятой веткой через compare-and-swap и машинный результат с SHA
 и доказательствами.
 
-> Статус: `0.1.0-alpha.26` — предварительный выпуск (alpha). Договоры
+> Статус: `0.1.0-alpha.27` — предварительный выпуск (alpha). Договоры
 > `v1alpha1` могут измениться между alpha-версиями; закрепляйте точную версию.
 > Файл → ревью плана → кандидат → интеграция → принятие → результат JSON, с
 > ограниченным восстановлением, повторным использованием кандидата, бюджетами,
@@ -28,7 +28,7 @@ Headless-движок исполнения инженерных поручени
 Из npm — точная версия (воспроизводимо) или последняя alpha по тегу:
 
 ```sh
-npm install --save-exact devcontour-harness@0.1.0-alpha.26   # точная версия
+npm install --save-exact devcontour-harness@0.1.0-alpha.27   # точная версия
 # или: npm install --save-exact devcontour-harness@alpha     # текущая alpha
 npx harness --version
 ```
@@ -99,6 +99,7 @@ git rev-parse refs/heads/harness/accepted   # совпадает с data.result.
 | `status / events / result --state D`         | Чтение без побочных эффектов                       |
 | `pause / resume / cancel / retry --state D`  | Управление очередью и поручением                   |
 | `deliver --state D --work ID --sink file:D`  | Повтор доставки без моделей и интеграции           |
+| `worktree-cleanup --state D [--dry-run]`     | Уборка деревьев завершённых попыток                |
 | `profile --profile ID [--repository D]`      | Разрешение профиля стека без команд проекта        |
 | `doctor`                                     | Версии, runtime, sandbox, совместимость состояния  |
 
@@ -122,6 +123,12 @@ PASS» нет. Адаптеры хоста реализуют порты `Execut
 `/contracts` и `/testing`; JSON-схемы входов и выходов —
 `devcontour-harness/schemas/<имя>.schema.json`. Декларации используют типы
 Node.js: TypeScript-потребителю нужен `@types/node` (или `skipLibCheck`).
+
+## Выпуск 0.1.0-alpha.27
+
+Хранилище зависимостей pnpm в политике, команда `worktree-cleanup` для
+деревьев завершённых попыток и более дешёвый поиск оставшихся процессов.
+Подробно — [заметки выпуска](docs/release-notes/0.1.0-alpha.27.md).
 
 ## Выпуск 0.1.0-alpha.26
 
