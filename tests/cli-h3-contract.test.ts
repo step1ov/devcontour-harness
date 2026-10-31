@@ -44,6 +44,7 @@ const harness = (args: string[]) => {
 };
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
+const laterCommands: readonly string[] = ['worktree-cleanup'];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
   'validate',
@@ -201,13 +202,15 @@ test('H3-01: API каждой общей операции опубликован
 });
 
 test('H3-01: прежние команды и схемы их данных не изменились — только добавлена capabilities', () => {
-  assert.deepEqual(Object.keys(cliCommands), [
+  // Команды, добавленные позже: прежние они не меняют.
+  const later = (name: string) => !laterCommands.includes(name);
+  assert.deepEqual(Object.keys(cliCommands).filter(later), [
     ...h2Commands.slice(0, 20),
     'capabilities',
     ...h2Commands.slice(20),
   ]);
   assert.deepEqual(
-    Object.keys(cliDataSchemas).sort(),
+    Object.keys(cliDataSchemas).filter(later).sort(),
     [...h2Commands, 'capabilities', 'version'].sort(),
   );
 
@@ -233,7 +236,7 @@ test('H3-01: прежние команды и схемы их данных не 
 
   const data = Object.fromEntries(
     Object.entries(cliDataSchemas)
-      .filter(([c]) => c !== 'capabilities')
+      .filter(([c]) => c !== 'capabilities' && !laterCommands.includes(c))
       .map(([c, s]) => [
         c,
         z.toJSONSchema(s as z.ZodType, { io: 'output', unrepresentable: 'any' }),

@@ -278,6 +278,7 @@ const options = {
   basis: { type: 'string' },
   contracts: { type: 'string' },
   requirements: { type: 'string', multiple: true },
+  'dry-run': { type: 'boolean' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -290,6 +291,7 @@ const flagOwners = {
   brief: ['plan-request', 'plan-check'],
   contracts: ['plan-request', 'plan-check'],
   requirements: ['plan-request'],
+  'dry-run': ['worktree-cleanup'],
 } as const;
 
 /** Явное человеческое представление успешного ответа (`--human`). */
@@ -560,6 +562,16 @@ async function run(
       const h = open(need('state'), binding(need('state')), false);
       try {
         return { command, data: await h.cleanup(need('run')) };
+      } finally {
+        h.close();
+      }
+    }
+    case 'worktree-cleanup': {
+      const dryRun = !!v['dry-run'];
+      const h = open(need('state'), binding(need('state')), dryRun ? 'state' : false);
+      try {
+        const data = await h.cleanupWorktrees({ dryRun });
+        return { command, data, ...(data.failed ? { code: 4 } : {}) };
       } finally {
         h.close();
       }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -174,16 +174,18 @@ test('Зависший git update-ref внутри транзакции оста
   const b = based();
   const { store } = engineOf(b.policy);
   const shim = mkdtempSync(join(tmpdir(), 'harness-git-shim-'));
+  const hung = join(shim, 'hung');
+  // Намного длиннее любого прогона: перенос, который ждёт зависание, не уложится в него.
+  const hangSeconds = 300;
   const realGit = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
   writeFileSync(
     join(shim, 'git'),
-    `#!/bin/sh\nfor a in "$@"; do [ "$a" = update-ref ] && exec sleep 60; done\nexec ${JSON.stringify(realGit)} "$@"\n`,
+    `#!/bin/sh\nfor a in "$@"; do [ "$a" = update-ref ] && { : > ${JSON.stringify(hung)}; exec sleep ${hangSeconds}; }; done\nexec ${JSON.stringify(realGit)} "$@"\n`,
   );
   chmodSync(join(shim, 'git'), 0o755);
   assert.ok(fencedRefMove.timeoutMs > 0 && fencedRefMove.timeoutMs <= 60000);
   const before = b.tip();
   const path = process.env.PATH;
-  const started = Date.now();
   try {
     process.env.PATH = `${shim}:${path}`;
     await assert.rejects(
@@ -197,7 +199,10 @@ test('Зависший git update-ref внутри транзакции оста
   } finally {
     process.env.PATH = path;
   }
-  assert.ok(Date.now() - started < 30000, 'не ждал зависший Git целиком');
+  assert.ok(
+    Date.now() - statSync(hung).mtimeMs < (hangSeconds - 30) * 1000,
+    'не ждал зависший Git целиком',
+  );
   assert.equal(b.tip(), before, 'база не сдвинута');
   await moveBase({
     policy: b.policy,

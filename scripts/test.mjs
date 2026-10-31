@@ -4,6 +4,7 @@ import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from 'node:test';
 import { spec } from 'node:test/reporters';
+import { createScratch, removeScratch } from './test-scratch.mjs';
 
 // Три уровня проверки (README, «Разработка»):
 //   npm test                — весь suite; npm run check добавляет --release;
@@ -136,6 +137,9 @@ if (flags.list) {
   };
   process.once('SIGINT', interrupt);
   process.once('SIGTERM', terminate);
+  const scratch = createScratch('hr-');
+  process.env.TMPDIR = scratch;
+  process.once('exit', () => removeScratch(scratch, 'hr-'));
   const results = run({
     files,
     concurrency: 4,

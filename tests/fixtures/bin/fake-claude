@@ -40,6 +40,7 @@ if (!step) {
   console.error(`fixture: no ${role} step`);
   process.exit(2);
 }
+writeFileSync(`${scenarioPath}.${role}.${index}.started`, '');
 const prompt = readFileSync(0, 'utf8');
 // Ключи окружения вызова (значения — только у FIXTURE_/PROFILE_): тесты проверяют, что профиль применён.
 writeFileSync(
@@ -86,6 +87,15 @@ if (step.spawnHanging) {
   if (step.spawnHanging === 'detached') child.unref();
 }
 if (step.sleepMs) await new Promise((r) => setTimeout(r, step.sleepMs));
+// Шаг держится, пока тест не создаст файл: событие вместо подобранной паузы.
+// Предел — на случай, если тест умер и файла не будет.
+for (const end = Date.now() + 600_000; step.holdUntil && !existsSync(step.holdUntil); ) {
+  if (Date.now() > end) {
+    console.error('fixture: holdUntil не дождался файла');
+    process.exit(2);
+  }
+  await new Promise((r) => setTimeout(r, 20));
+}
 for (const [path, text] of Object.entries(step.files ?? {})) {
   mkdirSync(dirname(join(process.cwd(), path)), { recursive: true });
   writeFileSync(join(process.cwd(), path), text);

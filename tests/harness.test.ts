@@ -4,7 +4,8 @@
 import { issuedFindings } from './review-fixture.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   API_VERSION,
@@ -443,18 +444,33 @@ test('S1-R1-06: пауза человека до первого запуска �
 });
 
 test('S1-R1-07/T04: работающий controller продлевает роль; второй не захватывает её; завершившийся освобождает', async () => {
+  const hold = join(mkdtempSync(join(tmpdir(), 'harness-hold-')), 'release');
   const ctx = hsetup({
-    scenario: { writer: { ...implement(), sleepMs: 7500 }, reviewer: approve() },
+    scenario: { writer: { ...implement(), holdUntil: hold }, reviewer: approve() },
     policy: (p) => ((p as any).leaseMs = 5000),
   });
   const h = ctx.open();
   const running = h.run({ graph: ctx.graph, author: 'claude' });
-  await new Promise((r) => setTimeout(r, 6000));
   const other = new Engine({
     host: standaloneHost(new SqliteExecutionStore(ctx.statePath, 'other'), ctx.policy),
     policy: ctx.policy,
   });
+  const lease = () => h.engine.read((v) => v.controller()?.leaseUntil);
+  const giveUp = Date.now() + 60000;
+  while (!lease() && Date.now() < giveUp) await new Promise((r) => setTimeout(r, 20));
+  const first = lease()!;
+  assert.ok(first, 'роль взята');
+  // Срок, взятый при старте, прошёл, а роль действует: её продлили. Проверка
+  // сразу за наблюдением: стоявший event loop не успевает её истечь между ними.
+  while (!(Date.now() > first && (lease() ?? 0) > Date.now()) && Date.now() < giveUp)
+    await new Promise((r) => setTimeout(r, 20));
+  assert.equal(
+    h.engine.read((v) => v.work('add-greeting')!.status),
+    'running',
+    'работа идёт',
+  );
   assert.equal(other.lead('other-process'), false, 'роль продлена, пока идёт работа');
+  writeFileSync(hold, '');
   await running;
   assert.equal(
     h.engine.read((v) => v.work('add-greeting')!.status),

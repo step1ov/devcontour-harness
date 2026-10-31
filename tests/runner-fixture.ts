@@ -150,3 +150,23 @@ export async function runAll(ctx: ReturnType<typeof setup>) {
 
 export const target = (ctx: ReturnType<typeof setup>) =>
   ctx.repo.git('rev-parse', ctx.policy.repositories[0]!.targetRef);
+
+/**
+ * Прогон с пределом времени, который должен сработать на конкретном шаге. Под
+ * нагрузкой предел может сработать раньше этого шага: такой прогон ничего не
+ * доказывает (`conclusive` — ложь) и повторяется с вдвое большим пределом, не
+ * больше `doublings` раз. Утверждения теста относятся к последнему прогону.
+ */
+export async function widening<T>(
+  limitMs: number,
+  run: (limitMs: number) => Promise<T>,
+  conclusive: (result: T) => boolean,
+  doublings = 3,
+): Promise<T> {
+  let result = await run(limitMs);
+  for (let i = 0; i < doublings && !conclusive(result); i++) {
+    limitMs *= 2;
+    result = await run(limitMs);
+  }
+  return result;
+}

@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   roleBinding,
   selectReviewer,
@@ -41,6 +41,27 @@ import {
   type WorkState,
 } from '../contracts/index.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
+import { worktreeKey } from '../environment/git-trust.ts';
+import {
+  attemptRefusal,
+  cleanupUnfinished,
+  inspectTree,
+  isWithin,
+  lockCleanup,
+  readRemoval,
+  recordFile,
+  recordRemoval,
+  registered,
+  removeTree,
+  savePatch,
+  sizeKb,
+  treeHead,
+  treeState,
+  treeUnchanged,
+  trusted,
+  type RemovalRecord,
+  type WorktreeCleanupEntry,
+} from './worktree-cleanup.ts';
 import {
   protectedChanges,
   protectedSnapshot,
@@ -1524,6 +1545,163 @@ export class Runner {
           (JSON.parse(await readFile(file, 'utf8')) as { errors: string[] }).errors.join('; '),
       );
     return { status: 'cleaned' as const, receipts: cleaned };
+  }
+
+  /** Предел обхода дерева при очистке: дошедший до него обход отказывает. */
+  static cleanupScanLimit = 2_000_000;
+  /** Предел удаления одного дерева: большие деревья удаляются минутами. */
+  static cleanupRemovalMs = 1_800_000;
+
+  /**
+   * Убрать рабочие деревья закончившихся попыток. Ветки и достижимые коммиты
+   * остаются; неподтверждённые правки сохраняются патчем в артефактах попытки
+   * до удаления. В сомнении дерево остаётся: отказ назван поимённо и не срывает
+   * остальные деревья. Один запуск на каталог состояния; `dryRun` ничего не пишет.
+   */
+  async cleanupWorktrees({ dryRun = false }: { dryRun?: boolean } = {}) {
+    const unlock = dryRun
+      ? undefined
+      : await lockCleanup(join(this.options.stateDir, 'worktree-cleanup.lock'));
+    try {
+      return await this.sweepWorktrees(dryRun);
+    } finally {
+      await unlock?.();
+    }
+  }
+
+  private async sweepWorktrees(dryRun: boolean) {
+    const worktrees: WorktreeCleanupEntry[] = [];
+    const attempts = this.engine.read((v) =>
+      v.attempts().map((attempt) => {
+        const work = v.work(attempt.workId);
+        const latest = v.attempts(attempt.workId).every((a) => a.attempt <= attempt.attempt);
+        return {
+          attempt,
+          refusal: attemptRefusal(attempt, work, latest, this.jobs.has(attempt.id)),
+        };
+      }),
+    );
+    for (const repo of this.policy.repositories) {
+      const repoPath = this.repoPath(repo);
+      const live = await registered(repoPath);
+      const owners = new Map<string, (typeof attempts)[number]>();
+      for (const item of attempts.filter((i) => i.attempt.repositoryId === repo.id)) {
+        const dir = this.checkout(repo.id, 'worktrees', item.attempt.id);
+        for (const path of [
+          dir,
+          dir + '-integration',
+          ...(item.attempt.worktree
+            ? [item.attempt.worktree, item.attempt.worktree + '-integration']
+            : []),
+        ])
+          owners.set(worktreeKey(path), item);
+      }
+      const roots = [
+        this.checkout(repo.id, 'worktrees'),
+        join(this.dirOf(repo.id), 'worktrees'),
+      ].map(worktreeKey);
+      // Дерево без регистрации (удаление оборвалось после неё) git больше не
+      // покажет: о нём знает только попытка.
+      const paths = new Set([...live.keys(), ...owners.keys()]);
+      for (const path of paths) {
+        if (!existsSync(path) || !roots.some((root) => isWithin(path, root))) continue;
+        const owner = owners.get(path);
+        const entry: WorktreeCleanupEntry = {
+          path,
+          repositoryId: repo.id,
+          action: 'refused',
+          ...(owner ? { attemptId: owner.attempt.id } : {}),
+        };
+        worktrees.push(entry);
+        if (!owner) {
+          entry.reason = 'unknown-attempt';
+          continue;
+        }
+        const artifacts = join(this.dirOf(repo.id), 'artifacts', owner.attempt.id);
+        let prior: RemovalRecord | undefined;
+        try {
+          entry.sizeKb = await sizeKb(path);
+          prior = await readRemoval(artifacts, path);
+          let refusal = owner.refusal;
+          if (!refusal)
+            try {
+              if (await cleanupUnfinished(artifacts, await receipts(artifacts)))
+                refusal = 'cleanup-pending';
+            } catch {
+              refusal = 'cleanup-unreadable';
+            }
+          if (prior && prior.status !== 'removed') {
+            refusal ??= 'removal-incomplete';
+            entry.record = recordFile(artifacts, path);
+            if (prior.patch) entry.patch = prior.patch;
+            if (prior.head) entry.head = prior.head;
+          }
+          if (!live.has(path)) refusal ??= 'not-registered';
+          if (live.get(path)?.locked) refusal ??= 'worktree-locked';
+          if (!refusal && !trusted(path, repoPath)) refusal = 'untrusted';
+          let head: string | undefined;
+          let decided: string | undefined;
+          if (!refusal) {
+            head = await treeHead(path);
+            if (head) entry.head = head;
+            const seen = await inspectTree(path, repoPath, head, Runner.cleanupScanLimit);
+            refusal = seen.refusal;
+            decided = seen.status;
+            if (seen.uncommitted !== undefined) entry.uncommitted = seen.uncommitted;
+            if (seen.ignored) entry.ignored = seen.ignored;
+          }
+          if (refusal) {
+            entry.reason = refusal;
+            continue;
+          }
+          if (dryRun) {
+            entry.action = 'remove';
+            continue;
+          }
+          let edits: string | undefined;
+          if (entry.uncommitted) {
+            const saved = await savePatch(path, artifacts, `uncommitted-${basename(path)}`, head!);
+            if (saved.refusal) {
+              entry.reason = saved.refusal;
+              continue;
+            }
+            entry.patch = saved.patch!;
+            edits = saved.edits;
+          }
+          if (!(await treeUnchanged(path, head!, decided!, edits))) {
+            entry.reason = 'tree-changed';
+            continue;
+          }
+          await recordRemoval(artifacts, entry, 'removing', prior);
+          entry.removalStarted = true;
+          await removeTree(repoPath, path, Runner.cleanupRemovalMs);
+          entry.action = 'removed';
+          await recordRemoval(artifacts, entry, 'removed', prior);
+        } catch (error) {
+          entry.action = 'failed';
+          entry.error = error instanceof Error ? error.message : String(error);
+          if (entry.removalStarted) {
+            Object.assign(entry, await treeState(repoPath, path));
+            await recordRemoval(artifacts, entry, 'incomplete', prior).catch((e: unknown) => {
+              entry.error += `; запись не обновлена: ${e instanceof Error ? e.message : String(e)}`;
+            });
+          }
+        }
+      }
+    }
+    const count = (action: WorktreeCleanupEntry['action']) =>
+      worktrees.filter((w) => w.action === action).length;
+    return {
+      dryRun,
+      removed: count('removed'),
+      removable: count('remove'),
+      refused: count('refused'),
+      failed: count('failed'),
+      reclaimedKb: worktrees
+        .filter((w) => w.action === 'remove' || w.action === 'removed')
+        .reduce((sum, w) => sum + (w.sizeKb ?? 0), 0),
+      worktrees,
+    };
   }
 
   private async gate(
