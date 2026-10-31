@@ -789,6 +789,13 @@ test('worktree-cleanup: путь под настроенным clean-фильт�
     'remove',
     'настройка без пути ничего не значит',
   );
+  writeFileSync(join(dir, 'notes.txt'), 'plain\n');
+  writeFileSync(join(dir, '.gitattributes'), 'notes.txt filter=unconfigured\n');
+  assert.equal(
+    entryFor(await ctx.runner.cleanupWorktrees({ dryRun: true }), dir)?.action,
+    'remove',
+    'атрибут без настроенного фильтра ничего не значит',
+  );
   writeFileSync(join(dir, '.gitattributes'), 'secret.txt filter=drop\n');
   writeFileSync(join(dir, 'secret.txt'), 'precious\n');
   await assertRefused(ctx, dir, 'clean-filter');
