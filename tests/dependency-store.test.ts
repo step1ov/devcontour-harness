@@ -1234,6 +1234,8 @@ test(
     // Гонка с отменой: менеджер и обёртка песочницы завершились с кодом 0.
     storeTree.run = (_h, options) =>
       new Promise((done) => {
+        // Настоящий менеджер успевает создать пустой store.
+        mkdirSync(join(options.write[0]!, 'store'), { recursive: true });
         options.signal.addEventListener('abort', () =>
           done({ code: 0, stdout: '', stderr: '', timedOut: false } as Awaited<
             ReturnType<typeof run>
