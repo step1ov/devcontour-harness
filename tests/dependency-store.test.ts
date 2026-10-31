@@ -36,7 +36,7 @@ import { executionEnvironment } from '../src/environment/lifecycle.ts';
 import { processStartedAt } from '../src/environment/live-calls.ts';
 import { ResourcePool, resourceKey } from '../src/environment/resources.ts';
 import { assertToolchainReady, inspectPolicy } from '../src/toolchains/inspect.ts';
-import { resolveExecutable } from '../src/toolchains/probe.ts';
+import { dependencyStoreSupports, resolveExecutable } from '../src/toolchains/probe.ts';
 import {
   dependencyStoreRoot,
   materializeStore,
@@ -1283,6 +1283,13 @@ test(
     assert.equal(silent.envChanged, false);
   },
 );
+
+test('DS30: границы проверенных версий', () => {
+  for (const version of ['9.15.0', '10.12.3', '10.26.0', '10.26.9'])
+    assert.equal(dependencyStoreSupports('pnpm', version), true, version);
+  for (const version of ['9.14.4', '10.27.0', '10.34.9', '11.0.0', '12.16.1'])
+    assert.equal(dependencyStoreSupports('pnpm', version), false, version);
+});
 
 test('DS15: doctor предупреждает, а не останавливает запуск', async () => {
   const ctx = setup({
