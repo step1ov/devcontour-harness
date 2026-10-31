@@ -545,8 +545,9 @@ test('ревью плана и контракта: открытых находо
     capabilities: () => Promise.resolve({ runtime, available: true } as any),
     invoke: (request) => {
       calls++;
-      const previous = [...request.prompt.matchAll(/"id":"([0-9a-f]{64})"/g)].map((m) => ({
-        id: m[1],
+      const ids = [...request.prompt.matchAll(/"id":"([0-9a-f]{64})"/g)].map((m) => m[1]);
+      const previous = [...new Set(ids)].map((id) => ({
+        id,
         status: 'open',
         basis: 'не исправлено',
       }));
@@ -615,6 +616,13 @@ test('ревью плана и контракта: открытых находо
   });
   assert.equal(calls, 3);
   assert.equal(limit.findings.filter((f) => f.status === 'open').length, 500);
+  // Повтор той же находки не занимает места в `previous`: 501 запись, 500 ID.
+  const repeated = await review('contract', {
+    subject: 'e',
+    history: { rounds: 1, findings: [...findings(500), findings(1)[0]] },
+  });
+  assert.equal(calls, 4);
+  assert.equal(new Set(repeated.findings.map((f) => f.id)).size, 500);
 });
 
 test('ревью плана: файл ответа больше предела — RUNTIME_UNAVAILABLE с причиной, раунд не записан', async () => {
