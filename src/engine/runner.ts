@@ -277,6 +277,7 @@ export class Runner {
       boundary: this.boundary(),
       resourceDatabase: this.options.resourceDatabase ?? defaultResourceDatabase(),
       deadline: this.phaseDeadlines.get(attempt.id) ?? Date.now() + this.policy.runTimeoutMs,
+      phaseMs: this.policy.runTimeoutMs,
     };
   }
   /** Каталог рабочего дерева вида `kind`: вне дерева или прежний в каталоге попыток. */

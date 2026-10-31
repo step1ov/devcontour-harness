@@ -21,11 +21,13 @@ import {
   type DependencyStorePolicy,
   type ExecutionPolicy,
 } from '../contracts/index.ts';
+import { readBounded } from '../environment/bounded-read.ts';
 import { checkoutPath, type CheckoutRoot } from '../environment/checkout-root.ts';
 import { snapshotLimit } from '../environment/isolation.ts';
 import type { executionEnvironment } from '../environment/lifecycle.ts';
 import { osTool } from '../environment/os-tools.ts';
-import { command, gitOutput, processStart } from '../environment/process.ts';
+import { processStartedAt } from '../environment/live-calls.ts';
+import { command, gitOutput } from '../environment/process.ts';
 import { ResourcePool, resourceKey } from '../environment/resources.ts';
 import {
   declaredManagerVersion,
@@ -128,6 +130,15 @@ const COPY_HEADROOM = 1.1;
  * только эти шаги зависят от сети. Остальное время — работе, которая её ждёт.
  */
 const STORE_TIME_SHARE = 1 / 3;
+/**
+ * Сколько полного бюджета должно оставаться к началу сборки, чтобы её истечение
+ * говорило о реестре. Меньше — фаза опоздала сама, и отказ не значит ничего.
+ */
+const FULL_BUDGET_SHARE = 0.75;
+/** Больше package.json в корне не читается: файл пишет кандидат. */
+const MANIFEST_LIMIT = 1024 * 1024;
+/** Предел lockfile checkout: файл пишет кандидат. */
+const LOCK_LIMIT = 64 * 1024 * 1024;
 
 export interface StoreContext {
   policy: Pick<ExecutionPolicy, 'isolation'>;
@@ -139,6 +150,8 @@ export interface StoreContext {
   resourceDatabase: string;
   /** Момент (ms), когда истекает время фазы; от остатка считается бюджет хранилища. */
   deadline: number;
+  /** Полная длина этого предела фазы: так видно, что фаза пришла с остатком. */
+  phaseMs: number;
 }
 
 export interface StoreReceipt {
@@ -193,9 +206,17 @@ interface Store {
   /** `outer` и бюджет хранилища: его истечение — промах, а не отказ фазы. */
   signal: AbortSignal;
   budgetMs: number;
+  /** Момент (ms), когда истекает бюджет хранилища. */
+  budgetEnds: number;
+  /** Бюджет фазы, пришедшей вовремя. */
+  fullBudgetMs: number;
   logDir: string;
   identity: Identity;
-  receipt: Pick<StoreReceipt, 'refused' | 'built'> & { reason?: string };
+  receipt: Pick<StoreReceipt, 'refused' | 'built'> & {
+    reason?: string;
+    /** Хранилище не влезло бы в сверку защищённых путей: дерево и окружение не трогать. */
+    untouched?: boolean;
+  };
 }
 
 /** Каталог seeds: том рабочих деревьев и уже закрытое песочницей место. */
@@ -289,6 +310,11 @@ export const storeTree = {
    * допишут в дерево после развёртывания.
    */
   maxEntries: Math.floor(snapshotLimit * 0.9),
+  /**
+   * Меньше этого остатка сборка не начинается и ничего не отмечает: за такое время
+   * она не успеет, а опоздавшая фаза не должна закрывать сборку остальным.
+   */
+  minBuildMs: 30000,
   /** Запуск сборки; тест подменяет его: исход гонки с отменой иначе не воспроизвести. */
   run: runCheck,
   /** Запись `.gitignore` хранилища; тест подменяет её, чтобы проверить отказ. */
@@ -451,8 +477,9 @@ async function newestSeed(s: Store) {
  * держится (публикация атомарна): она только не даёт качать одно и то же дважды.
  * Живую аренду не отнимает ни срок, ни бюджет. Истёк бюджет — `undefined`.
  *
- * В `owner` записан момент запуска владельца: pid после перезапуска контейнера
- * занимает другой процесс, и `clearAbandoned` по одному pid ждал бы вечно.
+ * В `owner` записан момент запуска владельца (число: текст `ps` зависит от TZ
+ * процесса): pid после перезапуска контейнера занимает другой процесс, и
+ * `clearAbandoned` по одному pid ждал бы вечно.
  * Запись своя у этой аренды, поведение других ресурсов не меняется.
  */
 const LEASE_OWNER = 'dependency-store-started:';
@@ -465,11 +492,16 @@ async function exclusive<T>(s: Store, work: () => Promise<T>): Promise<T | undef
   };
   const key = resourceKey(resource);
   const token = randomUUID();
-  const owner = LEASE_OWNER + ((await processStart(process.pid)) ?? '');
+  const owner = LEASE_OWNER + (processStartedAt(process.pid) ?? '');
   const compared = new Set<string>();
   const leases = new ResourcePool(s.ctx.resourceDatabase);
   try {
-    while (!leases.tryAcquire([resource], owner, token, s.budgetMs)) {
+    for (;;) {
+      if (s.signal.aborted) {
+        if (s.outer.aborted) throw s.outer.reason;
+        return undefined;
+      }
+      if (leases.tryAcquire([resource], owner, token, s.budgetMs)) break;
       const lease = leases.list().find((l) => l.key === key);
       if (lease) {
         try {
@@ -483,9 +515,9 @@ async function exclusive<T>(s: Store, work: () => Promise<T>): Promise<T | undef
           : '';
         if (started && !compared.has(lease.token)) {
           compared.add(lease.token);
-          const actual = await processStart(lease.pid);
+          const actual = processStartedAt(lease.pid);
           // Сравнить не с чем — владелец считается живым.
-          if (actual && actual !== started) {
+          if (actual !== undefined && String(actual) !== started) {
             leases.release(lease.token);
             continue;
           }
@@ -511,14 +543,25 @@ interface FailedBuild {
   reason: string;
   /** Повторится на том же lockfile: сборка не идёт, пока он не изменится. */
   permanent: boolean;
+  /** Отказ по этому `maxBytes`: другой предел решает заново. */
+  maxBytes?: number;
+  /** Хранилище не влезло бы в сверку защищённых путей: дерево и окружение не трогать. */
+  untouched?: boolean;
 }
 
-/** Действующая пометка отказа сборки этого ключа. */
+/** Действующая пометка отказа; нечитаемая равна её отсутствию и будет заменена. */
 async function failedBuild(s: Store, key: string) {
   const path = failedMark(s, key);
   const raw = await readFile(path, 'utf8').catch(() => undefined);
   if (raw === undefined) return undefined;
-  const mark = JSON.parse(raw) as FailedBuild;
+  let mark: FailedBuild;
+  try {
+    mark = JSON.parse(raw) as FailedBuild;
+  } catch {
+    return undefined;
+  }
+  if (typeof mark?.reason !== 'string') return undefined;
+  if (mark.maxBytes !== undefined && mark.maxBytes !== s.spec.maxBytes) return undefined;
   if (mark.permanent) return mark;
   const st = await stat(path).catch(() => undefined);
   return st && Date.now() - st.mtimeMs < FAILED_BUILD_COOLDOWN_MS ? mark : undefined;
@@ -528,11 +571,19 @@ const failedReason = (mark: FailedBuild) =>
   (mark.permanent ? 'сборка этого lockfile невозможна: ' : 'недавняя сборка не удалась: ') +
   mark.reason;
 
-async function markFailed(s: Store, key: string, reason: string, permanent = false) {
-  s.receipt.reason = reason;
-  await mkdir(join(s.root, 'failed'), { recursive: true });
-  await writeFile(failedMark(s, key), JSON.stringify({ reason, permanent }));
+/** Запись через переименование: обрыв не оставляет половину пометки. */
+async function markFailed(s: Store, key: string, mark: FailedBuild) {
+  s.receipt.reason = mark.reason;
+  if (mark.untouched) s.receipt.untouched = true;
+  const dir = join(s.root, 'failed');
+  await mkdir(dir, { recursive: true });
+  const staged = join(dir, `.${randomUUID()}`);
+  await writeFile(staged, JSON.stringify(mark));
+  await rename(staged, failedMark(s, key));
 }
+
+const remaining = (s: Store) => s.budgetEnds - Date.now();
+const buildFloor = (s: Store) => Math.min(storeTree.minBuildMs, s.spec.timeoutMs);
 
 /** Один проход сборки в каталоге `work`; итог — дерево с отпечатком или причина отказа. */
 async function fetchInto(s: Store, work: string, lock: string, settings: string, base?: Seed) {
@@ -574,13 +625,20 @@ async function fetchInto(s: Store, work: string, lock: string, settings: string,
       !result.timedOut && s.manager.permanent.test(result.stdout + result.stderr),
     );
   }
-  return { store, ...(await fingerprint(store)) };
+  try {
+    return { store, ...(await fingerprint(store)) };
+  } catch (error) {
+    // Отказ относится к тому, что менеджер только что записал, а не к основе.
+    if (error instanceof SeedRefused) throw new BuildFailed(`сборка seed: ${error.message}`, true);
+    throw error;
+  }
 }
 
 class BuildFailed extends Error {
   constructor(
     message: string,
     readonly permanent: boolean,
+    readonly detail: Pick<FailedBuild, 'maxBytes' | 'untouched'> = {},
   ) {
     super(message);
   }
@@ -591,6 +649,7 @@ async function buildSeed(s: Store, key: string, lock: string, lockSha256: string
   await sweep(s);
   const tmp = join(s.root, 'tmp', randomUUID());
   const work = join(tmp, 'work');
+  const full = remaining(s) >= s.fullBudgetMs * FULL_BUDGET_SHARE;
   try {
     // Основа — свежий seed той же среды: сдвиг lockfile докачивает только разницу.
     let base = await newestSeed(s);
@@ -609,11 +668,14 @@ async function buildSeed(s: Store, key: string, lock: string, lockSha256: string
       base = undefined;
     }
     if (built.bytes > s.spec.maxBytes)
-      throw new BuildFailed(`seed ${built.bytes} байт больше предела ${s.spec.maxBytes}`, true);
+      throw new BuildFailed(`seed ${built.bytes} байт больше предела ${s.spec.maxBytes}`, true, {
+        maxBytes: s.spec.maxBytes,
+      });
     if (built.files.size > storeTree.maxFiles)
       throw new BuildFailed(
         `seed из ${built.files.size} файлов больше предела ${storeTree.maxFiles}`,
         true,
+        { untouched: true },
       );
     // Менеджер мог выйти с кодом 0 и ничего не сохранить: такой seed не ускоряет
     // ничего, а выглядел бы попаданием.
@@ -643,16 +705,21 @@ async function buildSeed(s: Store, key: string, lock: string, lockSha256: string
     return { key, store: join(s.root, 'seeds', key, 'store'), manifest };
   } catch (error) {
     if (s.outer.aborted) throw error;
-    await markFailed(
-      s,
-      key,
-      s.signal.aborted
-        ? `бюджет хранилища ${s.budgetMs} мс истёк`
-        : error instanceof Error
-          ? error.message
-          : String(error),
-      error instanceof BuildFailed && error.permanent,
-    );
+    const expired = s.signal.aborted;
+    const reason = expired
+      ? `бюджет хранилища ${s.budgetMs} мс истёк`
+      : error instanceof Error
+        ? error.message
+        : String(error);
+    // Истечение бюджета опоздавшей фазы говорит о ней, а не о реестре: остальным
+    // попыткам сборка не закрывается.
+    if (expired && !full) s.receipt.reason = reason;
+    else
+      await markFailed(s, key, {
+        reason,
+        permanent: error instanceof BuildFailed && error.permanent,
+        ...(error instanceof BuildFailed ? error.detail : {}),
+      });
     return undefined;
   } finally {
     await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
@@ -708,16 +775,26 @@ async function chooseSeed(s: Store) {
   const key = digestOf({ format: FORMAT, identity: s.identity, lockSha256 });
   const exact = await readSeed(s, key);
   if (exact) return exact;
+  const mark = (failed: FailedBuild) => {
+    s.receipt.reason = failedReason(failed);
+    if (failed.untouched) s.receipt.untouched = true;
+  };
+  const late = () => {
+    if (remaining(s) >= buildFloor(s)) return false;
+    s.receipt.reason = `на сборку seed остаётся меньше ${buildFloor(s)} мс`;
+    return true;
+  };
   const failed = await failedBuild(s, key);
-  if (failed) s.receipt.reason = failedReason(failed);
-  else {
+  if (failed) mark(failed);
+  else if (!late()) {
     const built = await exclusive(s, async () => {
       const seed = await readSeed(s, key);
       if (seed) return seed;
-      // Проверка под арендой: очередь за упавшей сборкой не повторяет её.
+      // Проверка под арендой: очередь за упавшей сборкой не повторяет её, а
+      // дождавшийся конца бюджета не начинает то, что не успеет.
       const refused = await failedBuild(s, key);
-      if (!refused) return buildSeed(s, key, lock, lockSha256);
-      s.receipt.reason = failedReason(refused);
+      if (refused) mark(refused);
+      else if (!late()) return buildSeed(s, key, lock, lockSha256);
       return undefined;
     });
     if (built) return built;
@@ -729,14 +806,14 @@ async function chooseSeed(s: Store) {
 async function identityOf(manager: Manager, spec: DependencyStorePolicy, env: NodeJS.ProcessEnv) {
   const [tool, node] = await Promise.all(
     [manager.version, ['node', '--version']].map((argv) =>
-      defaultProbe(argv, { timeoutMs: PROBE_TIMEOUT_MS, env }),
+      defaultProbe(argv, { timeoutMs: PROBE_TIMEOUT_MS, env }).catch(() => undefined),
     ),
   );
-  if (tool!.code || node!.code) return undefined;
+  if (!tool || !node || tool.code || node.code) return undefined;
   return {
     manager: spec.manager,
-    version: tool!.stdout.trim(),
-    node: node!.stdout.trim(),
+    version: tool.stdout.trim(),
+    node: node.stdout.trim(),
     platform: process.platform,
     arch: process.arch,
   };
@@ -745,22 +822,23 @@ async function identityOf(manager: Manager, spec: DependencyStorePolicy, env: No
 /** Почему этой версией менеджера хранилище не пользуется, или `undefined`. */
 async function unsupported(identity: Identity, spec: DependencyStorePolicy, cwd: string) {
   const { from, below } = dependencyStoreVersions[spec.manager];
-  const pinned = await readFile(join(cwd, 'package.json'), 'utf8')
+  const version = versionOf(identity.version);
+  if (!version) return `версия ${spec.manager} не определена`;
+  // Файл пишет кандидат: чтение не идёт по ссылке, не ждёт устройство и не берёт лишнего.
+  const pinned = await readBounded(join(cwd, 'package.json'), MANIFEST_LIMIT)
     .then((raw) => (JSON.parse(raw) as { packageManager?: unknown }).packageManager)
     .catch(() => undefined);
-  const versions = [
-    versionOf(identity.version) ?? identity.version,
-    declaredManagerVersion(pinned, spec.manager),
-  ].filter((v) => v !== undefined);
+  const versions = [version, declaredManagerVersion(pinned, spec.manager)].filter(
+    (v) => v !== undefined,
+  );
   const wrong = versions.find((v) => !dependencyStoreSupports(spec.manager, v));
   return wrong && `${spec.manager} ${wrong} вне проверенных версий ${from} … <${below}`;
 }
 
-/** Lockfile checkout: обычный файл внутри дерева или ничего. */
+/** Lockfile checkout: обычный файл внутри дерева в пределах размера, или ничего. */
 async function checkoutLock(cwd: string, lockfile: string) {
-  const path = join(cwd, lockfile);
-  if (!(await lstat(path).catch(() => undefined))?.isFile()) return undefined;
-  return sha256((await readFile(path, 'utf8')).trim());
+  const text = await readBounded(join(cwd, lockfile), LOCK_LIMIT).catch(() => undefined);
+  return text === undefined ? undefined : sha256(text.trim());
 }
 
 /**
@@ -808,6 +886,7 @@ export async function materializeStore(
         ? await unsupported(identity, spec, input.cwd)
         : `не найден ${manager.version[0]} или node`;
       // Вне проверенных версий окружение и дерево остаются как без хранилища.
+      // Найти менеджер не удалось — то же: проверить версию нечем.
       if (refusal || !identity) summary.reason = refusal;
       else {
         const lock = await checkoutLock(input.cwd, spec.lockfile);
@@ -827,6 +906,8 @@ export async function materializeStore(
             outer: input.signal,
             signal: AbortSignal.any([input.signal, AbortSignal.timeout(budgetMs)]),
             budgetMs,
+            budgetEnds: Date.now() + budgetMs,
+            fullBudgetMs: Math.min(spec.timeoutMs, ctx.phaseMs * STORE_TIME_SHARE),
             logDir: input.dir,
             identity,
             receipt: summary,
@@ -839,6 +920,7 @@ export async function materializeStore(
             if (entries > storeTree.maxEntries) {
               // Копия не влезла бы в сверку защищённых путей: проверка упала бы.
               summary.reason = `checkout с копией seed — ${entries} элементов, предел ${storeTree.maxEntries}`;
+              summary.untouched = true;
               break;
             }
             try {
@@ -860,7 +942,8 @@ export async function materializeStore(
             }
           }
         }
-        await seal();
+        // Предел — причина промаха: установка в дереве сама упёрлась бы в сверку.
+        if (summary.outcome || !summary.untouched) await seal();
       }
     }
   } catch (error) {
@@ -874,6 +957,7 @@ export async function materializeStore(
     // Не вышло и это — в дереве ничего не остаётся, как без хранилища.
     await seal().catch(() => rm(dest, { recursive: true, force: true }).catch(() => undefined));
   }
+  delete summary.untouched;
   const receipt: StoreReceipt = {
     outcome: 'miss',
     ...summary,

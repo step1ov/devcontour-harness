@@ -223,6 +223,7 @@ export class JointRunner {
                     },
                     resourceDatabase: this.options.resourceDatabase ?? defaultResourceDatabase(),
                     deadline,
+                    phaseMs: this.policy.runTimeoutMs,
                   },
                   {
                     repo,

@@ -393,6 +393,7 @@ async function decide(
             boundary,
             resourceDatabase: ctx.resourceDatabase ?? defaultResourceDatabase(),
             deadline,
+            phaseMs: limitMs,
           },
           { repo, cwd: dir, execution, signal, dir: io },
         );

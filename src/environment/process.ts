@@ -304,12 +304,6 @@ export async function gitOutput(cwd: string, ...args: string[]) {
   return text.trim();
 }
 
-/** Момент запуска процесса в тексте ОС: вместе с pid отличает его от занявшего тот же pid. */
-export async function processStart(pid: number) {
-  const stdout = await output(osTool('ps'), ['-o', 'lstart=', '-p', String(pid)], 10000);
-  return stdout?.trim() || undefined;
-}
-
 export async function git(cwd: string, ...args: string[]) {
   const added = worktreeAddPath(args);
   // Путь убираемого дерева — до удаления: потом настоящий путь уже не узнать.

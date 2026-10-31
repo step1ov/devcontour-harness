@@ -33,7 +33,7 @@ import {
   isolationSupport,
 } from '../src/environment/isolation.ts';
 import { executionEnvironment } from '../src/environment/lifecycle.ts';
-import { processStart } from '../src/environment/process.ts';
+import { processStartedAt } from '../src/environment/live-calls.ts';
 import { ResourcePool, resourceKey } from '../src/environment/resources.ts';
 import { assertToolchainReady, inspectPolicy } from '../src/toolchains/inspect.ts';
 import { resolveExecutable } from '../src/toolchains/probe.ts';
@@ -281,6 +281,15 @@ async function contour(
   };
   return { ...ctx, context, repoPolicy: repo, seeds, check, commit, seedOf };
 }
+
+/** Короткий бюджет в тесте: пол полезной сборки рассчитан на настоящий реестр. */
+const lowerBuildFloor = (t: TestContext) => {
+  const floor = storeTree.minBuildMs;
+  storeTree.minBuildMs = 500;
+  t.after(() => {
+    storeTree.minBuildMs = floor;
+  });
+};
 
 const gatesPassed = (r: { result: any }) =>
   assert.equal(r.result.failure, undefined, JSON.stringify(r.result.failures));
@@ -709,12 +718,29 @@ test(
       db.close();
     };
     // pid жив, но запущен в другой момент: это другой процесс.
-    hold('dependency-store-started:Thu Jan  1 00:00:00 1970', Date.now() + 3600000);
+    hold('dependency-store-started:1000', Date.now() + 3600000);
     const reused = await ctx.check(ctx.repo.head());
     gatesPassed(reused);
     assert.equal(reused.receipt.built, true);
 
+    // Текст `ps` зависит от TZ, момент запуска — нет: иначе процессы с разным TZ
+    // сочли бы живого владельца чужим.
+    const tokyo = execFileSync(
+      process.execPath,
+      [
+        '--disable-warning=ExperimentalWarning',
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '-e',
+        `import { processStartedAt as at } from ${JSON.stringify(new URL('../src/environment/live-calls.ts', import.meta.url).href)}; console.log(at(${process.pid}))`,
+      ],
+      { encoding: 'utf8', env: { ...process.env, TZ: 'Asia/Tokyo' } },
+    ).trim();
+    assert.equal(tokyo, String(processStartedAt(process.pid)));
+
     // Тот же процесс, истёкший срок: аренда живого владельца не отнимается.
+    lowerBuildFloor(t);
     const live = await contour(
       reg.url,
       { 'dep-a': '1.0.0' },
@@ -725,7 +751,7 @@ test(
       },
     );
     const liveRoot = join(live.state, 'dependency-store', live.repoPolicy.id);
-    const started = await processStart(process.pid);
+    const started = processStartedAt(process.pid);
     const db = new DatabaseSync(join(live.state, 'resources.sqlite'));
     db.exec(
       'CREATE TABLE IF NOT EXISTS leases (key TEXT PRIMARY KEY, resource TEXT NOT NULL, owner TEXT NOT NULL, token TEXT NOT NULL, pid INTEGER NOT NULL, expires INTEGER NOT NULL)',
@@ -734,7 +760,7 @@ test(
     db.prepare('INSERT INTO leases VALUES (?,?,?,?,?,?)').run(
       key,
       resource,
-      'dependency-store-started:' + started!,
+      'dependency-store-started:' + String(started),
       'live-token',
       process.pid,
       Date.now() - 1000,
@@ -875,6 +901,10 @@ test(
     gatesPassed(many);
     assert.equal(many.receipt.outcome, 'miss');
     assert.match(many.receipt.reason, /файлов больше предела/);
+    assert.deepEqual(many.receipt.env, {}, 'предел: окружение как без хранилища');
+    const repeated = await crowded.check(crowded.repo.head());
+    assert.match(repeated.receipt.reason, /файлов больше предела/);
+    assert.deepEqual(repeated.receipt.env, {}, 'и по пометке о прошлом отказе');
     storeTree.maxFiles = limit;
 
     // Сам seed больше предела: не публикуется, установка обычная.
@@ -892,6 +922,15 @@ test(
     assert.equal(refused.receipt.outcome, 'miss');
     assert.match(refused.receipt.reason, /больше предела/);
     assert.equal(existsSync(over.seeds) ? readdirSync(over.seeds).length : 0, 0);
+    // Поднятый предел решает заново: отказ относился к старому.
+    const raised = executionPolicySchema.parse({
+      ...over.policy,
+      repositories: [
+        { ...over.repoPolicy, dependencyStore: { manager: 'pnpm', maxBytes: 8 * 1024 * 1024 } },
+      ],
+    });
+    const after = await over.check(over.repo.head(), ['install'], { policy: raised });
+    assert.equal(after.receipt.outcome, 'hit', after.receipt.reason);
   },
 );
 
@@ -957,6 +996,7 @@ test(
         boundary: { hidden: [ctx.state] },
         resourceDatabase: join(ctx.state, 'resources.sqlite'),
         deadline: Date.now() + 60000,
+        phaseMs: 60000,
       },
       {
         repo: ctx.repoPolicy,
@@ -1067,6 +1107,183 @@ test(
   },
 );
 
+/** Прямой вызов на отдельном дереве: что сделал со средой и деревом сам вызов. */
+async function placed(
+  ctx: Awaited<ReturnType<typeof contour>>,
+  name: string,
+  over: {
+    deadlineMs?: number;
+    phaseMs?: number;
+    path?: string;
+    prepare?: (cwd: string) => void;
+  } = {},
+) {
+  const cwd = join(ctx.state, name);
+  ctx.repo.git('worktree', 'add', '-q', '--detach', cwd, 'HEAD');
+  over.prepare?.(cwd);
+  const execution = executionEnvironment([ctx.policy.environment], {}, process.env);
+  if (over.path) execution.env.PATH = over.path;
+  const before = { ...execution.env };
+  const started = Date.now();
+  const receipt = await materializeStore(
+    {
+      policy: ctx.policy,
+      root: (id) => join(ctx.state, 'dependency-store', id),
+      repoPath: () => ctx.repo.dir,
+      boundary: { hidden: [ctx.state] },
+      resourceDatabase: join(ctx.state, 'resources.sqlite'),
+      deadline: Date.now() + (over.deadlineMs ?? 120000),
+      phaseMs: over.phaseMs ?? over.deadlineMs ?? 120000,
+    },
+    {
+      repo: ctx.repoPolicy,
+      cwd,
+      execution,
+      signal: new AbortController().signal,
+      dir: join(ctx.state, name + '-out'),
+    },
+  );
+  return {
+    receipt: receipt!,
+    cwd,
+    ms: Date.now() - started,
+    tree: existsSync(join(cwd, '.pnpm-store')),
+    envChanged: JSON.stringify(execution.env) !== JSON.stringify(before),
+  };
+}
+const failedDir = (ctx: Awaited<ReturnType<typeof contour>>) =>
+  join(ctx.state, 'dependency-store', ctx.repoPolicy.id, 'failed');
+
+test(
+  'DS25: ссылка в только что собранном store — вина сборки: хорошая основа цела, отказ постоянный',
+  { skip: unavailable, timeout: 120000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
+    gatesPassed(await ctx.check(ctx.repo.head()));
+    const base = ctx.seedOf().key;
+    await ctx.commit({ 'dep-a': '1.0.0', 'dep-b': '1.0.0' });
+    const run = storeTree.run;
+    storeTree.run = async (h, options) => {
+      const result = await run(h, options);
+      symlinkSync('/etc/hosts', join(options.write[0]!, 'store', 'v10', 'project-link'));
+      return result;
+    };
+    t.after(() => {
+      storeTree.run = run;
+    });
+    const r = await placed(ctx, 'a');
+    storeTree.run = run;
+    assert.equal(r.receipt.refused, undefined, 'основа не виновата');
+    assert.deepEqual(readdirSync(ctx.seeds), [base]);
+    assert.equal(r.receipt.outcome, 'partial', 'основа осталась частичным попаданием');
+    const [mark] = readdirSync(failedDir(ctx));
+    assert.equal(JSON.parse(readFileSync(join(failedDir(ctx), mark!), 'utf8')).permanent, true);
+  },
+);
+
+test(
+  'DS26: нечитаемая пометка отказа равна её отсутствию и заменяется',
+  { skip: unavailable, timeout: 120000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
+    reg.failNext = 1;
+    await placed(ctx, 'a');
+    const [mark] = readdirSync(failedDir(ctx));
+    assert.equal(readdirSync(failedDir(ctx)).length, 1, 'временных файлов не осталось');
+    writeFileSync(join(failedDir(ctx), mark!), '{"reason":"обрыв');
+    reg.failNext = 1;
+    const replaced = await placed(ctx, 'b');
+    assert.match(replaced.receipt.reason!, /сборка seed/);
+    assert.equal(JSON.parse(readFileSync(join(failedDir(ctx), mark!), 'utf8')).permanent, false);
+    writeFileSync(join(failedDir(ctx), mark!), '');
+    const healed = await placed(ctx, 'c');
+    assert.equal(healed.receipt.outcome, 'hit', healed.receipt.reason);
+  },
+);
+
+test(
+  'DS27: опоздавшая фаза не собирает и не закрывает сборку другим',
+  { skip: unavailable, timeout: 120000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
+    reg.downloads.length = 0;
+    const late = await placed(ctx, 'late', { deadlineMs: 300, phaseMs: 120000 });
+    assert.equal(late.receipt.outcome, 'miss');
+    assert.match(late.receipt.reason!, /на сборку seed остаётся меньше/);
+    assert.deepEqual(reg.downloads, [], 'сборка не начиналась');
+    assert.equal(existsSync(failedDir(ctx)), false, 'пометки нет');
+
+    // Выше пола, но фаза опоздала: бюджет истёк, виноват не реестр.
+    lowerBuildFloor(t);
+    reg.stallNext = 1;
+    const cut = await placed(ctx, 'cut', { deadlineMs: 4500, phaseMs: 120000 });
+    assert.match(cut.receipt.reason!, /бюджет хранилища/);
+    assert.equal(existsSync(failedDir(ctx)), false, 'истечение чужого бюджета не отказ реестра');
+
+    const healthy = await placed(ctx, 'healthy');
+    assert.equal(healthy.receipt.outcome, 'hit', healthy.receipt.reason);
+    assert.equal(healthy.receipt.built, true);
+  },
+);
+
+test(
+  'DS28: package.json и lockfile кандидата не читаются по ссылке и сверх предела',
+  { skip: unavailable, timeout: 120000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
+    gatesPassed(await ctx.check(ctx.repo.head()));
+    for (const [name, link] of [
+      ['stdin', '/dev/stdin'],
+      ['zero', '/dev/zero'],
+    ] as const) {
+      const r = await placed(ctx, name, {
+        prepare: (cwd) => {
+          rmSync(join(cwd, 'package.json'));
+          symlinkSync(link, join(cwd, 'package.json'));
+        },
+      });
+      assert.equal(r.receipt.outcome, 'hit', name + ': поле просто не прочитано');
+      assert.ok(r.ms < 30000, name);
+    }
+    const linked = await placed(ctx, 'linked', {
+      prepare: (cwd) => {
+        rmSync(join(cwd, 'pnpm-lock.yaml'));
+        symlinkSync('/dev/zero', join(cwd, 'pnpm-lock.yaml'));
+      },
+    });
+    assert.equal(linked.receipt.outcome, 'miss');
+    assert.match(linked.receipt.reason!, /нет файла/);
+  },
+);
+
+test(
+  'DS29: менеджер не найден или молчит о версии — среда и дерево как без хранилища',
+  { skip: unavailable, timeout: 120000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
+    const empty = realpathSync(mkdtempSync(join(tmpdir(), 'harness-nopnpm-')));
+    symlinkSync(process.execPath, join(empty, 'node'));
+    const missing = await placed(ctx, 'none', { path: empty });
+    assert.equal(missing.receipt.outcome, 'miss');
+    assert.match(missing.receipt.reason!, /не найден pnpm/);
+    assert.equal(missing.tree, false);
+    assert.equal(missing.envChanged, false);
+
+    const bin = realpathSync(mkdtempSync(join(tmpdir(), 'harness-pnpm-')));
+    writeFileSync(join(bin, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const silent = await placed(ctx, 'silent', { path: bin + ':' + process.env.PATH });
+    assert.equal(silent.receipt.outcome, 'miss');
+    assert.match(silent.receipt.reason!, /версия pnpm не определена/);
+    assert.equal(silent.tree, false);
+    assert.equal(silent.envChanged, false);
+  },
+);
+
 test('DS15: doctor предупреждает, а не останавливает запуск', async () => {
   const ctx = setup({
     scenario: {},
@@ -1087,6 +1304,10 @@ test('DS15: doctor предупреждает, а не останавливае�
   assert.match(notes, /12\.16\.1 вне проверенных версий/);
   assert.match(notes, /код кандидата/);
   await assertToolchainReady(ctx.policy, ctx.repo.dir, options);
+  const [silent] = await inspectPolicy(ctx.policy, ctx.repo.dir, {
+    probe: () => Promise.resolve({ code: 0, stdout: '', stderr: '', timedOut: false as const }),
+  });
+  assert.match(silent!.warnings.map((w) => w.message).join('\n'), /Версия pnpm не определена/);
 
   const missing = await inspectPolicy(ctx.policy, ctx.repo.dir, { env: { PATH: '/nonexistent' } });
   assert.ok(missing[0]!.warnings.some((w) => w.code === 'TOOL_MISSING'));
@@ -1129,6 +1350,7 @@ test(
   { skip: unavailable, timeout: 180000 },
   async (t) => {
     const reg = await registry(t);
+    lowerBuildFloor(t);
     const ctx = await contour(
       reg.url,
       { 'dep-a': '1.0.0' },
@@ -1161,6 +1383,7 @@ test(
           boundary: { hidden: [queue.state] },
           resourceDatabase: join(queue.state, 'resources.sqlite'),
           deadline: Date.now() + budget * 3,
+          phaseMs: budget * 3,
         },
         {
           repo: queue.repoPolicy,
@@ -1206,6 +1429,7 @@ test(
         boundary: { hidden: [queue.state] },
         resourceDatabase: join(queue.state, 'resources.sqlite'),
         deadline: Date.now() + 90000,
+        phaseMs: 90000,
       },
       {
         repo: queue.repoPolicy,
@@ -1230,6 +1454,7 @@ test(
   { skip: unavailable, timeout: 120000 },
   async (t) => {
     const reg = await registry(t);
+    lowerBuildFloor(t);
     const run = storeTree.run;
     // Гонка с отменой: менеджер и обёртка песочницы завершились с кодом 0.
     storeTree.run = (_h, options) =>
@@ -1405,6 +1630,7 @@ test(
     gatesPassed(over);
     assert.equal(over.receipt.outcome, 'miss');
     assert.match(over.receipt.reason, /элементов, предел 2/);
+    assert.deepEqual(over.receipt.env, {}, 'предел: окружение как без хранилища');
     storeTree.maxEntries = entries;
 
     // Каталог квитанции — файл, запись `.gitignore` отказывает: фаза идёт дальше.
@@ -1426,6 +1652,7 @@ test(
         boundary: { hidden: [ctx.state] },
         resourceDatabase: database,
         deadline: Date.now() + 60000,
+        phaseMs: 60000,
       },
       {
         repo: ctx.repoPolicy,
@@ -1457,6 +1684,7 @@ test('DS11: выключено по умолчанию: политика без 
       boundary: { hidden: [ctx.state] },
       resourceDatabase: join(ctx.state, 'resources.sqlite'),
       deadline: Date.now() + 60000,
+      phaseMs: 60000,
     } satisfies StoreContext,
     {
       repo: ctx.policy.repositories[0]!,
