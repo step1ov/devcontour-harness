@@ -681,6 +681,12 @@ test('worktree-cleanup: ref рабочего дерева не держит ве
   }
 });
 
+test('worktree-cleanup: ref рабочего дерева основного checkout тоже не считается общим', async () => {
+  const { ctx, dir, sha } = await detachedWork();
+  inTree(ctx.repo.dir, 'update-ref', 'refs/bisect/bad', sha);
+  await assertRefused(ctx, dir, 'unreachable-head');
+});
+
 test('worktree-cleanup: ref общего репозитория держит вершину', async () => {
   const { ctx, dir, sha } = await detachedWork();
   inTree(dir, 'update-ref', 'refs/heads/kept', sha);
