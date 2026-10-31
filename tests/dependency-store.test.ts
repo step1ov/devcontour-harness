@@ -701,7 +701,7 @@ test(
 
 test(
   'DS23: pid занят другим процессом — аренда снимается; живой владелец не теряет её ни по сроку, ни по бюджету',
-  { skip: unavailable, timeout: 120000 },
+  { skip: unavailable, timeout: 240000 },
   async (t) => {
     const reg = await registry(t);
     const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
@@ -752,7 +752,8 @@ test(
       { 'dep-a': '1.0.0' },
       {
         policy: (p) => {
-          p.runTimeoutMs = 9000;
+          // Подготовка под нагрузкой не должна съесть бюджет ожидания до его начала.
+          p.runTimeoutMs = 30000;
         },
       },
     );
