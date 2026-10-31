@@ -1226,6 +1226,37 @@ test(
 );
 
 test(
+  'DS24: менеджер, вышедший с кодом 0 по отмене бюджета, — не завершённая сборка и не приговор lockfile',
+  { skip: unavailable, timeout: 120000 },
+  async (t) => {
+    const reg = await registry(t);
+    const bin = realpathSync(mkdtempSync(join(tmpdir(), 'harness-pnpm-')));
+    writeFileSync(
+      join(bin, 'pnpm'),
+      `#!/bin/sh\nif [ "$1" = "fetch" ]; then trap 'exit 0' TERM; sleep 60 & wait; exit 0; fi\nexec ${JSON.stringify(pnpm)} "$@"\n`,
+      { mode: 0o755 },
+    );
+    const ctx = await contour(
+      reg.url,
+      { 'dep-a': '1.0.0' },
+      {
+        policy: (p) => {
+          p.environment.values.PATH = bin + ':' + process.env.PATH;
+          p.runTimeoutMs = 9000;
+        },
+      },
+    );
+    const r = await ctx.check(ctx.repo.head());
+    gatesPassed(r);
+    assert.equal(r.receipt.outcome, 'miss');
+    assert.match(r.receipt.reason, /бюджет хранилища/);
+    const marks = join(ctx.state, 'dependency-store', ctx.repoPolicy.id, 'failed');
+    const [mark] = readdirSync(marks);
+    assert.equal(JSON.parse(readFileSync(join(marks, mark!), 'utf8')).permanent, false);
+  },
+);
+
+test(
   'DS19: версия вне проверенных: окружение и дерево как без хранилища, gate проходит',
   { skip: unavailable, timeout: 120000 },
   async (t) => {

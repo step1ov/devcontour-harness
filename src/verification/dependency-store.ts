@@ -563,14 +563,13 @@ async function fetchInto(s: Store, work: string, lock: string, settings: string,
     join(s.logDir, 'dependency-store.log'),
     s.execution.redact(result.stdout + '\n' + result.stderr),
   );
-  // Прерванный менеджер мог выйти и без кода ошибки: его store не итог сборки.
+  // Прерванный менеджер мог выйти и без кода ошибки: его store не итог сборки, а
+  // пустой store иначе выглядел бы неизбежным отказом самого lockfile.
   if (result.code || result.timedOut || s.signal.aborted) {
     const output = s.execution.redact(result.stderr || result.stdout).trim();
     throw new BuildFailed(
       `сборка seed: код ${result.code}${result.timedOut ? ', предел времени' : ''}: ${output.slice(-500)}`,
-      !result.timedOut &&
-        !s.signal.aborted &&
-        s.manager.permanent.test(result.stdout + result.stderr),
+      !result.timedOut && s.manager.permanent.test(result.stdout + result.stderr),
     );
   }
   return { store, ...(await fingerprint(store)) };
@@ -650,8 +649,7 @@ async function buildSeed(s: Store, key: string, lock: string, lockSha256: string
         : error instanceof Error
           ? error.message
           : String(error),
-      // Истёкший бюджет говорит о сети, а не о lockfile: сборка ещё будет.
-      error instanceof BuildFailed && error.permanent && !s.signal.aborted,
+      error instanceof BuildFailed && error.permanent,
     );
     return undefined;
   } finally {
