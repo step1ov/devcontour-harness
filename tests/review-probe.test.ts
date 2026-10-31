@@ -57,7 +57,8 @@ test('Зависшая проверка reviewer останавливается 
       const pidFile = join(s.root, 'child.pid');
       const started = Date.now();
       // Команда печатает, оставляет потомка в собственной группе процессов и зависает.
-      const detach = `const c=require('child_process').spawn('sleep',['60'],{detached:true,stdio:'ignore'});require('fs').writeFileSync(${JSON.stringify(pidFile)},String(c.pid));c.unref();console.log('started');setInterval(()=>{},1000)`;
+      // Потомок спит много дольше ожидания ниже: сам он не завершится.
+      const detach = `const c=require('child_process').spawn('sleep',['600'],{detached:true,stdio:'ignore'});require('fs').writeFileSync(${JSON.stringify(pidFile)},String(c.pid));c.unref();console.log('started');setInterval(()=>{},1000)`;
       const hung = await probes.run({
         argv: [process.execPath, '-e', detach],
         // Просьба модели не расширяет предел controller.

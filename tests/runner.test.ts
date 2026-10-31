@@ -209,6 +209,8 @@ test('T08: невалидный ответ ревью, approved с блокир�
       },
       ({ ctx }) => name !== 'таймаут' || existsSync(`${ctx.scenarioPath}.reviewer.0.started`),
     );
+    if (name === 'таймаут')
+      assert.ok(existsSync(`${ctx.scenarioPath}.reviewer.0.started`), 'предел застал ревьюера');
     const work = ctx.engine.read((v) => v.work('add-greeting')!);
     assert.equal(work.status, 'failed', name);
     assert.match(work.failure!, reason, name);

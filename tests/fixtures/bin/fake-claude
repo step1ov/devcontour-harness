@@ -88,8 +88,14 @@ if (step.spawnHanging) {
 }
 if (step.sleepMs) await new Promise((r) => setTimeout(r, step.sleepMs));
 // Шаг держится, пока тест не создаст файл: событие вместо подобранной паузы.
-while (step.holdUntil && !existsSync(step.holdUntil))
+// Предел — на случай, если тест умер и файла не будет.
+for (const end = Date.now() + 600_000; step.holdUntil && !existsSync(step.holdUntil); ) {
+  if (Date.now() > end) {
+    console.error('fixture: holdUntil не дождался файла');
+    process.exit(2);
+  }
   await new Promise((r) => setTimeout(r, 20));
+}
 for (const [path, text] of Object.entries(step.files ?? {})) {
   mkdirSync(dirname(join(process.cwd(), path)), { recursive: true });
   writeFileSync(join(process.cwd(), path), text);
