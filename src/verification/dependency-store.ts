@@ -289,6 +289,8 @@ export const storeTree = {
    * допишут в дерево после развёртывания.
    */
   maxEntries: Math.floor(snapshotLimit * 0.9),
+  /** Запуск сборки; тест подменяет его: исход гонки с отменой иначе не воспроизвести. */
+  run: runCheck,
   /** Запись `.gitignore` хранилища; тест подменяет её, чтобы проверить отказ. */
   ignore: (dest: string) => writeFile(join(dest, '.gitignore'), '*\n'),
   /**
@@ -542,7 +544,7 @@ async function fetchInto(s: Store, work: string, lock: string, settings: string,
   for (const [name, text] of Object.entries(s.manager.buildFiles))
     await writeFile(join(name === 'package.json' ? project : work, name), text);
   if (base) await place(base, store, s.outer);
-  const result = await runCheck(
+  const result = await storeTree.run(
     { config: s.ctx.policy },
     {
       argv: s.manager.fetch(store),

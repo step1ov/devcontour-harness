@@ -1230,18 +1230,24 @@ test(
   { skip: unavailable, timeout: 120000 },
   async (t) => {
     const reg = await registry(t);
-    const bin = realpathSync(mkdtempSync(join(tmpdir(), 'harness-pnpm-')));
-    writeFileSync(
-      join(bin, 'pnpm'),
-      `#!/bin/sh\nif [ "$1" = "fetch" ]; then trap 'exit 0' TERM; sleep 60 & wait; exit 0; fi\nexec ${JSON.stringify(pnpm)} "$@"\n`,
-      { mode: 0o755 },
-    );
+    const run = storeTree.run;
+    // Гонка с отменой: менеджер и обёртка песочницы завершились с кодом 0.
+    storeTree.run = (_h, options) =>
+      new Promise((done) => {
+        options.signal.addEventListener('abort', () =>
+          done({ code: 0, stdout: '', stderr: '', timedOut: false } as Awaited<
+            ReturnType<typeof run>
+          >),
+        );
+      });
+    t.after(() => {
+      storeTree.run = run;
+    });
     const ctx = await contour(
       reg.url,
       { 'dep-a': '1.0.0' },
       {
         policy: (p) => {
-          p.environment.values.PATH = bin + ':' + process.env.PATH;
           p.runTimeoutMs = 9000;
         },
       },
