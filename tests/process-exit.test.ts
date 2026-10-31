@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { command } from '../src/environment/process.ts';
 
@@ -96,3 +99,31 @@ for (const outcome of ['success', 'cancel', 'timeout'] as const)
       }
     },
   );
+
+test('A contained directory given through a symlink alias still finds the descendant inside it', async () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'contained-alias-')));
+  const alias = join(base, 'alias');
+  symlinkSync(base, alias);
+  let pid = 0;
+  try {
+    // Без окружения и с выходом родителя сразу: опрос родства его не застаёт,
+    // остаётся только текущий каталог, который lsof называет настоящим путём.
+    const result = await command(
+      [
+        process.execPath,
+        '-e',
+        `const c=require('node:child_process').spawn('/bin/sh',['-c','exec sleep 600'],
+          {detached:true,stdio:'ignore',env:{},cwd:${JSON.stringify(alias)}});
+        c.unref();console.log('DESCENDANT='+c.pid);`,
+      ],
+      process.cwd(),
+      { contain: { dirs: [alias] } },
+    );
+    pid = Number(/DESCENDANT=(\d+)/.exec(result.stdout)?.[1]);
+    assert.ok(pid > 0, 'descendant was started');
+    assert.equal(alive(pid), false, 'the alias reached the real path');
+  } finally {
+    if (pid && alive(pid)) process.kill(pid, 'SIGKILL');
+    rmSync(base, { recursive: true, force: true });
+  }
+});

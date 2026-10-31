@@ -1,9 +1,10 @@
-import { mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from 'node:test';
 import { spec } from 'node:test/reporters';
+import { createScratch, removeScratch } from './test-scratch.mjs';
 
 // Три уровня проверки (README, «Разработка»):
 //   npm test                — весь suite; npm run check добавляет --release;
@@ -136,18 +137,9 @@ if (flags.list) {
   };
   process.once('SIGINT', interrupt);
   process.once('SIGTERM', terminate);
-  // Фикстуры создают временные каталоги и не убирают их: сотни тысяч каталогов
-  // в общем $TMPDIR замедляют всё, что его читает. Прогон держит их в своём
-  // каталоге и убирает его целиком; имя короткое — в нём живут Unix-сокеты.
-  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'hr-')));
+  const scratch = createScratch('hr-');
   process.env.TMPDIR = scratch;
-  process.once('exit', () => {
-    try {
-      rmSync(scratch, { recursive: true, force: true, maxRetries: 2 });
-    } catch (error) {
-      console.error(`Временный каталог прогона не убран: ${scratch}: ${error.message}`);
-    }
-  });
+  process.once('exit', () => removeScratch(scratch, 'hr-'));
   const results = run({
     files,
     concurrency: 4,
