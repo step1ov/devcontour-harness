@@ -1288,6 +1288,14 @@ test(
     assert.match(silent.receipt.reason!, /версия pnpm не определена/);
     assert.equal(silent.tree, false);
     assert.equal(silent.envChanged, false);
+
+    // Причина отказа видна: иначе промах на занятой машине нечем объяснить.
+    writeFileSync(join(bin, 'pnpm'), '#!/bin/sh\nexit 3\n', { mode: 0o755 });
+    const broken = await placed(ctx, 'broken', { path: bin + ':' + process.env.PATH });
+    assert.equal(broken.receipt.outcome, 'miss');
+    assert.match(broken.receipt.reason!, /pnpm: код 3/);
+    assert.equal(broken.tree, false);
+    assert.equal(broken.envChanged, false);
   },
 );
 

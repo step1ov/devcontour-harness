@@ -34,7 +34,6 @@ import {
   defaultProbe,
   dependencyStoreSupports,
   dependencyStoreVersions,
-  PROBE_TIMEOUT_MS,
   versionOf,
 } from '../toolchains/probe.ts';
 import { runCheck, type Boundary } from './gates.ts';
@@ -135,6 +134,11 @@ const STORE_TIME_SHARE = 1 / 3;
  * говорило о реестре. Меньше — фаза опоздала сама, и отказ не значит ничего.
  */
 const FULL_BUDGET_SHARE = 0.75;
+/**
+ * Предел пробы версий. Запуск node и pnpm на загруженной машине занимает секунды,
+ * а отказ пробы стоит хранилища на всю фазу: короткий предел доктора здесь мал.
+ */
+const IDENTITY_PROBE_MS = 30000;
 /** Больше package.json в корне не читается: файл пишет кандидат. */
 const MANIFEST_LIMIT = 1024 * 1024;
 /** Предел lockfile checkout: файл пишет кандидат. */
@@ -803,13 +807,18 @@ async function chooseSeed(s: Store) {
   return newestSeed(s);
 }
 
+/** Версии среды или причина, почему их не узнать: без неё промах не объяснить. */
 async function identityOf(manager: Manager, spec: DependencyStorePolicy, env: NodeJS.ProcessEnv) {
-  const [tool, node] = await Promise.all(
-    [manager.version, ['node', '--version']].map((argv) =>
-      defaultProbe(argv, { timeoutMs: PROBE_TIMEOUT_MS, env }).catch(() => undefined),
-    ),
-  );
-  if (!tool || !node || tool.code || node.code) return undefined;
+  const probe = (argv: string[]) =>
+    defaultProbe(argv, { timeoutMs: IDENTITY_PROBE_MS, env }).then(
+      (r) => (r.code ? `${argv[0]}: код ${r.code}${r.timedOut ? ', предел времени' : ''}` : r),
+      (error: unknown) => `${argv[0]}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  const [tool, node] = await Promise.all([probe(manager.version), probe(['node', '--version'])]);
+  if (typeof tool === 'string' || typeof node === 'string')
+    return `не найден ${manager.version[0]} или node: ${[tool, node]
+      .filter((r) => typeof r === 'string')
+      .join('; ')}`;
   return {
     manager: spec.manager,
     version: tool.stdout.trim(),
@@ -882,12 +891,11 @@ export async function materializeStore(
       summary.reason = `${manager.dir} уже есть в дереве`;
     else {
       const identity = await identityOf(manager, spec, input.execution.env);
-      const refusal = identity
-        ? await unsupported(identity, spec, input.cwd)
-        : `не найден ${manager.version[0]} или node`;
+      const refusal =
+        typeof identity === 'string' ? identity : await unsupported(identity, spec, input.cwd);
       // Вне проверенных версий окружение и дерево остаются как без хранилища.
       // Найти менеджер не удалось — то же: проверить версию нечем.
-      if (refusal || !identity) summary.reason = refusal;
+      if (refusal || typeof identity === 'string') summary.reason = refusal;
       else {
         const lock = await checkoutLock(input.cwd, spec.lockfile);
         if (lock === undefined) summary.reason = `в дереве нет файла ${spec.lockfile}`;
