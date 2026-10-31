@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   HarnessError,
+  REVIEW_ITEMS_LIMIT,
   WORKSPACE_OWNER,
   contextDigest,
   findingId,
@@ -134,6 +135,14 @@ export async function technicalReview(
       'Runtime не подключён: ' + choice.reviewer.runtime,
     );
   const open = lastFindings.filter((f) => f.status === 'open');
+  // Ответ обязан назвать каждую открытую находку по ID, а `previous` ограничен:
+  // такой раунд не одобрить, и вызов модели был бы оплачен впустую.
+  const named = new Set(open.map((f) => f.id)).size;
+  if (named > REVIEW_ITEMS_LIMIT)
+    throw new HarnessError(
+      'REVIEW_PROTOCOL_INVALID',
+      `Ревью ${kind} ${subject}: открытых находок ${named}, предел раунда ревью ${REVIEW_ITEMS_LIMIT}; нового вызова нет`,
+    );
   const round = before + 1;
   const dir = input.artifactDir;
   await mkdir(dir, { recursive: true });

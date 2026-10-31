@@ -284,6 +284,12 @@ test('H3-01: прежние команды и схемы их данных не 
     JSON.stringify(data['source-snapshot']).includes('"localContext"'),
     'source-snapshot объявляет пакеты контекста',
   );
+  // Хеш H2 выше вырезает `baseline`, поэтому только эта проверка держит объявление.
+  for (const command of ['run', 'source-snapshot', 'source-status'])
+    assert.ok(
+      JSON.stringify(data[command]).includes('"baseline"'),
+      command + ' объявляет baseline',
+    );
   for (const value of ADDITIVE_ENUM_VALUES)
     assert.ok(JSON.stringify(data).includes(JSON.stringify(value)), value + ' объявлен');
 });

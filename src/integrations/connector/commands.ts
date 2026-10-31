@@ -170,7 +170,13 @@ export class Connector {
   baselineIssue(policy: ExecutionPolicy, baseDir: string): string | undefined {
     const file = this.loaded.file;
     if (!this.config.baseline || !file) return undefined;
-    const real = realpathSync(file);
+    let real: string;
+    try {
+      real = realpathSync(file);
+    } catch {
+      // Защиту файла, которого уже нет, не проверить: отказ, а не внутренняя ошибка.
+      return `Конфигурация коннектора с baseline недоступна после загрузки (${file}): восстановите файл и повторите команду`;
+    }
     for (const repo of policy.repositories) {
       const root = resolveFrom(baseDir, repo.path);
       if (!existsSync(root)) continue;
@@ -294,7 +300,8 @@ export class Connector {
   /**
    * Прочитать и предпросмотреть снимок; записать graph/context/manifest для
    * `review-plan`/`approve`. Снимок закрепляется в состоянии коннектора по
-   * semantic digest: повтор неизменной постановки ничего не меняет.
+   * semantic digest: повтор неизменной постановки ничего не меняет, а возврат
+   * к прежней редакции снова закрепляет её запись (`created: false`).
    */
   async snapshot(outDir?: string) {
     const snapshot = await this.source.snapshot();

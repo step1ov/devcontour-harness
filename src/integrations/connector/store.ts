@@ -194,7 +194,17 @@ export class ConnectorStore {
     return this.tx(() => {
       const prior = this.snapshot(record.revision);
       // Повтор той же редакции не меняет записанный снимок (и время его создания).
-      if (prior) return { record: prior, created: false };
+      // Возврат к прежней редакции снова делает её последней: иначе снимок,
+      // совпавший со свежим чтением, не закрепить ничем, кроме новой правки.
+      if (prior) {
+        this.db
+          .prepare(
+            `UPDATE snapshots SET rowid=(SELECT max(rowid) + 1 FROM snapshots)
+             WHERE revision=? AND rowid<(SELECT max(rowid) FROM snapshots)`,
+          )
+          .run(record.revision);
+        return { record: prior, created: false };
+      }
       const full = { ...record, createdAt: now() };
       this.db
         .prepare('INSERT INTO snapshots VALUES(?, ?, ?, ?)')
@@ -209,21 +219,18 @@ export class ConnectorStore {
     return row ? (JSON.parse(row.data) as SnapshotRecord) : undefined;
   }
 
-  /** Последний снимок графа (по времени записи). */
+  /** Последний закреплённый снимок графа: порядок записи, а не время создания редакции. */
   latestSnapshot(graphId: string): SnapshotRecord | undefined {
     const row = this.db
-      .prepare(
-        'SELECT data FROM snapshots WHERE graph_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1',
-      )
+      .prepare('SELECT data FROM snapshots WHERE graph_id=? ORDER BY rowid DESC LIMIT 1')
       .get(graphId) as { data: string } | undefined;
     return row ? (JSON.parse(row.data) as SnapshotRecord) : undefined;
   }
 
   /** Последний закреплённый снимок любого графа этого коннектора. */
   latestSnapshotAny(): SnapshotRecord | undefined {
-    const row = this.db
-      .prepare('SELECT data FROM snapshots ORDER BY created_at DESC, rowid DESC LIMIT 1')
-      .get() as { data: string } | undefined;
+    const row = this.db.prepare('SELECT data FROM snapshots ORDER BY rowid DESC LIMIT 1').get() as
+      { data: string } | undefined;
     return row ? (JSON.parse(row.data) as SnapshotRecord) : undefined;
   }
 

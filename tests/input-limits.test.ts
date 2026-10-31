@@ -26,6 +26,7 @@ import { CODEX_RESULT_LIMIT, cliAdapter } from '../src/agents/cli-adapter.ts';
 import { probeSpec, assertProbeSpec, type ProbeSpec } from '../src/agents/review-probe.ts';
 import { reviewOutputSchema } from '../src/agents/schemas.ts';
 import {
+  HarnessError,
   REVIEW_ITEMS_LIMIT,
   TaskFailure,
   checkCodeReview,
@@ -533,6 +534,128 @@ test('ревью плана: ответ сверх предела — неодо
   assert.equal(record.approved, false);
   assert.deepEqual(record.findings, []);
   assert.match(record.summary, /вне схемы: findings: .*500/);
+});
+
+test('ревью плана и контракта: открытых находок сверх предела — отказ до вызова, ровно предел — вызов', async () => {
+  // Каждый раунд добавляет свои находки и оставляет прежние открытыми.
+  const added = [findings(250), findings(251).map((f) => ({ ...f, message: 'n' + f.message }))];
+  let calls = 0;
+  const adapter = (runtime: RuntimeName): RuntimeAdapter => ({
+    runtime,
+    capabilities: () => Promise.resolve({ runtime, available: true } as any),
+    invoke: (request) => {
+      calls++;
+      const ids = [...request.prompt.matchAll(/"id":"([0-9a-f]{64})"/g)].map((m) => m[1]);
+      const previous = [...new Set(ids)].map((id) => ({
+        id,
+        status: 'open',
+        basis: 'не исправлено',
+      }));
+      return Promise.resolve({
+        status: 'ok',
+        text: '',
+        model: null,
+        runtimeVersion: 'controlled',
+        output: response({ findings: added.shift() ?? [], previous }),
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reportedUsd: 0,
+          complete: true,
+          source: 'claude-result',
+        },
+        diagnostics: { exitCode: 0 },
+      });
+    },
+  });
+  const adapters = { codex: adapter('codex'), claude: adapter('claude') };
+  const policy = policyOf();
+  const stateDir = scratch();
+  const h = Harness.open({ policy, stateDir, baseDir: process.cwd(), adapters });
+  const { technicalReview } = await import('../src/control/review.ts');
+  const review = (
+    kind: 'plan' | 'contract',
+    over: { history?: unknown; subject?: string } = {},
+  ) => {
+    const subject = over.subject ?? 'g';
+    return technicalReview(h.engine, policy, adapters, {
+      kind,
+      subject,
+      digest: 'a'.repeat(64),
+      author: 'claude',
+      instructions: ['Review.'],
+      cwd: process.cwd(),
+      artifactDir: join(stateDir, kind, subject),
+      denied: [stateDir],
+      meta: { subjectId: subject, subjectKind: 'other' },
+      ...(over.history ? { history: over.history as never } : {}),
+    });
+  };
+  // Открытые находки накапливаются раундами движка: 250, затем ещё 251.
+  await review('plan');
+  const second = await review('plan');
+  assert.equal(second.findings.filter((f) => f.status === 'open').length, 501);
+  assert.equal(calls, 2);
+  const stop = (error: unknown) =>
+    error instanceof HarnessError &&
+    error.code === 'REVIEW_PROTOCOL_INVALID' &&
+    /открытых находок 501, предел раунда ревью 500; нового вызова нет/.test(error.message);
+  await assert.rejects(review('plan'), stop);
+  assert.equal(calls, 2);
+  // Тот же предел у контракта и у находок раундов хоста; ровно предел проходит.
+  await assert.rejects(
+    review('contract', { subject: 'c', history: { rounds: 1, findings: findings(501) } }),
+    stop,
+  );
+  assert.equal(calls, 2);
+  const limit = await review('contract', {
+    subject: 'd',
+    history: { rounds: 1, findings: findings(500) },
+  });
+  assert.equal(calls, 3);
+  assert.equal(limit.findings.filter((f) => f.status === 'open').length, 500);
+  // Повтор той же находки не занимает места в `previous`: 501 запись, 500 ID.
+  const repeated = await review('contract', {
+    subject: 'e',
+    history: { rounds: 1, findings: [...findings(500), findings(1)[0]] },
+  });
+  assert.equal(calls, 4);
+  assert.equal(new Set(repeated.findings.map((f) => f.id)).size, 500);
+});
+
+test('ревью плана: файл ответа больше предела — RUNTIME_UNAVAILABLE с причиной, раунд не записан', async () => {
+  const dir = scratch();
+  const payload = join(dir, 'payload');
+  writeFileSync(payload, ' '.repeat(CODEX_RESULT_LIMIT + 1));
+  const adapter = (runtime: RuntimeName): RuntimeAdapter => ({
+    runtime,
+    capabilities: () => Promise.resolve({ runtime, available: true } as any),
+    invoke: () => invoke(dir, payload),
+  });
+  const adapters = { codex: adapter('codex'), claude: adapter('claude') };
+  const policy = policyOf();
+  const h = Harness.open({ policy, stateDir: dir, baseDir: process.cwd(), adapters });
+  const { technicalReview } = await import('../src/control/review.ts');
+  await assert.rejects(
+    technicalReview(h.engine, policy, adapters, {
+      kind: 'plan',
+      subject: 'g',
+      digest: 'a'.repeat(64),
+      author: 'claude',
+      instructions: ['Review.'],
+      cwd: process.cwd(),
+      artifactDir: join(dir, 'plan'),
+      denied: [dir],
+      meta: { subjectId: 'g', subjectKind: 'other' },
+    }),
+    (error: unknown) =>
+      error instanceof HarnessError &&
+      error.code === 'RUNTIME_UNAVAILABLE' &&
+      new RegExp(`не прочитан.*${CODEX_RESULT_LIMIT} байт`).test(error.message),
+  );
+  assert.deepEqual(h.engine.reviews('plan', 'g'), []);
 });
 
 const probe = (over: Partial<ProbeSpec> = {}): ProbeSpec => ({
