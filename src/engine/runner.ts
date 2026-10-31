@@ -1634,6 +1634,7 @@ export class Runner {
             refusal ??= 'removal-incomplete';
             entry.record = recordFile(artifacts, path);
             if (prior.patch) entry.patch = prior.patch;
+            if (prior.head) entry.head = prior.head;
           }
           if (!live.has(path)) refusal ??= 'not-registered';
           if (live.get(path)?.locked) refusal ??= 'worktree-locked';

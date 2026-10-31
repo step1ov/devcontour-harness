@@ -44,6 +44,8 @@ export type WorktreeRefusal =
   | 'tree-changed'
   | 'ignore-rules-changed'
   | 'hidden-changes'
+  | 'staged-ignored'
+  | 'staged-differs'
   | 'unreachable-head'
   | 'patch-unusable'
   | 'removal-incomplete'
@@ -308,6 +310,47 @@ async function cleanFilterApplies(dir: string) {
   return false;
 }
 
+/**
+ * Настоящий индекс хранит то, чего не будет в патче: патч строится из файлов дерева
+ * без учёта игнорируемого. Файл, добавленный через `git add -f`, в него не войдёт, а
+ * проиндексированная версия, отличная от файла, потеряется. Единственная копия тогда
+ * лежит в индексе дерева. Добавлять такое через `-f` нельзя: индекс мог получить
+ * игнорируемое и случайно. Индекс, равный файлу дерева, правки не теряет.
+ */
+async function stagedRefusal(dir: string, head: string): Promise<WorktreeRefusal | undefined> {
+  const raw = (...args: string[]) =>
+    gitOutput(dir, [
+      '--no-optional-locks',
+      'diff',
+      '--raw',
+      '-z',
+      '--no-abbrev',
+      '--no-renames',
+      ...args,
+    ]);
+  const fields = (await raw('--cached', head)).split('\0');
+  const added: string[] = [];
+  const staged = new Set<string>();
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    const status = fields[i]!.split(' ')[4];
+    if (status === 'D') continue;
+    staged.add(fields[i + 1]!);
+    if (status === 'A') added.push(fields[i + 1]!);
+  }
+  if (!staged.size) return undefined;
+  if (added.length) {
+    const ignored = await gitOutput(dir, ['check-ignore', '--no-index', '--stdin', '-z'], {
+      input: added.join('\0') + '\0',
+      allowed: 1,
+    });
+    if (ignored) return 'staged-ignored';
+  }
+  const worktree = (await raw()).split('\0');
+  for (let i = 1; i < worktree.length; i += 2)
+    if (staged.has(worktree[i]!)) return 'staged-differs';
+  return undefined;
+}
+
 /** Неподтверждённые правки и игнорируемое без записи в индекс дерева. */
 async function treeStatus(dir: string) {
   const out = await gitOutput(dir, [
@@ -366,6 +409,8 @@ export async function inspectTree(
   if (await ignoreRulesChanged(dir, head, scan.ignoreFiles, entries))
     return refused('ignore-rules-changed');
   if (flags.hidden) return refused('hidden-changes');
+  const staged = await stagedRefusal(dir, head);
+  if (staged) return refused(staged);
   if (await cleanFilterApplies(dir)) return refused('clean-filter');
   if (scan.readOnly) return refused('read-only-path');
   return status;
@@ -577,7 +622,11 @@ async function takeOver(file: string) {
   }
 }
 
-/** Один запуск очистки на каталог состояния: два запуска делили бы патчи и записи. */
+/**
+ * Один запуск очистки на каталог состояния: два запуска делили бы патчи и записи.
+ * Замок сверяет PID, поэтому каталог состояния должен принадлежать одному
+ * пространству PID: контейнер со своим пространством увидел бы чужой замок умершим.
+ */
 export async function lockCleanup(file: string) {
   const mine = `${process.pid} ${randomUUID()}`;
   for (let attempt = 0; attempt < 3; attempt++) {

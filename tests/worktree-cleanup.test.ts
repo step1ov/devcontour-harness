@@ -627,6 +627,7 @@ test('worktree-cleanup H8: оборванное удаление — истин�
   assert.equal(again.reason, 'removal-incomplete');
   assert.equal(again.patch, entry.patch);
   assert.equal(again.record, recordPath, 'запись названа: её снимают вручную');
+  assert.equal(again.head, entry.head, 'патч применяется поверх этой вершины');
   assert.ok(existsSync(dir));
 });
 
@@ -634,10 +635,11 @@ test('worktree-cleanup H8: процесс умер посреди удалени
   const { ctx, dir, attempt } = await finished();
   writeFileSync(
     join(artifactsOf(ctx, attempt.id), `worktree-cleanup-${attempt.id}.json`),
-    JSON.stringify({ status: 'removing', patch: '/saved/edits.patch' }),
+    JSON.stringify({ status: 'removing', patch: '/saved/edits.patch', head: 'pinned-head' }),
   );
   const entry = await assertRefused(ctx, dir, 'removal-incomplete');
   assert.equal(entry.patch, '/saved/edits.patch');
+  assert.equal(entry.head, 'pinned-head');
 });
 
 test('worktree-cleanup H8: дерево без регистрации и без записи — отказ', async () => {
@@ -865,4 +867,87 @@ test('worktree-cleanup: снимается только свой замок', as
   writeFileSync(file, 'another owner');
   await unlock();
   assert.equal(readFileSync(file, 'utf8'), 'another owner');
+});
+
+/** Дерево, где `build/` и `*.local` игнорируются правилами вершины. */
+async function ignoringTree() {
+  const found = await finished();
+  writeFileSync(join(found.dir, '.gitignore'), 'build/\n*.local\n');
+  inTree(found.dir, 'add', '.gitignore');
+  commit(found.dir, 'ignore');
+  return found;
+}
+
+test('worktree-cleanup: игнорируемый файл, добавленный в индекс через -f, — отказ; копия не теряется', async () => {
+  for (const withEdit of [true, false]) {
+    const { ctx, dir } = await ignoringTree();
+    mkdirSync(join(dir, 'build'));
+    writeFileSync(join(dir, 'build', 'only-copy.txt'), 'work in index\n');
+    inTree(dir, 'add', '-f', 'build/only-copy.txt');
+    if (withEdit) writeFileSync(join(dir, 'README.md'), 'edited\n');
+    await assertRefused(ctx, dir, 'staged-ignored');
+    assert.ok(existsSync(join(dir, 'build', 'only-copy.txt')));
+  }
+});
+
+test('worktree-cleanup: добавленный через -f файл, удалённый с диска, остаётся отказом', async () => {
+  const { ctx, dir } = await ignoringTree();
+  writeFileSync(join(dir, 'x.local'), 'only in index\n');
+  inTree(dir, 'add', '-f', 'x.local');
+  rmSync(join(dir, 'x.local'));
+  await assertRefused(ctx, dir, 'staged-ignored');
+});
+
+test('worktree-cleanup: игнорируемый файл, уже лежащий в вершине, не мешает', async () => {
+  const { ctx, dir } = await ignoringTree();
+  writeFileSync(join(dir, 'kept.local'), 'tracked\n');
+  inTree(dir, 'add', '-f', 'kept.local');
+  commit(dir, 'force added');
+  writeFileSync(join(dir, 'kept.local'), 'edited\n');
+  inTree(dir, 'add', '-f', 'kept.local');
+  const entry = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
+  assert.equal(entry.action, 'removed', entry.reason);
+  assert.match(readFileSync(entry.patch!, 'utf8'), /\+edited/);
+});
+
+test('worktree-cleanup: проиндексированная версия, отличная и от вершины, и от файла, — отказ', async () => {
+  // Новый файл (AM), изменённый файл (MM) и файл, удалённый с диска (AD).
+  for (const after of [
+    (dir: string) => writeFileSync(join(dir, 'n.txt'), 'worktree version\n'),
+    (dir: string) => rmSync(join(dir, 'n.txt')),
+  ]) {
+    const { ctx, dir } = await finished();
+    writeFileSync(join(dir, 'n.txt'), 'staged version\n');
+    inTree(dir, 'add', 'n.txt');
+    after(dir);
+    await assertRefused(ctx, dir, 'staged-differs');
+  }
+  const { ctx, dir } = await finished();
+  writeFileSync(join(dir, 'README.md'), 'staged version\n');
+  inTree(dir, 'add', 'README.md');
+  writeFileSync(join(dir, 'README.md'), 'worktree version\n');
+  await assertRefused(ctx, dir, 'staged-differs');
+});
+
+test('worktree-cleanup: индекс, равный файлу дерева, и правка без индекса разрешены', async () => {
+  const { ctx, dir } = await finished();
+  writeFileSync(join(dir, 'n.txt'), 'staged and same\n');
+  inTree(dir, 'add', 'n.txt');
+  writeFileSync(join(dir, 'README.md'), 'not staged\n');
+  const entry = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
+  assert.equal(entry.action, 'removed', entry.reason);
+  const text = readFileSync(entry.patch!, 'utf8');
+  assert.match(text, /staged and same/);
+  assert.match(text, /not staged/);
+});
+
+test('worktree-cleanup: файл с тем же содержимым, но новой меткой времени, — не отличие', async () => {
+  const { ctx, dir } = await finished();
+  const file = join(dir, 'n.txt');
+  writeFileSync(file, 'same\n');
+  inTree(dir, 'add', 'n.txt');
+  await new Promise((r) => setTimeout(r, 1100));
+  writeFileSync(file, 'same\n');
+  const plan = entryFor(await ctx.runner.cleanupWorktrees({ dryRun: true }), dir)!;
+  assert.equal(plan.action, 'remove', plan.reason);
 });
