@@ -558,22 +558,25 @@ test('worktree-cleanup H7: настройки пользователя не ме
   ctx.repo.git('worktree', 'remove', '--force', restored);
 });
 
-test('worktree-cleanup H7: патч, не прошедший проверку наложением, — отказ, патча нет', async () => {
-  const { ctx, dir, attempt } = await finished();
-  writeFileSync(join(dir, 'README.md'), 'edited\n');
-  const restore = shimGit('for a in "$@"; do [ "$a" = apply ] && exit 1; done');
-  try {
-    const entry = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
-    assert.equal(entry.reason, 'patch-unusable');
-    assert.equal(entry.action, 'refused');
-  } finally {
-    restore();
+test('worktree-cleanup H7: патч, не дающий то же дерево, — отказ, патча нет', async () => {
+  // Наложение падает, либо проходит, но ничего не меняет: важен результат, а не код выхода.
+  for (const answer of ['exit 1', 'exit 0']) {
+    const { ctx, dir, attempt } = await finished();
+    writeFileSync(join(dir, 'README.md'), 'edited\n');
+    const restore = shimGit(`for a in "$@"; do [ "$a" = apply ] && ${answer}; done`);
+    try {
+      const entry = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
+      assert.equal(entry.reason, 'patch-unusable', answer);
+      assert.equal(entry.action, 'refused');
+    } finally {
+      restore();
+    }
+    assert.ok(existsSync(dir));
+    assert.deepEqual(
+      readdirSync(artifactsOf(ctx, attempt.id)).filter((n) => n.startsWith('uncommitted-')),
+      [],
+    );
   }
-  assert.ok(existsSync(dir));
-  assert.deepEqual(
-    readdirSync(artifactsOf(ctx, attempt.id)).filter((n) => n.startsWith('uncommitted-')),
-    [],
-  );
 });
 
 test('worktree-cleanup H8: каталог только для чтения — отказ до удаления, дерево цело', async () => {
@@ -593,8 +596,10 @@ test('worktree-cleanup H8: оборванное удаление — истин�
   const { ctx, dir, attempt } = await finished();
   writeFileSync(join(dir, 'README.md'), 'edited\n');
   const admin = join(ctx.repo.dir, '.git', 'worktrees', attempt.id);
+  const recordPath = join(artifactsOf(ctx, attempt.id), `worktree-cleanup-${attempt.id}.json`);
+  const atRemoval = join(ctx.state, 'record-at-removal.json');
   const restore = shimGit(
-    `for a in "$@"; do [ "$a" = remove ] && { rm -f ${JSON.stringify(join(dir, 'README.md'))}; rm -rf ${JSON.stringify(admin)}; echo "error: failed to delete" >&2; exit 1; }; done`,
+    `for a in "$@"; do [ "$a" = remove ] && { cp ${JSON.stringify(recordPath)} ${JSON.stringify(atRemoval)}; rm -f ${JSON.stringify(join(dir, 'README.md'))}; rm -rf ${JSON.stringify(admin)}; echo "error: failed to delete" >&2; exit 1; }; done`,
   );
   let entry;
   try {
@@ -607,16 +612,28 @@ test('worktree-cleanup H8: оборванное удаление — истин�
   assert.equal(entry.registered, false, 'регистрации уже нет');
   assert.equal(entry.treePresent, true, 'часть дерева осталась');
   assert.ok(existsSync(entry.patch!));
-  const record = JSON.parse(
-    readFileSync(join(artifactsOf(ctx, attempt.id), `worktree-cleanup-${attempt.id}.json`), 'utf8'),
-  ) as { status: string; patch: string };
-  assert.deepEqual([record.status, record.patch], ['incomplete', entry.patch]);
+  const recorded = (path: string) => {
+    const { status, patch } = JSON.parse(readFileSync(path, 'utf8')) as Record<string, string>;
+    return [status, patch];
+  };
+  assert.deepEqual(recorded(atRemoval), ['removing', entry.patch], 'записано до удаления');
+  assert.deepEqual(recorded(recordPath), ['incomplete', entry.patch]);
 
   const again = entryFor(await ctx.runner.cleanupWorktrees(), dir)!;
   assert.equal(again.action, 'refused', 'дерево без регистрации всё ещё названо');
   assert.equal(again.reason, 'removal-incomplete');
   assert.equal(again.patch, entry.patch);
   assert.ok(existsSync(dir));
+});
+
+test('worktree-cleanup H8: процесс умер посреди удаления — запись держит дерево', async () => {
+  const { ctx, dir, attempt } = await finished();
+  writeFileSync(
+    join(artifactsOf(ctx, attempt.id), `worktree-cleanup-${attempt.id}.json`),
+    JSON.stringify({ status: 'removing', patch: '/saved/edits.patch' }),
+  );
+  const entry = await assertRefused(ctx, dir, 'removal-incomplete');
+  assert.equal(entry.patch, '/saved/edits.patch');
 });
 
 test('worktree-cleanup H8: дерево без регистрации и без записи — отказ', async () => {
