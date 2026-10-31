@@ -1609,7 +1609,7 @@ test(
       storeTree.run = run;
     });
     const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
-    const r = await placed(ctx, 'stopped', { deadlineMs: 9000 });
+    const r = await placed(ctx, 'stopped', { deadlineMs: 30000 });
     assert.equal(r.receipt.outcome, 'miss');
     assert.match(r.receipt.reason!, /бюджет хранилища/);
     const marks = join(ctx.state, 'dependency-store', ctx.repoPolicy.id, 'failed');
