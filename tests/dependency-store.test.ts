@@ -761,7 +761,8 @@ test(
     db.prepare('INSERT INTO leases VALUES (?,?,?,?,?,?)').run(
       key,
       resource,
-      'dependency-store-started:' + String(started),
+      // Сдвиг в пределах допуска: `lstart` на Linux движется после перевода часов.
+      'dependency-store-started:' + String(started! + 3000),
       'live-token',
       process.pid,
       Date.now() - 1000,
@@ -1165,7 +1166,9 @@ test(
     const base = ctx.seedOf().key;
     await ctx.commit({ 'dep-a': '1.0.0', 'dep-b': '1.0.0' });
     const run = storeTree.run;
+    let runs = 0;
     storeTree.run = async (h, options) => {
+      runs++;
       const result = await run(h, options);
       symlinkSync('/etc/hosts', join(options.write[0]!, 'store', 'v10', 'project-link'));
       return result;
@@ -1176,6 +1179,7 @@ test(
     const r = await placed(ctx, 'a');
     storeTree.run = run;
     assert.equal(r.receipt.refused, undefined, 'основа не виновата');
+    assert.equal(runs, 2, 'приговор выносит только сборка без основы');
     assert.deepEqual(readdirSync(ctx.seeds), [base]);
     assert.equal(r.receipt.outcome, 'partial', 'основа осталась частичным попаданием');
     const [mark] = readdirSync(failedDir(ctx));
@@ -1220,13 +1224,27 @@ test(
     // Выше пола, но фаза опоздала: бюджет истёк, виноват не реестр.
     lowerBuildFloor(t);
     reg.stallNext = 1;
-    const cut = await placed(ctx, 'cut', { deadlineMs: 4500, phaseMs: 120000 });
+    const cut = await placed(ctx, 'cut', { deadlineMs: 24000, phaseMs: 120000 });
     assert.match(cut.receipt.reason!, /бюджет хранилища/);
     assert.equal(existsSync(failedDir(ctx)), false, 'истечение чужого бюджета не отказ реестра');
 
     const healthy = await placed(ctx, 'healthy');
     assert.equal(healthy.receipt.outcome, 'hit', healthy.receipt.reason);
     assert.equal(healthy.receipt.built, true);
+
+    // Малый `timeoutMs` — не повод не собирать никогда.
+    storeTree.minBuildMs = 30000;
+    const small = await contour(
+      reg.url,
+      { 'dep-a': '1.0.0' },
+      {
+        policy: (p) => {
+          p.repositories[0].dependencyStore.timeoutMs = 20000;
+        },
+      },
+    );
+    const quick = await placed(small, 'quick');
+    assert.equal(quick.receipt.built, true, quick.receipt.reason);
   },
 );
 
@@ -1247,9 +1265,22 @@ test(
           symlinkSync(link, join(cwd, 'package.json'));
         },
       });
-      assert.equal(r.receipt.outcome, 'hit', name + ': поле просто не прочитано');
+      assert.equal(r.receipt.outcome, 'miss', name);
+      assert.match(r.receipt.reason!, /package\.json не прочитан/, name);
+      assert.equal(r.tree, false, name);
+      assert.equal(r.envChanged, false, name);
       assert.ok(r.ms < 30000, name);
     }
+    // Большой package.json скрывает закреплённую версию так же; отсутствие не скрывает.
+    const oversized = await placed(ctx, 'big-manifest', {
+      prepare: (cwd) => truncateSync(join(cwd, 'package.json'), 2 * 1024 * 1024),
+    });
+    assert.match(oversized.receipt.reason!, /package\.json не прочитан/);
+    assert.equal(oversized.tree, false);
+    const absent = await placed(ctx, 'no-manifest', {
+      prepare: (cwd) => rmSync(join(cwd, 'package.json')),
+    });
+    assert.equal(absent.receipt.outcome, 'hit', absent.receipt.reason);
     const linked = await placed(ctx, 'linked', {
       prepare: (cwd) => {
         rmSync(join(cwd, 'pnpm-lock.yaml'));
@@ -1263,7 +1294,9 @@ test(
       prepare: (cwd) => truncateSync(join(cwd, 'pnpm-lock.yaml'), 65 * 1024 * 1024),
     });
     assert.equal(huge.receipt.outcome, 'miss');
-    assert.match(huge.receipt.reason!, /нет файла/);
+    assert.match(huge.receipt.reason!, /pnpm-lock\.yaml больше предела/);
+    assert.equal(huge.tree, false);
+    assert.equal(huge.envChanged, false);
   },
 );
 
@@ -1296,6 +1329,89 @@ test(
     assert.match(broken.receipt.reason!, /pnpm: код 3/);
     assert.equal(broken.tree, false);
     assert.equal(broken.envChanged, false);
+  },
+);
+
+test(
+  'DS31: сверх обоих пределов дерево и окружение не тронуты, и в повторе; отказ записи тоже',
+  { skip: unavailable, timeout: 120000 },
+  async (t) => {
+    const reg = await registry(t);
+    const limit = storeTree.maxFiles;
+    storeTree.maxFiles = 1;
+    t.after(() => {
+      storeTree.maxFiles = limit;
+    });
+    const ctx = await contour(
+      reg.url,
+      { 'dep-big': '1.0.0' },
+      {
+        policy: (p) => {
+          p.repositories[0].dependencyStore.maxBytes = 1024 * 1024;
+        },
+      },
+    );
+    for (const name of ['first', 'repeat']) {
+      const r = await placed(ctx, name);
+      assert.equal(r.receipt.outcome, 'miss', name);
+      assert.match(r.receipt.reason!, /больше предела/, name);
+      assert.equal(r.tree, false, name);
+      assert.equal(r.envChanged, false, name);
+    }
+    storeTree.maxFiles = limit;
+
+    // Прежний seed подошёл бы, но копия не удалась: предел по-прежнему причина.
+    const moved = await contour(reg.url, { 'dep-a': '1.0.0' });
+    gatesPassed(await moved.check(moved.repo.head()));
+    await moved.commit({ 'dep-a': '1.0.0', 'dep-big': '1.0.0' });
+    storeTree.maxFiles = 2;
+    const cloneable = storeTree.cloneable;
+    const freeBytes = storeTree.freeBytes;
+    storeTree.cloneable = () => Promise.resolve(false);
+    // Место есть для сборки, но не для копии в это дерево.
+    storeTree.freeBytes = (path) =>
+      path.endsWith('no-room') ? Promise.resolve(1) : freeBytes(path);
+    t.after(() => {
+      storeTree.cloneable = cloneable;
+      storeTree.freeBytes = freeBytes;
+    });
+    const failed = await placed(moved, 'no-room');
+    storeTree.cloneable = cloneable;
+    storeTree.freeBytes = freeBytes;
+    assert.equal(failed.receipt.outcome, 'miss');
+    assert.match(failed.receipt.reason!, /не помещается/);
+    assert.equal(failed.tree, false);
+    assert.equal(failed.envChanged, false);
+  },
+);
+
+test(
+  'DS32: основа упёрлась в предел файлов — сборка с пустого, seed не замерзает',
+  { skip: unavailable, timeout: 120000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
+    gatesPassed(await ctx.check(ctx.repo.head()));
+    const count = (dir: string) =>
+      Object.keys(JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')).files).length;
+    const first = count(ctx.seedOf().dir);
+    const limit = storeTree.maxFiles;
+    storeTree.maxFiles = first + 1; // Свежая сборка влезает, основа с новым пакетом — нет.
+    t.after(() => {
+      storeTree.maxFiles = limit;
+    });
+    reg.downloads.length = 0;
+    await ctx.commit({ 'dep-b': '1.0.0' });
+    const r = await placed(ctx, 'fresh');
+    assert.equal(r.receipt.outcome, 'hit', r.receipt.reason);
+    assert.equal(r.receipt.built, true);
+    assert.ok(r.receipt.files! <= first + 1, 'seed собран без основы');
+    assert.deepEqual(
+      reg.downloads,
+      ['dep-b-1.0.0.tgz', 'dep-b-1.0.0.tgz'],
+      'основа, затем с пустого',
+    );
+    assert.equal(existsSync(failedDir(ctx)), false, 'приговора нет');
   },
 );
 
@@ -1492,19 +1608,10 @@ test(
     t.after(() => {
       storeTree.run = run;
     });
-    const ctx = await contour(
-      reg.url,
-      { 'dep-a': '1.0.0' },
-      {
-        policy: (p) => {
-          p.runTimeoutMs = 9000;
-        },
-      },
-    );
-    const r = await ctx.check(ctx.repo.head());
-    gatesPassed(r);
+    const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
+    const r = await placed(ctx, 'stopped', { deadlineMs: 9000 });
     assert.equal(r.receipt.outcome, 'miss');
-    assert.match(r.receipt.reason, /бюджет хранилища/);
+    assert.match(r.receipt.reason!, /бюджет хранилища/);
     const marks = join(ctx.state, 'dependency-store', ctx.repoPolicy.id, 'failed');
     const [mark] = readdirSync(marks);
     assert.equal(JSON.parse(readFileSync(join(marks, mark!), 'utf8')).permanent, false);

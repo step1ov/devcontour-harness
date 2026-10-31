@@ -21,7 +21,7 @@ import {
   type DependencyStorePolicy,
   type ExecutionPolicy,
 } from '../contracts/index.ts';
-import { readBounded } from '../environment/bounded-read.ts';
+import { OversizedFile, readBounded } from '../environment/bounded-read.ts';
 import { checkoutPath, type CheckoutRoot } from '../environment/checkout-root.ts';
 import { snapshotLimit } from '../environment/isolation.ts';
 import type { executionEnvironment } from '../environment/lifecycle.ts';
@@ -139,6 +139,12 @@ const FULL_BUDGET_SHARE = 0.75;
  * а отказ пробы стоит хранилища на всю фазу: короткий предел доктора здесь мал.
  */
 const IDENTITY_PROBE_MS = 30000;
+/**
+ * Допуск сравнения момента запуска: на Linux `lstart` считается от часов и после
+ * их перевода сдвигается. Живая аренда важнее: pid, занятый в эти секунды другим
+ * процессом, только заставит подождать до конца бюджета.
+ */
+const START_TOLERANCE_MS = 5000;
 /** Больше package.json в корне не читается: файл пишет кандидат. */
 const MANIFEST_LIMIT = 1024 * 1024;
 /** Предел lockfile checkout: файл пишет кандидат. */
@@ -521,7 +527,7 @@ async function exclusive<T>(s: Store, work: () => Promise<T>): Promise<T | undef
           compared.add(lease.token);
           const actual = processStartedAt(lease.pid);
           // Сравнить не с чем — владелец считается живым.
-          if (actual !== undefined && String(actual) !== started) {
+          if (actual !== undefined && Math.abs(actual - Number(started)) > START_TOLERANCE_MS) {
             leases.release(lease.token);
             continue;
           }
@@ -587,7 +593,8 @@ async function markFailed(s: Store, key: string, mark: FailedBuild) {
 }
 
 const remaining = (s: Store) => s.budgetEnds - Date.now();
-const buildFloor = (s: Store) => Math.min(storeTree.minBuildMs, s.spec.timeoutMs);
+/** Пол не выше полного бюджета, иначе малый `timeoutMs` не дал бы собрать seed никогда. */
+const buildFloor = (s: Store) => Math.min(storeTree.minBuildMs, s.fullBudgetMs * FULL_BUDGET_SHARE);
 
 /** Один проход сборки в каталоге `work`; итог — дерево с отпечатком или причина отказа. */
 async function fetchInto(s: Store, work: string, lock: string, settings: string, base?: Seed) {
@@ -662,18 +669,22 @@ async function buildSeed(s: Store, key: string, lock: string, lockSha256: string
       try {
         built = await fetchInto(s, work, lock, join(tmp, 'settings'), base);
       } catch (error) {
-        if (!(error instanceof SeedRefused) || !base) throw error;
-        await refuse(s, base.key, error.message);
+        if (!base) throw error;
+        if (error instanceof SeedRefused) await refuse(s, base.key, error.message);
+        // Приговор lockfile выносит только сборка без основы.
+        else if (!(error instanceof BuildFailed && error.permanent)) throw error;
         base = undefined;
         continue;
       }
       // Основа копит пакеты прежних lockfile: сверх предела — заново с пустого.
-      if (built.bytes <= s.spec.maxBytes || !base) break;
+      if ((built.bytes <= s.spec.maxBytes && built.files.size <= storeTree.maxFiles) || !base)
+        break;
       base = undefined;
     }
     if (built.bytes > s.spec.maxBytes)
       throw new BuildFailed(`seed ${built.bytes} байт больше предела ${s.spec.maxBytes}`, true, {
         maxBytes: s.spec.maxBytes,
+        untouched: true,
       });
     if (built.files.size > storeTree.maxFiles)
       throw new BuildFailed(
@@ -709,7 +720,9 @@ async function buildSeed(s: Store, key: string, lock: string, lockSha256: string
     return { key, store: join(s.root, 'seeds', key, 'store'), manifest };
   } catch (error) {
     if (s.outer.aborted) throw error;
-    const expired = s.signal.aborted;
+    const known = error instanceof BuildFailed ? error : undefined;
+    // Неизбежный отказ остаётся собой, даже если бюджет истёк в тот же момент.
+    const expired = s.signal.aborted && !known?.permanent;
     const reason = expired
       ? `бюджет хранилища ${s.budgetMs} мс истёк`
       : error instanceof Error
@@ -717,12 +730,14 @@ async function buildSeed(s: Store, key: string, lock: string, lockSha256: string
         : String(error);
     // Истечение бюджета опоздавшей фазы говорит о ней, а не о реестре: остальным
     // попыткам сборка не закрывается.
-    if (expired && !full) s.receipt.reason = reason;
-    else
+    if (expired && !full) {
+      s.receipt.reason = reason;
+      if (known?.detail.untouched) s.receipt.untouched = true;
+    } else
       await markFailed(s, key, {
         reason,
-        permanent: error instanceof BuildFailed && error.permanent,
-        ...(error instanceof BuildFailed ? error.detail : {}),
+        permanent: known?.permanent ?? false,
+        ...known?.detail,
       });
     return undefined;
   } finally {
@@ -834,9 +849,15 @@ async function unsupported(identity: Identity, spec: DependencyStorePolicy, cwd:
   const version = versionOf(identity.version);
   if (!version) return `версия ${spec.manager} не определена`;
   // Файл пишет кандидат: чтение не идёт по ссылке, не ждёт устройство и не берёт лишнего.
-  const pinned = await readBounded(join(cwd, 'package.json'), MANIFEST_LIMIT)
-    .then((raw) => (JSON.parse(raw) as { packageManager?: unknown }).packageManager)
-    .catch(() => undefined);
+  // Нечитаемый файл скрывает закреплённую версию; отсутствующий ничего не закрепляет.
+  let pinned: unknown;
+  try {
+    const raw = await readBounded(join(cwd, 'package.json'), MANIFEST_LIMIT);
+    pinned = (JSON.parse(raw) as { packageManager?: unknown } | null)?.packageManager;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+      return `package.json не прочитан: версия ${spec.manager} не определена`;
+  }
   const versions = [version, declaredManagerVersion(pinned, spec.manager)].filter(
     (v) => v !== undefined,
   );
@@ -844,10 +865,12 @@ async function unsupported(identity: Identity, spec: DependencyStorePolicy, cwd:
   return wrong && `${spec.manager} ${wrong} вне проверенных версий ${from} … <${below}`;
 }
 
-/** Lockfile checkout: обычный файл внутри дерева в пределах размера, или ничего. */
+/** Lockfile checkout: обычный файл внутри дерева или ничего; сверх предела — `oversized`. */
 async function checkoutLock(cwd: string, lockfile: string) {
-  const text = await readBounded(join(cwd, lockfile), LOCK_LIMIT).catch(() => undefined);
-  return text === undefined ? undefined : sha256(text.trim());
+  const text = await readBounded(join(cwd, lockfile), LOCK_LIMIT).catch((error: unknown) =>
+    error instanceof OversizedFile ? ('oversized' as const) : undefined,
+  );
+  return text === undefined || text === 'oversized' ? text : sha256(text.trim());
 }
 
 /**
@@ -899,7 +922,10 @@ export async function materializeStore(
       else {
         const lock = await checkoutLock(input.cwd, spec.lockfile);
         if (lock === undefined) summary.reason = `в дереве нет файла ${spec.lockfile}`;
-        else {
+        else if (lock === 'oversized') {
+          summary.reason = `${spec.lockfile} больше предела ${LOCK_LIMIT} байт`;
+          summary.untouched = true;
+        } else {
           const budgetMs = Math.max(
             1,
             Math.floor(Math.min(spec.timeoutMs, (ctx.deadline - Date.now()) * STORE_TIME_SHARE)),
@@ -962,8 +988,10 @@ export async function materializeStore(
     summary.reason = error instanceof Error ? error.message : String(error);
     env = {};
     await rm(dest, { recursive: true, force: true }).catch(() => undefined);
-    // Не вышло и это — в дереве ничего не остаётся, как без хранилища.
-    await seal().catch(() => rm(dest, { recursive: true, force: true }).catch(() => undefined));
+    // Не вышло и это — в дереве ничего не остаётся, как без хранилища. Так же, если
+    // причина промаха — предел.
+    if (!summary.untouched)
+      await seal().catch(() => rm(dest, { recursive: true, force: true }).catch(() => undefined));
   }
   delete summary.untouched;
   const receipt: StoreReceipt = {
