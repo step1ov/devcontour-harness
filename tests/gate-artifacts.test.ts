@@ -198,6 +198,8 @@ test('gate artifacts: каталог, подменённый ссылкой на
 
 test('gate artifacts: отмена проверки останавливает копирование и записана', async () => {
   const { root, dest } = tree({ 'a.png': 'a', 'b.png': 'b' });
+  mkdirSync(dest, { recursive: true });
+  writeFileSync(join(dest, 'previous.png'), 'p');
   const controller = new AbortController();
   controller.abort();
   const kept = await keepGateArtifacts({
@@ -215,6 +217,35 @@ test('gate artifacts: отмена проверки останавливает �
       ['b.png', 'copy-failed', 'проверка отменена'],
     ],
   );
+  assert.equal(kept.dir, dest);
+  assert.ok(existsSync(join(dest, 'previous.png')), 'отменённый запуск ничего не удаляет');
+});
+
+test('gate artifacts: текст в UTF-16 с секретом не копируется; маска UTF-8 идёт по байтам', async () => {
+  const secret = 'synthetic-artifact-secret-9021';
+  const raw = Buffer.concat([
+    Buffer.from([0xff, 0xfe, 0x41]),
+    Buffer.from(secret),
+    Buffer.from([0x80]),
+  ]);
+  const { root, dest } = tree({
+    'out/wide.txt': Buffer.from(`token=${secret}`, 'utf16le'),
+    'out/raw.log': raw,
+  });
+  const kept = await keepGateArtifacts({ root, paths: ['out'], dest, redact: redactor([secret]) });
+  assert.deepEqual(reasons(kept), [['out/wide.txt', 'secret']]);
+  assert.ok(!existsSync(join(dest, 'out', 'wide.txt')));
+  // Невалидный UTF-8 вокруг секрета сохраняется байт в байт.
+  assert.deepEqual(
+    readFileSync(join(dest, 'out', 'raw.log')),
+    Buffer.concat([
+      Buffer.from([0xff, 0xfe, 0x41]),
+      Buffer.from('[REDACTED]'),
+      Buffer.from([0x80]),
+    ]),
+  );
+  assert.equal(kept.files[0]!.redacted, true);
+  assertCopies(kept);
 });
 
 test('gate artifacts: путь за пределами дерева не копируется и при обходе схемы', async () => {
@@ -345,6 +376,12 @@ test('gate artifacts: ограждение удаления сравнивает
         redact: (v) => v,
       });
       assert.deepEqual(reasons(kept), [['a.png', 'copy-failed']], `${base} → ${dest}`);
+      // `dir` — реальный путь и при отказе ограждения.
+      assert.equal(
+        kept.dir,
+        existsSync(dest) ? realpathSync(dest) : join(root, 'new.artifacts'),
+        dest,
+      );
     }
     assert.equal(readFileSync(join(root, 'a.png'), 'utf8'), 'a', dest);
     assert.equal(readFileSync(join(root, 'inner', 'keep.png'), 'utf8'), 'k', dest);
@@ -380,7 +417,12 @@ test('gate artifacts: схема — относительные пути, не �
 });
 
 /** Gate задачи на настоящем репозитории; evidence записывается при любом исходе. */
-async function gate(dir: string, sha: string, g: Partial<GatePolicy> & { command: string[] }) {
+async function gate(
+  dir: string,
+  sha: string,
+  g: Partial<GatePolicy> & { command: string[] },
+  signal = new AbortController().signal,
+) {
   const recorded: Omit<EvidenceRecord, 'id' | 'runId' | 'createdAt'>[] = [];
   const artifactDir = temp('harness-ga-art-');
   let failure: TaskFailure | undefined;
@@ -402,7 +444,7 @@ async function gate(dir: string, sha: string, g: Partial<GatePolicy> & { command
         ...g,
       },
       artifactDir,
-      signal: new AbortController().signal,
+      signal,
       execution: { env: process.env, redact: (v) => v },
       boundary: { hidden: [], readable: [] },
     });
@@ -479,4 +521,24 @@ test('runGate: gate без artifacts — evidence без нового поля',
   });
   assert.equal(evidence.passed, true, evidence.summary);
   assert.equal('artifactFiles' in evidence, false);
+});
+
+test('runGate: отмена запуска доходит до копирования artifacts', async () => {
+  const r = repo({ '.gitignore': 'test-results/\n' });
+  mkdirSync(join(r.dir, 'test-results', 'shots'), { recursive: true });
+  writeFileSync(join(r.dir, 'test-results', 'shots', 'a.png'), 'png');
+  const controller = new AbortController();
+  controller.abort();
+  const { evidence } = await gate(
+    r.dir,
+    r.head(),
+    { command: nodeGate(junit('<testcase name="a"/>')), artifacts: ['test-results/shots'] },
+    controller.signal,
+  );
+  assert.equal(evidence.passed, false);
+  assert.deepEqual(evidence.artifactFiles!.files, []);
+  assert.deepEqual(
+    evidence.artifactFiles!.skipped.map((s) => [s.path, s.reason, s.detail]),
+    [['test-results/shots', 'copy-failed', 'проверка отменена']],
+  );
 });

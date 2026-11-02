@@ -53,6 +53,37 @@ function binaryHasSecret(bytes: Buffer, redact: Redactor): boolean {
   return false;
 }
 
+const marker = Buffer.from('[REDACTED]');
+/**
+ * Маска секретов в байтах текстового файла; `undefined` — секретов нет. По
+ * списку форм redactor замена идёт по байтам: невалидный UTF-8 вокруг секрета
+ * остаётся как был. Redactor без списка применяется к тексту UTF-8.
+ */
+function maskText(bytes: Buffer, redact: Redactor): Buffer | undefined {
+  if (!redact.secrets) {
+    const text = bytes.toString('utf8');
+    const masked = redact(text);
+    return masked === text ? undefined : Buffer.from(masked);
+  }
+  let out = bytes,
+    changed = false;
+  for (const secret of redact.secrets) {
+    if (!secret) continue;
+    const needle = Buffer.from(secret, 'utf8');
+    const parts: Buffer[] = [];
+    let from = 0;
+    for (let at = out.indexOf(needle); at >= 0; at = out.indexOf(needle, from)) {
+      parts.push(out.subarray(from, at), marker);
+      from = at + needle.length;
+    }
+    if (!parts.length) continue;
+    parts.push(out.subarray(from));
+    out = Buffer.concat(parts);
+    changed = true;
+  }
+  return changed ? out : undefined;
+}
+
 /** Объявленные пути без повторов и без путей внутри уже объявленного каталога. */
 function declaredRoots(paths: readonly string[]) {
   const unique = [...new Set(paths.map((p) => p.replace(/\/+$/, '')))];
@@ -67,7 +98,7 @@ function declaredRoots(paths: readonly string[]) {
  * пути, ни в его компонентах, ни внутри каталога: такой путь записывается как
  * `symlink`. Копируются только обычные файлы с одной жёсткой ссылкой и с
  * разрешёнными расширениями в пределах `gateArtifactLimits`; файл,
- * разрешающийся вне дерева или подменённый между обходом и чтением, не
+ * разрешающийся перед чтением вне дерева, не
  * копируется. Всё прочее и всякий отказ чтения или записи записываются в
  * `skipped` с причиной. Функция не бросает: исход gate от сохранения не
  * зависит, а отказ сохранения остаётся в evidence.
@@ -107,7 +138,14 @@ export async function keepGateArtifacts(options: {
       ...(detail ? { detail: redact(detail).slice(0, 500) } : {}),
     });
   };
-  let root: string, dest: string;
+  const done = () => ({ dir: dest, files, skipped, ...(skippedMore ? { skippedMore } : {}) });
+  let root: string,
+    dest = resolve(options.dest);
+  // Отменённый запуск не трогает и прежние копии: удалять их уже незачем.
+  if (signal?.aborted) {
+    for (const path of paths) skip(path, 'copy-failed', 'проверка отменена');
+    return done();
+  }
   try {
     root = await realpath(options.root);
     // Удаляется только свой каталог копий: никогда не дерево, не его предок и
@@ -119,12 +157,15 @@ export async function keepGateArtifacts(options: {
     await mkdir(dest, { recursive: true });
   } catch (error) {
     for (const path of paths) skip(path, 'copy-failed', message(error));
-    return { dir: options.dest, files, skipped, ...(skippedMore ? { skippedMore } : {}) };
+    return done();
   }
 
-  const read = async (rel: string, abs: string, seen: { dev: number; ino: number }) => {
+  const read = async (abs: string) => {
     // Каталог-предок мог быть подменён ссылкой после обхода: копия берётся
-    // только из пути, который и сейчас разрешается внутрь дерева.
+    // только из пути, который и сейчас разрешается внутрь дерева. Между этой
+    // проверкой и open остаётся окно гонки: без openat его не закрыть по пути.
+    // Его может использовать только процесс, переживший gate; потомков gate
+    // harness завершает до копирования (см. docs/contracts.md).
     const real = await realpath(abs);
     if (!inside(real, root)) return 'outside' as const;
     const handle = await open(
@@ -136,7 +177,6 @@ export async function keepGateArtifacts(options: {
       if (!stat.isFile()) return 'not-regular' as const;
       // Жёсткая ссылка на файл вне дерева неотличима от своего файла по пути.
       if (stat.nlink > 1) return 'hardlink' as const;
-      if (stat.dev !== seen.dev || stat.ino !== seen.ino) return 'outside' as const;
       if (stat.size > limits.fileBytes) return 'file-limit' as const;
       const buffer = Buffer.allocUnsafe(Math.min(stat.size, limits.fileBytes) + 1);
       let size = 0;
@@ -148,23 +188,20 @@ export async function keepGateArtifacts(options: {
         // Файл вырос после stat: копия была бы не тем, что описано.
         if (size === buffer.length) throw new Error('файл изменился при чтении');
       }
-      // Прочитано то же, что найдено обходом: путь и теперь ведёт к этому файлу.
-      const after = await lstat(abs);
-      if (after.dev !== stat.dev || after.ino !== stat.ino) return 'outside' as const;
       return Buffer.from(buffer.subarray(0, size));
     } finally {
       await handle.close();
     }
   };
 
-  const copy = async (rel: string, abs: string, seen: { dev: number; ino: number }) => {
+  const copy = async (rel: string, abs: string) => {
     if (!allowed.has(extname(rel).toLowerCase())) return skip(rel, 'extension');
     // Имя копии на диске равно пути в evidence: путь с секретом не сохраняется.
     if (redact(rel) !== rel) return skip(rel, 'secret');
     if (files.length >= limits.files) return skip(rel, 'count-limit');
     let bytes: Buffer;
     try {
-      const result = await read(rel, abs, seen);
+      const result = await read(abs);
       if (!Buffer.isBuffer(result)) return skip(rel, result);
       bytes = result;
     } catch (error) {
@@ -172,13 +209,15 @@ export async function keepGateArtifacts(options: {
     }
     let redacted = false;
     if (textExtensions.has(extname(rel).toLowerCase())) {
-      const text = bytes.toString('utf8');
-      const masked = redact(text);
-      if (masked !== text) {
-        bytes = Buffer.from(masked);
+      const masked = maskText(bytes, redact);
+      if (masked) {
+        bytes = masked;
         redacted = true;
       }
-    } else if (binaryHasSecret(bytes, redact)) return skip(rel, 'secret');
+    }
+    // Секрет, оставшийся после маски (текст в UTF-16 и других кодировках), и
+    // секрет в не текстовом файле: такой файл не копируется.
+    if (binaryHasSecret(bytes, redact)) return skip(rel, 'secret');
     if (bytes.length > limits.fileBytes) return skip(rel, 'file-limit');
     if (total + bytes.length > limits.totalBytes) return skip(rel, 'total-limit');
     try {
@@ -207,7 +246,7 @@ export async function keepGateArtifacts(options: {
       return skip(rel, 'copy-failed', message(error));
     }
     if (info.isSymbolicLink()) return skip(rel, 'symlink');
-    if (info.isFile()) return copy(rel, abs, info);
+    if (info.isFile()) return copy(rel, abs);
     if (!info.isDirectory()) return skip(rel, 'not-regular');
     // Записи читаются только до предела обхода: огромный каталог не
     // перечисляется целиком. Прочитанное посещается в порядке имён.
@@ -264,5 +303,5 @@ export async function keepGateArtifacts(options: {
     }
     await visit(rel, abs);
   }
-  return { dir: dest, files, skipped, ...(skippedMore ? { skippedMore } : {}) };
+  return done();
 }
