@@ -248,6 +248,56 @@ export function codexPermissions(policy: Isolation, network: boolean) {
 
 const srtCli = createRequire(import.meta.url).resolve('@anthropic-ai/sandbox-runtime/dist/cli.js');
 
+/**
+ * Предзагрузка процесса srt: поиск shell без порождения `which`.
+ *
+ * srt на каждый запуск ищет shell через `spawnSync('which', [shell],
+ * { timeout: 1000 })`. Под нагрузкой машины порождение `which` не
+ * укладывается в секунду, srt печатает «Shell 'bash' not found in PATH» и
+ * выходит до запуска команды: проверка падала как будто по вине проекта.
+ * Передать srt путь shell нельзя: у CLI такой опции нет, а абсолютный путь
+ * он тоже проверяет через `which`. Поэтому такой вызов отвечается в процессе
+ * srt: исполняемый файл ищется по тому же PATH, что у `which`, но только в
+ * абсолютных каталогах — относительный или пустой элемент PATH указывает на
+ * текущий каталог, то есть, возможно, в проверяемое дерево. Не найденное и
+ * любые другие вызовы уходят в настоящий `spawnSync` — ответ «нет такого
+ * shell» по-прежнему даёт `which`, а не эта подмена.
+ */
+export const srtShellLookup =
+  'data:text/javascript,' +
+  encodeURIComponent(`
+import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { accessSync, constants, statSync } from 'node:fs';
+import { delimiter, isAbsolute, join } from 'node:path';
+const original = cp.spawnSync;
+const find = (bin, path) => {
+  if (bin.includes('/') && !isAbsolute(bin)) return;
+  const dirs = bin.includes('/') ? [''] : (path ?? '').split(delimiter).filter((d) => isAbsolute(d));
+  for (const dir of dirs) {
+    const file = dir ? join(dir, bin) : bin;
+    try {
+      if (!statSync(file).isFile()) continue;
+      accessSync(file, constants.X_OK);
+      return file;
+    } catch {}
+  }
+};
+cp.spawnSync = function spawnSync(command, args, options) {
+  if (command === 'which' && Array.isArray(args) && args.length === 1 &&
+      typeof args[0] === 'string' && args[0] && !args[0].startsWith('-') &&
+      options?.encoding === 'utf8') {
+    const file = find(args[0], (options.env ?? process.env).PATH);
+    if (file) {
+      const stdout = file + '\\n';
+      return { pid: 0, output: [null, stdout, ''], stdout, stderr: '', status: 0, signal: null };
+    }
+  }
+  return original.apply(this, arguments);
+};
+syncBuiltinESMExports();
+`);
+
 /** Готов ли механизм изоляции проверок на этой машине. */
 export function isolationSupport() {
   if (!SandboxManager.isSupportedPlatform())
@@ -730,8 +780,15 @@ export async function isolatedCommand(
    * ядра, и по нему отказы этой проверки отличаются от чужих (`parseSandboxLog`).
    */
   tag = '',
+  /**
+   * Токен старта: обёртка печатает его строкой в stderr перед exec команды.
+   * Метку-файл команда может стереть (каталог метки ей открыт на запись), а
+   * напечатанное до неё — нет: токен в выводе доказывает старт.
+   */
+  token = '',
 ) {
   if (!/^[a-z0-9]*$/.test(tag)) throw new Error('Токен журнала песочницы — только [a-z0-9]');
+  if (!/^[a-z0-9]*$/.test(token)) throw new Error('Токен старта — только [a-z0-9]');
   await mkdir(settingsDir, { recursive: true });
   const settings = join(settingsDir, 'isolation.json');
   const denies = platform === 'darwin' ? protectedWriteDenies(protect) : undefined;
@@ -754,14 +811,17 @@ export async function isolatedCommand(
   return {
     argv: [
       process.execPath,
+      '--import',
+      srtShellLookup,
       srtCli,
       '--settings',
       settings,
       '--',
       '/bin/sh',
       '-c',
-      `${tag ? `: ${tag}; ` : ''}: > "$0" && cd -- "$1" && shift && exec "$@"`,
+      `${tag ? `: ${tag}; ` : ''}: > "$0" && { [ -z "$1" ] || printf '%s\\n' "$1" >&2; } && cd -- "$2" && shift 2 && exec "$@"`,
       started,
+      token,
       workdir,
       '/usr/bin/env',
       `TMPDIR=${scratch}`,

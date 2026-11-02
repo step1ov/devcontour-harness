@@ -588,6 +588,16 @@ export class ReviewProbes {
           ...(gate ? { failure: 'environment' as const } : {}),
         }
       : {};
+    // Песочница так и не запустила команду: исполнять было нечего.
+    if (r.launchFailed && !r.timedOut && !signal.aborted)
+      return {
+        status: 'error',
+        failure: 'environment',
+        exitCode: r.code,
+        stdout: tail(r.stdout),
+        stderr: tail(r.stderr),
+        note: `Песочница ОС не запустила команду (попыток: ${r.attempts}): команда не исполнялась. Это ошибка среды, а не находка в коде.`,
+      };
     return {
       ...hint,
       status: signal.aborted
@@ -769,6 +779,14 @@ export class ReviewProbes {
           ...streams,
           status: 'timeout',
           note: `Gate не завершился за ${limitMs} мс и остановлен вместе с потомками; это наблюдение, а не доказанный дефект. ${observation}`,
+        };
+      else if (r.launchFailed)
+        outcome = {
+          ...base,
+          ...streams,
+          status: 'error',
+          failure: 'environment',
+          note: `Песочница ОС не запустила gate (попыток: ${r.attempts}): команда не исполнялась. Это ошибка среды, а не находка в коде.`,
         };
       else if (blocked.length)
         outcome = {

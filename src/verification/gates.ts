@@ -237,11 +237,71 @@ function failedCases(counts: ReturnType<typeof junitSummary>) {
 }
 /**
  * Песочница отказала до запуска команды: процесс завершился неуспешно, а
- * метка старта, которую обёртка создаёт перед exec, не появилась. Текст
- * stderr признаком не служит — его может напечатать и сама проверка.
+ * обёртка не дошла до exec — нет ни метки-файла, ни токена старта, который
+ * она печатает в stderr перед exec (`printed`). Метку команда может стереть,
+ * напечатанный токен — нет; подделать токен значит лишь признать старт.
+ * Текст stderr сам признаком не служит — его может напечатать и проверка.
  */
-export function sandboxNotStarted(result: { code: number }, started: string | undefined) {
-  return started !== undefined && result.code !== 0 && !existsSync(started);
+export function sandboxNotStarted(
+  result: { code: number },
+  started: string | undefined,
+  printed: boolean,
+) {
+  return started !== undefined && result.code !== 0 && !printed && !existsSync(started);
+}
+/**
+ * Фильтр сырого stderr, вырезающий строку токена старта, которую обёртка
+ * печатает перед exec. Ищет до маски: маска по значениям окружения (`1`,
+ * `8080`) задевала бы шестнадцатеричный токен, и старт не узнавался. Хвост,
+ * который может оказаться началом токена, придерживается до следующего
+ * куска. Вырезается только первое вхождение; `onSeen` — при нём.
+ */
+export function startTokenFilter(token: string, onSeen: () => void) {
+  const line = token + '\n';
+  let pending = '',
+    seen = false;
+  return (text: string, final: boolean) => {
+    if (seen) return text;
+    pending += text;
+    const at = pending.indexOf(line);
+    if (at >= 0) {
+      seen = true;
+      onSeen();
+      const out = pending.slice(0, at) + pending.slice(at + line.length);
+      pending = '';
+      return out;
+    }
+    let keep = 0;
+    if (!final)
+      for (let k = Math.min(line.length - 1, pending.length); k > 0; k--)
+        if (line.startsWith(pending.slice(-k))) {
+          keep = k;
+          break;
+        }
+    const out = pending.slice(0, pending.length - keep);
+    pending = pending.slice(pending.length - keep);
+    return out;
+  };
+}
+/**
+ * Известные отказы запуска самой песочницы — не содержимого проверяемого
+ * дерева: поиск shell и порождение процесса песочницы. Только они при
+ * доказанном «не стартовала» делают отказ классом `environment`; прочие
+ * отказы srt до старта (например, сборка запретов по дереву на Linux) могут
+ * зависеть от кандидата и остаются провалом проверки. Весь stderr должен
+ * состоять только из таких строк srt: строка внутри другого вывода не в счёт.
+ */
+export function sandboxLaunchFailure(stderr: string) {
+  const lines = stderr
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return (
+    lines.length > 0 &&
+    lines.every((l) =>
+      /^Error: Shell '[^']+' not found in PATH$|^Failed to execute command: \S/.test(l),
+    )
+  );
 }
 /** Команда проверки находится — иначе ENOENT, как при обычном запуске. */
 function assertExecutable(name: string, path: string | undefined, cwd: string) {
@@ -329,7 +389,8 @@ export async function runCheck(
     violations?: boolean;
     /**
      * Запуск проверки подтверждён: без песочницы — порождён её процесс, в
-     * песочнице — обёртка создала метку старта перед exec. Запуск самой
+     * песочнице — обёртка напечатала токен старта (или создала метку) перед
+     * exec. Запуск самой
      * обёртки песочницы запуском проверки не считается. Вызывается не более
      * одного раза, в том числе когда проверка затем завершилась исключением.
      */
@@ -350,7 +411,15 @@ export async function runCheck(
     result: Awaited<ReturnType<typeof command>> | undefined,
     monitor: Awaited<ReturnType<typeof watchSandboxLog>>,
     violations: SandboxViolation[] | undefined,
-    attempts = 1;
+    attempts = 1,
+    // Во всех попытках отказала сама песочница: команда не начиналась.
+    // Вычисляется до уборки, пока метка старта ещё на месте.
+    notStarted = false,
+    // Не стартовала по известному отказу запуска песочницы: отказ среды.
+    launchFailed = false,
+    // Токен старта в stderr текущей попытки.
+    printed = false;
+  const token = randomUUID().replace(/-/g, '');
   const scratch = await realpath(await mkdtemp(join(tmpdir(), 'dc-gate-')));
   // Метка старта — вне TMPDIR команды: проверка, чистящая свой временный
   // каталог, не должна стирать признак того, что она уже начиналась.
@@ -391,20 +460,32 @@ export async function runCheck(
         roots.length ? roots : [workdir],
         process.platform,
         tag,
+        token,
       );
       argv = wrapped.argv;
       env = { ...env, ...wrapped.env };
       cwd = wrapped.cwd;
       if (tag) monitor = await watchSandboxLog(tag);
     }
-    const execute = () => {
+    const execute = async () => {
       // Уже отменённый вызов не запускается: слушатель отмены на отменённом
       // сигнале не срабатывает, и команда шла бы до таймаута.
       if (options.signal.aborted)
         throw Object.assign(new Error('Проверка отменена до запуска'), { name: 'AbortError' });
+      printed = false;
       return command(argv, cwd, {
         signal: options.signal,
         ...(started === undefined ? { onSpawn: confirm } : {}),
+        // Токен старта ищется в сыром потоке до маски и вырезается из него:
+        // итоговый stderr хранит только хвост, а маска могла исказить токен.
+        ...(started !== undefined
+          ? {
+              rawStderr: startTokenFilter(token, () => {
+                printed = true;
+                confirm();
+              }),
+            }
+          : {}),
         timeoutMs: options.timeoutMs,
         env,
         redact: options.redact,
@@ -417,13 +498,16 @@ export async function runCheck(
     };
     try {
       result = await execute();
-      // sandbox-runtime ищет shell через `which` с таймаутом в секунду и под
-      // нагрузкой отказывает до запуска команды. Повтор допустим, только если
-      // команда точно не начиналась: метки старта нет.
-      for (; attempts < 3 && sandboxNotStarted(result, started); attempts++) {
+      // Песочница может отказать до запуска команды (прежде так отказывал
+      // поиск shell через `which` под нагрузкой — см. `srtShellLookup`).
+      // Повтор допустим, только если команда точно не начиналась: нет ни
+      // метки, ни токена старта. Стёртая командой метка повтора не даёт.
+      for (; attempts < 3 && sandboxNotStarted(result, started, printed); attempts++) {
         await new Promise((r) => setTimeout(r, 500 * attempts));
         result = await execute();
       }
+      notStarted = sandboxNotStarted(result, started, printed);
+      launchFailed = notStarted && sandboxLaunchFailure(result.stderr);
     } finally {
       // Факт старта читается до удаления метки — и при исключении после него.
       if (started !== undefined && existsSync(started)) confirm();
@@ -437,6 +521,8 @@ export async function runCheck(
       ...result,
       attempts,
       started: launched,
+      notStarted,
+      launchFailed,
       ...(policy ? { isolation: policy } : {}),
       ...(violations ? { violations } : {}),
     };
@@ -462,6 +548,8 @@ export async function runCheck(
               ...result,
               attempts,
               started: launched,
+              notStarted,
+              launchFailed,
               ...(policy ? { isolation: policy } : {}),
               ...(violations ? { violations } : {}),
             },
@@ -702,6 +790,17 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     }
     if (result.timedOut || signal.aborted)
       throw new Error('Проверка прервана или превысила timeout');
+    // Песочница так и не запустила команду по известному отказу запуска:
+    // код проекта не исполнялся, и его правка ничего не изменит. Это отказ
+    // среды, а не провал проверки; текст srt вроде «Shell 'bash' not found
+    // in PATH» остаётся только причиной. Прочие отказы — провал проверки.
+    if (result.launchFailed) {
+      kind = 'environment';
+      throw new Error(
+        `песочница ОС не запустила команду проверки (попыток: ${result.attempts}): проверка не исполнялась. ` +
+          `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
+      );
+    }
     if (result.code !== 0) {
       // Сохраняем валидный отчёт и при отказе команды, до классификации
       // песочницы: после очистки worktree иначе остаётся только хвост лога.

@@ -37,6 +37,12 @@ export async function command(
      * служебные строки JSON. Сохранять его нельзя.
      */
     onRawStdout?: (text: string) => void;
+    /**
+     * Фильтр stderr до маски: получает сырой текст (`final` — последний
+     * кусок) и возвращает то, что идёт дальше в маску и вывод. Служебные
+     * строки ищутся здесь: маска по значениям окружения могла бы их исказить.
+     */
+    rawStderr?: (text: string, final: boolean) => string;
     /** Процесс запущен (событие `spawn`): до него команда не исполнялась. */
     onSpawn?: () => void;
     /**
@@ -104,7 +110,8 @@ export async function command(
     });
     child.stderr.on('data', (d: Buffer) => {
       lastOutputAt = new Date().toISOString();
-      append('stderr', maskErr(stderrDecoder.write(d)));
+      const raw = stderrDecoder.write(d);
+      append('stderr', maskErr(options.rawStderr ? options.rawStderr(raw, false) : raw));
     });
     const signalGroup = (signal: NodeJS.Signals) => {
       try {
@@ -207,7 +214,11 @@ export async function command(
       const rest = stdoutDecoder.end();
       options.onRawStdout?.(rest);
       append('stdout', maskOut(rest, true));
-      append('stderr', maskErr(stderrDecoder.end(), true));
+      const restErr = stderrDecoder.end();
+      append(
+        'stderr',
+        maskErr(options.rawStderr ? options.rawStderr(restErr, true) : restErr, true),
+      );
       if (outputError) {
         reject(outputError);
         return;
