@@ -15,11 +15,6 @@ export class OversizedFile extends Error {
  * не держит `open` (O_NONBLOCK) и отклоняется как не обычный файл.
  */
 export async function readBounded(path: string, limit: number): Promise<string> {
-  return (await readBoundedBytes(path, limit)).toString('utf8');
-}
-
-/** Байты файла по тем же правилам, что и `readBounded`. */
-export async function readBoundedBytes(path: string, limit: number): Promise<Buffer> {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await handle.stat();
@@ -33,7 +28,7 @@ export async function readBoundedBytes(path: string, limit: number): Promise<Buf
       size += bytesRead;
       if (size > limit) throw new OversizedFile(limit);
     }
-    return Buffer.from(buffer.subarray(0, size));
+    return buffer.toString('utf8', 0, size);
   } finally {
     await handle.close();
   }

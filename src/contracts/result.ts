@@ -302,15 +302,20 @@ export const gateArtifactExtensions = ['.png', '.json', '.txt', '.xml', '.log'] 
 /**
  * Почему файл artifacts не сохранён: `missing` — пути нет; `symlink` — путь
  * или его компонент — ссылка (не разыменовывается); `outside` — путь вне
- * дерева; `not-regular` — не обычный файл; `extension` — расширение вне
- * списка; `file-limit`, `total-limit`, `count-limit`, `scan-limit` — пределы;
- * `copy-failed` — чтение или запись копии не удались (причина в `detail`).
+ * дерева; `not-regular` — не обычный файл; `hardlink` — у файла больше одной
+ * жёсткой ссылки (мог быть файлом вне дерева); `secret` — в имени или в байтах
+ * не текстового файла найден секрет окружения (изображение не переписывается);
+ * `extension` — расширение вне списка; `file-limit`, `total-limit`,
+ * `count-limit`, `scan-limit` — пределы; `copy-failed` — чтение или запись
+ * копии не удались либо проверка отменена (причина в `detail`).
  */
 export const gateArtifactSkipReasons = [
   'missing',
   'symlink',
   'outside',
   'not-regular',
+  'hardlink',
+  'secret',
   'extension',
   'file-limit',
   'total-limit',

@@ -208,8 +208,17 @@ function jointContour(gate: string = combo, patch: (p: any) => void = () => {}) 
   return { ...ctx, joint };
 }
 
+/** Та же проверка комбинации, оставляющая снимок экрана и отчёт не из списка расширений. */
+const comboWithShots =
+  `require('fs').mkdirSync('shots', { recursive: true });` +
+  `require('fs').writeFileSync('shots/a.png', 'png');` +
+  `require('fs').writeFileSync('shots/page.html', '<html>');\n` +
+  combo;
+
 test('T24: два репозитория — принятые поручения, комбинация падает; исправление проходит; смена SHA и основания делает результат неактуальным', async () => {
-  const ctx = jointContour();
+  const ctx = jointContour(comboWithShots, (p) => {
+    p.workspaceGates[0].artifacts = ['value.json', 'shots/a.png', 'shots/page.html'];
+  });
   await ctx.runner.init();
   ready(ctx.engine, ctx.graph, 'runner-1');
   await ctx.runner.drain();
@@ -226,12 +235,16 @@ test('T24: два репозитория — принятые поручения
   // Упавший gate сохраняет объявленные artifacts копиями: их хеш — в evidence.
   const kept = failed.evidence[0]!.artifactFiles!;
   assert.deepEqual(
-    kept.files.map((f) => [f.path, f.bytes]),
-    [['value.json', readFileSync(join(kept.dir, 'value.json')).length]],
+    kept.files.map((f) => f.path),
+    ['value.json', 'shots/a.png'],
   );
-  assert.equal(kept.files[0]!.sha256, sha256(readFileSync(join(kept.dir, 'value.json'))));
-  assert.equal(kept.dir, join(ctx.state, 'joint', failed.id, 'combo', 'artifacts'));
-  assert.deepEqual(kept.skipped, []);
+  for (const f of kept.files) {
+    const bytes = readFileSync(join(kept.dir, f.path));
+    assert.equal(f.sha256, sha256(bytes), f.path);
+    assert.equal(f.bytes, bytes.length, f.path);
+  }
+  assert.deepEqual(kept.skipped, [{ path: 'shots/page.html', reason: 'extension' }]);
+  assert.equal(kept.dir, join(realpathSync(ctx.state), 'joint', failed.id, 'combo.artifacts'));
   assert.equal(ctx.worktrees('product'), 1, 'снимки компонентов убраны');
   // Поручение продукта выравнивает значение.
   const fix = workGraphSchema.parse({
@@ -259,11 +272,12 @@ test('T24: два репозитория — принятые поручения
   assert.equal(passed.status, 'passed', JSON.stringify(passed.evidence.map((e) => e.summary)));
   assert.equal(passed.evidence[0]!.artifacts[0]!.path, 'product/value.json');
   assert.equal(passed.evidence[0]!.artifacts[0]!.digest.length, 64);
-  assert.equal(
-    passed.evidence[0]!.artifactFiles!.files[0]!.sha256,
-    passed.evidence[0]!.artifacts[0]!.digest,
-    'копия совпадает с проверенным artifact',
+  // Проверенный artifact и его копия совпадают; недопустимое расширение — только хеш.
+  assert.deepEqual(
+    passed.evidence[0]!.artifactFiles!.files.map((f) => f.sha256),
+    passed.evidence[0]!.artifacts.slice(0, 2).map((a) => a.digest),
   );
+  assert.equal(passed.evidence[0]!.artifacts[2]!.path, 'product/shots/page.html');
   assert.equal(ctx.engine.jointResult(set).current, true);
   // Проверка набора без продукта — другой предмет: прежний отказ остаётся отказом.
   assert.equal(ctx.engine.jointResult(['add-greeting']).current, false);

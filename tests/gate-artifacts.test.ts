@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -34,7 +36,7 @@ function tree(files: Record<string, string | Buffer> = {}) {
     mkdirSync(join(root, path, '..'), { recursive: true });
     writeFileSync(join(root, path), content);
   }
-  return { root, dest: join(temp('harness-ga-out-'), 'unit', 'artifacts') };
+  return { root, dest: join(temp('harness-ga-out-'), 'unit.artifacts') };
 }
 
 const reasons = (kept: GateArtifactFiles) => kept.skipped.map((s) => [s.path, s.reason]);
@@ -60,7 +62,8 @@ test('gate artifacts: каталог обходится по именам, ра�
   });
   const kept = await keepGateArtifacts({
     root,
-    paths: ['shots/', 'results', 'missing/dir'],
+    // Повтор и путь внутри объявленного каталога объединяются: копия одна.
+    paths: ['shots/', 'results', 'shots', 'shots/a.png', 'missing/dir'],
     dest,
     redact: (v) => v,
   });
@@ -84,24 +87,48 @@ test('gate artifacts: каталог обходится по именам, ра�
   assertCopies(kept);
 });
 
-test('gate artifacts: секрет окружения в текстовой копии замаскирован, digest относится к копии', async () => {
+test('gate artifacts: секрет — в тексте маскируется, двоичный файл и имя с секретом не копируются', async () => {
   const secret = 'synthetic-artifact-secret-4417';
   const { root, dest } = tree({
     'out/trace.json': `{"token":"${secret}"}`,
-    'out/shot.png': secret,
+    'out/shot.png': Buffer.concat([Buffer.from([0x89, 0x50]), Buffer.from(secret)]),
+    'out/wide.png': Buffer.from(secret, 'utf16le'),
+    // Форма секрета в JSON-экранировании тоже секрет.
+    'out/quoted.png': JSON.stringify(secret + '"').slice(1, -1),
+    [`out/${secret}.txt`]: 'plain',
+    'out/clean.png': 'no secret here',
   });
   const kept = await keepGateArtifacts({
     root,
     paths: ['out'],
     dest,
-    redact: redactor([secret]),
+    redact: redactor([secret, secret + '"']),
   });
   const trace = kept.files.find((f) => f.path === 'out/trace.json')!;
   assert.equal(trace.redacted, true);
   assert.ok(!readFileSync(join(dest, 'out/trace.json'), 'utf8').includes(secret));
-  // Двоичный снимок не переписывается: маска портила бы изображение.
-  assert.equal(kept.files.find((f) => f.path === 'out/shot.png')!.redacted, undefined);
+  // Изображение не переписывается маской: файл с секретом не копируется вовсе.
+  assert.deepEqual(
+    kept.files.map((f) => f.path),
+    ['out/clean.png', 'out/trace.json'],
+  );
+  assert.deepEqual(reasons(kept), [
+    ['out/quoted.png', 'secret'],
+    ['out/shot.png', 'secret'],
+    ['out/[REDACTED].txt', 'secret'],
+    ['out/wide.png', 'secret'],
+  ]);
+  for (const name of ['shot.png', 'wide.png', 'quoted.png', `${secret}.txt`])
+    assert.ok(!existsSync(join(dest, 'out', name)), name);
   assertCopies(kept);
+  // Redactor без списка форм: проверка его же маской по байтам.
+  const plain = await keepGateArtifacts({
+    root,
+    paths: ['out/shot.png', 'out/clean.png'],
+    dest,
+    redact: (v) => v.split(secret).join('***'),
+  });
+  assert.deepEqual(reasons(plain), [['out/shot.png', 'secret']]);
 });
 
 test('gate artifacts: ссылки не разыменовываются — ни в каталоге, ни в компоненте пути, ни сам путь', async () => {
@@ -114,7 +141,7 @@ test('gate artifacts: ссылки не разыменовываются — н�
   symlinkSync(join(outside, 'secret.png'), join(root, 'direct.png'));
   const kept = await keepGateArtifacts({
     root,
-    paths: ['shots', 'escape/secret.png', 'escape', 'direct.png'],
+    paths: ['shots', 'escape/secret.png', 'direct.png'],
     dest,
     redact: (v) => v,
   });
@@ -126,11 +153,68 @@ test('gate artifacts: ссылки не разыменовываются — н�
     ['shots/dir', 'symlink'],
     ['shots/leak.png', 'symlink'],
     ['escape/secret.png', 'symlink'],
-    ['escape', 'symlink'],
     ['direct.png', 'symlink'],
   ]);
+  const itself = await keepGateArtifacts({ root, paths: ['escape'], dest, redact: (v) => v });
+  assert.deepEqual(reasons(itself), [['escape', 'symlink']]);
   assert.ok(!existsSync(join(dest, 'escape')) && !existsSync(join(dest, 'direct.png')));
   assert.equal(readFileSync(join(outside, 'secret.png'), 'utf8'), 'outside', 'источник цел');
+});
+
+test('gate artifacts: жёсткая ссылка на файл вне дерева не копируется', async () => {
+  const outside = temp('harness-ga-outside-');
+  writeFileSync(join(outside, 'secret.png'), 'outside');
+  const { root, dest } = tree({ 'shots/ok.png': 'ok' });
+  linkSync(join(outside, 'secret.png'), join(root, 'shots', 'linked.png'));
+  const kept = await keepGateArtifacts({ root, paths: ['shots'], dest, redact: (v) => v });
+  assert.deepEqual(
+    kept.files.map((f) => f.path),
+    ['shots/ok.png'],
+  );
+  assert.deepEqual(reasons(kept), [['shots/linked.png', 'hardlink']]);
+  assert.ok(!existsSync(join(dest, 'shots', 'linked.png')));
+});
+
+test('gate artifacts: каталог, подменённый ссылкой наружу после обхода, не копируется', async () => {
+  const outside = temp('harness-ga-outside-');
+  writeFileSync(join(outside, 'a.png'), 'outside');
+  const { root, dest } = tree({ 'shots/a.png': 'inside' });
+  const kept = await keepGateArtifacts({
+    root,
+    paths: ['shots'],
+    dest,
+    redact: (v) => v,
+    // Каталог уже прочитан; перед файлом он становится ссылкой на чужой каталог.
+    beforeVisit: (rel) => {
+      if (rel !== 'shots/a.png') return;
+      renameSync(join(root, 'shots'), join(root, 'shots-moved'));
+      symlinkSync(outside, join(root, 'shots'));
+    },
+  });
+  assert.deepEqual(kept.files, []);
+  assert.deepEqual(reasons(kept), [['shots/a.png', 'outside']]);
+  assert.ok(!existsSync(join(dest, 'shots', 'a.png')));
+});
+
+test('gate artifacts: отмена проверки останавливает копирование и записана', async () => {
+  const { root, dest } = tree({ 'a.png': 'a', 'b.png': 'b' });
+  const controller = new AbortController();
+  controller.abort();
+  const kept = await keepGateArtifacts({
+    root,
+    paths: ['a.png', 'b.png'],
+    dest,
+    redact: (v) => v,
+    signal: controller.signal,
+  });
+  assert.deepEqual(kept.files, []);
+  assert.deepEqual(
+    kept.skipped.map((s) => [s.path, s.reason, s.detail]),
+    [
+      ['a.png', 'copy-failed', 'проверка отменена'],
+      ['b.png', 'copy-failed', 'проверка отменена'],
+    ],
+  );
 });
 
 test('gate artifacts: путь за пределами дерева не копируется и при обходе схемы', async () => {
@@ -205,23 +289,33 @@ test('gate artifacts: пределы файла, суммы, числа и об�
   );
   assert.deepEqual(reasons(total), [['big/c.png', 'total-limit']]);
   assert.ok(!existsSync(join(dest, 'big/a.png')), 'прежние копии убраны');
-  // Обход и список пропусков ограничены, остаток посчитан.
+  // Каталог читается только до предела обхода; остановка названа.
   const scan = await keepGateArtifacts({
     root,
-    paths: ['big'],
+    paths: ['big', 'big/a.png', 'later.png'],
     dest,
     redact: (v) => v,
-    limits: { scan: 3, skipped: 2 },
+    limits: { scan: 3 },
   });
-  assert.deepEqual(
-    scan.files.map((f) => f.path),
-    ['big/a.png', 'big/b.png'],
-  );
+  assert.equal(scan.files.length, 3);
   assert.deepEqual(reasons(scan), [
-    ['big/c.png', 'scan-limit'],
-    ['big/d.png', 'scan-limit'],
+    ['big', 'scan-limit'],
+    ['later.png', 'scan-limit'],
   ]);
-  assert.equal(scan.skippedMore, 2);
+  // Список пропусков ограничен, остаток посчитан.
+  const many = tree(Object.fromEntries([1, 2, 3, 4].map((i) => [`x/p${i}.html`, 'x'])));
+  const listed = await keepGateArtifacts({
+    root: many.root,
+    paths: ['x'],
+    dest: many.dest,
+    redact: (v) => v,
+    limits: { skipped: 2 },
+  });
+  assert.deepEqual(reasons(listed), [
+    ['x/p1.html', 'extension'],
+    ['x/p2.html', 'extension'],
+  ]);
+  assert.equal(listed.skippedMore, 2);
 });
 
 test('gate artifacts: каталог копий, совпадающий с деревом, не удаляется — отказ записан', async () => {
@@ -230,14 +324,32 @@ test('gate artifacts: каталог копий, совпадающий с де�
   assert.deepEqual(kept.files, []);
   assert.deepEqual(reasons(kept), [['a.png', 'copy-failed']]);
   assert.equal(readFileSync(join(root, 'a.png'), 'utf8'), 'a', 'дерево цело');
-  const parent = await keepGateArtifacts({
-    root,
-    paths: ['a.png'],
-    dest: join(root, '..'),
-    redact: (v) => v,
-  });
-  assert.deepEqual(reasons(parent), [['a.png', 'copy-failed']]);
-  assert.ok(existsSync(join(root, 'a.png')));
+});
+
+test('gate artifacts: ограждение удаления сравнивает реальные пути (/var и /private/var)', async () => {
+  // Путь mkdtemp не разрешён: на macOS он начинается с /var, реальный — с /private/var.
+  // Предок дерева — собственный каталог теста: ошибка ограждения не задела бы чужое.
+  const outer = mkdtempSync(join(tmpdir(), 'harness-ga-raw-'));
+  const raw = join(outer, 'tree');
+  mkdirSync(raw);
+  writeFileSync(join(raw, 'a.png'), 'a');
+  mkdirSync(join(raw, 'inner'));
+  writeFileSync(join(raw, 'inner', 'keep.png'), 'k');
+  const root = realpathSync(raw);
+  for (const dest of [raw, outer, join(raw, 'inner'), join(raw, 'new.artifacts')]) {
+    for (const base of [root, raw]) {
+      const kept = await keepGateArtifacts({
+        root: base,
+        paths: ['a.png'],
+        dest,
+        redact: (v) => v,
+      });
+      assert.deepEqual(reasons(kept), [['a.png', 'copy-failed']], `${base} → ${dest}`);
+    }
+    assert.equal(readFileSync(join(root, 'a.png'), 'utf8'), 'a', dest);
+    assert.equal(readFileSync(join(root, 'inner', 'keep.png'), 'utf8'), 'k', dest);
+  }
+  assert.ok(!existsSync(join(root, 'new.artifacts')), 'внутри дерева ничего не создано');
 });
 
 test('gate artifacts: схема — относительные пути, не больше 16, без пустого списка', () => {
@@ -321,7 +433,7 @@ test('runGate: упавший gate сохраняет снимки экрана 
   assert.ok(failure, 'провал остаётся провалом');
   assert.equal(evidence.passed, false);
   const kept = evidence.artifactFiles!;
-  assert.equal(kept.dir, join(artifactDir, 'visual', 'artifacts'));
+  assert.equal(kept.dir, join(artifactDir, 'visual.artifacts'));
   assert.deepEqual(
     kept.files.map((f) => [f.path, f.bytes]),
     [

@@ -336,8 +336,9 @@ export class JointRunner {
                   ? await keepGateArtifacts({
                       root: cwd,
                       paths: gate.artifacts,
-                      dest: join(dir, gate.id, 'artifacts'),
+                      dest: join(dir, `${gate.id}.artifacts`),
                       redact,
+                      signal,
                     })
                   : undefined;
                 log = redact(log);

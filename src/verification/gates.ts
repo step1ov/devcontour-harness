@@ -882,8 +882,10 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     ? await keepGateArtifacts({
         root,
         paths: gate.artifacts,
-        dest: join(artifactDir, gate.id, 'artifacts'),
+        // Точки в ID нет: имя не совпадёт с каталогом другого gate или фазы.
+        dest: join(artifactDir, `${gate.id}.artifacts`),
         redact,
+        signal,
       })
     : undefined;
   await mkdir(artifactDir, { recursive: true });
