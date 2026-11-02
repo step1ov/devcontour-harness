@@ -589,7 +589,7 @@ export class ReviewProbes {
         }
       : {};
     // Песочница так и не запустила команду: исполнять было нечего.
-    if (r.notStarted && !r.timedOut && !signal.aborted)
+    if (r.launchFailed && !r.timedOut && !signal.aborted)
       return {
         status: 'error',
         failure: 'environment',
@@ -780,7 +780,7 @@ export class ReviewProbes {
           status: 'timeout',
           note: `Gate не завершился за ${limitMs} мс и остановлен вместе с потомками; это наблюдение, а не доказанный дефект. ${observation}`,
         };
-      else if (r.notStarted)
+      else if (r.launchFailed)
         outcome = {
           ...base,
           ...streams,

@@ -6,6 +6,7 @@ import {
   chmodSync,
   constants,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -20,7 +21,7 @@ import type { EvidenceRecord } from '../src/contracts/index.ts';
 import { redactor } from '../src/environment/redaction.ts';
 import { isolationSupport, srtShellLookup } from '../src/environment/isolation.ts';
 import { TaskFailure } from '../src/engine/failure.ts';
-import { runCheck, runGate } from '../src/verification/gates.ts';
+import { runCheck, runGate, sandboxLaunchFailure } from '../src/verification/gates.ts';
 import { ReviewProbes, type ProbeSpec } from '../src/agents/review-probe.ts';
 import { repo } from './git-fixture.ts';
 
@@ -97,14 +98,14 @@ function noShell() {
 }
 
 /** srt-овский поиск shell в отдельном процессе Node, с предзагрузкой или без. */
-function srtWhich(env: NodeJS.ProcessEnv, names: string[], preload: boolean) {
+function srtWhich(env: NodeJS.ProcessEnv, names: string[], preload: boolean, cwd?: string) {
   const script = `import { whichSync } from ${JSON.stringify(whichModule)};
 process.stdout.write(JSON.stringify(${JSON.stringify(names)}.map((n) => whichSync(n))));`;
   return JSON.parse(
     execFileSync(
       process.execPath,
       [...(preload ? ['--import', srtShellLookup] : []), '--input-type=module', '-e', script],
-      { env, encoding: 'utf8' },
+      { env, encoding: 'utf8', ...(cwd ? { cwd } : {}) },
     ),
   ) as (string | null)[];
 }
@@ -123,6 +124,38 @@ test('Поиск shell для srt не порождает `which`; не найд
   assert.deepEqual(srtWhich(fake.env, ['bash'], true), [null], 'истёкший `which` — не найден');
   assert.deepEqual(srtWhich(fake.env, ['bash'], true), ['/bin/bash']);
   assert.equal(fake.calls(), 2);
+});
+
+test('Подмена ищет shell только среди исполняемых файлов в абсолютных каталогах PATH', () => {
+  const dir = (name: string) => realpathSync(mkdtempSync(join(tmpdir(), `harness-${name}-`)));
+  const shell = (at: string, mode = 0o755) => {
+    writeFileSync(join(at, 'bash'), '#!/bin/sh\n');
+    chmodSync(join(at, 'bash'), mode);
+  };
+  // Каждый отказ подмены доходит до подставного `which`, который всегда истекает.
+  const rejects = (path: string, cwd?: string) => {
+    const fake = loaded(99, path);
+    assert.deepEqual(srtWhich(fake.env, ['bash'], true, cwd), [null], path);
+    assert.equal(fake.calls(), 1, `${path}: вопрос ушёл к \`which\``);
+  };
+  const plain = dir('plain');
+  shell(plain, 0o644);
+  rejects(plain);
+  const folder = dir('folder');
+  mkdirSync(join(folder, 'bash'));
+  rejects(folder);
+  // Пустой и относительный элементы PATH указывают на текущий каталог — дерево проверки.
+  const cwd = dir('cwd');
+  shell(cwd);
+  mkdirSync(join(cwd, 'rel'));
+  shell(join(cwd, 'rel'));
+  rejects(['', 'rel', '.'].join(delimiter), cwd);
+  // Обратная сверка: исполняемый файл в абсолютном каталоге находится без `which`.
+  const good = dir('good');
+  shell(good);
+  const fake = loaded(99, [plain, folder, 'rel', good].join(delimiter));
+  assert.deepEqual(srtWhich(fake.env, ['bash', 'rel/bash'], true, cwd), [join(good, 'bash'), null]);
+  assert.equal(fake.calls(), 0, 'bash найден подменой; rel/bash подмена не ищет');
 });
 
 const out = () => join(realpathSync(mkdtempSync(join(tmpdir(), 'harness-start-out-'))), 'ran');
@@ -179,8 +212,12 @@ test(
   },
 );
 
-async function gate(env: NodeJS.ProcessEnv, code: number) {
-  const r = repo();
+async function gate(
+  env: NodeJS.ProcessEnv,
+  code: number,
+  script = `process.exit(${code})`,
+  r = repo(),
+) {
   const recorded: Omit<EvidenceRecord, 'id' | 'runId' | 'createdAt'>[] = [];
   let failure: TaskFailure | undefined;
   try {
@@ -197,7 +234,7 @@ async function gate(env: NodeJS.ProcessEnv, code: number) {
         id: 'unit',
         kind: 'check',
         timeoutMs: 20000,
-        command: [process.execPath, '-e', `process.exit(${code})`],
+        command: [process.execPath, '-e', script],
       },
       artifactDir: mkdtempSync(join(tmpdir(), 'harness-art-')),
       signal: new AbortController().signal,
@@ -265,3 +302,55 @@ test(
     assert.equal(once.failure, undefined);
   },
 );
+
+test(
+  'Команда, стёршая свою метку старта и упавшая, — провал проверки: один запуск, без повторов',
+  { skip: noSandbox },
+  async () => {
+    // Свой TMPDIR: команда стирает метки только этого теста.
+    const saved = process.env.TMPDIR;
+    process.env.TMPDIR = realpathSync(mkdtempSync(join(tmpdir(), 'harness-marks-')));
+    try {
+      const r = repo();
+      const runs = join(r.dir, 'runs.log');
+      const script = `const fs = require('fs'), path = require('path');
+fs.appendFileSync(${JSON.stringify(runs)}, 'x');
+const up = path.dirname(process.env.TMPDIR);
+for (const d of fs.readdirSync(up).filter((n) => n.startsWith('dc-start-')))
+  try { fs.rmSync(path.join(up, d, 'started')); } catch {}
+process.exit(1);`;
+      const g = await gate(process.env, 1, script, r);
+      assert.equal(readFileSync(runs, 'utf8'), 'x', 'команда исполнена один раз');
+      assert.equal(g.evidence.passed, false);
+      assert.equal(g.failure?.kind, 'gate', g.evidence.summary);
+      assert.match(g.evidence.summary, /^Код выхода 1/);
+    } finally {
+      if (saved === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = saved;
+    }
+  },
+);
+
+test('Токен старта не попадает в вывод проверки', { skip: noSandbox }, async () => {
+  const file = out();
+  const r = await check(process.env, file);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stderr, '', 'служебная строка обёртки убрана');
+  assert.equal(r.started, true);
+});
+
+test('Отказ среды — только известные отказы запуска самой песочницы, а не любой текст srt', () => {
+  for (const text of [
+    "Error: Shell 'bash' not found in PATH\n    at wrap (file.js:1:1)",
+    "Shell 'zsh' not found in PATH",
+    'Failed to execute command: spawn /bin/sh EAGAIN',
+  ])
+    assert.match(text, sandboxLaunchFailure, text);
+  for (const text of [
+    "bwrap: Can't mkdir /tmp/x/.idea: Permission denied",
+    'sandbox-exec: syntax error in profile',
+    "echo: Shell 'bash' not found in PATH, try again",
+    '',
+  ])
+    assert.doesNotMatch(text, sandboxLaunchFailure, text);
+});

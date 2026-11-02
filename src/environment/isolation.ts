@@ -257,8 +257,10 @@ const srtCli = createRequire(import.meta.url).resolve('@anthropic-ai/sandbox-run
  * выходит до запуска команды: проверка падала как будто по вине проекта.
  * Передать srt путь shell нельзя: у CLI такой опции нет, а абсолютный путь
  * он тоже проверяет через `which`. Поэтому такой вызов отвечается в процессе
- * srt: исполняемый файл ищется по тому же PATH, что у `which`. Не найденное
- * и любые другие вызовы уходят в настоящий `spawnSync` — ответ «нет такого
+ * srt: исполняемый файл ищется по тому же PATH, что у `which`, но только в
+ * абсолютных каталогах — относительный или пустой элемент PATH указывает на
+ * текущий каталог, то есть, возможно, в проверяемое дерево. Не найденное и
+ * любые другие вызовы уходят в настоящий `spawnSync` — ответ «нет такого
  * shell» по-прежнему даёт `which`, а не эта подмена.
  */
 export const srtShellLookup =
@@ -267,10 +269,11 @@ export const srtShellLookup =
 import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { accessSync, constants, statSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { delimiter, isAbsolute, join } from 'node:path';
 const original = cp.spawnSync;
 const find = (bin, path) => {
-  const dirs = bin.includes('/') ? [''] : (path ?? '').split(delimiter).filter(Boolean);
+  if (bin.includes('/') && !isAbsolute(bin)) return;
+  const dirs = bin.includes('/') ? [''] : (path ?? '').split(delimiter).filter((d) => isAbsolute(d));
   for (const dir of dirs) {
     const file = dir ? join(dir, bin) : bin;
     try {
@@ -777,8 +780,15 @@ export async function isolatedCommand(
    * ядра, и по нему отказы этой проверки отличаются от чужих (`parseSandboxLog`).
    */
   tag = '',
+  /**
+   * Токен старта: обёртка печатает его строкой в stderr перед exec команды.
+   * Метку-файл команда может стереть (каталог метки ей открыт на запись), а
+   * напечатанное до неё — нет: токен в выводе доказывает старт.
+   */
+  token = '',
 ) {
   if (!/^[a-z0-9]*$/.test(tag)) throw new Error('Токен журнала песочницы — только [a-z0-9]');
+  if (!/^[a-z0-9]*$/.test(token)) throw new Error('Токен старта — только [a-z0-9]');
   await mkdir(settingsDir, { recursive: true });
   const settings = join(settingsDir, 'isolation.json');
   const denies = platform === 'darwin' ? protectedWriteDenies(protect) : undefined;
@@ -809,8 +819,9 @@ export async function isolatedCommand(
       '--',
       '/bin/sh',
       '-c',
-      `${tag ? `: ${tag}; ` : ''}: > "$0" && cd -- "$1" && shift && exec "$@"`,
+      `${tag ? `: ${tag}; ` : ''}: > "$0" && { [ -z "$1" ] || printf '%s\\n' "$1" >&2; } && cd -- "$2" && shift 2 && exec "$@"`,
       started,
+      token,
       workdir,
       '/usr/bin/env',
       `TMPDIR=${scratch}`,
