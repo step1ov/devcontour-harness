@@ -21,7 +21,12 @@ import type { EvidenceRecord } from '../src/contracts/index.ts';
 import { redactor } from '../src/environment/redaction.ts';
 import { isolationSupport, srtShellLookup } from '../src/environment/isolation.ts';
 import { TaskFailure } from '../src/engine/failure.ts';
-import { runCheck, runGate, sandboxLaunchFailure } from '../src/verification/gates.ts';
+import {
+  runCheck,
+  runGate,
+  sandboxLaunchFailure,
+  startTokenFilter,
+} from '../src/verification/gates.ts';
 import { ReviewProbes, type ProbeSpec } from '../src/agents/review-probe.ts';
 import { repo } from './git-fixture.ts';
 
@@ -217,6 +222,7 @@ async function gate(
   code: number,
   script = `process.exit(${code})`,
   r = repo(),
+  redact = redactor([]),
 ) {
   const recorded: Omit<EvidenceRecord, 'id' | 'runId' | 'createdAt'>[] = [];
   let failure: TaskFailure | undefined;
@@ -238,7 +244,7 @@ async function gate(
       },
       artifactDir: mkdtempSync(join(tmpdir(), 'harness-art-')),
       signal: new AbortController().signal,
-      execution: { env, redact: redactor([]) },
+      execution: { env, redact },
       boundary: { hidden: [], readable: shellless },
     });
   } catch (error) {
@@ -303,32 +309,103 @@ test(
   },
 );
 
-test(
-  'Команда, стёршая свою метку старта и упавшая, — провал проверки: один запуск, без повторов',
-  { skip: noSandbox },
-  async () => {
-    // Свой TMPDIR: команда стирает метки только этого теста.
-    const saved = process.env.TMPDIR;
-    process.env.TMPDIR = realpathSync(mkdtempSync(join(tmpdir(), 'harness-marks-')));
-    try {
-      const r = repo();
-      const runs = join(r.dir, 'runs.log');
-      const script = `const fs = require('fs'), path = require('path');
-fs.appendFileSync(${JSON.stringify(runs)}, 'x');
+/** Собственный TMPDIR на время `fn`: команда стирает метки только этого теста. */
+async function ownTmp<T>(fn: () => Promise<T>) {
+  const saved = process.env.TMPDIR;
+  process.env.TMPDIR = realpathSync(mkdtempSync(join(tmpdir(), 'harness-marks-')));
+  try {
+    return await fn();
+  } finally {
+    if (saved === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = saved;
+  }
+}
+/**
+ * Команда, которая стирает свою метку старта, печатает отказ srt и падает:
+ * так она выдавала бы себя за не запущенную песочницей.
+ */
+const forger = (runs?: string) => `const fs = require('fs'), path = require('path');
+${runs ? `fs.appendFileSync(${JSON.stringify(runs)}, 'x');` : ''}
 const up = path.dirname(process.env.TMPDIR);
 for (const d of fs.readdirSync(up).filter((n) => n.startsWith('dc-start-')))
   try { fs.rmSync(path.join(up, d, 'started')); } catch {}
+console.error("Error: Shell 'bash' not found in PATH");
 process.exit(1);`;
-      const g = await gate(process.env, 1, script, r);
+const signature = "Error: Shell 'bash' not found in PATH";
+
+test(
+  'Команда, стёршая свою метку старта и напечатавшая отказ srt, — провал проверки: один запуск; маска не задевает токен',
+  { skip: noSandbox },
+  () =>
+    ownTmp(async () => {
+      // Секрет из одной шестнадцатеричной цифры: маска до поиска токена
+      // разрезала бы его, и старт не узнавался.
+      const redact = redactor(['1']);
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'harness-forger-')));
+      const runs = join(dir, 'runs.log');
+      const r = await runCheck(os, {
+        argv: [process.execPath, '-e', forger(runs)],
+        cwd: dir,
+        env: process.env,
+        redact,
+        signal: new AbortController().signal,
+        write: [dir],
+        readable: [],
+        controller: [],
+        settingsDir: mkdtempSync(join(tmpdir(), 'harness-start-settings-')),
+      });
       assert.equal(readFileSync(runs, 'utf8'), 'x', 'команда исполнена один раз');
+      assert.equal(r.attempts, 1);
+      assert.equal(r.started, true);
+      assert.equal(r.notStarted, false);
+      assert.equal(r.launchFailed, false);
+      assert.equal(r.stderr.trim(), signature, 'в выводе нет ни токена, ни его обрывков');
+
+      const repository = repo();
+      const gateRuns = join(repository.dir, 'runs.log');
+      const g = await gate(process.env, 1, forger(gateRuns), repository, redact);
+      assert.equal(readFileSync(gateRuns, 'utf8'), 'x', 'gate исполнен один раз');
       assert.equal(g.evidence.passed, false);
       assert.equal(g.failure?.kind, 'gate', g.evidence.summary);
-      assert.match(g.evidence.summary, /^Код выхода 1/);
-    } finally {
-      if (saved === undefined) delete process.env.TMPDIR;
-      else process.env.TMPDIR = saved;
-    }
-  },
+      // Код «1» маскируется секретом «1» — это маска, а не токен.
+      assert.match(
+        g.evidence.summary,
+        /^Код выхода \[REDACTED\]: Error: Shell 'bash' not found in PATH$/,
+      );
+      // Первая строка лога — заголовок с путями; вывод и итог — после неё.
+      const body = readFileSync(g.evidence.log, 'utf8').split('\n').slice(1).join('\n');
+      assert.doesNotMatch(body, /[0-9a-f]{6,}/, 'обрывков токена в логе нет');
+    }),
+);
+
+test(
+  'Проба reviewer, стёршая метку и напечатавшая отказ srt, — провал команды, а не ошибка среды',
+  { skip: noSandbox },
+  () =>
+    ownTmp(async () => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-probe-')));
+      const spec: ProbeSpec = {
+        cwd: root,
+        controller: [],
+        readable: [root],
+        isolation: { mode: 'os', domains: [] },
+        commandTimeoutMs: 20000,
+        budgetMs: 120000,
+        deadline: Date.now() + 600000,
+        env: ['PATH', 'HARNESS_TEST_HEX_SECRET'],
+        secrets: ['HARNESS_TEST_HEX_SECRET'],
+        settingsDir: join(root, 'settings'),
+        log: join(root, 'probes.jsonl'),
+      };
+      const r = await new ReviewProbes(spec, undefined, {
+        ...process.env,
+        HARNESS_TEST_HEX_SECRET: '1',
+      }).run({ argv: [process.execPath, '-e', forger()] });
+      assert.equal(r.status, 'failed', r.note);
+      assert.equal(r.failure, undefined);
+      assert.equal(r.exitCode, 1);
+      assert.equal(r.stderr.trim(), signature);
+    }),
 );
 
 test('Токен старта не попадает в вывод проверки', { skip: noSandbox }, async () => {
@@ -339,18 +416,38 @@ test('Токен старта не попадает в вывод проверк
   assert.equal(r.started, true);
 });
 
-test('Отказ среды — только известные отказы запуска самой песочницы, а не любой текст srt', () => {
+test('Отказ среды — только stderr из одних известных отказов запуска песочницы', () => {
   for (const text of [
-    "Error: Shell 'bash' not found in PATH\n    at wrap (file.js:1:1)",
-    "Shell 'zsh' not found in PATH",
+    "Error: Shell 'bash' not found in PATH",
+    "Error: Shell 'zsh' not found in PATH\n",
     'Failed to execute command: spawn /bin/sh EAGAIN',
   ])
-    assert.match(text, sandboxLaunchFailure, text);
+    assert.equal(sandboxLaunchFailure(text), true, text);
   for (const text of [
     "bwrap: Can't mkdir /tmp/x/.idea: Permission denied",
     'sandbox-exec: syntax error in profile',
     "echo: Shell 'bash' not found in PATH, try again",
+    "Shell 'bash' not found in PATH",
+    // Строка отказа внутри другого вывода — не отказ запуска.
+    "candidate output\nError: Shell 'bash' not found in PATH",
+    "Error: Shell 'bash' not found in PATH\n    at wrap (file.js:1:1)",
+    'Failed to execute command: ',
     '',
   ])
-    assert.doesNotMatch(text, sandboxLaunchFailure, text);
+    assert.equal(sandboxLaunchFailure(text), false, text);
+});
+
+test('Токен старта вырезается из сырого потока на любом стыке кусков и только один раз', () => {
+  const token = 'ab12cd34';
+  const line = `pre\n${token}\npost ${token}\n`;
+  for (let cut = 0; cut <= line.length; cut++) {
+    let seen = 0;
+    const filter = startTokenFilter(token, () => seen++);
+    const out = filter(line.slice(0, cut), false) + filter(line.slice(cut), true);
+    assert.equal(out, `pre\npost ${token}\n`, `стык ${cut}`);
+    assert.equal(seen, 1);
+  }
+  // Начало токена без конца отдаётся целиком в последнем куске.
+  const filter = startTokenFilter(token, () => assert.fail('токена не было'));
+  assert.equal(filter('x ab12', false) + filter('', true), 'x ab12');
 });

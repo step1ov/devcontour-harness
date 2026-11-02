@@ -250,14 +250,59 @@ export function sandboxNotStarted(
   return started !== undefined && result.code !== 0 && !printed && !existsSync(started);
 }
 /**
+ * Фильтр сырого stderr, вырезающий строку токена старта, которую обёртка
+ * печатает перед exec. Ищет до маски: маска по значениям окружения (`1`,
+ * `8080`) задевала бы шестнадцатеричный токен, и старт не узнавался. Хвост,
+ * который может оказаться началом токена, придерживается до следующего
+ * куска. Вырезается только первое вхождение; `onSeen` — при нём.
+ */
+export function startTokenFilter(token: string, onSeen: () => void) {
+  const line = token + '\n';
+  let pending = '',
+    seen = false;
+  return (text: string, final: boolean) => {
+    if (seen) return text;
+    pending += text;
+    const at = pending.indexOf(line);
+    if (at >= 0) {
+      seen = true;
+      onSeen();
+      const out = pending.slice(0, at) + pending.slice(at + line.length);
+      pending = '';
+      return out;
+    }
+    let keep = 0;
+    if (!final)
+      for (let k = Math.min(line.length - 1, pending.length); k > 0; k--)
+        if (line.startsWith(pending.slice(-k))) {
+          keep = k;
+          break;
+        }
+    const out = pending.slice(0, pending.length - keep);
+    pending = pending.slice(pending.length - keep);
+    return out;
+  };
+}
+/**
  * Известные отказы запуска самой песочницы — не содержимого проверяемого
  * дерева: поиск shell и порождение процесса песочницы. Только они при
  * доказанном «не стартовала» делают отказ классом `environment`; прочие
  * отказы srt до старта (например, сборка запретов по дереву на Linux) могут
- * зависеть от кандидата и остаются провалом проверки.
+ * зависеть от кандидата и остаются провалом проверки. Весь stderr должен
+ * состоять только из таких строк srt: строка внутри другого вывода не в счёт.
  */
-export const sandboxLaunchFailure =
-  /^(?:Error: )?Shell '[^']+' not found in PATH$|^Failed to execute command: /m;
+export function sandboxLaunchFailure(stderr: string) {
+  const lines = stderr
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return (
+    lines.length > 0 &&
+    lines.every((l) =>
+      /^Error: Shell '[^']+' not found in PATH$|^Failed to execute command: \S/.test(l),
+    )
+  );
+}
 /** Команда проверки находится — иначе ENOENT, как при обычном запуске. */
 function assertExecutable(name: string, path: string | undefined, cwd: string) {
   const candidates = name.includes('/')
@@ -428,22 +473,17 @@ export async function runCheck(
       if (options.signal.aborted)
         throw Object.assign(new Error('Проверка отменена до запуска'), { name: 'AbortError' });
       printed = false;
-      let seen = '';
-      const r = await command(argv, cwd, {
+      return command(argv, cwd, {
         signal: options.signal,
         ...(started === undefined ? { onSpawn: confirm } : {}),
-        // Токен старта ищется в потоке, а не в итоговом stderr: тот хранит
-        // только хвост вывода. Токен может прийти на стыке кусков.
+        // Токен старта ищется в сыром потоке до маски и вырезается из него:
+        // итоговый stderr хранит только хвост, а маска могла исказить токен.
         ...(started !== undefined
           ? {
-              onOutput: (stream: 'stdout' | 'stderr', text: string) => {
-                if (stream !== 'stderr' || printed) return;
-                seen += text;
-                if (seen.includes(token)) {
-                  printed = true;
-                  confirm();
-                } else seen = seen.slice(-token.length);
-              },
+              rawStderr: startTokenFilter(token, () => {
+                printed = true;
+                confirm();
+              }),
             }
           : {}),
         timeoutMs: options.timeoutMs,
@@ -455,8 +495,6 @@ export async function runCheck(
         // во время проверки, — её потомок, даже без метки и родства.
         contain: { dirs: [...options.write, scratch, marks] },
       });
-      // Служебная строка обёртки — не вывод проверки.
-      return started === undefined ? r : { ...r, stderr: r.stderr.replace(token + '\n', '') };
     };
     try {
       result = await execute();
@@ -469,7 +507,7 @@ export async function runCheck(
         result = await execute();
       }
       notStarted = sandboxNotStarted(result, started, printed);
-      launchFailed = notStarted && sandboxLaunchFailure.test(result.stderr);
+      launchFailed = notStarted && sandboxLaunchFailure(result.stderr);
     } finally {
       // Факт старта читается до удаления метки — и при исключении после него.
       if (started !== undefined && existsSync(started)) confirm();
