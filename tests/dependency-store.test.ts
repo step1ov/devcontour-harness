@@ -975,6 +975,84 @@ test(
   },
 );
 
+/** Файлы дерева: путь, права, байты. */
+const treeOf = (root: string) =>
+  (readdirSync(root, { recursive: true }) as string[])
+    .filter((rel) => lstatSync(join(root, rel)).isFile())
+    .sort()
+    .map((rel) => [rel, lstatSync(join(root, rel)).mode & 0o777, readFileSync(join(root, rel))]);
+
+test(
+  'DS33: clonefile каталога — копия равна seed и своя, занятый путь не тронут; без него — порции cp; подмена копии после клона — отказ',
+  { skip: unavailable, timeout: 180000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
+    gatesPassed(await ctx.check(ctx.repo.head()));
+    const seed = ctx.seedOf();
+    const signal = new AbortController().signal;
+    if (process.platform === 'darwin') {
+      const to = join(ctx.state, 'cloned');
+      assert.equal(await storeTree.cloneDirectory(seed.store, to, signal), true);
+      assert.deepEqual(treeOf(to), treeOf(seed.store));
+      const text = CONTENT('dep-a', '1.0.0');
+      assert.notEqual(lstatSync(casOf(to, text)).ino, lstatSync(casOf(seed.store, text)).ino);
+      chmodSync(casOf(to, text), 0o644);
+      writeFileSync(casOf(to, text), 'module.exports = "отравлено";\n');
+      assert.equal(readFileSync(casOf(seed.store, text), 'utf8'), text, 'запись в копию не в seed');
+      // Занятый путь: отказ без записи и без удаления того, что там лежит.
+      const busy = join(ctx.state, 'busy');
+      mkdirSync(busy);
+      writeFileSync(join(busy, 'mine'), 'чужое');
+      assert.equal(await storeTree.cloneDirectory(seed.store, busy, signal), false);
+      assert.deepEqual(readdirSync(busy), ['mine']);
+    }
+
+    const direct = storeTree.cloneDirectory;
+    storeTree.cloneDirectory = () => Promise.resolve(false);
+    t.after(() => {
+      storeTree.cloneDirectory = direct;
+    });
+    reg.downloads.length = 0;
+    const batches = await ctx.check(ctx.repo.head());
+    gatesPassed(batches);
+    assert.equal(batches.receipt.outcome, 'hit');
+    assert.deepEqual(reg.downloads, []);
+    storeTree.cloneDirectory = direct;
+
+    // Сверяются байты копии, а не seed: копию портят уже после размещения.
+    const { clone, copy } = storeTree;
+    let poisoned = false;
+    const poison = (to: string) => {
+      if (poisoned || !existsSync(join(to, 'v10'))) return;
+      poisoned = true;
+      const file = casOf(to, CONTENT('dep-a', '1.0.0'));
+      chmodSync(file, 0o644);
+      writeFileSync(file, 'module.exports = "отравлено";\n');
+    };
+    storeTree.clone = async (from, to, s) => {
+      await clone.call(storeTree, from, to, s);
+      poison(to);
+    };
+    storeTree.copy = async (from, to) => {
+      await copy.call(storeTree, from, to);
+      poison(to);
+    };
+    t.after(() => {
+      Object.assign(storeTree, { clone, copy });
+    });
+    reg.downloads.length = 0;
+    const after = await ctx.check(ctx.repo.head());
+    Object.assign(storeTree, { clone, copy });
+    assert.ok(poisoned, 'копия испорчена');
+    gatesPassed(after);
+    assert.equal(after.receipt.outcome, 'hit');
+    assert.equal(after.receipt.built, true, 'seed собран заново');
+    assert.match(after.receipt.refused.join('\n'), /изменено содержимое/);
+    assert.deepEqual(reg.downloads, ['dep-a-1.0.0.tgz']);
+  },
+);
+
 test(
   'DS14: сборка не исполняет файлы проекта; копия не делит inode с seed и скрыта от git',
   { skip: unavailable, timeout: 120000 },

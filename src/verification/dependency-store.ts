@@ -36,6 +36,7 @@ import {
   dependencyStoreVersions,
   versionOf,
 } from '../toolchains/probe.ts';
+import { fileDigests, NotRegularFile } from './file-digests.ts';
 import { runCheck, type Boundary } from './gates.ts';
 
 /**
@@ -262,20 +263,20 @@ const within = async <T>(items: T[], limit: number, action: (item: T) => Promise
   for (const worker of workers) if (worker.status === 'rejected') throw worker.reason;
 };
 
-/** Файлы дерева. Ссылка и всё, что не обычный файл, — отказ: seed их не содержит. */
+/** Пути файлов дерева. Ссылка и всё, что не обычный файл, — отказ: seed их не содержит. */
 async function regularFiles(root: string) {
   const top = await lstat(root);
   if (!top.isDirectory()) throw new SeedRefused('корень хранилища — не каталог');
-  const files: { rel: string; mode: number; size: number }[] = [];
+  const files: string[] = [];
   const walk = async (prefix: string) => {
+    const dirs: string[] = [];
     for (const entry of await readdir(join(root, prefix), { withFileTypes: true })) {
       const rel = prefix ? prefix + '/' + entry.name : entry.name;
-      if (entry.isDirectory()) await walk(rel);
-      else if (entry.isFile()) {
-        const st = await lstat(join(root, rel));
-        files.push({ rel, mode: st.mode & 0o777, size: st.size });
-      } else throw new SeedRefused(`в хранилище не обычный файл: ${rel}`);
+      if (entry.isDirectory()) dirs.push(rel);
+      else if (entry.isFile()) files.push(rel);
+      else throw new SeedRefused(`в хранилище не обычный файл: ${rel}`);
     }
+    await within(dirs, FILE_CONCURRENCY, walk);
   };
   await walk('');
   return files;
@@ -283,14 +284,23 @@ async function regularFiles(root: string) {
 
 class SeedRefused extends Error {}
 
+/**
+ * Хэш, права и размер каждого файла — с того же дескриптора, что и байты
+ * (`fileDigests`): между обходом и чтением файл не подменить ссылкой.
+ */
 async function fingerprint(root: string) {
   const list = await regularFiles(root);
+  const digests = await fileDigests(root, list).catch((error: unknown) => {
+    throw error instanceof NotRegularFile ? new SeedRefused(error.message) : error;
+  });
   // Map, а не объект: файл `__proto__` не должен исчезнуть из отпечатка.
   const files = new Map<string, Manifest['files'][string]>();
-  await within(list, FILE_CONCURRENCY, async (f) => {
-    files.set(f.rel, [sha256(await readFile(join(root, f.rel))), f.mode]);
-  });
-  return { files, bytes: list.reduce((sum, f) => sum + f.size, 0) };
+  let bytes = 0;
+  for (const f of digests) {
+    files.set(f.rel, [f.sha256, f.mode]);
+    bytes += f.size;
+  }
+  return { files, bytes };
 }
 
 /** Дерево в точности равно манифесту: тот же набор файлов, байты и права. */
@@ -307,6 +317,11 @@ async function assertMatches(root: string, manifest: Manifest) {
     if (found[1] !== mode) throw new SeedRefused(`изменены права ${rel}`);
   }
 }
+
+/** `clonefile(2)` на JXA: печатает результат вызова, `0` — успех. */
+const CLONEFILE_JXA =
+  "function run(argv){ObjC.bindFunction('clonefile',['int',['char *','char *','unsigned int']]);" +
+  'return String($.clonefile(argv[0],argv[1],0))}';
 
 /** Способы размещения дерева; тест подменяет `cloneable`, чтобы проверить обычную копию. */
 export const storeTree = {
@@ -352,8 +367,13 @@ export const storeTree = {
     const free = await statfs(path);
     return Number(free.bavail) * Number(free.bsize);
   },
-  /** Копия-при-записи порциями: один `cp` на всё дерево вдвое медленнее. */
+  /**
+   * Копия-при-записи. На macOS — один `clonefile(2)` всего каталога: ядро клонирует
+   * дерево целиком, в разы быстрее `cp -c`, который клонирует по одному файлу.
+   * Не вышло — порции `cp`, как на Linux: один `cp` на всё дерево вдвое медленнее.
+   */
   async clone(from: string, to: string, signal: AbortSignal) {
+    if (process.platform === 'darwin' && (await storeTree.cloneDirectory(from, to, signal))) return;
     const batches: [string, string][] = [];
     const expand = async (src: string, dst: string, depth: number) => {
       await mkdir(dst, { recursive: true });
@@ -375,16 +395,35 @@ export const storeTree = {
       if (done.code) throw new Error(`Клонирование не удалось: ${done.stderr.trim()}`);
     });
   },
+  /**
+   * `clonefile(2)` каталога `from` в свободный путь `to`; `false` — не вышло, и `to`
+   * не осталось. В Node вызова нет, поэтому он идёт через JavaScript for Automation
+   * (`osascript` есть в каждой macOS). Тест подменяет способ, чтобы проверить порции.
+   */
+  async cloneDirectory(from: string, to: string, signal: AbortSignal) {
+    const tool = osTool('osascript');
+    // Не штатный путь — значит, из PATH: такой файл может принадлежать проекту.
+    if (!tool.startsWith('/') || (await lstat(to).catch(() => undefined))) return false;
+    const done = await command([tool, '-l', 'JavaScript', '-e', CLONEFILE_JXA, from, to], from, {
+      signal,
+      timeoutMs: 120000,
+    });
+    if (done.code === 0 && done.stdout.trim() === '0') return true;
+    signal.throwIfAborted();
+    // Путь `to` перед вызовом был свободен: всё, что там есть, оставил clonefile.
+    await rm(to, { recursive: true, force: true });
+    return false;
+  },
   async copy(from: string, to: string) {
     const files = await regularFiles(from);
     await mkdir(to, { recursive: true });
     await within(
-      [...new Set(files.map((f) => dirname(join(to, f.rel))))].sort(),
+      [...new Set(files.map((rel) => dirname(join(to, rel))))].sort(),
       FILE_CONCURRENCY,
       async (dir) => void (await mkdir(dir, { recursive: true })),
     );
-    await within(files, FILE_CONCURRENCY, (f) =>
-      copyFile(join(from, f.rel), join(to, f.rel), constants.COPYFILE_EXCL),
+    await within(files, FILE_CONCURRENCY, (rel) =>
+      copyFile(join(from, rel), join(to, rel), constants.COPYFILE_EXCL),
     );
   },
 };
