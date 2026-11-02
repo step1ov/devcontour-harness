@@ -35,6 +35,7 @@ import {
   readPropertyReport,
   type CheckManifest,
 } from './property.ts';
+import { keepGateArtifacts } from './gate-artifacts.ts';
 
 /** Длинное имя testcase заменяется хешем, а не обрезается: обрезка дала бы ложные совпадения. */
 export const TEST_ID_LIMIT = 1000;
@@ -874,6 +875,19 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     if (!passed) log += '\n' + summary;
   } else if (corpusDir)
     await rm(corpusDir, { recursive: true, force: true }).catch(() => undefined);
+  // Artifacts gate (снимки экрана, отчёты) сохраняются при любом исходе:
+  // провал — тот случай, когда они нужнее всего. Пропуски и отказы копирования
+  // названы в evidence и на исход gate не влияют.
+  const artifactFiles = gate.artifacts?.length
+    ? await keepGateArtifacts({
+        root,
+        paths: gate.artifacts,
+        // Точки в ID нет: имя не совпадёт с каталогом другого gate или фазы.
+        dest: join(artifactDir, `${gate.id}.artifacts`),
+        redact,
+        signal,
+      })
+    : undefined;
   await mkdir(artifactDir, { recursive: true });
   const logPath = join(artifactDir, `${gate.id}.log`);
   log = redact(log);
@@ -893,6 +907,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     ...(manifest?.truncated ? { testsTruncated: true } : {}),
     ...(run.consumer ? { consumer: run.consumer } : {}),
     ...(propertyEvidence ? { property: propertyEvidence } : {}),
+    ...(artifactFiles ? { artifactFiles } : {}),
     ...(run.recheck
       ? {
           recheck: {

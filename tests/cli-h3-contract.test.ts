@@ -255,6 +255,20 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.recheck;
       return rest;
     }
+    // Аддитивное поле gate задачи — сохраняемые `artifacts` (у gate совместной
+    // проверки, с `repositoryId`, поле было и в H2).
+    if (
+      k === 'properties' &&
+      v &&
+      typeof v === 'object' &&
+      'artifacts' in v &&
+      'command' in v &&
+      !('repositoryId' in v)
+    ) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.artifacts;
+      return rest;
+    }
     // Аддитивное поле doctor — действующий корень рабочих деревьев (alpha.23).
     if (k === 'properties' && v && typeof v === 'object' && 'checkouts' in v && 'sandbox' in v) {
       const rest = { ...(v as Record<string, unknown>) };
@@ -295,6 +309,11 @@ test('H3-01: прежние команды и схемы их данных не 
     );
   for (const value of ADDITIVE_ENUM_VALUES)
     assert.ok(JSON.stringify(data).includes(JSON.stringify(value)), value + ' объявлен');
+  // Хеш H2 выше вырезает `artifacts` gate задачи: объявление держит эта проверка.
+  assert.ok(
+    JSON.stringify(data.profile).includes('"artifacts"'),
+    'gates профиля объявляют artifacts',
+  );
 });
 
 test('H3-01: --help называет capabilities; прежние команды и capabilities отвечают тем же конвертом', () => {

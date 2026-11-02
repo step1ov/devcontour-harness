@@ -14,6 +14,7 @@ import { workGraphSchema, workOrderSchema } from './work.ts';
 import { contextPinSchema, contextSnapshotSchema } from './context.ts';
 import {
   deliveryStateSchema,
+  gateArtifactFilesSchema,
   jointActiveSchema,
   jointFailedSchema,
   jointPassedSchema,
@@ -307,6 +308,8 @@ export const evidenceRecordSchema = z.strictObject({
     .optional(),
   testsTruncated: z.boolean().optional(),
   property: propertyEvidenceSchema.optional(),
+  /** Копии `gate.artifacts` (нет у прежних записей и у gate без поля). */
+  artifactFiles: gateArtifactFilesSchema.optional(),
   /** Действующая версия проверок, под которой получено evidence. */
   checks: digestSchema.optional(),
   /**

@@ -286,6 +286,76 @@ export const jointManifestSchema = z.record(
   z.strictObject({ sha: gitShaSchema, tree: gitShaSchema }),
 );
 
+/** Пределы сохранения artifacts одного gate (`gates[].artifacts`, `workspaceGates[].artifacts`). */
+export const gateArtifactLimits = {
+  /** Объявленных путей у gate задачи. */
+  paths: 16,
+  files: 64,
+  fileBytes: 8 * 1024 * 1024,
+  totalBytes: 20 * 1024 * 1024,
+  /** Записей обхода каталогов: дальше обход не идёт. */
+  scan: 4096,
+  /** Перечисленных пропусков; остальные считаются в `skippedMore`. */
+  skipped: 100,
+} as const;
+export const gateArtifactExtensions = ['.png', '.json', '.txt', '.xml', '.log'] as const;
+/**
+ * Почему файл artifacts не сохранён: `missing` — пути нет; `symlink` — путь
+ * или его компонент — ссылка (не разыменовывается); `outside` — путь вне
+ * дерева; `not-regular` — не обычный файл; `hardlink` — у файла больше одной
+ * жёсткой ссылки (мог быть файлом вне дерева); `secret` — в имени или в байтах
+ * не текстового файла найден секрет окружения (изображение не переписывается);
+ * `extension` — расширение вне списка; `file-limit`, `total-limit`,
+ * `count-limit`, `scan-limit` — пределы; `copy-failed` — чтение или запись
+ * копии не удались либо проверка отменена (причина в `detail`).
+ */
+export const gateArtifactSkipReasons = [
+  'missing',
+  'symlink',
+  'outside',
+  'not-regular',
+  'hardlink',
+  'secret',
+  'extension',
+  'file-limit',
+  'total-limit',
+  'count-limit',
+  'scan-limit',
+  'copy-failed',
+] as const;
+/**
+ * Artifacts gate, сохранённые как evidence при любом исходе gate: копии в
+ * `dir` по путям относительно дерева, SHA-256 и размер сохранённых байтов.
+ * `redacted` — в текстовом файле замаскирован секрет окружения: digest
+ * относится к копии. Пропуски названы с причиной; исход gate от них не
+ * зависит.
+ */
+export const gateArtifactFilesSchema = z.strictObject({
+  dir: z.string().min(1),
+  files: z
+    .array(
+      z.strictObject({
+        path: z.string().min(1).max(1000),
+        sha256: digestSchema,
+        bytes: z.number().int().min(0),
+        redacted: z.literal(true).optional(),
+      }),
+    )
+    .max(gateArtifactLimits.files),
+  skipped: z
+    .array(
+      z.strictObject({
+        path: z.string().min(1).max(1000),
+        reason: z.enum(gateArtifactSkipReasons),
+        detail: z.string().max(500).optional(),
+      }),
+    )
+    .max(gateArtifactLimits.skipped),
+  /** Пропусков сверх перечисленных. */
+  skippedMore: z.number().int().positive().optional(),
+});
+export type GateArtifactFiles = z.infer<typeof gateArtifactFilesSchema>;
+
 export const jointEvidenceSchema = z.strictObject({
   gate: idSchema,
   passed: z.boolean(),
@@ -295,6 +365,8 @@ export const jointEvidenceSchema = z.strictObject({
   digest: digestSchema,
   summary: z.string(),
   artifacts: z.array(artifactPin),
+  /** Копии artifacts gate (нет у прежних записей). */
+  artifactFiles: gateArtifactFilesSchema.optional(),
   durationMs: z.number().min(0).optional(),
 });
 

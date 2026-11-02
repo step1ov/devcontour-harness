@@ -14,6 +14,7 @@ import {
 import { digestOf } from './digest.ts';
 import type { CodedIssue, ErrorCode } from './errors.ts';
 import { toolchainSchema } from './toolchain.ts';
+import { gateArtifactLimits } from './result.ts';
 
 const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
 /** Переменные `HARNESS_*` и исторические `DEVCONTOUR_*` задаёт сам harness, не политика. */
@@ -56,9 +57,25 @@ const junitReport = z.strictObject({ type: z.literal('junit'), path: relativePat
  * Gate. У `test` JUnit-отчёт обязателен: exit 0 без свежего непустого
  * отчёта на точном SHA не принимается. `check` — проверка без testcases.
  */
+/**
+ * Файлы и каталоги gate задачи, сохраняемые как evidence при любом исходе
+ * (например, снимки экрана визуального теста), относительно корня дерева.
+ * Необязательное поле без умолчания: политика без него сохраняет digest.
+ */
+const gateArtifacts = z.array(relativePathSchema).min(1).max(gateArtifactLimits.paths).optional();
 export const gateSchema = z.discriminatedUnion('kind', [
-  z.strictObject({ ...gateCommon, kind: z.literal('test'), report: junitReport }),
-  z.strictObject({ ...gateCommon, kind: z.literal('check'), report: junitReport.optional() }),
+  z.strictObject({
+    ...gateCommon,
+    kind: z.literal('test'),
+    report: junitReport,
+    artifacts: gateArtifacts,
+  }),
+  z.strictObject({
+    ...gateCommon,
+    kind: z.literal('check'),
+    report: junitReport.optional(),
+    artifacts: gateArtifacts,
+  }),
 ]);
 export type GatePolicy = z.infer<typeof gateSchema>;
 

@@ -19,6 +19,7 @@ import {
 import { composeRedactors, type Redactor } from '../environment/redaction.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { dependencyStoreRoot, materializeStore } from '../verification/dependency-store.ts';
+import { keepGateArtifacts } from '../verification/gate-artifacts.ts';
 import { junitSummary, prepareReportPath, runCheck } from '../verification/gates.ts';
 import { orderedWorkspaceGates, publicJoint } from '../verification/joint.ts';
 import type { Engine } from './engine.ts';
@@ -329,6 +330,17 @@ export class JointRunner {
                   summary = redact(error instanceof Error ? error.message : String(error));
                   log += '\n' + summary;
                 }
+                // Объявленные artifacts сохраняются копиями при любом исходе;
+                // их наличие и неизменность по-прежнему проверяет сам gate.
+                const artifactFiles = gate.artifacts.length
+                  ? await keepGateArtifacts({
+                      root: cwd,
+                      paths: gate.artifacts,
+                      dest: join(dir, `${gate.id}.artifacts`),
+                      redact,
+                      signal,
+                    })
+                  : undefined;
                 log = redact(log);
                 await writeFile(logPath, log);
                 const evidence = {
@@ -340,6 +352,7 @@ export class JointRunner {
                   digest: createHash('sha256').update(log).digest('hex'),
                   summary: redact(summary).slice(0, 4000),
                   artifacts,
+                  ...(artifactFiles ? { artifactFiles } : {}),
                   durationMs: Date.now() - startedAt,
                 };
                 this.engine.jointEvidence(v.id, v.token, evidence);
