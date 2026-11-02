@@ -1054,6 +1054,63 @@ test(
 );
 
 test(
+  'DS34: запуск osascript запрещён — клон порциями cp; флаг uchg в копии не мешает убрать её и seed',
+  { skip: unavailable || (process.platform !== 'darwin' && 'только macOS'), timeout: 180000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
+    gatesPassed(await ctx.check(ctx.repo.head()));
+
+    // Файл без права исполнения: spawn отказывает с EACCES, как контроль исполнения.
+    const blocked = join(ctx.state, 'osascript');
+    writeFileSync(blocked, '#!/bin/sh\nexit 0\n', { mode: 0o644 });
+    const osascript = storeTree.osascript;
+    storeTree.osascript = () => blocked;
+    t.after(() => {
+      storeTree.osascript = osascript;
+    });
+    reg.downloads.length = 0;
+    const fallback = await ctx.check(ctx.repo.head());
+    gatesPassed(fallback);
+    assert.equal(fallback.receipt.outcome, 'hit', fallback.receipt.reason);
+    assert.equal(fallback.receipt.mode, 'clone');
+    assert.deepEqual(reg.downloads, []);
+    storeTree.osascript = osascript;
+
+    // Флаг переносится клоном в копию; отказ от копии и от seed всё равно их убирает.
+    const seed = ctx.seedOf();
+    const flagged = casOf(seed.store, CONTENT('dep-a', '1.0.0'));
+    execFileSync('/usr/bin/chflags', ['uchg', flagged]);
+    t.after(() => {
+      if (existsSync(flagged)) execFileSync('/usr/bin/chflags', ['nouchg', flagged]);
+    });
+    const { clone } = storeTree;
+    let planted = false;
+    storeTree.clone = async (from, to, s) => {
+      await clone.call(storeTree, from, to, s);
+      if (!planted) writeFileSync(join(to, 'v10', 'planted'), 'x');
+      planted = true;
+    };
+    t.after(() => {
+      storeTree.clone = clone;
+    });
+    reg.downloads.length = 0;
+    const after = await ctx.check(ctx.repo.head());
+    storeTree.clone = clone;
+    gatesPassed(after);
+    assert.equal(after.receipt.outcome, 'hit', after.receipt.reason);
+    assert.equal(after.receipt.built, true, 'seed с флагом убран и собран заново');
+    assert.match(after.receipt.refused.join('\n'), /набор файлов/);
+    // Ключ тот же: на месте прежнего seed — новый, и его файл без флага.
+    assert.equal(
+      execFileSync('/usr/bin/stat', ['-f', '%f', flagged], { encoding: 'utf8' }).trim(),
+      '0',
+    );
+    assert.deepEqual(reg.downloads, ['dep-a-1.0.0.tgz']);
+  },
+);
+
+test(
   'DS14: сборка не исполняет файлы проекта; копия не делит inode с seed и скрыта от git',
   { skip: unavailable, timeout: 120000 },
   async (t) => {

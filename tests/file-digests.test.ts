@@ -19,7 +19,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileDigests, NotRegularFile } from '../src/verification/file-digests.ts';
+import type { Worker } from 'node:worker_threads';
+import { digestWorker, fileDigests, NotRegularFile } from '../src/verification/file-digests.ts';
 
 const tree = (t: { after: (fn: () => void) => void }) => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'harness-digests-')));
@@ -48,7 +49,7 @@ test('FD01: отпечатки потоков равны чтению по од�
     assert.deepEqual(byRel.get(rel), {
       rel,
       sha256: createHash('sha256').update(readFileSync(path)).digest('hex'),
-      mode: st.mode & 0o777,
+      mode: st.mode & 0o7777,
       size: st.size,
     });
   }
@@ -79,4 +80,37 @@ test('FD03: исчезнувший файл — ошибка с кодом, а �
     (error: unknown) =>
       !(error instanceof NotRegularFile) && (error as NodeJS.ErrnoException).code === 'ENOENT',
   );
+});
+
+test('FD04: отмена и отказ запуска потока останавливают все потоки до возврата', async (t) => {
+  const root = tree(t);
+  const rels: string[] = [];
+  for (let i = 0; i < 4000; i++) {
+    writeFileSync(join(root, `f${i}`), randomBytes(64));
+    rels.push(`f${i}`);
+  }
+  const aborted = new AbortController();
+  aborted.abort(new Error('отменено заранее'));
+  await assert.rejects(fileDigests(root, rels, aborted.signal), /отменено заранее/);
+
+  const later = new AbortController();
+  const pending = fileDigests(root, rels, later.signal);
+  later.abort(new Error('отменено в работе'));
+  await assert.rejects(pending, /отменено в работе/);
+
+  const create = digestWorker.create;
+  t.after(() => {
+    digestWorker.create = create;
+  });
+  const started: Worker[] = [];
+  digestWorker.create = () => {
+    if (started.length === 1) throw new Error('поток не запустился');
+    const worker = create();
+    started.push(worker);
+    return worker;
+  };
+  await assert.rejects(fileDigests(root, rels), /поток не запустился/);
+  assert.equal(started.length, 1);
+  // После выхода потока его threadId — -1.
+  assert.equal(started[0]!.threadId, -1, 'запущенный поток остановлен до возврата');
 });

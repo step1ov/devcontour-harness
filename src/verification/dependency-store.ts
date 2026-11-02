@@ -286,26 +286,29 @@ class SeedRefused extends Error {}
 
 /**
  * Хэш, права и размер каждого файла — с того же дескриптора, что и байты
- * (`fileDigests`): между обходом и чтением файл не подменить ссылкой.
+ * (`fileDigests`): файл, ставший ссылкой между обходом и чтением, не читается.
+ * Setuid, setgid и sticky — отказ: менеджер их не ставит, а манифест хранит только
+ * `0o777`, и копия с ними отличалась бы от сверенной.
  */
-async function fingerprint(root: string) {
+async function fingerprint(root: string, signal?: AbortSignal) {
   const list = await regularFiles(root);
-  const digests = await fileDigests(root, list).catch((error: unknown) => {
+  const digests = await fileDigests(root, list, signal).catch((error: unknown) => {
     throw error instanceof NotRegularFile ? new SeedRefused(error.message) : error;
   });
   // Map, а не объект: файл `__proto__` не должен исчезнуть из отпечатка.
   const files = new Map<string, Manifest['files'][string]>();
   let bytes = 0;
   for (const f of digests) {
-    files.set(f.rel, [f.sha256, f.mode]);
+    if (f.mode & 0o7000) throw new SeedRefused(`особые права ${f.rel}`);
+    files.set(f.rel, [f.sha256, f.mode & 0o777]);
     bytes += f.size;
   }
   return { files, bytes };
 }
 
 /** Дерево в точности равно манифесту: тот же набор файлов, байты и права. */
-async function assertMatches(root: string, manifest: Manifest) {
-  const { files } = await fingerprint(root);
+async function assertMatches(root: string, manifest: Manifest, signal: AbortSignal) {
+  const { files } = await fingerprint(root, signal);
   const expected = Object.keys(manifest.files);
   if (files.size !== expected.length)
     throw new SeedRefused(`набор файлов изменён: ${files.size} вместо ${expected.length}`);
@@ -315,6 +318,24 @@ async function assertMatches(root: string, manifest: Manifest) {
     if (!found) throw new SeedRefused(`нет файла ${rel}`);
     if (found[0] !== hash) throw new SeedRefused(`изменено содержимое ${rel}`);
     if (found[1] !== mode) throw new SeedRefused(`изменены права ${rel}`);
+  }
+}
+
+/**
+ * Удалить дерево. Клон (и `cp -c`) переносит BSD-флаги вроде `uchg`, с которыми
+ * `rm` получает EPERM: на macOS флаги снимаются без перехода по ссылкам, и удаление
+ * повторяется.
+ */
+async function removeTree(path: string) {
+  try {
+    await rm(path, { recursive: true, force: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    const chflags = osTool('chflags');
+    if (process.platform !== 'darwin' || (code !== 'EPERM' && code !== 'EACCES')) throw error;
+    if (!chflags.startsWith('/')) throw error;
+    await command([chflags, '-R', '-P', '0', path], dirname(path), { timeoutMs: 120000 });
+    await rm(path, { recursive: true, force: true });
   }
 }
 
@@ -401,19 +422,27 @@ export const storeTree = {
    * (`osascript` есть в каждой macOS). Тест подменяет способ, чтобы проверить порции.
    */
   async cloneDirectory(from: string, to: string, signal: AbortSignal) {
-    const tool = osTool('osascript');
+    const tool = storeTree.osascript();
     // Не штатный путь — значит, из PATH: такой файл может принадлежать проекту.
     if (!tool.startsWith('/') || (await lstat(to).catch(() => undefined))) return false;
-    const done = await command([tool, '-l', 'JavaScript', '-e', CLONEFILE_JXA, from, to], from, {
-      signal,
-      timeoutMs: 120000,
-    });
-    if (done.code === 0 && done.stdout.trim() === '0') return true;
+    try {
+      const done = await command([tool, '-l', 'JavaScript', '-e', CLONEFILE_JXA, from, to], from, {
+        signal,
+        timeoutMs: 120000,
+      });
+      if (done.code === 0 && done.stdout.trim() === '0') return true;
+    } catch (error) {
+      // Запуск запрещён (EPERM, EACCES от контроля исполнения) — это не отказ
+      // хранилища, а повод клонировать по-старому.
+      if (signal.aborted) throw error;
+    }
     signal.throwIfAborted();
     // Путь `to` перед вызовом был свободен: всё, что там есть, оставил clonefile.
-    await rm(to, { recursive: true, force: true });
+    await removeTree(to);
     return false;
   },
+  /** Путь `osascript`; тест подменяет его, чтобы проверить отказ запуска. */
+  osascript: () => osTool('osascript'),
   async copy(from: string, to: string) {
     const files = await regularFiles(from);
     await mkdir(to, { recursive: true });
@@ -455,7 +484,7 @@ async function place(seed: Seed, to: string, signal: AbortSignal) {
       );
     await storeTree.copy(seed.store, to);
   }
-  await assertMatches(to, seed.manifest);
+  await assertMatches(to, seed.manifest, signal);
   return cloned ? ('clone' as const) : ('copy' as const);
 }
 
@@ -473,7 +502,7 @@ async function dropSeed(s: Store, key: string) {
   const trash = join(s.root, 'tmp', randomUUID());
   await mkdir(dirname(trash), { recursive: true });
   await rename(join(s.root, 'seeds', key), trash).catch(() => undefined);
-  await rm(trash, { recursive: true, force: true });
+  await removeTree(trash);
   pool(s, (p) => p.setSeedPin(s.root, key, undefined));
 }
 
@@ -676,7 +705,7 @@ async function fetchInto(s: Store, work: string, lock: string, settings: string,
     );
   }
   try {
-    return { store, ...(await fingerprint(store)) };
+    return { store, ...(await fingerprint(store, s.outer)) };
   } catch (error) {
     // Отказ относится к тому, что менеджер только что записал, а не к основе.
     if (error instanceof SeedRefused) throw new BuildFailed(`сборка seed: ${error.message}`, true);
@@ -780,7 +809,7 @@ async function buildSeed(s: Store, key: string, lock: string, lockSha256: string
       });
     return undefined;
   } finally {
-    await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+    await removeTree(tmp).catch(() => undefined);
   }
 }
 
@@ -1008,7 +1037,7 @@ export async function materializeStore(
               summary.files = Object.keys(seed.manifest.files).length;
               summary.bytes = seed.manifest.bytes;
             } catch (error) {
-              await rm(dest, { recursive: true, force: true });
+              await removeTree(dest);
               delete summary.mode;
               if (!(error instanceof SeedRefused)) throw error;
               await refuse(s, seed.key, error.message);
@@ -1026,11 +1055,10 @@ export async function materializeStore(
       delete summary[field];
     summary.reason = error instanceof Error ? error.message : String(error);
     env = {};
-    await rm(dest, { recursive: true, force: true }).catch(() => undefined);
+    await removeTree(dest).catch(() => undefined);
     // Не вышло и это — в дереве ничего не остаётся, как без хранилища. Так же, если
     // причина промаха — предел.
-    if (!summary.untouched)
-      await seal().catch(() => rm(dest, { recursive: true, force: true }).catch(() => undefined));
+    if (!summary.untouched) await seal().catch(() => removeTree(dest).catch(() => undefined));
   }
   delete summary.untouched;
   const receipt: StoreReceipt = {

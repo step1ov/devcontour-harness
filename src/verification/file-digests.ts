@@ -15,6 +15,7 @@ import { Worker } from 'node:worker_threads';
 export interface FileDigest {
   rel: string;
   sha256: string;
+  /** Права вместе с setuid, setgid и sticky (`0o7777`). */
   mode: number;
   size: number;
 }
@@ -54,7 +55,7 @@ parentPort.on('message', ({ root, rels }) => {
       const hash = createHash('sha256');
       for (let n; (n = readSync(fd, buffer, 0, buffer.length, null)) > 0; )
         hash.update(buffer.subarray(0, n));
-      results.push([rel, hash.digest('hex'), st.mode & 0o777, st.size]);
+      results.push([rel, hash.digest('hex'), st.mode & 0o7777, st.size]);
     } catch (error) {
       return parentPort.postMessage({ error: { message: error.message, code: error.code } });
     } finally {
@@ -70,26 +71,53 @@ type Reply =
   | { refused: string }
   | { error: { message: string; code?: string } };
 
-/** Отпечатки файлов `rels` под `root`; первый отказ останавливает раздачу. */
-export async function fileDigests(root: string, rels: string[]): Promise<FileDigest[]> {
+/** Запуск потока; тест подменяет его, чтобы проверить отказ запуска. */
+export const digestWorker = { create: () => new Worker(WORKER, { eval: true }) };
+
+/**
+ * Отпечатки файлов `rels` под `root`. Первый отказ или отмена останавливает раздачу
+ * и все потоки; результат возвращается, только когда ни один поток не работает.
+ */
+export async function fileDigests(
+  root: string,
+  rels: string[],
+  signal?: AbortSignal,
+): Promise<FileDigest[]> {
+  signal?.throwIfAborted();
   const batches: string[][] = [];
   for (let i = 0; i < rels.length; i += BATCH) batches.push(rels.slice(i, i + BATCH));
   const threads = Math.min(MAX_THREADS, Math.max(1, availableParallelism() - 1), batches.length);
   const out: FileDigest[] = [];
   let next = 0;
   let failure: Error | undefined;
+  const stops = new Set<() => void>();
+  const fail = (error: unknown) => {
+    failure ??= error instanceof Error ? error : new Error(String(error));
+    for (const stop of stops) stop();
+  };
+  const onAbort = () => fail(signal!.reason);
+  signal?.addEventListener('abort', onAbort, { once: true });
   const run = () =>
     new Promise<void>((resolve) => {
-      const worker = new Worker(WORKER, { eval: true });
+      let worker: Worker;
+      try {
+        worker = digestWorker.create();
+      } catch (error) {
+        fail(error);
+        return resolve();
+      }
       let done = false;
-      const finish = (error?: Error) => {
+      const finish = (error?: unknown) => {
         if (done) return;
         done = true;
-        failure ??= error;
+        stops.delete(stop);
+        if (error !== undefined) fail(error);
         worker.removeAllListeners();
         worker.on('error', () => undefined);
         void worker.terminate().then(() => resolve());
       };
+      const stop = () => finish();
+      stops.add(stop);
       const feed = () => {
         if (failure || next >= batches.length) return finish();
         worker.postMessage({ root, rels: batches[next++] });
@@ -106,7 +134,11 @@ export async function fileDigests(root: string, rels: string[]): Promise<FileDig
       worker.on('exit', () => finish(new Error('поток сверки завершился раньше времени')));
       feed();
     });
-  await Promise.all(Array.from({ length: threads }, run));
+  try {
+    await Promise.all(Array.from({ length: threads }, run));
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+  }
   if (failure) throw failure;
   return out;
 }
