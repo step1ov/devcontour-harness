@@ -151,6 +151,15 @@ const additiveFields: {
     },
     basis: 'changes',
   },
+  {
+    // Копии artifacts gate как evidence; умолчание не подставляется.
+    id: 'repositories[].gates[].artifacts',
+    apply: (raw) => {
+      const gates = raw.repositories[0]!.gates as Record<string, unknown>[];
+      gates[0]!.artifacts = ['test-results/screenshots'];
+    },
+    basis: 'changes',
+  },
 ];
 
 test('A03/profiles: встроенные профили alpha.5 на месте, их байты и закрепления не изменились', (t) => {

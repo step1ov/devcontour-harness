@@ -131,6 +131,25 @@ lockfile, установка докачивает разницу; `miss` — о�
 Исключение `materializeStore` бросает только при отмене переданного `signal`. Коды `doctor`:
 предупреждения `LOCKFILE_MISSING`, `TOOL_MISSING`, `DEPENDENCY_STORE`.
 
+`repositories[].gates[].artifacts` — необязательный список (1–16) путей
+относительно корня дерева: файлы или каталоги, которые gate оставляет как
+доказательство (например, снимки экрана визуального теста). Без поля
+поведение и digest политики прежние. После gate — и при успехе, и при провале —
+harness копирует подходящие файлы в `<артефакты фазы>/<gate>/artifacts/<путь>`
+и пишет в evidence поле `artifactFiles`: `dir`, `files[]` (`path`, `sha256`,
+`bytes`, `redacted` — в текстовой копии замаскирован секрет окружения) и
+`skipped[]` (`path`, `reason`, `detail`) с `skippedMore` для пропусков сверх 100. Копируются только обычные файлы `.png`, `.json`, `.txt`, `.xml`, `.log`:
+не больше 64 файлов, 8 МБ на файл и 20 МБ всего, обход каталогов — до 4096
+записей. Ссылки не разыменовываются (ни сам путь, ни его компоненты, ни
+записи каталога): такой путь записывается как `symlink`. Причины пропуска:
+`missing`, `symlink`, `outside`, `not-regular`, `extension`, `file-limit`,
+`total-limit`, `count-limit`, `scan-limit`, `copy-failed`. Исход gate от
+копирования не зависит: превышение пределов и отказ записи не делают
+проваленный gate прошедшим и прошедший — проваленным, а названы в evidence.
+`workspaceGates[].artifacts` по-прежнему обязаны существовать и хешируются в
+`artifacts[]`; их копии с теми же пределами пишутся в `artifactFiles` записи
+совместной проверки (`<каталог проверки>/<gate>/artifacts/`).
+
 `policyDigest(policy)` — digest загруженной политики целиком: им сверяются
 применённая политика (`control.appliedPolicy`) и запрос операции
 `control.reconfigure`. `executionDigest(policy)` — digest исполнительной
