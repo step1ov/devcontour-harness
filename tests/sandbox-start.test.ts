@@ -312,7 +312,7 @@ test(
 /** Собственный TMPDIR на время `fn`: команда стирает метки только этого теста. */
 async function ownTmp<T>(fn: () => Promise<T>) {
   const saved = process.env.TMPDIR;
-  process.env.TMPDIR = realpathSync(mkdtempSync(join(tmpdir(), 'harness-marks-')));
+  process.env.TMPDIR = realpathSync(mkdtempSync(join(tmpdir(), 'hm-')));
   try {
     return await fn();
   } finally {
