@@ -668,7 +668,7 @@ const buildFloor = (s: Store) => Math.min(storeTree.minBuildMs, s.fullBudgetMs *
 async function fetchInto(s: Store, work: string, lock: string, settings: string, base?: Seed) {
   const project = join(work, 'project');
   const store = join(work, 'store');
-  await rm(work, { recursive: true, force: true });
+  await removeTree(work);
   await mkdir(project, { recursive: true });
   await writeFile(join(project, s.spec.lockfile.split('/').at(-1)!), lock + '\n');
   for (const [name, text] of Object.entries(s.manager.buildFiles))
@@ -816,7 +816,7 @@ async function buildSeed(s: Store, key: string, lock: string, lockSha256: string
 /** Брошенные каталоги сборки: вызывается под арендой, живых среди них нет. */
 async function sweep(s: Store) {
   for (const name of await readdir(join(s.root, 'tmp')).catch(() => [] as string[]))
-    await rm(join(s.root, 'tmp', name), { recursive: true, force: true });
+    await removeTree(join(s.root, 'tmp', name));
 }
 
 /**
