@@ -350,7 +350,10 @@ export async function runCheck(
     result: Awaited<ReturnType<typeof command>> | undefined,
     monitor: Awaited<ReturnType<typeof watchSandboxLog>>,
     violations: SandboxViolation[] | undefined,
-    attempts = 1;
+    attempts = 1,
+    // Во всех попытках отказала сама песочница: команда не начиналась.
+    // Вычисляется до уборки, пока метка старта ещё на месте.
+    notStarted = false;
   const scratch = await realpath(await mkdtemp(join(tmpdir(), 'dc-gate-')));
   // Метка старта — вне TMPDIR команды: проверка, чистящая свой временный
   // каталог, не должна стирать признак того, что она уже начиналась.
@@ -417,13 +420,15 @@ export async function runCheck(
     };
     try {
       result = await execute();
-      // sandbox-runtime ищет shell через `which` с таймаутом в секунду и под
-      // нагрузкой отказывает до запуска команды. Повтор допустим, только если
-      // команда точно не начиналась: метки старта нет.
+      // Песочница может отказать до запуска команды (прежде так отказывал
+      // поиск shell через `which` под нагрузкой — см. `srtShellLookup`).
+      // Повтор допустим, только если команда точно не начиналась: метки
+      // старта нет.
       for (; attempts < 3 && sandboxNotStarted(result, started); attempts++) {
         await new Promise((r) => setTimeout(r, 500 * attempts));
         result = await execute();
       }
+      notStarted = sandboxNotStarted(result, started);
     } finally {
       // Факт старта читается до удаления метки — и при исключении после него.
       if (started !== undefined && existsSync(started)) confirm();
@@ -437,6 +442,7 @@ export async function runCheck(
       ...result,
       attempts,
       started: launched,
+      notStarted,
       ...(policy ? { isolation: policy } : {}),
       ...(violations ? { violations } : {}),
     };
@@ -462,6 +468,7 @@ export async function runCheck(
               ...result,
               attempts,
               started: launched,
+              notStarted,
               ...(policy ? { isolation: policy } : {}),
               ...(violations ? { violations } : {}),
             },
@@ -702,6 +709,16 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     }
     if (result.timedOut || signal.aborted)
       throw new Error('Проверка прервана или превысила timeout');
+    // Песочница так и не запустила команду: код проекта не исполнялся, и его
+    // правка ничего не изменит. Это отказ среды, а не провал проверки; текст
+    // srt вроде «Shell 'bash' not found in PATH» остаётся только причиной.
+    if (result.notStarted) {
+      kind = 'environment';
+      throw new Error(
+        `песочница ОС не запустила команду проверки (попыток: ${result.attempts}): проверка не исполнялась. ` +
+          `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
+      );
+    }
     if (result.code !== 0) {
       // Сохраняем валидный отчёт и при отказе команды, до классификации
       // песочницы: после очистки worktree иначе остаётся только хвост лога.

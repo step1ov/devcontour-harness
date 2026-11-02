@@ -248,6 +248,53 @@ export function codexPermissions(policy: Isolation, network: boolean) {
 
 const srtCli = createRequire(import.meta.url).resolve('@anthropic-ai/sandbox-runtime/dist/cli.js');
 
+/**
+ * Предзагрузка процесса srt: поиск shell без порождения `which`.
+ *
+ * srt на каждый запуск ищет shell через `spawnSync('which', [shell],
+ * { timeout: 1000 })`. Под нагрузкой машины порождение `which` не
+ * укладывается в секунду, srt печатает «Shell 'bash' not found in PATH» и
+ * выходит до запуска команды: проверка падала как будто по вине проекта.
+ * Передать srt путь shell нельзя: у CLI такой опции нет, а абсолютный путь
+ * он тоже проверяет через `which`. Поэтому такой вызов отвечается в процессе
+ * srt: исполняемый файл ищется по тому же PATH, что у `which`. Не найденное
+ * и любые другие вызовы уходят в настоящий `spawnSync` — ответ «нет такого
+ * shell» по-прежнему даёт `which`, а не эта подмена.
+ */
+export const srtShellLookup =
+  'data:text/javascript,' +
+  encodeURIComponent(`
+import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { accessSync, constants, statSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
+const original = cp.spawnSync;
+const find = (bin, path) => {
+  const dirs = bin.includes('/') ? [''] : (path ?? '').split(delimiter).filter(Boolean);
+  for (const dir of dirs) {
+    const file = dir ? join(dir, bin) : bin;
+    try {
+      if (!statSync(file).isFile()) continue;
+      accessSync(file, constants.X_OK);
+      return file;
+    } catch {}
+  }
+};
+cp.spawnSync = function spawnSync(command, args, options) {
+  if (command === 'which' && Array.isArray(args) && args.length === 1 &&
+      typeof args[0] === 'string' && args[0] && !args[0].startsWith('-') &&
+      options?.encoding === 'utf8') {
+    const file = find(args[0], (options.env ?? process.env).PATH);
+    if (file) {
+      const stdout = file + '\\n';
+      return { pid: 0, output: [null, stdout, ''], stdout, stderr: '', status: 0, signal: null };
+    }
+  }
+  return original.apply(this, arguments);
+};
+syncBuiltinESMExports();
+`);
+
 /** Готов ли механизм изоляции проверок на этой машине. */
 export function isolationSupport() {
   if (!SandboxManager.isSupportedPlatform())
@@ -754,6 +801,8 @@ export async function isolatedCommand(
   return {
     argv: [
       process.execPath,
+      '--import',
+      srtShellLookup,
       srtCli,
       '--settings',
       settings,
