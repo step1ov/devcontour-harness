@@ -189,7 +189,15 @@ const browserGraph = (entry) => {
       fail(`./${entry} достигает ` + rel);
     const text = readFileSync(file, 'utf8');
     if (/['"`]node:/.test(text)) fail(`./${entry} содержит node: в ` + rel);
-    for (const [, spec] of text.matchAll(/(?:\bfrom\s*|\bimport\s*\(?\s*)['"]([^'"]+)['"]/g)) {
+    // Только операторы модуля: `import … from`, `export … from`, `import '…'` в
+    // начале строки и динамический `import('…')`. Слово «from» внутри строк
+    // текста отчёта импортом не считается.
+    const specs = [
+      ...text.matchAll(/^\s*(?:import|export)\b[^'"`;]*?\bfrom\s*['"]([^'"]+)['"]/gm),
+      ...text.matchAll(/^\s*import\s*['"]([^'"]+)['"]/gm),
+      ...text.matchAll(/\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g),
+    ];
+    for (const [, spec] of specs) {
       if (!spec.startsWith('.')) fail(`./${entry} импортирует «${spec}» в ${rel}`);
       walk(resolve(file, '..', spec));
     }
