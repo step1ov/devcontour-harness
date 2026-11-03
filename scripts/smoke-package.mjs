@@ -163,33 +163,43 @@ for (const required of [
   'lib/catalog/index.js',
   'lib/catalog/page.js',
   'lib/contracts/catalog.js',
+  // Отчёт об эффекте.
+  'lib/report/index.js',
+  'lib/control/report.js',
+  'lib/contracts/report.js',
+  'schemas/value-report.schema.json',
 ])
   if (!packed.files.some((f) => f.path === required)) fail('нет файла ' + required);
 
-// ./projections годится для браузерного бандла: всё, что достижимо от
-// lib/projections/index.js, лежит в lib/projections/** или в двух
-// разрешённых листах contracts и не импортирует node:* (Q3, K1).
+// ./projections и ./report годятся для браузерного бандла: всё, что достижимо
+// от их index.js, лежит в своём каталоге или в разрешённых листах contracts и
+// не импортирует node:* (Q3, K1).
 const libDir = join(unpacked, 'package', 'lib');
-const projectionFiles = new Set();
-const walk = (file) => {
-  if (projectionFiles.has(file)) return;
-  projectionFiles.add(file);
-  const rel = file.slice(libDir.length + 1);
-  if (
-    !rel.startsWith('projections/') &&
-    rel !== 'contracts/errors.js' &&
-    rel !== 'contracts/repair-policy.js'
-  )
-    fail('./projections достигает ' + rel);
-  const text = readFileSync(file, 'utf8');
-  if (/['"`]node:/.test(text)) fail('./projections содержит node: в ' + rel);
-  for (const [, spec] of text.matchAll(/(?:\bfrom\s*|\bimport\s*\(?\s*)['"]([^'"]+)['"]/g)) {
-    if (!spec.startsWith('.')) fail(`./projections импортирует «${spec}» в ${rel}`);
-    walk(resolve(file, '..', spec));
-  }
+const browserGraph = (entry) => {
+  const files = new Set();
+  const walk = (file) => {
+    if (files.has(file)) return;
+    files.add(file);
+    const rel = file.slice(libDir.length + 1);
+    if (
+      !rel.startsWith(entry + '/') &&
+      rel !== 'contracts/errors.js' &&
+      rel !== 'contracts/repair-policy.js'
+    )
+      fail(`./${entry} достигает ` + rel);
+    const text = readFileSync(file, 'utf8');
+    if (/['"`]node:/.test(text)) fail(`./${entry} содержит node: в ` + rel);
+    for (const [, spec] of text.matchAll(/(?:\bfrom\s*|\bimport\s*\(?\s*)['"]([^'"]+)['"]/g)) {
+      if (!spec.startsWith('.')) fail(`./${entry} импортирует «${spec}» в ${rel}`);
+      walk(resolve(file, '..', spec));
+    }
+  };
+  walk(join(libDir, entry, 'index.js'));
+  if (files.size < 2) fail(`граф импортов ./${entry} пуст`);
+  return files;
 };
-walk(join(libDir, 'projections', 'index.js'));
-if (projectionFiles.size < 2) fail('граф импортов ./projections пуст');
+const projectionFiles = browserGraph('projections');
+const reportFiles = browserGraph('report');
 
 const consumer = join(scratch, 'consumer');
 execFileSync('mkdir', [consumer]);
@@ -356,6 +366,12 @@ const p = await import('devcontour-harness/projections');
 if (m.chainRoots !== p.chainRoots) throw new Error('chainRoots: корень и ./projections — разные функции');
 const differ = Object.keys(p).filter((k) => m[k] !== p[k]);
 if (differ.length) throw new Error('разные объекты: ' + differ.join(', '));
+const rp = await import('devcontour-harness/report');
+const reportDiffer = Object.keys(rp).filter((k) => m[k] !== rp[k]);
+if (reportDiffer.length) throw new Error('корень и ./report: разные ' + reportDiffer.join(', '));
+for (const name of ['valueReport', 'reportMarkdown', 'reportHtml'])
+  if (typeof rp[name] !== 'function') throw new Error('нет экспорта ./report ' + name);
+if (typeof m.collectReportInput !== 'function') throw new Error('нет экспорта collectReportInput');
 for (const name of ['chainRoots', 'workProgress', 'nextAction', 'queueStop', 'explainStop', 'stopCodeOf', 'clipText', 'clipDeep'])
   if (typeof p[name] !== 'function') throw new Error('нет экспорта ./projections ' + name);
 for (const name of ['inspectPath', 'checkDestination', 'listRegularFiles', 'planFileWrites', 'applyFileWrites', 'initProject', 'diagnoseState'])
@@ -1210,5 +1226,5 @@ if (!reads.some((p) => p.includes(join('node_modules', 'devcontour-harness', 'li
   fail('журнал чтения не содержит модулей установленного пакета');
 
 console.log(
-  `smoke-package: ${packed.filename} (${packed.files.length} файлов) установлен; профили, шаблоны, полный цикл и отказы gate/области/controller без каталога skills пройдены на fixture runtime (механика, не качество модели); ./projections без node: (${projectionFiles.size} модулей), одна реализация с корнем, consumer-h1 ${hostReport.total} проверок, consumer-h2 ${hostH2Report.total} проверок, consumer-h3 ${hostH3Report.total} проверок; capabilities ${catalog.tools.length} операций; маршрут H1 init → run → accepted ${h1Accepted.slice(0, 12)}, explain, повтор init без записи; маршрут H2 init → plan-request → draft → plan-check → validate → review-plan ${record.digest.slice(0, 12)} без вызовов runtime при планировании, plan-request сверх предела — RESPONSE_TOO_LARGE; ${reads.length} чтений вне checkout; sha512 ${packed.integrity}`,
+  `smoke-package: ${packed.filename} (${packed.files.length} файлов) установлен; профили, шаблоны, полный цикл и отказы gate/области/controller без каталога skills пройдены на fixture runtime (механика, не качество модели); ./projections без node: (${projectionFiles.size} модулей), ./report без node: (${reportFiles.size} модулей), одна реализация с корнем, consumer-h1 ${hostReport.total} проверок, consumer-h2 ${hostH2Report.total} проверок, consumer-h3 ${hostH3Report.total} проверок; capabilities ${catalog.tools.length} операций; маршрут H1 init → run → accepted ${h1Accepted.slice(0, 12)}, explain, повтор init без записи; маршрут H2 init → plan-request → draft → plan-check → validate → review-plan ${record.digest.slice(0, 12)} без вызовов runtime при планировании, plan-request сверх предела — RESPONSE_TOO_LARGE; ${reads.length} чтений вне checkout; sha512 ${packed.integrity}`,
 );

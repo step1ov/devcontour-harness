@@ -53,6 +53,8 @@ import { analyzeRecovery, applyCases } from './recovery.ts';
 import { declarationProblems, referenceNote } from '../verification/checks.ts';
 import { spikeOf, spikesOf } from '../verification/spike.ts';
 import { staleArtifacts } from '../verification/confirm.ts';
+import { collectReportInput } from './report.ts';
+import { valueReport, type ValueReportOptions } from '../report/compute.ts';
 
 export interface HarnessOptions {
   /** Каталог состояния исполнения: база, worktrees, артефакты. */
@@ -864,6 +866,18 @@ export class Harness {
           });
         }),
     };
+  }
+
+  /**
+   * Отчёт об эффекте (`valueReport`) по состоянию этого каталога: только
+   * чтение; пути evidence — относительно каталога состояния.
+   */
+  report(options: Omit<ValueReportOptions, 'stateDir' | 'harnessVersion'> = {}) {
+    return valueReport(collectReportInput(this.store), {
+      ...options,
+      stateDir: resolve(this.options.stateDir),
+      harnessVersion: HARNESS_VERSION,
+    });
   }
 
   events(after = 0, limit = 100) {

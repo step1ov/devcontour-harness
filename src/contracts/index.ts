@@ -20,3 +20,4 @@ export * from './project.ts';
 export * from './diagnosis.ts';
 export * from './planning.ts';
 export * from './catalog.ts';
+export * from './report.ts';

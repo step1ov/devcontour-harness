@@ -45,6 +45,10 @@ import { harnessCapabilities } from './catalog/harness.ts';
 import type { RunnerHooks } from './engine/runner.ts';
 import { hostGitArgs } from './environment/process.ts';
 import { FileContextSource, FileResultSink, FileWorkSource } from './connectors/files.ts';
+import { SqliteExecutionStore } from './storage/sqlite.ts';
+import { collectReportInput } from './control/report.ts';
+import { writeReportFile } from './control/report-file.ts';
+import { valueReport, reportHtml, reportMarkdown } from './report/index.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -280,6 +284,11 @@ const options = {
   requirements: { type: 'string', multiple: true },
   'dry-run': { type: 'boolean' },
   detail: { type: 'boolean' },
+  since: { type: 'string' },
+  until: { type: 'string' },
+  'as-of': { type: 'string' },
+  format: { type: 'string' },
+  'no-titles': { type: 'boolean' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -294,6 +303,11 @@ const flagOwners = {
   requirements: ['plan-request'],
   'dry-run': ['worktree-cleanup'],
   detail: ['status'],
+  since: ['report'],
+  until: ['report'],
+  'as-of': ['report'],
+  format: ['report'],
+  'no-titles': ['report'],
 } as const;
 
 /** Явное человеческое представление успешного ответа (`--human`). */
@@ -353,9 +367,11 @@ const readText = (path: string, what: string) => {
   }
 };
 
+const reportFormats = ['json', 'md', 'html'] as const;
+
 async function run(
   argv: string[],
-): Promise<{ command: CliCommand | 'version'; data: unknown; code?: number }> {
+): Promise<{ command: CliCommand | 'version'; data: unknown; code?: number; text?: string }> {
   const [name, ...rest] = argv;
   if (name === '--version' || name === 'version') {
     // Прочие аргументы version по-прежнему игнорирует; новые флаги — только у своих команд.
@@ -667,6 +683,46 @@ async function run(
         }),
       };
     }
+    case 'report': {
+      const state = need('state');
+      const format = (v.format ?? 'json') as (typeof reportFormats)[number];
+      if (!reportFormats.includes(format))
+        throw new HarnessError('INVALID_INPUT', '--format: ожидается json, md или html', [
+          { path: ['--format'], message: String(v.format) },
+        ]);
+      const file = join(resolve(state), 'state.sqlite');
+      if (!existsSync(file))
+        throw new HarnessError('NOT_FOUND', 'Каталог состояния не найден: ' + state);
+      // Однократное чтение без записи и без файлов в каталоге состояния
+      // (неизменяемое открытие с проверкой после чтения, `readOnce`).
+      const report = SqliteExecutionStore.readOnce(
+        file,
+        'devcontour-harness@' + HARNESS_VERSION,
+        (store) =>
+          valueReport(collectReportInput(store), {
+            ...optional('since', v.since),
+            ...optional('until', v.until),
+            ...optional('asOf', v['as-of']),
+            ...(v['no-titles'] ? { noTitles: true } : {}),
+            label: basename(resolve(state)),
+            stateDir: resolve(state),
+            harnessVersion: HARNESS_VERSION,
+          }),
+      );
+      if (format === 'json' && !v.out) return { command, data: report };
+      const text =
+        format === 'json'
+          ? JSON.stringify(report, null, 2) + '\n'
+          : format === 'md'
+            ? reportMarkdown(report)
+            : reportHtml(report);
+      if (!v.out) return { command, data: report, text };
+      writeReportFile(v.out, state, text);
+      return {
+        command,
+        data: { out: v.out, format, bytes: Buffer.byteLength(text), asOf: report.window.asOf },
+      };
+    }
     case 'plan-request': {
       const b = loadPolicy(need('policy'));
       const first = b.policy.repositories[0]?.id ?? 'main';
@@ -756,6 +812,8 @@ try {
   code = result.code ?? exitCodes.ok;
   const present = result.command !== 'version' ? presenters[result.command] : undefined;
   if (present && argv.includes('--human')) text = present(envelope.data as never);
+  // report --format md|html: проверенные данные печатаются текстом, без конверта.
+  if (result.text !== undefined) text = result.text;
 } catch (error) {
   const known =
     error instanceof HarnessError

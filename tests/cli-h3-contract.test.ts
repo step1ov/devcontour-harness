@@ -44,7 +44,7 @@ const harness = (args: string[]) => {
 };
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
-const laterCommands: readonly string[] = ['worktree-cleanup'];
+const laterCommands: readonly string[] = ['worktree-cleanup', 'report'];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
   'validate',

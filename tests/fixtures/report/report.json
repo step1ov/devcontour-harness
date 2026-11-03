@@ -1,0 +1,826 @@
+{
+  "reportVersion": 1,
+  "harnessVersion": "0.0.0-test",
+  "label": "demo",
+  "window": {
+    "since": null,
+    "until": null,
+    "asOf": "2026-11-03T16:00:00.000Z"
+  },
+  "enoughData": true,
+  "coverage": {
+    "works": 7,
+    "attempts": 13,
+    "failed": 7,
+    "withFailureKind": 6,
+    "withTimings": 9,
+    "withCalls": 11,
+    "withWait": 8,
+    "doneWithoutAttempt": 0,
+    "withEngineVersion": 11,
+    "engines": [
+      "0.1.0-alpha.29",
+      "0.1.0-alpha.30"
+    ],
+    "enginesTruncated": false,
+    "calls": 10,
+    "reviews": 3,
+    "events": 8,
+    "eventsFrom": "2026-10-05T07:50:00.000Z"
+  },
+  "summary": {
+    "status": "ok",
+    "headlines": [
+      {
+        "id": "accepted",
+        "value": "5",
+        "text": "5 tasks accepted. At least 2 of them on the first try; for 1 more task it is unknown (failures without a class).",
+        "basis": "Accepted: merged after all required checks and an independent review. First try: the accepting attempt was the only counted attempt (environment failures and shutdowns are not counted). Window: all history.",
+        "measure": {
+          "value": 2,
+          "n": 5,
+          "unknown": 1,
+          "bound": "lower"
+        }
+      },
+      {
+        "id": "sent-back",
+        "value": "≥ 2 of 5",
+        "text": "At least 2 of 5 accepted tasks were sent back by checks, review or the scope rule before merge; 1 task had only failures without a class before merge. Nothing merged without passing every required check and review.",
+        "basis": "An attempt rejected as gate, review or scope-violation before the accepting attempt. Failures without a class are not counted, so this is a lower bound.",
+        "measure": {
+          "value": 2,
+          "n": 5,
+          "unknown": 1,
+          "bound": "lower"
+        }
+      },
+      {
+        "id": "lead-time",
+        "value": "8.1 d",
+        "text": "From approval to merge: median 8.1 d (n=5).",
+        "basis": "Wall clock from the first attempt's approval to the accepting attempt, including queue waits and pauses. 1 task used the task approval time because the first attempt has no wait record.",
+        "measure": {
+          "value": 702000000,
+          "n": 5,
+          "unknown": 0,
+          "bound": "exact"
+        }
+      },
+      {
+        "id": "spend",
+        "value": "≥ $2.37",
+        "text": "Known spend ≥ $2.37 per accepted task (1 call without a known price, 2 attempts without call records: configure prices).",
+        "basis": "Known spend $11.85 over 10 calls in the window (plans, contracts, implementation and review) divided by 5 accepted tasks.",
+        "measure": {
+          "value": 2.37,
+          "n": 5,
+          "unknown": 3,
+          "bound": "lower"
+        }
+      },
+      {
+        "id": "environment",
+        "value": "≥ 1 of 6",
+        "text": "At least 1 of 6 classified failed attempts were caused by the environment; 1 more failure in setup checks may be environment too.",
+        "basis": "Environment: sandbox, network, provider access and expired leases. 0 time-limit failures (ambiguous) and 1 unknown or unclassified failure are not distributed.",
+        "measure": {
+          "value": 1,
+          "n": 6,
+          "unknown": 1,
+          "bound": "lower"
+        }
+      }
+    ]
+  },
+  "defects": {
+    "rejected": 4,
+    "byKind": {
+      "gate": 2,
+      "review": 1,
+      "scope-violation": 1
+    },
+    "byPhase": {
+      "candidate": 2,
+      "integration": 1,
+      "unknown": 1
+    },
+    "sentBack": {
+      "value": 2,
+      "n": 5,
+      "unknown": 1,
+      "bound": "lower"
+    },
+    "sentBackSetupOnly": 0,
+    "sentBackRange": {
+      "min": 2,
+      "max": 3
+    },
+    "byGate": [
+      {
+        "gate": "install",
+        "phase": "integration",
+        "failed": 1,
+        "setup": true
+      },
+      {
+        "gate": "unit",
+        "phase": "candidate",
+        "failed": 1,
+        "setup": false
+      }
+    ],
+    "byGateTruncated": false,
+    "reviews": {
+      "rejected": 1,
+      "candidate": 1,
+      "integration": 0,
+      "blockingFindings": 2,
+      "withoutFindings": 0
+    },
+    "afterGreenGates": {
+      "value": 1,
+      "n": 7,
+      "unknown": 0,
+      "bound": "exact"
+    },
+    "integration": 1,
+    "planContract": {
+      "rounds": 3,
+      "rejected": 1,
+      "plans": {
+        "rounds": 2,
+        "rejected": 1
+      },
+      "contracts": {
+        "rounds": 1,
+        "rejected": 0
+      },
+      "blockingClosed": 1,
+      "blockingOpen": 0,
+      "blockingWithdrawn": 0
+    },
+    "withdrawn": {
+      "value": 1,
+      "n": 4,
+      "unknown": 1,
+      "bound": "exact"
+    },
+    "items": [
+      {
+        "workId": "broken",
+        "runId": "run-broken-2",
+        "attempt": 2,
+        "kind": "test",
+        "phase": "integration",
+        "gate": "install",
+        "at": "2026-11-03T10:40:00.000Z",
+        "sha": "496ad081c104",
+        "log": "…/install.log",
+        "blocking": null
+      },
+      {
+        "workId": "broken",
+        "runId": "run-broken-1",
+        "attempt": 1,
+        "kind": "scope",
+        "phase": null,
+        "gate": null,
+        "at": "2026-10-29T10:30:00.000Z",
+        "sha": "efaabe836d64",
+        "log": null,
+        "blocking": null
+      },
+      {
+        "workId": "review",
+        "runId": "run-review-1",
+        "attempt": 1,
+        "kind": "review",
+        "phase": "candidate",
+        "gate": "independent-review",
+        "at": "2026-10-14T10:30:00.000Z",
+        "sha": "b0ed1b9fd317",
+        "log": "repos/app/artifacts/run-review-1/candidate/independent-review.log",
+        "blocking": 2
+      },
+      {
+        "workId": "gate",
+        "runId": "run-gate-2",
+        "attempt": 2,
+        "kind": "test",
+        "phase": "candidate",
+        "gate": "unit",
+        "at": "2026-10-12T10:22:00.000Z",
+        "sha": "82406707b186",
+        "log": "repos/app/artifacts/run-gate-2/candidate/unit.log",
+        "blocking": null
+      }
+    ],
+    "itemsTotal": 4,
+    "itemsTruncated": false
+  },
+  "autonomy": {
+    "withAction": {
+      "value": 0,
+      "n": 5,
+      "unknown": 0,
+      "bound": "lower"
+    },
+    "withoutAction": {
+      "value": null,
+      "n": 5,
+      "unknown": 5,
+      "bound": "unknown"
+    },
+    "actions": {
+      "operatorDecisions": 0,
+      "holds": 1,
+      "cancelledAttempts": 1,
+      "retries": null,
+      "resets": null,
+      "baseMoves": null
+    },
+    "approvals": {
+      "operator": 1,
+      "agent": 0,
+      "source": "events"
+    },
+    "pauses": [
+      {
+        "reason": "operator",
+        "count": 1,
+        "pausedMs": 3600000,
+        "open": 1,
+        "failures": []
+      },
+      {
+        "reason": "runtime",
+        "count": 1,
+        "pausedMs": 1800000,
+        "open": 0,
+        "failures": [
+          "environment"
+        ]
+      }
+    ],
+    "escalations": 0
+  },
+  "speed": {
+    "leadTime": {
+      "n": 5,
+      "unknown": 0,
+      "median": 702000000,
+      "p75": 705600000,
+      "max": 1141200000,
+      "values": []
+    },
+    "leadTimeFallback": 1,
+    "dependencyWait": {
+      "n": 8,
+      "unknown": 0,
+      "median": 6450000,
+      "p75": 86400000,
+      "max": 1126800000,
+      "values": []
+    },
+    "queueWait": {
+      "n": 8,
+      "unknown": 0,
+      "median": 3600000,
+      "p75": 3600000,
+      "max": 3600000,
+      "values": []
+    },
+    "stages": [
+      {
+        "family": "implementation",
+        "spans": 9,
+        "totalMs": 9720000,
+        "medianMs": 1080000,
+        "acceptedMs": 4320000,
+        "rejectedMs": 5400000,
+        "incomplete": 0
+      },
+      {
+        "family": "candidate-review",
+        "spans": 9,
+        "totalMs": 4320000,
+        "medianMs": 480000,
+        "acceptedMs": 1920000,
+        "rejectedMs": 2400000,
+        "incomplete": 0
+      },
+      {
+        "family": "candidate-test",
+        "spans": 18,
+        "totalMs": 2160000,
+        "medianMs": 120000,
+        "acceptedMs": 960000,
+        "rejectedMs": 1200000,
+        "incomplete": 0
+      },
+      {
+        "family": "integration-test",
+        "spans": 0,
+        "totalMs": 0,
+        "medianMs": null,
+        "acceptedMs": 0,
+        "rejectedMs": 0,
+        "incomplete": 1
+      }
+    ],
+    "stagesTruncated": false,
+    "firstPass": {
+      "value": 2,
+      "n": 5,
+      "unknown": 1,
+      "bound": "lower"
+    },
+    "firstPassRaw": {
+      "value": 1,
+      "n": 5,
+      "unknown": 0,
+      "bound": "exact"
+    },
+    "finished": {
+      "accepted": 5,
+      "failed": 1,
+      "cancelled": 1
+    },
+    "attemptsPerAccepted": {
+      "n": 5,
+      "buckets": {
+        "1": 1,
+        "2": 3,
+        "3": 1,
+        "4-6": 0,
+        "7+": 0
+      },
+      "median": 2,
+      "mean": 2
+    },
+    "attemptsOnOther": 3,
+    "machineTime": {
+      "n": 5,
+      "unknown": 0,
+      "median": 6000000,
+      "p75": 10800000,
+      "max": 12900000,
+      "values": []
+    }
+  },
+  "cost": {
+    "calls": 10,
+    "knownCalls": 9,
+    "knownUsd": 11.85,
+    "reportedUsd": 10.55,
+    "estimatedUsd": 1.3,
+    "unknown": {
+      "total": 1,
+      "noPrice": 1,
+      "incomplete": 0,
+      "active": 0,
+      "abandoned": 0,
+      "byRuntime": [
+        {
+          "runtime": "codex",
+          "calls": 1
+        }
+      ]
+    },
+    "attemptsWithoutCalls": 2,
+    "attemptsPartialCalls": 0,
+    "perAccepted": {
+      "value": 2.37,
+      "n": 5,
+      "unknown": 3,
+      "bound": "lower"
+    },
+    "perAttempt": {
+      "n": 9,
+      "unknown": 4,
+      "median": 0.8,
+      "p75": 1.75,
+      "max": 3,
+      "values": []
+    },
+    "rejected": {
+      "bound": "lower",
+      "usd": 6.5,
+      "totalUsd": 11.35,
+      "attempts": 13,
+      "byBucket": [
+        {
+          "bucket": "defect",
+          "usd": 6.5
+        },
+        {
+          "bucket": "environment",
+          "usd": 0
+        },
+        {
+          "bucket": "operator",
+          "usd": 0
+        },
+        {
+          "bucket": "unclassified",
+          "usd": 0
+        }
+      ]
+    },
+    "byStage": [
+      {
+        "stage": "implementation",
+        "calls": 8,
+        "knownUsd": 11.35,
+        "unknownCalls": 0
+      },
+      {
+        "stage": "plan-review",
+        "calls": 1,
+        "knownUsd": 0.5,
+        "unknownCalls": 0
+      },
+      {
+        "stage": "candidate-review",
+        "calls": 1,
+        "knownUsd": 0,
+        "unknownCalls": 1
+      }
+    ],
+    "tokens": {
+      "input": 8900,
+      "output": 1700,
+      "cacheRead": 40000,
+      "cacheWrite": 800,
+      "incompleteCalls": 1
+    }
+  },
+  "environment": {
+    "failed": 7,
+    "classified": 6,
+    "interrupted": 1,
+    "buckets": [
+      {
+        "bucket": "defect",
+        "count": 4
+      },
+      {
+        "bucket": "incomplete",
+        "count": 0
+      },
+      {
+        "bucket": "integration",
+        "count": 0
+      },
+      {
+        "bucket": "environment",
+        "count": 1
+      },
+      {
+        "bucket": "time-limit",
+        "count": 0
+      },
+      {
+        "bucket": "tool",
+        "count": 0
+      },
+      {
+        "bucket": "operator",
+        "count": 1
+      },
+      {
+        "bucket": "budget",
+        "count": 0
+      },
+      {
+        "bucket": "unknown",
+        "count": 0
+      },
+      {
+        "bucket": "unclassified",
+        "count": 1
+      }
+    ],
+    "share": {
+      "value": 1,
+      "n": 6,
+      "unknown": 1,
+      "bound": "lower"
+    },
+    "setupCheckFailures": 1,
+    "timeLimit": 0,
+    "causes": null,
+    "neutral": {
+      "costBound": "exact",
+      "attempts": 1,
+      "blocked": 1,
+      "machineMs": 120000,
+      "knownUsd": 0,
+      "runtimePauses": 1
+    },
+    "rechecks": {
+      "flaky": 0,
+      "confirmed": 0
+    }
+  },
+  "weeks": {
+    "rows": [
+      {
+        "kind": "week",
+        "week": "2026-W45",
+        "attempts": 2,
+        "accepted": 0,
+        "firstPass": 0,
+        "defects": 1,
+        "environment": 0,
+        "knownUsd": 0.4,
+        "unknownCalls": 0,
+        "leadMedianMs": null,
+        "engines": [
+          "0.1.0-alpha.30"
+        ],
+        "enginesTruncated": false,
+        "engineChanged": true
+      },
+      {
+        "kind": "week",
+        "week": "2026-W44",
+        "attempts": 4,
+        "accepted": 2,
+        "firstPass": 1,
+        "defects": 1,
+        "environment": 1,
+        "knownUsd": 2.5,
+        "unknownCalls": 0,
+        "leadMedianMs": null,
+        "engines": [
+          "0.1.0-alpha.29",
+          "0.1.0-alpha.30"
+        ],
+        "enginesTruncated": false,
+        "engineChanged": true
+      },
+      {
+        "kind": "gap",
+        "from": "2026-W43",
+        "to": "2026-W43"
+      },
+      {
+        "kind": "week",
+        "week": "2026-W42",
+        "attempts": 3,
+        "accepted": 1,
+        "firstPass": 0,
+        "defects": 2,
+        "environment": 0,
+        "knownUsd": 7.25,
+        "unknownCalls": 0,
+        "leadMedianMs": null,
+        "engines": [
+          "0.1.0-alpha.29"
+        ],
+        "enginesTruncated": false,
+        "engineChanged": false
+      },
+      {
+        "kind": "week",
+        "week": "2026-W41",
+        "attempts": 2,
+        "accepted": 1,
+        "firstPass": 1,
+        "defects": 0,
+        "environment": 0,
+        "knownUsd": 1.7,
+        "unknownCalls": 1,
+        "leadMedianMs": null,
+        "engines": [
+          "0.1.0-alpha.29"
+        ],
+        "enginesTruncated": false,
+        "engineChanged": true
+      },
+      {
+        "kind": "week",
+        "week": "2026-W40",
+        "attempts": 1,
+        "accepted": 1,
+        "firstPass": 0,
+        "defects": 0,
+        "environment": 0,
+        "knownUsd": 0,
+        "unknownCalls": 0,
+        "leadMedianMs": null,
+        "engines": [
+          "unknown"
+        ],
+        "enginesTruncated": false,
+        "engineChanged": false
+      },
+      {
+        "kind": "week",
+        "week": "2026-W39",
+        "attempts": 1,
+        "accepted": 0,
+        "firstPass": 0,
+        "defects": 0,
+        "environment": 0,
+        "knownUsd": 0,
+        "unknownCalls": 0,
+        "leadMedianMs": null,
+        "engines": [
+          "unknown"
+        ],
+        "enginesTruncated": false,
+        "engineChanged": false
+      }
+    ],
+    "earlier": null,
+    "active": 6
+  },
+  "works": {
+    "rows": [
+      {
+        "id": "cancel",
+        "title": "Abandoned idea",
+        "outcome": "cancelled",
+        "finishedAt": "2026-11-03T14:20:00.000Z",
+        "attempts": 1,
+        "counted": 1,
+        "leadMs": null,
+        "knownUsd": 0,
+        "unknownCalls": 0,
+        "costBound": "exact",
+        "rejections": [
+          {
+            "key": "operator",
+            "count": 1
+          }
+        ]
+      },
+      {
+        "id": "broken",
+        "title": "Refactor storage",
+        "outcome": "failed",
+        "finishedAt": "2026-11-03T10:45:00.000Z",
+        "attempts": 2,
+        "counted": 2,
+        "leadMs": null,
+        "knownUsd": 1,
+        "unknownCalls": 0,
+        "costBound": "lower",
+        "rejections": [
+          {
+            "key": "defect",
+            "count": 2
+          }
+        ]
+      },
+      {
+        "id": "env",
+        "title": "Wire the CLI",
+        "outcome": "accepted",
+        "finishedAt": "2026-10-28T12:00:00.000Z",
+        "attempts": 2,
+        "counted": 1,
+        "leadMs": 14400000,
+        "knownUsd": 1.1,
+        "unknownCalls": 0,
+        "costBound": "exact",
+        "rejections": [
+          {
+            "key": "environment",
+            "count": 1
+          }
+        ]
+      },
+      {
+        "id": "review",
+        "title": "Harden <input> handling",
+        "outcome": "accepted",
+        "finishedAt": "2026-10-27T13:00:00.000Z",
+        "attempts": 2,
+        "counted": 2,
+        "leadMs": 1141200000,
+        "knownUsd": 3.8,
+        "unknownCalls": 0,
+        "costBound": "exact",
+        "rejections": [
+          {
+            "key": "defect",
+            "count": 1
+          }
+        ]
+      },
+      {
+        "id": "gate",
+        "title": "Fix | the *parser*",
+        "outcome": "accepted",
+        "finishedAt": "2026-10-13T11:00:00.000Z",
+        "attempts": 3,
+        "counted": 2,
+        "leadMs": 702000000,
+        "knownUsd": 4.25,
+        "unknownCalls": 0,
+        "costBound": "exact",
+        "rejections": [
+          {
+            "key": "defect",
+            "count": 1
+          }
+        ]
+      },
+      {
+        "id": "first",
+        "title": "Add the greeting",
+        "outcome": "accepted",
+        "finishedAt": "2026-10-05T10:50:00.000Z",
+        "attempts": 1,
+        "counted": 1,
+        "leadMs": 10200000,
+        "knownUsd": 1.2,
+        "unknownCalls": 1,
+        "costBound": "lower",
+        "rejections": []
+      },
+      {
+        "id": "legacy",
+        "title": "Old task from before classification",
+        "outcome": "accepted",
+        "finishedAt": "2026-09-29T12:00:00.000Z",
+        "attempts": 2,
+        "counted": 2,
+        "leadMs": 705600000,
+        "knownUsd": 0,
+        "unknownCalls": 0,
+        "costBound": "unknown",
+        "rejections": [
+          {
+            "key": "unclassified",
+            "count": 1
+          }
+        ]
+      }
+    ],
+    "total": 7,
+    "truncated": false
+  },
+  "limitations": [
+    {
+      "id": "no-baseline",
+      "text": "There is no before-harness baseline: the report does not compare with work done without the harness."
+    },
+    {
+      "id": "actions-not-recorded",
+      "text": "Human actions are counted only where a person is recorded as the actor (operator recovery decisions); retries, resets, cancellations and base moves have no recorded actor yet, so tasks that needed no human action are not measurable yet."
+    },
+    {
+      "id": "check-network",
+      "text": "Network or registry errors inside checks are classified as check failures, so rejections by checks can be overstated; setup checks are marked."
+    },
+    {
+      "id": "environment-cause",
+      "text": "Environment failures have no recorded sub-cause (sandbox, network, provider, lease)."
+    },
+    {
+      "id": "reviewer-precision",
+      "text": "A rejected candidate is not proof of a real defect: reviewer precision is not measured; withdrawn findings are only a proxy."
+    },
+    {
+      "id": "escaped-defects",
+      "text": "Defects found after merge and human time outside the tool are not visible to the harness."
+    },
+    {
+      "id": "unclassified",
+      "text": "1 failed attempt without a failure class (recorded before classification) is shown as unclassified, not as defects."
+    },
+    {
+      "id": "timings",
+      "text": "4 of 13 attempts have no stage timings; stage time covers the rest."
+    },
+    {
+      "id": "calls",
+      "text": "2 of 13 attempts have no call records, so their spend is unknown."
+    },
+    {
+      "id": "holds-actor",
+      "text": "Holds and cancelled attempts record no actor (host operations hold tasks too), so they are not counted as human actions."
+    },
+    {
+      "id": "prices",
+      "text": "1 of 10 calls have no known price (no tariff 1, incomplete telemetry 0, active 0, abandoned 0); spend is a lower bound."
+    },
+    {
+      "id": "lead-fallback",
+      "text": "1 accepted task started from the task approval time, which a re-approval overwrites."
+    },
+    {
+      "id": "events-from",
+      "text": "Pauses and approvals are counted from events, which start at 2026-10-05T07:50:00.000Z."
+    },
+    {
+      "id": "engines",
+      "text": "Several engine versions in the window (0.1.0-alpha.29, 0.1.0-alpha.30, unknown): weeks where the version changed are marked."
+    }
+  ]
+}

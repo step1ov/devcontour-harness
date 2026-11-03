@@ -32,7 +32,8 @@ refs, варианты исходов. Связи **между** значени�
 
 Опубликованы: `work-order`, `work-graph`, `execution-policy`,
 `context-snapshot`, `contract-document`, `run-result`, `result-envelope`,
-`run-event`, `review-record`, `joint-verification`, `execution-document`.
+`run-event`, `review-record`, `joint-verification`, `execution-document`,
+`value-report` (отчёт `harness report`, см. «ValueReport»).
 
 ## Версии
 
@@ -674,6 +675,120 @@ original}` (исходный тип, не длиннее 200 символов; �
 (`policy.applied`, `policy.reconfigure`). `base.moved` — проверка владения
 операцией и CAS-сдвиг ref базы; записей и событий не создаёт.
 
+### ValueReport
+
+Отчёт об эффекте (`harness report`, `valueReport` из `devcontour-harness/report`
+и корня пакета; `reportVersion: 1`, `valueReportSchema`,
+`schemas/value-report.schema.json`). Отвечает на вопрос «что дал harness на
+этом проекте» данными самого проекта: только наблюдения (счёт и
+длительности), без «сэкономленных часов» и сравнения «с harness и без»
+(базы до harness в состоянии нет).
+
+Вход (`ValueReportInput`) — те же формы, что у `ExecutionView`: `works`,
+`attempts`, `calls` (`locals('usage')`), `reviews` (`locals('reviews')`),
+`events`, `graphs`. `collectReportInput(store)` собирает его из любого
+`ExecutionStore` одним `read` и страницами `events` по 500; `Harness.report()`
+— то же по каталогу состояния. Параметры: `since` (включительно; ISO-время с
+поясом, дата `YYYY-MM-DD` или `Nd`/`Nw` до `asOf`), `until` (не
+включительно), `asOf`, `noTitles`, `label`, `stateDir`, `harnessVersion`.
+`reportMarkdown(report)` и `reportHtml(report)` — чистые рендеры: те же
+разделы и числа; HTML — один файл без скриптов, шрифтов, изображений и
+внешних ссылок (CSP `default-src 'none'; style-src 'unsafe-inline'; img-src
+data:`), светлая и тёмная схема по `prefers-color-scheme`, таблицы
+прокручиваются на ширине телефона, столбики недель (inline SVG) — от 3
+активных недель. Модуль `devcontour-harness/report` без `node:*` и без zod.
+
+**Детерминизм.** Тот же вход и параметры — те же байты JSON, Markdown и HTML
+при любом порядке входных массивов, часах и часовом поясе. `asOf` по
+умолчанию — последняя метка времени в данных (событие, начало или конец
+попытки и вызова, раунд ревью), не часы; с `until` раньше неё — `until`.
+Время — UTC ISO, недели — ISO (понедельник, UTC), числа без локали.
+
+**Определения.**
+
+- Принятое поручение — `WorkState.status = done` с успешной попыткой;
+  принявшая попытка — последняя `succeeded`. Поручение `done` без успешной
+  попытки не имеет времени приёмки и не входит в принятые ни в каком окне
+  (`coverage.doneWithoutAttempt`). В окно входят: принятые — по времени
+  приёмки, попытки и вызовы — по началу, раунды ревью и события — по своему
+  времени.
+- Попытки поручения считаются по записям попыток, а не по
+  `WorkState.attempt` (сброс возвращает счётчик к 0).
+- Корзины отказа попытки (`failureBucketOf`): `defect` (`gate`, `review`,
+  `scope-violation`), `incomplete` (`empty-result`, `unfinished`,
+  `needs-lead`), `integration` (`stale-base`, `merge`), `environment`
+  (`environment`, `provider-auth`, `blocked`, истёкшее владение), `time-limit`
+  (`timeout`), `tool` (`review-protocol`), `operator` (`cancelled`), `budget`,
+  `unknown`, `unclassified` (попытка без класса — записана до
+  классификации; не «дефект»). Прерванная штатной остановкой
+  (`interrupted: shutdown`) — не отказ, считается отдельно.
+- Первая попытка — у принятого поручения засчитанная попытка одна
+  (засчитанные — без `environment` и прерываний); если, кроме принявшей,
+  засчитаны только отказы без класса, — неизвестно (`unknown`, `bound:
+lower`). `firstPassRaw` — попытка вообще одна.
+- Возвращено (`sentBack`) — принятое поручение с попыткой `defect` до
+  принявшей. Поручения, у которых до приёмки только отказы без класса
+  (`unknown`, `unclassified`), не считаются, а идут в `unknown`: тогда
+  `bound: lower` («≥ N», «M more without a class»). Без них, но если часть
+  поручений вернули только отказы gate подготовки (установка зависимостей,
+  возможна сеть; `sentBackSetupOnly`), — `bound: upper`; оба сомнения
+  сразу — `bound: unknown` и диапазон `sentBackRange` («1–3 of 5»); иначе
+  `exact`.
+- Ревью после зелёных gates (`afterGreenGates`) — ревью кандидата отклонило,
+  хотя каждый обязательный gate прошёл на том же SHA (и той же версии
+  проверок); диагностика, не точность reviewer.
+- Срок от согласования до приёмки — от `wait.approvedAt` первой попытки
+  (иначе `WorkState.approvedAt`, его переписывает повторное согласование —
+  `leadTimeFallback`) до конца принявшей попытки; включает очередь и паузы.
+- Расход: известная цена — правило `knownCost`; на принятое поручение —
+  известный расход окна / принятые окна. `callsRecorded` попытки значит
+  «учёт её вызовов полон», а не «вызовы есть»: записи вызовов попытки без
+  флага входят в её расход, но лишь нижней границей
+  (`attemptsPartialCalls`); без флага и без записей расход неизвестен
+  (`attemptsWithoutCalls`). `bound: exact` — только если все вызовы окна
+  завершены с полными счётчиками и ценой и у всех попыток окна учёт полон;
+  иначе `lower` («≥»); без единой известной цены при неизвестных —
+  `unknown` (`value: null`), не `$0`. Расход отклонённых попыток
+  (`cost.rejected`) и расход отказов окружения (`environment.neutral`) —
+  одна и та же атрибуция по всем завершённым попыткам окна.
+- Действия человека — только записи с актёром-человеком: решения recovery
+  с источником `operator`. Удержания (`work.held`) и отмены попыток актёра
+  не называют (удерживают и операции хоста, например смена контракта): они
+  показаны отдельно (`holds`, `cancelledAttempts`) и в действия человека не
+  входят. Повторы, сбросы, отмена без попытки и сдвиг базы пока не
+  записываются: `withAction` — нижняя граница, «без действий человека»
+  (`withoutAction`) пока не измеримо (`value: null`, `bound: unknown`),
+  `retries`/`resets`/`baseMoves` — `null`.
+- Отказы окружения (`environment.share`) — среди классифицированных; если
+  есть отказы только в gates подготовки (`setupCheckFailures`), доля —
+  нижняя граница («at least», «M more may be environment»).
+- Паузы — `control.paused` до следующего `control.resumed` (открытая — до
+  `asOf`); время паузы — её пересечение с окном. Согласования — события
+  `graph.approved` для графов, у которых такие события есть; для прочих —
+  текущее согласование графа в состоянии (`source: state` или `mixed`); нет
+  ни того ни другого — `source: none`, число неизвестно, а не ноль.
+
+**Малые выборки и неизвестное.** `ReportMeasure` — `{value, n, unknown,
+bound}`, `bound` — `exact | lower | upper | unknown`; неизвестное не
+показывается нулём. Процент — только при знаменателе от 20, иначе «k of n».
+Медиана и p75 — от 5 значений, иначе `null` и значения в `values`. Меньше 3
+принятых поручений в окне — `summary.status: not-enough-data` (сырые
+счётчики вместо заголовочных чисел). Сводка — не больше 5 чисел (принятые и
+первая попытка, возвращено, срок, расход на принятое, отказы окружения),
+каждое с предложением и основанием (`basis`). Раздел `limitations` есть
+всегда: постоянные ограничения и найденные в данных (попытки без класса,
+без замеров, без учёта вызовов, вызовы без цены, начало событий, смена
+версии движка, усечения).
+
+**Приватность и пределы.** В отчёт попадают только перечисленные поля: нет
+prompt, вывода runtime, текстов находок, ошибок и причин, fencing-токенов.
+Пути evidence — относительно `stateDir`; путь вне него — `…/<имя файла>`,
+домашний каталог не печатается. `noTitles` убирает заголовки поручений и
+метку проекта. Пределы (`REPORT_LIMITS`): 50 строк поручений (новые сверху),
+50 ссылок evidence, 12 активных недель (ранние свёрнуты в `earlier`,
+недели без активности — `gap`), 50 строк gates и стадий; JSON ≤ 512 КБ,
+HTML ≤ 1 МБ. Усечение отмечено флагом и ограничением.
+
 ## Порты
 
 | Порт                                                           | Договор                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -805,35 +920,63 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 читающие на отсутствующем каталоге отвечают `NOT_FOUND` и ничего не создают.
 Бинарник не хранит настроек проекта и не помнит «последний активный проект».
 
-| Команда            | Аргументы                                                                              | Пишет | `data`                                                                                   | Повтор                                                                                                                                                 |
-| ------------------ | -------------------------------------------------------------------------------------- | ----- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `validate`         | `--graph F --policy F [--context F]`                                                   | нет   | digests, число поручений                                                                 | Чистая функция входов                                                                                                                                  |
-| `review-plan`      | `--state D --graph F --policy F --author A [--context F]`                              | да    | `ReviewRecord`                                                                           | Тот же digest и автор, уже согласованные, — тот же раунд без вызова модели; автор, не допускаемый правилом вендора, — `REVIEWER_SAME_VENDOR` до вызова |
-| `review-contract`  | `--state D --contract F --policy F --author A`                                         | да    | `ReviewRecord`                                                                           | Как `review-plan`                                                                                                                                      |
-| `approve`          | `--state D --subject ID --digest H`                                                    | да    | subject, digest, at                                                                      | Тот же digest — без изменений; только `approvalMode: operator`                                                                                         |
-| `run`              | `--state D --graph F --policy F [--context F] [--sink file:D] [--once]`                | да    | граф, поручения и их блокеры, задание `workflow`                                         | Та же редакция продолжает работу; другой digest той же редакции — `REVISION_CONFLICT`                                                                  |
-| `status`           | `--state D [--graph ID] [--detail]`                                                    | нет   | очередь, графы, поручения с блокерами, бюджеты; с `--detail` — `detail`                  | Только чтение                                                                                                                                          |
-| `events`           | `--state D [--after N] [--limit 1–500]`                                                | нет   | события (неизвестный тип — `unknown`), `next`                                            | Только чтение                                                                                                                                          |
-| `pause`            | `--state D`                                                                            | да    | `ControlState`                                                                           | Без изменений                                                                                                                                          |
-| `resume`           | `--state D`                                                                            | да    | `ControlState`                                                                           | Решение человека: снимает паузу оператора, штатной остановки и отказа runtime вместе с её классами; паузу операции reconfigure — `PAUSED`              |
-| `cancel`           | `--state D --work ID [--reason T]`                                                     | да    | статус поручения                                                                         | Отменённое — без изменений; это не retry                                                                                                               |
-| `retry`            | `--state D --work ID [--reset --reason T]`                                             | да    | статус поручения                                                                         | В пределах `maxAttempts` и бюджета; `--reset` с причиной сбрасывает счётчик попыток, но не учёт расходов                                               |
-| `result`           | `--state D --work ID`                                                                  | нет   | `ResultEnvelope`                                                                         | Только чтение                                                                                                                                          |
-| `deliver`          | `--state D --work ID --sink file:D`                                                    | да    | `ResultEnvelope`                                                                         | Доставленное не доставляется повторно; моделей и интеграции нет                                                                                        |
-| `cleanup`          | `--state D --run ID`                                                                   | да    | исход очистки попытки                                                                    |
-| `worktree-cleanup` | `--state D [--dry-run]`                                                                | да    | счётчики и `worktrees[]` с действием и причиной отказа                                   |
-| `profile`          | `--profile ID\|./F [--repository D]`                                                   | нет   | закрепление (`pin`) и разрешённый профиль                                                | Чистая функция файлов профиля; команды проекта не исполняются                                                                                          |
-| `doctor`           | `[--state D] [--policy F]`                                                             | нет   | версии, runtime, sandbox, совместимость состояния и версии движка в нём                  | Без live-вызова модели                                                                                                                                 |
-| `init`             | `--repository D [--profile P] [--writer R] [--state D] [--plan]`                       | да    | план файлов, `created`, `manifest`, `facts`, `toolchain`, `next`                         | Create-only `.harness/`, manifest до политики, политика последней; повтор — `created: []`; иное решение — `PATH_CONFLICT`                              |
-| `explain`          | `--state D --policy F [--work ID]`                                                     | нет   | `diagnoses[]` (`StopDiagnosis`)                                                          | Только чтение: без повторов, вызовов моделей и изменений состояния                                                                                     |
-| `plan-request`     | `--brief F --policy F [--context F] [--contracts D] [--requirements [R:]F]… [--human]` | нет   | `prompt`, `readOnly`, `recommendedTasks`, `maxTasks`, `basis`, `facts` (`PlanningFacts`) | Чистая функция входов: та же постановка и те же факты — тот же prompt и `basis`; модель не вызывается                                                  |
-| `plan-check`       | `--draft F --policy F [--context F] [--contracts D] [--brief F [--basis H]]`           | нет   | `issues`, `checkPlan`; без проблем — `graph`, `graphDigest`, `basis`                     | Чистая функция входов и `HEAD` источников требований; согласования не выдаёт, gates не запускает; расхождение `--basis` — `APPROVAL_STALE`             |
-| `capabilities`     | —                                                                                      | нет   | каталог общих операций (`OperationCatalog`)                                              | Чистая функция установленной версии пакета                                                                                                             |
-| `--version`        | —                                                                                      | нет   | версия пакета и API                                                                      | —                                                                                                                                                      |
+| Команда            | Аргументы                                                                                                 | Пишет | `data`                                                                                   | Повтор                                                                                                                                                 |
+| ------------------ | --------------------------------------------------------------------------------------------------------- | ----- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `validate`         | `--graph F --policy F [--context F]`                                                                      | нет   | digests, число поручений                                                                 | Чистая функция входов                                                                                                                                  |
+| `review-plan`      | `--state D --graph F --policy F --author A [--context F]`                                                 | да    | `ReviewRecord`                                                                           | Тот же digest и автор, уже согласованные, — тот же раунд без вызова модели; автор, не допускаемый правилом вендора, — `REVIEWER_SAME_VENDOR` до вызова |
+| `review-contract`  | `--state D --contract F --policy F --author A`                                                            | да    | `ReviewRecord`                                                                           | Как `review-plan`                                                                                                                                      |
+| `approve`          | `--state D --subject ID --digest H`                                                                       | да    | subject, digest, at                                                                      | Тот же digest — без изменений; только `approvalMode: operator`                                                                                         |
+| `run`              | `--state D --graph F --policy F [--context F] [--sink file:D] [--once]`                                   | да    | граф, поручения и их блокеры, задание `workflow`                                         | Та же редакция продолжает работу; другой digest той же редакции — `REVISION_CONFLICT`                                                                  |
+| `status`           | `--state D [--graph ID] [--detail]`                                                                       | нет   | очередь, графы, поручения с блокерами, бюджеты; с `--detail` — `detail`                  | Только чтение                                                                                                                                          |
+| `events`           | `--state D [--after N] [--limit 1–500]`                                                                   | нет   | события (неизвестный тип — `unknown`), `next`                                            | Только чтение                                                                                                                                          |
+| `pause`            | `--state D`                                                                                               | да    | `ControlState`                                                                           | Без изменений                                                                                                                                          |
+| `resume`           | `--state D`                                                                                               | да    | `ControlState`                                                                           | Решение человека: снимает паузу оператора, штатной остановки и отказа runtime вместе с её классами; паузу операции reconfigure — `PAUSED`              |
+| `cancel`           | `--state D --work ID [--reason T]`                                                                        | да    | статус поручения                                                                         | Отменённое — без изменений; это не retry                                                                                                               |
+| `retry`            | `--state D --work ID [--reset --reason T]`                                                                | да    | статус поручения                                                                         | В пределах `maxAttempts` и бюджета; `--reset` с причиной сбрасывает счётчик попыток, но не учёт расходов                                               |
+| `result`           | `--state D --work ID`                                                                                     | нет   | `ResultEnvelope`                                                                         | Только чтение                                                                                                                                          |
+| `deliver`          | `--state D --work ID --sink file:D`                                                                       | да    | `ResultEnvelope`                                                                         | Доставленное не доставляется повторно; моделей и интеграции нет                                                                                        |
+| `cleanup`          | `--state D --run ID`                                                                                      | да    | исход очистки попытки                                                                    |
+| `worktree-cleanup` | `--state D [--dry-run]`                                                                                   | да    | счётчики и `worktrees[]` с действием и причиной отказа                                   |
+| `profile`          | `--profile ID\|./F [--repository D]`                                                                      | нет   | закрепление (`pin`) и разрешённый профиль                                                | Чистая функция файлов профиля; команды проекта не исполняются                                                                                          |
+| `doctor`           | `[--state D] [--policy F]`                                                                                | нет   | версии, runtime, sandbox, совместимость состояния и версии движка в нём                  | Без live-вызова модели                                                                                                                                 |
+| `init`             | `--repository D [--profile P] [--writer R] [--state D] [--plan]`                                          | да    | план файлов, `created`, `manifest`, `facts`, `toolchain`, `next`                         | Create-only `.harness/`, manifest до политики, политика последней; повтор — `created: []`; иное решение — `PATH_CONFLICT`                              |
+| `explain`          | `--state D --policy F [--work ID]`                                                                        | нет   | `diagnoses[]` (`StopDiagnosis`)                                                          | Только чтение: без повторов, вызовов моделей и изменений состояния                                                                                     |
+| `report`           | `--state D [--since T\|Nd\|Nw] [--until T] [--as-of T] [--format json\|md\|html] [--no-titles] [--out F]` | нет   | `ValueReport`; с `--out` — `{out, format, bytes, asOf}`                                  | Только чтение; те же данные и параметры — те же байты                                                                                                  |
+| `plan-request`     | `--brief F --policy F [--context F] [--contracts D] [--requirements [R:]F]… [--human]`                    | нет   | `prompt`, `readOnly`, `recommendedTasks`, `maxTasks`, `basis`, `facts` (`PlanningFacts`) | Чистая функция входов: та же постановка и те же факты — тот же prompt и `basis`; модель не вызывается                                                  |
+| `plan-check`       | `--draft F --policy F [--context F] [--contracts D] [--brief F [--basis H]]`                              | нет   | `issues`, `checkPlan`; без проблем — `graph`, `graphDigest`, `basis`                     | Чистая функция входов и `HEAD` источников требований; согласования не выдаёт, gates не запускает; расхождение `--basis` — `APPROVAL_STALE`             |
+| `capabilities`     | —                                                                                                         | нет   | каталог общих операций (`OperationCatalog`)                                              | Чистая функция установленной версии пакета                                                                                                             |
+| `--version`        | —                                                                                                         | нет   | версия пакета и API                                                                      | —                                                                                                                                                      |
 
 Полная форма каждой команды — `cliCommands` (аргументы, обязательность,
 идемпотентность, отказы exit 3). Все команды реализованы. `run` принимает `--author` (по умолчанию `external`) — автора графа для ревью плана. `HARNESS_CODEX_BIN` и `HARNESS_CLAUDE_BIN` подменяют исполняемые файлы runtime (fixture executables в тестах).
 `init --plan` ничего не пишет (exit 3 при конфликтах или неготовом toolchain). `--human` принимают только `init`, `explain` и `plan-request` (печатает prompt): успешный ответ — текст для человека, отказ — тот же JSON-конверт, exit code одинаков; у прочих команд флаг — `INVALID_INPUT`. `plan-check` с проблемами отвечает `ok: true` с данными, exit — по классу первой проблемы; draft — `schemas/plan-draft.schema.json` (`planDraftSchema`). Маршрут самостоятельного проекта и планирование — [standalone](standalone.md).
+
+**`report`.** Читает каталог состояния только для чтения и строит
+`ValueReport` (`valueReport`); `binding.json` не нужен. Чтение однократное
+(`SqliteExecutionStore.readOnce`): база без журнала (`-wal`, `-journal`)
+открывается неизменяемой (`immutable=1`) — в каталоге не появляется ни одного
+файла; после чтения проверяется, что журнал не появился, а размер и время
+основного файла прежние, иначе (писатель начал работу или журнал уже был)
+чтение повторяется обычным открытием только для чтения. Долгоживущие
+дескрипторы (`status`, `events`, `result`, `explain`, `Harness.open` с
+`readOnlyState`) открываются обычным чтением: с блокировками SQLite они
+видят новые фиксации, а у WAL-базы появляются пустые служебные
+`-wal`/`-shm` (данных в них нет). `--format json` (по умолчанию) — обычный конверт. `--format
+md|html` — документированное исключение, как `--human`: успешный ответ
+печатается текстом без конверта (данные перед этим проверены схемой), отказ
+— тот же JSON-конверт и тот же exit code. `--out F` записывает отчёт
+выбранного формата во временный файл того же каталога и переименовывает
+его поверх цели (запись не идёт сквозь symlink или жёсткую ссылку; права
+прежнего файла сохраняются, новый — `0600`; при неполной записи временный
+файл удаляется);
+`PATH_CONFLICT` — цель не обычный файл, symlink, файл с несколькими жёсткими
+ссылками или путь внутри каталога состояния; отсутствующий каталог —
+`INVALID_INPUT`; stdout — конверт `{out, format, bytes, asOf}`. Неверное
+окно (`--since` не раньше `--until`, время без пояса) — `INVALID_INPUT`;
+нет каталога — `NOT_FOUND`, каталог не создаётся. Флаги `--since`,
+`--until`, `--as-of`, `--format`, `--no-titles` принимает только `report`.
+Пределы размера (JSON 512 КБ, HTML и Markdown 1 МБ) проверяют сами
+`valueReport` и рендеры (`assertReportBytes`, `INTERNAL`).
 
 **`status --detail`.** Без флага ответ `status` прежний. С флагом добавляется
 `detail: {at, queue, attempts}` — снимок наблюдателя по часам движка:

@@ -31,6 +31,10 @@
       "types": "./lib/projections/index.d.ts",
       "default": "./lib/projections/index.js"
     },
+    "./report": {
+      "types": "./lib/report/index.d.ts",
+      "default": "./lib/report/index.js"
+    },
     "./package.json": "./package.json",
     "./schemas/*": "./schemas/*",
     "./testing": {
