@@ -3,6 +3,7 @@
 import type { ValueReport } from '../contracts/report.ts';
 import { reportBlocks, type Block } from './document.ts';
 import { formatDuration, formatUsd } from './format.ts';
+import { assertReportBytes, reportLimits } from './compute.ts';
 
 /** Текст Markdown: разметка из данных (заголовок поручения, ID) не исполняется. */
 const md = (text: string) => text.replace(/[\r\n]+/g, ' ').replace(/([\\`*_[\]<>|#])/g, '\\$1');
@@ -55,7 +56,9 @@ export function weekCells(weeks: ValueReport['weeks']): string[][] {
           formatUsd(w.knownUsd),
           String(w.unknownCalls),
           w.leadMedianMs === null ? '' : formatDuration(w.leadMedianMs),
-          (w.engineChanged ? 'changed: ' : '') + w.engines.join(', '),
+          (w.engineChanged ? 'changed: ' : '') +
+            w.engines.join(', ') +
+            (w.enginesTruncated ? ', …' : ''),
         ],
   );
   const e = weeks.earlier;
@@ -113,5 +116,7 @@ function block(b: Block): string[] {
 
 /** Отчёт в Markdown: те же разделы и числа, что в HTML. */
 export function reportMarkdown(report: ValueReport): string {
-  return reportBlocks(report).flatMap(block).join('\n').trimEnd() + '\n';
+  const md = reportBlocks(report).flatMap(block).join('\n').trimEnd() + '\n';
+  assertReportBytes(md, reportLimits.htmlBytes, 'Markdown');
+  return md;
 }

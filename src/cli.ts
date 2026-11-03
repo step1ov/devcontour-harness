@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   existsSync,
   lstatSync,
   realpathSync,
+  renameSync,
+  rmSync,
   readFileSync,
   readdirSync,
   writeFileSync,
   mkdirSync,
 } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import {
@@ -49,7 +52,6 @@ import { FileContextSource, FileResultSink, FileWorkSource } from './connectors/
 import { SqliteExecutionStore } from './storage/sqlite.ts';
 import { collectReportInput } from './control/report.ts';
 import { valueReport, reportHtml, reportMarkdown } from './report/index.ts';
-import { REPORT_LIMITS } from './contracts/report.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -368,28 +370,20 @@ const readText = (path: string, what: string) => {
   }
 };
 
-/** Файлы каталога состояния, которые `report --out` не перезаписывает. */
-const stateFiles = new Set([
-  'state.sqlite',
-  'state.sqlite-wal',
-  'state.sqlite-shm',
-  'binding.json',
-]);
-
 /**
- * Запись `report --out`: обычный файл (новый или прежний), не символическая
- * ссылка и не файл состояния; каталог должен существовать.
+ * Запись `report --out` без записи «сквозь» ссылки: текст пишется во
+ * временный файл того же каталога (`wx`, новый файл) и переименовывается
+ * поверх цели — rename заменяет запись каталога и не следует ни за symlink,
+ * ни за жёсткой ссылкой. Отказ `PATH_CONFLICT`: цель — не обычный файл,
+ * symlink, файл с несколькими жёсткими ссылками (`nlink > 1`) или путь внутри
+ * каталога состояния. Каталог цели должен существовать.
  */
 function writeReport(out: string, state: string, text: string) {
   const target = resolve(out);
-  const existing = existsSync(target) || lstatExists(target);
-  if (existing) {
-    const stat = lstatSync(target);
-    if (stat.isSymbolicLink() || !stat.isFile())
-      throw new HarnessError('PATH_CONFLICT', '--out: не обычный файл: ' + out, [
-        { path: ['--out'], message: stat.isSymbolicLink() ? 'symlink' : 'not-a-file' },
-      ]);
-  }
+  const conflict = (message: string, detail: string) =>
+    new HarnessError('PATH_CONFLICT', `--out: ${message}: ${out}`, [
+      { path: ['--out'], message: detail },
+    ]);
   let dir: string;
   try {
     dir = realpathSync(dirname(target));
@@ -400,24 +394,36 @@ function writeReport(out: string, state: string, text: string) {
       [{ path: ['--out'], message: out }],
     );
   }
-  if (stateFiles.has(basename(target)) && dir === realpathSync(resolve(state)))
-    throw new HarnessError('PATH_CONFLICT', '--out: файл состояния не перезаписывается: ' + out, [
-      { path: ['--out'], message: 'state-file' },
-    ]);
+  const stateDir = realpathSync(resolve(state));
+  if (dir === stateDir || dir.startsWith(stateDir + sep))
+    throw conflict('внутри каталога состояния', 'inside-state');
+  const existing = lstatOf(target);
+  if (existing) {
+    if (existing.isSymbolicLink()) throw conflict('символическая ссылка', 'symlink');
+    if (!existing.isFile()) throw conflict('не обычный файл', 'not-a-file');
+    if (existing.nlink > 1) throw conflict('у файла несколько жёстких ссылок', 'hard-link');
+  }
+  const temp = join(dir, `.${basename(target)}.${process.pid}.${randomUUID()}.tmp`);
+  let created = false;
   try {
-    writeFileSync(target, text);
+    writeFileSync(temp, text, { flag: 'wx' });
+    created = true;
+    renameSync(temp, join(dir, basename(target)));
+    created = false;
   } catch (error) {
     throw new HarnessError('INVALID_INPUT', `--out: не записан: ${(error as Error).message}`, [
       { path: ['--out'], message: out },
     ]);
+  } finally {
+    // Удаляется только свой временный файл, созданный выше (`wx`), и только если rename не прошёл.
+    if (created) rmSync(temp, { force: true });
   }
 }
-const lstatExists = (path: string) => {
+const lstatOf = (path: string) => {
   try {
-    lstatSync(path);
-    return true;
+    return lstatSync(path);
   } catch {
-    return false;
+    return undefined;
   }
 };
 
@@ -765,12 +771,6 @@ async function run(
       } finally {
         store.close();
       }
-      const json = JSON.stringify(report);
-      if (Buffer.byteLength(json) > REPORT_LIMITS.jsonBytes)
-        throw new HarnessError(
-          'INTERNAL',
-          `Отчёт больше предела ${REPORT_LIMITS.jsonBytes} байт: пределы списков нарушены (дефект harness)`,
-        );
       if (format === 'json' && !v.out) return { command, data: report };
       const text =
         format === 'json'

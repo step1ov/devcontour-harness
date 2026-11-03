@@ -27,9 +27,21 @@ export type Block =
   | { kind: 'weeks'; weeks: ValueReport['weeks'] };
 
 const plural = (n: number, one: string, many = one + 's') => `${n} ${n === 1 ? one : many}`;
+/** Сумма с границей: «≥ $x» при неполном учёте, «unknown» без единой известной цены. */
+const money = (bound: string, usd: number) =>
+  bound === 'unknown' ? 'unknown' : (bound === 'exact' ? '' : '≥ ') + formatUsd(usd);
 const usdDist = (d: ReportDist) => formatDist(d, formatUsd);
-const or = (n: number | null, text: (n: number) => string) =>
-  n === null ? 'not recorded' : text(n);
+/** Действия без записи — одним списком «Not recorded yet», с записью — числом. */
+const actionsLine = (items: [string, number | null][]) => {
+  const known = items.filter(([, n]) => n !== null).map(([name, n]) => `${name} ${n}`);
+  const missing = items.filter(([, n]) => n === null).map(([name]) => name);
+  return [
+    known.length ? `${known.join(', ')}.` : '',
+    missing.length ? `Not recorded yet: ${missing.join(', ')}.` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+};
 
 const bucketLabels: Record<string, string> = {
   defect: 'defect (check, review, scope)',
@@ -66,7 +78,7 @@ export function reportBlocks(r: ValueReport): Block[] {
     true,
   );
   p(
-    `Coverage: ${c.attempts} attempts on ${c.works} tasks; failure class on ${c.withFailureKind} of ${c.failed} failed; stage timings on ${c.withTimings}; call records on ${c.withCalls}; approval wait on ${c.withWait}. ${c.calls} calls, ${c.reviews} plan or contract review rounds, ${c.events} events${c.eventsFrom ? ` (events from ${c.eventsFrom})` : ''}.`,
+    `Coverage: ${c.attempts} attempts on ${c.works} tasks; failure class on ${c.withFailureKind} of ${c.failed} failed; stage timings on ${c.withTimings}; complete call records on ${c.withCalls}; approval wait on ${c.withWait}. ${c.calls} calls, ${c.reviews} plan or contract review rounds, ${c.events} events${c.eventsFrom ? ` (events from ${c.eventsFrom})` : ''}.${c.doneWithoutAttempt ? ` Done tasks without a succeeded attempt (not counted as accepted): ${c.doneWithoutAttempt}.` : ''}`,
     true,
   );
 
@@ -76,7 +88,7 @@ export function reportBlocks(r: ValueReport): Block[] {
   h(2, 'Defects caught before merge');
   list([
     `Rejected attempts: ${d.rejected} (checks ${d.byKind.gate}, review ${d.byKind.review}, scope ${d.byKind['scope-violation']}; candidate ${d.byPhase.candidate}, integration ${d.byPhase.integration}, phase unknown ${d.byPhase.unknown}).`,
-    `Accepted tasks sent back at least once: ${formatMeasureRatio(d.sentBack)}.`,
+    `Accepted tasks sent back at least once: ${formatMeasureRatio(d.sentBack)}${d.sentBack.unknown ? `; ${d.sentBack.unknown} more with failures without a class` : ''}${d.sentBackSetupOnly ? `; ${d.sentBackSetupOnly} only by setup checks (may be network)` : ''}.`,
     `Rejected reviews: ${d.reviews.rejected} (candidate ${d.reviews.candidate}, integration ${d.reviews.integration}) with ${d.reviews.blockingFindings} blocking findings; ${d.reviews.withoutFindings} without findings.`,
     `Rejected by review although every required check passed on the same commit: ${formatMeasureRatio(d.afterGreenGates)} green candidates (diagnostic: what the checks did not catch).`,
     `Caught only against the current target branch (integration): ${d.integration}.`,
@@ -120,8 +132,16 @@ export function reportBlocks(r: ValueReport): Block[] {
   h(2, 'Autonomy');
   list([
     `Accepted tasks with a recorded human action: ${formatMeasureRatio(a.withAction)}; without one: ${formatMeasureRatio(a.withoutAction)}.`,
-    `Recorded actions: operator recovery decisions ${a.actions.operatorDecisions}, holds ${a.actions.holds}, cancelled attempts ${a.actions.cancelledAttempts}; retries ${or(a.actions.retries, String)}, resets ${or(a.actions.resets, String)}, base moves ${or(a.actions.baseMoves, String)}.`,
-    `Plan approvals: operator ${a.approvals.operator}, agent ${a.approvals.agent} (${a.approvals.source === 'events' ? 'from events' : a.approvals.source === 'state' ? 'current approvals only' : 'none recorded'}).`,
+    `Human actions with a recorded actor: operator recovery decisions ${a.actions.operatorDecisions}. Without a recorded actor (not counted as human): holds ${a.actions.holds}, cancelled attempts ${a.actions.cancelledAttempts}. ${actionsLine(
+      [
+        ['retries', a.actions.retries],
+        ['resets', a.actions.resets],
+        ['base moves', a.actions.baseMoves],
+      ],
+    )}`,
+    a.approvals.source === 'none'
+      ? 'Plan approvals: unknown (no approval records).'
+      : `Plan approvals: operator ${a.approvals.operator}, agent ${a.approvals.agent} (${a.approvals.source === 'events' ? 'from events' : a.approvals.source === 'state' ? 'current approvals of graphs only' : 'from events, and current approvals of graphs without events'}).`,
     `Escalations to a person (recovery awaiting the user or stopped): ${a.escalations}.`,
   ]);
   if (a.pauses.length)
@@ -174,10 +194,10 @@ export function reportBlocks(r: ValueReport): Block[] {
   h(2, 'Cost');
   list([
     `Known spend ${formatUsd(k.knownUsd)} over ${k.knownCalls} of ${k.calls} calls (reported by the provider ${formatUsd(k.reportedUsd)}, estimated from tariffs ${formatUsd(k.estimatedUsd)}).`,
-    `Calls without a known price: ${k.unknown.total} (no tariff ${k.unknown.noPrice}, incomplete telemetry ${k.unknown.incomplete}, active ${k.unknown.active}, abandoned ${k.unknown.abandoned})${k.unknown.byRuntime.length ? `; by runtime: ${k.unknown.byRuntime.map((x) => `${x.runtime} ${x.calls}`).join(', ')}` : ''}. Attempts without call records: ${k.attemptsWithoutCalls}.`,
+    `Calls without a known price: ${k.unknown.total} (no tariff ${k.unknown.noPrice}, incomplete telemetry ${k.unknown.incomplete}, active ${k.unknown.active}, abandoned ${k.unknown.abandoned})${k.unknown.byRuntime.length ? `; by runtime: ${k.unknown.byRuntime.map((x) => `${x.runtime} ${x.calls}`).join(', ')}` : ''}. Attempts without call records: ${k.attemptsWithoutCalls}; with records not marked complete: ${k.attemptsPartialCalls}.`,
     `Spend per accepted task: ${formatMeasureUsd(k.perAccepted)}.`,
     `Spend per fully priced attempt: ${usdDist(k.perAttempt)}.`,
-    `Spend on attempts that were not accepted: ${formatUsd(k.rejected.usd)} of ${formatUsd(k.rejected.totalUsd)} attributed to ${k.rejected.attempts} attempts${k.rejected.byBucket.length ? ` (${k.rejected.byBucket.map((x) => `${x.bucket} ${formatUsd(x.usd)}`).join(', ')})` : ''}.`,
+    `Spend on attempts that were not accepted: ${money(k.rejected.bound, k.rejected.usd)} of ${money(k.rejected.bound, k.rejected.totalUsd)} attributed to ${k.rejected.attempts} attempts${k.rejected.byBucket.length ? ` (${k.rejected.byBucket.map((x) => `${x.bucket} ${formatUsd(x.usd)}`).join(', ')})` : ''}.`,
   ]);
   if (k.byStage.length)
     table(
@@ -193,7 +213,7 @@ export function reportBlocks(r: ValueReport): Block[] {
 
   h(2, 'Environment');
   p(
-    `Failed attempts: ${e.failed}, of them ${e.classified} classified; attempts interrupted by shutdown are not failures: ${e.interrupted}. Caused by the environment: ${formatMeasureRatio(e.share)} classified.`,
+    `Failed attempts: ${e.failed}, of them ${e.classified} classified; attempts interrupted by shutdown are not failures: ${e.interrupted}. Caused by the environment: ${formatMeasureRatio(e.share)} classified${e.setupCheckFailures ? `; ${e.setupCheckFailures} more failed only in setup checks and may be environment too` : ''}.`,
   );
   table(
     ['Failure class', 'Attempts'],
@@ -201,7 +221,7 @@ export function reportBlocks(r: ValueReport): Block[] {
     [1],
   );
   list([
-    `Environment failures cost ${formatDuration(e.neutral.machineMs)} of machine time and ${formatUsd(e.neutral.knownUsd)} known spend; blocked before work (not counted as an attempt): ${e.neutral.blocked}; queue stops caused by the environment: ${e.neutral.runtimePauses}.`,
+    `Environment failures cost ${formatDuration(e.neutral.machineMs)} of machine time and ${money(e.neutral.costBound, e.neutral.knownUsd)} known spend; blocked before work (not counted as an attempt): ${e.neutral.blocked}; queue stops caused by the environment: ${e.neutral.runtimePauses}.`,
     `Integration check rechecks: ${e.rechecks.flaky} flaky (false rejection avoided), ${e.rechecks.confirmed} confirmed.`,
     'Environment sub-causes: not recorded yet.',
   ]);

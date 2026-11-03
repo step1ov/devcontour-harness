@@ -4,6 +4,7 @@
 import type { ValueReport } from '../contracts/report.ts';
 import { reportBlocks, type Block } from './document.ts';
 import { weekCells, weekColumns, weekNumeric } from './markdown.ts';
+import { assertReportBytes, reportLimits } from './compute.ts';
 
 const esc = (text: string) =>
   text
@@ -117,12 +118,13 @@ function block(b: Block): string {
  */
 export function reportHtml(report: ValueReport): string {
   const title = report.label ? `Harness report: ${report.label}` : 'Harness report';
-  return (
+  const html =
     '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n' +
     '<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
     `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">\n` +
     `<title>${esc(title)}</title>\n<style>${style}</style>\n</head>\n<body>\n<main>\n` +
     reportBlocks(report).map(block).join('\n') +
-    '\n</main>\n</body>\n</html>\n'
-  );
+    '\n</main>\n</body>\n</html>\n';
+  assertReportBytes(html, reportLimits.htmlBytes, 'HTML');
+  return html;
 }

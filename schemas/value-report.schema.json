@@ -100,6 +100,11 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
+        "doneWithoutAttempt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
         "withWait": {
           "type": "integer",
           "minimum": 0,
@@ -157,6 +162,7 @@
         "withFailureKind",
         "withTimings",
         "withCalls",
+        "doneWithoutAttempt",
         "withWait",
         "withEngineVersion",
         "engines",
@@ -401,6 +407,11 @@
             "bound"
           ],
           "additionalProperties": false
+        },
+        "sentBackSetupOnly": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "byGate": {
           "maxItems": 50,
@@ -762,6 +773,7 @@
         "byKind",
         "byPhase",
         "sentBack",
+        "sentBackSetupOnly",
         "byGate",
         "byGateTruncated",
         "reviews",
@@ -935,6 +947,7 @@
               "enum": [
                 "events",
                 "state",
+                "mixed",
                 "none"
               ]
             }
@@ -1652,6 +1665,11 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
+        "attemptsPartialCalls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
         "perAccepted": {
           "type": "object",
           "properties": {
@@ -1757,6 +1775,15 @@
         "rejected": {
           "type": "object",
           "properties": {
+            "bound": {
+              "type": "string",
+              "enum": [
+                "exact",
+                "lower",
+                "upper",
+                "unknown"
+              ]
+            },
             "usd": {
               "type": "number",
               "minimum": 0
@@ -1805,6 +1832,7 @@
             }
           },
           "required": [
+            "bound",
             "usd",
             "totalUsd",
             "attempts",
@@ -1894,6 +1922,7 @@
         "estimatedUsd",
         "unknown",
         "attemptsWithoutCalls",
+        "attemptsPartialCalls",
         "perAccepted",
         "perAttempt",
         "rejected",
@@ -1992,6 +2021,11 @@
           ],
           "additionalProperties": false
         },
+        "setupCheckFailures": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
         "timeLimit": {
           "type": "integer",
           "minimum": 0,
@@ -2003,6 +2037,15 @@
         "neutral": {
           "type": "object",
           "properties": {
+            "costBound": {
+              "type": "string",
+              "enum": [
+                "exact",
+                "lower",
+                "upper",
+                "unknown"
+              ]
+            },
             "attempts": {
               "type": "integer",
               "minimum": 0,
@@ -2029,6 +2072,7 @@
             }
           },
           "required": [
+            "costBound",
             "attempts",
             "blocked",
             "machineMs",
@@ -2064,6 +2108,7 @@
         "interrupted",
         "buckets",
         "share",
+        "setupCheckFailures",
         "timeLimit",
         "causes",
         "neutral",
@@ -2147,6 +2192,9 @@
                   },
                   "engineChanged": {
                     "type": "boolean"
+                  },
+                  "enginesTruncated": {
+                    "type": "boolean"
                   }
                 },
                 "required": [
@@ -2161,7 +2209,8 @@
                   "unknownCalls",
                   "leadMedianMs",
                   "engines",
-                  "engineChanged"
+                  "engineChanged",
+                  "enginesTruncated"
                 ],
                 "additionalProperties": false
               },

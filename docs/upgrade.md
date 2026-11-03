@@ -270,6 +270,11 @@ json|md|html`, `--out F`, окно `--since/--until`, `--as-of`, `--no-titles`.
 - **Библиотека.** `devcontour-harness/report` (`valueReport`,
   `reportMarkdown`, `reportHtml`; без `node:*`), в корне — те же функции,
   `collectReportInput(store)` и `Harness.report()`.
+- **Чтение без файлов.** Открытие состояния только для чтения (`report`,
+  `status`, `events`, `result`, проверка перед открытием) у базы без `-wal`
+  больше не создаёт в каталоге состояния служебных `-wal` и `-shm`: база
+  открывается неизменяемой. При существующем `-wal` (писатель работает)
+  поведение прежнее.
 - **Схема.** `value-report` (`schemas/value-report.schema.json`,
   `reportVersion: 1`) и данные `report` в `cliDataSchemas`.
 

@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   API_VERSION,
   HarnessError,
@@ -41,6 +42,22 @@ function parseDocument(data: string): ExecutionDocument {
       })),
     );
   return parsed.data;
+}
+
+/**
+ * Открытие без единой записи в каталог. Читатель WAL-базы создаёт служебные
+ * `-wal` и `-shm`, если их нет; поэтому без `-wal` (ни один писатель базу не
+ * держит, всё зафиксировано в основном файле) база открывается как
+ * неизменяемая (`immutable=1`) — SQLite не создаёт файлов и не берёт
+ * блокировок. При существующем `-wal` его содержимое нужно прочитать: обычное
+ * открытие только для чтения пользуется уже существующими файлами писателя.
+ */
+function openReadOnly(file: string) {
+  if (existsSync(file + '-wal')) return new DatabaseSync(file, { readOnly: true });
+  const url = pathToFileURL(file);
+  url.searchParams.set('mode', 'ro');
+  url.searchParams.set('immutable', '1');
+  return new DatabaseSync(url, { readOnly: true });
 }
 
 /** Сколько событий одной транзакции допускается (договор курсора адаптеров). */
@@ -84,7 +101,7 @@ export class SqliteExecutionStore implements ExecutionStore {
       throw new HarnessError('STATE_VERSION_UNSUPPORTED', 'Состояние не найдено');
     if (options.readOnly) {
       // Диагностическое открытие: ни автор, ни PRAGMA, ни схема не меняются.
-      this.db = new DatabaseSync(file, { readOnly: true });
+      this.db = openReadOnly(file);
       this.db.exec('PRAGMA busy_timeout=20000;');
       return;
     }
@@ -114,7 +131,7 @@ export class SqliteExecutionStore implements ExecutionStore {
 
   /** Проверка существующего файла без единой записи; отказ — HarnessError. */
   private static preflight(file: string) {
-    const db = new DatabaseSync(file, { readOnly: true });
+    const db = openReadOnly(file);
     try {
       db.exec('PRAGMA busy_timeout=20000;');
       const tables = new Set(

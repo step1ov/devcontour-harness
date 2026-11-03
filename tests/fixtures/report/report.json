@@ -16,6 +16,7 @@
     "withTimings": 9,
     "withCalls": 11,
     "withWait": 8,
+    "doneWithoutAttempt": 0,
     "withEngineVersion": 11,
     "engines": [
       "0.1.0-alpha.29",
@@ -44,14 +45,14 @@
       },
       {
         "id": "sent-back",
-        "value": "2 of 5",
-        "text": "2 of 5 accepted tasks were sent back by checks, review or the scope rule before merge. Nothing merged without passing every required check and review.",
-        "basis": "An attempt rejected as gate, review or scope-violation before the accepting attempt. Check failures caused by network or registry errors are still counted here, so this is an upper bound.",
+        "value": "≥ 2 of 5",
+        "text": "At least 2 of 5 accepted tasks were sent back by checks, review or the scope rule before merge; 1 more task had failures without a class before merge. Nothing merged without passing every required check and review.",
+        "basis": "An attempt rejected as gate, review or scope-violation before the accepting attempt. Failures without a class are not counted, so this is a lower bound.",
         "measure": {
           "value": 2,
           "n": 5,
-          "unknown": 0,
-          "bound": "exact"
+          "unknown": 1,
+          "bound": "lower"
         }
       },
       {
@@ -80,14 +81,14 @@
       },
       {
         "id": "environment",
-        "value": "1 of 6",
-        "text": "1 of 6 classified failed attempts were caused by the environment, not your code.",
+        "value": "≥ 1 of 6",
+        "text": "At least 1 of 6 classified failed attempts were caused by the environment; 1 more failure in setup checks may be environment too.",
         "basis": "Environment: sandbox, network, provider access and expired leases. 0 time-limit failures (ambiguous) and 1 unknown or unclassified failure are not distributed.",
         "measure": {
           "value": 1,
           "n": 6,
           "unknown": 1,
-          "bound": "exact"
+          "bound": "lower"
         }
       }
     ]
@@ -107,9 +108,10 @@
     "sentBack": {
       "value": 2,
       "n": 5,
-      "unknown": 0,
-      "bound": "exact"
+      "unknown": 1,
+      "bound": "lower"
     },
+    "sentBackSetupOnly": 0,
     "byGate": [
       {
         "gate": "install",
@@ -215,13 +217,13 @@
   },
   "autonomy": {
     "withAction": {
-      "value": 1,
+      "value": 0,
       "n": 5,
       "unknown": 0,
       "bound": "lower"
     },
     "withoutAction": {
-      "value": 4,
+      "value": 5,
       "n": 5,
       "unknown": 0,
       "bound": "upper"
@@ -383,6 +385,7 @@
       ]
     },
     "attemptsWithoutCalls": 2,
+    "attemptsPartialCalls": 0,
     "perAccepted": {
       "value": 2.37,
       "n": 5,
@@ -391,16 +394,17 @@
     },
     "perAttempt": {
       "n": 9,
-      "unknown": 2,
+      "unknown": 4,
       "median": 0.8,
       "p75": 1.75,
       "max": 3,
       "values": []
     },
     "rejected": {
+      "bound": "lower",
       "usd": 6.5,
       "totalUsd": 11.35,
-      "attempts": 11,
+      "attempts": 13,
       "byBucket": [
         {
           "bucket": "defect",
@@ -412,6 +416,10 @@
         },
         {
           "bucket": "operator",
+          "usd": 0
+        },
+        {
+          "bucket": "unclassified",
           "usd": 0
         }
       ]
@@ -494,11 +502,13 @@
       "value": 1,
       "n": 6,
       "unknown": 1,
-      "bound": "exact"
+      "bound": "lower"
     },
+    "setupCheckFailures": 1,
     "timeLimit": 0,
     "causes": null,
     "neutral": {
+      "costBound": "exact",
       "attempts": 1,
       "blocked": 1,
       "machineMs": 120000,
@@ -526,6 +536,7 @@
         "engines": [
           "0.1.0-alpha.30"
         ],
+        "enginesTruncated": false,
         "engineChanged": true
       },
       {
@@ -543,6 +554,7 @@
           "0.1.0-alpha.29",
           "0.1.0-alpha.30"
         ],
+        "enginesTruncated": false,
         "engineChanged": true
       },
       {
@@ -564,6 +576,7 @@
         "engines": [
           "0.1.0-alpha.29"
         ],
+        "enginesTruncated": false,
         "engineChanged": false
       },
       {
@@ -580,6 +593,7 @@
         "engines": [
           "0.1.0-alpha.29"
         ],
+        "enginesTruncated": false,
         "engineChanged": true
       },
       {
@@ -596,6 +610,7 @@
         "engines": [
           "unknown"
         ],
+        "enginesTruncated": false,
         "engineChanged": false
       },
       {
@@ -612,6 +627,7 @@
         "engines": [
           "unknown"
         ],
+        "enginesTruncated": false,
         "engineChanged": false
       }
     ],
@@ -752,7 +768,7 @@
     },
     {
       "id": "actions-not-recorded",
-      "text": "Retries, resets, cancellations without an attempt and base moves are not recorded yet, so human actions are a lower bound and tasks without them an upper bound."
+      "text": "Human actions are counted only where a person is recorded as the actor (operator recovery decisions); retries, resets, cancellations and base moves have no recorded actor yet, so human actions are a lower bound and tasks without them an upper bound."
     },
     {
       "id": "check-network",
@@ -781,6 +797,10 @@
     {
       "id": "calls",
       "text": "2 of 13 attempts have no call records, so their spend is unknown."
+    },
+    {
+      "id": "holds-actor",
+      "text": "Holds and cancelled attempts record no actor (host operations hold tasks too), so they are not counted as human actions."
     },
     {
       "id": "prices",

@@ -130,6 +130,8 @@ const weekRowSchema = z.strictObject({
   engines: z.array(label).max(5),
   /** Набор версий движка отличается от предыдущей активной недели. */
   engineChanged: z.boolean(),
+  /** Версий движка в неделе больше 5: показаны первые. */
+  enginesTruncated: z.boolean(),
 });
 const weekGapSchema = z.strictObject({ kind: z.literal('gap'), from: week, to: week });
 const weekEarlierSchema = z.strictObject({
@@ -181,7 +183,13 @@ export const valueReportSchema = z.strictObject({
     failed: count,
     withFailureKind: count,
     withTimings: count,
+    /** Попытки с полным учётом вызовов (`callsRecorded`). */
     withCalls: count,
+    /**
+     * Поручения `done` без успешной попытки: время приёмки неизвестно, в
+     * принятые (в любом окне) не входят.
+     */
+    doneWithoutAttempt: count,
     withWait: count,
     withEngineVersion: count,
     engines: z.array(label).max(20),
@@ -209,7 +217,14 @@ export const valueReportSchema = z.strictObject({
     rejected: count,
     byKind: z.strictObject({ gate: count, review: count, 'scope-violation': count }),
     byPhase: z.strictObject({ candidate: count, integration: count, unknown: count }),
+    /**
+     * Возвращено до приёмки: `value` — с отказом `defect`; `unknown` — только
+     * с отказами без класса (`unknown`, `unclassified`) — `bound: lower`;
+     * без них, но с возвратами только gate подготовки — `bound: upper`.
+     */
     sentBack: reportMeasureSchema,
+    /** Возвращённые только отказами gate подготовки (возможна сеть). */
+    sentBackSetupOnly: count,
     byGate: z
       .array(
         z.strictObject({
@@ -250,7 +265,9 @@ export const valueReportSchema = z.strictObject({
     withoutAction: reportMeasureSchema,
     /** `null` — действие этого вида не записывается. */
     actions: z.strictObject({
+      /** Решения recovery с источником `operator`: единственное действие с записанным актёром. */
       operatorDecisions: count,
+      /** Удержания и отмены попыток: актёр не записан, к действиям человека не относятся. */
       holds: count,
       cancelledAttempts: count,
       retries: count.nullable(),
@@ -260,7 +277,12 @@ export const valueReportSchema = z.strictObject({
     approvals: z.strictObject({
       operator: count,
       agent: count,
-      source: z.enum(['events', 'state', 'none']),
+      /**
+       * `events` — события `graph.approved`; `state` — согласования графов в
+       * состоянии (графы без событий); `mixed` — оба; `none` — записей нет
+       * (число неизвестно, а не ноль).
+       */
+      source: z.enum(['events', 'state', 'mixed', 'none']),
     }),
     pauses: z
       .array(
@@ -322,10 +344,15 @@ export const valueReportSchema = z.strictObject({
       abandoned: count,
       byRuntime: z.array(z.strictObject({ runtime: label, calls: count })).max(20),
     }),
+    /** Попытки без единой записи вызова и без полного учёта: расход неизвестен. */
     attemptsWithoutCalls: count,
+    /** Попытки с записями вызовов, но без полного учёта: расход — нижняя граница. */
+    attemptsPartialCalls: count,
     perAccepted: reportMeasureSchema,
     perAttempt: reportDistSchema,
     rejected: z.strictObject({
+      /** `lower` — у части попыток учёт неполон. */
+      bound: z.enum(reportBounds),
       usd,
       totalUsd: usd,
       attempts: count,
@@ -347,11 +374,15 @@ export const valueReportSchema = z.strictObject({
     classified: count,
     interrupted: count,
     buckets: z.array(z.strictObject({ bucket: z.enum(failureBuckets), count })).length(10),
+    /** Отказы окружения среди классифицированных; `lower`, если есть отказы gate подготовки. */
     share: reportMeasureSchema,
+    /** Отказы `defect` только в gates подготовки: возможно, тоже окружение (сеть, реестр). */
+    setupCheckFailures: count,
     timeLimit: count,
     /** Подпричина отказа окружения ещё не записывается. */
     causes: z.null(),
     neutral: z.strictObject({
+      costBound: z.enum(reportBounds),
       attempts: count,
       blocked: count,
       machineMs: ms,

@@ -18,6 +18,7 @@ import type { ReviewRecord } from '../contracts/review.ts';
 import type { FailureBucket, ReportDist, ReportMeasure, ValueReport } from '../contracts/report.ts';
 import {
   formatDuration,
+  formatMeasureRatio,
   formatMeasureUsd,
   formatRatio,
   formatUsd,
@@ -151,8 +152,9 @@ function windowOf(input: ValueReportInput, options: ValueReportOptions): Window 
   return { since, until, asOf };
 }
 
+/** Неизвестное время не входит ни в одно окно (и в неограниченное тоже): итог не зависит от окна. */
 const inWindow = (w: Window, iso: string | undefined) => {
-  if (!iso) return w.since === undefined && w.until === undefined;
+  if (!iso) return false;
   const ms = at(iso);
   return (w.since === undefined || ms >= w.since) && (w.until === undefined || ms < w.until);
 };
@@ -202,6 +204,13 @@ const counted = (a: AttemptState) =>
 
 /** Gate подготовки: установка зависимостей — его отказ часто сетевой (M6). */
 const setupGate = (gate: string) => /install|setup|bootstrap|deps|dependenc/i.test(gate);
+
+/** Отказ gate только в gates подготовки: возможно, сеть или реестр, а не код (M6). */
+const setupOnlyFailure = (a: AttemptState) => {
+  if (a.failureKind !== 'gate' || a.blocked) return false;
+  const failing = a.evidence.filter((e) => e.kind === 'test' && !e.passed);
+  return failing.length > 0 && failing.every((e) => setupGate(e.gate));
+};
 
 /* ------------------------------------------------------------------ */
 /* Статистика                                                          */
@@ -369,9 +378,22 @@ export function valueReport(
 
   const isFirstPass = (f: WorkFacts) =>
     f.attempts.filter(counted).length === 1 && !!f.accepting && counted(f.accepting);
-  const sentBack = (f: WorkFacts) => {
+  /**
+   * Возврат до приёмки: `defect` — есть отказ `defect`; `setup` — только
+   * отказы gate подготовки; `unknown` — отказов `defect` нет, но есть отказы
+   * без класса; `no` — ни того ни другого.
+   */
+  const sentBack = (f: WorkFacts): 'defect' | 'setup' | 'unknown' | 'no' => {
     const end = f.accepting ? f.attempts.indexOf(f.accepting) : f.attempts.length;
-    return f.attempts.slice(0, end).some((a) => failureBucketOf(a) === 'defect');
+    const before = f.attempts.slice(0, end);
+    const defects = before.filter((a) => failureBucketOf(a) === 'defect');
+    if (defects.length) return defects.every(setupOnlyFailure) ? 'setup' : 'defect';
+    return before.some((a) => {
+      const b = failureBucketOf(a);
+      return b === 'unknown' || b === 'unclassified';
+    })
+      ? 'unknown'
+      : 'no';
   };
   const leadOf = (f: WorkFacts): { ms: number | null; fallback: boolean } => {
     const first = f.attempts[0];
@@ -385,12 +407,18 @@ export function valueReport(
     sum(list.map((a) => (a.finishedAt ? Math.max(0, at(a.finishedAt) - at(a.startedAt)) : 0)));
 
   /* Стоимость попыток и поручений ------------------------------------ */
+  /**
+   * Расход попытки. `callsRecorded` значит «учёт вызовов полон», а не «вызовы
+   * есть»: записи попытки без флага тоже её расход, но лишь нижняя граница;
+   * без флага и без записей расход неизвестен.
+   */
   const attemptCost = (a: AttemptState) => {
     const own = callsOfRun.get(a.id) ?? [];
     const known = own.filter(callCostKnown);
     return {
       usd: sum(known.map((c) => c.costUsd!)),
       unknown: own.length - known.length,
+      calls: own.length,
       complete: !!a.callsRecorded && own.every(callComplete),
     };
   };
@@ -563,15 +591,15 @@ export function valueReport(
   );
   const holds = windowEvents.filter((e) => e.type === 'work.held' && !e.payload.released);
   const cancelledAttempts = windowAttempts.filter((a) => failureBucketOf(a) === 'operator');
-  const actedOn = new Set<string>([
-    ...[...episodes.values()]
+  // Действие человека — только запись с актёром-человеком (решение recovery
+  // оператора). Удержание (`work.held`) и отмена попытки актёра не называют:
+  // их ставят и операции хоста (например, смена контракта), поэтому они
+  // показаны отдельно и в действия человека не входят.
+  const actedOn = new Set<string>(
+    [...episodes.values()]
       .filter((r) => r.decision?.source.kind === 'operator')
       .map((r) => r.workId),
-    ...events
-      .filter((e) => e.type === 'work.held' && !e.payload.released && e.workId)
-      .map((e) => e.workId!),
-    ...attempts.filter((a) => failureBucketOf(a) === 'operator').map((a) => a.workId),
-  ]);
+  );
   const acceptedActed = accepted.filter((f) => actedOn.has(f.work.id)).length;
   const escalated = new Set<string>([
     ...[...episodes.values()]
@@ -588,40 +616,58 @@ export function valueReport(
       .map((e) => (e.type === 'work.recovery' ? e.payload.recoveryId : '')),
   ]);
 
-  const approvalEvents = windowEvents.filter((e) => e.type === 'graph.approved');
-  const approvals =
-    approvalEvents.length || events.length
-      ? {
-          operator: approvalEvents.filter(
-            (e) => e.type === 'graph.approved' && e.payload.actor === 'operator',
-          ).length,
-          agent: approvalEvents.filter(
-            (e) => e.type === 'graph.approved' && e.payload.actor === 'agent',
-          ).length,
-          source: 'events' as const,
-        }
-      : graphs.some((g) => g.approval)
-        ? {
-            operator: graphs.filter(
-              (g) => g.approval?.actor === 'operator' && inWindow(w, g.approval.at),
-            ).length,
-            agent: graphs.filter((g) => g.approval?.actor === 'agent' && inWindow(w, g.approval.at))
-              .length,
-            source: 'state' as const,
-          }
-        : { operator: 0, agent: 0, source: 'none' as const };
+  // Согласования: по событиям — для графов, у которых события согласования
+  // есть; по состоянию графа — для прочих; ни того ни другого — неизвестно.
+  const approvalEvents = events.filter((e) => e.type === 'graph.approved');
+  const evented = new Set(approvalEvents.map((e) => e.graphId ?? ''));
+  let fromEvents = 0;
+  let fromState = 0;
+  const approvalCount = { operator: 0, agent: 0 };
+  for (const e of approvalEvents)
+    if (e.type === 'graph.approved' && inWindow(w, e.at)) {
+      approvalCount[e.payload.actor] += 1;
+      fromEvents += 1;
+    }
+  for (const g of graphs)
+    if (!evented.has(g.id) && g.approval && inWindow(w, g.approval.at)) {
+      approvalCount[g.approval.actor] += 1;
+      fromState += 1;
+    }
+  const approvalsKnown = approvalEvents.length > 0 || graphs.some((g) => g.approval);
+  const approvals = {
+    ...approvalCount,
+    source: !approvalsKnown
+      ? ('none' as const)
+      : fromEvents && fromState
+        ? ('mixed' as const)
+        : fromState
+          ? ('state' as const)
+          : ('events' as const),
+  };
 
   // Паузы: каждое `control.paused` до следующего `control.resumed` (открытая — до asOf).
   const pauseRows = new Map<
     PauseReason,
     { count: number; pausedMs: number; open: number; failures: Set<FailureKind> }
   >();
+  // Время паузы — пересечение с окном [since, until или asOf); пауза, начатая
+  // до окна, входит своим временем внутри окна, но не числом пауз.
+  const windowStart = w.since ?? -Infinity;
+  const windowEnd = Math.min(w.asOf, w.until ?? w.asOf);
+  const rowOf = (reason: PauseReason) => {
+    const row = pauseRows.get(reason) ?? { count: 0, pausedMs: 0, open: 0, failures: new Set() };
+    pauseRows.set(reason, row);
+    return row;
+  };
   let openPause: { reason: PauseReason; at: number; inside: boolean } | undefined;
   const closePause = (end: number, open: boolean) => {
-    if (!openPause?.inside) return;
-    const row = pauseRows.get(openPause.reason)!;
-    row.pausedMs += Math.max(0, end - openPause.at);
-    if (open) row.open += 1;
+    if (!openPause) return;
+    const overlap = Math.min(end, windowEnd) - Math.max(openPause.at, windowStart);
+    if (overlap > 0 || openPause.inside) {
+      const row = rowOf(openPause.reason);
+      row.pausedMs += Math.max(0, overlap);
+      if (open && openPause.inside) row.open += 1;
+    }
   };
   for (const e of events) {
     if (e.type === 'control.paused') {
@@ -629,22 +675,16 @@ export function valueReport(
       const inside = inWindow(w, e.at);
       openPause = { reason: e.payload.reason, at: at(e.at), inside };
       if (inside) {
-        const row = pauseRows.get(e.payload.reason) ?? {
-          count: 0,
-          pausedMs: 0,
-          open: 0,
-          failures: new Set(),
-        };
+        const row = rowOf(e.payload.reason);
         row.count += 1;
         for (const k of e.payload.failures ?? []) row.failures.add(k);
-        pauseRows.set(e.payload.reason, row);
       }
     } else if (e.type === 'control.resumed' && openPause) {
       closePause(at(e.at), false);
       openPause = undefined;
     }
   }
-  if (openPause) closePause(Math.min(w.asOf, w.until ?? w.asOf), true);
+  if (openPause) closePause(windowEnd, true);
   const pauseOrder: PauseReason[] = [
     'operator',
     'shutdown',
@@ -745,7 +785,9 @@ export function valueReport(
   const estimatedUsd = sum(
     knownCalls.filter((c) => c.costSource === 'tariff-estimate').map((c) => c.costUsd!),
   );
-  const uninstrumented = windowAttempts.filter((a) => !a.callsRecorded).length;
+  const partialAttempts = windowAttempts.filter((a) => !a.callsRecorded);
+  const uninstrumented = partialAttempts.length;
+  const withoutCalls = partialAttempts.filter((a) => !callsOfRun.has(a.id)).length;
   const spendBound: ReportMeasure['bound'] =
     accepted.length === 0 ||
     (knownCalls.length === 0 &&
@@ -760,9 +802,18 @@ export function valueReport(
     unknownCalls.length + uninstrumented,
     spendBound,
   );
+  // Все завершённые попытки окна: и без полного учёта (их расход — нижняя граница).
   const attemptCosts = windowAttempts
-    .filter((a) => a.status !== 'active' && a.callsRecorded)
+    .filter((a) => a.status !== 'active')
     .map((a) => ({ a, cost: attemptCost(a) }));
+  const attemptsBound = (list: typeof attemptCosts): ReportMeasure['bound'] =>
+    list.every(({ cost }) => cost.complete)
+      ? 'exact'
+      : list.some(({ cost }) => cost.usd > 0 || cost.calls > cost.unknown)
+        ? 'lower'
+        : list.length
+          ? 'unknown'
+          : 'exact';
   const fullyPriced = attemptCosts.filter(({ cost }) => cost.complete && cost.unknown === 0);
   // Прерванная штатной остановкой попытка не отклонена: следующая продолжает её работу.
   const rejectedCosts = attemptCosts.filter(
@@ -803,8 +854,12 @@ export function valueReport(
   const classified = failedTotal - unclassifiedOrUnknown;
   const envAttempts = failedAttempts.filter((a) => failureBucketOf(a) === 'environment');
   const envCount = envAttempts.length;
+  const setupCheckFailures = failedAttempts.filter(setupOnlyFailure).length;
   const rechecks = { flaky: 0, confirmed: 0 };
   for (const { e } of windowEvidence) if (e.recheck) rechecks[e.recheck.outcome] += 1;
+
+  const sentBackCount = { defect: 0, setup: 0, unknown: 0, no: 0 };
+  for (const f of accepted) sentBackCount[sentBack(f)] += 1;
 
   /* Недели (T1–T2) ---------------------------------------------------- */
   const weekly = weeksOf({
@@ -860,6 +915,7 @@ export function valueReport(
     withTimings: windowAttempts.filter((a) => a.timings?.length).length,
     withCalls: windowAttempts.filter((a) => a.callsRecorded).length,
     withWait: windowAttempts.filter((a) => a.wait?.approvedAt).length,
+    doneWithoutAttempt: facts.filter((f) => f.outcome === 'accepted' && !f.accepting).length,
     withEngineVersion: windowAttempts.filter((a) => a.engineVersion).length,
     engines: engineSet.slice(0, 20).map((e) => clip(e, 200)),
     enginesTruncated: engineSet.length > 20,
@@ -885,7 +941,13 @@ export function valueReport(
       rejected: defectAttempts.length,
       byKind,
       byPhase,
-      sentBack: measure(accepted.filter(sentBack).length, accepted.length, 0, 'exact'),
+      sentBack: measure(
+        sentBackCount.defect + sentBackCount.setup,
+        accepted.length,
+        sentBackCount.unknown,
+        sentBackCount.unknown ? 'lower' : sentBackCount.setup ? 'upper' : 'exact',
+      ),
+      sentBackSetupOnly: sentBackCount.setup,
       byGate: byGate.slice(0, reportLimits.rows),
       byGateTruncated: byGate.length > reportLimits.rows,
       reviews: reviewsBlock,
@@ -970,7 +1032,8 @@ export function valueReport(
           .slice(0, 20)
           .map(([runtime, n]) => ({ runtime: clip(runtime, 200), calls: n })),
       },
-      attemptsWithoutCalls: uninstrumented,
+      attemptsWithoutCalls: withoutCalls,
+      attemptsPartialCalls: uninstrumented - withoutCalls,
       perAccepted: perAcceptedUsd,
       perAttempt: dist(
         fullyPriced.map(({ cost }) => cost.usd),
@@ -978,6 +1041,7 @@ export function valueReport(
         false,
       ),
       rejected: {
+        bound: attemptsBound(attemptCosts),
         usd: round2(sum(rejectedCosts.map(({ cost }) => cost.usd))),
         totalUsd: round2(sum(attemptCosts.map(({ cost }) => cost.usd))),
         attempts: attemptCosts.length,
@@ -1001,14 +1065,22 @@ export function valueReport(
       classified,
       interrupted,
       buckets: failureBucketNames.map((b) => ({ bucket: b, count: bucketCounts.get(b) ?? 0 })),
-      share: measure(envCount, classified, unclassifiedOrUnknown, classified ? 'exact' : 'unknown'),
+      share: measure(
+        envCount,
+        classified,
+        unclassifiedOrUnknown,
+        !classified ? 'unknown' : setupCheckFailures ? 'lower' : 'exact',
+      ),
+      setupCheckFailures,
       timeLimit: bucketCounts.get('time-limit') ?? 0,
       causes: null,
       neutral: {
+        // Тот же расход, что у корзины `environment` раздела расходов.
+        costBound: attemptsBound(attemptCosts.filter(({ a }) => envAttempts.includes(a))),
         attempts: envCount,
         blocked: envAttempts.filter((a) => a.blocked).length,
         machineMs: Math.round(machineOf(envAttempts)),
-        knownUsd: round2(sum(envAttempts.map((a) => attemptCost(a).usd))),
+        knownUsd: round2(bucketUsd.get('environment') ?? 0),
         runtimePauses,
       },
       rechecks,
@@ -1019,7 +1091,21 @@ export function valueReport(
   };
   report.summary = summaryOf(report, failedAttempts.length);
   report.limitations = limitationsOf(report);
+  assertReportBytes(JSON.stringify(report), reportLimits.jsonBytes, 'JSON');
   return report;
+}
+
+/**
+ * Предел размера отчёта (`REPORT_LIMITS`): его обеспечивают пределы списков,
+ * поэтому превышение — дефект harness (`INTERNAL`), а не усечение молча.
+ */
+export function assertReportBytes(text: string, limit: number, what: string) {
+  const bytes = new TextEncoder().encode(text).length;
+  if (bytes > limit)
+    throw new HarnessError(
+      'INTERNAL',
+      `Отчёт ${what}: ${bytes} байт больше предела ${limit}; пределы списков нарушены (дефект harness)`,
+    );
 }
 
 /* ------------------------------------------------------------------ */
@@ -1119,6 +1205,7 @@ function weeksOf(input: {
       unknownCalls: row.unknownCalls,
       leadMedianMs: row.leads.length >= 5 ? dist(row.leads, 0).median : null,
       engines: engines.slice(0, 5),
+      enginesTruncated: engines.length > 5,
       engineChanged:
         prevEngines !== undefined &&
         (prevEngines.size !== row.engines.size || engines.some((e) => !prevEngines.has(e))),
@@ -1180,10 +1267,12 @@ function summaryOf(r: ValueReport, failedAttempts: number): ValueReport['summary
         ? lead.values.map(formatDuration).join(', ')
         : 'unknown';
   const unpriced = r.cost.unknown.total;
-  const uninstrumented = r.cost.attemptsWithoutCalls;
+  const withoutCalls = r.cost.attemptsWithoutCalls;
+  const partialCalls = r.cost.attemptsPartialCalls;
   const spendWhy = [
     unpriced ? plural(unpriced, 'call') + ' without a known price' : '',
-    uninstrumented ? plural(uninstrumented, 'attempt') + ' without call records' : '',
+    withoutCalls ? plural(withoutCalls, 'attempt') + ' without call records' : '',
+    partialCalls ? plural(partialCalls, 'attempt') + ' with possibly incomplete call records' : '',
   ]
     .filter(Boolean)
     .join(', ');
@@ -1200,9 +1289,9 @@ function summaryOf(r: ValueReport, failedAttempts: number): ValueReport['summary
       },
       {
         id: 'sent-back',
-        value: formatRatio(sb.value ?? 0, sb.n),
-        text: `${formatRatio(sb.value ?? 0, sb.n)} accepted tasks were sent back by checks, review or the scope rule before merge. Nothing merged without passing every required check and review.`,
-        basis: `An attempt rejected as gate, review or scope-violation before the accepting attempt. Check failures caused by network or registry errors are still counted here, so this is an upper bound.`,
+        value: formatMeasureRatio(sb),
+        text: `${sb.bound === 'lower' ? 'At least ' : sb.bound === 'upper' ? 'At most ' : ''}${formatRatio(sb.value ?? 0, sb.n)} accepted tasks were sent back by checks, review or the scope rule before merge${sb.unknown ? `; ${plural(sb.unknown, 'more task')} had failures without a class before merge` : ''}. Nothing merged without passing every required check and review.`,
+        basis: `An attempt rejected as gate, review or scope-violation before the accepting attempt.${r.defects.sentBackSetupOnly ? ` ${plural(r.defects.sentBackSetupOnly, 'task')} counted only through setup-check failures, which may be network or registry errors.` : ''}${sb.bound === 'exact' ? '' : sb.bound === 'lower' ? ' Failures without a class are not counted, so this is a lower bound.' : ' So this is an upper bound.'}`,
         measure: sb,
       },
       {
@@ -1229,11 +1318,13 @@ function summaryOf(r: ValueReport, failedAttempts: number): ValueReport['summary
       },
       {
         id: 'environment',
-        value: env.value === null ? 'unknown' : formatRatio(env.value, env.n),
+        value: formatMeasureRatio(env),
         text:
           env.value === null
             ? 'No classified failed attempts in the window.'
-            : `${formatRatio(env.value, env.n)} classified failed attempts were caused by the environment, not your code.`,
+            : env.bound === 'lower'
+              ? `At least ${formatRatio(env.value, env.n)} classified failed attempts were caused by the environment; ${plural(r.environment.setupCheckFailures, 'more failure')} in setup checks may be environment too.`
+              : `${formatRatio(env.value, env.n)} classified failed attempts were caused by the environment, not your code.`,
         basis: `Environment: sandbox, network, provider access and expired leases. ${plural(r.environment.timeLimit, 'time-limit failure')} (ambiguous) and ${plural(env.unknown, 'unknown or unclassified failure')} are not distributed.`,
         measure: env,
       },
@@ -1249,7 +1340,7 @@ function limitationsOf(r: ValueReport): ValueReport['limitations'] {
     },
     {
       id: 'actions-not-recorded',
-      text: 'Retries, resets, cancellations without an attempt and base moves are not recorded yet, so human actions are a lower bound and tasks without them an upper bound.',
+      text: 'Human actions are counted only where a person is recorded as the actor (operator recovery decisions); retries, resets, cancellations and base moves have no recorded actor yet, so human actions are a lower bound and tasks without them an upper bound.',
     },
     {
       id: 'check-network',
@@ -1287,6 +1378,26 @@ function limitationsOf(r: ValueReport): ValueReport['limitations'] {
     'calls',
     r.cost.attemptsWithoutCalls > 0,
     `${r.cost.attemptsWithoutCalls} of ${c.attempts} attempts have no call records, so their spend is unknown.`,
+  );
+  add(
+    'partial-calls',
+    r.cost.attemptsPartialCalls > 0,
+    `${r.cost.attemptsPartialCalls} of ${c.attempts} attempts have call records that are not marked complete; their spend is a lower bound.`,
+  );
+  add(
+    'done-without-attempt',
+    c.doneWithoutAttempt > 0,
+    `${plural(c.doneWithoutAttempt, 'done task')} without a succeeded attempt ${c.doneWithoutAttempt === 1 ? 'has' : 'have'} no acceptance time and ${c.doneWithoutAttempt === 1 ? 'is' : 'are'} not counted as accepted.`,
+  );
+  add(
+    'holds-actor',
+    r.autonomy.actions.holds + r.autonomy.actions.cancelledAttempts > 0,
+    'Holds and cancelled attempts record no actor (host operations hold tasks too), so they are not counted as human actions.',
+  );
+  add(
+    'approvals-unknown',
+    r.autonomy.approvals.source === 'none',
+    'No approval records: plan approvals are unknown, not zero.',
   );
   add(
     'prices',

@@ -2,25 +2,25 @@
 
 _Window: all history. As of 2026-11-03T16:00:00.000Z. Harness 0.0.0-test. Engines: 0.1.0-alpha.29, 0.1.0-alpha.30 (2 attempts unknown)._
 
-_Coverage: 13 attempts on 7 tasks; failure class on 6 of 7 failed; stage timings on 9; call records on 11; approval wait on 8. 10 calls, 3 plan or contract review rounds, 8 events (events from 2026-10-05T07:50:00.000Z)._
+_Coverage: 13 attempts on 7 tasks; failure class on 6 of 7 failed; stage timings on 9; complete call records on 11; approval wait on 8. 10 calls, 3 plan or contract review rounds, 8 events (events from 2026-10-05T07:50:00.000Z)._
 
 ## Summary
 
 - **5**: 5 tasks accepted. 2 of them on the first try.
   _Accepted: merged after all required checks and an independent review. First try: the accepting attempt was the only counted attempt (environment failures and shutdowns are not counted). Window: all history._
-- **2 of 5**: 2 of 5 accepted tasks were sent back by checks, review or the scope rule before merge. Nothing merged without passing every required check and review.
-  _An attempt rejected as gate, review or scope-violation before the accepting attempt. Check failures caused by network or registry errors are still counted here, so this is an upper bound._
+- **≥ 2 of 5**: At least 2 of 5 accepted tasks were sent back by checks, review or the scope rule before merge; 1 more task had failures without a class before merge. Nothing merged without passing every required check and review.
+  _An attempt rejected as gate, review or scope-violation before the accepting attempt. Failures without a class are not counted, so this is a lower bound._
 - **8.1 d**: From approval to merge: median 8.1 d (n=5).
   _Wall clock from the first attempt's approval to the accepting attempt, including queue waits and pauses. 1 task used the task approval time because the first attempt has no wait record._
 - **≥ $2.37**: Known spend ≥ $2.37 per accepted task (1 call without a known price, 2 attempts without call records: configure prices).
   _Known spend $11.85 over 10 calls in the window (plans, contracts, implementation and review) divided by 5 accepted tasks._
-- **1 of 6**: 1 of 6 classified failed attempts were caused by the environment, not your code.
+- **≥ 1 of 6**: At least 1 of 6 classified failed attempts were caused by the environment; 1 more failure in setup checks may be environment too.
   _Environment: sandbox, network, provider access and expired leases. 0 time-limit failures (ambiguous) and 1 unknown or unclassified failure are not distributed._
 
 ## Defects caught before merge
 
 - Rejected attempts: 4 (checks 2, review 1, scope 1; candidate 2, integration 1, phase unknown 1).
-- Accepted tasks sent back at least once: 2 of 5.
+- Accepted tasks sent back at least once: ≥ 2 of 5; 1 more with failures without a class.
 - Rejected reviews: 1 (candidate 1, integration 0) with 2 blocking findings; 0 without findings.
 - Rejected by review although every required check passed on the same commit: 1 of 7 green candidates (diagnostic: what the checks did not catch).
 - Caught only against the current target branch (integration): 1.
@@ -45,8 +45,8 @@ _Coverage: 13 attempts on 7 tasks; failure class on 6 of 7 failed; stage timings
 
 ## Autonomy
 
-- Accepted tasks with a recorded human action: ≥ 1 of 5; without one: ≤ 4 of 5.
-- Recorded actions: operator recovery decisions 0, holds 1, cancelled attempts 1; retries not recorded, resets not recorded, base moves not recorded.
+- Accepted tasks with a recorded human action: ≥ 0 of 5; without one: ≤ 5 of 5.
+- Human actions with a recorded actor: operator recovery decisions 0. Without a recorded actor (not counted as human): holds 1, cancelled attempts 1. Not recorded yet: retries, resets, base moves.
 - Plan approvals: operator 1, agent 0 (from events).
 - Escalations to a person (recovery awaiting the user or stopped): 0.
 
@@ -73,10 +73,10 @@ _Coverage: 13 attempts on 7 tasks; failure class on 6 of 7 failed; stage timings
 ## Cost
 
 - Known spend $11.85 over 9 of 10 calls (reported by the provider $10.55, estimated from tariffs $1.30).
-- Calls without a known price: 1 (no tariff 1, incomplete telemetry 0, active 0, abandoned 0); by runtime: codex 1. Attempts without call records: 2.
+- Calls without a known price: 1 (no tariff 1, incomplete telemetry 0, active 0, abandoned 0); by runtime: codex 1. Attempts without call records: 2; with records not marked complete: 0.
 - Spend per accepted task: ≥ $2.37.
-- Spend per fully priced attempt: median $0.80, p75 $1.75, max $3.00 (n=9; 2 not measured).
-- Spend on attempts that were not accepted: $6.50 of $11.35 attributed to 11 attempts (defect $6.50, environment $0.00, operator $0.00).
+- Spend per fully priced attempt: median $0.80, p75 $1.75, max $3.00 (n=9; 4 not measured).
+- Spend on attempts that were not accepted: ≥ $6.50 of ≥ $11.35 attributed to 13 attempts (defect $6.50, environment $0.00, operator $0.00, unclassified $0.00).
 
 | Stage | Calls | Known spend | Without price |
 | --- | ---: | ---: | ---: |
@@ -86,7 +86,7 @@ _Coverage: 13 attempts on 7 tasks; failure class on 6 of 7 failed; stage timings
 
 ## Environment
 
-Failed attempts: 7, of them 6 classified; attempts interrupted by shutdown are not failures: 1. Caused by the environment: 1 of 6 classified.
+Failed attempts: 7, of them 6 classified; attempts interrupted by shutdown are not failures: 1. Caused by the environment: ≥ 1 of 6 classified; 1 more failed only in setup checks and may be environment too.
 
 | Failure class | Attempts |
 | --- | ---: |
@@ -132,7 +132,7 @@ Failed attempts: 7, of them 6 classified; attempts interrupted by shutdown are n
 ## Limits and unknowns
 
 - There is no before-harness baseline: the report does not compare with work done without the harness.
-- Retries, resets, cancellations without an attempt and base moves are not recorded yet, so human actions are a lower bound and tasks without them an upper bound.
+- Human actions are counted only where a person is recorded as the actor (operator recovery decisions); retries, resets, cancellations and base moves have no recorded actor yet, so human actions are a lower bound and tasks without them an upper bound.
 - Network or registry errors inside checks are classified as check failures, so rejections by checks can be overstated; setup checks are marked.
 - Environment failures have no recorded sub-cause (sandbox, network, provider, lease).
 - A rejected candidate is not proof of a real defect: reviewer precision is not measured; withdrawn findings are only a proxy.
@@ -140,6 +140,7 @@ Failed attempts: 7, of them 6 classified; attempts interrupted by shutdown are n
 - 1 failed attempt without a failure class (recorded before classification) is shown as unclassified, not as defects.
 - 4 of 13 attempts have no stage timings; stage time covers the rest.
 - 2 of 13 attempts have no call records, so their spend is unknown.
+- Holds and cancelled attempts record no actor (host operations hold tasks too), so they are not counted as human actions.
 - 1 of 10 calls have no known price (no tariff 1, incomplete telemetry 0, active 0, abandoned 0); spend is a lower bound.
 - 1 accepted task started from the task approval time, which a re-approval overwrites.
 - Pauses and approvals are counted from events, which start at 2026-10-05T07:50:00.000Z.

@@ -9,6 +9,7 @@ import {
   readFileSync,
   readdirSync,
   statSync,
+  linkSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -62,24 +63,19 @@ function seededState() {
 }
 
 /**
- * Данные каталога состояния: содержимое файлов (журнал WAL — содержимое,
- * отсутствующий равен пустому) и состав каталога. Индекс `-shm` —
- * разделяемая память читателей SQLite, а не данные (как в cli-explain).
+ * Каталог состояния целиком: каждый файл (включая служебные `-wal`/`-shm`
+ * SQLite) с содержимым. Чтение не должно ни менять файлы, ни создавать новые.
  */
-const snapshot = (dir: string) => {
-  const sha = (file: string) =>
-    createHash('sha256')
-      .update(existsSync(file) ? readFileSync(file) : '')
-      .digest('hex');
-  const entries = readdirSync(dir, { recursive: true, withFileTypes: true })
+const snapshot = (dir: string) =>
+  readdirSync(dir, { recursive: true, withFileTypes: true })
     .map((e) => join(e.parentPath, e.name))
-    .filter((p) => !/state\.sqlite-(wal|shm)$/.test(p))
-    .sort();
-  return [
-    ...entries.map((p) => `${p}:${statSync(p).isFile() ? sha(p) : 'dir'}`),
-    `wal:${sha(join(dir, 'state.sqlite-wal'))}`,
-  ].join('\n');
-};
+    .sort()
+    .map((p) =>
+      statSync(p).isFile()
+        ? `${p}:${createHash('sha256').update(readFileSync(p)).digest('hex')}`
+        : `${p}:dir`,
+    )
+    .join('\n');
 
 const run = (args: string[], env: Record<string, string> = {}) => {
   const home = mkdtempSync(join(tmpdir(), 'harness-home-'));
@@ -160,6 +156,11 @@ test('report CLI: --out пишет файл выбранного формата,
   assert.equal(data.format, 'html');
   assert.equal(data.bytes, Buffer.byteLength(text));
   assert.equal(text, run(['report', '--state', state, '--format', 'html']).stdout);
+  assert.deepEqual(
+    readdirSync(parent).filter((f) => f.endsWith('.tmp')),
+    [],
+    'временный файл не остаётся',
+  );
   // Повтор перезаписывает свой обычный файл.
   assert.equal(run(['report', '--state', state, '--format', 'html', '--out', out]).status, 0);
   const jsonOut = join(parent, 'report.json');
@@ -199,6 +200,19 @@ test('report CLI: отказы — нет каталога, неверный ф�
   assert.equal(readFileSync(target, 'utf8'), 'keep');
 
   const before = snapshot(state);
+  // Жёсткая ссылка на базу состояния вне каталога: отказ, база байт в байт прежняя.
+  const hard = join(parent, 'hard.json');
+  linkSync(join(state, 'state.sqlite'), hard);
+  r = run(['report', '--state', state, '--out', hard]);
+  assert.equal(r.status, 3);
+  assert.equal(envelope(r.stdout).error?.code, 'PATH_CONFLICT');
+  assert.match(r.stdout, /hard-link/);
+  // Любой путь внутри каталога состояния, даже новый файл, — отказ.
+  r = run(['report', '--state', state, '--format', 'md', '--out', join(state, 'report.md')]);
+  assert.equal(r.status, 3);
+  assert.match(r.stdout, /inside-state/);
+  assert.equal(existsSync(join(state, 'report.md')), false);
+
   r = run(['report', '--state', state, '--out', join(state, 'state.sqlite')]);
   assert.equal(r.status, 3);
   assert.equal(envelope(r.stdout).error?.code, 'PATH_CONFLICT');
@@ -237,4 +251,18 @@ test('report: Harness.report — тот же отчёт по каталогу с
   } finally {
     h.close();
   }
+});
+
+test('report: хранилище только для чтения не создаёт файлов в каталоге состояния (нет -wal/-shm)', () => {
+  const { state } = seededState();
+  const before = readdirSync(state).sort();
+  assert.deepEqual(before, ['state.sqlite']);
+  const store = new SqliteExecutionStore(join(state, 'state.sqlite'), 'reader', { readOnly: true });
+  try {
+    assert.ok(store.read((v) => v.works()).length > 0);
+    assert.ok(store.events(0, 10).length > 0);
+  } finally {
+    store.close();
+  }
+  assert.deepEqual(readdirSync(state).sort(), before);
 });

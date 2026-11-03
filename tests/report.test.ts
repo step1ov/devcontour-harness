@@ -17,6 +17,7 @@ import {
 } from '../src/contracts/index.ts';
 import { knownCost } from '../src/engine/usage.ts';
 import {
+  assertReportBytes,
   callCostKnown,
   failureBucketNames,
   isoWeekOf,
@@ -31,7 +32,16 @@ import {
 } from '../src/report/index.ts';
 import * as root from '../src/index.ts';
 import * as reportModule from '../src/report/index.ts';
-import { HOME, SECRET, STATE_DIR, reportFixture, shuffled, t, tokenOf } from './report-fixture.ts';
+import {
+  HOME,
+  SECRET,
+  STATE_DIR,
+  digest,
+  reportFixture,
+  shuffled,
+  t,
+  tokenOf,
+} from './report-fixture.ts';
 
 const golden = (name: string) =>
   fileURLToPath(new URL(`./fixtures/report/${name}`, import.meta.url));
@@ -83,7 +93,8 @@ test('report: ключевые числа фикстуры — принятые,
   // env: отказ окружения не засчитан — первая попытка; gate: прерывание не засчитано, отказ gate — засчитан.
   assert.deepEqual(r.speed.firstPass, { value: 2, n: 5, unknown: 0, bound: 'exact' });
   assert.deepEqual(r.speed.firstPassRaw, { value: 1, n: 5, unknown: 0, bound: 'exact' });
-  assert.deepEqual(r.defects.sentBack, { value: 2, n: 5, unknown: 0, bound: 'exact' });
+  // legacy: до приёмки только отказ без класса — неизвестно, вернули ли его.
+  assert.deepEqual(r.defects.sentBack, { value: 2, n: 5, unknown: 1, bound: 'lower' });
   assert.deepEqual(r.defects.byKind, { gate: 2, review: 1, 'scope-violation': 1 });
   assert.deepEqual(r.defects.afterGreenGates.value, 1);
   assert.equal(r.defects.byGate.find((g) => g.gate === 'install')?.setup, true);
@@ -99,12 +110,16 @@ test('report: ключевые числа фикстуры — принятые,
     ],
   );
   assert.equal(r.environment.interrupted, 1);
-  assert.deepEqual(r.environment.share, { value: 1, n: 6, unknown: 1, bound: 'exact' });
+  // broken-2 отказал только в gate установки — возможно, тоже окружение.
+  assert.deepEqual(r.environment.share, { value: 1, n: 6, unknown: 1, bound: 'lower' });
+  assert.equal(r.environment.setupCheckFailures, 1);
   // Попытки — из записей попыток: у legacy счётчик WorkState.attempt = 0, попыток 2.
   assert.equal(r.works.rows.find((w) => w.id === 'legacy')?.attempts, 2);
   // Начало срока — wait.approvedAt первой попытки; у legacy его нет — запасной вариант.
   assert.equal(r.speed.leadTimeFallback, 1);
-  assert.equal(r.autonomy.withAction.value, 1);
+  // Удержание (work.held) актёра не называет — не действие человека.
+  assert.equal(r.autonomy.withAction.value, 0);
+  assert.equal(r.autonomy.actions.holds, 1);
   assert.equal(r.autonomy.withAction.bound, 'lower');
   assert.equal(r.autonomy.withoutAction.bound, 'upper');
   assert.equal(r.autonomy.actions.retries, null);
@@ -486,4 +501,214 @@ test('report: ISO-неделя UTC с понедельника, включая �
   assert.equal(isoWeekOf(Date.parse('2024-12-30T12:00:00Z')), '2025-W01');
   assert.equal(isoWeekOf(Date.parse('2021-01-03T12:00:00Z')), '2020-W53');
   assert.equal(isoWeekOf(Date.parse('2027-01-01T00:00:00Z')), '2026-W53');
+});
+
+/* ------------------------------------------------------------------ */
+/* Замечания независимого ревью                                        */
+/* ------------------------------------------------------------------ */
+
+const headline = (r: ReturnType<typeof valueReport>, id: string) =>
+  r.summary.status === 'ok' ? r.summary.headlines.find((h) => h.id === id) : undefined;
+
+test('review 1: вызовы попытки без callsRecorded — её расход нижней границей, а не пропуск; окружение и расходы согласованы', () => {
+  const input = reportFixture();
+  const base = valueReport(input, options);
+  // run-gate-2 ($2.50) без флага полного учёта; run-env-1 получает вызов $0.70 без флага.
+  const envCall = {
+    ...input.calls![0]!,
+    id: 'c-env-1',
+    runId: 'run-env-1',
+    costUsd: 0.7,
+    startedAt: t(23, 10, 1),
+  };
+  const partial: ValueReportInput = {
+    ...input,
+    attempts: input.attempts.map((a) =>
+      a.id === 'run-gate-2' || a.id === 'run-env-1' ? { ...a, callsRecorded: undefined } : a,
+    ),
+    calls: [...input.calls!, envCall],
+  };
+  const r = valueReport(partial, options);
+  assert.equal(r.cost.rejected.usd, round(base.cost.rejected.usd + 0.7));
+  assert.equal(r.cost.rejected.bound, 'lower');
+  assert.equal(r.cost.attemptsPartialCalls, 2);
+  assert.equal(r.cost.attemptsWithoutCalls, base.cost.attemptsWithoutCalls);
+  assert.ok(r.limitations.some((l) => l.id === 'partial-calls'));
+  const envBucket = r.cost.rejected.byBucket.find((b) => b.bucket === 'environment');
+  assert.equal(envBucket?.usd, 0.7);
+  assert.equal(r.environment.neutral.knownUsd, 0.7);
+  assert.equal(r.environment.neutral.costBound, 'lower');
+  const md = reportMarkdown(r);
+  assert.match(md, /Spend on attempts that were not accepted: ≥ \$/);
+  assert.match(md, /≥ \$0\.70 known spend/);
+  // Обратный случай: все попытки с полным учётом — точная сумма без «≥».
+  const full = valueReport(
+    {
+      ...keep(input, ['first', 'gate']),
+      calls: input.calls!.filter((c) => c.runId?.startsWith('run-gate')),
+    },
+    options,
+  );
+  assert.equal(full.cost.rejected.bound, 'exact');
+  assert.equal(full.cost.rejected.usd, 2.5);
+});
+const round = (x: number) => Math.round(x * 100) / 100;
+
+test('review 2: возвраты — отказы без класса делают число нижней границей; только gate подготовки — верхней', () => {
+  const input = reportFixture();
+  const r = valueReport(input, options);
+  assert.deepEqual(
+    [r.defects.sentBack.value, r.defects.sentBack.unknown, r.defects.sentBack.bound],
+    [2, 1, 'lower'],
+  );
+  assert.match(
+    headline(r, 'sent-back')!.text,
+    /^At least 2 of 5 .*1 more task had failures without a class/,
+  );
+  // Без legacy и с обычными отказами — точное число.
+  const exact = valueReport(keep(input, ['first', 'gate', 'review', 'env']), options);
+  assert.deepEqual([exact.defects.sentBack.value, exact.defects.sentBack.bound], [2, 'exact']);
+  // gate вернул только gate установки — возможно, сеть: верхняя граница.
+  const setup: ValueReportInput = {
+    ...keep(input, ['first', 'gate', 'env']),
+  };
+  setup.attempts = setup.attempts.map((a) =>
+    a.id === 'run-gate-2'
+      ? { ...a, evidence: a.evidence.map((e) => (e.passed ? e : { ...e, gate: 'install' })) }
+      : a,
+  );
+  const upper = valueReport(setup, options);
+  assert.deepEqual([upper.defects.sentBack.value, upper.defects.sentBack.bound], [1, 'upper']);
+  assert.equal(upper.defects.sentBackSetupOnly, 1);
+  assert.match(headline(upper, 'sent-back')!.text, /^At most 1 of 3/);
+});
+
+test('review 3: удержания и отмены без актёра — не действия человека; решение recovery оператора — действие', () => {
+  const input = reportFixture();
+  const r = valueReport(input, options);
+  assert.equal(r.autonomy.withAction.value, 0);
+  assert.equal(r.autonomy.actions.holds, 1);
+  assert.ok(r.limitations.some((l) => l.id === 'holds-actor'));
+  const decided: ValueReportInput = {
+    ...input,
+    works: input.works.map((w) =>
+      w.id === 'env'
+        ? {
+            ...w,
+            recoveryHistory: [
+              {
+                id: 'rec-1',
+                property: 'p',
+                basis: digest('rec'),
+                runs: [],
+                openedAt: t(23, 9),
+                status: 'closed' as const,
+                calls: 0,
+                decision: {
+                  action: 'new-approach' as const,
+                  reason: SECRET,
+                  evidence: [],
+                  source: { kind: 'operator' as const },
+                  decidedAt: t(23, 9, 30),
+                },
+                history: [],
+                version: 1,
+              },
+            ],
+          }
+        : w,
+    ),
+  };
+  const acted = valueReport(decided, options);
+  assert.equal(acted.autonomy.withAction.value, 1);
+  assert.equal(acted.autonomy.actions.operatorDecisions, 1);
+  assert.ok(!JSON.stringify(acted).includes(SECRET));
+});
+
+test('review 4: согласования — по событиям только для графов с событиями; иначе из графа; нет записей — неизвестно', () => {
+  const input = reportFixture();
+  assert.equal(valueReport(input, options).autonomy.approvals.source, 'events');
+  // События есть, но не graph.approved: согласование графа берётся из состояния.
+  const noApprovalEvents: ValueReportInput = {
+    ...input,
+    events: input.events!.filter((e) => e.type !== 'graph.approved'),
+  };
+  const state = valueReport(noApprovalEvents, options).autonomy.approvals;
+  assert.deepEqual(state, { operator: 1, agent: 0, source: 'state' });
+  // Ни событий согласования, ни графов — неизвестно, а не ноль.
+  const none = valueReport({ ...noApprovalEvents, graphs: [] }, options);
+  assert.equal(none.autonomy.approvals.source, 'none');
+  assert.match(reportMarkdown(none), /Plan approvals: unknown \(no approval records\)/);
+  assert.ok(none.limitations.some((l) => l.id === 'approvals-unknown'));
+});
+
+test('review 7: отказы окружения — «≥», если есть отказы gate подготовки; без них — точно', () => {
+  const input = reportFixture();
+  const r = valueReport(input, options);
+  const env = headline(r, 'environment')!;
+  assert.equal(env.value, '≥ 1 of 6');
+  assert.match(
+    env.text,
+    /^At least 1 of 6 .*1 more failure in setup checks may be environment too/,
+  );
+  assert.doesNotMatch(env.text, /not your code/);
+  const exact = valueReport(keep(input, ['first', 'gate', 'review', 'env']), options);
+  assert.equal(exact.environment.share.bound, 'exact');
+  assert.match(headline(exact, 'environment')!.text, /not your code/);
+});
+
+test('review 8: время пауз ограничено окном', () => {
+  const input = reportFixture();
+  // runtime: 10:03–10:33 дня 23; окно с 10:18 — 15 минут внутри, пауза начата до окна.
+  const from = valueReport(input, { ...options, since: t(23, 10, 18) });
+  const runtime = from.autonomy.pauses.find((p) => p.reason === 'runtime')!;
+  assert.deepEqual([runtime.count, runtime.pausedMs], [0, 15 * 60_000]);
+  // operator: открыта с 15:00 дня 29; окно до 15:30 — 30 минут, а не до asOf.
+  const until = valueReport(input, { ...options, until: t(29, 15, 30) });
+  const operator = until.autonomy.pauses.find((p) => p.reason === 'operator')!;
+  assert.deepEqual([operator.count, operator.pausedMs, operator.open], [1, 30 * 60_000, 1]);
+});
+
+test('review 9: done без успешной попытки — не принято ни в каком окне, отмечено в покрытии', () => {
+  const input = reportFixture();
+  const first = input.works.find((w) => w.id === 'first')!;
+  const ghost = { ...input, works: [...input.works, { ...first, id: 'ghost' }] };
+  const all = valueReport(ghost, options);
+  const windowed = valueReport(ghost, { ...options, since: '2026-09-01' });
+  for (const r of [all, windowed]) {
+    assert.equal(r.speed.finished.accepted, 5);
+    assert.equal(r.coverage.doneWithoutAttempt, 1);
+    assert.ok(!r.works.rows.some((w) => w.id === 'ghost'));
+    assert.ok(r.limitations.some((l) => l.id === 'done-without-attempt'));
+  }
+});
+
+test('review 10: предел размера проверяет само ядро и рендеры', () => {
+  assert.throws(
+    () =>
+      assertReportBytes('x'.repeat(REPORT_LIMITS.jsonBytes + 1), REPORT_LIMITS.jsonBytes, 'JSON'),
+    (e: unknown) => e instanceof HarnessError && e.code === 'INTERNAL',
+  );
+  assert.doesNotThrow(() => assertReportBytes('я'.repeat(10), 20, 'JSON'));
+  assert.throws(() => assertReportBytes('я'.repeat(11), 20, 'JSON'), /22 байт/);
+});
+
+test('review 11: больше 5 версий движка в неделе — список отмечен усечённым', () => {
+  const input = keep(reportFixture(), ['first']);
+  const run = input.attempts[0]!;
+  const extra = Array.from({ length: 6 }, (_, i) => ({
+    ...run,
+    id: `run-x-${i}`,
+    token: tokenOf(`run-x-${i}`),
+    status: 'failed' as const,
+    failureKind: 'gate' as const,
+    startedAt: t(1, 9 + i),
+    finishedAt: t(1, 9 + i, 30),
+    engineVersion: `9.9.${i}`,
+  }));
+  const many = { ...input, attempts: [...input.attempts, ...extra] };
+  const r = valueReport(many, options);
+  const week = r.weeks.rows.find((w) => w.kind === 'week' && w.week === '2026-W41');
+  assert.ok(week && week.kind === 'week' && week.enginesTruncated, JSON.stringify(week));
+  assert.match(reportMarkdown(r), /, …/);
 });

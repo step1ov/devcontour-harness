@@ -6,6 +6,7 @@
 export {
   valueReport,
   failureBucketOf,
+  assertReportBytes,
   callCostKnown,
   reportPath,
   isoWeekOf,
