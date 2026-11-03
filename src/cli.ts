@@ -279,6 +279,7 @@ const options = {
   contracts: { type: 'string' },
   requirements: { type: 'string', multiple: true },
   'dry-run': { type: 'boolean' },
+  detail: { type: 'boolean' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -292,6 +293,7 @@ const flagOwners = {
   contracts: ['plan-request', 'plan-check'],
   requirements: ['plan-request'],
   'dry-run': ['worktree-cleanup'],
+  detail: ['status'],
 } as const;
 
 /** Явное человеческое представление успешного ответа (`--human`). */
@@ -517,7 +519,8 @@ async function run(
     case 'result': {
       const h = open(need('state'), binding(need('state')), 'state');
       try {
-        if (command === 'status') return { command, data: h.status(v.graph) };
+        if (command === 'status')
+          return { command, data: h.status(v.graph, { detail: Boolean(v.detail) }) };
         if (command === 'events')
           return { command, data: h.events(Number(v.after ?? 0), Number(v.limit ?? 100)) };
         return { command, data: h.result(need('work')) };

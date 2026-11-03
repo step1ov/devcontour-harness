@@ -14,6 +14,8 @@ const sha = gitShaSchema;
 const text = z.string().max(4000);
 const runtime = runtimeNameSchema;
 const phase = z.enum(['candidate', 'integration']);
+/** Предел имени стадии в событии `attempt.stage`. */
+export const STAGE_NAME_LIMIT = 300;
 const delivery = {
   sink: idSchema,
   key: z.string().min(1).max(300),
@@ -78,6 +80,21 @@ export const eventPayloads = {
     reviewer: runtime,
     sameVendor: z.boolean(),
     blocking: z.number().int().min(0),
+  }),
+  /**
+   * Граница стадии попытки (замер `AttemptState.timings`): одно `started` и
+   * одно `finished` на стадию, в той же транзакции под fencing, что и замер.
+   * `at` и `durationMs` — по часам движка, те же, что в замере.
+   */
+  'attempt.stage': z.strictObject({
+    timingId: z.string().min(1).max(200),
+    stage: z.string().min(1).max(STAGE_NAME_LIMIT),
+    phase: z.enum(['started', 'finished']),
+    at: isoTimeSchema,
+    /** Только у `finished`. */
+    durationMs: z.number().int().min(0).optional(),
+    /** Только у `finished`. */
+    outcome: z.enum(['passed', 'failed']).optional(),
   }),
   'attempt.failed': z.strictObject({
     failureKind: failureKindSchema,

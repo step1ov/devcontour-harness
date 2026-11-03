@@ -24,6 +24,7 @@ import {
   type RuntimeName,
   type WorkGraph,
   type WorkflowJob,
+  type ExecutionView,
 } from '../contracts/index.ts';
 import { cliAdapter } from '../agents/cli-adapter.ts';
 import { Engine } from '../engine/engine.ts';
@@ -36,6 +37,13 @@ import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { validateInputs } from '../validate.ts';
 import { WorkflowQueue } from './workflow.ts';
+import {
+  CLIP_DIAGNOSTIC,
+  attemptView,
+  clipText,
+  queuePause,
+  queueStop,
+} from '../projections/index.ts';
 import { technicalReview } from './review.ts';
 import { policySourceChanged, type PolicySource } from './provenance.ts';
 import { JointRunner } from '../engine/joint-runner.ts';
@@ -759,7 +767,12 @@ export class Harness {
     return true;
   }
 
-  status(graphId?: string) {
+  /**
+   * Состояние очереди, графов и поручений. С `detail` — ещё снимок
+   * наблюдателя: почему стоит выдача (`queueStop` и `queuePause`) и активные
+   * попытки (`attemptView`); без него ответ прежний.
+   */
+  status(graphId?: string, options: { detail?: boolean } = {}) {
     return this.engine.read((v) => ({
       stateVersion: STATE_VERSION,
       control: v.control(),
@@ -785,7 +798,68 @@ export class Harness {
       ...((budgets) => (budgets ? { budgets } : {}))(
         budgetOverview(this.engine.budgetContext(), v),
       ),
+      ...(options.detail ? { detail: this.statusDetail(v, graphId) } : {}),
     }));
+  }
+
+  private statusDetail(v: ExecutionView, graphId?: string) {
+    const now = this.engine.clock();
+    const control = v.control();
+    const works = v.works(graphId);
+    const attempts = v.works().flatMap((w) => v.attempts(w.id));
+    // Последний отказ классов паузы runtime — её подробность (как `queueStop`
+    // хоста по ошибкам планировщика): порядок — по времени завершения.
+    const failures = new Set(control.pauseFailures ?? []);
+    const errors = attempts
+      .filter((a) => a.status === 'failed' && a.failureKind && failures.has(a.failureKind))
+      .sort((a, b) => (a.finishedAt ?? '').localeCompare(b.finishedAt ?? ''))
+      .map((a, i) => ({ seq: i + 1, ...(a.error ? { message: a.error } : {}) }));
+    const stop = queueStop({
+      paused: control.paused,
+      ...(control.pauseReason ? { pauseReason: control.pauseReason } : {}),
+      errors,
+    });
+    const pause = queuePause(control);
+    // Пауза без причины в standalone — «очередь ещё не запускали»: её снимает
+    // run (как и в explain), это не отказ runtime прежних записей хоста.
+    const notStarted = control.paused && !control.pauseReason;
+    const repositoryGates = (id: string) =>
+      this.policy.repositories.find((r) => r.id === id)?.gates.map((g) => g.id);
+    return {
+      at: new Date(now).toISOString(),
+      queue: notStarted
+        ? {
+            paused: true,
+            detail: 'Очередь ещё не запускали: её снимает harness run',
+            code: 'PAUSED' as const,
+            cause: 'not-ready' as const,
+            actor: 'user' as const,
+            action: 'resume-queue' as const,
+          }
+        : {
+            ...stop,
+            ...(stop.detail ? { detail: clipText(stop.detail, CLIP_DIAGNOSTIC)! } : {}),
+            ...(control.paused && control.pausedAt ? { since: control.pausedAt } : {}),
+            ...(control.paused && control.pauseOperation
+              ? { operation: control.pauseOperation }
+              : {}),
+            ...(control.paused && control.pauseFailures?.length
+              ? { failures: [...control.pauseFailures] }
+              : {}),
+            ...(pause ?? {}),
+          },
+      attempts: works
+        .map((w) => (w.activeRunId ? v.attempt(w.activeRunId) : undefined))
+        .filter((a) => a?.status === 'active')
+        .map((a) => {
+          const gates = repositoryGates(a!.repositoryId);
+          return attemptView(a!, {
+            now,
+            leaseMs: this.policy.leaseMs,
+            ...(gates ? { repositoryGates: gates } : {}),
+          });
+        }),
+    };
   }
 
   events(after = 0, limit = 100) {
