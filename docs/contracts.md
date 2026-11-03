@@ -619,6 +619,40 @@ manifestDigest, impact?, evidence[], error?}`. Смена любого SHA де�
 схема: лишних полей нет, поэтому токен владения, секрет или объект попытки в
 событие не попадает.
 
+`attempt.stage` — граница стадии попытки: `{timingId, stage, phase:
+'started'|'finished', at, durationMs?, outcome?: 'passed'|'failed'}`, конверт
+несёт `graphId`, `workId`, `runId`, `attempt`. Стадии — те же, что замеры
+`AttemptState.timings`: `dependency-store`, `implementation` /
+`implementation-reuse`, `candidate-environment:<шаг>`, `integration-wait`,
+`<фаза>-test:<gate>`, `<фаза>-consumer:<репозиторий>:<gate>`,
+`<фаза>-recheck:<gate>`, `<фаза>-review`, `integration-environment:<шаг>`,
+`integration-consumer-environment:<репозиторий>:<шаг>`. На стадию — одно
+`started` и не больше одного `finished` (у него `durationMs` и `outcome`);
+`at` и `durationMs` — по часам движка и совпадают с замером. Событие пишется
+в той же транзакции `run.timing.started`/`run.timing.finished`, что и замер,
+под fencing: утративший владение не пишет ни замера, ни события. Повторное
+закрытие замера ничего не меняет и событий не создаёт.
+
+`finished` может не прийти: поздний finish владельца, утратившего срок,
+отклоняется (runner его не повторяет), упавший процесс его не пишет, а `adopt`
+и recovery открытые замеры прежнего владельца не закрывают. Такая стадия
+остаётся открытой и в замере, и в журнале; её конец — событие конца попытки
+(`attempt.expired`, `attempt.failed`, `attempt.cancelled`,
+`attempt.recovered`, `work.accepted`). Потребитель журнала обязан обрабатывать
+незакрытые стадии.
+
+Чтение журнала терпимо к типам более новых версий: событие типа, которого нет
+в `eventPayloads`, возвращается как `UnknownRunEvent` —
+`{apiVersion, seq, at, graphId?, workId?, runId?, attempt?, type: 'unknown',
+original}` (исходный тип, не длиннее 200 символов; нагрузка не возвращается).
+`RunEvent` = известные события (`KnownRunEvent`) | `UnknownRunEvent`: нагрузка
+доступна после сужения по `type` (`e.type !== 'unknown'`) или у
+`KnownRunEvent`. Тип `ExecutionStore.events()` прежний (`RunEvent[]`), поэтому
+хранилища хоста, возвращающие или делегирующие события, компилируются без
+изменений. Разбор — `readRunEvent`, схема чтения — `readRunEventSchema`. Запись строгая
+(`runEventSchema`, опубликованная `run-event`): `unknown` записать нельзя;
+известный тип с нарушенной нагрузкой при чтении — отказ.
+
 `transactionKinds` — имена транзакций исполнения; совпадают с сохранёнными
 типами событий журнала хоста (`run.claimed`, `task.done`, `run.failed`,
 `scheduler.error`, …). `workflow.updated` пишет только локальные записи
@@ -778,8 +812,8 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `review-contract`  | `--state D --contract F --policy F --author A`                                         | да    | `ReviewRecord`                                                                           | Как `review-plan`                                                                                                                                      |
 | `approve`          | `--state D --subject ID --digest H`                                                    | да    | subject, digest, at                                                                      | Тот же digest — без изменений; только `approvalMode: operator`                                                                                         |
 | `run`              | `--state D --graph F --policy F [--context F] [--sink file:D] [--once]`                | да    | граф, поручения и их блокеры, задание `workflow`                                         | Та же редакция продолжает работу; другой digest той же редакции — `REVISION_CONFLICT`                                                                  |
-| `status`           | `--state D [--graph ID]`                                                               | нет   | очередь, графы, поручения с блокерами, бюджеты                                           | Только чтение                                                                                                                                          |
-| `events`           | `--state D [--after N] [--limit 1–500]`                                                | нет   | события, `next`                                                                          | Только чтение                                                                                                                                          |
+| `status`           | `--state D [--graph ID] [--detail]`                                                    | нет   | очередь, графы, поручения с блокерами, бюджеты; с `--detail` — `detail`                  | Только чтение                                                                                                                                          |
+| `events`           | `--state D [--after N] [--limit 1–500]`                                                | нет   | события (неизвестный тип — `unknown`), `next`                                            | Только чтение                                                                                                                                          |
 | `pause`            | `--state D`                                                                            | да    | `ControlState`                                                                           | Без изменений                                                                                                                                          |
 | `resume`           | `--state D`                                                                            | да    | `ControlState`                                                                           | Решение человека: снимает паузу оператора, штатной остановки и отказа runtime вместе с её классами; паузу операции reconfigure — `PAUSED`              |
 | `cancel`           | `--state D --work ID [--reason T]`                                                     | да    | статус поручения                                                                         | Отменённое — без изменений; это не retry                                                                                                               |
@@ -800,6 +834,33 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 Полная форма каждой команды — `cliCommands` (аргументы, обязательность,
 идемпотентность, отказы exit 3). Все команды реализованы. `run` принимает `--author` (по умолчанию `external`) — автора графа для ревью плана. `HARNESS_CODEX_BIN` и `HARNESS_CLAUDE_BIN` подменяют исполняемые файлы runtime (fixture executables в тестах).
 `init --plan` ничего не пишет (exit 3 при конфликтах или неготовом toolchain). `--human` принимают только `init`, `explain` и `plan-request` (печатает prompt): успешный ответ — текст для человека, отказ — тот же JSON-конверт, exit code одинаков; у прочих команд флаг — `INVALID_INPUT`. `plan-check` с проблемами отвечает `ok: true` с данными, exit — по классу первой проблемы; draft — `schemas/plan-draft.schema.json` (`planDraftSchema`). Маршрут самостоятельного проекта и планирование — [standalone](standalone.md).
+
+**`status --detail`.** Без флага ответ `status` прежний. С флагом добавляется
+`detail: {at, queue, attempts}` — снимок наблюдателя по часам движка:
+
+- `queue` — почему стоит выдача: `paused`, `reason` и `detail` (`queueStop`;
+  у паузы отказа runtime `detail` — сообщение последнего отказа её классов),
+  `since`, `operation`, `failures` (классы отказа паузы runtime) и кто и что её
+  снимает — `code`, `cause`, `actor`, `action` (`queuePause`, то же
+  рассуждение, что у `explain` на claim). Паузу, которую снимет следующий
+  run (очередь ещё не запускали, штатная остановка, применимый запрос
+  политики), `explain` считает снятой; `queue` показывает её с
+  `liftedByRun: true` и тем же диагнозом, что у готового поручения в
+  `explain`: `NOT_READY`, `not-ready`, `controller`, `wait`.
+- `attempts[]` — активные попытки (`attemptView`): `runId`, `workId`,
+  `attempt`, `phase`, `runtime`, `model?`, `startedAt`, `elapsedMs`; `stage`
+  — последний незакрытый замер (`name`, `family` — имя до `:`, `startedAt`,
+  `elapsedMs`; при равном начале — позже записанный); `lease` — `owner`,
+  `leaseUntil`, `leaseMs`, `sinceHeartbeatMs` (от последнего heartbeat,
+  `leaseUntil − leaseMs`; нет при сроке `0` — владение отозвано) и `stale`
+  (срок истёк). `leaseMs` — из политики процесса, который читает: у CLI —
+  `binding.json` каталога состояния. `gates` — обязательные gates текущей фазы
+  (интеграции в `integrating`, иначе кандидата) по последней записи каждого на
+  текущем SHA фазы, без проверок потребителей: `passed + failed + remaining =
+required`.
+
+`attemptView` и `queuePause` — чистые проекции `devcontour-harness/projections`:
+хост строит тот же вид по своей попытке.
 
 **Общие операции и граница транспорта.** `init`, `explain`, `plan-request`,
 `plan-check` и `capabilities` — общие операции агентского слоя

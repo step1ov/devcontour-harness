@@ -112,7 +112,11 @@ export interface ExecutionStore {
   readonly stateVersion: number;
   transact<T>(kind: TransactionKind, fn: (tx: ExecutionTransaction) => NotPromise<T>): T;
   read<T>(fn: (view: ExecutionView) => NotPromise<T>): T;
-  /** События строго после `after`, по возрастанию `seq`. */
+  /**
+   * События строго после `after`, по возрастанию `seq`. Тип, которого эта
+   * версия не знает, возвращается `UnknownRunEvent` (`readRunEvent`), а не
+   * обрывает список.
+   */
   events(after?: number, limit?: number): RunEvent[];
   close(): void;
 }

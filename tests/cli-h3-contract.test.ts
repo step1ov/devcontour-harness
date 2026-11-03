@@ -81,7 +81,9 @@ const h2Commands = [
  * (пустой результат без механического основания), полем `recheck` записи
  * evidence, пределом области gates `GATE_SCOPE_LIMIT` вместо 20, полем
  * `checkouts` ответа doctor, полем `localContext` ответа source-snapshot и
- * полем `baseline` ответов коннектора; без них — те же байты.
+ * полем `baseline` ответов коннектора, вариантами `unknown` (тип, записанный
+ * более новой версией) и `attempt.stage` событий `events`, полем `detail` и
+ * флагом `--detail` команды status; без них — те же байты.
  */
 const H2_COMMANDS_SHA = '58efd5e554cd5b015538ef1d4e7dd8d20f24205ef24e28c5b27394642bc20e25';
 const H2_DATA_SHA = '95016c62e6e7fb134ab3dcde4aff35679951fe1b9037452bc86846230ffa5682';
@@ -100,6 +102,17 @@ function gateScope(v: unknown): v is Record<string, unknown> {
       (o.items.type === 'string' && o.items.minLength === 1 && o.items.maxLength === 200))
   );
 }
+/**
+ * Аддитивные варианты событий после H2: непрозрачное неизвестное событие
+ * чтения и границы стадий попытки.
+ */
+const ADDITIVE_EVENT_TYPES = new Set(['unknown', 'attempt.stage']);
+/** Аддитивные флаги прежних команд после H2. */
+const ADDITIVE_ARGS = new Set(['status--detail']);
+/** Тип варианта события в JSON Schema (`properties.type.const`). */
+const eventTypeOf = (v: unknown) =>
+  (v as { properties?: { type?: { const?: unknown } } } | null)?.properties?.type?.const as
+    string | undefined;
 /** Аддитивные значения перечней после H2. */
 const ADDITIVE_ENUM_VALUES = new Set(['unfinished', 'needs-lead']);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
@@ -223,11 +236,13 @@ test('H3-01: прежние команды и схемы их данных не 
         {
           ...contract,
           ...(c === 'init' ? { description: H2_INIT_DESCRIPTION } : {}),
-          args: (contract.args as readonly CliArgument[]).map((arg) => {
-            const copy: CliArgument = { ...arg };
-            delete copy.multiple;
-            return copy;
-          }),
+          args: (contract.args as readonly CliArgument[])
+            .filter((arg) => !ADDITIVE_ARGS.has(c + arg.name))
+            .map((arg) => {
+              const copy: CliArgument = { ...arg };
+              delete copy.multiple;
+              return copy;
+            }),
         },
       ];
     }),
@@ -247,7 +262,9 @@ test('H3-01: прежние команды и схемы их данных не 
   const h2 = JSON.stringify(data, (k, v: unknown) => {
     if (Array.isArray(v))
       return (v as unknown[]).filter(
-        (x) => !(typeof x === 'string' && ADDITIVE_ENUM_VALUES.has(x)),
+        (x) =>
+          !(typeof x === 'string' && ADDITIVE_ENUM_VALUES.has(x)) &&
+          !(k === 'oneOf' && ADDITIVE_EVENT_TYPES.has(eventTypeOf(x) ?? '')),
       );
     // Аддитивное поле записи evidence — повтор провала gate интеграции.
     if (k === 'properties' && v && typeof v === 'object' && 'recheck' in v) {
@@ -288,6 +305,12 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.baseline;
       return rest;
     }
+    // Аддитивное поле status — снимок наблюдателя `--detail`.
+    if (k === 'properties' && v && typeof v === 'object' && 'detail' in v && 'stateVersion' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.detail;
+      return rest;
+    }
     // Ослабленный предел области gates (20 → предел gates профиля).
     if (gateScope(v)) return { ...v, maxItems: 20 };
     return v;
@@ -307,6 +330,20 @@ test('H3-01: прежние команды и схемы их данных не 
       JSON.stringify(data[command]).includes('"baseline"'),
       command + ' объявляет baseline',
     );
+  // Хеш H2 выше вырезает аддитивные варианты событий: объявление держит эта проверка.
+  const eventVariants = (
+    data.events as unknown as { properties: { events: { items: { oneOf: unknown[] } } } }
+  ).properties.events.items.oneOf.map(eventTypeOf);
+  for (const type of ADDITIVE_EVENT_TYPES)
+    assert.ok(eventVariants.includes(type), 'events объявляет вариант ' + type);
+  // Хеш H2 выше вырезает detail status и флаг --detail: объявление держит эта проверка.
+  assert.ok(JSON.stringify(data.status).includes('"detail"'), 'status объявляет detail');
+  assert.ok(
+    (cliCommands.status.args as readonly CliArgument[]).some(
+      (a) => a.name === '--detail' && a.value === 'flag' && !a.required,
+    ),
+    'status объявляет флаг --detail',
+  );
   for (const value of ADDITIVE_ENUM_VALUES)
     assert.ok(JSON.stringify(data).includes(JSON.stringify(value)), value + ' объявлен');
   // Хеш H2 выше вырезает `artifacts` gate задачи: объявление держит эта проверка.

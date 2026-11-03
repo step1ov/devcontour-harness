@@ -1,6 +1,6 @@
 import { HarnessError } from '../contracts/errors.ts';
 import { MAX_NEUTRAL_FAILURES, repairPolicy } from '../contracts/repair-policy.ts';
-import type { WorkState, WorkStatus } from '../contracts/index.ts';
+import type { ControlState, ExecutionView, WorkState, WorkStatus } from '../contracts/index.ts';
 import type { Harness } from '../control/harness.ts';
 import { acceptanceGap, repairDecision } from '../engine/repair.ts';
 import type { EvidenceLink, StopInput, StopPhase } from '../projections/stop.ts';
@@ -9,6 +9,27 @@ export interface StopInputOptions {
   maxAttempts: number;
   repairBudget: number;
   workId?: string;
+}
+
+/**
+ * Control таким, каким его увидит следующий run этого процесса: run снимает
+ * паузу «не запускали» (без причины) и штатную остановку, а применимый запрос
+ * политики применяет до выдачи стадии (с ним снимается и его пауза). Общий
+ * для `explain` и `status --detail`. `lifted` — пауза есть, но её снимет run.
+ * Документ не меняется: `control` — прежний объект или его копия.
+ */
+export function nextRunControl(h: Harness, v: ExecutionView) {
+  const raw = v.control();
+  const liftsReconfigure =
+    h.engine.reconfigureApplies(v) &&
+    raw.pauseReason === 'reconfigure' &&
+    raw.pauseOperation === raw.reconfigure?.operation;
+  const lifted =
+    raw.paused && (!raw.pauseReason || raw.pauseReason === 'shutdown' || liftsReconfigure);
+  const control: ControlState = lifted
+    ? { ...raw, paused: false, pauseReason: undefined, pauseFailures: undefined }
+    : raw;
+  return { control, lifted };
 }
 
 const phaseOf: Partial<Record<WorkStatus, StopPhase>> = {
@@ -45,20 +66,8 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
           message: `Роль controller держит ${lease.owner} до ${new Date(lease.leaseUntil).toISOString()}.`,
         },
       });
-    // Control таким, каким его увидит следующий run этого процесса: run снимает
-    // паузу «не запускали» и штатную остановку, а применимый запрос политики
-    // применяет до выдачи стадии (с ним снимается и его пауза).
-    const raw = v.control();
+    const { control } = nextRunControl(h, v);
     const reconfigureApplies = h.engine.reconfigureApplies(v);
-    const liftsReconfigure =
-      reconfigureApplies &&
-      raw.pauseReason === 'reconfigure' &&
-      raw.pauseOperation === raw.reconfigure?.operation;
-    const lifted =
-      raw.paused && (!raw.pauseReason || raw.pauseReason === 'shutdown' || liftsReconfigure);
-    const control: typeof raw = lifted
-      ? { ...raw, paused: false, pauseReason: undefined, pauseFailures: undefined }
-      : raw;
     // Бюджет держит выдачу по тому же расчёту, которым следующий claim ставит
     // или снимает budgetBlock; записанное поле — лишь кэш этого расчёта
     // (после повышения бюджета оно устаревает, выключенные бюджеты не держат).

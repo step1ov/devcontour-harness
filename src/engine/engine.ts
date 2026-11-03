@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  STAGE_NAME_LIMIT,
   roleBinding,
   executionDigest,
   HarnessError,
@@ -1337,24 +1338,61 @@ export class Engine {
     );
   }
 
-  /** Начало стадии попытки; `timingFinished` закрывает её исходом. */
+  /**
+   * Начало стадии попытки; `timingFinished` закрывает её исходом. Замер и
+   * событие `attempt.stage` пишутся одной транзакцией под fencing: утративший
+   * владение не публикует ни того, ни другого.
+   */
   timingStarted(id: string, token: string, stage: string) {
     const timing = { id: this.id(), stage, startedAt: iso(this.now()) };
-    this.withAttempt(id, token, 'run.timing.started', (a, _w, tx) =>
-      tx.putAttempt({ ...a, timings: [...(a.timings ?? []), timing] }),
-    );
+    this.withAttempt(id, token, 'run.timing.started', (a, w, tx) => {
+      tx.putAttempt({ ...a, timings: [...(a.timings ?? []), timing] });
+      tx.emit({
+        type: 'attempt.stage',
+        graphId: w.graphId,
+        workId: w.id,
+        runId: id,
+        attempt: a.attempt,
+        payload: {
+          timingId: timing.id,
+          stage: stage.slice(0, STAGE_NAME_LIMIT),
+          phase: 'started',
+          at: timing.startedAt,
+        },
+      });
+    });
     return timing.id;
   }
 
   timingFinished(id: string, token: string, timingId: string, outcome: 'passed' | 'failed') {
-    this.withAttempt(id, token, 'run.timing.finished', (a, _w, tx) =>
+    this.withAttempt(id, token, 'run.timing.finished', (a, w, tx) => {
+      const at = iso(this.now());
+      const open = (a.timings ?? []).find((t) => t.id === timingId);
+      // Не больше одного `finished` на стадию: закрытый или чужой замер не
+      // переписывается, событие не создаётся — запись и журнал согласованы.
+      if (!open || open.finishedAt) return;
       tx.putAttempt({
         ...a,
         timings: (a.timings ?? []).map((t) =>
-          t.id === timingId ? { ...t, finishedAt: iso(this.now()), outcome } : t,
+          t.id === timingId ? { ...t, finishedAt: at, outcome } : t,
         ),
-      }),
-    );
+      });
+      tx.emit({
+        type: 'attempt.stage',
+        graphId: w.graphId,
+        workId: w.id,
+        runId: id,
+        attempt: a.attempt,
+        payload: {
+          timingId,
+          stage: open.stage.slice(0, STAGE_NAME_LIMIT),
+          phase: 'finished',
+          at,
+          durationMs: Math.max(0, Date.parse(at) - Date.parse(open.startedAt)),
+          outcome,
+        },
+      });
+    });
   }
 
   /**

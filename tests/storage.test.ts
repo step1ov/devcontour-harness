@@ -4,7 +4,14 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { HarnessError } from '../src/contracts/index.ts';
+import {
+  API_VERSION,
+  HarnessError,
+  eventsDataSchema,
+  readRunEvent,
+  readRunEventSchema,
+  runEventSchema,
+} from '../src/contracts/index.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import { executionStoreContract } from '../src/testing/index.ts';
 
@@ -73,4 +80,91 @@ test('Поле состояния, которого версия не знает
   const after = new DatabaseSync(file);
   assert.equal((after.prepare('SELECT data FROM state').get() as { data: string }).data, before);
   after.close();
+});
+
+test('Событие неизвестного типа (записанное более новой версией) читается непрозрачным, список не обрывается', () => {
+  const dir = temp();
+  const file = join(dir, 'state.sqlite');
+  const store = new SqliteExecutionStore(file, 'test');
+  store.transact('run.phase', (tx) =>
+    tx.emit({ type: 'attempt.phase', runId: 'r1', payload: { phase: 'running' } }),
+  );
+  const db = new DatabaseSync(file);
+  const future = {
+    apiVersion: API_VERSION,
+    seq: 2,
+    at: '2026-11-03T00:00:00.000Z',
+    workId: 'w1',
+    runId: 'r1',
+    attempt: 1,
+    type: 'attempt.future-kind',
+    payload: { anything: 'x', nested: { deep: true } },
+  };
+  db.prepare('INSERT INTO events(seq, data) VALUES(2, ?)').run(JSON.stringify(future));
+  db.close();
+  store.transact('run.phase', (tx) =>
+    tx.emit({ type: 'attempt.phase', runId: 'r1', payload: { phase: 'verifying' } }),
+  );
+
+  const events = store.events();
+  assert.deepEqual(
+    events.map((e) => [e.seq, e.type]),
+    [
+      [1, 'attempt.phase'],
+      [2, 'unknown'],
+      [3, 'attempt.phase'],
+    ],
+  );
+  // Документированная форма: конверт, `type: 'unknown'`, исходный тип; нагрузки нет.
+  assert.deepEqual(events[1], {
+    apiVersion: API_VERSION,
+    seq: 2,
+    at: '2026-11-03T00:00:00.000Z',
+    workId: 'w1',
+    runId: 'r1',
+    attempt: 1,
+    type: 'unknown',
+    original: 'attempt.future-kind',
+  });
+  assert.ok(readRunEventSchema.safeParse(events[1]).success, 'форма из схемы чтения');
+  assert.equal(runEventSchema.safeParse(events[1]).success, false, 'писатель её не принимает');
+  // Тот же список отдаёт и CLI-данные `events`.
+  assert.ok(eventsDataSchema.safeParse({ events, next: 3 }).success);
+  // Курсор идёт через неизвестное событие.
+  assert.deepEqual(
+    store.events(1).map((e) => e.seq),
+    [2, 3],
+  );
+  // Записать событие типа `unknown` нельзя: писатель строгий.
+  assert.throws(() =>
+    store.transact('run.phase', (tx) =>
+      tx.emit({ type: 'unknown', original: 'x', payload: {} } as never),
+    ),
+  );
+  assert.equal(store.events().length, 3);
+  store.close();
+
+  // Известный тип с нарушенной нагрузкой — по-прежнему отказ, а не подмена.
+  const broken = new DatabaseSync(file);
+  broken
+    .prepare('INSERT INTO events(data) VALUES(?)')
+    .run(JSON.stringify({ ...future, seq: 4, type: 'attempt.phase', payload: { phase: 'nope' } }));
+  broken.close();
+  const reread = new SqliteExecutionStore(file, 'test', { readOnly: true });
+  assert.throws(() => reread.events());
+  reread.close();
+});
+
+test('readRunEvent: неизвестный тип с нарушенным конвертом — отказ', () => {
+  assert.throws(() => readRunEvent({ type: 'future.kind', seq: 0, at: 'x' }));
+  assert.equal(
+    readRunEvent({
+      apiVersion: API_VERSION,
+      seq: 1,
+      at: '2026-11-03T00:00:00.000Z',
+      type: 'x'.repeat(300),
+      payload: 1,
+    }).type,
+    'unknown',
+  );
 });

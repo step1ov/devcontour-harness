@@ -37,6 +37,42 @@ export function stopCodeOf(kind: FailureKind | undefined): ErrorCode {
   }
 }
 
+export interface QueuePause {
+  code: ErrorCode;
+  cause: StopCause;
+  actor: Actor;
+  action: NextAction;
+}
+
+/**
+ * Кто и что снимает паузу выдачи — то же рассуждение, которым `explainStop`
+ * объясняет остановку на claim: пауза оператора и штатной остановки снимается
+ * `resume`; пауза отказа runtime — исправлением первого класса отказа
+ * (`pauseFailures`, без него — окружение); паузу reconfigure и base-check
+ * снимает сама операция. Без паузы — `undefined`. Пауза без причины —
+ * прежние записи паузы рантайма (как в `queueStop`).
+ */
+export function queuePause(control: {
+  paused: boolean;
+  pauseReason?: PauseReason;
+  pauseFailures?: readonly FailureKind[];
+}): QueuePause | undefined {
+  if (!control.paused) return undefined;
+  const reason = control.pauseReason ?? 'runtime';
+  if (reason === 'operator' || reason === 'shutdown')
+    return { code: 'PAUSED', cause: 'operator-pause', actor: 'user', action: 'resume-queue' };
+  if (reason === 'runtime') {
+    const paused = control.pauseFailures?.[0] ?? 'environment';
+    return {
+      code: stopCodeOf(paused),
+      cause: paused,
+      actor: 'user',
+      action: paused === 'provider-auth' ? 'fix-access' : 'fix-environment',
+    };
+  }
+  return { code: 'PAUSED', cause: 'not-ready', actor: 'controller', action: 'wait' };
+}
+
 export const stopCauses = [
   'provider-auth',
   'environment',
@@ -442,37 +478,17 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       action: 'raise-budget',
       note: work.budgetBlock.reason,
     };
-  if (control.paused && (control.pauseReason === 'operator' || control.pauseReason === 'shutdown'))
+  const pause = control.pauseReason ? queuePause(control) : undefined;
+  if (pause)
     return {
-      code: 'PAUSED',
-      cause: 'operator-pause',
+      ...pause,
       phase: 'claim',
-      actor: 'user',
-      action: 'resume-queue',
-      note: 'Продолжение — harness resume.',
-    };
-  if (control.paused && control.pauseReason === 'runtime') {
-    const paused = control.pauseFailures?.[0] ?? 'environment';
-    return {
-      code: stopCodeOf(paused),
-      cause: paused,
-      phase: 'claim',
-      actor: 'user',
-      action: paused === 'provider-auth' ? 'fix-access' : 'fix-environment',
-      note: `Выдача остановлена отказом класса ${paused}; после исправления — harness resume.`,
-    };
-  }
-  if (
-    control.paused &&
-    (control.pauseReason === 'reconfigure' || control.pauseReason === 'base-check')
-  )
-    return {
-      code: 'PAUSED',
-      cause: 'not-ready',
-      phase: 'claim',
-      actor: 'controller',
-      action: 'wait',
-      note: `Очередь ждёт операции ${control.pauseReason}.`,
+      note:
+        control.pauseReason === 'runtime'
+          ? `Выдача остановлена отказом класса ${pause.cause}; после исправления — harness resume.`
+          : pause.action === 'wait'
+            ? `Очередь ждёт операции ${control.pauseReason}.`
+            : 'Продолжение — harness resume.',
     };
   const active = activePhase[work.status];
   if (active)

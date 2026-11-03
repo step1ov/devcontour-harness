@@ -19,10 +19,18 @@ export {
 } from './progress.ts';
 export { nextAction, nextSteps, type NextInput, type NextStep, type NextView } from './next.ts';
 export { queueStop, type QueueStopInput, type QueueStopView } from './queue.ts';
+export {
+  attemptView,
+  type AttemptView,
+  type AttemptViewInput,
+  type AttemptViewOptions,
+} from './attempt.ts';
 export { CLIP_SHORT, CLIP_DIAGNOSTIC, clipText, clipDeep } from './clip.ts';
 export {
   stopCodeOf,
   explainStop,
+  queuePause,
+  type QueuePause,
   stopCauses,
   stopPhases,
   type StopInput,

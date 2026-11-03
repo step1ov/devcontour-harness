@@ -9,14 +9,25 @@ import {
   targetRefSchema,
 } from './primitives.ts';
 import { HarnessError, errorCodes, type ErrorCode } from './errors.ts';
-import { controlStateSchema, controllerLeaseSchema, workStatusSchema } from './execution.ts';
-import { runEventSchema } from './events.ts';
+import {
+  controlStateSchema,
+  controllerLeaseSchema,
+  failureKindSchema,
+  pauseReasons,
+  workStatusSchema,
+} from './execution.ts';
+import { readRunEventSchema } from './events.ts';
 import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
 import { reviewRecordSchema } from './review.ts';
 import { sourceRefSchema } from './work.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
 import { filePlanEntrySchema, projectManifestSchema } from './project.ts';
-import { stopDiagnosisSchema } from './diagnosis.ts';
+import {
+  diagnosisActions,
+  diagnosisActors,
+  diagnosisCauses,
+  stopDiagnosisSchema,
+} from './diagnosis.ts';
 import { planCheckDataSchema, planRequestDataSchema } from './planning.ts';
 import { toolchainReportSchema } from './toolchain.ts';
 import { operationCatalogSchema } from './catalog.ts';
@@ -227,6 +238,13 @@ export const cliCommands = {
     args: [
       state,
       { name: '--graph', value: 'id', required: false, description: 'Только этот граф' },
+      {
+        name: '--detail',
+        value: 'flag',
+        required: false,
+        description:
+          'Добавить detail: почему стоит выдача и активные попытки (стадия, владение, gates)',
+      },
     ],
     refusals: ['NOT_FOUND'],
   },
@@ -620,6 +638,68 @@ export const validateDataSchema = z.strictObject({
   orders: z.number().int().positive(),
 });
 
+/** Активная попытка `status --detail` (`attemptView`). */
+export const attemptViewSchema = z.strictObject({
+  runId: z.string().min(1).max(200),
+  workId: idSchema,
+  attempt: z.number().int().positive(),
+  status: z.string(),
+  phase: workStatusSchema,
+  runtime: z.string(),
+  model: z.string().optional(),
+  startedAt: isoTimeSchema,
+  elapsedMs: z.number().int().min(0),
+  /** Текущая стадия (последний незакрытый замер); нет — между стадиями. */
+  stage: z
+    .strictObject({
+      name: z.string().min(1),
+      family: z.string(),
+      startedAt: isoTimeSchema,
+      elapsedMs: z.number().int().min(0),
+    })
+    .optional(),
+  /** Последний heartbeat — `leaseUntil − leaseMs`; `stale` — срок истёк. */
+  lease: z.strictObject({
+    owner: z.string().min(1).max(300),
+    leaseUntil: z.number().int().min(0),
+    leaseMs: z.number().int().positive(),
+    /** Нет при сроке `0` (владение отозвано). */
+    sinceHeartbeatMs: z.number().int().min(0).optional(),
+    stale: z.boolean(),
+  }),
+  /** Обязательные gates текущей фазы на её текущем SHA: `passed + failed + remaining = required`. */
+  gates: z.strictObject({
+    phase: z.enum(['candidate', 'integration']),
+    required: z.number().int().min(0),
+    passed: z.number().int().min(0),
+    failed: z.number().int().min(0),
+    remaining: z.number().int().min(0),
+  }),
+});
+
+/**
+ * Почему выдача стоит (`status --detail`): причина паузы (`queueStop`), кто и
+ * что её снимает (`queuePause`, то же рассуждение, что у `explain`), классы
+ * отказа паузы runtime и последнее сообщение отказа этих классов.
+ */
+export const queueViewSchema = z.strictObject({
+  paused: z.boolean(),
+  reason: z.enum(pauseReasons).optional(),
+  detail: z.string().optional(),
+  since: isoTimeSchema.optional(),
+  operation: z.string().optional(),
+  /**
+   * Пауза есть, но её снимет следующий run (очередь не запускали, штатная
+   * остановка, применимый запрос политики) — как в `explain`.
+   */
+  liftedByRun: z.literal(true).optional(),
+  failures: z.array(failureKindSchema).optional(),
+  code: z.enum(Object.keys(errorCodes) as [ErrorCode, ...ErrorCode[]]).optional(),
+  cause: z.enum(diagnosisCauses).optional(),
+  actor: z.enum(diagnosisActors).nullable().optional(),
+  action: z.enum(diagnosisActions).optional(),
+});
+
 export const statusDataSchema = z.strictObject({
   stateVersion: z.literal(STATE_VERSION),
   control: controlStateSchema,
@@ -678,10 +758,22 @@ export const statusDataSchema = z.strictObject({
       ),
     })
     .optional(),
+  /**
+   * Только `status --detail`: время снимка, почему стоит выдача и активные
+   * попытки (стадия, длительность, владение, gates). Без флага поля нет.
+   */
+  detail: z
+    .strictObject({
+      at: isoTimeSchema,
+      queue: queueViewSchema,
+      attempts: z.array(attemptViewSchema),
+    })
+    .optional(),
 });
 
 export const eventsDataSchema = z.strictObject({
-  events: z.array(runEventSchema),
+  /** Событие неизвестного этой версии типа — `{type: 'unknown', original}`. */
+  events: z.array(readRunEventSchema),
   /** Номер для следующего `--after`. */
   next: z.number().int().min(0),
 });
