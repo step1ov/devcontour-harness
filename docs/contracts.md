@@ -835,6 +835,17 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 идемпотентность, отказы exit 3). Все команды реализованы. `run` принимает `--author` (по умолчанию `external`) — автора графа для ревью плана. `HARNESS_CODEX_BIN` и `HARNESS_CLAUDE_BIN` подменяют исполняемые файлы runtime (fixture executables в тестах).
 `init --plan` ничего не пишет (exit 3 при конфликтах или неготовом toolchain). `--human` принимают только `init`, `explain` и `plan-request` (печатает prompt): успешный ответ — текст для человека, отказ — тот же JSON-конверт, exit code одинаков; у прочих команд флаг — `INVALID_INPUT`. `plan-check` с проблемами отвечает `ok: true` с данными, exit — по классу первой проблемы; draft — `schemas/plan-draft.schema.json` (`planDraftSchema`). Маршрут самостоятельного проекта и планирование — [standalone](standalone.md).
 
+**Причина отказа окружения `dependency-network`.** Установка зависимостей,
+упавшая на сети или реестре пакетов, получает класс `environment`, а не `gate`
+(правило — [архитектура](architecture.md#что-гарантируется), «Сеть и реестр при установке зависимостей»). Отдельного поля
+причины нет: схема состояния прежняя, а `failureKind` — `environment`.
+Причину несёт начало текста отказа: `<фаза>/<gate>: dependency-network: …` у
+gate, `dependency-network: … Шаг <id>: …` у шага `prepare` или lifecycle. Текст
+попадает в `WorkState.failure`, `AttemptState.error`, `summary` evidence gate и в
+`message` диагноза `explain` (`cause: environment`, `action: fix-environment`).
+У reviewer probe такой gate — `status: error`, `failure: environment`, `note`
+начинается с `dependency-network:`.
+
 **`status --detail`.** Без флага ответ `status` прежний. С флагом добавляется
 `detail: {at, queue, attempts}` — снимок наблюдателя по часам движка:
 

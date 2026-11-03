@@ -27,6 +27,10 @@ import { UntrustedCheckoutError } from '../environment/git-trust.ts';
 import { TaskFailure, type FailureKind } from '../engine/failure.ts';
 import { redactDeep } from '../environment/redaction.ts';
 import {
+  dependencyNetworkFailure,
+  dependencyNetworkMessage,
+} from '../environment/dependency-network.ts';
+import {
   expectsReference,
   manifestDigest,
   propertyCoverage,
@@ -847,6 +851,19 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
               .join('; ') +
             (denied.length > 3 ? ` и ещё ${denied.length - 3}` : '') +
             `. Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
+        );
+      }
+      // Установка зависимостей, закреплённая политикой, упала на сети или
+      // реестре пакетов, а признаков ошибки проекта нет: правка кода её не
+      // снимет (правило — environment/dependency-network.ts).
+      const network = dependencyNetworkFailure(gate.command, result.stdout + '\n' + result.stderr);
+      if (network) {
+        kind = 'environment';
+        throw new Error(
+          dependencyNetworkMessage(
+            redact(network),
+            `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
+          ),
         );
       }
       throw new Error(

@@ -26,6 +26,10 @@ import {
   type ProbeServer,
   TaskFailure,
 } from '../contracts/index.ts';
+import {
+  dependencyNetworkFailure,
+  dependencyNetworkMessage,
+} from '../environment/dependency-network.ts';
 import { osToolEnv } from '../environment/os-tools.ts';
 import { redactor } from '../environment/redaction.ts';
 import {
@@ -766,6 +770,7 @@ export class ReviewProbes {
         this.spec.isolation.mode === 'os' && r.code !== 0
           ? sandboxBlockedHosts(output, this.spec.isolation.domains)
           : [];
+      const network = r.code !== 0 ? dependencyNetworkFailure(gate.command, output) : undefined;
       if (signal.aborted)
         outcome = {
           ...base,
@@ -795,6 +800,14 @@ export class ReviewProbes {
           status: 'error',
           failure: 'environment',
           note: `Песочница закрыла сеть к ${blocked.join(', ')} (нет в isolation.domains): ошибка среды, не находка в коде.`,
+        };
+      else if (network)
+        outcome = {
+          ...base,
+          ...streams,
+          status: 'error',
+          failure: 'environment',
+          note: dependencyNetworkMessage(redact(network), 'Это ошибка среды, а не находка в коде.'),
         };
       else if (r.code !== 0 && report?.status !== 'fresh' && writeDenied.test(output))
         // Отчёта нет, а проверка получила отказ записи: она писала мимо

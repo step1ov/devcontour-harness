@@ -6,8 +6,10 @@ import {
   environmentSchema,
   lifecycleSchema,
   stepSchema,
+  TaskFailure,
   type ExecutionPolicy,
 } from '../contracts/index.ts';
+import { dependencyNetworkFailure, dependencyNetworkMessage } from './dependency-network.ts';
 import { command } from './process.ts';
 import { redactor } from './redaction.ts';
 export { redactor } from './redaction.ts';
@@ -106,8 +108,21 @@ export async function runSteps(
       redact: execution.redact,
     });
     await writeFile(join(dir, step.id + '.log'), result.stdout + '\n' + result.stderr);
-    if (result.code || result.timedOut || signal.aborted)
-      throw new Error(`Шаг ${step.id}: exit=${result.code}; timeout=${result.timedOut}`);
+    if (result.code || result.timedOut || signal.aborted) {
+      const message = `Шаг ${step.id}: exit=${result.code}; timeout=${result.timedOut}`;
+      // Шаг установки зависимостей, упавший на сети или реестре: отказ среды
+      // с причиной в сообщении, а не неизвестный (environment/dependency-network.ts).
+      const network =
+        !result.timedOut && !signal.aborted
+          ? dependencyNetworkFailure(step.command, result.stdout + '\n' + result.stderr)
+          : undefined;
+      if (network)
+        throw new TaskFailure(
+          'environment',
+          dependencyNetworkMessage(execution.redact(network), message),
+        );
+      throw new Error(message);
+    }
   }
 }
 
