@@ -1368,29 +1368,30 @@ export class Engine {
     this.withAttempt(id, token, 'run.timing.finished', (a, w, tx) => {
       const at = iso(this.now());
       const open = (a.timings ?? []).find((t) => t.id === timingId);
+      // Не больше одного `finished` на стадию: закрытый или чужой замер не
+      // переписывается, событие не создаётся — запись и журнал согласованы.
+      if (!open || open.finishedAt) return;
       tx.putAttempt({
         ...a,
         timings: (a.timings ?? []).map((t) =>
           t.id === timingId ? { ...t, finishedAt: at, outcome } : t,
         ),
       });
-      // Одно `finished` на стадию: повторное закрытие замера события не создаёт.
-      if (open && !open.finishedAt)
-        tx.emit({
-          type: 'attempt.stage',
-          graphId: w.graphId,
-          workId: w.id,
-          runId: id,
-          attempt: a.attempt,
-          payload: {
-            timingId,
-            stage: open.stage.slice(0, STAGE_NAME_LIMIT),
-            phase: 'finished',
-            at,
-            durationMs: Math.max(0, Date.parse(at) - Date.parse(open.startedAt)),
-            outcome,
-          },
-        });
+      tx.emit({
+        type: 'attempt.stage',
+        graphId: w.graphId,
+        workId: w.id,
+        runId: id,
+        attempt: a.attempt,
+        payload: {
+          timingId,
+          stage: open.stage.slice(0, STAGE_NAME_LIMIT),
+          phase: 'finished',
+          at,
+          durationMs: Math.max(0, Date.parse(at) - Date.parse(open.startedAt)),
+          outcome,
+        },
+      });
     });
   }
 

@@ -21,9 +21,13 @@ export interface AttemptViewInput {
     finishedAt?: string;
     outcome?: 'passed' | 'failed';
   }[];
+  /** Кандидат и интеграция попытки: gates считаются только по записям текущего SHA фазы. */
+  candidateSha?: string;
+  integrationSha?: string;
   evidence: readonly {
     kind: 'test' | 'review';
     phase: 'candidate' | 'integration';
+    sha: string;
     gate: string;
     passed: boolean;
     consumer?: string;
@@ -35,7 +39,11 @@ export interface AttemptViewInput {
 export interface AttemptViewOptions {
   /** Текущее время, epoch ms. */
   now: number;
-  /** Длина владения политики (`leaseMs`): heartbeat продлевает срок на неё. */
+  /**
+   * Длина владения политики (`leaseMs`): heartbeat продлевает срок на неё.
+   * У CLI — политика из `binding.json` каталога состояния, у библиотеки —
+   * политика `Harness`; другая политика процесса-владельца даст другую оценку.
+   */
   leaseMs: number;
   /** Gates репозитория, когда у попытки нет `requiredGates` (прежние записи). */
   repositoryGates?: readonly string[];
@@ -58,19 +66,22 @@ export interface AttemptView {
   stage?: { name: string; family: string; startedAt: string; elapsedMs: number };
   /**
    * Владение: последний heartbeat выводится из срока (`leaseUntil − leaseMs`);
-   * `stale` — срок истёк, владелец больше не может писать.
+   * `stale` — срок истёк, владелец больше не может писать. Срок `0` (владение
+   * отозвано, например отказом recovery) heartbeat не означает:
+   * `sinceHeartbeatMs` тогда нет.
    */
   lease: {
     owner: string;
     leaseUntil: number;
     leaseMs: number;
-    sinceHeartbeatMs: number;
+    sinceHeartbeatMs?: number;
     stale: boolean;
   };
   /**
-   * Gates текущей фазы (интеграции — в `integrating`, иначе кандидата) по
-   * последней записи каждого gate без проверок потребителей: прошли, не
-   * прошли и ещё без записи из обязательных.
+   * Обязательные gates текущей фазы (интеграции — в `integrating`, иначе
+   * кандидата) по последней записи каждого gate на текущем SHA фазы, без
+   * проверок потребителей: прошли, не прошли, ещё без записи. Записи других
+   * gates и других SHA не считаются: `passed + failed + remaining = required`.
    */
   gates: {
     phase: 'candidate' | 'integration';
@@ -90,16 +101,28 @@ const ms = (iso: string) => Date.parse(iso);
  */
 export function attemptView(input: AttemptViewInput, options: AttemptViewOptions): AttemptView {
   const { now, leaseMs } = options;
+  // Незакрытый замер устаревшего владельца (поздний finish не записан) тоже
+  // открыт: текущей считается последняя начатая стадия, при равном начале —
+  // позже записанная.
   const open = (input.timings ?? []).filter((t) => !t.finishedAt);
   const current = open.reduce<(typeof open)[number] | undefined>(
     (a, t) => (!a || ms(t.startedAt) >= ms(a.startedAt) ? t : a),
     undefined,
   );
   const phase = input.phase === 'integrating' ? 'integration' : 'candidate';
+  const sha = phase === 'integration' ? input.integrationSha : input.candidateSha;
+  const required = [...new Set(input.requiredGates ?? options.repositoryGates ?? [])];
   const latest = new Map<string, boolean>();
   for (const e of input.evidence)
-    if (e.kind === 'test' && e.phase === phase && !e.consumer) latest.set(e.gate, e.passed);
-  const required = [...(input.requiredGates ?? options.repositoryGates ?? [])];
+    if (
+      e.kind === 'test' &&
+      e.phase === phase &&
+      !e.consumer &&
+      sha !== undefined &&
+      e.sha === sha &&
+      required.includes(e.gate)
+    )
+      latest.set(e.gate, e.passed);
   const passed = [...latest.values()].filter(Boolean).length;
   return {
     runId: input.id,
@@ -125,7 +148,9 @@ export function attemptView(input: AttemptViewInput, options: AttemptViewOptions
       owner: input.owner,
       leaseUntil: input.leaseUntil,
       leaseMs,
-      sinceHeartbeatMs: Math.max(0, now - (input.leaseUntil - leaseMs)),
+      ...(input.leaseUntil > 0
+        ? { sinceHeartbeatMs: Math.max(0, now - (input.leaseUntil - leaseMs)) }
+        : {}),
       stale: input.leaseUntil <= now,
     },
     gates: {

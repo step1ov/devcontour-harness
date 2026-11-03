@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { HarnessError, executionDigest, type RunEvent } from '../src/contracts/index.ts';
+import { HarnessError, type RunEvent } from '../src/contracts/index.ts';
 import { approve, implement, runAll, setup } from './runner-fixture.ts';
-import { engineOf, graphOf, policyOf, ready } from './engine-fixture.ts';
+import { engineOf, graphOf, ready } from './engine-fixture.ts';
 
 const stageEvents = (events: RunEvent[]) =>
   events.filter(
@@ -69,18 +69,7 @@ test('attempt.stage под fencing: чужой токен, истёкшее и �
   const timingsOf = () => engine.read((v) => v.attempt(a.id)!.timings ?? []);
 
   assert.throws(() => engine.timingStarted(a.id, 'forged-token-0000', 'x'), refused('LEASE_STALE'));
-  const id = engine.timingStarted(a.id, a.token, 'candidate-test:unit');
-  clock.now += 1500;
-  engine.timingFinished(a.id, a.token, id, 'passed');
-  // Повторное закрытие замера второго finished не создаёт.
-  engine.timingFinished(a.id, a.token, id, 'passed');
-  assert.deepEqual(
-    stages().map((e) => [e.payload.phase, e.payload.durationMs]),
-    [
-      ['started', undefined],
-      ['finished', 1500],
-    ],
-  );
+  assert.deepEqual(stages(), [], 'чужой токен не пишет');
 
   const late = engine.timingStarted(a.id, a.token, 'candidate-review');
   clock.now += 31_000; // срок владения истёк
@@ -93,31 +82,60 @@ test('attempt.stage под fencing: чужой токен, истёкшее и �
   assert.equal(stages().length, before.events, 'событий устаревшего владельца нет');
   assert.equal(JSON.stringify(timingsOf()), before.timings, 'замеров устаревшего владельца нет');
   // Новый владелец пишет.
-  engine.timingStarted(adopted.id, adopted.token, 'candidate-review');
+  engine.timingStarted(adopted.id, adopted.token, 'candidate-test:unit');
   assert.equal(stages().length, before.events + 1);
 });
 
-test('attempt.stage не меняет формат состояния и digest политики', () => {
-  const policy = policyOf();
-  const digest = executionDigest(policy);
-  const { engine, store } = engineOf(policy);
+test('attempt.stage: повторное закрытие замера — без изменений и без второго finished', () => {
+  const { engine, store, clock } = engineOf();
+  ready(engine, graphOf({ a: [] }));
+  const a = engine.claim('c1')!;
+  const id = engine.timingStarted(a.id, a.token, 'candidate-test:unit');
+  clock.now += 1500;
+  engine.timingFinished(a.id, a.token, id, 'passed');
+  const closed = engine.read((v) => v.attempt(a.id)!.timings![0]!);
+  clock.now += 2000;
+  engine.timingFinished(a.id, a.token, id, 'failed');
+  engine.timingFinished(a.id, a.token, 'no-such-timing', 'failed');
+  assert.deepEqual(
+    engine.read((v) => v.attempt(a.id)!.timings![0]!),
+    closed,
+    'finishedAt и исход не переписаны',
+  );
+  assert.deepEqual(
+    stageEvents(store.events(0, 500)).map((e) => [
+      e.payload.phase,
+      e.payload.durationMs,
+      e.payload.outcome,
+    ]),
+    [
+      ['started', undefined, undefined],
+      ['finished', 1500, 'passed'],
+    ],
+  );
+});
+
+test('attempt.stage: стадия попытки, утратившей владение, остаётся открытой; конец попытки — attempt.expired', () => {
+  const { engine, store, clock } = engineOf();
   ready(engine, graphOf({ a: [] }));
   const a = engine.claim('c1')!;
   const id = engine.timingStarted(a.id, a.token, 'implementation');
-  engine.timingFinished(a.id, a.token, id, 'passed');
-  assert.equal(executionDigest(policy), digest);
-  assert.equal(
-    engine.read((v) => v.attempt(a.id)!.policyDigest),
-    a.policyDigest,
+  clock.now += 31_000;
+  // Поздний finish владельца, утратившего срок, отклоняется (runner его глотает).
+  assert.throws(() => engine.timingFinished(a.id, a.token, id, 'passed'), refused('LEASE_STALE'));
+  engine.expire();
+  const events = store.events(0, 500);
+  const pair = stageEvents(events).filter((e) => e.payload.timingId === id);
+  assert.deepEqual(
+    pair.map((e) => e.payload.phase),
+    ['started'],
+    'started без finished',
   );
-  assert.equal(store.stateVersion, 1);
-  // Документ попытки не несёт ничего, кроме прежнего замера.
-  const attempt = engine.read((v) => v.attempt(a.id)!);
-  assert.deepEqual(Object.keys(attempt.timings![0]!).sort(), [
-    'finishedAt',
-    'id',
-    'outcome',
-    'stage',
-    'startedAt',
-  ]);
+  assert.equal(
+    engine.read((v) => v.attempt(a.id)!.timings![0]!.finishedAt),
+    undefined,
+    'замер не закрыт',
+  );
+  const expired = events.find((e) => e.type === 'attempt.expired' && e.runId === a.id);
+  assert.ok(expired && expired.seq > pair[0]!.seq, 'конец стадии — событие конца попытки');
 });

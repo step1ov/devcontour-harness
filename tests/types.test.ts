@@ -6,6 +6,8 @@ import type {
   CheckSuite,
   ExecutionTransaction,
   JointVerificationState,
+  KnownRunEvent,
+  RunEvent,
   RunEventDraft,
   RunResult,
   WorkState,
@@ -57,6 +59,28 @@ export function _compileChecks(tx: ExecutionTransaction, v: JointVerificationSta
   void draft;
 }
 
+/**
+ * Событие при чтении может быть непрозрачным `unknown` (тип более новой
+ * версии): нагрузка доступна только после сужения по `type`, а
+ * `KnownRunEvent` — событие известного типа.
+ */
+export function _eventChecks(e: RunEvent, known: KnownRunEvent) {
+  // @ts-expect-error — у непрозрачного события нагрузки нет: сначала сузить по type
+  void e.payload;
+  if (e.type === 'unknown') {
+    const original: string = e.original;
+    void original;
+    return;
+  }
+  void e.payload;
+  void known.payload;
+  if (e.type === 'attempt.stage') {
+    const phase: 'started' | 'finished' = e.payload.phase;
+    void phase;
+  }
+}
+
 test('Проверки типов выполняются компилятором (см. npm run typecheck)', () => {
   assert.equal(typeof _compileChecks, 'function');
+  assert.equal(typeof _eventChecks, 'function');
 });

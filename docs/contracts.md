@@ -627,17 +627,29 @@ manifestDigest, impact?, evidence[], error?}`. Смена любого SHA де�
 `<фаза>-test:<gate>`, `<фаза>-consumer:<репозиторий>:<gate>`,
 `<фаза>-recheck:<gate>`, `<фаза>-review`, `integration-environment:<шаг>`,
 `integration-consumer-environment:<репозиторий>:<шаг>`. На стадию — одно
-`started` и одно `finished` (у него `durationMs` и `outcome`); `at` и
-`durationMs` — по часам движка и совпадают с замером. Событие пишется в той же
-транзакции `run.timing.started`/`run.timing.finished`, что и замер, под
-fencing: утративший владение не пишет ни замера, ни события.
+`started` и не больше одного `finished` (у него `durationMs` и `outcome`);
+`at` и `durationMs` — по часам движка и совпадают с замером. Событие пишется
+в той же транзакции `run.timing.started`/`run.timing.finished`, что и замер,
+под fencing: утративший владение не пишет ни замера, ни события. Повторное
+закрытие замера ничего не меняет и событий не создаёт.
+
+`finished` может не прийти: поздний finish владельца, утратившего срок,
+отклоняется (runner его не повторяет), упавший процесс его не пишет, а `adopt`
+и recovery открытые замеры прежнего владельца не закрывают. Такая стадия
+остаётся открытой и в замере, и в журнале; её конец — событие конца попытки
+(`attempt.expired`, `attempt.failed`, `attempt.cancelled`,
+`attempt.recovered`, `work.accepted`). Потребитель журнала обязан обрабатывать
+незакрытые стадии.
 
 Чтение журнала терпимо к типам более новых версий: событие типа, которого нет
 в `eventPayloads`, возвращается как `UnknownRunEvent` —
 `{apiVersion, seq, at, graphId?, workId?, runId?, attempt?, type: 'unknown',
 original}` (исходный тип, не длиннее 200 символов; нагрузка не возвращается).
-`RunEvent` = известные события (`KnownRunEvent`) | `UnknownRunEvent`; разбор —
-`readRunEvent`, схема чтения — `readRunEventSchema`. Запись строгая
+`RunEvent` = известные события (`KnownRunEvent`) | `UnknownRunEvent`: нагрузка
+доступна после сужения по `type` (`e.type !== 'unknown'`) или у
+`KnownRunEvent`. Тип `ExecutionStore.events()` прежний (`RunEvent[]`), поэтому
+хранилища хоста, возвращающие или делегирующие события, компилируются без
+изменений. Разбор — `readRunEvent`, схема чтения — `readRunEventSchema`. Запись строгая
 (`runEventSchema`, опубликованная `run-event`): `unknown` записать нельзя;
 известный тип с нарушенной нагрузкой при чтении — отказ.
 
@@ -830,16 +842,22 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
   у паузы отказа runtime `detail` — сообщение последнего отказа её классов),
   `since`, `operation`, `failures` (классы отказа паузы runtime) и кто и что её
   снимает — `code`, `cause`, `actor`, `action` (`queuePause`, то же
-  рассуждение, что у `explain` на claim). Пауза без причины в standalone —
-  очередь ещё не запускали (`cause: not-ready`, её снимает `run`).
+  рассуждение, что у `explain` на claim). Паузу, которую снимет следующий
+  run (очередь ещё не запускали, штатная остановка, применимый запрос
+  политики), `explain` считает снятой; `queue` показывает её с
+  `liftedByRun: true` и тем же диагнозом, что у готового поручения в
+  `explain`: `NOT_READY`, `not-ready`, `controller`, `wait`.
 - `attempts[]` — активные попытки (`attemptView`): `runId`, `workId`,
   `attempt`, `phase`, `runtime`, `model?`, `startedAt`, `elapsedMs`; `stage`
   — последний незакрытый замер (`name`, `family` — имя до `:`, `startedAt`,
-  `elapsedMs`); `lease` — `owner`, `leaseUntil`, `leaseMs`, `sinceHeartbeatMs`
-  (от последнего heartbeat, `leaseUntil − leaseMs`) и `stale` (срок истёк);
-  `gates` текущей фазы (интеграции в `integrating`, иначе кандидата) — `required`,
-  `passed`, `failed`, `remaining` по последней записи каждого gate без проверок
-  потребителей.
+  `elapsedMs`; при равном начале — позже записанный); `lease` — `owner`,
+  `leaseUntil`, `leaseMs`, `sinceHeartbeatMs` (от последнего heartbeat,
+  `leaseUntil − leaseMs`; нет при сроке `0` — владение отозвано) и `stale`
+  (срок истёк). `leaseMs` — из политики процесса, который читает: у CLI —
+  `binding.json` каталога состояния. `gates` — обязательные gates текущей фазы
+  (интеграции в `integrating`, иначе кандидата) по последней записи каждого на
+  текущем SHA фазы, без проверок потребителей: `passed + failed + remaining =
+required`.
 
 `attemptView` и `queuePause` — чистые проекции `devcontour-harness/projections`:
 хост строит тот же вид по своей попытке.

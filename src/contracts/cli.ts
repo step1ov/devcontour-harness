@@ -663,10 +663,11 @@ export const attemptViewSchema = z.strictObject({
     owner: z.string().min(1).max(300),
     leaseUntil: z.number().int().min(0),
     leaseMs: z.number().int().positive(),
-    sinceHeartbeatMs: z.number().int().min(0),
+    /** Нет при сроке `0` (владение отозвано). */
+    sinceHeartbeatMs: z.number().int().min(0).optional(),
     stale: z.boolean(),
   }),
-  /** Gates текущей фазы по последней записи каждого gate. */
+  /** Обязательные gates текущей фазы на её текущем SHA: `passed + failed + remaining = required`. */
   gates: z.strictObject({
     phase: z.enum(['candidate', 'integration']),
     required: z.number().int().min(0),
@@ -687,6 +688,11 @@ export const queueViewSchema = z.strictObject({
   detail: z.string().optional(),
   since: isoTimeSchema.optional(),
   operation: z.string().optional(),
+  /**
+   * Пауза есть, но её снимет следующий run (очередь не запускали, штатная
+   * остановка, применимый запрос политики) — как в `explain`.
+   */
+  liftedByRun: z.literal(true).optional(),
   failures: z.array(failureKindSchema).optional(),
   code: z.enum(Object.keys(errorCodes) as [ErrorCode, ...ErrorCode[]]).optional(),
   cause: z.enum(diagnosisCauses).optional(),

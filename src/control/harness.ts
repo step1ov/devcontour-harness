@@ -37,6 +37,7 @@ import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { validateInputs } from '../validate.ts';
 import { WorkflowQueue } from './workflow.ts';
+import { nextRunControl } from '../explain/state.ts';
 import {
   CLIP_DIAGNOSTIC,
   attemptView,
@@ -819,35 +820,38 @@ export class Harness {
       ...(control.pauseReason ? { pauseReason: control.pauseReason } : {}),
       errors,
     });
-    const pause = queuePause(control);
-    // Пауза без причины в standalone — «очередь ещё не запускали»: её снимает
-    // run (как и в explain), это не отказ runtime прежних записей хоста.
-    const notStarted = control.paused && !control.pauseReason;
     const repositoryGates = (id: string) =>
       this.policy.repositories.find((r) => r.id === id)?.gates.map((g) => g.id);
+    // Пауза, которую снимет следующий run, глазами explain: выдача не стоит,
+    // поручения ждут controller.
+    const queue = nextRunControl(this, v).lifted
+      ? {
+          paused: true,
+          ...(control.pauseReason ? { reason: control.pauseReason } : {}),
+          detail: 'Паузу снимет следующий harness run',
+          ...(control.pausedAt ? { since: control.pausedAt } : {}),
+          ...(control.pauseOperation ? { operation: control.pauseOperation } : {}),
+          liftedByRun: true as const,
+          code: 'NOT_READY' as const,
+          cause: 'not-ready' as const,
+          actor: 'controller' as const,
+          action: 'wait' as const,
+        }
+      : {
+          ...stop,
+          ...(stop.detail ? { detail: clipText(stop.detail, CLIP_DIAGNOSTIC)! } : {}),
+          ...(control.paused && control.pausedAt ? { since: control.pausedAt } : {}),
+          ...(control.paused && control.pauseOperation
+            ? { operation: control.pauseOperation }
+            : {}),
+          ...(control.paused && control.pauseFailures?.length
+            ? { failures: [...control.pauseFailures] }
+            : {}),
+          ...(queuePause(control) ?? {}),
+        };
     return {
       at: new Date(now).toISOString(),
-      queue: notStarted
-        ? {
-            paused: true,
-            detail: 'Очередь ещё не запускали: её снимает harness run',
-            code: 'PAUSED' as const,
-            cause: 'not-ready' as const,
-            actor: 'user' as const,
-            action: 'resume-queue' as const,
-          }
-        : {
-            ...stop,
-            ...(stop.detail ? { detail: clipText(stop.detail, CLIP_DIAGNOSTIC)! } : {}),
-            ...(control.paused && control.pausedAt ? { since: control.pausedAt } : {}),
-            ...(control.paused && control.pauseOperation
-              ? { operation: control.pauseOperation }
-              : {}),
-            ...(control.paused && control.pauseFailures?.length
-              ? { failures: [...control.pauseFailures] }
-              : {}),
-            ...(pause ?? {}),
-          },
+      queue,
       attempts: works
         .map((w) => (w.activeRunId ? v.attempt(w.activeRunId) : undefined))
         .filter((a) => a?.status === 'active')
