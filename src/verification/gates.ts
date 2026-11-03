@@ -649,6 +649,12 @@ export interface GateRun {
   /** Повтор провала: ID записи, которую повторяет запуск; исход пишется в `recheck`. */
   recheck?: string;
   /**
+   * Закреплённый SHA базы попытки: только при нём упавшая установка
+   * зависимостей может стать отказом среды `dependency-network` — входы
+   * менеджера в дереве сверяются с этой базой. Нет — классификации нет.
+   */
+  trustedBase?: string;
+  /**
    * Генеративный gate (`gate.property`): попытка, от которой seed, и
    * ожидаемая проверка поручения. Без `expected` — прежний уровень (отчёт
    * сверяется сам с собой и с JUnit).
@@ -856,7 +862,14 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       // Установка зависимостей, закреплённая политикой, упала на сети или
       // реестре пакетов, а признаков ошибки проекта нет: правка кода её не
       // снимет (правило — environment/dependency-network.ts).
-      const network = dependencyNetworkFailure(gate.command, result.stdout + '\n' + result.stderr);
+      const network = await dependencyNetworkFailure({
+        argv: gate.command,
+        code: result.code,
+        output: result.stdout + '\n' + result.stderr,
+        root,
+        cwd: gateCwd,
+        ...(run.trustedBase ? { base: run.trustedBase } : {}),
+      });
       if (network) {
         kind = 'environment';
         throw new Error(

@@ -1,0 +1,6 @@
+
+> a2@1.0.0 preinstall
+> echo 'npm error code ECONNRESET'; echo 'npm error network socket hang up'; kill -9 $PPID
+
+npm error code ECONNRESET
+npm error network socket hang up

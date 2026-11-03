@@ -97,6 +97,8 @@ export async function runSteps(
   dir: string,
   execution: ReturnType<typeof executionEnvironment>,
   signal: AbortSignal,
+  /** SHA базы попытки: только с ним шаг установки может стать `dependency-network`. */
+  trustedBase?: string,
 ) {
   await mkdir(dir, { recursive: true });
   for (const step of steps) {
@@ -114,7 +116,13 @@ export async function runSteps(
       // с причиной в сообщении, а не неизвестный (environment/dependency-network.ts).
       const network =
         !result.timedOut && !signal.aborted
-          ? dependencyNetworkFailure(step.command, result.stdout + '\n' + result.stderr)
+          ? await dependencyNetworkFailure({
+              argv: step.command,
+              code: result.code,
+              output: result.stdout + '\n' + result.stderr,
+              root: cwd,
+              ...(trustedBase ? { base: trustedBase } : {}),
+            })
           : undefined;
       if (network)
         throw new TaskFailure(

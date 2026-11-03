@@ -109,6 +109,8 @@ export const probeSpec = z.object({
   /** Фаза и SHA ревью: записываются в каждый запуск gate. */
   phase: z.string().optional(),
   sha: z.string().optional(),
+  /** SHA базы попытки: только с ним gate установки может стать `dependency-network`. */
+  trustedBase: z.string().optional(),
   /**
    * Вызов reviewer, которому принадлежит журнал: попытка harness, фаза, SHA
    * и номер вызова. Записывается в каждый исход — по нему итог ревью не
@@ -770,7 +772,17 @@ export class ReviewProbes {
         this.spec.isolation.mode === 'os' && r.code !== 0
           ? sandboxBlockedHosts(output, this.spec.isolation.domains)
           : [];
-      const network = r.code !== 0 ? dependencyNetworkFailure(gate.command, output) : undefined;
+      const network =
+        r.code !== 0 && !r.timedOut && !signal.aborted
+          ? await dependencyNetworkFailure({
+              argv: gate.command,
+              code: r.code,
+              output,
+              root,
+              cwd: gateCwd,
+              ...(this.spec.trustedBase ? { base: this.spec.trustedBase } : {}),
+            })
+          : undefined;
       if (signal.aborted)
         outcome = {
           ...base,
