@@ -91,7 +91,8 @@ test('report: ключевые числа фикстуры — принятые,
   assert.equal(r.window.asOf, t(29, 16));
   assert.deepEqual(r.speed.finished, { accepted: 5, failed: 1, cancelled: 1 });
   // env: отказ окружения не засчитан — первая попытка; gate: прерывание не засчитано, отказ gate — засчитан.
-  assert.deepEqual(r.speed.firstPass, { value: 2, n: 5, unknown: 0, bound: 'exact' });
+  // legacy: кроме принявшей, только отказ без класса — первая ли попытка, неизвестно.
+  assert.deepEqual(r.speed.firstPass, { value: 2, n: 5, unknown: 1, bound: 'lower' });
   assert.deepEqual(r.speed.firstPassRaw, { value: 1, n: 5, unknown: 0, bound: 'exact' });
   // legacy: до приёмки только отказ без класса — неизвестно, вернули ли его.
   assert.deepEqual(r.defects.sentBack, { value: 2, n: 5, unknown: 1, bound: 'lower' });
@@ -121,7 +122,7 @@ test('report: ключевые числа фикстуры — принятые,
   assert.equal(r.autonomy.withAction.value, 0);
   assert.equal(r.autonomy.actions.holds, 1);
   assert.equal(r.autonomy.withAction.bound, 'lower');
-  assert.equal(r.autonomy.withoutAction.bound, 'upper');
+  assert.deepEqual(r.autonomy.withoutAction, { value: null, n: 5, unknown: 5, bound: 'unknown' });
   assert.equal(r.autonomy.actions.retries, null);
   assert.deepEqual(
     r.autonomy.pauses.map((p) => [p.reason, p.count, p.pausedMs, p.open]),
@@ -563,7 +564,7 @@ test('review 2: возвраты — отказы без класса делаю
   );
   assert.match(
     headline(r, 'sent-back')!.text,
-    /^At least 2 of 5 .*1 more task had failures without a class/,
+    /^At least 2 of 5 .*1 task had only failures without a class/,
   );
   // Без legacy и с обычными отказами — точное число.
   const exact = valueReport(keep(input, ['first', 'gate', 'review', 'env']), options);
@@ -711,4 +712,63 @@ test('review 11: больше 5 версий движка в неделе — с
   const week = r.weeks.rows.find((w) => w.kind === 'week' && w.week === '2026-W41');
   assert.ok(week && week.kind === 'week' && week.enginesTruncated, JSON.stringify(week));
   assert.match(reportMarkdown(r), /, …/);
+});
+
+/* ------------------------------------------------------------------ */
+/* Ревью, раунд 2                                                      */
+/* ------------------------------------------------------------------ */
+
+test('round 2: возвраты — оба сомнения сразу дают диапазон без знака границы', () => {
+  const input = reportFixture();
+  const mixed: ValueReportInput = {
+    ...input,
+    attempts: input.attempts.map((a) =>
+      a.id === 'run-gate-2'
+        ? { ...a, evidence: a.evidence.map((e) => (e.passed ? e : { ...e, gate: 'install' })) }
+        : a,
+    ),
+  };
+  const r = valueReport(mixed, options);
+  // review — defect, gate — только gate установки, legacy — только без класса.
+  assert.deepEqual(r.defects.sentBackRange, { min: 1, max: 3 });
+  assert.equal(r.defects.sentBack.bound, 'unknown');
+  const h = headline(r, 'sent-back')!;
+  assert.equal(h.value, '1–3 of 5');
+  assert.match(h.text, /^Between 1 and 3 of 5 accepted tasks/);
+  assert.match(reportMarkdown(r), /sent back at least once: 1–3 of 5/);
+  // Обратно: одно сомнение — знак границы, диапазон схлопнут с одной стороны.
+  const lower = valueReport(input, options);
+  assert.deepEqual(lower.defects.sentBackRange, { min: 2, max: 3 });
+  assert.equal(headline(lower, 'sent-back')!.value, '≥ 2 of 5');
+});
+
+test('round 2: первая попытка — отказы без класса делают её нижней границей; без них — точно', () => {
+  const input = reportFixture();
+  const r = valueReport(input, options);
+  assert.deepEqual(r.speed.firstPass, { value: 2, n: 5, unknown: 1, bound: 'lower' });
+  assert.match(
+    headline(r, 'accepted')!.text,
+    /At least 2 of them on the first try; for 1 more task it is unknown/,
+  );
+  const exact = valueReport(keep(input, ['first', 'gate', 'review', 'env']), options);
+  assert.deepEqual(exact.speed.firstPass, { value: 2, n: 4, unknown: 0, bound: 'exact' });
+  assert.match(
+    headline(exact, 'accepted')!.text,
+    /^4 tasks accepted\. 2 of them on the first try\.$/,
+  );
+});
+
+test('round 2: «без действий человека» — не измеримо, а не «≥ 0 of N»; ограничение о событиях без согласований', () => {
+  const input = reportFixture();
+  const md = reportMarkdown(valueReport(input, options));
+  assert.match(md, /needed no human action: not measurable yet/);
+  assert.doesNotMatch(md, /recorded human action: ≥/);
+  assert.match(md, /Pauses and approvals are counted from events/);
+  const none = valueReport(
+    { ...input, graphs: [], events: input.events!.filter((e) => e.type !== 'graph.approved') },
+    options,
+  );
+  const text = none.limitations.map((l) => l.text).join('\n');
+  assert.match(text, /Pauses are counted from events/);
+  assert.doesNotMatch(text, /Pauses and approvals are counted/);
 });

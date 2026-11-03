@@ -1,18 +1,14 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import {
   existsSync,
   lstatSync,
-  realpathSync,
-  renameSync,
-  rmSync,
   readFileSync,
   readdirSync,
   writeFileSync,
   mkdirSync,
 } from 'node:fs';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import {
@@ -51,6 +47,7 @@ import { hostGitArgs } from './environment/process.ts';
 import { FileContextSource, FileResultSink, FileWorkSource } from './connectors/files.ts';
 import { SqliteExecutionStore } from './storage/sqlite.ts';
 import { collectReportInput } from './control/report.ts';
+import { writeReportFile } from './control/report-file.ts';
 import { valueReport, reportHtml, reportMarkdown } from './report/index.ts';
 
 const usage = `harness ${HARNESS_VERSION}
@@ -367,63 +364,6 @@ const readText = (path: string, what: string) => {
       'INVALID_INPUT',
       `${what}: не прочитан ${path}: ${(error as Error).message}`,
     );
-  }
-};
-
-/**
- * Запись `report --out` без записи «сквозь» ссылки: текст пишется во
- * временный файл того же каталога (`wx`, новый файл) и переименовывается
- * поверх цели — rename заменяет запись каталога и не следует ни за symlink,
- * ни за жёсткой ссылкой. Отказ `PATH_CONFLICT`: цель — не обычный файл,
- * symlink, файл с несколькими жёсткими ссылками (`nlink > 1`) или путь внутри
- * каталога состояния. Каталог цели должен существовать.
- */
-function writeReport(out: string, state: string, text: string) {
-  const target = resolve(out);
-  const conflict = (message: string, detail: string) =>
-    new HarnessError('PATH_CONFLICT', `--out: ${message}: ${out}`, [
-      { path: ['--out'], message: detail },
-    ]);
-  let dir: string;
-  try {
-    dir = realpathSync(dirname(target));
-  } catch (error) {
-    throw new HarnessError(
-      'INVALID_INPUT',
-      `--out: каталог недоступен: ${(error as Error).message}`,
-      [{ path: ['--out'], message: out }],
-    );
-  }
-  const stateDir = realpathSync(resolve(state));
-  if (dir === stateDir || dir.startsWith(stateDir + sep))
-    throw conflict('внутри каталога состояния', 'inside-state');
-  const existing = lstatOf(target);
-  if (existing) {
-    if (existing.isSymbolicLink()) throw conflict('символическая ссылка', 'symlink');
-    if (!existing.isFile()) throw conflict('не обычный файл', 'not-a-file');
-    if (existing.nlink > 1) throw conflict('у файла несколько жёстких ссылок', 'hard-link');
-  }
-  const temp = join(dir, `.${basename(target)}.${process.pid}.${randomUUID()}.tmp`);
-  let created = false;
-  try {
-    writeFileSync(temp, text, { flag: 'wx' });
-    created = true;
-    renameSync(temp, join(dir, basename(target)));
-    created = false;
-  } catch (error) {
-    throw new HarnessError('INVALID_INPUT', `--out: не записан: ${(error as Error).message}`, [
-      { path: ['--out'], message: out },
-    ]);
-  } finally {
-    // Удаляется только свой временный файл, созданный выше (`wx`), и только если rename не прошёл.
-    if (created) rmSync(temp, { force: true });
-  }
-}
-const lstatOf = (path: string) => {
-  try {
-    return lstatSync(path);
-  } catch {
-    return undefined;
   }
 };
 
@@ -753,24 +693,22 @@ async function run(
       const file = join(resolve(state), 'state.sqlite');
       if (!existsSync(file))
         throw new HarnessError('NOT_FOUND', 'Каталог состояния не найден: ' + state);
-      // Только чтение: база открывается без записи метки писателя и PRAGMA.
-      const store = new SqliteExecutionStore(file, 'devcontour-harness@' + HARNESS_VERSION, {
-        readOnly: true,
-      });
-      let report;
-      try {
-        report = valueReport(collectReportInput(store), {
-          ...optional('since', v.since),
-          ...optional('until', v.until),
-          ...optional('asOf', v['as-of']),
-          ...(v['no-titles'] ? { noTitles: true } : {}),
-          label: basename(resolve(state)),
-          stateDir: resolve(state),
-          harnessVersion: HARNESS_VERSION,
-        });
-      } finally {
-        store.close();
-      }
+      // Однократное чтение без записи и без файлов в каталоге состояния
+      // (неизменяемое открытие с проверкой после чтения, `readOnce`).
+      const report = SqliteExecutionStore.readOnce(
+        file,
+        'devcontour-harness@' + HARNESS_VERSION,
+        (store) =>
+          valueReport(collectReportInput(store), {
+            ...optional('since', v.since),
+            ...optional('until', v.until),
+            ...optional('asOf', v['as-of']),
+            ...(v['no-titles'] ? { noTitles: true } : {}),
+            label: basename(resolve(state)),
+            stateDir: resolve(state),
+            harnessVersion: HARNESS_VERSION,
+          }),
+      );
       if (format === 'json' && !v.out) return { command, data: report };
       const text =
         format === 'json'
@@ -779,7 +717,7 @@ async function run(
             ? reportMarkdown(report)
             : reportHtml(report);
       if (!v.out) return { command, data: report, text };
-      writeReport(v.out, state, text);
+      writeReportFile(v.out, state, text);
       return {
         command,
         data: { out: v.out, format, bytes: Buffer.byteLength(text), asOf: report.window.asOf },

@@ -379,6 +379,21 @@ export function valueReport(
   const isFirstPass = (f: WorkFacts) =>
     f.attempts.filter(counted).length === 1 && !!f.accepting && counted(f.accepting);
   /**
+   * Первая попытка неизвестна: кроме принявшей, засчитаны только отказы без
+   * класса — будь они отказами окружения, попытка была бы первой.
+   */
+  const firstPassUnknown = (f: WorkFacts) => {
+    if (isFirstPass(f) || !f.accepting) return false;
+    const others = f.attempts.filter((a) => a !== f.accepting && counted(a));
+    return (
+      others.length > 0 &&
+      others.every((a) => {
+        const b = failureBucketOf(a);
+        return b === 'unknown' || b === 'unclassified';
+      })
+    );
+  };
+  /**
    * Возврат до приёмки: `defect` — есть отказ `defect`; `setup` — только
    * отказы gate подготовки; `unknown` — отказов `defect` нет, но есть отказы
    * без класса; `no` — ни того ни другого.
@@ -760,6 +775,7 @@ export function valueReport(
   for (const n of perAccepted)
     buckets[n <= 1 ? '1' : n === 2 ? '2' : n === 3 ? '3' : n <= 6 ? '4-6' : '7+'] += 1;
   const firstPass = accepted.filter(isFirstPass).length;
+  const firstPassUnknownCount = accepted.filter(firstPassUnknown).length;
   const firstPassRaw = accepted.filter((f) => f.attempts.length === 1).length;
 
   /* Стоимость (C1–C6) ------------------------------------------------- */
@@ -945,9 +961,19 @@ export function valueReport(
         sentBackCount.defect + sentBackCount.setup,
         accepted.length,
         sentBackCount.unknown,
-        sentBackCount.unknown ? 'lower' : sentBackCount.setup ? 'upper' : 'exact',
+        sentBackCount.unknown && sentBackCount.setup
+          ? 'unknown'
+          : sentBackCount.unknown
+            ? 'lower'
+            : sentBackCount.setup
+              ? 'upper'
+              : 'exact',
       ),
       sentBackSetupOnly: sentBackCount.setup,
+      sentBackRange: {
+        min: sentBackCount.defect,
+        max: sentBackCount.defect + sentBackCount.setup + sentBackCount.unknown,
+      },
       byGate: byGate.slice(0, reportLimits.rows),
       byGateTruncated: byGate.length > reportLimits.rows,
       reviews: reviewsBlock,
@@ -974,12 +1000,9 @@ export function valueReport(
     },
     autonomy: {
       withAction: measure(acceptedActed, accepted.length, 0, accepted.length ? 'lower' : 'unknown'),
-      withoutAction: measure(
-        accepted.length - acceptedActed,
-        accepted.length,
-        0,
-        accepted.length ? 'upper' : 'unknown',
-      ),
+      // Без записанного актёра повторов, сбросов и сдвигов базы «без действий
+      // человека» не измерить: значение неизвестно, а не верхняя граница N.
+      withoutAction: measure(null, accepted.length, accepted.length, 'unknown'),
       actions: {
         operatorDecisions: operatorDecisions.length,
         holds: holds.length,
@@ -999,7 +1022,12 @@ export function valueReport(
       queueWait: dist(queueWaits, 0),
       stages: stagesAll.slice(0, reportLimits.rows),
       stagesTruncated: stagesAll.length > reportLimits.rows,
-      firstPass: measure(firstPass, accepted.length, 0, 'exact'),
+      firstPass: measure(
+        firstPass,
+        accepted.length,
+        firstPassUnknownCount,
+        firstPassUnknownCount ? 'lower' : 'exact',
+      ),
       firstPassRaw: measure(firstPassRaw, accepted.length, 0, 'exact'),
       finished: {
         accepted: finished.filter((f) => f.outcome === 'accepted').length,
@@ -1277,21 +1305,27 @@ function summaryOf(r: ValueReport, failedAttempts: number): ValueReport['summary
     .filter(Boolean)
     .join(', ');
   const spendValue = formatMeasureUsd(spend);
+  const range = r.defects.sentBackRange;
+  const sentBackValue =
+    sb.bound === 'unknown' ? `${range.min}–${range.max} of ${sb.n}` : formatMeasureRatio(sb);
   return {
     status: 'ok',
     headlines: [
       {
         id: 'accepted',
         value: String(n),
-        text: `${plural(n, 'task')} accepted. ${fp.value} of them${pct(fp.value ?? 0, n)} on the first try.`,
+        text:
+          fp.bound === 'lower'
+            ? `${plural(n, 'task')} accepted. At least ${fp.value} of them${pct(fp.value ?? 0, n)} on the first try; for ${plural(fp.unknown, 'more task')} it is unknown (failures without a class).`
+            : `${plural(n, 'task')} accepted. ${fp.value} of them${pct(fp.value ?? 0, n)} on the first try.`,
         basis: `Accepted: merged after all required checks and an independent review. First try: the accepting attempt was the only counted attempt (environment failures and shutdowns are not counted). Window: ${window}.`,
         measure: fp,
       },
       {
         id: 'sent-back',
-        value: formatMeasureRatio(sb),
-        text: `${sb.bound === 'lower' ? 'At least ' : sb.bound === 'upper' ? 'At most ' : ''}${formatRatio(sb.value ?? 0, sb.n)} accepted tasks were sent back by checks, review or the scope rule before merge${sb.unknown ? `; ${plural(sb.unknown, 'more task')} had failures without a class before merge` : ''}. Nothing merged without passing every required check and review.`,
-        basis: `An attempt rejected as gate, review or scope-violation before the accepting attempt.${r.defects.sentBackSetupOnly ? ` ${plural(r.defects.sentBackSetupOnly, 'task')} counted only through setup-check failures, which may be network or registry errors.` : ''}${sb.bound === 'exact' ? '' : sb.bound === 'lower' ? ' Failures without a class are not counted, so this is a lower bound.' : ' So this is an upper bound.'}`,
+        value: sentBackValue,
+        text: `${sb.bound === 'lower' ? 'At least ' : sb.bound === 'upper' ? 'At most ' : sb.bound === 'unknown' ? 'Between ' : ''}${sb.bound === 'unknown' ? `${range.min} and ${range.max} of ${sb.n}` : formatRatio(sb.value ?? 0, sb.n)} accepted tasks were sent back by checks, review or the scope rule before merge${sb.unknown ? `; ${plural(sb.unknown, 'task')} had only failures without a class before merge` : ''}. Nothing merged without passing every required check and review.`,
+        basis: `An attempt rejected as gate, review or scope-violation before the accepting attempt.${r.defects.sentBackSetupOnly ? ` ${plural(r.defects.sentBackSetupOnly, 'task')} counted only through setup-check failures, which may be network or registry errors.` : ''}${sb.bound === 'exact' ? '' : sb.bound === 'lower' ? ' Failures without a class are not counted, so this is a lower bound.' : sb.bound === 'upper' ? ' So this is an upper bound.' : ' Both caveats apply, so a range is shown.'}`,
         measure: sb,
       },
       {
@@ -1340,7 +1374,7 @@ function limitationsOf(r: ValueReport): ValueReport['limitations'] {
     },
     {
       id: 'actions-not-recorded',
-      text: 'Human actions are counted only where a person is recorded as the actor (operator recovery decisions); retries, resets, cancellations and base moves have no recorded actor yet, so human actions are a lower bound and tasks without them an upper bound.',
+      text: 'Human actions are counted only where a person is recorded as the actor (operator recovery decisions); retries, resets, cancellations and base moves have no recorded actor yet, so tasks that needed no human action are not measurable yet.',
     },
     {
       id: 'check-network',
@@ -1412,12 +1446,12 @@ function limitationsOf(r: ValueReport): ValueReport['limitations'] {
   add(
     'events',
     c.eventsFrom === null,
-    'No events are recorded: pauses and approvals are not shown.',
+    `No events are recorded: pauses are not shown${r.autonomy.approvals.source === 'none' ? ', approvals are unknown' : ''}.`,
   );
   add(
     'events-from',
     c.eventsFrom !== null && (r.window.since === null || c.eventsFrom > r.window.since),
-    `Pauses and approvals are counted from events, which start at ${c.eventsFrom}.`,
+    `${r.autonomy.approvals.source === 'events' || r.autonomy.approvals.source === 'mixed' ? 'Pauses and approvals are' : 'Pauses are'} counted from events, which start at ${c.eventsFrom}.`,
   );
   add(
     'engines',

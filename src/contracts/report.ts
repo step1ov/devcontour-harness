@@ -225,6 +225,13 @@ export const valueReportSchema = z.strictObject({
     sentBack: reportMeasureSchema,
     /** Возвращённые только отказами gate подготовки (возможна сеть). */
     sentBackSetupOnly: count,
+    /**
+     * Диапазон возвращённых: `min` — с отказом `defect` не только в gates
+     * подготовки; `max` — плюс только gates подготовки и только отказы без
+     * класса. Оба сомнения сразу — `sentBack.bound: unknown`, показывается
+     * диапазон.
+     */
+    sentBackRange: z.strictObject({ min: count, max: count }),
     byGate: z
       .array(
         z.strictObject({

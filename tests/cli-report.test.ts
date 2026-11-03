@@ -9,7 +9,9 @@ import {
   readFileSync,
   readdirSync,
   statSync,
+  chmodSync,
   linkSync,
+  writeSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -27,6 +29,8 @@ import {
   type RunEventDraft,
 } from '../src/contracts/index.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
+import { REPORT_FILE_MODE, writeReportFile } from '../src/control/report-file.ts';
+import { HarnessError } from '../src/contracts/index.ts';
 import { Harness } from '../src/control/harness.ts';
 import { example } from './fixtures.ts';
 import { SECRET, reportFixture } from './report-fixture.ts';
@@ -253,16 +257,126 @@ test('report: Harness.report — тот же отчёт по каталогу с
   }
 });
 
-test('report: хранилище только для чтения не создаёт файлов в каталоге состояния (нет -wal/-shm)', () => {
+test('report: однократное чтение не создаёт файлов; обычное только для чтения — лишь пустые служебные', () => {
   const { state } = seededState();
-  const before = readdirSync(state).sort();
-  assert.deepEqual(before, ['state.sqlite']);
-  const store = new SqliteExecutionStore(join(state, 'state.sqlite'), 'reader', { readOnly: true });
-  try {
+  const file = join(state, 'state.sqlite');
+  const sha = () => createHash('sha256').update(readFileSync(file)).digest('hex');
+  const data = sha();
+  assert.deepEqual(readdirSync(state).sort(), ['state.sqlite']);
+  SqliteExecutionStore.readOnce(file, 'reader', (store) => {
     assert.ok(store.read((v) => v.works()).length > 0);
     assert.ok(store.events(0, 10).length > 0);
+  });
+  assert.deepEqual(readdirSync(state).sort(), ['state.sqlite']);
+  // Долгоживущий дескриптор (status, Harness.open): блокировки SQLite и -wal/-shm без данных.
+  const store = new SqliteExecutionStore(file, 'reader', { readOnly: true });
+  try {
+    assert.ok(store.read((v) => v.works()).length > 0);
   } finally {
     store.close();
   }
-  assert.deepEqual(readdirSync(state).sort(), before);
+  assert.equal(sha(), data);
+  const wal = join(state, 'state.sqlite-wal');
+  assert.ok(!existsSync(wal) || statSync(wal).size === 0);
+});
+
+const lateWork = (input: ReturnType<typeof reportFixture>, id: string) => ({
+  ...input.works[0]!,
+  id,
+});
+
+test('round 2: readOnce — без писателя одно неизменяемое чтение без файлов; писатель начал работу — повтор обычным чтением', () => {
+  const { state, input } = seededState();
+  const file = join(state, 'state.sqlite');
+  let calls = 0;
+  const quiet = SqliteExecutionStore.readOnce(file, 'r', (store) => {
+    calls += 1;
+    return store.read((v) => v.works().length);
+  });
+  assert.deepEqual([quiet, calls], [input.works.length, 1]);
+  assert.deepEqual(readdirSync(state), ['state.sqlite']);
+
+  // Писатель открывает базу и фиксирует запись во время неизменяемого чтения
+  // и держит её открытой (есть -wal): чтение повторяется и видит запись.
+  let writer: SqliteExecutionStore | undefined;
+  calls = 0;
+  try {
+    const counted = SqliteExecutionStore.readOnce(file, 'r', (store) => {
+      calls += 1;
+      if (!writer) {
+        writer = new SqliteExecutionStore(file, 'writer');
+        writer.transact('graph.registered', (tx) => tx.putWork(lateWork(input, 'late-1')));
+      }
+      return store.read((v) => v.works().length);
+    });
+    assert.deepEqual([counted, calls], [input.works.length + 1, 2]);
+  } finally {
+    writer?.close();
+  }
+
+  // Писатель зафиксировал и закрылся (журнал снова удалён, основной файл изменён).
+  calls = 0;
+  const closed = SqliteExecutionStore.readOnce(file, 'r', (store) => {
+    calls += 1;
+    if (calls === 1) {
+      const w = new SqliteExecutionStore(file, 'writer');
+      try {
+        w.transact('graph.registered', (tx) => tx.putWork(lateWork(input, 'late-2')));
+      } finally {
+        w.close();
+      }
+    }
+    return store.read((v) => v.works().length);
+  });
+  assert.deepEqual([closed, calls], [input.works.length + 2, 2]);
+});
+
+test('round 2: долгоживущий дескриптор только для чтения видит новые фиксации', () => {
+  const { state, input } = seededState();
+  const file = join(state, 'state.sqlite');
+  const reader = new SqliteExecutionStore(file, 'reader', { readOnly: true });
+  const writer = new SqliteExecutionStore(file, 'writer');
+  try {
+    assert.equal(
+      reader.read((v) => v.works().length),
+      input.works.length,
+    );
+    writer.transact('graph.registered', (tx) => tx.putWork(lateWork(input, 'late')));
+    assert.equal(
+      reader.read((v) => v.works().length),
+      input.works.length + 1,
+    );
+  } finally {
+    writer.close();
+    reader.close();
+  }
+});
+
+test('round 2: --out сохраняет права прежнего файла, новый — 0600; неполная запись не оставляет временного файла', () => {
+  const { parent, state } = seededState();
+  const fresh = join(parent, 'fresh.md');
+  writeReportFile(fresh, state, 'one');
+  assert.equal(statSync(fresh).mode & 0o777, REPORT_FILE_MODE);
+  const shared = join(parent, 'shared.md');
+  writeFileSync(shared, 'old');
+  chmodSync(shared, 0o640);
+  writeReportFile(shared, state, 'two');
+  assert.equal(readFileSync(shared, 'utf8'), 'two');
+  assert.equal(statSync(shared).mode & 0o777, 0o640);
+
+  assert.throws(
+    () =>
+      writeReportFile(shared, state, 'three-partial', {
+        write(fd, data) {
+          writeSync(fd, data, 0, 3);
+          throw new Error('disk full');
+        },
+      }),
+    (e: unknown) => e instanceof HarnessError && e.code === 'INVALID_INPUT',
+  );
+  assert.equal(readFileSync(shared, 'utf8'), 'two');
+  assert.deepEqual(
+    readdirSync(parent).filter((f) => f.endsWith('.tmp')),
+    [],
+  );
 });

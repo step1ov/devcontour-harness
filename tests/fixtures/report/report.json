@@ -34,19 +34,19 @@
       {
         "id": "accepted",
         "value": "5",
-        "text": "5 tasks accepted. 2 of them on the first try.",
+        "text": "5 tasks accepted. At least 2 of them on the first try; for 1 more task it is unknown (failures without a class).",
         "basis": "Accepted: merged after all required checks and an independent review. First try: the accepting attempt was the only counted attempt (environment failures and shutdowns are not counted). Window: all history.",
         "measure": {
           "value": 2,
           "n": 5,
-          "unknown": 0,
-          "bound": "exact"
+          "unknown": 1,
+          "bound": "lower"
         }
       },
       {
         "id": "sent-back",
         "value": "≥ 2 of 5",
-        "text": "At least 2 of 5 accepted tasks were sent back by checks, review or the scope rule before merge; 1 more task had failures without a class before merge. Nothing merged without passing every required check and review.",
+        "text": "At least 2 of 5 accepted tasks were sent back by checks, review or the scope rule before merge; 1 task had only failures without a class before merge. Nothing merged without passing every required check and review.",
         "basis": "An attempt rejected as gate, review or scope-violation before the accepting attempt. Failures without a class are not counted, so this is a lower bound.",
         "measure": {
           "value": 2,
@@ -112,6 +112,10 @@
       "bound": "lower"
     },
     "sentBackSetupOnly": 0,
+    "sentBackRange": {
+      "min": 2,
+      "max": 3
+    },
     "byGate": [
       {
         "gate": "install",
@@ -223,10 +227,10 @@
       "bound": "lower"
     },
     "withoutAction": {
-      "value": 5,
+      "value": null,
       "n": 5,
-      "unknown": 0,
-      "bound": "upper"
+      "unknown": 5,
+      "bound": "unknown"
     },
     "actions": {
       "operatorDecisions": 0,
@@ -329,8 +333,8 @@
     "firstPass": {
       "value": 2,
       "n": 5,
-      "unknown": 0,
-      "bound": "exact"
+      "unknown": 1,
+      "bound": "lower"
     },
     "firstPassRaw": {
       "value": 1,
@@ -768,7 +772,7 @@
     },
     {
       "id": "actions-not-recorded",
-      "text": "Human actions are counted only where a person is recorded as the actor (operator recovery decisions); retries, resets, cancellations and base moves have no recorded actor yet, so human actions are a lower bound and tasks without them an upper bound."
+      "text": "Human actions are counted only where a person is recorded as the actor (operator recovery decisions); retries, resets, cancellations and base moves have no recorded actor yet, so tasks that needed no human action are not measurable yet."
     },
     {
       "id": "check-network",

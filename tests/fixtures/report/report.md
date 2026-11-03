@@ -6,9 +6,9 @@ _Coverage: 13 attempts on 7 tasks; failure class on 6 of 7 failed; stage timings
 
 ## Summary
 
-- **5**: 5 tasks accepted. 2 of them on the first try.
+- **5**: 5 tasks accepted. At least 2 of them on the first try; for 1 more task it is unknown (failures without a class).
   _Accepted: merged after all required checks and an independent review. First try: the accepting attempt was the only counted attempt (environment failures and shutdowns are not counted). Window: all history._
-- **≥ 2 of 5**: At least 2 of 5 accepted tasks were sent back by checks, review or the scope rule before merge; 1 more task had failures without a class before merge. Nothing merged without passing every required check and review.
+- **≥ 2 of 5**: At least 2 of 5 accepted tasks were sent back by checks, review or the scope rule before merge; 1 task had only failures without a class before merge. Nothing merged without passing every required check and review.
   _An attempt rejected as gate, review or scope-violation before the accepting attempt. Failures without a class are not counted, so this is a lower bound._
 - **8.1 d**: From approval to merge: median 8.1 d (n=5).
   _Wall clock from the first attempt's approval to the accepting attempt, including queue waits and pauses. 1 task used the task approval time because the first attempt has no wait record._
@@ -45,7 +45,7 @@ _Coverage: 13 attempts on 7 tasks; failure class on 6 of 7 failed; stage timings
 
 ## Autonomy
 
-- Accepted tasks with a recorded human action: ≥ 0 of 5; without one: ≤ 5 of 5.
+- Accepted tasks that needed no human action: not measurable yet (retries, resets and base moves have no recorded actor). Accepted tasks with an operator recovery decision: 0 of 5.
 - Human actions with a recorded actor: operator recovery decisions 0. Without a recorded actor (not counted as human): holds 1, cancelled attempts 1. Not recorded yet: retries, resets, base moves.
 - Plan approvals: operator 1, agent 0 (from events).
 - Escalations to a person (recovery awaiting the user or stopped): 0.
@@ -57,7 +57,7 @@ _Coverage: 13 attempts on 7 tasks; failure class on 6 of 7 failed; stage timings
 
 ## Speed
 
-- First try: 2 of 5 accepted tasks (any attempt count: 1 of 5). Finished in the window: 5 accepted, 1 failed, 1 cancelled.
+- First try: ≥ 2 of 5 accepted tasks (any attempt count: 1 of 5). Finished in the window: 5 accepted, 1 failed, 1 cancelled.
 - Approval to merge: median 8.1 d, p75 8.2 d, max 13.2 d (n=5); 1 from the task approval time. Includes queue waits and pauses.
 - Waiting for dependencies: median 1.8 h, p75 24.0 h, max 13.0 d (n=8). Waiting in the queue: median 1.0 h, p75 1.0 h, max 1.0 h (n=8).
 - Attempts per accepted task: 1 ×1, 2 ×3, 3 ×1, 4–6 ×0, 7+ ×0; median 2, mean 2. Attempts on tasks not accepted in the window: 3.
@@ -132,7 +132,7 @@ Failed attempts: 7, of them 6 classified; attempts interrupted by shutdown are n
 ## Limits and unknowns
 
 - There is no before-harness baseline: the report does not compare with work done without the harness.
-- Human actions are counted only where a person is recorded as the actor (operator recovery decisions); retries, resets, cancellations and base moves have no recorded actor yet, so human actions are a lower bound and tasks without them an upper bound.
+- Human actions are counted only where a person is recorded as the actor (operator recovery decisions); retries, resets, cancellations and base moves have no recorded actor yet, so tasks that needed no human action are not measurable yet.
 - Network or registry errors inside checks are classified as check failures, so rejections by checks can be overstated; setup checks are marked.
 - Environment failures have no recorded sub-cause (sandbox, network, provider, lease).
 - A rejected candidate is not proof of a real defect: reviewer precision is not measured; withdrawn findings are only a proxy.

@@ -88,7 +88,7 @@ export function reportBlocks(r: ValueReport): Block[] {
   h(2, 'Defects caught before merge');
   list([
     `Rejected attempts: ${d.rejected} (checks ${d.byKind.gate}, review ${d.byKind.review}, scope ${d.byKind['scope-violation']}; candidate ${d.byPhase.candidate}, integration ${d.byPhase.integration}, phase unknown ${d.byPhase.unknown}).`,
-    `Accepted tasks sent back at least once: ${formatMeasureRatio(d.sentBack)}${d.sentBack.unknown ? `; ${d.sentBack.unknown} more with failures without a class` : ''}${d.sentBackSetupOnly ? `; ${d.sentBackSetupOnly} only by setup checks (may be network)` : ''}.`,
+    `Accepted tasks sent back at least once: ${d.sentBack.bound === 'unknown' ? `${d.sentBackRange.min}–${d.sentBackRange.max} of ${d.sentBack.n}` : formatMeasureRatio(d.sentBack)}${d.sentBack.unknown ? `; ${d.sentBack.unknown} more with failures without a class` : ''}${d.sentBackSetupOnly ? `; ${d.sentBackSetupOnly} only by setup checks (may be network)` : ''}.`,
     `Rejected reviews: ${d.reviews.rejected} (candidate ${d.reviews.candidate}, integration ${d.reviews.integration}) with ${d.reviews.blockingFindings} blocking findings; ${d.reviews.withoutFindings} without findings.`,
     `Rejected by review although every required check passed on the same commit: ${formatMeasureRatio(d.afterGreenGates)} green candidates (diagnostic: what the checks did not catch).`,
     `Caught only against the current target branch (integration): ${d.integration}.`,
@@ -131,7 +131,7 @@ export function reportBlocks(r: ValueReport): Block[] {
 
   h(2, 'Autonomy');
   list([
-    `Accepted tasks with a recorded human action: ${formatMeasureRatio(a.withAction)}; without one: ${formatMeasureRatio(a.withoutAction)}.`,
+    `Accepted tasks that needed no human action: not measurable yet (retries, resets and base moves have no recorded actor). Accepted tasks with an operator recovery decision: ${a.withAction.value ?? 0} of ${a.withAction.n}.`,
     `Human actions with a recorded actor: operator recovery decisions ${a.actions.operatorDecisions}. Without a recorded actor (not counted as human): holds ${a.actions.holds}, cancelled attempts ${a.actions.cancelledAttempts}. ${actionsLine(
       [
         ['retries', a.actions.retries],

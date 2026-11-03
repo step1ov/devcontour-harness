@@ -45,19 +45,31 @@ function parseDocument(data: string): ExecutionDocument {
 }
 
 /**
- * Открытие без единой записи в каталог. Читатель WAL-базы создаёт служебные
- * `-wal` и `-shm`, если их нет; поэтому без `-wal` (ни один писатель базу не
- * держит, всё зафиксировано в основном файле) база открывается как
- * неизменяемая (`immutable=1`) — SQLite не создаёт файлов и не берёт
- * блокировок. При существующем `-wal` его содержимое нужно прочитать: обычное
- * открытие только для чтения пользуется уже существующими файлами писателя.
+ * Открытие только для чтения. Обычное — с блокировками SQLite и чтением
+ * `-wal`: читатель видит новые фиксации, но WAL-база без `-wal`/`-shm`
+ * получает их пустыми служебными файлами (данных в них нет). Неизменяемое
+ * (`immutable`) не создаёт файлов и не берёт блокировок — годится только
+ * для однократного чтения с проверкой после него (`readOnce`): долгоживущий
+ * дескриптор так не увидел бы новых фиксаций, а начавший работу писатель
+ * мог бы дать рваное чтение.
  */
-function openReadOnly(file: string) {
-  if (existsSync(file + '-wal')) return new DatabaseSync(file, { readOnly: true });
+function openReadOnly(file: string, immutable = false) {
+  if (!immutable) return new DatabaseSync(file, { readOnly: true });
   const url = pathToFileURL(file);
   url.searchParams.set('mode', 'ro');
   url.searchParams.set('immutable', '1');
   return new DatabaseSync(url, { readOnly: true });
+}
+
+/** Отпечаток файлов базы: размер и время основного файла, наличие журналов. */
+function fileMark(file: string) {
+  const main = statSync(file, { throwIfNoEntry: false });
+  return JSON.stringify([
+    main?.size ?? null,
+    main?.mtimeMs ?? null,
+    existsSync(file + '-wal'),
+    existsSync(file + '-journal'),
+  ]);
 }
 
 /** Сколько событий одной транзакции допускается (договор курсора адаптеров). */
@@ -89,19 +101,27 @@ export class SqliteExecutionStore implements ExecutionStore {
   constructor(
     readonly file: string,
     readonly writer: string,
-    readonly options: { readOnly?: boolean } = {},
+    readonly options: {
+      readOnly?: boolean;
+      /**
+       * Только с `readOnly`: неизменяемое открытие без файлов и блокировок —
+       * для однократного чтения через `SqliteExecutionStore.readOnce`.
+       */
+      immutable?: boolean;
+    } = {},
   ) {
     // Существующее состояние сначала проверяется целиком через отдельное
     // соединение только для чтения: версия формата и документ строгой схемой.
     // Несовместимый вход отклоняется до DDL, записи автора и смены journal
     // mode — файл остаётся байт в байт прежним.
     const existing = file !== ':memory:' && existsSync(file) && statSync(file).size > 0;
-    if (existing) SqliteExecutionStore.preflight(file);
+    const immutable = Boolean(options.readOnly && options.immutable);
+    if (existing) SqliteExecutionStore.preflight(file, immutable);
     else if (options.readOnly)
       throw new HarnessError('STATE_VERSION_UNSUPPORTED', 'Состояние не найдено');
     if (options.readOnly) {
       // Диагностическое открытие: ни автор, ни PRAGMA, ни схема не меняются.
-      this.db = openReadOnly(file);
+      this.db = openReadOnly(file, immutable);
       this.db.exec('PRAGMA busy_timeout=20000;');
       return;
     }
@@ -129,9 +149,34 @@ export class SqliteExecutionStore implements ExecutionStore {
     }
   }
 
+  /**
+   * Однократное чтение без единого файла в каталоге состояния (`report`).
+   * Если журнала (`-wal`, `-journal`) нет, база открывается неизменяемой;
+   * после чтения проверяется, что журнал не появился, а размер и время
+   * основного файла прежние. Иначе (писатель начал работу или журнал уже
+   * был) чтение повторяется обычным открытием только для чтения — с его
+   * служебными `-wal`/`-shm`, но согласованное.
+   */
+  static readOnce<T>(file: string, writer: string, fn: (store: SqliteExecutionStore) => T): T {
+    const once = (immutable: boolean) => {
+      const store = new SqliteExecutionStore(file, writer, { readOnly: true, immutable });
+      try {
+        return fn(store);
+      } finally {
+        store.close();
+      }
+    };
+    const before = fileMark(file);
+    if (!existsSync(file + '-wal') && !existsSync(file + '-journal')) {
+      const result = once(true);
+      if (fileMark(file) === before) return result;
+    }
+    return once(false);
+  }
+
   /** Проверка существующего файла без единой записи; отказ — HarnessError. */
-  private static preflight(file: string) {
-    const db = openReadOnly(file);
+  private static preflight(file: string, immutable = false) {
+    const db = openReadOnly(file, immutable);
     try {
       db.exec('PRAGMA busy_timeout=20000;');
       const tables = new Set(

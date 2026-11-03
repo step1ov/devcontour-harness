@@ -413,6 +413,26 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
+        "sentBackRange": {
+          "type": "object",
+          "properties": {
+            "min": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "min",
+            "max"
+          ],
+          "additionalProperties": false
+        },
         "byGate": {
           "maxItems": 50,
           "type": "array",
@@ -774,6 +794,7 @@
         "byPhase",
         "sentBack",
         "sentBackSetupOnly",
+        "sentBackRange",
         "byGate",
         "byGateTruncated",
         "reviews",
