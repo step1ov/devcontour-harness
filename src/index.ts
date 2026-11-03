@@ -210,6 +210,8 @@ export {
   type RepairRule,
 } from './engine/failure.ts';
 export * from './projections/index.ts';
+export * from './report/index.ts';
+export { collectReportInput } from './control/report.ts';
 export {
   inspectPath,
   checkDestination,

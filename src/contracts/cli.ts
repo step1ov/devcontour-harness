@@ -31,6 +31,7 @@ import {
 import { planCheckDataSchema, planRequestDataSchema } from './planning.ts';
 import { toolchainReportSchema } from './toolchain.ts';
 import { operationCatalogSchema } from './catalog.ts';
+import { reportDataSchema } from './report.ts';
 
 /**
  * Договор CLI `harness`.
@@ -452,6 +453,56 @@ export const cliCommands = {
       },
     ],
     refusals: ['NOT_FOUND'],
+  },
+  report: {
+    description:
+      'Отчёт об эффекте по данным каталога состояния: принятые поручения, отказы проверок и ревью, автономность, скорость, расход, окружение, недели; только чтение, без вызовов моделей',
+    writes: false,
+    idempotency:
+      'Только чтение. Тот же каталог и те же параметры дают те же байты: момент отчёта по умолчанию — последняя метка времени в данных, а не часы',
+    args: [
+      state,
+      {
+        name: '--since',
+        value: 'text',
+        required: false,
+        description:
+          'Начало окна включительно: ISO-время с поясом, дата YYYY-MM-DD или Nd/Nw до --as-of',
+      },
+      {
+        name: '--until',
+        value: 'text',
+        required: false,
+        description: 'Конец окна не включительно: ISO-время с поясом или дата',
+      },
+      {
+        name: '--as-of',
+        value: 'text',
+        required: false,
+        description: 'Момент отчёта; по умолчанию — последняя метка времени в данных',
+      },
+      {
+        name: '--format',
+        value: 'text',
+        required: false,
+        description:
+          'json (по умолчанию, в конверте), md или html (текст в stdout без конверта; отказ — JSON-конверт)',
+      },
+      {
+        name: '--no-titles',
+        value: 'flag',
+        required: false,
+        description: 'Без заголовков поручений и метки проекта',
+      },
+      {
+        name: '--out',
+        value: 'path',
+        required: false,
+        description:
+          'Записать отчёт выбранного формата в файл (не символическую ссылку и не файл состояния); в stdout — конверт с путём и размером',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'PATH_CONFLICT'],
   },
   'plan-request': {
     description:
@@ -1158,6 +1209,7 @@ export const cliDataSchemas = {
   doctor: doctorDataSchema,
   init: initDataSchema,
   explain: explainDataSchema,
+  report: reportDataSchema,
   'plan-request': planRequestDataSchema,
   'plan-check': planCheckDataSchema,
   capabilities: operationCatalogSchema,
