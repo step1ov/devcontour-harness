@@ -9,6 +9,7 @@ import {
   WORKSPACE_OWNER,
   executionDocumentSchema,
   localSchemas,
+  readRunEvent,
   runEventSchema,
   type ExecutionDocument,
   type ExecutionStore,
@@ -231,7 +232,7 @@ export class SqliteExecutionStore implements ExecutionStore {
     const rows = this.db
       .prepare('SELECT data FROM events WHERE seq>? ORDER BY seq LIMIT ?')
       .all(after, Math.min(Math.max(limit, 1), 500)) as { data: string }[];
-    return rows.map((r) => runEventSchema.parse(JSON.parse(r.data)) as RunEvent);
+    return rows.map((r) => readRunEvent(JSON.parse(r.data)));
   }
 
   close() {

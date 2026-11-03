@@ -197,9 +197,44 @@ export const runEventSchema = z.discriminatedUnion(
   'type',
   variants as [(typeof variants)[number], ...(typeof variants)[number][]],
 );
-export type RunEvent = {
+/** Событие известного этой версии типа: так оно записывается. */
+export type KnownRunEvent = {
   [T in EventType]: Envelope & { type: T; payload: z.infer<(typeof eventPayloads)[T]> };
 }[EventType];
+
+/**
+ * Событие типа, которого эта версия не знает (его записала более новая
+ * версия): при чтении журнала оно не обрывает список, а возвращается
+ * непрозрачным — конверт, `type: 'unknown'` и исходный тип в `original`;
+ * нагрузка не возвращается. Записать такое событие нельзя: писатель строгий
+ * (`runEventSchema`). Известный тип с нарушенной нагрузкой — по-прежнему отказ.
+ */
+export const unknownRunEventSchema = envelopeSchema.extend({
+  type: z.literal('unknown'),
+  original: z.string().min(1).max(200),
+});
+export type UnknownRunEvent = z.infer<typeof unknownRunEventSchema>;
+/** Событие журнала при чтении: известного типа или непрозрачное неизвестное. */
+export type RunEvent = KnownRunEvent | UnknownRunEvent;
+/** Схема прочитанного события (`events`): `runEventSchema` и `unknownRunEventSchema`. */
+export const readRunEventSchema = z.discriminatedUnion('type', [
+  ...(variants as [(typeof variants)[number], ...(typeof variants)[number][]]),
+  unknownRunEventSchema,
+]);
+
+/**
+ * Разобрать сохранённое событие терпимо к неизвестному типу: тип, которого
+ * нет в `eventPayloads`, становится `UnknownRunEvent` (конверт проверяется
+ * строго); известный тип разбирается строгой схемой, и её отказ — ошибка.
+ */
+export function readRunEvent(raw: unknown): RunEvent {
+  const type = (raw as { type?: unknown } | null)?.type;
+  if (typeof type === 'string' && !Object.hasOwn(eventPayloads, type)) {
+    const env = z.object(envelope).parse(raw);
+    return unknownRunEventSchema.parse({ ...env, type: 'unknown', original: type.slice(0, 200) });
+  }
+  return runEventSchema.parse(raw) as KnownRunEvent;
+}
 export type RunEventDraft = {
   [T in EventType]: Omit<Envelope, 'apiVersion' | 'seq' | 'at'> & {
     type: T;

@@ -10,7 +10,7 @@ import {
 } from './primitives.ts';
 import { HarnessError, errorCodes, type ErrorCode } from './errors.ts';
 import { controlStateSchema, controllerLeaseSchema, workStatusSchema } from './execution.ts';
-import { runEventSchema } from './events.ts';
+import { readRunEventSchema } from './events.ts';
 import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
 import { reviewRecordSchema } from './review.ts';
 import { sourceRefSchema } from './work.ts';
@@ -681,7 +681,8 @@ export const statusDataSchema = z.strictObject({
 });
 
 export const eventsDataSchema = z.strictObject({
-  events: z.array(runEventSchema),
+  /** Событие неизвестного этой версии типа — `{type: 'unknown', original}`. */
+  events: z.array(readRunEventSchema),
   /** Номер для следующего `--after`. */
   next: z.number().int().min(0),
 });

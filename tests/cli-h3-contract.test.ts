@@ -81,7 +81,8 @@ const h2Commands = [
  * (пустой результат без механического основания), полем `recheck` записи
  * evidence, пределом области gates `GATE_SCOPE_LIMIT` вместо 20, полем
  * `checkouts` ответа doctor, полем `localContext` ответа source-snapshot и
- * полем `baseline` ответов коннектора; без них — те же байты.
+ * полем `baseline` ответов коннектора, вариантом `unknown` событий `events`
+ * (тип, записанный более новой версией); без них — те же байты.
  */
 const H2_COMMANDS_SHA = '58efd5e554cd5b015538ef1d4e7dd8d20f24205ef24e28c5b27394642bc20e25';
 const H2_DATA_SHA = '95016c62e6e7fb134ab3dcde4aff35679951fe1b9037452bc86846230ffa5682';
@@ -100,6 +101,12 @@ function gateScope(v: unknown): v is Record<string, unknown> {
       (o.items.type === 'string' && o.items.minLength === 1 && o.items.maxLength === 200))
   );
 }
+/** Аддитивные варианты событий после H2: непрозрачное неизвестное событие чтения. */
+const ADDITIVE_EVENT_TYPES = new Set(['unknown']);
+/** Тип варианта события в JSON Schema (`properties.type.const`). */
+const eventTypeOf = (v: unknown) =>
+  (v as { properties?: { type?: { const?: unknown } } } | null)?.properties?.type?.const as
+    string | undefined;
 /** Аддитивные значения перечней после H2. */
 const ADDITIVE_ENUM_VALUES = new Set(['unfinished', 'needs-lead']);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
@@ -247,7 +254,9 @@ test('H3-01: прежние команды и схемы их данных не 
   const h2 = JSON.stringify(data, (k, v: unknown) => {
     if (Array.isArray(v))
       return (v as unknown[]).filter(
-        (x) => !(typeof x === 'string' && ADDITIVE_ENUM_VALUES.has(x)),
+        (x) =>
+          !(typeof x === 'string' && ADDITIVE_ENUM_VALUES.has(x)) &&
+          !(k === 'oneOf' && ADDITIVE_EVENT_TYPES.has(eventTypeOf(x) ?? '')),
       );
     // Аддитивное поле записи evidence — повтор провала gate интеграции.
     if (k === 'properties' && v && typeof v === 'object' && 'recheck' in v) {
@@ -307,6 +316,12 @@ test('H3-01: прежние команды и схемы их данных не 
       JSON.stringify(data[command]).includes('"baseline"'),
       command + ' объявляет baseline',
     );
+  // Хеш H2 выше вырезает аддитивные варианты событий: объявление держит эта проверка.
+  const eventVariants = (
+    data.events as unknown as { properties: { events: { items: { oneOf: unknown[] } } } }
+  ).properties.events.items.oneOf.map(eventTypeOf);
+  for (const type of ADDITIVE_EVENT_TYPES)
+    assert.ok(eventVariants.includes(type), 'events объявляет вариант ' + type);
   for (const value of ADDITIVE_ENUM_VALUES)
     assert.ok(JSON.stringify(data).includes(JSON.stringify(value)), value + ' объявлен');
   // Хеш H2 выше вырезает `artifacts` gate задачи: объявление держит эта проверка.
