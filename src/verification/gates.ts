@@ -867,7 +867,6 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         code: result.code,
         output: result.stdout + '\n' + result.stderr,
         root,
-        cwd: gateCwd,
         ...(run.trustedBase ? { base: run.trustedBase } : {}),
       });
       if (network) {

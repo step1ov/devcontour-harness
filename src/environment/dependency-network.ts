@@ -39,9 +39,9 @@
 // `MAX_NEUTRAL_FAILURES` на поручение — дальше решает человек.
 
 import { createHash } from 'node:crypto';
-import { lstat, readFile } from 'node:fs/promises';
-import { join, posix, relative, sep } from 'node:path';
-import { gitOutput } from './process.ts';
+import { lstat, readFile, readdir, readlink } from 'node:fs/promises';
+import { join, posix } from 'node:path';
+import { gitBlobs, gitOutput } from './process.ts';
 
 /** Причина отказа среды, которую несёт сообщение: стабильный токен в начале. */
 export const DEPENDENCY_NETWORK = 'dependency-network';
@@ -265,7 +265,8 @@ const installScripts = [
 const watched = (path: string) => {
   const name = posix.basename(path);
   return (
-    !path.split('/').includes('node_modules') && (name === 'package.json' || configNames.has(name))
+    !path.split('/').includes('node_modules') &&
+    (name === 'package.json' || name === '.gitignore' || configNames.has(name))
   );
 };
 
@@ -298,51 +299,76 @@ const hasInstallScripts = (text: string) => {
   }
 };
 
+/** Предел элементов обхода дерева: больше — входы не сверить, и доверия нет. */
+const WALK_LIMIT = 500_000;
+/** Каталоги, которые обход не читает: зависимости, git и копия хранилища harness в корне. */
+const skipped = (dir: string, name: string) =>
+  name === 'node_modules' || name === '.git' || (dir === '' && name === '.pnpm-store');
+
+/**
+ * Входы установки и ссылки в дереве — обходом файловой системы, а не по
+ * индексу git: `.gitignore` кандидата скрыл бы от `ls-files` манифест,
+ * который менеджер всё равно найдёт по глобу workspace.
+ */
+async function walk(root: string) {
+  const files: string[] = [];
+  const links: string[] = [];
+  let seen = 0;
+  const visit = async (dir: string) => {
+    for (const entry of await readdir(join(root, dir), { withFileTypes: true })) {
+      if (++seen > WALK_LIMIT) throw new Error(`в дереве больше ${WALK_LIMIT} элементов`);
+      const path = dir ? `${dir}/${entry.name}` : entry.name;
+      if (entry.isSymbolicLink()) links.push(path);
+      else if (entry.isDirectory()) {
+        if (!skipped(dir, entry.name)) await visit(path);
+      } else if (watched(path)) files.push(path);
+    }
+  };
+  await visit('');
+  return { files, links };
+}
+
 /**
  * Почему входам установки в дереве `root` верить нельзя (условия 2 и 3
  * правила), или `undefined`, если они совпадают с базой `base` и база не
- * исполняет кода при установке. `cwd` — каталог команды: конфигурация в нём и
- * его предках внутри дерева проверяется и тогда, когда git её игнорирует.
- * Любая ошибка чтения — недоверие.
+ * исполняет кода при установке. Сверяются все файлы входов по обе стороны —
+ * в базе и в дереве (обход файловой системы, включая игнорируемые git), все
+ * `.gitignore` и все символические ссылки дерева. Любая ошибка чтения —
+ * недоверие.
  */
-export async function untrustedInputs(root: string, base: string, cwd = root) {
+export async function untrustedInputs(root: string, base: string) {
   try {
     const baseFiles = new Map<string, { mode: string; blob: string }>();
+    const baseLinks = new Map<string, string>();
     for (const entry of (await gitOutput(root, 'ls-tree', '-r', '-z', '--full-tree', base)).split(
       '\0',
     )) {
       const tab = entry.indexOf('\t');
       if (tab < 0) continue;
       const path = entry.slice(tab + 1);
-      if (!watched(path)) continue;
       const [mode, , blob] = entry.slice(0, tab).split(' ');
-      baseFiles.set(path, { mode: mode!, blob: blob! });
+      if (mode === '120000') baseLinks.set(path, blob!);
+      if (watched(path)) baseFiles.set(path, { mode: mode!, blob: blob! });
     }
-    const paths = new Set(baseFiles.keys());
-    for (const path of (
-      await gitOutput(root, 'ls-files', '-z', '-c', '-o', '--exclude-standard')
-    ).split('\0'))
-      if (path && watched(path)) paths.add(path);
-    // Конфигурация, которую git игнорирует, менеджер всё равно читает: в корне,
-    // в каталогах манифестов и на пути к каталогу команды.
-    const dirs = new Set<string>(['']);
-    for (const path of paths) dirs.add(posix.dirname(path) === '.' ? '' : posix.dirname(path));
-    const own = relative(root, cwd).split(sep).join('/');
-    if (!own.startsWith('..'))
-      for (let d = own; d && d !== '.'; d = posix.dirname(d) === '.' ? '' : posix.dirname(d))
-        dirs.add(d);
-    for (const dir of dirs)
-      for (const name of configNames) {
-        const path = dir ? `${dir}/${name}` : name;
-        if (paths.has(path)) continue;
-        if (
-          await lstat(join(root, path)).then(
-            () => true,
-            () => false,
-          )
-        )
-          paths.add(path);
-      }
+    const tree = await walk(root);
+    // Ссылка, которой нет в базе (или с другой целью), уводит обход менеджера
+    // в каталог, который здесь не сверить.
+    for (const path of tree.links) {
+      const target = Buffer.from(await readlink(join(root, path)));
+      if (baseLinks.get(path) !== blobOf(target)) return `ссылка не из базы: ${path}`;
+    }
+    const paths = new Set([...baseFiles.keys(), ...tree.files]);
+    // Тексты манифестов и конфигурации базы — одним чтением; lockfiles
+    // сверяются только отпечатком.
+    const texts = await gitBlobs(
+      root,
+      [...baseFiles]
+        .filter(([path]) => {
+          const name = posix.basename(path);
+          return name === 'package.json' || !/lock/.test(name);
+        })
+        .map(([, f]) => f.blob),
+    );
     for (const path of [...paths].sort()) {
       const name = posix.basename(path);
       const before = baseFiles.get(path);
@@ -353,10 +379,7 @@ export async function untrustedInputs(root: string, base: string, cwd = root) {
       const bytes = stat ? await readFile(join(root, path)) : undefined;
       if (!before && !bytes) continue;
       if (!before || !bytes) return `${before ? 'удалён' : 'добавлен'} ${path}`;
-      const baseText =
-        name === 'package.json' || !/lock|\.lockb$/.test(name)
-          ? await gitOutput(root, 'cat-file', 'blob', before.blob)
-          : undefined;
+      const baseText = texts.get(before.blob)?.toString('utf8');
       if (name === 'package.json') {
         if (hasInstallScripts(baseText!)) return `скрипт установки в базе: ${path}`;
         if (before.blob === blobOf(bytes)) continue;
@@ -384,8 +407,6 @@ export interface InstallFailure {
   output: string;
   /** Корень проверяемого дерева. */
   root: string;
-  /** Каталог команды. */
-  cwd?: string;
   /** SHA базы, с которой сверяются входы; нет базы — нет и классификации. */
   base?: string;
 }
@@ -398,8 +419,7 @@ export async function dependencyNetworkFailure(failure: InstallFailure) {
   if (!failure.base) return undefined;
   const line = registryFailureLine(failure.argv, failure.code, failure.output);
   if (!line) return undefined;
-  if (await untrustedInputs(failure.root, failure.base, failure.cwd ?? failure.root))
-    return undefined;
+  if (await untrustedInputs(failure.root, failure.base)) return undefined;
   return line;
 }
 

@@ -779,7 +779,6 @@ export class ReviewProbes {
               code: r.code,
               output,
               root,
-              cwd: gateCwd,
               ...(this.spec.trustedBase ? { base: this.spec.trustedBase } : {}),
             })
           : undefined;

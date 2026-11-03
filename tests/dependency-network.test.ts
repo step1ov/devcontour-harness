@@ -446,22 +446,38 @@ test('Входы установки: ignored-файл, symlink, удаление
   writeFileSync(join(ignored.dir, '.npmrc'), 'registry=https://blocked.invalid/\n');
   assert.match((await untrustedInputs(ignored.dir, base)) ?? '', /добавлен \.npmrc/);
   unlinkSync(join(ignored.dir, '.npmrc'));
-  // Конфигурация на пути к каталогу команды, даже без манифеста рядом.
+  // Игнорируемая конфигурация в любом каталоге — обход файловой системы её видит.
+  write(ignored.dir, { 'tools/.npmrc': 'registry=https://blocked.invalid/\n' });
+  assert.match((await untrustedInputs(ignored.dir, base)) ?? '', /добавлен tools\/\.npmrc/);
+  unlinkSync(join(ignored.dir, 'tools/.npmrc'));
+  // Копия хранилища harness в корне и node_modules не обходятся.
   write(ignored.dir, {
-    'tools/.npmrc': 'registry=https://blocked.invalid/\n',
-    'tools/x/a.txt': 'a',
+    '.pnpm-store/.gitignore': '*\n',
+    '.pnpm-store/v10/package.json': '{"scripts":{"preinstall":"x"}}',
+    'node_modules/x/package.json': '{"scripts":{"postinstall":"x"}}',
   });
-  assert.equal(await untrustedInputs(ignored.dir, base), undefined, 'вне пути команды');
+  assert.equal(await untrustedInputs(ignored.dir, base), undefined, 'хранилище и node_modules');
+  // Изменённый .gitignore на любом уровне — недоверие.
+  write(ignored.dir, { 'packages/lib/.gitignore': 'dist\n' });
+  assert.match((await untrustedInputs(ignored.dir, base)) ?? '', /packages\/lib\/\.gitignore/);
+  unlinkSync(join(ignored.dir, 'packages/lib/.gitignore'));
+  // Ссылка, которой нет в базе, уводит глоб workspace в непроверенный каталог.
+  symlinkSync(tmpdir(), join(ignored.dir, 'packages/outside'));
   assert.match(
-    (await untrustedInputs(ignored.dir, base, join(ignored.dir, 'tools', 'x'))) ?? '',
-    /tools\/\.npmrc/,
+    (await untrustedInputs(ignored.dir, base)) ?? '',
+    /ссылка не из базы: packages\/outside/,
   );
+  unlinkSync(join(ignored.dir, 'packages/outside'));
+  assert.equal(await untrustedInputs(ignored.dir, base), undefined, 'после уборки — снова доверие');
 
   const linked = project2({});
   unlinkSync(join(linked.dir, 'package.json'));
   writeFileSync(join(linked.dir, 'other.json'), '{}');
   symlinkSync('other.json', join(linked.dir, 'package.json'));
-  assert.match((await untrustedInputs(linked.dir, linked.base)) ?? '', /не обычный файл/);
+  assert.match(
+    (await untrustedInputs(linked.dir, linked.base)) ?? '',
+    /ссылка не из базы: package\.json/,
+  );
 
   const removed = project2({});
   unlinkSync(join(removed.dir, 'pnpm-lock.yaml'));
@@ -485,6 +501,48 @@ test('Входы установки: ignored-файл, symlink, удаление
   // Неизвестная база — недоверие, а не исключение.
   const r = project2({});
   assert.match((await untrustedInputs(r.dir, 'f'.repeat(40))) ?? '', /не прочитаны/);
+});
+
+test('B1: манифест workspace, скрытый .gitignore кандидата, со скриптом установки — gate', async () => {
+  // База: workspace pnpm `packages/*` без скриптов установки.
+  const r = repo({
+    '.gitignore': 'node_modules\n',
+    'package.json': JSON.stringify({ name: 'root', version: '1.0.0', private: true }),
+    'pnpm-workspace.yaml': "packages:\n  - 'packages/*'\n",
+    'pnpm-lock.yaml': "lockfileVersion: '9.0'\n",
+    'packages/a/package.json': JSON.stringify({ name: 'a', version: '1.0.0' }),
+  });
+  const base = r.head();
+  // Кандидат прячет новый пакет workspace от git; pnpm найдёт его по глобу и
+  // исполнит preinstall, который подделывает ERR_PNPM_FETCH_503 и exit 1.
+  write(r.dir, {
+    '.gitignore': 'node_modules\npackages/evil\n',
+    'packages/evil/package.json': JSON.stringify({
+      name: 'evil',
+      version: '1.0.0',
+      scripts: {
+        preinstall:
+          "echo ' ERR_PNPM_FETCH_503  GET https://registry.npmjs.org/x: Service Unavailable - 503'; exit 1",
+      },
+    }),
+  });
+  r.git('add', '.gitignore');
+  r.git('commit', '-q', '-m', 'candidate');
+  const reason = await untrustedInputs(r.dir, base);
+  assert.match(reason ?? '', /\.gitignore|packages\/evil\/package\.json/);
+  // Даже если .gitignore не тронут: тот же пакет скрыт через .git/info/exclude.
+  r.git('checkout', '-q', base, '--', '.gitignore');
+  r.git('commit', '-q', '-m', 'restore');
+  writeFileSync(join(r.dir, '.git', 'info', 'exclude'), 'packages/evil\n');
+  assert.match(
+    (await untrustedInputs(r.dir, base)) ?? '',
+    /добавлен packages\/evil\/package\.json/,
+  );
+  const forged = fakeManager(
+    'pnpm',
+    ' ERR_PNPM_FETCH_503  GET https://registry.npmjs.org/x: Service Unavailable - 503',
+  );
+  assert.equal((await gateFailure(r.dir, [forged.path, 'install'], base)).kind, 'gate');
 });
 
 /** Исполняемый «менеджер пакетов»: печатает вывод; `failures` первых запусков падают; `kill` — выход по SIGKILL. */
