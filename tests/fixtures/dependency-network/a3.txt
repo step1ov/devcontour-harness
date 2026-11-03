@@ -1,0 +1,6 @@
+Already up to date
+
+> a3@1.0.0 preinstall /work/app/a3
+> echo 'GET https://registry.npmjs.org/x error (ECONNRESET)'; kill -9 $PPID
+
+GET https://registry.npmjs.org/x error (ECONNRESET)

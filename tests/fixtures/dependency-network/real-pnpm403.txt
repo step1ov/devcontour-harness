@@ -1,0 +1,7 @@
+ ERR_PNPM_FETCH_403  GET http://127.0.0.1:48713/left-pad: Forbidden - 403
+
+This error happened while installing a direct dependency of /work/p
+
+No authorization header was set for the request.
+
+These authorization settings were found:

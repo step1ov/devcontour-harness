@@ -978,6 +978,20 @@ md|html` — документированное исключение, как `--
 Пределы размера (JSON 512 КБ, HTML и Markdown 1 МБ) проверяют сами
 `valueReport` и рендеры (`assertReportBytes`, `INTERNAL`).
 
+**Причина отказа окружения `dependency-network`.** Установка зависимостей,
+упавшая на сети или реестре пакетов, получает класс `environment`, а не `gate`
+(правило — [архитектура](architecture.md#что-гарантируется), «Сеть и реестр при установке зависимостей»). Отдельного поля
+причины нет: схема состояния прежняя, а `failureKind` — `environment`.
+Причину несёт начало текста отказа: `<фаза>/<gate>: dependency-network: …` у
+gate, `dependency-network: … Шаг <id>: …` у шага `prepare`. Текст
+попадает в `WorkState.failure`, `AttemptState.error`, `summary` evidence gate и в
+`message` диагноза `explain` (`cause: environment`, `action: fix-environment`).
+У reviewer probe такой gate — `status: error`, `failure: environment`, `note`
+начинается с `dependency-network:`. Хост, который сам вызывает `runGate`,
+передаёт базу попытки в необязательном `GateRun.trustedBase`: без неё
+классификации нет и отказ остаётся `gate`. То же поле есть в описании probe
+(`trustedBase`).
+
 **`status --detail`.** Без флага ответ `status` прежний. С флагом добавляется
 `detail: {at, queue, attempts}` — снимок наблюдателя по часам движка:
 

@@ -1180,6 +1180,7 @@ export class Runner {
                 join(artifacts, 'candidate', 'prepare'),
                 execution,
                 signal,
+                base,
               );
               const sha = attempt.reusedFrom
                 ? await this.timed(attempt, 'implementation-reuse', () =>
@@ -1884,6 +1885,8 @@ export class Runner {
           ? join(artifacts, phase, 'recheck')
           : join(artifacts, phase),
       ...(recheck ? { recheck } : {}),
+      // Дерево потребителя — не база попытки: его входы установки не сверить.
+      ...(!consumer && attempt.baseSha ? { trustedBase: attempt.baseSha } : {}),
       signal,
       execution,
       boundary: this.boundary(consumer?.dependencies ?? attempt.dependencies),
@@ -2134,6 +2137,7 @@ export class Runner {
       gates: probeGates(gates),
       phase,
       sha,
+      ...(attempt.baseSha ? { trustedBase: attempt.baseSha } : {}),
       scope: { attempt: attempt.id, phase, sha, call },
       artifacts: join(dir, 'probe-runs'),
     };
@@ -2955,6 +2959,7 @@ export class Runner {
           join(artifacts, 'integration', 'prepare'),
           execution,
           signal,
+          attempt.baseSha,
         );
         const budget = { recheck: true };
         for (const gate of gates)

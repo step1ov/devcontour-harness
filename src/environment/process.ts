@@ -315,6 +315,45 @@ export async function gitOutput(cwd: string, ...args: string[]) {
   return text.trim();
 }
 
+/**
+ * Содержимое объектов git одним `cat-file --batch`: байты, без усечения и
+ * без процесса на объект. Отсутствующий объект — отказ.
+ */
+export async function gitBlobs(cwd: string, ids: readonly string[]) {
+  const out = new Map<string, Buffer>();
+  if (!ids.length) return out;
+  const unique = [...new Set(ids)];
+  const data = await new Promise<Buffer>((done, fail) => {
+    const child = spawn('git', hostGitArgs(cwd, ['cat-file', '--batch']), {
+      cwd,
+      env: gitEnv(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const chunks: Buffer[] = [];
+    let stderr = '';
+    child.stdout.on('data', (c: Buffer) => chunks.push(c));
+    child.stderr.on('data', (c: Buffer) => (stderr += c.toString()));
+    child.on('error', fail);
+    child.on('close', (code) =>
+      code === 0 ? done(Buffer.concat(chunks)) : fail(new Error(`git cat-file: ${stderr.trim()}`)),
+    );
+    child.stdin.on('error', () => {});
+    child.stdin.end(unique.join('\n') + '\n');
+  });
+  let at = 0;
+  for (const id of unique) {
+    const eol = data.indexOf(10, at);
+    if (eol < 0) throw new Error('git cat-file: ответ оборван');
+    const [sha, type, size] = data.subarray(at, eol).toString().split(' ');
+    if (type === 'missing' || size === undefined)
+      throw new Error(`git cat-file: нет объекта ${id}`);
+    const length = Number(size);
+    out.set(sha!, data.subarray(eol + 1, eol + 1 + length));
+    at = eol + 1 + length + 1;
+  }
+  return out;
+}
+
 export async function git(cwd: string, ...args: string[]) {
   const added = worktreeAddPath(args);
   // Путь убираемого дерева — до удаления: потом настоящий путь уже не узнать.

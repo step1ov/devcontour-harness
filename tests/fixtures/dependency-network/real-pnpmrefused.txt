@@ -1,0 +1,3 @@
+ ERR_PNPM_META_FETCH_FAIL  GET http://127.0.0.1:1/left-pad: request to http://127.0.0.1:1/left-pad failed, reason: connect ECONNREFUSED 127.0.0.1:1
+
+This error happened while installing a direct dependency of /work/p
