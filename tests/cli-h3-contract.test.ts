@@ -104,13 +104,18 @@ function gateScope(v: unknown): v is Record<string, unknown> {
 }
 /**
  * Аддитивные варианты событий после H2: непрозрачное неизвестное событие
- * чтения и границы стадий попытки.
+ * чтения, границы стадий и живость попытки, события вмешательств и причины
+ * отказа (alpha.34).
  */
 const ADDITIVE_EVENT_TYPES = new Set([
   'unknown',
   'attempt.stage',
   'attempt.liveness',
   'joint.liveness',
+  'work.retried',
+  'work.cancelled',
+  'base.moved',
+  'attempt.diagnosed',
 ]);
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set(['status--detail']);
