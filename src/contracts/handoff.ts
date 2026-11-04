@@ -17,8 +17,10 @@ import { idSchema, isoTimeSchema } from './primitives.ts';
  *
  * Пакет ограничен по размеру, чтобы поместиться в контекст агента: списки
  * обрезаются по `HANDOFF_LIMITS` (число отброшенного — в `truncated`), каждая
- * строка из хранилища усекается до предела своего поля с «…» (без разрыва
- * суррогатной пары), а сериализованный пакет не больше `HANDOFF_MAX_BYTES`.
+ * строка из хранилища очищается от escape-последовательностей и управляющих
+ * символов и усекается до предела своего поля с «…» (без разрыва суррогатной
+ * пары), а сериализованный пакет не больше `HANDOFF_MAX_BYTES` байт UTF-8:
+ * сверх него записи отбрасываются (`truncated.bySize`).
  *
  * Литералы `nextSteps` повторяют `src/projections/next.ts` (модуль без zod);
  * тест сверяет оба перечня поэлементно.
@@ -128,12 +130,7 @@ const stopSchema = z.strictObject({
 
 export const handoffPackSchema = z.strictObject({
   handoffVersion: z.literal(HANDOFF_VERSION),
-  /**
-   * Момент снимка (часы движка). Части пакета читаются несколькими чтениями
-   * хранилища подряд (состояние, диагнозы, задания): каждое — согласованный
-   * снимок, но писатель, работающий в это время, может сдвинуть состояние
-   * между ними.
-   */
+  /** Момент снимка (часы движка); весь пакет — одно чтение хранилища. */
   at: isoTimeSchema,
   /** Только этот граф (`--graph`); нет — вся доска. */
   graphId: idSchema.optional(),
@@ -175,6 +172,8 @@ export const handoffPackSchema = z.strictObject({
       elapsedMs: count,
       stage: z.strictObject({ name: name, elapsedMs: count }).optional(),
       sinceHeartbeatMs: count.optional(),
+      /** Срок владения попыткой. */
+      leaseUntil: isoTimeSchema,
       stale: z.boolean(),
       gates: z.strictObject({
         phase: z.enum(['candidate', 'integration']),
@@ -298,8 +297,12 @@ export const handoffPackSchema = z.strictObject({
   /** Намерения агента — единственный текст не из хранилища. */
   intentions: z.array(clipped(HANDOFF_LIMITS.intentionChars).min(1)).max(HANDOFF_LIMITS.intentions),
   /**
-   * Сколько записей каждого списка не вошло в пакет; `intentions` — сколько
-   * намерений усечено по `intentionChars`.
+   * Сколько записей каждого списка не вошло в пакет (по пределу числа или
+   * размера). `budgets` — строки бюджетов сверх предела, `budgetsWithin` —
+   * бюджеты поручений в пределах и без расхода (не показаны намеренно);
+   * `intentions` — сколько намерений усечено по `intentionChars`,
+   * `intentionsDropped` — отброшено ради предела размера; `bySize` — пакет
+   * урезан до `HANDOFF_MAX_BYTES`.
    */
   truncated: z.strictObject({
     works: count,
@@ -307,8 +310,11 @@ export const handoffPackSchema = z.strictObject({
     failures: count,
     unfinished: count,
     budgets: count,
+    budgetsWithin: count,
     repairs: count,
     intentions: count,
+    intentionsDropped: count,
+    bySize: z.boolean(),
   }),
 });
 export type HandoffPack = z.infer<typeof handoffPackSchema>;

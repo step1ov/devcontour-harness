@@ -96,6 +96,8 @@ export class SqliteExecutionStore implements ExecutionStore {
   readonly stateVersion = STATE_VERSION;
   private db!: DatabaseSync;
   private frame?: Frame;
+  /** Снимок внешнего `read`: вложенное чтение видит его же, без второго BEGIN. */
+  private reading?: Frame;
   private savepoint = 0;
 
   constructor(
@@ -219,14 +221,18 @@ export class SqliteExecutionStore implements ExecutionStore {
 
   read<T>(fn: (view: ExecutionView) => NotPromise<T>): T {
     if (this.frame) return fn(this.view(this.frame));
+    if (this.reading) return fn(this.view(this.reading));
     this.db.exec('BEGIN');
     try {
-      const value = fn(this.view({ doc: this.load(), drafts: [], depth: 0 }));
+      this.reading = { doc: this.load(), drafts: [], depth: 0 };
+      const value = fn(this.view(this.reading));
       this.db.exec('COMMIT');
       return value;
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
+    } finally {
+      this.reading = undefined;
     }
   }
 

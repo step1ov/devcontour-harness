@@ -22,7 +22,10 @@ export interface HandoffOptions {
   intentions?: readonly string[];
   /**
    * Маска текстов из хранилища (ошибки, причины, сообщения). По умолчанию —
-   * значения секретов политики из окружения процесса, как у коннектора.
+   * значения секретов политики из окружения процесса, как у коннектора:
+   * маска знает только те значения, что заданы в окружении читающего
+   * процесса. Секрет, которого в нём нет (другая машина, другой процесс
+   * controller), не маскируется — передайте свою маску.
    */
   redact?: (text: string) => string;
 }
@@ -34,6 +37,17 @@ type Next = HandoffPack['next'];
  * Строка не длиннее `n` code units и «…»; суррогатная пара не разрывается.
  * В отличие от `clipText`, предел не может разрезать символ вне BMP.
  */
+/**
+ * Текст для пакета: без escape-последовательностей терминала (ANSI CSI, OSC)
+ * и с каждой серией управляющих символов, заменённой одним пробелом (кроме перевода строки и
+ * табуляции): в JSON каждый такой символ стоил бы 6 байт.
+ */
+export function plainText(text: string): string {
+  return text
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]/g, '')
+    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]+/g, ' ');
+}
+
 export function clipSafe(text: string, n: number): string {
   if (text.length <= n) return text;
   const code = text.charCodeAt(n - 1);
@@ -61,11 +75,19 @@ const actorRank = (d: Stop) => (!isDecision(d) ? 2 : d.actor === 'user' ? 0 : 1)
  * каждому открытому поручению и последние провалы попыток. Размер ограничен
  * `HANDOFF_LIMITS` и `HANDOFF_MAX_BYTES`. Агент добавляет только `intentions`.
  *
- * Чтения хранилища (status, диагнозы, задания графов) идут подряд, а не
- * одной транзакцией: каждое согласовано само по себе, а работающий в это
- * время писатель может сдвинуть состояние между ними.
+ * Весь пакет читается одним снимком хранилища: status, диагнозы и задания
+ * графов — вложенные чтения внутри одного `read`.
+ *
+ * Пакет не больше `HANDOFF_MAX_BYTES` в UTF-8: при превышении записи
+ * отбрасываются в порядке «намерения с конца, старые провалы, поручения без
+ * решения, остановки без решения, остальные поручения и остановки» и
+ * учитываются в `truncated`; отказа по размеру нет.
  */
 export function handoffPack(h: Harness, options: HandoffOptions = {}): HandoffPack {
+  return h.engine.read(() => build(h, options));
+}
+
+function build(h: Harness, options: HandoffOptions): HandoffPack {
   const { graphId } = options;
   const intentions = (options.intentions ?? []).map((s) => s.trim()).filter(Boolean);
   if (intentions.length > HANDOFF_LIMITS.intentions)
@@ -77,7 +99,7 @@ export function handoffPack(h: Harness, options: HandoffOptions = {}): HandoffPa
   const redact = options.redact ?? redactor(policySecrets(h.policy));
   /** Текст из хранилища: маска секретов и предел поля. */
   const text = <T extends string | undefined>(s: T, n: number = HANDOFF_LIMITS.text) =>
-    (s === undefined ? undefined : clipSafe(redact(s), n)) as T;
+    (s === undefined ? undefined : clipSafe(plainText(redact(s)), n)) as T;
   const name = <T extends string | undefined>(s: T) => text(s, HANDOFF_LIMITS.name);
 
   const status = h.status(graphId, { detail: true });
@@ -298,6 +320,7 @@ export function handoffPack(h: Harness, options: HandoffOptions = {}): HandoffPa
     elapsedMs: a.elapsedMs,
     ...(a.stage ? { stage: { name: name(a.stage.name), elapsedMs: a.stage.elapsedMs } } : {}),
     ...opt('sinceHeartbeatMs', a.lease.sinceHeartbeatMs),
+    leaseUntil: new Date(a.lease.leaseUntil).toISOString(),
     stale: a.lease.stale,
     gates: a.gates,
   }));
@@ -375,8 +398,9 @@ export function handoffPack(h: Harness, options: HandoffOptions = {}): HandoffPa
       }
     : undefined;
 
-  const clippedIntentions = intentions.map((s) => clipSafe(s, HANDOFF_LIMITS.intentionChars));
-  const pack = handoffPackSchema.parse({
+  const cleanIntentions = intentions.map(plainText);
+  const clippedIntentions = cleanIntentions.map((s) => clipSafe(s, HANDOFF_LIMITS.intentionChars));
+  const pack: HandoffPack = {
     handoffVersion: HANDOFF_VERSION,
     at: new Date(now).toISOString(),
     ...opt('graphId', graphId),
@@ -412,17 +436,50 @@ export function handoffPack(h: Harness, options: HandoffOptions = {}): HandoffPa
       stops: diagnoses.length - stops.length,
       failures: failed.length - failures.length,
       unfinished: unfinishedAll.length - unfinished.length,
-      budgets: relevant.length - budgetEntries.length,
+      budgets: shown.length - budgetEntries.length,
+      budgetsWithin: relevant.length - shown.length,
       repairs: repairsAll.length - repairs.length,
-      intentions: intentions.filter((s, i) => s !== clippedIntentions[i]).length,
+      intentions: cleanIntentions.filter((s, i) => s !== clippedIntentions[i]).length,
+      intentionsDropped: 0,
+      bySize: false,
     },
-  });
-  const bytes = Buffer.byteLength(JSON.stringify(pack));
-  if (bytes > HANDOFF_MAX_BYTES)
-    throw new HarnessError(
-      'INTERNAL',
-      `Пакет передачи ${bytes} байт больше предела ${HANDOFF_MAX_BYTES} (дефект пределов handoff)`,
-    );
+  };
+  return handoffPackSchema.parse(fitPack(pack));
+}
+
+/** Решение в строке поручения или в остановке. */
+const decides = (n: { actor: string | null; action: string }) => isDecision(n);
+
+/**
+ * Предел размера в байтах UTF-8: записи отбрасываются в фиксированном
+ * порядке, пока пакет не уложится; каждая — в `truncated`.
+ */
+export function fitPack(pack: HandoffPack, maxBytes: number = HANDOFF_MAX_BYTES): HandoffPack {
+  const size = () => Buffer.byteLength(JSON.stringify(pack));
+  const t = pack.truncated;
+  const dropLast = <T>(list: T[], keep: (x: T) => boolean = () => false) => {
+    for (let i = list.length - 1; i >= 0; i--)
+      if (!keep(list[i]!)) {
+        list.splice(i, 1);
+        return true;
+      }
+    return false;
+  };
+  const steps: (() => boolean)[] = [
+    () => dropLast(pack.intentions) && (t.intentionsDropped++, true),
+    () => dropLast(pack.failures) && (t.failures++, true),
+    () => dropLast(pack.works, (w) => decides(w.next)) && (t.works++, true),
+    () => dropLast(pack.stops, decides) && (t.stops++, true),
+    () => dropLast(pack.unfinished) && (t.unfinished++, true),
+    () => dropLast(pack.works) && (t.works++, true),
+    () => dropLast(pack.stops) && (t.stops++, true),
+    () => Boolean(pack.budgets && dropLast(pack.budgets.entries)) && (t.budgets++, true),
+  ];
+  for (const step of steps)
+    while (size() > maxBytes) {
+      t.bySize = true;
+      if (!step()) break;
+    }
   return pack;
 }
 
@@ -461,7 +518,17 @@ function boardNext(input: {
       workId: running.workId,
       detail: 'Идёт попытка с живым владельцем; controller продолжит очередь',
     };
-  const abandoned = input.active.find((a) => a.stale) ?? input.active[0];
+  // Свежий срок владения без controller: попытку ведёт живой (или только что
+  // пропавший) процесс — run её не перехватит, пока срок не истечёт.
+  if (running)
+    return {
+      actor: 'controller',
+      action: 'wait',
+      step: 'attempt-running',
+      workId: running.workId,
+      detail: `Владение попыткой действует до ${running.leaseUntil}: ждать или проверить процесс-владелец`,
+    };
+  const abandoned = input.active.find((a) => a.stale);
   if (abandoned || input.staleRecords)
     return {
       actor: 'controller',

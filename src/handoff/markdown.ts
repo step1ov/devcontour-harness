@@ -1,4 +1,4 @@
-import { HANDOFF_LIMITS, type HandoffPack } from '../contracts/handoff.ts';
+import { HANDOFF_LIMITS, HANDOFF_MAX_BYTES, type HandoffPack } from '../contracts/handoff.ts';
 
 /** Ячейка таблицы Markdown: одна строка, без разделителей колонок. */
 const cell = (s: string | number | undefined | null) =>
@@ -41,7 +41,10 @@ export function handoffMarkdown(pack: HandoffPack): string {
     '',
     `Поручений: ${s.works} (открыто ${s.open}, принято ${s.done}, отменено ${s.cancelled}); ` +
       `статусы: ${s.byStatus.map((b) => `${b.status} ${b.count}`).join(', ') || '—'}. ` +
-      `Пределы: попыток ${pack.limits.maxAttempts}, восстановлений группы ${pack.limits.repairBudget}.`,
+      `Пределы: попыток ${pack.limits.maxAttempts}, восстановлений группы ${pack.limits.repairBudget}.` +
+      (pack.truncated.bySize
+        ? ` Пакет урезан до ${Math.round(HANDOFF_MAX_BYTES / 1024)} КБ: часть записей отброшена (см. «не вошли»).`
+        : ''),
     '',
     '## Следующий шаг',
     '',
@@ -136,6 +139,11 @@ export function handoffMarkdown(pack: HandoffPack): string {
     }
   }
   out.push(...more(pack.truncated.works, 'поручений'));
+  if (
+    pack.queue.paused &&
+    pack.works.some((w) => w.next.actor === 'controller' && w.next.action === 'retry')
+  )
+    out.push('', 'Повтор ждёт снятия паузы очереди.');
   out.push('', '## Последние провалы', '');
   if (!pack.failures.length) out.push('Провалов нет.');
   for (const f of pack.failures)
@@ -162,6 +170,10 @@ export function handoffMarkdown(pack: HandoffPack): string {
           `${secs(b.durationMs)} | ${b.unknownCalls} |`,
       );
     out.push(...more(pack.truncated.budgets, 'бюджетов'));
+    if (pack.truncated.budgetsWithin)
+      out.push(
+        `Бюджеты поручений в пределах и без расхода не показаны: ${pack.truncated.budgetsWithin}.`,
+      );
   }
   if (pack.repairs.length) {
     out.push('', 'Восстановления заданий:');
@@ -177,5 +189,7 @@ export function handoffMarkdown(pack: HandoffPack): string {
     out.push(
       `(Усечено намерений: ${pack.truncated.intentions}, предел — ${HANDOFF_LIMITS.intentionChars} знаков.)`,
     );
+  if (pack.truncated.intentionsDropped)
+    out.push(`(Отброшено намерений ради предела размера: ${pack.truncated.intentionsDropped}.)`);
   return out.join('\n') + '\n';
 }

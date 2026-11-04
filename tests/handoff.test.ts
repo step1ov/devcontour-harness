@@ -28,7 +28,7 @@ import {
 } from '../src/contracts/index.ts';
 import { Harness } from '../src/control/harness.ts';
 import { measuredInvoke } from '../src/engine/measured.ts';
-import { clipSafe } from '../src/handoff/pack.ts';
+import { clipSafe, fitPack } from '../src/handoff/pack.ts';
 import { handoffMarkdown, handoffPack } from '../src/index.ts';
 import { nextSteps } from '../src/projections/index.ts';
 import { hsetup } from './harness-fixture.ts';
@@ -151,8 +151,11 @@ test('handoff: пакет из хранилища — активная рабо�
       failures: 0,
       unfinished: 0,
       budgets: 0,
+      budgetsWithin: 0,
       repairs: 0,
       intentions: 0,
+      intentionsDropped: 0,
+      bySize: false,
     });
     assert.ok(!JSON.stringify(pack).includes(c.token), 'токен владения не в пакете');
 
@@ -221,6 +224,46 @@ test('handoff: истёкшее владение — незавершённая 
     const md = handoffMarkdown(pack);
     assert.match(md, /владение истекло/);
     assert.match(md, /… и ещё 2 провалов/);
+  } finally {
+    h.close();
+  }
+});
+
+test('handoff next: свежий срок владения без controller — ждать до срока, без harness run', () => {
+  const ctx = hsetup({ scenario: {} });
+  const h = ctx.open();
+  try {
+    ready(h.engine, graphOf({ a: [], b: [] }));
+    h.engine.claim('c1');
+    h.engine.release('c1');
+    const pack = handoffPack(h);
+    assert.equal(pack.active[0]!.stale, false);
+    assert.deepEqual(
+      [pack.next.actor, pack.next.action, pack.next.step, pack.next.workId, pack.next.command],
+      ['controller', 'wait', 'attempt-running', 'a', undefined],
+    );
+    assert.ok(pack.next.detail!.includes(pack.active[0]!.leaseUntil));
+    assert.match(pack.next.detail!, /проверить процесс-владелец/);
+  } finally {
+    h.close();
+  }
+});
+
+test('handoff: пауза очереди и повтор controller — строка «повтор ждёт снятия паузы»', () => {
+  const ctx = hsetup({ scenario: {} });
+  const h = ctx.open();
+  try {
+    const g = ready(h.engine, graphOf({ a: [], b: [] }));
+    h.workflows.start({ kind: 'graph', id: g.id, authorRuntime: 'claude' });
+    const a = h.engine.claim('c1')!;
+    h.engine.fail(a.id, a.token, 'gate', { kind: 'gate' });
+    h.engine.pause('operator');
+    const pack = handoffPack(h);
+    const wa = pack.works.find((w) => w.id === 'a')!;
+    assert.deepEqual([wa.next.actor, wa.next.action], ['controller', 'retry']);
+    assert.match(handoffMarkdown(pack), /Повтор ждёт снятия паузы очереди/);
+    h.engine.resume();
+    assert.doesNotMatch(handoffMarkdown(handoffPack(h)), /Повтор ждёт снятия паузы/);
   } finally {
     h.close();
   }
@@ -319,10 +362,12 @@ test('handoff: пауза очереди — одна остановка без 
     assert.equal(pack.truncated.works, 71 - HANDOFF_LIMITS.works);
     // Бюджеты поручений в пределах и без расхода не перечисляются.
     assert.deepEqual(pack.budgets!.entries, []);
-    assert.equal(pack.truncated.budgets, 71);
+    assert.equal(pack.truncated.budgets, 0, 'не срезаны пределом');
+    assert.equal(pack.truncated.budgetsWithin, 71, 'в пределах и без расхода');
     const md = handoffMarkdown(pack);
     assert.match(md, /очередь PAUSED .* Поручений: 70 \(w00, /);
     assert.match(md, /… и ещё 21 поручений/);
+    assert.match(md, /Бюджеты поручений в пределах и без расхода не показаны: 71/);
   } finally {
     h.close();
   }
@@ -525,14 +570,137 @@ test('handoff: худший случай — пределы заполнены, 
     });
     const bytes = Buffer.byteLength(JSON.stringify(pack));
     assert.ok(bytes <= HANDOFF_MAX_BYTES, `${bytes} байт`);
-    assert.equal(pack.works.length, HANDOFF_LIMITS.works);
-    assert.equal(pack.truncated.works, 30);
-    assert.equal(pack.failures.length, HANDOFF_LIMITS.failures);
-    assert.equal(pack.stops.length, HANDOFF_LIMITS.stops);
-    // 80 диагнозов поручений и роль controller.
-    assert.equal(pack.truncated.stops, 81 - HANDOFF_LIMITS.stops);
+    // Каждый список: показано + не вошло = всего (80 поручений, 80 провалов,
+    // 80 диагнозов поручений и роль controller).
+    assert.equal(pack.works.length + pack.truncated.works, 80);
+    assert.equal(pack.failures.length + pack.truncated.failures, 80);
+    assert.equal(pack.stops.length + pack.truncated.stops, 81);
+    assert.ok(pack.works.length <= HANDOFF_LIMITS.works);
     assert.ok(pack.stops.every((d) => d.evidence.length <= HANDOFF_LIMITS.evidence));
     assert.equal(pack.truncated.intentions, HANDOFF_LIMITS.intentions);
+  } finally {
+    h.close();
+  }
+});
+
+test('handoff: предел в байтах — ANSI, управляющие символы и кириллица; записи отбрасываются, а не отказ', () => {
+  const ctx = hsetup({ scenario: {}, policy: (p) => ((p as any).maxAttempts = 2) });
+  const h = ctx.open();
+  try {
+    const deps = Object.fromEntries(Array.from({ length: 80 }, (_, i) => [`w${i}`, []]));
+    ready(h.engine, graphOf(deps));
+    const ansi = '\x1b[31mОшибка\x1b[0m \x1b]0;title\x07'.repeat(400);
+    for (let i = 0; i < 80; i++) {
+      const run = h.engine.claim('c1')!;
+      h.engine.fail(run.id, run.token, ansi + i, { kind: 'gate' });
+    }
+    h.store.transact('task.retry', (tx) => {
+      for (let i = 0; i < 80; i++) {
+        const w = tx.work('w' + i)!;
+        tx.putWork({ ...w, order: { ...w.order, title: 'Ж'.repeat(180) } });
+      }
+    });
+    const ids = Array.from({ length: 80 }, (_, i) => `w${i}`);
+    h.engine.hold(ids, 'op-1', '\x01'.repeat(3000) + 'Причина'.repeat(100));
+    const intentions = Array.from({ length: 20 }, (_, i) => 'Я'.repeat(1000) + i);
+    for (const pack of [handoffPack(h, { intentions }), handoffPack(h)]) {
+      const json = JSON.stringify(pack);
+      assert.ok(Buffer.byteLength(json) <= HANDOFF_MAX_BYTES, `${Buffer.byteLength(json)} байт`);
+      assert.ok(handoffPackSchema.safeParse(pack).success);
+      assert.ok(!/\\u00[01]/.test(json), 'нет управляющих символов');
+      assert.ok(!json.includes('[31m'), 'нет ANSI');
+      assert.match(pack.failures[0]!.error!, /^Ошибка Ошибка/);
+      const t = pack.truncated;
+      assert.equal(pack.works.length + t.works, 80);
+      assert.equal(pack.failures.length + t.failures, 80);
+    }
+    const full = handoffPack(h, { intentions });
+    assert.equal(full.truncated.bySize, false, 'реальная доска укладывается после очистки текста');
+    // Меньший предел: записи уходят в порядке «намерения, старые провалы,
+    // поручения без решения»; решения остаются.
+    const before = structuredClone(full);
+    const fitted = fitPack(structuredClone(full), 60 * 1024);
+    assert.ok(Buffer.byteLength(JSON.stringify(fitted)) <= 60 * 1024);
+    const t = fitted.truncated;
+    assert.equal(t.bySize, true);
+    assert.equal(t.intentionsDropped, 20);
+    assert.deepEqual(fitted.intentions, []);
+    assert.equal(fitted.failures.length + t.failures, 80);
+    assert.deepEqual(
+      fitted.failures.map((f) => f.runId),
+      before.failures.slice(0, fitted.failures.length).map((f) => f.runId),
+      'остаются новые провалы',
+    );
+    // Поручения отбрасываются только после всех намерений и провалов.
+    assert.ok(fitted.works.length < before.works.length);
+    assert.deepEqual(fitted.failures, []);
+    assert.equal(fitted.works.length + t.works, 80);
+    assert.deepEqual(
+      fitted.works.map((w) => w.id),
+      before.works.slice(0, fitted.works.length).map((w) => w.id),
+      'остаются первые по порядку',
+    );
+    assert.ok(handoffPackSchema.safeParse(fitted).success);
+    assert.match(handoffMarkdown(fitted), /Пакет урезан до 256 КБ/);
+    assert.match(handoffMarkdown(fitted), /Отброшено намерений ради предела размера: 20/);
+  } finally {
+    h.close();
+  }
+});
+
+test('handoff: предел в байтах — поручение без решения уходит раньше поручений с решением', () => {
+  const { h } = board();
+  try {
+    const pack = handoffPack(h);
+    assert.deepEqual(
+      pack.works.map((w) => [w.id, w.next.actor, w.next.action]),
+      [
+        ['c', 'controller', 'wait'],
+        ['a', 'lead', 'diagnose-failure'],
+        ['b', 'lead', 'diagnose-failure'],
+      ],
+    );
+    // Предел, в который пакет входит без провалов и без поручения c.
+    const manual = structuredClone(pack);
+    manual.failures = [];
+    manual.works = manual.works.filter((w) => w.id !== 'c');
+    const limit = Buffer.byteLength(JSON.stringify(manual)) + 8;
+    const fitted = fitPack(structuredClone(pack), limit);
+    assert.deepEqual(
+      fitted.works.map((w) => w.id),
+      ['a', 'b'],
+    );
+    assert.deepEqual([fitted.truncated.failures, fitted.truncated.works], [1, 1]);
+    assert.equal(fitted.stops.length, pack.stops.length, 'остановки целы');
+  } finally {
+    h.close();
+  }
+});
+
+test('handoff: весь пакет — один снимок; вложенное чтение хранилища без второго BEGIN', () => {
+  const { ctx, h } = board();
+  try {
+    // Второе соединение пишет между внешним и вложенным чтением: вложенное его не видит.
+    const other = ctx.open();
+    try {
+      const seen = h.store.read((outer) => {
+        const before = outer.control().paused;
+        other.engine.pause('operator');
+        const inner = h.store.read((v) => v.control().paused);
+        return { before, inner };
+      });
+      assert.deepEqual(seen, { before: false, inner: false });
+      assert.equal(
+        h.store.read((v) => v.control().paused),
+        true,
+        'новое чтение видит запись',
+      );
+    } finally {
+      other.close();
+    }
+    // handoffPack внутри чтения: status, диагнозы и задания — тот же снимок.
+    const pack = h.engine.read(() => handoffPack(h));
+    assert.equal(pack.queue.paused, true);
   } finally {
     h.close();
   }
