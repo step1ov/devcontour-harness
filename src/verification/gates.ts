@@ -15,6 +15,7 @@ import { command, git } from '../environment/process.ts';
 import {
   isolation,
   isolatedCommand,
+  srtTempDir,
   isolationSupport,
   protectedChanges,
   protectedSnapshot,
@@ -431,6 +432,8 @@ export async function runCheck(
   // Метка старта — вне TMPDIR команды: проверка, чистящая свой временный
   // каталог, не должна стирать признак того, что она уже начиналась.
   const marks = await realpath(await mkdtemp(join(tmpdir(), 'dc-start-')));
+  // Свой короткий временный каталог srt (`srtTempDir`), если его пришлось создать.
+  let srtTemp: string | undefined;
   try {
     if (h.config.isolation.mode === 'os') {
       const support = isolationBackend.check();
@@ -457,6 +460,10 @@ export async function runCheck(
       const roots = isolation({ write: options.write, controller: [] }).write.filter(
         (w) => workdir === w || workdir.startsWith(w + sep),
       );
+      // Сокеты srt — во временном каталоге его процесса: при глубоком TMPDIR
+      // путь длиннее предела unix-сокета, и srt не стартует.
+      const srt = await srtTempDir();
+      if (srt.created) srtTemp = srt.dir;
       const wrapped = await isolatedCommand(
         policy,
         argv,
@@ -468,6 +475,7 @@ export async function runCheck(
         process.platform,
         tag,
         token,
+        srt.dir,
       );
       argv = wrapped.argv;
       env = { ...env, ...wrapped.env };
@@ -542,6 +550,7 @@ export async function runCheck(
     const removed = await Promise.allSettled([
       checkCleanup.remove(scratch),
       checkCleanup.remove(marks),
+      ...(srtTemp ? [checkCleanup.remove(srtTemp)] : []),
     ]);
     const failed = removed.find((r) => r.status === 'rejected');
     if (failed) {

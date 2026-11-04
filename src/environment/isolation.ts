@@ -1,7 +1,7 @@
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { createRequire } from 'node:module';
-import { writeFile, mkdir } from 'node:fs/promises';
+import { writeFile, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { existsSync, lstatSync, readlinkSync, realpathSync, readdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
@@ -749,12 +749,70 @@ export function protectedChanges(before: Map<string, string>, root: string) {
 }
 
 /**
+ * Предел пути unix-сокета (`sun_path`, вместе с завершающим NUL): 104 байта
+ * на macOS, 108 на Linux. srt слушает свои сокеты во временном каталоге
+ * процесса (`srt-mux-<pid>-<n>.sock`, `claude-socks-<16 hex>.sock`,
+ * `srt-obs-XXXXXX/s<8 hex>.sock`); глубокий TMPDIR делает путь длиннее
+ * предела, и srt падает до запуска команды (`listen EINVAL`).
+ */
+export const SOCKET_PATH_LIMIT: Partial<Record<NodeJS.Platform, number>> = {
+  darwin: 104,
+  linux: 108,
+};
+/** Запас под самое длинное имя сокета srt внутри его временного каталога (с разделителем). */
+export const SRT_SOCKET_RESERVE = 48;
+/** Короткая база временного каталога srt, когда TMPDIR процесса слишком глубокий. */
+export const SRT_SHORT_BASE = '/tmp';
+
+/** Путь каталога оставляет место сокетам srt на этой платформе. */
+export const srtSocketsFit = (dir: string, platform: NodeJS.Platform = process.platform) => {
+  const limit = SOCKET_PATH_LIMIT[platform];
+  return limit === undefined || Buffer.byteLength(dir) + SRT_SOCKET_RESERVE < limit;
+};
+
+/**
+ * Временный каталог процесса srt. TMPDIR процесса — как есть, если сокеты
+ * srt в нём укладываются в предел пути; иначе — свой каталог под
+ * `SRT_SHORT_BASE` (`mkdtemp`: новый, `0700`, только владельцу), который
+ * вызывающий удаляет после проверки (`created`). Если и он не укладывается
+ * или не создаётся — `SandboxPolicyError` (отказ среды, `environment`) до
+ * запуска, с именем TMPDIR в тексте.
+ * Команде внутри передаётся свой scratch, не этот каталог.
+ */
+export async function srtTempDir(
+  base: string = tmpdir(),
+  platform: NodeJS.Platform = process.platform,
+  short: string = SRT_SHORT_BASE,
+): Promise<{ dir: string; created: boolean }> {
+  if (srtSocketsFit(base, platform)) return { dir: base, created: false };
+  const limit = SOCKET_PATH_LIMIT[platform]!;
+  const refuse = (detail: string) =>
+    new SandboxPolicyError(
+      `Песочница проверки не запустится: путь сокетов sandbox-runtime в TMPDIR ` +
+        `(${base}, ${Buffer.byteLength(base)} байт) длиннее предела unix-сокета ` +
+        `${limit} байт, а короткий каталог ${short} ${detail}. Задайте более короткий TMPDIR`,
+    );
+  let dir: string;
+  try {
+    dir = await realpath(await mkdtemp(join(short, 'dc-srt-')));
+  } catch (error) {
+    throw refuse(`недоступен: ${(error as Error).message}`);
+  }
+  if (!srtSocketsFit(dir, platform)) {
+    await rm(dir, { recursive: true, force: true });
+    throw refuse(`тоже слишком длинный (${dir})`);
+  }
+  return { dir, created: true };
+}
+
+/**
  * Команда проверки внутри sandbox-runtime.
  *
  * Настройки пишутся в файл: srt отказывает, если файл пуст или невалиден, и
  * не откатывается к умолчаниям. Собственный служебный сокет srt кладёт во
- * временный каталог процесса, поэтому srt получает короткий системный
- * TMPDIR, а команде внутри передаётся свой scratch.
+ * временный каталог процесса, поэтому srt получает TMPDIR, в котором путь
+ * сокета укладывается в предел (`srtTempDir`), а команде внутри передаётся
+ * свой scratch.
  *
  * `cwd` — каталог, из которого запускается srt (см. `protectedWriteDenies`):
  * на macOS это каталог метки старта, а в рабочий каталог проверки обёртка
@@ -786,6 +844,8 @@ export async function isolatedCommand(
    * напечатанное до неё — нет: токен в выводе доказывает старт.
    */
   token = '',
+  /** Временный каталог процесса srt (`srtTempDir`); по умолчанию TMPDIR процесса. */
+  srtTemp: string = tmpdir(),
 ) {
   if (!/^[a-z0-9]*$/.test(tag)) throw new Error('Токен журнала песочницы — только [a-z0-9]');
   if (!/^[a-z0-9]*$/.test(token)) throw new Error('Токен старта — только [a-z0-9]');
@@ -827,7 +887,7 @@ export async function isolatedCommand(
       `TMPDIR=${scratch}`,
       ...argv,
     ],
-    env: { TMPDIR: tmpdir() },
+    env: { TMPDIR: srtTemp },
     // Без явных запретов srt остаётся в рабочем каталоге: его собственный
     // обязательный запрет действует от него.
     cwd: denies ? dirname(started) : workdir,

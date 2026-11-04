@@ -19,9 +19,16 @@ import { delimiter, join } from 'node:path';
 import { createRequire } from 'node:module';
 import type { EvidenceRecord } from '../src/contracts/index.ts';
 import { redactor } from '../src/environment/redaction.ts';
-import { isolationSupport, srtShellLookup } from '../src/environment/isolation.ts';
+import {
+  SandboxPolicyError,
+  isolationSupport,
+  srtShellLookup,
+  srtSocketsFit,
+  srtTempDir,
+} from '../src/environment/isolation.ts';
 import { TaskFailure } from '../src/engine/failure.ts';
 import {
+  checkCleanup,
   runCheck,
   runGate,
   sandboxLaunchFailure,
@@ -451,3 +458,84 @@ test('Токен старта вырезается из сырого поток�
   const filter = startTokenFilter(token, () => assert.fail('токена не было'));
   assert.equal(filter('x ab12', false) + filter('', true), 'x ab12');
 });
+
+/** Глубокий TMPDIR: путь сокета srt в нём длиннее предела unix-сокета. */
+const deepTmp = () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-deep-')));
+  const deep = join(root, 'd'.repeat(60), 'e'.repeat(60));
+  mkdirSync(deep, { recursive: true });
+  return { root, deep };
+};
+
+test('srtTempDir: короткий TMPDIR — как есть; глубокий — свой каталог 0700 под /tmp; иначе отказ среды с TMPDIR', async () => {
+  assert.deepEqual(await srtTempDir('/tmp', 'darwin'), { dir: '/tmp', created: false });
+  const { root, deep } = deepTmp();
+  try {
+    assert.equal(srtSocketsFit(deep, 'darwin'), false);
+    assert.equal(srtSocketsFit(deep, 'linux'), false);
+    // Платформа без предела sun_path в таблице — каталог как есть.
+    assert.deepEqual(await srtTempDir(deep, 'win32'), { dir: deep, created: false });
+    for (const platform of ['darwin', 'linux'] as const) {
+      const short = await srtTempDir(deep, platform);
+      try {
+        assert.equal(short.created, true);
+        assert.notEqual(short.dir, deep);
+        assert.equal(realpathSync(short.dir), short.dir);
+        assert.ok(short.dir.startsWith(realpathSync('/tmp') + '/dc-srt-'), short.dir);
+        assert.equal(statSync(short.dir).mode & 0o777, 0o700);
+        assert.equal(srtSocketsFit(short.dir, platform), true);
+      } finally {
+        if (short.created && short.dir.includes('/dc-srt-')) await checkCleanup.remove(short.dir);
+      }
+    }
+    // Короткий каталог недоступен или сам слишком глубокий — отказ среды до запуска.
+    await assert.rejects(
+      srtTempDir(deep, 'darwin', join(root, 'missing')),
+      (e: unknown) =>
+        e instanceof SandboxPolicyError &&
+        /TMPDIR/.test(e.message) &&
+        e.message.includes(deep) &&
+        /недоступен/.test(e.message),
+    );
+    await assert.rejects(
+      srtTempDir(deep, 'darwin', deep),
+      (e: unknown) => e instanceof SandboxPolicyError && /тоже слишком длинный/.test(e.message),
+    );
+    assert.deepEqual(
+      execFileSync('find', [deep, '-name', 'dc-srt-*']).toString(),
+      '',
+      'отвергнутый каталог убран',
+    );
+  } finally {
+    if (root.includes('harness-deep-')) await checkCleanup.remove(root);
+  }
+});
+
+test(
+  'Проверка в песочнице стартует при глубоком TMPDIR; короткий каталог srt убирается',
+  { skip: noSandbox },
+  async () => {
+    const { root, deep } = deepTmp();
+    const saved = process.env.TMPDIR;
+    const original = checkCleanup.remove;
+    const removed: string[] = [];
+    checkCleanup.remove = (dir) => (removed.push(dir), original(dir));
+    try {
+      const file = out();
+      process.env.TMPDIR = deep;
+      const r = await check(loaded(0, process.env.PATH ?? '').env, file);
+      assert.equal(r.code, 0, r.stderr);
+      assert.equal(r.started, true);
+      assert.doesNotMatch(r.stderr, /EINVAL/);
+      assert.equal(existsSync(file), true, 'команда исполнилась');
+      const srt = removed.filter((d) => d.includes('/dc-srt-'));
+      assert.equal(srt.length, 1, removed.join(', '));
+      assert.equal(existsSync(srt[0]!), false, 'каталог srt убран');
+    } finally {
+      process.env.TMPDIR = saved;
+      if (saved === undefined) delete process.env.TMPDIR;
+      checkCleanup.remove = original;
+      if (root.includes('harness-deep-')) await original(root);
+    }
+  },
+);
