@@ -16,6 +16,7 @@ import {
   vendorOf,
   workGraphDigest,
   type AttemptState,
+  type RunEventPayload,
   type ControllerLease,
   type Author,
   type CallRecord,
@@ -1362,6 +1363,39 @@ export class Engine {
       });
     });
     return timing.id;
+  }
+
+  /**
+   * Переход живости попытки по обходу controller: запись `liveness` и событие
+   * `attempt.liveness` — одной транзакцией под fencing; утративший владение
+   * не публикует ни того, ни другого.
+   */
+  liveness(
+    id: string,
+    token: string,
+    liveness: NonNullable<AttemptState['liveness']>,
+    event: Omit<
+      RunEventPayload<'attempt.liveness'>,
+      'state' | 'lastMovementAt' | 'activity' | 'action'
+    >,
+  ) {
+    this.withAttempt(id, token, 'run.liveness', (a, w, tx) => {
+      tx.putAttempt({ ...a, liveness });
+      tx.emit({
+        type: 'attempt.liveness',
+        graphId: w.graphId,
+        workId: w.id,
+        runId: id,
+        attempt: a.attempt,
+        payload: {
+          state: liveness.state,
+          lastMovementAt: liveness.lastMovementAt,
+          ...(liveness.activity ? { activity: liveness.activity } : {}),
+          ...(liveness.action ? { action: liveness.action } : {}),
+          ...event,
+        },
+      });
+    });
   }
 
   timingFinished(id: string, token: string, timingId: string, outcome: 'passed' | 'failed') {

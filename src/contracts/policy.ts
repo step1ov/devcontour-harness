@@ -310,6 +310,27 @@ export const executionPolicySchema = z.strictObject({
    * digest и pins прежней политики не меняются. См. docs/review-protocol.md.
    */
   reviewProtocolRetries: z.number().int().min(0).max(2).optional(),
+  /**
+   * Обход зависших попыток controller: каждые `intervalMs` он оценивает
+   * движение исполняющегося (вывод, команды, стадии, процессор дерева):
+   * `quiet` — нет движения дольше `quietMs`, `stalled` — дольше `stalledMs`.
+   * На `stalled` — снимок процессов и хвоста вывода и действие `action`:
+   * `report` только сообщает, `stop` останавливает попытку исходом
+   * `stalled`. Нет поля — умолчания `DEFAULT_STALL_SWEEP`; они не
+   * подставляются в политику, и digest прежних политик не меняется.
+   */
+  stallSweep: z
+    .strictObject({
+      intervalMs: z.number().int().min(10).max(600_000).default(30_000),
+      quietMs: z.number().int().positive().max(86_400_000).default(180_000),
+      stalledMs: z.number().int().positive().max(86_400_000).default(600_000),
+      action: z.enum(['stop', 'report']).default('report'),
+    })
+    .refine((s) => s.quietMs < s.stalledMs, {
+      message: 'stallSweep.quietMs должен быть меньше stalledMs',
+      path: ['quietMs'],
+    })
+    .optional(),
   maxAttempts: z.number().int().min(1).max(10).default(3),
   repairBudget: z.number().int().min(0).max(50).default(6),
   reuseImplementation: z.boolean().default(true),
@@ -327,6 +348,23 @@ export const executionPolicySchema = z.strictObject({
   prices: z.array(priceSchema).max(100).default([]),
 });
 export type ExecutionPolicy = z.infer<typeof executionPolicySchema>;
+
+/** Обход зависших попыток по умолчанию: умеренные пороги, только сообщение. */
+export const DEFAULT_STALL_SWEEP = {
+  intervalMs: 30_000,
+  quietMs: 180_000,
+  stalledMs: 600_000,
+  action: 'report',
+} as const satisfies NonNullable<ExecutionPolicy['stallSweep']>;
+export type StallSweepPolicy = {
+  intervalMs: number;
+  quietMs: number;
+  stalledMs: number;
+  action: 'stop' | 'report';
+};
+/** Действующий обход политики: заданный или умолчание. */
+export const stallSweepOf = (policy: Pick<ExecutionPolicy, 'stallSweep'>): StallSweepPolicy =>
+  policy.stallSweep ?? DEFAULT_STALL_SWEEP;
 export type ExecutionPolicyInput = z.input<typeof executionPolicySchema>;
 
 export const policyDigest = (policy: ExecutionPolicy) => digestOf(policy);

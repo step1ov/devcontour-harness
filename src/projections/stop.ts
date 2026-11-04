@@ -28,6 +28,7 @@ export function stopCodeOf(kind: FailureKind | undefined): ErrorCode {
     case 'provider-auth':
     case 'environment':
     case 'timeout':
+    case 'stalled':
       return 'RUNTIME_UNAVAILABLE';
     case 'stale-base':
     case 'merge':
@@ -77,6 +78,7 @@ export const stopCauses = [
   'provider-auth',
   'environment',
   'timeout',
+  'stalled',
   'stale-base',
   'empty-result',
   'unfinished',
@@ -131,6 +133,16 @@ export type StopInput =
         waitingOn?: string[];
         /** Согласование графа устарело для этой политики (режим operator). */
         approvalStale?: string;
+        /**
+         * Активная попытка без движения по обходу controller: что не
+         * двигалось, сколько и что controller сделает (`action` у stalled).
+         */
+        liveness?: {
+          state: 'quiet' | 'stalled';
+          lastMovementAt: string;
+          activity?: string;
+          action?: 'stop' | 'report';
+        };
       };
       maxAttempts: number;
       repair: {
@@ -171,6 +183,8 @@ const causeText: Record<StopCause, string> = {
   'provider-auth': 'Провайдер отказал: runtime не авторизован, нет кредитов или исчерпан лимит.',
   environment: 'Окружение не дало исполнителю работать (сеть, TLS/DNS, процесс runtime).',
   timeout: 'Попытка исчерпала отведённое время.',
+  stalled:
+    'Процесс попытки жив, но не двигался дольше порога: нет вывода, расхода процессора и смены стадий.',
   'stale-base': 'База прогонов отстала от рабочей ветки.',
   'empty-result': 'Исполнитель отчитался о выполнении, не изменив ни одного файла.',
   unfinished: 'Исполнитель не доделал работу и сообщил об этом.',
@@ -196,6 +210,7 @@ const failurePhase: Record<FailureKind, StopPhase> = {
   'provider-auth': 'implementation',
   environment: 'implementation',
   timeout: 'implementation',
+  stalled: 'implementation',
   unknown: 'implementation',
   'empty-result': 'implementation',
   unfinished: 'implementation',
@@ -384,6 +399,7 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
         };
       case 'environment':
       case 'timeout':
+      case 'stalled':
         return {
           code: 'RUNTIME_UNAVAILABLE',
           cause: kind,
@@ -491,6 +507,31 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
             : 'Продолжение — harness resume.',
     };
   const active = activePhase[work.status];
+  const idle = work.liveness;
+  if (active && idle) {
+    const what = idle.activity ? ` (${idle.activity})` : '';
+    // Сообщённое зависание остаётся за человеком: controller его не остановит.
+    if (idle.state === 'stalled' && idle.action !== 'stop')
+      return {
+        code: 'RUNTIME_UNAVAILABLE',
+        cause: 'stalled',
+        phase: active,
+        actor: 'user',
+        action: 'fix-environment',
+        note: `Попытка зависла${what}: движения нет с ${idle.lastMovementAt}. Политика только сообщает (stallSweep.action: report); снимок — в событии attempt.liveness.`,
+      };
+    return {
+      code: 'NOT_READY',
+      cause: idle.state === 'stalled' ? 'stalled' : 'not-ready',
+      phase: active,
+      actor: 'controller',
+      action: 'wait',
+      note:
+        idle.state === 'stalled'
+          ? `Попытка зависла${what}: controller останавливает её исходом stalled.`
+          : `Поручение выполняется (${work.status}), но без движения${what} с ${idle.lastMovementAt}.`,
+    };
+  }
   if (active)
     return {
       code: 'NOT_READY',

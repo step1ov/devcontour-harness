@@ -6,6 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import {
   sha256,
+  type Activity,
   type EvidenceRecord,
   type ExecutionPolicy,
   type GatePolicy,
@@ -399,6 +400,8 @@ export async function runCheck(
      * одного раза, в том числе когда проверка затем завершилась исключением.
      */
     onStart?: () => void;
+    /** Что это за команда для обхода зависших попыток (`command`). */
+    activity?: Activity;
   },
 ) {
   let launched = false;
@@ -478,6 +481,7 @@ export async function runCheck(
         throw Object.assign(new Error('Проверка отменена до запуска'), { name: 'AbortError' });
       printed = false;
       return command(argv, cwd, {
+        ...(options.activity ? { activity: options.activity } : {}),
         signal: options.signal,
         ...(started === undefined ? { onSpawn: confirm } : {}),
         // Токен старта ищется в сыром потоке до маски и вырезается из него:
@@ -752,6 +756,10 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     const result = await runCheck(
       { config: run.policy },
       {
+        activity: {
+          kind: 'gate',
+          label: (run.consumer ? `${run.consumer}:${gate.id}` : gate.id).slice(0, 300),
+        },
         argv: gate.command,
         cwd: gateCwd,
         env: {

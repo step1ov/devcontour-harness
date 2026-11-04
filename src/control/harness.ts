@@ -795,6 +795,11 @@ export class Harness {
         status: w.status,
         attempt: w.attempt,
         ...(w.activeRunId ? { activeRunId: w.activeRunId } : {}),
+        ...((state) => (state && state !== 'active' ? { liveness: state } : {}))(
+          w.activeRunId && v.attempt(w.activeRunId)?.status === 'active'
+            ? v.attempt(w.activeRunId)?.liveness?.state
+            : undefined,
+        ),
         ...(w.resultSha ? { resultSha: w.resultSha } : {}),
         blockers: this.engine.blockers(w, v),
       })),

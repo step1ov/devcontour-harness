@@ -104,6 +104,7 @@ export async function runSteps(
   for (const step of steps) {
     signal.throwIfAborted();
     const result = await command(step.command, cwd, {
+      activity: { kind: 'step', label: step.id },
       signal,
       timeoutMs: step.timeoutMs,
       env: execution.env,

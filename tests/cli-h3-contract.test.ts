@@ -106,7 +106,7 @@ function gateScope(v: unknown): v is Record<string, unknown> {
  * Аддитивные варианты событий после H2: непрозрачное неизвестное событие
  * чтения и границы стадий попытки.
  */
-const ADDITIVE_EVENT_TYPES = new Set(['unknown', 'attempt.stage']);
+const ADDITIVE_EVENT_TYPES = new Set(['unknown', 'attempt.stage', 'attempt.liveness']);
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set(['status--detail']);
 /** Тип варианта события в JSON Schema (`properties.type.const`). */
@@ -114,7 +114,7 @@ const eventTypeOf = (v: unknown) =>
   (v as { properties?: { type?: { const?: unknown } } } | null)?.properties?.type?.const as
     string | undefined;
 /** Аддитивные значения перечней после H2. */
-const ADDITIVE_ENUM_VALUES = new Set(['unfinished', 'needs-lead']);
+const ADDITIVE_ENUM_VALUES = new Set(['unfinished', 'needs-lead', 'stalled']);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
   'Подготовить существующий Git npm/pnpm-репозиторий: план или create-only запись .harness/ (политика из профиля и toolchain inspection, manifest последним); чужие файлы не меняются';
@@ -303,6 +303,12 @@ test('H3-01: прежние команды и схемы их данных не 
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.localContext;
       delete rest.baseline;
+      return rest;
+    }
+    // Аддитивное поле status — живость активной попытки (`works[].liveness`).
+    if (k === 'properties' && v && typeof v === 'object' && 'liveness' in v && 'blockers' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.liveness;
       return rest;
     }
     // Аддитивное поле status — снимок наблюдателя `--detail`.

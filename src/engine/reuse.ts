@@ -20,6 +20,7 @@ import {
 export const reusableFailures: readonly FailureKind[] = [
   'environment',
   'timeout',
+  'stalled',
   // Ответ reviewer вне протокола о коде кандидата ничего не говорит.
   'review-protocol',
 ];

@@ -108,6 +108,7 @@ manifest снимка и в необязательном поле `baseline` о�
 | `toolProfiles{}`, `environment`, `lifecycle`, `resources[]`  | Инструменты (у профиля — встроенные инструменты claude, shell и сеть codex, MCP-серверы `mcp{}`: stdio-команда или http-адрес, только перечисленные `tools`, учётные данные — именами переменных `env`/`bearerTokenEnv`, передаются CLI по имени), среда, ресурсы (порты 1024–65535) |
 | `concurrency`, `leaseMs`, `runTimeoutMs`, `reviewProbes`     | Пределы исполнения                                                                                                                                                                                                                                                                   |
 | `maxAttempts`, `repairBudget`, `reuseImplementation`         | Повторы и повторное использование кандидата                                                                                                                                                                                                                                          |
+| `stallSweep{intervalMs, quietMs, stalledMs, action}`         | Необязательное: обход зависших попыток controller ([ниже](#зависшие-попытки)); нет поля — 30 000 / 180 000 / 600 000 мс и `report`, умолчание не подставляется и digest политики не меняет                                                                                           |
 | `reviewProtocolRetries`                                      | Необязательное: дополнительные вызовы reviewer кода при ошибке протокола ответа (0–2; нет поля — 1, умолчание не подставляется и digest политики не меняет), [review-protocol.md](review-protocol.md)                                                                                |
 | `budgets{work, group, total, onUnknown}`, `prices[]`         | Пределы USD и/или времени; тарифы                                                                                                                                                                                                                                                    |
 
@@ -613,6 +614,33 @@ manifestDigest, impact?, evidence[], error?}`. Смена любого SHA де�
 закреплён, `impact` может нести только ссылку на базовую проверку
 (`baseline`), выбранную хостом для режима `affected`.
 
+### Зависшие попытки
+
+Controller, ведущий очередь, раз в `stallSweep.intervalMs` обходит
+исполняющиеся попытки. Движение попытки — начало и конец её команды (вызов
+агента, gate, шаг среды, прочие команды), вывод в stdout/stderr, граница стадии
+(`attempt.stage`) и расход процессора деревом процессов исполняющихся команд
+не меньше 1 % прошедшего времени (один `ps` на обход; отказ `ps` — оценка
+только по выводу). Попытка без исполняющихся команд считается `active`.
+
+Состояния: `active`; `quiet` — нет движения дольше `quietMs`; `stalled` —
+дольше `stalledMs` (`quietMs < stalledMs`). Переход пишется в
+`AttemptState.liveness` и событием `attempt.liveness` одной транзакцией под
+fencing; само состояние между переходами не перезаписывается. На `stalled` —
+снимок процессов исполняющихся команд (pid, родитель, процессорное время,
+команда под маской среды) и хвост вывода: в событии (≤ 20 процессов, ≤ 2000
+символов) и в `artifacts/<runId>/stall-<ms>.json`. Дальше — `action`:
+`report` только сообщает (попытка идёт до своего предела времени, движение
+вернёт `active`), `stop` останавливает попытку отказом класса `stalled`:
+повтор или правка среды, а не правка кода (`repairPolicy.stalled`, бюджет
+попыток он тратит, как `timeout`).
+
+`status` показывает `works[].liveness` (`quiet`/`stalled`) у активной попытки
+без движения, `status --detail` — `detail.attempts[].liveness` (`state`,
+`since`, `lastMovementAt`, `idleMs`, `activity`, `action`), `explain` —
+причину `stalled` у работающего поручения: при `report` действует человек
+(`fix-environment`), при `stop` — controller.
+
 ### RunEvent
 
 `{apiVersion, seq, at, type, graphId?, workId?, runId?, attempt?, payload}`.
@@ -633,6 +661,12 @@ manifestDigest, impact?, evidence[], error?}`. Смена любого SHA де�
 в той же транзакции `run.timing.started`/`run.timing.finished`, что и замер,
 под fencing: утративший владение не пишет ни замера, ни события. Повторное
 закрытие замера ничего не меняет и событий не создаёт.
+
+`attempt.liveness` — переход живости попытки по обходу controller:
+`{state, previous, lastMovementAt, idleMs, activity?: {kind:
+'agent'|'gate'|'step'|'command', label}, action?: 'stop'|'report',
+snapshot?}`; `action` и `snapshot` — только у `stalled` (см. «Зависшие
+попытки»).
 
 `finished` может не прийти: поздний finish владельца, утратившего срок,
 отклоняется (runner его не повторяет), упавший процесс его не пишет, а `adopt`

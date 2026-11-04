@@ -13,7 +13,8 @@ import {
   worktreeAddPath,
 } from './git-trust.ts';
 import { outputRedactor, type Redactor } from './redaction.ts';
-import type { RuntimeDiagnostics } from '../contracts/index.ts';
+import type { Activity, RuntimeDiagnostics } from '../contracts/index.ts';
+import { activityScope } from './activity.ts';
 export interface CommandResult {
   code: number;
   stdout: string;
@@ -57,6 +58,12 @@ export async function command(
      * полон: окружение можно очистить, опрос можно опередить, каталог сменить.
      */
     contain?: boolean | { dirs: string[] };
+    /**
+     * Что это за команда для обхода зависших попыток. Команда в контексте
+     * владельца (`activityScope`) отслеживается и без этого поля — как
+     * `command` с именем исполняемого файла.
+     */
+    activity?: Activity;
   } = {},
 ): Promise<CommandResult> {
   const [file, ...args] = argv;
@@ -82,6 +89,15 @@ export async function command(
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     if (options.onSpawn) child.once('spawn', options.onSpawn);
+    const scope = activityScope.getStore();
+    const tracked = scope?.begin(
+      child.pid,
+      options.activity ?? {
+        kind: 'command',
+        label: (file.split('/').at(-1) || file).slice(0, 300),
+      },
+      options.redact,
+    );
     let stdout = '',
       stderr = '',
       timedOut = false,
@@ -95,6 +111,7 @@ export async function command(
       if (!text) return;
       if (stream === 'stdout') stdout = (stdout + text).slice(-2_000_000);
       else stderr = (stderr + text).slice(-2_000_000);
+      if (tracked) scope!.output(tracked, text);
       try {
         options.onOutput?.(stream, text);
       } catch (error) {
@@ -104,12 +121,14 @@ export async function command(
     };
     child.stdout.on('data', (d: Buffer) => {
       lastOutputAt = new Date().toISOString();
+      if (tracked) scope!.moved();
       const text = stdoutDecoder.write(d);
       options.onRawStdout?.(text);
       append('stdout', maskOut(text));
     });
     child.stderr.on('data', (d: Buffer) => {
       lastOutputAt = new Date().toISOString();
+      if (tracked) scope!.moved();
       const raw = stderrDecoder.write(d);
       append('stderr', maskErr(options.rawStderr ? options.rawStderr(raw, false) : raw));
     });
@@ -156,6 +175,7 @@ export async function command(
     poll?.unref();
     const dirs = typeof options.contain === 'object' ? options.contain.dirs : [];
     const cleanup = () => {
+      if (tracked) scope!.end(tracked);
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
       if (poll) clearInterval(poll);

@@ -356,6 +356,7 @@ export function cliAdapter(
       const telemetry = usageStream(runtime);
       try {
         result = await command(argv, r.cwd, {
+          activity: { kind: 'agent', label: `${runtime} ${r.task}`.slice(0, 300) },
           contain: { dirs: review ? [] : r.sandbox.writable },
           onRawStdout: (text: string) => {
             telemetry.push(text);

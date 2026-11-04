@@ -41,6 +41,18 @@ export const validPayloads: Record<EventType, Record<string, unknown>> = {
     durationMs: 1000,
     outcome: 'passed',
   },
+  'attempt.liveness': {
+    state: 'stalled',
+    previous: 'quiet',
+    lastMovementAt: '2026-11-03T00:00:00.000Z',
+    idleMs: 900000,
+    activity: { kind: 'gate', label: 'unit' },
+    action: 'report',
+    snapshot: {
+      processes: [{ pid: 42, parentPid: 1, cpuMs: 10, command: 'node test/run.js' }],
+      tail: 'waiting for server',
+    },
+  },
   'attempt.failed': { failureKind: 'gate', message: 'unit failed', blocked: false },
   'attempt.expired': { leaseUntil: 1 },
   'attempt.cancelled': { reason: 'operator' },

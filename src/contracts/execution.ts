@@ -52,6 +52,12 @@ export const failureKinds = [
   'provider-auth',
   'environment',
   'timeout',
+  /**
+   * Процесс попытки жив, но дольше порога политики (`stallSweep.stalledMs`)
+   * не выводил, не расходовал процессор и не закрывал стадий: обход
+   * controller остановил его. Действие — повтор или правка среды, не кода.
+   */
+  'stalled',
   'stale-base',
   'empty-result',
   /** Исполнитель сообщил `completed: false`: работа не доделана, черновик сохранён. */
@@ -73,6 +79,40 @@ export const failureKinds = [
 ] as const;
 export const failureKindSchema = z.enum(failureKinds);
 export type FailureKind = (typeof failureKinds)[number];
+
+/**
+ * Живость исполняющейся попытки по периодическому обходу controller
+ * (`stallSweep` политики): `active` — движение было недавно, `quiet` — нет
+ * движения дольше `quietMs`, `stalled` — дольше `stalledMs`. Движение —
+ * вывод процесса, начало или конец его команды, граница стадии
+ * (`attempt.stage`), заметный расход процессора деревом процессов.
+ */
+export const livenessStates = ['active', 'quiet', 'stalled'] as const;
+export const livenessStateSchema = z.enum(livenessStates);
+export type LivenessState = (typeof livenessStates)[number];
+/** Что исполняется: вызов агента, gate, шаг среды или прочая команда попытки. */
+export const activitySchema = z.strictObject({
+  kind: z.enum(['agent', 'gate', 'step', 'command']),
+  label: z.string().min(1).max(300),
+});
+export type Activity = z.infer<typeof activitySchema>;
+/** Действие controller на `stalled`: остановить процесс или только сообщить. */
+export const stallActionSchema = z.enum(['stop', 'report']);
+/** Последнее состояние живости попытки; пишется только на переходах. */
+export const attemptLivenessSchema = z.strictObject({
+  state: livenessStateSchema,
+  /** Время обхода, на котором состояние стало текущим. */
+  at: isoTimeSchema,
+  /** Последнее замеченное движение. */
+  lastMovementAt: isoTimeSchema,
+  /** Последняя начатая из исполняющихся команд; нет — команды не идут. */
+  activity: activitySchema.optional(),
+  /** Только у `stalled`: что controller сделал по политике. */
+  action: stallActionSchema.optional(),
+  /** Только у `stalled`: файл снимка процессов и хвоста вывода. */
+  artifact: z.string().max(1000).optional(),
+});
+export type AttemptLiveness = z.infer<typeof attemptLivenessSchema>;
 
 /** Значение из отчёта проверки или ответа reviewer: произвольный JSON, сохраняется как есть. */
 const jsonValue: z.ZodType<unknown> = z.lazy(() =>
@@ -510,6 +550,8 @@ export const attemptStateSchema = z.strictObject({
   wait: z
     .strictObject({ approvedAt: isoTimeSchema.optional(), readyAt: isoTimeSchema.optional() })
     .optional(),
+  /** Живость исполняющейся попытки (обход controller); нет — обход её не оценивал. */
+  liveness: attemptLivenessSchema.optional(),
   timings: z
     .array(
       z.strictObject({

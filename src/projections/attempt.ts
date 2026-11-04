@@ -34,6 +34,14 @@ export interface AttemptViewInput {
   }[];
   /** Gates, которые попытка обязана пройти в каждой фазе (`AttemptState.requiredGates`). */
   requiredGates?: readonly string[];
+  /** Последний переход живости по обходу controller (`AttemptState.liveness`). */
+  liveness?: {
+    state: 'active' | 'quiet' | 'stalled';
+    at: string;
+    lastMovementAt: string;
+    activity?: { kind: 'agent' | 'gate' | 'step' | 'command'; label: string };
+    action?: 'stop' | 'report';
+  };
 }
 
 export interface AttemptViewOptions {
@@ -89,6 +97,20 @@ export interface AttemptView {
     passed: number;
     failed: number;
     remaining: number;
+  };
+  /**
+   * Живость по последнему переходу обхода controller: `quiet` и `stalled`
+   * держатся до движения, поэтому `idleMs` у них точен; у `active` его нет —
+   * переход в active записывается только при смене состояния. Нет поля —
+   * обход попытку не оценивал (прежний controller или ещё не было обхода).
+   */
+  liveness?: {
+    state: 'active' | 'quiet' | 'stalled';
+    since: string;
+    lastMovementAt: string;
+    idleMs?: number;
+    activity?: { kind: 'agent' | 'gate' | 'step' | 'command'; label: string };
+    action?: 'stop' | 'report';
   };
 }
 
@@ -160,5 +182,19 @@ export function attemptView(input: AttemptViewInput, options: AttemptViewOptions
       failed: latest.size - passed,
       remaining: required.filter((g) => !latest.has(g)).length,
     },
+    ...(input.liveness
+      ? {
+          liveness: {
+            state: input.liveness.state,
+            since: input.liveness.at,
+            lastMovementAt: input.liveness.lastMovementAt,
+            ...(input.liveness.state !== 'active'
+              ? { idleMs: Math.max(0, now - ms(input.liveness.lastMovementAt)) }
+              : {}),
+            ...(input.liveness.activity ? { activity: { ...input.liveness.activity } } : {}),
+            ...(input.liveness.action ? { action: input.liveness.action } : {}),
+          },
+        }
+      : {}),
   };
 }

@@ -8,7 +8,13 @@ import {
   runtimeNameSchema,
 } from './primitives.ts';
 import { sourceRefSchema } from './work.ts';
-import { failureKindSchema, workStatusSchema } from './execution.ts';
+import {
+  activitySchema,
+  failureKindSchema,
+  livenessStateSchema,
+  stallActionSchema,
+  workStatusSchema,
+} from './execution.ts';
 
 const sha = gitShaSchema;
 const text = z.string().max(4000);
@@ -97,6 +103,38 @@ export const eventPayloads = {
     durationMs: z.number().int().min(0).optional(),
     /** Только у `finished`. */
     outcome: z.enum(['passed', 'failed']).optional(),
+  }),
+  /**
+   * Обход controller сменил живость исполняющейся попытки (только переходы).
+   * У `stalled` — снимок: процессы исполняющихся команд и хвост их вывода
+   * (замаскированные), и что controller сделал (`action`).
+   */
+  'attempt.liveness': z.strictObject({
+    state: livenessStateSchema,
+    previous: livenessStateSchema,
+    lastMovementAt: isoTimeSchema,
+    idleMs: z.number().int().min(0),
+    activity: activitySchema.optional(),
+    action: stallActionSchema.optional(),
+    snapshot: z
+      .strictObject({
+        processes: z
+          .array(
+            z.strictObject({
+              pid: z.number().int().positive(),
+              parentPid: z.number().int().min(0),
+              /** Процессорное время; нет — ps его не сообщил. */
+              cpuMs: z.number().int().min(0).optional(),
+              command: z.string().max(300),
+            }),
+          )
+          .max(20),
+        /** ps не дал списка процессов: снимок только из вывода. */
+        processesUnavailable: z.boolean().optional(),
+        tail: z.string().max(2000),
+        artifact: z.string().max(1000).optional(),
+      })
+      .optional(),
   }),
   'attempt.failed': z.strictObject({
     failureKind: failureKindSchema,
@@ -194,6 +232,8 @@ export const eventPayloads = {
   }),
 } as const;
 export type EventType = keyof typeof eventPayloads;
+/** Нагрузка события своего типа. */
+export type RunEventPayload<T extends EventType> = z.infer<(typeof eventPayloads)[T]>;
 export const eventTypes = Object.keys(eventPayloads) as EventType[];
 
 const envelope = {
@@ -282,6 +322,7 @@ export const transactionKinds = [
   'run.model',
   'run.timing.started',
   'run.timing.finished',
+  'run.liveness',
   'evidence.recorded',
   'reproduction.recorded',
   'findings.recorded',
