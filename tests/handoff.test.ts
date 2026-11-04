@@ -586,7 +586,8 @@ test('handoff: бюджеты — расход против предела, не
   }
 });
 
-test('handoff: расход вызова о группе — одна строка группы, а не строка у каждого поручения', async () => {
+/** Доска a, b, c: свой вызов у a и вызов о группе (ревью плана) стоимостью `groupUsd`. */
+async function sharedSpend(onUnknown: 'stop' | 'continue', groupUsd: number | null) {
   const ctx = hsetup({
     scenario: {},
     policy: (p) =>
@@ -594,45 +595,112 @@ test('handoff: расход вызова о группе — одна строк
         total: { usd: 5 },
         group: { usd: 5 },
         work: { usd: 1 },
-        onUnknown: 'continue',
+        onUnknown,
       }),
   });
   const h = ctx.open();
+  ready(h.engine, graphOf({ a: [], b: [], c: [] }));
+  const a = h.engine.claim('c1')!;
+  const signal = new AbortController().signal;
+  await measuredInvoke(h.engine, adapter(usage(0.4)), request(), signal, {
+    repositoryId: 'app',
+    runId: a.id,
+    stage: 'implementation',
+  });
+  // Вызов о группе, закреплён за всеми её поручениями.
+  await measuredInvoke(h.engine, adapter(usage(groupUsd)), request(), signal, {
+    repositoryId: 'app',
+    subjectId: 'g',
+    subjectKind: 'group',
+    stage: 'plan-review',
+  });
+  return h;
+}
+const budgetRows = (pack: ReturnType<typeof handoffPack>) =>
+  pack.budgets!.entries.map((e) => [e.scope, e.id ?? null, e.state]);
+
+test('handoff: расход вызова о группе — одна строка группы, а не строка у каждого поручения', async () => {
+  const h = await sharedSpend('continue', null);
   try {
-    ready(h.engine, graphOf({ a: [], b: [], c: [] }));
-    const a = h.engine.claim('c1')!;
-    const signal = new AbortController().signal;
-    await measuredInvoke(h.engine, adapter(usage(0.4)), request(), signal, {
-      repositoryId: 'app',
-      runId: a.id,
-      stage: 'implementation',
-    });
-    // Ревью плана без стоимости: вызов о группе, закреплён за всеми её поручениями.
-    await measuredInvoke(h.engine, adapter(usage(null)), request(), signal, {
-      repositoryId: 'app',
-      subjectId: 'g',
-      subjectKind: 'group',
-      stage: 'plan-review',
-    });
     const pack = handoffPack(h);
-    const rows = pack.budgets!.entries.map((e) => [e.scope, e.id ?? null, e.unknownCalls]);
-    // Вызов о группе посчитан один раз в группе и total; у a — свой вызов и доля группы.
-    assert.deepEqual(rows, [
-      ['total', null, 1],
-      ['group', 'g', 1],
-      ['work', 'a', 1],
-    ]);
+    // Неопределённый бюджет при onUnknown: continue выдачу не держит: b и c скрыты.
+    assert.deepEqual(
+      pack.budgets!.entries.map((e) => [e.scope, e.id ?? null, e.unknownCalls]),
+      [
+        ['total', null, 1],
+        ['group', 'g', 1],
+        ['work', 'a', 1],
+      ],
+    );
     assert.equal(pack.truncated.budgetsShared, 2, 'b и c: только вызов о группе');
     assert.equal(pack.truncated.budgetsWithin, 0);
     assert.match(
       handoffMarkdown(pack),
-      /весь расход которых — вызовы о их группе \(ревью плана\), не показаны: 2/,
+      /весь расход которых — вызовы о их группе \(ревью и проверка плана\), не показаны: 2/,
     );
-    // status по-прежнему показывает бюджет каждого поручения: ограничение действует.
+    // status по-прежнему показывает бюджет каждого поручения.
     const b = statusOf(h).budgets!.budgets.find(
       (x) => x.scope.kind === 'work' && x.scope.id === 'b',
     )!;
     assert.deepEqual([b.state, b.unknownCalls], ['undetermined', 1]);
+  } finally {
+    h.close();
+  }
+});
+
+test('handoff: строка бюджета поручения, которая держит выдачу, показана, даже если расход — вызов о группе', async () => {
+  // Неизвестная стоимость при onUnknown: stop — undetermined держит выдачу.
+  const unknown = await sharedSpend('stop', null);
+  try {
+    const pack = handoffPack(unknown);
+    assert.deepEqual(budgetRows(pack), [
+      ['total', null, 'undetermined'],
+      ['group', 'g', 'undetermined'],
+      ['work', 'a', 'undetermined'],
+      ['work', 'b', 'undetermined'],
+      ['work', 'c', 'undetermined'],
+    ]);
+    assert.equal(pack.truncated.budgetsShared, 0);
+  } finally {
+    unknown.close();
+  }
+  // Предел поручения $1 превышен ревью плана за $1.5 — при любом onUnknown.
+  const exceeded = await sharedSpend('continue', 1.5);
+  try {
+    const pack = handoffPack(exceeded);
+    assert.deepEqual(budgetRows(pack), [
+      ['total', null, 'within'],
+      ['group', 'g', 'within'],
+      ['work', 'a', 'exceeded'],
+      ['work', 'b', 'exceeded'],
+      ['work', 'c', 'exceeded'],
+    ]);
+    assert.equal(pack.truncated.budgetsShared, 0);
+  } finally {
+    exceeded.close();
+  }
+});
+
+test('handoff: упавшая отменой — решение, только пока её ждут; без ждущих не повтор', () => {
+  const ctx = hsetup({ scenario: {} });
+  const h = ctx.open();
+  try {
+    ready(h.engine, graphOf({ a: [], b: ['a'], c: [] }));
+    const run = h.engine.claim('c1')!;
+    assert.equal(run.workId, 'a');
+    h.engine.fail(run.id, run.token, 'отменено', { kind: 'cancelled' });
+    h.engine.release('c1');
+    const waiting = handoffPack(h);
+    assert.deepEqual(
+      [waiting.next.actor, waiting.next.action, waiting.next.workId],
+      ['lead', 'replan-dependents', 'a'],
+    );
+    h.engine.cancel('b', 'не нужно');
+    const quiet = handoffPack(h);
+    assert.ok(!quiet.stops.some((d) => d.code === 'CANCELLED'), JSON.stringify(quiet.stops));
+    const a = quiet.works.find((w) => w.id === 'a')!;
+    assert.deepEqual([a.status, a.next.actor, a.next.action], ['failed', null, 'none']);
+    assert.equal(quiet.next.workId, 'c');
   } finally {
     h.close();
   }

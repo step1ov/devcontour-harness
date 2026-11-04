@@ -164,10 +164,23 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
     for (const work of works) {
       if (work.status === 'done') continue;
       if (options.workId !== undefined && work.id !== options.workId) continue;
-      const openDependents = work.status === 'cancelled' ? openDependentsOf(work.id) : undefined;
+      // Отменённая (или упавшая отменой) — решение, только пока её ждут.
+      const openDependents =
+        work.status === 'cancelled' ||
+        (work.status === 'failed' && work.failureKind === 'cancelled')
+          ? openDependentsOf(work.id)
+          : undefined;
       // Отменённая без ждущих — не остановка доски: в общий explain и пакет
-      // не входит (как принятая); explain этой работы её показывает.
-      if (openDependents && !openDependents.length && options.workId === undefined) continue;
+      // не входит (как принятая); explain этой работы её показывает. Упавшая
+      // отменой остаётся открытой работой: её диагноз (действия нет) нужен
+      // строке поручения в пакете.
+      if (
+        work.status === 'cancelled' &&
+        openDependents &&
+        !openDependents.length &&
+        options.workId === undefined
+      )
+        continue;
       const attempts = v.attempts(work.id);
       const last = attempts.filter((a) => a.status !== 'active').at(-1);
       const kind = work.failureKind ?? 'unknown';

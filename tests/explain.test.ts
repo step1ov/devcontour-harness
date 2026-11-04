@@ -252,6 +252,16 @@ test('H1-03: таблица §1.2 для kind=work — ветки в указа�
       ['CANCELLED', 'cancelled', 'claim', 'lead', 'replan-dependents'],
     ],
     [
+      '9 failed/cancelled без незавершённых зависимых',
+      failed('cancelled', { work: { openDependents: [] } }),
+      ['CANCELLED', 'cancelled', 'claim', null, 'none'],
+    ],
+    [
+      '9 failed/cancelled, ждут незавершённые',
+      failed('cancelled', { work: { openDependents: ['b'] } }),
+      ['CANCELLED', 'cancelled', 'claim', 'lead', 'replan-dependents'],
+    ],
+    [
       '9 cancelled без незавершённых зависимых',
       work({ work: { status: 'cancelled', failureKind: 'cancelled', openDependents: [] } }),
       ['CANCELLED', 'cancelled', 'claim', null, 'none'],

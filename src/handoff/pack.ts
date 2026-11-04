@@ -9,7 +9,7 @@ import {
 import { HarnessError } from '../contracts/errors.ts';
 import type { AttemptState, WorkState, WorkStatus } from '../contracts/execution.ts';
 import { statusOf } from '../control/status.ts';
-import { ownWorkRecords } from '../engine/budget.ts';
+import { budgetBlocks, ownWorkRecords } from '../engine/budget.ts';
 import { callRecords } from '../engine/usage.ts';
 import { policySecrets, redactor } from '../environment/redaction.ts';
 import { stopInputsOf, type StopSource } from '../explain/state.ts';
@@ -192,12 +192,13 @@ function build(
 
   // Остановки и решения — диагнозы explain по сохранённому состоянию.
   const inGraph = (d: StopDiagnosis) => graphId === undefined || !d.workId || byId.has(d.workId);
-  const raw = stopInputsOf(h, { maxAttempts, repairBudget })
-    .map(explainStop)
-    .filter((d) => d.action !== 'none' && inGraph(d));
-  // Диагноз поручения: explain знает, продолжит ли движок работу сам.
+  const all = stopInputsOf(h, { maxAttempts, repairBudget }).map(explainStop).filter(inGraph);
+  const raw = all.filter((d) => d.action !== 'none');
+  // Диагноз поручения: explain знает, продолжит ли движок работу сам. Диагноз
+  // без действия (упавшая отменой без ждущих) тоже: иначе строка поручения
+  // взяла бы повтор из nextAction, а отмена не повторяется.
   const diagnosisOf = new Map<string, StopDiagnosis>();
-  for (const d of raw) if (d.workId && !diagnosisOf.has(d.workId)) diagnosisOf.set(d.workId, d);
+  for (const d of all) if (d.workId && !diagnosisOf.has(d.workId)) diagnosisOf.set(d.workId, d);
   const stopOf = (d: StopDiagnosis): Stop => ({
     code: d.code,
     cause: d.cause,
@@ -416,8 +417,12 @@ function build(
       b.reportedUsd + b.estimatedUsd > 0 ||
       b.unknownCalls + b.unfinishedCalls + b.abandonedCalls > 0,
   );
+  // Строка, которая держит выдачу поручения, остаётся: это его ограничение.
   const sharedOnly = (b: (typeof relevant)[number]) =>
-    b.scope.kind === 'work' && b.uncoveredRuns === 0 && !read.ownSpend.has(b.scope.id!);
+    b.scope.kind === 'work' &&
+    b.uncoveredRuns === 0 &&
+    !read.ownSpend.has(b.scope.id!) &&
+    !budgetBlocks(b.state, status.budgets?.onUnknown);
   const shown = listed
     .filter((b) => !sharedOnly(b))
     .map((b, i) => ({ b, i }))

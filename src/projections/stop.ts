@@ -269,6 +269,35 @@ function retryPlannedOf(input: Extract<StopInput, { kind: 'work' }>) {
   );
 }
 
+/**
+ * Отмена — решение ведущего (перепланировать ждущих), только пока от работы
+ * прямо зависит незавершённая; без таких — действия нет. Состав не известен
+ * (`undefined`) — прежнее replan-dependents.
+ */
+function cancelledOutcome(dependents: string[] | undefined, phase: StopPhase): Outcome {
+  if (dependents && !dependents.length)
+    return {
+      code: 'CANCELLED',
+      cause: 'cancelled',
+      phase,
+      actor: null,
+      action: 'none',
+      note: 'Незавершённых зависимых работ нет: перепланировать нечего.',
+    };
+  return {
+    code: 'CANCELLED',
+    cause: 'cancelled',
+    phase,
+    actor: 'lead',
+    action: 'replan-dependents',
+    ...(dependents
+      ? {
+          note: `Ждут отменённую: ${dependents.slice(0, 5).join(', ')}${dependents.length > 5 ? ` и ещё ${dependents.length - 5}` : ''}.`,
+        }
+      : {}),
+  };
+}
+
 function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean): Outcome {
   const { work, control, maxAttempts } = input;
   const kind: FailureKind = work.failureKind ?? 'unknown';
@@ -440,13 +469,7 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
         };
       case 'cancelled':
         // Поручение со статусом failed и классом cancelled: отмена не повторяется.
-        return {
-          code: stopCodeOf(kind),
-          cause: kind,
-          phase,
-          actor: 'lead',
-          action: 'replan-dependents',
-        };
+        return cancelledOutcome(work.openDependents, phase);
       default:
         return {
           code: stopCodeOf(kind),
@@ -466,30 +489,7 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       action: 'diagnose-failure',
       note: `Ждёт ${work.waitingOn.join(', ')}: на них движок остановится; следующий шаг — по их диагнозу.`,
     };
-  if (work.status === 'cancelled') {
-    const dependents = work.openDependents;
-    if (dependents && !dependents.length)
-      return {
-        code: 'CANCELLED',
-        cause: 'cancelled',
-        phase: 'claim',
-        actor: null,
-        action: 'none',
-        note: 'Незавершённых зависимых работ нет: перепланировать нечего.',
-      };
-    return {
-      code: 'CANCELLED',
-      cause: 'cancelled',
-      phase: 'claim',
-      actor: 'lead',
-      action: 'replan-dependents',
-      ...(dependents
-        ? {
-            note: `Ждут отменённую: ${dependents.slice(0, 5).join(', ')}${dependents.length > 5 ? ` и ещё ${dependents.length - 5}` : ''}.`,
-          }
-        : {}),
-    };
-  }
+  if (work.status === 'cancelled') return cancelledOutcome(work.openDependents, 'claim');
   if (work.status === 'draft')
     return {
       code: 'APPROVAL_REQUIRED',

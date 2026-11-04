@@ -176,7 +176,7 @@ export function handoffMarkdown(pack: HandoffPack): string {
       );
     if (pack.truncated.budgetsShared)
       out.push(
-        `Бюджеты поручений, весь расход которых — вызовы о их группе (ревью плана), не показаны: ${pack.truncated.budgetsShared}; этот расход учтён один раз — в строках группы и total.`,
+        `Бюджеты поручений, весь расход которых — вызовы о их группе (ревью и проверка плана), не показаны: ${pack.truncated.budgetsShared}; этот расход учтён один раз — в строках группы и total.`,
       );
   }
   if (pack.repairs.length) {

@@ -342,10 +342,15 @@ export function callAttribution(
 
 /** Бюджет, который запрещает тратить: превышен или не определён при `onUnknown: stop`. */
 export function blockingBudget(c: BudgetContext, statuses: BudgetStatus[]) {
-  const stopOnUnknown = (c.policy.budgets?.onUnknown ?? 'stop') === 'stop';
-  return statuses.find(
-    (b) => b.state === 'exceeded' || (b.state === 'undetermined' && stopOnUnknown),
-  );
+  return statuses.find((b) => budgetBlocks(b.state, c.policy.budgets?.onUnknown));
+}
+
+/** Запрещает ли тратить бюджет в этом состоянии: превышен или не определён при `onUnknown: stop`. */
+export function budgetBlocks(
+  state: BudgetStatus['state'],
+  onUnknown: 'stop' | 'continue' | undefined,
+) {
+  return state === 'exceeded' || (state === 'undetermined' && (onUnknown ?? 'stop') === 'stop');
 }
 
 /** Отказ до траты: превышенный или неопределённый бюджет не даёт начать вызов. */
