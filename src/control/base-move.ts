@@ -3,6 +3,7 @@ import { mkdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
 import {
+  HarnessError,
   baseMoveActors,
   type BaseMoveActor,
   type ExecutionPolicy,
@@ -40,7 +41,13 @@ export function fencedRefMove(
   by: BaseMoveActor = 'host',
 ): RefMove {
   // Актёр проверяется до любого сдвига: недопустимое значение — отказ без git update-ref.
-  const actor = z.enum(baseMoveActors).parse(by);
+  const parsed = z.enum(baseMoveActors).safeParse(by);
+  if (!parsed.success)
+    throw new HarnessError(
+      'INVALID_INPUT',
+      `Недопустимый актёр сдвига базы: ${String(by).slice(0, 60)}`,
+    );
+  const actor = parsed.data;
   return (repoPath, target, to, from) =>
     store.transact('base.moved', (tx) => {
       fence(tx);

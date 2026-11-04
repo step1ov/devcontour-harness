@@ -642,15 +642,30 @@ export function valueReport(
   // (`work.held`, его ставит и человек, и операция хоста) — поручение с ними
   // «без действий человека» не считается, а неизвестно.
   const unattributed = new Set<string>();
+  // Порядок — по `seq` журнала, а не по времени: `at` события — часы записи,
+  // а время попытки — часы движка (их задаёт хост), сравнивать их нельзя.
   const reopenedAt = new Map<string, number[]>();
   const registeredAt = new Map<string, number[]>();
+  const endSeq = new Map<string, number>();
+  const startSeq = new Map<string, number>();
   const push = (m: Map<string, number[]>, key: string, ms: number) =>
     m.set(key, [...(m.get(key) ?? []), ms]);
   for (const e of events) {
-    if (e.type === 'graph.registered' && e.graphId) push(registeredAt, e.graphId, at(e.at));
+    if (e.type === 'graph.registered' && e.graphId) push(registeredAt, e.graphId, e.seq);
+    if (e.runId && e.type === 'attempt.claimed') startSeq.set(e.runId, e.seq);
+    if (
+      e.runId &&
+      (e.type === 'attempt.failed' ||
+        e.type === 'attempt.cancelled' ||
+        e.type === 'attempt.expired' ||
+        // Записывающая версия пишет их сразу за концом попытки: конец — с ними.
+        e.type === 'attempt.diagnosed' ||
+        e.type === 'work.cancelled')
+    )
+      endSeq.set(e.runId, Math.max(endSeq.get(e.runId) ?? 0, e.seq));
     if (!e.workId) continue;
     if (e.type === 'work.held') unattributed.add(e.workId);
-    if (e.type === 'work.retried') push(reopenedAt, e.workId, at(e.at));
+    if (e.type === 'work.retried') push(reopenedAt, e.workId, e.seq);
     if (e.type !== 'work.retried' && e.type !== 'work.cancelled') continue;
     if (e.payload.by === 'operator') actedOn.add(e.workId);
     else if (e.payload.by === 'host') unattributed.add(e.workId);
@@ -658,7 +673,9 @@ export function valueReport(
   // Пробел записи (откат на версию без этих событий и повторное обновление):
   // после начала записи новая попытка поручения после отказа или отмены
   // невозможна без повтора — нет ни `work.retried`, ни новой редакции графа
-  // между ними, значит, повтор шёл версией, которая его не записывает.
+  // между концом прежней попытки и выдачей новой (по `seq`), значит, повтор
+  // шёл версией, которая его не записывает. Без этих событий попытки (журнал
+  // неполон) пробел не определяется.
   const gapWorks = new Set<string>();
   const gapInWindow = new Set<string>();
   if (recordedFrom !== undefined)
@@ -667,10 +684,10 @@ export function valueReport(
         const prev = f.attempts[i - 1]!;
         const cur = f.attempts[i]!;
         if (!finishedStatuses.has(prev.status) || prev.interrupted === 'shutdown') continue;
-        if (!prev.finishedAt || at(prev.finishedAt) < recordedFrom) continue;
-        const from = at(prev.finishedAt);
-        const to = at(cur.startedAt);
-        const between = (ms: number) => ms >= from && ms <= to;
+        const from = endSeq.get(prev.id);
+        const to = startSeq.get(cur.id);
+        if (from === undefined || to === undefined || from < firstRecorded!.seq) continue;
+        const between = (seq: number) => seq > from && seq < to;
         if (
           (reopenedAt.get(f.work.id) ?? []).some(between) ||
           (registeredAt.get(f.work.graphId) ?? []).some(between)
@@ -1487,7 +1504,7 @@ function summaryOf(r: ValueReport, failedAttempts: number): ValueReport['summary
           fp.bound === 'lower'
             ? `${plural(n, 'task')} accepted. At least ${fp.value} of them${pct(fp.value ?? 0, n)} on the first try; for ${plural(fp.unknown, 'more task')} it is unknown (failures without a class).`
             : `${plural(n, 'task')} accepted. ${fp.value} of them${pct(fp.value ?? 0, n)} on the first try.`,
-        basis: `Accepted: merged after all required checks and an independent review. First try: the accepting attempt was the only counted attempt (environment failures and shutdowns are not counted). Window: ${window}.`,
+        basis: `Accepted: merged after all required checks and an independent review. First try: the accepting attempt was the only counted attempt (environment failures except stalls, blocked-before-work attempts, expired leases and shutdowns are not counted). Window: ${window}.`,
         measure: fp,
       },
       {

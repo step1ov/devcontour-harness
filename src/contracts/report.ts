@@ -446,6 +446,11 @@ export const valueReportSchema = z.strictObject({
         bound: z.enum(['exact', 'lower']),
       })
       .nullable(),
+    /**
+     * Цена отказов окружения: попытки корзины `environment` — и зависания
+     * (`stalled`), хотя они засчитаны в предел попыток; `blocked` — из них
+     * отказы до работы.
+     */
     neutral: z.strictObject({
       costBound: z.enum(reportBounds),
       attempts: count,

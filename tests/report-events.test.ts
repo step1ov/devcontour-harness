@@ -16,6 +16,7 @@ import {
   type ValueReportOptions,
 } from '../src/report/index.ts';
 import { STATE_DIR, reportFixture, shuffled, t } from './report-fixture.ts';
+import { engineOf, graphOf, policyOf, ready } from './engine-fixture.ts';
 
 const options: ValueReportOptions = {
   stateDir: STATE_DIR,
@@ -208,6 +209,38 @@ test('report events: смешанная история — до первой з�
   assert.equal(early.autonomy.withoutAction.value, 0);
 });
 
+/** Конец первой и выдача второй попытки `env`: порядок попыток в журнале. */
+const envAttemptEvents = (): [string, Record<string, unknown>][] => [
+  [
+    t(23, 10, 2),
+    {
+      type: 'attempt.failed',
+      graphId: 'demo',
+      workId: 'env',
+      runId: 'run-env-1',
+      attempt: 1,
+      payload: { failureKind: 'environment', message: 'x', blocked: true },
+    },
+  ],
+  [
+    t(23, 11),
+    {
+      type: 'attempt.claimed',
+      graphId: 'demo',
+      workId: 'env',
+      runId: 'run-env-2',
+      attempt: 2,
+      payload: {
+        owner: 'c1',
+        runtime: 'claude',
+        reviewer: 'codex',
+        policyDigest: 'b'.repeat(64),
+        engineVersion: '0.0.0-test',
+      },
+    },
+  ],
+];
+
 test('report events: пробел записи — новая попытка без записанного повтора; новая редакция графа его объясняет', () => {
   // Запись идёт с t(9, 0), но повтор `env` (между t(23,10,2) и t(23,11)) не
   // записан: между ними работала версия без событий (откат и повторное обновление).
@@ -216,6 +249,7 @@ test('report events: пробел записи — новая попытка б�
       [t(9, 0), { type: 'base.moved', payload: { by: 'operator' } }],
       [t(21, 8), retried('review', 'recovery')],
       [t(25), retried('broken', 'recovery')],
+      ...envAttemptEvents(),
     ],
     ['work.held'],
   );
@@ -230,6 +264,7 @@ test('report events: пробел записи — новая попытка б�
       [t(9, 0), { type: 'base.moved', payload: { by: 'operator' } }],
       [t(21, 8), retried('review', 'recovery')],
       [t(25), retried('broken', 'recovery')],
+      ...envAttemptEvents(),
       [
         t(23, 10, 30),
         {
@@ -290,4 +325,35 @@ test('report events: подпричины — отказ окружения бе
     reportMarkdown(r),
     /Environment sub-causes \(1 earlier failure without a recorded sub-cause\): none in the window\./,
   );
+});
+
+test('report events: пробел записи — по порядку журнала, а не по часам: часы движка смещены', () => {
+  // Часы движка (2026-01-01) на месяцы позади часов записи событий: сравнение
+  // времени попытки с временем события не годится, порядок seq — годится.
+  const run = (gap: boolean) => {
+    const { engine, store } = engineOf(
+      policyOf((p) => ((p as { maxAttempts: number }).maxAttempts = 5)),
+    );
+    ready(engine, graphOf({ a: [] }));
+    const first = engine.claim('c1')!;
+    engine.fail(first.id, first.token, 'unit failed', { kind: 'gate' });
+    if (gap)
+      // Повтор прежней версией (после отката): состояние без события.
+      store.transact('task.retry', (tx) => {
+        const w = tx.work('a')!;
+        tx.putWork({ ...w, status: 'ready', failure: undefined, failureKind: undefined });
+      });
+    else engine.retry('a', undefined, 'recovery');
+    engine.claim('c1')!;
+    const input: ValueReportInput = engine.read((v) => ({
+      works: v.works('g'),
+      attempts: v.attempts('a'),
+      events: store.events(0, 1000),
+    }));
+    return report(input);
+  };
+  assert.equal(run(false).autonomy.actions.recorded!.gaps, 0);
+  const gap = run(true).autonomy.actions.recorded!;
+  assert.equal(gap.gaps, 1);
+  assert.equal(gap.bound, 'lower');
 });
