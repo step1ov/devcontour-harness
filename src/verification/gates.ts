@@ -7,6 +7,7 @@ import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import {
   sha256,
   type Activity,
+  type EnvironmentCause,
   type EvidenceRecord,
   type ExecutionPolicy,
   type GatePolicy,
@@ -751,6 +752,8 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   // Восстановленный из cache зелёный отчёт иначе выглядел бы свежим.
   const freshness = freshnessEnv(gate.kind, run.execution.env);
   let kind: FailureKind = 'gate';
+  /** Причина отказа окружения (`attempt.diagnosed`), когда она известна здесь. */
+  let cause: EnvironmentCause | undefined;
   // Заголовок лога — фактические каталог и argv запуска: digest лога входит в
   // evidence, и запись называет, где и чем проверка исполнялась.
   let passed = false,
@@ -823,6 +826,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     // in PATH» остаётся только причиной. Прочие отказы — провал проверки.
     if (result.launchFailed) {
       kind = 'environment';
+      cause = 'sandbox-launch';
       throw new Error(
         `песочница ОС не запустила команду проверки (попыток: ${result.attempts}): проверка не исполнялась. ` +
           `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
@@ -845,6 +849,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
           : [];
       if (blocked.length) {
         kind = 'environment';
+        cause = 'sandbox-network';
         throw new Error(
           `песочница проверки закрыла сеть к ${blocked.join(', ')}: этих доменов нет в isolation.domains. ` +
             `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
@@ -863,6 +868,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
           : [];
       if (denied.length) {
         kind = 'environment';
+        cause = 'sandbox-filesystem';
         throw new Error(
           `песочница проверки отказала в доступе: ` +
             denied
@@ -888,6 +894,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       });
       if (network) {
         kind = 'environment';
+        cause = 'dependency-network';
         throw new Error(
           dependencyNetworkMessage(
             redact(network),
@@ -921,7 +928,10 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   } catch (error) {
     // Сборка политики не удалась — отказ среды; checkout, который увёл бы
     // git хоста в чужую конфигурацию, — нарушение области.
-    if (error instanceof SandboxPolicyError) kind = 'environment';
+    if (error instanceof SandboxPolicyError) {
+      kind = 'environment';
+      cause = 'sandbox-policy';
+    }
     if (error instanceof UntrustedCheckoutError) kind = 'scope-violation';
     const message = error instanceof Error ? error.message : String(error);
     summary = redact(message);
@@ -1080,6 +1090,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
             unbound: [...new Set(failing.filter((id) => !declared.has(id)))],
           }
         : undefined,
+      kind === 'environment' ? cause : undefined,
     );
   }
   return evidence;

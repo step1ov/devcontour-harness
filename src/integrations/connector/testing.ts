@@ -2020,7 +2020,11 @@ export function connectorSuite(backend: SuiteBackend, options: SuiteOptions = {}
           ...(variant === 'cancel'
             ? {
                 onWriter: (request: RuntimeRequest) =>
-                  void opened!.h.engine.cancel(request.subject!.workId, 'отмена человеком'),
+                  void opened!.h.engine.cancel(
+                    request.subject!.workId,
+                    'отмена человеком',
+                    'operator',
+                  ),
               }
             : {}),
         });

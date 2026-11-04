@@ -564,8 +564,12 @@ async function run(
           };
         const result =
           command === 'cancel'
-            ? h.engine.cancel(need('work'), v.reason)
-            : h.engine.retry(need('work'), v.reset ? { reason: need('reason') } : undefined);
+            ? h.engine.cancel(need('work'), v.reason, 'operator')
+            : h.engine.retry(
+                need('work'),
+                v.reset ? { reason: need('reason') } : undefined,
+                'operator',
+              );
         return {
           command,
           data: {

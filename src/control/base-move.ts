@@ -1,7 +1,12 @@
 import { execFileSync } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import type { ExecutionPolicy, ExecutionStore, ExecutionView } from '../contracts/index.ts';
+import type {
+  BaseMoveActor,
+  ExecutionPolicy,
+  ExecutionStore,
+  ExecutionView,
+} from '../contracts/index.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
 import { checkoutPath, chooseCheckoutRoot } from '../environment/checkout-root.ts';
 import { credentialPaths } from '../environment/isolation.ts';
@@ -21,10 +26,16 @@ export type RefMove = (
  * исполняется чужой код: hook `reference-transaction`, ждущий ту же базу,
  * ждал бы её, а она — его; срок Git ограничен, зависший Git не держит базу.
  */
+/**
+ * Сдвиг записывается событием `base.moved` в той же транзакции: отказ
+ * проверки или Git отменяет и событие. `by` — кто сдвигает: controller
+ * (перемотка очереди) или оператор; хост, не назвавший актёра, — `host`.
+ */
 export function fencedRefMove(
   store: ExecutionStore,
   fence: (view: ExecutionView) => void,
   timeoutMs = fencedRefMove.timeoutMs,
+  by: BaseMoveActor = 'host',
 ): RefMove {
   return (repoPath, target, to, from) =>
     store.transact('base.moved', (tx) => {
@@ -34,6 +45,7 @@ export function fencedRefMove(
         timeout: timeoutMs,
         stdio: 'pipe',
       });
+      tx.emit({ type: 'base.moved', payload: { by } });
     });
 }
 /** Предел git update-ref внутри транзакции; конечный и короче lease. */

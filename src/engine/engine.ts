@@ -17,6 +17,9 @@ import {
   workGraphDigest,
   type AttemptState,
   type RunEventPayload,
+  type CancelActor,
+  type EnvironmentCause,
+  type RetryActor,
   type ControllerLease,
   type Author,
   type CallRecord,
@@ -136,6 +139,20 @@ const contentDigest = (order: WorkState['order']) =>
  */
 const uncounted = (kind: FailureKind, blocked: boolean) =>
   blocked || kind === 'environment' || kind === 'provider-auth';
+
+/**
+ * Причина отказа для `attempt.diagnosed`: отказ не окружения — `none`;
+ * окружения — названная в точке обнаружения или по классу отказа.
+ */
+const causeOf = (kind: FailureKind, cause: EnvironmentCause | undefined): EnvironmentCause => {
+  if (kind === 'stalled') return 'stalled';
+  if (kind === 'provider-auth')
+    return cause === 'provider-limit' ? 'provider-limit' : 'provider-auth';
+  if (kind !== 'environment') return 'none';
+  return cause && cause !== 'none' && cause !== 'provider-auth' && cause !== 'provider-limit'
+    ? cause
+    : 'other';
+};
 
 /** Поручение исчерпало предел незасчитанных отказов: повтор — только со сбросом. */
 export const neutralExhausted = (w: Pick<WorkState, 'neutralFailures'>) =>
@@ -337,8 +354,16 @@ export class Engine {
         });
       }
       for (const prior of existing ? tx.works(graph.id) : [])
-        if (!graph.orders.some((o) => o.id === prior.id) && prior.status !== 'done')
+        if (!graph.orders.some((o) => o.id === prior.id) && prior.status !== 'done') {
           tx.putWork({ ...prior, status: 'cancelled', activeRunId: undefined });
+          if (prior.status !== 'cancelled')
+            tx.emit({
+              type: 'work.cancelled',
+              graphId: graph.id,
+              workId: prior.id,
+              payload: { by: 'graph', hadAttempt: Boolean(prior.activeRunId) },
+            });
+        }
       tx.putLocal('run-keys', WORKSPACE_OWNER, key, { graphId: graph.id, digest, at });
       tx.emit({
         type: 'graph.registered',
@@ -1761,6 +1786,12 @@ export class Engine {
        * ждёт восстановления. Интегрированная попытка так не возвращается.
        */
       interrupted?: boolean;
+      /**
+       * Причина отказа окружения, известная в точке обнаружения
+       * (`attempt.diagnosed`). Для отказа не окружения — всегда `none`;
+       * без неё — по классу отказа.
+       */
+      cause?: EnvironmentCause;
     } = {},
   ) {
     const kind = options.kind ?? 'unknown';
@@ -1847,6 +1878,18 @@ export class Engine {
         runId: id,
         attempt: a.attempt,
         payload: { failureKind: kind, message: shown.slice(0, 4000), blocked },
+      });
+      tx.emit({
+        type: 'attempt.diagnosed',
+        graphId: w.graphId,
+        workId: w.id,
+        runId: id,
+        attempt: a.attempt,
+        payload: {
+          failureKind: kind,
+          cause: interrupted ? 'shutdown' : causeOf(kind, options.cause),
+          counted: !interrupted && !uncounted(kind, blocked),
+        },
       });
       // Остановка — не неисправность окружения: её пауза уже стоит.
       if (repairPolicy[kind].blocksQueue && !interrupted) {
@@ -2815,6 +2858,14 @@ export class Engine {
             attempt: a.attempt,
             payload: { leaseUntil: a.leaseUntil },
           });
+          tx.emit({
+            type: 'attempt.diagnosed',
+            graphId: w.graphId,
+            workId: a.workId,
+            runId: a.id,
+            attempt: a.attempt,
+            payload: { failureKind: 'environment', cause: 'lease-expired', counted: false },
+          });
           ids.push(a.id);
         }
       return ids;
@@ -2864,7 +2915,11 @@ export class Engine {
   }
 
   /** Отмена: активная попытка теряет владение, поручение — cancelled. Принятое не отменяется. */
-  cancel(workId: string, reason = 'отменено оператором') {
+  /**
+   * `by` — кто отменил (`work.cancelled`); хост, не назвавший актёра, — `host`.
+   * CLI передаёт `operator`.
+   */
+  cancel(workId: string, reason = 'отменено оператором', by: CancelActor = 'host') {
     return this.tx('task.cancelled', (tx) => {
       const w = tx.work(workId);
       if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
@@ -2894,6 +2949,13 @@ export class Engine {
         failureKind: 'cancelled',
       };
       tx.putWork(next);
+      tx.emit({
+        type: 'work.cancelled',
+        graphId: w.graphId,
+        workId,
+        ...(a ? { runId: a.id, attempt: a.attempt } : {}),
+        payload: { by, hadAttempt: Boolean(a) },
+      });
       return { work: next, changed: true };
     });
   }
@@ -2901,9 +2963,11 @@ export class Engine {
   /**
    * Повтор неуспешного или отменённого поручения. Пока попытки не
    * исчерпаны — без сброса; исчерпаны — только явный сброс с причиной.
-   * Класс и отпечаток прошлого отказа снимаются.
+   * Класс и отпечаток прошлого отказа снимаются. `by` — кто повторил
+   * (`work.retried`): CLI — `operator`, восстановление очереди — `recovery`,
+   * хост, не назвавший актёра, — `host`.
    */
-  retry(workId: string, reset?: { reason: string }) {
+  retry(workId: string, reset?: { reason: string }, by: RetryActor = 'host') {
     return this.tx('task.retry', (tx) => {
       const w = tx.work(workId);
       if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
@@ -2926,6 +2990,16 @@ export class Engine {
         failureFingerprint: undefined,
       };
       tx.putWork(next);
+      tx.emit({
+        type: 'work.retried',
+        graphId: w.graphId,
+        workId,
+        payload: {
+          by,
+          reset: exhausted,
+          ...(exhausted ? { spent: w.attempt, reasonLength: reset!.reason.trim().length } : {}),
+        },
+      });
       return { work: next, changed: true };
     });
   }

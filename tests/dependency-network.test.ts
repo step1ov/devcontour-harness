@@ -600,11 +600,14 @@ test('runGate: настоящий 403 при входах базы — environme
   const pm = fakeManager('pnpm', network['pnpm 403']![1]);
   const failure = await gateFailure(r.dir, [pm.path, 'install', '--frozen-lockfile'], r.base);
   assert.equal(failure.kind, 'environment');
+  assert.equal(failure.diagnosis, 'dependency-network', 'причина — в точке обнаружения');
   assert.match(failure.message, /^candidate\/install: dependency-network: /);
   assert.match(failure.message, /ERR_PNPM_FETCH_403/);
   assert.equal(classifyFailure(failure, failure.message), 'environment');
   // Без закреплённой базы классификации нет.
-  assert.equal((await gateFailure(r.dir, [pm.path, 'install'])).kind, 'gate');
+  const plain = await gateFailure(r.dir, [pm.path, 'install']);
+  assert.equal(plain.kind, 'gate');
+  assert.equal(plain.diagnosis, undefined, 'у отказа gate причины окружения нет');
 });
 
 test('runGate: отказ, вызванный кандидатом, и подделки A1–A3 — gate', async () => {
@@ -747,6 +750,22 @@ test('Run: обрыв реестра не тратит попытку, держ�
   assert.equal(ctx.calls('claude', 'writer'), 1, 'writer вызван один раз');
   assert.equal(work.neutralFailures, 2);
   assert.equal(pm.runs(), 2);
+  // Причина записана событием в транзакции отказа, повтор — восстановлением.
+  const diagnosed = h.store
+    .events(0, 500)
+    .filter((e) => e.type === 'attempt.diagnosed')
+    .map((e) => (e.type === 'attempt.diagnosed' ? e.payload : null));
+  assert.deepEqual(diagnosed, [
+    { failureKind: 'environment', cause: 'dependency-network', counted: false },
+    { failureKind: 'environment', cause: 'dependency-network', counted: false },
+  ]);
+  assert.deepEqual(
+    h.store
+      .events(0, 500)
+      .filter((e) => e.type === 'work.retried')
+      .map((e) => (e.type === 'work.retried' ? e.payload : null)),
+    [{ by: 'recovery', reset: false }],
+  );
   // Выдача держалась так же, как при любом отказе окружения: пауза runtime и
   // повтор восстановлением класса environment.
   const log = h.store.events(0, 500);

@@ -123,6 +123,7 @@ test(
         'os',
       );
       assert.equal(failure?.kind, 'environment', evidence.summary);
+      assert.equal(failure.diagnosis, 'sandbox-filesystem');
       assert.match(
         failure.message,
         /песочница проверки отказала в доступе: \.idea — обязательный запрет записи/,

@@ -20,6 +20,39 @@ const sha = gitShaSchema;
 const text = z.string().max(4000);
 const runtime = runtimeNameSchema;
 const phase = z.enum(['candidate', 'integration']);
+/**
+ * Причина отказа окружения (`attempt.diagnosed`): ставится в точке
+ * обнаружения (песочница gate, сеть установки зависимостей, провайдер,
+ * транспорт), а не разбором текста потом. `none` — отказ не окружения
+ * (код, ревью, область); `other` — отказ окружения без известной причины.
+ */
+export const environmentCauses = [
+  'sandbox-launch',
+  'sandbox-network',
+  'sandbox-filesystem',
+  'sandbox-policy',
+  'dependency-network',
+  'provider-auth',
+  'provider-limit',
+  'transport',
+  'preflight',
+  'lease-expired',
+  'stalled',
+  'shutdown',
+  'other',
+  'none',
+] as const;
+export const environmentCauseSchema = z.enum(environmentCauses);
+export type EnvironmentCause = (typeof environmentCauses)[number];
+/** Кто повторил поручение (`work.retried`): `host` — хост не назвал актёра. */
+export const retryActors = ['operator', 'recovery', 'host'] as const;
+export type RetryActor = (typeof retryActors)[number];
+/** Кто отменил поручение (`work.cancelled`): `graph` — новая редакция графа его убрала. */
+export const cancelActors = ['operator', 'host', 'graph'] as const;
+export type CancelActor = (typeof cancelActors)[number];
+/** Кто сдвинул ref базы (`base.moved`): `host` — хост не назвал актёра. */
+export const baseMoveActors = ['operator', 'controller', 'host'] as const;
+export type BaseMoveActor = (typeof baseMoveActors)[number];
 /** Предел имени стадии в событии `attempt.stage`. */
 export const STAGE_NAME_LIMIT = 300;
 const delivery = {
@@ -146,6 +179,16 @@ export const eventPayloads = {
     message: text,
     blocked: z.boolean(),
   }),
+  /**
+   * Причина отказа попытки: пишется в той же транзакции, что `attempt.failed`
+   * (и `attempt.expired`, причина `lease-expired`). `counted` — отказ
+   * засчитан в предел попыток поручения. Текста отказа здесь нет.
+   */
+  'attempt.diagnosed': z.strictObject({
+    failureKind: failureKindSchema,
+    cause: environmentCauseSchema,
+    counted: z.boolean(),
+  }),
   'attempt.expired': z.strictObject({ leaseUntil: z.number().int().min(0) }),
   'attempt.cancelled': z.strictObject({ reason: text }),
   'attempt.recovered': z.strictObject({
@@ -154,6 +197,23 @@ export const eventPayloads = {
     reason: text.optional(),
   }),
   'work.accepted': z.strictObject({ resultSha: sha, integrationSha: sha }),
+  /**
+   * Поручение возвращено в очередь повтором (`engine.retry`). `reset` —
+   * сброс исчерпанного предела; `spent` — засчитанных попыток до сброса
+   * (сброс обнуляет счётчик). Причины сброса нет: только её длина.
+   */
+  'work.retried': z.strictObject({
+    by: z.enum(retryActors),
+    reset: z.boolean(),
+    spent: z.number().int().min(0).optional(),
+    reasonLength: z.number().int().min(0).optional(),
+  }),
+  /**
+   * Поручение отменено (`engine.cancel` или новая редакция графа).
+   * `hadAttempt` — отменена и активная попытка (её `attempt.cancelled` — в
+   * той же транзакции).
+   */
+  'work.cancelled': z.strictObject({ by: z.enum(cancelActors), hadAttempt: z.boolean() }),
   'work.blocked': z.strictObject({ code: z.string().min(1).max(60), message: text }),
   'control.paused': z.strictObject({
     reason: z.enum(['operator', 'shutdown', 'runtime', 'base-check', 'reconfigure']),
@@ -163,6 +223,11 @@ export const eventPayloads = {
     reason: z.enum(['operator', 'shutdown', 'runtime', 'base-check', 'reconfigure']),
   }),
   'controller.acquired': z.strictObject({ owner: z.string().min(1).max(300) }),
+  /**
+   * Ref базы сдвинут (`fencedRefMove`) — в той же транзакции, что проверка
+   * владения и `git update-ref`. Одно событие на репозиторий.
+   */
+  'base.moved': z.strictObject({ by: z.enum(baseMoveActors) }),
   'controller.released': z.strictObject({ owner: z.string().min(1).max(300) }),
   'budget.blocked': z.strictObject({
     scope: z.enum(['work', 'group', 'total']),
@@ -376,8 +441,8 @@ export const transactionKinds = [
   'workspace.failed',
   'workspace.liveness',
   /**
-   * Сдвиг ref базы операцией внутри транзакции проверки её владения: только
-   * проверка и синхронный `git update-ref`, записей и событий нет.
+   * Сдвиг ref базы внутри транзакции проверки владения: проверка, синхронный
+   * `git update-ref` и событие `base.moved`; записей нет.
    */
   'base.moved',
   /** Только локальные записи технической очереди (`workflow-jobs`); событий журнала нет. */

@@ -727,7 +727,7 @@ export class Harness {
     if (!r) return false;
     if (r.status === 'retry' && ['failed', 'cancelled'].includes(work.status)) {
       if (work.status === 'cancelled') throw new Error(`${workId}: поручение отменено человеком`);
-      this.engine.retry(workId);
+      this.engine.retry(workId, undefined, 'recovery');
       return true;
     }
     if (r.status === 'retry' || r.status === 'retrying') return true;
@@ -747,7 +747,7 @@ export class Harness {
       });
       if (!decided || decided.action === 'stop') return decided;
       this.workflows.repair(job, `repair:${decided.kind}`, () => {
-        this.engine.retry(decided.workId);
+        this.engine.retry(decided.workId, undefined, 'recovery');
         // Повтор признал причину разовой: своя причина паузы снимается. Выдача
         // возвращается, только когда не осталось ни одной; пауза человека
         // не снимается вовсе.

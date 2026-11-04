@@ -130,7 +130,7 @@ import {
 import { CleanupFailure, cleanupEnvironment } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { REQUIREMENT_GATE, assertRequirements } from '../verification/requirements.ts';
-import { BlockedError, classifyFailure } from './classify.ts';
+import { BlockedError, classifyFailure, environmentCauseOf } from './classify.ts';
 import { TaskFailure, type FailureKind } from './failure.ts';
 import { activeOf, namesFailingCases, type Engine } from './engine.ts';
 import { prompt } from './prompt.ts';
@@ -1571,6 +1571,7 @@ export class Runner {
             ? { properties: error.properties }
             : {}),
           kind,
+          cause: environmentCauseOf(stalled ? undefined : error, message, kind),
           blocked:
             (error instanceof BlockedError || kind === 'provider-auth') && !attempt.candidateSha,
           ...(heartbeatCause ? { heartbeatCause } : {}),

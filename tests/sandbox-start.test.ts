@@ -274,6 +274,7 @@ test(
     const never = await gate(loaded(99, noShell()).env, 0);
     assert.equal(never.evidence.passed, false, 'не запущенная проверка не проходит');
     assert.equal(never.failure?.kind, 'environment');
+    assert.equal(never.failure?.diagnosis, 'sandbox-launch');
     assert.match(
       never.evidence.summary,
       /^песочница ОС не запустила команду проверки \(попыток: 3\): проверка не исполнялась/,
@@ -283,6 +284,7 @@ test(
     const failed = await gate(loaded(1, noShell()).env, 3);
     assert.equal(failed.evidence.passed, false);
     assert.equal(failed.failure?.kind, 'gate');
+    assert.equal(failed.failure?.diagnosis, undefined);
     assert.match(failed.evidence.summary, /^Код выхода 3/);
     const ok = await gate(loaded(1, noShell()).env, 0);
     assert.equal(ok.evidence.passed, true, ok.evidence.summary);

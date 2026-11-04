@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto';
 // отказа, записывается вместе с попыткой и дальше используется как есть.
 
 import type { FailureKind } from './execution.ts';
+import type { EnvironmentCause } from './events.ts';
 
 /** Отказ окружения до начала работы: попытка не засчитывается. */
 export class BlockedError extends Error {
@@ -34,6 +35,8 @@ export class TaskFailure extends Error {
       classes?: string[];
       pairs?: { property: string; inputClass: string }[];
     },
+    /** Причина отказа окружения, известная в точке обнаружения (`attempt.diagnosed`). */
+    readonly diagnosis?: EnvironmentCause,
   ) {
     super(message);
     this.name = 'TaskFailure';

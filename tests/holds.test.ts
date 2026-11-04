@@ -146,9 +146,37 @@ test('Перенос базы под владением операции: пос
     refused('LEASE_STALE'),
   );
   assert.equal(b.tip(), before, 'база не сдвинута после отмены');
+  const moves = () => store.events().filter((e) => e.type === 'base.moved');
+  assert.deepEqual(moves(), [], 'отказ проверки владения отменяет и событие');
   owned = true;
   await moveBase({ policy: b.policy, baseDir: b.r.dir, stateDir: b.state, move });
   assert.equal(b.tip(), b.r.head());
+  assert.deepEqual(
+    moves().map((e) => e.type === 'base.moved' && e.payload),
+    [{ by: 'host' }],
+    'хост не назвал актёра',
+  );
+});
+
+test('base.moved: актёр сдвига в событии; отказ CAS Git события не оставляет', async () => {
+  const b = based();
+  const { store } = engineOf(b.policy);
+  const before = b.tip();
+  const moves = () =>
+    store.events().flatMap((e) => (e.type === 'base.moved' ? [e.payload.by] : []));
+  // Устаревшее ожидаемое значение: git update-ref отказывает внутри транзакции.
+  const stale = fencedRefMove(store, () => {}, undefined, 'operator');
+  assert.throws(() => stale(b.r.dir, b.ref, b.r.head(), b.r.head()));
+  assert.equal(b.tip(), before);
+  assert.deepEqual(moves(), []);
+  await moveBase({
+    policy: b.policy,
+    baseDir: b.r.dir,
+    stateDir: b.state,
+    move: fencedRefMove(store, () => {}, undefined, 'controller'),
+  });
+  assert.equal(b.tip(), b.r.head());
+  assert.deepEqual(moves(), ['controller']);
 });
 
 test('Сдвиг ref внутри транзакции не исполняет hooks репозитория', async () => {

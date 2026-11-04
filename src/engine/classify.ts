@@ -2,6 +2,7 @@ import {
   BlockedError,
   HarnessError,
   TaskFailure,
+  type EnvironmentCause,
   type ErrorCode,
   type FailureKind,
 } from '../contracts/index.ts';
@@ -55,4 +56,36 @@ export function classifyFailure(error: unknown, message: string): FailureKind {
   )
     return 'environment';
   return 'unknown';
+}
+
+/** Предел или баланс провайдера, а не учётные данные (часть `providerRefusal`). */
+const providerLimit = (message: string) =>
+  /credit balance|insufficient credit|insufficient_quota|session limit|usage limit|rate limit|rate_limit|limit reached|too many requests|\b429\b|overloaded/i.test(
+    message,
+  );
+
+/**
+ * Причина отказа окружения (`attempt.diagnosed`): названная в точке
+ * обнаружения (`TaskFailure.diagnosis`), иначе — по тем же признакам, что
+ * класс отказа. Отказ не окружения — `none`; движок приводит причину к
+ * классу сам, поэтому здесь достаточно лучшей догадки.
+ */
+export function environmentCauseOf(
+  error: unknown,
+  message: string,
+  kind: FailureKind,
+): EnvironmentCause {
+  if (kind === 'stalled') return 'stalled';
+  if (kind === 'provider-auth') return providerLimit(message) ? 'provider-limit' : 'provider-auth';
+  if (kind !== 'environment') return 'none';
+  if (error instanceof TaskFailure && error.diagnosis) return error.diagnosis;
+  if (
+    transportFailure(message) ||
+    /econnreset|epipe|socket hang up|connection reset|stream closed|channel closed|fetch failed|network error/i.test(
+      message,
+    )
+  )
+    return 'transport';
+  if (error instanceof BlockedError) return 'preflight';
+  return 'other';
 }
