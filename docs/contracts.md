@@ -687,6 +687,42 @@ fencing; само состояние между переходами не пер
 'stop'|'report', snapshot?}`; `joint.liveness` — то же с `verificationId`; `action` и `snapshot` — только у `stalled` (см. «Зависшие
 попытки»).
 
+`work.retried` — поручение возвращено в очередь `engine.retry`: `{by:
+'operator'|'recovery'|'host', reset, spent?, reasonLength?}`. `by` — третий
+аргумент `retry(workId, reset?, by?)`: CLI `retry` передаёт `operator`,
+восстановление очереди (`repair`, эпизод по свойству) — `recovery`, хост без
+актёра — `host` (по умолчанию). `reset` — сброс исчерпанного предела; `spent` —
+засчитанные попытки до сброса (сброс обнуляет `WorkState.attempt`),
+`reasonLength` — длина причины сброса; текста причины в событии нет. Повтор
+без изменения (поручение уже в очереди) и отказ повтора событий не создают.
+
+`work.cancelled` — поручение отменено: `{by: 'operator'|'host'|'graph',
+hadAttempt}`. `engine.cancel(workId, reason?, by?)` (CLI `cancel` — `operator`,
+по умолчанию `host`); `graph` — новая редакция графа убрала поручение.
+`hadAttempt` — отменена и активная попытка: её `attempt.cancelled` идёт в той
+же транзакции перед `work.cancelled`, у которого тогда те же `runId` и
+`attempt`. Повторная отмена отменённого событий не создаёт.
+
+`base.moved` — сдвиг ref базы `fencedRefMove(store, fence, timeoutMs?, by?)`:
+`{by: 'operator'|'controller'|'host'}` (по умолчанию `host`), одно событие на
+репозиторий, в той же транзакции, что проверка владения и `git update-ref`.
+Отказ проверки или Git (CAS) отменяет и событие. `moveBase` без `move` событий
+не пишет: у него нет хранилища.
+
+`attempt.diagnosed` — причина отказа попытки: `{failureKind, cause, counted}`,
+конверт несёт `graphId`, `workId`, `runId`, `attempt`. Пишется сразу за
+`attempt.failed` (и `attempt.expired`) в той же транзакции под fencing.
+`cause` (`environmentCauses`): `sandbox-launch`, `sandbox-network`,
+`sandbox-filesystem`, `sandbox-policy`, `dependency-network` — ставит gate в
+точке обнаружения (`TaskFailure.diagnosis`); `transport`, `preflight`
+(`BlockedError` до работы), `provider-auth`, `provider-limit`, `stalled`,
+`shutdown` (прерывание штатной остановкой), `lease-expired` — по классу отказа
+и его признакам; `other` — отказ окружения без известной причины; `none` —
+отказ не окружения. Хост, вызывающий `engine.fail`, может передать
+`options.cause`; движок приводит её к классу (у отказа не окружения — всегда
+`none`). `counted` — отказ засчитан в предел попыток. Текста отказа в событии
+нет.
+
 `finished` может не прийти: поздний finish владельца, утратившего срок,
 отклоняется (runner его не повторяет), упавший процесс его не пишет, а `adopt`
 и recovery открытые замеры прежнего владельца не закрывают. Такая стадия
@@ -726,7 +762,7 @@ original}` (исходный тип, не длиннее 200 символов; �
 (`joint.started`, `joint.finished`). `config.started`, `config.reconfigure-*`
 и `config.reconfigured` меняют применённую политику и запрос операции
 (`policy.applied`, `policy.reconfigure`). `base.moved` — проверка владения
-операцией и CAS-сдвиг ref базы; записей и событий не создаёт.
+операцией и CAS-сдвиг ref базы; записей не создаёт, событие — `base.moved`.
 
 ### ValueReport
 
@@ -812,13 +848,31 @@ lower`). `firstPassRaw` — попытка вообще одна.
   (`cost.rejected`) и расход отказов окружения (`environment.neutral`) —
   одна и та же атрибуция по всем завершённым попыткам окна.
 - Действия человека — только записи с актёром-человеком: решения recovery
-  с источником `operator`. Удержания (`work.held`) и отмены попыток актёра
-  не называют (удерживают и операции хоста, например смена контракта): они
-  показаны отдельно (`holds`, `cancelledAttempts`) и в действия человека не
-  входят. Повторы, сбросы, отмена без попытки и сдвиг базы пока не
-  записываются: `withAction` — нижняя граница, «без действий человека»
-  (`withoutAction`) пока не измеримо (`value: null`, `bound: unknown`),
-  `retries`/`resets`/`baseMoves` — `null`.
+  с источником `operator`, повторы и отмены с `by: operator` (`work.retried`,
+  `work.cancelled`). Удержания (`work.held`) актёра не называют (удерживают и
+  операции хоста, например смена контракта): они показаны отдельно (`holds`)
+  и в действия человека не входят; так же `cancelledAttempts` — отменённые
+  попытки по записям попыток. Повторы восстановлением (`recovery`), сдвиги
+  базы controller и отмены новой редакцией графа — автоматические.
+- Вмешательства по событиям (`actions.recorded`): числа в окне по актёрам —
+  повторы, сбросы, отмены (и отмены без активной попытки), сдвиги базы;
+  `retries`/`resets`/`baseMoves` — их суммы. Запись начинается с первого
+  события версии, которая их пишет (`work.retried`, `work.cancelled`,
+  `base.moved`, `attempt.diagnosed`; `recorded.from`); раньше него действие
+  могло быть, но не записано. Нет ни одного такого события в журнале —
+  `recorded: null`, суммы `null`, `withAction` — нижняя граница, «без действий
+  человека» (`withoutAction`) не измеримо (`value: null`, `bound: unknown`).
+  С записью: `recorded.bound: lower`, если в окне есть попытки, события или
+  принятые поручения раньше `from`, иначе `exact`. Поручение «без действий»
+  известно, если начато (согласование первой попытки, иначе поручения) не
+  раньше `from` и ни один его повтор или отмена не сделаны хостом без актёра
+  (`host`); прочие принятые без действия оператора идут в `unknown` обеих мер
+  (`bound: lower`). Сдвиги базы считаются, но к поручениям не относятся.
+- Подпричины окружения (`environment.causes`): отказы окружения окна по
+  `attempt.diagnosed` своей попытки — строки `{cause, count, counted}` (по
+  убыванию числа); отказ без события (записан раньше) — `undiagnosed`, тогда
+  `bound: lower`. Нет ни одного `attempt.diagnosed` в журнале — `causes:
+null`.
 - Отказы окружения (`environment.share`) — среди классифицированных; если
   есть отказы только в gates подготовки (`setupCheckFailures`), доля —
   нижняя граница («at least», «M more may be environment»).
