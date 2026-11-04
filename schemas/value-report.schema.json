@@ -1064,6 +1064,15 @@
                         "host"
                       ],
                       "additionalProperties": false
+                    },
+                    "baseMovesBound": {
+                      "type": "string",
+                      "const": "lower"
+                    },
+                    "gaps": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
                     }
                   },
                   "required": [
@@ -1073,7 +1082,9 @@
                     "resets",
                     "cancellations",
                     "cancelledWithoutAttempt",
-                    "baseMoves"
+                    "baseMoves",
+                    "baseMovesBound",
+                    "gaps"
                   ],
                   "additionalProperties": false
                 },
@@ -2719,7 +2730,7 @@
     },
     "limitations": {
       "minItems": 1,
-      "maxItems": 30,
+      "maxItems": 40,
       "type": "array",
       "items": {
         "type": "object",

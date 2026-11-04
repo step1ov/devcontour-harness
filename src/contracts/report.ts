@@ -283,7 +283,12 @@ export const valueReportSchema = z.strictObject({
       /** Удержания и отмены попыток: актёр не записан, к действиям человека не относятся. */
       holds: count,
       cancelledAttempts: count,
-      /** Повторы, сбросы и сдвиги базы в окне по событиям; `null` — событий вмешательств нет. */
+      /**
+       * Повторы и сбросы в окне по событиям — только точные: `null`, если
+       * событий вмешательств нет или запись не покрывает окно (числа по
+       * актёрам — в `recorded`). `baseMoves` — всегда `null`: сдвиг базы вне
+       * `fencedRefMove` не записывается, его число — нижняя граница.
+       */
       retries: count.nullable(),
       resets: count.nullable(),
       baseMoves: count.nullable(),
@@ -303,6 +308,14 @@ export const valueReportSchema = z.strictObject({
           /** Отмены поручений без активной попытки (их `attempt.cancelled` нет). */
           cancelledWithoutAttempt: count,
           baseMoves: actorCounts(baseMoveActors),
+          /** Сдвиги базы — всегда нижняя граница: перенос вне `fencedRefMove` не пишется. */
+          baseMovesBound: z.literal('lower'),
+          /**
+           * Поручения окна с новой попыткой после отказа или отмены без
+           * записанного повтора (между ними работала версия без событий):
+           * пробел записи, `bound: lower`.
+           */
+          gaps: count,
         })
         .nullable(),
     }),
@@ -456,7 +469,7 @@ export const valueReportSchema = z.strictObject({
   limitations: z
     .array(z.strictObject({ id: z.string().min(1).max(60), text: sentence }))
     .min(1)
-    .max(30),
+    .max(40),
 });
 export type ValueReport = z.infer<typeof valueReportSchema>;
 

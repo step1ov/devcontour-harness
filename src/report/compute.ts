@@ -199,9 +199,19 @@ export function failureBucketOf(a: AttemptState): FailureBucket | null {
   return 'unclassified';
 }
 
-/** Засчитанная попытка: не отказ окружения и не прерывание штатной остановкой. */
+/**
+ * Засчитанная в предел попыток — то же правило, что у движка (`counted` в
+ * `attempt.diagnosed`): не засчитаны прерванные штатной остановкой, отказы до
+ * работы (`blocked`), отказы окружения и провайдера (`environment`,
+ * `provider-auth`) и истёкшее владение. Зависание (`stalled`) засчитано.
+ */
 const counted = (a: AttemptState) =>
-  a.status !== 'active' && a.interrupted !== 'shutdown' && failureBucketOf(a) !== 'environment';
+  a.status !== 'active' &&
+  a.interrupted !== 'shutdown' &&
+  !a.blocked &&
+  a.status !== 'expired' &&
+  a.failureKind !== 'environment' &&
+  a.failureKind !== 'provider-auth';
 
 /** Gate подготовки: установка зависимостей — его отказ часто сетевой (M6). */
 const setupGate = (gate: string) => /install|setup|bootstrap|deps|dependenc/i.test(gate);
@@ -628,13 +638,47 @@ export function valueReport(
   ]);
   const firstRecorded = events.find((e) => interventionTypes.has(e.type));
   const recordedFrom = firstRecorded ? at(firstRecorded.at) : undefined;
-  const hostActed = new Set<string>();
+  // Актёр не назван: повтор или отмена хостом (`host`) и любое удержание
+  // (`work.held`, его ставит и человек, и операция хоста) — поручение с ними
+  // «без действий человека» не считается, а неизвестно.
+  const unattributed = new Set<string>();
+  const reopenedAt = new Map<string, number[]>();
+  const registeredAt = new Map<string, number[]>();
+  const push = (m: Map<string, number[]>, key: string, ms: number) =>
+    m.set(key, [...(m.get(key) ?? []), ms]);
   for (const e of events) {
-    if (e.type !== 'work.retried' && e.type !== 'work.cancelled') continue;
+    if (e.type === 'graph.registered' && e.graphId) push(registeredAt, e.graphId, at(e.at));
     if (!e.workId) continue;
+    if (e.type === 'work.held') unattributed.add(e.workId);
+    if (e.type === 'work.retried') push(reopenedAt, e.workId, at(e.at));
+    if (e.type !== 'work.retried' && e.type !== 'work.cancelled') continue;
     if (e.payload.by === 'operator') actedOn.add(e.workId);
-    else if (e.payload.by === 'host') hostActed.add(e.workId);
+    else if (e.payload.by === 'host') unattributed.add(e.workId);
   }
+  // Пробел записи (откат на версию без этих событий и повторное обновление):
+  // после начала записи новая попытка поручения после отказа или отмены
+  // невозможна без повтора — нет ни `work.retried`, ни новой редакции графа
+  // между ними, значит, повтор шёл версией, которая его не записывает.
+  const gapWorks = new Set<string>();
+  const gapInWindow = new Set<string>();
+  if (recordedFrom !== undefined)
+    for (const f of facts)
+      for (let i = 1; i < f.attempts.length; i++) {
+        const prev = f.attempts[i - 1]!;
+        const cur = f.attempts[i]!;
+        if (!finishedStatuses.has(prev.status) || prev.interrupted === 'shutdown') continue;
+        if (!prev.finishedAt || at(prev.finishedAt) < recordedFrom) continue;
+        const from = at(prev.finishedAt);
+        const to = at(cur.startedAt);
+        const between = (ms: number) => ms >= from && ms <= to;
+        if (
+          (reopenedAt.get(f.work.id) ?? []).some(between) ||
+          (registeredAt.get(f.work.graphId) ?? []).some(between)
+        )
+          continue;
+        gapWorks.add(f.work.id);
+        if (inWindow(w, cur.startedAt)) gapInWindow.add(f.work.id);
+      }
   /** Начало жизни поручения: согласование первой попытки или поручения, иначе первая попытка. */
   const startOf = (f: WorkFacts) => {
     const first = f.attempts[0];
@@ -643,13 +687,18 @@ export function valueReport(
   };
   const coveredWork = (f: WorkFacts) => {
     const start = startOf(f);
-    return recordedFrom !== undefined && start !== undefined && start >= recordedFrom;
+    return (
+      recordedFrom !== undefined &&
+      start !== undefined &&
+      start >= recordedFrom &&
+      !gapWorks.has(f.work.id)
+    );
   };
   const acceptedActed = accepted.filter((f) => actedOn.has(f.work.id)).length;
   // Отсутствие действия человека известно, если поручение начато после
-  // начала записи и ни один его повтор или отмена не сделаны хостом без актёра.
+  // начала записи, без пробела в ней, и у него нет действий без актёра.
   const acceptedUnknown = accepted.filter(
-    (f) => !actedOn.has(f.work.id) && (!coveredWork(f) || hostActed.has(f.work.id)),
+    (f) => !actedOn.has(f.work.id) && (!coveredWork(f) || unattributed.has(f.work.id)),
   ).length;
   const zero = <A extends readonly string[]>(actors: A) =>
     Object.fromEntries(actors.map((a) => [a, 0])) as Record<A[number], number>;
@@ -665,6 +714,8 @@ export function valueReport(
             cancellations: zero(['operator', 'host', 'graph'] as const),
             cancelledWithoutAttempt: 0,
             baseMoves: zero(['operator', 'controller', 'host'] as const),
+            baseMovesBound: 'lower' as const,
+            gaps: gapInWindow.size,
           };
           for (const e of windowEvents)
             if (e.type === 'work.retried') {
@@ -677,6 +728,7 @@ export function valueReport(
           // Окно начинается раньше записи: в нём есть попытки или события до неё.
           const before = (ms: number) => ms < recordedFrom;
           if (
+            gapInWindow.size > 0 ||
             windowAttempts.some((a) => before(at(a.startedAt))) ||
             windowEvents.some((e) => before(at(e.at))) ||
             accepted.some((f) => before(startOf(f) ?? -Infinity))
@@ -684,8 +736,11 @@ export function valueReport(
             r.bound = 'lower';
           return r;
         })();
+  // Сумма — только точная: при нижней границе её нет (`null`), числа по
+  // актёрам с границей — в `recorded`. Сдвиги базы — всегда нижняя граница:
+  // перенос вне `fencedRefMove` (например, `moveBase` без `move`) не пишется.
   const total = (counts: Record<string, number> | undefined) =>
-    counts ? sum(Object.values(counts)) : null;
+    counts && recorded?.bound === 'exact' ? sum(Object.values(counts)) : null;
   const escalated = new Set<string>([
     ...[...episodes.values()]
       .filter(
@@ -1122,7 +1177,7 @@ export function valueReport(
         cancelledAttempts: cancelledAttempts.length,
         retries: total(recorded?.retries),
         resets: total(recorded?.resets),
-        baseMoves: total(recorded?.baseMoves),
+        baseMoves: null,
         recorded,
       },
       approvals,
@@ -1525,14 +1580,27 @@ function limitationsOf(r: ValueReport): ValueReport['limitations'] {
     const unknown = r.autonomy.withoutAction.unknown;
     add(
       'actions-from',
-      unknown > 0 || recorded.bound === 'lower',
-      `Retries, resets, cancellations and base moves are recorded with their actor from ${recorded.from}; ${plural(unknown, 'accepted task')} started earlier or ${unknown === 1 ? 'was' : 'were'} retried or cancelled by the host without a named actor, so tasks that needed no human action are a lower bound${recorded.bound === 'lower' ? ' and action counts cover only the recorded part of the window' : ''}.`,
+      recorded.bound === 'lower',
+      `Retries, resets, cancellations and base moves are recorded with their actor from ${recorded.from}; the window has activity before that, so action counts are lower bounds.`,
     );
     add(
-      'base-moves',
-      (r.autonomy.actions.baseMoves ?? 0) > 0,
-      'Base moves are counted by actor but are not attributed to tasks.',
+      'actions-unknown',
+      unknown > 0,
+      `${plural(unknown, 'accepted task')} started before actions were recorded, ${unknown === 1 ? 'was' : 'were'} held, or ${unknown === 1 ? 'was' : 'were'} retried or cancelled by the host without a named actor, so tasks that needed no human action are a lower bound.`,
     );
+    add(
+      'recording-gap',
+      recorded.gaps > 0,
+      `${plural(recorded.gaps, 'task')} got a new attempt after a failure or cancellation without a recorded retry (an older version ran in between, for example after a rollback); actions there are not recorded.`,
+    );
+    out.push({
+      id: 'base-moves',
+      text: 'Base moves are a lower bound: moves outside the fenced path are not recorded; they are not attributed to tasks.',
+    });
+    out.push({
+      id: 'rollback-gap',
+      text: 'If an older version ran after recording began (rollback and re-upgrade), its retries, cancellations and base moves are not recorded; only gaps that left a new attempt without a retry are detected.',
+    });
   }
   if (causes)
     add(
@@ -1570,7 +1638,7 @@ function limitationsOf(r: ValueReport): ValueReport['limitations'] {
     'holds-actor',
     r.autonomy.actions.holds + (recorded ? 0 : r.autonomy.actions.cancelledAttempts) > 0,
     recorded
-      ? 'Holds record no actor (host operations hold tasks too), so they are not counted as human actions.'
+      ? 'Holds record no actor (host operations hold tasks too): they are not counted as human actions, and held tasks are counted as unknown, not as needing no human action.'
       : 'Holds and cancelled attempts record no actor (host operations hold tasks too), so they are not counted as human actions.',
   );
   add(
