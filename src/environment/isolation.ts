@@ -1,7 +1,8 @@
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { createRequire } from 'node:module';
-import { writeFile, mkdir, mkdtemp, realpath, rm, readdir, lstat } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { writeFile, mkdir, mkdtemp, realpath, rm, readdir, lstat, rename } from 'node:fs/promises';
 import { existsSync, lstatSync, readlinkSync, realpathSync, readdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
@@ -783,13 +784,31 @@ const processAlive = (pid: number) => {
   }
 };
 
+/** Наибольший pid, который принимает уборка (pid_t — 32-битное со знаком). */
+const MAX_PID = 2 ** 31 - 1;
+/** Префикс каталога srt, переименованного уборкой перед удалением. */
+export const SRT_REMOVING_PREFIX = '.dc-srt-rm-';
+
 /**
  * Уборка брошенных каталогов srt (controller упал до своей уборки) — по
  * возможности, ошибки не мешают проверке. Удаляется только запись, которая
- * одновременно: имя `dc-srt-<pid>-XXXXXX`, каталог (не symlink, `lstat`),
- * владелец — этот пользователь, не менялся дольше `SRT_STALE_MS`, и
- * процесс-создатель (pid из имени, не этот процесс) уже не существует.
- * Живой процесс с тем же pid (повтор pid) только оставляет каталог.
+ * одновременно:
+ * - имя `dc-srt-<pid>-XXXXXX`, pid — безопасное целое не больше 2^31−1 и не
+ *   этот процесс (иначе запись остаётся);
+ * - каталог (не symlink, `lstat`) этого пользователя;
+ * - ни сам каталог, ни одна запись прямо в нём не менялись дольше
+ *   `SRT_STALE_MS`. Свежая запись внутри — признак живого srt: процесс srt
+ *   переживает controller, убитый SIGKILL (pid создателя уже свободен), а
+ *   контейнеры с общим `/tmp` и своим пространством pid не видят создателя
+ *   из другого пространства — для них «процесса нет» ничего не доказывает;
+ * - процесс-создатель не существует (ESRCH; EPERM — процесс есть, он жив).
+ *   Повтор pid только оставляет каталог.
+ *
+ * Удаление без гонки с подменой: каталог сначала переименовывается в
+ * `.dc-srt-rm-<uuid>` того же каталога, переименованный путь проверяется
+ * снова (каталог, владелец, тот же inode), и только тогда удаляется. Не
+ * прошедший повторную проверку остаётся под новым именем; уборка его не
+ * трогает, как и остаток после падения между rename и rm.
  */
 export async function sweepStaleSrtDirs(
   short: string,
@@ -803,16 +822,28 @@ export async function sweepStaleSrtDirs(
   } catch {
     return [];
   }
+  const fresh = (mtimeMs: number) => now - mtimeMs < SRT_STALE_MS;
   const removed: string[] = [];
   for (const name of names) {
     const pid = Number(srtDirName.exec(name)?.[1]);
-    if (!pid || pid === process.pid) continue;
+    if (!Number.isSafeInteger(pid) || pid < 1 || pid > MAX_PID || pid === process.pid) continue;
     const path = join(short, name);
     try {
       const st = await lstat(path);
-      if (!st.isDirectory() || st.uid !== uid || now - st.mtimeMs < SRT_STALE_MS) continue;
-      if (processAlive(pid)) continue;
-      await rm(path, { recursive: true, force: true });
+      if (!st.isDirectory() || st.uid !== uid || fresh(st.mtimeMs)) continue;
+      let recent = false;
+      for (const entry of await readdir(path))
+        if (fresh((await lstat(join(path, entry))).mtimeMs)) {
+          recent = true;
+          break;
+        }
+      if (recent || processAlive(pid)) continue;
+      const moved = join(short, SRT_REMOVING_PREFIX + randomUUID());
+      await rename(path, moved);
+      const again = await lstat(moved);
+      if (!again.isDirectory() || again.uid !== uid || again.ino !== st.ino || again.dev !== st.dev)
+        continue;
+      await rm(moved, { recursive: true, force: true });
       removed.push(path);
     } catch {
       // Уборка по возможности: запись исчезла, нет прав — пропускаем.

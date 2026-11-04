@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import {
   accessSync,
   chmodSync,
@@ -9,6 +9,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   statSync,
   symlinkSync,
@@ -21,6 +22,7 @@ import { createRequire } from 'node:module';
 import type { EvidenceRecord } from '../src/contracts/index.ts';
 import { redactor } from '../src/environment/redaction.ts';
 import {
+  SRT_REMOVING_PREFIX,
   SRT_STALE_MS,
   SandboxPolicyError,
   isolationSupport,
@@ -570,20 +572,27 @@ test(
     const { root, deep } = deepTmp();
     const saved = process.env.TMPDIR;
     const short = srtTempBase.short;
-    const marker = join(root, 'ran');
+    // Маркер — в дереве проверки, куда gate может писать: обратная сверка
+    // ниже показывает, что та же команда его создаёт, когда песочница стартует.
+    const r0 = repo();
+    const marker = join(r0.dir, 'ran');
+    const script = `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`;
     try {
       srtTempBase.short = join(root, 'missing');
       process.env.TMPDIR = deep;
-      const r = await gate(
-        loaded(0, process.env.PATH ?? '').env,
-        0,
-        `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`,
-      );
+      const r = await gate(loaded(0, process.env.PATH ?? '').env, 0, script, r0);
       assert.equal(r.evidence.passed, false);
       assert.equal(r.failure?.kind, 'environment');
       assert.match(r.evidence.summary, /TMPDIR/);
+      assert.match(r.evidence.summary, /недоступен/);
+      assert.match(r.evidence.summary, /Задайте более короткий TMPDIR/);
       assert.ok(r.evidence.summary.includes(deep), r.evidence.summary);
       assert.equal(existsSync(marker), false, 'команда не запускалась');
+      // Обратная сверка: с доступным коротким каталогом та же команда пишет маркер.
+      srtTempBase.short = short;
+      const ok = await gate(loaded(0, process.env.PATH ?? '').env, 0, script, r0);
+      assert.equal(ok.evidence.passed, true, ok.evidence.summary);
+      assert.equal(existsSync(marker), true, 'маркер доступен команде на запись');
     } finally {
       srtTempBase.short = short;
       process.env.TMPDIR = saved;
@@ -593,22 +602,47 @@ test(
   },
 );
 
-test('sweepStaleSrtDirs: убирает только свои старые каталоги srt завершившихся процессов', async () => {
+/** Pid завершившегося процесса: потомок убит и дождан; ESRCH проверен. */
+async function deadPid() {
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    stdio: 'ignore',
+  });
+  await new Promise((resolve) => child.once('spawn', resolve));
+  const pid = child.pid!;
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  child.kill('SIGKILL');
+  await exited;
+  try {
+    process.kill(pid, 0);
+    return undefined; // pid уже занят другим процессом
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH' ? pid : undefined;
+  }
+}
+
+test('sweepStaleSrtDirs: убирает только свои старые каталоги srt завершившихся процессов', async (t) => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'harness-srt-sweep-')));
   try {
-    const dead = spawnSync(process.execPath, ['-e', '0']).pid;
+    const dead = await deadPid();
+    if (dead === undefined) return t.skip('pid завершившегося потомка уже занят');
     const old = (Date.now() - SRT_STALE_MS - 60_000) / 1000;
-    const make = (name: string, age = old) => {
+    const make = (name: string, age = old, inner = age) => {
       const path = join(base, name);
       mkdirSync(path);
       writeFileSync(join(path, 's.sock'), '');
+      utimesSync(join(path, 's.sock'), inner, inner);
       utimesSync(path, age, age);
       return path;
     };
     const stale = make(`dc-srt-${dead}-aB3dE9`);
     const fresh = make(`dc-srt-${dead}-fResh1`, Date.now() / 1000);
+    // Свежая запись внутри старого каталога: srt, переживший controller.
+    const orphan = make(`dc-srt-${dead}-orphan`, old, Date.now() / 1000);
     const live = make(`dc-srt-${process.ppid}-live01`);
     const own = make(`dc-srt-${process.pid}-own001`);
+    // Pid вне pid_t и вне безопасных целых — запись остаётся.
+    const big = make(`dc-srt-${2 ** 31}-big001`);
+    const huge = make(`dc-srt-99999999999999999999-huge01`);
     const other = make(`dc-other-${dead}-aB3dE9`);
     const odd = make(`dc-srt-${dead}-toolong7`);
     // Symlink с подходящим именем не удаляется и не разыменовывается.
@@ -617,11 +651,25 @@ test('sweepStaleSrtDirs: убирает только свои старые ка�
     const file = join(base, `dc-srt-${dead}-file01`);
     writeFileSync(file, '');
     utimesSync(file, old, old);
-    assert.deepEqual(await sweepStaleSrtDirs(base), [stale]);
+    // pid 1 есть всегда; не root получает EPERM — процесс считается живым.
+    const root = process.getuid?.() === 0;
+    const init = make('dc-srt-1-init01');
+
+    assert.deepEqual(
+      (await sweepStaleSrtDirs(base)).sort(),
+      (root ? [init, stale] : [stale]).sort(),
+    );
     assert.equal(existsSync(stale), false);
-    for (const kept of [fresh, live, own, other, odd, target, file, join(target, 's.sock')])
+    // Удаление шло через переименование: промежуточного каталога не осталось.
+    assert.deepEqual(
+      readdirSync(base).filter((n) => n.startsWith(SRT_REMOVING_PREFIX)),
+      [],
+    );
+    for (const kept of [fresh, orphan, live, own, big, huge, other, odd, target, file])
       assert.equal(existsSync(kept), true, kept);
+    assert.equal(existsSync(join(target, 's.sock')), true);
     assert.equal(existsSync(join(base, `dc-srt-${dead}-link01`)), true);
+    if (!root) assert.equal(existsSync(init), true, 'EPERM — процесс жив');
     // Нет каталога — пусто, без исключения.
     assert.deepEqual(await sweepStaleSrtDirs(join(base, 'missing')), []);
   } finally {
