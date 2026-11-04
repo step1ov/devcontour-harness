@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import {
   HANDOFF_LIMITS,
   HANDOFF_MAX_BYTES,
+  HANDOFF_MIN_BYTES,
   cliDataSchemas,
   exitCodes,
   handoffNextSteps,
@@ -29,7 +30,9 @@ import {
 import { Harness } from '../src/control/harness.ts';
 import { measuredInvoke } from '../src/engine/measured.ts';
 import { clipSafe, fitPack } from '../src/handoff/pack.ts';
-import { handoffMarkdown, handoffPack } from '../src/index.ts';
+import * as root from '../src/index.ts';
+import { handoffMarkdown, handoffPack, statusOf, type HandoffSource } from '../src/index.ts';
+import { policySecrets } from '../src/environment/redaction.ts';
 import { nextSteps } from '../src/projections/index.ts';
 import { hsetup } from './harness-fixture.ts';
 import { graphOf, ready } from './engine-fixture.ts';
@@ -641,7 +644,7 @@ test('handoff: предел в байтах — ANSI, управляющие с�
       'остаются первые по порядку',
     );
     assert.ok(handoffPackSchema.safeParse(fitted).success);
-    assert.match(handoffMarkdown(fitted), /Пакет урезан до 256 КБ/);
+    assert.match(handoffMarkdown(fitted), /Пакет урезан по пределу размера/);
     assert.match(handoffMarkdown(fitted), /Отброшено намерений ради предела размера: 20/);
   } finally {
     h.close();
@@ -783,4 +786,143 @@ test('handoff CLI: JSON-конверт по умолчанию, --format md — 
 test('handoff: договор — перечень шагов совпадает с проекцией, схема опубликована', () => {
   assert.deepEqual([...handoffNextSteps], [...nextSteps]);
   assert.equal(publishedSchemas['handoff-pack'], handoffPackSchema);
+});
+
+/** Часы движка остановлены: два пакета одной доски сравнимы целиком. */
+const freeze = (h: Harness) => {
+  const at = h.engine.clock();
+  (h.engine as any).now = () => at;
+};
+
+/** Доска на 80 поручений с длинными текстами: пакет урезается меньшим пределом. */
+function wideBoard(fill = 'Ж') {
+  const ctx = hsetup({ scenario: {}, policy: (p) => ((p as any).maxAttempts = 2) });
+  const h = ctx.open();
+  const deps = Object.fromEntries(Array.from({ length: 80 }, (_, i) => [`w${i}`, []]));
+  ready(h.engine, graphOf(deps));
+  for (let i = 0; i < 80; i++) {
+    const run = h.engine.claim('c1')!;
+    h.engine.fail(run.id, run.token, (fill === 'Ж' ? 'Ошибка '.repeat(60) : fill.repeat(290)) + i, {
+      kind: 'gate',
+    });
+  }
+  h.store.transact('task.retry', (tx) => {
+    for (let i = 0; i < 80; i++) {
+      const w = tx.work('w' + i)!;
+      tx.putWork({ ...w, order: { ...w.order, title: fill.repeat(180) } });
+    }
+  });
+  freeze(h);
+  const intentions = Array.from({ length: 20 }, (_, i) => 'Я'.repeat(1000) + i);
+  return { h, intentions };
+}
+
+test('handoff maxBytes: меньший предел хоста — тот же порядок отбрасывания и счётчики, что у fitPack', () => {
+  const { h, intentions } = wideBoard();
+  try {
+    const full = handoffPack(h, { intentions });
+    assert.equal(full.truncated.bySize, false);
+    for (const limit of [HANDOFF_MIN_BYTES, 16 * 1024, 64 * 1024]) {
+      const pack = handoffPack(h, { intentions, maxBytes: limit });
+      assert.deepEqual(pack, fitPack(structuredClone(full), limit), `предел ${limit}`);
+      assert.ok(Buffer.byteLength(JSON.stringify(pack)) <= limit, `${limit}`);
+      assert.equal(pack.truncated.bySize, true);
+      assert.equal(pack.works.length + pack.truncated.works, 80);
+      assert.equal(pack.failures.length + pack.truncated.failures, 80);
+      assert.ok(handoffPackSchema.safeParse(pack).success);
+    }
+    // Предел по умолчанию — HANDOFF_MAX_BYTES.
+    assert.deepEqual(handoffPack(h, { intentions, maxBytes: HANDOFF_MAX_BYTES }), full);
+    // measure: json и markdown дают одно, пока Markdown не длиннее JSON.
+    assert.deepEqual(
+      handoffPack(h, { intentions, maxBytes: 32 * 1024, measure: 'markdown' }),
+      handoffPack(h, { intentions, maxBytes: 32 * 1024 }),
+    );
+  } finally {
+    h.close();
+  }
+});
+
+test('handoff measure markdown: Markdown длиннее JSON — укладываются оба, порядок отбрасывания прежний', () => {
+  // «|» в ячейке Markdown экранируется: Markdown пакета длиннее его JSON.
+  const { h, intentions } = wideBoard('|');
+  try {
+    const full = handoffPack(h, { intentions });
+    const limit = 32 * 1024;
+    const byJson = handoffPack(h, { intentions, maxBytes: limit });
+    assert.ok(Buffer.byteLength(handoffMarkdown(byJson)) > limit, 'Markdown длиннее предела');
+    const md = handoffPack(h, { intentions, maxBytes: limit, measure: 'markdown' });
+    assert.ok(Buffer.byteLength(handoffMarkdown(md)) <= limit);
+    assert.ok(Buffer.byteLength(JSON.stringify(md)) <= limit);
+    assert.ok(md.truncated.works > byJson.truncated.works);
+    assert.equal(md.works.length + md.truncated.works, 80);
+    assert.deepEqual(
+      md.works.map((w) => w.id),
+      byJson.works.slice(0, md.works.length).map((w) => w.id),
+      'тот же порядок: уходят последние',
+    );
+    assert.deepEqual(fitPack(structuredClone(full), limit, 'markdown'), md);
+    assert.ok(handoffPackSchema.safeParse(md).success);
+  } finally {
+    h.close();
+  }
+});
+
+test('handoff maxBytes и measure: значение вне границ — отказ INVALID_INPUT', () => {
+  const { h } = board();
+  try {
+    for (const maxBytes of [0, HANDOFF_MIN_BYTES - 1, HANDOFF_MAX_BYTES + 1, 4096.5, NaN, -1])
+      assert.throws(
+        () => handoffPack(h, { maxBytes }),
+        (e: any) => e.code === 'INVALID_INPUT' && e.issues?.[0]?.path?.[0] === 'maxBytes',
+        String(maxBytes),
+      );
+    assert.throws(
+      () => handoffPack(h, { measure: 'html' as any }),
+      (e: any) => e.code === 'INVALID_INPUT',
+    );
+    assert.ok(handoffPack(h, { maxBytes: HANDOFF_MIN_BYTES }));
+    assert.ok(handoffPack(h, { maxBytes: HANDOFF_MAX_BYTES }));
+  } finally {
+    h.close();
+  }
+});
+
+test('handoff: узкий источник хоста (не Harness) даёт тот же пакет и то же состояние', () => {
+  const { h } = board();
+  try {
+    freeze(h);
+    const { engine, policy, workflows } = h;
+    const source: HandoffSource = {
+      engine,
+      policy,
+      workflows: {
+        list: () => workflows.list(),
+        continues: (j, v, o) => workflows.continues(j, v, o),
+      },
+    };
+    assert.ok(!(source instanceof Harness));
+    assert.deepEqual(handoffPack(source), handoffPack(h));
+    assert.deepEqual(handoffPack(source, { graphId: 'g' }), handoffPack(h, { graphId: 'g' }));
+    assert.deepEqual(
+      statusOf(source, undefined, { detail: true }),
+      h.status(undefined, { detail: true }),
+    );
+    assert.deepEqual(statusOf({ engine, policy }), h.status());
+  } finally {
+    h.close();
+  }
+});
+
+test('handoff: policySecrets из корня пакета — та же функция, что маска пакета по умолчанию', () => {
+  assert.equal(root.policySecrets, policySecrets);
+  assert.equal(typeof root.composeRedactors, 'function');
+  const policy = {
+    repositories: [{ gates: [{ secrets: { TOKEN: 'HW_SECRET_A' } }] }],
+    secrets: { B: 'HW_SECRET_B' },
+  };
+  assert.deepEqual(root.policySecrets(policy, { HW_SECRET_A: 'aaa', HW_SECRET_B: 'bbb' }), [
+    'aaa',
+    'bbb',
+  ]);
 });

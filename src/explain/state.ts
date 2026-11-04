@@ -1,9 +1,38 @@
 import { HarnessError } from '../contracts/errors.ts';
 import { MAX_NEUTRAL_FAILURES, repairPolicy } from '../contracts/repair-policy.ts';
-import type { ControlState, ExecutionView, WorkState, WorkStatus } from '../contracts/index.ts';
-import type { Harness } from '../control/harness.ts';
+import type {
+  ControlState,
+  ExecutionPolicy,
+  ExecutionView,
+  WorkState,
+  WorkStatus,
+  WorkflowJob,
+} from '../contracts/index.ts';
+import type { Engine } from '../engine/engine.ts';
 import { acceptanceGap, repairDecision } from '../engine/repair.ts';
 import type { EvidenceLink, StopInput, StopPhase } from '../projections/stop.ts';
+
+/**
+ * Что читают диагнозы по сохранённому состоянию (`stopInputsOf`) и пакет
+ * передачи контекста: движок над хранилищем, политика исполнения и очередь
+ * заданий графов — список заданий и решение, продолжит ли задание работу.
+ * `Harness` удовлетворяет ему структурно (`workflows` — его `WorkflowQueue`);
+ * хост со своим движком передаёт свой адаптер заданий.
+ */
+export interface StopSource {
+  readonly engine: Engine;
+  readonly policy: ExecutionPolicy;
+  readonly workflows: {
+    /** Задания очереди; диагнозы и пакет читают задания `kind: 'graph'`. */
+    list(): readonly WorkflowJob[];
+    /** Продолжит ли очередь задание сама (как `WorkflowQueue.continues`). */
+    continues(
+      job: WorkflowJob,
+      view: ExecutionView,
+      options?: { reconfigureApplies?: boolean },
+    ): boolean;
+  };
+}
 
 export interface StopInputOptions {
   maxAttempts: number;
@@ -18,7 +47,7 @@ export interface StopInputOptions {
  * для `explain` и `status --detail`. `lifted` — пауза есть, но её снимет run.
  * Документ не меняется: `control` — прежний объект или его копия.
  */
-export function nextRunControl(h: Harness, v: ExecutionView) {
+export function nextRunControl(h: { readonly engine: Engine }, v: ExecutionView) {
   const raw = v.control();
   const liftsReconfigure =
     h.engine.reconfigureApplies(v) &&
@@ -49,7 +78,7 @@ const phaseOf: Partial<Record<WorkStatus, StopPhase>> = {
  * Первым идёт вход действующей роли controller, затем поручения (кроме
  * принятых) в порядке состояния.
  */
-export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[] {
+export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInput[] {
   const jobs = h.workflows.list().filter((j) => j.kind === 'graph');
   const now = h.engine.clock();
   return h.engine.read((v) => {
@@ -225,7 +254,7 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
   });
 }
 
-type View = Parameters<Parameters<Harness['engine']['read']>[0]>[0];
+type View = Parameters<Parameters<Engine['read']>[0]>[0];
 type Outlook = 'retry' | 'wait' | 'stop';
 
 /**

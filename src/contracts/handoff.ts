@@ -57,6 +57,12 @@ export const HANDOFF_LIMITS = {
 
 /** Предел сериализованного пакета (JSON, UTF-8). */
 export const HANDOFF_MAX_BYTES = 256 * 1024;
+/**
+ * Наименьший предел, который хост может задать пакету (`maxBytes` у
+ * `handoffPack`): ниже него не помещаются даже записи, которые не
+ * отбрасываются (сводка, очередь, идущие попытки, следующий шаг).
+ */
+export const HANDOFF_MIN_BYTES = 4 * 1024;
 
 /** Строка, усечённая до `n` знаков с «…». */
 const clipped = (n: number) => z.string().max(n + 1);
@@ -302,7 +308,8 @@ export const handoffPackSchema = z.strictObject({
    * бюджеты поручений в пределах и без расхода (не показаны намеренно);
    * `intentions` — сколько намерений усечено по `intentionChars`,
    * `intentionsDropped` — отброшено ради предела размера; `bySize` — пакет
-   * урезан до `HANDOFF_MAX_BYTES`.
+   * урезан до предела размера (`HANDOFF_MAX_BYTES` или меньший `maxBytes`
+   * хоста).
    */
   truncated: z.strictObject({
     works: count,

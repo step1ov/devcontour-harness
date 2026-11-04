@@ -844,7 +844,7 @@ HTML ≤ 1 МБ. Усечение отмечено флагом и ограни�
 
 ### HandoffPack
 
-Пакет передачи контекста (`harness handoff`, `handoffPack(harness, options)`
+Пакет передачи контекста (`harness handoff`, `handoffPack(source, options)`
 и `handoffMarkdown(pack)` из корня пакета; `handoffVersion: 1`,
 `handoffPackSchema`, `schemas/handoff-pack.schema.json`). Ведущий агент хоста,
 который ведёт доску через много попыток, начинает новую сессию с пакета, а не
@@ -906,6 +906,28 @@ escape-последовательностей терминала (ANSI CSI, OSC)
 коннектора): секрет, которого в этом окружении нет, маска не знает —
 библиотеке можно передать свою `redact`. Fencing-токены в пакет не
 попадают.
+
+**Хост.** Источник пакета — `HandoffSource`: `{ engine, policy, workflows }`,
+где `engine` — `Engine` над хранилищем хоста, `policy` — его
+`ExecutionPolicy`, `workflows` — `list()` заданий (пакет и диагнозы берут
+задания `kind: "graph"`) и `continues(job, view, { reconfigureApplies })`,
+продолжит ли очередь задание сама. `Harness` удовлетворяет типу структурно;
+хост со своим движком передаёт свой адаптер заданий без экземпляра
+`Harness`. Состояние доски над тем же источником — `statusOf(source,
+graphId?, { detail })` (`Harness.status` — та же функция).
+
+Параметры `handoffPack`: `graphId`, `intentions`, `redact`, а также
+`maxBytes` — предел хоста в байтах UTF-8, целое от `HANDOFF_MIN_BYTES`
+(4 КБ) до `HANDOFF_MAX_BYTES` (по умолчанию), иначе `INVALID_INPUT`; порядок
+отбрасывания и счётчики `truncated` те же, что у предела по умолчанию, а
+`bySize` значит «урезан до заданного предела». Сводка, очередь, идущие
+попытки, задания и `next` не отбрасываются: для них предел — лучшее
+усилие. `measure` — что укладывается в предел: `json` (по умолчанию) —
+сериализованный пакет; `markdown` — и JSON, и `handoffMarkdown(pack)`
+(Markdown бывает длиннее JSON: «|» в ячейке экранируется). Свой раздел
+Markdown хост учитывает, уменьшая `maxBytes`. Маску из секретов политики и
+своих значений хост составляет из `policySecrets(policy, env?)`,
+`redactor` и `composeRedactors` корня пакета.
 
 Весь пакет — один снимок хранилища: `handoffPack` выполняет status,
 диагнозы и чтение заданий графов внутри одного `read`

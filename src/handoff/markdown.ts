@@ -1,4 +1,4 @@
-import { HANDOFF_LIMITS, HANDOFF_MAX_BYTES, type HandoffPack } from '../contracts/handoff.ts';
+import { HANDOFF_LIMITS, type HandoffPack } from '../contracts/handoff.ts';
 
 /** Ячейка таблицы Markdown: одна строка, без разделителей колонок. */
 const cell = (s: string | number | undefined | null) =>
@@ -43,7 +43,7 @@ export function handoffMarkdown(pack: HandoffPack): string {
       `статусы: ${s.byStatus.map((b) => `${b.status} ${b.count}`).join(', ') || '—'}. ` +
       `Пределы: попыток ${pack.limits.maxAttempts}, восстановлений группы ${pack.limits.repairBudget}.` +
       (pack.truncated.bySize
-        ? ` Пакет урезан до ${Math.round(HANDOFF_MAX_BYTES / 1024)} КБ: часть записей отброшена (см. «не вошли»).`
+        ? ' Пакет урезан по пределу размера: часть записей отброшена (см. «не вошли»).'
         : ''),
     '',
     '## Следующий шаг',

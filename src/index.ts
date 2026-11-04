@@ -161,6 +161,13 @@ export { ReviewProbes, probeLimits, observeReproductions } from './agents/review
 export {
   composeRedactors,
   outputRedactor,
+  /**
+   * Значения секретов политики (`secrets`-карты на любом уровне) из
+   * окружения процесса — маска пакета передачи контекста и коннектора по
+   * умолчанию. Хост, составляющий свою маску (`composeRedactors`), берёт
+   * секреты политики этим же обходом.
+   */
+  policySecrets,
   redactDeep,
   redactError,
   redactor,
@@ -213,7 +220,14 @@ export {
 export * from './projections/index.ts';
 export * from './report/index.ts';
 export { collectReportInput } from './control/report.ts';
-export { handoffPack, handoffMarkdown, type HandoffOptions } from './handoff/index.ts';
+export {
+  handoffPack,
+  handoffMarkdown,
+  type HandoffOptions,
+  type HandoffSource,
+} from './handoff/index.ts';
+// Состояние доски над движком и политикой хоста (`Harness.status` — та же функция).
+export { statusOf, type StatusSource } from './control/status.ts';
 export {
   inspectPath,
   checkDestination,
@@ -235,6 +249,6 @@ export {
   type InitData,
 } from './init/project.ts';
 export { diagnoseState, type DiagnoseOptions } from './explain/diagnose.ts';
-export { stopInputsOf, type StopInputOptions } from './explain/state.ts';
+export { stopInputsOf, type StopInputOptions, type StopSource } from './explain/state.ts';
 export * from './planning/index.ts';
 export * from './catalog/index.ts';

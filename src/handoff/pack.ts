@@ -1,15 +1,17 @@
 import {
   HANDOFF_LIMITS,
   HANDOFF_MAX_BYTES,
+  HANDOFF_MIN_BYTES,
   HANDOFF_VERSION,
   handoffPackSchema,
   type HandoffPack,
 } from '../contracts/handoff.ts';
 import { HarnessError } from '../contracts/errors.ts';
 import type { AttemptState, WorkState, WorkStatus } from '../contracts/execution.ts';
-import type { Harness } from '../control/harness.ts';
+import { statusOf } from '../control/status.ts';
 import { policySecrets, redactor } from '../environment/redaction.ts';
-import { stopInputsOf } from '../explain/state.ts';
+import { stopInputsOf, type StopSource } from '../explain/state.ts';
+import { handoffMarkdown } from './markdown.ts';
 import { activeStatuses } from '../projections/enums.ts';
 import { nextAction } from '../projections/next.ts';
 import { explainStop, stopCodeOf, type StopDiagnosis } from '../projections/stop.ts';
@@ -27,7 +29,29 @@ export interface HandoffOptions {
    * controller), не маскируется — передайте свою маску.
    */
   redact?: (text: string) => string;
+  /**
+   * Предел пакета в байтах UTF-8: целое от `HANDOFF_MIN_BYTES` до
+   * `HANDOFF_MAX_BYTES` (по умолчанию). Хост с меньшим пределом ответа
+   * получает тот же порядок отбрасывания и те же счётчики `truncated`, что и
+   * при пределе по умолчанию; иное значение — отказ `INVALID_INPUT`.
+   */
+  maxBytes?: number;
+  /**
+   * Что укладывается в `maxBytes`: `json` (по умолчанию) — сериализованный
+   * пакет; `markdown` — и JSON, и `handoffMarkdown(pack)`, для хоста, который
+   * отдаёт пакет Markdown. Свой раздел хост учитывает, уменьшая `maxBytes`.
+   */
+  measure?: 'json' | 'markdown';
 }
+
+/**
+ * Что читает пакет: движок над хранилищем (`read`, `clock`, блокировки,
+ * бюджеты), политика исполнения и очередь заданий графов (`list`,
+ * `continues`). `Harness` удовлетворяет ему структурно; хост со своим
+ * `Engine` передаёт `{ engine, policy, workflows }` со своим адаптером
+ * заданий — экземпляр `Harness` не нужен.
+ */
+export type HandoffSource = StopSource;
 
 type Stop = HandoffPack['stops'][number];
 type Next = HandoffPack['next'];
@@ -77,16 +101,43 @@ const actorRank = (d: Stop) => (!isDecision(d) ? 2 : d.actor === 'user' ? 0 : 1)
  * Весь пакет читается одним снимком хранилища: status, диагнозы и задания
  * графов — вложенные чтения внутри одного `read`.
  *
- * Пакет не больше `HANDOFF_MAX_BYTES` в UTF-8: при превышении записи
- * отбрасываются в порядке «намерения с конца, старые провалы, поручения без
- * решения, остановки без решения, остальные поручения и остановки» и
- * учитываются в `truncated`; отказа по размеру нет.
+ * Пакет не больше `maxBytes` (по умолчанию `HANDOFF_MAX_BYTES`) в UTF-8: при
+ * превышении записи отбрасываются в порядке «намерения с конца, старые
+ * провалы, поручения без решения, остановки без решения, незавершённые
+ * попытки, остальные поручения и остановки, строки бюджетов» и учитываются
+ * в `truncated`; отказа по размеру нет. Сводка, очередь, идущие попытки,
+ * задания и следующий шаг не отбрасываются: предел для них — лучшее
+ * усилие.
+ *
+ * Источник — `Harness` или любой `HandoffSource` хоста.
  */
-export function handoffPack(h: Harness, options: HandoffOptions = {}): HandoffPack {
-  return h.engine.read(() => build(h, options));
+export function handoffPack(h: HandoffSource, options: HandoffOptions = {}): HandoffPack {
+  const maxBytes = options.maxBytes ?? HANDOFF_MAX_BYTES;
+  if (!Number.isInteger(maxBytes) || maxBytes < HANDOFF_MIN_BYTES || maxBytes > HANDOFF_MAX_BYTES)
+    throw new HarnessError(
+      'INVALID_INPUT',
+      `maxBytes ${maxBytes}: нужно целое от ${HANDOFF_MIN_BYTES} до ${HANDOFF_MAX_BYTES}`,
+      [
+        {
+          path: ['maxBytes'],
+          message: `${maxBytes} вне ${HANDOFF_MIN_BYTES}..${HANDOFF_MAX_BYTES}`,
+        },
+      ],
+    );
+  const measure = options.measure ?? 'json';
+  if (measure !== 'json' && measure !== 'markdown')
+    throw new HarnessError('INVALID_INPUT', `measure ${String(measure)}: json или markdown`, [
+      { path: ['measure'], message: String(measure) },
+    ]);
+  return h.engine.read(() => build(h, options, maxBytes, measure));
 }
 
-function build(h: Harness, options: HandoffOptions): HandoffPack {
+function build(
+  h: HandoffSource,
+  options: HandoffOptions,
+  maxBytes: number,
+  measure: 'json' | 'markdown',
+): HandoffPack {
   const { graphId } = options;
   const intentions = (options.intentions ?? []).map((s) => s.trim()).filter(Boolean);
   if (intentions.length > HANDOFF_LIMITS.intentions)
@@ -101,7 +152,7 @@ function build(h: Harness, options: HandoffOptions): HandoffPack {
     (s === undefined ? undefined : clipSafe(plainText(redact(s)), n)) as T;
   const name = <T extends string | undefined>(s: T) => text(s, HANDOFF_LIMITS.name);
 
-  const status = h.status(graphId, { detail: true });
+  const status = statusOf(h, graphId, { detail: true });
   if (graphId !== undefined && !status.graphs.length)
     throw new HarnessError('NOT_FOUND', 'Граф не найден: ' + graphId);
   const detail = status.detail!;
@@ -443,7 +494,7 @@ function build(h: Harness, options: HandoffOptions): HandoffPack {
       bySize: false,
     },
   };
-  return handoffPackSchema.parse(fitPack(pack));
+  return handoffPackSchema.parse(fitPack(pack, maxBytes, measure));
 }
 
 /** Решение в строке поручения или в остановке. */
@@ -451,10 +502,19 @@ const decides = (n: { actor: string | null; action: string }) => isDecision(n);
 
 /**
  * Предел размера в байтах UTF-8: записи отбрасываются в фиксированном
- * порядке, пока пакет не уложится; каждая — в `truncated`.
+ * порядке, пока пакет не уложится; каждая — в `truncated`. С `markdown`
+ * мерой служит больший из размеров JSON и `handoffMarkdown(pack)`.
  */
-export function fitPack(pack: HandoffPack, maxBytes: number = HANDOFF_MAX_BYTES): HandoffPack {
-  const size = () => Buffer.byteLength(JSON.stringify(pack));
+export function fitPack(
+  pack: HandoffPack,
+  maxBytes: number = HANDOFF_MAX_BYTES,
+  measure: 'json' | 'markdown' = 'json',
+): HandoffPack {
+  const json = () => Buffer.byteLength(JSON.stringify(pack));
+  const size =
+    measure === 'markdown'
+      ? () => Math.max(json(), Buffer.byteLength(handoffMarkdown(pack)))
+      : json;
   const t = pack.truncated;
   const dropLast = <T>(list: T[], keep: (x: T) => boolean = () => false) => {
     for (let i = list.length - 1; i >= 0; i--)
