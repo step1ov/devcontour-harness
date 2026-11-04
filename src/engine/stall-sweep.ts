@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import type { Activity, LivenessState, StallSweepPolicy } from '../contracts/index.ts';
-import type { ActivityScope, TrackedCommand } from '../environment/activity.ts';
+import { ActivityScope, activityScope, type TrackedCommand } from '../environment/activity.ts';
 import { osTool, osToolEnv } from '../environment/os-tools.ts';
 
 // Обход зависших попыток. Предел времени (`timeoutMs`) отличает только
@@ -14,9 +14,12 @@ import { osTool, osToolEnv } from '../environment/os-tools.ts';
 /**
  * Доля процессорного времени от прошедшего, с которой расход дерева считается
  * движением. Простаивающий event loop или ожидание сети расходуют десятые доли
- * процента; работающая проверка без вывода — десятки. Сравнение — с опорной
- * точкой последнего движения, а не с прошлым замером: грубое разрешение ps
- * (секунды на Linux) не даёт ни ложного движения, ни ложного простоя.
+ * процента; работающая проверка без вывода — десятки. Расход считается по
+ * каждому процессу отдельно (сумма положительных приростов): завершившийся
+ * потомок уносит своё время из суммы дерева, и сравнение сумм ложно видело бы
+ * простой у сборки из коротких процессов. Накопленный прирост сравнивается с
+ * временем от последнего движения: грубое разрешение ps (секунды на Linux) не
+ * даёт ни ложного движения, ни ложного простоя.
  */
 export const CPU_ACTIVE_SHARE = 0.01;
 
@@ -45,7 +48,9 @@ export function parseCpuTime(text: string): number | undefined {
 /** Строки `ps -axww -o pid=,ppid=,time=,command=`. */
 export function parseProcessTable(stdout: string): ProcessRow[] {
   return stdout.split('\n').flatMap((line) => {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
+    // Строка команды бывает пустой (процесс-зомби, сменивший argv): такую
+    // строку не отбрасывают, иначе её потомки выпали бы из дерева.
+    const m = /^\s*(\d+)\s+(\d+)\s+(\S+)(?:\s+(.*))?$/.exec(line);
     if (!m) return [];
     const cpuMs = parseCpuTime(m[3]!);
     return [
@@ -53,7 +58,7 @@ export function parseProcessTable(stdout: string): ProcessRow[] {
         pid: Number(m[1]),
         parentPid: Number(m[2]),
         ...(cpuMs !== undefined ? { cpuMs } : {}),
-        command: m[4]!.trim(),
+        command: (m[4] ?? '').trim(),
       },
     ];
   });
@@ -109,36 +114,58 @@ export interface LivenessChange {
   lastMovementAt: number;
   idleMs: number;
   activity?: Activity;
+  /**
+   * ps не дал данных о процессах исполняющихся команд: оценка только по
+   * выводу и стадиям, поэтому выше `quiet` она не поднимается.
+   */
+  cpuUnavailable?: boolean;
   /** Только у `stalled`. */
   snapshot?: StallSnapshot;
 }
 
+/**
+ * Исход записи перехода у получателя: `recorded` — записан; `retry` —
+ * временный отказ, следующий обход повторит переход; `dropped` — больше не
+ * оценивать (владение утрачено, попытка остановлена).
+ */
+export type ChangeOutcome = 'recorded' | 'retry' | 'dropped';
+
 interface Memo {
   state: LivenessState;
-  /** Набор отслеживаемых процессов, к которому относится опора расхода. */
-  key: string;
-  cpuMs?: number;
-  cpuAt?: number;
-  /** Остановлен по `stop`: дальнейших переходов нет. */
+  /** Процессорное время каждого процесса деревьев по прошлому замеру. */
+  cpu?: Map<number, number>;
+  /** Прирост процессора с последнего движения. */
+  pending: number;
+  /** Время последнего движения по процессору (опора доли). */
+  cpuAt: number;
+  /** Остановлен или утрачен: дальнейших переходов нет. */
   done?: boolean;
 }
 
 const SNAPSHOT_PROCESSES = 100;
+/** Перерыв обходов (сон машины, занятый event loop) дольше стольких интервалов — не простой работы. */
+const GAP_INTERVALS = 3;
+/** Строка команды без маски не сохраняется. */
+export const UNMASKED_COMMAND = '(строка команды скрыта: нет маски)';
 
 /**
  * Периодический обход исполняющегося. Один ps на обход для всех попыток;
- * переходы отдаются `changed` синхронно. При `action: stop` попытка после
- * `stalled` больше не оценивается: её остановка сама выглядела бы движением.
+ * переходы отдаются `changed` синхронно. Попытка без исполняющихся команд
+ * (ждёт hook, ресурс, интеграцию) оценивается от последнего движения с
+ * большим порогом (`stalledMs`) и не выше `quiet`: её команды не зависли,
+ * а снимать нечего. При `action: stop` попытка после `stalled` больше не
+ * оценивается: её остановка сама выглядела бы движением.
  */
 export class StallSweep {
   private readonly memo = new Map<string, Memo>();
   private timer?: ReturnType<typeof setInterval>;
   private running?: Promise<void>;
+  private lastTick?: number;
   constructor(
     private readonly options: {
       policy: StallSweepPolicy;
       subjects: () => Iterable<SweepSubject>;
-      changed: (change: LivenessChange) => void;
+      changed: (change: LivenessChange) => ChangeOutcome | void;
       clock?: () => number;
       sample?: () => Promise<ProcessRow[] | null>;
     },
@@ -153,6 +180,8 @@ export class StallSweep {
   stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    // Следующий запуск не считает остановленное время перерывом работы.
+    this.lastTick = undefined;
   }
 
   /** Один обход; параллельный вызов ждёт идущий, а не запускает второй. */
@@ -166,49 +195,49 @@ export class StallSweep {
   }
 
   private async sweep() {
+    const clock = this.options.clock ?? Date.now;
+    const { policy } = this.options;
+    const startedAt = clock();
+    // Сон машины или занятый event loop: обходов не было, и молчание за это
+    // время ничего не говорит о работе. Отсчёт начинается заново, решения в
+    // этом обходе нет.
+    const gap =
+      this.lastTick !== undefined && startedAt - this.lastTick > GAP_INTERVALS * policy.intervalMs;
+    this.lastTick = startedAt;
     const subjects = [...this.options.subjects()];
     const ids = new Set(subjects.map((s) => s.id));
     for (const id of this.memo.keys()) if (!ids.has(id)) this.memo.delete(id);
+    if (gap) {
+      for (const subject of subjects) {
+        subject.scope.moved(startedAt);
+        const memo = this.memo.get(subject.id);
+        if (memo) Object.assign(memo, { cpu: undefined, pending: 0, cpuAt: startedAt });
+      }
+      return;
+    }
     const busy = subjects.some((s) => s.scope.running.size > 0);
     const rows = busy ? await (this.options.sample ?? sampleProcesses)() : null;
-    const clock = this.options.clock ?? Date.now;
     const now = clock();
-    const { policy } = this.options;
     for (const subject of subjects) {
-      const memo = this.memo.get(subject.id) ?? { state: 'active' as const, key: '' };
+      const memo: Memo = this.memo.get(subject.id) ?? { state: 'active', pending: 0, cpuAt: now };
       this.memo.set(subject.id, memo);
       if (memo.done) continue;
       const { scope } = subject;
       const tracked = [...scope.running];
-      const key = tracked
-        .map((t) => t.pid ?? 0)
-        .sort((a, b) => a - b)
-        .join(',');
       const trees = rows
         ? tracked.flatMap((t) => (t.pid ? [{ t, tree: treeOf(rows, t.pid) }] : []))
         : [];
-      if (rows) {
-        const cpu = trees.reduce(
-          (sum, { tree }) => sum + tree.reduce((s, r) => s + (r.cpuMs ?? 0), 0),
-          0,
-        );
-        if (key !== memo.key || memo.cpuMs === undefined || memo.cpuAt === undefined) {
-          memo.key = key;
-          memo.cpuMs = cpu;
-          memo.cpuAt = now;
-        } else if (
-          cpu > memo.cpuMs &&
-          cpu - memo.cpuMs >= CPU_ACTIVE_SHARE * Math.max(1, now - memo.cpuAt)
-        ) {
-          scope.moved();
-          memo.cpuMs = cpu;
-          memo.cpuAt = now;
-        }
+      const known = trees.some(({ tree }) => tree.some((r) => r.cpuMs !== undefined));
+      if (known) this.cpuMovement(memo, scope, trees, now);
+      else memo.cpu = undefined;
+      const idleMs = Math.max(0, now - scope.lastMovementAt);
+      let state: LivenessState;
+      if (!tracked.length) state = idleMs >= policy.stalledMs ? 'quiet' : 'active';
+      else {
+        state = livenessOf(idleMs, policy);
+        // Без данных о процессах молчание не отличить от счёта: не выше quiet.
+        if (!known && state === 'stalled') state = 'quiet';
       }
-      // Без исполняющихся команд попытка в собственном коде harness: его
-      // ограничивают другие сроки, а начало следующей команды — движение.
-      const idleMs = tracked.length ? Math.max(0, now - scope.lastMovementAt) : 0;
-      const state = livenessOf(idleMs, policy);
       if (state === memo.state) continue;
       const previous = memo.state;
       memo.state = state;
@@ -221,16 +250,59 @@ export class StallSweep {
         lastMovementAt: scope.lastMovementAt,
         idleMs,
         ...(current ? { activity: current.activity } : {}),
+        ...(tracked.length && !known ? { cpuUnavailable: true } : {}),
       };
       if (state === 'stalled') {
         change.snapshot = snapshotOf(tracked, trees, rows, current);
         if (policy.action === 'stop') memo.done = true;
       }
+      let outcome: ChangeOutcome;
       try {
-        this.options.changed(change);
+        outcome = this.options.changed(change) ?? 'recorded';
       } catch {
-        /* Получатель перехода не останавливает обход. */
+        outcome = 'retry';
       }
+      if (outcome === 'retry') {
+        // Переход не записан: следующий обход повторит его.
+        memo.state = previous;
+        memo.done = false;
+      } else if (outcome === 'dropped') memo.done = true;
+    }
+  }
+
+  /**
+   * Движение по процессору: сумма положительных приростов каждого процесса
+   * (новый — от нуля) и смена состава дерева. Завершившийся потомок не
+   * уменьшает счёт, а появление и уход процессов — уже работа.
+   */
+  private cpuMovement(
+    memo: Memo,
+    scope: ActivityScope,
+    trees: { tree: ProcessRow[] }[],
+    now: number,
+  ) {
+    const current = new Map<number, number>();
+    for (const { tree } of trees) for (const r of tree) current.set(r.pid, r.cpuMs ?? 0);
+    const previous = memo.cpu;
+    memo.cpu = current;
+    if (!previous) {
+      memo.pending = 0;
+      memo.cpuAt = now;
+      return;
+    }
+    let churn = current.size !== previous.size;
+    for (const [pid, cpu] of current) {
+      const before = previous.get(pid);
+      if (before === undefined) churn = true;
+      memo.pending += Math.max(0, cpu - (before ?? 0));
+    }
+    if (
+      churn ||
+      (memo.pending > 0 && memo.pending >= CPU_ACTIVE_SHARE * Math.max(1, now - memo.cpuAt))
+    ) {
+      scope.moved(now);
+      memo.pending = 0;
+      memo.cpuAt = now;
     }
   }
 }
@@ -247,11 +319,60 @@ function snapshotOf(
     for (const row of tree) {
       if (seen.has(row.pid) || processes.length >= SNAPSHOT_PROCESSES) continue;
       seen.add(row.pid);
-      processes.push({ ...row, command: (t.redact ?? String)(row.command).slice(0, 1000) });
+      processes.push({
+        ...row,
+        command: t.redact ? t.redact(row.command).slice(0, 1000) : UNMASKED_COMMAND,
+      });
     }
   return {
     processes,
     ...(rows ? {} : { processesUnavailable: true }),
     tail: (current ?? tracked.at(-1))?.tail ?? '',
   };
+}
+
+/** Остановка обходом зависших: причина прерывания и текст отказа. */
+export class StalledError extends Error {
+  override name = 'StalledError';
+}
+
+/** Текст остановки по переходу в `stalled`. */
+export function stallMessage(change: LivenessChange, policy: StallSweepPolicy, artifact?: string) {
+  const what = change.activity
+    ? `${change.activity.kind} ${change.activity.label}`
+    : 'команда попытки';
+  return (
+    `Зависание: ${what} не двигалась ${Math.round(change.idleMs / 1000)} с ` +
+    `(порог stallSweep.stalledMs ${Math.round(policy.stalledMs / 1000)} с): ` +
+    'нет вывода, расхода процессора и смены стадий. Повтор или правка среды, не кода' +
+    (artifact ? `; снимок: ${artifact}` : '')
+  );
+}
+
+/**
+ * Обход зависших для операции вне попытки (совместная проверка, gates на
+ * SHA): своя область движения, один субъект. Записать живость некуда, поэтому
+ * сообщается только остановка: при `action: stop` на `stalled` вызывается
+ * `abort` с `StalledError`, и операция завершается отказом с её текстом.
+ */
+export async function superviseStalls<T>(
+  policy: StallSweepPolicy,
+  abort: (reason: StalledError) => void,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const scope = new ActivityScope();
+  const sweep = new StallSweep({
+    policy,
+    subjects: () => [{ id: 'operation', scope }],
+    changed: (change) => {
+      if (change.state === 'stalled' && policy.action === 'stop')
+        abort(new StalledError(stallMessage(change, policy)));
+    },
+  });
+  sweep.start();
+  try {
+    return await activityScope.run(scope, fn);
+  } finally {
+    sweep.stop();
+  }
 }

@@ -2045,7 +2045,7 @@
         "intervalMs": {
           "default": 30000,
           "type": "integer",
-          "minimum": 10,
+          "minimum": 1000,
           "maximum": 600000
         },
         "quietMs": {

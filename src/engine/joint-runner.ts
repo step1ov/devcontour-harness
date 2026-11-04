@@ -6,8 +6,10 @@ import {
   type ExecutionPolicy,
   type JointVerification,
   type JointVerificationState,
+  stallSweepOf,
 } from '../contracts/index.ts';
 import { git } from '../environment/process.ts';
+import { superviseStalls, type StalledError } from './stall-sweep.ts';
 import { chooseCheckoutRoot } from '../environment/checkout-root.ts';
 import { credentialPaths } from '../environment/isolation.ts';
 import {
@@ -71,7 +73,7 @@ export class JointRunner {
       workIds,
       ...(options.baseline ? { baseline: options.baseline } : {}),
     });
-    return this.execute(v, options.signal);
+    return this.supervised(v, options.signal);
   }
 
   /**
@@ -79,7 +81,20 @@ export class JointRunner {
    * транзакции (с продуктовыми условиями), передаёт её сюда.
    */
   run(v: JointVerificationState, signal?: AbortSignal) {
-    return this.execute(v, signal);
+    return this.supervised(v, signal);
+  }
+
+  /**
+   * Проверка под своим обходом зависших: команды вне попытки, записать
+   * живость некуда; при `stop` зависание прерывает проверку своей причиной.
+   */
+  private supervised(v: JointVerificationState, outer?: AbortSignal) {
+    const stall = new AbortController();
+    return superviseStalls(
+      stallSweepOf(this.policy),
+      (reason: StalledError) => stall.abort(reason),
+      () => this.execute(v, outer ? AbortSignal.any([outer, stall.signal]) : stall.signal),
+    );
   }
 
   private async execute(
@@ -375,7 +390,12 @@ export class JointRunner {
           availableRedactor([this.policy.environment, r.environment], source),
         ),
       );
-      const message = redact(error instanceof Error ? error.message : String(error));
+      // Остановка обходом зависших называет зависание, что бы ни выбросила прерванная операция.
+      const stalled =
+        outer?.aborted && (outer.reason as Error | undefined)?.name === 'StalledError'
+          ? (outer.reason as Error).message
+          : undefined;
+      const message = redact(stalled ?? (error instanceof Error ? error.message : String(error)));
       this.engine.jointFail(v.id, v.token, message);
       const failed = this.engine.read((view) => view.verification(v.id));
       if (failed?.status === 'failed') return publicJoint(failed);

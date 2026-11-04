@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
@@ -104,7 +104,13 @@ import {
 } from '../agents/review-probe.ts';
 import { runGate } from '../verification/gates.ts';
 import { ActivityScope, activityScope } from '../environment/activity.ts';
-import { StallSweep, type LivenessChange } from './stall-sweep.ts';
+import {
+  StallSweep,
+  StalledError,
+  stallMessage,
+  type ChangeOutcome,
+  type LivenessChange,
+} from './stall-sweep.ts';
 import { orderedScope } from '../verification/gate-scope.ts';
 import {
   alreadySatisfiedVerdict,
@@ -453,17 +459,45 @@ export class Runner {
    * снимок в artifacts попытки и, при `action: stop`, остановка попытки
    * исходом `stalled` (`StalledError` как причина прерывания).
    */
-  private livenessChanged(change: LivenessChange) {
+  private livenessChanged(change: LivenessChange): ChangeOutcome {
     const job = this.jobs.get(change.subject.id);
-    if (!job) return;
-    const { action } = stallSweepOf(this.policy);
+    if (!job) return 'dropped';
+    const sweep = stallSweepOf(this.policy);
     const id = change.subject.id;
     const iso = (ms: number) => new Date(ms).toISOString();
     const stalled = change.state === 'stalled';
-    const artifact = stalled
-      ? join(this.dirOf(job.repositoryId), 'artifacts', id, `stall-${change.at}.json`)
-      : undefined;
     const snapshot = change.snapshot;
+    // Снимок пишется до события: событие называет только записанный файл.
+    let artifact: string | undefined;
+    if (stalled && snapshot) {
+      const path = join(this.dirOf(job.repositoryId), 'artifacts', id, `stall-${change.at}.json`);
+      try {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(
+          path,
+          JSON.stringify(
+            {
+              runId: id,
+              at: iso(change.at),
+              lastMovementAt: iso(change.lastMovementAt),
+              idleMs: Math.round(change.idleMs),
+              activity: change.activity,
+              action: sweep.action,
+              ...snapshot,
+            },
+            null,
+            2,
+          ),
+        );
+        artifact = path;
+      } catch {
+        /* Снимок не записан: событие несёт его без ссылки на файл. */
+      }
+    }
+    const stop = () => {
+      if (stalled && sweep.action === 'stop')
+        job.controller.abort(new StalledError(stallMessage(change, sweep, artifact)));
+    };
     try {
       this.engine.liveness(
         id,
@@ -473,12 +507,13 @@ export class Runner {
           at: iso(change.at),
           lastMovementAt: iso(change.lastMovementAt),
           ...(change.activity ? { activity: change.activity } : {}),
-          ...(stalled ? { action } : {}),
+          ...(stalled ? { action: sweep.action } : {}),
           ...(artifact ? { artifact } : {}),
         },
         {
           previous: change.previous,
           idleMs: Math.round(change.idleMs),
+          ...(change.cpuUnavailable ? { cpuUnavailable: true } : {}),
           ...(snapshot
             ? {
                 snapshot: {
@@ -496,46 +531,20 @@ export class Runner {
             : {}),
         },
       );
-    } catch {
-      // Утратившая владение или завершившаяся попытка перехода не публикует.
-      return;
+    } catch (error) {
+      // Отказ движка (владение утрачено, попытка не активна, запрет хоста):
+      // попытку больше не оценивать и не трогать.
+      if (error instanceof HarnessError) return 'dropped';
+      // Временный отказ хранилища: переход повторит следующий обход; зависшая
+      // попытка при `stop` останавливается всё равно — причина в её отказе.
+      if (stalled && sweep.action === 'stop') {
+        stop();
+        return 'dropped';
+      }
+      return 'retry';
     }
-    if (!stalled) return;
-    if (artifact && snapshot)
-      void mkdir(dirname(artifact), { recursive: true })
-        .then(() =>
-          writeFile(
-            artifact,
-            JSON.stringify(
-              {
-                runId: id,
-                at: iso(change.at),
-                lastMovementAt: iso(change.lastMovementAt),
-                idleMs: Math.round(change.idleMs),
-                activity: change.activity,
-                action,
-                ...snapshot,
-              },
-              null,
-              2,
-            ),
-          ),
-        )
-        .catch(() => undefined);
-    if (action === 'stop') {
-      const what = change.activity
-        ? `${change.activity.kind} ${change.activity.label}`
-        : 'команда попытки';
-      job.controller.abort(
-        new DOMException(
-          `Зависание: ${what} не двигалась ${Math.round(change.idleMs / 1000)} с ` +
-            `(порог stallSweep.stalledMs ${Math.round(stallSweepOf(this.policy).stalledMs / 1000)} с): ` +
-            'нет вывода, расхода процессора и смены стадий. Повтор или правка среды, не кода' +
-            (artifact ? `; снимок: ${artifact}` : ''),
-          'StalledError',
-        ),
-      );
-    }
+    stop();
+    return 'recorded';
   }
 
   /** Освободить роль controller: процесс больше не ведёт очередь. */

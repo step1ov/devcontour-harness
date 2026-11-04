@@ -956,6 +956,9 @@
               ],
               "additionalProperties": false
             },
+            "cpuUnavailable": {
+              "type": "boolean"
+            },
             "action": {
               "type": "string",
               "enum": [

@@ -28,8 +28,8 @@ export class ActivityScope {
   constructor(readonly clock: () => number = Date.now) {
     this.lastMovementAt = clock();
   }
-  moved() {
-    this.lastMovementAt = Math.max(this.lastMovementAt, this.clock());
+  moved(at = this.clock()) {
+    this.lastMovementAt = Math.max(this.lastMovementAt, at);
   }
   begin(pid: number | undefined, activity: Activity, redact?: (text: string) => string) {
     const tracked: TrackedCommand = {

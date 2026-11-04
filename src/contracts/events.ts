@@ -115,6 +115,8 @@ export const eventPayloads = {
     lastMovementAt: isoTimeSchema,
     idleMs: z.number().int().min(0),
     activity: activitySchema.optional(),
+    /** ps не дал данных о процессах: оценка только по выводу, не выше `quiet`. */
+    cpuUnavailable: z.boolean().optional(),
     action: stallActionSchema.optional(),
     snapshot: z
       .strictObject({

@@ -1,7 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm, rmdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { HarnessError, type EvidenceRecord, type ExecutionPolicy } from '../contracts/index.ts';
+import {
+  HarnessError,
+  stallSweepOf,
+  type EvidenceRecord,
+  type ExecutionPolicy,
+} from '../contracts/index.ts';
+import { superviseStalls } from '../engine/stall-sweep.ts';
 import { TaskFailure } from '../engine/failure.ts';
 import { git } from '../environment/process.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
@@ -79,6 +85,30 @@ export interface GatesAtResult {
  * профиль проверяется один раз на итоговом SHA.
  */
 export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesAtResult> {
+  // Свой обход зависших: команды вне попытки, записать живость некуда; при
+  // `stop` зависание прерывает проверку, и отказ называет его.
+  const stall = new AbortController();
+  const signal = input.signal ? AbortSignal.any([input.signal, stall.signal]) : stall.signal;
+  try {
+    return await superviseStalls(
+      stallSweepOf(ctx.policy),
+      (reason) => stall.abort(reason),
+      () => gatesAt(ctx, { ...input, signal }),
+    );
+  } catch (error) {
+    if (stall.signal.aborted && !(error instanceof TaskFailure && error.kind === 'stalled'))
+      throw new TaskFailure('stalled', (stall.signal.reason as Error).message);
+    throw error;
+  }
+}
+
+/** Причина остановки обходом зависших, если сигнал прерван им. */
+const stalledBy = (signal?: AbortSignal) =>
+  signal?.aborted && (signal.reason as Error | undefined)?.name === 'StalledError'
+    ? (signal.reason as Error).message
+    : undefined;
+
+async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesAtResult> {
   const repo = ctx.policy.repositories.find((r) => r.id === input.repositoryId);
   if (!repo) throw new HarnessError('NOT_FOUND', 'Репозиторий не объявлен: ' + input.repositoryId);
   if (!input.gates.length) throw new HarnessError('INVALID_INPUT', 'Не названы gates проверки');
@@ -248,7 +278,7 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
                 if (!(error instanceof TaskFailure) || evidence.at(-1)?.gate !== gate.id)
                   throw error;
                 failed.add(gate.id);
-                failures.push({ gate: gate.id, message: error.message });
+                failures.push({ gate: gate.id, message: stalledBy(input.signal) ?? error.message });
               }
             }
           },

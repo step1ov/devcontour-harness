@@ -321,7 +321,7 @@ export const executionPolicySchema = z.strictObject({
    */
   stallSweep: z
     .strictObject({
-      intervalMs: z.number().int().min(10).max(600_000).default(30_000),
+      intervalMs: z.number().int().min(1000).max(600_000).default(30_000),
       quietMs: z.number().int().positive().max(86_400_000).default(180_000),
       stalledMs: z.number().int().positive().max(86_400_000).default(600_000),
       action: z.enum(['stop', 'report']).default('report'),
@@ -329,6 +329,10 @@ export const executionPolicySchema = z.strictObject({
     .refine((s) => s.quietMs < s.stalledMs, {
       message: 'stallSweep.quietMs должен быть меньше stalledMs',
       path: ['quietMs'],
+    })
+    .refine((s) => s.intervalMs <= s.quietMs, {
+      message: 'stallSweep.intervalMs не больше quietMs: иначе quiet не заметить вовремя',
+      path: ['intervalMs'],
     })
     .optional(),
   maxAttempts: z.number().int().min(1).max(10).default(3),
@@ -373,12 +377,14 @@ export const policyDigest = (policy: ExecutionPolicy) => digestOf(policy);
  * Digest исполнительной части политики — основание согласования графа и
  * fencing попыток. Пределы бюджетов и тарифы в него не входят: это учёт, а не
  * условия исполнения, и поднятый предел действует сразу, без нового
- * согласования (как в DevContour). `policyDigest` — digest загруженной
+ * согласования (как в DevContour). Обход зависших (`stallSweep`) — тоже
+ * надзор, а не условие исполнения кода: его пороги меняются без новой
+ * попытки и не трогают основания reuse. `policyDigest` — digest загруженной
  * политики целиком: им сверяются применение политики (`appliedPolicy`) и
  * запрос операции reconfigure.
  */
 export const executionDigest = (policy: ExecutionPolicy) =>
-  digestOf({ ...policy, budgets: undefined, prices: undefined });
+  digestOf({ ...policy, budgets: undefined, prices: undefined, stallSweep: undefined });
 
 export type ReviewKind = 'code' | 'plan' | 'contract';
 

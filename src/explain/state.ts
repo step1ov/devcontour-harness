@@ -198,9 +198,9 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
                   },
                 }
               : {})(
-            work.activeRunId && v.attempt(work.activeRunId)?.status === 'active'
-              ? v.attempt(work.activeRunId)?.liveness
-              : undefined,
+            ((a) => (a?.status === 'active' ? a.liveness : undefined))(
+              work.activeRunId ? v.attempt(work.activeRunId) : undefined,
+            ),
           ),
         },
         maxAttempts: options.maxAttempts,
