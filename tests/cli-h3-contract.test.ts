@@ -44,7 +44,7 @@ const harness = (args: string[]) => {
 };
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
-const laterCommands: readonly string[] = ['worktree-cleanup', 'report'];
+const laterCommands: readonly string[] = ['worktree-cleanup', 'report', 'handoff'];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
   'validate',
@@ -192,11 +192,11 @@ test('H3-01: каждая общая операция читается из до
     // Вход строгий: лишний ключ отвергается.
     assert.equal(op.input.safeParse({ unknownArg: 'x' }).success, false, c);
   }
-  // multiple объявлен только у --requirements plan-request.
+  // multiple объявлен только у --requirements plan-request и --intent handoff.
   const multiple = Object.entries(cliCommands).flatMap(([c, contract]) =>
     (contract.args as readonly CliArgument[]).filter((a) => a.multiple).map((a) => c + a.name),
   );
-  assert.deepEqual(multiple, ['plan-request--requirements']);
+  assert.deepEqual(multiple, ['handoff--intent', 'plan-request--requirements']);
   assert.deepEqual(Object.keys(sharedOperations.capabilities.input.shape), []);
 });
 

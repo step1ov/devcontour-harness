@@ -103,6 +103,7 @@ git rev-parse refs/heads/harness/accepted   # совпадает с data.result.
 | `profile --profile ID [--repository D]`      | Разрешение профиля стека без команд проекта        |
 | `doctor`                                     | Версии, runtime, sandbox, совместимость состояния  |
 | `report --state D [--format md\|html]`       | Отчёт об эффекте по данным проекта                 |
+| `handoff --state D [--intent T]… [--json]`   | Пакет передачи контекста новой сессии агента       |
 
 stdout — один JSON (`devcontour-harness/v1alpha1`), диагностика — stderr. Exit
 codes: 0 успех, 2 неверный вход, 3 отказ/блокировка, 4 инфраструктура.

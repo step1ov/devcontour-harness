@@ -49,6 +49,7 @@ import { SqliteExecutionStore } from './storage/sqlite.ts';
 import { collectReportInput } from './control/report.ts';
 import { writeReportFile } from './control/report-file.ts';
 import { valueReport, reportHtml, reportMarkdown } from './report/index.ts';
+import { handoffMarkdown, handoffPack } from './handoff/index.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -289,6 +290,8 @@ const options = {
   'as-of': { type: 'string' },
   format: { type: 'string' },
   'no-titles': { type: 'boolean' },
+  intent: { type: 'string', multiple: true },
+  json: { type: 'boolean' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -308,6 +311,8 @@ const flagOwners = {
   'as-of': ['report'],
   format: ['report'],
   'no-titles': ['report'],
+  intent: ['handoff'],
+  json: ['handoff'],
 } as const;
 
 /** Явное человеческое представление успешного ответа (`--human`). */
@@ -722,6 +727,19 @@ async function run(
         command,
         data: { out: v.out, format, bytes: Buffer.byteLength(text), asOf: report.window.asOf },
       };
+    }
+    case 'handoff': {
+      const h = open(need('state'), binding(need('state')), 'state');
+      try {
+        const data = handoffPack(h, {
+          ...optional('graphId', v.graph),
+          ...optional('intentions', v.intent),
+        });
+        // Markdown по умолчанию; --json — конверт. Отказ — JSON в обоих режимах.
+        return { command, data, ...(v.json ? {} : { text: handoffMarkdown(data) }) };
+      } finally {
+        h.close();
+      }
     }
     case 'plan-request': {
       const b = loadPolicy(need('policy'));

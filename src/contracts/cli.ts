@@ -32,6 +32,7 @@ import { planCheckDataSchema, planRequestDataSchema } from './planning.ts';
 import { toolchainReportSchema } from './toolchain.ts';
 import { operationCatalogSchema } from './catalog.ts';
 import { reportDataSchema } from './report.ts';
+import { handoffPackSchema } from './handoff.ts';
 
 /**
  * Договор CLI `harness`.
@@ -503,6 +504,31 @@ export const cliCommands = {
       },
     ],
     refusals: ['NOT_FOUND', 'PATH_CONFLICT'],
+  },
+  handoff: {
+    description:
+      'Пакет передачи контекста для новой сессии ведущего агента из хранилища: активная работа и стадия, решения и остановки, незавершённые попытки, последние провалы, бюджеты, следующий шаг; только чтение',
+    writes: false,
+    idempotency: 'Только чтение; агент добавляет только намерения (--intent)',
+    args: [
+      state,
+      { name: '--graph', value: 'id', required: false, description: 'Только этот граф' },
+      {
+        name: '--intent',
+        value: 'text',
+        required: false,
+        multiple: true,
+        description:
+          'Намерение агента (до 20, каждое до 1000 знаков); единственный текст не из хранилища',
+      },
+      {
+        name: '--json',
+        value: 'flag',
+        required: false,
+        description: 'JSON-конверт (HandoffPack) вместо Markdown',
+      },
+    ],
+    refusals: ['NOT_FOUND'],
   },
   'plan-request': {
     description:
@@ -1210,6 +1236,7 @@ export const cliDataSchemas = {
   init: initDataSchema,
   explain: explainDataSchema,
   report: reportDataSchema,
+  handoff: handoffPackSchema,
   'plan-request': planRequestDataSchema,
   'plan-check': planCheckDataSchema,
   capabilities: operationCatalogSchema,

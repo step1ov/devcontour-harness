@@ -168,6 +168,10 @@ for (const required of [
   'lib/control/report.js',
   'lib/contracts/report.js',
   'schemas/value-report.schema.json',
+  // Пакет передачи контекста.
+  'lib/handoff/index.js',
+  'lib/contracts/handoff.js',
+  'schemas/handoff-pack.schema.json',
 ])
   if (!packed.files.some((f) => f.path === required)) fail('нет файла ' + required);
 

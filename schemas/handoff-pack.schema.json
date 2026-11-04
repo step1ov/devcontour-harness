@@ -1,0 +1,1270 @@
+{
+  "$id": "devcontour-harness/v1alpha1/handoff-pack.schema.json",
+  "title": "handoff-pack",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "handoffVersion": {
+      "type": "number",
+      "const": 1
+    },
+    "at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+    },
+    "graphId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "maxAttempts": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "repairBudget": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "maxAttempts",
+        "repairBudget"
+      ],
+      "additionalProperties": false
+    },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "works": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "open": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "done": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "cancelled": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "byStatus": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "draft",
+                  "ready",
+                  "running",
+                  "verifying",
+                  "reviewing",
+                  "integrating",
+                  "done",
+                  "failed",
+                  "cancelled"
+                ]
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "status",
+              "count"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "works",
+        "open",
+        "done",
+        "cancelled",
+        "byStatus"
+      ],
+      "additionalProperties": false
+    },
+    "queue": {
+      "type": "object",
+      "properties": {
+        "paused": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "operator",
+            "shutdown",
+            "runtime",
+            "base-check",
+            "reconfigure"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 301
+        },
+        "since": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "liftedByRun": {
+          "type": "boolean",
+          "const": true
+        },
+        "code": {
+          "type": "string",
+          "enum": [
+            "INVALID_INPUT",
+            "UNSUPPORTED_COMMAND",
+            "UNSUPPORTED_VERSION",
+            "GRAPH_CYCLE",
+            "GRAPH_UNKNOWN_DEPENDENCY",
+            "GRAPH_DUPLICATE_ID",
+            "GATE_UNKNOWN",
+            "GATE_GROUP_CYCLE",
+            "REVIEWER_SAME_VENDOR",
+            "REVIEWER_MISSING",
+            "RESPONSE_TOO_LARGE",
+            "APPROVAL_STALE",
+            "APPROVAL_REQUIRED",
+            "LEASE_STALE",
+            "CONTROLLER_BUSY",
+            "PAUSED",
+            "NOT_READY",
+            "SCOPE_VIOLATION",
+            "GATE_FAILED",
+            "REVIEW_REJECTED",
+            "BUDGET_EXHAUSTED",
+            "BUDGET_UNKNOWN",
+            "ATTEMPTS_EXHAUSTED",
+            "REVISION_CONFLICT",
+            "CANCELLED",
+            "NOT_FOUND",
+            "PATH_CONFLICT",
+            "STATE_VERSION_UNSUPPORTED",
+            "RUNTIME_UNAVAILABLE",
+            "REVIEW_PROTOCOL_INVALID",
+            "SANDBOX_UNAVAILABLE",
+            "GIT_FAILED",
+            "STORAGE_FAILED",
+            "DELIVERY_FAILED",
+            "INTERNAL"
+          ]
+        },
+        "actor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "controller",
+                "lead",
+                "user"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "none",
+            "wait",
+            "review-plan",
+            "retry",
+            "diagnose-failure",
+            "reset-attempts",
+            "raise-budget",
+            "replan-dependents",
+            "recovery-decision",
+            "user-decision",
+            "resume-queue",
+            "fix-environment",
+            "fix-access"
+          ]
+        }
+      },
+      "required": [
+        "paused"
+      ],
+      "additionalProperties": false
+    },
+    "controller": {
+      "type": "object",
+      "properties": {
+        "owner": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "until": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "live": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "owner",
+        "until",
+        "live"
+      ],
+      "additionalProperties": false
+    },
+    "active": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "workId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 301
+          },
+          "runId": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "attempt": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "ready",
+              "running",
+              "verifying",
+              "reviewing",
+              "integrating",
+              "done",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "runtime": {
+            "type": "string"
+          },
+          "elapsedMs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "stage": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "elapsedMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "name",
+              "elapsedMs"
+            ],
+            "additionalProperties": false
+          },
+          "sinceHeartbeatMs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "stale": {
+            "type": "boolean"
+          },
+          "gates": {
+            "type": "object",
+            "properties": {
+              "phase": {
+                "type": "string",
+                "enum": [
+                  "candidate",
+                  "integration"
+                ]
+              },
+              "required": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "passed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "failed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "remaining": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "phase",
+              "required",
+              "passed",
+              "failed",
+              "remaining"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "workId",
+          "title",
+          "runId",
+          "attempt",
+          "phase",
+          "runtime",
+          "elapsedMs",
+          "stale",
+          "gates"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "unfinished": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "runId": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "workId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "attempt": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "ready",
+              "running",
+              "verifying",
+              "reviewing",
+              "integrating",
+              "done",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+          },
+          "stale": {
+            "type": "boolean"
+          },
+          "current": {
+            "type": "boolean"
+          },
+          "interrupted": {
+            "type": "string",
+            "const": "shutdown"
+          }
+        },
+        "required": [
+          "runId",
+          "workId",
+          "attempt",
+          "phase",
+          "startedAt",
+          "stale",
+          "current"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "works": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "graphId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 301
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "ready",
+              "running",
+              "verifying",
+              "reviewing",
+              "integrating",
+              "done",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "attempt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "failureKind": {
+            "type": "string",
+            "enum": [
+              "provider-auth",
+              "environment",
+              "timeout",
+              "stale-base",
+              "empty-result",
+              "unfinished",
+              "scope-violation",
+              "gate",
+              "review",
+              "review-protocol",
+              "merge",
+              "cancelled",
+              "budget",
+              "needs-lead",
+              "unknown"
+            ]
+          },
+          "failure": {
+            "type": "string",
+            "maxLength": 301
+          },
+          "hold": {
+            "type": "object",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "maxLength": 300
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 301
+              }
+            },
+            "required": [
+              "operation",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "recovery": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "maxLength": 40
+              },
+              "property": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 301
+              },
+              "proposal": {
+                "type": "string",
+                "maxLength": 301
+              }
+            },
+            "required": [
+              "status",
+              "property"
+            ],
+            "additionalProperties": false
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "enum": [
+                    "INVALID_INPUT",
+                    "UNSUPPORTED_COMMAND",
+                    "UNSUPPORTED_VERSION",
+                    "GRAPH_CYCLE",
+                    "GRAPH_UNKNOWN_DEPENDENCY",
+                    "GRAPH_DUPLICATE_ID",
+                    "GATE_UNKNOWN",
+                    "GATE_GROUP_CYCLE",
+                    "REVIEWER_SAME_VENDOR",
+                    "REVIEWER_MISSING",
+                    "RESPONSE_TOO_LARGE",
+                    "APPROVAL_STALE",
+                    "APPROVAL_REQUIRED",
+                    "LEASE_STALE",
+                    "CONTROLLER_BUSY",
+                    "PAUSED",
+                    "NOT_READY",
+                    "SCOPE_VIOLATION",
+                    "GATE_FAILED",
+                    "REVIEW_REJECTED",
+                    "BUDGET_EXHAUSTED",
+                    "BUDGET_UNKNOWN",
+                    "ATTEMPTS_EXHAUSTED",
+                    "REVISION_CONFLICT",
+                    "CANCELLED",
+                    "NOT_FOUND",
+                    "PATH_CONFLICT",
+                    "STATE_VERSION_UNSUPPORTED",
+                    "RUNTIME_UNAVAILABLE",
+                    "REVIEW_PROTOCOL_INVALID",
+                    "SANDBOX_UNAVAILABLE",
+                    "GIT_FAILED",
+                    "STORAGE_FAILED",
+                    "DELIVERY_FAILED",
+                    "INTERNAL"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "maxLength": 301
+                }
+              },
+              "required": [
+                "code",
+                "message"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "next": {
+            "type": "object",
+            "properties": {
+              "actor": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "controller",
+                      "lead",
+                      "user"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "action": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "wait",
+                  "review-plan",
+                  "retry",
+                  "diagnose-failure",
+                  "reset-attempts",
+                  "raise-budget",
+                  "replan-dependents",
+                  "recovery-decision",
+                  "user-decision",
+                  "resume-queue",
+                  "fix-environment",
+                  "fix-access"
+                ]
+              },
+              "step": {
+                "type": "string",
+                "enum": [
+                  "accepted",
+                  "cancelled",
+                  "recovery-awaiting-lead",
+                  "recovery-analyzing",
+                  "recovery-applying",
+                  "recovery-retry-allowed",
+                  "recovery-retrying",
+                  "recovery-awaiting-user",
+                  "recovery-stopped",
+                  "corpus-adoption",
+                  "held",
+                  "plan-review",
+                  "attempt-running",
+                  "retry-within-budget",
+                  "attempts-exhausted",
+                  "awaiting-claim"
+                ]
+              },
+              "property": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "detail": {
+                "type": "string",
+                "maxLength": 301
+              }
+            },
+            "required": [
+              "actor",
+              "action"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "graphId",
+          "title",
+          "status",
+          "attempt",
+          "blockers",
+          "next"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "stops": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "INVALID_INPUT",
+              "UNSUPPORTED_COMMAND",
+              "UNSUPPORTED_VERSION",
+              "GRAPH_CYCLE",
+              "GRAPH_UNKNOWN_DEPENDENCY",
+              "GRAPH_DUPLICATE_ID",
+              "GATE_UNKNOWN",
+              "GATE_GROUP_CYCLE",
+              "REVIEWER_SAME_VENDOR",
+              "REVIEWER_MISSING",
+              "RESPONSE_TOO_LARGE",
+              "APPROVAL_STALE",
+              "APPROVAL_REQUIRED",
+              "LEASE_STALE",
+              "CONTROLLER_BUSY",
+              "PAUSED",
+              "NOT_READY",
+              "SCOPE_VIOLATION",
+              "GATE_FAILED",
+              "REVIEW_REJECTED",
+              "BUDGET_EXHAUSTED",
+              "BUDGET_UNKNOWN",
+              "ATTEMPTS_EXHAUSTED",
+              "REVISION_CONFLICT",
+              "CANCELLED",
+              "NOT_FOUND",
+              "PATH_CONFLICT",
+              "STATE_VERSION_UNSUPPORTED",
+              "RUNTIME_UNAVAILABLE",
+              "REVIEW_PROTOCOL_INVALID",
+              "SANDBOX_UNAVAILABLE",
+              "GIT_FAILED",
+              "STORAGE_FAILED",
+              "DELIVERY_FAILED",
+              "INTERNAL"
+            ]
+          },
+          "cause": {
+            "type": "string",
+            "enum": [
+              "provider-auth",
+              "environment",
+              "timeout",
+              "stale-base",
+              "empty-result",
+              "unfinished",
+              "scope-violation",
+              "gate",
+              "review",
+              "review-protocol",
+              "merge",
+              "cancelled",
+              "budget",
+              "needs-lead",
+              "unknown",
+              "runtime-missing",
+              "controller-busy",
+              "operator-pause",
+              "approval-required",
+              "not-ready"
+            ]
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "preflight",
+              "claim",
+              "implementation",
+              "gates",
+              "review",
+              "integration",
+              "delivery"
+            ]
+          },
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "controller",
+                  "lead",
+                  "user"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "none",
+              "wait",
+              "review-plan",
+              "retry",
+              "diagnose-failure",
+              "reset-attempts",
+              "raise-budget",
+              "replan-dependents",
+              "recovery-decision",
+              "user-decision",
+              "resume-queue",
+              "fix-environment",
+              "fix-access"
+            ]
+          },
+          "retryPlanned": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "evidence": {
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "attempt",
+                    "evidence",
+                    "event",
+                    "doctor"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "sha": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "workId": {
+            "type": "string"
+          },
+          "runId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "cause",
+          "phase",
+          "actor",
+          "action",
+          "retryPlanned",
+          "message",
+          "evidence"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "runId": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "workId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "attempt": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "failed",
+              "expired"
+            ]
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "ready",
+              "running",
+              "verifying",
+              "reviewing",
+              "integrating",
+              "done",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "finishedAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+          },
+          "failureKind": {
+            "type": "string",
+            "enum": [
+              "provider-auth",
+              "environment",
+              "timeout",
+              "stale-base",
+              "empty-result",
+              "unfinished",
+              "scope-violation",
+              "gate",
+              "review",
+              "review-protocol",
+              "merge",
+              "cancelled",
+              "budget",
+              "needs-lead",
+              "unknown"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "INVALID_INPUT",
+              "UNSUPPORTED_COMMAND",
+              "UNSUPPORTED_VERSION",
+              "GRAPH_CYCLE",
+              "GRAPH_UNKNOWN_DEPENDENCY",
+              "GRAPH_DUPLICATE_ID",
+              "GATE_UNKNOWN",
+              "GATE_GROUP_CYCLE",
+              "REVIEWER_SAME_VENDOR",
+              "REVIEWER_MISSING",
+              "RESPONSE_TOO_LARGE",
+              "APPROVAL_STALE",
+              "APPROVAL_REQUIRED",
+              "LEASE_STALE",
+              "CONTROLLER_BUSY",
+              "PAUSED",
+              "NOT_READY",
+              "SCOPE_VIOLATION",
+              "GATE_FAILED",
+              "REVIEW_REJECTED",
+              "BUDGET_EXHAUSTED",
+              "BUDGET_UNKNOWN",
+              "ATTEMPTS_EXHAUSTED",
+              "REVISION_CONFLICT",
+              "CANCELLED",
+              "NOT_FOUND",
+              "PATH_CONFLICT",
+              "STATE_VERSION_UNSUPPORTED",
+              "RUNTIME_UNAVAILABLE",
+              "REVIEW_PROTOCOL_INVALID",
+              "SANDBOX_UNAVAILABLE",
+              "GIT_FAILED",
+              "STORAGE_FAILED",
+              "DELIVERY_FAILED",
+              "INTERNAL"
+            ]
+          },
+          "error": {
+            "type": "string",
+            "maxLength": 301
+          }
+        },
+        "required": [
+          "runId",
+          "workId",
+          "attempt",
+          "status",
+          "phase",
+          "code"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "properties": {
+        "onUnknown": {
+          "type": "string",
+          "enum": [
+            "stop",
+            "continue"
+          ]
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "work",
+                  "group",
+                  "total"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "within",
+                  "exceeded",
+                  "undetermined"
+                ]
+              },
+              "limitUsd": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "limitMs": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "spentUsd": {
+                "type": "number",
+                "minimum": 0
+              },
+              "durationMs": {
+                "type": "number",
+                "minimum": 0
+              },
+              "unknownCalls": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "remainingUsd": {
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "remainingMs": {
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 301
+              }
+            },
+            "required": [
+              "scope",
+              "state",
+              "spentUsd",
+              "durationMs",
+              "unknownCalls",
+              "remainingUsd",
+              "remainingMs"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "onUnknown",
+        "entries"
+      ],
+      "additionalProperties": false
+    },
+    "repairs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "graphId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "status": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "used": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "budget": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "graphId",
+          "status",
+          "used",
+          "budget"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "next": {
+      "type": "object",
+      "properties": {
+        "actor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "controller",
+                "lead",
+                "user"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "none",
+            "wait",
+            "review-plan",
+            "retry",
+            "diagnose-failure",
+            "reset-attempts",
+            "raise-budget",
+            "replan-dependents",
+            "recovery-decision",
+            "user-decision",
+            "resume-queue",
+            "fix-environment",
+            "fix-access"
+          ]
+        },
+        "step": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "cancelled",
+            "recovery-awaiting-lead",
+            "recovery-analyzing",
+            "recovery-applying",
+            "recovery-retry-allowed",
+            "recovery-retrying",
+            "recovery-awaiting-user",
+            "recovery-stopped",
+            "corpus-adoption",
+            "held",
+            "plan-review",
+            "attempt-running",
+            "retry-within-budget",
+            "attempts-exhausted",
+            "awaiting-claim"
+          ]
+        },
+        "property": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 301
+        },
+        "workId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "code": {
+          "type": "string",
+          "enum": [
+            "INVALID_INPUT",
+            "UNSUPPORTED_COMMAND",
+            "UNSUPPORTED_VERSION",
+            "GRAPH_CYCLE",
+            "GRAPH_UNKNOWN_DEPENDENCY",
+            "GRAPH_DUPLICATE_ID",
+            "GATE_UNKNOWN",
+            "GATE_GROUP_CYCLE",
+            "REVIEWER_SAME_VENDOR",
+            "REVIEWER_MISSING",
+            "RESPONSE_TOO_LARGE",
+            "APPROVAL_STALE",
+            "APPROVAL_REQUIRED",
+            "LEASE_STALE",
+            "CONTROLLER_BUSY",
+            "PAUSED",
+            "NOT_READY",
+            "SCOPE_VIOLATION",
+            "GATE_FAILED",
+            "REVIEW_REJECTED",
+            "BUDGET_EXHAUSTED",
+            "BUDGET_UNKNOWN",
+            "ATTEMPTS_EXHAUSTED",
+            "REVISION_CONFLICT",
+            "CANCELLED",
+            "NOT_FOUND",
+            "PATH_CONFLICT",
+            "STATE_VERSION_UNSUPPORTED",
+            "RUNTIME_UNAVAILABLE",
+            "REVIEW_PROTOCOL_INVALID",
+            "SANDBOX_UNAVAILABLE",
+            "GIT_FAILED",
+            "STORAGE_FAILED",
+            "DELIVERY_FAILED",
+            "INTERNAL"
+          ]
+        }
+      },
+      "required": [
+        "actor",
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    "intentions": {
+      "maxItems": 20,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1001
+      }
+    },
+    "truncated": {
+      "type": "object",
+      "properties": {
+        "works": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "stops": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "failures": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unfinished": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "works",
+        "stops",
+        "failures",
+        "unfinished"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "handoffVersion",
+    "at",
+    "limits",
+    "summary",
+    "queue",
+    "active",
+    "unfinished",
+    "works",
+    "stops",
+    "failures",
+    "repairs",
+    "next",
+    "intentions",
+    "truncated"
+  ],
+  "additionalProperties": false
+}

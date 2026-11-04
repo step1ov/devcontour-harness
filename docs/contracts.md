@@ -33,7 +33,8 @@ refs, варианты исходов. Связи **между** значени�
 Опубликованы: `work-order`, `work-graph`, `execution-policy`,
 `context-snapshot`, `contract-document`, `run-result`, `result-envelope`,
 `run-event`, `review-record`, `joint-verification`, `execution-document`,
-`value-report` (отчёт `harness report`, см. «ValueReport»).
+`value-report` (отчёт `harness report`, см. «ValueReport»), `handoff-pack`
+(пакет `harness handoff`, см. «HandoffPack»).
 
 ## Версии
 
@@ -789,6 +790,43 @@ prompt, вывода runtime, текстов находок, ошибок и п�
 недели без активности — `gap`), 50 строк gates и стадий; JSON ≤ 512 КБ,
 HTML ≤ 1 МБ. Усечение отмечено флагом и ограничением.
 
+### HandoffPack
+
+Пакет передачи контекста (`harness handoff`, `handoffPack(harness, options)`
+и `handoffMarkdown(pack)` из корня пакета; `handoffVersion: 1`,
+`handoffPackSchema`, `schemas/handoff-pack.schema.json`). Ведущий агент хоста,
+который ведёт доску через много попыток, начинает новую сессию с пакета, а не
+с пересказа предыдущей: факты собираются из хранилища теми же проекциями, что
+`status --detail` и `explain`, и только читают состояние.
+
+- `summary`, `limits` — счёт поручений по статусам, `maxAttempts` и
+  `repairBudget` политики;
+- `queue`, `controller` — пауза выдачи, её причина и кто её снимает
+  (`queueStop`, `queuePause`); держатель роли controller и свежесть срока;
+- `active` — идущие попытки: стадия и её длительность, heartbeat, gates
+  текущей фазы (`attemptView`); `unfinished` — незакрытые записи попыток с
+  истёкшим владением или такие, которые поручение уже не ведёт;
+- `works` — открытые поручения (идущие, упавшие, план, остальные): класс и
+  причина провала, удержание, эпизод восстановления с предложением,
+  блокировки и `next` — кто и что делает (по диагнозу `explain`, стадия — по
+  `nextAction`);
+- `stops` — диагнозы `explain` без проб runtime (`StopDiagnosis`), кроме
+  `action: none`; решения (`actor` lead или user и действие не `wait`) идут
+  первыми;
+- `failures` — последние провалившиеся и истёкшие попытки, новые первыми:
+  `failureKind`, код (`stopCodeOf`) и текст ошибки;
+- `budgets` — каждая область бюджета: потрачено (сообщено + оценено) против
+  предела, время, неизвестные вызовы, остаток (`null`, когда расход известен
+  не полностью); `repairs` — восстановления незавершённых заданий графов;
+- `next` — следующий шаг доски: первое решение, иначе ожидание идущей
+  попытки, иначе первый открытый шаг поручения;
+- `intentions` — единственный текст не из хранилища: намерения агента.
+
+Пределы (`HANDOFF_LIMITS`): 50 открытых поручений, 30 остановок, 10
+провалов, 20 незавершённых попыток, 3 блокировки на поручение, 20 намерений
+по 1000 знаков; строки фактов усечены до 300 знаков с «…». Сколько записей
+каждого списка не вошло — `truncated`. Fencing-токены в пакет не попадают.
+
 ## Порты
 
 | Порт                                                           | Договор                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -942,6 +980,7 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `init`             | `--repository D [--profile P] [--writer R] [--state D] [--plan]`                                          | да    | план файлов, `created`, `manifest`, `facts`, `toolchain`, `next`                         | Create-only `.harness/`, manifest до политики, политика последней; повтор — `created: []`; иное решение — `PATH_CONFLICT`                              |
 | `explain`          | `--state D --policy F [--work ID]`                                                                        | нет   | `diagnoses[]` (`StopDiagnosis`)                                                          | Только чтение: без повторов, вызовов моделей и изменений состояния                                                                                     |
 | `report`           | `--state D [--since T\|Nd\|Nw] [--until T] [--as-of T] [--format json\|md\|html] [--no-titles] [--out F]` | нет   | `ValueReport`; с `--out` — `{out, format, bytes, asOf}`                                  | Только чтение; те же данные и параметры — те же байты                                                                                                  |
+| `handoff`          | `--state D [--graph ID] [--intent T]… [--json]`                                                           | нет   | `HandoffPack`; по умолчанию — Markdown без конверта                                      | Только чтение; агент добавляет только намерения                                                                                                        |
 | `plan-request`     | `--brief F --policy F [--context F] [--contracts D] [--requirements [R:]F]… [--human]`                    | нет   | `prompt`, `readOnly`, `recommendedTasks`, `maxTasks`, `basis`, `facts` (`PlanningFacts`) | Чистая функция входов: та же постановка и те же факты — тот же prompt и `basis`; модель не вызывается                                                  |
 | `plan-check`       | `--draft F --policy F [--context F] [--contracts D] [--brief F [--basis H]]`                              | нет   | `issues`, `checkPlan`; без проблем — `graph`, `graphDigest`, `basis`                     | Чистая функция входов и `HEAD` источников требований; согласования не выдаёт, gates не запускает; расхождение `--basis` — `APPROVAL_STALE`             |
 | `capabilities`     | —                                                                                                         | нет   | каталог общих операций (`OperationCatalog`)                                              | Чистая функция установленной версии пакета                                                                                                             |
@@ -977,6 +1016,14 @@ md|html` — документированное исключение, как `--
 `--until`, `--as-of`, `--format`, `--no-titles` принимает только `report`.
 Пределы размера (JSON 512 КБ, HTML и Markdown 1 МБ) проверяют сами
 `valueReport` и рендеры (`assertReportBytes`, `INTERNAL`).
+
+**`handoff`.** Открывает каталог состояния только для чтения (политика — из
+`binding.json`, как у `status`) и строит `HandoffPack`. По умолчанию успешный
+ответ печатается Markdown без конверта — документированное исключение, как
+`report --format md`; `--json` даёт обычный конверт. Отказ — JSON-конверт в
+обоих режимах; нет каталога — `NOT_FOUND`, каталог не создаётся; неизвестный
+`--graph` — `NOT_FOUND`; больше 20 `--intent` — `INVALID_INPUT`. Флаги
+`--intent` и `--json` принимает только `handoff`.
 
 **Причина отказа окружения `dependency-network`.** Установка зависимостей,
 упавшая на сети или реестре пакетов, получает класс `environment`, а не `gate`
