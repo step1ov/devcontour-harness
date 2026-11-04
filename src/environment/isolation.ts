@@ -1,7 +1,7 @@
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { createRequire } from 'node:module';
-import { writeFile, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { writeFile, mkdir, mkdtemp, realpath, rm, readdir, lstat } from 'node:fs/promises';
 import { existsSync, lstatSync, readlinkSync, realpathSync, readdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
@@ -763,6 +763,63 @@ export const SOCKET_PATH_LIMIT: Partial<Record<NodeJS.Platform, number>> = {
 export const SRT_SOCKET_RESERVE = 48;
 /** Короткая база временного каталога srt, когда TMPDIR процесса слишком глубокий. */
 export const SRT_SHORT_BASE = '/tmp';
+/**
+ * База, которую берёт `runGate`; тест подменяет её, чтобы проверить отказ
+ * (как `isolationBackend`).
+ */
+export const srtTempBase = { short: SRT_SHORT_BASE };
+/** Возраст, после которого брошенный каталог srt убирается при создании нового. */
+export const SRT_STALE_MS = 24 * 60 * 60 * 1000;
+/** Имя своего каталога srt: `dc-srt-<pid создателя>-<суффикс mkdtemp>`. */
+const srtDirName = /^dc-srt-([1-9]\d*)-[A-Za-z0-9]{6}$/;
+
+const processAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM — процесс есть, но чужой: считаем живым.
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+};
+
+/**
+ * Уборка брошенных каталогов srt (controller упал до своей уборки) — по
+ * возможности, ошибки не мешают проверке. Удаляется только запись, которая
+ * одновременно: имя `dc-srt-<pid>-XXXXXX`, каталог (не symlink, `lstat`),
+ * владелец — этот пользователь, не менялся дольше `SRT_STALE_MS`, и
+ * процесс-создатель (pid из имени, не этот процесс) уже не существует.
+ * Живой процесс с тем же pid (повтор pid) только оставляет каталог.
+ */
+export async function sweepStaleSrtDirs(
+  short: string,
+  now: number = Date.now(),
+): Promise<string[]> {
+  const uid = process.getuid?.();
+  if (uid === undefined) return [];
+  let names: string[];
+  try {
+    names = await readdir(short);
+  } catch {
+    return [];
+  }
+  const removed: string[] = [];
+  for (const name of names) {
+    const pid = Number(srtDirName.exec(name)?.[1]);
+    if (!pid || pid === process.pid) continue;
+    const path = join(short, name);
+    try {
+      const st = await lstat(path);
+      if (!st.isDirectory() || st.uid !== uid || now - st.mtimeMs < SRT_STALE_MS) continue;
+      if (processAlive(pid)) continue;
+      await rm(path, { recursive: true, force: true });
+      removed.push(path);
+    } catch {
+      // Уборка по возможности: запись исчезла, нет прав — пропускаем.
+    }
+  }
+  return removed;
+}
 
 /** Путь каталога оставляет место сокетам srt на этой платформе. */
 export const srtSocketsFit = (dir: string, platform: NodeJS.Platform = process.platform) => {
@@ -774,7 +831,8 @@ export const srtSocketsFit = (dir: string, platform: NodeJS.Platform = process.p
  * Временный каталог процесса srt. TMPDIR процесса — как есть, если сокеты
  * srt в нём укладываются в предел пути; иначе — свой каталог под
  * `SRT_SHORT_BASE` (`mkdtemp`: новый, `0700`, только владельцу), который
- * вызывающий удаляет после проверки (`created`). Если и он не укладывается
+ * вызывающий удаляет после проверки (`created`); перед созданием убираются
+ * брошенные каталоги (`sweepStaleSrtDirs`). Если и он не укладывается
  * или не создаётся — `SandboxPolicyError` (отказ среды, `environment`) до
  * запуска, с именем TMPDIR в тексте.
  * Команде внутри передаётся свой scratch, не этот каталог.
@@ -782,7 +840,7 @@ export const srtSocketsFit = (dir: string, platform: NodeJS.Platform = process.p
 export async function srtTempDir(
   base: string = tmpdir(),
   platform: NodeJS.Platform = process.platform,
-  short: string = SRT_SHORT_BASE,
+  short: string = srtTempBase.short,
 ): Promise<{ dir: string; created: boolean }> {
   if (srtSocketsFit(base, platform)) return { dir: base, created: false };
   const limit = SOCKET_PATH_LIMIT[platform]!;
@@ -792,9 +850,10 @@ export async function srtTempDir(
         `(${base}, ${Buffer.byteLength(base)} байт) длиннее предела unix-сокета ` +
         `${limit} байт, а короткий каталог ${short} ${detail}. Задайте более короткий TMPDIR`,
     );
+  await sweepStaleSrtDirs(short);
   let dir: string;
   try {
-    dir = await realpath(await mkdtemp(join(short, 'dc-srt-')));
+    dir = await realpath(await mkdtemp(join(short, `dc-srt-${process.pid}-`)));
   } catch (error) {
     throw refuse(`недоступен: ${(error as Error).message}`);
   }

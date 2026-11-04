@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   accessSync,
   chmodSync,
@@ -12,6 +12,7 @@ import {
   realpathSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,11 +21,14 @@ import { createRequire } from 'node:module';
 import type { EvidenceRecord } from '../src/contracts/index.ts';
 import { redactor } from '../src/environment/redaction.ts';
 import {
+  SRT_STALE_MS,
   SandboxPolicyError,
   isolationSupport,
   srtShellLookup,
   srtSocketsFit,
+  srtTempBase,
   srtTempDir,
+  sweepStaleSrtDirs,
 } from '../src/environment/isolation.ts';
 import { TaskFailure } from '../src/engine/failure.ts';
 import {
@@ -481,7 +485,10 @@ test('srtTempDir: короткий TMPDIR — как есть; глубокий 
         assert.equal(short.created, true);
         assert.notEqual(short.dir, deep);
         assert.equal(realpathSync(short.dir), short.dir);
-        assert.ok(short.dir.startsWith(realpathSync('/tmp') + '/dc-srt-'), short.dir);
+        assert.ok(
+          short.dir.startsWith(realpathSync('/tmp') + `/dc-srt-${process.pid}-`),
+          short.dir,
+        );
         assert.equal(statSync(short.dir).mode & 0o777, 0o700);
         assert.equal(srtSocketsFit(short.dir, platform), true);
       } finally {
@@ -523,11 +530,27 @@ test(
     try {
       const file = out();
       process.env.TMPDIR = deep;
-      const r = await check(loaded(0, process.env.PATH ?? '').env, file);
+      const r = await runCheck(os, {
+        argv: [
+          process.execPath,
+          '-e',
+          `require('fs').writeFileSync(${JSON.stringify(file)}, process.env.TMPDIR)`,
+        ],
+        cwd: realpathSync(mkdtempSync(join(tmpdir(), 'harness-start-cwd-'))),
+        env: loaded(0, process.env.PATH ?? '').env,
+        signal: new AbortController().signal,
+        write: [join(file, '..')],
+        readable: shellless,
+        controller: [],
+        settingsDir: mkdtempSync(join(tmpdir(), 'harness-start-settings-')),
+      });
       assert.equal(r.code, 0, r.stderr);
       assert.equal(r.started, true);
       assert.doesNotMatch(r.stderr, /EINVAL/);
-      assert.equal(existsSync(file), true, 'команда исполнилась');
+      // Команде — её scratch под глубоким TMPDIR, а не короткий каталог srt.
+      const inner = readFileSync(file, 'utf8');
+      assert.ok(inner.startsWith(deep + '/dc-gate-'), inner);
+      assert.ok(!inner.includes('dc-srt-'), inner);
       const srt = removed.filter((d) => d.includes('/dc-srt-'));
       assert.equal(srt.length, 1, removed.join(', '));
       assert.equal(existsSync(srt[0]!), false, 'каталог srt убран');
@@ -539,3 +562,69 @@ test(
     }
   },
 );
+
+test(
+  'Gate при глубоком TMPDIR без короткого каталога srt — отказ среды до запуска, с TMPDIR в тексте',
+  { skip: noSandbox },
+  async () => {
+    const { root, deep } = deepTmp();
+    const saved = process.env.TMPDIR;
+    const short = srtTempBase.short;
+    const marker = join(root, 'ran');
+    try {
+      srtTempBase.short = join(root, 'missing');
+      process.env.TMPDIR = deep;
+      const r = await gate(
+        loaded(0, process.env.PATH ?? '').env,
+        0,
+        `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`,
+      );
+      assert.equal(r.evidence.passed, false);
+      assert.equal(r.failure?.kind, 'environment');
+      assert.match(r.evidence.summary, /TMPDIR/);
+      assert.ok(r.evidence.summary.includes(deep), r.evidence.summary);
+      assert.equal(existsSync(marker), false, 'команда не запускалась');
+    } finally {
+      srtTempBase.short = short;
+      process.env.TMPDIR = saved;
+      if (saved === undefined) delete process.env.TMPDIR;
+      if (root.includes('harness-deep-')) await checkCleanup.remove(root);
+    }
+  },
+);
+
+test('sweepStaleSrtDirs: убирает только свои старые каталоги srt завершившихся процессов', async () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'harness-srt-sweep-')));
+  try {
+    const dead = spawnSync(process.execPath, ['-e', '0']).pid;
+    const old = (Date.now() - SRT_STALE_MS - 60_000) / 1000;
+    const make = (name: string, age = old) => {
+      const path = join(base, name);
+      mkdirSync(path);
+      writeFileSync(join(path, 's.sock'), '');
+      utimesSync(path, age, age);
+      return path;
+    };
+    const stale = make(`dc-srt-${dead}-aB3dE9`);
+    const fresh = make(`dc-srt-${dead}-fResh1`, Date.now() / 1000);
+    const live = make(`dc-srt-${process.ppid}-live01`);
+    const own = make(`dc-srt-${process.pid}-own001`);
+    const other = make(`dc-other-${dead}-aB3dE9`);
+    const odd = make(`dc-srt-${dead}-toolong7`);
+    // Symlink с подходящим именем не удаляется и не разыменовывается.
+    const target = make('target');
+    symlinkSync(target, join(base, `dc-srt-${dead}-link01`));
+    const file = join(base, `dc-srt-${dead}-file01`);
+    writeFileSync(file, '');
+    utimesSync(file, old, old);
+    assert.deepEqual(await sweepStaleSrtDirs(base), [stale]);
+    assert.equal(existsSync(stale), false);
+    for (const kept of [fresh, live, own, other, odd, target, file, join(target, 's.sock')])
+      assert.equal(existsSync(kept), true, kept);
+    assert.equal(existsSync(join(base, `dc-srt-${dead}-link01`)), true);
+    // Нет каталога — пусто, без исключения.
+    assert.deepEqual(await sweepStaleSrtDirs(join(base, 'missing')), []);
+  } finally {
+    if (base.includes('harness-srt-sweep-')) await checkCleanup.remove(base);
+  }
+});
