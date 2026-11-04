@@ -89,3 +89,19 @@ export function environmentCauseOf(
   if (error instanceof BlockedError) return 'preflight';
   return 'other';
 }
+
+/**
+ * Отказ с дописанной причиной (например, неудавшейся очисткой): класс,
+ * свойства и причина окружения `TaskFailure` сохраняются; прочий отказ —
+ * `Error` с исходным в `cause`.
+ */
+export function withSuffix(failure: Error, suffix: string): Error {
+  return failure instanceof TaskFailure
+    ? new TaskFailure(
+        failure.kind,
+        `${failure.message}; ${suffix}`,
+        failure.properties,
+        failure.diagnosis,
+      )
+    : new Error(`${failure.message}; ${suffix}`, { cause: failure });
+}

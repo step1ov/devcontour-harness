@@ -727,7 +727,12 @@ export class Harness {
     if (!r) return false;
     if (r.status === 'retry' && ['failed', 'cancelled'].includes(work.status)) {
       if (work.status === 'cancelled') throw new Error(`${workId}: поручение отменено человеком`);
-      this.engine.retry(workId, undefined, 'recovery');
+      // Повтор по решению оператора — действие человека; по решению ведущего — восстановление.
+      this.engine.retry(
+        workId,
+        undefined,
+        r.decision?.source.kind === 'operator' ? 'operator' : 'recovery',
+      );
       return true;
     }
     if (r.status === 'retry' || r.status === 'retrying') return true;

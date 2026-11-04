@@ -1,11 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import type {
-  BaseMoveActor,
-  ExecutionPolicy,
-  ExecutionStore,
-  ExecutionView,
+import { z } from 'zod';
+import {
+  baseMoveActors,
+  type BaseMoveActor,
+  type ExecutionPolicy,
+  type ExecutionStore,
+  type ExecutionView,
 } from '../contracts/index.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
 import { checkoutPath, chooseCheckoutRoot } from '../environment/checkout-root.ts';
@@ -37,6 +39,8 @@ export function fencedRefMove(
   timeoutMs = fencedRefMove.timeoutMs,
   by: BaseMoveActor = 'host',
 ): RefMove {
+  // Актёр проверяется до любого сдвига: недопустимое значение — отказ без git update-ref.
+  const actor = z.enum(baseMoveActors).parse(by);
   return (repoPath, target, to, from) =>
     store.transact('base.moved', (tx) => {
       fence(tx);
@@ -45,7 +49,7 @@ export function fencedRefMove(
         timeout: timeoutMs,
         stdio: 'pipe',
       });
-      tx.emit({ type: 'base.moved', payload: { by } });
+      tx.emit({ type: 'base.moved', payload: { by: actor } });
     });
 }
 /** Предел git update-ref внутри транзакции; конечный и короче lease. */

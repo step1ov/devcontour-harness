@@ -17,7 +17,7 @@ import {
   type EventType,
   type RunEvent,
 } from '../src/contracts/index.ts';
-import { BlockedError, environmentCauseOf } from '../src/engine/classify.ts';
+import { BlockedError, environmentCauseOf, withSuffix } from '../src/engine/classify.ts';
 import { TaskFailure } from '../src/engine/failure.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import { engineOf, graphOf, planReview, policyOf, ready, trustNone } from './engine-fixture.ts';
@@ -158,13 +158,18 @@ test('attempt.diagnosed: сразу за attempt.failed той же попытк
     ],
     [{ kind: 'stalled' }, { failureKind: 'stalled', cause: 'stalled', counted: true }],
     [{ kind: 'unknown' }, { failureKind: 'unknown', cause: 'none', counted: true }],
+    // Отказ до работы с классом не окружения — всё равно окружение: preflight.
+    [
+      { kind: 'timeout', blocked: true },
+      { failureKind: 'timeout', cause: 'preflight', counted: false },
+    ],
     [
       { kind: 'environment', interrupted: true },
       { failureKind: 'environment', cause: 'shutdown', counted: false },
     ],
   ];
   for (const [options, expected] of cases) {
-    engine.clearFailure(['environment', 'provider-auth', 'stalled']);
+    engine.clearFailure(['environment', 'provider-auth', 'stalled', 'timeout']);
     const a = engine.claim('c1')!;
     engine.fail(a.id, a.token, 'отказ', options);
     const events = store.events();
@@ -321,4 +326,70 @@ test('CLI retry --reset и cancel — актёр operator', () => {
   } finally {
     store.close();
   }
+});
+
+test('Повтор после решения эпизода: решение оператора — by operator, ведущего — recovery', () => {
+  for (const [source, by] of [
+    [{ kind: 'operator' }, 'operator'],
+    [{ kind: 'lead', runtime: 'claude' }, 'recovery'],
+  ] as const) {
+    const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+    const h = ctx.open();
+    try {
+      ready(h.engine, ctx.graph);
+      const a = h.engine.claim('c1')!;
+      h.engine.fail(a.id, a.token, 'unit failed', { kind: 'gate' });
+      h.store.transact('recovery.decided', (tx) => {
+        const w = tx.work(a.workId)!;
+        tx.putWork({
+          ...w,
+          recovery: {
+            id: 'RC-1',
+            property: 'p',
+            basis: 'a'.repeat(64),
+            runs: [a.id],
+            openedAt: '2026-01-01T00:00:00.000Z',
+            status: 'retry',
+            calls: 0,
+            decision: {
+              action: 'new-approach',
+              reason: 'r',
+              evidence: [],
+              source,
+              decidedAt: '2026-01-01T00:00:01.000Z',
+            },
+            history: [],
+            version: 1,
+          },
+        } as never);
+      });
+      assert.equal(
+        (h as unknown as { afterDecision(id: string): boolean }).afterDecision(a.workId),
+        true,
+      );
+      assert.deepEqual(
+        ofType(h.store.events(0, 1000), 'work.retried').map((e) => e.payload),
+        [{ by, reset: false }],
+        JSON.stringify(source),
+      );
+    } finally {
+      h.close();
+    }
+  }
+});
+
+test('withSuffix: дописанная причина очистки сохраняет класс, свойства и причину окружения', () => {
+  const properties = { bound: ['p'], unbound: [] };
+  const net = withSuffix(
+    new TaskFailure('environment', 'install', properties, 'dependency-network'),
+    'не удалось убрать',
+  );
+  assert.ok(net instanceof TaskFailure);
+  assert.equal(net.kind, 'environment');
+  assert.equal(net.diagnosis, 'dependency-network');
+  assert.deepEqual(net.properties, properties);
+  assert.equal(net.message, 'install; не удалось убрать');
+  const plain = withSuffix(new Error('x'), 'y');
+  assert.ok(!(plain instanceof TaskFailure));
+  assert.equal(plain.message, 'x; y');
 });

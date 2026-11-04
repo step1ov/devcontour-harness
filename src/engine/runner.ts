@@ -130,7 +130,7 @@ import {
 import { CleanupFailure, cleanupEnvironment } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { REQUIREMENT_GATE, assertRequirements } from '../verification/requirements.ts';
-import { BlockedError, classifyFailure, environmentCauseOf } from './classify.ts';
+import { BlockedError, classifyFailure, environmentCauseOf, withSuffix } from './classify.ts';
 import { TaskFailure, type FailureKind } from './failure.ts';
 import { activeOf, namesFailingCases, type Engine } from './engine.ts';
 import { prompt } from './prompt.ts';
@@ -1329,7 +1329,12 @@ export class Runner {
                       if (this.policy.isolation.mode === 'os') guarded = protectedSnapshot(cwd);
                     } catch (error) {
                       if (error instanceof SandboxPolicyError)
-                        throw new TaskFailure('environment', error.message);
+                        throw new TaskFailure(
+                          'environment',
+                          error.message,
+                          undefined,
+                          'sandbox-policy',
+                        );
                       throw error;
                     }
                     const response = await this.call(
@@ -2197,10 +2202,7 @@ export class Runner {
       const cleanup = leftovers.length
         ? `не удалось убрать рабочие деревья проверки потребителя: ${leftovers.join('; ')}`
         : undefined;
-      if (failure && cleanup)
-        throw failure instanceof TaskFailure
-          ? new TaskFailure(failure.kind, `${failure.message}; ${cleanup}`)
-          : new Error(`${failure.message}; ${cleanup}`, { cause: failure });
+      if (failure && cleanup) throw withSuffix(failure, cleanup);
       if (failure) throw failure;
       if (cleanup)
         throw new TaskFailure('environment', cleanup[0]!.toUpperCase() + cleanup.slice(1));

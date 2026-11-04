@@ -701,6 +701,7 @@ test('Шаг prepare установки на реестре — environment пр
     (e: unknown) =>
       e instanceof TaskFailure &&
       e.kind === 'environment' &&
+      e.diagnosis === 'dependency-network' &&
       /^dependency-network: .*Шаг deps: exit=1/.test(e.message),
   );
   const plain = (e: unknown) =>

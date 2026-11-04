@@ -144,8 +144,15 @@ const uncounted = (kind: FailureKind, blocked: boolean) =>
  * Причина отказа для `attempt.diagnosed`: отказ не окружения — `none`;
  * окружения — названная в точке обнаружения или по классу отказа.
  */
-const causeOf = (kind: FailureKind, cause: EnvironmentCause | undefined): EnvironmentCause => {
+const causeOf = (
+  kind: FailureKind,
+  cause: EnvironmentCause | undefined,
+  blocked: boolean,
+): EnvironmentCause => {
   if (kind === 'stalled') return 'stalled';
+  // Отказ до работы (`blocked`) — отказ окружения при любом классе: отчёт
+  // относит его к окружению, и причина не `none`.
+  if (blocked && kind !== 'provider-auth' && kind !== 'environment') return 'preflight';
   if (kind === 'provider-auth')
     return cause === 'provider-limit' ? 'provider-limit' : 'provider-auth';
   if (kind !== 'environment') return 'none';
@@ -1887,7 +1894,7 @@ export class Engine {
         attempt: a.attempt,
         payload: {
           failureKind: kind,
-          cause: interrupted ? 'shutdown' : causeOf(kind, options.cause),
+          cause: interrupted ? 'shutdown' : causeOf(kind, options.cause, blocked),
           counted: !interrupted && !uncounted(kind, blocked),
         },
       });

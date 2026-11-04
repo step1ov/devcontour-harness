@@ -164,6 +164,9 @@ test('base.moved: актёр сдвига в событии; отказ CAS Git 
   const before = b.tip();
   const moves = () =>
     store.events().flatMap((e) => (e.type === 'base.moved' ? [e.payload.by] : []));
+  // Недопустимый актёр — отказ до сдвига и до транзакции.
+  assert.throws(() => fencedRefMove(store, () => {}, undefined, 'bogus' as never));
+  assert.equal(b.tip(), before);
   // Устаревшее ожидаемое значение: git update-ref отказывает внутри транзакции.
   const stale = fencedRefMove(store, () => {}, undefined, 'operator');
   assert.throws(() => stale(b.r.dir, b.ref, b.r.head(), b.r.head()));

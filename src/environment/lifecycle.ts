@@ -129,6 +129,8 @@ export async function runSteps(
         throw new TaskFailure(
           'environment',
           dependencyNetworkMessage(execution.redact(network), message),
+          undefined,
+          'dependency-network',
         );
       throw new Error(message);
     }
