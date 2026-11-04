@@ -129,7 +129,8 @@ codes: 0 успех, 2 неверный вход, 3 отказ/блокиров�
 каталог в отчёт не попадают; `--no-titles` убирает и заголовки. Тот же
 каталог — те же байты: момент отчёта — последняя метка времени в данных.
 Хост строит тот же отчёт из своего хранилища: `valueReport` из
-`devcontour-harness/report`. Подробно — [ValueReport](docs/contracts.md#valuereport).
+`devcontour-harness/report`, файл отчёта — `writeReportFile` из корня пакета.
+Подробно — [ValueReport](docs/contracts.md#valuereport).
 
 ## Библиотека
 

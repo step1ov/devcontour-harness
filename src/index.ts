@@ -220,6 +220,13 @@ export {
 export * from './projections/index.ts';
 export * from './report/index.ts';
 export { collectReportInput } from './control/report.ts';
+/**
+ * Запись файла отчёта (`harness report --out`): во временный файл каталога
+ * цели и rename, без записи сквозь symlink и жёсткие ссылки, вне каталога
+ * состояния; новый файл — `0600`. Использует `node:fs`, поэтому только в
+ * корне пакета, а не в `./report` (тот без `node:*`).
+ */
+export { REPORT_FILE_MODE, writeReportFile, type ReportFileIo } from './control/report-file.ts';
 export {
   handoffPack,
   handoffMarkdown,

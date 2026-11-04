@@ -380,3 +380,20 @@ test('round 2: --out сохраняет права прежнего файла, 
     [],
   );
 });
+
+test('writeReportFile из корня пакета — та же запись, что у report --out; ./report без неё', async () => {
+  const root = await import('../src/index.ts');
+  const report = await import('../src/report/index.ts');
+  assert.equal(root.writeReportFile, writeReportFile);
+  assert.equal(root.REPORT_FILE_MODE, REPORT_FILE_MODE);
+  assert.equal((report as Record<string, unknown>).writeReportFile, undefined);
+  const { parent, state } = seededState();
+  const out = join(parent, 'host.md');
+  root.writeReportFile(out, state, 'host report');
+  assert.equal(readFileSync(out, 'utf8'), 'host report');
+  assert.equal(statSync(out).mode & 0o777, REPORT_FILE_MODE);
+  assert.throws(
+    () => root.writeReportFile(join(state, 'inside.md'), state, 'x'),
+    (e: unknown) => e instanceof HarnessError && e.code === 'PATH_CONFLICT',
+  );
+});

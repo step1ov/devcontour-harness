@@ -386,7 +386,7 @@ for (const name of ['valueReport', 'reportMarkdown', 'reportHtml'])
 if (typeof m.collectReportInput !== 'function') throw new Error('нет экспорта collectReportInput');
 for (const name of ['chainRoots', 'workProgress', 'nextAction', 'queueStop', 'explainStop', 'stopCodeOf', 'clipText', 'clipDeep'])
   if (typeof p[name] !== 'function') throw new Error('нет экспорта ./projections ' + name);
-for (const name of ['handoffPack', 'handoffMarkdown', 'statusOf', 'policySecrets', 'redactor', 'composeRedactors'])
+for (const name of ['handoffPack', 'handoffMarkdown', 'statusOf', 'policySecrets', 'redactor', 'composeRedactors', 'writeReportFile'])
   if (typeof m[name] !== 'function') throw new Error('нет экспорта ' + name);
 if (typeof m.HANDOFF_MIN_BYTES !== 'number' || m.HANDOFF_MIN_BYTES !== (await import('devcontour-harness/contracts')).HANDOFF_MIN_BYTES) throw new Error('HANDOFF_MIN_BYTES');
 for (const name of ['inspectPath', 'checkDestination', 'listRegularFiles', 'planFileWrites', 'applyFileWrites', 'initProject', 'diagnoseState'])
