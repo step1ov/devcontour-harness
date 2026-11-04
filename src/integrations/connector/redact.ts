@@ -1,5 +1,5 @@
 import { HarnessError } from '../../contracts/index.ts';
-import { redactor, type Redactor } from '../../environment/redaction.ts';
+import { policySecrets, redactor, type Redactor } from '../../environment/redaction.ts';
 import { TransportError, type RelayTransport } from './transport.ts';
 
 /**
@@ -11,23 +11,6 @@ import { TransportError, type RelayTransport } from './transport.ts';
  * шагов/операций, `lastError` доставки или вывод CLI. Данные успешных ответов
  * не меняются: это содержимое задач, которое закрепляется по digest.
  */
-
-/** Значения секретов: `secrets`-карты политики (на любом уровне) из окружения controller. */
-export function policySecrets(policy: unknown, env: NodeJS.ProcessEnv = process.env): string[] {
-  const out = new Set<string>();
-  const walk = (value: unknown) => {
-    if (!value || typeof value !== 'object') return;
-    if (Array.isArray(value)) return value.forEach(walk);
-    for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
-      if (key === 'secrets' && v && typeof v === 'object' && !Array.isArray(v))
-        for (const name of Object.values(v as Record<string, unknown>))
-          if (typeof name === 'string' && env[name]) out.add(env[name]);
-      walk(v);
-    }
-  };
-  walk(policy);
-  return [...out];
-}
 
 const SECRET_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL|AUTH)/i;
 
@@ -91,4 +74,4 @@ export function redactingTransport(inner: RelayTransport, redact: Redactor): Rel
   return wrapped;
 }
 
-export { redactor };
+export { policySecrets, redactor };

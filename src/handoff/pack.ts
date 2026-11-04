@@ -8,9 +8,8 @@ import {
 import { HarnessError } from '../contracts/errors.ts';
 import type { AttemptState, WorkState, WorkStatus } from '../contracts/execution.ts';
 import type { Harness } from '../control/harness.ts';
-import { redactor } from '../environment/redaction.ts';
+import { policySecrets, redactor } from '../environment/redaction.ts';
 import { stopInputsOf } from '../explain/state.ts';
-import { policySecrets } from '../integrations/connector/redact.ts';
 import { activeStatuses } from '../projections/enums.ts';
 import { nextAction } from '../projections/next.ts';
 import { explainStop, stopCodeOf, type StopDiagnosis } from '../projections/stop.ts';

@@ -110,3 +110,20 @@ export function redactError(error: unknown, redact: (text: string) => string): u
   }
   return safe;
 }
+
+/** Значения секретов: `secrets`-карты политики (на любом уровне) из окружения controller. */
+export function policySecrets(policy: unknown, env: NodeJS.ProcessEnv = process.env): string[] {
+  const out = new Set<string>();
+  const walk = (value: unknown) => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) return value.forEach(walk);
+    for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+      if (key === 'secrets' && v && typeof v === 'object' && !Array.isArray(v))
+        for (const name of Object.values(v as Record<string, unknown>))
+          if (typeof name === 'string' && env[name]) out.add(env[name]);
+      walk(v);
+    }
+  };
+  walk(policy);
+  return [...out];
+}
