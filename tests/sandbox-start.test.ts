@@ -651,14 +651,10 @@ test('sweepStaleSrtDirs: убирает только свои старые ка�
     const file = join(base, `dc-srt-${dead}-file01`);
     writeFileSync(file, '');
     utimesSync(file, old, old);
-    // pid 1 есть всегда; не root получает EPERM — процесс считается живым.
-    const root = process.getuid?.() === 0;
+    // pid 1 есть всегда: root видит его живым, не root получает EPERM — тоже живой.
     const init = make('dc-srt-1-init01');
 
-    assert.deepEqual(
-      (await sweepStaleSrtDirs(base)).sort(),
-      (root ? [init, stale] : [stale]).sort(),
-    );
+    assert.deepEqual((await sweepStaleSrtDirs(base)).sort(), [stale]);
     assert.equal(existsSync(stale), false);
     // Удаление шло через переименование: промежуточного каталога не осталось.
     assert.deepEqual(
@@ -669,7 +665,7 @@ test('sweepStaleSrtDirs: убирает только свои старые ка�
       assert.equal(existsSync(kept), true, kept);
     assert.equal(existsSync(join(target, 's.sock')), true);
     assert.equal(existsSync(join(base, `dc-srt-${dead}-link01`)), true);
-    if (!root) assert.equal(existsSync(init), true, 'EPERM — процесс жив');
+    assert.equal(existsSync(init), true, 'pid 1 жив');
     // Нет каталога — пусто, без исключения.
     assert.deepEqual(await sweepStaleSrtDirs(join(base, 'missing')), []);
   } finally {
