@@ -522,10 +522,10 @@ export const cliCommands = {
           'Намерение агента (до 20, каждое до 1000 знаков); единственный текст не из хранилища',
       },
       {
-        name: '--json',
-        value: 'flag',
+        name: '--format',
+        value: 'text',
         required: false,
-        description: 'JSON-конверт (HandoffPack) вместо Markdown',
+        description: 'json (по умолчанию, конверт HandoffPack) или md (Markdown без конверта)',
       },
     ],
     refusals: ['NOT_FOUND'],

@@ -1,5 +1,6 @@
 import {
   HANDOFF_LIMITS,
+  HANDOFF_MAX_BYTES,
   HANDOFF_VERSION,
   handoffPackSchema,
   type HandoffPack,
@@ -7,8 +8,9 @@ import {
 import { HarnessError } from '../contracts/errors.ts';
 import type { AttemptState, WorkState, WorkStatus } from '../contracts/execution.ts';
 import type { Harness } from '../control/harness.ts';
+import { redactor } from '../environment/redaction.ts';
 import { stopInputsOf } from '../explain/state.ts';
-import { clipText } from '../projections/clip.ts';
+import { policySecrets } from '../integrations/connector/redact.ts';
 import { activeStatuses } from '../projections/enums.ts';
 import { nextAction } from '../projections/next.ts';
 import { explainStop, stopCodeOf, type StopDiagnosis } from '../projections/stop.ts';
@@ -18,9 +20,25 @@ export interface HandoffOptions {
   graphId?: string;
   /** Намерения агента: единственный текст пакета не из хранилища. */
   intentions?: readonly string[];
+  /**
+   * Маска текстов из хранилища (ошибки, причины, сообщения). По умолчанию —
+   * значения секретов политики из окружения процесса, как у коннектора.
+   */
+  redact?: (text: string) => string;
 }
 
-const clip = (s: string | undefined) => clipText(s, HANDOFF_LIMITS.text);
+type Stop = HandoffPack['stops'][number];
+type Next = HandoffPack['next'];
+
+/**
+ * Строка не длиннее `n` code units и «…»; суррогатная пара не разрывается.
+ * В отличие от `clipText`, предел не может разрезать символ вне BMP.
+ */
+export function clipSafe(text: string, n: number): string {
+  if (text.length <= n) return text;
+  const code = text.charCodeAt(n - 1);
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? n - 1 : n) + '…';
+}
 /** Поле объекта только при заданном значении (exactOptionalPropertyTypes). */
 const opt = <K extends string, T>(key: K, value: T | undefined) =>
   (value === undefined ? {} : { [key]: value }) as Partial<Record<K, T>>;
@@ -30,10 +48,10 @@ const isActive = (s: WorkStatus) => (activeStatuses as readonly WorkStatus[]).in
 const rank = (s: WorkStatus) =>
   isActive(s) ? 0 : s === 'failed' ? 1 : s === 'draft' ? 2 : s === 'ready' ? 3 : 4;
 /** Решение: действует человек или ведущий, и действие — не ожидание. */
-const isDecision = (d: StopDiagnosis) =>
+const isDecision = (d: { actor: string | null; action: string }) =>
   (d.actor === 'user' || d.actor === 'lead') && d.action !== 'wait';
 /** Порядок остановок: решения человека, затем ведущего, затем ожидания. */
-const actorRank = (d: StopDiagnosis) => (!isDecision(d) ? 2 : d.actor === 'user' ? 0 : 1);
+const actorRank = (d: Stop) => (!isDecision(d) ? 2 : d.actor === 'user' ? 0 : 1);
 
 /**
  * Пакет передачи контекста ведущего агента из хранилища (`harness handoff`).
@@ -41,7 +59,11 @@ const actorRank = (d: StopDiagnosis) => (!isDecision(d) ? 2 : d.actor === 'user'
  * (очередь, активные попытки, блокировки, бюджеты) и `explain` (остановки,
  * решения, ожидаемое действие; без проб runtime), плюс `nextAction` по
  * каждому открытому поручению и последние провалы попыток. Размер ограничен
- * `HANDOFF_LIMITS`. Агент добавляет только `intentions`.
+ * `HANDOFF_LIMITS` и `HANDOFF_MAX_BYTES`. Агент добавляет только `intentions`.
+ *
+ * Чтения хранилища (status, диагнозы, задания графов) идут подряд, а не
+ * одной транзакцией: каждое согласовано само по себе, а работающий в это
+ * время писатель может сдвинуть состояние между ними.
  */
 export function handoffPack(h: Harness, options: HandoffOptions = {}): HandoffPack {
   const { graphId } = options;
@@ -52,12 +74,20 @@ export function handoffPack(h: Harness, options: HandoffOptions = {}): HandoffPa
       `Намерений ${intentions.length}, предел ${HANDOFF_LIMITS.intentions}`,
       [{ path: ['intentions'], message: `${intentions.length} > ${HANDOFF_LIMITS.intentions}` }],
     );
+  const redact = options.redact ?? redactor(policySecrets(h.policy));
+  /** Текст из хранилища: маска секретов и предел поля. */
+  const text = <T extends string | undefined>(s: T, n: number = HANDOFF_LIMITS.text) =>
+    (s === undefined ? undefined : clipSafe(redact(s), n)) as T;
+  const name = <T extends string | undefined>(s: T) => text(s, HANDOFF_LIMITS.name);
+
   const status = h.status(graphId, { detail: true });
   if (graphId !== undefined && !status.graphs.length)
     throw new HarnessError('NOT_FOUND', 'Граф не найден: ' + graphId);
   const detail = status.detail!;
   const { maxAttempts, repairBudget } = h.policy;
   const now = h.engine.clock();
+  const q = detail.queue;
+  const qCause = 'cause' in q ? q.cause : undefined;
   const blockersOf = new Map(status.works.map((w) => [w.id, w.blockers]));
 
   const read = h.engine.read((v) => {
@@ -66,9 +96,9 @@ export function handoffPack(h: Harness, options: HandoffOptions = {}): HandoffPa
     return { works, attempts };
   });
   const byId = new Map<string, WorkState>(read.works.map((w) => [w.id, w]));
-  const title = (id: string) => clip(byId.get(id)?.order.title ?? id)!;
+  const title = (id: string) => text(byId.get(id)?.order.title ?? id);
 
-  // Сводка по статусам — в порядке перечня статусов.
+  // Сводка по статусам — в порядке появления.
   const counts = new Map<WorkStatus, number>();
   for (const w of read.works) counts.set(w.status, (counts.get(w.status) ?? 0) + 1);
   const open = read.works
@@ -79,17 +109,93 @@ export function handoffPack(h: Harness, options: HandoffOptions = {}): HandoffPa
 
   // Остановки и решения — диагнозы explain по сохранённому состоянию.
   const inGraph = (d: StopDiagnosis) => graphId === undefined || !d.workId || byId.has(d.workId);
-  const diagnoses = stopInputsOf(h, { maxAttempts, repairBudget })
+  const raw = stopInputsOf(h, { maxAttempts, repairBudget })
     .map(explainStop)
-    .filter((d) => d.action !== 'none' && inGraph(d))
-    .map((d, i) => ({ d, i }))
-    .sort((a, b) => actorRank(a.d) - actorRank(b.d) || a.i - b.i)
-    .map(({ d }) => ({ ...d, message: clip(d.message)! }));
-  const stops = diagnoses.slice(0, HANDOFF_LIMITS.stops);
+    .filter((d) => d.action !== 'none' && inGraph(d));
   // Диагноз поручения: explain знает, продолжит ли движок работу сам.
   const diagnosisOf = new Map<string, StopDiagnosis>();
-  for (const d of diagnoses)
-    if (d.workId && !diagnosisOf.has(d.workId)) diagnosisOf.set(d.workId, d);
+  for (const d of raw) if (d.workId && !diagnosisOf.has(d.workId)) diagnosisOf.set(d.workId, d);
+  const stopOf = (d: StopDiagnosis): Stop => ({
+    code: d.code,
+    cause: d.cause,
+    phase: d.phase,
+    actor: d.actor,
+    action: d.action,
+    retryPlanned: d.retryPlanned,
+    message: text(d.message),
+    evidence: d.evidence.slice(0, HANDOFF_LIMITS.evidence).map((e) => ({
+      kind: e.kind,
+      id: name(e.id),
+      ...opt('sha', e.sha?.slice(0, 64)),
+    })),
+    ...opt('workId', d.workId),
+    ...opt('runId', name(d.runId)),
+  });
+  // Остановка выдачи общей паузой очереди и повторы одного диагноза на
+  // выдаче сворачиваются в одну запись: иначе они вытесняют решения.
+  const queueStop = (d: StopDiagnosis) =>
+    q.paused &&
+    d.phase === 'claim' &&
+    d.code === q.code &&
+    d.cause === qCause &&
+    d.actor === q.actor &&
+    d.action === q.action;
+  interface Entry {
+    stop: Stop;
+    ids: string[];
+    queue: boolean;
+  }
+  const groups = new Map<string, Entry>();
+  const ordered: Entry[] = [];
+  for (const d of raw) {
+    const queue = Boolean(d.workId) && queueStop(d);
+    const key = queue
+      ? 'queue'
+      : d.workId && d.phase === 'claim'
+        ? [d.code, d.cause, d.actor, d.action, d.message].join('\u0000')
+        : undefined;
+    const group = key ? groups.get(key) : undefined;
+    if (group) {
+      if (d.workId) group.ids.push(d.workId);
+      continue;
+    }
+    const entry = { stop: stopOf(d), ids: d.workId ? [d.workId] : [], queue };
+    if (key) groups.set(key, entry);
+    ordered.push(entry);
+  }
+  if (q.paused && !groups.has('queue') && q.code && q.action && qCause)
+    ordered.unshift({
+      stop: {
+        code: q.code,
+        cause: qCause,
+        phase: 'claim',
+        actor: q.actor ?? null,
+        action: q.action,
+        retryPlanned: false,
+        message: text(q.detail ?? `Очередь на паузе: ${q.reason ?? 'runtime'}`),
+        evidence: [],
+      },
+      ids: [],
+      queue: true,
+    });
+  const diagnoses = ordered
+    .map(({ stop, ids, queue }): Stop => {
+      if (!queue && ids.length < 2) return stop;
+      const { workId: _w, runId: _r, ...rest } = stop;
+      void _w;
+      void _r;
+      return {
+        ...rest,
+        ...(queue ? { queue: true as const } : {}),
+        ...(ids.length
+          ? { works: ids.slice(0, HANDOFF_LIMITS.stopWorks), worksCount: ids.length }
+          : {}),
+      };
+    })
+    .map((d, i) => ({ d, i }))
+    .sort((a, b) => actorRank(a.d) - actorRank(b.d) || a.i - b.i)
+    .map(({ d }) => d);
+  const stops = diagnoses.slice(0, HANDOFF_LIMITS.stops);
 
   const works = open.slice(0, HANDOFF_LIMITS.works).map((w) => {
     const view = nextAction({
@@ -99,11 +205,17 @@ export function handoffPack(h: Harness, options: HandoffOptions = {}): HandoffPa
       ...opt('hold', w.hold),
       ...opt('recovery', w.recovery),
     });
-    // Кто и что — по диагнозу explain, когда он есть; стадия — по nextAction.
+    // Кто и что — по диагнозу explain, когда он есть; стадия и свойство — по nextAction.
     const d = diagnosisOf.get(w.id);
-    const next = d
-      ? { actor: d.actor, action: d.action, step: view.step, detail: d.message }
-      : { ...view, ...opt('detail', clip(view.detail)) };
+    const next = {
+      actor: d ? d.actor : view.actor,
+      action: d ? d.action : view.action,
+      step: view.step,
+      ...opt('property', name(view.property)),
+      ...opt('detail', text(d ? d.message : view.detail)),
+    };
+    // Пауза очереди одна на всех: её показывает `queue`, а не каждая строка.
+    const blockers = (blockersOf.get(w.id) ?? []).filter((b) => !(q.paused && b.code === 'PAUSED'));
     return {
       id: w.id,
       graphId: w.graphId,
@@ -111,21 +223,26 @@ export function handoffPack(h: Harness, options: HandoffOptions = {}): HandoffPa
       status: w.status,
       attempt: w.attempt,
       ...opt('failureKind', w.failureKind),
-      ...opt('failure', clip(w.failure)),
-      ...(w.hold ? { hold: { operation: w.hold.operation, reason: clip(w.hold.reason)! } } : {}),
+      ...opt('failure', text(w.failure)),
+      ...(w.hold
+        ? { hold: { operation: name(w.hold.operation), reason: text(w.hold.reason) } }
+        : {}),
       ...(w.recovery
         ? {
             recovery: {
               status: w.recovery.status,
-              property: w.recovery.property,
-              ...opt('reason', clip(w.recovery.reason)),
-              ...opt('proposal', clip(w.recovery.decision?.proposal)),
+              property: name(w.recovery.property),
+              ...opt('reason', text(w.recovery.reason)),
+              ...opt('proposal', text(w.recovery.decision?.proposal)),
             },
           }
         : {}),
-      blockers: (blockersOf.get(w.id) ?? [])
+      blockers: blockers
         .slice(0, HANDOFF_LIMITS.blockers)
-        .map((b) => ({ code: b.code, message: clip(b.message)! })),
+        .map((b) => ({ code: b.code, message: text(b.message) })),
+      ...(blockers.length > HANDOFF_LIMITS.blockers
+        ? { blockersTruncated: blockers.length - HANDOFF_LIMITS.blockers }
+        : {}),
       next,
     };
   });
@@ -136,15 +253,16 @@ export function handoffPack(h: Harness, options: HandoffOptions = {}): HandoffPa
     .filter((a) => a.status === 'failed' || a.status === 'expired')
     .sort((a, b) => time(b).localeCompare(time(a)) || b.attempt - a.attempt);
   const failures = failed.slice(0, HANDOFF_LIMITS.failures).map((a) => ({
-    runId: a.id,
+    runId: name(a.id),
     workId: a.workId,
+    ...opt('workStatus', byId.get(a.workId)?.status),
     attempt: a.attempt,
     status: a.status as 'failed' | 'expired',
     phase: a.phase,
     ...opt('finishedAt', a.finishedAt),
     ...opt('failureKind', a.failureKind),
     code: stopCodeOf(a.failureKind),
-    ...opt('error', clip(a.error)),
+    ...opt('error', text(a.error)),
   }));
 
   // Незавершённые записи: попытка не закрыта, но владение истекло или
@@ -160,7 +278,7 @@ export function handoffPack(h: Harness, options: HandoffOptions = {}): HandoffPa
   const unfinished = unfinishedAll
     .slice(0, HANDOFF_LIMITS.unfinished)
     .map(({ a, stale, current }) => ({
-      runId: a.id,
+      runId: name(a.id),
       workId: a.workId,
       attempt: a.attempt,
       phase: a.phase,
@@ -173,63 +291,92 @@ export function handoffPack(h: Harness, options: HandoffOptions = {}): HandoffPa
   const active = detail.attempts.map((a) => ({
     workId: a.workId,
     title: title(a.workId),
-    runId: a.runId,
+    runId: name(a.runId),
     attempt: a.attempt,
     phase: a.phase,
-    runtime: a.runtime,
+    runtime: name(a.runtime),
     elapsedMs: a.elapsedMs,
-    ...(a.stage ? { stage: { name: a.stage.name, elapsedMs: a.stage.elapsedMs } } : {}),
+    ...(a.stage ? { stage: { name: name(a.stage.name), elapsedMs: a.stage.elapsedMs } } : {}),
     ...opt('sinceHeartbeatMs', a.lease.sinceHeartbeatMs),
     stale: a.lease.stale,
     gates: a.gates,
   }));
 
-  const q = detail.queue;
   const queue = {
     paused: q.paused,
     ...opt('reason', q.reason),
-    ...opt('detail', clip(q.detail)),
+    ...opt('detail', text(q.detail)),
     ...opt('since', q.since),
+    ...opt('operation', name(q.operation)),
+    ...('failures' in q && q.failures?.length ? { failures: [...q.failures] } : {}),
     ...('liftedByRun' in q ? { liftedByRun: q.liftedByRun } : {}),
     ...opt('code', q.code),
     ...(q.actor !== undefined ? { actor: q.actor } : {}),
     ...opt('action', q.action),
   };
 
+  // Бюджеты: общий и групп этого графа — всегда; поручений — только с
+  // расходом или не в пределах; затем общий предел строк.
+  const relevant = (status.budgets?.budgets ?? []).filter((b) =>
+    b.scope.kind === 'total'
+      ? true
+      : b.scope.kind === 'group'
+        ? graphId === undefined || b.scope.id === graphId
+        : b.scope.id !== undefined && byId.has(b.scope.id),
+  );
+  const shown = relevant
+    .filter(
+      (b) =>
+        b.scope.kind !== 'work' ||
+        b.state !== 'within' ||
+        b.reportedUsd + b.estimatedUsd > 0 ||
+        b.unknownCalls + b.unfinishedCalls + b.abandonedCalls > 0,
+    )
+    .map((b, i) => ({ b, i }))
+    .sort(
+      (x, y) =>
+        (x.b.scope.kind === 'work' ? 1 : 0) - (y.b.scope.kind === 'work' ? 1 : 0) || x.i - y.i,
+    )
+    .map(({ b }) => b);
+  const budgetEntries = shown.slice(0, HANDOFF_LIMITS.budgets).map((b) => ({
+    scope: b.scope.kind,
+    ...opt('id', name(b.scope.id)),
+    state: b.state,
+    ...opt('limitUsd', b.limit.usd),
+    ...opt('limitMs', b.limit.timeMs),
+    reportedUsd: b.reportedUsd,
+    estimatedUsd: b.estimatedUsd,
+    complete: b.unknownCalls + b.unfinishedCalls + b.abandonedCalls + b.uncoveredRuns === 0,
+    unknownCalls: b.unknownCalls,
+    unfinishedCalls: b.unfinishedCalls,
+    abandonedCalls: b.abandonedCalls,
+    uncoveredRuns: b.uncoveredRuns,
+    durationMs: b.durationMs,
+    remainingUsd: b.remainingUsd,
+    remainingMs: b.remainingMs,
+    ...opt('reason', text(b.reason)),
+  }));
   const budgets = status.budgets
-    ? {
-        onUnknown: status.budgets.onUnknown,
-        entries: status.budgets.budgets.map((b) => ({
-          scope: b.scope.kind,
-          ...opt('id', b.scope.id),
-          state: b.state,
-          ...opt('limitUsd', b.limit.usd),
-          ...opt('limitMs', b.limit.timeMs),
-          spentUsd: b.reportedUsd + b.estimatedUsd,
-          durationMs: b.durationMs,
-          unknownCalls: b.unknownCalls,
-          remainingUsd: b.remainingUsd,
-          remainingMs: b.remainingMs,
-          ...opt('reason', clip(b.reason)),
-        })),
-      }
+    ? { onUnknown: status.budgets.onUnknown, entries: budgetEntries }
     : undefined;
 
   const graphIds = new Set(status.graphs.map((g) => g.id));
-  const repairs = h.workflows
+  const repairsAll = h.workflows
     .list()
     .filter((j) => j.kind === 'graph' && graphIds.has(j.id) && j.status !== 'completed')
     .map((j) => ({ graphId: j.id, status: j.status, used: j.repairs ?? 0, budget: repairBudget }));
+  const repairs = repairsAll.slice(0, HANDOFF_LIMITS.repairs);
 
   const controller = status.controller
     ? {
-        owner: status.controller.owner,
+        owner: name(status.controller.owner),
         until: new Date(status.controller.leaseUntil).toISOString(),
         live: status.controller.leaseUntil > now,
       }
     : undefined;
 
-  return handoffPackSchema.parse({
+  const clippedIntentions = intentions.map((s) => clipSafe(s, HANDOFF_LIMITS.intentionChars));
+  const pack = handoffPackSchema.parse({
     handoffVersion: HANDOFF_VERSION,
     at: new Date(now).toISOString(),
     ...opt('graphId', graphId),
@@ -250,57 +397,99 @@ export function handoffPack(h: Harness, options: HandoffOptions = {}): HandoffPa
     failures,
     ...opt('budgets', budgets),
     repairs,
-    next: boardNext(diagnoses, active.length, works, read.works.length, Boolean(controller?.live)),
-    intentions: intentions.map((s) => clipText(s, HANDOFF_LIMITS.intentionChars)!),
+    next: boardNext({
+      diagnoses,
+      active,
+      staleRecords: unfinishedAll.some((x) => x.stale),
+      works,
+      total: read.works.length,
+      controllerLive: Boolean(controller?.live),
+      liftedByRun: 'liftedByRun' in q && q.liftedByRun === true,
+    }),
+    intentions: clippedIntentions,
     truncated: {
       works: open.length - works.length,
       stops: diagnoses.length - stops.length,
       failures: failed.length - failures.length,
       unfinished: unfinishedAll.length - unfinished.length,
+      budgets: relevant.length - budgetEntries.length,
+      repairs: repairsAll.length - repairs.length,
+      intentions: intentions.filter((s, i) => s !== clippedIntentions[i]).length,
     },
   });
+  const bytes = Buffer.byteLength(JSON.stringify(pack));
+  if (bytes > HANDOFF_MAX_BYTES)
+    throw new HarnessError(
+      'INTERNAL',
+      `Пакет передачи ${bytes} байт больше предела ${HANDOFF_MAX_BYTES} (дефект пределов handoff)`,
+    );
+  return pack;
 }
 
 /**
  * Следующий шаг доски: первое решение человека или ведущего (`explain`);
- * иначе идущая попытка — ждать controller; иначе первый открытый шаг
- * поручения; иначе ничего.
+ * иначе идущая попытка с живым владельцем — ждать controller; попытка без
+ * живого владельца — `harness run` (истечёт брошенную попытку и продолжит
+ * очередь); иначе первый открытый шаг поручения (без controller —
+ * `harness run`); иначе ничего.
  */
-function boardNext(
-  diagnoses: StopDiagnosis[],
-  active: number,
-  works: HandoffPack['works'],
-  total: number,
-  controllerLive: boolean,
-): HandoffPack['next'] {
-  const decision = diagnoses.find(isDecision);
+function boardNext(input: {
+  diagnoses: Stop[];
+  active: HandoffPack['active'];
+  staleRecords: boolean;
+  works: HandoffPack['works'];
+  total: number;
+  controllerLive: boolean;
+  liftedByRun: boolean;
+}): Next {
+  const decision = input.diagnoses.find(isDecision);
   if (decision)
     return {
       actor: decision.actor,
       action: decision.action,
       code: decision.code,
       ...opt('workId', decision.workId),
-      detail: clip(decision.message)!,
+      detail: decision.message,
+      ...(decision.action === 'resume-queue' ? { command: 'harness resume' as const } : {}),
     };
-  if (active)
+  const running = input.active.find((a) => !a.stale);
+  if (running && input.controllerLive)
     return {
       actor: 'controller',
       action: 'wait',
       step: 'attempt-running',
-      detail: 'Идёт попытка; controller продолжит очередь',
+      workId: running.workId,
+      detail: 'Идёт попытка с живым владельцем; controller продолжит очередь',
     };
-  const first = works.find((w) => w.next.action !== 'none');
-  if (first)
+  const abandoned = input.active.find((a) => a.stale) ?? input.active[0];
+  if (abandoned || input.staleRecords)
+    return {
+      actor: 'controller',
+      action: 'wait',
+      step: 'awaiting-claim',
+      ...opt('workId', abandoned?.workId),
+      detail: input.controllerLive
+        ? 'Владение попыткой истекло: controller истечёт её и выдаст работу заново'
+        : 'Попытка без живого владельца: harness run истечёт её и продолжит очередь',
+      ...(input.controllerLive ? {} : { command: 'harness run' as const }),
+    };
+  const first = input.works.find((w) => w.next.action !== 'none');
+  if (first) {
+    const idle = !input.controllerLive && (first.next.actor === 'controller' || input.liftedByRun);
     return {
       ...first.next,
       workId: first.id,
-      ...(first.next.step === 'awaiting-claim' && !controllerLive
-        ? { detail: 'Очередь ждёт controller: работу продолжит harness run' }
+      ...(idle
+        ? {
+            detail: 'Очередь ждёт controller: работу продолжит harness run',
+            command: 'harness run' as const,
+          }
         : {}),
     };
+  }
   return {
     actor: null,
     action: 'none',
-    detail: total ? 'Вся работа завершена' : 'Работы нет',
+    detail: input.total ? 'Вся работа завершена' : 'Работы нет',
   };
 }

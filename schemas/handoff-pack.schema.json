@@ -127,6 +127,33 @@
           "format": "date-time",
           "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
         },
+        "operation": {
+          "type": "string",
+          "maxLength": 201
+        },
+        "failures": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "provider-auth",
+              "environment",
+              "timeout",
+              "stale-base",
+              "empty-result",
+              "unfinished",
+              "scope-violation",
+              "gate",
+              "review",
+              "review-protocol",
+              "merge",
+              "cancelled",
+              "budget",
+              "needs-lead",
+              "unknown"
+            ]
+          }
+        },
         "liftedByRun": {
           "type": "boolean",
           "const": true
@@ -215,7 +242,7 @@
       "properties": {
         "owner": {
           "type": "string",
-          "maxLength": 300
+          "maxLength": 201
         },
         "until": {
           "type": "string",
@@ -248,7 +275,7 @@
           },
           "runId": {
             "type": "string",
-            "maxLength": 200
+            "maxLength": 201
           },
           "attempt": {
             "type": "integer",
@@ -270,7 +297,8 @@
             ]
           },
           "runtime": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 201
           },
           "elapsedMs": {
             "type": "integer",
@@ -282,7 +310,7 @@
             "properties": {
               "name": {
                 "type": "string",
-                "maxLength": 200
+                "maxLength": 201
               },
               "elapsedMs": {
                 "type": "integer",
@@ -366,7 +394,7 @@
         "properties": {
           "runId": {
             "type": "string",
-            "maxLength": 200
+            "maxLength": 201
           },
           "workId": {
             "type": "string",
@@ -484,7 +512,7 @@
             "properties": {
               "operation": {
                 "type": "string",
-                "maxLength": 300
+                "maxLength": 201
               },
               "reason": {
                 "type": "string",
@@ -506,7 +534,7 @@
               },
               "property": {
                 "type": "string",
-                "maxLength": 200
+                "maxLength": 201
               },
               "reason": {
                 "type": "string",
@@ -580,6 +608,11 @@
               "additionalProperties": false
             }
           },
+          "blockersTruncated": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
           "next": {
             "type": "object",
             "properties": {
@@ -639,11 +672,18 @@
               },
               "property": {
                 "type": "string",
-                "maxLength": 200
+                "maxLength": 201
               },
               "detail": {
                 "type": "string",
                 "maxLength": 301
+              },
+              "command": {
+                "type": "string",
+                "enum": [
+                  "harness run",
+                  "harness resume"
+                ]
               }
             },
             "required": [
@@ -785,10 +825,10 @@
           },
           "message": {
             "type": "string",
-            "maxLength": 2000
+            "maxLength": 301
           },
           "evidence": {
-            "maxItems": 20,
+            "maxItems": 5,
             "type": "array",
             "items": {
               "type": "object",
@@ -803,10 +843,12 @@
                   ]
                 },
                 "id": {
-                  "type": "string"
+                  "type": "string",
+                  "maxLength": 201
                 },
                 "sha": {
-                  "type": "string"
+                  "type": "string",
+                  "maxLength": 64
                 }
               },
               "required": [
@@ -817,10 +859,29 @@
             }
           },
           "workId": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
           },
           "runId": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 201
+          },
+          "queue": {
+            "type": "boolean",
+            "const": true
+          },
+          "works": {
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,80}$"
+            }
+          },
+          "worksCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
           }
         },
         "required": [
@@ -843,11 +904,25 @@
         "properties": {
           "runId": {
             "type": "string",
-            "maxLength": 200
+            "maxLength": 201
           },
           "workId": {
             "type": "string",
             "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "workStatus": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "ready",
+              "running",
+              "verifying",
+              "reviewing",
+              "integrating",
+              "done",
+              "failed",
+              "cancelled"
+            ]
           },
           "attempt": {
             "type": "integer",
@@ -981,7 +1056,7 @@
               },
               "id": {
                 "type": "string",
-                "maxLength": 200
+                "maxLength": 201
               },
               "state": {
                 "type": "string",
@@ -1000,18 +1075,40 @@
                 "exclusiveMinimum": 0,
                 "maximum": 9007199254740991
               },
-              "spentUsd": {
+              "reportedUsd": {
                 "type": "number",
                 "minimum": 0
               },
-              "durationMs": {
+              "estimatedUsd": {
                 "type": "number",
                 "minimum": 0
+              },
+              "complete": {
+                "type": "boolean"
               },
               "unknownCalls": {
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 9007199254740991
+              },
+              "unfinishedCalls": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "abandonedCalls": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "uncoveredRuns": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "durationMs": {
+                "type": "number",
+                "minimum": 0
               },
               "remainingUsd": {
                 "anyOf": [
@@ -1043,9 +1140,14 @@
             "required": [
               "scope",
               "state",
-              "spentUsd",
-              "durationMs",
+              "reportedUsd",
+              "estimatedUsd",
+              "complete",
               "unknownCalls",
+              "unfinishedCalls",
+              "abandonedCalls",
+              "uncoveredRuns",
+              "durationMs",
               "remainingUsd",
               "remainingMs"
             ],
@@ -1060,6 +1162,7 @@
       "additionalProperties": false
     },
     "repairs": {
+      "maxItems": 10,
       "type": "array",
       "items": {
         "type": "object",
@@ -1151,11 +1254,18 @@
         },
         "property": {
           "type": "string",
-          "maxLength": 200
+          "maxLength": 201
         },
         "detail": {
           "type": "string",
           "maxLength": 301
+        },
+        "command": {
+          "type": "string",
+          "enum": [
+            "harness run",
+            "harness resume"
+          ]
         },
         "workId": {
           "type": "string",
@@ -1239,13 +1349,31 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
+        },
+        "budgets": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "repairs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "intentions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
         }
       },
       "required": [
         "works",
         "stops",
         "failures",
-        "unfinished"
+        "unfinished",
+        "budgets",
+        "repairs",
+        "intentions"
       ],
       "additionalProperties": false
     }

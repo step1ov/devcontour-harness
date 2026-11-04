@@ -90,20 +90,20 @@ git rev-parse refs/heads/harness/accepted   # совпадает с data.result.
 
 ## Команды
 
-| Команда                                      | Что делает                                         |
-| -------------------------------------------- | -------------------------------------------------- |
-| `validate --graph F --policy F`              | Проверка входов без моделей и записи               |
-| `review-plan / review-contract … --author A` | Раунд технического ревью с историей находок        |
-| `approve --state D --subject ID --digest H`  | Согласование оператором (`approvalMode: operator`) |
-| `run --graph F --policy F --state D`         | Регистрация, согласование и работа до простоя      |
-| `status / events / result --state D`         | Чтение без побочных эффектов                       |
-| `pause / resume / cancel / retry --state D`  | Управление очередью и поручением                   |
-| `deliver --state D --work ID --sink file:D`  | Повтор доставки без моделей и интеграции           |
-| `worktree-cleanup --state D [--dry-run]`     | Уборка деревьев завершённых попыток                |
-| `profile --profile ID [--repository D]`      | Разрешение профиля стека без команд проекта        |
-| `doctor`                                     | Версии, runtime, sandbox, совместимость состояния  |
-| `report --state D [--format md\|html]`       | Отчёт об эффекте по данным проекта                 |
-| `handoff --state D [--intent T]… [--json]`   | Пакет передачи контекста новой сессии агента       |
+| Команда                                         | Что делает                                         |
+| ----------------------------------------------- | -------------------------------------------------- |
+| `validate --graph F --policy F`                 | Проверка входов без моделей и записи               |
+| `review-plan / review-contract … --author A`    | Раунд технического ревью с историей находок        |
+| `approve --state D --subject ID --digest H`     | Согласование оператором (`approvalMode: operator`) |
+| `run --graph F --policy F --state D`            | Регистрация, согласование и работа до простоя      |
+| `status / events / result --state D`            | Чтение без побочных эффектов                       |
+| `pause / resume / cancel / retry --state D`     | Управление очередью и поручением                   |
+| `deliver --state D --work ID --sink file:D`     | Повтор доставки без моделей и интеграции           |
+| `worktree-cleanup --state D [--dry-run]`        | Уборка деревьев завершённых попыток                |
+| `profile --profile ID [--repository D]`         | Разрешение профиля стека без команд проекта        |
+| `doctor`                                        | Версии, runtime, sandbox, совместимость состояния  |
+| `report --state D [--format md\|html]`          | Отчёт об эффекте по данным проекта                 |
+| `handoff --state D [--format md] [--intent T]…` | Пакет передачи контекста новой сессии агента       |
 
 stdout — один JSON (`devcontour-harness/v1alpha1`), диагностика — stderr. Exit
 codes: 0 успех, 2 неверный вход, 3 отказ/блокировка, 4 инфраструктура.
