@@ -1370,6 +1370,11 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
+        "budgetsShared": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
         "repairs": {
           "type": "integer",
           "minimum": 0,
@@ -1396,6 +1401,7 @@
         "unfinished",
         "budgets",
         "budgetsWithin",
+        "budgetsShared",
         "repairs",
         "intentions",
         "intentionsDropped",

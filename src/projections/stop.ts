@@ -134,6 +134,12 @@ export type StopInput =
         /** Согласование графа устарело для этой политики (режим operator). */
         approvalStale?: string;
         /**
+         * У отменённой работы: незавершённые работы, которые прямо от неё
+         * зависят. Пусто — перепланировать нечего (действия нет); не задано —
+         * неизвестно, прежнее replan-dependents.
+         */
+        openDependents?: string[];
+        /**
          * Активная попытка без движения по обходу controller: что не
          * двигалось, сколько и что controller сделает (`action` у stalled).
          */
@@ -460,14 +466,30 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       action: 'diagnose-failure',
       note: `Ждёт ${work.waitingOn.join(', ')}: на них движок остановится; следующий шаг — по их диагнозу.`,
     };
-  if (work.status === 'cancelled')
+  if (work.status === 'cancelled') {
+    const dependents = work.openDependents;
+    if (dependents && !dependents.length)
+      return {
+        code: 'CANCELLED',
+        cause: 'cancelled',
+        phase: 'claim',
+        actor: null,
+        action: 'none',
+        note: 'Незавершённых зависимых работ нет: перепланировать нечего.',
+      };
     return {
       code: 'CANCELLED',
       cause: 'cancelled',
       phase: 'claim',
       actor: 'lead',
       action: 'replan-dependents',
+      ...(dependents
+        ? {
+            note: `Ждут отменённую: ${dependents.slice(0, 5).join(', ')}${dependents.length > 5 ? ` и ещё ${dependents.length - 5}` : ''}.`,
+          }
+        : {}),
     };
+  }
   if (work.status === 'draft')
     return {
       code: 'APPROVAL_REQUIRED',

@@ -174,6 +174,10 @@ export function handoffMarkdown(pack: HandoffPack): string {
       out.push(
         `Бюджеты поручений в пределах и без расхода не показаны: ${pack.truncated.budgetsWithin}.`,
       );
+    if (pack.truncated.budgetsShared)
+      out.push(
+        `Бюджеты поручений, весь расход которых — вызовы о их группе (ревью плана), не показаны: ${pack.truncated.budgetsShared}; этот расход учтён один раз — в строках группы и total.`,
+      );
   }
   if (pack.repairs.length) {
     out.push('', 'Восстановления заданий:');

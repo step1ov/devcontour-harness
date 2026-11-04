@@ -28,7 +28,7 @@ import {
   type StopDiagnosis,
   type StopInput,
 } from '../src/projections/stop.ts';
-import { ready } from './engine-fixture.ts';
+import { graphOf, ready } from './engine-fixture.ts';
 import { hsetup } from './harness-fixture.ts';
 import { approve, implement } from './runner-fixture.ts';
 
@@ -245,6 +245,16 @@ test('H1-03: таблица §1.2 для kind=work — ветки в указа�
       '9 cancelled',
       work({ work: { status: 'cancelled', failureKind: 'cancelled' } }),
       ['CANCELLED', 'cancelled', 'claim', 'lead', 'replan-dependents'],
+    ],
+    [
+      '9 cancelled, ждут незавершённые',
+      work({ work: { status: 'cancelled', failureKind: 'cancelled', openDependents: ['b'] } }),
+      ['CANCELLED', 'cancelled', 'claim', 'lead', 'replan-dependents'],
+    ],
+    [
+      '9 cancelled без незавершённых зависимых',
+      work({ work: { status: 'cancelled', failureKind: 'cancelled', openDependents: [] } }),
+      ['CANCELLED', 'cancelled', 'claim', null, 'none'],
     ],
     [
       '10 draft',
@@ -875,6 +885,39 @@ test('H1-03 (H1-F006): последняя стадия уже выполняет
     assert.deepEqual(seen, { held: true, expired: false, retryPlanned: true });
     assert.equal(h.workflows.get(job.key).repairs, 1, 'run действительно назначил repair');
     assert.equal(result.works[0]!.status, 'done');
+  } finally {
+    h.close();
+  }
+});
+
+test('stopInputsOf: отменённая без незавершённых зависимых — не остановка доски, explain работы её показывает', () => {
+  const ctx = hsetup({ scenario: {} });
+  const h = ctx.open();
+  try {
+    ready(h.engine, graphOf({ a: [], b: ['a'], c: [] }));
+    h.engine.release('c1');
+    h.engine.cancel('a', 'не нужно');
+    h.engine.cancel('c', 'не нужно');
+    const opts = { maxAttempts: 3, repairBudget: 6 };
+    const board = () =>
+      stopInputsOf(h, opts)
+        .filter((i): i is WorkInput => i.kind === 'work')
+        .map(explainStop)
+        .filter((d) => d.code === 'CANCELLED')
+        .map((d) => [d.workId, d.action]);
+    // a ждёт незавершённая b; c не ждёт никто.
+    assert.deepEqual(board(), [['a', 'replan-dependents']]);
+    const [only] = stopInputsOf(h, { ...opts, workId: 'c' })
+      .filter((i): i is WorkInput => i.kind === 'work')
+      .map(explainStop);
+    assert.deepEqual(
+      [only!.workId, only!.code, only!.actor, only!.action],
+      ['c', 'CANCELLED', null, 'none'],
+    );
+    assert.match(only!.message, /перепланировать нечего/);
+    // Ждущая отменена тоже: у a больше нет незавершённых зависимых.
+    h.engine.cancel('b', 'не нужно');
+    assert.deepEqual(board(), []);
   } finally {
     h.close();
   }

@@ -148,9 +148,26 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
     };
     for (const w of works) groupOf(w.graphId, w);
     const everyGroup = new Map([...groups.values()].flatMap((g) => [...g]));
+    // Незавершённые работы, которые прямо ждут отменённую: только их и
+    // перепланирует replan-dependents. Ждущая через отменённую же
+    // промежуточную — забота диагноза той; через принятую — не ждёт вовсе.
+    const openDependentsOf = (id: string) =>
+      works
+        .filter(
+          (w) =>
+            w.status !== 'done' &&
+            w.status !== 'cancelled' &&
+            w.order.dependsOn.includes(id) &&
+            !external(w.graphId).has(id),
+        )
+        .map((w) => w.id);
     for (const work of works) {
       if (work.status === 'done') continue;
       if (options.workId !== undefined && work.id !== options.workId) continue;
+      const openDependents = work.status === 'cancelled' ? openDependentsOf(work.id) : undefined;
+      // Отменённая без ждущих — не остановка доски: в общий explain и пакет
+      // не входит (как принятая); explain этой работы её показывает.
+      if (openDependents && !openDependents.length && options.workId === undefined) continue;
       const attempts = v.attempts(work.id);
       const last = attempts.filter((a) => a.status !== 'active').at(-1);
       const kind = work.failureKind ?? 'unknown';
@@ -214,6 +231,7 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
           ...(work.recovery ? { recovery: { status: work.recovery.status } } : {}),
           ...(waitingOn.length ? { waitingOn } : {}),
           ...(approvalStale ? { approvalStale } : {}),
+          ...(openDependents ? { openDependents } : {}),
           ...((live) =>
             live && live.state !== 'active'
               ? {

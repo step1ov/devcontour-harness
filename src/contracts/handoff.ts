@@ -260,7 +260,8 @@ export const handoffPackSchema = z.strictObject({
    * сообщённое runtime, `estimatedUsd` — оценка по тарифу; `complete: false`
    * — расход известен не полностью (вызовы без стоимости, незавершённые,
    * брошенные, попытки без учёта), сумма — нижняя граница, `remaining*` —
-   * `null`. Бюджеты поручений в пределах и без расхода не перечисляются.
+   * `null`. Бюджеты поручений в пределах и без расхода не перечисляются, как
+   * и поручений, весь расход которых — вызовы о их группе (`truncated.budgetsShared`).
    * Нет поля — бюджеты не заданы.
    */
   budgets: z
@@ -306,7 +307,10 @@ export const handoffPackSchema = z.strictObject({
   /**
    * Сколько записей каждого списка не вошло в пакет (по пределу числа или
    * размера). `budgets` — строки бюджетов сверх предела, `budgetsWithin` —
-   * бюджеты поручений в пределах и без расхода (не показаны намеренно);
+   * бюджеты поручений в пределах и без расхода (не показаны намеренно),
+   * `budgetsShared` — бюджеты поручений, весь расход которых — вызовы о их
+   * группе (ревью и проверка плана): этот расход один и уже есть в строках
+   * группы и total, а не повторяется у каждого поручения;
    * `intentions` — сколько намерений усечено по `intentionChars`,
    * `intentionsDropped` — отброшено ради предела размера; `bySize` — пакет
    * урезан до предела размера (`HANDOFF_MAX_BYTES` или меньший `maxBytes`
@@ -319,6 +323,7 @@ export const handoffPackSchema = z.strictObject({
     unfinished: count,
     budgets: count,
     budgetsWithin: count,
+    budgetsShared: count,
     repairs: count,
     intentions: count,
     intentionsDropped: count,

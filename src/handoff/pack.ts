@@ -9,6 +9,8 @@ import {
 import { HarnessError } from '../contracts/errors.ts';
 import type { AttemptState, WorkState, WorkStatus } from '../contracts/execution.ts';
 import { statusOf } from '../control/status.ts';
+import { ownWorkRecords } from '../engine/budget.ts';
+import { callRecords } from '../engine/usage.ts';
 import { policySecrets, redactor } from '../environment/redaction.ts';
 import { stopInputsOf, type StopSource } from '../explain/state.ts';
 import { handoffMarkdown } from './markdown.ts';
@@ -168,7 +170,13 @@ function build(
   const read = h.engine.read((v) => {
     const works = v.works(graphId);
     const attempts = works.flatMap((w) => v.attempts(w.id));
-    return { works, attempts };
+    // Поручения со своими вызовами: строка бюджета поручения, весь расход
+    // которого — вызовы о его группе, повторяла бы строку группы N раз.
+    const calls = callRecords(v);
+    const ownSpend = new Set(
+      works.filter((w) => ownWorkRecords(v, calls, w.id).length > 0).map((w) => w.id),
+    );
+    return { works, attempts, ownSpend };
   });
   const byId = new Map<string, WorkState>(read.works.map((w) => [w.id, w]));
   const title = (id: string) => text(byId.get(id)?.order.title ?? id);
@@ -392,7 +400,8 @@ function build(
   };
 
   // Бюджеты: общий и групп этого графа — всегда; поручений — только с
-  // расходом или не в пределах; затем общий предел строк.
+  // расходом или не в пределах и только со своими вызовами (расход вызовов о
+  // группе — один, его показывают строки группы и total); затем общий предел строк.
   const relevant = (status.budgets?.budgets ?? []).filter((b) =>
     b.scope.kind === 'total'
       ? true
@@ -400,14 +409,17 @@ function build(
         ? graphId === undefined || b.scope.id === graphId
         : b.scope.id !== undefined && byId.has(b.scope.id),
   );
-  const shown = relevant
-    .filter(
-      (b) =>
-        b.scope.kind !== 'work' ||
-        b.state !== 'within' ||
-        b.reportedUsd + b.estimatedUsd > 0 ||
-        b.unknownCalls + b.unfinishedCalls + b.abandonedCalls > 0,
-    )
+  const listed = relevant.filter(
+    (b) =>
+      b.scope.kind !== 'work' ||
+      b.state !== 'within' ||
+      b.reportedUsd + b.estimatedUsd > 0 ||
+      b.unknownCalls + b.unfinishedCalls + b.abandonedCalls > 0,
+  );
+  const sharedOnly = (b: (typeof relevant)[number]) =>
+    b.scope.kind === 'work' && b.uncoveredRuns === 0 && !read.ownSpend.has(b.scope.id!);
+  const shown = listed
+    .filter((b) => !sharedOnly(b))
     .map((b, i) => ({ b, i }))
     .sort(
       (x, y) =>
@@ -490,7 +502,8 @@ function build(
       failures: failed.length - failures.length,
       unfinished: unfinishedAll.length - unfinished.length,
       budgets: shown.length - budgetEntries.length,
-      budgetsWithin: relevant.length - shown.length,
+      budgetsWithin: relevant.length - listed.length,
+      budgetsShared: listed.length - shown.length,
       repairs: repairsAll.length - repairs.length,
       intentions: cleanIntentions.filter((s, i) => s !== clippedIntentions[i]).length,
       intentionsDropped: 0,
