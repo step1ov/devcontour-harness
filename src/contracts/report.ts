@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { baseMoveActors, cancelActors, environmentCauses, retryActors } from './events.ts';
 import { failureKindSchema, pauseReasons } from './execution.ts';
 import { isoTimeSchema } from './primitives.ts';
 
@@ -115,6 +116,11 @@ const evidenceRefSchema = z.strictObject({
 });
 
 const countRow = <K extends z.ZodType>(key: K) => z.strictObject({ key, count });
+/** Число по каждому актёру перечня. */
+const actorCounts = <A extends readonly [string, ...string[]]>(actors: A) =>
+  z.strictObject(
+    Object.fromEntries(actors.map((a) => [a, count])) as { [K in A[number]]: typeof count },
+  );
 
 const weekRowSchema = z.strictObject({
   kind: z.literal('week'),
@@ -277,9 +283,28 @@ export const valueReportSchema = z.strictObject({
       /** Удержания и отмены попыток: актёр не записан, к действиям человека не относятся. */
       holds: count,
       cancelledAttempts: count,
+      /** Повторы, сбросы и сдвиги базы в окне по событиям; `null` — событий вмешательств нет. */
       retries: count.nullable(),
       resets: count.nullable(),
       baseMoves: count.nullable(),
+      /**
+       * Актёры вмешательств из событий `work.retried`, `work.cancelled`,
+       * `base.moved`; `null` — таких событий в журнале нет (записаны до
+       * версии, которая их пишет). `from` — первое такое событие; `bound:
+       * lower` — в окне есть активность раньше него.
+       */
+      recorded: z
+        .strictObject({
+          from: isoTimeSchema,
+          bound: z.enum(['exact', 'lower']),
+          retries: actorCounts(retryActors),
+          resets: actorCounts(retryActors),
+          cancellations: actorCounts(cancelActors),
+          /** Отмены поручений без активной попытки (их `attempt.cancelled` нет). */
+          cancelledWithoutAttempt: count,
+          baseMoves: actorCounts(baseMoveActors),
+        })
+        .nullable(),
     }),
     approvals: z.strictObject({
       operator: count,
@@ -386,8 +411,28 @@ export const valueReportSchema = z.strictObject({
     /** Отказы `defect` только в gates подготовки: возможно, тоже окружение (сеть, реестр). */
     setupCheckFailures: count,
     timeLimit: count,
-    /** Подпричина отказа окружения ещё не записывается. */
-    causes: z.null(),
+    /**
+     * Подпричины отказов окружения по `attempt.diagnosed`; `null` — таких
+     * событий в журнале нет. `undiagnosed` — отказы окружения окна без
+     * события (записаны раньше): тогда `bound: lower`.
+     */
+    causes: z
+      .strictObject({
+        rows: z
+          .array(
+            z.strictObject({
+              cause: z.enum(environmentCauses),
+              count,
+              /** Из них засчитаны в предел попыток. */
+              counted: count,
+            }),
+          )
+          .max(environmentCauses.length),
+        diagnosed: count,
+        undiagnosed: count,
+        bound: z.enum(['exact', 'lower']),
+      })
+      .nullable(),
     neutral: z.strictObject({
       costBound: z.enum(reportBounds),
       attempts: count,

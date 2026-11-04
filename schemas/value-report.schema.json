@@ -938,6 +938,149 @@
                   "type": "null"
                 }
               ]
+            },
+            "recorded": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "from": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "bound": {
+                      "type": "string",
+                      "enum": [
+                        "exact",
+                        "lower"
+                      ]
+                    },
+                    "retries": {
+                      "type": "object",
+                      "properties": {
+                        "operator": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "recovery": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "host": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "operator",
+                        "recovery",
+                        "host"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "resets": {
+                      "type": "object",
+                      "properties": {
+                        "operator": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "recovery": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "host": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "operator",
+                        "recovery",
+                        "host"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "cancellations": {
+                      "type": "object",
+                      "properties": {
+                        "operator": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "host": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "graph": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "operator",
+                        "host",
+                        "graph"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "cancelledWithoutAttempt": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "baseMoves": {
+                      "type": "object",
+                      "properties": {
+                        "operator": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "controller": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "host": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "operator",
+                        "controller",
+                        "host"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "from",
+                    "bound",
+                    "retries",
+                    "resets",
+                    "cancellations",
+                    "cancelledWithoutAttempt",
+                    "baseMoves"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -946,7 +1089,8 @@
             "cancelledAttempts",
             "retries",
             "resets",
-            "baseMoves"
+            "baseMoves",
+            "recorded"
           ],
           "additionalProperties": false
         },
@@ -2054,7 +2198,84 @@
           "maximum": 9007199254740991
         },
         "causes": {
-          "type": "null"
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "rows": {
+                  "maxItems": 14,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "cause": {
+                        "type": "string",
+                        "enum": [
+                          "sandbox-launch",
+                          "sandbox-network",
+                          "sandbox-filesystem",
+                          "sandbox-policy",
+                          "dependency-network",
+                          "provider-auth",
+                          "provider-limit",
+                          "transport",
+                          "preflight",
+                          "lease-expired",
+                          "stalled",
+                          "shutdown",
+                          "other",
+                          "none"
+                        ]
+                      },
+                      "count": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "counted": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "cause",
+                      "count",
+                      "counted"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "diagnosed": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "undiagnosed": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "bound": {
+                  "type": "string",
+                  "enum": [
+                    "exact",
+                    "lower"
+                  ]
+                }
+              },
+              "required": [
+                "rows",
+                "diagnosed",
+                "undiagnosed",
+                "bound"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "neutral": {
           "type": "object",

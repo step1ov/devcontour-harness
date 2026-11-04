@@ -56,6 +56,23 @@ const bucketLabels: Record<string, string> = {
   unclassified: 'unclassified (legacy)',
 };
 
+const causeLabels: Record<string, string> = {
+  'sandbox-launch': 'sandbox did not start the command',
+  'sandbox-network': 'sandbox closed the network',
+  'sandbox-filesystem': 'sandbox denied file access',
+  'sandbox-policy': 'sandbox policy could not be built',
+  'dependency-network': 'dependency install network or registry',
+  'provider-auth': 'provider login',
+  'provider-limit': 'provider limit or balance',
+  transport: 'network to the provider',
+  preflight: 'setup before work',
+  'lease-expired': 'lease expired',
+  stalled: 'stalled process',
+  shutdown: 'controller shutdown',
+  other: 'other',
+  none: 'not an environment cause',
+};
+
 /** Блоки отчёта в порядке разделов (`docs/contracts.md`, «Отчёт»). */
 export function reportBlocks(r: ValueReport): Block[] {
   const c = r.coverage;
@@ -130,15 +147,21 @@ export function reportBlocks(r: ValueReport): Block[] {
   }
 
   h(2, 'Autonomy');
+  const rec = a.actions.recorded;
+  const ge = rec?.bound === 'lower' ? '≥ ' : '';
   list([
-    `Accepted tasks that needed no human action: not measurable yet (retries, resets and base moves have no recorded actor). Accepted tasks with an operator recovery decision: ${a.withAction.value ?? 0} of ${a.withAction.n}.`,
-    `Human actions with a recorded actor: operator recovery decisions ${a.actions.operatorDecisions}. Without a recorded actor (not counted as human): holds ${a.actions.holds}, cancelled attempts ${a.actions.cancelledAttempts}. ${actionsLine(
-      [
-        ['retries', a.actions.retries],
-        ['resets', a.actions.resets],
-        ['base moves', a.actions.baseMoves],
-      ],
-    )}`,
+    rec
+      ? `Accepted tasks that needed no human action: ${formatMeasureRatio(a.withoutAction)}. With a recorded human action (operator retry, cancellation or recovery decision): ${formatMeasureRatio(a.withAction)}.`
+      : `Accepted tasks that needed no human action: not measurable yet (retries, resets and base moves have no recorded actor). Accepted tasks with an operator recovery decision: ${a.withAction.value ?? 0} of ${a.withAction.n}.`,
+    rec
+      ? `Human actions: operator recovery decisions ${a.actions.operatorDecisions}, operator retries ${ge}${rec.retries.operator} (resets ${ge}${rec.resets.operator}), operator cancellations ${ge}${rec.cancellations.operator}, operator base moves ${ge}${rec.baseMoves.operator}. Automatic: recovery retries ${ge}${rec.retries.recovery}, controller base moves ${ge}${rec.baseMoves.controller}, cancellations by a new graph revision ${ge}${rec.cancellations.graph}. By the host without a named actor: retries ${ge}${rec.retries.host}, cancellations ${ge}${rec.cancellations.host}, base moves ${ge}${rec.baseMoves.host}. Tasks cancelled without an active attempt: ${ge}${rec.cancelledWithoutAttempt}. Without a recorded actor: holds ${a.actions.holds}. Recorded from ${rec.from}.`
+      : `Human actions with a recorded actor: operator recovery decisions ${a.actions.operatorDecisions}. Without a recorded actor (not counted as human): holds ${a.actions.holds}, cancelled attempts ${a.actions.cancelledAttempts}. ${actionsLine(
+          [
+            ['retries', a.actions.retries],
+            ['resets', a.actions.resets],
+            ['base moves', a.actions.baseMoves],
+          ],
+        )}`,
     a.approvals.source === 'none'
       ? 'Plan approvals: unknown (no approval records).'
       : `Plan approvals: operator ${a.approvals.operator}, agent ${a.approvals.agent} (${a.approvals.source === 'events' ? 'from events' : a.approvals.source === 'state' ? 'current approvals of graphs only' : 'from events, and current approvals of graphs without events'}).`,
@@ -223,7 +246,9 @@ export function reportBlocks(r: ValueReport): Block[] {
   list([
     `Environment failures cost ${formatDuration(e.neutral.machineMs)} of machine time and ${money(e.neutral.costBound, e.neutral.knownUsd)} known spend; blocked before work (not counted as an attempt): ${e.neutral.blocked}; queue stops caused by the environment: ${e.neutral.runtimePauses}.`,
     `Integration check rechecks: ${e.rechecks.flaky} flaky (false rejection avoided), ${e.rechecks.confirmed} confirmed.`,
-    'Environment sub-causes: not recorded yet.',
+    e.causes
+      ? `Environment sub-causes${e.causes.undiagnosed ? ` (${e.causes.undiagnosed} earlier failures without a recorded sub-cause)` : ''}: ${e.causes.rows.length ? e.causes.rows.map((x) => `${causeLabels[x.cause] ?? x.cause} ${x.count}${x.counted ? ` (${x.counted} counted as an attempt)` : ''}`).join(', ') : 'none in the window'}.`
+      : 'Environment sub-causes: not recorded yet.',
   ]);
 
   h(2, 'Weekly trend');

@@ -13,7 +13,7 @@ import type {
   PropertyRecovery,
   WorkState,
 } from '../contracts/execution.ts';
-import type { RunEvent } from '../contracts/events.ts';
+import type { EnvironmentCause, RunEvent, RunEventPayload } from '../contracts/events.ts';
 import type { ReviewRecord } from '../contracts/review.ts';
 import type { FailureBucket, ReportDist, ReportMeasure, ValueReport } from '../contracts/report.ts';
 import {
@@ -607,16 +607,85 @@ export function valueReport(
   );
   const holds = windowEvents.filter((e) => e.type === 'work.held' && !e.payload.released);
   const cancelledAttempts = windowAttempts.filter((a) => failureBucketOf(a) === 'operator');
-  // Действие человека — только запись с актёром-человеком (решение recovery
-  // оператора). Удержание (`work.held`) и отмена попытки актёра не называют:
-  // их ставят и операции хоста (например, смена контракта), поэтому они
-  // показаны отдельно и в действия человека не входят.
+  // Действие человека — только запись с актёром-человеком: решение recovery
+  // оператора, повтор и отмена с `by: operator`. Удержание (`work.held`) актёра
+  // не называет: его ставят и операции хоста (например, смена контракта),
+  // поэтому оно показано отдельно и в действия человека не входит.
   const actedOn = new Set<string>(
     [...episodes.values()]
       .filter((r) => r.decision?.source.kind === 'operator')
       .map((r) => r.workId),
   );
+  // Вмешательства с актёром (`work.retried`, `work.cancelled`, `base.moved`):
+  // запись идёт с первого события версии, которая их пишет (она же пишет
+  // `attempt.diagnosed` при каждом отказе). Раньше него действие могло быть,
+  // но не записано, — поручение, начатое раньше, «без действий» не считается.
+  const interventionTypes = new Set([
+    'work.retried',
+    'work.cancelled',
+    'base.moved',
+    'attempt.diagnosed',
+  ]);
+  const firstRecorded = events.find((e) => interventionTypes.has(e.type));
+  const recordedFrom = firstRecorded ? at(firstRecorded.at) : undefined;
+  const hostActed = new Set<string>();
+  for (const e of events) {
+    if (e.type !== 'work.retried' && e.type !== 'work.cancelled') continue;
+    if (!e.workId) continue;
+    if (e.payload.by === 'operator') actedOn.add(e.workId);
+    else if (e.payload.by === 'host') hostActed.add(e.workId);
+  }
+  /** Начало жизни поручения: согласование первой попытки или поручения, иначе первая попытка. */
+  const startOf = (f: WorkFacts) => {
+    const first = f.attempts[0];
+    const iso = first?.wait?.approvedAt ?? f.work.approvedAt ?? first?.startedAt;
+    return iso ? at(iso) : undefined;
+  };
+  const coveredWork = (f: WorkFacts) => {
+    const start = startOf(f);
+    return recordedFrom !== undefined && start !== undefined && start >= recordedFrom;
+  };
   const acceptedActed = accepted.filter((f) => actedOn.has(f.work.id)).length;
+  // Отсутствие действия человека известно, если поручение начато после
+  // начала записи и ни один его повтор или отмена не сделаны хостом без актёра.
+  const acceptedUnknown = accepted.filter(
+    (f) => !actedOn.has(f.work.id) && (!coveredWork(f) || hostActed.has(f.work.id)),
+  ).length;
+  const zero = <A extends readonly string[]>(actors: A) =>
+    Object.fromEntries(actors.map((a) => [a, 0])) as Record<A[number], number>;
+  const recorded =
+    recordedFrom === undefined
+      ? null
+      : (() => {
+          const r = {
+            from: toIso(recordedFrom),
+            bound: 'exact' as 'exact' | 'lower',
+            retries: zero(['operator', 'recovery', 'host'] as const),
+            resets: zero(['operator', 'recovery', 'host'] as const),
+            cancellations: zero(['operator', 'host', 'graph'] as const),
+            cancelledWithoutAttempt: 0,
+            baseMoves: zero(['operator', 'controller', 'host'] as const),
+          };
+          for (const e of windowEvents)
+            if (e.type === 'work.retried') {
+              r.retries[e.payload.by] += 1;
+              if (e.payload.reset) r.resets[e.payload.by] += 1;
+            } else if (e.type === 'work.cancelled') {
+              r.cancellations[e.payload.by] += 1;
+              if (!e.payload.hadAttempt) r.cancelledWithoutAttempt += 1;
+            } else if (e.type === 'base.moved') r.baseMoves[e.payload.by] += 1;
+          // Окно начинается раньше записи: в нём есть попытки или события до неё.
+          const before = (ms: number) => ms < recordedFrom;
+          if (
+            windowAttempts.some((a) => before(at(a.startedAt))) ||
+            windowEvents.some((e) => before(at(e.at))) ||
+            accepted.some((f) => before(startOf(f) ?? -Infinity))
+          )
+            r.bound = 'lower';
+          return r;
+        })();
+  const total = (counts: Record<string, number> | undefined) =>
+    counts ? sum(Object.values(counts)) : null;
   const escalated = new Set<string>([
     ...[...episodes.values()]
       .filter(
@@ -872,6 +941,36 @@ export function valueReport(
   const envAttempts = failedAttempts.filter((a) => failureBucketOf(a) === 'environment');
   const envCount = envAttempts.length;
   const setupCheckFailures = failedAttempts.filter(setupOnlyFailure).length;
+  // Подпричины окружения (E3): `attempt.diagnosed` той же попытки; отказ
+  // без события записан до версии, которая их пишет.
+  const diagnosisOf = new Map<string, RunEventPayload<'attempt.diagnosed'>>();
+  for (const e of events)
+    if (e.type === 'attempt.diagnosed' && e.runId) diagnosisOf.set(e.runId, e.payload);
+  const causes = diagnosisOf.size
+    ? (() => {
+        const rows = new Map<EnvironmentCause, { count: number; counted: number }>();
+        let undiagnosed = 0;
+        for (const a of envAttempts) {
+          const d = diagnosisOf.get(a.id);
+          if (!d) {
+            undiagnosed += 1;
+            continue;
+          }
+          const row = rows.get(d.cause) ?? { count: 0, counted: 0 };
+          row.count += 1;
+          if (d.counted) row.counted += 1;
+          rows.set(d.cause, row);
+        }
+        return {
+          rows: [...rows.entries()]
+            .map(([cause, r]) => ({ cause, count: r.count, counted: r.counted }))
+            .sort((x, y) => y.count - x.count || cmp(x.cause, y.cause)),
+          diagnosed: envAttempts.length - undiagnosed,
+          undiagnosed,
+          bound: undiagnosed ? ('lower' as const) : ('exact' as const),
+        };
+      })()
+    : null;
   const rechecks = { flaky: 0, confirmed: 0 };
   for (const { e } of windowEvidence) if (e.recheck) rechecks[e.recheck.outcome] += 1;
 
@@ -1000,17 +1099,31 @@ export function valueReport(
       itemsTruncated: allItems.length > items.length,
     },
     autonomy: {
-      withAction: measure(acceptedActed, accepted.length, 0, accepted.length ? 'lower' : 'unknown'),
+      withAction: measure(
+        acceptedActed,
+        accepted.length,
+        recorded ? acceptedUnknown : 0,
+        !accepted.length ? 'unknown' : !recorded || acceptedUnknown ? 'lower' : 'exact',
+      ),
       // Без записанного актёра повторов, сбросов и сдвигов базы «без действий
       // человека» не измерить: значение неизвестно, а не верхняя граница N.
-      withoutAction: measure(null, accepted.length, accepted.length, 'unknown'),
+      // С записью — нижняя граница, пока есть поручения, начатые до неё.
+      withoutAction: recorded
+        ? measure(
+            accepted.length - acceptedActed - acceptedUnknown,
+            accepted.length,
+            acceptedUnknown,
+            !accepted.length ? 'unknown' : acceptedUnknown ? 'lower' : 'exact',
+          )
+        : measure(null, accepted.length, accepted.length, 'unknown'),
       actions: {
         operatorDecisions: operatorDecisions.length,
         holds: holds.length,
         cancelledAttempts: cancelledAttempts.length,
-        retries: null,
-        resets: null,
-        baseMoves: null,
+        retries: total(recorded?.retries),
+        resets: total(recorded?.resets),
+        baseMoves: total(recorded?.baseMoves),
+        recorded,
       },
       approvals,
       pauses,
@@ -1102,7 +1215,7 @@ export function valueReport(
       ),
       setupCheckFailures,
       timeLimit: bucketCounts.get('time-limit') ?? 0,
-      causes: null,
+      causes,
       neutral: {
         // Тот же расход, что у корзины `environment` раздела расходов.
         costBound: attemptsBound(attemptCosts.filter(({ a }) => envAttempts.includes(a))),
@@ -1368,23 +1481,33 @@ function summaryOf(r: ValueReport, failedAttempts: number): ValueReport['summary
 }
 
 function limitationsOf(r: ValueReport): ValueReport['limitations'] {
+  const recorded = r.autonomy.actions.recorded;
+  const causes = r.environment.causes;
   const out: ValueReport['limitations'] = [
     {
       id: 'no-baseline',
       text: 'There is no before-harness baseline: the report does not compare with work done without the harness.',
     },
-    {
-      id: 'actions-not-recorded',
-      text: 'Human actions are counted only where a person is recorded as the actor (operator recovery decisions); retries, resets, cancellations and base moves have no recorded actor yet, so tasks that needed no human action are not measurable yet.',
-    },
+    ...(recorded === null
+      ? [
+          {
+            id: 'actions-not-recorded',
+            text: 'Human actions are counted only where a person is recorded as the actor (operator recovery decisions); retries, resets, cancellations and base moves have no recorded actor yet, so tasks that needed no human action are not measurable yet.',
+          },
+        ]
+      : []),
     {
       id: 'check-network',
       text: 'Network or registry errors inside checks are classified as check failures, so rejections by checks can be overstated; setup checks are marked.',
     },
-    {
-      id: 'environment-cause',
-      text: 'Environment failures have no recorded sub-cause (sandbox, network, provider, lease).',
-    },
+    ...(causes === null
+      ? [
+          {
+            id: 'environment-cause',
+            text: 'Environment failures have no recorded sub-cause (sandbox, network, provider, lease).',
+          },
+        ]
+      : []),
     {
       id: 'reviewer-precision',
       text: 'A rejected candidate is not proof of a real defect: reviewer precision is not measured; withdrawn findings are only a proxy.',
@@ -1398,6 +1521,25 @@ function limitationsOf(r: ValueReport): ValueReport['limitations'] {
   const add = (id: string, cond: boolean, text: string) => {
     if (cond) out.push({ id, text });
   };
+  if (recorded) {
+    const unknown = r.autonomy.withoutAction.unknown;
+    add(
+      'actions-from',
+      unknown > 0 || recorded.bound === 'lower',
+      `Retries, resets, cancellations and base moves are recorded with their actor from ${recorded.from}; ${plural(unknown, 'accepted task')} started earlier or ${unknown === 1 ? 'was' : 'were'} retried or cancelled by the host without a named actor, so tasks that needed no human action are a lower bound${recorded.bound === 'lower' ? ' and action counts cover only the recorded part of the window' : ''}.`,
+    );
+    add(
+      'base-moves',
+      (r.autonomy.actions.baseMoves ?? 0) > 0,
+      'Base moves are counted by actor but are not attributed to tasks.',
+    );
+  }
+  if (causes)
+    add(
+      'environment-cause-from',
+      causes.undiagnosed > 0,
+      `${plural(causes.undiagnosed, 'environment failure')} recorded before sub-causes were recorded ${causes.undiagnosed === 1 ? 'has' : 'have'} no sub-cause; sub-causes are shown for the rest.`,
+    );
   const unclassified = r.environment.buckets.find((b) => b.bucket === 'unclassified')!.count;
   add(
     'unclassified',
@@ -1426,8 +1568,10 @@ function limitationsOf(r: ValueReport): ValueReport['limitations'] {
   );
   add(
     'holds-actor',
-    r.autonomy.actions.holds + r.autonomy.actions.cancelledAttempts > 0,
-    'Holds and cancelled attempts record no actor (host operations hold tasks too), so they are not counted as human actions.',
+    r.autonomy.actions.holds + (recorded ? 0 : r.autonomy.actions.cancelledAttempts) > 0,
+    recorded
+      ? 'Holds record no actor (host operations hold tasks too), so they are not counted as human actions.'
+      : 'Holds and cancelled attempts record no actor (host operations hold tasks too), so they are not counted as human actions.',
   );
   add(
     'approvals-unknown',

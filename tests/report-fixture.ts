@@ -475,7 +475,7 @@ export function reportFixture(): ValueReportInput {
       payload: { reason: SECRET },
     }),
     event(t(29, 15), { type: 'control.paused', payload: { reason: 'operator' } }),
-    event(t(29, 16), { type: 'unknown', original: 'work.retried' }),
+    event(t(29, 16), { type: 'unknown', original: 'work.reopened' }),
   ];
 
   return { graphs, works, attempts, calls, reviews, events };

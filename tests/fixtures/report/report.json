@@ -238,7 +238,8 @@
       "cancelledAttempts": 1,
       "retries": null,
       "resets": null,
-      "baseMoves": null
+      "baseMoves": null,
+      "recorded": null
     },
     "approvals": {
       "operator": 1,
