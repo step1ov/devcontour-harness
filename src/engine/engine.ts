@@ -2914,10 +2914,10 @@ export class Engine {
     });
   }
 
-  /** Отмена: активная попытка теряет владение, поручение — cancelled. Принятое не отменяется. */
   /**
-   * `by` — кто отменил (`work.cancelled`); хост, не назвавший актёра, — `host`.
-   * CLI передаёт `operator`.
+   * Отмена: активная попытка теряет владение, поручение — cancelled. Принятое
+   * не отменяется. `by` — кто отменил (`work.cancelled`): CLI — `operator`,
+   * хост, не назвавший актёра, — `host`.
    */
   cancel(workId: string, reason = 'отменено оператором', by: CancelActor = 'host') {
     return this.tx('task.cancelled', (tx) => {
