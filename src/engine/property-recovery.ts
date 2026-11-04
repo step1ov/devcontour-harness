@@ -36,6 +36,7 @@ const neutral: FailureKind[] = [
   'provider-auth',
   'environment',
   'timeout',
+  'stalled',
   'stale-base',
   'merge',
   'cancelled',

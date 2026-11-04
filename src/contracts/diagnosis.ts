@@ -23,6 +23,7 @@ export const diagnosisCauses = [
   'provider-auth',
   'environment',
   'timeout',
+  'stalled',
   'stale-base',
   'empty-result',
   'unfinished',

@@ -142,6 +142,7 @@ export {
   type GatesAtContext,
   type GatesAtInput,
   type GatesAtResult,
+  type LivenessReport,
 } from './verification/gates-at.ts';
 export {
   dependencyStoreRoot,

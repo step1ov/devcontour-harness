@@ -174,6 +174,7 @@ const bucketOfKind: Record<FailureKind, FailureBucket> = {
   merge: 'integration',
   environment: 'environment',
   'provider-auth': 'environment',
+  stalled: 'environment',
   timeout: 'time-limit',
   'review-protocol': 'tool',
   cancelled: 'operator',

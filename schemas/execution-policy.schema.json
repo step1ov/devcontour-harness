@@ -2039,6 +2039,38 @@
       "minimum": 0,
       "maximum": 2
     },
+    "stallSweep": {
+      "type": "object",
+      "properties": {
+        "intervalMs": {
+          "default": 30000,
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 600000
+        },
+        "quietMs": {
+          "default": 180000,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 86400000
+        },
+        "stalledMs": {
+          "default": 600000,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 86400000
+        },
+        "action": {
+          "default": "report",
+          "type": "string",
+          "enum": [
+            "stop",
+            "report"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "maxAttempts": {
       "default": 3,
       "type": "integer",

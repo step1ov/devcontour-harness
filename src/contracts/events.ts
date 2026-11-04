@@ -8,7 +8,13 @@ import {
   runtimeNameSchema,
 } from './primitives.ts';
 import { sourceRefSchema } from './work.ts';
-import { failureKindSchema, workStatusSchema } from './execution.ts';
+import {
+  activitySchema,
+  failureKindSchema,
+  livenessStateSchema,
+  stallActionSchema,
+  workStatusSchema,
+} from './execution.ts';
 
 const sha = gitShaSchema;
 const text = z.string().max(4000);
@@ -21,6 +27,37 @@ const delivery = {
   key: z.string().min(1).max(300),
   revision: z.string().min(1).max(200),
   attempts: z.number().int().min(0),
+};
+
+/** Переход живости по обходу зависших: общая часть событий попытки и совместной проверки. */
+const liveness = {
+  state: livenessStateSchema,
+  previous: livenessStateSchema,
+  lastMovementAt: isoTimeSchema,
+  idleMs: z.number().int().min(0),
+  activity: activitySchema.optional(),
+  /** ps не дал данных о процессах: оценка только по выводу, не выше `quiet`. */
+  cpuUnavailable: z.boolean().optional(),
+  action: stallActionSchema.optional(),
+  snapshot: z
+    .strictObject({
+      processes: z
+        .array(
+          z.strictObject({
+            pid: z.number().int().positive(),
+            parentPid: z.number().int().min(0),
+            /** Процессорное время; нет — ps его не сообщил. */
+            cpuMs: z.number().int().min(0).optional(),
+            command: z.string().max(300),
+          }),
+        )
+        .max(20),
+      /** ps не дал списка процессов: снимок только из вывода. */
+      processesUnavailable: z.boolean().optional(),
+      tail: z.string().max(2000),
+      artifact: z.string().max(1000).optional(),
+    })
+    .optional(),
 };
 
 /**
@@ -98,6 +135,12 @@ export const eventPayloads = {
     /** Только у `finished`. */
     outcome: z.enum(['passed', 'failed']).optional(),
   }),
+  /**
+   * Обход controller сменил живость исполняющейся попытки (только переходы).
+   * У `stalled` — снимок: процессы исполняющихся команд и хвост их вывода
+   * (замаскированные), и что controller сделал (`action`).
+   */
+  'attempt.liveness': z.strictObject(liveness),
   'attempt.failed': z.strictObject({
     failureKind: failureKindSchema,
     message: text,
@@ -158,6 +201,15 @@ export const eventPayloads = {
     workIds: z.array(idSchema).max(500),
     policyDigest: digestSchema,
   }),
+  /**
+   * Обход зависших совместной проверки сменил её живость (только переходы);
+   * нагрузка — как у `attempt.liveness`. При `report` это единственный след
+   * зависания: записи попытки у проверки нет.
+   */
+  'joint.liveness': z.strictObject({
+    verificationId: z.string().min(1).max(200),
+    ...liveness,
+  }),
   /** Совместная проверка закончилась: `passed` — только с manifest. */
   'joint.finished': z.strictObject({
     verificationId: z.string().min(1).max(200),
@@ -194,6 +246,8 @@ export const eventPayloads = {
   }),
 } as const;
 export type EventType = keyof typeof eventPayloads;
+/** Нагрузка события своего типа. */
+export type RunEventPayload<T extends EventType> = z.infer<(typeof eventPayloads)[T]>;
 export const eventTypes = Object.keys(eventPayloads) as EventType[];
 
 const envelope = {
@@ -282,6 +336,7 @@ export const transactionKinds = [
   'run.model',
   'run.timing.started',
   'run.timing.finished',
+  'run.liveness',
   'evidence.recorded',
   'reproduction.recorded',
   'findings.recorded',
@@ -319,6 +374,7 @@ export const transactionKinds = [
   'workspace.evidence',
   'workspace.verified',
   'workspace.failed',
+  'workspace.liveness',
   /**
    * Сдвиг ref базы операцией внутри транзакции проверки её владения: только
    * проверка и синхронный `git update-ref`, записей и событий нет.

@@ -15,6 +15,9 @@ import {
   failureKindSchema,
   pauseReasons,
   workStatusSchema,
+  activitySchema,
+  livenessStateSchema,
+  stallActionSchema,
 } from './execution.ts';
 import { readRunEventSchema } from './events.ts';
 import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
@@ -752,6 +755,17 @@ export const attemptViewSchema = z.strictObject({
     failed: z.number().int().min(0),
     remaining: z.number().int().min(0),
   }),
+  /** Живость по обходу controller; `idleMs` — только у `quiet` и `stalled`. */
+  liveness: z
+    .strictObject({
+      state: livenessStateSchema,
+      since: isoTimeSchema,
+      lastMovementAt: isoTimeSchema,
+      idleMs: z.number().int().min(0).optional(),
+      activity: activitySchema.optional(),
+      action: stallActionSchema.optional(),
+    })
+    .optional(),
 });
 
 /**
@@ -796,6 +810,12 @@ export const statusDataSchema = z.strictObject({
       status: workStatusSchema,
       attempt: z.number().int().min(0),
       activeRunId: z.string().optional(),
+      /**
+       * Активная попытка без движения по обходу controller: `quiet` или
+       * `stalled` (с `status --detail` — подробности в `detail.attempts`).
+       * Нет поля — движется или не оценивалась.
+       */
+      liveness: z.enum(['quiet', 'stalled']).optional(),
       resultSha: gitShaSchema.optional(),
       /** Почему поручение сейчас не выдаётся; пусто — может быть выдано. */
       blockers: z.array(blocker),

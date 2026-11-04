@@ -1,7 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm, rmdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { HarnessError, type EvidenceRecord, type ExecutionPolicy } from '../contracts/index.ts';
+import {
+  HarnessError,
+  stallSweepOf,
+  type EvidenceRecord,
+  type ExecutionPolicy,
+  type RunEventPayload,
+} from '../contracts/index.ts';
+import { livenessPayload, superviseStalls } from '../engine/stall-sweep.ts';
 import { TaskFailure } from '../engine/failure.ts';
 import { git } from '../environment/process.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
@@ -47,7 +54,16 @@ export interface GatesAtInput {
    */
   record(evidence: EvidenceRecord): void;
   signal?: AbortSignal;
+  /**
+   * Переход живости проверки по обходу зависших (`stallSweep`), в обоих
+   * режимах: при `report` — единственный путь узнать о зависании до конца
+   * проверки. Нагрузка — как у события `attempt.liveness`.
+   */
+  onLiveness?(report: LivenessReport): void;
 }
+
+/** Переход живости проверки вне попытки (нагрузка `attempt.liveness`). */
+export type LivenessReport = RunEventPayload<'attempt.liveness'>;
 
 export interface GatesAtResult {
   id: string;
@@ -63,6 +79,8 @@ export interface GatesAtResult {
    * с этой причиной и evidence не получают).
    */
   failures: { gate: string; message: string }[];
+  /** Переходы живости за проверку (`onLiveness`); нет — проверка не замолкала. */
+  liveness?: LivenessReport[];
 }
 
 /**
@@ -79,6 +97,38 @@ export interface GatesAtResult {
  * профиль проверяется один раз на итоговом SHA.
  */
 export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesAtResult> {
+  // Свой обход зависших: команды вне попытки, записать живость некуда; при
+  // `stop` зависание прерывает проверку, и отказ называет его.
+  const stall = new AbortController();
+  const signal = input.signal ? AbortSignal.any([input.signal, stall.signal]) : stall.signal;
+  const policy = stallSweepOf(ctx.policy);
+  const liveness: LivenessReport[] = [];
+  try {
+    const result = await superviseStalls(
+      policy,
+      (reason) => stall.abort(reason),
+      () => gatesAt(ctx, { ...input, signal }),
+      (change) => {
+        const report = livenessPayload(change, policy.action);
+        liveness.push(report);
+        input.onLiveness?.(report);
+      },
+    );
+    return liveness.length ? { ...result, liveness } : result;
+  } catch (error) {
+    if (stall.signal.aborted && !(error instanceof TaskFailure && error.kind === 'stalled'))
+      throw new TaskFailure('stalled', (stall.signal.reason as Error).message);
+    throw error;
+  }
+}
+
+/** Причина остановки обходом зависших, если сигнал прерван им. */
+const stalledBy = (signal?: AbortSignal) =>
+  signal?.aborted && (signal.reason as Error | undefined)?.name === 'StalledError'
+    ? (signal.reason as Error).message
+    : undefined;
+
+async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesAtResult> {
   const repo = ctx.policy.repositories.find((r) => r.id === input.repositoryId);
   if (!repo) throw new HarnessError('NOT_FOUND', 'Репозиторий не объявлен: ' + input.repositoryId);
   if (!input.gates.length) throw new HarnessError('INVALID_INPUT', 'Не названы gates проверки');
@@ -248,7 +298,7 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
                 if (!(error instanceof TaskFailure) || evidence.at(-1)?.gate !== gate.id)
                   throw error;
                 failed.add(gate.id);
-                failures.push({ gate: gate.id, message: error.message });
+                failures.push({ gate: gate.id, message: stalledBy(input.signal) ?? error.message });
               }
             }
           },

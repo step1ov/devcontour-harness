@@ -16,6 +16,7 @@ import {
   vendorOf,
   workGraphDigest,
   type AttemptState,
+  type RunEventPayload,
   type ControllerLease,
   type Author,
   type CallRecord,
@@ -1364,6 +1365,30 @@ export class Engine {
     return timing.id;
   }
 
+  /**
+   * Переход живости попытки по обходу controller: запись `liveness` и событие
+   * `attempt.liveness` — одной транзакцией под fencing; утративший владение
+   * не публикует ни того, ни другого.
+   */
+  liveness(
+    id: string,
+    token: string,
+    liveness: NonNullable<AttemptState['liveness']>,
+    payload: RunEventPayload<'attempt.liveness'>,
+  ) {
+    this.withAttempt(id, token, 'run.liveness', (a, w, tx) => {
+      tx.putAttempt({ ...a, liveness });
+      tx.emit({
+        type: 'attempt.liveness',
+        graphId: w.graphId,
+        workId: w.id,
+        runId: id,
+        attempt: a.attempt,
+        payload,
+      });
+    });
+  }
+
   timingFinished(id: string, token: string, timingId: string, outcome: 'passed' | 'failed') {
     this.withAttempt(id, token, 'run.timing.finished', (a, w, tx) => {
       const at = iso(this.now());
@@ -2639,6 +2664,17 @@ export class Engine {
       const next = { ...v, manifest, manifestDigest: digestOf(manifest), impact };
       tx.putVerification(next);
       return next;
+    });
+  }
+
+  /** Переход живости совместной проверки (обход зависших): событие под её fencing. */
+  jointLiveness(
+    id: string,
+    token: string,
+    payload: Omit<RunEventPayload<'joint.liveness'>, 'verificationId'>,
+  ) {
+    this.jointUpdate(id, token, 'workspace.liveness', (_v, tx) => {
+      tx.emit({ type: 'joint.liveness', payload: { verificationId: id, ...payload } });
     });
   }
 

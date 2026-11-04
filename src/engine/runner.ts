@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
@@ -29,6 +29,7 @@ import {
   type ReviewResult,
   type AlreadySatisfied,
   sha256,
+  stallSweepOf,
   type AttemptState,
   type ContextSnapshot,
   type EvidenceRecord,
@@ -102,6 +103,15 @@ import {
   type ProbeSpec,
 } from '../agents/review-probe.ts';
 import { runGate } from '../verification/gates.ts';
+import { ActivityScope, activityScope } from '../environment/activity.ts';
+import {
+  StallSweep,
+  StalledError,
+  stallMessage,
+  livenessPayload,
+  type ChangeOutcome,
+  type LivenessChange,
+} from './stall-sweep.ts';
 import { orderedScope } from '../verification/gate-scope.ts';
 import {
   alreadySatisfiedVerdict,
@@ -243,8 +253,18 @@ export class Runner {
   private readonly policy: ExecutionPolicy;
   private jobs = new Map<
     string,
-    { promise: Promise<void>; controller: AbortController; shutdown?: boolean }
+    {
+      promise: Promise<void>;
+      controller: AbortController;
+      shutdown?: boolean;
+      /** Движение команд попытки: его оценивает обход зависших. */
+      scope: ActivityScope;
+      token: string;
+      repositoryId: string;
+    }
   >();
+  /** Обход зависших попыток (`stallSweep` политики); идёт, пока процесс ведёт очередь. */
+  private sweep?: StallSweep;
   private mergeTails = new Map<string, Promise<void>>();
   /** Входы незавершённой очистки проверок потребителей, по попыткам. */
   private retained = new Map<string, Retained>();
@@ -422,10 +442,102 @@ export class Runner {
       Math.max(500, this.policy.leaseMs / 3),
     );
     this.leaseTimer.unref();
+    this.sweep ??= new StallSweep({
+      policy: stallSweepOf(this.policy),
+      subjects: () => [...this.jobs].map(([id, job]) => ({ id, scope: job.scope })),
+      changed: (change) => this.livenessChanged(change),
+    });
+    this.sweep.start();
   }
   private stopLead() {
     if (this.leaseTimer) clearInterval(this.leaseTimer);
     this.leaseTimer = undefined;
+    this.sweep?.stop();
+  }
+
+  /**
+   * Переход живости попытки: запись и событие под fencing; на `stalled` —
+   * снимок в artifacts попытки и, при `action: stop`, остановка попытки
+   * исходом `stalled` (`StalledError` как причина прерывания).
+   */
+  private livenessChanged(change: LivenessChange): ChangeOutcome {
+    const job = this.jobs.get(change.subject.id);
+    if (!job) return 'dropped';
+    const sweep = stallSweepOf(this.policy);
+    const id = change.subject.id;
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const stalled = change.state === 'stalled';
+    const snapshot = change.snapshot;
+    // Снимок пишется до события: событие называет только записанный файл.
+    // Один файл на эпизод зависания: повтор незаписанного перехода берёт уже
+    // записанный снимок, а не плодит новые.
+    let artifact: string | undefined;
+    if (stalled && snapshot) {
+      const path = join(
+        this.dirOf(job.repositoryId),
+        'artifacts',
+        id,
+        `stall-${change.episode}.json`,
+      );
+      if (existsSync(path)) artifact = path;
+      else
+        try {
+          mkdirSync(dirname(path), { recursive: true });
+          writeFileSync(
+            path,
+            JSON.stringify(
+              {
+                runId: id,
+                at: iso(change.at),
+                lastMovementAt: iso(change.lastMovementAt),
+                idleMs: Math.round(change.idleMs),
+                activity: change.activity,
+                action: sweep.action,
+                ...snapshot,
+              },
+              null,
+              2,
+            ),
+          );
+          artifact = path;
+        } catch {
+          /* Снимок не записан: событие несёт его без ссылки на файл. */
+        }
+    }
+    const stop = () => {
+      if (stalled && sweep.action === 'stop')
+        job.controller.abort(new StalledError(stallMessage(change, sweep, artifact)));
+    };
+    try {
+      this.engine.liveness(
+        id,
+        job.token,
+        {
+          state: change.state,
+          at: iso(change.at),
+          lastMovementAt: iso(change.lastMovementAt),
+          ...(change.activity ? { activity: change.activity } : {}),
+          ...(stalled ? { action: sweep.action } : {}),
+          ...(artifact ? { artifact } : {}),
+        },
+        livenessPayload(change, sweep.action, artifact),
+      );
+    } catch (error) {
+      // Зависшая попытка при `stop` останавливается, что бы ни помешало
+      // записи: её job ещё здесь, и причина — в её отказе.
+      if (stalled && sweep.action === 'stop') {
+        stop();
+        return 'dropped';
+      }
+      // Отказ движка (владение утрачено, попытка не активна, запрет хоста) и
+      // отказ схемы события детерминированы: повтор дал бы то же.
+      if (error instanceof HarnessError || (error as Error | undefined)?.name === 'ZodError')
+        return 'dropped';
+      // Временный отказ хранилища: переход повторит следующий обход.
+      return 'retry';
+    }
+    stop();
+    return 'recorded';
   }
 
   /** Освободить роль controller: процесс больше не ведёт очередь. */
@@ -476,11 +588,20 @@ export class Runner {
       const attempt = this.engine.claim(this.owner);
       if (!attempt) break;
       const controller = new AbortController();
-      const promise = this.execute(attempt, controller).finally(() => {
-        this.jobs.delete(attempt.id);
-        this.phaseDeadlines.delete(attempt.id);
+      const scope = new ActivityScope();
+      const promise = activityScope
+        .run(scope, () => this.execute(attempt, controller))
+        .finally(() => {
+          this.jobs.delete(attempt.id);
+          this.phaseDeadlines.delete(attempt.id);
+        });
+      this.jobs.set(attempt.id, {
+        promise,
+        controller,
+        scope,
+        token: attempt.token,
+        repositoryId: attempt.repositoryId,
       });
-      this.jobs.set(attempt.id, { promise, controller });
     }
   }
 
@@ -873,8 +994,11 @@ export class Runner {
   /** Стадия попытки с замером: начало, конец и исход записываются под fencing. */
   private async timed<T>(attempt: AttemptState, stage: string, fn: () => Promise<T>) {
     const id = this.engine.timingStarted(attempt.id, attempt.token, stage);
+    // Граница стадии — движение попытки для обхода зависших.
+    activityScope.getStore()?.moved();
     try {
       const value = await fn();
+      activityScope.getStore()?.moved();
       this.engine.timingFinished(attempt.id, attempt.token, id, 'passed');
       return value;
     } catch (error) {
@@ -1385,12 +1509,20 @@ export class Runner {
       const expired =
         controller.signal.aborted &&
         (controller.signal.reason as Error | undefined)?.name === 'TimeoutError';
+      // Остановку обходом зависших называет она сама, что бы ни выбросила
+      // прерванная операция: прерванный gate или вызов — следствие, не причина.
+      const stalled =
+        controller.signal.aborted &&
+        (controller.signal.reason as Error | undefined)?.name === 'StalledError'
+          ? (controller.signal.reason as Error).message
+          : undefined;
       const message =
-        expired && !(error instanceof TaskFailure)
+        stalled ??
+        (expired && !(error instanceof TaskFailure)
           ? `Исчерпан лимит времени попытки (${Math.round(this.policy.runTimeoutMs / 1000)} с)`
           : error instanceof Error
             ? error.message
-            : String(error);
+            : String(error));
       // Штатная остановка оборвала попытку: что бы ни выбросила прерванная
       // операция, это не отказ работы. Черновик сохраняется, поручение
       // возвращается в очередь, бюджет попыток не тратится.
@@ -1419,8 +1551,11 @@ export class Runner {
           return;
         }
       try {
-        const kind =
-          expired && !(error instanceof TaskFailure) ? 'timeout' : classifyFailure(error, message);
+        const kind = stalled
+          ? 'stalled'
+          : expired && !(error instanceof TaskFailure)
+            ? 'timeout'
+            : classifyFailure(error, message);
         // Незакоммиченная работа сохраняется при любом отказе до кандидата:
         // по времени, «не закончил», обрыв. Иначе повтор начинал с пустого
         // дерева и тратил попытку на сделанное.
@@ -1432,7 +1567,7 @@ export class Runner {
         if (kind === 'review' && this.policy.approvalMode === 'agent')
           await this.confirmReproductions(attempt).catch(() => undefined);
         this.engine.fail(attempt.id, attempt.token, message, {
-          ...(error instanceof TaskFailure && error.properties
+          ...(!stalled && error instanceof TaskFailure && error.properties
             ? { properties: error.properties }
             : {}),
           kind,

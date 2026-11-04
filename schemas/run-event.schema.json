@@ -901,6 +901,182 @@
         },
         "type": {
           "type": "string",
+          "const": "attempt.liveness"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "active",
+                "quiet",
+                "stalled"
+              ]
+            },
+            "previous": {
+              "type": "string",
+              "enum": [
+                "active",
+                "quiet",
+                "stalled"
+              ]
+            },
+            "lastMovementAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "idleMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "activity": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "agent",
+                    "gate",
+                    "step",
+                    "command"
+                  ]
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                }
+              },
+              "required": [
+                "kind",
+                "label"
+              ],
+              "additionalProperties": false
+            },
+            "cpuUnavailable": {
+              "type": "boolean"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "stop",
+                "report"
+              ]
+            },
+            "snapshot": {
+              "type": "object",
+              "properties": {
+                "processes": {
+                  "maxItems": 20,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "pid": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "parentPid": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "cpuMs": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "command": {
+                        "type": "string",
+                        "maxLength": 300
+                      }
+                    },
+                    "required": [
+                      "pid",
+                      "parentPid",
+                      "command"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "processesUnavailable": {
+                  "type": "boolean"
+                },
+                "tail": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "artifact": {
+                  "type": "string",
+                  "maxLength": 1000
+                }
+              },
+              "required": [
+                "processes",
+                "tail"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "state",
+            "previous",
+            "lastMovementAt",
+            "idleMs"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "apiVersion",
+        "seq",
+        "at",
+        "type",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "const": "devcontour-harness/v1alpha1"
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "graphId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "workId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "runId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "attempt": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "type": {
+          "type": "string",
           "const": "attempt.failed"
         },
         "payload": {
@@ -912,6 +1088,7 @@
                 "provider-auth",
                 "environment",
                 "timeout",
+                "stalled",
                 "stale-base",
                 "empty-result",
                 "unfinished",
@@ -1341,6 +1518,7 @@
                   "provider-auth",
                   "environment",
                   "timeout",
+                  "stalled",
                   "stale-base",
                   "empty-result",
                   "unfinished",
@@ -1897,6 +2075,188 @@
             "verificationId",
             "workIds",
             "policyDigest"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "apiVersion",
+        "seq",
+        "at",
+        "type",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "const": "devcontour-harness/v1alpha1"
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "graphId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "workId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "runId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "attempt": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "type": {
+          "type": "string",
+          "const": "joint.liveness"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "verificationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "active",
+                "quiet",
+                "stalled"
+              ]
+            },
+            "previous": {
+              "type": "string",
+              "enum": [
+                "active",
+                "quiet",
+                "stalled"
+              ]
+            },
+            "lastMovementAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "idleMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "activity": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "agent",
+                    "gate",
+                    "step",
+                    "command"
+                  ]
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                }
+              },
+              "required": [
+                "kind",
+                "label"
+              ],
+              "additionalProperties": false
+            },
+            "cpuUnavailable": {
+              "type": "boolean"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "stop",
+                "report"
+              ]
+            },
+            "snapshot": {
+              "type": "object",
+              "properties": {
+                "processes": {
+                  "maxItems": 20,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "pid": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "parentPid": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "cpuMs": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "command": {
+                        "type": "string",
+                        "maxLength": 300
+                      }
+                    },
+                    "required": [
+                      "pid",
+                      "parentPid",
+                      "command"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "processesUnavailable": {
+                  "type": "boolean"
+                },
+                "tail": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "artifact": {
+                  "type": "string",
+                  "maxLength": 1000
+                }
+              },
+              "required": [
+                "processes",
+                "tail"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "verificationId",
+            "state",
+            "previous",
+            "lastMovementAt",
+            "idleMs"
           ],
           "additionalProperties": false
         }

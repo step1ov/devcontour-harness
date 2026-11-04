@@ -185,6 +185,23 @@ export function stopInputsOf(h: Harness, options: StopInputOptions): StopInput[]
           ...(work.recovery ? { recovery: { status: work.recovery.status } } : {}),
           ...(waitingOn.length ? { waitingOn } : {}),
           ...(approvalStale ? { approvalStale } : {}),
+          ...((live) =>
+            live && live.state !== 'active'
+              ? {
+                  liveness: {
+                    state: live.state,
+                    lastMovementAt: live.lastMovementAt,
+                    ...(live.activity
+                      ? { activity: `${live.activity.kind} ${live.activity.label}` }
+                      : {}),
+                    ...(live.action ? { action: live.action } : {}),
+                  },
+                }
+              : {})(
+            ((a) => (a?.status === 'active' ? a.liveness : undefined))(
+              work.activeRunId ? v.attempt(work.activeRunId) : undefined,
+            ),
+          ),
         },
         maxAttempts: options.maxAttempts,
         repair: {
