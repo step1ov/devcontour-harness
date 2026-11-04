@@ -552,3 +552,34 @@ test('T24: корень рабочих деревьев задан — комп�
   assert.ok(!existsSync(join(ctx.state, 'workspace-checks', v.id, 'components')));
   assert.ok(!existsSync(join(root, '.joint', v.id)), 'компоненты под корнем убраны');
 });
+
+test('Совместная проверка под обходом зависших: report — событие joint.liveness, stop — отказ с текстом зависания', async () => {
+  const late = `setTimeout(() => require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase name="x"/></testsuite>'), 5000);`;
+  const hang = `setTimeout(() => {}, 30000);`;
+  for (const [action, gate] of [
+    ['report', late],
+    ['stop', hang],
+  ] as const) {
+    const ctx = jointContour(gate, (p) => {
+      p.stallSweep = { intervalMs: 1000, quietMs: 1000, stalledMs: 3000, action };
+    });
+    ready(ctx.engine, ctx.graph, 'runner-1');
+    accept(ctx.engine, { 'add-greeting': ctx.ref('library') });
+    const started = Date.now();
+    const result = await ctx.joint.verify(['add-greeting']);
+    const events = ctx.engine.host.store
+      .events(0, 500)
+      .filter((e) => e.type === 'joint.liveness')
+      .map((e) => (e as { payload: Record<string, any> }).payload);
+    const stalled = events.find((e) => e.state === 'stalled');
+    assert.equal(stalled?.verificationId, result.id, JSON.stringify(events));
+    assert.equal(stalled?.action, action);
+    assert.equal(stalled?.activity?.kind, 'gate');
+    if (action === 'report') assert.equal(result.status, 'passed');
+    else {
+      assert.ok(Date.now() - started < 25000);
+      assert.equal(result.status, 'failed');
+      assert.match(result.status === 'failed' ? result.error : '', /Зависание: gate combo/);
+    }
+  }
+});

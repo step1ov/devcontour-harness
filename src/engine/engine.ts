@@ -1374,10 +1374,7 @@ export class Engine {
     id: string,
     token: string,
     liveness: NonNullable<AttemptState['liveness']>,
-    event: Omit<
-      RunEventPayload<'attempt.liveness'>,
-      'state' | 'lastMovementAt' | 'activity' | 'action'
-    >,
+    payload: RunEventPayload<'attempt.liveness'>,
   ) {
     this.withAttempt(id, token, 'run.liveness', (a, w, tx) => {
       tx.putAttempt({ ...a, liveness });
@@ -1387,13 +1384,7 @@ export class Engine {
         workId: w.id,
         runId: id,
         attempt: a.attempt,
-        payload: {
-          state: liveness.state,
-          lastMovementAt: liveness.lastMovementAt,
-          ...(liveness.activity ? { activity: liveness.activity } : {}),
-          ...(liveness.action ? { action: liveness.action } : {}),
-          ...event,
-        },
+        payload,
       });
     });
   }
@@ -2673,6 +2664,17 @@ export class Engine {
       const next = { ...v, manifest, manifestDigest: digestOf(manifest), impact };
       tx.putVerification(next);
       return next;
+    });
+  }
+
+  /** Переход живости совместной проверки (обход зависших): событие под её fencing. */
+  jointLiveness(
+    id: string,
+    token: string,
+    payload: Omit<RunEventPayload<'joint.liveness'>, 'verificationId'>,
+  ) {
+    this.jointUpdate(id, token, 'workspace.liveness', (_v, tx) => {
+      tx.emit({ type: 'joint.liveness', payload: { verificationId: id, ...payload } });
     });
   }
 

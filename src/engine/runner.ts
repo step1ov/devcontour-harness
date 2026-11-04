@@ -108,6 +108,7 @@ import {
   StallSweep,
   StalledError,
   stallMessage,
+  livenessPayload,
   type ChangeOutcome,
   type LivenessChange,
 } from './stall-sweep.ts';
@@ -468,31 +469,40 @@ export class Runner {
     const stalled = change.state === 'stalled';
     const snapshot = change.snapshot;
     // Снимок пишется до события: событие называет только записанный файл.
+    // Один файл на эпизод зависания: повтор незаписанного перехода берёт уже
+    // записанный снимок, а не плодит новые.
     let artifact: string | undefined;
     if (stalled && snapshot) {
-      const path = join(this.dirOf(job.repositoryId), 'artifacts', id, `stall-${change.at}.json`);
-      try {
-        mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(
-          path,
-          JSON.stringify(
-            {
-              runId: id,
-              at: iso(change.at),
-              lastMovementAt: iso(change.lastMovementAt),
-              idleMs: Math.round(change.idleMs),
-              activity: change.activity,
-              action: sweep.action,
-              ...snapshot,
-            },
-            null,
-            2,
-          ),
-        );
-        artifact = path;
-      } catch {
-        /* Снимок не записан: событие несёт его без ссылки на файл. */
-      }
+      const path = join(
+        this.dirOf(job.repositoryId),
+        'artifacts',
+        id,
+        `stall-${change.episode}.json`,
+      );
+      if (existsSync(path)) artifact = path;
+      else
+        try {
+          mkdirSync(dirname(path), { recursive: true });
+          writeFileSync(
+            path,
+            JSON.stringify(
+              {
+                runId: id,
+                at: iso(change.at),
+                lastMovementAt: iso(change.lastMovementAt),
+                idleMs: Math.round(change.idleMs),
+                activity: change.activity,
+                action: sweep.action,
+                ...snapshot,
+              },
+              null,
+              2,
+            ),
+          );
+          artifact = path;
+        } catch {
+          /* Снимок не записан: событие несёт его без ссылки на файл. */
+        }
     }
     const stop = () => {
       if (stalled && sweep.action === 'stop')
@@ -510,37 +520,20 @@ export class Runner {
           ...(stalled ? { action: sweep.action } : {}),
           ...(artifact ? { artifact } : {}),
         },
-        {
-          previous: change.previous,
-          idleMs: Math.round(change.idleMs),
-          ...(change.cpuUnavailable ? { cpuUnavailable: true } : {}),
-          ...(snapshot
-            ? {
-                snapshot: {
-                  processes: snapshot.processes.slice(0, 20).map((p) => ({
-                    pid: p.pid,
-                    parentPid: p.parentPid,
-                    ...(p.cpuMs !== undefined ? { cpuMs: p.cpuMs } : {}),
-                    command: p.command.slice(0, 300),
-                  })),
-                  ...(snapshot.processesUnavailable ? { processesUnavailable: true } : {}),
-                  tail: snapshot.tail.slice(-2000),
-                  ...(artifact ? { artifact } : {}),
-                },
-              }
-            : {}),
-        },
+        livenessPayload(change, sweep.action, artifact),
       );
     } catch (error) {
-      // Отказ движка (владение утрачено, попытка не активна, запрет хоста):
-      // попытку больше не оценивать и не трогать.
-      if (error instanceof HarnessError) return 'dropped';
-      // Временный отказ хранилища: переход повторит следующий обход; зависшая
-      // попытка при `stop` останавливается всё равно — причина в её отказе.
+      // Зависшая попытка при `stop` останавливается, что бы ни помешало
+      // записи: её job ещё здесь, и причина — в её отказе.
       if (stalled && sweep.action === 'stop') {
         stop();
         return 'dropped';
       }
+      // Отказ движка (владение утрачено, попытка не активна, запрет хоста) и
+      // отказ схемы события детерминированы: повтор дал бы то же.
+      if (error instanceof HarnessError || (error as Error | undefined)?.name === 'ZodError')
+        return 'dropped';
+      // Временный отказ хранилища: переход повторит следующий обход.
       return 'retry';
     }
     stop();

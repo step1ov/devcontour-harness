@@ -6,8 +6,9 @@ import {
   stallSweepOf,
   type EvidenceRecord,
   type ExecutionPolicy,
+  type RunEventPayload,
 } from '../contracts/index.ts';
-import { superviseStalls } from '../engine/stall-sweep.ts';
+import { livenessPayload, superviseStalls } from '../engine/stall-sweep.ts';
 import { TaskFailure } from '../engine/failure.ts';
 import { git } from '../environment/process.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
@@ -53,7 +54,16 @@ export interface GatesAtInput {
    */
   record(evidence: EvidenceRecord): void;
   signal?: AbortSignal;
+  /**
+   * Переход живости проверки по обходу зависших (`stallSweep`), в обоих
+   * режимах: при `report` — единственный путь узнать о зависании до конца
+   * проверки. Нагрузка — как у события `attempt.liveness`.
+   */
+  onLiveness?(report: LivenessReport): void;
 }
+
+/** Переход живости проверки вне попытки (нагрузка `attempt.liveness`). */
+export type LivenessReport = RunEventPayload<'attempt.liveness'>;
 
 export interface GatesAtResult {
   id: string;
@@ -69,6 +79,8 @@ export interface GatesAtResult {
    * с этой причиной и evidence не получают).
    */
   failures: { gate: string; message: string }[];
+  /** Переходы живости за проверку (`onLiveness`); нет — проверка не замолкала. */
+  liveness?: LivenessReport[];
 }
 
 /**
@@ -89,12 +101,20 @@ export async function runGatesAt(ctx: GatesAtContext, input: GatesAtInput): Prom
   // `stop` зависание прерывает проверку, и отказ называет его.
   const stall = new AbortController();
   const signal = input.signal ? AbortSignal.any([input.signal, stall.signal]) : stall.signal;
+  const policy = stallSweepOf(ctx.policy);
+  const liveness: LivenessReport[] = [];
   try {
-    return await superviseStalls(
-      stallSweepOf(ctx.policy),
+    const result = await superviseStalls(
+      policy,
       (reason) => stall.abort(reason),
       () => gatesAt(ctx, { ...input, signal }),
+      (change) => {
+        const report = livenessPayload(change, policy.action);
+        liveness.push(report);
+        input.onLiveness?.(report);
+      },
     );
+    return liveness.length ? { ...result, liveness } : result;
   } catch (error) {
     if (stall.signal.aborted && !(error instanceof TaskFailure && error.kind === 'stalled'))
       throw new TaskFailure('stalled', (stall.signal.reason as Error).message);

@@ -1,5 +1,10 @@
 import { execFile } from 'node:child_process';
-import type { Activity, LivenessState, StallSweepPolicy } from '../contracts/index.ts';
+import type {
+  Activity,
+  LivenessState,
+  RunEventPayload,
+  StallSweepPolicy,
+} from '../contracts/index.ts';
 import { ActivityScope, activityScope, type TrackedCommand } from '../environment/activity.ts';
 import { osTool, osToolEnv } from '../environment/os-tools.ts';
 
@@ -64,6 +69,19 @@ export function parseProcessTable(stdout: string): ProcessRow[] {
   });
 }
 
+let shared: { at: number; rows: Promise<ProcessRow[] | null> } | undefined;
+/**
+ * Таблица процессов, общая для одновременных обходов (попытки controller,
+ * совместная проверка, gates на SHA): снимок моложе `maxAgeMs` берётся
+ * готовым, а не новым вызовом ps.
+ */
+export function sharedSample(maxAgeMs: number): Promise<ProcessRow[] | null> {
+  const now = Date.now();
+  if (shared && now - shared.at < maxAgeMs) return shared.rows;
+  shared = { at: now, rows: sampleProcesses() };
+  return shared.rows;
+}
+
 /** Таблица процессов одним вызовом ps; отказ или Windows — `null`, а не исключение. */
 export function sampleProcesses(timeoutMs = 5000): Promise<ProcessRow[] | null> {
   if (process.platform === 'win32') return Promise.resolve(null);
@@ -121,6 +139,12 @@ export interface LivenessChange {
   cpuUnavailable?: boolean;
   /** Только у `stalled`. */
   snapshot?: StallSnapshot;
+  /**
+   * Номер эпизода зависания субъекта (с 1): растёт при каждом новом входе в
+   * `stalled`, повтор незаписанного перехода сохраняет номер — по нему снимок
+   * пишется один раз на эпизод.
+   */
+  episode: number;
 }
 
 /**
@@ -140,11 +164,25 @@ interface Memo {
   cpuAt: number;
   /** Остановлен или утрачен: дальнейших переходов нет. */
   done?: boolean;
+  /** Эпизоды `stalled` (последний — текущий или прошедший). */
+  episode: number;
+  /** Подряд незаписанных повторов текущего перехода. */
+  retries: number;
+  /** Эпизод `episode` начат и не закрыт записанным выходом из `stalled`. */
+  stallOpen?: boolean;
 }
 
 const SNAPSHOT_PROCESSES = 100;
 /** Перерыв обходов (сон машины, занятый event loop) дольше стольких интервалов — не простой работы. */
 const GAP_INTERVALS = 3;
+/**
+ * Перерывов подряд, после которых обход решает как обычно: машина, где каждый
+ * обход опаздывает (медленный ps, нагрузка), иначе сбрасывала бы отсчёт
+ * бесконечно.
+ */
+const MAX_GAP_RESETS = 2;
+/** Незаписанных повторов одного перехода, после которых субъект больше не оценивается. */
+export const MAX_CHANGE_RETRIES = 5;
 /** Строка команды без маски не сохраняется. */
 export const UNMASKED_COMMAND = '(строка команды скрыта: нет маски)';
 
@@ -160,7 +198,9 @@ export class StallSweep {
   private readonly memo = new Map<string, Memo>();
   private timer?: ReturnType<typeof setInterval>;
   private running?: Promise<void>;
+  /** Конец прошлого обхода: перерыв считается от него, не от начала. */
   private lastTick?: number;
+  private gaps = 0;
   constructor(
     private readonly options: {
       policy: StallSweepPolicy;
@@ -182,6 +222,7 @@ export class StallSweep {
     this.timer = undefined;
     // Следующий запуск не считает остановленное время перерывом работы.
     this.lastTick = undefined;
+    this.gaps = 0;
   }
 
   /** Один обход; параллельный вызов ждёт идущий, а не запускает второй. */
@@ -196,14 +237,23 @@ export class StallSweep {
 
   private async sweep() {
     const clock = this.options.clock ?? Date.now;
+    try {
+      await this.decide(clock);
+    } finally {
+      this.lastTick = clock();
+    }
+  }
+
+  private async decide(clock: () => number) {
     const { policy } = this.options;
     const startedAt = clock();
     // Сон машины или занятый event loop: обходов не было, и молчание за это
     // время ничего не говорит о работе. Отсчёт начинается заново, решения в
-    // этом обходе нет.
-    const gap =
+    // этом обходе нет — но не больше MAX_GAP_RESETS раз подряд.
+    const late =
       this.lastTick !== undefined && startedAt - this.lastTick > GAP_INTERVALS * policy.intervalMs;
-    this.lastTick = startedAt;
+    const gap = late && this.gaps < MAX_GAP_RESETS;
+    this.gaps = late ? this.gaps + 1 : 0;
     const subjects = [...this.options.subjects()];
     const ids = new Set(subjects.map((s) => s.id));
     for (const id of this.memo.keys()) if (!ids.has(id)) this.memo.delete(id);
@@ -216,10 +266,18 @@ export class StallSweep {
       return;
     }
     const busy = subjects.some((s) => s.scope.running.size > 0);
-    const rows = busy ? await (this.options.sample ?? sampleProcesses)() : null;
+    const rows = busy
+      ? await (this.options.sample ?? (() => sharedSample(policy.intervalMs / 2)))()
+      : null;
     const now = clock();
     for (const subject of subjects) {
-      const memo: Memo = this.memo.get(subject.id) ?? { state: 'active', pending: 0, cpuAt: now };
+      const memo: Memo = this.memo.get(subject.id) ?? {
+        state: 'active',
+        pending: 0,
+        cpuAt: now,
+        episode: 0,
+        retries: 0,
+      };
       this.memo.set(subject.id, memo);
       if (memo.done) continue;
       const { scope } = subject;
@@ -241,6 +299,8 @@ export class StallSweep {
       if (state === memo.state) continue;
       const previous = memo.state;
       memo.state = state;
+      // Повтор незаписанного перехода — тот же эпизод.
+      const episode = state === 'stalled' && !memo.stallOpen ? memo.episode + 1 : memo.episode;
       const current = scope.current();
       const change: LivenessChange = {
         subject,
@@ -249,6 +309,7 @@ export class StallSweep {
         at: now,
         lastMovementAt: scope.lastMovementAt,
         idleMs,
+        episode: state === 'stalled' ? episode : memo.episode,
         ...(current ? { activity: current.activity } : {}),
         ...(tracked.length && !known ? { cpuUnavailable: true } : {}),
       };
@@ -262,18 +323,30 @@ export class StallSweep {
       } catch {
         outcome = 'retry';
       }
-      if (outcome === 'retry') {
-        // Переход не записан: следующий обход повторит его.
+      if (state === 'stalled') {
+        memo.episode = episode;
+        memo.stallOpen = true;
+      }
+      if (outcome === 'retry' && memo.retries < MAX_CHANGE_RETRIES) {
+        // Переход не записан: следующий обход повторит его (ограниченно —
+        // устойчивый отказ записи не повторяется бесконечно).
+        memo.retries++;
         memo.state = previous;
         memo.done = false;
-      } else if (outcome === 'dropped') memo.done = true;
+      } else if (outcome === 'retry' || outcome === 'dropped') memo.done = true;
+      else {
+        memo.retries = 0;
+        if (state !== 'stalled') memo.stallOpen = false;
+      }
     }
   }
 
   /**
    * Движение по процессору: сумма положительных приростов каждого процесса
-   * (новый — от нуля) и смена состава дерева. Завершившийся потомок не
-   * уменьшает счёт, а появление и уход процессов — уже работа.
+   * (новый — от нуля). Завершившийся потомок не уменьшает счёт. Смена
+   * состава дерева сама по себе движением не считается: цикл ожидания
+   * (`until nc -z db 5432; do sleep 1; done`) порождает процессы без конца,
+   * не продвигаясь.
    */
   private cpuMovement(
     memo: Memo,
@@ -290,16 +363,8 @@ export class StallSweep {
       memo.cpuAt = now;
       return;
     }
-    let churn = current.size !== previous.size;
-    for (const [pid, cpu] of current) {
-      const before = previous.get(pid);
-      if (before === undefined) churn = true;
-      memo.pending += Math.max(0, cpu - (before ?? 0));
-    }
-    if (
-      churn ||
-      (memo.pending > 0 && memo.pending >= CPU_ACTIVE_SHARE * Math.max(1, now - memo.cpuAt))
-    ) {
+    for (const [pid, cpu] of current) memo.pending += Math.max(0, cpu - (previous.get(pid) ?? 0));
+    if (memo.pending > 0 && memo.pending >= CPU_ACTIVE_SHARE * Math.max(1, now - memo.cpuAt)) {
       scope.moved(now);
       memo.pending = 0;
       memo.cpuAt = now;
@@ -351,20 +416,27 @@ export function stallMessage(change: LivenessChange, policy: StallSweepPolicy, a
 
 /**
  * Обход зависших для операции вне попытки (совместная проверка, gates на
- * SHA): своя область движения, один субъект. Записать живость некуда, поэтому
- * сообщается только остановка: при `action: stop` на `stalled` вызывается
+ * SHA): своя область движения, один субъект. Переходы получает `onChange`
+ * (запись — у вызывающего); при `action: stop` на `stalled` вызывается
  * `abort` с `StalledError`, и операция завершается отказом с её текстом.
  */
 export async function superviseStalls<T>(
   policy: StallSweepPolicy,
   abort: (reason: StalledError) => void,
   fn: () => Promise<T>,
+  /** Каждый переход — в обоих режимах; сбой получателя не мешает остановке. */
+  onChange?: (change: LivenessChange) => void,
 ): Promise<T> {
   const scope = new ActivityScope();
   const sweep = new StallSweep({
     policy,
     subjects: () => [{ id: 'operation', scope }],
     changed: (change) => {
+      try {
+        onChange?.(change);
+      } catch {
+        /* Сообщение не записано: остановка не зависит от него. */
+      }
       if (change.state === 'stalled' && policy.action === 'stop')
         abort(new StalledError(stallMessage(change, policy)));
     },
@@ -375,4 +447,41 @@ export async function superviseStalls<T>(
   } finally {
     sweep.stop();
   }
+}
+
+/**
+ * Нагрузка события перехода (`attempt.liveness`, `joint.liveness`) из
+ * перехода обхода: снимок урезан до пределов события, `action` — только у
+ * `stalled`, `artifact` — только записанный файл снимка.
+ */
+export function livenessPayload(
+  change: LivenessChange,
+  action: StallSweepPolicy['action'],
+  artifact?: string,
+): RunEventPayload<'attempt.liveness'> {
+  const snapshot = change.snapshot;
+  return {
+    state: change.state,
+    previous: change.previous,
+    lastMovementAt: new Date(change.lastMovementAt).toISOString(),
+    idleMs: Math.round(change.idleMs),
+    ...(change.activity ? { activity: change.activity } : {}),
+    ...(change.cpuUnavailable ? { cpuUnavailable: true } : {}),
+    ...(change.state === 'stalled' ? { action } : {}),
+    ...(snapshot
+      ? {
+          snapshot: {
+            processes: snapshot.processes.slice(0, 20).map((p) => ({
+              pid: p.pid,
+              parentPid: p.parentPid,
+              ...(p.cpuMs !== undefined ? { cpuMs: p.cpuMs } : {}),
+              command: p.command.slice(0, 300),
+            })),
+            ...(snapshot.processesUnavailable ? { processesUnavailable: true } : {}),
+            tail: snapshot.tail.slice(-2000),
+            ...(artifact ? { artifact } : {}),
+          },
+        }
+      : {}),
+  };
 }

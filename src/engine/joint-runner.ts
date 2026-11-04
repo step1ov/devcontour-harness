@@ -9,7 +9,7 @@ import {
   stallSweepOf,
 } from '../contracts/index.ts';
 import { git } from '../environment/process.ts';
-import { superviseStalls, type StalledError } from './stall-sweep.ts';
+import { livenessPayload, superviseStalls, type StalledError } from './stall-sweep.ts';
 import { chooseCheckoutRoot } from '../environment/checkout-root.ts';
 import { credentialPaths } from '../environment/isolation.ts';
 import {
@@ -85,15 +85,18 @@ export class JointRunner {
   }
 
   /**
-   * Проверка под своим обходом зависших: команды вне попытки, записать
-   * живость некуда; при `stop` зависание прерывает проверку своей причиной.
+   * Проверка под своим обходом зависших: переходы — события `joint.liveness`
+   * под fencing проверки (в обоих режимах), при `stop` зависание прерывает
+   * проверку своей причиной.
    */
   private supervised(v: JointVerificationState, outer?: AbortSignal) {
     const stall = new AbortController();
+    const policy = stallSweepOf(this.policy);
     return superviseStalls(
-      stallSweepOf(this.policy),
+      policy,
       (reason: StalledError) => stall.abort(reason),
       () => this.execute(v, outer ? AbortSignal.any([outer, stall.signal]) : stall.signal),
+      (change) => this.engine.jointLiveness(v.id, v.token, livenessPayload(change, policy.action)),
     );
   }
 
@@ -287,6 +290,7 @@ export class JointRunner {
                   const result = await runCheck(
                     { config: this.policy },
                     {
+                      activity: { kind: 'gate', label: gate.id },
                       argv: gate.command,
                       cwd: gateCwd,
                       signal,

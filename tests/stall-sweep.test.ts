@@ -3,7 +3,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   DEFAULT_STALL_SWEEP,
@@ -12,12 +12,15 @@ import {
   repairPolicy,
   stallSweepOf,
   type StallSweepPolicy,
+  HarnessError,
 } from '../src/contracts/index.ts';
 import { ActivityScope, activityScope } from '../src/environment/activity.ts';
 import { command } from '../src/environment/process.ts';
 import {
+  MAX_CHANGE_RETRIES,
   StallSweep,
   UNMASKED_COMMAND,
+  sharedSample,
   parseCpuTime,
   parseProcessTable,
   treeOf,
@@ -197,7 +200,7 @@ test('Обход: тот же состав дерева без расхода �
     { pid: 11, parentPid: 10, cpuMs: 5000, command: 'cc' },
   ]);
   await h.sweep.tick();
-  // Потомок ушёл, новый стоит: уход — движение, дальше простоя.
+  // Потомок ушёл, новый стоит: смена состава движением не считается.
   h.advance(100);
   h.setRows([
     { pid: 10, parentPid: 1, cpuMs: 0, command: 'sh' },
@@ -624,4 +627,193 @@ test('runGatesAt: зависший gate вне попытки остановле
   );
   assert.ok(Date.now() - started < 25000, 'до конца сна gate');
   assert.match(result.failure?.message ?? '', /Зависание: gate unit/);
+});
+
+test('Обход: цикл ожидания (процессы рождаются, процессор не растёт) — зависание', async () => {
+  const h = harness({ ...policy, action: 'stop' });
+  h.scope.begin(10, { kind: 'gate', label: 'wait-db' });
+  // `until nc -z db 5432; do sleep 1; done`: каждый обход — новый sleep.
+  for (let i = 0; i < 6; i++) {
+    h.setRows([
+      { pid: 10, parentPid: 1, cpuMs: 3, command: 'sh -c until …' },
+      { pid: 100 + i, parentPid: 10, cpuMs: 0, command: 'sleep 1' },
+    ]);
+    await h.sweep.tick();
+    h.advance(100);
+  }
+  assert.deepEqual(h.states(), ['quiet', 'stalled']);
+});
+
+test('Обход: перерыв считается от конца прошлого обхода — медленный ps не сбрасывает отсчёт', async () => {
+  let now = 0;
+  const scope = new ActivityScope(() => now);
+  scope.begin(10, { kind: 'gate', label: 'unit' });
+  const seen: string[] = [];
+  const sweep = new StallSweep({
+    policy: { intervalMs: 1000, quietMs: 2000, stalledMs: 9000, action: 'report' },
+    clock: () => now,
+    // ps отвечает 2,5 интервала: от начала до начала — больше трёх интервалов.
+    sample: () => {
+      now += 2500;
+      return Promise.resolve([{ pid: 10, parentPid: 1, cpuMs: 0, command: 'node' }]);
+    },
+    subjects: () => [{ id: 'A', scope }],
+    changed: (c) => {
+      seen.push(c.state);
+    },
+  });
+  await sweep.tick();
+  now += 1000;
+  await sweep.tick();
+  assert.deepEqual(seen, ['quiet'], 'второй обход решает, а не сбрасывает отсчёт');
+});
+
+test('Обход: перерывы подряд сбрасывают отсчёт не больше двух раз', async () => {
+  const h = harness({ ...policy, action: 'stop' });
+  h.scope.begin(10, { kind: 'gate', label: 'unit' });
+  h.setRows([{ pid: 10, parentPid: 1, cpuMs: 0, command: 'node' }]);
+  await h.sweep.tick();
+  for (let i = 0; i < 3; i++) {
+    h.advance(5000);
+    await h.sweep.tick();
+  }
+  assert.deepEqual(h.states(), ['stalled'], 'третий опоздавший обход решает');
+});
+
+test('Обход: устойчивый отказ записи — ограниченные повторы одного эпизода', async () => {
+  let now = 0;
+  const scope = new ActivityScope(() => now);
+  scope.begin(10, { kind: 'gate', label: 'unit' });
+  const episodes: number[] = [];
+  const sweep = new StallSweep({
+    policy,
+    clock: () => now,
+    sample: () => Promise.resolve([{ pid: 10, parentPid: 1, cpuMs: 0, command: 'node' }]),
+    subjects: () => [{ id: 'A', scope }],
+    changed: (c) => {
+      episodes.push(c.episode);
+      return 'retry';
+    },
+  });
+  await sweep.tick();
+  now = 400;
+  for (let i = 0; i < MAX_CHANGE_RETRIES + 5; i++) await sweep.tick();
+  assert.equal(episodes.length, MAX_CHANGE_RETRIES + 1, 'первая запись и повторы');
+  assert.deepEqual(new Set(episodes), new Set([1]), 'повторы — тот же эпизод');
+});
+
+test('Обход: эпизоды зависания нумеруются заново после выхода из stalled', async () => {
+  const h = harness();
+  const t = h.scope.begin(10, { kind: 'gate', label: 'unit' });
+  h.setRows([{ pid: 10, parentPid: 1, cpuMs: 0, command: 'node' }]);
+  await h.sweep.tick();
+  h.advance(400);
+  await h.sweep.tick();
+  h.scope.output(t, 'x');
+  await h.sweep.tick();
+  h.advance(400);
+  await h.sweep.tick();
+  assert.deepEqual(
+    h.changes.map((c) => `${c.state}:${c.episode}`),
+    ['stalled:1', 'active:1', 'stalled:2'],
+  );
+});
+
+test('Таблица процессов общая для одновременных обходов в пределах окна', () => {
+  const a = sharedSample(60_000);
+  const b = sharedSample(60_000);
+  assert.equal(a, b, 'второй обход берёт тот же снимок');
+  assert.notEqual(sharedSample(0), a, 'устаревший снимок обновляется');
+});
+
+test('Runner: gate с циклом ожидания (sleep в цикле) остановлен исходом stalled', async () => {
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: sweepPolicy('stop', (p) => {
+      p.repositories[0].gates[0].command = ['/bin/sh', '-c', 'until false; do sleep 1; done'];
+      p.repositories[0].gates[0].timeoutMs = 30000;
+    }),
+  });
+  const started = Date.now();
+  await runAll(ctx);
+  assert.ok(Date.now() - started < 25000, 'до предела gate');
+  const first = firstAttempt(ctx);
+  assert.equal(first.failureKind, 'stalled', first.error);
+  assert.match(first.error!, /gate unit/);
+});
+
+test('Runner: отказ записи stalled — один снимок на эпизод, повторы ограничены', async () => {
+  const ctx = setup({
+    scenario: { writer: { sleepMs: 12000, ...implement() }, reviewer: approve() },
+    policy: sweepPolicy('report'),
+  });
+  const write = ctx.engine.liveness.bind(ctx.engine);
+  let refused = 0;
+  ctx.engine.liveness = (id, token, record, payload) => {
+    if (payload.state === 'stalled') {
+      refused++;
+      throw new Error('disk I/O error');
+    }
+    write(id, token, record, payload);
+  };
+  await runAll(ctx);
+  const first = firstAttempt(ctx);
+  assert.equal(first.status, 'succeeded', first.error);
+  assert.equal(refused, MAX_CHANGE_RETRIES + 1, 'первая запись и ограниченные повторы');
+  const dir = join(ctx.state, 'artifacts', first.id);
+  assert.deepEqual(
+    readdirSync(dir).filter((f) => f.startsWith('stall-')),
+    ['stall-1.json'],
+  );
+});
+
+test('Runner: stop останавливает зависшую попытку и при отказе движка записать переход', async () => {
+  const ctx = setup({
+    scenario: { writer: { sleepMs: 30000, ...implement() }, reviewer: approve() },
+    policy: sweepPolicy('stop'),
+  });
+  const write = ctx.engine.liveness.bind(ctx.engine);
+  ctx.engine.liveness = (id, token, record, payload) => {
+    if (payload.state === 'stalled') throw new HarnessError('LEASE_STALE', 'устаревшая');
+    write(id, token, record, payload);
+  };
+  const started = Date.now();
+  await runAll(ctx);
+  assert.ok(Date.now() - started < 25000);
+  assert.equal(firstAttempt(ctx).failureKind, 'stalled', firstAttempt(ctx).error);
+});
+
+test('runGatesAt: report — зависание видно в результате и хосту, проверка доходит до конца', async () => {
+  const ctx = setup({
+    scenario: {},
+    files: {
+      'test/late.js': "setTimeout(() => require('./run.js'), 5000);\n",
+      'src/greet.js': "exports.greet = (name) => 'Hello, ' + name + '!';\n",
+    },
+    policy: sweepPolicy('report', (p) => {
+      p.repositories[0].gates[0].command = [process.execPath, 'test/late.js'];
+    }),
+  });
+  const reported: string[] = [];
+  const result = await runGatesAt(
+    {
+      policy: ctx.policy,
+      stateDir: ctx.state,
+      repoPath: () => ctx.repo.dir,
+      boundary: () => ({ hidden: [ctx.state], readable: [join(ctx.repo.dir, '.git')] }),
+      resourceDatabase: join(ctx.state, 'resources.sqlite'),
+    },
+    {
+      repositoryId: 'app',
+      sha: ctx.repo.head(),
+      gates: ['unit'],
+      record: () => undefined,
+      onLiveness: (r) => reported.push(r.state),
+    },
+  );
+  assert.equal(result.failure, undefined, JSON.stringify(result.failures));
+  const stalled = result.liveness?.find((r) => r.state === 'stalled');
+  assert.equal(stalled?.action, 'report', JSON.stringify(result.liveness));
+  assert.deepEqual(stalled?.activity, { kind: 'gate', label: 'unit' });
+  assert.ok(reported.includes('stalled'), 'хост получил переход');
 });
