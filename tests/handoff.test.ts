@@ -633,6 +633,10 @@ test('handoff: расход вызова о группе — одна строк
       ],
     );
     assert.equal(pack.truncated.budgetsShared, 2, 'b и c: только вызов о группе');
+    // Пакет прежней версии без поля разбирается: budgetsShared — 0.
+    const { budgetsShared: _s, ...older } = pack.truncated;
+    void _s;
+    assert.equal(handoffPackSchema.parse({ ...pack, truncated: older }).truncated.budgetsShared, 0);
     assert.equal(pack.truncated.budgetsWithin, 0);
     assert.match(
       handoffMarkdown(pack),
@@ -681,11 +685,11 @@ test('handoff: строка бюджета поручения, которая д
   }
 });
 
-test('handoff: упавшая отменой — решение, только пока её ждут; без ждущих не повтор', () => {
+test('handoff: упавшая отменой — replan, пока её ждут; без ждущих — решение человека, не повтор', () => {
   const ctx = hsetup({ scenario: {} });
   const h = ctx.open();
   try {
-    ready(h.engine, graphOf({ a: [], b: ['a'], c: [] }));
+    ready(h.engine, graphOf({ a: [], b: ['a'] }));
     const run = h.engine.claim('c1')!;
     assert.equal(run.workId, 'a');
     h.engine.fail(run.id, run.token, 'отменено', { kind: 'cancelled' });
@@ -695,12 +699,24 @@ test('handoff: упавшая отменой — решение, только п
       [waiting.next.actor, waiting.next.action, waiting.next.workId],
       ['lead', 'replan-dependents', 'a'],
     );
+    // Других открытых работ нет: a открыта, движок её не повторит — решает человек.
     h.engine.cancel('b', 'не нужно');
     const quiet = handoffPack(h);
-    assert.ok(!quiet.stops.some((d) => d.code === 'CANCELLED'), JSON.stringify(quiet.stops));
+    assert.equal(quiet.summary.open, 1);
     const a = quiet.works.find((w) => w.id === 'a')!;
-    assert.deepEqual([a.status, a.next.actor, a.next.action], ['failed', null, 'none']);
-    assert.equal(quiet.next.workId, 'c');
+    assert.deepEqual(
+      [a.status, a.next.actor, a.next.action, a.next.step],
+      ['failed', 'user', 'user-decision', 'cancelled'],
+    );
+    assert.match(a.next.detail!, /harness retry/);
+    assert.deepEqual(
+      [quiet.next.actor, quiet.next.action, quiet.next.code, quiet.next.workId],
+      ['user', 'user-decision', 'CANCELLED', 'a'],
+    );
+    assert.deepEqual(
+      quiet.stops.map((d) => [d.workId, d.action]),
+      [['a', 'user-decision']],
+    );
   } finally {
     h.close();
   }

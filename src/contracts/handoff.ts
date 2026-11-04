@@ -323,7 +323,8 @@ export const handoffPackSchema = z.strictObject({
     unfinished: count,
     budgets: count,
     budgetsWithin: count,
-    budgetsShared: count,
+    // Пакеты прежних версий поля не знают: при разборе — 0.
+    budgetsShared: count.default(0),
     repairs: count,
     intentions: count,
     intentionsDropped: count,

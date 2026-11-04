@@ -245,6 +245,12 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
           ...(waitingOn.length ? { waitingOn } : {}),
           ...(approvalStale ? { approvalStale } : {}),
           ...(openDependents ? { openDependents } : {}),
+          ...((stoppedBy) => (stoppedBy ? { repairStoppedBy: stoppedBy } : {}))(
+            // Отмена в группе останавливает её восстановление: сёстрам — почему.
+            work.status === 'failed' && work.failureKind !== 'cancelled' && !work.recovery && job
+              ? works.find((w) => w.graphId === work.graphId && w.status === 'cancelled')?.id
+              : undefined,
+          ),
           ...((live) =>
             live && live.state !== 'active'
               ? {

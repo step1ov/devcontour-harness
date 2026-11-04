@@ -140,6 +140,11 @@ export type StopInput =
          */
         openDependents?: string[];
         /**
+         * Отменённая работа той же группы, из-за которой движок не
+         * восстанавливает группу сам (`repairDecision`: любая отмена — stop).
+         */
+        repairStoppedBy?: string;
+        /**
          * Активная попытка без движения по обходу controller: что не
          * двигалось, сколько и что controller сделает (`action` у stalled).
          */
@@ -274,7 +279,22 @@ function retryPlannedOf(input: Extract<StopInput, { kind: 'work' }>) {
  * прямо зависит незавершённая; без таких — действия нет. Состав не известен
  * (`undefined`) — прежнее replan-dependents.
  */
-function cancelledOutcome(dependents: string[] | undefined, phase: StopPhase): Outcome {
+function cancelledOutcome(
+  dependents: string[] | undefined,
+  phase: StopPhase,
+  failed = false,
+): Outcome {
+  // Упавшая отменой работа открыта, а движок её не повторяет: без ждущих
+  // решает человек — повторить или отменить её.
+  if (failed && dependents && !dependents.length)
+    return {
+      code: 'CANCELLED',
+      cause: 'cancelled',
+      phase,
+      actor: 'user',
+      action: 'user-decision',
+      note: 'Попытка отменена, работа открыта, движок её не повторяет: повторить (harness retry) или отменить работу.',
+    };
   if (dependents && !dependents.length)
     return {
       code: 'CANCELLED',
@@ -469,7 +489,7 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
         };
       case 'cancelled':
         // Поручение со статусом failed и классом cancelled: отмена не повторяется.
-        return cancelledOutcome(work.openDependents, phase);
+        return cancelledOutcome(work.openDependents, phase, true);
       default:
         return {
           code: stopCodeOf(kind),
@@ -711,6 +731,9 @@ export function explainStop(input: StopInput): StopDiagnosis {
     message: message(
       outcome.cause,
       note,
+      input.work.repairStoppedBy && outcome.action !== 'retry'
+        ? `Автоматическое восстановление группы остановлено отменой ${input.work.repairStoppedBy}.`
+        : undefined,
       input.work.failure ? `Отказ: ${input.work.failure}` : undefined,
     ),
     evidence: (input.evidence ?? []).slice(-20).map((e) => ({ ...e })),

@@ -305,6 +305,10 @@ test('H1-05: OP-DIAG-03 таблица веток nextAction', () => {
       { actor: null, action: 'none', step: 'cancelled' },
     ],
     [
+      { status: 'failed', failureKind: 'cancelled' },
+      { actor: 'user', action: 'user-decision', step: 'cancelled' },
+    ],
+    [
       { recovery: recovery('awaiting-lead') },
       {
         actor: 'lead',

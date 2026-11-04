@@ -254,7 +254,7 @@ test('H1-03: таблица §1.2 для kind=work — ветки в указа�
     [
       '9 failed/cancelled без незавершённых зависимых',
       failed('cancelled', { work: { openDependents: [] } }),
-      ['CANCELLED', 'cancelled', 'claim', null, 'none'],
+      ['CANCELLED', 'cancelled', 'claim', 'user', 'user-decision'],
     ],
     [
       '9 failed/cancelled, ждут незавершённые',
@@ -928,6 +928,35 @@ test('stopInputsOf: отменённая без незавершённых за�
     // Ждущая отменена тоже: у a больше нет незавершённых зависимых.
     h.engine.cancel('b', 'не нужно');
     assert.deepEqual(board(), []);
+  } finally {
+    h.close();
+  }
+});
+
+test('stopInputsOf: отмена в группе останавливает её восстановление — диагноз упавшей сестры называет отменённую', () => {
+  const ctx = hsetup({ scenario: {} });
+  const h = ctx.open();
+  try {
+    const graph = ready(h.engine, graphOf({ a: [], b: [] }));
+    h.workflows.start({ kind: 'graph', id: graph.id, authorRuntime: 'claude' });
+    const run = h.engine.claim('c1')!;
+    assert.equal(run.workId, 'a');
+    h.engine.fail(run.id, run.token, 'unit', { kind: 'gate' });
+    h.engine.release('c1');
+    const opts = { maxAttempts: 3, repairBudget: 6 };
+    const diagnose = () =>
+      stopInputsOf(h, opts)
+        .filter((i): i is WorkInput => i.kind === 'work')
+        .map(explainStop);
+    // Без отмены gate повторяется движком.
+    assert.equal(diagnose().find((d) => d.workId === 'a')!.action, 'retry');
+    h.engine.cancel('b', 'не нужно');
+    const board = diagnose();
+    // Отменённая без ждущих скрыта, но сестра говорит, почему повтора нет.
+    assert.ok(!board.some((d) => d.workId === 'b'));
+    const a = board.find((d) => d.workId === 'a')!;
+    assert.notEqual(a.action, 'retry');
+    assert.match(a.message, /восстановление группы остановлено отменой b/);
   } finally {
     h.close();
   }

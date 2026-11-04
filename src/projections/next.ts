@@ -1,5 +1,11 @@
 import type { PropertyRecovery } from '../contracts/execution.ts';
-import { activeStatuses, type Actor, type NextAction, type WorkStatus } from './enums.ts';
+import {
+  activeStatuses,
+  type Actor,
+  type FailureKind,
+  type NextAction,
+  type WorkStatus,
+} from './enums.ts';
 
 export const nextSteps = [
   'accepted',
@@ -24,6 +30,8 @@ export interface NextInput {
   status: WorkStatus;
   attempt: number;
   maxAttempts: number;
+  /** Класс отказа упавшей работы: отмену движок не повторяет. */
+  failureKind?: FailureKind;
   hold?: { operation: string };
   recovery?: Pick<PropertyRecovery, 'status' | 'property' | 'reason' | 'decision'>;
   waitingAdoption?: boolean;
@@ -87,6 +95,9 @@ export function nextAction(input: NextInput): NextView {
   if (input.status === 'draft') return view('lead', 'review-plan', 'plan-review');
   if ((activeStatuses as readonly WorkStatus[]).includes(input.status))
     return view('controller', 'wait', 'attempt-running');
+  // Упавшая отменой: движок не повторяет, решает человек (повтор или отмена).
+  if (input.status === 'failed' && input.failureKind === 'cancelled')
+    return view('user', 'user-decision', 'cancelled');
   if (input.status === 'failed')
     return input.maxAttempts - input.attempt > 0
       ? view('controller', 'retry', 'retry-within-budget')
