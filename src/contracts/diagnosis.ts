@@ -24,6 +24,7 @@ export const diagnosisCauses = [
   'environment',
   'timeout',
   'stalled',
+  'context-exhausted',
   'stale-base',
   'empty-result',
   'unfinished',

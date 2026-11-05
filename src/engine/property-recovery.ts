@@ -37,6 +37,8 @@ const neutral: FailureKind[] = [
   'environment',
   'timeout',
   'stalled',
+  // Нехватка окна контекста говорит о размере задачи, а не о свойстве.
+  'context-exhausted',
   'stale-base',
   'merge',
   'cancelled',

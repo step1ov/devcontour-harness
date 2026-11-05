@@ -79,6 +79,7 @@ export const stopCauses = [
   'environment',
   'timeout',
   'stalled',
+  'context-exhausted',
   'stale-base',
   'empty-result',
   'unfinished',
@@ -196,6 +197,8 @@ const causeText: Record<StopCause, string> = {
   timeout: 'Попытка исчерпала отведённое время.',
   stalled:
     'Процесс попытки жив, но не двигался дольше порога: нет вывода, расхода процессора и смены стадий.',
+  'context-exhausted':
+    'Исполнителю не хватило окна контекста модели: задача или её контекст не помещаются в одну попытку.',
   'stale-base': 'База прогонов отстала от рабочей ветки.',
   'empty-result': 'Исполнитель отчитался о выполнении, не изменив ни одного файла.',
   unfinished: 'Исполнитель не доделал работу и сообщил об этом.',
@@ -222,6 +225,7 @@ const failurePhase: Record<FailureKind, StopPhase> = {
   environment: 'implementation',
   timeout: 'implementation',
   stalled: 'implementation',
+  'context-exhausted': 'implementation',
   unknown: 'implementation',
   'empty-result': 'implementation',
   unfinished: 'implementation',
@@ -490,6 +494,15 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       case 'cancelled':
         // Поручение со статусом failed и классом cancelled: отмена не повторяется.
         return cancelledOutcome(work.openDependents, phase, true);
+      case 'context-exhausted':
+        return {
+          code: stopCodeOf(kind),
+          cause: kind,
+          phase,
+          actor: 'lead',
+          action: 'diagnose-failure',
+          note: 'Окна контекста модели не хватило и на повторе: разделите поручение или сократите контекст (меньше файлов и вывода в подсказке, уже область).',
+        };
       default:
         return {
           code: stopCodeOf(kind),

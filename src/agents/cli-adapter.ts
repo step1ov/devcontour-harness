@@ -27,6 +27,9 @@ import { probeCallMs, probeServer, probeTool } from './review-probe.ts';
 import { claudeResult, runtimeEvents } from './runtime-events.ts';
 import { runtimeVersion, unknownUsage, usageStream } from './usage.ts';
 
+/** `terminal_reason` claude, означающие нехватку окна контекста модели. */
+const contextExhaustedReasons = new Set(['prompt_too_long', 'blocking_limit']);
+
 type ToolProfile = z.infer<typeof toolProfileSchema>;
 
 /**
@@ -386,12 +389,31 @@ export function cliAdapter(
       }
       const usage = telemetry.usage(result.code === 0 && !result.timedOut && !signal.aborted);
       const model = telemetry.model();
+      const terminalReason = telemetry.terminalReason();
+      const compactions = telemetry.compactions();
       // Сообщённые runtime счётчики и стоимость — и в диагностике вызова:
-      // runtime.log ограничен и итоговой строки может не содержать.
+      // runtime.log ограничен и итоговой строки может не содержать. Там же
+      // исход хода claude и число сжатий контекста (успешное сжатие — не отказ).
       await writeFile(
         join(dir, 'runtime.json'),
-        JSON.stringify({ ...result.diagnostics, usage }, null, 2),
+        JSON.stringify(
+          {
+            ...result.diagnostics,
+            usage,
+            ...(terminalReason ? { terminalReason } : {}),
+            ...(compactions ? { compactions } : {}),
+          },
+          null,
+          2,
+        ),
       );
+      // Нехватку окна контекста claude сообщает итоговым событием, а не
+      // текстом: `prompt_too_long` — запрос отклонён (одна реплика больше
+      // окна), `blocking_limit` — CLI сам остановил ход у предела окна (при
+      // выключенном или не сумевшем сжатии). Текст причины не разбирается:
+      // в нём числа токенов, и «…401…» стал бы отказом провайдера.
+      const contextExhausted =
+        runtime === 'claude' && !!terminalReason && contextExhaustedReasons.has(terminalReason);
       const bookkeeping = ['system', 'result', 'error', 'session.created', 'thread.started'];
       const started =
         result.timedOut ||
@@ -421,6 +443,7 @@ export function cliAdapter(
         exitCode: result.code,
         ...(why ? { reason: why } : {}),
         log: logPath,
+        ...(contextExhausted ? { contextExhausted: true as const } : {}),
       });
       const expired =
         signal.aborted && (signal.reason as Error | undefined)?.name === 'TimeoutError';
@@ -435,7 +458,8 @@ export function cliAdapter(
       if (result.code !== 0)
         return {
           ...base,
-          status: started ? 'failed' : 'unavailable',
+          // Нехватка окна — ответ runtime о запросе, а не недоступный runtime.
+          status: started || contextExhausted ? 'failed' : 'unavailable',
           diagnostics: diagnostics(`код ${result.code}${reason() ? ': ' + reason() : ''}`),
         };
       let output: unknown;

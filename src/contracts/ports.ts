@@ -230,8 +230,14 @@ export interface RuntimeResponse {
   text: string;
   sessionId?: string;
   usage: Usage;
-  /** Безопасная диагностика: код выхода, причина, путь сохранённого журнала. */
-  diagnostics: { exitCode: number | null; reason?: string; log?: string };
+  /**
+   * Безопасная диагностика: код выхода, причина, путь сохранённого журнала.
+   * `contextExhausted` — runtime сам сообщил, что запрос не помещается в окно
+   * контекста модели (у claude — `terminal_reason` итогового события);
+   * движок относит такой отказ к классу `context-exhausted`, а не к тексту
+   * причины. Необязательное поле: адаптер без него — прежняя семантика.
+   */
+  diagnostics: { exitCode: number | null; reason?: string; log?: string; contextExhausted?: true };
   /** Что reviewer выполнил по событиям runtime (только для ревью). */
   inspection?: NonNullable<EvidenceRecord['inspection']>;
 }

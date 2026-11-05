@@ -124,7 +124,7 @@ const eventTypeOf = (v: unknown) =>
   (v as { properties?: { type?: { const?: unknown } } } | null)?.properties?.type?.const as
     string | undefined;
 /** Аддитивные значения перечней после H2. */
-const ADDITIVE_ENUM_VALUES = new Set(['unfinished', 'needs-lead', 'stalled']);
+const ADDITIVE_ENUM_VALUES = new Set(['unfinished', 'needs-lead', 'stalled', 'context-exhausted']);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
   'Подготовить существующий Git npm/pnpm-репозиторий: план или create-only запись .harness/ (политика из профиля и toolchain inspection, manifest последним); чужие файлы не меняются';

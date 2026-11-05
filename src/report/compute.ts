@@ -169,6 +169,7 @@ const bucketOfKind: Record<FailureKind, FailureBucket> = {
   'scope-violation': 'defect',
   'empty-result': 'incomplete',
   unfinished: 'incomplete',
+  'context-exhausted': 'incomplete',
   'needs-lead': 'incomplete',
   'stale-base': 'integration',
   merge: 'integration',

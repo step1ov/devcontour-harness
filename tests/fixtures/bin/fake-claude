@@ -261,6 +261,10 @@ if (runtime === 'codex') {
     });
   if (step.exit) process.exit(step.exit);
   writeFileSync(arg('--output-last-message'), step.raw ?? JSON.stringify(step.result));
+} else if (step.stream) {
+  // Записанный поток живого CLI (обрезанный): события как есть, затем код выхода.
+  process.stdout.write(readFileSync(step.stream, 'utf8'));
+  process.exit(step.exit ?? 0);
 } else {
   out({ type: 'system', subtype: 'init', model: step.model ?? 'claude-fixture' });
   if (started)

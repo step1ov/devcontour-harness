@@ -849,6 +849,13 @@ export class Runner {
       };
     if (response.status === 'failed') {
       const message = `${adapter.runtime}: runtime завершился отказом${response.diagnostics.reason ? ': ' + response.diagnostics.reason : ''}`;
+      // Класс — по признаку адаптера, до разбора текста: числа токенов в
+      // причине совпадали бы с признаками отказа провайдера («401», «429»).
+      if (response.diagnostics.contextExhausted)
+        throw new TaskFailure(
+          'context-exhausted',
+          `${adapter.runtime}: не хватило окна контекста модели${response.diagnostics.reason ? ': ' + response.diagnostics.reason : ''}`,
+        );
       throw new TaskFailure(
         classifyFailure(undefined, message) === 'unknown'
           ? review

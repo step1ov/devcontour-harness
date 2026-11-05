@@ -21,6 +21,8 @@ export const reusableFailures: readonly FailureKind[] = [
   'environment',
   'timeout',
   'stalled',
+  // Нехватка окна контекста (обычно у reviewer большого diff) о коде не говорит.
+  'context-exhausted',
   // Ответ reviewer вне протокола о коде кандидата ничего не говорит.
   'review-protocol',
 ];

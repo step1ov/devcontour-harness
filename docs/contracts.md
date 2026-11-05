@@ -660,6 +660,40 @@ fencing; само состояние между переходами не пер
 причину `stalled` у работающего поручения: при `report` действует человек
 (`fix-environment`), при `stop` — controller.
 
+### Нехватка окна контекста
+
+Отказ класса `context-exhausted` — исполнителю или reviewer не хватило окна
+контекста модели внутри попытки. Класс ставится по признаку, который сообщил
+сам runtime, а не по тексту причины: адаптер claude читает `terminal_reason`
+итогового события `result` потока `stream-json` и выставляет
+`RuntimeResponse.diagnostics.contextExhausted`. Признаки:
+
+- `prompt_too_long` — запрос отклонён: одна реплика (подсказка с
+  контекстом) больше окна, сжимать нечего;
+- `blocking_limit` — CLI сам остановил ход у предела окна, когда
+  автоматическое сжатие выключено (`DISABLE_AUTO_COMPACT`,
+  `autoCompactEnabled: false`) или не помогло.
+
+В обоих случаях CLI выходит с кодом 1, `is_error: true`, текст `result`
+начинается с `Prompt is too long`. Текст в причине отказа сохраняется, но
+класс от него не зависит: в нём числа токенов, а «401» или «429» внутри них
+текстовый разбор принял бы за отказ провайдера. Успешное автоматическое
+сжатие (`system`/`compact_boundary`) — не отказ: вызов продолжается и
+завершается своим исходом; число сжатий и `terminal_reason` пишутся в
+`runtime.json` вызова (`compactions`, `terminalReason`). У codex признак
+пока не распознаётся: его отказ классифицируется как прежде.
+
+Попытка засчитывается в `maxAttempts`: отказ говорит о размере задачи, а не
+об окружении, и выдачу не останавливает. `repairPolicy['context-exhausted']`
+— один повтор: следующая попытка получает в подсказке указание держать
+контекст малым (читать только нужные файлы и строки, не выводить большие
+файлы и длинный вывод команд); второй такой же отказ останавливает цикл —
+задачу нужно разделить или сократить её контекст (`explain`: ведущий,
+`diagnose-failure`). Корзина отчёта — `incomplete`; разбор свойства
+(`property-recovery`) такой отказ не считает, кандидат после отказа reviewer
+переиспользуется (`reusableFailures`). Причина `attempt.diagnosed` — `none`,
+`counted: true`.
+
 ### RunEvent
 
 `{apiVersion, seq, at, type, graphId?, workId?, runId?, attempt?, payload}`.
@@ -816,7 +850,7 @@ data:`), светлая и тёмная схема по `prefers-color-scheme`, 
   `WorkState.attempt` (сброс возвращает счётчик к 0).
 - Корзины отказа попытки (`failureBucketOf`): `defect` (`gate`, `review`,
   `scope-violation`), `incomplete` (`empty-result`, `unfinished`,
-  `needs-lead`), `integration` (`stale-base`, `merge`), `environment`
+  `needs-lead`, `context-exhausted`), `integration` (`stale-base`, `merge`), `environment`
   (`environment`, `provider-auth`, `blocked`, истёкшее владение), `time-limit`
   (`timeout`), `tool` (`review-protocol`), `operator` (`cancelled`), `budget`,
   `unknown`, `unclassified` (попытка без класса — записана до
