@@ -234,6 +234,7 @@ export const cliCommands = {
       'BUDGET_EXHAUSTED',
       'BUDGET_UNKNOWN',
       'ATTEMPTS_EXHAUSTED',
+      'CONTEXT_EXHAUSTED',
     ],
   },
   status: {

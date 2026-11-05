@@ -504,16 +504,24 @@ null` и этого правила засчитанных попыток: ист
   `explain`, пакет передачи и отчёт — корзина `incomplete`) и необязательное
   поле `AttemptState.contextLimit` (`prompt-too-long` | `blocking-limit`).
 - **Коды.** `CONTEXT_EXHAUSTED` (класс `refused`, exit code 3) — код
-  остановки этого класса.
+  остановки этого класса (`stopReason` результата, `explain`, пакет передачи;
+  в `cliCommands.run.refusals`).
 - **Политика.** `repairPolicy['context-exhausted']`: один повтор у
   `blocking-limit`, ни одного у `prompt-too-long` (`repairRepeats`); попытка
-  засчитывается.
+  засчитывается. `prompt-too-long` — только `prompt_too_long` на первом ходе
+  (`num_turns` ≤ 1); тот же признак после ходов работы — `blocking-limit`.
+- **API.** `repairRepeats` и `lastContextLimit` экспортированы рядом с
+  `repairPolicy`.
 - **Порт runtime.** Необязательное поле
   `RuntimeResponse.diagnostics.contextExhausted` (предел окна); адаптер без
   него — прежняя классификация. В `runtime.json` вызова claude —
   `terminalReason` и `compactions` (диагностика, не договор).
 
 Прежде такой отказ claude получал класс `unknown` (у reviewer — `review`).
+Читатель, проверявший строгой схемой прежней версии `ValueReport`, пакет
+передачи (`handoff-pack`), диагноз остановки (`stop-diagnosis`) или
+`RunResult`, отклонит новые значения `context-exhausted` и
+`CONTEXT_EXHAUSTED`: обновить схему вместе с пакетом.
 
 **Откат.** Документ состояния разбирается строго: alpha.34 и ниже отказывают
 на документе с отказом `context-exhausted` или полем `contextLimit`. Путь —

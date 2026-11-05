@@ -122,8 +122,8 @@ const flatUsage = (usage: unknown) =>
  * учитывалась неполной. Здесь каждая строка разбирается сразу; хранятся
  * только поля телеметрии — последнее событие `result`, события
  * `turn.completed` и первая сообщённая модель, — а не текст вывода.
- * У claude также — `terminal_reason` последнего `result` (по нему адаптер
- * узнаёт нехватку окна контекста) и число автоматических и ручных сжатий
+ * У claude также — `terminal_reason` и `num_turns` последнего `result` (по
+ * ним адаптер узнаёт нехватку окна контекста) и число автоматических и ручных сжатий
  * контекста (`system`/`compact_boundary`): успешное сжатие не отказ.
  */
 export function usageStream(runtime: 'codex' | 'claude') {
@@ -133,6 +133,7 @@ export function usageStream(runtime: 'codex' | 'claude') {
     model: string | null = null,
     result: string | undefined,
     terminalReason: string | undefined,
+    numTurns: number | undefined,
     compactions = 0;
   const turns: string[] = [];
   const line = (text: string) => {
@@ -154,6 +155,8 @@ export function usageStream(runtime: 'codex' | 'claude') {
       compactions++;
     if (runtime === 'claude' && e.type === 'result')
       terminalReason = typeof e.terminal_reason === 'string' ? e.terminal_reason : undefined;
+    if (runtime === 'claude' && e.type === 'result')
+      numTurns = typeof e.num_turns === 'number' ? e.num_turns : undefined;
     if (runtime === 'claude' && e.type === 'result')
       result = JSON.stringify({
         type: e.type,
@@ -214,6 +217,11 @@ export function usageStream(runtime: 'codex' | 'claude') {
     terminalReason: () => {
       flush();
       return terminalReason;
+    },
+    /** `num_turns` последнего `result` claude; нет — runtime не сообщил. */
+    numTurns: () => {
+      flush();
+      return numTurns;
     },
     /** Сколько раз runtime сжал контекст за вызов (`compact_boundary`). */
     compactions: () => compactions,

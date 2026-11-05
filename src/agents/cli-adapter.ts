@@ -28,11 +28,22 @@ import { probeCallMs, probeServer, probeTool } from './review-probe.ts';
 import { claudeResult, runtimeEvents } from './runtime-events.ts';
 import { runtimeVersion, unknownUsage, usageStream } from './usage.ts';
 
-/** `terminal_reason` claude, означающие нехватку окна контекста модели, и предел. */
-const contextExhaustedReasons: Record<string, ContextLimit> = {
-  prompt_too_long: 'prompt-too-long',
-  blocking_limit: 'blocking-limit',
-};
+/**
+ * Предел окна контекста по итоговому событию claude. `prompt_too_long` на
+ * первом ходе (`num_turns` ≤ 1, записанный случай: подсказка сама больше
+ * окна) — `prompt-too-long`, повтор только удлинит подсказку. Тот же признак
+ * после ходов работы (окно заполнил вывод инструментов) и без `num_turns` —
+ * `blocking-limit`, как остановка CLI у предела окна: повтор может читать
+ * меньше.
+ */
+export function claudeContextLimit(
+  terminalReason: string | undefined,
+  numTurns: number | undefined,
+): ContextLimit | undefined {
+  if (terminalReason === 'blocking_limit') return 'blocking-limit';
+  if (terminalReason !== 'prompt_too_long') return undefined;
+  return numTurns !== undefined && numTurns <= 1 ? 'prompt-too-long' : 'blocking-limit';
+}
 
 type ToolProfile = z.infer<typeof toolProfileSchema>;
 
@@ -411,17 +422,10 @@ export function cliAdapter(
           2,
         ),
       );
-      // Нехватку окна контекста claude сообщает итоговым событием, а не
-      // текстом: `prompt_too_long` — запрос отклонён (одна реплика больше
-      // окна), `blocking_limit` — CLI сам остановил ход у предела окна (при
-      // выключенном или не сумевшем сжатии). Текст причины не разбирается:
-      // в нём числа токенов, и «…401…» стал бы отказом провайдера.
+      // Нехватка окна контекста — по `terminal_reason` итогового события
+      // claude, а не по тексту причины (в нём числа токенов).
       const contextExhausted =
-        runtime === 'claude' &&
-        terminalReason &&
-        Object.hasOwn(contextExhaustedReasons, terminalReason)
-          ? contextExhaustedReasons[terminalReason]
-          : undefined;
+        runtime === 'claude' ? claudeContextLimit(terminalReason, telemetry.numTurns()) : undefined;
       const bookkeeping = ['system', 'result', 'error', 'session.created', 'thread.started'];
       const started =
         result.timedOut ||
@@ -478,8 +482,9 @@ export function cliAdapter(
           output = JSON.parse(cleaned);
         } else {
           const last = runtimeEvents(result.stdout).events.findLast((e) => e.type === 'result');
-          // Отказ runtime при коде 0 — до разбора ответа: у такого `result`
-          // нет `structured_output`, и он читался как ответ вне схемы.
+          // `is_error` проверяется до разбора: `claudeResult` требует поле
+          // `structured_output`, которого у такого `result` нет, и отказ
+          // runtime при коде 0 читался как непрочитанный ответ.
           if (last?.is_error === true)
             return {
               ...base,

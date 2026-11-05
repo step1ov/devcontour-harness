@@ -5,6 +5,8 @@ export {
   failureFingerprint,
   failureKinds,
   repairPolicy,
+  repairRepeats,
+  lastContextLimit,
   MAX_NEUTRAL_FAILURES,
   type FailureKind,
   type RepairRule,

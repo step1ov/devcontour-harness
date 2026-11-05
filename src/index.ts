@@ -214,6 +214,8 @@ export {
   TaskFailure,
   failureFingerprint,
   repairPolicy,
+  repairRepeats,
+  lastContextLimit,
   MAX_NEUTRAL_FAILURES,
   type RepairRule,
 } from './engine/failure.ts';

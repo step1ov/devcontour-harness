@@ -13,7 +13,7 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cliAdapter } from '../src/agents/cli-adapter.ts';
+import { claudeContextLimit, cliAdapter } from '../src/agents/cli-adapter.ts';
 import { usageStream } from '../src/agents/usage.ts';
 import type { EventType, RunEvent, RuntimeRequest } from '../src/contracts/index.ts';
 import { repairPolicy, repairRepeats } from '../src/contracts/repair-policy.ts';
@@ -21,6 +21,9 @@ import { explainStop } from '../src/projections/stop.ts';
 import { classifyFailure } from '../src/engine/classify.ts';
 import { repairDecision } from '../src/engine/repair.ts';
 import { approve, implement, runAll, setup } from './runner-fixture.ts';
+import { stopInputsOf } from '../src/explain/state.ts';
+import { ready } from './engine-fixture.ts';
+import { hsetup } from './harness-fixture.ts';
 
 const capture = (name: string) =>
   fileURLToPath(new URL(`./fixtures/context-exhaustion/${name}.jsonl`, import.meta.url));
@@ -145,6 +148,33 @@ test('Поток без событий работы (только init и result
   assert.equal((await invoke(plain, 1)).response.status, 'unavailable');
 });
 
+test('prompt_too_long после ходов работы — blocking-limit (повтор может читать меньше); без num_turns — тоже', async () => {
+  const midRun = derived('blocking-limit', (events) =>
+    events.map((e) => (e.type === 'result' ? { ...e, terminal_reason: 'prompt_too_long' } : e)),
+  );
+  const mid = await invoke(midRun, 1);
+  assert.equal(mid.response.status, 'failed');
+  assert.equal(mid.response.diagnostics.contextExhausted, 'blocking-limit');
+  const noTurns = derived('prompt-too-long', (events) =>
+    events.map((e) => {
+      if (e.type !== 'result') return e;
+      const rest = { ...e };
+      delete rest.num_turns;
+      return rest;
+    }),
+  );
+  assert.equal((await invoke(noTurns, 1)).response.diagnostics.contextExhausted, 'blocking-limit');
+  assert.deepEqual(
+    [
+      claudeContextLimit('prompt_too_long', 1),
+      claudeContextLimit('prompt_too_long', 13),
+      claudeContextLimit('blocking_limit', 1),
+      claudeContextLimit('api_error', 1),
+    ],
+    ['prompt-too-long', 'blocking-limit', 'blocking-limit', undefined],
+  );
+});
+
 test('Телеметрия потока: terminal_reason последнего result и число compact_boundary', () => {
   const stream = usageStream('claude');
   for (const line of readFileSync(capture('auto-compact'), 'utf8').split('\n'))
@@ -248,7 +278,7 @@ test('prompt_too_long: повтора нет — отказ сразу оста�
   assert.match(diagnosis.message, /превышено уже первым запросом/);
 });
 
-test('blocking_limit, затем prompt_too_long: один отпечаток, предел последнего — остановка', async () => {
+test('blocking_limit, затем prompt_too_long первого хода: один отпечаток у обоих пределов', async () => {
   const ctx = setup({
     scenario: {
       writer: [
@@ -273,7 +303,6 @@ test('blocking_limit, затем prompt_too_long: один отпечаток, �
     ['blocking-limit', 'prompt-too-long'],
   );
   assert.equal(attempts[0]!.failureFingerprint, attempts[1]!.failureFingerprint);
-  assert.equal(decide()?.action, 'stop');
 });
 
 test('Reviewer с нехваткой окна: класс context-exhausted, а не review; повтор берёт кандидата, reviewer без подсказки writer', async () => {
@@ -300,4 +329,67 @@ test('Reviewer с нехваткой окна: класс context-exhausted, а 
   assert.equal(second.reusedFrom?.runId, first!.id, 'кандидат переиспользован');
   const prompt = readFileSync(`${ctx.scenarioPath}.reviewer.1.prompt`, 'utf8');
   assert.doesNotMatch(prompt, /Keep your context small/);
+});
+
+for (const limit of ['prompt-too-long', 'blocking-limit'] as const)
+  test(`stopInputsOf → explainStop: предел ${limit} доходит до диагноза, повтор обещается как у repairDecision`, () => {
+    const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+    const h = ctx.open();
+    const graph = ready(h.engine, ctx.graph, 'controller');
+    const job = h.workflows.start({ kind: 'graph', id: graph.id, authorRuntime: 'claude' });
+    h.workflows.finish(h.workflows.claim(job.key)!);
+    const a = h.engine.claim('controller')!;
+    h.engine.fail(a.id, a.token, 'claude: не хватило окна контекста модели', {
+      kind: 'context-exhausted',
+      contextLimit: limit,
+    });
+    const options = { maxAttempts: h.policy.maxAttempts, repairBudget: h.policy.repairBudget };
+    const inputs = stopInputsOf(h, options);
+    const input = inputs.find((i) => i.kind === 'work' && i.work.id === a.workId);
+    assert.equal(input?.kind === 'work' && input.work.contextLimit, limit);
+    const d = explainStop(input!);
+    const work = h.engine.read((v) => v.work(a.workId))!;
+    const decision = h.engine.read((v) =>
+      repairDecision(v, [work], {
+        budgetLeft: options.repairBudget,
+        maxAttempts: options.maxAttempts,
+      }),
+    );
+    assert.equal(d.retryPlanned, decision?.action === 'retry');
+    assert.equal(decision?.action, limit === 'prompt-too-long' ? 'stop' : 'retry');
+    if (!d.retryPlanned) {
+      // Первый отказ вне задания графа: повтора не было, и диагноз о нём не говорит.
+      assert.equal(d.code, 'CONTEXT_EXHAUSTED');
+      assert.doesNotMatch(d.message, /на повторе/);
+    }
+  });
+
+test('Диагноз blocking-limit без повтора и после повтора: «на повторе» — только когда повтор был', () => {
+  const base = {
+    kind: 'work' as const,
+    work: {
+      id: 'w',
+      status: 'failed' as const,
+      attempt: 1,
+      failureKind: 'context-exhausted' as const,
+      contextLimit: 'blocking-limit' as const,
+    },
+    maxAttempts: 5,
+    control: { paused: false },
+  };
+  const first = explainStop({
+    ...base,
+    repair: { sameFailureRepairs: 0, groupRepairsUsed: 0, groupRepairBudget: 0 },
+  });
+  assert.equal(first.retryPlanned, false, 'вне задания графа повтора нет');
+  assert.equal(first.code, 'CONTEXT_EXHAUSTED');
+  assert.doesNotMatch(first.message, /на повторе/);
+  assert.match(first.message, /повторите с меньшим контекстом/);
+  const repeated = explainStop({
+    ...base,
+    work: { ...base.work, attempt: 2 },
+    repair: { sameFailureRepairs: 1, groupRepairsUsed: 1, groupRepairBudget: 3 },
+  });
+  assert.equal(repeated.retryPlanned, false);
+  assert.match(repeated.message, /не хватило и на повторе/);
 });

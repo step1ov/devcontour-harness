@@ -252,6 +252,8 @@ test('H3-01: прежние команды и схемы их данных не 
         {
           ...contract,
           ...(c === 'init' ? { description: H2_INIT_DESCRIPTION } : {}),
+          // Аддитивный код отказа (alpha.35: CONTEXT_EXHAUSTED у run).
+          refusals: contract.refusals.filter((code) => !ADDITIVE_ENUM_VALUES.has(code)),
           args: (contract.args as readonly CliArgument[])
             .filter((arg) => !ADDITIVE_ARGS.has(c + arg.name))
             .map((arg) => {
