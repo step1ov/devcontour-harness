@@ -8,6 +8,7 @@ import type { RunEvent, RunEventDraft, TransactionKind } from './events.ts';
 import type {
   AttemptState,
   CallRecord,
+  ContextLimit,
   EvidenceRecord,
   ControlState,
   ControllerLease,
@@ -233,11 +234,17 @@ export interface RuntimeResponse {
   /**
    * Безопасная диагностика: код выхода, причина, путь сохранённого журнала.
    * `contextExhausted` — runtime сам сообщил, что запрос не помещается в окно
-   * контекста модели (у claude — `terminal_reason` итогового события);
-   * движок относит такой отказ к классу `context-exhausted`, а не к тексту
-   * причины. Необязательное поле: адаптер без него — прежняя семантика.
+   * контекста модели, и какой предел (у claude — `terminal_reason` итогового
+   * события); движок относит такой отказ к классу `context-exhausted`, а не
+   * к тексту причины. Необязательное поле: адаптер без него — прежняя
+   * семантика.
    */
-  diagnostics: { exitCode: number | null; reason?: string; log?: string; contextExhausted?: true };
+  diagnostics: {
+    exitCode: number | null;
+    reason?: string;
+    log?: string;
+    contextExhausted?: ContextLimit;
+  };
   /** Что reviewer выполнил по событиям runtime (только для ревью). */
   inspection?: NonNullable<EvidenceRecord['inspection']>;
 }

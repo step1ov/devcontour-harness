@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 // текст задачи похож на текст инфраструктуры. Поэтому класс ставится в точке
 // отказа, записывается вместе с попыткой и дальше используется как есть.
 
-import type { FailureKind } from './execution.ts';
+import type { ContextLimit, FailureKind } from './execution.ts';
 import type { EnvironmentCause } from './events.ts';
 
 /** Отказ окружения до начала работы: попытка не засчитывается. */
@@ -37,6 +37,8 @@ export class TaskFailure extends Error {
     },
     /** Причина отказа окружения, известная в точке обнаружения (`attempt.diagnosed`). */
     readonly diagnosis?: EnvironmentCause,
+    /** Предел окна контекста у отказа `context-exhausted`, сообщённый runtime. */
+    readonly contextLimit?: ContextLimit,
   ) {
     super(message);
     this.name = 'TaskFailure';

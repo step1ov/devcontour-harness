@@ -89,6 +89,17 @@ export const failureKindSchema = z.enum(failureKinds);
 export type FailureKind = (typeof failureKinds)[number];
 
 /**
+ * Какой предел окна контекста сообщил runtime у отказа `context-exhausted`:
+ * `prompt-too-long` — запрос отклонён (claude `terminal_reason:
+ * prompt_too_long`, уже одна реплика больше окна; повтор только удлинит
+ * подсказку), `blocking-limit` — ход остановлен у предела окна (claude
+ * `blocking_limit`).
+ */
+export const contextLimits = ['prompt-too-long', 'blocking-limit'] as const;
+export const contextLimitSchema = z.enum(contextLimits);
+export type ContextLimit = (typeof contextLimits)[number];
+
+/**
  * Живость исполняющейся попытки по периодическому обходу controller
  * (`stallSweep` политики): `active` — движение было недавно, `quiet` — нет
  * движения дольше `quietMs`, `stalled` — дольше `stalledMs`. Движение —
@@ -497,6 +508,8 @@ export const attemptStateSchema = z.strictObject({
   /** Отказ окружения: исполнителю не дали работать, попытка не засчитана. */
   blocked: z.boolean().optional(),
   failureKind: failureKindSchema.optional(),
+  /** Предел окна контекста — только у отказа `context-exhausted`. */
+  contextLimit: contextLimitSchema.optional(),
   failureFingerprint: z.string().optional(),
   /** Gates, которые попытка обязана пройти в обеих фазах (раскрытая область). */
   requiredGates: z.array(idSchema).optional(),

@@ -154,9 +154,15 @@ export function prompt(input: {
         ? `The previous attempt stopped before finishing (${attempt.continuedFrom.reason === 'timeout' ? 'ran out of time' : attempt.continuedFrom.reason === 'context-exhausted' ? 'ran out of the model context window' : attempt.continuedFrom.reason}). Its unfinished, unverified changes are already applied in this worktree as uncommitted edits (${attempt.continuedFrom.files.join(', ')}). Continue from them: check what is done and what is broken, finish the work and make the gates pass. Treat them as a draft, not as reviewed work.`
         : `The previous attempt produced a candidate that failed (${attempt.continuedFrom.reason === 'review' ? 'rejected by review' : attempt.continuedFrom.reason}); see its error and findings above. Its changes are already applied in this worktree as uncommitted edits (${attempt.continuedFrom.files.join(', ')}). Fix what failed on top of them; if the failure shows the approach itself is wrong, replace it rather than patching around it. The gates and a new independent review decide again.`
       : '',
-    // Повтор после нехватки окна контекста: прошлый способ работы не помещался.
+    // Повтор writer после нехватки окна контекста: прошлый способ работы не
+    // помещался. Reviewer той же попытки подсказку не получает; о самой
+    // нехватке уже сказал абзац черновика, если черновик наложен.
+    !review &&
     input.history.filter((a) => a.id !== attempt.id).at(-1)?.failureKind === 'context-exhausted'
-      ? 'The previous attempt ran out of the model context window. Keep your context small this time: read only the files and line ranges you need, do not print whole large files or long command output, and do not re-read what you already have.'
+      ? (attempt.continuedFrom?.applied && attempt.continuedFrom.reason === 'context-exhausted'
+          ? ''
+          : 'The previous attempt ran out of the model context window. ') +
+        'Keep your context small this time: read only the files and line ranges you need, do not print whole large files or long command output, and do not re-read what you already have.'
       : '',
     !review && attempt.continuedFrom?.applied && attempt.continuedFrom.respecified
       ? 'The specification or its contracts changed after that attempt: check the applied changes against the current approved specification and contracts above, not against the old ones.'

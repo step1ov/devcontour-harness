@@ -102,6 +102,7 @@ export function withSuffix(failure: Error, suffix: string): Error {
         `${failure.message}; ${suffix}`,
         failure.properties,
         failure.diagnosis,
+        failure.contextLimit,
       )
     : new Error(`${failure.message}; ${suffix}`, { cause: failure });
 }

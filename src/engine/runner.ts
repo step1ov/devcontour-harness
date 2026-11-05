@@ -851,10 +851,15 @@ export class Runner {
       const message = `${adapter.runtime}: runtime завершился отказом${response.diagnostics.reason ? ': ' + response.diagnostics.reason : ''}`;
       // Класс — по признаку адаптера, до разбора текста: числа токенов в
       // причине совпадали бы с признаками отказа провайдера («401», «429»).
+      // Текст постоянный, предел — данными: отпечаток один при любом пределе
+      // и любых числах токенов; текст runtime — в журнале вызова.
       if (response.diagnostics.contextExhausted)
         throw new TaskFailure(
           'context-exhausted',
-          `${adapter.runtime}: не хватило окна контекста модели${response.diagnostics.reason ? ': ' + response.diagnostics.reason : ''}`,
+          `${adapter.runtime}: не хватило окна контекста модели`,
+          undefined,
+          undefined,
+          response.diagnostics.contextExhausted,
         );
       throw new TaskFailure(
         classifyFailure(undefined, message) === 'unknown'
@@ -1583,6 +1588,9 @@ export class Runner {
             ? { properties: error.properties }
             : {}),
           kind,
+          ...(!stalled && error instanceof TaskFailure && error.contextLimit
+            ? { contextLimit: error.contextLimit }
+            : {}),
           cause: environmentCauseOf(stalled ? undefined : error, message, kind),
           blocked:
             (error instanceof BlockedError || kind === 'provider-auth') && !attempt.candidateSha,

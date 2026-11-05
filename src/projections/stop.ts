@@ -1,5 +1,5 @@
 import { errorCodes, type ErrorCode } from '../contracts/errors.ts';
-import { repairPolicy } from '../contracts/repair-policy.ts';
+import { repairPolicy, repairRepeats } from '../contracts/repair-policy.ts';
 import { CLIP_DIAGNOSTIC, clipText } from './clip.ts';
 import type { Actor, FailureKind, NextAction, PauseReason, WorkStatus } from './enums.ts';
 
@@ -25,6 +25,8 @@ export function stopCodeOf(kind: FailureKind | undefined): ErrorCode {
       return 'BUDGET_EXHAUSTED';
     case 'cancelled':
       return 'CANCELLED';
+    case 'context-exhausted':
+      return 'CONTEXT_EXHAUSTED';
     case 'provider-auth':
     case 'environment':
     case 'timeout':
@@ -122,6 +124,8 @@ export type StopInput =
         status: WorkStatus;
         attempt: number;
         failureKind?: FailureKind;
+        /** Предел окна контекста последнего отказа `context-exhausted`. */
+        contextLimit?: 'prompt-too-long' | 'blocking-limit';
         failure?: string;
         hold?: { operation: string; reason: string };
         budgetBlock?: { reason: string };
@@ -272,7 +276,7 @@ function retryPlannedOf(input: Extract<StopInput, { kind: 'work' }>) {
   const rule = repairPolicy[work.failureKind ?? 'unknown'];
   return (
     rule.action === 'retry' &&
-    repair.sameFailureRepairs < rule.repeats &&
+    repair.sameFailureRepairs < repairRepeats(work.failureKind ?? 'unknown', work.contextLimit) &&
     work.attempt < maxAttempts &&
     repair.groupRepairsUsed < repair.groupRepairBudget
   );
@@ -501,7 +505,10 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
           phase,
           actor: 'lead',
           action: 'diagnose-failure',
-          note: 'Окна контекста модели не хватило и на повторе: разделите поручение или сократите контекст (меньше файлов и вывода в подсказке, уже область).',
+          note:
+            work.contextLimit === 'prompt-too-long'
+              ? 'Окно контекста модели превышено уже первым запросом, повтор только удлинит его: разделите поручение или сократите контекст (меньше файлов и вывода в подсказке, уже область).'
+              : 'Окна контекста модели не хватило и на повторе: разделите поручение или сократите контекст (меньше файлов и вывода в подсказке, уже область).',
         };
       default:
         return {
@@ -660,6 +667,14 @@ function errorOutcome(code: ErrorCode): Omit<Outcome, 'note'> {
       return { code, cause: 'budget', phase: 'claim', actor: 'user', action: 'raise-budget' };
     case 'ATTEMPTS_EXHAUSTED':
       return { code, cause: 'unknown', phase: 'claim', actor: 'user', action: 'reset-attempts' };
+    case 'CONTEXT_EXHAUSTED':
+      return {
+        code,
+        cause: 'context-exhausted',
+        phase: 'implementation',
+        actor: 'lead',
+        action: 'diagnose-failure',
+      };
     case 'RUNTIME_UNAVAILABLE':
       return {
         code,

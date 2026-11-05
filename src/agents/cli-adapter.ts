@@ -4,6 +4,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { z } from 'zod';
 import type {
+  ContextLimit,
   ProbeServer,
   RuntimeAdapter,
   RuntimeCapabilities,
@@ -27,8 +28,11 @@ import { probeCallMs, probeServer, probeTool } from './review-probe.ts';
 import { claudeResult, runtimeEvents } from './runtime-events.ts';
 import { runtimeVersion, unknownUsage, usageStream } from './usage.ts';
 
-/** `terminal_reason` claude, означающие нехватку окна контекста модели. */
-const contextExhaustedReasons = new Set(['prompt_too_long', 'blocking_limit']);
+/** `terminal_reason` claude, означающие нехватку окна контекста модели, и предел. */
+const contextExhaustedReasons: Record<string, ContextLimit> = {
+  prompt_too_long: 'prompt-too-long',
+  blocking_limit: 'blocking-limit',
+};
 
 type ToolProfile = z.infer<typeof toolProfileSchema>;
 
@@ -413,7 +417,11 @@ export function cliAdapter(
       // выключенном или не сумевшем сжатии). Текст причины не разбирается:
       // в нём числа токенов, и «…401…» стал бы отказом провайдера.
       const contextExhausted =
-        runtime === 'claude' && !!terminalReason && contextExhaustedReasons.has(terminalReason);
+        runtime === 'claude' &&
+        terminalReason &&
+        Object.hasOwn(contextExhaustedReasons, terminalReason)
+          ? contextExhaustedReasons[terminalReason]
+          : undefined;
       const bookkeeping = ['system', 'result', 'error', 'session.created', 'thread.started'];
       const started =
         result.timedOut ||
@@ -443,7 +451,7 @@ export function cliAdapter(
         exitCode: result.code,
         ...(why ? { reason: why } : {}),
         log: logPath,
-        ...(contextExhausted ? { contextExhausted: true as const } : {}),
+        ...(contextExhausted ? { contextExhausted } : {}),
       });
       const expired =
         signal.aborted && (signal.reason as Error | undefined)?.name === 'TimeoutError';
@@ -469,16 +477,21 @@ export function cliAdapter(
           await writeFile(resultPath, cleaned);
           output = JSON.parse(cleaned);
         } else {
-          const final = claudeResult.parse(
-            runtimeEvents(result.stdout).events.findLast((e) => e.type === 'result'),
-          );
-          if (final.is_error)
+          const last = runtimeEvents(result.stdout).events.findLast((e) => e.type === 'result');
+          // Отказ runtime при коде 0 — до разбора ответа: у такого `result`
+          // нет `structured_output`, и он читался как ответ вне схемы.
+          if (last?.is_error === true)
             return {
               ...base,
               status: 'failed',
-              diagnostics: diagnostics(redact(final.result ?? 'ошибка runtime').slice(0, 300)),
+              diagnostics: diagnostics(
+                redact(typeof last.result === 'string' ? last.result : 'ошибка runtime').slice(
+                  0,
+                  300,
+                ),
+              ),
             };
-          output = final.structured_output;
+          output = claudeResult.parse(last).structured_output;
         }
       } catch (error) {
         // Непрочитанный файл не замаскирован: на диске он не остаётся.

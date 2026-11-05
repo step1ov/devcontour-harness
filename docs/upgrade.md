@@ -501,21 +501,25 @@ null` и этого правила засчитанных попыток: ист
 
 - **Состояние и журнал.** Класс отказа `context-exhausted` в `failureKind`
   (попытка, поручение, `attempt.failed`, `attempt.diagnosed`, причина
-  `explain`, пакет передачи и отчёт — корзина `incomplete`).
-- **Политика.** `repairPolicy['context-exhausted']`: один повтор, затем
-  остановка; попытка засчитывается.
+  `explain`, пакет передачи и отчёт — корзина `incomplete`) и необязательное
+  поле `AttemptState.contextLimit` (`prompt-too-long` | `blocking-limit`).
+- **Коды.** `CONTEXT_EXHAUSTED` (класс `refused`, exit code 3) — код
+  остановки этого класса.
+- **Политика.** `repairPolicy['context-exhausted']`: один повтор у
+  `blocking-limit`, ни одного у `prompt-too-long` (`repairRepeats`); попытка
+  засчитывается.
 - **Порт runtime.** Необязательное поле
-  `RuntimeResponse.diagnostics.contextExhausted`; адаптер без него —
-  прежняя классификация. В `runtime.json` вызова claude — `terminalReason` и
-  `compactions` (диагностика, не договор).
+  `RuntimeResponse.diagnostics.contextExhausted` (предел окна); адаптер без
+  него — прежняя классификация. В `runtime.json` вызова claude —
+  `terminalReason` и `compactions` (диагностика, не договор).
 
 Прежде такой отказ claude получал класс `unknown` (у reviewer — `review`).
 
 **Откат.** Документ состояния разбирается строго: alpha.34 и ниже отказывают
-на документе с отказом `context-exhausted`. Путь — строка «Новая версия уже
-изменила формат» таблицы [«Откат»](#откат): остановить writers и восстановить
-копию каталога состояния, снятую до обновления, вместе с прежней версией
-пакета.
+на документе с отказом `context-exhausted` или полем `contextLimit`. Путь —
+строка «Новая версия уже изменила формат» таблицы [«Откат»](#откат):
+остановить writers и восстановить копию каталога состояния, снятую до
+обновления, вместе с прежней версией пакета.
 
 ## Перед обновлением
 

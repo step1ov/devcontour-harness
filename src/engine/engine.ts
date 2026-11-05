@@ -18,6 +18,7 @@ import {
   type AttemptState,
   type RunEventPayload,
   type CancelActor,
+  type ContextLimit,
   type EnvironmentCause,
   type RetryActor,
   type ControllerLease,
@@ -1799,6 +1800,8 @@ export class Engine {
        * без неё — по классу отказа.
        */
       cause?: EnvironmentCause;
+      /** Предел окна контекста — пишется только у отказа `context-exhausted`. */
+      contextLimit?: ContextLimit;
     } = {},
   ) {
     const kind = options.kind ?? 'unknown';
@@ -1831,6 +1834,9 @@ export class Engine {
         error: shown,
         ...(blocked ? { blocked: true } : {}),
         failureKind: kind,
+        ...(kind === 'context-exhausted' && options.contextLimit
+          ? { contextLimit: options.contextLimit }
+          : {}),
         failureFingerprint: fingerprint,
         finishedAt: iso(this.now()),
         ...(bound.length ? { properties: bound } : {}),

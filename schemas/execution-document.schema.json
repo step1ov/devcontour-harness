@@ -1492,6 +1492,13 @@
               "unknown"
             ]
           },
+          "contextLimit": {
+            "type": "string",
+            "enum": [
+              "prompt-too-long",
+              "blocking-limit"
+            ]
+          },
           "failureFingerprint": {
             "type": "string"
           },

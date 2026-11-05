@@ -1,5 +1,10 @@
 import { HarnessError } from '../contracts/errors.ts';
-import { MAX_NEUTRAL_FAILURES, repairPolicy } from '../contracts/repair-policy.ts';
+import {
+  MAX_NEUTRAL_FAILURES,
+  lastContextLimit,
+  repairPolicy,
+  repairRepeats,
+} from '../contracts/repair-policy.ts';
 import type {
   ControlState,
   ExecutionPolicy,
@@ -236,6 +241,9 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
           status: work.status,
           attempt: work.attempt,
           ...(work.failureKind ? { failureKind: work.failureKind } : {}),
+          ...(work.failureKind === 'context-exhausted' && lastContextLimit(attempts)
+            ? { contextLimit: lastContextLimit(attempts) }
+            : {}),
           ...(work.failure !== undefined ? { failure: work.failure } : {}),
           ...(work.hold
             ? { hold: { operation: work.hold.operation, reason: work.hold.reason } }
@@ -271,7 +279,9 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
         },
         maxAttempts: options.maxAttempts,
         repair: {
-          sameFailureRepairs: fingerprint ? identical - 1 : repairPolicy[kind].repeats,
+          sameFailureRepairs: fingerprint
+            ? identical - 1
+            : repairRepeats(kind, lastContextLimit(attempts)),
           groupRepairsUsed: job?.repairs ?? 0,
           groupRepairBudget: job ? options.repairBudget : 0,
           ...(outlook ? { outlook } : {}),
@@ -406,12 +416,13 @@ function outlookOf(
   const ahead: Outlook = episodes.length ? 'wait' : 'retry';
   for (const [i, w] of plain.entries()) {
     const rule = repairPolicy[w.failureKind ?? 'unknown'];
+    const repeats = repairRepeats(w.failureKind ?? 'unknown', lastContextLimit(v.attempts(w.id)));
     const identical = w.failureFingerprint
       ? v.attempts(w.id).filter((a) => a.failureFingerprint === w.failureFingerprint).length
-      : rule.repeats + 1;
+      : repeats + 1;
     const retry =
       rule.action === 'retry' &&
-      identical - 1 < rule.repeats &&
+      identical - 1 < repeats &&
       !acceptanceGap(v, w) &&
       (w.neutralFailures ?? 0) < MAX_NEUTRAL_FAILURES &&
       w.attempt < options.maxAttempts &&

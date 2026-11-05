@@ -1,5 +1,6 @@
 import type { AttemptState, ExecutionView, FailureKind, WorkState } from '../contracts/index.ts';
 import { MAX_NEUTRAL_FAILURES, repairPolicy } from './failure.ts';
+import { lastContextLimit, repairRepeats } from '../contracts/repair-policy.ts';
 import { RECOVERY_THRESHOLD, isNeutral } from './property-recovery.ts';
 
 export type RepairDecision =
@@ -190,7 +191,8 @@ export function repairDecision(
   const identical = fingerprint
     ? view.attempts(work.id).filter((a) => a.failureFingerprint === fingerprint).length
     : 0;
-  if (!fingerprint || identical > rule.repeats)
+  const repeats = repairRepeats(kind, lastContextLimit(view.attempts(work.id)));
+  if (!fingerprint || identical > repeats)
     return {
       action: 'stop',
       workId: work.id,
@@ -206,6 +208,6 @@ export function repairDecision(
     kind,
     fingerprint,
     blocksQueue: rule.blocksQueue ?? false,
-    reason: `${work.id}: ${kind}, повтор ${identical} из ${rule.repeats}.${detail}`,
+    reason: `${work.id}: ${kind}, повтор ${identical} из ${repeats}.${detail}`,
   };
 }

@@ -38,6 +38,8 @@ export const errorCodes = {
   BUDGET_EXHAUSTED: 'refused',
   BUDGET_UNKNOWN: 'refused',
   ATTEMPTS_EXHAUSTED: 'refused',
+  /** Задача или её контекст не помещаются в окно контекста модели (`context-exhausted`). */
+  CONTEXT_EXHAUSTED: 'refused',
   REVISION_CONFLICT: 'refused',
   CANCELLED: 'refused',
   NOT_FOUND: 'refused',

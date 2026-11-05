@@ -666,30 +666,39 @@ fencing; само состояние между переходами не пер
 контекста модели внутри попытки. Класс ставится по признаку, который сообщил
 сам runtime, а не по тексту причины: адаптер claude читает `terminal_reason`
 итогового события `result` потока `stream-json` и выставляет
-`RuntimeResponse.diagnostics.contextExhausted`. Признаки:
+`RuntimeResponse.diagnostics.contextExhausted` — предел окна
+(`ContextLimit`). Записанные на живом CLI признаки:
 
-- `prompt_too_long` — запрос отклонён: одна реплика (подсказка с
-  контекстом) больше окна, сжимать нечего;
-- `blocking_limit` — CLI сам остановил ход у предела окна, когда
-  автоматическое сжатие выключено (`DISABLE_AUTO_COMPACT`,
-  `autoCompactEnabled: false`) или не помогло.
+- `prompt_too_long` → `prompt-too-long` — запрос отклонён: уже одна реплика
+  (подсказка с контекстом) больше окна, сжимать нечего;
+- `blocking_limit` → `blocking-limit` — CLI сам остановил ход у предела окна.
+  Записан с выключенным автоматическим сжатием через `DISABLE_AUTO_COMPACT=1`.
+  `autoCompactEnabled: false` в `--settings` сжатие тоже выключает (проверено),
+  но исход у предела окна с ним не записан; путь «сжатие включено, но не
+  помогло» не проверен.
 
-В обоих случаях CLI выходит с кодом 1, `is_error: true`, текст `result`
-начинается с `Prompt is too long`. Текст в причине отказа сохраняется, но
-класс от него не зависит: в нём числа токенов, а «401» или «429» внутри них
-текстовый разбор принял бы за отказ провайдера. Успешное автоматическое
-сжатие (`system`/`compact_boundary`) — не отказ: вызов продолжается и
-завершается своим исходом; число сжатий и `terminal_reason` пишутся в
-`runtime.json` вызова (`compactions`, `terminalReason`). У codex признак
-пока не распознаётся: его отказ классифицируется как прежде.
+В обоих случаях CLI выходил с кодом 1, `is_error: true`, текст `result`
+начинался с `Prompt is too long`; признак учитывается и при коде 0. Текст
+отказа попытки постоянный (`claude: не хватило окна контекста модели`), предел
+— данными (`AttemptState.contextLimit`), текст runtime — в журнале вызова:
+отпечаток один при любом пределе и любых числах токенов, а «401» или «429» в
+числах токенов текстовый разбор принял бы за отказ провайдера. Успешное
+автоматическое сжатие (`system`/`compact_boundary`) — не отказ: вызов
+продолжается и завершается своим исходом; число сжатий и `terminal_reason`
+пишутся в `runtime.json` вызова (`compactions`, `terminalReason`). У codex
+признак пока не распознаётся: его отказ классифицируется как прежде.
 
 Попытка засчитывается в `maxAttempts`: отказ говорит о размере задачи, а не
-об окружении, и выдачу не останавливает. `repairPolicy['context-exhausted']`
-— один повтор: следующая попытка получает в подсказке указание держать
-контекст малым (читать только нужные файлы и строки, не выводить большие
-файлы и длинный вывод команд); второй такой же отказ останавливает цикл —
-задачу нужно разделить или сократить её контекст (`explain`: ведущий,
-`diagnose-failure`). Корзина отчёта — `incomplete`; разбор свойства
+об окружении, и выдачу не останавливает. Повторы (`repairRepeats`): у
+`blocking-limit` — один (`repairPolicy['context-exhausted'].repeats`), и
+следующая попытка writer получает в подсказке указание держать контекст малым
+(читать только нужные файлы и строки, не выводить большие файлы и длинный
+вывод команд); у `prompt-too-long` — ни одного: повтор только удлинил бы
+подсказку. Предел берётся у последней попытки с отказом, так что
+`blocking-limit` и затем `prompt-too-long` (один отпечаток) тоже
+останавливают цикл. Дальше задачу нужно разделить или сократить её контекст:
+код остановки `CONTEXT_EXHAUSTED` (класс `refused`), `explain` — ведущий,
+`diagnose-failure`. Корзина отчёта — `incomplete`; разбор свойства
 (`property-recovery`) такой отказ не считает, кандидат после отказа reviewer
 переиспользуется (`reusableFailures`). Причина `attempt.diagnosed` — `none`,
 `counted: true`.
@@ -1152,12 +1161,12 @@ subjects)`: `subjects.input(kind, id, view)` задаёт digest входа и �
 `HarnessError {code, class, message, issues[{path, message}]}`; класс задаёт
 exit code CLI.
 
-| Exit | Класс            | Коды                                                                                                                                                                                                                                                                            |
-| ---- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | успех            | —                                                                                                                                                                                                                                                                               |
-| 2    | `input`          | `INVALID_INPUT`, `UNSUPPORTED_COMMAND`, `UNSUPPORTED_VERSION`, `GRAPH_*`, `GATE_*`, `REVIEWER_*`, `RESPONSE_TOO_LARGE`                                                                                                                                                          |
-| 3    | `refused`        | `APPROVAL_STALE`, `APPROVAL_REQUIRED`, `LEASE_STALE`, `CONTROLLER_BUSY`, `PAUSED`, `NOT_READY`, `SCOPE_VIOLATION`, `GATE_FAILED`, `REVIEW_REJECTED`, `BUDGET_EXHAUSTED`, `BUDGET_UNKNOWN`, `ATTEMPTS_EXHAUSTED`, `REVISION_CONFLICT`, `CANCELLED`, `NOT_FOUND`, `PATH_CONFLICT` |
-| 4    | `infrastructure` | `STATE_VERSION_UNSUPPORTED`, `RUNTIME_UNAVAILABLE`, `REVIEW_PROTOCOL_INVALID`, `SANDBOX_UNAVAILABLE`, `GIT_FAILED`, `STORAGE_FAILED`, `DELIVERY_FAILED`, `INTERNAL`                                                                                                             |
+| Exit | Класс            | Коды                                                                                                                                                                                                                                                                                                 |
+| ---- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | успех            | —                                                                                                                                                                                                                                                                                                    |
+| 2    | `input`          | `INVALID_INPUT`, `UNSUPPORTED_COMMAND`, `UNSUPPORTED_VERSION`, `GRAPH_*`, `GATE_*`, `REVIEWER_*`, `RESPONSE_TOO_LARGE`                                                                                                                                                                               |
+| 3    | `refused`        | `APPROVAL_STALE`, `APPROVAL_REQUIRED`, `LEASE_STALE`, `CONTROLLER_BUSY`, `PAUSED`, `NOT_READY`, `SCOPE_VIOLATION`, `GATE_FAILED`, `REVIEW_REJECTED`, `BUDGET_EXHAUSTED`, `BUDGET_UNKNOWN`, `ATTEMPTS_EXHAUSTED`, `CONTEXT_EXHAUSTED`, `REVISION_CONFLICT`, `CANCELLED`, `NOT_FOUND`, `PATH_CONFLICT` |
+| 4    | `infrastructure` | `STATE_VERSION_UNSUPPORTED`, `RUNTIME_UNAVAILABLE`, `REVIEW_PROTOCOL_INVALID`, `SANDBOX_UNAVAILABLE`, `GIT_FAILED`, `STORAGE_FAILED`, `DELIVERY_FAILED`, `INTERNAL`                                                                                                                                  |
 
 Exit 1 не используется: им Node завершает процесс при необработанном
 исключении.

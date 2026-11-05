@@ -1529,6 +1529,7 @@
                     "BUDGET_EXHAUSTED",
                     "BUDGET_UNKNOWN",
                     "ATTEMPTS_EXHAUSTED",
+                    "CONTEXT_EXHAUSTED",
                     "REVISION_CONFLICT",
                     "CANCELLED",
                     "NOT_FOUND",

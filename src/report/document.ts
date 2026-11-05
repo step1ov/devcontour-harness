@@ -45,7 +45,7 @@ const actionsLine = (items: [string, number | null][]) => {
 
 const bucketLabels: Record<string, string> = {
   defect: 'defect (check, review, scope)',
-  incomplete: 'incomplete (empty, unfinished, needs lead)',
+  incomplete: 'incomplete (empty, unfinished, needs lead, context exhausted)',
   integration: 'integration (stale base, merge)',
   environment: 'environment (sandbox, network, provider, lease)',
   'time-limit': 'time limit',
