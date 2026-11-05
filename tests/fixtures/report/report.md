@@ -91,7 +91,7 @@ Failed attempts: 7, of them 6 classified; attempts interrupted by shutdown are n
 | Failure class | Attempts |
 | --- | ---: |
 | defect (check, review, scope) | 4 |
-| incomplete (empty, unfinished, needs lead) | 0 |
+| incomplete (empty, unfinished, needs lead, context exhausted) | 0 |
 | integration (stale base, merge) | 0 |
 | environment (sandbox, network, provider, lease) | 1 |
 | time limit | 0 |
