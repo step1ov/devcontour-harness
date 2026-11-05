@@ -492,13 +492,47 @@ test('worktree-cleanup H5: отказ сохранения не трогает �
 test('worktree-cleanup H5: одновременные запуски на один каталог состояния — второй отказывает', async () => {
   const { ctx, dir } = await finished();
   writeFileSync(join(dir, 'README.md'), 'edited\n');
-  const [first, second] = await Promise.allSettled([
-    ctx.runner.cleanupWorktrees(),
-    ctx.runner.cleanupWorktrees(),
-  ]);
-  assert.equal(first.status, 'fulfilled');
-  assert.ok(second.status === 'rejected');
-  assert.equal((second.reason as { code: string }).code, 'NOT_READY');
+  // Какой из двух запусков возьмёт замок, решает пул потоков fs: порядок
+  // вызова его не задаёт. Взявший замок держится в очистке, пока второй не
+  // получит отказ, — иначе под нагрузкой первый мог бы успеть снять замок.
+  const runner = ctx.runner as unknown as { sweepWorktrees: (dryRun: boolean) => Promise<unknown> };
+  const sweep = runner.sweepWorktrees.bind(runner);
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let entered = 0;
+  runner.sweepWorktrees = async (dryRun) => {
+    entered++;
+    await held;
+    return sweep(dryRun);
+  };
+  const runs = [ctx.runner.cleanupWorktrees(), ctx.runner.cleanupWorktrees()];
+  let loser: unknown;
+  try {
+    loser = await Promise.race(
+      runs.map((run) =>
+        run.then(
+          () => undefined,
+          (e: unknown) => e,
+        ),
+      ),
+    );
+  } finally {
+    release();
+  }
+  const results = await Promise.allSettled(runs);
+  delete (runner as { sweepWorktrees?: unknown }).sweepWorktrees;
+  assert.equal(entered, 1, 'в очистку вошёл один запуск');
+  assert.equal((loser as { code?: string } | undefined)?.code, 'NOT_READY', String(loser));
+  const fulfilled = results.filter((r) => r.status === 'fulfilled');
+  const rejected = results.filter((r) => r.status === 'rejected');
+  assert.equal(fulfilled.length, 1, JSON.stringify(results.map((r) => r.status)));
+  assert.equal(rejected.length, 1);
+  assert.equal((rejected[0]!.reason as { code: string }).code, 'NOT_READY');
+  assert.equal(
+    entryFor(fulfilled[0]!.value, dir)?.action,
+    'removed',
+    'взявший замок очистил дерево',
+  );
   assert.equal(existsSync(join(ctx.state, 'worktree-cleanup.lock')), false, 'замок снят');
   // Замок умершего процесса не держит очистку.
   const dead = spawnSync(process.execPath, ['-p', 'process.pid'], { encoding: 'utf8' });

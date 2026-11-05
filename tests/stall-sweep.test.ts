@@ -490,24 +490,32 @@ test('Runner: зависший шаг среды остановлен исход
       p.repositories[0].prepare = [
         { id: 'warmup', command: [process.execPath, '-e', 'setTimeout(() => {}, 30000)'] },
       ];
+      // Окно quiet шире предела перерыва (3 обхода): обход не перескочит его,
+      // не сбросив отсчёт, — переход в quiet наблюдается всегда.
+      p.stallSweep.stalledMs = 5000;
     }),
   });
-  // Первая запись перехода отказывает (хранилище занято): переход не теряется.
+  // Первая запись quiet отказывает (хранилище занято): обход откатывает
+  // состояние и решает заново. Следующий обход записывает текущее состояние —
+  // quiet или, если молчание уже дошло до порога, сразу stalled, — но от
+  // active: отказавший переход не засчитан как записанный.
   const write = ctx.engine.liveness.bind(ctx.engine);
-  let failures = 1;
+  let failed = 0;
   ctx.engine.liveness = (...args) => {
-    if (failures-- > 0) throw new Error('database is locked');
+    if (args[3].state === 'quiet' && failed++ === 0) throw new Error('database is locked');
     write(...args);
   };
   await runAll(ctx);
   const first = firstAttempt(ctx);
   assert.equal(first.failureKind, 'stalled', first.error);
   assert.match(first.error!, /step warmup/);
-  assert.deepEqual(
-    livenessEvents(ctx).map((e) => String(e.state)),
-    ['quiet', 'stalled'],
-    'отказавший переход записан следующим обходом',
+  assert.ok(failed >= 1, 'запись quiet отказала');
+  const events = livenessEvents(ctx);
+  assert.ok(
+    ['quiet,stalled', 'stalled'].includes(events.map((e) => String(e.state)).join()),
+    JSON.stringify(events.map((e) => `${String(e.previous)}->${String(e.state)}`)),
   );
+  assert.equal(events[0]!.previous, 'active', 'отказавший переход повторён от прежнего состояния');
   assert.deepEqual(livenessEvents(ctx).at(-1)!.activity, { kind: 'step', label: 'warmup' });
 });
 
