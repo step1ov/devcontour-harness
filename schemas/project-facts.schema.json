@@ -68,6 +68,18 @@
           "items": {
             "type": "string"
           }
+        },
+        "changeCount": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -76,7 +88,8 @@
         "baseSha",
         "branch",
         "dirty",
-        "changes"
+        "changes",
+        "changeCount"
       ],
       "additionalProperties": false
     },
@@ -315,6 +328,7 @@
               "dirty-checkout",
               "stack-ambiguous",
               "stack-unsupported",
+              "profile-invalid",
               "package-json-missing",
               "package-json-invalid",
               "manager-mismatch",

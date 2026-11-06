@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { projectFactsSchema, type ProjectFacts } from '../src/contracts/index.ts';
 import { inspectProject } from '../src/init/inspect.ts';
@@ -136,6 +136,7 @@ test('H01-A: npm fixture — воспроизводимые факты без п
   assert.equal(first.git.branch, 'main');
   assert.equal(first.git.dirty, false);
   assert.deepEqual(first.git.changes, []);
+  assert.equal(first.git.changeCount, 0);
   assert.deepEqual(first.lockfiles, ['package-lock.json']);
   assert.deepEqual(first.packageManager, {
     status: 'detected',
@@ -262,6 +263,7 @@ test('H01-B: инспекция не меняет файлы, refs и индек
   assert.equal(facts.git.dirty, true);
   // Новый каталог раскрывается до файлов: хост отличает свои записи от чужих.
   assert.deepEqual(facts.git.changes, ['notes/draft.md', 'untracked.txt']);
+  assert.equal(facts.git.changeCount, 2);
   assert.ok(codes(facts).includes('dirty-checkout'));
 });
 
@@ -331,4 +333,31 @@ test('H01-D: отсутствующий менеджер и несовпаден
   });
   assert.deepEqual(codes(old), ['tool-version-mismatch']);
   assert.equal(old.ready, true);
+});
+
+test('H01-B: больше 50 изменений — список усечён, счётчик полный', async () => {
+  const p = project();
+  for (let i = 0; i < 60; i++) writeFileSync(join(p.root, `extra-${i}.txt`), String(i));
+  const facts = await inspectProject({
+    repository: p.root,
+    env: p.env,
+    probe: recordingProbe().probe,
+  });
+  assert.equal(facts.git.changes.length, 50);
+  assert.equal(facts.git.changeCount, 60);
+});
+
+test('H01-D: относительный элемент PATH не считается найденным CLI', async () => {
+  const p = project(undefined, { runtimes: [] });
+  const local = join(p.scratch, 'rel');
+  mkdirSync(local);
+  writeFileSync(join(local, 'claude'), '#!/bin/sh\necho 1.0.0\n', { mode: 0o755 });
+  const facts = await inspectProject({
+    repository: p.root,
+    // Относительный путь до заглушки от cwd теста: прежний поиск её бы нашёл.
+    env: { ...p.env, PATH: p.env.PATH + ':' + relative(process.cwd(), local) },
+    probe: recordingProbe().probe,
+    runtimes: ['claude'],
+  });
+  assert.deepEqual(facts.runtimes, [{ runtime: 'claude', status: 'missing', auth: 'unknown' }]);
 });

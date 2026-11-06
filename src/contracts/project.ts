@@ -65,6 +65,7 @@ export const projectDiagnosticCodes = [
   'dirty-checkout',
   'stack-ambiguous',
   'stack-unsupported',
+  'profile-invalid',
   'package-json-missing',
   'package-json-invalid',
   'manager-mismatch',
@@ -107,6 +108,8 @@ export const projectFactsSchema = z.strictObject({
     dirty: z.boolean().nullable(),
     /** Первые 50 изменённых путей (`git status`), без игнорируемых. */
     changes: z.array(z.string()).max(50),
+    /** Сколько всего изменённых путей; больше 50 — список `changes` усечён. null — неизвестно. */
+    changeCount: z.number().int().min(0).nullable(),
   }),
   /** Lockfiles корня по известным менеджерам. */
   lockfiles: z.array(z.string()),

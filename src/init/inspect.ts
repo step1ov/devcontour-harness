@@ -1,5 +1,5 @@
 import { lstatSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import {
   API_VERSION,
   HARNESS_PROJECT_DIR,
@@ -38,8 +38,13 @@ const exists = (path: string) => {
  * а пользовательские hooks и fsmonitor не запускались.
  */
 const gitEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({ ...env, GIT_OPTIONAL_LOCKS: '0' });
+/** Предел одного вызова Git: зависший Git (сетевой ФС, lock) не держит инспекцию. */
+const GIT_TIMEOUT_MS = 15_000;
 const git = (cwd: string, env: NodeJS.ProcessEnv, ...args: string[]) =>
-  command(['git', '-c', 'core.fsmonitor=false', ...args], cwd, { env: gitEnv(env) });
+  command(['git', '-c', 'core.fsmonitor=false', ...args], cwd, {
+    env: gitEnv(env),
+    timeoutMs: GIT_TIMEOUT_MS,
+  });
 
 export type GitFacts =
   | { problem: 'path-missing' | 'not-directory' | 'not-git-repository'; path: string }
@@ -141,6 +146,7 @@ export async function inspectProject(options: InspectProjectOptions): Promise<Pr
     branch: null,
     dirty: null,
     changes: [],
+    changeCount: null,
   };
   if ('problem' in facts) {
     const text = {
@@ -161,6 +167,7 @@ export async function inspectProject(options: InspectProjectOptions): Promise<Pr
       branch: facts.branch,
       dirty: null,
       changes: [],
+      changeCount: null,
     };
     if (facts.path !== facts.root)
       add(
@@ -200,12 +207,15 @@ export async function inspectProject(options: InspectProjectOptions): Promise<Pr
       gitSummary.dirty = dirty;
       // Записи -z: `XY путь`, у переименования следом исходный путь отдельной записью.
       const entries = status.code === 0 ? status.stdout.split('\0') : [];
-      for (let i = 0; i < entries.length && gitSummary.changes.length < 50; i++) {
+      let count = 0;
+      for (let i = 0; i < entries.length; i++) {
         const entry = entries[i]!;
         if (entry.length < 4) continue;
-        gitSummary.changes.push(entry.slice(3));
+        count++;
+        if (gitSummary.changes.length < 50) gitSummary.changes.push(entry.slice(3));
         if (entry[0] === 'R' || entry[0] === 'C') i++;
       }
+      gitSummary.changeCount = status.code === 0 ? count : null;
       if (dirty)
         add(
           'dirty-checkout',
@@ -309,10 +319,18 @@ export async function inspectProject(options: InspectProjectOptions): Promise<Pr
           : []
         : [detected.id];
     for (const id of candidates) {
-      const resolved = resolveProfile(id, {
-        repository: root,
-        repositoryId: PROJECT_REPOSITORY_ID,
-      });
+      let resolved;
+      try {
+        resolved = resolveProfile(id, { repository: root, repositoryId: PROJECT_REPOSITORY_ID });
+      } catch (error) {
+        add(
+          'profile-invalid',
+          'blocker',
+          `Профиль ${id} не разрешается: ${(error as Error).message}`,
+          'Проверьте профиль и его слои',
+        );
+        continue;
+      }
       profiles.push(profilePin(resolved));
       if (!('problem' in detected)) {
         const manager = packageManager.name!;
@@ -341,7 +359,13 @@ export async function inspectProject(options: InspectProjectOptions): Promise<Pr
 
   // Пробы — только `--version` в нейтральном каталоге.
   const versionProbe = async (name: string) => {
-    const executable = resolveExecutable(name, env.PATH);
+    // Проба исполняется во временном каталоге: относительный элемент PATH там
+    // означал бы другой файл, поэтому ищутся только абсолютные.
+    const absolutePath = (env.PATH ?? '')
+      .split(delimiter)
+      .filter((dir) => isAbsolute(dir))
+      .join(delimiter);
+    const executable = resolveExecutable(name, absolutePath);
     if (!executable) return { status: 'missing' as const };
     const r = await probe([executable, '--version'], { timeoutMs: PROBE_TIMEOUT_MS, env }).catch(
       () => undefined,
