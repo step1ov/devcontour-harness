@@ -2,6 +2,7 @@ import type { AttemptState, ExecutionView, FailureKind, WorkState } from '../con
 import { MAX_NEUTRAL_FAILURES, repairPolicy } from './failure.ts';
 import { lastContextLimit, repairRepeats } from '../contracts/repair-policy.ts';
 import { RECOVERY_THRESHOLD, isNeutral } from './property-recovery.ts';
+import { blockingRequest } from './input-requests.ts';
 
 export type RepairDecision =
   | {
@@ -117,8 +118,14 @@ export function repairDecision(
 ): RepairDecision | undefined {
   // Поручение с эпизодом по свойству восстанавливается своим разбором, а не
   // обычным повтором: третья слепая попытка как раз и запрещена.
+  // Поручение, ждущее ответа на вопрос исполнителя, не чинится и не
+  // останавливает восстановление группы: продолжение — только applyInput, а
+  // независимая работа графа идёт своим чередом.
   const broken = works.filter(
-    (w) => ['failed', 'cancelled'].includes(w.status) && (w.status === 'cancelled' || !w.recovery),
+    (w) =>
+      ['failed', 'cancelled'].includes(w.status) &&
+      (w.status === 'cancelled' || !w.recovery) &&
+      !(w.status === 'failed' && blockingRequest(view, w)),
   );
   if (!broken.length) return undefined;
 

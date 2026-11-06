@@ -32,6 +32,10 @@ import {
   type ExecutionView,
   type FailureKind,
   type GraphState,
+  type InputOutcome,
+  type InputRequest,
+  inputPolicyOf,
+  inputRequestId,
   type JointVerification,
   type JointVerificationState,
   type NotPromise,
@@ -74,6 +78,7 @@ import {
   closeIfBasisChanged,
 } from './property-recovery.ts';
 import { REQUIREMENT_GATE } from '../verification/requirements.ts';
+import { blockingRequest } from './input-requests.ts';
 import { pinnedCorpus, propertyProofProblem } from '../verification/acceptance.ts';
 import {
   jointImpact,
@@ -889,7 +894,8 @@ export class Engine {
         | 'BUDGET_EXHAUSTED'
         | 'REVIEWER_SAME_VENDOR'
         | 'REVIEWER_MISSING'
-        | 'INVALID_INPUT';
+        | 'INVALID_INPUT'
+        | 'INPUT_REQUIRED';
       message: string;
     }[] = [];
     if (view.control().paused)
@@ -930,6 +936,16 @@ export class Engine {
       });
     if (work.hold)
       out.push({ code: 'NOT_READY', message: 'Удержано операцией ' + work.hold.operation });
+    // Вопрос исполнителя без применённого ответа держит поручение сам по себе.
+    const question = blockingRequest(view, work);
+    if (question)
+      out.push({
+        code: 'INPUT_REQUIRED',
+        message:
+          question.lifecycle === 'pending'
+            ? `Ждёт ответа на вопрос исполнителя ${question.id}`
+            : `Ответ на вопрос ${question.id} записан, но не применён (applyInput)`,
+      });
     // Записанный budgetBlock — кэш расчёта claim: готовую работу держит текущий расчёт.
     const budget = work.status === 'ready' ? this.budgetBlockOf(work.id, view) : undefined;
     if (budget) out.push({ code: 'BUDGET_EXHAUSTED', message: budget });
@@ -1014,6 +1030,9 @@ export class Engine {
         if (blocksClaim(w) || this.awaitsOperator(w, tx)) return false;
         if (w.attempt >= this.policy.maxAttempts) return false;
         if (neutralExhausted(w)) return false;
+        // Вопрос без применённого ответа: новая редакция графа и согласование
+        // делают поручение готовым, но выдачи нет до applyInput.
+        if (blockingRequest(tx, w)) return false;
         const graph = tx.graph(w.graphId);
         // Согласование привязано к graph digest и к политике, под которой оно дано.
         if (!graph?.approval || graph.approval.digest !== graph.digest) return false;
@@ -1064,6 +1083,14 @@ export class Engine {
       }));
       const at = this.now();
       const ready = work.approvedAt ? this.host.readyAt?.(work, tx) : undefined;
+      // Действующий снимок контекста выдачи: runner загружает именно его, и
+      // смена согласования после выдачи не подменяет контекст попытки.
+      const approvedContext = tx.graph(work.graphId)!.approval?.context;
+      const contextPin = this.host.input
+        ? this.host.input.contextDigestOf(work, tx)
+        : approvedContext
+          ? approvedContext.digest
+          : undefined;
       const attempt: AttemptState = {
         id: this.id(),
         workId: work.id,
@@ -1102,7 +1129,11 @@ export class Engine {
           orderDigest: digestOf(work.order),
           targetRef: repo.targetRef,
           source: work.order.source,
+          ...(contextPin !== undefined ? { contextDigest: contextPin } : {}),
         },
+        // Порог вопросов исполнителя закрепляется при выдаче: смена политики
+        // действует со следующей попытки.
+        inputPolicy: structuredClone(inputPolicyOf(this.policy)),
         dispatch: {
           policy: 'fifo-ready-v1',
           at: iso(at),
@@ -1599,6 +1630,12 @@ export class Engine {
       this.assertCurrentPolicy(tx);
       if (a.phase !== 'integrating' || !a.candidateSha || a.integrationSha !== sha)
         throw new HarnessError('NOT_READY', 'Нет интеграционного коммита');
+      const question = blockingRequest(tx, w);
+      if (question)
+        throw new HarnessError(
+          'INPUT_REQUIRED',
+          `Поручение ждёт ответа на вопрос исполнителя ${question.id}; приёмка невозможна`,
+        );
       // Принять можно только под той версией проверок, под которой шла
       // попытка: новый корпус, принятый поручением, требует новой попытки.
       if (a.checks && this.checksOf(w, tx) !== a.checks.effective)
@@ -1802,6 +1839,12 @@ export class Engine {
       cause?: EnvironmentCause;
       /** Предел окна контекста — пишется только у отказа `context-exhausted`. */
       contextLimit?: ContextLimit;
+      /**
+       * Вопрос, допущения и неблокирующие запросы из ответа writer:
+       * записываются той же транзакцией, что и отказ (`needs-input` —
+       * блокирующий запрос; `unfinished` — отклонённый вопрос ниже порога).
+       */
+      input?: InputOutcome;
     } = {},
   ) {
     const kind = options.kind ?? 'unknown';
@@ -1847,6 +1890,9 @@ export class Engine {
         // Пары по объявленным свойствам ведёт эпизод разбора, не пробел приёмки.
         ...(pairs.length ? { classified: pairs } : {}),
         ...(interrupted ? { interrupted: 'shutdown' as const } : {}),
+        ...(options.input?.assumptions.length
+          ? { assumptions: options.input.assumptions.slice(0, 20) }
+          : {}),
       };
       tx.putAttempt(failed);
       const next = structuredClone(w);
@@ -1904,6 +1950,8 @@ export class Engine {
           counted: !interrupted && !uncounted(kind, blocked),
         },
       });
+      if (options.input && !interrupted)
+        this.writeInput(tx, failed, w, options.input, kind === 'needs-input');
       // Остановка — не неисправность окружения: её пауза уже стоит.
       if (repairPolicy[kind].blocksQueue && !interrupted) {
         const control = tx.control();
@@ -1934,6 +1982,153 @@ export class Engine {
         ...(episode ? { recovery: { id: episode.id, status: episode.status } } : {}),
       };
     });
+  }
+
+  /**
+   * Допущения и неблокирующие запросы готовой реализации (`completed: true`)
+   * записываются до кандидата под тем же fencing. Вопрос, ставший
+   * остановкой, сюда не попадает — его пишет `fail`.
+   */
+  recordAssumptions(id: string, token: string, input: InputOutcome) {
+    this.withAttempt(id, token, 'run.implementation-basis', (a, w, tx) => {
+      const next: AttemptState = {
+        ...a,
+        ...(input.assumptions.length ? { assumptions: input.assumptions.slice(0, 20) } : {}),
+      };
+      tx.putAttempt(next);
+      this.writeInput(tx, next, w, { ...input, question: undefined }, false);
+    });
+  }
+
+  /**
+   * Основание исходной попытки запроса: источник и digests, под которыми шла
+   * попытка, снимок контекста, база и закреплённая политика вопросов.
+   */
+  private originOf(tx: ExecutionView, a: AttemptState, w: WorkState) {
+    return {
+      source: structuredClone(w.order.source),
+      graphId: w.graphId,
+      graphDigest: a.pinned?.graphDigest ?? tx.graph(w.graphId)!.digest,
+      orderDigest: this.host.basis.orderDigest(w, tx),
+      policyDigest: a.policyDigest,
+      contextDigest: a.contextSnapshot ?? null,
+      baseSha: a.baseSha ?? null,
+      inputPolicy: structuredClone(a.inputPolicy ?? inputPolicyOf(this.policy)),
+    };
+  }
+
+  /**
+   * Запись вопроса и запросов попытки в `input-requests` (владелец —
+   * репозиторий поручения) и событий с ID, digests и числами — без текста.
+   * `stop` — попытка кончилась `needs-input`: вопрос — блокирующий запрос
+   * `pending`. Иначе вопрос ниже порога записывается отклонённым
+   * (`cancelled`, без блокировки), если он не стал неблокирующим запросом
+   * автономного режима. ID детерминированы попыткой: повтор записи той же
+   * попытки записей не плодит.
+   */
+  private writeInput(
+    tx: ExecutionTransaction,
+    a: AttemptState,
+    w: WorkState,
+    input: InputOutcome,
+    stop: boolean,
+  ) {
+    const owner = w.order.repositoryId;
+    const at = iso(this.now());
+    const origin = this.originOf(tx, a, w);
+    const draft = a.partial
+      ? { digest: a.partial.digest, files: a.partial.files.slice(0, 500) }
+      : null;
+    const base = {
+      workId: w.id,
+      graphId: w.graphId,
+      runId: a.id,
+      attempt: a.attempt,
+      callId: input.callId,
+      criticalHits: input.criticalHits.slice(0, 20),
+      draft,
+      createdAt: at,
+      originBasis: origin,
+      answers: [],
+      version: 1,
+    };
+    const written: InputRequest[] = [];
+    const put = (request: InputRequest) => {
+      if (tx.local('input-requests', owner, request.id)) return;
+      tx.putLocal('input-requests', owner, request.id, request);
+      written.push(request);
+    };
+    const question = input.question;
+    // Вопрос ниже порога, ставший неблокирующим запросом автономного режима,
+    // отклонённым не пишется второй раз.
+    const asFollowUp = !!question && input.followUps.some((f) => f.question === question.question);
+    if (question && (stop || !asFollowUp))
+      put({
+        ...base,
+        id: inputRequestId(a.id, 0),
+        kind: 'question',
+        blocking: stop,
+        question: structuredClone(question.question),
+        effectiveSeverity: question.effectiveSeverity,
+        floors: [...question.floors],
+        lifecycle: stop ? 'pending' : 'cancelled',
+        ...(stop
+          ? {}
+          : {
+              closed: {
+                at,
+                by: 'controller' as const,
+                reason: `Вопрос ниже порога политики (${question.effectiveSeverity} < ${origin.inputPolicy.threshold}): исполнитель решает сам и записывает допущение`,
+              },
+            }),
+      });
+    input.followUps.forEach((f, i) =>
+      put({
+        ...base,
+        id: inputRequestId(a.id, i + 1),
+        kind: 'follow-up',
+        blocking: false,
+        question: structuredClone(f.question),
+        effectiveSeverity: f.effectiveSeverity,
+        floors: [...f.floors],
+        lifecycle: 'pending',
+      }),
+    );
+    for (const r of written)
+      tx.emit({
+        type: 'input.requested',
+        graphId: w.graphId,
+        workId: w.id,
+        runId: a.id,
+        attempt: a.attempt,
+        payload: {
+          requestId: r.id,
+          kind: r.kind,
+          blocking: r.blocking,
+          lifecycle: r.lifecycle === 'pending' ? 'pending' : 'cancelled',
+          effectiveSeverity: r.effectiveSeverity,
+          floors: r.floors,
+          criticalHits: r.criticalHits.length,
+          questionDigest: digestOf(r.question),
+          draftDigest: r.draft?.digest ?? null,
+        },
+      });
+    if (input.assumptions.length || input.followUps.length)
+      tx.emit({
+        type: 'attempt.assumptions',
+        graphId: w.graphId,
+        workId: w.id,
+        runId: a.id,
+        attempt: a.attempt,
+        payload: {
+          count: Math.min(input.assumptions.length, 20),
+          maxSeverity: Math.max(0, ...input.assumptions.map((x) => x.effectiveSeverity)),
+          floors: input.assumptions.filter((x) => x.floors.length).length,
+          followUps: input.followUps.length,
+          digest: digestOf(input.assumptions),
+        },
+      });
+    return written;
   }
 
   /* ---------------------------------------------------------------- */
@@ -2984,6 +3179,14 @@ export class Engine {
     return this.tx('task.retry', (tx) => {
       const w = tx.work(workId);
       if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
+      // Вопрос исполнителя без применённого ответа: ни обычный повтор, ни
+      // сброс попыток его не обходят — продолжение только через applyInput.
+      const question = blockingRequest(tx, w);
+      if (question)
+        throw new HarnessError(
+          'INPUT_REQUIRED',
+          `Поручение ждёт ${question.lifecycle === 'pending' ? 'ответа' : 'применения ответа'} на вопрос исполнителя ${question.id}; повтор без ответа запрещён`,
+        );
       const exhausted = w.attempt >= this.policy.maxAttempts || neutralExhausted(w);
       if (w.status === 'ready' && !exhausted) return { work: w, changed: false };
       if (!['failed', 'cancelled'].includes(w.status) && !(exhausted && !w.activeRunId))

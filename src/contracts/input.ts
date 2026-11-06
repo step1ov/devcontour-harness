@@ -267,6 +267,29 @@ export const inputRequestSchema = z.strictObject({
 });
 export type InputRequest = z.infer<typeof inputRequestSchema>;
 
+/** Вопрос или допущение с оценкой controller. */
+export interface RatedInput {
+  question: InputQuestion;
+  effectiveSeverity: number;
+  floors: InputFloor[];
+}
+
+/**
+ * Что ответ writer оставил движку вместе с исходом попытки: вопрос
+ * (`question` — остановка `needs-input`, `declined` — вопрос ниже порога у
+ * незавершённой попытки), допущения с оценкой, неблокирующие запросы ведущему
+ * (автономный режим), изменённые критические пути и вызов, в ответе которого
+ * всё это пришло. Только память процесса: сохраняется движком в
+ * `input-requests` и `AttemptState.assumptions`.
+ */
+export interface InputOutcome {
+  question?: RatedInput & { mode: 'request' | 'declined' };
+  assumptions: RecordedAssumption[];
+  followUps: RatedInput[];
+  criticalHits: string[];
+  callId: string | null;
+}
+
 /** Запрос держит работу: вопрос, ещё не применённый и не закрытый. */
 export const blocksWork = (r: Pick<InputRequest, 'blocking' | 'lifecycle'>) =>
   r.blocking && (r.lifecycle === 'pending' || r.lifecycle === 'answered');

@@ -48,6 +48,8 @@ const neutral: FailureKind[] = [
   'empty-result',
   // Незавершённая работа свойство не проверяла.
   'unfinished',
+  // Остановка с вопросом исполнителя свойство не проверяла.
+  'needs-input',
   'needs-lead',
   'scope-violation',
 ];

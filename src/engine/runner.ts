@@ -30,6 +30,9 @@ import {
   type AlreadySatisfied,
   sha256,
   stallSweepOf,
+  inputPolicyOf,
+  inputRequestId,
+  type InputOutcome,
   type AttemptState,
   type ContextSnapshot,
   type EvidenceRecord,
@@ -155,6 +158,7 @@ import { expectsReference, propertySeed } from '../verification/property.ts';
 import { selfCheckNote, writeSelfCheck, type SelfCheckPlan } from '../verification/self-check.ts';
 import { measuredInvoke } from './measured.ts';
 import { continuableDraft, implementationBasis } from './reuse.ts';
+import { evaluateInput, type InputEvaluation } from './input-policy.ts';
 
 type Repo = ExecutionPolicy['repositories'][number];
 
@@ -751,8 +755,9 @@ export class Runner {
       outputSchema?: Record<string, unknown>;
     },
     signal: AbortSignal,
-  ): Promise<RuntimeResponse & { redact: Redactor; unreadable?: string }> {
+  ): Promise<RuntimeResponse & { redact: Redactor; unreadable?: string; callId: string }> {
     const review = input.task !== 'implement';
+    const callId = randomUUID();
     const work = await this.workOf(input.attempt);
     const role = roleBinding(this.policy, work.order.role, work.order.repositoryId)!;
     // Профиль reviewer — того назначения, которое выбрано для этой попытки
@@ -783,7 +788,7 @@ export class Runner {
       this.engine,
       adapter,
       {
-        callId: randomUUID(),
+        callId,
         task: input.task,
         subject: {
           workId: input.attempt.workId,
@@ -853,6 +858,7 @@ export class Runner {
         output: undefined,
         unreadable: response.diagnostics.reason,
         redact: execution.redact,
+        callId,
       };
     if (response.status === 'failed') {
       const message = `${adapter.runtime}: runtime завершился отказом${response.diagnostics.reason ? ': ' + response.diagnostics.reason : ''}`;
@@ -878,7 +884,7 @@ export class Runner {
       );
     }
     // Маска — полным окружением вызова, включая секреты его профиля.
-    return { ...response, redact: execution.redact };
+    return { ...response, redact: execution.redact, callId };
   }
 
   private workOf(attempt: AttemptState) {
@@ -1063,6 +1069,66 @@ export class Runner {
       throw new TaskFailure('unknown', 'Рабочее дерево взятого кандидата не чистое');
     await this.assertScope(work, repo, cwd, context, [base, sha]);
     return sha;
+  }
+
+  /**
+   * Исход ответа writer по политике вопросов (`evaluateInput`): остановка с
+   * вопросом — `needs-input` (черновик сохранит обработчик отказа, кандидата
+   * нет), вопрос ниже порога — `unfinished` с отклонённым вопросом,
+   * `completed: false` без вопроса — `unfinished`. Готовая реализация
+   * записывает допущения и неблокирующие запросы под fencing и идёт дальше.
+   */
+  private decideInput(
+    attempt: AttemptState,
+    output: ImplementationResult,
+    evaluation: InputEvaluation,
+    callId: string,
+  ) {
+    const policy = attempt.inputPolicy ?? inputPolicyOf(this.policy);
+    const outcome = (question?: InputOutcome['question']): InputOutcome => ({
+      ...(question ? { question } : {}),
+      assumptions: evaluation.assumptions,
+      followUps: evaluation.followUps,
+      criticalHits: evaluation.criticalHits,
+      callId,
+    });
+    const decision = evaluation.decision;
+    switch (decision.kind) {
+      case 'stop':
+        // Текста вопроса в причине нет: она уходит в события и отчёт; вопрос —
+        // в запросе по ID.
+        throw new TaskFailure(
+          'needs-input',
+          `Исполнитель остановился с вопросом ${inputRequestId(attempt.id, 0)} (серьёзность ${decision.question.effectiveSeverity}, порог ${policy.threshold}${decision.fromAssumption ? '; развилка, решённая исполнителем, не ниже порога' : ''})`,
+          undefined,
+          undefined,
+          undefined,
+          outcome({ ...decision.question, mode: 'request' }),
+        );
+      case 'declined':
+        throw new TaskFailure(
+          'unfinished',
+          `Исполнитель задал вопрос ниже порога политики (серьёзность ${decision.question.effectiveSeverity} < ${policy.threshold}) и не закончил работу: такие развилки он решает сам и записывает допущением`,
+          undefined,
+          undefined,
+          undefined,
+          outcome({ ...decision.question, mode: 'declined' }),
+        );
+      case 'unfinished':
+        // Не доделано — свой класс: повтор продолжит с черновика, а не
+        // остановится как неизвестный отказ.
+        throw new TaskFailure(
+          'unfinished',
+          'Исполнитель сообщил о незавершённой работе: ' + output.summary.slice(0, 500),
+          undefined,
+          undefined,
+          undefined,
+          evaluation.assumptions.length || evaluation.followUps.length ? outcome() : undefined,
+        );
+      case 'continue':
+        if (evaluation.assumptions.length || evaluation.followUps.length)
+          this.engine.recordAssumptions(attempt.id, attempt.token, outcome());
+    }
   }
 
   /**
@@ -1414,6 +1480,7 @@ export class Runner {
                           history: this.history(attempt),
                           context,
                           gates: gates.map((g) => ({ id: g.id, command: g.command })),
+                          inputPolicy: attempt.inputPolicy ?? inputPolicyOf(this.policy),
                           notes: [
                             ...this.notes(attempt, false),
                             ...(await this.hostNotes(work, attempt, false)),
@@ -1442,16 +1509,11 @@ export class Runner {
                       throw new Error(
                         'Ответ исполнителя вне схемы: ' + result.error.issues[0]?.message,
                       );
-                    // Не доделано — свой класс: повтор продолжит с черновика,
-                    // а не остановится как неизвестный отказ.
-                    if (!result.data.completed)
-                      throw new TaskFailure(
-                        'unfinished',
-                        'Исполнитель сообщил о незавершённой работе: ' +
-                          result.data.summary.slice(0, 500),
-                      );
                     this.engine.heartbeat(attempt.id, attempt.token);
                     signal.throwIfAborted();
+                    // Область записи проверяется до решения о вопросе и
+                    // незавершённости: нарушение области остаётся нарушением
+                    // области и не прячется за needs-input или unfinished.
                     // После работы непрочитанный путь закрыл исполнитель —
                     // нарушение области, как и созданный защищённый путь.
                     let planted: string[] = [];
@@ -1477,11 +1539,29 @@ export class Runner {
                         'Исполнитель изменил HEAD; интеграцией владеет harness',
                       );
                     await git(cwd, 'add', '-A');
+                    const changed = (
+                      await git(cwd, 'diff', '--cached', '--no-renames', '--name-only', '-z')
+                    )
+                      .split('\0')
+                      .filter(Boolean);
                     // Пустой результат — не отказ сразу: приёмку могла уже
                     // выполнить зависимость. Кандидат — сама база (без
                     // коммита); gates задачи на ней и подтверждение reviewer
                     // (`alreadySatisfied`) решают, принять ли его.
-                    if (await this.assertScope(work, repo, cwd, context, undefined, true)) {
+                    const empty = await this.assertScope(work, repo, cwd, context, undefined, true);
+                    // Вопрос, допущения и незавершённость — по закреплённой
+                    // в попытке политике вопросов.
+                    this.decideInput(
+                      attempt,
+                      result.data,
+                      evaluateInput(
+                        result.data,
+                        attempt.inputPolicy ?? inputPolicyOf(this.policy),
+                        changed,
+                      ),
+                      response.callId,
+                    );
+                    if (empty) {
                       await this.options.hooks?.implemented?.({
                         attempt,
                         output: result.data,
@@ -1642,6 +1722,9 @@ export class Runner {
           kind,
           ...(!stalled && error instanceof TaskFailure && error.contextLimit
             ? { contextLimit: error.contextLimit }
+            : {}),
+          ...(!stalled && error instanceof TaskFailure && error.input
+            ? { input: error.input }
             : {}),
           cause: environmentCauseOf(stalled ? undefined : error, message, kind),
           blocked:
@@ -2949,6 +3032,22 @@ export class Runner {
       if (review)
         out.push(
           'When a finding fails on a concrete input, fill reproduction: property (the testId or acceptance criterion it violates; required for a blocking finding), input (the exact input as JSON text), inputClass (the class of inputs this one belongs to: the generator or family that produces such failures, e.g. "ties between equal optima with more than 6 items", not the instance itself; required for a blocking finding), expected and actual, and command (argv) that shows it. If you ran it through the controller check tool, set run to the runId it returned and executed=true; the controller confirms the run from its own log and records the command that actually ran. Otherwise run=null and it is a hypothesis. Use null for findings without such an input.',
+        );
+      // Развилки, которые исполнитель решил сам: reviewer проверяет, что
+      // ни одна не меняет согласованный договор, критерии или решение продукта.
+      const assumptions = review ? (v.attempt(attempt.id)?.assumptions ?? []) : [];
+      if (assumptions.length)
+        out.push(
+          'Decisions the writer made on its own and recorded as assumptions (question, chosen, severity as rated by the controller). Reject the change if any of them alters an approved contract, acceptance criterion or product decision, or if the choice is clearly unreasonable: ' +
+            JSON.stringify(
+              assumptions.map((a) => ({
+                question: a.question,
+                chosen: a.chosen,
+                rationale: a.rationale,
+                severity: a.effectiveSeverity,
+                ...(a.floors.length ? { critical: a.floors } : {}),
+              })),
+            ),
         );
       // Reviewer видит, что controller сам записал о проверяемом SHA: gates и
       // их итоги, а не пересказ исполнителя.

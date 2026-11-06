@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 
 import type { ContextLimit, FailureKind } from './execution.ts';
 import type { EnvironmentCause } from './events.ts';
+import type { InputOutcome } from './input.ts';
 
 /** Отказ окружения до начала работы: попытка не засчитывается. */
 export class BlockedError extends Error {
@@ -39,6 +40,12 @@ export class TaskFailure extends Error {
     readonly diagnosis?: EnvironmentCause,
     /** Предел окна контекста у отказа `context-exhausted`, сообщённый runtime. */
     readonly contextLimit?: ContextLimit,
+    /**
+     * Вопрос, допущения и неблокирующие запросы из ответа writer
+     * (`needs-input`, `unfinished`): движок записывает их в той же
+     * транзакции, что и отказ.
+     */
+    readonly input?: InputOutcome,
   ) {
     super(message);
     this.name = 'TaskFailure';
