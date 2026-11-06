@@ -243,6 +243,8 @@ test('H01-A: два lockfile, нет профиля, worktree, нет комми
 test('H01-B: инспекция не меняет файлы, refs и индекс и не создаёт state', async () => {
   const p = project((dir) => writeFileSync(join(dir, 'devcontour.config.json'), '{}\n'));
   writeFileSync(join(p.root, 'untracked.txt'), 'x\n');
+  mkdirSync(join(p.root, 'notes'));
+  writeFileSync(join(p.root, 'notes', 'draft.md'), 'x\n');
   // Индекс устарел относительно файла: обычный `git status` переписал бы его.
   writeFileSync(join(p.root, 'src', 'greet.js'), readFileSync(join(p.root, 'src', 'greet.js')));
   const before = snapshot(p.root);
@@ -258,7 +260,8 @@ test('H01-B: инспекция не меняет файлы, refs и индек
   assert.ok(codes(facts).includes('devcontour-owned'));
   assert.equal(facts.diagnostics.find((d) => d.code === 'devcontour-owned')!.severity, 'info');
   assert.equal(facts.git.dirty, true);
-  assert.deepEqual(facts.git.changes, ['untracked.txt']);
+  // Новый каталог раскрывается до файлов: хост отличает свои записи от чужих.
+  assert.deepEqual(facts.git.changes, ['notes/draft.md', 'untracked.txt']);
   assert.ok(codes(facts).includes('dirty-checkout'));
 });
 

@@ -194,7 +194,7 @@ export async function inspectProject(options: InspectProjectOptions): Promise<Pr
         'status',
         '--porcelain=v1',
         '-z',
-        '--untracked-files=normal',
+        '--untracked-files=all',
       );
       const dirty = status.code === 0 ? status.stdout.length > 0 : null;
       gitSummary.dirty = dirty;
