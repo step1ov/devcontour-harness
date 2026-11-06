@@ -23,7 +23,16 @@ import {
   type RuntimeName,
   type WorkGraph,
   type WorkflowJob,
+  type AttemptState,
+  INPUT_SOURCE_KIND,
+  latestAnswer,
 } from '../contracts/index.ts';
+import {
+  inputContextSource,
+  unappliedInputs,
+  withInput,
+  type InputMessageRef,
+} from '../engine/input-requests.ts';
 import { cliAdapter } from '../agents/cli-adapter.ts';
 import { Engine } from '../engine/engine.ts';
 import { runResult } from '../engine/result.ts';
@@ -133,7 +142,7 @@ export class Harness {
       stateDir: options.stateDir,
       baseDir: options.baseDir,
       adapters: this.adapters,
-      context: (work) => this.contextOf(work.graphId),
+      context: (work, attempt) => this.contextOf(work.graphId, attempt),
       ...(options.environment ? { environment: options.environment } : {}),
       ...(options.resourceDatabase ? { resourceDatabase: options.resourceDatabase } : {}),
       ...(options.hooks ? { hooks: options.hooks } : {}),
@@ -421,10 +430,105 @@ export class Harness {
    * последний переданный: отклонённый или ещё не согласованный снимок не
    * исполняется.
    */
-  private contextOf(graphId: string): ContextSnapshot | undefined {
-    const digest = this.engine.read((v) => v.graph(graphId)?.approval?.context?.digest);
+  private contextOf(graphId: string, attempt?: AttemptState): ContextSnapshot | undefined {
+    // Попытка загружает снимок, закреплённый при выдаче: согласование,
+    // сменившееся после claim, не подменяет её контекст.
+    const pinned = attempt?.pinned?.contextDigest;
+    const digest =
+      pinned !== undefined
+        ? pinned
+        : this.engine.read((v) => v.graph(graphId)?.approval?.context?.digest);
     if (!digest) return undefined;
     return this.engine.read((v) => v.local('context-snapshots', WORKSPACE_OWNER, digest));
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Вопросы исполнителя                                               */
+  /* ---------------------------------------------------------------- */
+
+  /** Запросы исполнителя: все или поручения. */
+  inputRequests(filter: { workId?: string } = {}) {
+    return this.engine.inputRequests(filter);
+  }
+
+  /** Запрос исполнителя по ID. */
+  inputRequest(id: string) {
+    return this.engine.inputRequest(id);
+  }
+
+  /** Записать ответ (новая версия); работу он не возобновляет. */
+  answerInput(id: string, answer: Parameters<Engine['answerInput']>[1], expectedVersion: number) {
+    return this.engine.answerInput(id, answer, expectedVersion);
+  }
+
+  /**
+   * Снимок контекста с последним ответом на запрос: действующий снимок графа
+   * плюс источник ответа (`input-answer`). Снимок сохраняется по digest, но
+   * не активируется: дальше — review-plan с ним, `proposeTarget` и
+   * `applyInput`. `messages` — сообщения обсуждения хоста, включённые в
+   * manifest (ID, версия, digest).
+   */
+  inputContext(id: string, options: { messages?: InputMessageRef[] } = {}) {
+    const request = this.engine.inputRequest(id);
+    const answer = latestAnswer(request);
+    if (!answer) throw new HarnessError('INPUT_REQUIRED', `На вопрос ${id} ещё нет ответа`);
+    const base = this.contextOf(request.graphId);
+    const snapshot = withInput(base, inputContextSource(request, answer, options.messages));
+    const issues = contextIssues(snapshot);
+    if (issues.length)
+      throw new HarnessError('INVALID_INPUT', 'Снимок контекста: ' + issues.join('; '));
+    const digest = contextDigest(snapshot);
+    this.store.transact('run.context', (tx) =>
+      tx.putLocal('context-snapshots', WORKSPACE_OWNER, digest, snapshot),
+    );
+    return { requestId: id, answerDigest: answer.digest, digest, snapshot };
+  }
+
+  /** Основание продолжения для снимка с ответом (только чтение). */
+  proposeTarget(id: string, contextDigest: string | null) {
+    return this.engine.proposeTarget(id, contextDigest);
+  }
+
+  /** Применить ответ одной транзакцией (см. `Engine.applyInput`); модель не вызывается. */
+  applyInput(id: string, options: Parameters<Engine['applyInput']>[1]) {
+    return this.engine.applyInput(id, options);
+  }
+
+  /** Отменить вопрос: работа больше его не ждёт. */
+  cancelInput(id: string, input: Parameters<Engine['cancelInput']>[1], expectedVersion: number) {
+    return this.engine.cancelInput(id, input, expectedVersion);
+  }
+
+  /** Заменить вопрос преемником (изменение требований — новая ревизия). */
+  supersedeInput(
+    id: string,
+    input: Parameters<Engine['supersedeInput']>[1],
+    expectedVersion: number,
+  ) {
+    return this.engine.supersedeInput(id, input, expectedVersion);
+  }
+
+  /**
+   * Контекст запуска с применёнными ответами: переданный снимок (или
+   * отсутствие снимка) вместе с источниками применённых ответов действующего
+   * согласования — это тот же действующий снимок, а не изменение контекста.
+   * Иначе — переданный снимок как есть.
+   */
+  private withAppliedInputs(graphId: string, context: ContextSnapshot | undefined) {
+    const approved = this.contextOf(graphId);
+    if (!approved) return context;
+    const applied = this.engine.read((v) =>
+      approved.sources.filter(
+        (s) =>
+          s.kind === INPUT_SOURCE_KIND && !unappliedInputs(v, { ...approved, sources: [s] }).length,
+      ),
+    );
+    if (!applied.length) return context;
+    const carried = applied.reduce<ContextSnapshot | undefined>(
+      (snapshot, entry) => withInput(snapshot, entry),
+      context,
+    );
+    return carried && contextDigest(carried) === contextDigest(approved) ? approved : context;
   }
 
   /**
@@ -503,10 +607,23 @@ export class Harness {
       if (issues.length)
         throw new HarnessError('INVALID_INPUT', 'Снимок контекста: ' + issues.join('; '));
     }
+    // Снимок с неприменённым ответом на вопрос исполнителя запуск не
+    // активирует — до платного ревью: продолжение после ответа — applyInput.
+    const unapplied = this.engine.read((v) => unappliedInputs(v, input.context));
+    if (unapplied.length)
+      throw new HarnessError(
+        'INPUT_REQUIRED',
+        'Снимок контекста содержит неприменённый ответ на вопрос исполнителя (' +
+          unapplied.map((u) => u.requestId ?? u.source).join(', ') +
+          '): review-plan со снимком, затем input-apply',
+      );
+    // Применённые ответы действующего согласования остаются в нём: запуск с
+    // тем же снимком без них — не смена контекста.
+    const context = this.withAppliedInputs(graph.id, input.context);
     // Согласование связано с контекстом, который видел reviewer плана: снимок
     // хранится по digest, но действующим становится только вместе с
     // согласованием. Другой снимок при том же графе требует нового раунда.
-    const contextKey = input.context ? contextDigest(input.context) : null;
+    const contextKey = context ? contextDigest(context) : null;
     const contextChanged = (graph.approval?.context?.digest ?? null) !== contextKey;
     if (
       !graph.approval ||
@@ -519,7 +636,7 @@ export class Harness {
           kind: 'plan',
           graph: input.graph,
           author: input.author,
-          ...(input.context ? { context: input.context } : {}),
+          ...(context ? { context } : {}),
         });
         if (!record.approved)
           throw new HarnessError(

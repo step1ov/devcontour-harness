@@ -1,7 +1,19 @@
 import {
+  API_VERSION,
+  INPUT_SOURCE_KIND,
   blocksWork,
+  inputManifestSchema,
+  inputSourceId,
+  pinnedBytes,
+  sha256,
+  sourceDigest,
+  type ContextSnapshot,
+  type ContextSourceEntry,
   type ExecutionView,
+  type InputAnswer,
+  type InputManifest,
   type InputRequest,
+  type PinnedFile,
   type WorkState,
 } from '../contracts/index.ts';
 
@@ -41,4 +53,126 @@ export function requestById(
 ): { owner: string; request: InputRequest } | undefined {
   const found = view.locals('input-requests').find((r) => r.key === id);
   return found ? { owner: found.owner, request: found.value } : undefined;
+}
+
+/* ------------------------------------------------------------------ */
+/* Ответ как источник контекста                                         */
+/* ------------------------------------------------------------------ */
+
+const pin = (path: string, text: string): PinnedFile => ({
+  path,
+  digest: sha256(Buffer.from(text, 'utf8')),
+  bytes: Buffer.byteLength(text, 'utf8'),
+  content: { encoding: 'utf8', data: text },
+});
+
+/** Сообщение обсуждения хоста, включённое в источник ответа: ID, версия и digest. */
+export type InputMessageRef = InputManifest['messages'][number];
+
+/**
+ * Источник контекста с ответом на вопрос исполнителя (`input-answer`):
+ * файл `input/<id>.md` — вопрос, варианты и ответ, их получат writer и оба
+ * reviewer; справка `input/<id>.manifest.json` — точные запрос, digest и
+ * версия ответа и включённые сообщения хоста. Версия источника — версия
+ * ответа (`r<N>`), не ревизия Git. Источник неизменяем: новое сообщение или
+ * ответ — новый источник и новый снимок.
+ */
+export function inputContextSource(
+  request: InputRequest,
+  answer: InputAnswer,
+  messages: InputMessageRef[] = [],
+): ContextSourceEntry {
+  const manifest: InputManifest = inputManifestSchema.parse({
+    requestId: request.id,
+    answerDigest: answer.digest,
+    revision: answer.revision,
+    messages,
+  });
+  const q = request.question;
+  const text = [
+    `# Answer to the writer's question ${request.id}`,
+    `Work order: ${request.workId}, attempt ${request.attempt}.`,
+    '## Question',
+    q.question,
+    ...(q.options.length
+      ? [
+          '## Options',
+          ...q.options.map(
+            (o) => `- ${o.id}: ${o.label}${o.consequence ? ` — ${o.consequence}` : ''}`,
+          ),
+          q.recommended ? `Recommended by the writer: ${q.recommended}.` : '',
+        ]
+      : []),
+    `## Answer (revision ${answer.revision}, ${answer.kind})`,
+    answer.optionId ? `Chosen option: ${answer.optionId}.` : '',
+    answer.text,
+  ]
+    .filter((line) => line !== '')
+    .join('\n\n');
+  const files = [pin(`input/${request.id}.md`, text + '\n')];
+  const references = [
+    pin(`input/${request.id}.manifest.json`, JSON.stringify(manifest, null, 2) + '\n'),
+  ];
+  const entry = {
+    id: inputSourceId(request.id),
+    kind: INPUT_SOURCE_KIND,
+    version: `r${answer.revision}`,
+    required: true,
+    files,
+    references,
+  };
+  return { ...entry, digest: sourceDigest(entry) };
+}
+
+/** Снимок `base` с источником ответа (прежний источник того же запроса заменяется). */
+export function withInput(
+  base: ContextSnapshot | undefined,
+  entry: ContextSourceEntry,
+): ContextSnapshot {
+  return {
+    apiVersion: API_VERSION,
+    sources: [...(base?.sources ?? []).filter((s) => s.id !== entry.id), entry],
+    missing: (base?.missing ?? []).filter((m) => m.id !== entry.id),
+  };
+}
+
+/** Manifest источника ответа; источник другого вида или без manifest — `undefined`. */
+export function inputManifestOf(source: ContextSourceEntry): InputManifest | undefined {
+  if (source.kind !== INPUT_SOURCE_KIND) return undefined;
+  const file = source.references.find((f) => f.path.endsWith('.manifest.json'));
+  if (!file) return undefined;
+  const parsed = inputManifestSchema.safeParse(
+    JSON.parse(pinnedBytes(file).toString('utf8')) as unknown,
+  );
+  return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * Источники ответов снимка, которые ещё не применены `applyInput`: запрос не
+ * найден, не применён или применён с другим ответом. Такой снимок не
+ * становится действующим согласованием обходным путём (approve, run).
+ */
+export function unappliedInputs(view: ExecutionView, snapshot: ContextSnapshot | undefined) {
+  const out: { source: string; requestId?: string; reason: string }[] = [];
+  for (const source of snapshot?.sources ?? []) {
+    if (source.kind !== INPUT_SOURCE_KIND) continue;
+    const manifest = inputManifestOf(source);
+    if (!manifest) {
+      out.push({ source: source.id, reason: 'manifest ответа не прочитан' });
+      continue;
+    }
+    const found = requestById(view, manifest.requestId)?.request;
+    if (!found)
+      out.push({ source: source.id, requestId: manifest.requestId, reason: 'запрос не найден' });
+    else if (found.lifecycle !== 'applied' || found.target?.answerDigest !== manifest.answerDigest)
+      out.push({
+        source: source.id,
+        requestId: found.id,
+        reason:
+          found.lifecycle === 'applied'
+            ? 'в снимке другой ответ, чем применённый'
+            : `ответ не применён (${found.lifecycle})`,
+      });
+  }
+  return out;
 }

@@ -35,6 +35,11 @@ export async function measuredInvoke(
   request: RuntimeRequest,
   signal: AbortSignal,
   meta: CallMeta,
+  /**
+   * Вызов начался: бюджет пропустил его и запись учёта создана — до
+   * обращения к runtime. Отказ обработчика вызов не отменяет.
+   */
+  onStart?: (callId: string) => void,
 ): Promise<RuntimeResponse> {
   const startedAt = new Date().toISOString();
   const started = performance.now();
@@ -75,6 +80,11 @@ export async function measuredInvoke(
     meta,
   );
   startActive(record.id);
+  try {
+    onStart?.(record.id);
+  } catch {
+    /* Подтверждение начала — сведение, а не условие вызова. */
+  }
   const progress = setInterval(() => {
     record = { ...record, elapsedMs: Math.round(performance.now() - started) };
     engine.saveCall(record);

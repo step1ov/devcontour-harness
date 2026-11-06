@@ -184,8 +184,16 @@ export interface RunnerOptions {
   /** Каталог, от которого разрешаются относительные пути репозиториев политики. */
   baseDir: string;
   adapters: Partial<Record<RuntimeName, RuntimeAdapter>>;
-  /** Закреплённый контекст поручения; без него — пустой снимок. Хост может собирать его асинхронно. */
-  context?: (work: WorkState) => ContextSnapshot | undefined | Promise<ContextSnapshot | undefined>;
+  /**
+   * Закреплённый контекст поручения; без него — пустой снимок. Хост может
+   * собирать его асинхронно. `attempt` — выданная попытка: снимок, закреплённый
+   * при выдаче (`attempt.pinned.contextDigest`), загружается по нему, а не по
+   * текущему согласованию.
+   */
+  context?: (
+    work: WorkState,
+    attempt: AttemptState,
+  ) => ContextSnapshot | undefined | Promise<ContextSnapshot | undefined>;
   /** Дополнения хоста: сведения в запросах и отчёт исполнителя. В приёмке не участвуют. */
   hooks?: RunnerHooks;
   owner?: string;
@@ -831,6 +839,11 @@ export class Runner {
         runId: input.attempt.id,
         stage: review ? input.phase + '-review' : 'implementation',
       },
+      // Ответ на вопрос «передан исполнителю» — только по началу вызова writer
+      // попытки, выданной с ним, а не по apply или claim.
+      !review && input.attempt.input
+        ? (id) => this.engine.inputDelivered(input.attempt.id, input.attempt.token, id)
+        : undefined,
     );
     if (response.model && !review && response.model !== input.attempt.model)
       this.engine.update(input.attempt.id, input.attempt.token, 'run.model', {
@@ -1303,7 +1316,7 @@ export class Runner {
             this.engine.update(attempt.id, attempt.token, 'run.context', { resources });
           attempt = { ...attempt, resources };
           const work = await this.workOf(attempt);
-          const context = await this.options.context?.(work);
+          const context = await this.options.context?.(work, attempt);
           if (context)
             // Попытка закрепляет снимок контекста: writer и оба reviewer видят одни и те же байты.
             this.engine.update(attempt.id, attempt.token, 'run.context', {
