@@ -634,11 +634,18 @@ test('SBX07: файл .git worktree, заменённый каталогом (д
 });
 
 /** Установка до исполнителя в песочнице проверки над деревом `dir` (база — HEAD). */
-const writerInstall = (dir: string, base: string, command: string[], env = process.env) =>
+const writerInstall = (
+  dir: string,
+  base: string,
+  command: string[],
+  env = process.env,
+  trusted = true,
+) =>
   prepareWriterDependencies({
     policy: os.config,
     cwd: dir,
     base,
+    trusted,
     gates: [{ id: 'install', kind: 'check', timeoutMs: 60000, command }],
     artifactDir: mkdtempSync(join(tmpdir(), 'harness-art-')),
     signal: new AbortController().signal,
@@ -647,7 +654,7 @@ const writerInstall = (dir: string, base: string, command: string[], env = proce
   });
 
 test(
-  'SBX12: установка до исполнителя ставит пакет с .idea в дерево исполнителя; node_modules скрыт от git',
+  'SBX12 [песочница ОС]: установка до исполнителя ставит пакет с .idea в дерево исполнителя; node_modules скрыт от git',
   { skip: noSandbox },
   async () => {
     const npm = (process.env.PATH ?? '')
@@ -693,7 +700,7 @@ test(
         npm_config_update_notifier: 'false',
       },
     );
-    assert.deepEqual(outcome, { installed: ['install'] });
+    assert.deepEqual(outcome, { installed: ['install'], frozen: false, sealed: ['node_modules'] });
     assert.equal(
       readFileSync(join(r.dir, 'node_modules/dep/.idea/codeStyles/codeStyleConfig.xml'), 'utf8'),
       '<x/>',
@@ -703,7 +710,7 @@ test(
 );
 
 test(
-  'SBX13: защищённый путь, перенесённый установкой до исполнителя вне node_modules, — environment/sandbox-policy',
+  'SBX13 [песочница ОС]: защищённый путь, перенесённый установкой до исполнителя вне node_modules, — environment/sandbox-policy',
   { skip: noSandbox },
   async () => {
     const r = repo();
@@ -725,6 +732,15 @@ test(
         ),
     );
     assert.ok(existsSync(at('moved/.vscode/tasks.json')), 'перенос состоялся: сработала сверка');
+    rmSync(at('moved'), { recursive: true, force: true });
+    // Над черновиком прежней попытки тот же перенос — нарушение области.
+    await assert.rejects(
+      writerInstall(r.dir, r.head(), [process.execPath, '-e', script], process.env, false),
+      (e: unknown) =>
+        e instanceof TaskFailure &&
+        e.kind === 'scope-violation' &&
+        /над черновиком прежней попытки/.test(e.message),
+    );
     rmSync(at('moved'), { recursive: true, force: true });
     // Отказ установки без защищённого пути — только исход для заметки.
     const plain = await writerInstall(r.dir, r.head(), [
