@@ -2,6 +2,7 @@ import { errorCodes, type ErrorCode } from '../contracts/errors.ts';
 import { repairPolicy, repairRepeats } from '../contracts/repair-policy.ts';
 import { CLIP_DIAGNOSTIC, clipText } from './clip.ts';
 import type { Actor, FailureKind, NextAction, PauseReason, WorkStatus } from './enums.ts';
+import type { InputState } from './input.ts';
 
 /**
  * Код остановки по классу отказа. Это та же таблица, которой RunResult
@@ -162,6 +163,22 @@ export type StopInput =
           activity?: string;
           action?: 'stop' | 'report';
         };
+        /**
+         * Вопрос исполнителя, держащий работу (`needs-input`): состояние,
+         * вопрос и варианты (усечённые), ответ — версией и digest, без
+         * текста; почему ответ сейчас не применяется; сколько решений
+         * исполнитель принял сам и сколько запросов ждут ведущего.
+         */
+        input?: {
+          requestId: string;
+          state: InputState;
+          question?: string;
+          options?: string[];
+          answer?: { revision: number; digest: string };
+          refusal?: string;
+          assumptions?: number;
+          followUps?: number;
+        };
       };
       maxAttempts: number;
       repair: {
@@ -183,6 +200,14 @@ export type StopInput =
       evidence?: EvidenceLink[];
     }
   | { kind: 'error'; error: { code: ErrorCode; message: string } }
+  /**
+   * Неблокирующий запрос ведущему (follow-up): критическое решение,
+   * принятое исполнителем в автономном режиме. Работу он не держит.
+   */
+  | {
+      kind: 'input';
+      request: { id: string; workId: string; question: string; severity: number };
+    }
   | { kind: 'runtime'; runtime: { runtime: string; available: boolean; reason?: string } };
 export interface StopDiagnosis {
   code: ErrorCode;
@@ -437,6 +462,46 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       action: 'wait',
       note: 'Движок сначала занят другим поручением группы.',
     };
+  // Вопрос исполнителя: шаг определяет состояние запроса, а не класс отказа.
+  const question = work.input;
+  if (
+    work.status === 'failed' &&
+    kind === 'needs-input' &&
+    question &&
+    (question.state === 'awaiting-answer' || question.state === 'answered-not-applied')
+  ) {
+    const head = `Вопрос ${question.requestId}${question.question ? `: «${clipText(question.question, 200)}»` : ''}${question.options?.length ? `; варианты: ${question.options.join(', ')}` : ''}.`;
+    const own = [
+      question.assumptions ? `Решено исполнителем: ${question.assumptions}.` : '',
+      question.followUps ? `Запросов ведущему: ${question.followUps}.` : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    if (question.state === 'awaiting-answer')
+      return {
+        code: 'INPUT_REQUIRED',
+        cause: 'needs-input',
+        phase,
+        actor: 'user',
+        action: 'answer-input',
+        note: [head, 'Ответьте: harness input-answer.', own].filter(Boolean).join(' '),
+      };
+    return {
+      code: 'INPUT_REQUIRED',
+      cause: 'needs-input',
+      phase,
+      actor: 'lead',
+      action: 'apply-input',
+      note: [
+        head,
+        `Ответ r${question.answer?.revision ?? '?'} (${question.answer?.digest.slice(0, 12) ?? '—'}) записан, но не применён${question.refusal ? `: ${question.refusal}` : ''}.`,
+        'Дальше: input-context, review-plan со снимком, input-apply.',
+        own,
+      ]
+        .filter(Boolean)
+        .join(' '),
+    };
+  }
   if (work.status === 'failed') {
     if (work.attempt >= maxAttempts)
       return {
@@ -749,6 +814,23 @@ export function explainStop(input: StopInput): StopDiagnosis {
       retryPlanned: false,
       message: clipText(`Runtime ${runtime} доступен.`, CLIP_DIAGNOSTIC - 1)!,
       evidence: [],
+    };
+  }
+  if (input.kind === 'input') {
+    const r = input.request;
+    return {
+      code: 'INPUT_REQUIRED',
+      cause: 'needs-input',
+      phase: 'implementation',
+      actor: 'lead',
+      action: 'answer-input',
+      retryPlanned: false,
+      message: clipText(
+        `Решение исполнителя ждёт ведущего (неблокирующий запрос ${r.id}, серьёзность ${r.severity}): «${clipText(r.question, 300)}». Работа не остановлена, утверждённое не изменено; пересмотр — обычной корректировкой.`,
+        CLIP_DIAGNOSTIC - 1,
+      )!,
+      evidence: [],
+      workId: r.workId,
     };
   }
   if (input.kind === 'error') {

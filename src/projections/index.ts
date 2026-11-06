@@ -39,3 +39,10 @@ export {
   type StopDiagnosis,
   type EvidenceLink,
 } from './stop.ts';
+export {
+  inputStates,
+  inputStateOf,
+  workInputOf,
+  type InputState,
+  type WorkInputView,
+} from './input.ts';

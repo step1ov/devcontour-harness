@@ -157,6 +157,7 @@ test('handoff: пакет из хранилища — активная рабо�
       budgetsWithin: 0,
       budgetsShared: 0,
       repairs: 0,
+      inputs: 0,
       intentions: 0,
       intentionsDropped: 0,
       bySize: false,

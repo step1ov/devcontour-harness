@@ -40,7 +40,12 @@ import {
 } from '../src/engine/input-requests.ts';
 import { evaluateInput, inputPolicyText } from '../src/engine/input-policy.ts';
 import { engineOf, graphOf, policyOf, ready, trustNone, planReview } from './engine-fixture.ts';
-import { bin, greet, runAll, setup } from './runner-fixture.ts';
+import { approve, bin, greet, implement, runAll, setup } from './runner-fixture.ts';
+import { hsetup } from './harness-fixture.ts';
+import { stopInputsOf } from '../src/explain/state.ts';
+import { explainStop } from '../src/projections/stop.ts';
+import { handoffPack } from '../src/handoff/pack.ts';
+import { handoffMarkdown } from '../src/handoff/markdown.ts';
 
 /** Новый процесс над тем же каталогом состояния и репозиторием с другой политикой. */
 function setupOver(ctx: ReturnType<typeof setup>, raw: Record<string, unknown>) {
@@ -1101,4 +1106,117 @@ test('H02-D/K: следующая попытка и оба ревью получ
       .read((v) => v.locals('usage'))
       .some((c) => c.value.id === delivered.callId && c.value.stage === 'implementation'),
   );
+});
+
+/* ------------------------------------------------------------------ */
+/* Проекции (S4)                                                       */
+/* ------------------------------------------------------------------ */
+
+test('H02-H: status, explain, handoff и report различают ожидание ответа, ответ без применения и новую попытку; ответа целиком в отчёте нет', () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const h = ctx.open();
+  const graph = ready(h.engine, ctx.graph, 'controller');
+  const a = h.engine.claim('controller')!;
+  h.engine.fail(a.id, a.token, 'вопрос', { kind: 'needs-input', input: outcome() });
+  const id = h.inputRequests({ workId: a.workId })[0]!.id;
+  const options = { maxAttempts: h.policy.maxAttempts, repairBudget: h.policy.repairBudget };
+  const look = () => {
+    const work = h.status().works.find((w) => w.id === a.workId)!;
+    const diagnosis = stopInputsOf(h, options)
+      .filter((i) => i.kind === 'work' && i.work.id === a.workId)
+      .map(explainStop)[0]!;
+    return { work, diagnosis, pack: handoffPack(h), report: h.report() };
+  };
+
+  const awaiting = look();
+  assert.equal(awaiting.work.input?.state, 'awaiting-answer');
+  assert.equal(awaiting.work.input?.requestId, id);
+  assert.ok(awaiting.work.blockers.some((b) => b.code === 'INPUT_REQUIRED'));
+  assert.equal(awaiting.diagnosis.code, 'INPUT_REQUIRED');
+  assert.equal(awaiting.diagnosis.cause, 'needs-input');
+  assert.deepEqual([awaiting.diagnosis.actor, awaiting.diagnosis.action], ['user', 'answer-input']);
+  assert.equal(awaiting.diagnosis.retryPlanned, false);
+  assert.match(awaiting.diagnosis.message, /Какой формат приветствия/);
+  assert.match(awaiting.diagnosis.message, /варианты: hello, hi/);
+  assert.equal(awaiting.pack.inputs?.[0]?.state, 'awaiting-answer');
+  assert.equal(awaiting.pack.inputs?.[0]?.answer, undefined);
+  assert.equal(awaiting.report.inputs?.awaitingAnswer, 1);
+  assert.match(handoffMarkdown(awaiting.pack), /## Вопросы исполнителя/);
+
+  const secret = 'Ответ с подробностями, которых нет в отчёте';
+  const answered = h.answerInput(id, { text: secret, actor: { kind: 'operator' } }, 1);
+  const pending = look();
+  assert.equal(pending.work.input?.state, 'answered-not-applied');
+  assert.deepEqual([pending.diagnosis.actor, pending.diagnosis.action], ['lead', 'apply-input']);
+  assert.match(pending.diagnosis.message, new RegExp(answered.answer.digest.slice(0, 12)));
+  assert.equal(pending.pack.inputs?.[0]?.answer?.digest, answered.answer.digest);
+  assert.equal(pending.pack.inputs?.[0]?.answer?.excerpt, secret);
+  assert.equal(pending.report.inputs?.answeredNotApplied, 1);
+  assert.doesNotMatch(JSON.stringify(pending.report), /подробностями/);
+
+  const { digest } = h.inputContext(id);
+  h.engine.recordReview({
+    ...planReview(h.engine, graph, h.engine.reviews('plan', graph.id).length + 1),
+    contextDigest: digest,
+  });
+  const proposal = h.proposeTarget(id, digest);
+  assert.deepEqual(proposal.problems, []);
+  const applied = h.applyInput(id, {
+    answerDigest: answered.answer.digest,
+    expectedVersion: answered.request.version,
+    contextDigest: digest,
+    targetDigest: proposal.target!.digest,
+    actor: 'agent',
+  });
+  assert.equal(applied.applied, true);
+  const ready_ = look();
+  assert.equal(ready_.work.status, 'ready');
+  assert.equal(ready_.work.input?.state, 'applied-awaiting-claim');
+  assert.notEqual(ready_.diagnosis.code, 'INPUT_REQUIRED');
+  assert.equal(ready_.report.inputs?.appliedAwaitingClaim, 1);
+  assert.equal(ready_.pack.inputs?.[0]?.state, 'applied-awaiting-claim');
+
+  const next = h.engine.claim('controller')!;
+  assert.equal(h.engine.inputDelivered(next.id, next.token, 'call-1'), true);
+  const delivered = look();
+  assert.equal(delivered.work.input?.state, 'delivered');
+  assert.equal(delivered.report.inputs?.delivered, 1);
+  assert.equal(delivered.pack.inputs, undefined, 'переданный вопрос больше не открыт');
+  h.close();
+});
+
+test('Проекции: неблокирующий запрос ведущему — отдельный диагноз; работа им не держится', () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const h = ctx.open();
+  ready(h.engine, ctx.graph, 'controller');
+  const a = h.engine.claim('controller')!;
+  const follow = {
+    question: question(3, { affects: ['contract'] }),
+    effectiveSeverity: 10,
+    floors: ['declared' as const],
+  };
+  h.engine.recordAssumptions(a.id, a.token, {
+    assumptions: [{ ...assumption(3, ['contract']), effectiveSeverity: 10, floors: ['declared'] }],
+    followUps: [follow],
+    criticalHits: [],
+    callId: 'call-1',
+  });
+  const diagnoses = stopInputsOf(h, {
+    maxAttempts: h.policy.maxAttempts,
+    repairBudget: h.policy.repairBudget,
+  }).map(explainStop);
+  const extra = diagnoses.find((d) => d.cause === 'needs-input')!;
+  assert.deepEqual(
+    [extra.code, extra.actor, extra.action],
+    ['INPUT_REQUIRED', 'lead', 'answer-input'],
+  );
+  assert.match(extra.message, /неблокирующий запрос/);
+  assert.equal(extra.workId, a.workId);
+  const work = h.status().works.find((w) => w.id === a.workId)!;
+  assert.equal(work.followUps, 1);
+  assert.equal(work.input, undefined);
+  assert.ok(!work.blockers.some((b) => b.code === 'INPUT_REQUIRED'));
+  assert.equal(h.report().inputs?.followUps, 1);
+  assert.equal(h.report().inputs?.assumptions, 1);
+  h.close();
 });

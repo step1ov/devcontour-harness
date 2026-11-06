@@ -7,7 +7,7 @@ import {
 } from './diagnosis.ts';
 import { errorCodes, type ErrorCode } from './errors.ts';
 import { failureKindSchema, pauseReasons, workStatusSchema } from './execution.ts';
-import { idSchema, isoTimeSchema } from './primitives.ts';
+import { digestSchema, idSchema, isoTimeSchema } from './primitives.ts';
 
 /**
  * Пакет передачи контекста (`harness handoff`, `handoffPack`): состояние доски
@@ -49,6 +49,10 @@ export const HANDOFF_LIMITS = {
   /** Намерения агента и знаков в каждом. */
   intentions: 20,
   intentionChars: 1000,
+  /** Вопросы исполнителя (открытые запросы), вопросы первыми. */
+  inputs: 10,
+  /** Знаков ответа в пакете (`answer.excerpt`). */
+  answerChars: 500,
   /** Предел строки факта из хранилища. */
   text: 300,
   /** Предел идентификатора, имени стадии, владельца из хранилища. */
@@ -300,6 +304,38 @@ export const handoffPackSchema = z.strictObject({
       }),
     )
     .max(HANDOFF_LIMITS.repairs),
+  /**
+   * Открытые вопросы исполнителя (H02): вопрос — усечённый, варианты — ID,
+   * ответ — версия, digest и начало текста, основания — digests. Нет поля —
+   * пакет прежней версии.
+   */
+  inputs: z
+    .array(
+      z.strictObject({
+        requestId: name,
+        workId: idSchema,
+        kind: z.enum(['question', 'follow-up']),
+        state: z.enum(['awaiting-answer', 'answered-not-applied', 'applied-awaiting-claim']),
+        severity: z.number().int().min(1).max(10),
+        question: text,
+        options: z.array(name).max(6),
+        answer: z
+          .strictObject({
+            revision: z.number().int().positive(),
+            digest: digestSchema,
+            excerpt: clipped(HANDOFF_LIMITS.answerChars),
+          })
+          .optional(),
+        origin: z.strictObject({
+          graphDigest: digestSchema,
+          orderDigest: digestSchema,
+          contextDigest: digestSchema.nullable(),
+        }),
+        targetDigest: digestSchema.optional(),
+      }),
+    )
+    .max(HANDOFF_LIMITS.inputs)
+    .optional(),
   /** Следующий шаг доски: первое решение lead/user, иначе ход controller. */
   next: nextSchema.extend({ workId: idSchema.optional(), code: errorCodeSchema.optional() }),
   /** Намерения агента — единственный текст не из хранилища. */
@@ -326,6 +362,8 @@ export const handoffPackSchema = z.strictObject({
     // Пакеты прежних версий поля не знают: при разборе — 0.
     budgetsShared: count.default(0),
     repairs: count,
+    // Пакеты прежних версий поля не знают: при разборе — 0.
+    inputs: count.default(0),
     intentions: count,
     intentionsDropped: count,
     bySize: z.boolean(),

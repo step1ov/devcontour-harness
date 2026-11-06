@@ -1,6 +1,7 @@
 import { STATE_VERSION, type ExecutionPolicy, type ExecutionView } from '../contracts/index.ts';
 import { budgetOverview } from '../engine/budget.ts';
 import type { Engine } from '../engine/engine.ts';
+import { requestsOf } from '../engine/input-requests.ts';
 import { nextRunControl } from '../explain/state.ts';
 import {
   CLIP_DIAGNOSTIC,
@@ -8,6 +9,7 @@ import {
   clipText,
   queuePause,
   queueStop,
+  workInputOf,
 } from '../projections/index.ts';
 
 /**
@@ -56,6 +58,12 @@ export function statusOf(
           ? { liveness: a.liveness.state }
           : {})(w.activeRunId ? v.attempt(w.activeRunId) : undefined),
       ...(w.resultSha ? { resultSha: w.resultSha } : {}),
+      // Вопрос исполнителя: ID, состояние, версия и серьёзность, без текста;
+      // неблокирующие запросы ведущему — числом.
+      ...((view) => ({
+        ...(view.input ? { input: view.input } : {}),
+        ...(view.followUps ? { followUps: view.followUps } : {}),
+      }))(workInputOf(requestsOf(v, w))),
       blockers: engine.blockers(w, v),
     })),
     ...((budgets) => (budgets ? { budgets } : {}))(budgetOverview(engine.budgetContext(), v)),

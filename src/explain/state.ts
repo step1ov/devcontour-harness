@@ -6,6 +6,7 @@ import {
   repairRepeats,
 } from '../contracts/repair-policy.ts';
 import type {
+  AttemptState,
   ControlState,
   ExecutionPolicy,
   ExecutionView,
@@ -15,6 +16,9 @@ import type {
 } from '../contracts/index.ts';
 import type { Engine } from '../engine/engine.ts';
 import { acceptanceGap, repairDecision } from '../engine/repair.ts';
+import { requestsOf } from '../engine/input-requests.ts';
+import { activeOf } from '../engine/engine.ts';
+import { inputStateOf } from '../projections/input.ts';
 import type { EvidenceLink, StopInput, StopPhase } from '../projections/stop.ts';
 
 /**
@@ -166,6 +170,41 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
             !external(w.graphId).has(id),
         )
         .map((w) => w.id);
+    // Вопрос исполнителя, держащий работу: состояние, вопрос и варианты
+    // (усекает explain), ответ — версией и digest; почему ответ сейчас не
+    // применится — по тем же пределам, что у applyInput.
+    const inputOf = (work: WorkState, attempts: readonly AttemptState[]) => {
+      if (work.failureKind !== 'needs-input') return undefined;
+      const requests = requestsOf(v, work);
+      const question = requests
+        .filter((r) => r.kind === 'question' && r.blocking && inputStateOf(r))
+        .at(-1);
+      if (!question) return undefined;
+      const answer = question.answers.at(-1);
+      const refusal = [
+        work.attempt >= options.maxAttempts
+          ? `исчерпаны попытки (${work.attempt} из ${options.maxAttempts}): применение — со сбросом и причиной`
+          : '',
+        budgetReason(work) ?? '',
+        activeOf(v).some((a) => v.work(a.workId)?.graphId === work.graphId)
+          ? 'в графе идут попытки: новое согласование ждёт их окончания'
+          : '',
+      ].filter(Boolean);
+      const own = attempts.flatMap((a) => a.assumptions ?? []).length;
+      const followUps = requests.filter(
+        (r) => r.kind === 'follow-up' && r.lifecycle === 'pending',
+      ).length;
+      return {
+        requestId: question.id,
+        state: inputStateOf(question)!,
+        question: question.question.question,
+        options: question.question.options.map((o) => o.id),
+        ...(answer ? { answer: { revision: answer.revision, digest: answer.digest } } : {}),
+        ...(refusal.length ? { refusal: refusal.join('; ') } : {}),
+        ...(own ? { assumptions: own } : {}),
+        ...(followUps ? { followUps } : {}),
+      };
+    };
     for (const work of works) {
       if (work.status === 'done') continue;
       if (options.workId !== undefined && work.id !== options.workId) continue;
@@ -244,6 +283,7 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
           ...(work.failureKind === 'context-exhausted' && lastContextLimit(attempts)
             ? { contextLimit: lastContextLimit(attempts) }
             : {}),
+          ...((input) => (input ? { input } : {}))(inputOf(work, attempts)),
           ...(work.failure !== undefined ? { failure: work.failure } : {}),
           ...(work.hold
             ? { hold: { operation: work.hold.operation, reason: work.hold.reason } }
@@ -296,6 +336,22 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
         ...(last ? { phase: phaseOf[last.phase] ?? 'claim', runId: last.id } : {}),
         evidence,
       });
+    }
+    // Неблокирующие запросы ведущему (автономный режим): отдельными
+    // диагнозами — работу они не держат, но ждут решения.
+    for (const work of works) {
+      if (options.workId !== undefined && work.id !== options.workId) continue;
+      for (const r of requestsOf(v, work))
+        if (r.kind === 'follow-up' && r.lifecycle === 'pending')
+          inputs.push({
+            kind: 'input',
+            request: {
+              id: r.id,
+              workId: r.workId,
+              question: r.question.question,
+              severity: r.effectiveSeverity,
+            },
+          });
     }
     return inputs;
   });

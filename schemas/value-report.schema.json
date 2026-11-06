@@ -2588,6 +2588,68 @@
       ],
       "additionalProperties": false
     },
+    "inputs": {
+      "type": "object",
+      "properties": {
+        "questions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "awaitingAnswer": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "answeredNotApplied": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "appliedAwaitingClaim": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "delivered": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "closed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "declined": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "followUps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "assumptions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "questions",
+        "awaitingAnswer",
+        "answeredNotApplied",
+        "appliedAwaitingClaim",
+        "delivered",
+        "closed",
+        "declined",
+        "followUps",
+        "assumptions"
+      ],
+      "additionalProperties": false
+    },
     "works": {
       "type": "object",
       "properties": {

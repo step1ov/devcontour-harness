@@ -15,6 +15,8 @@ import type {
 } from '../contracts/execution.ts';
 import type { EnvironmentCause, RunEvent, RunEventPayload } from '../contracts/events.ts';
 import type { ReviewRecord } from '../contracts/review.ts';
+import type { InputRequest } from '../contracts/input.ts';
+import { inputStateOf } from '../projections/input.ts';
 import type { FailureBucket, ReportDist, ReportMeasure, ValueReport } from '../contracts/report.ts';
 import {
   formatDuration,
@@ -61,6 +63,8 @@ export interface ValueReportInput {
   events?: readonly RunEvent[];
   /** Графы: согласования, если событий нет. */
   graphs?: readonly GraphState[];
+  /** Вопросы исполнителей (`locals('input-requests')`): в отчёт — только числа. */
+  inputRequests?: readonly InputRequest[];
 }
 
 export interface ValueReportOptions {
@@ -186,6 +190,29 @@ const bucketOfKind: Record<FailureKind, FailureBucket> = {
 };
 
 const finishedStatuses = new Set(['failed', 'cancelled', 'expired']);
+
+/** Числа вопросов исполнителя в окне: состояния вопросов, запросы ведущему, решения исполнителя. */
+function inputCounts(
+  requests: readonly InputRequest[],
+  attempts: readonly AttemptState[],
+  w: Window,
+): NonNullable<ValueReport['inputs']> {
+  const inside = requests.filter((r) => inWindow(w, r.createdAt));
+  const questions = inside.filter((r) => r.kind === 'question' && r.blocking);
+  const state = (s: string) => questions.filter((r) => inputStateOf(r) === s).length;
+  return {
+    questions: questions.length,
+    awaitingAnswer: state('awaiting-answer'),
+    answeredNotApplied: state('answered-not-applied'),
+    appliedAwaitingClaim: state('applied-awaiting-claim'),
+    delivered: state('delivered'),
+    closed: questions.filter((r) => r.lifecycle === 'cancelled' || r.lifecycle === 'superseded')
+      .length,
+    declined: inside.filter((r) => r.kind === 'question' && !r.blocking).length,
+    followUps: inside.filter((r) => r.kind === 'follow-up').length,
+    assumptions: attempts.reduce((n, a) => n + (a.assumptions?.length ?? 0), 0),
+  };
+}
 
 /**
  * Корзина отказа попытки; `null` — попытка не отказ (успех, идёт) или
@@ -1303,6 +1330,7 @@ export function valueReport(
       rechecks,
     },
     weeks: weekly,
+    ...(input.inputRequests ? { inputs: inputCounts(input.inputRequests, windowAttempts, w) } : {}),
     works: { rows: workRows, total: rowsAll.length, truncated: rowsAll.length > workRows.length },
     limitations: [],
   };

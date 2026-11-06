@@ -1227,6 +1227,124 @@
         "additionalProperties": false
       }
     },
+    "inputs": {
+      "maxItems": 10,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "maxLength": 201
+          },
+          "workId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "question",
+              "follow-up"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "awaiting-answer",
+              "answered-not-applied",
+              "applied-awaiting-claim"
+            ]
+          },
+          "severity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "question": {
+            "type": "string",
+            "maxLength": 301
+          },
+          "options": {
+            "maxItems": 6,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 201
+            }
+          },
+          "answer": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "excerpt": {
+                "type": "string",
+                "maxLength": 501
+              }
+            },
+            "required": [
+              "revision",
+              "digest",
+              "excerpt"
+            ],
+            "additionalProperties": false
+          },
+          "origin": {
+            "type": "object",
+            "properties": {
+              "graphDigest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "orderDigest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "contextDigest": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "graphDigest",
+              "orderDigest",
+              "contextDigest"
+            ],
+            "additionalProperties": false
+          },
+          "targetDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "requestId",
+          "workId",
+          "kind",
+          "state",
+          "severity",
+          "question",
+          "options",
+          "origin"
+        ],
+        "additionalProperties": false
+      }
+    },
     "next": {
       "type": "object",
       "properties": {
@@ -1403,6 +1521,12 @@
           "maximum": 9007199254740991
         },
         "repairs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "inputs": {
+          "default": 0,
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991

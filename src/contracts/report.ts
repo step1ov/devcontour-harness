@@ -472,6 +472,28 @@ export const valueReportSchema = z.strictObject({
     earlier: weekEarlierSchema.nullable(),
     active: count,
   }),
+  /**
+   * Вопросы исполнителя в окне (по времени запроса): только числа — ни
+   * вопроса, ни ответа в отчёте нет. `awaitingAnswer` — ждут ответа,
+   * `answeredNotApplied` — ответ записан, не применён, `appliedAwaitingClaim`
+   * — применён, вызова ещё не было, `delivered` — передан исполнителю,
+   * `closed` — отменены или заменены, `declined` — вопросы ниже порога,
+   * `followUps` — неблокирующие запросы ведущему, `assumptions` — решения
+   * исполнителя в попытках окна. Нет поля — отчёт без сведений о вопросах.
+   */
+  inputs: z
+    .strictObject({
+      questions: count,
+      awaitingAnswer: count,
+      answeredNotApplied: count,
+      appliedAwaitingClaim: count,
+      delivered: count,
+      closed: count,
+      declined: count,
+      followUps: count,
+      assumptions: count,
+    })
+    .optional(),
   works: z.strictObject({
     rows: z.array(workRowSchema).max(REPORT_LIMITS.works),
     total: count,

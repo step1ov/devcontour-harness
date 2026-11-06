@@ -144,6 +144,18 @@ export function handoffMarkdown(pack: HandoffPack): string {
     pack.works.some((w) => w.next.actor === 'controller' && w.next.action === 'retry')
   )
     out.push('', 'Повтор ждёт снятия паузы очереди.');
+  if (pack.inputs?.length || pack.truncated.inputs) {
+    out.push('', '## Вопросы исполнителя', '');
+    for (const r of pack.inputs ?? [])
+      out.push(
+        `- ${r.requestId} ${r.workId} [${r.kind}, ${r.state}, серьёзность ${r.severity}]: ${cell(r.question)}` +
+          (r.options.length ? ` (варианты: ${r.options.join(', ')})` : '') +
+          (r.answer
+            ? ` — ответ r${r.answer.revision} ${r.answer.digest.slice(0, 12)}: ${cell(r.answer.excerpt)}`
+            : ''),
+      );
+    out.push(...more(pack.truncated.inputs, 'вопросов'));
+  }
   out.push('', '## Последние провалы', '');
   if (!pack.failures.length) out.push('Провалов нет.');
   for (const f of pack.failures)

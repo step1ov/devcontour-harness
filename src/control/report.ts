@@ -17,6 +17,7 @@ export function collectReportInput(store: ExecutionStore): ValueReportInput {
     attempts: v.attempts(),
     calls: v.locals('usage').map((r) => r.value),
     reviews: v.locals('reviews').map((r) => r.value),
+    inputRequests: v.locals('input-requests').map((r) => r.value),
   }));
   const events: RunEvent[] = [];
   let after = 0;
