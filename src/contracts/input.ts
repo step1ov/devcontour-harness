@@ -216,6 +216,18 @@ export const inputLifecycles = [
 export type InputLifecycle = (typeof inputLifecycles)[number];
 
 /**
+ * Состояние вопроса для проекций (`projections/input.ts` повторяет перечень
+ * без zod; тест сверяет оба): ждёт ответа, ответ не применён, применён и ждёт
+ * вызова, передан исполнителю.
+ */
+export const inputStateNames = [
+  'awaiting-answer',
+  'answered-not-applied',
+  'applied-awaiting-claim',
+  'delivered',
+] as const;
+
+/**
  * Канонический запрос. `kind`: `question` — остановка попытки (блокирует
  * claim, retry, repair и finish, пока `pending` или `answered`);
  * `follow-up` — неблокирующий запрос ведущему из автономного режима или

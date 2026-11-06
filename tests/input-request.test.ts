@@ -24,6 +24,7 @@ import {
   type InputOutcome,
   type InputQuestion,
   type RunEvent,
+  inputStateNames,
 } from '../src/contracts/index.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import { Engine } from '../src/engine/engine.ts';
@@ -44,6 +45,7 @@ import { approve, bin, greet, implement, runAll, setup } from './runner-fixture.
 import { hsetup } from './harness-fixture.ts';
 import { stopInputsOf } from '../src/explain/state.ts';
 import { explainStop } from '../src/projections/stop.ts';
+import { inputStates } from '../src/projections/input.ts';
 import { handoffPack } from '../src/handoff/pack.ts';
 import { handoffMarkdown } from '../src/handoff/markdown.ts';
 
@@ -1219,4 +1221,8 @@ test('Проекции: неблокирующий запрос ведущему
   assert.equal(h.report().inputs?.followUps, 1);
   assert.equal(h.report().inputs?.assumptions, 1);
   h.close();
+});
+
+test('Проекции: перечень состояний вопроса без zod совпадает с договором', () => {
+  assert.deepEqual([...inputStates], [...inputStateNames]);
 });

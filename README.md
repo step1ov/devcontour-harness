@@ -104,6 +104,7 @@ git rev-parse refs/heads/harness/accepted   # совпадает с data.result.
 | `doctor`                                        | Версии, runtime, sandbox, совместимость состояния  |
 | `report --state D [--format md\|html]`          | Отчёт об эффекте по данным проекта                 |
 | `handoff --state D [--format md] [--intent T]…` | Пакет передачи контекста новой сессии агента       |
+| `input-list / input-show / input-answer …`      | Вопрос исполнителя: ответ, снимок, применение      |
 
 stdout — один JSON (`devcontour-harness/v1alpha1`), диагностика — stderr. Exit
 codes: 0 успех, 2 неверный вход, 3 отказ/блокировка, 4 инфраструктура.

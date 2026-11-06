@@ -127,6 +127,28 @@ export {
   type RepairDecision,
 } from './engine/repair.ts';
 export { technicalReview, type TechnicalReviewInput } from './control/review.ts';
+/**
+ * Вопрос исполнителя (H02): решение по ответу writer и политике вопросов,
+ * чтение запросов, источник контекста с ответом и проверка снимка на
+ * неприменённые ответы — для хоста со своим согласованием (`InputHost`).
+ */
+export {
+  evaluateInput,
+  inputPolicyText,
+  assumptionQuestion,
+  type InputEvaluation,
+  type InputDecision,
+} from './engine/input-policy.ts';
+export {
+  requestsOf,
+  requestById,
+  blockingRequest,
+  inputContextSource,
+  withInput,
+  inputManifestOf,
+  unappliedInputs,
+  type InputMessageRef,
+} from './engine/input-requests.ts';
 export { JointRunner, type JointRunnerOptions } from './engine/joint-runner.ts';
 export { moveBase, fencedRefMove, type BaseMoved, type RefMove } from './control/base-move.ts';
 export {

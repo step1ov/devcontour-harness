@@ -547,6 +547,57 @@ null` и этого правила засчитанных попыток: ист
 при откате уберите его из политики. Подробнее —
 [зависимости исполнителя](toolchains.md#зависимости-исполнителя).
 
+### unreleased: вопросы исполнителя
+
+Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`, `apiVersion`
+прежний); новое — аддитивно, подробности — [вопрос исполнителя](contracts.md#вопрос-исполнителя):
+
+- **Политика.** Необязательное `inputPolicy {threshold 1–11, criticalPaths}`;
+  без поля политика и её digest прежние, порог — 7. В `executionDigest` поле
+  не входит: его смена не требует нового согласования графа и действует со
+  следующей попытки.
+- **Ответ writer.** Необязательные `inputRequest` и `assumptions`;
+  wire-схема CLI runtime объявляет оба поля. `completed: true` с вопросом —
+  ответ вне схемы. Ответ прежнего формата читается как прежде.
+- **Состояние.** Локальное пространство `input-requests` (`InputRequest`,
+  `schemas/input-request.schema.json`); необязательные поля попытки
+  `inputPolicy`, `assumptions`, `input` и `pinned.contextDigest`. Класс
+  отказа `needs-input`. Состояние без вопросов читается без изменений: запросов
+  нет, выдача и повтор прежние.
+- **Коды и журнал.** `INPUT_REQUIRED` (класс `refused`, exit code 3; в
+  отказах `run`, `retry`, `approve`); события `input.requested`,
+  `input.answered`, `input.applied`, `input.closed`, `input.delivered`,
+  `attempt.assumptions` (ID, digests и числа); типы транзакций `input.*`.
+  Причина остановки `needs-input`, действия `answer-input` и `apply-input`.
+- **Проекции.** `status`: `works[].input`, `works[].followUps`; пакет передачи:
+  блок `inputs` и `truncated.inputs`; отчёт: блок `inputs` (только числа) и
+  корзина отказов `input`.
+- **Порты.** Необязательный `ExecutionHost.input` (`InputHost`) для хоста,
+  ведущего согласование сам; `RunnerOptions.context(work, attempt)` получает
+  выданную попытку (снимок загружается по `attempt.pinned.contextDigest`);
+  `measuredInvoke` — необязательный `onStart(callId)`. Набор
+  `executionStoreContract` проверяет пространство `input-requests`;
+  `sampleInputRequest`/`answeredInputRequest` экспортированы из
+  `devcontour-harness/testing`.
+- **CLI.** Команды `input-list`, `input-show`, `input-answer`,
+  `input-context`, `input-target`, `input-apply`, `input-cancel`,
+  `input-supersede`.
+
+Читатель со строгой схемой прежней версии `ValueReport`, `HandoffPack`,
+`StopDiagnosis`, `RunEvent`, `RunResult` или ответа `status` отклонит новые
+значения и поля: обновить схему вместе с пакетом. Хост с собственным
+хранилищем (DevContour) хранит `input-requests` у владельца-компонента, а
+адаптер прогоняет расширенный `executionStoreContract`.
+
+**Откат.** Документ состояния разбирается строго: прежние версии отказывают
+до записи на попытке с полями `inputPolicy`, `assumptions`, `input` или
+`pinned.contextDigest` (их пишет каждая новая выдача) и на отказе
+`needs-input`; записи `input-requests` прежняя версия не читает. Путь —
+строка «Новая версия уже изменила формат» таблицы [«Откат»](#откат):
+остановить writers и восстановить копию каталога состояния, снятую до
+обновления, вместе с прежней версией пакета; поле `inputPolicy` убрать из
+политики.
+
 ## Перед обновлением
 
 1. **Остановить записывающих.** Запретить новые выдачи (`harness pause`),
