@@ -160,6 +160,15 @@ const additiveFields: {
     },
     basis: 'changes',
   },
+  {
+    // Установка зависимостей до исполнителя: нет поля — включено, умолчание
+    // в политику не подставляется.
+    id: 'repositories[].writerDependencies',
+    apply: (raw) => {
+      raw.repositories[0]!.writerDependencies = false;
+    },
+    basis: 'changes',
+  },
 ];
 
 test('A03/profiles: встроенные профили alpha.5 на месте, их байты и закрепления не изменились', (t) => {

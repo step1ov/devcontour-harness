@@ -186,6 +186,12 @@ export const repositoryPolicySchema = z.strictObject({
   prepare: z.array(stepSchema).default([]),
   /** Необязательное поле без умолчания: политика без него сохраняет digest. */
   dependencyStore: dependencyStoreSchema.optional(),
+  /**
+   * Установка зависимостей в дереве исполнителя до его работы — gates
+   * установки попытки под изоляцией gate, без evidence. Нет поля — включено;
+   * `false` — выключено. Без умолчания: политика без поля сохраняет digest.
+   */
+  writerDependencies: z.boolean().optional(),
   dependencyBuild: z.array(stepSchema).default([]),
   dependencyArtifacts: z.array(relativePathSchema).default([]),
   preflight: z.array(stepSchema).default([]),

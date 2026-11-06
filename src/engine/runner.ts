@@ -102,7 +102,13 @@ import {
   probeTool,
   type ProbeSpec,
 } from '../agents/review-probe.ts';
-import { runGate } from '../verification/gates.ts';
+import {
+  prepareWriterDependencies,
+  runGate,
+  writerDependenciesNote,
+  writerDependencyGates,
+  type WriterDependencies,
+} from '../verification/gates.ts';
 import { ActivityScope, activityScope } from '../environment/activity.ts';
 import {
   StallSweep,
@@ -1003,15 +1009,23 @@ export class Runner {
     );
   }
 
-  /** Стадия попытки с замером: начало, конец и исход записываются под fencing. */
-  private async timed<T>(attempt: AttemptState, stage: string, fn: () => Promise<T>) {
+  /**
+   * Стадия попытки с замером: начало, конец и исход записываются под fencing.
+   * `outcome` — исход по значению стадии, которая не роняет попытку отказом.
+   */
+  private async timed<T>(
+    attempt: AttemptState,
+    stage: string,
+    fn: () => Promise<T>,
+    outcome?: (value: T) => 'passed' | 'failed',
+  ) {
     const id = this.engine.timingStarted(attempt.id, attempt.token, stage);
     // Граница стадии — движение попытки для обхода зависших.
     activityScope.getStore()?.moved();
     try {
       const value = await fn();
       activityScope.getStore()?.moved();
-      this.engine.timingFinished(attempt.id, attempt.token, id, 'passed');
+      this.engine.timingFinished(attempt.id, attempt.token, id, outcome?.(value) ?? 'passed');
       return value;
     } catch (error) {
       try {
@@ -1318,6 +1332,32 @@ export class Runner {
                 signal,
                 base,
               );
+              // Зависимости в дереве исполнителя — до его работы и до снимка
+              // защищённых путей: песочница исполнителя установку не пропускает.
+              // Взятый кандидат исполнителя не вызывает — ставить незачем.
+              const installs =
+                attempt.reusedFrom || repo.writerDependencies === false
+                  ? []
+                  : writerDependencyGates(gates);
+              let dependencies: WriterDependencies | undefined;
+              if (installs.length)
+                dependencies = await this.timed(
+                  attempt,
+                  'writer-dependencies',
+                  () =>
+                    prepareWriterDependencies({
+                      policy: this.policy,
+                      cwd,
+                      base,
+                      gates: installs,
+                      artifactDir: join(artifacts, 'candidate', 'writer-dependencies'),
+                      signal,
+                      execution,
+                      boundary: this.boundary(attempt.dependencies),
+                    }),
+                  // Отказ установки попытку не роняет, но в замере виден.
+                  (d) => (d.failed ? 'failed' : 'passed'),
+                );
               const sha = attempt.reusedFrom
                 ? await this.timed(attempt, 'implementation-reuse', () =>
                     this.reuseCandidate(attempt, work, repo, cwd, base, context),
@@ -1366,6 +1406,7 @@ export class Runner {
                           notes: [
                             ...this.notes(attempt, false),
                             ...(await this.hostNotes(work, attempt, false)),
+                            ...(dependencies ? [writerDependenciesNote(dependencies)] : []),
                             ALREADY_SATISFIED_WRITER_NOTE,
                           ],
                           // Открытые находки ревью с выданными ID — из истории

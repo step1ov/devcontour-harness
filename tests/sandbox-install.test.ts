@@ -28,7 +28,7 @@ import {
   sandboxDenials,
 } from '../src/environment/isolation.ts';
 import { TaskFailure } from '../src/engine/failure.ts';
-import { runCheck, runGate } from '../src/verification/gates.ts';
+import { prepareWriterDependencies, runCheck, runGate } from '../src/verification/gates.ts';
 import { repo } from './git-fixture.ts';
 
 /**
@@ -632,3 +632,107 @@ test('SBX07: файл .git worktree, заменённый каталогом (д
   writeFileSync(join(root, 'pkg', '.git'), 'gitdir: /elsewhere\n');
   assert.deepEqual(rel(protectedChanges(before, root)), ['pkg/.git']);
 });
+
+/** Установка до исполнителя в песочнице проверки над деревом `dir` (база — HEAD). */
+const writerInstall = (dir: string, base: string, command: string[], env = process.env) =>
+  prepareWriterDependencies({
+    policy: os.config,
+    cwd: dir,
+    base,
+    gates: [{ id: 'install', kind: 'check', timeoutMs: 60000, command }],
+    artifactDir: mkdtempSync(join(tmpdir(), 'harness-art-')),
+    signal: new AbortController().signal,
+    execution: { env, redact: redactor([]) },
+    boundary: { hidden: [], readable: [] },
+  });
+
+test(
+  'SBX12: установка до исполнителя ставит пакет с .idea в дерево исполнителя; node_modules скрыт от git',
+  { skip: noSandbox },
+  async () => {
+    const npm = (process.env.PATH ?? '')
+      .split(delimiter)
+      .map((d) => join(d, 'npm'))
+      .find((p) => existsSync(p));
+    assert.ok(npm, 'npm есть рядом с node');
+    const src = realpathSync(mkdtempSync(join(tmpdir(), 'harness-sbx-pkg-')));
+    const pkg = join(src, 'package');
+    mkdirSync(join(pkg, '.idea', 'codeStyles'), { recursive: true });
+    writeFileSync(join(pkg, 'package.json'), '{"name":"dep","version":"1.0.0"}');
+    writeFileSync(join(pkg, '.idea', 'codeStyles', 'codeStyleConfig.xml'), '<x/>');
+    // Кэш и конфигурация npm — в дереве, но игнорируются проектом; node_modules — нет.
+    const r = repo({
+      '.gitignore': '.npm-cache/\n.npmrc-user\n',
+      'package.json':
+        '{"name":"app","version":"1.0.0","dependencies":{"dep":"file:vendor/dep.tgz"}}',
+    });
+    mkdirSync(join(r.dir, 'vendor'));
+    execFileSync('tar', ['czf', join(r.dir, 'vendor', 'dep.tgz'), 'package'], {
+      cwd: src,
+      env: { ...process.env, COPYFILE_DISABLE: '1' },
+    });
+    r.git('add', 'vendor/dep.tgz');
+    r.git('commit', '-q', '-m', 'vendor');
+    writeFileSync(join(r.dir, '.npmrc-user'), '');
+    const outcome = await writerInstall(
+      r.dir,
+      r.head(),
+      [
+        npm,
+        'install',
+        '--offline',
+        '--no-package-lock',
+        '--ignore-scripts',
+        '--no-audit',
+        '--no-fund',
+      ],
+      {
+        ...process.env,
+        npm_config_cache: join(r.dir, '.npm-cache'),
+        npm_config_userconfig: join(r.dir, '.npmrc-user'),
+        npm_config_update_notifier: 'false',
+      },
+    );
+    assert.deepEqual(outcome, { installed: ['install'] });
+    assert.equal(
+      readFileSync(join(r.dir, 'node_modules/dep/.idea/codeStyles/codeStyleConfig.xml'), 'utf8'),
+      '<x/>',
+    );
+    assert.equal(r.git('status', '--porcelain'), '', 'node_modules скрыт своим .gitignore');
+  },
+);
+
+test(
+  'SBX13: защищённый путь, перенесённый установкой до исполнителя вне node_modules, — environment/sandbox-policy',
+  { skip: noSandbox },
+  async () => {
+    const r = repo();
+    const at = (p: string) => join(r.dir, p);
+    // Каталог IDE собирается внутри node_modules, где запрет не действует, и
+    // переносится в дерево целиком: запреты песочницы видят только путь операции.
+    const script =
+      `const fs=require('fs');fs.mkdirSync(${JSON.stringify(at('node_modules/pkg/.vscode'))},{recursive:true});` +
+      `fs.writeFileSync(${JSON.stringify(at('node_modules/pkg/.vscode/tasks.json'))},'{}');` +
+      `fs.renameSync(${JSON.stringify(at('node_modules/pkg'))},${JSON.stringify(at('moved'))})`;
+    await assert.rejects(
+      writerInstall(r.dir, r.head(), [process.execPath, '-e', script]),
+      (e: unknown) =>
+        e instanceof TaskFailure &&
+        e.kind === 'environment' &&
+        e.diagnosis === 'sandbox-policy' &&
+        /установка зависимостей до исполнителя \(install\) создала или изменила защищённые пути .*moved\/\.vscode/.test(
+          e.message,
+        ),
+    );
+    assert.ok(existsSync(at('moved/.vscode/tasks.json')), 'перенос состоялся: сработала сверка');
+    rmSync(at('moved'), { recursive: true, force: true });
+    // Отказ установки без защищённого пути — только исход для заметки.
+    const plain = await writerInstall(r.dir, r.head(), [
+      process.execPath,
+      '-e',
+      'console.error("ERR boom");process.exit(2)',
+    ]);
+    assert.equal(plain.installed.length, 0);
+    assert.match(plain.failed!.summary, /^код выхода 2: .*ERR boom/);
+  },
+);
