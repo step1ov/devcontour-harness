@@ -47,6 +47,7 @@ import {
 import { runGatesAt, type GatesAtContext } from '../src/verification/gates-at.ts';
 import { components } from './components-fixture.ts';
 import { ready } from './engine-fixture.ts';
+import { hsetup } from './harness-fixture.ts';
 import { example } from './fixtures.ts';
 import { write } from './git-fixture.ts';
 import { knap, propertySetup } from './property-fixture.ts';
@@ -1996,4 +1997,222 @@ test('DS13: каталог seeds — корень рабочих деревье�
     dependencyStoreRoot({ root: '/r', placement: 'configured' }, state, 'app'),
     join('/r', 'app', 'dependency-store'),
   );
+});
+
+test(
+  'DS35: зависимости в дереве исполнителя до его работы: исполнитель видит node_modules, evidence — только gate установки на кандидате, node_modules не в commit',
+  { skip: unavailable, timeout: 240000 },
+  async (t) => {
+    const reg = await registry(t);
+    // Без `.gitignore`: проект не обязан игнорировать node_modules.
+    const ctx = await contour(
+      reg.url,
+      { 'dep-a': '1.0.0' },
+      { scenario: { reviewer: approve() }, files: { '.gitignore': null } },
+    );
+    writeFileSync(
+      ctx.scenarioPath,
+      JSON.stringify({
+        writer: { ...implement(), observe: ['node_modules/dep-a/index.js'], recordPrompt: true },
+        reviewer: approve(),
+      }),
+    );
+    // Gate установки — в области поручения: до исполнителя ставятся только
+    // обязательные gates попытки.
+    ctx.graph.orders[0]!.gates = ['install', ...(ctx.graph.orders[0]!.gates ?? [])];
+    await runAll(ctx);
+    const work = ctx.engine.read((v) => v.work(ctx.graph.orders[0]!.id)!);
+    assert.equal(work.status, 'done', work.failure);
+    const observed = JSON.parse(readFileSync(`${ctx.scenarioPath}.writer.0.observed`, 'utf8'));
+    assert.equal(
+      observed['node_modules/dep-a/index.js'],
+      CONTENT('dep-a', '1.0.0'),
+      'исполнитель застал установленный пакет',
+    );
+    assert.match(
+      readFileSync(`${ctx.scenarioPath}.writer.0.prompt`, 'utf8'),
+      /Dependencies are installed by the controller/,
+    );
+    const [attempt, ...rest] = ctx.engine.read((v) => v.attempts(work.id));
+    assert.equal(rest.length, 0);
+    // Установка до исполнителя evidence не пишет: gate установки — один раз на
+    // кандидате (и на integration), ни одной записи на базе.
+    const installs = attempt!.evidence.filter((e) => e.kind === 'test' && e.gate === 'install');
+    assert.deepEqual(
+      installs.filter((e) => e.phase === 'candidate').map((e) => [e.sha, e.passed]),
+      [[attempt!.candidateSha, true]],
+    );
+    assert.equal(
+      installs.some((e) => e.sha === attempt!.baseSha),
+      false,
+    );
+    const timings = attempt!.timings ?? [];
+    const stage = timings.filter((s) => s.stage === 'writer-dependencies');
+    assert.deepEqual(
+      stage.map((s) => s.outcome),
+      ['passed'],
+    );
+    const implementation = timings.find((s) => s.stage === 'implementation')!;
+    assert.ok(stage[0]!.finishedAt! <= implementation.startedAt, 'стадия — до реализации');
+    const receipt = JSON.parse(
+      readFileSync(
+        join(
+          ctx.state,
+          'artifacts',
+          attempt!.id,
+          'candidate',
+          'writer-dependencies',
+          'writer-dependencies.json',
+        ),
+        'utf8',
+      ),
+    );
+    assert.deepEqual(receipt, { installed: ['install'] });
+    const changed = ctx.repo
+      .git('diff', '--name-only', ctx.repo.git('rev-parse', `${target(ctx)}^`), target(ctx))
+      .split('\n');
+    assert.deepEqual(changed, ['src/greet.js'], 'node_modules не попали в commit');
+  },
+);
+
+/** Подставной pnpm: исход каждого запуска по плану (`ok` — ставит пакет, `net` — 403 реестра). */
+function plannedPnpm(plan: ('ok' | 'net')[]) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'harness-pm-')));
+  const counter = join(dir, 'runs');
+  const path = join(dir, 'pnpm');
+  writeFileSync(
+    path,
+    `#!${process.execPath}
+const fs = require('fs');
+const runs = Number(fs.existsSync(${JSON.stringify(counter)}) ? fs.readFileSync(${JSON.stringify(counter)}, 'utf8') : 0) + 1;
+fs.writeFileSync(${JSON.stringify(counter)}, String(runs));
+const plan = ${JSON.stringify(plan)};
+if ((plan[runs - 1] ?? 'ok') === 'ok') {
+  fs.mkdirSync('node_modules/fake', { recursive: true });
+  fs.writeFileSync('node_modules/fake/index.js', 'run ' + runs);
+  console.log('Done in 0.1s');
+  process.exit(0);
+}
+console.log(' ERR_PNPM_FETCH_403  GET https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz: Forbidden - 403');
+process.exit(1);
+`,
+  );
+  chmodSync(path, 0o755);
+  return { path, runs: () => (existsSync(counter) ? Number(readFileSync(counter, 'utf8')) : 0) };
+}
+
+/** Контур с gate установки подставным pnpm первым в области поручения. */
+function plannedContour(pm: { path: string }, optOut = false, writer: unknown = implement()) {
+  const steps = {
+    ...(writer as object),
+    observe: ['node_modules/fake/index.js'],
+    recordPrompt: true,
+  };
+  return hsetup({
+    scenario: { writer: [steps, steps], reviewer: approve() },
+    policy: (p: Record<string, any>) => {
+      const repo = p.repositories[0];
+      repo.gates = [
+        { id: 'install', kind: 'check', command: [pm.path, 'install', '--frozen-lockfile'] },
+        ...repo.gates,
+      ];
+      if (optOut) repo.writerDependencies = false;
+    },
+    graph: (g: Record<string, any>) => {
+      for (const order of g.orders) order.gates = ['install', ...(order.gates ?? [])];
+    },
+  });
+}
+
+const stageOutcomes = (attempt: { timings?: { stage: string; outcome?: string }[] }) =>
+  (attempt.timings ?? []).filter((s) => s.stage === 'writer-dependencies').map((s) => s.outcome);
+
+test('DS36: отказ установки до исполнителя — только заметка в запросе; gate установки на кандидате решает сам', async () => {
+  const pm = plannedPnpm(['net', 'ok', 'ok']);
+  const ctx = plannedContour(pm);
+  const h = ctx.open();
+  const data = await h.run({ graph: ctx.graph, author: 'claude' });
+  const work = h.engine.read((v) => v.work(data.works[0]!.id)!);
+  const attempts = h.engine.read((v) => v.attempts(work.id));
+  assert.equal(work.status, 'done', work.failure);
+  assert.equal(attempts.length, 1, 'попытка не потрачена');
+  assert.deepEqual(stageOutcomes(attempts[0]!), ['failed']);
+  const prompt = readFileSync(`${ctx.scenarioPath}.writer.0.prompt`, 'utf8');
+  assert.match(
+    prompt,
+    /Dependencies were not installed before your turn \(install: код выхода 1: .*Forbidden - 403/,
+  );
+  assert.doesNotMatch(prompt, /Dependencies are installed by the controller/);
+  const observed = JSON.parse(readFileSync(`${ctx.scenarioPath}.writer.0.observed`, 'utf8'));
+  assert.equal(observed['node_modules/fake/index.js'], null);
+  const installs = attempts[0]!.evidence.filter((e) => e.gate === 'install');
+  assert.deepEqual(
+    installs.map((e) => [e.phase, e.passed, e.sha === attempts[0]!.baseSha]),
+    [
+      ['candidate', true, false],
+      ['integration', true, false],
+    ],
+  );
+  assert.equal(pm.runs(), 3);
+  h.close();
+});
+
+test('DS37: writerDependencies: false и взятый кандидат — установки до исполнителя нет', async () => {
+  // Выключено политикой: стадии и заметки нет, менеджер — только в gates.
+  {
+    const pm = plannedPnpm(['ok', 'ok']);
+    const ctx = plannedContour(pm, true);
+    const h = ctx.open();
+    const data = await h.run({ graph: ctx.graph, author: 'claude' });
+    const work = h.engine.read((v) => v.work(data.works[0]!.id)!);
+    const [attempt] = h.engine.read((v) => v.attempts(work.id));
+    assert.equal(work.status, 'done', work.failure);
+    assert.deepEqual(stageOutcomes(attempt!), []);
+    assert.doesNotMatch(
+      readFileSync(`${ctx.scenarioPath}.writer.0.prompt`, 'utf8'),
+      /Dependencies (are|were not) installed/,
+    );
+    assert.equal(
+      JSON.parse(readFileSync(`${ctx.scenarioPath}.writer.0.observed`, 'utf8'))[
+        'node_modules/fake/index.js'
+      ],
+      null,
+    );
+    assert.equal(pm.runs(), 2);
+    h.close();
+  }
+  // Взятый кандидат: gate установки на кандидате упал на реестре (environment),
+  // повтор берёт тот же кандидат без исполнителя — и без установки до него.
+  {
+    const pm = plannedPnpm(['ok', 'net', 'ok', 'ok']);
+    const ctx = plannedContour(pm);
+    const h = ctx.open();
+    const data = await h.run({ graph: ctx.graph, author: 'claude' });
+    const work = h.engine.read((v) => v.work(data.works[0]!.id)!);
+    const attempts = h.engine.read((v) => v.attempts(work.id));
+    assert.equal(work.status, 'done', work.failure);
+    assert.equal(attempts.length, 2);
+    assert.equal(attempts[0]!.failureKind, 'environment', attempts[0]!.error);
+    assert.equal(attempts[1]!.reusedFrom?.runId, attempts[0]!.id);
+    assert.deepEqual(attempts.map(stageOutcomes), [['passed'], []]);
+    assert.equal(
+      JSON.parse(readFileSync(`${ctx.scenarioPath}.writer.0.observed`, 'utf8'))[
+        'node_modules/fake/index.js'
+      ],
+      'run 1',
+      'исполнитель застал установку до своей работы',
+    );
+    assert.match(
+      readFileSync(`${ctx.scenarioPath}.writer.0.prompt`, 'utf8'),
+      /Dependencies are installed by the controller/,
+    );
+    assert.equal(ctx.calls('claude', 'writer'), 1);
+    assert.equal(pm.runs(), 4);
+    // Установка до исполнителя не попала в commit: node_modules скрыт своим `.gitignore`.
+    const changed = ctx.repo
+      .git('diff', '--name-only', ctx.repo.git('rev-parse', `${target(ctx)}^`), target(ctx))
+      .split('\n');
+    assert.deepEqual(changed, ['src/greet.js']);
+    h.close();
+  }
 });

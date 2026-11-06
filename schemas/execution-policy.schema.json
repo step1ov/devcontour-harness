@@ -733,6 +733,9 @@
             ],
             "additionalProperties": false
           },
+          "writerDependencies": {
+            "type": "boolean"
+          },
           "dependencyBuild": {
             "default": [],
             "type": "array",

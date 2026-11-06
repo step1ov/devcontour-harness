@@ -750,7 +750,16 @@ test('Run: обрыв реестра не тратит попытку, держ�
   assert.equal(attempts[1]!.reusedFrom?.runId, attempts[0]!.id, 'повтор взял того же кандидата');
   assert.equal(ctx.calls('claude', 'writer'), 1, 'writer вызван один раз');
   assert.equal(work.neutralFailures, 2);
-  assert.equal(pm.runs(), 2);
+  // Установка до исполнителя (первая попытка) и два gate установки; взятый
+  // кандидат установки до исполнителя не получает. Её сетевой отказ —
+  // заметка исполнителю и отказ в замере стадии, а не отказ попытки.
+  assert.equal(pm.runs(), 3);
+  assert.deepEqual(
+    attempts.map((a) =>
+      (a.timings ?? []).filter((s) => s.stage === 'writer-dependencies').map((s) => s.outcome),
+    ),
+    [['failed'], []],
+  );
   // Причина записана событием в транзакции отказа, повтор — восстановлением.
   const diagnosed = h.store
     .events(0, 500)
@@ -804,7 +813,12 @@ test('Run: разовый обрыв реестра — повтор с тем �
   const pm = fakeManager('pnpm', network['npm 403']![1], 1);
   const ctx = hsetup({
     scenario: { writer: [implement(), implement()], reviewer: approve() },
-    policy: withInstall([pm.path, 'install']),
+    policy: (p: any) => {
+      withInstall([pm.path, 'install'])(p);
+      // Единственный отказ реестра должен достаться gate кандидата, а не
+      // установке до исполнителя.
+      p.repositories[0].writerDependencies = false;
+    },
     graph: inScope,
   });
   const h = ctx.open();

@@ -32,6 +32,7 @@ import { redactDeep } from '../environment/redaction.ts';
 import {
   dependencyNetworkFailure,
   dependencyNetworkMessage,
+  isDependencyInstall,
 } from '../environment/dependency-network.ts';
 import {
   expectsReference,
@@ -1094,4 +1095,207 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     );
   }
   return evidence;
+}
+
+/** Предел сводки отказа в запросе исполнителя: заметка, а не лог. */
+const WRITER_DEPENDENCIES_NOTE_LIMIT = 400;
+
+/** Что нужно для установки зависимостей в дереве исполнителя до его работы. */
+export interface WriterDependenciesRun {
+  policy: Pick<ExecutionPolicy, 'isolation'>;
+  /** Рабочее дерево исполнителя: здесь оно ещё совпадает с базой. */
+  cwd: string;
+  /** SHA базы попытки: дерево возвращается к нему, если установка тронула отслеживаемые файлы. */
+  base: string;
+  /** Gates установки из обязательных gates попытки (`writerDependencyGates`), в их порядке. */
+  gates: GatePolicy[];
+  /** Каталог журналов и квитанции (`artifacts/candidate/writer-dependencies`). */
+  artifactDir: string;
+  signal: AbortSignal;
+  /** Окружение фазы — с окружением хранилища зависимостей, как у gate. */
+  execution: { env: NodeJS.ProcessEnv; redact: (value: string) => string };
+  boundary: Boundary;
+}
+
+/** Исход установки для исполнителя: что поставлено и почему нет. Evidence не пишется. */
+export interface WriterDependencies {
+  /** ID gates, исполненных с кодом 0. */
+  installed: string[];
+  /** Первый отказ: gate и короткая сводка; дальше установка не идёт. */
+  failed?: { gate: string; summary: string };
+  /** Неотслеживаемые пути, появившиеся после установки (вне `node_modules`), — для разбора. */
+  untracked?: string[];
+}
+
+/**
+ * Gates установки из обязательных gates попытки: только однозначный argv
+ * менеджера пакетов (`isDependencyInstall`). Скрипты, `npx` и shell сюда не
+ * попадают — они остаются только gates.
+ */
+export function writerDependencyGates(gates: readonly GatePolicy[]) {
+  return gates.filter((g) => isDependencyInstall(g.command));
+}
+
+/** Неотслеживаемые и не игнорируемые пути дерева (каталог — с `/` на конце). */
+async function untrackedPaths(cwd: string) {
+  const out = await git(cwd, 'status', '--porcelain=v1', '-z', '--untracked-files=normal');
+  return new Set(
+    out
+      .split('\0')
+      .filter((e) => e.startsWith('?? '))
+      .map((e) => e.slice(3)),
+  );
+}
+
+/**
+ * Установка зависимостей в дереве исполнителя до его работы. Песочница
+ * Claude Code закрывает запись в `**\/.idea` и `**\/.vscode` от своего
+ * рабочего каталога, и установка пакета с такими каталогами в ней падает; у
+ * codex по умолчанию нет сети. Поэтому controller исполняет здесь сами gates
+ * установки попытки — те же argv, та же изоляция, что у gate (`runCheck`: запись
+ * только в дерево, граница, сеть `isolation.domains`, окружение фазы с
+ * хранилищем, сверка защищённых путей) — над деревом базы.
+ *
+ * Evidence не пишется: она привязана к SHA кандидата, а настоящий gate
+ * установки исполняется на нём после работы исполнителя. Отказ установки
+ * попытку не роняет: он становится заметкой исполнителю. Исключение —
+ * защищённый путь, созданный или изменённый установкой над деревом базы:
+ * исполнитель его не трогал, поэтому это отказ среды (`sandbox-policy`), а не
+ * дефект кода.
+ */
+export async function prepareWriterDependencies(
+  run: WriterDependenciesRun,
+): Promise<WriterDependencies> {
+  const { cwd, signal } = run;
+  const redact = run.execution.redact;
+  const root = await realpath(cwd);
+  const result: WriterDependencies = { installed: [] };
+  const os = run.policy.isolation.mode === 'os';
+  const before = await untrackedPaths(root);
+  for (const gate of run.gates) {
+    signal.throwIfAborted();
+    const gateCwd = gate.cwd ? await realpath(resolve(root, gate.cwd)) : root;
+    if (gateCwd !== root && !gateCwd.startsWith(root + sep))
+      throw new Error('Gate cwd выходит из worktree');
+    let guarded: Map<string, string> | undefined;
+    try {
+      if (os) guarded = protectedSnapshot(root);
+    } catch (error) {
+      if (error instanceof SandboxPolicyError)
+        throw new TaskFailure('environment', error.message, undefined, 'sandbox-policy');
+      throw error;
+    }
+    let log = `# harness writer-dependencies ${gate.id}: cwd=${relative(root, gateCwd) || '.'} argv=${JSON.stringify(gate.command.map(redact))}\n`;
+    let failure: string | undefined;
+    try {
+      const checked = await runCheck(
+        { config: run.policy },
+        {
+          activity: { kind: 'gate', label: `writer-dependencies:${gate.id}`.slice(0, 300) },
+          argv: gate.command,
+          cwd: gateCwd,
+          env: run.execution.env,
+          redact,
+          timeoutMs: gate.timeoutMs,
+          signal,
+          write: [cwd],
+          readable: run.boundary.readable,
+          controller: run.boundary.hidden,
+          ...(run.boundary.checkouts?.length ? { checkouts: run.boundary.checkouts } : {}),
+          settingsDir: join(run.artifactDir, gate.id),
+          violations: true,
+        },
+      );
+      log += checked.stdout + '\n' + checked.stderr;
+      if (checked.timedOut) failure = 'превышен timeout';
+      else if (checked.launchFailed) failure = 'песочница ОС не запустила команду';
+      else if (checked.code !== 0)
+        failure = `код выхода ${checked.code}: ${diagnostic(checked.stderr, checked.stdout, redact)}`;
+    } catch (error) {
+      if (signal.aborted) throw error;
+      // Отказ сборки политики песочницы — отказ среды, как у gate.
+      if (error instanceof SandboxPolicyError)
+        throw new TaskFailure('environment', error.message, undefined, 'sandbox-policy');
+      failure = redact(error instanceof Error ? error.message : String(error));
+    }
+    if (signal.aborted) signal.throwIfAborted();
+    // Защищённый путь, который установка создала, изменила или закрыла от
+    // чтения, — отказ среды при любом коде выхода: дерево — ещё база.
+    let planted: string[] = [];
+    try {
+      if (guarded) planted = protectedChanges(guarded, root);
+    } catch (error) {
+      if (error instanceof SandboxPolicyError)
+        throw new TaskFailure(
+          'environment',
+          `установка зависимостей до исполнителя (${gate.id}): ${error.message}`,
+          undefined,
+          'sandbox-policy',
+        );
+      throw error;
+    }
+    if (planted.length)
+      throw new TaskFailure(
+        'environment',
+        `установка зависимостей до исполнителя (${gate.id}) создала или изменила защищённые пути (конфигурация IDE, shell, git или Claude): ` +
+          planted
+            .slice(0, 5)
+            .map((p) => relative(root, p))
+            .join(', ') +
+          (planted.length > 5 ? ` и ещё ${planted.length - 5}` : ''),
+        undefined,
+        'sandbox-policy',
+      );
+    // Lockfile и манифесты заморожены: установка, сдвинувшая HEAD или
+    // отслеживаемые файлы, откатывается к базе, иначе исполнитель закоммитил
+    // бы её правку как свою.
+    if (
+      (await git(root, 'rev-parse', 'HEAD')) !== run.base ||
+      (await git(root, 'status', '--porcelain', '--untracked-files=no'))
+    ) {
+      await git(root, 'reset', '-q', '--hard', run.base);
+      failure ??= 'установка изменила отслеживаемые файлы или HEAD; изменения отменены';
+    }
+    await mkdir(run.artifactDir, { recursive: true });
+    await writeFile(
+      join(run.artifactDir, `${gate.id}.log`),
+      redact(log + (failure ? '\n' + failure : '')),
+    );
+    if (failure) {
+      result.failed = {
+        gate: gate.id,
+        summary: redact(failure).slice(0, WRITER_DEPENDENCIES_NOTE_LIMIT),
+      };
+      break;
+    }
+    result.installed.push(gate.id);
+  }
+  // Новые `node_modules` скрываются от git своим `.gitignore`, как копия
+  // хранилища: исполнитель коммитит дерево целиком (`git add -A`), а проект
+  // не обязан их игнорировать. Ссылка не трогается: запись ушла бы наружу.
+  const added = [...(await untrackedPaths(root))].filter((p) => !before.has(p));
+  const left: string[] = [];
+  for (const path of added) {
+    const dir = path.replace(/\/$/, '');
+    const stat = path.endsWith('/')
+      ? await lstat(join(root, dir)).catch(() => undefined)
+      : undefined;
+    if (dir.split('/').at(-1) === 'node_modules' && stat?.isDirectory())
+      await writeFile(join(root, dir, '.gitignore'), '*\n');
+    else left.push(path);
+  }
+  if (left.length) result.untracked = left.slice(0, 20);
+  await mkdir(run.artifactDir, { recursive: true });
+  await writeFile(
+    join(run.artifactDir, 'writer-dependencies.json'),
+    JSON.stringify(result, null, 2),
+  );
+  return result;
+}
+
+/** Заметка исполнителю об установке зависимостей до его работы. */
+export function writerDependenciesNote(outcome: WriterDependencies) {
+  if (outcome.failed)
+    return `Dependencies were not installed before your turn (${outcome.failed.gate}: ${outcome.failed.summary}); local checks that need them may be unavailable.`;
+  return 'Dependencies are installed by the controller from the locked manifest; do not run install and do not change lockfiles or package manifests. Run local checks with the installed tools.';
 }

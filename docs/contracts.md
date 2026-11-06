@@ -125,6 +125,11 @@ manifest снимка и в необязательном поле `baseline` о�
 gate установки остаётся обычным `pnpm install --frozen-lockfile`.
 Подробности и граница доверия — [toolchains](toolchains.md#хранилище-зависимостей).
 
+`repositories[].writerDependencies` — необязательное: `false` выключает установку зависимостей
+в дереве исполнителя до его работы (gates установки попытки под изоляцией gate, без evidence,
+стадия `writer-dependencies` в `timings`). Нет поля — включено, умолчание не подставляется и
+digest политики не меняет. Подробно — [toolchains](toolchains.md#зависимости-исполнителя).
+
 Квитанция `dependency-store.json` лежит в артефактах фазы: `outcome`
 (`hit` — lockfile checkout равен lockfile seed; `partial` — seed другого
 lockfile, установка докачивает разницу; `miss` — обычная установка), `seed`,
