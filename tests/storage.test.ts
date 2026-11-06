@@ -11,6 +11,7 @@ import {
   readRunEvent,
   readRunEventSchema,
   runEventSchema,
+  type ExecutionStore,
 } from '../src/contracts/index.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import { executionStoreContract } from '../src/testing/index.ts';
@@ -167,4 +168,83 @@ test('readRunEvent: неизвестный тип с нарушенным кон
     }).type,
     'unknown',
   );
+});
+
+/**
+ * Хранилище, искажающее локальные записи: проверка, что договор
+ * `executionStoreContract` ловит такие адаптеры, а не только исправные.
+ */
+function distorted(
+  inner: SqliteExecutionStore,
+  distort: {
+    locals?: (rows: { owner: string; key: string; value: unknown }[], owner?: string) => unknown;
+    putLocal?: (put: () => void, exists: boolean, namespace: string) => void;
+  },
+): ExecutionStore {
+  const wrap = <V extends object>(view: V): V =>
+    new Proxy(view, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver) as unknown;
+        if (prop === 'locals' && distort.locals) {
+          const locals = value as (ns: string, owner?: string) => never[];
+          return (ns: string, owner?: string) =>
+            distort.locals!(locals.call(target, ns, owner), owner);
+        }
+        if (prop === 'putLocal' && distort.putLocal) {
+          const put = value as (ns: string, owner: string, key: string, v: unknown) => void;
+          const local = (
+            target as unknown as { local: (n: string, o: string, k: string) => unknown }
+          ).local;
+          return (ns: string, owner: string, key: string, v: unknown) =>
+            distort.putLocal!(
+              () => put.call(target, ns, owner, key, v),
+              local.call(target, ns, owner, key) !== undefined,
+              ns,
+            );
+        }
+        return typeof value === 'function' ? (value as () => unknown).bind(target) : value;
+      },
+    });
+  return {
+    stateVersion: inner.stateVersion,
+    transact: (kind, fn) => inner.transact(kind, (tx) => fn(wrap(tx))),
+    read: (fn) => inner.read((v) => fn(wrap(v))),
+    events: (after, limit) => inner.events(after, limit),
+    close: () => inner.close(),
+  };
+}
+
+function contractCases(open: (dir: string) => ExecutionStore) {
+  const cases = new Map<string, () => void | Promise<void>>();
+  executionStoreContract('broken', (title, fn) => cases.set(title, fn), open, temp);
+  const find = (part: string) => {
+    const found = [...cases].find(([title]) => title.includes(part));
+    assert.ok(found, 'в договоре нет случая: ' + part);
+    return found[1];
+  };
+  return find;
+}
+
+test('Договор хранилища ловит адаптер, который в списке без владельца теряет owner', async () => {
+  const find = contractCases((dir) =>
+    distorted(new SqliteExecutionStore(join(dir, 'state.sqlite'), 'test'), {
+      locals: (rows, owner) =>
+        owner === undefined ? rows.map((r) => ({ ...r, owner: '' })) : rows,
+    }),
+  );
+  const run = find('список без владельца');
+  await assert.rejects(async () => run());
+});
+
+test('Договор хранилища ловит адаптер, который не перезаписывает запрос новой версией', async () => {
+  const find = contractCases((dir) =>
+    distorted(new SqliteExecutionStore(join(dir, 'state.sqlite'), 'test'), {
+      putLocal: (put, exists, ns) => {
+        if (ns === 'input-requests' && exists) return;
+        put();
+      },
+    }),
+  );
+  const run = find('ровно таким, каким записан');
+  await assert.rejects(async () => run());
 });

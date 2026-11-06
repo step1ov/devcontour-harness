@@ -387,6 +387,81 @@ export function executionStoreContract(
     b.close();
   });
 
+  test(`${name}: запросы исполнителя разных владельцев — список без владельца с owner и key, с владельцем — только его`, () => {
+    const s = open(tempDir());
+    const app = sampleInputRequest('run-app', 'w1');
+    const lib = sampleInputRequest('run-lib', 'w2');
+    s.transact('run.failed', (tx) => {
+      tx.putLocal('input-requests', 'app', app.id, app);
+      tx.putLocal('input-requests', 'lib', lib.id, lib);
+    });
+    // Движок ищет запрос по ID среди всех владельцев (answer, apply, cancel).
+    const all = s.read((v) => v.locals('input-requests'));
+    assert.deepEqual(
+      all.map((r) => [r.owner, r.key, r.value.id]).sort(),
+      [
+        ['app', app.id, app.id],
+        ['lib', lib.id, lib.id],
+      ].sort(),
+    );
+    assert.deepEqual(
+      s.read((v) => v.locals('input-requests', 'lib')).map((r) => [r.owner, r.key]),
+      [['lib', lib.id]],
+    );
+    s.close();
+  });
+
+  test(`${name}: запрос исполнителя хранится ровно таким, каким записан, на каждой версии`, () => {
+    // Правила версий (вопрос и основание неизменяемы, ответы только
+    // дополняются, CAS по version) проверяет движок; хранилище обязано
+    // хранить запись целиком: не сливать, не переупорядочивать, не
+    // оставлять прежнюю версию.
+    const dir = tempDir();
+    const s = open(dir);
+    const v1 = sampleInputRequest();
+    const v2 = answeredInputRequest(v1, 'ISO');
+    const v3 = answeredInputRequest(v2, 'ISO 8601, UTC');
+    const v4: InputRequest = {
+      ...v3,
+      lifecycle: 'applied',
+      target: {
+        originDigest: digestOf(v3.originBasis),
+        answerDigest: v3.answers[1]!.digest,
+        graphDigest: v3.originBasis.graphDigest,
+        orderDigest: v3.originBasis.orderDigest,
+        policyDigest: v3.originBasis.policyDigest,
+        contextDigest: digestOf('context'),
+        review: { round: 2, approved: true, reviewerBinding: null },
+        actor: 'agent',
+        digest: digestOf('target'),
+      },
+      version: v3.version + 1,
+    };
+    for (const value of [v1, v2, v3, v4]) {
+      s.transact('input.answered', (tx) => tx.putLocal('input-requests', 'app', v1.id, value));
+      assert.deepEqual(
+        s.read((v) => v.local('input-requests', 'app', v1.id)),
+        value,
+        'версия ' + value.version,
+      );
+    }
+    s.close();
+    const again = open(dir);
+    const stored = again.read((v) => v.local('input-requests', 'app', v1.id))!;
+    assert.deepEqual(stored, v4);
+    assert.deepEqual(stored.question, v1.question);
+    assert.deepEqual(stored.originBasis, v1.originBasis);
+    assert.deepEqual(
+      stored.answers.map((a) => [a.revision, a.text]),
+      [
+        [1, 'ISO'],
+        [2, 'ISO 8601, UTC'],
+      ],
+    );
+    assert.equal(again.read((v) => v.locals('input-requests')).length, 1, 'одна запись на ключ');
+    again.close();
+  });
+
   test(`${name}: запрос вне схемы и откат транзакции не оставляют записи`, () => {
     const s = open(tempDir());
     const request = sampleInputRequest();
