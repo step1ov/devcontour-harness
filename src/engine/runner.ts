@@ -1564,11 +1564,22 @@ export class Runner {
                     const empty = await this.assertScope(work, repo, cwd, context, undefined, true);
                     // Вопрос, допущения и незавершённость — по закреплённой
                     // в попытке политике вопросов.
+                    // Вопрос и допущения — текст writer: маскируются полным
+                    // окружением вызова до записи, как ответ reviewer; запрос,
+                    // explain, пакет передачи и снимок с ответом видят уже
+                    // замаскированное.
+                    const decided = {
+                      ...result.data,
+                      ...(result.data.inputRequest
+                        ? { inputRequest: redactDeep(result.data.inputRequest, response.redact) }
+                        : {}),
+                      assumptions: redactDeep(result.data.assumptions, response.redact),
+                    };
                     this.decideInput(
                       attempt,
-                      result.data,
+                      decided,
                       evaluateInput(
-                        result.data,
+                        decided,
                         attempt.inputPolicy ?? inputPolicyOf(this.policy),
                         changed,
                       ),

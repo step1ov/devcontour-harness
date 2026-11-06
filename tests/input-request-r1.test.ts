@@ -20,12 +20,14 @@ import {
   type ExecutionPolicy,
   type InputOutcome,
   type InputQuestion,
+  type RuntimeAdapter,
 } from '../src/contracts/index.ts';
 import { Engine } from '../src/engine/engine.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import { inputContextSource, unappliedInputs, withInput } from '../src/engine/input-requests.ts';
-import { runAll, setup } from './runner-fixture.ts';
+import { bin, runAll, setup } from './runner-fixture.ts';
+import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { engineOf, graphOf, planReview, policyOf, ready, sha } from './engine-fixture.ts';
 
 export const question = (severity = 8, extra: Partial<InputQuestion> = {}): InputQuestion => ({
@@ -249,4 +251,66 @@ test('m-2: длинный изменённый критический путь �
   const [request] = ctx.engine.inputRequests({ workId: 'add-greeting' });
   assert.equal(request!.criticalHits[0]!.length, 500);
   assert.deepEqual(request!.floors, ['critical-path']);
+});
+
+test('M-4: секрет профиля в вопросе и допущениях writer маскируется до записи — и у библиотечного адаптера без маски', async () => {
+  process.env.HARNESS_TEST_INPUT_SECRET = 'tok-7f3a9c';
+  const secret = 'tok-7f3a9c';
+  try {
+    // Библиотечный адаптер, который не маскирует ответ сам: секрет попадает
+    // в структурированный ответ после CLI fixture.
+    const leaking = (inner: RuntimeAdapter): RuntimeAdapter => ({
+      runtime: inner.runtime,
+      capabilities: () => inner.capabilities(),
+      invoke: async (request, signal) => {
+        const response = await inner.invoke(request, signal);
+        if (request.task !== 'implement') return response;
+        const output = structuredClone(response.output) as {
+          inputRequest: InputQuestion;
+          assumptions: { question: string; rationale: string }[];
+        };
+        output.inputRequest.question = `Использовать токен ${secret} или новый?`;
+        output.inputRequest.options[0]!.label = secret;
+        output.assumptions[0]!.rationale = `${secret} не в коде`;
+        return { ...response, output };
+      },
+    });
+    const ctx = setup({
+      scenario: {
+        writer: {
+          files: { 'src/greet.js': "exports.greet = () => 'draft';\n" },
+          result: {
+            completed: false,
+            summary: 'вопрос',
+            discoveries: [],
+            inputRequest: question(9),
+            assumptions: [
+              { question: 'Где хранить?', chosen: 'env', rationale: '-', severity: 2, affects: [] },
+            ],
+          },
+        },
+      },
+      policy: (p) => {
+        p.inputPolicy = { threshold: 7, criticalPaths: [] };
+        (p as { environment: { secrets: Record<string, string> } }).environment.secrets = {
+          TOKEN: 'HARNESS_TEST_INPUT_SECRET',
+        };
+      },
+      runner: {
+        adapters: {
+          claude: leaking(cliAdapter('claude', { executable: bin('fake-claude') })),
+          codex: cliAdapter('codex', { executable: bin('fake-codex') }),
+        },
+      },
+    });
+    await runAll(ctx);
+    const [request] = ctx.engine.inputRequests({ workId: 'add-greeting' });
+    const attempt = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+    assert.equal(attempt.failureKind, 'needs-input', attempt.error);
+    const stored = JSON.stringify({ request, assumptions: attempt.assumptions });
+    assert.doesNotMatch(stored, /tok-7f3a9c/);
+    assert.match(request!.question.question, /Использовать токен .+ или новый\?/);
+  } finally {
+    delete process.env.HARNESS_TEST_INPUT_SECRET;
+  }
 });
