@@ -472,6 +472,19 @@ export class Harness {
     const request = this.engine.inputRequest(id);
     const answer = latestAnswer(request);
     if (!answer) throw new HarnessError('INPUT_REQUIRED', `На вопрос ${id} ещё нет ответа`);
+    // Снимок с ответом нужен для продолжения (вопрос с ответом) или для
+    // переноса ответа в новую редакцию (заменённый вопрос); у
+    // неблокирующего запроса и закрытого без замены его нельзя ни применить,
+    // ни согласовать.
+    if (
+      request.kind !== 'question' ||
+      !request.blocking ||
+      !['answered', 'superseded'].includes(request.lifecycle)
+    )
+      throw new HarnessError(
+        'NOT_READY',
+        `Запрос ${id} (${request.kind}, ${request.lifecycle}): снимок с ответом строится для вопроса в answered или заменённого (superseded)`,
+      );
     const base = this.contextOf(request.graphId);
     const snapshot = withInput(base, inputContextSource(request, answer, options.messages));
     const issues = contextIssues(snapshot);

@@ -153,6 +153,18 @@ export function inputManifestOf(source: ContextSourceEntry): InputManifest | und
 }
 
 /**
+ * Ответ заменённого запроса (`superseded`), перенесённый в контекст
+ * преемника: продолжением исходной работы он не является — это сведения для
+ * новой редакции. Запрос закрыт, блокировки нет; снимок называет ровно один
+ * из записанных ответов.
+ */
+export const carried = (request: InputRequest, manifest: InputManifest) =>
+  request.lifecycle === 'superseded' &&
+  request.answers.some(
+    (a) => a.digest === manifest.answerDigest && a.revision === manifest.revision,
+  );
+
+/**
  * Источники ответов снимка, которые ещё не применены `applyInput`: запрос не
  * найден, не применён или применён с другим ответом. Такой снимок не
  * становится действующим согласованием обходным путём (approve, run).
@@ -169,6 +181,7 @@ export function unappliedInputs(view: ExecutionView, snapshot: ContextSnapshot |
     const found = requestById(view, manifest.requestId)?.request;
     if (!found)
       out.push({ source: source.id, requestId: manifest.requestId, reason: 'запрос не найден' });
+    else if (carried(found, manifest)) continue;
     else if (found.lifecycle !== 'applied' || found.target?.answerDigest !== manifest.answerDigest)
       out.push({
         source: source.id,

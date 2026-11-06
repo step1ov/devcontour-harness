@@ -21,16 +21,28 @@ import {
   type InputOutcome,
   type InputQuestion,
   type RuntimeAdapter,
+  workGraphSchema,
 } from '../src/contracts/index.ts';
 import { Engine } from '../src/engine/engine.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import { inputContextSource, unappliedInputs, withInput } from '../src/engine/input-requests.ts';
-import { bin, runAll, setup } from './runner-fixture.ts';
+import { approve, bin, implement, runAll, setup } from './runner-fixture.ts';
+import { hsetup } from './harness-fixture.ts';
+import { stopInputsOf } from '../src/explain/state.ts';
+import { explainStop } from '../src/projections/stop.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { prompt } from '../src/engine/prompt.ts';
 import { inputPolicyText, normalizeImplementation } from '../src/engine/input-policy.ts';
-import { engineOf, graphOf, planReview, policyOf, ready, sha } from './engine-fixture.ts';
+import {
+  engineOf,
+  graphOf,
+  planReview,
+  policyOf,
+  ready,
+  sha,
+  trustNone,
+} from './engine-fixture.ts';
 
 export const question = (severity = 8, extra: Partial<InputQuestion> = {}): InputQuestion => ({
   question: 'Какой формат приветствия?',
@@ -467,4 +479,68 @@ test('M-3: запрос продолжения называет ответ в с
   assert.match(text(true), /the answer is in the pinned context below/);
   assert.doesNotMatch(text(false), /the answer is in the pinned context/);
   assert.match(text(false), /no answer is attached to this attempt/);
+});
+
+test('M-2: новая редакция графа держит вопрос; выход с сохранением ответа — supersede и перенос ответа в контекст новой редакции', () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const h = ctx.open();
+  ready(h.engine, ctx.graph, 'controller');
+  const a = h.engine.claim('controller')!;
+  h.engine.fail(a.id, a.token, 'вопрос', { kind: 'needs-input', input: outcome() });
+  const id = h.inputRequests({ workId: a.workId })[0]!.id;
+  h.answerInput(id, { text: 'Hello, <name>!', actor: { kind: 'operator' } }, 1);
+  // Новая редакция графа: добавлено поручение.
+  const raw = structuredClone(ctx.graph) as unknown as {
+    source: { revision: string };
+    orders: Record<string, unknown>[];
+  };
+  raw.source.revision = '2';
+  raw.orders.push({
+    ...raw.orders[0],
+    id: 'extra',
+    source: { connector: 'files', ref: 'extra', revision: '1' },
+  });
+  const next = workGraphSchema.parse(raw);
+  const { graph } = h.engine.register(next, trustNone);
+  h.engine.recordReview(planReview(h.engine, graph, h.engine.reviews('plan', graph.id).length + 1));
+  h.engine.approve(graph.id, 'agent');
+  const work = h.engine.read((v) => v.work(a.workId)!);
+  assert.equal(work.status, 'ready');
+  // Вопрос по-прежнему держит работу, и explain его называет.
+  const diagnosis = stopInputsOf(h, {
+    maxAttempts: h.policy.maxAttempts,
+    repairBudget: h.policy.repairBudget,
+  })
+    .filter((i) => i.kind === 'work' && i.work.id === a.workId)
+    .map(explainStop)[0]!;
+  assert.deepEqual([diagnosis.code, diagnosis.action], ['INPUT_REQUIRED', 'apply-input']);
+  assert.ok(
+    h.proposeTarget(id, null).problems.some((p) => /supersedeInput/.test(p)),
+    'предложение называет выход',
+  );
+  // Выход: заменить вопрос новой редакцией работы и перенести ответ в контекст.
+  h.supersedeInput(id, { by: 'lead', reason: 'новая редакция графа', successor: a.workId }, 2);
+  const { digest } = h.inputContext(id);
+  h.engine.recordReview({
+    ...planReview(h.engine, graph, h.engine.reviews('plan', graph.id).length + 1),
+    contextDigest: digest,
+  });
+  h.engine.approve(graph.id, 'agent', { bindContext: true });
+  const claimed = h.engine.claim('controller')!;
+  assert.equal(claimed.workId, a.workId);
+  assert.equal(claimed.pinned?.contextDigest, digest, 'ответ — в контексте новой попытки');
+  // m-5: снимок для неблокирующего запроса не строится.
+  h.engine.recordAssumptions(claimed.id, claimed.token, {
+    assumptions: [],
+    followUps: [{ question: question(3), effectiveSeverity: 10, floors: ['declared'] }],
+    criticalHits: [],
+    callId: null,
+  });
+  const follow = h.inputRequests({ workId: a.workId }).find((r) => r.kind === 'follow-up')!;
+  h.answerInput(follow.id, { text: 'оставить', actor: { kind: 'lead' } }, follow.version);
+  assert.equal(
+    code(() => h.inputContext(follow.id)),
+    'NOT_READY',
+  );
+  h.close();
 });

@@ -2613,6 +2613,19 @@ export class Engine {
       if (request.kind !== 'question') problems.push('неблокирующий запрос не применяется');
       if (request.lifecycle !== 'answered')
         problems.push(`запрос ${request.lifecycle}, нужен answered`);
+      // Та же проверка исходной остановки, что у applyInput, — с выходом.
+      const last = v.attempts(work.id).at(-1);
+      const atOrigin =
+        (work.status === 'failed' && work.failureKind === 'needs-input') || work.status === 'ready';
+      if (
+        !atOrigin ||
+        last?.id !== request.runId ||
+        v.graph(work.graphId)?.digest !== request.originBasis.graphDigest ||
+        this.host.basis.orderDigest(work, v) !== request.originBasis.orderDigest
+      )
+        problems.push(
+          'работа уже не в исходной остановке (новая редакция графа или постановки): выход — supersedeInput и перенос ответа в контекст новой редакции (input-context, review-plan, согласование)',
+        );
       const answer = latestAnswer(request);
       if (!answer) {
         problems.push('ответа нет');
@@ -2726,7 +2739,7 @@ export class Engine {
       )
         throw new HarnessError(
           'APPROVAL_STALE',
-          'Граф или постановка изменились после вопроса: продолжение — новой ревизией',
+          'Граф или постановка изменились после вопроса: продолжение этой остановки невозможно. Выход с сохранением ответа — supersedeInput (преемник — новая редакция работы), затем снимок с ответом (input-context), review-plan с ним и обычное согласование',
         );
       const contextDigest = options.contextDigest;
       // Политика процесса применена — и у хоста с портом согласования.
