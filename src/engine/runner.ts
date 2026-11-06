@@ -1332,6 +1332,10 @@ export class Runner {
                 signal,
                 base,
               );
+              // Черновик прежней попытки — до установки: манифесты, которые он
+              // меняет, исполнитель увидит уже установленными.
+              if (!attempt.reusedFrom)
+                attempt = await this.continueDraft(attempt, work, repoPath, cwd);
               // Зависимости в дереве исполнителя — до его работы и до снимка
               // защищённых путей: песочница исполнителя установку не пропускает.
               // Взятый кандидат исполнителя не вызывает — ставить незачем.
@@ -1349,7 +1353,10 @@ export class Runner {
                       policy: this.policy,
                       cwd,
                       base,
+                      // С наложенным черновиком манифесты писал прежний исполнитель.
+                      trusted: !attempt.continuedFrom?.applied,
                       gates: installs,
+                      protectedPaths: repo.protectedPaths,
                       artifactDir: join(artifacts, 'candidate', 'writer-dependencies'),
                       signal,
                       execution,
@@ -1363,7 +1370,6 @@ export class Runner {
                     this.reuseCandidate(attempt, work, repo, cwd, base, context),
                   )
                 : await this.timed(attempt, 'implementation', async () => {
-                    attempt = await this.continueDraft(attempt, work, repoPath, cwd);
                     const dir = join(artifacts, 'implementation');
                     await mkdir(dir, { recursive: true });
                     await writeFile(join(dir, 'work.json'), JSON.stringify(work.order, null, 2));
