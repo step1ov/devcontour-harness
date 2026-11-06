@@ -158,7 +158,7 @@ import { expectsReference, propertySeed } from '../verification/property.ts';
 import { selfCheckNote, writeSelfCheck, type SelfCheckPlan } from '../verification/self-check.ts';
 import { measuredInvoke } from './measured.ts';
 import { continuableDraft, implementationBasis } from './reuse.ts';
-import { evaluateInput, type InputEvaluation } from './input-policy.ts';
+import { evaluateInput, normalizeImplementation, type InputEvaluation } from './input-policy.ts';
 
 type Repo = ExecutionPolicy['repositories'][number];
 
@@ -1096,6 +1096,7 @@ export class Runner {
     output: ImplementationResult,
     evaluation: InputEvaluation,
     callId: string,
+    normalized?: string[],
   ) {
     const policy = attempt.inputPolicy ?? inputPolicyOf(this.policy);
     const outcome = (question?: InputOutcome['question']): InputOutcome => ({
@@ -1104,6 +1105,7 @@ export class Runner {
       followUps: evaluation.followUps,
       criticalHits: evaluation.criticalHits,
       callId,
+      ...(normalized?.length ? { normalized } : {}),
     });
     const decision = evaluation.decision;
     switch (decision.kind) {
@@ -1517,11 +1519,18 @@ export class Runner {
                       },
                       signal,
                     );
-                    const result = implementationResultSchema.safeParse(response.output);
-                    if (!result.success)
+                    const parsed = implementationResultSchema.safeParse(response.output);
+                    // Вопрос вне схемы не теряется: controller приводит его к
+                    // схеме и записывает, что исправил; прочий ответ вне схемы —
+                    // отказ, как прежде.
+                    const normalized = parsed.success
+                      ? undefined
+                      : normalizeImplementation(response.output);
+                    if (!parsed.success && !normalized)
                       throw new Error(
-                        'Ответ исполнителя вне схемы: ' + result.error.issues[0]?.message,
+                        'Ответ исполнителя вне схемы: ' + parsed.error.issues[0]?.message,
                       );
+                    const result = { data: parsed.success ? parsed.data : normalized!.output };
                     this.engine.heartbeat(attempt.id, attempt.token);
                     signal.throwIfAborted();
                     // Область записи проверяется до решения о вопросе и
@@ -1584,6 +1593,7 @@ export class Runner {
                         changed,
                       ),
                       response.callId,
+                      normalized?.issues,
                     );
                     if (empty) {
                       await this.options.hooks?.implemented?.({

@@ -28,6 +28,7 @@ import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import { inputContextSource, unappliedInputs, withInput } from '../src/engine/input-requests.ts';
 import { bin, runAll, setup } from './runner-fixture.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
+import { inputPolicyText, normalizeImplementation } from '../src/engine/input-policy.ts';
 import { engineOf, graphOf, planReview, policyOf, ready, sha } from './engine-fixture.ts';
 
 export const question = (severity = 8, extra: Partial<InputQuestion> = {}): InputQuestion => ({
@@ -313,4 +314,53 @@ test('M-4: секрет профиля в вопросе и допущениях
   } finally {
     delete process.env.HARNESS_TEST_INPUT_SECRET;
   }
+});
+
+test('M-6: вопрос вне схемы (длинный текст, ID с пробелом) — needs-input с записью исправлений, а не потерянный вопрос', async () => {
+  const ctx = setup({
+    scenario: {
+      writer: {
+        files: { 'src/greet.js': "exports.greet = () => 'draft';\n" },
+        result: {
+          completed: false,
+          summary: 'вопрос',
+          discoveries: [],
+          inputRequest: {
+            question: 'Q'.repeat(1600),
+            options: [
+              { id: 'Option A', label: 'A', consequence: null },
+              { id: 'Option B', label: 'B', consequence: null },
+            ],
+            recommended: 'Option A',
+            severity: 8,
+            rationale: 'r',
+            affects: [],
+          },
+          assumptions: [],
+        },
+      },
+    },
+    policy: (p) => (p.inputPolicy = { threshold: 7, criticalPaths: [] }),
+  });
+  await runAll(ctx);
+  const work = ctx.engine.read((v) => v.work('add-greeting')!);
+  assert.equal(work.failureKind, 'needs-input', work.failure);
+  const [request] = ctx.engine.inputRequests({ workId: 'add-greeting' });
+  assert.equal(request!.question.question.length, 1500);
+  assert.deepEqual(
+    request!.question.options.map((o) => o.id),
+    ['Option-A', 'Option-B'],
+  );
+  assert.equal(request!.question.recommended, 'Option-A');
+  assert.ok(request!.normalized?.some((n) => /усечено до 1500/.test(n)));
+  assert.ok(request!.normalized?.some((n) => /Option A/.test(n)));
+});
+
+test('M-6: пределы названы в запросе writer; ответ вне схемы без вопроса не исправляется', () => {
+  const text = inputPolicyText({ threshold: 7, criticalPaths: [] });
+  assert.match(text, /question up to 1500 characters/);
+  assert.match(text, /\[A-Za-z0-9_-\]\{1,40\} \(no spaces\)/);
+  assert.match(inputPolicyText({ threshold: 11, criticalPaths: [] }), /up to 6 options/);
+  assert.equal(normalizeImplementation({ completed: true, summary: 1 }), undefined);
+  assert.equal(normalizeImplementation({ completed: false, inputRequest: null }), undefined);
 });

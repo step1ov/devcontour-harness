@@ -1,7 +1,9 @@
 import {
   INPUT_AUTONOMOUS,
+  INPUT_LIMITS,
   INPUT_SEVERITY_MAX,
   criticalAreas,
+  implementationResultSchema,
   type Assumption,
   type ImplementationResult,
   type InputFloor,
@@ -148,6 +150,9 @@ export function evaluateInput(
   return { decision: { kind: 'continue' }, assumptions, followUps, criticalHits };
 }
 
+/** Пределы вопроса и допущений, названные writer: ответ сверх них — вне схемы. */
+const INPUT_LIMITS_TEXT = `Limits: question up to ${INPUT_LIMITS.question} characters; up to ${INPUT_LIMITS.options} options, each id matching [A-Za-z0-9_-]{1,40} (no spaces), label up to 300 characters, consequence up to 1000 characters or null; recommended is one of the option ids or null; rationale up to ${INPUT_LIMITS.rationale} characters; severity an integer 1-10; affects only from the listed areas; up to ${INPUT_LIMITS.assumptions} assumptions, each chosen up to 300 characters.`;
+
 /** Раздел запроса writer: порог, шкала, критические области и пути, как задать вопрос. */
 export function inputPolicyText(policy: InputPolicy) {
   const areas = criticalAreas.join('|');
@@ -163,6 +168,7 @@ export function inputPolicyText(policy: InputPolicy) {
       scale,
       critical +
         ' Critical decisions are sent to the lead as follow-up requests; they never change an approved contract, acceptance or product decision — choose the option that keeps them intact.',
+      INPUT_LIMITS_TEXT,
     ].join(' ');
   return [
     `Decision policy: input threshold ${policy.threshold} (pinned for this attempt).`,
@@ -171,5 +177,129 @@ export function inputPolicyText(policy: InputPolicy) {
     `If a fork has severity below ${policy.threshold}, decide it yourself, continue, and record it in \`assumptions\` (question, chosen, rationale, severity, affects).`,
     `If a fork has severity ${policy.threshold} or higher, do not guess: stop, leave your partial edits in the worktree uncommitted, and return completed=false with \`inputRequest\` (question, up to 6 options each with its consequence, recommended option id or null, severity, rationale, affects). Asking below the threshold is a protocol violation and the attempt counts as unfinished.`,
     'Otherwise return `inputRequest`: null. completed=true together with an inputRequest is invalid.',
+    INPUT_LIMITS_TEXT,
   ].join(' ');
+}
+
+/* ------------------------------------------------------------------ */
+/* Вопрос вне схемы                                                    */
+/* ------------------------------------------------------------------ */
+
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+const text = (v: unknown): string =>
+  typeof v === 'string'
+    ? v
+    : typeof v === 'number' || typeof v === 'boolean'
+      ? String(v)
+      : v === undefined || v === null
+        ? ''
+        : JSON.stringify(v);
+
+/**
+ * Ответ writer вне схемы, в котором есть вопрос: привести вопрос и
+ * допущения к схеме (усечь текст до пределов, исправить ID вариантов, взять
+ * первые шесть вариантов, ограничить серьёзность; неразборчивая серьёзность —
+ * потолок), чтобы вопрос не потерялся, а исправленное было видно в запросе.
+ * Схема договора остаётся строгой: результат проходит её целиком. Ответа без
+ * вопроса функция не исправляет — `undefined`, отказ остаётся отказом.
+ */
+export function normalizeImplementation(
+  raw: unknown,
+): { output: ImplementationResult; issues: string[] } | undefined {
+  if (!isRecord(raw) || !isRecord(raw.inputRequest)) return undefined;
+  const issues: string[] = [];
+  const clip = (value: unknown, max: number, what: string) => {
+    const s = text(value);
+    if (s.length > max) issues.push(`${what}: ${s.length} знаков, усечено до ${max}`);
+    return s.slice(0, max);
+  };
+  const severity = (value: unknown, what: string) => {
+    const n = typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : NaN;
+    if (Number.isNaN(n)) {
+      issues.push(`${what}: серьёзность не число — потолок ${INPUT_SEVERITY_MAX}`);
+      return INPUT_SEVERITY_MAX;
+    }
+    const clamped = Math.min(INPUT_SEVERITY_MAX, Math.max(1, n));
+    if (clamped !== value) issues.push(`${what}: серьёзность ${String(value)} → ${clamped}`);
+    return clamped;
+  };
+  const areas = (value: unknown, what: string) => {
+    const list = Array.isArray(value) ? value : [];
+    const known = list.filter((a): a is (typeof criticalAreas)[number] =>
+      (criticalAreas as readonly unknown[]).includes(a),
+    );
+    if (known.length !== list.length) issues.push(`${what}: неизвестные области отброшены`);
+    return [...new Set(known)];
+  };
+  const q = raw.inputRequest;
+  const rawOptions = Array.isArray(q.options) ? q.options.filter(isRecord) : [];
+  if (rawOptions.length > INPUT_LIMITS.options)
+    issues.push(`варианты: ${rawOptions.length}, оставлены первые ${INPUT_LIMITS.options}`);
+  const ids = new Map<string, string>();
+  const options = rawOptions.slice(0, INPUT_LIMITS.options).map((o, i) => {
+    let id = text(o.id)
+      .replace(/[^A-Za-z0-9_-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40);
+    if (!id || [...ids.values()].includes(id)) id = `option-${i + 1}`;
+    if (id !== text(o.id)) issues.push(`вариант ${i + 1}: ID «${text(o.id).slice(0, 60)}» → ${id}`);
+    ids.set(text(o.id), id);
+    const label = clip(o.label, 300, `вариант ${id}`) || id;
+    const consequence =
+      o.consequence === null || o.consequence === undefined
+        ? null
+        : clip(o.consequence, 1000, `последствие ${id}`);
+    return { id, label, consequence };
+  });
+  const recommended =
+    typeof q.recommended === 'string' && ids.has(q.recommended) ? ids.get(q.recommended)! : null;
+  if (q.recommended !== null && q.recommended !== undefined && recommended === null)
+    issues.push('рекомендуемый вариант не из вариантов — снят');
+  const question = {
+    question: clip(q.question, INPUT_LIMITS.question, 'вопрос') || 'Вопрос без текста',
+    options,
+    recommended,
+    severity: severity(q.severity, 'вопрос'),
+    rationale: clip(q.rationale, INPUT_LIMITS.rationale, 'основание'),
+    affects: areas(q.affects, 'вопрос'),
+  };
+  const rawAssumptions = Array.isArray(raw.assumptions) ? raw.assumptions.filter(isRecord) : [];
+  if (rawAssumptions.length > INPUT_LIMITS.assumptions)
+    issues.push(
+      `допущения: ${rawAssumptions.length}, оставлены первые ${INPUT_LIMITS.assumptions}`,
+    );
+  const assumptions = rawAssumptions.slice(0, INPUT_LIMITS.assumptions).map((a, i) => ({
+    question: clip(a.question, INPUT_LIMITS.question, `допущение ${i + 1}`) || 'Без текста',
+    chosen: clip(a.chosen, 300, `выбор допущения ${i + 1}`) || 'не назван',
+    rationale: clip(a.rationale, INPUT_LIMITS.rationale, `основание допущения ${i + 1}`),
+    severity: severity(a.severity, `допущение ${i + 1}`),
+    affects: areas(a.affects, `допущение ${i + 1}`),
+  }));
+  if (raw.completed !== false)
+    issues.push('completed: true вместе с вопросом — работа считается незавершённой');
+  const parsed = implementationResultSchema.safeParse({
+    completed: false,
+    summary: text(raw.summary),
+    discoveries: Array.isArray(raw.discoveries) ? raw.discoveries : [],
+    inputRequest: question,
+    assumptions,
+  });
+  if (!parsed.success) {
+    // Находки вне схемы — не повод терять вопрос.
+    const retry = implementationResultSchema.safeParse({
+      completed: false,
+      summary: text(raw.summary),
+      discoveries: [],
+      inputRequest: question,
+      assumptions,
+    });
+    if (!retry.success) return undefined;
+    issues.push('находки вне схемы отброшены');
+    return { output: retry.data, issues: issues.slice(0, 10).map((s) => s.slice(0, 300)) };
+  }
+  return {
+    output: parsed.data,
+    issues: (issues.length ? issues : ['ответ вне схемы']).slice(0, 10).map((s) => s.slice(0, 300)),
+  };
 }

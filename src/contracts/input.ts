@@ -275,6 +275,12 @@ export const inputRequestSchema = z.strictObject({
       successor: z.string().min(1).max(200).optional(),
     })
     .optional(),
+  /**
+   * Ответ writer был вне схемы, и controller привёл вопрос к ней (усёк
+   * текст, исправил ID вариантов, ограничил серьёзность): что именно
+   * исправлено. Нет поля — вопрос пришёл в схеме.
+   */
+  normalized: z.array(z.string().min(1).max(300)).min(1).max(10).optional(),
   version: z.number().int().positive(),
 });
 export type InputRequest = z.infer<typeof inputRequestSchema>;
@@ -300,6 +306,8 @@ export interface InputOutcome {
   followUps: RatedInput[];
   criticalHits: string[];
   callId: string | null;
+  /** Ответ был вне схемы: что controller исправил, чтобы не потерять вопрос. */
+  normalized?: string[];
 }
 
 /** Запрос держит работу: вопрос, ещё не применённый и не закрытый. */

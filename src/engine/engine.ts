@@ -2181,6 +2181,9 @@ export class Engine {
         question: structuredClone(question.question),
         effectiveSeverity: question.effectiveSeverity,
         floors: [...question.floors],
+        ...(input.normalized?.length
+          ? { normalized: input.normalized.slice(0, 10).map((n) => n.slice(0, 300)) }
+          : {}),
         lifecycle: stop ? 'pending' : 'cancelled',
         ...(stop
           ? {}
