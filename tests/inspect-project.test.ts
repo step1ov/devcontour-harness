@@ -135,6 +135,7 @@ test('H01-A: npm fixture — воспроизводимые факты без п
   assert.equal(first.git.baseSha, p.git('rev-parse', 'HEAD'));
   assert.equal(first.git.branch, 'main');
   assert.equal(first.git.dirty, false);
+  assert.deepEqual(first.git.changes, []);
   assert.deepEqual(first.lockfiles, ['package-lock.json']);
   assert.deepEqual(first.packageManager, {
     status: 'detected',
@@ -257,6 +258,7 @@ test('H01-B: инспекция не меняет файлы, refs и индек
   assert.ok(codes(facts).includes('devcontour-owned'));
   assert.equal(facts.diagnostics.find((d) => d.code === 'devcontour-owned')!.severity, 'info');
   assert.equal(facts.git.dirty, true);
+  assert.deepEqual(facts.git.changes, ['untracked.txt']);
   assert.ok(codes(facts).includes('dirty-checkout'));
 });
 

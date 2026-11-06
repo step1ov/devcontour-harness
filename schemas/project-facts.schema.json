@@ -61,6 +61,13 @@
             "boolean",
             "null"
           ]
+        },
+        "changes": {
+          "maxItems": 50,
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
@@ -68,7 +75,8 @@
         "worktree",
         "baseSha",
         "branch",
-        "dirty"
+        "dirty",
+        "changes"
       ],
       "additionalProperties": false
     },

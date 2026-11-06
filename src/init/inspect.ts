@@ -140,6 +140,7 @@ export async function inspectProject(options: InspectProjectOptions): Promise<Pr
     baseSha: null,
     branch: null,
     dirty: null,
+    changes: [],
   };
   if ('problem' in facts) {
     const text = {
@@ -159,6 +160,7 @@ export async function inspectProject(options: InspectProjectOptions): Promise<Pr
       baseSha: facts.baseSha,
       branch: facts.branch,
       dirty: null,
+      changes: [],
     };
     if (facts.path !== facts.root)
       add(
@@ -196,6 +198,14 @@ export async function inspectProject(options: InspectProjectOptions): Promise<Pr
       );
       const dirty = status.code === 0 ? status.stdout.length > 0 : null;
       gitSummary.dirty = dirty;
+      // Записи -z: `XY путь`, у переименования следом исходный путь отдельной записью.
+      const entries = status.code === 0 ? status.stdout.split('\0') : [];
+      for (let i = 0; i < entries.length && gitSummary.changes.length < 50; i++) {
+        const entry = entries[i]!;
+        if (entry.length < 4) continue;
+        gitSummary.changes.push(entry.slice(3));
+        if (entry[0] === 'R' || entry[0] === 'C') i++;
+      }
       if (dirty)
         add(
           'dirty-checkout',

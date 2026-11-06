@@ -105,6 +105,8 @@ export const projectFactsSchema = z.strictObject({
     branch: z.string().nullable(),
     /** Изменения рабочего дерева и индекса, без игнорируемых; null — неизвестно. */
     dirty: z.boolean().nullable(),
+    /** Первые 50 изменённых путей (`git status`), без игнорируемых. */
+    changes: z.array(z.string()).max(50),
   }),
   /** Lockfiles корня по известным менеджерам. */
   lockfiles: z.array(z.string()),
