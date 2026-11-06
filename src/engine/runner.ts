@@ -104,6 +104,7 @@ import {
 } from '../agents/review-probe.ts';
 import {
   prepareWriterDependencies,
+  draftTouchesInstall,
   runGate,
   writerDependenciesNote,
   writerDependencyGates,
@@ -1353,8 +1354,12 @@ export class Runner {
                       policy: this.policy,
                       cwd,
                       base,
-                      // С наложенным черновиком манифесты писал прежний исполнитель.
-                      trusted: !attempt.continuedFrom?.applied,
+                      // Манифесты из черновика писал прежний исполнитель; черновик
+                      // без манифестов ставит зависимости базы.
+                      trusted: !(
+                        attempt.continuedFrom?.applied &&
+                        draftTouchesInstall(attempt.continuedFrom.files)
+                      ),
                       gates: installs,
                       protectedPaths: repo.protectedPaths,
                       artifactDir: join(artifacts, 'candidate', 'writer-dependencies'),

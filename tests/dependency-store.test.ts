@@ -45,7 +45,11 @@ import {
   type StoreContext,
 } from '../src/verification/dependency-store.ts';
 import { runGatesAt, type GatesAtContext } from '../src/verification/gates-at.ts';
-import { prepareWriterDependencies } from '../src/verification/gates.ts';
+import {
+  draftTouchesInstall,
+  prepareWriterDependencies,
+  writerDependenciesNote,
+} from '../src/verification/gates.ts';
 import { redactor } from '../src/environment/redaction.ts';
 import { components } from './components-fixture.ts';
 import { ready } from './engine-fixture.ts';
@@ -2325,10 +2329,12 @@ test('DS39: установка до исполнителя — node_modules вн
   assert.deepEqual(outcome.removed, ['apps/x/dist/y.js']);
   assert.equal(outcome.frozen, true);
   assert.equal(outcome.installed[0], 'install');
-  assert.match(
-    outcome.failed?.summary ?? '',
-    /отслеживаемые файлы, изменения отменены: pnpm-lock\.yaml/,
-  );
+  // Установка прошла: возврат lockfile — не «не установлено».
+  assert.equal(outcome.failed, undefined);
+  assert.deepEqual(outcome.reverted, ['pnpm-lock.yaml']);
+  const note = writerDependenciesNote(outcome);
+  assert.doesNotMatch(note, /not installed/);
+  assert.match(note, /restored them.*pnpm-lock\.yaml/);
   assert.equal(readFileSync(join(r.dir, 'pnpm-lock.yaml'), 'utf8'), 'lockfileVersion: 9\n');
   assert.equal(
     readFileSync(join(r.dir, 'apps/x/keep.txt'), 'utf8'),
@@ -2370,4 +2376,12 @@ test('DS40: установка до исполнителя идёт после �
   const observed = JSON.parse(readFileSync(`${ctx.scenarioPath}.writer.1.observed`, 'utf8'));
   assert.deepEqual(observed, { 'src/greet.js': half, 'src/draft.js': 'draft\n' });
   h.close();
+});
+
+test('DS41: черновик без манифестов не делает установку виной прежнего исполнителя', () => {
+  assert.equal(draftTouchesInstall(['src/a.ts', 'README.md']), false);
+  assert.equal(draftTouchesInstall(['package.json']), true);
+  assert.equal(draftTouchesInstall(['apps/x/pnpm-lock.yaml']), true);
+  assert.equal(draftTouchesInstall(['.npmrc']), true);
+  assert.equal(draftTouchesInstall(['docs/package.json.md']), false);
 });

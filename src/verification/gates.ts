@@ -1153,6 +1153,8 @@ export interface WriterDependencies {
   installed: string[];
   /** Первый отказ: gate и короткая сводка; дальше установка не идёт. */
   failed?: { gate: string; summary: string };
+  /** Отслеживаемые файлы, которые изменила установка и вернул controller. */
+  reverted?: string[];
   /** Манифесты и lockfiles в каталогах установки есть, и все они в защищённых путях. */
   frozen: boolean;
   /** Новые `node_modules`, скрытые от git своим `.gitignore`. */
@@ -1349,7 +1351,8 @@ export async function prepareWriterDependencies(
               .map((p) => relative(root, p))
               .join(', ') +
             (planted.length > 5 ? ` и ещё ${planted.length - 5}` : ''));
-      throw run.trusted
+      // Нечитаемый снимок — отказ среды при любом происхождении манифестов.
+      throw run.trusted || unreadable
         ? new TaskFailure('environment', message, undefined, 'sandbox-policy')
         : new TaskFailure('scope-violation', message + ' (над черновиком прежней попытки)');
     }
@@ -1400,14 +1403,9 @@ export async function prepareWriterDependencies(
       await writeFile(join(root, path), bytes);
     }
   }
-  if (reverted.length && !result.failed)
-    result.failed = {
-      gate: result.installed.at(-1) ?? run.gates[0]!.id,
-      summary: redact(
-        'установка изменила отслеживаемые файлы, изменения отменены: ' +
-          reverted.slice(0, 5).join(', '),
-      ).slice(0, WRITER_DEPENDENCIES_NOTE_LIMIT),
-    };
+  // Установка прошла, но правила отслеживаемые файлы: зависимости стоят,
+  // а файлы возвращены — это не «не установлено».
+  if (reverted.length) result.reverted = reverted.slice(0, WRITER_DEPENDENCIES_LIST_LIMIT);
   // Новые `node_modules` — где угодно в дереве, и внутри каталогов, уже
   // бывших неотслеживаемыми, — скрываются своим `.gitignore`, как копия
   // хранилища: исполнитель коммитит дерево целиком (`git add -A`), а проект
@@ -1465,9 +1463,20 @@ export function writerDependenciesNote(outcome: WriterDependencies) {
           : '') +
         ' Run local checks with the installed tools.',
     );
+  if (outcome.reverted?.length)
+    parts.push(
+      `The install changed tracked files and the controller restored them (untrusted names as JSON: ${JSON.stringify(outcome.reverted.slice(0, 5))}); installed dependencies may not match those files exactly.`,
+    );
   if (outcome.removed?.length)
     parts.push(
       `The controller removed ${outcome.removedCount ?? outcome.removed.length} untracked path(s) the install left outside node_modules (untrusted names as JSON: ${JSON.stringify(outcome.removed.slice(0, 5))}); they are not part of your work.`,
     );
   return parts.join(' ');
+}
+
+/** Манифесты и настройки установки: черновик с ними меняет то, что ставится. */
+const installInputs =
+  /(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|bun\.lockb?|\.npmrc|\.pnpmfile\.cjs)$/;
+export function draftTouchesInstall(files: string[]) {
+  return files.some((f) => installInputs.test(f));
 }
