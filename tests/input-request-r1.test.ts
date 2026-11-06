@@ -6,13 +6,15 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   HarnessError,
   WORKSPACE_OWNER,
   contextDigest,
+  executionPolicySchema,
   latestAnswer,
   sha256,
   sourceDigest,
@@ -27,7 +29,8 @@ import { Engine } from '../src/engine/engine.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import { inputContextSource, unappliedInputs, withInput } from '../src/engine/input-requests.ts';
-import { approve, bin, implement, runAll, setup } from './runner-fixture.ts';
+import { approve, bin, greet, implement, runAll, setup } from './runner-fixture.ts';
+import { Runner } from '../src/engine/runner.ts';
 import { hsetup } from './harness-fixture.ts';
 import { stopInputsOf } from '../src/explain/state.ts';
 import { explainStop } from '../src/projections/stop.ts';
@@ -543,4 +546,137 @@ test('M-2: новая редакция графа держит вопрос; в�
     'NOT_READY',
   );
   h.close();
+});
+
+const exhausted = {
+  stream: fileURLToPath(
+    new URL('./fixtures/context-exhaustion/blocking-limit.jsonl', import.meta.url),
+  ),
+  exit: 1,
+};
+const withAssumption = (severity: number) => ({
+  files: { 'src/greet.js': greet },
+  result: {
+    completed: true,
+    summary: 'Добавлена greet',
+    discoveries: [],
+    inputRequest: null,
+    assumptions: [
+      { question: 'Регистр имени?', chosen: 'как передано', rationale: 'r', severity, affects: [] },
+    ],
+  },
+});
+
+/** Новый процесс над тем же каталогом состояния с другой политикой. */
+function reopen(ctx: ReturnType<typeof setup>, patch: (p: Record<string, unknown>) => void) {
+  const raw = structuredClone(ctx.policy) as unknown as Record<string, unknown>;
+  patch(raw);
+  const policy = executionPolicySchema.parse(raw);
+  const store = new SqliteExecutionStore(join(ctx.state, 'state.sqlite'), 'test');
+  const engine = new Engine({ host: standaloneHost(store, policy), policy });
+  const adapter = (name: 'claude' | 'codex') =>
+    cliAdapter(name, { executable: bin(`fake-${name}`), toolProfiles: policy.toolProfiles });
+  const runner = new Runner({
+    engine,
+    stateDir: ctx.state,
+    baseDir: ctx.repo.dir,
+    adapters: { claude: adapter('claude'), codex: adapter('codex') },
+    owner: 'runner-1',
+    resourceDatabase: join(ctx.state, 'resources.sqlite'),
+  });
+  return { store, engine, runner };
+}
+
+test('M-5: взятый кандидат несёт решения его попытки — они записаны в новую попытку, reviewer их видит', async () => {
+  const ctx = setup({
+    writer: 'claude',
+    reviewer: 'claude',
+    vendor: 'same-vendor-allowed',
+    scenario: {
+      writer: withAssumption(3),
+      reviewer: [exhausted, { ...approve(), recordPrompt: true }],
+    },
+    policy: (p) => {
+      p.inputPolicy = { threshold: 7, criticalPaths: [] };
+      (p as { maxAttempts: number }).maxAttempts = 5;
+    },
+  });
+  await runAll(ctx);
+  ctx.engine.retry('add-greeting');
+  ctx.engine.resume();
+  await ctx.runner.drain();
+  const [first, second] = ctx.engine.read((v) => v.attempts('add-greeting'));
+  assert.equal(first!.failureKind, 'context-exhausted', first!.error);
+  assert.equal(second!.reusedFrom?.runId, first!.id, 'кандидат взят');
+  assert.deepEqual(
+    second!.assumptions?.map((a) => a.question),
+    ['Регистр имени?'],
+  );
+  const reviewer = readFileSync(`${ctx.scenarioPath}.reviewer.1.prompt`, 'utf8');
+  assert.match(reviewer, /Decisions the writer made on its own[\s\S]*Регистр имени/);
+});
+
+test('M-5: решения кандидата переоцениваются по политике новой попытки — не ниже порога останавливают', async () => {
+  const ctx = setup({
+    writer: 'claude',
+    reviewer: 'claude',
+    vendor: 'same-vendor-allowed',
+    scenario: { writer: withAssumption(8), reviewer: [exhausted, approve()] },
+    policy: (p) => {
+      p.inputPolicy = { threshold: 11, criticalPaths: [] };
+      (p as { maxAttempts: number }).maxAttempts = 5;
+    },
+  });
+  await runAll(ctx);
+  ctx.store.close();
+  const next = reopen(ctx, (p) => (p.inputPolicy = { threshold: 7, criticalPaths: [] }));
+  next.engine.retry('add-greeting');
+  await next.runner.init();
+  next.engine.resume();
+  await next.runner.drain();
+  const attempts = next.engine.read((v) => v.attempts('add-greeting'));
+  assert.equal(attempts[1]!.reusedFrom?.runId, attempts[0]!.id);
+  assert.equal(attempts[1]!.failureKind, 'needs-input', attempts[1]!.error);
+  next.store.close();
+});
+
+test('M-5: продолжение черновика показывает решения прежней попытки writer и reviewer', async () => {
+  const ctx = setup({
+    scenario: {
+      writer: [
+        {
+          files: { 'src/greet.js': "exports.greet = () => 'draft';\n" },
+          result: {
+            completed: false,
+            summary: 'не успел',
+            discoveries: [],
+            inputRequest: null,
+            assumptions: [
+              {
+                question: 'Регистр имени?',
+                chosen: 'как передано',
+                rationale: 'r',
+                severity: 2,
+                affects: [],
+              },
+            ],
+          },
+        },
+        { ...implement(), recordPrompt: true },
+      ],
+      reviewer: { ...approve(), recordPrompt: true },
+    },
+    policy: (p) => (p.inputPolicy = { threshold: 7, criticalPaths: [] }),
+  });
+  await runAll(ctx);
+  ctx.engine.retry('add-greeting');
+  ctx.engine.resume();
+  await ctx.runner.drain();
+  const second = ctx.engine.read((v) => v.attempts('add-greeting')[1]!);
+  assert.equal(second.continuedFrom?.applied, true);
+  assert.equal(second.status, 'succeeded', second.error);
+  const writer = readFileSync(`${ctx.scenarioPath}.writer.1.prompt`, 'utf8');
+  assert.match(writer, /Decisions the previous attempt made[\s\S]*Регистр имени/);
+  const reviewer = readFileSync(`${ctx.scenarioPath}.reviewer.0.prompt`, 'utf8');
+  assert.match(reviewer, /Decisions the writer made on its own[\s\S]*Регистр имени/);
 });

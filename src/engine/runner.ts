@@ -1091,11 +1091,45 @@ export class Runner {
    * `completed: false` без вопроса — `unfinished`. Готовая реализация
    * записывает допущения и неблокирующие запросы под fencing и идёт дальше.
    */
+  /**
+   * Взятый кандидат несёт решения попытки, которая его написала: они
+   * переоцениваются по политике вопросов этой попытки (порог и критические
+   * пути могли смениться) — развилка не ниже порога останавливает попытку
+   * `needs-input`, остальные записываются в неё, и reviewer их видит.
+   */
+  private async carryAssumptions(attempt: AttemptState, cwd: string, base: string, sha: string) {
+    const source = this.engine.read((v) => v.attempt(attempt.reusedFrom!.runId)?.assumptions ?? []);
+    if (!source.length) return;
+    const assumptions = source.map((a) => ({
+      question: a.question,
+      chosen: a.chosen,
+      rationale: a.rationale,
+      severity: a.severity,
+      affects: a.affects,
+    }));
+    const changed = (await git(cwd, 'diff', '--no-renames', '--name-only', '-z', base, sha))
+      .split('\0')
+      .filter(Boolean);
+    const output = {
+      completed: true,
+      summary: '',
+      discoveries: [],
+      inputRequest: null,
+      assumptions,
+    };
+    this.decideInput(
+      attempt,
+      output,
+      evaluateInput(output, attempt.inputPolicy ?? inputPolicyOf(this.policy), changed),
+      null,
+    );
+  }
+
   private decideInput(
     attempt: AttemptState,
     output: ImplementationResult,
     evaluation: InputEvaluation,
-    callId: string,
+    callId: string | null,
     normalized?: string[],
   ) {
     const policy = attempt.inputPolicy ?? inputPolicyOf(this.policy);
@@ -1453,7 +1487,12 @@ export class Runner {
                 );
               const sha = attempt.reusedFrom
                 ? await this.timed(attempt, 'implementation-reuse', () =>
-                    this.reuseCandidate(attempt, work, repo, cwd, base, context),
+                    this.reuseCandidate(attempt, work, repo, cwd, base, context).then(
+                      async (reused) => {
+                        await this.carryAssumptions(attempt, cwd, base, reused);
+                        return reused;
+                      },
+                    ),
                   )
                 : await this.timed(attempt, 'implementation', async () => {
                     const dir = join(artifacts, 'implementation');
@@ -3088,7 +3127,27 @@ export class Runner {
         );
       // Развилки, которые исполнитель решил сам: reviewer проверяет, что
       // ни одна не меняет согласованный договор, критерии или решение продукта.
-      const assumptions = review ? (v.attempt(attempt.id)?.assumptions ?? []) : [];
+      // Решения попытки, черновик которой продолжается: writer видит их и
+      // записывает заново те, что оставляет; reviewer — вместе со своими.
+      const continued = attempt.continuedFrom?.applied
+        ? (v.attempt(attempt.continuedFrom.runId)?.assumptions ?? [])
+        : [];
+      if (!review && continued.length)
+        out.push(
+          'Decisions the previous attempt made on its own while writing the draft you continue (assumptions, as rated by the controller). Keep or revisit each; record every decision you keep in `assumptions` again: ' +
+            JSON.stringify(
+              continued.map((a) => ({
+                question: a.question,
+                chosen: a.chosen,
+                rationale: a.rationale,
+                severity: a.effectiveSeverity,
+              })),
+            ),
+        );
+      const own = review ? (v.attempt(attempt.id)?.assumptions ?? []) : [];
+      const assumptions = review
+        ? [...own, ...continued.filter((c) => !own.some((a) => a.question === c.question))]
+        : [];
       if (assumptions.length)
         out.push(
           'Decisions the writer made on its own and recorded as assumptions (question, chosen, severity as rated by the controller). Reject the change if any of them alters an approved contract, acceptance criterion or product decision, or if the choice is clearly unreasonable: ' +
