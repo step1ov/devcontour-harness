@@ -507,84 +507,115 @@ export class Engine {
     } = {},
   ) {
     return this.tx('graph.approved', (tx) => {
-      this.assertCurrentPolicy(tx);
-      const graph = tx.graph(graphId);
-      if (!graph) throw new HarnessError('NOT_FOUND', 'Граф не найден: ' + graphId);
-      if (actor !== this.policy.approvalMode)
-        throw new HarnessError(
-          'APPROVAL_REQUIRED',
-          `Политика требует согласования ${this.policy.approvalMode === 'operator' ? 'оператором' : 'агентом-ревьюером'}`,
-        );
-      const rounds = tx
-        .locals('reviews', WORKSPACE_OWNER)
-        .map((r) => r.value)
-        .filter((r) => r.kind === 'plan' && r.subject === graphId)
-        .sort((a, b) => a.round - b.round);
-      const last = rounds.at(-1);
-      if (!last || last.digest !== graph.digest)
-        throw new HarnessError('APPROVAL_REQUIRED', 'Нет ревью плана для текущего digest графа');
-      if (actor === 'agent' && !last.approved)
-        throw new HarnessError('REVIEW_REJECTED', 'Последний раунд ревью плана не одобрил граф');
-      if (last.reviewerBinding !== this.reviewerBinding('plan', last.authorRuntime))
-        throw new HarnessError(
-          'APPROVAL_REQUIRED',
-          'Ревью плана проведено при другом назначении reviewer; нужен новый раунд',
-        );
-      // Свойства поручений существуют в их договорах проверки и исполняются
-      // их генеративными gates: иначе ожидаемая проверка не определена.
-      const problems = tx.works(graphId).flatMap((w) => {
-        const repo = this.repository(w.order.repositoryId);
-        return orderPropertyProblems(w.order, contractDocuments(w.order, tx), {
-          configured: repo.gates,
-          ...(w.order.gates ? { scope: expandGateRefs(repo, w.order.gates) } : {}),
-        });
-      });
-      if (problems.length)
-        throw new HarnessError(
-          'INVALID_INPUT',
-          'Договор проверки поручений не согласован: ' + problems.join('; '),
-        );
-      const policy = executionDigest(this.policy);
-      const context = options.bindContext ? { digest: last.contextDigest ?? null } : undefined;
-      if (
-        graph.approval?.digest === graph.digest &&
-        graph.policyDigest === policy &&
-        graph.approval.context?.digest === context?.digest
-      )
-        return { graph, changed: false };
-      const at = iso(this.now());
-      const approval: TechnicalApproval = {
-        actor,
-        digest: graph.digest,
-        authorRuntime: last.authorRuntime === 'external' ? undefined : last.authorRuntime,
-        reviewerRuntime: last.reviewerRuntime,
-        artifact: last.artifact,
-        ...(context ? { context } : {}),
-      };
-      tx.putGraph({ ...graph, policyDigest: policy, approval: { ...approval, at } });
-      tx.emit({ type: 'graph.approved', graphId, payload: { digest: graph.digest, actor } });
-      for (const work of tx.works(graphId)) {
-        if (work.status !== 'draft') continue;
-        const ready: WorkState = structuredClone({
-          ...work,
-          status: 'ready' as const,
-          approvedAt: at,
-          approvedDigest: this.host.basis.orderDigest(work, tx),
-          approvedScope: this.host.basis.scopeDigest(work, tx),
-          approval,
-        });
-        if (closeIfBasisChanged(ready, at, this.episodeOf(ready, tx)))
-          this.recoveryEvent(tx, ready, ready.recoveryHistory!.at(-1)!);
-        tx.putWork(ready);
-        tx.emit({
-          type: 'work.ready',
-          graphId,
-          workId: work.id,
-          payload: { orderDigest: ready.approvedDigest! },
-        });
-      }
-      return { graph: tx.graph(graphId)!, changed: true };
+      const { graph, last } = this.approvalCheck(tx, graphId, actor);
+      return this.activateApproval(tx, graph, last, actor, options);
     });
+  }
+
+  /**
+   * Проверки согласования графа (`approve`): политика процесса применена,
+   * актёр — режим политики, последний раунд ревью плана относится к текущему
+   * digest графа (в режиме `agent` — одобрен) и проведён при текущем
+   * назначении reviewer, договоры проверки поручений согласованы. Ничего не
+   * пишет, кроме записи применённой политики барьером; отказ — исключение.
+   * Общая для `approve` и `applyInput`: продолжение после ответа проходит те
+   * же проверки, а не ослабленные.
+   */
+  approvalCheck(tx: ExecutionTransaction, graphId: string, actor: TechnicalApproval['actor']) {
+    this.assertCurrentPolicy(tx);
+    const graph = tx.graph(graphId);
+    if (!graph) throw new HarnessError('NOT_FOUND', 'Граф не найден: ' + graphId);
+    if (actor !== this.policy.approvalMode)
+      throw new HarnessError(
+        'APPROVAL_REQUIRED',
+        `Политика требует согласования ${this.policy.approvalMode === 'operator' ? 'оператором' : 'агентом-ревьюером'}`,
+      );
+    const rounds = tx
+      .locals('reviews', WORKSPACE_OWNER)
+      .map((r) => r.value)
+      .filter((r) => r.kind === 'plan' && r.subject === graphId)
+      .sort((a, b) => a.round - b.round);
+    const last = rounds.at(-1);
+    if (!last || last.digest !== graph.digest)
+      throw new HarnessError('APPROVAL_REQUIRED', 'Нет ревью плана для текущего digest графа');
+    if (actor === 'agent' && !last.approved)
+      throw new HarnessError('REVIEW_REJECTED', 'Последний раунд ревью плана не одобрил граф');
+    if (last.reviewerBinding !== this.reviewerBinding('plan', last.authorRuntime))
+      throw new HarnessError(
+        'APPROVAL_REQUIRED',
+        'Ревью плана проведено при другом назначении reviewer; нужен новый раунд',
+      );
+    // Свойства поручений существуют в их договорах проверки и исполняются
+    // их генеративными gates: иначе ожидаемая проверка не определена.
+    const problems = tx.works(graphId).flatMap((w) => {
+      const repo = this.repository(w.order.repositoryId);
+      return orderPropertyProblems(w.order, contractDocuments(w.order, tx), {
+        configured: repo.gates,
+        ...(w.order.gates ? { scope: expandGateRefs(repo, w.order.gates) } : {}),
+      });
+    });
+    if (problems.length)
+      throw new HarnessError(
+        'INVALID_INPUT',
+        'Договор проверки поручений не согласован: ' + problems.join('; '),
+      );
+    return { graph, last };
+  }
+
+  /**
+   * Записать согласование графа по проверенному раунду (`approvalCheck`):
+   * digest, политика, при `bindContext` — снимок контекста раунда; черновые
+   * поручения становятся готовыми. Повтор того же согласования ничего не
+   * меняет. Только внутри транзакции после `approvalCheck`.
+   */
+  activateApproval(
+    tx: ExecutionTransaction,
+    graph: GraphState,
+    last: ReviewRecord,
+    actor: TechnicalApproval['actor'],
+    options: { bindContext?: boolean } = {},
+  ) {
+    const graphId = graph.id;
+    const policy = executionDigest(this.policy);
+    const context = options.bindContext ? { digest: last.contextDigest ?? null } : undefined;
+    if (
+      graph.approval?.digest === graph.digest &&
+      graph.policyDigest === policy &&
+      graph.approval.context?.digest === context?.digest
+    )
+      return { graph, changed: false };
+    const at = iso(this.now());
+    const approval: TechnicalApproval = {
+      actor,
+      digest: graph.digest,
+      authorRuntime: last.authorRuntime === 'external' ? undefined : last.authorRuntime,
+      reviewerRuntime: last.reviewerRuntime,
+      artifact: last.artifact,
+      ...(context ? { context } : {}),
+    };
+    tx.putGraph({ ...graph, policyDigest: policy, approval: { ...approval, at } });
+    tx.emit({ type: 'graph.approved', graphId, payload: { digest: graph.digest, actor } });
+    for (const work of tx.works(graphId)) {
+      if (work.status !== 'draft') continue;
+      const ready: WorkState = structuredClone({
+        ...work,
+        status: 'ready' as const,
+        approvedAt: at,
+        approvedDigest: this.host.basis.orderDigest(work, tx),
+        approvedScope: this.host.basis.scopeDigest(work, tx),
+        approval,
+      });
+      if (closeIfBasisChanged(ready, at, this.episodeOf(ready, tx)))
+        this.recoveryEvent(tx, ready, ready.recoveryHistory!.at(-1)!);
+      tx.putWork(ready);
+      tx.emit({
+        type: 'work.ready',
+        graphId,
+        workId: work.id,
+        payload: { orderDigest: ready.approvedDigest! },
+      });
+    }
+    return { graph: tx.graph(graphId)!, changed: true };
   }
 
   /* ---------------------------------------------------------------- */
@@ -3187,36 +3218,51 @@ export class Engine {
           'INPUT_REQUIRED',
           `Поручение ждёт ${question.lifecycle === 'pending' ? 'ответа' : 'применения ответа'} на вопрос исполнителя ${question.id}; повтор без ответа запрещён`,
         );
-      const exhausted = w.attempt >= this.policy.maxAttempts || neutralExhausted(w);
-      if (w.status === 'ready' && !exhausted) return { work: w, changed: false };
-      if (!['failed', 'cancelled'].includes(w.status) && !(exhausted && !w.activeRunId))
-        throw new HarnessError('NOT_READY', 'Повтор доступен после отказа или отмены');
-      if (exhausted && !reset?.reason.trim())
-        throw new HarnessError(
-          'ATTEMPTS_EXHAUSTED',
-          'Исчерпан лимит попыток; повторите со сбросом и причиной',
-        );
-      const next: WorkState = {
-        ...w,
-        status: w.approvedDigest ? 'ready' : 'draft',
-        attempt: exhausted ? 0 : w.attempt,
-        neutralFailures: exhausted ? undefined : w.neutralFailures,
-        failure: undefined,
-        failureKind: undefined,
-        failureFingerprint: undefined,
-      };
-      tx.putWork(next);
-      tx.emit({
-        type: 'work.retried',
-        graphId: w.graphId,
-        workId,
-        payload: {
-          by,
-          reset: exhausted,
-          ...(exhausted ? { spent: w.attempt, reasonLength: reset!.reason.trim().length } : {}),
-        },
-      });
-      return { work: next, changed: true };
+      return this.retryIn(tx, w, reset, by);
     });
+  }
+
+  /**
+   * Повтор поручения внутри транзакции (`retry`): правила — те же, что у
+   * `retry`, — пока попытки не исчерпаны, без сброса; исчерпаны — только
+   * явный сброс с причиной. Общий для `retry` и `applyInput`.
+   */
+  retryIn(
+    tx: ExecutionTransaction,
+    w: WorkState,
+    reset: { reason: string } | undefined,
+    by: RetryActor,
+  ) {
+    const workId = w.id;
+    const exhausted = w.attempt >= this.policy.maxAttempts || neutralExhausted(w);
+    if (w.status === 'ready' && !exhausted) return { work: w, changed: false };
+    if (!['failed', 'cancelled'].includes(w.status) && !(exhausted && !w.activeRunId))
+      throw new HarnessError('NOT_READY', 'Повтор доступен после отказа или отмены');
+    if (exhausted && !reset?.reason.trim())
+      throw new HarnessError(
+        'ATTEMPTS_EXHAUSTED',
+        'Исчерпан лимит попыток; повторите со сбросом и причиной',
+      );
+    const next: WorkState = {
+      ...w,
+      status: w.approvedDigest ? 'ready' : 'draft',
+      attempt: exhausted ? 0 : w.attempt,
+      neutralFailures: exhausted ? undefined : w.neutralFailures,
+      failure: undefined,
+      failureKind: undefined,
+      failureFingerprint: undefined,
+    };
+    tx.putWork(next);
+    tx.emit({
+      type: 'work.retried',
+      graphId: w.graphId,
+      workId,
+      payload: {
+        by,
+        reset: exhausted,
+        ...(exhausted ? { spent: w.attempt, reasonLength: reset!.reason.trim().length } : {}),
+      },
+    });
+    return { work: next, changed: true };
   }
 }
