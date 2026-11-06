@@ -552,6 +552,15 @@ export class Engine {
    */
   approvalCheck(tx: ExecutionTransaction, graphId: string, actor: TechnicalApproval['actor']) {
     this.assertCurrentPolicy(tx);
+    return this.approvalRules(tx, graphId, actor);
+  }
+
+  /**
+   * Правила согласования без барьера политики (`approvalCheck` — с ним):
+   * только чтение, отказ — исключение. Им же `proposeTarget` называет
+   * причины отказа, не повторяя правил.
+   */
+  private approvalRules(tx: ExecutionView, graphId: string, actor: TechnicalApproval['actor']) {
     const graph = tx.graph(graphId);
     if (!graph) throw new HarnessError('NOT_FOUND', 'Граф не найден: ' + graphId);
     if (actor !== this.policy.approvalMode)
@@ -2441,13 +2450,20 @@ export class Engine {
    * `contextDigest`. Только внутри транзакции.
    */
   private targetReview(
-    tx: ExecutionTransaction,
+    tx: ExecutionView,
     work: WorkState,
     contextDigest: string | null,
     actor: TechnicalApproval['actor'],
   ) {
+    // Актёр согласования — режим политики и у хоста с портом: порт правил
+    // движка не ослабляет.
+    if (actor !== this.policy.approvalMode)
+      throw new HarnessError(
+        'APPROVAL_REQUIRED',
+        `Политика требует согласования ${this.policy.approvalMode === 'operator' ? 'оператором' : 'агентом-ревьюером'}`,
+      );
     if (this.host.input) return { review: this.host.input.review(work, contextDigest, actor, tx) };
-    const checked = this.approvalCheck(tx, work.graphId, actor);
+    const checked = this.approvalRules(tx, work.graphId, actor);
     if ((checked.last.contextDigest ?? null) !== contextDigest)
       throw new HarnessError(
         'APPROVAL_REQUIRED',
@@ -2531,32 +2547,16 @@ export class Engine {
         problems.push('ответ — изменение требований: новая ревизия, не продолжение');
       if (!this.carriesAnswer(v, request, answer, contextDigest))
         problems.push('снимок контекста не содержит этот ответ');
+      // Те же проверки, что у applyInput: барьер политики (только чтение) и
+      // правила согласования — причинами, а не исключением.
+      const stale = this.staleReason(v);
+      if (stale) problems.push(stale);
       let review: InputTarget['review'] = null;
-      if (this.host.input) {
-        try {
-          review = this.host.input.review(work, contextDigest, actor, v);
-        } catch (error) {
-          problems.push(error instanceof Error ? error.message : String(error));
-        }
-      } else {
-        const last = v
-          .locals('reviews', WORKSPACE_OWNER)
-          .map((r) => r.value)
-          .filter((r) => r.kind === 'plan' && r.subject === work.graphId)
-          .sort((a, b) => a.round - b.round)
-          .at(-1);
-        if (!last) problems.push('нет ревью плана');
-        else {
-          if ((last.contextDigest ?? null) !== contextDigest)
-            problems.push('последний раунд ревью плана рассматривал другой снимок контекста');
-          if (actor === 'agent' && !last.approved)
-            problems.push('последний раунд ревью плана не одобрил граф');
-          review = {
-            round: last.round,
-            approved: last.approved,
-            reviewerBinding: last.reviewerBinding ?? null,
-          };
-        }
+      try {
+        review = this.targetReview(v, work, contextDigest, actor).review;
+      } catch (error) {
+        if (!(error instanceof HarnessError)) throw error;
+        problems.push(error.message);
       }
       const target = this.targetOf(v, request, work, contextDigest, review, actor);
       const active = activeOf(v).filter((a) => v.work(a.workId)?.graphId === work.graphId);
@@ -2655,6 +2655,8 @@ export class Engine {
           'Граф или постановка изменились после вопроса: продолжение — новой ревизией',
         );
       const contextDigest = options.contextDigest;
+      // Политика процесса применена — и у хоста с портом согласования.
+      this.assertCurrentPolicy(tx);
       const { review, checked } = this.targetReview(tx, work, contextDigest, options.actor);
       const target: Omit<InputTarget, 'digest'> = this.targetOf(
         tx,
