@@ -46,6 +46,7 @@ export const failureBucketNames = [
   'budget',
   'unknown',
   'unclassified',
+  'input',
 ] as const satisfies readonly FailureBucket[];
 
 /** Данные исполнения: те же формы, что отдают `ExecutionView` и `events()`. */
@@ -171,6 +172,7 @@ const bucketOfKind: Record<FailureKind, FailureBucket> = {
   unfinished: 'incomplete',
   'context-exhausted': 'incomplete',
   'needs-lead': 'incomplete',
+  'needs-input': 'input',
   'stale-base': 'integration',
   merge: 'integration',
   environment: 'environment',

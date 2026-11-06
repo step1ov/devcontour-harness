@@ -27,6 +27,8 @@ export function stopCodeOf(kind: FailureKind | undefined): ErrorCode {
       return 'CANCELLED';
     case 'context-exhausted':
       return 'CONTEXT_EXHAUSTED';
+    case 'needs-input':
+      return 'INPUT_REQUIRED';
     case 'provider-auth':
     case 'environment':
     case 'timeout':
@@ -93,6 +95,7 @@ export const stopCauses = [
   'cancelled',
   'budget',
   'needs-lead',
+  'needs-input',
   'unknown',
   'runtime-missing',
   'controller-busy',
@@ -215,6 +218,7 @@ const causeText: Record<StopCause, string> = {
   budget: 'Бюджет расходов или времени исчерпан либо не определён.',
   'needs-lead':
     'Пустой результат без механического основания считать работу сделанной: решение ведущего.',
+  'needs-input': 'Исполнитель остановился с вопросом: работа ждёт ответа и его применения.',
   unknown: 'Класс отказа не определён.',
   'runtime-missing': 'Назначенный политикой runtime не найден или не отвечает на --version.',
   'controller-busy': 'Очередь ведёт другой процесс controller.',
@@ -234,6 +238,7 @@ const failurePhase: Record<FailureKind, StopPhase> = {
   'empty-result': 'implementation',
   unfinished: 'implementation',
   'needs-lead': 'review',
+  'needs-input': 'implementation',
   gate: 'gates',
   review: 'review',
   'review-protocol': 'review',

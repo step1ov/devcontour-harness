@@ -152,6 +152,7 @@
               "cancelled",
               "budget",
               "needs-lead",
+              "needs-input",
               "unknown"
             ]
           }
@@ -187,6 +188,7 @@
             "BUDGET_UNKNOWN",
             "ATTEMPTS_EXHAUSTED",
             "CONTEXT_EXHAUSTED",
+            "INPUT_REQUIRED",
             "REVISION_CONFLICT",
             "CANCELLED",
             "NOT_FOUND",
@@ -231,7 +233,9 @@
             "user-decision",
             "resume-queue",
             "fix-environment",
-            "fix-access"
+            "fix-access",
+            "answer-input",
+            "apply-input"
           ]
         }
       },
@@ -511,6 +515,7 @@
               "cancelled",
               "budget",
               "needs-lead",
+              "needs-input",
               "unknown"
             ]
           },
@@ -594,6 +599,7 @@
                     "BUDGET_UNKNOWN",
                     "ATTEMPTS_EXHAUSTED",
                     "CONTEXT_EXHAUSTED",
+                    "INPUT_REQUIRED",
                     "REVISION_CONFLICT",
                     "CANCELLED",
                     "NOT_FOUND",
@@ -658,7 +664,9 @@
                   "user-decision",
                   "resume-queue",
                   "fix-environment",
-                  "fix-access"
+                  "fix-access",
+                  "answer-input",
+                  "apply-input"
                 ]
               },
               "step": {
@@ -749,6 +757,7 @@
               "BUDGET_UNKNOWN",
               "ATTEMPTS_EXHAUSTED",
               "CONTEXT_EXHAUSTED",
+              "INPUT_REQUIRED",
               "REVISION_CONFLICT",
               "CANCELLED",
               "NOT_FOUND",
@@ -782,6 +791,7 @@
               "cancelled",
               "budget",
               "needs-lead",
+              "needs-input",
               "unknown",
               "runtime-missing",
               "controller-busy",
@@ -832,7 +842,9 @@
               "user-decision",
               "resume-queue",
               "fix-environment",
-              "fix-access"
+              "fix-access",
+              "answer-input",
+              "apply-input"
             ]
           },
           "retryPlanned": {
@@ -989,6 +1001,7 @@
               "cancelled",
               "budget",
               "needs-lead",
+              "needs-input",
               "unknown"
             ]
           },
@@ -1019,6 +1032,7 @@
               "BUDGET_UNKNOWN",
               "ATTEMPTS_EXHAUSTED",
               "CONTEXT_EXHAUSTED",
+              "INPUT_REQUIRED",
               "REVISION_CONFLICT",
               "CANCELLED",
               "NOT_FOUND",
@@ -1246,7 +1260,9 @@
             "user-decision",
             "resume-queue",
             "fix-environment",
-            "fix-access"
+            "fix-access",
+            "answer-input",
+            "apply-input"
           ]
         },
         "step": {
@@ -1316,6 +1332,7 @@
             "BUDGET_UNKNOWN",
             "ATTEMPTS_EXHAUSTED",
             "CONTEXT_EXHAUSTED",
+            "INPUT_REQUIRED",
             "REVISION_CONFLICT",
             "CANCELLED",
             "NOT_FOUND",

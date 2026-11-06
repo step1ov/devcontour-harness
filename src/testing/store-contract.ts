@@ -1,11 +1,85 @@
 import assert from 'node:assert/strict';
 import {
   WORKSPACE_OWNER,
+  answerDigest,
   digestOf,
+  inputRequestId,
   type ExecutionStore,
+  type InputRequest,
   type RunEventDraft,
   type WorkState,
 } from '../contracts/index.ts';
+
+/**
+ * Запрос исполнителя (`input-requests`) для проверок адаптера: вопрос с
+ * вариантами, основание исходной попытки, без ответов (`pending`).
+ */
+export function sampleInputRequest(runId = 'run-1', workId = 'w1'): InputRequest {
+  const d = digestOf(runId);
+  return {
+    id: inputRequestId(runId, 0),
+    kind: 'question',
+    blocking: true,
+    workId,
+    graphId: 'g',
+    runId,
+    attempt: 1,
+    callId: 'call-1',
+    question: {
+      question: 'Какой формат даты в ответе API?',
+      options: [
+        { id: 'iso', label: 'ISO 8601', consequence: null },
+        { id: 'unix', label: 'Unix seconds', consequence: 'меняет договор клиентов' },
+      ],
+      recommended: 'iso',
+      severity: 8,
+      rationale: 'Формат виден клиентам',
+      affects: ['api'],
+    },
+    effectiveSeverity: 10,
+    floors: ['declared'],
+    criticalHits: [],
+    draft: { digest: d, files: ['src/a.ts'] },
+    createdAt: '2026-01-01T00:00:00.000Z',
+    originBasis: {
+      source: { connector: 'files', ref: workId, revision: '1' },
+      graphId: 'g',
+      graphDigest: d,
+      orderDigest: d,
+      policyDigest: d,
+      contextDigest: null,
+      baseSha: 'a'.repeat(40),
+      inputPolicy: { threshold: 7, criticalPaths: [] },
+    },
+    lifecycle: 'pending',
+    answers: [],
+    version: 1,
+  };
+}
+
+/** Тот же запрос с ответом: `answered`, следующая версия. */
+export function answeredInputRequest(request: InputRequest, text = 'ISO 8601'): InputRequest {
+  const content = {
+    revision: request.answers.length + 1,
+    text,
+    optionId: null,
+    kind: 'clarification' as const,
+  };
+  return {
+    ...request,
+    lifecycle: 'answered',
+    answers: [
+      ...request.answers,
+      {
+        ...content,
+        actor: { kind: 'operator' },
+        digest: answerDigest(request.id, content),
+        at: '2026-01-01T00:01:00.000Z',
+      },
+    ],
+    version: request.version + 1,
+  };
+}
 
 /**
  * Общий набор проверок договора `ExecutionStore`. Его проходят standalone
@@ -239,6 +313,106 @@ export function executionStoreContract(
     assert.equal(
       s.read((v) => v.local('usage', 'app', 'bad')),
       undefined,
+    );
+    s.close();
+  });
+
+  test(`${name}: состояние без вопросов исполнителя читается с пустым списком запросов`, () => {
+    const dir = tempDir();
+    const a = open(dir);
+    a.transact('run.phase', (tx) => tx.putWork(work('w1')));
+    a.close();
+    const b = open(dir);
+    assert.deepEqual(
+      b.read((v) => v.locals('input-requests')),
+      [],
+    );
+    assert.equal(
+      b.read((v) => v.local('input-requests', 'app', inputRequestId('run-1', 0))),
+      undefined,
+    );
+    b.close();
+  });
+
+  test(`${name}: запрос исполнителя хранится у владельца, версия видна другому экземпляру`, () => {
+    const dir = tempDir();
+    const a = open(dir);
+    const request = sampleInputRequest();
+    a.transact('run.failed', (tx) => {
+      tx.putLocal('input-requests', 'app', request.id, request);
+      tx.emit({
+        type: 'input.requested',
+        workId: 'w1',
+        runId: 'run-1',
+        payload: {
+          requestId: request.id,
+          kind: 'question',
+          blocking: true,
+          lifecycle: 'pending',
+          effectiveSeverity: 10,
+          floors: ['declared'],
+          criticalHits: 0,
+          questionDigest: digestOf(request.question),
+          draftDigest: request.draft!.digest,
+        },
+      });
+    });
+    assert.deepEqual(
+      a.read((v) => v.local('input-requests', 'app', request.id)),
+      request,
+    );
+    assert.equal(
+      a.read((v) => v.local('input-requests', WORKSPACE_OWNER, request.id)),
+      undefined,
+      'владелец — репозиторий поручения',
+    );
+    const b = open(dir);
+    const answered = answeredInputRequest(request);
+    b.transact('input.answered', (tx) =>
+      tx.putLocal('input-requests', 'app', request.id, answered),
+    );
+    assert.equal(
+      a.read((v) => v.local('input-requests', 'app', request.id)?.version),
+      2,
+    );
+    assert.equal(
+      a.read((v) => v.local('input-requests', 'app', request.id)?.answers[0]?.digest),
+      answered.answers[0]!.digest,
+    );
+    assert.deepEqual(
+      a.events().map((e) => e.type),
+      ['input.requested'],
+    );
+    a.close();
+    b.close();
+  });
+
+  test(`${name}: запрос вне схемы и откат транзакции не оставляют записи`, () => {
+    const s = open(tempDir());
+    const request = sampleInputRequest();
+    const invalid: unknown[] = [
+      { ...request, extra: true },
+      { ...request, id: 'IR-short' },
+      { ...request, lifecycle: 'open' },
+      { ...request, question: { ...request.question, severity: 11 } },
+      { ...request, question: { ...request.question, recommended: 'nope' } },
+      answeredInputRequest(request, 'x'.repeat(3001)),
+    ];
+    for (const value of invalid)
+      assert.throws(() =>
+        s.transact('run.failed', (tx) =>
+          tx.putLocal('input-requests', 'app', request.id, value as InputRequest),
+        ),
+      );
+    assert.throws(() =>
+      s.transact('run.failed', (tx) => {
+        tx.putLocal('input-requests', 'app', request.id, request);
+        throw new Error('отказ');
+      }),
+    );
+    assert.deepEqual(
+      s.read((v) => v.locals('input-requests')),
+      [],
     );
     s.close();
   });

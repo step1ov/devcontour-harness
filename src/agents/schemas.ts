@@ -4,6 +4,7 @@ import {
   REVIEW_ITEMS_LIMIT,
   findingStatuses,
 } from '../contracts/review.ts';
+import { INPUT_LIMITS, INPUT_SEVERITY_MAX, criticalAreas } from '../contracts/input.ts';
 
 /**
  * JSON Schema структурированного ответа для CLI runtime. Codex требует
@@ -26,6 +27,54 @@ const discovery = {
   required: ['kind', 'title', 'path', 'line', 'observation', 'consequence', 'reproduction'],
 };
 
+const areas = {
+  type: 'array',
+  maxItems: criticalAreas.length,
+  items: { type: 'string', enum: [...criticalAreas] },
+};
+const severity = { type: 'integer', minimum: 1, maximum: INPUT_SEVERITY_MAX };
+
+/** Вопрос исполнителя (`inputQuestionSchema`); `null` — вопроса нет. */
+const inputRequest = {
+  type: ['object', 'null'],
+  additionalProperties: false,
+  properties: {
+    question: { type: 'string' },
+    options: {
+      type: 'array',
+      maxItems: INPUT_LIMITS.options,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string' },
+          label: { type: 'string' },
+          consequence: { type: ['string', 'null'] },
+        },
+        required: ['id', 'label', 'consequence'],
+      },
+    },
+    recommended: { type: ['string', 'null'] },
+    severity,
+    rationale: { type: 'string' },
+    affects: areas,
+  },
+  required: ['question', 'options', 'recommended', 'severity', 'rationale', 'affects'],
+};
+
+const assumption = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    question: { type: 'string' },
+    chosen: { type: 'string' },
+    rationale: { type: 'string' },
+    severity,
+    affects: areas,
+  },
+  required: ['question', 'chosen', 'rationale', 'severity', 'affects'],
+};
+
 export const implementationOutputSchema = {
   type: 'object',
   additionalProperties: false,
@@ -33,8 +82,10 @@ export const implementationOutputSchema = {
     completed: { type: 'boolean' },
     summary: { type: 'string' },
     discoveries: { type: 'array', maxItems: 20, items: discovery },
+    inputRequest,
+    assumptions: { type: 'array', maxItems: INPUT_LIMITS.assumptions, items: assumption },
   },
-  required: ['completed', 'summary', 'discoveries'],
+  required: ['completed', 'summary', 'discoveries', 'inputRequest', 'assumptions'],
 };
 
 export const reviewOutputSchema = {

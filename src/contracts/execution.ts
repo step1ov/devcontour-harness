@@ -21,6 +21,12 @@ import {
 } from './result.ts';
 import { findingStatuses, reviewRecordSchema, reviewRoundSchema } from './review.ts';
 import { contractDocumentSchema, spikeSchema } from './checks.ts';
+import {
+  INPUT_LIMITS,
+  inputPolicySchema,
+  inputRequestSchema,
+  recordedAssumptionSchema,
+} from './input.ts';
 
 /**
  * Нейтральная модель исполнения — то, что ExecutionStore обязан хранить
@@ -83,6 +89,13 @@ export const failureKinds = [
    * сделанной механически нет: решение — за ведущим, не повтор.
    */
   'needs-lead',
+  /**
+   * Исполнитель остановился с вопросом, серьёзность которого не ниже порога
+   * закреплённой `inputPolicy`: запрос записан в `input-requests` той же
+   * транзакцией, черновик сохранён. Попытка засчитана; автоматического
+   * повтора нет — продолжение только после ответа и `applyInput`.
+   */
+  'needs-input',
   'unknown',
 ] as const;
 export const failureKindSchema = z.enum(failureKinds);
@@ -551,6 +564,25 @@ export const attemptStateSchema = z.strictObject({
     .optional(),
   partial: partialDraftSchema.optional(),
   continuedFrom: continuationSchema.optional(),
+  /**
+   * Политика вопросов исполнителя, закреплённая при выдаче: смена порога
+   * действует со следующей попытки. Нет у попыток прежних версий.
+   */
+  inputPolicy: inputPolicySchema.optional(),
+  /** Развилки, решённые исполнителем, с оценкой controller (не больше 20). */
+  assumptions: z.array(recordedAssumptionSchema).max(INPUT_LIMITS.assumptions).optional(),
+  /**
+   * Ответ на вопрос, с которым выдана попытка: запрос, точный ответ и
+   * основание продолжения. Связывается при claim, только если применённое
+   * основание совпало с основанием выдачи.
+   */
+  input: z
+    .strictObject({
+      requestId: z.string().min(1).max(200),
+      answerDigest: digestSchema,
+      targetDigest: digestSchema,
+    })
+    .optional(),
   callsRecorded: z.literal(true).optional(),
   dispatch: z
     .strictObject({
@@ -600,6 +632,12 @@ export const attemptStateSchema = z.strictObject({
         ref: z.string().min(1).max(300),
         revision: z.string().min(1).max(200),
       }),
+      /**
+       * Действующий снимок контекста на момент выдачи (`null` — без
+       * контекста): runner загружает именно его. Нет — хост не связывает
+       * согласование с контекстом (или попытка прежней версии).
+       */
+      contextDigest: digestSchema.nullable().optional(),
     })
     .optional(),
   /**
@@ -1148,6 +1186,12 @@ export const localSchemas = {
    * передаются следующей попытке.
    */
   reproductions: reproductionRegistrySchema,
+  /**
+   * Вопросы исполнителей и ответы на них (`InputRequest`) по владельцу —
+   * репозиторию поручения. Вопрос и основание неизменяемы, ответы только
+   * дополняются, `version` — CAS записи.
+   */
+  'input-requests': inputRequestSchema,
 } as const;
 export type LocalNamespace = keyof typeof localSchemas;
 export type LocalValue<N extends LocalNamespace> = z.infer<(typeof localSchemas)[N]>;

@@ -1188,6 +1188,7 @@
                     "cancelled",
                     "budget",
                     "needs-lead",
+                    "needs-input",
                     "unknown"
                   ]
                 }
@@ -1976,7 +1977,7 @@
               "maximum": 9007199254740991
             },
             "byBucket": {
-              "maxItems": 10,
+              "maxItems": 11,
               "type": "array",
               "items": {
                 "type": "object",
@@ -1993,7 +1994,8 @@
                       "operator",
                       "budget",
                       "unknown",
-                      "unclassified"
+                      "unclassified",
+                      "input"
                     ]
                   },
                   "usd": {
@@ -2128,8 +2130,8 @@
           "maximum": 9007199254740991
         },
         "buckets": {
-          "minItems": 10,
-          "maxItems": 10,
+          "minItems": 11,
+          "maxItems": 11,
           "type": "array",
           "items": {
             "type": "object",
@@ -2146,7 +2148,8 @@
                   "operator",
                   "budget",
                   "unknown",
-                  "unclassified"
+                  "unclassified",
+                  "input"
                 ]
               },
               "count": {
@@ -2664,7 +2667,7 @@
                 ]
               },
               "rejections": {
-                "maxItems": 10,
+                "maxItems": 11,
                 "type": "array",
                 "items": {
                   "type": "object",
@@ -2681,7 +2684,8 @@
                         "operator",
                         "budget",
                         "unknown",
-                        "unclassified"
+                        "unclassified",
+                        "input"
                       ]
                     },
                     "count": {

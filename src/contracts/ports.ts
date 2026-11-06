@@ -2,6 +2,7 @@ import type { RuntimeName } from './primitives.ts';
 import type { RuntimeBinding } from './policy.ts';
 import type { WorkGraph, Prerequisite, SourceRef } from './work.ts';
 import type { ContextSnapshot } from './context.ts';
+import type { InputTarget } from './input.ts';
 import type { ContractDocument } from './checks.ts';
 import type { RunResult } from './result.ts';
 import type { RunEvent, RunEventDraft, TransactionKind } from './events.ts';
@@ -464,6 +465,50 @@ export interface ContractApprovals {
   approved(ref: { id: string; digest: string }, view: ExecutionView): HostRefusal;
 }
 
+/**
+ * Продолжение после ответа на вопрос исполнителя (H02) у хоста, который ведёт
+ * согласование сам и не хранит его в `graph.approval` (у DevContour —
+ * согласование задачи и контекстные пакеты). Без порта движок использует
+ * `graph.approval.context` и раунды ревью плана (`reviews`) — standalone.
+ *
+ * Все методы синхронны и вызываются внутри транзакции движка; отказ —
+ * `HarnessError`, он откатывает транзакцию. Ослабить правило движка порт не
+ * может: блокировку запросом, fencing, пределы попыток и бюджеты движок
+ * проверяет сам до вызова порта.
+ */
+export interface InputHost {
+  /**
+   * Действующий снимок контекста поручения по сведениям хоста — то, что
+   * claim закрепит в `AttemptState.pinned.contextDigest`: digest, `null` —
+   * без контекста, `undefined` — хост не связывает согласование с контекстом.
+   */
+  contextDigestOf(work: WorkState, view: ExecutionView): string | null | undefined;
+  /**
+   * Согласование цели по правилам хоста: снимок `contextDigest` прошёл
+   * ревью для текущей постановки, и `actor` допустим режимом согласования.
+   * Возвращает раунд ревью, на котором основана цель (`null` — у хоста нет
+   * раундов), или бросает `HarnessError` (`APPROVAL_REQUIRED`,
+   * `REVIEW_REJECTED`, `APPROVAL_STALE`). Ничего не пишет.
+   */
+  review(
+    work: WorkState,
+    contextDigest: string | null,
+    actor: 'agent' | 'operator',
+    view: ExecutionView,
+  ): InputTarget['review'];
+  /**
+   * Активировать цель в транзакции `applyInput`: после записи
+   * `contextDigestOf(work)` равен `target.contextDigest`. Движок перед вызовом
+   * уже проверил, что активных попыток графа нет.
+   */
+  activate(tx: ExecutionTransaction, work: WorkState, target: InputTarget): void;
+  /**
+   * Снимок контекста по digest — для сверки manifest ответа в цели. Нет
+   * метода — локальные `context-snapshots` (`WORKSPACE_OWNER`).
+   */
+  snapshot?(digest: string, view: ExecutionView): ContextSnapshot | undefined;
+}
+
 /** Хост, внутри которого работает движок: хранилище, основания, условия и области бюджетов. */
 export interface ExecutionHost {
   store: ExecutionStore;
@@ -482,4 +527,9 @@ export interface ExecutionHost {
    * выдумывается.
    */
   readyAt?(work: WorkState, view: ExecutionView): string | undefined;
+  /**
+   * Согласование продолжения после ответа на вопрос исполнителя (`InputHost`).
+   * Нет порта — согласование графа движка (`graph.approval`).
+   */
+  input?: InputHost;
 }

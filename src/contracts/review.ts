@@ -9,6 +9,7 @@ import {
   gateScopeSchema,
 } from './primitives.ts';
 import { digestOf } from './digest.ts';
+import { INPUT_LIMITS, assumptionSchema, inputQuestionSchema } from './input.ts';
 
 /**
  * Ответы исполнителей. Runtime возвращает сырой текст/JSON (`RuntimeResponse.output`
@@ -27,11 +28,30 @@ export const discoverySchema = z.strictObject({
   reproduction: z.string().min(3).max(3000),
 });
 
-export const implementationResultSchema = z.object({
-  completed: z.boolean(),
-  summary: z.string(),
-  discoveries: z.array(discoverySchema).max(20).default([]),
-});
+/**
+ * Ответ writer. При `completed: false` он может вернуть вопрос
+ * (`inputRequest`) — controller решит по закреплённой `inputPolicy`, остановка
+ * это (`needs-input`) или незавершённость. `completed: true` вместе с вопросом
+ * невалиден. Развилки, решённые самим исполнителем, — `assumptions`. Поля
+ * необязательны: ответ прежнего формата читается как ответ без вопроса и
+ * допущений.
+ */
+export const implementationResultSchema = z
+  .object({
+    completed: z.boolean(),
+    summary: z.string(),
+    discoveries: z.array(discoverySchema).max(20).default([]),
+    inputRequest: inputQuestionSchema.nullable().optional(),
+    assumptions: z.array(assumptionSchema).max(INPUT_LIMITS.assumptions).default([]),
+  })
+  .superRefine((r, ctx) => {
+    if (r.completed && r.inputRequest)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['inputRequest'],
+        message: 'completed: true вместе с вопросом невалиден',
+      });
+  });
 export type ImplementationResult = z.infer<typeof implementationResultSchema>;
 
 export const reproductionSchema = z.object({

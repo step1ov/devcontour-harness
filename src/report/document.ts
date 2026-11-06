@@ -54,6 +54,7 @@ const bucketLabels: Record<string, string> = {
   budget: 'budget',
   unknown: 'unknown',
   unclassified: 'unclassified (legacy)',
+  input: 'stopped for a question (needs input)',
 };
 
 const causeLabels: Record<string, string> = {

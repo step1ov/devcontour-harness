@@ -12,6 +12,7 @@ import {
   trimmedText,
 } from './primitives.ts';
 import { digestOf } from './digest.ts';
+import { DEFAULT_INPUT_POLICY, inputPolicySchema, type InputPolicy } from './input.ts';
 import type { CodedIssue, ErrorCode } from './errors.ts';
 import { toolchainSchema } from './toolchain.ts';
 import { gateArtifactLimits } from './result.ts';
@@ -341,6 +342,14 @@ export const executionPolicySchema = z.strictObject({
       path: ['intervalMs'],
     })
     .optional(),
+  /**
+   * Когда исполнитель останавливается с вопросом, а когда решает сам и
+   * записывает допущение (`inputPolicySchema`, docs/contracts.md «Вопрос
+   * исполнителя»). Нет поля — `DEFAULT_INPUT_POLICY` (порог 7); умолчание не
+   * подставляется в политику, digest прежних политик не меняется. В
+   * `executionDigest` не входит: закрепляется в попытке при выдаче.
+   */
+  inputPolicy: inputPolicySchema.optional(),
   maxAttempts: z.number().int().min(1).max(10).default(3),
   repairBudget: z.number().int().min(0).max(50).default(6),
   reuseImplementation: z.boolean().default(true),
@@ -385,12 +394,28 @@ export const policyDigest = (policy: ExecutionPolicy) => digestOf(policy);
  * условия исполнения, и поднятый предел действует сразу, без нового
  * согласования (как в DevContour). Обход зависших (`stallSweep`) — тоже
  * надзор, а не условие исполнения кода: его пороги меняются без новой
- * попытки и не трогают основания reuse. `policyDigest` — digest загруженной
+ * попытки и не трогают основания reuse. Политика вопросов исполнителя
+ * (`inputPolicy`) закрепляется в попытке при выдаче и тоже не входит.
+ * `policyDigest` — digest загруженной
  * политики целиком: им сверяются применение политики (`appliedPolicy`) и
  * запрос операции reconfigure.
  */
 export const executionDigest = (policy: ExecutionPolicy) =>
-  digestOf({ ...policy, budgets: undefined, prices: undefined, stallSweep: undefined });
+  digestOf({
+    ...policy,
+    budgets: undefined,
+    prices: undefined,
+    stallSweep: undefined,
+    inputPolicy: undefined,
+  });
+
+/**
+ * Действующая политика вопросов: заданная или умолчание. Порог вопросов —
+ * правило исполнителя, а не условие исполнения кода: как и `stallSweep`, он
+ * не входит в `executionDigest`, а попытка закрепляет его при выдаче.
+ */
+export const inputPolicyOf = (policy: Pick<ExecutionPolicy, 'inputPolicy'>): InputPolicy =>
+  policy.inputPolicy ?? DEFAULT_INPUT_POLICY;
 
 export type ReviewKind = 'code' | 'plan' | 'contract';
 

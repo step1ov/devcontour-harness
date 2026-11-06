@@ -116,6 +116,13 @@ const ADDITIVE_EVENT_TYPES = new Set([
   'work.cancelled',
   'base.moved',
   'attempt.diagnosed',
+  // H02: вопросы исполнителя и решения, принятые им самим.
+  'input.requested',
+  'input.answered',
+  'input.applied',
+  'input.closed',
+  'input.delivered',
+  'attempt.assumptions',
 ]);
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set(['status--detail']);
@@ -130,6 +137,11 @@ const ADDITIVE_ENUM_VALUES = new Set([
   'stalled',
   'context-exhausted',
   'CONTEXT_EXHAUSTED',
+  // H02: остановка с вопросом исполнителя и её шаги.
+  'needs-input',
+  'INPUT_REQUIRED',
+  'answer-input',
+  'apply-input',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
