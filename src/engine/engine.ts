@@ -39,6 +39,8 @@ import {
   type InputTarget,
   INPUT_LIMITS,
   answerDigest,
+  inputAnswerSchema,
+  inputRequestSchema,
   inputPolicyOf,
   inputRequestId,
   inputSourceId,
@@ -180,6 +182,23 @@ const causeOf = (
     ? cause
     : 'other';
 };
+
+/** Нарушение схемы входа операции — `INVALID_INPUT` с путями, а не исключение zod. */
+function invalidInput(
+  what: string,
+  result: { success: boolean; error?: { issues: { path: PropertyKey[]; message: string }[] } },
+) {
+  if (result.success) return;
+  const issues = (result.error?.issues ?? []).map((i) => ({
+    path: i.path.map((p) => (typeof p === 'number' ? p : String(p))),
+    message: i.message,
+  }));
+  throw new HarnessError(
+    'INVALID_INPUT',
+    `${what}: ${issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
+    issues,
+  );
+}
 
 /** Поручение исчерпало предел незасчитанных отказов: повтор — только со сбросом. */
 export const neutralExhausted = (w: Pick<WorkState, 'neutralFailures'>) =>
@@ -2125,7 +2144,10 @@ export class Engine {
     const at = iso(this.now());
     const origin = this.originOf(tx, a, w);
     const draft = a.partial
-      ? { digest: a.partial.digest, files: a.partial.files.slice(0, 500) }
+      ? {
+          digest: a.partial.digest,
+          files: a.partial.files.slice(0, 500).map((f) => f.slice(0, 500)),
+        }
       : null;
     const base = {
       workId: w.id,
@@ -2133,7 +2155,7 @@ export class Engine {
       runId: a.id,
       attempt: a.attempt,
       callId: input.callId,
-      criticalHits: input.criticalHits.slice(0, 20),
+      criticalHits: input.criticalHits.slice(0, 20).map((path) => path.slice(0, 500)),
       draft,
       createdAt: at,
       originBasis: origin,
@@ -2285,7 +2307,11 @@ export class Engine {
         last &&
         last.text === content.text &&
         last.optionId === content.optionId &&
-        last.kind === content.kind
+        last.kind === content.kind &&
+        // Другой актёр или другое сообщение хоста — другой ответ, а не повтор.
+        last.actor.kind === answer.actor.kind &&
+        last.actor.id === answer.actor.id &&
+        last.messageRef === answer.messageRef
       )
         return { request, answer: last, changed: false };
       if (!['pending', 'answered'].includes(request.lifecycle))
@@ -2317,6 +2343,9 @@ export class Engine {
         digest: answerDigest(id, { revision, ...content }),
         at: iso(this.now()),
       };
+      // Пределы ответа (длина, ссылка хоста, ID актёра) — типизированным
+      // отказом, а не исключением схемы при записи.
+      invalidInput('Ответ', inputAnswerSchema.safeParse(recorded));
       const next: InputRequest = {
         ...request,
         lifecycle: 'answered',
@@ -2389,15 +2418,14 @@ export class Engine {
       this.expectVersion(request, expectedVersion);
       const reason = input.reason.trim();
       if (!reason) throw new HarnessError('INVALID_INPUT', 'Нужна причина');
-      return {
-        request: this.closeIn(tx, owner, request, lifecycle, {
-          at: iso(this.now()),
-          by: input.by,
-          reason: reason.slice(0, 1000),
-          ...(input.successor ? { successor: input.successor } : {}),
-        }),
-        changed: true,
+      const closed = {
+        at: iso(this.now()),
+        by: input.by,
+        reason: reason.slice(0, 1000),
+        ...(input.successor ? { successor: input.successor } : {}),
       };
+      invalidInput('Закрытие запроса', inputRequestSchema.shape.closed.safeParse(closed));
+      return { request: this.closeIn(tx, owner, request, lifecycle, closed), changed: true };
     });
   }
 

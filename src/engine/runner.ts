@@ -1728,7 +1728,7 @@ export class Runner {
         // ждёт окончания этой попытки. В operator mode подтверждение — ручное.
         if (kind === 'review' && this.policy.approvalMode === 'agent')
           await this.confirmReproductions(attempt).catch(() => undefined);
-        this.engine.fail(attempt.id, attempt.token, message, {
+        const failure = {
           ...(!stalled && error instanceof TaskFailure && error.properties
             ? { properties: error.properties }
             : {}),
@@ -1736,15 +1736,34 @@ export class Runner {
           ...(!stalled && error instanceof TaskFailure && error.contextLimit
             ? { contextLimit: error.contextLimit }
             : {}),
-          ...(!stalled && error instanceof TaskFailure && error.input
-            ? { input: error.input }
-            : {}),
           cause: environmentCauseOf(stalled ? undefined : error, message, kind),
           blocked:
             (error instanceof BlockedError || kind === 'provider-auth') && !attempt.candidateSha,
           ...(heartbeatCause ? { heartbeatCause } : {}),
-        });
-        await this.options.hooks?.failed?.({ attempt, kind, message });
+        };
+        const input = !stalled && error instanceof TaskFailure ? error.input : undefined;
+        let recorded: { kind: FailureKind; message: string } = { kind, message };
+        try {
+          this.engine.fail(attempt.id, attempt.token, message, {
+            ...failure,
+            ...(input ? { input } : {}),
+          });
+        } catch (refused) {
+          // Запрос не записался (откат той же транзакции, что и отказ):
+          // попытка не остаётся активной до истечения срока — отказ пишется
+          // без запроса, остановка с вопросом — незавершённостью с причиной.
+          // Утрата владения так и остаётся утратой: второй отказ не пройдёт.
+          if (!input) throw refused;
+          recorded = {
+            kind: kind === 'needs-input' ? 'unfinished' : kind,
+            message: `${message}. Вопрос исполнителя не записан: ${(refused instanceof Error ? refused.message : String(refused)).slice(0, 300)}`,
+          };
+          this.engine.fail(attempt.id, attempt.token, recorded.message, {
+            ...failure,
+            kind: recorded.kind,
+          });
+        }
+        await this.options.hooks?.failed?.({ attempt, ...recorded });
       } catch {
         // Отменённая или потерявшая владение попытка не публикует поздний отказ.
       }

@@ -141,9 +141,14 @@ export function inputManifestOf(source: ContextSourceEntry): InputManifest | und
   if (source.kind !== INPUT_SOURCE_KIND) return undefined;
   const file = source.references.find((f) => f.path.endsWith('.manifest.json'));
   if (!file) return undefined;
-  const parsed = inputManifestSchema.safeParse(
-    JSON.parse(pinnedBytes(file).toString('utf8')) as unknown,
-  );
+  let raw: unknown;
+  try {
+    raw = JSON.parse(pinnedBytes(file).toString('utf8'));
+  } catch {
+    // Не JSON или digest не совпал: manifest не прочитан — причина, а не сбой.
+    return undefined;
+  }
+  const parsed = inputManifestSchema.safeParse(raw);
   return parsed.success ? parsed.data : undefined;
 }
 

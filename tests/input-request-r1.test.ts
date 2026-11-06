@@ -14,6 +14,8 @@ import {
   WORKSPACE_OWNER,
   contextDigest,
   latestAnswer,
+  sha256,
+  sourceDigest,
   type ExecutionHost,
   type ExecutionPolicy,
   type InputOutcome,
@@ -22,8 +24,9 @@ import {
 import { Engine } from '../src/engine/engine.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
-import { inputContextSource, withInput } from '../src/engine/input-requests.ts';
-import { graphOf, planReview, policyOf, ready, sha } from './engine-fixture.ts';
+import { inputContextSource, unappliedInputs, withInput } from '../src/engine/input-requests.ts';
+import { runAll, setup } from './runner-fixture.ts';
+import { engineOf, graphOf, planReview, policyOf, ready, sha } from './engine-fixture.ts';
 
 export const question = (severity = 8, extra: Partial<InputQuestion> = {}): InputQuestion => ({
   question: 'Какой формат приветствия?',
@@ -135,4 +138,115 @@ test('M-1: у хоста с портом согласования applyInput п�
   assert.equal(approved.get('w'), digest);
   void sha;
   void planReview;
+});
+
+/** Граф w; попытка остановилась с вопросом (standalone). */
+function stopped(patch: (p: Record<string, unknown>) => void = () => {}) {
+  const env = engineOf(policyOf(patch));
+  const graph = ready(env.engine, graphOf({ w: [], x: [] }));
+  const attempt = env.engine.claim('c1')!;
+  env.engine.fail(attempt.id, attempt.token, 'вопрос', { kind: 'needs-input', input: outcome() });
+  const [request] = env.engine.inputRequests({ workId: attempt.workId });
+  return { ...env, graph, attempt, request: request! };
+}
+
+test('m-1: manifest ответа не JSON — причина «не прочитан», а не сбой', () => {
+  const env = stopped();
+  const text = 'not json';
+  const entry = {
+    id: 'input-' + env.request.id.slice(3),
+    kind: 'input-answer',
+    version: 'r1',
+    required: true,
+    files: [],
+    references: [
+      {
+        path: `input/${env.request.id}.manifest.json`,
+        digest: sha256(Buffer.from(text)),
+        bytes: Buffer.byteLength(text),
+        content: { encoding: 'utf8' as const, data: text },
+      },
+    ],
+  };
+  const snapshot = withInput(undefined, { ...entry, digest: sourceDigest(entry) });
+  const found = env.engine.read((v) => unappliedInputs(v, snapshot));
+  assert.deepEqual(
+    found.map((f) => f.reason),
+    ['manifest ответа не прочитан'],
+  );
+});
+
+test('m-3: тот же текст от другого актёра или с другой ссылкой хоста — новая версия, не повтор', () => {
+  const env = stopped();
+  const id = env.request.id;
+  env.engine.answerInput(id, { text: 'ISO', actor: { kind: 'operator' }, messageRef: 'm-1' }, 1);
+  const lead = env.engine.answerInput(
+    id,
+    { text: 'ISO', actor: { kind: 'lead' }, messageRef: 'm-2' },
+    2,
+  );
+  assert.equal(lead.changed, true);
+  assert.deepEqual(
+    lead.request.answers.map((a) => [a.revision, a.actor.kind, a.messageRef]),
+    [
+      [1, 'operator', 'm-1'],
+      [2, 'lead', 'm-2'],
+    ],
+  );
+  const again = env.engine.answerInput(
+    id,
+    { text: 'ISO', actor: { kind: 'lead' }, messageRef: 'm-2' },
+    2,
+  );
+  assert.equal(again.changed, false);
+});
+
+test('m-10: пределы ответа и закрытия — INVALID_INPUT, а не исключение схемы', () => {
+  const env = stopped();
+  const id = env.request.id;
+  const long = () =>
+    env.engine.answerInput(id, { text: 'x'.repeat(3001), actor: { kind: 'operator' } }, 1);
+  assert.equal(code(long), 'INVALID_INPUT');
+  assert.equal(
+    code(() =>
+      env.engine.answerInput(
+        id,
+        { text: 'ok', actor: { kind: 'operator' }, messageRef: 'r'.repeat(301) },
+        1,
+      ),
+    ),
+    'INVALID_INPUT',
+  );
+  assert.equal(
+    code(() =>
+      env.engine.supersedeInput(id, { by: 'lead', reason: 'x', successor: 's'.repeat(201) }, 1),
+    ),
+    'INVALID_INPUT',
+  );
+  assert.equal(env.engine.inputRequest(id).version, 1, 'ничего не записано');
+});
+
+test('m-2: длинный изменённый критический путь не роняет запись вопроса — попытка не остаётся активной', async () => {
+  const deep = `src/${'a'.repeat(200)}/${'b'.repeat(200)}/${'c'.repeat(150)}.js`;
+  const ctx = setup({
+    scenario: {
+      writer: {
+        files: { [deep]: 'x\n' },
+        result: {
+          completed: false,
+          summary: 'вопрос',
+          discoveries: [],
+          inputRequest: question(3),
+          assumptions: [],
+        },
+      },
+    },
+    policy: (p) => (p.inputPolicy = { threshold: 7, criticalPaths: ['src'] }),
+  });
+  await runAll(ctx);
+  const work = ctx.engine.read((v) => v.work('add-greeting')!);
+  assert.equal(work.failureKind, 'needs-input', work.failure);
+  const [request] = ctx.engine.inputRequests({ workId: 'add-greeting' });
+  assert.equal(request!.criticalHits[0]!.length, 500);
+  assert.deepEqual(request!.floors, ['critical-path']);
 });
