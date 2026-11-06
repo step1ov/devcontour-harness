@@ -18,7 +18,6 @@ import {
   type ProfilePin,
   type ProjectManifest,
 } from '../contracts/index.ts';
-import { command } from '../environment/process.ts';
 import { profilePin, resolveProfile } from '../profiles/resolve.ts';
 import { Manifests, packageManagerField } from '../toolchains/manifests.ts';
 import { inspectPolicy, problemLines, type ToolchainReport } from '../toolchains/inspect.ts';
@@ -37,11 +36,9 @@ import {
   detectProfile,
   generatePolicy,
 } from './policy.ts';
+import { devcontourMarkers, gitFacts } from './inspect.ts';
 
 export type InitData = z.infer<typeof initDataSchema>;
-
-/** Маркеры репозитория DevContour: второй controller и state не создаются. */
-const devcontourMarkers = ['devcontour.config.json', '.devcontour-local'];
 
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
 const lstat = (path: string): Stats | undefined => {
@@ -193,31 +190,24 @@ async function gitRoot(repository: string, env: NodeJS.ProcessEnv) {
       [{ path: ['--repository'], message: 'not-git-root' }],
     );
   };
-  let root: string;
-  try {
-    root = realpathSync(resolve(repository));
-  } catch {
-    return notRoot(resolve(repository) + ' не существует');
-  }
-  if (!lstatSync(root).isDirectory()) notRoot(root + ' не каталог');
-  const top = await command(['git', 'rev-parse', '--show-toplevel'], root, { env });
-  const toplevel = top.code === 0 ? top.stdout.trim() : '';
-  let real = '';
-  try {
-    real = toplevel ? realpathSync(toplevel) : '';
-  } catch {
-    real = '';
-  }
-  if (real !== root)
-    notRoot(real ? `${root} внутри репозитория ${real}` : `${root} не в Git-репозитории`);
-  const head = await command(['git', 'rev-parse', '--verify', '-q', 'HEAD^{commit}'], root, {
-    env,
-  });
-  if (head.code !== 0)
-    throw new HarnessError('NOT_READY', `В репозитории ${root} нет коммитов: сделайте первый`, [
-      { path: ['--repository'], message: 'no-commits' },
-    ]);
-  return root;
+  // Те же факты, что у inspectProject: один алгоритм определения корня.
+  const facts = await gitFacts(repository, env);
+  if ('problem' in facts)
+    return notRoot(
+      facts.problem === 'path-missing'
+        ? facts.path + ' не существует'
+        : facts.problem === 'not-directory'
+          ? facts.path + ' не каталог'
+          : `${facts.path} не в Git-репозитории`,
+    );
+  if (facts.root !== facts.path) notRoot(`${facts.path} внутри репозитория ${facts.root}`);
+  if (!facts.baseSha)
+    throw new HarnessError(
+      'NOT_READY',
+      `В репозитории ${facts.root} нет коммитов: сделайте первый`,
+      [{ path: ['--repository'], message: 'no-commits' }],
+    );
+  return facts.root;
 }
 
 /**

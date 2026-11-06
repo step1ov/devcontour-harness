@@ -8,7 +8,7 @@ import { reviewRecordSchema } from './review.ts';
 import { executionDocumentSchema } from './execution.ts';
 import { contractDocumentSchema } from './checks.ts';
 import { stackProfileSchema } from './profiles.ts';
-import { projectManifestSchema } from './project.ts';
+import { projectFactsSchema, projectManifestSchema } from './project.ts';
 import { stopDiagnosisSchema } from './diagnosis.ts';
 import { planDraftSchema } from './planning.ts';
 import { valueReportSchema } from './report.ts';
@@ -39,6 +39,7 @@ export const publishedSchemas = {
   'execution-document': executionDocumentSchema,
   'stack-profile': stackProfileSchema,
   'project-manifest': projectManifestSchema,
+  'project-facts': projectFactsSchema,
   'stop-diagnosis': stopDiagnosisSchema,
   'plan-draft': planDraftSchema,
   'value-report': valueReportSchema,

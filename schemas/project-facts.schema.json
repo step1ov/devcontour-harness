@@ -1,0 +1,371 @@
+{
+  "$id": "devcontour-harness/v1alpha1/project-facts.schema.json",
+  "title": "project-facts",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "devcontour-harness/v1alpha1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "project-facts"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "git": {
+      "type": "object",
+      "properties": {
+        "root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "worktree": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "main",
+                "linked"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baseSha": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40,64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dirty": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "root",
+        "worktree",
+        "baseSha",
+        "branch",
+        "dirty"
+      ],
+      "additionalProperties": false
+    },
+    "lockfiles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "packageManager": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "detected",
+            "ambiguous",
+            "none"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "enum": [
+            "npm",
+            "pnpm"
+          ]
+        },
+        "lockfile": {
+          "type": "string"
+        },
+        "declared": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "profiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "version": {
+            "type": "string",
+            "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[A-Za-z0-9.-]+)?$"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "source": {
+            "type": "object",
+            "properties": {
+              "repositoryId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500,
+                "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+              }
+            },
+            "required": [
+              "repositoryId",
+              "path"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "digest"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "scripts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "command"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "missing",
+              "version-error",
+              "mismatch"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "required": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "source"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "name",
+          "status"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "runtimes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "runtime": {
+            "type": "string",
+            "enum": [
+              "claude",
+              "codex"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "available",
+              "missing",
+              "version-error"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "auth": {
+            "type": "string",
+            "const": "unknown"
+          }
+        },
+        "required": [
+          "runtime",
+          "status",
+          "auth"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "markers": {
+      "type": "object",
+      "properties": {
+        "devcontour": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "harnessProject": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "devcontour",
+        "harnessProject"
+      ],
+      "additionalProperties": false
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "path-missing",
+              "not-directory",
+              "not-git-repository",
+              "inside-repository",
+              "git-worktree",
+              "no-commits",
+              "dirty-checkout",
+              "stack-ambiguous",
+              "stack-unsupported",
+              "package-json-missing",
+              "package-json-invalid",
+              "manager-mismatch",
+              "no-check-scripts",
+              "tool-missing",
+              "tool-version-error",
+              "tool-version-mismatch",
+              "runtime-missing",
+              "runtime-version-error",
+              "devcontour-owned",
+              "harness-project"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "blocker",
+              "warning",
+              "info"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "severity",
+          "message",
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "ready": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "path",
+    "git",
+    "lockfiles",
+    "packageManager",
+    "profiles",
+    "scripts",
+    "checks",
+    "tools",
+    "runtimes",
+    "markers",
+    "diagnostics",
+    "ready"
+  ],
+  "additionalProperties": false
+}

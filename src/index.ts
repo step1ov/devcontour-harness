@@ -257,6 +257,12 @@ export {
   type InitOptions,
   type InitData,
 } from './init/project.ts';
+export {
+  inspectProject,
+  gitFacts,
+  type GitFacts,
+  type InspectProjectOptions,
+} from './init/inspect.ts';
 export { diagnoseState, type DiagnoseOptions } from './explain/diagnose.ts';
 export { stopInputsOf, type StopInputOptions, type StopSource } from './explain/state.ts';
 export * from './planning/index.ts';
