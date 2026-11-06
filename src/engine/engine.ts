@@ -1104,6 +1104,11 @@ export class Engine {
       const active = tx.attempts().filter((a) => a.status === 'active');
       if (active.length >= this.policy.concurrency) return undefined;
       this.budgetBlocks(tx);
+      // Применённый ответ, основание которого сменилось до выдачи, не
+      // теряется молча: запрос возвращается в `answered` (работа снова ждёт
+      // применения и не выдаётся), причина записана.
+      for (const ready of tx.works().filter((w) => w.status === 'ready'))
+        this.staleTargets(tx, ready);
       for (const ready of tx.works().filter((w) => w.status === 'ready' && w.recovery)) {
         const next = structuredClone(ready);
         if (closeIfBasisChanged(next, iso(this.now()), this.episodeOf(next, tx))) {
@@ -2510,6 +2515,45 @@ export class Engine {
     };
   }
 
+  /** Действующий снимок контекста поручения для выдачи (`pinned.contextDigest`). */
+  private contextPinOf(view: ExecutionView, work: WorkState) {
+    if (this.host.input) return this.host.input.contextDigestOf(work, view);
+    const approved = view.graph(work.graphId)?.approval?.context;
+    return approved ? approved.digest : undefined;
+  }
+
+  /** Чем основание выдачи сейчас расходится с применённым; `undefined` — совпадает. */
+  private targetDrift(view: ExecutionView, work: WorkState, target: InputTarget) {
+    if (target.graphDigest !== view.graph(work.graphId)?.digest) return 'graph' as const;
+    if (target.orderDigest !== this.host.basis.orderDigest(work, view)) return 'order' as const;
+    if (target.policyDigest !== this.host.basis.policyDigest(work, view)) return 'policy' as const;
+    if (target.contextDigest !== (this.contextPinOf(view, work) ?? null)) return 'context' as const;
+    return undefined;
+  }
+
+  /** Вернуть в `answered` применённые, но не переданные ответы с устаревшим основанием. */
+  private staleTargets(tx: ExecutionTransaction, work: WorkState) {
+    for (const r of requestsOf(tx, work)) {
+      if (r.kind !== 'question' || r.lifecycle !== 'applied' || r.delivered || !r.target) continue;
+      const reason = this.targetDrift(tx, work, r.target);
+      if (!reason) continue;
+      const { target, ...rest } = r;
+      tx.putLocal('input-requests', work.order.repositoryId, r.id, {
+        ...rest,
+        lifecycle: 'answered',
+        stale: { targetDigest: target.digest, reason, at: iso(this.now()) },
+        version: r.version + 1,
+      });
+      tx.emit({
+        type: 'input.stale',
+        graphId: work.graphId,
+        workId: work.id,
+        runId: r.runId,
+        payload: { requestId: r.id, targetDigest: target.digest, reason },
+      });
+    }
+  }
+
   /**
    * Снимок `contextDigest` несёт источник ответа этого запроса с точным
    * digest и версией ответа (manifest). Снимок — порта хоста или локальный.
@@ -2667,11 +2711,10 @@ export class Engine {
       // Работа всё ещё в той остановке, из которой задан вопрос: устаревший
       // ответ не применяется к другой работе или другой попытке.
       const last = tx.attempts(work.id).at(-1);
-      if (
-        work.status !== 'failed' ||
-        work.failureKind !== 'needs-input' ||
-        last?.id !== request.runId
-      )
+      // Готовая без новой попытки — после устаревшего применения (`stale`).
+      const atOrigin =
+        (work.status === 'failed' && work.failureKind === 'needs-input') || work.status === 'ready';
+      if (!atOrigin || last?.id !== request.runId)
         throw new HarnessError(
           'NOT_READY',
           `Поручение ${work.id} уже не в остановке попытки ${request.runId}: ответ не применяется`,
@@ -2745,8 +2788,11 @@ export class Engine {
         this.activateApproval(tx, checked!.graph, checked!.last, options.actor, {
           bindContext: true,
         });
+      // Прежнее устаревшее основание — история события `input.stale`.
+      const { stale: _stale, ...current } = request;
+      void _stale;
       const next: InputRequest = {
-        ...request,
+        ...current,
         lifecycle: 'applied',
         target: full,
         version: request.version + 1,

@@ -341,6 +341,15 @@ export const eventPayloads = {
     by: z.enum(['operator', 'lead', 'host', 'controller']),
     successor: z.string().min(1).max(200).optional(),
   }),
+  /**
+   * Применённое основание устарело до выдачи (claim): запрос снова
+   * `answered`, работа ждёт нового применения; без текста.
+   */
+  'input.stale': z.strictObject({
+    requestId: inputRequestId,
+    targetDigest: digestSchema,
+    reason: z.enum(['context', 'graph', 'order', 'policy']),
+  }),
   /** Ответ передан исполнителю: начался вызов runtime попытки с этим ответом. */
   'input.delivered': z.strictObject({
     requestId: inputRequestId,

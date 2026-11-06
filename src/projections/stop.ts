@@ -465,9 +465,8 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
   // Вопрос исполнителя: шаг определяет состояние запроса, а не класс отказа.
   const question = work.input;
   if (
-    work.status === 'failed' &&
-    kind === 'needs-input' &&
     question &&
+    work.status !== 'cancelled' &&
     (question.state === 'awaiting-answer' || question.state === 'answered-not-applied')
   ) {
     const head = `Вопрос ${question.requestId}${question.question ? `: «${clipText(question.question, 200)}»` : ''}${question.options?.length ? `; варианты: ${question.options.join(', ')}` : ''}.`;

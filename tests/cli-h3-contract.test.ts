@@ -134,6 +134,7 @@ const ADDITIVE_EVENT_TYPES = new Set([
   'input.applied',
   'input.closed',
   'input.delivered',
+  'input.stale',
   'attempt.assumptions',
 ]);
 /** Аддитивные флаги прежних команд после H2. */

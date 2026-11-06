@@ -276,6 +276,18 @@ export const inputRequestSchema = z.strictObject({
     })
     .optional(),
   /**
+   * Применённое основание устарело до выдачи попытки с ответом (сменились
+   * согласованный снимок, граф, постановка или политика): запрос возвращён в
+   * `answered`, работа снова ждёт применения — ответ не теряется молча.
+   */
+  stale: z
+    .strictObject({
+      targetDigest: digestSchema,
+      reason: z.enum(['context', 'graph', 'order', 'policy']),
+      at: isoTimeSchema,
+    })
+    .optional(),
+  /**
    * Ответ writer был вне схемы, и controller привёл вопрос к ней (усёк
    * текст, исправил ID вариантов, ограничил серьёзность): что именно
    * исправлено. Нет поля — вопрос пришёл в схеме.

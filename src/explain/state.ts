@@ -174,7 +174,9 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
     // (усекает explain), ответ — версией и digest; почему ответ сейчас не
     // применится — по тем же пределам, что у applyInput.
     const inputOf = (work: WorkState, attempts: readonly AttemptState[]) => {
-      if (work.failureKind !== 'needs-input') return undefined;
+      // Вопрос держит и готовую работу (новая редакция графа, устаревшее
+      // применение): диагноз называет его при любом статусе, кроме итоговых.
+      if (work.status === 'done' || work.status === 'cancelled') return undefined;
       const requests = requestsOf(v, work);
       const question = requests
         .filter((r) => r.kind === 'question' && r.blocking && inputStateOf(r))
@@ -182,6 +184,9 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
       if (!question) return undefined;
       const answer = question.answers.at(-1);
       const refusal = [
+        question.stale
+          ? `применённое основание устарело до выдачи (${question.stale.reason}): нужен новый снимок с ответом, ревью и применение`
+          : '',
         work.attempt >= options.maxAttempts
           ? `исчерпаны попытки (${work.attempt} из ${options.maxAttempts}): применение — со сбросом и причиной`
           : '',

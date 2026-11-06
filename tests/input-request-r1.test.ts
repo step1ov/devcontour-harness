@@ -28,6 +28,7 @@ import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import { inputContextSource, unappliedInputs, withInput } from '../src/engine/input-requests.ts';
 import { bin, runAll, setup } from './runner-fixture.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
+import { prompt } from '../src/engine/prompt.ts';
 import { inputPolicyText, normalizeImplementation } from '../src/engine/input-policy.ts';
 import { engineOf, graphOf, planReview, policyOf, ready, sha } from './engine-fixture.ts';
 
@@ -363,4 +364,107 @@ test('M-6: пределы названы в запросе writer; ответ в
   assert.match(inputPolicyText({ threshold: 11, criticalPaths: [] }), /up to 6 options/);
   assert.equal(normalizeImplementation({ completed: true, summary: 1 }), undefined);
   assert.equal(normalizeImplementation({ completed: false, inputRequest: null }), undefined);
+});
+
+/** Ответ, снимок с ним, раунд ревью этого снимка и предложение основания. */
+function prepare(env: ReturnType<typeof stopped>, text = 'Hello') {
+  const current = env.engine.inputRequest(env.request.id);
+  const answered =
+    latestAnswer(current)?.text === text
+      ? current
+      : env.engine.answerInput(
+          env.request.id,
+          { text, actor: { kind: 'operator' } },
+          current.version,
+        ).request;
+  const snapshot = withInput(undefined, inputContextSource(answered, latestAnswer(answered)!));
+  const digest = contextDigest(snapshot);
+  env.store.transact('run.context', (tx) =>
+    tx.putLocal('context-snapshots', WORKSPACE_OWNER, digest, snapshot),
+  );
+  env.engine.recordReview({
+    ...planReview(env.engine, env.graph, env.engine.reviews('plan', env.graph.id).length + 1),
+    contextDigest: digest,
+  });
+  const proposal = env.engine.proposeTarget(env.request.id, digest);
+  const apply = () =>
+    env.engine.applyInput(env.request.id, {
+      answerDigest: latestAnswer(answered)!.digest,
+      expectedVersion: env.engine.inputRequest(env.request.id).version,
+      contextDigest: digest,
+      targetDigest: proposal.target!.digest,
+      actor: 'agent',
+    });
+  return { answered, digest, proposal, apply };
+}
+
+test('M-3: согласование сменилось после apply — при выдаче ответ не теряется: запрос снова answered, работа держится и применяется заново', () => {
+  const env = stopped();
+  const first = prepare(env);
+  assert.equal(first.apply().applied, true);
+  // Новое согласование без снимка с ответом (как run без --context).
+  env.engine.recordReview(
+    planReview(env.engine, env.graph, env.engine.reviews('plan', env.graph.id).length + 1),
+  );
+  env.engine.approve(env.graph.id, 'agent', { bindContext: true });
+  env.clock.now += 1000;
+  const claimed = env.engine.claim('c1');
+  assert.notEqual(claimed?.workId, 'w', 'работа без ответа не выдана');
+  const request = env.engine.inputRequest(env.request.id);
+  assert.equal(request.lifecycle, 'answered');
+  assert.equal(request.target, undefined);
+  assert.equal(request.stale?.reason, 'context');
+  assert.ok(
+    env.engine
+      .read((v) => env.engine.blockers(v.work('w')!, v))
+      .some((b) => b.code === 'INPUT_REQUIRED'),
+  );
+  assert.equal(env.store.events(0, 500).filter((e) => e.type === 'input.stale').length, 1);
+  if (claimed) env.engine.fail(claimed.id, claimed.token, 'x', { kind: 'gate' });
+  // Новый снимок с тем же ответом, ревью и применение: работа готова и с ответом.
+  const second = prepare(env);
+  const applied = second.apply();
+  assert.equal(applied.applied, true);
+  assert.equal(env.engine.inputRequest(env.request.id).stale, undefined);
+  env.clock.now += 1000;
+  const next = env.engine.claim('c1')!;
+  assert.equal(next.workId, 'w');
+  assert.equal(next.input?.requestId, env.request.id);
+  assert.equal(next.pinned?.contextDigest, second.digest);
+});
+
+test('M-3: запрос продолжения называет ответ в снимке, только если он связан с попыткой', () => {
+  const env = stopped();
+  const base = env.engine.read((v) => ({
+    work: v.work('w')!,
+    attempt: v.attempt(env.attempt.id)!,
+  }));
+  const text = (input: boolean) =>
+    prompt({
+      work: base.work,
+      attempt: {
+        ...base.attempt,
+        continuedFrom: {
+          runId: env.attempt.id,
+          kind: 'unfinished',
+          reason: 'needs-input',
+          applied: true,
+          files: ['src/a.js'],
+        },
+        ...(input
+          ? {
+              input: {
+                requestId: env.request.id,
+                answerDigest: sha('a').slice(0, 64),
+                targetDigest: sha('b').slice(0, 64),
+              },
+            }
+          : {}),
+      },
+      history: [],
+      gates: [],
+    });
+  assert.match(text(true), /the answer is in the pinned context below/);
+  assert.doesNotMatch(text(false), /the answer is in the pinned context/);
+  assert.match(text(false), /no answer is attached to this attempt/);
 });

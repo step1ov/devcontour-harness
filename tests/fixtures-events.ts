@@ -125,6 +125,7 @@ export const validPayloads: Record<EventType, Record<string, unknown>> = {
     by: 'lead',
     successor: 'w2',
   },
+  'input.stale': { requestId: 'IR-' + 'a'.repeat(24), targetDigest: d, reason: 'context' },
   'input.delivered': { requestId: 'IR-' + 'a'.repeat(24), answerDigest: d, callId: 'call-1' },
   'attempt.assumptions': { count: 2, maxSeverity: 4, floors: 0, followUps: 0, digest: d },
   'delivery.pending': delivery,

@@ -960,11 +960,16 @@ test('H02-K: доставку подтверждает только начало
   );
   moved.engine.approve(moved.graph.id, 'agent', { bindContext: true });
   moved.clock.now += 1000;
-  const unrelated = moved.engine.claim('c1')!;
-  assert.equal(unrelated.workId, 'a');
-  assert.equal(unrelated.input, undefined);
-  assert.equal(moved.engine.inputDelivered(unrelated.id, unrelated.token, 'call-1'), false);
-  assert.equal(moved.engine.inputRequest(moved.request.id).delivered, undefined);
+  // Ответ новой попытке не приписывается и не теряется молча: основание
+  // устарело, запрос снова answered, работа ждёт нового применения.
+  const unrelated = moved.engine.claim('c1');
+  assert.notEqual(unrelated?.workId, 'a');
+  if (unrelated)
+    assert.equal(moved.engine.inputDelivered(unrelated.id, unrelated.token, 'call-1'), false);
+  const after = moved.engine.inputRequest(moved.request.id);
+  assert.equal(after.delivered, undefined);
+  assert.equal(after.lifecycle, 'answered');
+  assert.equal(after.stale?.reason, 'context');
 });
 
 test('H02-G: состояние без вопросов (формы alpha.35) читается: запросов нет, выдача и повтор как прежде', () => {
