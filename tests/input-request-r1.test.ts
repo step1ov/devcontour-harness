@@ -35,6 +35,7 @@ import { Runner } from '../src/engine/runner.ts';
 import { hsetup } from './harness-fixture.ts';
 import { stopInputsOf } from '../src/explain/state.ts';
 import { explainStop } from '../src/projections/stop.ts';
+import { handoffPack } from '../src/handoff/pack.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { prompt } from '../src/engine/prompt.ts';
 import {
@@ -1895,4 +1896,76 @@ test('R6-3: пересинхронизация трекера (только ре
   assert.ok(w, 'w выдана');
   assert.equal(w.input?.requestId, env.request.id);
   assert.equal(env.engine.inputRequest(env.request.id).stale, undefined);
+});
+
+test('R6-1/R6-4: устаревший перенесённый ответ виден в статусе, explain и пакете передачи; выходы — снять (input-cancel) или перенести снова', () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const h = ctx.open();
+  const g1 = ready(h.engine, ctx.graph, 'controller');
+  const a = h.engine.claim('controller')!;
+  h.engine.fail(a.id, a.token, 'вопрос', { kind: 'needs-input', input: outcome() });
+  const id = h.inputRequests({ workId: a.workId })[0]!.id;
+  h.answerInput(id, { text: 'Hello', actor: { kind: 'operator' } }, 1);
+  const raw = structuredClone(ctx.graph) as unknown as {
+    source: { revision: string };
+    orders: Record<string, unknown>[];
+  };
+  raw.source.revision = '2';
+  raw.orders[0] = { ...raw.orders[0], goal: String(raw.orders[0]!.goal) + ' Уточнено.' };
+  const { graph } = h.engine.register(workGraphSchema.parse(raw), trustNone);
+  void g1;
+  h.engine.recordReview(planReview(h.engine, graph, h.engine.reviews('plan', graph.id).length + 1));
+  h.engine.approve(graph.id, 'agent');
+  const closed = h.supersedeInput(
+    id,
+    { by: 'lead', reason: 'редакция', successor: a.workId },
+    2,
+  ).request;
+  const { digest } = h.inputContext(id);
+  h.engine.recordReview({
+    ...planReview(h.engine, graph, h.engine.reviews('plan', graph.id).length + 1),
+    contextDigest: digest,
+  });
+  const proposal = h.proposeCarry(id, digest);
+  h.carryInput(id, {
+    contextDigest: digest,
+    actor: 'agent',
+    expectedVersion: closed.version,
+    targetDigest: proposal.target!.digest,
+  });
+  // Согласование ушло на снимок без ответа до выдачи — перенос устарел.
+  h.engine.recordReview(planReview(h.engine, graph, h.engine.reviews('plan', graph.id).length + 1));
+  h.engine.approve(graph.id, 'agent', { bindContext: true });
+  assert.equal(h.engine.claim('controller'), undefined, 'работа держится');
+  const stale = h.inputRequest(id);
+  assert.equal(stale.stale?.reason, 'context');
+  // R6-4: состояние видно.
+  const work = h.status().works.find((w) => w.id === a.workId)!;
+  assert.equal(work.input?.state, 'carry-stale');
+  const diagnosis = stopInputsOf(h, {
+    maxAttempts: h.policy.maxAttempts,
+    repairBudget: h.policy.repairBudget,
+  })
+    .filter((i) => i.kind === 'work' && i.work.id === a.workId)
+    .map(explainStop)[0]!;
+  assert.equal(diagnosis.code, 'INPUT_REQUIRED');
+  assert.match(diagnosis.message, /carryInput/);
+  assert.match(diagnosis.message, /input-cancel/);
+  assert.equal(handoffPack(h).inputs?.[0]?.state, 'carry-stale');
+  // R6-1: выход «снять» — работа продолжается без перенесённого ответа.
+  const released = h.cancelInput(
+    id,
+    { by: 'operator', reason: 'ответ больше не нужен' },
+    stale.version,
+  );
+  assert.equal(released.changed, true);
+  assert.equal(released.request.lifecycle, 'cancelled');
+  assert.ok(
+    !h
+      .status()
+      .works.find((w) => w.id === a.workId)!
+      .blockers.some((b) => b.code === 'INPUT_REQUIRED'),
+  );
+  assert.equal(h.engine.claim('controller')?.workId, a.workId, 'работа выдана без ответа');
+  h.close();
 });

@@ -491,7 +491,7 @@ function build(
       workId: r.workId,
       kind: r.kind,
       state: inputStateOf(r) as
-        'awaiting-answer' | 'answered-not-applied' | 'applied-awaiting-claim',
+        'awaiting-answer' | 'answered-not-applied' | 'applied-awaiting-claim' | 'carry-stale',
       severity: r.effectiveSeverity,
       question: text(r.question.question),
       options: r.question.options.map((o) => name(o.id)),

@@ -2449,8 +2449,15 @@ export class Engine {
   ) {
     return this.tx('input.closed', (tx) => {
       const { owner, request } = this.requestIn(tx, id);
-      if (request.lifecycle === lifecycle) return { request, changed: false };
-      if (!['pending', 'answered'].includes(request.lifecycle))
+      // Перенесённый ответ, устаревший до выдачи, можно снять: работа
+      // перестаёт его ждать и продолжает без него (второй выход — новый перенос).
+      const staleCarry =
+        lifecycle === 'cancelled' &&
+        request.lifecycle === 'superseded' &&
+        !!request.stale &&
+        !request.target;
+      if (request.lifecycle === lifecycle && !staleCarry) return { request, changed: false };
+      if (!['pending', 'answered'].includes(request.lifecycle) && !staleCarry)
         throw new HarnessError(
           'NOT_READY',
           `Запрос ${id} ${request.lifecycle}: ${lifecycle === 'cancelled' ? 'отмена' : 'замена'} невозможна`,
@@ -2755,11 +2762,7 @@ export class Engine {
       const last = v.attempts(work.id).at(-1);
       const atOrigin =
         (work.status === 'failed' && work.failureKind === 'needs-input') || work.status === 'ready';
-      if (
-        !atOrigin ||
-        last?.id !== request.runId ||
-        this.orderMoved(v, work, request.originBasis)
-      )
+      if (!atOrigin || last?.id !== request.runId || this.orderMoved(v, work, request.originBasis))
         problems.push(
           'работа уже не в исходной остановке (новая редакция постановки или другая попытка): выход — supersedeInput и перенос ответа в контекст новой редакции (input-context, review-plan, согласование)',
         );

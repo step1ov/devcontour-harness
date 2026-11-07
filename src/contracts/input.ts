@@ -237,6 +237,7 @@ export const inputStateNames = [
   'answered-not-applied',
   'applied-awaiting-claim',
   'delivered',
+  'carry-stale',
 ] as const;
 
 /**

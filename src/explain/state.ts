@@ -184,9 +184,7 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
       if (!question) return undefined;
       const answer = question.answers.at(-1);
       const refusal = [
-        question.stale
-          ? `применённое основание устарело до выдачи (${question.stale.reason}): нужен новый снимок с ответом, ревью и применение`
-          : '',
+        question.stale ? `основание устарело до выдачи (${question.stale.reason})` : '',
         work.attempt >= options.maxAttempts
           ? `исчерпаны попытки (${work.attempt} из ${options.maxAttempts}): применение — со сбросом и причиной`
           : '',

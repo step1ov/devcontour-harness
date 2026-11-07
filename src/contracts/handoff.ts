@@ -315,7 +315,12 @@ export const handoffPackSchema = z.strictObject({
         requestId: name,
         workId: idSchema,
         kind: z.enum(['question', 'follow-up']),
-        state: z.enum(['awaiting-answer', 'answered-not-applied', 'applied-awaiting-claim']),
+        state: z.enum([
+          'awaiting-answer',
+          'answered-not-applied',
+          'applied-awaiting-claim',
+          'carry-stale',
+        ]),
         severity: z.number().int().min(1).max(10),
         question: text,
         options: z.array(name).max(6),

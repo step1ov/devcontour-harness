@@ -467,7 +467,9 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
   if (
     question &&
     work.status !== 'cancelled' &&
-    (question.state === 'awaiting-answer' || question.state === 'answered-not-applied')
+    (question.state === 'awaiting-answer' ||
+      question.state === 'answered-not-applied' ||
+      question.state === 'carry-stale')
   ) {
     const head = `Вопрос ${question.requestId}${question.question ? `: «${clipText(question.question, 200)}»` : ''}${question.options?.length ? `; варианты: ${question.options.join(', ')}` : ''}.`;
     const own = [
@@ -484,6 +486,22 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
         actor: 'user',
         action: 'answer-input',
         note: [head, 'Ответьте: harness input-answer.', own].filter(Boolean).join(' '),
+      };
+    if (question.state === 'carry-stale')
+      return {
+        code: 'INPUT_REQUIRED',
+        cause: 'needs-input',
+        phase,
+        actor: 'lead',
+        action: 'apply-input',
+        note: [
+          head,
+          `Перенесённый ответ r${question.answer?.revision ?? '?'} устарел до выдачи${question.refusal ? `: ${question.refusal}` : ''}.`,
+          'Выходы: перенести снова (input-context, review-plan, carryInput) или снять перенесённый ответ (input-cancel) — работа продолжится без него.',
+          own,
+        ]
+          .filter(Boolean)
+          .join(' '),
       };
     return {
       code: 'INPUT_REQUIRED',

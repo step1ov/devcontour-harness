@@ -155,6 +155,7 @@ const ADDITIVE_ENUM_VALUES = new Set([
   'INPUT_REQUIRED',
   'answer-input',
   'apply-input',
+  'carry-stale',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
