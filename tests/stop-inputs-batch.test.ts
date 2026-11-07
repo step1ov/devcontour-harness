@@ -171,7 +171,7 @@ test('stopInputsOf совпадает с прежней реализацией (
   assert.deepEqual(missing, [], 'формы, которых генератор не дал');
 });
 
-test('approvalStaleness = первая причина APPROVAL_STALE из blockers: устаревшая постановка, политика после согласования, отказ хоста', () => {
+test('approvalStaleness = первая причина APPROVAL_STALE из blockers: процесс не с применённой политикой, устаревшая постановка, политика после согласования, отказ хоста', () => {
   let stale = 0;
   const reasons = new Set<string>();
   const agree = (engine: Engine, label: string) =>
@@ -221,8 +221,32 @@ test('approvalStaleness = первая причина APPROVAL_STALE из blocke
       `seed ${seed} host`,
     );
   }
+  // Процесс не с применённой политикой: применена политика доски, роль
+  // controller держит её процесс, а этот загружен с другой — причина процесса
+  // идёт первой у каждой работы.
+  for (let seed = 1; seed <= 4; seed++) {
+    const board = boardOf(specOf(seed));
+    const clock = () => Date.parse('2026-01-01T00:00:00.000Z');
+    const holder = new Engine({
+      host: standaloneHost(board.store, board.policy),
+      policy: board.policy,
+      now: clock,
+    });
+    holder.release('c1');
+    assert.ok(holder.lead('c2'), `seed ${seed}: роль получена`);
+    holder.recordPolicy('c2');
+    const changed = policyOf((p) => {
+      p.maxAttempts = 4;
+      p.repairBudget = board.policy.repairBudget;
+      p.approvalMode = board.policy.approvalMode;
+    });
+    agree(
+      new Engine({ host: standaloneHost(board.store, changed), policy: changed, now: clock }),
+      `seed ${seed} process`,
+    );
+  }
   assert.ok(stale > 100, `устаревших ${stale}`);
-  assert.deepEqual([...reasons].sort(), ['Политика', 'Постановка', 'Хост:']);
+  assert.deepEqual([...reasons].sort(), ['Политика', 'Постановка', 'Процесс', 'Хост:']);
 });
 
 test('workIds: неизвестная работа — NOT_FOUND, вместе с workId — INVALID_INPUT, пустой набор — без работ', () => {
