@@ -6,7 +6,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1486,4 +1486,50 @@ test('Q1: согласование другой работы того же гр�
   assert.ok(w, 'w выдана');
   assert.equal(w.input?.requestId, env.request.id, 'ответ связан с попыткой');
   assert.equal(env.engine.inputRequest(env.request.id).stale, undefined);
+});
+
+test('Q6: загрузчик контекста хоста, не учитывающий закрепление, отказывает сразу — до вызова writer', async () => {
+  const snap = (text: string) => {
+    const file = {
+      path: 'notes.md',
+      digest: sha256(Buffer.from(text)),
+      bytes: Buffer.byteLength(text),
+      content: { encoding: 'utf8' as const, data: text },
+    };
+    const entry = {
+      id: 'notes',
+      kind: 'doc',
+      version: '1',
+      required: false,
+      files: [file],
+      references: [],
+    };
+    return withInput(undefined, { ...entry, digest: sourceDigest(entry) });
+  };
+  const pinned = snap('закреплённый');
+  const other = snap('другой');
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    runner: { context: () => other },
+  });
+  await ctx.runner.init();
+  const { graph } = ctx.engine.register(ctx.graph, trustNone);
+  const digest = contextDigest(pinned);
+  ctx.store.transact('run.context', (tx) =>
+    tx.putLocal('context-snapshots', WORKSPACE_OWNER, digest, pinned),
+  );
+  ctx.engine.recordReview({
+    ...planReview(ctx.engine, graph, 1),
+    authorRuntime: 'claude',
+    reviewerBinding: ctx.engine.reviewerBinding('plan', 'claude')!,
+    contextDigest: digest,
+  });
+  ctx.engine.approve(graph.id, 'agent', { bindContext: true });
+  ctx.engine.resume();
+  await ctx.runner.drain();
+  const [attempt] = ctx.engine.read((v) => v.attempts('add-greeting'));
+  assert.equal(attempt!.pinned?.contextDigest, digest);
+  assert.equal(attempt!.status, 'failed');
+  assert.match(attempt!.error ?? '', /закреплённым при выдаче/);
+  assert.equal(existsSync(`${ctx.scenarioPath}.claude.writer.count`), false, 'writer не вызывался');
 });

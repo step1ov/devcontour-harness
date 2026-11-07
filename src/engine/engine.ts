@@ -1409,6 +1409,21 @@ export class Engine {
     });
   }
 
+  /**
+   * Снимок контекста попытки обязан совпасть с закреплённым при выдаче
+   * (`pinned.contextDigest`, `null` — без контекста). Попытки без
+   * закрепления (прежних версий, хост без связи согласования с контекстом)
+   * не проверяются.
+   */
+  private assertPinnedContext(a: AttemptState, snapshot: string | null) {
+    const pinned = a.pinned?.contextDigest;
+    if (pinned === undefined || pinned === snapshot) return;
+    throw new HarnessError(
+      'APPROVAL_STALE',
+      `Снимок контекста попытки ${snapshot ?? 'null'} не совпадает с закреплённым при выдаче ${pinned}: загрузчик контекста хоста обязан загружать снимок по attempt.pinned.contextDigest`,
+    );
+  }
+
   /** Дополнить попытку сведениями её хода (контекст, ресурсы, замеры) под тем же fencing. */
   update(
     id: string,
@@ -1418,7 +1433,12 @@ export class Engine {
       Pick<AttemptState, 'context' | 'contextSnapshot' | 'resources' | 'model' | 'timings'>
     >,
   ) {
-    this.withAttempt(id, token, kind, (a, _w, tx) => tx.putAttempt({ ...a, ...patch }));
+    this.withAttempt(id, token, kind, (a, _w, tx) => {
+      // Снимок, закреплённый при выдаче, — единственный допустимый: загрузчик
+      // хоста, не учитывающий закрепление, отказывает сразу, а не при приёмке.
+      if (patch.contextSnapshot !== undefined) this.assertPinnedContext(a, patch.contextSnapshot);
+      tx.putAttempt({ ...a, ...patch });
+    });
   }
 
   /** Снимок зависимостей, против которого идёт попытка; закрепляется до реализации. */
@@ -1881,6 +1901,8 @@ export class Engine {
       if (proof) throw new HarnessError('GATE_FAILED', proof);
       const contract = this.contractBlocker(w, tx);
       if (contract) throw new HarnessError('APPROVAL_STALE', contract);
+      // Попытка исполнена ровно на снимке, закреплённом при выдаче.
+      this.assertPinnedContext(a, a.contextSnapshot ?? null);
       // Согласование, связанное с контекстом, принимает только попытку на
       // том же снимке: новый одобренный контекст требует новой попытки.
       const bound = tx.graph(w.graphId)?.approval?.context;
