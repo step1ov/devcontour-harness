@@ -158,13 +158,17 @@ export function inputManifestOf(source: ContextSourceEntry): InputManifest | und
  * новой редакции. Запрос закрыт, блокировки нет; снимок называет ровно один
  * из записанных ответов.
  */
-export const carried = (request: InputRequest, manifest: InputManifest) => {
+export const carried = (
+  request: InputRequest,
+  manifest: InputManifest,
+  mayCarry: (request: InputRequest) => boolean = (r) => r.closed?.carry === true,
+) => {
   const last = request.answers.at(-1);
   return (
     request.lifecycle === 'superseded' &&
-    request.closed?.carry === true &&
     last?.digest === manifest.answerDigest &&
-    last.revision === manifest.revision
+    last.revision === manifest.revision &&
+    mayCarry(request)
   );
 };
 
@@ -173,7 +177,15 @@ export const carried = (request: InputRequest, manifest: InputManifest) => {
  * найден, не применён или применён с другим ответом. Такой снимок не
  * становится действующим согласованием обходным путём (approve, run).
  */
-export function unappliedInputs(view: ExecutionView, snapshot: ContextSnapshot | undefined) {
+export function unappliedInputs(
+  view: ExecutionView,
+  snapshot: ContextSnapshot | undefined,
+  /**
+   * Можно ли перенести ответ заменённого запроса сейчас (`Engine.carryAllowed`);
+   * без него — отметка `closed.carry`, записанная при замене.
+   */
+  mayCarry?: (request: InputRequest) => boolean,
+) {
   const out: { source: string; requestId?: string; reason: string }[] = [];
   for (const source of snapshot?.sources ?? []) {
     if (source.kind !== INPUT_SOURCE_KIND) continue;
@@ -185,7 +197,7 @@ export function unappliedInputs(view: ExecutionView, snapshot: ContextSnapshot |
     const found = requestById(view, manifest.requestId)?.request;
     if (!found)
       out.push({ source: source.id, requestId: manifest.requestId, reason: 'запрос не найден' });
-    else if (carried(found, manifest)) continue;
+    else if (carried(found, manifest, mayCarry)) continue;
     else if (found.lifecycle !== 'applied' || found.target?.answerDigest !== manifest.answerDigest)
       out.push({
         source: source.id,

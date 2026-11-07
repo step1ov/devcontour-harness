@@ -29,7 +29,6 @@ import {
 } from '../contracts/index.ts';
 import {
   inputContextSource,
-  unappliedInputs,
   withInput,
   type InputMessageRef,
 } from '../engine/input-requests.ts';
@@ -533,7 +532,8 @@ export class Harness {
     const applied = this.engine.read((v) =>
       approved.sources.filter(
         (s) =>
-          s.kind === INPUT_SOURCE_KIND && !unappliedInputs(v, { ...approved, sources: [s] }).length,
+          s.kind === INPUT_SOURCE_KIND &&
+          !this.engine.unappliedInputs(v, { ...approved, sources: [s] }).length,
       ),
     );
     if (!applied.length) return context;
@@ -622,7 +622,7 @@ export class Harness {
     }
     // Снимок с неприменённым ответом на вопрос исполнителя запуск не
     // активирует — до платного ревью: продолжение после ответа — applyInput.
-    const unapplied = this.engine.read((v) => unappliedInputs(v, input.context));
+    const unapplied = this.engine.read((v) => this.engine.unappliedInputs(v, input.context));
     if (unapplied.length)
       throw new HarnessError(
         'INPUT_REQUIRED',

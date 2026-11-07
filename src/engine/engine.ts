@@ -548,7 +548,7 @@ export class Engine {
       // через applyInput: обходное согласование его не активирует.
       if (options.bindContext && last.contextDigest) {
         const snapshot = tx.local('context-snapshots', WORKSPACE_OWNER, last.contextDigest);
-        const unapplied = unappliedInputs(tx, snapshot);
+        const unapplied = this.unappliedInputs(tx, snapshot);
         if (unapplied.length)
           throw new HarnessError(
             'INPUT_REQUIRED',
@@ -2438,7 +2438,10 @@ export class Engine {
         ...(input.successor ? { successor: input.successor } : {}),
         // Перенос ответа в контекст новой редакции — только когда исходная
         // остановка уже не держится; иначе продолжение — только applyInput.
-        ...(lifecycle === 'superseded' ? { carry: !this.originHolds(tx, request) } : {}),
+        // Сведение для истории: решает перенос его чтение (`carryAllowed`).
+        ...(lifecycle === 'superseded'
+          ? { carry: this.carryAllowed(tx, { ...request, lifecycle: 'superseded' }) }
+          : {}),
       };
       invalidInput('Закрытие запроса', inputRequestSchema.shape.closed.safeParse(closed));
       return { request: this.closeIn(tx, owner, request, lifecycle, closed), changed: true };
@@ -2539,6 +2542,30 @@ export class Engine {
       view.graph(work.graphId)?.digest === request.originBasis.graphDigest &&
       this.host.basis.orderDigest(work, view) === request.originBasis.orderDigest
     );
+  }
+
+  /**
+   * Можно ли перенести ответ заменённого запроса в контекст сейчас — в
+   * момент переноса, а не замены (порядок «замена, потом новая редакция»
+   * тоже ведёт к переносу). Уточнение: исходная остановка уже не держится.
+   * Изменение требований: изменилась постановка самой этой работы — иначе
+   * требование вошло бы в неизменную постановку одним файлом контекста.
+   * Переносится только последний ответ (`carried`).
+   */
+  carryAllowed(view: ExecutionView, request: InputRequest) {
+    if (request.lifecycle !== 'superseded') return false;
+    const answer = latestAnswer(request);
+    if (!answer) return false;
+    const work = view.work(request.workId);
+    const orderChanged =
+      !work || this.host.basis.orderDigest(work, view) !== request.originBasis.orderDigest;
+    if (answer.kind === 'requirement-change') return orderChanged;
+    return orderChanged || !this.originHolds(view, request);
+  }
+
+  /** Неприменённые источники ответов снимка с правилом переноса этого движка. */
+  unappliedInputs(view: ExecutionView, snapshot: ContextSnapshot | undefined) {
+    return unappliedInputs(view, snapshot, (r) => this.carryAllowed(view, r));
   }
 
   /**

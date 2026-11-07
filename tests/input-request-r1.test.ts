@@ -1251,3 +1251,118 @@ test('R3-3: нераспознанная область — критичност
   assert.equal(out.assumptions[0]!.effectiveSeverity, 10);
   assert.equal(out.followUps.length, 1, 'ведущий получает запрос');
 });
+
+/** Новая редакция графа: другие поручения не меняются, `change` правит граф. */
+function reviseGraph(
+  env: ReturnType<typeof stopped>,
+  revision: string,
+  change: (orders: Record<string, unknown>[]) => void,
+) {
+  const raw = structuredClone(graphOf({ w: [], x: [] })) as unknown as {
+    source: { revision: string };
+    orders: Record<string, unknown>[];
+  };
+  raw.source.revision = revision;
+  change(raw.orders);
+  const { graph } = env.engine.register(workGraphSchema.parse(raw), trustNone);
+  env.engine.recordReview(
+    planReview(env.engine, graph, env.engine.reviews('plan', graph.id).length + 1),
+  );
+  env.engine.approve(graph.id, 'agent');
+  return graph;
+}
+const addOrder = (id: string) => (orders: Record<string, unknown>[]) =>
+  void orders.push({ ...orders[0], id, source: { connector: 'files', ref: id, revision: '1' } });
+
+test('R3-1: изменение требований переносится, только если изменилась постановка самой работы', () => {
+  const env = stopped();
+  const answered = env.engine.answerInput(
+    env.request.id,
+    { text: 'Новый критерий', kind: 'requirement-change', actor: { kind: 'operator' } },
+    1,
+  ).request;
+  // Новая редакция графа, постановка w прежняя.
+  const unrelated = reviseGraph(env, '2', addOrder('y'));
+  env.engine.supersedeInput(
+    env.request.id,
+    { by: 'lead', reason: 'ревизия', successor: 'w' },
+    answered.version,
+  );
+  assert.equal(env.engine.inputRequest(env.request.id).closed?.carry, false);
+  reviewSnapshot(env, unrelated);
+  assert.equal(
+    code(() => env.engine.approve(unrelated.id, 'agent', { bindContext: true })),
+    'INPUT_REQUIRED',
+  );
+  // Редакция, изменившая постановку w: требование вошло в неё — перенос допустим.
+  const changed = reviseGraph(env, '3', (orders) => {
+    addOrder('y')(orders);
+    orders[0] = { ...orders[0], goal: String(orders[0]!.goal) + ' С новым критерием.' };
+  });
+  reviewSnapshot(env, changed);
+  assert.equal(env.engine.approve(changed.id, 'agent', { bindContext: true }).changed, true);
+});
+
+test('R3-2: замена до новой редакции графа — перенос решается при переносе, а не навсегда при замене', () => {
+  const env = stopped();
+  const answered = env.engine.answerInput(
+    env.request.id,
+    { text: 'Hello', actor: { kind: 'operator' } },
+    1,
+  ).request;
+  env.engine.supersedeInput(
+    env.request.id,
+    { by: 'lead', reason: 'будет редакция', successor: 'w' },
+    answered.version,
+  );
+  assert.equal(
+    env.engine.inputRequest(env.request.id).closed?.carry,
+    false,
+    'остановка ещё держалась',
+  );
+  const graph = reviseGraph(env, '2', addOrder('y'));
+  reviewSnapshot(env, graph);
+  assert.equal(env.engine.approve(graph.id, 'agent', { bindContext: true }).changed, true);
+});
+
+test('R3-2: run со снимком перенесённого ответа при идущей попытке соседа — NOT_READY до платного ревью', async () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const h = ctx.open();
+  const raw = structuredClone(ctx.graph) as unknown as {
+    source: { revision: string };
+    orders: Record<string, unknown>[];
+  };
+  raw.orders.push({
+    ...raw.orders[0],
+    id: 'extra',
+    source: { connector: 'files', ref: 'extra', revision: '1' },
+  });
+  const g1 = workGraphSchema.parse(raw);
+  ready(h.engine, g1, 'controller');
+  const a = h.engine.claim('controller')!;
+  assert.equal(a.workId, 'add-greeting');
+  h.engine.fail(a.id, a.token, 'вопрос', { kind: 'needs-input', input: outcome() });
+  const id = h.inputRequests({ workId: a.workId })[0]!.id;
+  h.answerInput(id, { text: 'Hello', actor: { kind: 'operator' } }, 1);
+  raw.source.revision = '2';
+  raw.orders.push({
+    ...raw.orders[0],
+    id: 'third',
+    source: { connector: 'files', ref: 'third', revision: '1' },
+  });
+  const g2 = workGraphSchema.parse(raw);
+  const { graph } = h.engine.register(g2, trustNone);
+  h.engine.recordReview(planReview(h.engine, graph, h.engine.reviews('plan', graph.id).length + 1));
+  h.engine.approve(graph.id, 'agent');
+  const sibling = h.engine.claim('controller')!;
+  assert.equal(sibling.workId, 'extra');
+  h.supersedeInput(id, { by: 'lead', reason: 'редакция', successor: a.workId }, 2);
+  const { snapshot } = h.inputContext(id);
+  const reviews = ctx.calls('codex', 'reviewer');
+  await assert.rejects(
+    h.run({ graph: g2, context: snapshot, author: 'claude' }),
+    (e: unknown) => e instanceof HarnessError && e.code === 'NOT_READY',
+  );
+  assert.equal(ctx.calls('codex', 'reviewer'), reviews, 'ревью плана не вызывалось');
+  h.close();
+});
