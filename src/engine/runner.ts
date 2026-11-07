@@ -839,12 +839,17 @@ export class Runner {
         runId: input.attempt.id,
         stage: review ? input.phase + '-review' : 'implementation',
       },
-      // Ответ на вопрос «передан исполнителю» — только по началу вызова writer
-      // попытки, выданной с ним, а не по apply или claim.
-      !review && input.attempt.input
-        ? (id) => this.engine.inputDelivered(input.attempt.id, input.attempt.token, id)
-        : undefined,
     );
+    // Ответ «передан исполнителю» — только когда runtime вызова writer
+    // попытки, выданной с ним, действительно работал (ответ не
+    // `unavailable`: процесс запустился), а не по apply, claim или началу
+    // учёта вызова.
+    if (!review && input.attempt.input && response.status !== 'unavailable')
+      try {
+        this.engine.inputDelivered(input.attempt.id, input.attempt.token, callId);
+      } catch {
+        /* Утратившая владение попытка доставку не подтверждает. */
+      }
     if (response.model && !review && response.model !== input.attempt.model)
       this.engine.update(input.attempt.id, input.attempt.token, 'run.model', {
         model: response.model,

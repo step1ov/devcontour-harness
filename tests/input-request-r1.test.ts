@@ -36,7 +36,12 @@ import { stopInputsOf } from '../src/explain/state.ts';
 import { explainStop } from '../src/projections/stop.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { prompt } from '../src/engine/prompt.ts';
-import { inputPolicyText, normalizeImplementation } from '../src/engine/input-policy.ts';
+import {
+  evaluateInput,
+  inputPolicyText,
+  normalizeImplementation,
+} from '../src/engine/input-policy.ts';
+import { statusOf } from '../src/control/status.ts';
 import {
   engineOf,
   graphOf,
@@ -679,4 +684,168 @@ test('M-5: продолжение черновика показывает реш
   assert.match(writer, /Decisions the previous attempt made[\s\S]*Регистр имени/);
   const reviewer = readFileSync(`${ctx.scenarioPath}.reviewer.0.prompt`, 'utf8');
   assert.match(reviewer, /Decisions the writer made on its own[\s\S]*Регистр имени/);
+});
+
+test('m-12: в автономном режиме заданный вопрос записан и решением исполнителя', () => {
+  const out = evaluateInput(
+    { completed: false, inputRequest: question(9, { affects: ['api'] }), assumptions: [] },
+    { threshold: 11, criticalPaths: [] },
+    [],
+  );
+  assert.equal(out.decision.kind, 'declined');
+  assert.deepEqual(
+    out.assumptions.map((a) => [a.question, a.chosen, a.effectiveSeverity]),
+    [['Какой формат приветствия?', 'Hello, <name>!', 10]],
+  );
+  assert.equal(out.followUps.length, 1);
+});
+
+test('m-6: у принятой работы статус не показывает вопрос', () => {
+  const env = stopped();
+  env.store.transact('run.phase', (tx) => tx.putWork({ ...tx.work('w')!, status: 'done' }));
+  const status = statusOf({ engine: env.engine, policy: env.engine.policy });
+  assert.equal(status.works.find((w) => w.id === 'w')!.input, undefined);
+  assert.ok(status.works.find((w) => w.id === 'x'));
+});
+
+test('m-7: Harness загружает снимок, закреплённый при выдаче, а не согласование, сменившееся после неё', () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const h = ctx.open();
+  const { graph } = h.engine.register(ctx.graph, trustNone);
+  const snap = (text: string) => {
+    const file = {
+      path: 'notes.md',
+      digest: sha256(Buffer.from(text)),
+      bytes: Buffer.byteLength(text),
+      content: { encoding: 'utf8' as const, data: text },
+    };
+    const entry = {
+      id: 'notes',
+      kind: 'doc',
+      version: '1',
+      required: false,
+      files: [file],
+      references: [],
+    };
+    const snapshot = withInput(undefined, { ...entry, digest: sourceDigest(entry) });
+    const digest = contextDigest(snapshot);
+    h.store.transact('run.context', (tx) =>
+      tx.putLocal('context-snapshots', WORKSPACE_OWNER, digest, snapshot),
+    );
+    h.engine.recordReview({
+      ...planReview(h.engine, graph, h.engine.reviews('plan', graph.id).length + 1),
+      contextDigest: digest,
+    });
+    h.engine.approve(graph.id, 'agent', { bindContext: true });
+    return digest;
+  };
+  const first = snap('первый');
+  h.engine.lead('controller');
+  h.engine.resume();
+  const attempt = h.engine.claim('controller')!;
+  assert.equal(attempt.pinned?.contextDigest, first);
+  const second = snap('второй');
+  const contextOf = (
+    h as unknown as {
+      contextOf: (
+        g: string,
+        a?: unknown,
+      ) => { sources: { files: { content: { data: string } }[] }[] } | undefined;
+    }
+  ).contextOf.bind(h);
+  assert.equal(contextOf(graph.id, attempt)?.sources[0]!.files[0]!.content.data, 'первый');
+  assert.equal(contextOf(graph.id)?.sources[0]!.files[0]!.content.data, 'второй');
+  assert.notEqual(first, second);
+  h.close();
+});
+
+test('m-11: вызов writer, который не запустился (unavailable), не подтверждает доставку ответа', async () => {
+  let down = false;
+  const flaky = (inner: RuntimeAdapter): RuntimeAdapter => ({
+    runtime: inner.runtime,
+    capabilities: () => inner.capabilities(),
+    invoke: (request, signal) =>
+      down && request.task === 'implement'
+        ? Promise.resolve({
+            status: 'unavailable' as const,
+            model: null,
+            runtimeVersion: null,
+            text: '',
+            usage: {
+              inputTokens: null,
+              outputTokens: null,
+              cacheReadTokens: null,
+              cacheWriteTokens: null,
+              reportedUsd: null,
+              complete: false,
+              source: 'unavailable' as const,
+            },
+            diagnostics: { exitCode: null, reason: 'spawn ENOENT' },
+          })
+        : inner.invoke(request, signal),
+  });
+  const ctx = setup({
+    scenario: {
+      writer: [
+        {
+          files: { 'src/greet.js': "exports.greet = () => 'draft';\n" },
+          result: {
+            completed: false,
+            summary: 'вопрос',
+            discoveries: [],
+            inputRequest: question(9),
+            assumptions: [],
+          },
+        },
+        implement(),
+      ],
+      reviewer: approve(),
+    },
+    policy: (p) => {
+      p.inputPolicy = { threshold: 7, criticalPaths: [] };
+      (p as { maxAttempts: number }).maxAttempts = 5;
+    },
+    runner: {
+      adapters: {
+        claude: flaky(cliAdapter('claude', { executable: bin('fake-claude') })),
+        codex: cliAdapter('codex', { executable: bin('fake-codex') }),
+      },
+    },
+  });
+  const graph = await runAll(ctx);
+  const [request] = ctx.engine.inputRequests({ workId: 'add-greeting' });
+  const answered = ctx.engine.answerInput(
+    request!.id,
+    { text: 'Hello', actor: { kind: 'operator' } },
+    1,
+  ).request;
+  const snapshot = withInput(undefined, inputContextSource(answered, latestAnswer(answered)!));
+  const digest = contextDigest(snapshot);
+  ctx.store.transact('run.context', (tx) =>
+    tx.putLocal('context-snapshots', WORKSPACE_OWNER, digest, snapshot),
+  );
+  ctx.engine.recordReview({
+    ...planReview(ctx.engine, graph, ctx.engine.reviews('plan', graph.id).length + 1),
+    authorRuntime: 'claude',
+    reviewerBinding: ctx.engine.reviewerBinding('plan', 'claude')!,
+    contextDigest: digest,
+  });
+  const proposal = ctx.engine.proposeTarget(request!.id, digest);
+  assert.deepEqual(proposal.problems, []);
+  ctx.engine.applyInput(request!.id, {
+    answerDigest: latestAnswer(answered)!.digest,
+    expectedVersion: answered.version,
+    contextDigest: digest,
+    targetDigest: proposal.target!.digest,
+    actor: 'agent',
+  });
+  down = true;
+  ctx.engine.resume();
+  await ctx.runner.drain();
+  assert.equal(ctx.engine.inputRequest(request!.id).delivered, undefined, 'runtime не запустился');
+  down = false;
+  ctx.engine.retry('add-greeting');
+  ctx.engine.resume();
+  await ctx.runner.drain();
+  assert.ok(ctx.engine.inputRequest(request!.id).delivered, 'вызов writer состоялся');
 });

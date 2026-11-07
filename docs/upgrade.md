@@ -575,13 +575,19 @@ null` и этого правила засчитанных попыток: ист
 - **Порты.** Необязательный `ExecutionHost.input` (`InputHost`) для хоста,
   ведущего согласование сам; `RunnerOptions.context(work, attempt)` получает
   выданную попытку (снимок загружается по `attempt.pinned.contextDigest`);
-  `measuredInvoke` — необязательный `onStart(callId)`. Набор
+  `measuredInvoke` — необязательный `onStart(callId)` (доставку ответа
+  runner подтверждает не им, а ответом runtime, отличным от `unavailable`). Набор
   `executionStoreContract` проверяет пространство `input-requests`;
   `sampleInputRequest`/`answeredInputRequest` экспортированы из
   `devcontour-harness/testing`.
 - **CLI.** Команды `input-list`, `input-show`, `input-answer`,
   `input-context`, `input-target`, `input-apply`, `input-cancel`,
   `input-supersede`.
+- **Поведение `unfinished`.** Защищённые пути, HEAD и область записи
+  проверяются до решения о вопросе и незавершённости для любого ответа
+  writer. Прежде `completed: false` с правкой вне области получал
+  `unfinished` и продолжался с черновика в области; теперь это
+  `scope-violation` (повтор по его правилу), как у готовой реализации.
 
 Читатель со строгой схемой прежней версии `ValueReport`, `HandoffPack`,
 `StopDiagnosis`, `RunEvent`, `RunResult` или ответа `status` отклонит новые

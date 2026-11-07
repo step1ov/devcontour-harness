@@ -60,8 +60,11 @@ export function statusOf(
       ...(w.resultSha ? { resultSha: w.resultSha } : {}),
       // Вопрос исполнителя: ID, состояние, версия и серьёзность, без текста;
       // неблокирующие запросы ведущему — числом.
+      // У итоговой работы вопрос — история: статус его не показывает.
       ...((view) => ({
-        ...(view.input ? { input: view.input } : {}),
+        ...(view.input && w.status !== 'done' && w.status !== 'cancelled'
+          ? { input: view.input }
+          : {}),
         ...(view.followUps ? { followUps: view.followUps } : {}),
       }))(workInputOf(requestsOf(v, w))),
       blockers: engine.blockers(w, v),

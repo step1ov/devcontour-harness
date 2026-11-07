@@ -119,9 +119,25 @@ export function evaluateInput(
         followUps,
         criticalHits,
       };
+    // Автономный режим: заданный всё же вопрос — тоже решение исполнителя
+    // (рекомендованный им вариант или «не выбрано»): reviewer его видит.
+    const asked: RecordedAssumption[] = free
+      ? [
+          {
+            question: request.question,
+            chosen:
+              request.options.find((o) => o.id === request.recommended)?.label ?? 'не выбрано',
+            rationale: request.rationale,
+            severity: request.severity,
+            affects: request.affects,
+            effectiveSeverity: question.effectiveSeverity,
+            floors: question.floors,
+          },
+        ]
+      : [];
     return {
       decision: { kind: 'declined', question },
-      assumptions,
+      assumptions: [...assumptions, ...asked].slice(0, INPUT_LIMITS.assumptions),
       followUps: free && question.floors.length ? [...followUps, question] : followUps,
       criticalHits,
     };
