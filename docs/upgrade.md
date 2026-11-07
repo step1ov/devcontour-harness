@@ -589,7 +589,10 @@ null` и этого правила засчитанных попыток: ист
   запроса — `Engine.proposeCarry` и `Engine.carryInput` (`expectedVersion`,
   `targetDigest`; `Harness.proposeCarry`/`carryInput`). Экспортированный
   `unappliedInputs` требует `mayCarry`. `originBasis.contentDigest` —
-  необязательное поле запроса. Исходная остановка и
+  необязательное поле запроса, `target.contentDigest` — цели; состояние
+  вопроса `carry-stale` (status, handoff); `cancelInput` снимает устаревший
+  перенесённый ответ. Не найденный закреплённый снимок держит только свою
+  работу (`needs-lead`, не засчитана), очередь не останавливается. Исходная остановка и
   устаревание применённого ответа сравнивают постановку самой работы, а не
   digest графа. Попытка с `pinned.contextDigest` отказывает, если загрузчик
   контекста хоста вернул другой снимок. `implementationOutputSchema`
