@@ -2513,6 +2513,19 @@ export class Engine {
         ...(lifecycle === 'superseded'
           ? { carry: this.carryAllowed(tx, { ...request, lifecycle: 'superseded' }) }
           : {}),
+        // Снятие устаревшего переноса не стирает запись замены (преемник,
+        // перенос, причина): она остаётся прежним закрытием.
+        ...(staleCarry && request.closed
+          ? {
+              previous: {
+                at: request.closed.at,
+                by: request.closed.by,
+                reason: request.closed.reason,
+                ...(request.closed.successor ? { successor: request.closed.successor } : {}),
+                ...(request.closed.carry !== undefined ? { carry: request.closed.carry } : {}),
+              },
+            }
+          : {}),
       };
       invalidInput('Закрытие запроса', inputRequestSchema.shape.closed.safeParse(closed));
       return { request: this.closeIn(tx, owner, request, lifecycle, closed), changed: true };

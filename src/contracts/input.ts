@@ -248,6 +248,22 @@ export const inputStateNames = [
  * работу. `draft` — черновик попытки (digest и файлы `AttemptState.partial`).
  * `version` — CAS записи.
  */
+/** Запись закрытия запроса: кто, когда и почему; у замены — преемник и перенос. */
+const inputClosedSchema = z.strictObject({
+  at: isoTimeSchema,
+  by: z.enum(['operator', 'lead', 'host', 'controller']),
+  reason: z.string().min(1).max(1000),
+  /** Преемник (новая работа или запрос), у `superseded`. */
+  successor: z.string().min(1).max(200).optional(),
+  /**
+   * Только у `superseded`: исходная остановка уже не держалась (новая
+   * редакция графа или постановки, другая попытка) — последний ответ
+   * можно перенести в контекст новой редакции. `false` или нет поля —
+   * перенос запрещён: продолжение остановки — только `applyInput`.
+   */
+  carry: z.boolean().optional(),
+});
+
 export const inputRequestSchema = z.strictObject({
   id: z.string().regex(/^IR-[a-f0-9]{24}$/, 'Ожидается ID запроса IR-<24 hex>'),
   kind: z.enum(['question', 'follow-up']),
@@ -279,20 +295,14 @@ export const inputRequestSchema = z.strictObject({
       at: isoTimeSchema,
     })
     .optional(),
-  closed: z
-    .strictObject({
-      at: isoTimeSchema,
-      by: z.enum(['operator', 'lead', 'host', 'controller']),
-      reason: z.string().min(1).max(1000),
-      /** Преемник (новая работа или запрос), у `superseded`. */
-      successor: z.string().min(1).max(200).optional(),
+  closed: inputClosedSchema
+    .extend({
       /**
-       * Только у `superseded`: исходная остановка уже не держалась (новая
-       * редакция графа или постановки, другая попытка) — последний ответ
-       * можно перенести в контекст новой редакции. `false` или нет поля —
-       * перенос запрещён: продолжение остановки — только `applyInput`.
+       * Прежнее закрытие, которое это закрытие сменило: снятие устаревшего
+       * переноса (`superseded` → `cancelled`) сохраняет запись замены —
+       * преемника, решение о переносе и причину.
        */
-      carry: z.boolean().optional(),
+      previous: inputClosedSchema.optional(),
     })
     .optional(),
   /**

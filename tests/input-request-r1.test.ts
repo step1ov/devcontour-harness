@@ -1970,6 +1970,63 @@ test('R6-1/R6-4: устаревший перенесённый ответ вид
   h.close();
 });
 
+test('R7-2: снятие устаревшего переноса сохраняет запись замены (преемник, перенос, причина) прежним закрытием', () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const h = ctx.open();
+  ready(h.engine, ctx.graph, 'controller');
+  const a = h.engine.claim('controller')!;
+  h.engine.fail(a.id, a.token, 'вопрос', { kind: 'needs-input', input: outcome() });
+  const id = h.inputRequests({ workId: a.workId })[0]!.id;
+  h.answerInput(id, { text: 'Hello', actor: { kind: 'operator' } }, 1);
+  const raw = structuredClone(ctx.graph) as unknown as {
+    source: { revision: string };
+    orders: Record<string, unknown>[];
+  };
+  raw.source.revision = '2';
+  raw.orders[0] = { ...raw.orders[0], goal: String(raw.orders[0]!.goal) + ' Уточнено.' };
+  const { graph } = h.engine.register(workGraphSchema.parse(raw), trustNone);
+  h.engine.recordReview(planReview(h.engine, graph, h.engine.reviews('plan', graph.id).length + 1));
+  h.engine.approve(graph.id, 'agent');
+  const superseded = h.supersedeInput(
+    id,
+    { by: 'lead', reason: 'редакция', successor: a.workId },
+    2,
+  ).request;
+  const replaced = superseded.closed!;
+  assert.equal(replaced.successor, a.workId);
+  assert.equal(replaced.carry, true);
+  const { digest } = h.inputContext(id);
+  h.engine.recordReview({
+    ...planReview(h.engine, graph, h.engine.reviews('plan', graph.id).length + 1),
+    contextDigest: digest,
+  });
+  const proposal = h.proposeCarry(id, digest);
+  h.carryInput(id, {
+    contextDigest: digest,
+    actor: 'agent',
+    expectedVersion: superseded.version,
+    targetDigest: proposal.target!.digest,
+  });
+  h.engine.recordReview(planReview(h.engine, graph, h.engine.reviews('plan', graph.id).length + 1));
+  h.engine.approve(graph.id, 'agent', { bindContext: true });
+  assert.equal(h.engine.claim('controller'), undefined, 'работа держится');
+  const stale = h.inputRequest(id);
+  assert.equal(stale.stale?.reason, 'context');
+  const released = h.cancelInput(
+    id,
+    { by: 'operator', reason: 'ответ больше не нужен' },
+    stale.version,
+  ).request;
+  assert.equal(released.lifecycle, 'cancelled');
+  assert.equal(released.closed?.by, 'operator');
+  assert.equal(released.closed?.reason, 'ответ больше не нужен');
+  assert.equal(released.closed?.successor, undefined, 'снятие — не замена');
+  assert.deepEqual(released.closed?.previous, replaced, 'запись замены сохранена');
+  // Сохранённая запись проходит схему и читается заново тем же.
+  assert.deepEqual(h.inputRequest(id).closed?.previous, replaced);
+  h.close();
+});
+
 test('R6-2: закреплённого снимка нет у одной работы — держится только она, очередь не на паузе, другая работа исполняется', async () => {
   const text = 'закреплённый';
   const file = {
