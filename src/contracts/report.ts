@@ -477,7 +477,9 @@ export const valueReportSchema = z.strictObject({
    * вопроса, ни ответа в отчёте нет. `awaitingAnswer` — ждут ответа,
    * `answeredNotApplied` — ответ записан, не применён, `appliedAwaitingClaim`
    * — применён, вызова ещё не было, `delivered` — передан исполнителю,
-   * `closed` — отменены или заменены, `declined` — вопросы ниже порога,
+   * `carryStale` — перенесённый ответ устарел до выдачи и работа ждёт (новый
+   * перенос или снятие; нет поля — отчёт до alpha.37), `closed` — отменены
+   * или заменены (кроме `carryStale`), `declined` — вопросы ниже порога,
    * `followUps` — неблокирующие запросы ведущему, `assumptions` — решения
    * исполнителя в попытках окна. Нет поля — отчёт без сведений о вопросах.
    */
@@ -488,6 +490,7 @@ export const valueReportSchema = z.strictObject({
       answeredNotApplied: count,
       appliedAwaitingClaim: count,
       delivered: count,
+      carryStale: count.optional(),
       closed: count,
       declined: count,
       followUps: count,

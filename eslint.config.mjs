@@ -109,10 +109,10 @@ export default tseslint.config(
               message: 'Проекции не зависят от Node и zod: их импортирует браузер.',
             },
             {
-              regex: '^\\.\\./(?!contracts/(errors|repair-policy)\\.ts$)',
+              regex: '^\\.\\./(?!contracts/(errors|repair-policy|input-state)\\.ts$)',
               allowTypeImports: true,
               message:
-                'Проекции импортируют из harness только типы и contracts/errors, contracts/repair-policy.',
+                'Проекции импортируют из harness только типы и contracts/errors, contracts/repair-policy, contracts/input-state.',
             },
           ],
         },

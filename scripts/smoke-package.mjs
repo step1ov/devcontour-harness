@@ -188,7 +188,8 @@ const browserGraph = (entry) => {
     if (
       !rel.startsWith(entry + '/') &&
       rel !== 'contracts/errors.js' &&
-      rel !== 'contracts/repair-policy.js'
+      rel !== 'contracts/repair-policy.js' &&
+      rel !== 'contracts/input-state.js'
     )
       fail(`./${entry} достигает ` + rel);
     const text = readFileSync(file, 'utf8');

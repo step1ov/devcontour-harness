@@ -16,6 +16,7 @@ import type {
 import type { EnvironmentCause, RunEvent, RunEventPayload } from '../contracts/events.ts';
 import type { ReviewRecord } from '../contracts/review.ts';
 import type { InputRequest } from '../contracts/input.ts';
+import { inputStateOf, type InputState } from '../contracts/input-state.ts';
 import type { FailureBucket, ReportDist, ReportMeasure, ValueReport } from '../contracts/report.ts';
 import {
   formatDuration,
@@ -198,29 +199,20 @@ function inputCounts(
 ): NonNullable<ValueReport['inputs']> {
   const inside = requests.filter((r) => inWindow(w, r.createdAt));
   const questions = inside.filter((r) => r.kind === 'question' && r.blocking);
-  // Состояние — по жизненному циклу и доставке (тот же расчёт, что у
-  // `projections/input.ts`): граф модуля отчёта остаётся в report/.
-  const state = (s: string) =>
-    questions.filter(
-      (r) =>
-        (r.lifecycle === 'pending'
-          ? 'awaiting-answer'
-          : r.lifecycle === 'answered'
-            ? 'answered-not-applied'
-            : r.lifecycle === 'applied'
-              ? r.delivered
-                ? 'delivered'
-                : 'applied-awaiting-claim'
-              : undefined) === s,
-    ).length;
+  // Состояние — тем же правилом, что у проекций (`contracts/input-state.ts`):
+  // перенесённый ответ, устаревший до выдачи (`carry-stale`), держит работу —
+  // он ждёт решения, а не закрыт.
+  const state = (s: InputState) => questions.filter((r) => inputStateOf(r) === s).length;
   return {
     questions: questions.length,
     awaitingAnswer: state('awaiting-answer'),
     answeredNotApplied: state('answered-not-applied'),
     appliedAwaitingClaim: state('applied-awaiting-claim'),
     delivered: state('delivered'),
-    closed: questions.filter((r) => r.lifecycle === 'cancelled' || r.lifecycle === 'superseded')
-      .length,
+    carryStale: state('carry-stale'),
+    closed: questions.filter(
+      (r) => (r.lifecycle === 'cancelled' || r.lifecycle === 'superseded') && !inputStateOf(r),
+    ).length,
     declined: inside.filter((r) => r.kind === 'question' && !r.blocking).length,
     followUps: inside.filter((r) => r.kind === 'follow-up').length,
     assumptions: attempts.reduce((n, a) => n + (a.assumptions?.length ?? 0), 0),

@@ -1971,7 +1971,8 @@ test('R6-1/R6-4: устаревший перенесённый ответ вид
   h.close();
 });
 
-test('R7-2: снятие устаревшего переноса сохраняет запись замены (преемник, перенос, причина) прежним закрытием', () => {
+/** Заменённый вопрос, чей перенесённый ответ устарел до выдачи (`carry-stale`). */
+const staleCarried = () => {
   const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
   const h = ctx.open();
   ready(h.engine, ctx.graph, 'controller');
@@ -2013,6 +2014,11 @@ test('R7-2: снятие устаревшего переноса сохраня�
   assert.equal(h.engine.claim('controller'), undefined, 'работа держится');
   const stale = h.inputRequest(id);
   assert.equal(stale.stale?.reason, 'context');
+  return { h, a, id, replaced, stale };
+};
+
+test('R7-2: снятие устаревшего переноса сохраняет запись замены (преемник, перенос, причина) прежним закрытием', () => {
+  const { h, id, replaced, stale } = staleCarried();
   const released = h.cancelInput(
     id,
     { by: 'operator', reason: 'ответ больше не нужен' },
@@ -2025,6 +2031,21 @@ test('R7-2: снятие устаревшего переноса сохраня�
   assert.deepEqual(released.closed?.previous, replaced, 'запись замены сохранена');
   // Сохранённая запись проходит схему и читается заново тем же.
   assert.deepEqual(h.inputRequest(id).closed?.previous, replaced);
+  h.close();
+});
+
+test('R7-5: отчёт считает устаревший перенос ждущим (carryStale), как проекции, а не закрытым', () => {
+  const { h, a, id, stale } = staleCarried();
+  assert.equal(h.status().works.find((w) => w.id === a.workId)!.input?.state, 'carry-stale');
+  const waiting = h.report().inputs!;
+  assert.equal(waiting.carryStale, 1);
+  assert.equal(waiting.closed, 0, 'не закрыт');
+  assert.equal(waiting.questions, 1);
+  // Снятый перенос — уже закрыт.
+  h.cancelInput(id, { by: 'operator', reason: 'ответ больше не нужен' }, stale.version);
+  const released = h.report().inputs!;
+  assert.equal(released.carryStale, 0);
+  assert.equal(released.closed, 1);
   h.close();
 });
 
