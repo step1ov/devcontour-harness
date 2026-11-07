@@ -2570,7 +2570,7 @@ export class Engine {
       view.attempts(work.id).at(-1)?.id === request.runId &&
       // Своя постановка, а не весь граф: согласование соседней работы (у хоста
       // граф — активная ревизия доски) остановку не обесценивает.
-      this.host.basis.orderDigest(work, view) === request.originBasis.orderDigest
+      !this.orderMoved(view, work, request.originBasis)
     );
   }
 
@@ -2582,19 +2582,31 @@ export class Engine {
    * требование вошло бы в неизменную постановку одним файлом контекста.
    * Переносится только последний ответ (`carried`).
    */
+  /**
+   * Изменилась ли постановка работы против запомненной: по содержанию без
+   * ревизии источника (`contentDigest`), если оно записано, иначе по digest
+   * постановки хоста (записи прежних версий).
+   */
+  private orderMoved(
+    view: ExecutionView,
+    work: WorkState | undefined,
+    basis: { orderDigest: string; contentDigest?: string },
+  ) {
+    if (!work) return true;
+    return basis.contentDigest !== undefined
+      ? contentDigest(work.order) !== basis.contentDigest
+      : this.host.basis.orderDigest(work, view) !== basis.orderDigest;
+  }
+
   carryAllowed(view: ExecutionView, request: InputRequest) {
     if (request.lifecycle !== 'superseded') return false;
     const answer = latestAnswer(request);
     if (!answer) return false;
     const work = view.work(request.workId);
-    const orderChanged =
-      !work || this.host.basis.orderDigest(work, view) !== request.originBasis.orderDigest;
-    // Изменение требований — по содержанию постановки, без ревизии источника:
-    // пересинхронизация трекера одной ревизией перенос не открывает.
-    if (answer.kind === 'requirement-change')
-      return request.originBasis.contentDigest !== undefined
-        ? !work || contentDigest(work.order) !== request.originBasis.contentDigest
-        : orderChanged;
+    // По содержанию постановки, без ревизии источника: пересинхронизация
+    // трекера одной ревизией перенос не открывает.
+    const orderChanged = this.orderMoved(view, work, request.originBasis);
+    if (answer.kind === 'requirement-change') return orderChanged;
     return orderChanged || !this.originHolds(view, request);
   }
 
@@ -2643,7 +2655,7 @@ export class Engine {
   ) {
     // Граф целиком не сравнивается: согласование другой работы того же графа
     // применённый ответ не обесценивает (причина `graph` больше не ставится).
-    if (target.orderDigest !== this.host.basis.orderDigest(work, view)) return 'order' as const;
+    if (this.orderMoved(view, work, target)) return 'order' as const;
     if (target.policyDigest !== this.host.basis.policyDigest(work, view)) return 'policy' as const;
     const pin = this.contextPinOf(view, work) ?? null;
     // Другой снимок, который несёт тот же ответ (например, с ответом на
@@ -2717,6 +2729,7 @@ export class Engine {
       answerDigest: latestAnswer(request)!.digest,
       graphDigest: view.graph(work.graphId)!.digest,
       orderDigest: this.host.basis.orderDigest(work, view),
+      contentDigest: contentDigest(work.order),
       policyDigest: this.host.basis.policyDigest(work, view),
       contextDigest,
       review,
@@ -2745,7 +2758,7 @@ export class Engine {
       if (
         !atOrigin ||
         last?.id !== request.runId ||
-        this.host.basis.orderDigest(work, v) !== request.originBasis.orderDigest
+        this.orderMoved(v, work, request.originBasis)
       )
         problems.push(
           'работа уже не в исходной остановке (новая редакция постановки или другая попытка): выход — supersedeInput и перенос ответа в контекст новой редакции (input-context, review-plan, согласование)',
@@ -2862,7 +2875,7 @@ export class Engine {
         );
       // Своя постановка, а не весь граф: другие работы графа меняются своим
       // чередом (у хоста граф — активная ревизия доски).
-      if (this.host.basis.orderDigest(work, tx) !== request.originBasis.orderDigest)
+      if (this.orderMoved(tx, work, request.originBasis))
         throw new HarnessError(
           'APPROVAL_STALE',
           'Постановка работы изменилась после вопроса: продолжение этой остановки невозможно. Выход с сохранением ответа — supersedeInput (преемник — новая редакция работы), затем снимок с ответом (input-context), review-plan с ним и обычное согласование',

@@ -526,6 +526,7 @@ test('M-2: новая редакция графа держит вопрос; в�
   // Новая редакция постановки самой работы (ревизия её источника).
   raw.orders[0] = {
     ...raw.orders[0],
+    goal: String(raw.orders[0]!.goal) + ' Уточнено.',
     source: { connector: 'files', ref: 'add-greeting', revision: '2' },
   };
   const next = workGraphSchema.parse(raw);
@@ -997,7 +998,11 @@ function reviewSnapshot(
 
 /** Новая редакция графа (та же работа, другая ревизия источника), согласованная без контекста. */
 function revise(env: ReturnType<typeof stopped>) {
-  const { graph } = env.engine.register(graphOf({ w: [], x: [] }, '2'), trustNone);
+  const raw = structuredClone(graphOf({ w: [], x: [] }, '2')) as unknown as {
+    orders: Record<string, unknown>[];
+  };
+  raw.orders[0] = { ...raw.orders[0], goal: String(raw.orders[0]!.goal) + ' Уточнено.' };
+  const { graph } = env.engine.register(workGraphSchema.parse(raw), trustNone);
   env.engine.recordReview(
     planReview(env.engine, graph, env.engine.reviews('plan', graph.id).length + 1),
   );
@@ -1349,7 +1354,11 @@ test('R3-2: замена до новой редакции графа — пер�
   );
   const graph = reviseGraph(env, '2', (orders) => {
     addOrder('y')(orders);
-    orders[0] = { ...orders[0], source: { connector: 'files', ref: 'w', revision: '2' } };
+    orders[0] = {
+      ...orders[0],
+      goal: String(orders[0]!.goal) + ' Уточнено.',
+      source: { connector: 'files', ref: 'w', revision: '2' },
+    };
   });
   reviewSnapshot(env, graph);
   assert.equal(env.engine.approve(graph.id, 'agent', { bindContext: true }).changed, true);
@@ -1382,6 +1391,7 @@ test('R3-2: run со снимком перенесённого ответа пр
   });
   raw.orders[0] = {
     ...raw.orders[0],
+    goal: String(raw.orders[0]!.goal) + ' Уточнено.',
     source: { connector: 'files', ref: 'add-greeting', revision: '2' },
   };
   const g2 = workGraphSchema.parse(raw);
@@ -1562,7 +1572,11 @@ test('Q2: carryInput у хоста с портом — перенос одной
     orders: Record<string, unknown>[];
   };
   raw.source.revision = '2';
-  raw.orders[0] = { ...raw.orders[0], source: { connector: 'files', ref: 'w', revision: '2' } };
+  raw.orders[0] = {
+    ...raw.orders[0],
+    goal: String(raw.orders[0]!.goal) + ' Уточнено.',
+    source: { connector: 'files', ref: 'w', revision: '2' },
+  };
   const { graph } = a.engine.register(workGraphSchema.parse(raw), trustNone);
   a.engine.recordReview(planReview(a.engine, graph, a.engine.reviews('plan', graph.id).length + 1));
   a.engine.approve(graph.id, 'agent');
@@ -1849,4 +1863,36 @@ test('R5-4: закреплённого снимка нет — отказ при
   assert.equal(attempt!.blocked, true, 'не засчитана');
   assert.match(attempt!.error ?? '', /закреплённый при выдаче, не найден/);
   assert.equal(existsSync(`${ctx.scenarioPath}.claude.writer.count`), false, 'writer не вызывался');
+});
+
+test('R6-3: пересинхронизация трекера (только ревизия постановки) не мешает применить ответ и не делает применённый устаревшим', () => {
+  const bumpW = (orders: Record<string, unknown>[]) => {
+    orders[0] = { ...orders[0], source: { connector: 'files', ref: 'w', revision: '2' } };
+  };
+  // До применения: остановка держится, применение, а не перенос.
+  const before = stopped();
+  const g2 = reviseGraph(before, '2', bumpW);
+  assert.equal(applyOn(before, g2).result.applied, true);
+
+  // После применения: ре-синхронизация и новое согласование с тем же снимком.
+  const env = stopped();
+  const { digest } = applyOn(env, env.graph);
+  const raw = structuredClone(graphOf({ w: [], x: [] })) as unknown as {
+    source: { revision: string };
+    orders: Record<string, unknown>[];
+  };
+  raw.source.revision = '2';
+  bumpW(raw.orders);
+  const { graph } = env.engine.register(workGraphSchema.parse(raw), trustNone);
+  env.engine.recordReview({
+    ...planReview(env.engine, graph, env.engine.reviews('plan', graph.id).length + 1),
+    contextDigest: digest,
+  });
+  env.engine.approve(graph.id, 'agent', { bindContext: true });
+  env.clock.now += 1000;
+  const claimed = [env.engine.claim('c1'), env.engine.claim('c1')].filter(Boolean);
+  const w = claimed.find((a) => a!.workId === 'w');
+  assert.ok(w, 'w выдана');
+  assert.equal(w.input?.requestId, env.request.id);
+  assert.equal(env.engine.inputRequest(env.request.id).stale, undefined);
 });

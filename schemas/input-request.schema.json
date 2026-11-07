@@ -413,6 +413,10 @@
           "type": "string",
           "pattern": "^[a-f0-9]{64}$"
         },
+        "contentDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
         "policyDigest": {
           "type": "string",
           "pattern": "^[a-f0-9]{64}$"

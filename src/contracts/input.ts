@@ -197,6 +197,12 @@ export const inputTargetSchema = z.strictObject({
   answerDigest: digestSchema,
   graphDigest: digestSchema,
   orderDigest: digestSchema,
+  /**
+   * Содержание постановки без ревизии источника на момент цели: по нему, а
+   * не по `orderDigest`, судится устаревание (пересинхронизация трекера одной
+   * ревизией цель не обесценивает). Нет поля — цель прежней версии.
+   */
+  contentDigest: digestSchema.optional(),
   policyDigest: digestSchema,
   contextDigest: digestSchema.nullable(),
   review: z
