@@ -502,6 +502,11 @@ export class Harness {
     return this.engine.applyInput(id, options);
   }
 
+  /** Перенести ответ заменённого вопроса в согласование новой редакции (см. `Engine.carryInput`). */
+  carryInput(id: string, options: Parameters<Engine['carryInput']>[1]) {
+    return this.engine.carryInput(id, options);
+  }
+
   /** Отменить вопрос: работа больше его не ждёт. */
   cancelInput(id: string, input: Parameters<Engine['cancelInput']>[1], expectedVersion: number) {
     return this.engine.cancelInput(id, input, expectedVersion);

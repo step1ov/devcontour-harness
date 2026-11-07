@@ -2957,6 +2957,130 @@ export class Engine {
   }
 
   /**
+   * Перенести ответ заменённого запроса в действующее согласование работы —
+   * у хоста с портом согласования так же, как у standalone. Одна
+   * транзакция: правило переноса (`carryAllowed`), снимок несёт ровно
+   * последний ответ и не несёт неприменённых, политика процесса применена,
+   * ревью снимка и актёр — по правилам хоста или `approvalRules`, в графе нет
+   * идущих попыток и совместной проверки; затем активация (`InputHost.activate`
+   * с `mode: 'carry'` или согласование графа), цель записывается в запрос
+   * (он остаётся `superseded`), и упавшая работа возвращается в очередь
+   * обычным повтором. Модель не вызывается; повтор того же переноса —
+   * `{ carried: true, changed: false }`.
+   */
+  carryInput(
+    id: string,
+    options: {
+      /** Снимок с ответом, прошедший ревью. */
+      contextDigest: string;
+      actor: TechnicalApproval['actor'];
+      expectedVersion?: number;
+      /** Сброс исчерпанных попыток упавшей работы — с причиной, как у `retry`. */
+      reset?: { reason: string };
+    },
+  ) {
+    return this.tx('input.applied', (tx) => {
+      const { owner, request } = this.requestIn(tx, id);
+      if (request.kind !== 'question' || !request.blocking)
+        throw new HarnessError('INVALID_INPUT', `Запрос ${id} неблокирующий: переносить нечего`);
+      if (request.lifecycle !== 'superseded')
+        throw new HarnessError(
+          'NOT_READY',
+          `Запрос ${id} ${request.lifecycle}: перенос — только для заменённого (supersedeInput); продолжение остановки — applyInput`,
+        );
+      if (options.expectedVersion !== undefined)
+        this.expectVersion(request, options.expectedVersion);
+      const answer = latestAnswer(request);
+      if (!answer) throw new HarnessError('INPUT_REQUIRED', `На вопрос ${id} нет ответа`);
+      if (
+        request.target?.contextDigest === options.contextDigest &&
+        request.target.answerDigest === answer.digest
+      )
+        return { carried: true as const, changed: false, request };
+      if (!this.carryAllowed(tx, request))
+        throw new HarnessError(
+          'INPUT_REQUIRED',
+          answer.kind === 'requirement-change'
+            ? `Изменение требований переносится, только если изменилась постановка работы ${request.workId}`
+            : `Исходная остановка запроса ${id} держится: продолжение — applyInput, а не перенос`,
+        );
+      if (!this.carriesAnswer(tx, request, answer, options.contextDigest))
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `Снимок ${options.contextDigest} не содержит последний ответ на запрос ${id}`,
+        );
+      const snapshot =
+        this.host.input?.snapshot?.(options.contextDigest, tx) ??
+        tx.local('context-snapshots', WORKSPACE_OWNER, options.contextDigest);
+      const unapplied = this.unappliedInputs(tx, snapshot);
+      if (unapplied.length)
+        throw new HarnessError(
+          'INPUT_REQUIRED',
+          'Снимок содержит неприменённый ответ: ' +
+            unapplied.map((u) => `${u.requestId ?? u.source} (${u.reason})`).join(', '),
+        );
+      const work = tx.work(request.workId);
+      if (!work) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + request.workId);
+      if (work.status === 'cancelled' || work.status === 'done')
+        throw new HarnessError(
+          'NOT_READY',
+          `Поручение ${work.id} ${work.status}: переносить некуда`,
+        );
+      this.assertCurrentPolicy(tx);
+      const targetRequest = { id, answerDigest: answer.digest, mode: 'carry' as const };
+      const { review, checked } = this.targetReview(
+        tx,
+        work,
+        options.contextDigest,
+        options.actor,
+        targetRequest,
+      );
+      const active = activeOf(tx).filter((a) => tx.work(a.workId)?.graphId === work.graphId);
+      if (active.length || this.liveJoint(tx))
+        return {
+          carried: false as const,
+          changed: false,
+          request,
+          active: active.map((a) => ({ id: a.id, workId: a.workId })),
+          ...(this.liveJoint(tx) ? { joint: true } : {}),
+        };
+      const target = this.targetOf(tx, request, work, options.contextDigest, review, options.actor);
+      const full: InputTarget = { ...target, digest: targetDigest(target) };
+      if (this.host.input) this.host.input.activate(tx, work, full, targetRequest);
+      else
+        this.activateApproval(tx, checked!.graph, checked!.last, options.actor, {
+          bindContext: true,
+        });
+      const next: InputRequest = { ...request, target: full, version: request.version + 1 };
+      tx.putLocal('input-requests', owner, id, next);
+      const current = tx.work(work.id)!;
+      const retried =
+        current.status === 'failed'
+          ? this.retryIn(
+              tx,
+              current,
+              options.reset,
+              options.actor === 'operator' ? 'operator' : 'recovery',
+            )
+          : { work: current, changed: false };
+      tx.emit({
+        type: 'input.applied',
+        graphId: work.graphId,
+        workId: work.id,
+        runId: request.runId,
+        payload: {
+          requestId: id,
+          answerDigest: answer.digest,
+          targetDigest: full.digest,
+          contextDigest: options.contextDigest,
+          retried: retried.changed,
+        },
+      });
+      return { carried: true as const, changed: true, request: next, work: retried.work };
+    });
+  }
+
+  /**
    * Ответ передан исполнителю: начался вызов runtime попытки, выданной с этим
    * ответом (`AttemptState.input`). Под fencing попытки и один раз: ни apply,
    * ни claim доставку не подтверждают.

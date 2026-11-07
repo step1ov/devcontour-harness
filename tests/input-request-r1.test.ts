@@ -1533,3 +1533,74 @@ test('Q6: загрузчик контекста хоста, не учитыва�
   assert.match(attempt!.error ?? '', /закреплённым при выдаче/);
   assert.equal(existsSync(`${ctx.scenarioPath}.claude.writer.count`), false, 'writer не вызывался');
 });
+
+test('Q2: carryInput у хоста с портом — перенос одной транзакцией: правило переноса, политика, без идущих попыток, activate(carry), повтор', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-h02r4-carry-'));
+  const approved = new Map<string, string | null>();
+  const calls: { method: string; request: unknown }[] = [];
+  const a = hostEngine(policyOf(), dir, approved, calls);
+  ready(a.engine, graphOf({ w: [], x: [] }));
+  const attempt = a.engine.claim('c1')!;
+  a.engine.fail(attempt.id, attempt.token, 'вопрос', { kind: 'needs-input', input: outcome() });
+  const [request] = a.engine.inputRequests({ workId: 'w' });
+  const answered = a.engine.answerInput(
+    request!.id,
+    { text: 'Hello', actor: { kind: 'operator' } },
+    1,
+  ).request;
+  // Новая редакция постановки w; согласование графа без контекста.
+  const raw = structuredClone(graphOf({ w: [], x: [] })) as unknown as {
+    source: { revision: string };
+    orders: Record<string, unknown>[];
+  };
+  raw.source.revision = '2';
+  raw.orders[0] = { ...raw.orders[0], source: { connector: 'files', ref: 'w', revision: '2' } };
+  const { graph } = a.engine.register(workGraphSchema.parse(raw), trustNone);
+  a.engine.recordReview(planReview(a.engine, graph, a.engine.reviews('plan', graph.id).length + 1));
+  a.engine.approve(graph.id, 'agent');
+  // Соседняя попытка идёт (w держит вопрос) — перенос ждёт.
+  a.clock.now += 1000;
+  const sibling = a.engine.claim('c1')!;
+  assert.equal(sibling.workId, 'x');
+  const closed = a.engine.supersedeInput(
+    request!.id,
+    { by: 'lead', reason: 'редакция', successor: 'w' },
+    answered.version,
+  ).request;
+  const snapshot = withInput(undefined, inputContextSource(closed, latestAnswer(closed)!));
+  const digest = contextDigest(snapshot);
+  a.store.transact('run.context', (tx) =>
+    tx.putLocal('context-snapshots', WORKSPACE_OWNER, digest, snapshot),
+  );
+  const waiting = a.engine.carryInput(request!.id, { contextDigest: digest, actor: 'agent' });
+  assert.equal(waiting.carried, false);
+  assert.equal(approved.get('w'), undefined);
+  a.engine.fail(sibling.id, sibling.token, 'x', { kind: 'gate' });
+  // Процесс с неприменённой политикой не переносит.
+  const b = hostEngine(
+    policyOf((p) => (p.maxAttempts = 5)),
+    dir,
+    approved,
+  );
+  assert.equal(
+    code(() => b.engine.carryInput(request!.id, { contextDigest: digest, actor: 'agent' })),
+    'APPROVAL_STALE',
+  );
+  const carried = a.engine.carryInput(request!.id, { contextDigest: digest, actor: 'agent' });
+  assert.equal(carried.carried, true);
+  assert.equal(approved.get('w'), digest);
+  assert.deepEqual(calls.at(-1), {
+    method: 'activate',
+    request: { id: request!.id, answerDigest: latestAnswer(closed)!.digest, mode: 'carry' },
+  });
+  assert.equal(a.engine.inputRequest(request!.id).lifecycle, 'superseded');
+  assert.equal(a.engine.inputRequest(request!.id).target?.contextDigest, digest);
+  assert.equal(
+    a.engine.carryInput(request!.id, { contextDigest: digest, actor: 'agent' }).changed,
+    false,
+  );
+  a.clock.now += 1000;
+  const next = a.engine.claim('c1')!;
+  assert.equal(next.workId, 'w');
+  assert.equal(next.pinned?.contextDigest, digest);
+});
