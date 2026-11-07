@@ -114,8 +114,14 @@ function gapSubject(key: string) {
 export function repairDecision(
   view: ExecutionView,
   works: WorkState[],
-  options: { budgetLeft: number; maxAttempts: number },
+  options: {
+    budgetLeft: number;
+    maxAttempts: number;
+    /** Вопрос, держащий работу, — как `blockingRequest`; диагноз многих работ читает запросы раз. */
+    blocking?: (work: WorkState) => unknown;
+  },
 ): RepairDecision | undefined {
+  const blocking = options.blocking ?? ((w: WorkState) => blockingRequest(view, w));
   // Поручение с эпизодом по свойству восстанавливается своим разбором, а не
   // обычным повтором: третья слепая попытка как раз и запрещена.
   // Поручение, ждущее ответа на вопрос исполнителя, не чинится и не
@@ -125,7 +131,7 @@ export function repairDecision(
     (w) =>
       ['failed', 'cancelled'].includes(w.status) &&
       (w.status === 'cancelled' || !w.recovery) &&
-      !(w.status === 'failed' && blockingRequest(view, w)),
+      !(w.status === 'failed' && blocking(w)),
   );
   if (!broken.length) return undefined;
 

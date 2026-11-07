@@ -34,6 +34,29 @@ export function requestsOf(
 }
 
 /**
+ * `requestsOf` для многих поручений одного вида: записи пространства
+ * читаются один раз, ответ по поручению — тот же, что у `requestsOf`
+ * (владелец — репозиторий поручения, без него — все; тот же порядок).
+ */
+export function requestsIndex(
+  view: ExecutionView,
+): (work: Pick<WorkState, 'id' | 'order'>) => InputRequest[] {
+  const byWork = new Map<string, { owner: string; value: InputRequest }[]>();
+  for (const { owner, value } of view.locals('input-requests')) {
+    const list = byWork.get(value.workId);
+    if (list) list.push({ owner, value });
+    else byWork.set(value.workId, [{ owner, value }]);
+  }
+  return (work) => {
+    const owner = work.order.repositoryId;
+    return (byWork.get(work.id) ?? [])
+      .filter((e) => owner === undefined || e.owner === owner)
+      .map((e) => e.value)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  };
+}
+
+/**
  * Вопрос, держащий поручение: блокирующий запрос в `pending` или
  * `answered`. Это канонический блокер claim, retry (в том числе со сбросом),
  * repair и finish: `WorkState.hold` для него не занимается, и снятие чужого

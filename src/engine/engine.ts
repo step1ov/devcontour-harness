@@ -968,12 +968,49 @@ export class Engine {
   /**
    * Причина, по которой бюджет не даст выдать поручение при следующем claim, —
    * тот же расчёт, которым claim ставит `budgetBlock` (и до того, как поле
-   * записано). Только чтение; бюджеты выключены — `undefined`.
+   * записано). Только чтение; бюджеты выключены — `undefined`. `records` —
+   * записи вызовов, уже прочитанные в этом виде (диагноз многих работ читает
+   * их один раз).
    */
-  budgetBlockOf(workId: string, view: ExecutionView) {
+  budgetBlockOf(workId: string, view: ExecutionView, records?: CallRecord[]) {
     if (!this.policy.budgets) return undefined;
     const c = this.budgetContext();
-    return blockingBudget(c, workBudgets(c, view, workId, callRecords(view)))?.reason;
+    return blockingBudget(c, workBudgets(c, view, workId, records ?? callRecords(view)))?.reason;
+  }
+
+  /**
+   * Первая причина `APPROVAL_STALE` из `blockers` — без остальных проверок
+   * выдачи (бюджет, вопросы, предпосылки, контракт). Порядок причин тот же:
+   * процесс не с применённой политикой, политика после согласования графа,
+   * постановка готовой работы после согласования, отказ хоста. Возвращает
+   * проверку для многих работ одного вида: общее для них (применённая
+   * политика, согласование графа) считается один раз.
+   */
+  approvalStaleness(view: ExecutionView): (work: WorkState) => string | undefined {
+    let process: { reason: string | undefined } | undefined;
+    let policy: string | undefined;
+    const graphs = new Map<string, boolean>();
+    return (work) => {
+      process ??= { reason: this.staleReason(view) };
+      if (process.reason) return process.reason;
+      if (!graphs.has(work.graphId)) {
+        const graph = view.graph(work.graphId);
+        graphs.set(
+          work.graphId,
+          Boolean(graph?.approval) &&
+            graph!.policyDigest !== (policy ??= executionDigest(this.policy)),
+        );
+      }
+      if (graphs.get(work.graphId))
+        return 'Политика изменилась после согласования; согласуйте заново';
+      if (
+        work.status === 'ready' &&
+        work.approvedDigest !== this.host.basis.orderDigest(work, view)
+      )
+        return 'Постановка изменилась после согласования';
+      const refusal = this.host.guards.claimable(work, view);
+      return refusal?.code === 'APPROVAL_STALE' ? refusal.message : undefined;
+    };
   }
 
   /** Почему поручение сейчас не выдаётся; пусто — может быть выдано. */
