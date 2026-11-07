@@ -962,3 +962,35 @@ test('stopInputsOf: отмена в группе останавливает её
     h.close();
   }
 });
+
+test('R7-3: needs-lead до начала работы (preflight) — фаза preflight и неполные входы, а не пустой результат после ревью', () => {
+  const before = check(
+    failed('needs-lead', {
+      work: { preflight: true, failure: 'Работа w1: снимок контекста abc не найден' },
+      phase: 'implementation',
+    }),
+  );
+  assert.deepEqual(shape(before), [
+    'APPROVAL_REQUIRED',
+    'needs-lead',
+    'preflight',
+    'lead',
+    'diagnose-failure',
+  ]);
+  assert.equal(before.retryPlanned, false);
+  assert.match(before.message, /^Работа отказала до начала/);
+  assert.match(before.message, /Попытка не засчитана/);
+  assert.match(before.message, /автоматического повтора нет/);
+  assert.match(before.message, /Отказ: Работа w1: снимок контекста abc не найден/);
+  assert.doesNotMatch(before.message, /Пустой результат/);
+  // Без preflight — прежний случай: пустой результат, принятый ревью.
+  const review = check(failed('needs-lead'));
+  assert.deepEqual(shape(review), [
+    'APPROVAL_REQUIRED',
+    'needs-lead',
+    'review',
+    'lead',
+    'diagnose-failure',
+  ]);
+  assert.match(review.message, /^Пустой результат/);
+});

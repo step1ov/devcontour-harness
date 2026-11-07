@@ -34,6 +34,7 @@ import { approve, bin, greet, implement, runAll, setup } from './runner-fixture.
 import { Runner } from '../src/engine/runner.ts';
 import { hsetup } from './harness-fixture.ts';
 import { stopInputsOf } from '../src/explain/state.ts';
+import { repairDecision } from '../src/engine/repair.ts';
 import { explainStop } from '../src/projections/stop.ts';
 import { handoffPack } from '../src/handoff/pack.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
@@ -2083,4 +2084,89 @@ test('R6-2: закреплённого снимка нет у одной раб�
     'done',
     'другая работа исполнена',
   );
+});
+
+test('R7-3: отказ из-за потерянного снимка объясняется как отказ до начала работы, не засчитан и не повторяется сам', async () => {
+  const text = 'закреплённый';
+  const file = {
+    path: 'notes.md',
+    digest: sha256(Buffer.from(text)),
+    bytes: Buffer.byteLength(text),
+    content: { encoding: 'utf8' as const, data: text },
+  };
+  const entry = {
+    id: 'notes',
+    kind: 'doc',
+    version: '1',
+    required: false,
+    files: [file],
+    references: [],
+  };
+  const snapshot = withInput(undefined, { ...entry, digest: sourceDigest(entry) });
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p) => ((p as { concurrency: number }).concurrency = 1),
+    graph: (g) => {
+      const orders = g.orders as Record<string, unknown>[];
+      orders.push({
+        ...orders[0],
+        id: 'extra',
+        source: { connector: 'files', ref: 'extra', revision: '1' },
+      });
+    },
+    // Снимок у хоста потерян только для первой работы.
+    runner: { context: (work) => (work.id === 'add-greeting' ? undefined : snapshot) },
+  });
+  await ctx.runner.init();
+  const { graph } = ctx.engine.register(ctx.graph, trustNone);
+  const digest = contextDigest(snapshot);
+  ctx.store.transact('run.context', (tx) =>
+    tx.putLocal('context-snapshots', WORKSPACE_OWNER, digest, snapshot),
+  );
+  ctx.engine.recordReview({
+    ...planReview(ctx.engine, graph, 1),
+    authorRuntime: 'claude',
+    reviewerBinding: ctx.engine.reviewerBinding('plan', 'claude')!,
+    contextDigest: digest,
+  });
+  ctx.engine.approve(graph.id, 'agent', { bindContext: true });
+  ctx.engine.resume();
+  await ctx.runner.drain();
+  const attempts = ctx.engine.read((v) => v.attempts('add-greeting'));
+  assert.equal(attempts.length, 1, 'одна попытка: повтора нет');
+  assert.equal(attempts[0]!.blocked, true);
+  const work = ctx.engine.read((v) => v.work('add-greeting'))!;
+  assert.equal(work.status, 'failed');
+  assert.equal(work.attempt, 0, 'попытка не засчитана');
+  // Диагноз: фаза preflight, неполные входы, решение ведущего, без повтора.
+  const source = {
+    engine: ctx.engine,
+    policy: ctx.policy,
+    workflows: { list: () => [], continues: () => false },
+  };
+  const input = stopInputsOf(source, {
+    maxAttempts: ctx.policy.maxAttempts,
+    repairBudget: ctx.policy.repairBudget,
+    workId: 'add-greeting',
+  }).find((i) => i.kind === 'work')!;
+  assert.equal(input.kind === 'work' && input.work.preflight, true);
+  const diagnosis = explainStop(input);
+  assert.equal(diagnosis.phase, 'preflight');
+  assert.equal(diagnosis.actor, 'lead');
+  assert.equal(diagnosis.action, 'diagnose-failure');
+  assert.equal(diagnosis.retryPlanned, false);
+  assert.match(diagnosis.message, /до начала/);
+  assert.match(diagnosis.message, /снимок контекста .* не найден/);
+  assert.doesNotMatch(diagnosis.message, /Пустой результат/);
+  // Решение восстановления группы — остановка с той же причиной.
+  const decision = ctx.engine.read((v) =>
+    repairDecision(v, v.works(graph.id), { budgetLeft: 6, maxAttempts: ctx.policy.maxAttempts }),
+  )!;
+  assert.equal(decision.action, 'stop');
+  assert.equal(decision.workId, 'add-greeting');
+  assert.match(decision.reason, /отказала до начала, при загрузке своих входов/);
+  assert.doesNotMatch(decision.reason, /не изменил ни файла/);
+  // Новый проход очереди работу не выдаёт сам: попытка по-прежнему одна.
+  await ctx.runner.drain();
+  assert.equal(ctx.engine.read((v) => v.attempts('add-greeting')).length, 1);
 });

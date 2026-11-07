@@ -1,5 +1,9 @@
 import { errorCodes, type ErrorCode } from '../contracts/errors.ts';
-import { repairPolicy, repairRepeats } from '../contracts/repair-policy.ts';
+import {
+  PREFLIGHT_NEEDS_LEAD_EXPLAIN,
+  repairPolicy,
+  repairRepeats,
+} from '../contracts/repair-policy.ts';
 import { CLIP_DIAGNOSTIC, clipText } from './clip.ts';
 import type { Actor, FailureKind, NextAction, PauseReason, WorkStatus } from './enums.ts';
 import type { InputState } from './input.ts';
@@ -131,6 +135,12 @@ export type StopInput =
         /** Предел окна контекста последнего отказа `context-exhausted`. */
         contextLimit?: 'prompt-too-long' | 'blocking-limit';
         failure?: string;
+        /**
+         * Отказ до начала работы (причина `preflight`): последняя попытка не
+         * засчитана и исполнитель не вызывался — фаза `preflight`, у
+         * `needs-lead` — неполные входы работы, а не пустой результат.
+         */
+        preflight?: boolean;
         hold?: { operation: string; reason: string };
         budgetBlock?: { reason: string };
         /**
@@ -284,11 +294,20 @@ const activePhase: Partial<Record<WorkStatus, StopPhase>> = {
 type Outcome = Pick<StopDiagnosis, 'code' | 'cause' | 'phase' | 'actor' | 'action'> & {
   /** Пояснение к шаблону причины (без текста отказа). */
   note?: string;
+  /** Текст причины вместо шаблона `causeText` (та же причина, другой случай). */
+  text?: string;
 };
 
+/** Шаблон `needs-lead` для отказа до начала работы (неполные входы, не пустой результат). */
+const preflightNeedsLeadText =
+  'Работа отказала до начала: её входы при загрузке неполны (например, не найден закреплённый при выдаче снимок контекста); решение ведущего.';
+
 const message = (cause: StopCause, ...parts: (string | undefined)[]) =>
+  messageWith(causeText[cause], ...parts);
+
+const messageWith = (head: string, ...parts: (string | undefined)[]) =>
   clipText(
-    [causeText[cause], ...parts.filter((p): p is string => Boolean(p))].join(' '),
+    [head, ...parts.filter((p): p is string => Boolean(p))].join(' '),
     // clipText добавляет «…» сверх предела: итог не длиннее CLIP_DIAGNOSTIC.
     CLIP_DIAGNOSTIC - 1,
   )!;
@@ -359,7 +378,8 @@ function cancelledOutcome(
 function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean): Outcome {
   const { work, control, maxAttempts } = input;
   const kind: FailureKind = work.failureKind ?? 'unknown';
-  const phase = input.phase ?? failurePhase[kind];
+  // Отказ до начала работы — фаза preflight, какой бы ни была фаза попытки.
+  const phase = work.preflight ? 'preflight' : (input.phase ?? failurePhase[kind]);
   const exhausted = `Исчерпано ${work.attempt} из ${maxAttempts} попыток; сброс — решение человека.`;
   if (work.status === 'done')
     return {
@@ -564,6 +584,9 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
           phase,
           actor: 'lead',
           action: 'diagnose-failure',
+          ...(work.preflight
+            ? { text: preflightNeedsLeadText, note: PREFLIGHT_NEEDS_LEAD_EXPLAIN }
+            : {}),
         };
       case 'review-protocol':
       case 'unknown':
@@ -860,12 +883,12 @@ export function explainStop(input: StopInput): StopDiagnosis {
     };
   }
   const retryPlanned = retryPlannedOf(input);
-  const { note, ...outcome } = workOutcome(input, retryPlanned);
+  const { note, text, ...outcome } = workOutcome(input, retryPlanned);
   return {
     ...outcome,
     retryPlanned: outcome.action === 'retry',
-    message: message(
-      outcome.cause,
+    message: messageWith(
+      text ?? causeText[outcome.cause],
       note,
       input.work.repairStoppedBy && outcome.action !== 'retry'
         ? `Автоматическое восстановление группы остановлено отменой ${input.work.repairStoppedBy}.`

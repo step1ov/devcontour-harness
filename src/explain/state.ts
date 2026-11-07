@@ -2,6 +2,7 @@ import { HarnessError } from '../contracts/errors.ts';
 import { blocksWork } from '../contracts/index.ts';
 import {
   MAX_NEUTRAL_FAILURES,
+  failedBeforeWork,
   lastContextLimit,
   repairPolicy,
   repairRepeats,
@@ -394,6 +395,9 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
             : {}),
           ...((input) => (input ? { input } : {}))(inputOf(work, attempts)),
           ...(work.failure !== undefined ? { failure: work.failure } : {}),
+          ...(work.status === 'failed' && failedBeforeWork(kind, attempts)
+            ? { preflight: true }
+            : {}),
           ...(work.hold
             ? { hold: { operation: work.hold.operation, reason: work.hold.reason } }
             : {}),

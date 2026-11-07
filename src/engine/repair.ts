@@ -1,6 +1,11 @@
 import type { AttemptState, ExecutionView, FailureKind, WorkState } from '../contracts/index.ts';
 import { MAX_NEUTRAL_FAILURES, repairPolicy } from './failure.ts';
-import { lastContextLimit, repairRepeats } from '../contracts/repair-policy.ts';
+import {
+  failedBeforeWork,
+  lastContextLimit,
+  repairExplain,
+  repairRepeats,
+} from '../contracts/repair-policy.ts';
 import { RECOVERY_THRESHOLD, isNeutral } from './property-recovery.ts';
 import { blockingRequest } from './input-requests.ts';
 
@@ -157,7 +162,7 @@ export function repairDecision(
       action: 'stop',
       workId: work.id,
       kind,
-      reason: `${work.id}: ${rule.explain}${detail}`,
+      reason: `${work.id}: ${repairExplain(kind, failedBeforeWork(kind, view.attempts(work.id)))}${detail}`,
     };
 
   if (options.budgetLeft <= 0)

@@ -154,6 +154,41 @@ export const repairPolicy: Record<FailureKind, RepairRule> = {
 };
 
 /**
+ * Отказ до начала работы (`preflight`): попытка не засчитана, писатель не
+ * вызывался. У `needs-lead` это не пустой результат после ревью, а неполные
+ * входы этой работы при загрузке (например, не найден снимок контекста,
+ * закреплённый при выдаче): держится только она, очередь не на паузе,
+ * автоматического повтора нет.
+ */
+export const PREFLIGHT_NEEDS_LEAD_EXPLAIN =
+  'Работа отказала до начала, при загрузке своих входов: например, не найден снимок контекста, закреплённый при выдаче. Попытка не засчитана, исполнитель не вызывался, очередь не остановлена, автоматического повтора нет: держится только эта работа. Ведущий восстанавливает входы (снимок) или согласует работу заново, затем повторяет её.';
+
+/**
+ * Причина остановки по классу отказа; отказ до начала работы (`preflight`)
+ * у `needs-lead` объясняется своими словами, а не пустым результатом.
+ */
+export function repairExplain(kind: FailureKind, preflight = false): string {
+  return preflight && kind === 'needs-lead'
+    ? PREFLIGHT_NEEDS_LEAD_EXPLAIN
+    : repairPolicy[kind].explain;
+}
+
+/**
+ * Отказ работы произошёл до начала работы (`preflight`): последняя
+ * завершившаяся попытка не засчитана (`blocked`) по классу, который не
+ * окружение и не провайдер (у тех своя причина), — как причина
+ * `attempt.diagnosed`.
+ */
+export function failedBeforeWork(
+  kind: FailureKind,
+  attempts: readonly Pick<AttemptState, 'status' | 'blocked' | 'failureKind'>[],
+): boolean {
+  if (kind === 'environment' || kind === 'provider-auth') return false;
+  const last = attempts.findLast((a) => a.status !== 'active');
+  return Boolean(last?.blocked) && last?.failureKind === kind;
+}
+
+/**
  * Повторы одного отпечатка, разрешённые классу, с учётом предела окна
  * контекста последнего отказа: `prompt-too-long` — уже первая реплика больше
  * окна, повтор только удлинит подсказку отказом прошлой попытки, поэтому
