@@ -1275,19 +1275,22 @@ repairBudget, workId?, workIds? })` из корня пакета (источни
 `workId` вместе с `workIds` — `INVALID_INPUT`, пустой набор — без работ.
 Общее для работ (прогноз групп, обратные зависимости, запросы, попытки,
 записи вызовов, статусы бюджетов) читается один раз за вызов: набор и доска
-линейны по числу работ; порты хоста (`basis.orderDigest`,
-`guards.claimable`, `budgets.groupOf` при пределе группы) по-прежнему
-спрашиваются о каждой работе. Для многих работ одного чтения у `Engine`
-есть `approvalStaleness(view)` — первая причина `APPROVAL_STALE` из
-`blockers` в том же порядке — и `budgetBlockers(view)` — то же, что
-`budgetBlockOf`; оба возвращают функцию работы, действительную только
-внутри этого чтения (вид не переживает `read`). `budgetBlocksOf(workIds |
-undefined, view)` — бюджетные блоки набора (без `workIds` — всех работ
-вида) за одно чтение: `Map` работа → причина или `undefined`, по каждой —
-то же, что `budgetBlockOf(workId, view)`. `budgetBlockOf(workId, view,
-records?)` принимает уже прочитанные записи вызовов, `repairDecision(view,
-works, { budgetLeft, maxAttempts, blocking? })` — вопрос, держащий работу
-(по умолчанию `blockingRequest`).
+линейны по числу работ. Порты хоста по-прежнему спрашиваются о каждой
+работе: `basis.orderDigest`, `guards.claimable`, `budgets.groupOf` при
+пределе группы и `budgets.members` для прежних записей вызовов без
+закреплённой группы (`subjectId` без `groupId`, которые не закрепил
+`pinLegacyCalls`). Бюджетные блоки многих работ хост получает из
+`Engine.budgetBlocksOf(workIds | undefined, view)`: за одно чтение, для
+набора или (без `workIds`) всех работ вида — `Map` работа → причина или
+`undefined`, по каждой то же, что `budgetBlockOf(workId, view)` на момент
+вызова. `budgetBlockOf(workId, view, records?)` принимает уже прочитанные
+записи вызовов, `repairDecision(view, works, { budgetLeft, maxAttempts,
+blocking? })` — вопрос, держащий работу (по умолчанию `blockingRequest`).
+`Engine.budgetBlockers(view)` и `Engine.approvalStaleness(view)` —
+внутренние помощники диагноза: функция, которую они возвращают, считает
+общее один раз на момент создания (`at` бюджетов фиксирован) и верна
+только внутри того же чтения; хост их не держит между чтениями и
+пользуется `budgetBlocksOf` и `stopInputsOf`.
 
 Весь пакет — один снимок хранилища: `handoffPack` выполняет status,
 диагнозы и чтение заданий графов внутри одного `read`
