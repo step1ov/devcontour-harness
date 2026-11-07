@@ -567,7 +567,8 @@ null` и этого правила засчитанных попыток: ист
 - **Коды и журнал.** `INPUT_REQUIRED` (класс `refused`, exit code 3; в
   отказах `run`, `retry`, `approve`); события `input.requested`,
   `input.answered`, `input.applied`, `input.closed`, `input.delivered`,
-  `attempt.assumptions` (ID, digests и числа); типы транзакций `input.*`.
+  `attempt.assumptions`, `input.stale` (ID, digests и числа); типы
+  транзакций `input.*`. Необязательные поля запроса `stale` и `normalized`.
   Причина остановки `needs-input`, действия `answer-input` и `apply-input`.
 - **Проекции.** `status`: `works[].input`, `works[].followUps`; пакет передачи:
   блок `inputs` и `truncated.inputs`; отчёт: блок `inputs` (только числа) и
