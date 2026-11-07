@@ -65,7 +65,10 @@ export const stops = (policy: InputPolicy, effectiveSeverity: number) =>
 
 function rate(item: { severity: number; affects: readonly string[] }, hits: string[]): InputRating {
   const floors: InputFloor[] = [];
-  if (item.affects.length) floors.push('declared');
+  // Потолок самооценки — по шкале изменение требований, договора или
+  // безопасности: это объявленная критичность и без названной области (так
+  // и у нераспознанной области ответа вне схемы).
+  if (item.affects.length || item.severity >= INPUT_SEVERITY_MAX) floors.push('declared');
   if (hits.length) floors.push('critical-path');
   return {
     effectiveSeverity: floors.length ? INPUT_SEVERITY_MAX : item.severity,

@@ -1222,3 +1222,32 @@ test('R3-5: короткие и общие наследуемые значени
   const text = 'opt1 production tk-42 abcdefghijklmnopqrstuvwx z9';
   assert.equal(redact(text), 'opt1 production [REDACTED] [REDACTED] [REDACTED]');
 });
+
+test('R3-3: нераспознанная область — критичность с минимумом: в автономном режиме запрос ведущему', () => {
+  const normalized = normalizeImplementation({
+    completed: false,
+    summary: 's',
+    inputRequest: {
+      ...question(4),
+      options: [{ id: 'Option A', label: 'A', consequence: null }],
+      recommended: null,
+    },
+    assumptions: [
+      {
+        question: 'Хранить пароли?',
+        chosen: 'хэш',
+        rationale: 'r',
+        severity: 3,
+        affects: ['security'],
+      },
+    ],
+  })!.output;
+  const out = evaluateInput(
+    { completed: true, inputRequest: null, assumptions: normalized.assumptions },
+    { threshold: 11, criticalPaths: [] },
+    [],
+  );
+  assert.deepEqual(out.assumptions[0]!.floors, ['declared']);
+  assert.equal(out.assumptions[0]!.effectiveSeverity, 10);
+  assert.equal(out.followUps.length, 1, 'ведущий получает запрос');
+});
