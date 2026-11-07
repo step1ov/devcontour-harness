@@ -586,7 +586,10 @@ null` и этого правила засчитанных попыток: ист
   `input-supersede`.
 - **Хост с портом согласования.** `InputHost.review` и `activate`
   получают запрос (`{id, answerDigest, mode}`); перенос ответа заменённого
-  запроса — `Engine.carryInput` (`Harness.carryInput`). Исходная остановка и
+  запроса — `Engine.proposeCarry` и `Engine.carryInput` (`expectedVersion`,
+  `targetDigest`; `Harness.proposeCarry`/`carryInput`). Экспортированный
+  `unappliedInputs` требует `mayCarry`. `originBasis.contentDigest` —
+  необязательное поле запроса. Исходная остановка и
   устаревание применённого ответа сравнивают постановку самой работы, а не
   digest графа. Попытка с `pinned.contextDigest` отказывает, если загрузчик
   контекста хоста вернул другой снимок. `implementationOutputSchema`
