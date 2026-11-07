@@ -16,7 +16,6 @@ import type {
 import type { EnvironmentCause, RunEvent, RunEventPayload } from '../contracts/events.ts';
 import type { ReviewRecord } from '../contracts/review.ts';
 import type { InputRequest } from '../contracts/input.ts';
-import { inputStateOf } from '../projections/input.ts';
 import type { FailureBucket, ReportDist, ReportMeasure, ValueReport } from '../contracts/report.ts';
 import {
   formatDuration,
@@ -199,7 +198,21 @@ function inputCounts(
 ): NonNullable<ValueReport['inputs']> {
   const inside = requests.filter((r) => inWindow(w, r.createdAt));
   const questions = inside.filter((r) => r.kind === 'question' && r.blocking);
-  const state = (s: string) => questions.filter((r) => inputStateOf(r) === s).length;
+  // Состояние — по жизненному циклу и доставке (тот же расчёт, что у
+  // `projections/input.ts`): граф модуля отчёта остаётся в report/.
+  const state = (s: string) =>
+    questions.filter(
+      (r) =>
+        (r.lifecycle === 'pending'
+          ? 'awaiting-answer'
+          : r.lifecycle === 'answered'
+            ? 'answered-not-applied'
+            : r.lifecycle === 'applied'
+              ? r.delivered
+                ? 'delivered'
+                : 'applied-awaiting-claim'
+              : undefined) === s,
+    ).length;
   return {
     questions: questions.length,
     awaitingAnswer: state('awaiting-answer'),
