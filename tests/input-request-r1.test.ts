@@ -1799,3 +1799,46 @@ test('R5-3: перенесённый ответ — связан с попытк
   assert.equal(next.input?.requestId, c.env.request.id);
   assert.equal(c.env.engine.inputDelivered(next.id, next.token, 'call-1'), true);
 });
+
+test('R5-4: закреплённого снимка нет — отказ при загрузке, до вызова writer, попытка не засчитана', async () => {
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    runner: { context: () => undefined },
+  });
+  await ctx.runner.init();
+  const { graph } = ctx.engine.register(ctx.graph, trustNone);
+  const text = 'закреплённый';
+  const file = {
+    path: 'notes.md',
+    digest: sha256(Buffer.from(text)),
+    bytes: Buffer.byteLength(text),
+    content: { encoding: 'utf8' as const, data: text },
+  };
+  const entry = {
+    id: 'notes',
+    kind: 'doc',
+    version: '1',
+    required: false,
+    files: [file],
+    references: [],
+  };
+  const snapshot = withInput(undefined, { ...entry, digest: sourceDigest(entry) });
+  const digest = contextDigest(snapshot);
+  ctx.store.transact('run.context', (tx) =>
+    tx.putLocal('context-snapshots', WORKSPACE_OWNER, digest, snapshot),
+  );
+  ctx.engine.recordReview({
+    ...planReview(ctx.engine, graph, 1),
+    authorRuntime: 'claude',
+    reviewerBinding: ctx.engine.reviewerBinding('plan', 'claude')!,
+    contextDigest: digest,
+  });
+  ctx.engine.approve(graph.id, 'agent', { bindContext: true });
+  ctx.engine.resume();
+  await ctx.runner.drain();
+  const [attempt] = ctx.engine.read((v) => v.attempts('add-greeting'));
+  assert.equal(attempt!.status, 'failed');
+  assert.equal(attempt!.blocked, true, 'не засчитана');
+  assert.match(attempt!.error ?? '', /закреплённый при выдаче, не найден/);
+  assert.equal(existsSync(`${ctx.scenarioPath}.claude.writer.count`), false, 'writer не вызывался');
+});

@@ -1383,6 +1383,13 @@ export class Runner {
           attempt = { ...attempt, resources };
           const work = await this.workOf(attempt);
           const context = await this.options.context?.(work, attempt);
+          // Закреплённый при выдаче снимок не найден — отказ сразу, до любого
+          // платного вызова, а не при приёмке; попытка не засчитывается.
+          const pinnedContext = attempt.pinned?.contextDigest;
+          if (typeof pinnedContext === 'string' && !context)
+            throw new BlockedError(
+              `Снимок контекста ${pinnedContext}, закреплённый при выдаче, не найден: загрузчик хоста обязан вернуть его по attempt.pinned.contextDigest`,
+            );
           if (context)
             // Попытка закрепляет снимок контекста: writer и оба reviewer видят одни и те же байты.
             this.engine.update(attempt.id, attempt.token, 'run.context', {
