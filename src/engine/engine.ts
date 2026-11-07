@@ -38,6 +38,7 @@ import {
   type InputRequest,
   type InputTarget,
   type InputTargetRequest,
+  linksAnswer,
   type ContextSnapshot,
   INPUT_LIMITS,
   INPUT_SOURCE_KIND,
@@ -1037,7 +1038,9 @@ export class Engine {
         message:
           question.lifecycle === 'pending'
             ? `Ждёт ответа на вопрос исполнителя ${question.id}`
-            : `Ответ на вопрос ${question.id} записан, но не применён (applyInput)`,
+            : question.lifecycle === 'superseded'
+              ? `Перенесённый ответ на вопрос ${question.id} устарел до выдачи: нужен новый перенос (carryInput)`
+              : `Ответ на вопрос ${question.id} записан, но не применён (applyInput)`,
       });
     // Записанный budgetBlock — кэш расчёта claim: готовую работу держит текущий расчёт.
     const budget = work.status === 'ready' ? this.budgetBlockOf(work.id, view) : undefined;
@@ -1265,7 +1268,7 @@ export class Engine {
       // применённое основание совпало с основанием выдачи: смена согласования
       // после apply не приписывает старый ответ новой попытке.
       const answered = requestsOf(tx, work)
-        .filter((r) => r.kind === 'question' && r.lifecycle === 'applied' && !r.delivered)
+        .filter((r) => linksAnswer(r) && !r.delivered)
         .at(-1);
       const target = answered?.target;
       // То же правило, что у устаревания (`targetDrift`): ответ связан, пока
@@ -2654,13 +2657,15 @@ export class Engine {
   /** Вернуть в `answered` применённые, но не переданные ответы с устаревшим основанием. */
   private staleTargets(tx: ExecutionTransaction, work: WorkState) {
     for (const r of requestsOf(tx, work)) {
-      if (r.kind !== 'question' || r.lifecycle !== 'applied' || r.delivered || !r.target) continue;
+      if (!linksAnswer(r) || r.delivered || !r.target) continue;
       const reason = this.targetDrift(tx, work, r, r.target);
       if (!reason) continue;
       const { target, ...rest } = r;
+      // Применённый — снова `answered`; перенесённый остаётся заменённым без
+      // цели: работа ждёт нового переноса (`blocksWork`).
       tx.putLocal('input-requests', work.order.repositoryId, r.id, {
         ...rest,
-        lifecycle: 'answered',
+        lifecycle: r.lifecycle === 'applied' ? 'answered' : 'superseded',
         stale: { targetDigest: target.digest, reason, at: iso(this.now()) },
         version: r.version + 1,
       });
@@ -3129,7 +3134,9 @@ export class Engine {
         this.activateApproval(tx, checked!.graph, checked!.last, options.actor, {
           bindContext: true,
         });
-      const next: InputRequest = { ...request, target: full, version: request.version + 1 };
+      const { stale: _stale, ...current0 } = request;
+      void _stale;
+      const next: InputRequest = { ...current0, target: full, version: request.version + 1 };
       tx.putLocal('input-requests', owner, id, next);
       const current = tx.work(work.id)!;
       // В очередь возвращается только работа, остановленная вопросом; иной
@@ -3172,7 +3179,7 @@ export class Engine {
       if (
         !request ||
         request.delivered ||
-        request.lifecycle !== 'applied' ||
+        !linksAnswer(request) ||
         request.target?.digest !== a.input.targetDigest
       )
         return false;

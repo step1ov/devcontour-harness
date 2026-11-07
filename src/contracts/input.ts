@@ -336,8 +336,21 @@ export interface InputOutcome {
 }
 
 /** Запрос держит работу: вопрос, ещё не применённый и не закрытый. */
-export const blocksWork = (r: Pick<InputRequest, 'blocking' | 'lifecycle'>) =>
-  r.blocking && (r.lifecycle === 'pending' || r.lifecycle === 'answered');
+export const blocksWork = (
+  r: Pick<InputRequest, 'blocking' | 'lifecycle'> & Partial<Pick<InputRequest, 'stale' | 'target'>>,
+) =>
+  r.blocking &&
+  (r.lifecycle === 'pending' ||
+    r.lifecycle === 'answered' ||
+    // Перенесённый ответ, основание которого устарело до выдачи: работа ждёт
+    // нового переноса, а не идёт без ответа.
+    (r.lifecycle === 'superseded' && !!r.stale && !r.target));
+
+/** Ответ запроса связан с основанием выдачи: применённый или перенесённый. */
+export const linksAnswer = (r: Pick<InputRequest, 'kind' | 'lifecycle' | 'target'>) =>
+  r.kind === 'question' &&
+  !!r.target &&
+  (r.lifecycle === 'applied' || r.lifecycle === 'superseded');
 
 /** Последний ответ запроса. */
 export const latestAnswer = (r: Pick<InputRequest, 'answers'>) => r.answers.at(-1);

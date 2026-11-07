@@ -1758,3 +1758,44 @@ test('R5-2: исчерпанные попытки и бюджет — {blocker} 
     'отказ gate — не повтор переноса',
   );
 });
+
+test('R5-3: перенесённый ответ — связан с попыткой; согласование без него до выдачи — запись устаревания, работа держится до нового переноса', () => {
+  const c = carryReady();
+  assert.equal(c.env.engine.carryInput(c.env.request.id, c.options).carried, true);
+  // Согласование сменилось на снимок без ответа (как run с другим контекстом).
+  c.env.engine.recordReview(
+    planReview(c.env.engine, c.graph, c.env.engine.reviews('plan', c.graph.id).length + 1),
+  );
+  c.env.engine.approve(c.graph.id, 'agent', { bindContext: true });
+  c.env.clock.now += 1000;
+  const first = c.env.engine.claim('c1');
+  assert.notEqual(first?.workId, 'w', 'w без перенесённого ответа не выдана');
+  const stale = c.env.engine.inputRequest(c.env.request.id);
+  assert.equal(stale.lifecycle, 'superseded');
+  assert.equal(stale.target, undefined);
+  assert.equal(stale.stale?.reason, 'context');
+  assert.ok(
+    c.env.engine
+      .read((v) => c.env.engine.blockers(v.work('w')!, v))
+      .some((b) => b.code === 'INPUT_REQUIRED' && /carryInput/.test(b.message)),
+  );
+  if (first) c.env.engine.fail(first.id, first.token, 'x', { kind: 'gate' });
+  // Новый перенос — работа выдаётся с ответом, связанным с попыткой.
+  const digest = reviewSnapshot(c.env, c.graph);
+  const proposal = c.env.engine.proposeCarry(c.env.request.id, digest);
+  assert.equal(
+    c.env.engine.carryInput(c.env.request.id, {
+      ...c.options,
+      contextDigest: digest,
+      expectedVersion: stale.version,
+      targetDigest: proposal.target!.digest,
+    }).carried,
+    true,
+  );
+  assert.equal(c.env.engine.inputRequest(c.env.request.id).stale, undefined);
+  c.env.clock.now += 1000;
+  const next = c.env.engine.claim('c1')!;
+  assert.equal(next.workId, 'w');
+  assert.equal(next.input?.requestId, c.env.request.id);
+  assert.equal(c.env.engine.inputDelivered(next.id, next.token, 'call-1'), true);
+});
