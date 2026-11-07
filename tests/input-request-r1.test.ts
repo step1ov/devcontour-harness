@@ -1100,7 +1100,7 @@ test('R2-5: два вопроса в графе — применение вто�
   assert.equal(env.engine.inputRequest(reqW.id).stale, undefined);
 });
 
-test('R2-6: продолжение не выдаёт вопрос за решение и переоценивает решения прежней попытки по новой политике', async () => {
+test('R2-6/R3-4: продолжение не выдаёт вопрос за решение, переоценивает решения прежней попытки, и не записанное заново решение не ниже порога останавливает', async () => {
   const ctx = setup({
     scenario: {
       writer: [
@@ -1155,12 +1155,14 @@ test('R2-6: продолжение не выдаёт вопрос за реше�
   const block = writer.slice(writer.indexOf('Decisions the previous attempt made'));
   assert.match(block, /Регистр имени\?","chosen":"как есть","rationale":"r","severity":10/);
   assert.doesNotMatch(block.split('\n')[0]!, /Формат даты/, 'вопрос — не решение');
-  const reviewer = readFileSync(`${ctx.scenarioPath}.reviewer.0.prompt`, 'utf8');
-  const decisions = reviewer
-    .slice(reviewer.indexOf('Decisions the writer made on its own'))
-    .split('\n')[0]!;
-  assert.match(decisions, /Регистр имени/);
-  assert.doesNotMatch(decisions, /Формат даты/);
+  // R3-4: решение, не записанное writer заново и теперь не ниже порога,
+  // останавливает попытку, как у взятого кандидата.
+  const second = next.engine.read((v) => v.attempts('add-greeting')[1]!);
+  assert.equal(second.failureKind, 'needs-input', second.error);
+  const asked = next.engine
+    .inputRequests({ workId: 'add-greeting' })
+    .find((r) => r.runId === second.id)!;
+  assert.equal(asked.question.question, 'Регистр имени?');
   next.store.close();
 });
 

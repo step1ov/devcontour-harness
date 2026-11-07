@@ -30,10 +30,12 @@ import {
   type AlreadySatisfied,
   sha256,
   stallSweepOf,
+  INPUT_LIMITS,
   inputPolicyOf,
   inputRequestId,
   type InputOutcome,
   type AttemptState,
+  type ExecutionView,
   type ContextSnapshot,
   type EvidenceRecord,
   type ExecutionPolicy,
@@ -1131,6 +1133,28 @@ export class Runner {
     );
   }
 
+  /**
+   * Решения попытки, черновик которой продолжается (без решения, ставшего её
+   * вопросом: на него есть ответ или вопрос снят), — как их записал writer,
+   * без оценки controller.
+   */
+  private continuedDecisions(attempt: AttemptState, v: ExecutionView) {
+    const from = attempt.continuedFrom?.applied ? attempt.continuedFrom : undefined;
+    if (!from) return [];
+    const asked = requestsOf(v, v.work(attempt.workId))
+      .filter((r) => r.runId === from.runId && r.kind === 'question')
+      .map((r) => r.question.question);
+    return (v.attempt(from.runId)?.assumptions ?? [])
+      .filter((a) => !asked.includes(a.question))
+      .map((a) => ({
+        question: a.question,
+        chosen: a.chosen,
+        rationale: a.rationale,
+        severity: a.severity,
+        affects: a.affects,
+      }));
+  }
+
   private decideInput(
     attempt: AttemptState,
     output: ImplementationResult,
@@ -1625,12 +1649,23 @@ export class Runner {
                     // окружением вызова до записи, как ответ reviewer; запрос,
                     // explain, пакет передачи и снимок с ответом видят уже
                     // замаскированное.
+                    // Решения продолжаемого черновика, которые writer не записал
+                    // заново, решаются вместе с его собственными (как у взятого
+                    // кандидата): не ниже порога — остановка.
+                    const inherited = this.engine
+                      .read((v) => this.continuedDecisions(attempt, v))
+                      .filter(
+                        (c) => !result.data.assumptions.some((a) => a.question === c.question),
+                      );
                     const decided = {
                       ...result.data,
                       ...(result.data.inputRequest
                         ? { inputRequest: redactDeep(result.data.inputRequest, response.redact) }
                         : {}),
-                      assumptions: redactDeep(result.data.assumptions, response.redact),
+                      assumptions: [
+                        ...redactDeep(result.data.assumptions, response.redact),
+                        ...inherited,
+                      ].slice(0, INPUT_LIMITS.assumptions),
                     };
                     this.decideInput(
                       attempt,
@@ -3141,27 +3176,14 @@ export class Runner {
       // Решение, ставшее вопросом прежней попытки, — не решение: на него есть
       // ответ (или вопрос снят). Остальные переоцениваются по политике этой
       // попытки и файлам черновика, как у взятого кандидата.
-      const from = attempt.continuedFrom?.applied ? attempt.continuedFrom : undefined;
-      const asked = from
-        ? requestsOf(v, v.work(attempt.workId))
-            .filter((r) => r.runId === from.runId && r.kind === 'question')
-            .map((r) => r.question.question)
-        : [];
-      const kept = from
-        ? (v.attempt(from.runId)?.assumptions ?? []).filter((a) => !asked.includes(a.question))
-        : [];
+      const kept = this.continuedDecisions(attempt, v);
+      const from = attempt.continuedFrom;
       const continued = kept.length
         ? evaluateInput(
             {
               completed: true,
               inputRequest: null,
-              assumptions: kept.map((a) => ({
-                question: a.question,
-                chosen: a.chosen,
-                rationale: a.rationale,
-                severity: a.severity,
-                affects: a.affects,
-              })),
+              assumptions: kept,
             },
             attempt.inputPolicy ?? inputPolicyOf(this.policy),
             from!.files,
