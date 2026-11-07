@@ -90,7 +90,12 @@ export const code = (fn: () => unknown) => {
 };
 
 /** Хост со своим согласованием контекста (как DevContour): снимок поручения — в памяти хоста. */
-function hostEngine(policy: ExecutionPolicy, dir: string, approved: Map<string, string | null>) {
+function hostEngine(
+  policy: ExecutionPolicy,
+  dir: string,
+  approved: Map<string, string | null>,
+  calls: { method: string; request: unknown }[] = [],
+) {
   const store = new SqliteExecutionStore(join(dir, 'state.sqlite'), 'test');
   const clock = { now: Date.parse('2026-01-01T00:00:00.000Z') };
   let n = 0;
@@ -98,8 +103,14 @@ function hostEngine(policy: ExecutionPolicy, dir: string, approved: Map<string, 
     ...standaloneHost(store, policy),
     input: {
       contextDigestOf: (work) => approved.get(work.id) ?? null,
-      review: () => ({ round: 1, approved: true, reviewerBinding: null }),
-      activate: (_tx, work, target) => void approved.set(work.id, target.contextDigest),
+      review: (_work, _digest, _actor, _view, request) => {
+        calls.push({ method: 'review', request });
+        return { round: 1, approved: true, reviewerBinding: null };
+      },
+      activate: (_tx, work, target, request) => {
+        calls.push({ method: 'activate', request });
+        approved.set(work.id, target.contextDigest);
+      },
     },
   };
   const engine = new Engine({
@@ -1368,4 +1379,46 @@ test('R3-2: run со снимком перенесённого ответа пр
   );
   assert.equal(ctx.calls('codex', 'reviewer'), reviews, 'ревью плана не вызывалось');
   h.close();
+});
+
+test('Q3: порт хоста получает запрос и ответ в review и activate', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-h02r4-'));
+  const approved = new Map<string, string | null>();
+  const calls: { method: string; request: unknown }[] = [];
+  const a = hostEngine(policyOf(), dir, approved, calls);
+  ready(a.engine, graphOf({ w: [] }));
+  const attempt = a.engine.claim('c1')!;
+  a.engine.fail(attempt.id, attempt.token, 'вопрос', { kind: 'needs-input', input: outcome() });
+  const [request] = a.engine.inputRequests();
+  const answered = a.engine.answerInput(
+    request!.id,
+    { text: 'Hello', actor: { kind: 'operator' } },
+    1,
+  ).request;
+  const snapshot = withInput(undefined, inputContextSource(answered, latestAnswer(answered)!));
+  const digest = contextDigest(snapshot);
+  a.store.transact('run.context', (tx) =>
+    tx.putLocal('context-snapshots', WORKSPACE_OWNER, digest, snapshot),
+  );
+  const proposal = a.engine.proposeTarget(request!.id, digest);
+  a.engine.applyInput(request!.id, {
+    answerDigest: latestAnswer(answered)!.digest,
+    expectedVersion: answered.version,
+    contextDigest: digest,
+    targetDigest: proposal.target!.digest,
+    actor: 'agent',
+  });
+  const expected = { id: request!.id, answerDigest: latestAnswer(answered)!.digest, mode: 'apply' };
+  assert.deepEqual(calls.at(-1), { method: 'activate', request: expected });
+  assert.ok(
+    calls.some(
+      (c) => c.method === 'review' && JSON.stringify(c.request) === JSON.stringify(expected),
+    ),
+  );
+});
+
+test('Q4: wire-схема ответа writer экспортирована корнем пакета', async () => {
+  const root = (await import('../src/index.ts')) as unknown as Record<string, unknown>;
+  const { implementationOutputSchema } = await import('../src/agents/schemas.ts');
+  assert.equal(root.implementationOutputSchema, implementationOutputSchema);
 });

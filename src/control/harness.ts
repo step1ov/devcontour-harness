@@ -27,11 +27,7 @@ import {
   INPUT_SOURCE_KIND,
   latestAnswer,
 } from '../contracts/index.ts';
-import {
-  inputContextSource,
-  withInput,
-  type InputMessageRef,
-} from '../engine/input-requests.ts';
+import { inputContextSource, withInput, type InputMessageRef } from '../engine/input-requests.ts';
 import { cliAdapter } from '../agents/cli-adapter.ts';
 import { Engine } from '../engine/engine.ts';
 import { runResult } from '../engine/result.ts';

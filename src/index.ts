@@ -132,6 +132,8 @@ export { technicalReview, type TechnicalReviewInput } from './control/review.ts'
  * чтение запросов, источник контекста с ответом и проверка снимка на
  * неприменённые ответы — для хоста со своим согласованием (`InputHost`).
  */
+/** Wire-схема ответа writer для CLI runtime (JSON Schema): хост переиспользует её, а не копирует. */
+export { implementationOutputSchema } from './agents/schemas.ts';
 export {
   evaluateInput,
   inputPolicyText,

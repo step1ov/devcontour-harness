@@ -37,6 +37,7 @@ import {
   type InputOutcome,
   type InputRequest,
   type InputTarget,
+  type InputTargetRequest,
   type ContextSnapshot,
   INPUT_LIMITS,
   INPUT_SOURCE_KIND,
@@ -2501,6 +2502,7 @@ export class Engine {
     work: WorkState,
     contextDigest: string | null,
     actor: TechnicalApproval['actor'],
+    request: InputTargetRequest,
   ) {
     // Актёр согласования — режим политики и у хоста с портом: порт правил
     // движка не ослабляет.
@@ -2509,7 +2511,8 @@ export class Engine {
         'APPROVAL_REQUIRED',
         `Политика требует согласования ${this.policy.approvalMode === 'operator' ? 'оператором' : 'агентом-ревьюером'}`,
       );
-    if (this.host.input) return { review: this.host.input.review(work, contextDigest, actor, tx) };
+    if (this.host.input)
+      return { review: this.host.input.review(work, contextDigest, actor, tx, request) };
     const checked = this.approvalRules(tx, work.graphId, actor);
     if ((checked.last.contextDigest ?? null) !== contextDigest)
       throw new HarnessError(
@@ -2728,7 +2731,11 @@ export class Engine {
       if (stale) problems.push(stale);
       let review: InputTarget['review'] = null;
       try {
-        review = this.targetReview(v, work, contextDigest, actor).review;
+        review = this.targetReview(v, work, contextDigest, actor, {
+          id: request.id,
+          answerDigest: answer.digest,
+          mode: 'apply',
+        }).review;
       } catch (error) {
         if (!(error instanceof HarnessError)) throw error;
         problems.push(error.message);
@@ -2831,7 +2838,14 @@ export class Engine {
       const contextDigest = options.contextDigest;
       // Политика процесса применена — и у хоста с портом согласования.
       this.assertCurrentPolicy(tx);
-      const { review, checked } = this.targetReview(tx, work, contextDigest, options.actor);
+      const targetRequest = { id, answerDigest: answer.digest, mode: 'apply' as const };
+      const { review, checked } = this.targetReview(
+        tx,
+        work,
+        contextDigest,
+        options.actor,
+        targetRequest,
+      );
       const target: Omit<InputTarget, 'digest'> = this.targetOf(
         tx,
         request,
@@ -2883,7 +2897,7 @@ export class Engine {
           blocker: { code: 'BUDGET_EXHAUSTED' as const, message: budget },
         };
       const full: InputTarget = { ...target, digest };
-      if (this.host.input) this.host.input.activate(tx, work, full);
+      if (this.host.input) this.host.input.activate(tx, work, full, targetRequest);
       else
         this.activateApproval(tx, checked!.graph, checked!.last, options.actor, {
           bindContext: true,

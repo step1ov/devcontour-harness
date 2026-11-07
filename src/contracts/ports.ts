@@ -495,18 +495,34 @@ export interface InputHost {
     contextDigest: string | null,
     actor: 'agent' | 'operator',
     view: ExecutionView,
+    /** Запрос и ответ, которые продолжаются или переносятся. */
+    request: InputTargetRequest,
   ): InputTarget['review'];
   /**
    * Активировать цель в транзакции `applyInput`: после записи
    * `contextDigestOf(work)` равен `target.contextDigest`. Движок перед вызовом
-   * уже проверил, что активных попыток графа нет.
+   * уже проверил, что активных попыток графа нет. Вызывается и при
+   * переносе ответа заменённого запроса (`carryInput`).
    */
-  activate(tx: ExecutionTransaction, work: WorkState, target: InputTarget): void;
+  activate(
+    tx: ExecutionTransaction,
+    work: WorkState,
+    target: InputTarget,
+    request: InputTargetRequest,
+  ): void;
   /**
    * Снимок контекста по digest — для сверки manifest ответа в цели. Нет
    * метода — локальные `context-snapshots` (`WORKSPACE_OWNER`).
    */
   snapshot?(digest: string, view: ExecutionView): ContextSnapshot | undefined;
+}
+
+/** Запрос, ответ которого продолжает или переносит `InputHost.review/activate`. */
+export interface InputTargetRequest {
+  id: string;
+  answerDigest: string;
+  /** `apply` — продолжение остановки, `carry` — перенос ответа заменённого запроса. */
+  mode: 'apply' | 'carry';
 }
 
 /** Хост, внутри которого работает движок: хранилище, основания, условия и области бюджетов. */
