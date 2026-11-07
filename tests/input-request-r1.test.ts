@@ -1162,3 +1162,39 @@ test('R2-6: продолжение не выдаёт вопрос за реше�
   assert.doesNotMatch(decisions, /Формат даты/);
   next.store.close();
 });
+
+test('R2-8/m-2: запись вопроса отклонена — отказ пишется без него (unfinished с причиной), попытка не остаётся активной', async () => {
+  const ctx = setup({
+    scenario: { writer: asks9() },
+    policy: (p) => (p.inputPolicy = { threshold: 7, criticalPaths: [] }),
+  });
+  const original = ctx.engine.fail.bind(ctx.engine);
+  let refused = 0;
+  ctx.engine.fail = ((id, token, error, options = {}) => {
+    if (options.input) {
+      refused++;
+      throw new Error('запись запроса отклонена хранилищем');
+    }
+    return original(id, token, error, options);
+  });
+  await runAll(ctx);
+  const [attempt] = ctx.engine.read((v) => v.attempts('add-greeting'));
+  assert.equal(refused, 1);
+  assert.equal(attempt!.status, 'failed');
+  assert.equal(attempt!.failureKind, 'unfinished');
+  assert.match(attempt!.error ?? '', /Вопрос исполнителя не записан: запись запроса отклонена/);
+  assert.deepEqual(ctx.engine.inputRequests(), []);
+});
+
+function asks9() {
+  return {
+    files: { 'src/greet.js': "exports.greet = () => 'draft';\n" },
+    result: {
+      completed: false,
+      summary: 'вопрос',
+      discoveries: [],
+      inputRequest: question(9),
+      assumptions: [],
+    },
+  };
+}
