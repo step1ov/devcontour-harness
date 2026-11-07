@@ -228,9 +228,10 @@ export const inputLifecycles = [
 export type InputLifecycle = (typeof inputLifecycles)[number];
 
 /**
- * Состояние вопроса для проекций (`projections/input.ts` повторяет перечень
- * без zod; тест сверяет оба): ждёт ответа, ответ не применён, применён и ждёт
- * вызова, передан исполнителю.
+ * Состояние вопроса для проекций и отчёта (`contracts/input-state.ts`
+ * повторяет перечень без zod; тест сверяет оба): ждёт ответа, ответ не
+ * применён, применён и ждёт вызова, передан исполнителю, перенесённый ответ
+ * устарел до выдачи.
  */
 export const inputStateNames = [
   'awaiting-answer',

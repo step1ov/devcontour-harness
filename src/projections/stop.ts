@@ -1,9 +1,5 @@
 import { errorCodes, type ErrorCode } from '../contracts/errors.ts';
-import {
-  PREFLIGHT_NEEDS_LEAD_EXPLAIN,
-  repairPolicy,
-  repairRepeats,
-} from '../contracts/repair-policy.ts';
+import { repairPolicy, repairRepeats } from '../contracts/repair-policy.ts';
 import { CLIP_DIAGNOSTIC, clipText } from './clip.ts';
 import type { Actor, FailureKind, NextAction, PauseReason, WorkStatus } from './enums.ts';
 import type { InputState } from './input.ts';
@@ -301,6 +297,9 @@ type Outcome = Pick<StopDiagnosis, 'code' | 'cause' | 'phase' | 'actor' | 'actio
 /** Шаблон `needs-lead` для отказа до начала работы (неполные входы, не пустой результат). */
 const preflightNeedsLeadText =
   'Работа отказала до начала: её входы при загрузке неполны (например, не найден закреплённый при выдаче снимок контекста); решение ведущего.';
+/** Последствия и шаг — без повтора причины (полное объяснение — `PREFLIGHT_NEEDS_LEAD_EXPLAIN`). */
+const preflightNeedsLeadSteps =
+  'Попытка не засчитана, исполнитель не вызывался, очередь не остановлена, автоматического повтора нет: восстановите входы (снимок) или согласуйте работу заново, затем повторите.';
 
 const message = (cause: StopCause, ...parts: (string | undefined)[]) =>
   messageWith(causeText[cause], ...parts);
@@ -585,7 +584,7 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
           actor: 'lead',
           action: 'diagnose-failure',
           ...(work.preflight
-            ? { text: preflightNeedsLeadText, note: PREFLIGHT_NEEDS_LEAD_EXPLAIN }
+            ? { text: preflightNeedsLeadText, note: preflightNeedsLeadSteps }
             : {}),
         };
       case 'review-protocol':
