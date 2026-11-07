@@ -2154,6 +2154,7 @@ export class Engine {
       contextDigest: a.contextSnapshot ?? null,
       baseSha: a.baseSha ?? null,
       inputPolicy: structuredClone(a.inputPolicy ?? inputPolicyOf(this.policy)),
+      contentDigest: contentDigest(w.order),
     };
   }
 
@@ -2585,7 +2586,12 @@ export class Engine {
     const work = view.work(request.workId);
     const orderChanged =
       !work || this.host.basis.orderDigest(work, view) !== request.originBasis.orderDigest;
-    if (answer.kind === 'requirement-change') return orderChanged;
+    // Изменение требований — по содержанию постановки, без ревизии источника:
+    // пересинхронизация трекера одной ревизией перенос не открывает.
+    if (answer.kind === 'requirement-change')
+      return request.originBasis.contentDigest !== undefined
+        ? !work || contentDigest(work.order) !== request.originBasis.contentDigest
+        : orderChanged;
     return orderChanged || !this.originHolds(view, request);
   }
 

@@ -161,7 +161,7 @@ export function inputManifestOf(source: ContextSourceEntry): InputManifest | und
 export const carried = (
   request: InputRequest,
   manifest: InputManifest,
-  mayCarry: (request: InputRequest) => boolean = (r) => r.closed?.carry === true,
+  mayCarry: (request: InputRequest) => boolean,
 ) => {
   const last = request.answers.at(-1);
   return (
@@ -181,11 +181,17 @@ export function unappliedInputs(
   view: ExecutionView,
   snapshot: ContextSnapshot | undefined,
   /**
-   * Можно ли перенести ответ заменённого запроса сейчас (`Engine.carryAllowed`);
-   * без него — отметка `closed.carry`, записанная при замене.
+   * Можно ли перенести ответ заменённого запроса сейчас — правило движка
+   * (`(r) => engine.carryAllowed(view, r)`; то же делает
+   * `Engine.unappliedInputs`). Обязателен: отметка `closed.carry` — лишь
+   * сведение о моменте замены, решать по ней нельзя.
    */
-  mayCarry?: (request: InputRequest) => boolean,
+  mayCarry: (request: InputRequest) => boolean,
 ) {
+  // Вызов без правила переноса (прежняя сигнатура, JS) — ошибка, а не тихое
+  // решение по устаревшей отметке.
+  if (typeof mayCarry !== 'function')
+    throw new TypeError('unappliedInputs: нужен mayCarry (Engine.carryAllowed)');
   const out: { source: string; requestId?: string; reason: string }[] = [];
   for (const source of snapshot?.sources ?? []) {
     if (source.kind !== INPUT_SOURCE_KIND) continue;

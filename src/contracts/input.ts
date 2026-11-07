@@ -178,6 +178,12 @@ export const inputOriginSchema = z.strictObject({
   contextDigest: digestSchema.nullable(),
   baseSha: gitShaSchema.nullable(),
   inputPolicy: inputPolicySchema,
+  /**
+   * Digest содержания постановки без ревизии источника: изменение
+   * требований переносится, только если изменилось содержание, а не одна
+   * ревизия (пересинхронизация трекера). Нет поля — запрос прежней версии.
+   */
+  contentDigest: digestSchema.optional(),
 });
 export type InputOrigin = z.infer<typeof inputOriginSchema>;
 

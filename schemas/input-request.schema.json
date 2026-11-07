@@ -283,6 +283,10 @@
             }
           },
           "additionalProperties": false
+        },
+        "contentDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
         }
       },
       "required": [

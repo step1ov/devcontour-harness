@@ -205,7 +205,7 @@ test('m-1: manifest ответа не JSON — причина «не прочи�
     ],
   };
   const snapshot = withInput(undefined, { ...entry, digest: sourceDigest(entry) });
-  const found = env.engine.read((v) => unappliedInputs(v, snapshot));
+  const found = env.engine.read((v) => env.engine.unappliedInputs(v, snapshot));
   assert.deepEqual(
     found.map((f) => f.reason),
     ['manifest ответа не прочитан'],
@@ -1603,4 +1603,51 @@ test('Q2: carryInput у хоста с портом — перенос одной
   const next = a.engine.claim('c1')!;
   assert.equal(next.workId, 'w');
   assert.equal(next.pinned?.contextDigest, digest);
+});
+
+/** Ответ на вопрос w с видом `kind`, затем замена. */
+function supersedeWith(
+  env: ReturnType<typeof stopped>,
+  kind: 'clarification' | 'requirement-change',
+) {
+  const answered = env.engine.answerInput(
+    env.request.id,
+    { text: 'Ответ', kind, actor: { kind: 'operator' } },
+    1,
+  ).request;
+  return env.engine.supersedeInput(
+    env.request.id,
+    { by: 'lead', reason: 'замена', successor: 'w' },
+    answered.version,
+  ).request;
+}
+
+test('R5-1: пересинхронизация трекера (только ревизия источника постановки) не открывает перенос изменения требований', () => {
+  const env = stopped();
+  const bump = reviseGraph(env, '2', (orders) => {
+    orders[0] = { ...orders[0], source: { connector: 'files', ref: 'w', revision: '2' } };
+  });
+  supersedeWith(env, 'requirement-change');
+  assert.equal(
+    env.engine.read((v) => env.engine.carryAllowed(v, env.engine.inputRequest(env.request.id))),
+    false,
+  );
+  reviewSnapshot(env, bump);
+  assert.equal(
+    code(() => env.engine.approve(bump.id, 'agent', { bindContext: true })),
+    'INPUT_REQUIRED',
+  );
+});
+
+test('R5-6: экспортированный unappliedInputs без правила переноса движка — ошибка, а не решение по отметке замены', () => {
+  const env = stopped();
+  supersedeWith(env, 'clarification');
+  const request = env.engine.inputRequest(env.request.id);
+  const snapshot = withInput(undefined, inputContextSource(request, latestAnswer(request)!));
+  const loose = unappliedInputs as unknown as (v: unknown, s: unknown) => unknown;
+  assert.throws(() => env.engine.read((v) => loose(v, snapshot)), /mayCarry/);
+  assert.deepEqual(
+    env.engine.read((v) => unappliedInputs(v, snapshot, (r) => env.engine.carryAllowed(v, r))),
+    env.engine.read((v) => env.engine.unappliedInputs(v, snapshot)),
+  );
 });
