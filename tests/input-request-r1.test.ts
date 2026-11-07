@@ -1572,7 +1572,15 @@ test('Q2: carryInput у хоста с портом — перенос одной
   a.store.transact('run.context', (tx) =>
     tx.putLocal('context-snapshots', WORKSPACE_OWNER, digest, snapshot),
   );
-  const waiting = a.engine.carryInput(request!.id, { contextDigest: digest, actor: 'agent' });
+  const proposal = a.engine.proposeCarry(request!.id, digest);
+  assert.ok(proposal.problems.some((p) => /идут попытки/.test(p)));
+  const carryOptions = {
+    contextDigest: digest,
+    actor: 'agent' as const,
+    expectedVersion: closed.version,
+    targetDigest: proposal.target!.digest,
+  };
+  const waiting = a.engine.carryInput(request!.id, carryOptions);
   assert.equal(waiting.carried, false);
   assert.equal(approved.get('w'), undefined);
   a.engine.fail(sibling.id, sibling.token, 'x', { kind: 'gate' });
@@ -1583,10 +1591,10 @@ test('Q2: carryInput у хоста с портом — перенос одной
     approved,
   );
   assert.equal(
-    code(() => b.engine.carryInput(request!.id, { contextDigest: digest, actor: 'agent' })),
+    code(() => b.engine.carryInput(request!.id, carryOptions)),
     'APPROVAL_STALE',
   );
-  const carried = a.engine.carryInput(request!.id, { contextDigest: digest, actor: 'agent' });
+  const carried = a.engine.carryInput(request!.id, carryOptions);
   assert.equal(carried.carried, true);
   assert.equal(approved.get('w'), digest);
   assert.deepEqual(calls.at(-1), {
@@ -1595,10 +1603,7 @@ test('Q2: carryInput у хоста с портом — перенос одной
   });
   assert.equal(a.engine.inputRequest(request!.id).lifecycle, 'superseded');
   assert.equal(a.engine.inputRequest(request!.id).target?.contextDigest, digest);
-  assert.equal(
-    a.engine.carryInput(request!.id, { contextDigest: digest, actor: 'agent' }).changed,
-    false,
-  );
+  assert.equal(a.engine.carryInput(request!.id, carryOptions).changed, false);
   a.clock.now += 1000;
   const next = a.engine.claim('c1')!;
   assert.equal(next.workId, 'w');
@@ -1649,5 +1654,107 @@ test('R5-6: экспортированный unappliedInputs без правил
   assert.deepEqual(
     env.engine.read((v) => unappliedInputs(v, snapshot, (r) => env.engine.carryAllowed(v, r))),
     env.engine.read((v) => env.engine.unappliedInputs(v, snapshot)),
+  );
+});
+
+/** Заменённый вопрос w после новой редакции постановки w, снимок с ответом прошёл ревью. */
+function carryReady(patch: (p: Record<string, unknown>) => void = () => {}) {
+  const env = stopped(patch);
+  const answered = env.engine.answerInput(
+    env.request.id,
+    { text: 'Hello', actor: { kind: 'operator' } },
+    1,
+  ).request;
+  const graph = reviseGraph(env, '2', (orders) => {
+    orders[0] = { ...orders[0], goal: String(orders[0]!.goal) + ' Уточнено.' };
+  });
+  const closed = env.engine.supersedeInput(
+    env.request.id,
+    { by: 'lead', reason: 'редакция', successor: 'w' },
+    answered.version,
+  ).request;
+  const digest = reviewSnapshot(env, graph);
+  const proposal = env.engine.proposeCarry(env.request.id, digest);
+  const options = {
+    contextDigest: digest,
+    actor: 'agent' as const,
+    expectedVersion: closed.version,
+    targetDigest: proposal.target!.digest,
+  };
+  /** Работа снова остановлена (как у хоста, где редакция не сбрасывает статус). */
+  const setWork = (patchWork: Record<string, unknown>) =>
+    env.store.transact('run.phase', (tx) => tx.putWork({ ...tx.work('w')!, ...patchWork }));
+  return { env, graph, digest, proposal, options, setWork };
+}
+
+test('R5-2: carryInput требует точную версию и основание из proposeCarry', () => {
+  const c = carryReady();
+  assert.deepEqual(c.proposal.problems, []);
+  assert.equal(
+    code(() => c.env.engine.carryInput(c.env.request.id, { ...c.options, expectedVersion: 1 })),
+    'REVISION_CONFLICT',
+  );
+  // Новый раунд ревью после предложения: перенос — не на том ревью, что видел вызывающий.
+  reviewSnapshot(c.env, c.graph);
+  assert.equal(
+    code(() => c.env.engine.carryInput(c.env.request.id, c.options)),
+    'APPROVAL_STALE',
+  );
+});
+
+test('R5-2: исчерпанные попытки и бюджет — {blocker} до активации; иной отказ не возвращается в очередь', () => {
+  const tight = carryReady((p) => (p.maxAttempts = 1));
+  tight.setWork({ status: 'failed', failureKind: 'needs-input', attempt: 1 });
+  const before = tight.env.engine.read((v) => v.graph(tight.graph.id)!.approval);
+  const blocked = tight.env.engine.carryInput(tight.env.request.id, tight.options);
+  assert.equal(blocked.carried, false);
+  assert.equal('blocker' in blocked && blocked.blocker?.code, 'ATTEMPTS_EXHAUSTED');
+  assert.deepEqual(
+    tight.env.engine.read((v) => v.graph(tight.graph.id)!.approval),
+    before,
+    'согласование не переключено',
+  );
+
+  const budget = carryReady((p) => (p.budgets = { work: { usd: 1 }, onUnknown: 'stop' }));
+  budget.env.store.transact('usage.recorded', (tx) =>
+    tx.putLocal('usage', 'app', 'call-x', {
+      id: 'call-x',
+      repositoryId: 'app',
+      runId: budget.env.attempt.id,
+      workId: 'w',
+      stage: 'implementation',
+      runtime: 'claude',
+      model: null,
+      runtimeVersion: null,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      finishedAt: '2026-01-01T00:00:01.000Z',
+      outcome: 'returned',
+      promptBytes: 1,
+      promptDigest: sha256('p'),
+      usage: {
+        inputTokens: null,
+        outputTokens: null,
+        cacheReadTokens: null,
+        cacheWriteTokens: null,
+        reportedUsd: null,
+        complete: false,
+        source: 'unavailable',
+      },
+      costUsd: 5,
+      costSource: 'provider-reported',
+    }),
+  );
+  const held = budget.env.engine.carryInput(budget.env.request.id, budget.options);
+  assert.equal(held.carried, false);
+  assert.equal('blocker' in held && held.blocker?.code, 'BUDGET_EXHAUSTED');
+
+  const gate = carryReady();
+  gate.setWork({ status: 'failed', failureKind: 'gate' });
+  const carried = gate.env.engine.carryInput(gate.env.request.id, gate.options);
+  assert.equal(carried.carried, true);
+  assert.equal(
+    gate.env.engine.read((v) => v.work('w')!.status),
+    'failed',
+    'отказ gate — не повтор переноса',
   );
 });

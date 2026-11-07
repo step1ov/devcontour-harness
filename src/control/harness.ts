@@ -502,6 +502,11 @@ export class Harness {
     return this.engine.applyInput(id, options);
   }
 
+  /** Основание переноса ответа заменённого вопроса (только чтение, см. `Engine.proposeCarry`). */
+  proposeCarry(id: string, contextDigest: string) {
+    return this.engine.proposeCarry(id, contextDigest);
+  }
+
   /** Перенести ответ заменённого вопроса в согласование новой редакции (см. `Engine.carryInput`). */
   carryInput(id: string, options: Parameters<Engine['carryInput']>[1]) {
     return this.engine.carryInput(id, options);

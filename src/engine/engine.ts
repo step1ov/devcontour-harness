@@ -2963,6 +2963,46 @@ export class Engine {
   }
 
   /**
+   * Предложить основание переноса ответа заменённого запроса (только
+   * чтение): digest, который назовёт `carryInput`, и причины, по которым
+   * перенос сейчас откажет.
+   */
+  proposeCarry(id: string, contextDigest: string, actor = this.policy.approvalMode) {
+    return this.read((v) => {
+      const { request } = this.requestIn(v, id);
+      const work = v.work(request.workId);
+      if (!work) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + request.workId);
+      const problems: string[] = [];
+      if (request.lifecycle !== 'superseded')
+        problems.push(`запрос ${request.lifecycle}, нужен superseded`);
+      const answer = latestAnswer(request);
+      if (!answer) return { request, problems: [...problems, 'ответа нет'] };
+      if (!this.carryAllowed(v, request))
+        problems.push('правило переноса не позволяет перенести ответ');
+      if (!this.carriesAnswer(v, request, answer, contextDigest))
+        problems.push('снимок контекста не содержит последний ответ');
+      const stale = this.staleReason(v);
+      if (stale) problems.push(stale);
+      let review: InputTarget['review'] = null;
+      try {
+        review = this.targetReview(v, work, contextDigest, actor, {
+          id,
+          answerDigest: answer.digest,
+          mode: 'carry',
+        }).review;
+      } catch (error) {
+        if (!(error instanceof HarnessError)) throw error;
+        problems.push(error.message);
+      }
+      const active = activeOf(v).filter((a) => v.work(a.workId)?.graphId === work.graphId);
+      if (active.length)
+        problems.push('в графе идут попытки: ' + active.map((a) => a.id).join(', '));
+      const target = this.targetOf(v, request, work, contextDigest, review, actor);
+      return { request, target: { ...target, digest: targetDigest(target) }, problems };
+    });
+  }
+
+  /**
    * Перенести ответ заменённого запроса в действующее согласование работы —
    * у хоста с портом согласования так же, как у standalone. Одна
    * транзакция: правило переноса (`carryAllowed`), снимок несёт ровно
@@ -2980,7 +3020,10 @@ export class Engine {
       /** Снимок с ответом, прошедший ревью. */
       contextDigest: string;
       actor: TechnicalApproval['actor'];
-      expectedVersion?: number;
+      /** Версия запроса, которую видел вызывающий (CAS). */
+      expectedVersion: number;
+      /** Digest основания из `proposeCarry`: перенос — на том ревью, которое видел вызывающий. */
+      targetDigest: string;
       /** Сброс исчерпанных попыток упавшей работы — с причиной, как у `retry`. */
       reset?: { reason: string };
     },
@@ -2994,15 +3037,14 @@ export class Engine {
           'NOT_READY',
           `Запрос ${id} ${request.lifecycle}: перенос — только для заменённого (supersedeInput); продолжение остановки — applyInput`,
         );
-      if (options.expectedVersion !== undefined)
-        this.expectVersion(request, options.expectedVersion);
       const answer = latestAnswer(request);
       if (!answer) throw new HarnessError('INPUT_REQUIRED', `На вопрос ${id} нет ответа`);
       if (
-        request.target?.contextDigest === options.contextDigest &&
+        request.target?.digest === options.targetDigest &&
         request.target.answerDigest === answer.digest
       )
         return { carried: true as const, changed: false, request };
+      this.expectVersion(request, options.expectedVersion);
       if (!this.carryAllowed(tx, request))
         throw new HarnessError(
           'INPUT_REQUIRED',
@@ -3052,6 +3094,36 @@ export class Engine {
         };
       const target = this.targetOf(tx, request, work, options.contextDigest, review, options.actor);
       const full: InputTarget = { ...target, digest: targetDigest(target) };
+      if (full.digest !== options.targetDigest)
+        throw new HarnessError(
+          'APPROVAL_STALE',
+          'Основание переноса изменилось после предложения (proposeCarry); предложите заново',
+        );
+      // Пределы — до активации, как у applyInput: согласование не
+      // переключается под работу, которую сейчас не выдать.
+      const stopped = work.status === 'failed' && work.failureKind === 'needs-input';
+      if (
+        stopped &&
+        (work.attempt >= this.policy.maxAttempts || neutralExhausted(work)) &&
+        !options.reset?.reason.trim()
+      )
+        return {
+          carried: false as const,
+          changed: false,
+          request,
+          blocker: {
+            code: 'ATTEMPTS_EXHAUSTED' as const,
+            message: `Исчерпано ${work.attempt} из ${this.policy.maxAttempts} попыток; перенос — со сбросом и причиной`,
+          },
+        };
+      const budget = this.budgetBlockOf(work.id, tx);
+      if (budget)
+        return {
+          carried: false as const,
+          changed: false,
+          request,
+          blocker: { code: 'BUDGET_EXHAUSTED' as const, message: budget },
+        };
       if (this.host.input) this.host.input.activate(tx, work, full, targetRequest);
       else
         this.activateApproval(tx, checked!.graph, checked!.last, options.actor, {
@@ -3060,8 +3132,10 @@ export class Engine {
       const next: InputRequest = { ...request, target: full, version: request.version + 1 };
       tx.putLocal('input-requests', owner, id, next);
       const current = tx.work(work.id)!;
+      // В очередь возвращается только работа, остановленная вопросом; иной
+      // отказ после редакции — решение по его правилам, не перенос ответа.
       const retried =
-        current.status === 'failed'
+        current.status === 'failed' && current.failureKind === 'needs-input'
           ? this.retryIn(
               tx,
               current,
