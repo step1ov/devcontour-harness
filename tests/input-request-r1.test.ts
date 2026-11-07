@@ -42,6 +42,7 @@ import {
   normalizeImplementation,
 } from '../src/engine/input-policy.ts';
 import { statusOf } from '../src/control/status.ts';
+import { executionEnvironment } from '../src/environment/lifecycle.ts';
 import {
   engineOf,
   graphOf,
@@ -1170,13 +1171,13 @@ test('R2-8/m-2: запись вопроса отклонена — отказ п
   });
   const original = ctx.engine.fail.bind(ctx.engine);
   let refused = 0;
-  ctx.engine.fail = ((id, token, error, options = {}) => {
+  ctx.engine.fail = (id, token, error, options = {}) => {
     if (options.input) {
       refused++;
       throw new Error('запись запроса отклонена хранилищем');
     }
     return original(id, token, error, options);
-  });
+  };
   await runAll(ctx);
   const [attempt] = ctx.engine.read((v) => v.attempts('add-greeting'));
   assert.equal(refused, 1);
@@ -1198,3 +1199,26 @@ function asks9() {
     },
   };
 }
+
+test('R3-5: короткие и общие наследуемые значения не вырезаются из вывода; секретные по имени и длинные — маскируются', () => {
+  const { redact } = executionEnvironment(
+    [
+      {
+        inherit: ['FORCE_COLOR', 'NODE_ENV', 'MY_API_TOKEN', 'LONG_OPAQUE'],
+        values: {},
+        secrets: { DECLARED: 'D' },
+      },
+    ],
+    {},
+    {
+      PATH: '/bin',
+      FORCE_COLOR: '1',
+      NODE_ENV: 'production',
+      MY_API_TOKEN: 'tk-42',
+      LONG_OPAQUE: 'abcdefghijklmnopqrstuvwx',
+      D: 'z9',
+    },
+  );
+  const text = 'opt1 production tk-42 abcdefghijklmnopqrstuvwx z9';
+  assert.equal(redact(text), 'opt1 production [REDACTED] [REDACTED] [REDACTED]');
+});
