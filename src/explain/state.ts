@@ -20,7 +20,6 @@ import type {
 import type { Engine } from '../engine/engine.ts';
 import { acceptanceGap, repairDecision } from '../engine/repair.ts';
 import { requestsIndex } from '../engine/input-requests.ts';
-import { callRecords } from '../engine/usage.ts';
 import { activeOf } from '../engine/engine.ts';
 import { inputStateOf } from '../projections/input.ts';
 import type { EvidenceLink, StopInput, StopPhase } from '../projections/stop.ts';
@@ -99,9 +98,11 @@ const phaseOf: Partial<Record<WorkStatus, StopPhase>> = {
  *
  * Выбор: `workId` — одна работа, `workIds` — набор (входы каждой — те же,
  * что у вызова с её `workId`, в порядке состояния), без них — доска. Всё, что
- * общее для работ (прогноз групп, обратные зависимости, запросы, записи
- * вызовов), читается один раз за вызов, поэтому диагноз набора и доски
- * линеен по числу работ и их связей.
+ * общее для работ (прогноз групп, обратные зависимости, запросы, попытки,
+ * записи вызовов и статусы бюджетов), читается один раз за вызов, поэтому
+ * диагноз набора и доски линеен по числу работ и их связей. Исключение —
+ * порты хоста, которые движок спрашивает о каждой работе (основание
+ * постановки, `claimable`, группа бюджета при пределе группы).
  */
 export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInput[] {
   if (options.workId !== undefined && options.workIds !== undefined)
@@ -148,12 +149,8 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
     // Бюджет держит выдачу по тому же расчёту, которым следующий claim ставит
     // или снимает budgetBlock; записанное поле — лишь кэш этого расчёта
     // (после повышения бюджета оно устаревает, выключенные бюджеты не держат).
-    let records: ReturnType<typeof callRecords> | undefined;
-    const budgetById = memo((id: string) =>
-      h.engine.policy.budgets
-        ? h.engine.budgetBlockOf(id, v, (records ??= callRecords(v)))
-        : undefined,
-    );
+    const budgetBlock = h.engine.budgetBlockers(v);
+    const budgetById = memo((id: string) => budgetBlock(id));
     const budgetReason = (w: WorkState) => budgetById(w.id);
     const budgetHeld = (w: WorkState) => Boolean(budgetReason(w));
     // Внешние предпосылки графа claim не проверяет, даже если id совпал с работой.
@@ -305,9 +302,10 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
     // сломанную без автоматического шага или саму ждущую такую (транзитивно).
     // Готовая и выдаваемая предпосылка движок не останавливает. Ответ зависит
     // только от предпосылки и графа ждущей работы (есть ли у неё задание,
-    // прогноз группы, внешние предпосылки): граф ацикличен, поэтому ответ
-    // запоминается для всех ждущих работ графа; работа на пути обхода — false,
-    // как повторный визит прежнего обхода.
+    // прогноз группы, внешние предпосылки): граф ацикличен (graphIssues
+    // отвергает цикл и зависимость вне графа и его предпосылок, register —
+    // чужой ID), поэтому ответ запоминается для всех ждущих работ графа;
+    // работа на пути обхода — false, как повторный визит прежнего обхода.
     const stopsFor = memo((key: string) => {
       const [graphId, hasJob] = [key.slice(0, -2), key.endsWith('\u00001')];
       const known = new Map<string, boolean>();

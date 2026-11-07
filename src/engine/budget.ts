@@ -1,4 +1,5 @@
 import type {
+  AttemptState,
   BudgetScopes,
   CallRecord,
   ExecutionPolicy,
@@ -108,14 +109,18 @@ export function scopeRecords(
   view: ExecutionView,
   records: CallRecord[],
   scope: BudgetScope,
+  groupsOf: () => Set<string> = () => workGroups(c, view, records, scope.id!),
 ) {
   if (scope.kind === 'total') return records;
   if (scope.kind === 'group') return records.filter((r) => recordGroup(c, view, r) === scope.id);
-  const groups = workGroups(c, view, records, scope.id!);
+  // Группы поручения нужны только записям без поручения: спрашиваются у хоста лениво.
+  let groups: Set<string> | undefined;
   return records.filter((r) => {
     if (r.workIds) return r.workIds.includes(scope.id!);
     const work = recordWork(view, r);
-    return work === scope.id || (!work && groups.has(recordGroup(c, view, r) ?? ''));
+    return (
+      work === scope.id || (!work && (groups ??= groupsOf()).has(recordGroup(c, view, r) ?? ''))
+    );
   });
 }
 
@@ -140,25 +145,30 @@ function uncoveredRuns(
   view: ExecutionView,
   records: CallRecord[],
   scope: BudgetScope,
+  uncovered = uncoveredAttempts(view, records),
 ) {
-  const implemented = new Set(
-    records.filter((r) => r.stage === 'implementation' && r.runId).map((r) => r.runId),
-  );
   const works =
     scope.kind === 'total'
       ? undefined
       : scope.kind === 'work'
         ? new Set([scope.id!])
         : new Set(c.scopes.members(scope.id!, view));
+  return uncovered.filter((a) => !works || works.has(a.workId)).length;
+}
+
+/** Попытки вида без записанных вызовов реализации — для всех областей сразу. */
+function uncoveredAttempts(view: ExecutionView, records: CallRecord[]) {
+  const implemented = new Set(
+    records.filter((r) => r.stage === 'implementation' && r.runId).map((r) => r.runId),
+  );
   return view
     .attempts()
     .filter(
       (a) =>
         !a.callsRecorded &&
-        (!works || works.has(a.workId)) &&
         !implemented.has(a.id) &&
         (a.candidateSha || a.timings?.some((t) => t.stage.startsWith('implementation'))),
-    ).length;
+    );
 }
 
 export type BudgetStatus = {
@@ -175,14 +185,15 @@ export function budgetStatus(
   scope: BudgetScope,
   records?: CallRecord[],
   at = Date.now(),
+  shared?: { uncovered: () => AttemptState[]; groupsOf?: () => Set<string> },
 ): BudgetStatus | undefined {
   const limit = c.policy.budgets?.[scope.kind];
   if (!limit) return undefined;
   const all = records ?? callRecords(view);
-  const own = scopeRecords(c, view, all, scope);
+  const own = scopeRecords(c, view, all, scope, shared?.groupsOf);
   const spent = {
     ...usageTotals(own, false, at),
-    uncoveredRuns: uncoveredRuns(c, view, all, scope),
+    uncoveredRuns: uncoveredRuns(c, view, all, scope, shared?.uncovered()),
     // Исключение из неизвестных — только для вызовов с подтверждённо живым
     // владельцем: вызов умершего процесса неизвестен сразу, не дожидаясь
     // восстановления.
@@ -251,6 +262,42 @@ export function workBudgets(
     ),
     budgetStatus(c, view, { kind: 'total' }, records, at),
   ].filter((b): b is BudgetStatus => !!b);
+}
+
+/**
+ * `workBudgets` для многих поручений одного вида: общий бюджет считается раз,
+ * бюджет группы — раз на группу, попытки без записанных вызовов читаются
+ * одним проходом, группы поручения спрашиваются у хоста, только когда они
+ * нужны (предел группы или запись без поручения). Ответ по поручению — тот
+ * же, что у `workBudgets` с теми же `records` и `at`. Действует в пределах
+ * этого вида (одного чтения).
+ */
+export function workBudgetsOf(
+  c: BudgetContext,
+  view: ExecutionView,
+  records = callRecords(view),
+  at = Date.now(),
+): (workId: string) => BudgetStatus[] {
+  let uncovered: AttemptState[] | undefined;
+  const shared = { uncovered: () => (uncovered ??= uncoveredAttempts(view, records)) };
+  let total: { status: BudgetStatus | undefined } | undefined;
+  const groups = new Map<string, BudgetStatus | undefined>();
+  const groupStatus = (id: string) => {
+    if (!groups.has(id))
+      groups.set(id, budgetStatus(c, view, { kind: 'group', id }, records, at, shared));
+    return groups.get(id);
+  };
+  return (workId) => {
+    let own: Set<string> | undefined;
+    const groupsOf = () => (own ??= workGroups(c, view, records, workId));
+    const work = budgetStatus(c, view, { kind: 'work', id: workId }, records, at, {
+      ...shared,
+      groupsOf,
+    });
+    const inGroups = c.policy.budgets?.group ? [...groupsOf()].map(groupStatus) : [];
+    total ??= { status: budgetStatus(c, view, { kind: 'total' }, records, at, shared) };
+    return [work, ...inGroups, total.status].filter((b): b is BudgetStatus => !!b);
+  };
 }
 
 /** Сведения о вызове: попытка, предмет (поручение, группа, документ), стадия. */

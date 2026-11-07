@@ -6,10 +6,38 @@
  * записью через `store.transact`, как в explain-engine.test.ts. Модели не
  * вызываются.
  */
-import type { FailureKind, WorkState } from '../src/contracts/index.ts';
+import {
+  workGraphSchema,
+  type FailureKind,
+  type InputOutcome,
+  type WorkState,
+} from '../src/contracts/index.ts';
 import type { ExecutionView } from '../src/contracts/ports.ts';
 import type { StopSource } from '../src/explain/state.ts';
-import { engineOf, graphOf, planReview, policyOf, trustNone } from './engine-fixture.ts';
+import { digestOf } from '../src/contracts/digest.ts';
+import { engineOf, graphOf, planReview, policyOf, sha, trustNone } from './engine-fixture.ts';
+
+/** Вопрос исполнителя (и, по желанию, запрос ведущему) — как в input-request тестах. */
+const question = (severity: number) => ({
+  question: 'Какой формат приветствия?',
+  options: [
+    { id: 'hello', label: 'Hello, <name>!', consequence: null },
+    { id: 'hi', label: 'Hi <name>', consequence: null },
+  ],
+  recommended: 'hello',
+  severity,
+  rationale: 'Текст виден пользователю',
+  affects: [] as never[],
+});
+const askOutcome = (followUp: boolean): InputOutcome => ({
+  question: { question: question(8), effectiveSeverity: 8, floors: [], mode: 'request' },
+  assumptions: [],
+  followUps: followUp
+    ? [{ question: question(3), effectiveSeverity: 10, floors: ['declared' as const] }]
+    : [],
+  criticalHits: [],
+  callId: 'call-1',
+});
 
 export const mulberry32 = (seed: number) => () => {
   seed = (seed + 0x6d2b79f5) | 0;
@@ -32,8 +60,16 @@ export interface BoardSpec {
   size: number;
   seed: number;
   approvalMode?: 'agent' | 'operator';
-  /** Второй граф без задания (прогноз — stop). */
+  /** Второй граф (без задания или, у `rich`, со своим заданием). */
   second?: boolean;
+  /**
+   * Расширенные формы (отдельным потоком seed, базовые доски не сдвигаются):
+   * вопросы исполнителя и запросы ведущему, ответ без применения, отказ до
+   * начала работы (preflight), бюджеты с попытками без учёта вызовов, внешняя
+   * предпосылка графа, идущая попытка, живая роль controller, задания обоих
+   * графов с разным продолжением.
+   */
+  rich?: boolean;
 }
 
 /** Зависимости основного графа по форме. */
@@ -90,21 +126,54 @@ export function boardOf(
   wrapView: (view: ExecutionView) => ExecutionView = (v) => v,
 ) {
   const rnd = mulberry32(spec.seed);
+  // Второй поток: расширенные формы не сдвигают базовую последовательность.
+  const extra = mulberry32(spec.seed ^ 0x5bd1e995);
+  const rich = (p: number) => Boolean(spec.rich) && extra() < p;
+  const budgets = rich(0.4)
+    ? {
+        work: { usd: 5 },
+        ...(extra() < 0.5 ? { total: { usd: 100 } } : {}),
+        ...(extra() < 0.4 ? { group: { usd: 50 } } : {}),
+        onUnknown: extra() < 0.5 ? ('stop' as const) : ('continue' as const),
+      }
+    : undefined;
   const policy = policyOf((p) => {
     p.maxAttempts = 3;
     p.repairBudget = 2 + Math.floor(rnd() * 3);
     if (spec.approvalMode) p.approvalMode = spec.approvalMode;
+    if (budgets) p.budgets = budgets;
   });
   const { engine, store, dir } = engineOf(policy);
   const deps = depsOf(spec, rnd);
   const actor = spec.approvalMode === 'operator' ? 'operator' : 'agent';
+  const trusted = { trusted: () => true, reachable: () => true };
   const register = (graph: ReturnType<typeof graphOf>) => {
-    const { graph: state } = engine.register(graph, trustNone);
+    const { graph: state } = engine.register(graph, trusted);
     engine.recordReview(planReview(engine, state, engine.reviews('plan', state.id).length + 1));
     engine.approve(state.id, actor);
     return state;
   };
-  const main = register(graphOf(deps, '1', 'g'));
+  // Внешняя предпосылка: часть работ ждёт её, claim её не проверяет.
+  const external = rich(0.3);
+  const mainGraph = graphOf(deps, '1', 'g');
+  const main = register(
+    external
+      ? workGraphSchema.parse({
+          ...mainGraph,
+          prerequisites: [
+            {
+              id: 'ext',
+              repositoryId: mainGraph.orders[0]!.repositoryId,
+              resultSha: sha('e'),
+              receipt: { kind: 'trusted', issuer: 'board', digest: digestOf('ext') },
+            },
+          ],
+          orders: mainGraph.orders.map((o, i) =>
+            i % 4 === 1 ? { ...o, dependsOn: [...o.dependsOn, 'ext'] } : o,
+          ),
+        })
+      : mainGraph,
+  );
   if (spec.second) {
     const other: Record<string, string[]> = {};
     for (let i = 0; i < 6; i++) other['x' + i] = i ? ['x' + (i - 1)] : [];
@@ -124,10 +193,44 @@ export function boardOf(
 
   // Отказы: всё, что выдаётся, падает случайным классом; часть — повторно
   // тем же текстом (отпечаток), часть повторяется движком.
+  let live = false;
   for (let claims = 0; claims < spec.size; claims++) {
     const a = engine.claim('c1');
     if (!a) break;
     const kind = rnd() < 0.04 ? 'environment' : KINDS[Math.floor(rnd() * KINDS.length)]!;
+    // Идущая попытка (отказ применения ответа в графе с попытками); вторая
+    // единица concurrency остаётся очереди.
+    if (!live && rich(0.1)) {
+      live = true;
+      continue;
+    }
+    if (rich(0.12)) {
+      // Вопрос исполнителя (иногда с запросом ведущему); часть — с ответом.
+      engine.fail(a.id, a.token, 'вопрос', {
+        kind: 'needs-input',
+        input: askOutcome(extra() < 0.5),
+      });
+      if (extra() < 0.5) {
+        const request = engine
+          .inputRequests({ workId: a.workId })
+          .find((r) => r.kind === 'question');
+        if (request)
+          engine.answerInput(
+            request.id,
+            { text: 'Hello', actor: { kind: 'operator' } },
+            request.version,
+          );
+      }
+      continue;
+    }
+    if (rich(0.06)) {
+      // Отказ до начала работы: не засчитан, повтора нет.
+      engine.fail(a.id, a.token, `Работа ${a.workId}: снимок контекста не найден`, {
+        kind: 'needs-lead',
+        blocked: true,
+      });
+      continue;
+    }
     engine.fail(a.id, a.token, `${kind} at ${a.workId}`, { kind });
     if (rnd() < 0.25) {
       try {
@@ -183,22 +286,38 @@ export function boardOf(
   for (const id of ids)
     if (rnd() < 0.05)
       put(id, (w) => ({ ...w, order: { ...w.order, title: w.order.title + ' (изменено)' } }));
+  // Попытки без записанных вызовов: бюджет не определён (или превышен по onUnknown).
+  if (budgets)
+    store.transact('task.retry', (tx) => {
+      for (const a of tx.attempts())
+        if (a.status !== 'active' && extra() < 0.15) {
+          // Попытка до учёта вызовов: без отметки `callsRecorded`, с кандидатом.
+          const legacy: Partial<typeof a> = { ...a, candidateSha: sha('c') };
+          delete legacy.callsRecorded;
+          tx.putAttempt(legacy as typeof a);
+        }
+    });
   if (rnd() < 0.15) engine.pause('operator');
-  engine.release('c1');
+  // Живая роль controller — отдельный вход диагноза.
+  if (!rich(0.2)) engine.release('c1');
 
   // Задание, которое очередь сама не продолжит (agent: только пересогласование).
-  const continues = rnd() >= 0.2;
-  const job = {
-    kind: 'graph',
-    id: main.id,
-    repairs: Math.floor(rnd() * 2),
-  } as unknown as Parameters<StopSource['workflows']['continues']>[0];
+  type Job = Parameters<StopSource['workflows']['continues']>[0];
+  const continues = new Map([[main.id, rnd() >= 0.2]]);
+  const jobs: Job[] = [
+    { kind: 'graph', id: main.id, repairs: Math.floor(rnd() * 2) } as unknown as Job,
+  ];
+  // Задание второго графа со своим продолжением.
+  if (spec.second && rich(0.6)) {
+    continues.set('h', extra() < 0.5);
+    jobs.push({ kind: 'graph', id: 'h', repairs: 0 } as unknown as Job);
+  }
   const read0 = store.read.bind(store);
   (store as { read: typeof store.read }).read = (fn) => read0((v) => fn(wrapView(v)));
   const source: StopSource = {
     engine,
     policy,
-    workflows: { list: () => [job], continues: () => continues },
+    workflows: { list: () => jobs, continues: (j) => continues.get(j.id) ?? false },
   };
   return {
     source,
@@ -218,10 +337,13 @@ export function boardOf(
 export function perfBoardOf(
   shape: 'failed' | 'cancelled' | 'chain',
   wrapView: (view: ExecutionView) => ExecutionView = (v) => v,
+  /** Бюджеты поручения и общий: статусы бюджетов — тоже раз на чтение. */
+  budgets = false,
 ) {
   const policy = policyOf((p) => {
     p.maxAttempts = 3;
     p.repairBudget = 3;
+    if (budgets) p.budgets = { work: { usd: 3 }, total: { usd: 100 }, onUnknown: 'continue' };
   });
   const { engine, store } = engineOf(policy);
   const deps: Record<string, string[]> = {};

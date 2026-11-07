@@ -70,6 +70,7 @@ import {
   callBudgets,
   legacyGroupCall,
   workBudgets,
+  workBudgetsOf,
   type BudgetContext,
   type CallMeta,
 } from './budget.ts';
@@ -976,6 +977,19 @@ export class Engine {
     if (!this.policy.budgets) return undefined;
     const c = this.budgetContext();
     return blockingBudget(c, workBudgets(c, view, workId, records ?? callRecords(view)))?.reason;
+  }
+
+  /**
+   * `budgetBlockOf` для многих работ одного вида: записи вызовов, общий
+   * бюджет, бюджеты групп и попытки без учёта вызовов считаются один раз.
+   * Ответ по работе — тот же, что у `budgetBlockOf`; проверка действует только
+   * в пределах этого вида (одного чтения).
+   */
+  budgetBlockers(view: ExecutionView): (workId: string) => string | undefined {
+    if (!this.policy.budgets) return () => undefined;
+    const c = this.budgetContext();
+    const statuses = workBudgetsOf(c, view);
+    return (workId) => blockingBudget(c, statuses(workId))?.reason;
   }
 
   /**
