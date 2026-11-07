@@ -18,6 +18,7 @@ import {
   latestAnswer,
   sha256,
   sourceDigest,
+  type ContextSnapshot,
   type ExecutionHost,
   type ExecutionPolicy,
   type InputOutcome,
@@ -803,6 +804,7 @@ test('m-11: вызов writer, который не запустился (unavail
           })
         : inner.invoke(request, signal),
   });
+  let load: (digest: string) => ContextSnapshot | undefined = () => undefined;
   const ctx = setup({
     scenario: {
       writer: [
@@ -825,12 +827,18 @@ test('m-11: вызов writer, который не запустился (unavail
       (p as { maxAttempts: number }).maxAttempts = 5;
     },
     runner: {
+      // Загрузчик хоста по закреплению попытки (как у Harness).
+      context: (_work, attempt) => {
+        const pin = attempt.pinned?.contextDigest;
+        return pin ? load(pin) : undefined;
+      },
       adapters: {
         claude: flaky(cliAdapter('claude', { executable: bin('fake-claude') })),
         codex: cliAdapter('codex', { executable: bin('fake-codex') }),
       },
     },
   });
+  load = (digest) => ctx.engine.read((v) => v.local('context-snapshots', WORKSPACE_OWNER, digest));
   const graph = await runAll(ctx);
   const [request] = ctx.engine.inputRequests({ workId: 'add-greeting' });
   const answered = ctx.engine.answerInput(
