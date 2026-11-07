@@ -2542,7 +2542,8 @@ export class Engine {
     return (
       atOrigin &&
       view.attempts(work.id).at(-1)?.id === request.runId &&
-      view.graph(work.graphId)?.digest === request.originBasis.graphDigest &&
+      // Своя постановка, а не весь граф: согласование соседней работы (у хоста
+      // граф — активная ревизия доски) остановку не обесценивает.
       this.host.basis.orderDigest(work, view) === request.originBasis.orderDigest
     );
   }
@@ -2609,7 +2610,8 @@ export class Engine {
     request: InputRequest,
     target: InputTarget,
   ) {
-    if (target.graphDigest !== view.graph(work.graphId)?.digest) return 'graph' as const;
+    // Граф целиком не сравнивается: согласование другой работы того же графа
+    // применённый ответ не обесценивает (причина `graph` больше не ставится).
     if (target.orderDigest !== this.host.basis.orderDigest(work, view)) return 'order' as const;
     if (target.policyDigest !== this.host.basis.policyDigest(work, view)) return 'policy' as const;
     const pin = this.contextPinOf(view, work) ?? null;
@@ -2710,11 +2712,10 @@ export class Engine {
       if (
         !atOrigin ||
         last?.id !== request.runId ||
-        v.graph(work.graphId)?.digest !== request.originBasis.graphDigest ||
         this.host.basis.orderDigest(work, v) !== request.originBasis.orderDigest
       )
         problems.push(
-          'работа уже не в исходной остановке (новая редакция графа или постановки): выход — supersedeInput и перенос ответа в контекст новой редакции (input-context, review-plan, согласование)',
+          'работа уже не в исходной остановке (новая редакция постановки или другая попытка): выход — supersedeInput и перенос ответа в контекст новой редакции (input-context, review-plan, согласование)',
         );
       const answer = latestAnswer(request);
       if (!answer) {
@@ -2826,14 +2827,12 @@ export class Engine {
           'NOT_READY',
           `Поручение ${work.id} уже не в остановке попытки ${request.runId}: ответ не применяется`,
         );
-      const graph = tx.graph(work.graphId)!;
-      if (
-        graph.digest !== request.originBasis.graphDigest ||
-        this.host.basis.orderDigest(work, tx) !== request.originBasis.orderDigest
-      )
+      // Своя постановка, а не весь граф: другие работы графа меняются своим
+      // чередом (у хоста граф — активная ревизия доски).
+      if (this.host.basis.orderDigest(work, tx) !== request.originBasis.orderDigest)
         throw new HarnessError(
           'APPROVAL_STALE',
-          'Граф или постановка изменились после вопроса: продолжение этой остановки невозможно. Выход с сохранением ответа — supersedeInput (преемник — новая редакция работы), затем снимок с ответом (input-context), review-plan с ним и обычное согласование',
+          'Постановка работы изменилась после вопроса: продолжение этой остановки невозможно. Выход с сохранением ответа — supersedeInput (преемник — новая редакция работы), затем снимок с ответом (input-context), review-plan с ним и обычное согласование',
         );
       const contextDigest = options.contextDigest;
       // Политика процесса применена — и у хоста с портом согласования.

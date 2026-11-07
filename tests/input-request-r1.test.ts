@@ -522,6 +522,11 @@ test('M-2: новая редакция графа держит вопрос; в�
     id: 'extra',
     source: { connector: 'files', ref: 'extra', revision: '1' },
   });
+  // Новая редакция постановки самой работы (ревизия её источника).
+  raw.orders[0] = {
+    ...raw.orders[0],
+    source: { connector: 'files', ref: 'add-greeting', revision: '2' },
+  };
   const next = workGraphSchema.parse(raw);
   const { graph } = h.engine.register(next, trustNone);
   h.engine.recordReview(planReview(h.engine, graph, h.engine.reviews('plan', graph.id).length + 1));
@@ -1334,7 +1339,10 @@ test('R3-2: замена до новой редакции графа — пер�
     false,
     'остановка ещё держалась',
   );
-  const graph = reviseGraph(env, '2', addOrder('y'));
+  const graph = reviseGraph(env, '2', (orders) => {
+    addOrder('y')(orders);
+    orders[0] = { ...orders[0], source: { connector: 'files', ref: 'w', revision: '2' } };
+  });
   reviewSnapshot(env, graph);
   assert.equal(env.engine.approve(graph.id, 'agent', { bindContext: true }).changed, true);
 });
@@ -1364,6 +1372,10 @@ test('R3-2: run со снимком перенесённого ответа пр
     id: 'third',
     source: { connector: 'files', ref: 'third', revision: '1' },
   });
+  raw.orders[0] = {
+    ...raw.orders[0],
+    source: { connector: 'files', ref: 'add-greeting', revision: '2' },
+  };
   const g2 = workGraphSchema.parse(raw);
   const { graph } = h.engine.register(g2, trustNone);
   h.engine.recordReview(planReview(h.engine, graph, h.engine.reviews('plan', graph.id).length + 1));
@@ -1421,4 +1433,57 @@ test('Q4: wire-схема ответа writer экспортирована ко�
   const root = (await import('../src/index.ts')) as unknown as Record<string, unknown>;
   const { implementationOutputSchema } = await import('../src/agents/schemas.ts');
   assert.equal(root.implementationOutputSchema, implementationOutputSchema);
+});
+
+/** Ответ, снимок, раунд ревью снимка для `graph` и применение. */
+function applyOn(env: ReturnType<typeof stopped>, graph: { id: string; digest: string }) {
+  const current = env.engine.inputRequest(env.request.id);
+  const answered = latestAnswer(current)
+    ? current
+    : env.engine.answerInput(
+        env.request.id,
+        { text: 'Hello', actor: { kind: 'operator' } },
+        current.version,
+      ).request;
+  const digest = reviewSnapshot(env, graph);
+  const proposal = env.engine.proposeTarget(env.request.id, digest);
+  assert.deepEqual(proposal.problems, []);
+  const result = env.engine.applyInput(env.request.id, {
+    answerDigest: latestAnswer(answered)!.digest,
+    expectedVersion: answered.version,
+    contextDigest: digest,
+    targetDigest: proposal.target!.digest,
+    actor: 'agent',
+  });
+  return { digest, result };
+}
+
+test('Q1: согласование другой работы того же графа не мешает применить ответ и не делает применённый устаревшим', () => {
+  // Новая редакция графа добавляет работу y, постановка w прежняя.
+  const before = stopped();
+  const g2 = reviseGraph(before, '2', addOrder('y'));
+  const { result } = applyOn(before, g2);
+  assert.equal(result.applied, true, 'остановка w держится: применение, а не перенос');
+
+  const env = stopped();
+  const { digest } = applyOn(env, env.graph);
+  // После применения согласована новая работа графа (граф сменил digest).
+  const raw = structuredClone(graphOf({ w: [], x: [] })) as unknown as {
+    source: { revision: string };
+    orders: Record<string, unknown>[];
+  };
+  raw.source.revision = '2';
+  addOrder('y')(raw.orders);
+  const { graph } = env.engine.register(workGraphSchema.parse(raw), trustNone);
+  env.engine.recordReview({
+    ...planReview(env.engine, graph, env.engine.reviews('plan', graph.id).length + 1),
+    contextDigest: digest,
+  });
+  env.engine.approve(graph.id, 'agent', { bindContext: true });
+  env.clock.now += 1000;
+  const claimed = [env.engine.claim('c1'), env.engine.claim('c1')].filter(Boolean);
+  const w = claimed.find((a) => a!.workId === 'w');
+  assert.ok(w, 'w выдана');
+  assert.equal(w.input?.requestId, env.request.id, 'ответ связан с попыткой');
+  assert.equal(env.engine.inputRequest(env.request.id).stale, undefined);
 });
