@@ -993,6 +993,21 @@ export class Engine {
   }
 
   /**
+   * Бюджетные блоки набора работ за одно чтение (без `workIds` — всех работ
+   * вида): по каждой работе — то же, что `budgetBlockOf(workId, view)`,
+   * `undefined` — не держит. Общее (записи вызовов, общий бюджет, бюджеты
+   * групп, попытки без учёта вызовов) считается один раз.
+   */
+  budgetBlocksOf(
+    workIds: readonly string[] | undefined,
+    view: ExecutionView,
+  ): Map<string, string | undefined> {
+    const ids = workIds ?? view.works().map((w) => w.id);
+    const blockOf = this.budgetBlockers(view);
+    return new Map(ids.map((id) => [id, blockOf(id)]));
+  }
+
+  /**
    * Первая причина `APPROVAL_STALE` из `blockers` — без остальных проверок
    * выдачи (бюджет, вопросы, предпосылки, контракт). Порядок причин тот же:
    * процесс не с применённой политикой, политика после согласования графа,

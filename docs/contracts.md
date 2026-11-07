@@ -1281,7 +1281,10 @@ repairBudget, workId?, workIds? })` из корня пакета (источни
 есть `approvalStaleness(view)` — первая причина `APPROVAL_STALE` из
 `blockers` в том же порядке — и `budgetBlockers(view)` — то же, что
 `budgetBlockOf`; оба возвращают функцию работы, действительную только
-внутри этого чтения (вид не переживает `read`). `budgetBlockOf(workId, view,
+внутри этого чтения (вид не переживает `read`). `budgetBlocksOf(workIds |
+undefined, view)` — бюджетные блоки набора (без `workIds` — всех работ
+вида) за одно чтение: `Map` работа → причина или `undefined`, по каждой —
+то же, что `budgetBlockOf(workId, view)`. `budgetBlockOf(workId, view,
 records?)` принимает уже прочитанные записи вызовов, `repairDecision(view,
 works, { budgetLeft, maxAttempts, blocking? })` — вопрос, держащий работу
 (по умолчанию `blockingRequest`).

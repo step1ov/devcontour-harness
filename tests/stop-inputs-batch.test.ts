@@ -273,3 +273,44 @@ for (const budgets of [false, true])
         assert.ok(elapsed < 10_000, `${form}: ${Math.round(elapsed)} мс`);
       }
     });
+
+test('budgetBlocksOf = budgetBlockOf по каждой работе (набор и все работы) и читает вид постоянное число раз', () => {
+  let blocked = 0;
+  let compared = 0;
+  for (let seed = 2; seed <= 80; seed += 2) {
+    const board = boardOf(specOf(seed));
+    if (!board.policy.budgets) continue;
+    board.engine.read((v) => {
+      const ids = v.works().map((w) => w.id);
+      const all = board.engine.budgetBlocksOf(undefined, v);
+      assert.deepEqual([...all.keys()], ids, `seed ${seed}: все работы в порядке состояния`);
+      for (const id of ids) {
+        const one = board.engine.budgetBlockOf(id, v);
+        assert.equal(all.get(id), one, `seed ${seed}: ${id}`);
+        if (one) blocked++;
+        compared++;
+      }
+      const subset = ids.filter((_, i) => i % 3 === 0);
+      assert.deepEqual(
+        board.engine.budgetBlocksOf(subset, v),
+        new Map(subset.map((id) => [id, all.get(id)])),
+        `seed ${seed}: набор`,
+      );
+    });
+  }
+  assert.ok(compared > 200, `сравнено ${compared}`);
+  assert.ok(blocked > 20, `блоков ${blocked}`);
+  // Бюджеты выключены — блоков нет.
+  const plain = boardOf({ shape: 'fan', size: 12, seed: 3 });
+  plain.engine.read((v) =>
+    assert.deepEqual([...plain.engine.budgetBlocksOf(undefined, v).values()].filter(Boolean), []),
+  );
+  // 400 работ с бюджетами: одно чтение вида — постоянное число чтений.
+  const counts = new Map<string, number>();
+  const big = perfBoardOf('failed', hostLikeView(counts), true);
+  counts.clear();
+  const blocks = big.source.engine.read((v) => big.source.engine.budgetBlocksOf(undefined, v));
+  assert.equal(blocks.size, 400);
+  const reads = [...counts.values()].reduce((a, b) => a + b, 0);
+  assert.ok(reads <= 10, `${reads} чтений вида: ${JSON.stringify([...counts])}`);
+});
