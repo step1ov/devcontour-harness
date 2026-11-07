@@ -1052,3 +1052,48 @@ test('R2-1: переносится только последняя версия 
   reviewSnapshot(env, graph);
   assert.equal(env.engine.approve(graph.id, 'agent', { bindContext: true }).changed, true);
 });
+
+test('R2-5: два вопроса в графе — применение второго не делает первое устаревшим, ответы связаны с попытками', () => {
+  const env = stopped();
+  env.clock.now += 1000;
+  const xa = env.engine.claim('c1')!;
+  assert.equal(xa.workId, 'x');
+  env.engine.fail(xa.id, xa.token, 'вопрос', { kind: 'needs-input', input: outcome() });
+  const reqW = env.request;
+  const reqX = env.engine.inputRequests({ workId: 'x' })[0]!;
+  const answer = (id: string) =>
+    env.engine.answerInput(id, { text: 'Hello ' + id, actor: { kind: 'operator' } }, 1).request;
+  const aw = answer(reqW.id);
+  const ax = answer(reqX.id);
+  const apply = (request: typeof aw, base: ReturnType<typeof withInput> | undefined) => {
+    const snapshot = withInput(base, inputContextSource(request, latestAnswer(request)!));
+    const digest = contextDigest(snapshot);
+    env.store.transact('run.context', (tx) =>
+      tx.putLocal('context-snapshots', WORKSPACE_OWNER, digest, snapshot),
+    );
+    env.engine.recordReview({
+      ...planReview(env.engine, env.graph, env.engine.reviews('plan', env.graph.id).length + 1),
+      contextDigest: digest,
+    });
+    const proposal = env.engine.proposeTarget(request.id, digest);
+    assert.deepEqual(proposal.problems, []);
+    const result = env.engine.applyInput(request.id, {
+      answerDigest: latestAnswer(request)!.digest,
+      expectedVersion: request.version,
+      contextDigest: digest,
+      targetDigest: proposal.target!.digest,
+      actor: 'agent',
+    });
+    assert.equal(result.applied, true);
+    return snapshot;
+  };
+  const sw = apply(aw, undefined);
+  apply(ax, sw);
+  env.clock.now += 1000;
+  const first = env.engine.claim('c1')!;
+  const second = env.engine.claim('c1')!;
+  assert.deepEqual([first.workId, second.workId].sort(), ['w', 'x']);
+  assert.ok(first.input && second.input, 'оба ответа связаны с попытками');
+  assert.equal(env.engine.inputRequest(reqW.id).lifecycle, 'applied');
+  assert.equal(env.engine.inputRequest(reqW.id).stale, undefined);
+});

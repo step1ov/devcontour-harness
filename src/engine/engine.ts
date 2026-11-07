@@ -1267,12 +1267,13 @@ export class Engine {
         .filter((r) => r.kind === 'question' && r.lifecycle === 'applied' && !r.delivered)
         .at(-1);
       const target = answered?.target;
+      // То же правило, что у устаревания (`targetDrift`): ответ связан, пока
+      // закреплённый снимок несёт именно его.
       if (
         target &&
-        target.graphDigest === tx.graph(work.graphId)!.digest &&
-        target.orderDigest === this.host.basis.orderDigest(work, tx) &&
+        answered &&
         target.policyDigest === attempt.policyDigest &&
-        target.contextDigest === (contextPin ?? null)
+        !this.targetDrift(tx, work, answered, target)
       )
         attempt.input = {
           requestId: answered.id,
@@ -2572,11 +2573,21 @@ export class Engine {
   }
 
   /** Чем основание выдачи сейчас расходится с применённым; `undefined` — совпадает. */
-  private targetDrift(view: ExecutionView, work: WorkState, target: InputTarget) {
+  private targetDrift(
+    view: ExecutionView,
+    work: WorkState,
+    request: InputRequest,
+    target: InputTarget,
+  ) {
     if (target.graphDigest !== view.graph(work.graphId)?.digest) return 'graph' as const;
     if (target.orderDigest !== this.host.basis.orderDigest(work, view)) return 'order' as const;
     if (target.policyDigest !== this.host.basis.policyDigest(work, view)) return 'policy' as const;
-    if (target.contextDigest !== (this.contextPinOf(view, work) ?? null)) return 'context' as const;
+    const pin = this.contextPinOf(view, work) ?? null;
+    // Другой снимок, который несёт тот же ответ (например, с ответом на
+    // второй вопрос графа), основание не обесценивает.
+    const answer = request.answers.find((a) => a.digest === target.answerDigest);
+    if (target.contextDigest !== pin && !(answer && this.carriesAnswer(view, request, answer, pin)))
+      return 'context' as const;
     return undefined;
   }
 
@@ -2584,7 +2595,7 @@ export class Engine {
   private staleTargets(tx: ExecutionTransaction, work: WorkState) {
     for (const r of requestsOf(tx, work)) {
       if (r.kind !== 'question' || r.lifecycle !== 'applied' || r.delivered || !r.target) continue;
-      const reason = this.targetDrift(tx, work, r.target);
+      const reason = this.targetDrift(tx, work, r, r.target);
       if (!reason) continue;
       const { target, ...rest } = r;
       tx.putLocal('input-requests', work.order.repositoryId, r.id, {
