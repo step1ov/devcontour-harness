@@ -15,6 +15,9 @@ import {
   stallActionSchema,
   workStatusSchema,
 } from './execution.ts';
+import { inputFloorSchema, inputRequestSchema } from './input.ts';
+
+const inputRequestId = inputRequestSchema.shape.id;
 
 const sha = gitShaSchema;
 const text = z.string().max(4000);
@@ -296,6 +299,75 @@ export const eventPayloads = {
     status: z.enum(['requested', 'failed', 'cleared']),
     error: text.optional(),
   }),
+  /**
+   * Исполнитель остановился с вопросом или controller записал неблокирующий
+   * запрос (follow-up, отклонённый вопрос): только ID, вид, серьёзность,
+   * минимумы и digests — текста вопроса в журнале нет.
+   */
+  'input.requested': z.strictObject({
+    requestId: inputRequestId,
+    kind: z.enum(['question', 'follow-up']),
+    blocking: z.boolean(),
+    lifecycle: z.enum(['pending', 'cancelled']),
+    effectiveSeverity: z.number().int().min(1).max(10),
+    floors: z.array(inputFloorSchema).max(2),
+    criticalHits: z.number().int().min(0),
+    questionDigest: digestSchema,
+    draftDigest: digestSchema.nullable(),
+  }),
+  /** Записан ответ (новая версия): digest и вид, без текста. */
+  'input.answered': z.strictObject({
+    requestId: inputRequestId,
+    revision: z.number().int().positive(),
+    answerDigest: digestSchema,
+    kind: z.enum(['clarification', 'requirement-change']),
+    actor: z.enum(['operator', 'lead', 'host']),
+  }),
+  /**
+   * Ответ применён: основание продолжения активировано, поручение
+   * возвращено в очередь (`retried`) — одной транзакцией, без вызова модели.
+   */
+  'input.applied': z.strictObject({
+    requestId: inputRequestId,
+    answerDigest: digestSchema,
+    targetDigest: digestSchema,
+    contextDigest: digestSchema.nullable(),
+    retried: z.boolean(),
+  }),
+  /** Запрос закрыт без продолжения: отменён или заменён преемником. */
+  'input.closed': z.strictObject({
+    requestId: inputRequestId,
+    lifecycle: z.enum(['cancelled', 'superseded']),
+    by: z.enum(['operator', 'lead', 'host', 'controller']),
+    successor: z.string().min(1).max(200).optional(),
+  }),
+  /**
+   * Применённое основание устарело до выдачи (claim): запрос снова
+   * `answered`, работа ждёт нового применения; без текста.
+   */
+  'input.stale': z.strictObject({
+    requestId: inputRequestId,
+    targetDigest: digestSchema,
+    reason: z.enum(['context', 'graph', 'order', 'policy']),
+  }),
+  /** Ответ передан исполнителю: начался вызов runtime попытки с этим ответом. */
+  'input.delivered': z.strictObject({
+    requestId: inputRequestId,
+    answerDigest: digestSchema,
+    callId: z.string().min(1).max(200),
+  }),
+  /**
+   * Развилки, решённые исполнителем: только число, наибольшая действующая
+   * серьёзность, число сработавших минимумов и неблокирующих запросов,
+   * digest списка — текста допущений в журнале нет.
+   */
+  'attempt.assumptions': z.strictObject({
+    count: z.number().int().min(0).max(20),
+    maxSeverity: z.number().int().min(0).max(10),
+    floors: z.number().int().min(0),
+    followUps: z.number().int().min(0),
+    digest: digestSchema,
+  }),
   'delivery.pending': z.strictObject(delivery),
   'delivery.delivered': z.strictObject({ ...delivery, receipt: z.string().max(1000).optional() }),
   'delivery.failed': z.strictObject({ ...delivery, error: text }),
@@ -463,5 +535,13 @@ export const transactionKinds = [
   'checks.awaiting-operator',
   'checks.adoption-abandoned',
   'checks.spike',
+  /** Ответ на вопрос исполнителя (`input.answered`). */
+  'input.answered',
+  /** Применение ответа: активация основания и повтор (`input.applied`). */
+  'input.applied',
+  /** Отмена или замена запроса (`input.closed`). */
+  'input.closed',
+  /** Подтверждение передачи ответа началом вызова (`input.delivered`). */
+  'input.delivered',
 ] as const;
 export type TransactionKind = (typeof transactionKinds)[number];

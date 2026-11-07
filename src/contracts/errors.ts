@@ -40,6 +40,12 @@ export const errorCodes = {
   ATTEMPTS_EXHAUSTED: 'refused',
   /** Задача или её контекст не помещаются в окно контекста модели (`context-exhausted`). */
   CONTEXT_EXHAUSTED: 'refused',
+  /**
+   * Работу держит вопрос исполнителя без применённого ответа (`needs-input`):
+   * claim, retry, repair и finish отклоняются до `applyInput`; контекст с
+   * неприменённым ответом не активируется обходным согласованием.
+   */
+  INPUT_REQUIRED: 'refused',
   REVISION_CONFLICT: 'refused',
   CANCELLED: 'refused',
   NOT_FOUND: 'refused',

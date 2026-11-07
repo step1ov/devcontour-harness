@@ -14,6 +14,8 @@ import { callRecords } from '../engine/usage.ts';
 import { policySecrets, redactor } from '../environment/redaction.ts';
 import { stopInputsOf, type StopSource } from '../explain/state.ts';
 import { handoffMarkdown } from './markdown.ts';
+import { requestsOf } from '../engine/input-requests.ts';
+import { inputStateOf } from '../projections/input.ts';
 import { activeStatuses } from '../projections/enums.ts';
 import { nextAction } from '../projections/next.ts';
 import { explainStop, stopCodeOf, type StopDiagnosis } from '../projections/stop.ts';
@@ -176,7 +178,21 @@ function build(
     const ownSpend = new Set(
       works.filter((w) => ownWorkRecords(v, calls, w.id).length > 0).map((w) => w.id),
     );
-    return { works, attempts, ownSpend };
+    // Открытые запросы исполнителя: вопросы, затем запросы ведущему.
+    const inputs = works
+      .flatMap((w) => requestsOf(v, w))
+      .filter(
+        (r) =>
+          (r.kind === 'question' &&
+            r.blocking &&
+            inputStateOf(r) &&
+            inputStateOf(r) !== 'delivered') ||
+          (r.kind === 'follow-up' && r.lifecycle === 'pending'),
+      )
+      .sort((a, b) =>
+        a.kind === b.kind ? a.createdAt.localeCompare(b.createdAt) : a.kind === 'question' ? -1 : 1,
+      );
+    return { works, attempts, ownSpend, inputs };
   });
   const byId = new Map<string, WorkState>(read.works.map((w) => [w.id, w]));
   const title = (id: string) => text(byId.get(id)?.order.title ?? id);
@@ -468,6 +484,34 @@ function build(
       }
     : undefined;
 
+  const inputs = read.inputs.slice(0, HANDOFF_LIMITS.inputs).map((r) => {
+    const answer = r.answers.at(-1);
+    return {
+      requestId: name(r.id),
+      workId: r.workId,
+      kind: r.kind,
+      state: inputStateOf(r) as
+        'awaiting-answer' | 'answered-not-applied' | 'applied-awaiting-claim' | 'carry-stale',
+      severity: r.effectiveSeverity,
+      question: text(r.question.question),
+      options: r.question.options.map((o) => name(o.id)),
+      ...(answer
+        ? {
+            answer: {
+              revision: answer.revision,
+              digest: answer.digest,
+              excerpt: text(answer.text, HANDOFF_LIMITS.answerChars),
+            },
+          }
+        : {}),
+      origin: {
+        graphDigest: r.originBasis.graphDigest,
+        orderDigest: r.originBasis.orderDigest,
+        contextDigest: r.originBasis.contextDigest,
+      },
+      ...opt('targetDigest', r.target?.digest),
+    };
+  });
   const cleanIntentions = intentions.map(plainText);
   const clippedIntentions = cleanIntentions.map((s) => clipSafe(s, HANDOFF_LIMITS.intentionChars));
   const pack: HandoffPack = {
@@ -491,6 +535,7 @@ function build(
     failures,
     ...opt('budgets', budgets),
     repairs,
+    ...(inputs.length ? { inputs } : {}),
     next: boardNext({
       diagnoses,
       active,
@@ -510,6 +555,7 @@ function build(
       budgetsWithin: relevant.length - listed.length,
       budgetsShared: listed.length - shown.length,
       repairs: repairsAll.length - repairs.length,
+      inputs: read.inputs.length - inputs.length,
       intentions: cleanIntentions.filter((s, i) => s !== clippedIntentions[i]).length,
       intentionsDropped: 0,
       bySize: false,
@@ -554,6 +600,7 @@ export function fitPack(
     () => dropLast(pack.works) && (t.works++, true),
     () => dropLast(pack.stops) && (t.stops++, true),
     () => Boolean(pack.budgets && dropLast(pack.budgets.entries)) && (t.budgets++, true),
+    () => Boolean(pack.inputs && dropLast(pack.inputs)) && (t.inputs++, true),
   ];
   for (const step of steps)
     while (size() > maxBytes) {

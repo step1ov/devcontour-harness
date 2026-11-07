@@ -547,6 +547,86 @@ null` и этого правила засчитанных попыток: ист
 при откате уберите его из политики. Подробнее —
 [зависимости исполнителя](toolchains.md#зависимости-исполнителя).
 
+### unreleased: вопросы исполнителя
+
+Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`, `apiVersion`
+прежний); новое — аддитивно, подробности — [вопрос исполнителя](contracts.md#вопрос-исполнителя):
+
+- **Политика.** Необязательное `inputPolicy {threshold 1–11, criticalPaths}`;
+  без поля политика и её digest прежние, порог — 7. В `executionDigest` поле
+  не входит: его смена не требует нового согласования графа и действует со
+  следующей попытки.
+- **Ответ writer.** Необязательные `inputRequest` и `assumptions`;
+  wire-схема CLI runtime объявляет оба поля. `completed: true` с вопросом —
+  ответ вне схемы. Ответ прежнего формата читается как прежде.
+- **Состояние.** Локальное пространство `input-requests` (`InputRequest`,
+  `schemas/input-request.schema.json`); необязательные поля попытки
+  `inputPolicy`, `assumptions`, `input` и `pinned.contextDigest`. Класс
+  отказа `needs-input`. Состояние без вопросов читается без изменений: запросов
+  нет, выдача и повтор прежние.
+- **Коды и журнал.** `INPUT_REQUIRED` (класс `refused`, exit code 3; в
+  отказах `run`, `retry`, `approve`); события `input.requested`,
+  `input.answered`, `input.applied`, `input.closed`, `input.delivered`,
+  `attempt.assumptions`, `input.stale` (ID, digests и числа); типы
+  транзакций `input.*`. Необязательные поля запроса `stale` и `normalized`.
+  Причина остановки `needs-input`, действия `answer-input` и `apply-input`.
+- **Проекции.** `status`: `works[].input`, `works[].followUps`; пакет передачи:
+  блок `inputs` и `truncated.inputs`; отчёт: блок `inputs` (только числа) и
+  корзина отказов `input`.
+- **Порты.** Необязательный `ExecutionHost.input` (`InputHost`) для хоста,
+  ведущего согласование сам; `RunnerOptions.context(work, attempt)` получает
+  выданную попытку (снимок загружается по `attempt.pinned.contextDigest`);
+  `measuredInvoke` — необязательный `onStart(callId)` (доставку ответа
+  runner подтверждает не им, а ответом runtime, отличным от `unavailable`). Набор
+  `executionStoreContract` проверяет пространство `input-requests`;
+  `sampleInputRequest`/`answeredInputRequest` экспортированы из
+  `devcontour-harness/testing`.
+- **CLI.** Команды `input-list`, `input-show`, `input-answer`,
+  `input-context`, `input-target`, `input-apply`, `input-cancel`,
+  `input-supersede`.
+- **Хост с портом согласования.** `InputHost.review` и `activate`
+  получают запрос (`{id, answerDigest, mode}`); перенос ответа заменённого
+  запроса — `Engine.proposeCarry` и `Engine.carryInput` (`expectedVersion`,
+  `targetDigest`; `Harness.proposeCarry`/`carryInput`). Экспортированный
+  `unappliedInputs` требует `mayCarry`. `originBasis.contentDigest` —
+  необязательное поле запроса, `target.contentDigest` — цели; состояние
+  вопроса `carry-stale` (status, handoff); `cancelInput` снимает устаревший
+  перенесённый ответ. Не найденный закреплённый снимок держит только свою
+  работу (`needs-lead`, не засчитана), очередь не останавливается. Исходная остановка и
+  устаревание применённого ответа сравнивают постановку самой работы, а не
+  digest графа. Попытка с `pinned.contextDigest` отказывает, если загрузчик
+  контекста хоста вернул другой снимок. `implementationOutputSchema`
+  (wire-схема ответа writer) экспортирован корнем пакета.
+- **Маскирование.** Ответ writer маскируется полным окружением вызова до
+  разбора: `hooks.implemented` получает уже замаскированный `output`
+  (`summary`, `discoveries`). Наследуемые переменные (`environment.inherit`)
+  маскируются, если значение не короче 8 знаков или имя похоже на секрет
+  (TOKEN, SECRET, PASSWORD, API_KEY, CREDENTIAL, AUTH, PRIVATE; значение от 4
+  знаков); объявленные `secrets` — всегда. Не маскируются только наследуемые
+  значения короче 8 знаков без секретного имени (`FORCE_COLOR=1`, `CI=true`):
+  прежде они вырезались из каждой строки вывода проверок и ответов. Короткий
+  секрет без секретного имени объявите в `secrets`.
+- **Поведение `unfinished`.** Защищённые пути, HEAD и область записи
+  проверяются до решения о вопросе и незавершённости для любого ответа
+  writer. Прежде `completed: false` с правкой вне области получал
+  `unfinished` и продолжался с черновика в области; теперь это
+  `scope-violation` (повтор по его правилу), как у готовой реализации.
+
+Читатель со строгой схемой прежней версии `ValueReport`, `HandoffPack`,
+`StopDiagnosis`, `RunEvent`, `RunResult` или ответа `status` отклонит новые
+значения и поля: обновить схему вместе с пакетом. Хост с собственным
+хранилищем (DevContour) хранит `input-requests` у владельца-компонента, а
+адаптер прогоняет расширенный `executionStoreContract`.
+
+**Откат.** Документ состояния разбирается строго: прежние версии отказывают
+до записи на попытке с полями `inputPolicy`, `assumptions`, `input` или
+`pinned.contextDigest` (их пишет каждая новая выдача) и на отказе
+`needs-input`; записи `input-requests` прежняя версия не читает. Путь —
+строка «Новая версия уже изменила формат» таблицы [«Откат»](#откат):
+остановить writers и восстановить копию каталога состояния, снятую до
+обновления, вместе с прежней версией пакета; поле `inputPolicy` убрать из
+политики.
+
 ## Перед обновлением
 
 1. **Остановить записывающих.** Запретить новые выдачи (`harness pause`),

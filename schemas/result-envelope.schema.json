@@ -1530,6 +1530,7 @@
                     "BUDGET_UNKNOWN",
                     "ATTEMPTS_EXHAUSTED",
                     "CONTEXT_EXHAUSTED",
+                    "INPUT_REQUIRED",
                     "REVISION_CONFLICT",
                     "CANCELLED",
                     "NOT_FOUND",

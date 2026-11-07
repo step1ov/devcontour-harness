@@ -501,6 +501,10 @@
       {
         "bucket": "unclassified",
         "count": 1
+      },
+      {
+        "bucket": "input",
+        "count": 0
       }
     ],
     "share": {

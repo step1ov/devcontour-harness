@@ -18,6 +18,8 @@ export const diagnosisActions = [
   'resume-queue',
   'fix-environment',
   'fix-access',
+  'answer-input',
+  'apply-input',
 ] as const;
 export const diagnosisCauses = [
   'provider-auth',
@@ -36,6 +38,7 @@ export const diagnosisCauses = [
   'cancelled',
   'budget',
   'needs-lead',
+  'needs-input',
   'unknown',
   'runtime-missing',
   'controller-busy',

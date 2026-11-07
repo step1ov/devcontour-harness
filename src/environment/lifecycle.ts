@@ -58,8 +58,11 @@ export function executionEnvironment(
     for (const key of profile.inherit) {
       if (source[key] === undefined) throw new Error(`Не задана переменная окружения: ${key}`);
       env[key] = source[key];
-      // Inherited values are also redacted: callers need not classify every provider token.
-      if (source[key]) secretValues.push(source[key]);
+      // Наследуемые значения тоже маскируются — вызывающему не нужно
+      // объявлять каждый токен провайдера, — но только похожие на секрет:
+      // по имени или длиной. Очень короткое общее значение (`FORCE_COLOR=1`,
+      // `CI=true`) иначе вырезалось бы из каждой строки вывода.
+      if (source[key] && inheritedSecret(key, source[key])) secretValues.push(source[key]);
     }
     Object.assign(env, profile.values);
     for (const [key, from] of Object.entries(profile.secrets)) {
@@ -76,6 +79,19 @@ export function executionEnvironment(
   }
   return { env, redact: redactor(secretValues) };
 }
+
+/** Имя переменной похоже на секрет. */
+const SECRET_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL|AUTH|PRIVATE)/i;
+/** Наименьшая длина наследуемого значения без секретного имени, которое маскируется. */
+export const INHERITED_SECRET_MIN = 8;
+
+/**
+ * Маскировать ли наследуемое значение: имя похоже на секрет (значение не
+ * короче 4 знаков, как у настроек коннектора) или значение длинное
+ * (`INHERITED_SECRET_MIN`). Объявленные `secrets` маскируются всегда.
+ */
+export const inheritedSecret = (key: string, value: string) =>
+  SECRET_NAME.test(key) ? value.length >= 4 : value.length >= INHERITED_SECRET_MIN;
 /**
  * Маска по тем секретам и наследуемым значениям, что заданы, — даже когда
  * окружение целиком собрать нельзя. Незаданный секрет — причина отказа, но не

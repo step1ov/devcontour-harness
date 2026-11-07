@@ -36,6 +36,13 @@ import { toolchainReportSchema } from './toolchain.ts';
 import { operationCatalogSchema } from './catalog.ts';
 import { reportDataSchema } from './report.ts';
 import { handoffPackSchema } from './handoff.ts';
+import {
+  inputAnswerSchema,
+  inputLifecycles,
+  inputRequestSchema,
+  inputStateNames,
+  inputTargetSchema,
+} from './input.ts';
 
 /**
  * Договор CLI `harness`.
@@ -119,6 +126,25 @@ const source: CliArgument = {
   description: 'Конфигурация коннектора задач (provider relay-v1-http | relay-v2-cli)',
 };
 
+const inputRequestArg: CliArgument = {
+  name: '--request',
+  value: 'id',
+  required: true,
+  description: 'ID запроса исполнителя (IR-…)',
+};
+const requestVersionArg: CliArgument = {
+  name: '--request-version',
+  value: 'number',
+  required: true,
+  description: 'Версия запроса, которую видел вызывающий (CAS)',
+};
+const contextDigestArg: CliArgument = {
+  name: '--context-digest',
+  value: 'digest',
+  required: true,
+  description: 'Digest снимка контекста с ответом (input-context), прошедшего review-plan',
+};
+
 export const cliCommands = {
   validate: {
     description:
@@ -183,7 +209,7 @@ export const cliCommands = {
       },
       { name: '--subject', value: 'id', required: true, description: 'ID графа или контракта' },
     ],
-    refusals: ['APPROVAL_STALE', 'APPROVAL_REQUIRED', 'REVIEW_REJECTED'],
+    refusals: ['APPROVAL_STALE', 'APPROVAL_REQUIRED', 'REVIEW_REJECTED', 'INPUT_REQUIRED'],
   },
   run: {
     description:
@@ -235,6 +261,7 @@ export const cliCommands = {
       'BUDGET_UNKNOWN',
       'ATTEMPTS_EXHAUSTED',
       'CONTEXT_EXHAUSTED',
+      'INPUT_REQUIRED',
     ],
   },
   status: {
@@ -308,7 +335,13 @@ export const cliCommands = {
       },
       { name: '--reason', value: 'text', required: false, description: 'Причина сброса' },
     ],
-    refusals: ['NOT_FOUND', 'ATTEMPTS_EXHAUSTED', 'BUDGET_EXHAUSTED', 'BUDGET_UNKNOWN'],
+    refusals: [
+      'NOT_FOUND',
+      'ATTEMPTS_EXHAUSTED',
+      'BUDGET_EXHAUSTED',
+      'BUDGET_UNKNOWN',
+      'INPUT_REQUIRED',
+    ],
   },
   result: {
     description: 'Машинный результат последней завершённой попытки поручения и состояние доставки',
@@ -699,6 +732,149 @@ export const cliCommands = {
     ],
     refusals: ['NOT_FOUND', 'CONTROLLER_BUSY'],
   },
+  'input-list': {
+    description:
+      'Вопросы исполнителей (H02): ID, поручение, вид, состояние, серьёзность и версия запроса — без текста',
+    writes: false,
+    idempotency: 'Только чтение',
+    args: [state, { ...work, required: false, description: 'Только вопросы этого поручения' }],
+    refusals: ['NOT_FOUND'],
+  },
+  'input-show': {
+    description: 'Запрос исполнителя целиком: вопрос, варианты, основание, ответы, цель применения',
+    writes: false,
+    idempotency: 'Только чтение',
+    args: [state, inputRequestArg],
+    refusals: ['NOT_FOUND'],
+  },
+  'input-answer': {
+    description:
+      'Записать ответ на вопрос исполнителя новой неизменяемой версией; работу ответ не возобновляет — дальше input-context, review-plan, input-target, input-apply',
+    writes: true,
+    idempotency:
+      'Тот же текст, вариант и вид — прежний ответ без записи; иначе новая версия при совпадении --request-version (CAS); закрытый запрос — NOT_READY',
+    args: [
+      state,
+      inputRequestArg,
+      { name: '--text', value: 'text', required: true, description: 'Ответ (до 3000 знаков)' },
+      { name: '--option', value: 'id', required: false, description: 'Выбранный вариант (ID)' },
+      {
+        name: '--kind',
+        value: 'text',
+        required: false,
+        description:
+          'clarification (по умолчанию: продолжение той же работы) или requirement-change (новая ревизия: input-supersede)',
+      },
+      {
+        name: '--actor',
+        value: 'text',
+        required: false,
+        description: 'Кто отвечает: operator (по умолчанию) или lead',
+      },
+      requestVersionArg,
+    ],
+    refusals: ['NOT_FOUND', 'REVISION_CONFLICT', 'NOT_READY'],
+  },
+  'input-context': {
+    description:
+      'Снимок контекста с последним ответом: действующий снимок графа и источник input-answer (вопрос, ответ, manifest с точным digest и версией ответа); сохраняется по digest и пишется в --out, но не активируется',
+    writes: true,
+    idempotency: 'Тот же ответ и тот же действующий снимок — тот же digest и те же байты',
+    args: [
+      state,
+      inputRequestArg,
+      {
+        name: '--out',
+        value: 'path',
+        required: true,
+        description: 'Файл ContextSnapshot JSON для review-plan --context',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'INPUT_REQUIRED'],
+  },
+  'input-target': {
+    description:
+      'Основание продолжения для снимка с ответом (только чтение): digest, который назовёт input-apply, и причины, по которым применение сейчас откажет',
+    writes: false,
+    idempotency: 'Только чтение',
+    args: [state, inputRequestArg, contextDigestArg],
+    refusals: ['NOT_FOUND'],
+  },
+  'input-apply': {
+    description:
+      'Применить ответ одной транзакцией: проверки approve и retry, активация согласования снимка с ответом, запрос applied и обычный повтор поручения; модель не вызывается, пауза и удержания остаются',
+    writes: true,
+    idempotency:
+      'Повтор того же применения ничего не меняет и второй попытки не создаёт; идущие попытки графа, исчерпанные попытки или бюджет — applied:false, запрос и согласование не меняются (exit 3)',
+    args: [
+      state,
+      inputRequestArg,
+      {
+        name: '--answer',
+        value: 'digest',
+        required: true,
+        description: 'Digest последнего ответа (input-show)',
+      },
+      requestVersionArg,
+      contextDigestArg,
+      {
+        name: '--target',
+        value: 'digest',
+        required: true,
+        description: 'Digest основания из input-target',
+      },
+      {
+        name: '--reset',
+        value: 'flag',
+        required: false,
+        description: 'Сбросить исчерпанный счётчик попыток; требует --reason',
+      },
+      { name: '--reason', value: 'text', required: false, description: 'Причина сброса' },
+    ],
+    refusals: [
+      'NOT_FOUND',
+      'REVISION_CONFLICT',
+      'APPROVAL_STALE',
+      'APPROVAL_REQUIRED',
+      'REVIEW_REJECTED',
+      'INPUT_REQUIRED',
+      'NOT_READY',
+      'ATTEMPTS_EXHAUSTED',
+      'BUDGET_EXHAUSTED',
+    ],
+  },
+  'input-cancel': {
+    description:
+      'Отменить вопрос: работа больше его не ждёт (обычный повтор снова по своим правилам); применённый ответ не отменяется',
+    writes: true,
+    idempotency: 'Повтор для отменённого ничего не меняет',
+    args: [
+      state,
+      inputRequestArg,
+      requestVersionArg,
+      { name: '--reason', value: 'text', required: true, description: 'Причина' },
+    ],
+    refusals: ['NOT_FOUND', 'REVISION_CONFLICT', 'NOT_READY'],
+  },
+  'input-supersede': {
+    description:
+      'Заменить вопрос преемником: ответ меняет требования — новая ревизия или работа, а не продолжение этой',
+    writes: true,
+    idempotency: 'Повтор для заменённого ничего не меняет',
+    args: [
+      state,
+      inputRequestArg,
+      requestVersionArg,
+      { name: '--reason', value: 'text', required: true, description: 'Причина' },
+      {
+        name: '--successor',
+        value: 'id',
+        required: true,
+        description: 'Преемник: новая работа или запрос',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'REVISION_CONFLICT', 'NOT_READY'],
+  },
 } as const satisfies Record<string, CliCommandContract>;
 export type CliCommand = keyof typeof cliCommands;
 
@@ -818,6 +994,20 @@ export const statusDataSchema = z.strictObject({
        */
       liveness: z.enum(['quiet', 'stalled']).optional(),
       resultSha: gitShaSchema.optional(),
+      /**
+       * Последний незакрытый вопрос исполнителя (H02): ID, состояние, версия
+       * и действующая серьёзность, без текста. Нет поля — вопросов нет.
+       */
+      input: z
+        .strictObject({
+          requestId: inputRequestSchema.shape.id,
+          state: z.enum(inputStateNames),
+          version: z.number().int().positive(),
+          severity: z.number().int().min(1).max(10),
+        })
+        .optional(),
+      /** Неблокирующие запросы ведущему в ожидании (автономный режим). */
+      followUps: z.number().int().positive().optional(),
       /** Почему поручение сейчас не выдаётся; пусто — может быть выдано. */
       blockers: z.array(blocker),
     }),
@@ -1235,6 +1425,59 @@ export const initDataSchema = z.strictObject({
 /** `explain`: объяснения остановок. */
 export const explainDataSchema = z.strictObject({ diagnoses: z.array(stopDiagnosisSchema) });
 
+const requestIdSchema = inputRequestSchema.shape.id;
+
+export const inputListDataSchema = z.strictObject({
+  requests: z.array(
+    z.strictObject({
+      id: requestIdSchema,
+      workId: idSchema,
+      kind: z.enum(['question', 'follow-up']),
+      blocking: z.boolean(),
+      lifecycle: z.enum(inputLifecycles),
+      state: z.enum(inputStateNames).optional(),
+      severity: z.number().int().min(1).max(10),
+      version: z.number().int().positive(),
+      answers: z.number().int().min(0),
+      createdAt: isoTimeSchema,
+    }),
+  ),
+});
+export const inputAnswerDataSchema = z.strictObject({
+  request: inputRequestSchema,
+  answer: inputAnswerSchema,
+  changed: z.boolean(),
+});
+export const inputContextDataSchema = z.strictObject({
+  requestId: requestIdSchema,
+  answerDigest: digestSchema,
+  digest: digestSchema,
+  out: z.string().min(1),
+});
+export const inputTargetDataSchema = z.strictObject({
+  requestId: requestIdSchema,
+  target: inputTargetSchema.optional(),
+  problems: z.array(z.string()),
+});
+export const inputApplyDataSchema = z.strictObject({
+  requestId: requestIdSchema,
+  applied: z.boolean(),
+  changed: z.boolean(),
+  lifecycle: z.enum(inputLifecycles),
+  work: z
+    .strictObject({ id: idSchema, status: workStatusSchema, attempt: z.number().int().min(0) })
+    .optional(),
+  active: z.array(z.strictObject({ id: z.string().min(1), workId: idSchema })).optional(),
+  joint: z.literal(true).optional(),
+  blocker: blocker.optional(),
+});
+export const inputCloseDataSchema = z.strictObject({
+  requestId: requestIdSchema,
+  lifecycle: z.enum(inputLifecycles),
+  version: z.number().int().positive(),
+  changed: z.boolean(),
+});
+
 /** Схема `data` каждой команды. */
 export const cliDataSchemas = {
   validate: validateDataSchema,
@@ -1266,6 +1509,14 @@ export const cliDataSchemas = {
   'source-status': sourceStatusDataSchema,
   'source-deliver': sourceDeliverDataSchema,
   'source-reconcile': sourceReconcileDataSchema,
+  'input-list': inputListDataSchema,
+  'input-show': inputRequestSchema,
+  'input-answer': inputAnswerDataSchema,
+  'input-context': inputContextDataSchema,
+  'input-target': inputTargetDataSchema,
+  'input-apply': inputApplyDataSchema,
+  'input-cancel': inputCloseDataSchema,
+  'input-supersede': inputCloseDataSchema,
   version: versionDataSchema,
 } as const satisfies Record<CliCommand | 'version', z.ZodType>;
 

@@ -799,6 +799,7 @@
               "cancelled",
               "budget",
               "needs-lead",
+              "needs-input",
               "unknown"
             ]
           },
@@ -1489,6 +1490,7 @@
               "cancelled",
               "budget",
               "needs-lead",
+              "needs-input",
               "unknown"
             ]
           },
@@ -1983,6 +1985,7 @@
                   "cancelled",
                   "budget",
                   "needs-lead",
+                  "needs-input",
                   "unknown"
                 ]
               },
@@ -2004,6 +2007,121 @@
               "kind",
               "applied",
               "files"
+            ],
+            "additionalProperties": false
+          },
+          "inputPolicy": {
+            "type": "object",
+            "properties": {
+              "threshold": {
+                "default": 7,
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 11
+              },
+              "criticalPaths": {
+                "default": [],
+                "maxItems": 50,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "assumptions": {
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "question": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1500
+                },
+                "chosen": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                },
+                "rationale": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "severity": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 10
+                },
+                "affects": {
+                  "maxItems": 5,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "contract",
+                      "acceptance",
+                      "product",
+                      "api",
+                      "migration"
+                    ]
+                  }
+                },
+                "effectiveSeverity": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 10
+                },
+                "floors": {
+                  "maxItems": 2,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "declared",
+                      "critical-path"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "question",
+                "chosen",
+                "rationale",
+                "severity",
+                "affects",
+                "effectiveSeverity",
+                "floors"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "input": {
+            "type": "object",
+            "properties": {
+              "requestId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "answerDigest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "targetDigest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            },
+            "required": [
+              "requestId",
+              "answerDigest",
+              "targetDigest"
             ],
             "additionalProperties": false
           },
@@ -2236,6 +2354,17 @@
                   "revision"
                 ],
                 "additionalProperties": false
+              },
+              "contextDigest": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -4306,6 +4435,7 @@
               "cancelled",
               "budget",
               "needs-lead",
+              "needs-input",
               "unknown"
             ]
           }

@@ -13,6 +13,7 @@ import { stopDiagnosisSchema } from './diagnosis.ts';
 import { planDraftSchema } from './planning.ts';
 import { valueReportSchema } from './report.ts';
 import { handoffPackSchema } from './handoff.ts';
+import { inputRequestSchema } from './input.ts';
 
 /**
  * Схемы, публикуемые как JSON Schema (`schemas/<имя>.schema.json`).
@@ -44,4 +45,5 @@ export const publishedSchemas = {
   'plan-draft': planDraftSchema,
   'value-report': valueReportSchema,
   'handoff-pack': handoffPackSchema,
+  'input-request': inputRequestSchema,
 } as const satisfies Record<string, z.ZodType>;

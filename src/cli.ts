@@ -20,6 +20,7 @@ import {
   contractViolation,
   contextSnapshotSchema,
   contractDocumentSchema,
+  digestSchema,
   errorCodes,
   executionPolicySchema,
   exitCodeOf,
@@ -50,6 +51,7 @@ import { collectReportInput } from './control/report.ts';
 import { writeReportFile } from './control/report-file.ts';
 import { valueReport, reportHtml, reportMarkdown } from './report/index.ts';
 import { handoffMarkdown, handoffPack } from './handoff/index.ts';
+import { inputStateOf } from './projections/input.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -291,6 +293,16 @@ const options = {
   format: { type: 'string' },
   'no-titles': { type: 'boolean' },
   intent: { type: 'string', multiple: true },
+  request: { type: 'string' },
+  text: { type: 'string' },
+  option: { type: 'string' },
+  kind: { type: 'string' },
+  actor: { type: 'string' },
+  'request-version': { type: 'string' },
+  'context-digest': { type: 'string' },
+  answer: { type: 'string' },
+  target: { type: 'string' },
+  successor: { type: 'string' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -311,6 +323,24 @@ const flagOwners = {
   format: ['report', 'handoff'],
   'no-titles': ['report'],
   intent: ['handoff'],
+  request: [
+    'input-show',
+    'input-answer',
+    'input-context',
+    'input-target',
+    'input-apply',
+    'input-cancel',
+    'input-supersede',
+  ],
+  text: ['input-answer'],
+  option: ['input-answer'],
+  kind: ['input-answer'],
+  actor: ['input-answer'],
+  'request-version': ['input-answer', 'input-apply', 'input-cancel', 'input-supersede'],
+  'context-digest': ['input-target', 'input-apply'],
+  answer: ['input-apply'],
+  target: ['input-apply'],
+  successor: ['input-supersede'],
 } as const;
 
 /** Явное человеческое представление успешного ответа (`--human`). */
@@ -813,6 +843,138 @@ async function run(
           b && v.state ? { baseDir: b.baseDir } : undefined,
         ),
       };
+    }
+    case 'input-list':
+    case 'input-show':
+    case 'input-target': {
+      const h = open(need('state'), binding(need('state')), 'state');
+      try {
+        if (command === 'input-show') return { command, data: h.inputRequest(need('request')) };
+        if (command === 'input-target') {
+          const { request, target, problems } = h.proposeTarget(
+            need('request'),
+            parseWith(digestSchema, need('context-digest'), 'context-digest'),
+          );
+          return {
+            command,
+            data: { requestId: request.id, ...optional('target', target), problems },
+          };
+        }
+        return {
+          command,
+          data: {
+            requests: h.inputRequests(v.work ? { workId: v.work } : {}).map((r) => ({
+              id: r.id,
+              workId: r.workId,
+              kind: r.kind,
+              blocking: r.blocking,
+              lifecycle: r.lifecycle,
+              ...optional('state', inputStateOf(r)),
+              severity: r.effectiveSeverity,
+              version: r.version,
+              answers: r.answers.length,
+              createdAt: r.createdAt,
+            })),
+          },
+        };
+      } finally {
+        h.close();
+      }
+    }
+    case 'input-answer':
+    case 'input-context':
+    case 'input-apply':
+    case 'input-cancel':
+    case 'input-supersede': {
+      const b = binding(need('state'));
+      const h = open(need('state'), b, false);
+      const version = () => {
+        const n = Number(need('request-version'));
+        if (!Number.isSafeInteger(n) || n < 1)
+          throw new HarnessError('INVALID_INPUT', '--request-version: целое ≥ 1');
+        return n;
+      };
+      try {
+        const id = need('request');
+        if (command === 'input-answer') {
+          const kind = parseWith(
+            z.enum(['clarification', 'requirement-change']),
+            v.kind ?? 'clarification',
+            'kind',
+          );
+          const actor = parseWith(z.enum(['operator', 'lead']), v.actor ?? 'operator', 'actor');
+          return {
+            command,
+            data: h.answerInput(
+              id,
+              {
+                text: need('text'),
+                ...optional('optionId', v.option),
+                kind,
+                actor: { kind: actor },
+              },
+              version(),
+            ),
+          };
+        }
+        if (command === 'input-context') {
+          const out = resolve(need('out'));
+          const { requestId, answerDigest, digest, snapshot } = h.inputContext(id);
+          writeFileSync(out, JSON.stringify(snapshot, null, 2) + '\n');
+          return { command, data: { requestId, answerDigest, digest, out } };
+        }
+        if (command === 'input-apply') {
+          const result = h.applyInput(id, {
+            answerDigest: parseWith(digestSchema, need('answer'), 'answer'),
+            expectedVersion: version(),
+            contextDigest: parseWith(digestSchema, need('context-digest'), 'context-digest'),
+            targetDigest: parseWith(digestSchema, need('target'), 'target'),
+            actor: b.policy.approvalMode,
+            ...(v.reset ? { reset: { reason: need('reason') } } : {}),
+          });
+          return {
+            command,
+            data: {
+              requestId: id,
+              applied: result.applied,
+              changed: result.changed,
+              lifecycle: result.request.lifecycle,
+              ...('work' in result && result.work
+                ? {
+                    work: {
+                      id: result.work.id,
+                      status: result.work.status,
+                      attempt: result.work.attempt,
+                    },
+                  }
+                : {}),
+              ...('active' in result && result.active ? { active: result.active } : {}),
+              ...('joint' in result && result.joint ? { joint: true as const } : {}),
+              ...('blocker' in result && result.blocker ? { blocker: result.blocker } : {}),
+            },
+            ...(result.applied ? {} : { code: exitCodes.refused }),
+          };
+        }
+        const closed =
+          command === 'input-cancel'
+            ? h.cancelInput(id, { by: 'operator', reason: need('reason') }, version())
+            : h.supersedeInput(
+                id,
+                { by: 'operator', reason: need('reason'), successor: need('successor') },
+                version(),
+              );
+        return {
+          command,
+          data: {
+            requestId: id,
+            lifecycle: closed.request.lifecycle,
+            version: closed.request.version,
+            changed: closed.changed,
+          },
+        };
+      } finally {
+        h.close();
+      }
     }
   }
 }

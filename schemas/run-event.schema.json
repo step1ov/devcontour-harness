@@ -1101,6 +1101,7 @@
                 "cancelled",
                 "budget",
                 "needs-lead",
+                "needs-input",
                 "unknown"
               ]
             },
@@ -1190,6 +1191,7 @@
                 "cancelled",
                 "budget",
                 "needs-lead",
+                "needs-input",
                 "unknown"
               ]
             },
@@ -1786,6 +1788,7 @@
                   "cancelled",
                   "budget",
                   "needs-lead",
+                  "needs-input",
                   "unknown"
                 ]
               }
@@ -2818,6 +2821,628 @@
             "operation",
             "digest",
             "status"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "apiVersion",
+        "seq",
+        "at",
+        "type",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "const": "devcontour-harness/v1alpha1"
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "graphId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "workId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "runId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "attempt": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "type": {
+          "type": "string",
+          "const": "input.requested"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "requestId": {
+              "type": "string",
+              "pattern": "^IR-[a-f0-9]{24}$"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "question",
+                "follow-up"
+              ]
+            },
+            "blocking": {
+              "type": "boolean"
+            },
+            "lifecycle": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "cancelled"
+              ]
+            },
+            "effectiveSeverity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "floors": {
+              "maxItems": 2,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "declared",
+                  "critical-path"
+                ]
+              }
+            },
+            "criticalHits": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "questionDigest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "draftDigest": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "requestId",
+            "kind",
+            "blocking",
+            "lifecycle",
+            "effectiveSeverity",
+            "floors",
+            "criticalHits",
+            "questionDigest",
+            "draftDigest"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "apiVersion",
+        "seq",
+        "at",
+        "type",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "const": "devcontour-harness/v1alpha1"
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "graphId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "workId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "runId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "attempt": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "type": {
+          "type": "string",
+          "const": "input.answered"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "requestId": {
+              "type": "string",
+              "pattern": "^IR-[a-f0-9]{24}$"
+            },
+            "revision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "answerDigest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "clarification",
+                "requirement-change"
+              ]
+            },
+            "actor": {
+              "type": "string",
+              "enum": [
+                "operator",
+                "lead",
+                "host"
+              ]
+            }
+          },
+          "required": [
+            "requestId",
+            "revision",
+            "answerDigest",
+            "kind",
+            "actor"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "apiVersion",
+        "seq",
+        "at",
+        "type",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "const": "devcontour-harness/v1alpha1"
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "graphId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "workId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "runId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "attempt": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "type": {
+          "type": "string",
+          "const": "input.applied"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "requestId": {
+              "type": "string",
+              "pattern": "^IR-[a-f0-9]{24}$"
+            },
+            "answerDigest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "targetDigest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "contextDigest": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "retried": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "requestId",
+            "answerDigest",
+            "targetDigest",
+            "contextDigest",
+            "retried"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "apiVersion",
+        "seq",
+        "at",
+        "type",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "const": "devcontour-harness/v1alpha1"
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "graphId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "workId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "runId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "attempt": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "type": {
+          "type": "string",
+          "const": "input.closed"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "requestId": {
+              "type": "string",
+              "pattern": "^IR-[a-f0-9]{24}$"
+            },
+            "lifecycle": {
+              "type": "string",
+              "enum": [
+                "cancelled",
+                "superseded"
+              ]
+            },
+            "by": {
+              "type": "string",
+              "enum": [
+                "operator",
+                "lead",
+                "host",
+                "controller"
+              ]
+            },
+            "successor": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "required": [
+            "requestId",
+            "lifecycle",
+            "by"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "apiVersion",
+        "seq",
+        "at",
+        "type",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "const": "devcontour-harness/v1alpha1"
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "graphId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "workId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "runId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "attempt": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "type": {
+          "type": "string",
+          "const": "input.stale"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "requestId": {
+              "type": "string",
+              "pattern": "^IR-[a-f0-9]{24}$"
+            },
+            "targetDigest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "context",
+                "graph",
+                "order",
+                "policy"
+              ]
+            }
+          },
+          "required": [
+            "requestId",
+            "targetDigest",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "apiVersion",
+        "seq",
+        "at",
+        "type",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "const": "devcontour-harness/v1alpha1"
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "graphId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "workId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "runId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "attempt": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "type": {
+          "type": "string",
+          "const": "input.delivered"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "requestId": {
+              "type": "string",
+              "pattern": "^IR-[a-f0-9]{24}$"
+            },
+            "answerDigest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "callId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "required": [
+            "requestId",
+            "answerDigest",
+            "callId"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "apiVersion",
+        "seq",
+        "at",
+        "type",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "const": "devcontour-harness/v1alpha1"
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "graphId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "workId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "runId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "attempt": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "type": {
+          "type": "string",
+          "const": "attempt.assumptions"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 20
+            },
+            "maxSeverity": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "floors": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "followUps": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "count",
+            "maxSeverity",
+            "floors",
+            "followUps",
+            "digest"
           ],
           "additionalProperties": false
         }

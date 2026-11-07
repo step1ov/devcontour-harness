@@ -44,7 +44,19 @@ const harness = (args: string[]) => {
 };
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
-const laterCommands: readonly string[] = ['worktree-cleanup', 'report', 'handoff'];
+const laterCommands: readonly string[] = [
+  'worktree-cleanup',
+  'report',
+  'handoff',
+  'input-list',
+  'input-show',
+  'input-answer',
+  'input-context',
+  'input-target',
+  'input-apply',
+  'input-cancel',
+  'input-supersede',
+];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
   'validate',
@@ -116,6 +128,14 @@ const ADDITIVE_EVENT_TYPES = new Set([
   'work.cancelled',
   'base.moved',
   'attempt.diagnosed',
+  // H02: вопросы исполнителя и решения, принятые им самим.
+  'input.requested',
+  'input.answered',
+  'input.applied',
+  'input.closed',
+  'input.delivered',
+  'input.stale',
+  'attempt.assumptions',
 ]);
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set(['status--detail']);
@@ -130,6 +150,12 @@ const ADDITIVE_ENUM_VALUES = new Set([
   'stalled',
   'context-exhausted',
   'CONTEXT_EXHAUSTED',
+  // H02: остановка с вопросом исполнителя и её шаги.
+  'needs-input',
+  'INPUT_REQUIRED',
+  'answer-input',
+  'apply-input',
+  'carry-stale',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
@@ -323,10 +349,13 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.baseline;
       return rest;
     }
-    // Аддитивное поле status — живость активной попытки (`works[].liveness`).
+    // Аддитивные поля status — живость активной попытки (`works[].liveness`),
+    // вопрос исполнителя и запросы ведущему (`works[].input`, `followUps`, H02).
     if (k === 'properties' && v && typeof v === 'object' && 'liveness' in v && 'blockers' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.liveness;
+      delete rest.input;
+      delete rest.followUps;
       return rest;
     }
     // Аддитивное поле status — снимок наблюдателя `--detail`.
@@ -362,6 +391,11 @@ test('H3-01: прежние команды и схемы их данных не 
     assert.ok(eventVariants.includes(type), 'events объявляет вариант ' + type);
   // Хеш H2 выше вырезает detail status и флаг --detail: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.status).includes('"detail"'), 'status объявляет detail');
+  // Хеш H2 вырезает вопрос исполнителя в status: объявление держит эта проверка.
+  assert.ok(
+    JSON.stringify(data.status).includes('"followUps"'),
+    'status объявляет вопрос исполнителя',
+  );
   assert.ok(
     (cliCommands.status.args as readonly CliArgument[]).some(
       (a) => a.name === '--detail' && a.value === 'flag' && !a.required,

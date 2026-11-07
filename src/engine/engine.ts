@@ -32,6 +32,24 @@ import {
   type ExecutionView,
   type FailureKind,
   type GraphState,
+  type InputActor,
+  type InputAnswer,
+  type InputOutcome,
+  type InputRequest,
+  type InputTarget,
+  type InputTargetRequest,
+  linksAnswer,
+  type ContextSnapshot,
+  INPUT_LIMITS,
+  INPUT_SOURCE_KIND,
+  answerDigest,
+  inputAnswerSchema,
+  inputRequestSchema,
+  inputPolicyOf,
+  inputRequestId,
+  inputSourceId,
+  latestAnswer,
+  targetDigest,
   type JointVerification,
   type JointVerificationState,
   type NotPromise,
@@ -74,6 +92,13 @@ import {
   closeIfBasisChanged,
 } from './property-recovery.ts';
 import { REQUIREMENT_GATE } from '../verification/requirements.ts';
+import {
+  blockingRequest,
+  inputManifestOf,
+  requestById,
+  requestsOf,
+  unappliedInputs,
+} from './input-requests.ts';
 import { pinnedCorpus, propertyProofProblem } from '../verification/acceptance.ts';
 import {
   jointImpact,
@@ -161,6 +186,23 @@ const causeOf = (
     ? cause
     : 'other';
 };
+
+/** Нарушение схемы входа операции — `INVALID_INPUT` с путями, а не исключение zod. */
+function invalidInput(
+  what: string,
+  result: { success: boolean; error?: { issues: { path: PropertyKey[]; message: string }[] } },
+) {
+  if (result.success) return;
+  const issues = (result.error?.issues ?? []).map((i) => ({
+    path: i.path.map((p) => (typeof p === 'number' ? p : String(p))),
+    message: i.message,
+  }));
+  throw new HarnessError(
+    'INVALID_INPUT',
+    `${what}: ${issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
+    issues,
+  );
+}
 
 /** Поручение исчерпало предел незасчитанных отказов: повтор — только со сбросом. */
 export const neutralExhausted = (w: Pick<WorkState, 'neutralFailures'>) =>
@@ -364,6 +406,7 @@ export class Engine {
       for (const prior of existing ? tx.works(graph.id) : [])
         if (!graph.orders.some((o) => o.id === prior.id) && prior.status !== 'done') {
           tx.putWork({ ...prior, status: 'cancelled', activeRunId: undefined });
+          this.closeRequestsOf(tx, prior, 'controller');
           if (prior.status !== 'cancelled')
             tx.emit({
               type: 'work.cancelled',
@@ -502,84 +545,140 @@ export class Engine {
     } = {},
   ) {
     return this.tx('graph.approved', (tx) => {
-      this.assertCurrentPolicy(tx);
-      const graph = tx.graph(graphId);
-      if (!graph) throw new HarnessError('NOT_FOUND', 'Граф не найден: ' + graphId);
-      if (actor !== this.policy.approvalMode)
-        throw new HarnessError(
-          'APPROVAL_REQUIRED',
-          `Политика требует согласования ${this.policy.approvalMode === 'operator' ? 'оператором' : 'агентом-ревьюером'}`,
-        );
-      const rounds = tx
-        .locals('reviews', WORKSPACE_OWNER)
-        .map((r) => r.value)
-        .filter((r) => r.kind === 'plan' && r.subject === graphId)
-        .sort((a, b) => a.round - b.round);
-      const last = rounds.at(-1);
-      if (!last || last.digest !== graph.digest)
-        throw new HarnessError('APPROVAL_REQUIRED', 'Нет ревью плана для текущего digest графа');
-      if (actor === 'agent' && !last.approved)
-        throw new HarnessError('REVIEW_REJECTED', 'Последний раунд ревью плана не одобрил граф');
-      if (last.reviewerBinding !== this.reviewerBinding('plan', last.authorRuntime))
-        throw new HarnessError(
-          'APPROVAL_REQUIRED',
-          'Ревью плана проведено при другом назначении reviewer; нужен новый раунд',
-        );
-      // Свойства поручений существуют в их договорах проверки и исполняются
-      // их генеративными gates: иначе ожидаемая проверка не определена.
-      const problems = tx.works(graphId).flatMap((w) => {
-        const repo = this.repository(w.order.repositoryId);
-        return orderPropertyProblems(w.order, contractDocuments(w.order, tx), {
-          configured: repo.gates,
-          ...(w.order.gates ? { scope: expandGateRefs(repo, w.order.gates) } : {}),
-        });
-      });
-      if (problems.length)
-        throw new HarnessError(
-          'INVALID_INPUT',
-          'Договор проверки поручений не согласован: ' + problems.join('; '),
-        );
-      const policy = executionDigest(this.policy);
-      const context = options.bindContext ? { digest: last.contextDigest ?? null } : undefined;
-      if (
-        graph.approval?.digest === graph.digest &&
-        graph.policyDigest === policy &&
-        graph.approval.context?.digest === context?.digest
-      )
-        return { graph, changed: false };
-      const at = iso(this.now());
-      const approval: TechnicalApproval = {
-        actor,
-        digest: graph.digest,
-        authorRuntime: last.authorRuntime === 'external' ? undefined : last.authorRuntime,
-        reviewerRuntime: last.reviewerRuntime,
-        artifact: last.artifact,
-        ...(context ? { context } : {}),
-      };
-      tx.putGraph({ ...graph, policyDigest: policy, approval: { ...approval, at } });
-      tx.emit({ type: 'graph.approved', graphId, payload: { digest: graph.digest, actor } });
-      for (const work of tx.works(graphId)) {
-        if (work.status !== 'draft') continue;
-        const ready: WorkState = structuredClone({
-          ...work,
-          status: 'ready' as const,
-          approvedAt: at,
-          approvedDigest: this.host.basis.orderDigest(work, tx),
-          approvedScope: this.host.basis.scopeDigest(work, tx),
-          approval,
-        });
-        if (closeIfBasisChanged(ready, at, this.episodeOf(ready, tx)))
-          this.recoveryEvent(tx, ready, ready.recoveryHistory!.at(-1)!);
-        tx.putWork(ready);
-        tx.emit({
-          type: 'work.ready',
-          graphId,
-          workId: work.id,
-          payload: { orderDigest: ready.approvedDigest! },
-        });
+      const { graph, last } = this.approvalCheck(tx, graphId, actor);
+      // Снимок с ответом на вопрос исполнителя становится действующим только
+      // через applyInput: обходное согласование его не активирует.
+      if (options.bindContext && last.contextDigest) {
+        const snapshot = tx.local('context-snapshots', WORKSPACE_OWNER, last.contextDigest);
+        const unapplied = this.unappliedInputs(tx, snapshot);
+        if (unapplied.length)
+          throw new HarnessError(
+            'INPUT_REQUIRED',
+            'Снимок контекста содержит неприменённый ответ на вопрос исполнителя; активирует его только applyInput: ' +
+              unapplied.map((u) => `${u.requestId ?? u.source} (${u.reason})`).join(', '),
+          );
+        // Новый ответ в снимке не становится действующим под идущими
+        // попытками графа (H02-I) — и через обычное согласование.
+        const busy = this.inputActivationRefusal(tx, graphId, snapshot);
+        if (busy) throw new HarnessError('NOT_READY', busy);
       }
-      return { graph: tx.graph(graphId)!, changed: true };
+      return this.activateApproval(tx, graph, last, actor, options);
     });
+  }
+
+  /**
+   * Проверки согласования графа (`approve`): политика процесса применена,
+   * актёр — режим политики, последний раунд ревью плана относится к текущему
+   * digest графа (в режиме `agent` — одобрен) и проведён при текущем
+   * назначении reviewer, договоры проверки поручений согласованы. Ничего не
+   * пишет, кроме записи применённой политики барьером; отказ — исключение.
+   * Общая для `approve` и `applyInput`: продолжение после ответа проходит те
+   * же проверки, а не ослабленные.
+   */
+  approvalCheck(tx: ExecutionTransaction, graphId: string, actor: TechnicalApproval['actor']) {
+    this.assertCurrentPolicy(tx);
+    return this.approvalRules(tx, graphId, actor);
+  }
+
+  /**
+   * Правила согласования без барьера политики (`approvalCheck` — с ним):
+   * только чтение, отказ — исключение. Им же `proposeTarget` называет
+   * причины отказа, не повторяя правил.
+   */
+  private approvalRules(tx: ExecutionView, graphId: string, actor: TechnicalApproval['actor']) {
+    const graph = tx.graph(graphId);
+    if (!graph) throw new HarnessError('NOT_FOUND', 'Граф не найден: ' + graphId);
+    if (actor !== this.policy.approvalMode)
+      throw new HarnessError(
+        'APPROVAL_REQUIRED',
+        `Политика требует согласования ${this.policy.approvalMode === 'operator' ? 'оператором' : 'агентом-ревьюером'}`,
+      );
+    const rounds = tx
+      .locals('reviews', WORKSPACE_OWNER)
+      .map((r) => r.value)
+      .filter((r) => r.kind === 'plan' && r.subject === graphId)
+      .sort((a, b) => a.round - b.round);
+    const last = rounds.at(-1);
+    if (!last || last.digest !== graph.digest)
+      throw new HarnessError('APPROVAL_REQUIRED', 'Нет ревью плана для текущего digest графа');
+    if (actor === 'agent' && !last.approved)
+      throw new HarnessError('REVIEW_REJECTED', 'Последний раунд ревью плана не одобрил граф');
+    if (last.reviewerBinding !== this.reviewerBinding('plan', last.authorRuntime))
+      throw new HarnessError(
+        'APPROVAL_REQUIRED',
+        'Ревью плана проведено при другом назначении reviewer; нужен новый раунд',
+      );
+    // Свойства поручений существуют в их договорах проверки и исполняются
+    // их генеративными gates: иначе ожидаемая проверка не определена.
+    const problems = tx.works(graphId).flatMap((w) => {
+      const repo = this.repository(w.order.repositoryId);
+      return orderPropertyProblems(w.order, contractDocuments(w.order, tx), {
+        configured: repo.gates,
+        ...(w.order.gates ? { scope: expandGateRefs(repo, w.order.gates) } : {}),
+      });
+    });
+    if (problems.length)
+      throw new HarnessError(
+        'INVALID_INPUT',
+        'Договор проверки поручений не согласован: ' + problems.join('; '),
+      );
+    return { graph, last };
+  }
+
+  /**
+   * Записать согласование графа по проверенному раунду (`approvalCheck`):
+   * digest, политика, при `bindContext` — снимок контекста раунда; черновые
+   * поручения становятся готовыми. Повтор того же согласования ничего не
+   * меняет. Только внутри транзакции после `approvalCheck`.
+   */
+  activateApproval(
+    tx: ExecutionTransaction,
+    graph: GraphState,
+    last: ReviewRecord,
+    actor: TechnicalApproval['actor'],
+    options: { bindContext?: boolean } = {},
+  ) {
+    const graphId = graph.id;
+    const policy = executionDigest(this.policy);
+    const context = options.bindContext ? { digest: last.contextDigest ?? null } : undefined;
+    if (
+      graph.approval?.digest === graph.digest &&
+      graph.policyDigest === policy &&
+      graph.approval.context?.digest === context?.digest
+    )
+      return { graph, changed: false };
+    const at = iso(this.now());
+    const approval: TechnicalApproval = {
+      actor,
+      digest: graph.digest,
+      authorRuntime: last.authorRuntime === 'external' ? undefined : last.authorRuntime,
+      reviewerRuntime: last.reviewerRuntime,
+      artifact: last.artifact,
+      ...(context ? { context } : {}),
+    };
+    tx.putGraph({ ...graph, policyDigest: policy, approval: { ...approval, at } });
+    tx.emit({ type: 'graph.approved', graphId, payload: { digest: graph.digest, actor } });
+    for (const work of tx.works(graphId)) {
+      if (work.status !== 'draft') continue;
+      const ready: WorkState = structuredClone({
+        ...work,
+        status: 'ready' as const,
+        approvedAt: at,
+        approvedDigest: this.host.basis.orderDigest(work, tx),
+        approvedScope: this.host.basis.scopeDigest(work, tx),
+        approval,
+      });
+      if (closeIfBasisChanged(ready, at, this.episodeOf(ready, tx)))
+        this.recoveryEvent(tx, ready, ready.recoveryHistory!.at(-1)!);
+      tx.putWork(ready);
+      tx.emit({
+        type: 'work.ready',
+        graphId,
+        workId: work.id,
+        payload: { orderDigest: ready.approvedDigest! },
+      });
+    }
+    return { graph: tx.graph(graphId)!, changed: true };
   }
 
   /* ---------------------------------------------------------------- */
@@ -889,7 +988,8 @@ export class Engine {
         | 'BUDGET_EXHAUSTED'
         | 'REVIEWER_SAME_VENDOR'
         | 'REVIEWER_MISSING'
-        | 'INVALID_INPUT';
+        | 'INVALID_INPUT'
+        | 'INPUT_REQUIRED';
       message: string;
     }[] = [];
     if (view.control().paused)
@@ -930,6 +1030,18 @@ export class Engine {
       });
     if (work.hold)
       out.push({ code: 'NOT_READY', message: 'Удержано операцией ' + work.hold.operation });
+    // Вопрос исполнителя без применённого ответа держит поручение сам по себе.
+    const question = blockingRequest(view, work);
+    if (question)
+      out.push({
+        code: 'INPUT_REQUIRED',
+        message:
+          question.lifecycle === 'pending'
+            ? `Ждёт ответа на вопрос исполнителя ${question.id}`
+            : question.lifecycle === 'superseded'
+              ? `Перенесённый ответ на вопрос ${question.id} устарел до выдачи: нужен новый перенос (carryInput)`
+              : `Ответ на вопрос ${question.id} записан, но не применён (applyInput)`,
+      });
     // Записанный budgetBlock — кэш расчёта claim: готовую работу держит текущий расчёт.
     const budget = work.status === 'ready' ? this.budgetBlockOf(work.id, view) : undefined;
     if (budget) out.push({ code: 'BUDGET_EXHAUSTED', message: budget });
@@ -1000,6 +1112,11 @@ export class Engine {
       const active = tx.attempts().filter((a) => a.status === 'active');
       if (active.length >= this.policy.concurrency) return undefined;
       this.budgetBlocks(tx);
+      // Применённый ответ, основание которого сменилось до выдачи, не
+      // теряется молча: запрос возвращается в `answered` (работа снова ждёт
+      // применения и не выдаётся), причина записана.
+      for (const ready of tx.works().filter((w) => w.status === 'ready'))
+        this.staleTargets(tx, ready);
       for (const ready of tx.works().filter((w) => w.status === 'ready' && w.recovery)) {
         const next = structuredClone(ready);
         if (closeIfBasisChanged(next, iso(this.now()), this.episodeOf(next, tx))) {
@@ -1014,6 +1131,9 @@ export class Engine {
         if (blocksClaim(w) || this.awaitsOperator(w, tx)) return false;
         if (w.attempt >= this.policy.maxAttempts) return false;
         if (neutralExhausted(w)) return false;
+        // Вопрос без применённого ответа: новая редакция графа и согласование
+        // делают поручение готовым, но выдачи нет до applyInput.
+        if (blockingRequest(tx, w)) return false;
         const graph = tx.graph(w.graphId);
         // Согласование привязано к graph digest и к политике, под которой оно дано.
         if (!graph?.approval || graph.approval.digest !== graph.digest) return false;
@@ -1064,6 +1184,14 @@ export class Engine {
       }));
       const at = this.now();
       const ready = work.approvedAt ? this.host.readyAt?.(work, tx) : undefined;
+      // Действующий снимок контекста выдачи: runner загружает именно его, и
+      // смена согласования после выдачи не подменяет контекст попытки.
+      const approvedContext = tx.graph(work.graphId)!.approval?.context;
+      const contextPin = this.host.input
+        ? this.host.input.contextDigestOf(work, tx)
+        : approvedContext
+          ? approvedContext.digest
+          : undefined;
       const attempt: AttemptState = {
         id: this.id(),
         workId: work.id,
@@ -1102,7 +1230,11 @@ export class Engine {
           orderDigest: digestOf(work.order),
           targetRef: repo.targetRef,
           source: work.order.source,
+          ...(contextPin !== undefined ? { contextDigest: contextPin } : {}),
         },
+        // Порог вопросов исполнителя закрепляется при выдаче: смена политики
+        // действует со следующей попытки.
+        inputPolicy: structuredClone(inputPolicyOf(this.policy)),
         dispatch: {
           policy: 'fifo-ready-v1',
           at: iso(at),
@@ -1132,6 +1264,26 @@ export class Engine {
         callsRecorded: true,
         evidence: [],
       };
+      // Ответ на вопрос исполнителя связывается с попыткой, только если
+      // применённое основание совпало с основанием выдачи: смена согласования
+      // после apply не приписывает старый ответ новой попытке.
+      const answered = requestsOf(tx, work)
+        .filter((r) => linksAnswer(r) && !r.delivered)
+        .at(-1);
+      const target = answered?.target;
+      // То же правило, что у устаревания (`targetDrift`): ответ связан, пока
+      // закреплённый снимок несёт именно его.
+      if (
+        target &&
+        answered &&
+        target.policyDigest === attempt.policyDigest &&
+        !this.targetDrift(tx, work, answered, target)
+      )
+        attempt.input = {
+          requestId: answered.id,
+          answerDigest: target.answerDigest,
+          targetDigest: target.digest,
+        };
       tx.putAttempt(attempt);
       const recovery =
         work.recovery?.status === 'retry'
@@ -1260,6 +1412,21 @@ export class Engine {
     });
   }
 
+  /**
+   * Снимок контекста попытки обязан совпасть с закреплённым при выдаче
+   * (`pinned.contextDigest`, `null` — без контекста). Попытки без
+   * закрепления (прежних версий, хост без связи согласования с контекстом)
+   * не проверяются.
+   */
+  private assertPinnedContext(a: AttemptState, snapshot: string | null) {
+    const pinned = a.pinned?.contextDigest;
+    if (pinned === undefined || pinned === snapshot) return;
+    throw new HarnessError(
+      'APPROVAL_STALE',
+      `Снимок контекста попытки ${snapshot ?? 'null'} не совпадает с закреплённым при выдаче ${pinned}: загрузчик контекста хоста обязан загружать снимок по attempt.pinned.contextDigest`,
+    );
+  }
+
   /** Дополнить попытку сведениями её хода (контекст, ресурсы, замеры) под тем же fencing. */
   update(
     id: string,
@@ -1269,7 +1436,12 @@ export class Engine {
       Pick<AttemptState, 'context' | 'contextSnapshot' | 'resources' | 'model' | 'timings'>
     >,
   ) {
-    this.withAttempt(id, token, kind, (a, _w, tx) => tx.putAttempt({ ...a, ...patch }));
+    this.withAttempt(id, token, kind, (a, _w, tx) => {
+      // Снимок, закреплённый при выдаче, — единственный допустимый: загрузчик
+      // хоста, не учитывающий закрепление, отказывает сразу, а не при приёмке.
+      if (patch.contextSnapshot !== undefined) this.assertPinnedContext(a, patch.contextSnapshot);
+      tx.putAttempt({ ...a, ...patch });
+    });
   }
 
   /** Снимок зависимостей, против которого идёт попытка; закрепляется до реализации. */
@@ -1599,6 +1771,12 @@ export class Engine {
       this.assertCurrentPolicy(tx);
       if (a.phase !== 'integrating' || !a.candidateSha || a.integrationSha !== sha)
         throw new HarnessError('NOT_READY', 'Нет интеграционного коммита');
+      const question = blockingRequest(tx, w);
+      if (question)
+        throw new HarnessError(
+          'INPUT_REQUIRED',
+          `Поручение ждёт ответа на вопрос исполнителя ${question.id}; приёмка невозможна`,
+        );
       // Принять можно только под той версией проверок, под которой шла
       // попытка: новый корпус, принятый поручением, требует новой попытки.
       if (a.checks && this.checksOf(w, tx) !== a.checks.effective)
@@ -1726,6 +1904,8 @@ export class Engine {
       if (proof) throw new HarnessError('GATE_FAILED', proof);
       const contract = this.contractBlocker(w, tx);
       if (contract) throw new HarnessError('APPROVAL_STALE', contract);
+      // Попытка исполнена ровно на снимке, закреплённом при выдаче.
+      this.assertPinnedContext(a, a.contextSnapshot ?? null);
       // Согласование, связанное с контекстом, принимает только попытку на
       // том же снимке: новый одобренный контекст требует новой попытки.
       const bound = tx.graph(w.graphId)?.approval?.context;
@@ -1802,6 +1982,12 @@ export class Engine {
       cause?: EnvironmentCause;
       /** Предел окна контекста — пишется только у отказа `context-exhausted`. */
       contextLimit?: ContextLimit;
+      /**
+       * Вопрос, допущения и неблокирующие запросы из ответа writer:
+       * записываются той же транзакцией, что и отказ (`needs-input` —
+       * блокирующий запрос; `unfinished` — отклонённый вопрос ниже порога).
+       */
+      input?: InputOutcome;
     } = {},
   ) {
     const kind = options.kind ?? 'unknown';
@@ -1847,6 +2033,9 @@ export class Engine {
         // Пары по объявленным свойствам ведёт эпизод разбора, не пробел приёмки.
         ...(pairs.length ? { classified: pairs } : {}),
         ...(interrupted ? { interrupted: 'shutdown' as const } : {}),
+        ...(options.input?.assumptions.length
+          ? { assumptions: options.input.assumptions.slice(0, 20) }
+          : {}),
       };
       tx.putAttempt(failed);
       const next = structuredClone(w);
@@ -1904,6 +2093,8 @@ export class Engine {
           counted: !interrupted && !uncounted(kind, blocked),
         },
       });
+      if (options.input && !interrupted)
+        this.writeInput(tx, failed, w, options.input, kind === 'needs-input');
       // Остановка — не неисправность окружения: её пауза уже стоит.
       if (repairPolicy[kind].blocksQueue && !interrupted) {
         const control = tx.control();
@@ -1933,6 +2124,1095 @@ export class Engine {
         ...(bound.length ? { properties: bound } : {}),
         ...(episode ? { recovery: { id: episode.id, status: episode.status } } : {}),
       };
+    });
+  }
+
+  /**
+   * Допущения и неблокирующие запросы готовой реализации (`completed: true`)
+   * записываются до кандидата под тем же fencing. Вопрос, ставший
+   * остановкой, сюда не попадает — его пишет `fail`.
+   */
+  recordAssumptions(id: string, token: string, input: InputOutcome) {
+    this.withAttempt(id, token, 'run.implementation-basis', (a, w, tx) => {
+      const next: AttemptState = {
+        ...a,
+        ...(input.assumptions.length ? { assumptions: input.assumptions.slice(0, 20) } : {}),
+      };
+      tx.putAttempt(next);
+      this.writeInput(tx, next, w, { ...input, question: undefined }, false);
+    });
+  }
+
+  /**
+   * Основание исходной попытки запроса: источник и digests, под которыми шла
+   * попытка, снимок контекста, база и закреплённая политика вопросов.
+   */
+  private originOf(tx: ExecutionView, a: AttemptState, w: WorkState) {
+    return {
+      source: structuredClone(w.order.source),
+      graphId: w.graphId,
+      graphDigest: a.pinned?.graphDigest ?? tx.graph(w.graphId)!.digest,
+      orderDigest: this.host.basis.orderDigest(w, tx),
+      policyDigest: a.policyDigest,
+      contextDigest: a.contextSnapshot ?? null,
+      baseSha: a.baseSha ?? null,
+      inputPolicy: structuredClone(a.inputPolicy ?? inputPolicyOf(this.policy)),
+      contentDigest: contentDigest(w.order),
+    };
+  }
+
+  /**
+   * Запись вопроса и запросов попытки в `input-requests` (владелец —
+   * репозиторий поручения) и событий с ID, digests и числами — без текста.
+   * `stop` — попытка кончилась `needs-input`: вопрос — блокирующий запрос
+   * `pending`. Иначе вопрос ниже порога записывается отклонённым
+   * (`cancelled`, без блокировки), если он не стал неблокирующим запросом
+   * автономного режима. ID детерминированы попыткой: повтор записи той же
+   * попытки записей не плодит.
+   */
+  private writeInput(
+    tx: ExecutionTransaction,
+    a: AttemptState,
+    w: WorkState,
+    input: InputOutcome,
+    stop: boolean,
+  ) {
+    const owner = w.order.repositoryId;
+    const at = iso(this.now());
+    const origin = this.originOf(tx, a, w);
+    const draft = a.partial
+      ? {
+          digest: a.partial.digest,
+          files: a.partial.files.slice(0, 500).map((f) => f.slice(0, 500)),
+        }
+      : null;
+    const base = {
+      workId: w.id,
+      graphId: w.graphId,
+      runId: a.id,
+      attempt: a.attempt,
+      callId: input.callId,
+      criticalHits: input.criticalHits.slice(0, 20).map((path) => path.slice(0, 500)),
+      draft,
+      createdAt: at,
+      originBasis: origin,
+      answers: [],
+      version: 1,
+    };
+    const written: InputRequest[] = [];
+    const put = (request: InputRequest) => {
+      if (tx.local('input-requests', owner, request.id)) return;
+      tx.putLocal('input-requests', owner, request.id, request);
+      written.push(request);
+    };
+    const question = input.question;
+    // Вопрос ниже порога, ставший неблокирующим запросом автономного режима,
+    // отклонённым не пишется второй раз.
+    const asFollowUp = !!question && input.followUps.some((f) => f.question === question.question);
+    if (question && (stop || !asFollowUp))
+      put({
+        ...base,
+        id: inputRequestId(a.id, 0),
+        kind: 'question',
+        blocking: stop,
+        question: structuredClone(question.question),
+        effectiveSeverity: question.effectiveSeverity,
+        floors: [...question.floors],
+        ...(input.normalized?.length
+          ? { normalized: input.normalized.slice(0, 10).map((n) => n.slice(0, 300)) }
+          : {}),
+        lifecycle: stop ? 'pending' : 'cancelled',
+        ...(stop
+          ? {}
+          : {
+              closed: {
+                at,
+                by: 'controller' as const,
+                reason: `Вопрос ниже порога политики (${question.effectiveSeverity} < ${origin.inputPolicy.threshold}): исполнитель решает сам и записывает допущение`,
+              },
+            }),
+      });
+    input.followUps.forEach((f, i) =>
+      put({
+        ...base,
+        id: inputRequestId(a.id, i + 1),
+        kind: 'follow-up',
+        blocking: false,
+        question: structuredClone(f.question),
+        effectiveSeverity: f.effectiveSeverity,
+        floors: [...f.floors],
+        lifecycle: 'pending',
+      }),
+    );
+    for (const r of written)
+      tx.emit({
+        type: 'input.requested',
+        graphId: w.graphId,
+        workId: w.id,
+        runId: a.id,
+        attempt: a.attempt,
+        payload: {
+          requestId: r.id,
+          kind: r.kind,
+          blocking: r.blocking,
+          lifecycle: r.lifecycle === 'pending' ? 'pending' : 'cancelled',
+          effectiveSeverity: r.effectiveSeverity,
+          floors: r.floors,
+          criticalHits: r.criticalHits.length,
+          questionDigest: digestOf(r.question),
+          draftDigest: r.draft?.digest ?? null,
+        },
+      });
+    if (input.assumptions.length || input.followUps.length)
+      tx.emit({
+        type: 'attempt.assumptions',
+        graphId: w.graphId,
+        workId: w.id,
+        runId: a.id,
+        attempt: a.attempt,
+        payload: {
+          count: Math.min(input.assumptions.length, 20),
+          maxSeverity: Math.max(0, ...input.assumptions.map((x) => x.effectiveSeverity)),
+          floors: input.assumptions.filter((x) => x.floors.length).length,
+          followUps: input.followUps.length,
+          digest: digestOf(input.assumptions),
+        },
+      });
+    return written;
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Вопросы исполнителя: ответ, применение, закрытие                   */
+  /* ---------------------------------------------------------------- */
+
+  /** Запросы исполнителя: все или поручения; по времени создания. */
+  inputRequests(filter: { workId?: string } = {}) {
+    return this.read((v) => {
+      const work = filter.workId ? v.work(filter.workId) : undefined;
+      if (filter.workId && !work)
+        throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + filter.workId);
+      return requestsOf(v, work);
+    });
+  }
+
+  /** Запрос по ID; нет — `NOT_FOUND`. */
+  inputRequest(id: string) {
+    return this.read((v) => this.requestIn(v, id).request);
+  }
+
+  private requestIn(view: ExecutionView, id: string) {
+    const found = requestById(view, id);
+    if (!found) throw new HarnessError('NOT_FOUND', 'Запрос исполнителя не найден: ' + id);
+    return found;
+  }
+
+  /** CAS версии запроса: устаревшая версия — `REVISION_CONFLICT` без записи. */
+  private expectVersion(request: InputRequest, expected: number) {
+    if (request.version !== expected)
+      throw new HarnessError(
+        'REVISION_CONFLICT',
+        `Запрос ${request.id}: версия ${request.version}, ожидалась ${expected}; перечитайте запрос`,
+      );
+  }
+
+  /**
+   * Записать ответ — новую неизменяемую версию (`answered`). Ответ работу не
+   * возобновляет: продолжение — только `applyInput` после ревью контекста с
+   * ответом. Повтор того же содержания (текст, вариант, вид) — тот же ответ
+   * без записи, при любой версии: повтор после обрыва связи не создаёт
+   * второй версии. Закрытый или применённый запрос новых ответов не
+   * принимает (`NOT_READY`): поздний ответ остаётся историей хоста.
+   */
+  answerInput(
+    id: string,
+    answer: {
+      text: string;
+      optionId?: string | null;
+      kind?: InputAnswer['kind'];
+      actor: InputActor;
+      messageRef?: string;
+    },
+    expectedVersion: number,
+  ) {
+    return this.tx('input.answered', (tx) => {
+      const { owner, request } = this.requestIn(tx, id);
+      const text = answer.text.trim();
+      const content = {
+        text,
+        optionId: answer.optionId ?? null,
+        kind: answer.kind ?? ('clarification' as const),
+      };
+      const last = latestAnswer(request);
+      if (
+        last &&
+        last.text === content.text &&
+        last.optionId === content.optionId &&
+        last.kind === content.kind &&
+        // Другой актёр или другое сообщение хоста — другой ответ, а не повтор.
+        last.actor.kind === answer.actor.kind &&
+        last.actor.id === answer.actor.id &&
+        last.messageRef === answer.messageRef
+      )
+        return { request, answer: last, changed: false };
+      if (!['pending', 'answered'].includes(request.lifecycle))
+        throw new HarnessError(
+          'NOT_READY',
+          `Запрос ${id} ${request.lifecycle}: новый ответ не принимается`,
+        );
+      this.expectVersion(request, expectedVersion);
+      if (!text) throw new HarnessError('INVALID_INPUT', 'Пустой ответ');
+      if (request.answers.length >= INPUT_LIMITS.answers)
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `У запроса ${id} уже ${INPUT_LIMITS.answers} версий ответа`,
+        );
+      if (
+        content.optionId !== null &&
+        !request.question.options.some((o) => o.id === content.optionId)
+      )
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `Вариант ${content.optionId} не входит в варианты вопроса`,
+        );
+      const revision = request.answers.length + 1;
+      const recorded: InputAnswer = {
+        revision,
+        ...content,
+        actor: structuredClone(answer.actor),
+        ...(answer.messageRef ? { messageRef: answer.messageRef } : {}),
+        digest: answerDigest(id, { revision, ...content }),
+        at: iso(this.now()),
+      };
+      // Пределы ответа (длина, ссылка хоста, ID актёра) — типизированным
+      // отказом, а не исключением схемы при записи.
+      invalidInput('Ответ', inputAnswerSchema.safeParse(recorded));
+      const next: InputRequest = {
+        ...request,
+        lifecycle: 'answered',
+        answers: [...request.answers, recorded],
+        version: request.version + 1,
+      };
+      tx.putLocal('input-requests', owner, id, next);
+      tx.emit({
+        type: 'input.answered',
+        graphId: request.graphId,
+        workId: request.workId,
+        runId: request.runId,
+        payload: {
+          requestId: id,
+          revision,
+          answerDigest: recorded.digest,
+          kind: recorded.kind,
+          actor: recorded.actor.kind,
+        },
+      });
+      return { request: next, answer: recorded, changed: true };
+    });
+  }
+
+  /** Закрыть запрос без продолжения в транзакции: `cancelled` или `superseded`. */
+  private closeIn(
+    tx: ExecutionTransaction,
+    owner: string,
+    request: InputRequest,
+    lifecycle: 'cancelled' | 'superseded',
+    closed: NonNullable<InputRequest['closed']>,
+  ) {
+    const next: InputRequest = {
+      ...request,
+      lifecycle,
+      closed,
+      version: request.version + 1,
+    };
+    tx.putLocal('input-requests', owner, request.id, next);
+    tx.emit({
+      type: 'input.closed',
+      graphId: request.graphId,
+      workId: request.workId,
+      runId: request.runId,
+      payload: {
+        requestId: request.id,
+        lifecycle,
+        by: closed.by,
+        ...(closed.successor ? { successor: closed.successor } : {}),
+      },
+    });
+    return next;
+  }
+
+  /** Отмена или замена открытого запроса с CAS версии. */
+  private close(
+    id: string,
+    lifecycle: 'cancelled' | 'superseded',
+    input: { by: InputActor['kind']; reason: string; successor?: string },
+    expectedVersion: number,
+  ) {
+    return this.tx('input.closed', (tx) => {
+      const { owner, request } = this.requestIn(tx, id);
+      // Перенесённый ответ, устаревший до выдачи, можно снять: работа
+      // перестаёт его ждать и продолжает без него (второй выход — новый перенос).
+      const staleCarry =
+        lifecycle === 'cancelled' &&
+        request.lifecycle === 'superseded' &&
+        !!request.stale &&
+        !request.target;
+      if (request.lifecycle === lifecycle && !staleCarry) return { request, changed: false };
+      if (!['pending', 'answered'].includes(request.lifecycle) && !staleCarry)
+        throw new HarnessError(
+          'NOT_READY',
+          `Запрос ${id} ${request.lifecycle}: ${lifecycle === 'cancelled' ? 'отмена' : 'замена'} невозможна`,
+        );
+      this.expectVersion(request, expectedVersion);
+      const reason = input.reason.trim();
+      if (!reason) throw new HarnessError('INVALID_INPUT', 'Нужна причина');
+      const closed = {
+        at: iso(this.now()),
+        by: input.by,
+        reason: reason.slice(0, 1000),
+        ...(input.successor ? { successor: input.successor } : {}),
+        // Перенос ответа в контекст новой редакции — только когда исходная
+        // остановка уже не держится; иначе продолжение — только applyInput.
+        // Сведение для истории: решает перенос его чтение (`carryAllowed`).
+        ...(lifecycle === 'superseded'
+          ? { carry: this.carryAllowed(tx, { ...request, lifecycle: 'superseded' }) }
+          : {}),
+      };
+      invalidInput('Закрытие запроса', inputRequestSchema.shape.closed.safeParse(closed));
+      return { request: this.closeIn(tx, owner, request, lifecycle, closed), changed: true };
+    });
+  }
+
+  /**
+   * Отменить вопрос: работа больше не ждёт ответа (обычный повтор снова
+   * доступен по своим правилам). Применённый ответ не отменяется.
+   */
+  cancelInput(
+    id: string,
+    input: { by: InputActor['kind']; reason: string },
+    expectedVersion: number,
+  ) {
+    return this.close(id, 'cancelled', input, expectedVersion);
+  }
+
+  /**
+   * Заменить вопрос преемником: ответ — изменение требований, оно идёт
+   * обычной ревизией или новой работой (`successor`), а не продолжением этой
+   * работы через `applyInput`.
+   */
+  supersedeInput(
+    id: string,
+    input: { by: InputActor['kind']; reason: string; successor: string },
+    expectedVersion: number,
+  ) {
+    if (!input.successor.trim())
+      throw new HarnessError('INVALID_INPUT', 'Нужен преемник (новая работа или запрос)');
+    return this.close(id, 'superseded', input, expectedVersion);
+  }
+
+  /** Закрыть открытые запросы отменённого поручения (в транзакции отмены). */
+  private closeRequestsOf(
+    tx: ExecutionTransaction,
+    work: WorkState,
+    by: NonNullable<InputRequest['closed']>['by'],
+  ) {
+    for (const request of requestsOf(tx, work))
+      if (request.lifecycle === 'pending' || request.lifecycle === 'answered')
+        this.closeIn(tx, work.order.repositoryId, request, 'cancelled', {
+          at: iso(this.now()),
+          by,
+          reason: 'Поручение отменено',
+        });
+  }
+
+  /**
+   * Раунд ревью, на котором основано продолжение: у хоста с портом —
+   * его проверка; у standalone — та же проверка, что у `approve`
+   * (`approvalCheck`), и снимок последнего раунда ревью плана обязан быть
+   * `contextDigest`. Только внутри транзакции.
+   */
+  private targetReview(
+    tx: ExecutionView,
+    work: WorkState,
+    contextDigest: string | null,
+    actor: TechnicalApproval['actor'],
+    request: InputTargetRequest,
+  ) {
+    // Актёр согласования — режим политики и у хоста с портом: порт правил
+    // движка не ослабляет.
+    if (actor !== this.policy.approvalMode)
+      throw new HarnessError(
+        'APPROVAL_REQUIRED',
+        `Политика требует согласования ${this.policy.approvalMode === 'operator' ? 'оператором' : 'агентом-ревьюером'}`,
+      );
+    if (this.host.input)
+      return { review: this.host.input.review(work, contextDigest, actor, tx, request) };
+    const checked = this.approvalRules(tx, work.graphId, actor);
+    if ((checked.last.contextDigest ?? null) !== contextDigest)
+      throw new HarnessError(
+        'APPROVAL_REQUIRED',
+        'Последний раунд ревью плана рассматривал другой снимок контекста: проведите review-plan со снимком ответа',
+      );
+    return {
+      review: {
+        round: checked.last.round,
+        approved: checked.last.approved,
+        reviewerBinding: checked.last.reviewerBinding ?? null,
+      },
+      checked,
+    };
+  }
+
+  /**
+   * Исходная остановка запроса держится: работа на попытке вопроса
+   * (остановлена needs-input или готова после устаревшего применения), граф
+   * и постановка — те же. Тогда продолжение — только `applyInput`.
+   */
+  private originHolds(view: ExecutionView, request: InputRequest) {
+    const work = view.work(request.workId);
+    if (!work) return false;
+    const atOrigin =
+      (work.status === 'failed' && work.failureKind === 'needs-input') || work.status === 'ready';
+    return (
+      atOrigin &&
+      view.attempts(work.id).at(-1)?.id === request.runId &&
+      // Своя постановка, а не весь граф: согласование соседней работы (у хоста
+      // граф — активная ревизия доски) остановку не обесценивает.
+      !this.orderMoved(view, work, request.originBasis)
+    );
+  }
+
+  /**
+   * Можно ли перенести ответ заменённого запроса в контекст сейчас — в
+   * момент переноса, а не замены (порядок «замена, потом новая редакция»
+   * тоже ведёт к переносу). Уточнение: исходная остановка уже не держится.
+   * Изменение требований: изменилась постановка самой этой работы — иначе
+   * требование вошло бы в неизменную постановку одним файлом контекста.
+   * Переносится только последний ответ (`carried`).
+   */
+  /**
+   * Изменилась ли постановка работы против запомненной: по содержанию без
+   * ревизии источника (`contentDigest`), если оно записано, иначе по digest
+   * постановки хоста (записи прежних версий).
+   */
+  private orderMoved(
+    view: ExecutionView,
+    work: WorkState | undefined,
+    basis: { orderDigest: string; contentDigest?: string },
+  ) {
+    if (!work) return true;
+    return basis.contentDigest !== undefined
+      ? contentDigest(work.order) !== basis.contentDigest
+      : this.host.basis.orderDigest(work, view) !== basis.orderDigest;
+  }
+
+  carryAllowed(view: ExecutionView, request: InputRequest) {
+    if (request.lifecycle !== 'superseded') return false;
+    const answer = latestAnswer(request);
+    if (!answer) return false;
+    const work = view.work(request.workId);
+    // По содержанию постановки, без ревизии источника: пересинхронизация
+    // трекера одной ревизией перенос не открывает.
+    const orderChanged = this.orderMoved(view, work, request.originBasis);
+    if (answer.kind === 'requirement-change') return orderChanged;
+    return orderChanged || !this.originHolds(view, request);
+  }
+
+  /** Неприменённые источники ответов снимка с правилом переноса этого движка. */
+  unappliedInputs(view: ExecutionView, snapshot: ContextSnapshot | undefined) {
+    return unappliedInputs(view, snapshot, (r) => this.carryAllowed(view, r));
+  }
+
+  /**
+   * Почему снимок с ответами нельзя сделать действующим сейчас: в нём
+   * источник ответа, которого нет в действующем согласовании, а в графе идут
+   * попытки — их согласование обесценилось бы (H02-I). `undefined` — можно.
+   */
+  inputActivationRefusal(
+    view: ExecutionView,
+    graphId: string,
+    snapshot: ContextSnapshot | undefined,
+  ) {
+    const sources = (snapshot?.sources ?? []).filter((s) => s.kind === INPUT_SOURCE_KIND);
+    if (!sources.length) return undefined;
+    const digest = view.graph(graphId)?.approval?.context?.digest;
+    const current = digest ? view.local('context-snapshots', WORKSPACE_OWNER, digest) : undefined;
+    const added = sources.filter(
+      (s) => !current?.sources.some((c) => c.id === s.id && c.digest === s.digest),
+    );
+    if (!added.length) return undefined;
+    const active = activeOf(view).filter((a) => view.work(a.workId)?.graphId === graphId);
+    return active.length
+      ? `в графе идут попытки (${active.map((a) => a.id).join(', ')}): снимок с новым ответом станет действующим после их окончания`
+      : undefined;
+  }
+
+  /** Действующий снимок контекста поручения для выдачи (`pinned.contextDigest`). */
+  private contextPinOf(view: ExecutionView, work: WorkState) {
+    if (this.host.input) return this.host.input.contextDigestOf(work, view);
+    const approved = view.graph(work.graphId)?.approval?.context;
+    return approved ? approved.digest : undefined;
+  }
+
+  /** Чем основание выдачи сейчас расходится с применённым; `undefined` — совпадает. */
+  private targetDrift(
+    view: ExecutionView,
+    work: WorkState,
+    request: InputRequest,
+    target: InputTarget,
+  ) {
+    // Граф целиком не сравнивается: согласование другой работы того же графа
+    // применённый ответ не обесценивает (причина `graph` больше не ставится).
+    if (this.orderMoved(view, work, target)) return 'order' as const;
+    if (target.policyDigest !== this.host.basis.policyDigest(work, view)) return 'policy' as const;
+    const pin = this.contextPinOf(view, work) ?? null;
+    // Другой снимок, который несёт тот же ответ (например, с ответом на
+    // второй вопрос графа), основание не обесценивает.
+    const answer = request.answers.find((a) => a.digest === target.answerDigest);
+    if (target.contextDigest !== pin && !(answer && this.carriesAnswer(view, request, answer, pin)))
+      return 'context' as const;
+    return undefined;
+  }
+
+  /** Вернуть в `answered` применённые, но не переданные ответы с устаревшим основанием. */
+  private staleTargets(tx: ExecutionTransaction, work: WorkState) {
+    for (const r of requestsOf(tx, work)) {
+      if (!linksAnswer(r) || r.delivered || !r.target) continue;
+      const reason = this.targetDrift(tx, work, r, r.target);
+      if (!reason) continue;
+      const { target, ...rest } = r;
+      // Применённый — снова `answered`; перенесённый остаётся заменённым без
+      // цели: работа ждёт нового переноса (`blocksWork`).
+      tx.putLocal('input-requests', work.order.repositoryId, r.id, {
+        ...rest,
+        lifecycle: r.lifecycle === 'applied' ? 'answered' : 'superseded',
+        stale: { targetDigest: target.digest, reason, at: iso(this.now()) },
+        version: r.version + 1,
+      });
+      tx.emit({
+        type: 'input.stale',
+        graphId: work.graphId,
+        workId: work.id,
+        runId: r.runId,
+        payload: { requestId: r.id, targetDigest: target.digest, reason },
+      });
+    }
+  }
+
+  /**
+   * Снимок `contextDigest` несёт источник ответа этого запроса с точным
+   * digest и версией ответа (manifest). Снимок — порта хоста или локальный.
+   */
+  private carriesAnswer(
+    view: ExecutionView,
+    request: InputRequest,
+    answer: InputAnswer,
+    contextDigest: string | null,
+  ) {
+    if (contextDigest === null) return false;
+    const snapshot =
+      this.host.input?.snapshot?.(contextDigest, view) ??
+      view.local('context-snapshots', WORKSPACE_OWNER, contextDigest);
+    const source = snapshot?.sources.find((s) => s.id === inputSourceId(request.id));
+    const manifest = source ? inputManifestOf(source) : undefined;
+    return (
+      !!manifest &&
+      manifest.requestId === request.id &&
+      manifest.answerDigest === answer.digest &&
+      manifest.revision === answer.revision
+    );
+  }
+
+  /** Основание продолжения без digest: исходное, ответ, текущие основания, контекст, ревью, актёр. */
+  private targetOf(
+    view: ExecutionView,
+    request: InputRequest,
+    work: WorkState,
+    contextDigest: string | null,
+    review: InputTarget['review'],
+    actor: TechnicalApproval['actor'],
+  ): Omit<InputTarget, 'digest'> {
+    return {
+      originDigest: digestOf(request.originBasis),
+      answerDigest: latestAnswer(request)!.digest,
+      graphDigest: view.graph(work.graphId)!.digest,
+      orderDigest: this.host.basis.orderDigest(work, view),
+      contentDigest: contentDigest(work.order),
+      policyDigest: this.host.basis.policyDigest(work, view),
+      contextDigest,
+      review,
+      actor,
+    };
+  }
+
+  /**
+   * Предложить основание продолжения для снимка `contextDigest` (только
+   * чтение): digest, который назовёт `applyInput`, и причины, по которым
+   * применение сейчас откажет. Ничего не пишет и не активирует.
+   */
+  proposeTarget(id: string, contextDigest: string | null, actor = this.policy.approvalMode) {
+    return this.read((v) => {
+      const { request } = this.requestIn(v, id);
+      const work = v.work(request.workId);
+      if (!work) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + request.workId);
+      const problems: string[] = [];
+      if (request.kind !== 'question') problems.push('неблокирующий запрос не применяется');
+      if (request.lifecycle !== 'answered')
+        problems.push(`запрос ${request.lifecycle}, нужен answered`);
+      // Та же проверка исходной остановки, что у applyInput, — с выходом.
+      const last = v.attempts(work.id).at(-1);
+      const atOrigin =
+        (work.status === 'failed' && work.failureKind === 'needs-input') || work.status === 'ready';
+      if (!atOrigin || last?.id !== request.runId || this.orderMoved(v, work, request.originBasis))
+        problems.push(
+          'работа уже не в исходной остановке (новая редакция постановки или другая попытка): выход — supersedeInput и перенос ответа в контекст новой редакции (input-context, review-plan, согласование)',
+        );
+      const answer = latestAnswer(request);
+      if (!answer) {
+        problems.push('ответа нет');
+        return { request, problems };
+      }
+      if (answer.kind !== 'clarification')
+        problems.push('ответ — изменение требований: новая ревизия, не продолжение');
+      if (!this.carriesAnswer(v, request, answer, contextDigest))
+        problems.push('снимок контекста не содержит этот ответ');
+      // Те же проверки, что у applyInput: барьер политики (только чтение) и
+      // правила согласования — причинами, а не исключением.
+      const stale = this.staleReason(v);
+      if (stale) problems.push(stale);
+      let review: InputTarget['review'] = null;
+      try {
+        review = this.targetReview(v, work, contextDigest, actor, {
+          id: request.id,
+          answerDigest: answer.digest,
+          mode: 'apply',
+        }).review;
+      } catch (error) {
+        if (!(error instanceof HarnessError)) throw error;
+        problems.push(error.message);
+      }
+      const target = this.targetOf(v, request, work, contextDigest, review, actor);
+      const active = activeOf(v).filter((a) => v.work(a.workId)?.graphId === work.graphId);
+      if (active.length)
+        problems.push('в графе идут попытки: ' + active.map((a) => a.id).join(', '));
+      return {
+        request,
+        target: { ...target, digest: targetDigest(target) },
+        problems,
+      };
+    });
+  }
+
+  /**
+   * Применить ответ одной транзакцией: проверить точную версию запроса и
+   * digest ответа, исходное основание (поручение всё ещё в этой остановке),
+   * актуальность политики, раунд ревью снимка с ответом и актёра — теми же
+   * проверками, что `approve` (`approvalCheck`) и `retry` (`retryIn`), —
+   * пересчитать основание продолжения и сверить его с `targetDigest`;
+   * затем активировать согласование снимка, записать `applied` и цель и
+   * вернуть поручение в очередь обычным повтором (без сброса, если сброс не
+   * назван явно). Модель не вызывается; пауза оператора и чужие удержания
+   * остаются.
+   *
+   * Без изменения запроса и согласования: идут попытки графа или совместная проверка — `{ applied:
+   * false, active }` (их согласование не обесценивается); исчерпаны попытки
+   * или бюджет — `{ applied: false, blocker }`, запрос остаётся `answered`.
+   * Повтор того же применения — `{ applied: true, changed: false }`, второй
+   * попытки нет.
+   */
+  applyInput(
+    id: string,
+    options: {
+      answerDigest: string;
+      expectedVersion: number;
+      /** Снимок контекста с ответом, прошедший ревью (`null` — без контекста). */
+      contextDigest: string | null;
+      targetDigest: string;
+      actor: TechnicalApproval['actor'];
+      /** Сброс исчерпанных попыток — с причиной, как у `retry`. */
+      reset?: { reason: string };
+    },
+  ) {
+    return this.tx('input.applied', (tx) => {
+      const { owner, request } = this.requestIn(tx, id);
+      const answer = latestAnswer(request);
+      if (request.kind !== 'question' || !request.blocking)
+        throw new HarnessError('INVALID_INPUT', `Запрос ${id} неблокирующий: применять нечего`);
+      if (request.lifecycle === 'applied') {
+        if (
+          answer?.digest === options.answerDigest &&
+          request.target?.digest === options.targetDigest
+        )
+          return { applied: true as const, changed: false, request };
+        throw new HarnessError(
+          'REVISION_CONFLICT',
+          `Запрос ${id} уже применён с другим ответом или основанием`,
+        );
+      }
+      if (request.lifecycle === 'pending')
+        throw new HarnessError('INPUT_REQUIRED', `На вопрос ${id} ещё нет ответа`);
+      if (request.lifecycle !== 'answered')
+        throw new HarnessError('NOT_READY', `Запрос ${id} ${request.lifecycle}`);
+      this.expectVersion(request, options.expectedVersion);
+      if (!answer || answer.digest !== options.answerDigest)
+        throw new HarnessError(
+          'APPROVAL_STALE',
+          `Ответ на запрос ${id} изменился: применяется только последний ответ`,
+        );
+      if (answer.kind !== 'clarification')
+        throw new HarnessError(
+          'INVALID_INPUT',
+          'Ответ меняет требования: это новая ревизия (supersedeInput), а не продолжение работы',
+        );
+      const work = tx.work(request.workId);
+      if (!work) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + request.workId);
+      // Работа всё ещё в той остановке, из которой задан вопрос: устаревший
+      // ответ не применяется к другой работе или другой попытке.
+      const last = tx.attempts(work.id).at(-1);
+      // Готовая без новой попытки — после устаревшего применения (`stale`).
+      const atOrigin =
+        (work.status === 'failed' && work.failureKind === 'needs-input') || work.status === 'ready';
+      if (!atOrigin || last?.id !== request.runId)
+        throw new HarnessError(
+          'NOT_READY',
+          `Поручение ${work.id} уже не в остановке попытки ${request.runId}: ответ не применяется`,
+        );
+      // Своя постановка, а не весь граф: другие работы графа меняются своим
+      // чередом (у хоста граф — активная ревизия доски).
+      if (this.orderMoved(tx, work, request.originBasis))
+        throw new HarnessError(
+          'APPROVAL_STALE',
+          'Постановка работы изменилась после вопроса: продолжение этой остановки невозможно. Выход с сохранением ответа — supersedeInput (преемник — новая редакция работы), затем снимок с ответом (input-context), review-plan с ним и обычное согласование',
+        );
+      const contextDigest = options.contextDigest;
+      // Политика процесса применена — и у хоста с портом согласования.
+      this.assertCurrentPolicy(tx);
+      const targetRequest = { id, answerDigest: answer.digest, mode: 'apply' as const };
+      const { review, checked } = this.targetReview(
+        tx,
+        work,
+        contextDigest,
+        options.actor,
+        targetRequest,
+      );
+      const target: Omit<InputTarget, 'digest'> = this.targetOf(
+        tx,
+        request,
+        work,
+        contextDigest,
+        review,
+        options.actor,
+      );
+      const digest = targetDigest(target);
+      if (digest !== options.targetDigest)
+        throw new HarnessError(
+          'APPROVAL_STALE',
+          'Основание продолжения изменилось после предложения (proposeTarget); предложите заново',
+        );
+      // Снимок обязан нести ровно этот ответ этого запроса.
+      if (!this.carriesAnswer(tx, request, answer, contextDigest))
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `Снимок контекста ${contextDigest ?? 'null'} не содержит этот ответ на запрос ${id}`,
+        );
+      // Попытки графа идут под действующим согласованием: новое не
+      // активируется до их окончания.
+      const active = activeOf(tx).filter((a) => tx.work(a.workId)?.graphId === work.graphId);
+      if (active.length || this.liveJoint(tx))
+        return {
+          applied: false as const,
+          changed: false,
+          request,
+          active: active.map((a) => ({ id: a.id, workId: a.workId })),
+          ...(this.liveJoint(tx) ? { joint: true } : {}),
+        };
+      const exhausted = work.attempt >= this.policy.maxAttempts || neutralExhausted(work);
+      if (exhausted && !options.reset?.reason.trim())
+        return {
+          applied: false as const,
+          changed: false,
+          request,
+          blocker: {
+            code: 'ATTEMPTS_EXHAUSTED' as const,
+            message: `Исчерпано ${work.attempt} из ${this.policy.maxAttempts} попыток; ответ сохранён, продолжение — со сбросом и причиной`,
+          },
+        };
+      const budget = this.budgetBlockOf(work.id, tx);
+      if (budget)
+        return {
+          applied: false as const,
+          changed: false,
+          request,
+          blocker: { code: 'BUDGET_EXHAUSTED' as const, message: budget },
+        };
+      const full: InputTarget = { ...target, digest };
+      if (this.host.input) this.host.input.activate(tx, work, full, targetRequest);
+      else
+        this.activateApproval(tx, checked!.graph, checked!.last, options.actor, {
+          bindContext: true,
+        });
+      // Прежнее устаревшее основание — история события `input.stale`.
+      const { stale: _stale, ...current } = request;
+      void _stale;
+      const next: InputRequest = {
+        ...current,
+        lifecycle: 'applied',
+        target: full,
+        version: request.version + 1,
+      };
+      tx.putLocal('input-requests', owner, id, next);
+      const retried = this.retryIn(
+        tx,
+        tx.work(work.id)!,
+        options.reset,
+        options.actor === 'operator' ? 'operator' : 'recovery',
+      );
+      tx.emit({
+        type: 'input.applied',
+        graphId: work.graphId,
+        workId: work.id,
+        runId: request.runId,
+        payload: {
+          requestId: id,
+          answerDigest: answer.digest,
+          targetDigest: digest,
+          contextDigest,
+          retried: retried.changed,
+        },
+      });
+      return { applied: true as const, changed: true, request: next, work: retried.work };
+    });
+  }
+
+  /**
+   * Предложить основание переноса ответа заменённого запроса (только
+   * чтение): digest, который назовёт `carryInput`, и причины, по которым
+   * перенос сейчас откажет.
+   */
+  proposeCarry(id: string, contextDigest: string, actor = this.policy.approvalMode) {
+    return this.read((v) => {
+      const { request } = this.requestIn(v, id);
+      const work = v.work(request.workId);
+      if (!work) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + request.workId);
+      const problems: string[] = [];
+      if (request.lifecycle !== 'superseded')
+        problems.push(`запрос ${request.lifecycle}, нужен superseded`);
+      const answer = latestAnswer(request);
+      if (!answer) return { request, problems: [...problems, 'ответа нет'] };
+      if (!this.carryAllowed(v, request))
+        problems.push('правило переноса не позволяет перенести ответ');
+      if (!this.carriesAnswer(v, request, answer, contextDigest))
+        problems.push('снимок контекста не содержит последний ответ');
+      const stale = this.staleReason(v);
+      if (stale) problems.push(stale);
+      let review: InputTarget['review'] = null;
+      try {
+        review = this.targetReview(v, work, contextDigest, actor, {
+          id,
+          answerDigest: answer.digest,
+          mode: 'carry',
+        }).review;
+      } catch (error) {
+        if (!(error instanceof HarnessError)) throw error;
+        problems.push(error.message);
+      }
+      const active = activeOf(v).filter((a) => v.work(a.workId)?.graphId === work.graphId);
+      if (active.length)
+        problems.push('в графе идут попытки: ' + active.map((a) => a.id).join(', '));
+      const target = this.targetOf(v, request, work, contextDigest, review, actor);
+      return { request, target: { ...target, digest: targetDigest(target) }, problems };
+    });
+  }
+
+  /**
+   * Перенести ответ заменённого запроса в действующее согласование работы —
+   * у хоста с портом согласования так же, как у standalone. Одна
+   * транзакция: правило переноса (`carryAllowed`), снимок несёт ровно
+   * последний ответ и не несёт неприменённых, политика процесса применена,
+   * ревью снимка и актёр — по правилам хоста или `approvalRules`, в графе нет
+   * идущих попыток и совместной проверки; затем активация (`InputHost.activate`
+   * с `mode: 'carry'` или согласование графа), цель записывается в запрос
+   * (он остаётся `superseded`), и упавшая работа возвращается в очередь
+   * обычным повтором. Модель не вызывается; повтор того же переноса —
+   * `{ carried: true, changed: false }`.
+   */
+  carryInput(
+    id: string,
+    options: {
+      /** Снимок с ответом, прошедший ревью. */
+      contextDigest: string;
+      actor: TechnicalApproval['actor'];
+      /** Версия запроса, которую видел вызывающий (CAS). */
+      expectedVersion: number;
+      /** Digest основания из `proposeCarry`: перенос — на том ревью, которое видел вызывающий. */
+      targetDigest: string;
+      /** Сброс исчерпанных попыток упавшей работы — с причиной, как у `retry`. */
+      reset?: { reason: string };
+    },
+  ) {
+    return this.tx('input.applied', (tx) => {
+      const { owner, request } = this.requestIn(tx, id);
+      if (request.kind !== 'question' || !request.blocking)
+        throw new HarnessError('INVALID_INPUT', `Запрос ${id} неблокирующий: переносить нечего`);
+      if (request.lifecycle !== 'superseded')
+        throw new HarnessError(
+          'NOT_READY',
+          `Запрос ${id} ${request.lifecycle}: перенос — только для заменённого (supersedeInput); продолжение остановки — applyInput`,
+        );
+      const answer = latestAnswer(request);
+      if (!answer) throw new HarnessError('INPUT_REQUIRED', `На вопрос ${id} нет ответа`);
+      if (
+        request.target?.digest === options.targetDigest &&
+        request.target.answerDigest === answer.digest
+      )
+        return { carried: true as const, changed: false, request };
+      this.expectVersion(request, options.expectedVersion);
+      if (!this.carryAllowed(tx, request))
+        throw new HarnessError(
+          'INPUT_REQUIRED',
+          answer.kind === 'requirement-change'
+            ? `Изменение требований переносится, только если изменилась постановка работы ${request.workId}`
+            : `Исходная остановка запроса ${id} держится: продолжение — applyInput, а не перенос`,
+        );
+      if (!this.carriesAnswer(tx, request, answer, options.contextDigest))
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `Снимок ${options.contextDigest} не содержит последний ответ на запрос ${id}`,
+        );
+      const snapshot =
+        this.host.input?.snapshot?.(options.contextDigest, tx) ??
+        tx.local('context-snapshots', WORKSPACE_OWNER, options.contextDigest);
+      const unapplied = this.unappliedInputs(tx, snapshot);
+      if (unapplied.length)
+        throw new HarnessError(
+          'INPUT_REQUIRED',
+          'Снимок содержит неприменённый ответ: ' +
+            unapplied.map((u) => `${u.requestId ?? u.source} (${u.reason})`).join(', '),
+        );
+      const work = tx.work(request.workId);
+      if (!work) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + request.workId);
+      if (work.status === 'cancelled' || work.status === 'done')
+        throw new HarnessError(
+          'NOT_READY',
+          `Поручение ${work.id} ${work.status}: переносить некуда`,
+        );
+      this.assertCurrentPolicy(tx);
+      const targetRequest = { id, answerDigest: answer.digest, mode: 'carry' as const };
+      const { review, checked } = this.targetReview(
+        tx,
+        work,
+        options.contextDigest,
+        options.actor,
+        targetRequest,
+      );
+      const active = activeOf(tx).filter((a) => tx.work(a.workId)?.graphId === work.graphId);
+      if (active.length || this.liveJoint(tx))
+        return {
+          carried: false as const,
+          changed: false,
+          request,
+          active: active.map((a) => ({ id: a.id, workId: a.workId })),
+          ...(this.liveJoint(tx) ? { joint: true } : {}),
+        };
+      const target = this.targetOf(tx, request, work, options.contextDigest, review, options.actor);
+      const full: InputTarget = { ...target, digest: targetDigest(target) };
+      if (full.digest !== options.targetDigest)
+        throw new HarnessError(
+          'APPROVAL_STALE',
+          'Основание переноса изменилось после предложения (proposeCarry); предложите заново',
+        );
+      // Пределы — до активации, как у applyInput: согласование не
+      // переключается под работу, которую сейчас не выдать.
+      const stopped = work.status === 'failed' && work.failureKind === 'needs-input';
+      if (
+        stopped &&
+        (work.attempt >= this.policy.maxAttempts || neutralExhausted(work)) &&
+        !options.reset?.reason.trim()
+      )
+        return {
+          carried: false as const,
+          changed: false,
+          request,
+          blocker: {
+            code: 'ATTEMPTS_EXHAUSTED' as const,
+            message: `Исчерпано ${work.attempt} из ${this.policy.maxAttempts} попыток; перенос — со сбросом и причиной`,
+          },
+        };
+      const budget = this.budgetBlockOf(work.id, tx);
+      if (budget)
+        return {
+          carried: false as const,
+          changed: false,
+          request,
+          blocker: { code: 'BUDGET_EXHAUSTED' as const, message: budget },
+        };
+      if (this.host.input) this.host.input.activate(tx, work, full, targetRequest);
+      else
+        this.activateApproval(tx, checked!.graph, checked!.last, options.actor, {
+          bindContext: true,
+        });
+      const { stale: _stale, ...current0 } = request;
+      void _stale;
+      const next: InputRequest = { ...current0, target: full, version: request.version + 1 };
+      tx.putLocal('input-requests', owner, id, next);
+      const current = tx.work(work.id)!;
+      // В очередь возвращается только работа, остановленная вопросом; иной
+      // отказ после редакции — решение по его правилам, не перенос ответа.
+      const retried =
+        current.status === 'failed' && current.failureKind === 'needs-input'
+          ? this.retryIn(
+              tx,
+              current,
+              options.reset,
+              options.actor === 'operator' ? 'operator' : 'recovery',
+            )
+          : { work: current, changed: false };
+      tx.emit({
+        type: 'input.applied',
+        graphId: work.graphId,
+        workId: work.id,
+        runId: request.runId,
+        payload: {
+          requestId: id,
+          answerDigest: answer.digest,
+          targetDigest: full.digest,
+          contextDigest: options.contextDigest,
+          retried: retried.changed,
+        },
+      });
+      return { carried: true as const, changed: true, request: next, work: retried.work };
+    });
+  }
+
+  /**
+   * Ответ передан исполнителю: начался вызов runtime попытки, выданной с этим
+   * ответом (`AttemptState.input`). Под fencing попытки и один раз: ни apply,
+   * ни claim доставку не подтверждают.
+   */
+  inputDelivered(id: string, token: string, callId: string) {
+    return this.withAttempt(id, token, 'input.delivered', (a, w, tx) => {
+      if (!a.input) return false;
+      const request = requestsOf(tx, w).find((r) => r.id === a.input!.requestId);
+      if (
+        !request ||
+        request.delivered ||
+        !linksAnswer(request) ||
+        request.target?.digest !== a.input.targetDigest
+      )
+        return false;
+      tx.putLocal('input-requests', w.order.repositoryId, request.id, {
+        ...request,
+        delivered: { runId: a.id, callId, at: iso(this.now()) },
+        version: request.version + 1,
+      });
+      tx.emit({
+        type: 'input.delivered',
+        graphId: w.graphId,
+        workId: w.id,
+        runId: a.id,
+        attempt: a.attempt,
+        payload: { requestId: request.id, answerDigest: a.input.answerDigest, callId },
+      });
+      return true;
     });
   }
 
@@ -2962,6 +4242,8 @@ export class Engine {
         failureKind: 'cancelled',
       };
       tx.putWork(next);
+      // Отмена работы закрывает её вопросы: поздний ответ работу не возобновит.
+      this.closeRequestsOf(tx, w, by === 'graph' ? 'controller' : by);
       tx.emit({
         type: 'work.cancelled',
         graphId: w.graphId,
@@ -2984,36 +4266,60 @@ export class Engine {
     return this.tx('task.retry', (tx) => {
       const w = tx.work(workId);
       if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
-      const exhausted = w.attempt >= this.policy.maxAttempts || neutralExhausted(w);
-      if (w.status === 'ready' && !exhausted) return { work: w, changed: false };
-      if (!['failed', 'cancelled'].includes(w.status) && !(exhausted && !w.activeRunId))
-        throw new HarnessError('NOT_READY', 'Повтор доступен после отказа или отмены');
-      if (exhausted && !reset?.reason.trim())
-        throw new HarnessError(
-          'ATTEMPTS_EXHAUSTED',
-          'Исчерпан лимит попыток; повторите со сбросом и причиной',
-        );
-      const next: WorkState = {
-        ...w,
-        status: w.approvedDigest ? 'ready' : 'draft',
-        attempt: exhausted ? 0 : w.attempt,
-        neutralFailures: exhausted ? undefined : w.neutralFailures,
-        failure: undefined,
-        failureKind: undefined,
-        failureFingerprint: undefined,
-      };
-      tx.putWork(next);
-      tx.emit({
-        type: 'work.retried',
-        graphId: w.graphId,
-        workId,
-        payload: {
-          by,
-          reset: exhausted,
-          ...(exhausted ? { spent: w.attempt, reasonLength: reset!.reason.trim().length } : {}),
-        },
-      });
-      return { work: next, changed: true };
+      return this.retryIn(tx, w, reset, by);
     });
+  }
+
+  /**
+   * Повтор поручения внутри транзакции (`retry`): правила — те же, что у
+   * `retry`, — пока попытки не исчерпаны, без сброса; исчерпаны — только
+   * явный сброс с причиной. Общий для `retry` и `applyInput`.
+   */
+  retryIn(
+    tx: ExecutionTransaction,
+    w: WorkState,
+    reset: { reason: string } | undefined,
+    by: RetryActor,
+  ) {
+    const workId = w.id;
+    // Вопрос исполнителя без применённого ответа: ни обычный повтор, ни
+    // сброс попыток его не обходят — продолжение только через applyInput
+    // (он отмечает запрос применённым до повтора).
+    const question = blockingRequest(tx, w);
+    if (question)
+      throw new HarnessError(
+        'INPUT_REQUIRED',
+        `Поручение ждёт ${question.lifecycle === 'pending' ? 'ответа' : 'применения ответа'} на вопрос исполнителя ${question.id}; повтор без ответа запрещён`,
+      );
+    const exhausted = w.attempt >= this.policy.maxAttempts || neutralExhausted(w);
+    if (w.status === 'ready' && !exhausted) return { work: w, changed: false };
+    if (!['failed', 'cancelled'].includes(w.status) && !(exhausted && !w.activeRunId))
+      throw new HarnessError('NOT_READY', 'Повтор доступен после отказа или отмены');
+    if (exhausted && !reset?.reason.trim())
+      throw new HarnessError(
+        'ATTEMPTS_EXHAUSTED',
+        'Исчерпан лимит попыток; повторите со сбросом и причиной',
+      );
+    const next: WorkState = {
+      ...w,
+      status: w.approvedDigest ? 'ready' : 'draft',
+      attempt: exhausted ? 0 : w.attempt,
+      neutralFailures: exhausted ? undefined : w.neutralFailures,
+      failure: undefined,
+      failureKind: undefined,
+      failureFingerprint: undefined,
+    };
+    tx.putWork(next);
+    tx.emit({
+      type: 'work.retried',
+      graphId: w.graphId,
+      workId,
+      payload: {
+        by,
+        reset: exhausted,
+        ...(exhausted ? { spent: w.attempt, reasonLength: reset!.reason.trim().length } : {}),
+      },
+    });
+    return { work: next, changed: true };
   }
 }

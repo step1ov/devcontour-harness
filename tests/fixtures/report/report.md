@@ -100,6 +100,7 @@ Failed attempts: 7, of them 6 classified; attempts interrupted by shutdown are n
 | budget | 0 |
 | unknown | 0 |
 | unclassified (legacy) | 1 |
+| stopped for a question (needs input) | 0 |
 
 - Environment failures cost 2 min of machine time and $0.00 known spend; blocked before work (not counted as an attempt): 1; queue stops caused by the environment: 1.
 - Integration check rechecks: 0 flaky (false rejection avoided), 0 confirmed.

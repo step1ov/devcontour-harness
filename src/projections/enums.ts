@@ -20,6 +20,10 @@ export const nextActions = [
   'resume-queue',
   'fix-environment',
   'fix-access',
+  /** Ответить на вопрос исполнителя (оператор или ведущий). */
+  'answer-input',
+  /** Подготовить контекст с ответом, провести его ревью и применить (ведущий). */
+  'apply-input',
 ] as const;
 export type NextAction = (typeof nextActions)[number];
 

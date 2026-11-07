@@ -49,6 +49,8 @@ export const failureBuckets = [
   'budget',
   'unknown',
   'unclassified',
+  /** Остановка с вопросом исполнителя (`needs-input`): не дефект кода. */
+  'input',
 ] as const;
 export type FailureBucket = (typeof failureBuckets)[number];
 
@@ -401,7 +403,9 @@ export const valueReportSchema = z.strictObject({
       usd,
       totalUsd: usd,
       attempts: count,
-      byBucket: z.array(z.strictObject({ bucket: z.enum(failureBuckets), usd })).max(10),
+      byBucket: z
+        .array(z.strictObject({ bucket: z.enum(failureBuckets), usd }))
+        .max(failureBuckets.length),
     }),
     byStage: z
       .array(z.strictObject({ stage: label, calls: count, knownUsd: usd, unknownCalls: count }))
@@ -418,7 +422,9 @@ export const valueReportSchema = z.strictObject({
     failed: count,
     classified: count,
     interrupted: count,
-    buckets: z.array(z.strictObject({ bucket: z.enum(failureBuckets), count })).length(10),
+    buckets: z
+      .array(z.strictObject({ bucket: z.enum(failureBuckets), count }))
+      .length(failureBuckets.length),
     /** Отказы окружения среди классифицированных; `lower`, если есть отказы gate подготовки. */
     share: reportMeasureSchema,
     /** Отказы `defect` только в gates подготовки: возможно, тоже окружение (сеть, реестр). */
@@ -466,6 +472,28 @@ export const valueReportSchema = z.strictObject({
     earlier: weekEarlierSchema.nullable(),
     active: count,
   }),
+  /**
+   * Вопросы исполнителя в окне (по времени запроса): только числа — ни
+   * вопроса, ни ответа в отчёте нет. `awaitingAnswer` — ждут ответа,
+   * `answeredNotApplied` — ответ записан, не применён, `appliedAwaitingClaim`
+   * — применён, вызова ещё не было, `delivered` — передан исполнителю,
+   * `closed` — отменены или заменены, `declined` — вопросы ниже порога,
+   * `followUps` — неблокирующие запросы ведущему, `assumptions` — решения
+   * исполнителя в попытках окна. Нет поля — отчёт без сведений о вопросах.
+   */
+  inputs: z
+    .strictObject({
+      questions: count,
+      awaitingAnswer: count,
+      answeredNotApplied: count,
+      appliedAwaitingClaim: count,
+      delivered: count,
+      closed: count,
+      declined: count,
+      followUps: count,
+      assumptions: count,
+    })
+    .optional(),
   works: z.strictObject({
     rows: z.array(workRowSchema).max(REPORT_LIMITS.works),
     total: count,
