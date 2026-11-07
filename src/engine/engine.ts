@@ -37,7 +37,9 @@ import {
   type InputOutcome,
   type InputRequest,
   type InputTarget,
+  type ContextSnapshot,
   INPUT_LIMITS,
+  INPUT_SOURCE_KIND,
   answerDigest,
   inputAnswerSchema,
   inputRequestSchema,
@@ -545,16 +547,18 @@ export class Engine {
       // Снимок с ответом на вопрос исполнителя становится действующим только
       // через applyInput: обходное согласование его не активирует.
       if (options.bindContext && last.contextDigest) {
-        const unapplied = unappliedInputs(
-          tx,
-          tx.local('context-snapshots', WORKSPACE_OWNER, last.contextDigest),
-        );
+        const snapshot = tx.local('context-snapshots', WORKSPACE_OWNER, last.contextDigest);
+        const unapplied = unappliedInputs(tx, snapshot);
         if (unapplied.length)
           throw new HarnessError(
             'INPUT_REQUIRED',
             'Снимок контекста содержит неприменённый ответ на вопрос исполнителя; активирует его только applyInput: ' +
               unapplied.map((u) => `${u.requestId ?? u.source} (${u.reason})`).join(', '),
           );
+        // Новый ответ в снимке не становится действующим под идущими
+        // попытками графа (H02-I) — и через обычное согласование.
+        const busy = this.inputActivationRefusal(tx, graphId, snapshot);
+        if (busy) throw new HarnessError('NOT_READY', busy);
       }
       return this.activateApproval(tx, graph, last, actor, options);
     });
@@ -2431,6 +2435,9 @@ export class Engine {
         by: input.by,
         reason: reason.slice(0, 1000),
         ...(input.successor ? { successor: input.successor } : {}),
+        // Перенос ответа в контекст новой редакции — только когда исходная
+        // остановка уже не держится; иначе продолжение — только applyInput.
+        ...(lifecycle === 'superseded' ? { carry: !this.originHolds(tx, request) } : {}),
       };
       invalidInput('Закрытие запроса', inputRequestSchema.shape.closed.safeParse(closed));
       return { request: this.closeIn(tx, owner, request, lifecycle, closed), changed: true };
@@ -2513,6 +2520,48 @@ export class Engine {
       },
       checked,
     };
+  }
+
+  /**
+   * Исходная остановка запроса держится: работа на попытке вопроса
+   * (остановлена needs-input или готова после устаревшего применения), граф
+   * и постановка — те же. Тогда продолжение — только `applyInput`.
+   */
+  private originHolds(view: ExecutionView, request: InputRequest) {
+    const work = view.work(request.workId);
+    if (!work) return false;
+    const atOrigin =
+      (work.status === 'failed' && work.failureKind === 'needs-input') || work.status === 'ready';
+    return (
+      atOrigin &&
+      view.attempts(work.id).at(-1)?.id === request.runId &&
+      view.graph(work.graphId)?.digest === request.originBasis.graphDigest &&
+      this.host.basis.orderDigest(work, view) === request.originBasis.orderDigest
+    );
+  }
+
+  /**
+   * Почему снимок с ответами нельзя сделать действующим сейчас: в нём
+   * источник ответа, которого нет в действующем согласовании, а в графе идут
+   * попытки — их согласование обесценилось бы (H02-I). `undefined` — можно.
+   */
+  inputActivationRefusal(
+    view: ExecutionView,
+    graphId: string,
+    snapshot: ContextSnapshot | undefined,
+  ) {
+    const sources = (snapshot?.sources ?? []).filter((s) => s.kind === INPUT_SOURCE_KIND);
+    if (!sources.length) return undefined;
+    const digest = view.graph(graphId)?.approval?.context?.digest;
+    const current = digest ? view.local('context-snapshots', WORKSPACE_OWNER, digest) : undefined;
+    const added = sources.filter(
+      (s) => !current?.sources.some((c) => c.id === s.id && c.digest === s.digest),
+    );
+    if (!added.length) return undefined;
+    const active = activeOf(view).filter((a) => view.work(a.workId)?.graphId === graphId);
+    return active.length
+      ? `в графе идут попытки (${active.map((a) => a.id).join(', ')}): снимок с новым ответом станет действующим после их окончания`
+      : undefined;
   }
 
   /** Действующий снимок контекста поручения для выдачи (`pinned.contextDigest`). */

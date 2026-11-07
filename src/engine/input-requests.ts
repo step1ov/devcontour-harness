@@ -158,11 +158,15 @@ export function inputManifestOf(source: ContextSourceEntry): InputManifest | und
  * новой редакции. Запрос закрыт, блокировки нет; снимок называет ровно один
  * из записанных ответов.
  */
-export const carried = (request: InputRequest, manifest: InputManifest) =>
-  request.lifecycle === 'superseded' &&
-  request.answers.some(
-    (a) => a.digest === manifest.answerDigest && a.revision === manifest.revision,
+export const carried = (request: InputRequest, manifest: InputManifest) => {
+  const last = request.answers.at(-1);
+  return (
+    request.lifecycle === 'superseded' &&
+    request.closed?.carry === true &&
+    last?.digest === manifest.answerDigest &&
+    last.revision === manifest.revision
   );
+};
 
 /**
  * Источники ответов снимка, которые ещё не применены `applyInput`: запрос не

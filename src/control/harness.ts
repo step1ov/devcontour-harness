@@ -633,6 +633,10 @@ export class Harness {
     // Применённые ответы действующего согласования остаются в нём: запуск с
     // тем же снимком без них — не смена контекста.
     const context = this.withAppliedInputs(graph.id, input.context);
+    // Снимок с новым ответом не активируется под идущими попытками графа —
+    // отказ до платного ревью.
+    const busy = this.engine.read((v) => this.engine.inputActivationRefusal(v, graph.id, context));
+    if (busy) throw new HarnessError('NOT_READY', busy);
     // Согласование связано с контекстом, который видел reviewer плана: снимок
     // хранится по digest, но действующим становится только вместе с
     // согласованием. Другой снимок при том же графе требует нового раунда.

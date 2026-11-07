@@ -948,3 +948,107 @@ test('R2-3: область вне схемы не снимает минимум 
   assert.equal(unknown.inputRequest!.severity, 10);
   assert.equal(evaluateInput(unknown, policy, []).decision.kind, 'stop');
 });
+
+/** Снимок с последним ответом запроса (по digest) и раунд ревью плана этого снимка. */
+function reviewSnapshot(
+  env: ReturnType<typeof stopped>,
+  graph: { id: string; digest: string },
+  answerIndex = -1,
+) {
+  const request = env.engine.inputRequest(env.request.id);
+  const answer = request.answers.at(answerIndex)!;
+  const snapshot = withInput(undefined, inputContextSource(request, answer));
+  const digest = contextDigest(snapshot);
+  env.store.transact('run.context', (tx) =>
+    tx.putLocal('context-snapshots', WORKSPACE_OWNER, digest, snapshot),
+  );
+  env.engine.recordReview({
+    ...planReview(env.engine, graph, env.engine.reviews('plan', graph.id).length + 1),
+    contextDigest: digest,
+  });
+  return digest;
+}
+
+/** Новая редакция графа (та же работа, другая ревизия источника), согласованная без контекста. */
+function revise(env: ReturnType<typeof stopped>) {
+  const { graph } = env.engine.register(graphOf({ w: [], x: [] }, '2'), trustNone);
+  env.engine.recordReview(
+    planReview(env.engine, graph, env.engine.reviews('plan', graph.id).length + 1),
+  );
+  env.engine.approve(graph.id, 'agent');
+  return graph;
+}
+
+test('R2-1: замена при действующей исходной остановке ответ не переносит — изменение требований не возобновляет работу обходом applyInput', () => {
+  const env = stopped();
+  const answered = env.engine.answerInput(
+    env.request.id,
+    { text: 'Новые критерии', kind: 'requirement-change', actor: { kind: 'operator' } },
+    1,
+  ).request;
+  const closed = env.engine.supersedeInput(
+    env.request.id,
+    { by: 'lead', reason: 'изменение требований', successor: 'w' },
+    answered.version,
+  ).request;
+  assert.equal(closed.closed?.carry, false);
+  reviewSnapshot(env, env.graph);
+  assert.equal(
+    code(() => env.engine.approve(env.graph.id, 'agent', { bindContext: true })),
+    'INPUT_REQUIRED',
+  );
+});
+
+test('R2-1: перенесённый ответ не активируется под идущей попыткой соседа; после её окончания — согласуется', () => {
+  const env = stopped();
+  const answered = env.engine.answerInput(
+    env.request.id,
+    { text: 'Hello', actor: { kind: 'operator' } },
+    1,
+  ).request;
+  const graph = revise(env);
+  env.clock.now += 1000;
+  const sibling = env.engine.claim('c1')!;
+  assert.equal(sibling.workId, 'x');
+  const closed = env.engine.supersedeInput(
+    env.request.id,
+    { by: 'lead', reason: 'новая редакция', successor: 'w' },
+    answered.version,
+  ).request;
+  assert.equal(closed.closed?.carry, true);
+  reviewSnapshot(env, graph);
+  const before = env.engine.read((v) => v.graph(graph.id)!.approval);
+  assert.equal(
+    code(() => env.engine.approve(graph.id, 'agent', { bindContext: true })),
+    'NOT_READY',
+  );
+  assert.deepEqual(
+    env.engine.read((v) => v.graph(graph.id)!.approval),
+    before,
+  );
+  env.engine.fail(sibling.id, sibling.token, 'x', { kind: 'gate' });
+  assert.equal(env.engine.approve(graph.id, 'agent', { bindContext: true }).changed, true);
+});
+
+test('R2-1: переносится только последняя версия ответа', () => {
+  const env = stopped();
+  env.engine.answerInput(env.request.id, { text: 'v1', actor: { kind: 'operator' } }, 1);
+  const v2 = env.engine.answerInput(
+    env.request.id,
+    { text: 'v2', actor: { kind: 'operator' } },
+    2,
+  ).request;
+  const graph = revise(env);
+  env.engine.supersedeInput(
+    env.request.id,
+    { by: 'lead', reason: 'редакция', successor: 'w' },
+    v2.version,
+  );
+  reviewSnapshot(env, graph, 0);
+  assert.equal(
+    code(() => env.engine.approve(graph.id, 'agent', { bindContext: true })),
+    'INPUT_REQUIRED',
+  );
+  reviewSnapshot(env, graph);
+  assert.equal(env.engine.approve(graph.id, 'agent', { bindContext: true }).changed, true);
+});

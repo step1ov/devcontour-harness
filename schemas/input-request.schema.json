@@ -538,6 +538,9 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 200
+        },
+        "carry": {
+          "type": "boolean"
         }
       },
       "required": [

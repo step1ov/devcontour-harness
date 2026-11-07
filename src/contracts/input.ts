@@ -273,6 +273,13 @@ export const inputRequestSchema = z.strictObject({
       reason: z.string().min(1).max(1000),
       /** Преемник (новая работа или запрос), у `superseded`. */
       successor: z.string().min(1).max(200).optional(),
+      /**
+       * Только у `superseded`: исходная остановка уже не держалась (новая
+       * редакция графа или постановки, другая попытка) — последний ответ
+       * можно перенести в контекст новой редакции. `false` или нет поля —
+       * перенос запрещён: продолжение остановки — только `applyInput`.
+       */
+      carry: z.boolean().optional(),
     })
     .optional(),
   /**
