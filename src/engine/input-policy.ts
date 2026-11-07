@@ -240,13 +240,38 @@ export function normalizeImplementation(
     if (clamped !== value) issues.push(`${what}: серьёзность ${String(value)} → ${clamped}`);
     return clamped;
   };
+  // Область — без регистра и с распространёнными синонимами. Названная, но
+  // не распознанная область не снимает минимум: серьёзность — потолок.
+  const areaAliases: Record<string, (typeof criticalAreas)[number]> = {
+    contract: 'contract',
+    contracts: 'contract',
+    acceptance: 'acceptance',
+    'acceptance-criteria': 'acceptance',
+    'acceptance criteria': 'acceptance',
+    product: 'product',
+    api: 'api',
+    'public-api': 'api',
+    'public api': 'api',
+    migration: 'migration',
+    migrations: 'migration',
+    'data-migration': 'migration',
+    'data migration': 'migration',
+    'schema-migration': 'migration',
+  };
   const areas = (value: unknown, what: string) => {
     const list = Array.isArray(value) ? value : [];
-    const known = list.filter((a): a is (typeof criticalAreas)[number] =>
-      (criticalAreas as readonly unknown[]).includes(a),
-    );
-    if (known.length !== list.length) issues.push(`${what}: неизвестные области отброшены`);
-    return [...new Set(known)];
+    const known = list
+      .map((a) => areaAliases[text(a).trim().toLowerCase()])
+      .filter((a): a is (typeof criticalAreas)[number] => a !== undefined);
+    const unknown = list.length - known.length;
+    if (unknown) issues.push(`${what}: ${unknown} нераспознанных областей`);
+    return { areas: [...new Set(known)], unmapped: unknown > 0 && !known.length };
+  };
+  /** Серьёзность с минимумом области: названная нераспознанная область — потолок. */
+  const rated = (value: unknown, what: string, affects: ReturnType<typeof areas>) => {
+    if (!affects.unmapped) return severity(value, what);
+    issues.push(`${what}: область названа, но не распознана — серьёзность ${INPUT_SEVERITY_MAX}`);
+    return INPUT_SEVERITY_MAX;
   };
   const q = raw.inputRequest;
   const rawOptions = Array.isArray(q.options) ? q.options.filter(isRecord) : [];
@@ -259,7 +284,9 @@ export function normalizeImplementation(
       .replace(/^-+|-+$/g, '')
       .slice(0, 40);
     if (!id || [...ids.values()].includes(id)) id = `option-${i + 1}`;
-    if (id !== text(o.id)) issues.push(`вариант ${i + 1}: ID «${text(o.id).slice(0, 60)}» → ${id}`);
+    // Исходный ID в запись не попадает: только номер и длина.
+    if (id !== text(o.id))
+      issues.push(`вариант ${i + 1}: ID вне схемы (${text(o.id).length} знаков) → ${id}`);
     ids.set(text(o.id), id);
     const label = clip(o.label, 300, `вариант ${id}`) || id;
     const consequence =
@@ -272,26 +299,30 @@ export function normalizeImplementation(
     typeof q.recommended === 'string' && ids.has(q.recommended) ? ids.get(q.recommended)! : null;
   if (q.recommended !== null && q.recommended !== undefined && recommended === null)
     issues.push('рекомендуемый вариант не из вариантов — снят');
+  const questionAreas = areas(q.affects, 'вопрос');
   const question = {
     question: clip(q.question, INPUT_LIMITS.question, 'вопрос') || 'Вопрос без текста',
     options,
     recommended,
-    severity: severity(q.severity, 'вопрос'),
+    severity: rated(q.severity, 'вопрос', questionAreas),
     rationale: clip(q.rationale, INPUT_LIMITS.rationale, 'основание'),
-    affects: areas(q.affects, 'вопрос'),
+    affects: questionAreas.areas,
   };
   const rawAssumptions = Array.isArray(raw.assumptions) ? raw.assumptions.filter(isRecord) : [];
   if (rawAssumptions.length > INPUT_LIMITS.assumptions)
     issues.push(
       `допущения: ${rawAssumptions.length}, оставлены первые ${INPUT_LIMITS.assumptions}`,
     );
-  const assumptions = rawAssumptions.slice(0, INPUT_LIMITS.assumptions).map((a, i) => ({
-    question: clip(a.question, INPUT_LIMITS.question, `допущение ${i + 1}`) || 'Без текста',
-    chosen: clip(a.chosen, 300, `выбор допущения ${i + 1}`) || 'не назван',
-    rationale: clip(a.rationale, INPUT_LIMITS.rationale, `основание допущения ${i + 1}`),
-    severity: severity(a.severity, `допущение ${i + 1}`),
-    affects: areas(a.affects, `допущение ${i + 1}`),
-  }));
+  const assumptions = rawAssumptions.slice(0, INPUT_LIMITS.assumptions).map((a, i) => {
+    const affects = areas(a.affects, `допущение ${i + 1}`);
+    return {
+      question: clip(a.question, INPUT_LIMITS.question, `допущение ${i + 1}`) || 'Без текста',
+      chosen: clip(a.chosen, 300, `выбор допущения ${i + 1}`) || 'не назван',
+      rationale: clip(a.rationale, INPUT_LIMITS.rationale, `основание допущения ${i + 1}`),
+      severity: rated(a.severity, `допущение ${i + 1}`, affects),
+      affects: affects.areas,
+    };
+  });
   if (raw.completed !== false)
     issues.push('completed: true вместе с вопросом — работа считается незавершённой');
   const parsed = implementationResultSchema.safeParse({

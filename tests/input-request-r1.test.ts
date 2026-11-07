@@ -374,7 +374,8 @@ test('M-6: вопрос вне схемы (длинный текст, ID с пр
   );
   assert.equal(request!.question.recommended, 'Option-A');
   assert.ok(request!.normalized?.some((n) => /усечено до 1500/.test(n)));
-  assert.ok(request!.normalized?.some((n) => /Option A/.test(n)));
+  assert.ok(request!.normalized?.some((n) => /ID вне схемы \(8 знаков\) → Option-A/.test(n)));
+  assert.ok(!request!.normalized?.some((n) => /Option A/.test(n)), 'исходный ID не повторяется');
 });
 
 test('M-6: пределы названы в запросе writer; ответ вне схемы без вопроса не исправляется', () => {
@@ -848,4 +849,102 @@ test('m-11: вызов writer, который не запустился (unavail
   ctx.engine.resume();
   await ctx.runner.drain();
   assert.ok(ctx.engine.inputRequest(request!.id).delivered, 'вызов writer состоялся');
+});
+
+/** Библиотечный адаптер без маски: подменяет ответ writer после CLI fixture. */
+const rewriting =
+  (change: (output: Record<string, unknown>) => void) =>
+  (inner: RuntimeAdapter): RuntimeAdapter => ({
+    runtime: inner.runtime,
+    capabilities: () => inner.capabilities(),
+    invoke: async (request, signal) => {
+      const response = await inner.invoke(request, signal);
+      if (request.task !== 'implement') return response;
+      const output = structuredClone(response.output) as Record<string, unknown>;
+      change(output);
+      return { ...response, output };
+    },
+  });
+
+async function leakRun(change: (output: Record<string, unknown>) => void) {
+  process.env.HARNESS_TEST_INPUT_SECRET = 'tok-7f';
+  try {
+    const ctx = setup({
+      scenario: {
+        writer: {
+          files: { 'src/greet.js': "exports.greet = () => 'draft';\n" },
+          result: {
+            completed: false,
+            summary: 'вопрос',
+            discoveries: [],
+            inputRequest: question(9),
+            assumptions: [],
+          },
+        },
+      },
+      policy: (p) => {
+        p.inputPolicy = { threshold: 7, criticalPaths: [] };
+        (p as { environment: { secrets: Record<string, string> } }).environment.secrets = {
+          TOKEN: 'HARNESS_TEST_INPUT_SECRET',
+        };
+      },
+      runner: {
+        adapters: {
+          claude: rewriting(change)(cliAdapter('claude', { executable: bin('fake-claude') })),
+          codex: cliAdapter('codex', { executable: bin('fake-codex') }),
+        },
+      },
+    });
+    await runAll(ctx);
+    const work = ctx.engine.read((v) => v.work('add-greeting')!);
+    const [request] = ctx.engine.inputRequests({ workId: 'add-greeting' });
+    return { work, request };
+  } finally {
+    delete process.env.HARNESS_TEST_INPUT_SECRET;
+  }
+}
+
+test('R2-2: секрет в ID варианта вне схемы — ни в исправленном вопросе, ни в записи исправлений', async () => {
+  const { work, request } = await leakRun((output) => {
+    const q = output.inputRequest as InputQuestion;
+    q.options[0]!.id = 'use tok-7f3a9c';
+    q.recommended = 'use tok-7f3a9c';
+  });
+  assert.equal(work.failureKind, 'needs-input', work.failure);
+  assert.ok(request!.normalized?.length);
+  assert.doesNotMatch(JSON.stringify(request), /tok-7f/);
+});
+
+test('R2-7: вопрос на пределе длины с секретом — после маски он длиннее предела, но вопрос записан, а не потерян', async () => {
+  const { work, request } = await leakRun((output) => {
+    const q = output.inputRequest as InputQuestion;
+    // Маска `[REDACTED]` длиннее секрета: 1500 знаков становятся 1504.
+    q.question = 'Q'.repeat(1493) + ' tok-7f';
+  });
+  assert.equal(work.failureKind, 'needs-input', work.failure);
+  assert.ok(request!.question.question.length <= 1500);
+  assert.doesNotMatch(JSON.stringify(request), /tok-7f/);
+});
+
+test('R2-3: область вне схемы не снимает минимум — синоним распознан, нераспознанная даёт потолок', () => {
+  const ask = (affects: unknown[]) =>
+    normalizeImplementation({
+      completed: false,
+      summary: 's',
+      inputRequest: {
+        ...question(4),
+        options: [{ id: 'Option A', label: 'A', consequence: null }],
+        recommended: null,
+        affects,
+      },
+      assumptions: [],
+    })!.output;
+  const api = ask(['API']);
+  assert.deepEqual(api.inputRequest!.affects, ['api']);
+  const policy = { threshold: 7, criticalPaths: [] };
+  assert.equal(evaluateInput(api, policy, []).decision.kind, 'stop');
+  const unknown = ask(['security']);
+  assert.deepEqual(unknown.inputRequest!.affects, []);
+  assert.equal(unknown.inputRequest!.severity, 10);
+  assert.equal(evaluateInput(unknown, policy, []).decision.kind, 'stop');
 });

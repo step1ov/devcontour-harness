@@ -1563,13 +1563,16 @@ export class Runner {
                       },
                       signal,
                     );
-                    const parsed = implementationResultSchema.safeParse(response.output);
+                    // Ответ writer маскируется полным окружением вызова до
+                    // разбора: пределы схемы проверяются на тексте, который
+                    // будет записан, а усечение не режет секрет до
+                    // неузнаваемого префикса.
+                    const output = redactDeep(response.output, response.redact);
+                    const parsed = implementationResultSchema.safeParse(output);
                     // Вопрос вне схемы не теряется: controller приводит его к
                     // схеме и записывает, что исправил; прочий ответ вне схемы —
                     // отказ, как прежде.
-                    const normalized = parsed.success
-                      ? undefined
-                      : normalizeImplementation(response.output);
+                    const normalized = parsed.success ? undefined : normalizeImplementation(output);
                     if (!parsed.success && !normalized)
                       throw new Error(
                         'Ответ исполнителя вне схемы: ' + parsed.error.issues[0]?.message,
