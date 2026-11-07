@@ -1202,11 +1202,11 @@ function asks9() {
   };
 }
 
-test('R3-5: короткие и общие наследуемые значения не вырезаются из вывода; секретные по имени и длинные — маскируются', () => {
+test('R3-5: очень короткие наследуемые значения без секретного имени не вырезаются из вывода; остальные маскируются', () => {
   const { redact } = executionEnvironment(
     [
       {
-        inherit: ['FORCE_COLOR', 'NODE_ENV', 'MY_API_TOKEN', 'LONG_OPAQUE'],
+        inherit: ['FORCE_COLOR', 'FLAG', 'NODE_ENV', 'MY_API_TOKEN', 'LONG_OPAQUE'],
         values: {},
         secrets: { DECLARED: 'D' },
       },
@@ -1215,14 +1215,15 @@ test('R3-5: короткие и общие наследуемые значени
     {
       PATH: '/bin',
       FORCE_COLOR: '1',
+      FLAG: 'true',
       NODE_ENV: 'production',
       MY_API_TOKEN: 'tk-42',
       LONG_OPAQUE: 'abcdefghijklmnopqrstuvwx',
       D: 'z9',
     },
   );
-  const text = 'opt1 production tk-42 abcdefghijklmnopqrstuvwx z9';
-  assert.equal(redact(text), 'opt1 production [REDACTED] [REDACTED] [REDACTED]');
+  const text = 'opt1 true production tk-42 abcdefghijklmnopqrstuvwx z9';
+  assert.equal(redact(text), 'opt1 true [REDACTED] [REDACTED] [REDACTED] [REDACTED]');
 });
 
 test('R3-3: нераспознанная область — критичность с минимумом: в автономном режиме запрос ведущему', () => {

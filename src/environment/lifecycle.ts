@@ -60,8 +60,8 @@ export function executionEnvironment(
       env[key] = source[key];
       // Наследуемые значения тоже маскируются — вызывающему не нужно
       // объявлять каждый токен провайдера, — но только похожие на секрет:
-      // по имени или длиной. Короткое общее значение (`FORCE_COLOR=1`,
-      // `NODE_ENV=production`) иначе вырезалось бы из каждой строки вывода.
+      // по имени или длиной. Очень короткое общее значение (`FORCE_COLOR=1`,
+      // `CI=true`) иначе вырезалось бы из каждой строки вывода.
       if (source[key] && inheritedSecret(key, source[key])) secretValues.push(source[key]);
     }
     Object.assign(env, profile.values);
@@ -83,7 +83,7 @@ export function executionEnvironment(
 /** Имя переменной похоже на секрет. */
 const SECRET_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL|AUTH|PRIVATE)/i;
 /** Наименьшая длина наследуемого значения без секретного имени, которое маскируется. */
-export const INHERITED_SECRET_MIN = 16;
+export const INHERITED_SECRET_MIN = 8;
 
 /**
  * Маскировать ли наследуемое значение: имя похоже на секрет (значение не
