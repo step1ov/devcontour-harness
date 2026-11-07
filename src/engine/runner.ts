@@ -158,6 +158,7 @@ import { expectsReference, propertySeed } from '../verification/property.ts';
 import { selfCheckNote, writeSelfCheck, type SelfCheckPlan } from '../verification/self-check.ts';
 import { measuredInvoke } from './measured.ts';
 import { continuableDraft, implementationBasis } from './reuse.ts';
+import { requestsOf } from './input-requests.ts';
 import { evaluateInput, normalizeImplementation, type InputEvaluation } from './input-policy.ts';
 
 type Repo = ExecutionPolicy['repositories'][number];
@@ -3137,8 +3138,34 @@ export class Runner {
       // ни одна не меняет согласованный договор, критерии или решение продукта.
       // Решения попытки, черновик которой продолжается: writer видит их и
       // записывает заново те, что оставляет; reviewer — вместе со своими.
-      const continued = attempt.continuedFrom?.applied
-        ? (v.attempt(attempt.continuedFrom.runId)?.assumptions ?? [])
+      // Решение, ставшее вопросом прежней попытки, — не решение: на него есть
+      // ответ (или вопрос снят). Остальные переоцениваются по политике этой
+      // попытки и файлам черновика, как у взятого кандидата.
+      const from = attempt.continuedFrom?.applied ? attempt.continuedFrom : undefined;
+      const asked = from
+        ? requestsOf(v, v.work(attempt.workId))
+            .filter((r) => r.runId === from.runId && r.kind === 'question')
+            .map((r) => r.question.question)
+        : [];
+      const kept = from
+        ? (v.attempt(from.runId)?.assumptions ?? []).filter((a) => !asked.includes(a.question))
+        : [];
+      const continued = kept.length
+        ? evaluateInput(
+            {
+              completed: true,
+              inputRequest: null,
+              assumptions: kept.map((a) => ({
+                question: a.question,
+                chosen: a.chosen,
+                rationale: a.rationale,
+                severity: a.severity,
+                affects: a.affects,
+              })),
+            },
+            attempt.inputPolicy ?? inputPolicyOf(this.policy),
+            from!.files,
+          ).assumptions
         : [];
       if (!review && continued.length)
         out.push(

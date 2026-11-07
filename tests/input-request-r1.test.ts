@@ -487,7 +487,8 @@ test('M-3: запрос продолжения называет ответ в с
     });
   assert.match(text(true), /the answer is in the pinned context below/);
   assert.doesNotMatch(text(false), /the answer is in the pinned context/);
-  assert.match(text(false), /no answer is attached to this attempt/);
+  assert.match(text(false), /if the pinned context below has an input-answer source/);
+  assert.doesNotMatch(text(false), /no answer is attached/, 'перенесённый ответ не отрицается');
 });
 
 test('M-2: новая редакция графа держит вопрос; выход с сохранением ответа — supersede и перенос ответа в контекст новой редакции', () => {
@@ -1096,4 +1097,68 @@ test('R2-5: два вопроса в графе — применение вто�
   assert.ok(first.input && second.input, 'оба ответа связаны с попытками');
   assert.equal(env.engine.inputRequest(reqW.id).lifecycle, 'applied');
   assert.equal(env.engine.inputRequest(reqW.id).stale, undefined);
+});
+
+test('R2-6: продолжение не выдаёт вопрос за решение и переоценивает решения прежней попытки по новой политике', async () => {
+  const ctx = setup({
+    scenario: {
+      writer: [
+        {
+          files: { 'src/greet.js': greet },
+          result: {
+            completed: true,
+            summary: 'готово',
+            discoveries: [],
+            inputRequest: null,
+            assumptions: [
+              { question: 'Формат даты?', chosen: 'ISO', rationale: 'r', severity: 8, affects: [] },
+              {
+                question: 'Регистр имени?',
+                chosen: 'как есть',
+                rationale: 'r',
+                severity: 2,
+                affects: [],
+              },
+            ],
+          },
+        },
+        { ...implement(), recordPrompt: true },
+      ],
+      reviewer: { ...approve(), recordPrompt: true },
+    },
+    policy: (p) => {
+      p.inputPolicy = { threshold: 7, criticalPaths: [] };
+      (p as { maxAttempts: number }).maxAttempts = 5;
+    },
+  });
+  await runAll(ctx);
+  assert.equal(
+    ctx.engine.read((v) => v.work('add-greeting')!.failureKind),
+    'needs-input',
+  );
+  const [request] = ctx.engine.inputRequests({ workId: 'add-greeting' });
+  assert.equal(request!.question.question, 'Формат даты?');
+  ctx.store.close();
+  // Новая политика: изменённый черновиком путь критичен.
+  const next = reopen(ctx, (p) => (p.inputPolicy = { threshold: 7, criticalPaths: ['src'] }));
+  next.engine.cancelInput(
+    request!.id,
+    { by: 'operator', reason: 'решим в ревью' },
+    request!.version,
+  );
+  next.engine.retry('add-greeting');
+  await next.runner.init();
+  next.engine.resume();
+  await next.runner.drain();
+  const writer = readFileSync(`${ctx.scenarioPath}.writer.1.prompt`, 'utf8');
+  const block = writer.slice(writer.indexOf('Decisions the previous attempt made'));
+  assert.match(block, /Регистр имени\?","chosen":"как есть","rationale":"r","severity":10/);
+  assert.doesNotMatch(block.split('\n')[0]!, /Формат даты/, 'вопрос — не решение');
+  const reviewer = readFileSync(`${ctx.scenarioPath}.reviewer.0.prompt`, 'utf8');
+  const decisions = reviewer
+    .slice(reviewer.indexOf('Decisions the writer made on its own'))
+    .split('\n')[0]!;
+  assert.match(decisions, /Регистр имени/);
+  assert.doesNotMatch(decisions, /Формат даты/);
+  next.store.close();
 });
