@@ -584,6 +584,13 @@ null` и этого правила засчитанных попыток: ист
 - **CLI.** Команды `input-list`, `input-show`, `input-answer`,
   `input-context`, `input-target`, `input-apply`, `input-cancel`,
   `input-supersede`.
+- **Хост с портом согласования.** `InputHost.review` и `activate`
+  получают запрос (`{id, answerDigest, mode}`); перенос ответа заменённого
+  запроса — `Engine.carryInput` (`Harness.carryInput`). Исходная остановка и
+  устаревание применённого ответа сравнивают постановку самой работы, а не
+  digest графа. Попытка с `pinned.contextDigest` отказывает, если загрузчик
+  контекста хоста вернул другой снимок. `implementationOutputSchema`
+  (wire-схема ответа writer) экспортирован корнем пакета.
 - **Маскирование.** Ответ writer маскируется полным окружением вызова до
   разбора: `hooks.implemented` получает уже замаскированный `output`
   (`summary`, `discoveries`). Наследуемые переменные (`environment.inherit`)
