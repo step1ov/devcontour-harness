@@ -1386,9 +1386,14 @@ export class Runner {
           // Закреплённый при выдаче снимок не найден — отказ сразу, до любого
           // платного вызова, а не при приёмке; попытка не засчитывается.
           const pinnedContext = attempt.pinned?.contextDigest;
+          // Это неисправность данных этой работы, а не среды: держится только
+          // она (решение ведущего), очередь не останавливается.
           if (typeof pinnedContext === 'string' && !context)
-            throw new BlockedError(
-              `Снимок контекста ${pinnedContext}, закреплённый при выдаче, не найден: загрузчик хоста обязан вернуть его по attempt.pinned.contextDigest`,
+            throw new TaskFailure(
+              'needs-lead',
+              `Работа ${work.id}: снимок контекста ${pinnedContext}, закреплённый при выдаче, не найден (загрузчик хоста обязан вернуть его по attempt.pinned.contextDigest). Восстановите снимок или согласуйте работу заново, затем повторите`,
+              undefined,
+              'preflight',
             );
           if (context)
             // Попытка закрепляет снимок контекста: writer и оба reviewer видят одни и те же байты.
@@ -1849,7 +1854,11 @@ export class Runner {
             : {}),
           cause: environmentCauseOf(stalled ? undefined : error, message, kind),
           blocked:
-            (error instanceof BlockedError || kind === 'provider-auth') && !attempt.candidateSha,
+            (error instanceof BlockedError ||
+              kind === 'provider-auth' ||
+              // Отказ до работы с известной причиной preflight: не засчитывается.
+              (error instanceof TaskFailure && error.diagnosis === 'preflight')) &&
+            !attempt.candidateSha,
           ...(heartbeatCause ? { heartbeatCause } : {}),
         };
         const input = !stalled && error instanceof TaskFailure ? error.input : undefined;

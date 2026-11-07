@@ -1969,3 +1969,61 @@ test('R6-1/R6-4: устаревший перенесённый ответ вид
   assert.equal(h.engine.claim('controller')?.workId, a.workId, 'работа выдана без ответа');
   h.close();
 });
+
+test('R6-2: закреплённого снимка нет у одной работы — держится только она, очередь не на паузе, другая работа исполняется', async () => {
+  const text = 'закреплённый';
+  const file = {
+    path: 'notes.md',
+    digest: sha256(Buffer.from(text)),
+    bytes: Buffer.byteLength(text),
+    content: { encoding: 'utf8' as const, data: text },
+  };
+  const entry = {
+    id: 'notes',
+    kind: 'doc',
+    version: '1',
+    required: false,
+    files: [file],
+    references: [],
+  };
+  const snapshot = withInput(undefined, { ...entry, digest: sourceDigest(entry) });
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p) => ((p as { concurrency: number }).concurrency = 1),
+    graph: (g) => {
+      const orders = g.orders as Record<string, unknown>[];
+      orders.push({
+        ...orders[0],
+        id: 'extra',
+        source: { connector: 'files', ref: 'extra', revision: '1' },
+      });
+    },
+    // Снимок у хоста потерян только для первой работы.
+    runner: { context: (work) => (work.id === 'add-greeting' ? undefined : snapshot) },
+  });
+  await ctx.runner.init();
+  const { graph } = ctx.engine.register(ctx.graph, trustNone);
+  const digest = contextDigest(snapshot);
+  ctx.store.transact('run.context', (tx) =>
+    tx.putLocal('context-snapshots', WORKSPACE_OWNER, digest, snapshot),
+  );
+  ctx.engine.recordReview({
+    ...planReview(ctx.engine, graph, 1),
+    authorRuntime: 'claude',
+    reviewerBinding: ctx.engine.reviewerBinding('plan', 'claude')!,
+    contextDigest: digest,
+  });
+  ctx.engine.approve(graph.id, 'agent', { bindContext: true });
+  ctx.engine.resume();
+  await ctx.runner.drain();
+  const lost = ctx.engine.read((v) => v.attempts('add-greeting'))[0]!;
+  assert.equal(lost.failureKind, 'needs-lead');
+  assert.equal(lost.blocked, true, 'не засчитана');
+  assert.match(lost.error ?? '', /Работа add-greeting: снимок контекста .* не найден/);
+  assert.equal(ctx.engine.read((v) => v.control()).paused, false, 'очередь не на паузе');
+  assert.equal(
+    ctx.engine.read((v) => v.work('extra')!.status),
+    'done',
+    'другая работа исполнена',
+  );
+});
