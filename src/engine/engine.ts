@@ -168,6 +168,15 @@ const uncounted = (kind: FailureKind, blocked: boolean) =>
   blocked || kind === 'environment' || kind === 'provider-auth';
 
 /**
+ * Остановка вопросом (`needs-input`) — не неудача работы: попытка
+ * возвращается в предел, а предел незасчитанных отказов не тратится. Повтор
+ * без ответа невозможен (вопрос держит выдачу до `applyInput`), поэтому
+ * цикла это не открывает; ответ на последней попытке продолжает работу без
+ * сброса.
+ */
+const returnsAttempt = (kind: FailureKind) => kind === 'needs-input';
+
+/**
  * Причина отказа для `attempt.diagnosed`: отказ не окружения — `none`;
  * окружения — названная в точке обнаружения или по классу отказа.
  */
@@ -2137,8 +2146,11 @@ export class Engine {
             }),
         activeRunId: undefined,
         attempt:
-          (interrupted || uncounted(kind, blocked)) && w.attempt > 0 ? w.attempt - 1 : w.attempt,
-        // Отказ до работы (blocked) и штатная остановка предел не тратят.
+          (interrupted || uncounted(kind, blocked) || returnsAttempt(kind)) && w.attempt > 0
+            ? w.attempt - 1
+            : w.attempt,
+        // Отказ до работы (blocked), штатная остановка и вопрос предел
+        // незасчитанных отказов не тратят.
         ...(uncounted(kind, blocked) && !blocked && !interrupted
           ? { neutralFailures: (w.neutralFailures ?? 0) + 1 }
           : {}),
@@ -2160,7 +2172,7 @@ export class Engine {
         payload: {
           failureKind: kind,
           cause: interrupted ? 'shutdown' : causeOf(kind, options.cause, blocked),
-          counted: !interrupted && !uncounted(kind, blocked),
+          counted: !interrupted && !uncounted(kind, blocked) && !returnsAttempt(kind),
         },
       });
       if (options.input && !interrupted)

@@ -129,7 +129,7 @@ function stateOf(ctx: ReturnType<typeof setup>) {
 /* Остановка (S2)                                                      */
 /* ------------------------------------------------------------------ */
 
-test('H02-A: вопрос не ниже порога — needs-input, процесс завершён, попытка засчитана, автоповтора нет', async () => {
+test('H02-A: вопрос не ниже порога — needs-input, процесс завершён, попытка не засчитана, автоповтора нет', async () => {
   const ctx = setup({ scenario: { writer: [asks(8), asks(8)] }, policy: withThreshold(7) });
   await runAll(ctx);
   const { work, attempts, requests } = stateOf(ctx);
@@ -139,7 +139,7 @@ test('H02-A: вопрос не ниже порога — needs-input, проце
   );
   assert.equal(work.status, 'failed');
   assert.equal(work.failureKind, 'needs-input');
-  assert.equal(work.attempt, 1, 'попытка засчитана');
+  assert.equal(work.attempt, 0, 'остановка вопросом попытку не тратит');
   assert.equal(work.activeRunId, undefined, 'владения нет');
   assert.equal(requests.length, 1);
   const [request] = requests;
@@ -694,7 +694,7 @@ test('H02-D: снимок с ответом проходит ревью и пр�
   }));
   assert.equal(after.graph.approval?.context?.digest, prepared.digest);
   assert.equal(after.work.status, 'ready');
-  assert.equal(after.work.attempt, 1, 'попытки не сброшены');
+  assert.equal(after.work.attempt, 0, 'вопрос попытку не тратил');
   assert.equal(after.request.lifecycle, 'applied');
   assert.equal(after.request.target?.contextDigest, prepared.digest);
   assert.equal(after.request.target?.review?.round, 2);
@@ -821,6 +821,55 @@ test('H02-E: смена политики после предложения — �
   assert.equal(env.engine.inputRequest(env.request.id).lifecycle, 'answered');
 });
 
+test('Вопрос на последней попытке: попытка возвращена, ответ применяется без сброса', () => {
+  const env = engineOf(policyOf((p) => (p.maxAttempts = 2)));
+  const graph = ready(env.engine, graphOf({ a: [] }));
+  // Первая попытка засчитана содержательным отказом.
+  const first = env.engine.claim('c1')!;
+  env.engine.fail(first.id, first.token, 'gate', { kind: 'gate' });
+  assert.equal(
+    env.engine.read((v) => v.work('a')!.attempt),
+    1,
+  );
+  // Незасчитанный отказ раньше — его счётчик вопрос не трогает.
+  env.store.transact('run.phase', (tx) => tx.putWork({ ...tx.work('a')!, neutralFailures: 1 }));
+  env.engine.retry('a');
+  // Вторая — последняя по пределу — останавливается вопросом.
+  const last = env.engine.claim('c1')!;
+  assert.equal(last.attempt, 2);
+  env.engine.fail(last.id, last.token, 'вопрос', { kind: 'needs-input', input: outcome() });
+  const work = env.engine.read((v) => v.work('a')!);
+  assert.equal(work.status, 'failed');
+  assert.equal(work.failureKind, 'needs-input');
+  assert.equal(work.attempt, 1, 'остановка вопросом попытку не тратит');
+  assert.equal(work.neutralFailures, 1, 'предел незасчитанных отказов не тронут');
+  const diagnosed = env.store
+    .events()
+    .filter((e) => e.type === 'attempt.diagnosed' && e.runId === last.id);
+  assert.deepEqual(
+    diagnosed.map((e) => (e.type === 'attempt.diagnosed' ? e.payload.counted : null)),
+    [false],
+  );
+  // Вопрос держит выдачу и до ответа, и без applyInput.
+  assert.equal(env.engine.claim('c1'), undefined);
+  const [request] = env.engine.inputRequests({ workId: 'a' });
+  const stoppedEnv = { ...env, graph, attempt: last, request: request! };
+  const prepared = prepare(stoppedEnv);
+  assert.deepEqual(prepared.proposal.problems, []);
+  assert.equal(env.engine.claim('c1'), undefined, 'ответ без применения выдачи не даёт');
+  // Применение без reset продолжает работу.
+  const applied = applyWith(stoppedEnv, prepared);
+  assert.equal(applied.applied, true);
+  assert.equal(env.engine.inputRequest(request!.id).lifecycle, 'applied');
+  const after = env.engine.read((v) => v.work('a')!);
+  assert.equal(after.status, 'ready');
+  assert.equal(after.attempt, 1);
+  assert.equal(after.neutralFailures, 1, 'без сброса счётчик незасчитанных прежний');
+  const next = env.engine.claim('c1')!;
+  assert.equal(next.workId, 'a');
+  assert.equal(next.attempt, 2, 'продолжение — последняя попытка предела');
+});
+
 test('H02-F: пауза оператора, чужое удержание, бюджет и предел попыток остаются после ответа', () => {
   // Пауза и удержание: apply возвращает в очередь, но выдачи нет.
   const env = stopped();
@@ -837,22 +886,19 @@ test('H02-F: пауза оператора, чужое удержание, бю�
   );
   assert.equal(env.engine.claim('c1'), undefined, 'пауза держит выдачу');
 
-  // Предел попыток: ответ сохранён, apply не продолжает и попыток не добавляет.
+  // Предел попыток исчерпан другими отказами: ответ сохранён, apply не
+  // продолжает и попыток не добавляет; явный сброс с причиной — правило retry.
   const tight = stopped((p) => (p.maxAttempts = 1));
   const t = prepare(tight);
+  tight.store.transact('run.phase', (tx) => tx.putWork({ ...tx.work('a')!, attempt: 1 }));
   const refused = applyWith(tight, t);
   assert.equal(refused.applied, false);
   assert.equal(refused.applied === false && refused.blocker?.code, 'ATTEMPTS_EXHAUSTED');
   assert.equal(tight.engine.inputRequest(tight.request.id).lifecycle, 'answered');
   assert.equal(
-    tight.engine.read((v) => v.work('a')!.attempt),
-    1,
-  );
-  assert.equal(
     tight.engine.read((v) => v.work('a')!.status),
     'failed',
   );
-  // Явный сброс с причиной — то же правило, что у retry.
   const reset = applyWith(tight, t, { reset: { reason: 'ответ получен' } });
   assert.equal(reset.applied, true);
   assert.equal(

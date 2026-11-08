@@ -238,7 +238,8 @@ export function failureBucketOf(a: AttemptState): FailureBucket | null {
  * Засчитанная в предел попыток — то же правило, что у движка (`counted` в
  * `attempt.diagnosed`): не засчитаны прерванные штатной остановкой, отказы до
  * работы (`blocked`), отказы окружения и провайдера (`environment`,
- * `provider-auth`) и истёкшее владение. Зависание (`stalled`) засчитано.
+ * `provider-auth`), остановка вопросом (`needs-input`) и истёкшее владение.
+ * Зависание (`stalled`) засчитано.
  */
 const counted = (a: AttemptState) =>
   a.status !== 'active' &&
@@ -246,7 +247,8 @@ const counted = (a: AttemptState) =>
   !a.blocked &&
   a.status !== 'expired' &&
   a.failureKind !== 'environment' &&
-  a.failureKind !== 'provider-auth';
+  a.failureKind !== 'provider-auth' &&
+  a.failureKind !== 'needs-input';
 
 /** Gate подготовки: установка зависимостей — его отказ часто сетевой (M6). */
 const setupGate = (gate: string) => /install|setup|bootstrap|deps|dependenc/i.test(gate);
@@ -1540,7 +1542,7 @@ function summaryOf(r: ValueReport, failedAttempts: number): ValueReport['summary
           fp.bound === 'lower'
             ? `${plural(n, 'task')} accepted. At least ${fp.value} of them${pct(fp.value ?? 0, n)} on the first try; for ${plural(fp.unknown, 'more task')} it is unknown (failures without a class).`
             : `${plural(n, 'task')} accepted. ${fp.value} of them${pct(fp.value ?? 0, n)} on the first try.`,
-        basis: `Accepted: merged after all required checks and an independent review. First try: the accepting attempt was the only counted attempt (environment failures except stalls, blocked-before-work attempts, expired leases and shutdowns are not counted). Window: ${window}.`,
+        basis: `Accepted: merged after all required checks and an independent review. First try: the accepting attempt was the only counted attempt (environment failures except stalls, blocked-before-work attempts, stops with a question, expired leases and shutdowns are not counted). Window: ${window}.`,
         measure: fp,
       },
       {
