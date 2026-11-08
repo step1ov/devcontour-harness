@@ -7,7 +7,7 @@ _Coverage: 13 attempts on 7 tasks; failure class on 6 of 7 failed; stage timings
 ## Summary
 
 - **5**: 5 tasks accepted. At least 2 of them on the first try; for 1 more task it is unknown (failures without a class).
-  _Accepted: merged after all required checks and an independent review. First try: the accepting attempt was the only counted attempt (environment failures except stalls, blocked-before-work attempts, stops with a question, expired leases and shutdowns are not counted). Window: all history._
+  _Accepted: merged after all required checks and an independent review. First try: the accepting attempt was the only counted attempt (environment failures except stalls, blocked-before-work attempts, stops with a question that gave the attempt back, expired leases and shutdowns are not counted). Window: all history._
 - **≥ 2 of 5**: At least 2 of 5 accepted tasks were sent back by checks, review or the scope rule before merge; 1 task had only failures without a class before merge. Nothing merged without passing every required check and review.
   _An attempt rejected as gate, review or scope-violation before the accepting attempt. Failures without a class are not counted, so this is a lower bound._
 - **8.1 d**: From approval to merge: median 8.1 d (n=5).

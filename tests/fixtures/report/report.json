@@ -35,7 +35,7 @@
         "id": "accepted",
         "value": "5",
         "text": "5 tasks accepted. At least 2 of them on the first try; for 1 more task it is unknown (failures without a class).",
-        "basis": "Accepted: merged after all required checks and an independent review. First try: the accepting attempt was the only counted attempt (environment failures except stalls, blocked-before-work attempts, stops with a question, expired leases and shutdowns are not counted). Window: all history.",
+        "basis": "Accepted: merged after all required checks and an independent review. First try: the accepting attempt was the only counted attempt (environment failures except stalls, blocked-before-work attempts, stops with a question that gave the attempt back, expired leases and shutdowns are not counted). Window: all history.",
         "measure": {
           "value": 2,
           "n": 5,

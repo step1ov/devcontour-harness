@@ -870,6 +870,93 @@ test('Вопрос на последней попытке: попытка воз
   assert.equal(next.attempt, 2, 'продолжение — последняя попытка предела');
 });
 
+/** Выдать поручение `a` и остановить попытку вопросом; запрос этой остановки. */
+const askOnce = (env: ReturnType<typeof engineOf>, graph: ReturnType<typeof ready>) => {
+  const run = env.engine.claim('c1');
+  assert.ok(run, 'выдача после применённого ответа');
+  assert.equal(run.workId, 'a');
+  // Продолжение получает применённый ответ (runtime запущен с ним).
+  if (run.input) env.engine.inputDelivered(run.id, run.token, `call-${run.id}`);
+  env.engine.fail(run.id, run.token, 'вопрос', { kind: 'needs-input', input: outcome() });
+  const request = env.engine.inputRequests({ workId: 'a' }).find((r) => r.lifecycle === 'pending')!;
+  return { run, stoppedEnv: { ...env, graph, attempt: run, request } };
+};
+const countedOf = (env: ReturnType<typeof engineOf>, runId: string) =>
+  env.store
+    .events()
+    .flatMap((e) =>
+      e.type === 'attempt.diagnosed' && e.runId === runId ? [e.payload.counted] : [],
+    );
+
+test('Предел остановок вопросом: вопрос → ответ → применение не повторяется без конца; сверх maxAttempts вопрос засчитан', () => {
+  const env = engineOf(policyOf((p) => (p.maxAttempts = 2)));
+  const graph = ready(env.engine, graphOf({ a: [] }));
+  const seen: { attempt: number; counted: boolean[]; spent: number }[] = [];
+  let blocker: string | undefined;
+  // Ответ даёт модель (actor agent) и применяет без сброса — так, как в
+  // режиме согласования agent; цикл обязан кончиться без бюджета.
+  for (let i = 0; i < 10 && !blocker; i++) {
+    const { run, stoppedEnv } = askOnce(env, graph);
+    seen.push({
+      attempt: run.attempt,
+      counted: countedOf(env, run.id),
+      spent: env.engine.read((v) => v.work('a')!.attempt),
+    });
+    const applied = applyWith(stoppedEnv, prepare(stoppedEnv));
+    if (!applied.applied) blocker = applied.blocker?.code;
+  }
+  // Две остановки (предел — maxAttempts) возвращают попытку; третья и
+  // четвёртая засчитаны и исчерпывают предел попыток.
+  assert.deepEqual(seen, [
+    { attempt: 1, counted: [false], spent: 0 },
+    { attempt: 1, counted: [false], spent: 0 },
+    { attempt: 1, counted: [true], spent: 1 },
+    { attempt: 2, counted: [true], spent: 2 },
+  ]);
+  assert.equal(blocker, 'ATTEMPTS_EXHAUSTED', 'продолжение — только явным сбросом с причиной');
+  assert.equal(env.engine.claim('c1'), undefined);
+  // Сброс предел остановок вопросом не возвращает: следующий вопрос засчитан.
+  const [request] = env.engine
+    .inputRequests({ workId: 'a' })
+    .filter((r) => r.lifecycle === 'answered');
+  const last = {
+    ...env,
+    graph,
+    attempt: env.engine.read((v) => v.attempts('a').at(-1)!),
+    request: request!,
+  };
+  const reset = applyWith(last, prepare(last), { reset: { reason: 'ответ получен, сброс' } });
+  assert.equal(reset.applied, true);
+  const { run } = askOnce(env, graph);
+  assert.equal(run.attempt, 1);
+  assert.deepEqual(countedOf(env, run.id), [true]);
+  assert.equal(
+    env.engine.read((v) => v.work('a')!.attempt),
+    1,
+  );
+});
+
+test('Предел остановок вопросом: отмена и повтор вместо ответа его не обходят', () => {
+  const env = engineOf(policyOf((p) => (p.maxAttempts = 2)));
+  const graph = ready(env.engine, graphOf({ a: [] }));
+  const attempts: number[] = [];
+  let refused: string | undefined;
+  for (let i = 0; i < 10 && !refused; i++) {
+    const { run } = askOnce(env, graph);
+    attempts.push(run.attempt);
+    // Отмена закрывает вопрос; повтор без ответа — пока попытки не исчерпаны.
+    env.engine.cancel('a', 'обход вопроса');
+    try {
+      env.engine.retry('a');
+    } catch (e) {
+      refused = e instanceof HarnessError ? e.code : String(e);
+    }
+  }
+  assert.deepEqual(attempts, [1, 1, 1, 2], 'две остановки бесплатны, дальше — засчитаны');
+  assert.equal(refused, 'ATTEMPTS_EXHAUSTED');
+  assert.equal(env.engine.claim('c1'), undefined);
+});
+
 test('H02-F: пауза оператора, чужое удержание, бюджет и предел попыток остаются после ответа', () => {
   // Пауза и удержание: apply возвращает в очередь, но выдачи нет.
   const env = stopped();

@@ -169,12 +169,22 @@ const uncounted = (kind: FailureKind, blocked: boolean) =>
 
 /**
  * Остановка вопросом (`needs-input`) — не неудача работы: попытка
- * возвращается в предел, а предел незасчитанных отказов не тратится. Повтор
- * без ответа невозможен (вопрос держит выдачу до `applyInput`), поэтому
- * цикла это не открывает; ответ на последней попытке продолжает работу без
- * сброса.
+ * возвращается в предел, а предел незасчитанных отказов не тратится; ответ
+ * на последней попытке продолжает работу без сброса. Ответ может дать
+ * модель (режим согласования `agent`), поэтому возврат ограничен: поручение
+ * получает не больше `maxAttempts` таких остановок за всю жизнь — сброс их
+ * не возвращает. Счёт — по записям попыток поручения (`earlier` — прежние
+ * остановки вопросом, кроме прерванных остановкой controller); остановка
+ * сверх предела засчитывается как обычная попытка.
  */
-const returnsAttempt = (kind: FailureKind) => kind === 'needs-input';
+const returnsAttempt = (kind: FailureKind, earlier: number, maxAttempts: number) =>
+  kind === 'needs-input' && earlier < maxAttempts;
+
+/** Прежние остановки вопросом поручения, кроме попытки `except`. */
+const inputStopsOf = (attempts: readonly AttemptState[], except?: string) =>
+  attempts.filter(
+    (x) => x.id !== except && x.failureKind === 'needs-input' && x.interrupted !== 'shutdown',
+  ).length;
 
 /**
  * Причина отказа для `attempt.diagnosed`: отказ не окружения — `none`;
@@ -2117,6 +2127,11 @@ export class Engine {
           : {}),
       };
       tx.putAttempt(failed);
+      const givesBack = returnsAttempt(
+        kind,
+        inputStopsOf(tx.attempts(w.id), id),
+        this.policy.maxAttempts,
+      );
       const next = structuredClone(w);
       const before = next.recovery?.status;
       const episode = afterFailure(
@@ -2146,11 +2161,12 @@ export class Engine {
             }),
         activeRunId: undefined,
         attempt:
-          (interrupted || uncounted(kind, blocked) || returnsAttempt(kind)) && w.attempt > 0
+          (interrupted || uncounted(kind, blocked) || givesBack) && w.attempt > 0
             ? w.attempt - 1
             : w.attempt,
         // Отказ до работы (blocked), штатная остановка и вопрос предел
-        // незасчитанных отказов не тратят.
+        // незасчитанных отказов не тратят; вопрос сверх своего предела
+        // засчитан как попытка.
         ...(uncounted(kind, blocked) && !blocked && !interrupted
           ? { neutralFailures: (w.neutralFailures ?? 0) + 1 }
           : {}),
@@ -2172,7 +2188,7 @@ export class Engine {
         payload: {
           failureKind: kind,
           cause: interrupted ? 'shutdown' : causeOf(kind, options.cause, blocked),
-          counted: !interrupted && !uncounted(kind, blocked) && !returnsAttempt(kind),
+          counted: !interrupted && !uncounted(kind, blocked) && !givesBack,
         },
       });
       if (options.input && !interrupted)

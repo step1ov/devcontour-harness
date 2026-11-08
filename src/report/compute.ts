@@ -238,17 +238,19 @@ export function failureBucketOf(a: AttemptState): FailureBucket | null {
  * Засчитанная в предел попыток — то же правило, что у движка (`counted` в
  * `attempt.diagnosed`): не засчитаны прерванные штатной остановкой, отказы до
  * работы (`blocked`), отказы окружения и провайдера (`environment`,
- * `provider-auth`), остановка вопросом (`needs-input`) и истёкшее владение.
- * Зависание (`stalled`) засчитано.
+ * `provider-auth`) и истёкшее владение. Зависание (`stalled`) засчитано.
+ * Остановка вопросом (`needs-input`) не засчитана, только если движок вернул
+ * попытку (`givenBack` — по `attempt.diagnosed` с `counted: false`): сверх
+ * своего предела и до версии, вернувшей попытку, она засчитана.
  */
-const counted = (a: AttemptState) =>
+const counted = (a: AttemptState, givenBack: ReadonlySet<string>) =>
   a.status !== 'active' &&
   a.interrupted !== 'shutdown' &&
   !a.blocked &&
   a.status !== 'expired' &&
   a.failureKind !== 'environment' &&
   a.failureKind !== 'provider-auth' &&
-  a.failureKind !== 'needs-input';
+  !(a.failureKind === 'needs-input' && givenBack.has(a.id));
 
 /** Gate подготовки: установка зависимостей — его отказ часто сетевой (M6). */
 const setupGate = (gate: string) => /install|setup|bootstrap|deps|dependenc/i.test(gate);
@@ -366,6 +368,13 @@ export function valueReport(
   const events = [...(input.events ?? [])].sort((a, b) => a.seq - b.seq);
   const graphs = [...(input.graphs ?? [])].sort((a, b) => cmp(a.id, b.id));
 
+  // Остановки вопросом, вернувшие попытку: вердикт движка в `attempt.diagnosed`.
+  const givenBack = new Set<string>();
+  for (const e of events)
+    if (e.type === 'attempt.diagnosed' && e.runId && e.payload.counted === false)
+      givenBack.add(e.runId);
+  const isCounted = (a: AttemptState) => counted(a, givenBack);
+
   const attemptsOf = new Map<string, AttemptState[]>();
   for (const a of attempts) {
     const list = attemptsOf.get(a.workId) ?? [];
@@ -425,14 +434,14 @@ export function valueReport(
   const failedAttempts = windowAttempts.filter((a) => finishedStatuses.has(a.status));
 
   const isFirstPass = (f: WorkFacts) =>
-    f.attempts.filter(counted).length === 1 && !!f.accepting && counted(f.accepting);
+    f.attempts.filter(isCounted).length === 1 && !!f.accepting && isCounted(f.accepting);
   /**
    * Первая попытка неизвестна: кроме принявшей, засчитаны только отказы без
    * класса — будь они отказами окружения, попытка была бы первой.
    */
   const firstPassUnknown = (f: WorkFacts) => {
     if (isFirstPass(f) || !f.accepting) return false;
-    const others = f.attempts.filter((a) => a !== f.accepting && counted(a));
+    const others = f.attempts.filter((a) => a !== f.accepting && isCounted(a));
     return (
       others.length > 0 &&
       others.every((a) => {
@@ -1115,7 +1124,7 @@ export function valueReport(
       outcome: f.outcome!,
       finishedAt: f.finishedAt ? toIso(at(f.finishedAt)) : null,
       attempts: f.attempts.length,
-      counted: f.attempts.filter(counted).length,
+      counted: f.attempts.filter(isCounted).length,
       leadMs: f.outcome === 'accepted' ? leadOf(f).ms : null,
       knownUsd: cost.usd,
       unknownCalls: cost.unknown,
@@ -1542,7 +1551,7 @@ function summaryOf(r: ValueReport, failedAttempts: number): ValueReport['summary
           fp.bound === 'lower'
             ? `${plural(n, 'task')} accepted. At least ${fp.value} of them${pct(fp.value ?? 0, n)} on the first try; for ${plural(fp.unknown, 'more task')} it is unknown (failures without a class).`
             : `${plural(n, 'task')} accepted. ${fp.value} of them${pct(fp.value ?? 0, n)} on the first try.`,
-        basis: `Accepted: merged after all required checks and an independent review. First try: the accepting attempt was the only counted attempt (environment failures except stalls, blocked-before-work attempts, stops with a question, expired leases and shutdowns are not counted). Window: ${window}.`,
+        basis: `Accepted: merged after all required checks and an independent review. First try: the accepting attempt was the only counted attempt (environment failures except stalls, blocked-before-work attempts, stops with a question that gave the attempt back, expired leases and shutdowns are not counted). Window: ${window}.`,
         measure: fp,
       },
       {

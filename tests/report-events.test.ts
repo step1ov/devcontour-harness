@@ -357,3 +357,55 @@ test('report events: пробел записи — по порядку журн�
   assert.equal(gap.gaps, 1);
   assert.equal(gap.bound, 'lower');
 });
+
+test('report events: остановка вопросом, вернувшая попытку, не засчитана — продолжение принято с первой попытки', () => {
+  // `first` принято с первой попытки; перед ней — остановка вопросом с тем же
+  // номером попытки (ответ применён, работа продолжена).
+  const withQuestion = (diagnosed?: boolean): ValueReportInput => {
+    const base = withEvents(
+      diagnosed === undefined
+        ? []
+        : [
+            [
+              t(0, 9, 40),
+              {
+                type: 'attempt.diagnosed',
+                graphId: 'demo',
+                workId: 'first',
+                runId: 'run-first-q',
+                attempt: 1,
+                payload: { failureKind: 'needs-input', cause: 'none', counted: diagnosed },
+              },
+            ],
+          ],
+    );
+    const accepted = base.attempts.find((a) => a.id === 'run-first-1')!;
+    const question = {
+      ...accepted,
+      id: 'run-first-q',
+      status: 'failed' as const,
+      phase: 'failed' as const,
+      failureKind: 'needs-input' as const,
+      startedAt: t(0, 9, 20),
+      finishedAt: t(0, 9, 40),
+      evidence: [],
+    };
+    return { ...base, attempts: [...base.attempts, question] };
+  };
+  const firstRow = (r: ReturnType<typeof valueReport>) =>
+    r.works.rows.find((w) => w.id === 'first')!;
+  const before = report(withEvents([]));
+  // Попытку вернул движок (`counted: false`): первая попытка, как без вопроса.
+  const given = report(withQuestion(false));
+  assert.deepEqual(given.speed.firstPass, before.speed.firstPass);
+  assert.equal(firstRow(given).attempts, 2);
+  assert.equal(firstRow(given).counted, 1);
+  // Сверх предела остановок вопросом движок засчитал её — не первая попытка.
+  const capped = report(withQuestion(true));
+  assert.equal(capped.speed.firstPass.value, before.speed.firstPass.value! - 1);
+  assert.equal(firstRow(capped).counted, 2);
+  // Без события (версия до возврата попытки) остановка засчитана, как тогда.
+  const legacy = report(withQuestion());
+  assert.equal(legacy.speed.firstPass.value, before.speed.firstPass.value! - 1);
+  assert.equal(firstRow(legacy).counted, 2);
+});
