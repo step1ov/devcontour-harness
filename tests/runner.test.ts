@@ -15,6 +15,7 @@ import {
   type EvidenceRecord,
 } from '../src/contracts/index.ts';
 import { approve, greet, implement, runAll, setup, target, widening } from './runner-fixture.ts';
+import { WIRED, withPreparationStub } from './preparation-fixture.ts';
 
 test('T01: поручение с тестами и двумя ревью принимается ровно один раз; result SHA в target ref; evidence обеих фаз', async () => {
   const ctx = setup({ scenario: { writer: implement(), reviewer: approve() } });
@@ -192,9 +193,40 @@ test(
       attempt.error ?? '',
       /Подготовка окружения .*создала, изменила или удалила защищённые пути .*: \.vscode\. /,
     );
+    assert.equal(attempt.candidateSha, undefined, 'до исполнителя: кандидата нет');
+    const diagnosed = ctx.store
+      .events(0, 500)
+      .flatMap((e) => (e.type === 'attempt.diagnosed' ? [e.payload] : []));
+    assert.deepEqual(diagnosed, [
+      { failureKind: 'environment', cause: 'sandbox-policy', counted: false },
+    ]);
+    assert.equal(
+      ctx.engine.read((v) => v.control().paused),
+      true,
+      'отказ политики повторился бы на любой работе: выдача остановлена',
+    );
     assert.equal(target(ctx), before, 'target ref не продвинут');
   },
 );
+
+test('T05: сверка подготовки вызывается в фазах кандидата и интеграции; отказ после prepare интеграции — отказ среды', async () => {
+  await withPreparationStub(2, async (calls) => {
+    const ctx = setup({ scenario: { writer: implement(), reviewer: approve() } });
+    const before = target(ctx);
+    await runAll(ctx);
+    const attempt = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+    assert.equal(attempt.failureKind, 'environment', attempt.error);
+    assert.match(attempt.error ?? '', new RegExp(WIRED));
+    assert.ok(attempt.integrationSha, 'отказ — в фазе интеграции');
+    assert.equal(calls.length, 2);
+    assert.ok(
+      calls.every((c) => c.checked),
+      'обе сверки проверены после подготовки',
+    );
+    assert.notEqual(calls[0]!.root, calls[1]!.root, 'у интеграции своё дерево');
+    assert.equal(target(ctx), before, 'target ref не продвинут');
+  });
+});
 
 test('T08: невалидный ответ ревью, approved с блокирующей находкой и таймаут ревьюера — не принято, без самооценки writer', async () => {
   const blocking = approve();

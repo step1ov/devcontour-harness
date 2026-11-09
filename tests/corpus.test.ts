@@ -20,6 +20,7 @@ import { caseHooks } from '../src/verification/confirm.ts';
 import { approve, implement, runAll, target } from './runner-fixture.ts';
 import { Harness } from '../src/control/harness.ts';
 import { knap, propertyHarness, propertySetup, rejection } from './property-fixture.ts';
+import { WIRED, withPreparationStub } from './preparation-fixture.ts';
 
 const refused = (code: ErrorCode) => (e: unknown) => {
   assert.ok(e instanceof HarnessError, String(e));
@@ -35,6 +36,25 @@ const input = JSON.stringify({
     { w: 1, v: 9 },
   ],
   cap: 4,
+});
+
+test('T17: подтверждение примера вызывает сверку подготовки в своём дереве; её отказ — inconclusive, корпус не меняется', async () => {
+  const ctx = propertySetup({ writer: [implement({ 'src/knap.mjs': knap.firstThree })] });
+  await ctx.runner.init();
+  await runAll(ctx);
+  await withPreparationStub(1, async (calls) => {
+    const r = await ctx.runner.submitCase({
+      workId: 'add-greeting',
+      property: 'knapsack-optimal',
+      input,
+      expected: '12',
+      key: 'case-prepared',
+    });
+    assert.equal(r.decision.outcome, 'inconclusive', r.decision.reason);
+    assert.match(r.decision.reason ?? '', new RegExp(WIRED));
+    assert.equal(r.version, null, 'неподтверждённое не создаёт версию');
+    assert.ok(calls.length >= 1 && calls[0]!.checked, 'проверена после подготовки');
+  });
 });
 
 test('T17: пример подтверждается закреплённым эталоном дважды на дефектном SHA; только подтверждённый случай — новая версия корпуса; повтор ключа не дублирует', async () => {

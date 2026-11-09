@@ -7,6 +7,7 @@ import { explicitPrerequisites, gatePrerequisites } from '../src/verification/ga
 import type { EvidenceRecord } from '../src/contracts/index.ts';
 import { greet, setup } from './runner-fixture.ts';
 import { write } from './git-fixture.ts';
+import { WIRED, withPreparationStub } from './preparation-fixture.ts';
 
 // Второй gate зависит от unit и проходит только в окружении integration этой
 // проверки: так видно и порядок предпосылок, и фазу, и идентификатор.
@@ -257,4 +258,23 @@ test('предпосылки gate: явный dependsOn (и пустой) — г
     ),
     ['setup', 'x'],
   );
+});
+
+test('gates на SHA вне попытки: сверка подготовки вызывается в дереве проверки; её отказ — ошибка команды, дерево убрано', async () => {
+  const { ctx, context } = fixture();
+  await withPreparationStub(1, async (calls) => {
+    await assert.rejects(
+      runGatesAt(context, {
+        id: 'GA-prepared',
+        repositoryId: 'app',
+        sha: ctx.repo.head(),
+        gates: ['unit'],
+        record: () => {},
+      }),
+      new RegExp(WIRED),
+    );
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0]!.checked, 'проверена после подготовки');
+  });
+  assert.ok(!existsSync(join(ctx.state, 'gates-at', 'GA-prepared', 'worktree')));
 });

@@ -19,6 +19,7 @@ import { requirementProof } from '../src/verification/proof.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import { components, node } from './components-fixture.ts';
+import { WIRED, withPreparationStub } from './preparation-fixture.ts';
 import { engineOf, graphOf, policyOf, ready, sha } from './engine-fixture.ts';
 import { planReview, trustNone } from './engine-fixture.ts';
 
@@ -330,6 +331,18 @@ function integrated(ctx: ReturnType<typeof components>, value?: string) {
     );
   return { a, dir, at, consume };
 }
+
+test('T21/G02: сверка подготовки вызывается в дереве потребителя; её отказ после prepare потребителя — отказ, дерево убрано', async () => {
+  await withPreparationStub(1, async (calls) => {
+    const ctx = components();
+    const { consume } = integrated(ctx, '2');
+    await assert.rejects(consume(), new RegExp(WIRED));
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0]!.checked, 'проверена после подготовки');
+    assert.equal(ctx.worktrees('product'), 1, 'дерево потребителя убрано');
+    ctx.store.close();
+  });
+});
 
 test('T21/G02: транзитивный потребитель собирается против интегрированного провайдера, выполняет свои prepare и lifecycle, записывает проверенное и не оставляет деревьев, даже при отказе', async () => {
   const log = join(
