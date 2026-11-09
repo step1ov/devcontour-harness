@@ -16,7 +16,6 @@ import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import type { EvidenceRecord } from '../src/contracts/index.ts';
 import { redactor } from '../src/environment/redaction.ts';
-import { denyGlobRegex } from '@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js';
 import {
   anchoredAtRoot,
   pinnedBases,
@@ -819,8 +818,23 @@ test('SBX15: шаблон запрета с базой в корне совпа�
     'нет ASCII — прежний шаблон',
   );
   assert.equal(anchoredAtRoot(root, `/elsewhere/a/*/.idea`), `/elsewhere/a/*/.idea`);
-  // Перевод самого srt (`denyGlobRegex`, как у правила запрета): класс из
-  // одного символа — этот символ.
+  // Перевод шаблона запрета в регулярное выражение — как у srt 0.0.77
+  // (`globToRegex` + хвост `(/.*)?` в `denyGlobRegex`): класс из одного
+  // символа — этот символ. Внутренний модуль srt не импортируется: пакет
+  // не обещает его путь. Перевод самого srt на тех же написаниях
+  // проверяют SBX14 и SBX16 в настоящей песочнице.
+  const denyGlobRegex = (pattern: string) =>
+    '^' +
+    pattern
+      .replace(/[.^$+{}()|\\]/g, '\\$&')
+      .replace(/\[([^\]]*?)$/g, '\\[$1')
+      .replace(/\*\*\//g, '__GLOBSTAR_SLASH__')
+      .replace(/\*\*/g, '__GLOBSTAR__')
+      .replace(/\*/g, '[^/]*')
+      .replace(/\?/g, '[^/]')
+      .replace(/__GLOBSTAR_SLASH__/g, '(.*/)?')
+      .replace(/__GLOBSTAR__/g, '.*') +
+    '(/.*)?$';
   for (const [dir, ok, bad] of [
     ['.reports', '.reports/x/.idea', 'xreports/x/.idea'],
     ['src', 'src/x/.idea/a.xml', 'srcx/x/.idea'],
@@ -856,6 +870,24 @@ test('SBX15: шаблон запрета с базой в корне совпа�
     'отказ пережит, провал — тест',
   );
   assert.deepEqual(classify(claude, eperm('/elsewhere/x')), [], 'EPERM о другом пути');
+  assert.deepEqual(
+    classify(claude, `${eperm('/elsewhere/x')}\n    at cleanup (${root}/.claude/x.js:1:1)`),
+    [],
+    'EPERM о другом пути, абсолютное имя каталога — в другой строке',
+  );
+  assert.deepEqual(
+    classify(claude, `${eperm('/elsewhere/x')}\nsee .claude/settings.json`),
+    [],
+    'EPERM о другом пути, относительное имя каталога — в другой строке',
+  );
+  assert.equal(
+    classify(
+      claude,
+      `AssertionError: expected 1 to equal 2\r\nrm: .claude: Operation not permitted`,
+    ).length,
+    1,
+    'EPERM и имя каталога в одной строке',
+  );
   // Не закреплённый запретом каталог: отказа ядра на нём быть не должно, и
   // классом среды он не становится.
   const expo = join(root, '.reports', 'expo-export');
