@@ -1029,3 +1029,81 @@ test('Повтор gate интеграции: только после зелён
     'отчёт свойств без провалов не мешает повтору',
   );
 });
+
+test('T10b: ревью интеграции видит только изменения своей попытки поверх актуального target, а не чужую уже принятую работу', async () => {
+  // Две независимые работы начинают от одного target. Первая (её исполнитель
+  // пишет src/a.txt) принимается раньше; исполнитель второй (src/b.txt)
+  // держится, пока первая не принята, — его кандидат основан на прежнем target.
+  const hold = join(mkdtempSync(join(tmpdir(), 'harness-hold-')), 'release');
+  // Номер шага сценария fake CLI выдаётся по счётчику без блокировки: второй
+  // исполнитель стартует, когда первый свой номер уже взял.
+  let prepared = 0;
+  const ctx: ReturnType<typeof setup> = setup({
+    runner: {
+      hooks: {
+        prepared: async () => {
+          if (prepared++ === 0) return;
+          for (let i = 0; i < 4800 && !existsSync(ctx.scenarioPath + '.writer.0.started'); i++)
+            await new Promise((r) => setTimeout(r, 25));
+        },
+      },
+    },
+    files: { 'src/greet.js': greet },
+    scenario: {
+      writer: [
+        implement({ 'src/a.txt': 'a\n' }),
+        { ...implement({ 'src/b.txt': 'b\n' }), holdUntil: hold },
+      ],
+      reviewer: { ...approve(), recordPrompt: true },
+    },
+    graph: (g) => {
+      const orders = g.orders as Record<string, unknown>[];
+      orders.push({
+        ...orders[0]!,
+        id: 'second-change',
+        source: { connector: 'files', ref: 'second-change', revision: '1' },
+        title: 'Second change',
+      });
+    },
+  });
+  const start = target(ctx);
+  const done = runAll(ctx);
+  let first: string | undefined;
+  for (let i = 0; i < 4800 && !first; i++) {
+    await new Promise((r) => setTimeout(r, 25));
+    first = ctx.engine.read((v) =>
+      ['add-greeting', 'second-change'].find((id) => v.work(id)?.status === 'done'),
+    );
+  }
+  assert.ok(first, 'первая работа принята');
+  writeFileSync(hold, '');
+  await done;
+  const second = first === 'add-greeting' ? 'second-change' : 'add-greeting';
+  const resultA = ctx.engine.read((v) => v.work(first)!.resultSha!);
+  const b = ctx.engine.read((v) => v.attempts(second).at(-1)!);
+  assert.equal(b.status, 'succeeded', b.error);
+  assert.equal(b.baseSha, start, 'вторая попытка начата от прежнего target');
+  assert.equal(
+    ctx.repo.git('rev-parse', `${b.integrationSha}^1`),
+    resultA,
+    'интеграция второй работы поверх принятой первой',
+  );
+  // Вызовы reviewer: кандидат и интеграция первой, затем кандидат и интеграция второй.
+  const integration = readFileSync(ctx.scenarioPath + '.reviewer.3.prompt', 'utf8');
+  const diff = integration.slice(integration.indexOf('Exact diff to review:'));
+  assert.ok(
+    integration.includes(`Review commit: ${b.integrationSha} (integration)`),
+    'четвёртый вызов — ревью интеграции второй работы',
+  );
+  assert.equal(
+    /Base commit: ([0-9a-f]+)\./.exec(integration)?.[1],
+    resultA,
+    'база — принятая первая',
+  );
+  assert.ok(diff.includes('src/b.txt'), 'своё изменение в diff ревью');
+  assert.ok(!diff.includes('src/a.txt'), 'чужая принятая работа не в diff ревью');
+  // Ключи записанного ревью не изменили смысла: SHA интеграции и область поручения.
+  const reviewed = b.evidence.filter((e) => e.kind === 'review' && e.phase === 'integration');
+  assert.equal(reviewed.at(-1)?.sha, b.integrationSha);
+  assert.equal(b.evidence.filter((e) => e.kind === 'review').at(-1)?.passed, true);
+});

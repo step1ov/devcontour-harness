@@ -3456,17 +3456,10 @@ export class Runner {
         await this.consumers(attempt, cwd, sha, artifacts, signal);
         this.requirements(attempt, work, repoPath, cwd, sha, 'integration');
         rearm();
-        await this.review(
-          attempt,
-          work,
-          cwd,
-          attempt.baseSha!,
-          sha,
-          'integration',
-          artifacts,
-          signal,
-          context,
-        );
+        // База ревью интеграции — target, на который сделано слияние (первый
+        // родитель integration SHA), а не база попытки: работа, принятая в
+        // target после начала попытки, в diff этого поручения не входит.
+        await this.review(attempt, work, cwd, base, sha, 'integration', artifacts, signal, context);
       },
       (stage, action) => this.timed(attempt, 'integration-environment:' + stage, action),
     );
