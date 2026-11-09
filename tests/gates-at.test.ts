@@ -275,6 +275,7 @@ test('gates на SHA вне попытки: сверка подготовки в
     );
     assert.equal(calls.length, 1);
     assert.ok(calls[0]!.checked, 'проверена после подготовки');
+    assert.equal(calls[0]!.execution?.env?.DEVCONTOUR_RUN_ID, 'GA-prepared', 'окружение проверки');
   });
   assert.ok(!existsSync(join(ctx.state, 'gates-at', 'GA-prepared', 'worktree')));
 });

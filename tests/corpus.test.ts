@@ -54,6 +54,7 @@ test('T17: подтверждение примера вызывает сверк
     assert.match(r.decision.reason ?? '', new RegExp(WIRED));
     assert.equal(r.version, null, 'неподтверждённое не создаёт версию');
     assert.ok(calls.length >= 1 && calls[0]!.checked, 'проверена после подготовки');
+    assert.equal(calls[0]!.execution?.env?.DEVCONTOUR_PHASE, 'case', 'окружение подтверждения');
   });
 });
 

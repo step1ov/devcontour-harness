@@ -339,6 +339,11 @@ test('T21/G02: сверка подготовки вызывается в дер�
     await assert.rejects(consume(), new RegExp(WIRED));
     assert.equal(calls.length, 1);
     assert.ok(calls[0]!.checked, 'проверена после подготовки');
+    assert.equal(
+      calls[0]!.execution?.env?.DEVCONTOUR_REPOSITORY_ID,
+      'product',
+      'окружение потребителя',
+    );
     assert.equal(ctx.worktrees('product'), 1, 'дерево потребителя убрано');
     ctx.store.close();
   });

@@ -209,6 +209,65 @@ test(
   },
 );
 
+test(
+  'T05: вложенный .git, созданный prepare под песочницей ОС, принадлежит подготовке: исполнитель кандидата удаляет его, gate интеграции уносит родителя — приёмка',
+  { skip: isolationSupport().ok ? false : 'песочница ОС недоступна' },
+  async () => {
+    const ctx = setup({
+      files: { '.gitignore': 'sub/\n' },
+      graph: (g) =>
+        ((g as { orders: { gates: string[] }[] }).orders[0]!.gates = ['unit', 'cleanup']),
+      scenario: {
+        writer: { ...implement(), remove: ['sub/.git'] },
+        reviewer: approve(),
+      },
+      policy: (p) => {
+        (p as { maxAttempts: number }).maxAttempts = 1;
+        p.isolation = { mode: 'os', domains: [] };
+        const repo = (
+          p as unknown as {
+            repositories: { prepare: unknown[]; gates: Record<string, unknown>[] }[];
+          }
+        ).repositories[0]!;
+        repo.prepare = [
+          {
+            id: 'submodule',
+            command: [
+              process.execPath,
+              '-e',
+              "require('fs').mkdirSync('sub',{recursive:true});require('fs').writeFileSync('sub/.git','gitdir: ../.git/modules/sub\\n')",
+            ],
+            timeoutMs: 30_000,
+          },
+        ];
+        // Уборка фикстуры переносом родителя во временный каталог gate.
+        repo.gates.push({
+          id: 'cleanup',
+          kind: 'check',
+          command: [
+            process.execPath,
+            '-e',
+            "const fs=require('fs'),p=require('path'),os=require('os');if(fs.existsSync('sub/.git'))fs.renameSync('sub',p.join(fs.mkdtempSync(p.join(os.tmpdir(),'gone-')),'sub'))",
+          ],
+          timeoutMs: 30_000,
+        });
+      },
+    });
+    await runAll(ctx);
+    const work = ctx.engine.read((v) => v.work('add-greeting')!);
+    assert.equal(work.status, 'done', work.failure);
+    const attempt = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+    assert.deepEqual(
+      attempt.evidence.filter((e) => e.gate === 'cleanup').map((e) => [e.phase, e.passed]),
+      [
+        ['candidate', true],
+        ['integration', true],
+      ],
+      'gate интеграции унёс подготовленный подмодуль',
+    );
+  },
+);
+
 test('T05: сверка подготовки вызывается в фазах кандидата и интеграции; отказ после prepare интеграции — отказ среды', async () => {
   await withPreparationStub(2, async (calls) => {
     const ctx = setup({ scenario: { writer: implement(), reviewer: approve() } });
@@ -224,6 +283,12 @@ test('T05: сверка подготовки вызывается в фазах 
       'обе сверки проверены после подготовки',
     );
     assert.notEqual(calls[0]!.root, calls[1]!.root, 'у интеграции своё дерево');
+    // Проверке передано окружение своей фазы: в него пишется владение
+    // подготовки, которое читают исполнитель, установка и gates фазы.
+    assert.deepEqual(
+      calls.map((c) => c.execution?.env?.DEVCONTOUR_PHASE),
+      ['candidate', 'integration'],
+    );
     assert.equal(target(ctx), before, 'target ref не продвинут');
   });
 });
