@@ -667,16 +667,21 @@ function pinnedDirectoryRule(
 
 const epermPattern = /\bEPERM\b|operation not permitted/i;
 /**
- * Путь отдельным словом строки: перед ним начало строки, пробел или кавычка
- * (у относительного ещё `./`), после — конец строки, пробел, кавычка, `:`,
- * `/` или `,`. Так `.claude-old` и `~/.claude/…` не называют `.claude`.
+ * Путь отдельным словом строки: перед ним начало строки, пробел, кавычка,
+ * `(`, `[`, `=` или `<` (у относительного ещё `./`), после — конец строки,
+ * пробел, кавычка, `:`, `/`, `,`, `;`, `)`, `]`, `>` или точка в конце
+ * предложения (перед пробелом или концом строки). Так `.claude-old`,
+ * `.claude.bak` и `~/.claude/…` не называют `.claude`.
  */
 function token(line: string, path: string, relativePath: boolean) {
-  const before = /[\s'"`]/;
-  const after = /[\s'"`:/,]/;
+  const before = /[\s'"`([=<]/;
+  const after = /[\s'"`:/,;)\]>]/;
+  const ends = (end: number) =>
+    end >= line.length ||
+    after.test(line[end]!) ||
+    (line[end] === '.' && (end + 1 >= line.length || /\s/.test(line[end + 1]!)));
   for (let i = line.indexOf(path); i !== -1; i = line.indexOf(path, i + 1)) {
-    const end = i + path.length;
-    if (end < line.length && !after.test(line[end]!)) continue;
+    if (!ends(i + path.length)) continue;
     if (i === 0 || before.test(line[i - 1]!)) return true;
     if (relativePath && line.slice(i - 2, i) === './' && (i === 2 || before.test(line[i - 3]!)))
       return true;
@@ -878,7 +883,10 @@ export function protectedChanges(
   root: string,
   /**
    * Пути относительно `root`, которыми владеет подготовка фазы (вложенные
-   * `.git`, см. `preparationGuard`): их изменение и исчезновение не в счёт.
+   * `.git`, см. `preparationGuard`): не в счёт только их исчезновение
+   * (уборка фикстуры переносом родителя). Изменение — в том числе подмена
+   * переносом другого `.git` на то же место — нарушение: подменённый
+   * `gitdir` подмодуля git хоста прочитал бы при следующей команде.
    */
   owned?: ReadonlySet<string>,
 ) {
@@ -886,7 +894,7 @@ export function protectedChanges(
   const mine = (path: string) => !owned?.has(relative(root, path));
   const changed = [...after]
     .filter(([path, sig]) => {
-      if (sig === 'missing' || !mine(path)) return false;
+      if (sig === 'missing') return false;
       const was = before.get(path) ?? 'missing';
       if (sig === emptyTree && (was === 'missing' || was === emptyTree)) return false;
       return was !== sig;

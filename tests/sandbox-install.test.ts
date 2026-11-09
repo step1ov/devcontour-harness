@@ -874,6 +874,7 @@ test('SBX15: шаблон запрета с базой в корне совпа�
     [`Error: EPERM: operation not permitted, open '/Users/me/.claude/settings.json'`, '~/.claude'],
     [`rm: .claude-old: Operation not permitted`, 'соседний каталог, относительно'],
     [`rm: x.claude: Operation not permitted`, 'имя внутри слова'],
+    [`rmdir(.claude.bak): Operation not permitted`, 'точка внутри имени'],
   ] as const)
     assert.deepEqual(classify(claude, line), [], why);
   for (const [line, why] of [
@@ -882,6 +883,11 @@ test('SBX15: шаблон запрета с базой в корне совпа�
     [`remove ${claude}: operation not permitted`, 'Go'],
     [`PermissionError: [Errno 1] Operation not permitted: '.claude'`, 'Python'],
     [`AssertionError: expected 1 to equal 2\nrmdir '${claude}/': EPERM`, 'после имени /'],
+    [`Warning: rmdir(${claude}): Operation not permitted`, 'PHP, скобки'],
+    [`EPERM path=${claude}; retry`, '= и ;'],
+    [`EPERM [${claude}]`, 'квадратные скобки'],
+    [`EPERM <${claude}>`, 'угловые скобки'],
+    [`EPERM: could not remove ${claude}.`, 'точка в конце предложения'],
   ] as const)
     assert.equal(classify(claude, line).length, 1, why);
   // macOS: журнал ядра пишет /private/var, а вывод проверки — /var.
@@ -1024,12 +1030,16 @@ test('SBX18: подготовка фазы (prepare, lifecycle) не созда�
   });
   assert.equal(sub.message, undefined);
   assert.deepEqual([...sub.execution.prepared!].sort(), ['.build/checkouts/dep/.git', 'sub/.git']);
-  // Сверка gate или исполнителя после подготовки: изменение и уборка того,
-  // чем владеет подготовка, — не нарушение; без владения — нарушение.
+  // Сверка gate или исполнителя после подготовки: уборка того, чем владеет
+  // подготовка, — не нарушение; изменение (подмена gitdir) — нарушение и с
+  // владением; без владения нарушение и то и другое.
   const before = protectedSnapshot(root);
   writeFileSync(join(root, 'sub/.git'), 'gitdir: ../.git/modules/other\n');
   rmSync(join(root, '.build'), { recursive: true });
-  assert.deepEqual(protectedChanges(before, root, sub.execution.prepared), []);
+  assert.deepEqual(
+    protectedChanges(before, root, sub.execution.prepared).map((p) => p.slice(root.length + 1)),
+    ['sub/.git'],
+  );
   assert.deepEqual(
     protectedChanges(before, root)
       .map((p) => p.slice(root.length + 1))
@@ -1071,24 +1081,59 @@ test('SBX18: подготовка фазы (prepare, lifecycle) не созда�
 });
 
 test(
-  'SBX19 [песочница ОС]: вложенный .git, созданный подготовкой, gate не удаляет и с владением подготовки — запрет записи sandbox-runtime, отказ среды; .git остаётся',
+  'SBX19 [песочница ОС]: вложенный .git, которым владеет подготовка: rm -rf в gate закрыт запретом sandbox-runtime; перенос родителя наружу — не нарушение; подмена переносом внутрь — scope-violation',
   { skip: noSandbox },
   async () => {
-    // Владение подготовки снимает только сверку снимков; обязательный запрет
-    // sandbox-runtime на запись и удаление вложенного `.git` действует как
-    // прежде, поэтому уборка такой фикстуры — дело подготовки или teardown.
-    const r = repo({ 'src/a.ts': 'x\n' });
-    const root = realpathSync(r.dir);
-    mkdirSync(join(root, 'fixture'));
-    writeFileSync(join(root, 'fixture/.git'), 'gitdir: ../.git/modules/fixture\n');
-    const result = await gate(
-      r.dir,
-      r.head(),
-      `require('fs').rmSync('fixture',{recursive:true})`,
-      new Set(['fixture/.git']),
-    );
-    assert.equal(result.failure?.kind, 'environment', result.failure?.message);
-    assert.match(result.failure.message, /fixture\/\.git — обязательный запрет записи/);
-    assert.equal(existsSync(join(root, 'fixture/.git')), true);
+    const fresh = () => {
+      const r = repo({ 'src/a.ts': 'x\n' });
+      const root = realpathSync(r.dir);
+      // Подмодуль, созданный подготовкой до gate.
+      mkdirSync(join(root, 'sub'));
+      writeFileSync(join(root, 'sub/.git'), 'gitdir: ../.git/modules/sub\n');
+      return { r, root };
+    };
+    const owned = new Set(['sub/.git']);
+    {
+      // `rm -rf`: ядро отказывает в удалении, `.git` остаётся.
+      const { r, root } = fresh();
+      const result = await gate(
+        r.dir,
+        r.head(),
+        `require('fs').rmSync('sub',{recursive:true})`,
+        owned,
+      );
+      // Класс отказа зависит от того, успел ли журнал ядра записать отказ
+      // (environment) или нет (gate); проходом он не бывает.
+      assert.ok(result.failure, 'rm -rf вложенного .git не проходит');
+      assert.notEqual(result.failure.kind, 'scope-violation', result.failure.message);
+      assert.equal(existsSync(join(root, 'sub/.git')), true);
+    }
+    {
+      // Перенос родителя во временный каталог gate: уборка фикстуры.
+      const { r, root } = fresh();
+      const out = `const fs=require('fs'),p=require('path'),os=require('os');fs.renameSync('sub',fs.mkdtempSync(p.join(os.tmpdir(),'gone-'))+'/sub')`;
+      const result = await gate(r.dir, r.head(), out, owned);
+      assert.equal(result.failure, undefined, result.failure?.message);
+      assert.equal(existsSync(join(root, 'sub')), false);
+      // Без владения та же уборка — нарушение.
+      const again = fresh();
+      const strict = await gate(again.r.dir, again.r.head(), out);
+      assert.equal(strict.failure?.kind, 'scope-violation', strict.failure?.message);
+      assert.match(strict.failure.message, /удалила защищённые пути .*sub\/\.git/);
+    }
+    {
+      // Подмена: `.git` с другим gitdir собран во временном каталоге и
+      // перенесён на место прежнего. Владение подготовки это не прикрывает.
+      const { r, root } = fresh();
+      const swap = `const fs=require('fs'),p=require('path'),os=require('os');const ev=fs.mkdtempSync(p.join(os.tmpdir(),'ev-'));fs.mkdirSync(ev+'/sub');fs.writeFileSync(ev+'/sub/.git','gitdir: ../evilg\\n');fs.renameSync('sub',ev+'/old');fs.renameSync(ev+'/sub','sub')`;
+      const result = await gate(r.dir, r.head(), swap, owned);
+      assert.equal(result.failure?.kind, 'scope-violation', result.failure?.message);
+      assert.match(result.failure.message, /изменила или удалила защищённые пути .*sub\/\.git/);
+      assert.match(
+        readFileSync(join(root, 'sub/.git'), 'utf8'),
+        /evilg/,
+        'подмена дошла до дерева',
+      );
+    }
   },
 );

@@ -710,7 +710,7 @@ export interface GateRun {
   execution: {
     env: NodeJS.ProcessEnv;
     redact: (value: string) => string;
-    /** Вложенные `.git`, созданные подготовкой фазы: сверка их не считает. */
+    /** Вложенные `.git`, созданные подготовкой фазы: их исчезновение сверка не считает. */
     prepared?: ReadonlySet<string>;
   };
   /** Закрытое проверке (состояние controller, чужие checkout) и открытое внутри него. */
@@ -1224,7 +1224,7 @@ export interface WriterDependenciesRun {
   execution: {
     env: NodeJS.ProcessEnv;
     redact: (value: string) => string;
-    /** Вложенные `.git`, созданные подготовкой фазы: сверка их не считает. */
+    /** Вложенные `.git`, созданные подготовкой фазы: их исчезновение сверка не считает. */
     prepared?: ReadonlySet<string>;
   };
   boundary: Boundary;
