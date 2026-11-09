@@ -873,11 +873,20 @@ export function protectedSnapshot(root: string) {
  * файлом. Путь, где раньше были файлы, по-прежнему нарушение при любом
  * изменении.
  */
-export function protectedChanges(before: Map<string, string>, root: string) {
+export function protectedChanges(
+  before: Map<string, string>,
+  root: string,
+  /**
+   * Пути относительно `root`, которыми владеет подготовка фазы (вложенные
+   * `.git`, см. `preparationGuard`): их изменение и исчезновение не в счёт.
+   */
+  owned?: ReadonlySet<string>,
+) {
   const after = protectedSnapshot(root);
+  const mine = (path: string) => !owned?.has(relative(root, path));
   const changed = [...after]
     .filter(([path, sig]) => {
-      if (sig === 'missing') return false;
+      if (sig === 'missing' || !mine(path)) return false;
       const was = before.get(path) ?? 'missing';
       if (sig === emptyTree && (was === 'missing' || was === emptyTree)) return false;
       return was !== sig;
@@ -890,7 +899,10 @@ export function protectedChanges(before: Map<string, string>, root: string) {
   const removed = [...before]
     .filter(
       ([path, sig]) =>
-        sig !== 'missing' && sig !== emptyTree && (after.get(path) ?? 'missing') === 'missing',
+        mine(path) &&
+        sig !== 'missing' &&
+        sig !== emptyTree &&
+        (after.get(path) ?? 'missing') === 'missing',
     )
     .map(([path]) => path);
   return [...changed, ...removed];

@@ -176,7 +176,7 @@ test(
   },
 );
 
-async function gate(dir: string, sha: string, script: string) {
+async function gate(dir: string, sha: string, script: string, prepared?: Set<string>) {
   const recorded: Omit<EvidenceRecord, 'id' | 'runId' | 'createdAt'>[] = [];
   try {
     await runGate({
@@ -196,7 +196,7 @@ async function gate(dir: string, sha: string, script: string) {
       },
       artifactDir: mkdtempSync(join(tmpdir(), 'harness-art-')),
       signal: new AbortController().signal,
-      execution: { env: process.env, redact: redactor([]) },
+      execution: { env: process.env, redact: redactor([]), ...(prepared ? { prepared } : {}) },
       boundary: { hidden: [], readable: [] },
     });
   } catch (error) {
@@ -992,42 +992,103 @@ test('SBX17: сверка защищённых путей — исчезнувш
   );
 });
 
-test('SBX18: подготовка фазы (prepare, lifecycle) не создаёт, не меняет и не удаляет защищённые пути — отказ среды; без песочницы ОС сверки нет', () => {
+test('SBX18: подготовка фазы (prepare, lifecycle) не создаёт, не меняет и не удаляет конфигурацию IDE, агента и корневого git — отказ среды; вложенный .git разрешён и принадлежит подготовке; без песочницы ОС или подготовки сверки нет', () => {
   const r = repo({ 'src/a.ts': 'x\n', 'vendor/x/.idea/workspace.xml': '<x/>' });
   const root = realpathSync(r.dir);
-  const refused = (change: () => void) => {
+  const run = (change: () => void) => {
     const check = preparationGuard(true, root);
     change();
+    const execution: { prepared?: Set<string> } = {};
     try {
-      check();
+      check(execution);
     } catch (error) {
       assert.ok(error instanceof TaskFailure);
       assert.equal(error.kind, 'environment');
       assert.equal(error.diagnosis, 'sandbox-policy');
-      return error.message;
+      return { message: error.message, execution };
     }
-    return undefined;
+    return { message: undefined, execution };
   };
   assert.equal(
-    refused(() => writeFileSync(join(root, 'src/b.ts'), 'y\n')),
+    run(() => writeFileSync(join(root, 'src/b.ts'), 'y\n')).message,
     undefined,
     'обычные файлы подготовка пишет',
   );
-  assert.match(
-    refused(() => {
-      mkdirSync(join(root, 'fixture/repo/.git'), { recursive: true });
-      writeFileSync(join(root, 'fixture/repo/.git/config'), '');
-    }) ?? '',
-    /Подготовка окружения .*создала, изменила или удалила защищённые пути .*: fixture\/repo\/\.git\. /,
+  // Подмодуль (файл `.git`) и клон зависимости (каталог `.git`) — владение
+  // подготовки, не отказ.
+  const sub = run(() => {
+    mkdirSync(join(root, 'sub'));
+    writeFileSync(join(root, 'sub/.git'), 'gitdir: ../.git/modules/sub\n');
+    mkdirSync(join(root, '.build/checkouts/dep/.git'), { recursive: true });
+    writeFileSync(join(root, '.build/checkouts/dep/.git/HEAD'), 'ref: refs/heads/main\n');
+  });
+  assert.equal(sub.message, undefined);
+  assert.deepEqual([...sub.execution.prepared!].sort(), ['.build/checkouts/dep/.git', 'sub/.git']);
+  // Сверка gate или исполнителя после подготовки: изменение и уборка того,
+  // чем владеет подготовка, — не нарушение; без владения — нарушение.
+  const before = protectedSnapshot(root);
+  writeFileSync(join(root, 'sub/.git'), 'gitdir: ../.git/modules/other\n');
+  rmSync(join(root, '.build'), { recursive: true });
+  assert.deepEqual(protectedChanges(before, root, sub.execution.prepared), []);
+  assert.deepEqual(
+    protectedChanges(before, root)
+      .map((p) => p.slice(root.length + 1))
+      .sort(),
+    ['.build/checkouts/dep/.git', 'sub/.git'],
   );
-  rmSync(join(root, 'fixture'), { recursive: true });
+  rmSync(join(root, 'sub'), { recursive: true });
+  // Конфигурация IDE и агента — отказ.
   assert.match(
-    refused(() => rmSync(join(root, 'vendor'), { recursive: true })) ?? '',
+    run(() => {
+      mkdirSync(join(root, '.vscode'));
+      writeFileSync(join(root, '.vscode/settings.json'), '{}');
+    }).message ?? '',
+    /Подготовка окружения .*создала, изменила или удалила защищённые пути .*: \.vscode\. /,
+  );
+  rmSync(join(root, '.vscode'), { recursive: true });
+  assert.match(
+    run(() => rmSync(join(root, 'vendor'), { recursive: true })).message ?? '',
     /: vendor\/x\/\.idea\. /,
     'удаление через родителя',
   );
-  const off = preparationGuard(false, root);
-  mkdirSync(join(root, '.vscode'));
-  writeFileSync(join(root, '.vscode/settings.json'), '{}');
-  off();
+  // Вложенный `.git` рядом с `.claude`: отказ называет только `.claude`.
+  const mixed = run(() => {
+    mkdirSync(join(root, 'lib/.claude'), { recursive: true });
+    writeFileSync(join(root, 'lib/.claude/settings.json'), '{}');
+    mkdirSync(join(root, 'lib/dep'));
+    writeFileSync(join(root, 'lib/dep/.git'), 'gitdir: x\n');
+  });
+  assert.match(mixed.message ?? '', /: lib\/\.claude\. /);
+  assert.equal(mixed.execution.prepared, undefined, 'при отказе владение не передаётся');
+  rmSync(join(root, 'lib'), { recursive: true });
+  // Без песочницы ОС или без подготовки дерево не обходится.
+  for (const off of [preparationGuard(false, root), preparationGuard(true, root, false)]) {
+    mkdirSync(join(root, '.vscode'));
+    writeFileSync(join(root, '.vscode/settings.json'), '{}');
+    off();
+    rmSync(join(root, '.vscode'), { recursive: true });
+  }
 });
+
+test(
+  'SBX19 [песочница ОС]: вложенный .git, созданный подготовкой, gate не удаляет и с владением подготовки — запрет записи sandbox-runtime, отказ среды; .git остаётся',
+  { skip: noSandbox },
+  async () => {
+    // Владение подготовки снимает только сверку снимков; обязательный запрет
+    // sandbox-runtime на запись и удаление вложенного `.git` действует как
+    // прежде, поэтому уборка такой фикстуры — дело подготовки или teardown.
+    const r = repo({ 'src/a.ts': 'x\n' });
+    const root = realpathSync(r.dir);
+    mkdirSync(join(root, 'fixture'));
+    writeFileSync(join(root, 'fixture/.git'), 'gitdir: ../.git/modules/fixture\n');
+    const result = await gate(
+      r.dir,
+      r.head(),
+      `require('fs').rmSync('fixture',{recursive:true})`,
+      new Set(['fixture/.git']),
+    );
+    assert.equal(result.failure?.kind, 'environment', result.failure?.message);
+    assert.match(result.failure.message, /fixture\/\.git — обязательный запрет записи/);
+    assert.equal(existsSync(join(root, 'fixture/.git')), true);
+  },
+);

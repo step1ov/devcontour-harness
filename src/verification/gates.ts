@@ -707,7 +707,12 @@ export interface GateRun {
   artifactDir: string;
   signal: AbortSignal;
   /** Окружение фазы: переменные и маска секретов. */
-  execution: { env: NodeJS.ProcessEnv; redact: (value: string) => string };
+  execution: {
+    env: NodeJS.ProcessEnv;
+    redact: (value: string) => string;
+    /** Вложенные `.git`, созданные подготовкой фазы: сверка их не считает. */
+    prepared?: ReadonlySet<string>;
+  };
   /** Закрытое проверке (состояние controller, чужие checkout) и открытое внутри него. */
   boundary: Boundary;
   /** Проверка потребителя: evidence несёт его компонент и не закрывает собственные gates. */
@@ -865,7 +870,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     // нарушение области, а не отказ среды (снимок до проверки прочитался).
     let planted: string[] = [];
     try {
-      if (before) planted = protectedChanges(before, root);
+      if (before) planted = protectedChanges(before, root, run.execution.prepared);
     } catch (error) {
       if (error instanceof SandboxPolicyError) kind = 'scope-violation';
       throw error instanceof SandboxPolicyError ? new Error(error.message) : error;
@@ -1216,7 +1221,12 @@ export interface WriterDependenciesRun {
   artifactDir: string;
   signal: AbortSignal;
   /** Окружение фазы — с окружением хранилища зависимостей, как у gate. */
-  execution: { env: NodeJS.ProcessEnv; redact: (value: string) => string };
+  execution: {
+    env: NodeJS.ProcessEnv;
+    redact: (value: string) => string;
+    /** Вложенные `.git`, созданные подготовкой фазы: сверка их не считает. */
+    prepared?: ReadonlySet<string>;
+  };
   boundary: Boundary;
 }
 
@@ -1409,7 +1419,7 @@ export async function prepareWriterDependencies(
     let planted: string[] = [];
     let unreadable: string | undefined;
     try {
-      if (guarded) planted = protectedChanges(guarded, root);
+      if (guarded) planted = protectedChanges(guarded, root, run.execution.prepared);
     } catch (error) {
       if (!(error instanceof SandboxPolicyError)) throw error;
       unreadable = error.message;

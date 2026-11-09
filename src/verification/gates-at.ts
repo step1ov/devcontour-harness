@@ -13,7 +13,8 @@ import { TaskFailure } from '../engine/failure.ts';
 import { git } from '../environment/process.ts';
 import {
   executionEnvironment,
-  preparationGuard,
+  preparation,
+  preparesTree,
   runSteps,
   withEnvironment,
 } from '../environment/lifecycle.ts';
@@ -234,7 +235,11 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
           source,
         );
         const boundary = ctx.boundary();
-        const prepared = preparationGuard(ctx.policy.isolation.mode === 'os', cwd);
+        const prepared = preparation.guard(
+          ctx.policy.isolation.mode === 'os',
+          cwd,
+          preparesTree(repo.lifecycle ?? ctx.policy.lifecycle, repo.prepare, repo.dependencyStore),
+        );
         await withEnvironment(
           repo.lifecycle ?? ctx.policy.lifecycle,
           cwd,
@@ -244,7 +249,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
           async () => {
             await materializeStore(store, { repo, cwd, execution, signal, dir: artifacts });
             await runSteps(repo.prepare, cwd, join(artifacts, 'prepare'), execution, signal);
-            prepared();
+            prepared(execution);
             for (const gate of gates) {
               // Пропускается только gate, чья явная предпосылка (`dependsOn`) не
               // прошла. Провал неявной (более ранний check gate в режиме

@@ -1,5 +1,5 @@
 import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
-import { join, relative, sep } from 'node:path';
+import { basename, dirname, join, relative, sep } from 'node:path';
 import type { z } from 'zod';
 import {
   digestOf,
@@ -12,7 +12,7 @@ import {
 import { dependencyNetworkFailure, dependencyNetworkMessage } from './dependency-network.ts';
 import { protectedChanges, protectedSnapshot, SandboxPolicyError } from './isolation.ts';
 import { command } from './process.ts';
-import { redactor } from './redaction.ts';
+import { redactor, type Redactor } from './redaction.ts';
 export { redactor } from './redaction.ts';
 
 type Environment = z.infer<typeof environmentSchema>;
@@ -78,7 +78,13 @@ export function executionEnvironment(
     env[key] = value;
     if (key.startsWith('DEVCONTOUR_')) env['HARNESS_' + key.slice('DEVCONTOUR_'.length)] = value;
   }
-  return { env, redact: redactor(secretValues) };
+  const result: {
+    env: NodeJS.ProcessEnv;
+    redact: Redactor;
+    /** Вложенные `.git`, созданные подготовкой фазы (`preparationGuard`). */
+    prepared?: PreparedProtected;
+  } = { env, redact: redactor(secretValues) };
+  return result;
 }
 
 /** Имя переменной похоже на секрет. */
@@ -155,22 +161,52 @@ export async function runSteps(
 }
 
 /**
+ * Защищённые пути, которыми владеет подготовка фазы: вложенные `.git`
+ * (подмодули, клоны зависимостей), созданные или изменённые её шагами. Пути —
+ * относительно корня дерева фазы. Сверки исполнителя, установки и gates той
+ * же фазы их изменение и исчезновение своими не считают.
+ */
+export type PreparedProtected = Set<string>;
+
+/** Есть ли у фазы подготовка, которую стоит сверять. */
+export function preparesTree(
+  lifecycle: Lifecycle | undefined,
+  prepare: readonly Step[],
+  store: unknown,
+) {
+  return !!(lifecycle?.setup.length || lifecycle?.ready.length || prepare.length || store);
+}
+
+/**
+ * Вложенный `.git` (файл подмодуля или каталог клона) ниже корня дерева.
+ * Корневой `.git` с его `config` и `hooks` сюда не входит.
+ */
+const nestedGit = (root: string, path: string) =>
+  basename(path).toLowerCase() === '.git' && dirname(path) !== root;
+
+/**
  * Сверка защищённых путей вокруг подготовки фазы: шагов lifecycle `setup` и
  * `ready`, хранилища зависимостей и шагов `prepare`. Их задаёт политика, и
  * исполняются они обычным процессом хоста, вне песочницы, — запреты имён на
  * них не действуют. Снимок снимается до `withEnvironment`, сверка — сразу
  * после `prepare`, до черновика, установки и исполнителя.
  *
- * Подготовка, которая создала, изменила или удалила конфигурацию IDE,
- * shell, git или Claude в дереве, — отказ среды (`sandbox-policy`): его
- * чинит политика, а не код задачи. Иначе такая подготовка прошла бы молча, а
- * gate, удаливший созданное ею (уборка клонированной фикстуры с `.git`),
- * получил бы `scope-violation` за чужое содержимое.
+ * - Вложенный `.git`, созданный или изменённый подготовкой (`git submodule
+ *   update --init`, клоны менеджеров зависимостей), разрешён и переходит во
+ *   владение подготовки: проверка записывает его в `execution.prepared`, и
+ *   сверки исполнителя, установки и gates этой фазы его изменение и
+ *   удаление (уборка клонированной фикстуры) нарушением не считают.
+ * - Любой другой защищённый путь — конфигурация IDE, агента, shell или
+ *   корневого `.git` — созданный, изменённый или удалённый подготовкой, —
+ *   отказ среды (`sandbox-policy`) с путями в сообщении: его чинит политика,
+ *   а не код задачи.
  *
- * Без песочницы ОС (`os = false`) сверки нет, как и у gate и исполнителя.
+ * Без песочницы ОС (`os = false`) или без подготовки (`active = false`)
+ * сверки нет: обходить дерево незачем.
  */
-export function preparationGuard(os: boolean, root: string) {
-  if (!os) return () => {};
+export function preparationGuard(os: boolean, root: string, active = true) {
+  type Check = (execution?: { prepared?: PreparedProtected }) => void;
+  if (!os || !active) return (() => {}) as Check;
   const environment = (message: string) =>
     new TaskFailure('environment', message, undefined, 'sandbox-policy');
   let before: Map<string, string>;
@@ -180,7 +216,7 @@ export function preparationGuard(os: boolean, root: string) {
     if (error instanceof SandboxPolicyError) throw environment(error.message);
     throw error;
   }
-  return () => {
+  const check: Check = (execution) => {
     let changed: string[];
     try {
       changed = protectedChanges(before, root);
@@ -188,20 +224,32 @@ export function preparationGuard(os: boolean, root: string) {
       if (error instanceof SandboxPolicyError) throw environment(error.message);
       throw error;
     }
-    if (!changed.length) return;
-    throw environment(
-      'Подготовка окружения (lifecycle setup/ready, хранилище зависимостей, prepare) создала, ' +
-        'изменила или удалила защищённые пути (конфигурация IDE, shell, git или Claude): ' +
-        changed
-          .slice(0, 5)
-          .map((p) => relative(root, p))
-          .join(', ') +
-        (changed.length > 5 ? ` и ещё ${changed.length - 5}` : '') +
-        '. Шаги подготовки задаёт политика, и исполняются они вне песочницы: такие пути в ' +
-        'дереве проверки они не создают, не меняют и не удаляют — держите их вне worktree',
-    );
+    const refused = changed.filter((p) => !nestedGit(root, p));
+    if (refused.length)
+      throw environment(
+        'Подготовка окружения (lifecycle setup/ready, хранилище зависимостей, prepare) создала, ' +
+          'изменила или удалила защищённые пути (конфигурация IDE, агента, shell или корневого git): ' +
+          refused
+            .slice(0, 5)
+            .map((p) => relative(root, p))
+            .join(', ') +
+          (refused.length > 5 ? ` и ещё ${refused.length - 5}` : '') +
+          '. Шаги подготовки задаёт политика, и исполняются они вне песочницы: такие пути в ' +
+          'дереве проверки они не создают, не меняют и не удаляют — держите их вне worktree',
+      );
+    if (execution && changed.length) {
+      execution.prepared ??= new Set();
+      for (const p of changed) execution.prepared.add(relative(root, p));
+    }
   };
+  return check;
 }
+
+/**
+ * Точка подмены для тестов: фазы берут сверку подготовки отсюда (как
+ * `hostLoad` у gate), и тест проверяет, что каждая фаза её вызывает.
+ */
+export const preparation = { guard: preparationGuard };
 
 // Teardown uses a fresh deadline: cancellation must not cancel cleanup itself.
 // The receipt is retained after crashes and can be explicitly resumed with environment-cleanup.

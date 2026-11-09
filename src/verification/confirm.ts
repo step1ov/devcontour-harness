@@ -14,7 +14,8 @@ import {
 import { OversizedFile, readBounded } from '../environment/bounded-read.ts';
 import {
   executionEnvironment,
-  preparationGuard,
+  preparation,
+  preparesTree,
   runSteps,
   withEnvironment,
 } from '../environment/lifecycle.ts';
@@ -381,7 +382,11 @@ async function decide(
     const limitMs = gateTimeoutMs(gate, ctx.policy) * 3 + 120000;
     const deadline = Date.now() + limitMs;
     const signal = AbortSignal.timeout(limitMs);
-    const prepared = preparationGuard(ctx.policy.isolation.mode === 'os', dir);
+    const prepared = preparation.guard(
+      ctx.policy.isolation.mode === 'os',
+      dir,
+      preparesTree(repo.lifecycle ?? ctx.policy.lifecycle, repo.prepare, repo.dependencyStore),
+    );
     await withEnvironment(
       repo.lifecycle ?? ctx.policy.lifecycle,
       dir,
@@ -405,7 +410,7 @@ async function decide(
           { repo, cwd: dir, execution, signal, dir: io },
         );
         await runSteps(repo.prepare, dir, join(io, 'prepare'), execution, signal);
-        prepared();
+        prepared(execution);
         const request = join(io, 'case.json');
         await writeFile(
           request,
