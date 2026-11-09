@@ -2042,6 +2042,11 @@
       "minimum": 0,
       "maximum": 2
     },
+    "gateTimeoutFloorMs": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 600000
+    },
     "stallSweep": {
       "type": "object",
       "properties": {

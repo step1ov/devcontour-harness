@@ -2574,7 +2574,7 @@ export class Runner {
       settingsDir: join(dir, 'probe-settings'),
       log: join(dir, 'probes.jsonl'),
       // Объявленные gates — по ID: argv, cwd и путь отчёта выбирает controller.
-      gates: probeGates(gates),
+      gates: probeGates(gates, this.policy),
       phase,
       sha,
       ...(attempt.baseSha ? { trustedBase: attempt.baseSha } : {}),

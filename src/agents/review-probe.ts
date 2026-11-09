@@ -25,6 +25,7 @@ import {
   type GatePolicy,
   type ProbeServer,
   TaskFailure,
+  gateTimeoutMs,
 } from '../contracts/index.ts';
 import {
   dependencyNetworkFailure,
@@ -1005,13 +1006,16 @@ export function serveReviewProbes(
 }
 
 /** Объявленные gates репозитория в виде спецификации probe. */
-export function probeGates(gates: GatePolicy[]): ProbeGate[] {
+export function probeGates(
+  gates: GatePolicy[],
+  policy: { gateTimeoutFloorMs?: number | undefined } = {},
+): ProbeGate[] {
   return gates.map((g) => ({
     id: g.id,
     kind: g.kind,
     command: g.command,
     ...(g.cwd ? { cwd: g.cwd } : {}),
-    timeoutMs: g.timeoutMs,
+    timeoutMs: gateTimeoutMs(g, policy),
     ...(g.report ? { report: { type: g.report.type, path: g.report.path } } : {}),
     ...(g.property ? { property: true } : {}),
   }));

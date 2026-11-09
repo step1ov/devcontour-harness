@@ -21,6 +21,8 @@ import {
   type EvidenceRecord,
   type ExecutionPolicy,
   type GatePolicy,
+  gateTimeoutMs,
+  gateTimeoutText,
 } from '../contracts/index.ts';
 import { command, git, gitOutput } from '../environment/process.ts';
 import {
@@ -657,7 +659,7 @@ export interface Boundary {
 
 /** Что нужно для запуска gate попытки. */
 export interface GateRun {
-  policy: Pick<ExecutionPolicy, 'isolation'>;
+  policy: Pick<ExecutionPolicy, 'isolation' | 'gateTimeoutFloorMs'>;
   /** Запись evidence под fencing попытки. */
   record: (evidence: Omit<EvidenceRecord, 'id' | 'runId' | 'createdAt'>) => EvidenceRecord;
   cwd: string;
@@ -798,7 +800,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
           ),
         },
         redact,
-        timeoutMs: gate.timeoutMs,
+        timeoutMs: gateTimeoutMs(gate, run.policy),
         signal,
         write: [cwd, ...(propertyDir ? [propertyDir] : [])],
         readable: [...run.boundary.readable, ...(corpusDir ? [corpusDir] : [])],
@@ -831,7 +833,10 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       );
     }
     if (result.timedOut || signal.aborted)
-      throw new Error('Проверка прервана или превысила timeout');
+      throw new Error(
+        'Проверка прервана или превысила timeout' +
+          (result.timedOut && !signal.aborted ? ': ' + gateTimeoutText(gate, run.policy) : ''),
+      );
     // Песочница так и не запустила команду по известному отказу запуска:
     // код проекта не исполнялся, и его правка ничего не изменит. Это отказ
     // среды, а не провал проверки; текст srt вроде «Shell 'bash' not found
@@ -1124,7 +1129,7 @@ const MANIFESTS = [
 
 /** Что нужно для установки зависимостей в дереве исполнителя до его работы. */
 export interface WriterDependenciesRun {
-  policy: Pick<ExecutionPolicy, 'isolation'>;
+  policy: Pick<ExecutionPolicy, 'isolation' | 'gateTimeoutFloorMs'>;
   /** Рабочее дерево исполнителя: база попытки, возможно с наложенным черновиком. */
   cwd: string;
   /** SHA базы попытки (HEAD дерева). */
@@ -1308,7 +1313,7 @@ export async function prepareWriterDependencies(
           cwd: gateCwd,
           env: run.execution.env,
           redact,
-          timeoutMs: gate.timeoutMs,
+          timeoutMs: gateTimeoutMs(gate, run.policy),
           signal,
           write: [run.cwd],
           readable: run.boundary.readable,
@@ -1319,7 +1324,7 @@ export async function prepareWriterDependencies(
         },
       );
       log += checked.stdout + '\n' + checked.stderr;
-      if (checked.timedOut) failure = 'превышен timeout';
+      if (checked.timedOut) failure = 'превышен timeout: ' + gateTimeoutText(gate, run.policy);
       else if (checked.launchFailed) failure = 'песочница ОС не запустила команду';
       else if (checked.code !== 0)
         failure = `код выхода ${checked.code}: ${diagnostic(checked.stderr, checked.stdout, redact)}`;

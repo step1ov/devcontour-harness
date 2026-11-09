@@ -7,6 +7,7 @@ import {
   type JointVerification,
   type JointVerificationState,
   stallSweepOf,
+  gateTimeoutMs,
 } from '../contracts/index.ts';
 import { git } from '../environment/process.ts';
 import { livenessPayload, superviseStalls, type StalledError } from './stall-sweep.ts';
@@ -294,7 +295,7 @@ export class JointRunner {
                       argv: gate.command,
                       cwd: gateCwd,
                       signal,
-                      timeoutMs: gate.timeoutMs,
+                      timeoutMs: gateTimeoutMs(gate, this.policy),
                       write: [cwd],
                       readable: [
                         ...Object.values(paths),

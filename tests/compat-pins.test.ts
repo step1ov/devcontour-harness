@@ -169,6 +169,14 @@ const additiveFields: {
     },
     basis: 'changes',
   },
+  {
+    // Нижняя граница предела gate; умолчание не подставляется.
+    id: 'gateTimeoutFloorMs',
+    apply: (raw) => {
+      raw.gateTimeoutFloorMs = 30000;
+    },
+    basis: 'changes',
+  },
 ];
 
 test('A03/profiles: встроенные профили alpha.5 на месте, их байты и закрепления не изменились', (t) => {

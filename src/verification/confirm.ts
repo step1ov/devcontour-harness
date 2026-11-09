@@ -9,6 +9,7 @@ import {
   type ContractArtifact,
   type ExecutionPolicy,
   type WorkState,
+  gateTimeoutMs,
 } from '../contracts/index.ts';
 import { OversizedFile, readBounded } from '../environment/bounded-read.ts';
 import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
@@ -372,7 +373,7 @@ async function decide(
       },
       ctx.environment ?? process.env,
     );
-    const limitMs = gate.timeoutMs * 3 + 120000;
+    const limitMs = gateTimeoutMs(gate, ctx.policy) * 3 + 120000;
     const deadline = Date.now() + limitMs;
     const signal = AbortSignal.timeout(limitMs);
     await withEnvironment(
@@ -419,7 +420,7 @@ async function decide(
                 HARNESS_CASE_RESULT: out,
               },
               redact: execution.redact,
-              timeoutMs: gate.timeoutMs,
+              timeoutMs: gateTimeoutMs(gate, ctx.policy),
               signal,
               write: [dir, io],
               readable: boundary.readable,

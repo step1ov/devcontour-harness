@@ -318,6 +318,14 @@ export const executionPolicySchema = z.strictObject({
    */
   reviewProtocolRetries: z.number().int().min(0).max(2).optional(),
   /**
+   * Нижняя граница предела времени каждого исполнения gate (мс, 1000–600000):
+   * действующий предел — max(gate.timeoutMs, gateTimeoutFloorMs). Объявленный
+   * предел gate не меняется; поле защищает короткие пределы от нагрузки хоста.
+   * Нет поля — действует объявленный предел; умолчание не подставляется, и
+   * digest прежних политик не меняется.
+   */
+  gateTimeoutFloorMs: z.number().int().min(1000).max(600_000).optional(),
+  /**
    * Обход зависших попыток controller: каждые `intervalMs` он оценивает
    * движение исполняющегося (вывод, команды, стадии, процессор дерева):
    * `quiet` — нет движения дольше `quietMs`, `stalled` — дольше `stalledMs`.
@@ -752,3 +760,29 @@ export const mcpEnvironment = (profile?: { mcp: Record<string, McpServer> }) => 
   values: {},
   secrets: {},
 });
+
+/**
+ * Действующий предел времени исполнения gate: объявленный `timeoutMs`, не
+ * меньше `gateTimeoutFloorMs` политики, если он задан.
+ */
+export function gateTimeoutMs(
+  gate: { timeoutMs: number },
+  policy: { gateTimeoutFloorMs?: number | undefined },
+): number {
+  return Math.max(gate.timeoutMs, policy.gateTimeoutFloorMs ?? 0);
+}
+
+/**
+ * Предел времени gate для текста отказа: действующий в секундах и, если его
+ * поднял `gateTimeoutFloorMs`, объявленный.
+ */
+export function gateTimeoutText(
+  gate: { timeoutMs: number },
+  policy: { gateTimeoutFloorMs?: number | undefined },
+): string {
+  const seconds = (ms: number) => `${Math.round(ms / 100) / 10} с`;
+  const effective = gateTimeoutMs(gate, policy);
+  return effective > gate.timeoutMs
+    ? `предел ${seconds(effective)} (объявлен ${seconds(gate.timeoutMs)}, поднят gateTimeoutFloorMs)`
+    : `предел ${seconds(effective)}`;
+}

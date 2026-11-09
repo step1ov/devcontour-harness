@@ -11,7 +11,14 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { EvidenceRecord, GatePolicy } from '../src/contracts/index.ts';
+import {
+  executionPolicySchema,
+  gateTimeoutMs,
+  policyDigest,
+  type EvidenceRecord,
+  type GatePolicy,
+} from '../src/contracts/index.ts';
+import { example } from './fixtures.ts';
 import { failureFingerprint } from '../src/contracts/failure.ts';
 import { redactor } from '../src/environment/redaction.ts';
 import { isolationSupport, watchSandboxLog } from '../src/environment/isolation.ts';
@@ -35,6 +42,7 @@ async function gate(
   g: Partial<GatePolicy> & { command: string[] },
   secret?: string,
   isolationMode: 'none' | 'os' = 'none',
+  gateTimeoutFloorMs?: number,
 ) {
   const recorded: Omit<EvidenceRecord, 'id' | 'runId' | 'createdAt'>[] = [];
   const full = {
@@ -48,7 +56,10 @@ async function gate(
   let failure: TaskFailure | undefined;
   try {
     await runGate({
-      policy: { isolation: { ...policy.isolation, mode: isolationMode } },
+      policy: {
+        isolation: { ...policy.isolation, mode: isolationMode },
+        ...(gateTimeoutFloorMs ? { gateTimeoutFloorMs } : {}),
+      },
       record: (e) => {
         recorded.push(e);
         return { ...e, id: 'e', runId: 'r', createdAt: new Date().toISOString() };
@@ -246,6 +257,58 @@ test('T07: gate, изменивший HEAD или отслеживаемый ф�
   });
   assert.match(head.evidence.summary, /изменил HEAD/);
   assert.equal(head.evidence.passed, false);
+});
+
+test('gateTimeoutFloorMs поднимает короткий объявленный предел gate; отказ по пределу называет действующий и объявленный', async () => {
+  const r = repo({ 'src/a.js': 'a\n' });
+  const sha = r.head();
+  // Команда дольше объявленного предела, но короче нижней границы политики.
+  const slow = {
+    kind: 'check' as const,
+    report: undefined,
+    timeoutMs: 300,
+    command: [process.execPath, '-e', 'setTimeout(() => {}, 1500)'],
+  };
+  const bare = await gate(r.dir, sha, slow);
+  assert.equal(bare.evidence.passed, false, 'без нижней границы — отказ по объявленному пределу');
+  assert.match(bare.failure?.message ?? '', /превысила timeout: предел 0\.3 с$/);
+  const floored = await gate(r.dir, sha, slow, undefined, 'none', 3000);
+  assert.equal(floored.evidence.passed, true, floored.evidence.summary);
+  // Нижняя граница ниже времени команды: предел назван вместе с объявленным.
+  const short = await gate(
+    r.dir,
+    sha,
+    { ...slow, command: [process.execPath, '-e', 'setTimeout(() => {}, 5000)'] },
+    undefined,
+    'none',
+    1000,
+  );
+  assert.equal(short.evidence.passed, false);
+  assert.match(
+    short.failure?.message ?? '',
+    /предел 1 с \(объявлен 0\.3 с, поднят gateTimeoutFloorMs\)/,
+  );
+});
+
+test('gateTimeoutFloorMs: необязательное поле 1000–600000 без умолчания в политике', () => {
+  const raw = example('policy');
+  const parsed = executionPolicySchema.parse(raw);
+  assert.equal('gateTimeoutFloorMs' in parsed, false, 'умолчание не подставляется');
+  for (const bad of [999, 600001, 1500.5])
+    assert.equal(
+      executionPolicySchema.safeParse({ ...raw, gateTimeoutFloorMs: bad }).success,
+      false,
+    );
+  const withFloor = executionPolicySchema.parse({ ...raw, gateTimeoutFloorMs: 30000 });
+  assert.equal(withFloor.gateTimeoutFloorMs, 30000);
+  assert.notEqual(policyDigest(withFloor), policyDigest(parsed), 'поле входит в digest политики');
+  assert.equal(
+    withFloor.repositories[0]!.gates[0]!.timeoutMs,
+    parsed.repositories[0]!.gates[0]!.timeoutMs,
+  );
+  assert.equal(gateTimeoutMs({ timeoutMs: 10000 }, withFloor), 30000);
+  assert.equal(gateTimeoutMs({ timeoutMs: 120000 }, withFloor), 120000);
+  assert.equal(gateTimeoutMs({ timeoutMs: 10000 }, parsed), 10000);
 });
 
 test('Секрет окружения маскируется в выводе, сводке и логе gate', async () => {
