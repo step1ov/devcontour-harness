@@ -110,7 +110,11 @@ export const probeSpec = z.object({
   /** Фаза и SHA ревью: записываются в каждый запуск gate. */
   phase: z.string().optional(),
   sha: z.string().optional(),
-  /** SHA базы попытки: только с ним gate установки может стать `dependency-network`. */
+  /**
+   * SHA базы ревью: у кандидата — база попытки, у интеграции — target, на
+   * который сделано слияние (первый родитель integration SHA). Только с ним
+   * gate установки может стать `dependency-network`.
+   */
   trustedBase: z.string().optional(),
   /**
    * Вызов reviewer, которому принадлежит журнал: попытка harness, фаза, SHA
