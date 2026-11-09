@@ -619,7 +619,8 @@ export function pinnedBases(roots: string[]) {
  *   для корней, в которых работает проверка (`pinnedBases`): srt закрепляет
  *   его от переноса, и правка кода этого не снимет;
  * - проверка упала с EPERM, назвав этот путь (абсолютно или относительно
- *   своего рабочего каталога) в той же строке, что и EPERM: отказ, который
+ *   своего рабочего каталога) отдельным словом в той же строке, что и
+ *   EPERM (`token`): отказ, который
  *   проверка пережила, — не причина её провала. Настоящий провал теста с
  *   проглоченной неудачной уборкой остаётся провалом gate, даже если в
  *   выводе есть другой EPERM и короткое имя каталога (`.claude`) где-то ещё.
@@ -641,8 +642,13 @@ function pinnedDirectoryRule(
   const roots = policy.write.filter((w) => cwd === w || cwd.startsWith(w + sep));
   if (!roots.some((w) => v.path.startsWith(w + sep))) return undefined;
   const local = relative(cwd, v.path);
+  const spellings = [
+    v.path,
+    ...(v.path.startsWith('/private/') ? [v.path.slice('/private'.length)] : []),
+  ];
   const named = (line: string) =>
-    mentions(line, v.path) || (!local.startsWith('..') && line.includes(local));
+    spellings.some((p) => token(line, p, false)) ||
+    (!local.startsWith('..') && local !== '' && token(line, local, true));
   if (!lines.some(named)) return undefined;
   try {
     if (!lstatSync(v.path).isDirectory()) return undefined;
@@ -660,6 +666,23 @@ function pinnedDirectoryRule(
 }
 
 const epermPattern = /\bEPERM\b|operation not permitted/i;
+/**
+ * Путь отдельным словом строки: перед ним начало строки, пробел или кавычка
+ * (у относительного ещё `./`), после — конец строки, пробел, кавычка, `:`,
+ * `/` или `,`. Так `.claude-old` и `~/.claude/…` не называют `.claude`.
+ */
+function token(line: string, path: string, relativePath: boolean) {
+  const before = /[\s'"`]/;
+  const after = /[\s'"`:/,]/;
+  for (let i = line.indexOf(path); i !== -1; i = line.indexOf(path, i + 1)) {
+    const end = i + path.length;
+    if (end < line.length && !after.test(line[end]!)) continue;
+    if (i === 0 || before.test(line[i - 1]!)) return true;
+    if (relativePath && line.slice(i - 2, i) === './' && (i === 2 || before.test(line[i - 3]!)))
+      return true;
+  }
+  return false;
+}
 /** Путь в выводе проверки в любом написании (macOS: /private/var и /var). */
 const mentions = (output: string, path: string) =>
   output.includes(path) ||

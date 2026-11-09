@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import type { EvidenceRecord } from '../src/contracts/index.ts';
 import { redactor } from '../src/environment/redaction.ts';
+import { denyGlobRegex } from '@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js';
 import { preparationGuard } from '../src/environment/lifecycle.ts';
 import {
   anchoredAtRoot,
@@ -819,23 +820,8 @@ test('SBX15: шаблон запрета с базой в корне совпа�
     'нет ASCII — прежний шаблон',
   );
   assert.equal(anchoredAtRoot(root, `/elsewhere/a/*/.idea`), `/elsewhere/a/*/.idea`);
-  // Перевод шаблона запрета в регулярное выражение — как у srt 0.0.77
-  // (`globToRegex` + хвост `(/.*)?` в `denyGlobRegex`): класс из одного
-  // символа — этот символ. Внутренний модуль srt не импортируется: пакет
-  // не обещает его путь. Перевод самого srt на тех же написаниях
-  // проверяют SBX14 и SBX16 в настоящей песочнице.
-  const denyGlobRegex = (pattern: string) =>
-    '^' +
-    pattern
-      .replace(/[.^$+{}()|\\]/g, '\\$&')
-      .replace(/\[([^\]]*?)$/g, '\\[$1')
-      .replace(/\*\*\//g, '__GLOBSTAR_SLASH__')
-      .replace(/\*\*/g, '__GLOBSTAR__')
-      .replace(/\*/g, '[^/]*')
-      .replace(/\?/g, '[^/]')
-      .replace(/__GLOBSTAR_SLASH__/g, '(.*/)?')
-      .replace(/__GLOBSTAR__/g, '.*') +
-    '(/.*)?$';
+  // Перевод самого srt (`denyGlobRegex`, как у правила запрета): класс из
+  // одного символа — этот символ.
   for (const [dir, ok, bad] of [
     ['.reports', '.reports/x/.idea', 'xreports/x/.idea'],
     ['src', 'src/x/.idea/a.xml', 'srcx/x/.idea'],
@@ -881,14 +867,30 @@ test('SBX15: шаблон запрета с базой в корне совпа�
     [],
     'EPERM о другом пути, относительное имя каталога — в другой строке',
   );
-  assert.equal(
-    classify(
-      claude,
-      `AssertionError: expected 1 to equal 2\r\nrm: .claude: Operation not permitted`,
-    ).length,
-    1,
-    'EPERM и имя каталога в одной строке',
-  );
+  // Имя — отдельным словом строки: соседний путь и `~/.claude` того же
+  // имени не в счёт.
+  for (const [line, why] of [
+    [eperm(join(root, '.claude-old')), 'соседний каталог, абсолютно'],
+    [`Error: EPERM: operation not permitted, open '/Users/me/.claude/settings.json'`, '~/.claude'],
+    [`rm: .claude-old: Operation not permitted`, 'соседний каталог, относительно'],
+    [`rm: x.claude: Operation not permitted`, 'имя внутри слова'],
+  ] as const)
+    assert.deepEqual(classify(claude, line), [], why);
+  for (const [line, why] of [
+    [`rm: .claude: Operation not permitted`, 'rm, относительно'],
+    [`rm: ./.claude: Operation not permitted`, 'rm, ./'],
+    [`remove ${claude}: operation not permitted`, 'Go'],
+    [`PermissionError: [Errno 1] Operation not permitted: '.claude'`, 'Python'],
+    [`AssertionError: expected 1 to equal 2\nrmdir '${claude}/': EPERM`, 'после имени /'],
+  ] as const)
+    assert.equal(classify(claude, line).length, 1, why);
+  // macOS: журнал ядра пишет /private/var, а вывод проверки — /var.
+  if (claude.startsWith('/private/var/'))
+    assert.equal(
+      classify(claude, eperm(claude.slice('/private'.length))).length,
+      1,
+      'написание /var',
+    );
   // Не закреплённый запретом каталог: отказа ядра на нём быть не должно, и
   // классом среды он не становится.
   const expo = join(root, '.reports', 'expo-export');
