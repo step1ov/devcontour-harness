@@ -742,7 +742,7 @@ test(
         e instanceof TaskFailure &&
         e.kind === 'environment' &&
         e.diagnosis === 'sandbox-policy' &&
-        /установка зависимостей до исполнителя \(install\) создала или изменила защищённые пути .*moved\/\.vscode/.test(
+        /установка зависимостей до исполнителя \(install\) создала, изменила или удалила защищённые пути .*moved\/\.vscode/.test(
           e.message,
         ),
     );

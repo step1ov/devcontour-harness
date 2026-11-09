@@ -125,7 +125,11 @@ test(
     const folds = process.platform === 'darwin' || process.platform === 'win32';
     for (const [extra, modes, reason] of [
       [{}, {}, undefined],
-      [{ '.claude/settings.json': '{}' }, {}, /\): \.claude$/],
+      [
+        { '.claude/settings.json': '{}' },
+        {},
+        /создал, изменил или удалил защищённые пути .*\): \.claude$/,
+      ],
       // На нечувствительной к регистру ФС хост читает это как `.claude/settings.json`.
       ...(folds ? [[{ '.Claude/settings.json': '{}' }, {}, /\): \.Claude$/] as const] : []),
       [{}, { '.claude/.cc-writes': 0o777 }, /\): \.claude$/],

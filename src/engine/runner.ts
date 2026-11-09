@@ -1634,7 +1634,7 @@ export class Runner {
                     if (planted.length)
                       throw new TaskFailure(
                         'scope-violation',
-                        'Исполнитель создал или изменил защищённые пути (конфигурация IDE, shell, git или Claude): ' +
+                        'Исполнитель создал, изменил или удалил защищённые пути (конфигурация IDE, shell, git или Claude): ' +
                           planted
                             .slice(0, 5)
                             .map((p) => relative(cwd, p))

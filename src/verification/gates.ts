@@ -1418,7 +1418,7 @@ export async function prepareWriterDependencies(
       const message =
         `установка зависимостей до исполнителя (${gate.id}) ` +
         (unreadable ??
-          'создала или изменила защищённые пути (конфигурация IDE, shell, git или Claude): ' +
+          'создала, изменила или удалила защищённые пути (конфигурация IDE, shell, git или Claude): ' +
             planted
               .slice(0, 5)
               .map((p) => relative(root, p))
