@@ -1,5 +1,5 @@
 import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
-import { join, sep } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import type { z } from 'zod';
 import {
   digestOf,
@@ -10,6 +10,7 @@ import {
   type ExecutionPolicy,
 } from '../contracts/index.ts';
 import { dependencyNetworkFailure, dependencyNetworkMessage } from './dependency-network.ts';
+import { protectedChanges, protectedSnapshot, SandboxPolicyError } from './isolation.ts';
 import { command } from './process.ts';
 import { redactor } from './redaction.ts';
 export { redactor } from './redaction.ts';
@@ -151,6 +152,55 @@ export async function runSteps(
       throw new Error(message);
     }
   }
+}
+
+/**
+ * Сверка защищённых путей вокруг подготовки фазы: шагов lifecycle `setup` и
+ * `ready`, хранилища зависимостей и шагов `prepare`. Их задаёт политика, и
+ * исполняются они обычным процессом хоста, вне песочницы, — запреты имён на
+ * них не действуют. Снимок снимается до `withEnvironment`, сверка — сразу
+ * после `prepare`, до черновика, установки и исполнителя.
+ *
+ * Подготовка, которая создала, изменила или удалила конфигурацию IDE,
+ * shell, git или Claude в дереве, — отказ среды (`sandbox-policy`): его
+ * чинит политика, а не код задачи. Иначе такая подготовка прошла бы молча, а
+ * gate, удаливший созданное ею (уборка клонированной фикстуры с `.git`),
+ * получил бы `scope-violation` за чужое содержимое.
+ *
+ * Без песочницы ОС (`os = false`) сверки нет, как и у gate и исполнителя.
+ */
+export function preparationGuard(os: boolean, root: string) {
+  if (!os) return () => {};
+  const environment = (message: string) =>
+    new TaskFailure('environment', message, undefined, 'sandbox-policy');
+  let before: Map<string, string>;
+  try {
+    before = protectedSnapshot(root);
+  } catch (error) {
+    if (error instanceof SandboxPolicyError) throw environment(error.message);
+    throw error;
+  }
+  return () => {
+    let changed: string[];
+    try {
+      changed = protectedChanges(before, root);
+    } catch (error) {
+      if (error instanceof SandboxPolicyError) throw environment(error.message);
+      throw error;
+    }
+    if (!changed.length) return;
+    throw environment(
+      'Подготовка окружения (lifecycle setup/ready, хранилище зависимостей, prepare) создала, ' +
+        'изменила или удалила защищённые пути (конфигурация IDE, shell, git или Claude): ' +
+        changed
+          .slice(0, 5)
+          .map((p) => relative(root, p))
+          .join(', ') +
+        (changed.length > 5 ? ` и ещё ${changed.length - 5}` : '') +
+        '. Шаги подготовки задаёт политика, и исполняются они вне песочницы: такие пути в ' +
+        'дереве проверки они не создают, не меняют и не удаляют — держите их вне worktree',
+    );
+  };
 }
 
 // Teardown uses a fresh deadline: cancellation must not cancel cleanup itself.

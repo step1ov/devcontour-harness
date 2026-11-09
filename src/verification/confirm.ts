@@ -12,7 +12,12 @@ import {
   gateTimeoutMs,
 } from '../contracts/index.ts';
 import { OversizedFile, readBounded } from '../environment/bounded-read.ts';
-import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
+import {
+  executionEnvironment,
+  preparationGuard,
+  runSteps,
+  withEnvironment,
+} from '../environment/lifecycle.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
 import { defaultResourceDatabase } from '../environment/resources.ts';
 import { contractDocuments, obligationOf } from './checks.ts';
@@ -376,6 +381,7 @@ async function decide(
     const limitMs = gateTimeoutMs(gate, ctx.policy) * 3 + 120000;
     const deadline = Date.now() + limitMs;
     const signal = AbortSignal.timeout(limitMs);
+    const prepared = preparationGuard(ctx.policy.isolation.mode === 'os', dir);
     await withEnvironment(
       repo.lifecycle ?? ctx.policy.lifecycle,
       dir,
@@ -399,6 +405,7 @@ async function decide(
           { repo, cwd: dir, execution, signal, dir: io },
         );
         await runSteps(repo.prepare, dir, join(io, 'prepare'), execution, signal);
+        prepared();
         const request = join(io, 'case.json');
         await writeFile(
           request,

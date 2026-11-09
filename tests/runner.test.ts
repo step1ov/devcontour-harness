@@ -162,6 +162,40 @@ test(
   },
 );
 
+test(
+  'T05: подготовка (prepare) под песочницей ОС, создавшая защищённый путь, — отказ среды до исполнителя; target не двигается',
+  { skip: isolationSupport().ok ? false : 'песочница ОС недоступна' },
+  async () => {
+    const ctx = setup({
+      scenario: { writer: implement(), reviewer: approve() },
+      policy: (p) => {
+        (p as { maxAttempts: number }).maxAttempts = 1;
+        p.isolation = { mode: 'os', domains: [] };
+        (p as unknown as { repositories: { prepare: unknown[] }[] }).repositories[0]!.prepare = [
+          {
+            id: 'ide',
+            command: [
+              process.execPath,
+              '-e',
+              "require('fs').mkdirSync('.vscode');require('fs').writeFileSync('.vscode/settings.json','{}')",
+            ],
+            timeoutMs: 30_000,
+          },
+        ];
+      },
+    });
+    const before = target(ctx);
+    await runAll(ctx);
+    const attempt = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+    assert.equal(attempt.failureKind, 'environment', attempt.error);
+    assert.match(
+      attempt.error ?? '',
+      /Подготовка окружения .*создала, изменила или удалила защищённые пути .*: \.vscode\. /,
+    );
+    assert.equal(target(ctx), before, 'target ref не продвинут');
+  },
+);
+
 test('T08: невалидный ответ ревью, approved с блокирующей находкой и таймаут ревьюера — не принято, без самооценки writer', async () => {
   const blocking = approve();
   (blocking.result as { findings: unknown[] }).findings = [

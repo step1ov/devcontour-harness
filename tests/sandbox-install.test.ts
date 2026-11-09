@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import type { EvidenceRecord } from '../src/contracts/index.ts';
 import { redactor } from '../src/environment/redaction.ts';
+import { preparationGuard } from '../src/environment/lifecycle.ts';
 import {
   anchoredAtRoot,
   pinnedBases,
@@ -987,4 +988,44 @@ test('SBX17: сверка защищённых путей — исчезнувш
     after(() => rmSync(join(root, 'lib'), { recursive: true })),
     ['lib/b/.idea'],
   );
+});
+
+test('SBX18: подготовка фазы (prepare, lifecycle) не создаёт, не меняет и не удаляет защищённые пути — отказ среды; без песочницы ОС сверки нет', () => {
+  const r = repo({ 'src/a.ts': 'x\n', 'vendor/x/.idea/workspace.xml': '<x/>' });
+  const root = realpathSync(r.dir);
+  const refused = (change: () => void) => {
+    const check = preparationGuard(true, root);
+    change();
+    try {
+      check();
+    } catch (error) {
+      assert.ok(error instanceof TaskFailure);
+      assert.equal(error.kind, 'environment');
+      assert.equal(error.diagnosis, 'sandbox-policy');
+      return error.message;
+    }
+    return undefined;
+  };
+  assert.equal(
+    refused(() => writeFileSync(join(root, 'src/b.ts'), 'y\n')),
+    undefined,
+    'обычные файлы подготовка пишет',
+  );
+  assert.match(
+    refused(() => {
+      mkdirSync(join(root, 'fixture/repo/.git'), { recursive: true });
+      writeFileSync(join(root, 'fixture/repo/.git/config'), '');
+    }) ?? '',
+    /Подготовка окружения .*создала, изменила или удалила защищённые пути .*: fixture\/repo\/\.git\. /,
+  );
+  rmSync(join(root, 'fixture'), { recursive: true });
+  assert.match(
+    refused(() => rmSync(join(root, 'vendor'), { recursive: true })) ?? '',
+    /: vendor\/x\/\.idea\. /,
+    'удаление через родителя',
+  );
+  const off = preparationGuard(false, root);
+  mkdirSync(join(root, '.vscode'));
+  writeFileSync(join(root, '.vscode/settings.json'), '{}');
+  off();
 });

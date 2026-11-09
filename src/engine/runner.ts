@@ -73,7 +73,12 @@ import {
   protectedSnapshot,
   SandboxPolicyError,
 } from '../environment/isolation.ts';
-import { executionEnvironment, runSteps, withEnvironment } from '../environment/lifecycle.ts';
+import {
+  executionEnvironment,
+  preparationGuard,
+  runSteps,
+  withEnvironment,
+} from '../environment/lifecycle.ts';
 import {
   dependencyStoreRoot,
   materializeStore,
@@ -1468,6 +1473,7 @@ export class Runner {
           attempt = { ...attempt, baseSha: base, worktree: cwd };
           const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
           const execution = this.environment(attempt, 'candidate', cwd);
+          const prepared = preparationGuard(this.policy.isolation.mode === 'os', cwd);
           const candidate = await withEnvironment(
             repo.lifecycle ?? this.policy.lifecycle,
             cwd,
@@ -1491,6 +1497,7 @@ export class Runner {
                 signal,
                 base,
               );
+              prepared();
               // Черновик прежней попытки — до установки: манифесты, которые он
               // меняет, исполнитель увидит уже установленными.
               if (!attempt.reusedFrom)
@@ -2488,6 +2495,7 @@ export class Runner {
           repo.id,
           dependencies,
         );
+        const prepared = preparationGuard(this.policy.isolation.mode === 'os', dir);
         await withEnvironment(
           repo.lifecycle ?? this.policy.lifecycle,
           dir,
@@ -2497,6 +2505,7 @@ export class Runner {
           async () => {
             await this.dependencyStore(attempt, repo, dir, execution, signal, own);
             await runSteps(repo.prepare, dir, join(own, 'prepare'), execution, signal);
+            prepared();
             await pinned('подготовка');
             for (const gate of ordered(repo.gates, consumer.gates))
               await this.gate(
@@ -3515,6 +3524,7 @@ export class Runner {
     this.engine.phase(attempt.id, attempt.token, 'integrating', { integrationSha: sha });
     const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
     const execution = this.environment(attempt, 'integration', cwd);
+    const prepared = preparationGuard(this.policy.isolation.mode === 'os', cwd);
     await withEnvironment(
       repo.lifecycle ?? this.policy.lifecycle,
       cwd,
@@ -3538,6 +3548,7 @@ export class Runner {
           signal,
           attempt.baseSha,
         );
+        prepared();
         const budget = { recheck: true };
         for (const gate of gates)
           await this.integrationGate(attempt, cwd, sha, gate, artifacts, signal, execution, budget);
