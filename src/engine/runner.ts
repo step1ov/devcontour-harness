@@ -2529,6 +2529,13 @@ export class Runner {
     dir: string,
     phase: string,
     sha: string,
+    /**
+     * База ревью (та же, что `Base commit` запроса): у кандидата — база
+     * попытки, у интеграции — target, на который сделано слияние (первый
+     * родитель integration SHA). Проверки reviewer сравнивают с ней входы
+     * установки зависимостей (`trustedBase`).
+     */
+    base: string,
     gates: GatePolicy[],
     /** Номер вызова reviewer логического ревью: записывается в каждый запуск probe. */
     call: number,
@@ -2577,7 +2584,7 @@ export class Runner {
       gates: probeGates(gates, this.policy),
       phase,
       sha,
-      ...(attempt.baseSha ? { trustedBase: attempt.baseSha } : {}),
+      trustedBase: base,
       scope: { attempt: attempt.id, phase, sha, call },
       artifacts: join(dir, 'probe-runs'),
     };
@@ -2820,6 +2827,7 @@ export class Runner {
         callDir,
         phase,
         sha,
+        base,
         gates,
         call,
         shared,

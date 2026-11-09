@@ -1056,6 +1056,10 @@ test('T10b: ревью интеграции видит только измене
       ],
       reviewer: { ...approve(), recordPrompt: true },
     },
+    // Пределы проверок reviewer в сроке теста: probes выдаются, их база видна в probe.json.
+    policy: (p) => {
+      p.reviewProbes = { commandTimeoutMs: 10_000, budgetMs: 30_000, reserveMs: 5_000 };
+    },
     graph: (g) => {
       const orders = g.orders as Record<string, unknown>[];
       orders.push({
@@ -1106,6 +1110,21 @@ test('T10b: ревью интеграции видит только измене
   const reviewed = b.evidence.filter((e) => e.kind === 'review' && e.phase === 'integration');
   assert.equal(reviewed.at(-1)?.sha, b.integrationSha);
   assert.equal(b.evidence.filter((e) => e.kind === 'review').at(-1)?.passed, true);
+  // Проверки reviewer сравнивают входы установки с той же базой, что называет
+  // запрос: у интеграции — сдвинутый target (первый родитель integration SHA),
+  // у кандидата — база попытки.
+  const trusted = (attempt: typeof b, phase: 'candidate' | 'integration') => {
+    const log = attempt.evidence.findLast((e) => e.kind === 'review' && e.phase === phase)!.log;
+    return (
+      JSON.parse(readFileSync(join(log, '..', 'probe.json'), 'utf8')) as { trustedBase: string }
+    ).trustedBase;
+  };
+  assert.equal(trusted(b, 'integration'), resultA, 'probes интеграции — от сдвинутого target');
+  assert.notEqual(trusted(b, 'integration'), b.baseSha);
+  assert.equal(trusted(b, 'candidate'), b.baseSha, 'probes кандидата — от базы попытки');
+  const a = ctx.engine.read((v) => v.attempts(first).at(-1)!);
+  assert.equal(trusted(a, 'integration'), start, 'target первой не сдвигался: её база');
+  assert.equal(trusted(a, 'candidate'), a.baseSha);
 });
 
 test('T10c: кандидат, уже входящий в target, — явный отказ merge до gates и ревью интеграции; target не продвинут', async () => {
