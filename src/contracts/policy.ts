@@ -530,6 +530,14 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
   const add = (code: ErrorCode, path: (string | number)[], message: string) =>
     issues.push({ code, path, message });
   const repos = new Map<string, Repo>();
+  // Нижняя граница предела gate не длиннее предела вызова: иначе одна
+  // проверка законно переживала бы весь срок вызова, который её запустил.
+  if (policy.gateTimeoutFloorMs !== undefined && policy.gateTimeoutFloorMs > policy.runTimeoutMs)
+    add(
+      'INVALID_INPUT',
+      ['gateTimeoutFloorMs'],
+      `gateTimeoutFloorMs (${policy.gateTimeoutFloorMs} мс) больше runTimeoutMs (${policy.runTimeoutMs} мс)`,
+    );
   // Тариф однозначен: у модели не бывает двух тарифов на один момент.
   const tariffs = new Set<string>();
   policy.prices.forEach((p, i) => {

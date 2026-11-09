@@ -437,3 +437,27 @@ test('Ревью: approved при блокирующей находке и не�
     /неизвестной находки/,
   );
 });
+
+test('gateTimeoutFloorMs больше runTimeoutMs отклоняется проверкой политики; равный и меньший проходят', () => {
+  const raw = clone(example('policy'));
+  const issues = (floor: number, run: number) =>
+    policyIssues(
+      executionPolicySchema.parse({ ...raw, gateTimeoutFloorMs: floor, runTimeoutMs: run }),
+    );
+  const over = issues(60000, 30000);
+  assert.deepEqual(
+    over.map((i) => [i.code, i.path]),
+    [['INVALID_INPUT', ['gateTimeoutFloorMs']]],
+  );
+  assert.match(over[0]!.message, /больше runTimeoutMs/);
+  assert.deepEqual(issues(30000, 30000), []);
+  assert.deepEqual(issues(10000, 30000), []);
+  assert.throws(
+    () =>
+      validateInputs({
+        graph: example('graph'),
+        policy: { ...raw, gateTimeoutFloorMs: 60000, runTimeoutMs: 30000 },
+      }),
+    (e: unknown) => e instanceof HarnessError && e.code === 'INVALID_INPUT',
+  );
+});
