@@ -392,7 +392,7 @@ export function protectedWriteDenies(roots: string[]) {
         for (const name of ideDirectories) {
           // Любой подкаталог, и появившийся во время проверки: `node_modules/.idea`
           // этим правилом тоже закрыт, но пакеты лежат уровнем ниже.
-          if (safe) denies.push(join(dir, '*', name));
+          if (safe) denies.push(anchoredAtRoot(root, join(dir, '*', name)));
         }
         let entries: import('node:fs').Dirent[] = [];
         try {
@@ -414,6 +414,39 @@ export function protectedWriteDenies(roots: string[]) {
     }
   }
   return [...new Set(denies)];
+}
+/**
+ * Шаблон запрета под каталогом `dir` внутри `root`, база которого — `root`.
+ *
+ * srt закрепляет базу шаблона (статический префикс до первого символа глоба)
+ * и всех её предков запретом `file-write-unlink`/`file-write-create`: иначе
+ * каталог можно было бы перенести из-под запрета. Шаблон `<dir>/*\/.idea`
+ * закреплял так каждый существующий каталог дерева до глубины перечисления:
+ * проверка не могла удалить или переименовать даже свой прежний вывод
+ * (`.reports/expo-export`, оставленный самопроверкой исполнителя), и
+ * `expo export` падал с `EPERM rmdir`.
+ *
+ * Один символ первого сегмента под `root` записывается классом (`.reports` →
+ * `[.]reports`): шаблон совпадает с теми же путями (класс из одного символа —
+ * этот символ), а статический префикс обрывается в `root`, и закреплены
+ * только `root` и его предки, как у шаблонов `root/**\/<имя>`. Перенос
+ * каталога с подложенным внутри `.idea` по-прежнему ловит сверка снимков
+ * (`protectedSnapshot`) — как и новый каталог, которого при сборке политики
+ * не было. Символ — печатный ASCII: класс Seatbelt сравнивает байты, и
+ * многобайтовый символ в классе совпал бы не с тем. Сегмент без такого
+ * символа остаётся прежним шаблоном.
+ */
+export function anchoredAtRoot(root: string, pattern: string) {
+  const rest = relative(root, pattern);
+  if (!rest || rest.startsWith('..') || pattern !== join(root, rest)) return pattern;
+  const first = rest.split(sep)[0]!;
+  // `*` и прочие символы глоба отсюда не приходят (`glob` проверен выше);
+  // `^` в начале класса — отрицание, `\` и `-` — служебные.
+  const at = [...first].findIndex((c) => /^[\x20-\x7e]$/.test(c) && !/[\^\\\-*?[\]]/.test(c));
+  if (first === '*' || at < 0) return pattern;
+  const chars = [...first];
+  const anchored = chars.slice(0, at).join('') + `[${chars[at]}]` + chars.slice(at + 1).join('');
+  return join(root, anchored, rest.slice(first.length));
 }
 /** Запреты для `.git` корня: файл рабочего дерева целиком, у каталога — перенаправления. */
 function rootGitDenies(root: string) {
@@ -559,6 +592,25 @@ export function hiddenReadRule(policy: Isolation, path: string) {
   return `запрет чтения песочницы: ${hidden} закрыт проверке`;
 }
 
+/**
+ * Удаление или перенос существующего каталога внутри открытых проверке
+ * каталогов, в котором ей отказало ядро. Запись там открыта, и такой отказ
+ * даёт только srt: каталог — база или предок запрета записи, и srt закрепляет
+ * его от переноса (`anchoredAtRoot`). Правка кода его не снимет — это отказ
+ * среды, а не провал проверки. Отказ в создании сюда не входит: его дают и
+ * запреты имён, и они разобраны `mandatoryDenyRule`.
+ */
+function pinnedDirectoryRule(policy: Isolation, v: SandboxViolation) {
+  if (v.operation !== 'file-write-unlink') return undefined;
+  if (!policy.write.some((w) => v.path.startsWith(w + sep))) return undefined;
+  try {
+    if (!lstatSync(v.path).isDirectory()) return undefined;
+  } catch {
+    return undefined;
+  }
+  return 'запрет sandbox-runtime на удаление или перенос каталога: каталог закреплён запретами записи внутри него';
+}
+
 /** Путь в выводе проверки в любом написании (macOS: /private/var и /var). */
 const mentions = (output: string, path: string) =>
   output.includes(path) ||
@@ -601,7 +653,7 @@ export function sandboxDenials(
   for (const v of violations) {
     if (found.has(v.path)) continue;
     const rule = v.operation.startsWith('file-write')
-      ? mandatoryDenyRule(policy, v.path)
+      ? (mandatoryDenyRule(policy, v.path) ?? pinnedDirectoryRule(policy, v))
       : v.operation.startsWith('file-read') &&
           !credential(v.path) &&
           eperm &&

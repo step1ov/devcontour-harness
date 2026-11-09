@@ -13,10 +13,11 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import type { EvidenceRecord } from '../src/contracts/index.ts';
 import { redactor } from '../src/environment/redaction.ts';
 import {
+  anchoredAtRoot,
   isolation,
   isolationSupport,
   mandatoryDenyRule,
@@ -302,9 +303,9 @@ test('SBX05: явные запреты — каталоги IDE вне node_modu
     `${root}/.idea`,
     `${root}/.vscode`,
     `${root}/*/.idea`,
-    `${root}/src/*/.vscode`,
-    `${root}/src/deep/*/.idea`,
-    `${root}/apps/m/*/.idea`,
+    `${root}/[s]rc/*/.vscode`,
+    `${root}/[s]rc/deep/*/.idea`,
+    `${root}/[a]pps/m/*/.idea`,
     `${root}/.bashrc`,
     `${root}/**/.bashrc`,
     `${root}/**/.git/hooks`,
@@ -323,7 +324,20 @@ test('SBX05: явные запреты — каталоги IDE вне node_modu
     false,
   );
   // Глубже предела перечисления правила нет — граница подхода.
-  assert.equal(denies.includes(`${root}/src/deep/er/*/.idea`), false);
+  assert.equal(denies.includes(`${root}/[s]rc/deep/er/*/.idea`), false);
+  // srt закрепляет от удаления и переноса базу каждого шаблона (статический
+  // префикс) и её предков: база — только корень, ни один каталог дерева.
+  const base = (d: string) => {
+    const prefix = d.split(/[*?[\]]/)[0]!;
+    return prefix === d ? dirname(d) : prefix.endsWith('/') ? prefix.slice(0, -1) : dirname(prefix);
+  };
+  const pinned = denies
+    .map(base)
+    // `.git` и `.claude` — сами защищённые имена (их закрепление и задумано).
+    .filter(
+      (b) => b.startsWith(root + '/') && !['.git', '.claude'].includes(b.slice(root.length + 1)),
+    );
+  assert.deepEqual(pinned, [], 'каталоги дерева не закреплены запретами');
   // Корень с символами глоба шаблоном не записать: srt остаётся с полным запретом.
   assert.equal(protectedWriteDenies([join(root, 'a[1]')]), undefined);
 });
@@ -752,3 +766,94 @@ test(
     assert.match(plain.failed!.summary, /^код выхода 2: .*ERR boom/);
   },
 );
+
+test(
+  'SBX14 [песочница ОС]: gate удаляет и пересоздаёт прежний вывод в дереве (каталоги на любой глубине), каталоги IDE по-прежнему закрыты',
+  { skip: noSandbox },
+  async () => {
+    const r = repo({ '.gitignore': '.reports/\n', 'src/index.ts': 'x\n' });
+    const at = (p: string) => join(realpathSync(r.dir), p);
+    // Как самопроверка исполнителя: вывод сборки остался в дереве до gate.
+    mkdirSync(at('.reports/expo-export/_expo/static/js'), { recursive: true });
+    writeFileSync(at('.reports/expo-export/_expo/static/js/index.js'), 'old');
+    writeFileSync(at('.reports/expo-export/metadata.json'), '{}');
+    mkdirSync(at('src/generated/deep'), { recursive: true });
+    // Как `expo export`: сначала убрать прежний вывод, затем записать новый.
+    const exportLike =
+      `const fs=require('fs');` +
+      `fs.rmSync('.reports/expo-export',{recursive:true});` +
+      `fs.mkdirSync('.reports/expo-export/_expo',{recursive:true});` +
+      `fs.writeFileSync('.reports/expo-export/metadata.json','{"v":2}');` +
+      `fs.rmSync('src/generated',{recursive:true});` +
+      `fs.renameSync('.reports','.reports-old');fs.renameSync('.reports-old','.reports');`;
+    const done = await gate(r.dir, r.head(), exportLike);
+    assert.equal(done.failure, undefined, done.evidence.summary);
+    assert.equal(readFileSync(at('.reports/expo-export/metadata.json'), 'utf8'), '{"v":2}');
+    assert.equal(existsSync(at('.reports/expo-export/_expo/static')), false);
+    assert.equal(existsSync(at('src/generated')), false);
+    if (!mac) return;
+    // Запреты каталогов IDE в тех же каталогах остались.
+    mkdirSync(at('src/generated/deep'), { recursive: true });
+    for (const p of ['.reports/expo-export/x/.idea/w.xml', 'src/generated/deep/.vscode/t.json']) {
+      const denied = await gate(
+        r.dir,
+        r.head(),
+        `const fs=require('fs'),path=require('path');try{fs.mkdirSync(path.dirname(${JSON.stringify(at(p))}),{recursive:true});fs.writeFileSync(${JSON.stringify(at(p))},'x')}catch(e){console.error(e.message);process.exit(1)}`,
+      );
+      assert.match(denied.failure?.message ?? '', /EPERM/, p);
+      assert.equal(existsSync(at(p)), false, p);
+    }
+  },
+);
+
+test('SBX15: шаблон запрета с базой в корне совпадает с теми же путями; отказ в удалении каталога внутри дерева — отказ среды', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-sbx-anchor-')));
+  assert.equal(anchoredAtRoot(root, `${root}/.reports/*/.idea`), `${root}/[.]reports/*/.idea`);
+  assert.equal(anchoredAtRoot(root, `${root}/*/.idea`), `${root}/*/.idea`);
+  assert.equal(anchoredAtRoot(root, `${root}/-x^/a/*/.idea`), `${root}/-[x]^/a/*/.idea`);
+  assert.equal(
+    anchoredAtRoot(root, `${root}/ёж/*/.idea`),
+    `${root}/ёж/*/.idea`,
+    'нет ASCII — прежний шаблон',
+  );
+  assert.equal(anchoredAtRoot(root, `/elsewhere/a/*/.idea`), `/elsewhere/a/*/.idea`);
+  // Тот же перевод, что у srt (globToRegex): класс из одного символа — этот символ.
+  const regex = (glob: string) =>
+    new RegExp(
+      '^' +
+        glob
+          .replace(/[.^$+{}()|\\]/g, '\\$&')
+          .replace(/\*/g, '[^/]*')
+          .replace(/\?/g, '[^/]') +
+        '(/.*)?$',
+    );
+  for (const [dir, ok, bad] of [
+    ['.reports', '.reports/x/.idea', 'xreports/x/.idea'],
+    ['src', 'src/x/.idea/a.xml', 'srcx/x/.idea'],
+    ['a+b(c)', 'a+b(c)/y/.idea', 'aab(c)/y/.idea'],
+  ] as const) {
+    const re = regex(anchoredAtRoot(root, join(root, dir, '*', '.idea')));
+    assert.ok(re.test(join(root, ok)), ok);
+    assert.equal(re.test(join(root, bad)), false, bad);
+  }
+
+  mkdirSync(join(root, '.reports', 'expo-export'), { recursive: true });
+  writeFileSync(join(root, '.reports', 'file.txt'), 'x');
+  const policy = isolation({ write: [root], controller: [] });
+  const found = sandboxDenials(
+    [
+      { operation: 'file-write-unlink', path: join(root, '.reports', 'expo-export') },
+      { operation: 'file-write-unlink', path: join(root, '.reports', 'file.txt') },
+      { operation: 'file-write-unlink', path: join(root, 'gone') },
+      { operation: 'file-write-create', path: join(root, '.reports', 'expo-export') },
+      { operation: 'file-write-unlink', path: root },
+      { operation: 'file-write-unlink', path: tmpdir() },
+    ],
+    policy,
+  );
+  assert.deepEqual(
+    found.map((d) => d.path),
+    [join(root, '.reports', 'expo-export')],
+  );
+  assert.match(found[0]!.rule, /удаление или перенос каталога/);
+});
