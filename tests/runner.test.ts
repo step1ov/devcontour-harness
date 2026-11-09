@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Runner } from '../src/engine/runner.ts';
 import { isolationSupport } from '../src/environment/isolation.ts';
+import { hostLoad } from '../src/verification/gates.ts';
 import { BlockedError } from '../src/engine/classify.ts';
 import {
   TaskFailure,
@@ -318,6 +319,86 @@ require('./run.js');
     a.timings?.some((t) => t.stage.startsWith('integration-recheck:')),
     'повтор — отдельная стадия замеров',
   );
+});
+
+/**
+ * Gate кандидата, который в первых `slow` запусках кандидата спит дольше
+ * своего предела, дальше — обычный тест. Счётчик запусков — вне worktree.
+ */
+async function candidateTimeout(load: number, slow: number) {
+  const state = mkdtempSync(join(tmpdir(), 'harness-timeout-'));
+  const counter = join(state, 'candidate-runs');
+  const gate = `
+const fs = require('fs');
+const n = fs.existsSync(${JSON.stringify(counter)}) ? Number(fs.readFileSync(${JSON.stringify(counter)}, 'utf8')) : 0;
+if (process.env.DEVCONTOUR_PHASE === 'candidate') fs.writeFileSync(${JSON.stringify(counter)}, String(n + 1));
+if (process.env.DEVCONTOUR_PHASE === 'candidate' && n < ${slow}) { setTimeout(() => {}, 30000); return; }
+require('./run.js');
+`;
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    files: { 'test/slow.js': gate },
+    policy: (p) => {
+      const raw = p as {
+        maxAttempts: number;
+        repositories: { gates: { command: string[]; timeoutMs: number }[] }[];
+      };
+      raw.maxAttempts = 1;
+      raw.repositories[0]!.gates[0]!.command = [process.execPath, 'test/slow.js'];
+      raw.repositories[0]!.gates[0]!.timeoutMs = 1500;
+    },
+  });
+  const read = hostLoad.read;
+  hostLoad.read = () => ({ load1: load, cpus: 8 });
+  try {
+    await runAll(ctx);
+  } finally {
+    hostLoad.read = read;
+  }
+  const work = ctx.engine.read((v) => v.work('add-greeting')!);
+  const attempts = ctx.engine.read((v) => v.attempts('add-greeting'));
+  const candidate = attempts[0]!.evidence.filter(
+    (e) => e.phase === 'candidate' && e.kind === 'test',
+  );
+  return { ctx, work, attempts, candidate, runs: Number(readFileSync(counter, 'utf8')) };
+}
+
+test('Таймаут gate кандидата под высокой нагрузкой хоста повторяется один раз на том же SHA: повтор прошёл — принятие без новой попытки, запись помечена flaky', async () => {
+  const { work, attempts, candidate, runs } = await candidateTimeout(8 * 100, 1);
+  assert.equal(work.status, 'done', work.failure);
+  assert.equal(attempts.length, 1, 'таймаут под нагрузкой не стоил попытки');
+  assert.equal(candidate.length, 2);
+  assert.equal(candidate[0]!.passed, false);
+  assert.match(
+    candidate[0]!.summary,
+    /превысила timeout: предел 1\.5 с, нагрузка хоста 800 на 8 ядер/,
+  );
+  assert.equal(candidate[1]!.passed, true);
+  assert.equal(candidate[1]!.sha, candidate[0]!.sha);
+  assert.deepEqual(candidate[1]!.recheck, { of: candidate[0]!.id, outcome: 'flaky' });
+  assert.notEqual(candidate[0]!.log, candidate[1]!.log, 'лог первого запуска сохранён');
+  assert.equal(runs, 2);
+  assert.ok(attempts[0]!.timings?.some((t) => t.stage.startsWith('candidate-recheck:')));
+});
+
+test('Таймаут gate кандидата: на свободной машине не повторяется; под нагрузкой второй таймаут — провал gate, засчитанный как прежде', async () => {
+  const idle = await candidateTimeout(1, 1);
+  assert.equal(idle.work.status, 'failed');
+  assert.equal(idle.work.failureKind, 'gate');
+  assert.equal(idle.candidate.length, 1, 'без нагрузки повтора нет');
+  assert.equal(idle.runs, 1);
+  assert.match(idle.candidate[0]!.summary, /превысила timeout.*нагрузка хоста 1 на 8 ядер/);
+
+  const stuck = await candidateTimeout(8 * 100, 5);
+  assert.equal(stuck.work.status, 'failed');
+  assert.equal(stuck.work.failureKind, 'gate', 'таймаут после повтора — настоящий провал');
+  assert.equal(stuck.attempts[0]!.failureKind, 'gate');
+  assert.equal(stuck.candidate.length, 2, 'один повтор, не больше');
+  assert.deepEqual(stuck.candidate[1]!.recheck, {
+    of: stuck.candidate[0]!.id,
+    outcome: 'confirmed',
+  });
+  assert.equal(stuck.runs, 2);
 });
 
 test('T10: чужое продвижение target ref перед CAS — нет потери чужого коммита и ложного done; повтор от актуальной базы', async () => {
@@ -999,10 +1080,28 @@ test('Повтор gate интеграции: только после зелён
   assert.deepEqual(
     await runs(
       [green, red],
-      [{ candidateSha, evidence: [{ recheck: { of: 'x', outcome: 'confirmed' } }] }],
+      [
+        {
+          candidateSha,
+          evidence: [{ phase: 'integration', recheck: { of: 'x', outcome: 'confirmed' } }],
+        },
+      ],
     ),
     [undefined],
     'тот же кандидат уже повторялся в другой попытке',
+  );
+  assert.deepEqual(
+    await runs(
+      [green, red],
+      [
+        {
+          candidateSha,
+          evidence: [{ phase: 'candidate', recheck: { of: 'x', outcome: 'flaky' } }],
+        },
+      ],
+    ),
+    [undefined, red.id],
+    'повтор gate кандидата бюджет интеграции не тратит',
   );
   assert.deepEqual(
     await runs(

@@ -26,6 +26,8 @@ import { TaskFailure } from '../src/engine/failure.ts';
 import { previousAttempts } from '../src/engine/prompt.ts';
 import { engineOf, graphOf, ready } from './engine-fixture.ts';
 import {
+  GateTimeout,
+  hostLoad,
   junitSummary,
   prepareReportPath,
   runGate,
@@ -269,9 +271,23 @@ test('gateTimeoutFloorMs поднимает короткий объявленн�
     timeoutMs: 300,
     command: [process.execPath, '-e', 'setTimeout(() => {}, 1500)'],
   };
-  const bare = await gate(r.dir, sha, slow);
+  const read = hostLoad.read;
+  hostLoad.read = () => ({ load1: 3.04, cpus: 4 });
+  let bare;
+  try {
+    bare = await gate(r.dir, sha, slow);
+  } finally {
+    hostLoad.read = read;
+  }
   assert.equal(bare.evidence.passed, false, 'без нижней границы — отказ по объявленному пределу');
-  assert.match(bare.failure?.message ?? '', /превысила timeout: предел 0\.3 с$/);
+  assert.match(
+    bare.failure?.message ?? '',
+    /превысила timeout: предел 0\.3 с, нагрузка хоста 3 на 4 ядер$/,
+  );
+  // Таймаут самого gate — класс `gate`, нагрузка ниже порога повтора.
+  assert.ok(bare.failure instanceof GateTimeout);
+  assert.equal(bare.failure.kind, 'gate');
+  assert.equal(bare.failure.overloaded, false);
   const floored = await gate(r.dir, sha, slow, undefined, 'none', 3000);
   assert.equal(floored.evidence.passed, true, floored.evidence.summary);
   // Нижняя граница ниже времени команды: предел назван вместе с объявленным.

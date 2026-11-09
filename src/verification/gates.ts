@@ -9,7 +9,7 @@ import {
   lstat,
   chmod,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { availableParallelism, loadavg, tmpdir } from 'node:os';
 import { join, resolve, sep, delimiter, relative, dirname } from 'node:path';
 import { accessSync, constants, existsSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
@@ -657,6 +657,44 @@ export interface Boundary {
   checkouts?: string[];
 }
 
+/**
+ * Нагрузка хоста на одно ядро (средняя за минуту), начиная с которой gate,
+ * исчерпавший свой предел времени, повторяется один раз на том же SHA
+ * (`GateTimeout.overloaded`). Под такой нагрузкой предел gate меряет очередь
+ * к процессору, а не его код; проверка, которая и на свободной машине не
+ * укладывается в предел, повтора не получает.
+ */
+export const HOST_LOAD_RECHECK_PER_CPU = 2;
+/** Снимок нагрузки хоста; объект — чтобы тест мог подменить чтение. */
+export const hostLoad = {
+  read: (): HostLoad => ({ load1: loadavg()[0] ?? 0, cpus: Math.max(1, availableParallelism()) }),
+};
+export interface HostLoad {
+  /** Средняя нагрузка за минуту (`os.loadavg()[0]`; на Windows — 0). */
+  load1: number;
+  /** Доступные процессу ядра. */
+  cpus: number;
+}
+const loadText = (load: HostLoad) =>
+  `нагрузка хоста ${Math.round(load.load1 * 10) / 10} на ${load.cpus} ядер`;
+/**
+ * Gate исчерпал свой предел времени (не отмена попытки). Класс отказа —
+ * прежний `gate`; нагрузка в момент таймаута решает, повторить ли gate один
+ * раз (`Runner`): повтор прошёл — исход `flaky`, попытка не тратится; снова
+ * таймаут — провал засчитан как прежде.
+ */
+export class GateTimeout extends TaskFailure {
+  constructor(
+    message: string,
+    readonly load: HostLoad,
+  ) {
+    super('gate', message);
+  }
+  get overloaded() {
+    return this.load.load1 / this.load.cpus >= HOST_LOAD_RECHECK_PER_CPU;
+  }
+}
+
 /** Что нужно для запуска gate попытки. */
 export interface GateRun {
   policy: Pick<ExecutionPolicy, 'isolation' | 'gateTimeoutFloorMs'>;
@@ -768,6 +806,8 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   let kind: FailureKind = 'gate';
   /** Причина отказа окружения (`attempt.diagnosed`), когда она известна здесь. */
   let cause: EnvironmentCause | undefined;
+  /** Нагрузка хоста, когда gate исчерпал свой предел времени. */
+  let timedOut: HostLoad | undefined;
   // Заголовок лога — фактические каталог и argv запуска: digest лога входит в
   // evidence, и запись называет, где и чем проверка исполнялась.
   let passed = false,
@@ -832,10 +872,11 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
           (planted.length > 5 ? ` и ещё ${planted.length - 5}` : ''),
       );
     }
+    if (result.timedOut && !signal.aborted) timedOut = hostLoad.read();
     if (result.timedOut || signal.aborted)
       throw new Error(
         'Проверка прервана или превысила timeout' +
-          (result.timedOut && !signal.aborted ? ': ' + gateTimeoutText(gate, run.policy) : ''),
+          (timedOut ? `: ${gateTimeoutText(gate, run.policy)}, ${loadText(timedOut)}` : ''),
       );
     // Песочница так и не запустила команду по известному отказу запуска:
     // код проекта не исполнялся, и его правка ничего не изменит. Это отказ
@@ -1098,9 +1139,12 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       ...(report?.corpus?.failed.map((c) => c.property) ?? []),
     ];
     const declared = new Set(expected?.properties.map((p) => p.id) ?? []);
+    const message = `${phase}/${run.consumer ? run.consumer + ':' : ''}${gate.id}: ${evidence.summary}`;
+    // Таймаут без контрпримера свойства: повтор на том же SHA решает `Runner`.
+    if (timedOut && kind === 'gate' && !failing.length) throw new GateTimeout(message, timedOut);
     throw new TaskFailure(
       kind,
-      `${phase}/${run.consumer ? run.consumer + ':' : ''}${gate.id}: ${evidence.summary}`,
+      message,
       failing.length
         ? {
             bound: [...new Set(failing.filter((id) => declared.has(id)))],

@@ -108,6 +108,7 @@ import {
   type ProbeSpec,
 } from '../agents/review-probe.ts';
 import {
+  GateTimeout,
   prepareWriterDependencies,
   draftTouchesInstall,
   runGate,
@@ -1718,16 +1719,17 @@ export class Runner {
                   });
               rearm();
               this.engine.phase(attempt.id, attempt.token, 'verifying', { candidateSha: sha });
+              const recheck = { recheck: true };
               for (const gate of gates)
-                await this.gate(
+                await this.candidateGate(
                   attempt,
                   cwd,
                   sha,
-                  'candidate',
                   gate,
                   artifacts,
                   signal,
                   execution,
+                  recheck,
                 ).catch((error: unknown) => {
                   // Без изменений непрошедший gate значит одно: работа не
                   // сделана, — это пустой результат, а не дефект кода.
@@ -2233,6 +2235,58 @@ export class Runner {
   }
 
   /**
+   * Gate кандидата с одним повтором на попытку — только когда gate исчерпал
+   * свой предел времени под высокой нагрузкой хоста (`GateTimeout.overloaded`).
+   * Такой таймаут меряет очередь к процессору, а не код: без повтора он
+   * засчитывался провалом gate и стоил новой реализации. Повтор — тот же gate
+   * на том же SHA; обе записи остаются, у повтора — `recheck` со ссылкой на
+   * первую и исходом. Повторный таймаут — провал, засчитанный как прежде.
+   * Прочие провалы, контрпример свойства и таймаут на свободной машине не
+   * повторяются.
+   */
+  private async candidateGate(
+    attempt: AttemptState,
+    cwd: string,
+    sha: string,
+    gate: GatePolicy,
+    artifacts: string,
+    signal: AbortSignal,
+    execution: ReturnType<typeof executionEnvironment>,
+    budget: { recheck: boolean },
+  ) {
+    try {
+      await this.gate(attempt, cwd, sha, 'candidate', gate, artifacts, signal, execution);
+    } catch (error) {
+      if (!budget.recheck || signal.aborted || !(error instanceof GateTimeout)) throw error;
+      if (!error.overloaded) throw error;
+      const failed = this.engine.read((v) =>
+        (v.attempt(attempt.id)?.evidence ?? []).findLast(
+          (e) =>
+            e.kind === 'test' &&
+            e.gate === gate.id &&
+            e.phase === 'candidate' &&
+            e.sha === sha &&
+            !e.consumer,
+        ),
+      );
+      if (!failed || failed.passed || namesFailingCases(failed)) throw error;
+      budget.recheck = false;
+      await this.gate(
+        attempt,
+        cwd,
+        sha,
+        'candidate',
+        gate,
+        artifacts,
+        signal,
+        execution,
+        undefined,
+        failed.id,
+      );
+    }
+  }
+
+  /**
    * Gate интеграции с одним повтором на кандидата. Провал собственного gate на
    * integration, когда тот же gate прошёл на кандидате, часто вызван средой
    * (бюджет времени под конкуренцией за CPU), а не кодом; без повтора такой
@@ -2268,12 +2322,15 @@ export class Runner {
           failed: evidence.findLast((e) => own(e, 'integration', sha)),
           candidatePassed:
             evidence.findLast((e) => own(e, 'candidate', attempt.candidateSha))?.passed === true,
-          // Один повтор на кандидата: переиспользованный следующей попыткой
-          // кандидат второго не получает.
+          // Один повтор интеграции на кандидата: переиспользованный следующей
+          // попыткой кандидат второго не получает. Повтор gate кандидата
+          // (таймаут под нагрузкой) — своей фазы и этот бюджет не тратит.
           spent: v
             .attempts(attempt.workId)
             .some(
-              (x) => x.candidateSha === attempt.candidateSha && x.evidence.some((e) => e.recheck),
+              (x) =>
+                x.candidateSha === attempt.candidateSha &&
+                x.evidence.some((e) => e.recheck && e.phase === 'integration'),
             ),
         };
       });

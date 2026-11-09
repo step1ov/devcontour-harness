@@ -1782,7 +1782,7 @@ export class Engine {
           `Evidence вида ${evidence.kind} не может относиться к gate ${evidence.gate}`,
         );
       // Повтор ссылается на провал того же gate этой попытки на том же SHA, и
-      // попытка повторяет не больше одного провала.
+      // попытка повторяет не больше одного провала на фазу.
       if (evidence.recheck) {
         const of = evidence.recheck.of;
         const first = a.evidence.find((e) => e.id === of);
@@ -1796,7 +1796,7 @@ export class Engine {
           first.sha !== evidence.sha ||
           first.consumer !== evidence.consumer ||
           namesFailingCases(first) ||
-          a.evidence.some((e) => e.recheck)
+          a.evidence.some((e) => e.recheck && e.phase === evidence.phase)
         )
           throw new HarnessError(
             'INVALID_INPUT',

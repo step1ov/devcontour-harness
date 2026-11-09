@@ -841,4 +841,33 @@ test('Повтор gate интеграции: один на попытку, ис
     refused('INVALID_INPUT'),
     'второй повтор в той же попытке',
   );
+  // Повтор gate кандидата — своей фазы: он не тратит единственный повтор
+  // интеграции, но и сам единственный на фазу.
+  const candidate = (passed: boolean, extra: Record<string, unknown> = {}) =>
+    engine.evidence(a.id, a.token, {
+      kind: 'test',
+      phase: 'candidate',
+      sha: sha('a'),
+      gate: 'unit',
+      passed,
+      command: [],
+      exitCode: passed ? 0 : 1,
+      log: '',
+      digest: digestOf(JSON.stringify(['candidate', passed, extra])),
+      summary: '',
+      ...extra,
+    } as never);
+  const slow = candidate(false);
+  assert.throws(
+    () => candidate(true, { recheck: { of: first.id, outcome: 'flaky' } }),
+    refused('INVALID_INPUT'),
+    'повтор ссылается на провал своей фазы',
+  );
+  candidate(true, { recheck: { of: slow.id, outcome: 'flaky' } });
+  const again = candidate(false);
+  assert.throws(
+    () => candidate(true, { recheck: { of: again.id, outcome: 'flaky' } }),
+    refused('INVALID_INPUT'),
+    'второй повтор кандидата в той же попытке',
+  );
 });
