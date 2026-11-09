@@ -619,9 +619,10 @@ export function pinnedBases(roots: string[]) {
  *   для корней, в которых работает проверка (`pinnedBases`): srt закрепляет
  *   его от переноса, и правка кода этого не снимет;
  * - проверка упала с EPERM, назвав этот путь (абсолютно или относительно
- *   своего рабочего каталога): отказ, который проверка пережила, — не
- *   причина её провала. Настоящий провал теста с проглоченной неудачной
- *   уборкой остаётся провалом gate.
+ *   своего рабочего каталога) в той же строке, что и EPERM: отказ, который
+ *   проверка пережила, — не причина её провала. Настоящий провал теста с
+ *   проглоченной неудачной уборкой остаётся провалом gate, даже если в
+ *   выводе есть другой EPERM и короткое имя каталога (`.claude`) где-то ещё.
  *
  * Отказ в создании сюда не входит: его дают и запреты имён, и они разобраны
  * `mandatoryDenyRule`.
@@ -631,30 +632,34 @@ function pinnedDirectoryRule(
   v: SandboxViolation,
   output: string | undefined,
   cwd: string | undefined,
+  bases: (roots: string[]) => string[] = pinnedBases,
 ) {
   if (v.operation !== 'file-write-unlink' || output === undefined || cwd === undefined)
     return undefined;
-  if (!/\bEPERM\b|operation not permitted/i.test(output)) return undefined;
+  const lines = output.split(/\r?\n/).filter((line) => epermPattern.test(line));
+  if (!lines.length) return undefined;
   const roots = policy.write.filter((w) => cwd === w || cwd.startsWith(w + sep));
   if (!roots.some((w) => v.path.startsWith(w + sep))) return undefined;
   const local = relative(cwd, v.path);
-  if (!mentions(output, v.path) && (local.startsWith('..') || !output.includes(local)))
-    return undefined;
+  const named = (line: string) =>
+    mentions(line, v.path) || (!local.startsWith('..') && line.includes(local));
+  if (!lines.some(named)) return undefined;
   try {
     if (!lstatSync(v.path).isDirectory()) return undefined;
   } catch {
     return undefined;
   }
-  let bases: string[];
+  let pinned: string[];
   try {
-    bases = pinnedBases(roots);
+    pinned = bases(roots);
   } catch {
     return undefined;
   }
-  if (!bases.some((b) => b === v.path || b.startsWith(v.path + sep))) return undefined;
+  if (!pinned.some((b) => b === v.path || b.startsWith(v.path + sep))) return undefined;
   return 'запрет sandbox-runtime на удаление или перенос каталога: каталог закреплён запретами записи внутри него';
 }
 
+const epermPattern = /\bEPERM\b|operation not permitted/i;
 /** Путь в выводе проверки в любом написании (macOS: /private/var и /var). */
 const mentions = (output: string, path: string) =>
   output.includes(path) ||
@@ -682,7 +687,15 @@ export function sandboxDenials(
   cwd?: string,
 ) {
   const found = new Map<string, string>();
-  const eperm = output !== undefined && /\bEPERM\b|operation not permitted/i.test(output);
+  const eperm = output !== undefined && epermPattern.test(output);
+  // Базы закреплённых каталогов перечисляют дерево: один раз на разбор.
+  const bases = new Map<string, string[]>();
+  const pinnedOnce = (roots: string[]) => {
+    const key = roots.join('\0');
+    let cached = bases.get(key);
+    if (!cached) bases.set(key, (cached = pinnedBases(roots)));
+    return cached;
+  };
   const credentials = credentialPaths().flatMap((path) => {
     try {
       return [path, realpathSync(path)];
@@ -697,7 +710,8 @@ export function sandboxDenials(
   for (const v of violations) {
     if (found.has(v.path)) continue;
     const rule = v.operation.startsWith('file-write')
-      ? (mandatoryDenyRule(policy, v.path) ?? pinnedDirectoryRule(policy, v, output, cwd))
+      ? (mandatoryDenyRule(policy, v.path) ??
+        pinnedDirectoryRule(policy, v, output, cwd, pinnedOnce))
       : v.operation.startsWith('file-read') &&
           !credential(v.path) &&
           eperm &&
