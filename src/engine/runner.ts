@@ -3424,6 +3424,23 @@ export class Runner {
       throw new TaskFailure('merge', error instanceof Error ? error.message : String(error));
     }
     const sha = await git(cwd, 'rev-parse', 'HEAD');
+    // Кандидат с изменениями даёт ровно слияние «target + кандидат». Иначе
+    // (кандидат уже достижим из target — «Already up to date» — или merge
+    // сделал fast-forward) проверять и продвигать нечего: проверки и ревью
+    // интеграции видели бы не слияние этого поручения.
+    if (attempt.candidateSha !== attempt.baseSha) {
+      const parents = (await git(cwd, 'rev-list', '--parents', '-n', '1', sha)).split(' ');
+      if (
+        parents.length !== 3 ||
+        parents[0] !== sha ||
+        parents[1] !== base ||
+        parents[2] !== attempt.candidateSha
+      )
+        throw new TaskFailure(
+          'merge',
+          `Интеграция не создала слияние кандидата ${attempt.candidateSha} с целевой веткой ${repo.targetRef} (${base}): получен ${sha} с родителями ${parents.slice(1).join(', ') || 'нет'}; кандидат, вероятно, уже входит в целевую ветку`,
+        );
+    }
     this.engine.phase(attempt.id, attempt.token, 'integrating', { integrationSha: sha });
     const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
     const execution = this.environment(attempt, 'integration', cwd);

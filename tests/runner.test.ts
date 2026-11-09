@@ -1107,3 +1107,40 @@ test('T10b: ревью интеграции видит только измене
   assert.equal(reviewed.at(-1)?.sha, b.integrationSha);
   assert.equal(b.evidence.filter((e) => e.kind === 'review').at(-1)?.passed, true);
 });
+
+test('T10c: кандидат, уже входящий в target, — явный отказ merge до gates и ревью интеграции; target не продвинут', async () => {
+  // Хост сам продвигает target на кандидата сразу после его коммита: слияние
+  // интеграции становится «Already up to date» и нового коммита не создаёт.
+  let candidate = '';
+  const ctx: ReturnType<typeof setup> = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p) => {
+      p.maxAttempts = 1;
+    },
+    runner: {
+      hooks: {
+        implemented: ({ sha }) => {
+          candidate = sha;
+          ctx.repo.git('update-ref', ctx.policy.repositories[0]!.targetRef, sha);
+        },
+      },
+    },
+  });
+  await runAll(ctx);
+  const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.ok(candidate && a.candidateSha === candidate && a.candidateSha !== a.baseSha);
+  assert.equal(a.status, 'failed');
+  assert.equal(a.failureKind, 'merge', a.error);
+  assert.match(a.error ?? '', /Интеграция не создала слияние кандидата/);
+  assert.equal(target(ctx), candidate, 'target не продвинут интеграцией');
+  assert.equal(
+    a.evidence.filter((e) => e.phase === 'integration').length,
+    0,
+    'ни gate, ни ревью интеграции',
+  );
+  assert.equal(
+    readFileSync(ctx.scenarioPath + '.codex.reviewer.count', 'utf8'),
+    '1',
+    'reviewer вызван только для кандидата',
+  );
+});
