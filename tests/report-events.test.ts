@@ -145,6 +145,14 @@ test('report events: история целиком под записью — р�
   assert.match(md, /holds 1 \(held tasks count as unknown\)/);
   assert.match(md, /Environment sub-causes: network to the provider 1\./);
   assert.doesNotMatch(md, /Not recorded yet/);
+  // `sandbox-policy` — и несобранная политика, и защищённые пути, изменённые
+  // до работы (установка, подготовка фазы).
+  const policy = structuredClone(r);
+  policy.environment.causes!.rows = [{ cause: 'sandbox-policy', count: 1, counted: 0 }];
+  assert.match(
+    reportMarkdown(policy),
+    /Environment sub-causes: sandbox policy not built, or protected paths changed before work 1\./,
+  );
   // Без удержания то же окно точно: 4 of 5.
   const unheld = report(withEvents(covered(), ['work.held']));
   assert.deepEqual(unheld.autonomy.withoutAction, { value: 4, n: 5, unknown: 0, bound: 'exact' });
