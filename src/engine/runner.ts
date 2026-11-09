@@ -2259,17 +2259,23 @@ export class Runner {
     } catch (error) {
       if (!budget.recheck || signal.aborted || !(error instanceof GateTimeout)) throw error;
       if (!error.overloaded) throw error;
-      const failed = this.engine.read((v) =>
-        (v.attempt(attempt.id)?.evidence ?? []).findLast(
-          (e) =>
-            e.kind === 'test' &&
-            e.gate === gate.id &&
-            e.phase === 'candidate' &&
-            e.sha === sha &&
-            !e.consumer,
-        ),
-      );
-      if (!failed || failed.passed || namesFailingCases(failed)) throw error;
+      const { failed, spent } = this.engine.read((v) => {
+        const evidence = v.attempt(attempt.id)?.evidence ?? [];
+        return {
+          failed: evidence.findLast(
+            (e) =>
+              e.kind === 'test' &&
+              e.gate === gate.id &&
+              e.phase === 'candidate' &&
+              e.sha === sha &&
+              !e.consumer,
+          ),
+          // Бюджет — по состоянию, как правило движка (один повтор на фазу
+          // попытки), а не только по счётчику этого прохода проверок.
+          spent: evidence.some((e) => e.recheck && e.phase === 'candidate'),
+        };
+      });
+      if (!failed || failed.passed || namesFailingCases(failed) || spent) throw error;
       budget.recheck = false;
       await this.gate(
         attempt,

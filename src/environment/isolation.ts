@@ -593,21 +593,65 @@ export function hiddenReadRule(policy: Isolation, path: string) {
 }
 
 /**
- * Удаление или перенос существующего каталога внутри открытых проверке
- * каталогов, в котором ей отказало ядро. Запись там открыта, и такой отказ
- * даёт только srt: каталог — база или предок запрета записи, и srt закрепляет
- * его от переноса (`anchoredAtRoot`). Правка кода его не снимет — это отказ
- * среды, а не провал проверки. Отказ в создании сюда не входит: его дают и
- * запреты имён, и они разобраны `mandatoryDenyRule`.
+ * Каталоги, которые srt закрепляет от удаления и переноса запретами записи
+ * для корней `roots` (`protectedWriteDenies`): база каждого шаблона
+ * (статический префикс до первого символа глоба) и предки буквального пути.
+ * Возвращаются базы; закреплены и все их предки.
  */
-function pinnedDirectoryRule(policy: Isolation, v: SandboxViolation) {
-  if (v.operation !== 'file-write-unlink') return undefined;
-  if (!policy.write.some((w) => v.path.startsWith(w + sep))) return undefined;
+export function pinnedBases(roots: string[]) {
+  const denies = protectedWriteDenies(roots) ?? [];
+  return [
+    ...new Set(
+      denies.map((d) => {
+        if (!glob.test(d)) return dirname(d);
+        const prefix = d.split(/[*?[\]]/)[0]!;
+        return prefix.endsWith(sep) ? prefix.slice(0, -1) : dirname(prefix);
+      }),
+    ),
+  ];
+}
+
+/**
+ * Удаление или перенос существующего каталога внутри открытых проверке
+ * каталогов, в котором ей отказало ядро, — отказ среды, только когда:
+ *
+ * - каталог — база или предок запрета записи, пересчитанного по политике
+ *   для корней, в которых работает проверка (`pinnedBases`): srt закрепляет
+ *   его от переноса, и правка кода этого не снимет;
+ * - проверка упала с EPERM, назвав этот путь (абсолютно или относительно
+ *   своего рабочего каталога): отказ, который проверка пережила, — не
+ *   причина её провала. Настоящий провал теста с проглоченной неудачной
+ *   уборкой остаётся провалом gate.
+ *
+ * Отказ в создании сюда не входит: его дают и запреты имён, и они разобраны
+ * `mandatoryDenyRule`.
+ */
+function pinnedDirectoryRule(
+  policy: Isolation,
+  v: SandboxViolation,
+  output: string | undefined,
+  cwd: string | undefined,
+) {
+  if (v.operation !== 'file-write-unlink' || output === undefined || cwd === undefined)
+    return undefined;
+  if (!/\bEPERM\b|operation not permitted/i.test(output)) return undefined;
+  const roots = policy.write.filter((w) => cwd === w || cwd.startsWith(w + sep));
+  if (!roots.some((w) => v.path.startsWith(w + sep))) return undefined;
+  const local = relative(cwd, v.path);
+  if (!mentions(output, v.path) && (local.startsWith('..') || !output.includes(local)))
+    return undefined;
   try {
     if (!lstatSync(v.path).isDirectory()) return undefined;
   } catch {
     return undefined;
   }
+  let bases: string[];
+  try {
+    bases = pinnedBases(roots);
+  } catch {
+    return undefined;
+  }
+  if (!bases.some((b) => b === v.path || b.startsWith(v.path + sep))) return undefined;
   return 'запрет sandbox-runtime на удаление или перенос каталога: каталог закреплён запретами записи внутри него';
 }
 
@@ -653,7 +697,7 @@ export function sandboxDenials(
   for (const v of violations) {
     if (found.has(v.path)) continue;
     const rule = v.operation.startsWith('file-write')
-      ? (mandatoryDenyRule(policy, v.path) ?? pinnedDirectoryRule(policy, v))
+      ? (mandatoryDenyRule(policy, v.path) ?? pinnedDirectoryRule(policy, v, output, cwd))
       : v.operation.startsWith('file-read') &&
           !credential(v.path) &&
           eperm &&
@@ -782,6 +826,9 @@ export function protectedSnapshot(root: string) {
  * из снимка, а не пропуск: вызывающий решает, отказ ли это среды (снимок до
  * работы) или нарушение области (после).
  *
+ * Путь с содержимым, который был до снимка и исчез после, — нарушение
+ * (удаление `.idea` через перенос родителя).
+ *
  * Пустые каталоги (только каталоги, рекурсивно, без записи всем)
  * нарушением не считаются, если до снимка пути не было или он тоже был без
  * файлов: исполняемой конфигурации в них нет, а CLI исполнителя создаёт
@@ -791,7 +838,7 @@ export function protectedSnapshot(root: string) {
  */
 export function protectedChanges(before: Map<string, string>, root: string) {
   const after = protectedSnapshot(root);
-  return [...after]
+  const changed = [...after]
     .filter(([path, sig]) => {
       if (sig === 'missing') return false;
       const was = before.get(path) ?? 'missing';
@@ -799,6 +846,17 @@ export function protectedChanges(before: Map<string, string>, root: string) {
       return was !== sig;
     })
     .map(([path]) => path);
+  // Исчезнувший защищённый путь с содержимым — тоже нарушение: ядро не
+  // закрепляет каталоги дерева, и `.idea` уходит вместе с перенесённым и
+  // удалённым родителем. Пустые служебные каталоги (только каталоги)
+  // исчезать могут.
+  const removed = [...before]
+    .filter(
+      ([path, sig]) =>
+        sig !== 'missing' && sig !== emptyTree && (after.get(path) ?? 'missing') === 'missing',
+    )
+    .map(([path]) => path);
+  return [...changed, ...removed];
 }
 
 /**

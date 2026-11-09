@@ -16,8 +16,10 @@ import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import type { EvidenceRecord } from '../src/contracts/index.ts';
 import { redactor } from '../src/environment/redaction.ts';
+import { denyGlobRegex } from '@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js';
 import {
   anchoredAtRoot,
+  pinnedBases,
   isolation,
   isolationSupport,
   mandatoryDenyRule,
@@ -817,43 +819,140 @@ test('SBX15: шаблон запрета с базой в корне совпа�
     'нет ASCII — прежний шаблон',
   );
   assert.equal(anchoredAtRoot(root, `/elsewhere/a/*/.idea`), `/elsewhere/a/*/.idea`);
-  // Тот же перевод, что у srt (globToRegex): класс из одного символа — этот символ.
-  const regex = (glob: string) =>
-    new RegExp(
-      '^' +
-        glob
-          .replace(/[.^$+{}()|\\]/g, '\\$&')
-          .replace(/\*/g, '[^/]*')
-          .replace(/\?/g, '[^/]') +
-        '(/.*)?$',
-    );
+  // Перевод самого srt (`denyGlobRegex`, как у правила запрета): класс из
+  // одного символа — этот символ.
   for (const [dir, ok, bad] of [
     ['.reports', '.reports/x/.idea', 'xreports/x/.idea'],
     ['src', 'src/x/.idea/a.xml', 'srcx/x/.idea'],
     ['a+b(c)', 'a+b(c)/y/.idea', 'aab(c)/y/.idea'],
+    ['$d', '$d/y/.idea', 'xd/y/.idea'],
+    ['ж1', 'ж1/y/.idea', 'жx/y/.idea'],
   ] as const) {
-    const re = regex(anchoredAtRoot(root, join(root, dir, '*', '.idea')));
+    const pattern = anchoredAtRoot(root, join(root, dir, '*', '.idea'));
+    assert.notEqual(pattern, join(root, dir, '*', '.idea'), dir);
+    const re = new RegExp(denyGlobRegex(pattern));
     assert.ok(re.test(join(root, ok)), ok);
     assert.equal(re.test(join(root, bad)), false, bad);
   }
 
+  // Удаление каталога внутри дерева — отказ среды, только когда каталог
+  // закреплён запретом (`.claude` — предок `.claude/commands`) и проверка
+  // упала с EPERM, назвав его.
   mkdirSync(join(root, '.reports', 'expo-export'), { recursive: true });
+  mkdirSync(join(root, '.claude'));
   writeFileSync(join(root, '.reports', 'file.txt'), 'x');
   const policy = isolation({ write: [root], controller: [] });
-  const found = sandboxDenials(
-    [
-      { operation: 'file-write-unlink', path: join(root, '.reports', 'expo-export') },
-      { operation: 'file-write-unlink', path: join(root, '.reports', 'file.txt') },
-      { operation: 'file-write-unlink', path: join(root, 'gone') },
-      { operation: 'file-write-create', path: join(root, '.reports', 'expo-export') },
-      { operation: 'file-write-unlink', path: root },
-      { operation: 'file-write-unlink', path: tmpdir() },
-    ],
-    policy,
+  const claude = join(root, '.claude');
+  const unlink = (path: string) => ({ operation: 'file-write-unlink', path });
+  const classify = (path: string, output: string | undefined, cwd: string | undefined = root) =>
+    sandboxDenials([unlink(path)], policy, output, cwd).map((d) => d.rule);
+  const eperm = (path: string) => `Error: EPERM: operation not permitted, rmdir '${path}'`;
+  assert.match(classify(claude, eperm(claude))[0] ?? '', /удаление или перенос каталога/);
+  assert.equal(classify(claude, eperm('.claude')).length, 1, 'путь относительно cwd');
+  assert.deepEqual(classify(claude, undefined), [], 'нет вывода');
+  assert.deepEqual(
+    classify(claude, 'AssertionError: expected 1 to equal 2'),
+    [],
+    'отказ пережит, провал — тест',
+  );
+  assert.deepEqual(classify(claude, eperm('/elsewhere/x')), [], 'EPERM о другом пути');
+  // Не закреплённый запретом каталог: отказа ядра на нём быть не должно, и
+  // классом среды он не становится.
+  const expo = join(root, '.reports', 'expo-export');
+  assert.deepEqual(classify(expo, eperm(expo)), []);
+  for (const path of [join(root, '.reports', 'file.txt'), join(root, 'gone'), root, tmpdir()])
+    assert.deepEqual(classify(path, eperm(path)), [], path);
+  assert.deepEqual(
+    sandboxDenials([{ operation: 'file-write-create', path: claude }], policy, eperm(claude), root),
+    [],
+    'отказ в создании разбирают запреты имён',
+  );
+  assert.ok(pinnedBases([root]).includes(claude));
+});
+
+test(
+  'SBX16 [песочница ОС]: запреты IDE в другом регистре и при необычных именах каталогов; перенос родителя с подложенным или удалённым .idea — scope-violation; проглоченный отказ уборки при провале теста — gate',
+  { skip: noSandbox },
+  async () => {
+    const fresh = (files: Record<string, string> = {}) => {
+      const r = repo({ 'src/a/index.ts': 'x\n', ...files });
+      return { r, at: (p: string) => join(realpathSync(r.dir), p) };
+    };
+    if (mac) {
+      const odd = ['(x) $d', '.r', '~t', "'s", 'ж1', 'ёж'];
+      const { r, at } = fresh();
+      for (const n of odd) mkdirSync(at(`${n}/a`), { recursive: true });
+      const paths = [
+        'SRC/a/.idea/x.xml',
+        'src/a/.IDEA/x.xml',
+        'Src/A/.VSCode/t.json',
+        ...odd.map((n) => `${n}/a/.idea/w.xml`),
+      ];
+      const result = await check(r.dir, r.dir, tryWrites(paths.map(at)));
+      assert.equal(result.code, 0, result.stderr);
+      const got = JSON.parse(result.stdout) as Record<string, true | string>;
+      for (const p of paths) assert.equal(got[at(p)], 'EPERM', `запись закрыта: ${p}`);
+    }
+    {
+      // Перенос родителя наружу, подложенный `.idea`, перенос обратно.
+      const { r, at } = fresh();
+      const planted = await gate(
+        r.dir,
+        r.head(),
+        `const fs=require('fs');fs.renameSync('src','tmpx');fs.mkdirSync('tmpx/a/.idea');fs.writeFileSync('tmpx/a/.idea/planted.xml','<x/>');fs.renameSync('tmpx','src')`,
+      );
+      assert.equal(planted.failure?.kind, 'scope-violation', planted.evidence.summary);
+      assert.match(planted.failure.message, /защищённые пути .*src\/a\/\.idea/);
+      assert.ok(existsSync(at('src/a/.idea/planted.xml')));
+    }
+    {
+      // Прежний неотслеживаемый `.idea` уходит вместе с перенесённым и удалённым родителем.
+      const { r, at } = fresh();
+      mkdirSync(at('lib/b/.idea'), { recursive: true });
+      writeFileSync(at('lib/b/.idea/workspace.xml'), '<x/>');
+      const removed = await gate(
+        r.dir,
+        r.head(),
+        `const fs=require('fs');fs.renameSync('lib','trash');fs.rmSync('trash',{recursive:true})`,
+      );
+      assert.equal(removed.failure?.kind, 'scope-violation', removed.evidence.summary);
+      assert.match(removed.failure.message, /удалила защищённые пути .*lib\/b\/\.idea/);
+    }
+    if (mac) {
+      // Настоящий провал теста и проглоченный отказ ядра в уборке
+      // закреплённого каталога: провал gate, а не отказ среды.
+      const { r, at } = fresh();
+      mkdirSync(at('.claude'), { mode: 0o755 });
+      const failed = await gate(
+        r.dir,
+        r.head(),
+        `try{require('fs').rmdirSync('.claude')}catch{}console.error('AssertionError: expected 1 to equal 2');process.exit(1)`,
+      );
+      assert.ok(existsSync(at('.claude')), 'ядро закрепило каталог');
+      assert.equal(failed.failure?.kind, 'gate', failed.evidence.summary);
+      assert.match(failed.failure.message, /AssertionError/);
+    }
+  },
+);
+
+test('SBX17: сверка защищённых путей — исчезнувший путь с содержимым нарушение, пустой служебный — нет', () => {
+  const r = repo({ 'src/a.ts': 'x\n' });
+  const root = realpathSync(r.dir);
+  const after = (change: () => void) => {
+    const before = protectedSnapshot(root);
+    change();
+    return protectedChanges(before, root).map((p) => p.slice(root.length + 1));
+  };
+  mkdirSync(join(root, 'lib/b/.idea'), { recursive: true });
+  writeFileSync(join(root, 'lib/b/.idea/workspace.xml'), '<x/>');
+  mkdirSync(join(root, '.claude/.cc-writes'), { recursive: true, mode: 0o700 });
+  assert.deepEqual(
+    after(() => rmSync(join(root, '.claude'), { recursive: true })),
+    [],
+    'пустое служебное дерево может исчезнуть',
   );
   assert.deepEqual(
-    found.map((d) => d.path),
-    [join(root, '.reports', 'expo-export')],
+    after(() => rmSync(join(root, 'lib'), { recursive: true })),
+    ['lib/b/.idea'],
   );
-  assert.match(found[0]!.rule, /удаление или перенос каталога/);
 });

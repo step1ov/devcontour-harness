@@ -806,8 +806,14 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   let kind: FailureKind = 'gate';
   /** Причина отказа окружения (`attempt.diagnosed`), когда она известна здесь. */
   let cause: EnvironmentCause | undefined;
-  /** Нагрузка хоста, когда gate исчерпал свой предел времени. */
+  /**
+   * Нагрузка хоста, когда gate исчерпал свой предел времени: меньшая из
+   * снятых до запуска и в момент таймаута.
+   */
   let timedOut: HostLoad | undefined;
+  let loadBefore: HostLoad | undefined;
+  /** Провалы, записанные в JUnit до таймаута: повтор их не отменяет. */
+  let timedOutFailures = '';
   // Заголовок лога — фактические каталог и argv запуска: digest лога входит в
   // evidence, и запись называет, где и чем проверка исполнялась.
   let passed = false,
@@ -819,6 +825,9 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     // Снимок защищённых путей до проверки: запреты песочницы видят только
     // путь операции, перенос готового каталога ими не закрыт.
     const before = run.policy.isolation.mode === 'os' ? protectedSnapshot(root) : undefined;
+    // Нагрузка до запуска: gate, который сам перегрузил процессор (пул
+    // потоков без предела), не должен заработать повтор своей нагрузкой.
+    loadBefore = hostLoad.read();
     const result = await runCheck(
       { config: run.policy },
       {
@@ -864,7 +873,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     if (planted.length) {
       kind = 'scope-violation';
       throw new Error(
-        'проверка создала или изменила защищённые пути (конфигурация IDE, shell, git или Claude): ' +
+        'проверка создала, изменила или удалила защищённые пути (конфигурация IDE, shell, git или Claude): ' +
           planted
             .slice(0, 5)
             .map((p) => relative(root, p))
@@ -872,11 +881,25 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
           (planted.length > 5 ? ` и ещё ${planted.length - 5}` : ''),
       );
     }
-    if (result.timedOut && !signal.aborted) timedOut = hostLoad.read();
+    if (result.timedOut && !signal.aborted) {
+      const now = hostLoad.read();
+      timedOut =
+        loadBefore && loadBefore.load1 / loadBefore.cpus < now.load1 / now.cpus ? loadBefore : now;
+      // Отчёт, записанный до таймаута, читается без гарантий: названный в нём
+      // провал — найденный дефект, и повтор gate его не отменяет.
+      const partial = reportPath
+        ? await readReport(reportPath, cwd, redact).catch(() => undefined)
+        : undefined;
+      if (partial?.failures) {
+        manifest = partial;
+        timedOutFailures = failedCases(partial);
+      }
+    }
     if (result.timedOut || signal.aborted)
       throw new Error(
         'Проверка прервана или превысила timeout' +
-          (timedOut ? `: ${gateTimeoutText(gate, run.policy)}, ${loadText(timedOut)}` : ''),
+          (timedOut ? `: ${gateTimeoutText(gate, run.policy)}, ${loadText(timedOut)}` : '') +
+          (timedOutFailures ? `; до таймаута упали ${timedOutFailures}` : ''),
       );
     // Песочница так и не запустила команду по известному отказу запуска:
     // код проекта не исполнялся, и его правка ничего не изменит. Это отказ
@@ -1141,7 +1164,8 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     const declared = new Set(expected?.properties.map((p) => p.id) ?? []);
     const message = `${phase}/${run.consumer ? run.consumer + ':' : ''}${gate.id}: ${evidence.summary}`;
     // Таймаут без контрпримера свойства: повтор на том же SHA решает `Runner`.
-    if (timedOut && kind === 'gate' && !failing.length) throw new GateTimeout(message, timedOut);
+    if (timedOut && kind === 'gate' && !failing.length && !timedOutFailures)
+      throw new GateTimeout(message, timedOut);
     throw new TaskFailure(
       kind,
       message,

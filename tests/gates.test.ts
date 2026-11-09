@@ -718,3 +718,117 @@ test('A long spaced line stays cheap to scan', async () => {
   assert.ok(performance.now() - started < 5000);
   assert.ok(summary.length < 400);
 });
+
+/** Подменяет чтение нагрузки хоста последовательностью значений на время `fn`. */
+async function withLoads<T>(loads: number[], fn: () => Promise<T>) {
+  const read = hostLoad.read;
+  const queue = [...loads];
+  hostLoad.read = () => ({ load1: queue.length > 1 ? queue.shift()! : queue[0]!, cpus: 8 });
+  try {
+    return await fn();
+  } finally {
+    hostLoad.read = read;
+  }
+}
+const hang = 'setTimeout(() => {}, 30000)';
+
+test('Таймаут gate: нагрузка — меньшая из снятых до запуска и в момент таймаута; gate, перегрузивший хост сам, повтора не получает', async () => {
+  const r = repo({ 'src/a.js': 'a\n' });
+  const slow = {
+    kind: 'check' as const,
+    report: undefined,
+    timeoutMs: 300,
+    command: nodeGate(hang),
+  };
+  // До запуска хост свободен, к таймауту загружен (сам gate): повтора нет.
+  const self = await withLoads([1, 800], () => gate(r.dir, r.head(), slow));
+  assert.ok(self.failure instanceof GateTimeout);
+  assert.equal(self.failure.overloaded, false);
+  assert.match(self.failure.message, /нагрузка хоста 1 на 8 ядер$/);
+  // Загружен до запуска и разгрузился к таймауту — тоже меньшая.
+  const eased = await withLoads([800, 8], () => gate(r.dir, r.head(), slow));
+  assert.ok(eased.failure instanceof GateTimeout);
+  assert.equal(eased.failure.overloaded, false);
+  // Загружен и до, и в момент таймаута — повтор оправдан.
+  const busy = await withLoads([800, 400], () => gate(r.dir, r.head(), slow));
+  assert.ok(busy.failure instanceof GateTimeout);
+  assert.equal(busy.failure.overloaded, true);
+  assert.match(busy.failure.message, /нагрузка хоста 400 на 8 ядер$/);
+});
+
+test('Таймаут gate после записанного провала JUnit — не GateTimeout: найденный провал не повторяется и назван', async () => {
+  const r = repo({ 'src/a.js': 'a\n' });
+  const { failure, evidence } = await withLoads([800], () =>
+    gate(r.dir, r.head(), {
+      timeoutMs: 1000,
+      command: nodeGate(
+        `${junit('<testcase classname="c" name="breaks"><failure message="expected 1"/></testcase>')};${hang}`,
+      ),
+    }),
+  );
+  assert.ok(failure instanceof TaskFailure);
+  assert.equal(failure instanceof GateTimeout, false, 'провал до таймаута повтора не получает');
+  assert.equal(failure.kind, 'gate');
+  assert.match(failure.message, /превысила timeout.*; до таймаута упали .*breaks/);
+  assert.equal(evidence.passed, false);
+  // Зелёный частичный отчёт повтору не мешает.
+  const green = await withLoads([800], () =>
+    gate(r.dir, r.head(), {
+      timeoutMs: 1000,
+      command: nodeGate(`${junit('<testcase classname="c" name="ok"/>')};${hang}`),
+    }),
+  );
+  assert.ok(green.failure instanceof GateTimeout);
+  assert.equal(green.failure.overloaded, true);
+});
+
+test('Таймаут генеративного gate с контрпримером свойства под высокой нагрузкой — не GateTimeout: контрпример не повторяется', async () => {
+  const r = repo({ 'src/a.js': 'a\n' });
+  const recorded: Omit<EvidenceRecord, 'id' | 'runId' | 'createdAt'>[] = [];
+  const run = (report: object) =>
+    withLoads([800], async () => {
+      try {
+        await runGate({
+          policy: { isolation: { ...policy.isolation, mode: 'none' } },
+          record: (e) => {
+            recorded.push(e);
+            return { ...e, id: 'e', runId: 'r', createdAt: new Date().toISOString() };
+          },
+          cwd: r.dir,
+          sha: r.head(),
+          phase: 'candidate',
+          gate: {
+            id: 'prop',
+            kind: 'check',
+            timeoutMs: 1000,
+            property: {},
+            command: nodeGate(
+              `require('fs').writeFileSync(process.env.DEVCONTOUR_PROPERTY_REPORT, ${JSON.stringify(JSON.stringify(report))});${hang}`,
+            ),
+          },
+          artifactDir: mkdtempSync(join(tmpdir(), 'harness-art-')),
+          signal: new AbortController().signal,
+          execution: { env: process.env, redact: redactor([]) },
+          boundary: { hidden: [], readable: [] },
+          property: { runId: 'run-1', contracts: {}, artifacts: [] },
+        });
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    });
+  const counterexample = await run({
+    version: 1,
+    properties: [{ testId: 'p', status: 'failed', cases: 2 }],
+  });
+  assert.ok(counterexample instanceof TaskFailure, String(counterexample));
+  assert.equal(counterexample instanceof GateTimeout, false, 'контрпример не повторяется');
+  assert.deepEqual(counterexample.properties?.unbound, ['p']);
+  // Без контрпримера тот же таймаут под нагрузкой повтор получает.
+  const clean = await run({
+    version: 1,
+    properties: [{ testId: 'p', status: 'passed', cases: 2 }],
+  });
+  assert.ok(clean instanceof GateTimeout, String(clean));
+  assert.equal(clean.overloaded, true);
+});
