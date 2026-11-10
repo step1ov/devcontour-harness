@@ -12,6 +12,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1217,5 +1218,42 @@ test('SBX20: исчезновение вложенного .git, которым 
   );
   rmSync(join(root, 'sub'), { recursive: true, force: true });
   rmSync(join(root, 'deps'), { recursive: true, force: true });
+  rmSync(outside, { recursive: true });
+});
+
+test('SBX21: подпись файла учитывает ctime — правка на месте с восстановленными размером и mtime (utimes) в перенесённом наружу родителе — нарушение; перенос родителя туда и обратно — нет', async () => {
+  const r = repo({ 'src/a.ts': 'x\n' });
+  const root = realpathSync(r.dir);
+  const outside = mkdtempSync(join(tmpdir(), 'harness-sbx21-'));
+  const file = join(root, 'src/a/.idea/workspace.xml');
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, '<a/>');
+  // Целые секунды: `utimes` вернёт mtime без потери точности.
+  utimesSync(file, 1_700_000_000, 1_700_000_000);
+  const roundTrip = async (edit: (moved: string) => void) => {
+    const before = protectedSnapshot(root);
+    const was = lstatSync(file);
+    // ctime файловой системы может быть грубее миллисекунды.
+    await new Promise((done) => setTimeout(done, 1100));
+    renameSync(join(root, 'src/a'), join(outside, 'a'));
+    edit(join(outside, 'a/.idea/workspace.xml'));
+    renameSync(join(outside, 'a'), join(root, 'src/a'));
+    const now = lstatSync(file);
+    assert.deepEqual(
+      [now.ino, now.size, now.mtimeMs],
+      [was.ino, was.size, was.mtimeMs],
+      'подделка вернула inode, размер и mtime',
+    );
+    return protectedChanges(before, root).map((p) => p.slice(root.length + 1));
+  };
+  assert.deepEqual(await roundTrip(() => {}), [], 'перенос родителя туда и обратно');
+  assert.deepEqual(
+    await roundTrip((moved) => {
+      writeFileSync(moved, '<b/>', { flag: 'r+' });
+      utimesSync(moved, 1_700_000_000, 1_700_000_000);
+    }),
+    ['src/a/.idea'],
+  );
+  assert.equal(readFileSync(file, 'utf8'), '<b/>');
   rmSync(outside, { recursive: true });
 });

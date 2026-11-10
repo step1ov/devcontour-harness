@@ -811,8 +811,12 @@ export function protectedSnapshot(root: string) {
     try {
       if (stat.isSymbolicLink()) return 'l:' + readlinkSync(path);
       // Не каталог и не ссылка — файл, FIFO, сокет, устройство: всё это
-      // содержимое, пустым деревом не бывает.
-      if (!stat.isDirectory()) return `f:${stat.size}:${stat.mtimeMs}:${stat.ino}`;
+      // содержимое, пустым деревом не бывает. mtime возвращает `utimes`,
+      // ctime — нет: правка на месте в перенесённом наружу родителе с
+      // восстановленными размером и mtime всё равно меняет подпись. Ту же
+      // ctime меняют chmod/chown и новая жёсткая ссылка на файл — для
+      // защищённой конфигурации это тоже изменение.
+      if (!stat.isDirectory()) return `f:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}`;
       const mode = stat.mode & 0o7777;
       const names = readdirSync(path).sort();
       const inner = names.map((name) => signature(join(path, name)));
