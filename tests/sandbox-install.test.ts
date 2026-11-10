@@ -4,10 +4,12 @@ import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -1135,5 +1137,85 @@ test(
         'подмена дошла до дерева',
       );
     }
+    {
+      // Подмена родителя: `sub` перенесён наружу, на его место — ссылка на
+      // каталог вне дерева с другим `.git`. Снимок в ссылку не спускается,
+      // но исчезновением такой `.git` не считается.
+      const { r, root } = fresh();
+      const link = `const fs=require('fs'),p=require('path'),os=require('os');const ev=fs.mkdtempSync(p.join(os.tmpdir(),'ev-'));fs.mkdirSync(ev+'/sub');fs.writeFileSync(ev+'/sub/.git','gitdir: ../evilg\\n');fs.renameSync('sub',ev+'/old');fs.symlinkSync(ev+'/sub','sub')`;
+      const result = await gate(r.dir, r.head(), link, owned);
+      assert.equal(result.failure?.kind, 'scope-violation', result.failure?.message);
+      assert.match(result.failure.message, /удалила защищённые пути .*sub\/\.git/);
+      // Временный каталог gate убран после проверки, ссылка осталась.
+      assert.equal(lstatSync(join(root, 'sub')).isSymbolicLink(), true, 'подмена дошла до дерева');
+    }
   },
 );
+
+test('SBX20: исчезновение вложенного .git, которым владеет подготовка, — только при настоящих каталогах-родителях; подмена родителя ссылкой или файлом — нарушение', () => {
+  const r = repo({ 'src/a.ts': 'x\n' });
+  const root = realpathSync(r.dir);
+  const outside = mkdtempSync(join(tmpdir(), 'harness-sbx20-'));
+  const owned = new Set(['sub/.git', 'deps/x/dep/.git']);
+  const plant = () => {
+    rmSync(join(root, 'sub'), { recursive: true, force: true });
+    rmSync(join(root, 'deps'), { recursive: true, force: true });
+    mkdirSync(join(root, 'sub'));
+    writeFileSync(join(root, 'sub/.git'), 'gitdir: ../.git/modules/sub\n');
+    mkdirSync(join(root, 'deps/x/dep/.git'), { recursive: true });
+    writeFileSync(join(root, 'deps/x/dep/.git/HEAD'), 'ref: refs/heads/main\n');
+  };
+  const after = (change: () => void) => {
+    plant();
+    const before = protectedSnapshot(root);
+    change();
+    return protectedChanges(before, root, owned)
+      .map((p) => p.slice(root.length + 1))
+      .sort();
+  };
+  let n = 0;
+  const away = (path: string) => renameSync(join(root, path), join(outside, `gone-${n++}`));
+  // Законная уборка: родитель перенесён наружу или удалён, сам `.git` удалён.
+  assert.deepEqual(
+    after(() => {
+      away('sub');
+      away('deps');
+    }),
+    [],
+  );
+  assert.deepEqual(
+    after(() => {
+      rmSync(join(root, 'sub/.git'));
+      away('deps/x');
+    }),
+    [],
+  );
+  // Родитель — ссылка на каталог вне дерева с другим `.git`.
+  const evil = join(outside, 'evil');
+  mkdirSync(join(evil, 'dep/.git'), { recursive: true });
+  writeFileSync(join(evil, '.git'), 'gitdir: ../evilg\n');
+  assert.deepEqual(
+    after(() => {
+      away('sub');
+      symlinkSync(evil, join(root, 'sub'));
+      away('deps/x');
+      symlinkSync(evil, join(root, 'deps/x'));
+    }),
+    ['deps/x/dep/.git', 'sub/.git'],
+  );
+  // Ссылка выше по цепочке и файл на месте родителя — тоже подмена.
+  assert.deepEqual(
+    after(() => {
+      away('deps');
+      mkdirSync(join(outside, 'deps-evil/x'), { recursive: true });
+      symlinkSync(join(evil, 'dep'), join(outside, 'deps-evil/x/dep'));
+      symlinkSync(join(outside, 'deps-evil'), join(root, 'deps'));
+      away('sub');
+      writeFileSync(join(root, 'sub'), 'x');
+    }),
+    ['deps/x/dep/.git', 'sub/.git'],
+  );
+  rmSync(join(root, 'sub'), { recursive: true, force: true });
+  rmSync(join(root, 'deps'), { recursive: true, force: true });
+  rmSync(outside, { recursive: true });
+});

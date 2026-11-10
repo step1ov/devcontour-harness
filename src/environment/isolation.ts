@@ -862,6 +862,33 @@ export function protectedSnapshot(root: string) {
   return found;
 }
 /**
+ * Исчез ли `path` из дерева сам, а не скрылся за подменённым родителем.
+ *
+ * Снимок не спускается в символьные ссылки на каталоги: родитель `sub`,
+ * перенесённый наружу и заменённый ссылкой на каталог вне дерева с другим
+ * `.git`, выглядел бы как исчезновение `sub/.git`, а git хоста прочитал бы
+ * подменённый `gitdir` через ссылку. Исчезновением считается только путь,
+ * у которого цепочка родителей от `root` — настоящие каталоги до первого
+ * отсутствующего звена (родитель удалён или перенесён наружу) или до
+ * самого пути. Ссылка или не каталог на месте родителя — подмена.
+ */
+function removedInPlace(root: string, path: string) {
+  const parts = relative(root, path).split(sep).slice(0, -1);
+  let dir = root;
+  for (const part of parts) {
+    dir = join(dir, part);
+    let stat;
+    try {
+      stat = lstatSync(dir);
+    } catch (error) {
+      if (missing(error)) return true;
+      return unreadable(root, dir, error);
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+  }
+  return true;
+}
+/**
  * Защищённые пути, которые появились или изменились после снимка `before`.
  *
  * Путь, который сверка не может прочитать (кроме ENOENT), — `SandboxPolicyError`
@@ -884,14 +911,14 @@ export function protectedChanges(
   /**
    * Пути относительно `root`, которыми владеет подготовка фазы (вложенные
    * `.git`, см. `preparationGuard`): не в счёт только их исчезновение
-   * (уборка фикстуры переносом родителя). Изменение — в том числе подмена
+   * (уборка фикстуры переносом родителя, см. `removedInPlace`). Изменение — в том числе подмена
    * переносом другого `.git` на то же место — нарушение: подменённый
    * `gitdir` подмодуля git хоста прочитал бы при следующей команде.
    */
   owned?: ReadonlySet<string>,
 ) {
   const after = protectedSnapshot(root);
-  const mine = (path: string) => !owned?.has(relative(root, path));
+  const mine = (path: string) => !owned?.has(relative(root, path)) || !removedInPlace(root, path);
   const changed = [...after]
     .filter(([path, sig]) => {
       if (sig === 'missing') return false;
