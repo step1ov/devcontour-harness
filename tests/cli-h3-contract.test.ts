@@ -136,6 +136,8 @@ const ADDITIVE_EVENT_TYPES = new Set([
   'input.delivered',
   'input.stale',
   'attempt.assumptions',
+  // alpha.44: явный сброс бюджета совместных проверок набора.
+  'joint.budget-reset',
 ]);
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set(['status--detail']);
@@ -364,6 +366,19 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.detail;
       return rest;
     }
+    // Аддитивное поле `joint.finished` — проверка прервана до результата gates (alpha.44).
+    if (
+      k === 'properties' &&
+      v &&
+      typeof v === 'object' &&
+      'interrupted' in v &&
+      'verificationId' in v &&
+      'manifestDigest' in v
+    ) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.interrupted;
+      return rest;
+    }
     // Ослабленный предел области gates (20 → предел gates профиля).
     if (gateScope(v)) return { ...v, maxItems: 20 };
     return v;
@@ -389,6 +404,16 @@ test('H3-01: прежние команды и схемы их данных не 
   ).properties.events.items.oneOf.map(eventTypeOf);
   for (const type of ADDITIVE_EVENT_TYPES)
     assert.ok(eventVariants.includes(type), 'events объявляет вариант ' + type);
+  // Хеш H2 вырезает `interrupted` у joint.finished (alpha.44): объявление держит эта проверка.
+  const finished = (
+    data.events as unknown as {
+      properties: { events: { items: { oneOf: Record<string, unknown>[] } } };
+    }
+  ).properties.events.items.oneOf.find((x) => eventTypeOf(x) === 'joint.finished');
+  assert.ok(
+    JSON.stringify(finished).includes('"interrupted"'),
+    'joint.finished объявляет interrupted',
+  );
   // Хеш H2 выше вырезает detail status и флаг --detail: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.status).includes('"detail"'), 'status объявляет detail');
   // Хеш H2 вырезает вопрос исполнителя в status: объявление держит эта проверка.
