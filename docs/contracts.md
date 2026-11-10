@@ -368,7 +368,9 @@ writer и reviewer кода получают список файлов набо�
 техническая очередь ведущего, `contract-documents` — документы контрактов,
 прошедшие ревью, по digest, `spikes` — эксперименты выполнимости
 репозитория, `reproductions` — реестр воспроизведений из находок ревью по
-поручениям). `owner` — репозиторий или `@workspace`.
+поручениям, `input-requests` — вопросы исполнителей и ответы на них,
+`joint-budget-resets` — явные сбросы бюджета совместных проверок набора).
+`owner` — репозиторий или `@workspace`.
 
 ## Ответы исполнителей
 
@@ -1013,7 +1015,13 @@ original}` (исходный тип, не длиннее 200 символов; �
 транзакциями `recovery.*`, отказом и выдачей (`work.recovery`).
 `workspace.verification.started`, `workspace.manifest`, `workspace.evidence`,
 `workspace.verified`, `workspace.failed` — транзакции совместной проверки
-(`joint.started`, `joint.finished`). `config.started`, `config.reconfigure-*`
+(`joint.started`, `joint.finished`; у прерванной до результата gates —
+`interrupted: true`). `workspace.budget-reset` — явный сброс бюджета
+совместных проверок набора: запись `joint-budget-resets` и событие
+`joint.budget-reset`. Договор хранилища (`executionStoreContract`)
+проверяет, что адаптер сохраняет `interrupted` совместной проверки и
+пространство `joint-budget-resets`; хост, который заводит проверку своей
+операцией, передаёт её в необязательном `startVerification`. `config.started`, `config.reconfigure-*`
 и `config.reconfigured` меняют применённую политику и запрос операции
 (`policy.applied`, `policy.reconfigure`). `base.moved` — проверка владения
 операцией и CAS-сдвиг ref базы; записей не создаёт, событие — `base.moved`.

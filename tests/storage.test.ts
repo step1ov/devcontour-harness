@@ -179,6 +179,7 @@ function distorted(
   distort: {
     locals?: (rows: { owner: string; key: string; value: unknown }[], owner?: string) => unknown;
     putLocal?: (put: () => void, exists: boolean, namespace: string) => void;
+    putVerification?: (verification: Record<string, unknown>) => unknown;
   },
 ): ExecutionStore {
   const wrap = <V extends object>(view: V): V =>
@@ -189,6 +190,10 @@ function distorted(
           const locals = value as (ns: string, owner?: string) => never[];
           return (ns: string, owner?: string) =>
             distort.locals!(locals.call(target, ns, owner), owner);
+        }
+        if (prop === 'putVerification' && distort.putVerification) {
+          const put = value as (v: unknown) => void;
+          return (v: Record<string, unknown>) => put.call(target, distort.putVerification!(v));
         }
         if (prop === 'putLocal' && distort.putLocal) {
           const put = value as (ns: string, owner: string, key: string, v: unknown) => void;
@@ -246,5 +251,19 @@ test('Договор хранилища ловит адаптер, которы�
     }),
   );
   const run = find('ровно таким, каким записан');
+  await assert.rejects(async () => run());
+});
+
+test('Договор хранилища ловит адаптер, который теряет отметку прерванной совместной проверки', async () => {
+  const find = contractCases((dir) =>
+    distorted(new SqliteExecutionStore(join(dir, 'state.sqlite'), 'test'), {
+      putVerification: (v) => {
+        const rest = { ...v };
+        delete rest.interrupted;
+        return rest;
+      },
+    }),
+  );
+  const run = find('сохраняет interrupted');
   await assert.rejects(async () => run());
 });

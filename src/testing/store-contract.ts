@@ -6,6 +6,7 @@ import {
   inputRequestId,
   type ExecutionStore,
   type InputRequest,
+  type JointVerificationState,
   type RunEventDraft,
   type WorkState,
 } from '../contracts/index.ts';
@@ -92,6 +93,13 @@ export function executionStoreContract(
   test: (title: string, fn: () => void | Promise<void>) => unknown,
   open: (dir: string) => ExecutionStore,
   tempDir: () => string,
+  options: {
+    /**
+     * Как хост заводит новую совместную проверку (у DevContour — операцией
+     * ChangeSet). По умолчанию — `putVerification` в транзакции начала.
+     */
+    startVerification?: (store: ExecutionStore, verification: JointVerificationState) => void;
+  } = {},
 ) {
   const work = (id: string, status: WorkState['status'] = 'ready'): WorkState => ({
     id,
@@ -330,6 +338,48 @@ export function executionStoreContract(
     assert.equal(
       b.read((v) => v.local('input-requests', 'app', inputRequestId('run-1', 0))),
       undefined,
+    );
+    b.close();
+  });
+
+  test(`${name}: прерванная совместная проверка сохраняет interrupted и виден другому экземпляру`, () => {
+    const dir = tempDir();
+    const a = open(dir);
+    a.transact('run.phase', (tx) => {
+      tx.putWork(work('w1', 'done'));
+      tx.putWork(work('w2', 'done'));
+    });
+    const active: JointVerificationState = {
+      apiVersion: 'devcontour-harness/v1alpha1',
+      id: 'jv-interrupted',
+      token: 'token-'.padEnd(32, 'x'),
+      leaseUntil: 1,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      status: 'active',
+      policyDigest: digestOf('policy'),
+      specDigest: digestOf('spec'),
+      workIds: ['w1', 'w2'],
+      evidence: [],
+    };
+    if (options.startVerification) options.startVerification(a, active);
+    else a.transact('workspace.verification.started', (tx) => tx.putVerification(active));
+    a.transact('workspace.failed', (tx) =>
+      tx.putVerification({
+        ...active,
+        status: 'failed',
+        error: 'Совместная проверка отменена',
+        finishedAt: '2026-01-01T00:01:00.000Z',
+        interrupted: true,
+      }),
+    );
+    a.close();
+    const b = open(dir);
+    const stored = b.read((v) => v.verification(active.id));
+    assert.equal(stored?.status, 'failed');
+    assert.equal(
+      stored?.status === 'failed' ? stored.interrupted : undefined,
+      true,
+      'отметка прерывания не теряется: без неё прерванная проверка тратит предел набора',
     );
     b.close();
   });

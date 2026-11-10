@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { baseMoveActors, cancelActors, environmentCauses, retryActors } from './events.ts';
-import { failureKindSchema, pauseReasons } from './execution.ts';
+import { failureKindSchema, jointResetActors, pauseReasons } from './execution.ts';
 import { isoTimeSchema } from './primitives.ts';
 
 /**
@@ -310,6 +310,12 @@ export const valueReportSchema = z.strictObject({
           /** Отмены поручений без активной попытки (их `attempt.cancelled` нет). */
           cancelledWithoutAttempt: count,
           baseMoves: actorCounts(baseMoveActors),
+          /**
+           * Явные сбросы бюджета совместных проверок (`joint.budget-reset`)
+           * по актёру. Событие пишется с версии, где появился сброс: до неё
+           * сбросов не было, число точное (нет у отчётов прежних версий).
+           */
+          jointResets: actorCounts(jointResetActors).optional(),
           /** Сдвиги базы — всегда нижняя граница: перенос вне `fencedRefMove` не пишется. */
           baseMovesBound: z.literal('lower'),
           /**

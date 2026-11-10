@@ -417,3 +417,24 @@ test('report events: остановка вопросом, вернувшая п�
   assert.equal(legacy.speed.firstPass.value, before.speed.firstPass.value! - 1);
   assert.equal(firstRow(legacy).counted, 2);
 });
+
+test('report events: явные сбросы бюджета совместных проверок считаются по актёру', () => {
+  const reset = (by: string) => ({
+    type: 'joint.budget-reset',
+    payload: { resetId: 'R-' + by, workIds: ['gate', 'env'], by, settled: 3, reasonLength: 9 },
+  });
+  const r = report(
+    withEvents([
+      ...covered(),
+      [t(8), reset('operator')],
+      [t(9), reset('host')],
+      [t(10), reset('operator')],
+    ]),
+  );
+  assert.deepEqual(r.autonomy.actions.recorded!.jointResets, { operator: 2, host: 1 });
+  assert.match(reportMarkdown(r), /Joint verification budget resets: operator 2, host 1/);
+  assert.deepEqual(report(withEvents(covered())).autonomy.actions.recorded!.jointResets, {
+    operator: 0,
+    host: 0,
+  });
+});

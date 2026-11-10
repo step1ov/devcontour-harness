@@ -3986,20 +3986,7 @@ export class Engine {
         if (v.status !== 'active') continue;
         if (v.leaseUntil > this.now())
           throw new HarnessError('NOT_READY', 'Совместная проверка уже выполняется');
-        const error = 'Истёк срок владения проверкой';
-        // Владение потеряно до результата gates: проверка прервана, а не провалена.
-        const interrupted = v.evidence.length === 0 ? { interrupted: true as const } : {};
-        tx.putVerification({
-          ...v,
-          status: 'failed',
-          error,
-          finishedAt: iso(this.now()),
-          ...interrupted,
-        });
-        tx.emit({
-          type: 'joint.finished',
-          payload: { verificationId: v.id, status: 'failed', error, ...interrupted },
-        });
+        this.closeExpiredJoint(tx, v);
       }
       const exhausted = this.jointExhausted(tx, input.workIds);
       if (exhausted) throw new HarnessError('ATTEMPTS_EXHAUSTED', exhausted);
@@ -4192,6 +4179,26 @@ export class Engine {
   }
 
   /**
+   * Закрыть истёкшую активную проверку отказом. Владение потеряно: без
+   * evidence проверка прервана до результата gates, с evidence — обычный отказ.
+   */
+  private closeExpiredJoint(tx: ExecutionTransaction, v: JointVerificationState) {
+    const error = 'Истёк срок владения проверкой';
+    const interrupted = v.evidence.length === 0 ? { interrupted: true as const } : {};
+    tx.putVerification({
+      ...v,
+      status: 'failed',
+      error,
+      finishedAt: iso(this.now()),
+      ...interrupted,
+    });
+    tx.emit({
+      type: 'joint.finished',
+      payload: { verificationId: v.id, status: 'failed', error, ...interrupted },
+    });
+  }
+
+  /**
    * Почему набор не может начать совместную проверку по бюджету, или
    * `undefined`. Предел тратят проверки с результатом gates и отказы до них;
    * прерванные до результата gates (`interrupted`) — только свой предел.
@@ -4207,7 +4214,7 @@ export class Engine {
     const interrupted = window.filter(jointInterrupted).length;
     const counted = window.length - interrupted;
     if (counted >= this.policy.maxAttempts)
-      return `Исчерпан предел совместных проверок этого набора: ${counted} из ${this.policy.maxAttempts}. Не считаются только проверки, прерванные остановкой или потерей владения до результата gates. Предел снимает принятие хостом успешной проверки набора или явный сброс (jointBudgetReset) с причиной`;
+      return `Исчерпан предел совместных проверок этого набора: ${counted} из ${this.policy.maxAttempts}. Не считаются только проверки, прерванные остановкой или потерей владения до результата gates. Предел снимает принятие хостом успешной проверки набора; явный сброс (jointBudgetReset) с причиной снимает только проверки без результата gates`;
     if (interrupted >= MAX_NEUTRAL_FAILURES)
       return `Совместные проверки этого набора прерваны до результата gates ${interrupted} раз (предел ${MAX_NEUTRAL_FAILURES}): устраните причину остановок или потери владения и сбросьте бюджет явно (jointBudgetReset) с причиной`;
     return undefined;
@@ -4216,8 +4223,12 @@ export class Engine {
   /**
    * Явный сброс бюджета совместных проверок набора оператором или хостом:
    * только при исчерпанном пределе и без живой проверки этого набора, с
-   * причиной. Завершённые проверки набора (снимок их ID) больше не тратят
-   * предел; запись сброса — в `joint-budget-resets`, событие `joint.budget-reset`.
+   * причиной. Сброс снимает только проверки набора без результата gates
+   * (прерванные и отказы до gates, в том числе записанные прежними версиями);
+   * проверки с evidence тратят предел и после сброса, поэтому предел,
+   * исчерпанный ими одними, сброс не снимает. Истёкшая незакрытая проверка
+   * набора закрывается здесь же (как в `jointStart`). Запись — в
+   * `joint-budget-resets`, событие — `joint.budget-reset`.
    */
   jointBudgetReset(
     workIds: string[],
@@ -4229,23 +4240,38 @@ export class Engine {
     if (!workIds.length || new Set(workIds).size !== workIds.length)
       throw new HarnessError('INVALID_INPUT', 'Нужен непустой набор разных поручений');
     return this.tx('workspace.budget-reset', (tx) => {
-      const own = tx.verifications().filter((v) => sameWorks(v.workIds, workIds));
-      if (own.some((v) => v.status === 'active' && v.leaseUntil > this.now()))
-        throw new HarnessError('NOT_READY', 'Совместная проверка этого набора ещё выполняется');
+      for (const v of tx.verifications()) {
+        if (v.status !== 'active' || !sameWorks(v.workIds, workIds)) continue;
+        if (v.leaseUntil > this.now())
+          throw new HarnessError('NOT_READY', 'Совместная проверка этого набора ещё выполняется');
+        this.closeExpiredJoint(tx, v);
+      }
       if (!this.jointExhausted(tx, workIds))
         throw new HarnessError(
           'NOT_READY',
           'Предел совместных проверок этого набора не исчерпан; сброс не нужен',
         );
-      // Истёкшая активная проверка входит в снимок: её закроет отказом
-      // следующий jointStart, и тратить предел она уже не будет.
+      const window = jointBudgetWindow(
+        tx,
+        workIds,
+        this.host.basis.jointBudgetCheckpoints
+          ? this.host.basis.jointBudgetCheckpoints([...workIds], tx)
+          : [],
+      );
+      const gated = window.filter((v) => v.evidence.length > 0).length;
+      if (gated >= this.policy.maxAttempts)
+        throw new HarnessError(
+          'ATTEMPTS_EXHAUSTED',
+          `Предел совместных проверок этого набора исчерпан проверками с результатом gates: ${gated} из ${this.policy.maxAttempts}. Сброс снимает только проверки без результата gates; дальше — принятие хостом успешной проверки или новый набор`,
+        );
+      const settled = window.filter((v) => v.status === 'failed' && v.evidence.length === 0);
       const record: JointBudgetReset = {
         id: this.id(),
         at: iso(this.now()),
         workIds: [...workIds].sort(),
         reason: reason.slice(0, 2000),
         actor: options.actor ?? 'host',
-        settledVerificationIds: own.map((v) => v.id),
+        settledVerificationIds: settled.map((v) => v.id),
       };
       tx.putLocal('joint-budget-resets', WORKSPACE_OWNER, record.id, record);
       tx.emit({

@@ -327,3 +327,58 @@ test('Repeated interruptions have their own limit; an explicit reset with a reas
   );
   reopened.close();
 });
+
+test('A reset discounts only verifications without gate evidence; a limit spent by gate results alone is refused', () => {
+  const { engine, store } = setup();
+  gateFailed(engine);
+  gateFailed(engine);
+  interrupt(engine);
+  interrupt(engine);
+  interrupt(engine);
+  const reset = engine.jointBudgetReset(works, { reason: 'lease loss fixed', actor: 'operator' });
+  assert.equal(reset.settledVerificationIds.length, 3, 'только прерванные');
+  // Два отказа gates остаются в пределе: после сброса — одна проверка.
+  fail(engine);
+  assert.throws(() => engine.jointStart({ workIds: works }), exhausted);
+  store.close();
+
+  const gates = setup();
+  gateFailed(gates.engine);
+  gateFailed(gates.engine);
+  gateFailed(gates.engine);
+  assert.throws(
+    () => gates.engine.jointBudgetReset(works, { reason: 'try again', actor: 'operator' }),
+    (e: unknown) => exhausted(e) && /результатом gates: 3 из 3/.test((e as Error).message),
+  );
+  assert.equal(
+    gates.engine.read((v) => v.locals('joint-budget-resets').length),
+    0,
+  );
+  gates.store.close();
+
+  // Отказы до gates прежних версий (без отметки, без evidence) сброс снимает.
+  const legacy = setup();
+  fail(legacy.engine);
+  fail(legacy.engine);
+  fail(legacy.engine);
+  assert.equal(
+    legacy.engine.jointBudgetReset(works, { reason: 'old aborted runs' }).settledVerificationIds
+      .length,
+    3,
+  );
+  assert.ok(legacy.engine.jointStart({ workIds: works }));
+  legacy.store.close();
+});
+
+test('A reset closes an expired, still active verification of the set before judging the budget', () => {
+  const { engine, store, clock, policy } = setup();
+  interrupt(engine);
+  interrupt(engine);
+  const stale = engine.jointStart({ workIds: works });
+  clock.now += policy.leaseMs + 1;
+  const reset = engine.jointBudgetReset(works, { reason: 'host crashed', actor: 'operator' });
+  assert.ok(reset.settledVerificationIds.includes(stale.id));
+  assert.equal(verification(engine, stale.id).status, 'failed');
+  assert.equal(verification(engine, stale.id).interrupted, true);
+  store.close();
+});

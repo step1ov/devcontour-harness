@@ -778,6 +778,7 @@ export function valueReport(
             cancelledWithoutAttempt: 0,
             baseMoves: zero(['operator', 'controller', 'host'] as const),
             baseMovesBound: 'lower' as const,
+            jointResets: zero(['operator', 'host'] as const),
             gaps: gapInWindow.size,
           };
           for (const e of windowEvents)
@@ -788,6 +789,7 @@ export function valueReport(
               r.cancellations[e.payload.by] += 1;
               if (!e.payload.hadAttempt) r.cancelledWithoutAttempt += 1;
             } else if (e.type === 'base.moved') r.baseMoves[e.payload.by] += 1;
+            else if (e.type === 'joint.budget-reset') r.jointResets[e.payload.by] += 1;
           // Окно начинается раньше записи: в нём есть попытки или события до неё.
           const before = (ms: number) => ms < recordedFrom;
           if (

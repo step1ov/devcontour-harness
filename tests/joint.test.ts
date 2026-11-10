@@ -632,13 +632,18 @@ test('Прерванная совместная проверка: останов
 
   // Остановка хоста во время gate: evidence gate записано — отказ тратит предел.
   {
-    const ctx = jointContour(hang);
+    // Остановка — по метке, которую gate пишет при старте, а не по времени.
+    const mark = join(mkdtempSync(join(tmpdir(), 'joint-gate-mark-')), 'started');
+    const ctx = jointContour(`require('fs').writeFileSync(${JSON.stringify(mark)}, '1');\n${hang}`);
     ready(ctx.engine, ctx.graph, 'runner-1');
     accept(ctx.engine, { 'add-greeting': ctx.ref('library') });
     const stop = new AbortController();
-    const timer = setTimeout(() => stop.abort(), 1500);
+    const poll = setInterval(() => {
+      if (existsSync(mark)) stop.abort();
+    }, 50);
     const result = await ctx.joint.verify(['add-greeting'], { signal: stop.signal });
-    clearTimeout(timer);
+    clearInterval(poll);
+    assert.ok(existsSync(mark), 'gate стартовал до остановки');
     assert.equal(result.status, 'failed');
     assert.equal(result.evidence.length, 1, 'evidence прерванного gate');
     assert.equal(interruptedOf(result), false, 'результат gate есть — не прерывание');

@@ -1065,6 +1065,26 @@
                       ],
                       "additionalProperties": false
                     },
+                    "jointResets": {
+                      "type": "object",
+                      "properties": {
+                        "operator": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "host": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "operator",
+                        "host"
+                      ],
+                      "additionalProperties": false
+                    },
                     "baseMovesBound": {
                       "type": "string",
                       "const": "lower"
