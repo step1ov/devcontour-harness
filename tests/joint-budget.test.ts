@@ -382,3 +382,55 @@ test('A reset closes an expired, still active verification of the set before jud
   assert.equal(verification(engine, stale.id).interrupted, true);
   store.close();
 });
+
+test('A reset that would settle nothing or leave the set exhausted is refused and not recorded', () => {
+  /** Успешная проверка без evidence и без принятия (область gates пуста). */
+  const bare = (ctx: ReturnType<typeof setup>) => {
+    const v = pass(ctx.engine);
+    const stored = ctx.engine.read((x) => x.verification(v.id)!);
+    ctx.store.transact('workspace.verified', (tx) =>
+      tx.putVerification({ ...stored, evidence: [] }),
+    );
+  };
+  const refusedReset = (ctx: ReturnType<typeof setup>, settled: number, remaining: number) => {
+    assert.throws(
+      () => ctx.engine.jointBudgetReset(works, { reason: 'retry the set', actor: 'operator' }),
+      (e: unknown) =>
+        exhausted(e) &&
+        (e as Error).message.includes(`без результата gates (${settled})`) &&
+        (e as Error).message.includes(`(${remaining}, в том числе успешные без принятия)`),
+    );
+    assert.equal(
+      ctx.engine.read((v) => v.locals('joint-budget-resets').length),
+      0,
+    );
+  };
+
+  const nothing = setup();
+  bare(nothing);
+  bare(nothing);
+  bare(nothing);
+  assert.throws(() => nothing.engine.jointStart({ workIds: works }), exhausted);
+  refusedReset(nothing, 0, 3);
+  nothing.store.close();
+
+  // Три успешные без принятия и отказ прежней версии без evidence: после
+  // сброса этого отказа набор всё равно исчерпан.
+  const still = setup();
+  bare(still);
+  const template = still.engine.read((x) => x.verifications()[0]!);
+  still.store.transact('workspace.failed', (tx) => {
+    tx.putVerification({ ...template, id: 'bare-2' });
+    tx.putVerification({ ...template, id: 'bare-3' });
+    tx.putVerification({
+      ...template,
+      id: 'legacy-failed',
+      status: 'failed',
+      error: 'Совместная проверка отменена',
+      manifest: undefined,
+      manifestDigest: undefined,
+    } as never);
+  });
+  refusedReset(still, 1, 3);
+  still.store.close();
+});

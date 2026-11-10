@@ -4265,6 +4265,15 @@ export class Engine {
           `Предел совместных проверок этого набора исчерпан проверками с результатом gates: ${gated} из ${this.policy.maxAttempts}. Сброс снимает только проверки без результата gates; дальше — принятие хостом успешной проверки или новый набор`,
         );
       const settled = window.filter((v) => v.status === 'failed' && v.evidence.length === 0);
+      // Успешная проверка без принятия (и без evidence) сбросом не снимается:
+      // сброс, после которого набор всё равно исчерпан, не записывается. Пустой
+      // снимок сюда же: предел исчерпан, значит, остаток — весь предел.
+      const remaining = window.length - settled.length;
+      if (remaining >= this.policy.maxAttempts)
+        throw new HarnessError(
+          'ATTEMPTS_EXHAUSTED',
+          `Сброс не освобождает предел совместных проверок этого набора: снимаются только отказы без результата gates (${settled.length}), а остальные проверки (${remaining}, в том числе успешные без принятия) тратят ${remaining} из ${this.policy.maxAttempts}; дальше — принятие хостом успешной проверки или новый набор`,
+        );
       const record: JointBudgetReset = {
         id: this.id(),
         at: iso(this.now()),
