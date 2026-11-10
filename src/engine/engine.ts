@@ -21,6 +21,8 @@ import {
   type ContextLimit,
   type EnvironmentCause,
   type RetryActor,
+  type JointBudgetReset,
+  type JointResetActor,
   type ControllerLease,
   type Author,
   type CallRecord,
@@ -107,7 +109,8 @@ import {
   jointSpecDigest,
   publicJoint,
   sameWorks,
-  jointBudgetAttempts,
+  jointBudgetWindow,
+  jointInterrupted,
 } from '../verification/joint.ts';
 
 /** Префикс причины неудавшегося продления: первая причина не затирается следствиями. */
@@ -3984,24 +3987,22 @@ export class Engine {
         if (v.leaseUntil > this.now())
           throw new HarnessError('NOT_READY', 'Совместная проверка уже выполняется');
         const error = 'Истёк срок владения проверкой';
-        tx.putVerification({ ...v, status: 'failed', error, finishedAt: iso(this.now()) });
+        // Владение потеряно до результата gates: проверка прервана, а не провалена.
+        const interrupted = v.evidence.length === 0 ? { interrupted: true as const } : {};
+        tx.putVerification({
+          ...v,
+          status: 'failed',
+          error,
+          finishedAt: iso(this.now()),
+          ...interrupted,
+        });
         tx.emit({
           type: 'joint.finished',
-          payload: { verificationId: v.id, status: 'failed', error },
+          payload: { verificationId: v.id, status: 'failed', error, ...interrupted },
         });
       }
-      const previous = jointBudgetAttempts(
-        tx,
-        input.workIds,
-        this.host.basis.jointBudgetCheckpoints
-          ? this.host.basis.jointBudgetCheckpoints([...input.workIds], tx)
-          : [],
-      );
-      if (previous.length >= this.policy.maxAttempts)
-        throw new HarnessError(
-          'ATTEMPTS_EXHAUSTED',
-          'Исчерпан предел совместных проверок этого набора',
-        );
+      const exhausted = this.jointExhausted(tx, input.workIds);
+      if (exhausted) throw new HarnessError('ATTEMPTS_EXHAUSTED', exhausted);
       const works = input.workIds.map((id) => tx.work(id));
       if (works.some((w) => !w || w.status !== 'done' || !w.resultSha))
         throw new HarnessError('NOT_READY', 'Сначала завершите все поручения набора');
@@ -4162,19 +4163,102 @@ export class Engine {
     });
   }
 
-  /** Отказ проверки её владельцем; истёкший срок допустим, чужой токен — нет. */
-  jointFail(id: string, token: string, error: string) {
+  /**
+   * Отказ проверки её владельцем; истёкший срок допустим, чужой токен — нет.
+   * `interrupted` — проверку прервали остановка или потеря владения; движок
+   * отмечает её прерванной только без evidence: результат gate тратит предел.
+   */
+  jointFail(id: string, token: string, error: string, options: { interrupted?: boolean } = {}) {
     return this.tx('workspace.failed', (tx) => {
       const v = tx.verification(id);
       if (!v || v.status !== 'active' || v.token !== token || v.engineVersion !== this.version)
         return false;
       const message = error.slice(0, 4000) || 'Совместная проверка не прошла';
-      tx.putVerification({ ...v, status: 'failed', error: message, finishedAt: iso(this.now()) });
+      const interrupted =
+        options.interrupted && v.evidence.length === 0 ? { interrupted: true as const } : {};
+      tx.putVerification({
+        ...v,
+        status: 'failed',
+        error: message,
+        finishedAt: iso(this.now()),
+        ...interrupted,
+      });
       tx.emit({
         type: 'joint.finished',
-        payload: { verificationId: id, status: 'failed', error: message },
+        payload: { verificationId: id, status: 'failed', error: message, ...interrupted },
       });
       return true;
+    });
+  }
+
+  /**
+   * Почему набор не может начать совместную проверку по бюджету, или
+   * `undefined`. Предел тратят проверки с результатом gates и отказы до них;
+   * прерванные до результата gates (`interrupted`) — только свой предел.
+   */
+  private jointExhausted(tx: ExecutionView, workIds: string[]) {
+    const window = jointBudgetWindow(
+      tx,
+      workIds,
+      this.host.basis.jointBudgetCheckpoints
+        ? this.host.basis.jointBudgetCheckpoints([...workIds], tx)
+        : [],
+    );
+    const interrupted = window.filter(jointInterrupted).length;
+    const counted = window.length - interrupted;
+    if (counted >= this.policy.maxAttempts)
+      return `Исчерпан предел совместных проверок этого набора: ${counted} из ${this.policy.maxAttempts}. Не считаются только проверки, прерванные остановкой или потерей владения до результата gates. Предел снимает принятие хостом успешной проверки набора или явный сброс (jointBudgetReset) с причиной`;
+    if (interrupted >= MAX_NEUTRAL_FAILURES)
+      return `Совместные проверки этого набора прерваны до результата gates ${interrupted} раз (предел ${MAX_NEUTRAL_FAILURES}): устраните причину остановок или потери владения и сбросьте бюджет явно (jointBudgetReset) с причиной`;
+    return undefined;
+  }
+
+  /**
+   * Явный сброс бюджета совместных проверок набора оператором или хостом:
+   * только при исчерпанном пределе и без живой проверки этого набора, с
+   * причиной. Завершённые проверки набора (снимок их ID) больше не тратят
+   * предел; запись сброса — в `joint-budget-resets`, событие `joint.budget-reset`.
+   */
+  jointBudgetReset(
+    workIds: string[],
+    options: { reason: string; actor?: JointResetActor },
+  ): JointBudgetReset {
+    const reason = options.reason?.trim() ?? '';
+    if (!reason)
+      throw new HarnessError('INVALID_INPUT', 'Сброс бюджета совместных проверок требует причины');
+    if (!workIds.length || new Set(workIds).size !== workIds.length)
+      throw new HarnessError('INVALID_INPUT', 'Нужен непустой набор разных поручений');
+    return this.tx('workspace.budget-reset', (tx) => {
+      const own = tx.verifications().filter((v) => sameWorks(v.workIds, workIds));
+      if (own.some((v) => v.status === 'active' && v.leaseUntil > this.now()))
+        throw new HarnessError('NOT_READY', 'Совместная проверка этого набора ещё выполняется');
+      if (!this.jointExhausted(tx, workIds))
+        throw new HarnessError(
+          'NOT_READY',
+          'Предел совместных проверок этого набора не исчерпан; сброс не нужен',
+        );
+      // Истёкшая активная проверка входит в снимок: её закроет отказом
+      // следующий jointStart, и тратить предел она уже не будет.
+      const record: JointBudgetReset = {
+        id: this.id(),
+        at: iso(this.now()),
+        workIds: [...workIds].sort(),
+        reason: reason.slice(0, 2000),
+        actor: options.actor ?? 'host',
+        settledVerificationIds: own.map((v) => v.id),
+      };
+      tx.putLocal('joint-budget-resets', WORKSPACE_OWNER, record.id, record);
+      tx.emit({
+        type: 'joint.budget-reset',
+        payload: {
+          resetId: record.id,
+          workIds: record.workIds,
+          by: record.actor,
+          settled: record.settledVerificationIds.length,
+          reasonLength: record.reason.length,
+        },
+      });
+      return record;
     });
   }
 

@@ -92,6 +92,13 @@ export const validPayloads: Record<EventType, Record<string, unknown>> = {
   'work.recovery': { recoveryId: 'RC-1', property: 'p-optimal', status: 'awaiting-lead' },
   'joint.started': { verificationId: 'JV-1', workIds: ['a', 'b'], policyDigest: d },
   'joint.finished': { verificationId: 'JV-1', status: 'passed', manifestDigest: d },
+  'joint.budget-reset': {
+    resetId: 'R-1',
+    workIds: ['a', 'b'],
+    by: 'operator',
+    settled: 3,
+    reasonLength: 12,
+  },
   'policy.applied': { digest: d, generation: 2, by: 'runner-1', operation: 'op-1' },
   'policy.reconfigure': { operation: 'op-1', digest: d, status: 'requested' },
   'input.requested': {

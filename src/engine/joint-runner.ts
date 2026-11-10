@@ -3,6 +3,7 @@ import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import {
   digestOf,
+  HarnessError,
   type ExecutionPolicy,
   type JointVerification,
   type JointVerificationState,
@@ -109,11 +110,14 @@ export class JointRunner {
     const signal = outer ? AbortSignal.any([outer, controller.signal]) : controller.signal;
     const timer = setTimeout(() => controller.abort(), this.policy.runTimeoutMs);
     const deadline = Date.now() + this.policy.runTimeoutMs;
+    // Владение потеряно: продление отказало устаревшим владением.
+    let leaseLost = false;
     const heartbeat = setInterval(
       () => {
         try {
           this.engine.jointHeartbeat(v.id, v.token);
-        } catch {
+        } catch (error) {
+          if (error instanceof HarnessError && error.code === 'LEASE_STALE') leaseLost = true;
           controller.abort();
         }
       },
@@ -401,7 +405,14 @@ export class JointRunner {
           ? (outer.reason as Error).message
           : undefined;
       const message = redact(stalled ?? (error instanceof Error ? error.message : String(error)));
-      this.engine.jointFail(v.id, v.token, message);
+      // Прервана, а не провалена: остановка хоста (внешний сигнал, не обход
+      // зависших) или потеря владения. Без evidence движок не тратит на неё
+      // предел набора; результат gate (evidence) тратит всегда.
+      const interrupted =
+        (outer?.aborted && !stalled) ||
+        leaseLost ||
+        (error instanceof HarnessError && error.code === 'LEASE_STALE');
+      this.engine.jointFail(v.id, v.token, message, interrupted ? { interrupted: true } : {});
       const failed = this.engine.read((view) => view.verification(v.id));
       if (failed?.status === 'failed') return publicJoint(failed);
       throw error instanceof Error ? Object.assign(error, { message }) : new Error(message);

@@ -120,6 +120,16 @@ test('T24: fencing совместной проверки — выдача сто
   assert.equal(engine.jointFail(retry.id, retry.token, 'основание сменилось'), true);
   const third = engine.jointStart({ workIds: ['a', 'b'] });
   engine.jointFail(third.id, third.token, 'x');
+  // Истёкшая до результата gates первая проверка прервана: предел не тратит.
+  assert.equal(
+    engine.read((x) => {
+      const first = x.verification(v.id)!;
+      return first.status === 'failed' && first.interrupted;
+    }),
+    true,
+  );
+  const fourth = engine.jointStart({ workIds: ['a', 'b'] });
+  engine.jointFail(fourth.id, fourth.token, 'y');
   assert.throws(
     () => engine.jointStart({ workIds: ['a', 'b'] }),
     refused('ATTEMPTS_EXHAUSTED'),
@@ -334,6 +344,11 @@ test('T24: результат поручения, которого нет в tar
   assert.equal(failed.status, 'failed');
   assert.match(failed.status === 'failed' ? failed.error : '', /отсутствует/);
   assert.equal(failed.manifest, undefined, 'manifest не закреплён');
+  assert.equal(
+    failed.status === 'failed' ? failed.interrupted : 'not failed',
+    undefined,
+    'отказ до gates не по остановке — не прерывание: предел тратится',
+  );
 });
 
 test('T24: gate совместной проверки не может изменить manifest или исходники другого компонента', async () => {
@@ -581,5 +596,81 @@ test('Совместная проверка под обходом зависши
       assert.equal(result.status, 'failed');
       assert.match(result.status === 'failed' ? result.error : '', /Зависание: gate combo/);
     }
+  }
+});
+
+test('Прерванная совместная проверка: остановка хоста и потеря владения до gates — interrupted; остановка во время gate с evidence — обычный отказ', async () => {
+  const hang = `setTimeout(() => {}, 30000);`;
+  const interruptedOf = (v: { status: string; interrupted?: true }) =>
+    v.status === 'failed' ? (v.interrupted ?? false) : 'not failed';
+
+  // Остановка хоста до первого gate: evidence нет — прервана.
+  {
+    const ctx = jointContour(hang);
+    ready(ctx.engine, ctx.graph, 'runner-1');
+    accept(ctx.engine, { 'add-greeting': ctx.ref('library') });
+    const stop = new AbortController();
+    const runner = new JointRunner({
+      engine: ctx.engine,
+      stateDir: ctx.state,
+      baseDir: ctx.state,
+      resourceDatabase: join(ctx.state, 'resources.sqlite'),
+      prepare: () => Promise.resolve(stop.abort()),
+    });
+    const result = await runner.run(
+      ctx.engine.jointStart({ workIds: ['add-greeting'] }),
+      stop.signal,
+    );
+    assert.equal(result.status, 'failed');
+    assert.deepEqual(result.evidence, []);
+    assert.equal(interruptedOf(result), true, 'остановка до gates — прерывание');
+    const finished = ctx.engine.host.store
+      .events(0, 500)
+      .find((e) => e.type === 'joint.finished') as { payload: Record<string, unknown> } | undefined;
+    assert.equal(finished?.payload.interrupted, true, 'событие несёт прерывание');
+  }
+
+  // Остановка хоста во время gate: evidence gate записано — отказ тратит предел.
+  {
+    const ctx = jointContour(hang);
+    ready(ctx.engine, ctx.graph, 'runner-1');
+    accept(ctx.engine, { 'add-greeting': ctx.ref('library') });
+    const stop = new AbortController();
+    const timer = setTimeout(() => stop.abort(), 1500);
+    const result = await ctx.joint.verify(['add-greeting'], { signal: stop.signal });
+    clearTimeout(timer);
+    assert.equal(result.status, 'failed');
+    assert.equal(result.evidence.length, 1, 'evidence прерванного gate');
+    assert.equal(interruptedOf(result), false, 'результат gate есть — не прерывание');
+  }
+
+  // Продление владения отказало (LEASE_STALE): прервана, хотя внешнего сигнала нет.
+  {
+    const ctx = jointContour(hang, (p) => {
+      p.leaseMs = 5000;
+    });
+    ready(ctx.engine, ctx.graph, 'runner-1');
+    accept(ctx.engine, { 'add-greeting': ctx.ref('library') });
+    const engine = ctx.engine as any;
+    const runner = new JointRunner({
+      engine: ctx.engine,
+      stateDir: ctx.state,
+      baseDir: ctx.state,
+      resourceDatabase: join(ctx.state, 'resources.sqlite'),
+      prepare: async (signal) => {
+        // Часы движка уходят за срок владения: следующее продление отказывает.
+        engine.now = () => Date.now() + 60_000;
+        await new Promise((resolve) => {
+          const guard = setTimeout(resolve, 10_000);
+          signal.addEventListener('abort', () => resolve(clearTimeout(guard)), { once: true });
+        });
+        assert.ok(signal.aborted, 'отказ продления прервал проверку');
+        throw new Error('подготовка прервана');
+      },
+    });
+    const result = await runner.run(ctx.engine.jointStart({ workIds: ['add-greeting'] }));
+    engine.now = Date.now;
+    assert.equal(result.status, 'failed');
+    assert.equal(interruptedOf(result), true, 'потеря владения до gates — прерывание');
   }
 });

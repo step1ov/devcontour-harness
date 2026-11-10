@@ -409,6 +409,12 @@ export const jointFailedSchema = z.strictObject({
   manifest: jointManifestSchema.optional(),
   manifestDigest: digestSchema.optional(),
   error: z.string().min(1),
+  /**
+   * Проверку прервали до результата gates: остановка хоста или потеря
+   * владения. Ставится только без evidence; такая проверка не тратит предел
+   * совместных проверок набора (у прежних записей поля нет).
+   */
+  interrupted: z.literal(true).optional(),
 });
 export const jointPassedSchema = z.strictObject({
   ...jointCommon,

@@ -1155,6 +1155,24 @@ export const reproductionRegistrySchema = z.strictObject({
 });
 export const MAX_REPRODUCTIONS = 500;
 
+/** Кто сбросил бюджет совместных проверок (`joint.budget-reset`). */
+export const jointResetActors = ['operator', 'host'] as const;
+export type JointResetActor = (typeof jointResetActors)[number];
+/**
+ * Явный сброс бюджета совместных проверок набора (`engine.jointBudgetReset`):
+ * завершённые к этому моменту проверки набора больше не тратят его предел.
+ * Граница — снимок ID этих проверок, а не время: откат часов её не сдвигает.
+ */
+export const jointBudgetResetSchema = z.strictObject({
+  id: z.string().min(1).max(200),
+  at: isoTimeSchema,
+  workIds: z.array(idSchema).min(1).max(500),
+  reason: z.string().trim().min(1).max(2000),
+  actor: z.enum(jointResetActors),
+  settledVerificationIds: z.array(z.string().min(1).max(200)).min(1).max(10_000),
+});
+export type JointBudgetReset = z.infer<typeof jointBudgetResetSchema>;
+
 export const localSchemas = {
   /** Учёт вызовов моделей. */
   usage: callRecordSchema,
@@ -1195,6 +1213,11 @@ export const localSchemas = {
    * отдаёт её в списке без владельца с `owner` и `key` (`executionStoreContract`).
    */
   'input-requests': inputRequestSchema,
+  /**
+   * Явные сбросы бюджета совместных проверок (`JointBudgetReset`) по ID сброса,
+   * у `@workspace`. Пишет только `engine.jointBudgetReset`.
+   */
+  'joint-budget-resets': jointBudgetResetSchema,
 } as const;
 export type LocalNamespace = keyof typeof localSchemas;
 export type LocalValue<N extends LocalNamespace> = z.infer<(typeof localSchemas)[N]>;

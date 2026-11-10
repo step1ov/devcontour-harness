@@ -578,6 +578,10 @@
         "error": {
           "type": "string",
           "minLength": 1
+        },
+        "interrupted": {
+          "type": "boolean",
+          "const": true
         }
       },
       "required": [

@@ -6,6 +6,7 @@ import {
   type JointVerification,
   type JointVerificationState,
   type JointBudgetCheckpoint,
+  WORKSPACE_OWNER,
 } from '../contracts/index.ts';
 
 /**
@@ -54,8 +55,19 @@ export function jointSpecDigest(view: ExecutionView, workIds: string[]) {
 export const sameWorks = (a: string[], b: string[]) =>
   JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 
-/** Незакрытые принятием попытки; checkpoints доверенного хоста проверяются целиком. */
-export function jointBudgetAttempts(
+/**
+ * Проверка, прерванная до результата gates (остановка хоста, потеря
+ * владения): без evidence она не говорит ничего о комбинации и предел не тратит.
+ */
+export const jointInterrupted = (v: JointVerificationState) =>
+  v.status === 'failed' && v.interrupted === true && v.evidence.length === 0;
+
+/**
+ * Окно бюджета набора: проверки, не закрытые принятием хоста и не снятые
+ * явным сбросом (`joint-budget-resets`). Checkpoints доверенного хоста
+ * проверяются целиком.
+ */
+export function jointBudgetWindow(
   view: ExecutionView,
   workIds: string[],
   checkpoints: readonly JointBudgetCheckpoint[],
@@ -98,7 +110,22 @@ export function jointBudgetAttempts(
       settled.add(id);
     }
   }
+  for (const { value } of view.locals('joint-budget-resets', WORKSPACE_OWNER))
+    if (sameWorks(value.workIds, workIds))
+      for (const id of value.settledVerificationIds) settled.add(id);
   return view.verifications().filter((v) => sameWorks(v.workIds, workIds) && !settled.has(v.id));
+}
+
+/**
+ * Проверки набора, тратящие его предел: окно бюджета без прерванных до
+ * результата gates. Прерванная после evidence и отказ gate тратят.
+ */
+export function jointBudgetAttempts(
+  view: ExecutionView,
+  workIds: string[],
+  checkpoints: readonly JointBudgetCheckpoint[],
+) {
+  return jointBudgetWindow(view, workIds, checkpoints).filter((v) => !jointInterrupted(v));
 }
 
 /** Gates совместной проверки в порядке их зависимостей. */

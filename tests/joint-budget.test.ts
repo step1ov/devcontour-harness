@@ -5,7 +5,7 @@ import { HarnessError, sha256, type JointBudgetCheckpoint } from '../src/contrac
 import { Engine } from '../src/engine/engine.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
-import { jointBudgetAttempts } from '../src/verification/joint.ts';
+import { jointBudgetAttempts, jointBudgetWindow } from '../src/verification/joint.ts';
 import { engineOf, graphOf, policyOf, ready, sha } from './engine-fixture.ts';
 
 const works = ['a', 'b'];
@@ -178,4 +178,152 @@ test('Invalid accepted checkpoints fail closed and hook exceptions roll back exp
     before,
   );
   store.close();
+});
+
+function interrupt(engine: Engine) {
+  const v = engine.jointStart({ workIds: works });
+  engine.jointFail(v.id, v.token, 'Совместная проверка отменена', { interrupted: true });
+  return v;
+}
+
+function gateFailed(engine: Engine, options: { interrupted?: boolean } = {}) {
+  const v = engine.jointStart({ workIds: works });
+  engine.jointManifest(v.id, v.token, { app: { sha: sha('a'), tree: sha('b') } });
+  engine.jointEvidence(v.id, v.token, {
+    gate: 'combo',
+    command: ['node', 'combo.js'],
+    passed: false,
+    exitCode: 1,
+    log: 'combo.log',
+    digest: sha256('fail'),
+    summary: '1 tests, 1 failures, 0 skipped',
+    artifacts: [],
+    durationMs: 1,
+  });
+  engine.jointFail(v.id, v.token, 'Gate combo: exit=null; timeout=false', options);
+  return v;
+}
+
+const verification = (engine: Engine, id: string) =>
+  engine.read((v) => v.verification(id)!) as { status: string; interrupted?: true };
+
+test('Interrupted verifications without gate evidence do not spend the joint budget; a gate result or a real failure does', () => {
+  const { engine, store } = setup();
+  const first = interrupt(engine);
+  assert.equal(verification(engine, first.id).interrupted, true);
+  fail(engine);
+  interrupt(engine);
+  // Отказ с результатом gate тратит предел, даже если владелец назвал его прерыванием.
+  const late = gateFailed(engine, { interrupted: true });
+  assert.equal(
+    verification(engine, late.id).interrupted,
+    undefined,
+    'evidence есть — не прерывание',
+  );
+  assert.equal(
+    engine.read((v) => jointBudgetAttempts(v, works, []).length),
+    2,
+  );
+  // Запись хоста с прерыванием и evidence всё равно тратит предел.
+  const hostWritten = { ...verification(engine, late.id), interrupted: true } as never;
+  store.transact('workspace.failed', (tx) => tx.putVerification(hostWritten));
+  assert.equal(
+    engine.read((v) => jointBudgetAttempts(v, works, []).length),
+    2,
+  );
+  const third = fail(engine);
+  assert.equal(verification(engine, third.id).interrupted, undefined);
+  assert.throws(
+    () => engine.jointStart({ workIds: works }),
+    (e: unknown) =>
+      exhausted(e) &&
+      /3 из 3/.test((e as Error).message) &&
+      /прерванные остановкой/.test((e as Error).message),
+  );
+  store.close();
+});
+
+test('An expired verification is closed as interrupted only without gate evidence', () => {
+  const { engine, store, clock, policy } = setup();
+  const withEvidence = engine.jointStart({ workIds: works });
+  engine.jointManifest(withEvidence.id, withEvidence.token, {
+    app: { sha: sha('a'), tree: sha('b') },
+  });
+  engine.jointEvidence(withEvidence.id, withEvidence.token, {
+    gate: 'combo',
+    command: ['node', 'combo.js'],
+    passed: false,
+    exitCode: 1,
+    log: 'combo.log',
+    digest: sha256('fail'),
+    summary: 'fail',
+    artifacts: [],
+  });
+  clock.now += policy.leaseMs + 1;
+  const bare = engine.jointStart({ workIds: works });
+  assert.equal(verification(engine, withEvidence.id).status, 'failed');
+  assert.equal(verification(engine, withEvidence.id).interrupted, undefined);
+  clock.now += policy.leaseMs + 1;
+  engine.jointStart({ workIds: works });
+  assert.equal(verification(engine, bare.id).status, 'failed');
+  assert.equal(verification(engine, bare.id).interrupted, true, 'истёк до gates — прерывание');
+  const ids = engine.read((v) => jointBudgetAttempts(v, works, []).map((x) => x.id));
+  assert.ok(ids.includes(withEvidence.id) && !ids.includes(bare.id));
+  store.close();
+});
+
+test('Repeated interruptions have their own limit; an explicit reset with a reason reopens the budget and survives restart', () => {
+  const { engine, store, clock, dir, policy } = setup();
+  interrupt(engine);
+  interrupt(engine);
+  assert.throws(
+    () => engine.jointBudgetReset(works, { reason: 'stuck', actor: 'operator' }),
+    (e: unknown) => e instanceof HarnessError && e.code === 'NOT_READY',
+    'сброс до исчерпания не нужен',
+  );
+  interrupt(engine);
+  assert.throws(
+    () => engine.jointStart({ workIds: works }),
+    (e: unknown) => exhausted(e) && /прерваны до результата gates 3/.test((e as Error).message),
+  );
+  assert.throws(() => engine.jointBudgetReset(works, { reason: '  ' }), invalid);
+  const reset = engine.jointBudgetReset([...works].reverse(), {
+    reason: 'host restarted; lease loss fixed',
+    actor: 'operator',
+  });
+  assert.equal(reset.settledVerificationIds.length, 3);
+  assert.deepEqual(reset.workIds, works);
+  const event = store.events(0, 500).find((e) => e.type === 'joint.budget-reset') as
+    { payload: Record<string, unknown> } | undefined;
+  assert.deepEqual(event?.payload, {
+    resetId: reset.id,
+    workIds: works,
+    by: 'operator',
+    settled: 3,
+    reasonLength: reset.reason.length,
+  });
+  const live = engine.jointStart({ workIds: works });
+  assert.throws(
+    () => engine.jointBudgetReset(works, { reason: 'again' }),
+    (e: unknown) => e instanceof HarnessError && e.code === 'NOT_READY',
+    'живая проверка набора',
+  );
+  engine.jointFail(live.id, live.token, 'assertion failed');
+  fail(engine);
+  fail(engine);
+  assert.throws(() => engine.jointStart({ workIds: works }), exhausted, 'новый предел — снова 3');
+  store.close();
+  // Запись сброса — в состоянии: после перезапуска граница та же.
+  const reopened = new SqliteExecutionStore(join(dir, 'state.sqlite'), 'test');
+  const restarted = new Engine({
+    host: standaloneHost(reopened, policy),
+    policy,
+    now: () => clock.now,
+  });
+  assert.equal(
+    restarted.read((v) => jointBudgetWindow(v, works, []).length),
+    3,
+    'прерывания до сброса вне окна; в нём — три отказа после сброса',
+  );
+  reopened.close();
 });

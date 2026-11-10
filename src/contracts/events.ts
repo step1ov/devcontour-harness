@@ -11,6 +11,7 @@ import { sourceRefSchema } from './work.ts';
 import {
   activitySchema,
   failureKindSchema,
+  jointResetActors,
   livenessStateSchema,
   stallActionSchema,
   workStatusSchema,
@@ -284,6 +285,19 @@ export const eventPayloads = {
     status: z.enum(['passed', 'failed']),
     manifestDigest: digestSchema.optional(),
     error: text.optional(),
+    /** Прервана до результата gates (остановка, потеря владения): предел не тратит. */
+    interrupted: z.literal(true).optional(),
+  }),
+  /**
+   * Явный сброс бюджета совместных проверок набора: `settled` завершённых
+   * проверок больше не тратят его предел. Текст причины — в записи сброса.
+   */
+  'joint.budget-reset': z.strictObject({
+    resetId: z.string().min(1).max(200),
+    workIds: z.array(idSchema).max(500),
+    by: z.enum(jointResetActors),
+    settled: z.number().int().min(0),
+    reasonLength: z.number().int().min(0),
   }),
   /** Политика стала применённой: запуском процесса или операцией reconfigure. */
   'policy.applied': z.strictObject({
@@ -512,6 +526,8 @@ export const transactionKinds = [
   'workspace.verified',
   'workspace.failed',
   'workspace.liveness',
+  /** Явный сброс бюджета совместных проверок набора (`joint.budget-reset`). */
+  'workspace.budget-reset',
   /**
    * Сдвиг ref базы внутри транзакции проверки владения: проверка, синхронный
    * `git update-ref` и событие `base.moved`; записей нет.

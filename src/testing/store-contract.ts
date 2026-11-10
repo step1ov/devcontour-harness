@@ -334,6 +334,33 @@ export function executionStoreContract(
     b.close();
   });
 
+  test(`${name}: сброс бюджета совместных проверок хранится у @workspace и виден другому экземпляру`, () => {
+    const dir = tempDir();
+    const a = open(dir);
+    assert.deepEqual(
+      a.read((v) => v.locals('joint-budget-resets', WORKSPACE_OWNER)),
+      [],
+    );
+    const reset = {
+      id: 'reset-1',
+      at: '2026-01-01T00:00:00.000Z',
+      workIds: ['a', 'b'],
+      reason: 'lease lost on host stop',
+      actor: 'operator' as const,
+      settledVerificationIds: ['jv-1', 'jv-2'],
+    };
+    a.transact('workspace.budget-reset', (tx) =>
+      tx.putLocal('joint-budget-resets', WORKSPACE_OWNER, reset.id, reset),
+    );
+    a.close();
+    const b = open(dir);
+    assert.deepEqual(
+      b.read((v) => v.locals('joint-budget-resets', WORKSPACE_OWNER)),
+      [{ owner: WORKSPACE_OWNER, key: reset.id, value: reset }],
+    );
+    b.close();
+  });
+
   test(`${name}: запрос исполнителя хранится у владельца, версия видна другому экземпляру`, () => {
     const dir = tempDir();
     const a = open(dir);
