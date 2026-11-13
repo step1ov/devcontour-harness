@@ -5,7 +5,7 @@ Headless-движок исполнения инженерных поручени
 интеграция с принятой веткой через compare-and-swap и машинный результат с SHA
 и доказательствами.
 
-> Статус: `0.1.0-alpha.44` — предварительный выпуск (alpha). Договоры
+> Статус: `0.1.0-alpha.45` — предварительный выпуск (alpha). Договоры
 > `v1alpha1` могут измениться между alpha-версиями; закрепляйте точную версию.
 > Файл → ревью плана → кандидат → интеграция → принятие → результат JSON, с
 > ограниченным восстановлением, повторным использованием кандидата, бюджетами,
@@ -28,7 +28,7 @@ Headless-движок исполнения инженерных поручени
 Из npm — точная версия (воспроизводимо) или последняя alpha по тегу:
 
 ```sh
-npm install --save-exact devcontour-harness@0.1.0-alpha.44   # точная версия
+npm install --save-exact devcontour-harness@0.1.0-alpha.45   # точная версия
 # или: npm install --save-exact devcontour-harness@alpha     # текущая alpha
 npx harness --version
 ```
@@ -148,6 +148,15 @@ PASS» нет. Адаптеры хоста реализуют порты `Execut
 `/contracts` и `/testing`; JSON-схемы входов и выходов —
 `devcontour-harness/schemas/<имя>.schema.json`. Декларации используют типы
 Node.js: TypeScript-потребителю нужен `@types/node` (или `skipLibCheck`).
+
+## Выпуск 0.1.0-alpha.45
+
+Gate задачи может объявить `when: { paths: [...] }`: runner исполняет его,
+только если настоящий diff Git от последнего зелёного SHA gate задевает эти
+пути или неявные входы, а иначе пишет evidence `not-applicable` — не PASS и
+не провал. Хост проверяет пропущенные gates набора на итоговом SHA через
+`coverageChanges` и `uncoveredGates`; git хоста не читает объекты замены.
+Подробно — [заметки выпуска](docs/release-notes/0.1.0-alpha.45.md).
 
 ## Выпуск 0.1.0-alpha.44
 
