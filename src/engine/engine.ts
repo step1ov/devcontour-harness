@@ -96,6 +96,11 @@ import {
 } from './property-recovery.ts';
 import { REQUIREMENT_GATE } from '../verification/requirements.ts';
 import {
+  notApplicableProblem,
+  proofGates,
+  type ChangedPaths,
+} from '../verification/applicability.ts';
+import {
   blockingRequest,
   inputManifestOf,
   requestById,
@@ -1581,9 +1586,11 @@ export class Engine {
    * поручений: покрытие — по фактическому собственному evidence на принятом
    * SHA попытки под текущим основанием политики, для любой области. Evidence потребителя — проверка другого
    * компонента и не в счёт; запись ревью не закрывает одноимённый test gate.
-   * Решение о приёмке набора поручений — за хостом.
+   * Gate с `when`, признанный где-то неприменимым, решается по объединённому
+   * diff набора `changes` (`uncoveredGates` проверки). Решение о приёмке набора
+   * поручений — за хостом.
    */
-  uncoveredGates(workIds: string[]) {
+  uncoveredGates(workIds: string[], changes?: Readonly<Record<string, ChangedPaths>>) {
     return this.read((v) => {
       const works = workIds.map((id) => v.work(id)).filter((w): w is WorkState => !!w);
       const repositories = [...new Set(works.map((w) => w.order.repositoryId))].map((id) =>
@@ -1602,6 +1609,7 @@ export class Engine {
             .filter((a) => a.policyDigest === this.host.basis.policyDigest(w, v))
             .flatMap((a) => a.evidence),
         })),
+        changes,
       );
     });
   }
@@ -1784,6 +1792,33 @@ export class Engine {
           'INVALID_INPUT',
           `Evidence вида ${evidence.kind} не может относиться к gate ${evidence.gate}`,
         );
+      // Неприменимость (`when.paths`) — только у gate с `when` области
+      // попытки, под его текущим определением, без исполнения и не PASS;
+      // сведения о ней — только у такой записи.
+      if ((evidence.kind === 'not-applicable') !== (evidence.notApplicable !== undefined))
+        throw new HarnessError(
+          'INVALID_INPUT',
+          'Сведения о неприменимости — только у записи вида not-applicable',
+        );
+      if (evidence.kind === 'not-applicable') {
+        const problem =
+          evidence.passed ||
+          evidence.consumer !== undefined ||
+          evidence.recheck !== undefined ||
+          evidence.tests !== undefined ||
+          evidence.property !== undefined ||
+          evidence.artifactFiles !== undefined ||
+          !(a.requiredGates ?? []).includes(evidence.gate)
+            ? 'запись неприменимости не может быть PASS, исполнением или gate вне области'
+            : notApplicableProblem({
+                gates: this.repository(a.repositoryId).gates,
+                gate: evidence.gate,
+                record: evidence,
+                proof: proofGates(w.order, contractDocuments(w.order, tx)),
+                ran: [],
+              });
+        if (problem) throw new HarnessError('INVALID_INPUT', problem);
+      }
       // Повтор ссылается на провал того же gate этой попытки на том же SHA, и
       // попытка повторяет не больше одного провала на фазу.
       if (evidence.recheck) {
@@ -1842,6 +1877,7 @@ export class Engine {
             passed: record.passed,
             evidenceId: record.id,
             ...(record.consumer ? { consumer: record.consumer } : {}),
+            ...(record.kind === 'not-applicable' ? { notApplicable: true as const } : {}),
             ...(record.recheck ? { recheck: record.recheck } : {}),
           },
         });
@@ -1876,25 +1912,63 @@ export class Engine {
           'APPROVAL_STALE',
           'Версия проверок поручения изменилась; нужна новая попытка',
         );
-      const last = (
-        kind: EvidenceRecord['kind'],
+      const decisive = (
+        kinds: EvidenceRecord['kind'][],
         phase: EvidenceRecord['phase'],
         at: string,
         gate: string,
       ) =>
         a.evidence.findLast(
           (e) =>
-            e.kind === kind &&
+            kinds.includes(e.kind) &&
             e.phase === phase &&
             e.sha === at &&
             e.gate === gate &&
             e.consumer === undefined &&
             (!a.checks || e.checks === a.checks.effective),
-        )?.passed === true;
+        );
+      const last = (
+        kind: EvidenceRecord['kind'],
+        phase: EvidenceRecord['phase'],
+        at: string,
+        gate: string,
+      ) => decisive([kind], phase, at, gate)?.passed === true;
+      // Обязательный gate закрыт PASS или — только обычный gate с `when` —
+      // записью неприменимости под текущим определением (`notApplicableProblem`).
+      const repoGates = this.repository(a.repositoryId).gates;
+      const named = proofGates(w.order, contractDocuments(w.order, tx));
+      const shaOf = (phase: EvidenceRecord['phase']) =>
+        phase === 'candidate' ? a.candidateSha! : sha;
+      const ran = Object.fromEntries(
+        (['candidate', 'integration'] as const).map((phase) => [
+          phase,
+          (a.requiredGates ?? []).filter(
+            (gate) =>
+              decisive(['test', 'not-applicable'], phase, shaOf(phase), gate)?.kind === 'test',
+          ),
+        ]),
+      ) as Record<EvidenceRecord['phase'], string[]>;
       for (const gate of a.requiredGates ?? [])
-        for (const phase of ['candidate', 'integration'] as const)
-          if (!last('test', phase, phase === 'candidate' ? a.candidateSha : sha, gate))
-            throw new HarnessError('GATE_FAILED', `Нет PASS: ${phase}/${gate}`);
+        for (const phase of ['candidate', 'integration'] as const) {
+          const record = decisive(['test', 'not-applicable'], phase, shaOf(phase), gate);
+          if (record?.kind === 'test' && record.passed) continue;
+          const problem =
+            record?.kind === 'not-applicable'
+              ? notApplicableProblem({
+                  gates: repoGates,
+                  gate,
+                  record,
+                  proof: named,
+                  ran: ran[phase],
+                })
+              : 'нет записи';
+          if (problem)
+            throw new HarnessError(
+              'GATE_FAILED',
+              `Нет PASS: ${phase}/${gate}` +
+                (record?.kind === 'not-applicable' ? ': ' + problem : ''),
+            );
+        }
       for (const phase of ['candidate', 'integration'] as const)
         if (
           !last('review', phase, phase === 'candidate' ? a.candidateSha : sha, 'independent-review')

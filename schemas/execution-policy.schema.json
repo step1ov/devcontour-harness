@@ -379,6 +379,25 @@
                         "maxLength": 500,
                         "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
                       }
+                    },
+                    "when": {
+                      "type": "object",
+                      "properties": {
+                        "paths": {
+                          "minItems": 1,
+                          "maxItems": 64,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          }
+                        }
+                      },
+                      "required": [
+                        "paths"
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [
@@ -475,6 +494,25 @@
                         "maxLength": 500,
                         "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
                       }
+                    },
+                    "when": {
+                      "type": "object",
+                      "properties": {
+                        "paths": {
+                          "minItems": 1,
+                          "maxItems": 64,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          }
+                        }
+                      },
+                      "required": [
+                        "paths"
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [

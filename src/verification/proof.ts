@@ -1,4 +1,11 @@
-import type { EvidenceRecord, WorkOrder } from '../contracts/index.ts';
+import {
+  gateDigest,
+  type EvidenceRecord,
+  type GateApplicability,
+  type GatePolicy,
+  type WorkOrder,
+} from '../contracts/index.ts';
+import { pathApplicability, type ChangedPaths } from './applicability.ts';
 
 type Requirement = WorkOrder['requirements'][number];
 
@@ -11,6 +18,7 @@ export type ProofRecord = Pick<EvidenceRecord, 'kind' | 'gate' | 'phase' | 'sha'
   checks?: string | undefined;
   tests?: EvidenceRecord['tests'];
   testsTruncated?: boolean | undefined;
+  notApplicable?: GateApplicability | undefined;
 };
 
 /**
@@ -115,36 +123,60 @@ export function unprovenReason(
  * одноимённый test gate не закрывает. Какие записи относятся к поручению
  * (попытки под текущим основанием, переносимый результат другого clone), —
  * решает вызывающий; правило покрытия — одно.
+ *
+ * Gate с `when.paths`, который хотя бы одно поручение признало неприменимым
+ * (`not-applicable` на integration), решается по объединённому diff набора
+ * (`changes[repositoryId]`, например `changedPaths` от базы каждого поручения
+ * до итогового SHA): задетый diff (или без `changes`, или под другим
+ * определением gate) он непокрыт, даже если другое поручение его прошло, —
+ * хост исполняет его один раз на итоговом SHA; не задетый — неприменим к
+ * набору и не непокрыт.
  */
 export function uncoveredGates(
-  repositories: readonly { id: string; gates: readonly { id: string }[] }[],
+  repositories: readonly {
+    id: string;
+    gates: readonly ({ id: string } | GatePolicy)[];
+    protectedPaths?: readonly string[];
+  }[],
   works: readonly {
     repositoryId: string;
     resultSha: string | undefined;
     evidence: readonly ProofRecord[];
   }[],
+  changes?: Readonly<Record<string, ChangedPaths>>,
 ) {
   const result: { repositoryId: string; gates: string[] }[] = [];
   for (const repositoryId of [...new Set(works.map((w) => w.repositoryId))]) {
-    const covered = new Set(
-      works
-        .filter((w) => w.repositoryId === repositoryId)
-        .flatMap((w) =>
-          w.evidence
-            .filter(
-              (e) =>
-                e.kind === 'test' &&
-                e.phase === 'integration' &&
-                e.passed &&
-                !e.consumer &&
-                w.resultSha !== undefined &&
-                e.sha === w.resultSha,
-            )
-            .map((e) => e.gate),
+    const own = works
+      .filter((w) => w.repositoryId === repositoryId)
+      .flatMap((w) =>
+        w.evidence.filter(
+          (e) =>
+            e.phase === 'integration' &&
+            !e.consumer &&
+            w.resultSha !== undefined &&
+            e.sha === w.resultSha,
         ),
-    );
+      );
+    const covered = new Set(own.filter((e) => e.kind === 'test' && e.passed).map((e) => e.gate));
+    const skips = own.filter((e) => e.kind === 'not-applicable');
     const repository = repositories.find((r) => r.id === repositoryId);
-    const missing = (repository?.gates ?? []).map((g) => g.id).filter((id) => !covered.has(id));
+    const missing: string[] = [];
+    for (const gate of repository?.gates ?? []) {
+      const skipped = skips.filter((e) => e.gate === gate.id);
+      if (!skipped.length || !('when' in gate) || !gate.when) {
+        if (!covered.has(gate.id)) missing.push(gate.id);
+        continue;
+      }
+      const changed = changes?.[repositoryId];
+      const same = skipped.every((e) => e.notApplicable?.gateDigest === gateDigest(gate));
+      const applies =
+        !changed ||
+        !same ||
+        pathApplicability({ protectedPaths: repository?.protectedPaths ?? [] }, gate, changed)
+          .applies;
+      if (applies) missing.push(gate.id);
+    }
     if (missing.length) result.push({ repositoryId, gates: missing });
   }
   return result;

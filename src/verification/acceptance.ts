@@ -11,6 +11,7 @@ import {
   type EvidenceRecord,
   type ExecutionPolicy,
   type ExecutionView,
+  type GateApplicability,
   type RunResult,
   type WorkOrder,
 } from '../contracts/index.ts';
@@ -24,6 +25,7 @@ import {
 import { manifestDigest } from './property.ts';
 import { unprovenReason, type ProofRecord } from './proof.ts';
 import { REQUIREMENT_GATE } from './requirements.ts';
+import { notApplicableProblem, proofGates } from './applicability.ts';
 
 /**
  * Доказательство договора проверки на границе приёмки.
@@ -153,7 +155,10 @@ export function suiteCorpus(
 }
 
 /** Запись evidence результата в форме доказательства (у получателя). */
-type ReceivedEvidence = ProofEvidence & Pick<ProofRecord, 'tests' | 'testsTruncated'>;
+type ReceivedEvidence = ProofEvidence &
+  Pick<ProofRecord, 'tests' | 'testsTruncated'> & {
+    notApplicable?: GateApplicability | undefined;
+  };
 
 /** Политика получателя: репозитории (gates, группы, зависимости, target), роли и правила ревью. */
 export type ReceiverPolicy = Pick<ExecutionPolicy, 'repositories' | 'roles' | 'review'>;
@@ -374,6 +379,24 @@ export const receiptTrust = {
   'evidence[].summary': ['informative', 'описание записи'],
   'evidence[].consumer': ['expected', 'объявленный потребитель'],
   'evidence[].checks': ['expected', 'версия проверок, вычисленная получателем, у каждой записи'],
+  'evidence[].notApplicable': [
+    'consistency',
+    'только у записи not-applicable: обычный gate с when, не доказательство и не предпосылка исполненного',
+  ],
+  'evidence[].notApplicable.gateDigest': ['expected', 'digest определения gate у получателя'],
+  'evidence[].notApplicable.patterns': ['informative', 'пути when; их задаёт определение gate'],
+  'evidence[].notApplicable.patterns[]': ['informative', 'пути when; их задаёт определение gate'],
+  'evidence[].notApplicable.ranges': ['informative', 'diff фазы — наблюдение Git исполнителя'],
+  'evidence[].notApplicable.ranges[]': ['informative', 'diff фазы — наблюдение Git исполнителя'],
+  'evidence[].notApplicable.ranges[].from': [
+    'informative',
+    'diff фазы — наблюдение Git исполнителя',
+  ],
+  'evidence[].notApplicable.ranges[].to': ['informative', 'diff фазы — наблюдение Git исполнителя'],
+  'evidence[].notApplicable.count': ['informative', 'diff фазы — наблюдение Git исполнителя'],
+  'evidence[].notApplicable.files': ['informative', 'diff фазы — наблюдение Git исполнителя'],
+  'evidence[].notApplicable.files[]': ['informative', 'diff фазы — наблюдение Git исполнителя'],
+  'evidence[].notApplicable.pathsDigest': ['informative', 'diff фазы — наблюдение Git исполнителя'],
   'evidence[].tests': ['expected', 'доказательство названного testcase решающей записью'],
   'evidence[].tests[]': ['expected', 'элемент названного testcase; прочие элементы — сведения'],
   'evidence[].tests[].id': ['expected', 'ID названного testcase'],
@@ -582,12 +605,28 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
       integrity.push(`запись ${e.id}: сведения о свойствах недопустимы у записи вида ${e.kind}`);
     if ((e.reviewer !== undefined) !== (e.kind === 'review'))
       integrity.push(`запись ${e.id}: сведения о reviewer не согласованы с видом записи`);
+    if ((e.notApplicable !== undefined) !== (e.kind === 'not-applicable'))
+      integrity.push(`запись ${e.id}: сведения о неприменимости не согласованы с видом записи`);
+    if (e.kind === 'not-applicable' && (e.passed || e.consumer !== undefined))
+      integrity.push(`запись ${e.id}: неприменимый gate не бывает PASS или проверкой потребителя`);
   }
   if (integrity.length) return integrity;
   const evidence: ReceivedEvidence[] = result.evidence
-    .filter((e) => e.kind === 'test' || e.kind === 'review' || e.kind === 'consumer')
+    .filter(
+      (e) =>
+        e.kind === 'test' ||
+        e.kind === 'review' ||
+        e.kind === 'consumer' ||
+        e.kind === 'not-applicable',
+    )
     .map((e) => ({
-      kind: e.kind === 'review' ? ('review' as const) : ('test' as const),
+      kind:
+        e.kind === 'review'
+          ? ('review' as const)
+          : e.kind === 'not-applicable'
+            ? ('not-applicable' as const)
+            : ('test' as const),
+      ...(e.notApplicable ? { notApplicable: e.notApplicable } : {}),
       phase: e.phase,
       gate: e.gate,
       sha: e.sha,
@@ -599,14 +638,14 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
       testsTruncated: e.testsTruncated,
     }));
   const last = (
-    kind: 'test' | 'review',
+    kind: 'test' | 'review' | readonly ('test' | 'not-applicable')[],
     phase: 'candidate' | 'integration',
     gate: string,
     consumer?: string,
   ) =>
     evidence.findLast(
       (e) =>
-        e.kind === kind &&
+        (typeof kind === 'string' ? e.kind === kind : kind.includes(e.kind as 'test')) &&
         e.phase === phase &&
         e.gate === gate &&
         e.sha === sha(phase) &&
@@ -631,12 +670,37 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
       `область результата [${declared.join(', ')}] — ожидалась ровно [${own.join(', ')}]`,
     );
   const required = [...new Set([...own, ...(gates.byGate?.keys() ?? [])])];
+  // Обычный gate с `when` закрывается и записью неприменимости
+  // (`notApplicableProblem` по политике получателя); доказательства
+  // требований и договоров — только PASS.
+  const named = proofGates(order, context.contracts);
   const decisiveAll = (['candidate', 'integration'] as const).flatMap((phase) => [
-    ...required.map((gate) => ({ phase, gate, check: last('test', phase, gate) })),
+    ...required.map((gate) => ({
+      phase,
+      gate,
+      check: last(named.has(gate) ? 'test' : (['test', 'not-applicable'] as const), phase, gate),
+    })),
     { phase, gate: 'independent-review', check: last('review', phase, 'independent-review') },
   ]);
-  for (const { phase, gate, check } of decisiveAll)
-    if (!check?.passed) problems.push(`Нет PASS: ${phase}/${gate}`);
+  for (const { phase, gate, check } of decisiveAll) {
+    if (check?.passed) continue;
+    const problem =
+      check?.kind === 'not-applicable'
+        ? notApplicableProblem({
+            gates: repo.gates,
+            gate,
+            record: check,
+            proof: named,
+            ran: decisiveAll
+              .filter((d) => d.phase === phase && d.check?.kind === 'test')
+              .map((d) => d.gate),
+          })
+        : 'нет записи';
+    if (problem)
+      problems.push(
+        `Нет PASS: ${phase}/${gate}` + (check?.kind === 'not-applicable' ? ': ' + problem : ''),
+      );
+  }
   // Ревью: writer — роли поручения в политике получателя; reviewer решающих
   // записей обеих фаз — тот, кого политика назначает этому writer, и правило
   // вендора соблюдено (тот же вендор — только явным разрешением). Для

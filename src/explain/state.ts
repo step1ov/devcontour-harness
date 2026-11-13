@@ -377,7 +377,7 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
         ? [
             { kind: 'attempt', id: last.id },
             ...last.evidence
-              .filter((e) => !e.passed)
+              .filter((e) => !e.passed && e.kind !== 'not-applicable')
               .map((e): EvidenceLink => ({ kind: 'evidence', id: e.id, sha: e.sha })),
           ]
         : [];

@@ -173,6 +173,63 @@ lockfile, установка докачивает разницу; `miss` — о�
 `artifacts[]`; их копии с теми же правилами пишутся в `artifactFiles` записи
 совместной проверки (`<каталог проверки>/<gate>.artifacts/`).
 
+`repositories[].gates[].when` — необязательное условие применимости gate
+задачи: `{ paths: [...] }`, 1–64 шаблона путей от корня репозитория
+(POSIX-glob: `**` целым сегментом — любое число сегментов, `*` и `?` — внутри
+сегмента, `{a,b}` без вложенности; без `..`, `.`, пустых сегментов, ведущего
+`/`, `\`, `[]` и отрицания). Шаблон задевает и всё внутри совпавшего каталога
+(`web` и `web/` задевают `web/a.ts`). Без поля поведение и digest политики
+прежние. `policyIssues` отклоняет репозиторий, у которого нет ни одного test
+gate без `when`, и `when` у генеративного gate (`property`). У
+`workspaceGates` поля нет (строгая схема его отклоняет).
+
+Решение принимает runner в каждой фазе попытки по настоящему diff Git, а не по
+отчёту исполнителя: кандидат — `git diff --no-renames --name-only
+base..candidate`; интеграция — объединение `base..candidate` и
+`base..integration` (что принесло слияние с target). Переименование даёт оба
+пути; удаление, смена режима и подмодуль — свои пути. Условный gate
+**исполняется**, если: он назван требованием поручения, договором проверки
+(свойство, эталон, обязательство) или это `requirement-source` (`proofGates`);
+под текущим определением (`gateDigest(gate)`) он ещё не проходил integration
+принятой попытки этого репозитория; diff не прочитан, больше 5000 путей или
+пуст (попытка без изменений); diff задевает шаблон `when.paths`; diff задевает
+неявный вход — `protectedPaths`, каталог `.harness/`, манифест, lockfile или
+файл версии инструментов в любом каталоге (`package.json`, lockfiles npm/pnpm/
+yarn/bun, `.npmrc`, `.nvmrc`, `Cargo.*`, `go.mod`/`go.sum`/`go.work`,
+`pyproject.toml`, `poetry.lock`, `uv.lock`, `Pipfile*`, `requirements*.txt`,
+`Gemfile*`, `composer.*`) или путь, названный в argv команды gate (с учётом
+`cwd`; скрипт, вызванный косвенно, например из `package.json`, в `when.paths`
+указывают сами); он — предпосылка (`gatePrerequisites`: `dependsOn` или, в
+режиме порядка массива, более ранний check gate) исполняемого gate области.
+Иначе gate не исполняется, а runner пишет запись evidence вида
+`not-applicable` (`passed: false`, `exitCode: -1`, без команды и лога) с полем
+`notApplicable`: `gateDigest`, `patterns`, `ranges[]` `{from, to}`, `count`,
+первые 50 путей `files`, `pathsDigest` — SHA-256 отсортированного полного
+списка, разделённого NUL. Событие `attempt.gate` такой записи несёт
+`notApplicable: true`. Исполненный условный gate пишет в evidence `gateDigest`.
+
+Неприменимость — не PASS. Приёмка (`finish`) и получатель receipt
+(`resultProblems`) засчитывают её обязательному gate только когда: у gate в
+их политике есть `when` с тем же `gateDigest`; gate не из `proofGates`
+поручения; ни один исполненный gate той же фазы не опирается на него как на
+предпосылку. Доказательство требования (`requirementProof`, testcase) и
+договора проверки (`propertyProofProblem`) читает только записи `test`.
+Receipt перечисляет неприменимые gates ссылками evidence вида
+`not-applicable` с `notApplicable`. Функции: `changedPaths`, `gateDecisions`,
+`pathApplicability`, `matchingPaths`, `gatePathRegExp`, `proofGates`,
+`notApplicableProblem`, `gateDigest`.
+
+Покрытие набора поручений (`uncoveredGates(repositories, works, changes?)`,
+`Engine.uncoveredGates(workIds, changes?)`): gate с `when`, признанный
+неприменимым на integration хотя бы одним поручением, решается по
+объединённому diff набора `changes[repositoryId]` (хост вычисляет
+`changedPaths(repoPath, [{from: база каждого принятого поручения, to:
+итоговый SHA}])`). Задетый — или без `changes`, или под другим определением
+gate — он непокрыт, даже если другое поручение его прошло, и хост исполняет его
+один раз на итоговом SHA (`runGatesAt`); не задетый — не пробел. Для политики
+без `when` правило прежнее. Совместная проверка (`workspaceGates`,
+`JointRunner`) не меняется.
+
 `policyDigest(policy)` — digest загруженной политики целиком: им сверяются
 применённая политика (`control.appliedPolicy`) и запрос операции
 `control.reconfigure`. `executionDigest(policy)` — digest исполнительной
@@ -356,7 +413,7 @@ writer и reviewer кода получают список файлов набо�
 | `GraphState`      | Граф, его digest, digest политики, техническое согласование (с `approval.context` — снимок контекста, который видел reviewer плана; только он исполняется и принимается)                                                                                                                      |
 | `WorkState`       | Закреплённое поручение, статус, попытки, результат, класс отказа, согласованные digests, удержание, блок бюджета, версия корпуса, эпизод восстановления по свойству                                                                                                                           |
 | `AttemptState`    | Владение (`token`, `owner`, `leaseUntil`), runtime и reviewer, фаза, SHA, evidence, раскрытые gates, потребители и что у них проверено, версия проверок, контекст, зависимости и свежесть, основание и источник reuse, черновик, выбор из очереди, замеры, `engineVersion`, `consumerVersion` |
-| `EvidenceRecord`  | Фаза, SHA, gate, исход, команда, лог, digest, testcases, отчёт свойств, осмотр ревью, версия проверок                                                                                                                                                                                         |
+| `EvidenceRecord`  | Фаза, SHA, gate, исход (`test`, `review`, `not-applicable`), команда, лог, digest, testcases, отчёт свойств, осмотр ревью, версия проверок                                                                                                                                                    |
 | `ControlState`    | Пауза и её причина, классы отказов, ожидания, применённая политика, reconfigure                                                                                                                                                                                                               |
 | `ControllerLease` | Единственный действующий controller; `engineVersion` (с 0.1.0-alpha.2) — версия движка процесса: роль другой версии или без версии не перенимается, пока она жива                                                                                                                             |
 | `CallRecord`      | Вызов модели: стадия, runtime, сообщённая модель, версия, исход, процесс, монотонное время, закреплённая атрибуция (`workId`, `groupId`, `workIds`), вид предмета (`subjectKind`: поручение, группа, прочее), счётчики, стоимость и её источник                                               |
@@ -556,6 +613,18 @@ Schema строит подделку каждого поля (другое зн�
 | `evidence[].summary`                                    | сведение            | описание записи                                                                                       |
 | `evidence[].consumer`                                   | ожидание получателя | объявленный потребитель                                                                               |
 | `evidence[].checks`                                     | ожидание получателя | версия проверок, вычисленная получателем, у каждой записи                                             |
+| `evidence[].notApplicable`                              | согласованность     | только у записи not-applicable: обычный gate с when, не доказательство и не предпосылка исполненного  |
+| `evidence[].notApplicable.gateDigest`                   | ожидание получателя | digest определения gate у получателя                                                                  |
+| `evidence[].notApplicable.patterns`                     | сведение            | пути when; их задаёт определение gate                                                                 |
+| `evidence[].notApplicable.patterns[]`                   | сведение            | пути when; их задаёт определение gate                                                                 |
+| `evidence[].notApplicable.ranges`                       | сведение            | diff фазы — наблюдение Git исполнителя                                                                |
+| `evidence[].notApplicable.ranges[]`                     | сведение            | diff фазы — наблюдение Git исполнителя                                                                |
+| `evidence[].notApplicable.ranges[].from`                | сведение            | diff фазы — наблюдение Git исполнителя                                                                |
+| `evidence[].notApplicable.ranges[].to`                  | сведение            | diff фазы — наблюдение Git исполнителя                                                                |
+| `evidence[].notApplicable.count`                        | сведение            | diff фазы — наблюдение Git исполнителя                                                                |
+| `evidence[].notApplicable.files`                        | сведение            | diff фазы — наблюдение Git исполнителя                                                                |
+| `evidence[].notApplicable.files[]`                      | сведение            | diff фазы — наблюдение Git исполнителя                                                                |
+| `evidence[].notApplicable.pathsDigest`                  | сведение            | diff фазы — наблюдение Git исполнителя                                                                |
 | `evidence[].tests`                                      | ожидание получателя | доказательство названного testcase решающей записью                                                   |
 | `evidence[].tests[]`                                    | ожидание получателя | элемент названного testcase; прочие элементы — сведения                                               |
 | `evidence[].tests[].id`                                 | ожидание получателя | ID названного testcase                                                                                |

@@ -138,6 +138,8 @@ export const eventPayloads = {
     passed: z.boolean(),
     evidenceId: z.string().min(1).max(200),
     consumer: idSchema.optional(),
+    /** Gate с `when.paths` не исполнялся: diff фазы его не задел (не PASS и не провал). */
+    notApplicable: z.literal(true).optional(),
     /** Повтор провала интеграции: повторённая запись и исход. */
     recheck: z
       .strictObject({

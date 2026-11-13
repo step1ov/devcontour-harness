@@ -45,7 +45,9 @@ export function summaryText(input: {
       const tests = e.tests
         ? ` (${e.tests.filter((t) => t.status === 'passed').length}/${e.tests.length} тестов)`
         : '';
-      return `- ${e.gate} [${e.phase}]: ${e.passed ? 'passed' : 'failed'}${tests} @ ${shortSha(e.sha)}`;
+      const outcome =
+        e.kind === 'not-applicable' ? 'not applicable' : e.passed ? 'passed' : 'failed';
+      return `- ${e.gate} [${e.phase}]: ${outcome}${tests} @ ${shortSha(e.sha)}`;
     });
   const reviews = r.evidence.filter((e) => e.kind === 'review');
   const lines = [

@@ -158,6 +158,8 @@ const ADDITIVE_ENUM_VALUES = new Set([
   'answer-input',
   'apply-input',
   'carry-stale',
+  // Вид evidence неисполненного условного gate (`when.paths`).
+  'not-applicable',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
@@ -306,6 +308,22 @@ test('H3-01: прежние команды и схемы их данных не 
   // Порядок ключей cliDataSchemas H2 — без capabilities; аддитивные значения
   // перечней убираются, остальное — байты H2.
   const h2 = JSON.stringify(data, (k, v: unknown) => {
+    // Аддитивные поля условного gate (`when.paths`) — до прочих правил, потому
+    // что делят объект с их полями: условие gate задачи (рядом с `artifacts`),
+    // сведения о неприменимости и digest определения у evidence, флаг события
+    // `attempt.gate` (рядом с `recheck`), счёт неприменимых gates попытки.
+    if (
+      k === 'properties' &&
+      v &&
+      typeof v === 'object' &&
+      ('notApplicable' in v || ('when' in v && 'command' in v))
+    ) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.notApplicable;
+      delete rest.gateDigest;
+      if ('command' in rest) delete rest.when;
+      v = rest;
+    }
     if (Array.isArray(v))
       return (v as unknown[]).filter(
         (x) =>
@@ -413,6 +431,11 @@ test('H3-01: прежние команды и схемы их данных не 
   assert.ok(
     JSON.stringify(finished).includes('"interrupted"'),
     'joint.finished объявляет interrupted',
+  );
+  // Хеш H2 вырезает поля условного gate: объявление держит эта проверка.
+  assert.ok(
+    JSON.stringify(data).includes('"notApplicable"'),
+    'данные объявляют неприменимость gate',
   );
   // Хеш H2 выше вырезает detail status и флаг --detail: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.status).includes('"detail"'), 'status объявляет detail');

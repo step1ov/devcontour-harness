@@ -324,6 +324,11 @@ const gitEnv = () => ({
  * содержимого файла, которое разбирают, усечение незаметно и опасно.
  */
 export async function gitOutput(cwd: string, ...args: string[]) {
+  return (await gitRawOutput(cwd, ...args)).trim();
+}
+
+/** Вывод git целиком и без обрезки пробелов: для `-z`-списков путей. */
+export async function gitRawOutput(cwd: string, ...args: string[]) {
   let text = '';
   const result = await command(['git', ...hostGitArgs(cwd, args)], cwd, {
     env: gitEnv(),
@@ -332,7 +337,7 @@ export async function gitOutput(cwd: string, ...args: string[]) {
     },
   });
   if (result.code !== 0) throw new Error(`git ${args[0]}: ${result.stderr.trim()}`);
-  return text.trim();
+  return text;
 }
 
 /**

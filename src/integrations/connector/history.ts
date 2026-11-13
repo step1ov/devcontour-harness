@@ -611,7 +611,8 @@ export class HistoryRecorder {
     const gates = result.evidence
       .filter((e) => e.kind !== 'review')
       .map(
-        (e) => `${e.gate} [${e.phase}] ${e.passed ? 'passed' : 'failed'} @ ${e.sha.slice(0, 12)}`,
+        (e) =>
+          `${e.gate} [${e.phase}] ${e.kind === 'not-applicable' ? 'not applicable' : e.passed ? 'passed' : 'failed'} @ ${e.sha.slice(0, 12)}`,
       )
       .join('\n');
     const accepted = result.outcome === 'accepted';

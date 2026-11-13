@@ -409,7 +409,7 @@ export interface HistoryAttempt {
   evidence: {
     id: string;
     runId: string;
-    kind: 'test' | 'review';
+    kind: 'test' | 'review' | 'not-applicable';
     phase: 'candidate' | 'integration';
     sha: string;
     passed: boolean;

@@ -40,9 +40,11 @@ const ref = (e: EvidenceRecord, attempt: AttemptState) => ({
   kind:
     e.kind === 'review'
       ? ('review' as const)
-      : e.consumer
-        ? ('consumer' as const)
-        : ('test' as const),
+      : e.kind === 'not-applicable'
+        ? ('not-applicable' as const)
+        : e.consumer
+          ? ('consumer' as const)
+          : ('test' as const),
   phase: e.phase,
   gate: e.gate,
   sha: e.sha,
@@ -51,6 +53,8 @@ const ref = (e: EvidenceRecord, attempt: AttemptState) => ({
   summary: e.summary.slice(0, 4000),
   ...(e.consumer ? { consumer: e.consumer } : {}),
   ...(e.checks ? { checks: e.checks } : {}),
+  // Gate не исполнялся по `when.paths`: правило и diff — получателю.
+  ...(e.notApplicable ? { notApplicable: e.notApplicable } : {}),
   // Список тестов собственной проверки интеграции — для доказательства
   // названного testcase у получателя.
   ...(e.kind === 'test' && !e.consumer && e.phase === 'integration' && e.tests

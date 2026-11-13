@@ -386,7 +386,8 @@
                       "check",
                       "review",
                       "property",
-                      "consumer"
+                      "consumer",
+                      "not-applicable"
                     ]
                   },
                   "phase": {
@@ -508,6 +509,73 @@
                         "additionalProperties": false
                       }
                     },
+                    "additionalProperties": false
+                  },
+                  "notApplicable": {
+                    "type": "object",
+                    "properties": {
+                      "gateDigest": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "patterns": {
+                        "maxItems": 64,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        }
+                      },
+                      "ranges": {
+                        "maxItems": 4,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "from": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{40}([a-f0-9]{24})?$"
+                            },
+                            "to": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{40}([a-f0-9]{24})?$"
+                            }
+                          },
+                          "required": [
+                            "from",
+                            "to"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "count": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 5000
+                      },
+                      "files": {
+                        "maxItems": 50,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1000
+                        }
+                      },
+                      "pathsDigest": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    },
+                    "required": [
+                      "gateDigest",
+                      "patterns",
+                      "ranges",
+                      "count",
+                      "files",
+                      "pathsDigest"
+                    ],
                     "additionalProperties": false
                   },
                   "reviewer": {
@@ -1143,7 +1211,8 @@
                       "check",
                       "review",
                       "property",
-                      "consumer"
+                      "consumer",
+                      "not-applicable"
                     ]
                   },
                   "phase": {
@@ -1265,6 +1334,73 @@
                         "additionalProperties": false
                       }
                     },
+                    "additionalProperties": false
+                  },
+                  "notApplicable": {
+                    "type": "object",
+                    "properties": {
+                      "gateDigest": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "patterns": {
+                        "maxItems": 64,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        }
+                      },
+                      "ranges": {
+                        "maxItems": 4,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "from": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{40}([a-f0-9]{24})?$"
+                            },
+                            "to": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{40}([a-f0-9]{24})?$"
+                            }
+                          },
+                          "required": [
+                            "from",
+                            "to"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "count": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 5000
+                      },
+                      "files": {
+                        "maxItems": 50,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1000
+                        }
+                      },
+                      "pathsDigest": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    },
+                    "required": [
+                      "gateDigest",
+                      "patterns",
+                      "ranges",
+                      "count",
+                      "files",
+                      "pathsDigest"
+                    ],
                     "additionalProperties": false
                   },
                   "reviewer": {

@@ -14,6 +14,7 @@ import { workGraphSchema, workOrderSchema } from './work.ts';
 import { contextPinSchema, contextSnapshotSchema } from './context.ts';
 import {
   deliveryStateSchema,
+  gateApplicabilitySchema,
   gateArtifactFilesSchema,
   jointActiveSchema,
   jointFailedSchema,
@@ -340,7 +341,11 @@ export const evidenceFindingSchema = z.strictObject({
 export const evidenceRecordSchema = z.strictObject({
   id: z.string().min(1).max(200),
   runId: z.string().min(1).max(200),
-  kind: z.enum(['test', 'review']),
+  /**
+   * `not-applicable` — gate с `when.paths` не исполнялся: diff фазы его не
+   * задел (`notApplicable`). Такая запись всегда `passed: false` и не PASS.
+   */
+  kind: z.enum(['test', 'review', 'not-applicable']),
   phase: z.enum(['candidate', 'integration']),
   sha: gitShaSchema,
   /** ID gate; для ревью — `independent-review`. */
@@ -385,6 +390,13 @@ export const evidenceRecordSchema = z.strictObject({
   artifactFiles: gateArtifactFilesSchema.optional(),
   /** Действующая версия проверок, под которой получено evidence. */
   checks: digestSchema.optional(),
+  /**
+   * Digest определения gate с `when` (`gateDigest`), под которым он исполнен
+   * или признан неприменимым. Нет у gates без `when` и у прежних записей.
+   */
+  gateDigest: digestSchema.optional(),
+  /** Только у записи `not-applicable`: правило и diff, по которым gate не исполнялся. */
+  notApplicable: gateApplicabilitySchema.optional(),
   /**
    * Ревью попытки без изменений подтвердило, что приёмка уже выполнена на
    * базе: gates, на которые сослался reviewer, и его основание.

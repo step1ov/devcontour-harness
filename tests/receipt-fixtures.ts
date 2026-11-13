@@ -3,6 +3,7 @@
  */
 import {
   digestOf,
+  gateDigest,
   runResultSchema,
   sha256,
   type EvidenceRecord,
@@ -439,4 +440,51 @@ export function maximalAttempt() {
     return { result, context: { ...context, contextDigest } as ReceiverContext };
   };
   return { ...f, done };
+}
+
+/**
+ * Принятый результат с условным gate `ui` (`when.paths`), неприменимым в обеих
+ * фазах: записи `not-applicable` с правилом и diff.
+ */
+export function notApplicableAttempt() {
+  const policy = policyOf((p: any) => {
+    p.repositories[0].gates.push({
+      id: 'ui',
+      kind: 'check',
+      command: ['node', 'ui.js'],
+      when: { paths: ['web/'] },
+    });
+  });
+  const gate = policy.repositories[0]!.gates.find((g) => g.id === 'ui')!;
+  const graph = graphOf({ a: [] });
+  graph.orders[0]!.gates = ['unit', 'ui'];
+  const f = attempt(graph, policy);
+  for (const phase of ['candidate', 'integration'] as const) {
+    const at = sha(phase === 'candidate' ? 'c' : 'b');
+    const notApplicable = {
+      gateDigest: gateDigest(gate),
+      patterns: ['web/'],
+      ranges: [
+        { from: sha('a'), to: sha('c') },
+        ...(phase === 'integration' ? [{ from: sha('a'), to: at }] : []),
+      ],
+      count: 2,
+      files: ['src/a.js', 'src/b.js'],
+      pathsDigest: sha256('src/a.js\0src/b.js'),
+    };
+    f.e.evidence(f.a.id, f.a.token, {
+      kind: 'not-applicable',
+      phase,
+      sha: at,
+      gate: 'ui',
+      passed: false,
+      command: [],
+      exitCode: -1,
+      log: '',
+      digest: digestOf(notApplicable),
+      summary: 'Не применим',
+      notApplicable,
+    });
+  }
+  return f;
 }

@@ -64,21 +64,68 @@ const junitReport = z.strictObject({ type: z.literal('junit'), path: relativePat
  * Необязательное поле без умолчания: политика без него сохраняет digest.
  */
 const gateArtifacts = z.array(relativePathSchema).min(1).max(gateArtifactLimits.paths).optional();
+
+/**
+ * Почему шаблон пути `when.paths` недопустим, или undefined. Шаблон —
+ * относительный POSIX-glob от корня репозитория: `**`, `*`, `?` и `{a,b}` без
+ * вложенности; без `..`, `.`, пустых сегментов, ведущего `/`, обратной
+ * косой черты, отрицания и классов символов.
+ */
+export function gatePathPatternProblem(pattern: string): string | undefined {
+  if (pattern.startsWith('/')) return 'шаблон пути не может быть абсолютным';
+  if (/[\\\0\[\]]/.test(pattern)) return 'обратная косая черта, NUL и [] в шаблоне не допускаются';
+  if (pattern.startsWith('!')) return 'отрицание в шаблоне не поддерживается';
+  const body = pattern.endsWith('/') ? pattern.slice(0, -1) : pattern;
+  if (body.split('/').some((s) => s === '' || s === '.' || s === '..'))
+    return 'шаблон пути без пустых сегментов, . и ..';
+  let depth = 0;
+  for (const c of pattern) {
+    if (c === '{' && ++depth > 1) return 'вложенные {} в шаблоне не поддерживаются';
+    if (c === '}' && --depth < 0) return 'непарная } в шаблоне';
+  }
+  if (depth) return 'непарная { в шаблоне';
+  return undefined;
+}
+const gatePathPattern = z
+  .string()
+  .min(1)
+  .max(200)
+  .superRefine((value, ctx) => {
+    const problem = gatePathPatternProblem(value);
+    if (problem) ctx.addIssue({ code: 'custom', message: problem });
+  });
+/**
+ * Условие применимости gate задачи: gate исполняется, только когда настоящий
+ * diff фазы (из Git, не заявление исполнителя) задевает один из путей или
+ * неявный вход gate; иначе пишется запись `not-applicable`, которая не PASS.
+ * Необязательное поле без умолчания: политика без него сохраняет digest.
+ */
+export const gateWhenSchema = z.strictObject({
+  paths: z.array(gatePathPattern).min(1).max(64),
+});
+const gateWhen = gateWhenSchema.optional();
 export const gateSchema = z.discriminatedUnion('kind', [
   z.strictObject({
     ...gateCommon,
     kind: z.literal('test'),
     report: junitReport,
     artifacts: gateArtifacts,
+    when: gateWhen,
   }),
   z.strictObject({
     ...gateCommon,
     kind: z.literal('check'),
     report: junitReport.optional(),
     artifacts: gateArtifacts,
+    when: gateWhen,
   }),
 ]);
 export type GatePolicy = z.infer<typeof gateSchema>;
+/**
+ * Digest определения gate задачи (с `when`): под ним записывается решение о
+ * применимости. Смена команды, путей или любого поля — другой digest.
+ */
+export const gateDigest = (gate: GatePolicy) => digestOf(gate);
 
 /** Группы gates: не больше 100 групп по 100 ссылок, члены — gates или группы (`@имя`). */
 export const gateGroupsSchema = z
@@ -588,6 +635,22 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
         ['repositories', r, 'gates'],
         'Нужен хотя бы один test gate с JUnit report',
       );
+    // Условие путей: хотя бы один test gate исполняется всегда, и генеративный
+    // gate условным не бывает (его seed и отчёт свойств — доказательство).
+    else if (!repo.gates.some((g) => g.kind === 'test' && !g.when))
+      add(
+        'INVALID_INPUT',
+        ['repositories', r, 'gates'],
+        'Нужен хотя бы один test gate без when: все test gates не могут быть условными',
+      );
+    repo.gates.forEach((g, i) => {
+      if (g.when && g.property)
+        add(
+          'INVALID_INPUT',
+          ['repositories', r, 'gates', i, 'when'],
+          'Генеративный gate (property) не может быть условным (when)',
+        );
+    });
     for (const group of Object.keys(repo.gateGroups ?? {}))
       try {
         expandGateRefs(repo, ['@' + group]);

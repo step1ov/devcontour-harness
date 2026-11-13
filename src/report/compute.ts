@@ -514,9 +514,13 @@ export function valueReport(
 
   /* Дефекты (D1–D7) -------------------------------------------------- */
   const defectAttempts = windowAttempts.filter((a) => failureBucketOf(a) === 'defect');
-  const failingOf = (a: AttemptState): EvidenceRecord[] => {
+  const failingOf = (a: AttemptState): (EvidenceRecord & { kind: 'test' | 'review' })[] => {
     const kind = a.failureKind === 'gate' ? 'test' : a.failureKind === 'review' ? 'review' : null;
-    return a.evidence.filter((e) => !e.passed && (kind === null || e.kind === kind));
+    // Неприменимый gate (`when.paths`) не исполнялся и провалом не считается.
+    return a.evidence.filter(
+      (e): e is EvidenceRecord & { kind: 'test' | 'review' } =>
+        !e.passed && e.kind !== 'not-applicable' && (kind === null || e.kind === kind),
+    );
   };
   const byKind = { gate: 0, review: 0, 'scope-violation': 0 };
   const byPhase = { candidate: 0, integration: 0, unknown: 0 };
@@ -568,15 +572,15 @@ export function valueReport(
     if (!required.length) continue;
     for (const e of a.evidence) {
       if (e.kind !== 'review' || e.phase !== 'candidate') continue;
+      // Неприменимый gate (`when.paths`) зелёного состава не нарушает.
       const allGreen = required.every((g) =>
         a.evidence.some(
           (x) =>
-            x.kind === 'test' &&
+            (x.kind === 'not-applicable' || (x.kind === 'test' && x.passed)) &&
             x.phase === 'candidate' &&
             !x.consumer &&
             x.gate === g &&
             x.sha === e.sha &&
-            x.passed &&
             (x.checks === undefined || e.checks === undefined || x.checks === e.checks),
         ),
       );

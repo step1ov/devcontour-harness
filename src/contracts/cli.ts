@@ -924,13 +924,18 @@ export const attemptViewSchema = z.strictObject({
     sinceHeartbeatMs: z.number().int().min(0).optional(),
     stale: z.boolean(),
   }),
-  /** Обязательные gates текущей фазы на её текущем SHA: `passed + failed + remaining = required`. */
+  /**
+   * Обязательные gates текущей фазы на её текущем SHA:
+   * `passed + failed + remaining (+ notApplicable) = required`.
+   */
   gates: z.strictObject({
     phase: z.enum(['candidate', 'integration']),
     required: z.number().int().min(0),
     passed: z.number().int().min(0),
     failed: z.number().int().min(0),
     remaining: z.number().int().min(0),
+    /** Не исполнены по `when.paths` (нет поля — таких нет). */
+    notApplicable: z.number().int().positive().optional(),
   }),
   /** Живость по обходу controller; `idleMs` — только у `quiet` и `stalled`. */
   liveness: z

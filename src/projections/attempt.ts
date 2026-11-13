@@ -25,7 +25,7 @@ export interface AttemptViewInput {
   candidateSha?: string;
   integrationSha?: string;
   evidence: readonly {
-    kind: 'test' | 'review';
+    kind: 'test' | 'review' | 'not-applicable';
     phase: 'candidate' | 'integration';
     sha: string;
     gate: string;
@@ -89,7 +89,7 @@ export interface AttemptView {
    * Обязательные gates текущей фазы (интеграции — в `integrating`, иначе
    * кандидата) по последней записи каждого gate на текущем SHA фазы, без
    * проверок потребителей: прошли, не прошли, ещё без записи. Записи других
-   * gates и других SHA не считаются: `passed + failed + remaining = required`.
+   * gates и других SHA не считаются: `passed + failed + remaining (+ notApplicable) = required`.
    */
   gates: {
     phase: 'candidate' | 'integration';
@@ -97,6 +97,8 @@ export interface AttemptView {
     passed: number;
     failed: number;
     remaining: number;
+    /** Не исполнены по `when.paths` (нет поля — таких нет); входят в `required`. */
+    notApplicable?: number;
   };
   /**
    * Живость по последнему переходу обхода controller: `quiet` и `stalled`
@@ -135,6 +137,18 @@ export function attemptView(input: AttemptViewInput, options: AttemptViewOptions
   const sha = phase === 'integration' ? input.integrationSha : input.candidateSha;
   const required = [...new Set(input.requiredGates ?? options.repositoryGates ?? [])];
   const latest = new Map<string, boolean>();
+  // Gate, не исполненный по `when.paths`: ни PASS, ни провал, но и не ждёт.
+  const notApplicable = new Set<string>();
+  for (const e of input.evidence)
+    if (
+      e.kind === 'not-applicable' &&
+      e.phase === phase &&
+      !e.consumer &&
+      sha !== undefined &&
+      e.sha === sha &&
+      required.includes(e.gate)
+    )
+      notApplicable.add(e.gate);
   for (const e of input.evidence)
     if (
       e.kind === 'test' &&
@@ -180,7 +194,10 @@ export function attemptView(input: AttemptViewInput, options: AttemptViewOptions
       required: required.length,
       passed,
       failed: latest.size - passed,
-      remaining: required.filter((g) => !latest.has(g)).length,
+      remaining: required.filter((g) => !latest.has(g) && !notApplicable.has(g)).length,
+      ...(notApplicable.size
+        ? { notApplicable: [...notApplicable].filter((g) => !latest.has(g)).length }
+        : {}),
     },
     ...(input.liveness
       ? {

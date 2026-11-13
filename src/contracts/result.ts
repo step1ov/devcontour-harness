@@ -25,13 +25,44 @@ export const findingSchema = z.strictObject({
 });
 export type Finding = z.infer<typeof findingSchema>;
 
+/** Пределы сведений о неприменимости gate (`when.paths`). */
+export const gateApplicabilityLimits = {
+  /** Шаблонов путей у gate. */
+  patterns: 64,
+  /** Перечисленных изменённых путей; остальные — числом (`count`) и digest. */
+  files: 50,
+  /** Изменённых путей, сверх которых diff не разбирается и gate исполняется. */
+  changed: 5000,
+} as const;
+
+/**
+ * Почему gate с `when.paths` не исполнялся: настоящий diff фазы (не заявление
+ * исполнителя) не задел ни одного его пути и ни одного неявного входа. Это не
+ * PASS: запись вида `not-applicable` закрывает только обычный обязательный
+ * gate, но не доказательство требования, свойства или testcase.
+ * `gateDigest` — digest определения gate (`gateDigest`), под которым принято
+ * решение; `ranges` — сравненные пары коммитов, `count` — число изменённых
+ * путей, `files` — первые из них, `pathsDigest` — SHA-256 отсортированного
+ * полного списка, разделённого NUL.
+ */
+export const gateApplicabilitySchema = z.strictObject({
+  gateDigest: digestSchema,
+  patterns: z.array(z.string().min(1).max(200)).max(gateApplicabilityLimits.patterns),
+  ranges: z.array(z.strictObject({ from: gitShaSchema, to: gitShaSchema })).max(4),
+  count: z.number().int().min(0).max(gateApplicabilityLimits.changed),
+  files: z.array(z.string().min(1).max(1000)).max(gateApplicabilityLimits.files),
+  pathsDigest: digestSchema,
+});
+export type GateApplicability = z.infer<typeof gateApplicabilitySchema>;
+
 /**
  * Ссылка на доказательство. Само evidence (логи, отчёты) хранит
  * ExecutionStore; результат несёт digest и SHA, по которым его сверяют.
  */
 export const evidenceRefSchema = z.strictObject({
   id: z.string().min(1).max(200),
-  kind: z.enum(['test', 'check', 'review', 'property', 'consumer']),
+  /** `not-applicable` — gate не исполнялся по `when.paths` (`notApplicable`); не PASS. */
+  kind: z.enum(['test', 'check', 'review', 'property', 'consumer', 'not-applicable']),
   phase: z.enum(['candidate', 'integration']),
   gate: z.string().min(1).max(200),
   sha: gitShaSchema,
@@ -74,6 +105,8 @@ export const evidenceRefSchema = z.strictObject({
         .optional(),
     })
     .optional(),
+  /** Только у записи `not-applicable`: правило и diff, по которым gate не исполнялся. */
+  notApplicable: gateApplicabilitySchema.optional(),
   reviewer: z
     .strictObject({
       runtime: runtimeNameSchema,

@@ -11,7 +11,7 @@ import {
   type ReceiverContext,
 } from '../src/verification/acceptance.ts';
 import { sha } from './engine-fixture.ts';
-import { acceptedProperty, maximalAttempt } from './receipt-fixtures.ts';
+import { acceptedProperty, maximalAttempt, notApplicableAttempt } from './receipt-fixtures.ts';
 
 /**
  * Модель доверия получателя (`receiptTrust`) как проверяемое утверждение.
@@ -304,6 +304,16 @@ test('Каждое поле максимального результата: п�
 
 test('Каждое поле результата с договором проверки (манифест, корпус): подделка — отказ', () => {
   const { result, context } = acceptedProperty();
+  const { failures, visited } = judge(result, context, '');
+  for (const p of visited) visitedAll.add(p);
+  assert.deepEqual(failures, []);
+});
+
+test('Каждое поле результата с неприменимым gate (when.paths): подделка правила — отказ, diff — сведение', () => {
+  const f = notApplicableAttempt();
+  const { result, context } = f.done();
+  f.store.close();
+  assert.ok(result.evidence.some((e) => e.kind === 'not-applicable'));
   const { failures, visited } = judge(result, context, '');
   for (const p of visited) visitedAll.add(p);
   assert.deepEqual(failures, []);

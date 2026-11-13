@@ -132,6 +132,7 @@ import {
   type LivenessChange,
 } from './stall-sweep.ts';
 import { orderedScope } from '../verification/gate-scope.ts';
+import { changedPaths, gateDecisions, proofGates } from '../verification/applicability.ts';
 import {
   alreadySatisfiedVerdict,
   contractCheckGates,
@@ -1736,7 +1737,17 @@ export class Runner {
               rearm();
               this.engine.phase(attempt.id, attempt.token, 'verifying', { candidateSha: sha });
               const recheck = { recheck: true };
-              for (const gate of gates)
+              const applicable = await this.applicableGates(
+                attempt,
+                work,
+                repo,
+                gates,
+                'candidate',
+                cwd,
+                sha,
+                base,
+              );
+              for (const gate of applicable)
                 await this.candidateGate(
                   attempt,
                   cwd,
@@ -2374,6 +2385,73 @@ export class Runner {
         failed.id,
       );
     }
+  }
+
+  /**
+   * Gates фазы, которые исполняются; для остальных (gate с `when.paths`, чей
+   * путь diff фазы не задел, — `gateDecisions`) записывается `not-applicable`.
+   * Diff — из Git: кандидат — `base..candidate`; интеграция — ещё и
+   * `base..integration` (то, что принесло слияние с target). Попытка без
+   * изменений исполняет всё: её приёмка опирается на прохождение gates.
+   */
+  private async applicableGates(
+    attempt: AttemptState,
+    work: WorkState,
+    repo: Repo,
+    gates: GatePolicy[],
+    phase: EvidenceRecord['phase'],
+    cwd: string,
+    sha: string,
+    base: string,
+  ): Promise<GatePolicy[]> {
+    if (!gates.some((g) => g.when)) return gates;
+    const candidate = phase === 'candidate' ? sha : attempt.candidateSha!;
+    if (candidate === base) return gates;
+    const changed = await changedPaths(cwd, [
+      { from: base, to: candidate },
+      ...(phase === 'integration' ? [{ from: base, to: sha }] : []),
+    ]);
+    const decisions = this.engine.read((v) => {
+      const proof = proofGates(work.order, contractDocuments(work.order, v));
+      const accepted = v
+        .attempts()
+        .filter((x) => x.status === 'succeeded' && x.repositoryId === repo.id && x.integrationSha);
+      return gateDecisions({
+        repo,
+        scope: gates,
+        changed,
+        proof,
+        passedUnder: (gate, digest) =>
+          accepted.some((x) =>
+            x.evidence.some(
+              (e) =>
+                e.kind === 'test' &&
+                e.phase === 'integration' &&
+                e.sha === x.integrationSha &&
+                e.gate === gate.id &&
+                e.consumer === undefined &&
+                e.passed &&
+                e.gateDigest === digest,
+            ),
+          ),
+      });
+    });
+    for (const d of decisions)
+      if (!d.run && d.record)
+        this.engine.evidence(attempt.id, attempt.token, {
+          kind: 'not-applicable',
+          phase,
+          sha,
+          gate: d.gate.id,
+          passed: false,
+          command: [],
+          exitCode: -1,
+          log: '',
+          digest: digestOf(d.record),
+          summary: `Не применим: diff фазы (${d.record.count} путей) не задел when.paths и неявные входы gate`,
+          notApplicable: d.record,
+        });
+    return decisions.filter((d) => d.run).map((d) => d.gate);
   }
 
   private async runOneGate(
@@ -3342,6 +3420,8 @@ export class Runner {
                 passed: e.passed,
                 summary: e.summary,
                 ...(e.consumer ? { consumer: e.consumer } : {}),
+                // Gate не исполнялся по when.paths: не провал и не PASS.
+                ...(e.kind === 'not-applicable' ? { notApplicable: true } : {}),
               })),
             ),
           'Where a requirement names a testId, open that test. Reject it when the test does not exercise the stated scenario, or when it would still pass if the behaviour it claims to prove were broken. A matching name is not proof.',
@@ -3567,7 +3647,17 @@ export class Runner {
         );
         prepared(execution);
         const budget = { recheck: true };
-        for (const gate of gates)
+        const applicable = await this.applicableGates(
+          attempt,
+          work,
+          repo,
+          gates,
+          'integration',
+          cwd,
+          sha,
+          attempt.baseSha!,
+        );
+        for (const gate of applicable)
           await this.integrationGate(attempt, cwd, sha, gate, artifacts, signal, execution, budget);
         await this.consumers(attempt, cwd, sha, artifacts, signal);
         this.requirements(attempt, work, repoPath, cwd, sha, 'integration');

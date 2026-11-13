@@ -628,6 +628,10 @@
               "type": "string",
               "pattern": "^[A-Za-z0-9_-]{1,80}$"
             },
+            "notApplicable": {
+              "type": "boolean",
+              "const": true
+            },
             "recheck": {
               "type": "object",
               "properties": {

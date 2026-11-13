@@ -181,6 +181,18 @@ export {
   standaloneScope,
 } from './verification/gate-scope.ts';
 export { requirementProof, uncoveredGates, unprovenReason } from './verification/proof.ts';
+export {
+  changedPaths,
+  gateDecisions,
+  gatePathRegExp,
+  matchingPaths,
+  notApplicableProblem,
+  pathApplicability,
+  proofGates,
+  type ChangedPaths,
+  type GateDecision,
+  type PathDecision,
+} from './verification/applicability.ts';
 export { ReviewProbes, probeLimits, observeReproductions } from './agents/review-probe.ts';
 export {
   composeRedactors,
