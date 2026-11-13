@@ -78,6 +78,9 @@ export function gatePathPatternProblem(pattern: string): string | undefined {
   const body = pattern.endsWith('/') ? pattern.slice(0, -1) : pattern;
   if (body.split('/').some((s) => s === '' || s === '.' || s === '..'))
     return 'шаблон пути без пустых сегментов, . и ..';
+  // И внутри вариантов `{}`: `{..,x}` — тот же выход за корень.
+  if (body.split(/[/{},]/).some((s) => s === '.' || s === '..'))
+    return 'шаблон пути без . и .. и внутри {}';
   let depth = 0;
   for (const c of pattern) {
     if (c === '{' && ++depth > 1) return 'вложенные {} в шаблоне не поддерживаются';

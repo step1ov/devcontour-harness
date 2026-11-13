@@ -316,12 +316,13 @@ test('H3-01: прежние команды и схемы их данных не 
       k === 'properties' &&
       v &&
       typeof v === 'object' &&
-      ('notApplicable' in v || ('when' in v && 'command' in v))
+      ('notApplicable' in v || ('when' in v && 'command' in v && 'timeoutMs' in v))
     ) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.notApplicable;
-      delete rest.gateDigest;
-      if ('command' in rest) delete rest.when;
+      delete rest.gateBasis;
+      // `when` — только у схемы gate задачи (у gate совместной проверки его нет).
+      if ('command' in rest && 'timeoutMs' in rest && !('repositoryId' in rest)) delete rest.when;
       v = rest;
     }
     if (Array.isArray(v))

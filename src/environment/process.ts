@@ -313,6 +313,9 @@ export function hostGitArgs(cwd: string, args: string[]) {
 const gitEnv = () => ({
   ...process.env,
   GIT_TERMINAL_PROMPT: '0',
+  // Объекты замены (`refs/replace/*`) в общем каталоге git пишет любой, кто
+  // пишет в репозиторий: diff, область записи и применимость gates их не видят.
+  GIT_NO_REPLACE_OBJECTS: '1',
   GIT_AUTHOR_NAME: 'devcontour-harness',
   GIT_AUTHOR_EMAIL: 'harness@localhost',
   GIT_COMMITTER_NAME: 'devcontour-harness',

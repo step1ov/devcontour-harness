@@ -21,7 +21,6 @@ import {
   type EvidenceRecord,
   type ExecutionPolicy,
   type GatePolicy,
-  gateDigest,
   gateTimeoutMs,
   gateTimeoutText,
 } from '../contracts/index.ts';
@@ -1148,9 +1147,6 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     ...(manifest ? { tests: manifest.cases } : {}),
     ...(manifest?.truncated ? { testsTruncated: true } : {}),
     ...(run.consumer ? { consumer: run.consumer } : {}),
-    // Определение условного gate, под которым он исполнен: по нему решается,
-    // проходил ли gate под текущим определением (`gateDecisions`).
-    ...(gate.when ? { gateDigest: gateDigest(gate) } : {}),
     ...(propertyEvidence ? { property: propertyEvidence } : {}),
     ...(artifactFiles ? { artifactFiles } : {}),
     ...(run.recheck

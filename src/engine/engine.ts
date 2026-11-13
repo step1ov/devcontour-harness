@@ -1810,13 +1810,28 @@ export class Engine {
           evidence.artifactFiles !== undefined ||
           !(a.requiredGates ?? []).includes(evidence.gate)
             ? 'запись неприменимости не может быть PASS, исполнением или gate вне области'
-            : notApplicableProblem({
-                gates: this.repository(a.repositoryId).gates,
-                gate: evidence.gate,
-                record: evidence,
-                proof: proofGates(w.order, contractDocuments(w.order, tx)),
-                ran: [],
-              });
+            : // Решение — о SHA текущей фазы, diff заканчивается на нём.
+              evidence.sha !==
+                  (evidence.phase === 'candidate' ? a.candidateSha : a.integrationSha) ||
+                evidence.notApplicable!.ranges.at(-1)?.to !== evidence.sha
+              ? 'запись неприменимости не относится к SHA фазы попытки'
+              : // Исполненный gate не становится неприменимым на том же SHA.
+                a.evidence.some(
+                    (e) =>
+                      e.kind === 'test' &&
+                      e.gate === evidence.gate &&
+                      e.phase === evidence.phase &&
+                      e.sha === evidence.sha &&
+                      e.consumer === undefined,
+                  )
+                ? 'gate уже исполнялся на этом SHA: запись неприменимости не заменяет его исход'
+                : notApplicableProblem({
+                    gates: this.repository(a.repositoryId).gates,
+                    gate: evidence.gate,
+                    record: evidence,
+                    proof: proofGates(w.order, contractDocuments(w.order, tx)),
+                    ran: [],
+                  });
         if (problem) throw new HarnessError('INVALID_INPUT', problem);
       }
       // Повтор ссылается на провал того же gate этой попытки на том же SHA, и
@@ -1943,14 +1958,16 @@ export class Engine {
         (['candidate', 'integration'] as const).map((phase) => [
           phase,
           (a.requiredGates ?? []).filter(
-            (gate) =>
-              decisive(['test', 'not-applicable'], phase, shaOf(phase), gate)?.kind === 'test',
+            (gate) => decisive(['test'], phase, shaOf(phase), gate) !== undefined,
           ),
         ]),
       ) as Record<EvidenceRecord['phase'], string[]>;
       for (const gate of a.requiredGates ?? [])
         for (const phase of ['candidate', 'integration'] as const) {
-          const record = decisive(['test', 'not-applicable'], phase, shaOf(phase), gate);
+          // Исход исполнения решает всегда; неприменимость — только без него.
+          const record =
+            decisive(['test'], phase, shaOf(phase), gate) ??
+            decisive(['not-applicable'], phase, shaOf(phase), gate);
           if (record?.kind === 'test' && record.passed) continue;
           const problem =
             record?.kind === 'not-applicable'

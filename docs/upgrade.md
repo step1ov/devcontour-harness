@@ -824,26 +824,35 @@ alpha.44 матрицы форматов — новое поле и новое �
 форматов добавляет выпуск.
 
 - Gate задачи принимает `when: { paths: [...] }`. Runner решает в каждой
-  фазе по diff Git и пишет за неприменимый gate evidence вида
-  `not-applicable` (`passed: false`, поле `notApplicable`); исполненный
-  условный gate пишет `gateDigest`. Событие `attempt.gate` получает
-  необязательное `notApplicable: true`, ссылка evidence receipt — вид
-  `not-applicable` и поле `notApplicable`. Правила — `docs/contracts.md`
+  фазе по diff Git от последнего зелёного SHA gate и пишет за неприменимый
+  gate evidence вида `not-applicable` (`passed: false`, поле
+  `notApplicable`); исполненный условный gate пишет `gateBasis`. Событие
+  `attempt.gate` получает необязательное `notApplicable: true`, ссылка
+  evidence receipt — вид `not-applicable` и поле `notApplicable`, проекция
+  попытки — `gates.notApplicable`. Правила — `docs/contracts.md`
   («ExecutionPolicy»).
-- Хост со своим хранилищем сохраняет новый вид evidence и поля `gateDigest`
+- Весь git хоста идёт с `GIT_NO_REPLACE_OBJECTS=1`: замены объектов в
+  репозитории не влияют на diff, область записи и применимость.
+- **Хост до обновления.** Прежний хост читает `attempt.gate` с
+  `passed: false` и `notApplicable: true` как провал gate, а прежний
+  получатель receipt отклоняет вид ссылки `not-applicable` (строгая схема).
+  Оба исхода — в безопасную сторону, но хост (DevContour) обязан понять новый
+  вид evidence до того, как в политике появится `when`.
+- Хост со своим хранилищем сохраняет новый вид evidence и поля `gateBasis`
   и `notApplicable`; в представлениях показывает неприменимый gate отдельно
   от PASS и провала и не считает его ни тем, ни другим. Доказательства
   testcase и сценариев читают только записи `test`.
 - Хост, который проверяет полный профиль набора на итоговом SHA
-  (`uncoveredGates` → `runGatesAt`), передаёт объединённый diff набора
-  `changes` (`changedPaths` от базы каждого принятого поручения до итогового
-  SHA) и передаёт gates политики harness (по ним сверяется `gateDigest`).
-  Без `changes` gate, признанный где-то неприменимым, исполняется на итоговом
-  SHA.
-- Добавление или смена `when` меняет digest политики: согласования,
-  привязанные к нему, нужно повторить. Первый прогон нового определения gate
-  исполняет его, пока он не пройдёт integration принятой попытки.
-- Состояние с evidence `not-applicable` или полями `gateDigest` и
+  (`uncoveredGates` → `runGatesAt`), передаёт `changes`, построенный
+  `coverageChanges(repoPath, evidence, finalSha)`, и gates политики harness.
+  Diff, не начинающийся от зелёного SHA каждой записи неприменимости, неполный
+  или с разными концами, считается отсутствующим: такой gate исполняется на
+  итоговом SHA.
+- Добавление или смена `when`, ресурсов, окружения, подготовки или версии
+  harness меняет основание gate: первый прогон после этого исполняет его.
+  Добавление `when` меняет digest политики — согласования, привязанные к
+  нему, нужно повторить.
+- Состояние с evidence `not-applicable` или полями `gateBasis` и
   `notApplicable` прежние версии отклоняют (строгая схема): откат — через
   копию. Без условных gates таких записей нет, и откат возможен без
   изменений состояния.

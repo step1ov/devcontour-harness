@@ -183,6 +183,8 @@ export {
 export { requirementProof, uncoveredGates, unprovenReason } from './verification/proof.ts';
 export {
   changedPaths,
+  coverageChanges,
+  gateBasis,
   gateDecisions,
   gatePathRegExp,
   matchingPaths,

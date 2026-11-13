@@ -391,10 +391,12 @@ export const evidenceRecordSchema = z.strictObject({
   /** Действующая версия проверок, под которой получено evidence. */
   checks: digestSchema.optional(),
   /**
-   * Digest определения gate с `when` (`gateDigest`), под которым он исполнен
-   * или признан неприменимым. Нет у gates без `when` и у прежних записей.
+   * Основание исполнения gate с `when` (`gateBasis`: определение, ресурсы,
+   * окружение, подготовка, изоляция, версия harness) у собственной записи
+   * `test` попытки: по нему ищется последний зелёный SHA gate. Нет у gates
+   * без `when` и у прежних записей.
    */
-  gateDigest: digestSchema.optional(),
+  gateBasis: digestSchema.optional(),
   /** Только у записи `not-applicable`: правило и diff, по которым gate не исполнялся. */
   notApplicable: gateApplicabilitySchema.optional(),
   /**

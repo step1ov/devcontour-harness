@@ -678,7 +678,10 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
     ...required.map((gate) => ({
       phase,
       gate,
-      check: last(named.has(gate) ? 'test' : (['test', 'not-applicable'] as const), phase, gate),
+      // Исход исполнения решает всегда; неприменимость — только без него.
+      check:
+        last('test', phase, gate) ??
+        (named.has(gate) ? undefined : last(['not-applicable'] as const, phase, gate)),
     })),
     { phase, gate: 'independent-review', check: last('review', phase, 'independent-review') },
   ]);

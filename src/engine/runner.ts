@@ -132,7 +132,13 @@ import {
   type LivenessChange,
 } from './stall-sweep.ts';
 import { orderedScope } from '../verification/gate-scope.ts';
-import { changedPaths, gateDecisions, proofGates } from '../verification/applicability.ts';
+import {
+  changedPaths,
+  gateBasis,
+  gateDecisions,
+  proofGates,
+  type ChangedPaths,
+} from '../verification/applicability.ts';
 import {
   alreadySatisfiedVerdict,
   contractCheckGates,
@@ -2407,34 +2413,68 @@ export class Runner {
     if (!gates.some((g) => g.when)) return gates;
     const candidate = phase === 'candidate' ? sha : attempt.candidateSha!;
     if (candidate === base) return gates;
-    const changed = await changedPaths(cwd, [
-      { from: base, to: candidate },
-      ...(phase === 'integration' ? [{ from: base, to: sha }] : []),
-    ]);
-    const decisions = this.engine.read((v) => {
-      const proof = proofGates(work.order, contractDocuments(work.order, v));
-      const accepted = v
+    const proof = this.engine.read((v) => proofGates(work.order, contractDocuments(work.order, v)));
+    // Последний зелёный SHA условного gate: integration принятой попытки
+    // этого репозитория, где gate прошёл под тем же основанием (`gateBasis`),
+    // и предок базы попытки. Diff фазы — от него: всё, что попало в target
+    // после (в том числе мимо harness или в задачах с суженной областью),
+    // входит в решение. Нет такого SHA — gate исполняется.
+    const greens = this.engine.read((v) =>
+      v
         .attempts()
-        .filter((x) => x.status === 'succeeded' && x.repositoryId === repo.id && x.integrationSha);
-      return gateDecisions({
-        repo,
-        scope: gates,
-        changed,
-        proof,
-        passedUnder: (gate, digest) =>
-          accepted.some((x) =>
-            x.evidence.some(
-              (e) =>
-                e.kind === 'test' &&
-                e.phase === 'integration' &&
-                e.sha === x.integrationSha &&
-                e.gate === gate.id &&
-                e.consumer === undefined &&
-                e.passed &&
-                e.gateDigest === digest,
-            ),
-          ),
-      });
+        .filter((x) => x.status === 'succeeded' && x.repositoryId === repo.id && x.integrationSha)
+        .sort((x, y) => (y.finishedAt ?? '').localeCompare(x.finishedAt ?? '')),
+    );
+    const diffs = new Map<string, ChangedPaths>();
+    const changed = new Map<string, ChangedPaths>();
+    for (const gate of gates) {
+      if (!gate.when || proof.has(gate.id)) continue;
+      const basis = gateBasis(this.policy, repo, gate, this.engine.version);
+      const shas = [
+        ...new Set(
+          greens
+            .filter((x) =>
+              x.evidence.some(
+                (e) =>
+                  e.kind === 'test' &&
+                  e.phase === 'integration' &&
+                  e.sha === x.integrationSha &&
+                  e.gate === gate.id &&
+                  e.consumer === undefined &&
+                  e.passed &&
+                  e.gateBasis === basis,
+              ),
+            )
+            .map((x) => x.integrationSha!),
+        ),
+      ].slice(0, 50);
+      let anchor: string | undefined;
+      for (const green of shas)
+        if (
+          await git(cwd, 'merge-base', '--is-ancestor', green, base).then(
+            () => true,
+            () => false,
+          )
+        ) {
+          anchor = green;
+          break;
+        }
+      if (!anchor) continue;
+      if (!diffs.has(anchor))
+        diffs.set(
+          anchor,
+          await changedPaths(cwd, [
+            { from: anchor, to: candidate },
+            ...(phase === 'integration' ? [{ from: anchor, to: sha }] : []),
+          ]),
+        );
+      changed.set(gate.id, diffs.get(anchor)!);
+    }
+    const decisions = gateDecisions({
+      repo,
+      scope: gates,
+      proof,
+      changedFor: (gate) => changed.get(gate.id),
     });
     for (const d of decisions)
       if (!d.run && d.record)
@@ -2470,9 +2510,20 @@ export class Runner {
     // поручения ждёт от него отчёта (без договора — прежний уровень).
     const run = this.propertyRun(attempt, gate, consumer);
     const property = gate.property || expectsReference(run.expected) ? run : undefined;
+    const basis =
+      gate.when && !consumer
+        ? {
+            gateBasis: gateBasis(
+              this.policy,
+              this.repo(attempt.repositoryId),
+              gate,
+              this.engine.version,
+            ),
+          }
+        : {};
     await runGate({
       policy: this.policy,
-      record: (e) => this.engine.evidence(attempt.id, attempt.token, e),
+      record: (e) => this.engine.evidence(attempt.id, attempt.token, { ...e, ...basis }),
       cwd,
       sha,
       phase,

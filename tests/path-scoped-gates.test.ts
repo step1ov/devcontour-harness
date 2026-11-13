@@ -5,18 +5,21 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   digestOf,
+  executionDigest,
   executionPolicySchema,
   gateDigest,
   gateSchema,
   policyDigest,
   policyIssues,
   runResultSchema,
+  workGraphSchema,
   type ExecutionPolicy,
   type GatePolicy,
   type RunResult,
 } from '../src/contracts/index.ts';
 import {
   changedPaths,
+  coverageChanges,
   gateDecisions,
   matchingPaths,
   notApplicableProblem,
@@ -29,6 +32,10 @@ import { resultProblems, type ReceiverContext } from '../src/verification/accept
 import { runResult } from '../src/engine/result.ts';
 import { engineOf, graphOf, policyOf, ready, sha } from './engine-fixture.ts';
 import { example } from './fixtures.ts';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { nodeGate, repo, write } from './git-fixture.ts';
 import { approve, greet, implement, runAll, setup } from './runner-fixture.ts';
 
@@ -74,12 +81,32 @@ test('when.paths: glob — **, *, ?, {a,b} и каталог задевают п
     'docs/a.md',
   ]);
   assert.deepEqual(matchingPaths(['**'], ['x', 'y/z']), ['x', 'y/z']);
+  // `X/**` и шаблон внутри X задевают сам путь X (подмодуль, файл вместо каталога).
+  assert.deepEqual(matchingPaths(['vendor/lib/**'], ['vendor/lib', 'vendor']), [
+    'vendor/lib',
+    'vendor',
+  ]);
+  assert.deepEqual(matchingPaths(['web/*.ts'], ['web', 'webx']), ['web']);
+  // Регистр и нормализация Unicode не сужают совпадение.
+  assert.deepEqual(matchingPaths(['web/**'], ['WEB/a.ts']), ['WEB/a.ts']);
+  assert.deepEqual(matchingPaths(['caf\u00e9/**'], ['cafe\u0301/a']), ['cafe\u0301/a']);
   // Точка и + в шаблоне — буквально.
   assert.deepEqual(matchingPaths(['a.c'], ['abc', 'a.c']), ['a.c']);
 });
 
 test('when.paths: схема отклоняет абсолютные пути, .., отрицание, классы и вложенные {}', () => {
-  for (const bad of ['/web/**', 'web/../x', '!web', 'web/[ab]', 'a\\b', 'a//b', 'a/{b,{c}}', '{a'])
+  for (const bad of [
+    '{..,x}',
+    '{a,.}/b',
+    '/web/**',
+    'web/../x',
+    '!web',
+    'web/[ab]',
+    'a\\b',
+    'a//b',
+    'a/{b,{c}}',
+    '{a',
+  ])
     assert.throws(() => ui({ when: { paths: [bad] } }), /./, bad);
   assert.throws(() => ui({ when: { paths: [] } }));
   assert.throws(() => gateSchema.parse({ ...ui(), when: { paths: ['web'], extra: 1 } }));
@@ -104,9 +131,14 @@ test('when: политика без поля сохраняет digest; все t
   const raw = example('policy') as any;
   const plain = executionPolicySchema.parse(raw);
   assert.ok(!('when' in plain.repositories[0]!.gates[0]!), 'нет поля — нет ключа');
+  // Digests примера политики — те же, что у 0.1.0-alpha.44.
   assert.equal(
     policyDigest(plain),
-    policyDigest(executionPolicySchema.parse(structuredClone(raw))),
+    'fe2c6fe7a4c099a27c1b32d2f2fd295a887abcb83ea6f8c41dd408b561e00279',
+  );
+  assert.equal(
+    executionDigest(plain),
+    '283ae58f297b00c742c2ad627c4ade43748a2e64961bf1148465aa7ca18e8aa2',
   );
   assert.deepEqual(policyIssues(plain), []);
   const conditional = structuredClone(raw);
@@ -157,6 +189,11 @@ test('применимость: путь, неявные входы, неизв�
     'test/run.js',
     '.harness/policy.json',
     'scripts/ui-check.mjs',
+    '.gitattributes',
+    'src/core/.gitattributes',
+    '.gitmodules',
+    '.lfsconfig',
+    'TEST/run.js',
   ])
     assert.equal(applies([input]).applies, true, input);
   const inCwd = ui({
@@ -207,9 +244,9 @@ test('решения области: доказательство, истори�
       gateDecisions({
         repo: repoOf(gates),
         scope: options.scope ?? gates,
-        changed: changed(files),
         proof: new Set(options.proof ?? []),
-        passedUnder: (g, d) => d === gateDigest(g) && !(options.never ?? []).includes(g.id),
+        // Нет зелёного SHA под тем же основанием — diff не определён.
+        changedFor: (g) => ((options.never ?? []).includes(g.id) ? undefined : changed(files)),
       }).map((d) => [d.gate.id, d.run]),
     );
   assert.deepEqual(decide(['src/a.ts']), { build: false, ui: false, unit: true, e2e: false });
@@ -241,9 +278,8 @@ test('решения области: доказательство, истори�
       gateDecisions({
         repo: repoOf(ordered),
         scope: ordered,
-        changed: changed(['src/a.ts']),
         proof: new Set(),
-        passedUnder: () => true,
+        changedFor: () => changed(['src/a.ts']),
       }).map((d) => [d.gate.id, d.run]),
     ),
     { ui: true, unit: true },
@@ -320,6 +356,30 @@ test('changedPaths: настоящий Git — переименование да
     'src/gone.ts',
     'web/old.ts',
   ]);
+  // Gitlink подмодуля с ignore=all в .gitmodules виден: --ignore-submodules=none.
+  write(r.dir, {
+    '.gitmodules': '[submodule "lib"]\n\tpath = vendor/lib\n\turl = ./lib\n\tignore = all\n',
+  });
+  r.git('add', '.gitmodules');
+  r.git('update-index', '--add', '--cacheinfo', `160000,${sha('1')},vendor/lib`);
+  r.git('commit', '-qm', 'submodule');
+  const pinned = r.head();
+  r.git('update-index', '--cacheinfo', `160000,${sha('2')},vendor/lib`);
+  r.git('commit', '-qm', 'bump');
+  const bump = await changedPaths(r.dir, [{ from: pinned, to: r.head() }]);
+  assert.deepEqual(bump.files, ['vendor/lib']);
+  assert.deepEqual(matchingPaths(['vendor/lib/**'], bump.files), ['vendor/lib']);
+  // Замена объекта или grafts подменяют историю: diff неполон, gate исполняется.
+  r.git('replace', second, first);
+  const replaced = await changedPaths(r.dir, [{ from: base, to: second }]);
+  assert.equal(replaced.complete, false);
+  assert.match(replaced.problem!, /refs\/replace/);
+  r.git('replace', '-d', second);
+  assert.equal((await changedPaths(r.dir, [{ from: base, to: second }])).complete, true);
+  mkdirSync(join(r.dir, '.git', 'info'), { recursive: true });
+  writeFileSync(join(r.dir, '.git', 'info', 'grafts'), second + '\n');
+  assert.equal((await changedPaths(r.dir, [{ from: base, to: second }])).complete, false);
+  rmSync(join(r.dir, '.git', 'info', 'grafts'));
   const broken = await changedPaths(r.dir, [{ from: base, to: sha('9') }]);
   assert.equal(broken.complete, false);
   assert.match(broken.problem!, /git diff/);
@@ -374,6 +434,22 @@ test('покрытие набора: неприменимый gate решает�
     { repositoryId: 'app', gates: ['ui'] },
   ]);
   assert.deepEqual(uncoveredGates([repository], works, { app: changed(['src/a.ts']) }), []);
+  // Diff хоста, не привязанный к записи: неполный, не от её зелёного SHA или
+  // с разными концами — считается отсутствующим.
+  for (const bad of [
+    changed(['src/a.ts'], false),
+    { ...changed(['src/a.ts']), ranges: [{ from: sha('9'), to: sha('b') }] },
+    {
+      ...changed(['src/a.ts']),
+      ranges: [
+        { from: sha('a'), to: sha('b') },
+        { from: sha('c'), to: sha('d') },
+      ],
+    },
+  ])
+    assert.deepEqual(uncoveredGates([repository], works, { app: bad }), [
+      { repositoryId: 'app', gates: ['ui'] },
+    ]);
   // Неприменим во всех поручениях и не задет — не пробел; задет — пробел.
   const skipped = [works[0]!];
   assert.deepEqual(uncoveredGates([repository], skipped, { app: changed(['src/a.ts']) }), []);
@@ -413,10 +489,11 @@ function claimed(policy: ExecutionPolicy) {
   return { ...ctx, a };
 }
 
-const record = (gate: GatePolicy) => ({
+/** Сведения о неприменимости; diff кончается на SHA фазы (`to`). */
+const record = (gate: GatePolicy, to = sha('c')) => ({
   gateDigest: gateDigest(gate),
   patterns: gate.when!.paths,
-  ranges: [{ from: sha('a'), to: sha('c') }],
+  ranges: [{ from: sha('a'), to }],
   count: 1,
   files: ['src/a.ts'],
   pathsDigest: digestOf('src/a.ts'),
@@ -436,9 +513,9 @@ test('приёмка: неприменимость закрывает обычн
     command: [],
     exitCode: -1,
     log: '',
-    digest: digestOf(record(gate)),
+    digest: digestOf(record(gate, at(phase))),
     summary: 'Не применим',
-    notApplicable: record(gate),
+    notApplicable: record(gate, at(phase)),
     ...patch,
   });
   // Движок отклоняет запись неприменимости, которая выдаёт себя за PASS, —
@@ -448,6 +525,8 @@ test('приёмка: неприменимость закрывает обычн
     [{ notApplicable: { ...record(gate), gateDigest: 'e'.repeat(64) } }, /другим определением/],
     [{ gate: 'unit' }, /без when/],
     [{ kind: 'test' }, /только у записи вида not-applicable/],
+    [{ sha: sha('b') }, /не относится к SHA фазы/],
+    [{ notApplicable: record(gate, sha('b')) }, /не относится к SHA фазы/],
   ] as const)
     assert.throws(() => e.evidence(a.id, a.token, na('candidate', patch)), pattern);
   for (const phase of ['candidate', 'integration'] as const) {
@@ -542,9 +621,9 @@ test('приёмка: неприменимая предпосылка испол
       command: [],
       exitCode: -1,
       log: '',
-      digest: digestOf(record(gate)),
+      digest: digestOf(record(gate, at)),
       summary: 'Не применим',
-      notApplicable: record(gate),
+      notApplicable: record(gate, at),
     });
     for (const kind of ['test', 'review'] as const)
       e.evidence(a.id, a.token, {
@@ -564,37 +643,138 @@ test('приёмка: неприменимая предпосылка испол
   store.close();
 });
 
-test('runner: diff из Git решает по фазам — первый прогон определения, путь, lockfile исполняют gate; прочее — not-applicable', async () => {
-  const marker = 'process.exit(0)';
-  const tasks: [string, Record<string, string>][] = [
-    ['t1', { 'src/greet.js': greet }],
-    ['t2', { 'src/extra.js': 'exports.x = 1;\n' }],
-    ['t3', { 'web/page.js': 'exports.page = 1;\n' }],
-    ['t4', { 'package.json': '{"name":"app"}\n' }],
+test('приёмка: неприменимость не заменяет исход gate, исполненного на том же SHA', () => {
+  const policy = conditionalPolicy();
+  const gate = policy.repositories[0]!.gates.find((g) => g.id === 'ui')!;
+  const { engine: e, store, a } = claimed(policy);
+  const at = (phase: 'candidate' | 'integration') => sha(phase === 'candidate' ? 'c' : 'b');
+  const run = (phase: 'candidate' | 'integration', gid: string, passed: boolean) =>
+    e.evidence(a.id, a.token, {
+      kind: gid === 'independent-review' ? 'review' : 'test',
+      phase,
+      sha: at(phase),
+      gate: gid,
+      passed,
+      command: ['x'],
+      exitCode: passed ? 0 : 1,
+      log: '',
+      digest: digestOf(gid + phase + passed),
+      summary: passed ? 'ok' : 'fail',
+    });
+  run('candidate', 'ui', false);
+  assert.throws(
+    () =>
+      e.evidence(a.id, a.token, {
+        kind: 'not-applicable',
+        phase: 'candidate',
+        sha: at('candidate'),
+        gate: 'ui',
+        passed: false,
+        command: [],
+        exitCode: -1,
+        log: '',
+        digest: digestOf('na'),
+        summary: 'Не применим',
+        notApplicable: record(gate, at('candidate')),
+      }),
+    /уже исполнялся на этом SHA/,
+  );
+  for (const phase of ['candidate', 'integration'] as const) {
+    run(phase, 'unit', true);
+    run(phase, 'independent-review', true);
+  }
+  run('integration', 'ui', true);
+  // Решает исход исполнения (FAIL кандидата), а не отсутствие записи.
+  assert.throws(() => e.finish(a.id, a.token, sha('b')), /Нет PASS: candidate\/ui$/);
+  store.close();
+});
+
+/** Коммит в target ref мимо harness: файл поверх текущей головы (без checkout). */
+function externalCommit(r: ReturnType<typeof repo>, ref: string, path: string, text: string) {
+  const index = join(mkdtempSync(join(tmpdir(), 'harness-index-')), 'index');
+  const run = (args: string[], input?: string) =>
+    execFileSync('git', args, {
+      cwd: r.dir,
+      encoding: 'utf8',
+      input,
+      env: {
+        ...process.env,
+        GIT_INDEX_FILE: index,
+        GIT_AUTHOR_NAME: 't',
+        GIT_AUTHOR_EMAIL: 't@t',
+        GIT_COMMITTER_NAME: 't',
+        GIT_COMMITTER_EMAIL: 't@t',
+      },
+    }).trim();
+  const head = run(['rev-parse', ref]);
+  run(['read-tree', head]);
+  const blob = run(['hash-object', '-w', '--stdin'], text);
+  run(['update-index', '--add', '--cacheinfo', `100644,${blob},${path}`]);
+  const commit = run(['commit-tree', run(['write-tree']), '-p', head, '-m', 'external ' + path]);
+  run(['update-ref', ref, commit, head]);
+}
+
+test('runner: решение от последнего зелёного SHA по diff Git — правка target мимо harness и задача с суженной областью исполняют gate', async () => {
+  const tasks: [string, Record<string, string>, string[]][] = [
+    ['t1', { 'src/greet.js': greet }, ['unit', 'ui']],
+    ['t2', { 'src/a.js': 'exports.a = 1;\n' }, ['unit', 'ui']],
+    ['t3', { 'src/b.js': 'exports.b = 1;\n' }, ['unit', 'ui']],
+    ['t4', { 'src/c.js': 'exports.c = 1;\n' }, ['unit', 'ui']],
+    ['t5', { 'web/n.js': 'exports.n = 1;\n' }, ['unit']],
+    ['t6', { 'src/d.js': 'exports.d = 1;\n' }, ['unit', 'ui']],
+    ['t7', { 'src/e.js': 'exports.e = 1;\n' }, ['unit', 'ui']],
   ];
-  const ctx = setup({
+  const ref = () => ctx.policy.repositories[0]!.targetRef;
+  const ctx: ReturnType<typeof setup> = setup({
     scenario: { writer: tasks.map(([, files]) => implement(files)), reviewer: approve() },
     policy: (p: any) => {
       p.repositories[0].gates.push({
         id: 'ui',
         kind: 'check',
-        command: nodeGate(marker),
-        when: { paths: ['web/'] },
+        command: nodeGate('process.exit(0)'),
+        when: { paths: ['web/**'] },
       });
+    },
+    // Пока t2 пишет кандидата, в target попадает правка web/: кандидат её
+    // не видит (gate неприменим), интеграция видит (gate исполняется).
+    runner: {
+      hooks: {
+        implemented: ({ attempt }) => {
+          if (attempt.workId === 't2') externalCommit(ctx.repo, ref(), 'web/during.js', '1\n');
+        },
+      },
     },
     graph: (g: any) => {
       const base = g.orders[0];
-      g.orders = tasks.map(([id], i) => ({
+      g.orders = tasks.slice(0, 3).map(([id, , gates], i) => ({
         ...structuredClone(base),
         id,
         source: { ...base.source, ref: id },
         title: 'Задача ' + id,
-        writeScope: ['src', 'web', 'package.json'],
-        gates: ['unit', 'ui'],
+        writeScope: ['src', 'web'],
+        gates,
         dependsOn: i ? [tasks[i - 1]![0]] : [],
       }));
     },
   });
+  await runAll(ctx);
+  // Правка web/ мимо harness после t3; вторая доска: t4 — только src/, t5
+  // (суженная область без ui) правит web/, t6 и t7 — только src/.
+  externalCommit(ctx.repo, ref(), 'web/outside.js', '2\n');
+  const first = ctx.graph as any;
+  const outsideCheck = structuredClone(first);
+  outsideCheck.id = 'g2';
+  outsideCheck.source = { ...first.source, ref: 'g2' };
+  outsideCheck.orders = tasks.slice(3).map(([id, , gates], i) => ({
+    ...structuredClone(first.orders[0]),
+    id,
+    source: { ...first.orders[0].source, ref: id },
+    title: 'Задача ' + id,
+    writeScope: ['src', 'web'],
+    gates,
+    dependsOn: i ? [tasks[3 + i - 1]![0]] : [],
+  }));
+  ctx.graph = workGraphSchema.parse(outsideCheck);
   await runAll(ctx);
   const outcome = ctx.engine.read((v) =>
     Object.fromEntries(
@@ -602,55 +782,86 @@ test('runner: diff из Git решает по фазам — первый про
         const attempt = v.attempts(id).find((x) => x.status === 'succeeded');
         return [
           id,
-          {
-            status: v.work(id)?.status,
-            ui: (['candidate', 'integration'] as const).map(
+          [
+            v.work(id)?.status,
+            ...(['candidate', 'integration'] as const).map(
               (phase) =>
-                attempt?.evidence.findLast((e) => e.gate === 'ui' && e.phase === phase)?.kind,
+                attempt?.evidence.findLast((e) => e.gate === 'ui' && e.phase === phase)?.kind ??
+                '-',
             ),
-          },
+          ],
         ];
       }),
     ),
   );
   assert.deepEqual(outcome, {
-    // Определение ещё не проходило integration принятой попытки — исполняется.
-    t1: { status: 'done', ui: ['test', 'test'] },
-    t2: { status: 'done', ui: ['not-applicable', 'not-applicable'] },
-    t3: { status: 'done', ui: ['test', 'test'] },
-    // Манифест — неявный вход любого условного gate.
-    t4: { status: 'done', ui: ['test', 'test'] },
+    // Зелёного SHA под этим основанием ещё нет — исполняется.
+    t1: ['done', 'test', 'test'],
+    // Кандидат не задел web/, интеграция принесла web/during.js.
+    t2: ['done', 'not-applicable', 'test'],
+    t3: ['done', 'not-applicable', 'not-applicable'],
+    // Правка web/ мимо harness — между зелёным SHA (t2) и базой.
+    t4: ['done', 'test', 'test'],
+    t5: ['done', '-', '-'],
+    // Правка web/ задачей без ui в области — между зелёным SHA (t4) и базой.
+    t6: ['done', 'test', 'test'],
+    t7: ['done', 'not-applicable', 'not-applicable'],
   });
-  const { t1, t2 } = ctx.engine.read((v) => ({
-    t1: v.attempts('t1').find((x) => x.status === 'succeeded')!,
-    t2: v.attempts('t2').find((x) => x.status === 'succeeded')!,
-  }));
-  const gate = ctx.policy.repositories[0]!.gates.find((g) => g.id === 'ui')!;
+  const attemptOf = (id: string) =>
+    ctx.engine.read((v) => v.attempts(id).find((x) => x.status === 'succeeded')!);
+  const t1 = attemptOf('t1');
+  const t3 = attemptOf('t3');
+  const t6 = attemptOf('t6');
+  const t7 = attemptOf('t7');
   assert.ok(
-    t1.evidence.some(
-      (e) => e.gate === 'ui' && e.kind === 'test' && e.gateDigest === gateDigest(gate),
-    ),
-    'исполненный условный gate несёт digest определения',
+    t1.evidence.some((e) => e.gate === 'ui' && e.kind === 'test' && e.gateBasis),
+    'исполненный условный gate несёт основание',
   );
-  const skip = t2.evidence.find((e) => e.kind === 'not-applicable' && e.phase === 'integration')!;
-  assert.deepEqual(skip.notApplicable!.files, ['src/extra.js']);
+  // Diff t3 — от зелёного SHA t2 (интеграция), а не от базы t3.
+  const skip3 = t3.evidence.find((e) => e.kind === 'not-applicable' && e.phase === 'integration')!;
   assert.deepEqual(
-    skip.notApplicable!.ranges.map((r) => r.to),
-    [t2.candidateSha, t2.integrationSha],
+    skip3.notApplicable!.ranges.map((r) => [r.from, r.to]),
+    [
+      [attemptOf('t2').integrationSha, t3.candidateSha],
+      [attemptOf('t2').integrationSha, t3.integrationSha],
+    ],
   );
-  assert.equal(skip.passed, false);
+  assert.deepEqual(skip3.notApplicable!.files, ['src/b.js']);
+  const skip7 = t7.evidence.find((e) => e.kind === 'not-applicable' && e.phase === 'integration')!;
+  assert.equal(skip7.notApplicable!.ranges[0]!.from, t6.integrationSha);
   // Receipt принятой попытки с неприменимым gate принимает получатель с той же политикой.
-  const result = runResult(t2, '0.1.0-test');
-  const order = ctx.engine.read((v) => v.work('t2')!.order);
+  const order = ctx.engine.read((v) => v.work('t7')!.order);
   assert.deepEqual(
-    resultProblems(result, {
+    resultProblems(runResult(t7, '0.1.0-test'), {
       order,
-      graphId: ctx.graph.id,
+      graphId: 'g2',
       contracts: [],
       policy: ctx.policy,
       contextDigest: null,
     }),
     [],
   );
+  // Покрытие набора: объединённый diff, собранный harness от зелёных SHA
+  // записей неприменимости до итогового SHA.
+  const final = ctx.repo.git('rev-parse', ref());
+  const evidence = [t3, t7].flatMap((a) => a.evidence);
+  const union = await coverageChanges(ctx.repo.dir, evidence, final);
+  assert.equal(union.complete, true);
+  const works = [t3, t7].map((a) => ({
+    repositoryId: 'app',
+    resultSha: a.integrationSha,
+    evidence: a.evidence,
+  }));
+  // От зелёного SHA t3 (t2) до итога задет web/ — gate непокрыт.
+  assert.deepEqual(uncoveredGates(ctx.policy.repositories, works, { app: union }), [
+    { repositoryId: 'app', gates: ['ui'] },
+  ]);
+  // Только t7: от его зелёного SHA (t6) web/ не задет — покрыт.
+  const only7 = await coverageChanges(ctx.repo.dir, t7.evidence, final);
+  assert.deepEqual(uncoveredGates(ctx.policy.repositories, [works[1]!], { app: only7 }), []);
+  // Diff хоста не от зелёного SHA t3 (от базы t7) — считается отсутствующим.
+  assert.deepEqual(uncoveredGates(ctx.policy.repositories, works, { app: only7 }), [
+    { repositoryId: 'app', gates: ['ui'] },
+  ]);
   ctx.store.close();
 });

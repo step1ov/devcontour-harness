@@ -126,8 +126,9 @@ export function unprovenReason(
  *
  * Gate с `when.paths`, который хотя бы одно поручение признало неприменимым
  * (`not-applicable` на integration), решается по объединённому diff набора
- * (`changes[repositoryId]`, например `changedPaths` от базы каждого поручения
- * до итогового SHA): задетый diff (или без `changes`, или под другим
+ * (`changes[repositoryId]`: `changedPaths` от зелёного SHA каждой такой записи
+ * — `notApplicable.ranges[0].from` — до итогового SHA; полный, с одним концом,
+ * иначе считается отсутствующим): задетый diff (или без `changes`, или под другим
  * определением gate) он непокрыт, даже если другое поручение его прошло, —
  * хост исполняет его один раз на итоговом SHA; не задетый — неприменим к
  * набору и не непокрыт.
@@ -168,7 +169,22 @@ export function uncoveredGates(
         if (!covered.has(gate.id)) missing.push(gate.id);
         continue;
       }
-      const changed = changes?.[repositoryId];
+      // Объединённый diff засчитывается, только если он полон, у всех пар
+      // один конец (итоговый SHA) и он начинается от зелёного SHA (`ranges[0].from`
+      // записи неприменимости) каждого поручения, где gate не исполнялся.
+      // Иначе diff хоста не доказывает покрытия и считается отсутствующим.
+      const given = changes?.[repositoryId];
+      const ends = new Set(given?.ranges.map((r) => r.to));
+      const starts = new Set(given?.ranges.map((r) => r.from));
+      const changed =
+        given?.complete &&
+        ends.size === 1 &&
+        skipped.every((e) => {
+          const from = e.notApplicable?.ranges[0]?.from;
+          return from !== undefined && starts.has(from);
+        })
+          ? given
+          : undefined;
       const same = skipped.every((e) => e.notApplicable?.gateDigest === gateDigest(gate));
       const applies =
         !changed ||

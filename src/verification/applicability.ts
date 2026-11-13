@@ -1,6 +1,9 @@
-import { posix } from 'node:path';
+import { existsSync } from 'node:fs';
+import { posix, resolve } from 'node:path';
 import {
   HARNESS_PROJECT_DIR,
+  digestOf,
+  type ExecutionPolicy,
   gateApplicabilityLimits,
   gateDigest,
   sha256,
@@ -41,7 +44,10 @@ const globCache = new Map<string, RegExp>();
 export function gatePathRegExp(pattern: string): RegExp {
   const cached = globCache.get(pattern);
   if (cached) return cached;
-  const body = pattern.endsWith('/') ? pattern.slice(0, -1) : pattern;
+  const normal = pattern.normalize('NFC');
+  const trimmed = normal.endsWith('/') ? normal.slice(0, -1) : normal;
+  // `X/**` задевает и сам путь `X` (подмодуль, файл вместо каталога).
+  const body = trimmed.endsWith('/**') ? trimmed.slice(0, -3) : trimmed;
   let re = '';
   for (let i = 0; i < body.length; i++) {
     const c = body[i]!;
@@ -67,7 +73,8 @@ export function gatePathRegExp(pattern: string): RegExp {
     else if (c === ',' && openBrace(body, i)) re += '|';
     else re += c.replace(/[.+^$()|\\]/g, '\\$&');
   }
-  const out = new RegExp('^(?:' + re + ')(?:/.*)?$', 's');
+  // Без учёта регистра и в NFC: лишнее совпадение только чаще исполняет gate.
+  const out = new RegExp('^(?:' + re + ')(?:/.*)?$', 'si');
   globCache.set(pattern, out);
   return out;
 }
@@ -75,10 +82,28 @@ export function gatePathRegExp(pattern: string): RegExp {
 const openBrace = (body: string, at: number) =>
   body.lastIndexOf('{', at) > body.lastIndexOf('}', at);
 
-/** Пути, которые задевает хотя бы один шаблон. */
+/** Буквальный префикс шаблона до первого glob-символа, по целым сегментам. */
+const literalPrefix = (pattern: string) => {
+  const normal = pattern.normalize('NFC').toLowerCase();
+  const glob = normal.search(/[*?{]/);
+  if (glob < 0) return normal.replace(/\/$/, '');
+  return normal.slice(0, normal.lastIndexOf('/', glob) + 1).replace(/\/$/, '');
+};
+
+/**
+ * Пути, которые задевает хотя бы один шаблон: совпадение glob или путь —
+ * каталог-предок буквального префикса шаблона (`vendor` для `vendor/lib/**`:
+ * файл или подмодуль на месте каталога шаблона).
+ */
 export function matchingPaths(patterns: readonly string[], files: readonly string[]) {
   const res = patterns.map(gatePathRegExp);
-  return files.filter((f) => res.some((re) => re.test(f)));
+  const prefixes = patterns.map(literalPrefix).filter(Boolean);
+  return files.filter((f) => {
+    const path = f.normalize('NFC');
+    if (res.some((re) => re.test(path))) return true;
+    const lower = path.toLowerCase();
+    return prefixes.some((p) => p === lower || p.startsWith(lower + '/'));
+  });
 }
 
 /**
@@ -93,12 +118,28 @@ export async function changedPaths(
 ): Promise<ChangedPaths> {
   const files = new Set<string>();
   try {
+    // Замены объектов и grafts подменяют историю для git: такой diff не
+    // доказывает ничего, и условные gates исполняются.
+    const replaced = await gitRawOutput(cwd, 'for-each-ref', '--count=1', 'refs/replace/');
+    const common = (await gitRawOutput(cwd, 'rev-parse', '--git-common-dir')).trim();
+    if (replaced.trim() || existsSync(resolve(cwd, common, 'info', 'grafts')))
+      return {
+        ranges,
+        files: [],
+        complete: false,
+        problem: 'в репозитории есть refs/replace или info/grafts',
+      };
     for (const { from, to } of ranges) {
+      // Подмодули — всегда (`ignore` из .gitmodules пишет исполнитель),
+      // без относительных путей и textconv.
       const text = await gitRawOutput(
         cwd,
         'diff',
         '--no-renames',
         '--no-ext-diff',
+        '--no-textconv',
+        '--no-relative',
+        '--ignore-submodules=none',
         '--name-only',
         '-z',
         from,
@@ -130,14 +171,21 @@ export async function changedPaths(
  * меняет то, что ставится и чем собирается, — любой условный gate исполняется.
  */
 const installInputs =
-  /(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|\.yarnrc\.yml|bun\.lockb?|\.npmrc|\.pnpmfile\.cjs|\.nvmrc|\.node-version|\.tool-versions|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|go\.work|go\.work\.sum|pyproject\.toml|poetry\.lock|uv\.lock|Pipfile|Pipfile\.lock|requirements[^/]*\.txt|Gemfile|Gemfile\.lock|composer\.json|composer\.lock)$/;
+  /(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|\.yarnrc\.yml|bun\.lockb?|\.npmrc|\.pnpmfile\.cjs|\.nvmrc|\.node-version|\.tool-versions|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|go\.work|go\.work\.sum|pyproject\.toml|poetry\.lock|uv\.lock|Pipfile|Pipfile\.lock|requirements[^/]*\.txt|Gemfile|Gemfile\.lock|composer\.json|composer\.lock|\.gitattributes|\.gitmodules|\.lfsconfig)$/i;
 
-const under = (path: string, prefix: string) =>
-  prefix === '.' ||
-  prefix === '' ||
-  path === prefix ||
-  path === prefix.replace(/\/$/, '') ||
-  path.startsWith(prefix.endsWith('/') ? prefix : prefix + '/');
+const fold = (path: string) => path.normalize('NFC').toLowerCase();
+/** Путь внутри префикса (без учёта регистра, NFC): лишнее совпадение только чаще исполняет gate. */
+const under = (raw: string, rawPrefix: string) => {
+  const path = fold(raw);
+  const prefix = fold(rawPrefix);
+  return (
+    prefix === '.' ||
+    prefix === '' ||
+    path === prefix ||
+    path === prefix.replace(/\/$/, '') ||
+    path.startsWith(prefix.endsWith('/') ? prefix : prefix + '/')
+  );
+};
 
 /** Пути в argv gate, относительные корню репозитория (с учётом `cwd`). */
 function commandPaths(gate: Pick<GatePolicy, 'command' | 'cwd'>) {
@@ -174,6 +222,35 @@ export function implicitInput(
   );
 }
 
+/**
+ * Основание исполнения условного gate: его определение (`gateDigest`),
+ * описания его ресурсов, окружение, lifecycle, подготовка, хранилище
+ * зависимостей и toolchain репозитория, изоляция и версия harness. Зелёный
+ * SHA gate засчитывается только под тем же основанием: смена любого из них
+ * исполняет gate заново.
+ */
+export function gateBasis(
+  policy: Pick<ExecutionPolicy, 'resources' | 'environment' | 'lifecycle' | 'isolation'>,
+  repo: Pick<
+    ExecutionPolicy['repositories'][number],
+    'environment' | 'lifecycle' | 'prepare' | 'dependencyStore' | 'toolchain'
+  >,
+  gate: GatePolicy,
+  harnessVersion: string,
+) {
+  return digestOf({
+    gate: gateDigest(gate),
+    resources: policy.resources.filter((r) => gate.resources?.includes(r.id)),
+    environment: [policy.environment, repo.environment],
+    lifecycle: repo.lifecycle ?? policy.lifecycle,
+    prepare: repo.prepare,
+    dependencyStore: repo.dependencyStore,
+    toolchain: repo.toolchain,
+    isolation: policy.isolation,
+    harness: harnessVersion,
+  });
+}
+
 /** Решение по одному gate с `when`: исполнять (с причиной) или нет (с записью). */
 export type PathDecision =
   { applies: true; reason: string } | { applies: false; record: GateApplicability };
@@ -198,7 +275,8 @@ export function pathApplicability(
       patterns: [...gate.when.paths],
       ranges: changed.ranges.map(({ from, to }) => ({ from, to })),
       count: changed.files.length,
-      files: changed.files.slice(0, gateApplicabilityLimits.files),
+      // Длинный путь (их пишет исполнитель) не перечисляется: он в `count` и `pathsDigest`.
+      files: changed.files.filter((f) => f.length <= 1000).slice(0, gateApplicabilityLimits.files),
       pathsDigest: sha256(changed.files.join('\0')),
     },
   };
@@ -227,11 +305,14 @@ export interface GateDecisionInput {
   repo: { gates: GatePolicy[]; protectedPaths: readonly string[] };
   /** Область фазы в порядке исполнения. */
   scope: GatePolicy[];
-  changed: ChangedPaths;
+  /**
+   * Diff фазы условного gate от его последнего зелёного SHA (integration
+   * принятой попытки под тем же основанием gate, предок базы попытки) до
+   * SHA фазы; undefined — такого SHA нет, и gate исполняется.
+   */
+  changedFor(gate: GatePolicy): ChangedPaths | undefined;
   /** `proofGates` поручения. */
   proof: ReadonlySet<string>;
-  /** Gate уже прошёл integration принятой попытки под этим определением (`gateDigest`). */
-  passedUnder(gate: GatePolicy, digest: string): boolean;
 }
 
 export interface GateDecision {
@@ -243,8 +324,8 @@ export interface GateDecision {
 
 /**
  * Решения по области фазы. Gate без `when` исполняется всегда. Условный
- * исполняется, если: он доказывает требование или договор; под своим
- * определением он ещё ни разу не прошёл integration принятой попытки; diff
+ * исполняется, если: он доказывает требование или договор; среди предков
+ * базы нет его зелёного SHA под тем же основанием (`changedFor`); diff
  * неизвестен, пуст или задевает его путь или неявный вход; он — предпосылка
  * (`gatePrerequisites`: `dependsOn` или более ранний check gate) исполняемого
  * gate области. Иначе — запись `not-applicable`.
@@ -254,13 +335,14 @@ export function gateDecisions(input: GateDecisionInput): GateDecision[] {
     if (!gate.when) return { gate, run: true, reason: 'gate без when' };
     if (input.proof.has(gate.id))
       return { gate, run: true, reason: 'gate доказывает требование или договор поручения' };
-    if (!input.passedUnder(gate, gateDigest(gate)))
+    const changed = input.changedFor(gate);
+    if (!changed)
       return {
         gate,
         run: true,
-        reason: 'определение gate ещё не проходило integration принятой попытки',
+        reason: 'нет зелёного SHA gate под тем же основанием среди предков базы',
       };
-    const path = pathApplicability(input.repo, gate, input.changed);
+    const path = pathApplicability(input.repo, gate, changed);
     return path.applies
       ? { gate, run: true, reason: path.reason }
       : { gate, run: false, reason: 'diff не задел пути gate', record: path.record };
@@ -310,4 +392,31 @@ export function notApplicableProblem(input: {
   );
   if (dependent) return `gate ${gate.id} — предпосылка исполненного ${dependent}: нужен PASS`;
   return undefined;
+}
+
+/**
+ * Объединённый diff набора для `uncoveredGates`: от зелёного SHA каждой
+ * записи неприменимости фазы интеграции (`notApplicable.ranges[0].from`) до
+ * итогового SHA репозитория. Хосту не нужно собирать пары самому.
+ */
+export function coverageChanges(
+  cwd: string,
+  evidence: readonly {
+    kind: string;
+    phase: string;
+    notApplicable?: GateApplicability | undefined;
+  }[],
+  finalSha: string,
+): Promise<ChangedPaths> {
+  const anchors = [
+    ...new Set(
+      evidence
+        .filter((e) => e.kind === 'not-applicable' && e.phase === 'integration')
+        .flatMap((e) => (e.notApplicable?.ranges[0] ? [e.notApplicable.ranges[0].from] : [])),
+    ),
+  ];
+  return changedPaths(
+    cwd,
+    anchors.map((from) => ({ from, to: finalSha })),
+  );
 }
