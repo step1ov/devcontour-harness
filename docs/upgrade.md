@@ -831,8 +831,8 @@ alpha.44 матрицы форматов — новое поле и новое �
   evidence receipt — вид `not-applicable` и поле `notApplicable`, проекция
   попытки — `gates.notApplicable`. Правила — `docs/contracts.md`
   («ExecutionPolicy»).
-- Весь git хоста идёт с `GIT_NO_REPLACE_OBJECTS=1`: замены объектов в
-  репозитории не влияют на diff, область записи и применимость.
+- Весь git хоста идёт с `--no-replace-objects` (`gitHardening`): замены
+  объектов не влияют на diff, требования, область записи и применимость.
 - **Хост до обновления.** Прежний хост читает `attempt.gate` с
   `passed: false` и `notApplicable: true` как провал gate, а прежний
   получатель receipt отклоняет вид ссылки `not-applicable` (строгая схема).
@@ -844,12 +844,13 @@ alpha.44 матрицы форматов — новое поле и новое �
   testcase и сценариев читают только записи `test`.
 - Хост, который проверяет полный профиль набора на итоговом SHA
   (`uncoveredGates` → `runGatesAt`), передаёт `changes`, построенный
-  `coverageChanges(repoPath, evidence, finalSha)`, и gates политики harness.
+  `coverageChanges(repoPath, evidence, finalSha)`, итоговые SHA `finalShas`
+  и gates политики harness.
   Diff, не начинающийся от зелёного SHA каждой записи неприменимости, неполный
   или с разными концами, считается отсутствующим: такой gate исполняется на
   итоговом SHA.
-- Добавление или смена `when`, ресурсов, окружения, подготовки или версии
-  harness меняет основание gate: первый прогон после этого исполняет его.
+- Добавление или смена `when`, ресурсов, предпосылок, окружения, подготовки
+  или версии harness меняет основание gate: первый прогон после этого исполняет его.
   Добавление `when` меняет digest политики — согласования, привязанные к
   нему, нужно повторить.
 - Состояние с evidence `not-applicable` или полями `gateBasis` и

@@ -20,6 +20,9 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
  * исполняемые настройки, которые git читает сам.
  */
 export const gitHardening = [
+  // Объекты замены (`refs/replace/*`) пишет любой, кто пишет в репозиторий:
+  // git хоста читает только настоящие объекты (diff, требования, области).
+  '--no-replace-objects',
   '-c',
   // Older Git treats 'false' as a hook executable; empty disables the hook
   // there and is false for versions supporting the built-in fsmonitor.

@@ -145,6 +145,8 @@ export function uncoveredGates(
     evidence: readonly ProofRecord[];
   }[],
   changes?: Readonly<Record<string, ChangedPaths>>,
+  /** Итоговый SHA каждого репозитория: конец объединённого diff (`changes`). */
+  finalShas?: Readonly<Record<string, string>>,
 ) {
   const result: { repositoryId: string; gates: string[] }[] = [];
   for (const repositoryId of [...new Set(works.map((w) => w.repositoryId))]) {
@@ -170,7 +172,7 @@ export function uncoveredGates(
         continue;
       }
       // Объединённый diff засчитывается, только если он полон, у всех пар
-      // один конец (итоговый SHA) и он начинается от зелёного SHA (`ranges[0].from`
+      // один конец — переданный итоговый SHA (`finalShas`) — и он начинается от зелёного SHA (`ranges[0].from`
       // записи неприменимости) каждого поручения, где gate не исполнялся.
       // Иначе diff хоста не доказывает покрытия и считается отсутствующим.
       const given = changes?.[repositoryId];
@@ -179,6 +181,8 @@ export function uncoveredGates(
       const changed =
         given?.complete &&
         ends.size === 1 &&
+        finalShas?.[repositoryId] !== undefined &&
+        ends.has(finalShas[repositoryId]) &&
         skipped.every((e) => {
           const from = e.notApplicable?.ranges[0]?.from;
           return from !== undefined && starts.has(from);

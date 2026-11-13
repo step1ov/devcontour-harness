@@ -183,7 +183,9 @@ lockfile, установка докачивает разницу; `miss` — о�
 Шаблон задевает всё внутри совпавшего каталога (`web` и `web/` задевают
 `web/a.ts`), а изменённый путь, который сам — каталог-предок буквального
 префикса шаблона, задевает его (`vendor/lib/**` — gitlink `vendor/lib`, файл
-`vendor` на месте каталога). Сравнение — без учёта регистра и в NFC: лишнее
+`vendor` на месте каталога), как и путь, чьи сегменты совпадают с первыми
+сегментами шаблона до `**` (`packages/*/src/**` — gitlink `packages/ui`).
+Подмодули и ссылки под `**` называют в `when.paths` явно. Сравнение — без учёта регистра и в NFC: лишнее
 совпадение только чаще исполняет gate. Без поля поведение и digest политики
 прежние. `policyIssues` отклоняет репозиторий, у которого нет ни одного test
 gate без `when`, и `when` у генеративного gate (`property`). У
@@ -195,15 +197,16 @@ gate без `when`, и `when` у генеративного gate (`property`). �
 Решение принимает runner в каждой фазе попытки по настоящему diff Git, а не по
 отчёту исполнителя. Опора — **последний зелёный SHA** gate: integration SHA
 принятой попытки этого репозитория, где gate прошёл под тем же основанием
-`gateBasis` (определение `gateDigest`, описания его ресурсов, окружение,
+`gateBasis` (определение `gateDigest`, описания его ресурсов, определения и
+ресурсы его предпосылок `gatePrerequisites` транзитивно, окружение,
 lifecycle, `prepare`, хранилище зависимостей и toolchain репозитория,
 изоляция, версия harness) и который — предок базы попытки. Нет такого SHA —
 gate исполняется. Diff кандидата — `зелёный..candidate`, интеграции — ещё и
 `зелёный..integration`: всё, что попало в target после зелёного SHA (другие
 задачи, задачи с суженной областью, коммиты мимо harness), входит в решение.
 Diff — `git diff --no-renames --no-ext-diff --no-textconv --no-relative
---ignore-submodules=none --name-only` при `GIT_NO_REPLACE_OBJECTS=1` (так
-вызывается весь git хоста); переименование даёт оба пути, удаление, смена
+--ignore-submodules=none --name-only` с `--no-replace-objects` (его несёт
+`gitHardening`, то есть каждый вызов git хоста через `hostGitArgs`); переименование даёт оба пути, удаление, смена
 режима и gitlink — свои пути. Есть `refs/replace/*` или `info/grafts` — diff
 неполон. Условный gate **исполняется**, если: он назван требованием
 поручения, договором проверки (свойство, эталон, обязательство) или это
@@ -241,15 +244,22 @@ Diff — `git diff --no-renames --no-ext-diff --no-textconv --no-relative
 неприменимые gates ссылками evidence вида `not-applicable` с `notApplicable`.
 Функции: `changedPaths`, `coverageChanges`, `gateBasis`, `gateDecisions`,
 `pathApplicability`, `matchingPaths`, `gatePathRegExp`, `proofGates`,
-`notApplicableProblem`, `gateDigest`.
+`notApplicableProblem`, `gateDigest`. Основание включает версию harness:
+после обновления пакета каждый условный gate исполняется один раз. Не входят
+в основание образ контейнера по изменяемому тегу и переменные окружения
+хоста, передаваемые по имени (`environment.inherit`): их смену gate не видит.
+`matchingPaths` и `gatePathRegExp` намеренно расширяют совпадение (регистр,
+NFC, каталоги-предки) и годятся только там, где совпадение исполняет
+проверку, а не разрешает запись.
 
 Покрытие набора поручений (`uncoveredGates(repositories, works, changes?)`,
-`Engine.uncoveredGates(workIds, changes?)`): gate с `when`, признанный
+`Engine.uncoveredGates(workIds, changes?, finalShas?)`): gate с `when`, признанный
 неприменимым на integration хотя бы одним поручением, решается по
 объединённому diff набора `changes[repositoryId]`. Его строит
 `coverageChanges(repoPath, evidence, finalSha)`: от зелёного SHA каждой такой
 записи (`notApplicable.ranges[0].from`) до итогового SHA. Diff засчитывается,
-только если он полон, у всех пар один конец и среди начал есть зелёный SHA
+только если он полон, у всех пар один конец — итоговый SHA репозитория из
+`finalShas` — и среди начал есть зелёный SHA
 каждой записи неприменимости gate; иначе он считается отсутствующим. Задетый
 diff — или без `changes`, или под другим определением gate — gate непокрыт,
 даже если другое поручение его прошло, и хост исполняет его один раз на

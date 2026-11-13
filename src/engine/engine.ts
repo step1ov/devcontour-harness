@@ -1590,7 +1590,11 @@ export class Engine {
    * diff набора `changes` (`uncoveredGates` проверки). Решение о приёмке набора
    * поручений — за хостом.
    */
-  uncoveredGates(workIds: string[], changes?: Readonly<Record<string, ChangedPaths>>) {
+  uncoveredGates(
+    workIds: string[],
+    changes?: Readonly<Record<string, ChangedPaths>>,
+    finalShas?: Readonly<Record<string, string>>,
+  ) {
     return this.read((v) => {
       const works = workIds.map((id) => v.work(id)).filter((w): w is WorkState => !!w);
       const repositories = [...new Set(works.map((w) => w.order.repositoryId))].map((id) =>
@@ -1610,6 +1614,7 @@ export class Engine {
             .flatMap((a) => a.evidence),
         })),
         changes,
+        finalShas,
       );
     });
   }

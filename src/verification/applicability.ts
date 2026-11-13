@@ -98,12 +98,50 @@ const literalPrefix = (pattern: string) => {
 export function matchingPaths(patterns: readonly string[], files: readonly string[]) {
   const res = patterns.map(gatePathRegExp);
   const prefixes = patterns.map(literalPrefix).filter(Boolean);
+  const segmented = patterns.map(patternSegments);
   return files.filter((f) => {
     const path = f.normalize('NFC');
     if (res.some((re) => re.test(path))) return true;
     const lower = path.toLowerCase();
-    return prefixes.some((p) => p === lower || p.startsWith(lower + '/'));
+    if (prefixes.some((p) => p === lower || p.startsWith(lower + '/'))) return true;
+    const parts = path.split('/');
+    return segmented.some((segments) => coversPrefix(segments, parts));
   });
+}
+
+/** Сегменты шаблона по `/` вне `{}`. */
+function patternSegments(pattern: string) {
+  const body = pattern.normalize('NFC').replace(/\/$/, '');
+  const out: string[] = [];
+  let depth = 0;
+  let current = '';
+  for (const c of body) {
+    if (c === '{') depth++;
+    if (c === '}') depth--;
+    if (c === '/' && depth === 0) {
+      out.push(current);
+      current = '';
+    } else current += c;
+  }
+  out.push(current);
+  return out;
+}
+
+/**
+ * Изменённый путь — каталог (подмодуль, ссылка), внутри которого шаблон
+ * может что-то задеть: его сегменты совпадают с первыми сегментами шаблона
+ * (`packages/ui` для `packages/*\/src/**`); до `**` — не дальше.
+ */
+function coversPrefix(segments: string[], parts: string[]) {
+  if (parts.length >= segments.length) return false;
+  for (let i = 0; i < parts.length; i++) {
+    // Под `**` любой путь мог бы быть каталогом: подмодули и ссылки там
+    // называют в `when.paths` явно (иначе любой файл исполнял бы gate).
+    if (segments[i] === '**') return false;
+    if (segments[i]!.includes('/')) return true;
+    if (!gatePathRegExp(segments[i]!).test(parts[i]!)) return false;
+  }
+  return true;
 }
 
 /**
@@ -224,7 +262,8 @@ export function implicitInput(
 
 /**
  * Основание исполнения условного gate: его определение (`gateDigest`),
- * описания его ресурсов, окружение, lifecycle, подготовка, хранилище
+ * описания его ресурсов, определения и ресурсы его предпосылок
+ * (`gatePrerequisites`, транзитивно), окружение, lifecycle, подготовка, хранилище
  * зависимостей и toolchain репозитория, изоляция и версия harness. Зелёный
  * SHA gate засчитывается только под тем же основанием: смена любого из них
  * исполняет gate заново.
@@ -233,14 +272,22 @@ export function gateBasis(
   policy: Pick<ExecutionPolicy, 'resources' | 'environment' | 'lifecycle' | 'isolation'>,
   repo: Pick<
     ExecutionPolicy['repositories'][number],
-    'environment' | 'lifecycle' | 'prepare' | 'dependencyStore' | 'toolchain'
+    'gates' | 'environment' | 'lifecycle' | 'prepare' | 'dependencyStore' | 'toolchain'
   >,
   gate: GatePolicy,
   harnessVersion: string,
 ) {
+  const resources = (g: GatePolicy) => policy.resources.filter((r) => g.resources?.includes(r.id));
+  // Предпосылки (`dependsOn` или, в режиме порядка массива, более ранние
+  // check gates) исполняются перед gate в том же дереве: их вывод — его вход.
+  const prerequisites = gatePrerequisites(repo.gates, gate.id)
+    .sort()
+    .map((id) => repo.gates.find((g) => g.id === id)!)
+    .map((g) => ({ id: g.id, gate: gateDigest(g), resources: resources(g) }));
   return digestOf({
     gate: gateDigest(gate),
-    resources: policy.resources.filter((r) => gate.resources?.includes(r.id)),
+    resources: resources(gate),
+    prerequisites,
     environment: [policy.environment, repo.environment],
     lifecycle: repo.lifecycle ?? policy.lifecycle,
     prepare: repo.prepare,
