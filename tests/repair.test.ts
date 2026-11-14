@@ -519,8 +519,14 @@ test('T15: отказ и остановка задания ставят врем
     ['running', 'queued', 'running', 'failed'],
   );
   // Повтор человека возвращает задание в очередь: времени окончания нет.
+  clock.now += 1000;
   const retried = flow.retry(job.key);
   assert.equal(retried.finishedAt, undefined);
+  assert.deepEqual(
+    retried.history.at(-1),
+    { at: at(), stage: 0, event: 'queued' },
+    'повтор — событие истории',
+  );
   assert.equal(flow.get(job.key).finishedAt, undefined);
   // Исчерпанные попытки при захвате — тоже окончание.
   clock.now += 1000;

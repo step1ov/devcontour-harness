@@ -340,7 +340,11 @@ export class WorkflowQueue {
         );
       if (!this.current(job, tx))
         throw new HarnessError('APPROVAL_STALE', 'Вход задания изменился: нужно новое задание');
-      const next: WorkflowJob = { ...job, status: 'queued' };
+      const next: WorkflowJob = {
+        ...job,
+        status: 'queued',
+        history: [...job.history, { at: iso(this.now()), stage: job.stage, event: 'queued' }],
+      };
       delete next.error;
       delete next.finishedAt;
       tx.putLocal('workflow-jobs', WorkflowQueue.owner(owner), key, next);
