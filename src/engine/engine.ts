@@ -839,7 +839,8 @@ export class Engine {
    * Пока есть ожидание `base-check`, пауза остаётся и переходит в паузу
    * `base-check`: устранённый отказ не подтверждает перенесённую базу (это
    * делает человек через `resume`), а пауза `runtime` без классов отказа
-   * звала бы чинить окружение.
+   * звала бы чинить окружение. Новая причина — новая пауза: `pausedAt` —
+   * время перехода (как у перехода хоста DevContour).
    */
   clearFailure(kinds: FailureKind[]) {
     return this.tx('scheduler.started', (tx) => {
@@ -853,7 +854,7 @@ export class Engine {
         pauseFailures: left.length ? left : undefined,
         ...(cleared
           ? waits
-            ? { pauseReason: 'base-check' as const }
+            ? { pauseReason: 'base-check' as const, pausedAt: iso(this.now()) }
             : { paused: false, pauseReason: undefined, pausedAt: undefined }
           : {}),
       };

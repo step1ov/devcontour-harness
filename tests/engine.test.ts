@@ -885,8 +885,10 @@ test('T14: ожидание base-check держит выдачу без флаг
     at: new Date(clock.now).toISOString(),
   };
   store.transact('scheduler.paused', (tx) => tx.setControl({ ...tx.control(), waits: [wait] }));
+  clock.now += 5000;
   engine.clearFailure(['provider-auth']);
   const control = engine.read((v) => v.control());
+  assert.equal(control.pausedAt, new Date(clock.now).toISOString(), 'время паузы — время перехода');
   assert.equal(control.paused, true, 'снятие отказа не снимает паузу, пока база не подтверждена');
   assert.deepEqual(control.pauseFailures, undefined, 'класс отказа снят');
   assert.equal(control.pauseReason, 'base-check', 'пауза держится ожиданием базы, а не отказом');
