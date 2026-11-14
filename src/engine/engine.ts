@@ -836,23 +836,30 @@ export class Engine {
 
   /**
    * Снять паузу отказа после устранения причины: только названные классы.
-   * Пока есть ожидание `base-check`, пауза остаётся: устранённый отказ не
-   * подтверждает перенесённую базу (это делает человек через `resume`).
+   * Пока есть ожидание `base-check`, пауза остаётся и переходит в паузу
+   * `base-check`: устранённый отказ не подтверждает перенесённую базу (это
+   * делает человек через `resume`), а пауза `runtime` без классов отказа
+   * звала бы чинить окружение.
    */
   clearFailure(kinds: FailureKind[]) {
     return this.tx('scheduler.started', (tx) => {
       const control = tx.control();
       const left = (control.pauseFailures ?? []).filter((k) => !kinds.includes(k));
       if (left.length === (control.pauseFailures ?? []).length) return control;
-      const unpause =
-        !left.length && control.pauseReason === 'runtime' && !awaitsBaseCheck(control);
+      const cleared = !left.length && control.pauseReason === 'runtime';
+      const waits = cleared && awaitsBaseCheck(control);
       const next = {
         ...control,
         pauseFailures: left.length ? left : undefined,
-        ...(unpause ? { paused: false, pauseReason: undefined, pausedAt: undefined } : {}),
+        ...(cleared
+          ? waits
+            ? { pauseReason: 'base-check' as const }
+            : { paused: false, pauseReason: undefined, pausedAt: undefined }
+          : {}),
       };
       tx.setControl(next);
-      if (unpause) tx.emit({ type: 'control.resumed', payload: { reason: 'runtime' } });
+      if (waits) tx.emit({ type: 'control.paused', payload: { reason: 'base-check' } });
+      else if (cleared) tx.emit({ type: 'control.resumed', payload: { reason: 'runtime' } });
       return next;
     });
   }

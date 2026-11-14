@@ -10,6 +10,7 @@ import { HarnessError, digestOf, type ErrorCode } from '../src/contracts/index.t
 import { Engine } from '../src/engine/engine.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
+import { queuePause } from '../src/projections/index.ts';
 import {
   engineOf,
   graphOf,
@@ -888,6 +889,25 @@ test('T14: ожидание base-check держит выдачу без флаг
   const control = engine.read((v) => v.control());
   assert.equal(control.paused, true, 'снятие отказа не снимает паузу, пока база не подтверждена');
   assert.deepEqual(control.pauseFailures, undefined, 'класс отказа снят');
+  assert.equal(control.pauseReason, 'base-check', 'пауза держится ожиданием базы, а не отказом');
+  assert.deepEqual(queuePause(control), {
+    code: 'PAUSED',
+    cause: 'not-ready',
+    actor: 'controller',
+    action: 'wait',
+  });
+  assert.deepEqual(
+    store
+      .events()
+      .filter((e) => e.type === 'control.paused' || e.type === 'control.resumed')
+      .map((e) => [e.type, (e.payload as { reason: string }).reason])
+      .slice(-2),
+    [
+      ['control.paused', 'runtime'],
+      ['control.paused', 'base-check'],
+    ],
+    'смена причины паузы — в журнале',
+  );
   assert.equal(engine.claim('c1'), undefined);
   // Флаг паузы снят мимо операции (другой путь хоста): выдачи всё равно нет.
   store.transact('scheduler.started', (tx) =>
@@ -898,7 +918,7 @@ test('T14: ожидание base-check держит выдачу без флаг
     engine.read((v) => engine.blockers(v.work('b')!, v)).some((b) => b.code === 'PAUSED'),
     'причина видна в blockers',
   );
-  // Ожидание другого вида выдачу не держит.
+  // Ожидание другого вида рядом с base-check выдачу не открывает.
   store.transact('scheduler.started', (tx) =>
     tx.setControl({ ...tx.control(), waits: [{ ...wait, kind: 'context-lock' }, wait] }),
   );
@@ -911,6 +931,11 @@ test('T14: ожидание base-check держит выдачу без флаг
   assert.deepEqual(
     engine.read((v) => v.control().waits?.map((w) => w.kind)),
     ['context-lock'],
+  );
+  // Осталось только ожидание context-lock, очередь без паузы: оно выдачу не держит.
+  assert.equal(
+    engine.read((v) => v.control().paused),
+    false,
   );
   assert.ok(engine.claim('c1'), 'после подтверждения выдача идёт');
 });
