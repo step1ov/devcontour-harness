@@ -293,11 +293,16 @@ export const handoffPackSchema = z.strictObject({
       ),
     })
     .optional(),
-  /** Восстановления заданий графов: потрачено против бюджета. */
+  /**
+   * Восстановления заданий графов: потрачено против бюджета. `key` — ключ
+   * задания (у графа после новой редакции их несколько: прежнее — `stale`);
+   * `status` — статус задания. У пакетов прежних версий ключа нет.
+   */
   repairs: z
     .array(
       z.strictObject({
         graphId: idSchema,
+        key: digestSchema.optional(),
         status: z.string().max(40),
         used: count,
         budget: count,

@@ -473,7 +473,13 @@ function build(
   const repairsAll = h.workflows
     .list()
     .filter((j) => j.kind === 'graph' && graphIds.has(j.id) && j.status !== 'completed')
-    .map((j) => ({ graphId: j.id, status: j.status, used: j.repairs ?? 0, budget: repairBudget }));
+    .map((j) => ({
+      graphId: j.id,
+      key: j.key,
+      status: j.status,
+      used: j.repairs ?? 0,
+      budget: repairBudget,
+    }));
   const repairs = repairsAll.slice(0, HANDOFF_LIMITS.repairs);
 
   const controller = status.controller

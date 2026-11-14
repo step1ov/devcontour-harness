@@ -274,6 +274,44 @@ test('handoff: пауза очереди и повтор controller — стро
   }
 });
 
+test('handoff: восстановления заданий несут ключ и статус задания — устаревшее отличимо от действующего', () => {
+  const ctx = hsetup({ scenario: {} });
+  const h = ctx.open();
+  try {
+    const g = ready(h.engine, graphOf({ a: [] }));
+    const old = h.workflows.start({ kind: 'graph', id: g.id, authorRuntime: 'claude' });
+    // Новая редакция графа: прежнее задание устаревает, действующее — другим ключом.
+    const g2 = ready(h.engine, graphOf({ a: [], b: [] }, '2'));
+    assert.equal(g2.id, g.id);
+    assert.equal(h.workflows.claim(old.key), undefined);
+    const current = h.workflows.start({ kind: 'graph', id: g.id, authorRuntime: 'claude' });
+    assert.notEqual(current.key, old.key);
+    const pack = handoffPack(h);
+    assert.deepEqual(
+      pack.repairs
+        .map((r) => [r.graphId, r.key, r.status])
+        .sort((x, y) => x[2]!.localeCompare(y[2]!)),
+      [
+        [g.id, current.key, 'queued'],
+        [g.id, old.key, 'stale'],
+      ],
+    );
+    assert.equal(handoffPackSchema.safeParse(pack).success, true);
+    // Пакет прежней версии без ключа остаётся допустимым.
+    const legacy = {
+      ...pack,
+      repairs: pack.repairs.map((r) => {
+        const copy = { ...r };
+        delete copy.key;
+        return copy;
+      }),
+    };
+    assert.equal(handoffPackSchema.safeParse(legacy).success, true);
+  } finally {
+    h.close();
+  }
+});
+
 test('handoff next: попытка без живого владельца — harness run, а не ожидание', () => {
   const ctx = hsetup({ scenario: {} });
   const h = ctx.open();
