@@ -496,6 +496,85 @@ test('T15: задание ставится идемпотентно; истёк�
   assert.notEqual(flow.start(request).key, job.key);
 });
 
+test('T15: отказ и остановка задания ставят время окончания и событие истории; повтор их снимает', () => {
+  const { engine, store, clock } = engineOf();
+  ready(engine, graphOf({ a: [] }));
+  const flow = new WorkflowQueue(store, engine.policy, () => clock.now);
+  const job = flow.start({ kind: 'graph', id: 'g', authorRuntime: 'codex', maxAttempts: 3 });
+  const at = () => new Date(clock.now).toISOString();
+  // Прерванная стадия возвращается в очередь: не окончена, но событие есть.
+  clock.now += 1000;
+  flow.fail(flow.claim(job.key)!, 'обрыв', true);
+  assert.equal(flow.get(job.key).status, 'queued');
+  assert.equal(flow.get(job.key).finishedAt, undefined);
+  assert.deepEqual(flow.get(job.key).history.at(-1), { at: at(), stage: 0, event: 'queued' });
+  clock.now += 1000;
+  flow.fail(flow.claim(job.key)!, 'сломалось');
+  const failed = flow.get(job.key);
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.finishedAt, at(), 'отказ ставит время окончания');
+  assert.deepEqual(failed.history.at(-1), { at: at(), stage: 0, event: 'failed' });
+  assert.deepEqual(
+    failed.history.map((h) => h.event),
+    ['running', 'queued', 'running', 'failed'],
+  );
+  // Повтор человека возвращает задание в очередь: времени окончания нет.
+  const retried = flow.retry(job.key);
+  assert.equal(retried.finishedAt, undefined);
+  assert.equal(flow.get(job.key).finishedAt, undefined);
+  // Исчерпанные попытки при захвате — тоже окончание.
+  clock.now += 1000;
+  flow.fail(flow.claim(job.key)!, 'снова');
+  assert.equal(flow.get(job.key).attempts, 3);
+  store.transact('workflow.updated', (tx) =>
+    tx.putLocal('workflow-jobs', WORKSPACE_OWNER, job.key, {
+      ...tx.local('workflow-jobs', WORKSPACE_OWNER, job.key)!,
+      status: 'queued',
+      finishedAt: undefined,
+    }),
+  );
+  clock.now += 1000;
+  assert.equal(flow.claim(job.key), undefined);
+  assert.equal(flow.get(job.key).status, 'failed');
+  assert.equal(flow.get(job.key).finishedAt, at(), 'исчерпанные попытки ставят время окончания');
+  // Устаревшее при захвате задание — тоже окончание.
+  const other = flow.start({ kind: 'graph', id: 'g', authorRuntime: 'codex' });
+  assert.equal(other.key, job.key);
+  engine.register(graphOf({ a: [], b: [] }, '2'), { trusted: () => false, reachable: () => true });
+  const second = flow.start({ kind: 'graph', id: 'g', authorRuntime: 'codex' });
+  clock.now += 1000;
+  const running = flow.claim(second.key)!;
+  engine.register(graphOf({ a: [], b: [], c: [] }, '3'), {
+    trusted: () => false,
+    reachable: () => true,
+  });
+  clock.now += 1000;
+  flow.fail(running, 'вход сменился');
+  assert.equal(flow.get(second.key).status, 'stale');
+  assert.equal(flow.get(second.key).finishedAt, at());
+  assert.equal(flow.get(second.key).history.at(-1)?.event, 'stale');
+  const third = flow.start({ kind: 'graph', id: 'g', authorRuntime: 'codex' });
+  engine.register(graphOf({ a: [], b: [], c: [], d: [] }, '4'), {
+    trusted: () => false,
+    reachable: () => true,
+  });
+  clock.now += 1000;
+  assert.equal(flow.claim(third.key), undefined);
+  assert.equal(flow.get(third.key).status, 'stale');
+  assert.equal(
+    flow.get(third.key).finishedAt,
+    at(),
+    'устаревшее при захвате ставит время окончания',
+  );
+  // Сохранённое задание прежней версии без времени окончания читается.
+  store.transact('workflow.updated', (tx) => {
+    const legacy = { ...tx.local('workflow-jobs', WORKSPACE_OWNER, job.key)! };
+    delete legacy.finishedAt;
+    tx.putLocal('workflow-jobs', WORKSPACE_OWNER, job.key, legacy);
+  });
+  assert.equal(flow.get(job.key).finishedAt, undefined);
+});
+
 test('Завершённое задание сохраняет израсходованные попытки стадий, а не сброшенный счётчик', () => {
   const { engine, store, clock } = engineOf();
   ready(engine, graphOf({ a: [] }));

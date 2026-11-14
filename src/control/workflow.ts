@@ -219,6 +219,7 @@ export class WorkflowQueue {
         next.leaseUntil = this.now() + this.policy.leaseMs;
         next.attempts = job.attempts + 1;
       }
+      if (next.status !== 'running') next.finishedAt = iso(this.now());
       next.history.push({ at: iso(this.now()), stage: job.stage, event: next.status });
       tx.putLocal('workflow-jobs', WorkflowQueue.owner(owner), key, next);
       return next.status === 'running' ? next : undefined;
@@ -286,15 +287,23 @@ export class WorkflowQueue {
     });
   }
 
-  /** Отказ стадии: прерванная — снова в очереди, изменившийся вход — `stale`, иначе `failed`. */
+  /**
+   * Отказ стадии: прерванная — снова в очереди, изменившийся вход — `stale`,
+   * иначе `failed`. Новый статус — событие истории; остановленное задание
+   * (`failed`, `stale`) получает время окончания.
+   */
   fail(job: WorkflowJob, message: string, interrupted = false) {
     this.store.transact('workflow.updated', (tx) => {
       const current = tx.local('workflow-jobs', WorkflowQueue.owner(job.owner), job.key);
       if (!current || current.token !== job.token || current.status !== 'running') return;
+      const at = iso(this.now());
+      const status = !this.current(job, tx) ? 'stale' : interrupted ? 'queued' : 'failed';
       const next: WorkflowJob = {
         ...current,
-        status: !this.current(job, tx) ? 'stale' : interrupted ? 'queued' : 'failed',
+        status,
         error: message.slice(0, 1000),
+        history: [...current.history, { at, stage: current.stage, event: status }],
+        ...(status === 'queued' ? {} : { finishedAt: at }),
       };
       delete next.token;
       delete next.leaseUntil;
@@ -333,6 +342,7 @@ export class WorkflowQueue {
         throw new HarnessError('APPROVAL_STALE', 'Вход задания изменился: нужно новое задание');
       const next: WorkflowJob = { ...job, status: 'queued' };
       delete next.error;
+      delete next.finishedAt;
       tx.putLocal('workflow-jobs', WorkflowQueue.owner(owner), key, next);
       return next;
     });

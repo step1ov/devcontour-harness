@@ -1114,8 +1114,13 @@ export const workflowJobSchema = z.strictObject({
   token: z.string().optional(),
   leaseUntil: z.number().int().min(0).optional(),
   startedAt: isoTimeSchema,
+  /**
+   * Время окончания: `completed`, `failed`, `stale`. Повтор человека его
+   * снимает. У заданий, остановленных прежними версиями, может отсутствовать.
+   */
   finishedAt: isoTimeSchema.optional(),
   error: z.string().optional(),
+  /** События стадий: захват (`running`), исход (`completed`, `failed`, `stale`, `queued`), восстановления. */
   history: z.array(
     z.strictObject({ at: isoTimeSchema, stage: z.number().int().min(0), event: z.string() }),
   ),
