@@ -24,6 +24,7 @@ import {
   type JointBudgetReset,
   type JointResetActor,
   type ControllerLease,
+  type ControlState,
   type Author,
   type CallRecord,
   type ContractDocument,
@@ -154,6 +155,9 @@ export interface EngineOptions {
 export type Phase = 'running' | 'verifying' | 'reviewing' | 'integrating';
 
 const iso = (ms: number) => new Date(ms).toISOString();
+/** Хост ждёт подтверждения перенесённой базы: выдача закрыта при любом `paused`. */
+const awaitsBaseCheck = (control: Pick<ControlState, 'waits'>) =>
+  (control.waits ?? []).some((w) => w.kind === 'base-check');
 
 /** Содержание поручения без номера редакции источника: одинаковое содержание — та же работа. */
 const contentDigest = (order: WorkState['order']) =>
@@ -799,7 +803,10 @@ export class Engine {
    * Снять паузу — решение человека (семантика DevContour `pause(false)`):
    * снимает паузу оператора, штатной остановки и отказа runtime вместе с её
    * классами отказов. Паузу операции reconfigure снимает только сама
-   * операция: `PAUSED`.
+   * операция: `PAUSED`. Это и явный маршрут человека «подтвердить базу и
+   * начать»: `resume` снимает ожидания `base-check`. Других путей снять их у
+   * движка нет — пока такое ожидание есть, `claim` не выдаёт работу при
+   * любом значении `paused`.
    */
   resume() {
     return this.tx('scheduler.started', (tx) => {
@@ -827,13 +834,18 @@ export class Engine {
     });
   }
 
-  /** Снять паузу отказа после устранения причины: только названные классы. */
+  /**
+   * Снять паузу отказа после устранения причины: только названные классы.
+   * Пока есть ожидание `base-check`, пауза остаётся: устранённый отказ не
+   * подтверждает перенесённую базу (это делает человек через `resume`).
+   */
   clearFailure(kinds: FailureKind[]) {
     return this.tx('scheduler.started', (tx) => {
       const control = tx.control();
       const left = (control.pauseFailures ?? []).filter((k) => !kinds.includes(k));
       if (left.length === (control.pauseFailures ?? []).length) return control;
-      const unpause = !left.length && control.pauseReason === 'runtime';
+      const unpause =
+        !left.length && control.pauseReason === 'runtime' && !awaitsBaseCheck(control);
       const next = {
         ...control,
         pauseFailures: left.length ? left : undefined,
@@ -1094,6 +1106,8 @@ export class Engine {
         code: 'PAUSED',
         message: 'Очередь на паузе: ' + (view.control().pauseReason ?? 'operator'),
       });
+    else if (awaitsBaseCheck(view.control()))
+      out.push({ code: 'PAUSED', message: 'Очередь ждёт подтверждения перенесённой базы' });
     const reconfigure = this.reconfiguring(view);
     if (reconfigure)
       out.push({
@@ -1197,6 +1211,9 @@ export class Engine {
           'Выдавать попытки может только действующий controller',
         );
       if (tx.control().paused || this.host.guards.claimBarrier(tx)) return undefined;
+      // Перенесённая база не подтверждена хостом: снятый мимо `resume` флаг
+      // паузы (например, восстановлением отказа) выдачу не открывает.
+      if (awaitsBaseCheck(tx.control())) return undefined;
       // Пока операция применяет политику, попытки не выдаются, даже если
       // человек снял паузу: попытка под прежней политикой не нужна.
       if (this.reconfiguring(tx)) return undefined;

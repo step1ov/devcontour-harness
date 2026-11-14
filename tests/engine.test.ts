@@ -871,3 +871,46 @@ test('Повтор gate интеграции: один на попытку, ис
     'второй повтор кандидата в той же попытке',
   );
 });
+
+test('T14: ожидание base-check держит выдачу без флага паузы; clearFailure его не снимает, resume человека — снимает', () => {
+  const { engine, store, clock } = engineOf();
+  ready(engine, graphOf({ a: [], b: [] }));
+  const a = engine.claim('c1')!;
+  engine.fail(a.id, a.token, 'Not logged in', { kind: 'provider-auth', blocked: true });
+  // Хост ждёт подтверждения перенесённой базы поверх паузы отказа.
+  const wait = {
+    kind: 'base-check' as const,
+    detail: 'base moved',
+    at: new Date(clock.now).toISOString(),
+  };
+  store.transact('scheduler.paused', (tx) => tx.setControl({ ...tx.control(), waits: [wait] }));
+  engine.clearFailure(['provider-auth']);
+  const control = engine.read((v) => v.control());
+  assert.equal(control.paused, true, 'снятие отказа не снимает паузу, пока база не подтверждена');
+  assert.deepEqual(control.pauseFailures, undefined, 'класс отказа снят');
+  assert.equal(engine.claim('c1'), undefined);
+  // Флаг паузы снят мимо операции (другой путь хоста): выдачи всё равно нет.
+  store.transact('scheduler.started', (tx) =>
+    tx.setControl({ ...tx.control(), paused: false, pauseReason: undefined }),
+  );
+  assert.equal(engine.claim('c1'), undefined, 'ожидание base-check держит выдачу без паузы');
+  assert.ok(
+    engine.read((v) => engine.blockers(v.work('b')!, v)).some((b) => b.code === 'PAUSED'),
+    'причина видна в blockers',
+  );
+  // Ожидание другого вида выдачу не держит.
+  store.transact('scheduler.started', (tx) =>
+    tx.setControl({ ...tx.control(), waits: [{ ...wait, kind: 'context-lock' }, wait] }),
+  );
+  assert.equal(engine.claim('c1'), undefined);
+  // Решение человека («подтвердить и начать»): resume снимает ожидание base-check.
+  store.transact('scheduler.paused', (tx) =>
+    tx.setControl({ ...tx.control(), paused: true, pauseReason: 'base-check' }),
+  );
+  engine.resume();
+  assert.deepEqual(
+    engine.read((v) => v.control().waits?.map((w) => w.kind)),
+    ['context-lock'],
+  );
+  assert.ok(engine.claim('c1'), 'после подтверждения выдача идёт');
+});
