@@ -8,6 +8,7 @@ import {
   gateDigest,
   sha256,
   type ContractDocument,
+  type AttemptState,
   type GateApplicability,
   type GatePolicy,
   type WorkOrder,
@@ -348,6 +349,48 @@ export function proofGates(
   return out;
 }
 
+/** Снимок провайдера, против которого шла попытка (`AttemptState.dependencies`). */
+export type ProviderSnapshot = Pick<
+  NonNullable<AttemptState['dependencies']>[number],
+  'repositoryId' | 'sha' | 'artifacts'
+>;
+
+/**
+ * Почему база провайдеров сдвинулась с зелёного SHA gate, или undefined.
+ * Провайдеры — `dependsOn` репозитория и все репозитории снимков (в том числе
+ * транзитивные). Сдвиг — другой SHA или другие artifacts провайдера; снимок
+ * провайдера, которого нет у зелёной попытки или у текущей (запись прежней
+ * версии, новый провайдер), — тоже сдвиг: изменение провайдера меняет вход
+ * gate потребителя, даже если diff потребителя не задел его путей.
+ */
+export function providerMovement(
+  providers: readonly string[],
+  green: readonly ProviderSnapshot[] | undefined,
+  current: readonly ProviderSnapshot[] | undefined,
+): string | undefined {
+  const ids = [
+    ...new Set([
+      ...providers,
+      ...(green ?? []).map((d) => d.repositoryId),
+      ...(current ?? []).map((d) => d.repositoryId),
+    ]),
+  ].sort();
+  const pins = (d: ProviderSnapshot) =>
+    JSON.stringify(
+      [...d.artifacts].map((a) => [a.path, a.digest]).sort((x, y) => x[0]!.localeCompare(y[0]!)),
+    );
+  for (const id of ids) {
+    const from = green?.find((d) => d.repositoryId === id);
+    const to = current?.find((d) => d.repositoryId === id);
+    if (!from || !to)
+      return `снимок провайдера ${id} ${from ? 'попытки' : 'зелёного SHA'} неизвестен`;
+    if (from.sha !== to.sha)
+      return `база провайдера ${id} сдвинулась: ${from.sha.slice(0, 12)} → ${to.sha.slice(0, 12)}`;
+    if (pins(from) !== pins(to)) return `артефакты провайдера ${id} изменились`;
+  }
+  return undefined;
+}
+
 export interface GateDecisionInput {
   repo: { gates: GatePolicy[]; protectedPaths: readonly string[] };
   /** Область фазы в порядке исполнения. */
@@ -358,6 +401,13 @@ export interface GateDecisionInput {
    * SHA фазы; undefined — такого SHA нет, и gate исполняется.
    */
   changedFor(gate: GatePolicy): ChangedPaths | undefined;
+  /**
+   * Почему база провайдеров сдвинулась с того же зелёного SHA
+   * (`providerMovement`), или undefined. Спрашивается только у условного gate
+   * с зелёным SHA. Обязателен: вызывающий без провайдеров возвращает
+   * undefined явно, а не пропускает правило.
+   */
+  providersMoved(gate: GatePolicy): string | undefined;
   /** `proofGates` поручения. */
   proof: ReadonlySet<string>;
 }
@@ -372,7 +422,8 @@ export interface GateDecision {
 /**
  * Решения по области фазы. Gate без `when` исполняется всегда. Условный
  * исполняется, если: он доказывает требование или договор; среди предков
- * базы нет его зелёного SHA под тем же основанием (`changedFor`); diff
+ * базы нет его зелёного SHA под тем же основанием (`changedFor`); с этого
+ * зелёного SHA сдвинулась база провайдеров (`providersMoved`); diff
  * неизвестен, пуст или задевает его путь или неявный вход; он — предпосылка
  * (`gatePrerequisites`: `dependsOn` или более ранний check gate) исполняемого
  * gate области. Иначе — запись `not-applicable`.
@@ -389,6 +440,8 @@ export function gateDecisions(input: GateDecisionInput): GateDecision[] {
         run: true,
         reason: 'нет зелёного SHA gate под тем же основанием среди предков базы',
       };
+    const moved = input.providersMoved(gate);
+    if (moved) return { gate, run: true, reason: moved };
     const path = pathApplicability(input.repo, gate, changed);
     return path.applies
       ? { gate, run: true, reason: path.reason }

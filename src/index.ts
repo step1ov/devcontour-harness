@@ -191,9 +191,11 @@ export {
   notApplicableProblem,
   pathApplicability,
   proofGates,
+  providerMovement,
   type ChangedPaths,
   type GateDecision,
   type PathDecision,
+  type ProviderSnapshot,
 } from './verification/applicability.ts';
 export { ReviewProbes, probeLimits, observeReproductions } from './agents/review-probe.ts';
 export {

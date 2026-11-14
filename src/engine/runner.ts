@@ -137,6 +137,7 @@ import {
   gateBasis,
   gateDecisions,
   proofGates,
+  providerMovement,
   type ChangedPaths,
 } from '../verification/applicability.ts';
 import {
@@ -2425,29 +2426,27 @@ export class Runner {
         .filter((x) => x.status === 'succeeded' && x.repositoryId === repo.id && x.integrationSha)
         .sort((x, y) => (y.finishedAt ?? '').localeCompare(x.finishedAt ?? '')),
     );
+    // Снимок провайдеров текущей попытки — закреплённый в хранилище до реализации.
+    const providers = this.engine.read((v) => v.attempt(attempt.id)?.dependencies);
     const diffs = new Map<string, ChangedPaths>();
     const changed = new Map<string, ChangedPaths>();
+    const moved = new Map<string, string | undefined>();
     for (const gate of gates) {
       if (!gate.when || proof.has(gate.id)) continue;
       const basis = gateBasis(this.policy, repo, gate, this.engine.version);
-      const shas = [
-        ...new Set(
-          greens
-            .filter((x) =>
-              x.evidence.some(
-                (e) =>
-                  e.kind === 'test' &&
-                  e.phase === 'integration' &&
-                  e.sha === x.integrationSha &&
-                  e.gate === gate.id &&
-                  e.consumer === undefined &&
-                  e.passed &&
-                  e.gateBasis === basis,
-              ),
-            )
-            .map((x) => x.integrationSha!),
+      const passed = greens.filter((x) =>
+        x.evidence.some(
+          (e) =>
+            e.kind === 'test' &&
+            e.phase === 'integration' &&
+            e.sha === x.integrationSha &&
+            e.gate === gate.id &&
+            e.consumer === undefined &&
+            e.passed &&
+            e.gateBasis === basis,
         ),
-      ].slice(0, 50);
+      );
+      const shas = [...new Set(passed.map((x) => x.integrationSha!))].slice(0, 50);
       let anchor: string | undefined;
       for (const green of shas)
         if (
@@ -2460,6 +2459,10 @@ export class Runner {
           break;
         }
       if (!anchor) continue;
+      // Gate потребителя зависит и от провайдеров: их база с зелёного SHA
+      // сравнивается со снимком попытки (`providerMovement`).
+      const green = passed.find((x) => x.integrationSha === anchor)!;
+      moved.set(gate.id, providerMovement(repo.dependsOn, green.dependencies, providers));
       if (!diffs.has(anchor))
         diffs.set(
           anchor,
@@ -2475,6 +2478,7 @@ export class Runner {
       scope: gates,
       proof,
       changedFor: (gate) => changed.get(gate.id),
+      providersMoved: (gate) => moved.get(gate.id),
     });
     for (const d of decisions)
       if (!d.run && d.record)

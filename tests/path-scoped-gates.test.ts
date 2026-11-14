@@ -26,6 +26,7 @@ import {
   notApplicableProblem,
   pathApplicability,
   proofGates,
+  providerMovement,
   type ChangedPaths,
 } from '../src/verification/applicability.ts';
 import { uncoveredGates } from '../src/verification/proof.ts';
@@ -38,6 +39,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { nodeGate, repo, write } from './git-fixture.ts';
+import { components } from './components-fixture.ts';
 import { approve, bin, greet, implement, runAll, setup } from './runner-fixture.ts';
 import { Engine } from '../src/engine/engine.ts';
 import { Runner } from '../src/engine/runner.ts';
@@ -258,6 +260,7 @@ test('решения области: доказательство, истори�
         proof: new Set(options.proof ?? []),
         // Нет зелёного SHA под тем же основанием — diff не определён.
         changedFor: (g) => ((options.never ?? []).includes(g.id) ? undefined : changed(files)),
+        providersMoved: () => undefined,
       }).map((d) => [d.gate.id, d.run]),
     );
   assert.deepEqual(decide(['src/a.ts']), { build: false, ui: false, unit: true, e2e: false });
@@ -291,10 +294,71 @@ test('решения области: доказательство, истори�
         scope: ordered,
         proof: new Set(),
         changedFor: () => changed(['src/a.ts']),
+        providersMoved: () => undefined,
       }).map((d) => [d.gate.id, d.run]),
     ),
     { ui: true, unit: true },
   );
+});
+
+test('провайдеры: сдвиг базы провайдера с зелёного SHA исполняет условный gate, даже если diff потребителя не задел его путей', () => {
+  const pin = (repositoryId: string, at: string, digest = 'a') => ({
+    repositoryId,
+    sha: sha(at),
+    artifacts: [{ path: 'built.json', digest: digestOf(digest) }],
+  });
+  assert.equal(
+    providerMovement([], undefined, undefined),
+    undefined,
+    'без провайдеров — нет сдвига',
+  );
+  assert.equal(providerMovement([], [], []), undefined);
+  assert.equal(providerMovement(['lib'], [pin('lib', '1')], [pin('lib', '1')]), undefined);
+  assert.match(providerMovement(['lib'], [pin('lib', '1')], [pin('lib', '2')])!, /lib.*сдвинулась/);
+  assert.match(
+    providerMovement(['lib'], [pin('lib', '1')], [pin('lib', '1', 'b')])!,
+    /артефакты провайдера lib/,
+    'тот же SHA, другие artifacts — сдвиг',
+  );
+  // Снимок неизвестен (запись прежней версии или провайдер добавлен) — сдвиг.
+  assert.match(providerMovement(['lib'], undefined, undefined)!, /lib.*неизвестен/);
+  assert.match(providerMovement(['lib'], undefined, [pin('lib', '1')])!, /lib.*неизвестен/);
+  assert.match(providerMovement(['lib'], [pin('lib', '1')], [])!, /lib.*неизвестен/);
+  // Транзитивный провайдер только в снимках — тоже провайдер.
+  assert.match(
+    providerMovement(['mid'], [pin('mid', '1'), pin('lib', '1')], [pin('mid', '1')])!,
+    /lib.*неизвестен/,
+  );
+  // Решения: сдвиг провайдера исполняет условный gate; без зелёного SHA или
+  // для gate без when функция не нужна.
+  const asked: string[] = [];
+  const decisions = gateDecisions({
+    repo: repoOf([ui(), ui({ id: 'web' })]),
+    scope: [ui(), ui({ id: 'web' })],
+    proof: new Set(),
+    changedFor: () => changed(['src/a.ts']),
+    providersMoved: (g) => {
+      asked.push(g.id);
+      return g.id === 'ui' ? 'база провайдера lib сдвинулась' : undefined;
+    },
+  });
+  assert.deepEqual(
+    decisions.map((d) => [d.gate.id, d.run, d.reason, d.record === undefined]),
+    [
+      ['ui', true, 'база провайдера lib сдвинулась', true],
+      ['web', false, 'diff не задел пути gate', false],
+    ],
+  );
+  assert.deepEqual(asked, ['ui', 'web']);
+  asked.length = 0;
+  gateDecisions({
+    repo: repoOf([ui()]),
+    scope: [ui()],
+    proof: new Set(),
+    changedFor: () => undefined,
+    providersMoved: (g) => (asked.push(g.id), 'x'),
+  });
+  assert.deepEqual(asked, [], 'без зелёного SHA сдвиг не спрашивается');
 });
 
 test('основание gate: определение, ресурсы, окружение, подготовка, toolchain, изоляция, версия и предпосылки меняют digest', () => {
@@ -1039,6 +1103,87 @@ test('runner: смена версии harness меняет основание �
     // Зелёный SHA прежней версии harness — другое основание.
     v3: ['test', 'test'],
     v4: ['not-applicable', 'not-applicable'],
+  });
+  ctx.store.close();
+});
+
+test('runner: сдвиг базы провайдера с зелёного SHA исполняет условный gate потребителя; без сдвига — неприменим', async () => {
+  const tasks: [string, string][] = [
+    ['p1', 'src/a.js'],
+    ['p2', 'src/b.js'],
+    ['p3', 'src/c.js'],
+    ['p4', 'src/d.js'],
+  ];
+  const ctx = components({
+    scenario: {
+      writer: tasks.map(([, file]) => implement({ [file]: 'exports.x = 1;\n' })),
+      reviewer: approve(),
+    },
+    policy: (p) => {
+      p.repositories.find((r: any) => r.id === 'product').gates = [
+        {
+          id: 'unit',
+          kind: 'test',
+          command: [process.execPath, 'unit.js'],
+          report: { type: 'junit', path: 'reports/unit.xml' },
+        },
+        {
+          id: 'ui',
+          kind: 'check',
+          command: nodeGate('process.exit(0)'),
+          when: { paths: ['web/**'] },
+        },
+      ];
+    },
+  });
+  const orders = (base: any, list: typeof tasks) =>
+    list.map(([id], i) => ({
+      ...structuredClone(base),
+      id,
+      repositoryId: 'product',
+      source: { ...base.source, ref: id },
+      title: 'Задача ' + id,
+      writeScope: ['src'],
+      gates: ['unit', 'ui'],
+      dependsOn: i ? [list[i - 1]![0]] : [],
+    }));
+  const raw = structuredClone(ctx.graph) as any;
+  const base = raw.orders[0];
+  delete base.consumers;
+  const graph = (id: string, list: typeof tasks) =>
+    workGraphSchema.parse({
+      ...raw,
+      id,
+      source: { ...raw.source, ref: id },
+      orders: orders(base, list),
+    });
+  await runAll({ ...ctx, graph: graph('g1', tasks.slice(0, 2)) } as any);
+  // Библиотека продвигается мимо harness: diff продукта её не видит.
+  const library = ctx.repos.library!;
+  const ref = ctx.policy.repositories.find((r) => r.id === 'library')!.targetRef;
+  externalCommit(library, ref, 'value.json', '3\n');
+  await runAll({ ...ctx, graph: graph('g2', tasks.slice(2)) } as any);
+  const kinds = ctx.engine.read((v) =>
+    Object.fromEntries(
+      tasks.map(([id]) => {
+        const a = v.attempts(id).find((x) => x.status === 'succeeded');
+        return [
+          id,
+          (['candidate', 'integration'] as const).map(
+            (phase) => a?.evidence.findLast((e) => e.gate === 'ui' && e.phase === phase)?.kind,
+          ),
+        ];
+      }),
+    ),
+  );
+  assert.deepEqual(kinds, {
+    // Зелёного SHA ещё нет.
+    p1: ['test', 'test'],
+    p2: ['not-applicable', 'not-applicable'],
+    // Библиотека сдвинулась с зелёного SHA (p1).
+    p3: ['test', 'test'],
+    // Зелёный SHA p3 — под той же базой библиотеки.
+    p4: ['not-applicable', 'not-applicable'],
   });
   ctx.store.close();
 });

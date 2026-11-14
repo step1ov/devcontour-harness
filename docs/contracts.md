@@ -218,8 +218,14 @@ Diff — `git diff --no-renames --no-ext-diff --no-textconv --no-relative
 `.nvmrc`, `Cargo.*`, `go.mod`/`go.sum`/`go.work`, `pyproject.toml`,
 `poetry.lock`, `uv.lock`, `Pipfile*`, `requirements*.txt`, `Gemfile*`,
 `composer.*`, `.gitattributes`, `.gitmodules`, `.lfsconfig`) или путь,
-названный в argv команды gate (с учётом `cwd`); он — предпосылка
-(`gatePrerequisites`) исполняемого gate области. Общие настройки инструментов
+названный в argv команды gate (с учётом `cwd`); с зелёного SHA сдвинулась
+база провайдеров (`providerMovement`): у провайдера из `dependsOn`
+репозитория или из снимков зависимостей (`AttemptState.dependencies`, в том
+числе транзитивного) другой SHA или другие artifacts, чем у принятой попытки
+зелёного SHA, либо снимка нет у одной из попыток — изменение провайдера меняет
+вход gate потребителя, даже если diff потребителя не задел его путей; он —
+предпосылка (`gatePrerequisites`) исполняемого gate области. Отключить это
+правило у gate нельзя. Общие настройки инструментов
 неявными входами **не** считаются — их перечисляют в `when.paths` сами:
 корневые `tsconfig*.json`, `eslint.config.*`, `vitest/jest/playwright.config.*`,
 `Makefile`, `Dockerfile`, `.env*`, скрипты, вызванные косвенно (например из
