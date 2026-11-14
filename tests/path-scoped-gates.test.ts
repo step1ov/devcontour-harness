@@ -315,10 +315,10 @@ test('провайдеры: сдвиг базы провайдера с зелё
   assert.equal(providerMovement([], [], []), undefined);
   assert.equal(providerMovement(['lib'], [pin('lib', '1')], [pin('lib', '1')]), undefined);
   assert.match(providerMovement(['lib'], [pin('lib', '1')], [pin('lib', '2')])!, /lib.*сдвинулась/);
-  assert.match(
-    providerMovement(['lib'], [pin('lib', '1')], [pin('lib', '1', 'b')])!,
-    /артефакты провайдера lib/,
-    'тот же SHA, другие artifacts — сдвиг',
+  assert.equal(
+    providerMovement(['lib'], [pin('lib', '1')], [pin('lib', '1', 'b')]),
+    undefined,
+    'тот же SHA, пересобранные artifacts — не сдвиг (невоспроизводимая сборка не отключает условные gates)',
   );
   // Снимок неизвестен (запись прежней версии или провайдер добавлен) — сдвиг.
   assert.match(providerMovement(['lib'], undefined, undefined)!, /lib.*неизвестен/);
@@ -359,6 +359,17 @@ test('провайдеры: сдвиг базы провайдера с зелё
     providersMoved: (g) => (asked.push(g.id), 'x'),
   });
   assert.deepEqual(asked, [], 'без зелёного SHA сдвиг не спрашивается');
+  // Без `providersMoved` вызывающий ручается за провайдеров: решает только diff
+  // (так вызывает DevContour, сам ограничивая зелёные SHA теми же провайдерами).
+  assert.deepEqual(
+    gateDecisions({
+      repo: repoOf([ui()]),
+      scope: [ui()],
+      proof: new Set(),
+      changedFor: () => changed(['src/a.ts']),
+    }).map((d) => [d.gate.id, d.run, d.reason]),
+    [['ui', false, 'diff не задел пути gate']],
+  );
 });
 
 test('основание gate: определение, ресурсы, окружение, подготовка, toolchain, изоляция, версия и предпосылки меняют digest', () => {
@@ -1185,5 +1196,23 @@ test('runner: сдвиг базы провайдера с зелёного SHA �
     // Зелёный SHA p3 — под той же базой библиотеки.
     p4: ['not-applicable', 'not-applicable'],
   });
+  // Почему p3 исполнял gate: его diff от зелёного SHA (p1) web/ не задевает и
+  // неявных входов не несёт — исполнение дал только сдвиг библиотеки.
+  const attemptOf = (id: string) =>
+    ctx.engine.read((v) => v.attempts(id).find((x) => x.status === 'succeeded')!);
+  const [p1, p2, p3, p4] = ['p1', 'p2', 'p3', 'p4'].map(attemptOf);
+  const product = ctx.policy.repositories.find((r) => r.id === 'product')!;
+  const uiGate = product.gates.find((g) => g.id === 'ui')!;
+  const p3Diff = await changedPaths(ctx.repos.product!.dir, [
+    { from: p1!.integrationSha!, to: p3!.candidateSha! },
+    { from: p1!.integrationSha!, to: p3!.integrationSha! },
+  ]);
+  assert.equal(pathApplicability(product, uiGate, p3Diff).applies, false);
+  assert.match(
+    providerMovement(product.dependsOn, p1!.dependencies, p3!.dependencies)!,
+    /база провайдера library сдвинулась/,
+  );
+  assert.equal(providerMovement(product.dependsOn, p1!.dependencies, p2!.dependencies), undefined);
+  assert.equal(providerMovement(product.dependsOn, p3!.dependencies, p4!.dependencies), undefined);
   ctx.store.close();
 });

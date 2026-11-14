@@ -221,9 +221,12 @@ Diff — `git diff --no-renames --no-ext-diff --no-textconv --no-relative
 названный в argv команды gate (с учётом `cwd`); с зелёного SHA сдвинулась
 база провайдеров (`providerMovement`): у провайдера из `dependsOn`
 репозитория или из снимков зависимостей (`AttemptState.dependencies`, в том
-числе транзитивного) другой SHA или другие artifacts, чем у принятой попытки
-зелёного SHA, либо снимка нет у одной из попыток — изменение провайдера меняет
-вход gate потребителя, даже если diff потребителя не задел его путей; он —
+числе транзитивного) другой SHA, чем у принятой попытки зелёного SHA, либо
+снимка нет у одной из попыток — изменение провайдера меняет вход gate
+потребителя, даже если diff потребителя не задел его путей (artifacts
+провайдера, пересобираемые в каждой попытке, не сравниваются: при том же SHA
+невоспроизводимая сборка не должна отключать условные gates; смену
+`dependencyBuild` провайдера при том же SHA правило не видит); он —
 предпосылка (`gatePrerequisites`) исполняемого gate области. Отключить это
 правило у gate нельзя. Общие настройки инструментов
 неявными входами **не** считаются — их перечисляют в `when.paths` сами:
@@ -250,7 +253,10 @@ Diff — `git diff --no-renames --no-ext-diff --no-textconv --no-relative
 неприменимые gates ссылками evidence вида `not-applicable` с `notApplicable`.
 Функции: `changedPaths`, `coverageChanges`, `gateBasis`, `gateDecisions`,
 `pathApplicability`, `matchingPaths`, `gatePathRegExp`, `proofGates`,
-`notApplicableProblem`, `gateDigest`. Основание включает версию harness:
+`providerMovement`, `notApplicableProblem`, `gateDigest`. У `gateDecisions`
+вход `providersMoved` необязателен: без него провайдеры считаются не
+сдвинувшимися — вызывающий ручается, что `changedFor` даёт зелёный SHA только
+под теми же SHA провайдеров (runner передаёт его всегда). Основание включает версию harness:
 после обновления пакета каждый условный gate исполняется один раз. Не входят
 в основание образ контейнера по изменяемому тегу и переменные окружения
 хоста, передаваемые по имени (`environment.inherit`): их смену gate не видит.

@@ -352,16 +352,19 @@ export function proofGates(
 /** Снимок провайдера, против которого шла попытка (`AttemptState.dependencies`). */
 export type ProviderSnapshot = Pick<
   NonNullable<AttemptState['dependencies']>[number],
-  'repositoryId' | 'sha' | 'artifacts'
+  'repositoryId' | 'sha'
 >;
 
 /**
  * Почему база провайдеров сдвинулась с зелёного SHA gate, или undefined.
  * Провайдеры — `dependsOn` репозитория и все репозитории снимков (в том числе
- * транзитивные). Сдвиг — другой SHA или другие artifacts провайдера; снимок
- * провайдера, которого нет у зелёной попытки или у текущей (запись прежней
- * версии, новый провайдер), — тоже сдвиг: изменение провайдера меняет вход
- * gate потребителя, даже если diff потребителя не задел его путей.
+ * транзитивные). Сдвиг — другой SHA провайдера; снимок провайдера, которого
+ * нет у зелёной попытки или у текущей (запись прежней версии, новый
+ * провайдер), — тоже сдвиг: изменение провайдера меняет вход gate
+ * потребителя, даже если diff потребителя не задел его путей. Artifacts
+ * провайдера не сравниваются: их пересобирают в каждой попытке, и
+ * невоспроизводимая сборка давала бы сдвиг на каждой; при том же SHA их
+ * вход — тот же источник.
  */
 export function providerMovement(
   providers: readonly string[],
@@ -375,10 +378,6 @@ export function providerMovement(
       ...(current ?? []).map((d) => d.repositoryId),
     ]),
   ].sort();
-  const pins = (d: ProviderSnapshot) =>
-    JSON.stringify(
-      [...d.artifacts].map((a) => [a.path, a.digest]).sort((x, y) => x[0]!.localeCompare(y[0]!)),
-    );
   for (const id of ids) {
     const from = green?.find((d) => d.repositoryId === id);
     const to = current?.find((d) => d.repositoryId === id);
@@ -386,7 +385,6 @@ export function providerMovement(
       return `снимок провайдера ${id} ${from ? 'попытки' : 'зелёного SHA'} неизвестен`;
     if (from.sha !== to.sha)
       return `база провайдера ${id} сдвинулась: ${from.sha.slice(0, 12)} → ${to.sha.slice(0, 12)}`;
-    if (pins(from) !== pins(to)) return `артефакты провайдера ${id} изменились`;
   }
   return undefined;
 }
@@ -404,10 +402,11 @@ export interface GateDecisionInput {
   /**
    * Почему база провайдеров сдвинулась с того же зелёного SHA
    * (`providerMovement`), или undefined. Спрашивается только у условного gate
-   * с зелёным SHA. Обязателен: вызывающий без провайдеров возвращает
-   * undefined явно, а не пропускает правило.
+   * с зелёным SHA. Без поля провайдеры считаются не сдвинувшимися: вызывающий
+   * ручается, что `changedFor` даёт зелёный SHA только под теми же SHA
+   * провайдеров (или что провайдеров нет). Runner его передаёт всегда.
    */
-  providersMoved(gate: GatePolicy): string | undefined;
+  providersMoved?(gate: GatePolicy): string | undefined;
   /** `proofGates` поручения. */
   proof: ReadonlySet<string>;
 }
@@ -440,7 +439,7 @@ export function gateDecisions(input: GateDecisionInput): GateDecision[] {
         run: true,
         reason: 'нет зелёного SHA gate под тем же основанием среди предков базы',
       };
-    const moved = input.providersMoved(gate);
+    const moved = input.providersMoved?.(gate);
     if (moved) return { gate, run: true, reason: moved };
     const path = pathApplicability(input.repo, gate, changed);
     return path.applies
