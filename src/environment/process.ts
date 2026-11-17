@@ -37,6 +37,40 @@ export class ReapFailure extends TaskFailure {
     this.name = 'ReapFailure';
   }
 }
+
+/**
+ * Отказ остановки потомков завершившейся команды — один текст у всех, кто
+ * сдерживает команды (и у хоста со своим запуском): команда, её PID и
+ * выход, что не остановлено (PID или почему нет перечня), нагрузка хоста.
+ */
+export function reapFailure(outcome: {
+  /** Что за команда: ID gate, runtime и задача. */
+  label: string;
+  pid: number | undefined;
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  survivors: number[];
+  inventory?: string | undefined;
+  redact?: (value: string) => string;
+}) {
+  const pids = (list: number[]) =>
+    list.slice(0, 10).join(', ') + (list.length > 10 ? ` и ещё ${list.length - 10}` : '');
+  const what = outcome.inventory
+    ? `перечень процессов не получен (${outcome.inventory})` +
+      (outcome.survivors.length
+        ? `; последние замеченные потомки: PID ${pids(outcome.survivors)}`
+        : '')
+    : `живы после остановки PID ${pids(outcome.survivors)}`;
+  const exit = outcome.signal ? `сигнал ${outcome.signal}` : `код выхода ${outcome.code ?? -1}`;
+  const text =
+    `Не удалось завершить процессы команды «${outcome.label}» (PID ${outcome.pid ?? '?'}, ${exit}): ${what}. ` +
+    `Ресурсы не освобождены: потомки команды могут ещё работать; ${loadText(hostLoad.read())}`;
+  return new ReapFailure(
+    outcome.redact ? outcome.redact(text) : text,
+    outcome.survivors,
+    outcome.inventory,
+  );
+}
 export interface CommandResult {
   code: number;
   stdout: string;
@@ -231,25 +265,15 @@ export async function command(
         ? await sweep(mark, seen, dirs, Date.parse(startedAt))
         : { survivors: [] as number[] };
       if (swept.survivors.length || swept.inventory) {
-        const label = options.activity?.label ?? file.split('/').at(-1) ?? file;
-        const pids = (list: number[]) =>
-          list.slice(0, 10).join(', ') + (list.length > 10 ? ` и ещё ${list.length - 10}` : '');
-        const what = swept.inventory
-          ? `перечень процессов не получен (${swept.inventory})` +
-            (swept.survivors.length
-              ? `; последние замеченные потомки: PID ${pids(swept.survivors)}`
-              : '')
-          : `живы после остановки PID ${pids(swept.survivors)}`;
-        const exit = signal ? `сигнал ${signal}` : `код выхода ${code ?? -1}`;
-        const text =
-          `Не удалось завершить процессы команды «${label}» (PID ${child.pid ?? '?'}, ${exit}): ${what}. ` +
-          `Ресурсы не освобождены: потомки команды могут ещё работать; ${loadText(hostLoad.read())}`;
         reject(
-          new ReapFailure(
-            options.redact ? options.redact(text) : text,
-            swept.survivors,
-            swept.inventory,
-          ),
+          reapFailure({
+            label: options.activity?.label ?? file.split('/').at(-1) ?? file,
+            pid: child.pid,
+            code,
+            signal,
+            ...swept,
+            ...(options.redact ? { redact: options.redact } : {}),
+          }),
         );
         return;
       }

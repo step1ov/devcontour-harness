@@ -592,6 +592,7 @@ export async function runCheck(
   }
 }
 const checkResult = Symbol('runCheck.result');
+const leftoverText = (reason: string) => `временные каталоги проверки не убраны: ${reason}`;
 /** Исход проверки, завершившейся до исключения (например, отказа уборки), если он есть. */
 export function completedCheck(error: unknown) {
   return error && typeof error === 'object' && checkResult in error
@@ -812,6 +813,8 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   let timedOutFailures = '';
   // Заголовок лога — фактические каталог и argv запуска: digest лога входит в
   // evidence, и запись называет, где и чем проверка исполнялась.
+  /** Отказ уборки каталогов завершившейся проверки (`completedCheck`). */
+  let leftover: string | undefined;
   let passed = false,
     summary = '',
     log = `# harness gate ${gate.id}: cwd=${relative(root, gateCwd) || '.'} argv=${JSON.stringify(gate.command.map(redact))}${gate.kind === 'test' ? ` fresh=${redact(JSON.stringify(freshness))}` : ''}\n`,
@@ -854,7 +857,14 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         settingsDir: join(artifactDir, gate.id),
         violations: true,
       },
-    );
+    ).catch((error: unknown) => {
+      // Проверка завершилась, но её временные каталоги не убраны: исход
+      // разбирается как обычно, а отказ уборки дописывается к нему.
+      const done = completedCheck(error);
+      if (!done) throw error;
+      leftover = error instanceof Error ? error.message : String(error);
+      return done;
+    });
     exitCode = result.code;
     log += result.stdout + '\n' + result.stderr;
     // Путь, который после проверки не прочитать, проверка и закрыла: это
@@ -1001,6 +1011,15 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       throw new Error('Gate изменил HEAD');
     if (await git(cwd, 'status', '--porcelain', '--untracked-files=no'))
       throw new Error('Gate изменил отслеживаемые файлы');
+    // Проверка прошла, но controller не убрал её каталоги (scratch, метки
+    // старта, временный каталог srt — вне worktree): о коде это ничего не
+    // говорит, это отказ среды `cleanup`. Проверка всё равно не пройдена:
+    // зелёный исход без уборки не принимается.
+    if (leftover) {
+      kind = 'environment';
+      cause = 'cleanup';
+      throw new Error(`${summary}, но ${leftoverText(leftover)}`);
+    }
     passed = true;
   } catch (error) {
     // Сборка политики не удалась — отказ среды; checkout, который увёл бы
@@ -1018,7 +1037,9 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       kind = 'environment';
       cause = 'process-reap';
     }
-    const message = error instanceof Error ? error.message : String(error);
+    let message = error instanceof Error ? error.message : String(error);
+    // Провал самой проверки остаётся её классом; неубранные каталоги — к нему.
+    if (leftover && cause !== 'cleanup') message += `; ${leftoverText(leftover)}`;
     summary = redact(message);
     log += '\n' + summary;
   }

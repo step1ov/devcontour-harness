@@ -71,6 +71,7 @@ const causeLabels: Record<string, string> = {
   stalled: 'stalled process',
   shutdown: 'controller shutdown',
   'process-reap': 'command processes not stopped or not listed',
+  cleanup: 'attempt resources not released (check folders, environment teardown)',
   other: 'other',
   none: 'not an environment cause',
 };

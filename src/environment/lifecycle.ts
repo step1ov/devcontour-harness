@@ -19,9 +19,26 @@ type Environment = z.infer<typeof environmentSchema>;
 type Lifecycle = z.infer<typeof lifecycleSchema>;
 type Step = z.infer<typeof stepSchema>;
 
-/** Отказ обязательной очистки окружения: приёмка с ним не происходит. */
+/**
+ * Отказ обязательной очистки окружения: приёмка с ним не происходит.
+ * Исходный отказ работы, если он был, — `cause`: класс и причина попытки —
+ * его (`classifyFailure`), очистка лишь дописана к тексту. Без исходного
+ * отказа это отказ окружения `cleanup`: ресурсы попытки не освобождены, о
+ * коде это ничего не говорит.
+ */
 export class CleanupFailure extends Error {
   override name = 'CleanupFailure';
+  constructor(message: string, original?: Error) {
+    super(message, original ? { cause: original } : undefined);
+  }
+  /** Исходный отказ работы, если он был. */
+  get original(): Error | undefined {
+    return this.cause instanceof Error ? this.cause : undefined;
+  }
+  /** Тот же отказ с дописанной причиной; исходный отказ сохраняется. */
+  extend(suffix: string) {
+    return new CleanupFailure(`${this.message}; ${suffix}`, this.original);
+  }
 }
 
 /** Жив ли процесс (сигнал 0 не доставляется, только проверяется). */
@@ -311,6 +328,7 @@ export async function withEnvironment<T>(
     receipt.status = 'cleanup-failed';
     failure = new CleanupFailure(
       `${failure instanceof Error ? failure.message + '; ' : ''}Очистка окружения не завершена: ${error instanceof Error ? error.message : String(error)}`,
+      failure,
     );
   }
   await writeFile(receiptPath, JSON.stringify(receipt, null, 2));

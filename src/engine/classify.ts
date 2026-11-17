@@ -7,7 +7,16 @@ import {
   type FailureKind,
 } from '../contracts/index.ts';
 
+import { CleanupFailure } from '../environment/lifecycle.ts';
+
 export { BlockedError };
+
+/**
+ * Отказ, по которому судится попытка: у незавершённой очистки окружения —
+ * исходный отказ работы (`CleanupFailure.original`), иначе сам отказ.
+ */
+export const failureOrigin = (error: unknown): unknown =>
+  error instanceof CleanupFailure && error.original ? error.original : error;
 
 /**
  * Отказ провайдера, а не работы: он повторится на любой следующей выдаче.
@@ -40,6 +49,10 @@ const byCode: Partial<Record<ErrorCode, FailureKind>> = {
 };
 
 export function classifyFailure(error: unknown, message: string): FailureKind {
+  // Незавершённая очистка не меняет класс отказа работы; без него это отказ
+  // окружения — ресурсы попытки не освобождены.
+  if (error instanceof CleanupFailure)
+    return error.original ? classifyFailure(error.original, message) : 'environment';
   if (error instanceof TaskFailure) return error.kind;
   // Приёмка отказала по правилу (нет доказательства, ревью, область): класс —
   // это правило, а не «неизвестно».
@@ -78,6 +91,8 @@ export function environmentCauseOf(
   if (kind === 'stalled') return 'stalled';
   if (kind === 'provider-auth') return providerLimit(message) ? 'provider-limit' : 'provider-auth';
   if (kind !== 'environment') return 'none';
+  if (error instanceof CleanupFailure)
+    return error.original ? environmentCauseOf(error.original, message, kind) : 'cleanup';
   if (error instanceof TaskFailure && error.diagnosis) return error.diagnosis;
   if (
     transportFailure(message) ||
@@ -96,6 +111,7 @@ export function environmentCauseOf(
  * `Error` с исходным в `cause`.
  */
 export function withSuffix(failure: Error, suffix: string): Error {
+  if (failure instanceof CleanupFailure) return failure.extend(suffix);
   return failure instanceof TaskFailure
     ? new TaskFailure(
         failure.kind,

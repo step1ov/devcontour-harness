@@ -216,6 +216,12 @@ export {
 // Git хоста над checkout, где исполнялся чужой код: хост, запускающий свой
 // git над теми же деревьями, сверяет репозиторий теми же правилами.
 export { hostGitArgs } from './environment/process.ts';
+// Отказ остановки потомков сдерживаемой команды: хост со своим запуском
+// команд называет и классифицирует его так же (`environment`/`process-reap`).
+export { ReapFailure, reapFailure } from './environment/process.ts';
+export { hostLoad, loadText, type HostLoad } from './environment/host-load.ts';
+export { CleanupFailure } from './environment/lifecycle.ts';
+export { failureOrigin } from './engine/classify.ts';
 export {
   UntrustedCheckoutError,
   assertTrustedCheckout,

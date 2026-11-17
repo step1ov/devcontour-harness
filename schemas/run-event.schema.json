@@ -1215,6 +1215,7 @@
                 "stalled",
                 "shutdown",
                 "process-reap",
+                "cleanup",
                 "other",
                 "none"
               ]

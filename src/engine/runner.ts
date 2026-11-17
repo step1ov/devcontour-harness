@@ -157,7 +157,13 @@ import {
 import { CleanupFailure, cleanupEnvironment } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { REQUIREMENT_GATE, assertRequirements } from '../verification/requirements.ts';
-import { BlockedError, classifyFailure, environmentCauseOf, withSuffix } from './classify.ts';
+import {
+  BlockedError,
+  classifyFailure,
+  environmentCauseOf,
+  failureOrigin,
+  withSuffix,
+} from './classify.ts';
 import { TaskFailure, type FailureKind } from './failure.ts';
 import { activeOf, namesFailingCases, type Engine } from './engine.ts';
 import { prompt } from './prompt.ts';
@@ -1819,6 +1825,8 @@ export class Runner {
       // Незавершённая очистка окружения: рабочие деревья и снимки — входы её
       // повторения (`environment.json` ссылается на них), их нельзя убирать.
       preserve = error instanceof CleanupFailure;
+      // Класс, свойства и вопрос — исходного отказа работы, а не очистки.
+      const origin = failureOrigin(error);
       // Прерывание по лимиту времени называется лимитом времени, что бы ни выбросила прерванная операция.
       const expired =
         controller.signal.aborted &&
@@ -1832,7 +1840,7 @@ export class Runner {
           : undefined;
       const message =
         stalled ??
-        (expired && !(error instanceof TaskFailure)
+        (expired && !(origin instanceof TaskFailure)
           ? `Исчерпан лимит времени попытки (${Math.round(this.policy.runTimeoutMs / 1000)} с)`
           : error instanceof Error
             ? error.message
@@ -1867,7 +1875,7 @@ export class Runner {
       try {
         const kind = stalled
           ? 'stalled'
-          : expired && !(error instanceof TaskFailure)
+          : expired && !(origin instanceof TaskFailure)
             ? 'timeout'
             : classifyFailure(error, message);
         // Незакоммиченная работа сохраняется при любом отказе до кандидата:
@@ -1881,23 +1889,23 @@ export class Runner {
         if (kind === 'review' && this.policy.approvalMode === 'agent')
           await this.confirmReproductions(attempt).catch(() => undefined);
         const failure = {
-          ...(!stalled && error instanceof TaskFailure && error.properties
-            ? { properties: error.properties }
+          ...(!stalled && origin instanceof TaskFailure && origin.properties
+            ? { properties: origin.properties }
             : {}),
           kind,
-          ...(!stalled && error instanceof TaskFailure && error.contextLimit
-            ? { contextLimit: error.contextLimit }
+          ...(!stalled && origin instanceof TaskFailure && origin.contextLimit
+            ? { contextLimit: origin.contextLimit }
             : {}),
           cause: environmentCauseOf(stalled ? undefined : error, message, kind),
           blocked:
-            (error instanceof BlockedError ||
+            (origin instanceof BlockedError ||
               kind === 'provider-auth' ||
               // Отказ до работы с известной причиной preflight: не засчитывается.
-              (error instanceof TaskFailure && error.diagnosis === 'preflight')) &&
+              (origin instanceof TaskFailure && origin.diagnosis === 'preflight')) &&
             !attempt.candidateSha,
           ...(heartbeatCause ? { heartbeatCause } : {}),
         };
-        const input = !stalled && error instanceof TaskFailure ? error.input : undefined;
+        const input = !stalled && origin instanceof TaskFailure ? origin.input : undefined;
         let recorded: { kind: FailureKind; message: string } = { kind, message };
         try {
           this.engine.fail(attempt.id, attempt.token, message, {
@@ -2706,8 +2714,8 @@ export class Runner {
         retained.worktrees.push({ checkout, dir });
         retained.snapshots.push(...dependencies.filter((d) => d.repositoryId !== provider));
         this.retained.set(attempt.id, retained);
-        throw new CleanupFailure(
-          `${failure.message}; рабочие деревья проверки потребителя ${repo.id} сохранены для повторной очистки (${join(own, 'environment', 'environment.json')})`,
+        throw failure.extend(
+          `рабочие деревья проверки потребителя ${repo.id} сохранены для повторной очистки (${join(own, 'environment', 'environment.json')})`,
         );
       }
       // Очистка — обязательная часть проверки: её отказ не скрывается и не

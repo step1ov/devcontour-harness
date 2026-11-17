@@ -2238,7 +2238,7 @@
               "type": "object",
               "properties": {
                 "rows": {
-                  "maxItems": 15,
+                  "maxItems": 16,
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -2259,6 +2259,7 @@
                           "stalled",
                           "shutdown",
                           "process-reap",
+                          "cleanup",
                           "other",
                           "none"
                         ]
