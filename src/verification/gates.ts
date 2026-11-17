@@ -858,6 +858,8 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   let leftover: string | undefined;
   /** Команда завершилась, но её потомки не остановлены или не пересчитаны. */
   let reaped: ReapFailure | undefined;
+  /** Провал назван только ненулевым кодом выхода, без иной причины. */
+  let exitOnly = false;
   let passed = false,
     summary = '',
     log = `# harness gate ${gate.id}: cwd=${relative(root, gateCwd) || '.'} argv=${JSON.stringify(gate.command.map(redact))}${gate.kind === 'test' ? ` fresh=${redact(JSON.stringify(freshness))}` : ''}\n`,
@@ -1036,6 +1038,8 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
           ),
         );
       }
+      // Провал назван только кодом выхода (без упавших случаев отчёта).
+      exitOnly = !counts?.failures;
       throw new Error(
         [
           `Код выхода ${result.code}`,
@@ -1097,6 +1101,9 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     summary = redact(message);
     log += '\n' + summary;
   }
+  // Сводка после разбора исхода команды: любая причина, дописанная позже
+  // (свойства, покрытие, отчёт, корпус, уборка), — уже не «только код выхода».
+  const caughtSummary = summary;
   // Отчёт свойств читается при любом исходе: провал и таймаут — ровно те
   // случаи, когда контрпример и вход нужны больше всего.
   let propertyEvidence: EvidenceRecord['property'];
@@ -1260,7 +1267,10 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         kind = 'environment';
         cause = 'process-reap';
       }
-      throw new ReapedGate(kind, message, properties, kind === 'environment' ? cause : undefined);
+      throw Object.assign(
+        new ReapedGate(kind, message, properties, kind === 'environment' ? cause : undefined),
+        { exitOnly: kind === 'gate' && exitOnly && !named && summary === caughtSummary },
+      );
     }
     // Таймаут без контрпримера свойства: повтор на том же SHA решает `Runner`.
     if (timedOut && kind === 'gate' && !failing.length && !timedOutFailures)

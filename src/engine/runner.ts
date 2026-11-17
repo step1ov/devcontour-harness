@@ -2442,8 +2442,9 @@ export class Runner {
 
   /**
    * Провал gate интеграции при неостановленных потомках. Если кандидат этот
-   * gate прошёл, а провал назван только кодом выхода (ни упавшего теста, ни
-   * контрпримера свойства или случая корпуса), это — перегрузка хоста
+   * gate прошёл, а провал назван только ненулевым кодом выхода (`exitOnly`:
+   * ни упавшего или пропущенного теста, ни свойства, покрытия, отчёта,
+   * корпуса, ни правки HEAD или отслеживаемых файлов), это — перегрузка хоста
    * (`ps` не уложился в свой предел, семейство D52), а не дефект: такой
    * провал без потомков получил бы повтор, а повтора на этом дереве нет.
    * Класс — `environment`/`process-reap`, не засчитывается. Названный провал
@@ -2470,7 +2471,7 @@ export class Runner {
       namesFailingCases(failed) ||
       (failed.tests ?? []).some((t) => t.status === 'failed') ||
       (error.properties?.bound.length ?? 0) + (error.properties?.unbound.length ?? 0) > 0;
-    if (named || !candidatePassed) return error;
+    if (!error.exitOnly || named || !candidatePassed) return error;
     return new ReapedGate('environment', error.message, undefined, 'process-reap');
   }
 
