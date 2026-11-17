@@ -536,7 +536,16 @@ export async function runCheck(
         // разбирается как обычно (повтор не стартовавшей песочницы, журнал
         // отказов ядра), а отказ остановки выносится в конце с полным исходом.
         if (error instanceof ReapFailure && error.result) {
-          reaped ??= error;
+          // Текст и исход — последнего запуска (того, что стартовал);
+          // потомки прежних не стартовавших запусков не забываются.
+          reaped = reaped
+            ? new ReapFailure(
+                error.message,
+                [...new Set([...reaped.survivors, ...error.survivors])],
+                error.inventory ?? reaped.inventory,
+                error.result,
+              )
+            : error;
           return error.result;
         }
         throw error;

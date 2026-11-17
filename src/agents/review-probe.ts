@@ -38,9 +38,11 @@ import {
   freshnessEnv,
   propertyReportEnv,
   junitSummary,
+  reapedFailure,
   runCheck,
   sandboxBlockedHosts,
 } from '../verification/gates.ts';
+import { ReapFailure } from '../environment/process.ts';
 
 /**
  * Пробные проверки reviewer под пределами harness.
@@ -505,7 +507,9 @@ export class ReviewProbes {
               stdout: tail(done.stdout),
               stderr: tail(done.stderr),
               note:
-                'Проверка завершилась, но controller не убрал её временные каталоги — отказ среды после исхода: ' +
+                (error instanceof ReapFailure
+                  ? 'Проверка завершилась, но её потомки не остановлены или не пересчитаны — отказ среды после исхода: '
+                  : 'Проверка завершилась, но controller не убрал её временные каталоги — отказ среды после исхода: ') +
                 message,
             }
           : signal.aborted && !launch.started
@@ -870,7 +874,11 @@ export class ReviewProbes {
       // процесса: код и вывод завершившейся проверки остаются в результате.
       outcome = launch.started
         ? {
-            ...environment(`Gate запустился, но его evidence не сохранено: ${message}.`),
+            ...environment(
+              reapedFailure(error)
+                ? `Gate завершился, но его потомки не остановлены или не пересчитаны: ${message}.`
+                : `Gate запустился, но его evidence не сохранено: ${message}.`,
+            ),
             ...((finished ??= completedCheck(error))
               ? {
                   exitCode: finished.timedOut || signal.aborted ? null : finished.code,

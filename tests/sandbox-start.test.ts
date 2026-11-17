@@ -358,6 +358,29 @@ test(
 );
 
 test(
+  'R3-3: оба запуска (не стартовавший и стартовавший) с неостановленными потомками — текст и исход последнего',
+  { skip: noSandbox },
+  async () => {
+    const file = out();
+    const inventory = processInventory.marked;
+    processInventory.marked = () => Promise.reject(new Error('ps не ответил за 10 с'));
+    let error: unknown;
+    try {
+      await check(loaded(1, noShell()).env, file);
+    } catch (e) {
+      error = e;
+    } finally {
+      processInventory.marked = inventory;
+    }
+    assert.equal(existsSync(file), true, 'второй запуск исполнил команду');
+    assert.ok(error instanceof ReapFailure, String(error));
+    assert.equal(error.result?.code, 0, 'исход — стартовавшего запуска');
+    assert.match(error.message, /код выхода 0\)/, 'текст — о стартовавшем запуске');
+    assert.equal(completedCheck(error)?.attempts, 2);
+  },
+);
+
+test(
   'Команда reviewer, которую песочница так и не запустила, — ошибка среды, а не провал',
   { skip: noSandbox },
   async () => {
@@ -387,6 +410,43 @@ test(
     const once = await run(1);
     assert.equal(once.status, 'passed', once.stderr);
     assert.equal(once.failure, undefined);
+  },
+);
+
+test(
+  'R3-4: команда reviewer с неостановленными потомками — отказ среды с понятной причиной',
+  { skip: noSandbox },
+  async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-probe-')));
+    const spec: ProbeSpec = {
+      cwd: root,
+      controller: [],
+      readable: [root, ...shellless],
+      isolation: { mode: 'os', domains: [] },
+      commandTimeoutMs: 20000,
+      budgetMs: 120000,
+      deadline: Date.now() + 600000,
+      env: ['PATH', 'NODE_OPTIONS', 'FAKE_WHICH_LOG', 'FAKE_WHICH_FAILURES'],
+      secrets: [],
+      settingsDir: join(root, 'settings'),
+      log: join(root, 'probes.jsonl'),
+    };
+    const inventory = processInventory.marked;
+    processInventory.marked = () => Promise.reject(new Error('ps не ответил за 10 с'));
+    let result;
+    try {
+      result = await new ReviewProbes(spec, undefined, loaded(0, noShell()).env).run({
+        argv: [process.execPath, '-e', 'process.exit(0)'],
+      });
+    } finally {
+      processInventory.marked = inventory;
+    }
+    assert.equal(result.status, 'error');
+    assert.equal(result.failure, 'environment');
+    assert.match(
+      result.note ?? '',
+      /^Проверка завершилась, но её потомки не остановлены или не пересчитаны/,
+    );
   },
 );
 
