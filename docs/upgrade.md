@@ -893,12 +893,18 @@ until)` и метка документа `leaseRows: true`. Первая стр�
   причинами `process-reap` или `cleanup`**: прежняя версия разбирает
   известные события строго, и `events()` (доска, отчёт, повтор) упадёт на
   первом таком событии, а исправить базу она не сможет. Проверка перед
-  откатом: `SELECT count(*) FROM events WHERE json_extract(data, '$.type') =
-'attempt.diagnosed' AND json_extract(data, '$.payload.cause') IN
-('process-reap', 'cleanup')` по `state.sqlite` — не 0
-  значит оставаться на 0.1.0-alpha.47 или вернуть копию базы, снятую до
+  откатом (по `state.sqlite`):
+
+  ```sql
+  SELECT count(*) FROM events
+  WHERE json_extract(data, '$.type') = 'attempt.diagnosed'
+    AND json_extract(data, '$.payload.cause') IN ('process-reap', 'cleanup');
+  ```
+
+  Не 0 — оставаться на 0.1.0-alpha.47 или вернуть копию базы, снятую до
   обновления (работа после неё теряется). Копию базы снимайте перед
   обновлением.
+
 - **Перед обновлением остановите прежний процесс.** Открытие базы новой
   версией для записи при идущих попытках переносит их сроки в строки и
   ставит метку: работающая очередь прежней версии на следующем продлении
