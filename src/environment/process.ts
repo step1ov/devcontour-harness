@@ -13,8 +13,30 @@ import {
   worktreeAddPath,
 } from './git-trust.ts';
 import { outputRedactor, type Redactor } from './redaction.ts';
-import type { Activity, RuntimeDiagnostics } from '../contracts/index.ts';
+import { TaskFailure, type Activity, type RuntimeDiagnostics } from '../contracts/index.ts';
 import { activityScope } from './activity.ts';
+import { hostLoad, loadText } from './host-load.ts';
+
+/**
+ * Сдерживаемая команда завершилась, но её потомков не удалось остановить или
+ * хотя бы пересчитать (`ps` не ответил под нагрузкой хоста). О коде это
+ * ничего не говорит: класс — отказ окружения (`process-reap`), попытка не
+ * засчитывается. Сдерживание не ослабляется: результата команды нет, и
+ * вызывающий не принимает её исход — потомок, возможно, ещё работает в её
+ * каталогах.
+ */
+export class ReapFailure extends TaskFailure {
+  constructor(
+    message: string,
+    /** Пережившие остановку PID; пусто, если перечень так и не получен. */
+    readonly survivors: number[],
+    /** Почему перечень процессов не получен; нет — перечень был. */
+    readonly inventory: string | undefined,
+  ) {
+    super('environment', message, undefined, 'process-reap');
+    this.name = 'ReapFailure';
+  }
+}
 export interface CommandResult {
   code: number;
   stdout: string;
@@ -205,11 +227,28 @@ export async function command(
       cleanup();
       if (child.pid && mark)
         for (const [pid, start] of await descendants(child.pid, seen)) seen.set(pid, start);
-      const survivors = mark ? await sweep(mark, seen, dirs, Date.parse(startedAt)) : [];
-      if (survivors.length) {
+      const swept = mark
+        ? await sweep(mark, seen, dirs, Date.parse(startedAt))
+        : { survivors: [] as number[] };
+      if (swept.survivors.length || swept.inventory) {
+        const label = options.activity?.label ?? file.split('/').at(-1) ?? file;
+        const pids = (list: number[]) =>
+          list.slice(0, 10).join(', ') + (list.length > 10 ? ` и ещё ${list.length - 10}` : '');
+        const what = swept.inventory
+          ? `перечень процессов не получен (${swept.inventory})` +
+            (swept.survivors.length
+              ? `; последние замеченные потомки: PID ${pids(swept.survivors)}`
+              : '')
+          : `живы после остановки PID ${pids(swept.survivors)}`;
+        const exit = signal ? `сигнал ${signal}` : `код выхода ${code ?? -1}`;
+        const text =
+          `Не удалось завершить процессы команды «${label}» (PID ${child.pid ?? '?'}, ${exit}): ${what}. ` +
+          `Ресурсы не освобождены: потомки команды могут ещё работать; ${loadText(hostLoad.read())}`;
         reject(
-          new Error(
-            `Не удалось завершить процессы проверки: ${survivors.join(', ')}. Ресурсы не освобождены`,
+          new ReapFailure(
+            options.redact ? options.redact(text) : text,
+            swept.survivors,
+            swept.inventory,
           ),
         );
         return;
@@ -407,12 +446,29 @@ function output(
   /** Код выхода, при котором вывод остаётся верным (lsof: часть процессов уже завершилась). */
   partial?: number,
 ): Promise<string | null> {
+  return outcome(command, args, timeout, partial).then((r) => ('error' in r ? null : r.stdout));
+}
+/** Вывод системной утилиты или причина, по которой его нет. */
+function outcome(
+  command: string,
+  args: string[],
+  timeout: number,
+  partial?: number,
+): Promise<{ stdout: string } | { error: string }> {
   return new Promise((resolve) => {
     execFile(
       command,
       args,
       { encoding: 'utf8', env: osToolEnv(), timeout, maxBuffer: 64_000_000 },
-      (error, stdout) => resolve(error && (!partial || error.code !== partial) ? null : stdout),
+      (error, stdout) => {
+        if (!error || (partial && error.code === partial)) return resolve({ stdout });
+        const name = command.split('/').at(-1) ?? command;
+        resolve({
+          error: error.killed
+            ? `${name} не ответил за ${Math.round(timeout / 1000)} с`
+            : `${name}: ${typeof error.code === 'number' ? `код выхода ${error.code}` : (error.code ?? error.message)}`,
+        });
+      },
     );
   });
 }
@@ -432,9 +488,9 @@ async function marked(mark: string): Promise<number[]> {
     });
   }
   // macOS: -E добавляет окружение к команде для процессов своего пользователя.
-  const stdout = await output(osTool('ps'), ['-Eww', '-ax', '-o', 'pid=,command='], 10000);
-  if (stdout === null) throw new Error('Не удалось перечислить процессы проверки');
-  return stdout.split('\n').flatMap((line) => {
+  const listed = await outcome(osTool('ps'), ['-Eww', '-ax', '-o', 'pid=,command='], 10000);
+  if ('error' in listed) throw new Error(listed.error);
+  return listed.stdout.split('\n').flatMap((line) => {
     const m = /^\s*(\d+)\s+(.*)$/.exec(line);
     return m && m[2]!.includes(needle) && Number(m[1]) !== process.pid ? [Number(m[1])] : [];
   });
@@ -530,31 +586,55 @@ async function inside(
   }
   return pids;
 }
-/** Остановить всех потомков команды; вернуть тех, кто пережил попытки. */
+/**
+ * Перечень процессов для остановки потомков; объект — чтобы тест мог
+ * подменить его отказ.
+ */
+export const processInventory = { marked };
+/** Сколько раз перечень может не получиться за одну остановку, прежде чем она сдаётся. */
+const INVENTORY_TRIES = 3;
+/**
+ * Остановить всех потомков команды; вернуть тех, кто пережил попытки, и —
+ * если перечень так и не получен — почему. Перечень не получен — не «живых
+ * нет»: команда тогда не считается завершённой.
+ */
 async function sweep(
   mark: string,
   seen: Map<number, string>,
   dirs: string[],
   since: number,
-): Promise<number[]> {
+): Promise<{ survivors: number[]; inventory?: string }> {
   let left: number[] = [];
+  let failures = 0;
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
       const rows = await processTable();
       const table = new Map(rows.map((r) => [r.pid, r.start]));
       left = [
         ...new Set([
-          ...(await marked(mark)),
+          ...(await processInventory.marked(mark)),
           // Замеченный опросом потомок — только если это тот же процесс, а
           // не новый, получивший освободившийся PID.
           ...[...seen].filter(([pid, start]) => table.get(pid) === start).map(([pid]) => pid),
           ...(await inside(dirs, since, rows)),
         ]),
       ];
-    } catch {
-      return [-1];
+    } catch (error) {
+      // Под нагрузкой хоста `ps` не укладывается в свой предел: перечень
+      // повторяется, а не объявляется отказом с первого раза. Уже известные
+      // потомки останавливаются и между попытками.
+      const reason = error instanceof Error ? error.message : String(error);
+      if (++failures >= INVENTORY_TRIES) return { survivors: left, inventory: reason };
+      for (const pid of left)
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          /* Already gone. */
+        }
+      await new Promise((r) => setTimeout(r, 500 * failures));
+      continue;
     }
-    if (!left.length) return [];
+    if (!left.length) return { survivors: [] };
     for (const pid of left)
       try {
         process.kill(pid, 'SIGKILL');
@@ -563,5 +643,5 @@ async function sweep(
       }
     await new Promise((r) => setTimeout(r, 100));
   }
-  return left;
+  return { survivors: left };
 }

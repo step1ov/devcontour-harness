@@ -1214,6 +1214,7 @@
                 "lease-expired",
                 "stalled",
                 "shutdown",
+                "process-reap",
                 "other",
                 "none"
               ]

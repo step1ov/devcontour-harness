@@ -1084,7 +1084,9 @@ hadAttempt}`. `engine.cancel(workId, reason?, by?)` (CLI `cancel` — `operator`
 точке обнаружения (`TaskFailure.diagnosis`); `transport`, `preflight`
 (`BlockedError` до работы), `provider-auth`, `provider-limit`, `stalled`,
 `shutdown` (прерывание штатной остановкой), `lease-expired` — по классу отказа
-и его признакам; `other` — отказ окружения без известной причины; `none` —
+и его признакам; `process-reap` — потомков сдерживаемой команды (gate,
+вызова runtime) не удалось остановить или пересчитать (`ReapFailure`):
+проверка не пройдена и на том же дереве не повторяется; `other` — отказ окружения без известной причины; `none` —
 отказ не окружения. Хост, вызывающий `engine.fail`, может передать
 `options.cause`; движок приводит её к классу (у отказа не окружения — всегда
 `none`). `counted` — отказ засчитан в предел попыток (`maxAttempts`): не

@@ -70,6 +70,7 @@ const causeLabels: Record<string, string> = {
   'lease-expired': 'lease expired',
   stalled: 'stalled process',
   shutdown: 'controller shutdown',
+  'process-reap': 'command processes not stopped or not listed',
   other: 'other',
   none: 'not an environment cause',
 };

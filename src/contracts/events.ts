@@ -43,6 +43,7 @@ export const environmentCauses = [
   'lease-expired',
   'stalled',
   'shutdown',
+  'process-reap',
   'other',
   'none',
 ] as const;

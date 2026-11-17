@@ -9,7 +9,8 @@ import {
   lstat,
   chmod,
 } from 'node:fs/promises';
-import { availableParallelism, loadavg, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
+import { hostLoad, loadText, type HostLoad } from '../environment/host-load.ts';
 import { join, resolve, sep, delimiter, relative, dirname } from 'node:path';
 import { accessSync, constants, existsSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
@@ -24,7 +25,7 @@ import {
   gateTimeoutMs,
   gateTimeoutText,
 } from '../contracts/index.ts';
-import { command, git, gitOutput } from '../environment/process.ts';
+import { ReapFailure, command, git, gitOutput } from '../environment/process.ts';
 import {
   isolation,
   isolatedCommand,
@@ -665,18 +666,8 @@ export interface Boundary {
  * укладывается в предел, повтора не получает.
  */
 export const HOST_LOAD_RECHECK_PER_CPU = 2;
-/** Снимок нагрузки хоста; объект — чтобы тест мог подменить чтение. */
-export const hostLoad = {
-  read: (): HostLoad => ({ load1: loadavg()[0] ?? 0, cpus: Math.max(1, availableParallelism()) }),
-};
-export interface HostLoad {
-  /** Средняя нагрузка за минуту (`os.loadavg()[0]`; на Windows — 0). */
-  load1: number;
-  /** Доступные процессу ядра. */
-  cpus: number;
-}
-const loadText = (load: HostLoad) =>
-  `нагрузка хоста ${Math.round(load.load1 * 10) / 10} на ${load.cpus} ядер`;
+// Снимок нагрузки хоста — общий с containment команд (`host-load.ts`).
+export { hostLoad, type HostLoad };
 /**
  * Gate исчерпал свой предел времени (не отмена попытки). Класс отказа —
  * прежний `gate`; нагрузка в момент таймаута решает, повторить ли gate один
@@ -1019,6 +1010,14 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       cause = 'sandbox-policy';
     }
     if (error instanceof UntrustedCheckoutError) kind = 'scope-violation';
+    // Процессы проверки не удалось остановить или пересчитать: о коде это
+    // ничего не говорит — отказ среды. Проверка при этом не пройдена, и
+    // повтора на том же дереве нет (повтор интеграции — только у `gate`):
+    // потомок, возможно, ещё пишет в worktree.
+    if (error instanceof ReapFailure) {
+      kind = 'environment';
+      cause = 'process-reap';
+    }
     const message = error instanceof Error ? error.message : String(error);
     summary = redact(message);
     log += '\n' + summary;
