@@ -32,9 +32,24 @@ export class ReapFailure extends TaskFailure {
     readonly survivors: number[],
     /** Почему перечень процессов не получен; нет — перечень был. */
     readonly inventory: string | undefined,
+    /**
+     * Исход самой команды (код, вывод), если она завершилась: провал,
+     * который она назвала, — свидетельство о коде и при неостановленных
+     * потомках. Принимать его успехом нельзя.
+     */
+    readonly result?: CommandResult,
   ) {
     super('environment', message, undefined, 'process-reap');
     this.name = 'ReapFailure';
+  }
+  /** Тот же отказ с дописанной причиной (например, неубранными каталогами). */
+  extend(suffix: string) {
+    return new ReapFailure(
+      `${this.message}; ${suffix}`,
+      this.survivors,
+      this.inventory,
+      this.result,
+    );
   }
 }
 
@@ -52,6 +67,7 @@ export function reapFailure(outcome: {
   survivors: number[];
   inventory?: string | undefined;
   redact?: (value: string) => string;
+  result?: CommandResult;
 }) {
   const pids = (list: number[]) =>
     list.slice(0, 10).join(', ') + (list.length > 10 ? ` и ещё ${list.length - 10}` : '');
@@ -69,6 +85,7 @@ export function reapFailure(outcome: {
     outcome.redact ? outcome.redact(text) : text,
     outcome.survivors,
     outcome.inventory,
+    outcome.result,
   );
 }
 export interface CommandResult {
@@ -264,19 +281,10 @@ export async function command(
       const swept = mark
         ? await sweep(mark, seen, dirs, Date.parse(startedAt))
         : { survivors: [] as number[] };
-      if (swept.survivors.length || swept.inventory) {
-        reject(
-          reapFailure({
-            label: options.activity?.label ?? file.split('/').at(-1) ?? file,
-            pid: child.pid,
-            code,
-            signal,
-            ...swept,
-            ...(options.redact ? { redact: options.redact } : {}),
-          }),
-        );
-        return;
-      }
+      // Потомков не удалось остановить или пересчитать: исход команды
+      // собирается как обычно (ожидание pipes ограничено — их может держать
+      // переживший потомок) и уходит вместе с отказом, а не результатом.
+      const reaped = swept.survivors.length > 0 || swept.inventory !== undefined;
       if (mark) {
         let pipeTimer: NodeJS.Timeout | undefined;
         try {
@@ -306,7 +314,7 @@ export async function command(
         reject(outputError);
         return;
       }
-      resolve({
+      const result: CommandResult = {
         code: code ?? -1,
         stdout,
         stderr,
@@ -323,7 +331,20 @@ export async function command(
           stderrTail: stderr.slice(-4000),
           processTree,
         },
-      });
+      };
+      if (reaped)
+        reject(
+          reapFailure({
+            label: options.activity?.label ?? file.split('/').at(-1) ?? file,
+            pid: child.pid,
+            code,
+            signal,
+            ...swept,
+            ...(options.redact ? { redact: options.redact } : {}),
+            result,
+          }),
+        );
+      else resolve(result);
     };
     child.stdin.on('error', () => {});
     child.stdin.end(options.input ?? '');
@@ -460,19 +481,9 @@ export async function git(cwd: string, ...args: string[]) {
 }
 
 /**
- * Вывод системной утилиты или null, если она не выполнилась. Не блокирует
+ * Вывод системной утилиты или причина, по которой его нет. Не блокирует
  * event loop. Локаль фиксирована (`osToolEnv`): вывод разбирается.
  */
-function output(
-  command: string,
-  args: string[],
-  timeout: number,
-  /** Код выхода, при котором вывод остаётся верным (lsof: часть процессов уже завершилась). */
-  partial?: number,
-): Promise<string | null> {
-  return outcome(command, args, timeout, partial).then((r) => ('error' in r ? null : r.stdout));
-}
-/** Вывод системной утилиты или причина, по которой его нет. */
 function outcome(
   command: string,
   args: string[],
@@ -512,18 +523,32 @@ async function marked(mark: string): Promise<number[]> {
     });
   }
   // macOS: -E добавляет окружение к команде для процессов своего пользователя.
-  const listed = await outcome(osTool('ps'), ['-Eww', '-ax', '-o', 'pid=,command='], 10000);
+  const listed = await processInventory.tool(
+    osTool('ps'),
+    ['-Eww', '-ax', '-o', 'pid=,command='],
+    10000,
+  );
   if ('error' in listed) throw new Error(listed.error);
   return listed.stdout.split('\n').flatMap((line) => {
     const m = /^\s*(\d+)\s+(.*)$/.exec(line);
     return m && m[2]!.includes(needle) && Number(m[1]) !== process.pid ? [Number(m[1])] : [];
   });
 }
-/** Живые процессы: PID, родитель, время старта. */
-async function processTable(): Promise<{ pid: number; ppid: number; start: string }[]> {
-  const stdout = await output(osTool('ps'), ['-axo', 'pid=,ppid=,lstart='], 10000);
-  if (stdout === null) return [];
-  return stdout.split('\n').flatMap((line) => {
+/**
+ * Живые процессы: PID, родитель, время старта. `strict` — для остановки
+ * потомков: неполученная таблица там не «процессов нет», а отказ перечня
+ * (`sweep` повторяет его и сдаётся с `ReapFailure`). Опрос во время команды
+ * пустую таблицу переживает.
+ */
+async function processTable(
+  strict = false,
+): Promise<{ pid: number; ppid: number; start: string }[]> {
+  const listed = await processInventory.tool(osTool('ps'), ['-axo', 'pid=,ppid=,lstart='], 10000);
+  if ('error' in listed) {
+    if (strict) throw new Error(listed.error);
+    return [];
+  }
+  return listed.stdout.split('\n').flatMap((line) => {
     const m = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line);
     return m ? [{ pid: Number(m[1]), ppid: Number(m[2]), start: m[3]!.trim() }] : [];
   });
@@ -590,15 +615,17 @@ async function inside(
   // сотни миллисекунд на каждую команду. Код 1 — часть из них уже завершилась.
   const candidates = [...started.keys()].filter((pid) => pid !== process.pid && fresh(pid));
   if (!candidates.length) return [];
-  const stdout = await output(
+  // Отказ lsof — неполученный перечень, а не «в каталогах никого нет».
+  const listed = await processInventory.tool(
     osTool('lsof'),
     ['-a', '-d', 'cwd', '-Fpn', '-u', String(process.getuid?.()), '-p', candidates.join(',')],
     15000,
     1,
   );
+  if ('error' in listed) throw new Error(listed.error);
   const pids: number[] = [];
   let pid = 0;
-  for (const line of (stdout ?? '').split('\n')) {
+  for (const line of listed.stdout.split('\n')) {
     if (line.startsWith('p')) pid = Number(line.slice(1));
     else if (
       line.startsWith('n') &&
@@ -614,7 +641,11 @@ async function inside(
  * Перечень процессов для остановки потомков; объект — чтобы тест мог
  * подменить его отказ.
  */
-export const processInventory = { marked };
+export const processInventory = {
+  marked,
+  /** Запуск системной утилиты перечня (`ps`, `lsof`). */
+  tool: outcome,
+};
 /** Сколько раз перечень может не получиться за одну остановку, прежде чем она сдаётся. */
 const INVENTORY_TRIES = 3;
 /**
@@ -632,7 +663,7 @@ async function sweep(
   let failures = 0;
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
-      const rows = await processTable();
+      const rows = await processTable(true);
       const table = new Map(rows.map((r) => [r.pid, r.start]));
       left = [
         ...new Set([
