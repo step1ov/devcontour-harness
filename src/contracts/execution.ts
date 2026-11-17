@@ -1271,6 +1271,14 @@ export const executionDocumentSchema = z.strictObject({
   verifications: z.array(jointVerificationStateSchema).default([]),
   control: controlStateSchema,
   controller: controllerLeaseSchema.optional(),
+  /**
+   * Метка D53: сроки аренды активных попыток держат строки таблицы
+   * `leases`, а `leaseUntil` попытки в документе — не источник (для отладки).
+   * Прежние версии не знают поля и отказывают до любой записи (строгая
+   * схема). Ставится первой строкой аренды вместе с переносом сроков всех
+   * активных попыток; снимается шагом вниз (`stepDownLeases`).
+   */
+  leaseRows: z.literal(true).optional(),
   sequence: z.number().int().min(0),
 });
 export type ExecutionDocument = z.infer<typeof executionDocumentSchema>;

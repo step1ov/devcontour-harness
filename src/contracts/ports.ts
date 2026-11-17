@@ -44,6 +44,23 @@ export interface ExecutionView {
   verification(id: string): JointVerificationState | undefined;
   verifications(): JointVerificationState[];
   /**
+   * Аренда активной попытки — строка хранилища (D53), без проекции всей
+   * попытки и без чтения документа. `undefined` — у попытки нет аренды
+   * (она не активна, строки нет или token строки не её). Необязательный
+   * метод: адаптер, у которого он есть, обязан иметь и `renewLease`,
+   * `activeLeases`, `dataVersion` — тогда продление идёт строкой.
+   */
+  attemptLease?(id: string): AttemptLease | undefined;
+  /** Аренды активных попыток, ещё действующие в момент `at` (`leaseUntil > at`). */
+  activeLeases?(at: number): AttemptLease[];
+  /**
+   * Счётчик версии данных: меняется при каждой фиксации, которая записала
+   * записи модели, локальные записи или события, и не меняется продлением
+   * аренды (`renewLease`). По нему движок решает, нужна ли продлению полная
+   * проверка политики и guards.
+   */
+  dataVersion?(): number;
+  /**
    * Локальные записи исполнения, адресуемые `(namespace, owner, key)`.
    * Пространства и схемы — `localSchemas`; `owner` — репозиторий, за которым
    * закреплена запись, или `WORKSPACE_OWNER`. Адаптер хранит их в той же
@@ -80,6 +97,34 @@ export interface ExecutionTransaction extends ExecutionView {
     value: LocalValue<N>,
   ): void;
   emit(event: RunEventDraft): void;
+  /**
+   * Условное продление одной строки аренды (D53): срок становится `until`,
+   * только если строка `(kind, id)` есть, её token, владелец и версия движка
+   * совпадают с переданными и срок ещё не истёк (`leaseUntil > now`).
+   * `true` — продлено. Записи модели, события и `dataVersion` не меняются.
+   * Истёкший срок не продлевается даже прежним token.
+   */
+  renewLease?(
+    kind: LeaseKind,
+    id: string,
+    token: string,
+    owner: string,
+    engineVersion: string | undefined,
+    until: number,
+    now: number,
+  ): boolean;
+}
+
+/** Вид аренды, которую хранилище держит строкой. Пока только попытки. */
+export type LeaseKind = 'attempt';
+
+/** Строка аренды попытки: кто держит попытку и до какого момента. */
+export interface AttemptLease {
+  id: string;
+  token: string;
+  owner: string;
+  engineVersion: string | undefined;
+  leaseUntil: number;
 }
 
 /** Результат транзакции не может быть Promise: внутри нельзя ждать внешней работы. */
@@ -101,6 +146,14 @@ export type NotPromise<T> = T extends PromiseLike<unknown> ? never : T;
  * - событие фиксируется вместе с транзакцией, даже если она не изменила
  *   записей модели (только `emit` или только локальная запись и `emit`);
  * - `kind === 'heartbeat'` продлевает только сроки владения и не создаёт события;
+ *   у адаптера со строками аренды (`renewLease`) продление попытки меняет
+ *   только её строку: документ, записи модели и `dataVersion` прежние;
+ * - аренда попытки (D53): `putAttempt` активной попытки пишет её строку
+ *   аренды (token, владелец, версия движка, `leaseUntil`) той же
+ *   транзакцией, неактивной — удаляет; чтение попытки (`attempt`,
+ *   `attempts`, `activeAttempts`) отдаёт срок из строки, пока token строки
+ *   равен token попытки, а без такой строки у активной попытки срок 0
+ *   (аренды нет). Правило «максимум строки и документа» не действует;
  * - внутри `fn` допустим один синхронный внешний эффект — CAS продвижения
  *   target ref (`git update-ref <ref> <new> <old>`) при приёмке: он
  *   выполняется до фиксации, и его отказ откатывает транзакцию. Падение

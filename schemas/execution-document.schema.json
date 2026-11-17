@@ -4643,6 +4643,10 @@
       ],
       "additionalProperties": false
     },
+    "leaseRows": {
+      "type": "boolean",
+      "const": true
+    },
     "sequence": {
       "type": "integer",
       "minimum": 0,

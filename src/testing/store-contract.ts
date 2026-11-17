@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   WORKSPACE_OWNER,
   answerDigest,
+  type AttemptState,
   digestOf,
   inputRequestId,
   type ExecutionStore,
@@ -99,6 +100,15 @@ export function executionStoreContract(
      * ChangeSet). По умолчанию — `putVerification` в транзакции начала.
      */
     startVerification?: (store: ExecutionStore, verification: JointVerificationState) => void;
+    /**
+     * Адаптер держит аренду попыток строками (D53: `attemptLease`,
+     * `activeLeases`, `dataVersion`, `renewLease`). По умолчанию —
+     * определяется по адаптеру: есть методы — проверки строк обязательны;
+     * нет ни одного — адаптер прежнего договора (продление через
+     * `putAttempt`), проверки строк не применяются. Часть методов без
+     * остальных — отказ.
+     */
+    leaseRows?: boolean;
   } = {},
 ) {
   const work = (id: string, status: WorkState['status'] = 'ready'): WorkState => ({
@@ -150,6 +160,18 @@ export function executionStoreContract(
     costUsd: null,
     costSource: 'unknown' as const,
   });
+
+  const leaseRows = options.leaseRows ?? declaresLeaseRows(open(tempDir()));
+  if (leaseRows) leaseRowCases(name, test, open, tempDir, work);
+  else
+    test(`${name}: D53 адаптер без строк аренды не объявляет их методы частично`, () => {
+      const s = open(tempDir());
+      const methods = s.transact('heartbeat', (tx) =>
+        LEASE_METHODS.filter((k) => typeof tx[k] === 'function'),
+      );
+      assert.equal(methods.length, 0, 'часть методов строк аренды без остальных');
+      s.close();
+    });
 
   test(`${name}: запись видна следующей транзакции и другому экземпляру`, () => {
     const dir = tempDir();
@@ -578,6 +600,291 @@ export function executionStoreContract(
       s.read((v) => v.work('w1')),
       undefined,
     );
+    s.close();
+  });
+}
+
+const LEASE_METHODS = ['attemptLease', 'activeLeases', 'dataVersion', 'renewLease'] as const;
+
+/** Объявляет ли адаптер аренду строками: все четыре метода договора D53. */
+function declaresLeaseRows(store: ExecutionStore): boolean {
+  try {
+    const methods = store.transact('heartbeat', (tx) =>
+      LEASE_METHODS.filter((k) => typeof tx[k] === 'function'),
+    );
+    return methods.length > 0;
+  } finally {
+    store.close();
+  }
+}
+
+/** Активная попытка поручения `workId` для проверок строки аренды. */
+function sampleAttempt(id: string, workId: string, leaseUntil: number): AttemptState {
+  return {
+    id,
+    workId,
+    repositoryId: 'app',
+    attempt: 1,
+    token: ('token-' + id).padEnd(32, 'x'),
+    owner: 'owner-a',
+    runtime: 'fixture',
+    reviewer: 'fixture',
+    policyDigest: digestOf('policy'),
+    status: 'active',
+    phase: 'running',
+    startedAt: '2026-01-01T00:00:00.000Z',
+    leaseUntil,
+    engineVersion: 'engine-1',
+    evidence: [],
+  };
+}
+
+/**
+ * Аренда попыток строкой (D53). Каждый случай называет поломку, которую
+ * он ловит: строка, пережившая смену статуса или token, или продление,
+ * которое переписывает документ, оживили бы чужую или истёкшую попытку.
+ */
+function leaseRowCases(
+  name: string,
+  test: (title: string, fn: () => void | Promise<void>) => unknown,
+  open: (dir: string) => ExecutionStore,
+  tempDir: () => string,
+  work: (id: string, status?: WorkState['status']) => WorkState,
+) {
+  const T0 = 1_000_000;
+  const seed = (s: ExecutionStore, leaseUntil = T0 + 30_000, id = 'a1') => {
+    const attempt = sampleAttempt(id, 'w-' + id, leaseUntil);
+    s.transact('run.claimed', (tx) => {
+      tx.putWork({ ...work('w-' + id, 'running'), activeRunId: id, attempt: 1 });
+      tx.putAttempt(attempt);
+    });
+    return attempt;
+  };
+  const renew = (
+    s: ExecutionStore,
+    a: Pick<AttemptState, 'id' | 'token' | 'owner' | 'engineVersion'>,
+    until: number,
+    now: number,
+  ) =>
+    s.transact('heartbeat', (tx) => {
+      assert.ok(typeof tx.renewLease === 'function', 'адаптер объявляет renewLease');
+      return tx.renewLease('attempt', a.id, a.token, a.owner, a.engineVersion, until, now);
+    });
+  const lease = (s: ExecutionStore, id: string) =>
+    s.read((v) => {
+      assert.ok(typeof v.attemptLease === 'function', 'адаптер объявляет attemptLease');
+      return v.attemptLease(id);
+    });
+
+  test(`${name}: D53 выдача пишет строку аренды; activeLeases — только действующие`, () => {
+    // Ловит: putAttempt активной попытки не пишет строку — продлевать нечего.
+    const s = open(tempDir());
+    const a = seed(s);
+    assert.deepEqual(lease(s, a.id), {
+      id: a.id,
+      token: a.token,
+      owner: a.owner,
+      engineVersion: a.engineVersion,
+      leaseUntil: a.leaseUntil,
+    });
+    assert.deepEqual(
+      s.read((v) => v.activeLeases!(T0).map((l) => l.id)),
+      [a.id],
+    );
+    assert.deepEqual(
+      s.read((v) => v.activeLeases!(a.leaseUntil)),
+      [],
+      'срок, равный моменту, уже не действует',
+    );
+    s.close();
+  });
+
+  test(`${name}: D53 продление меняет только строку — не документ, не события, не dataVersion`, () => {
+    // Ловит: продление переписывает документ или поднимает версию данных
+    // (F46: каждый heartbeat переписывал всё состояние), а чтение попытки
+    // не накладывает срок строки.
+    const dir = tempDir();
+    const s = open(dir);
+    const a = seed(s);
+    const before = s.read((v) => ({
+      version: v.dataVersion!(),
+      work: v.work('w-' + a.id),
+      attempt: v.attempt(a.id),
+    }));
+    const events = s.events().length;
+    assert.equal(renew(s, a, T0 + 60_000, T0 + 10_000), true);
+    const after = s.read((v) => ({
+      version: v.dataVersion!(),
+      work: v.work('w-' + a.id),
+      attempt: v.attempt(a.id),
+      attempts: v.attempts().find((x) => x.id === a.id),
+      active: (v.activeAttempts?.() ?? v.attempts()).find((x) => x.id === a.id),
+    }));
+    assert.equal(after.version, before.version, 'продление не меняет версию данных');
+    assert.deepEqual(after.work, before.work);
+    assert.deepEqual(
+      { ...after.attempt, leaseUntil: 0 },
+      { ...before.attempt, leaseUntil: 0 },
+      'кроме срока попытка прежняя',
+    );
+    assert.equal(after.attempt?.leaseUntil, T0 + 60_000, 'attempt() — срок строки');
+    assert.equal(after.attempts?.leaseUntil, T0 + 60_000, 'attempts() — срок строки');
+    assert.equal(after.active?.leaseUntil, T0 + 60_000, 'activeAttempts() — срок строки');
+    assert.equal(s.events().length, events, 'продление не пишет событий');
+    const other = open(dir);
+    assert.equal(
+      other.read((v) => v.attempt(a.id)?.leaseUntil),
+      T0 + 60_000,
+      'другой экземпляр видит продлённый срок',
+    );
+    // Истечение по снимку видит срок строки, а не прежний срок документа.
+    assert.deepEqual(
+      other.read((v) =>
+        v.attempts().filter((x) => x.status === 'active' && x.leaseUntil <= T0 + 40_000),
+      ),
+      [],
+    );
+    other.close();
+    s.close();
+  });
+
+  test(`${name}: D53 продление отклоняется: чужой token, владелец, версия движка, истёкший срок`, () => {
+    // Ловит: безусловное продление по id и оживление истёкшей аренды
+    // прежним token (ограждение держалось бы на «никто ещё не истёк»).
+    const s = open(tempDir());
+    const a = seed(s, T0 + 30_000);
+    const now = T0 + 10_000;
+    assert.equal(renew(s, { ...a, token: 'other-'.padEnd(32, 'y') }, T0 + 90_000, now), false);
+    assert.equal(renew(s, { ...a, owner: 'owner-b' }, T0 + 90_000, now), false);
+    assert.equal(renew(s, { ...a, engineVersion: 'engine-2' }, T0 + 90_000, now), false);
+    assert.equal(renew(s, { ...a, engineVersion: undefined }, T0 + 90_000, now), false);
+    assert.equal(renew(s, a, T0 + 90_000, T0 + 30_000), false, 'срок равен моменту — истёк');
+    assert.equal(renew(s, a, T0 + 90_000, T0 + 45_000), false, 'истёкший не продлевается');
+    assert.equal(renew(s, { ...a, id: 'missing' }, T0 + 90_000, now), false);
+    assert.equal(lease(s, a.id)?.leaseUntil, T0 + 30_000, 'отказ не меняет срок');
+    assert.equal(
+      s.read((v) => v.attempt(a.id)?.leaseUntil),
+      T0 + 30_000,
+    );
+    s.close();
+  });
+
+  for (const status of ['succeeded', 'failed', 'cancelled', 'expired'] as const)
+    test(`${name}: D53 смена статуса на ${status} удаляет строку аренды той же транзакцией`, () => {
+      // Ловит: строка, пережившая конец попытки, продлевалась бы прежним
+      // token и показывала бы занятость завершённой попытки.
+      const s = open(tempDir());
+      const a = seed(s);
+      s.transact('run.failed', (tx) => {
+        tx.putAttempt({
+          ...tx.attempt(a.id)!,
+          status,
+          finishedAt: '2026-01-01T00:01:00.000Z',
+        });
+        tx.putWork({ ...tx.work('w-' + a.id)!, activeRunId: undefined, status: 'failed' });
+      });
+      assert.equal(lease(s, a.id), undefined);
+      assert.equal(renew(s, a, T0 + 90_000, T0 + 1), false);
+      assert.deepEqual(
+        s.read((v) => v.activeLeases!(0)),
+        [],
+      );
+      assert.equal(
+        s.read((v) => v.attempt(a.id)?.status),
+        status,
+      );
+      s.close();
+    });
+
+  test(`${name}: D53 новый token (adopt, recovery) переписывает строку; прежний token отклоняется`, () => {
+    // Ловит: adopt оставляет строку прежнего владельца — старый процесс
+    // продолжал бы продлевать попытку, перешедшую к новому.
+    const s = open(tempDir());
+    const a = seed(s, T0 + 30_000);
+    const adopted: AttemptState = {
+      ...a,
+      token: 'adopted-'.padEnd(32, 'z'),
+      owner: 'owner-b',
+      engineVersion: 'engine-2',
+      leaseUntil: T0 + 70_000,
+    };
+    s.transact('run.recovered', (tx) => tx.putAttempt(adopted));
+    assert.deepEqual(lease(s, a.id), {
+      id: a.id,
+      token: adopted.token,
+      owner: 'owner-b',
+      engineVersion: 'engine-2',
+      leaseUntil: T0 + 70_000,
+    });
+    assert.equal(renew(s, a, T0 + 90_000, T0 + 1), false, 'прежний token');
+    assert.equal(renew(s, adopted, T0 + 90_000, T0 + 1), true, 'новый token');
+    assert.equal(
+      s.read((v) => v.attempt(a.id)?.leaseUntil),
+      T0 + 90_000,
+    );
+    s.close();
+  });
+
+  test(`${name}: D53 отклонённый recovery (срок 0) — аренды нет, продление отклоняется`, () => {
+    // Ловит: срок 0, записанный rejectRecovery, не доходит до строки — и
+    // попытка, которую recovery отпустил, продлевалась бы владельцем.
+    const s = open(tempDir());
+    const a = seed(s, T0 + 30_000);
+    s.transact('recovery.rejected', (tx) => tx.putAttempt({ ...tx.attempt(a.id)!, leaseUntil: 0 }));
+    assert.equal(
+      s.read((v) => v.attempt(a.id)?.leaseUntil),
+      0,
+    );
+    assert.equal(renew(s, a, T0 + 90_000, T0 + 1), false);
+    assert.deepEqual(
+      s.read((v) => v.activeLeases!(0)),
+      [],
+    );
+    s.close();
+  });
+
+  test(`${name}: D53 строка откатывается вместе с транзакцией и вложенной частью`, () => {
+    // Ловит: строка аренды пишется вне транзакции документа — откат
+    // оставлял бы аренду попытки, которой нет.
+    const s = open(tempDir());
+    assert.throws(() =>
+      s.transact('run.claimed', (tx) => {
+        tx.putWork({ ...work('w-r1', 'running'), activeRunId: 'r1', attempt: 1 });
+        tx.putAttempt(sampleAttempt('r1', 'w-r1', T0 + 30_000));
+        throw new Error('отказ');
+      }),
+    );
+    assert.equal(lease(s, 'r1'), undefined);
+    const a = seed(s, T0 + 30_000, 'r2');
+    s.transact('run.phase', () => {
+      assert.throws(() =>
+        s.transact('run.failed', (inner) => {
+          inner.putAttempt({ ...inner.attempt(a.id)!, status: 'failed' });
+          throw new Error('вложенный отказ');
+        }),
+      );
+      assert.equal(
+        s.read((v) => v.attemptLease!(a.id)?.token),
+        a.token,
+        'откат вложенной части вернул строку',
+      );
+      assert.equal(
+        s.read((v) => v.attempt(a.id)?.status),
+        'active',
+      );
+    });
+    assert.equal(lease(s, a.id)?.leaseUntil, T0 + 30_000);
+    // Продление внутри транзакции, которая затем падает, тоже откатывается.
+    assert.throws(() =>
+      s.transact('heartbeat', (tx) => {
+        assert.equal(
+          tx.renewLease!('attempt', a.id, a.token, a.owner, a.engineVersion, T0 + 99_000, T0),
+          true,
+        );
+        throw new Error('отказ');
+      }),
+    );
+    assert.equal(lease(s, a.id)?.leaseUntil, T0 + 30_000);
     s.close();
   });
 }

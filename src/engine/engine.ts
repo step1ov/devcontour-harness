@@ -1486,9 +1486,71 @@ export class Engine {
     });
   }
 
+  /**
+   * Когда продление попытки последний раз проверяло политику и guards
+   * полностью: token, версия данных и момент проверки (D53).
+   */
+  private readonly leaseChecks = new Map<
+    string,
+    { token: string; dataVersion: number; at: number }
+  >();
+
+  /**
+   * Продление владения попыткой. У хранилища со строками аренды (D53) —
+   * условное продление одной строки: документ не читается и не пишется.
+   * Политика и guards, которые раньше проверяло каждое продление,
+   * проверяются полностью (`withAttempt`), когда сменилась версия данных
+   * или с прошлой полной проверки прошёл срок аренды: смена политики или
+   * отказ хоста по-прежнему прерывают идущую попытку.
+   */
   heartbeat(id: string, token: string) {
-    this.withAttempt(id, token, 'heartbeat', (a, _w, tx) => {
-      tx.putAttempt({ ...a, leaseUntil: this.now() + this.policy.leaseMs });
+    this.tx('heartbeat', (tx) => {
+      if (!tx.renewLease || !tx.attemptLease || !tx.dataVersion) {
+        this.withAttempt(id, token, 'heartbeat', (a, _w, inner) => {
+          inner.putAttempt({ ...a, leaseUntil: this.now() + this.policy.leaseMs });
+        });
+        return;
+      }
+      const now = this.now();
+      try {
+        const lease = tx.attemptLease(id);
+        if (!lease || lease.token !== token || lease.leaseUntil <= now)
+          throw new HarnessError('LEASE_STALE', 'Устаревшая попытка: владение утрачено');
+        if (lease.engineVersion !== this.version)
+          throw new HarnessError(
+            'LEASE_STALE',
+            `Попытку выдал движок ${lease.engineVersion ?? 'прежней версии'}, а работает ${this.version}: продолжение прежним token запрещено, нужна новая попытка`,
+          );
+        const version = tx.dataVersion();
+        const checked = this.leaseChecks.get(id);
+        if (
+          !checked ||
+          checked.token !== token ||
+          checked.dataVersion !== version ||
+          now - checked.at >= this.policy.leaseMs
+        ) {
+          // Полная проверка — та же, что у любой операции попытки.
+          this.withAttempt(id, token, 'heartbeat', () => undefined);
+          this.leaseChecks.set(id, { token, dataVersion: version, at: now });
+          if (this.leaseChecks.size > 1000)
+            this.leaseChecks.delete(this.leaseChecks.keys().next().value!);
+        }
+        if (
+          !tx.renewLease(
+            'attempt',
+            id,
+            token,
+            lease.owner,
+            lease.engineVersion,
+            now + this.policy.leaseMs,
+            now,
+          )
+        )
+          throw new HarnessError('LEASE_STALE', 'Устаревшая попытка: владение утрачено');
+      } catch (error) {
+        this.leaseChecks.delete(id);
+        throw error;
+      }
     });
   }
 

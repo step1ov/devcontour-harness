@@ -12,10 +12,13 @@ import {
   localSchemas,
   readRunEvent,
   runEventSchema,
+  type AttemptLease,
+  type AttemptState,
   type ExecutionDocument,
   type ExecutionStore,
   type ExecutionTransaction,
   type ExecutionView,
+  type LeaseKind,
   type LocalNamespace,
   type LocalValue,
   type NotPromise,
@@ -75,8 +78,39 @@ function fileMark(file: string) {
 /** Сколько событий одной транзакции допускается (договор курсора адаптеров). */
 const MAX_EVENTS_PER_TRANSACTION = 1024;
 
+/**
+ * Строки аренды попыток (D53). Создаётся первой строкой: открытие и чтение
+ * базы прежней версии таблицу не добавляют.
+ */
+const LEASES_TABLE =
+  'CREATE TABLE IF NOT EXISTS leases (kind TEXT NOT NULL, id TEXT NOT NULL, token TEXT NOT NULL, owner TEXT NOT NULL, engine TEXT NOT NULL, until INTEGER NOT NULL, PRIMARY KEY(kind, id))';
+
+interface LeaseRow {
+  id: string;
+  token: string;
+  owner: string;
+  engine: string;
+  until: number;
+}
+
+const leaseOf = (row: LeaseRow): AttemptLease => ({
+  id: row.id,
+  token: row.token,
+  owner: row.owner,
+  engineVersion: row.engine || undefined,
+  leaseUntil: row.until,
+});
+
 interface Frame {
-  doc: ExecutionDocument;
+  /**
+   * Документ транзакции: читается при первом обращении к записям модели.
+   * Продление аренды строкой (`renewLease`) документ не читает и не пишет.
+   */
+  doc?: ExecutionDocument;
+  /** Записи модели изменены: документ пишется при фиксации. */
+  dirty: boolean;
+  /** Локальные записи изменены: растёт `dataVersion`. */
+  touched: boolean;
   drafts: RunEventDraft[];
   depth: number;
 }
@@ -84,10 +118,14 @@ interface Frame {
 /**
  * Standalone ExecutionStore: нейтральный документ, события и локальные
  * записи в одной SQLite. Транзакция — `BEGIN IMMEDIATE` (вложенная —
- * SAVEPOINT); документ читается один раз на внешнюю транзакцию, вложенные
- * работают с ним же и при отказе восстанавливают его снимок и свой буфер
- * событий. Документ проверяется схемой при каждой фиксации: состояние вне
- * договора не записывается.
+ * SAVEPOINT); документ читается не больше раза на внешнюю транзакцию — при
+ * первом обращении к записям модели, — вложенные работают с ним же и при
+ * отказе восстанавливают его снимок и свой буфер событий. Документ пишется,
+ * только если транзакция изменила записи модели, и проверяется схемой при
+ * каждой такой фиксации: состояние вне договора не записывается.
+ *
+ * Аренда попыток (D53) — строки таблицы `leases` в той же базе: продление
+ * (`renewLease`) меняет одну строку, не читая и не переписывая документ.
  *
  * Версия: в `meta` записаны версия формата и версия писателя. Неизвестная
  * версия формата отклоняется при открытии, до любой записи.
@@ -143,6 +181,14 @@ export class SqliteExecutionStore implements ExecutionStore {
       this.db
         .prepare('INSERT OR IGNORE INTO state VALUES(1, ?)')
         .run(JSON.stringify(emptyDocument()));
+      // Миграция D53: сроки активных попыток прежней версии переходят в
+      // строки той же транзакцией, что ставит метку. Иначе процесс прежней
+      // версии успел бы продлить срок в документе между двумя шагами.
+      const doc = this.load();
+      if (!doc.leaseRows && doc.attempts.some((a) => a.status === 'active')) {
+        this.markLeaseRows(doc);
+        this.writeDocument(doc);
+      }
       this.db.exec('COMMIT');
     } catch (error) {
       if (this.db.isTransaction) this.db.exec('ROLLBACK');
@@ -214,9 +260,108 @@ export class SqliteExecutionStore implements ExecutionStore {
     }
   }
 
+  /**
+   * Документ с наложенными сроками аренды: при метке срок активной попытки —
+   * из её строки, пока token строки равен token попытки; без такой строки
+   * аренды нет (0). Без метки (документ прежней версии) источник — документ.
+   */
   private load(): ExecutionDocument {
     const row = this.db.prepare('SELECT data FROM state WHERE id=1').get() as { data: string };
-    return parseDocument(row.data);
+    const doc = parseDocument(row.data);
+    if (doc.leaseRows) {
+      const rows = new Map(this.leaseRows().map((r) => [r.id, r]));
+      for (const a of doc.attempts)
+        if (a.status === 'active') {
+          const lease = rows.get(a.id);
+          a.leaseUntil = lease && lease.token === a.token ? lease.until : 0;
+        }
+    }
+    return doc;
+  }
+
+  private hasLeases = false;
+  /** Есть ли таблица строк аренды (её создаёт первая строка). */
+  private leaseTable() {
+    return (this.hasLeases ||= !!this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='leases'")
+      .get());
+  }
+
+  private leaseRows(): LeaseRow[] {
+    if (!this.leaseTable()) return [];
+    return this.db
+      .prepare("SELECT id, token, owner, engine, until FROM leases WHERE kind='attempt'")
+      .all() as unknown as LeaseRow[];
+  }
+
+  private putLeaseRow(a: AttemptState) {
+    this.db.exec(LEASES_TABLE);
+    this.hasLeases = true;
+    this.db
+      .prepare("INSERT OR REPLACE INTO leases VALUES('attempt', ?, ?, ?, ?, ?)")
+      .run(a.id, a.token, a.owner, a.engineVersion ?? '', a.leaseUntil);
+  }
+
+  private deleteLeaseRow(id: string) {
+    if (this.leaseTable())
+      this.db.prepare("DELETE FROM leases WHERE kind='attempt' AND id=?").run(id);
+  }
+
+  /** Метка D53 и строки всех активных попыток документа — в открытой транзакции. */
+  private markLeaseRows(doc: ExecutionDocument) {
+    for (const a of doc.attempts) if (a.status === 'active') this.putLeaseRow(a);
+    doc.leaseRows = true;
+  }
+
+  /** Документ проверяется схемой и пишется; растёт `sequence`. */
+  private writeDocument(doc: ExecutionDocument) {
+    doc.sequence++;
+    const parsed = executionDocumentSchema.parse(doc);
+    this.db.prepare('UPDATE state SET data=? WHERE id=1').run(JSON.stringify(parsed));
+  }
+
+  /** Версия данных (`ExecutionView.dataVersion`): продление строкой её не меняет. */
+  private dataVersion(): number {
+    const row = this.db.prepare("SELECT value FROM meta WHERE key='dataVersion'").get() as
+      { value: string } | undefined;
+    return Number(row?.value ?? 0);
+  }
+
+  private bumpDataVersion() {
+    this.db
+      .prepare("INSERT OR REPLACE INTO meta VALUES('dataVersion', ?)")
+      .run(String(this.dataVersion() + 1));
+  }
+
+  /**
+   * Шаг вниз перед откатом на версию без строк аренды (D53): срок строки
+   * копируется в документ, метка и строки снимаются одной транзакцией. Без
+   * него прежняя версия отказывала бы навсегда. Выполняется после остановки
+   * очереди; следующее открытие этой версией с активными попытками снова
+   * перенесёт сроки в строки. Возвращает число активных попыток, чей срок
+   * перенесён в документ.
+   */
+  stepDownLeases(): number {
+    if (this.frame) throw new Error('Шаг вниз — вне транзакции');
+    if (this.options.readOnly)
+      throw new HarnessError('STATE_VERSION_UNSUPPORTED', 'Состояние открыто только для чтения');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const doc = this.load();
+      const active = doc.leaseRows ? doc.attempts.filter((a) => a.status === 'active').length : 0;
+      if (doc.leaseRows || this.leaseRows().length) {
+        delete doc.leaseRows;
+        if (this.leaseTable()) this.db.prepare("DELETE FROM leases WHERE kind='attempt'").run();
+        this.writeDocument(doc);
+        this.bumpDataVersion();
+      }
+      this.db.exec('COMMIT');
+      return active;
+    } catch (error) {
+      this.hasLeases = false;
+      if (this.db.isTransaction) this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   read<T>(fn: (view: ExecutionView) => NotPromise<T>): T {
@@ -224,7 +369,7 @@ export class SqliteExecutionStore implements ExecutionStore {
     if (this.reading) return fn(this.view(this.reading));
     this.db.exec('BEGIN');
     try {
-      this.reading = { doc: this.load(), drafts: [], depth: 0 };
+      this.reading = { dirty: false, touched: false, drafts: [], depth: 0 };
       const value = fn(this.view(this.reading));
       this.db.exec('COMMIT');
       return value;
@@ -242,15 +387,16 @@ export class SqliteExecutionStore implements ExecutionStore {
     const outer = this.frame;
     const point = 'harness_' + ++this.savepoint;
     this.db.exec(outer ? `SAVEPOINT ${point}` : 'BEGIN IMMEDIATE');
-    let loaded: ExecutionDocument | undefined;
-    try {
-      if (!outer) loaded = this.load();
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
-    const frame: Frame = outer ?? { doc: loaded!, drafts: [], depth: 0 };
-    const saved = outer ? structuredClone(frame.doc) : undefined;
+    // Документ читается при первом обращении к записям модели (`doc` кадра):
+    // продление аренды строкой его не разбирает и не пишет.
+    const frame: Frame = outer ?? { dirty: false, touched: false, drafts: [], depth: 0 };
+    const saved = outer
+      ? {
+          doc: frame.doc ? structuredClone(frame.doc) : undefined,
+          dirty: frame.dirty,
+          touched: frame.touched,
+        }
+      : undefined;
     const drafts = frame.drafts.length;
     frame.depth++;
     this.frame = frame;
@@ -263,19 +409,26 @@ export class SqliteExecutionStore implements ExecutionStore {
       } else {
         if (frame.drafts.length > MAX_EVENTS_PER_TRANSACTION)
           throw new Error('Слишком много событий в одной транзакции');
-        frame.doc.sequence++;
-        const doc = executionDocumentSchema.parse(frame.doc);
-        this.db.prepare('UPDATE state SET data=? WHERE id=1').run(JSON.stringify(doc));
-        if (kind !== 'heartbeat') this.writeEvents(frame.drafts);
+        if (frame.dirty) this.writeDocument(frame.doc!);
+        const events = kind !== 'heartbeat' && frame.drafts.length > 0;
+        if (events) this.writeEvents(frame.drafts);
+        if (frame.dirty || frame.touched || events) this.bumpDataVersion();
         this.db.exec('COMMIT');
       }
       return value;
     } catch (error) {
+      // Таблица строк аренды, созданная откаченной частью, исчезла вместе с ней.
+      this.hasLeases = false;
       if (outer) {
         this.db.exec(`ROLLBACK TO ${point}; RELEASE ${point}`);
-        for (const key of Object.keys(frame.doc))
-          delete (frame.doc as Record<string, unknown>)[key];
-        Object.assign(frame.doc, saved);
+        // Документ, прочитанный вложенной частью, читается заново из базы.
+        if (saved!.doc && frame.doc) {
+          for (const key of Object.keys(frame.doc))
+            delete (frame.doc as Record<string, unknown>)[key];
+          Object.assign(frame.doc, saved!.doc);
+        } else frame.doc = saved!.doc;
+        frame.dirty = saved!.dirty;
+        frame.touched = saved!.touched;
         frame.drafts.length = drafts;
       } else this.db.exec('ROLLBACK');
       throw error;
@@ -308,20 +461,89 @@ export class SqliteExecutionStore implements ExecutionStore {
   }
 
   private view(frame: Frame): ExecutionTransaction {
-    const doc = new DocumentView(frame.doc);
+    const loaded = () => (frame.doc ??= this.load());
+    const doc = () => new DocumentView(loaded());
+    // Изменение записи модели: документ будет записан при фиксации.
+    const edit = () => {
+      if (this.frame !== frame) throw new Error('Запись вне транзакции');
+      frame.dirty = true;
+      return doc();
+    };
     const db = this.db;
     const inTx = () => this.frame === frame;
     return {
-      control: () => doc.control(),
-      controller: () => doc.controller(),
-      graph: (id) => doc.graph(id),
-      graphs: () => doc.graphs(),
-      work: (id) => doc.work(id),
-      works: (graphId) => doc.works(graphId),
-      attempt: (id) => doc.attempt(id),
-      attempts: (workId) => doc.attempts(workId),
-      verification: (id) => doc.verification(id),
-      verifications: () => doc.verifications(),
+      control: () => doc().control(),
+      controller: () => doc().controller(),
+      graph: (id) => doc().graph(id),
+      graphs: () => doc().graphs(),
+      work: (id) => doc().work(id),
+      works: (graphId) => doc().works(graphId),
+      attempt: (id) => doc().attempt(id),
+      attempts: (workId) => doc().attempts(workId),
+      activeAttempts: () =>
+        doc()
+          .attempts()
+          .filter((a) => a.status === 'active'),
+      verification: (id) => doc().verification(id),
+      verifications: () => doc().verifications(),
+      attemptLease: (id) => {
+        // Строка есть только при метке: её достаточно, документ не читается.
+        const row = this.leaseTable()
+          ? (db
+              .prepare(
+                "SELECT id, token, owner, engine, until FROM leases WHERE kind='attempt' AND id=?",
+              )
+              .get(id) as LeaseRow | undefined)
+          : undefined;
+        if (row) return leaseOf(row);
+        // Без строки: у документа прежней версии (без метки) срок — в нём.
+        const d = loaded();
+        if (d.leaseRows) return undefined;
+        const a = d.attempts.find((x) => x.id === id);
+        return a?.status === 'active'
+          ? {
+              id: a.id,
+              token: a.token,
+              owner: a.owner,
+              engineVersion: a.engineVersion,
+              leaseUntil: a.leaseUntil,
+            }
+          : undefined;
+      },
+      activeLeases: (at) =>
+        loaded()
+          .attempts.filter((a) => a.status === 'active' && a.leaseUntil > at)
+          .map((a) => ({
+            id: a.id,
+            token: a.token,
+            owner: a.owner,
+            engineVersion: a.engineVersion,
+            leaseUntil: a.leaseUntil,
+          })),
+      dataVersion: () => this.dataVersion(),
+      renewLease: (
+        kind: LeaseKind,
+        id: string,
+        token: string,
+        owner: string,
+        engineVersion: string | undefined,
+        until: number,
+        now: number,
+      ) => {
+        if (!inTx()) throw new Error('Продление аренды вне транзакции');
+        if (kind !== 'attempt') throw new Error('Неизвестный вид аренды: ' + String(kind));
+        if (!this.leaseTable()) return false;
+        const changed = db
+          .prepare(
+            "UPDATE leases SET until=? WHERE kind='attempt' AND id=? AND token=? AND owner=? AND engine=? AND until>?",
+          )
+          .run(until, id, token, owner, engineVersion ?? '', now).changes;
+        if (changed !== 1) return false;
+        // Прочитанный документ транзакции видит новый срок; записи он не требует.
+        const a = frame.doc?.attempts.find((x) => x.id === id);
+        if (a) a.leaseUntil = until;
+        return true;
+      },
       local<N extends LocalNamespace>(namespace: N, owner: string, key: string) {
         const row = db
           .prepare('SELECT data FROM local WHERE namespace=? AND owner=? AND key=?')
@@ -348,12 +570,21 @@ export class SqliteExecutionStore implements ExecutionStore {
           value: localSchemas[namespace].parse(JSON.parse(r.data)) as LocalValue<N>,
         }));
       },
-      putGraph: (g) => doc.putGraph(g),
-      putWork: (w) => doc.putWork(w),
-      putAttempt: (a) => doc.putAttempt(a),
-      putVerification: (v) => doc.putVerification(v),
-      setControl: (c) => doc.setControl(c),
-      setController: (l) => doc.setController(l),
+      putGraph: (g) => edit().putGraph(g),
+      putWork: (w) => edit().putWork(w),
+      putAttempt: (a) => {
+        edit().putAttempt(a);
+        // Строка аренды — той же транзакцией: активная попытка пишет её,
+        // неактивная удаляет. Первая строка ставит метку и переносит сроки
+        // всех активных попыток документа.
+        const d = loaded();
+        if (a.status !== 'active') this.deleteLeaseRow(a.id);
+        else if (!d.leaseRows) this.markLeaseRows(d);
+        else this.putLeaseRow(a);
+      },
+      putVerification: (v) => edit().putVerification(v),
+      setControl: (c) => edit().setControl(c),
+      setController: (l) => edit().setController(l),
       putLocal<N extends LocalNamespace>(
         namespace: N,
         owner: string,
@@ -362,6 +593,10 @@ export class SqliteExecutionStore implements ExecutionStore {
       ) {
         if (!inTx()) throw new Error('Локальная запись вне транзакции');
         const parsed = localSchemas[namespace].parse(value);
+        // Запись в базу проверенного формата: документ вне договора (например,
+        // более новой версии) — отказ до записи, как у записей модели.
+        loaded();
+        frame.touched = true;
         db.prepare('INSERT OR REPLACE INTO local VALUES(?,?,?,?)').run(
           namespace,
           owner || WORKSPACE_OWNER,
@@ -371,6 +606,7 @@ export class SqliteExecutionStore implements ExecutionStore {
       },
       emit(event) {
         if (!inTx()) throw new Error('Событие вне транзакции');
+        loaded();
         frame.drafts.push(event);
       },
     };
