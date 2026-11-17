@@ -8,6 +8,8 @@ import {
 } from '../contracts/index.ts';
 
 import { CleanupFailure } from '../environment/lifecycle.ts';
+import { ReapFailure } from '../environment/process.ts';
+import { ReapedGate } from '../verification/reaped.ts';
 
 export { BlockedError };
 
@@ -115,7 +117,14 @@ export function environmentCauseOf(
  * `Error` с исходным в `cause`.
  */
 export function withSuffix(failure: Error, suffix: string): Error {
-  if (failure instanceof CleanupFailure) return failure.extend(suffix);
+  // Признак незавершённой очистки и неостановленных потомков сохраняется:
+  // по нему решаются сохранение деревьев и запрет повтора на дереве.
+  if (
+    failure instanceof CleanupFailure ||
+    failure instanceof ReapedGate ||
+    failure instanceof ReapFailure
+  )
+    return failure.extend(suffix);
   return failure instanceof TaskFailure
     ? new TaskFailure(
         failure.kind,

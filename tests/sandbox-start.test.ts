@@ -36,6 +36,7 @@ import { TaskFailure } from '../src/engine/failure.ts';
 import { ReapFailure, processInventory } from '../src/environment/process.ts';
 import {
   checkCleanup,
+  ReapedGate,
   completedCheck,
   runCheck,
   runGate,
@@ -235,11 +236,13 @@ test(
     }
     assert.equal(existsSync(file), true, 'второй запуск исполнил команду');
     assert.ok(error instanceof ReapFailure, String(error));
-    assert.equal(
-      completedCheck(error),
-      undefined,
-      'исход прежнего (не стартовавшего) запуска не приписан',
-    );
+    // Приписан полный исход последнего (стартовавшего) запуска, а не
+    // прежнего, не стартовавшего.
+    const done = completedCheck(error);
+    assert.equal(done?.attempts, 2);
+    assert.equal(done.started, true);
+    assert.equal(done.notStarted, false);
+    assert.equal(done.code, 0);
     assert.equal(error.result?.code, 0, 'исход — того запуска, чьи потомки не остановлены');
     assert.match(error.message, /временные каталоги проверки не убраны: ENOTEMPTY/);
   },
@@ -327,6 +330,30 @@ test(
     assert.match(failed.evidence.summary, /^Код выхода 3/);
     const ok = await gate(loaded(1, noShell()).env, 0);
     assert.equal(ok.evidence.passed, true, ok.evidence.summary);
+  },
+);
+
+test(
+  'N1: песочница так и не запустила gate, а перечень процессов не получен — по-прежнему отказ среды sandbox-launch, не засчитан',
+  { skip: noSandbox },
+  async () => {
+    const inventory = processInventory.marked;
+    processInventory.marked = () => Promise.reject(new Error('ps не ответил за 10 с'));
+    let never;
+    try {
+      never = await gate(loaded(99, noShell()).env, 0);
+    } finally {
+      processInventory.marked = inventory;
+    }
+    assert.equal(never.evidence.passed, false);
+    assert.ok(never.failure instanceof ReapedGate, String(never.failure));
+    assert.equal(never.failure.kind, 'environment');
+    assert.equal(never.failure.diagnosis, 'sandbox-launch');
+    assert.match(
+      never.evidence.summary,
+      /^песочница ОС не запустила команду проверки \(попыток: 3\)/,
+    );
+    assert.match(never.evidence.summary, /Не удалось завершить процессы команды/);
   },
 );
 

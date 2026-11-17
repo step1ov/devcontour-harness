@@ -58,6 +58,7 @@ import {
   type CheckManifest,
 } from './property.ts';
 import { keepGateArtifacts } from './gate-artifacts.ts';
+import { ReapedGate } from './reaped.ts';
 
 /** Длинное имя testcase заменяется хешем, а не обрезается: обрезка дала бы ложные совпадения. */
 export const TEST_ID_LIMIT = 1000;
@@ -452,6 +453,8 @@ export async function runCheck(
   let srtTemp: string | undefined;
   /** Отказ тела проверки: уборка его не заменяет. */
   let thrown: { error: unknown } | undefined;
+  /** Первый запуск, чьи потомки не остановлены или не пересчитаны. */
+  let reaped: ReapFailure | undefined;
   try {
     if (h.config.isolation.mode === 'os') {
       const support = isolationBackend.check();
@@ -528,6 +531,15 @@ export async function runCheck(
         // Каталоги проверки принадлежат только ей: процесс, запущенный в них
         // во время проверки, — её потомок, даже без метки и родства.
         contain: { dirs: [...options.write, scratch, marks] },
+      }).catch((error: unknown) => {
+        // Потомки запуска не остановлены или не пересчитаны: его исход
+        // разбирается как обычно (повтор не стартовавшей песочницы, журнал
+        // отказов ядра), а отказ остановки выносится в конце с полным исходом.
+        if (error instanceof ReapFailure && error.result) {
+          reaped ??= error;
+          return error.result;
+        }
+        throw error;
       });
     };
     try {
@@ -551,7 +563,7 @@ export async function runCheck(
     }
     // Без песочницы завершившийся процесс точно порождался.
     if (started === undefined) confirm();
-    return {
+    const outcome = {
       ...result,
       attempts,
       started: launched,
@@ -560,6 +572,10 @@ export async function runCheck(
       ...(policy ? { isolation: policy } : {}),
       ...(violations ? { violations } : {}),
     };
+    // Исход проверки — вместе с отказом остановки (`completedCheck`): её
+    // класс решает вызывающий, успехом она не станет.
+    if (reaped) throw Object.assign(reaped, { [checkResult]: outcome });
+    return outcome;
   } catch (error) {
     // Отказ самой проверки (в том числе неостановленные потомки) — её исход:
     // отказ уборки ниже его не заменяет, а дописывается к нему.
@@ -584,7 +600,11 @@ export async function runCheck(
       // частый случай: ReapFailure не должна стать «провалом gate».
       if (thrown) {
         const original = thrown.error;
-        if (original instanceof ReapFailure) throw original.extend(leftoverText(error.message));
+        if (original instanceof ReapFailure) {
+          const extended = original.extend(leftoverText(error.message));
+          const done = completedCheck(original);
+          throw done ? Object.assign(extended, { [checkResult]: done }) : extended;
+        }
         if (original instanceof Error) {
           original.message += `; ${leftoverText(error.message)}`;
           throw original;
@@ -693,18 +713,9 @@ export { hostLoad, type HostLoad };
  * раз (`Runner`): повтор прошёл — исход `flaky`, попытка не тратится; снова
  * таймаут — провал засчитан как прежде.
  */
-/**
- * Отказ gate, чьи потомки не остановлены или не пересчитаны: дерево, где он
- * исполнялся, больше не используется — ни повтора gate на нём, ни следующих
- * проверок. Класс — `environment`/`process-reap` или `gate`, если команда
- * сама назвала провал.
- */
-export class ReapedGate extends TaskFailure {
-  override name = 'ReapedGate';
-}
-/** Отказ, после которого в дереве проверки, возможно, ещё работают её потомки. */
-export const reapedFailure = (error: unknown) =>
-  error instanceof ReapedGate || error instanceof ReapFailure;
+// Отказ gate с неостановленными потомками — в лёгком модуле: его знает и
+// классификация отказов (`withSuffix`).
+export { ReapedGate, reapedFailure } from './reaped.ts';
 export class GateTimeout extends TaskFailure {
   constructor(
     message: string,
@@ -890,24 +901,15 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         violations: true,
       },
     ).catch((error: unknown): Awaited<ReturnType<typeof runCheck>> => {
-      // Команда завершилась, но её потомков не удалось остановить или
-      // пересчитать: исход разбирается как обычно (провал, который назвала
-      // команда, — свидетельство о коде), но успехом не станет.
-      if (error instanceof ReapFailure && error.result) {
-        reaped = error;
-        return {
-          ...error.result,
-          attempts: 1,
-          started: true,
-          notStarted: false,
-          launchFailed: false,
-        };
-      }
-      // Проверка завершилась, но её временные каталоги не убраны: исход
-      // разбирается как обычно, а отказ уборки дописывается к нему.
+      // Проверка завершилась, но её временные каталоги не убраны или её
+      // потомки не остановлены (`ReapFailure` с исходом runCheck: старт
+      // песочницы, отказы ядра): исход разбирается как обычно (провал,
+      // который назвала команда, — свидетельство о коде; отказ песочницы —
+      // отказ среды), отказ дописывается к нему, успехом проверка не станет.
       const done = completedCheck(error);
       if (!done) throw error;
-      leftover = error instanceof Error ? error.message : String(error);
+      if (error instanceof ReapFailure) reaped = error;
+      else leftover = error instanceof Error ? error.message : String(error);
       return done;
     });
     exitCode = result.code;

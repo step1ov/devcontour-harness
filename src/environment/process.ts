@@ -310,7 +310,9 @@ export async function command(
         'stderr',
         maskErr(options.rawStderr ? options.rawStderr(restErr, true) : restErr, true),
       );
-      if (outputError) {
+      // Неостановленные потомки важнее отказа обработчика вывода: иначе
+      // отказ терял бы причину `process-reap`, и дерево сочли бы свободным.
+      if (outputError && !reaped) {
         reject(outputError);
         return;
       }

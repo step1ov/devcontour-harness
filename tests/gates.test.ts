@@ -21,6 +21,7 @@ import {
 import { example } from './fixtures.ts';
 import { failureFingerprint } from '../src/contracts/failure.ts';
 import { redactor } from '../src/environment/redaction.ts';
+import { processInventory } from '../src/environment/process.ts';
 import { isolationSupport, watchSandboxLog } from '../src/environment/isolation.ts';
 import { TaskFailure } from '../src/engine/failure.ts';
 import { previousAttempts } from '../src/engine/prompt.ts';
@@ -170,6 +171,44 @@ test(
       junitSummary(readFileSync(join(nuisance.artifactDir, 'unit.xml'), 'utf8')).failures,
       1,
     );
+  },
+);
+
+test(
+  'N1: отказ файловой песочницы при неостановленных потомках — по-прежнему отказ среды sandbox-filesystem',
+  {
+    skip: !sandbox.ok
+      ? 'песочница ОС недоступна: ' + sandbox.detail
+      : process.platform !== 'darwin'
+        ? 'отказы ядра наблюдаются только на macOS'
+        : false,
+  },
+  async () => {
+    const r = repo();
+    const inventory = processInventory.marked;
+    processInventory.marked = () => Promise.reject(new Error('ps не ответил за 10 с'));
+    let outcome;
+    try {
+      outcome = await gate(
+        r.dir,
+        r.head(),
+        {
+          command: nodeGate(
+            `${junit('<testcase name="blocked"><error message="sandbox denied write"/></testcase>')};const result=require('child_process').spawnSync('/bin/mkdir',['.idea'],{stdio:'inherit'});process.exit(result.status??1)`,
+          ),
+        },
+        undefined,
+        'os',
+      );
+    } finally {
+      processInventory.marked = inventory;
+    }
+    const { evidence, failure } = outcome;
+    assert.equal(evidence.passed, false);
+    assert.equal(failure?.kind, 'environment', evidence.summary);
+    assert.equal(failure.diagnosis, 'sandbox-filesystem');
+    assert.match(failure.message, /песочница проверки отказала в доступе: \.idea/);
+    assert.match(failure.message, /Не удалось завершить процессы команды/);
   },
 );
 
