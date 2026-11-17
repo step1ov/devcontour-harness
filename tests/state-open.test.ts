@@ -125,3 +125,30 @@ test('S4-R1-01: повторный отказ транзакции над исп
     store.close();
   }
 });
+
+test('D53: документ, изменённый другим соединением после успешной транзакции, — отказ до записи и у продления', () => {
+  // Ловит проверку формата только при первой транзакции: продление строкой
+  // документа не открывает, и без сверки PRAGMA data_version в начале каждой
+  // транзакции документ более новой версии, записанный после открытия, не
+  // остановил бы продления.
+  const { file } = stateFile();
+  const store = new SqliteExecutionStore(file, 'test');
+  try {
+    store.transact('heartbeat', () => undefined);
+    store.read(() => undefined);
+    patch(file, (db) => {
+      const doc = JSON.parse(
+        (db.prepare('SELECT data FROM state').get() as { data: string }).data,
+      ) as Record<string, unknown>;
+      db.prepare('UPDATE state SET data=? WHERE id=1').run(
+        JSON.stringify({ ...doc, futureField: 1 }),
+      );
+    });
+    for (let i = 0; i < 2; i++) {
+      assert.throws(() => store.transact('heartbeat', () => undefined), unsupported);
+      assert.throws(() => store.read(() => undefined), unsupported);
+    }
+  } finally {
+    store.close();
+  }
+});
