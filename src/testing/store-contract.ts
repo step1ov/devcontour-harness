@@ -102,7 +102,7 @@ export function executionStoreContract(
     startVerification?: (store: ExecutionStore, verification: JointVerificationState) => void;
     /**
      * Адаптер держит аренду попыток строками (D53: `attemptLease`,
-     * `activeLeases`, `dataVersion`, `renewLease`). По умолчанию —
+     * `dataVersion`, `renewLease`; `activeLeases` — по желанию). По умолчанию —
      * определяется по адаптеру: есть методы — проверки строк обязательны;
      * нет ни одного — адаптер прежнего договора (продление через
      * `putAttempt`), проверки строк не применяются. Часть методов без
@@ -604,7 +604,12 @@ export function executionStoreContract(
   });
 }
 
-const LEASE_METHODS = ['attemptLease', 'activeLeases', 'dataVersion', 'renewLease'] as const;
+/**
+ * Методы строк аренды, которые адаптер объявляет вместе (их зовёт
+ * продление движка). `activeLeases` необязателен и в набор не входит:
+ * движок его не вызывает.
+ */
+const LEASE_METHODS = ['attemptLease', 'dataVersion', 'renewLease'] as const;
 
 /** Объявляет ли адаптер аренду строками: все четыре метода договора D53. */
 function declaresLeaseRows(store: ExecutionStore): boolean {
@@ -670,6 +675,16 @@ function leaseRowCases(
       assert.ok(typeof tx.renewLease === 'function', 'адаптер объявляет renewLease');
       return tx.renewLease('attempt', a.id, a.token, a.owner, a.engineVersion, until, now);
     });
+  // Действующие аренды: `activeLeases`, если адаптер его объявил, иначе по
+  // срокам активных попыток — то же правило.
+  const liveLeases = (s: ExecutionStore, at: number) =>
+    s.read((v) =>
+      typeof v.activeLeases === 'function'
+        ? v.activeLeases(at).map((l) => l.id)
+        : (v.activeAttempts?.() ?? v.attempts())
+            .filter((x) => x.status === 'active' && x.leaseUntil > at)
+            .map((x) => x.id),
+    );
   const lease = (s: ExecutionStore, id: string) =>
     s.read((v) => {
       assert.ok(typeof v.attemptLease === 'function', 'адаптер объявляет attemptLease');
@@ -687,15 +702,8 @@ function leaseRowCases(
       engineVersion: a.engineVersion,
       leaseUntil: a.leaseUntil,
     });
-    assert.deepEqual(
-      s.read((v) => v.activeLeases!(T0).map((l) => l.id)),
-      [a.id],
-    );
-    assert.deepEqual(
-      s.read((v) => v.activeLeases!(a.leaseUntil)),
-      [],
-      'срок, равный моменту, уже не действует',
-    );
+    assert.deepEqual(liveLeases(s, T0), [a.id]);
+    assert.deepEqual(liveLeases(s, a.leaseUntil), [], 'срок, равный моменту, уже не действует');
     s.close();
   });
 
@@ -785,10 +793,7 @@ function leaseRowCases(
       });
       assert.equal(lease(s, a.id), undefined);
       assert.equal(renew(s, a, T0 + 90_000, T0 + 1), false);
-      assert.deepEqual(
-        s.read((v) => v.activeLeases!(0)),
-        [],
-      );
+      assert.deepEqual(liveLeases(s, 0), []);
       assert.equal(
         s.read((v) => v.attempt(a.id)?.status),
         status,
@@ -836,10 +841,7 @@ function leaseRowCases(
       0,
     );
     assert.equal(renew(s, a, T0 + 90_000, T0 + 1), false);
-    assert.deepEqual(
-      s.read((v) => v.activeLeases!(0)),
-      [],
-    );
+    assert.deepEqual(liveLeases(s, 0), []);
     s.close();
   });
 
@@ -856,7 +858,11 @@ function leaseRowCases(
     );
     assert.equal(lease(s, 'r1'), undefined);
     const a = seed(s, T0 + 30_000, 'r2');
-    s.transact('run.phase', () => {
+    // Адаптер может писать строки сразу (standalone) или при фиксации из
+    // разницы документа (DevContour). Внешняя транзакция после отката
+    // вложенной меняет другую запись модели: документ фиксируется, и
+    // строка остаётся, только если откат вернул и попытку, и строку.
+    s.transact('run.phase', (outerTx) => {
       assert.throws(() =>
         s.transact('run.failed', (inner) => {
           inner.putAttempt({ ...inner.attempt(a.id)!, status: 'failed' });
@@ -872,19 +878,26 @@ function leaseRowCases(
         s.read((v) => v.attempt(a.id)?.status),
         'active',
       );
+      outerTx.putWork({ ...outerTx.work('w-' + a.id)!, attempt: 2 });
     });
+    assert.equal(
+      s.read((v) => v.work('w-' + a.id)?.attempt),
+      2,
+      'внешняя часть записана',
+    );
     assert.equal(lease(s, a.id)?.leaseUntil, T0 + 30_000);
+    assert.equal(renew(s, a, T0 + 60_000, T0 + 1), true, 'строка действует после фиксации');
     // Продление внутри транзакции, которая затем падает, тоже откатывается.
     assert.throws(() =>
       s.transact('heartbeat', (tx) => {
         assert.equal(
-          tx.renewLease!('attempt', a.id, a.token, a.owner, a.engineVersion, T0 + 99_000, T0),
+          tx.renewLease!('attempt', a.id, a.token, a.owner, a.engineVersion, T0 + 99_000, T0 + 2),
           true,
         );
         throw new Error('отказ');
       }),
     );
-    assert.equal(lease(s, a.id)?.leaseUntil, T0 + 30_000);
+    assert.equal(lease(s, a.id)?.leaseUntil, T0 + 60_000);
     s.close();
   });
 }

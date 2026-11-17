@@ -188,6 +188,7 @@ export class SqliteExecutionStore implements ExecutionStore {
       if (!doc.leaseRows && doc.attempts.some((a) => a.status === 'active')) {
         this.markLeaseRows(doc);
         this.writeDocument(doc);
+        this.bumpDataVersion();
       }
       this.db.exec('COMMIT');
     } catch (error) {
@@ -320,6 +321,27 @@ export class SqliteExecutionStore implements ExecutionStore {
     this.db.prepare('UPDATE state SET data=? WHERE id=1').run(JSON.stringify(parsed));
   }
 
+  /** `PRAGMA data_version` на момент последней проверки документа этим соединением. */
+  private validatedAt?: number;
+  /**
+   * Проверка формата в начале транзакции без разбора документа на каждой.
+   * Документ разбирается строгой схемой, если его могло изменить другое
+   * соединение (`PRAGMA data_version` сменился) с прошлой проверки: документ
+   * вне договора (например, более новой версии) — отказ до любой записи и в
+   * транзакции, которая только продлевает аренду строкой. Свои фиксации
+   * `data_version` этого соединения не меняют: продления одного процесса
+   * документ не разбирают. Возвращает разобранный документ или `undefined`.
+   */
+  private validate(): ExecutionDocument | undefined {
+    const { data_version } = this.db.prepare('PRAGMA data_version').get() as {
+      data_version: number;
+    };
+    if (data_version === this.validatedAt) return undefined;
+    const doc = this.load();
+    this.validatedAt = data_version;
+    return doc;
+  }
+
   /** Версия данных (`ExecutionView.dataVersion`): продление строкой её не меняет. */
   private dataVersion(): number {
     const row = this.db.prepare("SELECT value FROM meta WHERE key='dataVersion'").get() as
@@ -369,7 +391,7 @@ export class SqliteExecutionStore implements ExecutionStore {
     if (this.reading) return fn(this.view(this.reading));
     this.db.exec('BEGIN');
     try {
-      this.reading = { dirty: false, touched: false, drafts: [], depth: 0 };
+      this.reading = { dirty: false, touched: false, drafts: [], depth: 0, doc: this.validate() };
       const value = fn(this.view(this.reading));
       this.db.exec('COMMIT');
       return value;
@@ -389,7 +411,20 @@ export class SqliteExecutionStore implements ExecutionStore {
     this.db.exec(outer ? `SAVEPOINT ${point}` : 'BEGIN IMMEDIATE');
     // Документ читается при первом обращении к записям модели (`doc` кадра):
     // продление аренды строкой его не разбирает и не пишет.
-    const frame: Frame = outer ?? { dirty: false, touched: false, drafts: [], depth: 0 };
+    let validated: ExecutionDocument | undefined;
+    try {
+      if (!outer) validated = this.validate();
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    const frame: Frame = outer ?? {
+      dirty: false,
+      touched: false,
+      drafts: [],
+      depth: 0,
+      doc: validated,
+    };
     const saved = outer
       ? {
           doc: frame.doc ? structuredClone(frame.doc) : undefined,

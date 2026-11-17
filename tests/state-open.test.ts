@@ -117,19 +117,9 @@ test('S4-R1-01: повторный отказ транзакции над исп
         JSON.stringify({ ...doc, futureField: 1 }),
       );
     });
-    // Документ читается при первом обращении (D53: продление аренды строкой
-    // его не разбирает); любая транзакция, которая читает или пишет записи
-    // модели, локальные записи или события, отказывает до записи.
     for (let i = 0; i < 2; i++) {
-      assert.throws(() => store.transact('heartbeat', (tx) => tx.attempts()), unsupported);
-      assert.throws(
-        () =>
-          store.transact('run.phase', (tx) =>
-            tx.emit({ type: 'attempt.phase', runId: 'r', payload: { phase: 'running' } }),
-          ),
-        unsupported,
-      );
-      assert.throws(() => store.read((v) => v.attempts()), unsupported);
+      assert.throws(() => store.transact('heartbeat', () => undefined), unsupported);
+      assert.throws(() => store.read(() => undefined), unsupported);
     }
   } finally {
     store.close();

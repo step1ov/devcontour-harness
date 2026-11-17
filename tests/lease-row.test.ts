@@ -13,7 +13,7 @@ import { HarnessError, WORKSPACE_OWNER, executionDocumentSchema } from '../src/c
 import { Engine } from '../src/engine/engine.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
-import { engineOf, graphOf, policyOf, ready } from './engine-fixture.ts';
+import { engineOf, graphOf, policyOf, ready, trustNone } from './engine-fixture.ts';
 
 const refused = (code: string) => (e: unknown) => e instanceof HarnessError && e.code === code;
 
@@ -211,14 +211,42 @@ test('D53: ошибка миграции откатывает и строки, �
   ) as Record<string, unknown>;
   delete doc.leaseRows;
   db.prepare('UPDATE state SET data=? WHERE id=1').run(JSON.stringify(doc));
-  // Таблица с лишним столбцом: чтение строк проходит, вставка в миграции падает.
+  db.exec('DROP TABLE leases');
+  // Отказ после записи строк и документа, внутри той же транзакции: на
+  // последнем шаге миграции (версия данных).
   db.exec(
-    'DROP TABLE leases; CREATE TABLE leases (kind TEXT, id TEXT, token TEXT, owner TEXT, engine TEXT, until INTEGER, extra TEXT NOT NULL)',
+    "CREATE TRIGGER fail_migration AFTER INSERT ON meta WHEN NEW.key='dataVersion' BEGIN SELECT RAISE(ABORT, 'сбой миграции'); END",
   );
   db.close();
   const before = raw(dir).data;
-  assert.throws(() => new SqliteExecutionStore(join(dir, 'state.sqlite'), 'test'));
-  assert.equal(raw(dir).data, before, 'документ без метки — как был');
+  assert.throws(() => new SqliteExecutionStore(join(dir, 'state.sqlite'), 'test'), /сбой миграции/);
+  const after = raw(dir);
+  assert.equal(after.data, before, 'документ без метки — как был');
+  assert.deepEqual(after.rows, [], 'строк нет: их запись откачена вместе с документом');
+});
+
+test('D53: попытка, отвязанная от поручения записью данных, не продлевается строкой', () => {
+  // Ловит: продление строкой без полной проверки после изменения данных —
+  // попытка, которую запись хоста отвязала от поручения (activeRunId снят,
+  // попытка ещё активна и её строка цела), продлевалась бы. Новая редакция
+  // графа при активных попытках отказывает (REVISION_CONFLICT), поэтому
+  // отвязку делает прямая запись хоста.
+  const { engine, clock, store } = engineOf();
+  ready(engine, graphOf({ a: [] }));
+  const a = engine.claim('c1')!;
+  engine.heartbeat(a.id, a.token);
+  assert.throws(
+    () => engine.register(graphOf({ a: [] }, '2'), trustNone),
+    refused('REVISION_CONFLICT'),
+  );
+  store.transact('run.phase', (tx) => tx.putWork({ ...tx.work('a')!, activeRunId: undefined }));
+  assert.equal(
+    store.read((v) => v.attemptLease!(a.id)?.token),
+    a.token,
+    'строка попытки цела',
+  );
+  clock.now += 1_000;
+  assert.throws(() => engine.heartbeat(a.id, a.token), refused('LEASE_STALE'));
 });
 
 test('D53: шаг вниз копирует срок строки в документ и снимает метку и строки', () => {
