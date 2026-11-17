@@ -402,3 +402,81 @@ test('N5: withSuffix сохраняет ReapedGate и ReapFailure; отказ о
   assert.ok(error instanceof ReapFailure, String(error));
   assert.ok(withSuffix(error, 'x') instanceof ReapFailure);
 });
+
+const skippedReport =
+  '<testsuite><testcase classname="greet" name="greets"><skipped/></testcase></testsuite>';
+async function namedIntegrationFailure(fail: string) {
+  const { a, diagnosed } = await integrationReap(fail);
+  assert.equal(a.status, 'failed');
+  assert.equal(a.failureKind, 'gate', a.error);
+  assert.deepEqual(diagnosed, [{ failureKind: 'gate', cause: 'none', counted: true }]);
+  const integration = a.evidence.filter((e) => e.phase === 'integration' && e.kind === 'test');
+  assert.equal(integration.length, 1, 'повтора на том же дереве нет');
+}
+
+test('R3-1: пропущенный тест интеграции при неостановленных потомках — gate, засчитан', () =>
+  namedIntegrationFailure(
+    `fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, ${JSON.stringify(skippedReport)}); process.exit(0);`,
+  ));
+
+test('R3-1: gate интеграции изменил отслеживаемый файл при неостановленных потомках — gate, засчитан', () =>
+  namedIntegrationFailure(
+    `require('./run.js'); fs.writeFileSync('README.md', 'changed by gate\\n'); process.exit(0);`,
+  ));
+
+/** Исполнитель пишет черновик и молчит; перечень процессов недоступен. */
+function sleepyWriter(extra: Partial<Parameters<typeof setup>[0]> = {}) {
+  const draft = "exports.greet = (name) => 'Hello, ' + name; // черновик\n";
+  return setup({
+    scenario: {
+      writer: { ...implement(), draftFiles: { 'src/greet.js': draft }, sleepMs: 30000 },
+      reviewer: approve(),
+    },
+    ...extra,
+  });
+}
+const savedPatch = (error: string | undefined) => {
+  const path = /сохранены только файлом (\S+partial\.patch)/.exec(error ?? '')?.[1];
+  assert.ok(path, error);
+  assert.match(readFileSync(path, 'utf8'), /src\/greet\.js/);
+};
+
+test('R3-2: штатная остановка вызова исполнителя с неостановленными потомками — черновик не записан, изменения только файлом', async () => {
+  const ctx = sleepyWriter();
+  await withInventory({ marked: down }, async () => {
+    await ctx.runner.init();
+    const { trustNone, planReview } = await import('./engine-fixture.ts');
+    const { graph } = ctx.engine.register(ctx.graph, trustNone);
+    ctx.engine.recordReview(planReview(ctx.engine, graph, 1));
+    ctx.engine.approve(graph.id, 'agent');
+    ctx.engine.resume();
+    await ctx.runner.tick();
+    const tree = () => ctx.engine.read((v) => v.attempts()[0]?.worktree);
+    for (let i = 0; i < 400 && !(tree() && existsSync(join(tree()!, 'src/greet.js'))); i++)
+      await new Promise((r) => setTimeout(r, 25));
+    await ctx.runner.stop();
+  });
+  const first = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.equal(first.interrupted, 'shutdown');
+  assert.equal(first.partial, undefined, 'черновик из дерева с возможными писателями не записан');
+  savedPatch(first.error);
+});
+
+test('R3-2: зависание вызова исполнителя с неостановленными потомками — черновик не записан, изменения только файлом', async () => {
+  const ctx = sleepyWriter({
+    policy: (p) => {
+      p.stallSweep = {
+        intervalMs: 1000,
+        quietMs: 1000,
+        stalledMs: 3000,
+        action: 'stop',
+      };
+      p.maxAttempts = 1;
+    },
+  });
+  await withInventory({ marked: down }, () => runAll(ctx));
+  const first = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.equal(first.failureKind, 'stalled', first.error);
+  assert.equal(first.partial, undefined, 'черновик из дерева с возможными писателями не записан');
+  savedPatch(first.error);
+});

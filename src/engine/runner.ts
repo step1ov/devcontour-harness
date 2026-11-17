@@ -290,6 +290,10 @@ const within = (path: string, prefixes: string[]) =>
  * интеграцию с текущей принятой веткой, gates и ревью integration SHA и
  * приёмку с CAS продвижения target ref внутри транзакции приёмки.
  */
+/** Текст отказа о черновике, сохранённом только файлом. */
+const artifactOnly = (patch: string) =>
+  `изменения попытки сохранены только файлом ${patch} (автоматически не применяются: потомки могли ещё писать в дерево)`;
+
 export class Runner {
   /** Предел git update-ref приёмки внутри транзакции; конечный и короче lease. */
   static refTimeoutMs = 15000;
@@ -1848,6 +1852,8 @@ export class Runner {
       preserve = error instanceof CleanupFailure;
       // Класс, свойства и вопрос — исходного отказа работы, а не очистки.
       const origin = failureOrigin(error);
+      // Потомки прерванной или упавшей команды не остановлены.
+      const reapedTree = reapedFailure(origin);
       // Прерывание по лимиту времени называется лимитом времени, что бы ни выбросила прерванная операция.
       const expired =
         controller.signal.aborted &&
@@ -1872,9 +1878,17 @@ export class Runner {
       const shutdown = controller.signal.aborted && this.jobs.get(attempt.id)?.shutdown === true;
       if (shutdown)
         try {
-          await this.keepDraft(attempt, await this.workOf(attempt), artifacts);
+          // Неостановленные потомки прерванной команды могли ещё писать в
+          // дерево: его изменения — только файлом, не черновиком следующей.
+          const saved = await this.keepDraft(
+            attempt,
+            await this.workOf(attempt),
+            artifacts,
+            !reapedTree,
+          );
           const message =
-            'Попытку прервала штатная остановка controller; поручение возвращено в очередь и продолжится с кандидата или черновика';
+            'Попытку прервала штатная остановка controller; поручение возвращено в очередь и продолжится с кандидата или черновика' +
+            (reapedTree && saved ? `; ${artifactOnly(saved)}` : '');
           const failed = this.engine.fail(attempt.id, attempt.token, message, {
             kind: 'environment',
             interrupted: true,
@@ -1908,13 +1922,13 @@ export class Runner {
         // начинает с базы в новом дереве.
         const cause = environmentCauseOf(stalled ? undefined : error, message, kind);
         let reported = message;
-        if (cause === 'process-reap') {
-          // Неостановленные потомки могли ещё писать в дерево: черновик не
-          // продолжается следующей попыткой. Изменения сохраняются только
-          // файлом — их можно разобрать и применить вручную.
+        // Неостановленные потомки могли ещё писать в дерево — при любом
+        // исходе, в том числе зависании: черновик не продолжается следующей
+        // попыткой. Изменения сохраняются только файлом — их можно разобрать
+        // и применить вручную.
+        if (cause === 'process-reap' || reapedTree) {
           const saved = await this.keepDraft(attempt, await this.workOf(attempt), artifacts, false);
-          if (saved)
-            reported += `; изменения попытки сохранены только файлом ${saved} (автоматически не применяются: потомки могли ещё писать в дерево)`;
+          if (saved) reported += `; ${artifactOnly(saved)}`;
         } else if (kind !== 'provider-auth')
           await this.keepDraft(attempt, await this.workOf(attempt), artifacts);
         // Пример reviewer — гипотеза; эталон решает, станет ли он обязательным:
