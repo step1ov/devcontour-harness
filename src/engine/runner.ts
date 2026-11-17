@@ -1239,7 +1239,17 @@ export class Runner {
    * них, а не с пустого дерева. Не удалось сохранить — попытка просто
    * начнётся заново.
    */
-  private async keepDraft(attempt: AttemptState, work: WorkState, artifacts: string) {
+  private async keepDraft(
+    attempt: AttemptState,
+    work: WorkState,
+    artifacts: string,
+    /**
+     * Записать черновик в попытку (его продолжит следующая). `false` — только
+     * файл в artifacts: дерево могли ещё менять неостановленные потомки, и
+     * автоматически такой снимок не применяется.
+     */
+    record = true,
+  ): Promise<string | undefined> {
     if (attempt.candidateSha || !attempt.worktree || !attempt.baseSha || !work.approvedDigest)
       return;
     try {
@@ -1261,6 +1271,7 @@ export class Runner {
       );
       const text = await readFile(patch, 'utf8');
       if (!text.trim() || text.length > 5_000_000) return;
+      if (!record) return patch;
       const files = (
         await git(attempt.worktree, 'diff', '--cached', '--name-only', attempt.baseSha, ...scope)
       )
@@ -1273,6 +1284,7 @@ export class Runner {
         spec: work.approvedDigest,
         contracts: Object.fromEntries(work.order.contracts.map((c) => [c.id, c.digest])),
       });
+      return patch;
     } catch {
       /* Черновик — удобство, а не условие: без него попытка начнётся с нуля. */
     }
@@ -1895,7 +1907,15 @@ export class Runner {
         // записи на ходу. Попытка — отказ среды без черновика; следующая
         // начинает с базы в новом дереве.
         const cause = environmentCauseOf(stalled ? undefined : error, message, kind);
-        if (kind !== 'provider-auth' && cause !== 'process-reap')
+        let reported = message;
+        if (cause === 'process-reap') {
+          // Неостановленные потомки могли ещё писать в дерево: черновик не
+          // продолжается следующей попыткой. Изменения сохраняются только
+          // файлом — их можно разобрать и применить вручную.
+          const saved = await this.keepDraft(attempt, await this.workOf(attempt), artifacts, false);
+          if (saved)
+            reported += `; изменения попытки сохранены только файлом ${saved} (автоматически не применяются: потомки могли ещё писать в дерево)`;
+        } else if (kind !== 'provider-auth')
           await this.keepDraft(attempt, await this.workOf(attempt), artifacts);
         // Пример reviewer — гипотеза; эталон решает, станет ли он обязательным:
         // подтверждение идёт до записи отказа, и принятие новой версии корпуса
@@ -1920,9 +1940,9 @@ export class Runner {
           ...(heartbeatCause ? { heartbeatCause } : {}),
         };
         const input = !stalled && origin instanceof TaskFailure ? origin.input : undefined;
-        let recorded: { kind: FailureKind; message: string } = { kind, message };
+        let recorded: { kind: FailureKind; message: string } = { kind, message: reported };
         try {
-          this.engine.fail(attempt.id, attempt.token, message, {
+          this.engine.fail(attempt.id, attempt.token, reported, {
             ...failure,
             ...(input ? { input } : {}),
           });
@@ -1934,7 +1954,7 @@ export class Runner {
           if (!input) throw refused;
           recorded = {
             kind: kind === 'needs-input' ? 'unfinished' : kind,
-            message: `${message}. Вопрос исполнителя не записан: ${(refused instanceof Error ? refused.message : String(refused)).slice(0, 300)}`,
+            message: `${reported}. Вопрос исполнителя не записан: ${(refused instanceof Error ? refused.message : String(refused)).slice(0, 300)}`,
           };
           this.engine.fail(attempt.id, attempt.token, recorded.message, {
             ...failure,

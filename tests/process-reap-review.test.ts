@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TaskFailure, type EvidenceRecord, type GatePolicy } from '../src/contracts/index.ts';
-import { classifyFailure, failureOrigin } from '../src/engine/classify.ts';
+import { classifyFailure, failureOrigin, withSuffix } from '../src/engine/classify.ts';
 import { hostLoad } from '../src/environment/host-load.ts';
 import { CleanupFailure } from '../src/environment/lifecycle.ts';
 import { ReapFailure, command, processInventory } from '../src/environment/process.ts';
@@ -14,6 +14,7 @@ import {
   ReapedGate,
   checkCleanup,
   prepareWriterDependencies,
+  reapedFailure,
   runGate,
 } from '../src/verification/gates.ts';
 import { runGatesAt, type GatesAtContext } from '../src/verification/gates-at.ts';
@@ -308,13 +309,22 @@ test('#9: неостановленные потомки вызова испол�
     assert.equal(a.status, 'failed');
     assert.equal(a.failureKind, 'environment', a.error);
     assert.match(a.error ?? '', /Не удалось завершить процессы команды «claude/);
-    assert.equal(a.partial, undefined, 'черновик из дерева с возможными писателями не снят');
+    assert.equal(
+      a.partial,
+      undefined,
+      'черновик из дерева с возможными писателями не продолжается',
+    );
+    // N3: изменения сохранены только файлом, путь назван в тексте отказа.
+    const saved = /сохранены только файлом (\S+partial\.patch)/.exec(a.error ?? '')?.[1];
+    assert.ok(saved, a.error);
+    assert.match(readFileSync(saved, 'utf8'), /src\/greet\.js/);
   } finally {
     rmSync(flags, { recursive: true, force: true });
   }
 });
 
-test('#1/#5: провал gate интеграции с неостановленными потомками — gate, но без повтора на том же дереве и без интеграции', async () => {
+/** Gate интеграции первой попытки падает (`fail` — тело провала) и отмечает отказ перечня. */
+async function integrationReap(fail: string) {
   const flags = mkdtempSync(join(tmpdir(), 'harness-reap-'));
   const flag = join(flags, 'reap');
   const once = join(flags, 'once');
@@ -324,6 +334,7 @@ const fs = require('fs');
 if (process.env.DEVCONTOUR_PHASE === 'integration' && !fs.existsSync(${JSON.stringify(once)})) {
   fs.writeFileSync(${JSON.stringify(once)}, '1');
   fs.writeFileSync(${JSON.stringify(flag)}, '1');
+  ${fail}
   process.exit(1);
 }
 require('./run.js');
@@ -337,12 +348,57 @@ require('./run.js');
       },
     });
     const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
-    assert.equal(a.status, 'failed');
-    assert.equal(a.failureKind, 'gate', a.error);
-    const integration = a.evidence.filter((e) => e.phase === 'integration' && e.kind === 'test');
-    assert.equal(integration.length, 1, 'повтора на том же дереве нет');
-    assert.ok(!a.evidence.some((e) => e.recheck));
+    const diagnosed = ctx.store
+      .events()
+      .flatMap((e) => (e.type === 'attempt.diagnosed' && e.runId === a.id ? [e.payload] : []));
+    return { a, diagnosed };
   } finally {
     rmSync(flags, { recursive: true, force: true });
   }
+}
+
+test('N2: провал gate интеграции, названный только кодом выхода, при неостановленных потомках после прошедшего кандидата — среда, не засчитан, без повтора', async () => {
+  const { a, diagnosed } = await integrationReap('');
+  assert.equal(a.status, 'failed');
+  assert.equal(a.failureKind, 'environment', a.error);
+  assert.deepEqual(diagnosed, [
+    { failureKind: 'environment', cause: 'process-reap', counted: false },
+  ]);
+  const integration = a.evidence.filter((e) => e.phase === 'integration' && e.kind === 'test');
+  assert.equal(integration.length, 1, 'повтора на том же дереве нет');
+  assert.ok(!a.evidence.some((e) => e.recheck));
+});
+
+test('N2: упавший тест интеграции при неостановленных потомках — gate (засчитан), без повтора и без интеграции', async () => {
+  const report =
+    '<testsuite><testcase classname="greet" name="greets"><failure message="broken"/></testcase></testsuite>';
+  const { a, diagnosed } = await integrationReap(
+    `fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, ${JSON.stringify(report)});`,
+  );
+  assert.equal(a.status, 'failed');
+  assert.equal(a.failureKind, 'gate', a.error);
+  assert.deepEqual(diagnosed, [{ failureKind: 'gate', cause: 'none', counted: true }]);
+  const integration = a.evidence.filter((e) => e.phase === 'integration' && e.kind === 'test');
+  assert.equal(integration.length, 1, 'повтора на том же дереве нет');
+});
+
+test('N5: withSuffix сохраняет ReapedGate и ReapFailure; отказ обработчика вывода не заслоняет неостановленных потомков', async () => {
+  const gateFailure = new ReapedGate('gate', 'integration/unit: Код выхода 1');
+  const suffixed = withSuffix(gateFailure, 'деревья сохранены');
+  assert.ok(suffixed instanceof ReapedGate);
+  assert.equal(reapedFailure(suffixed), true);
+  assert.match(suffixed.message, /; деревья сохранены$/);
+  const error = await withInventory({ marked: down }, () =>
+    caught(
+      command([process.execPath, '-e', 'console.log("x")'], process.cwd(), {
+        contain: true,
+        timeoutMs: 30000,
+        onOutput: () => {
+          throw new Error('ENOSPC: no space left on device');
+        },
+      }),
+    ),
+  );
+  assert.ok(error instanceof ReapFailure, String(error));
+  assert.ok(withSuffix(error, 'x') instanceof ReapFailure);
 });
