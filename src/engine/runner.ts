@@ -116,6 +116,7 @@ import {
 import {
   GateTimeout,
   prepareWriterDependencies,
+  reapedFailure,
   draftTouchesInstall,
   runGate,
   writerDependenciesNote,
@@ -2357,7 +2358,9 @@ export class Runner {
       await this.gate(attempt, cwd, sha, 'integration', gate, artifacts, signal, execution);
     } catch (error) {
       if (!budget.recheck || signal.aborted || !(error instanceof TaskFailure)) throw error;
-      if (error.kind !== 'gate') throw error;
+      // Потомки gate не остановлены: повтор на том же дереве рядом с живым
+      // писателем не проводится, какой бы ни был класс.
+      if (error.kind !== 'gate' || reapedFailure(error)) throw error;
       const { failed, candidatePassed, spent } = this.engine.read((v) => {
         const evidence = v.attempt(attempt.id)?.evidence ?? [];
         const own = (e: EvidenceRecord, phase: EvidenceRecord['phase'], at?: string) =>

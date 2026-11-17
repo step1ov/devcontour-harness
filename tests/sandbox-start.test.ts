@@ -33,8 +33,10 @@ import {
   sweepStaleSrtDirs,
 } from '../src/environment/isolation.ts';
 import { TaskFailure } from '../src/engine/failure.ts';
+import { ReapFailure, processInventory } from '../src/environment/process.ts';
 import {
   checkCleanup,
+  completedCheck,
   runCheck,
   runGate,
   sandboxLaunchFailure,
@@ -203,6 +205,43 @@ test(
     assert.equal(r.started, true);
     assert.equal(r.notStarted, false);
     assert.equal(fake.calls(), 0, 'shell найден без `which`');
+  },
+);
+
+test(
+  'Неостановленные потомки на повторе после неудачного старта песочницы: отказ остановки первичен, исход прежнего запуска не приписан',
+  { skip: noSandbox },
+  async () => {
+    const file = out();
+    const once = loaded(1, noShell());
+    const inventory = processInventory.marked;
+    const remove = checkCleanup.remove;
+    // Перечень отказывает только после того, как команда исполнилась (второй
+    // запуск); уборка scratch отказывает.
+    processInventory.marked = (mark) =>
+      existsSync(file) ? Promise.reject(new Error('ps не ответил за 10 с')) : inventory(mark);
+    checkCleanup.remove = async (dir) => {
+      await remove(dir);
+      if (dir.includes('dc-gate-')) throw new Error('ENOTEMPTY: directory not empty');
+    };
+    let error: unknown;
+    try {
+      await check(once.env, file);
+    } catch (e) {
+      error = e;
+    } finally {
+      processInventory.marked = inventory;
+      checkCleanup.remove = remove;
+    }
+    assert.equal(existsSync(file), true, 'второй запуск исполнил команду');
+    assert.ok(error instanceof ReapFailure, String(error));
+    assert.equal(
+      completedCheck(error),
+      undefined,
+      'исход прежнего (не стартовавшего) запуска не приписан',
+    );
+    assert.equal(error.result?.code, 0, 'исход — того запуска, чьи потомки не остановлены');
+    assert.match(error.message, /временные каталоги проверки не убраны: ENOTEMPTY/);
   },
 );
 

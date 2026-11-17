@@ -450,6 +450,8 @@ export async function runCheck(
   const marks = await realpath(await mkdtemp(join(tmpdir(), 'dc-start-')));
   // Свой короткий временный каталог srt (`srtTempDir`), если его пришлось создать.
   let srtTemp: string | undefined;
+  /** Отказ тела проверки: уборка его не заменяет. */
+  let thrown: { error: unknown } | undefined;
   try {
     if (h.config.isolation.mode === 'os') {
       const support = isolationBackend.check();
@@ -558,6 +560,11 @@ export async function runCheck(
       ...(policy ? { isolation: policy } : {}),
       ...(violations ? { violations } : {}),
     };
+  } catch (error) {
+    // Отказ самой проверки (в том числе неостановленные потомки) — её исход:
+    // отказ уборки ниже его не заменяет, а дописывается к нему.
+    thrown = { error };
+    throw error;
   } finally {
     // Наблюдение за журналом не переживает проверку и при исключении.
     if (monitor && violations === undefined) await monitor.stop(0);
@@ -570,11 +577,22 @@ export async function runCheck(
     ]);
     const failed = removed.find((r) => r.status === 'rejected');
     if (failed) {
-      // Отказ уборки после завершения не стирает исход проверки: код и
-      // вывод доступны вызывающему через ошибку (`completedCheck`).
       const error =
         failed.reason instanceof Error ? failed.reason : new Error(String(failed.reason));
-
+      // Проверка уже отказала: её отказ остаётся первичным — с классом,
+      // причиной и исходом. Неостановленные потомки, мешающие уборке, —
+      // частый случай: ReapFailure не должна стать «провалом gate».
+      if (thrown) {
+        const original = thrown.error;
+        if (original instanceof ReapFailure) throw original.extend(leftoverText(error.message));
+        if (original instanceof Error) {
+          original.message += `; ${leftoverText(error.message)}`;
+          throw original;
+        }
+        throw original;
+      }
+      // Отказ уборки после завершения не стирает исход проверки: код и
+      // вывод доступны вызывающему через ошибку (`completedCheck`).
       throw result
         ? Object.assign(error, {
             [checkResult]: {
@@ -675,6 +693,18 @@ export { hostLoad, type HostLoad };
  * раз (`Runner`): повтор прошёл — исход `flaky`, попытка не тратится; снова
  * таймаут — провал засчитан как прежде.
  */
+/**
+ * Отказ gate, чьи потомки не остановлены или не пересчитаны: дерево, где он
+ * исполнялся, больше не используется — ни повтора gate на нём, ни следующих
+ * проверок. Класс — `environment`/`process-reap` или `gate`, если команда
+ * сама назвала провал.
+ */
+export class ReapedGate extends TaskFailure {
+  override name = 'ReapedGate';
+}
+/** Отказ, после которого в дереве проверки, возможно, ещё работают её потомки. */
+export const reapedFailure = (error: unknown) =>
+  error instanceof ReapedGate || error instanceof ReapFailure;
 export class GateTimeout extends TaskFailure {
   constructor(
     message: string,
@@ -815,6 +845,8 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   // evidence, и запись называет, где и чем проверка исполнялась.
   /** Отказ уборки каталогов завершившейся проверки (`completedCheck`). */
   let leftover: string | undefined;
+  /** Команда завершилась, но её потомки не остановлены или не пересчитаны. */
+  let reaped: ReapFailure | undefined;
   let passed = false,
     summary = '',
     log = `# harness gate ${gate.id}: cwd=${relative(root, gateCwd) || '.'} argv=${JSON.stringify(gate.command.map(redact))}${gate.kind === 'test' ? ` fresh=${redact(JSON.stringify(freshness))}` : ''}\n`,
@@ -857,7 +889,20 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         settingsDir: join(artifactDir, gate.id),
         violations: true,
       },
-    ).catch((error: unknown) => {
+    ).catch((error: unknown): Awaited<ReturnType<typeof runCheck>> => {
+      // Команда завершилась, но её потомков не удалось остановить или
+      // пересчитать: исход разбирается как обычно (провал, который назвала
+      // команда, — свидетельство о коде), но успехом не станет.
+      if (error instanceof ReapFailure && error.result) {
+        reaped = error;
+        return {
+          ...error.result,
+          attempts: 1,
+          started: true,
+          notStarted: false,
+          launchFailed: false,
+        };
+      }
       // Проверка завершилась, но её временные каталоги не убраны: исход
       // разбирается как обычно, а отказ уборки дописывается к нему.
       const done = completedCheck(error);
@@ -1015,6 +1060,9 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     // старта, временный каталог srt — вне worktree): о коде это ничего не
     // говорит, это отказ среды `cleanup`. Проверка всё равно не пройдена:
     // зелёный исход без уборки не принимается.
+    // Проверка прошла, но её потомки не остановлены: зелёный исход рядом с
+    // живым писателем не принимается — отказ среды `process-reap`.
+    if (reaped) throw reaped;
     if (leftover) {
       kind = 'environment';
       cause = 'cleanup';
@@ -1036,8 +1084,12 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     if (error instanceof ReapFailure) {
       kind = 'environment';
       cause = 'process-reap';
+      reaped = error;
     }
     let message = error instanceof Error ? error.message : String(error);
+    // Провал, названный самой командой, остаётся первичным; неостановленные
+    // потомки дописываются к нему (правило то же, что у неубранных каталогов).
+    if (reaped && error !== reaped) message += `; ${reaped.message}`;
     // Провал самой проверки остаётся её классом; неубранные каталоги — к нему.
     if (leftover && cause !== 'cleanup') message += `; ${leftoverText(leftover)}`;
     summary = redact(message);
@@ -1188,20 +1240,30 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     ];
     const declared = new Set(expected?.properties.map((p) => p.id) ?? []);
     const message = `${phase}/${run.consumer ? run.consumer + ':' : ''}${gate.id}: ${evidence.summary}`;
+    const properties = failing.length
+      ? {
+          bound: [...new Set(failing.filter((id) => declared.has(id)))],
+          unbound: [...new Set(failing.filter((id) => !declared.has(id)))],
+        }
+      : undefined;
+    if (reaped) {
+      // Потомки команды не остановлены. Провал, который назвала команда
+      // (код выхода, упавшие тесты, контрпример свойства), — свидетельство о
+      // коде: класс `gate`, засчитывается, неостановленные потомки дописаны.
+      // Таймаут и прерывание без названного провала о коде не говорят —
+      // отказ среды. В обоих случаях повтора на этом дереве нет (`ReapedGate`).
+      const named = failing.length > 0 || timedOutFailures !== '';
+      if (named) kind = 'gate';
+      else if (kind === 'gate' && (timedOut || signal.aborted)) {
+        kind = 'environment';
+        cause = 'process-reap';
+      }
+      throw new ReapedGate(kind, message, properties, kind === 'environment' ? cause : undefined);
+    }
     // Таймаут без контрпримера свойства: повтор на том же SHA решает `Runner`.
     if (timedOut && kind === 'gate' && !failing.length && !timedOutFailures)
       throw new GateTimeout(message, timedOut);
-    throw new TaskFailure(
-      kind,
-      message,
-      failing.length
-        ? {
-            bound: [...new Set(failing.filter((id) => declared.has(id)))],
-            unbound: [...new Set(failing.filter((id) => !declared.has(id)))],
-          }
-        : undefined,
-      kind === 'environment' ? cause : undefined,
-    );
+    throw new TaskFailure(kind, message, properties, kind === 'environment' ? cause : undefined);
   }
   return evidence;
 }
@@ -1431,6 +1493,9 @@ export async function prepareWriterDependencies(
       // Отказ сборки политики песочницы — отказ среды, как у gate.
       if (error instanceof SandboxPolicyError)
         throw new TaskFailure('environment', error.message, undefined, 'sandbox-policy');
+      // Потомки установки не остановлены: исполнитель не получает дерево, в
+      // котором они, возможно, ещё пишут, — попытка кончается отказом среды.
+      if (error instanceof ReapFailure) throw error;
       failure = redact(error instanceof Error ? error.message : String(error));
     }
     signal.throwIfAborted();
