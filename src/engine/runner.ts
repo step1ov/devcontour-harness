@@ -116,6 +116,7 @@ import {
 import {
   GateTimeout,
   prepareWriterDependencies,
+  ReapedGate,
   reapedFailure,
   draftTouchesInstall,
   runGate,
@@ -2369,6 +2370,8 @@ export class Runner {
     try {
       await this.gate(attempt, cwd, sha, 'integration', gate, artifacts, signal, execution);
     } catch (error) {
+      if (!signal.aborted && error instanceof ReapedGate && error.kind === 'gate')
+        throw this.overloadedIntegration(attempt, sha, gate, error);
       if (!budget.recheck || signal.aborted || !(error instanceof TaskFailure)) throw error;
       // Потомки gate не остановлены: повтор на том же дереве рядом с живым
       // писателем не проводится, какой бы ни был класс.
@@ -2415,6 +2418,40 @@ export class Runner {
         failed.id,
       );
     }
+  }
+
+  /**
+   * Провал gate интеграции при неостановленных потомках. Если кандидат этот
+   * gate прошёл, а провал назван только кодом выхода (ни упавшего теста, ни
+   * контрпримера свойства или случая корпуса), это — перегрузка хоста
+   * (`ps` не уложился в свой предел, семейство D52), а не дефект: такой
+   * провал без потомков получил бы повтор, а повтора на этом дереве нет.
+   * Класс — `environment`/`process-reap`, не засчитывается. Названный провал
+   * остаётся `gate`.
+   */
+  private overloadedIntegration(
+    attempt: AttemptState,
+    sha: string,
+    gate: GatePolicy,
+    error: ReapedGate,
+  ): ReapedGate {
+    const { failed, candidatePassed } = this.engine.read((v) => {
+      const evidence = v.attempt(attempt.id)?.evidence ?? [];
+      const own = (e: EvidenceRecord, phase: EvidenceRecord['phase'], at?: string) =>
+        e.kind === 'test' && e.gate === gate.id && e.phase === phase && e.sha === at && !e.consumer;
+      return {
+        failed: evidence.findLast((e) => own(e, 'integration', sha)),
+        candidatePassed:
+          evidence.findLast((e) => own(e, 'candidate', attempt.candidateSha))?.passed === true,
+      };
+    });
+    const named =
+      !failed ||
+      namesFailingCases(failed) ||
+      (failed.tests ?? []).some((t) => t.status === 'failed') ||
+      (error.properties?.bound.length ?? 0) + (error.properties?.unbound.length ?? 0) > 0;
+    if (named || !candidatePassed) return error;
+    return new ReapedGate('environment', error.message, undefined, 'process-reap');
   }
 
   /**
