@@ -20,7 +20,7 @@ import {
 } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { removeSnapshots, snapshotDependencies, type DependencySnapshot } from './dependencies.ts';
-import { runGate, type Boundary } from './gates.ts';
+import { reapedFailure, runGate, type Boundary } from './gates.ts';
 import { checkoutPath, chooseCheckoutRoot } from '../environment/checkout-root.ts';
 import { dependencyStoreRoot, materializeStore, type StoreContext } from './dependency-store.ts';
 import { credentialPaths } from '../environment/isolation.ts';
@@ -250,11 +250,23 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
             await materializeStore(store, { repo, cwd, execution, signal, dir: artifacts });
             await runSteps(repo.prepare, cwd, join(artifacts, 'prepare'), execution, signal);
             prepared(execution);
+            let reapedBy: string | undefined;
             for (const gate of gates) {
               // Пропускается только gate, чья явная предпосылка (`dependsOn`) не
               // прошла. Провал неявной (более ранний check gate в режиме
               // порядка массива) не скрывает исход тестов: исполняются и
               // названы оба.
+              // Потомки прежнего gate не остановлены: следующие gates в этом
+              // дереве не исполняются — их evidence записывалось бы рядом с
+              // живым писателем.
+              if (reapedBy) {
+                failed.add(gate.id);
+                failures.push({
+                  gate: gate.id,
+                  message: `не исполнен: потомки проверки ${reapedBy} не остановлены, дерево не используется`,
+                });
+                continue;
+              }
               const blocked = explicitPrerequisites(repo.gates, gate.id).filter((g) =>
                 failed.has(g),
               );
@@ -311,6 +323,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
                   throw error;
                 failed.add(gate.id);
                 failures.push({ gate: gate.id, message: stalledBy(input.signal) ?? error.message });
+                if (reapedFailure(error)) reapedBy = gate.id;
               }
             }
           },
