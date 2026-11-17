@@ -13,10 +13,14 @@ export { BlockedError };
 
 /**
  * Отказ, по которому судится попытка: у незавершённой очистки окружения —
- * исходный отказ работы (`CleanupFailure.original`), иначе сам отказ.
+ * исходный отказ работы (`CleanupFailure.original`, через все вложенные
+ * очистки), иначе сам отказ.
  */
-export const failureOrigin = (error: unknown): unknown =>
-  error instanceof CleanupFailure && error.original ? error.original : error;
+export function failureOrigin(error: unknown): unknown {
+  let origin = error;
+  while (origin instanceof CleanupFailure && origin.original) origin = origin.original;
+  return origin;
+}
 
 /**
  * Отказ провайдера, а не работы: он повторится на любой следующей выдаче.

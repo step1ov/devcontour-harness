@@ -1774,7 +1774,14 @@ export class Runner {
                 ).catch((error: unknown) => {
                   // Без изменений непрошедший gate значит одно: работа не
                   // сделана, — это пустой результат, а не дефект кода.
-                  if (sha !== base || !(error instanceof TaskFailure)) throw error;
+                  // Отказ среды (в том числе неостановленные потомки) остаётся
+                  // отказом среды и без изменений: о работе он не говорит.
+                  if (
+                    sha !== base ||
+                    !(error instanceof TaskFailure) ||
+                    error.kind === 'environment'
+                  )
+                    throw error;
                   throw new TaskFailure(
                     'empty-result',
                     'Изменений нет, а проверки задачи на базе не проходят: ' + error.message,
@@ -1882,7 +1889,12 @@ export class Runner {
         // Незакоммиченная работа сохраняется при любом отказе до кандидата:
         // по времени, «не закончил», обрыв. Иначе повтор начинал с пустого
         // дерева и тратил попытку на сделанное.
-        if (kind !== 'provider-auth')
+        // Неостановленные потомки (вызов runtime, установка зависимостей)
+        // могут ещё писать в дерево: снимок черновика был бы снимком чужой
+        // записи на ходу. Попытка — отказ среды без черновика; следующая
+        // начинает с базы в новом дереве.
+        const cause = environmentCauseOf(stalled ? undefined : error, message, kind);
+        if (kind !== 'provider-auth' && cause !== 'process-reap')
           await this.keepDraft(attempt, await this.workOf(attempt), artifacts);
         // Пример reviewer — гипотеза; эталон решает, станет ли он обязательным:
         // подтверждение идёт до записи отказа, и принятие новой версии корпуса
@@ -1897,7 +1909,7 @@ export class Runner {
           ...(!stalled && origin instanceof TaskFailure && origin.contextLimit
             ? { contextLimit: origin.contextLimit }
             : {}),
-          cause: environmentCauseOf(stalled ? undefined : error, message, kind),
+          cause,
           blocked:
             (origin instanceof BlockedError ||
               kind === 'provider-auth' ||
