@@ -4,6 +4,9 @@ import {
   API_VERSION,
   HarnessError,
   STATE_VERSION,
+  runtimeAssignments,
+  sameVendorReviews,
+  type Author,
   type ExecutionPolicy,
   type RuntimeAdapter,
   type RuntimeName,
@@ -24,27 +27,6 @@ export type ToolchainInspect = (
   baseDir: string,
 ) => Promise<ToolchainReport[]>;
 
-/** Runtime, которые политика действительно назначает writer или reviewer. */
-function usedRuntimes(policy: ExecutionPolicy) {
-  const used = new Set<string>();
-  const rule = (r?: { reviewer: { runtime: string }; alternates?: { runtime: string }[] }) => {
-    if (!r) return;
-    used.add(r.reviewer.runtime);
-    for (const a of r.alternates ?? []) used.add(a.runtime);
-  };
-  for (const k of ['code', 'plan', 'contract'] as const) rule(policy.review[k]);
-  const roles = [
-    ...Object.values(policy.roles),
-    ...policy.repositories.flatMap((r) => Object.values(r.roles ?? {})),
-  ];
-  for (const b of roles) {
-    used.add(b.writer.runtime);
-    rule(b.review);
-  }
-  for (const r of policy.repositories) rule(r.review);
-  return used;
-}
-
 /**
  * Проверка среды без live-вызова модели: версия пакета и Node, наличие
  * runtime (по `--version`) и их возможности, OS-sandbox, совместимость
@@ -52,8 +34,10 @@ function usedRuntimes(policy: ExecutionPolicy) {
  * для совместимого состояния называются версии движка, встреченные в нём
  * (роль controller и попытки), — перед обновлением и откатом видно, какая
  * версия последней писала состояние. С политикой — предупреждения
- * (`warnings`): сумма пределов шагов фазы больше `runTimeoutMs`
- * (`timeBudgetWarnings`); они не попадают в `problems`.
+ * (`warnings`): порт ресурса только на wildcard, ревью тем же вендором
+ * (`review-same-vendor: …`), сумма пределов шагов фазы больше `runTimeoutMs`
+ * (`timeBudgetWarnings`), советы о ресурсах машины (`resourceWarnings`); они
+ * не попадают в `problems`.
  */
 export async function doctor(
   policy: ExecutionPolicy | undefined,
@@ -73,22 +57,32 @@ export async function doctor(
    */
   checkouts?: { baseDir: string; checkoutRoot?: string },
   /**
-   * База блокировок ресурсов (по умолчанию общая база машины); читается,
-   * только если есть. `false` — порты ресурсов не пробуются.
+   * Необязательные параметры: `resourceDatabase` — база блокировок ресурсов
+   * (по умолчанию общая база машины; читается, только если есть; `false` —
+   * порты ресурсов не пробуются); `planAuthors` — авторы планов и контрактов
+   * для предупреждения о ревью тем же вендором (ведущий из manifest проекта;
+   * нет — writers ролей политики).
    */
-  resourceDatabase: string | false = defaultResourceDatabase(),
+  options: { resourceDatabase?: string | false; planAuthors?: readonly Author[] } = {},
 ) {
   const problems: string[] = [];
   const runtimes = [];
   // С политикой обязательны только назначенные ею runtime: сценарий одного
   // вендора или fixture не требует второго CLI.
-  const required = policy ? usedRuntimes(policy) : new Set(['codex', 'claude']);
+  const assigned = policy ? runtimeAssignments(policy) : undefined;
+  const required = new Set<string>(assigned ? assigned.keys() : ['codex', 'claude']);
   for (const runtime of ['codex', 'claude'] as const) {
     const caps = required.has(runtime)
       ? await adapters[runtime]?.capabilities().catch(() => undefined)
       : undefined;
+    const what = assigned?.get(runtime);
     if (!caps?.version && required.has(runtime))
-      problems.push(`${runtime}: не найден или не отвечает на --version`);
+      problems.push(
+        `${runtime}: не найден или не отвечает на --version` +
+          (what
+            ? `; политика назначает его (${what.join(', ')}) — первая попытка или ревью остановится; установите ${runtime} и выполните вход либо подготовьте политику без него (init --review same)`
+            : ''),
+      );
     runtimes.push({
       runtime,
       available: Boolean(caps?.version),
@@ -158,6 +152,7 @@ export async function doctor(
       );
   // Проба портов привязывает их и зовёт lsof; вызывающий без нужды в ней
   // (explain) передаёт `resourceDatabase: false`.
+  const { resourceDatabase = defaultResourceDatabase(), planAuthors } = options;
   const ports =
     policy && resourceDatabase !== false ? await portStatus(policy, resourceDatabase) : [];
   const warnings: string[] = [];
@@ -170,6 +165,30 @@ export async function doctor(
       warnings.push(
         `Порт ${p.port} (ресурс ${p.id}) на всех адресах держит ${p.holder}; loopback свободен — служба попытки должна слушать 127.0.0.1. ${PORT_ADVICE}`,
       );
+  // Ревью тем же вендором — не отказ, но явное предупреждение.
+  const same = policy
+    ? sameVendorReviews(
+        policy,
+        planAuthors?.length
+          ? planAuthors
+          : [
+              ...new Set(
+                [
+                  ...Object.values(policy.roles),
+                  ...policy.repositories.flatMap((r) => Object.values(r.roles ?? {})),
+                ].map((b) => b.writer.runtime),
+              ),
+            ],
+      )
+    : [];
+  if (same.length)
+    warnings.push(
+      `review-same-vendor: Ревью тем же вендором, что автор (vendor: same-vendor-allowed): ${[
+        ...new Set(
+          same.map((s) => `${s.role ? 'code ' + s.role : s.kind} ${s.author}→${s.reviewer}`),
+        ),
+      ].join(', ')}; независимость ниже, чем у ревью другим вендором`,
+    );
   return {
     harness: HARNESS_VERSION,
     apiVersion: API_VERSION,
@@ -182,9 +201,10 @@ export async function doctor(
     ...(toolchains ? { toolchains } : {}),
     ...(ports.length ? { ports } : {}),
     problems,
-    // Предупреждения не делают среду негодной: порт только на wildcard,
-    // пределы шагов фазы больше `runTimeoutMs` (`timeBudgetWarnings`, худший
-    // случай) и советы о ресурсах машины (`resourceWarnings`).
+    // Предупреждения не делают среду негодной: порт только на wildcard, ревью
+    // тем же вендором, пределы шагов фазы больше `runTimeoutMs`
+    // (`timeBudgetWarnings`, худший случай) и советы о ресурсах машины
+    // (`resourceWarnings`).
     ...(policy
       ? {
           warnings: [

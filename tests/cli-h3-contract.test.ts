@@ -141,7 +141,18 @@ const ADDITIVE_EVENT_TYPES = new Set([
   'joint.budget-reset',
 ]);
 /** Аддитивные флаги прежних команд после H2. */
-const ADDITIVE_ARGS = new Set(['status--detail', 'init--lean']);
+const ADDITIVE_ARGS = new Set([
+  'status--detail',
+  'init--lean',
+  'init--lead',
+  'init--review',
+  'init--model',
+]);
+/**
+ * Текст `--writer` init в H2. Следующий выпуск меняет умолчание: writer —
+ * ведущий (`--lead`), а не `claude`; аргумент и его значения прежние.
+ */
+const H2_INIT_WRITER = 'Runtime writer: claude (по умолчанию) или codex; reviewer — другой вендор';
 /** Тип варианта события в JSON Schema (`properties.type.const`). */
 const eventTypeOf = (v: unknown) =>
   (v as { properties?: { type?: { const?: unknown } } } | null)?.properties?.type?.const as
@@ -290,6 +301,7 @@ test('H3-01: прежние команды и схемы их данных не 
             .map((arg) => {
               const copy: CliArgument = { ...arg };
               delete copy.multiple;
+              if (c === 'init' && arg.name === '--writer') copy.description = H2_INIT_WRITER;
               return copy;
             }),
         },
@@ -309,6 +321,25 @@ test('H3-01: прежние команды и схемы их данных не 
   // Порядок ключей cliDataSchemas H2 — без capabilities; аддитивные значения
   // перечней убираются, остальное — байты H2.
   const h2 = JSON.stringify(data, (k, v: unknown) => {
+    // Аддитивные поля ответа init (следующий выпуск): ведущий, решение о
+    // ревью, наличие CLI и предупреждения — обязательные, поэтому и в `required`.
+    if (v && typeof v === 'object' && !Array.isArray(v) && 'properties' in v) {
+      const o = v as { properties: Record<string, unknown>; required?: string[] };
+      if (o.properties && 'facts' in o.properties && 'lead' in o.properties) {
+        const added = ['lead', 'review', 'runtimes', 'warnings'];
+        const properties = { ...o.properties };
+        for (const key of added) delete properties[key];
+        return { ...o, properties, required: o.required?.filter((r) => !added.includes(r)) };
+      }
+    }
+    // Аддитивные поля manifest проекта (следующий выпуск): lead, review, model.
+    if (k === 'properties' && v && typeof v === 'object' && 'projectId' in v && 'lead' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.lead;
+      delete rest.review;
+      delete rest.model;
+      return rest;
+    }
     // Аддитивные поля условного gate (`when.paths`) — до прочих правил, потому
     // что делят объект с их полями: условие gate задачи (рядом с `artifacts`),
     // сведения о неприменимости и digest определения у evidence, флаг события
@@ -372,8 +403,8 @@ test('H3-01: прежние команды и схемы их данных не 
       return rest;
     }
     // Аддитивные поля doctor — действующий корень рабочих деревьев (alpha.23),
-    // проба портов ресурсов и предупреждения (порт только на wildcard, срок
-    // фаз, советы о ресурсах машины).
+    // проба портов ресурсов и предупреждения (порт только на wildcard, ревью
+    // тем же вендором, срок фаз, советы о ресурсах машины).
     if (k === 'properties' && v && typeof v === 'object' && 'checkouts' in v && 'sandbox' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.checkouts;
@@ -438,6 +469,9 @@ test('H3-01: прежние команды и схемы их данных не 
   // Хеш H2 вырезает пробу портов и предупреждения doctor: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.doctor).includes('"ports"'), 'doctor: проба портов');
   assert.ok(JSON.stringify(data.doctor).includes('"warnings"'), 'doctor: предупреждения');
+  // Хеш H2 выше вырезает поля ведущего и ревью: объявление держит эта проверка.
+  for (const field of ['"lead"', '"review"', '"runtimes"', '"warnings"'])
+    assert.ok(JSON.stringify(data.init).includes(field), 'init объявляет ' + field);
   assert.ok(
     JSON.stringify(data['source-snapshot']).includes('"localContext"'),
     'source-snapshot объявляет пакеты контекста',

@@ -271,7 +271,13 @@ test('H01-C: init --plan и inspectProject видят один корень и �
   const p = project();
   const { probe } = recordingProbe();
   const facts = await inspectProject({ repository: p.root, env: p.env, probe });
-  const planned = await planProject({ repository: p.root, env: p.env, probe, plan: true });
+  const planned = await planProject({
+    repository: p.root,
+    env: p.env,
+    probe,
+    lead: 'claude',
+    plan: true,
+  });
   assert.equal(planned.root, facts.git.root);
   assert.deepEqual(planned.profile, facts.profiles[0]);
   assert.equal(existsSync(join(p.root, '.harness')), false);

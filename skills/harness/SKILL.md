@@ -54,32 +54,41 @@ Schema of input and response, and the byte limits. Read only.
 
 ### 3. Prepare the repository
 
-1. `$H init --repository <repo> --plan` writes nothing. Read `data.files`
+1. `$H init --repository <repo> --plan` writes nothing. The lead is you:
+   pass `--lead claude` or `--lead codex` unless `data.lead` already names
+   you (`CLAUDECODE` / `CODEX_THREAD_ID`, the saved manifest, or a
+   committed policy in a fresh checkout). The writer defaults to the lead;
+   `--review auto` (default) picks the same runtime with an explicit
+   `same-vendor-allowed` and a `review-same-vendor` warning only when your
+   own CLI works and the other vendor's is missing or signed out — tell the
+   user; otherwise a reviewer of the other vendor. Read `data.warnings`,
+   `data.files`
    (`create` / `preserve` / `conflict`), `data.conflicts`,
    `data.toolchain.problems`, `data.facts` and `data.manifest.paths.state`.
    Exit 3 means the plan has conflicts or the toolchain is not ready.
 2. Fix what you may fix, or hand it to the user (see the table).
 3. `$H init --repository <repo>` is create-only: `.harness/.gitignore`,
    `.harness/README.md`, `.harness/project.json` (the decisions: profile,
-   writer, state), and `.harness/policy.json` last. No other file of the
+   lead, writer, review, state), and `.harness/policy.json` last. No other file of the
    repository changes and nothing is committed. A
    repeat with the same decisions writes nothing (`created: []`); after an
    interruption it resumes from the saved manifest decisions and writes only
    what is missing.
 
-| Conflict or refusal                                 | Meaning                                                                                                                                                 | Action                                                                                                                      |
-| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `symlink`                                           | the path or an ancestor (`conflictPath`) is a symlink                                                                                                   | never write through it; the user replaces the link                                                                          |
-| `ancestor-not-directory`                            | an ancestor of the path is a file                                                                                                                       | ask the user; never delete their files                                                                                      |
-| `not-regular-file`                                  | the destination exists and is not a regular file                                                                                                        | ask the user                                                                                                                |
-| `outside-root`                                      | the destination resolves outside the repository                                                                                                         | ask the user                                                                                                                |
-| `content-differs` on `.harness/project.json`        | an explicit `--writer` or `--profile` differs from the saved manifest; after an upgrade or a move, also a changed built-in profile, root or API version | keep the saved decision, or the user confirms the change explicitly                                                         |
-| `content-differs` on `.harness/policy.json`         | the saved policy's writer differs from the manifest or explicit `--writer`                                                                              | keep the saved decision, or the user confirms the change explicitly                                                         |
-| `INVALID_INPUT` with a path                         | not a Git root, invalid manifest or policy (also a truncated write), `--state` inside the repository                                                    | read the issue path; a broken file is removed by a human, not overwritten                                                   |
-| `NOT_READY` `no-commits`                            | the repository has no commits                                                                                                                           | the user commits first                                                                                                      |
-| `NOT_READY` `stack-ambiguous` / `stack-unsupported` | both lockfiles, or none                                                                                                                                 | pass `--profile`; when profile gates do not fit, write `.harness/profile.json` and pass `--profile ./.harness/profile.json` |
-| `NOT_READY` toolchain problems                      | missing scripts, wrong tool versions                                                                                                                    | fix the project or hand it to the user; never weaken the policy                                                             |
-| `CONTROLLER_BUSY`                                   | the repository is already owned by another controller                                                                                                   | stop: a second controller and state are not created                                                                         |
+| Conflict or refusal                                 | Meaning                                                                                                                                                                                  | Action                                                                                                                      |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `symlink`                                           | the path or an ancestor (`conflictPath`) is a symlink                                                                                                                                    | never write through it; the user replaces the link                                                                          |
+| `ancestor-not-directory`                            | an ancestor of the path is a file                                                                                                                                                        | ask the user; never delete their files                                                                                      |
+| `not-regular-file`                                  | the destination exists and is not a regular file                                                                                                                                         | ask the user                                                                                                                |
+| `outside-root`                                      | the destination resolves outside the repository                                                                                                                                          | ask the user                                                                                                                |
+| `content-differs` on `.harness/project.json`        | an explicit `--lead`, `--writer`, `--review`, `--model` or `--profile` differs from the saved manifest; after an upgrade or a move, also a changed built-in profile, root or API version | keep the saved decision, or the user confirms the change explicitly                                                         |
+| `content-differs` on `.harness/policy.json`         | the saved policy assigns no allowed reviewer for the decisions (plan and contract of the lead, code of the writer); the refusal names the reason                                         | pass the `--lead` / `--writer` the policy was made for, or the user confirms the change explicitly                          |
+| `NOT_READY` `lead-unknown`                          | no `--lead`, no saved manifest and no session marker                                                                                                                                     | pass `--lead claude` or `--lead codex` (who leads this session)                                                             |
+| `INVALID_INPUT` with a path                         | not a Git root, invalid manifest or policy (also a truncated write), `--state` inside the repository                                                                                     | read the issue path; a broken file is removed by a human, not overwritten                                                   |
+| `NOT_READY` `no-commits`                            | the repository has no commits                                                                                                                                                            | the user commits first                                                                                                      |
+| `NOT_READY` `stack-ambiguous` / `stack-unsupported` | both lockfiles, or none                                                                                                                                                                  | pass `--profile`; when profile gates do not fit, write `.harness/profile.json` and pass `--profile ./.harness/profile.json` |
+| `NOT_READY` toolchain problems                      | missing scripts, wrong tool versions                                                                                                                                                     | fix the project or hand it to the user; never weaken the policy                                                             |
+| `CONTROLLER_BUSY`                                   | the repository is already owned by another controller                                                                                                                                    | stop: a second controller and state are not created                                                                         |
 
 ### 4. Plan the graph
 

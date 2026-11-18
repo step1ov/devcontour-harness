@@ -973,7 +973,8 @@ until)` и метка документа `leaseRows: true`. Первая стр�
 
 ### Следующий выпуск
 
-Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`). Политики
+Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`,
+`manifestVersion: 1`); существующие политики не перегенерируются. Политики
 без новых полей профиля и без `integrationReuse`, их digest (`policyDigest`,
 `executionDigest`) и исполнение не меняются (для `integrationReuse`
 закреплено тестом совместимости).
@@ -1113,6 +1114,41 @@ until)` и метка документа `leaseRows: true`. Первая стр�
   `CANCELLED` (exit 3): прерванный gate — `cancelled`, следующие — `not-run`,
   исходы — в `issues`. Прежние команды, их данные и формат состояния не
   меняются; откат — прежняя версия пакета, команда просто исчезает.
+
+- **Ведущий и ревью в `init`.** `init --lead claude|codex`: ведущий — автор планов и контрактов. Без
+  `--lead` — из manifest, затем из сохранённой политики (новый checkout без
+  `project.json`), затем признак окружения (`CLAUDECODE=1`,
+  `CODEX_THREAD_ID`), затем `--writer`; иначе `NOT_READY` (`lead-unknown`).
+  Молчаливого `--writer claude` по умолчанию больше нет: скрипт, который
+  вызывал `init` без `--writer` вне сессии Claude Code, передаёт `--lead`.
+- `--writer` по умолчанию — ведущий. Reviewer плана и контракта выбирается
+  для ведущего, reviewer кода — для writer.
+- `--review cross|same|auto` (умолчание `auto`): свой CLI есть, а CLI другого
+  вендора нет (или в нём явно нет входа) — тот же runtime с явным `vendor: same-vendor-allowed` и
+  предупреждением `review-same-vendor` в `init`, `doctor` (`warnings`) и
+  `report` (ограничение `review-same-vendor`). С двумя установленными CLI
+  сгенерированная политика байтово та же, что раньше; без CLI вовсе — `cross`
+  с предупреждениями `runtime-missing`.
+- `--model` — одна модель на writer и всех reviewers; с ревью двух вендоров —
+  `INVALID_INPUT` (`model-cross-vendor`).
+- Manifest хранит `lead`, `review` и `model` (необязательные поля). Manifest
+  прежнего формата читается: ведущий — его writer, ревью — `cross`; файл не
+  переписывается, `init --plan` не даёт `content-differs`.
+- Политика без manifest (новый checkout) продолжается по своим решениям:
+  ведущий — по правилу ревью плана, writer — по ролям или правилу ревью кода.
+  `content-differs` на `policy.json` — только когда политика не назначает
+  допустимого reviewer для решений (явных `--lead` / `--writer` или manifest).
+- Ответ `init` дополнен полями `lead`, `review`, `runtimes` (наличие CLI и
+  вход по `claude auth status` / `codex login status`) и `warnings`; ответ
+  `doctor` — необязательным `warnings`, а сообщение об отсутствующем
+  назначенном CLI называет его назначения.
+- Откат: строгая схема manifest прежних версий не принимает `lead`,
+  `review` и `model`. Перед откатом удалите `.harness/project.json` (он
+  локальный) и выполните `init` прежней версией с `--writer`, равным writer
+  manifest; политика при этом не меняется. Политику с ревью тем же вендором
+  (`review: same`) прежняя версия читает как политику другого writer
+  (`content-differs` на `policy.json`): такой проект откатывается вместе с
+  явным решением о политике.
 
 ## Перед обновлением
 

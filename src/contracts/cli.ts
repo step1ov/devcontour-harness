@@ -24,7 +24,12 @@ import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
 import { reviewRecordSchema } from './review.ts';
 import { sourceRefSchema } from './work.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
-import { filePlanEntrySchema, projectManifestSchema } from './project.ts';
+import {
+  filePlanEntrySchema,
+  initWarningCodes,
+  projectManifestSchema,
+  projectReviewModes,
+} from './project.ts';
 import {
   diagnosisActions,
   diagnosisActors,
@@ -448,10 +453,31 @@ export const cliCommands = {
           'Встроенный профиль или ./file.json репозитория; без него — из manifest, иначе по lockfile (npm-ci | pnpm-frozen)',
       },
       {
+        name: '--lead',
+        value: 'id',
+        required: false,
+        description:
+          'Ведущий (автор планов и контрактов): claude или codex; без него — из manifest, иначе по окружению (CLAUDECODE, CODEX_THREAD_ID), иначе NOT_READY lead-unknown',
+      },
+      {
         name: '--writer',
         value: 'id',
         required: false,
-        description: 'Runtime writer: claude (по умолчанию) или codex; reviewer — другой вендор',
+        description: 'Runtime writer: claude или codex; по умолчанию — из manifest, иначе ведущий',
+      },
+      {
+        name: '--review',
+        value: 'text',
+        required: false,
+        description:
+          'cross — reviewer другого вендора; same — тот же runtime с явным same-vendor-allowed; auto (по умолчанию) — cross, если другой CLI установлен и вошёл, иначе same',
+      },
+      {
+        name: '--model',
+        value: 'text',
+        required: false,
+        description:
+          'Одна модель на writer и всех reviewers политики (только с ревью одного вендора)',
       },
       {
         name: '--state',
@@ -1247,7 +1273,8 @@ export const doctorDataSchema = z.strictObject({
   /**
    * Предупреждения, не делающие среду негодной; есть, когда задана политика.
    * Источники: порт ресурса занят только на wildcard-адресе, а loopback
-   * свободен (служба попытки должна слушать 127.0.0.1); сумма пределов шагов
+   * свободен (служба попытки должна слушать 127.0.0.1); ревью тем же вендором,
+   * что автор (`review-same-vendor: …`); сумма пределов шагов
    * одной фазы больше `runTimeoutMs` (`timeBudgetWarnings`); советы о ресурсах
    * машины — `DEPENDENCY_STORE_RECOMMENDED`, `LOW_RESOURCES`,
    * `DIGEST_THREADS_INVALID` (`resourceWarnings`).
@@ -1519,6 +1546,36 @@ export const initDataSchema = z.strictObject({
   preserved: z.array(z.string()),
   profile: profilePinSchema,
   shadowed: z.array(z.string()),
+  /** Ведущий и откуда он взят: `--lead`, manifest, writer прежнего manifest, сохранённая политика, окружение, `--writer`. */
+  lead: z.strictObject({
+    runtime: z.enum(['claude', 'codex']),
+    source: z.enum(['option', 'manifest', 'legacy-writer', 'policy', 'env', 'writer']),
+  }),
+  /**
+   * Решение о ревью: `cross` или `same`; источник — `--review`, manifest,
+   * прежний manifest (`legacy`), сохранённая политика или выбор `auto` по
+   * доступности CLI.
+   */
+  review: z.strictObject({
+    mode: z.enum(projectReviewModes),
+    source: z.enum(['option', 'manifest', 'legacy', 'policy', 'auto']),
+  }),
+  /** Наличие CLI runtime (`--version`) и вход (`claude auth status`, `codex login status`). */
+  runtimes: z.array(
+    z.strictObject({
+      runtime: z.enum(['claude', 'codex']),
+      status: z.enum(['available', 'missing', 'version-error']),
+      version: z.string().optional(),
+      auth: z.enum(['ok', 'missing', 'unknown']),
+    }),
+  ),
+  /** Предупреждения подготовки: не отказ, но требуют внимания до запуска. */
+  warnings: z.array(
+    z.strictObject({
+      code: z.enum(initWarningCodes),
+      message: z.string(),
+    }),
+  ),
   facts: z.strictObject({
     repositoryId: idSchema,
     targetRef: targetRefSchema,

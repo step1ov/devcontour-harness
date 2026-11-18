@@ -25,6 +25,7 @@ import {
   executionPolicySchema,
   exitCodeOf,
   exitCodes,
+  projectManifestSchema,
   type CliCommand,
   type CliEnvelope,
   type ExecutionPolicy,
@@ -283,6 +284,9 @@ const options = {
   lean: { type: 'boolean' },
   human: { type: 'boolean' },
   writer: { type: 'string' },
+  lead: { type: 'string' },
+  review: { type: 'string' },
+  model: { type: 'string' },
   draft: { type: 'string' },
   brief: { type: 'string' },
   basis: { type: 'string' },
@@ -316,6 +320,9 @@ const flagOwners = {
   plan: ['init'],
   lean: ['init'],
   writer: ['init'],
+  lead: ['init'],
+  review: ['init'],
+  model: ['init'],
   human: ['init', 'explain', 'plan-request', 'gates'],
   draft: ['plan-check'],
   basis: ['plan-check'],
@@ -359,6 +366,21 @@ const presenters: Partial<Record<CliCommand, (data: never) => string>> = {
   explain: explainText,
   'plan-request': (data: { prompt: string }) => data.prompt + '\n',
   gates: gatesText,
+};
+
+/**
+ * Ведущий проекта из manifest рядом с политикой (`.harness/project.json`);
+ * нет файла, поля или файл не по схеме — undefined (doctor берёт writers ролей).
+ */
+const manifestLead = (policyPath: string): ['claude' | 'codex'] | undefined => {
+  try {
+    const parsed = projectManifestSchema.safeParse(
+      JSON.parse(readFileSync(join(dirname(resolve(policyPath)), 'project.json'), 'utf8')),
+    );
+    return parsed.success && parsed.data.lead ? [parsed.data.lead] : undefined;
+  } catch {
+    return undefined;
+  }
 };
 
 /** Поле объекта только при заданном значении (exactOptionalPropertyTypes). */
@@ -703,14 +725,31 @@ async function run(
       }
     }
     case 'init': {
-      if (v.writer !== undefined && v.writer !== 'claude' && v.writer !== 'codex')
-        throw new HarnessError('INVALID_INPUT', '--writer: ожидается claude или codex', [
-          { path: ['--writer'], message: v.writer },
+      const runtimeFlag = (flag: 'writer' | 'lead') => {
+        const value = v[flag];
+        if (value !== undefined && value !== 'claude' && value !== 'codex')
+          throw new HarnessError('INVALID_INPUT', `--${flag}: ожидается claude или codex`, [
+            { path: ['--' + flag], message: value },
+          ]);
+        return value;
+      };
+      const writer = runtimeFlag('writer');
+      const lead = runtimeFlag('lead');
+      if (v.review !== undefined && !['cross', 'same', 'auto'].includes(v.review))
+        throw new HarnessError('INVALID_INPUT', '--review: ожидается cross, same или auto', [
+          { path: ['--review'], message: v.review },
+        ]);
+      if (v.model !== undefined && (!v.model.trim() || v.model.length > 200))
+        throw new HarnessError('INVALID_INPUT', '--model: ожидается имя модели до 200 символов', [
+          { path: ['--model'], message: v.model },
         ]);
       const data = await initProject({
         repository: need('repository'),
         ...(v.profile ? { profile: v.profile } : {}),
-        ...(v.writer ? { writer: v.writer } : {}),
+        ...(lead ? { lead } : {}),
+        ...(writer ? { writer } : {}),
+        ...(v.review ? { review: v.review as 'cross' | 'same' | 'auto' } : {}),
+        ...(v.model ? { model: v.model } : {}),
         ...(v.state ? { state: v.state } : {}),
         ...(v.plan ? { plan: true } : {}),
         ...(v.lean ? { lean: true } : {}),
@@ -905,6 +944,7 @@ async function run(
               }
             : undefined,
           b && v.state ? { baseDir: b.baseDir } : undefined,
+          optional('planAuthors', v.policy ? manifestLead(v.policy) : undefined),
         ),
       };
     }

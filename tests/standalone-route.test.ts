@@ -119,13 +119,13 @@ test('H1-01/H1-02/H1-04: npm-приложение → init → граф из fac
   const before = outside(p.app);
   const headBefore = p.git('rev-parse', 'HEAD');
 
-  const plan = p.harness('init', '--repository', p.app, '--plan');
+  const plan = p.harness('init', '--repository', p.app, '--lead', 'claude', '--plan');
   assert.equal(plan.status, 0, plan.stderr + plan.stdout);
   assert.equal(plan.json.data.status, 'new');
   assert.equal(plan.json.data.toolchain.ready, true, plan.json.data.toolchain.problems.join('\n'));
   assert.equal(existsSync(join(p.app, '.harness')), false, '--plan ничего не пишет');
 
-  const init = p.harness('init', '--repository', p.app);
+  const init = p.harness('init', '--repository', p.app, '--lead', 'claude');
   assert.equal(init.status, 0, init.stderr + init.stdout);
   const data = init.json.data;
   assert.equal(data.mode, 'apply');
@@ -202,14 +202,14 @@ test('H1-01/H1-02/H1-04: npm-приложение → init → граф из fac
   assert.equal(p.git('show', `${accepted}:src/greet.js`), greet.trimEnd());
 
   // Повтор init: ничего не пишет, тот же projectId и state.
-  const again = p.harness('init', '--repository', p.app);
+  const again = p.harness('init', '--repository', p.app, '--lead', 'claude');
   assert.equal(again.status, 0, again.stderr + again.stdout);
   assert.deepEqual(again.json.data.created, []);
   assert.equal(again.json.data.status, 'complete');
   assert.equal(again.json.data.projectId, data.projectId);
   assert.equal(again.json.data.manifest.paths.state, state);
   // Новая сессия: только --repository и --plan — решения из manifest.
-  const session = p.harness('init', '--repository', p.app, '--plan');
+  const session = p.harness('init', '--repository', p.app, '--lead', 'claude', '--plan');
   assert.equal(session.status, 0, session.stderr);
   assert.deepEqual(session.json.data.manifest, data.manifest);
   const status = p.harness('status', '--state', session.json.data.manifest.paths.state);

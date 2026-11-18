@@ -50,7 +50,9 @@ export async function diagnoseState(
     claude: cliAdapter('claude', { toolProfiles: policy.toolProfiles }),
   };
   // Без пробы портов: explain не привязывает порты и не зовёт lsof.
-  const report = await doctor(policy, adapters, undefined, undefined, undefined, false);
+  const report = await doctor(policy, adapters, undefined, undefined, undefined, {
+    resourceDatabase: false,
+  });
   const runtimes: StopInput[] = report.runtimes
     // Не назначенный политикой runtime не нужен: его отсутствие не останавливает работу.
     .filter((r) => !r.available && !('reason' in r))

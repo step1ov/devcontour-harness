@@ -483,7 +483,9 @@ test('doctor: порт ресурса занят чужим процессом �
   const database = join(ctx.state, 'resources.sqlite');
   const foreign = await holder(port);
   try {
-    const report = await doctor(ctx.policy, {}, undefined, undefined, undefined, database);
+    const report = await doctor(ctx.policy, {}, undefined, undefined, undefined, {
+      resourceDatabase: database,
+    });
     assert.deepEqual(
       report.ports?.map((p) => [p.id, p.port, p.status]),
       [['web-port', port, 'busy']],
@@ -499,7 +501,9 @@ test('doctor: порт ресурса занят чужим процессом �
     const pool = new ResourcePool(database);
     try {
       assert.ok(pool.tryAcquire(ctx.policy.resources, 'run', 'token', 30000));
-      const leased = await doctor(ctx.policy, {}, undefined, undefined, undefined, database);
+      const leased = await doctor(ctx.policy, {}, undefined, undefined, undefined, {
+        resourceDatabase: database,
+      });
       assert.equal(leased.ports?.[0]?.status, 'leased');
       assert.ok(!leased.problems.some((p) => p.includes(`Порт ${port}`)));
     } finally {
@@ -525,20 +529,17 @@ test('wildcard-only: gate, слушающий все адреса, падает 
       first.error ?? '',
       new RegExp(`предупреждение пробы портов: Порт ${port} \\(ресурс web-port\\) на всех адресах`),
     );
-    const report = await doctor(
-      ctx.policy,
-      {},
-      undefined,
-      undefined,
-      undefined,
-      join(ctx.state, 'resources.sqlite'),
-    );
+    const report = await doctor(ctx.policy, {}, undefined, undefined, undefined, {
+      resourceDatabase: join(ctx.state, 'resources.sqlite'),
+    });
     assert.equal(report.ports?.[0]?.status, 'wildcard-only');
     assert.ok(!report.problems.some((p) => p.includes(`Порт ${port}`)), 'не в problems');
     assert.ok(report.warnings?.some((w) => w.startsWith(`Порт ${port} (ресурс web-port)`)));
     assert.doesNotThrow(() => doctorDataSchema.parse(report), 'договор CLI doctor');
     // explain не пробует порты.
-    const quiet = await doctor(ctx.policy, {}, undefined, undefined, undefined, false);
+    const quiet = await doctor(ctx.policy, {}, undefined, undefined, undefined, {
+      resourceDatabase: false,
+    });
     assert.equal(quiet.ports, undefined);
   } finally {
     await stopHolder(foreign);
