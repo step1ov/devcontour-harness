@@ -54,10 +54,13 @@ export interface LeanOptions {
   state?: string;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
-  /**
-   * Точки внутренних проверок записи (тесты): перед последней сверкой файла
-   * (временный файл уже записан) и после его rename.
-   */
+}
+
+/**
+ * Точки внутренних проверок записи (только тесты, не API пакета): перед
+ * последней сверкой файла (временный файл уже записан) и после его rename.
+ */
+interface WriteHooks {
   beforeReplace?: (path: string) => void;
   afterReplace?: (path: string) => void;
 }
@@ -274,7 +277,15 @@ function stateFacts(stateDir: string, before: ExecutionPolicy, now: number) {
  * делает прерывание продолжаемым: включение — manifest, затем политика;
  * выключение — политика, затем manifest.
  */
-export async function switchLean(options: LeanOptions): Promise<LeanData> {
+export function switchLean(options: LeanOptions): Promise<LeanData> {
+  return switchLeanWith(options);
+}
+
+/** `switchLean` с точками проверок записи; модуль не входит в exports пакета. */
+export async function switchLeanWith(
+  options: LeanOptions,
+  hooks: WriteHooks = {},
+): Promise<LeanData> {
   const env = options.env ?? process.env;
   const now = (options.now ?? Date.now)();
   const enable = !options.off;
@@ -369,6 +380,11 @@ export async function switchLean(options: LeanOptions): Promise<LeanData> {
     }
     const added = manifest.lean?.dependencyStore;
     if (added && repo && repo.dependencyStore === undefined) store = 'add';
+    const readd = () =>
+      notes.push(
+        `${storeField}: слой lean добавляет хранилище, а в политике его нет (прерванное переключение или удалено вручную) — добавляется снова; без него оставьте слой выключенным или удалите поле после включения`,
+      );
+    if (store === 'add') readd();
     if (!manifest.lean) {
       // Слой init --lean: поле со значением профиля без слоя — прерванное
       // выключение, его значение слоя возвращается; иное — ручная правка.
@@ -384,7 +400,10 @@ export async function switchLean(options: LeanOptions): Promise<LeanData> {
             `${field}: слой lean (init --lean) дал бы ${expected[field] ?? 'нет поля'}, сейчас ${String(current ?? 'нет поля')} — правка сохраняется`,
           );
       }
-      if (storeEligible && repo.dependencyStore === undefined) store = 'add';
+      if (storeEligible && repo.dependencyStore === undefined) {
+        store = 'add';
+        readd();
+      }
     }
   } else if (enabledBefore) {
     if (manifest.lean) {
@@ -540,9 +559,9 @@ export async function switchLean(options: LeanOptions): Promise<LeanData> {
     if (!enable) writes.reverse();
     const written: string[] = [];
     for (const [path, text, expected] of writes) {
-      replaceFile(path, text, expected, written, options.beforeReplace);
+      replaceFile(path, text, expected, written, hooks.beforeReplace);
       written.push(path);
-      options.afterReplace?.(path);
+      hooks.afterReplace?.(path);
     }
   }
   return {
@@ -585,31 +604,79 @@ const isLeanStore = (value: unknown) => {
 };
 
 /**
- * Расхождение manifest и политики проекта (прерванное переключение или правка
- * вручную): поля, которые слой lean записал по manifest, а в политике другие.
- * Нет manifest рядом с политикой, записи `lean` или расхождений — пусто.
+ * Расхождение manifest и политики проекта по слою lean, когда manifest его
+ * включает: поле со значением до слоя (или профиля без слоя) — прерванное
+ * переключение, которое дописывает повтор; иное значение — ручная правка,
+ * которую `lean` сохраняет, а `lean --off` не перезаписывает; нет хранилища,
+ * которое добавляет слой. Нет manifest рядом с политикой, слоя или
+ * расхождений — пусто.
  */
 export function leanMismatch(policyPath: string): string[] {
   try {
     const dir = dirname(policyPath);
-    const manifest = projectManifestSchema.safeParse(
-      JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8')),
-    );
-    if (!manifest.success || !manifest.data.lean) return [];
-    const raw = JSON.parse(readFileSync(policyPath, 'utf8')) as Record<string, unknown>;
-    const on = manifest.data.profile.layers?.includes(LAYER) ?? false;
-    const off = manifest.data.lean.policy.filter((c) => raw[c.field] !== c.applied);
-    if (!on || !off.length) return [];
-    return [
-      `LEAN_MISMATCH: manifest (${join(dir, 'project.json')}) включает слой lean, а в политике ${off
-        .map(
-          (c) =>
-            `${c.field} = ${raw[c.field] === undefined ? 'нет поля' : JSON.stringify(raw[c.field])} (слой записал ${c.applied})`,
-        )
-        .join(
-          ', ',
-        )}: переключение прервано или поле правили вручную. Повторите harness lean --repository ${dirname(dir)} --plan (или --off --plan)`,
-    ];
+    const root = dirname(dir);
+    const manifestPath = join(dir, 'project.json');
+    const parsed = projectManifestSchema.safeParse(JSON.parse(readFileSync(manifestPath, 'utf8')));
+    if (!parsed.success) return [];
+    const manifest = parsed.data;
+    const layers = manifest.profile.layers ?? [];
+    if (!layers.includes(LAYER)) return [];
+    const raw = JSON.parse(readFileSync(policyPath, 'utf8')) as ExecutionPolicyInput &
+      Record<string, unknown>;
+    const policy = executionPolicySchema.parse(raw);
+    const show = (v: unknown) => (v === undefined ? 'нет поля' : JSON.stringify(v));
+    const half: string[] = [];
+    const kept: string[] = [];
+    const repoIndex = policy.repositories.findIndex((r) => r.id === manifest.repository.id);
+    const repo = repoIndex === -1 ? undefined : policy.repositories[repoIndex];
+    let storeMissing = false;
+    if (manifest.lean) {
+      for (const c of manifest.lean.policy) {
+        const current = raw[c.field];
+        if (current === c.applied) continue;
+        (current === c.previous ? half : kept).push(
+          `${c.field} = ${show(current)} (слой записал ${c.applied})`,
+        );
+      }
+      storeMissing = Boolean(manifest.lean.dependencyStore && repo && !repo.dependencyStore);
+    } else {
+      const others = layers.filter((l) => l !== LAYER);
+      const resolve = (list: string[]) =>
+        resolveProfile(manifest.profile.ref, {
+          repository: root,
+          repositoryId: PROJECT_REPOSITORY_ID,
+          ...(list.length ? { layers: list } : {}),
+        });
+      const plain = resolve(others);
+      const base = withoutExecution(raw);
+      const withLean = executionFieldsOf(base, resolve([...others, LAYER]));
+      const without = executionFieldsOf(base, plain);
+      for (const field of EXECUTION_FIELDS) {
+        const current = raw[field];
+        if (current === withLean[field]) continue;
+        (current === without[field] ? half : kept).push(
+          `${field} = ${show(current)} (слой дал бы ${show(withLean[field])})`,
+        );
+      }
+      storeMissing = Boolean(
+        repo &&
+        !repo.dependencyStore &&
+        plain.toolchain?.packageManagers['.'] === 'pnpm' &&
+        lstat(join(root, 'pnpm-lock.yaml'))?.isFile(),
+      );
+    }
+    if (storeMissing)
+      half.push(`repositories[${repoIndex}].dependencyStore = нет поля (слой добавляет хранилище)`);
+    const out: string[] = [];
+    if (half.length)
+      out.push(
+        `LEAN_MISMATCH: manifest (${manifestPath}) включает слой lean, а в политике ${half.join(', ')} — значения до слоя: переключение прервано. Повторите harness lean --repository ${root} (дописать включение) или harness lean --repository ${root} --off (вернуть политику без слоя), сначала с --plan`,
+      );
+    if (kept.length)
+      out.push(
+        `LEAN_MISMATCH: слой lean включён, а ${kept.join(', ')} задано вручную после включения: harness lean это значение сохраняет, harness lean --off откажет PATH_CONFLICT. Это намеренно — оставьте; чтобы убрать предупреждение, верните значение слоя или уберите поле из записи lean в ${manifestPath}`,
+      );
+    return out;
   } catch {
     return [];
   }

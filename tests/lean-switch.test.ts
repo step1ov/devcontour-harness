@@ -28,7 +28,7 @@ import {
   projectManifestSchema,
   workGraphSchema,
 } from '../src/contracts/index.ts';
-import { leanMismatch, switchLean, type LeanOptions } from '../src/init/lean.ts';
+import { leanMismatch, switchLeanWith, type LeanOptions } from '../src/init/lean.ts';
 import { planProject, type InitOptions } from '../src/init/project.ts';
 import { Engine } from '../src/engine/engine.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
@@ -94,8 +94,21 @@ async function project(stack: 'npm' | 'pnpm', init: { lean?: boolean } = {}) {
     policy: readFileSync(policyPath, 'utf8'),
     manifest: readFileSync(manifestPath, 'utf8'),
   });
-  const lean = (extra: Partial<LeanOptions> = {}) =>
-    switchLean({ repository: root, env, ...extra });
+  const lean = (
+    extra: Partial<LeanOptions> & {
+      beforeReplace?: (path: string) => void;
+      afterReplace?: (path: string) => void;
+    } = {},
+  ) => {
+    const { beforeReplace, afterReplace, ...rest } = extra;
+    return switchLeanWith(
+      { repository: root, env, ...rest },
+      {
+        ...(beforeReplace ? { beforeReplace } : {}),
+        ...(afterReplace ? { afterReplace } : {}),
+      },
+    );
+  };
   return {
     root,
     env,
@@ -593,4 +606,32 @@ test('lean --state: проверка идущего run в названном к
     engine.release('c9');
     store.close();
   }
+});
+
+test('lean после прерванного --off проекта init --lean: исходные байты init --lean; расхождения doctor', async () => {
+  const p = await project('pnpm', { lean: true });
+  const on = p.read();
+  await assert.rejects(p.lean({ off: true, afterReplace: crash(1) }), /crash after rename/);
+  assert.notEqual(p.read().policy, on.policy, 'политика уже без слоя');
+  assert.equal(p.read().manifest, on.manifest);
+  const half = leanMismatch(p.policyPath);
+  assert.equal(half.length, 1, half.join('\n'));
+  assert.match(half[0]!, /concurrency = нет поля .*переключение прервано/);
+  assert.match(half[0]!, /dependencyStore = нет поля/);
+  const resumed = await p.lean();
+  assert.ok(
+    resumed.notes.some((n) => /dependencyStore: .*добавляется снова/.test(n)),
+    resumed.notes.join('\n'),
+  );
+  assert.deepEqual(p.read(), on);
+  assert.deepEqual(leanMismatch(p.policyPath), []);
+
+  // Ручная правка, которую lean сохраняет: другое предупреждение — намеренно, как снять.
+  const edited = JSON.parse(on.policy) as Record<string, unknown>;
+  edited.concurrency = 3;
+  writeFileSync(p.policyPath, JSON.stringify(edited, null, 2) + '\n');
+  const kept = leanMismatch(p.policyPath);
+  assert.equal(kept.length, 1, kept.join('\n'));
+  assert.match(kept[0]!, /concurrency = 3 .*задано вручную.*сохраняет.*PATH_CONFLICT.*намеренно/);
+  assert.equal((await p.lean()).changed, false);
 });
