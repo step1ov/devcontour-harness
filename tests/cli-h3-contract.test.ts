@@ -145,7 +145,7 @@ const ADDITIVE_EVENT_TYPES = new Set([
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([
   'status--detail',
-  // Текст сводки попыток для человека (следующий выпуск).
+  // Текст сводки попыток для человека (0.1.0-alpha.52).
   'status--human',
   'init--lean',
   'init--lead',
@@ -433,7 +433,7 @@ test('H3-01: прежние команды и схемы их данных не 
     }
     // Аддитивные поля status — живость активной попытки (`works[].liveness`),
     // вопрос исполнителя и запросы ведущему (`works[].input`, `followUps`, H02),
-    // сводка попыток (`works[].attemptSummary`, следующий выпуск).
+    // сводка попыток (`works[].attemptSummary`, 0.1.0-alpha.52).
     if (k === 'properties' && v && typeof v === 'object' && 'liveness' in v && 'blockers' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.liveness;
@@ -442,7 +442,7 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.attemptSummary;
       return rest;
     }
-    // Аддитивное поле explain — сводка попыток по поручениям (следующий выпуск).
+    // Аддитивное поле explain — сводка попыток по поручениям (0.1.0-alpha.52).
     if (k === 'properties' && v && typeof v === 'object' && 'diagnoses' in v && 'attempts' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.attempts;
