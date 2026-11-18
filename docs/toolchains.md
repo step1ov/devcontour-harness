@@ -309,6 +309,9 @@ worktrees не запускается — проблема `TOOL_IN_PROJECT`. Н
   `pmset -g therm` на macOS упоминается, только когда оно меньше 100%. Известный предел: вне
   macOS считаются логические ядра, и машина с 2 физическими ядрами и hyperthreading выглядит
   как 4-ядерная;
+- `LEAN_MISMATCH` — manifest проекта рядом с политикой включает слой lean, а поля, которые
+  записал `harness lean`, в политике другие (прерванное переключение или ручная правка); совет —
+  повторить `harness lean --plan` или `--off --plan`;
 - `DIGEST_THREADS_INVALID` — `HARNESS_DIGEST_THREADS` в окружении `doctor` задана, но не целое
   1–8: значение не действует.
 - срок фаз — фаза, сумма пределов шагов которой (lifecycle setup/ready, prepare, gates,

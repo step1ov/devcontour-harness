@@ -1156,7 +1156,7 @@ until)` и метка документа `leaseRows: true`. Первая стр�
 `manifestVersion: 1`). Существующие политики и manifest не переписываются,
 пока не вызвана новая команда.
 
-- **`harness lean --repository <repo> [--off] [--plan] [--human]`** включает
+- **`harness lean --repository <repo> [--state D] [--off] [--plan] [--human]`** включает
   и выключает слой `lean` в подготовленном проекте вместо ручной правки
   `.harness/policy.json` и удаления `project.json`. Включение складывает
   `concurrency`, `runTimeoutMs`, `gateTimeoutFloorMs` со слоем (наименьшая
@@ -1167,14 +1167,17 @@ until)` и метка документа `leaseRows: true`. Первая стр�
   `init --lean` снимает значениями профиля без слоя. `--plan` ничего не
   пишет. Идущий run — `CONTROLLER_BUSY`; поле, изменённое вручную после
   включения, — `PATH_CONFLICT`; файл, изменённый между чтением и записью, —
-  `REVISION_CONFLICT`; нет manifest — `NOT_READY`. Подробности —
+  `REVISION_CONFLICT` (каждый файл заменяется атомарно, два вместе — нет:
+  половину переключения дописывает повтор, `doctor` показывает её как
+  `LEAN_MISMATCH`); нет manifest — `NOT_READY`. Подробности —
   [standalone](standalone.md#слабая-машина).
-- **Digest политики меняется** при каждом переключении: графы, согласованные
-  под прежней политикой (`data.staleApprovals`), получают `APPROVAL_STALE` —
+- **Digest политики меняется** при каждом переключении: незавершённые графы,
+  согласованные под прежней политикой (`data.staleApprovals`), получают `APPROVAL_STALE` —
   повторите `review-plan`; следующий `run --policy` применяет новую политику.
 - Советы `doctor` `LOW_RESOURCES` и `DEPENDENCY_STORE_RECOMMENDED` для
   политики в `.harness/` называют `harness lean --repository <корень> --plan`
-  вместо списка полей; для политики вне проекта — поля, как раньше.
+  вместо списка полей; для политики вне проекта совет начинается с полей.
+  Новое предупреждение `doctor` — `LEAN_MISMATCH`.
 - Библиотека: `switchLean` из корня пакета (тот же ответ, что `data`
   команды). Политика, которую пишет `init`, байтово та же.
 - Откат: строгая схема manifest прежних версий не принимает поле `lean`.
