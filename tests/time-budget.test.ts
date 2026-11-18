@@ -6,6 +6,7 @@ import * as root from '../src/index.ts';
 import {
   gateChain,
   longestGateChain,
+  requiredRunTimeoutMs,
   timeBudgetWarnings,
 } from '../src/verification/time-budget.ts';
 import { policyOf } from './engine-fixture.ts';
@@ -45,7 +46,7 @@ const policyWith = (
   });
 
 test('срок фазы: сумма пределов больше runTimeoutMs — предупреждение с числами, не ошибка политики', () => {
-  const policy = policyWith([gate('unit', 10), gate('e2e', 8)], 15, (repo) => {
+  const policy = policyWith([gate('unit', 10), gate('e2e', 8)], 25, (repo) => {
     repo.lifecycle = {
       setup: [{ id: 'db', command: ['true'], timeoutMs: 2 * MIN }],
       ready: [{ id: 'wait', command: ['true'], timeoutMs: MIN }],
@@ -55,11 +56,12 @@ test('срок фазы: сумма пределов больше runTimeoutMs �
   });
   assert.deepEqual(policyIssues(policy), [], 'срок фазы не делает политику невалидной');
   const warnings = timeBudgetWarnings(policy);
+  // gates 18 + один повтор самого долгого gate (recheck) 10.
   assert.deepEqual(
     warnings.map((w) => [w.phase, w.totalMs, w.limitMs]),
     [
-      ['verification', 18 * MIN, 15 * MIN],
-      ['integration', 24 * MIN, 15 * MIN],
+      ['verification', 28 * MIN, 25 * MIN],
+      ['integration', 34 * MIN, 25 * MIN],
     ],
   );
   const integration = warnings[1]!;
@@ -67,26 +69,56 @@ test('срок фазы: сумма пределов больше runTimeoutMs �
     { what: 'lifecycle setup/ready', ms: 3 * MIN },
     { what: 'prepare', ms: 3 * MIN },
     { what: 'gates', ms: 18 * MIN },
+    { what: 'повтор gate', ms: 10 * MIN },
   ]);
   assert.match(
     integration.message,
-    /^app, фаза integration: сумма пределов lifecycle setup\/ready 3 мин \+ prepare 3 мин \+ gates 18 мин \(24 мин\) больше runTimeoutMs \(15 мин\): /,
+    /^app, фаза integration: сумма пределов lifecycle setup\/ready 3 мин \+ prepare 3 мин \+ gates 18 мин \+ повтор gate 10 мин \(34 мин\) больше runTimeoutMs \(25 мин\): интеграция может истечь до конца проверок; /,
   );
-  assert.match(integration.message, /истечь до конца проверок/);
-  // Gates независимы: самая длинная цепочка — один unit (10 мин), с окружением 16 мин > 15.
+  assert.doesNotMatch(integration.message, /на SHA/);
+  // Gates независимы: самая длинная цепочка — один unit (10 мин).
   assert.deepEqual(integration.longestChain, { gates: ['unit'], ms: 10 * MIN });
   assert.match(integration.message, /даже самая длинная цепочка gates \(unit, 10 мин\)/);
   assert.match(warnings[0]!.message, /цепочка gates \(unit, 10 мин\) укладывается/);
 });
 
 test('срок фазы: в пределах runTimeoutMs — предупреждений нет', () => {
-  const policy = policyWith([gate('unit', 5), gate('e2e', 5)], 15, (repo) => {
+  const policy = policyWith([gate('unit', 5), gate('e2e', 5)], 20, (repo) => {
     repo.prepare = [{ id: 'build', command: ['true'], timeoutMs: 4 * MIN }];
     repo.generators = [
       { id: 'api', command: ['true'], inputs: ['api/'], outputs: ['gen/'], timeoutMs: MIN },
     ];
   });
+  // integration: 4 + 10 + 5 + 1 = 20 — ровно срок.
   assert.deepEqual(timeBudgetWarnings(policy), []);
+});
+
+test('срок фазы: условный gate (when) и нижняя граница предела входят в сумму', () => {
+  const conditional = policyWith(
+    [gate('unit', 5), gate('visual', 6, { when: { paths: ['ui/**'] } })],
+    15,
+  );
+  assert.deepEqual(
+    timeBudgetWarnings(conditional).map((w) => w.totalMs),
+    [17 * MIN],
+    'when — худший случай: 5 + 6 + повтор 6',
+  );
+  const floored = policyWith([gate('unit', 1), gate('e2e', 1)], 12, (_, p) => {
+    p.gateTimeoutFloorMs = 5 * MIN;
+  });
+  assert.deepEqual(
+    timeBudgetWarnings(floored).map((w) => [w.totalMs, w.parts]),
+    [
+      [
+        15 * MIN,
+        [
+          { what: 'gates', ms: 10 * MIN },
+          { what: 'повтор gate', ms: 5 * MIN },
+        ],
+      ],
+    ],
+  );
+  assert.deepEqual(timeBudgetWarnings(policyWith([gate('unit', 1), gate('e2e', 1)], 12)), []);
 });
 
 test('срок фазы: цепочка dependsOn — gate с замыканием предпосылок в порядке исполнения', () => {
@@ -114,20 +146,19 @@ test('срок фазы: цепочка dependsOn — gate с замыкание
     gates: ['install', 'slow'],
     ms: 11 * MIN,
   });
-  // Нижняя граница предела gate входит в сумму.
   const floored = policyWith(gates, 60, (_, p) => {
     p.gateTimeoutFloorMs = 5 * MIN;
   });
   assert.equal(gateChain(floored.repositories[0]!.gates, 'unit', floored).ms, 16 * MIN);
-  // Полная область всех gates: 24 мин > 20 мин, цепочка e2e (21 мин) — тоже нет.
+  // Полная область: 24 + повтор 9 = 33 мин > 20; цепочка e2e (21) + повтор — тоже нет.
   const tight = policyWith(gates, 20);
   const [verification] = timeBudgetWarnings(tight);
   assert.equal(verification?.phase, 'verification');
-  assert.equal(verification?.totalMs, 24 * MIN);
+  assert.equal(verification?.totalMs, 33 * MIN);
   assert.match(verification.message, /install → build → lint → e2e, 21 мин\) не укладывается/);
 });
 
-test('срок фазы: генераторы, установка зависимостей исполнителя и совместная проверка', () => {
+test('срок фазы: генераторы, установка зависимостей исполнителя, совместная проверка; одно слагаемое — без повтора суммы', () => {
   const policy = policyWith(
     [check('install', 6, { command: ['npm', 'ci'] }), gate('unit', 1)],
     10,
@@ -154,12 +185,18 @@ test('срок фазы: генераторы, установка зависим
     [
       ['implementation', 11],
       ['generation', 11],
-      ['verification', 18],
-      ['integration', 23],
+      ['verification', 24],
+      ['integration', 29],
       ['joint', 11],
     ],
   );
   assert.match(warnings[0]!.message, /установка зависимостей исполнителя 6 мин/);
+  assert.equal(
+    warnings[1]!.message,
+    'app, фаза generation: предел генераторы 11 мин больше runTimeoutMs (10 мин): генерация может истечь до конца',
+  );
+  // Наибольшая сумма 29 мин × 1.25 = 36.25 → 40 мин.
+  assert.equal(requiredRunTimeoutMs(policy), 40 * MIN);
   const off = policyWith(
     [check('install', 6, { command: ['npm', 'ci'] }), gate('unit', 1)],
     10,
@@ -170,7 +207,7 @@ test('срок фазы: генераторы, установка зависим
   );
   assert.deepEqual(
     timeBudgetWarnings(off).map((w) => w.phase),
-    ['integration'],
+    ['verification', 'integration'],
     'без установки исполнителя фаза реализации укладывается',
   );
   assert.equal(root.timeBudgetWarnings, timeBudgetWarnings, 'опубликовано корнем пакета');
@@ -180,7 +217,7 @@ test('doctor --policy называет превышение срока фазы 
   const over = policyWith([gate('unit', 10), gate('e2e', 8)], 15);
   const report = await doctor(over, {});
   assert.equal(report.warnings?.length, 1);
-  assert.match(report.warnings[0]!, /\(18 мин\) больше runTimeoutMs \(15 мин\)/);
+  assert.match(report.warnings[0]!, /\(28 мин\) больше runTimeoutMs \(15 мин\)/);
   assert.ok(!report.problems.some((p) => /runTimeoutMs/.test(p)));
   assert.deepEqual((await doctor(policyWith([gate('unit', 1)], 15), {})).warnings, []);
   assert.equal((await doctor(undefined, {})).warnings, undefined, 'без политики поля нет');

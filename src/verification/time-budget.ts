@@ -80,55 +80,56 @@ export function longestGateChain(
   return best;
 }
 
+/** Сумма пределов шагов одной фазы. */
+export interface PhaseBudget {
+  path: (string | number)[];
+  phase: BudgetPhase;
+  repositoryId?: string;
+  /** Чем грозит превышение (для текста предупреждения). */
+  risk: string;
+  totalMs: number;
+  /** Слагаемые суммы (ненулевые), мс. */
+  parts: { what: string; ms: number }[];
+  longestChain?: GateChain;
+}
+
 /**
- * Предупреждения о сроке фаз: сумма объявленных пределов шагов, которые
- * исполняются в одной фазе последовательно (lifecycle setup/ready, prepare,
- * gates, генераторы), больше `runTimeoutMs`, — тогда попытка может истечь до
- * конца проверок, хотя каждый шаг укладывается в свой предел. Это
- * предупреждение, не ошибка: пределы — худший случай, обычно шаги быстрее.
+ * Суммы объявленных пределов шагов, которые исполняются в одной фазе
+ * последовательно (см. `BudgetPhase`): lifecycle setup/ready, prepare, gates,
+ * генераторы, повтор gate.
  *
  * Полная область gates — все gates репозитория (область попытки по
  * умолчанию; условные `when` — тоже, худший случай); gates одной области
- * исполняются по одному, поэтому их пределы складываются. Самая длинная
- * цепочка `dependsOn` — наименьшая область, которой нужен самый дорогой gate:
- * если укладывается она, сузить области задач можно, иначе нужен больший
- * `runTimeoutMs` или меньшие пределы. Не учтены: teardown (идёт в сроке
- * ревью), хранилище зависимостей (оно само ограничено долей остатка фазы),
- * `dependencyBuild` зависимостей (снимки переиспользуются), исполнитель и
- * reviewer (их предел — сам `runTimeoutMs`).
+ * исполняются по одному, поэтому их пределы складываются (действующие, с
+ * `gateTimeoutFloorMs`). Кандидат и интеграция допускают по одному повтору
+ * непрошедшего gate (`recheck`): в сумму входит один раз самый долгий gate.
+ * Самая длинная цепочка `dependsOn` — наименьшая область, которой нужен самый
+ * дорогой gate. Не учтены: teardown (идёт в сроке ревью), хранилище
+ * зависимостей (оно само ограничено долей остатка фазы), `dependencyBuild`
+ * зависимостей (снимки переиспользуются), исполнитель и reviewer (их предел —
+ * сам `runTimeoutMs`), gates потребителей на integration. Проверка на SHA вне
+ * попытки (`runGatesAt`) исполняет окружение, prepare и gates без генераторов
+ * и повторов: её сумма не больше суммы integration.
  */
-export function timeBudgetWarnings(policy: ExecutionPolicy): TimeBudgetWarning[] {
-  const limit = policy.runTimeoutMs;
-  const out: TimeBudgetWarning[] = [];
+export function phaseBudgets(policy: ExecutionPolicy): PhaseBudget[] {
+  const out: PhaseBudget[] = [];
   const push = (
     phase: BudgetPhase,
     path: (string | number)[],
     parts: { what: string; ms: number }[],
-    what: string,
+    risk: string,
     repo?: Repo,
     chain?: GateChain,
   ) => {
     const present = parts.filter((p) => p.ms > 0);
-    const total = present.reduce((t, p) => t + p.ms, 0);
-    if (total <= limit) return;
-    const where = repo ? `${repo.id}, фаза ${phase}` : `фаза ${phase}`;
-    let advice = '';
-    if (chain && chain.gates.length)
-      advice =
-        chain.ms + (total - present.find((p) => p.what === 'gates')!.ms) <= limit
-          ? `; самая длинная цепочка gates (${chain.gates.join(' → ')}, ${minutes(chain.ms)}) укладывается — сузьте области задач, поднимите runTimeoutMs или уменьшите пределы`
-          : `; даже самая длинная цепочка gates (${chain.gates.join(' → ')}, ${minutes(chain.ms)}) не укладывается — поднимите runTimeoutMs или уменьшите пределы`;
     out.push({
       path,
       phase,
       ...(repo ? { repositoryId: repo.id } : {}),
-      totalMs: total,
-      limitMs: limit,
+      risk,
+      totalMs: present.reduce((t, p) => t + p.ms, 0),
       parts: present,
       ...(chain ? { longestChain: chain } : {}),
-      message:
-        `${where}: сумма пределов ${present.map((p) => `${p.what} ${minutes(p.ms)}`).join(' + ')} ` +
-        `(${minutes(total)}) больше runTimeoutMs (${minutes(limit)}): ${what}${advice}`,
     });
   };
   policy.repositories.forEach((repo, r) => {
@@ -136,7 +137,9 @@ export function timeBudgetWarnings(policy: ExecutionPolicy): TimeBudgetWarning[]
     const lifecycle = repo.lifecycle ?? policy.lifecycle;
     const environment = lifecycle ? sum(lifecycle.setup) + sum(lifecycle.ready) : 0;
     const prepare = sum(repo.prepare);
-    const gates = repo.gates.reduce((t, g) => t + gateTimeoutMs(g, policy), 0);
+    const timeouts = repo.gates.map((g) => gateTimeoutMs(g, policy));
+    const gates = timeouts.reduce((t, ms) => t + ms, 0);
+    const recheck = Math.max(0, ...timeouts);
     const generators = sum(repo.generators ?? []);
     const installs =
       repo.writerDependencies === false
@@ -161,17 +164,19 @@ export function timeBudgetWarnings(policy: ExecutionPolicy): TimeBudgetWarning[]
       'генерация может истечь до конца',
       repo,
     );
+    const checks = [
+      { what: 'gates', ms: gates },
+      { what: 'повтор gate', ms: recheck },
+      { what: 'генераторы', ms: generators },
+    ];
+    // Без окружения и prepare сумма интеграции та же: одна запись на обе фазы.
     push(
       'verification',
       [...path, 'gates'],
-      [
-        { what: 'gates', ms: gates },
-        { what: 'генераторы', ms: generators },
-      ],
-      // Без окружения и prepare сумма интеграции та же: одно предупреждение на обе фазы.
+      checks,
       environment + prepare
         ? 'попытка может истечь до конца проверок'
-        : 'попытка может истечь до конца проверок кандидата и интеграции (и проверка gates на SHA)',
+        : 'попытка может истечь до конца проверок кандидата и интеграции',
       repo,
       chain,
     );
@@ -182,10 +187,9 @@ export function timeBudgetWarnings(policy: ExecutionPolicy): TimeBudgetWarning[]
         [
           { what: 'lifecycle setup/ready', ms: environment },
           { what: 'prepare', ms: prepare },
-          { what: 'gates', ms: gates },
-          { what: 'генераторы', ms: generators },
+          ...checks,
         ],
-        'интеграция (и проверка gates на SHA) может истечь до конца проверок',
+        'интеграция может истечь до конца проверок',
         repo,
         chain,
       );
@@ -207,4 +211,49 @@ export function timeBudgetWarnings(policy: ExecutionPolicy): TimeBudgetWarning[]
     'совместная проверка может истечь до конца проверок',
   );
   return out;
+}
+
+/**
+ * Предупреждения о сроке фаз: сумма пределов фазы (`phaseBudgets`) больше
+ * `runTimeoutMs` — попытка может истечь до конца проверок, хотя каждый шаг
+ * укладывается в свой предел. Это предупреждение, не ошибка: пределы —
+ * худший случай, обычно шаги быстрее. Если укладывается самая длинная
+ * цепочка `dependsOn`, можно сузить области задач; иначе нужен больший
+ * `runTimeoutMs` или меньшие пределы.
+ */
+export function timeBudgetWarnings(policy: ExecutionPolicy): TimeBudgetWarning[] {
+  const limit = policy.runTimeoutMs;
+  return phaseBudgets(policy)
+    .filter((b) => b.totalMs > limit)
+    .map(({ risk, ...b }) => {
+      const where = b.repositoryId ? `${b.repositoryId}, фаза ${b.phase}` : `фаза ${b.phase}`;
+      const chain = b.longestChain;
+      const gates = b.parts.find((p) => p.what === 'gates')?.ms;
+      let advice = '';
+      if (chain?.gates.length && gates !== undefined)
+        advice =
+          chain.ms + (b.totalMs - gates) <= limit
+            ? `; самая длинная цепочка gates (${chain.gates.join(' → ')}, ${minutes(chain.ms)}) укладывается — сузьте области задач, поднимите runTimeoutMs или уменьшите пределы`
+            : `; даже самая длинная цепочка gates (${chain.gates.join(' → ')}, ${minutes(chain.ms)}) не укладывается — поднимите runTimeoutMs или уменьшите пределы`;
+      const sum =
+        b.parts.length === 1
+          ? `предел ${b.parts[0]!.what} ${minutes(b.totalMs)}`
+          : `сумма пределов ${b.parts.map((p) => `${p.what} ${minutes(p.ms)}`).join(' + ')} (${minutes(b.totalMs)})`;
+      return {
+        ...b,
+        limitMs: limit,
+        message: `${where}: ${sum} больше runTimeoutMs (${minutes(limit)}): ${risk}${advice}`,
+      };
+    });
+}
+
+/**
+ * `runTimeoutMs`, при котором ни одна фаза политики не превышает срок:
+ * наибольшая сумма фазы (`phaseBudgets`) с запасом `margin`, округлённая
+ * вверх до 5 минут.
+ */
+export function requiredRunTimeoutMs(policy: ExecutionPolicy, margin = 1.25): number {
+  const step = 5 * 60_000;
+  const need = Math.max(0, ...phaseBudgets(policy).map((b) => b.totalMs)) * margin;
+  return Math.max(step, Math.ceil(need / step) * step);
 }
