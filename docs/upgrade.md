@@ -987,6 +987,12 @@ digest не меняются.
   можно сузить области задач). Это предупреждение: `problems`, exit code и
   `validate` не меняются. Библиотека: `timeBudgetWarnings`, `phaseBudgets`,
   `requiredRunTimeoutMs`, `gateChain`, `longestGateChain`.
+- **Срок фазы в политике `init`.** Если пределам шагов профиля не хватает
+  умолчания `runTimeoutMs` (15 мин), `init` записывает его в новую политику
+  явно: наибольшая сумма фазы × 1.25, вверх до 5 минут (так у большинства
+  встроенных профилей). Профили и их закрепления не меняются; уже записанная
+  `.harness/policy.json` не переписывается — для неё `doctor` покажет
+  предупреждение, и `runTimeoutMs` поднимается вручную.
 - **Команда `harness gates`.** `gates --state D [--policy F] --sha SHA|HEAD
 [--gate a,b] [--repository ID] [--fail-fast] [--human]` исполняет gates на
   коммите вне попытки поверх `runGatesAt` (то же исполнение, что integration)

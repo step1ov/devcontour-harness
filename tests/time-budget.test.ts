@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { doctor } from '../src/control/doctor.ts';
 import { policyIssues, type ExecutionPolicy } from '../src/contracts/index.ts';
 import * as root from '../src/index.ts';
+import { readdirSync } from 'node:fs';
+import { executionPolicySchema } from '../src/contracts/index.ts';
+import { generatePolicy } from '../src/init/policy.ts';
+import { resolveProfile } from '../src/profiles/resolve.ts';
 import {
   gateChain,
   longestGateChain,
@@ -211,6 +215,27 @@ test('срок фазы: генераторы, установка зависим
     'без установки исполнителя фаза реализации укладывается',
   );
   assert.equal(root.timeBudgetWarnings, timeBudgetWarnings, 'опубликовано корнем пакета');
+});
+
+test('init: политика каждого встроенного профиля укладывается в срок фаз; хватало умолчания — поля нет', () => {
+  const ids = readdirSync(new URL('../profiles/', import.meta.url))
+    .filter((f) => f.endsWith('.json'))
+    .map((f) => f.slice(0, -5));
+  assert.ok(ids.length >= 13, ids.join(', '));
+  const explicit: string[] = [];
+  for (const id of ids) {
+    const generated = generatePolicy({ profile: resolveProfile(id), writer: 'claude' });
+    const policy = executionPolicySchema.parse(generated.input);
+    assert.deepEqual(timeBudgetWarnings(policy), [], id);
+    if (generated.input.runTimeoutMs === undefined) continue;
+    explicit.push(id);
+    // Явный срок — только когда умолчания не хватало.
+    const fallback = executionPolicySchema.parse({ ...generated.input, runTimeoutMs: undefined });
+    assert.ok(timeBudgetWarnings(fallback).length, id + ': умолчания не хватало');
+    assert.equal(policy.runTimeoutMs % (5 * MIN), 0, id);
+  }
+  assert.ok(explicit.includes('npm-ci') && explicit.includes('expo-mobile'), explicit.join(', '));
+  assert.ok(explicit.length < ids.length, 'профилям, которым хватало умолчания, поле не пишется');
 });
 
 test('doctor --policy называет превышение срока фазы в warnings, не в problems', async () => {
