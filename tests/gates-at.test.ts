@@ -279,3 +279,70 @@ test('gates на SHA вне попытки: сверка подготовки в
   });
   assert.ok(!existsSync(join(ctx.state, 'gates-at', 'GA-prepared', 'worktree')));
 });
+
+test('gates на SHA: прерывание сигналом или пределом проверки — failures называет прерванный и следующие gates (проверка не выглядит прошедшей), interrupted и skipped отличают отмену', async () => {
+  const hanging = (runTimeoutMs?: number) => {
+    const ctx = setup({
+      scenario: {},
+      files: { 'test/hang.js': 'setTimeout(() => {}, 60000);\n', 'test/extra.js': extra },
+      policy: (p) => {
+        const repo = (p.repositories as { gates: Record<string, unknown>[] }[])[0]!;
+        repo.gates[0]!.command = [process.execPath, 'test/hang.js'];
+        repo.gates.push({
+          id: 'extra',
+          kind: 'test',
+          command: [process.execPath, 'test/extra.js'],
+          report: { type: 'junit', path: 'test-results/extra.xml' },
+          dependsOn: ['unit'],
+        });
+        if (runTimeoutMs) p.runTimeoutMs = runTimeoutMs;
+      },
+    });
+    const context: GatesAtContext = {
+      policy: ctx.policy,
+      stateDir: ctx.state,
+      repoPath: () => ctx.repo.dir,
+      boundary: () => ({ hidden: [ctx.state], readable: [join(ctx.repo.dir, '.git')] }),
+      resourceDatabase: join(ctx.state, 'resources.sqlite'),
+    };
+    return { ctx, context };
+  };
+  const expectInterrupted = (result: Awaited<ReturnType<typeof runGatesAt>>, reason: RegExp) => {
+    assert.ok(result.failures.length > 0, 'прерванная проверка не прошла');
+    assert.deepEqual(
+      result.failures.map((f) => f.gate),
+      ['unit', 'extra'],
+    );
+    assert.match(result.failures[0]!.message, reason);
+    assert.match(result.failures[1]!.message, /не исполнен: проверка прервана/);
+    assert.equal(result.failure?.gate, 'unit');
+    assert.equal(result.interrupted?.gate, 'unit');
+    assert.match(result.interrupted.reason, reason);
+    assert.deepEqual(result.skipped, ['extra']);
+  };
+
+  const signalled = hanging();
+  const abort = new AbortController();
+  setTimeout(() => abort.abort(new Error('отмена хостом')), 1500);
+  expectInterrupted(
+    await runGatesAt(signalled.context, {
+      repositoryId: 'app',
+      sha: signalled.ctx.repo.head(),
+      gates: ['extra'],
+      record: () => {},
+      signal: abort.signal,
+    }),
+    /отмена хостом/,
+  );
+
+  const timed = hanging(3000);
+  expectInterrupted(
+    await runGatesAt(timed.context, {
+      repositoryId: 'app',
+      sha: timed.ctx.repo.head(),
+      gates: ['extra'],
+      record: () => {},
+    }),
+    /исчерпан предел проверки runTimeoutMs \(3 с\)/,
+  );
+});

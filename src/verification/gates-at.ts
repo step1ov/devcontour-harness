@@ -98,10 +98,12 @@ export interface GatesAtResult {
   skipped?: string[];
   /**
    * Проверка прервана сигналом вызывающего или своим пределом времени
-   * (`runTimeoutMs`), а не провалом: `gate` — исполнявшийся в тот момент (его
-   * evidence записано непрошедшим, но в `failures` его нет), следующие gates
-   * не исполнены и названы в `skipped`. Остановка обходом зависших —
-   * по-прежнему провал gate (`failures`).
+   * (`runTimeoutMs`): `gate` — исполнявшийся в тот момент, следующие gates не
+   * исполнены и названы в `skipped`. Для совместимости `failures` по-прежнему
+   * называет их все (прерванный — причиной прерывания, следующие — «не
+   * исполнен: проверка прервана»): прерванная проверка никогда не выглядит
+   * прошедшей. Поле различает отмену и провал. Остановка обходом зависших —
+   * провал gate, без этого поля.
    */
   interrupted?: { gate?: string; reason: string };
   /** Переходы живости за проверку (`onLiveness`); нет — проверка не замолкала. */
@@ -281,7 +283,13 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
             prepared(execution);
             let reapedBy: string | undefined;
             for (const gate of gates) {
-              if (interrupted || (input.failFast && failures.length)) {
+              if (interrupted) {
+                skipped.push(gate.id);
+                failed.add(gate.id);
+                failures.push({ gate: gate.id, message: 'не исполнен: проверка прервана' });
+                continue;
+              }
+              if (input.failFast && failures.length) {
                 skipped.push(gate.id);
                 continue;
               }
@@ -357,6 +365,8 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
                 const reason = interruption();
                 if (reason) {
                   interrupted = { gate: gate.id, reason };
+                  failed.add(gate.id);
+                  failures.push({ gate: gate.id, message: 'прерван: ' + reason });
                   continue;
                 }
                 failed.add(gate.id);
