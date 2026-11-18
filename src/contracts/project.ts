@@ -25,7 +25,15 @@ export const projectManifestSchema = z.strictObject({
   /** realpath корня при init. */
   root: z.string().min(1),
   repository: z.strictObject({ id: idSchema, targetRef: targetRefSchema }),
-  profile: z.strictObject({ ref: z.string().min(1), pin: profilePinSchema }),
+  profile: z.strictObject({
+    ref: z.string().min(1),
+    pin: profilePinSchema,
+    /** Встроенные слои поверх профиля (`init --lean` — `['lean']`); нет — без слоёв. */
+    layers: z
+      .array(z.string().regex(/^[A-Za-z0-9_-]{1,80}$/))
+      .max(8)
+      .optional(),
+  }),
   runtimes: z.strictObject({ writer: runtimeSchema, reviewer: runtimeSchema }),
   paths: z.strictObject({
     policy: z.literal(PROJECT_POLICY_PATH),

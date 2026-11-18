@@ -373,6 +373,11 @@
       "minimum": 60000,
       "maximum": 7200000
     },
+    "gateTimeoutFloorMs": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 600000
+    },
     "roles": {
       "default": {},
       "type": "object",

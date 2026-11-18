@@ -49,18 +49,33 @@ export interface GeneratedPolicy {
 }
 
 /**
+ * Параметры исполнения, которые задаёт профиль (например, слой `lean`):
+ * параллельность и нижняя граница предела gate. Нет в профиле — умолчания
+ * схемы, и политика прежняя.
+ */
+export const profileExecution = (profile: ResolvedProfile) => ({
+  ...(profile.concurrency !== undefined ? { concurrency: profile.concurrency } : {}),
+  ...(profile.gateTimeoutFloorMs !== undefined
+    ? { gateTimeoutFloorMs: profile.gateTimeoutFloorMs }
+    : {}),
+});
+
+/**
  * Политика проекта из профиля: пользователь JSON не пишет. Репозиторий —
  * корень над `.harness/` (`path: '..'`), target ref — `harness/accepted`,
  * `.harness/` защищён от записи исполнителем. Версия менеджера пакетов из
  * `package.json#packageManager` (того же менеджера, что выбирает профиль)
  * заменяет pin профиля — это явное значение проекта, оно видно в `shadowed`.
  * Роли — профиля, иначе одна `developer` с выбранным writer; reviewer —
- * другой вендор. Approval, isolation и бюджеты — умолчания схемы.
+ * другой вендор. Параллельность и нижняя граница предела gate — профиля
+ * (`profileExecution`); approval, isolation и прочие бюджеты — умолчания схемы.
  */
 export function generatePolicy(input: {
   profile: ResolvedProfile;
   writer: 'claude' | 'codex';
   packageManager?: { name: string; version?: string };
+  /** Хранилище зависимостей pnpm (`init --lean` в pnpm-репозитории). */
+  dependencyStore?: boolean;
 }): GeneratedPolicy {
   const { profile, writer, packageManager } = input;
   const manager = profile.toolchain?.packageManagers['.'];
@@ -78,6 +93,7 @@ export function generatePolicy(input: {
     path: '..',
     targetRef: PROJECT_TARGET_REF,
     ...pinned,
+    ...(input.dependencyStore ? { dependencyStore: { manager: 'pnpm' as const } } : {}),
   });
   repository.protectedPaths = [
     ...new Set([...repository.protectedPaths, HARNESS_PROJECT_DIR + '/']),
@@ -91,6 +107,7 @@ export function generatePolicy(input: {
     repositories: [repository],
     roles,
     review: { code: { reviewer }, plan: { reviewer }, contract: { reviewer } },
+    ...profileExecution(profile),
   };
   // В файл пишется input-форма, но только прошедшая схему.
   executionPolicySchema.parse(policy);

@@ -1,0 +1,6 @@
+{
+  "id": "lean",
+  "version": "0.1.0",
+  "concurrency": 1,
+  "gateTimeoutFloorMs": 240000
+}

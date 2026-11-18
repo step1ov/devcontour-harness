@@ -462,6 +462,13 @@ export const cliCommands = {
       },
       { name: '--plan', value: 'flag', required: false, description: 'Только план, без записи' },
       {
+        name: '--lean',
+        value: 'flag',
+        required: false,
+        description:
+          'Слабая машина: слой lean (одна попытка за раз, gateTimeoutFloorMs 240000); для pnpm-lock.yaml — dependencyStore',
+      },
+      {
         name: '--human',
         value: 'flag',
         required: false,
