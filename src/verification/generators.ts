@@ -98,11 +98,15 @@ export async function runGenerators(run: GeneratorsRun): Promise<GeneratorOutcom
       join(run.artifactDir, 'generators.json'),
       JSON.stringify({ mode: run.mode, generators: outcomes }, null, 2),
     ).catch(() => undefined);
+    // Проверка не оставляет следов в индексе при любом исходе: дерево фазы —
+    // её коммит, а неотслеживаемые файлы подготовки остаются неотслеживаемыми.
+    if (run.mode === 'verify') await git(cwd, 'reset', '-q');
   }
-  // Проверка не оставляет следов в индексе: дерево фазы — её коммит.
-  if (run.mode === 'verify') await git(cwd, 'reset', '-q');
   return outcomes;
 }
+
+const listed = (paths: string[]) =>
+  paths.slice(0, 20).join(', ') + (paths.length > 20 ? ` и ещё ${paths.length - 20}` : '');
 
 async function runOne(
   run: GeneratorsRun,
@@ -113,9 +117,21 @@ async function runOne(
   const { cwd, signal } = run;
   const redact = run.execution.redact;
   const id = generator.id;
-  const workdir = generator.cwd ? await realpath(resolve(root, generator.cwd)) : root;
-  if (workdir !== root && !workdir.startsWith(root + sep))
-    throw new TaskFailure('scope-violation', `generator ${id}: cwd leaves the worktree`);
+  let workdir = root;
+  if (generator.cwd) {
+    try {
+      workdir = await realpath(resolve(root, generator.cwd));
+    } catch (error) {
+      // Каталога нет в дереве этого кандидата: генератор не может исполниться,
+      // как gate с несуществующей командой.
+      throw new TaskFailure(
+        'gate',
+        `Генератор ${id}: каталог cwd ${generator.cwd} не найден в дереве (${(error as NodeJS.ErrnoException).code ?? String(error)})`,
+      );
+    }
+    if (workdir !== root && !workdir.startsWith(root + sep))
+      throw new TaskFailure('scope-violation', `Генератор ${id}: cwd выходит из рабочего дерева`);
+  }
   const before = await stageAll(cwd);
   // Отслеживаемые выходы удаляются: генератор строит их заново целиком.
   for (const path of names(
@@ -172,34 +188,57 @@ async function runOne(
     if (guarded) planted = protectedChanges(guarded, root, run.execution.prepared);
   } catch (error) {
     if (error instanceof SandboxPolicyError)
-      throw new TaskFailure('scope-violation', `generator ${id}: ${error.message}`);
+      throw new TaskFailure('scope-violation', `Генератор ${id}: ${error.message}`);
     throw error;
   }
   if (planted.length)
     throw new TaskFailure(
       'scope-violation',
-      `generator ${id} created, changed or removed protected paths (IDE, shell, git or Claude configuration): ` +
+      `Генератор ${id} создал, изменил или удалил защищённые пути (конфигурация IDE, shell, git или Claude): ` +
         planted
           .slice(0, 5)
           .map((p) => relative(root, p))
           .join(', '),
     );
   if (result.timedOut)
-    throw new TaskFailure('gate', `generator ${id} exceeded its timeout (${timeoutMs} ms)`);
+    throw new TaskFailure('gate', `Генератор ${id} превысил предел времени (${timeoutMs} мс)`);
   if (result.launchFailed)
     throw new TaskFailure(
       'environment',
-      `the OS sandbox did not start generator ${id} (attempts: ${result.attempts}): ${diagnostic(result.stderr, result.stdout, redact)}`,
+      `Песочница ОС не запустила генератор ${id} (попыток: ${result.attempts}): ${diagnostic(result.stderr, result.stdout, redact)}`,
       undefined,
       'sandbox-launch',
     );
   if (result.code !== 0)
     throw new TaskFailure(
       'gate',
-      `generator ${id} failed: exit=${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
+      `Генератор ${id} не выполнился: exit=${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
     );
   if ((await git(cwd, 'rev-parse', 'HEAD')) !== head)
-    throw new TaskFailure('scope-violation', `generator ${id} changed HEAD; harness owns commits`);
+    throw new TaskFailure(
+      'scope-violation',
+      `Генератор ${id} изменил HEAD; коммитами владеет harness`,
+    );
+  // Сверка видит только отслеживаемое и неигнорируемое: выход, скрытый
+  // .gitignore, не попал бы в коммит, и проверка его свежести была бы пустой.
+  const ignored = names(
+    await gitRawOutput(
+      cwd,
+      '--literal-pathspecs',
+      'ls-files',
+      '-z',
+      '--others',
+      '--ignored',
+      '--exclude-standard',
+      '--',
+      ...generator.outputs,
+    ),
+  );
+  if (ignored.length)
+    throw new TaskFailure(
+      'gate',
+      `Генератор ${id} записал в выход файлы, скрытые .gitignore (в коммит они не попадут): ${listed(ignored)}; уберите выход из .gitignore или из outputs`,
+    );
   const after = await stageAll(cwd);
   const changed = names(
     await gitRawOutput(cwd, 'diff-tree', '-r', '--no-renames', '--name-only', '-z', before, after),
@@ -208,12 +247,32 @@ async function runOne(
   if (outside.length)
     throw new TaskFailure(
       'scope-violation',
-      `generator ${id} changed paths outside its outputs: ${outside.slice(0, 20).join(', ')}${outside.length > 20 ? ` and ${outside.length - 20} more` : ''}`,
+      `Генератор ${id} изменил пути вне своих выходов: ${listed(outside)}`,
+    );
+  // Ссылка в выходе указывала бы за его пределы: выход — только файлы.
+  const links = names(
+    await gitRawOutput(
+      cwd,
+      '--literal-pathspecs',
+      'ls-tree',
+      '-r',
+      '-z',
+      after,
+      '--',
+      ...generator.outputs,
+    ),
+  )
+    .filter((entry) => entry.startsWith('120000 '))
+    .map((entry) => entry.slice(entry.indexOf('\t') + 1));
+  if (links.length)
+    throw new TaskFailure(
+      'scope-violation',
+      `Генератор ${id}: в выходе символические ссылки: ${listed(links)}`,
     );
   if (run.mode === 'verify' && changed.length)
     throw new TaskFailure(
       'merge',
-      `generator ${id}: the committed output is stale on this base (regeneration changed ${changed.slice(0, 20).join(', ')}${changed.length > 20 ? ` and ${changed.length - 20} more` : ''}); a retry regenerates it on the current base`,
+      `Генератор ${id}: закоммиченный выход устарел на этой базе (перегенерация изменила ${listed(changed)}); повтор построит его на текущей базе`,
     );
   return { id, changed, exitCode: result.code, durationMs: Date.now() - started };
 }

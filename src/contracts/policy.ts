@@ -600,8 +600,15 @@ export function gateOrderIssues(
 /** Путь внутри префикса (путь или каталог), как `writePaths`. */
 const insidePath = (path: string, prefix: string) =>
   path === prefix || path.startsWith(prefix.endsWith('/') ? prefix : prefix + '/');
-/** Пути пересекаются: один совпадает с другим или лежит внутри него. */
-export const pathsOverlap = (a: string, b: string) => insidePath(a, b) || insidePath(b, a);
+/**
+ * Пути пересекаются: один совпадает с другим или лежит внутри него. Без учёта
+ * регистра: на нечувствительной к регистру ФС (macOS, Windows) `Gen/` и `gen/`
+ * — один каталог.
+ */
+export const pathsOverlap = (a: string, b: string) => {
+  const [x, y] = [a.toLowerCase(), b.toLowerCase()];
+  return insidePath(x, y) || insidePath(y, x);
+};
 /** Каталог состояния harness в дереве репозитория: генератор туда не пишет. */
 const HARNESS_TREE_DIRS = ['.devcontour', '.harness', '.git'];
 
