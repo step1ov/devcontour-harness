@@ -20,7 +20,12 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Worker } from 'node:worker_threads';
-import { digestWorker, fileDigests, NotRegularFile } from '../src/verification/file-digests.ts';
+import {
+  digestThreads,
+  digestWorker,
+  fileDigests,
+  NotRegularFile,
+} from '../src/verification/file-digests.ts';
 
 const tree = (t: { after: (fn: () => void) => void }) => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'harness-digests-')));
@@ -113,4 +118,34 @@ test('FD04: отмена и отказ запуска потока остана�
   assert.equal(started.length, 1);
   // После выхода потока его threadId — -1.
   assert.equal(started[0]!.threadId, -1, 'запущенный поток остановлен до возврата');
+});
+
+test('FD05: HARNESS_DIGEST_THREADS ограничивает число потоков; иное значение не действует', async (t) => {
+  const root = tree(t);
+  const rels: string[] = [];
+  // Больше двух порций (256 файлов): без предела потоков было бы больше одного.
+  for (let i = 0; i < 600; i++) {
+    writeFileSync(join(root, `f${i}`), String(i));
+    rels.push(`f${i}`);
+  }
+  assert.equal(digestThreads({ HARNESS_DIGEST_THREADS: '1' }), 1);
+  assert.equal(digestThreads({ HARNESS_DIGEST_THREADS: ' 3 ' }), 3);
+  const auto = digestThreads({});
+  for (const bad of ['0', '9', '-1', '1.5', 'two', ''])
+    assert.equal(digestThreads({ HARNESS_DIGEST_THREADS: bad }), auto, bad);
+  const create = digestWorker.create;
+  const previous = process.env.HARNESS_DIGEST_THREADS;
+  t.after(() => {
+    digestWorker.create = create;
+    if (previous === undefined) delete process.env.HARNESS_DIGEST_THREADS;
+    else process.env.HARNESS_DIGEST_THREADS = previous;
+  });
+  let started = 0;
+  digestWorker.create = () => {
+    started++;
+    return create();
+  };
+  process.env.HARNESS_DIGEST_THREADS = '1';
+  assert.equal((await fileDigests(root, rels)).length, rels.length);
+  assert.equal(started, 1, 'один поток при HARNESS_DIGEST_THREADS=1');
 });

@@ -462,6 +462,13 @@ export const cliCommands = {
       },
       { name: '--plan', value: 'flag', required: false, description: 'Только план, без записи' },
       {
+        name: '--lean',
+        value: 'flag',
+        required: false,
+        description:
+          'Новый проект на слабой машине: слой lean (одна попытка за раз, runTimeoutMs 1800000, gateTimeoutFloorMs 240000); для pnpm-профиля с pnpm-lock.yaml — dependencyStore',
+      },
+      {
         name: '--human',
         value: 'flag',
         required: false,
@@ -1189,7 +1196,13 @@ export const doctorDataSchema = z.strictObject({
     )
     .optional(),
   problems: z.array(z.string()),
-  /** Предупреждения: не мешают работе, но стоит знать (порт только на wildcard). */
+  /**
+   * Предупреждения, не делающие среду негодной; есть, когда задана политика.
+   * Источники: порт ресурса занят только на wildcard-адресе, а loopback
+   * свободен (служба попытки должна слушать 127.0.0.1), и советы о ресурсах
+   * машины — `DEPENDENCY_STORE_RECOMMENDED`, `LOW_RESOURCES`,
+   * `DIGEST_THREADS_INVALID` (`resourceWarnings`).
+   */
   warnings: z.array(z.string()).optional(),
 });
 

@@ -44,6 +44,7 @@ $H doctor
 ```sh
 $H init --repository <repo> --plan   # только план, ничего не пишет
 $H init --repository <repo>          # create-only запись .harness/
+$H init --repository <repo> --lean   # то же для слабой машины (ниже)
 ```
 
 Профиль: `--profile`, иначе сохранённый в manifest, иначе по lockfile — только
@@ -108,6 +109,43 @@ realpath корня, поэтому повтор и новая сессия на
 прерывания подготовка продолжается по его решениям (профиль, writer, state) и
 дописывает недостающее; `status: complete` — только при валидных manifest и
 политике.
+
+### Слабая машина
+
+На машине с 4 производительными ядрами или меньше чем 16 ГБ памяти (например,
+ноутбук без вентилятора) две одновременные попытки и их gates делят
+процессор, и проверки упираются в свои пределы времени. Для нового проекта
+`init --lean` надстраивает профиль встроенным слоем `lean`:
+
+- `concurrency: 1` — одна попытка за раз;
+- `runTimeoutMs: 1800000` — 30 минут на попытку: последовательные gates с
+  поднятой границей укладываются в неё;
+- `gateTimeoutFloorMs: 240000` — каждый gate получает не меньше 4 минут
+  (объявленные пределы gates не меняются, см.
+  [contracts](contracts.md#executionpolicy));
+- у pnpm-профиля с `pnpm-lock.yaml` в корне — `dependencyStore: { "manager": "pnpm" }`:
+  пакеты не скачиваются заново в каждый checkout
+  ([хранилище зависимостей](toolchains.md#хранилище-зависимостей); seed
+  собирается в песочнице, поэтому реестру нужен домен в `isolation.domains`,
+  иначе — обычная установка). Для npm хранилища нет.
+
+Решение записывается в manifest (`profile.layers: ["lean"]`): повтор `init`
+без флага его сохраняет. В уже подготовленном проекте `--lean` даёт
+`content-differs` на `project.json`: там те же значения задаются прямо в
+`.harness/policy.json` — `"concurrency": 1`, `"runTimeoutMs": 1800000`,
+`"gateTimeoutFloorMs": 240000` и, для pnpm, `"dependencyStore": { "manager": "pnpm" }`
+у репозитория. Снять слой: уберите эти поля из `.harness/policy.json`,
+удалите локальный `.harness/project.json` и повторите `init` без `--lean` с
+прежними `--profile`, `--writer` и `--state` — manifest запишется заново, без
+слоя. Без `--profile` профиль снова определяется по lockfile и может молча
+смениться другим.
+
+Свой профиль подключает слой через `"extends": ["pnpm-frozen", "lean"]`.
+Сверку копии seed можно ограничить переменной `HARNESS_DIGEST_THREADS`
+(целое 1–8, по умолчанию ядра минус одно). `doctor` с политикой предупреждает
+`LOW_RESOURCES`, если машина слабая, а параллельность политики больше 1, и
+`DEPENDENCY_STORE_RECOMMENDED`, если у pnpm-репозитория нет `dependencyStore`
+([диагностика](toolchains.md#диагностика-doctor-и-preflight)).
 
 ## Факты репозитория без записи
 

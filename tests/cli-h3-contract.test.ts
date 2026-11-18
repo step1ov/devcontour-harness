@@ -140,7 +140,7 @@ const ADDITIVE_EVENT_TYPES = new Set([
   'joint.budget-reset',
 ]);
 /** Аддитивные флаги прежних команд после H2. */
-const ADDITIVE_ARGS = new Set(['status--detail']);
+const ADDITIVE_ARGS = new Set(['status--detail', 'init--lean']);
 /** Тип варианта события в JSON Schema (`properties.type.const`). */
 const eventTypeOf = (v: unknown) =>
   (v as { properties?: { type?: { const?: unknown } } } | null)?.properties?.type?.const as
@@ -351,8 +351,21 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.artifacts;
       return rest;
     }
+    // Аддитивные поля слоя lean: граница предела gate разрешённого профиля и
+    // слои профиля в manifest init.
+    if (k === 'properties' && v && typeof v === 'object' && 'closure' in v && 'runTimeoutMs' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.gateTimeoutFloorMs;
+      return rest;
+    }
+    if (k === 'properties' && v && typeof v === 'object' && 'pin' in v && 'ref' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.layers;
+      return rest;
+    }
     // Аддитивные поля doctor — действующий корень рабочих деревьев (alpha.23),
-    // проба портов ресурсов и предупреждения (порт только на wildcard).
+    // проба портов ресурсов и предупреждения (порт только на wildcard, советы
+    // о ресурсах машины).
     if (k === 'properties' && v && typeof v === 'object' && 'checkouts' in v && 'sandbox' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.checkouts;
@@ -459,6 +472,9 @@ test('H3-01: прежние команды и схемы их данных не 
   );
   for (const value of ADDITIVE_ENUM_VALUES)
     assert.ok(JSON.stringify(data).includes(JSON.stringify(value)), value + ' объявлен');
+  // Хеш H2 вырезает поля слоя lean: объявление держит эта проверка.
+  assert.ok(JSON.stringify(data.profile).includes('"gateTimeoutFloorMs"'), 'profile: граница gate');
+  assert.ok(JSON.stringify(data.init).includes('"layers"'), 'init: слои профиля в manifest');
   // Хеш H2 выше вырезает `artifacts` gate задачи: объявление держит эта проверка.
   assert.ok(
     JSON.stringify(data.profile).includes('"artifacts"'),

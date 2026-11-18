@@ -141,6 +141,8 @@ export interface InitOptions {
   writer?: 'claude' | 'codex';
   state?: string;
   plan?: boolean;
+  /** Слой `lean` поверх профиля; в pnpm-репозитории — ещё и `dependencyStore`. */
+  lean?: boolean;
   env?: NodeJS.ProcessEnv;
   probe?: ToolProbe;
 }
@@ -244,7 +246,13 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
       );
     ref = detected.id;
   }
-  const profile = resolveProfile(ref, { repository: root, repositoryId: PROJECT_REPOSITORY_ID });
+  // Слои — явный --lean или решение manifest.
+  const layers = options.lean ? ['lean'] : (saved?.profile.layers ?? []);
+  const profile = resolveProfile(ref, {
+    repository: root,
+    repositoryId: PROJECT_REPOSITORY_ID,
+    ...(layers.length ? { layers } : {}),
+  });
   const projectId = projectIdOf(root);
   // 6. Состояние — вне репозитория.
   const state = options.state
@@ -274,6 +282,11 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
     profile,
     writer,
     ...(declared ? { packageManager: { name: declared.name, version: declared.version } } : {}),
+    ...(layers.includes('lean') &&
+    profile.toolchain?.packageManagers['.'] === 'pnpm' &&
+    lstat(join(root, 'pnpm-lock.yaml'))?.isFile()
+      ? { dependencyStore: true }
+      : {}),
   });
   const policyPath = join(root, PROJECT_POLICY_PATH);
   const policy = savedPolicy ?? executionPolicySchema.parse(generated.input);
@@ -286,7 +299,7 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
     projectId,
     root,
     repository: { id: PROJECT_REPOSITORY_ID, targetRef: PROJECT_TARGET_REF },
-    profile: { ref, pin },
+    profile: { ref, pin, ...(layers.length ? { layers } : {}) },
     runtimes: { writer, reviewer: writer === 'claude' ? 'codex' : 'claude' },
     paths: {
       policy: PROJECT_POLICY_PATH,
@@ -492,7 +505,7 @@ export function initText(data: InitData): string {
     `init ${data.mode}: ${data.status} ${data.projectId}`,
     `root: ${data.root}`,
     `state: ${data.manifest.paths.state}`,
-    `profile: ${data.profile.id}@${data.profile.version} (${data.manifest.profile.ref})`,
+    `profile: ${data.profile.id}@${data.profile.version} (${[data.manifest.profile.ref, ...(data.manifest.profile.layers ?? [])].join(' + ')})`,
     `runtimes: writer ${data.manifest.runtimes.writer}, reviewer ${data.manifest.runtimes.reviewer}`,
     ...data.files.map(
       (f) => `${f.action === 'conflict' ? `conflict:${f.conflict ?? '?'}` : f.action} ${f.path}`,

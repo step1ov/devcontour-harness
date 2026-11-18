@@ -278,6 +278,7 @@ const options = {
   decision: { type: 'string' },
   run: { type: 'string' },
   plan: { type: 'boolean' },
+  lean: { type: 'boolean' },
   human: { type: 'boolean' },
   writer: { type: 'string' },
   draft: { type: 'string' },
@@ -308,6 +309,7 @@ const options = {
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
 const flagOwners = {
   plan: ['init'],
+  lean: ['init'],
   writer: ['init'],
   human: ['init', 'explain', 'plan-request'],
   draft: ['plan-check'],
@@ -702,6 +704,7 @@ async function run(
         ...(v.writer ? { writer: v.writer } : {}),
         ...(v.state ? { state: v.state } : {}),
         ...(v.plan ? { plan: true } : {}),
+        ...(v.lean ? { lean: true } : {}),
       });
       // План с конфликтами или неготовым toolchain — отказ по существу с данными.
       const blocked = data.mode === 'plan' && (data.conflicts > 0 || !data.toolchain.ready);

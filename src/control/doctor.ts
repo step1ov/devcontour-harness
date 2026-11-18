@@ -15,6 +15,7 @@ import { defaultResourceDatabase, ResourcePool, resourceKey } from '../environme
 import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import type { ToolchainReport } from '../toolchains/inspect.ts';
+import { resourceWarnings } from './resource-advice.ts';
 
 /** Диагностика toolchain политики (см. `inspectPolicy` в `./toolchains`). */
 export type ToolchainInspect = (
@@ -178,7 +179,16 @@ export async function doctor(
     ...(toolchains ? { toolchains } : {}),
     ...(ports.length ? { ports } : {}),
     problems,
-    ...(warnings.length ? { warnings } : {}),
+    // Предупреждения (порт только на wildcard, советы о ресурсах —
+    // `resourceWarnings`) не делают среду негодной.
+    ...(policy
+      ? {
+          warnings: [
+            ...warnings,
+            ...resourceWarnings(policy, toolchain?.baseDir ?? checkouts?.baseDir ?? process.cwd()),
+          ],
+        }
+      : {}),
   };
 }
 

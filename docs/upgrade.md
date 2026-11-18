@@ -971,10 +971,10 @@ until)` и метка документа `leaseRows: true`. Первая стр�
 Подробности — [contracts](contracts.md#executionpolicy). Строгая схема прежних
 версий поле не принимает: при откате уберите его из политики.
 
-### Следующий выпуск: проверка портов ресурсов перед фазой
+### Следующий выпуск
 
-Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`); политика и
-её digest не меняются.
+Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`). Политики
+без новых полей профиля и их digest не меняются.
 
 - **Порты аренды проверяются на деле.** Перед каждой фазой аренды (до
   lifecycle `setup`/`ready`, `prepare` и gates; и в `runGatesAt`) controller
@@ -1020,6 +1020,28 @@ until)` и метка документа `leaseRows: true`. Первая стр�
   команда исполняется внутри `withResources`; хост, вызывающий
   `command(..., { contain })` вне аренды, записей не получает, и порт,
   занятый таким процессом, — `resource-busy`.
+
+- **Слой `lean` для слабой машины.** Встроенные слои профилей лежат в
+  `profiles/layers/` (без gates) и подключаются через `extends` или
+  `resolveProfile(ref, { layers })`; `builtinProfiles()` их не перечисляет.
+  `lean` задаёт `concurrency: 1`, `runTimeoutMs: 1800000` и новое поле
+  профиля `gateTimeoutFloorMs` (240000, слои берут наибольшее).
+  `generatePolicy` переносит `concurrency`, `runTimeoutMs` и
+  `gateTimeoutFloorMs` профиля в политику — например, политика из
+  `mobile-maestro`, а через `extends` и из `react-native` и `expo-mobile`,
+  теперь получает `concurrency: 1`. `harness init --lean` (новый проект)
+  применяет слой, записывает его в manifest (`profile.layers`, необязательное
+  поле) и для pnpm-профиля с `pnpm-lock.yaml` добавляет `dependencyStore`.
+  Строгая схема прежних версий не принимает `gateTimeoutFloorMs` в профиле и
+  `profile.layers` в manifest: при откате уберите их. Каталог `capabilities`
+  меняется (флаг `--lean` у `init`).
+- **Советы `doctor`.** С политикой ответ всегда несёт необязательное поле
+  `warnings` (рядом с предупреждениями о портах): `DEPENDENCY_STORE_RECOMMENDED`,
+  `LOW_RESOURCES` и `DIGEST_THREADS_INVALID`
+  ([диагностика](toolchains.md#диагностика-doctor-и-preflight)); `problems` и
+  exit code не меняются. `hostLoad.resources()` — память, производительные
+  ядра и тепловое ограничение macOS.
+- **`HARNESS_DIGEST_THREADS`** (1–8) ограничивает потоки сверки копии seed.
 
 ## Перед обновлением
 
