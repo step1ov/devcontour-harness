@@ -37,9 +37,10 @@ supports it).
 
 | Choice                     | Default (decide yourself)                                                                                     | Ask when                                                                                                                                              |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Writer and reviewer vendor | —                                                                                                             | always: which of `claude` / `codex` writes; the other one reviews and accepts                                                                         |
-| Same vendor for review     | never                                                                                                         | only one runtime is installed, or the user asked for it                                                                                               |
-| Models and effort          | runtime defaults                                                                                              | the user named models                                                                                                                                 |
+| Lead                       | you: `--lead claude` or `--lead codex` (the runtime of this session)                                          | —                                                                                                                                                     |
+| Writer vendor              | the lead (`--writer` only when the user wants another writer)                                                 | the user named a different writer                                                                                                                     |
+| Review vendor              | `--review auto`: the other vendor when its CLI is installed and signed in                                     | `auto` fell back to the same runtime (`review-same-vendor` warning): tell the user, and use `--review same` only with their yes                       |
+| Models and effort          | runtime defaults; one model for every binding — `--model` with `--review same`                                | the user named models                                                                                                                                 |
 | Branch                     | new branch `harness-setup` from the current branch; an existing `harness/accepted` is reported and left alone | the working tree is not clean                                                                                                                         |
 | Install location           | `<repo>/.harness-tools`                                                                                       | the user asked for a directory outside the repository                                                                                                 |
 | Package source             | npm `@alpha` resolved to the exact version                                                                    | the user gave a version or a tarball                                                                                                                  |
@@ -60,8 +61,9 @@ supports it).
 ### 1. Preconditions
 
 Node.js ≥ 24.3, `git`, `npm` (or `pnpm` for a pnpm project) and the runtime
-CLIs (`claude --version`, `codex --version`). Whether a runtime is signed in
-is not detectable without a model call: the user confirms it. A missing or
+CLIs (`claude --version`, `codex --version`). `init` checks sign-in locally
+without a model call (`claude auth status`, `codex login status`) and reports
+it in `data.runtimes`; an unknown answer is not a confirmation. A missing or
 signed-out runtime is the user's to fix.
 
 The package manager version is checked exactly: the built-in profiles pin
@@ -226,11 +228,15 @@ report.
 ### 7. `harness init`
 
 ```sh
-$H init --repository <repo> --writer <claude|codex> --plan
-$H init --repository <repo> --writer <claude|codex>
+$H init --repository <repo> --lead <claude|codex> --plan
+$H init --repository <repo> --lead <claude|codex>
 ```
 
-Add `--profile ./.harness/profile.json` with a local profile. The first call
+Add `--profile ./.harness/profile.json` with a local profile, `--writer`
+for a writer other than the lead, `--review cross|same` to override `auto`,
+and `--model <model>` (with `--review same`) to pin one model. Read
+`data.lead`, `data.review` and `data.warnings`: `review-same-vendor` and
+`runtime-missing` go to the user before the first run. The first call
 writes nothing: read `data.files`, `data.conflicts`,
 `data.toolchain.problems`, `data.facts` and `data.manifest.paths.state`, and
 resolve every conflict or problem with the table of the `harness` skill
@@ -243,17 +249,17 @@ resolve every conflict or problem with the table of the `harness` skill
 
 Edit `.harness/policy.json` only as the decisions require:
 
-- models: `model` on `roles.<role>.writer` and on `review.code.reviewer`,
+- models: `init --model` with `--review same`, or `model` on
+  `roles.<role>.writer` and on `review.code.reviewer`,
   `review.plan.reviewer`, `review.contract.reviewer`;
 - effort: `effort` (`low`, `medium`, `high`, `xhigh`) only on bindings whose
   `runtime` is `codex`; on any other runtime it is refused;
-- a reviewer of the writer's vendor (an explicit yes only): on
-  `review.code` and/or `review.contract`, set `reviewer.runtime` to the
-  writer's runtime and add `"vendor": "same-vendor-allowed"`. Leave
-  `review.plan` with the other vendor: `init` reads the saved writer from the
-  plan reviewer, so changing it makes every later `init --plan` report
-  `content-differs` on `policy.json`. When the user wants it anyway, say so
-  and let them decide;
+- a reviewer of the author's vendor (an explicit yes only): prefer a new
+  `init --review same` decision; editing by hand, set `reviewer.runtime` to
+  the author's runtime and add `"vendor": "same-vendor-allowed"` on the
+  rule. `init --plan` reports `content-differs` on `policy.json` only when
+  the policy assigns no allowed reviewer for the lead's plans and contracts
+  or the writer's code;
 - operator approval: top-level `"approvalMode": "operator"`;
 - isolation: keep `isolation.mode: os`. When `doctor` or a first `prepare`
   shows the sandbox blocking the package store, the network or the Docker
@@ -264,7 +270,8 @@ Edit `.harness/policy.json` only as the decisions require:
   lists it).
 
 Never remove or weaken anything `init` wrote. Keep the writer runtime as
-`init` wrote it: a different writer vendor is a new `init --writer` decision.
+`init` wrote it: a different lead or writer vendor is a new `init --lead` /
+`--writer` decision.
 
 Check after editing:
 
