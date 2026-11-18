@@ -57,7 +57,7 @@ const laterCommands: readonly string[] = [
   'input-cancel',
   'input-supersede',
   'gates',
-  // Переключение слоя lean в подготовленном проекте (после 0.1.0-alpha.50).
+  // Переключение слоя lean в подготовленном проекте (0.1.0-alpha.51).
   'lean',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
@@ -335,7 +335,7 @@ test('H3-01: прежние команды и схемы их данных не 
       }
     }
     // Аддитивные поля manifest проекта (0.1.0-alpha.50): lead, review, model;
-    // запись `harness lean` о прежних значениях политики (`lean`).
+    // запись `harness lean` о прежних значениях политики (`lean`, 0.1.0-alpha.51).
     if (k === 'properties' && v && typeof v === 'object' && 'projectId' in v && 'lead' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.lead;
