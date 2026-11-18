@@ -59,11 +59,14 @@ test('LOW_RESOURCES: слабая машина и параллельность 2
   const [warning] = report.warnings!;
   assert.match(warning!, /4 производительных ядер и 8 ГБ памяти/);
   assert.match(warning!, /параллельность политики 2/);
-  // Совет выполним и в готовом проекте: поля политики, init --lean — для нового.
+  // Совет выполним и в готовом проекте: команда переключения слоя, поля
+  // слоя и смена digest; init --lean — для нового.
   assert.match(
     warning!,
-    /\.harness\/policy\.json\) "concurrency": 1, "runTimeoutMs": 1800000, "gateTimeoutFloorMs": 240000/,
+    /В подготовленном проекте — harness lean --repository <корень проекта> --plan/,
   );
+  assert.match(warning!, /"concurrency": 1, "runTimeoutMs": 1800000, "gateTimeoutFloorMs": 240000/);
+  assert.match(warning!, /policyDigest меняется/);
   assert.match(warning!, /новый проект — harness init --lean/);
   assert.doesNotMatch(warning!, /частот|нагрев/, 'без ограничения частоты о нагреве не говорится');
   assert.ok(!report.problems.some((p) => p.includes('LOW_RESOURCES')));
@@ -136,7 +139,11 @@ test('DEPENDENCY_STORE_RECOMMENDED: pnpm-lock.yaml без dependencyStore — п
   assert.deepEqual(codes(report.warnings), ['DEPENDENCY_STORE_RECOMMENDED']);
   assert.match(
     report.warnings![0]!,
-    /\.harness\/policy\.json\) repositories\[0\]: "dependencyStore": \{ "manager": "pnpm" \}; новый проект — harness init --lean/,
+    /harness lean --repository <корень проекта> --plan, затем без --plan/,
+  );
+  assert.match(
+    report.warnings![0]!,
+    /repositories\[0\]: "dependencyStore": \{ "manager": "pnpm" \}; новый проект — harness init --lean/,
   );
   assert.deepEqual(
     report.problems.filter((p) => p.includes('DEPENDENCY_STORE')),
@@ -184,4 +191,15 @@ test('DIGEST_THREADS_INVALID: HARNESS_DIGEST_THREADS вне 1–8 — преду
       good,
     );
   assert.deepEqual(resourceWarnings(policy, '/', large, {}), []);
+});
+
+test('Советы о ресурсах называют harness lean с корнем проекта, когда политика лежит в .harness/', (t) => {
+  const root = repository(t, 'pnpm-lock.yaml');
+  const warnings = resourceWarnings(
+    policyOf((p) => ((p as { repositories: { path: string }[] }).repositories[0]!.path = '..')),
+    join(root, '.harness'),
+    small,
+  );
+  assert.deepEqual(codes(warnings), ['DEPENDENCY_STORE_RECOMMENDED', 'LOW_RESOURCES']);
+  for (const w of warnings) assert.ok(w.includes(`harness lean --repository ${root} --plan`), w);
 });
