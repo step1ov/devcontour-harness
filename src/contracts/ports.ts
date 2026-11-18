@@ -590,6 +590,24 @@ export interface InputTargetRequest {
 }
 
 /** Хост, внутри которого работает движок: хранилище, основания, условия и области бюджетов. */
+/** Возможности хоста (`ExecutionHost.capabilities`). */
+export interface HostCapabilities {
+  integrationReuse?: boolean;
+}
+
+/**
+ * Почему политика не может исполняться под этим хостом, или undefined:
+ * `integrationReuse` требует объявленной поддержки хоста.
+ */
+export function integrationReuseProblem(
+  policy: { integrationReuse?: string | undefined },
+  host: ExecutionHost,
+): string | undefined {
+  if (policy.integrationReuse === undefined || host.capabilities?.integrationReuse)
+    return undefined;
+  return `integrationReuse: '${policy.integrationReuse}' требует поддержки хоста (capabilities.integrationReuse): хост этой установки записи интеграции, взятые из кандидата, не принимает`;
+}
+
 export interface ExecutionHost {
   store: ExecutionStore;
   basis: BasisProvider;
@@ -599,6 +617,16 @@ export interface ExecutionHost {
   contracts?: ContractApprovals;
   /** Версия потребителя (например, DevContour); записывается в попытку рядом с версией движка. */
   consumerVersion?: string;
+  /**
+   * Возможности хоста, которые политика включает только с его согласия.
+   * `integrationReuse` — хост принимает записи интеграции, взятые из
+   * кандидата (`EvidenceRecord.reusedEvidence`), и его получатель передаёт
+   * деревья проверке результата (`ReceiverContext.trees`). Без объявления
+   * движок с политикой `integrationReuse` не создаётся
+   * (`integrationReuseProblem`): результат не должен отклоняться хостом
+   * после приёмки.
+   */
+  capabilities?: HostCapabilities;
   /**
    * Когда поручение стало готово к выдаче (согласовано и дождалось
    * зависимостей) — по сведениям хоста, например с учётом результатов,

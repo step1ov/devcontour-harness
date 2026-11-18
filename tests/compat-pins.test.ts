@@ -177,6 +177,14 @@ const additiveFields: {
     },
     basis: 'changes',
   },
+  {
+    // Перенос evidence кандидата на интеграцию; умолчание не подставляется.
+    id: 'integrationReuse',
+    apply: (raw) => {
+      raw.integrationReuse = 'identical-tree';
+    },
+    basis: 'changes',
+  },
 ];
 
 test('A03/profiles: встроенные профили alpha.5 на месте, их байты и закрепления не изменились', (t) => {
