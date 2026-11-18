@@ -32,6 +32,7 @@ import {
   type EvidenceRecord,
   type ExecutionHost,
   type ExecutionPolicy,
+  type ExecutionStore,
   type ExecutionTransaction,
   type ExecutionView,
   type FailureKind,
@@ -928,11 +929,15 @@ export class Engine {
     // один раз на выдачу (и между выдачами, пока данные те же). Статусы — по
     // поручению на свой момент, как у `workBudgets`: ответ тот же. Общий
     // бюджет и бюджеты групп пересчитываются, только когда момент сменился.
+    // Идущий вызов меряется ещё и монотонными часами и живостью владельца —
+    // помимо момента: с ним статусы считаются заново для каждого поручения.
     const usage = this.usageOf(tx);
+    const live = usage.records.some((r) => r.outcome === 'active');
     let moment: { at: number; of: (workId: string) => BudgetStatus[] } | undefined;
     for (const w of ready) {
       const at = Date.now();
-      if (moment?.at !== at) moment = { at, of: workBudgetsOf(c, tx, usage.records, at, usage) };
+      if (live || moment?.at !== at)
+        moment = { at, of: workBudgetsOf(c, tx, usage.records, at, usage) };
       const blocking = blockingBudget(c, moment.of(w.id));
       if (!blocking) {
         if (w.budgetBlock) tx.putWork({ ...w, budgetBlock: undefined });
@@ -962,17 +967,21 @@ export class Engine {
    * данные — ровно зафиксированные при этой `dataVersion`. Во вложенной или
    * уже писавшей транзакции (её записи могут быть не зафиксированы или
    * откатиться) и у хранилища без `dataVersion`/`pristine` — заново каждый
-   * раз. Значения только для чтения.
+   * раз. Ключ — хранилище и версия: версии разных хранилищ несравнимы.
+   * Значения только для чтения.
    */
   private usageMemo?: {
+    store: ExecutionStore;
     version: number;
     records: CallRecord[];
     uncovered: AttemptState[];
     workOf: RecordWork;
   };
   private usageOf(tx: ExecutionView) {
+    const store = this.host.store;
     const version = tx.pristine?.() ? tx.dataVersion?.() : undefined;
-    if (version !== undefined && this.usageMemo?.version === version) return this.usageMemo;
+    const memo = this.usageMemo;
+    if (version !== undefined && memo?.store === store && memo.version === version) return memo;
     const records = callRecords(tx);
     // Поручения прежних записей (по попытке) — сразу: кэш переживает этот
     // вид, и вопрос к закрытой транзакции позже был бы ошибкой.
@@ -981,6 +990,7 @@ export class Engine {
       records.filter((r) => r.workId === undefined).map((r) => [r, lookup(r)] as const),
     );
     const usage = {
+      store,
       version: version ?? -1,
       records,
       uncovered: uncoveredAttempts(tx, records),

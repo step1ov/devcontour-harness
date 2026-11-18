@@ -556,12 +556,15 @@ export class SqliteExecutionStore implements ExecutionStore {
             leaseUntil: a.leaseUntil,
           })),
       dataVersion: () => this.dataVersion(),
+      // Метка D53 обязательна: без неё в ту же базу может писать прежняя
+      // версия, которая `dataVersion` не меняет; с меткой она отказывает.
       pristine: () =>
         this.frame === frame &&
         frame.depth === 1 &&
         !frame.dirty &&
         !frame.touched &&
-        frame.drafts.length === 0,
+        frame.drafts.length === 0 &&
+        loaded().leaseRows === true,
       renewLease: (
         kind: LeaseKind,
         id: string,

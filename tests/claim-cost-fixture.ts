@@ -96,7 +96,8 @@ export function historyBoard(
     };
   });
   const dir = mkdtempSync(join(tmpdir(), 'harness-claim-cost-'));
-  const sqlite = new SqliteExecutionStore(join(dir, 'state.sqlite'), 'test');
+  const file = join(dir, 'state.sqlite');
+  const sqlite = new SqliteExecutionStore(file, 'test');
   const n: Counters = { attempts: 0, usage: 0 };
   const store: ExecutionStore = {
     stateVersion: sqlite.stateVersion,
@@ -153,5 +154,5 @@ export function historyBoard(
     n.attempts = 0;
     n.usage = 0;
   };
-  return { engine, store: sqlite, counters: n, reset, ids, clock };
+  return { engine, store: sqlite, file, counters: n, reset, ids, clock };
 }

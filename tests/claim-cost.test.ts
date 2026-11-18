@@ -9,10 +9,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { WORKSPACE_OWNER, type AttemptState } from '../src/contracts/index.ts';
-import { callRecords } from '../src/engine/usage.ts';
+import { callRecords, endActive, startActive } from '../src/engine/usage.ts';
 import * as oracle from './budget-oracle.ts';
 import { callOf, historyBoard } from './claim-cost-fixture.ts';
 import { sha } from './engine-fixture.ts';
+import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 
 const FIXED = Date.parse('2026-06-01T00:00:00.000Z');
 const frozen = <T>(fn: () => T): T => {
@@ -113,6 +114,130 @@ test('удержания claim = замороженные бюджеты; изм
   }
 });
 
+test('кэш учёта вызовов: запись другого соединения с тем же файлом видна следующей выдаче', () => {
+  const b = historyBoard(40, { budgets: { work: { usd: 0.06 }, onUnknown: 'stop' } });
+  frozen(() => b.engine.claim('c1'));
+  assert.deepEqual(
+    blocks(b).filter((r) => r.written),
+    [],
+    'в пределах до записи',
+  );
+  // Другой процесс (своё соединение) записывает расход поручения w3.
+  const other = new SqliteExecutionStore(b.file, 'test');
+  other.transact('task.retry', (tx) =>
+    tx.putLocal(
+      'usage',
+      WORKSPACE_OWNER,
+      'call-other',
+      callOf('other', { runId: 'old-3', workId: 'w3' }),
+    ),
+  );
+  other.close();
+  frozen(() => b.engine.claim('c1'));
+  const got = blocks(b);
+  for (const r of got) assert.equal(r.written, r.expected, r.id);
+  assert.deepEqual(
+    got.filter((r) => r.written).map((r) => r.id),
+    ['w3'],
+    'расход другого соединения держит w3',
+  );
+  b.store.close();
+});
+
+test('кэш учёта вызовов: попытка без учёта вызовов без новой записи вызова видна следующей выдаче', () => {
+  const b = historyBoard(40, { budgets: { work: { usd: 1 }, onUnknown: 'stop' } });
+  frozen(() => b.engine.claim('c1'));
+  assert.deepEqual(
+    blocks(b).filter((r) => r.written),
+    [],
+    'в пределах до записи',
+  );
+  // Только попытка: прежняя, до учёта вызовов, с кандидатом и без записи.
+  b.store.transact('task.retry', (tx) => {
+    const a: Partial<AttemptState> = {
+      ...tx.attempt('old-5')!,
+      id: 'pre-usage',
+      token: 'token-pre-usage-0001',
+      candidateSha: sha('c'),
+    };
+    delete a.callsRecorded;
+    tx.putAttempt(a as AttemptState);
+  });
+  frozen(() => b.engine.claim('c1'));
+  const got = blocks(b);
+  for (const r of got) assert.equal(r.written, r.expected, r.id);
+  assert.deepEqual(
+    got.filter((r) => r.written).map((r) => r.id),
+    ['w5'],
+    'попытка без учёта держит своё поручение',
+  );
+  b.store.close();
+});
+
+test('кэш учёта вызовов: ключ — хранилище и версия, не одна версия', () => {
+  const budgets = { work: { usd: 0.06 }, onUnknown: 'stop' };
+  const a = historyBoard(40, { budgets });
+  const b = historyBoard(40, { budgets });
+  // В A — запись без влияния на бюджеты, в B — расход w3: версии равны.
+  a.store.transact('task.retry', (tx) => tx.putWork({ ...tx.work('w0')! }));
+  b.store.transact('task.retry', (tx) =>
+    tx.putLocal('usage', WORKSPACE_OWNER, 'call-b', callOf('b', { runId: 'old-3', workId: 'w3' })),
+  );
+  const version = (x: Board) => x.store.read((v) => v.dataVersion!());
+  assert.equal(version(a), version(b), 'предпосылка: версии совпадают');
+  frozen(() => a.engine.claim('c1'));
+  assert.deepEqual(
+    blocks(a).filter((r) => r.written),
+    [],
+    'A в пределах',
+  );
+  // Движок A переключён на хранилище B той же версии.
+  a.engine.host.store = b.engine.host.store;
+  frozen(() => a.engine.claim('c1'));
+  const got = blocks(b);
+  for (const r of got) assert.equal(r.written, r.expected, r.id);
+  assert.deepEqual(
+    got.filter((r) => r.written).map((r) => r.id),
+    ['w3'],
+    'расход B держит w3',
+  );
+  a.store.close();
+  b.store.close();
+});
+
+test('идущий вызов: общий бюджет считается для каждого поручения заново, а не раз на момент', () => {
+  const b = historyBoard(8, { budgets: { total: { usd: 100 }, onUnknown: 'stop' } });
+  // Идущий вызов этого процесса без владельца: стоимость неизвестна, время —
+  // по монотонным часам, которые идут и при неизменном Date.now.
+  b.store.transact('task.retry', (tx) =>
+    tx.putLocal(
+      'usage',
+      WORKSPACE_OWNER,
+      'call-live',
+      callOf('live', { outcome: 'active', finishedAt: undefined, costUsd: null }),
+    ),
+  );
+  let t = 0;
+  startActive('call-live');
+  // Свойство экземпляра закрывает метод прототипа; удаление его возвращает.
+  Object.defineProperty(performance, 'now', { value: () => (t += 1000), configurable: true });
+  try {
+    frozen(() => b.engine.claim('c1'));
+  } finally {
+    delete (performance as { now?: unknown }).now;
+    endActive('call-live');
+  }
+  assert.ok(performance.now() < 1e9, 'монотонные часы восстановлены');
+  const reasons = b.engine.read((v) => b.ids.map((id) => v.work(id)!.budgetBlock?.reason));
+  assert.ok(
+    reasons.every((r) => r?.includes('Бюджет total не определён')),
+    'все удержаны общим',
+  );
+  // Время идущего вызова растёт от поручения к поручению: причины разные.
+  assert.equal(new Set(reasons).size, b.ids.length, reasons.join('\n'));
+  b.store.close();
+});
+
 test('удержания claim = замороженные бюджеты с попытками без учёта вызовов в истории', () => {
   const b = historyBoard(30, { uncovered: 3, legacy: true });
   frozen(() => b.engine.claim('c1'));
@@ -181,5 +306,9 @@ test('pristine: только внешняя транзакция без запи
     assert.equal(tx.pristine?.(), false, 'после записи модели');
   });
   b.store.read((v) => assert.notEqual(v.pristine?.(), true, 'вид чтения'));
+  // Без метки D53 (после шага вниз) в базу может писать прежняя версия,
+  // не меняющая dataVersion: кэш не берётся.
+  b.store.stepDownLeases();
+  b.store.transact('task.retry', (tx) => assert.equal(tx.pristine?.(), false, 'без метки D53'));
   b.store.close();
 });
