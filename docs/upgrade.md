@@ -1214,9 +1214,22 @@ until)` и метка документа `leaseRows: true`. Первая стр�
 ### Следующий выпуск
 
 Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`,
-`handoffVersion: 1`). Поля добавлены необязательными; записи хранилища не
-меняются.
+`handoffVersion: 1`, `reportVersion: 1`). Поля добавлены необязательными;
+записи хранилища не меняются.
 
+- **Сводка попыток в `status` и `explain`.** У поручений `status` —
+  необязательное поле `works[].attemptSummary`, у `explain` — `attempts[]`:
+  попыток всего, отказы по корзинам отчёта, таймауты, прерывания штатной
+  остановкой (не отказы), принятые, остаток попыток и восстановлений группы и
+  строка `line`. Числа — `attemptSummaryOf` из `devcontour-harness/report`,
+  та же функция, что строки поручений отчёта. `status` принимает `--human`
+  (строка на поручение), `explain --human` печатает раздел «Попытки».
+  Библиотека: `attemptSummaryOf`, `attemptSummaryLine`, `acceptingAttemptOf`,
+  `attemptSummaryView`, `liveGraphJobs`, `statusText`, `explainText`;
+  необязательное `StatusSource.workflows` даёт остаток восстановлений. Хост,
+  который сравнивает ответ `status` побайтно с прежним, убирает новое поле.
+  Откат: строгие схемы прежних версий не принимают `attemptSummary` и
+  `attempts`, а `status --human` — `INVALID_INPUT`.
 - **Пакет передачи без прерываний остановкой.** `failures` в `harness
 handoff` (`handoffPack`) больше не содержит попыток, прерванных штатной
   остановкой controller (`interrupted: "shutdown"`): они исключаются до

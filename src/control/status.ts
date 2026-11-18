@@ -1,4 +1,14 @@
-import { STATE_VERSION, type ExecutionPolicy, type ExecutionView } from '../contracts/index.ts';
+import type { z } from 'zod';
+import {
+  STATE_VERSION,
+  type statusDataSchema,
+  type AttemptState,
+  type ExecutionPolicy,
+  type ExecutionView,
+  type WorkState,
+  type WorkflowJob,
+} from '../contracts/index.ts';
+import { attemptSummaryLine, attemptSummaryOf, type AttemptBudget } from '../report/compute.ts';
 import { budgetOverview } from '../engine/budget.ts';
 import type { Engine } from '../engine/engine.ts';
 import { requestsOf } from '../engine/input-requests.ts';
@@ -20,6 +30,50 @@ import {
 export interface StatusSource {
   readonly engine: Engine;
   readonly policy: ExecutionPolicy;
+  /**
+   * Задания графов (`Harness.workflows`): с ними сводка попыток называет
+   * остаток восстановлений группы. Нет — сводка без `repairs`.
+   */
+  readonly workflows?: { list(): readonly WorkflowJob[] };
+}
+
+/**
+ * Действующие задания графов по id: незавершённые и не устаревшие (бюджет
+ * восстановлений устаревшего задания больше не расходуется).
+ */
+export function liveGraphJobs(workflows: StatusSource['workflows']): Map<string, WorkflowJob> {
+  const jobs = new Map<string, WorkflowJob>();
+  for (const j of workflows?.list() ?? [])
+    if (j.kind === 'graph' && j.status !== 'completed' && j.status !== 'stale') jobs.set(j.id, j);
+  return jobs;
+}
+
+/**
+ * Сводка попыток поручения для `status` и `explain`: числа — `attemptSummaryOf`
+ * (правила отчёта), остаток попыток — по засчитанным `work.attempt` и
+ * `maxAttempts`, восстановлений — по заданию графа и `repairBudget`; `line` —
+ * `attemptSummaryLine`.
+ */
+export function attemptSummaryView(
+  work: WorkState,
+  attempts: readonly AttemptState[],
+  policy: Pick<ExecutionPolicy, 'maxAttempts' | 'repairBudget'>,
+  job?: Pick<WorkflowJob, 'repairs'>,
+) {
+  const summary = attemptSummaryOf(work, attempts);
+  const budget: AttemptBudget = {
+    attempts: { used: work.attempt, max: policy.maxAttempts },
+    ...(job ? { repairs: { used: job.repairs ?? 0, budget: policy.repairBudget } } : {}),
+  };
+  const left = (used: number, max: number) => Math.max(0, max - used);
+  return {
+    ...summary,
+    attempts: { ...budget.attempts, left: left(work.attempt, policy.maxAttempts) },
+    ...(budget.repairs
+      ? { repairs: { ...budget.repairs, left: left(budget.repairs.used, budget.repairs.budget) } }
+      : {}),
+    line: attemptSummaryLine(summary, budget),
+  };
 }
 
 /**
@@ -34,6 +88,9 @@ export function statusOf(
   options: { detail?: boolean } = {},
 ) {
   const { engine } = source;
+  // Задания — внутри того же чтения: один снимок хранилища.
+  let jobs: Map<string, WorkflowJob> | undefined;
+  const jobOf = (graphId: string) => (jobs ??= liveGraphJobs(source.workflows)).get(graphId);
   return engine.read((v) => ({
     stateVersion: STATE_VERSION,
     control: v.control(),
@@ -68,6 +125,7 @@ export function statusOf(
         ...(view.followUps ? { followUps: view.followUps } : {}),
       }))(workInputOf(requestsOf(v, w))),
       blockers: engine.blockers(w, v),
+      attemptSummary: attemptSummaryView(w, v.attempts(w.id), source.policy, jobOf(w.graphId)),
     })),
     ...((budgets) => (budgets ? { budgets } : {}))(budgetOverview(engine.budgetContext(), v)),
     ...(options.detail ? { detail: statusDetail(source, v, graphId) } : {}),
@@ -134,4 +192,21 @@ function statusDetail(source: StatusSource, v: ExecutionView, graphId?: string) 
         });
       }),
   };
+}
+
+/**
+ * Текст `status --human`: состояние выдачи и строка на поручение — статус и
+ * сводка попыток (`attemptSummaryLine`); блокировки — кодами с отступом.
+ */
+export function statusText(data: z.output<typeof statusDataSchema>): string {
+  const c = data.control;
+  const out = [
+    c.paused ? `Выдача на паузе${c.pauseReason ? ` (${c.pauseReason})` : ''}.` : 'Выдача идёт.',
+  ];
+  if (!data.works.length) out.push('Поручений нет.');
+  for (const w of data.works) {
+    out.push(`${w.id} [${w.status}]${w.attemptSummary ? ': ' + w.attemptSummary.line : ''}`);
+    if (w.blockers.length) out.push(`  блокировки: ${w.blockers.map((b) => b.code).join(', ')}`);
+  }
+  return out.join('\n') + '\n';
 }

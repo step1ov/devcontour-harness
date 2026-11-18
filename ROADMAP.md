@@ -183,6 +183,10 @@ target интеграция не запускает перенесённые gat
 провалами разных классов, таймаутом, прерыванием и принятой попыткой —
 сверка строки `status`, `explain` и чисел отчёта.
 
+Сделано в следующем выпуске: `works[].attemptSummary` в `status`,
+`attempts[]` в `explain`, `status --human`; числа — `attemptSummaryOf`
+отчёта; правило в skill `harness`.
+
 **Провалы в пакете передачи без прерываний остановкой.** `harness handoff`
 (`src/handoff/pack.ts`) берёт последние провалы попыток (`failed` и
 `expired`) и режет их пределом `HANDOFF_LIMITS.failures` (10). Попытки,

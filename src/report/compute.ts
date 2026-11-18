@@ -262,6 +262,96 @@ const setupOnlyFailure = (a: AttemptState) => {
   return failing.length > 0 && failing.every((e) => setupGate(e.gate));
 };
 
+/**
+ * Принявшая попытка поручения — последняя успешная у принятого (`done`);
+ * у остальных — нет. Попытки — в порядке времени начала.
+ */
+export function acceptingAttemptOf(
+  work: Pick<WorkState, 'status'>,
+  attempts: readonly AttemptState[],
+): AttemptState | undefined {
+  return work.status === 'done'
+    ? attempts.filter((a) => a.status === 'succeeded').at(-1)
+    : undefined;
+}
+
+/** Сводка попыток одного поручения (`attemptSummaryOf`). */
+export interface AttemptSummary {
+  /** Записей попыток всего — как `works[].attempts` отчёта. */
+  total: number;
+  /** Идущие (`active`). */
+  active: number;
+  /** Отказы (`failureBucketOf` не `null`): без прерванных штатной остановкой. */
+  failed: number;
+  /** Отказы по корзинам в порядке `failureBucketNames` — как `works[].rejections` отчёта. */
+  failures: { key: FailureBucket; count: number }[];
+  /** Из отказов — по превышению времени (`failureKind: timeout`, корзина `time-limit`). */
+  timeouts: number;
+  /** Прерванные штатной остановкой controller (`interrupted: shutdown`): не отказы. */
+  interrupted: number;
+  /** Принятые: 1 — у принятого поручения есть принявшая попытка (`acceptingAttemptOf`). */
+  accepted: number;
+}
+
+/**
+ * Сводка попыток поручения теми же правилами, что строка поручения отчёта
+ * (`valueReport().works[]`): корзины — `failureBucketOf`, принявшая —
+ * `acceptingAttemptOf`. Прерывание штатной остановкой — не отказ, а своё
+ * число. Чистая функция: порядок попыток на числа не влияет.
+ */
+export function attemptSummaryOf(
+  work: Pick<WorkState, 'status'>,
+  attempts: readonly AttemptState[],
+): AttemptSummary {
+  const buckets = new Map<FailureBucket, number>();
+  for (const a of attempts) {
+    const b = failureBucketOf(a);
+    if (b) buckets.set(b, (buckets.get(b) ?? 0) + 1);
+  }
+  const failures = failureBucketNames
+    .filter((b) => buckets.has(b))
+    .map((b) => ({ key: b, count: buckets.get(b)! }));
+  return {
+    total: attempts.length,
+    active: attempts.filter((a) => a.status === 'active').length,
+    failed: sum(failures.map((f) => f.count)),
+    failures,
+    timeouts: buckets.get('time-limit') ?? 0,
+    interrupted: attempts.filter(
+      (a) => finishedStatuses.has(a.status) && a.interrupted === 'shutdown',
+    ).length,
+    accepted: acceptingAttemptOf(work, attempts) ? 1 : 0,
+  };
+}
+
+/** Остаток пределов поручения рядом со сводкой попыток. */
+export interface AttemptBudget {
+  /** Засчитанные попытки поручения (`WorkState.attempt`) и предел политики. */
+  attempts: { used: number; max: number };
+  /** Восстановления задания графа (`repairs`) и `repairBudget`; нет — задания нет. */
+  repairs?: { used: number; budget: number };
+}
+
+/**
+ * Строка сводки для человека и ведущего агента: факты из хранилища, без
+ * оценки времени. «Принято» — только принятая попытка (после gates,
+ * независимого ревью и интеграции), не исправление и не пройденная проверка.
+ */
+export function attemptSummaryLine(s: AttemptSummary, budget: AttemptBudget): string {
+  const left = (used: number, max: number) => Math.max(0, max - used);
+  return [
+    `попыток ${s.total}${s.active ? ` (идёт ${s.active})` : ''}`,
+    `отказов ${s.failed}${s.failures.length ? ` (${s.failures.map((f) => `${f.key} ${f.count}`).join(', ')})` : ''}`,
+    `по времени ${s.timeouts}`,
+    `прервано остановкой ${s.interrupted}`,
+    `принято ${s.accepted}`,
+    `осталось попыток ${left(budget.attempts.used, budget.attempts.max)} из ${budget.attempts.max}` +
+      (budget.repairs
+        ? `, восстановлений группы ${left(budget.repairs.used, budget.repairs.budget)} из ${budget.repairs.budget}`
+        : ''),
+  ].join('; ');
+}
+
 /* ------------------------------------------------------------------ */
 /* Статистика                                                          */
 /* ------------------------------------------------------------------ */
@@ -399,8 +489,7 @@ export function valueReport(
   /* Поручения: исход и время ----------------------------------------- */
   const facts: WorkFacts[] = works.map((work) => {
     const own = attemptsOf.get(work.id) ?? [];
-    const accepting =
-      work.status === 'done' ? own.filter((a) => a.status === 'succeeded').at(-1) : undefined;
+    const accepting = acceptingAttemptOf(work, own);
     const lastFinished = own
       .map((a) => a.finishedAt)
       .filter((x): x is string => !!x)
@@ -1119,11 +1208,6 @@ export function valueReport(
     .sort((a, b) => timeOrder(b.finishedAt, a.finishedAt) || cmp(a.work.id, b.work.id));
   const workRows = rowsAll.slice(0, reportLimits.works).map((f) => {
     const cost = workCost(f);
-    const rejections = new Map<FailureBucket, number>();
-    for (const a of f.attempts) {
-      const b = failureBucketOf(a);
-      if (b) rejections.set(b, (rejections.get(b) ?? 0) + 1);
-    }
     return {
       id: f.work.id,
       ...(options.noTitles ? {} : { title: clip(f.work.order.title, 180) }),
@@ -1135,9 +1219,7 @@ export function valueReport(
       knownUsd: cost.usd,
       unknownCalls: cost.unknown,
       costBound: cost.bound,
-      rejections: failureBucketNames
-        .filter((b) => rejections.has(b))
-        .map((b) => ({ key: b, count: rejections.get(b)! })),
+      rejections: attemptSummaryOf(f.work, f.attempts).failures,
     };
   });
 
