@@ -25,7 +25,7 @@ import {
 import { redactor } from '../environment/redaction.ts';
 import { inspectReview } from './inspect.ts';
 import { probeCallMs, probeServer, probeTool } from './review-probe.ts';
-import { claudeResult, runtimeEvents } from './runtime-events.ts';
+import { acceptedStructuredOutput, claudeResult, runtimeEvents } from './runtime-events.ts';
 import { runtimeVersion, unknownUsage, usageStream } from './usage.ts';
 
 /**
@@ -481,7 +481,8 @@ export function cliAdapter(
           await writeFile(resultPath, cleaned);
           output = JSON.parse(cleaned);
         } else {
-          const last = runtimeEvents(result.stdout).events.findLast((e) => e.type === 'result');
+          const { events } = runtimeEvents(result.stdout);
+          const last = events.findLast((e) => e.type === 'result');
           // `is_error` проверяется до разбора: `claudeResult` требует поле
           // `structured_output`, которого у такого `result` нет, и отказ
           // runtime при коде 0 читался как непрочитанный ответ.
@@ -496,7 +497,12 @@ export function cliAdapter(
                 ),
               ),
             };
-          output = claudeResult.parse(last).structured_output;
+          // Без итогового `structured_output` (строка `result` оборвана на
+          // выходе процесса или отсутствует) ответ — принятый вызов
+          // `StructuredOutput` из того же потока (F59).
+          const accepted =
+            last?.structured_output === undefined ? acceptedStructuredOutput(events) : undefined;
+          output = accepted ? accepted.value : claudeResult.parse(last).structured_output;
         }
       } catch (error) {
         // Непрочитанный файл не замаскирован: на диске он не остаётся.
