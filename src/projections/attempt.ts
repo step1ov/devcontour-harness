@@ -31,6 +31,8 @@ export interface AttemptViewInput {
     gate: string;
     passed: boolean;
     consumer?: string;
+    /** Запись интеграции взята из кандидата (`EvidenceRecord.reusedEvidence`). */
+    reusedEvidence?: unknown;
   }[];
   /** Gates, которые попытка обязана пройти в каждой фазе (`AttemptState.requiredGates`). */
   requiredGates?: readonly string[];
@@ -99,6 +101,8 @@ export interface AttemptView {
     remaining: number;
     /** Не исполнены по `when.paths` (нет поля — таких нет); входят в `required`. */
     notApplicable?: number;
+    /** Из `passed`: PASS интеграции взят из кандидата (нет поля — таких нет). */
+    reused?: number;
   };
   /**
    * Живость по последнему переходу обхода controller: `quiet` и `stalled`
@@ -159,6 +163,20 @@ export function attemptView(input: AttemptViewInput, options: AttemptViewOptions
       required.includes(e.gate)
     )
       latest.set(e.gate, e.passed);
+  // Последняя запись gate взята из кандидата (`reusedEvidence`).
+  const reused = new Set<string>();
+  for (const e of input.evidence)
+    if (
+      e.kind === 'test' &&
+      e.phase === phase &&
+      !e.consumer &&
+      sha !== undefined &&
+      e.sha === sha &&
+      required.includes(e.gate)
+    ) {
+      if (e.passed && e.reusedEvidence) reused.add(e.gate);
+      else reused.delete(e.gate);
+    }
   const passed = [...latest.values()].filter(Boolean).length;
   return {
     runId: input.id,
@@ -198,6 +216,7 @@ export function attemptView(input: AttemptViewInput, options: AttemptViewOptions
       ...(notApplicable.size
         ? { notApplicable: [...notApplicable].filter((g) => !latest.has(g)).length }
         : {}),
+      ...(reused.size ? { reused: reused.size } : {}),
     },
     ...(input.liveness
       ? {

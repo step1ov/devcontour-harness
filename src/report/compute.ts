@@ -1097,6 +1097,7 @@ export function valueReport(
     : null;
   const rechecks = { flaky: 0, confirmed: 0 };
   for (const { e } of windowEvidence) if (e.recheck) rechecks[e.recheck.outcome] += 1;
+  const reused = windowEvidence.filter(({ e }) => e.reusedEvidence).length;
 
   const sentBackCount = { defect: 0, setup: 0, unknown: 0, no: 0 };
   for (const f of accepted) sentBackCount[sentBack(f)] += 1;
@@ -1350,6 +1351,7 @@ export function valueReport(
         runtimePauses,
       },
       rechecks,
+      ...(reused ? { reused } : {}),
     },
     weeks: weekly,
     ...(input.inputRequests ? { inputs: inputCounts(input.inputRequests, windowAttempts, w) } : {}),
