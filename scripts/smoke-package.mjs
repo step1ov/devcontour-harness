@@ -127,6 +127,8 @@ const allowed = [
   // Шаблоны controller mode.
   /^templates\/controller-mode\/([A-Za-z.-]+\.md|[a-z-]+\.json)$/,
   /^profiles\/[a-z0-9-]+\.json$/,
+  // Встроенные слои профилей (lean, alpha.50).
+  /^profiles\/layers\/[a-z0-9-]+\.json$/,
   /^skills\/[a-z-]+\/SKILL\.md$/,
   /^templates\/(AGENTS\.md|[a-z-]+\.json)$/,
 ];
@@ -139,6 +141,7 @@ for (const required of [
   'schemas/work-graph.schema.json',
   'schemas/stack-profile.schema.json',
   'profiles/node-checks.json',
+  'profiles/layers/lean.json',
   'skills/harness/SKILL.md',
   'skills/harness-setup/SKILL.md',
   'templates/policy.json',
@@ -833,7 +836,8 @@ const h1Run = (...args) => {
   }
   return { ...r, json };
 };
-const h1Plan = h1Run('init', '--repository', h1, '--plan');
+// Ведущий явно: без признака сессии init спрашивает (`lead-unknown`).
+const h1Plan = h1Run('init', '--repository', h1, '--lead', 'claude', '--plan');
 if (
   h1Plan.status !== 0 ||
   h1Plan.json?.data?.mode !== 'plan' ||
@@ -843,7 +847,7 @@ if (
 )
   fail('init --plan: ' + h1Plan.status + ' ' + h1Plan.stdout + h1Plan.stderr);
 if (existsSync(join(h1, '.harness'))) fail('init --plan записал .harness/');
-const h1Init = h1Run('init', '--repository', h1);
+const h1Init = h1Run('init', '--repository', h1, '--lead', 'claude');
 const h1Data = h1Init.json?.data;
 if (h1Init.status !== 0 || h1Data?.mode !== 'apply')
   fail('init: ' + h1Init.status + ' ' + h1Init.stdout + h1Init.stderr);
@@ -1006,7 +1010,10 @@ const fixtureBins = {
   HARNESS_CLAUDE_BIN: join(fixtures, 'fake-claude'),
   HARNESS_CODEX_BIN: join(fixtures, 'fake-codex'),
 };
-const h2Init = h2Run(trapped, 'init', '--repository', h2);
+// init — не планирование: он проверяет наличие CLI (`--version`, проверка
+// входа) для решения о ревью, поэтому идёт с fixture runtime. Ловушки
+// стоят на командах планирования: им вызывать runtime нельзя.
+const h2Init = h2Run(fixtureBins, 'init', '--repository', h2, '--lead', 'claude');
 if (h2Init.status !== 0 || h2Init.json?.data?.mode !== 'apply')
   fail('H2 init: ' + h2Init.status + ' ' + h2Init.stdout + h2Init.stderr);
 const h2State = h2Init.json.data.manifest.paths.state;
