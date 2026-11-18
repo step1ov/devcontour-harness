@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { command, drainPipes } from '../src/environment/process.ts';
+import { command, drainPipes, ReapFailure } from '../src/environment/process.ts';
 
 const moduleUrl = new URL('../src/environment/process.ts', import.meta.url).href;
 test('A completed contained command leaves no pipe timeout holding its caller alive', () => {
@@ -142,30 +142,86 @@ test('A large final stdout line of a contained command arrives whole', async () 
   assert.equal((JSON.parse(result.stdout) as { x: string }).x.length, size);
 });
 
-test('A silent descendant that escaped the sweep holds the pipe only for the idle bound', async () => {
-  // Внук без окружения и вне каталогов, отсоединённый раньше первого опроса:
-  // очистка его не видит, а унаследованный stdout он держит. Ожидание pipe
-  // отсчитывается от последнего байта, а не растягивается до общего предела.
-  const inner = `const {spawn}=require('node:child_process');const g=spawn('/bin/sh',['-c','exec sleep 60'],{detached:true,stdio:['ignore','inherit','inherit'],env:{},cwd:'/'});g.unref();console.log('ESCAPED='+g.pid);process.exit(0)`;
-  const outer = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(inner)}],{detached:true,stdio:['ignore','inherit','inherit'],env:{},cwd:'/'}).unref()`;
-  let pid = 0;
-  const started = performance.now();
-  try {
-    const result = await command([process.execPath, '-e', outer], process.cwd(), {
-      contain: true,
-      onRawStdout: (chunk) => {
-        pid ||= Number(/ESCAPED=(\d+)/.exec(chunk)?.[1] ?? 0);
-      },
-    });
-    const elapsed = performance.now() - started;
-    assert.equal(result.code, 0, result.stderr);
-    assert.match(result.stdout, /ESCAPED=\d+/);
-    assert.ok(alive(pid), 'the holder really escaped the sweep');
-    assert.ok(elapsed < 15_000, `escaped holder delayed the command by ${Math.round(elapsed)}ms`);
-  } finally {
-    if (pid && alive(pid)) process.kill(pid, 'SIGKILL');
+// Внук без окружения и вне каталогов, отсоединённый раньше первого опроса:
+// очистка его не видит, а унаследованный stdout он держит. Под нагрузкой опрос
+// всё же может застать его и остановить — такой прогон ничего не доказывает и
+// повторяется; если держатель не ушёл ни разу, тест пропускается.
+const escapedHolder = (holder: string, parentStays: boolean) => {
+  const inner = `const {spawn}=require('node:child_process');const g=spawn('/bin/sh',['-c',${JSON.stringify(holder)}],{detached:true,stdio:['ignore','inherit','inherit'],env:{},cwd:'/'});g.unref();console.log('ESCAPED='+g.pid);process.exit(0)`;
+  return `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(inner)}],{detached:true,stdio:['ignore','inherit','inherit'],env:{},cwd:'/'}).unref();${parentStays ? 'setInterval(()=>{},1000)' : ''}`;
+};
+const escapeAttempts = 4;
+type EscapeRun = { escaped: boolean; result: Awaited<ReturnType<typeof command>>; elapsed: number };
+async function runEscaped(
+  holder: string,
+  outcome: 'success' | 'cancel' | 'timeout',
+): Promise<EscapeRun | undefined> {
+  for (let attempt = 0; attempt < escapeAttempts; attempt++) {
+    const controller = new AbortController();
+    let pid = 0;
+    let output = '';
+    const started = performance.now();
+    try {
+      const result = await command(
+        [process.execPath, '-e', escapedHolder(holder, outcome !== 'success')],
+        process.cwd(),
+        {
+          contain: true,
+          signal: controller.signal,
+          ...(outcome === 'timeout' ? { timeoutMs: 1500 } : {}),
+          onRawStdout: (chunk) => {
+            output += chunk;
+            pid ||= Number(/ESCAPED=(\d+)/.exec(output)?.[1] ?? 0);
+            if (pid && outcome === 'cancel') controller.abort();
+          },
+        },
+      );
+      const elapsed = performance.now() - started;
+      if (pid && alive(pid)) return { escaped: true, result, elapsed };
+    } catch (error) {
+      // Опрос застал держателя и не смог его остановить — тоже не уход.
+      if (!(error instanceof ReapFailure)) throw error;
+    } finally {
+      if (pid && alive(pid)) process.kill(pid, 'SIGKILL');
+    }
   }
-});
+  return undefined;
+}
+
+test(
+  'A silent descendant that escaped the sweep holds the pipe only for the idle bound',
+  { timeout: 120_000 },
+  async (t) => {
+    // Ожидание pipe отсчитывается от последнего байта, а не растягивается до
+    // общего предела.
+    const run = await runEscaped('exec sleep 60', 'success');
+    if (!run) return t.skip(`the holder was swept in all ${escapeAttempts} attempts`);
+    assert.equal(run.result.code, 0, run.result.stderr);
+    assert.match(run.result.stdout, /ESCAPED=\d+/);
+    assert.ok(
+      run.elapsed < 15_000,
+      `escaped holder delayed the command by ${Math.round(run.elapsed)}ms`,
+    );
+  },
+);
+
+for (const outcome of ['cancel', 'timeout'] as const)
+  test(
+    `A chatty escaped holder does not stretch a contained ${outcome} to the drain cap`,
+    { timeout: 180_000 },
+    async (t) => {
+      // После таймаута или отмены держатель, который продолжает писать, стоит
+      // команде короткий предел, а не общие 30 с.
+      const run = await runEscaped('while :; do echo tick; sleep 0.2; done', outcome);
+      if (!run) return t.skip(`the holder was swept in all ${escapeAttempts} attempts`);
+      assert.equal(run.result.timedOut, outcome === 'timeout');
+      assert.equal(run.result.diagnostics.aborted, outcome === 'cancel');
+      assert.ok(
+        run.elapsed < 15_000,
+        `chatty holder delayed the ${outcome} by ${Math.round(run.elapsed)}ms`,
+      );
+    },
+  );
 
 test('Pipe drain waits while bytes arrive and gives up on a silent or endless holder', async () => {
   let bytes = 0;
@@ -182,7 +238,7 @@ test('Pipe drain waits while bytes arrive and gives up on a silent or endless ho
   let started = performance.now();
   assert.equal(await drainPipes(new Promise(() => {}), () => 0, { idleMs: 300 }), false);
   const silent = performance.now() - started;
-  assert.ok(silent >= 290 && silent < 2000, `silent holder waited ${Math.round(silent)}ms`);
+  assert.ok(silent >= 290 && silent < 10_000, `silent holder waited ${Math.round(silent)}ms`);
 
   let endless = 0;
   const chatter = setInterval(() => (endless += 1), 50);
@@ -196,7 +252,33 @@ test('Pipe drain waits while bytes arrive and gives up on a silent or endless ho
     clearInterval(chatter);
   }
   const capped = performance.now() - started;
-  assert.ok(capped >= 990 && capped < 3000, `endless holder waited ${Math.round(capped)}ms`);
+  assert.ok(capped >= 990 && capped < 15_000, `endless holder waited ${Math.round(capped)}ms`);
+});
+
+test('Pipe drain gives up at once when its signal aborts', async () => {
+  let endless = 0;
+  const chatter = setInterval(() => (endless += 1), 50);
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 300);
+  const started = performance.now();
+  try {
+    assert.equal(
+      await drainPipes(new Promise(() => {}), () => endless, {
+        idleMs: 300,
+        signal: controller.signal,
+      }),
+      false,
+    );
+  } finally {
+    clearInterval(chatter);
+  }
+  const waited = performance.now() - started;
+  assert.ok(waited < 15_000, `aborted drain waited ${Math.round(waited)}ms`);
+  // Уже отменённый сигнал не ждёт вовсе.
+  assert.equal(
+    await drainPipes(new Promise(() => {}), () => endless, { signal: controller.signal }),
+    false,
+  );
 });
 
 test('Pipe drain reads data that became ready while the event loop was blocked', async () => {

@@ -288,7 +288,16 @@ export async function command(
       // собирается как обычно (ожидание pipes ограничено — их может держать
       // переживший потомок) и уходит вместе с отказом, а не результатом.
       const reaped = swept.survivors.length > 0 || swept.inventory !== undefined;
-      if (mark && !(await drainPipes(closed, () => pipeBytes))) {
+      // После таймаута или отмены таймер и слушатель отмены уже сняты: держатель
+      // pipe, который продолжает писать, не должен растягивать прерванную
+      // команду до общего предела. Отмена во время ожидания обрывает его.
+      const interrupted = timedOut || Boolean(options.signal?.aborted);
+      const drainLimits = interrupted
+        ? { limitMs: 3000 }
+        : options.signal
+          ? { signal: options.signal }
+          : {};
+      if (mark && !(await drainPipes(closed, () => pipeBytes, drainLimits))) {
         child.stdout.destroy();
         child.stderr.destroy();
       }
@@ -352,19 +361,28 @@ export async function command(
  * стоит команде прежние `idleMs`. Общий предел `limitMs` — на держателя,
  * который продолжает писать. Перед отказом цикл событий проходит фазу
  * ввода-вывода: после долгой блокировки таймер срабатывает раньше, чем
- * прочитаны уже готовые данные. `true` — pipes закрылись сами.
+ * прочитаны уже готовые данные. Отмена `signal` обрывает ожидание сразу.
+ * `true` — pipes закрылись сами.
  */
 export async function drainPipes(
   closed: Promise<void>,
   progress: () => number,
-  { idleMs = 3000, limitMs = 30_000 }: { idleMs?: number; limitMs?: number } = {},
+  {
+    idleMs = 3000,
+    limitMs = 30_000,
+    signal,
+  }: { idleMs?: number; limitMs?: number; signal?: AbortSignal } = {},
 ): Promise<boolean> {
   const deadline = performance.now() + limitMs;
   let timer: NodeJS.Timeout | undefined;
   let settled = false;
+  let onAbort: (() => void) | undefined;
   try {
     return await new Promise<boolean>((done) => {
       void closed.then(() => done(true));
+      if (signal?.aborted) return done(false);
+      onAbort = () => done(false);
+      signal?.addEventListener('abort', onAbort, { once: true });
       let seen = progress();
       const arm = () => {
         timer = setTimeout(
@@ -386,6 +404,7 @@ export async function drainPipes(
   } finally {
     settled = true;
     if (timer) clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener('abort', onAbort);
   }
 }
 function captureProcessTree(pid?: number): RuntimeDiagnostics['processTree'] {
