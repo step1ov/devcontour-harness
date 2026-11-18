@@ -12,7 +12,8 @@
 // менять: устаревший выход на новой базе — конфликт слияния, повтор
 // ответвляется от неё.
 
-import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { lstat, mkdir, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 import { gateTimeoutMs, type ExecutionPolicy, type GeneratorPolicy } from '../contracts/index.ts';
 import { TaskFailure } from '../engine/failure.ts';
@@ -29,7 +30,11 @@ import { completedCheck, diagnostic, runCheck } from './gates.ts';
 /**
  * Генераторы, которых касается изменение: изменённый путь совпадает со
  * входом, инструментом или выходом генератора (путь или префикс каталога).
- * Порядок — порядок политики.
+ * Порядок — порядок политики. Сравнение с учётом регистра, как у
+ * `writePaths` и всей проверки области (`within`): пути diff Git точные.
+ * Согласованность политики (`pathsOverlap`) сравнивает без регистра
+ * намеренно строже — на нечувствительной к регистру ФС разные написания
+ * одного каталога иначе прошли бы как непересекающиеся.
  */
 export function selectGenerators(
   generators: readonly GeneratorPolicy[],
@@ -105,6 +110,51 @@ export async function runGenerators(run: GeneratorsRun): Promise<GeneratorOutcom
   return outcomes;
 }
 
+/**
+ * Игнорируемые неотслеживаемые пути внутри выходов с отпечатком: файл — по
+ * содержимому, ссылка — по цели. Игнорируемый каталог целиком (`--directory`)
+ * — одной записью без обхода: генератор, дописавший в уже существующий
+ * игнорируемый каталог, этим не виден (в коммит такой файл всё равно не
+ * попадёт).
+ */
+async function ignoredUnder(cwd: string, root: string, outputs: readonly string[]) {
+  const entries = names(
+    await gitRawOutput(
+      cwd,
+      '--literal-pathspecs',
+      'ls-files',
+      '-z',
+      '--others',
+      '--ignored',
+      '--exclude-standard',
+      '--directory',
+      '--',
+      ...outputs,
+    ),
+  );
+  const result = new Map<string, string>();
+  for (const entry of entries) {
+    if (entry.endsWith('/')) {
+      result.set(entry, 'dir');
+      continue;
+    }
+    const path = join(root, entry);
+    const stat = await lstat(path).catch(() => undefined);
+    result.set(
+      entry,
+      !stat
+        ? 'missing'
+        : stat.isSymbolicLink()
+          ? 'link:' + (await readlink(path))
+          : 'file:' +
+            createHash('sha256')
+              .update(await readFile(path))
+              .digest('hex'),
+    );
+  }
+  return result;
+}
+
 const listed = (paths: string[]) =>
   paths.slice(0, 20).join(', ') + (paths.length > 20 ? ` и ещё ${paths.length - 20}` : '');
 
@@ -138,6 +188,7 @@ async function runOne(
     await gitRawOutput(cwd, '--literal-pathspecs', 'ls-files', '-z', '--', ...generator.outputs),
   ))
     await rm(join(root, path), { force: true });
+  const ignoredBefore = await ignoredUnder(cwd, root, generator.outputs);
   let guarded: Map<string, string> | undefined;
   try {
     if (run.policy.isolation.mode === 'os') guarded = protectedSnapshot(root);
@@ -221,23 +272,17 @@ async function runOne(
     );
   // Сверка видит только отслеживаемое и неигнорируемое: выход, скрытый
   // .gitignore, не попал бы в коммит, и проверка его свежести была бы пустой.
-  const ignored = names(
-    await gitRawOutput(
-      cwd,
-      '--literal-pathspecs',
-      'ls-files',
-      '-z',
-      '--others',
-      '--ignored',
-      '--exclude-standard',
-      '--',
-      ...generator.outputs,
-    ),
-  );
-  if (ignored.length)
+  // Отказ — только за то, что записал генератор: игнорируемое, бывшее в
+  // выходе до него (`node_modules` пакета workspace от gate установки, кэши
+  // сборки), не его выход.
+  const ignoredAfter = await ignoredUnder(cwd, root, generator.outputs);
+  const written = [...ignoredAfter]
+    .filter(([path, digest]) => ignoredBefore.get(path) !== digest)
+    .map(([path]) => path);
+  if (written.length)
     throw new TaskFailure(
       'gate',
-      `Генератор ${id} записал в выход файлы, скрытые .gitignore (в коммит они не попадут): ${listed(ignored)}; уберите выход из .gitignore или из outputs`,
+      `Генератор ${id} записал в выход файлы, скрытые .gitignore (в коммит они не попадут): ${listed(written)}; уберите выход из .gitignore или из outputs`,
     );
   const after = await stageAll(cwd);
   const changed = names(
