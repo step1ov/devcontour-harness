@@ -481,7 +481,7 @@ export function cliAdapter(
           await writeFile(resultPath, cleaned);
           output = JSON.parse(cleaned);
         } else {
-          const { events } = runtimeEvents(result.stdout);
+          const { events, malformed } = runtimeEvents(result.stdout);
           const last = events.findLast((e) => e.type === 'result');
           // `is_error` проверяется до разбора: `claudeResult` требует поле
           // `structured_output`, которого у такого `result` нет, и отказ
@@ -497,11 +497,12 @@ export function cliAdapter(
                 ),
               ),
             };
-          // Без итогового `structured_output` (строка `result` оборвана на
-          // выходе процесса или отсутствует) ответ — принятый вызов
-          // `StructuredOutput` из того же потока (F59).
+          // Строки `result` нет, а поток содержит неразобранную строку (итог
+          // оборван на выходе процесса): ответ — принятый вызов
+          // `StructuredOutput` из того же потока (F59). Целая строка `result`
+          // без ответа — решение CLI, она остаётся отказом.
           const accepted =
-            last?.structured_output === undefined ? acceptedStructuredOutput(events) : undefined;
+            last === undefined && malformed ? acceptedStructuredOutput(events) : undefined;
           output = accepted ? accepted.value : claudeResult.parse(last).structured_output;
         }
       } catch (error) {

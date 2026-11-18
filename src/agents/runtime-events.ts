@@ -36,28 +36,28 @@ const blocks = (event: Record<string, unknown>) => {
   return Array.isArray(message?.content) ? (message.content as unknown[]) : [];
 };
 /**
- * Ответ, который Claude Code принял инструментом `StructuredOutput`:
- * последний вызов с успешным `tool_result`. Итоговое событие `result`
- * повторяет его в `structured_output`, но на пилоте строка `result`
- * (десятки КБ) обрывалась на выходе процесса — готовая попытка проваливалась
- * как «ответ не прочитан». Вызов без принятого результата (отказ схемы,
- * ошибка инструмента) ответом не считается.
+ * Ответ, который Claude Code принял инструментом `StructuredOutput`. Итоговое
+ * событие `result` повторяет его в `structured_output`, но на пилоте строка
+ * `result` (десятки КБ) обрывалась на выходе процесса — готовая попытка
+ * проваливалась как «ответ не прочитан» (F59). Берётся последний вызов
+ * верхнего уровня (не субагента) и только если именно он принят: после
+ * отклонённого или оставшегося без результата вызова модель ещё меняла
+ * ответ, и что сообщил бы CLI, неизвестно.
  */
 export function acceptedStructuredOutput(events: Record<string, unknown>[]) {
   const accepted = new Set<string>();
   for (const event of events)
-    if (event.type === 'user')
+    if (event.type === 'user' && event.parent_tool_use_id == null)
       for (const block of blocks(event)) {
         const r = toolResult.safeParse(block);
         if (r.success && r.data.is_error !== true) accepted.add(r.data.tool_use_id);
       }
-  let output: { value: unknown } | undefined;
+  let last: { id: string; input: unknown } | undefined;
   for (const event of events)
     if (event.type === 'assistant' && event.parent_tool_use_id == null)
       for (const block of blocks(event)) {
         const call = toolUse.safeParse(block);
-        if (call.success && call.data.name === 'StructuredOutput' && accepted.has(call.data.id))
-          output = { value: call.data.input };
+        if (call.success && call.data.name === 'StructuredOutput') last = call.data;
       }
-  return output;
+  return last && accepted.has(last.id) ? { value: last.input } : undefined;
 }

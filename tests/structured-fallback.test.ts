@@ -97,20 +97,31 @@ test('F59: оборванная строка result — ответ из прин
   assert.deepEqual(response.output, answer);
 });
 
-test('F59: последний принятый вызов, а не отклонённый инструментом и не вызов субагента', async () => {
+test('F59: принятым должен быть последний вызов; вызов субагента не в счёт', async () => {
   const first = { ...answer, summary: 'первый' };
-  const response = await invoke(
+  // Вызов субагента после принятого ответа его не меняет.
+  const nested = await invoke(
     init +
       call('toolu_1', first) +
       reply('toolu_1') +
-      call('toolu_2', { wrong: true }) +
-      reply('toolu_2', true) +
       call('toolu_3', { nested: true }, 'toolu_task') +
       reply('toolu_3') +
       truncated,
   );
-  assert.equal(response.status, 'ok', JSON.stringify(response.diagnostics));
-  assert.deepEqual(response.output, first);
+  assert.equal(nested.status, 'ok', JSON.stringify(nested.diagnostics));
+  assert.deepEqual(nested.output, first);
+  // После принятого — отклонённый или оставшийся без результата вызов:
+  // модель ещё меняла ответ, прежний не берётся.
+  for (const tail of [
+    call('toolu_2', { wrong: true }) + reply('toolu_2', true),
+    call('toolu_2', { wrong: true }),
+  ]) {
+    const response = await invoke(
+      init + call('toolu_1', first) + reply('toolu_1') + tail + truncated,
+    );
+    assert.equal(response.status, 'failed');
+    assert.match(response.diagnostics.reason ?? '', /структурированный ответ не прочитан/);
+  }
 });
 
 test('F59: без принятого вызова оборванный поток — по-прежнему непрочитанный ответ', async () => {
@@ -134,4 +145,19 @@ test('F59: целая строка result по-прежнему источник
   );
   assert.equal(response.status, 'ok');
   assert.deepEqual(response.output, final);
+});
+
+test('F59: целая строка result решает сама — отказ и итог без ответа не подменяются принятым вызовом', async () => {
+  const before = init + call('toolu_1', answer) + reply('toolu_1');
+  const error = await invoke(
+    before +
+      line({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'boom' }),
+  );
+  assert.equal(error.status, 'failed');
+  assert.equal(error.diagnostics.reason, 'boom');
+  const empty = await invoke(
+    before + line({ type: 'result', subtype: 'error_max_turns', is_error: false }),
+  );
+  assert.equal(empty.status, 'failed', 'итог CLI без ответа не подменяется принятым вызовом');
+  assert.equal(empty.output, undefined);
 });
