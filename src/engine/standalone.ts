@@ -15,6 +15,8 @@ export function standaloneHost(store: ExecutionStore, policy: ExecutionPolicy): 
   const policyDigest = executionDigest(policy);
   return {
     store,
+    // Самостоятельный harness сам принимает и проверяет свои результаты.
+    capabilities: { integrationReuse: true },
     basis: {
       orderDigest: (work) => digestOf(work.order),
       scopeDigest: (work) =>

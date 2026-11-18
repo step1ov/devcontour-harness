@@ -205,6 +205,11 @@ export {
   type PathDecision,
   type ProviderSnapshot,
 } from './verification/applicability.ts';
+export {
+  reusedEvidenceProblem,
+  type ReuseCheck,
+  type ReuseRecord,
+} from './verification/integration-reuse.ts';
 export { ReviewProbes, probeLimits, observeReproductions } from './agents/review-probe.ts';
 export {
   composeRedactors,

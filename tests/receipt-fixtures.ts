@@ -488,3 +488,29 @@ export function notApplicableAttempt() {
   }
   return f;
 }
+
+/**
+ * Результат с записью интеграции, взятой из кандидата (`integrationReuse`):
+ * `lint` прошёл на кандидате, на интеграции — ссылка на его запись и общее
+ * дерево; получатель передаёт деревья своим Git (`trees`).
+ */
+export function reusedAttempt() {
+  const tree = sha('e');
+  const policy = policyOf((p: any) => {
+    p.integrationReuse = 'identical-tree';
+    p.repositories[0].gates.push({ id: 'lint', kind: 'check', command: ['node', 'lint.js'] });
+  });
+  const graph = graphOf({ a: [] });
+  graph.orders[0]!.gates = ['unit', 'lint'];
+  const f = attempt(graph, policy);
+  const source = f.evidence('lint', 'candidate');
+  f.evidence('lint', 'integration', {
+    summary: 'PASS взято из кандидата',
+    reusedEvidence: { evidenceId: source.id, phase: 'candidate', sha: sha('c'), tree },
+  });
+  const done = () => {
+    const out = f.done();
+    return { ...out, context: { ...out.context, trees: { candidate: tree, result: tree } } };
+  };
+  return { ...f, done };
+}

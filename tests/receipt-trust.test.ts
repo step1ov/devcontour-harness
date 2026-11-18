@@ -11,7 +11,12 @@ import {
   type ReceiverContext,
 } from '../src/verification/acceptance.ts';
 import { sha } from './engine-fixture.ts';
-import { acceptedProperty, maximalAttempt, notApplicableAttempt } from './receipt-fixtures.ts';
+import {
+  acceptedProperty,
+  maximalAttempt,
+  notApplicableAttempt,
+  reusedAttempt,
+} from './receipt-fixtures.ts';
 
 /**
  * Модель доверия получателя (`receiptTrust`) как проверяемое утверждение.
@@ -46,6 +51,12 @@ const containers = new Set(['source', 'inputs', 'checked', 'shas']);
 
 /** Поля, отсутствие которых получатель заменяет своим ожиданием. */
 const absentEquivalent = new Set(['inputs.writer', 'inputs.requiredGates']);
+/**
+ * Поля, без которых запись — утверждение об исполнении: ссылка записи
+ * интеграции на кандидата (`reusedEvidence`) лишь добавляет условия, а
+ * подлинность самой записи получатель не удостоверяет (транспорт хоста).
+ */
+const absentAsClaim = new Set(['evidence[].reusedEvidence']);
 
 test('Таблица модели доверия в docs/contracts.md совпадает с кодом', () => {
   const docs = readFileSync(new URL('../docs/contracts.md', import.meta.url), 'utf8');
@@ -203,6 +214,7 @@ function forgeries(result: RunResult, testId: string): Forgery[] {
           // Запись потребителя без сведений о свойствах целиком остаётся допустимой.
           trust:
             absentEquivalent.has(p) ||
+            absentAsClaim.has(p) ||
             (next.length === 3 &&
               next[0] === 'evidence' &&
               next[2] === 'property' &&
@@ -314,6 +326,16 @@ test('Каждое поле результата с неприменимым gat
   const { result, context } = f.done();
   f.store.close();
   assert.ok(result.evidence.some((e) => e.kind === 'not-applicable'));
+  const { failures, visited } = judge(result, context, '');
+  for (const p of visited) visitedAll.add(p);
+  assert.deepEqual(failures, []);
+});
+
+test('Каждое поле результата с записью, взятой из кандидата: подделка ссылки или дерева — отказ', () => {
+  const f = reusedAttempt();
+  const { result, context } = f.done();
+  f.store.close();
+  assert.ok(result.evidence.some((e) => e.reusedEvidence));
   const { failures, visited } = judge(result, context, '');
   for (const p of visited) visitedAll.add(p);
   assert.deepEqual(failures, []);
