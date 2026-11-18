@@ -4,6 +4,8 @@ import {
   API_VERSION,
   HarnessError,
   STATE_VERSION,
+  runtimeAssignments,
+  sameVendorReviews,
   type ExecutionPolicy,
   type RuntimeAdapter,
   type RuntimeName,
@@ -19,27 +21,6 @@ export type ToolchainInspect = (
   policy: ExecutionPolicy,
   baseDir: string,
 ) => Promise<ToolchainReport[]>;
-
-/** Runtime, которые политика действительно назначает writer или reviewer. */
-function usedRuntimes(policy: ExecutionPolicy) {
-  const used = new Set<string>();
-  const rule = (r?: { reviewer: { runtime: string }; alternates?: { runtime: string }[] }) => {
-    if (!r) return;
-    used.add(r.reviewer.runtime);
-    for (const a of r.alternates ?? []) used.add(a.runtime);
-  };
-  for (const k of ['code', 'plan', 'contract'] as const) rule(policy.review[k]);
-  const roles = [
-    ...Object.values(policy.roles),
-    ...policy.repositories.flatMap((r) => Object.values(r.roles ?? {})),
-  ];
-  for (const b of roles) {
-    used.add(b.writer.runtime);
-    rule(b.review);
-  }
-  for (const r of policy.repositories) rule(r.review);
-  return used;
-}
 
 /**
  * Проверка среды без live-вызова модели: версия пакета и Node, наличие
@@ -71,13 +52,20 @@ export async function doctor(
   const runtimes = [];
   // С политикой обязательны только назначенные ею runtime: сценарий одного
   // вендора или fixture не требует второго CLI.
-  const required = policy ? usedRuntimes(policy) : new Set(['codex', 'claude']);
+  const assigned = policy ? runtimeAssignments(policy) : undefined;
+  const required = new Set<string>(assigned ? assigned.keys() : ['codex', 'claude']);
   for (const runtime of ['codex', 'claude'] as const) {
     const caps = required.has(runtime)
       ? await adapters[runtime]?.capabilities().catch(() => undefined)
       : undefined;
+    const what = assigned?.get(runtime);
     if (!caps?.version && required.has(runtime))
-      problems.push(`${runtime}: не найден или не отвечает на --version`);
+      problems.push(
+        `${runtime}: не найден или не отвечает на --version` +
+          (what
+            ? `; политика назначает его (${what.join(', ')}) — первая попытка или ревью остановится; установите ${runtime} и выполните вход либо подготовьте политику без него (init --review same)`
+            : ''),
+      );
     runtimes.push({
       runtime,
       available: Boolean(caps?.version),
@@ -145,6 +133,29 @@ export async function doctor(
       problems.push(
         `toolchain ${r.repositoryId}: ${p.code} ${p.field.join('.')}${p.path ? ` (${p.path})` : ''}: ${p.message}`,
       );
+  // Ревью тем же вендором — не отказ, но явное предупреждение.
+  const same = policy
+    ? sameVendorReviews(policy, [
+        ...new Set(
+          [
+            ...Object.values(policy.roles),
+            ...policy.repositories.flatMap((r) => Object.values(r.roles ?? {})),
+          ].map((b) => b.writer.runtime),
+        ),
+      ])
+    : [];
+  const warnings = same.length
+    ? [
+        {
+          code: 'review-same-vendor' as const,
+          message: `Ревью тем же вендором, что автор (vendor: same-vendor-allowed): ${[
+            ...new Set(
+              same.map((s) => `${s.role ? 'code ' + s.role : s.kind} ${s.author}→${s.reviewer}`),
+            ),
+          ].join(', ')}; независимость ниже, чем у ревью другим вендором`,
+        },
+      ]
+    : [];
   return {
     harness: HARNESS_VERSION,
     apiVersion: API_VERSION,
@@ -156,5 +167,6 @@ export async function doctor(
     ...(checkoutRoot ? { checkouts: checkoutRoot } : {}),
     ...(toolchains ? { toolchains } : {}),
     problems,
+    ...(warnings.length ? { warnings } : {}),
   };
 }

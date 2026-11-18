@@ -9,6 +9,7 @@ import {
   targetRefSchema,
   vendorOf,
   type Author,
+  type RuntimeName,
   trimmedText,
 } from './primitives.ts';
 import { digestOf } from './digest.ts';
@@ -560,6 +561,74 @@ export function selectReviewer(
     code: 'REVIEWER_SAME_VENDOR',
     message: `Ревью ${kind}: reviewer ${rule.reviewer.runtime} того же вендора, что writer ${writer.runtime}; разрешите vendor: same-vendor-allowed явно`,
   };
+}
+
+type PolicyBindings = Pick<ExecutionPolicy, 'roles' | 'review' | 'repositories'>;
+
+/** Роли политики: общие и свои роли репозиториев. */
+const roleEntries = (policy: PolicyBindings) => [
+  ...Object.entries(policy.roles).map(([role, binding]) => ({
+    role,
+    binding,
+    repositoryId: undefined as string | undefined,
+  })),
+  ...policy.repositories.flatMap((r) =>
+    Object.entries(r.roles ?? {}).map(([role, binding]) => ({
+      role,
+      binding,
+      repositoryId: r.id,
+    })),
+  ),
+];
+
+/**
+ * Что политика назначает каждому runtime: `writer <роль>` и `reviewer <вид>`
+ * (основной reviewer и запасные). Runtime без назначений в карте нет.
+ */
+export function runtimeAssignments(policy: PolicyBindings): Map<RuntimeName, string[]> {
+  const out = new Map<RuntimeName, string[]>();
+  const add = (runtime: RuntimeName, what: string) => {
+    const list = out.get(runtime) ?? [];
+    if (!list.includes(what)) list.push(what);
+    out.set(runtime, list);
+  };
+  const rule = (r: ReviewRule | undefined, what: string) => {
+    if (!r) return;
+    for (const b of [r.reviewer, ...(r.alternates ?? [])]) add(b.runtime, 'reviewer ' + what);
+  };
+  for (const { role, binding } of roleEntries(policy)) {
+    add(binding.writer.runtime, 'writer ' + role);
+    rule(binding.review, 'code ' + role);
+  }
+  for (const r of policy.repositories) rule(r.review, 'code ' + r.id);
+  for (const k of ['plan', 'contract', 'code'] as const) rule(policy.review[k], k);
+  return out;
+}
+
+/**
+ * Ревью, которые политика отдаёт reviewer того же вендора, что автор:
+ * план и контракт — для каждого из `planAuthors`, код — для writer каждой
+ * роли. Только допустимые назначения (`same-vendor-allowed`); отказ
+ * `selectReviewer` сюда не попадает.
+ */
+export function sameVendorReviews(
+  policy: PolicyBindings,
+  planAuthors: readonly Author[],
+): { kind: ReviewKind; author: Author; reviewer: RuntimeName; role?: string }[] {
+  const out: { kind: ReviewKind; author: Author; reviewer: RuntimeName; role?: string }[] = [];
+  for (const kind of ['plan', 'contract'] as const)
+    for (const author of new Set(planAuthors)) {
+      const choice = selectReviewer(policy, kind, { runtime: author });
+      if (choice.ok && choice.sameVendor)
+        out.push({ kind, author, reviewer: choice.reviewer.runtime });
+    }
+  for (const { role, binding, repositoryId } of roleEntries(policy)) {
+    const author = binding.writer.runtime;
+    const choice = selectReviewer(policy, 'code', { runtime: author }, role, repositoryId);
+    if (choice.ok && choice.sameVendor)
+      out.push({ kind: 'code', author, reviewer: choice.reviewer.runtime, role });
+  }
+  return out;
 }
 
 type Issue = CodedIssue;
