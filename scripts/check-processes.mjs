@@ -143,6 +143,9 @@ export async function inventoryWithRetry(
 
 /** Own tagged descendants as well as children that leave their original process group.
  *
+ * A stop signals the check's own running steps (their process groups) at
+ * once, then sweeps leaked descendants from fresh snapshots.
+ *
  * An unavailable process inventory never stops or fails the check: a failed
  * background round is skipped with a warning, and a cleanup without a
  * snapshot falls back to the check's own live children (their ChildProcess
@@ -163,6 +166,8 @@ export function checkProcesses({
   let stopping = false;
   let pending;
   let polling;
+  /** The final sweep could not take a snapshot: leaks were not looked for. */
+  let leakCheckSkipped = false;
   /** Background rounds skipped in a row because no snapshot could be taken. */
   let skipped = 0;
   /** Why the check was stopped when no step's own failure stopped it. */
@@ -174,8 +179,13 @@ export function checkProcesses({
     return found;
   };
   const sample = async (withMark = false) => remember(await snapshot(withMark));
+  // A child whose spawn failed has no pid yet still no exit code: signalling
+  // it (child.kill included) would reach pid 0, the caller's process group.
+  const hasPid = (child) => Number.isInteger(child.pid) && child.pid > 0;
   const live = () =>
-    [...children].filter((child) => child.exitCode === null && child.signalCode === null);
+    [...children].filter(
+      (child) => hasPid(child) && child.exitCode === null && child.signalCode === null,
+    );
   const signalChildren = (signal) => {
     for (const child of live())
       try {
@@ -190,16 +200,25 @@ export function checkProcesses({
         }
       }
   };
-  /** Best-effort cleanup without a snapshot: only the check's own live children. */
-  const stopChildren = async (signal) => {
-    signalChildren(signal);
-    const started = Date.now();
-    while (live().length && Date.now() - started < 5000) await delay(100);
+  /** Without a snapshot: SIGKILL the check's own children still alive 5 s after `since`. */
+  const finishChildren = async (since) => {
+    while (live().length && Date.now() - since < 5000) await delay(100);
     if (live().length) signalChildren('SIGKILL');
   };
   const sweep = async (initialSignal) => {
-    const started = Date.now();
+    // Grace clocks start at each process's first signal, never before a
+    // slow snapshot: pid -> [start, first signal time].
+    const signalled = new Map();
+    let signalledAt;
+    // The check's own running steps are signalled at once: a fail-fast stop
+    // or Ctrl-C does not wait for ps.
+    if (live().length) {
+      signalledAt = Date.now();
+      for (const child of live()) signalled.set(child.pid, [undefined, signalledAt]);
+      signalChildren(initialSignal);
+    }
     for (;;) {
+      const sampledAt = Date.now();
       let candidates;
       let current;
       try {
@@ -210,18 +229,33 @@ export function checkProcesses({
         // a historical PID can describe an unrelated replacement process.
         current = await snapshot(true);
       } catch (error) {
+        leakCheckSkipped = true;
         warn(
           `warning: ${error.message}; leaked-process cleanup skipped, stopping only the check's own running steps`,
         );
-        return stopChildren(initialSignal);
+        if (signalledAt === undefined && live().length) {
+          signalChildren(initialSignal);
+          signalledAt = Date.now();
+        }
+        return finishChildren(signalledAt ?? Date.now());
       }
-      signalSameProcesses(
-        candidates,
-        current,
-        Date.now() - started < 1000 ? initialSignal : 'SIGKILL',
-      );
-      if (Date.now() - started >= 5000)
-        throw new Error('Check descendants survived bounded cleanup');
+      const first = new Map();
+      const again = new Map();
+      for (const [pid, start] of candidates) {
+        const known = signalled.get(pid);
+        // A child signalled through its group is recorded before its start is known.
+        if (known && known[0] === undefined) known[0] = start;
+        if (!known || known[0] !== start) first.set(pid, start);
+        // Only a snapshot begun past a process's grace that still shows it proves a survivor.
+        else if (sampledAt - known[1] >= 5000)
+          throw new Error('Check descendants survived bounded cleanup');
+        else again.set(pid, start);
+      }
+      const now = Date.now();
+      signalSameProcesses(first, current, initialSignal);
+      for (const [pid, start] of first) signalled.set(pid, [start, now]);
+      const late = new Map([...again].filter(([pid]) => now - signalled.get(pid)[1] >= 1000));
+      signalSameProcesses(late, current, 'SIGKILL');
       await delay(100);
     }
   };
@@ -231,16 +265,13 @@ export function checkProcesses({
     if (pending) return pending;
     stopping = true;
     cause = reason;
-    clearInterval(poll);
-    // ChildProcess tracks its own exit; unlike kill(-oldPid), this does not
-    // reuse a remembered process group after the leader has exited.
-    if (process.platform === 'win32') for (const child of children) child.kill(signal);
+    clearTimeout(poll);
     pending = sweep(signal).catch((error) => {
       process.exitCode ||= 1;
       cause ??= error.message;
       console.error(error.message);
       for (const child of children) {
-        child.kill('SIGKILL');
+        if (hasPid(child)) child.kill('SIGKILL');
         child.stdout?.destroy();
         child.stderr?.destroy();
       }
@@ -255,8 +286,17 @@ export function checkProcesses({
     process.exitCode = 143;
     void stop('SIGTERM');
   };
-  const poll = setInterval(() => {
-    if (polling || stopping) return;
+  /** Background rounds 250 ms apart; after a slow round, max(its duration, 1 s). */
+  const POLL_MS = 250;
+  let poll;
+  const schedule = (gap) => {
+    if (stopping) return;
+    poll = setTimeout(round, gap);
+    poll.unref();
+  };
+  const round = () => {
+    if (stopping) return;
+    const started = Date.now();
     polling = sample()
       .then(
         () => {
@@ -272,9 +312,11 @@ export function checkProcesses({
       )
       .finally(() => {
         polling = undefined;
+        const took = Date.now() - started;
+        schedule(took > POLL_MS ? Math.max(took, 1000) : POLL_MS);
       });
-  }, 250);
-  poll.unref();
+  };
+  schedule(POLL_MS);
   process.once('SIGINT', interrupt);
   process.once('SIGTERM', terminate);
   return {
@@ -284,6 +326,10 @@ export function checkProcesses({
     /** The reason of a stop no step's own exit caused, or of a failed cleanup. */
     get cause() {
       return cause;
+    },
+    /** True when the cleanup ran without a snapshot (ps unavailable). */
+    get leakCheckSkipped() {
+      return leakCheckSkipped;
     },
     /** Background inventory rounds skipped in a row (0 while ps answers). */
     get skippedRounds() {
@@ -299,6 +345,8 @@ export function checkProcesses({
       children.add(child);
       child.once('spawn', () => {
         // An early record only helps; the marker finds the child later anyway.
+        // A round in flight already reads the process table.
+        if (polling) return;
         void sample(true).catch((error) => {
           warn(`warning: ${error.message}; the new step keeps running`);
         });

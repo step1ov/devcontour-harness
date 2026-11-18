@@ -41,3 +41,6 @@ for (const r of results) {
 if (results.some((r) => r.code !== 0)) process.exitCode ||= 1;
 
 await processes.dispose();
+// Без ps в конце утечки не искались: сказать об этом, но не валить проверку.
+if (processes.leakCheckSkipped)
+  console.log('\nstatic checks: process leak check not performed (ps unavailable)');
