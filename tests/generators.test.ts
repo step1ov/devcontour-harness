@@ -689,17 +689,23 @@ test('Игнорируемые файлы, бывшие в выходе до г�
   assert.equal(bad.work().failureKind, 'gate', bad.work().failure);
   assert.match(bad.work().failure!, /скрытые \.gitignore .*catalog\.ts\.map/);
   assert.doesNotMatch(bad.work().failure!, /node_modules/);
+  // Отказ — на кандидате, при записи: сравнение только по путям пропустило бы
+  // бывший файл здесь и отказало бы лишь на integration (там его нет).
+  const failed = bad.attempts()[0]!;
+  assert.equal(failed.candidateSha, undefined, 'кандидат не создан');
+  assert.equal(failed.timings!.find((t) => t.stage === 'generate:catalog')?.outcome, 'failed');
+  assert.ok(!failed.timings!.some((t) => t.stage.startsWith('integration-')));
 });
 
 test('Генерация получает свой предел фазы: исполнитель и генератор вместе дольше runTimeoutMs, попытка принимается', async () => {
   const f = fixture({
-    writer: { ...implement({ [DATA]: data(['apple', ...items]) }), sleepMs: 5000 },
-    environment: { GEN_SLEEP_MS: '5000' },
-    policy: (p) => (p.runTimeoutMs = 8000),
+    writer: { ...implement({ [DATA]: data(['apple', ...items]) }), sleepMs: 3000 },
+    environment: { GEN_SLEEP_MS: '3000' },
+    policy: (p) => (p.runTimeoutMs = 5000),
   });
   await runAll(f.ctx);
   const work = f.work();
   assert.equal(work.status, 'done', work.failure);
   const timing = f.attempts()[0]!.timings!.find((t) => t.stage === 'generate:catalog')!;
-  assert.ok(Date.parse(timing.finishedAt!) - Date.parse(timing.startedAt) >= 5000);
+  assert.ok(Date.parse(timing.finishedAt!) - Date.parse(timing.startedAt) >= 3000);
 });

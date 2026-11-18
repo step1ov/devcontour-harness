@@ -13,7 +13,8 @@
 // ответвляется от неё.
 
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { lstat, mkdir, readlink, realpath, rm, writeFile } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 import { gateTimeoutMs, type ExecutionPolicy, type GeneratorPolicy } from '../contracts/index.ts';
 import { TaskFailure } from '../engine/failure.ts';
@@ -110,10 +111,18 @@ export async function runGenerators(run: GeneratorsRun): Promise<GeneratorOutcom
   return outcomes;
 }
 
+/** SHA-256 файла потоком: большой игнорируемый файл не читается в память целиком. */
+async function fileDigest(path: string) {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  return hash.digest('hex');
+}
+
 /**
  * Игнорируемые неотслеживаемые пути внутри выходов с отпечатком: файл — по
  * содержимому, ссылка — по цели. Игнорируемый каталог целиком (`--directory`)
- * — одной записью без обхода: генератор, дописавший в уже существующий
+ * — одной записью без обхода (цена сверки — запись, а не дерево
+ * `node_modules`): генератор, дописавший в уже существующий
  * игнорируемый каталог, этим не виден (в коммит такой файл всё равно не
  * попадёт).
  */
@@ -146,10 +155,7 @@ async function ignoredUnder(cwd: string, root: string, outputs: readonly string[
         ? 'missing'
         : stat.isSymbolicLink()
           ? 'link:' + (await readlink(path))
-          : 'file:' +
-            createHash('sha256')
-              .update(await readFile(path))
-              .digest('hex'),
+          : 'file:' + (await fileDigest(path)),
     );
   }
   return result;
