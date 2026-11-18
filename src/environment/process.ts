@@ -16,6 +16,7 @@ import { outputRedactor, type Redactor } from './redaction.ts';
 import { TaskFailure, type Activity, type RuntimeDiagnostics } from '../contracts/index.ts';
 import { activityScope } from './activity.ts';
 import { hostLoad, loadText } from './host-load.ts';
+import { leaseScope, recordSurvivors } from './survivors.ts';
 
 /**
  * Сдерживаемая команда завершилась, но её потомков не удалось остановить или
@@ -148,6 +149,9 @@ export async function command(
     // Метку окружения наследуют все потомки, в том числе отсоединившиеся:
     // по ней их находят после завершения.
     const mark = options.contain ? randomUUID() : undefined;
+    // Область аренды ресурсов — в момент запуска: пережившие остановку
+    // потомки записываются в её базу (`survivors.ts`).
+    const lease = mark ? leaseScope.getStore() : undefined;
     const child = spawn(file, args, {
       cwd,
       env: mark
@@ -281,9 +285,18 @@ export async function command(
       cleanup();
       if (child.pid && mark)
         for (const [pid, start] of await descendants(child.pid, seen)) seen.set(pid, start);
-      const swept = mark
+      const { starts, ...swept } = mark
         ? await sweep(mark, seen, dirs, Date.parse(startedAt))
-        : { survivors: [] as number[] };
+        : { survivors: [] as number[], starts: new Map<number, string>() };
+      if (swept.survivors.length)
+        recordSurvivors(
+          lease,
+          swept.survivors.flatMap((pid) => {
+            const start = starts.get(pid);
+            return start ? [{ pid, start }] : [];
+          }),
+          options.activity?.label ?? file.split('/').at(-1) ?? file,
+        );
       // Потомков не удалось остановить или пересчитать: исход команды
       // собирается как обычно (ожидание pipes ограничено — их может держать
       // переживший потомок) и уходит вместе с отказом, а не результатом.
@@ -596,7 +609,7 @@ async function marked(mark: string): Promise<number[]> {
  * (`sweep` повторяет его и сдаётся с `ReapFailure`). Опрос во время команды
  * пустую таблицу переживает.
  */
-async function processTable(
+export async function processTable(
   strict = false,
 ): Promise<{ pid: number; ppid: number; start: string }[]> {
   const listed = await processInventory.tool(osTool('ps'), ['-axo', 'pid=,ppid=,lstart='], 10000);
@@ -714,13 +727,17 @@ async function sweep(
   seen: Map<number, string>,
   dirs: string[],
   since: number,
-): Promise<{ survivors: number[]; inventory?: string }> {
+): Promise<{ survivors: number[]; inventory?: string; starts: Map<number, string> }> {
   let left: number[] = [];
   let failures = 0;
+  // Время старта по последней полученной таблице: по нему запись о
+  // пережившем процессе отличает его от нового с тем же PID.
+  let starts = new Map<number, string>();
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
       const rows = await processTable(true);
       const table = new Map(rows.map((r) => [r.pid, r.start]));
+      starts = table;
       left = [
         ...new Set([
           ...(await processInventory.marked(mark)),
@@ -735,7 +752,7 @@ async function sweep(
       // повторяется, а не объявляется отказом с первого раза. Уже известные
       // потомки останавливаются и между попытками.
       const reason = error instanceof Error ? error.message : String(error);
-      if (++failures >= INVENTORY_TRIES) return { survivors: left, inventory: reason };
+      if (++failures >= INVENTORY_TRIES) return { survivors: left, inventory: reason, starts };
       for (const pid of left)
         try {
           process.kill(pid, 'SIGKILL');
@@ -745,7 +762,7 @@ async function sweep(
       await new Promise((r) => setTimeout(r, 500 * failures));
       continue;
     }
-    if (!left.length) return { survivors: [] };
+    if (!left.length) return { survivors: [], starts };
     for (const pid of left)
       try {
         process.kill(pid, 'SIGKILL');
@@ -754,5 +771,5 @@ async function sweep(
       }
     await new Promise((r) => setTimeout(r, 100));
   }
-  return { survivors: left };
+  return { survivors: left, starts };
 }

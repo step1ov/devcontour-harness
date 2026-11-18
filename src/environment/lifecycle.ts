@@ -12,6 +12,8 @@ import {
 import { dependencyNetworkFailure, dependencyNetworkMessage } from './dependency-network.ts';
 import { protectedChanges, protectedSnapshot, SandboxPolicyError } from './isolation.ts';
 import { command } from './process.ts';
+import { ensurePortsFree } from './port-probe.ts';
+import { leaseScope } from './survivors.ts';
 import { redactor, type Redactor } from './redaction.ts';
 export { redactor } from './redaction.ts';
 
@@ -281,6 +283,38 @@ export async function withEnvironment<T>(
   action: () => Promise<T>,
   measure: <R>(stage: string, action: () => Promise<R>) => Promise<R> = (_stage, action) =>
     action(),
+  /** Предупреждения пробы портов (порт, занятый чужим процессом только на wildcard). */
+  warn?: (message: string) => void,
+): Promise<T> {
+  // Порты аренды свободны до lifecycle, prepare и gates фазы; внутри фазы
+  // их законно держат её службы, и вложенная фаза их не проверяет.
+  const warnings = await ensurePortsFree();
+  if (warnings.length) {
+    // Предупреждение видно в артефактах фазы (`port-probe.json`) и стадией
+    // `port-shared:<порт>` в замерах попытки.
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'port-probe.json'), JSON.stringify({ warnings }, null, 2));
+    for (const message of warnings) {
+      warn?.(message);
+      const port = /^Порт (\d+)/.exec(message)?.[1] ?? 'unknown';
+      await measure(`port-shared:${port}`, () => Promise.resolve());
+    }
+  }
+  const scope = leaseScope.getStore();
+  if (scope && !scope.environment)
+    return leaseScope.run({ ...scope, environment: true }, () =>
+      phaseEnvironment(lifecycle, cwd, dir, execution, signal, action, measure),
+    );
+  return phaseEnvironment(lifecycle, cwd, dir, execution, signal, action, measure);
+}
+async function phaseEnvironment<T>(
+  lifecycle: Lifecycle | undefined,
+  cwd: string,
+  dir: string,
+  execution: ReturnType<typeof executionEnvironment>,
+  signal: AbortSignal,
+  action: () => Promise<T>,
+  measure: <R>(stage: string, action: () => Promise<R>) => Promise<R>,
 ): Promise<T> {
   if (!lifecycle) return action();
   await mkdir(dir, { recursive: true });

@@ -87,6 +87,11 @@ export interface GatesAtResult {
   failures: { gate: string; message: string }[];
   /** Переходы живости за проверку (`onLiveness`); нет — проверка не замолкала. */
   liveness?: LivenessReport[];
+  /**
+   * Предупреждения пробы портов ресурсов: порт на всех адресах держит чужой
+   * процесс, loopback свободен (например, AirPlay Receiver на macOS).
+   */
+  warnings?: string[];
 }
 
 /**
@@ -166,6 +171,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
   const source = ctx.environment ?? process.env;
   const evidence: EvidenceRecord[] = [];
   const failures: GatesAtResult['failures'] = [];
+  const warnings: string[] = [];
   const failed = new Set<string>();
   let snapshots: DependencySnapshot[] = [];
   let added = false;
@@ -327,6 +333,8 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
               }
             }
           },
+          undefined,
+          (message) => warnings.push(message),
         );
         if (
           (await git(cwd, 'rev-parse', 'HEAD')) !== input.sha ||
@@ -358,5 +366,6 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
     evidence,
     ...(failures.length ? { failure: failures[0] } : {}),
     failures,
+    ...(warnings.length ? { warnings } : {}),
   };
 }

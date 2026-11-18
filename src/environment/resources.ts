@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { digestOf, type ExecutionPolicy } from '../contracts/index.ts';
 import { CleanupFailure, processAlive } from './lifecycle.ts';
+import { leaseScope, type LeaseScope } from './survivors.ts';
 
 type Resource = ExecutionPolicy['resources'][number];
 const digest = digestOf;
@@ -122,7 +123,17 @@ export async function withResources<T>(
   for (const id of ids)
     if (!config.resources.some((r) => r.id === id)) throw new Error('Неизвестный ресурс: ' + id);
   const resources = config.resources.filter((r) => ids.includes(r.id));
-  if (!resources.length) return work(signal, []);
+  // Область аренды видна командам и фазам внутри работы: пережившие
+  // остановку процессы записываются в базу машины, а порты аренды
+  // проверяются перед каждой фазой (`port-probe.ts`).
+  const scope: LeaseScope = {
+    database: config.resourceDatabase,
+    owner,
+    ports: resources.flatMap((r) =>
+      r.kind === 'port' ? [{ id: r.id, port: Number(r.value) }] : [],
+    ),
+  };
+  if (!resources.length) return leaseScope.run(scope, () => work(signal, []));
   const pool = new ResourcePool(config.resourceDatabase),
     token = randomUUID();
   const controller = new AbortController(),
@@ -147,7 +158,7 @@ export async function withResources<T>(
       },
       Math.max(1000, config.leaseMs / 3),
     );
-    const result = await work(combined, resources);
+    const result = await leaseScope.run(scope, () => work(combined, resources));
     combined.throwIfAborted();
     pool.heartbeat(token, count, config.leaseMs);
     return result;

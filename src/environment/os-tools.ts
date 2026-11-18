@@ -1,4 +1,5 @@
-import { accessSync, constants } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { accessSync, constants, readFileSync } from 'node:fs';
 
 /**
  * Системные утилиты, которыми ядро наблюдает процессы (`ps`, `lsof`),
@@ -72,4 +73,31 @@ export function lsofName(name: string): string {
     return [part[1] === 'x' ? parseInt(part.slice(2), 16) : simple[part[1]!]!];
   });
   return Buffer.from(bytes).toString('utf8');
+}
+
+let bootId: { value: string | undefined } | undefined;
+/**
+ * Идентификатор текущей загрузки ОС: Linux сообщает его прямо, macOS — момент
+ * загрузки. `undefined` — узнать нельзя. Вычисляется один раз.
+ */
+export function osBootId(): string | undefined {
+  if (bootId) return bootId.value;
+  let value: string | undefined;
+  try {
+    value = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+  } catch {
+    try {
+      const out = execFileSync(osTool('sysctl'), ['-n', 'kern.boottime'], {
+        encoding: 'utf8',
+        env: osToolEnv(),
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 2000,
+      });
+      value = /sec = \d+, usec = \d+/.exec(out)?.[0];
+    } catch {
+      value = undefined;
+    }
+  }
+  bootId = { value };
+  return value;
 }
