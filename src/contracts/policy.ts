@@ -214,6 +214,32 @@ export const dependencyStoreSchema = z.strictObject({
 });
 export type DependencyStorePolicy = z.infer<typeof dependencyStoreSchema>;
 
+/**
+ * Генератор репозитория: команда, которая строит закоммиченные выходы
+ * (`outputs`) из входов (`inputs`) инструментом (`tool`). Controller
+ * исполняет её после исполнителя, когда настоящий diff задевает входы,
+ * инструмент или выходы, с изоляцией и окружением gate; выходы попадают в
+ * кандидата, даже если лежат вне области записи роли и поручения. На
+ * взятом кандидате и на integration генератор исполняется заново и обязан
+ * не менять дерево. Пути — относительно корня репозитория, совпадение — путь
+ * или префикс каталога, как у `writePaths`.
+ */
+export const generatorSchema = z.strictObject({
+  /** Короче общего ID: имя стадии замера (`integration-generate:<id>`) не длиннее 100. */
+  id: z.string().regex(/^[A-Za-z0-9_-]{1,60}$/, 'Ожидается ID генератора [A-Za-z0-9_-]{1,60}'),
+  command: z.array(z.string().min(1)).min(1),
+  /** Каталог команды относительно корня дерева; нет — корень. */
+  cwd: relativePathSchema.optional(),
+  timeoutMs: z.number().int().positive().max(3_600_000).default(120000),
+  inputs: z.array(relativePathSchema).min(1).max(64),
+  outputs: z.array(relativePathSchema).min(1).max(64),
+  /** Файлы самого генератора: их правка тоже требует перегенерации. */
+  tool: z.array(relativePathSchema).max(64).default([]),
+});
+export type GeneratorPolicy = z.infer<typeof generatorSchema>;
+/** Предел генераторов одного репозитория. */
+export const MAX_GENERATORS = 10;
+
 export const repositoryPolicySchema = z.strictObject({
   id: idSchema,
   /**
@@ -248,6 +274,11 @@ export const repositoryPolicySchema = z.strictObject({
   preflight: z.array(stepSchema).default([]),
   /** Проверенные версии инструментов и явный выбор менеджера пакетов; читает preflight. */
   toolchain: toolchainSchema.optional(),
+  /**
+   * Генераторы закоммиченных выходов (`generatorSchema`, не больше 10).
+   * Необязательное поле без умолчания: политика без него сохраняет digest.
+   */
+  generators: z.array(generatorSchema).max(MAX_GENERATORS).optional(),
 });
 
 /** Предел расходов (USD) и/или времени вызовов; хотя бы одно поле — выражено вариантами. */
@@ -566,6 +597,68 @@ export function gateOrderIssues(
   return issues;
 }
 
+/** Путь внутри префикса (путь или каталог), как `writePaths`. */
+const insidePath = (path: string, prefix: string) =>
+  path === prefix || path.startsWith(prefix.endsWith('/') ? prefix : prefix + '/');
+/**
+ * Пути пересекаются: один совпадает с другим или лежит внутри него. Без учёта
+ * регистра: на нечувствительной к регистру ФС (macOS, Windows) `Gen/` и `gen/`
+ * — один каталог.
+ */
+export const pathsOverlap = (a: string, b: string) => {
+  const [x, y] = [a.toLowerCase(), b.toLowerCase()];
+  return insidePath(x, y) || insidePath(y, x);
+};
+/** Каталог состояния harness в дереве репозитория: генератор туда не пишет. */
+const HARNESS_TREE_DIRS = ['.devcontour', '.harness', '.git'];
+
+/**
+ * Согласованность генераторов репозитория (`repositories[].generators`):
+ * ID уникальны; выходы разных генераторов не пересекаются; выходы не
+ * пересекаются ни со входами и инструментом любого генератора (цепочек нет:
+ * порядок исполнения не влияет на результат), ни с `protectedPaths`, ни со
+ * служебными каталогами (`.devcontour/`, `.harness/`, `.git`). Пути — от корня
+ * репозитория. `path` — префикс пути нарушения (по умолчанию от генераторов).
+ */
+export function generatorIssues(
+  repo: Pick<Repo, 'generators' | 'protectedPaths'>,
+  path: (string | number)[] = ['generators'],
+): Issue[] {
+  const issues: Issue[] = [];
+  const generators = repo.generators ?? [];
+  const add = (where: (string | number)[], message: string) =>
+    issues.push({ code: 'INVALID_INPUT', path: [...path, ...where], message });
+  const ids = new Set<string>();
+  generators.forEach((g, i) => {
+    if (ids.has(g.id)) add([i, 'id'], 'Повтор генератора ' + g.id);
+    ids.add(g.id);
+  });
+  generators.forEach((g, i) =>
+    g.outputs.forEach((out, o) => {
+      const at = [i, 'outputs', o];
+      for (const dir of HARNESS_TREE_DIRS)
+        if (pathsOverlap(out, dir))
+          add(at, `Выход генератора ${g.id} (${out}) пересекает служебный каталог ${dir}`);
+      for (const p of repo.protectedPaths)
+        if (pathsOverlap(out, p))
+          add(at, `Выход генератора ${g.id} (${out}) пересекает защищённый путь ${p}`);
+      generators.forEach((other, j) => {
+        for (const own of [...other.inputs, ...other.tool])
+          if (pathsOverlap(out, own))
+            add(
+              at,
+              `Выход генератора ${g.id} (${out}) пересекает ${other.inputs.includes(own) ? 'вход' : 'инструмент'} генератора ${other.id} (${own})`,
+            );
+        if (j > i)
+          for (const theirs of other.outputs)
+            if (pathsOverlap(out, theirs))
+              add(at, `Выходы генераторов ${g.id} (${out}) и ${other.id} (${theirs}) пересекаются`);
+      });
+    }),
+  );
+  return issues;
+}
+
 /**
  * Согласованность политики, которую не выразить схемой, — проверки
  * DevContour `validateWorkflow` и загрузки конфигурации, перенесённые без
@@ -675,6 +768,7 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
     }))
       if (new Set(steps.map((s) => s.id)).size !== steps.length)
         add('INVALID_INPUT', ['repositories', r, name], 'Step ids должны быть уникальны');
+    issues.push(...generatorIssues(repo, ['repositories', r, 'generators']));
   });
   policy.repositories.forEach((repo, r) =>
     repo.dependsOn.forEach((dep, d) => {

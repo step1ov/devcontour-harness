@@ -162,6 +162,14 @@ export {
   type GateRun,
 } from './verification/gates.ts';
 export {
+  generatorNote,
+  runGenerators,
+  selectGenerators,
+  type GeneratorOutcome,
+  type GeneratorsRun,
+} from './verification/generators.ts';
+export { scopeViolations, type ScopeRules } from './engine/scope.ts';
+export {
   runGatesAt,
   type GatesAtContext,
   type GatesAtInput,
