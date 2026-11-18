@@ -71,6 +71,22 @@ type Reply =
   | { refused: string }
   | { error: { message: string; code?: string } };
 
+/**
+ * Число потоков сверки: ядра процесса минус одно, не больше 8.
+ * `HARNESS_DIGEST_THREADS` (целое 1–8) задаёт его явно — на слабой машине
+ * сверка копии seed не занимает все ядра; иное значение не действует.
+ */
+export function digestThreads(env: NodeJS.ProcessEnv = process.env): number {
+  return digestThreadsCap(env) ?? Math.min(MAX_THREADS, Math.max(1, availableParallelism() - 1));
+}
+
+/** Явное число потоков из `HARNESS_DIGEST_THREADS`; нет или не целое 1–8 — undefined. */
+export function digestThreadsCap(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  const raw = env.HARNESS_DIGEST_THREADS?.trim();
+  const cap = raw && /^\d+$/.test(raw) ? Number(raw) : NaN;
+  return cap >= 1 && cap <= MAX_THREADS ? cap : undefined;
+}
+
 /** Запуск потока; тест подменяет его, чтобы проверить отказ запуска. */
 export const digestWorker = { create: () => new Worker(WORKER, { eval: true }) };
 
@@ -86,7 +102,7 @@ export async function fileDigests(
   signal?.throwIfAborted();
   const batches: string[][] = [];
   for (let i = 0; i < rels.length; i += BATCH) batches.push(rels.slice(i, i + BATCH));
-  const threads = Math.min(MAX_THREADS, Math.max(1, availableParallelism() - 1), batches.length);
+  const threads = Math.min(digestThreads(), batches.length);
   const out: FileDigest[] = [];
   let next = 0;
   let failure: Error | undefined;

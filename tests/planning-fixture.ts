@@ -103,7 +103,7 @@ export function planningProject() {
   /** review-plan/run/result — с fixture runtime. */
   const harness = (...args: string[]) => run(fixtures, args);
 
-  const init = harness('init', '--repository', app);
+  const init = harness('init', '--repository', app, '--lead', 'claude');
   if (init.status !== 0) throw new Error('init: ' + init.stderr + init.stdout);
   const facts = init.json.data.facts;
   const state: string = init.json.data.manifest.paths.state;

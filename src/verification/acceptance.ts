@@ -12,6 +12,7 @@ import {
   type ExecutionPolicy,
   type ExecutionView,
   type GateApplicability,
+  type ReusedEvidence,
   type RunResult,
   type WorkOrder,
 } from '../contracts/index.ts';
@@ -26,6 +27,7 @@ import { manifestDigest } from './property.ts';
 import { unprovenReason, type ProofRecord } from './proof.ts';
 import { REQUIREMENT_GATE } from './requirements.ts';
 import { notApplicableProblem, proofGates } from './applicability.ts';
+import { reusedEvidenceProblem } from './integration-reuse.ts';
 
 /**
  * Доказательство договора проверки на границе приёмки.
@@ -157,11 +159,14 @@ export function suiteCorpus(
 /** Запись evidence результата в форме доказательства (у получателя). */
 type ReceivedEvidence = ProofEvidence &
   Pick<ProofRecord, 'tests' | 'testsTruncated'> & {
+    id: string;
     notApplicable?: GateApplicability | undefined;
+    reusedEvidence?: ReusedEvidence | undefined;
   };
 
 /** Политика получателя: репозитории (gates, группы, зависимости, target), роли и правила ревью. */
-export type ReceiverPolicy = Pick<ExecutionPolicy, 'repositories' | 'roles' | 'review'>;
+export type ReceiverPolicy = Pick<ExecutionPolicy, 'repositories' | 'roles' | 'review'> &
+  Partial<Pick<ExecutionPolicy, 'integrationReuse'>>;
 
 /**
  * Что получатель знает сам и передаёт проверке. Всё, что результат
@@ -222,6 +227,14 @@ export interface ReceiverContext {
    * соблюдено.
    */
   assignment?: 'current' | 'recorded';
+  /**
+   * Деревья кандидата и результата, вычисленные получателем своим Git
+   * (`git rev-parse <sha>^{tree}` для `shas.candidate` и `shas.result`).
+   * Нужны только результату с записями интеграции, взятыми из кандидата
+   * (`reusedEvidence`): без них такая запись не PASS. Проверка остаётся
+   * чистой — Git вызывает получатель.
+   */
+  trees?: { candidate: string; result: string };
 }
 
 /** Runtime, которые политика получателя назначает writer-ами и reviewer-ами. */
@@ -397,6 +410,20 @@ export const receiptTrust = {
   'evidence[].notApplicable.files': ['informative', 'diff фазы — наблюдение Git исполнителя'],
   'evidence[].notApplicable.files[]': ['informative', 'diff фазы — наблюдение Git исполнителя'],
   'evidence[].notApplicable.pathsDigest': ['informative', 'diff фазы — наблюдение Git исполнителя'],
+  'evidence[].reusedEvidence': [
+    'expected',
+    'только у записи test интеграции: PASS по правилу переноса и деревьям получателя (trees)',
+  ],
+  'evidence[].reusedEvidence.evidenceId': [
+    'consistency',
+    'решающая PASS-запись того же gate на кандидате в этом результате',
+  ],
+  'evidence[].reusedEvidence.phase': ['schema', 'литерал candidate'],
+  'evidence[].reusedEvidence.sha': ['consistency', 'SHA кандидата результата'],
+  'evidence[].reusedEvidence.tree': [
+    'expected',
+    'дерево кандидата и результата, вычисленное получателем своим Git',
+  ],
   'evidence[].tests': ['expected', 'доказательство названного testcase решающей записью'],
   'evidence[].tests[]': ['expected', 'элемент названного testcase; прочие элементы — сведения'],
   'evidence[].tests[].id': ['expected', 'ID названного testcase'],
@@ -605,6 +632,11 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
       integrity.push(`запись ${e.id}: сведения о свойствах недопустимы у записи вида ${e.kind}`);
     if ((e.reviewer !== undefined) !== (e.kind === 'review'))
       integrity.push(`запись ${e.id}: сведения о reviewer не согласованы с видом записи`);
+    if (
+      e.reusedEvidence !== undefined &&
+      (e.kind !== 'test' || e.phase !== 'integration' || e.consumer !== undefined)
+    )
+      integrity.push(`запись ${e.id}: взятой из кандидата бывает только запись test интеграции`);
     if ((e.notApplicable !== undefined) !== (e.kind === 'not-applicable'))
       integrity.push(`запись ${e.id}: сведения о неприменимости не согласованы с видом записи`);
     if (e.kind === 'not-applicable' && (e.passed || e.consumer !== undefined))
@@ -626,7 +658,9 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
           : e.kind === 'not-applicable'
             ? ('not-applicable' as const)
             : ('test' as const),
+      id: e.id,
       ...(e.notApplicable ? { notApplicable: e.notApplicable } : {}),
+      ...(e.reusedEvidence ? { reusedEvidence: e.reusedEvidence } : {}),
       phase: e.phase,
       gate: e.gate,
       sha: e.sha,
@@ -686,6 +720,25 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
     { phase, gate: 'independent-review', check: last('review', phase, 'independent-review') },
   ]);
   for (const { phase, gate, check } of decisiveAll) {
+    // Запись, взятая из кандидата, — PASS интеграции только по правилу
+    // переноса и деревьям, которые получатель вычислил сам.
+    if (check?.passed && check.reusedEvidence) {
+      const reused = !policy.integrationReuse
+        ? `запись ${check.id} (${gate}) взята из кандидата, а политика получателя не включает integrationReuse`
+        : context.trees
+          ? reusedEvidenceProblem({
+              record: check,
+              evidence,
+              candidateSha: result.shas.candidate,
+              resultSha: result.shas.result,
+              proof: named,
+              gates: repo.gates,
+              trees: context.trees,
+            })
+          : `запись ${check.id} (${gate}) взята из кандидата, а получатель не передал деревья кандидата и результата (trees)`;
+      if (reused) problems.push(`Нет PASS: ${phase}/${gate}: ${reused}`);
+      continue;
+    }
     if (check?.passed) continue;
     const problem =
       check?.kind === 'not-applicable'

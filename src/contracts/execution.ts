@@ -19,6 +19,7 @@ import {
   jointActiveSchema,
   jointFailedSchema,
   jointPassedSchema,
+  reusedEvidenceSchema,
 } from './result.ts';
 import { findingStatuses, reviewRecordSchema, reviewRoundSchema } from './review.ts';
 import { contractDocumentSchema, spikeSchema } from './checks.ts';
@@ -399,6 +400,13 @@ export const evidenceRecordSchema = z.strictObject({
   gateBasis: digestSchema.optional(),
   /** Только у записи `not-applicable`: правило и diff, по которым gate не исполнялся. */
   notApplicable: gateApplicabilitySchema.optional(),
+  /**
+   * Запись `test` интеграции, взятая из записи кандидата той же попытки
+   * (`integrationReuse: 'identical-tree'`): дерево integration SHA совпало с
+   * деревом кандидата, gate на интеграции не исполнялся. Не путать с
+   * `AttemptState.reusedFrom` (кандидат прежней попытки).
+   */
+  reusedEvidence: reusedEvidenceSchema.optional(),
   /**
    * Ревью попытки без изменений подтвердило, что приёмка уже выполнена на
    * базе: gates, на которые сослался reviewer, и его основание.

@@ -1097,6 +1097,7 @@ export function valueReport(
     : null;
   const rechecks = { flaky: 0, confirmed: 0 };
   for (const { e } of windowEvidence) if (e.recheck) rechecks[e.recheck.outcome] += 1;
+  const reused = windowEvidence.filter(({ e }) => e.reusedEvidence).length;
 
   const sentBackCount = { defect: 0, setup: 0, unknown: 0, no: 0 };
   for (const f of accepted) sentBackCount[sentBack(f)] += 1;
@@ -1350,6 +1351,7 @@ export function valueReport(
         runtimePauses,
       },
       rechecks,
+      ...(reused ? { reused } : {}),
     },
     weeks: weekly,
     ...(input.inputRequests ? { inputs: inputCounts(input.inputRequests, windowAttempts, w) } : {}),
@@ -1357,7 +1359,13 @@ export function valueReport(
     limitations: [],
   };
   report.summary = summaryOf(report, failedAttempts.length);
-  report.limitations = limitationsOf(report);
+  // Ревью тем же вендором, что автор: допустимо только явным разрешением
+  // политики и отмечается как ограничение независимости.
+  const sameVendor = {
+    code: windowEvents.filter((e) => e.type === 'attempt.review' && e.payload.sameVendor).length,
+    planContract: windowReviews.filter((r) => r.sameVendor).length,
+  };
+  report.limitations = limitationsOf(report, sameVendor);
   assertReportBytes(JSON.stringify(report), reportLimits.jsonBytes, 'JSON');
   return report;
 }
@@ -1605,14 +1613,26 @@ function summaryOf(r: ValueReport, failedAttempts: number): ValueReport['summary
   };
 }
 
-function limitationsOf(r: ValueReport): ValueReport['limitations'] {
+function limitationsOf(
+  r: ValueReport,
+  sameVendor: { code: number; planContract: number } = { code: 0, planContract: 0 },
+): ValueReport['limitations'] {
   const recorded = r.autonomy.actions.recorded;
   const causes = r.environment.causes;
+  const sameTotal = sameVendor.code + sameVendor.planContract;
   const out: ValueReport['limitations'] = [
     {
       id: 'no-baseline',
       text: 'There is no before-harness baseline: the report does not compare with work done without the harness.',
     },
+    ...(sameTotal
+      ? [
+          {
+            id: 'review-same-vendor',
+            text: `${plural(sameTotal, 'review')} in the window (code ${sameVendor.code}, plan or contract ${sameVendor.planContract}) ${sameTotal === 1 ? 'was' : 'were'} done by a reviewer of the same vendor as the author, as the policy explicitly allows (same-vendor-allowed); such reviews are less independent than cross-vendor ones.`,
+          },
+        ]
+      : []),
     ...(recorded === null
       ? [
           {

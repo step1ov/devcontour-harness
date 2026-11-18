@@ -176,6 +176,7 @@ export {
   type GatesAtResult,
   type LivenessReport,
 } from './verification/gates-at.ts';
+export { checkGates, type GateCheckInput, type GateCheckStatus } from './control/gates-check.ts';
 export {
   dependencyStoreRoot,
   materializeStore,
@@ -188,6 +189,14 @@ export {
   orderedScope,
   standaloneScope,
 } from './verification/gate-scope.ts';
+export {
+  gateChain,
+  longestGateChain,
+  timeBudgetWarnings,
+  type BudgetPhase,
+  type GateChain,
+  type TimeBudgetWarning,
+} from './verification/time-budget.ts';
 export { requirementProof, uncoveredGates, unprovenReason } from './verification/proof.ts';
 export {
   changedPaths,
@@ -205,6 +214,11 @@ export {
   type PathDecision,
   type ProviderSnapshot,
 } from './verification/applicability.ts';
+export {
+  reusedEvidenceProblem,
+  type ReuseCheck,
+  type ReuseRecord,
+} from './verification/integration-reuse.ts';
 export { ReviewProbes, probeLimits, observeReproductions } from './agents/review-probe.ts';
 export {
   composeRedactors,

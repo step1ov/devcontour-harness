@@ -699,13 +699,13 @@ test('Игнорируемые файлы, бывшие в выходе до г�
 
 test('Генерация получает свой предел фазы: исполнитель и генератор вместе дольше runTimeoutMs, попытка принимается', async () => {
   const f = fixture({
-    writer: { ...implement({ [DATA]: data(['apple', ...items]) }), sleepMs: 3000 },
-    environment: { GEN_SLEEP_MS: '3000' },
-    policy: (p) => (p.runTimeoutMs = 5000),
+    writer: { ...implement({ [DATA]: data(['apple', ...items]) }), sleepMs: 6000 },
+    environment: { GEN_SLEEP_MS: '6000' },
+    policy: (p) => (p.runTimeoutMs = 10000),
   });
   await runAll(f.ctx);
   const work = f.work();
   assert.equal(work.status, 'done', work.failure);
   const timing = f.attempts()[0]!.timings!.find((t) => t.stage === 'generate:catalog')!;
-  assert.ok(Date.parse(timing.finishedAt!) - Date.parse(timing.startedAt) >= 3000);
+  assert.ok(Date.parse(timing.finishedAt!) - Date.parse(timing.startedAt) >= 6000);
 });

@@ -653,6 +653,11 @@
                 "outcome"
               ],
               "additionalProperties": false
+            },
+            "reusedFrom": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
             }
           },
           "required": [
@@ -1216,6 +1221,7 @@
                 "shutdown",
                 "process-reap",
                 "cleanup",
+                "resource-busy",
                 "other",
                 "none"
               ]

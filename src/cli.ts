@@ -25,6 +25,7 @@ import {
   executionPolicySchema,
   exitCodeOf,
   exitCodes,
+  projectManifestSchema,
   type CliCommand,
   type CliEnvelope,
   type ExecutionPolicy,
@@ -52,6 +53,8 @@ import { writeReportFile } from './control/report-file.ts';
 import { valueReport, reportHtml, reportMarkdown } from './report/index.ts';
 import { handoffMarkdown, handoffPack } from './handoff/index.ts';
 import { inputStateOf } from './projections/input.ts';
+import { checkGates, gatesText } from './control/gates-check.ts';
+import { defaultResourceDatabase } from './environment/resources.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -278,8 +281,12 @@ const options = {
   decision: { type: 'string' },
   run: { type: 'string' },
   plan: { type: 'boolean' },
+  lean: { type: 'boolean' },
   human: { type: 'boolean' },
   writer: { type: 'string' },
+  lead: { type: 'string' },
+  review: { type: 'string' },
+  model: { type: 'string' },
   draft: { type: 'string' },
   brief: { type: 'string' },
   basis: { type: 'string' },
@@ -303,13 +310,20 @@ const options = {
   answer: { type: 'string' },
   target: { type: 'string' },
   successor: { type: 'string' },
+  sha: { type: 'string' },
+  gate: { type: 'string' },
+  'fail-fast': { type: 'boolean' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
 const flagOwners = {
   plan: ['init'],
+  lean: ['init'],
   writer: ['init'],
-  human: ['init', 'explain', 'plan-request'],
+  lead: ['init'],
+  review: ['init'],
+  model: ['init'],
+  human: ['init', 'explain', 'plan-request', 'gates'],
   draft: ['plan-check'],
   basis: ['plan-check'],
   brief: ['plan-request', 'plan-check'],
@@ -341,6 +355,9 @@ const flagOwners = {
   answer: ['input-apply'],
   target: ['input-apply'],
   successor: ['input-supersede'],
+  sha: ['gates'],
+  gate: ['gates'],
+  'fail-fast': ['gates'],
 } as const;
 
 /** Явное человеческое представление успешного ответа (`--human`). */
@@ -348,6 +365,22 @@ const presenters: Partial<Record<CliCommand, (data: never) => string>> = {
   init: initText,
   explain: explainText,
   'plan-request': (data: { prompt: string }) => data.prompt + '\n',
+  gates: gatesText,
+};
+
+/**
+ * Ведущий проекта из manifest рядом с политикой (`.harness/project.json`);
+ * нет файла, поля или файл не по схеме — undefined (doctor берёт writers ролей).
+ */
+const manifestLead = (policyPath: string): ['claude' | 'codex'] | undefined => {
+  try {
+    const parsed = projectManifestSchema.safeParse(
+      JSON.parse(readFileSync(join(dirname(resolve(policyPath)), 'project.json'), 'utf8')),
+    );
+    return parsed.success && parsed.data.lead ? [parsed.data.lead] : undefined;
+  } catch {
+    return undefined;
+  }
 };
 
 /** Поле объекта только при заданном значении (exactOptionalPropertyTypes). */
@@ -692,16 +725,34 @@ async function run(
       }
     }
     case 'init': {
-      if (v.writer !== undefined && v.writer !== 'claude' && v.writer !== 'codex')
-        throw new HarnessError('INVALID_INPUT', '--writer: ожидается claude или codex', [
-          { path: ['--writer'], message: v.writer },
+      const runtimeFlag = (flag: 'writer' | 'lead') => {
+        const value = v[flag];
+        if (value !== undefined && value !== 'claude' && value !== 'codex')
+          throw new HarnessError('INVALID_INPUT', `--${flag}: ожидается claude или codex`, [
+            { path: ['--' + flag], message: value },
+          ]);
+        return value;
+      };
+      const writer = runtimeFlag('writer');
+      const lead = runtimeFlag('lead');
+      if (v.review !== undefined && !['cross', 'same', 'auto'].includes(v.review))
+        throw new HarnessError('INVALID_INPUT', '--review: ожидается cross, same или auto', [
+          { path: ['--review'], message: v.review },
+        ]);
+      if (v.model !== undefined && (!v.model.trim() || v.model.length > 200))
+        throw new HarnessError('INVALID_INPUT', '--model: ожидается имя модели до 200 символов', [
+          { path: ['--model'], message: v.model },
         ]);
       const data = await initProject({
         repository: need('repository'),
         ...(v.profile ? { profile: v.profile } : {}),
-        ...(v.writer ? { writer: v.writer } : {}),
+        ...(lead ? { lead } : {}),
+        ...(writer ? { writer } : {}),
+        ...(v.review ? { review: v.review as 'cross' | 'same' | 'auto' } : {}),
+        ...(v.model ? { model: v.model } : {}),
         ...(v.state ? { state: v.state } : {}),
         ...(v.plan ? { plan: true } : {}),
+        ...(v.lean ? { lean: true } : {}),
       });
       // План с конфликтами или неготовым toolchain — отказ по существу с данными.
       const blocked = data.mode === 'plan' && (data.conflicts > 0 || !data.toolchain.ready);
@@ -822,6 +873,58 @@ async function run(
     }
     case 'capabilities':
       return { command, data: harnessCapabilities() };
+    case 'gates': {
+      const state = need('state');
+      const b = v.policy ? loadPolicy(v.policy) : binding(state);
+      const gates = v.gate
+        ?.split(',')
+        .map((g) => g.trim())
+        .filter(Boolean);
+      if (v.gate !== undefined && !gates?.length)
+        throw new HarnessError('INVALID_INPUT', 'gates: --gate без имён gates', [
+          { path: ['--gate'], message: v.gate },
+        ]);
+      // Прерывание (Ctrl-C, SIGTERM) останавливает gates, и рабочее дерево проверки убирается.
+      const abort = new AbortController();
+      const stop = () => abort.abort(new Error('Проверка прервана сигналом'));
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+      try {
+        const data = await checkGates({
+          policy: b.policy,
+          baseDir: b.baseDir,
+          stateDir: state,
+          rev: need('sha'),
+          ...optional('repositoryId', v.repository),
+          ...optional('gates', gates),
+          failFast: Boolean(v['fail-fast']),
+          signal: abort.signal,
+          resourceDatabase: defaultResourceDatabase(),
+          // Ход проверки — диагностика в stderr: stdout остаётся одним JSON.
+          onEvidence: (e) =>
+            process.stderr.write(`harness gates: ${e.gate} ${e.passed ? 'passed' : 'failed'}\n`),
+        });
+        // Прерывание — отказ CANCELLED; исход каждого gate — в issues.
+        if (data.interrupted)
+          throw new HarnessError(
+            'CANCELLED',
+            'Проверка gates прервана: ' + data.interrupted,
+            data.gates.map((g) => ({
+              path: ['gates', g.gate],
+              message: g.status + (g.message ? ': ' + g.message : ''),
+            })),
+          );
+        // Провал gate — данные проверки и exit 3 (GATE_FAILED), как ответ plan-check с проблемами.
+        return {
+          command,
+          data,
+          ...(data.passed ? {} : { code: exitCodes[errorCodes.GATE_FAILED] }),
+        };
+      } finally {
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
+      }
+    }
     case 'doctor': {
       const b = v.policy ? loadPolicy(v.policy) : v.state ? binding(v.state) : undefined;
       return {
@@ -841,6 +944,7 @@ async function run(
               }
             : undefined,
           b && v.state ? { baseDir: b.baseDir } : undefined,
+          optional('planAuthors', v.policy ? manifestLead(v.policy) : undefined),
         ),
       };
     }

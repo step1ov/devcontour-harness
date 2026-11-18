@@ -55,6 +55,9 @@ const ref = (e: EvidenceRecord, attempt: AttemptState) => ({
   ...(e.checks ? { checks: e.checks } : {}),
   // Gate не исполнялся по `when.paths`: правило и diff — получателю.
   ...(e.notApplicable ? { notApplicable: e.notApplicable } : {}),
+  // Запись интеграции взята из кандидата: ссылка и общее дерево — получателю,
+  // который сверит деревья своим Git.
+  ...(e.reusedEvidence ? { reusedEvidence: e.reusedEvidence } : {}),
   // Список тестов собственной проверки интеграции — для доказательства
   // названного testcase у получателя.
   ...(e.kind === 'test' && !e.consumer && e.phase === 'integration' && e.tests

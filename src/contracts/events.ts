@@ -45,6 +45,7 @@ export const environmentCauses = [
   'shutdown',
   'process-reap',
   'cleanup',
+  'resource-busy',
   'other',
   'none',
 ] as const;
@@ -149,6 +150,8 @@ export const eventPayloads = {
         outcome: z.enum(['flaky', 'confirmed']),
       })
       .optional(),
+    /** PASS интеграции взят из кандидата (`reusedEvidence`): ID записи кандидата. */
+    reusedFrom: z.string().min(1).max(200).optional(),
   }),
   'attempt.review': z.strictObject({
     phase,

@@ -11,6 +11,11 @@ if (args.includes('--version')) {
   console.log(`fake-${runtime} 0.0.1 (fixture)`);
   process.exit(0);
 }
+// Проверка входа (`claude auth status`, `codex login status`): fixture «вошёл».
+if (args.length === 2 && (args[0] === 'auth' || args[0] === 'login') && args[1] === 'status') {
+  console.log(args[0] === 'auth' ? JSON.stringify({ loggedIn: true }) : 'Logged in (fixture)');
+  process.exit(0);
+}
 const scenarioPath = process.env.FIXTURE_SCENARIO;
 if (!scenarioPath) {
   console.error('Not logged in: FIXTURE_SCENARIO is not set');

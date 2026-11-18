@@ -61,6 +61,12 @@ export interface GatesAtInput {
   record(evidence: EvidenceRecord): void;
   signal?: AbortSignal;
   /**
+   * Остановиться на первом непрошедшем gate: следующие gates не исполняются
+   * и названы в `skipped`, а не в `failures`. Нет — исполняются все (провал
+   * не скрывает исход остальных).
+   */
+  failFast?: boolean;
+  /**
    * Переход живости проверки по обходу зависших (`stallSweep`), в обоих
    * режимах: при `report` — единственный путь узнать о зависании до конца
    * проверки. Нагрузка — как у события `attempt.liveness`.
@@ -74,7 +80,7 @@ export type LivenessReport = RunEventPayload<'attempt.liveness'>;
 export interface GatesAtResult {
   id: string;
   sha: string;
-  /** Исполненные gates в порядке исполнения (с предпосылками). */
+  /** Gates проверки в порядке исполнения (с предпосылками; не исполненные при `failFast` — и в `skipped`). */
   gates: string[];
   evidence: EvidenceRecord[];
   /** Первый непрошедший gate и причина (то же, что `failures[0]`). */
@@ -85,8 +91,28 @@ export interface GatesAtResult {
    * с этой причиной и evidence не получают).
    */
   failures: { gate: string; message: string }[];
+  /**
+   * Gates, не исполненные после первого провала (`failFast`): не провал,
+   * исход неизвестен. Нет поля — исполнены все.
+   */
+  skipped?: string[];
+  /**
+   * Проверка прервана сигналом вызывающего или своим пределом времени
+   * (`runTimeoutMs`): `gate` — исполнявшийся в тот момент, следующие gates не
+   * исполнены и названы в `skipped`. Для совместимости `failures` по-прежнему
+   * называет их все (прерванный — причиной прерывания, следующие — «не
+   * исполнен: проверка прервана»): прерванная проверка никогда не выглядит
+   * прошедшей. Поле различает отмену и провал. Остановка обходом зависших —
+   * провал gate, без этого поля.
+   */
+  interrupted?: { gate?: string; reason: string };
   /** Переходы живости за проверку (`onLiveness`); нет — проверка не замолкала. */
   liveness?: LivenessReport[];
+  /**
+   * Предупреждения пробы портов ресурсов: порт на всех адресах держит чужой
+   * процесс, loopback свободен (например, AirPlay Receiver на macOS).
+   */
+  warnings?: string[];
 }
 
 /**
@@ -166,7 +192,18 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
   const source = ctx.environment ?? process.env;
   const evidence: EvidenceRecord[] = [];
   const failures: GatesAtResult['failures'] = [];
+  const warnings: string[] = [];
   const failed = new Set<string>();
+  const skipped: string[] = [];
+  let interrupted: GatesAtResult['interrupted'];
+  /** Прерывание сигналом или пределом проверки, не обходом зависших. */
+  const interruption = () => {
+    if (!signal.aborted || stalledBy(input.signal)) return undefined;
+    const reason = signal.reason as Error | undefined;
+    return timeout.aborted
+      ? `исчерпан предел проверки runTimeoutMs (${Math.round(ctx.policy.runTimeoutMs / 1000)} с)`
+      : (reason?.message ?? 'проверка прервана');
+  };
   let snapshots: DependencySnapshot[] = [];
   let added = false;
   const boundaryOf = ctx.boundary();
@@ -252,6 +289,16 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
             prepared(execution);
             let reapedBy: string | undefined;
             for (const gate of gates) {
+              if (interrupted) {
+                skipped.push(gate.id);
+                failed.add(gate.id);
+                failures.push({ gate: gate.id, message: 'не исполнен: проверка прервана' });
+                continue;
+              }
+              if (input.failFast && failures.length) {
+                skipped.push(gate.id);
+                continue;
+              }
               // Пропускается только gate, чья явная предпосылка (`dependsOn`) не
               // прошла. Провал неявной (более ранний check gate в режиме
               // порядка массива) не скрывает исход тестов: исполняются и
@@ -321,13 +368,23 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
                 // Провал gate записан (`record`); прочие ошибки — отказ проверки.
                 if (!(error instanceof TaskFailure) || evidence.at(-1)?.gate !== gate.id)
                   throw error;
+                const reason = interruption();
+                if (reason) {
+                  interrupted = { gate: gate.id, reason };
+                  failed.add(gate.id);
+                  failures.push({ gate: gate.id, message: 'прерван: ' + reason });
+                  continue;
+                }
                 failed.add(gate.id);
                 failures.push({ gate: gate.id, message: stalledBy(input.signal) ?? error.message });
                 if (reapedFailure(error)) reapedBy = gate.id;
               }
             }
           },
+          undefined,
+          (message) => warnings.push(message),
         );
+        if (interrupted) return;
         if (
           (await git(cwd, 'rev-parse', 'HEAD')) !== input.sha ||
           (await git(cwd, 'status', '--porcelain', '--untracked-files=no'))
@@ -335,6 +392,13 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
           throw new Error('Проверка изменила проверяемый код');
       },
     );
+  } catch (error) {
+    // Прерванная до gates или между ними проверка — отмена, а не отказ среды.
+    // Прерванная во время gate — результат с `interrupted` (уборка окружения
+    // после прерывания может отказать тем же сигналом).
+    const reason = interruption();
+    if (!reason) throw error;
+    if (!interrupted) throw new HarnessError('CANCELLED', 'Проверка gates прервана: ' + reason);
   } finally {
     if (added) await git(path, 'worktree', 'remove', '--force', cwd).catch(() => undefined);
     await removeSnapshots(
@@ -358,5 +422,8 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
     evidence,
     ...(failures.length ? { failure: failures[0] } : {}),
     failures,
+    ...(skipped.length ? { skipped } : {}),
+    ...(interrupted ? { interrupted } : {}),
+    ...(warnings.length ? { warnings } : {}),
   };
 }

@@ -472,6 +472,11 @@ export const valueReportSchema = z.strictObject({
       runtimePauses: count,
     }),
     rechecks: z.strictObject({ flaky: count, confirmed: count }),
+    /**
+     * Gates интеграции, взятые из кандидата при совпавшем дереве
+     * (`integrationReuse`), в окне. Нет поля — таких не было.
+     */
+    reused: count.optional(),
   }),
   weeks: z.strictObject({
     rows: z.array(z.union([weekRowSchema, weekGapSchema])).max(2 * REPORT_LIMITS.weeks),

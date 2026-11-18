@@ -80,6 +80,11 @@ export const stackProfileSchema = z.strictObject({
   concurrency: z.number().int().min(1).max(4).optional(),
   /** Сколько времени стек отводит одной попытке; слои берут наибольший предел. */
   runTimeoutMs: z.number().int().min(60_000).max(7_200_000).optional(),
+  /**
+   * Нижняя граница предела каждого gate (как `gateTimeoutFloorMs` политики);
+   * слои берут наибольшую. Нет поля — граница не задаётся.
+   */
+  gateTimeoutFloorMs: z.number().int().min(1000).max(600_000).optional(),
   roles: z.record(roleIdSchema, profileRoleSchema).default({}),
   contextPacks: z.array(profileContextPackSchema).max(50).default([]),
 });
@@ -114,6 +119,7 @@ export const resolvedProfileSchema = z.strictObject({
   generatedPaths: z.array(relativePathSchema),
   concurrency: z.number().int().optional(),
   runTimeoutMs: z.number().int().optional(),
+  gateTimeoutFloorMs: z.number().int().optional(),
   roles: z.record(roleIdSchema, profileRoleSchema),
   contextPacks: z.array(profileContextPackSchema),
   source: profileSourceSchema.optional(),

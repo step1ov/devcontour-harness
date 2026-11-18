@@ -24,7 +24,12 @@ import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
 import { reviewRecordSchema } from './review.ts';
 import { sourceRefSchema } from './work.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
-import { filePlanEntrySchema, projectManifestSchema } from './project.ts';
+import {
+  filePlanEntrySchema,
+  initWarningCodes,
+  projectManifestSchema,
+  projectReviewModes,
+} from './project.ts';
 import {
   diagnosisActions,
   diagnosisActors,
@@ -448,10 +453,31 @@ export const cliCommands = {
           'Встроенный профиль или ./file.json репозитория; без него — из manifest, иначе по lockfile (npm-ci | pnpm-frozen)',
       },
       {
+        name: '--lead',
+        value: 'id',
+        required: false,
+        description:
+          'Ведущий (автор планов и контрактов): claude или codex; без него — из manifest, иначе по окружению (CLAUDECODE, CODEX_THREAD_ID), иначе NOT_READY lead-unknown',
+      },
+      {
         name: '--writer',
         value: 'id',
         required: false,
-        description: 'Runtime writer: claude (по умолчанию) или codex; reviewer — другой вендор',
+        description: 'Runtime writer: claude или codex; по умолчанию — из manifest, иначе ведущий',
+      },
+      {
+        name: '--review',
+        value: 'text',
+        required: false,
+        description:
+          'cross — reviewer другого вендора; same — тот же runtime с явным same-vendor-allowed; auto (по умолчанию) — cross, если другой CLI установлен и вошёл, иначе same',
+      },
+      {
+        name: '--model',
+        value: 'text',
+        required: false,
+        description:
+          'Одна модель на writer и всех reviewers политики (только с ревью одного вендора)',
       },
       {
         name: '--state',
@@ -461,6 +487,13 @@ export const cliCommands = {
           'Каталог состояния вне репозитория; по умолчанию <state home>/projects/<projectId>',
       },
       { name: '--plan', value: 'flag', required: false, description: 'Только план, без записи' },
+      {
+        name: '--lean',
+        value: 'flag',
+        required: false,
+        description:
+          'Новый проект на слабой машине: слой lean (одна попытка за раз, runTimeoutMs 1800000, gateTimeoutFloorMs 240000); для pnpm-профиля с pnpm-lock.yaml — dependencyStore',
+      },
       {
         name: '--human',
         value: 'flag',
@@ -875,6 +908,52 @@ export const cliCommands = {
     ],
     refusals: ['NOT_FOUND', 'REVISION_CONFLICT', 'NOT_READY'],
   },
+  gates: {
+    description:
+      'Исполнить gates компонента на коммите вне попытки — тем же исполнением, что integration (рабочее дерево, снимки зависимостей, ресурсы, lifecycle, prepare, песочница); попыток и состояния поручений не пишет',
+    writes: true,
+    idempotency:
+      'Каждый вызов — новая проверка со своими логами в <state>/gates-at/<id>; база состояния, попытки и поручения не меняются',
+    args: [
+      {
+        ...state,
+        description: 'Каталог состояния: логи проверки; политика — из него, если нет --policy',
+      },
+      { ...policy, required: false },
+      {
+        name: '--sha',
+        value: 'text',
+        required: true,
+        description: 'Проверяемый коммит: SHA, ref или HEAD checkout репозитория',
+      },
+      {
+        name: '--gate',
+        value: 'text',
+        required: false,
+        description:
+          'Gates и группы (@имя) через запятую; предпосылки (dependsOn) добавляются сами; нет — все gates',
+      },
+      {
+        name: '--repository',
+        value: 'id',
+        required: false,
+        description: 'ID репозитория политики; нужен, если их несколько',
+      },
+      {
+        name: '--fail-fast',
+        value: 'flag',
+        required: false,
+        description: 'Остановиться на первом непрошедшем gate: следующие не исполняются (skipped)',
+      },
+      {
+        name: '--human',
+        value: 'flag',
+        required: false,
+        description: 'Таблица исходов для человека вместо JSON',
+      },
+    ],
+    refusals: ['GATE_FAILED', 'CANCELLED', 'NOT_FOUND'],
+  },
 } as const satisfies Record<string, CliCommandContract>;
 export type CliCommand = keyof typeof cliCommands;
 
@@ -936,6 +1015,8 @@ export const attemptViewSchema = z.strictObject({
     remaining: z.number().int().min(0),
     /** Не исполнены по `when.paths` (нет поля — таких нет). */
     notApplicable: z.number().int().positive().optional(),
+    /** Из `passed`: взяты из кандидата при совпавшем дереве (нет поля — таких нет). */
+    reused: z.number().int().positive().optional(),
   }),
   /** Живость по обходу controller; `idleMs` — только у `quiet` и `stalled`. */
   liveness: z
@@ -1173,7 +1254,66 @@ export const doctorDataSchema = z.strictObject({
     .optional(),
   /** Диагностика toolchain репозиториев политики; есть, когда задана политика. */
   toolchains: z.array(toolchainReportSchema).optional(),
+  /**
+   * Порты ресурсов `port` политики: проба без остановки процессов; `leased` —
+   * под арендой идущей попытки, не пробуется. Нет — портов в политике нет.
+   */
+  ports: z
+    .array(
+      z.strictObject({
+        id: z.string(),
+        port: z.number().int(),
+        status: z.enum(['free', 'busy', 'wildcard-only', 'leased']),
+        hosts: z.array(z.string()).optional(),
+        holder: z.string().optional(),
+      }),
+    )
+    .optional(),
   problems: z.array(z.string()),
+  /**
+   * Предупреждения, не делающие среду негодной; есть, когда задана политика.
+   * Источники: порт ресурса занят только на wildcard-адресе, а loopback
+   * свободен (служба попытки должна слушать 127.0.0.1); ревью тем же вендором,
+   * что автор (`review-same-vendor: …`); сумма пределов шагов
+   * одной фазы больше `runTimeoutMs` (`timeBudgetWarnings`); советы о ресурсах
+   * машины — `DEPENDENCY_STORE_RECOMMENDED`, `LOW_RESOURCES`,
+   * `DIGEST_THREADS_INVALID` (`resourceWarnings`).
+   */
+  warnings: z.array(z.string()).optional(),
+});
+
+/** Ответ `gates`: исход каждого gate проверки на коммите вне попытки. */
+export const gatesDataSchema = z.strictObject({
+  /** ID проверки (`runId` evidence, `DEVCONTOUR_RUN_ID` gates). */
+  id: z.string().min(1).max(200),
+  repositoryId: idSchema,
+  sha: gitShaSchema,
+  /** Все gates проверки прошли. */
+  passed: z.boolean(),
+  failFast: z.boolean(),
+  /** Проверка прервана сигналом или пределом `runTimeoutMs`: причина. */
+  interrupted: z.string().optional(),
+  durationMs: z.number().int().nonnegative(),
+  /** Gates в порядке исполнения (с предпосылками). */
+  gates: z.array(
+    z.strictObject({
+      gate: z.string().min(1).max(200),
+      /**
+       * `not-run` — не исполнен: не прошла предпосылка или потомки прежнего
+       * gate не остановлены или проверка прервана; `skipped` — не исполнен
+       * из-за `--fail-fast`; `cancelled` — прерван сигналом или пределом
+       * проверки (CLI тогда отвечает отказом `CANCELLED`).
+       */
+      status: z.enum(['passed', 'failed', 'cancelled', 'not-run', 'skipped']),
+      exitCode: z.number().int().optional(),
+      summary: z.string().optional(),
+      /** Лог gate. */
+      log: z.string().optional(),
+      message: z.string().optional(),
+    }),
+  ),
+  /** Каталог логов и артефактов проверки. */
+  logs: z.string(),
 });
 
 export const profileDataSchema = z.strictObject({
@@ -1406,6 +1546,36 @@ export const initDataSchema = z.strictObject({
   preserved: z.array(z.string()),
   profile: profilePinSchema,
   shadowed: z.array(z.string()),
+  /** Ведущий и откуда он взят: `--lead`, manifest, writer прежнего manifest, сохранённая политика, окружение, `--writer`. */
+  lead: z.strictObject({
+    runtime: z.enum(['claude', 'codex']),
+    source: z.enum(['option', 'manifest', 'legacy-writer', 'policy', 'env', 'writer']),
+  }),
+  /**
+   * Решение о ревью: `cross` или `same`; источник — `--review`, manifest,
+   * прежний manifest (`legacy`), сохранённая политика или выбор `auto` по
+   * доступности CLI.
+   */
+  review: z.strictObject({
+    mode: z.enum(projectReviewModes),
+    source: z.enum(['option', 'manifest', 'legacy', 'policy', 'auto']),
+  }),
+  /** Наличие CLI runtime (`--version`) и вход (`claude auth status`, `codex login status`). */
+  runtimes: z.array(
+    z.strictObject({
+      runtime: z.enum(['claude', 'codex']),
+      status: z.enum(['available', 'missing', 'version-error']),
+      version: z.string().optional(),
+      auth: z.enum(['ok', 'missing', 'unknown']),
+    }),
+  ),
+  /** Предупреждения подготовки: не отказ, но требуют внимания до запуска. */
+  warnings: z.array(
+    z.strictObject({
+      code: z.enum(initWarningCodes),
+      message: z.string(),
+    }),
+  ),
   facts: z.strictObject({
     repositoryId: idSchema,
     targetRef: targetRefSchema,
@@ -1522,6 +1692,7 @@ export const cliDataSchemas = {
   'input-apply': inputApplyDataSchema,
   'input-cancel': inputCloseDataSchema,
   'input-supersede': inputCloseDataSchema,
+  gates: gatesDataSchema,
   version: versionDataSchema,
 } as const satisfies Record<CliCommand | 'version', z.ZodType>;
 

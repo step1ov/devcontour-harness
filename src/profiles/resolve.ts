@@ -23,6 +23,12 @@ import { REQUIREMENT_GATE } from '../verification/requirements.ts';
 
 /** Встроенные профили пакета: `profiles/<id>.json` рядом с `lib/`. */
 export const builtinProfilesRoot = fileURLToPath(new URL('../../profiles/', import.meta.url));
+/**
+ * Встроенные слои — `profiles/layers/<id>.json`: части профиля без gates
+ * (например, `lean`), которые надстраивают профиль стека через `extends` или
+ * опцию `layers`. Сами по себе не разрешаются и в `builtinProfiles()` не входят.
+ */
+export const BUILTIN_LAYERS_DIR = 'layers';
 
 const builtinId = /^[A-Za-z0-9_-]{1,80}$/;
 const sha256 = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
@@ -39,6 +45,12 @@ export interface ResolveProfileOptions {
   builtinRoot?: string;
   /** Вернуть текст файла листа (`leafContent`) — для хоста, который хранит его сам. */
   includeLeafContent?: boolean;
+  /**
+   * Встроенные слои поверх профиля (`['lean']`), только из `profiles/layers/`:
+   * складываются как последние `extends` листа и входят в closure и digest.
+   * Нет опции — профиль прежний.
+   */
+  layers?: string[];
 }
 
 /**
@@ -61,6 +73,7 @@ export interface ProfileLayer {
   generatedPaths: string[];
   concurrency?: number;
   runTimeoutMs?: number;
+  gateTimeoutFloorMs?: number;
   roles: Record<string, unknown>;
   contextPacks: { id: string }[];
 }
@@ -124,6 +137,7 @@ const profileLayerShape = z.looseObject({
   generatedPaths: z.array(z.string()),
   concurrency: z.number().optional(),
   runTimeoutMs: z.number().optional(),
+  gateTimeoutFloorMs: z.number().optional(),
   roles: z.record(z.string(), z.unknown()),
   contextPacks: z.array(z.looseObject({ id: layerId })),
 });
@@ -134,6 +148,33 @@ export function builtinProfiles(root = builtinProfilesRoot) {
     .filter((f) => f.endsWith('.json'))
     .map((f) => f.slice(0, -'.json'.length))
     .sort();
+}
+
+const present = (path: string) => {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Файл встроенного ID: профиль `<id>.json` или слой `layers/<id>.json`; ID в
+ * обоих местах неоднозначен — отказ. `layerOnly` (опция `layers`, слои
+ * manifest) ищет только среди слоёв.
+ */
+function builtinFile(root: string, id: string, layerOnly: boolean) {
+  const top = join(root, id + '.json');
+  const layer = join(root, BUILTIN_LAYERS_DIR, id + '.json');
+  const isTop = present(top);
+  const isLayer = present(layer);
+  if (isTop && isLayer) refuse(`Встроенный ID ${id} — и профиль, и слой: неоднозначно`);
+  if (layerOnly) {
+    if (!isLayer) refuse('Слой профиля не найден: ' + id);
+    return { file: layer, layer: true };
+  }
+  return isLayer ? { file: layer, layer: true } : { file: top, layer: false };
 }
 
 /** Файл профиля: внутри своего корня, без symlink на пути, обычный файл до 128 KiB. */
@@ -185,8 +226,8 @@ function parseManifest(content: string, name: string, schema: z.ZodType): Profil
  *
  * Слои складываются: gates, подготовка, возможности, защищённые и
  * генерируемые пути — объединением; окружение и lifecycle — только из одного
- * слоя (иначе конфликт); параллельность — наименьшая, время попытки —
- * наибольшее; роли и инструкции стека — по ID, надстройка уточняет базу.
+ * слоя (иначе конфликт); параллельность — наименьшая, время попытки и
+ * нижняя граница предела gate — наибольшие; роли и инструкции стека — по ID, надстройка уточняет базу.
  * Итоговый профиль обязан иметь test gate с JUnit: зелёный выход без отчёта
  * ничего не доказывает. Файлы локальных слоёв становятся защищёнными путями.
  *
@@ -232,22 +273,23 @@ export function resolveProfile(
   const files: string[] = [];
   let source: ResolvedProfile['source'];
   let leafContent = '';
-  const visit = (reference: string, parent?: string, depth = 0): ProfileLayer => {
+  const visit = (reference: string, parent?: string, depth = 0, layerOnly = false): ProfileLayer => {
     if (depth > PROFILE_DEPTH_LIMIT) refuse('Слишком глубокое наследование профилей');
     const builtin = builtinId.test(reference);
     if (!builtin && !reference.startsWith('./') && !reference.startsWith('../'))
       refuse('Профиль: укажите встроенный ID либо относительный ./file.json');
     if (!builtin && (!root || parent === 'builtin'))
       refuse('Локальный профиль требует корень репозитория');
-    const file = builtin
-      ? join(builtinRoot, reference + '.json')
-      : resolve(parent ?? root!, reference);
+    const found = builtin ? builtinFile(builtinRoot, reference, layerOnly) : undefined;
+    const file = found ? found.file : resolve(parent ?? root!, reference);
     const owner = builtin ? builtinRoot : root!;
     const key = builtin ? 'builtin:' + reference : 'local:' + relative(root!, file);
     if (active.has(key)) refuse('Цикл наследования профилей: ' + key);
     const content = safeFile(owner, file);
     const manifest = parseManifest(content, key, schema);
     if (builtin && manifest.id !== reference) refuse('ID встроенного профиля не совпадает: ' + key);
+    // Слой надстраивает профиль параметрами исполнения, а не проверками.
+    if (found?.layer && manifest.gates.length) refuse('Слой профиля не объявляет gates: ' + key);
     if (depth === 0) {
       leafContent = content;
       if (!builtin) source = { repositoryId, path: relative(root!, file) };
@@ -266,6 +308,10 @@ export function resolveProfile(
     return manifest;
   };
   const leaf = visit(ref);
+  for (const layer of options.layers ?? []) {
+    if (!builtinId.test(layer)) refuse('Слой профиля: ожидается встроенный ID: ' + layer);
+    visit(layer, 'builtin', 1, true);
+  }
 
   const declared = layers.flatMap((p) => p.gates);
   const order = gateOrderIssues(declared);
@@ -300,6 +346,7 @@ export function resolveProfile(
     if (new Set(steps.map((s) => s.id)).size !== steps.length) refuse('Повтор lifecycle step ID');
   const limits = layers.flatMap((p) => (p.concurrency ? [p.concurrency] : []));
   const timeouts = layers.flatMap((p) => (p.runTimeoutMs ? [p.runTimeoutMs] : []));
+  const floors = layers.flatMap((p) => (p.gateTimeoutFloorMs ? [p.gateTimeoutFloorMs] : []));
   const resolved: ResolvedProfileOf<ProfileLayer> & { leafContent?: string } = {
     id: leaf.id,
     version: leaf.version,
@@ -317,6 +364,7 @@ export function resolveProfile(
     generatedPaths: [...new Set(layers.flatMap((p) => p.generatedPaths))],
     ...(limits.length ? { concurrency: Math.min(...limits) } : {}),
     ...(timeouts.length ? { runTimeoutMs: Math.max(...timeouts) } : {}),
+    ...(floors.length ? { gateTimeoutFloorMs: Math.max(...floors) } : {}),
     roles: Object.assign({}, ...layers.map((p) => p.roles)) as ProfileLayer['roles'],
     contextPacks: [
       ...new Map(layers.flatMap((p) => p.contextPacks).map((pack) => [pack.id, pack])).values(),

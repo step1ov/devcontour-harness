@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -72,7 +73,22 @@ function project(edit?: (dir: string) => void, options: { commit?: boolean } = {
     git('add', '-A');
     git('commit', '-qm', 'init');
   }
-  const env = { ...process.env, HARNESS_STATE_HOME: join(scratch, 'state-home') };
+  // Сессия Claude Code (признак ведущего) и оба CLI runtime — заглушки: тест
+  // не зависит от окружения, в котором его запускают.
+  const bin = join(scratch, 'bin');
+  mkdirSync(bin);
+  for (const r of ['claude', 'codex']) {
+    writeFileSync(join(bin, r), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(bin, r), 0o755);
+  }
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HARNESS_STATE_HOME: join(scratch, 'state-home'),
+    HARNESS_CLAUDE_BIN: join(bin, 'claude'),
+    HARNESS_CODEX_BIN: join(bin, 'codex'),
+    CLAUDECODE: '1',
+  };
+  delete env.CODEX_THREAD_ID;
   const opts = (extra: Partial<InitOptions> = {}): InitOptions => ({
     repository: root,
     env,
@@ -715,10 +731,17 @@ test('H1-02 (H1-F005): роли профиля со своими writers — п�
     const data = await initProject(opts());
     assert.deepEqual(data.manifest.runtimes, { writer: 'codex', reviewer: 'claude' }, shape);
     const policy = executionPolicySchema.parse(JSON.parse(readFileSync(policyPath, 'utf8')));
+    // План — ведущего (claude по признаку сессии), код — writer manifest.
+    assert.equal(data.lead.runtime, 'claude', shape);
     assert.equal(
-      selectReviewer(policy, 'plan', { runtime: data.manifest.runtimes.writer }).ok,
+      selectReviewer(policy, 'plan', { runtime: data.lead.runtime }).ok,
       true,
-      'reviewer другого вендора, чем writer manifest: ' + shape,
+      'reviewer плана другого вендора, чем ведущий: ' + shape,
+    );
+    assert.equal(
+      selectReviewer(policy, 'code', { runtime: data.manifest.runtimes.writer }).ok,
+      true,
+      'reviewer кода другого вендора, чем writer manifest: ' + shape,
     );
     const run = data.next.find((n) => n.command === 'run')!;
     assert.equal(run.args[run.args.indexOf('--author') + 1], 'codex', shape);
@@ -727,7 +750,7 @@ test('H1-02 (H1-F005): роли профиля со своими writers — п�
       generated!.content,
       'политика решений: ' + shape,
     );
-    // Завершённая подготовка: writer политики (по reviewer плана) совпадает с manifest.
+    // Завершённая подготовка: политика допускает ревью для решений manifest.
     const again = await initProject(opts());
     assert.equal(again.status, 'complete', shape);
     assert.equal(again.conflicts, 0, shape);
@@ -823,9 +846,13 @@ test('H1-02 (B3): политика отредактирована на writer co
   );
   const error = await refusal(initProject(p.opts()), 'PATH_CONFLICT');
   assert.deepEqual(error.issues, [{ path: [policyPath], message: 'content-differs' }]);
-  assert.match(error.message, /другого writer/);
-  // Явный --writer codex совпадает с политикой, но расходится с manifest.
-  const codex = await refusal(initProject(p.opts({ writer: 'codex' })), 'PATH_CONFLICT');
+  assert.match(error.message, /не подходит решениям init \(ведущий claude, writer claude\)/);
+  assert.match(error.message, /REVIEWER_SAME_VENDOR|того же вендора/);
+  // Ведущий и writer codex совпадают с политикой, но расходятся с manifest.
+  const codex = await refusal(
+    initProject(p.opts({ lead: 'codex', writer: 'codex' })),
+    'PATH_CONFLICT',
+  );
   assert.deepEqual(codex.issues, [{ path: [manifestPath], message: 'content-differs' }]);
   assert.equal(readFileSync(policyPath, 'utf8'), text);
   assert.equal(readFileSync(manifestPath, 'utf8'), manifestBytes);

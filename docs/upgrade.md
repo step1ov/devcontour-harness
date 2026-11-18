@@ -971,6 +971,185 @@ until)` и метка документа `leaseRows: true`. Первая стр�
 Подробности — [contracts](contracts.md#executionpolicy). Строгая схема прежних
 версий поле не принимает: при откате уберите его из политики.
 
+### 0.1.0-alpha.50: ведущий и ревью в `init`, проба портов, срок фаз, `harness gates`, слой `lean`, `integrationReuse`
+
+Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`,
+`manifestVersion: 1`); существующие политики не перегенерируются. Политики
+без новых полей профиля и без `integrationReuse`, их digest (`policyDigest`,
+`executionDigest`) и исполнение не меняются (для `integrationReuse`
+закреплено тестом совместимости).
+
+- **Порты аренды проверяются на деле.** Перед каждой фазой аренды (до
+  lifecycle `setup`/`ready`, `prepare` и gates; и в `runGatesAt`) controller
+  пробует привязать каждый ресурс `port` на `127.0.0.1`, `::1`, `0.0.0.0` и
+  `::`. Порт, занятый процессом, пережившим остановку команды прежней
+  попытки (записан в новой таблице `survivors` базы `resources.sqlite`
+  вместе с машиной и загрузкой ОС),
+  освобождается остановкой этого процесса; занятый иным процессом — отказ
+  `environment` с новой причиной `resource-busy` (порт, ресурс, PID и
+  команда в тексте), попытка не засчитана. Прежде такой порт ронял gate, и
+  провал засчитывался. Подробности —
+  [contracts](contracts.md#ресурсы-port).
+- **Политика с ресурсом `port` для внешней службы.** Если порт объявлен
+  ресурсом, а держит его служба, которую попытка не поднимает (запущенная
+  заранее база), каждая фаза теперь отказывает `resource-busy`. Объявите
+  такой ресурс как `service`. Порт, который поднимает lifecycle `setup`,
+  проверяется до `setup` — так он и задуман.
+- **Ловушка macOS: порты 5000 и 7000.** AirPlay Receiver (ControlCenter)
+  слушает их на всех адресах. Если loopback свободен, проба не отказывает, а
+  предупреждает (`port-probe.json` фазы, стадия `port-shared:<порт>`,
+  `GatesAtResult.warnings`, `warnings` у `harness doctor`, текст отказа
+  попытки, если она затем падает): служба попытки должна
+  слушать `127.0.0.1`. Лучше выбрать другой порт или выключить AirPlay
+  Receiver.
+- **Проверка до первого запуска.** `harness doctor --policy ...` пробует
+  порты ресурсов (`ports[]`, новое необязательное поле данных doctor, как и
+  `warnings[]`) и называет в `problems` порт, занятый чужим
+  процессом, — до того, как попытки начнут отказывать `resource-busy`.
+  Такой отказ ставит выдачу на паузу (класс `environment`): после
+  освобождения порта — повтор восстановления или `harness resume`.
+- **Новая причина `resource-busy`.** `environmentCauses`, схемы
+  `run-event` и `value-report` (`schemas/`) её содержат. Прежние версии
+  разбирают известные события строго: откат возможен, только пока в журнале
+  нет `attempt.diagnosed` с `cause: resource-busy` (проверка — как у
+  0.1.0-alpha.47, с этим значением), иначе — копия базы, снятая до
+  обновления.
+- **Закрыт предел 0.1.0-alpha.47** «пережившие остановку потомки прежней
+  попытки перед gates следующей не перепроверяются» — для портов ресурсов.
+  Через иные общие ресурсы (кеш пакетов, локальная база) переживший процесс
+  по-прежнему может уронить gate следующей попытки; такой провал
+  засчитывается.
+- **Хост со своим запуском команд.** Пережившие процессы записываются, когда
+  команда исполняется внутри `withResources`; хост, вызывающий
+  `command(..., { contain })` вне аренды, записей не получает, и порт,
+  занятый таким процессом, — `resource-busy`.
+
+- **Слой `lean` для слабой машины.** Встроенные слои профилей лежат в
+  `profiles/layers/` (без gates) и подключаются через `extends` или
+  `resolveProfile(ref, { layers })`; `builtinProfiles()` их не перечисляет.
+  `lean` задаёт `concurrency: 1`, `runTimeoutMs: 1800000` и новое поле
+  профиля `gateTimeoutFloorMs` (240000, слои берут наибольшее).
+  `generatePolicy` переносит `concurrency`, `runTimeoutMs` и
+  `gateTimeoutFloorMs` профиля в политику — например, политика из
+  `mobile-maestro`, а через `extends` и из `react-native` и `expo-mobile`,
+  теперь получает `concurrency: 1`. `harness init --lean` (новый проект)
+  применяет слой, записывает его в manifest (`profile.layers`, необязательное
+  поле) и для pnpm-профиля с `pnpm-lock.yaml` добавляет `dependencyStore`.
+  Строгая схема прежних версий не принимает `gateTimeoutFloorMs` в профиле и
+  `profile.layers` в manifest: при откате уберите их. Каталог `capabilities`
+  меняется (флаг `--lean` у `init`).
+- **Советы `doctor`.** С политикой ответ всегда несёт необязательное поле
+  `warnings` (рядом с предупреждениями о портах): `DEPENDENCY_STORE_RECOMMENDED`,
+  `LOW_RESOURCES` и `DIGEST_THREADS_INVALID`
+  ([диагностика](toolchains.md#диагностика-doctor-и-preflight)); `problems` и
+  exit code не меняются. `hostLoad.resources()` — память, производительные
+  ядра и тепловое ограничение macOS.
+- **`HARNESS_DIGEST_THREADS`** (1–8) ограничивает потоки сверки копии seed.
+
+- **Перенос evidence кандидата на интеграцию (`integrationReuse`).** Необязательное `integrationReuse: 'identical-tree'`: при
+  дереве integration-коммита, равном дереву кандидата, gates, прошедшие на
+  кандидате, пишутся на интеграции взятыми из него (`reusedEvidence`), а при
+  полном переносе окружение интеграции не поднимается. Правила и правило
+  доверия — [contracts](contracts.md#перенос-evidence-кандидата-на-интеграцию).
+  Поле входит в `executionDigest`: включение повторяет согласования,
+  привязанные к digest.
+- **`integrationReuse`: новые поля.** `EvidenceRecord.reusedEvidence` и
+  `evidence[].reusedEvidence` ссылки receipt
+  (`{evidenceId, phase: 'candidate', sha, tree}`), `ReceiverContext.trees`,
+  `attempt.gate.reusedFrom`, `gates.reused` проекции попытки,
+  `environment.reused` отчёта об эффекте, порт
+  `ExecutionHost.capabilities.integrationReuse` и
+  `integrationReuseProblem(policy, host)`. Standalone-хост объявляет
+  поддержку сам.
+- **`integrationReuse` у хоста, который ведёт попытки сам (DevContour).** Пока хост не объявил
+  `capabilities: { integrationReuse: true }`, `new Engine` с такой политикой
+  отказывает `INVALID_INPUT` — результат не будет отклонён хостом после
+  приёмки. Чтобы объявить поддержку, хост: сохраняет поле `reusedEvidence`
+  записи gate и события `attempt.gate.reusedFrom` (строгие схемы хоста);
+  передаёт в `resultProblems`/`assertResult` `trees`, вычисленные своим Git
+  для `shas.candidate` и `shas.result`, и `integrationReuse` в политике
+  получателя (`ReceiverPolicy`); в своих представлениях показывает
+  такие gates как «взято из кандидата», а не как исполненные; если хост
+  считает время или запуски gates, не считает их запуском; если хост
+  проверяет покрытие набора на итоговом SHA сам, учитывает, что запись
+  интеграции может быть взята из кандидата.
+- **Откат `integrationReuse`.** Состояние с записями `reusedEvidence` прежние версии
+  отклоняют (строгая схема): откат — через копию. Без поля в политике таких
+  записей нет, и откат возможен без изменений состояния; поле из политики
+  при откате убрать.
+
+- **Срок фаз в `doctor`.** С политикой (`--policy` или `--state`) поле
+  `warnings` ответа `doctor` называет и фазу, где сумма объявленных пределов
+  шагов одной фазы — lifecycle setup/ready, prepare, gates (действующие
+  пределы с `gateTimeoutFloorMs`, условные `when` — тоже), один повтор
+  самого долгого gate (`recheck`), генераторы, установка зависимостей
+  исполнителя — больше `runTimeoutMs`, то есть попытка может истечь до конца
+  проверок, хотя каждый шаг укладывается в свой предел. В тексте — слагаемые
+  в минутах и самая длинная цепочка `dependsOn`: укладывается ли она (тогда
+  можно сузить области задач). Это предупреждение: `problems`, exit code и
+  `validate` не меняются. Библиотека: `timeBudgetWarnings`, `phaseBudgets`,
+  `requiredRunTimeoutMs`, `gateChain`, `longestGateChain`.
+- **Срок фазы в политике `init`.** Если пределам шагов профиля не хватает
+  умолчания `runTimeoutMs` (15 мин), `init` записывает его в новую политику
+  явно: наибольшая сумма фазы (с повтором gate) × 1.25, вверх до 5 минут. Это
+  12 из 13 встроенных профилей: next-product, node-checks, python-api,
+  react-vite-admin — 20–25 мин, npm-ci, pnpm-frozen, python-uv, go-gotestsum,
+  nest-api — 30, mobile-maestro — 40, expo-mobile и react-native — 55;
+  умолчание остаётся только у go-api. Профили и их закрепления не меняются;
+  уже записанная `.harness/policy.json` не переписывается — для неё `doctor`
+  покажет предупреждение, и `runTimeoutMs` поднимается вручную.
+- **Команда `harness gates`.** `gates --state D [--policy F] --sha SHA|HEAD
+[--gate a,b] [--repository ID] [--fail-fast] [--human]` исполняет gates на
+  коммите вне попытки поверх `runGatesAt` (то же исполнение, что integration)
+  и печатает исход каждого gate; exit 0 — все прошли, 3 — нет (`GATE_FAILED`).
+  Попыток и состояния поручений не пишет. Новые флаги `--sha`, `--gate`,
+  `--fail-fast` принимает только она. `runGatesAt` получил необязательный
+  `failFast` (по умолчанию прежнее поведение: исполняются все gates) и
+  аддитивные поля результата `skipped` и `interrupted`. Прерывание сигналом
+  вызывающего или пределом проверки `runTimeoutMs` по-прежнему делает
+  проверку непрошедшей: `failures` называет прерванный gate (причина —
+  «прерван: …») и каждый следующий («не исполнен: проверка прервана»), а
+  `interrupted` и `skipped` отличают отмену от провала. Прерывание до gates —
+  `HarnessError` `CANCELLED`. CLI `gates` отвечает на прерывание отказом
+  `CANCELLED` (exit 3): прерванный gate — `cancelled`, следующие — `not-run`,
+  исходы — в `issues`. Прежние команды, их данные и формат состояния не
+  меняются; откат — прежняя версия пакета, команда просто исчезает.
+
+- **Ведущий и ревью в `init`.** `init --lead claude|codex`: ведущий — автор планов и контрактов. Без
+  `--lead` — из manifest, затем из сохранённой политики (новый checkout без
+  `project.json`), затем признак окружения (`CLAUDECODE=1`,
+  `CODEX_THREAD_ID`), затем `--writer`; иначе `NOT_READY` (`lead-unknown`).
+  Молчаливого `--writer claude` по умолчанию больше нет: скрипт, который
+  вызывал `init` без `--writer` вне сессии Claude Code, передаёт `--lead`.
+- `--writer` по умолчанию — ведущий. Reviewer плана и контракта выбирается
+  для ведущего, reviewer кода — для writer.
+- `--review cross|same|auto` (умолчание `auto`): свой CLI есть, а CLI другого
+  вендора нет (или в нём явно нет входа) — тот же runtime с явным `vendor: same-vendor-allowed` и
+  предупреждением `review-same-vendor` в `init`, `doctor` (`warnings`) и
+  `report` (ограничение `review-same-vendor`). С двумя установленными CLI
+  сгенерированная политика байтово та же, что раньше; без CLI вовсе — `cross`
+  с предупреждениями `runtime-missing`.
+- `--model` — одна модель на writer и всех reviewers; с ревью двух вендоров —
+  `INVALID_INPUT` (`model-cross-vendor`).
+- Manifest хранит `lead`, `review` и `model` (необязательные поля). Manifest
+  прежнего формата читается: ведущий — его writer, ревью — `cross`; файл не
+  переписывается, `init --plan` не даёт `content-differs`.
+- Политика без manifest (новый checkout) продолжается по своим решениям:
+  ведущий — по правилу ревью плана, writer — по ролям или правилу ревью кода.
+  `content-differs` на `policy.json` — только когда политика не назначает
+  допустимого reviewer для решений (явных `--lead` / `--writer` или manifest).
+- Ответ `init` дополнен полями `lead`, `review`, `runtimes` (наличие CLI и
+  вход по `claude auth status` / `codex login status`) и `warnings`; ответ
+  `doctor` — необязательным `warnings`, а сообщение об отсутствующем
+  назначенном CLI называет его назначения.
+- Откат: строгая схема manifest прежних версий не принимает `lead`,
+  `review` и `model`. Перед откатом удалите `.harness/project.json` (он
+  локальный) и выполните `init` прежней версией с `--writer`, равным writer
+  manifest; политика при этом не меняется. Политику с ревью тем же вендором
+  (`review: same`) прежняя версия читает как политику другого writer
+  (`content-differs` на `policy.json`): такой проект откатывается вместе с
+  явным решением о политике.
+
 ## Перед обновлением
 
 1. **Остановить записывающих.** Запретить новые выдачи (`harness pause`),

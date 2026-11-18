@@ -2238,7 +2238,7 @@
               "type": "object",
               "properties": {
                 "rows": {
-                  "maxItems": 16,
+                  "maxItems": 17,
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -2260,6 +2260,7 @@
                           "shutdown",
                           "process-reap",
                           "cleanup",
+                          "resource-busy",
                           "other",
                           "none"
                         ]
@@ -2380,6 +2381,11 @@
             "confirmed"
           ],
           "additionalProperties": false
+        },
+        "reused": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
         }
       },
       "required": [

@@ -16,6 +16,11 @@ export const PROJECT_WORK_DIR = '.harness/work';
 export const PROJECT_NOTES_DIR = '.harness/work/context/notes';
 
 const runtimeSchema = z.enum(['claude', 'codex']);
+/**
+ * Ревью проекта: `cross` — reviewer другого вендора, чем автор; `same` — тот
+ * же runtime с явным `vendor: same-vendor-allowed` в политике.
+ */
+export const projectReviewModes = ['cross', 'same'] as const;
 
 export const projectManifestSchema = z.strictObject({
   apiVersion: z.literal(API_VERSION),
@@ -25,7 +30,25 @@ export const projectManifestSchema = z.strictObject({
   /** realpath корня при init. */
   root: z.string().min(1),
   repository: z.strictObject({ id: idSchema, targetRef: targetRefSchema }),
-  profile: z.strictObject({ ref: z.string().min(1), pin: profilePinSchema }),
+  profile: z.strictObject({
+    ref: z.string().min(1),
+    pin: profilePinSchema,
+    /** Встроенные слои поверх профиля (`init --lean` — `['lean']`); нет — без слоёв. */
+    layers: z
+      .array(z.string().regex(/^[A-Za-z0-9_-]{1,80}$/))
+      .max(8)
+      .optional(),
+  }),
+  /**
+   * Ведущий проекта: runtime, который составляет планы и ведёт сессию
+   * (`review-plan --author`). Нет поля — manifest прежнего формата: ведущий
+   * выводится из writer.
+   */
+  lead: runtimeSchema.optional(),
+  /** Решение о ревью; нет поля — manifest прежнего формата (`cross`). */
+  review: z.enum(projectReviewModes).optional(),
+  /** Модель, закреплённая на writer и всех reviewers политики. */
+  model: z.string().min(1).max(200).optional(),
   runtimes: z.strictObject({ writer: runtimeSchema, reviewer: runtimeSchema }),
   paths: z.strictObject({
     policy: z.literal(PROJECT_POLICY_PATH),
@@ -36,6 +59,13 @@ export const projectManifestSchema = z.strictObject({
   }),
 });
 export type ProjectManifest = z.infer<typeof projectManifestSchema>;
+
+/** Предупреждения `init`: подготовка продолжается, но до запуска нужно решение. */
+export const initWarningCodes = [
+  'review-same-vendor',
+  'runtime-missing',
+  'runtime-unauthenticated',
+] as const;
 
 export const fileConflicts = [
   'symlink',

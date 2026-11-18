@@ -44,17 +44,65 @@ $H doctor
 ```sh
 $H init --repository <repo> --plan   # только план, ничего не пишет
 $H init --repository <repo>          # create-only запись .harness/
+$H init --repository <repo> --lean   # то же для слабой машины (ниже)
 ```
 
 Профиль: `--profile`, иначе сохранённый в manifest, иначе по lockfile — только
 `package-lock.json` даёт `npm-ci`, только `pnpm-lock.yaml` — `pnpm-frozen`;
 оба lockfile или ни одного — `NOT_READY` (`stack-ambiguous` /
 `stack-unsupported`). Версия менеджера пакетов берётся из
-`package.json#packageManager`, без него — из закрепления профиля. Writer —
-`--writer claude` (по умолчанию) или `codex`; reviewer всегда другого вендора.
+`package.json#packageManager`, без него — из закрепления профиля.
 Политика генерируется из профиля и проверяется toolchain inspection: нет
 script или подходящей версии инструмента — точная диагностика `NOT_READY`, а
 не ослабленная политика.
+
+### Ведущий, writer и ревью
+
+```sh
+$H init --repository <repo> --lead codex --plan           # ревью auto
+$H init --repository <repo> --lead claude --review same --model <model>
+```
+
+Ведущий (`--lead claude|codex`) — runtime, который ведёт сессию, составляет
+планы и контракты (`review-plan --author <ведущий>`). Источник по порядку:
+`--lead`, сохранённый manifest (`lead`; у manifest прежнего формата — его
+writer), сохранённая политика без manifest (новый checkout: `project.json` не
+под Git), признак окружения, `--writer`. Из политики ведущий читается по
+правилу ревью плана: `same-vendor-allowed` — его reviewer, иначе другой
+вендор; writer — общий writer ролей, иначе по правилу ревью кода. Признак окружения: `CLAUDECODE=1`
+(Claude Code задаёт его дочерним процессам) — `claude`; `CODEX_THREAD_ID`
+(Codex CLI задаёт его командам агента) — `codex`; оба сразу — признака нет.
+Ведущий не определён (пустой проект без признака) — `NOT_READY`
+(`lead-unknown`) с вопросом, а не молчаливое `claude`. Writer — `--writer`,
+иначе из manifest, иначе из сохранённой политики, иначе ведущий;
+`data.lead` называет ведущего и источник.
+
+Ревью (`--review`): reviewer плана и контракта выбирается для ведущего,
+reviewer кода — для writer.
+
+| `--review`         | Политика                                                                                                                                                                                                                |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cross`            | reviewer другого вендора; нет его CLI — init предупреждает (`runtime-missing`), `doctor` называет проблему до первой попытки                                                                                            |
+| `same`             | тот же runtime с явным `vendor: same-vendor-allowed` в каждом правиле; предупреждение `review-same-vendor`                                                                                                              |
+| `auto` (умолчание) | `same` с предупреждением — только когда свои CLI ведущего и writer пригодны, а CLI другого вендора нет или он не вошёл; иначе `cross` (без CLI вовсе — `cross` с `runtime-missing`); запасные reviewer не подставляются |
+
+Наличие CLI — `HARNESS_<RUNTIME>_BIN` или имя в PATH и ответ на
+`--version`; вход — `claude auth status` и `codex login status` (локальные
+проверки без вызова модели, пробы идут параллельно). «Не вошёл» — только по
+явному ответу: у claude JSON с `loggedIn: false`, у codex «Not logged in»;
+иной ответ — неизвестно, и `auto` считает такой CLI пригодным. Результат — `data.runtimes`. Решение
+сохраняется в manifest (`review: cross|same`): повтор и новая сессия его не
+пересчитывают; иное явное `--review` — `content-differs` на `project.json`.
+`--model` закрепляет одну модель на writer и всех reviewers (поле `model`
+привязок); при ревью другим вендором это отказ `INVALID_INPUT`
+(`model-cross-vendor`). Роли профиля со своими runtime не меняются; их
+отсутствующий CLI — предупреждение `runtime-missing`.
+
+`data.warnings` — предупреждения, не отказ: `review-same-vendor`,
+`runtime-missing`, `runtime-unauthenticated`. Те же правила видны дальше:
+`doctor` предупреждает о ревью тем же вендором (`warnings`) и называет
+отсутствующий назначенный CLI с его назначениями в `problems`; `report`
+добавляет ограничение `review-same-vendor`, если в окне были такие ревью.
 
 | Путь                               | Что                                            | Запись                                        | Под Git         |
 | ---------------------------------- | ---------------------------------------------- | --------------------------------------------- | --------------- |
@@ -77,6 +125,7 @@ realpath корня, поэтому повтор и новая сессия на
 `package.json` и не делает коммитов. Ответ `data` (`cliDataSchemas.init`):
 `mode`, `status` до вызова (`new`, `partial`, `complete`), `files` с действием
 по каждому файлу, `conflicts`, `created`, `preserved`, `manifest`, `profile`,
+`lead`, `review`, `runtimes`, `warnings`,
 `facts` (репозиторий, target ref, роли, gates, каталоги работы, контекста и
 заметок), `toolchain` и `next` — готовые вызовы `doctor`,
 `validate`, `run`, `status`, `explain`.
@@ -92,22 +141,65 @@ realpath корня, поэтому повтор и новая сессия на
 6. `--state` внутри репозитория — `INVALID_INPUT` (`state-inside-repository`).
 7. Невалидный существующий `.harness/policy.json` (в том числе обрыв посреди
    записи) — `INVALID_INPUT` с путём; файл не перезаписывается.
-8. Конфликты плана — `PATH_CONFLICT`, все конфликты в `issues` с абсолютными
+8. Ведущий не определён — `NOT_READY` (`lead-unknown`, путь `--lead`).
+9. Конфликты плана — `PATH_CONFLICT`, все конфликты в `issues` с абсолютными
    путями: `symlink`, `ancestor-not-directory`, `not-regular-file`,
    `content-differs`, `outside-root`.
-9. Проблемы toolchain — `NOT_READY`.
+10. Проблемы toolchain — `NOT_READY`.
 
-С `--plan` пункты 8–9 не бросаются: ответ `ok: true` с данными, exit 3 при
+С `--plan` пункты 9–10 не бросаются: ответ `ok: true` с данными, exit 3 при
 конфликтах или неготовом toolchain. Иное решение при существующем manifest
-(другой `--writer`, профиль с другим digest) — `content-differs` на
-`project.json`: решение меняется явно, файл не перезаписывается. Writer
-сохранённой политики (выводится из reviewer ревью плана — другой вендор),
-расходящийся с writer manifest или явного `--writer`, — `content-differs` на
-`policy.json`, в том числе после ручной правки политики. Повтор с теми же
-решениями даёт `created: []`. Manifest записывается до политики: после
-прерывания подготовка продолжается по его решениям (профиль, writer, state) и
-дописывает недостающее; `status: complete` — только при валидных manifest и
-политике.
+(другой `--lead`, `--writer`, `--review`, `--model`, профиль с другим digest)
+— `content-differs` на `project.json`: решение меняется явно, файл не
+перезаписывается. Сохранённая политика, которая не назначает допустимого
+reviewer для решений (план и контракт ведущего, код writer — `selectReviewer`,
+например reviewer того же вендора без `same-vendor-allowed`), —
+`content-differs` на `policy.json`, в том числе после ручной правки
+политики; отказ называет причину. Новый checkout без manifest берёт решения
+из самой политики и конфликта не даёт. Повтор с теми же решениями даёт
+`created: []`. Manifest записывается до политики: после прерывания
+подготовка продолжается по его решениям (профиль, ведущий, writer, ревью,
+state) и дописывает недостающее; `status: complete` — только при валидных
+manifest и политике. Manifest прежнего формата (без `lead`) продолжает
+работать: ведущий — его writer, ревью — `cross`, файл не переписывается и
+`content-differs` не возникает, пока решения те же.
+
+### Слабая машина
+
+На машине с 4 производительными ядрами или меньше чем 16 ГБ памяти (например,
+ноутбук без вентилятора) две одновременные попытки и их gates делят
+процессор, и проверки упираются в свои пределы времени. Для нового проекта
+`init --lean` надстраивает профиль встроенным слоем `lean`:
+
+- `concurrency: 1` — одна попытка за раз;
+- `runTimeoutMs: 1800000` — 30 минут на попытку: последовательные gates с
+  поднятой границей укладываются в неё;
+- `gateTimeoutFloorMs: 240000` — каждый gate получает не меньше 4 минут
+  (объявленные пределы gates не меняются, см.
+  [contracts](contracts.md#executionpolicy));
+- у pnpm-профиля с `pnpm-lock.yaml` в корне — `dependencyStore: { "manager": "pnpm" }`:
+  пакеты не скачиваются заново в каждый checkout
+  ([хранилище зависимостей](toolchains.md#хранилище-зависимостей); seed
+  собирается в песочнице, поэтому реестру нужен домен в `isolation.domains`,
+  иначе — обычная установка). Для npm хранилища нет.
+
+Решение записывается в manifest (`profile.layers: ["lean"]`): повтор `init`
+без флага его сохраняет. В уже подготовленном проекте `--lean` даёт
+`content-differs` на `project.json`: там те же значения задаются прямо в
+`.harness/policy.json` — `"concurrency": 1`, `"runTimeoutMs": 1800000`,
+`"gateTimeoutFloorMs": 240000` и, для pnpm, `"dependencyStore": { "manager": "pnpm" }`
+у репозитория. Снять слой: уберите эти поля из `.harness/policy.json`,
+удалите локальный `.harness/project.json` и повторите `init` без `--lean` с
+прежними `--profile`, `--writer` и `--state` — manifest запишется заново, без
+слоя. Без `--profile` профиль снова определяется по lockfile и может молча
+смениться другим.
+
+Свой профиль подключает слой через `"extends": ["pnpm-frozen", "lean"]`.
+Сверку копии seed можно ограничить переменной `HARNESS_DIGEST_THREADS`
+(целое 1–8, по умолчанию ядра минус одно). `doctor` с политикой предупреждает
+`LOW_RESOURCES`, если машина слабая, а параллельность политики больше 1, и
+`DEPENDENCY_STORE_RECOMMENDED`, если у pnpm-репозитория нет `dependencyStore`
+([диагностика](toolchains.md#диагностика-doctor-и-preflight)).
 
 ## Факты репозитория без записи
 
@@ -211,6 +303,25 @@ $H result --state <manifest.paths.state> --work <order-id>
 `result.outcome: accepted` и `result.shas.result`, равный
 `git rev-parse refs/heads/harness/accepted`, — приёмка; зелёный exit сам по
 себе ею не является.
+
+## Gates на коммите: `harness gates`
+
+Перед долгим циклом сначала прогоните дешёвые решающие gates:
+`harness gates --gate …`. Команда исполняет названные gates (и их
+предпосылки) на коммите тем же исполнением, что integration поручения, но вне
+попытки: ни попыток, ни состояния поручений она не пишет, модели не
+вызываются.
+
+```sh
+$H gates --state <manifest.paths.state> --policy .harness/policy.json \
+  --sha HEAD --gate lint,unit --fail-fast [--human]
+```
+
+`data.gates[]` — исход каждого gate: `passed`, `failed`, `not-run` (не прошла
+предпосылка) или `skipped` (`--fail-fast` после первого провала); exit 0 — все
+прошли, 3 — нет. Без `--gate` исполняются все gates; без `--fail-fast` провал
+не останавливает остальные. Логи — в `data.logs`. Это проверка, а не приёмка:
+принимает работу только `run`.
 
 ## `harness explain`
 
