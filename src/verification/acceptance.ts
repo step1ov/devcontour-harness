@@ -165,7 +165,8 @@ type ReceivedEvidence = ProofEvidence &
   };
 
 /** Политика получателя: репозитории (gates, группы, зависимости, target), роли и правила ревью. */
-export type ReceiverPolicy = Pick<ExecutionPolicy, 'repositories' | 'roles' | 'review'>;
+export type ReceiverPolicy = Pick<ExecutionPolicy, 'repositories' | 'roles' | 'review'> &
+  Partial<Pick<ExecutionPolicy, 'integrationReuse'>>;
 
 /**
  * Что получатель знает сам и передаёт проверке. Всё, что результат
@@ -722,17 +723,19 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
     // Запись, взятая из кандидата, — PASS интеграции только по правилу
     // переноса и деревьям, которые получатель вычислил сам.
     if (check?.passed && check.reusedEvidence) {
-      const reused = context.trees
-        ? reusedEvidenceProblem({
-            record: check,
-            evidence,
-            candidateSha: result.shas.candidate,
-            resultSha: result.shas.result,
-            proof: named,
-            gates: repo.gates,
-            trees: context.trees,
-          })
-        : `запись ${check.id} (${gate}) взята из кандидата, а получатель не передал деревья кандидата и результата (trees)`;
+      const reused = !policy.integrationReuse
+        ? `запись ${check.id} (${gate}) взята из кандидата, а политика получателя не включает integrationReuse`
+        : context.trees
+          ? reusedEvidenceProblem({
+              record: check,
+              evidence,
+              candidateSha: result.shas.candidate,
+              resultSha: result.shas.result,
+              proof: named,
+              gates: repo.gates,
+              trees: context.trees,
+            })
+          : `запись ${check.id} (${gate}) взята из кандидата, а получатель не передал деревья кандидата и результата (trees)`;
       if (reused) problems.push(`Нет PASS: ${phase}/${gate}: ${reused}`);
       continue;
     }

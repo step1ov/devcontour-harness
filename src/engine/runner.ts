@@ -4035,9 +4035,10 @@ export class Runner {
       // target после начала попытки, в diff этого поручения не входит.
       await this.review(attempt, work, cwd, base, sha, 'integration', artifacts, signal, context);
     };
-    // Все gates взяты из кандидата (или оставшиеся неприменимы): окружение
-    // интеграции — lifecycle, хранилище зависимостей, prepare, проверка
-    // генераторов — не нужно, его выходы те же, что у кандидата.
+    // Все gates взяты из кандидата (или оставшиеся неприменимы) и
+    // потребителей нет: окружение интеграции — lifecycle, хранилище
+    // зависимостей, prepare, проверка генераторов — не нужно, его выходы те
+    // же, что у кандидата.
     const early = reuse
       ? await this.applicableGates(
           attempt,
@@ -4050,7 +4051,10 @@ export class Runner {
           attempt.baseSha!,
         )
       : undefined;
-    if (early && !early.length) await finishing();
+    // Проверка потребителя снимает провайдера с дерева интеграции и ждёт его
+    // подготовки (хранилище, prepare) и сервисов lifecycle: с потребителями
+    // окружение поднимается всегда.
+    if (early && !early.length && !attempt.consumers?.length) await finishing();
     else {
       const execution = this.environment(attempt, 'integration', cwd);
       const prepared = preparation.guard(

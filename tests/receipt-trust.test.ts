@@ -341,6 +341,33 @@ test('Каждое поле результата с записью, взятой
   assert.deepEqual(failures, []);
 });
 
+test('Получатель: запись, взятая из кандидата, без деревьев, с разными деревьями или без integrationReuse в его политике — отказ', () => {
+  const f = reusedAttempt();
+  const { result, context } = f.done();
+  f.store.close();
+  assert.deepEqual(resultProblems(result, context), []);
+  const without: ReceiverContext = { ...context };
+  delete without.trees;
+  assert.ok(
+    resultProblems(result, without).some((p) =>
+      /Нет PASS: integration\/lint: .*не передал деревья/.test(p),
+    ),
+  );
+  assert.ok(
+    resultProblems(result, {
+      ...context,
+      trees: { candidate: context.trees.candidate, result: sha('9') },
+    }).some((p) => /integration\/lint: .*дерево результата .* не совпадает/.test(p)),
+  );
+  const plain = { ...context.policy };
+  delete plain.integrationReuse;
+  assert.ok(
+    resultProblems(result, { ...context, policy: plain }).some((p) =>
+      /integration\/lint: .*политика получателя не включает integrationReuse/.test(p),
+    ),
+  );
+});
+
 test('Фикстуры генератора покрывают все поля модели доверия', () => {
   const uncovered = Object.keys(receiptTrust).filter((p) => p !== 'outcome' && !visitedAll.has(p));
   assert.deepEqual(uncovered, []);

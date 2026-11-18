@@ -696,3 +696,75 @@ test('integrationReuse: отчёт называет число gates интег�
   assert.equal(plain.environment.reused, undefined);
   ctx.store.close();
 });
+
+test('integrationReuse: все gates взяты из кандидата, но есть потребитель — окружение интеграции поднимается, потребитель видит подготовленного провайдера', async () => {
+  const runs = counter();
+  // Потребитель читает выход prepare провайдера в дереве интеграции.
+  const verify = `const fs = require('fs');
+const p = JSON.parse(process.env.DEVCONTOUR_COMPONENTS_JSON);
+const ok = fs.existsSync(p.library + '/.prepared') && fs.readFileSync(p.library + '/value.json', 'utf8').trim() === '2';
+fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase name="consumer"' + (ok ? '/>' : '><failure message="unprepared"/></testcase>') + '</testsuite>');
+process.exit(ok ? 0 : 1);`;
+  const c = components({
+    policy: (p) => {
+      p.integrationReuse = 'identical-tree';
+      p.maxAttempts = 1;
+      const library = p.repositories.find((r: any) => r.id === 'library');
+      library.gates[0].command = node(runs.append('unit') + "require(process.cwd() + '/unit.js');");
+      library.prepare = [
+        {
+          id: 'prep',
+          command: node(runs.append('prepare') + "require('fs').writeFileSync('.prepared', '1');"),
+        },
+      ];
+      const product = p.repositories.find((r: any) => r.id === 'product');
+      product.gates[0].command = node(verify);
+    },
+  });
+  const a = await runComponents(c);
+  assert.equal(
+    c.engine.read((v) => v.work('add-greeting')!.status),
+    'done',
+    a.error,
+  );
+  assert.equal(runs.count('unit'), 1, 'gate провайдера взят из кандидата');
+  assert.ok(integrationRecord(a, 'unit')?.reusedEvidence);
+  assert.equal(runs.count('prepare'), 2, 'prepare интеграции исполнен ради потребителя');
+  assert.ok(
+    a.evidence.some((e) => e.consumer === 'product' && e.phase === 'integration' && e.passed),
+    'потребитель проверен и прошёл',
+  );
+  c.store.close();
+});
+
+test('integrationReuse: попытка без изменений (кандидат — база) ничего не переносит', async () => {
+  const confirmed = approve('Приёмка уже выполнена на базе');
+  (confirmed.result as Record<string, unknown>).alreadySatisfied = {
+    gates: ['unit'],
+    evidence: 'unit passes on the base: greet returns Hello, Ada!',
+  };
+  const ctx = setup({
+    files: {},
+    scenario: { writer: [implement(), implement({})], reviewer: confirmed },
+    policy: (p: any) => {
+      p.maxAttempts = 1;
+      p.integrationReuse = 'identical-tree';
+    },
+    graph: (g: any) => {
+      const order = g.orders[0];
+      g.orders = [
+        { ...order, id: 'dep', source: { ...order.source, ref: 'dep' } },
+        { ...order, dependsOn: ['dep'] },
+      ];
+    },
+  });
+  await runAll(ctx);
+  const work = ctx.engine.read((v) => v.work('add-greeting')!);
+  assert.equal(work.status, 'done', work.failure);
+  const a = attemptOf(ctx);
+  assert.equal(a.candidateSha, a.baseSha);
+  const record = integrationRecord(a, 'unit');
+  assert.ok(record?.passed);
+  assert.equal(record.reusedEvidence, undefined, 'без изменений gate исполняется на интеграции');
+  ctx.store.close();
+});
