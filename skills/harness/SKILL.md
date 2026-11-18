@@ -47,6 +47,10 @@ package covers both, the version pin and upgrades.
 ### 2. Check the machine
 
 `$H doctor` — runtime availability and versions, OS sandbox. No model call.
+With `--policy`, `data.warnings` carries machine advice: `LOW_RESOURCES`
+(weak machine, `concurrency` above 1) and `DEPENDENCY_STORE_RECOMMENDED`
+(pnpm without `dependencyStore`). For a new project answer them with
+`init --lean`; for a prepared one see "Weak machine" (step 8).
 
 `$H capabilities` — the catalog of the shared operations (`init`, `explain`,
 `plan-request`, `plan-check`, `capabilities`): description, `readOnly`, JSON
@@ -75,20 +79,21 @@ Schema of input and response, and the byte limits. Read only.
    interruption it resumes from the saved manifest decisions and writes only
    what is missing.
 
-| Conflict or refusal                                 | Meaning                                                                                                                                                                                  | Action                                                                                                                      |
-| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `symlink`                                           | the path or an ancestor (`conflictPath`) is a symlink                                                                                                                                    | never write through it; the user replaces the link                                                                          |
-| `ancestor-not-directory`                            | an ancestor of the path is a file                                                                                                                                                        | ask the user; never delete their files                                                                                      |
-| `not-regular-file`                                  | the destination exists and is not a regular file                                                                                                                                         | ask the user                                                                                                                |
-| `outside-root`                                      | the destination resolves outside the repository                                                                                                                                          | ask the user                                                                                                                |
-| `content-differs` on `.harness/project.json`        | an explicit `--lead`, `--writer`, `--review`, `--model` or `--profile` differs from the saved manifest; after an upgrade or a move, also a changed built-in profile, root or API version | keep the saved decision, or the user confirms the change explicitly                                                         |
-| `content-differs` on `.harness/policy.json`         | the saved policy assigns no allowed reviewer for the decisions (plan and contract of the lead, code of the writer); the refusal names the reason                                         | pass the `--lead` / `--writer` the policy was made for, or the user confirms the change explicitly                          |
-| `NOT_READY` `lead-unknown`                          | no `--lead`, no saved manifest and no session marker                                                                                                                                     | pass `--lead claude` or `--lead codex` (who leads this session)                                                             |
-| `INVALID_INPUT` with a path                         | not a Git root, invalid manifest or policy (also a truncated write), `--state` inside the repository                                                                                     | read the issue path; a broken file is removed by a human, not overwritten                                                   |
-| `NOT_READY` `no-commits`                            | the repository has no commits                                                                                                                                                            | the user commits first                                                                                                      |
-| `NOT_READY` `stack-ambiguous` / `stack-unsupported` | both lockfiles, or none                                                                                                                                                                  | pass `--profile`; when profile gates do not fit, write `.harness/profile.json` and pass `--profile ./.harness/profile.json` |
-| `NOT_READY` toolchain problems                      | missing scripts, wrong tool versions                                                                                                                                                     | fix the project or hand it to the user; never weaken the policy                                                             |
-| `CONTROLLER_BUSY`                                   | the repository is already owned by another controller                                                                                                                                    | stop: a second controller and state are not created                                                                         |
+| Conflict or refusal                                 | Meaning                                                                                                                                                                                            | Action                                                                                                                      |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `symlink`                                           | the path or an ancestor (`conflictPath`) is a symlink                                                                                                                                              | never write through it; the user replaces the link                                                                          |
+| `ancestor-not-directory`                            | an ancestor of the path is a file                                                                                                                                                                  | ask the user; never delete their files                                                                                      |
+| `not-regular-file`                                  | the destination exists and is not a regular file                                                                                                                                                   | ask the user                                                                                                                |
+| `outside-root`                                      | the destination resolves outside the repository                                                                                                                                                    | ask the user                                                                                                                |
+| `content-differs` on `.harness/project.json`        | an explicit `--lead`, `--writer`, `--review`, `--model`, `--profile` or `--lean` differs from the saved manifest; after an upgrade or a move, also a changed built-in profile, root or API version | keep the saved decision, or the user confirms the change explicitly; for `--lean` use `$H lean --repository <repo> --plan`  |
+| `content-differs` on `.harness/policy.json`         | the saved policy assigns no allowed reviewer for the decisions (plan and contract of the lead, code of the writer); the refusal names the reason                                                   | pass the `--lead` / `--writer` the policy was made for, or the user confirms the change explicitly                          |
+| `NOT_READY` `lead-unknown`                          | no `--lead`, no saved manifest and no session marker                                                                                                                                               | pass `--lead claude` or `--lead codex` (who leads this session)                                                             |
+| `INVALID_INPUT` with a path                         | not a Git root, invalid manifest or policy (also a truncated write), `--state` inside the repository                                                                                               | read the issue path; a broken file is removed by a human, not overwritten                                                   |
+| `NOT_READY` `no-commits`                            | the repository has no commits                                                                                                                                                                      | the user commits first                                                                                                      |
+| `NOT_READY` `stack-ambiguous` / `stack-unsupported` | both lockfiles, or none                                                                                                                                                                            | pass `--profile`; when profile gates do not fit, write `.harness/profile.json` and pass `--profile ./.harness/profile.json` |
+| `NOT_READY` toolchain problems                      | missing scripts, wrong tool versions                                                                                                                                                               | fix the project or hand it to the user; never weaken the policy                                                             |
+| `CONTROLLER_BUSY` from `lean`                       | a run of this project is in progress (live controller, attempt or joint verification)                                                                                                              | wait for the run to finish, then repeat `lean`; never edit the policy under a running controller                            |
+| `CONTROLLER_BUSY`                                   | the repository is already owned by another controller                                                                                                                                              | stop: a second controller and state are not created                                                                         |
 
 ### 4. Plan the graph
 
@@ -204,6 +209,25 @@ it returns `code`, `cause`, `phase`, `actor`, `action`, `retryPlanned`,
 
 Only `user` actions go to the human: access, environment, budgets, attempt
 resets, goal decisions and resuming a paused queue are their decisions.
+
+**Weak machine.** When `doctor --policy` reports `LOW_RESOURCES`, or attempts
+and gates on a slow machine stop at their time limits (`timeout`, a gate
+killed at its limit), switch the prepared project to the `lean` layer instead
+of editing the policy by hand:
+
+1. `$H lean --repository <repo> --plan` writes nothing. Show the user
+   `data.changes` (file, field, before → after: `concurrency` 1,
+   `gateTimeoutFloorMs`, `runTimeoutMs`, `dependencyStore` for pnpm,
+   `profile.layers` in the manifest) and `data.notes` (an explicit value the
+   layer replaces, for example `concurrency` 3). Exit 3 with
+   `data.problems`: `CONTROLLER_BUSY` — a run is in progress, wait for it;
+   `PATH_CONFLICT` — a field was edited by hand, the user decides.
+2. `$H lean --repository <repo>` applies it. The policy digest changes:
+   graphs in `data.staleApprovals` need `review-plan` again, and the next
+   `run --policy .harness/policy.json` uses the new policy.
+3. `$H lean --repository <repo> --off` restores the recorded values exactly
+   (`--plan` first). `NOT_READY` without `.harness/project.json`: run
+   `init --repository <repo>` first.
 
 ### 9. Report the result
 

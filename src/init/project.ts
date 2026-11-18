@@ -97,7 +97,7 @@ export function defaultStateDir(projectId: string, env: NodeJS.ProcessEnv = proc
  * обычный. Через symlink и не обычный файл не читается: такой путь станет
  * конфликтом плана, а не источником данных снаружи репозитория.
  */
-const projectFile = (root: string, rel: string) => {
+export const projectFile = (root: string, rel: string) => {
   if (!lstat(join(root, HARNESS_PROJECT_DIR))?.isDirectory()) return undefined;
   const path = join(root, rel);
   return lstat(path)?.isFile() ? path : undefined;
@@ -197,7 +197,7 @@ Resume in a new session:
 `;
 
 /** Корень: каталог, верхний уровень своего Git, с коммитом. */
-async function gitRoot(repository: string, env: NodeJS.ProcessEnv) {
+export async function gitRoot(repository: string, env: NodeJS.ProcessEnv) {
   const notRoot = (why: string): never => {
     throw new HarnessError(
       'INVALID_INPUT',
@@ -357,6 +357,8 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
     root,
     repository: { id: PROJECT_REPOSITORY_ID, targetRef: PROJECT_TARGET_REF },
     profile: { ref, pin, ...(layers.length ? { layers } : {}) },
+    // Запись `harness lean` о прежних значениях политики живёт, пока слой включён.
+    ...(layers.includes('lean') && saved?.lean ? { lean: saved.lean } : {}),
     // Manifest прежнего формата с теми же решениями не переписывается: без
     // новых полей он байтово тот же, и продолжение не даёт content-differs.
     ...(saved &&

@@ -299,14 +299,19 @@ worktrees не запускается — проблема `TOOL_IN_PROJECT`. Н
 попадают в `problems`:
 
 - `DEPENDENCY_STORE_RECOMMENDED` — у репозитория есть `pnpm-lock.yaml`, а `dependencyStore`
-  нет; совет — поле в `.harness/policy.json`, для npm совета нет;
+  нет; совет — `harness lean --repository <корень> --plan` (вместе со слоем lean) или только
+  поле в политике, для npm совета нет;
 - `LOW_RESOURCES` — не больше 4 производительных ядер (macOS: `sysctl hw.perflevel0.physicalcpu`,
   иначе `os.cpus().length`) или меньше 16 ГиБ памяти при `concurrency` больше 1. Совет называет
-  поля `.harness/policy.json` для готового проекта и `init --lean` для нового
+  `harness lean --repository <корень> --plan` для подготовленного проекта (корень — над
+  `.harness/` политики), `init --lean` для нового и поля слоя для политики вне проекта
   ([слабая машина](standalone.md#слабая-машина)). Ограничение частоты процессора из
   `pmset -g therm` на macOS упоминается, только когда оно меньше 100%. Известный предел: вне
   macOS считаются логические ядра, и машина с 2 физическими ядрами и hyperthreading выглядит
   как 4-ядерная;
+- `LEAN_MISMATCH` — manifest проекта рядом с политикой включает слой lean, а поля, которые
+  записал `harness lean`, в политике другие (прерванное переключение или ручная правка); совет —
+  повторить `harness lean --plan` или `--off --plan`;
 - `DIGEST_THREADS_INVALID` — `HARNESS_DIGEST_THREADS` в окружении `doctor` задана, но не целое
   1–8: значение не действует.
 - срок фаз — фаза, сумма пределов шагов которой (lifecycle setup/ready, prepare, gates,

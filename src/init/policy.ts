@@ -67,6 +67,33 @@ export const profileExecution = (profile: ResolvedProfile) => ({
     : {}),
 });
 
+/** Поля исполнения, которые профиль переносит в политику, в порядке записи `init`. */
+export const EXECUTION_FIELDS = ['concurrency', 'runTimeoutMs', 'gateTimeoutFloorMs'] as const;
+export type ExecutionField = (typeof EXECUTION_FIELDS)[number];
+
+/**
+ * Поля исполнения, которые `init` записал бы в эту политику из профиля
+ * `profile`: параллельность и нижняя граница предела gate — профиля (нет в
+ * профиле — поля нет, действует умолчание схемы); срок фазы — профиля, а если
+ * его (или умолчания) не хватает пределам шагов политики — наибольшая сумма
+ * фазы с запасом (`requiredRunTimeoutMs`), не меньше срока профиля. Прочие
+ * поля политики не меняются; поля исполнения самой политики не учитываются.
+ */
+export function executionFieldsOf(
+  policy: z.input<typeof executionPolicySchema>,
+  profile: ResolvedProfile,
+): Partial<Record<ExecutionField, number>> {
+  const base: z.input<typeof executionPolicySchema> = { ...policy };
+  for (const field of EXECUTION_FIELDS) delete base[field];
+  Object.assign(base, profileExecution(profile));
+  const budget = executionPolicySchema.parse(base);
+  if (timeBudgetWarnings(budget).length)
+    base.runTimeoutMs = Math.max(requiredRunTimeoutMs(budget), profile.runTimeoutMs ?? 0);
+  return Object.fromEntries(
+    EXECUTION_FIELDS.flatMap((f) => (base[f] === undefined ? [] : [[f, base[f]]])),
+  );
+}
+
 /**
  * Политика проекта из профиля: пользователь JSON не пишет. Репозиторий —
  * корень над `.harness/` (`path: '..'`), target ref — `harness/accepted`,
@@ -158,9 +185,8 @@ export function generatePolicy(input: {
     review: { code: rule(writer), plan: rule(lead), contract: rule(lead) },
     ...profileExecution(profile),
   };
-  const budget = executionPolicySchema.parse(policy);
-  if (timeBudgetWarnings(budget).length)
-    policy.runTimeoutMs = Math.max(requiredRunTimeoutMs(budget), profile.runTimeoutMs ?? 0);
+  const { runTimeoutMs } = executionFieldsOf(policy, profile);
+  if (runTimeoutMs !== policy.runTimeoutMs) policy.runTimeoutMs = runTimeoutMs;
   // В файл пишется input-форма, но только прошедшая схему.
   const parsed = executionPolicySchema.parse(policy);
   if (model) {

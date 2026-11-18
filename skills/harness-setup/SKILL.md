@@ -245,6 +245,20 @@ resolve every conflict or problem with the table of the `harness` skill
 `.harness/policy.json`. The state lives outside the repository
 (`HARNESS_STATE_HOME`, `XDG_STATE_HOME` or `~/.local/state/devcontour-harness`).
 
+On a weak machine (`doctor --policy` reports `LOW_RESOURCES`: at most 4
+performance cores or less than 16 GB of RAM) add `--lean` to a new
+project's `init`. For an already prepared project, or when attempts hit their
+time limits, switch the layer instead of editing the policy by hand:
+
+```sh
+$H lean --repository <repo> --plan
+$H lean --repository <repo>
+```
+
+Show `data.changes` and `data.notes` before applying, and tell the user the
+policy digest changes: graphs in `data.staleApprovals` need `review-plan`
+again. `$H lean --repository <repo> --off` restores the recorded values.
+
 ### 8. Runtimes, approval, isolation
 
 Edit `.harness/policy.json` only as the decisions require:

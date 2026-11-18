@@ -57,6 +57,8 @@ const laterCommands: readonly string[] = [
   'input-cancel',
   'input-supersede',
   'gates',
+  // Переключение слоя lean в подготовленном проекте (после 0.1.0-alpha.50).
+  'lean',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -332,12 +334,14 @@ test('H3-01: прежние команды и схемы их данных не 
         return { ...o, properties, required: o.required?.filter((r) => !added.includes(r)) };
       }
     }
-    // Аддитивные поля manifest проекта (0.1.0-alpha.50): lead, review, model.
+    // Аддитивные поля manifest проекта (0.1.0-alpha.50): lead, review, model;
+    // запись `harness lean` о прежних значениях политики (`lean`).
     if (k === 'properties' && v && typeof v === 'object' && 'projectId' in v && 'lead' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.lead;
       delete rest.review;
       delete rest.model;
+      delete rest.lean;
       return rest;
     }
     // Аддитивные поля условного gate (`when.paths`) — до прочих правил, потому
@@ -521,6 +525,11 @@ test('H3-01: прежние команды и схемы их данных не 
   // Хеш H2 вырезает поля слоя lean: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.profile).includes('"gateTimeoutFloorMs"'), 'profile: граница gate');
   assert.ok(JSON.stringify(data.init).includes('"layers"'), 'init: слои профиля в manifest');
+  // Хеш H2 вырезает запись `lean` manifest: объявление держит эта проверка.
+  assert.ok(
+    JSON.stringify(data.init).includes('"applied"'),
+    'init: запись lean о прежних значениях в manifest',
+  );
   // Хеш H2 выше вырезает `artifacts` gate задачи: объявление держит эта проверка.
   assert.ok(
     JSON.stringify(data.profile).includes('"artifacts"'),
