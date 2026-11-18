@@ -4,7 +4,10 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { Runner } from '../src/engine/runner.ts';
+import { crashedRecheck } from '../src/engine/engine.ts';
+import { recheckCounts } from '../src/report/compute.ts';
 import { isolationSupport } from '../src/environment/isolation.ts';
 import { hostLoad } from '../src/verification/gates.ts';
 import { BlockedError } from '../src/engine/classify.ts';
@@ -454,6 +457,194 @@ require('./run.js');
     a.timings?.some((t) => t.stage.startsWith('integration-recheck:')),
     'повтор — отдельная стадия замеров',
   );
+});
+
+/**
+ * Gate интеграции: первый запуск роняет тест `greets`, второй (повтор)
+ * проходит тесты, но исполнитель тестов падает кодом выхода (`recheck`
+ * — отчёт повтора), дальше — обычный тест.
+ */
+function crashedRecheckGate(counter: string, recheck: string, third = "require('./run.js');") {
+  return `
+const fs = require('fs');
+const n = fs.existsSync(${JSON.stringify(counter)}) ? Number(fs.readFileSync(${JSON.stringify(counter)}, 'utf8')) : 0;
+if (process.env.DEVCONTOUR_PHASE === 'integration') fs.writeFileSync(${JSON.stringify(counter)}, String(n + 1));
+if (process.env.DEVCONTOUR_PHASE === 'integration' && n === 0) {
+  fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase classname="greet" name="greets"><failure message="budget exceeded"/></testcase><testcase classname="greet" name="other"/></testsuite>');
+  process.exit(1);
+}
+if (process.env.DEVCONTOUR_PHASE === 'integration' && n === 1) {
+  fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, ${JSON.stringify(recheck)});
+  console.error('A jest worker process was terminated by another process: signal=SIGSEGV');
+  process.exit(1);
+}
+${third}
+`;
+}
+
+test('Повтор интеграции прошёл упавший тест, но исполнитель тестов упал: ещё один запуск, а не ремонт', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'harness-crash-'));
+  const counter = join(state, 'integration-runs');
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    files: {
+      'test/flaky.js': crashedRecheckGate(
+        counter,
+        '<testsuite><testcase classname="greet" name="greets"/><testcase classname="greet" name="other"/></testsuite>',
+      ),
+    },
+    policy: (p) => {
+      const raw = p as { maxAttempts: number; repositories: { gates: { command: string[] }[] }[] };
+      raw.maxAttempts = 1;
+      raw.repositories[0]!.gates[0]!.command = [process.execPath, 'test/flaky.js'];
+    },
+  });
+  await runAll(ctx);
+  const work = ctx.engine.read((v) => v.work('add-greeting')!);
+  assert.equal(work.status, 'done', work.failure);
+  const attempts = ctx.engine.read((v) => v.attempts('add-greeting'));
+  assert.equal(attempts.length, 1, 'падение исполнителя тестов не стоило новой реализации');
+  const integration = attempts[0]!.evidence.filter(
+    (e) => e.phase === 'integration' && e.kind === 'test',
+  );
+  assert.deepEqual(
+    integration.map((e) => [e.passed, e.recheck ?? null]),
+    [
+      [false, null],
+      [false, { of: integration[0]!.id, outcome: 'confirmed' }],
+      [true, { of: integration[0]!.id, outcome: 'flaky' }],
+    ],
+  );
+  assert.equal(integration[1]!.exitCode, 1);
+  assert.ok(integration[1]!.tests?.every((t) => t.status === 'passed'));
+  assert.equal(readFileSync(counter, 'utf8'), '3');
+  // Запуск после падения исполнителя пишет в свой каталог: лог упавшего
+  // повтора сохранён и сходится со своим digest.
+  assert.match(integration[1]!.log, /[/\\]integration[/\\]recheck[/\\]/);
+  assert.match(integration[2]!.log, /[/\\]integration[/\\]recheck-2[/\\]/);
+  const crashed = readFileSync(integration[1]!.log, 'utf8');
+  assert.match(crashed, /SIGSEGV/);
+  assert.equal(createHash('sha256').update(crashed).digest('hex'), integration[1]!.digest);
+});
+
+test('Запуск после падения исполнителя тестов провалился: отказ засчитан, три записи, задача упала', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'harness-crash-'));
+  const counter = join(state, 'integration-runs');
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    files: {
+      'test/flaky.js': crashedRecheckGate(
+        counter,
+        '<testsuite><testcase classname="greet" name="greets"/><testcase classname="greet" name="other"/></testsuite>',
+        `if (process.env.DEVCONTOUR_PHASE === 'integration') {
+  fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase classname="greet" name="greets"><failure message="budget exceeded"/></testcase><testcase classname="greet" name="other"/></testsuite>');
+  process.exit(1);
+}
+require('./run.js');`,
+      ),
+    },
+    policy: (p) => {
+      const raw = p as { maxAttempts: number; repositories: { gates: { command: string[] }[] }[] };
+      raw.maxAttempts = 1;
+      raw.repositories[0]!.gates[0]!.command = [process.execPath, 'test/flaky.js'];
+    },
+  });
+  await runAll(ctx);
+  const work = ctx.engine.read((v) => v.work('add-greeting')!);
+  assert.equal(work.status, 'failed');
+  assert.equal(work.failureKind, 'gate');
+  const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  const integration = a.evidence.filter((e) => e.phase === 'integration' && e.kind === 'test');
+  assert.deepEqual(
+    integration.map((e) => [e.passed, e.recheck?.outcome ?? null]),
+    [
+      [false, null],
+      [false, 'confirmed'],
+      [false, 'confirmed'],
+    ],
+  );
+  assert.equal(readFileSync(counter, 'utf8'), '3');
+  const diagnosed = ctx.store
+    .events()
+    .filter((e) => e.type === 'attempt.diagnosed')
+    .map((e) => (e.payload as { counted: boolean }).counted);
+  assert.deepEqual(diagnosed, [true], 'отказ засчитан');
+  // Отчёт об эффекте считает один исход на повторённую запись.
+  assert.deepEqual(recheckCounts(integration), { flaky: 0, confirmed: 1 });
+});
+
+test('crashedRecheck: только полный отчёт без свойств, ненулевой код выхода и прошедшие прежде упавшие тесты', () => {
+  const failed = {
+    tests: [
+      { id: 'greet.greets', status: 'failed' as const },
+      { id: 'greet.other', status: 'passed' as const },
+    ],
+  };
+  const crash = {
+    passed: false,
+    exitCode: 1,
+    recheck: { of: 'x', outcome: 'confirmed' as const },
+    tests: [{ id: 'greet.greets', status: 'passed' as const }],
+  };
+  assert.equal(crashedRecheck(failed, crash), true);
+  // Процесс исполнителя убит сигналом: кода выхода нет (-1) — не этот случай.
+  assert.equal(crashedRecheck(failed, { ...crash, exitCode: -1 }), false);
+  assert.equal(crashedRecheck(failed, { ...crash, exitCode: 0 }), false);
+  // Отчёт свойств (контрпример, покрытие) — повтор не продлевается.
+  const property = { seed: '1' } as unknown as NonNullable<EvidenceRecord['property']>;
+  assert.equal(crashedRecheck(failed, { ...crash, property }), false);
+  assert.equal(crashedRecheck({ ...failed, property }, crash), false);
+  // Усечённый отчёт не полон.
+  assert.equal(crashedRecheck(failed, { ...crash, testsTruncated: true }), false);
+  assert.equal(crashedRecheck({ ...failed, testsTruncated: true }, crash), false);
+  // Первый провал не назвал упавших тестов; повтор назвал упавший.
+  assert.equal(crashedRecheck({ tests: failed.tests.slice(1) }, crash), false);
+  assert.equal(
+    crashedRecheck(failed, {
+      ...crash,
+      tests: [...crash.tests, { id: 'greet.other', status: 'failed' as const }],
+    }),
+    false,
+  );
+  assert.equal(crashedRecheck(failed, { ...crash, passed: true }), false);
+  assert.deepEqual(
+    recheckCounts([
+      {},
+      { recheck: { of: 'a', outcome: 'confirmed' } },
+      { recheck: { of: 'a', outcome: 'flaky' } },
+      { recheck: { of: 'b', outcome: 'confirmed' } },
+    ]),
+    { flaky: 1, confirmed: 1 },
+  );
+});
+
+test('Повтор интеграции упал кодом выхода, но упавшего теста в отчёте нет: провал засчитан, третьего запуска нет', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'harness-crash-'));
+  const counter = join(state, 'integration-runs');
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    files: {
+      // Исполнитель упал, не дойдя до упавшего прежде теста: он не подтверждён.
+      'test/flaky.js': crashedRecheckGate(
+        counter,
+        '<testsuite><testcase classname="greet" name="other"/></testsuite>',
+      ),
+    },
+    policy: (p) => {
+      const raw = p as { maxAttempts: number; repositories: { gates: { command: string[] }[] }[] };
+      raw.maxAttempts = 1;
+      raw.repositories[0]!.gates[0]!.command = [process.execPath, 'test/flaky.js'];
+    },
+  });
+  await runAll(ctx);
+  const work = ctx.engine.read((v) => v.work('add-greeting')!);
+  assert.equal(work.status, 'failed');
+  assert.equal(work.failureKind, 'gate');
+  const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  const integration = a.evidence.filter((e) => e.phase === 'integration' && e.kind === 'test');
+  assert.equal(integration.length, 2, 'один повтор, не больше');
+  assert.deepEqual(integration[1]!.recheck, { of: integration[0]!.id, outcome: 'confirmed' });
+  assert.equal(readFileSync(counter, 'utf8'), '2');
 });
 
 /**

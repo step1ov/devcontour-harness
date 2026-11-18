@@ -169,7 +169,7 @@ import {
   withSuffix,
 } from './classify.ts';
 import { TaskFailure, type FailureKind } from './failure.ts';
-import { activeOf, namesFailingCases, type Engine } from './engine.ts';
+import { activeOf, crashedRecheck, namesFailingCases, type Engine } from './engine.ts';
 import { prompt } from './prompt.ts';
 import { scopeViolations } from './scope.ts';
 import { generatorNote, runGenerators, selectGenerators } from '../verification/generators.ts';
@@ -2444,6 +2444,8 @@ export class Runner {
     consumer?: { repositoryId: string; dependencies: DependencySnapshot[] },
     /** ID записи провала, которую повторяет этот запуск (`recheckIntegration`). */
     recheck?: string,
+    /** Каталог лога повтора: у запуска после падения исполнителя — свой. */
+    recheckDir = 'recheck',
   ) {
     // Время проверок потребителя — отдельная стадия: в метриках области оно
     // не смешивается с собственными gates поручения. Повтор — тоже своя
@@ -2465,6 +2467,7 @@ export class Runner {
         execution,
         consumer,
         recheck,
+        recheckDir,
       ),
     );
   }
@@ -2535,6 +2538,9 @@ export class Runner {
    * integration SHA, один раз за интеграцию кандидата; обе записи остаются,
    * у повтора — `recheck` со ссылкой на первую и исходом (`flaky` — повтор
    * прошёл, `confirmed` — провал подтвердился и засчитывается как прежде).
+   * Повтор, который прошёл упавшие тесты и провалился только кодом выхода
+   * исполнителя тестов (`crashedRecheck`), получает ещё один запуск с той же
+   * ссылкой: его исход и решает.
    */
   private async integrationGate(
     attempt: AttemptState,
@@ -2584,18 +2590,43 @@ export class Runner {
       if (!failed || failed.passed || namesFailingCases(failed) || !candidatePassed || spent)
         throw error;
       budget.recheck = false;
-      await this.gate(
-        attempt,
-        cwd,
-        sha,
-        'integration',
-        gate,
-        artifacts,
-        signal,
-        execution,
-        undefined,
-        failed.id,
-      );
+      const recheck = (dir?: string) =>
+        this.gate(
+          attempt,
+          cwd,
+          sha,
+          'integration',
+          gate,
+          artifacts,
+          signal,
+          execution,
+          undefined,
+          failed.id,
+          dir,
+        );
+      try {
+        await recheck();
+      } catch (again) {
+        // Повтор прошёл все тесты, упавшие в первом запуске, а провалился
+        // только кодом выхода исполнителя тестов (обрушенный worker): о коде
+        // это не говорит. Ещё один запуск того же gate решает исход; его
+        // провал засчитывается как прежде.
+        if (
+          signal.aborted ||
+          !(again instanceof TaskFailure) ||
+          again instanceof GateTimeout ||
+          again.kind !== 'gate' ||
+          reapedFailure(again) ||
+          !this.engine.read((v) => {
+            const last = (v.attempt(attempt.id)?.evidence ?? []).findLast(
+              (e) => e.phase === 'integration' && e.recheck?.of === failed.id,
+            );
+            return !!last && crashedRecheck(failed, last);
+          })
+        )
+          throw again;
+        await recheck('recheck-2');
+      }
     }
   }
 
@@ -2749,6 +2780,7 @@ export class Runner {
     execution: ReturnType<typeof executionEnvironment>,
     consumer?: { repositoryId: string; dependencies: DependencySnapshot[] },
     recheck?: string,
+    recheckDir = 'recheck',
   ) {
     // Генеративный gate — всегда; gate эталонных наборов — когда манифест
     // поручения ждёт от него отчёта (без договора — прежний уровень).
@@ -2773,11 +2805,12 @@ export class Runner {
       phase,
       gate,
       // Лог и отчёт повтора — в своём каталоге: первая запись ссылается на
-      // свой лог по digest, и повтор его не перезаписывает.
+      // свой лог по digest, и повтор его не перезаписывает (запуск после
+      // падения исполнителя — тоже: `recheck-2`).
       artifactDir: consumer
         ? join(artifacts, phase, 'consumer', consumer.repositoryId)
         : recheck
-          ? join(artifacts, phase, 'recheck')
+          ? join(artifacts, phase, recheckDir)
           : join(artifacts, phase),
       ...(recheck ? { recheck } : {}),
       // Дерево потребителя — не база попытки: его входы установки не сверить.
