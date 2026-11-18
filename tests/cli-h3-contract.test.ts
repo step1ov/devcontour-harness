@@ -145,6 +145,8 @@ const ADDITIVE_EVENT_TYPES = new Set([
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([
   'status--detail',
+  // Текст сводки попыток для человека (следующий выпуск).
+  'status--human',
   'init--lean',
   'init--lead',
   'init--review',
@@ -430,12 +432,21 @@ test('H3-01: прежние команды и схемы их данных не 
       return rest;
     }
     // Аддитивные поля status — живость активной попытки (`works[].liveness`),
-    // вопрос исполнителя и запросы ведущему (`works[].input`, `followUps`, H02).
+    // вопрос исполнителя и запросы ведущему (`works[].input`, `followUps`, H02),
+    // сводка попыток (`works[].attemptSummary`, следующий выпуск).
     if (k === 'properties' && v && typeof v === 'object' && 'liveness' in v && 'blockers' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.liveness;
       delete rest.input;
       delete rest.followUps;
+      delete rest.attemptSummary;
+      return rest;
+    }
+    // Аддитивное поле explain — сводка попыток по поручениям (следующий выпуск).
+    if (k === 'properties' && v && typeof v === 'object' && 'diagnoses' in v && 'attempts' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.attempts;
+      delete rest.attemptsTruncated;
       return rest;
     }
     // Аддитивное поле status — снимок наблюдателя `--detail`.
@@ -509,6 +520,15 @@ test('H3-01: прежние команды и схемы их данных не 
   );
   // Хеш H2 выше вырезает detail status и флаг --detail: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.status).includes('"detail"'), 'status объявляет detail');
+  // Хеш H2 вырезает сводку попыток status и explain: объявление держит эта проверка.
+  assert.ok(JSON.stringify(data.status).includes('"attemptSummary"'), 'status: сводка попыток');
+  assert.ok(JSON.stringify(data.explain).includes('"attempts"'), 'explain: сводка попыток');
+  assert.ok(
+    (cliCommands.status.args as readonly CliArgument[]).some(
+      (a) => a.name === '--human' && a.value === 'flag' && !a.required,
+    ),
+    'status объявляет флаг --human',
+  );
   // Хеш H2 вырезает вопрос исполнителя в status: объявление держит эта проверка.
   assert.ok(
     JSON.stringify(data.status).includes('"followUps"'),

@@ -9,6 +9,7 @@ import {
 import { HarnessError } from '../contracts/errors.ts';
 import type { AttemptState, WorkState, WorkStatus } from '../contracts/execution.ts';
 import { statusOf } from '../control/status.ts';
+import { interruptedByShutdown } from '../report/compute.ts';
 import { budgetBlocks, ownWorkRecords } from '../engine/budget.ts';
 import { callRecords } from '../engine/usage.ts';
 import { policySecrets, redactor } from '../environment/redaction.ts';
@@ -347,10 +348,14 @@ function build(
     };
   });
 
-  // Провалы попыток — новые первыми.
+  // Провалы попыток — новые первыми. Прерванные штатной остановкой — не
+  // провалы: исключаются до предела, иначе после перезапуска они вытесняют
+  // настоящие провалы; их число — отдельно (`interruptions`).
   const time = (a: AttemptState) => a.finishedAt ?? a.startedAt;
+  // Прерывания — тем же правилом, что сводка попыток и отчёт (`interruptedByShutdown`).
+  const interruptions = read.attempts.filter(interruptedByShutdown).length;
   const failed = read.attempts
-    .filter((a) => a.status === 'failed' || a.status === 'expired')
+    .filter((a) => (a.status === 'failed' || a.status === 'expired') && !interruptedByShutdown(a))
     .sort((a, b) => time(b).localeCompare(time(a)) || b.attempt - a.attempt);
   const failures = failed.slice(0, HANDOFF_LIMITS.failures).map((a) => ({
     runId: name(a.id),
@@ -539,6 +544,7 @@ function build(
     works,
     stops,
     failures,
+    ...(interruptions ? { interruptions } : {}),
     ...opt('budgets', budgets),
     repairs,
     ...(inputs.length ? { inputs } : {}),

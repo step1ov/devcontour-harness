@@ -189,7 +189,18 @@ test(
       assert.equal(doctor.json.data.state?.compatible, true, 'состояние alpha.5 несовместимо');
       assert.deepEqual(now.result.data, before.result.data, 'результат alpha.5 читается иначе');
       assert.deepEqual(now.events.data, before.events.data, 'журнал alpha.5 читается иначе');
-      assert.deepEqual(now.status.data, before.status.data, 'статус alpha.5 читается иначе');
+      // Аддитивное поле текущей версии — сводка попыток поручения: без него
+      // статус тот же; сама сводка читается из записей alpha.5.
+      const works = now.status.data.works as Record<string, unknown>[];
+      const summary = works.map((w) => w.attemptSummary as { accepted: number; line: string });
+      assert.ok(
+        summary.length && summary.every((x) => x?.accepted === 1 && /принято 1/.test(x.line)),
+      );
+      const stripped = {
+        ...now.status.data,
+        works: works.map(({ attemptSummary: _s, ...w }) => (void _s, w)),
+      };
+      assert.deepEqual(stripped, before.status.data, 'статус alpha.5 читается иначе');
       assert.deepEqual(dump(), stateBefore, 'чтение изменило содержимое базы');
 
       // Повтор доставки текущим кодом: идемпотентен, прежние записи не переписаны.

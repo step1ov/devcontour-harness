@@ -15,7 +15,7 @@ fencing, write scope and budgets are enforced by the harness itself, whether or
 not this file is installed.
 
 Every command takes explicit paths and prints one JSON envelope on stdout
-(`ok` with `data`, or `error`). `--human` (only `init`, `explain`, `plan-request` and `gates`) prints
+(`ok` with `data`, or `error`). `--human` (only `init`, `status`, `explain`, `plan-request` and `gates`) prints
 text instead of a successful envelope; a refusal stays JSON. Exit codes:
 0 success, 2 invalid input, 3 refusal or block, 4 infrastructure. The tool
 keeps no "current project".
@@ -209,6 +209,20 @@ it returns `code`, `cause`, `phase`, `actor`, `action`, `retryPlanned`,
 
 Only `user` actions go to the human: access, environment, budgets, attempt
 resets, goal decisions and resuming a paused queue are their decisions.
+
+**Progress and "how long" questions.** `status` (`works[].attemptSummary`)
+and `explain` (`attempts[]`) give one line per order, counted from the store
+by the same rules as `harness report`: attempts, failures by class, timeouts,
+attempts interrupted by a controller shutdown (not failures), accepted, and
+the attempts and group repairs left. When the user asks how long it will take
+or how far along it is, quote that `line` and `result.outcome`
+(`$H result --state <state> --work <id>`); never estimate time, and never
+turn the attempts left into a duration. Keep three words apart (in Russian
+«исправлено», «проверка прошла», «принято»): "fixed" — an
+attempt produced a candidate; "check passed" — a gate passed on that
+candidate (`gates` or evidence); "accepted" — only `result.outcome:
+accepted` (gates, independent review and integration). A fix or a green check
+is not accepted work.
 
 **Weak machine.** When `doctor --policy` reports `LOW_RESOURCES`, or attempts
 and gates on a slow machine stop at their time limits (`timeout`, a gate

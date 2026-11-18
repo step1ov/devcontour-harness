@@ -39,7 +39,7 @@ import {
 import { planCheckDataSchema, planRequestDataSchema } from './planning.ts';
 import { toolchainReportSchema } from './toolchain.ts';
 import { operationCatalogSchema } from './catalog.ts';
-import { reportDataSchema } from './report.ts';
+import { failureBuckets, reportDataSchema } from './report.ts';
 import { handoffPackSchema } from './handoff.ts';
 import {
   inputAnswerSchema,
@@ -282,6 +282,12 @@ export const cliCommands = {
         required: false,
         description:
           'Добавить detail: почему стоит выдача и активные попытки (стадия, владение, gates)',
+      },
+      {
+        name: '--human',
+        value: 'flag',
+        required: false,
+        description: 'Текст для человека вместо JSON: строка сводки попыток на поручение',
       },
     ],
     refusals: ['NOT_FOUND'],
@@ -1097,6 +1103,59 @@ export const queueViewSchema = z.strictObject({
   action: z.enum(diagnosisActions).optional(),
 });
 
+/**
+ * Сводка попыток поручения (`status`, `explain`): числа — теми же правилами,
+ * что строка поручения отчёта (`attemptSummaryOf`, `src/report/compute.ts`);
+ * `line` — та же сводка одной строкой (`attemptSummaryLine`). Ведущий агент
+ * на вопрос о сроке цитирует её, а не оценивает время.
+ */
+export const attemptSummarySchema = z.strictObject({
+  /** Записей попыток всего. */
+  total: z.number().int().min(0),
+  /** Идущие. */
+  active: z.number().int().min(0),
+  /** Отказы: без прерванных штатной остановкой. */
+  failed: z.number().int().min(0),
+  /** Отказы по корзинам отчёта (`failureBucketOf`). */
+  failures: z
+    .array(z.strictObject({ key: z.enum(failureBuckets), count: z.number().int().positive() }))
+    .max(failureBuckets.length),
+  /** Из отказов — по превышению времени (`timeout`). */
+  timeouts: z.number().int().min(0),
+  /** Прерванные штатной остановкой controller: не отказы. */
+  interrupted: z.number().int().min(0),
+  /** 1 — поручение принято принявшей попыткой. */
+  accepted: z.number().int().min(0).max(1),
+  /**
+   * Засчитанные попытки (`attempt` поручения), предел политики и остаток.
+   * `used` включает идущую попытку; закончившаяся незасчитанным отказом
+   * (окружение, вопрос, штатная остановка) возвращается.
+   */
+  attempts: z.strictObject({
+    used: z.number().int().min(0),
+    max: z.number().int().positive(),
+    left: z.number().int().min(0),
+  }),
+  /**
+   * Незасчитанные отказы поручения (`neutralFailures`) и их предел: на пределе
+   * повтор — только со сбросом человека, и `line` говорит это вместо остатка
+   * попыток.
+   */
+  neutral: z.strictObject({
+    used: z.number().int().min(0),
+    max: z.number().int().positive(),
+  }),
+  /** Восстановления задания графа по правилу `explain`; нет — задания нет. */
+  repairs: z
+    .strictObject({
+      used: z.number().int().min(0),
+      budget: z.number().int().min(0),
+      left: z.number().int().min(0),
+    })
+    .optional(),
+  line: z.string().max(1000),
+});
+
 export const statusDataSchema = z.strictObject({
   stateVersion: z.literal(STATE_VERSION),
   control: controlStateSchema,
@@ -1139,6 +1198,8 @@ export const statusDataSchema = z.strictObject({
       followUps: z.number().int().positive().optional(),
       /** Почему поручение сейчас не выдаётся; пусто — может быть выдано. */
       blockers: z.array(blocker),
+      /** Сводка попыток и остаток пределов (`attemptSummarySchema`). */
+      attemptSummary: attemptSummarySchema.optional(),
     }),
   ),
   /**
@@ -1698,7 +1759,16 @@ export const leanDataSchema = z.strictObject({
 });
 
 /** `explain`: объяснения остановок. */
-export const explainDataSchema = z.strictObject({ diagnoses: z.array(stopDiagnosisSchema) });
+export const explainDataSchema = z.strictObject({
+  diagnoses: z.array(stopDiagnosisSchema),
+  /** Сводка попыток по каждому поручению выбора (`--work` — одно), в порядке состояния. */
+  attempts: z
+    .array(z.strictObject({ workId: idSchema, ...attemptSummarySchema.shape }))
+    .max(100)
+    .optional(),
+  /** Поручений сверх предела строк `attempts` (100); нет поля — все показаны. */
+  attemptsTruncated: z.number().int().positive().optional(),
+});
 
 const requestIdSchema = inputRequestSchema.shape.id;
 

@@ -1,8 +1,19 @@
-import { STATE_VERSION, type ExecutionPolicy, type ExecutionView } from '../contracts/index.ts';
+import type { z } from 'zod';
+import {
+  STATE_VERSION,
+  type statusDataSchema,
+  type AttemptState,
+  type ExecutionPolicy,
+  type ExecutionView,
+  type WorkState,
+  type WorkflowJob,
+} from '../contracts/index.ts';
+import { attemptSummaryLine, attemptSummaryOf, type AttemptBudget } from '../report/compute.ts';
 import { budgetOverview } from '../engine/budget.ts';
 import type { Engine } from '../engine/engine.ts';
 import { requestsOf } from '../engine/input-requests.ts';
-import { nextRunControl } from '../explain/state.ts';
+import { MAX_NEUTRAL_FAILURES } from '../contracts/repair-policy.ts';
+import { nextRunControl, repairJobOf, type StopSource } from '../explain/state.ts';
 import {
   CLIP_DIAGNOSTIC,
   attemptView,
@@ -20,6 +31,71 @@ import {
 export interface StatusSource {
   readonly engine: Engine;
   readonly policy: ExecutionPolicy;
+  /**
+   * Задания графов (`Harness.workflows`, тот же адаптер, что у
+   * `StopSource`): с ними сводка попыток называет остаток восстановлений
+   * группы по правилу `explain` (`repairJobOf`). Нет — сводка без `repairs`.
+   */
+  readonly workflows?: StopSource['workflows'];
+}
+
+/** Попытки всех работ одним проходом по хранилищу (порядок — как у `v.attempts(id)`). */
+export function attemptsByWork(v: ExecutionView): (workId: string) => AttemptState[] {
+  const byWork = new Map<string, AttemptState[]>();
+  for (const a of v.attempts()) {
+    const list = byWork.get(a.workId);
+    if (list) list.push(a);
+    else byWork.set(a.workId, [a]);
+  }
+  return (workId) => byWork.get(workId) ?? [];
+}
+
+/**
+ * Сводки попыток работ одного чтения: попытки — одним проходом, задание
+ * группы — `repairJobOf` (как `explain`), если источник передал задания.
+ */
+export function attemptSummaries(source: StatusSource, v: ExecutionView) {
+  const attemptsOf = attemptsByWork(v);
+  const workflows = source.workflows;
+  const jobOf = workflows
+    ? repairJobOf({ engine: source.engine, policy: source.policy, workflows }, v)
+    : undefined;
+  return (w: WorkState) =>
+    attemptSummaryView(w, attemptsOf(w.id), source.policy, jobOf?.(w.graphId, w));
+}
+
+/**
+ * Сводка попыток поручения для `status` и `explain`: числа — `attemptSummaryOf`
+ * (правила отчёта), остаток попыток — по засчитанным `work.attempt` и
+ * `maxAttempts`, восстановлений — по заданию графа и `repairBudget`; `line` —
+ * `attemptSummaryLine`.
+ */
+export function attemptSummaryView(
+  work: WorkState,
+  attempts: readonly AttemptState[],
+  policy: Pick<ExecutionPolicy, 'maxAttempts' | 'repairBudget'>,
+  job?: Pick<WorkflowJob, 'repairs'>,
+) {
+  const summary = attemptSummaryOf(work, attempts);
+  const neutral = { used: work.neutralFailures ?? 0, max: MAX_NEUTRAL_FAILURES };
+  // Предел незасчитанных отказов держит только незавершённую работу: у
+  // принятой или отменённой строка называет итог, а не повтор со сбросом.
+  const final = work.status === 'done' || work.status === 'cancelled';
+  const budget: AttemptBudget = {
+    attempts: { used: work.attempt, max: policy.maxAttempts },
+    ...(final ? {} : { neutral }),
+    ...(job ? { repairs: { used: job.repairs ?? 0, budget: policy.repairBudget } } : {}),
+  };
+  const left = (used: number, max: number) => Math.max(0, max - used);
+  return {
+    ...summary,
+    attempts: { ...budget.attempts, left: left(work.attempt, policy.maxAttempts) },
+    neutral,
+    ...(budget.repairs
+      ? { repairs: { ...budget.repairs, left: left(budget.repairs.used, budget.repairs.budget) } }
+      : {}),
+    line: attemptSummaryLine(summary, budget),
+  };
 }
 
 /**
@@ -34,44 +110,49 @@ export function statusOf(
   options: { detail?: boolean } = {},
 ) {
   const { engine } = source;
-  return engine.read((v) => ({
-    stateVersion: STATE_VERSION,
-    control: v.control(),
-    ...(v.controller() ? { controller: v.controller() } : {}),
-    graphs: v
-      .graphs()
-      .filter((g) => !graphId || g.id === graphId)
-      .map((g) => ({
-        id: g.id,
-        digest: g.digest,
-        source: g.graph.source,
-        approved: g.approval?.digest === g.digest,
+  // Задания и попытки — внутри того же чтения: один снимок хранилища.
+  return engine.read((v) => {
+    const summaryOf = attemptSummaries(source, v);
+    return {
+      stateVersion: STATE_VERSION,
+      control: v.control(),
+      ...(v.controller() ? { controller: v.controller() } : {}),
+      graphs: v
+        .graphs()
+        .filter((g) => !graphId || g.id === graphId)
+        .map((g) => ({
+          id: g.id,
+          digest: g.digest,
+          source: g.graph.source,
+          approved: g.approval?.digest === g.digest,
+        })),
+      works: v.works(graphId).map((w) => ({
+        id: w.id,
+        graphId: w.graphId,
+        status: w.status,
+        attempt: w.attempt,
+        ...(w.activeRunId ? { activeRunId: w.activeRunId } : {}),
+        ...((a) =>
+          a?.status === 'active' && a.liveness && a.liveness.state !== 'active'
+            ? { liveness: a.liveness.state }
+            : {})(w.activeRunId ? v.attempt(w.activeRunId) : undefined),
+        ...(w.resultSha ? { resultSha: w.resultSha } : {}),
+        // Вопрос исполнителя: ID, состояние, версия и серьёзность, без текста;
+        // неблокирующие запросы ведущему — числом.
+        // У итоговой работы вопрос — история: статус его не показывает.
+        ...((view) => ({
+          ...(view.input && w.status !== 'done' && w.status !== 'cancelled'
+            ? { input: view.input }
+            : {}),
+          ...(view.followUps ? { followUps: view.followUps } : {}),
+        }))(workInputOf(requestsOf(v, w))),
+        blockers: engine.blockers(w, v),
+        attemptSummary: summaryOf(w),
       })),
-    works: v.works(graphId).map((w) => ({
-      id: w.id,
-      graphId: w.graphId,
-      status: w.status,
-      attempt: w.attempt,
-      ...(w.activeRunId ? { activeRunId: w.activeRunId } : {}),
-      ...((a) =>
-        a?.status === 'active' && a.liveness && a.liveness.state !== 'active'
-          ? { liveness: a.liveness.state }
-          : {})(w.activeRunId ? v.attempt(w.activeRunId) : undefined),
-      ...(w.resultSha ? { resultSha: w.resultSha } : {}),
-      // Вопрос исполнителя: ID, состояние, версия и серьёзность, без текста;
-      // неблокирующие запросы ведущему — числом.
-      // У итоговой работы вопрос — история: статус его не показывает.
-      ...((view) => ({
-        ...(view.input && w.status !== 'done' && w.status !== 'cancelled'
-          ? { input: view.input }
-          : {}),
-        ...(view.followUps ? { followUps: view.followUps } : {}),
-      }))(workInputOf(requestsOf(v, w))),
-      blockers: engine.blockers(w, v),
-    })),
-    ...((budgets) => (budgets ? { budgets } : {}))(budgetOverview(engine.budgetContext(), v)),
-    ...(options.detail ? { detail: statusDetail(source, v, graphId) } : {}),
-  }));
+      ...((budgets) => (budgets ? { budgets } : {}))(budgetOverview(engine.budgetContext(), v)),
+      ...(options.detail ? { detail: statusDetail(source, v, graphId) } : {}),
+    };
+  });
 }
 
 function statusDetail(source: StatusSource, v: ExecutionView, graphId?: string) {
@@ -134,4 +215,21 @@ function statusDetail(source: StatusSource, v: ExecutionView, graphId?: string) 
         });
       }),
   };
+}
+
+/**
+ * Текст `status --human`: состояние выдачи и строка на поручение — статус и
+ * сводка попыток (`attemptSummaryLine`); блокировки — кодами с отступом.
+ */
+export function statusText(data: z.output<typeof statusDataSchema>): string {
+  const c = data.control;
+  const out = [
+    c.paused ? `Выдача на паузе${c.pauseReason ? ` (${c.pauseReason})` : ''}.` : 'Выдача идёт.',
+  ];
+  if (!data.works.length) out.push('Поручений нет.');
+  for (const w of data.works) {
+    out.push(`${w.id} [${w.status}]${w.attemptSummary ? ': ' + w.attemptSummary.line : ''}`);
+    if (w.blockers.length) out.push(`  блокировки: ${w.blockers.map((b) => b.code).join(', ')}`);
+  }
+  return out.join('\n') + '\n';
 }

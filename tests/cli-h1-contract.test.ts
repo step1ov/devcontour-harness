@@ -47,7 +47,8 @@ test('H1-05: init и explain объявлены в договоре CLI со с�
 
 test('H1-05: --human и новые флаги принимают только свои команды; прежние отвечают INVALID_INPUT, exit 2', () => {
   for (const args of [
-    ['status', '--state', '/nonexistent', '--human'],
+    // status принимает --human с выпуска сводки попыток; events — нет.
+    ['events', '--state', '/nonexistent', '--human'],
     ['validate', '--graph', 'g.json', '--policy', 'p.json', '--plan'],
     ['run', '--writer', 'claude'],
   ]) {

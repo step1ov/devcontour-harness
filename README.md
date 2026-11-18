@@ -592,6 +592,7 @@ alpha.5 не читает; прежний DevContour его открывает �
 - [Быстрый старт по шагам](docs/quickstart.md)
 - [Установка, первая настройка и обновление версии — skill harness-setup](skills/harness-setup/SKILL.md)
 - [Самостоятельный проект: init, планирование (plan-request, plan-check), explain, capabilities, проекции](docs/standalone.md)
+- [Медленные окружения: пределы времени, условные gates, ресурсы, слой lean](docs/slow-environments.md)
 - [Архитектура и границы доверия](docs/architecture.md)
 - [Договоры: входы, выходы, порты, ошибки, CLI](docs/contracts.md)
 - [Совместимость форматов](docs/compatibility.md)

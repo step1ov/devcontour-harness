@@ -234,6 +234,86 @@ test('handoff: истёкшее владение — незавершённая 
   }
 });
 
+test('handoff: прерванные штатной остановкой — не провалы, исключены до предела и сосчитаны отдельно', () => {
+  const ctx = hsetup({ scenario: {}, policy: (p) => ((p as any).maxAttempts = 3) });
+  const h = ctx.open();
+  try {
+    const ids = Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`g${i}`, []]));
+    ready(h.engine, graphOf({ ...ids, s: [] }));
+    // 11 настоящих провалов (по коду) — сначала, чтобы прерывания были новее.
+    const genuine: string[] = [];
+    for (let i = 0; i < 11; i++) {
+      const run = h.engine.claim('c1')!;
+      assert.notEqual(run.workId, 's');
+      h.engine.fail(run.id, run.token, 'gate ' + i, { kind: 'gate' });
+      genuine.push(run.id);
+    }
+    // 12 прерываний остановкой одного поручения: оно каждый раз возвращается в очередь.
+    for (let i = 0; i < 12; i++) {
+      const run = h.engine.claim('c1')!;
+      assert.equal(run.workId, 's');
+      const r = h.engine.fail(run.id, run.token, 'остановка', {
+        kind: 'environment',
+        interrupted: true,
+      });
+      assert.equal(r.interrupted, true);
+    }
+    const pack = handoffPack(h);
+    assert.equal(pack.failures.length, HANDOFF_LIMITS.failures);
+    assert.ok(
+      pack.failures.every((f) => f.workId !== 's' && f.code === 'GATE_FAILED'),
+      'прерывания не в failures',
+    );
+    // Новые первыми: десять последних настоящих провалов, первый отброшен пределом.
+    assert.deepEqual(
+      pack.failures.map((f) => f.runId),
+      genuine.slice(1).reverse(),
+    );
+    assert.equal(pack.truncated.failures, 1);
+    assert.equal(pack.interruptions, 12);
+    assert.match(handoffMarkdown(pack), /Прервано штатной остановкой .*: 12\./);
+    assert.ok(handoffPackSchema.safeParse(pack).success);
+  } finally {
+    h.close();
+  }
+});
+
+test('handoff: один настоящий провал после 12 прерываний остановкой — в пакете', () => {
+  const ctx = hsetup({ scenario: {} });
+  const h = ctx.open();
+  try {
+    ready(h.engine, graphOf({ s: [], g: [] }));
+    for (let i = 0; i < 12; i++) {
+      const run = h.engine.claim('c1')!;
+      assert.equal(run.workId, 's');
+      h.engine.fail(run.id, run.token, 'остановка', { kind: 'environment', interrupted: true });
+    }
+    // `s` снова первая в очереди: отменяем её, чтобы выдать `g`.
+    h.engine.cancel('s', 'тест');
+    const g = h.engine.claim('c1')!;
+    assert.equal(g.workId, 'g');
+    h.engine.fail(g.id, g.token, 'unit failed', { kind: 'gate' });
+    const pack = handoffPack(h);
+    assert.deepEqual(
+      pack.failures.map((f) => f.runId),
+      [g.id],
+    );
+    assert.equal(pack.truncated.failures, 0);
+    assert.equal(pack.interruptions, 12);
+  } finally {
+    h.close();
+  }
+});
+
+test('handoff: без прерываний остановкой поля interruptions нет', () => {
+  const { h } = board();
+  try {
+    assert.equal('interruptions' in handoffPack(h), false);
+  } finally {
+    h.close();
+  }
+});
+
 test('handoff next: свежий срок владения без controller — ждать до срока, без harness run', () => {
   const ctx = hsetup({ scenario: {} });
   const h = ctx.open();
