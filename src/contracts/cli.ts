@@ -518,6 +518,13 @@ export const cliCommands = {
           'Корень Git-репозитория проекта с .harness/project.json и .harness/policy.json',
       },
       {
+        name: '--state',
+        value: 'dir',
+        required: false,
+        description:
+          'Каталог состояния для проверки идущего run (роль controller, попытки, совместные проверки); по умолчанию — paths.state manifest',
+      },
+      {
         name: '--off',
         value: 'flag',
         required: false,
@@ -1313,7 +1320,8 @@ export const doctorDataSchema = z.strictObject({
    * что автор (`review-same-vendor: …`); сумма пределов шагов
    * одной фазы больше `runTimeoutMs` (`timeBudgetWarnings`); советы о ресурсах
    * машины — `DEPENDENCY_STORE_RECOMMENDED`, `LOW_RESOURCES`,
-   * `DIGEST_THREADS_INVALID` (`resourceWarnings`).
+   * `DIGEST_THREADS_INVALID` (`resourceWarnings`); расхождение manifest
+   * проекта рядом с политикой и её полей по слою lean — `LEAN_MISMATCH`.
    */
   warnings: z.array(z.string()).optional(),
 });

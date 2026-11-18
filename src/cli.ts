@@ -39,7 +39,7 @@ import { assertToolchainReady, inspectPolicy } from './toolchains/inspect.ts';
 import { profilePin, resolveProfile } from './profiles/resolve.ts';
 import { cliAdapter } from './agents/cli-adapter.ts';
 import { initProject, initText } from './init/project.ts';
-import { leanText, switchLean } from './init/lean.ts';
+import { leanMismatch, leanText, switchLean } from './init/lean.ts';
 import { diagnoseState, explainText } from './explain/diagnose.ts';
 import { planCheck, planRequestOf } from './planning/check.ts';
 import { checkJsonBytes } from './catalog/bytes.ts';
@@ -767,6 +767,7 @@ async function run(
         repository: need('repository'),
         ...(v.off ? { off: true } : {}),
         ...(v.plan ? { plan: true } : {}),
+        ...(v.state ? { state: v.state } : {}),
       });
       // План с проблемами — отказ по существу с данными (как init --plan).
       return { command, data, ...(data.problems.length ? { code: exitCodes.refused } : {}) };
@@ -940,26 +941,27 @@ async function run(
     }
     case 'doctor': {
       const b = v.policy ? loadPolicy(v.policy) : v.state ? binding(v.state) : undefined;
-      return {
-        command,
-        data: await doctor(
-          b?.policy,
-          adapters(b?.policy ?? ({ toolProfiles: {} } as ExecutionPolicy)),
-          v.state,
-          b
-            ? {
-                baseDir: b.baseDir,
-                inspect: (policy, baseDir) =>
-                  inspectPolicy(policy, baseDir, {
-                    configSource: v.policy ? resolve(v.policy) : bindingFile(v.state!),
-                    ...(v.state ? { protectedRoots: [resolve(v.state)] } : {}),
-                  }),
-              }
-            : undefined,
-          b && v.state ? { baseDir: b.baseDir } : undefined,
-          optional('planAuthors', v.policy ? manifestLead(v.policy) : undefined),
-        ),
-      };
+      const report = await doctor(
+        b?.policy,
+        adapters(b?.policy ?? ({ toolProfiles: {} } as ExecutionPolicy)),
+        v.state,
+        b
+          ? {
+              baseDir: b.baseDir,
+              inspect: (policy, baseDir) =>
+                inspectPolicy(policy, baseDir, {
+                  configSource: v.policy ? resolve(v.policy) : bindingFile(v.state!),
+                  ...(v.state ? { protectedRoots: [resolve(v.state)] } : {}),
+                }),
+            }
+          : undefined,
+        b && v.state ? { baseDir: b.baseDir } : undefined,
+        optional('planAuthors', v.policy ? manifestLead(v.policy) : undefined),
+      );
+      // Manifest проекта рядом с политикой расходится с ней по слою lean — предупреждение.
+      const mismatch = v.policy ? leanMismatch(resolve(v.policy)) : [];
+      if (mismatch.length) report.warnings = [...(report.warnings ?? []), ...mismatch];
+      return { command, data: report };
     }
     case 'input-list':
     case 'input-show':

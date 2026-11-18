@@ -9,6 +9,7 @@ import {
   cpSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -27,7 +28,7 @@ import {
   projectManifestSchema,
   workGraphSchema,
 } from '../src/contracts/index.ts';
-import { switchLean, type LeanOptions } from '../src/init/lean.ts';
+import { leanMismatch, switchLean, type LeanOptions } from '../src/init/lean.ts';
 import { planProject, type InitOptions } from '../src/init/project.ts';
 import { Engine } from '../src/engine/engine.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
@@ -375,6 +376,19 @@ test('lean при идущем run: живая роль controller и попыт
     );
     assert.deepEqual(done.staleApprovals, ['g']);
     assert.ok(done.next.some((x) => x.command === 'review-plan'));
+    assert.ok(done.notes.some((x) => /графы g .*APPROVAL_STALE/.test(x)));
+
+    // Завершённый граф (все поручения done или cancelled) не устаревает.
+    engine.cancel('a');
+    await p.lean({ off: true, now: at(later) });
+    assert.deepEqual(p.read(), original);
+    // Политика снова та, под которой согласован граф, но граф завершён.
+    const finished = await p.lean({ plan: true, now: at(later) });
+    assert.deepEqual(finished.problems, []);
+    assert.deepEqual(finished.staleApprovals, []);
+    assert.ok(!finished.notes.some((x) => /APPROVAL_STALE/.test(x)), finished.notes.join('\n'));
+    assert.ok(finished.notes.some((x) => /policyDigest меняется/.test(x)));
+    assert.ok(!finished.next.some((x) => x.command === 'review-plan'));
   } finally {
     store.close();
   }
@@ -385,7 +399,7 @@ test('CLI lean: договор, JSON-конверт, --plan --human, отказ 
   assert.equal(cliCommands.lean.writes, true);
   assert.deepEqual(
     cliCommands.lean.args.map((a) => a.name),
-    ['--repository', '--off', '--plan', '--human'],
+    ['--repository', '--state', '--off', '--plan', '--human'],
   );
   assert.equal(cliDataSchemas.lean, leanDataSchema);
   const p = await project('npm');
@@ -426,4 +440,157 @@ test('CLI lean: договор, JSON-конверт, --plan --human, отказ 
   const missing = harness('lean', '--repository', p.root);
   assert.equal(missing.status, 3);
   assert.equal((JSON.parse(missing.stdout) as { error: { code: string } }).error.code, 'NOT_READY');
+});
+
+const crash = (after: number) => {
+  let n = 0;
+  return () => {
+    if (++n === after) throw new Error('crash after rename');
+  };
+};
+const tmpLeft = (root: string) =>
+  readdirSync(join(root, '.harness')).filter((f) => f.endsWith('.tmp'));
+
+test('lean: прерывание после первого rename — повтор и обратное направление сходятся к точным байтам', async () => {
+  const p = await project('pnpm');
+  const original = p.read();
+  await p.lean();
+  const on = p.read();
+  await p.lean({ off: true });
+  assert.deepEqual(p.read(), original);
+
+  // Включение: manifest записан, политика — нет.
+  await assert.rejects(p.lean({ afterReplace: crash(1) }), /crash after rename/);
+  assert.equal(p.read().policy, original.policy);
+  assert.equal(p.read().manifest, on.manifest);
+  assert.match(leanMismatch(p.policyPath).join('\n'), /LEAN_MISMATCH: .*concurrency/);
+  await p.lean();
+  assert.deepEqual(p.read(), on, 'повтор включения дописывает политику');
+  assert.deepEqual(leanMismatch(p.policyPath), []);
+  await p.lean({ off: true });
+  assert.deepEqual(p.read(), original);
+
+  await assert.rejects(p.lean({ afterReplace: crash(1) }), /crash after rename/);
+  await p.lean({ off: true });
+  assert.deepEqual(p.read(), original, 'выключение после прерванного включения');
+
+  // Выключение: политика возвращена, manifest — ещё со слоем.
+  await p.lean();
+  await assert.rejects(p.lean({ off: true, afterReplace: crash(1) }), /crash after rename/);
+  assert.equal(p.read().policy, original.policy);
+  assert.equal(p.read().manifest, on.manifest);
+  assert.match(leanMismatch(p.policyPath).join('\n'), /LEAN_MISMATCH/);
+  await p.lean({ off: true });
+  assert.deepEqual(p.read(), original, 'повтор выключения дописывает manifest');
+
+  await p.lean();
+  await assert.rejects(p.lean({ off: true, afterReplace: crash(1) }), /crash after rename/);
+  await p.lean();
+  assert.deepEqual(p.read(), on, 'включение после прерванного выключения');
+  assert.deepEqual(tmpLeft(p.root), []);
+});
+
+test('lean: файл изменён между чтением и rename — REVISION_CONFLICT; половина переключения названа и дописывается повтором', async () => {
+  const p = await project('npm');
+  const original = p.read();
+  // Первый файл (manifest при включении) изменён: ничего не записано.
+  const touched = original.manifest.replace(/\n$/, '\n\n');
+  await assert.rejects(
+    p.lean({
+      beforeReplace: (path) => {
+        if (path === p.manifestPath) writeFileSync(path, touched);
+      },
+    }),
+    (e: unknown) =>
+      e instanceof HarnessError &&
+      e.code === 'REVISION_CONFLICT' &&
+      /не записано, файлы прежние/.test(e.message),
+  );
+  assert.deepEqual(p.read(), { policy: original.policy, manifest: touched });
+  assert.deepEqual(tmpLeft(p.root), []);
+  writeFileSync(p.manifestPath, original.manifest);
+
+  // Политика изменена во время замены manifest: manifest записан, политика — нет.
+  const edited = JSON.parse(original.policy) as Record<string, unknown>;
+  edited.approvalMode = 'operator';
+  await assert.rejects(
+    p.lean({
+      beforeReplace: (path) => {
+        if (path === p.manifestPath)
+          writeFileSync(p.policyPath, JSON.stringify(edited, null, 2) + '\n');
+      },
+    }),
+    (e: unknown) =>
+      e instanceof HarnessError &&
+      e.code === 'REVISION_CONFLICT' &&
+      e.message.includes(`${p.manifestPath} уже записан`) &&
+      e.message.startsWith(p.policyPath),
+  );
+  assert.deepEqual(tmpLeft(p.root), []);
+  const resumed = await p.lean();
+  assert.deepEqual(resumed.problems, []);
+  const policy = p.parsed();
+  assert.equal(policy.concurrency, 1);
+  assert.equal(policy.gateTimeoutFloorMs, 240_000);
+  assert.equal(policy.approvalMode, 'operator', 'чужая правка сохранена');
+  await p.lean({ off: true });
+  assert.equal(p.read().manifest, original.manifest);
+  assert.equal(p.parsed().approvalMode, 'operator');
+});
+
+test('lean --off после init --lean и поднятых пределов gates: поле, которое слой не задаёт, не конфликт; срок фазы — в notes', async () => {
+  const p = await project('npm', { lean: true });
+  const raised = JSON.parse(p.read().policy) as {
+    repositories: { gates: { timeoutMs?: number }[] }[];
+  };
+  for (const gate of raised.repositories[0]!.gates) gate.timeoutMs = 1_200_000;
+  writeFileSync(p.policyPath, JSON.stringify(raised, null, 2) + '\n');
+  const plan = await p.lean({ off: true, plan: true });
+  assert.deepEqual(plan.problems, []);
+  assert.deepEqual(
+    plan.changes.filter((c) => c.file === 'policy').map((c) => c.field),
+    ['concurrency', 'gateTimeoutFloorMs'],
+  );
+  assert.ok(
+    plan.notes.some((n) => /^срок фазы: /.test(n)),
+    plan.notes.join('\n'),
+  );
+  await p.lean({ off: true });
+  assert.equal(p.parsed().runTimeoutMs, 1_800_000);
+});
+
+test('lean --off: dependencyStore, настроенный вручную после включения, — PATH_CONFLICT', async () => {
+  const p = await project('pnpm');
+  await p.lean();
+  const edited = JSON.parse(p.read().policy) as {
+    repositories: { dependencyStore: { maxBytes: number } }[];
+  };
+  edited.repositories[0]!.dependencyStore.maxBytes = 1024 * 1024 * 1024;
+  writeFileSync(p.policyPath, JSON.stringify(edited, null, 2) + '\n');
+  const plan = await p.lean({ off: true, plan: true });
+  assert.deepEqual(
+    plan.problems.map((x) => [x.code, x.field]),
+    [['PATH_CONFLICT', 'repositories[0].dependencyStore']],
+  );
+});
+
+test('lean --state: проверка идущего run в названном каталоге состояния', async () => {
+  const p = await project('npm');
+  const other = join(p.root, '..', 'other-state');
+  mkdirSync(other, { recursive: true });
+  const policy = p.parsed();
+  const store = new SqliteExecutionStore(join(other, 'state.sqlite'), 'test');
+  const engine = new Engine({ host: standaloneHost(store, policy), policy });
+  try {
+    assert.equal(engine.lead('c9'), true);
+    assert.deepEqual((await p.lean({ plan: true })).problems, []);
+    const busy = await p.lean({ plan: true, state: other });
+    assert.deepEqual(
+      busy.problems.map((x) => x.code),
+      ['CONTROLLER_BUSY'],
+    );
+  } finally {
+    engine.release('c9');
+    store.close();
+  }
 });

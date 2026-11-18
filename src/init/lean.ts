@@ -50,8 +50,16 @@ export interface LeanOptions {
   off?: boolean;
   /** Только изменения, без записи. */
   plan?: boolean;
+  /** Каталог состояния для проверки идущего run; по умолчанию — `paths.state` manifest. */
+  state?: string;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
+  /**
+   * Точки внутренних проверок записи (тесты): перед последней сверкой файла
+   * (временный файл уже записан) и после его rename.
+   */
+  beforeReplace?: (path: string) => void;
+  afterReplace?: (path: string) => void;
 }
 
 const LAYER = 'lean';
@@ -111,8 +119,14 @@ function manifestWith(
 }
 
 /** Запись поверх файла: временный файл того же каталога и rename; права прежние. */
-function replaceFile(path: string, text: string, expected: string) {
-  if (readFileSync(path, 'utf8') !== expected) throw changedUnder(path);
+function replaceFile(
+  path: string,
+  text: string,
+  expected: string,
+  written: string[],
+  before?: (path: string) => void,
+) {
+  if (readFileSync(path, 'utf8') !== expected) throw changedUnder(path, written);
   const dir = dirname(path);
   const temp = join(dir, `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
   const mode = lstatSync(path).mode & 0o7777;
@@ -128,8 +142,10 @@ function replaceFile(path: string, text: string, expected: string) {
       closeSync(fd);
     }
     chmodSync(temp, mode);
+    before?.(path);
     // Последняя сверка перед заменой: чужая запись между чтением и rename — отказ.
-    if (readFileSync(path, 'utf8') !== expected) throw changedUnder(path);
+    // Окно между этой сверкой и rename остаётся: блокировки файлов политики нет.
+    if (readFileSync(path, 'utf8') !== expected) throw changedUnder(path, written);
     renameSync(temp, path);
     created = false;
   } finally {
@@ -137,11 +153,16 @@ function replaceFile(path: string, text: string, expected: string) {
   }
 }
 
-const changedUnder = (path: string) =>
+const changedUnder = (path: string, written: string[] = []) =>
   new HarnessError(
     'REVISION_CONFLICT',
-    `${path} изменён после чтения: переключение слоя lean не записано; повторите команду`,
-    [{ path: [path], message: 'changed-after-read' }],
+    written.length
+      ? `${path} изменён после чтения: он не записан, а ${written.join(', ')} уже записан — переключение выполнено наполовину; повторите команду, она допишет недостающее`
+      : `${path} изменён после чтения: переключение слоя lean не записано, файлы прежние; повторите команду`,
+    [
+      { path: [path], message: 'changed-after-read' },
+      ...written.map((w) => ({ path: [w], message: 'written' })),
+    ],
   );
 
 /** Файл проекта для чтения: настоящий файл внутри `.harness/`, текст и разбор. */
@@ -218,9 +239,15 @@ function stateFacts(stateDir: string, before: ExecutionPolicy, now: number) {
             message: `Идёт совместная проверка ${j.id}: дождитесь её окончания, затем повторите`,
           });
       const digest = executionDigest(before);
+      // Завершённый граф (все поручения done или cancelled) согласования больше не требует.
       approved = v
         .graphs()
-        .filter((g) => g.approval && g.policyDigest === digest)
+        .filter(
+          (g) =>
+            g.approval &&
+            g.policyDigest === digest &&
+            v.works(g.id).some((w) => w.status !== 'done' && w.status !== 'cancelled'),
+        )
         .map((g) => g.id);
     }),
   );
@@ -343,12 +370,21 @@ export async function switchLean(options: LeanOptions): Promise<LeanData> {
     const added = manifest.lean?.dependencyStore;
     if (added && repo && repo.dependencyStore === undefined) store = 'add';
     if (!manifest.lean) {
-      const expected = executionFieldsOf(withoutExecution(raw), lean);
-      for (const field of EXECUTION_FIELDS)
-        if (raw[field] !== expected[field])
+      // Слой init --lean: поле со значением профиля без слоя — прерванное
+      // выключение, его значение слоя возвращается; иное — ручная правка.
+      const base = withoutExecution(raw);
+      const expected = executionFieldsOf(base, lean);
+      const without = executionFieldsOf(base, plain);
+      for (const field of EXECUTION_FIELDS) {
+        const current = raw[field];
+        if (current === expected[field]) continue;
+        if (current === without[field]) target.set(field, expected[field]);
+        else
           notes.push(
-            `${field}: слой lean (init --lean) дал бы ${expected[field] ?? 'нет поля'}, сейчас ${String(raw[field] ?? 'нет поля')} — правка сохраняется`,
+            `${field}: слой lean (init --lean) дал бы ${expected[field] ?? 'нет поля'}, сейчас ${String(current ?? 'нет поля')} — правка сохраняется`,
           );
+      }
+      if (storeEligible && repo.dependencyStore === undefined) store = 'add';
     }
   } else if (enabledBefore) {
     if (manifest.lean) {
@@ -366,7 +402,7 @@ export async function switchLean(options: LeanOptions): Promise<LeanData> {
       if (manifest.lean.dependencyStore) {
         const current = rawRepo()?.dependencyStore;
         if (current !== undefined) {
-          if (same(current, storeValue) || same(current, { manager: 'pnpm' })) store = 'remove';
+          if (isLeanStore(current)) store = 'remove';
           else
             conflict(
               storeField,
@@ -381,7 +417,8 @@ export async function switchLean(options: LeanOptions): Promise<LeanData> {
       const without = executionFieldsOf(base, plain);
       for (const field of EXECUTION_FIELDS) {
         const current = raw[field];
-        if (current === without[field]) continue;
+        // Слой не задаёт поле, если с ним и без него init вывел бы одно значение.
+        if (withLean[field] === without[field] || current === without[field]) continue;
         if (current === withLean[field]) target.set(field, without[field]);
         else
           conflict(
@@ -391,7 +428,7 @@ export async function switchLean(options: LeanOptions): Promise<LeanData> {
       }
       const current = rawRepo()?.dependencyStore;
       if (storeEligible && current !== undefined) {
-        if (same(current, storeValue) || same(current, { manager: 'pnpm' })) store = 'remove';
+        if (isLeanStore(current)) store = 'remove';
         else
           notes.push(
             `${storeField}: ${JSON.stringify(current)} отличается от того, что добавляет init --lean, — хранилище настроено вручную и остаётся`,
@@ -466,17 +503,24 @@ export async function switchLean(options: LeanOptions): Promise<LeanData> {
   }
 
   const policyChanged = policyText !== policyFile.text;
+  const stateDir = options.state ?? manifest.paths.state;
   const state = policyChanged
-    ? stateFacts(manifest.paths.state, before, now)
+    ? stateFacts(stateDir, before, now)
     : { problems: [], notes: [], approved: [] };
   problems.push(...state.problems);
   notes.push(...state.notes);
   const digests = { before: policyDigest(before), after: policyDigest(after) };
+  const staleApprovals = executionDigest(after) === executionDigest(before) ? [] : state.approved;
   if (policyChanged)
     notes.push(
-      `policyDigest меняется (${digests.before.slice(0, 12)} → ${digests.after.slice(0, 12)}): согласования графов и планы, проверенные под прежней политикой, устаревают (APPROVAL_STALE) — повторите review-plan; следующий run --policy ${policyFile.path} применяет новую политику`,
+      `policyDigest меняется (${digests.before.slice(0, 12)} → ${digests.after.slice(0, 12)}): следующий run --policy ${policyFile.path} применяет новую политику` +
+        (staleApprovals.length
+          ? `; графы ${staleApprovals.join(', ')} согласованы под прежней политикой и получат APPROVAL_STALE — повторите review-plan`
+          : ''),
     );
-  const staleApprovals = executionDigest(after) === executionDigest(before) ? [] : state.approved;
+  // Возвращённый срок фазы может не покрывать пределы шагов: политика — та, что была.
+  if (policyChanged)
+    for (const w of timeBudgetWarnings(after)) notes.push(`срок фазы: ${w.message}`);
 
   const changed = changes.length > 0;
   if (!options.plan && problems.length)
@@ -494,7 +538,12 @@ export async function switchLean(options: LeanOptions): Promise<LeanData> {
     for (const [path, , expected] of writes)
       if (readFileSync(path, 'utf8') !== expected) throw changedUnder(path);
     if (!enable) writes.reverse();
-    for (const [path, text, expected] of writes) replaceFile(path, text, expected);
+    const written: string[] = [];
+    for (const [path, text, expected] of writes) {
+      replaceFile(path, text, expected, written, options.beforeReplace);
+      written.push(path);
+      options.afterReplace?.(path);
+    }
   }
   return {
     mode: options.plan ? 'plan' : 'apply',
@@ -520,20 +569,50 @@ export async function switchLean(options: LeanOptions): Promise<LeanData> {
         ? [
             {
               command: 'review-plan',
-              args: [
-                '--state',
-                manifest.paths.state,
-                '--graph',
-                '<graph>',
-                '--policy',
-                policyFile.path,
-              ],
+              args: ['--state', stateDir, '--graph', '<graph>', '--policy', policyFile.path],
               why: `Согласовать заново графы прежней политики: ${staleApprovals.join(', ')}`,
             },
           ]
         : []),
     ],
   };
+}
+
+/** Хранилище, которое добавляет слой: `{ manager: 'pnpm' }` в краткой или полной форме. */
+const isLeanStore = (value: unknown) => {
+  const parsed = dependencyStoreSchema.safeParse(value);
+  return parsed.success && same(parsed.data, dependencyStoreSchema.parse({ manager: 'pnpm' }));
+};
+
+/**
+ * Расхождение manifest и политики проекта (прерванное переключение или правка
+ * вручную): поля, которые слой lean записал по manifest, а в политике другие.
+ * Нет manifest рядом с политикой, записи `lean` или расхождений — пусто.
+ */
+export function leanMismatch(policyPath: string): string[] {
+  try {
+    const dir = dirname(policyPath);
+    const manifest = projectManifestSchema.safeParse(
+      JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8')),
+    );
+    if (!manifest.success || !manifest.data.lean) return [];
+    const raw = JSON.parse(readFileSync(policyPath, 'utf8')) as Record<string, unknown>;
+    const on = manifest.data.profile.layers?.includes(LAYER) ?? false;
+    const off = manifest.data.lean.policy.filter((c) => raw[c.field] !== c.applied);
+    if (!on || !off.length) return [];
+    return [
+      `LEAN_MISMATCH: manifest (${join(dir, 'project.json')}) включает слой lean, а в политике ${off
+        .map(
+          (c) =>
+            `${c.field} = ${raw[c.field] === undefined ? 'нет поля' : JSON.stringify(raw[c.field])} (слой записал ${c.applied})`,
+        )
+        .join(
+          ', ',
+        )}: переключение прервано или поле правили вручную. Повторите harness lean --repository ${dirname(dir)} --plan (или --off --plan)`,
+    ];
+  } catch {
+    return [];
+  }
 }
 
 const definedOf = (fields: Record<string, number | undefined>) =>
