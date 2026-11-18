@@ -15,7 +15,7 @@ fencing, write scope and budgets are enforced by the harness itself, whether or
 not this file is installed.
 
 Every command takes explicit paths and prints one JSON envelope on stdout
-(`ok` with `data`, or `error`). `--human` (only `init`, `explain` and `plan-request`) prints
+(`ok` with `data`, or `error`). `--human` (only `init`, `explain`, `plan-request` and `gates`) prints
 text instead of a successful envelope; a refusal stays JSON. Exit codes:
 0 success, 2 invalid input, 3 refusal or block, 4 infrastructure. The tool
 keeps no "current project".
@@ -163,6 +163,21 @@ $H run --graph .harness/work/<graph-id>.json --policy .harness/policy.json \
 ```
 
 The state directory lives outside the repository; `run` creates it.
+
+Before a long cycle, first run the cheap decisive gates
+(«перед долгим циклом сначала прогоните дешёвые решающие gates»):
+
+```sh
+$H gates --state <manifest.paths.state> --policy .harness/policy.json \
+  --sha HEAD --gate <cheap,decisive,ids> --fail-fast
+```
+
+It runs the named gates (with their prerequisites) on that commit exactly as
+the integration phase does, outside any attempt: no attempt, no order state,
+no model call. `data.gates[]` gives `passed`, `failed`, `not-run` (a
+prerequisite failed) or `skipped` (after the first failure with
+`--fail-fast`); exit 0 when all passed, 3 otherwise; `--human` prints a table.
+A green `gates` is not acceptance: only `run` accepts work.
 
 ### 8. When it stops
 

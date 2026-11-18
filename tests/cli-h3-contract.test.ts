@@ -56,6 +56,7 @@ const laterCommands: readonly string[] = [
   'input-apply',
   'input-cancel',
   'input-supersede',
+  'gates',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -371,8 +372,8 @@ test('H3-01: прежние команды и схемы их данных не 
       return rest;
     }
     // Аддитивные поля doctor — действующий корень рабочих деревьев (alpha.23),
-    // проба портов ресурсов и предупреждения (порт только на wildcard, советы
-    // о ресурсах машины).
+    // проба портов ресурсов и предупреждения (порт только на wildcard, срок
+    // фаз, советы о ресурсах машины).
     if (k === 'properties' && v && typeof v === 'object' && 'checkouts' in v && 'sandbox' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.checkouts;

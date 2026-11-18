@@ -8,6 +8,7 @@ import {
   type ResolvedProfile,
 } from '../contracts/index.ts';
 import { profileRoles, repositoryFromProfile } from '../profiles/resolve.ts';
+import { requiredRunTimeoutMs, timeBudgetWarnings } from '../verification/time-budget.ts';
 
 export type DetectedProfile =
   | { id: 'npm-ci' | 'pnpm-frozen'; lockfile: string }
@@ -71,6 +72,11 @@ export const profileExecution = (profile: ResolvedProfile) => ({
  * Роли — профиля, иначе одна `developer` с выбранным writer; reviewer —
  * другой вендор. Параллельность и нижняя граница предела gate — профиля
  * (`profileExecution`); approval, isolation и прочие бюджеты — умолчания схемы.
+ * Срок фазы (`runTimeoutMs`) — профиля (`profileExecution`), иначе умолчание
+ * схемы, пока его хватает пределам шагов профиля (`timeBudgetWarnings`);
+ * иначе он записывается явно: наибольшая сумма фазы с запасом 25 %,
+ * округлённая вверх до 5 минут (`requiredRunTimeoutMs`), и не меньше
+ * `runTimeoutMs` профиля. Политика профиля, которой хватало срока, не меняется.
  */
 export function generatePolicy(input: {
   profile: ResolvedProfile;
@@ -111,6 +117,9 @@ export function generatePolicy(input: {
     review: { code: { reviewer }, plan: { reviewer }, contract: { reviewer } },
     ...profileExecution(profile),
   };
+  const parsed = executionPolicySchema.parse(policy);
+  if (timeBudgetWarnings(parsed).length)
+    policy.runTimeoutMs = Math.max(requiredRunTimeoutMs(parsed), profile.runTimeoutMs ?? 0);
   // В файл пишется input-форма, но только прошедшая схему.
   executionPolicySchema.parse(policy);
   return { input: policy, text: JSON.stringify(policy, null, 2) + '\n', shadowed };

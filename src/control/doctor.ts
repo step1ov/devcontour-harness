@@ -16,6 +16,7 @@ import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import type { ToolchainReport } from '../toolchains/inspect.ts';
 import { resourceWarnings } from './resource-advice.ts';
+import { timeBudgetWarnings } from '../verification/time-budget.ts';
 
 /** Диагностика toolchain политики (см. `inspectPolicy` в `./toolchains`). */
 export type ToolchainInspect = (
@@ -50,7 +51,9 @@ function usedRuntimes(policy: ExecutionPolicy) {
  * каталога состояния. Каталог состояния открывается только если он есть;
  * для совместимого состояния называются версии движка, встреченные в нём
  * (роль controller и попытки), — перед обновлением и откатом видно, какая
- * версия последней писала состояние.
+ * версия последней писала состояние. С политикой — предупреждения
+ * (`warnings`): сумма пределов шагов фазы больше `runTimeoutMs`
+ * (`timeBudgetWarnings`); они не попадают в `problems`.
  */
 export async function doctor(
   policy: ExecutionPolicy | undefined,
@@ -179,12 +182,14 @@ export async function doctor(
     ...(toolchains ? { toolchains } : {}),
     ...(ports.length ? { ports } : {}),
     problems,
-    // Предупреждения (порт только на wildcard, советы о ресурсах —
-    // `resourceWarnings`) не делают среду негодной.
+    // Предупреждения не делают среду негодной: порт только на wildcard,
+    // пределы шагов фазы больше `runTimeoutMs` (`timeBudgetWarnings`, худший
+    // случай) и советы о ресурсах машины (`resourceWarnings`).
     ...(policy
       ? {
           warnings: [
             ...warnings,
+            ...timeBudgetWarnings(policy).map((w) => w.message),
             ...resourceWarnings(policy, toolchain?.baseDir ?? checkouts?.baseDir ?? process.cwd()),
           ],
         }

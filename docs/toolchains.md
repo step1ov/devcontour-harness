@@ -309,6 +309,8 @@ worktrees не запускается — проблема `TOOL_IN_PROJECT`. Н
   как 4-ядерная;
 - `DIGEST_THREADS_INVALID` — `HARNESS_DIGEST_THREADS` в окружении `doctor` задана, но не целое
   1–8: значение не действует.
+- срок фаз — фаза, сумма пределов шагов которой (lifecycle setup/ready, prepare, gates,
+  генераторы) больше `runTimeoutMs`, названа с числами и самой длинной цепочкой `dependsOn`.
 
 `doctor` по-прежнему информационный (exit 0, проблемы в `problems`). С политикой он требует
 только runtime, назначенные политикой (`reason: "не назначен политикой"` у остальных).

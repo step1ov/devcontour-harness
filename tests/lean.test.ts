@@ -23,6 +23,7 @@ import {
 } from '../src/contracts/index.ts';
 import { builtinProfiles, builtinProfilesRoot, resolveProfile } from '../src/profiles/resolve.ts';
 import { generatePolicy } from '../src/init/policy.ts';
+import { requiredRunTimeoutMs } from '../src/verification/time-budget.ts';
 import { initProject, planProject, type InitOptions } from '../src/init/project.ts';
 import type { ToolProbe } from '../src/toolchains/probe.ts';
 
@@ -141,7 +142,15 @@ test('lean: политика из профиля без слоя не меняе
     const plain = generatePolicy({ profile: resolveProfile(ref), writer: 'claude' });
     assert.equal('concurrency' in plain.input, false, ref);
     assert.equal('gateTimeoutFloorMs' in plain.input, false, ref);
-    assert.equal('runTimeoutMs' in plain.input, false, ref);
+    // Срок фазы без слоя — только вывод из пределов шагов профиля (умолчания
+    // схемы им не хватает), не поле слоя.
+    assert.equal(
+      plain.input.runTimeoutMs,
+      requiredRunTimeoutMs(
+        executionPolicySchema.parse({ ...plain.input, runTimeoutMs: undefined }),
+      ),
+      ref,
+    );
     const parsed = executionPolicySchema.parse(plain.input);
     assert.equal(parsed.concurrency, 2, ref);
     assert.equal(parsed.repositories[0]!.dependencyStore, undefined, ref);

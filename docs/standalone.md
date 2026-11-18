@@ -250,6 +250,25 @@ $H result --state <manifest.paths.state> --work <order-id>
 `git rev-parse refs/heads/harness/accepted`, — приёмка; зелёный exit сам по
 себе ею не является.
 
+## Gates на коммите: `harness gates`
+
+Перед долгим циклом сначала прогоните дешёвые решающие gates:
+`harness gates --gate …`. Команда исполняет названные gates (и их
+предпосылки) на коммите тем же исполнением, что integration поручения, но вне
+попытки: ни попыток, ни состояния поручений она не пишет, модели не
+вызываются.
+
+```sh
+$H gates --state <manifest.paths.state> --policy .harness/policy.json \
+  --sha HEAD --gate lint,unit --fail-fast [--human]
+```
+
+`data.gates[]` — исход каждого gate: `passed`, `failed`, `not-run` (не прошла
+предпосылка) или `skipped` (`--fail-fast` после первого провала); exit 0 — все
+прошли, 3 — нет. Без `--gate` исполняются все gates; без `--fail-fast` провал
+не останавливает остальные. Логи — в `data.logs`. Это проверка, а не приёмка:
+принимает работу только `run`.
+
 ## `harness explain`
 
 ```sh
