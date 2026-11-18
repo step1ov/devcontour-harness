@@ -363,10 +363,12 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.layers;
       return rest;
     }
-    // Аддитивное поле doctor — действующий корень рабочих деревьев (alpha.23).
+    // Аддитивные поля doctor — действующий корень рабочих деревьев (alpha.23) и
+    // предупреждения о сроке фаз.
     if (k === 'properties' && v && typeof v === 'object' && 'checkouts' in v && 'sandbox' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.checkouts;
+      delete rest.warnings;
       return rest;
     }
     // Аддитивные поля ответов коннектора: пакеты `tasks[].context` (alpha.13) и
