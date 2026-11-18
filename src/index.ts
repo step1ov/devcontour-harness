@@ -325,6 +325,7 @@ export {
   type InitOptions,
   type InitData,
 } from './init/project.ts';
+export { switchLean, type LeanOptions, type LeanData } from './init/lean.ts';
 export {
   inspectProject,
   gitFacts,

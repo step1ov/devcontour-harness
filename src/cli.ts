@@ -39,6 +39,7 @@ import { assertToolchainReady, inspectPolicy } from './toolchains/inspect.ts';
 import { profilePin, resolveProfile } from './profiles/resolve.ts';
 import { cliAdapter } from './agents/cli-adapter.ts';
 import { initProject, initText } from './init/project.ts';
+import { leanText, switchLean } from './init/lean.ts';
 import { diagnoseState, explainText } from './explain/diagnose.ts';
 import { planCheck, planRequestOf } from './planning/check.ts';
 import { checkJsonBytes } from './catalog/bytes.ts';
@@ -282,6 +283,7 @@ const options = {
   run: { type: 'string' },
   plan: { type: 'boolean' },
   lean: { type: 'boolean' },
+  off: { type: 'boolean' },
   human: { type: 'boolean' },
   writer: { type: 'string' },
   lead: { type: 'string' },
@@ -317,13 +319,14 @@ const options = {
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
 const flagOwners = {
-  plan: ['init'],
+  plan: ['init', 'lean'],
   lean: ['init'],
+  off: ['lean'],
   writer: ['init'],
   lead: ['init'],
   review: ['init'],
   model: ['init'],
-  human: ['init', 'explain', 'plan-request', 'gates'],
+  human: ['init', 'lean', 'explain', 'plan-request', 'gates'],
   draft: ['plan-check'],
   basis: ['plan-check'],
   brief: ['plan-request', 'plan-check'],
@@ -363,6 +366,7 @@ const flagOwners = {
 /** Явное человеческое представление успешного ответа (`--human`). */
 const presenters: Partial<Record<CliCommand, (data: never) => string>> = {
   init: initText,
+  lean: leanText,
   explain: explainText,
   'plan-request': (data: { prompt: string }) => data.prompt + '\n',
   gates: gatesText,
@@ -757,6 +761,15 @@ async function run(
       // План с конфликтами или неготовым toolchain — отказ по существу с данными.
       const blocked = data.mode === 'plan' && (data.conflicts > 0 || !data.toolchain.ready);
       return { command, data, ...(blocked ? { code: exitCodes.refused } : {}) };
+    }
+    case 'lean': {
+      const data = await switchLean({
+        repository: need('repository'),
+        ...(v.off ? { off: true } : {}),
+        ...(v.plan ? { plan: true } : {}),
+      });
+      // План с проблемами — отказ по существу с данными (как init --plan).
+      return { command, data, ...(data.problems.length ? { code: exitCodes.refused } : {}) };
     }
     case 'explain': {
       const b = loadPolicy(need('policy'));
