@@ -1358,6 +1358,11 @@ export const gatesDataSchema = z.strictObject({
   ),
   /** Каталог логов и артефактов проверки. */
   logs: z.string(),
+  /**
+   * Предупреждения пробы портов ресурсов: порт на всех адресах держит чужой
+   * процесс, loopback свободен (например, AirPlay Receiver на macOS).
+   */
+  warnings: z.array(z.string()).optional(),
 });
 
 export const profileDataSchema = z.strictObject({

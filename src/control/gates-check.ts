@@ -156,6 +156,7 @@ export async function checkGates(input: GateCheckInput) {
     durationMs: Date.now() - started,
     gates,
     logs: join(stateDir, 'gates-at', result.id),
+    ...(result.warnings?.length ? { warnings: result.warnings } : {}),
   };
 }
 
@@ -173,6 +174,7 @@ export function gatesText(data: Awaited<ReturnType<typeof checkGates>>) {
       `${'gate'.padEnd(width)}  ${'status'.padEnd(9)}  exit`,
       ...lines,
       `логи: ${data.logs}`,
+      ...(data.warnings ?? []).map((w) => `предупреждение: ${w}`),
     ].join('\n') + '\n'
   );
 }
