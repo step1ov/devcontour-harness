@@ -176,6 +176,7 @@ export {
   type GatesAtResult,
   type LivenessReport,
 } from './verification/gates-at.ts';
+export { checkGates, type GateCheckInput, type GateCheckStatus } from './control/gates-check.ts';
 export {
   dependencyStoreRoot,
   materializeStore,

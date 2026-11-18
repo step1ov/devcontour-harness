@@ -56,6 +56,7 @@ const laterCommands: readonly string[] = [
   'input-apply',
   'input-cancel',
   'input-supersede',
+  'gates',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [

@@ -52,6 +52,8 @@ import { writeReportFile } from './control/report-file.ts';
 import { valueReport, reportHtml, reportMarkdown } from './report/index.ts';
 import { handoffMarkdown, handoffPack } from './handoff/index.ts';
 import { inputStateOf } from './projections/input.ts';
+import { checkGates, gatesText } from './control/gates-check.ts';
+import { defaultResourceDatabase } from './environment/resources.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -303,13 +305,16 @@ const options = {
   answer: { type: 'string' },
   target: { type: 'string' },
   successor: { type: 'string' },
+  sha: { type: 'string' },
+  gate: { type: 'string' },
+  'fail-fast': { type: 'boolean' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
 const flagOwners = {
   plan: ['init'],
   writer: ['init'],
-  human: ['init', 'explain', 'plan-request'],
+  human: ['init', 'explain', 'plan-request', 'gates'],
   draft: ['plan-check'],
   basis: ['plan-check'],
   brief: ['plan-request', 'plan-check'],
@@ -341,6 +346,9 @@ const flagOwners = {
   answer: ['input-apply'],
   target: ['input-apply'],
   successor: ['input-supersede'],
+  sha: ['gates'],
+  gate: ['gates'],
+  'fail-fast': ['gates'],
 } as const;
 
 /** Явное человеческое представление успешного ответа (`--human`). */
@@ -348,6 +356,7 @@ const presenters: Partial<Record<CliCommand, (data: never) => string>> = {
   init: initText,
   explain: explainText,
   'plan-request': (data: { prompt: string }) => data.prompt + '\n',
+  gates: gatesText,
 };
 
 /** Поле объекта только при заданном значении (exactOptionalPropertyTypes). */
@@ -822,6 +831,48 @@ async function run(
     }
     case 'capabilities':
       return { command, data: harnessCapabilities() };
+    case 'gates': {
+      const state = need('state');
+      const b = v.policy ? loadPolicy(v.policy) : binding(state);
+      const gates = v.gate
+        ?.split(',')
+        .map((g) => g.trim())
+        .filter(Boolean);
+      if (v.gate !== undefined && !gates?.length)
+        throw new HarnessError('INVALID_INPUT', 'gates: --gate без имён gates', [
+          { path: ['--gate'], message: v.gate },
+        ]);
+      // Прерывание (Ctrl-C, SIGTERM) останавливает gates, и рабочее дерево проверки убирается.
+      const abort = new AbortController();
+      const stop = () => abort.abort(new Error('Проверка прервана сигналом'));
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+      try {
+        const data = await checkGates({
+          policy: b.policy,
+          baseDir: b.baseDir,
+          stateDir: state,
+          rev: need('sha'),
+          ...optional('repositoryId', v.repository),
+          ...optional('gates', gates),
+          failFast: Boolean(v['fail-fast']),
+          signal: abort.signal,
+          resourceDatabase: defaultResourceDatabase(),
+          // Ход проверки — диагностика в stderr: stdout остаётся одним JSON.
+          onEvidence: (e) =>
+            process.stderr.write(`harness gates: ${e.gate} ${e.passed ? 'passed' : 'failed'}\n`),
+        });
+        // Провал gate — данные проверки и exit 3 (GATE_FAILED), как ответ plan-check с проблемами.
+        return {
+          command,
+          data,
+          ...(data.passed ? {} : { code: exitCodes[errorCodes.GATE_FAILED] }),
+        };
+      } finally {
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
+      }
+    }
     case 'doctor': {
       const b = v.policy ? loadPolicy(v.policy) : v.state ? binding(v.state) : undefined;
       return {

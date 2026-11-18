@@ -1697,12 +1697,28 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `input-apply`      | `--state D --request ID --answer H --request-version N --context-digest H --target H [--reset --reason T]` | да    | `applied`, `changed`, поручение; `active` или `blocker`                                  | Повтор — без изменений и второй попытки; не применено — exit 3, запрос прежний                                                                         |
 | `input-cancel`     | `--state D --request ID --request-version N --reason T`                                                    | да    | `lifecycle`, `version`, `changed`                                                        | Отменённый — без изменений                                                                                                                             |
 | `input-supersede`  | `--state D --request ID --request-version N --reason T --successor ID`                                     | да    | `lifecycle`, `version`, `changed`                                                        | Заменённый — без изменений                                                                                                                             |
+| `gates`            | `--state D [--policy F] --sha SHA\|HEAD [--gate a,b,@g] [--repository ID] [--fail-fast] [--human]`         | да    | исход каждого gate (`passed`, `failed`, `not-run`, `skipped`), SHA, каталог логов        |
 | `capabilities`     | —                                                                                                          | нет   | каталог общих операций (`OperationCatalog`)                                              | Чистая функция установленной версии пакета                                                                                                             |
 | `--version`        | —                                                                                                          | нет   | версия пакета и API                                                                      | —                                                                                                                                                      |
 
 Полная форма каждой команды — `cliCommands` (аргументы, обязательность,
 идемпотентность, отказы exit 3). Все команды реализованы. `run` принимает `--author` (по умолчанию `external`) — автора графа для ревью плана. `HARNESS_CODEX_BIN` и `HARNESS_CLAUDE_BIN` подменяют исполняемые файлы runtime (fixture executables в тестах).
-`init --plan` ничего не пишет (exit 3 при конфликтах или неготовом toolchain). `--human` принимают только `init`, `explain` и `plan-request` (печатает prompt): успешный ответ — текст для человека, отказ — тот же JSON-конверт, exit code одинаков; у прочих команд флаг — `INVALID_INPUT`. `plan-check` с проблемами отвечает `ok: true` с данными, exit — по классу первой проблемы; draft — `schemas/plan-draft.schema.json` (`planDraftSchema`). Маршрут самостоятельного проекта и планирование — [standalone](standalone.md).
+`init --plan` ничего не пишет (exit 3 при конфликтах или неготовом toolchain). `--human` принимают только `init`, `explain`, `plan-request` (печатает prompt) и `gates` (таблица исходов): успешный ответ — текст для человека, отказ — тот же JSON-конверт, exit code одинаков; у прочих команд флаг — `INVALID_INPUT`. `plan-check` с проблемами отвечает `ok: true` с данными, exit — по классу первой проблемы; draft — `schemas/plan-draft.schema.json` (`planDraftSchema`). Маршрут самостоятельного проекта и планирование — [standalone](standalone.md).
+
+**`gates`.** Gates компонента на коммите вне попытки — `runGatesAt` с тем же
+исполнением, что integration поручения: отдельное рабочее дерево на SHA,
+снимки зависимостей, ресурсы, lifecycle и prepare, окружение фазы
+`integration`, песочница. `--sha` — SHA, ref или `HEAD` checkout
+репозитория; `--gate` — gates и группы через запятую (нет — все gates),
+предпосылки (`gatePrerequisites`) добавляются и идут первыми; `--repository`
+нужен, если в политике несколько репозиториев. Неизвестный gate —
+`GATE_UNKNOWN` (exit 2) до исполнения. Провал gate проверку не останавливает
+(исходы всех gates — диагностика); `--fail-fast` останавливает её на первом
+провале, следующие gates — `skipped`, не провал. Все прошли — exit 0, иначе
+ответ с данными и exit 3 (`GATE_FAILED`). Попытки, evidence в базе состояния и
+состояние поручений не пишутся, база не открывается; логи остаются в
+`<state>/gates-at/<id>` (`data.logs`), ход — в stderr. Политика — из
+`--policy` или привязки каталога состояния.
 
 **`report`.** Читает каталог состояния только для чтения и строит
 `ValueReport` (`valueReport`); `binding.json` не нужен. Чтение однократное

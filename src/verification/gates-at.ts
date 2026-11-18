@@ -61,6 +61,12 @@ export interface GatesAtInput {
   record(evidence: EvidenceRecord): void;
   signal?: AbortSignal;
   /**
+   * Остановиться на первом непрошедшем gate: следующие gates не исполняются
+   * и названы в `skipped`, а не в `failures`. Нет — исполняются все (провал
+   * не скрывает исход остальных).
+   */
+  failFast?: boolean;
+  /**
    * Переход живости проверки по обходу зависших (`stallSweep`), в обоих
    * режимах: при `report` — единственный путь узнать о зависании до конца
    * проверки. Нагрузка — как у события `attempt.liveness`.
@@ -74,7 +80,7 @@ export type LivenessReport = RunEventPayload<'attempt.liveness'>;
 export interface GatesAtResult {
   id: string;
   sha: string;
-  /** Исполненные gates в порядке исполнения (с предпосылками). */
+  /** Gates проверки в порядке исполнения (с предпосылками; не исполненные при `failFast` — и в `skipped`). */
   gates: string[];
   evidence: EvidenceRecord[];
   /** Первый непрошедший gate и причина (то же, что `failures[0]`). */
@@ -85,6 +91,11 @@ export interface GatesAtResult {
    * с этой причиной и evidence не получают).
    */
   failures: { gate: string; message: string }[];
+  /**
+   * Gates, не исполненные после первого провала (`failFast`): не провал,
+   * исход неизвестен. Нет поля — исполнены все.
+   */
+  skipped?: string[];
   /** Переходы живости за проверку (`onLiveness`); нет — проверка не замолкала. */
   liveness?: LivenessReport[];
 }
@@ -167,6 +178,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
   const evidence: EvidenceRecord[] = [];
   const failures: GatesAtResult['failures'] = [];
   const failed = new Set<string>();
+  const skipped: string[] = [];
   let snapshots: DependencySnapshot[] = [];
   let added = false;
   const boundaryOf = ctx.boundary();
@@ -252,6 +264,10 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
             prepared(execution);
             let reapedBy: string | undefined;
             for (const gate of gates) {
+              if (input.failFast && failures.length) {
+                skipped.push(gate.id);
+                continue;
+              }
               // Пропускается только gate, чья явная предпосылка (`dependsOn`) не
               // прошла. Провал неявной (более ранний check gate в режиме
               // порядка массива) не скрывает исход тестов: исполняются и
@@ -358,5 +374,6 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
     evidence,
     ...(failures.length ? { failure: failures[0] } : {}),
     failures,
+    ...(skipped.length ? { skipped } : {}),
   };
 }

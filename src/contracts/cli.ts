@@ -875,6 +875,52 @@ export const cliCommands = {
     ],
     refusals: ['NOT_FOUND', 'REVISION_CONFLICT', 'NOT_READY'],
   },
+  gates: {
+    description:
+      'Исполнить gates компонента на коммите вне попытки — тем же исполнением, что integration (рабочее дерево, снимки зависимостей, ресурсы, lifecycle, prepare, песочница); попыток и состояния поручений не пишет',
+    writes: true,
+    idempotency:
+      'Каждый вызов — новая проверка со своими логами в <state>/gates-at/<id>; база состояния, попытки и поручения не меняются',
+    args: [
+      {
+        ...state,
+        description: 'Каталог состояния: логи проверки; политика — из него, если нет --policy',
+      },
+      { ...policy, required: false },
+      {
+        name: '--sha',
+        value: 'text',
+        required: true,
+        description: 'Проверяемый коммит: SHA, ref или HEAD checkout репозитория',
+      },
+      {
+        name: '--gate',
+        value: 'text',
+        required: false,
+        description:
+          'Gates и группы (@имя) через запятую; предпосылки (dependsOn) добавляются сами; нет — все gates',
+      },
+      {
+        name: '--repository',
+        value: 'id',
+        required: false,
+        description: 'ID репозитория политики; нужен, если их несколько',
+      },
+      {
+        name: '--fail-fast',
+        value: 'flag',
+        required: false,
+        description: 'Остановиться на первом непрошедшем gate: следующие не исполняются (skipped)',
+      },
+      {
+        name: '--human',
+        value: 'flag',
+        required: false,
+        description: 'Таблица исходов для человека вместо JSON',
+      },
+    ],
+    refusals: ['GATE_FAILED'],
+  },
 } as const satisfies Record<string, CliCommandContract>;
 export type CliCommand = keyof typeof cliCommands;
 
@@ -1180,6 +1226,36 @@ export const doctorDataSchema = z.strictObject({
    * задана политика.
    */
   warnings: z.array(z.string()).optional(),
+});
+
+/** Ответ `gates`: исход каждого gate проверки на коммите вне попытки. */
+export const gatesDataSchema = z.strictObject({
+  /** ID проверки (`runId` evidence, `DEVCONTOUR_RUN_ID` gates). */
+  id: z.string().min(1).max(200),
+  repositoryId: idSchema,
+  sha: gitShaSchema,
+  /** Все gates проверки прошли. */
+  passed: z.boolean(),
+  failFast: z.boolean(),
+  durationMs: z.number().int().nonnegative(),
+  /** Gates в порядке исполнения (с предпосылками). */
+  gates: z.array(
+    z.strictObject({
+      gate: z.string().min(1).max(200),
+      /**
+       * `not-run` — не исполнен: не прошла предпосылка или потомки прежнего
+       * gate не остановлены; `skipped` — не исполнен из-за `--fail-fast`.
+       */
+      status: z.enum(['passed', 'failed', 'not-run', 'skipped']),
+      exitCode: z.number().int().optional(),
+      summary: z.string().optional(),
+      /** Лог gate. */
+      log: z.string().optional(),
+      message: z.string().optional(),
+    }),
+  ),
+  /** Каталог логов и артефактов проверки. */
+  logs: z.string(),
 });
 
 export const profileDataSchema = z.strictObject({
@@ -1528,6 +1604,7 @@ export const cliDataSchemas = {
   'input-apply': inputApplyDataSchema,
   'input-cancel': inputCloseDataSchema,
   'input-supersede': inputCloseDataSchema,
+  gates: gatesDataSchema,
   version: versionDataSchema,
 } as const satisfies Record<CliCommand | 'version', z.ZodType>;
 
