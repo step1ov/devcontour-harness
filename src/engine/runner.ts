@@ -169,7 +169,7 @@ import {
   withSuffix,
 } from './classify.ts';
 import { TaskFailure, type FailureKind } from './failure.ts';
-import { activeOf, namesFailingCases, type Engine } from './engine.ts';
+import { activeOf, crashedRecheck, namesFailingCases, type Engine } from './engine.ts';
 import { prompt } from './prompt.ts';
 import { scopeViolations } from './scope.ts';
 import { generatorNote, runGenerators, selectGenerators } from '../verification/generators.ts';
@@ -2535,6 +2535,9 @@ export class Runner {
    * integration SHA, один раз за интеграцию кандидата; обе записи остаются,
    * у повтора — `recheck` со ссылкой на первую и исходом (`flaky` — повтор
    * прошёл, `confirmed` — провал подтвердился и засчитывается как прежде).
+   * Повтор, который прошёл упавшие тесты и провалился только кодом выхода
+   * исполнителя тестов (`crashedRecheck`), получает ещё один запуск с той же
+   * ссылкой: его исход и решает.
    */
   private async integrationGate(
     attempt: AttemptState,
@@ -2584,18 +2587,42 @@ export class Runner {
       if (!failed || failed.passed || namesFailingCases(failed) || !candidatePassed || spent)
         throw error;
       budget.recheck = false;
-      await this.gate(
-        attempt,
-        cwd,
-        sha,
-        'integration',
-        gate,
-        artifacts,
-        signal,
-        execution,
-        undefined,
-        failed.id,
-      );
+      const recheck = () =>
+        this.gate(
+          attempt,
+          cwd,
+          sha,
+          'integration',
+          gate,
+          artifacts,
+          signal,
+          execution,
+          undefined,
+          failed.id,
+        );
+      try {
+        await recheck();
+      } catch (again) {
+        // Повтор прошёл все тесты, упавшие в первом запуске, а провалился
+        // только кодом выхода исполнителя тестов (обрушенный worker): о коде
+        // это не говорит. Ещё один запуск того же gate решает исход; его
+        // провал засчитывается как прежде.
+        if (
+          signal.aborted ||
+          !(again instanceof TaskFailure) ||
+          again instanceof GateTimeout ||
+          again.kind !== 'gate' ||
+          reapedFailure(again) ||
+          !this.engine.read((v) => {
+            const last = (v.attempt(attempt.id)?.evidence ?? []).findLast(
+              (e) => e.phase === 'integration' && e.recheck?.of === failed.id,
+            );
+            return !!last && crashedRecheck(failed, last);
+          })
+        )
+          throw again;
+        await recheck();
+      }
     }
   }
 

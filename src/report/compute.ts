@@ -1095,8 +1095,13 @@ export function valueReport(
         };
       })()
     : null;
+  // Повтор после падения исполнителя тестов получает ещё один запуск с той же
+  // ссылкой `of`: исход повтора записи — последний из них.
+  const recheckOutcome = new Map<string, 'flaky' | 'confirmed'>();
+  for (const { e } of windowEvidence)
+    if (e.recheck) recheckOutcome.set(e.recheck.of, e.recheck.outcome);
   const rechecks = { flaky: 0, confirmed: 0 };
-  for (const { e } of windowEvidence) if (e.recheck) rechecks[e.recheck.outcome] += 1;
+  for (const outcome of recheckOutcome.values()) rechecks[outcome] += 1;
   const reused = windowEvidence.filter(({ e }) => e.reusedEvidence).length;
 
   const sentBackCount = { defect: 0, setup: 0, unknown: 0, no: 0 };

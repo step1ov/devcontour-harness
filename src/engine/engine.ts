@@ -256,6 +256,34 @@ export function namesFailingCases(e: Pick<EvidenceRecord, 'property'>) {
   );
 }
 
+/**
+ * Повтор `recheck` провала `failed` провален только кодом выхода исполнителя
+ * тестов: отчёт полон и не называет ни одного упавшего теста, каждый тест,
+ * упавший в первом запуске (`failed` называет хотя бы один), теперь прошёл,
+ * свойств и корпуса нет. Так выглядит падение процесса исполнителя (worker
+ * SIGSEGV) после прохождения тестов, а не дефект кода: такой повтор
+ * получает ещё один запуск с той же ссылкой.
+ */
+export function crashedRecheck(
+  failed: Pick<EvidenceRecord, 'tests' | 'testsTruncated' | 'property'>,
+  recheck: Pick<
+    EvidenceRecord,
+    'passed' | 'exitCode' | 'tests' | 'testsTruncated' | 'property' | 'recheck'
+  >,
+) {
+  if (recheck.passed || recheck.recheck?.outcome !== 'confirmed') return false;
+  if (!recheck.exitCode || recheck.exitCode < 0) return false;
+  if (failed.testsTruncated || recheck.testsTruncated || failed.property || recheck.property)
+    return false;
+  const before = (failed.tests ?? []).filter((t) => t.status === 'failed');
+  const after = new Map((recheck.tests ?? []).map((t) => [t.id, t.status]));
+  return (
+    before.length > 0 &&
+    !(recheck.tests ?? []).some((t) => t.status === 'failed') &&
+    before.every((t) => after.get(t.id) === 'passed')
+  );
+}
+
 /** Активные попытки снимка: быстрый путь адаптера или фильтр всех. */
 export function activeOf(v: ExecutionView): AttemptState[] {
   return v.activeAttempts ? v.activeAttempts() : v.attempts().filter((a) => a.status === 'active');
@@ -1957,10 +1985,18 @@ export class Engine {
         if (problem) throw new HarnessError('INVALID_INPUT', problem);
       }
       // Повтор ссылается на провал того же gate этой попытки на том же SHA, и
-      // попытка повторяет не больше одного провала на фазу.
+      // попытка повторяет не больше одного провала на фазу. Повтор, упавший
+      // только кодом выхода исполнителя тестов (`crashedRecheck`), получает
+      // один запуск сверх этого с той же ссылкой.
       if (evidence.recheck) {
         const of = evidence.recheck.of;
         const first = a.evidence.find((e) => e.id === of);
+        const prior = a.evidence.filter((e) => e.recheck && e.phase === evidence.phase);
+        const extra =
+          prior.length === 1 &&
+          prior[0]!.recheck!.of === of &&
+          !!first &&
+          crashedRecheck(first, prior[0]!);
         if (
           evidence.kind !== 'test' ||
           !first ||
@@ -1971,7 +2007,7 @@ export class Engine {
           first.sha !== evidence.sha ||
           first.consumer !== evidence.consumer ||
           namesFailingCases(first) ||
-          a.evidence.some((e) => e.recheck && e.phase === evidence.phase)
+          (prior.length > 0 && !extra)
         )
           throw new HarnessError(
             'INVALID_INPUT',
