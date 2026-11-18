@@ -283,10 +283,23 @@ export async function withEnvironment<T>(
   action: () => Promise<T>,
   measure: <R>(stage: string, action: () => Promise<R>) => Promise<R> = (_stage, action) =>
     action(),
+  /** Предупреждения пробы портов (порт, занятый чужим процессом только на wildcard). */
+  warn?: (message: string) => void,
 ): Promise<T> {
   // Порты аренды свободны до lifecycle, prepare и gates фазы; внутри фазы
   // их законно держат её службы, и вложенная фаза их не проверяет.
-  await ensurePortsFree();
+  const warnings = await ensurePortsFree();
+  if (warnings.length) {
+    // Предупреждение видно в артефактах фазы (`port-probe.json`) и стадией
+    // `port-shared:<порт>` в замерах попытки.
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'port-probe.json'), JSON.stringify({ warnings }, null, 2));
+    for (const message of warnings) {
+      warn?.(message);
+      const port = /^Порт (\d+)/.exec(message)?.[1] ?? 'unknown';
+      await measure(`port-shared:${port}`, () => Promise.resolve());
+    }
+  }
   const scope = leaseScope.getStore();
   if (scope && !scope.environment)
     return leaseScope.run({ ...scope, environment: true }, () =>

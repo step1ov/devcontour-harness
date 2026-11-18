@@ -10,6 +10,8 @@ import { ensurePortsFree, portBusy } from '../src/environment/port-probe.ts';
 import { command, processInventory, processTable } from '../src/environment/process.ts';
 import { leaseScope, recordSurvivors, survivorRecords } from '../src/environment/survivors.ts';
 import { runGatesAt, type GatesAtContext } from '../src/verification/gates-at.ts';
+import { doctor } from '../src/control/doctor.ts';
+import { ResourcePool } from '../src/environment/resources.ts';
 import { write } from './git-fixture.ts';
 import { approve, greet, implement, runAll, setup } from './runner-fixture.ts';
 
@@ -31,25 +33,63 @@ async function freePort(): Promise<number> {
   });
 }
 
-/** Процесс, слушающий порт на 127.0.0.1; запущен тестом и им же останавливается. */
-async function holder(port: number, detached = false): Promise<ChildProcess> {
-  const child = spawn(
-    process.execPath,
-    [
-      '-e',
-      `require('net').createServer().listen(${port}, '127.0.0.1', () => console.log('up')); setTimeout(() => {}, 120000);`,
-    ],
-    { stdio: ['ignore', 'pipe', 'inherit'], detached },
-  );
-  await new Promise<void>((resolve, reject) => {
+const listen = (port: number, host: string) =>
+  `require('net').createServer().listen(${port}, ${JSON.stringify(host)}, () => console.log('up ' + process.pid)); setTimeout(() => {}, 120000);`;
+/**
+ * Процесс, слушающий порт (по умолчанию на 127.0.0.1); запущен тестом и им же
+ * останавливается. `script` — свой код вместо слушателя: печатает
+ * `up <pid слушателя>`, когда порт занят. Возвращает и PID слушателя.
+ */
+async function holder(
+  port: number,
+  detached = false,
+  { host = '127.0.0.1', script }: { host?: string; script?: string } = {},
+): Promise<ChildProcess & { listener: number }> {
+  const child = spawn(process.execPath, ['-e', script ?? listen(port, host)], {
+    stdio: ['ignore', 'pipe', 'inherit'],
+    detached,
+  });
+  const listener = await new Promise<number>((resolve, reject) => {
     child.once('error', reject);
     child.once('exit', (code) => reject(new Error('держатель порта завершился: ' + code)));
+    let out = '';
     child.stdout.on('data', (d: Buffer) => {
-      if (d.toString().includes('up')) resolve();
+      out += d.toString();
+      const m = /up (\d+)/.exec(out);
+      if (m) resolve(Number(m[1]));
     });
   });
   child.removeAllListeners('exit');
-  return child;
+  return Object.assign(child, { listener });
+}
+/** Родитель, чей потомок слушает порт; оба живут, пока их не остановят. */
+const parentOf = (port: number) => `
+const { spawn } = require('child_process');
+const c = spawn(process.execPath, ['-e', ${JSON.stringify(listen(port, '127.0.0.1'))}], { stdio: ['ignore', 'pipe', 'inherit'] });
+c.stdout.on('data', (d) => process.stdout.write(d));
+setTimeout(() => {}, 120000);
+`;
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const gone = async (pid: number) => {
+  for (let i = 0; i < 200 && alive(pid); i++) await new Promise((r) => setTimeout(r, 25));
+  return !alive(pid);
+};
+const startOf = async (pid: number) => (await processTable(true)).find((r) => r.pid === pid)!.start;
+const tempDatabase = () => join(mkdtempSync(join(tmpdir(), 'ports-')), 'resources.sqlite');
+/** Можно ли привязать 127.0.0.1, пока порт на 0.0.0.0 занят (macOS — да, Linux — нет). */
+async function loopbackBesideWildcard(port: number) {
+  return new Promise<boolean>((resolve) => {
+    const s = createServer();
+    s.once('error', () => resolve(false));
+    s.listen({ host: '127.0.0.1', port, exclusive: true }, () => s.close(() => resolve(true)));
+  });
 }
 const exited = (child: ChildProcess) =>
   child.exitCode !== null || child.signalCode !== null
@@ -293,4 +333,166 @@ test('gates-at: порт ресурса держит чужой процесс �
     record: () => undefined,
   });
   assert.equal(result.failure, undefined, JSON.stringify(result.evidence.map((e) => e.summary)));
+});
+
+test('переживший — родитель держателя: остановлены оба, запись снята', async () => {
+  const port = await freePort();
+  const database = tempDatabase();
+  const parent = await holder(port, true, { script: parentOf(port) });
+  try {
+    assert.notEqual(parent.listener, parent.pid, 'порт слушает потомок');
+    recordSurvivors(
+      { database, owner: 'earlier' },
+      [{ pid: parent.pid!, start: await startOf(parent.pid!) }],
+      'unit',
+    );
+    const warnings = await ensurePortsFree({ database, owner: 'now', ports: [{ id: 'p', port }] });
+    assert.deepEqual(warnings, []);
+    assert.ok(await gone(parent.listener), 'слушатель остановлен');
+    await exited(parent);
+    assert.equal(await portBusy(port), false);
+    assert.deepEqual(survivorRecords(database), [], 'запись снята');
+  } finally {
+    await stopHolder(parent);
+    if (alive(parent.listener)) process.kill(parent.listener, 'SIGKILL');
+  }
+});
+
+test('записан потомок держателя (не предок) — порт занят чужим: resource-busy, никто не остановлен', async () => {
+  const port = await freePort();
+  const database = tempDatabase();
+  // Держатель — родитель, слушающий сам; потомок — записанный процесс.
+  const script = `
+const { spawn } = require('child_process');
+const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' });
+require('net').createServer().listen(${port}, '127.0.0.1', () => console.log('up ' + process.pid + ' child ' + c.pid));
+setTimeout(() => {}, 120000);
+`;
+  const parent = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const child = await new Promise<number>((resolve) => {
+    let out = '';
+    parent.stdout.on('data', (d: Buffer) => {
+      out += d.toString();
+      const m = /child (\d+)/.exec(out);
+      if (m) resolve(Number(m[1]));
+    });
+  });
+  try {
+    recordSurvivors(
+      { database, owner: 'earlier' },
+      [{ pid: child, start: await startOf(child) }],
+      'unit',
+    );
+    const error = await ensurePortsFree({
+      database,
+      owner: 'now',
+      ports: [{ id: 'p', port }],
+    }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    assert.ok(error instanceof TaskFailure && error.diagnosis === 'resource-busy', String(error));
+    assert.match(error.message, new RegExp(`PID ${parent.pid} \\(node\\)`));
+    assert.ok(alive(parent.pid!), 'держатель жив');
+    assert.ok(alive(child), 'записанный потомок жив');
+    assert.equal(survivorRecords(database).length, 1, 'запись не снята');
+  } finally {
+    if (alive(child)) process.kill(child, 'SIGKILL');
+    await stopHolder(parent);
+  }
+});
+
+test('lsof не ответил — держатель не определён: resource-busy с причиной', async () => {
+  const port = await freePort();
+  const held = await holder(port);
+  const tool = processInventory.tool;
+  processInventory.tool = (cmd, args, timeout, partial) =>
+    cmd.endsWith('lsof')
+      ? Promise.resolve({ error: 'lsof: ENOENT' })
+      : tool(cmd, args, timeout, partial);
+  try {
+    const error = await ensurePortsFree({
+      database: tempDatabase(),
+      owner: 'now',
+      ports: [{ id: 'p', port }],
+    }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    assert.ok(error instanceof TaskFailure && error.diagnosis === 'resource-busy', String(error));
+    assert.match(error.message, /держатель не определён \(lsof: ENOENT\)/);
+    assert.equal(held.exitCode, null);
+  } finally {
+    processInventory.tool = tool;
+    await stopHolder(held);
+  }
+});
+
+test('чужой процесс держит порт только на всех адресах, loopback свободен (AirPlay на macOS) — предупреждение, попытка проходит', async (t) => {
+  const port = await freePort();
+  const foreign = await holder(port, false, { host: '0.0.0.0' });
+  try {
+    if (!(await loopbackBesideWildcard(port))) {
+      t.skip('на этой ОС wildcard-держатель занимает и loopback');
+      return;
+    }
+    const warnings = await ensurePortsFree({
+      database: tempDatabase(),
+      owner: 'now',
+      ports: [{ id: 'web-port', port }],
+    });
+    assert.equal(warnings.length, 1);
+    assert.match(
+      warnings[0]!,
+      new RegExp(
+        `^Порт ${port} \\(ресурс web-port\\) на всех адресах .*PID ${foreign.pid} \\(node\\).*AirPlay`,
+      ),
+    );
+    const ctx = fixture(port);
+    await runAll(ctx);
+    const attempts = ctx.engine.read((v) => v.attempts('add-greeting'));
+    assert.equal(attempts.length, 1);
+    assert.equal(attempts[0]!.status, 'succeeded', attempts[0]!.error);
+    assert.ok(
+      attempts[0]!.timings?.some((s) => s.stage === `candidate-environment:port-shared:${port}`),
+      JSON.stringify(attempts[0]!.timings?.map((s) => s.stage)),
+    );
+    assert.equal(foreign.exitCode, null, 'чужой процесс не остановлен');
+  } finally {
+    await stopHolder(foreign);
+  }
+});
+
+test('doctor: порт ресурса занят чужим процессом — проблема с портом и PID; под арендой — не пробуется', async () => {
+  const port = await freePort();
+  const ctx = fixture(port);
+  const database = join(ctx.state, 'resources.sqlite');
+  const foreign = await holder(port);
+  try {
+    const report = await doctor(ctx.policy, {}, undefined, undefined, undefined, database);
+    assert.deepEqual(
+      report.ports?.map((p) => [p.id, p.port, p.status]),
+      [['web-port', port, 'busy']],
+    );
+    assert.ok(
+      report.problems.some((p) =>
+        new RegExp(
+          `^Порт ${port} \\(ресурс web-port\\) занят вне аренды: PID ${foreign.pid} \\(node\\).*resource-busy.*harness resume`,
+        ).test(p),
+      ),
+      JSON.stringify(report.problems),
+    );
+    const pool = new ResourcePool(database);
+    try {
+      assert.ok(pool.tryAcquire(ctx.policy.resources, 'run', 'token', 30000));
+      const leased = await doctor(ctx.policy, {}, undefined, undefined, undefined, database);
+      assert.equal(leased.ports?.[0]?.status, 'leased');
+      assert.ok(!leased.problems.some((p) => p.includes(`Порт ${port}`)));
+    } finally {
+      pool.release('token');
+      pool.close();
+    }
+  } finally {
+    await stopHolder(foreign);
+  }
 });

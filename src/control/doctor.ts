@@ -10,6 +10,8 @@ import {
 } from '../contracts/index.ts';
 import { credentialPaths, isolationSupport } from '../environment/isolation.ts';
 import { chooseCheckoutRoot } from '../environment/checkout-root.ts';
+import { inspectPort, PORT_ADVICE } from '../environment/port-probe.ts';
+import { defaultResourceDatabase, ResourcePool, resourceKey } from '../environment/resources.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import type { ToolchainReport } from '../toolchains/inspect.ts';
@@ -66,6 +68,8 @@ export async function doctor(
    * каталог состояния.
    */
   checkouts?: { baseDir: string; checkoutRoot?: string },
+  /** База блокировок ресурсов (по умолчанию общая база машины); читается, только если есть. */
+  resourceDatabase: string = defaultResourceDatabase(),
 ) {
   const problems: string[] = [];
   const runtimes = [];
@@ -145,6 +149,16 @@ export async function doctor(
       problems.push(
         `toolchain ${r.repositoryId}: ${p.code} ${p.field.join('.')}${p.path ? ` (${p.path})` : ''}: ${p.message}`,
       );
+  const ports = policy ? await portStatus(policy, resourceDatabase) : [];
+  for (const p of ports)
+    if (p.status === 'busy')
+      problems.push(
+        `Порт ${p.port} (ресурс ${p.id}) занят вне аренды: ${p.holder}. Фаза попытки с этим ресурсом откажет environment/resource-busy. ${PORT_ADVICE}`,
+      );
+    else if (p.status === 'wildcard-only')
+      problems.push(
+        `Предупреждение: порт ${p.port} (ресурс ${p.id}) на всех адресах держит ${p.holder}; loopback свободен — служба попытки должна слушать 127.0.0.1. ${PORT_ADVICE}`,
+      );
   return {
     harness: HARNESS_VERSION,
     apiVersion: API_VERSION,
@@ -155,6 +169,40 @@ export async function doctor(
     ...(state ? { state } : {}),
     ...(checkoutRoot ? { checkouts: checkoutRoot } : {}),
     ...(toolchains ? { toolchains } : {}),
+    ...(ports.length ? { ports } : {}),
     problems,
   };
+}
+
+/**
+ * Порты ресурсов политики: проба тем же способом, что перед фазой, без
+ * остановки процессов. Порт под арендой (идёт попытка) не пробуется: его
+ * законно держит её служба.
+ */
+async function portStatus(policy: ExecutionPolicy, database: string) {
+  const declared = policy.resources.filter((r) => r.kind === 'port');
+  if (!declared.length) return [];
+  let leased = new Set<string>();
+  const known = existsSync(database);
+  if (known)
+    try {
+      const pool = new ResourcePool(database);
+      try {
+        leased = new Set(pool.list().map((l) => l.key));
+      } finally {
+        pool.close();
+      }
+    } catch {
+      /* база не читается — аренды неизвестны, порт пробуется */
+    }
+  const out = [];
+  for (const r of declared) {
+    const port = Number(r.value);
+    if (leased.has(resourceKey(r))) {
+      out.push({ id: r.id, port, status: 'leased' as const });
+      continue;
+    }
+    out.push({ id: r.id, port, ...(await inspectPort(port, known ? database : undefined)) });
+  }
+  return out;
 }
