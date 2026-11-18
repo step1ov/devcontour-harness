@@ -1216,6 +1216,7 @@
                 "shutdown",
                 "process-reap",
                 "cleanup",
+                "resource-busy",
                 "other",
                 "none"
               ]

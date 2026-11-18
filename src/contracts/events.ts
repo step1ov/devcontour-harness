@@ -45,6 +45,7 @@ export const environmentCauses = [
   'shutdown',
   'process-reap',
   'cleanup',
+  'resource-busy',
   'other',
   'none',
 ] as const;
