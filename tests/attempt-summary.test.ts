@@ -13,7 +13,13 @@ import { fileURLToPath } from 'node:url';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { cliDataSchemas, type AttemptState } from '../src/contracts/index.ts';
 import { EXPLAIN_ATTEMPT_ROWS, diagnoseState, explainText } from '../src/explain/diagnose.ts';
-import { attemptSummaryLine, attemptSummaryOf, statusText, valueReport } from '../src/index.ts';
+import {
+  attemptSummaryLine,
+  attemptSummaryOf,
+  attemptSummaryView,
+  statusText,
+  valueReport,
+} from '../src/index.ts';
 import { graphOf, ready } from './engine-fixture.ts';
 import { hsetup } from './harness-fixture.ts';
 import { reportFixture } from './report-fixture.ts';
@@ -203,6 +209,22 @@ test('status и explain: строка сводки на поручение со�
       w.line,
       `попыток 7; отказов 5 (defect 2, environment 2, time-limit 1); по времени 1; прервано остановкой 1; принято 1; осталось попыток 1 из 6, восстановлений группы ${ctx.policy.repairBudget} из ${ctx.policy.repairBudget}`,
     );
+    // Предел незасчитанных отказов — только у незавершённой работы; у
+    // принятой и отменённой строка называет итог (остаток попыток).
+    const stored = h.engine.read((v) => ({ work: v.work('w')!, attempts: v.attempts('w') }));
+    const viewAs = (status: 'ready' | 'done' | 'cancelled') =>
+      attemptSummaryView(
+        { ...stored.work, status, neutralFailures: 3 },
+        stored.attempts,
+        ctx.policy,
+      );
+    assert.match(viewAs('ready').line, /исчерпан предел незасчитанных отказов 3 из 3/);
+    for (const final of ['done', 'cancelled'] as const) {
+      const view = viewAs(final);
+      assert.doesNotMatch(view.line, /незасчитанных/, final);
+      assert.match(view.line, /осталось попыток 1 из 6$/, final);
+      assert.deepEqual(view.neutral, { used: 3, max: 3 }, final);
+    }
     const x = status.works.find((y) => y.id === 'x')!.attemptSummary!;
     assert.equal(x.total, 0);
     assert.match(x.line, /^попыток 0; отказов 0; по времени 0; прервано остановкой 0; принято 0;/);

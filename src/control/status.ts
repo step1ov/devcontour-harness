@@ -77,16 +77,20 @@ export function attemptSummaryView(
   job?: Pick<WorkflowJob, 'repairs'>,
 ) {
   const summary = attemptSummaryOf(work, attempts);
+  const neutral = { used: work.neutralFailures ?? 0, max: MAX_NEUTRAL_FAILURES };
+  // Предел незасчитанных отказов держит только незавершённую работу: у
+  // принятой или отменённой строка называет итог, а не повтор со сбросом.
+  const final = work.status === 'done' || work.status === 'cancelled';
   const budget: AttemptBudget = {
     attempts: { used: work.attempt, max: policy.maxAttempts },
-    neutral: { used: work.neutralFailures ?? 0, max: MAX_NEUTRAL_FAILURES },
+    ...(final ? {} : { neutral }),
     ...(job ? { repairs: { used: job.repairs ?? 0, budget: policy.repairBudget } } : {}),
   };
   const left = (used: number, max: number) => Math.max(0, max - used);
   return {
     ...summary,
     attempts: { ...budget.attempts, left: left(work.attempt, policy.maxAttempts) },
-    neutral: budget.neutral!,
+    neutral,
     ...(budget.repairs
       ? { repairs: { ...budget.repairs, left: left(budget.repairs.used, budget.repairs.budget) } }
       : {}),
