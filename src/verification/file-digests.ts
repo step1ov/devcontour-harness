@@ -77,10 +77,14 @@ type Reply =
  * сверка копии seed не занимает все ядра; иное значение не действует.
  */
 export function digestThreads(env: NodeJS.ProcessEnv = process.env): number {
+  return digestThreadsCap(env) ?? Math.min(MAX_THREADS, Math.max(1, availableParallelism() - 1));
+}
+
+/** Явное число потоков из `HARNESS_DIGEST_THREADS`; нет или не целое 1–8 — undefined. */
+export function digestThreadsCap(env: NodeJS.ProcessEnv = process.env): number | undefined {
   const raw = env.HARNESS_DIGEST_THREADS?.trim();
   const cap = raw && /^\d+$/.test(raw) ? Number(raw) : NaN;
-  if (cap >= 1 && cap <= MAX_THREADS) return cap;
-  return Math.min(MAX_THREADS, Math.max(1, availableParallelism() - 1));
+  return cap >= 1 && cap <= MAX_THREADS ? cap : undefined;
 }
 
 /** Запуск потока; тест подменяет его, чтобы проверить отказ запуска. */

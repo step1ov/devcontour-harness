@@ -10,7 +10,7 @@ import { policyOf } from './engine-fixture.ts';
 
 const GiB = 1024 ** 3;
 const small: HostResources = {
-  memoryBytes: 16 * GiB,
+  memoryBytes: 8 * GiB,
   performanceCores: 4,
   coresSource: 'perflevel0',
 };
@@ -57,13 +57,19 @@ test('LOW_RESOURCES: слабая машина и параллельность 2
   assert.equal(calls, 1);
   assert.deepEqual(codes(report.warnings), ['LOW_RESOURCES']);
   const [warning] = report.warnings!;
-  assert.match(warning!, /4 производительных ядер и 16 ГБ памяти/);
+  assert.match(warning!, /4 производительных ядер и 8 ГБ памяти/);
   assert.match(warning!, /параллельность политики 2/);
-  assert.match(warning!, /--lean/);
+  // Совет выполним и в готовом проекте: поля политики, init --lean — для нового.
+  assert.match(
+    warning!,
+    /\.harness\/policy\.json\) "concurrency": 1, "runTimeoutMs": 1800000, "gateTimeoutFloorMs": 240000/,
+  );
+  assert.match(warning!, /новый проект — harness init --lean/);
+  assert.doesNotMatch(warning!, /частот|нагрев/, 'без ограничения частоты о нагреве не говорится');
   assert.ok(!report.problems.some((p) => p.includes('LOW_RESOURCES')));
   // Мало только памяти или только ядер — тоже слабая машина.
   for (const r of [
-    { ...large, memoryBytes: 8 * GiB },
+    { ...large, memoryBytes: 16 * GiB - 1 },
     { ...large, performanceCores: 2 },
   ])
     assert.deepEqual(
@@ -93,6 +99,14 @@ test('LOW_RESOURCES: большая машина или параллельнос
     (p.repositories as Record<string, unknown>[])[0]!.path = dir;
   };
   assert.deepEqual((await doctorWith(t, large, at)).report.warnings, []);
+  // Ровно 16 ГиБ и 8 производительных ядер — не слабая машина (граница памяти — строгая).
+  assert.deepEqual(
+    (await doctorWith(t, { ...large, memoryBytes: 16 * GiB, performanceCores: 8 }, at)).report
+      .warnings,
+    [],
+  );
+  // Ограничение частоты 100% — не ограничение.
+  assert.deepEqual((await doctorWith(t, { ...large, cpuSpeedLimit: 100 }, at)).report.warnings, []);
   const lean = await doctorWith(t, small, (p) => {
     at(p);
     p.concurrency = 1;
@@ -120,7 +134,10 @@ test('DEPENDENCY_STORE_RECOMMENDED: pnpm-lock.yaml без dependencyStore — п
     };
   const { report } = await doctorWith(t, large, at(pnpm));
   assert.deepEqual(codes(report.warnings), ['DEPENDENCY_STORE_RECOMMENDED']);
-  assert.match(report.warnings![0]!, /"dependencyStore": \{ "manager": "pnpm" \}/);
+  assert.match(
+    report.warnings![0]!,
+    /\.harness\/policy\.json\) repositories\[0\]: "dependencyStore": \{ "manager": "pnpm" \}; новый проект — harness init --lean/,
+  );
   assert.deepEqual(
     report.problems.filter((p) => p.includes('DEPENDENCY_STORE')),
     [],
@@ -148,4 +165,23 @@ test('hostLoad.resources: память, ядра и источник числа 
   assert.ok(Number.isInteger(r.performanceCores) && r.performanceCores >= 1);
   if (process.platform !== 'darwin') assert.equal(r.coresSource, 'cpus');
   if (r.cpuSpeedLimit !== undefined) assert.ok(r.cpuSpeedLimit >= 0 && r.cpuSpeedLimit <= 100);
+});
+
+test('DIGEST_THREADS_INVALID: HARNESS_DIGEST_THREADS вне 1–8 — предупреждение; верное значение и отсутствие — нет', () => {
+  const policy = policyOf((p) => {
+    p.concurrency = 1;
+  });
+  for (const bad of ['0', '9', 'two', '1.5', ''])
+    assert.deepEqual(
+      codes(resourceWarnings(policy, '/', large, { HARNESS_DIGEST_THREADS: bad })),
+      ['DIGEST_THREADS_INVALID'],
+      bad,
+    );
+  for (const good of ['1', ' 8 ', '08'])
+    assert.deepEqual(
+      resourceWarnings(policy, '/', large, { HARNESS_DIGEST_THREADS: good }),
+      [],
+      good,
+    );
+  assert.deepEqual(resourceWarnings(policy, '/', large, {}), []);
 });

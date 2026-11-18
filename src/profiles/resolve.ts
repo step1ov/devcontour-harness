@@ -46,8 +46,9 @@ export interface ResolveProfileOptions {
   /** Вернуть текст файла листа (`leafContent`) — для хоста, который хранит его сам. */
   includeLeafContent?: boolean;
   /**
-   * Встроенные слои поверх профиля (`['lean']`): складываются как последние
-   * `extends` листа и входят в closure и digest. Нет опции — профиль прежний.
+   * Встроенные слои поверх профиля (`['lean']`), только из `profiles/layers/`:
+   * складываются как последние `extends` листа и входят в closure и digest.
+   * Нет опции — профиль прежний.
    */
   layers?: string[];
 }
@@ -149,21 +150,31 @@ export function builtinProfiles(root = builtinProfilesRoot) {
     .sort();
 }
 
-/** Файл встроенного ID: профиль `<id>.json`, иначе слой `layers/<id>.json`. */
-function builtinFile(root: string, id: string) {
-  const top = join(root, id + '.json');
+const present = (path: string) => {
   try {
-    lstatSync(top);
-    return top;
+    lstatSync(path);
+    return true;
   } catch {
-    const layer = join(root, BUILTIN_LAYERS_DIR, id + '.json');
-    try {
-      lstatSync(layer);
-      return layer;
-    } catch {
-      return top;
-    }
+    return false;
   }
+};
+
+/**
+ * Файл встроенного ID: профиль `<id>.json` или слой `layers/<id>.json`; ID в
+ * обоих местах неоднозначен — отказ. `layerOnly` (опция `layers`, слои
+ * manifest) ищет только среди слоёв.
+ */
+function builtinFile(root: string, id: string, layerOnly: boolean) {
+  const top = join(root, id + '.json');
+  const layer = join(root, BUILTIN_LAYERS_DIR, id + '.json');
+  const isTop = present(top);
+  const isLayer = present(layer);
+  if (isTop && isLayer) refuse(`Встроенный ID ${id} — и профиль, и слой: неоднозначно`);
+  if (layerOnly) {
+    if (!isLayer) refuse('Слой профиля не найден: ' + id);
+    return { file: layer, layer: true };
+  }
+  return isLayer ? { file: layer, layer: true } : { file: top, layer: false };
 }
 
 /** Файл профиля: внутри своего корня, без symlink на пути, обычный файл до 128 KiB. */
@@ -262,20 +273,23 @@ export function resolveProfile(
   const files: string[] = [];
   let source: ResolvedProfile['source'];
   let leafContent = '';
-  const visit = (reference: string, parent?: string, depth = 0): ProfileLayer => {
+  const visit = (reference: string, parent?: string, depth = 0, layerOnly = false): ProfileLayer => {
     if (depth > PROFILE_DEPTH_LIMIT) refuse('Слишком глубокое наследование профилей');
     const builtin = builtinId.test(reference);
     if (!builtin && !reference.startsWith('./') && !reference.startsWith('../'))
       refuse('Профиль: укажите встроенный ID либо относительный ./file.json');
     if (!builtin && (!root || parent === 'builtin'))
       refuse('Локальный профиль требует корень репозитория');
-    const file = builtin ? builtinFile(builtinRoot, reference) : resolve(parent ?? root!, reference);
+    const found = builtin ? builtinFile(builtinRoot, reference, layerOnly) : undefined;
+    const file = found ? found.file : resolve(parent ?? root!, reference);
     const owner = builtin ? builtinRoot : root!;
     const key = builtin ? 'builtin:' + reference : 'local:' + relative(root!, file);
     if (active.has(key)) refuse('Цикл наследования профилей: ' + key);
     const content = safeFile(owner, file);
     const manifest = parseManifest(content, key, schema);
     if (builtin && manifest.id !== reference) refuse('ID встроенного профиля не совпадает: ' + key);
+    // Слой надстраивает профиль параметрами исполнения, а не проверками.
+    if (found?.layer && manifest.gates.length) refuse('Слой профиля не объявляет gates: ' + key);
     if (depth === 0) {
       leafContent = content;
       if (!builtin) source = { repositoryId, path: relative(root!, file) };
@@ -296,7 +310,7 @@ export function resolveProfile(
   const leaf = visit(ref);
   for (const layer of options.layers ?? []) {
     if (!builtinId.test(layer)) refuse('Слой профиля: ожидается встроенный ID: ' + layer);
-    visit(layer, 'builtin', 1);
+    visit(layer, 'builtin', 1, true);
   }
 
   const declared = layers.flatMap((p) => p.gates);

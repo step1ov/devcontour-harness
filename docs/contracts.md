@@ -1637,11 +1637,13 @@ Exit 1 не используется: им Node завершает процес�
 окружение и lifecycle задаёт один слой (иначе конфликт), параллельность —
 наименьшая, время попытки и `gateTimeoutFloorMs` — наибольшие, роли и
 `contextPacks` — по ID. Встроенный слой — часть профиля без gates, сам по себе
-не разрешается и в `builtinProfiles()` не входит; `lean` задаёт
-`concurrency: 1` и `gateTimeoutFloorMs: 240000`. `resolveProfile(ref, { layers: ["lean"] })`
-складывает встроенные слои поверх листа (они входят в closure и digest);
+не разрешается, gates не объявляет и в `builtinProfiles()` не входит; ID,
+который есть и среди профилей, и среди слоёв, — отказ. `lean` задаёт
+`concurrency: 1`, `runTimeoutMs: 1800000` и `gateTimeoutFloorMs: 240000`.
+`resolveProfile(ref, { layers: ["lean"] })` складывает встроенные слои —
+только из `profiles/layers/` — поверх листа (они входят в closure и digest);
 `harness init --lean` делает это и записывает слои в manifest
-(`profile.layers`). `generatePolicy` переносит `concurrency` и
+(`profile.layers`). `generatePolicy` переносит `concurrency`, `runTimeoutMs` и
 `gateTimeoutFloorMs` профиля в политику; без них политика и её digest прежние.
 Итог обязан иметь test gate с JUnit; `requirement-source` зарезервирован.
 Файлы локальных слоёв становятся защищёнными путями. Digest: один встроенный

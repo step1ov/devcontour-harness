@@ -299,11 +299,16 @@ worktrees не запускается — проблема `TOOL_IN_PROJECT`. Н
 попадают в `problems`:
 
 - `DEPENDENCY_STORE_RECOMMENDED` — у репозитория есть `pnpm-lock.yaml`, а `dependencyStore`
-  нет; для npm совета нет;
+  нет; совет — поле в `.harness/policy.json`, для npm совета нет;
 - `LOW_RESOURCES` — не больше 4 производительных ядер (macOS: `sysctl hw.perflevel0.physicalcpu`,
-  иначе число ядер) или 16 ГБ памяти при `concurrency` больше 1; совет — `init --lean` или слой
-  `lean` ([слабая машина](standalone.md#слабая-машина)). Ограничение частоты процессора из
-  `pmset -g therm` на macOS только упоминается в тексте.
+  иначе `os.cpus().length`) или меньше 16 ГиБ памяти при `concurrency` больше 1. Совет называет
+  поля `.harness/policy.json` для готового проекта и `init --lean` для нового
+  ([слабая машина](standalone.md#слабая-машина)). Ограничение частоты процессора из
+  `pmset -g therm` на macOS упоминается, только когда оно меньше 100%. Известный предел: вне
+  macOS считаются логические ядра, и машина с 2 физическими ядрами и hyperthreading выглядит
+  как 4-ядерная;
+- `DIGEST_THREADS_INVALID` — `HARNESS_DIGEST_THREADS` в окружении `doctor` задана, но не целое
+  1–8: значение не действует.
 
 `doctor` по-прежнему информационный (exit 0, проблемы в `problems`). С политикой он требует
 только runtime, назначенные политикой (`reason: "не назначен политикой"` у остальных).

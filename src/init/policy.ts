@@ -50,11 +50,13 @@ export interface GeneratedPolicy {
 
 /**
  * Параметры исполнения, которые задаёт профиль (например, слой `lean`):
- * параллельность и нижняя граница предела gate. Нет в профиле — умолчания
- * схемы, и политика прежняя.
+ * параллельность, время попытки и нижняя граница предела gate (слои уже
+ * сложены: наименьшая параллельность, наибольшие пределы). Нет в профиле —
+ * умолчания схемы, и политика прежняя.
  */
 export const profileExecution = (profile: ResolvedProfile) => ({
   ...(profile.concurrency !== undefined ? { concurrency: profile.concurrency } : {}),
+  ...(profile.runTimeoutMs !== undefined ? { runTimeoutMs: profile.runTimeoutMs } : {}),
   ...(profile.gateTimeoutFloorMs !== undefined
     ? { gateTimeoutFloorMs: profile.gateTimeoutFloorMs }
     : {}),

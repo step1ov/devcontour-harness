@@ -466,7 +466,7 @@ export const cliCommands = {
         value: 'flag',
         required: false,
         description:
-          'Слабая машина: слой lean (одна попытка за раз, gateTimeoutFloorMs 240000); для pnpm-lock.yaml — dependencyStore',
+          'Новый проект на слабой машине: слой lean (одна попытка за раз, runTimeoutMs 1800000, gateTimeoutFloorMs 240000); для pnpm-профиля с pnpm-lock.yaml — dependencyStore',
       },
       {
         name: '--human',
@@ -1183,8 +1183,9 @@ export const doctorDataSchema = z.strictObject({
   problems: z.array(z.string()),
   /**
    * Предупреждения политики, не делающие среду негодной: сумма пределов шагов
-   * одной фазы больше `runTimeoutMs` (`timeBudgetWarnings`). Есть, когда
-   * задана политика.
+   * одной фазы больше `runTimeoutMs` (`timeBudgetWarnings`) и советы о
+   * ресурсах машины — `DEPENDENCY_STORE_RECOMMENDED`, `LOW_RESOURCES`,
+   * `DIGEST_THREADS_INVALID` (`resourceWarnings`). Есть, когда задана политика.
    */
   warnings: z.array(z.string()).optional(),
 });

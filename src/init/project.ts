@@ -282,7 +282,9 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
     profile,
     writer,
     ...(declared ? { packageManager: { name: declared.name, version: declared.version } } : {}),
-    ...(layers.includes('lean') && lstat(join(root, 'pnpm-lock.yaml'))?.isFile()
+    ...(layers.includes('lean') &&
+    profile.toolchain?.packageManagers['.'] === 'pnpm' &&
+    lstat(join(root, 'pnpm-lock.yaml'))?.isFile()
       ? { dependencyStore: true }
       : {}),
   });
