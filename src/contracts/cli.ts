@@ -1173,7 +1173,24 @@ export const doctorDataSchema = z.strictObject({
     .optional(),
   /** Диагностика toolchain репозиториев политики; есть, когда задана политика. */
   toolchains: z.array(toolchainReportSchema).optional(),
+  /**
+   * Порты ресурсов `port` политики: проба без остановки процессов; `leased` —
+   * под арендой идущей попытки, не пробуется. Нет — портов в политике нет.
+   */
+  ports: z
+    .array(
+      z.strictObject({
+        id: z.string(),
+        port: z.number().int(),
+        status: z.enum(['free', 'busy', 'wildcard-only', 'leased']),
+        hosts: z.array(z.string()).optional(),
+        holder: z.string().optional(),
+      }),
+    )
+    .optional(),
   problems: z.array(z.string()),
+  /** Предупреждения: не мешают работе, но стоит знать (порт только на wildcard). */
+  warnings: z.array(z.string()).optional(),
 });
 
 export const profileDataSchema = z.strictObject({

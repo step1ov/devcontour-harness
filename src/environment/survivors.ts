@@ -40,11 +40,19 @@ export interface SurvivorRecord {
 /** Машина и загрузка ОС этого процесса (база может лежать в общем HOME). */
 const here = () => ({ host: hostname(), boot: osBootId() ?? '' });
 
+const COLUMNS = ['pid', 'start', 'host', 'boot', 'owner', 'label', 'at'];
 function open(database: string, busyMs = 5000) {
   mkdirSync(dirname(database), { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(database);
+  db.exec(`PRAGMA busy_timeout=${busyMs}`);
+  // Таблица другой формы (ранняя сборка без машины и загрузки ОС)
+  // пересоздаётся: записи одноразовые, без них порт — `resource-busy`.
+  const columns = (db.prepare('PRAGMA table_info(survivors)').all() as { name: string }[]).map(
+    (c) => c.name,
+  );
+  if (columns.length && columns.join() !== COLUMNS.join()) db.exec('DROP TABLE survivors');
   db.exec(
-    `PRAGMA busy_timeout=${busyMs}; CREATE TABLE IF NOT EXISTS survivors (pid INTEGER NOT NULL, start TEXT NOT NULL, host TEXT NOT NULL, boot TEXT NOT NULL, owner TEXT NOT NULL, label TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (pid, start, host, boot))`,
+    'CREATE TABLE IF NOT EXISTS survivors (pid INTEGER NOT NULL, start TEXT NOT NULL, host TEXT NOT NULL, boot TEXT NOT NULL, owner TEXT NOT NULL, label TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (pid, start, host, boot))',
   );
   return db;
 }

@@ -319,6 +319,17 @@ export class Runner {
   private retained = new Map<string, Retained>();
   /** Самопроверка исполнителя попытки: каталог (читаем writer) и план. */
   private selfChecks = new Map<string, { dir: string; plan: SelfCheckPlan }>();
+  /**
+   * Предупреждения пробы портов попытки (порт на wildcard держит чужой
+   * процесс): дописываются к тексту её отказа, чтобы провал gate на этом
+   * порту нёс объяснение, а не только артефакт фазы.
+   */
+  private portWarnings = new Map<string, string[]>();
+  private portWarning(id: string, message: string) {
+    const list = this.portWarnings.get(id) ?? [];
+    if (!list.includes(message)) list.push(message);
+    this.portWarnings.set(id, list);
+  }
 
   /** Корпус подтверждённых случаев: принятие версий и закреплённые snapshot. */
   readonly corpus: CorpusStore;
@@ -1936,6 +1947,7 @@ export class Runner {
               return sha;
             },
             (stage, action) => this.timed(attempt, 'candidate-environment:' + stage, action),
+            (message) => this.portWarning(attempt.id, message),
           );
           await assertDependencies(attempt.dependencies ?? []);
           attempt = { ...attempt, candidateSha: candidate };
@@ -2037,6 +2049,8 @@ export class Runner {
         // начинает с базы в новом дереве.
         const cause = environmentCauseOf(stalled ? undefined : error, message, kind);
         let reported = message;
+        const ports = this.portWarnings.get(attempt.id);
+        if (ports?.length) reported += `; предупреждение пробы портов: ${ports.join('; ')}`;
         // Неостановленные потомки могли ещё писать в дерево — при любом
         // исходе, в том числе зависании: черновик не продолжается следующей
         // попыткой. Изменения сохраняются только файлом — их можно разобрать
@@ -2098,6 +2112,7 @@ export class Runner {
       clearTimeout(timeout);
       clearInterval(heartbeat);
       this.selfChecks.delete(attempt.id);
+      this.portWarnings.delete(attempt.id);
       // Рабочие деревья попытки убираются; ветка попытки и объекты остаются —
       // по ним recovery и следующая попытка видят кандидата. Снимки
       // зависимостей: SHA, tree и artifacts записаны в попытке. Что убрать не
@@ -2881,6 +2896,7 @@ export class Runner {
           },
           (stage, action) =>
             this.timed(attempt, `integration-consumer-environment:${repo.id}:${stage}`, action),
+          (message) => this.portWarning(attempt.id, message),
         );
         await assertDependencies(dependencies);
         await pinned('проверка');
@@ -3952,6 +3968,7 @@ export class Runner {
         await this.review(attempt, work, cwd, base, sha, 'integration', artifacts, signal, context);
       },
       (stage, action) => this.timed(attempt, 'integration-environment:' + stage, action),
+      (message) => this.portWarning(attempt.id, message),
     );
     if (
       (await git(cwd, 'rev-parse', 'HEAD')) !== sha ||

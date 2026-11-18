@@ -68,8 +68,11 @@ export async function doctor(
    * каталог состояния.
    */
   checkouts?: { baseDir: string; checkoutRoot?: string },
-  /** База блокировок ресурсов (по умолчанию общая база машины); читается, только если есть. */
-  resourceDatabase: string = defaultResourceDatabase(),
+  /**
+   * База блокировок ресурсов (по умолчанию общая база машины); читается,
+   * только если есть. `false` — порты ресурсов не пробуются.
+   */
+  resourceDatabase: string | false = defaultResourceDatabase(),
 ) {
   const problems: string[] = [];
   const runtimes = [];
@@ -149,15 +152,19 @@ export async function doctor(
       problems.push(
         `toolchain ${r.repositoryId}: ${p.code} ${p.field.join('.')}${p.path ? ` (${p.path})` : ''}: ${p.message}`,
       );
-  const ports = policy ? await portStatus(policy, resourceDatabase) : [];
+  // Проба портов привязывает их и зовёт lsof; вызывающий без нужды в ней
+  // (explain) передаёт `resourceDatabase: false`.
+  const ports =
+    policy && resourceDatabase !== false ? await portStatus(policy, resourceDatabase) : [];
+  const warnings: string[] = [];
   for (const p of ports)
     if (p.status === 'busy')
       problems.push(
         `Порт ${p.port} (ресурс ${p.id}) занят вне аренды: ${p.holder}. Фаза попытки с этим ресурсом откажет environment/resource-busy. ${PORT_ADVICE}`,
       );
     else if (p.status === 'wildcard-only')
-      problems.push(
-        `Предупреждение: порт ${p.port} (ресурс ${p.id}) на всех адресах держит ${p.holder}; loopback свободен — служба попытки должна слушать 127.0.0.1. ${PORT_ADVICE}`,
+      warnings.push(
+        `Порт ${p.port} (ресурс ${p.id}) на всех адресах держит ${p.holder}; loopback свободен — служба попытки должна слушать 127.0.0.1. ${PORT_ADVICE}`,
       );
   return {
     harness: HARNESS_VERSION,
@@ -171,6 +178,7 @@ export async function doctor(
     ...(toolchains ? { toolchains } : {}),
     ...(ports.length ? { ports } : {}),
     problems,
+    ...(warnings.length ? { warnings } : {}),
   };
 }
 

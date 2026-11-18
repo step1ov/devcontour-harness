@@ -11,6 +11,10 @@ import { command, processInventory, processTable } from '../src/environment/proc
 import { leaseScope, recordSurvivors, survivorRecords } from '../src/environment/survivors.ts';
 import { runGatesAt, type GatesAtContext } from '../src/verification/gates-at.ts';
 import { doctor } from '../src/control/doctor.ts';
+import { doctorDataSchema } from '../src/contracts/cli.ts';
+import { osBootId } from '../src/environment/os-tools.ts';
+import { DatabaseSync } from 'node:sqlite';
+import { hostname } from 'node:os';
 import { ResourcePool } from '../src/environment/resources.ts';
 import { write } from './git-fixture.ts';
 import { approve, greet, implement, runAll, setup } from './runner-fixture.ts';
@@ -103,17 +107,17 @@ const stopHolder = async (child: ChildProcess) => {
 };
 
 /** Gate привязывает порт ресурса (как служба проверки) и затем исполняет тесты. */
-const gate = (port: number) => `
+const gate = (port: number, host = '127.0.0.1') => `
 const net = require('net');
 const s = net.createServer();
 s.once('error', (e) => { console.error('gate: ' + e.code); process.exit(1); });
-s.listen(${port}, '127.0.0.1', () => s.close(() => require('./run.js')));
+s.listen(${port}, ${JSON.stringify(host)}, () => s.close(() => require('./run.js')));
 `;
 
-function fixture(port: number) {
+function fixture(port: number, host?: string) {
   return setup({
     scenario: { writer: implement(), reviewer: approve() },
-    files: { 'test/gate.js': gate(port) },
+    files: { 'test/gate.js': gate(port, host) },
     policy: (p) => {
       p.resources = [{ id: 'web-port', kind: 'port', value: String(port) }];
       const raw = p as { repositories: { gates: { command: string[]; resources?: string[] }[] }[] };
@@ -428,12 +432,22 @@ test('lsof не ответил — держатель не определён: r
   }
 });
 
-test('чужой процесс держит порт только на всех адресах, loopback свободен (AirPlay на macOS) — предупреждение, попытка проходит', async (t) => {
+test('чужой процесс держит порт только на всех адресах, loopback свободен (AirPlay на macOS) — предупреждение, попытка проходит', async () => {
   const port = await freePort();
   const foreign = await holder(port, false, { host: '0.0.0.0' });
   try {
     if (!(await loopbackBesideWildcard(port))) {
-      t.skip('на этой ОС wildcard-держатель занимает и loopback');
+      // Здесь wildcard-держатель занимает и loopback: это отказ, а не
+      // предупреждение.
+      const error = await ensurePortsFree({
+        database: tempDatabase(),
+        owner: 'now',
+        ports: [{ id: 'web-port', port }],
+      }).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      assert.ok(error instanceof TaskFailure && error.diagnosis === 'resource-busy', String(error));
       return;
     }
     const warnings = await ensurePortsFree({
@@ -495,4 +509,63 @@ test('doctor: порт ресурса занят чужим процессом �
   } finally {
     await stopHolder(foreign);
   }
+});
+
+test('wildcard-only: gate, слушающий все адреса, падает — отказ попытки несёт предупреждение пробы; doctor — в warnings, не в problems', async () => {
+  const port = await freePort();
+  const foreign = await holder(port, false, { host: '0.0.0.0' });
+  try {
+    if (!(await loopbackBesideWildcard(port))) return; // покрыто тестом выше
+    const ctx = fixture(port, '0.0.0.0');
+    await runAll(ctx);
+    const first = ctx.engine.read((v) => v.attempts('add-greeting'))[0]!;
+    assert.equal(first.status, 'failed');
+    assert.notEqual(first.failureKind, 'environment', 'провал gate — не отказ окружения');
+    assert.match(
+      first.error ?? '',
+      new RegExp(`предупреждение пробы портов: Порт ${port} \\(ресурс web-port\\) на всех адресах`),
+    );
+    const report = await doctor(
+      ctx.policy,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      join(ctx.state, 'resources.sqlite'),
+    );
+    assert.equal(report.ports?.[0]?.status, 'wildcard-only');
+    assert.ok(!report.problems.some((p) => p.includes(`Порт ${port}`)), 'не в problems');
+    assert.ok(report.warnings?.some((w) => w.startsWith(`Порт ${port} (ресурс web-port)`)));
+    assert.doesNotThrow(() => doctorDataSchema.parse(report), 'договор CLI doctor');
+    // explain не пробует порты.
+    const quiet = await doctor(ctx.policy, {}, undefined, undefined, undefined, false);
+    assert.equal(quiet.ports, undefined);
+  } finally {
+    await stopHolder(foreign);
+  }
+});
+
+test('записи переживших: таблица прежней формы пересоздаётся; запись другой машины или загрузки ОС не учитывается', () => {
+  const database = tempDatabase();
+  const old = new DatabaseSync(database);
+  old.exec(
+    'CREATE TABLE survivors (pid INTEGER NOT NULL, start TEXT NOT NULL, owner TEXT NOT NULL, label TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (pid, start))',
+  );
+  old.prepare('INSERT INTO survivors VALUES (?,?,?,?,?)').run(1, 'x', 'o', 'l', Date.now());
+  old.close();
+  recordSurvivors({ database, owner: 'here' }, [{ pid: 42, start: 's' }], 'unit');
+  assert.deepEqual(
+    survivorRecords(database).map((r) => [r.pid, r.start, r.owner]),
+    [[42, 's', 'here']],
+  );
+  const db = new DatabaseSync(database);
+  const insert = db.prepare('INSERT INTO survivors VALUES (?,?,?,?,?,?,?)');
+  insert.run(43, 's', 'other-host', osBootId() ?? '', 'o', 'l', Date.now());
+  insert.run(44, 's', hostname(), 'other-boot', 'o', 'l', Date.now());
+  db.close();
+  assert.deepEqual(
+    survivorRecords(database).map((r) => r.pid),
+    [42],
+    'чужая машина и прежняя загрузка не учитываются',
+  );
 });
