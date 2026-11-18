@@ -75,12 +75,34 @@ export function legacyGroupCall(r: {
 /** Поручение записи: закреплённое при вызове, у прежних записей — по попытке. */
 const recordWork = (view: ExecutionView, r: CallRecord) => r.workId ?? subjectWork(view, r);
 
+/** Поручение записи — по виду; `RecordWork` с кэшем отвечает так же. */
+export type RecordWork = (r: CallRecord) => string | undefined;
+
+/**
+ * `recordWork` с кэшем на одно чтение: прежняя запись без поручения узнаёт его
+ * по попытке, и без кэша каждая область каждого поручения читала бы попытку
+ * заново. Действует, пока вид не меняется.
+ */
+export function recordWorkOf(view: ExecutionView): RecordWork {
+  const known = new Map<CallRecord, string | undefined>();
+  return (r) => {
+    if (r.workId !== undefined) return r.workId;
+    if (!known.has(r)) known.set(r, subjectWork(view, r));
+    return known.get(r);
+  };
+}
+
 /** Группа записи: закреплённая при вызове, у прежних записей — по текущему составу. */
-function recordGroup(c: BudgetContext, view: ExecutionView, r: CallRecord) {
+function recordGroup(
+  c: BudgetContext,
+  view: ExecutionView,
+  r: CallRecord,
+  workOf: RecordWork = (x) => recordWork(view, x),
+) {
   if (r.groupId) return r.groupId;
   if (r.subjectId && (!r.subjectKind || r.subjectKind === 'group') && isGroup(c, view, r.subjectId))
     return r.subjectId;
-  const work = recordWork(view, r);
+  const work = workOf(r);
   return work ? c.scopes.groupOf(work, view) : undefined;
 }
 
@@ -110,16 +132,19 @@ export function scopeRecords(
   records: CallRecord[],
   scope: BudgetScope,
   groupsOf: () => Set<string> = () => workGroups(c, view, records, scope.id!),
+  workOf: RecordWork = (r) => recordWork(view, r),
 ) {
   if (scope.kind === 'total') return records;
-  if (scope.kind === 'group') return records.filter((r) => recordGroup(c, view, r) === scope.id);
+  if (scope.kind === 'group')
+    return records.filter((r) => recordGroup(c, view, r, workOf) === scope.id);
   // Группы поручения нужны только записям без поручения: спрашиваются у хоста лениво.
   let groups: Set<string> | undefined;
   return records.filter((r) => {
     if (r.workIds) return r.workIds.includes(scope.id!);
-    const work = recordWork(view, r);
+    const work = workOf(r);
     return (
-      work === scope.id || (!work && (groups ??= groupsOf()).has(recordGroup(c, view, r) ?? ''))
+      work === scope.id ||
+      (!work && (groups ??= groupsOf()).has(recordGroup(c, view, r, workOf) ?? ''))
     );
   });
 }
@@ -157,7 +182,7 @@ function uncoveredRuns(
 }
 
 /** Попытки вида без записанных вызовов реализации — для всех областей сразу. */
-function uncoveredAttempts(view: ExecutionView, records: CallRecord[]) {
+export function uncoveredAttempts(view: ExecutionView, records: CallRecord[]) {
   const implemented = new Set(
     records.filter((r) => r.stage === 'implementation' && r.runId).map((r) => r.runId),
   );
@@ -185,12 +210,16 @@ export function budgetStatus(
   scope: BudgetScope,
   records?: CallRecord[],
   at = Date.now(),
-  shared?: { uncovered: () => AttemptState[]; groupsOf?: () => Set<string> },
+  shared?: {
+    uncovered: () => AttemptState[];
+    groupsOf?: () => Set<string>;
+    workOf?: RecordWork;
+  },
 ): BudgetStatus | undefined {
   const limit = c.policy.budgets?.[scope.kind];
   if (!limit) return undefined;
   const all = records ?? callRecords(view);
-  const own = scopeRecords(c, view, all, scope, shared?.groupsOf);
+  const own = scopeRecords(c, view, all, scope, shared?.groupsOf, shared?.workOf);
   const spent = {
     ...usageTotals(own, false, at),
     uncoveredRuns: uncoveredRuns(c, view, all, scope, shared?.uncovered()),
@@ -271,16 +300,23 @@ export function workBudgets(
  * нужны (предел группы или запись без поручения). Ответ по поручению — тот
  * же, что у `workBudgets` с теми же `records` и `at`; `at` фиксируется при
  * создании, поэтому все ответы — на один момент. Действует в пределах этого
- * вида (одного чтения).
+ * вида (одного чтения). `known` — уже известное для этих `records` при той
+ * же версии данных: попытки без учёта вызовов (`uncoveredAttempts`) и
+ * поручения записей (`recordWorkOf`); с ним история попыток не читается
+ * заново.
  */
 export function workBudgetsOf(
   c: BudgetContext,
   view: ExecutionView,
   records = callRecords(view),
   at = Date.now(),
+  known?: { uncovered: AttemptState[]; workOf: RecordWork },
 ): (workId: string) => BudgetStatus[] {
-  let uncovered: AttemptState[] | undefined;
-  const shared = { uncovered: () => (uncovered ??= uncoveredAttempts(view, records)) };
+  let uncovered = known?.uncovered;
+  const shared = {
+    uncovered: () => (uncovered ??= uncoveredAttempts(view, records)),
+    workOf: known?.workOf ?? recordWorkOf(view),
+  };
   let total: { status: BudgetStatus | undefined } | undefined;
   const groups = new Map<string, BudgetStatus | undefined>();
   const groupStatus = (id: string) => {
