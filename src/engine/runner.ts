@@ -1128,6 +1128,32 @@ export class Runner {
   }
 
   /**
+   * Gates фазы с проверкой генераторов (`verify`) сразу после последнего
+   * gate установки зависимостей: генератору нужны зависимости проекта, а
+   * взятый кандидат и integration ставят их только этими gates. Без gates
+   * установки — до первого gate.
+   */
+  private async verifyGenerated(
+    attempt: AttemptState,
+    applicable: GatePolicy[],
+    gates: GatePolicy[],
+    generators: GeneratorPolicy[],
+    cwd: string,
+    phase: 'candidate' | 'integration',
+    run: Parameters<Runner['generate']>[5],
+    gate: (gate: GatePolicy) => Promise<unknown>,
+  ) {
+    const installs = new Set(writerDependencyGates(gates).map((g) => g.id));
+    const last = applicable.findLastIndex((g) => installs.has(g.id));
+    const verify = () => this.generate(attempt, generators, cwd, 'verify', phase, run);
+    if (last < 0) await verify();
+    for (const [i, g] of applicable.entries()) {
+      await gate(g);
+      if (i === last) await verify();
+    }
+  }
+
+  /**
    * Кандидат предыдущей попытки вместо новой реализации. Движок уже сверил
    * основания; здесь проверяется сам коммит: ровно один поверх той же базы,
    * рабочее дерево чистое, область прежняя. Проверки и ревью затем идут
@@ -1140,11 +1166,6 @@ export class Runner {
     cwd: string,
     base: string,
     context: ContextSnapshot | undefined,
-    run: {
-      execution: ReturnType<typeof executionEnvironment>;
-      signal: AbortSignal;
-      artifacts: string;
-    },
   ) {
     const sha = await git(cwd, 'rev-parse', 'HEAD');
     const parents = (await git(cwd, 'rev-list', '--parents', '-n', '1', sha)).split(' ').slice(1);
@@ -1155,13 +1176,10 @@ export class Runner {
       );
     if (await git(cwd, 'status', '--porcelain'))
       throw new TaskFailure('unknown', 'Рабочее дерево взятого кандидата не чистое');
-    // Выходы генераторов взятого кандидата построены прежней попыткой:
-    // генератор исполняется заново и обязан их не изменить.
-    const changed = (await git(cwd, 'diff', '--no-renames', '--name-only', '-z', base, sha))
-      .split('\0')
-      .filter(Boolean);
-    const generators = selectGenerators(repo.generators ?? [], changed);
-    await this.generate(attempt, generators, cwd, 'verify', 'candidate', run);
+    // Выходы генераторов взятого кандидата построены прежней попыткой: их
+    // область — область генератора; заново они исполняются после gates
+    // установки (`verifyGenerated`) и обязаны дерево не изменить.
+    const generators = selectGenerators(repo.generators ?? [], await diffPaths(cwd, base, sha));
     await this.assertScope(
       work,
       repo,
@@ -1633,14 +1651,12 @@ export class Runner {
                 );
               const sha = attempt.reusedFrom
                 ? await this.timed(attempt, 'implementation-reuse', () =>
-                    this.reuseCandidate(attempt, work, repo, cwd, base, context, {
-                      execution,
-                      signal,
-                      artifacts,
-                    }).then(async (reused) => {
-                      await this.carryAssumptions(attempt, cwd, base, reused);
-                      return reused;
-                    }),
+                    this.reuseCandidate(attempt, work, repo, cwd, base, context).then(
+                      async (reused) => {
+                        await this.carryAssumptions(attempt, cwd, base, reused);
+                        return reused;
+                      },
+                    ),
                   )
                 : await this.timed(attempt, 'implementation', async () => {
                     const dir = join(artifacts, 'implementation');
@@ -1790,13 +1806,21 @@ export class Runner {
                     // вопросом или незавершённостью не перегенерируется (его
                     // продолжит повтор). Их выходы — не правка исполнителя:
                     // область к ним не применяется.
-                    const generators = selectGenerators(repo.generators ?? [], changed);
-                    if (generators.length && evaluation.decision.kind === 'continue')
+                    // Без генерации ручная правка выхода остаётся правкой
+                    // исполнителя и проверяется областью, как любая другая.
+                    const generators =
+                      evaluation.decision.kind === 'continue'
+                        ? selectGenerators(repo.generators ?? [], changed)
+                        : [];
+                    if (generators.length) {
+                      // Генерация — не время исполнителя: у неё свой предел фазы.
+                      rearm();
                       await this.generate(attempt, generators, cwd, 'write', 'candidate', {
                         execution,
                         signal,
                         artifacts,
                       });
+                    }
                     // Пустой результат — не отказ сразу: приёмку могла уже
                     // выполнить зависимость. Кандидат — сама база (без
                     // коммита); gates задачи на ней и подтверждение reviewer
@@ -1856,32 +1880,45 @@ export class Runner {
                 sha,
                 base,
               );
-              for (const gate of applicable)
-                await this.candidateGate(
-                  attempt,
-                  cwd,
-                  sha,
-                  gate,
-                  artifacts,
-                  signal,
-                  execution,
-                  recheck,
-                ).catch((error: unknown) => {
-                  // Без изменений непрошедший gate значит одно: работа не
-                  // сделана, — это пустой результат, а не дефект кода.
-                  // Отказ среды (в том числе неостановленные потомки) остаётся
-                  // отказом среды и без изменений: о работе он не говорит.
-                  if (
-                    sha !== base ||
-                    !(error instanceof TaskFailure) ||
-                    error.kind === 'environment'
-                  )
-                    throw error;
-                  throw new TaskFailure(
-                    'empty-result',
-                    'Изменений нет, а проверки задачи на базе не проходят: ' + error.message,
-                  );
-                });
+              // Взятый кандидат: генераторы — заново, после gates установки.
+              const verified = attempt.reusedFrom
+                ? selectGenerators(repo.generators ?? [], await diffPaths(cwd, base, sha))
+                : [];
+              await this.verifyGenerated(
+                attempt,
+                applicable,
+                gates,
+                verified,
+                cwd,
+                'candidate',
+                { execution, signal, artifacts },
+                (gate) =>
+                  this.candidateGate(
+                    attempt,
+                    cwd,
+                    sha,
+                    gate,
+                    artifacts,
+                    signal,
+                    execution,
+                    recheck,
+                  ).catch((error: unknown) => {
+                    // Без изменений непрошедший gate значит одно: работа не
+                    // сделана, — это пустой результат, а не дефект кода.
+                    // Отказ среды (в том числе неостановленные потомки) остаётся
+                    // отказом среды и без изменений: о работе он не говорит.
+                    if (
+                      sha !== base ||
+                      !(error instanceof TaskFailure) ||
+                      error.kind === 'environment'
+                    )
+                      throw error;
+                    throw new TaskFailure(
+                      'empty-result',
+                      'Изменений нет, а проверки задачи на базе не проходят: ' + error.message,
+                    );
+                  }),
+              );
               this.requirements(attempt, work, repoPath, cwd, sha, 'candidate');
               rearm();
               this.engine.phase(attempt.id, attempt.token, 'reviewing');
@@ -3874,31 +3911,6 @@ export class Runner {
           attempt.baseSha,
         );
         prepared(execution);
-        // Выходы генераторов кандидата построены на его базе: на слиянии с
-        // текущей они обязаны остаться прежними, иначе повтор от неё.
-        if (attempt.candidateSha !== attempt.baseSha && repo.generators?.length) {
-          const changed = (
-            await git(
-              cwd,
-              'diff',
-              '--no-renames',
-              '--name-only',
-              '-z',
-              attempt.baseSha!,
-              attempt.candidateSha!,
-            )
-          )
-            .split('\0')
-            .filter(Boolean);
-          await this.generate(
-            attempt,
-            selectGenerators(repo.generators, changed),
-            cwd,
-            'verify',
-            'integration',
-            { execution, signal, artifacts },
-          );
-        }
         const budget = { recheck: true };
         const applicable = await this.applicableGates(
           attempt,
@@ -3910,8 +3922,27 @@ export class Runner {
           sha,
           attempt.baseSha!,
         );
-        for (const gate of applicable)
-          await this.integrationGate(attempt, cwd, sha, gate, artifacts, signal, execution, budget);
+        // Выходы генераторов кандидата построены на его базе: на слиянии с
+        // текущей они обязаны остаться прежними (после gates установки:
+        // генератору нужны зависимости проекта), иначе повтор от неё.
+        const verified =
+          attempt.candidateSha !== attempt.baseSha && repo.generators?.length
+            ? selectGenerators(
+                repo.generators,
+                await diffPaths(cwd, attempt.baseSha!, attempt.candidateSha!),
+              )
+            : [];
+        await this.verifyGenerated(
+          attempt,
+          applicable,
+          gates,
+          verified,
+          cwd,
+          'integration',
+          { execution, signal, artifacts },
+          (gate) =>
+            this.integrationGate(attempt, cwd, sha, gate, artifacts, signal, execution, budget),
+        );
         await this.consumers(attempt, cwd, sha, artifacts, signal);
         this.requirements(attempt, work, repoPath, cwd, sha, 'integration');
         rearm();
@@ -3966,6 +3997,13 @@ export class Runner {
       throw error;
     }
   }
+}
+
+/** Пути, изменённые между двумя коммитами. */
+async function diffPaths(cwd: string, from: string, to: string) {
+  return (await git(cwd, 'diff', '--no-renames', '--name-only', '-z', from, to))
+    .split('\0')
+    .filter(Boolean);
 }
 
 /** Рабочие деревья (с их checkout) и снимки зависимостей, которые ещё нужно убрать. */
