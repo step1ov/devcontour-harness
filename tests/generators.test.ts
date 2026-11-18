@@ -53,6 +53,7 @@ if (process.argv.includes('--link')) fs.symlinkSync('../../../admin/data/catalog
 if (process.argv.includes('--needs-dep')) require(process.cwd() + '/node_modules/dep');
 if (process.argv.includes('--commit'))
   require('child_process').execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'sneak']);
+if (process.env.GEN_SLEEP_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.GEN_SLEEP_MS));
 if (process.env.GEN_MARK) fs.appendFileSync(process.env.GEN_MARK, 'ran\\n');
 `;
 const check = `
@@ -64,7 +65,7 @@ try {
   for (const [path, text] of Object.entries(expected))
     if (!fs.existsSync(path) || fs.readFileSync(path, 'utf8') !== text) message += path + ' stale; ';
   for (const f of fs.readdirSync('apps/mobile/src/generated'))
-    if (!expected['apps/mobile/src/generated/' + f]) message += f + ' unexpected; ';
+    if (f !== 'node_modules' && !f.endsWith('.map') && !expected['apps/mobile/src/generated/' + f]) message += f + ' unexpected; ';
 } catch (e) { message = String(e.message); }
 fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,
   '<testsuite><testcase classname="catalog" name="in-sync">' + (message ? '<failure message="' + message.replace(/[<&"]/g, '') + '"/>' : '') + '</testcase></testsuite>');
@@ -546,6 +547,9 @@ test('Генератору нужны зависимости проекта: н�
 const fs = require('fs');
 fs.mkdirSync('node_modules/dep', { recursive: true });
 fs.writeFileSync('node_modules/dep/index.js', 'module.exports = 1;\\n');
+// Пакет workspace в каталоге выхода: установка кладёт и его node_modules.
+fs.mkdirSync('apps/mobile/src/generated/node_modules/inner', { recursive: true });
+fs.writeFileSync('apps/mobile/src/generated/node_modules/inner/index.js', 'module.exports = 2;\\n');
 `,
   );
   chmodSync(npm, 0o755);
@@ -668,4 +672,34 @@ test('Пересечение путей генераторов — без учё
     generatorIssues(policy.repositories[0]!).map((i) => i.message),
     ['Выходы генераторов catalog (apps/mobile/src/generated) и b (Apps/Mobile/src) пересекаются'],
   );
+});
+
+test('Игнорируемые файлы, бывшие в выходе до генератора, не отказ; изменённый генератором — отказ', async () => {
+  const leftovers = {
+    [DATA]: data(['apple', ...items]),
+    [`${OUT}/catalog.ts.map`]: '{"old":true}',
+    [`${OUT}/node_modules/inner/index.js`]: 'module.exports = 2;\n',
+  };
+  const ok = fixture({ writer: implement(leftovers) });
+  await runAll(ok.ctx);
+  assert.equal(ok.work().status, 'done', ok.work().failure);
+  // Генератор перезаписал игнорируемый файл, бывший в выходе: в коммит он не попадёт.
+  const bad = fixture({ writer: implement(leftovers), generators: [genWith('--map')] });
+  await runAll(bad.ctx);
+  assert.equal(bad.work().failureKind, 'gate', bad.work().failure);
+  assert.match(bad.work().failure!, /скрытые \.gitignore .*catalog\.ts\.map/);
+  assert.doesNotMatch(bad.work().failure!, /node_modules/);
+});
+
+test('Генерация получает свой предел фазы: исполнитель и генератор вместе дольше runTimeoutMs, попытка принимается', async () => {
+  const f = fixture({
+    writer: { ...implement({ [DATA]: data(['apple', ...items]) }), sleepMs: 5000 },
+    environment: { GEN_SLEEP_MS: '5000' },
+    policy: (p) => (p.runTimeoutMs = 8000),
+  });
+  await runAll(f.ctx);
+  const work = f.work();
+  assert.equal(work.status, 'done', work.failure);
+  const timing = f.attempts()[0]!.timings!.find((t) => t.stage === 'generate:catalog')!;
+  assert.ok(Date.parse(timing.finishedAt!) - Date.parse(timing.startedAt) >= 5000);
 });
