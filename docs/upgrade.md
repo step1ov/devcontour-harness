@@ -978,26 +978,28 @@ until)` и метка документа `leaseRows: true`. Первая стр�
 перегенерируются.
 
 - `init --lead claude|codex`: ведущий — автор планов и контрактов. Без
-  `--lead` — из manifest, затем признак окружения (`CLAUDECODE=1`,
+  `--lead` — из manifest, затем из сохранённой политики (новый checkout без
+  `project.json`), затем признак окружения (`CLAUDECODE=1`,
   `CODEX_THREAD_ID`), затем `--writer`; иначе `NOT_READY` (`lead-unknown`).
   Молчаливого `--writer claude` по умолчанию больше нет: скрипт, который
   вызывал `init` без `--writer` вне сессии Claude Code, передаёт `--lead`.
 - `--writer` по умолчанию — ведущий. Reviewer плана и контракта выбирается
   для ведущего, reviewer кода — для writer.
-- `--review cross|same|auto` (умолчание `auto`): без CLI другого вендора (или
-  без входа в него) — тот же runtime с явным `vendor: same-vendor-allowed` и
+- `--review cross|same|auto` (умолчание `auto`): свой CLI есть, а CLI другого
+  вендора нет (или в нём явно нет входа) — тот же runtime с явным `vendor: same-vendor-allowed` и
   предупреждением `review-same-vendor` в `init`, `doctor` (`warnings`) и
   `report` (ограничение `review-same-vendor`). С двумя установленными CLI
-  сгенерированная политика байтово та же, что раньше.
+  сгенерированная политика байтово та же, что раньше; без CLI вовсе — `cross`
+  с предупреждениями `runtime-missing`.
 - `--model` — одна модель на writer и всех reviewers; с ревью двух вендоров —
   `INVALID_INPUT` (`model-cross-vendor`).
 - Manifest хранит `lead`, `review` и `model` (необязательные поля). Manifest
   прежнего формата читается: ведущий — его writer, ревью — `cross`; файл не
   переписывается, `init --plan` не даёт `content-differs`.
-- Writer больше не выводится из reviewer плана сохранённой политики. Политика
-  без manifest (новый checkout) продолжается по `--lead` / `--writer` или
-  признаку сессии; `content-differs` на `policy.json` — только когда политика
-  не назначает допустимого reviewer для этих решений.
+- Политика без manifest (новый checkout) продолжается по своим решениям:
+  ведущий — по правилу ревью плана, writer — по ролям или правилу ревью кода.
+  `content-differs` на `policy.json` — только когда политика не назначает
+  допустимого reviewer для решений (явных `--lead` / `--writer` или manifest).
 - Ответ `init` дополнен полями `lead`, `review`, `runtimes` (наличие CLI и
   вход по `claude auth status` / `codex login status`) и `warnings`; ответ
   `doctor` — необязательным `warnings`, а сообщение об отсутствующем

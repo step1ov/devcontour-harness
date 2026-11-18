@@ -56,11 +56,12 @@ Schema of input and response, and the byte limits. Read only.
 
 1. `$H init --repository <repo> --plan` writes nothing. The lead is you:
    pass `--lead claude` or `--lead codex` unless `data.lead` already names
-   you (`CLAUDECODE` / `CODEX_THREAD_ID`, or the saved manifest). The writer
-   defaults to the lead; `--review auto` (default) picks a reviewer of the
-   other vendor when its CLI is installed and signed in, otherwise the same
-   runtime with an explicit `same-vendor-allowed` and a
-   `review-same-vendor` warning — tell the user. Read `data.warnings`,
+   you (`CLAUDECODE` / `CODEX_THREAD_ID`, the saved manifest, or a
+   committed policy in a fresh checkout). The writer defaults to the lead;
+   `--review auto` (default) picks the same runtime with an explicit
+   `same-vendor-allowed` and a `review-same-vendor` warning only when your
+   own CLI works and the other vendor's is missing or signed out — tell the
+   user; otherwise a reviewer of the other vendor. Read `data.warnings`,
    `data.files`
    (`create` / `preserve` / `conflict`), `data.conflicts`,
    `data.toolchain.problems`, `data.facts` and `data.manifest.paths.state`.
