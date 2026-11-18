@@ -123,3 +123,63 @@ test('удержания claim = замороженные бюджеты с по
   );
   b.store.close();
 });
+
+test('кэш учёта вызовов: вложенная выдача видит незафиксированный расход, откат не оставляет фантомов', () => {
+  const budgets = { total: { usd: 0.01 }, onUnknown: 'stop' };
+  const totalBlocked = (b: Board) => b.engine.read((v) => v.work('w0')!.budgetBlock?.reason);
+  const spend = (id: string) =>
+    callOf(id, { workId: 'w0', groupId: 'g', startedAt: '2025-12-31T00:00:00.000Z' });
+  // Кэш прогрет; вложенная выдача после записи расхода во внешней транзакции.
+  const warm = historyBoard(0, { budgets });
+  frozen(() => warm.engine.claim('c1'));
+  assert.equal(totalBlocked(warm), undefined, 'без расхода — не держит');
+  frozen(() =>
+    warm.store.transact('task.retry', (tx) => {
+      tx.putLocal('usage', WORKSPACE_OWNER, 'call-uncommitted', spend('uncommitted'));
+      warm.engine.claim('c1');
+    }),
+  );
+  assert.match(totalBlocked(warm) ?? '', /Бюджет total исчерпан/, 'вложенная выдача видит расход');
+  warm.store.close();
+  // Кэш пуст; первая выдача — во внешней транзакции, которая затем откатывается.
+  const cold = historyBoard(0, { budgets });
+  assert.throws(() =>
+    frozen(() =>
+      cold.store.transact('task.retry', (tx) => {
+        tx.putLocal('usage', WORKSPACE_OWNER, 'call-rolled-back', spend('rolled-back'));
+        cold.engine.claim('c1');
+        throw new Error('откат');
+      }),
+    ),
+  );
+  frozen(() => cold.engine.claim('c1'));
+  const got = blocks(cold);
+  for (const r of got) assert.equal(r.written, r.expected, `после отката: ${r.id}`);
+  assert.equal(totalBlocked(cold), undefined, 'откаченный расход не держит');
+  cold.store.close();
+});
+
+test('pristine: только внешняя транзакция без записей', () => {
+  const b = historyBoard(0, { budgets: null });
+  b.store.transact('task.retry', (tx) => {
+    assert.equal(tx.pristine?.(), true, 'нетронутая внешняя');
+    b.store.transact('task.retry', (inner) => assert.equal(inner.pristine?.(), false, 'вложенная'));
+    tx.putLocal('usage', WORKSPACE_OWNER, 'call-x', callOf('x'));
+    assert.equal(tx.pristine?.(), false, 'после локальной записи');
+  });
+  b.store.transact('task.retry', (tx) => {
+    tx.emit({
+      type: 'work.held',
+      graphId: 'g',
+      workId: 'w0',
+      payload: { operation: 'x', reason: 'y', released: true },
+    });
+    assert.equal(tx.pristine?.(), false, 'после события');
+  });
+  b.store.transact('task.retry', (tx) => {
+    tx.putWork({ ...tx.work('w0')! });
+    assert.equal(tx.pristine?.(), false, 'после записи модели');
+  });
+  b.store.read((v) => assert.notEqual(v.pristine?.(), true, 'вид чтения'));
+  b.store.close();
+});

@@ -556,6 +556,12 @@ export class SqliteExecutionStore implements ExecutionStore {
             leaseUntil: a.leaseUntil,
           })),
       dataVersion: () => this.dataVersion(),
+      pristine: () =>
+        this.frame === frame &&
+        frame.depth === 1 &&
+        !frame.dirty &&
+        !frame.touched &&
+        frame.drafts.length === 0,
       renewLease: (
         kind: LeaseKind,
         id: string,

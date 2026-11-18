@@ -78,6 +78,7 @@ import {
   workBudgets,
   workBudgetsOf,
   type BudgetContext,
+  type BudgetStatus,
   type CallMeta,
   type RecordWork,
 } from './budget.ts';
@@ -923,13 +924,16 @@ export class Engine {
     }
     if (!ready.length) return;
     const c = this.budgetContext();
-    // Общее для всех готовых (записи вызовов, общий бюджет, бюджеты групп,
-    // попытки без учёта вызовов) — один раз на выдачу; ответ по поручению —
-    // тот же, что у `workBudgets`.
+    // Записи вызовов, попытки без учёта вызовов и поручения прежних записей —
+    // один раз на выдачу (и между выдачами, пока данные те же). Статусы — по
+    // поручению на свой момент, как у `workBudgets`: ответ тот же. Общий
+    // бюджет и бюджеты групп пересчитываются, только когда момент сменился.
     const usage = this.usageOf(tx);
-    const statuses = workBudgetsOf(c, tx, usage.records, Date.now(), usage);
+    let moment: { at: number; of: (workId: string) => BudgetStatus[] } | undefined;
     for (const w of ready) {
-      const blocking = blockingBudget(c, statuses(w.id));
+      const at = Date.now();
+      if (moment?.at !== at) moment = { at, of: workBudgetsOf(c, tx, usage.records, at, usage) };
+      const blocking = blockingBudget(c, moment.of(w.id));
       if (!blocking) {
         if (w.budgetBlock) tx.putWork({ ...w, budgetBlock: undefined });
         continue;
@@ -953,11 +957,12 @@ export class Engine {
   /**
    * Записи вызовов и попытки без учёта вызовов — по версии данных хранилища.
    * Пока версия та же, история не перечитывается: такт выдачи на простое
-   * иначе разбирал бы все прежние попытки и записи вызовов. Версия меняется
-   * каждой фиксацией с записями модели или локальными записями
-   * (`ExecutionView.dataVersion`), поэтому кэш верен только для чтения до
-   * записей своей транзакции: вызывается в начале выдачи, до них. Без
-   * `dataVersion` — каждый раз заново. Значения только для чтения.
+   * иначе разбирал бы все прежние попытки и записи вызовов. Кэш берётся и
+   * пополняется только в нетронутой внешней транзакции (`pristine`): её
+   * данные — ровно зафиксированные при этой `dataVersion`. Во вложенной или
+   * уже писавшей транзакции (её записи могут быть не зафиксированы или
+   * откатиться) и у хранилища без `dataVersion`/`pristine` — заново каждый
+   * раз. Значения только для чтения.
    */
   private usageMemo?: {
     version: number;
@@ -966,7 +971,7 @@ export class Engine {
     workOf: RecordWork;
   };
   private usageOf(tx: ExecutionView) {
-    const version = tx.dataVersion?.();
+    const version = tx.pristine?.() ? tx.dataVersion?.() : undefined;
     if (version !== undefined && this.usageMemo?.version === version) return this.usageMemo;
     const records = callRecords(tx);
     // Поручения прежних записей (по попытке) — сразу: кэш переживает этот
