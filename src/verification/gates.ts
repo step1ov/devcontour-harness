@@ -225,7 +225,7 @@ const compilerError =
  * предупреждение в одном потоке не должно закрывать ошибку в другом. Секреты
  * снимаются тем же redact, что и в логе; объём ограничен.
  */
-function diagnostic(stderr: string, stdout: string, redact?: (value: string) => string) {
+export function diagnostic(stderr: string, stdout: string, redact?: (value: string) => string) {
   // У каждого потока свой бюджет: общий лимит, заполняемый по очереди,
   // позволял нескольким длинным строкам одного потока вытеснить ошибку
   // другого. Redact — до обрезки, иначе префикс секрета остаётся.

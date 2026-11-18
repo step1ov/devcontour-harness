@@ -40,6 +40,7 @@ import {
   type EvidenceRecord,
   type ExecutionPolicy,
   type GatePolicy,
+  type GeneratorPolicy,
   type RuntimeAdapter,
   type RuntimeName,
   type ProbeServer,
@@ -169,6 +170,8 @@ import {
 import { TaskFailure, type FailureKind } from './failure.ts';
 import { activeOf, namesFailingCases, type Engine } from './engine.ts';
 import { prompt } from './prompt.ts';
+import { scopeViolations } from './scope.ts';
+import { generatorNote, runGenerators, selectGenerators } from '../verification/generators.ts';
 import {
   contractDocuments,
   orderCheckManifest,
@@ -280,9 +283,6 @@ const ALREADY_SATISFIED_REVIEW_NOTE =
 
 /** Порядок области gates — общий с проверкой на SHA вне попытки (`orderedScope`). */
 const ordered = orderedScope;
-
-const within = (path: string, prefixes: string[]) =>
-  prefixes.some((p) => p === '.' || path === p || path.startsWith(p.endsWith('/') ? p : p + '/'));
 
 /**
  * Исполнитель очереди. Один действующий controller; попытка проходит
@@ -978,6 +978,8 @@ export class Runner {
     range?: [string, string],
     /** Пустой результат допустим (возможное «приёмка уже выполнена»): вернуть true вместо отказа. */
     allowEmpty = false,
+    /** Выходы генераторов, исполненных controller на кандидате (`scopeViolations`). */
+    allowed: string[] = [],
   ): Promise<boolean> {
     const changed = (
       await (range
@@ -997,13 +999,14 @@ export class Runner {
       .read((v) => contractDocuments(work.order, v))
       .filter((c) => (c.repositoryId ?? work.order.repositoryId) === repo.id)
       .flatMap((c) => (c.artifacts ?? []).map((a) => a.path));
-    const protectedList = [
-      ...repo.protectedPaths,
-      ...repo.generatedPaths,
-      ...pinnedContext,
-      ...checkers,
-    ];
-    const forbidden = changed.filter((p) => within(p, protectedList));
+    const role = roleBinding(this.policy, work.order.role, work.order.repositoryId)?.writePaths;
+    const { forbidden, outside } = scopeViolations(changed, {
+      protected: [...repo.protectedPaths, ...repo.generatedPaths],
+      pinned: [...pinnedContext, ...checkers],
+      writeScope: work.order.writeScope,
+      ...(role ? { role } : {}),
+      allowed,
+    });
     if (forbidden.length)
       throw new TaskFailure(
         'scope-violation',
@@ -1037,10 +1040,6 @@ export class Runner {
         'Изменений нет: поручение отчиталось о выполнении пустым коммитом',
       );
     }
-    const role = roleBinding(this.policy, work.order.role, work.order.repositoryId)?.writePaths;
-    const outside = changed.filter(
-      (p) => !within(p, work.order.writeScope) || (role && !within(p, role)),
-    );
     if (outside.length)
       throw new TaskFailure(
         'scope-violation',
@@ -1093,6 +1092,42 @@ export class Runner {
   }
 
   /**
+   * Генераторы репозитория в дереве фазы (`runGenerators`): стадия
+   * `generate:<id>` (на integration — `integration-generate:<id>`), журналы и
+   * квитанция — в `<артефакты фазы>/generate`.
+   */
+  private async generate(
+    attempt: AttemptState,
+    generators: GeneratorPolicy[],
+    cwd: string,
+    mode: 'write' | 'verify',
+    phase: 'candidate' | 'integration',
+    run: {
+      execution: ReturnType<typeof executionEnvironment>;
+      signal: AbortSignal;
+      artifacts: string;
+    },
+  ) {
+    if (!generators.length) return [];
+    return runGenerators({
+      policy: this.policy,
+      cwd,
+      generators,
+      mode,
+      execution: run.execution,
+      signal: run.signal,
+      boundary: this.boundary(attempt.dependencies),
+      artifactDir: join(run.artifacts, phase, 'generate'),
+      timed: (id, fn) =>
+        this.timed(
+          attempt,
+          `${phase === 'integration' ? 'integration-generate' : 'generate'}:${id}`,
+          fn,
+        ),
+    });
+  }
+
+  /**
    * Кандидат предыдущей попытки вместо новой реализации. Движок уже сверил
    * основания; здесь проверяется сам коммит: ровно один поверх той же базы,
    * рабочее дерево чистое, область прежняя. Проверки и ревью затем идут
@@ -1104,7 +1139,12 @@ export class Runner {
     repo: Repo,
     cwd: string,
     base: string,
-    context?: ContextSnapshot,
+    context: ContextSnapshot | undefined,
+    run: {
+      execution: ReturnType<typeof executionEnvironment>;
+      signal: AbortSignal;
+      artifacts: string;
+    },
   ) {
     const sha = await git(cwd, 'rev-parse', 'HEAD');
     const parents = (await git(cwd, 'rev-list', '--parents', '-n', '1', sha)).split(' ').slice(1);
@@ -1115,7 +1155,22 @@ export class Runner {
       );
     if (await git(cwd, 'status', '--porcelain'))
       throw new TaskFailure('unknown', 'Рабочее дерево взятого кандидата не чистое');
-    await this.assertScope(work, repo, cwd, context, [base, sha]);
+    // Выходы генераторов взятого кандидата построены прежней попыткой:
+    // генератор исполняется заново и обязан их не изменить.
+    const changed = (await git(cwd, 'diff', '--no-renames', '--name-only', '-z', base, sha))
+      .split('\0')
+      .filter(Boolean);
+    const generators = selectGenerators(repo.generators ?? [], changed);
+    await this.generate(attempt, generators, cwd, 'verify', 'candidate', run);
+    await this.assertScope(
+      work,
+      repo,
+      cwd,
+      context,
+      [base, sha],
+      false,
+      generators.flatMap((g) => g.outputs),
+    );
     return sha;
   }
 
@@ -1578,12 +1633,14 @@ export class Runner {
                 );
               const sha = attempt.reusedFrom
                 ? await this.timed(attempt, 'implementation-reuse', () =>
-                    this.reuseCandidate(attempt, work, repo, cwd, base, context).then(
-                      async (reused) => {
-                        await this.carryAssumptions(attempt, cwd, base, reused);
-                        return reused;
-                      },
-                    ),
+                    this.reuseCandidate(attempt, work, repo, cwd, base, context, {
+                      execution,
+                      signal,
+                      artifacts,
+                    }).then(async (reused) => {
+                      await this.carryAssumptions(attempt, cwd, base, reused);
+                      return reused;
+                    }),
                   )
                 : await this.timed(attempt, 'implementation', async () => {
                     const dir = join(artifacts, 'implementation');
@@ -1630,6 +1687,7 @@ export class Runner {
                             ...this.notes(attempt, false),
                             ...(await this.hostNotes(work, attempt, false)),
                             ...(dependencies ? [writerDependenciesNote(dependencies)] : []),
+                            ...(repo.generators?.length ? [generatorNote(repo.generators)!] : []),
                             ALREADY_SATISFIED_WRITER_NOTE,
                           ],
                           // Открытые находки ревью с выданными ID — из истории
@@ -1699,11 +1757,6 @@ export class Runner {
                     )
                       .split('\0')
                       .filter(Boolean);
-                    // Пустой результат — не отказ сразу: приёмку могла уже
-                    // выполнить зависимость. Кандидат — сама база (без
-                    // коммита); gates задачи на ней и подтверждение reviewer
-                    // (`alreadySatisfied`) решают, принять ли его.
-                    const empty = await this.assertScope(work, repo, cwd, context, undefined, true);
                     // Вопрос, допущения и незавершённость — по закреплённой
                     // в попытке политике вопросов.
                     // Вопрос и допущения — текст writer: маскируются полным
@@ -1728,14 +1781,39 @@ export class Runner {
                         ...inherited,
                       ].slice(0, INPUT_LIMITS.assumptions),
                     };
+                    const evaluation = evaluateInput(
+                      decided,
+                      attempt.inputPolicy ?? inputPolicyOf(this.policy),
+                      changed,
+                    );
+                    // Генераторы — только для готовой работы: черновик с
+                    // вопросом или незавершённостью не перегенерируется (его
+                    // продолжит повтор). Их выходы — не правка исполнителя:
+                    // область к ним не применяется.
+                    const generators = selectGenerators(repo.generators ?? [], changed);
+                    if (generators.length && evaluation.decision.kind === 'continue')
+                      await this.generate(attempt, generators, cwd, 'write', 'candidate', {
+                        execution,
+                        signal,
+                        artifacts,
+                      });
+                    // Пустой результат — не отказ сразу: приёмку могла уже
+                    // выполнить зависимость. Кандидат — сама база (без
+                    // коммита); gates задачи на ней и подтверждение reviewer
+                    // (`alreadySatisfied`) решают, принять ли его.
+                    const empty = await this.assertScope(
+                      work,
+                      repo,
+                      cwd,
+                      context,
+                      undefined,
+                      true,
+                      generators.flatMap((g) => g.outputs),
+                    );
                     this.decideInput(
                       attempt,
                       decided,
-                      evaluateInput(
-                        decided,
-                        attempt.inputPolicy ?? inputPolicyOf(this.policy),
-                        changed,
-                      ),
+                      evaluation,
                       response.callId,
                       normalized?.issues,
                     );
@@ -3796,6 +3874,31 @@ export class Runner {
           attempt.baseSha,
         );
         prepared(execution);
+        // Выходы генераторов кандидата построены на его базе: на слиянии с
+        // текущей они обязаны остаться прежними, иначе повтор от неё.
+        if (attempt.candidateSha !== attempt.baseSha && repo.generators?.length) {
+          const changed = (
+            await git(
+              cwd,
+              'diff',
+              '--no-renames',
+              '--name-only',
+              '-z',
+              attempt.baseSha!,
+              attempt.candidateSha!,
+            )
+          )
+            .split('\0')
+            .filter(Boolean);
+          await this.generate(
+            attempt,
+            selectGenerators(repo.generators, changed),
+            cwd,
+            'verify',
+            'integration',
+            { execution, signal, artifacts },
+          );
+        }
         const budget = { recheck: true };
         const applicable = await this.applicableGates(
           attempt,
