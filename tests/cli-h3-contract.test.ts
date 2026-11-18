@@ -321,6 +321,10 @@ test('H3-01: прежние команды и схемы их данных не 
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.notApplicable;
       delete rest.gateBasis;
+      // Перенос evidence кандидата (`integrationReuse`) рядом с `notApplicable`:
+      // счёт взятых gates попытки и ссылка записи evidence.
+      delete rest.reused;
+      delete rest.reusedEvidence;
       // `when` — только у схемы gate задачи (у gate совместной проверки его нет).
       if ('command' in rest && 'timeoutMs' in rest && !('repositoryId' in rest)) delete rest.when;
       v = rest;
@@ -335,6 +339,9 @@ test('H3-01: прежние команды и схемы их данных не 
     if (k === 'properties' && v && typeof v === 'object' && 'recheck' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.recheck;
+      // PASS интеграции, взятый из кандидата (`integrationReuse`): поле
+      // события `attempt.gate`.
+      delete rest.reusedFrom;
       return rest;
     }
     // Аддитивное поле gate задачи — сохраняемые `artifacts` (у gate совместной
@@ -423,6 +430,10 @@ test('H3-01: прежние команды и схемы их данных не 
     JSON.stringify(data.doctor).includes('"checkouts"'),
     'doctor объявляет корень рабочих деревьев',
   );
+  // Хеш H2 вырезает поля переноса evidence кандидата: объявление держит эта проверка.
+  assert.ok(JSON.stringify(data).includes('"reused"'), 'gates.reused попытки');
+  assert.ok(JSON.stringify(data).includes('"reusedFrom"'), 'attempt.gate.reusedFrom');
+  assert.ok(JSON.stringify(data).includes('"reusedEvidence"'), 'evidence.reusedEvidence');
   // Хеш H2 вырезает пробу портов и предупреждения doctor: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.doctor).includes('"ports"'), 'doctor: проба портов');
   assert.ok(JSON.stringify(data.doctor).includes('"warnings"'), 'doctor: предупреждения');

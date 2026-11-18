@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   STAGE_NAME_LIMIT,
   roleBinding,
+  integrationReuseProblem,
   executionDigest,
   HarnessError,
   WORKSPACE_OWNER,
@@ -109,6 +110,7 @@ import {
   unappliedInputs,
 } from './input-requests.ts';
 import { pinnedCorpus, propertyProofProblem } from '../verification/acceptance.ts';
+import { reusedEvidenceProblem } from '../verification/integration-reuse.ts';
 import {
   jointImpact,
   jointPolicyDigest,
@@ -279,6 +281,8 @@ export class Engine {
   constructor(options: EngineOptions) {
     this.host = options.host;
     this.policy = options.policy;
+    const reuse = integrationReuseProblem(this.policy, this.host);
+    if (reuse) throw new HarnessError('INVALID_INPUT', reuse);
     this.version = options.version ?? HARNESS_VERSION;
     this.now = options.now ?? Date.now;
     this.id = options.id ?? randomUUID;
@@ -1926,6 +1930,32 @@ export class Engine {
                   });
         if (problem) throw new HarnessError('INVALID_INPUT', problem);
       }
+      // Запись, взятая из кандидата (`integrationReuse`), — только под
+      // политикой, которая это включила, и по правилу переноса; деревья
+      // сверил controller, записавший её (и сверяет recovery).
+      if (evidence.reusedEvidence) {
+        const problem =
+          this.policy.integrationReuse !== 'identical-tree'
+            ? 'Запись, взятая из кандидата, без integrationReuse в политике'
+            : !a.candidateSha || !a.integrationSha
+              ? 'Запись, взятая из кандидата, до интеграции'
+              : evidence.recheck !== undefined
+                ? 'Запись, взятая из кандидата, не бывает повтором'
+                : reusedEvidenceProblem({
+                    record: {
+                      ...evidence,
+                      id: 'new',
+                      ...(a.checks ? { checks: a.checks.effective } : {}),
+                    },
+                    evidence: a.evidence,
+                    candidateSha: a.candidateSha,
+                    resultSha: a.integrationSha,
+                    proof: proofGates(w.order, contractDocuments(w.order, tx)),
+                    gates: this.repository(a.repositoryId).gates,
+                    trees: null,
+                  });
+        if (problem) throw new HarnessError('INVALID_INPUT', problem);
+      }
       // Повтор ссылается на провал того же gate этой попытки на том же SHA, и
       // попытка повторяет не больше одного провала на фазу.
       if (evidence.recheck) {
@@ -1986,6 +2016,7 @@ export class Engine {
             ...(record.consumer ? { consumer: record.consumer } : {}),
             ...(record.kind === 'not-applicable' ? { notApplicable: true as const } : {}),
             ...(record.recheck ? { recheck: record.recheck } : {}),
+            ...(record.reusedEvidence ? { reusedFrom: record.reusedEvidence.evidenceId } : {}),
           },
         });
       return record;
@@ -2060,7 +2091,25 @@ export class Engine {
           const record =
             decisive(['test'], phase, shaOf(phase), gate) ??
             decisive(['not-applicable'], phase, shaOf(phase), gate);
-          if (record?.kind === 'test' && record.passed) continue;
+          if (record?.kind === 'test' && record.passed && !record.reusedEvidence) continue;
+          // Взятая из кандидата запись — PASS только по правилу переноса под
+          // политикой, которая его включила (и после recovery).
+          if (record?.kind === 'test' && record.passed) {
+            const reused =
+              this.policy.integrationReuse !== 'identical-tree'
+                ? 'политика не включает integrationReuse'
+                : reusedEvidenceProblem({
+                    record,
+                    evidence: a.evidence,
+                    candidateSha: a.candidateSha,
+                    resultSha: sha,
+                    proof: named,
+                    gates: repoGates,
+                    trees: null,
+                  });
+            if (!reused) continue;
+            throw new HarnessError('GATE_FAILED', `Нет PASS: ${phase}/${gate}: ${reused}`);
+          }
           const problem =
             record?.kind === 'not-applicable'
               ? notApplicableProblem({

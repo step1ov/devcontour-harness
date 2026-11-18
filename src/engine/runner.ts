@@ -134,7 +134,8 @@ import {
   type ChangeOutcome,
   type LivenessChange,
 } from './stall-sweep.ts';
-import { orderedScope } from '../verification/gate-scope.ts';
+import { gatePrerequisites, orderedScope } from '../verification/gate-scope.ts';
+import { REUSED_LABEL } from '../verification/integration-reuse.ts';
 import {
   changedPaths,
   gateBasis,
@@ -727,6 +728,20 @@ export class Runner {
           a.integrationSha,
           repo.targetRef,
         );
+        // Записи, взятые из кандидата, — PASS только при том же дереве: его
+        // сверяет Git, а не сохранённое утверждение записи.
+        const reused = a.evidence.filter((e) => e.reusedEvidence);
+        if (reused.length) {
+          const path = this.repoPath(repo);
+          const trees = [
+            await git(path, 'rev-parse', a.integrationSha + '^{tree}'),
+            await git(path, 'rev-parse', a.candidateSha + '^{tree}'),
+          ];
+          if (trees[0] !== trees[1] || reused.some((e) => e.reusedEvidence!.tree !== trees[0]))
+            throw new Error(
+              'Дерево интеграции не совпадает с деревом кандидата; записи, взятые из кандидата, не принимаются',
+            );
+        }
         const adopted = this.engine.adopt(a.id, this.owner);
         this.engine.finish(a.id, adopted.token, a.integrationSha);
       } catch (error) {
@@ -3844,6 +3859,101 @@ export class Runner {
       }
   }
 
+  /**
+   * Что интеграция берёт из кандидата (`integrationReuse: 'identical-tree'`):
+   * undefined — ничего (поле не задано, кандидат без изменений, дерево
+   * слияния отличается от дерева кандидата, политика или версия движка
+   * сменились с выдачи, база провайдера сдвинулась). Иначе — общее дерево и
+   * решающие PASS-записи кандидата тех gates, которые переносятся: не
+   * доказательство, без `artifacts`, без сведений о свойствах, и ни один
+   * исполняемый gate не опирается на них как на предпосылку (её вывод — вход
+   * исполняемого, а дерево интеграции новое). Проверка генераторов при
+   * переносе не нужна: дерево — дерево кандидата, его выходы уже сверены.
+   */
+  private async integrationReuse(
+    attempt: AttemptState,
+    work: WorkState,
+    repo: Repo,
+    gates: GatePolicy[],
+    cwd: string,
+    sha: string,
+  ): Promise<{ tree: string; gates: Set<string>; records: EvidenceRecord[] } | undefined> {
+    if (this.policy.integrationReuse !== 'identical-tree') return undefined;
+    const candidate = attempt.candidateSha!;
+    if (candidate === attempt.baseSha) return undefined;
+    const tree = await git(cwd, 'rev-parse', sha + '^{tree}');
+    if (tree !== (await git(cwd, 'rev-parse', candidate + '^{tree}'))) return undefined;
+    const { policy, current, evidence, proof } = this.engine.read((v) => {
+      const a = v.attempt(attempt.id)!;
+      return {
+        policy: this.engine.host.basis.policyDigest(work, v),
+        current: a,
+        evidence: a.evidence,
+        proof: proofGates(work.order, contractDocuments(work.order, v)),
+      };
+    });
+    if (current.policyDigest !== policy) return undefined;
+    if ((current.engineVersion ?? this.engine.version) !== this.engine.version) return undefined;
+    // Снимок провайдеров попытки против их текущих голов: сдвиг — исполнение.
+    const snapshots = current.dependencies ?? [];
+    const heads = (await dependencyFreshness(this.repositories(), snapshots)).map((f) => ({
+      repositoryId: f.repositoryId,
+      sha: f.head,
+    }));
+    if (providerMovement(repo.dependsOn, snapshots, heads)) return undefined;
+    const checks = current.checks?.effective;
+    const sources = new Map<string, EvidenceRecord>();
+    for (const gate of gates) {
+      if (proof.has(gate.id) || gate.artifacts?.length) continue;
+      const decisive = evidence.findLast(
+        (e) =>
+          e.kind === 'test' &&
+          e.phase === 'candidate' &&
+          e.sha === candidate &&
+          e.gate === gate.id &&
+          e.consumer === undefined &&
+          e.checks === checks,
+      );
+      if (decisive?.passed && !decisive.property && !decisive.artifactFiles)
+        sources.set(gate.id, decisive);
+    }
+    // Предпосылки исполняемых gates исполняются с ними (до неподвижной точки).
+    const runs = (id: string) => !sources.has(id);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const running = gates.filter((g) => runs(g.id));
+      const needed = new Set(running.flatMap((g) => gatePrerequisites(repo.gates, g.id)));
+      for (const id of needed) if (sources.delete(id)) changed = true;
+    }
+    if (!sources.size) return undefined;
+    return {
+      tree,
+      gates: new Set(sources.keys()),
+      records: gates.flatMap((g) => (sources.has(g.id) ? [sources.get(g.id)!] : [])),
+    };
+  }
+
+  /** Запись интеграции, взятая из решающей записи кандидата при том же дереве. */
+  private recordReused(attempt: AttemptState, sha: string, source: EvidenceRecord, tree: string) {
+    this.engine.evidence(attempt.id, attempt.token, {
+      kind: 'test',
+      phase: 'integration',
+      sha,
+      gate: source.gate,
+      passed: true,
+      command: source.command,
+      exitCode: source.exitCode,
+      log: source.log,
+      digest: source.digest,
+      summary: `PASS ${REUSED_LABEL}: дерево integration-коммита ${tree.slice(0, 12)} совпадает с деревом кандидата ${source.sha.slice(0, 12)}; запись кандидата ${source.id}`,
+      ...(source.tests ? { tests: source.tests } : {}),
+      ...(source.testsTruncated ? { testsTruncated: true } : {}),
+      ...(source.gateBasis ? { gateBasis: source.gateBasis } : {}),
+      reusedEvidence: { evidenceId: source.id, phase: 'candidate', sha: source.sha, tree },
+    });
+  }
+
   private async integrate(
     attempt: AttemptState,
     work: WorkState,
@@ -3897,79 +4007,121 @@ export class Runner {
     }
     this.engine.phase(attempt.id, attempt.token, 'integrating', { integrationSha: sha });
     const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
-    const execution = this.environment(attempt, 'integration', cwd);
-    const prepared = preparation.guard(
-      this.policy.isolation.mode === 'os',
-      cwd,
-      preparesTree(repo.lifecycle ?? this.policy.lifecycle, repo.prepare, repo.dependencyStore),
-    );
-    await withEnvironment(
-      repo.lifecycle ?? this.policy.lifecycle,
-      cwd,
-      join(artifacts, 'integration', 'environment'),
-      execution,
-      signal,
-      async () => {
-        await this.dependencyStore(
-          attempt,
-          repo,
-          cwd,
-          execution,
-          signal,
-          join(artifacts, 'integration'),
-        );
-        await runSteps(
-          repo.prepare,
-          cwd,
-          join(artifacts, 'integration', 'prepare'),
-          execution,
-          signal,
-          attempt.baseSha,
-        );
-        prepared(execution);
-        const budget = { recheck: true };
-        const applicable = await this.applicableGates(
+    // Выходы генераторов кандидата построены на его базе: на слиянии с
+    // текущей они обязаны остаться прежними (после gates установки:
+    // генератору нужны зависимости проекта), иначе повтор от неё.
+    const generators =
+      attempt.candidateSha !== attempt.baseSha && repo.generators?.length
+        ? selectGenerators(
+            repo.generators,
+            await diffPaths(cwd, attempt.baseSha!, attempt.candidateSha!),
+          )
+        : [];
+    // Перенос evidence кандидата (`integrationReuse`): при совпавшем дереве
+    // прошедшие на кандидате gates записываются взятыми из него, остальные
+    // (и их предпосылки) исполняются как прежде.
+    const reuse = await this.integrationReuse(attempt, work, repo, gates, cwd, sha);
+    if (reuse)
+      for (const source of reuse.records) this.recordReused(attempt, sha, source, reuse.tree);
+    const run = reuse ? gates.filter((g) => !reuse.gates.has(g.id)) : gates;
+    const verify = reuse ? [] : generators;
+    const checks = async (
+      applicable: GatePolicy[],
+      execution: ReturnType<typeof executionEnvironment>,
+    ) => {
+      const budget = { recheck: true };
+      await this.verifyGenerated(
+        attempt,
+        applicable,
+        run,
+        verify,
+        cwd,
+        'integration',
+        { execution, signal, artifacts },
+        (gate) =>
+          this.integrationGate(attempt, cwd, sha, gate, artifacts, signal, execution, budget),
+      );
+    };
+    const finishing = async () => {
+      await this.consumers(attempt, cwd, sha, artifacts, signal);
+      this.requirements(attempt, work, repoPath, cwd, sha, 'integration');
+      rearm();
+      // База ревью интеграции — target, на который сделано слияние (первый
+      // родитель integration SHA), а не база попытки: работа, принятая в
+      // target после начала попытки, в diff этого поручения не входит.
+      await this.review(attempt, work, cwd, base, sha, 'integration', artifacts, signal, context);
+    };
+    // Все gates взяты из кандидата (или оставшиеся неприменимы) и
+    // потребителей нет: окружение интеграции — lifecycle, хранилище
+    // зависимостей, prepare, проверка генераторов — не нужно, его выходы те
+    // же, что у кандидата.
+    const early = reuse
+      ? await this.applicableGates(
           attempt,
           work,
           repo,
-          gates,
+          run,
           'integration',
           cwd,
           sha,
           attempt.baseSha!,
-        );
-        // Выходы генераторов кандидата построены на его базе: на слиянии с
-        // текущей они обязаны остаться прежними (после gates установки:
-        // генератору нужны зависимости проекта), иначе повтор от неё.
-        const verified =
-          attempt.candidateSha !== attempt.baseSha && repo.generators?.length
-            ? selectGenerators(
-                repo.generators,
-                await diffPaths(cwd, attempt.baseSha!, attempt.candidateSha!),
-              )
-            : [];
-        await this.verifyGenerated(
-          attempt,
-          applicable,
-          gates,
-          verified,
-          cwd,
-          'integration',
-          { execution, signal, artifacts },
-          (gate) =>
-            this.integrationGate(attempt, cwd, sha, gate, artifacts, signal, execution, budget),
-        );
-        await this.consumers(attempt, cwd, sha, artifacts, signal);
-        this.requirements(attempt, work, repoPath, cwd, sha, 'integration');
-        rearm();
-        // База ревью интеграции — target, на который сделано слияние (первый
-        // родитель integration SHA), а не база попытки: работа, принятая в
-        // target после начала попытки, в diff этого поручения не входит.
-        await this.review(attempt, work, cwd, base, sha, 'integration', artifacts, signal, context);
-      },
-      (stage, action) => this.timed(attempt, 'integration-environment:' + stage, action),
-      (message) => this.portWarning(attempt.id, message),
-    );
+        )
+      : undefined;
+    // Проверка потребителя снимает провайдера с дерева интеграции и ждёт его
+    // подготовки (хранилище, prepare) и сервисов lifecycle: с потребителями
+    // окружение поднимается всегда.
+    if (early && !early.length && !attempt.consumers?.length) await finishing();
+    else {
+      const execution = this.environment(attempt, 'integration', cwd);
+      const prepared = preparation.guard(
+        this.policy.isolation.mode === 'os',
+        cwd,
+        preparesTree(repo.lifecycle ?? this.policy.lifecycle, repo.prepare, repo.dependencyStore),
+      );
+      await withEnvironment(
+        repo.lifecycle ?? this.policy.lifecycle,
+        cwd,
+        join(artifacts, 'integration', 'environment'),
+        execution,
+        signal,
+        async () => {
+          await this.dependencyStore(
+            attempt,
+            repo,
+            cwd,
+            execution,
+            signal,
+            join(artifacts, 'integration'),
+          );
+          await runSteps(
+            repo.prepare,
+            cwd,
+            join(artifacts, 'integration', 'prepare'),
+            execution,
+            signal,
+            attempt.baseSha,
+          );
+          prepared(execution);
+          await checks(
+            early ??
+              (await this.applicableGates(
+                attempt,
+                work,
+                repo,
+                gates,
+                'integration',
+                cwd,
+                sha,
+                attempt.baseSha!,
+              )),
+            execution,
+          );
+          await finishing();
+        },
+        (stage, action) => this.timed(attempt, 'integration-environment:' + stage, action),
+        (message) => this.portWarning(attempt.id, message),
+      );
+    }
     if (
       (await git(cwd, 'rev-parse', 'HEAD')) !== sha ||
       (await git(cwd, 'status', '--porcelain', '--untracked-files=no'))

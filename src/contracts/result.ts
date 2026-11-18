@@ -56,6 +56,23 @@ export const gateApplicabilitySchema = z.strictObject({
 export type GateApplicability = z.infer<typeof gateApplicabilitySchema>;
 
 /**
+ * Запись интеграции взята из кандидата (`integrationReuse: 'identical-tree'`):
+ * дерево integration-коммита совпало с деревом кандидата, и gate, прошедший
+ * на кандидате, на интеграции не исполнялся. `evidenceId` — ID записи
+ * кандидата того же gate и попытки, `sha` — SHA кандидата, `tree` — общее
+ * дерево обоих коммитов. Получатель засчитывает такую запись PASS интеграции
+ * только по своим деревьям (`ReceiverContext.trees`). Не путать с
+ * `AttemptState.reusedFrom` — повтором кандидата прежней попытки.
+ */
+export const reusedEvidenceSchema = z.strictObject({
+  evidenceId: z.string().min(1).max(200),
+  phase: z.literal('candidate'),
+  sha: gitShaSchema,
+  tree: gitShaSchema,
+});
+export type ReusedEvidence = z.infer<typeof reusedEvidenceSchema>;
+
+/**
  * Ссылка на доказательство. Само evidence (логи, отчёты) хранит
  * ExecutionStore; результат несёт digest и SHA, по которым его сверяют.
  */
@@ -107,6 +124,8 @@ export const evidenceRefSchema = z.strictObject({
     .optional(),
   /** Только у записи `not-applicable`: правило и diff, по которым gate не исполнялся. */
   notApplicable: gateApplicabilitySchema.optional(),
+  /** Запись интеграции взята из кандидата при совпавшем дереве (`reusedEvidenceSchema`). */
+  reusedEvidence: reusedEvidenceSchema.optional(),
   reviewer: z
     .strictObject({
       runtime: runtimeNameSchema,

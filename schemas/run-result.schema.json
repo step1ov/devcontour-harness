@@ -571,6 +571,35 @@
                 ],
                 "additionalProperties": false
               },
+              "reusedEvidence": {
+                "type": "object",
+                "properties": {
+                  "evidenceId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "phase": {
+                    "type": "string",
+                    "const": "candidate"
+                  },
+                  "sha": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}([a-f0-9]{24})?$"
+                  },
+                  "tree": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}([a-f0-9]{24})?$"
+                  }
+                },
+                "required": [
+                  "evidenceId",
+                  "phase",
+                  "sha",
+                  "tree"
+                ],
+                "additionalProperties": false
+              },
               "reviewer": {
                 "type": "object",
                 "properties": {
@@ -1393,6 +1422,35 @@
                   "count",
                   "files",
                   "pathsDigest"
+                ],
+                "additionalProperties": false
+              },
+              "reusedEvidence": {
+                "type": "object",
+                "properties": {
+                  "evidenceId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "phase": {
+                    "type": "string",
+                    "const": "candidate"
+                  },
+                  "sha": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}([a-f0-9]{24})?$"
+                  },
+                  "tree": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}([a-f0-9]{24})?$"
+                  }
+                },
+                "required": [
+                  "evidenceId",
+                  "phase",
+                  "sha",
+                  "tree"
                 ],
                 "additionalProperties": false
               },

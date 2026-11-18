@@ -250,6 +250,11 @@ export function reportBlocks(r: ValueReport): Block[] {
   list([
     `Environment failures cost ${formatDuration(e.neutral.machineMs)} of machine time and ${money(e.neutral.costBound, e.neutral.knownUsd)} known spend; blocked before work (not counted as an attempt): ${e.neutral.blocked}; queue stops caused by the environment: ${e.neutral.runtimePauses}.`,
     `Gate rechecks (integration failures after a green candidate, candidate timeouts under host load): ${e.rechecks.flaky} flaky (false rejection avoided), ${e.rechecks.confirmed} confirmed.`,
+    ...(e.reused
+      ? [
+          `Integration gates taken from the candidate (взято из кандидата: merge tree identical to the candidate tree): ${e.reused}.`,
+        ]
+      : []),
     e.causes
       ? `Environment sub-causes${e.causes.undiagnosed ? ` (${e.causes.undiagnosed} earlier ${e.causes.undiagnosed === 1 ? 'failure' : 'failures'} without a recorded sub-cause)` : ''}: ${e.causes.rows.length ? e.causes.rows.map((x) => `${causeLabels[x.cause] ?? x.cause} ${x.count}${x.counted ? ` (${x.counted} counted as an attempt)` : ''}`).join(', ') : 'none in the window'}.`
       : 'Environment sub-causes: not recorded yet.',

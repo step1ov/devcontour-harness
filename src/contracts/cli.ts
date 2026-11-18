@@ -943,6 +943,8 @@ export const attemptViewSchema = z.strictObject({
     remaining: z.number().int().min(0),
     /** Не исполнены по `when.paths` (нет поля — таких нет). */
     notApplicable: z.number().int().positive().optional(),
+    /** Из `passed`: взяты из кандидата при совпавшем дереве (нет поля — таких нет). */
+    reused: z.number().int().positive().optional(),
   }),
   /** Живость по обходу controller; `idleMs` — только у `quiet` и `stalled`. */
   liveness: z
