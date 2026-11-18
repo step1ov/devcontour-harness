@@ -102,7 +102,9 @@ export interface PhaseBudget {
  * умолчанию; условные `when` — тоже, худший случай); gates одной области
  * исполняются по одному, поэтому их пределы складываются (действующие, с
  * `gateTimeoutFloorMs`). Кандидат и интеграция допускают по одному повтору
- * непрошедшего gate (`recheck`): в сумму входит один раз самый долгий gate.
+ * непрошедшего gate (`recheck`): в сумму входит один раз самый долгий gate;
+ * интеграция — ещё раз: повтор, упавший только кодом выхода исполнителя
+ * тестов, получает ещё один запуск.
  * Самая длинная цепочка `dependsOn` — наименьшая область, которой нужен самый
  * дорогой gate. Не учтены: teardown (идёт в сроке ревью), хранилище
  * зависимостей (оно само ограничено долей остатка фазы), `dependencyBuild`
@@ -169,11 +171,20 @@ export function phaseBudgets(policy: ExecutionPolicy): PhaseBudget[] {
       { what: 'повтор gate', ms: recheck },
       { what: 'генераторы', ms: generators },
     ];
-    // Без окружения и prepare сумма интеграции та же: одна запись на обе фазы.
+    // Интеграция допускает ещё один запуск повторённого gate, если повтор
+    // упал только кодом выхода исполнителя тестов (`crashedRecheck`).
+    const integrationChecks = [
+      checks[0]!,
+      checks[1]!,
+      { what: 'повтор gate после падения исполнителя тестов', ms: recheck },
+      checks[2]!,
+    ];
+    // Без окружения и prepare одна запись на обе фазы — с худшим случаем
+    // интеграции.
     push(
       'verification',
       [...path, 'gates'],
-      checks,
+      environment + prepare ? checks : integrationChecks,
       environment + prepare
         ? 'попытка может истечь до конца проверок'
         : 'попытка может истечь до конца проверок кандидата и интеграции',
@@ -187,7 +198,7 @@ export function phaseBudgets(policy: ExecutionPolicy): PhaseBudget[] {
         [
           { what: 'lifecycle setup/ready', ms: environment },
           { what: 'prepare', ms: prepare },
-          ...checks,
+          ...integrationChecks,
         ],
         'интеграция может истечь до конца проверок',
         repo,

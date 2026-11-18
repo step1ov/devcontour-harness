@@ -60,12 +60,13 @@ test('срок фазы: сумма пределов больше runTimeoutMs �
   });
   assert.deepEqual(policyIssues(policy), [], 'срок фазы не делает политику невалидной');
   const warnings = timeBudgetWarnings(policy);
-  // gates 18 + один повтор самого долгого gate (recheck) 10.
+  // gates 18 + один повтор самого долгого gate (recheck) 10; интеграция —
+  // ещё запуск повтора после падения исполнителя тестов 10.
   assert.deepEqual(
     warnings.map((w) => [w.phase, w.totalMs, w.limitMs]),
     [
       ['verification', 28 * MIN, 25 * MIN],
-      ['integration', 34 * MIN, 25 * MIN],
+      ['integration', 44 * MIN, 25 * MIN],
     ],
   );
   const integration = warnings[1]!;
@@ -74,10 +75,11 @@ test('срок фазы: сумма пределов больше runTimeoutMs �
     { what: 'prepare', ms: 3 * MIN },
     { what: 'gates', ms: 18 * MIN },
     { what: 'повтор gate', ms: 10 * MIN },
+    { what: 'повтор gate после падения исполнителя тестов', ms: 10 * MIN },
   ]);
   assert.match(
     integration.message,
-    /^app, фаза integration: сумма пределов lifecycle setup\/ready 3 мин \+ prepare 3 мин \+ gates 18 мин \+ повтор gate 10 мин \(34 мин\) больше runTimeoutMs \(25 мин\): интеграция может истечь до конца проверок; /,
+    /^app, фаза integration: сумма пределов lifecycle setup\/ready 3 мин \+ prepare 3 мин \+ gates 18 мин \+ повтор gate 10 мин \+ повтор gate после падения исполнителя тестов 10 мин \(44 мин\) больше runTimeoutMs \(25 мин\): интеграция может истечь до конца проверок; /,
   );
   assert.doesNotMatch(integration.message, /на SHA/);
   // Gates независимы: самая длинная цепочка — один unit (10 мин).
@@ -87,13 +89,25 @@ test('срок фазы: сумма пределов больше runTimeoutMs �
 });
 
 test('срок фазы: в пределах runTimeoutMs — предупреждений нет', () => {
-  const policy = policyWith([gate('unit', 5), gate('e2e', 5)], 20, (repo) => {
+  const policy = policyWith([gate('unit', 5), gate('e2e', 5)], 25, (repo) => {
     repo.prepare = [{ id: 'build', command: ['true'], timeoutMs: 4 * MIN }];
     repo.generators = [
       { id: 'api', command: ['true'], inputs: ['api/'], outputs: ['gen/'], timeoutMs: MIN },
     ];
   });
-  // integration: 4 + 10 + 5 + 1 = 20 — ровно срок.
+  // integration: 4 + 10 + 5 + 5 + 1 = 25 — ровно срок.
+  assert.deepEqual(timeBudgetWarnings(policy), []);
+  // Кандидат — без запуска после падения исполнителя: 4 + 10 + 5 + 1 = 20.
+  const candidate = policyWith([gate('unit', 5), gate('e2e', 5)], 20, (repo) => {
+    repo.prepare = [{ id: 'build', command: ['true'], timeoutMs: 4 * MIN }];
+    repo.generators = [
+      { id: 'api', command: ['true'], inputs: ['api/'], outputs: ['gen/'], timeoutMs: MIN },
+    ];
+  });
+  assert.deepEqual(
+    timeBudgetWarnings(candidate).map((w) => w.phase),
+    ['integration'],
+  );
   assert.deepEqual(timeBudgetWarnings(policy), []);
 });
 
@@ -104,8 +118,8 @@ test('срок фазы: условный gate (when) и нижняя грани
   );
   assert.deepEqual(
     timeBudgetWarnings(conditional).map((w) => w.totalMs),
-    [17 * MIN],
-    'when — худший случай: 5 + 6 + повтор 6',
+    [23 * MIN],
+    'when — худший случай: 5 + 6 + повтор 6 + запуск после падения исполнителя 6',
   );
   const floored = policyWith([gate('unit', 1), gate('e2e', 1)], 12, (_, p) => {
     p.gateTimeoutFloorMs = 5 * MIN;
@@ -114,10 +128,11 @@ test('срок фазы: условный gate (when) и нижняя грани
     timeBudgetWarnings(floored).map((w) => [w.totalMs, w.parts]),
     [
       [
-        15 * MIN,
+        20 * MIN,
         [
           { what: 'gates', ms: 10 * MIN },
           { what: 'повтор gate', ms: 5 * MIN },
+          { what: 'повтор gate после падения исполнителя тестов', ms: 5 * MIN },
         ],
       ],
     ],
@@ -154,11 +169,12 @@ test('срок фазы: цепочка dependsOn — gate с замыкание
     p.gateTimeoutFloorMs = 5 * MIN;
   });
   assert.equal(gateChain(floored.repositories[0]!.gates, 'unit', floored).ms, 16 * MIN);
-  // Полная область: 24 + повтор 9 = 33 мин > 20; цепочка e2e (21) + повтор — тоже нет.
+  // Полная область: 24 + повтор 9 + запуск после падения исполнителя 9 = 42 мин > 20;
+  // цепочка e2e (21) + повторы — тоже нет.
   const tight = policyWith(gates, 20);
   const [verification] = timeBudgetWarnings(tight);
   assert.equal(verification?.phase, 'verification');
-  assert.equal(verification?.totalMs, 33 * MIN);
+  assert.equal(verification?.totalMs, 42 * MIN);
   assert.match(verification.message, /install → build → lint → e2e, 21 мин\) не укладывается/);
 });
 
@@ -190,7 +206,7 @@ test('срок фазы: генераторы, установка зависим
       ['implementation', 11],
       ['generation', 11],
       ['verification', 24],
-      ['integration', 29],
+      ['integration', 35],
       ['joint', 11],
     ],
   );
@@ -199,8 +215,8 @@ test('срок фазы: генераторы, установка зависим
     warnings[1]!.message,
     'app, фаза generation: предел генераторы 11 мин больше runTimeoutMs (10 мин): генерация может истечь до конца',
   );
-  // Наибольшая сумма 29 мин × 1.25 = 36.25 → 40 мин.
-  assert.equal(requiredRunTimeoutMs(policy), 40 * MIN);
+  // Наибольшая сумма 35 мин × 1.25 = 43.75 → 45 мин.
+  assert.equal(requiredRunTimeoutMs(policy), 45 * MIN);
   const off = policyWith(
     [check('install', 6, { command: ['npm', 'ci'] }), gate('unit', 1)],
     10,
@@ -238,7 +254,7 @@ test('init: политика каждого встроенного профил�
   assert.ok(explicit.length < ids.length, 'профилям, которым хватало умолчания, поле не пишется');
 });
 
-test('init: со слоем lean срок фазы — наибольший из срока слоя и требуемого пределами шагов', () => {
+test('init: со слоем lean срок фазы — не меньше 30 мин слоя и не меньше срока init без слоя; больше — требуемый с запасом', () => {
   const ids = readdirSync(new URL('../profiles/', import.meta.url))
     .filter((f) => f.endsWith('.json'))
     .map((f) => f.slice(0, -5));
@@ -247,30 +263,28 @@ test('init: со слоем lean срок фазы — наибольший из
     const profile = resolveProfile(id, { layers: ['lean'] });
     const generated = generatePolicy({ profile, writer: 'claude' });
     const policy = executionPolicySchema.parse(generated.input);
+    const plain = executionPolicySchema.parse(
+      generatePolicy({ profile: resolveProfile(id), writer: 'claude' }).input,
+    );
     assert.deepEqual(timeBudgetWarnings(policy), [], id);
-    // Срок слоя (30 мин) не уменьшается выводом; больше он — только когда
-    // срока слоя пределам шагов не хватало, и тогда это требуемый срок.
+    // Срок слоя (30 мин) — нижняя граница: требуемый пределами шагов с
+    // запасом больше — он, даже если сроку слоя хватало суммы без запаса.
     assert.equal(profile.runTimeoutMs, 30 * MIN);
-    assert.ok(policy.runTimeoutMs >= profile.runTimeoutMs, id);
-    if (policy.runTimeoutMs > profile.runTimeoutMs) {
-      const layerOnly = executionPolicySchema.parse({
-        ...generated.input,
-        runTimeoutMs: profile.runTimeoutMs,
-      });
-      assert.ok(timeBudgetWarnings(layerOnly).length, id + ': срока слоя не хватало');
-      assert.equal(policy.runTimeoutMs, requiredRunTimeoutMs(layerOnly), id);
-      raised.push(id);
-    }
+    assert.equal(policy.runTimeoutMs, Math.max(30 * MIN, requiredRunTimeoutMs(policy)), id);
+    // Слой никогда не даёт срока меньше, чем init без слоя.
+    assert.ok(policy.runTimeoutMs >= plain.runTimeoutMs, id);
+    if (policy.runTimeoutMs > profile.runTimeoutMs) raised.push(id);
   }
-  // Профилям, которым хватало 30 мин слоя, срок слоя и остаётся.
+  // Профилям, которым хватает 30 мин с запасом, срок слоя и остаётся.
   assert.ok(raised.length < ids.length, raised.join(', '));
+  assert.ok(raised.includes('npm-ci') && raised.includes('pnpm-frozen'), raised.join(', '));
 });
 
 test('doctor --policy называет превышение срока фазы в warnings, не в problems', async () => {
   const over = policyWith([gate('unit', 10), gate('e2e', 8)], 15);
   const report = await doctor(over, {});
   assert.equal(report.warnings?.length, 1);
-  assert.match(report.warnings[0]!, /\(28 мин\) больше runTimeoutMs \(15 мин\)/);
+  assert.match(report.warnings[0]!, /\(38 мин\) больше runTimeoutMs \(15 мин\)/);
   assert.ok(!report.problems.some((p) => /runTimeoutMs/.test(p)));
   assert.deepEqual((await doctor(policyWith([gate('unit', 1)], 15), {})).warnings, []);
   assert.equal((await doctor(undefined, {})).warnings, undefined, 'без политики поля нет');

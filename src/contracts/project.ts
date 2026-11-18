@@ -40,6 +40,27 @@ export const projectManifestSchema = z.strictObject({
       .optional(),
   }),
   /**
+   * Что `harness lean` изменил в политике при включении слоя: поле, прежнее
+   * значение (нет `previous` — поля не было) и записанное значение; репозиторий,
+   * которому добавлено `dependencyStore`. По записи выключение возвращает
+   * политику точно. Нет поля — слой не включали этой командой (например,
+   * `init --lean`): выключение выводит прежние значения из профиля без слоя.
+   */
+  lean: z
+    .strictObject({
+      policy: z
+        .array(
+          z.strictObject({
+            field: z.enum(['concurrency', 'runTimeoutMs', 'gateTimeoutFloorMs']),
+            previous: z.number().int().positive().optional(),
+            applied: z.number().int().positive(),
+          }),
+        )
+        .max(3),
+      dependencyStore: z.strictObject({ repository: idSchema }).optional(),
+    })
+    .optional(),
+  /**
    * Ведущий проекта: runtime, который составляет планы и ведёт сессию
    * (`review-plan --author`). Нет поля — manifest прежнего формата: ведущий
    * выводится из writer.

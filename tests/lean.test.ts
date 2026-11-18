@@ -167,7 +167,10 @@ test('lean: политика из профиля без слоя не меняе
     );
     assert.equal(lean.concurrency, 1, ref);
     assert.equal(lean.gateTimeoutFloorMs, 240_000, ref);
-    assert.equal(lean.runTimeoutMs, 1_800_000, ref);
+    // Срок слоя (30 мин) — нижняя граница: вывод профиля без слоя больше, и
+    // слой его не уменьшает.
+    assert.equal(lean.runTimeoutMs, Math.max(1_800_000, parsed.runTimeoutMs), ref);
+    assert.equal(lean.runTimeoutMs, 2_100_000, ref);
     assert.notEqual(policyDigest(lean), policyDigest(parsed), ref);
   }
 });
@@ -208,17 +211,34 @@ test('init --lean: pnpm-репозиторий получает dependencyStore,
   assert.deepEqual(again.manifest.profile.layers, ['lean']);
 });
 
-test('lean: время попытки покрывает все gates с поднятой границей (next-product, react-vite-admin)', () => {
-  for (const ref of ['next-product', 'react-vite-admin', 'npm-ci', 'pnpm-frozen']) {
-    const policy = executionPolicySchema.parse(
-      generatePolicy({ profile: resolveProfile(ref, { layers: ['lean'] }), writer: 'claude' })
-        .input,
-    );
+test('lean: время попытки покрывает все gates с поднятой границей; не меньше 30 мин и не меньше срока init без слоя', () => {
+  const expected: Record<string, number> = {
+    'next-product': 1_800_000,
+    'react-vite-admin': 1_800_000,
+    'npm-ci': 2_100_000,
+    'pnpm-frozen': 2_100_000,
+    'mobile-maestro': 3_000_000,
+  };
+  for (const [ref, runTimeoutMs] of Object.entries(expected)) {
+    const generated = (layers?: string[]) =>
+      executionPolicySchema.parse(
+        generatePolicy({
+          profile: resolveProfile(ref, layers ? { layers } : {}),
+          writer: 'claude',
+        }).input,
+      );
+    const policy = generated(['lean']);
+    const plain = generated();
     const gates = policy.repositories[0]!.gates;
     const sum = gates.reduce((total, gate) => total + gateTimeoutMs(gate, policy), 0);
     assert.ok(gates.length > 0, ref);
     assert.ok(sum <= policy.runTimeoutMs, `${ref}: ${sum} > ${policy.runTimeoutMs}`);
-    assert.equal(policy.runTimeoutMs, 1_800_000, ref);
+    // Слой держит не меньше 30 мин; вывод из пределов шагов с запасом больше —
+    // он, и слой никогда не даёт срока меньше, чем init без слоя.
+    assert.ok(policy.runTimeoutMs >= 1_800_000, ref);
+    assert.ok(policy.runTimeoutMs >= plain.runTimeoutMs, ref);
+    assert.equal(policy.runTimeoutMs, Math.max(1_800_000, requiredRunTimeoutMs(policy)), ref);
+    assert.equal(policy.runTimeoutMs, runTimeoutMs, ref);
   }
 });
 

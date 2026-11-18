@@ -503,6 +503,49 @@ export const cliCommands = {
     ],
     refusals: ['PATH_CONFLICT', 'CONTROLLER_BUSY', 'NOT_READY'],
   },
+  lean: {
+    description:
+      'Включить или выключить слой lean (слабая машина) в подготовленном проекте: поля политики (concurrency, runTimeoutMs, gateTimeoutFloorMs, dependencyStore для pnpm) и profile.layers manifest; прежние значения записываются в manifest, выключение возвращает их точно',
+    writes: true,
+    idempotency:
+      'Повтор с тем же направлением ничего не пишет (changed: false); прерванное переключение дописывает недостающее; файлы, изменённые между чтением и записью, — REVISION_CONFLICT без записи',
+    args: [
+      {
+        name: '--repository',
+        value: 'dir',
+        required: true,
+        description:
+          'Корень Git-репозитория проекта с .harness/project.json и .harness/policy.json',
+      },
+      {
+        name: '--state',
+        value: 'dir',
+        required: false,
+        description:
+          'Каталог состояния для проверки идущего run (роль controller, попытки, совместные проверки); по умолчанию — paths.state manifest',
+      },
+      {
+        name: '--off',
+        value: 'flag',
+        required: false,
+        description:
+          'Выключить слой: вернуть значения, записанные при включении, иначе — профиля без слоя',
+      },
+      {
+        name: '--plan',
+        value: 'flag',
+        required: false,
+        description: 'Только изменения полей, без записи (exit 3 при проблемах)',
+      },
+      {
+        name: '--human',
+        value: 'flag',
+        required: false,
+        description: 'Текст для человека вместо JSON',
+      },
+    ],
+    refusals: ['NOT_READY', 'CONTROLLER_BUSY', 'PATH_CONFLICT', 'REVISION_CONFLICT'],
+  },
   explain: {
     description:
       'Объяснить остановки: код, причина, фаза, кто действует, допустимый следующий шаг и evidence; без повторов, вызовов моделей и изменений состояния',
@@ -1277,7 +1320,8 @@ export const doctorDataSchema = z.strictObject({
    * что автор (`review-same-vendor: …`); сумма пределов шагов
    * одной фазы больше `runTimeoutMs` (`timeBudgetWarnings`); советы о ресурсах
    * машины — `DEPENDENCY_STORE_RECOMMENDED`, `LOW_RESOURCES`,
-   * `DIGEST_THREADS_INVALID` (`resourceWarnings`).
+   * `DIGEST_THREADS_INVALID` (`resourceWarnings`); расхождение manifest
+   * проекта рядом с политикой и её полей по слою lean — `LEAN_MISMATCH`.
    */
   warnings: z.array(z.string()).optional(),
 });
@@ -1314,6 +1358,11 @@ export const gatesDataSchema = z.strictObject({
   ),
   /** Каталог логов и артефактов проверки. */
   logs: z.string(),
+  /**
+   * Предупреждения пробы портов ресурсов: порт на всех адресах держит чужой
+   * процесс, loopback свободен (например, AirPlay Receiver на macOS).
+   */
+  warnings: z.array(z.string()).optional(),
 });
 
 export const profileDataSchema = z.strictObject({
@@ -1597,6 +1646,57 @@ export const initDataSchema = z.strictObject({
   ),
 });
 
+/**
+ * `lean`: включение или выключение слоя `lean` в подготовленном проекте —
+ * изменения полей политики и manifest (план или применённые).
+ */
+export const leanDataSchema = z.strictObject({
+  mode: z.enum(['plan', 'apply']),
+  layer: z.literal('lean'),
+  /** Слой включён до вызова (`profile.layers` manifest). */
+  enabledBefore: z.boolean(),
+  /** Слой включён после вызова (`apply`) или после применения плана (`plan`). */
+  enabled: z.boolean(),
+  /** Есть изменения файлов: в плане — будут, в `apply` — записаны. */
+  changed: z.boolean(),
+  root: z.string(),
+  policyPath: z.string(),
+  manifestPath: z.string(),
+  /**
+   * Изменения полей: файл, путь поля, значение до и после (нет `before` —
+   * поля не было, нет `after` — поле удаляется).
+   */
+  changes: z.array(
+    z.strictObject({
+      file: z.enum(['policy', 'manifest']),
+      field: z.string(),
+      before: z.unknown().optional(),
+      after: z.unknown().optional(),
+    }),
+  ),
+  /** Пояснения: явные значения, которые слой заменил, расхождения, переформатирование. */
+  notes: z.array(z.string()),
+  /**
+   * Почему изменение не применяется: идёт run (`CONTROLLER_BUSY`) или поле
+   * изменено вручную после включения (`PATH_CONFLICT`). В плане — данные и
+   * exit 3; без `--plan` — отказ с тем же кодом до записи.
+   */
+  problems: z.array(
+    z.strictObject({
+      code: z.enum(['CONTROLLER_BUSY', 'PATH_CONFLICT']),
+      field: z.string().optional(),
+      message: z.string(),
+    }),
+  ),
+  /** `policyDigest` политики до и после: согласования прежней политики устаревают. */
+  policyDigest: z.strictObject({ before: digestSchema, after: digestSchema }),
+  /** Графы, согласованные под прежней политикой: после смены — `APPROVAL_STALE`, нужен review-plan. */
+  staleApprovals: z.array(idSchema),
+  next: z.array(
+    z.strictObject({ command: z.string(), args: z.array(z.string()), why: z.string() }),
+  ),
+});
+
 /** `explain`: объяснения остановок. */
 export const explainDataSchema = z.strictObject({ diagnoses: z.array(stopDiagnosisSchema) });
 
@@ -1674,6 +1774,7 @@ export const cliDataSchemas = {
   doctor: doctorDataSchema,
   init: initDataSchema,
   explain: explainDataSchema,
+  lean: leanDataSchema,
   report: reportDataSchema,
   handoff: handoffPackSchema,
   'plan-request': planRequestDataSchema,

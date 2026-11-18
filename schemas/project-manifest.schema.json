@@ -107,6 +107,60 @@
       ],
       "additionalProperties": false
     },
+    "lean": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "maxItems": 3,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "field": {
+                "type": "string",
+                "enum": [
+                  "concurrency",
+                  "runTimeoutMs",
+                  "gateTimeoutFloorMs"
+                ]
+              },
+              "previous": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "applied": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "field",
+              "applied"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "dependencyStore": {
+          "type": "object",
+          "properties": {
+            "repository": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,80}$"
+            }
+          },
+          "required": [
+            "repository"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "policy"
+      ],
+      "additionalProperties": false
+    },
     "lead": {
       "type": "string",
       "enum": [

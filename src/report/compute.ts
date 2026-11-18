@@ -1095,8 +1095,7 @@ export function valueReport(
         };
       })()
     : null;
-  const rechecks = { flaky: 0, confirmed: 0 };
-  for (const { e } of windowEvidence) if (e.recheck) rechecks[e.recheck.outcome] += 1;
+  const rechecks = recheckCounts(windowEvidence.map(({ e }) => e));
   const reused = windowEvidence.filter(({ e }) => e.reusedEvidence).length;
 
   const sentBackCount = { defect: 0, setup: 0, unknown: 0, no: 0 };
@@ -1782,4 +1781,17 @@ function limitationsOf(
     `Weeks before the newest ${r.weeks.rows.filter((x) => x.kind === 'week').length} active weeks are folded into one row.`,
   );
   return out;
+}
+
+/**
+ * Повторы gates по исходу. Повтор после падения исполнителя тестов получает
+ * ещё один запуск с той же ссылкой `of`: исход повтора записи — последний из
+ * них, и записанный провал считается один раз.
+ */
+export function recheckCounts(evidence: readonly Pick<EvidenceRecord, 'recheck'>[]) {
+  const outcome = new Map<string, 'flaky' | 'confirmed'>();
+  for (const e of evidence) if (e.recheck) outcome.set(e.recheck.of, e.recheck.outcome);
+  const counts = { flaky: 0, confirmed: 0 };
+  for (const o of outcome.values()) counts[o] += 1;
+  return counts;
 }

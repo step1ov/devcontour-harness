@@ -359,3 +359,87 @@ test('gates: инициализированный каталог состоян�
   assert.deepEqual(snapshot(), before, 'binding.json и state.sqlite не тронуты');
   assert.deepEqual(readdirSync(state).sort(), ['binding.json', 'gates-at', 'state.sqlite']);
 });
+
+test('gates: предупреждение пробы портов (порт на всех адресах держит чужой процесс) — в data.warnings и в таблице', async () => {
+  const { createServer } = await import('node:net');
+  const listen = (port: number, host: string) =>
+    new Promise<import('node:net').Server>((resolve, reject) => {
+      const server = createServer();
+      server.once('error', reject);
+      server.listen({ host, port }, () => resolve(server));
+    });
+  const close = (server: import('node:net').Server) =>
+    new Promise<void>((resolve) => server.close(() => resolve()));
+  const probe = await listen(0, '127.0.0.1');
+  const port = (probe.address() as { port: number }).port;
+  await close(probe);
+  // Чужой процесс: держит порт на 0.0.0.0.
+  const foreign = spawn(
+    process.execPath,
+    [
+      '-e',
+      `require('net').createServer().listen(${port}, '0.0.0.0', () => console.log('up')); setTimeout(() => {}, 120000);`,
+    ],
+    { stdio: ['ignore', 'pipe', 'inherit'] },
+  );
+  try {
+    await new Promise<void>((resolve, reject) => {
+      foreign.once('exit', (code) => reject(new Error('держатель порта завершился: ' + code)));
+      foreign.stdout.on('data', (d: Buffer) => d.toString().includes('up') && resolve());
+    });
+    // Linux не даёт привязать loopback рядом с 0.0.0.0: там это отказ, не предупреждение.
+    const beside = await listen(port, '127.0.0.1').then(close, () => false);
+    if (beside === false) return;
+
+    const { root, state, policyPath } = fixture();
+    const policy = JSON.parse(readFileSync(policyPath, 'utf8')) as {
+      resources?: unknown[];
+      repositories: { gates: { id: string; resources?: string[] }[] }[];
+    };
+    policy.resources = [{ id: 'web-port', kind: 'port', value: String(port) }];
+    policy.repositories[0]!.gates.find((g) => g.id === 'unit')!.resources = ['web-port'];
+    writeFileSync(policyPath, JSON.stringify(policy, null, 2));
+    // База ресурсов машины — под временным HOME, не общая.
+    const home = join(root, 'home');
+    mkdirSync(home);
+    const run = (...extra: string[]) =>
+      spawnSync(
+        process.execPath,
+        [
+          '--import',
+          import.meta.resolve('tsx'),
+          cli,
+          'gates',
+          '--state',
+          state,
+          '--policy',
+          policyPath,
+          '--sha',
+          'HEAD',
+          '--gate',
+          'unit',
+          ...extra,
+        ],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          env: { ...process.env, NODE_OPTIONS: '', HOME: home },
+          timeout: 120_000,
+        },
+      );
+    const json = run();
+    assert.equal(json.status, 0, json.stderr);
+    const data = cliDataSchemas.gates.parse((JSON.parse(json.stdout) as { data: unknown }).data);
+    assert.equal(data.passed, true);
+    assert.equal(data.warnings?.length, 1, JSON.stringify(data.warnings));
+    assert.match(
+      data.warnings[0]!,
+      new RegExp(`^Порт ${port} \\(ресурс web-port\\) на всех адресах`),
+    );
+    const human = run('--human');
+    assert.equal(human.status, 0, human.stderr);
+    assert.match(human.stdout, new RegExp(`\\nпредупреждение: Порт ${port} \\(ресурс web-port\\)`));
+  } finally {
+    foreign.kill();
+  }
+});
