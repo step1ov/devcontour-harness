@@ -1174,6 +1174,12 @@ export const doctorDataSchema = z.strictObject({
   /** Диагностика toolchain репозиториев политики; есть, когда задана политика. */
   toolchains: z.array(toolchainReportSchema).optional(),
   problems: z.array(z.string()),
+  /**
+   * Предупреждения политики, не делающие среду негодной: сумма пределов шагов
+   * одной фазы больше `runTimeoutMs` (`timeBudgetWarnings`). Есть, когда
+   * задана политика.
+   */
+  warnings: z.array(z.string()).optional(),
 });
 
 export const profileDataSchema = z.strictObject({

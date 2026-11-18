@@ -13,6 +13,7 @@ import { chooseCheckoutRoot } from '../environment/checkout-root.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import type { ToolchainReport } from '../toolchains/inspect.ts';
+import { timeBudgetWarnings } from '../verification/time-budget.ts';
 
 /** Диагностика toolchain политики (см. `inspectPolicy` в `./toolchains`). */
 export type ToolchainInspect = (
@@ -47,7 +48,9 @@ function usedRuntimes(policy: ExecutionPolicy) {
  * каталога состояния. Каталог состояния открывается только если он есть;
  * для совместимого состояния называются версии движка, встреченные в нём
  * (роль controller и попытки), — перед обновлением и откатом видно, какая
- * версия последней писала состояние.
+ * версия последней писала состояние. С политикой — предупреждения
+ * (`warnings`): сумма пределов шагов фазы больше `runTimeoutMs`
+ * (`timeBudgetWarnings`); они не попадают в `problems`.
  */
 export async function doctor(
   policy: ExecutionPolicy | undefined,
@@ -156,5 +159,7 @@ export async function doctor(
     ...(checkoutRoot ? { checkouts: checkoutRoot } : {}),
     ...(toolchains ? { toolchains } : {}),
     problems,
+    // Предупреждения не делают среду негодной: пределы — худший случай.
+    ...(policy ? { warnings: timeBudgetWarnings(policy).map((w) => w.message) } : {}),
   };
 }

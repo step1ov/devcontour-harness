@@ -188,6 +188,14 @@ export {
   orderedScope,
   standaloneScope,
 } from './verification/gate-scope.ts';
+export {
+  gateChain,
+  longestGateChain,
+  timeBudgetWarnings,
+  type BudgetPhase,
+  type GateChain,
+  type TimeBudgetWarning,
+} from './verification/time-budget.ts';
 export { requirementProof, uncoveredGates, unprovenReason } from './verification/proof.ts';
 export {
   changedPaths,
