@@ -796,10 +796,12 @@ test('Таймаут gate: нагрузка — меньшая из снятых
 });
 
 test('Таймаут gate после записанного провала JUnit — не GateTimeout: найденный провал не повторяется и назван', async () => {
+  // Предел — время, за которое gate успевает записать отчёт: под нагрузкой
+  // полного набора запуск node занимал больше 1 с, и отчёта до таймаута не было.
   const r = repo({ 'src/a.js': 'a\n' });
   const { failure, evidence } = await withLoads([800], () =>
     gate(r.dir, r.head(), {
-      timeoutMs: 1000,
+      timeoutMs: 5000,
       command: nodeGate(
         `${junit('<testcase classname="c" name="breaks"><failure message="expected 1"/></testcase>')};${hang}`,
       ),
@@ -813,7 +815,7 @@ test('Таймаут gate после записанного провала JUnit
   // Зелёный частичный отчёт повтору не мешает.
   const green = await withLoads([800], () =>
     gate(r.dir, r.head(), {
-      timeoutMs: 1000,
+      timeoutMs: 5000,
       command: nodeGate(`${junit('<testcase classname="c" name="ok"/>')};${hang}`),
     }),
   );
@@ -839,7 +841,7 @@ test('Таймаут генеративного gate с контрпримеро
           gate: {
             id: 'prop',
             kind: 'check',
-            timeoutMs: 1000,
+            timeoutMs: 5000,
             property: {},
             command: nodeGate(
               `require('fs').writeFileSync(process.env.DEVCONTOUR_PROPERTY_REPORT, ${JSON.stringify(JSON.stringify(report))});${hang}`,
