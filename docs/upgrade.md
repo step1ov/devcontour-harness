@@ -971,7 +971,7 @@ until)` и метка документа `leaseRows: true`. Первая стр�
 Подробности — [contracts](contracts.md#executionpolicy). Строгая схема прежних
 версий поле не принимает: при откате уберите его из политики.
 
-### Следующий выпуск
+### 0.1.0-alpha.50: ведущий и ревью в `init`, проба портов, срок фаз, `harness gates`, слой `lean`, `integrationReuse`
 
 Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`,
 `manifestVersion: 1`); существующие политики не перегенерируются. Политики

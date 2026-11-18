@@ -149,7 +149,7 @@ const ADDITIVE_ARGS = new Set([
   'init--model',
 ]);
 /**
- * Текст `--writer` init в H2. Следующий выпуск меняет умолчание: writer —
+ * Текст `--writer` init в H2. 0.1.0-alpha.50 меняет умолчание: writer —
  * ведущий (`--lead`), а не `claude`; аргумент и его значения прежние.
  */
 const H2_INIT_WRITER = 'Runtime writer: claude (по умолчанию) или codex; reviewer — другой вендор';
@@ -321,7 +321,7 @@ test('H3-01: прежние команды и схемы их данных не 
   // Порядок ключей cliDataSchemas H2 — без capabilities; аддитивные значения
   // перечней убираются, остальное — байты H2.
   const h2 = JSON.stringify(data, (k, v: unknown) => {
-    // Аддитивные поля ответа init (следующий выпуск): ведущий, решение о
+    // Аддитивные поля ответа init (0.1.0-alpha.50): ведущий, решение о
     // ревью, наличие CLI и предупреждения — обязательные, поэтому и в `required`.
     if (v && typeof v === 'object' && !Array.isArray(v) && 'properties' in v) {
       const o = v as { properties: Record<string, unknown>; required?: string[] };
@@ -332,7 +332,7 @@ test('H3-01: прежние команды и схемы их данных не 
         return { ...o, properties, required: o.required?.filter((r) => !added.includes(r)) };
       }
     }
-    // Аддитивные поля manifest проекта (следующий выпуск): lead, review, model.
+    // Аддитивные поля manifest проекта (0.1.0-alpha.50): lead, review, model.
     if (k === 'properties' && v && typeof v === 'object' && 'projectId' in v && 'lead' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.lead;
