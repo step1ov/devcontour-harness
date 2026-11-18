@@ -4,7 +4,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, realpathSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -41,6 +48,11 @@ fs.mkdirSync('apps/mobile/src/generated', { recursive: true });
 for (const [path, text] of Object.entries(render(items))) fs.writeFileSync(path, text);
 if (process.argv.includes('--outside')) fs.writeFileSync('apps/mobile/extra.txt', 'x');
 if (process.argv.includes('--fail')) { console.error('generator broke'); process.exit(3); }
+if (process.argv.includes('--map')) fs.writeFileSync('apps/mobile/src/generated/catalog.ts.map', '{}');
+if (process.argv.includes('--link')) fs.symlinkSync('../../../admin/data/catalog.json', 'apps/mobile/src/generated/data.json');
+if (process.argv.includes('--needs-dep')) require(process.cwd() + '/node_modules/dep');
+if (process.argv.includes('--commit'))
+  require('child_process').execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'sneak']);
 if (process.env.GEN_MARK) fs.appendFileSync(process.env.GEN_MARK, 'ran\\n');
 `;
 const check = `
@@ -87,6 +99,8 @@ function fixture(options: {
   maxAttempts?: number;
   runner?: Parameters<typeof setup>[0]['runner'];
   environment?: Record<string, string>;
+  policy?: (p: any) => void;
+  graph?: (g: any) => void;
 }) {
   const ctx = setup({
     scenario: { writer: options.writer, reviewer: options.reviewer ?? approve() },
@@ -95,6 +109,7 @@ function fixture(options: {
       'apps/admin/README.md': 'admin\n',
       'apps/mobile/scripts/gen.js': gen,
       'test/check.js': check,
+      '.gitignore': 'node_modules/\n*.map\n',
       ...outputs(items),
     },
     policy: (p: any) => {
@@ -107,8 +122,12 @@ function fixture(options: {
       p.roles.developer.writePaths = ['apps/admin'];
       p.maxAttempts = options.maxAttempts ?? 1;
       if (options.environment) Object.assign(p.environment.values, options.environment);
+      options.policy?.(p);
     },
-    graph: (g: any) => (g.orders[0].writeScope = ['apps/admin']),
+    graph: (g: any) => {
+      g.orders[0].writeScope = ['apps/admin'];
+      options.graph?.(g);
+    },
     ...(options.runner ? { runner: options.runner } : {}),
   });
   const attempts = () => ctx.engine.read((v) => v.attempts('add-greeting'));
@@ -236,7 +255,7 @@ test('Генератор, изменивший путь вне своих вых
   assert.equal(work.failureKind, 'scope-violation', work.failure);
   assert.match(
     work.failure!,
-    /generator catalog changed paths outside its outputs: apps\/mobile\/extra\.txt/,
+    /Генератор catalog изменил пути вне своих выходов: apps\/mobile\/extra\.txt/,
   );
   assert.equal(target(f.ctx), before);
 });
@@ -252,7 +271,7 @@ test('Упавший генератор — отказ класса gate с вы
   const work = f.work();
   assert.equal(work.status, 'failed');
   assert.equal(work.failureKind, 'gate', work.failure);
-  assert.match(work.failure!, /generator catalog failed: exit=3: .*generator broke/);
+  assert.match(work.failure!, /Генератор catalog не выполнился: exit=3: .*generator broke/);
   const timing = f.attempts()[0]!.timings!.find((t) => t.stage === 'generate:catalog');
   assert.equal(timing?.outcome, 'failed');
 });
@@ -326,7 +345,7 @@ test('Integration на сдвинутой базе с устаревшим вы�
   assert.ok(moved);
   const first = f.attempts()[0]!;
   assert.equal(first.failureKind, 'merge', first.error);
-  assert.match(first.error!, /generator catalog: the committed output is stale on this base/);
+  assert.match(first.error!, /Генератор catalog: закоммиченный выход устарел на этой базе/);
   assert.ok(first.timings!.some((t) => t.stage === 'integration-generate:catalog'));
   assert.equal(target(f.ctx), moved, 'чужой коммит остался вершиной');
   // Класс merge — повтор по таблице восстановления (его выдаёт цикл ведущего).
@@ -450,4 +469,203 @@ test('Схема и согласованность generators: пустые ко
   assert.deepEqual(messages([generator()], { protectedPaths: ['apps/mobile/'] }), [
     'repositories.0.generators.0.outputs.0: Выход генератора catalog (apps/mobile/src/generated) пересекает защищённый путь apps/mobile/',
   ]);
+});
+
+const genWith = (...flags: string[]) =>
+  generator({ command: [process.execPath, 'apps/mobile/scripts/gen.js', ...flags] });
+
+test('Вопрос исполнителя: генератор не исполняется, ручная правка выхода остаётся правкой исполнителя — scope-violation', async () => {
+  const mark = join(realpathSync(mkdtempSync(join(tmpdir(), 'gen-mark-'))), 'ran');
+  const f = fixture({
+    writer: {
+      files: {
+        [DATA]: data(['apple', ...items]),
+        [`${OUT}/count.ts`]: 'export const count = 0;\n',
+      },
+      result: {
+        completed: false,
+        summary: 'Нужен ответ',
+        discoveries: [],
+        inputRequest: {
+          question: 'Сортировать каталог?',
+          options: [
+            { id: 'yes', label: 'Да', consequence: null },
+            { id: 'no', label: 'Нет', consequence: 'меняет порядок' },
+          ],
+          recommended: 'yes',
+          severity: 9,
+          rationale: 'Порядок виден пользователю',
+          affects: [],
+        },
+        assumptions: [],
+      },
+    },
+    environment: { GEN_MARK: mark },
+  });
+  await runAll(f.ctx);
+  const work = f.work();
+  assert.equal(work.status, 'failed');
+  assert.equal(work.failureKind, 'scope-violation', work.failure);
+  assert.match(work.failure!, /apps\/mobile\/src\/generated\/count\.ts/);
+  assert.ok(!existsSync(mark), 'генератор не запускался');
+  assert.ok(!f.stages().some((s) => s.includes('generate')), f.stages().join(','));
+  // Без ручной правки выхода тот же вопрос — needs-input, а не нарушение области.
+  const g = fixture({
+    writer: {
+      files: { [DATA]: data(['apple', ...items]) },
+      result: {
+        completed: false,
+        summary: 'Нужен ответ',
+        discoveries: [],
+        inputRequest: {
+          question: 'Сортировать каталог?',
+          options: [
+            { id: 'yes', label: 'Да', consequence: null },
+            { id: 'no', label: 'Нет', consequence: 'меняет порядок' },
+          ],
+          recommended: 'yes',
+          severity: 9,
+          rationale: 'Порядок виден пользователю',
+          affects: [],
+        },
+        assumptions: [],
+      },
+    },
+  });
+  await runAll(g.ctx);
+  assert.equal(g.work().failureKind, 'needs-input', g.work().failure);
+  assert.ok(!g.stages().some((s) => s.includes('generate')));
+});
+
+test('Генератору нужны зависимости проекта: на взятом кандидате и integration он исполняется после gate установки', async () => {
+  const bin = realpathSync(mkdtempSync(join(tmpdir(), 'gen-npm-')));
+  const npm = join(bin, 'npm');
+  writeFileSync(
+    npm,
+    `#!${process.execPath}
+const fs = require('fs');
+fs.mkdirSync('node_modules/dep', { recursive: true });
+fs.writeFileSync('node_modules/dep/index.js', 'module.exports = 1;\\n');
+`,
+  );
+  chmodSync(npm, 0o755);
+  const crash = {
+    exit: 1,
+    stderr: 'ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed',
+  };
+  const f = fixture({
+    writer: implement({ [DATA]: data(['apple', ...items]) }),
+    reviewer: [crash, approve()],
+    maxAttempts: 5,
+    generators: [genWith('--needs-dep')],
+    policy: (p) => {
+      const repo = p.repositories[0];
+      // Установка — после test gate в порядке политики: проверка ждёт её.
+      repo.gates = [
+        { ...repo.gates[0], dependsOn: ['deps'] },
+        { id: 'deps', kind: 'check', command: [npm, 'ci'] },
+      ];
+    },
+    graph: (g) => (g.orders[0].gates = ['unit', 'deps']),
+  });
+  await runAll(f.ctx);
+  const first = f.attempts()[0]!;
+  assert.equal(first.failureKind, 'environment', first.error);
+  assert.ok(first.timings!.some((t) => t.stage === 'generate:catalog'));
+  f.ctx.engine.retry('add-greeting');
+  f.ctx.engine.resume();
+  await f.ctx.runner.drain();
+  const second = f.attempts()[1]!;
+  assert.equal(second.status, 'succeeded', second.error);
+  assert.ok(second.reusedFrom, 'кандидат взят');
+  const stages = f.stages(1);
+  for (const [phase, generate] of [
+    ['candidate', 'generate:catalog'],
+    ['integration', 'integration-generate:catalog'],
+  ] as const) {
+    const install = stages.indexOf(`${phase}-test:deps`);
+    assert.ok(install >= 0, stages.join(','));
+    assert.ok(
+      stages.indexOf(generate) > install,
+      `${generate} после установки: ${stages.join(',')}`,
+    );
+    assert.ok(stages.indexOf(generate) < stages.indexOf(`${phase}-test:unit`), stages.join(','));
+  }
+});
+
+test('Неотслеживаемый файл подготовки integration не попадает в индекс после проверки генератора', async () => {
+  const f = fixture({
+    writer: implement({ [DATA]: data(['apple', ...items]) }),
+    policy: (p) =>
+      (p.repositories[0].prepare = [
+        {
+          id: 'junk',
+          command: [
+            process.execPath,
+            '-e',
+            "if (process.env.DEVCONTOUR_PHASE === 'integration') require('fs').writeFileSync('junk.txt', 'x')",
+          ],
+        },
+      ]),
+  });
+  await runAll(f.ctx);
+  const work = f.work();
+  assert.equal(work.status, 'done', work.failure);
+  assert.ok(f.stages().includes('integration-generate:catalog'));
+  assert.throws(() => f.ctx.repo.git('cat-file', '-e', `${work.resultSha}:junk.txt`));
+});
+
+for (const [name, gen, kind, reason] of [
+  ['коммит в генераторе', genWith('--commit'), 'scope-violation', /Генератор catalog изменил HEAD/],
+  [
+    'выход, скрытый .gitignore',
+    genWith('--map'),
+    'gate',
+    /Генератор catalog записал в выход файлы, скрытые \.gitignore .*catalog\.ts\.map/,
+  ],
+  [
+    'символическая ссылка в выходе',
+    genWith('--link'),
+    'scope-violation',
+    /Генератор catalog: в выходе символические ссылки: apps\/mobile\/src\/generated\/data\.json/,
+  ],
+  [
+    'нет каталога cwd',
+    generator({ cwd: 'apps/nowhere' }),
+    'gate',
+    /Генератор catalog: каталог cwd apps\/nowhere не найден в дереве \(ENOENT\)/,
+  ],
+] as const)
+  test(`Генератор: ${name} — ${kind}; target не двигается`, async () => {
+    const f = fixture({
+      writer: implement({ [DATA]: data(['apple', ...items]) }),
+      generators: [gen],
+    });
+    const before = target(f.ctx);
+    await runAll(f.ctx);
+    const work = f.work();
+    assert.equal(work.status, 'failed');
+    assert.equal(work.failureKind, kind, work.failure);
+    assert.match(work.failure!, reason);
+    assert.equal(target(f.ctx), before);
+  });
+
+test('Пересечение путей генераторов — без учёта регистра', () => {
+  const raw = example('policy') as any;
+  const policy = executionPolicySchema.parse({
+    ...raw,
+    repositories: [
+      {
+        ...raw.repositories[0],
+        generators: [
+          generator(),
+          generator({ id: 'b', inputs: ['x'], tool: [], outputs: ['Apps/Mobile/src'] }),
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(
+    generatorIssues(policy.repositories[0]!).map((i) => i.message),
+    ['Выходы генераторов catalog (apps/mobile/src/generated) и b (Apps/Mobile/src) пересекаются'],
+  );
 });
