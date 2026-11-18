@@ -164,6 +164,10 @@ export function handoffMarkdown(pack: HandoffPack): string {
         `${f.failureKind ?? 'unknown'} / ${f.code}${f.error ? ` — ${cell(f.error)}` : ''}`,
     );
   out.push(...more(pack.truncated.failures, 'провалов'));
+  if (pack.interruptions)
+    out.push(
+      `Прервано штатной остановкой (не провалы, работа продолжается): ${pack.interruptions}.`,
+    );
   out.push('', '## Бюджеты', '');
   if (!pack.budgets) out.push('Бюджеты не заданы.');
   else {

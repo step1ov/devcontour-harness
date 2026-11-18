@@ -347,10 +347,14 @@ function build(
     };
   });
 
-  // Провалы попыток — новые первыми.
+  // Провалы попыток — новые первыми. Прерванные штатной остановкой — не
+  // провалы: исключаются до предела, иначе после перезапуска они вытесняют
+  // настоящие провалы; их число — отдельно (`interruptions`).
   const time = (a: AttemptState) => a.finishedAt ?? a.startedAt;
-  const failed = read.attempts
-    .filter((a) => a.status === 'failed' || a.status === 'expired')
+  const ended = read.attempts.filter((a) => a.status === 'failed' || a.status === 'expired');
+  const interruptions = ended.filter((a) => a.interrupted === 'shutdown').length;
+  const failed = ended
+    .filter((a) => a.interrupted !== 'shutdown')
     .sort((a, b) => time(b).localeCompare(time(a)) || b.attempt - a.attempt);
   const failures = failed.slice(0, HANDOFF_LIMITS.failures).map((a) => ({
     runId: name(a.id),
@@ -539,6 +543,7 @@ function build(
     works,
     stops,
     failures,
+    ...(interruptions ? { interruptions } : {}),
     ...opt('budgets', budgets),
     repairs,
     ...(inputs.length ? { inputs } : {}),
