@@ -16,14 +16,10 @@ export const LOW_RESOURCE_MEMORY_BYTES = 16 * 1024 ** 3;
 /** Поля политики, которые задаёт слой lean. */
 const LEAN_POLICY = '"concurrency": 1, "runTimeoutMs": 1800000, "gateTimeoutFloorMs": 240000';
 
-/**
- * Команда переключения слоя для проекта политики: каталог политики —
- * `.harness/` проекта, иначе (политика хоста) — заглушка корня.
- */
-const leanCommand = (baseDir: string) => {
+/** Корень проекта harness политики: каталог над `.harness/`; иначе политика вне проекта. */
+const projectRootOf = (baseDir: string) => {
   const dir = resolve(baseDir);
-  const root = basename(dir) === '.harness' ? dirname(dir) : '<корень проекта>';
-  return `harness lean --repository ${root}`;
+  return basename(dir) === '.harness' ? dirname(dir) : undefined;
 };
 
 const isFile = (path: string) => {
@@ -58,11 +54,15 @@ export function resourceWarnings(
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
   const warnings: string[] = [];
+  const project = projectRootOf(baseDir);
   policy.repositories.forEach((repo, i) => {
-    const root = isAbsolute(repo.path) ? repo.path : resolve(baseDir, repo.path);
-    if (!repo.dependencyStore && isFile(join(root, 'pnpm-lock.yaml')))
+    const at = isAbsolute(repo.path) ? repo.path : resolve(baseDir, repo.path);
+    if (!repo.dependencyStore && isFile(join(at, 'pnpm-lock.yaml')))
       warnings.push(
-        `DEPENDENCY_STORE_RECOMMENDED: репозиторий ${repo.id}: есть pnpm-lock.yaml, но нет dependencyStore — каждый checkout скачивает и распаковывает пакеты заново. В подготовленном проекте — ${leanCommand(baseDir)} --plan, затем без --plan (вместе со слоем lean; lean --off снимает), или только хранилище: в политике repositories[${i}]: "dependencyStore": { "manager": "pnpm" }; новый проект — harness init --lean`,
+        `DEPENDENCY_STORE_RECOMMENDED: репозиторий ${repo.id}: есть pnpm-lock.yaml, но нет dependencyStore — каждый checkout скачивает и распаковывает пакеты заново. ` +
+          (project
+            ? `В подготовленном проекте — harness lean --repository ${project} --plan, затем без --plan (вместе со слоем lean; lean --off снимает), или только хранилище: в политике repositories[${i}]: "dependencyStore": { "manager": "pnpm" }; новый проект — harness init --lean`
+            : `Добавьте в политику repositories[${i}]: "dependencyStore": { "manager": "pnpm" }; проект harness — harness lean --repository <корень проекта> --plan, новый — harness init --lean`),
       );
   });
   const low =
@@ -78,7 +78,11 @@ export function resourceWarnings(
         ? `; сейчас macOS ограничивает частоту процессора до ${resources.cpuSpeedLimit}% (pmset -g therm)`
         : '';
     warnings.push(
-      `LOW_RESOURCES: на машине ${cores} и ${gib(resources.memoryBytes)} ГБ памяти, а параллельность политики ${policy.concurrency}: одновременные попытки делят процессор и память, и gates упираются в пределы времени. В подготовленном проекте — ${leanCommand(baseDir)} --plan (изменения полей), затем без --plan: слой lean (${LEAN_POLICY}, для pnpm — dependencyStore; policyDigest меняется, согласованные графы — заново review-plan; lean --off снимает); новый проект — harness init --lean; политика вне проекта — задайте эти поля в ней${thermal}`,
+      `LOW_RESOURCES: на машине ${cores} и ${gib(resources.memoryBytes)} ГБ памяти, а параллельность политики ${policy.concurrency}: одновременные попытки делят процессор и память, и gates упираются в пределы времени. ` +
+        (project
+          ? `В подготовленном проекте — harness lean --repository ${project} --plan (изменения полей), затем без --plan: слой lean (${LEAN_POLICY}, для pnpm — dependencyStore; policyDigest меняется, согласованные графы — заново review-plan; lean --off снимает); новый проект — harness init --lean`
+          : `Задайте в политике ${LEAN_POLICY} (для pnpm — и dependencyStore); проект harness — harness lean --repository <корень проекта> --plan, новый — harness init --lean`) +
+        thermal,
     );
   }
   const threads = env.HARNESS_DIGEST_THREADS;
