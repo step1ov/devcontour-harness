@@ -25,6 +25,7 @@ import {
   executionPolicySchema,
   exitCodeOf,
   exitCodes,
+  projectManifestSchema,
   type CliCommand,
   type CliEnvelope,
   type ExecutionPolicy,
@@ -354,6 +355,21 @@ const presenters: Partial<Record<CliCommand, (data: never) => string>> = {
   init: initText,
   explain: explainText,
   'plan-request': (data: { prompt: string }) => data.prompt + '\n',
+};
+
+/**
+ * Ведущий проекта из manifest рядом с политикой (`.harness/project.json`);
+ * нет файла, поля или файл не по схеме — undefined (doctor берёт writers ролей).
+ */
+const manifestLead = (policyPath: string): ['claude' | 'codex'] | undefined => {
+  try {
+    const parsed = projectManifestSchema.safeParse(
+      JSON.parse(readFileSync(join(dirname(resolve(policyPath)), 'project.json'), 'utf8')),
+    );
+    return parsed.success && parsed.data.lead ? [parsed.data.lead] : undefined;
+  } catch {
+    return undefined;
+  }
 };
 
 /** Поле объекта только при заданном значении (exactOptionalPropertyTypes). */
@@ -864,6 +880,7 @@ async function run(
               }
             : undefined,
           b && v.state ? { baseDir: b.baseDir } : undefined,
+          v.policy ? manifestLead(v.policy) : undefined,
         ),
       };
     }

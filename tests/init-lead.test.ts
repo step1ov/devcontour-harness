@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -48,7 +49,15 @@ const probeOf =
     const status = argv.includes('status');
     const code = status && (name === 'claude' || name === 'codex') ? (auth[name] ?? 0) : 0;
     const stdout = status
-      ? ''
+      ? name === 'claude'
+        ? code === 0 || code === 1
+          ? JSON.stringify({ loggedIn: code === 0 })
+          : ''
+        : code === 0
+          ? 'Logged in using ChatGPT\n'
+          : code === 1
+            ? 'Not logged in\n'
+            : ''
       : /(^|\/)npm(-cli\.js)?$/.test(argv[0]!) || argv.some((a) => /(^|\/)npm(-cli\.js)?$/.test(a))
         ? NPM + '\n'
         : name === 'claude' || name === 'codex'
@@ -136,13 +145,15 @@ const matrix: Record<string, Runtime[]> = {
   none: [],
 };
 
-test('init --lead × наличие CLI: auto — ревью другим вендором, если он есть, иначе тот же runtime с явным same-vendor-allowed', async () => {
+test('init --lead × наличие CLI: auto — ревью другим вендором, если он есть; только свой CLI — тот же runtime с явным same-vendor-allowed; ни одного — cross', async () => {
   for (const lead of ['claude', 'codex'] as const)
     for (const [name, available] of Object.entries(matrix)) {
       const label = `${lead}, ${name}`;
       const p = project({ available });
       const { planned, raw } = await generatedPolicy(p, { lead });
-      const cross = available.includes(other(lead));
+      // same — только когда свой CLI есть, а другого вендора нет; без CLI вовсе —
+      // cross с предупреждениями, а не закоммиченное понижение.
+      const cross = available.includes(other(lead)) || !available.includes(lead);
       const rule = cross
         ? { reviewer: { runtime: other(lead) } }
         : { reviewer: { runtime: lead }, vendor: 'same-vendor-allowed' };
@@ -201,6 +212,11 @@ test('init auto: CLI другого вендора без входа — рев�
       ['codex', 'available', 'missing'],
     ],
   );
+  // claude: вход отсутствует только по JSON `loggedIn: false`.
+  const claudeOut = project({ auth: { claude: 1 } });
+  const codexLead = await initProject(claudeOut.opts({ lead: 'codex', plan: true }));
+  assert.deepEqual(codexLead.review, { mode: 'same', source: 'auto' });
+  assert.equal(codexLead.runtimes.find((r) => r.runtime === 'claude')?.auth, 'missing');
   const unknown = project({ auth: { codex: 7 } });
   const cross = await initProject(unknown.opts({ lead: 'claude', plan: true }));
   assert.deepEqual(cross.review, { mode: 'cross', source: 'auto' });
@@ -435,4 +451,141 @@ test('init --model: модель политики доходит до argv write
     assert.equal(argv[argv.indexOf('--model') + 1], 'm-1', role);
   }
   ctx.store.close();
+});
+
+test('новый checkout: только закоммиченная policy.json без project.json — решения из политики, без конфликта', async () => {
+  for (const [lead, review, available] of [
+    ['codex', 'cross', ['claude', 'codex']],
+    ['claude', 'cross', ['claude', 'codex']],
+    ['claude', 'same', ['claude']],
+  ] as const) {
+    const label = `${lead} ${review}`;
+    const p = project({ available: [...available] });
+    const first = await initProject(p.opts({ lead }));
+    assert.equal(first.review.mode, review, label);
+    const policyPath = join(p.root, '.harness/policy.json');
+    const policyBytes = readFileSync(policyPath, 'utf8');
+    // project.json не под Git: второй компьютер, CI, коллега.
+    rmSync(join(p.root, '.harness/project.json'));
+    for (const env of [{}, { CLAUDECODE: '1' }, { CODEX_THREAD_ID: 't-1' }] as Record<
+      string,
+      string
+    >[]) {
+      const q = { ...p, env: { ...p.env, ...env } };
+      const data = await initProject({ ...q.opts({ plan: true }), env: q.env });
+      assert.equal(
+        data.conflicts,
+        0,
+        `${label} ${JSON.stringify(env)}: ${JSON.stringify(data.files)}`,
+      );
+      assert.deepEqual(data.lead, { runtime: lead, source: 'policy' }, label);
+      assert.deepEqual(data.review, { mode: review, source: 'policy' }, label);
+      assert.equal(data.manifest.runtimes.writer, lead, label);
+    }
+    const resumed = await initProject(p.opts());
+    assert.equal(resumed.conflicts, 0, label);
+    assert.equal(readFileSync(policyPath, 'utf8'), policyBytes, label);
+    assert.equal(resumed.manifest.lead, lead, label);
+  }
+});
+
+test('регрессия: Codex-ведущий только с codex — ревью плана и кода тем же runtime (sameVendor), а не отказ', async () => {
+  const p = project({ available: ['codex'], env: { CODEX_THREAD_ID: 'thread-1' } });
+  const data = await initProject(p.opts());
+  assert.deepEqual(data.review, { mode: 'same', source: 'auto' });
+  const policy = executionPolicySchema.parse(
+    JSON.parse(readFileSync(join(p.root, '.harness/policy.json'), 'utf8')),
+  );
+  const { calls, adapters } = controlled();
+  const h = Harness.open({
+    policy,
+    stateDir: join(p.scratch, 'state'),
+    baseDir: join(p.root, '.harness'),
+    adapters,
+  });
+  try {
+    const record = await h.review({ kind: 'plan', graph: graphFor(policy), author: 'codex' });
+    assert.equal(record.reviewerRuntime, 'codex');
+    assert.equal(record.sameVendor, true);
+    assert.deepEqual(
+      calls.map((c) => c.runtime),
+      ['codex'],
+    );
+  } finally {
+    h.close();
+  }
+  // Ревью кода: попытка до принятия с writer и reviewer codex.
+  const { setup, runAll, implement, approve } = await import('./runner-fixture.ts');
+  const raw = JSON.parse(readFileSync(join(p.root, '.harness/policy.json'), 'utf8'));
+  const ctx = setup({
+    writer: 'codex',
+    reviewer: 'codex',
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (x: any) => {
+      x.roles.developer.writer = raw.roles.developer.writer;
+      x.review = raw.review;
+    },
+  });
+  await runAll(ctx);
+  const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.equal(a.status, 'succeeded', a.error);
+  const reviews = ctx.store.events().filter((e) => e.type === 'attempt.review');
+  assert.ok(reviews.length > 0);
+  for (const e of reviews)
+    assert.deepEqual(
+      { reviewer: (e.payload as any).reviewer, sameVendor: (e.payload as any).sameVendor },
+      { reviewer: 'codex', sameVendor: true },
+    );
+  ctx.store.close();
+});
+
+test('проверка входа: «не вошёл» — только по явному ответу CLI; прочий exit 1 — неизвестно', async () => {
+  const { probeRuntimes } = await import('../src/init/runtimes.ts');
+  const p = project();
+  const answer =
+    (status: Record<Runtime, { code: number; stdout: string }>): ToolProbe =>
+    (argv) => {
+      const name = basename(argv[0]!) as Runtime;
+      const r = argv.includes('status') ? status[name] : { code: 0, stdout: '1.2.3\n' };
+      return Promise.resolve({ ...r, stderr: '', timedOut: false });
+    };
+  const auth = async (status: Record<Runtime, { code: number; stdout: string }>) =>
+    (await probeRuntimes(p.env, answer(status))).map((r) => r.auth);
+  assert.deepEqual(
+    await auth({
+      claude: { code: 1, stdout: 'Error: config unreadable' },
+      codex: { code: 1, stdout: 'Error loading configuration' },
+    }),
+    ['unknown', 'unknown'],
+  );
+  assert.deepEqual(
+    await auth({
+      claude: { code: 1, stdout: '{"loggedIn": false}' },
+      codex: { code: 1, stdout: 'Not logged in' },
+    }),
+    ['missing', 'missing'],
+  );
+  assert.deepEqual(
+    await auth({
+      claude: { code: 0, stdout: '{"loggedIn": true}' },
+      codex: { code: 0, stdout: 'Logged in using ChatGPT' },
+    }),
+    ['ok', 'ok'],
+  );
+});
+
+test('doctor: автор планов для предупреждения о том же вендоре — ведущий manifest, если он известен', async () => {
+  const p = project({ available: ['claude', 'codex'] });
+  const { planned } = await generatedPolicy(p, { lead: 'codex', writer: 'claude', review: 'same' });
+  const adapter = (runtime: Runtime): RuntimeAdapter => ({
+    runtime,
+    capabilities: () => Promise.resolve({ runtime, version: '1.2.3' } as any),
+    invoke: () => Promise.reject(new Error('не вызывается')),
+  });
+  const adapters = { claude: adapter('claude'), codex: adapter('codex') };
+  const byRoles = await doctor(planned.policy, adapters);
+  assert.doesNotMatch(byRoles.warnings?.[0]?.message ?? '', /plan codex→codex/);
+  const byLead = await doctor(planned.policy, adapters, undefined, undefined, undefined, ['codex']);
+  assert.match(byLead.warnings?.[0]?.message ?? '', /plan codex→codex/);
+  assert.match(byLead.warnings?.[0]?.message ?? '', /code developer claude→claude/);
 });

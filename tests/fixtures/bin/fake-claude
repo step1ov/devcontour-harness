@@ -13,7 +13,7 @@ if (args.includes('--version')) {
 }
 // Проверка входа (`claude auth status`, `codex login status`): fixture «вошёл».
 if (args.length === 2 && (args[0] === 'auth' || args[0] === 'login') && args[1] === 'status') {
-  console.log('Logged in (fixture)');
+  console.log(args[0] === 'auth' ? JSON.stringify({ loggedIn: true }) : 'Logged in (fixture)');
   process.exit(0);
 }
 const scenarioPath = process.env.FIXTURE_SCENARIO;

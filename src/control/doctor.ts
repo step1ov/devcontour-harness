@@ -6,6 +6,7 @@ import {
   STATE_VERSION,
   runtimeAssignments,
   sameVendorReviews,
+  type Author,
   type ExecutionPolicy,
   type RuntimeAdapter,
   type RuntimeName,
@@ -47,6 +48,11 @@ export async function doctor(
    * каталог состояния.
    */
   checkouts?: { baseDir: string; checkoutRoot?: string },
+  /**
+   * Авторы планов и контрактов для предупреждения о ревью тем же вендором:
+   * ведущий из manifest проекта; нет — writers ролей политики.
+   */
+  planAuthors?: readonly Author[],
 ) {
   const problems: string[] = [];
   const runtimes = [];
@@ -135,14 +141,19 @@ export async function doctor(
       );
   // Ревью тем же вендором — не отказ, но явное предупреждение.
   const same = policy
-    ? sameVendorReviews(policy, [
-        ...new Set(
-          [
-            ...Object.values(policy.roles),
-            ...policy.repositories.flatMap((r) => Object.values(r.roles ?? {})),
-          ].map((b) => b.writer.runtime),
-        ),
-      ])
+    ? sameVendorReviews(
+        policy,
+        planAuthors?.length
+          ? planAuthors
+          : [
+              ...new Set(
+                [
+                  ...Object.values(policy.roles),
+                  ...policy.repositories.flatMap((r) => Object.values(r.roles ?? {})),
+                ].map((b) => b.writer.runtime),
+              ),
+            ],
+      )
     : [];
   const warnings = same.length
     ? [

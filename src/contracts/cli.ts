@@ -1436,10 +1436,10 @@ export const initDataSchema = z.strictObject({
   preserved: z.array(z.string()),
   profile: profilePinSchema,
   shadowed: z.array(z.string()),
-  /** Ведущий и откуда он взят: `--lead`, manifest, writer прежнего manifest, окружение, `--writer`. */
+  /** Ведущий и откуда он взят: `--lead`, manifest, writer прежнего manifest, сохранённая политика, окружение, `--writer`. */
   lead: z.strictObject({
     runtime: z.enum(['claude', 'codex']),
-    source: z.enum(['option', 'manifest', 'legacy-writer', 'env', 'writer']),
+    source: z.enum(['option', 'manifest', 'legacy-writer', 'policy', 'env', 'writer']),
   }),
   /**
    * Решение о ревью: `cross` или `same`; источник — `--review`, manifest,

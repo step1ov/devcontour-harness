@@ -278,21 +278,25 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
   const savedPolicy = savedPolicyPath
     ? parseFile(savedPolicyPath, executionPolicySchema, 'Политика проекта')
     : undefined;
-  // 8. Ведущий: --lead, manifest, writer прежнего manifest, окружение, --writer.
+  // 8. Ведущий: --lead, manifest, writer прежнего manifest, сохранённая
+  // политика (новый checkout: project.json не под Git), окружение, --writer.
   // Молчаливого умолчания нет: неизвестный ведущий — вопрос.
   const hint = leadHint(env);
+  const fromPolicy = !saved && savedPolicy ? decisionsOf(savedPolicy) : undefined;
   const lead: InitData['lead'] = options.lead
     ? { runtime: options.lead, source: 'option' }
     : saved?.lead
       ? { runtime: saved.lead, source: 'manifest' }
       : saved
         ? { runtime: saved.runtimes.writer, source: 'legacy-writer' }
-        : hint && 'runtime' in hint
-          ? { runtime: hint.runtime, source: 'env' }
-          : options.writer
-            ? { runtime: options.writer, source: 'writer' }
-            : leadUnknown(Boolean(hint));
-  const writer = options.writer ?? saved?.runtimes.writer ?? lead.runtime;
+        : fromPolicy?.lead
+          ? { runtime: fromPolicy.lead, source: 'policy' }
+          : hint && 'runtime' in hint
+            ? { runtime: hint.runtime, source: 'env' }
+            : options.writer
+              ? { runtime: options.writer, source: 'writer' }
+              : leadUnknown(Boolean(hint));
+  const writer = options.writer ?? saved?.runtimes.writer ?? fromPolicy?.writer ?? lead.runtime;
   const model = options.model ?? saved?.model;
   const runtimes = await probeRuntimes(env, options.probe ?? defaultProbe);
   const byName = (r: string) => runtimes.find((x) => x.runtime === r);
@@ -304,9 +308,14 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
       ? { mode: requested, source: 'option' }
       : requested === 'auto'
         ? {
-            mode: [otherRuntime(lead.runtime), otherRuntime(writer)].every((r) => usable(byName(r)))
-              ? 'cross'
-              : 'same',
+            // `same` — только когда собственные CLI ведущего и writer пригодны,
+            // а другого вендора нет: без CLI вовсе политика остаётся cross
+            // (предупреждения runtime-missing), а не закоммиченное понижение.
+            mode:
+              [lead.runtime, writer].every((r) => usable(byName(r))) &&
+              ![otherRuntime(lead.runtime), otherRuntime(writer)].every((r) => usable(byName(r)))
+                ? 'same'
+                : 'cross',
             source: 'auto',
           }
         : saved?.review
@@ -437,6 +446,31 @@ function leadUnknown(ambiguous: boolean): never {
       'writer по умолчанию — ведущий, ревью — другим CLI, если он установлен (--review).',
     [{ path: ['--lead'], message: 'lead-unknown' }],
   );
+}
+
+/**
+ * Решения, записанные в сохранённой политике, когда manifest нет (новый
+ * checkout: `project.json` не под Git). Ведущий — по правилу ревью плана:
+ * `same-vendor-allowed` — его reviewer, иначе другой вендор. Writer — общий
+ * writer ролей, если он один, иначе по правилу ревью кода.
+ */
+function decisionsOf(policy: ExecutionPolicy): {
+  lead?: 'claude' | 'codex';
+  writer?: 'claude' | 'codex';
+} {
+  const pick = (rule: ExecutionPolicy['review']['plan']) => {
+    const r = rule.reviewer.runtime;
+    if (r !== 'claude' && r !== 'codex') return undefined;
+    return rule.vendor === 'same-vendor-allowed' ? r : otherRuntime(r);
+  };
+  const writers = [...new Set(Object.values(policy.roles).map((b) => b.writer.runtime))];
+  const [only] = writers;
+  const lead = pick(policy.review.plan);
+  const writer =
+    writers.length === 1 && (only === 'claude' || only === 'codex')
+      ? only
+      : pick(policy.review.code);
+  return { ...(lead ? { lead } : {}), ...(writer ? { writer } : {}) };
 }
 
 /** Ревью сохранённой политики для ведущего: тот же вендор допущен — `same`. */

@@ -636,9 +636,7 @@ test('H1-02 (H1-F001): прерывание после записи manifest с 
     const p = project();
     const planned = await planProject(p.opts({ writer: 'codex' }));
     write(planned.intents);
-    // Решение записано в manifest — продолжение без аргументов. Политика без
-    // manifest writer не задаёт (он не выводится из reviewer): его называют явно.
-    const data = await initProject(p.opts(shape === 'manifest' ? {} : { writer: 'codex' }));
+    const data = await initProject(p.opts());
     assert.deepEqual(data.manifest.runtimes, { writer: 'codex', reviewer: 'claude' }, shape);
     assert.deepEqual(
       data.facts.roles.map((r) => r.runtime),
@@ -730,8 +728,7 @@ test('H1-02 (H1-F005): роли профиля со своими writers — п�
     // Прежний writer явно — не конфликт.
     const same = await initProject(opts({ writer: 'codex', plan: true }));
     assert.equal(same.conflicts, 0, shape);
-    // Без manifest writer не выводится из политики: его называют явно.
-    const data = await initProject(opts(shape === 'manifest' ? {} : { writer: 'codex' }));
+    const data = await initProject(opts());
     assert.deepEqual(data.manifest.runtimes, { writer: 'codex', reviewer: 'claude' }, shape);
     const policy = executionPolicySchema.parse(JSON.parse(readFileSync(policyPath, 'utf8')));
     // План — ведущего (claude по признаку сессии), код — writer manifest.

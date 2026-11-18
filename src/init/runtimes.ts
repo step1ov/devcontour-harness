@@ -20,19 +20,38 @@ export interface RuntimeAvailability {
 }
 
 /**
- * Локальная проверка входа без вызова модели и без диалога: exit 0 — вход
- * выполнен, exit 1 — нет; иное (тайм-аут, неизвестная команда) — неизвестно.
+ * Локальная проверка входа без вызова модели и без диалога. Вход отсутствует
+ * только по явному ответу: `claude auth status` — JSON с `loggedIn: false`,
+ * `codex login status` — «Not logged in». Иное (тайм-аут, другой формат,
+ * ошибка конфигурации) — неизвестно, а не «не вошёл».
  */
 const authStatus: Record<LeadRuntime, string[]> = {
   claude: ['auth', 'status'],
   codex: ['login', 'status'],
+};
+const authOf = (
+  runtime: LeadRuntime,
+  r: { code: number; stdout: string; stderr: string; timedOut: boolean } | undefined,
+): RuntimeAvailability['auth'] => {
+  if (!r || r.timedOut) return 'unknown';
+  if (runtime === 'claude') {
+    try {
+      const parsed = JSON.parse(r.stdout) as { loggedIn?: unknown };
+      return parsed.loggedIn === true ? 'ok' : parsed.loggedIn === false ? 'missing' : 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  }
+  const text = r.stdout + r.stderr;
+  if (/not logged in/i.test(text)) return 'missing';
+  return r.code === 0 && /logged in/i.test(text) ? 'ok' : 'unknown';
 };
 
 /**
  * Наличие CLI `claude` и `codex` так, как их найдёт harness при запуске:
  * `HARNESS_<RUNTIME>_BIN`, иначе имя в абсолютных элементах PATH. Проба —
  * `--version`, затем проверка входа; оба процесса в нейтральном каталоге
- * (`ToolProbe`), модель не вызывается.
+ * (`ToolProbe`), модель не вызывается. Runtime пробуются параллельно.
  */
 export async function probeRuntimes(
   env: NodeJS.ProcessEnv,
@@ -42,30 +61,25 @@ export async function probeRuntimes(
     .split(delimiter)
     .filter((dir) => isAbsolute(dir))
     .join(delimiter);
-  const out: RuntimeAvailability[] = [];
-  for (const runtime of ['claude', 'codex'] as const) {
+  const one = async (runtime: LeadRuntime): Promise<RuntimeAvailability> => {
     const executable = resolveExecutable(
       env[`HARNESS_${runtime.toUpperCase()}_BIN`] || runtime,
       path,
     );
-    if (!executable) {
-      out.push({ runtime, status: 'missing', auth: 'unknown' });
-      continue;
-    }
+    if (!executable) return { runtime, status: 'missing', auth: 'unknown' };
     const run = (args: string[]) =>
       probe([executable, ...args], { timeoutMs: PROBE_TIMEOUT_MS, env }).catch(() => undefined);
     const r = await run(['--version']);
     const version = r && r.code === 0 && !r.timedOut ? versionOf(r.stdout + r.stderr) : undefined;
-    if (!version) {
-      out.push({ runtime, status: 'version-error', auth: 'unknown' });
-      continue;
-    }
-    const a = await run(authStatus[runtime]);
-    const auth =
-      !a || a.timedOut ? 'unknown' : a.code === 0 ? 'ok' : a.code === 1 ? 'missing' : 'unknown';
-    out.push({ runtime, status: 'available', version, auth });
-  }
-  return out;
+    if (!version) return { runtime, status: 'version-error', auth: 'unknown' };
+    return {
+      runtime,
+      status: 'available',
+      version,
+      auth: authOf(runtime, await run(authStatus[runtime])),
+    };
+  };
+  return Promise.all((['claude', 'codex'] as const).map(one));
 }
 
 /** Runtime пригоден для назначения: CLI отвечает, вход не отсутствует явно. */
