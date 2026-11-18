@@ -959,7 +959,7 @@ until)` и метка документа `leaseRows: true`. Первая стр�
 - Откат на alpha.45 возможен без изменений состояния; пакет передачи с
   `repairs[].key` alpha.45 не читает.
 
-### Следующий выпуск: генераторы выходов (`repositories[].generators`)
+### 0.1.0-alpha.49: генераторы выходов (`repositories[].generators`)
 
 Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`). Без
 `repositories[].generators` политика, её digest и исполнение не меняются.
