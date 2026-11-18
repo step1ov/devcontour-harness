@@ -192,7 +192,9 @@ export async function command(
         stop();
       }
     };
+    let pipeBytes = 0;
     child.stdout.on('data', (d: Buffer) => {
+      pipeBytes += d.length;
       lastOutputAt = new Date().toISOString();
       if (tracked) scope!.moved();
       const text = stdoutDecoder.write(d);
@@ -200,6 +202,7 @@ export async function command(
       append('stdout', maskOut(text));
     });
     child.stderr.on('data', (d: Buffer) => {
+      pipeBytes += d.length;
       lastOutputAt = new Date().toISOString();
       if (tracked) scope!.moved();
       const raw = stderrDecoder.write(d);
@@ -285,22 +288,9 @@ export async function command(
       // собирается как обычно (ожидание pipes ограничено — их может держать
       // переживший потомок) и уходит вместе с отказом, а не результатом.
       const reaped = swept.survivors.length > 0 || swept.inventory !== undefined;
-      if (mark) {
-        let pipeTimer: NodeJS.Timeout | undefined;
-        try {
-          const bounded = await Promise.race([
-            closed.then(() => true),
-            new Promise<boolean>((r) => {
-              pipeTimer = setTimeout(() => r(false), 3000);
-            }),
-          ]);
-          if (!bounded) {
-            child.stdout.destroy();
-            child.stderr.destroy();
-          }
-        } finally {
-          if (pipeTimer) clearTimeout(pipeTimer);
-        }
+      if (mark && !(await drainPipes(closed, () => pipeBytes))) {
+        child.stdout.destroy();
+        child.stderr.destroy();
       }
       const rest = stdoutDecoder.end();
       options.onRawStdout?.(rest);
@@ -352,6 +342,51 @@ export async function command(
     child.stdin.end(options.input ?? '');
     if (options.signal?.aborted) stop();
   });
+}
+/**
+ * Ожидание закрытия pipes сдерживаемой команды после её выхода. Pipe может
+ * держать потомок, ушедший от очистки, поэтому ожидание ограничено — но
+ * отсчитывается от последнего прочитанного байта, а не от выхода: хвост
+ * вывода, который ещё читается под нагрузкой хоста, дочитывается целиком
+ * (уничтожение pipe теряло конец итоговой строки), а молчащий держатель pipe
+ * стоит команде прежние `idleMs`. Общий предел `limitMs` — на держателя,
+ * который продолжает писать. Перед отказом цикл событий проходит фазу
+ * ввода-вывода: после долгой блокировки таймер срабатывает раньше, чем
+ * прочитаны уже готовые данные. `true` — pipes закрылись сами.
+ */
+export async function drainPipes(
+  closed: Promise<void>,
+  progress: () => number,
+  { idleMs = 3000, limitMs = 30_000 }: { idleMs?: number; limitMs?: number } = {},
+): Promise<boolean> {
+  const deadline = performance.now() + limitMs;
+  let timer: NodeJS.Timeout | undefined;
+  let settled = false;
+  try {
+    return await new Promise<boolean>((done) => {
+      void closed.then(() => done(true));
+      let seen = progress();
+      const arm = () => {
+        timer = setTimeout(
+          () => setImmediate(check),
+          Math.max(0, Math.min(idleMs, deadline - performance.now())),
+        );
+      };
+      const check = () => {
+        // Pipes закрылись, пока проверка ждала своей фазы: новый таймер
+        // держал бы вызывающего живым.
+        if (settled) return;
+        const now = progress();
+        if (now === seen || performance.now() >= deadline) return done(false);
+        seen = now;
+        arm();
+      };
+      arm();
+    });
+  } finally {
+    settled = true;
+    if (timer) clearTimeout(timer);
+  }
 }
 function captureProcessTree(pid?: number): RuntimeDiagnostics['processTree'] {
   if (!pid || process.platform === 'win32')
