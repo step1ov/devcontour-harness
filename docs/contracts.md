@@ -1718,7 +1718,12 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 ответ с данными и exit 3 (`GATE_FAILED`). Попытки, evidence в базе состояния и
 состояние поручений не пишутся, база не открывается; логи остаются в
 `<state>/gates-at/<id>` (`data.logs`), ход — в stderr. Политика — из
-`--policy` или привязки каталога состояния.
+`--policy` или привязки каталога состояния; неизвестный репозиторий, коммит
+или неинициализированный каталог — `NOT_FOUND`. Прерывание (SIGINT, SIGTERM)
+или исчерпанный предел проверки `runTimeoutMs` — отказ `CANCELLED` (exit 3):
+исход каждого gate — в `error.issues` (`gates.<id>`), прерванный gate —
+`cancelled`, следующие — `not-run`; рабочее дерево убирается. Остановка
+обходом зависших (`stallSweep: stop`) — по-прежнему провал gate.
 
 **`report`.** Читает каталог состояния только для чтения и строит
 `ValueReport` (`valueReport`); `binding.json` не нужен. Чтение однократное

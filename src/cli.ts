@@ -862,6 +862,16 @@ async function run(
           onEvidence: (e) =>
             process.stderr.write(`harness gates: ${e.gate} ${e.passed ? 'passed' : 'failed'}\n`),
         });
+        // Прерывание — отказ CANCELLED; исход каждого gate — в issues.
+        if (data.interrupted)
+          throw new HarnessError(
+            'CANCELLED',
+            'Проверка gates прервана: ' + data.interrupted,
+            data.gates.map((g) => ({
+              path: ['gates', g.gate],
+              message: g.status + (g.message ? ': ' + g.message : ''),
+            })),
+          );
         // Провал gate — данные проверки и exit 3 (GATE_FAILED), как ответ plan-check с проблемами.
         return {
           command,

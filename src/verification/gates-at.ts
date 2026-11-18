@@ -96,6 +96,14 @@ export interface GatesAtResult {
    * исход неизвестен. Нет поля — исполнены все.
    */
   skipped?: string[];
+  /**
+   * Проверка прервана сигналом вызывающего или своим пределом времени
+   * (`runTimeoutMs`), а не провалом: `gate` — исполнявшийся в тот момент (его
+   * evidence записано непрошедшим, но в `failures` его нет), следующие gates
+   * не исполнены и названы в `skipped`. Остановка обходом зависших —
+   * по-прежнему провал gate (`failures`).
+   */
+  interrupted?: { gate?: string; reason: string };
   /** Переходы живости за проверку (`onLiveness`); нет — проверка не замолкала. */
   liveness?: LivenessReport[];
 }
@@ -179,6 +187,15 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
   const failures: GatesAtResult['failures'] = [];
   const failed = new Set<string>();
   const skipped: string[] = [];
+  let interrupted: GatesAtResult['interrupted'];
+  /** Прерывание сигналом или пределом проверки, не обходом зависших. */
+  const interruption = () => {
+    if (!signal.aborted || stalledBy(input.signal)) return undefined;
+    const reason = signal.reason as Error | undefined;
+    return timeout.aborted
+      ? `исчерпан предел проверки runTimeoutMs (${Math.round(ctx.policy.runTimeoutMs / 1000)} с)`
+      : (reason?.message ?? 'проверка прервана');
+  };
   let snapshots: DependencySnapshot[] = [];
   let added = false;
   const boundaryOf = ctx.boundary();
@@ -264,7 +281,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
             prepared(execution);
             let reapedBy: string | undefined;
             for (const gate of gates) {
-              if (input.failFast && failures.length) {
+              if (interrupted || (input.failFast && failures.length)) {
                 skipped.push(gate.id);
                 continue;
               }
@@ -337,6 +354,11 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
                 // Провал gate записан (`record`); прочие ошибки — отказ проверки.
                 if (!(error instanceof TaskFailure) || evidence.at(-1)?.gate !== gate.id)
                   throw error;
+                const reason = interruption();
+                if (reason) {
+                  interrupted = { gate: gate.id, reason };
+                  continue;
+                }
                 failed.add(gate.id);
                 failures.push({ gate: gate.id, message: stalledBy(input.signal) ?? error.message });
                 if (reapedFailure(error)) reapedBy = gate.id;
@@ -344,6 +366,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
             }
           },
         );
+        if (interrupted) return;
         if (
           (await git(cwd, 'rev-parse', 'HEAD')) !== input.sha ||
           (await git(cwd, 'status', '--porcelain', '--untracked-files=no'))
@@ -351,6 +374,13 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
           throw new Error('Проверка изменила проверяемый код');
       },
     );
+  } catch (error) {
+    // Прерванная до gates или между ними проверка — отмена, а не отказ среды.
+    // Прерванная во время gate — результат с `interrupted` (уборка окружения
+    // после прерывания может отказать тем же сигналом).
+    const reason = interruption();
+    if (!reason) throw error;
+    if (!interrupted) throw new HarnessError('CANCELLED', 'Проверка gates прервана: ' + reason);
   } finally {
     if (added) await git(path, 'worktree', 'remove', '--force', cwd).catch(() => undefined);
     await removeSnapshots(
@@ -375,5 +405,6 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
     ...(failures.length ? { failure: failures[0] } : {}),
     failures,
     ...(skipped.length ? { skipped } : {}),
+    ...(interrupted ? { interrupted } : {}),
   };
 }

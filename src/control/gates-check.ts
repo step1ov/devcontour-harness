@@ -10,7 +10,7 @@ import { git } from '../environment/process.ts';
 import { runGatesAt } from '../verification/gates-at.ts';
 
 /** Исход одного gate проверки `harness gates`. */
-export type GateCheckStatus = 'passed' | 'failed' | 'not-run' | 'skipped';
+export type GateCheckStatus = 'passed' | 'failed' | 'cancelled' | 'not-run' | 'skipped';
 
 export interface GateCheckInput {
   policy: ExecutionPolicy;
@@ -105,26 +105,45 @@ export async function checkGates(input: GateCheckInput) {
   );
   const failures = new Map(result.failures.map((f) => [f.gate, f.message]));
   const skipped = new Set(result.skipped ?? []);
+  const interrupted = result.interrupted;
   const gates = result.gates.map((gate) => {
     const evidence = result.evidence.find((e) => e.gate === gate);
-    const status: GateCheckStatus = evidence
-      ? evidence.passed
-        ? 'passed'
-        : 'failed'
-      : skipped.has(gate)
-        ? 'skipped'
-        : 'not-run';
-    const message = failures.get(gate);
+    // Прерванный gate — отмена, не провал; после прерывания gates не исполнены.
+    const status: GateCheckStatus =
+      interrupted?.gate === gate
+        ? 'cancelled'
+        : evidence
+          ? evidence.passed
+            ? 'passed'
+            : 'failed'
+          : skipped.has(gate)
+            ? interrupted
+              ? 'not-run'
+              : 'skipped'
+            : 'not-run';
+    const failure = failures.get(gate);
+    // Причина отказа без повтора того, что уже сказано в summary (в любую сторону).
+    const duplicate =
+      failure !== undefined &&
+      evidence !== undefined &&
+      (evidence.summary.includes(failure) || failure.includes(evidence.summary));
+    const message =
+      status === 'cancelled'
+        ? 'прерван: ' + interrupted!.reason
+        : status === 'skipped'
+          ? 'не исполнен: --fail-fast после первого провала'
+          : skipped.has(gate) && interrupted
+            ? 'не исполнен: проверка прервана'
+            : failure !== undefined && !duplicate
+              ? failure
+              : undefined;
     return {
       gate,
       status,
       ...(evidence
         ? { exitCode: evidence.exitCode, summary: evidence.summary, log: evidence.log }
         : {}),
-      ...(message && !evidence?.summary.includes(message) ? { message } : {}),
-      ...(status === 'skipped'
-        ? { message: 'не исполнен: --fail-fast после первого провала' }
-        : {}),
+      ...(message ? { message } : {}),
     };
   });
   return {
@@ -133,6 +152,7 @@ export async function checkGates(input: GateCheckInput) {
     sha,
     passed: gates.every((g) => g.status === 'passed'),
     failFast: Boolean(input.failFast),
+    ...(interrupted ? { interrupted: interrupted.reason } : {}),
     durationMs: Date.now() - started,
     gates,
     logs: join(stateDir, 'gates-at', result.id),
@@ -144,13 +164,13 @@ export function gatesText(data: Awaited<ReturnType<typeof checkGates>>) {
   const width = Math.max(4, ...data.gates.map((g) => g.gate.length));
   const lines = data.gates.map(
     (g) =>
-      `${g.gate.padEnd(width)}  ${g.status.padEnd(7)}  ${g.exitCode ?? '-'}`.padEnd(width + 16) +
+      `${g.gate.padEnd(width)}  ${g.status.padEnd(9)}  ${g.exitCode ?? '-'}`.padEnd(width + 18) +
       `  ${g.message ?? g.summary ?? ''}`.trimEnd(),
   );
   return (
     [
       `${data.repositoryId} @ ${data.sha.slice(0, 12)} — ${data.passed ? 'PASS' : 'FAIL'} (${Math.round(data.durationMs / 1000)} с)`,
-      `${'gate'.padEnd(width)}  ${'status'.padEnd(7)}  exit`,
+      `${'gate'.padEnd(width)}  ${'status'.padEnd(9)}  exit`,
       ...lines,
       `логи: ${data.logs}`,
     ].join('\n') + '\n'

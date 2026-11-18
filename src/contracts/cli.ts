@@ -919,7 +919,7 @@ export const cliCommands = {
         description: 'Таблица исходов для человека вместо JSON',
       },
     ],
-    refusals: ['GATE_FAILED'],
+    refusals: ['GATE_FAILED', 'CANCELLED', 'NOT_FOUND'],
   },
 } as const satisfies Record<string, CliCommandContract>;
 export type CliCommand = keyof typeof cliCommands;
@@ -1237,6 +1237,8 @@ export const gatesDataSchema = z.strictObject({
   /** Все gates проверки прошли. */
   passed: z.boolean(),
   failFast: z.boolean(),
+  /** Проверка прервана сигналом или пределом `runTimeoutMs`: причина. */
+  interrupted: z.string().optional(),
   durationMs: z.number().int().nonnegative(),
   /** Gates в порядке исполнения (с предпосылками). */
   gates: z.array(
@@ -1244,9 +1246,11 @@ export const gatesDataSchema = z.strictObject({
       gate: z.string().min(1).max(200),
       /**
        * `not-run` — не исполнен: не прошла предпосылка или потомки прежнего
-       * gate не остановлены; `skipped` — не исполнен из-за `--fail-fast`.
+       * gate не остановлены или проверка прервана; `skipped` — не исполнен
+       * из-за `--fail-fast`; `cancelled` — прерван сигналом или пределом
+       * проверки (CLI тогда отвечает отказом `CANCELLED`).
        */
-      status: z.enum(['passed', 'failed', 'not-run', 'skipped']),
+      status: z.enum(['passed', 'failed', 'cancelled', 'not-run', 'skipped']),
       exitCode: z.number().int().optional(),
       summary: z.string().optional(),
       /** Лог gate. */
