@@ -280,6 +280,9 @@ const options = {
   plan: { type: 'boolean' },
   human: { type: 'boolean' },
   writer: { type: 'string' },
+  lead: { type: 'string' },
+  review: { type: 'string' },
+  model: { type: 'string' },
   draft: { type: 'string' },
   brief: { type: 'string' },
   basis: { type: 'string' },
@@ -309,6 +312,9 @@ const options = {
 const flagOwners = {
   plan: ['init'],
   writer: ['init'],
+  lead: ['init'],
+  review: ['init'],
+  model: ['init'],
   human: ['init', 'explain', 'plan-request'],
   draft: ['plan-check'],
   basis: ['plan-check'],
@@ -692,14 +698,31 @@ async function run(
       }
     }
     case 'init': {
-      if (v.writer !== undefined && v.writer !== 'claude' && v.writer !== 'codex')
-        throw new HarnessError('INVALID_INPUT', '--writer: ожидается claude или codex', [
-          { path: ['--writer'], message: v.writer },
+      const runtimeFlag = (flag: 'writer' | 'lead') => {
+        const value = v[flag];
+        if (value !== undefined && value !== 'claude' && value !== 'codex')
+          throw new HarnessError('INVALID_INPUT', `--${flag}: ожидается claude или codex`, [
+            { path: ['--' + flag], message: value },
+          ]);
+        return value;
+      };
+      const writer = runtimeFlag('writer');
+      const lead = runtimeFlag('lead');
+      if (v.review !== undefined && !['cross', 'same', 'auto'].includes(v.review))
+        throw new HarnessError('INVALID_INPUT', '--review: ожидается cross, same или auto', [
+          { path: ['--review'], message: v.review },
+        ]);
+      if (v.model !== undefined && (!v.model.trim() || v.model.length > 200))
+        throw new HarnessError('INVALID_INPUT', '--model: ожидается имя модели до 200 символов', [
+          { path: ['--model'], message: v.model },
         ]);
       const data = await initProject({
         repository: need('repository'),
         ...(v.profile ? { profile: v.profile } : {}),
-        ...(v.writer ? { writer: v.writer } : {}),
+        ...(lead ? { lead } : {}),
+        ...(writer ? { writer } : {}),
+        ...(v.review ? { review: v.review as 'cross' | 'same' | 'auto' } : {}),
+        ...(v.model ? { model: v.model } : {}),
         ...(v.state ? { state: v.state } : {}),
         ...(v.plan ? { plan: true } : {}),
       });

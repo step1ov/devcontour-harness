@@ -13,6 +13,9 @@ import {
   PROJECT_WORK_DIR,
   executionPolicySchema,
   projectManifestSchema,
+  runtimeAssignments,
+  sameVendorReviews,
+  selectReviewer,
   type ExecutionPolicy,
   type initDataSchema,
   type ProfilePin,
@@ -37,6 +40,14 @@ import {
   generatePolicy,
 } from './policy.ts';
 import { devcontourMarkers, gitFacts } from './inspect.ts';
+import {
+  leadHint,
+  otherRuntime,
+  probeRuntimes,
+  usable,
+  type RuntimeAvailability,
+} from './runtimes.ts';
+import { defaultProbe } from '../toolchains/probe.ts';
 
 export type InitData = z.infer<typeof initDataSchema>;
 
@@ -61,16 +72,6 @@ const realish = (path: string) => {
       tail.push(basename(cursor));
     }
   }
-};
-
-/**
- * Writer, выбранный при генерации сохранённой политики. Роли профиля задают
- * своих writers сами, поэтому выбор читается по reviewer плана: generatePolicy
- * всегда назначает ему другой вендор, чем выбранный writer.
- */
-const writerOf = (policy: ExecutionPolicy | undefined) => {
-  const reviewer = policy?.review.plan?.reviewer.runtime;
-  return reviewer === 'codex' ? 'claude' : reviewer === 'claude' ? 'codex' : undefined;
 };
 
 /** `p-` + первые 16 hex sha256 от realpath корня: тот же проект — тот же id. */
@@ -138,7 +139,13 @@ export async function readProjectManifest(
 export interface InitOptions {
   repository: string;
   profile?: string;
+  /** Ведущий: автор планов и контрактов; writer по умолчанию. */
+  lead?: 'claude' | 'codex';
   writer?: 'claude' | 'codex';
+  /** `auto` (по умолчанию) — `cross`, если нужные CLI доступны, иначе `same`. */
+  review?: 'cross' | 'same' | 'auto';
+  /** Одна модель на writer и всех reviewers. */
+  model?: string;
   state?: string;
   plan?: boolean;
   env?: NodeJS.ProcessEnv;
@@ -159,6 +166,12 @@ export interface InitPlanned {
   profile: ProfilePin;
   shadowed: string[];
   toolchain: ToolchainReport[];
+  lead: InitData['lead'];
+  review: InitData['review'];
+  runtimes: RuntimeAvailability[];
+  warnings: InitData['warnings'];
+  /** Почему сохранённая политика расходится с решениями (конфликт `policy.json`). */
+  policyConflict?: string;
 }
 
 const readme = `# .harness
@@ -261,18 +274,53 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
       [{ path: ['--state'], message: 'state-inside-repository' }],
     );
   // 7. Сохранённая политика сильнее сгенерированной: агент мог её настроить.
-  // Сохранённая политика — решение, уже записанное прерванной подготовкой:
-  // её writer продолжает выбор, если manifest ещё не записан.
   const savedPolicyPath = projectFile(root, PROJECT_POLICY_PATH);
   const savedPolicy = savedPolicyPath
     ? parseFile(savedPolicyPath, executionPolicySchema, 'Политика проекта')
     : undefined;
-  const policyWriter = writerOf(savedPolicy);
-  const writer = options.writer ?? saved?.runtimes.writer ?? policyWriter ?? 'claude';
+  // 8. Ведущий: --lead, manifest, writer прежнего manifest, окружение, --writer.
+  // Молчаливого умолчания нет: неизвестный ведущий — вопрос.
+  const hint = leadHint(env);
+  const lead: InitData['lead'] = options.lead
+    ? { runtime: options.lead, source: 'option' }
+    : saved?.lead
+      ? { runtime: saved.lead, source: 'manifest' }
+      : saved
+        ? { runtime: saved.runtimes.writer, source: 'legacy-writer' }
+        : hint && 'runtime' in hint
+          ? { runtime: hint.runtime, source: 'env' }
+          : options.writer
+            ? { runtime: options.writer, source: 'writer' }
+            : leadUnknown(Boolean(hint));
+  const writer = options.writer ?? saved?.runtimes.writer ?? lead.runtime;
+  const model = options.model ?? saved?.model;
+  const runtimes = await probeRuntimes(env, options.probe ?? defaultProbe);
+  const byName = (r: string) => runtimes.find((x) => x.runtime === r);
+  // Ревью: --review cross|same; без него — решение manifest (прежний manifest —
+  // cross), сохранённой политики; иначе auto по доступности нужных CLI.
+  const requested = options.review ?? (saved || savedPolicy ? undefined : 'auto');
+  const review: InitData['review'] =
+    requested === 'cross' || requested === 'same'
+      ? { mode: requested, source: 'option' }
+      : requested === 'auto'
+        ? {
+            mode: [otherRuntime(lead.runtime), otherRuntime(writer)].every((r) => usable(byName(r)))
+              ? 'cross'
+              : 'same',
+            source: 'auto',
+          }
+        : saved?.review
+          ? { mode: saved.review, source: 'manifest' }
+          : saved
+            ? { mode: 'cross', source: 'legacy' }
+            : { mode: reviewModeOf(savedPolicy!, lead.runtime), source: 'policy' };
   const declared = packageManagerField(new Manifests(root), '.');
   const generated = generatePolicy({
     profile,
+    lead: lead.runtime,
     writer,
+    review: review.mode,
+    ...(model ? { model } : {}),
     ...(declared ? { packageManager: { name: declared.name, version: declared.version } } : {}),
   });
   const policyPath = join(root, PROJECT_POLICY_PATH);
@@ -287,7 +335,16 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
     root,
     repository: { id: PROJECT_REPOSITORY_ID, targetRef: PROJECT_TARGET_REF },
     profile: { ref, pin },
-    runtimes: { writer, reviewer: writer === 'claude' ? 'codex' : 'claude' },
+    // Manifest прежнего формата с теми же решениями не переписывается: без
+    // новых полей он байтово тот же, и продолжение не даёт content-differs.
+    ...(saved &&
+    !saved.lead &&
+    lead.runtime === saved.runtimes.writer &&
+    review.mode === 'cross' &&
+    !model
+      ? {}
+      : { lead: lead.runtime, review: review.mode, ...(model ? { model } : {}) }),
+    runtimes: { writer, reviewer: review.mode === 'cross' ? otherRuntime(writer) : writer },
     paths: {
       policy: PROJECT_POLICY_PATH,
       work: PROJECT_WORK_DIR,
@@ -311,9 +368,21 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
   ];
   const plan = await planFileWrites({ files: intents, root });
   const workConflicts: FilePlanEntry[] = [];
-  // Writer сохранённой политики расходится с решением (manifest или явный
-  // --writer): решение меняется явно, а не manifest, противоречащий политике.
-  if (savedPolicy && policyWriter && writer !== policyWriter)
+  // Сохранённая политика не допускает ревью для решений (план и контракт
+  // ведущего, код writer): решение меняется явно, а не manifest, которому
+  // политика противоречит.
+  const refusedReview = savedPolicy
+    ? (
+        [
+          ['plan', lead.runtime],
+          ['contract', lead.runtime],
+          ['code', writer],
+        ] as const
+      )
+        .map(([kind, author]) => selectReviewer(savedPolicy, kind, { runtime: author }))
+        .find((c) => !c.ok)
+    : undefined;
+  if (refusedReview)
     workConflicts.push({ path: policyPath, action: 'conflict', conflict: 'content-differs' });
   const harnessDir = join(root, HARNESS_PROJECT_DIR);
   if (!plan.entries.some((e) => e.conflictPath === harnessDir))
@@ -350,7 +419,73 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
     profile: pin,
     shadowed: generated.shadowed,
     toolchain,
+    lead,
+    review,
+    runtimes,
+    warnings: initWarnings(policy, lead.runtime, runtimes),
+    ...(refusedReview && !refusedReview.ok ? { policyConflict: refusedReview.message } : {}),
   };
+}
+
+function leadUnknown(ambiguous: boolean): never {
+  throw new HarnessError(
+    'NOT_READY',
+    (ambiguous
+      ? 'Ведущий не определён: окружение содержит маркеры и Claude Code (CLAUDECODE), и Codex (CODEX_THREAD_ID). '
+      : 'Ведущий не определён: нет --lead, сохранённого manifest и признака сессии Claude Code или Codex. ') +
+      'Кто ведёт этот проект — claude или codex? Повторите init с --lead claude или --lead codex: ' +
+      'writer по умолчанию — ведущий, ревью — другим CLI, если он установлен (--review).',
+    [{ path: ['--lead'], message: 'lead-unknown' }],
+  );
+}
+
+/** Ревью сохранённой политики для ведущего: тот же вендор допущен — `same`. */
+function reviewModeOf(policy: ExecutionPolicy, lead: 'claude' | 'codex'): 'cross' | 'same' {
+  const choice = selectReviewer(policy, 'plan', { runtime: lead });
+  return choice.ok && choice.sameVendor ? 'same' : 'cross';
+}
+
+/** Предупреждения действующей политики: ревью тем же вендором, отсутствующий CLI. */
+export function initWarnings(
+  policy: ExecutionPolicy,
+  lead: 'claude' | 'codex',
+  runtimes: RuntimeAvailability[],
+): InitData['warnings'] {
+  const warnings: InitData['warnings'] = [];
+  const same = sameVendorReviews(policy, [lead]);
+  if (same.length) {
+    const kinds = [...new Set(same.map((s) => (s.role ? `code ${s.role}` : s.kind)))];
+    const authors = [...new Set(same.map((s) => s.author))];
+    const others = [
+      ...new Set(
+        authors.flatMap((a) => (a === 'claude' || a === 'codex' ? [otherRuntime(a)] : [])),
+      ),
+    ];
+    warnings.push({
+      code: 'review-same-vendor',
+      message:
+        `Ревью (${kinds.join(', ')}) выполняет runtime того же вендора, что автор (${authors.join(', ')}): ` +
+        'политика разрешает это явно (vendor: same-vendor-allowed), но независимость такого ревью ниже. ' +
+        `Для ревью другим вендором установите ${others.join(', ')}, выполните вход и подготовьте политику с --review cross.`,
+    });
+  }
+  for (const [runtime, what] of runtimeAssignments(policy)) {
+    const r = runtimes.find((x) => x.runtime === runtime);
+    if (!r) continue;
+    if (r.status !== 'available')
+      warnings.push({
+        code: 'runtime-missing',
+        message:
+          `CLI ${runtime} ${r.status === 'missing' ? 'не найден' : 'не ответил на --version'}, а политика назначает его (${what.join(', ')}): ` +
+          `doctor назовёт это проблемой до первой попытки. Установите ${runtime} или выберите другое назначение (--review same, --lead, --writer).`,
+      });
+    else if (r.auth === 'missing')
+      warnings.push({
+        code: 'runtime-unauthenticated',
+        message: `CLI ${runtime} не выполнил вход (${runtime === 'claude' ? 'claude auth status' : 'codex login status'}), а политика назначает его (${what.join(', ')}): выполните вход до запуска.`,
+      });
+  }
+  return warnings;
 }
 
 function dataOf(
@@ -385,6 +520,10 @@ function dataOf(
     preserved: written.preserved,
     profile: planned.profile,
     shadowed: planned.shadowed,
+    lead: planned.lead,
+    review: planned.review,
+    runtimes: planned.runtimes,
+    warnings: planned.warnings,
     facts: {
       repositoryId: repository.id,
       targetRef: repository.targetRef,
@@ -468,7 +607,7 @@ export async function initProject(options: InitOptions): Promise<InitData> {
     throw new HarnessError(
       'PATH_CONFLICT',
       first.conflict === 'content-differs'
-        ? `Сохранённая политика задаёт другого writer: решение меняется явно, а не manifest поверх неё: ${first.path}`
+        ? `Сохранённая политика не подходит решениям init (ведущий ${planned.lead.runtime}, writer ${planned.manifest.runtimes.writer}): ${planned.policyConflict ?? 'ревью не назначается'}. Решение меняется явно — --lead/--writer, совпадающие с политикой, или правка политики, — а не manifest поверх неё: ${first.path}`
         : `Рабочий каталог .harness — не каталог внутри проекта: ${first.path}`,
       extra,
     );
@@ -493,7 +632,13 @@ export function initText(data: InitData): string {
     `root: ${data.root}`,
     `state: ${data.manifest.paths.state}`,
     `profile: ${data.profile.id}@${data.profile.version} (${data.manifest.profile.ref})`,
+    `lead: ${data.lead.runtime} (${data.lead.source})`,
+    `review: ${data.review.mode} (${data.review.source})`,
     `runtimes: writer ${data.manifest.runtimes.writer}, reviewer ${data.manifest.runtimes.reviewer}`,
+    ...data.runtimes.map(
+      (r) => `  ${r.runtime}: ${r.status}${r.version ? ' ' + r.version : ''}, auth ${r.auth}`,
+    ),
+    ...data.warnings.map((w) => `warning ${w.code}: ${w.message}`),
     ...data.files.map(
       (f) => `${f.action === 'conflict' ? `conflict:${f.conflict ?? '?'}` : f.action} ${f.path}`,
     ),

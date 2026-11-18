@@ -668,3 +668,40 @@ test('Формула версии проверок хоста получател
   );
   f.store.close();
 });
+
+test('init --review same: политика одного вендора проходит приёмку получателя, а отчёт отмечает ревью тем же вендором', async () => {
+  const { generatePolicy } = await import('../src/init/policy.ts');
+  const { resolveProfile } = await import('../src/profiles/resolve.ts');
+  const { collectReportInput } = await import('../src/control/report.ts');
+  const { valueReport } = await import('../src/report/index.ts');
+  for (const lead of ['claude', 'codex'] as const) {
+    const generated = generatePolicy({
+      profile: resolveProfile('npm-ci'),
+      lead,
+      writer: lead,
+      review: 'same',
+    }).input as any;
+    const policy = policyOf((p: any) => {
+      p.roles.developer.writer = generated.roles.developer.writer;
+      p.review = generated.review;
+    });
+    const f = attempt(graphOf({ a: [] }), policy);
+    const { result, context } = f.done();
+    assert.deepEqual(resultProblems(result, context), [], lead);
+    assert.ok(
+      result.evidence.some((x) => x.reviewer?.sameVendor === true),
+      lead,
+    );
+    const report = valueReport(collectReportInput(f.store));
+    const limitation = report.limitations.find((l) => l.id === 'review-same-vendor');
+    assert.ok(limitation, `${lead}: ${report.limitations.map((l) => l.id).join(', ')}`);
+    assert.match(limitation.text, /same vendor/);
+    f.store.close();
+  }
+  // Ревью другим вендором ограничения не добавляет.
+  const cross = attempt(graphOf({ a: [] }));
+  cross.done();
+  const report = valueReport(collectReportInput(cross.store));
+  assert.ok(!report.limitations.some((l) => l.id === 'review-same-vendor'));
+  cross.store.close();
+});

@@ -99,6 +99,25 @@
       ],
       "additionalProperties": false
     },
+    "lead": {
+      "type": "string",
+      "enum": [
+        "claude",
+        "codex"
+      ]
+    },
+    "review": {
+      "type": "string",
+      "enum": [
+        "cross",
+        "same"
+      ]
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
     "runtimes": {
       "type": "object",
       "properties": {

@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -30,7 +31,7 @@ const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
 const fixture = fileURLToPath(new URL('./fixtures/standalone/npm-app', import.meta.url));
 const npm = execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim();
 
-function project(edit?: (dir: string) => void) {
+function project(edit?: (dir: string) => void, overrides: Record<string, string | undefined> = {}) {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'harness-cli-init-')));
   const root = join(scratch, 'app');
   cpSync(fixture, root, { recursive: true });
@@ -38,15 +39,30 @@ function project(edit?: (dir: string) => void) {
   pkg.packageManager = 'npm@' + npm;
   writeFileSync(join(root, 'package.json'), JSON.stringify(pkg, null, 2) + '\n');
   edit?.(root);
-  const env = {
+  // CLI runtime — заглушки (`--version` и проверка входа), ведущий — сессия
+  // Claude Code: ответ не зависит от установленных CLI и окружения запуска.
+  const bin = join(scratch, 'bin');
+  mkdirSync(bin);
+  for (const r of ['claude', 'codex']) {
+    writeFileSync(join(bin, r), '#!/bin/sh\n[ "$1" = --version ] && echo 1.2.3\nexit 0\n');
+    chmodSync(join(bin, r), 0o755);
+  }
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     NODE_OPTIONS: '',
+    HARNESS_CLAUDE_BIN: join(bin, 'claude'),
+    HARNESS_CODEX_BIN: join(bin, 'codex'),
+    CLAUDECODE: '1',
     HARNESS_STATE_HOME: join(scratch, 'state-home'),
     GIT_AUTHOR_NAME: 't',
     GIT_AUTHOR_EMAIL: 't@t',
     GIT_COMMITTER_NAME: 't',
     GIT_COMMITTER_EMAIL: 't@t',
   };
+  delete env.CODEX_THREAD_ID;
+  for (const [k, value] of Object.entries(overrides))
+    if (value === undefined) delete env[k];
+    else env[k] = value;
   const git = (...args: string[]) =>
     execFileSync('git', args, { cwd: root, encoding: 'utf8', env }).trim();
   git('init', '-q', '-b', 'main');
@@ -218,4 +234,39 @@ test('H1-02: вход — не корень Git, state внутри, неодн�
   const foreign = p.harness('status', '--state', p.scratch, '--plan');
   assert.equal(foreign.status, exitCodes.input);
   assert.equal(existsSync(join(p.root, '.harness')), false);
+});
+
+test('init --lead/--review/--model через CLI: неверные значения — exit 2; без ведущего — NOT_READY lead-unknown exit 3; --human называет решения', () => {
+  const p = project(undefined, { CLAUDECODE: undefined });
+  for (const args of [
+    ['--lead', 'fixture'],
+    ['--review', 'maybe'],
+    ['--model', ' '],
+  ]) {
+    const bad = p.harness('init', '--repository', p.root, '--plan', ...args);
+    assert.equal(bad.status, exitCodes.input, args.join(' ') + bad.stdout);
+  }
+  const unknown = p.harness('init', '--repository', p.root, '--plan');
+  assert.equal(unknown.status, exitCodes.refused, unknown.stdout);
+  assert.equal(unknown.json.error.code, 'NOT_READY');
+  assert.deepEqual(unknown.json.error.issues, [{ path: ['--lead'], message: 'lead-unknown' }]);
+  const human = p.harness(
+    'init',
+    '--repository',
+    p.root,
+    '--plan',
+    '--human',
+    '--lead',
+    'codex',
+    '--review',
+    'same',
+    '--model',
+    'm-1',
+  );
+  assert.equal(human.status, exitCodes.ok, human.stdout + human.stderr);
+  assert.match(human.stdout, /\nlead: codex \(option\)\n/);
+  assert.match(human.stdout, /\nreview: same \(option\)\n/);
+  assert.match(human.stdout, /\nwarning review-same-vendor: /);
+  const foreign = p.harness('status', '--state', p.scratch, '--lead', 'codex');
+  assert.equal(foreign.status, exitCodes.input, '--lead — флаг init');
 });
