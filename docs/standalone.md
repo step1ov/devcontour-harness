@@ -136,7 +136,9 @@ realpath корня, поэтому повтор и новая сессия на
 `"gateTimeoutFloorMs": 240000` и, для pnpm, `"dependencyStore": { "manager": "pnpm" }`
 у репозитория. Снять слой: уберите эти поля из `.harness/policy.json`,
 удалите локальный `.harness/project.json` и повторите `init` без `--lean` с
-прежними `--writer` и `--state` — manifest запишется заново, без слоя.
+прежними `--profile`, `--writer` и `--state` — manifest запишется заново, без
+слоя. Без `--profile` профиль снова определяется по lockfile и может молча
+смениться другим.
 
 Свой профиль подключает слой через `"extends": ["pnpm-frozen", "lean"]`.
 Сверку копии seed можно ограничить переменной `HARNESS_DIGEST_THREADS`
