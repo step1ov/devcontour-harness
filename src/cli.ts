@@ -41,6 +41,7 @@ import { cliAdapter } from './agents/cli-adapter.ts';
 import { initProject, initText } from './init/project.ts';
 import { leanMismatch, leanText, switchLean } from './init/lean.ts';
 import { diagnoseState, explainText } from './explain/diagnose.ts';
+import { statusText } from './control/status.ts';
 import { planCheck, planRequestOf } from './planning/check.ts';
 import { checkJsonBytes } from './catalog/bytes.ts';
 import { isSharedOperation, sharedOperations } from './catalog/shared.ts';
@@ -326,7 +327,7 @@ const flagOwners = {
   lead: ['init'],
   review: ['init'],
   model: ['init'],
-  human: ['init', 'lean', 'explain', 'plan-request', 'gates'],
+  human: ['init', 'lean', 'status', 'explain', 'plan-request', 'gates'],
   draft: ['plan-check'],
   basis: ['plan-check'],
   brief: ['plan-request', 'plan-check'],
@@ -367,6 +368,7 @@ const flagOwners = {
 const presenters: Partial<Record<CliCommand, (data: never) => string>> = {
   init: initText,
   lean: leanText,
+  status: statusText,
   explain: explainText,
   'plan-request': (data: { prompt: string }) => data.prompt + '\n',
   gates: gatesText,

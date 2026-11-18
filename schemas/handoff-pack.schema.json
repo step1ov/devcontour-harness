@@ -1063,6 +1063,11 @@
         "additionalProperties": false
       }
     },
+    "interruptions": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
     "budgets": {
       "type": "object",
       "properties": {

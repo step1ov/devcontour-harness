@@ -304,7 +304,14 @@ export {
   type HandoffSource,
 } from './handoff/index.ts';
 // Состояние доски над движком и политикой хоста (`Harness.status` — та же функция).
-export { statusOf, type StatusSource } from './control/status.ts';
+export {
+  statusOf,
+  statusText,
+  attemptSummaryView,
+  attemptSummaries,
+  attemptsByWork,
+  type StatusSource,
+} from './control/status.ts';
 export {
   inspectPath,
   checkDestination,
@@ -332,7 +339,19 @@ export {
   type GitFacts,
   type InspectProjectOptions,
 } from './init/inspect.ts';
-export { diagnoseState, type DiagnoseOptions } from './explain/diagnose.ts';
-export { stopInputsOf, type StopInputOptions, type StopSource } from './explain/state.ts';
+export {
+  diagnoseState,
+  explainText,
+  EXPLAIN_ATTEMPT_ROWS,
+  type DiagnoseOptions,
+  type ExplainData,
+  type AttemptSummaryRow,
+} from './explain/diagnose.ts';
+export {
+  stopInputsOf,
+  repairJobOf,
+  type StopInputOptions,
+  type StopSource,
+} from './explain/state.ts';
 export * from './planning/index.ts';
 export * from './catalog/index.ts';

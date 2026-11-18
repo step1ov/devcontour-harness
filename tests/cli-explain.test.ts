@@ -187,6 +187,10 @@ async function explain(
     const head = `${d.workId ?? '—'} ${d.code} [${d.cause}/${d.phase}] → ${d.actor ?? '—'}: ${d.action}`;
     assert.ok(human.stdout.includes(head + '\n  ' + d.message), `--human: ${head}`);
   }
+  // Сводка попыток: строка на поручение выбора в разделе «Попытки».
+  assert.ok(data.attempts?.length, 'explain: сводка попыток');
+  for (const r of data.attempts ?? [])
+    assert.ok(human.stdout.includes(`  ${r.workId}: ${r.line}\n`), `--human: попытки ${r.workId}`);
   assert.deepEqual(snapshot(p), before, 'explain ничего не меняет');
   return data.diagnoses;
 }
@@ -501,6 +505,10 @@ test('H1-03/H1-05: нет state — NOT_FOUND, каталог не создан;
   assert.equal(human.status, r.status);
   assert.deepEqual(JSON.parse(human.stdout), r.json, 'отказ при --human — тот же конверт');
   assert.equal(existsSync(missing), false);
-  // --human только у init и explain.
-  assert.equal(p.harness(['status', '--state', missing, '--human']).status, exitCodes.input);
+  // --human у status (сводка попыток): отказ — тот же JSON-конверт; у events --human нет.
+  const status = p.json(['status', '--state', missing]);
+  const statusHuman = p.harness(['status', '--state', missing, '--human']);
+  assert.equal(statusHuman.status, status.status);
+  assert.deepEqual(JSON.parse(statusHuman.stdout), status.json);
+  assert.equal(p.harness(['events', '--state', missing, '--human']).status, exitCodes.input);
 });

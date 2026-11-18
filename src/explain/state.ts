@@ -79,6 +79,46 @@ export function nextRunControl(h: { readonly engine: Engine }, v: ExecutionView)
   return { control, lifted };
 }
 
+/**
+ * Задание графа, чей бюджет восстановлений действует для работы, — одно
+ * правило для `explain`, сводки попыток `status` и прогноза восстановления:
+ * задание, которое продолжит работу (`workflows.continues`); иначе в режиме
+ * agent при устаревшем согласовании работы — новое задание, которое начнёт
+ * run (`repairs: 0`); иначе — нет. Возвращает функцию `(graphId, work)`;
+ * задания и ответы `continues` читаются один раз на граф.
+ */
+export function repairJobOf(
+  h: Pick<StopSource, 'engine' | 'policy' | 'workflows'>,
+  v: ExecutionView,
+  options: {
+    jobs?: readonly WorkflowJob[];
+    reconfigureApplies?: boolean;
+    staleOf?: (w: WorkState) => string | undefined;
+  } = {},
+): (graphId: string, w: WorkState) => Pick<WorkflowJob, 'repairs'> | undefined {
+  let jobs = options.jobs;
+  const all = () => (jobs ??= h.workflows.list().filter((j) => j.kind === 'graph'));
+  let reconfigureApplies = options.reconfigureApplies;
+  const applies = () => (reconfigureApplies ??= h.engine.reconfigureApplies(v));
+  let staleness: ((w: WorkState) => string | undefined) | undefined = options.staleOf;
+  const staleOf = (w: WorkState) => (staleness ??= h.engine.approvalStaleness(v))(w);
+  const agentMode = h.policy.approvalMode === 'agent';
+  const live = new Map<string, WorkflowJob | undefined>();
+  return (graphId, w) => {
+    if (!live.has(graphId))
+      live.set(
+        graphId,
+        all().find(
+          (j) => j.id === graphId && h.workflows.continues(j, v, { reconfigureApplies: applies() }),
+        ),
+      );
+    const job = live.get(graphId);
+    if (job) return job;
+    if (agentMode && staleOf(w) && all().some((j) => j.id === graphId)) return { repairs: 0 };
+    return undefined;
+  };
+}
+
 const phaseOf: Partial<Record<WorkStatus, StopPhase>> = {
   running: 'implementation',
   verifying: 'gates',
@@ -180,15 +220,7 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
     const staleness = h.engine.approvalStaleness(v);
     const staleById = memo((id: string) => staleness(byId.get(id)!));
     const staleOf = (w: WorkState) => staleById(w.id);
-    const liveJob = memo((graphId: string) =>
-      jobs.find((j) => j.id === graphId && h.workflows.continues(j, v, { reconfigureApplies })),
-    );
-    const jobOf = (graphId: string, w: WorkState) => {
-      const live = liveJob(graphId);
-      if (live) return live;
-      if (agentMode && staleOf(w) && jobs.some((j) => j.id === graphId)) return { repairs: 0 };
-      return undefined;
-    };
+    const jobOf = repairJobOf(h, v, { jobs, reconfigureApplies, staleOf });
     // Прогноз по каждому графу — с первой работой графа в порядке состояния;
     // снятие паузы runtime — глобальное (clearFailure), ему нужны все графы.
     const firstOf = new Map<string, WorkState>();

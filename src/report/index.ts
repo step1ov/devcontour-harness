@@ -6,6 +6,10 @@
 export {
   valueReport,
   failureBucketOf,
+  attemptSummaryOf,
+  attemptSummaryLine,
+  acceptingAttemptOf,
+  interruptedByShutdown,
   assertReportBytes,
   callCostKnown,
   reportPath,
@@ -15,6 +19,8 @@ export {
   failureBucketNames,
   type ValueReportInput,
   type ValueReportOptions,
+  type AttemptSummary,
+  type AttemptBudget,
 } from './compute.ts';
 export { reportMarkdown } from './markdown.ts';
 export { reportHtml } from './html.ts';

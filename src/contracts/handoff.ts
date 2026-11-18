@@ -243,7 +243,12 @@ export const handoffPackSchema = z.strictObject({
    * действие не `wait`) — первыми.
    */
   stops: z.array(stopSchema),
-  /** Последние провалы попыток, новые первыми: класс отказа, код и причина. */
+  /**
+   * Последние провалы попыток, новые первыми: класс отказа, код и причина.
+   * Попытки, прерванные штатной остановкой (`interrupted: 'shutdown'`), не
+   * провалы: они исключены до предела `HANDOFF_LIMITS.failures` и
+   * сосчитаны в `interruptions`.
+   */
   failures: z.array(
     z.strictObject({
       runId: name,
@@ -259,6 +264,12 @@ export const handoffPackSchema = z.strictObject({
       error: text.optional(),
     }),
   ),
+  /**
+   * Попытки, прерванные штатной остановкой controller (`failed` с
+   * `interrupted: 'shutdown'`): поручение вернулось в очередь, следующая
+   * попытка продолжает работу. Нет поля — таких попыток нет.
+   */
+  interruptions: z.number().int().positive().optional(),
   /**
    * Бюджеты по записям вызовов: расход против предела. `reportedUsd` —
    * сообщённое runtime, `estimatedUsd` — оценка по тарифу; `complete: false`
