@@ -74,10 +74,13 @@ export type ExecutionField = (typeof EXECUTION_FIELDS)[number];
 /**
  * Поля исполнения, которые `init` записал бы в эту политику из профиля
  * `profile`: параллельность и нижняя граница предела gate — профиля (нет в
- * профиле — поля нет, действует умолчание схемы); срок фазы — профиля, а если
- * его (или умолчания) не хватает пределам шагов политики — наибольшая сумма
- * фазы с запасом (`requiredRunTimeoutMs`), не меньше срока профиля. Прочие
- * поля политики не меняются; поля исполнения самой политики не учитываются.
+ * профиле — поля нет, действует умолчание схемы). Срок фазы: без срока в
+ * профиле — умолчание схемы, а если его не хватает пределам шагов политики —
+ * наибольшая сумма фазы с запасом (`requiredRunTimeoutMs`). Срок профиля или
+ * слоя (`lean`) — нижняя граница, а не предел: требуемый с запасом больше —
+ * записывается он. Так слой никогда не даёт срока меньше, чем `init` без
+ * слоя: граница gate слоя только поднимает пределы шагов. Прочие поля
+ * политики не меняются; поля исполнения самой политики не учитываются.
  */
 export function executionFieldsOf(
   policy: z.input<typeof executionPolicySchema>,
@@ -87,11 +90,34 @@ export function executionFieldsOf(
   for (const field of EXECUTION_FIELDS) delete base[field];
   Object.assign(base, profileExecution(profile));
   const budget = executionPolicySchema.parse(base);
-  if (timeBudgetWarnings(budget).length)
-    base.runTimeoutMs = Math.max(requiredRunTimeoutMs(budget), profile.runTimeoutMs ?? 0);
+  if (profile.runTimeoutMs !== undefined)
+    base.runTimeoutMs = Math.max(requiredRunTimeoutMs(budget), profile.runTimeoutMs);
+  else if (timeBudgetWarnings(budget).length) base.runTimeoutMs = requiredRunTimeoutMs(budget);
   return Object.fromEntries(
     EXECUTION_FIELDS.flatMap((f) => (base[f] === undefined ? [] : [[f, base[f]]])),
   );
+}
+
+/**
+ * Срок фазы, который `init` до 0.1.0-alpha.51 выводил для профиля со своим
+ * сроком (слой `lean`): срок профиля, пока пределам шагов его хватает без
+ * запаса, иначе требуемый с запасом. Нет срока в профиле или значение то же,
+ * что у `executionFieldsOf`, — `undefined`. По нему `harness lean` и `doctor`
+ * отличают политику прежнего `init --lean` от ручной правки.
+ */
+export function priorLayerRunTimeoutMs(
+  policy: z.input<typeof executionPolicySchema>,
+  profile: ResolvedProfile,
+): number | undefined {
+  if (profile.runTimeoutMs === undefined) return undefined;
+  const base: z.input<typeof executionPolicySchema> = { ...policy };
+  for (const field of EXECUTION_FIELDS) delete base[field];
+  Object.assign(base, profileExecution(profile));
+  const budget = executionPolicySchema.parse(base);
+  const prior = timeBudgetWarnings(budget).length
+    ? Math.max(requiredRunTimeoutMs(budget), profile.runTimeoutMs)
+    : profile.runTimeoutMs;
+  return prior === executionFieldsOf(policy, profile).runTimeoutMs ? undefined : prior;
 }
 
 /**
@@ -106,12 +132,13 @@ export function executionFieldsOf(
  * с явным `vendor: same-vendor-allowed`. `model` закрепляется на каждом writer
  * и reviewer; одна модель у runtime двух вендоров — отказ. Параллельность и
  * нижняя граница предела gate — профиля (`profileExecution`); approval,
- * isolation и прочие бюджеты — умолчания схемы. Срок фазы (`runTimeoutMs`) —
- * профиля (`profileExecution`), иначе умолчание схемы, пока его хватает
- * пределам шагов профиля (`timeBudgetWarnings`); иначе он записывается явно:
- * наибольшая сумма фазы с запасом 25 %, округлённая вверх до 5 минут
- * (`requiredRunTimeoutMs`), и не меньше `runTimeoutMs` профиля. Политика
- * профиля, которой хватало срока, не меняется.
+ * isolation и прочие бюджеты — умолчания схемы. Срок фазы (`runTimeoutMs`,
+ * `executionFieldsOf`): без срока в профиле — умолчание схемы, пока его
+ * хватает пределам шагов профиля (`timeBudgetWarnings`); иначе он
+ * записывается явно: наибольшая сумма фазы с запасом 25 %, округлённая вверх
+ * до 5 минут (`requiredRunTimeoutMs`). Срок профиля или слоя — нижняя
+ * граница: требуемый с запасом больше — записывается он. Политика профиля без
+ * срока, которой хватало умолчания, не меняется.
  */
 export function generatePolicy(input: {
   profile: ResolvedProfile;

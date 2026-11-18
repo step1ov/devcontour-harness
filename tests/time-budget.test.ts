@@ -254,7 +254,7 @@ test('init: политика каждого встроенного профил�
   assert.ok(explicit.length < ids.length, 'профилям, которым хватало умолчания, поле не пишется');
 });
 
-test('init: со слоем lean срок фазы — наибольший из срока слоя и требуемого пределами шагов', () => {
+test('init: со слоем lean срок фазы — не меньше 30 мин слоя и не меньше срока init без слоя; больше — требуемый с запасом', () => {
   const ids = readdirSync(new URL('../profiles/', import.meta.url))
     .filter((f) => f.endsWith('.json'))
     .map((f) => f.slice(0, -5));
@@ -263,23 +263,21 @@ test('init: со слоем lean срок фазы — наибольший из
     const profile = resolveProfile(id, { layers: ['lean'] });
     const generated = generatePolicy({ profile, writer: 'claude' });
     const policy = executionPolicySchema.parse(generated.input);
+    const plain = executionPolicySchema.parse(
+      generatePolicy({ profile: resolveProfile(id), writer: 'claude' }).input,
+    );
     assert.deepEqual(timeBudgetWarnings(policy), [], id);
-    // Срок слоя (30 мин) не уменьшается выводом; больше он — только когда
-    // срока слоя пределам шагов не хватало, и тогда это требуемый срок.
+    // Срок слоя (30 мин) — нижняя граница: требуемый пределами шагов с
+    // запасом больше — он, даже если сроку слоя хватало суммы без запаса.
     assert.equal(profile.runTimeoutMs, 30 * MIN);
-    assert.ok(policy.runTimeoutMs >= profile.runTimeoutMs, id);
-    if (policy.runTimeoutMs > profile.runTimeoutMs) {
-      const layerOnly = executionPolicySchema.parse({
-        ...generated.input,
-        runTimeoutMs: profile.runTimeoutMs,
-      });
-      assert.ok(timeBudgetWarnings(layerOnly).length, id + ': срока слоя не хватало');
-      assert.equal(policy.runTimeoutMs, requiredRunTimeoutMs(layerOnly), id);
-      raised.push(id);
-    }
+    assert.equal(policy.runTimeoutMs, Math.max(30 * MIN, requiredRunTimeoutMs(policy)), id);
+    // Слой никогда не даёт срока меньше, чем init без слоя.
+    assert.ok(policy.runTimeoutMs >= plain.runTimeoutMs, id);
+    if (policy.runTimeoutMs > profile.runTimeoutMs) raised.push(id);
   }
-  // Профилям, которым хватало 30 мин слоя, срок слоя и остаётся.
+  // Профилям, которым хватает 30 мин с запасом, срок слоя и остаётся.
   assert.ok(raised.length < ids.length, raised.join(', '));
+  assert.ok(raised.includes('npm-ci') && raised.includes('pnpm-frozen'), raised.join(', '));
 });
 
 test('doctor --policy называет превышение срока фазы в warnings, не в problems', async () => {

@@ -148,10 +148,13 @@ for (const stack of ['npm', 'pnpm'] as const)
     const policy = p.parsed();
     assert.equal(policy.concurrency, 1);
     assert.equal(policy.gateTimeoutFloorMs, 240_000);
-    assert.equal(policy.runTimeoutMs, 1_800_000);
+    // Срок слоя (30 мин) — нижняя граница: вывод из пределов шагов с запасом
+    // (с запуском повтора интеграции после падения исполнителя тестов) больше,
+    // и он тот же у init без слоя и с ним.
+    assert.equal(policy.runTimeoutMs, 2_100_000);
     assert.equal(policy.repositories[0]!.dependencyStore !== undefined, stack === 'pnpm');
     const fields = on.changes.filter((c) => c.file === 'policy').map((c) => c.field);
-    // runTimeoutMs профиля без слоя уже 1800000 (вывод из пределов шагов): не меняется.
+    // runTimeoutMs профиля без слоя уже 2100000 (вывод из пределов шагов): не меняется.
     assert.deepEqual(fields, [
       'concurrency',
       'gateTimeoutFloorMs',
@@ -216,9 +219,10 @@ test('lean: явные параллельность 3 и срок 20 мин — 
   );
   assert.deepEqual(
     on.changes.find((c) => c.field === 'runTimeoutMs'),
-    { file: 'policy', field: 'runTimeoutMs', before: 1_200_000, after: 1_800_000 },
+    // Не 30 мин слоя: требуемый пределами шагов с запасом больше.
+    { file: 'policy', field: 'runTimeoutMs', before: 1_200_000, after: 2_100_000 },
   );
-  assert.equal(p.parsed().runTimeoutMs, 1_800_000);
+  assert.equal(p.parsed().runTimeoutMs, 2_100_000);
   await p.lean({ off: true });
   assert.deepEqual(p.read(), original);
   assert.equal(p.parsed().concurrency, 3);
@@ -569,7 +573,8 @@ test('lean --off после init --lean и поднятых пределов gat
     plan.notes.join('\n'),
   );
   await p.lean({ off: true });
-  assert.equal(p.parsed().runTimeoutMs, 1_800_000);
+  // Срок init --lean и init без слоя один (2100000): выключение его не меняет.
+  assert.equal(p.parsed().runTimeoutMs, 2_100_000);
 });
 
 test('lean --off: dependencyStore, настроенный вручную после включения, — PATH_CONFLICT', async () => {
@@ -634,4 +639,33 @@ test('lean после прерванного --off проекта init --lean: �
   assert.equal(kept.length, 1, kept.join('\n'));
   assert.match(kept[0]!, /concurrency = 3 .*задано вручную.*сохраняет.*PATH_CONFLICT.*намеренно/);
   assert.equal((await p.lean()).changed, false);
+});
+
+test('lean: политика init --lean до 0.1.0-alpha.51 (срок слоя 1800000) — не ручная правка: doctor молчит, включение поднимает срок, выключение даёт init без слоя', async () => {
+  for (const stack of ['npm', 'pnpm'] as const) {
+    const p = await project(stack, { lean: true });
+    const plain = await project(stack);
+    assert.equal(p.parsed().runTimeoutMs, 2_100_000, stack);
+    // Прежний init --lean: срок слоя, которого пределам шагов хватало без запаса.
+    const legacy = JSON.parse(p.read().policy) as Record<string, unknown>;
+    legacy.runTimeoutMs = 1_800_000;
+    writeFileSync(p.policyPath, JSON.stringify(legacy, null, 2) + '\n');
+    assert.deepEqual(leanMismatch(p.policyPath), [], stack);
+    const plan = await p.lean({ plan: true });
+    assert.deepEqual(plan.problems, [], stack);
+    assert.deepEqual(
+      plan.changes.map((c) => [c.field, c.before, c.after]),
+      [['runTimeoutMs', 1_800_000, 2_100_000]],
+      stack,
+    );
+    const off = await p.lean({ off: true });
+    assert.deepEqual(off.problems, [], stack);
+    assert.equal(p.read().policy, plain.read().policy, stack);
+    // Ручная правка срока по-прежнему видна.
+    const q = await project(stack, { lean: true });
+    const edited = JSON.parse(q.read().policy) as Record<string, unknown>;
+    edited.runTimeoutMs = 2_400_000;
+    writeFileSync(q.policyPath, JSON.stringify(edited, null, 2) + '\n');
+    assert.match(leanMismatch(q.policyPath).join('\n'), /LEAN_MISMATCH: .*runTimeoutMs/, stack);
+  }
 });

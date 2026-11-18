@@ -35,6 +35,7 @@ import {
   EXECUTION_FIELDS,
   PROJECT_REPOSITORY_ID,
   executionFieldsOf,
+  priorLayerRunTimeoutMs,
   type ExecutionField,
 } from './policy.ts';
 import { gitRoot, projectFile } from './project.ts';
@@ -346,10 +347,10 @@ export async function switchLeanWith(
         Math.max(before.gateTimeoutFloorMs ?? 0, lean.gateTimeoutFloorMs ?? 0) || undefined,
       runTimeoutMs: Math.max(before.runTimeoutMs, lean.runTimeoutMs ?? 0),
     };
-    // Срок фазы — не меньше требуемого пределами шагов с новой границей gate.
+    // Срок фазы — не меньше требуемого пределами шагов с новой границей gate
+    // (с запасом, как у init --lean: срок слоя — нижняя граница).
     const candidate = executionPolicySchema.parse({ ...raw, ...definedOf(wanted) });
-    if (timeBudgetWarnings(candidate).length)
-      wanted.runTimeoutMs = Math.max(requiredRunTimeoutMs(candidate), wanted.runTimeoutMs!);
+    wanted.runTimeoutMs = Math.max(requiredRunTimeoutMs(candidate), wanted.runTimeoutMs!);
     const changes: LeanRecord['policy'] = [];
     for (const field of EXECUTION_FIELDS) {
       const value = wanted[field];
@@ -391,10 +392,17 @@ export async function switchLeanWith(
       const base = withoutExecution(raw);
       const expected = executionFieldsOf(base, lean);
       const without = executionFieldsOf(base, plain);
+      // Срок прежнего init --lean (до 0.1.0-alpha.51) — не правка: он
+      // поднимается до нынешнего вывода.
+      const prior = priorLayerRunTimeoutMs(base, lean);
       for (const field of EXECUTION_FIELDS) {
         const current = raw[field];
         if (current === expected[field]) continue;
-        if (current === without[field]) target.set(field, expected[field]);
+        if (
+          current === without[field] ||
+          (field === 'runTimeoutMs' && prior !== undefined && current === prior)
+        )
+          target.set(field, expected[field]);
         else
           notes.push(
             `${field}: слой lean (init --lean) дал бы ${expected[field] ?? 'нет поля'}, сейчас ${String(current ?? 'нет поля')} — правка сохраняется`,
@@ -434,8 +442,17 @@ export async function switchLeanWith(
       const base = withoutExecution(raw);
       const withLean = executionFieldsOf(base, lean);
       const without = executionFieldsOf(base, plain);
+      const prior = priorLayerRunTimeoutMs(base, lean);
       for (const field of EXECUTION_FIELDS) {
         const current = raw[field];
+        // Срок прежнего init --lean (до 0.1.0-alpha.51) — значение слоя.
+        const layered =
+          current === withLean[field] ||
+          (field === 'runTimeoutMs' && prior !== undefined && current === prior);
+        if (layered) {
+          if (current !== without[field]) target.set(field, without[field]);
+          continue;
+        }
         // Слой не задаёт поле, если с ним и без него init вывел бы одно значение.
         if (withLean[field] === without[field] || current === without[field]) continue;
         if (current === withLean[field]) target.set(field, without[field]);
@@ -649,11 +666,15 @@ export function leanMismatch(policyPath: string): string[] {
         });
       const plain = resolve(others);
       const base = withoutExecution(raw);
-      const withLean = executionFieldsOf(base, resolve([...others, LAYER]));
+      const layered = resolve([...others, LAYER]);
+      const withLean = executionFieldsOf(base, layered);
       const without = executionFieldsOf(base, plain);
+      // Срок прежнего init --lean (до 0.1.0-alpha.51) — не правка и не половина.
+      const prior = priorLayerRunTimeoutMs(base, layered);
       for (const field of EXECUTION_FIELDS) {
         const current = raw[field];
         if (current === withLean[field]) continue;
+        if (field === 'runTimeoutMs' && prior !== undefined && current === prior) continue;
         (current === without[field] ? half : kept).push(
           `${field} = ${show(current)} (слой дал бы ${show(withLean[field])})`,
         );
