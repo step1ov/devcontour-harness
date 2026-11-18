@@ -351,10 +351,13 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.artifacts;
       return rest;
     }
-    // Аддитивное поле doctor — действующий корень рабочих деревьев (alpha.23).
+    // Аддитивные поля doctor — действующий корень рабочих деревьев (alpha.23),
+    // проба портов ресурсов и предупреждения (порт только на wildcard).
     if (k === 'properties' && v && typeof v === 'object' && 'checkouts' in v && 'sandbox' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.checkouts;
+      delete rest.ports;
+      delete rest.warnings;
       return rest;
     }
     // Аддитивные поля ответов коннектора: пакеты `tasks[].context` (alpha.13) и
@@ -407,6 +410,9 @@ test('H3-01: прежние команды и схемы их данных не 
     JSON.stringify(data.doctor).includes('"checkouts"'),
     'doctor объявляет корень рабочих деревьев',
   );
+  // Хеш H2 вырезает пробу портов и предупреждения doctor: объявление держит эта проверка.
+  assert.ok(JSON.stringify(data.doctor).includes('"ports"'), 'doctor: проба портов');
+  assert.ok(JSON.stringify(data.doctor).includes('"warnings"'), 'doctor: предупреждения');
   assert.ok(
     JSON.stringify(data['source-snapshot']).includes('"localContext"'),
     'source-snapshot объявляет пакеты контекста',
