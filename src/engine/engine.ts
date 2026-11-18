@@ -73,10 +73,13 @@ import {
   callAttribution,
   callBudgets,
   legacyGroupCall,
+  recordWorkOf,
+  uncoveredAttempts,
   workBudgets,
   workBudgetsOf,
   type BudgetContext,
   type CallMeta,
+  type RecordWork,
 } from './budget.ts';
 import { callDurationMs, callOwner, callRecords, ownerGone } from './usage.ts';
 import { MAX_NEUTRAL_FAILURES, failureFingerprint, repairPolicy } from './failure.ts';
@@ -918,10 +921,15 @@ export class Engine {
       for (const w of ready) if (w.budgetBlock) tx.putWork({ ...w, budgetBlock: undefined });
       return;
     }
+    if (!ready.length) return;
     const c = this.budgetContext();
-    const records = callRecords(tx);
+    // Общее для всех готовых (записи вызовов, общий бюджет, бюджеты групп,
+    // попытки без учёта вызовов) — один раз на выдачу; ответ по поручению —
+    // тот же, что у `workBudgets`.
+    const usage = this.usageOf(tx);
+    const statuses = workBudgetsOf(c, tx, usage.records, Date.now(), usage);
     for (const w of ready) {
-      const blocking = blockingBudget(c, workBudgets(c, tx, w.id, records));
+      const blocking = blockingBudget(c, statuses(w.id));
       if (!blocking) {
         if (w.budgetBlock) tx.putWork({ ...w, budgetBlock: undefined });
         continue;
@@ -940,6 +948,41 @@ export class Engine {
         },
       });
     }
+  }
+
+  /**
+   * Записи вызовов и попытки без учёта вызовов — по версии данных хранилища.
+   * Пока версия та же, история не перечитывается: такт выдачи на простое
+   * иначе разбирал бы все прежние попытки и записи вызовов. Версия меняется
+   * каждой фиксацией с записями модели или локальными записями
+   * (`ExecutionView.dataVersion`), поэтому кэш верен только для чтения до
+   * записей своей транзакции: вызывается в начале выдачи, до них. Без
+   * `dataVersion` — каждый раз заново. Значения только для чтения.
+   */
+  private usageMemo?: {
+    version: number;
+    records: CallRecord[];
+    uncovered: AttemptState[];
+    workOf: RecordWork;
+  };
+  private usageOf(tx: ExecutionView) {
+    const version = tx.dataVersion?.();
+    if (version !== undefined && this.usageMemo?.version === version) return this.usageMemo;
+    const records = callRecords(tx);
+    // Поручения прежних записей (по попытке) — сразу: кэш переживает этот
+    // вид, и вопрос к закрытой транзакции позже был бы ошибкой.
+    const lookup = recordWorkOf(tx);
+    const works = new Map(
+      records.filter((r) => r.workId === undefined).map((r) => [r, lookup(r)] as const),
+    );
+    const usage = {
+      version: version ?? -1,
+      records,
+      uncovered: uncoveredAttempts(tx, records),
+      workOf: (r: CallRecord) => r.workId ?? works.get(r),
+    };
+    if (version !== undefined) this.usageMemo = usage;
+    return usage;
   }
 
   /**
@@ -1263,7 +1306,7 @@ export class Engine {
       // Идущая совместная проверка закрепила комбинацию SHA: новые попытки
       // сдвинули бы target ref под ней.
       if (this.liveJoint(tx)) return undefined;
-      const active = tx.attempts().filter((a) => a.status === 'active');
+      const active = activeOf(tx);
       if (active.length >= this.policy.concurrency) return undefined;
       this.budgetBlocks(tx);
       // Применённый ответ, основание которого сменилось до выдачи, не
