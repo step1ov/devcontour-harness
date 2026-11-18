@@ -971,6 +971,30 @@ until)` и метка документа `leaseRows: true`. Первая стр�
 Подробности — [contracts](contracts.md#executionpolicy). Строгая схема прежних
 версий поле не принимает: при откате уберите его из политики.
 
+### Следующий выпуск
+
+Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`). Политики
+без новых полей профиля и их digest не меняются.
+
+- **Слой `lean` для слабой машины.** Встроенные слои профилей лежат в
+  `profiles/layers/` и подключаются через `extends` или
+  `resolveProfile(ref, { layers })`; `builtinProfiles()` их не перечисляет.
+  `lean` задаёт `concurrency: 1` и новое поле профиля `gateTimeoutFloorMs`
+  (240000, слои берут наибольшее). `generatePolicy` переносит `concurrency`
+  и `gateTimeoutFloorMs` профиля в политику — например, политика из профиля
+  `mobile-maestro` теперь получает его `concurrency: 1`.
+  `harness init --lean` применяет слой, записывает его в manifest
+  (`profile.layers`, необязательное поле) и для `pnpm-lock.yaml` добавляет
+  `dependencyStore`. Строгая схема прежних версий не принимает
+  `gateTimeoutFloorMs` в профиле и `profile.layers` в manifest: при откате
+  уберите их. Каталог `capabilities` меняется (флаг `--lean` у `init`).
+- **Советы `doctor`.** С политикой ответ получает необязательное поле
+  `warnings`: `DEPENDENCY_STORE_RECOMMENDED` и `LOW_RESOURCES`
+  ([диагностика](toolchains.md#диагностика-doctor-и-preflight)); `problems` и
+  exit code не меняются. `hostLoad.resources()` — память, производительные
+  ядра и тепловое ограничение macOS.
+- **`HARNESS_DIGEST_THREADS`** (1–8) ограничивает потоки сверки копии seed.
+
 ## Перед обновлением
 
 1. **Остановить записывающих.** Запретить новые выдачи (`harness pause`),

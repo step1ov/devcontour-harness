@@ -1628,13 +1628,21 @@ Exit 1 не используется: им Node завершает процес�
 ### StackProfile
 
 Переносимый профиль стека (`schemas/stack-profile.schema.json`):
-`{id, version, extends[], capabilities[], gates[], prepare[], environment?, lifecycle?, protectedPaths[], generatedPaths[], concurrency?, runTimeoutMs?, roles{}, contextPacks[]}`.
-`extends` — встроенный ID (`profiles/<id>.json` пакета) или относительный
+`{id, version, extends[], capabilities[], gates[], prepare[], environment?, lifecycle?, protectedPaths[], generatedPaths[], concurrency?, runTimeoutMs?, gateTimeoutFloorMs?, roles{}, contextPacks[]}`.
+`extends` — встроенный ID (`profiles/<id>.json` пакета, иначе слой
+`profiles/layers/<id>.json`) или относительный
 `./file.json` внутри репозитория; не глубже 16 слоёв и не больше 32 файлов,
 без symlink и выхода за корень, файл до 128 KiB. `resolveProfile` только
 читает манифесты: gates, подготовка, возможности и пути складываются,
 окружение и lifecycle задаёт один слой (иначе конфликт), параллельность —
-наименьшая, время попытки — наибольшее, роли и `contextPacks` — по ID.
+наименьшая, время попытки и `gateTimeoutFloorMs` — наибольшие, роли и
+`contextPacks` — по ID. Встроенный слой — часть профиля без gates, сам по себе
+не разрешается и в `builtinProfiles()` не входит; `lean` задаёт
+`concurrency: 1` и `gateTimeoutFloorMs: 240000`. `resolveProfile(ref, { layers: ["lean"] })`
+складывает встроенные слои поверх листа (они входят в closure и digest);
+`harness init --lean` делает это и записывает слои в manifest
+(`profile.layers`). `generatePolicy` переносит `concurrency` и
+`gateTimeoutFloorMs` профиля в политику; без них политика и её digest прежние.
 Итог обязан иметь test gate с JUnit; `requirement-source` зарезервирован.
 Файлы локальных слоёв становятся защищёнными путями. Digest: один встроенный
 файл — sha256 его байтов (так закреплены прежние потребители, встроенные
