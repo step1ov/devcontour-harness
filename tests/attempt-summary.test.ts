@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { cliDataSchemas, type AttemptState } from '../src/contracts/index.ts';
-import { diagnoseState, explainText } from '../src/explain/diagnose.ts';
+import { EXPLAIN_ATTEMPT_ROWS, diagnoseState, explainText } from '../src/explain/diagnose.ts';
 import { attemptSummaryLine, attemptSummaryOf, statusText, valueReport } from '../src/index.ts';
 import { graphOf, ready } from './engine-fixture.ts';
 import { hsetup } from './harness-fixture.ts';
@@ -76,6 +76,31 @@ test('attemptSummaryLine: факты без оценки времени; ост�
   assert.doesNotMatch(line, /мин|час|ETA|осталось времени/i);
 });
 
+test('attemptSummaryLine: на пределе незасчитанных отказов — не «осталось попыток»', () => {
+  const summary = {
+    total: 3,
+    active: 0,
+    failed: 3,
+    failures: [{ key: 'environment' as const, count: 3 }],
+    timeouts: 0,
+    interrupted: 0,
+    accepted: 0,
+  };
+  const line = attemptSummaryLine(summary, {
+    attempts: { used: 0, max: 3 },
+    neutral: { used: 3, max: 3 },
+  });
+  assert.equal(
+    line,
+    'попыток 3; отказов 3 (environment 3); по времени 0; прервано остановкой 0; принято 0; исчерпан предел незасчитанных отказов 3 из 3: повтор — только со сбросом',
+  );
+  assert.doesNotMatch(line, /осталось попыток/);
+  assert.match(
+    attemptSummaryLine(summary, { attempts: { used: 0, max: 3 }, neutral: { used: 2, max: 3 } }),
+    /осталось попыток 3 из 3$/,
+  );
+});
+
 /** Поручение `w`: gate, таймаут, прерывание, ревью, затем принятая попытка; `x` без попыток. */
 function board() {
   const ctx = hsetup({
@@ -109,6 +134,17 @@ function board() {
   run = claim();
   h.engine.fail(run.id, run.token, 'review rejected', { kind: 'review' });
   h.engine.retry('w');
+  // Отказ окружения не засчитан (попытка возвращена, neutralFailures + 1);
+  // он ставит выдачу на паузу runtime — снимаем её.
+  run = claim();
+  h.engine.fail(run.id, run.token, 'sandbox died', { kind: 'environment' });
+  h.engine.resume();
+  h.engine.retry('w');
+  // Зависание засчитано, класс — окружение (не время).
+  run = claim();
+  h.engine.fail(run.id, run.token, 'stalled', { kind: 'stalled' });
+  h.engine.resume();
+  h.engine.retry('w');
   run = claim();
   // Принятая попытка записью хранилища (приёмка — `engine.finish` после gates и ревью).
   h.store.transact('run.phase', (tx) => {
@@ -131,7 +167,6 @@ test('status и explain: строка сводки на поручение со�
   try {
     const status = cliDataSchemas.status.parse(h.status());
     const w = status.works.find((x) => x.id === 'w')!.attemptSummary!;
-    const used = h.engine.read((v) => v.work('w')!.attempt);
     assert.deepEqual(
       {
         total: w.total,
@@ -143,11 +178,12 @@ test('status и explain: строка сводки на поручение со�
         accepted: w.accepted,
       },
       {
-        total: 5,
+        total: 7,
         active: 0,
-        failed: 3,
+        failed: 5,
         failures: [
           { key: 'defect', count: 2 },
+          { key: 'environment', count: 2 },
           { key: 'time-limit', count: 1 },
         ],
         timeouts: 1,
@@ -155,15 +191,17 @@ test('status и explain: строка сводки на поручение со�
         accepted: 1,
       },
     );
-    assert.deepEqual(w.attempts, { used, max: 6, left: 6 - used });
+    // Засчитаны gate, таймаут, ревью, зависание и принятая; прерывание и окружение — нет.
+    assert.deepEqual(w.attempts, { used: 5, max: 6, left: 1 });
+    assert.deepEqual(w.neutral, { used: 1, max: 3 });
     assert.deepEqual(w.repairs, {
       used: 0,
       budget: ctx.policy.repairBudget,
       left: ctx.policy.repairBudget,
     });
-    assert.match(
+    assert.equal(
       w.line,
-      /^попыток 5; отказов 3 \(defect 2, time-limit 1\); по времени 1; прервано остановкой 1; принято 1; /,
+      `попыток 7; отказов 5 (defect 2, environment 2, time-limit 1); по времени 1; прервано остановкой 1; принято 1; осталось попыток 1 из 6, восстановлений группы ${ctx.policy.repairBudget} из ${ctx.policy.repairBudget}`,
     );
     const x = status.works.find((y) => y.id === 'x')!.attemptSummary!;
     assert.equal(x.total, 0);
@@ -211,4 +249,29 @@ test('status и explain: строка сводки на поручение со�
   } finally {
     if (open) h.close();
   }
+});
+
+test('explain: строк сводки не больше EXPLAIN_ATTEMPT_ROWS, остальные — attemptsTruncated', async () => {
+  const ctx = hsetup({ scenario: {} });
+  const h = ctx.open();
+  ready(
+    h.engine,
+    graphOf(
+      Object.fromEntries(Array.from({ length: EXPLAIN_ATTEMPT_ROWS + 2 }, (_, i) => [`w${i}`, []])),
+    ),
+  );
+  h.close();
+  const data = await diagnoseState({
+    stateDir: ctx.state,
+    policy: ctx.policy,
+    baseDir: ctx.repo.dir,
+    adapters: {
+      claude: cliAdapter('claude', { executable: bin('fake-claude'), toolProfiles: {} }),
+      codex: cliAdapter('codex', { executable: bin('fake-codex'), toolProfiles: {} }),
+    },
+  });
+  assert.ok(cliDataSchemas.explain.safeParse(data).success);
+  assert.equal(data.attempts?.length, EXPLAIN_ATTEMPT_ROWS);
+  assert.equal(data.attemptsTruncated, 2);
+  assert.match(explainText(data), /… и ещё поручений: 2\n$/);
 });

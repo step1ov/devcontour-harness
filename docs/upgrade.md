@@ -1221,12 +1221,18 @@ until)` и метка документа `leaseRows: true`. Первая стр�
   необязательное поле `works[].attemptSummary`, у `explain` — `attempts[]`:
   попыток всего, отказы по корзинам отчёта, таймауты, прерывания штатной
   остановкой (не отказы), принятые, остаток попыток и восстановлений группы и
-  строка `line`. Числа — `attemptSummaryOf` из `devcontour-harness/report`,
+  строка `line`; `neutral` — незасчитанные отказы и их предел (на пределе
+  строка говорит «исчерпан предел незасчитанных отказов»); у `explain` —
+  не больше 100 строк и `attemptsTruncated`. Числа — `attemptSummaryOf` из
+  `devcontour-harness/report`,
   та же функция, что строки поручений отчёта. `status` принимает `--human`
   (строка на поручение), `explain --human` печатает раздел «Попытки».
   Библиотека: `attemptSummaryOf`, `attemptSummaryLine`, `acceptingAttemptOf`,
-  `attemptSummaryView`, `liveGraphJobs`, `statusText`, `explainText`;
-  необязательное `StatusSource.workflows` даёт остаток восстановлений. Хост,
+  `interruptedByShutdown`, `attemptSummaryView`, `attemptSummaries`,
+  `attemptsByWork`, `repairJobOf` (одно правило задания группы для
+  `explain` и `status`), `statusText`, `explainText`; необязательное
+  `StatusSource.workflows` (тот же адаптер, что у `StopSource`) даёт остаток
+  восстановлений. Хост,
   который сравнивает ответ `status` побайтно с прежним, убирает новое поле.
   Откат: строгие схемы прежних версий не принимают `attemptSummary` и
   `attempts`, а `status --human` — `INVALID_INPUT`.

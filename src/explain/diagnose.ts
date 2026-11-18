@@ -4,7 +4,7 @@ import type { ExecutionPolicy, RuntimeName } from '../contracts/index.ts';
 import type { RuntimeAdapter } from '../contracts/ports.ts';
 import { doctor } from '../control/doctor.ts';
 import { Harness } from '../control/harness.ts';
-import { attemptSummaryView, liveGraphJobs } from '../control/status.ts';
+import { attemptSummaries, type attemptSummaryView } from '../control/status.ts';
 import { explainStop, type StopDiagnosis, type StopInput } from '../projections/stop.ts';
 import { stopInputsOf } from './state.ts';
 
@@ -36,23 +36,27 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
   });
   let stateInputs: StopInput[];
   let attempts: AttemptSummaryRow[];
+  let attemptsTruncated: number;
   try {
     stateInputs = stopInputsOf(h, {
       maxAttempts: policy.maxAttempts,
       repairBudget: policy.repairBudget,
       ...(options.workId !== undefined ? { workId: options.workId } : {}),
     });
-    // Сводка попыток каждого поручения выбора — та же, что `status`.
-    attempts = h.engine.read((v) => {
-      const jobs = liveGraphJobs(h.workflows);
-      return v
+    // Сводка попыток каждого поручения выбора — та же, что `status`; строк
+    // не больше `EXPLAIN_ATTEMPT_ROWS`, остальные — числом.
+    ({ attempts, attemptsTruncated } = h.engine.read((v) => {
+      const summaryOf = attemptSummaries(h, v);
+      const works = v
         .works()
-        .filter((w) => options.workId === undefined || w.id === options.workId)
-        .map((w) => ({
-          workId: w.id,
-          ...attemptSummaryView(w, v.attempts(w.id), policy, jobs.get(w.graphId)),
-        }));
-    });
+        .filter((w) => options.workId === undefined || w.id === options.workId);
+      return {
+        attempts: works
+          .slice(0, EXPLAIN_ATTEMPT_ROWS)
+          .map((w) => ({ workId: w.id, ...summaryOf(w) })),
+        attemptsTruncated: Math.max(0, works.length - EXPLAIN_ATTEMPT_ROWS),
+      };
+    }));
   } finally {
     h.close();
   }
@@ -68,7 +72,11 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
     // Не назначенный политикой runtime не нужен: его отсутствие не останавливает работу.
     .filter((r) => !r.available && !('reason' in r))
     .map((r) => ({ kind: 'runtime', runtime: { runtime: r.runtime, available: false } }));
-  return { diagnoses: [...runtimes, ...stateInputs].map(explainStop), attempts };
+  return {
+    diagnoses: [...runtimes, ...stateInputs].map(explainStop),
+    attempts,
+    ...(attemptsTruncated ? { attemptsTruncated } : {}),
+  };
 }
 
 /** Строка сводки попыток поручения в ответе `explain`. */
@@ -78,7 +86,11 @@ export type AttemptSummaryRow = { workId: string } & ReturnType<typeof attemptSu
 export interface ExplainData {
   diagnoses: StopDiagnosis[];
   attempts?: AttemptSummaryRow[];
+  attemptsTruncated?: number;
 }
+
+/** Предел строк сводки попыток в ответе `explain`; остальные — `attemptsTruncated`. */
+export const EXPLAIN_ATTEMPT_ROWS = 100;
 
 const link = (e: StopDiagnosis['evidence'][number]) =>
   `${e.kind}:${e.id}${e.sha ? '@' + e.sha : ''}`;
@@ -97,7 +109,11 @@ export function explainText(data: ExplainData): string {
         .join('\n')
         .concat('\n')
     : 'Остановок нет.\n';
-  return stops + attemptsText(data.attempts ?? []);
+  return (
+    stops +
+    attemptsText(data.attempts ?? []) +
+    (data.attemptsTruncated ? `  … и ещё поручений: ${data.attemptsTruncated}\n` : '')
+  );
 }
 
 /** Раздел «Попытки» текста `--human`: строка сводки на поручение. */

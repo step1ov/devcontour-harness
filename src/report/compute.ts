@@ -275,6 +275,15 @@ export function acceptingAttemptOf(
     : undefined;
 }
 
+/**
+ * Попытка прервана штатной остановкой controller: не отказ, работа
+ * продолжается. Признак пишет только отказ попытки (`Engine.fail`), поэтому
+ * у отменённой или истёкшей его нет; правило одно для отчёта, сводки
+ * попыток и пакета передачи (`interruptions`).
+ */
+export const interruptedByShutdown = (a: Pick<AttemptState, 'status' | 'interrupted'>) =>
+  finishedStatuses.has(a.status) && a.interrupted === 'shutdown';
+
 /** Сводка попыток одного поручения (`attemptSummaryOf`). */
 export interface AttemptSummary {
   /** Записей попыток всего — как `works[].attempts` отчёта. */
@@ -317,17 +326,25 @@ export function attemptSummaryOf(
     failed: sum(failures.map((f) => f.count)),
     failures,
     timeouts: buckets.get('time-limit') ?? 0,
-    interrupted: attempts.filter(
-      (a) => finishedStatuses.has(a.status) && a.interrupted === 'shutdown',
-    ).length,
+    interrupted: attempts.filter(interruptedByShutdown).length,
     accepted: acceptingAttemptOf(work, attempts) ? 1 : 0,
   };
 }
 
 /** Остаток пределов поручения рядом со сводкой попыток. */
 export interface AttemptBudget {
-  /** Засчитанные попытки поручения (`WorkState.attempt`) и предел политики. */
+  /**
+   * Засчитанные попытки поручения (`WorkState.attempt`) и предел политики.
+   * Идущая попытка уже засчитана; закончившаяся незасчитанным отказом
+   * возвращается.
+   */
   attempts: { used: number; max: number };
+  /**
+   * Незасчитанные отказы (`WorkState.neutralFailures`) и их предел
+   * `MAX_NEUTRAL_FAILURES`: на пределе повтор — только со сбросом человека,
+   * сколько бы попыток ни осталось.
+   */
+  neutral?: { used: number; max: number };
   /** Восстановления задания графа (`repairs`) и `repairBudget`; нет — задания нет. */
   repairs?: { used: number; budget: number };
 }
@@ -345,7 +362,9 @@ export function attemptSummaryLine(s: AttemptSummary, budget: AttemptBudget): st
     `по времени ${s.timeouts}`,
     `прервано остановкой ${s.interrupted}`,
     `принято ${s.accepted}`,
-    `осталось попыток ${left(budget.attempts.used, budget.attempts.max)} из ${budget.attempts.max}` +
+    (budget.neutral && budget.neutral.used >= budget.neutral.max
+      ? `исчерпан предел незасчитанных отказов ${budget.neutral.used} из ${budget.neutral.max}: повтор — только со сбросом`
+      : `осталось попыток ${left(budget.attempts.used, budget.attempts.max)} из ${budget.attempts.max}`) +
       (budget.repairs
         ? `, восстановлений группы ${left(budget.repairs.used, budget.repairs.budget)} из ${budget.repairs.budget}`
         : ''),

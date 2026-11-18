@@ -308,7 +308,8 @@ export {
   statusOf,
   statusText,
   attemptSummaryView,
-  liveGraphJobs,
+  attemptSummaries,
+  attemptsByWork,
   type StatusSource,
 } from './control/status.ts';
 export {
@@ -341,10 +342,16 @@ export {
 export {
   diagnoseState,
   explainText,
+  EXPLAIN_ATTEMPT_ROWS,
   type DiagnoseOptions,
   type ExplainData,
   type AttemptSummaryRow,
 } from './explain/diagnose.ts';
-export { stopInputsOf, type StopInputOptions, type StopSource } from './explain/state.ts';
+export {
+  stopInputsOf,
+  repairJobOf,
+  type StopInputOptions,
+  type StopSource,
+} from './explain/state.ts';
 export * from './planning/index.ts';
 export * from './catalog/index.ts';

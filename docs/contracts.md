@@ -1936,11 +1936,19 @@ gate, `dependency-network: … Шаг <id>: …` у шага `prepare`. Текс
   (`interrupted: shutdown`): не отказы, работа продолжается;
 - `accepted` — 1, если поручение принято (последняя успешная попытка
   принятого поручения);
-- `attempts` — `used` (засчитанные, `attempt` поручения), `max`
-  (`maxAttempts`) и `left`; `repairs` — `used`, `budget` (`repairBudget`) и
-  `left` действующего задания графа (нет задания — нет поля);
+- `attempts` — `used` (засчитанные, `attempt` поручения; идущая попытка
+  уже засчитана, закончившаяся незасчитанным отказом возвращается), `max`
+  (`maxAttempts`) и `left`; `neutral` — незасчитанные отказы
+  (`neutralFailures`) и их предел `MAX_NEUTRAL_FAILURES`: на пределе повтор
+  только со сбросом, и `line` называет это вместо остатка попыток;
+  `repairs` — `used`, `budget` (`repairBudget`) и `left` задания графа по
+  правилу `explain` (`repairJobOf`: задание, которое продолжит работу, или
+  новое при устаревшем согласовании в режиме agent; нет — нет поля);
 - `line` — та же сводка одной строкой (`attemptSummaryLine`), её же печатают
   `status --human` и `explain --human` (раздел «Попытки»).
+
+У `explain` строк не больше 100 (`EXPLAIN_ATTEMPT_ROWS`), остальные —
+числом `attemptsTruncated`. Попытки читаются одним проходом на чтение.
 
 Числа считает `attemptSummaryOf` (`devcontour-harness/report`) — та же
 функция, что строки поручений отчёта (`works.rows[].attempts`,

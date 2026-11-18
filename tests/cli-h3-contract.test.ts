@@ -446,6 +446,7 @@ test('H3-01: прежние команды и схемы их данных не 
     if (k === 'properties' && v && typeof v === 'object' && 'diagnoses' in v && 'attempts' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.attempts;
+      delete rest.attemptsTruncated;
       return rest;
     }
     // Аддитивное поле status — снимок наблюдателя `--detail`.

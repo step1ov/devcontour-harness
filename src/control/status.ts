@@ -12,7 +12,8 @@ import { attemptSummaryLine, attemptSummaryOf, type AttemptBudget } from '../rep
 import { budgetOverview } from '../engine/budget.ts';
 import type { Engine } from '../engine/engine.ts';
 import { requestsOf } from '../engine/input-requests.ts';
-import { nextRunControl } from '../explain/state.ts';
+import { MAX_NEUTRAL_FAILURES } from '../contracts/repair-policy.ts';
+import { nextRunControl, repairJobOf, type StopSource } from '../explain/state.ts';
 import {
   CLIP_DIAGNOSTIC,
   attemptView,
@@ -31,21 +32,36 @@ export interface StatusSource {
   readonly engine: Engine;
   readonly policy: ExecutionPolicy;
   /**
-   * Задания графов (`Harness.workflows`): с ними сводка попыток называет
-   * остаток восстановлений группы. Нет — сводка без `repairs`.
+   * Задания графов (`Harness.workflows`, тот же адаптер, что у
+   * `StopSource`): с ними сводка попыток называет остаток восстановлений
+   * группы по правилу `explain` (`repairJobOf`). Нет — сводка без `repairs`.
    */
-  readonly workflows?: { list(): readonly WorkflowJob[] };
+  readonly workflows?: StopSource['workflows'];
+}
+
+/** Попытки всех работ одним проходом по хранилищу (порядок — как у `v.attempts(id)`). */
+export function attemptsByWork(v: ExecutionView): (workId: string) => AttemptState[] {
+  const byWork = new Map<string, AttemptState[]>();
+  for (const a of v.attempts()) {
+    const list = byWork.get(a.workId);
+    if (list) list.push(a);
+    else byWork.set(a.workId, [a]);
+  }
+  return (workId) => byWork.get(workId) ?? [];
 }
 
 /**
- * Действующие задания графов по id: незавершённые и не устаревшие (бюджет
- * восстановлений устаревшего задания больше не расходуется).
+ * Сводки попыток работ одного чтения: попытки — одним проходом, задание
+ * группы — `repairJobOf` (как `explain`), если источник передал задания.
  */
-export function liveGraphJobs(workflows: StatusSource['workflows']): Map<string, WorkflowJob> {
-  const jobs = new Map<string, WorkflowJob>();
-  for (const j of workflows?.list() ?? [])
-    if (j.kind === 'graph' && j.status !== 'completed' && j.status !== 'stale') jobs.set(j.id, j);
-  return jobs;
+export function attemptSummaries(source: StatusSource, v: ExecutionView) {
+  const attemptsOf = attemptsByWork(v);
+  const workflows = source.workflows;
+  const jobOf = workflows
+    ? repairJobOf({ engine: source.engine, policy: source.policy, workflows }, v)
+    : undefined;
+  return (w: WorkState) =>
+    attemptSummaryView(w, attemptsOf(w.id), source.policy, jobOf?.(w.graphId, w));
 }
 
 /**
@@ -63,12 +79,14 @@ export function attemptSummaryView(
   const summary = attemptSummaryOf(work, attempts);
   const budget: AttemptBudget = {
     attempts: { used: work.attempt, max: policy.maxAttempts },
+    neutral: { used: work.neutralFailures ?? 0, max: MAX_NEUTRAL_FAILURES },
     ...(job ? { repairs: { used: job.repairs ?? 0, budget: policy.repairBudget } } : {}),
   };
   const left = (used: number, max: number) => Math.max(0, max - used);
   return {
     ...summary,
     attempts: { ...budget.attempts, left: left(work.attempt, policy.maxAttempts) },
+    neutral: budget.neutral!,
     ...(budget.repairs
       ? { repairs: { ...budget.repairs, left: left(budget.repairs.used, budget.repairs.budget) } }
       : {}),
@@ -88,48 +106,49 @@ export function statusOf(
   options: { detail?: boolean } = {},
 ) {
   const { engine } = source;
-  // Задания — внутри того же чтения: один снимок хранилища.
-  let jobs: Map<string, WorkflowJob> | undefined;
-  const jobOf = (graphId: string) => (jobs ??= liveGraphJobs(source.workflows)).get(graphId);
-  return engine.read((v) => ({
-    stateVersion: STATE_VERSION,
-    control: v.control(),
-    ...(v.controller() ? { controller: v.controller() } : {}),
-    graphs: v
-      .graphs()
-      .filter((g) => !graphId || g.id === graphId)
-      .map((g) => ({
-        id: g.id,
-        digest: g.digest,
-        source: g.graph.source,
-        approved: g.approval?.digest === g.digest,
+  // Задания и попытки — внутри того же чтения: один снимок хранилища.
+  return engine.read((v) => {
+    const summaryOf = attemptSummaries(source, v);
+    return {
+      stateVersion: STATE_VERSION,
+      control: v.control(),
+      ...(v.controller() ? { controller: v.controller() } : {}),
+      graphs: v
+        .graphs()
+        .filter((g) => !graphId || g.id === graphId)
+        .map((g) => ({
+          id: g.id,
+          digest: g.digest,
+          source: g.graph.source,
+          approved: g.approval?.digest === g.digest,
+        })),
+      works: v.works(graphId).map((w) => ({
+        id: w.id,
+        graphId: w.graphId,
+        status: w.status,
+        attempt: w.attempt,
+        ...(w.activeRunId ? { activeRunId: w.activeRunId } : {}),
+        ...((a) =>
+          a?.status === 'active' && a.liveness && a.liveness.state !== 'active'
+            ? { liveness: a.liveness.state }
+            : {})(w.activeRunId ? v.attempt(w.activeRunId) : undefined),
+        ...(w.resultSha ? { resultSha: w.resultSha } : {}),
+        // Вопрос исполнителя: ID, состояние, версия и серьёзность, без текста;
+        // неблокирующие запросы ведущему — числом.
+        // У итоговой работы вопрос — история: статус его не показывает.
+        ...((view) => ({
+          ...(view.input && w.status !== 'done' && w.status !== 'cancelled'
+            ? { input: view.input }
+            : {}),
+          ...(view.followUps ? { followUps: view.followUps } : {}),
+        }))(workInputOf(requestsOf(v, w))),
+        blockers: engine.blockers(w, v),
+        attemptSummary: summaryOf(w),
       })),
-    works: v.works(graphId).map((w) => ({
-      id: w.id,
-      graphId: w.graphId,
-      status: w.status,
-      attempt: w.attempt,
-      ...(w.activeRunId ? { activeRunId: w.activeRunId } : {}),
-      ...((a) =>
-        a?.status === 'active' && a.liveness && a.liveness.state !== 'active'
-          ? { liveness: a.liveness.state }
-          : {})(w.activeRunId ? v.attempt(w.activeRunId) : undefined),
-      ...(w.resultSha ? { resultSha: w.resultSha } : {}),
-      // Вопрос исполнителя: ID, состояние, версия и серьёзность, без текста;
-      // неблокирующие запросы ведущему — числом.
-      // У итоговой работы вопрос — история: статус его не показывает.
-      ...((view) => ({
-        ...(view.input && w.status !== 'done' && w.status !== 'cancelled'
-          ? { input: view.input }
-          : {}),
-        ...(view.followUps ? { followUps: view.followUps } : {}),
-      }))(workInputOf(requestsOf(v, w))),
-      blockers: engine.blockers(w, v),
-      attemptSummary: attemptSummaryView(w, v.attempts(w.id), source.policy, jobOf(w.graphId)),
-    })),
-    ...((budgets) => (budgets ? { budgets } : {}))(budgetOverview(engine.budgetContext(), v)),
-    ...(options.detail ? { detail: statusDetail(source, v, graphId) } : {}),
-  }));
+      ...((budgets) => (budgets ? { budgets } : {}))(budgetOverview(engine.budgetContext(), v)),
+      ...(options.detail ? { detail: statusDetail(source, v, graphId) } : {}),
+    };
+  });
 }
 
 function statusDetail(source: StatusSource, v: ExecutionView, graphId?: string) {

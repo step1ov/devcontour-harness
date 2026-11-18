@@ -9,6 +9,7 @@ export {
   attemptSummaryOf,
   attemptSummaryLine,
   acceptingAttemptOf,
+  interruptedByShutdown,
   assertReportBytes,
   callCostKnown,
   reportPath,

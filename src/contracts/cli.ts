@@ -1126,13 +1126,26 @@ export const attemptSummarySchema = z.strictObject({
   interrupted: z.number().int().min(0),
   /** 1 — поручение принято принявшей попыткой. */
   accepted: z.number().int().min(0).max(1),
-  /** Засчитанные попытки (`attempt` поручения), предел политики и остаток. */
+  /**
+   * Засчитанные попытки (`attempt` поручения), предел политики и остаток.
+   * `used` включает идущую попытку; закончившаяся незасчитанным отказом
+   * (окружение, вопрос, штатная остановка) возвращается.
+   */
   attempts: z.strictObject({
     used: z.number().int().min(0),
     max: z.number().int().positive(),
     left: z.number().int().min(0),
   }),
-  /** Восстановления незавершённого задания графа; нет — задания нет. */
+  /**
+   * Незасчитанные отказы поручения (`neutralFailures`) и их предел: на пределе
+   * повтор — только со сбросом человека, и `line` говорит это вместо остатка
+   * попыток.
+   */
+  neutral: z.strictObject({
+    used: z.number().int().min(0),
+    max: z.number().int().positive(),
+  }),
+  /** Восстановления задания графа по правилу `explain`; нет — задания нет. */
   repairs: z
     .strictObject({
       used: z.number().int().min(0),
@@ -1749,7 +1762,12 @@ export const leanDataSchema = z.strictObject({
 export const explainDataSchema = z.strictObject({
   diagnoses: z.array(stopDiagnosisSchema),
   /** Сводка попыток по каждому поручению выбора (`--work` — одно), в порядке состояния. */
-  attempts: z.array(z.strictObject({ workId: idSchema, ...attemptSummarySchema.shape })).optional(),
+  attempts: z
+    .array(z.strictObject({ workId: idSchema, ...attemptSummarySchema.shape }))
+    .max(100)
+    .optional(),
+  /** Поручений сверх предела строк `attempts` (100); нет поля — все показаны. */
+  attemptsTruncated: z.number().int().positive().optional(),
 });
 
 const requestIdSchema = inputRequestSchema.shape.id;
