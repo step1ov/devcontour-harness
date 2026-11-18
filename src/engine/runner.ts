@@ -2444,6 +2444,8 @@ export class Runner {
     consumer?: { repositoryId: string; dependencies: DependencySnapshot[] },
     /** ID записи провала, которую повторяет этот запуск (`recheckIntegration`). */
     recheck?: string,
+    /** Каталог лога повтора: у запуска после падения исполнителя — свой. */
+    recheckDir = 'recheck',
   ) {
     // Время проверок потребителя — отдельная стадия: в метриках области оно
     // не смешивается с собственными gates поручения. Повтор — тоже своя
@@ -2465,6 +2467,7 @@ export class Runner {
         execution,
         consumer,
         recheck,
+        recheckDir,
       ),
     );
   }
@@ -2587,7 +2590,7 @@ export class Runner {
       if (!failed || failed.passed || namesFailingCases(failed) || !candidatePassed || spent)
         throw error;
       budget.recheck = false;
-      const recheck = () =>
+      const recheck = (dir?: string) =>
         this.gate(
           attempt,
           cwd,
@@ -2599,6 +2602,7 @@ export class Runner {
           execution,
           undefined,
           failed.id,
+          dir,
         );
       try {
         await recheck();
@@ -2621,7 +2625,7 @@ export class Runner {
           })
         )
           throw again;
-        await recheck();
+        await recheck('recheck-2');
       }
     }
   }
@@ -2776,6 +2780,7 @@ export class Runner {
     execution: ReturnType<typeof executionEnvironment>,
     consumer?: { repositoryId: string; dependencies: DependencySnapshot[] },
     recheck?: string,
+    recheckDir = 'recheck',
   ) {
     // Генеративный gate — всегда; gate эталонных наборов — когда манифест
     // поручения ждёт от него отчёта (без договора — прежний уровень).
@@ -2800,11 +2805,12 @@ export class Runner {
       phase,
       gate,
       // Лог и отчёт повтора — в своём каталоге: первая запись ссылается на
-      // свой лог по digest, и повтор его не перезаписывает.
+      // свой лог по digest, и повтор его не перезаписывает (запуск после
+      // падения исполнителя — тоже: `recheck-2`).
       artifactDir: consumer
         ? join(artifacts, phase, 'consumer', consumer.repositoryId)
         : recheck
-          ? join(artifacts, phase, 'recheck')
+          ? join(artifacts, phase, recheckDir)
           : join(artifacts, phase),
       ...(recheck ? { recheck } : {}),
       // Дерево потребителя — не база попытки: его входы установки не сверить.
