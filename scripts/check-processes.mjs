@@ -4,6 +4,9 @@ import { readdir, readFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const MARK = 'DEVCONTOUR_CHECK_INVOCATION';
+/** Срок одного снимка ps: под нагрузкой (load 80–110, swap) ps отвечает
+ * десятками секунд; срок короче обрывал снимок, а с ним и проверку. */
+export const PS_TIMEOUT_MS = 30_000;
 const ps = (args) =>
   new Promise((resolve, reject) => {
     execFile(
@@ -12,11 +15,16 @@ const ps = (args) =>
       {
         encoding: 'utf8',
         env: { ...process.env, LC_ALL: 'C' },
-        timeout: 2000,
+        timeout: PS_TIMEOUT_MS,
         maxBuffer: 64_000_000,
       },
-      (error, stdout) =>
-        error ? reject(new Error('Cannot inventory check processes')) : resolve(stdout),
+      (error, stdout) => {
+        if (!error) return resolve(stdout);
+        const why = error.killed
+          ? `ps timed out after ${PS_TIMEOUT_MS} ms`
+          : (error.code ?? error.signal ?? error.message);
+        reject(new Error(`Cannot inventory check processes (${why})`));
+      },
     );
   });
 
@@ -44,7 +52,7 @@ async function linuxProcess(pid, mark) {
   }
 }
 
-async function inventory(mark) {
+export async function inventory(mark) {
   if (process.platform === 'win32') return [];
   if (process.platform === 'linux') {
     const rows = await Promise.all(
@@ -110,29 +118,103 @@ export function signalSameProcesses(candidates, rows, signal, kill = process.kil
       }
 }
 
-/** Own tagged descendants as well as children that leave their original process group. */
-export function checkProcesses() {
+/** Повторы одного снимка: отказ ps под нагрузкой обычно преходящ. */
+export const INVENTORY_RETRY = { attempts: 3, backoffMs: 1000 };
+
+/** A snapshot retried with doubling backoff; the last error is thrown. */
+export async function inventoryWithRetry(
+  read,
+  mark,
+  {
+    attempts = INVENTORY_RETRY.attempts,
+    backoffMs = INVENTORY_RETRY.backoffMs,
+    sleep = delay,
+  } = {},
+) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await read(mark);
+    } catch (error) {
+      if (attempt >= attempts) throw error;
+      await sleep(backoffMs * 2 ** (attempt - 1));
+    }
+  }
+}
+
+/** Own tagged descendants as well as children that leave their original process group.
+ *
+ * An unavailable process inventory never stops or fails the check: a failed
+ * background round is skipped with a warning, and a cleanup without a
+ * snapshot falls back to the check's own live children (their ChildProcess
+ * tracks their exit, so this never signals a reused PID). Leaked descendants
+ * are still found and stopped whenever ps answers.
+ *
+ * Options are for tests: `inventory(mark)` replaces the process snapshot,
+ * `retry` the retry policy, `warn` the warning sink.
+ */
+export function checkProcesses({
+  inventory: read = inventory,
+  retry = {},
+  warn = console.error,
+} = {}) {
   const mark = randomUUID();
   const children = new Set();
   const seen = new Map();
   let stopping = false;
   let pending;
   let polling;
+  /** Background rounds skipped in a row because no snapshot could be taken. */
+  let skipped = 0;
+  /** Why the check was stopped when no step's own failure stopped it. */
+  let cause;
+  const snapshot = (withMark) => inventoryWithRetry(read, withMark ? mark : undefined, retry);
   const remember = (rows) => {
     const found = ownedProcesses(rows, seen);
     for (const [pid, start] of found) seen.set(pid, start);
     return found;
   };
-  const sample = async (withMark = false) => remember(await inventory(withMark ? mark : undefined));
+  const sample = async (withMark = false) => remember(await snapshot(withMark));
+  const live = () =>
+    [...children].filter((child) => child.exitCode === null && child.signalCode === null);
+  const signalChildren = (signal) => {
+    for (const child of live())
+      try {
+        // A live leader keeps its process group id from being reused.
+        if (process.platform === 'win32') child.kill(signal);
+        else process.kill(-child.pid, signal);
+      } catch {
+        try {
+          child.kill(signal);
+        } catch {
+          /* Already exited. */
+        }
+      }
+  };
+  /** Best-effort cleanup without a snapshot: only the check's own live children. */
+  const stopChildren = async (signal) => {
+    signalChildren(signal);
+    const started = Date.now();
+    while (live().length && Date.now() - started < 5000) await delay(100);
+    if (live().length) signalChildren('SIGKILL');
+  };
   const sweep = async (initialSignal) => {
     const started = Date.now();
     for (;;) {
-      const candidates = await sample(true);
-      if (!candidates.size) return;
-      // Do not signal an old PID/group after a grace timer: re-read identities.
-      // Keep the invocation marker in this fresh snapshot. Coarse lstart plus
-      // a historical PID can describe an unrelated replacement process.
-      const current = await inventory(mark);
+      let candidates;
+      let current;
+      try {
+        candidates = await sample(true);
+        if (!candidates.size) return;
+        // Do not signal an old PID/group after a grace timer: re-read identities.
+        // Keep the invocation marker in this fresh snapshot. Coarse lstart plus
+        // a historical PID can describe an unrelated replacement process.
+        current = await snapshot(true);
+      } catch (error) {
+        warn(
+          `warning: ${error.message}; leaked-process cleanup skipped, stopping only the check's own running steps`,
+        );
+        return stopChildren(initialSignal);
+      }
       signalSameProcesses(
         candidates,
         current,
@@ -143,15 +225,19 @@ export function checkProcesses() {
       await delay(100);
     }
   };
-  const stop = (signal = 'SIGTERM') => {
+  // `reason` names the cause of a stop that is not a step's own exit (a
+  // spawn failure); only the first stop's reason is kept.
+  const stop = (signal = 'SIGTERM', reason) => {
     if (pending) return pending;
     stopping = true;
+    cause = reason;
     clearInterval(poll);
     // ChildProcess tracks its own exit; unlike kill(-oldPid), this does not
     // reuse a remembered process group after the leader has exited.
     if (process.platform === 'win32') for (const child of children) child.kill(signal);
     pending = sweep(signal).catch((error) => {
       process.exitCode ||= 1;
+      cause ??= error.message;
       console.error(error.message);
       for (const child of children) {
         child.kill('SIGKILL');
@@ -172,11 +258,18 @@ export function checkProcesses() {
   const poll = setInterval(() => {
     if (polling || stopping) return;
     polling = sample()
-      .catch((error) => {
-        process.exitCode ||= 1;
-        console.error(error.message);
-        return stop();
-      })
+      .then(
+        () => {
+          if (skipped)
+            warn(`check processes: inventory available again after ${skipped} skipped round(s)`);
+          skipped = 0;
+        },
+        (error) => {
+          // An unavailable snapshot is not a failure of the check: skip the round.
+          if (!skipped++)
+            warn(`warning: ${error.message}; skipping this inventory round, steps keep running`);
+        },
+      )
       .finally(() => {
         polling = undefined;
       });
@@ -188,6 +281,14 @@ export function checkProcesses() {
     get stopping() {
       return stopping;
     },
+    /** The reason of a stop no step's own exit caused, or of a failed cleanup. */
+    get cause() {
+      return cause;
+    },
+    /** Background inventory rounds skipped in a row (0 while ps answers). */
+    get skippedRounds() {
+      return skipped;
+    },
     spawn(command, args, options = {}) {
       if (stopping) return undefined;
       const child = spawn(command, args, {
@@ -197,14 +298,13 @@ export function checkProcesses() {
       });
       children.add(child);
       child.once('spawn', () => {
+        // An early record only helps; the marker finds the child later anyway.
         void sample(true).catch((error) => {
-          process.exitCode ||= 1;
-          console.error(error.message);
-          return stop();
+          warn(`warning: ${error.message}; the new step keeps running`);
         });
       });
-      child.once('error', () => {
-        void stop();
+      child.once('error', (error) => {
+        void stop('SIGTERM', `Cannot start ${command}: ${error.message}`);
       });
       // A detached descendant can keep stdio open, so do not wait for close.
       child.once('exit', (code) => {

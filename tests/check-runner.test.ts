@@ -253,3 +253,137 @@ test('Darwin process snapshots do not signal same-second PID replacements with a
   );
   assert.deepEqual(killed, [901, 902], 'history alone cannot authorize killing an unmarked orphan');
 });
+
+type InventoryRow = { pid: number; ppid: number; start: string; marked: boolean };
+type CheckProcessesModule = {
+  inventory(this: void, mark?: string): Promise<InventoryRow[]>;
+  inventoryWithRetry(
+    this: void,
+    read: (mark?: string) => Promise<InventoryRow[]>,
+    mark: string | undefined,
+    retry: { attempts?: number; backoffMs?: number; sleep?: (ms: number) => Promise<unknown> },
+  ): Promise<InventoryRow[]>;
+  checkProcesses(
+    this: void,
+    options?: {
+      inventory?: (mark?: string) => Promise<InventoryRow[]>;
+      retry?: { attempts?: number; backoffMs?: number };
+      warn?: (message: string) => void;
+    },
+  ): {
+    readonly stopping: boolean;
+    readonly cause: string | undefined;
+    readonly skippedRounds: number;
+    spawn(
+      command: string,
+      args: string[],
+      options?: object,
+    ): import('node:child_process').ChildProcess | undefined;
+    dispose(): Promise<void>;
+  };
+};
+const checkProcessesModule = async () => {
+  const module: string = '../scripts/check-processes.mjs';
+  return (await import(module)) as CheckProcessesModule;
+};
+const unavailable = () => new Error('Cannot inventory check processes (stub)');
+const exited = (child: import('node:child_process').ChildProcess) =>
+  new Promise<[number | null, NodeJS.Signals | null]>((done) =>
+    child.once('exit', (code, signal) => done([code, signal])),
+  );
+
+test('A process snapshot that fails a few times is retried with backoff and then succeeds', async () => {
+  const { inventoryWithRetry } = await checkProcessesModule();
+  const rows = [{ pid: 901, ppid: 1, start: 'x', marked: true }];
+  let calls = 0;
+  const sleeps: number[] = [];
+  const read = () => (++calls <= 2 ? Promise.reject(unavailable()) : Promise.resolve(rows));
+  const sleep = (ms: number) => {
+    sleeps.push(ms);
+    return Promise.resolve();
+  };
+  assert.equal(await inventoryWithRetry(read, 'm', { attempts: 3, backoffMs: 100, sleep }), rows);
+  assert.equal(calls, 3);
+  assert.deepEqual(sleeps, [100, 200], 'backoff doubles between attempts');
+  calls = 0;
+  await assert.rejects(
+    inventoryWithRetry(read, 'm', { attempts: 2, backoffMs: 1, sleep }),
+    /Cannot inventory/,
+    'past its attempts the last error is reported to the caller',
+  );
+});
+
+test('An unavailable process inventory never stops a step: rounds are skipped with a warning', async () => {
+  const { checkProcesses } = await checkProcessesModule();
+  const warnings: string[] = [];
+  const exitCode = process.exitCode;
+  const processes = checkProcesses({
+    inventory: () => Promise.reject(unavailable()),
+    retry: { attempts: 2, backoffMs: 1 },
+    warn: (message) => warnings.push(message),
+  });
+  try {
+    const child = processes.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1500)'], {
+      stdio: 'ignore',
+    });
+    assert.ok(child);
+    assert.deepEqual(await exited(child), [0, null], 'the step ran to its own end');
+    assert.equal(processes.stopping, false, 'no snapshot failure stopped the check');
+    assert.ok(processes.skippedRounds > 1, `rounds were skipped: ${processes.skippedRounds}`);
+  } finally {
+    await processes.dispose();
+  }
+  assert.equal(processes.cause, undefined);
+  assert.equal(process.exitCode, exitCode, 'an unavailable inventory does not fail the check');
+  assert.equal(
+    warnings.filter((w) => /skipping this inventory round/.test(w)).length,
+    1,
+    `one warning per failing streak: ${warnings.join('\n')}`,
+  );
+  assert.ok(
+    warnings.some((w) => /leaked-process cleanup skipped/.test(w)),
+    'the final cleanup names what it could not do',
+  );
+});
+
+test('After transient snapshot failures a leaked descendant is still found and stopped', async () => {
+  const { checkProcesses, inventory } = await checkProcessesModule();
+  let failures = 4;
+  const warnings: string[] = [];
+  const processes = checkProcesses({
+    inventory: (mark) => (failures-- > 0 ? Promise.reject(unavailable()) : inventory(mark)),
+    retry: { attempts: 3, backoffMs: 1 },
+    warn: (message) => warnings.push(message),
+  });
+  let leaked: number | undefined;
+  try {
+    // The step leaves a detached descendant behind and exits successfully.
+    const child = processes.spawn(
+      process.execPath,
+      [
+        '-e',
+        `const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+         c.unref(); console.log(c.pid);`,
+      ],
+      { stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    assert.ok(child);
+    let out = '';
+    child.stdout?.on('data', (chunk: Buffer) => (out += String(chunk)));
+    assert.deepEqual(await exited(child), [0, null]);
+    await until(() => /^\d+\s*$/.test(out), 'the descendant pid is printed');
+    leaked = Number(out.trim());
+    assert.ok(alive(leaked));
+    await delay(600); // background rounds recover from the failing streak
+  } finally {
+    await processes.dispose();
+  }
+  assert.ok(leaked);
+  await until(() => !alive(leaked), 'the leaked descendant is stopped by the final sweep');
+  assert.equal(processes.stopping, true);
+  assert.equal(processes.cause, undefined);
+  assert.ok(
+    !warnings.some((w) => /cleanup skipped/.test(w)),
+    `ps answered at the end: ${warnings.join('\n')}`,
+  );
+});
