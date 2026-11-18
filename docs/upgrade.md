@@ -971,6 +971,43 @@ until)` и метка документа `leaseRows: true`. Первая стр�
 Подробности — [contracts](contracts.md#executionpolicy). Строгая схема прежних
 версий поле не принимает: при откате уберите его из политики.
 
+### Следующий выпуск: перенос evidence кандидата на интеграцию (`integrationReuse`)
+
+Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`). Без
+`integrationReuse` политика, её `policyDigest` и `executionDigest` и
+исполнение не меняются (закреплено тестом совместимости).
+
+- **Политика.** Необязательное `integrationReuse: 'identical-tree'`: при
+  дереве integration-коммита, равном дереву кандидата, gates, прошедшие на
+  кандидате, пишутся на интеграции взятыми из него (`reusedEvidence`), а при
+  полном переносе окружение интеграции не поднимается. Правила и правило
+  доверия — [contracts](contracts.md#перенос-evidence-кандидата-на-интеграцию).
+  Поле входит в `executionDigest`: включение повторяет согласования,
+  привязанные к digest.
+- **Новые поля.** `EvidenceRecord.reusedEvidence` и
+  `evidence[].reusedEvidence` ссылки receipt
+  (`{evidenceId, phase: 'candidate', sha, tree}`), `ReceiverContext.trees`,
+  `attempt.gate.reusedFrom`, `gates.reused` проекции попытки,
+  `environment.reused` отчёта об эффекте, порт
+  `ExecutionHost.capabilities.integrationReuse` и
+  `integrationReuseProblem(policy, host)`. Standalone-хост объявляет
+  поддержку сам.
+- **Хост, который ведёт попытки сам (DevContour).** Пока хост не объявил
+  `capabilities: { integrationReuse: true }`, `new Engine` с такой политикой
+  отказывает `INVALID_INPUT` — результат не будет отклонён хостом после
+  приёмки. Чтобы объявить поддержку, хост: сохраняет поле `reusedEvidence`
+  записи gate и события `attempt.gate.reusedFrom` (строгие схемы хоста);
+  передаёт в `resultProblems`/`assertResult` `trees`, вычисленные своим Git
+  для `shas.candidate` и `shas.result`; в своих представлениях показывает
+  такие gates как «взято из кандидата», а не как исполненные; если хост
+  считает время или запуски gates, не считает их запуском; если хост
+  проверяет покрытие набора на итоговом SHA сам, учитывает, что запись
+  интеграции может быть взята из кандидата.
+- **Откат.** Состояние с записями `reusedEvidence` прежние версии
+  отклоняют (строгая схема): откат — через копию. Без поля в политике таких
+  записей нет, и откат возможен без изменений состояния; поле из политики
+  при откате убрать.
+
 ## Перед обновлением
 
 1. **Остановить записывающих.** Запретить новые выдачи (`harness pause`),
