@@ -110,7 +110,7 @@ export function ownedProcesses(rows, seen) {
 export function signalSameProcesses(candidates, rows, signal, kill = process.kill) {
   const current = ownedProcesses(rows, new Map());
   for (const [pid, start] of candidates)
-    if (pid !== process.pid && current.get(pid) === start)
+    if (pid > 0 && pid !== process.pid && current.get(pid) === start)
       try {
         kill(pid, signal);
       } catch {
@@ -207,14 +207,14 @@ export function checkProcesses({
   };
   const sweep = async (initialSignal) => {
     // Grace clocks start at each process's first signal, never before a
-    // slow snapshot: pid -> [start, first signal time].
+    // slow snapshot: pid -> { start, at (first signal), killed (SIGKILL time) }.
     const signalled = new Map();
     let signalledAt;
     // The check's own running steps are signalled at once: a fail-fast stop
     // or Ctrl-C does not wait for ps.
     if (live().length) {
       signalledAt = Date.now();
-      for (const child of live()) signalled.set(child.pid, [undefined, signalledAt]);
+      for (const child of live()) signalled.set(child.pid, { at: signalledAt });
       signalChildren(initialSignal);
     }
     for (;;) {
@@ -239,23 +239,24 @@ export function checkProcesses({
         }
         return finishChildren(signalledAt ?? Date.now());
       }
+      const now = Date.now();
       const first = new Map();
-      const again = new Map();
+      const kill = new Map();
       for (const [pid, start] of candidates) {
         const known = signalled.get(pid);
         // A child signalled through its group is recorded before its start is known.
-        if (known && known[0] === undefined) known[0] = start;
-        if (!known || known[0] !== start) first.set(pid, start);
-        // Only a snapshot begun past a process's grace that still shows it proves a survivor.
-        else if (sampledAt - known[1] >= 5000)
-          throw new Error('Check descendants survived bounded cleanup');
-        else again.set(pid, start);
+        if (known && known.start === undefined) known.start = start;
+        if (!known || known.start !== start) first.set(pid, start);
+        else if (known.killed !== undefined) {
+          // Only a snapshot begun 2 s after its SIGKILL that still lists it proves a survivor.
+          if (sampledAt - known.killed >= 2000)
+            throw new Error('Check descendants survived bounded cleanup');
+        } else if (now - known.at >= 1000) kill.set(pid, start);
       }
-      const now = Date.now();
       signalSameProcesses(first, current, initialSignal);
-      for (const [pid, start] of first) signalled.set(pid, [start, now]);
-      const late = new Map([...again].filter(([pid]) => now - signalled.get(pid)[1] >= 1000));
-      signalSameProcesses(late, current, 'SIGKILL');
+      for (const [pid, start] of first) signalled.set(pid, { start, at: now });
+      signalSameProcesses(kill, current, 'SIGKILL');
+      for (const pid of kill.keys()) signalled.get(pid).killed = now;
       await delay(100);
     }
   };

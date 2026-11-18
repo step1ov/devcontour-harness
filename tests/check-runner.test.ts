@@ -396,9 +396,13 @@ test('A slow but working ps during a stop: running steps get SIGTERM at once, le
   const root = await mkdtemp(join(tmpdir(), 'check-inventory-'));
   const exitCode = process.exitCode;
   let slow = false;
+  let answered: number | undefined;
   const processes = checkProcesses({
     inventory: async (mark) => {
-      if (slow) await delay(2600);
+      if (slow) {
+        await delay(2600);
+        answered ??= performance.now();
+      }
       return inventory(mark);
     },
     retry: { attempts: 1 },
@@ -432,10 +436,13 @@ test('A slow but working ps during a stop: running steps get SIGTERM at once, le
     leaked = Number(out.trim());
     await delay(500); // the descendant installs its SIGTERM handler
     slow = true;
-    const started = Date.now();
     const stopped = processes.stop('SIGTERM');
     assert.deepEqual(await exited(sibling), [0, null], 'the sibling got SIGTERM, not SIGKILL');
-    assert.ok(Date.now() - started < 2000, 'running steps are signalled before ps answers');
+    const siblingExited = performance.now();
+    assert.ok(
+      answered === undefined || siblingExited < answered,
+      'running steps are signalled before the slow ps answers',
+    );
     await stopped;
     assert.ok(existsSync(join(root, 'term')), 'the leaked descendant got SIGTERM first');
     await until(() => !alive(leaked!), 'the leaked descendant is gone');
@@ -493,4 +500,33 @@ test('Without ps a stop sends SIGTERM to a running step group, then SIGKILL afte
     await processes.dispose();
     for (const pid of pids) if (alive(pid)) process.kill(pid, 'SIGKILL');
   }
+});
+
+test('A stop with a step whose spawn failed never signals the caller process group', async () => {
+  // The scenario runs in a process group of its own; with the bug, kill(0)
+  // reaches that group and its SIGTERM handler reports it.
+  const script = `
+    process.on('SIGTERM', () => console.log('GROUP SIGNALLED'));
+    const { checkProcesses } = await import(${JSON.stringify(
+      join(source, 'scripts', 'check-processes.mjs'),
+    )});
+    const processes = checkProcesses({ warn: () => {} });
+    const child = processes.spawn('devcontour-nonexistent-command', [], { stdio: 'ignore' });
+    child.once('error', (error) => console.log('spawn ' + error.code));
+    await processes.stop('SIGTERM'); // before the spawn error is emitted
+    await processes.dispose();
+    await new Promise((r) => setTimeout(r, 200));
+    console.log('done');`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  child.stdout.on('data', (chunk: Buffer) => (out += String(chunk)));
+  child.stderr.on('data', (chunk: Buffer) => (out += String(chunk)));
+  const [code, signal] = await exited(child);
+  assert.deepEqual([code, signal], [0, null], out);
+  assert.match(out, /spawn ENOENT/, out);
+  assert.match(out, /done/, out);
+  assert.doesNotMatch(out, /GROUP SIGNALLED/, out);
 });
