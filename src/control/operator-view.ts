@@ -28,6 +28,7 @@ import {
   type CallRecord,
   type ReviewRecord,
   type statusDataSchema,
+  type AttemptState,
 } from '../contracts/index.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import { callCostKnown, failureBucketOf, interruptedByShutdown } from '../report/compute.ts';
@@ -57,6 +58,7 @@ import { acceptedTargets } from './target.ts';
 import { WorkflowQueue } from './workflow.ts';
 import { reviewRoundCap } from './review.ts';
 import { reviewSubjectSummary } from './review-summary.ts';
+import { stageOfStep } from './stage.ts';
 
 type StatusData = z.output<typeof statusDataSchema>;
 /** Поручение `status`; поля alpha.55 (`verification`, `lastFailure`, `plain`) — по наличию. */
@@ -238,11 +240,30 @@ const findingsOf = (findings: ReviewRecord['findings']) =>
     message: f.message,
   }));
 
-function reviewsOf(v: ExecutionView, policy: ExecutionPolicy): OperatorReviewInput[] {
-  const records = lastBySubject(
-    v.locals('reviews', WORKSPACE_OWNER).map((r) => r.value),
-    (r) => `${r.kind}\0${r.subject}`,
-  );
+type ReviewRound = NonNullable<OperatorViewInput['reviewRounds']>[number];
+
+/** Раунды по предмету: одна запись на (вид, предмет, раунд), время — первой записи. */
+const roundsOf = <R extends { subject: string; round: number; at: string }>(
+  rows: readonly R[],
+  kind: (r: R) => ReviewRound['kind'],
+): ReviewRound[] => {
+  const seen = new Set<string>();
+  const out: ReviewRound[] = [];
+  for (const r of rows) {
+    const key = `${kind(r)}\0${r.subject}\0${r.round}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ kind: kind(r), at: r.at });
+  }
+  return out;
+};
+
+function reviewsOf(
+  v: ExecutionView,
+  policy: ExecutionPolicy,
+): { reviews: OperatorReviewInput[]; rounds: ReviewRound[] } {
+  const rows = v.locals('reviews', WORKSPACE_OWNER).map((r) => r.value);
+  const records = lastBySubject(rows, (r) => `${r.kind}\0${r.subject}`);
   // Расход вызовов ревью предмета — правило `reviewSummaries` (стадии
   // plan-review / contract-review по ID предмета) и полнота учёта; без
   // предела сводки status: пределы и счёт опущенного — у проекции.
@@ -292,36 +313,86 @@ function reviewsOf(v: ExecutionView, policy: ExecutionPolicy): OperatorReviewInp
       lineEn: `${s.kind} ${s.subject}: ${reviewVerdictText(s.approved, counts, 'en')}; rounds ${s.rounds.used}${s.rounds.max === null ? '' : '/' + s.rounds.max}`,
     };
   });
-  const code = [
-    ...lastBySubject(
-      v.locals('code-reviews', WORKSPACE_OWNER).map((r) => r.value),
-      (r) => r.subject,
-    ).values(),
-  ].map((r): OperatorReviewInput => {
-    const counts = findingCounts(r.findings);
-    const scope = `${r.repositoryId}/${r.role} ${r.refs.base}..${r.refs.head}`;
-    return {
-      kind: 'code',
-      subject: r.subject,
-      at: r.at,
-      approved: r.approved,
-      rounds: { used: r.round, max: null },
-      open: { blocking: counts.blocking, notes: counts.notes },
-      accepted: counts.accepted,
-      reviewer: {
-        runtime: r.reviewerRuntime,
-        ...(r.reviewerModel ? { model: r.reviewerModel } : {}),
-      },
-      sameVendor: r.sameVendor,
-      spend: spend.get(`code\0${r.subject}`) ?? none,
-      findings: findingsOf(r.findings),
-      line: `код ${scope}: ${reviewVerdictText(r.approved, counts, 'ru')}; раундов ${r.round}`,
-      lineEn: `code ${scope}: ${reviewVerdictText(r.approved, counts, 'en')}; rounds ${r.round}`,
-    };
-  });
-  return [...plans, ...code].sort(
-    (a, b) => b.at.localeCompare(a.at) || a.subject.localeCompare(b.subject),
+  const codeRows = v.locals('code-reviews', WORKSPACE_OWNER).map((r) => r.value);
+  const code = [...lastBySubject(codeRows, (r) => r.subject).values()].map(
+    (r): OperatorReviewInput => {
+      const counts = findingCounts(r.findings);
+      const scope = `${r.repositoryId}/${r.role} ${r.refs.base}..${r.refs.head}`;
+      return {
+        kind: 'code',
+        subject: r.subject,
+        at: r.at,
+        approved: r.approved,
+        rounds: { used: r.round, max: null },
+        open: { blocking: counts.blocking, notes: counts.notes },
+        accepted: counts.accepted,
+        reviewer: {
+          runtime: r.reviewerRuntime,
+          ...(r.reviewerModel ? { model: r.reviewerModel } : {}),
+        },
+        sameVendor: r.sameVendor,
+        spend: spend.get(`code\0${r.subject}`) ?? none,
+        findings: findingsOf(r.findings),
+        line: `код ${scope}: ${reviewVerdictText(r.approved, counts, 'ru')}; раундов ${r.round}`,
+        lineEn: `code ${scope}: ${reviewVerdictText(r.approved, counts, 'en')}; rounds ${r.round}`,
+      };
+    },
   );
+  return {
+    reviews: [...plans, ...code].sort(
+      (a, b) => b.at.localeCompare(a.at) || a.subject.localeCompare(b.subject),
+    ),
+    rounds: [...roundsOf(rows, (r) => r.kind), ...roundsOf(codeRows, () => 'code' as const)],
+  };
+}
+
+/** Ближайший ранг: наименьшее значение, не меньше которого доля `p` образцов. */
+const nearestRank = (sorted: readonly number[], p: number) =>
+  sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)]!;
+
+/**
+ * Наблюдаемые длительности этапов по закончившимся попыткам (без прерванных
+ * остановкой): у попытки этап длится от начала первого его замера до конца
+ * последнего (`stageOfStep`); этап с незакрытым замером образцом не считается.
+ * Идущие попытки не входят: их текущий этап ещё не кончился.
+ */
+export function stageTypicalOf(
+  attempts: readonly AttemptState[],
+): Record<string, { p50Ms: number; p90Ms: number; samples: number }> {
+  const samples = new Map<string, number[]>();
+  for (const a of attempts) {
+    if (a.status === 'active' || interruptedByShutdown(a)) continue;
+    const spans = new Map<string, { s: number; e: number; open: boolean }>();
+    for (const t of a.timings ?? []) {
+      const stage = stageOfStep(t.stage);
+      if (!stage) continue;
+      const s = Date.parse(t.startedAt);
+      const e = t.finishedAt ? Date.parse(t.finishedAt) : NaN;
+      const cur = spans.get(stage) ?? { s: Infinity, e: -Infinity, open: false };
+      if (!Number.isFinite(s) || !Number.isFinite(e)) cur.open = true;
+      else {
+        cur.s = Math.min(cur.s, s);
+        cur.e = Math.max(cur.e, e);
+      }
+      spans.set(stage, cur);
+    }
+    for (const [stage, x] of spans) {
+      if (x.open || !(x.e >= x.s)) continue;
+      const xs = samples.get(stage) ?? [];
+      xs.push(x.e - x.s);
+      samples.set(stage, xs);
+    }
+  }
+  const out: Record<string, { p50Ms: number; p90Ms: number; samples: number }> = {};
+  for (const [stage, xs] of [...samples].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    const sorted = [...xs].sort((a, b) => a - b);
+    out[stage] = {
+      p50Ms: Math.round(nearestRank(sorted, 0.5)),
+      p90Ms: Math.round(nearestRank(sorted, 0.9)),
+      samples: sorted.length,
+    };
+  }
+  return out;
 }
 
 /** Вызов полностью учтён: завершён, usage полный, цена есть (правило отчёта). */
@@ -532,14 +603,17 @@ export function collectOperatorViewInput(
       works.filter((w) => w.status === 'done' || w.status === 'cancelled').map((w) => w.id),
     );
     const inputPolicy = policy.inputPolicy ?? DEFAULT_INPUT_POLICY;
+    // Вопросы закрытых работ — только для деталей работы (`closed`): обзор их
+    // не показывает, детали называют, кто и почему ответил.
     const questions = requestsOf(v)
-      .filter((r) => r.kind === 'question' && !closed.has(r.workId))
+      .filter((r) => r.kind === 'question')
       .flatMap((r) => {
         const state = inputStateOf(r);
         if (!state) return [];
         const impact = (r.question as { impact?: string | null }).impact ?? undefined;
         const plain = plainOf(r);
-        const by = r.answers.at(-1)?.actor.kind;
+        const last = r.answers.at(-1);
+        const by = last?.actor.kind;
         return [
           {
             requestId: r.id,
@@ -552,10 +626,22 @@ export function collectOperatorViewInput(
             ...(plain ? { plain } : {}),
             ...(impact ? { impact } : {}),
             ...(by ? { answeredBy: by } : {}),
+            ...(last
+              ? {
+                  answer: {
+                    by: last.actor.kind,
+                    ...(last.basis ? { basis: last.basis } : {}),
+                    ...(last.reason ? { reason: last.reason } : {}),
+                    at: last.at,
+                  },
+                }
+              : {}),
+            ...(closed.has(r.workId) ? { closed: true } : {}),
             leadMay: leadMayAnswer(r, inputPolicy),
           },
         ];
       });
+    const reviews = reviewsOf(v, policy);
     const control = v.control();
     const controller = v.controller();
     const raw = view.raw;
@@ -604,7 +690,17 @@ export function collectOperatorViewInput(
         complete: complete(r),
       })),
       questions,
-      reviews: reviewsOf(v, policy),
+      reviews: reviews.reviews,
+      reviewRounds: [
+        ...reviews.rounds,
+        // Ревью в попытке: одна запись evidence ревью на попытку и фазу (кандидат, интеграция).
+        ...attempts.flatMap((a) =>
+          a.evidence
+            .filter((e) => e.kind === 'review')
+            .map((e) => ({ kind: 'attempt' as const, at: e.createdAt })),
+        ),
+      ],
+      stageTypical: stageTypicalOf(attempts),
       stops,
       queue: {
         paused: control.paused,

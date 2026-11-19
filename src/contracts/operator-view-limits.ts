@@ -5,7 +5,7 @@
 /** Мажорная версия документа: меняется, только когда поле удалено, переименовано или меняет смысл. */
 export const OPERATOR_VIEW_VERSION = 1 as const;
 /** Ревизия внутри мажорной версии: растёт при добавлениях (необязательное поле, значение перечисления). */
-export const OPERATOR_VIEW_REVISION = 0;
+export const OPERATOR_VIEW_REVISION = 1;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -53,6 +53,12 @@ export const OPERATOR_VIEW_TEXT = {
   model: 200,
   reason: 200,
 } as const;
+
+/**
+ * Наблюдаемая длительность этапа (`works[].stage.typical`): поле есть, только
+ * когда закончившихся образцов этапа не меньше этого числа.
+ */
+export const OPERATOR_VIEW_TYPICAL_MIN_SAMPLES = 5;
 
 /** Окно истории и интервал по умолчанию: 24 ч по 15 минут (96 значений). */
 export const OPERATOR_VIEW_DEFAULT_WINDOW_MS = DAY_MS;

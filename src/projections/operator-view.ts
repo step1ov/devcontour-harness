@@ -15,6 +15,7 @@ import {
   OPERATOR_VIEW_LIMITS,
   OPERATOR_VIEW_REVISION,
   OPERATOR_VIEW_TEXT,
+  OPERATOR_VIEW_TYPICAL_MIN_SAMPLES,
   OPERATOR_VIEW_VERSION,
 } from '../contracts/operator-view-limits.ts';
 import type { ExecutionPolicy, RuntimeBinding } from '../contracts/policy.ts';
@@ -121,8 +122,22 @@ export interface OperatorQuestion {
   impact?: string;
   plain?: string;
   answeredBy?: 'operator' | 'lead' | 'host';
+  answerBasis?: AnswerBasisView;
   title?: string;
   createdAt: string;
+}
+
+/** Основание последнего ответа на вопрос (ревизия 1). */
+export interface AnswerBasisView {
+  by: 'operator' | 'lead' | 'host';
+  /** Правило политики, по которому ответил ведущий. */
+  rule?: 'technical' | 'severity';
+  /** Причина ведущего; без `--no-titles`. */
+  reason?: string;
+  impact: string;
+  at: string;
+  /** «ответил ведущий: <причина>» на языке представления. */
+  line: string;
 }
 
 export interface Escalation {
@@ -163,6 +178,7 @@ export interface WorkView {
     since?: string;
     next: string[];
     needs?: { actor: string | null; action: string };
+    typical?: StageTypical;
   };
   attempts: {
     used: number;
@@ -191,6 +207,28 @@ export interface WorkView {
   resultSha?: string;
 }
 
+/** Наблюдаемая длительность этапа: p50 и p90 закончившихся образцов. */
+export interface StageTypical {
+  p50Ms: number;
+  p90Ms: number;
+  samples: number;
+}
+
+/** Итоги окна истории (ревизия 1). */
+export interface ViewHistoryTotals {
+  attemptsStarted: number;
+  attemptsFailed: number;
+  failuresByBucket: Record<string, number>;
+  gatesPassed: number;
+  gatesFailed: number;
+  gatesReused: number;
+  reviewRounds: { plan: number; contract: number; code: number; attempt: number };
+  spendUsd: Bounded;
+  wallMs: number;
+  attemptMs: number;
+  loadPeak: number;
+}
+
 export interface ViewHistory {
   from: string;
   to: string;
@@ -205,6 +243,7 @@ export interface ViewHistory {
   spendBound: Bounded['bound'];
   spendOpeningUsd: Bounded;
   budgetUsd?: number;
+  totals?: ViewHistoryTotals;
 }
 
 export interface ViewHealth {
@@ -460,6 +499,15 @@ export interface OperatorQuestionInput {
   plain?: string;
   impact?: string;
   answeredBy?: 'operator' | 'lead' | 'host';
+  /** Последний ответ: кто, правило ведущего (`basis`), сырая причина, время. */
+  answer?: {
+    by: 'operator' | 'lead' | 'host';
+    basis?: 'technical' | 'severity';
+    reason?: string;
+    at: string;
+  };
+  /** Работа закрыта (`done`, `cancelled`): вопрос виден только в деталях работы. */
+  closed?: boolean;
   /** Действующая политика разрешает ответ ведущему (`leadMayAnswer`). */
   leadMay: boolean;
 }
@@ -549,6 +597,17 @@ export interface OperatorViewInput {
   calls: readonly OperatorCallInput[];
   questions: readonly OperatorQuestionInput[];
   reviews: readonly OperatorReviewInput[];
+  /**
+   * Раунды ревью для итогов окна: план, контракт, код (`review-code`) и ревью
+   * в попытке (`attempt`: кандидат и интеграция); по одной записи на раунд.
+   */
+  reviewRounds?: readonly { kind: 'plan' | 'contract' | 'code' | 'attempt'; at: string }[];
+  /**
+   * Наблюдаемые длительности этапов (`stage.name`) по закончившимся этапам
+   * попыток; проекция показывает их у работы на этом этапе при достаточном
+   * числе образцов.
+   */
+  stageTypical?: Readonly<Record<string, StageTypical>>;
   /** Остановки, которые ждут человека или ведущего (`explain`), и пауза очереди. */
   stops: readonly {
     workId?: string;
@@ -793,6 +852,9 @@ const remoteUnknown = (lang: 'ru' | 'en') => ({
       : 'эта версия harness не читает remote-tracking ref',
 });
 
+/** Этапы, у которых есть наблюдаемая длительность: идущие этапы попытки. */
+const typicalStages = new Set(['prepare', 'writer', 'gates', 'review', 'integration']);
+
 function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number>): WorkView {
   const s = w.stage;
   const a = w.attemptSummary;
@@ -814,6 +876,10 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
       ...(s.since ? { since: s.since } : {}),
       next: [...s.next],
       ...(s.needs ? { needs: { actor: actorOf(s.needs.actor), action: s.needs.action } } : {}),
+      ...((t) =>
+        t && t.samples >= OPERATOR_VIEW_TYPICAL_MIN_SAMPLES
+          ? { typical: { p50Ms: t.p50Ms, p90Ms: t.p90Ms, samples: t.samples } }
+          : {})(typicalStages.has(s.name) ? c.i.stageTypical?.[s.name] : undefined),
     },
     attempts: {
       used: a.attempts.used,
@@ -935,7 +1001,46 @@ function reviewView(
   };
 }
 
+const answerer = {
+  ru: { operator: 'оператор', lead: 'ведущий', host: 'хост' },
+  en: { operator: 'the operator', lead: 'the lead', host: 'the host' },
+} as const;
+const ruleText = {
+  ru: { technical: 'технический вопрос', severity: 'ниже порога серьёзности' },
+  en: { technical: 'technical question', severity: 'below the severity threshold' },
+} as const;
+
+/**
+ * Основание ответа: кто ответил, правило ведущего и его причина. Причина —
+ * свободный текст ведущего: маскируется и обрезается, с `--no-titles` её нет
+ * (ни в поле, ни в строке).
+ */
+function answerBasisOf(
+  c: Ctx,
+  q: OperatorQuestionInput,
+  impact: string,
+): AnswerBasisView | undefined {
+  const a = q.answer;
+  if (!a) return undefined;
+  const reason = c.titles ? text(c, a.reason, T.reason) : undefined;
+  const rule = a.by === 'lead' ? a.basis : undefined;
+  const head =
+    (c.lang === 'en' ? `answered by ${answerer.en[a.by]}` : `ответил ${answerer.ru[a.by]}`) +
+    (rule ? ` (${ruleText[c.lang][rule]})` : '');
+  const line = reason ? `${head}: ${reason}` : head;
+  return {
+    by: a.by,
+    ...(rule ? { rule } : {}),
+    ...(reason ? { reason } : {}),
+    impact,
+    at: a.at,
+    line: line.length > T.line ? line.slice(0, T.line - 1) + '…' : line,
+  };
+}
+
 function questionView(c: Ctx, q: OperatorQuestionInput): OperatorQuestion {
+  const impact = q.impact ?? 'user-visible';
+  const basis = answerBasisOf(c, q, impact);
   return {
     requestId: q.requestId,
     workId: q.workId,
@@ -943,9 +1048,10 @@ function questionView(c: Ctx, q: OperatorQuestionInput): OperatorQuestion {
     version: q.version,
     severity: q.severity,
     answerableBy: q.leadMay ? 'operator-or-lead' : 'operator',
-    impact: q.impact ?? 'user-visible',
+    impact,
     ...(q.plain ? { plain: text(c, q.plain, T.questionPlain) } : {}),
     ...(q.answeredBy ? { answeredBy: q.answeredBy } : {}),
+    ...(basis ? { answerBasis: basis } : {}),
     ...(c.titles && q.text ? { title: text(c, q.text, T.questionTitle) } : {}),
     createdAt: q.createdAt,
   };
@@ -1051,6 +1157,11 @@ function historyOf(i: OperatorViewInput, o: OperatorViewOptions): ViewHistory {
     else gateFailed[k]! += 1;
   }
   let windowExact = true;
+  let windowKnown = 0;
+  let windowKnownCalls = 0;
+  let windowUnknown = 0;
+  let windowIncomplete = 0;
+  let windowUncovered = 0;
   let opening = 0;
   let openingKnown = 0;
   let openingUnknown = 0;
@@ -1069,7 +1180,12 @@ function historyOf(i: OperatorViewInput, o: OperatorViewOptions): ViewHistory {
     const k = index(t);
     if (k < 0) continue;
     if (call.knownUsd === null || !call.complete) windowExact = false;
-    if (call.knownUsd !== null) spend[k]! += call.knownUsd;
+    if (call.knownUsd !== null) {
+      spend[k]! += call.knownUsd;
+      windowKnown += call.knownUsd;
+      windowKnownCalls += 1;
+    } else windowUnknown += 1;
+    if (!call.complete) windowIncomplete += 1;
   }
   // Попытка без записей вызовов (`callsRecorded`): её расход неизвестен.
   let openingUncovered = 0;
@@ -1077,9 +1193,60 @@ function historyOf(i: OperatorViewInput, o: OperatorViewOptions): ViewHistory {
     if (a.callsRecorded || a.status === 'active') continue;
     const end = ms(a.finishedAt ?? a.startedAt);
     if (end < from) openingUncovered += 1;
-    else if (end <= to) windowExact = false;
+    else if (end <= to) {
+      windowExact = false;
+      windowUncovered += 1;
+    }
   }
   const budgetUsd = i.policy.budgets?.total?.usd;
+  // Итоги окна — те же правила, что у рядов: неудачные попытки по классу
+  // отказа (сумма равна attemptsFailed), время попыток в пределах окна.
+  const byBucket: Record<string, number> = {};
+  for (const a of i.attempts) {
+    if ((a.status !== 'failed' && a.status !== 'expired') || a.interrupted) continue;
+    if (index(ms(a.finishedAt)) < 0) continue;
+    const bucket = a.failureBucket ?? 'unclassified';
+    byBucket[bucket] = (byBucket[bucket] ?? 0) + 1;
+  }
+  const clipped = spans
+    .map((x) => ({ s: Math.max(x.s, from), e: Math.min(x.e, to) }))
+    .filter((x) => x.e >= x.s)
+    .sort((x, y) => x.s - y.s || x.e - y.e);
+  let wallMs = 0;
+  let attemptMs = 0;
+  let runS = NaN;
+  let runE = NaN;
+  for (const x of clipped) {
+    attemptMs += x.e - x.s;
+    if (!(x.s <= runE)) {
+      if (Number.isFinite(runS)) wallMs += runE - runS;
+      runS = x.s;
+      runE = x.e;
+    } else runE = Math.max(runE, x.e);
+  }
+  if (Number.isFinite(runS)) wallMs += runE - runS;
+  const rounds = { plan: 0, contract: 0, code: 0, attempt: 0 };
+  for (const r of i.reviewRounds ?? []) if (index(ms(r.at)) >= 0) rounds[r.kind] += 1;
+  const sum = (xs: number[]) => xs.reduce((n, x) => n + x, 0);
+  const totals: ViewHistoryTotals = {
+    attemptsStarted: sum(started),
+    attemptsFailed: sum(failed),
+    failuresByBucket: byBucket,
+    gatesPassed: sum(passed),
+    gatesFailed: sum(gateFailed),
+    gatesReused: sum(reused),
+    reviewRounds: rounds,
+    spendUsd: boundedUsd({
+      knownUsd: windowKnown,
+      knownCalls: windowKnownCalls,
+      unknownCalls: windowUnknown,
+      uncoveredRuns: windowUncovered,
+      incompleteCalls: windowIncomplete,
+    }),
+    wallMs: Math.round(wallMs),
+    attemptMs: Math.round(attemptMs),
+    loadPeak: Math.max(0, ...load),
+  };
   return {
     from: iso(from),
     to: iso(to),
@@ -1100,6 +1267,7 @@ function historyOf(i: OperatorViewInput, o: OperatorViewOptions): ViewHistory {
       incompleteCalls: openingIncomplete,
     }),
     ...(budgetUsd !== undefined ? { budgetUsd } : {}),
+    totals,
   };
 }
 
@@ -1305,9 +1473,12 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
     reviews: take(i.reviews, L.reviews, truncated, 'reviews').map((r) =>
       reviewView(c, r, truncated),
     ),
-    questions: take([...i.questions].sort(questionOrder), L.questions, truncated, 'questions').map(
-      (x) => questionView(c, x),
-    ),
+    questions: take(
+      i.questions.filter((x) => !x.closed).sort(questionOrder),
+      L.questions,
+      truncated,
+      'questions',
+    ).map((x) => questionView(c, x)),
     escalations: take(escalationsOf(c), L.escalations, truncated, 'escalations'),
     drift: take(drift, L.drift, truncated, 'drift'),
     progress: {
