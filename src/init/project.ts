@@ -181,7 +181,7 @@ export interface InitPlanned {
   warnings: InitData['warnings'];
   /** Почему сохранённая политика расходится с решениями (конфликт `policy.json`). */
   policyConflict?: string;
-  questions: InitData['questions'];
+  questions: NonNullable<InitData['questions']>;
 }
 
 const readme = `# .harness
@@ -484,8 +484,8 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
  */
 function questionsOf(
   policy: ExecutionPolicy,
-  source: InitData['questions']['source'],
-): InitData['questions'] {
+  source: NonNullable<InitData['questions']>['source'],
+): NonNullable<InitData['questions']> {
   const lead = inputPolicyOf(policy).leadAnswers;
   const rule = leadAnswersRule(inputPolicyOf(policy));
   return {
@@ -731,10 +731,14 @@ export function initText(data: InitData): string {
     `lead: ${data.lead.runtime} (${data.lead.source})`,
     `review: ${data.review.mode} (${data.review.source})`,
     `runtimes: writer ${data.manifest.runtimes.writer}, reviewer ${data.manifest.runtimes.reviewer}`,
-    `questions: ${data.questions.line}` +
-      (data.questions.leadTechnical || data.questions.source === 'policy'
-        ? ''
-        : ' Чтобы технические вопросы решал ведущий — init --lead-technical-answers.'),
+    ...(data.questions
+      ? [
+          `questions: ${data.questions.line}` +
+            (data.questions.leadTechnical || data.questions.source === 'policy'
+              ? ''
+              : ' Чтобы технические вопросы решал ведущий — init --lead-technical-answers.'),
+        ]
+      : []),
     ...data.runtimes.map(
       (r) => `  ${r.runtime}: ${r.status}${r.version ? ' ' + r.version : ''}, auth ${r.auth}`,
     ),

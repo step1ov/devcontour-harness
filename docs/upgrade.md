@@ -1377,7 +1377,8 @@ handoff` (`handoffPack`) больше не содержит попыток, пр
   технический вопрос без минимумов `input-answer --actor lead --reason "…"`;
   без `--reason` — `INVALID_INPUT`. `leadAnswers.maxSeverity` стал
   необязательным, но `leadAnswers` без `maxSeverity` и без `technical: true`
-  отвергается схемой. Ответ ведущего на блокирующий вопрос получает
+  отвергается схемой. С `technical: true` вопрос для пользователя — только
+  человеку при любом `maxSeverity`. Ответ ведущего на блокирующий вопрос получает
   `basis` (`technical` | `severity`) и `reason`; `status`
   (`works[].input.impact/answerBasis/leadMay`), `explain`, пакет передачи
   (`inputs[].impact`, `inputs[].answer.basis/reason`) и отчёт

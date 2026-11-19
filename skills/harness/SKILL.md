@@ -305,15 +305,17 @@ Read the options, choose, and record the choice with the reason:
 `$H input-answer --state <state> --request <id> --text "<your decision>"
 [--option <id>] --actor lead --reason "<why this option>" --request-version <n>`
 (no `--reason` — `INVALID_INPUT`). It is shown as «решено ведущим (технический
-вопрос)» with the reason in `status`, `explain`, `handoff` and the report.
+вопрос)» in `status`, `explain`, `handoff` and the report (a count there);
+`explain` and `handoff` also carry your reason.
 If you see that an option would in fact change what the user sees or gets,
 do not decide it: pass it on to the human as above.
 
 Never close a question that changes the result for the user (`impact`
 absent or `user-visible`) with `--actor lead`: the harness refuses it with
-`OPERATOR_ANSWER_REQUIRED` (exit 3) unless the human has put
-`inputPolicy.leadAnswers {maxSeverity}` into the policy, and even then only up
-to that severity. Pending non-blocking requests to you (`kind: follow-up`,
+`OPERATOR_ANSWER_REQUIRED` (exit 3). The only exception is a policy that has
+`inputPolicy.leadAnswers {maxSeverity}` without `technical: true`: then you
+may answer up to that severity. With `technical: true` such questions always
+go to the human. Pending non-blocking requests to you (`kind: follow-up`,
 from the autonomous mode) you answer yourself with `--actor lead`; a question
 below the threshold is recorded closed (the writer decided) and takes no
 answer. Who answered is

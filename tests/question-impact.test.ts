@@ -7,6 +7,7 @@
  * вопрос)» в status, explain, пакете передачи и отчёте; doctor называет
  * действующее правило словами.
  */
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -14,6 +15,8 @@ import {
   cliDataSchemas,
   executionPolicySchema,
   implementationResultSchema,
+  answerDigest,
+  inputAnswerSchema,
   inputPolicySchema,
   inputRequestSchema,
   leadAnswerBasis,
@@ -105,6 +108,18 @@ function stopped(
 
 const TECHNICAL = { threshold: 7, leadAnswers: { technical: true } };
 
+/** Вопрос, поднятый ответом writer вне схемы через нормализацию и оценку. */
+const normalizedBasis = (inputRequest: Record<string, unknown>) => {
+  const out = normalizeImplementation({ completed: false, summary: 's', inputRequest })!;
+  const decision = evaluateInput(out.output, { threshold: 7, criticalPaths: [] }, []).decision as {
+    question: { question: InputQuestion; effectiveSeverity: number; floors: InputFloor[] };
+  };
+  return leadAnswerBasis(
+    { kind: 'question', blocking: true, ...decision.question },
+    { leadAnswers: { technical: true } },
+  );
+};
+
 test('alpha.55: запрос writer объясняет классификацию; wire-схема объявляет impact и forUser с null', () => {
   const text = inputPolicyText({ threshold: 7, criticalPaths: [] });
   assert.match(text, /`impact`: "technical" only when no option changes what the users/);
@@ -167,6 +182,12 @@ test('alpha.55: ответ вне схемы — impact вне перечня с
     inputRequest: { ...question('technical'), severity: 'x' },
   })!;
   assert.equal(ok.output.inputRequest?.impact, 'technical');
+  // Область строкой или объектом не теряет минимум: технический вопрос о
+  // критической области ведущему не достаётся.
+  assert.equal(normalizedBasis({ ...question('technical'), affects: 'product' }), null);
+  assert.equal(normalizedBasis({ ...question('technical'), affects: { product: true } }), null);
+  assert.equal(normalizedBasis({ ...question('technical'), affects: ['Public API'] }), null);
+  assert.equal(normalizedBasis({ ...question('technical'), affects: [] }), 'technical');
 });
 
 test('alpha.55: политика — leadAnswers нужен maxSeverity или technical: true; правило словами', () => {
@@ -183,7 +204,7 @@ test('alpha.55: политика — leadAnswers нужен maxSeverity или t
   assert.match(technical.ru, /меняют результат для пользователя.*— человеку/);
   assert.match(technical.en, /the lead decides technical questions/i);
   const both = leadAnswersRule({ leadAnswers: { technical: true, maxSeverity: 4 } });
-  assert.match(both.ru, /до 4 из 10/);
+  assert.match(both.ru, /серьёзность не выше 4 из 10\. Вопросы, которые меняют результат/);
   // Правило: технический без минимумов; пользовательский и критический — человек.
   const r = (impact: InputQuestion['impact'], floors: InputFloor[], effectiveSeverity = 8) => ({
     kind: 'question' as const,
@@ -192,17 +213,42 @@ test('alpha.55: политика — leadAnswers нужен maxSeverity или t
     floors,
     question: { impact },
   });
-  const pol = { leadAnswers: { technical: true } };
+  const pol = { leadAnswers: { technical: true as const } };
   assert.equal(leadAnswerBasis(r('technical', []), pol), 'technical');
   assert.equal(leadAnswerBasis(r('technical', ['declared'], 10), pol), null);
   assert.equal(leadAnswerBasis(r('technical', ['critical-path'], 10), pol), null);
   assert.equal(leadAnswerBasis(r('user-visible', []), pol), null);
   assert.equal(leadAnswerBasis(r(undefined, []), pol), null);
   assert.equal(leadAnswerBasis(r(undefined, []), {}), null);
-  // Сочетание: пользовательский до порога — по порогу; технический — по technical.
-  const combined = { leadAnswers: { technical: true, maxSeverity: 8 } };
-  assert.equal(leadAnswerBasis(r(undefined, []), combined), 'severity');
+  // Сочетание: с technical вопрос для пользователя — человеку при любом пороге;
+  // порог дополнительно ограничивает технические.
+  const combined = { leadAnswers: { technical: true as const, maxSeverity: 8 } };
+  assert.equal(leadAnswerBasis(r(undefined, []), combined), null);
+  assert.equal(leadAnswerBasis(r('user-visible', [], 3), combined), null);
   assert.equal(leadAnswerBasis(r('technical', []), combined), 'technical');
+  assert.equal(leadAnswerBasis(r('technical', [], 9), combined), null);
+  const top = { leadAnswers: { technical: true as const, maxSeverity: 10 } };
+  assert.equal(leadAnswerBasis(r('user-visible', [], 10), top), null);
+  assert.equal(leadAnswerBasis(r('technical', ['declared'], 10), top), null);
+  // Без technical — правило alpha.54 по порогу.
+  assert.equal(leadAnswerBasis(r(undefined, []), { leadAnswers: { maxSeverity: 8 } }), 'severity');
+  // Опубликованная JSON Schema политики держит то же правило (не теряет refine).
+  const policySchema = JSON.parse(
+    readFileSync(new URL('../schemas/execution-policy.schema.json', import.meta.url), 'utf8'),
+  ) as unknown;
+  const found: unknown[] = [];
+  JSON.stringify(policySchema, (k, v: unknown) => {
+    if (k === 'leadAnswers') found.push(v);
+    return v;
+  });
+  const variants = (
+    found[0] as { anyOf: { required: string[]; properties: { technical: unknown } }[] }
+  ).anyOf;
+  assert.deepEqual(
+    variants.map((v) => v.required),
+    [['maxSeverity'], ['technical']],
+  );
+  assert.deepEqual(variants[1]!.properties.technical, { type: 'boolean', const: true });
   // Неблокирующий — всегда.
   assert.equal(
     leadAnswerBasis({ ...r(undefined, []), kind: 'follow-up', blocking: false }, {}),
@@ -244,6 +290,35 @@ test('alpha.55: ведущий решает технический вопрос 
   );
   assert.equal(op.request.answers[0]!.basis, undefined);
   assert.equal(op.request.answers[0]!.reason, undefined);
+  // Digest ответа — от содержания (запрос, версия, текст, вариант, вид), без
+  // правила и причины: тот же, что у ответа прежней версии.
+  assert.equal(
+    answer.digest,
+    answerDigest(id, { revision: 1, text: 'Intl', optionId: 'native', kind: 'clarification' }),
+  );
+  // Повтор с той же причиной — тот же ответ; другая причина — новая версия.
+  const same = env.engine.answerInput(
+    id,
+    { text: 'Intl', optionId: 'native', actor: { kind: 'lead' }, reason: 'без новой зависимости' },
+    2,
+  );
+  assert.equal(same.changed, false);
+  const corrected = env.engine.answerInput(
+    id,
+    { text: 'Intl', optionId: 'native', actor: { kind: 'lead' }, reason: 'меньше пакета' },
+    2,
+  );
+  assert.equal(corrected.changed, true);
+  assert.equal(corrected.answer.reason, 'меньше пакета');
+  assert.equal(corrected.answer.revision, 2);
+  // Запись с правилом без ведущего или техническая без причины — вне договора.
+  assert.equal(
+    inputAnswerSchema.safeParse({ ...answer, actor: { kind: 'operator' } }).success,
+    false,
+  );
+  const { reason: _r, ...noReason } = answer;
+  void _r;
+  assert.equal(inputAnswerSchema.safeParse(noReason).success, false);
   // Контекст writer называет решение ведущего и причину.
   const source = inputContextSource(r.request, answer);
   const md = source.files.find((f) => f.path.endsWith('.md'))!;

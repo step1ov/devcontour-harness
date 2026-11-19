@@ -2779,20 +2779,23 @@ export class Engine {
       if (basis === null) {
         const lead = inputPolicy.leadAnswers;
         const impact = impactOf(request.question);
-        const allowed = [
+        const why =
           lead?.technical === true
-            ? impact !== 'technical'
-              ? 'технические вопросы, а этот меняет результат для пользователя'
-              : 'технические вопросы, но этот касается критической области или пути'
-            : '',
-          lead?.maxSeverity !== undefined ? `ответы до серьёзности ${lead.maxSeverity}` : '',
-        ].filter(Boolean);
+            ? 'политика разрешает ведущему только технические вопросы без критических областей и путей' +
+              (lead.maxSeverity !== undefined ? ` до серьёзности ${lead.maxSeverity}` : '') +
+              (impact !== 'technical'
+                ? ', а этот меняет результат для пользователя'
+                : request.floors.length
+                  ? ', а этот касается критической области или пути'
+                  : ', а этот серьёзнее порога')
+            : lead?.maxSeverity !== undefined
+              ? `политика разрешает ведущему ответы до серьёзности ${lead.maxSeverity}`
+              : 'политика не разрешает ответы ведущего (inputPolicy.leadAnswers)';
         throw new HarnessError(
           'OPERATOR_ANSWER_REQUIRED',
           `Запрос ${id}: блокирующий вопрос исполнителя (серьёзность ${request.effectiveSeverity}, ${impact === 'technical' ? 'технический' : 'меняет результат для пользователя'}) адресован человеку — ` +
-            (allowed.length
-              ? `политика разрешает ведущему ${allowed.join('; ')}. `
-              : 'политика не разрешает ответы ведущего (inputPolicy.leadAnswers). ') +
+            why +
+            '. ' +
             'Передайте человеку вопрос, варианты и рекомендацию дословно и запишите его ответ: input-answer --actor operator.',
         );
       }
@@ -2819,7 +2822,10 @@ export class Engine {
         // Другой актёр или другое сообщение хоста — другой ответ, а не повтор.
         last.actor.kind === answer.actor.kind &&
         last.actor.id === answer.actor.id &&
-        last.messageRef === answer.messageRef
+        last.messageRef === answer.messageRef &&
+        // Другая причина или другое правило приёма — новая версия ответа.
+        last.reason === reason &&
+        last.basis === leadBasis
       )
         return { request, answer: last, changed: false };
       if (!['pending', 'answered'].includes(request.lifecycle))

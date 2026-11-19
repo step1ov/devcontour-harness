@@ -307,18 +307,43 @@
               }
             },
             "leadAnswers": {
-              "type": "object",
-              "properties": {
-                "maxSeverity": {
-                  "type": "integer",
-                  "minimum": 1,
-                  "maximum": 10
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "maxSeverity": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 10
+                    },
+                    "technical": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "maxSeverity"
+                  ],
+                  "additionalProperties": false
                 },
-                "technical": {
-                  "type": "boolean"
+                {
+                  "type": "object",
+                  "properties": {
+                    "maxSeverity": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 10
+                    },
+                    "technical": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "technical"
+                  ],
+                  "additionalProperties": false
                 }
-              },
-              "additionalProperties": false
+              ]
             }
           },
           "additionalProperties": false

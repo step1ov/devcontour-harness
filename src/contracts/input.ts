@@ -183,21 +183,20 @@ export const inputPolicySchema = z.strictObject({
    * закреплённая в попытке: в попытку и в основание вопроса поле не пишется.
    */
   leadAnswers: z
-    .strictObject({
-      maxSeverity: severitySchema.optional(),
+    .union([
+      /** Прежнее правило (alpha.54): до порога серьёзности; `technical` — уточнение ниже. */
+      z.strictObject({ maxSeverity: severitySchema, technical: z.boolean().optional() }),
       /**
        * Явное согласие (opt-in), что ведущий решает технические вопросы
        * (`impact: technical`) сам — `input-answer --actor lead` с
-       * обязательной причиной (`--reason`), при любой серьёзности ниже
-       * минимумов. Вопрос с минимумом (`floors`: критическая область или
-       * критический путь) и вопрос, меняющий результат для пользователя
-       * (`user-visible` или без поля), — только человеку.
+       * обязательной причиной (`--reason`). С `technical: true` вопрос,
+       * меняющий результат для пользователя (`user-visible` или без поля), и
+       * вопрос с минимумом (`floors`: критическая область или критический
+       * путь) — только человеку при любом `maxSeverity`; `maxSeverity` тогда
+       * дополнительно ограничивает серьёзность технических вопросов.
        */
-      technical: z.boolean().optional(),
-    })
-    .refine((l) => l.maxSeverity !== undefined || l.technical === true, {
-      message: 'leadAnswers: нужен maxSeverity или technical: true',
-    })
+      z.strictObject({ maxSeverity: severitySchema.optional(), technical: z.literal(true) }),
+    ])
     .optional(),
 });
 export type InputPolicy = z.infer<typeof inputPolicySchema>;
@@ -248,25 +247,37 @@ export type InputActor = z.infer<typeof inputActorSchema>;
  * непрозрачная ссылка хоста на сообщение обсуждения. `digest` —
  * `answerDigest(requestId, answer)`.
  */
-export const inputAnswerSchema = z.strictObject({
-  revision: z.number().int().positive(),
-  text: z.string().min(1).max(INPUT_LIMITS.answer),
-  optionId: z.string().max(40).nullable(),
-  kind: z.enum(['clarification', 'requirement-change']),
-  actor: inputActorSchema,
-  messageRef: z.string().min(1).max(300).optional(),
-  /**
-   * Ответ ведущего на блокирующий вопрос: по какому правилу политики он
-   * принят (`technical` — технический вопрос, `severity` — до порога
-   * серьёзности). Нет поля — ответ человека, хоста, на неблокирующий запрос
-   * или запись прежней версии. В digest ответа не входит.
-   */
-  basis: z.enum(leadAnswerBases).optional(),
-  /** Почему ведущий выбрал этот ответ; обязательна при `basis: technical`. */
-  reason: z.string().min(1).max(INPUT_LIMITS.reason).optional(),
-  digest: digestSchema,
-  at: isoTimeSchema,
-});
+export const inputAnswerSchema = z
+  .strictObject({
+    revision: z.number().int().positive(),
+    text: z.string().min(1).max(INPUT_LIMITS.answer),
+    optionId: z.string().max(40).nullable(),
+    kind: z.enum(['clarification', 'requirement-change']),
+    actor: inputActorSchema,
+    messageRef: z.string().min(1).max(300).optional(),
+    /**
+     * Ответ ведущего на блокирующий вопрос: по какому правилу политики он
+     * принят (`technical` — технический вопрос, `severity` — до порога
+     * серьёзности). Нет поля — ответ человека, хоста, на неблокирующий запрос
+     * или запись прежней версии. В digest ответа не входит.
+     */
+    basis: z.enum(leadAnswerBases).optional(),
+    /** Почему ведущий выбрал этот ответ; обязательна при `basis: technical`. */
+    reason: z.string().min(1).max(INPUT_LIMITS.reason).optional(),
+    digest: digestSchema,
+    at: isoTimeSchema,
+  })
+  .superRefine((a, ctx) => {
+    // Правило приёма — только у ответа ведущего; технический — только с причиной.
+    if (a.basis !== undefined && a.actor.kind !== 'lead')
+      ctx.addIssue({
+        code: 'custom',
+        path: ['basis'],
+        message: 'basis — только у ответа ведущего',
+      });
+    if (a.basis === 'technical' && !a.reason?.trim())
+      ctx.addIssue({ code: 'custom', path: ['reason'], message: 'basis technical — с причиной' });
+  });
 export type InputAnswer = z.infer<typeof inputAnswerSchema>;
 
 /** Digest ответа: запрос, номер версии и содержание (без времени). */

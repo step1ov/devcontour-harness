@@ -277,7 +277,10 @@ export function normalizeImplementation(
     'schema-migration': 'migration',
   };
   const areas = (value: unknown, what: string) => {
-    const list = Array.isArray(value) ? value : [];
+    // Одна область строкой — как список из неё; иное непустое значение не
+    // списком — названная, но нераспознанная область (минимум остаётся).
+    const scalar = !Array.isArray(value) && value !== undefined && value !== null && value !== '';
+    const list = Array.isArray(value) ? value : scalar ? [value] : [];
     const known = list
       .map((a) => areaAliases[text(a).trim().toLowerCase()])
       .filter((a): a is (typeof criticalAreas)[number] => a !== undefined);

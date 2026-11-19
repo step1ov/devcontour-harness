@@ -864,15 +864,15 @@ test('alpha.55: --lead-technical-answers — правило в новой пол
   // Без флага: человек отвечает на все вопросы, init подсказывает флаг.
   const plain = await initProject(p.opts({ plan: true }));
   initDataSchema.parse(plain);
-  assert.equal(plain.questions.leadTechnical, false);
-  assert.equal(plain.questions.source, 'default');
-  assert.match(plain.questions.line, /отвечает человек/);
+  assert.equal(plain.questions!.leadTechnical, false);
+  assert.equal(plain.questions!.source, 'default');
+  assert.match(plain.questions!.line, /отвечает человек/);
   assert.match(initText(plain), /questions: .*init --lead-technical-answers/);
   // С флагом: правило в сгенерированной политике.
   const planned = await initProject(p.opts({ plan: true, leadTechnicalAnswers: true }));
-  assert.equal(planned.questions.leadTechnical, true);
-  assert.equal(planned.questions.source, 'option');
-  assert.match(planned.questions.line, /Технические вопросы/);
+  assert.equal(planned.questions!.leadTechnical, true);
+  assert.equal(planned.questions!.source, 'option');
+  assert.match(planned.questions!.line, /Технические вопросы/);
   const applied = await initProject(p.opts({ leadTechnicalAnswers: true }));
   assert.equal(applied.conflicts, 0);
   const policy = executionPolicySchema.parse(
@@ -881,8 +881,8 @@ test('alpha.55: --lead-technical-answers — правило в новой пол
   assert.deepEqual(policy.inputPolicy?.leadAnswers, { technical: true });
   // Повтор без флага: правило из сохранённой политики, без подсказки.
   const again = await initProject(p.opts({ plan: true }));
-  assert.equal(again.questions.leadTechnical, true);
-  assert.equal(again.questions.source, 'policy');
+  assert.equal(again.questions!.leadTechnical, true);
+  assert.equal(again.questions!.source, 'policy');
   assert.doesNotMatch(initText(again), /init --lead-technical-answers/);
   assert.equal(again.conflicts, 0);
 

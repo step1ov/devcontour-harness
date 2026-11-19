@@ -1987,15 +1987,17 @@ export const initDataSchema = z.strictObject({
    * `inputPolicy.leadAnswers.technical`; `init --lead-technical-answers`) или
    * все — человек; `maxSeverity` — прежний порог ответов ведущего. Источник —
    * флаг для новой политики, сохранённая политика или умолчание; `line` /
-   * `lineEn` — правило простыми словами.
+   * `lineEn` — правило простыми словами. Нет поля — ответ до alpha.55.
    */
-  questions: z.strictObject({
-    leadTechnical: z.boolean(),
-    maxSeverity: z.number().int().min(1).max(10).optional(),
-    source: z.enum(['option', 'policy', 'default']),
-    line: z.string(),
-    lineEn: z.string(),
-  }),
+  questions: z
+    .strictObject({
+      leadTechnical: z.boolean(),
+      maxSeverity: z.number().int().min(1).max(10).optional(),
+      source: z.enum(['option', 'policy', 'default']),
+      line: z.string(),
+      lineEn: z.string(),
+    })
+    .optional(),
   /** Предупреждения подготовки: не отказ, но требуют внимания до запуска. */
   warnings: z.array(
     z.strictObject({
