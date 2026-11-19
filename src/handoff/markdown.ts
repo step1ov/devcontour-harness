@@ -12,7 +12,7 @@ const cell = (s: string | number | undefined | null) =>
 const secs = (ms: number | undefined) => (ms === undefined ? '—' : `${Math.round(ms / 1000)} с`);
 const who = (actor: string | null | undefined) => actor ?? '—';
 const more = (n: number, what: RuForms) =>
-  n > 0 ? [`… и ещё ${ruCount(n, what)} (не вошли в пакет)`] : [];
+  n > 0 ? [`… и ещё ${ruCount(n, what)} (за пределами пакета)`] : [];
 const usd = (n: number | null | undefined) =>
   n === null || n === undefined ? '—' : `$${n.toFixed(2)}`;
 type Budget = NonNullable<HandoffPack['budgets']>['entries'][number];

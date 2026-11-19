@@ -17,6 +17,7 @@ import {
   type InputQuestion,
 } from '../src/contracts/index.ts';
 import {
+  attemptReviewRounds,
   collectOperatorViewInput,
   stageTypicalOf,
   type ViewSource,
@@ -425,4 +426,76 @@ test('view r1: загрузчик на настоящем движке — об�
   assert.equal(view.history.totals!.reviewRounds.attempt, 10);
   assert.equal(view.history.totals!.attemptsStarted, 6);
   env.store.close();
+});
+
+test('view r1: отменённая работа — вопрос с ответом ведущего остаётся в деталях, в обзоре его нет', () => {
+  const env = stopped();
+  env.engine.answerInput(
+    env.request.id,
+    { text: 'Intl', optionId: 'native', actor: { kind: 'lead' }, reason: 'без новой зависимости' },
+    1,
+  );
+  env.engine.cancel('w', 'не нужна');
+  const input = collect(env.engine, env.dir, env.clock.now);
+  const view = operatorView(input);
+  operatorViewSchema.parse(view);
+  assert.deepEqual(view.questions, [], 'обзор — только открытые работы');
+  const detail = workDetailView(input, 'w');
+  workDetailViewSchema.parse(detail);
+  assert.equal(detail.questions.length, 1);
+  const q = detail.questions[0]!;
+  assert.equal(q.state, env.engine.inputRequest(env.request.id).lifecycle);
+  assert.equal(q.answerBasis?.line, 'ответил ведущий (технический вопрос): без новой зависимости');
+  env.store.close();
+});
+
+const reviewEvidence = (
+  round: { scope: string; round: number; protocol: 'valid' | 'invalid' | 'unsafe' } | undefined,
+  minute: number,
+) => ({
+  kind: 'review',
+  createdAt: new Date(NOW + minute * 60_000).toISOString(),
+  ...(round ? { reviewRound: round } : {}),
+});
+
+test('view r1: attemptReviewRounds — раунд на (область, номер), только валидный протокол; прежняя запись — свой раунд', () => {
+  const scope = 'a'.repeat(64);
+  const other = 'b'.repeat(64);
+  const attempts = [
+    {
+      evidence: [
+        { kind: 'test', createdAt: new Date(NOW).toISOString() },
+        // Раунд 1: невалидный вызов, затем валидный повтор — один раунд, время валидного.
+        reviewEvidence({ scope, round: 1, protocol: 'invalid' }, 1),
+        reviewEvidence({ scope, round: 1, protocol: 'valid' }, 2),
+        // Небезопасный ответ раундом не считается.
+        reviewEvidence({ scope, round: 2, protocol: 'unsafe' }, 3),
+      ],
+    },
+    {
+      evidence: [
+        // Дубль той же области и номера в другой попытке — тот же раунд.
+        reviewEvidence({ scope, round: 1, protocol: 'valid' }, 4),
+        reviewEvidence({ scope, round: 2, protocol: 'valid' }, 5),
+        // Другая область с тем же номером — свой раунд.
+        reviewEvidence({ scope: other, round: 1, protocol: 'valid' }, 6),
+        // Прежняя запись без протокола.
+        reviewEvidence(undefined, 7),
+      ],
+    },
+  ] as unknown as AttemptState[];
+  const at = (m: number) => new Date(NOW + m * 60_000).toISOString();
+  assert.deepEqual(
+    attemptReviewRounds(attempts).map((r) => r.at),
+    [at(2), at(5), at(6), at(7)],
+  );
+});
+
+test('view r1: stageTypicalOf — p90 по ближайшему рангу не равен максимуму на 11 образцах', () => {
+  const minutes = [7, 3, 11, 1, 9, 5, 2, 10, 4, 8, 6];
+  const out = stageTypicalOf(
+    minutes.map((m, k) => timed(`s${k}`, 'succeeded', [['implementation', 0, m]])),
+  );
+  // Сортировка 1..11: p50 — 6-й (ceil(5.5)), p90 — 10-й (ceil(9.9)), не 11.
+  assert.deepEqual(out.writer, { p50Ms: 6 * 60_000, p90Ms: 10 * 60_000, samples: 11 });
 });

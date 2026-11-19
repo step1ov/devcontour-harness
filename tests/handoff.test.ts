@@ -228,7 +228,7 @@ test('handoff: истёкшее владение — незавершённая 
     assert.equal(pack.active[0]?.stale, true);
     const md = handoffMarkdown(pack);
     assert.match(md, /владение истекло/);
-    assert.match(md, /… и ещё 2 провала \(/);
+    assert.match(md, /… и ещё 2 провала \(за пределами пакета\)/);
   } finally {
     h.close();
   }
@@ -519,7 +519,7 @@ test('handoff: пауза очереди — одна остановка без 
     assert.equal(pack.truncated.budgetsWithin, 71, 'в пределах и без расхода');
     const md = handoffMarkdown(pack);
     assert.match(md, /очередь PAUSED .* Поручений: 70 \(w00, /);
-    assert.match(md, /… и ещё 21 поручение \(/);
+    assert.match(md, /… и ещё 21 поручение \(за пределами пакета\)/);
     assert.match(md, /Бюджеты поручений в пределах и без расхода не показаны: 71/);
   } finally {
     h.close();

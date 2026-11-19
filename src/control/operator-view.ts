@@ -346,6 +346,30 @@ function reviewsOf(
   };
 }
 
+/**
+ * Раунды ревью в попытках: один на (область, номер раунда) по первой валидной
+ * записи протокола (`reviewRound.protocol: valid`) — повторы вызова и
+ * невалидные или небезопасные ответы раундом не считаются, как в
+ * `codeReviewHistory`. Запись прежней версии без `reviewRound` — свой раунд.
+ */
+export function attemptReviewRounds(attempts: readonly AttemptState[]) {
+  const seen = new Set<string>();
+  const out: { kind: 'attempt'; at: string }[] = [];
+  for (const a of attempts)
+    for (const e of a.evidence) {
+      if (e.kind !== 'review') continue;
+      const r = e.reviewRound;
+      if (r) {
+        if (r.protocol !== 'valid') continue;
+        const key = `${r.scope}\0${r.round}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+      }
+      out.push({ kind: 'attempt', at: e.createdAt });
+    }
+  return out;
+}
+
 /** Ближайший ранг: наименьшее значение, не меньше которого доля `p` образцов. */
 const nearestRank = (sorted: readonly number[], p: number) =>
   sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)]!;
@@ -604,11 +628,13 @@ export function collectOperatorViewInput(
     );
     const inputPolicy = policy.inputPolicy ?? DEFAULT_INPUT_POLICY;
     // Вопросы закрытых работ — только для деталей работы (`closed`): обзор их
-    // не показывает, детали называют, кто и почему ответил.
+    // не показывает, детали называют, кто и почему ответил. Отмена работы
+    // переводит её запросы в `cancelled`, замена — в `superseded`: у закрытой
+    // работы такой вопрос остаётся с состоянием по своему lifecycle.
     const questions = requestsOf(v)
       .filter((r) => r.kind === 'question')
       .flatMap((r) => {
-        const state = inputStateOf(r);
+        const state = inputStateOf(r) ?? (closed.has(r.workId) ? r.lifecycle : undefined);
         if (!state) return [];
         const impact = (r.question as { impact?: string | null }).impact ?? undefined;
         const plain = plainOf(r);
@@ -694,11 +720,7 @@ export function collectOperatorViewInput(
       reviewRounds: [
         ...reviews.rounds,
         // Ревью в попытке: одна запись evidence ревью на попытку и фазу (кандидат, интеграция).
-        ...attempts.flatMap((a) =>
-          a.evidence
-            .filter((e) => e.kind === 'review')
-            .map((e) => ({ kind: 'attempt' as const, at: e.createdAt })),
-        ),
+        ...attemptReviewRounds(attempts),
       ],
       stageTypical: stageTypicalOf(attempts),
       stops,

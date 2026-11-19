@@ -493,7 +493,9 @@ test('H1-03: статическая проверка — stop.ts и explain/* н
     assert.ok(
       rel.startsWith('projections/') ||
         rel === 'contracts/errors.ts' ||
-        rel === 'contracts/repair-policy.ts',
+        rel === 'contracts/repair-policy.ts' ||
+        // Лист без импортов: русские формы при числе в тексте остановки.
+        rel === 'contracts/plural.ts',
       `stop.ts достигает ${rel}`,
     );
   }
