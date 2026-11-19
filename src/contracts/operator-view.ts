@@ -166,7 +166,12 @@ const escalationSchema = z.strictObject({
   code: token(80),
   actor: viewActor,
   action: token(80),
-  since: isoTimeSchema,
+  /**
+   * С какого момента ждёт — время из хранилища. Нет поля (ревизия 1) — время
+   * неизвестно (например, пауза записи прежней версии без `pausedAt`): часы
+   * запроса вместо него не подставляются.
+   */
+  since: isoTimeSchema.optional(),
 });
 
 const sha = token(64);

@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { operatorView, viewToken, workDetailView } from '../src/projections/index.ts';
 import { NOW, baseInput, work } from './operator-view-input.ts';
-import { collectOperatorViewInput, harnessView } from '../src/control/operator-view.ts';
+import { collectOperatorViewInput, harnessView, latestTime } from '../src/control/operator-view.ts';
 import type { WorkflowQueue } from '../src/control/workflow.ts';
 import { engineOf, graphOf, trustNone } from './engine-fixture.ts';
+import { operatorViewSchema } from '../src/contracts/index.ts';
 import { viewState } from './view-fixture.ts';
 
 test('view token: тот же вход — тот же токен; generatedAt в токен не входит', () => {
@@ -81,28 +82,55 @@ test('view token r1: настоящее состояние — два запус
   assert.notEqual(changed.source.token, first.source.token);
 });
 
-test('view token r1: остановка без начала этапа — since из хранилища, а не часы проекции', () => {
+const collectAt = (env: ReturnType<typeof engineOf>, now: number) =>
+  collectOperatorViewInput(
+    {
+      engine: env.engine,
+      policy: env.engine.policy,
+      workflows: { list: () => [], continues: () => false } as unknown as WorkflowQueue,
+      stateDir: env.dir,
+      baseDir: env.dir,
+    },
+    { warnings: [], baseDir: env.dir },
+    { now },
+  );
+
+test('view token r1: остановка без начала этапа — since = регистрация графа, токен не зависит от часов', () => {
   const env = engineOf();
-  // Граф зарегистрирован, план не согласован: работа стоит без начала этапа.
-  env.engine.register(graphOf({ w: [] }), trustNone);
-  const collect = (now: number) =>
-    collectOperatorViewInput(
-      {
-        engine: env.engine,
-        policy: env.engine.policy,
-        workflows: { list: () => [], continues: () => false } as unknown as WorkflowQueue,
-        stateDir: env.dir,
-        baseDir: env.dir,
-      },
-      { warnings: [], baseDir: env.dir },
-      { now },
-    );
+  // Граф зарегистрирован, план не согласован: работа стоит без начала этапа и без попыток.
+  const { graph } = env.engine.register(graphOf({ w: [] }), trustNone);
   const t0 = env.clock.now + 60_000;
-  const a = operatorView(collect(t0));
-  const b = operatorView(collect(t0 + 10 * 60_000));
+  const a = operatorView(collectAt(env, t0));
+  const b = operatorView(collectAt(env, t0 + 10 * 60_000));
   const stop = a.escalations.find((e) => e.workId === 'w');
   assert.ok(stop, 'остановка работы есть');
-  assert.notEqual(stop.since, new Date(t0).toISOString(), 'не часы проекции');
+  assert.equal(stop.since, graph.registeredAt);
   assert.equal(b.source.token, a.source.token);
   env.store.close();
+});
+
+test('view token r1: пауза без pausedAt — since нет (время неизвестно), токен не зависит от часов', () => {
+  const env = engineOf();
+  env.engine.register(graphOf({ w: [] }), trustNone);
+  // Запись паузы прежней версии: без момента начала.
+  env.store.transact('run.phase', (tx) => tx.setControl({ paused: true, pauseReason: 'operator' }));
+  const t0 = env.clock.now + 60_000;
+  const a = operatorView(collectAt(env, t0));
+  const b = operatorView(collectAt(env, t0 + 10 * 60_000));
+  operatorViewSchema.parse(a);
+  const pause = a.escalations.find((e) => e.workId === undefined && e.subject === undefined);
+  assert.ok(pause, 'эскалация паузы очереди есть');
+  assert.equal(pause.since, undefined);
+  assert.equal(b.source.token, a.source.token);
+  env.store.close();
+});
+
+test('view token r1: latestTime — самый поздний момент по времени, а не по строке', () => {
+  // Со смещением зоны строка «позже», а момент — раньше (10:00Z против 11:00Z).
+  assert.equal(
+    latestTime(['2026-01-01T13:00:00.000+03:00', '2026-01-01T11:00:00.000Z', undefined]),
+    '2026-01-01T11:00:00.000Z',
+  );
+  assert.equal(latestTime(['bad', undefined]), undefined);
+  assert.equal(latestTime([]), undefined);
 });

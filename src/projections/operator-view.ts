@@ -146,7 +146,8 @@ export interface Escalation {
   code: string;
   actor: string;
   action: string;
-  since: string;
+  /** Нет — время неизвестно; часы проекции не подставляются. */
+  since?: string;
 }
 
 export interface DriftView {
@@ -1377,7 +1378,6 @@ function healthOf(
 
 function escalationsOf(c: Ctx): Escalation[] {
   const i = c.i;
-  const at = iso(i.now);
   const stops = i.stops
     .filter((s) => s.actor === 'user' || s.actor === 'lead' || s.actor === 'operator')
     .map((s) => ({
@@ -1386,7 +1386,7 @@ function escalationsOf(c: Ctx): Escalation[] {
       code: s.code,
       actor: actorOf(s.actor)!,
       action: s.action,
-      since: s.since ?? at,
+      ...(s.since ? { since: s.since } : {}),
     }));
   const reviews = i.reviews
     .filter((r) => r.escalation)

@@ -370,6 +370,15 @@ export function attemptReviewRounds(attempts: readonly AttemptState[]) {
   return out;
 }
 
+/** Самый поздний момент по времени (не по строке: у записи бывает смещение зоны). */
+export const latestTime = (times: readonly (string | undefined)[]) =>
+  times.reduce<string | undefined>((best, t) => {
+    if (!t || !Number.isFinite(Date.parse(t))) return best;
+    if (!best) return t;
+    const d = Date.parse(t) - Date.parse(best);
+    return d > 0 || (d === 0 && t > best) ? t : best;
+  }, undefined);
+
 /** Ближайший ранг: наименьшее значение, не меньше которого доля `p` образцов. */
 const nearestRank = (sorted: readonly number[], p: number) =>
   sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)]!;
@@ -558,12 +567,7 @@ export function collectOperatorViewInput(
       // чтобы токен неизменного состояния не менялся.
       const since =
         sw?.stage?.since ??
-        attemptsOf
-          .get(input.work.id)
-          ?.map((a) => a.finishedAt)
-          .filter((t): t is string => !!t)
-          .sort()
-          .at(-1) ??
+        latestTime(attemptsOf.get(input.work.id)?.map((a) => a.finishedAt) ?? []) ??
         v.graph(v.work(input.work.id)?.graphId ?? '')?.registeredAt;
       stops.push({
         workId: input.work.id,
