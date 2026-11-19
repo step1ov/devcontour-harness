@@ -191,9 +191,13 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
   // службы lifecycle поднимаются для них (порт, устройство).
   const gates = input.lifecycleOnly ? [] : scope;
   /** Замер стадии окружения без команды (снимки, дерево, хранилище). */
-  const staged = async <T>(stage: string, action: () => Promise<T>) => {
+  const staged = async <T>(
+    stage: string,
+    action: () => Promise<T>,
+    detail?: (result: T) => string | undefined,
+  ) => {
     const started = Date.now();
-    const outcome = (ok: boolean) =>
+    const outcome = (ok: boolean, note?: string) =>
       input.onStep?.({
         stage,
         id: stage,
@@ -201,10 +205,11 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
         ok,
         timedOut: false,
         aborted: signal.aborted,
+        ...(note ? { detail: note } : {}),
       });
     try {
       const result = await action();
-      outcome(true);
+      outcome(true, detail?.(result));
       return result;
     } catch (error) {
       outcome(false);
@@ -295,6 +300,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
               environment: source,
               signal,
               store,
+              ...(input.onStep ? { onStep: (step: StepOutcome) => input.onStep!(step) } : {}),
             }),
           );
         await staged('worktree', () => git(path, 'worktree', 'add', '--detach', cwd, input.sha));
@@ -329,8 +335,12 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
           signal,
           async () => {
             if (repo.dependencyStore)
-              await staged('dependency-store', () =>
-                materializeStore(store, { repo, cwd, execution, signal, dir: artifacts }),
+              // Промах хранилища — не отказ: установка идёт обычным путём
+              // (`prepare`, gates); исход и причина видны в шаге.
+              await staged(
+                'dependency-store',
+                () => materializeStore(store, { repo, cwd, execution, signal, dir: artifacts }),
+                (r) => r && `${r.outcome}${r.reason ? ': ' + r.reason : ''}`,
               );
             else await materializeStore(store, { repo, cwd, execution, signal, dir: artifacts });
             await runSteps(repo.prepare, cwd, join(artifacts, 'prepare'), execution, signal);
@@ -433,6 +443,9 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
           (message) => warnings.push(message),
         );
         if (interrupted) return;
+        // Только окружение: отмена или предел во время teardown (у него свой
+        // срок) — не PASS.
+        if (input.lifecycleOnly && signal.aborted) throw signal.reason;
         if (
           (await git(cwd, 'rev-parse', 'HEAD')) !== input.sha ||
           (await git(cwd, 'status', '--porcelain', '--untracked-files=no'))

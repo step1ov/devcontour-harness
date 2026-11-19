@@ -4,11 +4,14 @@ import {
   HarnessError,
   digestOf,
   executionDigest,
+  stallSweepOf,
   type ExecutionPolicy,
 } from '../contracts/index.ts';
+import { executionEnvironment } from '../environment/lifecycle.ts';
 import { git } from '../environment/process.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import { repositoryPath } from './gates-check.ts';
+import { dependencyOrder } from '../verification/dependencies.ts';
 import { smokeLifecycle, type LifecycleSmokeResult } from './lifecycle-smoke.ts';
 
 type Repo = ExecutionPolicy['repositories'][number];
@@ -54,7 +57,9 @@ const readCached = (file: string): LifecycleSmokeResult | undefined => {
  * Preflight окружения перед `run` (`lifecyclePreflight: "cached"`): для
  * каждого названного репозитория с окружением (lifecycle, `prepare`,
  * хранилище, зависимости) — `smokeLifecycle` на `targetRef`, один раз на
- * ключ (дерево базы, `executionDigest` политики, версия harness). Успех
+ * ключ: дерево базы и деревья её зависимостей (`dependsOn`, транзитивно),
+ * `executionDigest` политики, обход зависших, digest окружения процесса
+ * (переменные и секреты политики, `PATH`, `HOME`) и версия harness. Успех
  * записывается в `<stateDir>/preflight/<ключ>.json` и при том же ключе не
  * повторяется. Отказ записывается для разбора, но не переиспользуется: порт,
  * сеть и службы — состояние машины, а не дерева. Первый отказ —
@@ -87,9 +92,49 @@ export async function lifecyclePreflight(input: {
         `Preflight окружения: target ref ${repo.targetRef} не найден в ${repo.id}`,
       );
     }
+    // Снимки зависимостей берутся с их targetRef: их деревья — тоже вход окружения.
+    const dependencies: Record<string, string> = {};
+    for (const dep of dependencyOrder(
+      {
+        repo: (rid) => policy.repositories.find((r) => r.id === rid)!,
+        path: pathOf,
+      },
+      repo.dependsOn,
+    )) {
+      const d = policy.repositories.find((r) => r.id === dep)!;
+      dependencies[dep] = await git(
+        pathOf(d),
+        'rev-parse',
+        '--verify',
+        `${d.targetRef}^{tree}`,
+      ).catch(() => 'missing');
+    }
+    // Окружение процесса и привязки политики (наследуемые переменные,
+    // секреты) — тоже вход: нехватка — отказ до кэша, значения — в ключе
+    // только digest-ом.
+    let environment: string;
+    try {
+      environment = digestOf(
+        executionEnvironment(
+          [policy.environment, repo.environment],
+          {},
+          input.environment ?? process.env,
+        ).env,
+      );
+    } catch (error) {
+      throw new HarnessError(
+        'LIFECYCLE_FAILED',
+        `Preflight окружения ${repo.id}: ${(error as Error).message}. Задайте переменную в окружении процесса harness. Попытки не начаты, модели не вызывались`,
+        [{ path: ['preflight', repo.id, 'class'], message: 'environment' }],
+      );
+    }
     const key = digestOf({
       repositoryId: repo.id,
       tree,
+      dependencies,
+      environment,
+      // Обход зависших применяется к шагам окружения, но не входит в executionDigest.
+      stallSweep: stallSweepOf(policy),
       policy: executionDigest(policy),
       harness: HARNESS_VERSION,
     });

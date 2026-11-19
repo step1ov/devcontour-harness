@@ -162,6 +162,13 @@ void describe('relay-v1 transport (fake HTTP)', () => {
         ['GET /api/v1/health'],
         'контекст проекта не читается',
       );
+      // Путь доставки без identity: мутация сверяет версию сама и не отправляется.
+      const fresh = transportFor(srv.url);
+      await rejects(fresh.move('Task0001', { column: 'done', ifRevision: 3 }), 'unsupported', (e) =>
+        assert.equal(e.details.code, 'CONNECTOR_VERSION_MISMATCH'),
+      );
+      await rejects(fresh.move('Task0001', { column: 'done', ifRevision: 3 }), 'unsupported');
+      assert.equal(srv.posts().length, 0, 'мутация не отправлена');
       // Ядро коннектора отвечает именованным отказом, а не общим NOT_READY.
       await assert.rejects(
         checkIdentity(t, { provider: 'relay-v1-http', projectId: P } as ConnectorConfig),

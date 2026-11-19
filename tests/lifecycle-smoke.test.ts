@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment --
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call --
    Политика fixture правится как сырой JSON до разбора схемой. */
 /**
  * `harness smoke` и preflight окружения перед `run`: lifecycle, `prepare` и
@@ -30,7 +30,8 @@ import {
   executionPolicySchema,
   type ExecutionPolicy,
 } from '../src/contracts/index.ts';
-import { smokeLifecycle } from '../src/control/lifecycle-smoke.ts';
+import { classifyLifecycleFailure, smokeLifecycle } from '../src/control/lifecycle-smoke.ts';
+import { CleanupFailure } from '../src/environment/lifecycle.ts';
 import { lifecyclePreflight } from '../src/control/preflight.ts';
 import { example } from './fixtures.ts';
 import { repo } from './git-fixture.ts';
@@ -383,6 +384,8 @@ test('run с lifecyclePreflight: отказ окружения — LIFECYCLE_FAI
     scenario: { writer: implement(), reviewer: approve() },
     policy: withEnv(0),
   });
+  // Первый запуск: целевой ветки ещё нет — её создаёт run до preflight.
+  passing.repo.git('update-ref', '-d', passing.policy.repositories[0]!.targetRef);
   const p = passing.open();
   try {
     const data = await p.run({ graph: passing.graph, author: 'claude' });
@@ -391,4 +394,121 @@ test('run с lifecyclePreflight: отказ окружения — LIFECYCLE_FAI
   } finally {
     p.close();
   }
+});
+
+test('preflight: ключ меняют дерево зависимости, окружение процесса и обход зависших; нехватка переменной — отказ до кэша', async () => {
+  const lib = repo({ 'lib.md': 'v1\n' });
+  const f = fixture(undefined, (p) => {
+    p.repositories.push({
+      id: 'lib',
+      path: lib.dir,
+      targetRef: 'refs/heads/harness/accepted',
+      gates: [{ id: 'lib-unit', kind: 'check', command: [process.execPath, '-e', '0'] }],
+    });
+    p.repositories[0].dependsOn = ['lib'];
+    p.environment = { inherit: ['SMOKE_TEST_VALUE'] };
+  });
+  lib.git('update-ref', 'refs/heads/harness/accepted', 'HEAD');
+  const input = {
+    policy: f.policy,
+    baseDir: f.root,
+    stateDir: f.state,
+    repositoryIds: ['app'],
+    resourceDatabase: join(f.root, 'resources.sqlite'),
+    environment: { ...process.env, SMOKE_TEST_VALUE: 'one' },
+  };
+  const first = await lifecyclePreflight(input);
+  assert.equal(first[0]!.cached, false);
+  assert.ok(
+    first[0]!.result.steps.some((s) => s.stage === 'dependencies'),
+    JSON.stringify(first[0]!.result.steps),
+  );
+  assert.equal((await lifecyclePreflight(input))[0]!.cached, true);
+  // Изменилась только зависимость — новая проверка.
+  writeFileSync(join(lib.dir, 'lib.md'), 'v2\n');
+  lib.git('commit', '-qam', 'v2');
+  lib.git('update-ref', 'refs/heads/harness/accepted', 'HEAD');
+  assert.equal((await lifecyclePreflight(input))[0]!.cached, false);
+  assert.equal((await lifecyclePreflight(input))[0]!.cached, true);
+  // Другое значение наследуемой переменной — новая проверка.
+  const other = { ...input, environment: { ...process.env, SMOKE_TEST_VALUE: 'two' } };
+  assert.equal((await lifecyclePreflight(other))[0]!.cached, false);
+  // Другой обход зависших — новая проверка.
+  const stall = {
+    ...input,
+    policy: {
+      ...f.policy,
+      stallSweep: { intervalMs: 1000, quietMs: 2000, stalledMs: 3000, action: 'stop' as const },
+    },
+  };
+  assert.equal((await lifecyclePreflight(stall))[0]!.cached, false);
+  // Переменной нет — отказ до кэша, хотя успех на этом дереве записан.
+  const env = { ...process.env };
+  delete env.SMOKE_TEST_VALUE;
+  await assert.rejects(
+    lifecyclePreflight({ ...input, environment: env }),
+    (e: unknown) =>
+      e instanceof HarnessError &&
+      e.code === 'LIFECYCLE_FAILED' &&
+      /SMOKE_TEST_VALUE/.test(e.message),
+  );
+});
+
+test('smoke: отмена после последнего шага — CANCELLED, а не PASS; промах хранилища — пояснение шага, не отказ', async () => {
+  const f = fixture();
+  const abort = new AbortController();
+  await assert.rejects(
+    f.smoke({
+      signal: abort.signal,
+      // Последний шаг перед teardown прошёл — отмена до уборки.
+      onStep: (s) => s.stage === 'prepare' && abort.abort(new Error('стоп')),
+    }),
+    (e: unknown) => e instanceof HarnessError && e.code === 'CANCELLED',
+  );
+  assert.deepEqual(f.order(), ['start', 'ready', 'seed', 'stop'], 'teardown исполнен');
+
+  const store = fixture(undefined, (p) => {
+    p.repositories[0].dependencyStore = { manager: 'pnpm' };
+  });
+  const data = await store.smoke();
+  assert.equal(data.passed, true, JSON.stringify(data.failure));
+  const step = data.steps.find((s) => s.stage === 'dependency-store')!;
+  assert.equal(step.status, 'passed');
+  assert.match(step.detail ?? '', /^miss: isolation\.mode: none/);
+});
+
+test('classifyLifecycleFailure: исходный отказ не приписывается teardown; уборка после предела не прячет упавший шаг', () => {
+  const policy = fixture().policy;
+  const teardown = {
+    stage: 'teardown',
+    id: 'stop',
+    durationMs: 5,
+    ok: false,
+    exitCode: 1,
+    timedOut: false,
+    aborted: false,
+  };
+  // Отказ сверки подготовки (не шаг), затем упал teardown — класс исходного отказа.
+  const guarded = classifyLifecycleFailure(
+    new CleanupFailure('guard; Очистка окружения не завершена', new Error('защищённые пути')),
+    teardown,
+    { policy, timedOut: false },
+  );
+  assert.equal(guarded.class, 'environment');
+  assert.equal(guarded.stage, undefined);
+  // setup упал сам, предел истёк позже (медленный teardown) — crash шага setup.
+  const crashed = classifyLifecycleFailure(
+    new HarnessError('CANCELLED', 'Проверка gates прервана: исчерпан предел'),
+    { ...teardown, stage: 'setup', id: 'start', exitCode: 2 },
+    { policy, timedOut: true },
+  );
+  assert.equal(crashed.class, 'crash');
+  assert.equal(crashed.step, 'start');
+  // Шаг отменён пределом — timeout.
+  const cut = classifyLifecycleFailure(
+    new HarnessError('CANCELLED', 'предел'),
+    { ...teardown, stage: 'setup', id: 'start', exitCode: 143, aborted: true },
+    { policy, timedOut: true },
+  );
+  assert.equal(cut.class, 'timeout');
 });

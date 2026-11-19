@@ -153,6 +153,8 @@ export interface StepOutcome {
   /** Код системной ошибки запуска (`ENOENT` — нет исполняемого файла, `EACCES`). */
   spawnError?: string;
   log?: string;
+  /** Пояснение стадии без команды (исход хранилища зависимостей). */
+  detail?: string;
 }
 
 export async function runSteps(

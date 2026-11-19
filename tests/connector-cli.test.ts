@@ -151,7 +151,7 @@ test('source: writeScope с "." рядом с другими путями — о
 });
 
 /** Сервер Relay v1 на loopback: одна задача без подзадач и документов. */
-async function relayServer(projectId: string) {
+async function relayServer(projectId: string, contractVersion = 1) {
   const page = (items: unknown[]) => ({
     items,
     total: items.length,
@@ -170,7 +170,7 @@ async function relayServer(projectId: string) {
   };
   const base = `/api/v1/projects/${projectId}`;
   const reply = (path: string): unknown => {
-    if (path === '/api/v1/health') return { status: 'ok', contractVersion: 1 };
+    if (path === '/api/v1/health') return { status: 'ok', contractVersion };
     if (path === `${base}/context`) return { projectId, capabilities: [] };
     if (path === `${base}/board-tasks/${task.id}`) return task;
     if (path === `${base}/board-tasks/${task.id}/criteria`) return page([]);
@@ -258,6 +258,37 @@ test('tasks[].context через CLI: source-snapshot с пакетом controll
     const repeat = cliDataSchemas['source-snapshot'].parse(again.json.data);
     assert.equal(repeat.created, false, 'повтор той же редакции не создаёт снимок');
     assert.equal(repeat.revision, data.revision);
+  } finally {
+    await relay.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('source-check: другой contractVersion Relay v1 — отказ CONNECTOR_VERSION_MISMATCH, exit 4', async () => {
+  const projectId = 'proj1';
+  const relay = await relayServer(projectId, 2);
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'harness-connector-cli-')));
+  try {
+    writeFileSync(
+      join(dir, 'connector.json'),
+      JSON.stringify({
+        version: 1,
+        provider: 'relay-v1-http',
+        projectId,
+        actor: 'harness',
+        relay: { endpoint: relay.url, timeoutMs: 2000 },
+        repository: { id: 'app' },
+        tasks: [{ ref: 'Task0001', writeScope: ['src'] }],
+      }),
+    );
+    const check = await harnessAsync(
+      ['source-check', '--source', 'connector.json', '--state', 'state'],
+      dir,
+    );
+    assert.equal(check.status, 4, check.stderr);
+    assert.equal(check.json.ok, false);
+    assert.equal(check.json.error!.code, 'CONNECTOR_VERSION_MISMATCH');
+    assert.match(JSON.stringify(check.json), /contractVersion 2/);
   } finally {
     await relay.close();
     rmSync(dir, { recursive: true, force: true });

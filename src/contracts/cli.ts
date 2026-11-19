@@ -1469,8 +1469,9 @@ export const smokeDataSchema = z.strictObject({
   passed: z.boolean(),
   durationMs: z.number().int().nonnegative(),
   /**
-   * Шаги в порядке исполнения: `dependencies`, `worktree`, `setup`, `ready`,
-   * `dependency-store`, `prepare`, `teardown` (стадия) и ID шага политики.
+   * Шаги в порядке исполнения: `dependencies`, `dependency-build:<репозиторий>`,
+   * `worktree`, `setup`, `ready`, `dependency-store`, `prepare`, `teardown`
+   * (стадия) и ID шага политики.
    */
   steps: z.array(
     z.strictObject({
@@ -1481,6 +1482,8 @@ export const smokeDataSchema = z.strictObject({
       exitCode: z.number().int().optional(),
       timedOut: z.boolean().optional(),
       log: z.string().optional(),
+      /** Исход хранилища зависимостей: `hit`, `partial`, `miss: причина` (промах — не отказ). */
+      detail: z.string().optional(),
     }),
   ),
   /** Отказ окружения: класс, где, сообщение и что сделать. */

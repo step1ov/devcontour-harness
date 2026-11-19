@@ -1298,8 +1298,9 @@ handoff` (`handoffPack`) больше не содержит попыток, пр
   `lifecycleOnly` и `onStep` (по умолчанию прежнее поведение).
 - **Поле политики `lifecyclePreflight: "cached"`** (opt-in): перед `run` —
   та же проверка на `targetRef` каждого репозитория с незавершёнными
-  поручениями, успех кэшируется в `<state>/preflight/` по (дерево базы,
-  `executionDigest`, версия harness). Отказ — `LIFECYCLE_FAILED` до ревью
+  поручениями, успех кэшируется в `<state>/preflight/` по (деревья базы и
+  зависимостей, `executionDigest`, `stallSweep`, digest окружения процесса,
+  версия harness). Отказ — `LIFECYCLE_FAILED` до ревью
   плана и первой попытки. Поле не входит в `executionDigest`: включение не
   требует нового согласования. Без поля поведение прежнее. Прежняя версия
   пакета политику с этим полем не примет (строгая схема): перед откатом
@@ -1308,7 +1309,8 @@ handoff` (`handoffPack`) больше не содержит попыток, пр
   (класс `infrastructure`, exit 4). Relay v1 с `contractVersion` не 1 и
   Relay-2 с sha256 binary не из `relay.build` теперь отказывают
   `CONNECTOR_VERSION_MISMATCH` вместо `NOT_READY`; потребитель, который
-  разбирал код отказа `source-*`, должен принять новый код.
+  разбирал код отказа `source-*`, должен принять новый код. `source-check` при
+  несовпадении отвечает этим отказом (exit 4), а не данными с `problems`.
 - Откат на 0.1.0-alpha.53: убрать `lifecyclePreflight` из политики; каталог
   `<state>/preflight/` прежняя версия не читает, его можно удалить.
 

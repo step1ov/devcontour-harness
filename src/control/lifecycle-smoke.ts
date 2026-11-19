@@ -30,6 +30,8 @@ export interface LifecycleSmokeStep {
   exitCode?: number;
   timedOut?: boolean;
   log?: string;
+  /** Пояснение стадии: исход хранилища зависимостей (`hit`, `partial`, `miss: причина`). */
+  detail?: string;
 }
 
 export interface LifecycleSmokeFailure {
@@ -78,6 +80,7 @@ const stepOf = (s: StepOutcome): LifecycleSmokeStep => ({
   ...(s.exitCode !== undefined ? { exitCode: s.exitCode } : {}),
   ...(s.timedOut ? { timedOut: true } : {}),
   ...(s.log ? { log: s.log } : {}),
+  ...(s.detail ? { detail: s.detail } : {}),
 });
 
 const seconds = (ms: number) => `${Math.round(ms / 1000)} с`;
@@ -95,9 +98,15 @@ export function classifyLifecycleFailure(
   const message = error instanceof Error ? error.message : String(error);
   const where = failed ? { stage: failed.stage, step: failed.id } : {};
   const log = failed?.log ? ` Лог шага: ${failed.log}.` : '';
+  // Исходный отказ классифицируется сам по себе: упавший после него teardown
+  // его причиной не становится.
   if (error instanceof CleanupFailure && error.original)
     return {
-      ...classifyLifecycleFailure(error.original, failed, context),
+      ...classifyLifecycleFailure(
+        error.original,
+        failed?.stage === 'teardown' ? undefined : failed,
+        context,
+      ),
       message,
     };
   if (error instanceof TaskFailure && error.diagnosis === 'resource-busy') {
@@ -111,6 +120,10 @@ export function classifyLifecycleFailure(
         ' и остановите его (часто — старый dev-сервер или служба прошлой попытки), затем повторите smoke. Код задачи не меняйте.',
     };
   }
+  // Шаг упал сам (не отменён пределом), а предел истёк позже — в уборке:
+  // причина — шаг.
+  if (context.timedOut && failed && !failed.ok && !failed.aborted && failed.stage !== 'teardown')
+    return classifyLifecycleFailure(new Error(message), failed, { ...context, timedOut: false });
   if (context.timedOut)
     return {
       class: 'timeout',

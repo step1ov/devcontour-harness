@@ -650,9 +650,12 @@ export class Harness {
     // Окружение проекта — до ревью плана и первой попытки: отказ lifecycle,
     // prepare или хранилища не тратит ни одного платного вызова.
     if (this.policy.lifecyclePreflight === 'cached') {
+      // Целевые ветки создаются до проверки (первый запуск); очередь выдаёт
+      // работу всех графов, поэтому проверяются репозитории всех незавершённых.
+      await this.runner.init();
       const pending = this.engine.read((v) =>
         v
-          .works(graph.id)
+          .works()
           .filter((w) => w.status !== 'done' && w.status !== 'cancelled')
           .map((w) => w.order.repositoryId),
       );
