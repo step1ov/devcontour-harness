@@ -703,12 +703,23 @@ function canonical<V>(value: V): V {
 }
 
 /**
- * Токен содержимого: SHA-256 канонических байтов документа без
- * `generatedAt` и `source.token`. Равный токен — то же представление.
+ * Токен содержимого: SHA-256 канонических байтов документа без часов
+ * проекции — `generatedAt`, границ окна истории `history.from` и `history.to`
+ * (окно кончается в `now`) — и без `source.token`. Равный токен — то же
+ * содержимое при тех же языке, окне и работе: два запуска над неизменным
+ * состоянием дают один токен. Содержимое, которое честно зависит от часов
+ * (истечение аренды, живость, время идущей попытки, событие, вышедшее из
+ * окна), меняет токен.
  */
 export function viewToken(view: OperatorView | WorkDetailView): string {
   const rest: Record<string, unknown> = { ...view };
   delete rest.generatedAt;
+  if ('history' in view) {
+    const history: Record<string, unknown> = { ...view.history };
+    delete history.from;
+    delete history.to;
+    rest.history = history;
+  }
   const src: Record<string, unknown> = { ...view.source };
   delete src.token;
   return sha256Hex(JSON.stringify(canonical({ ...rest, source: src })));

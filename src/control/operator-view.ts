@@ -553,12 +553,24 @@ export function collectOperatorViewInput(
       seen.add(input.work.id);
       const d = explainStop(input);
       const sw = status.works.find((w) => w.id === input.work.id);
+      // С какого момента стоит: начало этапа, иначе конец последней попытки
+      // работы, иначе регистрация графа — из хранилища, а не часы проекции,
+      // чтобы токен неизменного состояния не менялся.
+      const since =
+        sw?.stage?.since ??
+        attemptsOf
+          .get(input.work.id)
+          ?.map((a) => a.finishedAt)
+          .filter((t): t is string => !!t)
+          .sort()
+          .at(-1) ??
+        v.graph(v.work(input.work.id)?.graphId ?? '')?.registeredAt;
       stops.push({
         workId: input.work.id,
         code: d.code,
         actor: d.actor,
         action: d.action,
-        ...(sw?.stage?.since ? { since: sw.stage.since } : {}),
+        ...(since ? { since } : {}),
       });
     }
     const queue = status.detail?.queue;
