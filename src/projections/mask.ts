@@ -28,16 +28,16 @@ const bearer = /\b(Bearer|Basic|token)(\s+|=)[A-Za-z0-9._~+/=-]{8,}/gi;
 const urlCredentials = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@?#]+@/gi;
 // `password=…`, `api_key: …` и подобные пары.
 const secretPair =
-  /\b((?:pass(?:word|wd)?|secret|api[_-]?key|access[_-]?key|token|auth)\s*[=:]\s*)("?)[^\s"',;]{4,}\2/gi;
+  /((["']?)\b(?:pass(?:word|wd)?|secret|api[_-]?key|access[_-]?key|token|auth)\2\s*[=:]\s*)(["']?)[^\s"'`,;}]{4,}\3/gi;
 const longHex = /\b[A-Fa-f0-9]{32,}\b/g;
 const longBase64 = /[A-Za-z0-9+/_=-]{32,}/g;
 // `file://…`, путь Windows с любым разделителем и путь UNC (`\\host\share`).
-const fileUri = /\bfile:\/\/[^\s"'<>]*/gi;
-const windowsPath = /\b[A-Za-z]:[\\/][^\s"'<>|]*/g;
+const fileUri = /\bfile:\/\/[^\s"'`<>]*/gi;
+const windowsPath = /\b[A-Za-z]:[\\/][^\s"'`<>|]*/g;
 const uncPath = /\\\\[^\s"'<>|\\]+\\[^\s"'<>|]*/g;
 // Абсолютный POSIX-путь: начало строки или разделитель (в том числе `:`) перед
 // `/`, не `//` URL.
-const posixPath = /(^|[\s"'(=,:[{<])\/(?!\/)[^\s"'()<>,;\]}]*/g;
+const posixPath = /(^|[\s"'`(=,:[{<])\/(?!\/)[^\s"'`()<>,;\]}]*/g;
 
 const xml = (v: string) =>
   v.replace(

@@ -16,6 +16,7 @@ import {
   STATE_VERSION,
   WORKSPACE_OWNER,
   executionPolicySchema,
+  escalatedFindings,
   findingCounts,
   leadMayAnswer,
   policyDigest,
@@ -55,7 +56,7 @@ import { statusOf } from './status.ts';
 import { acceptedTargets } from './target.ts';
 import { WorkflowQueue } from './workflow.ts';
 import { reviewRoundCap } from './review.ts';
-import { reviewSummaries } from './review-summary.ts';
+import { reviewSubjectSummary } from './review-summary.ts';
 
 type StatusData = z.output<typeof statusDataSchema>;
 /** Поручение `status`; поля alpha.55 (`verification`, `lastFailure`, `plain`) — по наличию. */
@@ -237,21 +238,37 @@ const findingsOf = (findings: ReviewRecord['findings']) =>
     message: f.message,
   }));
 
-function reviewsOf(
-  v: ExecutionView,
-  policy: ExecutionPolicy,
-  omitted: { count: number },
-): OperatorReviewInput[] {
+function reviewsOf(v: ExecutionView, policy: ExecutionPolicy): OperatorReviewInput[] {
   const records = lastBySubject(
     v.locals('reviews', WORKSPACE_OWNER).map((r) => r.value),
     (r) => `${r.kind}\0${r.subject}`,
   );
-  const summaries = reviewSummaries(v, policy);
-  // Предметов больше предела сводки status: опущенные — числом в `truncated.reviews`.
-  omitted.count = Math.max(0, records.size - summaries.length);
-  const plans: OperatorReviewInput[] = summaries.map((s) => {
-    const r = records.get(`${s.kind}\0${s.subject}`)!;
+  // Расход вызовов ревью предмета — правило `reviewSummaries` (стадии
+  // plan-review / contract-review по ID предмета) и полнота учёта; без
+  // предела сводки status: пределы и счёт опущенного — у проекции.
+  type Spend = { calls: number; knownUsd: number; unknownCalls: number; incompleteCalls: number };
+  const spend = new Map<string, Spend>();
+  const add = (key: string, c: CallRecord) => {
+    const s = spend.get(key) ?? { calls: 0, knownUsd: 0, unknownCalls: 0, incompleteCalls: 0 };
+    s.calls += 1;
+    if (callCostKnown(c)) s.knownUsd += c.costUsd ?? 0;
+    else s.unknownCalls += 1;
+    if (!callComplete(c)) s.incompleteCalls += 1;
+    spend.set(key, s);
+  };
+  for (const c of callRecords(v)) {
+    if (!c.subjectId) continue;
+    if (c.stage === 'plan-review') add(`plan\0${c.subjectId}`, c);
+    else if (c.stage === 'contract-review') add(`contract\0${c.subjectId}`, c);
+    else if (c.stage === 'code-review') add(`code\0${c.subjectId}`, c);
+  }
+  const none: Spend = { calls: 0, knownUsd: 0, unknownCalls: 0, incompleteCalls: 0 };
+  const max = reviewRoundCap(policy);
+  const plans: OperatorReviewInput[] = [...records.entries()].map(([key, r]) => {
+    const spent = spend.get(key) ?? none;
+    const s = reviewSubjectSummary(r, max, spent);
     const counts = findingCounts(r.findings);
+    const waiting = escalatedFindings(r.findings, r.round);
     return {
       kind: s.kind,
       subject: s.subject,
@@ -265,24 +282,16 @@ function reviewsOf(
         ...(r.reviewerModel ? { model: r.reviewerModel } : {}),
       },
       sameVendor: r.sameVendor,
-      spend: s.spend,
+      spend: { ...s.spend, incompleteCalls: spent.incompleteCalls },
       findings: findingsOf(r.findings),
-      ...(s.escalation
-        ? { escalation: { round: r.round, findings: s.escalation.findings.map((f) => f.id) } }
+      // Все ждущие решения находки: предел и счёт опущенного — у проекции.
+      ...(waiting.length
+        ? { escalation: { round: r.round, findings: waiting.map((f) => f.id) } }
         : {}),
       line: s.line,
       lineEn: `${s.kind} ${s.subject}: ${reviewVerdictText(s.approved, counts, 'en')}; rounds ${s.rounds.used}${s.rounds.max === null ? '' : '/' + s.rounds.max}`,
     };
   });
-  const spend = new Map<string, { calls: number; knownUsd: number; unknownCalls: number }>();
-  for (const c of callRecords(v)) {
-    if (c.stage !== 'code-review' || !c.subjectId) continue;
-    const s = spend.get(c.subjectId) ?? { calls: 0, knownUsd: 0, unknownCalls: 0 };
-    s.calls += 1;
-    if (callCostKnown(c)) s.knownUsd += c.costUsd ?? 0;
-    else s.unknownCalls += 1;
-    spend.set(c.subjectId, s);
-  }
   const code = [
     ...lastBySubject(
       v.locals('code-reviews', WORKSPACE_OWNER).map((r) => r.value),
@@ -304,7 +313,7 @@ function reviewsOf(
         ...(r.reviewerModel ? { model: r.reviewerModel } : {}),
       },
       sameVendor: r.sameVendor,
-      spend: spend.get(r.subject) ?? { calls: 0, knownUsd: 0, unknownCalls: 0 },
+      spend: spend.get(`code\0${r.subject}`) ?? none,
       findings: findingsOf(r.findings),
       line: `код ${scope}: ${reviewVerdictText(r.approved, counts, 'ru')}; раундов ${r.round}`,
       lineEn: `code ${scope}: ${reviewVerdictText(r.approved, counts, 'en')}; rounds ${r.round}`,
@@ -314,6 +323,10 @@ function reviewsOf(
     (a, b) => b.at.localeCompare(a.at) || a.subject.localeCompare(b.subject),
   );
 }
+
+/** Вызов полностью учтён: завершён, usage полный, цена есть (правило отчёта). */
+const callComplete = (r: CallRecord) =>
+  r.outcome !== 'active' && r.outcome !== 'abandoned' && r.usage.complete && r.costUsd !== null;
 
 /** Чтение представления: движок над хранилищем, политика, задания графов, каталоги. */
 export interface ViewSource {
@@ -545,7 +558,6 @@ export function collectOperatorViewInput(
       });
     const control = v.control();
     const controller = v.controller();
-    const omittedReviews = { count: 0 };
     const raw = view.raw;
     return {
       now,
@@ -592,8 +604,7 @@ export function collectOperatorViewInput(
         complete: complete(r),
       })),
       questions,
-      reviews: reviewsOf(v, policy, omittedReviews),
-      ...(omittedReviews.count ? { reviewsOmitted: omittedReviews.count } : {}),
+      reviews: reviewsOf(v, policy),
       stops,
       queue: {
         paused: control.paused,

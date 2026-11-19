@@ -125,9 +125,14 @@ test('view secrets: маска — пути репозитория относи�
       path,
     );
   // Известные значения — любой длины и в формах URI, XML и JSON.
-  const known = { secrets: ['a&b-secret', '123'] };
-  for (const t of ['a%26b-secret', 'a&amp;b-secret', 'pin 123', JSON.stringify('a&b-secret"')])
-    assert.ok(!/a(&|%26|&amp;)b-secret|123/.test(maskText(t, 200, known)!), t);
+  const known = { secrets: ['a&b-secret', '123', 'p"q-secret'] };
+  for (const t of [
+    'a%26b-secret',
+    'a&amp;b-secret',
+    'pin 123',
+    JSON.stringify({ v: 'x p"q-secret' }),
+  ])
+    assert.ok(!/a(&|%26|&amp;)b-secret|123|q-secret/.test(maskText(t, 200, known)!), t);
 });
 
 test('view secrets: имена моделей политики маскируются до обрезки', () => {

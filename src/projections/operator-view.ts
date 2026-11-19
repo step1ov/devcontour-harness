@@ -476,7 +476,7 @@ export interface OperatorReviewInput {
   accepted: number;
   reviewer?: { runtime: string; model?: string };
   sameVendor?: boolean;
-  spend: { calls: number; knownUsd: number; unknownCalls: number };
+  spend: { calls: number; knownUsd: number; unknownCalls: number; incompleteCalls?: number };
   findings: readonly {
     id: string;
     severity: string;
@@ -600,6 +600,8 @@ const actorOf = (a: HarnessActor | undefined): string | null =>
   a === undefined || a === null ? null : a === 'user' ? 'operator' : a;
 
 const round4 = (x: number) => Math.round(x * 10000) / 10000;
+/** Точность сумм `status` (сводка ревью — 1e-6): представление её не огрубляет. */
+const round6 = (x: number) => Math.round(x * 1e6) / 1e6;
 const iso = (ms: number) => new Date(ms).toISOString();
 const ms = (s: string | undefined) => (s === undefined ? NaN : Date.parse(s));
 
@@ -619,7 +621,7 @@ export function boundedUsd(facts: {
   if (facts.knownCalls === 0 && (facts.unknownCalls > 0 || uncovered > 0))
     return { value: 0, bound: 'unknown' };
   const lower = facts.unknownCalls > 0 || uncovered > 0 || (facts.incompleteCalls ?? 0) > 0;
-  return { value: round4(facts.knownUsd), bound: lower ? 'lower' : 'exact' };
+  return { value: round6(facts.knownUsd), bound: lower ? 'lower' : 'exact' };
 }
 
 const utf8 = (s: string) => new TextEncoder().encode(s).length;
@@ -837,7 +839,7 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
     },
     ...(w.liveness ? { liveness: w.liveness } : w.active ? { liveness: 'active' as const } : {}),
     ...(w.active ? { runtime: w.active.runtime } : {}),
-    ...(w.active?.model ? { model: w.active.model.slice(0, T.model) } : {}),
+    ...((model) => (model ? { model } : {}))(text(c, w.active?.model, T.model)),
     blockers: take(w.blockers, L.blockersPerWork, truncated, 'blockers').map((b) => {
       const plain = c.lang === 'en' && b.plainEn ? b.plainEn : b.plain;
       return {
@@ -913,6 +915,7 @@ function reviewView(
         knownUsd: r.spend.knownUsd,
         knownCalls: r.spend.calls - r.spend.unknownCalls,
         unknownCalls: r.spend.unknownCalls,
+        incompleteCalls: r.spend.incompleteCalls ?? 0,
       }),
     },
     findings,
@@ -1395,7 +1398,7 @@ export function workDetailView(
     ...(a.failureBucket ? { failureBucket: a.failureBucket } : {}),
     ...(a.interrupted ? { interrupted: true as const } : {}),
     runtime: a.runtime,
-    ...(a.model ? { model: a.model.slice(0, T.model) } : {}),
+    ...((model) => (model ? { model } : {}))(text(c, a.model, T.model)),
     startedAt: a.startedAt,
     ...(a.finishedAt ? { finishedAt: a.finishedAt } : {}),
     stages: take(a.stages ?? [], L.stagesPerAttempt, truncated, 'stages').map((s) => {

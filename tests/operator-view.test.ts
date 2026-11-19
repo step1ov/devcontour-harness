@@ -18,7 +18,7 @@ import {
 } from '../src/control/operator-view.ts';
 import { collectReportInput } from '../src/control/report.ts';
 import { valueReport } from '../src/report/index.ts';
-import { operatorView, sha256Hex, workDetailView } from '../src/projections/index.ts';
+import { maskText, operatorView, sha256Hex, workDetailView } from '../src/projections/index.ts';
 import { NOW, at, attempt, baseInput, policy, review, work } from './operator-view-input.ts';
 import { viewState } from './view-fixture.ts';
 
@@ -655,7 +655,7 @@ test('view loader: прежний вызов без workId — по предме
     () => {},
     (input) => {
       const c = input.calls!.find((x) => x.id === 'c-cancel-1') ?? input.calls![0]!;
-      const legacy = { ...c, id: 'c-legacy', subjectId: 'first', subjectKind: 'work' as const };
+      const legacy = { ...c, id: 'c-legacy', subjectId: 'gate', subjectKind: 'work' as const };
       delete (legacy as { runId?: string }).runId;
       delete (legacy as { workId?: string }).workId;
       legacy.usage = { ...legacy.usage, complete: false };
@@ -664,11 +664,14 @@ test('view loader: прежний вызов без workId — по предме
     },
   );
   const view = harnessView({ stateDir: s.state, policyPath: s.policyPath, now: NOW });
-  const first = (
-    view as { works: { id: string; spend: { calls: number; usd: { bound: string } } }[] }
-  ).works.find((w) => w.id === 'first')!;
-  assert.equal(first.spend.calls, 3);
-  assert.notEqual(first.spend.usd.bound, 'exact');
+  type Works = { works: { id: string; spend: { calls: number; usd: { bound: string } } }[] };
+  // У `gate` остальные вызовы известны и полны: граница — только от прежнего вызова.
+  const gate = (view as Works).works.find((w) => w.id === 'gate')!;
+  assert.equal(gate.spend.calls, 3);
+  assert.equal(gate.spend.usd.bound, 'lower');
+  const plain = viewState();
+  const before = harnessView({ stateDir: plain.state, policyPath: plain.policyPath, now: NOW });
+  assert.equal((before as Works).works.find((w) => w.id === 'gate')!.spend.usd.bound, 'exact');
 });
 
 test('view loader: одни часы на всё чтение — вызов без конца не меняет байты между чтениями', () => {
@@ -691,4 +694,94 @@ test('view: окно, не кратное интервалу, — INVALID_INPUT,
     () => operatorView(baseInput(), { windowMs: 7 * DAY, bucketMs: 5 * DAY }),
     (e: unknown) => e instanceof HarnessError && e.code === 'INVALID_INPUT',
   );
+});
+
+test('view loader: ревью без предела сводки status, все находки эскалации, неполный учёт ревью', () => {
+  const s = viewState(
+    () => {},
+    (input) => {
+      const base = input.reviews![0]!;
+      const reviews = input.reviews as (typeof base)[];
+      // 51 предмет плана: предмет графа работ — самый старый.
+      for (let k = 0; k < 51; k++)
+        reviews.push({
+          ...base,
+          id: `extra-${k}`,
+          subject: `extra-${k}`,
+          at: '2026-11-01T00:00:00.000Z',
+        });
+      const finding = base.findings[0]!;
+      // 60 открытых блокирующих находок, открытых 4 раунда: все ждут решения.
+      reviews.push({
+        ...base,
+        id: 'esc',
+        subject: 'esc',
+        round: 4,
+        at: '2026-11-02T00:00:00.000Z',
+        approved: false,
+        findings: Array.from({ length: 60 }, (_, k) => ({
+          ...finding,
+          id: k.toString(16).padStart(64, '0'),
+          severity: 'blocking' as const,
+          status: 'open' as const,
+          openedIn: 1,
+          changedIn: 4,
+          rounds: 4,
+        })),
+      });
+      const call = input.calls![0]!;
+      (input.calls as (typeof call)[]).push({
+        ...call,
+        id: 'c-plan-review',
+        stage: 'plan-review',
+        subjectId: 'esc',
+        costUsd: 0.123456,
+        usage: { ...call.usage, complete: false },
+      });
+      delete (input.calls as (typeof call)[]).at(-1)!.runId;
+    },
+  );
+  const view = harnessView({ stateDir: s.state, policyPath: s.policyPath, now: NOW }) as ReturnType<
+    typeof operatorView
+  >;
+  operatorViewSchema.parse(view);
+  const esc = view.reviews.find((r) => r.subject === 'esc')!;
+  assert.deepEqual(esc.spend.usd, { value: 0.123456, bound: 'lower' });
+  assert.equal(esc.escalation!.findings.length, 50);
+  assert.equal(view.reviews.length, 50);
+  // 2 прежних + 51 + esc = 54 предмета; находки: 10 сверх предела у самих
+  // находок и 10 у эскалации.
+  assert.equal(view.truncated!.reviews, 4);
+  assert.equal(view.truncated!.findings, 20);
+  // Детали работы графа `demo` видят его ревью плана, хотя в обзоре предметов больше предела.
+  const detail = harnessView({
+    stateDir: s.state,
+    policyPath: s.policyPath,
+    now: NOW,
+    workId: 'gate',
+  });
+  assert.ok(
+    (detail as ReturnType<typeof workDetailView>).reviews.some((r) => r.subject === 'demo'),
+  );
+});
+
+test('view: модели попыток и активной попытки маскируются; кавычки и Markdown не открывают секрет', () => {
+  const KEY = 'sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789';
+  const input = baseInput({
+    works: [
+      work('a', {
+        active: { runtime: 'claude', model: `m ${KEY}` },
+        title: 'Fix `/opt/private/k.pem` path',
+      }),
+    ],
+    attempts: [attempt('a', 1, { model: `/opt/private/${KEY}` })],
+  });
+  const text = JSON.stringify([operatorView(input), workDetailView(input, 'a')]);
+  assert.ok(!text.includes('sk-ant') && !text.includes('/opt/private'), text);
+  for (const t of [
+    `password='hunter2pass'`,
+    `{"password":"hunter2pass"}`,
+    'api_key: "hunter2pass"',
+  ])
+    assert.ok(!maskText(t, 200)!.includes('hunter2pass'), t);
 });
