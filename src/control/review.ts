@@ -23,12 +23,30 @@ import {
 import { reviewOutputSchema } from '../agents/schemas.ts';
 import { redactInspection } from '../agents/inspect.ts';
 import { executionEnvironment } from '../environment/lifecycle.ts';
-import { redactDeep } from '../environment/redaction.ts';
+import { redactDeep, redactThenClip } from '../environment/redaction.ts';
 import type { CallMeta } from '../engine/budget.ts';
 import type { Engine } from '../engine/engine.ts';
 import { TaskFailure } from '../engine/failure.ts';
 import { measuredInvoke } from '../engine/measured.ts';
 import { contextText } from '../engine/prompt.ts';
+
+/**
+ * Пределы схемы для текста находок — на уже замаскированной записи: находки
+ * прежнего хоста приходят без маски, и обрезка до неё резала бы секрет.
+ */
+function boundedFindings(record: ReviewRecord): ReviewRecord {
+  return {
+    ...record,
+    // Итог с причинами протокола не выходит за предел схемы.
+    summary: redactThenClip(record.summary, 12000),
+    findings: record.findings.map((f) => ({
+      ...f,
+      message: redactThenClip(f.message, 12000),
+      ...(f.rule !== undefined ? { rule: redactThenClip(f.rule, 200) } : {}),
+      ...(f.basis !== undefined ? { basis: redactThenClip(f.basis, 4000) } : {}),
+    })),
+  };
+}
 
 /**
  * Раунд технического ревью плана или контракта — одна реализация для
@@ -103,8 +121,9 @@ export async function technicalReview(
       ? prior.findings.map((f) => ({
           id: findingId(subject, f),
           severity: f.severity,
-          message: f.message.slice(0, 12000),
-          ...(f.rule ? { rule: f.rule.slice(0, 200) } : {}),
+          // Обрезка — после маски, при записи раунда (`boundedFindings`).
+          message: f.message,
+          ...(f.rule ? { rule: f.rule } : {}),
           path: null,
           line: null,
           status: 'open' as const,
@@ -221,7 +240,10 @@ export async function technicalReview(
       'RUNTIME_UNAVAILABLE',
       `Ревью ${kind}: ${response.status}${response.diagnostics.reason ? ': ' + response.diagnostics.reason : ''}`,
     );
-  const parsed = reviewResultSchema.safeParse(response.output);
+  // Ответ reviewer маскируется полным окружением вызова до разбора и любой
+  // обрезки: обрезка до маски оставляла бы префикс секрета на границе.
+  const output = redactDeep(response.output, execution.redact);
+  const parsed = reviewResultSchema.safeParse(output);
   const issue = parsed.error?.issues[0];
   const issues = parsed.success
     ? reviewIssues(parsed.data, open)
@@ -309,7 +331,7 @@ export async function technicalReview(
       tx.putLocal('context-snapshots', WORKSPACE_OWNER, contextKey, context),
     );
   return engine.recordReview(
-    redactDeep(record, execution.redact),
+    boundedFindings(redactDeep(record, execution.redact)),
     input.contract,
     prior?.rounds ?? 0,
   );

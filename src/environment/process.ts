@@ -1,4 +1,4 @@
-import { spawn, spawnSync, execFile } from 'node:child_process';
+import { spawn, spawnSync, execFile, type SpawnSyncReturns } from 'node:child_process';
 import { lsofName, osTool, osToolEnv } from './os-tools.ts';
 import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
@@ -247,6 +247,9 @@ export async function command(
             .then((found) => {
               for (const [pid, start] of found) seen.set(pid, start);
             })
+            // Опрос — подсказка для остановки: его отказ не роняет хост,
+            // полноту проверяет `sweep` после выхода.
+            .catch(() => undefined)
             .finally(() => {
               polling = false;
             });
@@ -284,7 +287,10 @@ export async function command(
       // очистки и помечал завершившуюся команду как истёкшую.
       cleanup();
       if (child.pid && mark)
-        for (const [pid, start] of await descendants(child.pid, seen)) seen.set(pid, start);
+        for (const [pid, start] of await descendants(child.pid, seen).catch(
+          () => new Map<number, string>(),
+        ))
+          seen.set(pid, start);
       const { starts, ...swept } = mark
         ? await sweep(mark, seen, dirs, Date.parse(startedAt))
         : { survivors: [] as number[], starts: new Map<number, string>() };
@@ -427,12 +433,19 @@ function captureProcessTree(pid?: number): RuntimeDiagnostics['processTree'] {
       reason: 'Process inventory unavailable on this platform',
       processes: [],
     };
-  const result = spawnSync(osTool('ps'), ['-axo', 'pid=,ppid=,pgid=,comm='], {
-    encoding: 'utf8',
-    env: osToolEnv(),
-    timeout: 250,
-    maxBuffer: 1_000_000,
-  });
+  let result: SpawnSyncReturns<string>;
+  try {
+    result = spawnSync(osTool('ps'), ['-axo', 'pid=,ppid=,pgid=,comm='], {
+      encoding: 'utf8',
+      env: osToolEnv(),
+      timeout: 250,
+      maxBuffer: 1_000_000,
+    });
+  } catch (error) {
+    return { available: false, reason: inventoryUnavailable('ps', error), processes: [] };
+  }
+  if (result.error && typeof (result.error as NodeJS.ErrnoException).code === 'string')
+    inventoryUnavailable('ps', result.error);
   if (result.status !== 0)
     return { available: false, reason: 'OS denied or timed out process inventory', processes: [] };
   const rows = result.stdout.split('\n').flatMap((line) => {
@@ -534,19 +547,63 @@ export async function gitBlobs(cwd: string, ids: readonly string[]) {
   return out;
 }
 
+/**
+ * Предел вывода `git` в символах. Вывод больше предела — отказ
+ * `GitOutputLimit`, а не хвост: усечённый diff, список путей или содержимое
+ * файла выглядели бы полными.
+ */
+export const GIT_OUTPUT_LIMIT = 64_000_000;
+
+/** Вывод `git` больше предела: результат не возвращается, команда остановлена. */
+export class GitOutputLimit extends Error {
+  constructor(
+    readonly args: readonly string[],
+    readonly limit: number,
+  ) {
+    super(
+      `git ${args[0]}: вывод больше ${limit} символов; команда остановлена, усечённый вывод не используется`,
+    );
+    this.name = 'GitOutputLimit';
+  }
+}
+
+/** Вывод git целиком (без пробелов по краям); больше `GIT_OUTPUT_LIMIT` — отказ. */
 export async function git(cwd: string, ...args: string[]) {
+  return gitWithLimit(cwd, GIT_OUTPUT_LIMIT, ...args);
+}
+
+/**
+ * `git` с явным пределом вывода. Вывод собирается целиком, а не хвостом
+ * `command`: превышение предела останавливает команду и даёт `GitOutputLimit`.
+ */
+export async function gitWithLimit(cwd: string, limit: number, ...args: string[]) {
   const added = worktreeAddPath(args);
   // Путь убираемого дерева — до удаления: потом настоящий путь уже не узнать.
   const removed =
     args[0] === 'worktree' && args[1] === 'remove'
       ? worktreeKey(resolve(cwd, args.at(-1)!))
       : undefined;
-  const result = await command(['git', ...hostGitArgs(cwd, args)], cwd, { env: gitEnv() });
+  let text = '';
+  let over = false;
+  const stop = new AbortController();
+  const result = await command(['git', ...hostGitArgs(cwd, args)], cwd, {
+    env: gitEnv(),
+    signal: stop.signal,
+    onRawStdout: (chunk) => {
+      if (over || !chunk) return;
+      if (text.length + chunk.length > limit) {
+        over = true;
+        text = '';
+        stop.abort();
+      } else text += chunk;
+    },
+  });
+  if (over) throw new GitOutputLimit(args, limit);
   if (result.code !== 0)
     throw new Error(`git ${args[0]}: ${result.stderr.trim() || result.stdout.trim()}`);
   if (added) rememberWorktree(resolve(cwd, added));
   if (removed) forgetWorktree(removed);
-  return result.stdout.trim();
+  return text.trim();
 }
 
 /**
@@ -559,22 +616,52 @@ function outcome(
   timeout: number,
   partial?: number,
 ): Promise<{ stdout: string } | { error: string }> {
+  const name = command.split('/').at(-1) ?? command;
   return new Promise((resolve) => {
-    execFile(
-      command,
-      args,
-      { encoding: 'utf8', env: osToolEnv(), timeout, maxBuffer: 64_000_000 },
-      (error, stdout) => {
-        if (!error || (partial && error.code === partial)) return resolve({ stdout });
-        const name = command.split('/').at(-1) ?? command;
-        resolve({
-          error: error.killed
-            ? `${name} не ответил за ${Math.round(timeout / 1000)} с`
-            : `${name}: ${typeof error.code === 'number' ? `код выхода ${error.code}` : (error.code ?? error.message)}`,
-        });
-      },
-    );
+    // Запуск может отказать синхронно (EPERM под sandbox и др.): отказ —
+    // «перечень недоступен», а не исключение в таймере опроса.
+    try {
+      execFile(
+        command,
+        args,
+        { encoding: 'utf8', env: osToolEnv(), timeout, maxBuffer: 64_000_000 },
+        (error, stdout) => {
+          if (!error || (partial && error.code === partial)) return resolve({ stdout });
+          // Строковый код — отказ запуска (ENOENT, EACCES), а не выход утилиты.
+          if (typeof error.code === 'string') inventoryUnavailable(name, error);
+          resolve({
+            error: error.killed
+              ? `${name} не ответил за ${Math.round(timeout / 1000)} с`
+              : `${name}: ${typeof error.code === 'number' ? `код выхода ${error.code}` : (error.code ?? error.message)}`,
+          });
+        },
+      );
+    } catch (error) {
+      resolve({ error: inventoryUnavailable(name, error) });
+    }
   });
+}
+
+/**
+ * Последний отказ запуска утилиты перечня процессов (`ps`, `lsof`): перечень
+ * недоступен, хост продолжает работу. Первый отказ процесса — ещё и
+ * предупреждение Node (`HARNESS_PROCESS_INVENTORY`).
+ */
+export const inventoryStatus: {
+  failures: number;
+  last?: { tool: string; reason: string; at: string };
+} = { failures: 0 };
+function inventoryUnavailable(tool: string, error: unknown) {
+  const code = (error as { code?: unknown } | null)?.code;
+  const reason = `${tool}: запуск не удался (${typeof code === 'string' ? code : error instanceof Error ? error.message : String(error)}); перечень процессов недоступен`;
+  if (!inventoryStatus.failures++)
+    try {
+      process.emitWarning(reason, { code: 'HARNESS_PROCESS_INVENTORY' });
+    } catch {
+      /* Предупреждение — сведение. */
+    }
+  inventoryStatus.last = { tool, reason, at: new Date().toISOString() };
+  return reason;
 }
 /** Процессы пользователя, в окружении которых есть метка. */
 async function marked(mark: string): Promise<number[]> {

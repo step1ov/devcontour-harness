@@ -1318,14 +1318,19 @@ async function probeProcesses(runId: string): Promise<{ pid: number; pgid: numbe
       }
     });
   }
-  const stdout = await new Promise<string>((resolve) =>
-    execFile(
-      'ps',
-      ['-Eww', '-ax', '-o', 'pid=,pgid=,command='],
-      { encoding: 'utf8', env: osToolEnv(), maxBuffer: 64_000_000, timeout: 10000 },
-      (error, out) => resolve(error ? '' : out),
-    ),
-  );
+  const stdout = await new Promise<string>((resolve) => {
+    // Синхронный отказ запуска (EPERM под sandbox) — как отказ ps: пусто.
+    try {
+      execFile(
+        'ps',
+        ['-Eww', '-ax', '-o', 'pid=,pgid=,command='],
+        { encoding: 'utf8', env: osToolEnv(), maxBuffer: 64_000_000, timeout: 10000 },
+        (error, out) => resolve(error ? '' : out),
+      );
+    } catch {
+      resolve('');
+    }
+  });
   return stdout.split('\n').flatMap((line) => {
     const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
     return m && m[3]!.includes(needle) && Number(m[1]) !== own

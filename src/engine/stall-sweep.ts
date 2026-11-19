@@ -86,12 +86,17 @@ export function sharedSample(maxAgeMs: number): Promise<ProcessRow[] | null> {
 export function sampleProcesses(timeoutMs = 5000): Promise<ProcessRow[] | null> {
   if (process.platform === 'win32') return Promise.resolve(null);
   return new Promise((resolve) => {
-    execFile(
-      osTool('ps'),
-      ['-axww', '-o', 'pid=,ppid=,time=,command='],
-      { encoding: 'utf8', env: osToolEnv(), timeout: timeoutMs, maxBuffer: 64_000_000 },
-      (error, stdout) => resolve(error ? null : parseProcessTable(stdout)),
-    );
+    // Синхронный отказ запуска (EPERM под sandbox) — тоже `null`.
+    try {
+      execFile(
+        osTool('ps'),
+        ['-axww', '-o', 'pid=,ppid=,time=,command='],
+        { encoding: 'utf8', env: osToolEnv(), timeout: timeoutMs, maxBuffer: 64_000_000 },
+        (error, stdout) => resolve(error ? null : parseProcessTable(stdout)),
+      );
+    } catch {
+      resolve(null);
+    }
   });
 }
 
