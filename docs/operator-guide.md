@@ -78,8 +78,10 @@ version — [ниже](#operator-guide-english).
   изменением, результат записан (прошла / не прошла);
 - **взято прежнее** — проверка не запускалась повторно, потому что код тот же
   (например, на интеграции дерево файлов совпало с проверенным кандидатом);
-- **прочитано reviewer** — reviewer читал diff и ничего не запускал; это
-  мнение, а не запуск тестов;
+- **прочитано reviewer** — reviewer читал изменения; запускал ли он
+  что-то сам, написано отдельно («читал diff, ничего не запускал» или
+  «запускал команды: 2»), а если не написано — это неизвестно. Ревью — мнение
+  reviewer, а не проверки проекта, которые запускает harness;
 - **не проверялось** — проверки не было. Это не «в порядке».
 
 В панели это раздел «Что проверено» у работы. Если агент говорит «всё
@@ -122,9 +124,10 @@ harness запускает следующую, пока не кончится п
   ведущий или контроллер. Раздел «Нужен ваш ответ» показывает только то, что
   ждёт именно вас.
 - **Зависла** — попытка давно не подаёт признаков жизни: «тихая», а дольше
-  порога — «зависшая». harness останавливает зависшую попытку сам (или
-  только сообщает, если так настроено). Это не ваша ошибка: обычно
-  достаточно повтора.
+  порога — «зависшая». По умолчанию harness только сообщает о зависшей
+  попытке и не останавливает её; останавливает сам, только если так задано
+  в настройках. Это не ваша ошибка: обычно достаточно остановить её и
+  повторить — попросите об этом ведущего.
 
 ## Какие вопросы приходят вам
 
@@ -222,8 +225,9 @@ waiting on a question, stopped (needs a decision), accepted, cancelled.
 a promise.
 
 **"Checked" always says how:** run by the harness, reused (same code, not
-run again), read by the reviewer (read the diff, ran nothing), or not
-checked (which is not "fine"). Only what the task and the project checks
+run again), read by the reviewer (whether the reviewer ran anything is
+stated separately, e.g. "read the diff, ran nothing"; if it is not stated, it
+is unknown), or not checked (which is not "fine"). Only what the task and the project checks
 describe is checked: ask for end-to-end behaviour explicitly.
 
 **Why attempts repeat.** Each line says why the previous attempt stopped:
@@ -233,8 +237,9 @@ to tell a random failure from a real one.
 
 **Blocks.** Waiting in the queue needs nothing. Waiting for someone names
 who acts (you, the lead, the controller); "Needs your answer" lists only
-what waits for you. Quiet or stalled means no sign of life; the harness
-stops a stalled attempt itself, and a retry usually helps.
+what waits for you. Quiet or stalled means no sign of life. By default the
+harness only reports a stalled attempt and stops it only when the settings
+say so; ask the lead to stop and retry it.
 
 **Questions.** Questions that change the result for users always come to
 you. Technical questions go to the lead only when "The lead agent decides

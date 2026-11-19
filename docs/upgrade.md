@@ -1463,11 +1463,12 @@ alpha.57 включает всё из alpha.56; alpha.56 и alpha.57 можно 
   `works[].target.remote`. Потребитель, который держит копию
   `operator-view.schema.json` и `work-detail-view.schema.json`, должен её
   обновить.
-- **Удалённая ветка.** `status`, `result` и `report` дают у принятой работы
+- **Удалённая ветка.** `status`, `result` и `view` дают у принятой работы
   `target.remote` (`pushed`, `not-pushed`, `unknown`) по локальной
-  remote-tracking ref без fetch; копии `result-envelope.schema.json` и
-  `value-report.schema.json` нужно обновить. `target.remote` представления
-  больше не всегда `unknown`.
+  remote-tracking ref без fetch и без сети; копию
+  `result-envelope.schema.json` нужно обновить. `target.remote`
+  представления больше не всегда `unknown`. Сверка в partial clone не
+  догружает недостающие объекты (`unavailable` вместо обращения к сети).
 - **Откат на 0.1.0-alpha.56.** Действий с данными нет; ленты и состояния
   удалённой ветки после отката не будет.
 

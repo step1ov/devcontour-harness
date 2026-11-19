@@ -1592,10 +1592,12 @@ attempt}, spendUsd, wallMs, attemptMs, loadPeak}` — итоги окна тем
   `attempt.expired`, `attempt.interrupted`, `work.accepted`, `gate.passed`,
   `gate.failed`, `gate.recheck`, `gate.reused`, `review.approved`,
   `review.changes-requested`, `review.escalated`, `question.asked`,
-  `question.answered` (открытое перечисление). `plain` — фраза на языке
+  `question.answered`, `gate.not-launched` (открытое перечисление). У ревью
+  попытки фраза говорит, что reviewer делал, только по записи controller
+  (`inspection`). `plain` — фраза на языке
   `--lang`, маскированная и обрезанная до 200 символов; свободного текста
   ответов и находок в ней нет. При одинаковом времени порядок — по `action`,
-  затем по `plain`. Нет поля — производитель ленту не ведёт; пустой список —
+  затем по `plain`, затем по сырым полям события. Нет поля — производитель ленту не ведёт; пустой список —
   в окне ничего не происходило.
 - `works[].target.remote {state, trackingRef?, checkedAt?, reason?, line?}` —
   есть ли принятый коммит в удалённой ветке: `pushed`, `not-pushed`,
@@ -1607,10 +1609,13 @@ attempt}, spendUsd, wallMs, attemptMs, loadPeak}` — итоги окна тем
   на этой машине», класс ошибки git), `line` — сводка: «уже в удалённой ветке
   origin/main», «принято локально; в удалённой ветке origin/main ещё нет»,
   «неизвестно (нет удалённой ветки)». Та же сверка — в `status`
-  (`works[].target.remote`, строка в `status --human`), `result`
-  (`data.target.remote`) и строках `report.targets`: поля `line` / `lineEn`,
-  `reason` / `reasonEn`. Состояние может отставать от удалённого репозитория
-  до следующего `git fetch` или `git push` на этой машине.
+  (`works[].target.remote`, строка в `status --human`) и `result`
+  (`data.target.remote`): поля `line` / `lineEn`, `reason` / `reasonEn` и
+  `pushRemote` / `pushRef` — куда отправлять (`git push <pushRemote>
+<targetRef>:<pushRef>`). Upstream — ровно ветки `targetRef`. Вызовы git
+  сверки запрещают любой транспорт и ленивую догрузку объектов partial
+  clone. Состояние может отставать от удалённого репозитория до следующего
+  `git fetch` или `git push` на этой машине.
 
 **Числа не выводятся заново.** Этап, сводка попыток и расход работы — те же,
 что `status.works[]`; известные расходы и их граница — по правилам стоимости

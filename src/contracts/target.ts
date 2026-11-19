@@ -30,6 +30,14 @@ export const acceptedTargetSchema = z.strictObject({
     .strictObject({
       state: z.enum(['pushed', 'not-pushed', 'unknown']),
       trackingRef: z.string().min(1).max(500).optional(),
+      /**
+       * Куда отправлять принятое: удалённый репозиторий и ветка в нём —
+       * `git push <pushRemote> <ref>:<pushRef>` (upstream ветки, иначе
+       * `origin` и ветка того же имени). Отправляет человек или ведущий по
+       * его согласию, не harness.
+       */
+      pushRemote: z.string().min(1).max(200).optional(),
+      pushRef: z.string().min(1).max(500).optional(),
       checkedAt: isoTimeSchema.optional(),
       reason: z.string().max(200).optional(),
       reasonEn: z.string().max(200).optional(),

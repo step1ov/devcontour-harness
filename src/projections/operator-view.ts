@@ -448,6 +448,8 @@ export interface OperatorWorkInput {
     remote?: {
       state: 'pushed' | 'not-pushed' | 'unknown';
       trackingRef?: string;
+      pushRemote?: string;
+      pushRef?: string;
       checkedAt?: string;
       reason?: string;
       reasonEn?: string;
@@ -616,6 +618,8 @@ export type OperatorActivityInput =
       passed: boolean;
       recheck?: 'flaky' | 'confirmed';
       reused?: boolean;
+      /** Команда gate не запустилась (отказ песочницы): проверки не было. */
+      notLaunched?: boolean;
     }
   | {
       kind: 'review';
@@ -631,6 +635,13 @@ export type OperatorActivityInput =
       approved: boolean;
       blocking: number;
       reviewer: string;
+      /**
+       * Что reviewer делал по записи controller: `diff-only` — команд не
+       * запускал, `commands` — запускал (`commands` — сколько); нет —
+       * неизвестно, и фраза об этом молчит.
+       */
+      inspection?: 'diff-only' | 'commands';
+      commands?: number;
     }
   | {
       kind: 'review.escalated';
@@ -1605,28 +1616,34 @@ function activityLine(
       const where = ru
         ? `работа ${e.workId}, попытка ${e.attempt}, ${phaseWord.ru[e.phase]}`
         : `${e.workId}, attempt ${e.attempt}, ${phaseWord.en[e.phase]}`;
-      const action = e.reused
-        ? 'gate.reused'
-        : e.recheck
-          ? 'gate.recheck'
-          : e.passed
-            ? 'gate.passed'
-            : 'gate.failed';
-      const plain = e.reused
+      const action = e.notLaunched
+        ? 'gate.not-launched'
+        : e.reused
+          ? 'gate.reused'
+          : e.recheck
+            ? 'gate.recheck'
+            : e.passed
+              ? 'gate.passed'
+              : 'gate.failed';
+      const plain = e.notLaunched
         ? ru
-          ? `проверка ${e.gate} взята с кандидата: то же дерево, не запускалась (${where})`
-          : `check ${e.gate} was reused from the candidate: same tree, not run (${where})`
-        : e.recheck
-          ? e.recheck === 'flaky'
-            ? ru
-              ? `перепроверка ${e.gate} прошла: первый провал был случайным (${where})`
-              : `recheck of ${e.gate} passed: the first failure was random (${where})`
+          ? `проверка ${e.gate} не запустилась — отказ среды, проверки не было (${where})`
+          : `check ${e.gate} did not start — environment failure, nothing was checked (${where})`
+        : e.reused
+          ? ru
+            ? `проверка ${e.gate} взята с кандидата: то же дерево, не запускалась (${where})`
+            : `check ${e.gate} was reused from the candidate: same tree, not run (${where})`
+          : e.recheck
+            ? e.recheck === 'flaky'
+              ? ru
+                ? `перепроверка ${e.gate} прошла: первый провал был случайным (${where})`
+                : `recheck of ${e.gate} passed: the first failure was random (${where})`
+              : ru
+                ? `перепроверка ${e.gate} подтвердила провал (${where})`
+                : `recheck of ${e.gate} confirmed the failure (${where})`
             : ru
-              ? `перепроверка ${e.gate} подтвердила провал (${where})`
-              : `recheck of ${e.gate} confirmed the failure (${where})`
-          : ru
-            ? `контроллер запустил проверку ${e.gate}: ${e.passed ? 'прошла' : 'не прошла'} (${where})`
-            : `the controller ran check ${e.gate}: ${e.passed ? 'passed' : 'failed'} (${where})`;
+              ? `контроллер запустил проверку ${e.gate}: ${e.passed ? 'прошла' : 'не прошла'} (${where})`
+              : `the controller ran check ${e.gate}: ${e.passed ? 'passed' : 'failed'} (${where})`;
       return { actor: 'controller', action, workId: e.workId, plain };
     }
     case 'review': {
@@ -1644,13 +1661,22 @@ function activityLine(
         : ru
           ? `вернул ${what}: блокирующих замечаний ${e.blocking}`
           : `returned ${what}: ${e.blocking} blocking finding${e.blocking === 1 ? '' : 's'}`;
-      const read = ru ? '; читал diff, ничего не запускал' : '; read the diff, ran nothing';
+      const read =
+        e.inspection === 'diff-only'
+          ? ru
+            ? '; читал diff, ничего не запускал'
+            : '; read the diff, ran nothing'
+          : e.inspection === 'commands'
+            ? ru
+              ? `; запускал команды: ${e.commands ?? '?'}`
+              : `; ran commands: ${e.commands ?? '?'}`
+            : '';
       return {
         actor: 'reviewer',
         action: e.approved ? 'review.approved' : 'review.changes-requested',
         ...(e.workId ? { workId: e.workId } : {}),
         subject: e.subject,
-        plain: `reviewer ${e.reviewer} ${verdict}${round}${e.scope === 'attempt' || e.scope === 'code' ? read : ''}`,
+        plain: `reviewer ${e.reviewer} ${verdict}${round}${read}`,
       };
     }
     case 'review.escalated':
@@ -1708,6 +1734,9 @@ function activityOf(
       const line = activityLine(e, c.lang);
       return {
         t,
+        // Последний ключ порядка — само событие (сырые ID до маскирования и
+        // обрезки): совпавшие после обрезки фразы не зависят от порядка входа.
+        key: JSON.stringify(canonical(e)),
         row: {
           at: e.at,
           actor: line.actor,
@@ -1722,7 +1751,8 @@ function activityOf(
       (a, b) =>
         b.t - a.t ||
         (a.row.action < b.row.action ? -1 : a.row.action > b.row.action ? 1 : 0) ||
-        (a.row.plain < b.row.plain ? -1 : a.row.plain > b.row.plain ? 1 : 0),
+        (a.row.plain < b.row.plain ? -1 : a.row.plain > b.row.plain ? 1 : 0) ||
+        (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
     )
     .map((x) => x.row);
   return take(rows, L.activity, truncated, 'activity');

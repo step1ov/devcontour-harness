@@ -13,9 +13,14 @@ import {
   OPERATOR_VIEW_LIMITS,
   operatorViewSchema,
   workDetailViewSchema,
+  type AttemptState,
   type InputQuestion,
 } from '../src/contracts/index.ts';
-import { collectOperatorViewInput, type ViewSource } from '../src/control/operator-view.ts';
+import {
+  activityInputOf,
+  collectOperatorViewInput,
+  type ViewSource,
+} from '../src/control/operator-view.ts';
 import type { WorkflowQueue } from '../src/control/workflow.ts';
 import { operatorView, workDetailView } from '../src/projections/index.ts';
 import type { OperatorActivityInput } from '../src/projections/operator-view.ts';
@@ -82,6 +87,42 @@ const events: OperatorActivityInput[] = [
     approved: true,
     blocking: 0,
     reviewer: 'codex',
+    inspection: 'diff-only',
+  },
+  {
+    kind: 'review',
+    at: at(26),
+    scope: 'attempt',
+    subject: 'w',
+    workId: 'w',
+    attempt: 3,
+    phase: 'integration',
+    approved: true,
+    blocking: 0,
+    reviewer: 'claude',
+    inspection: 'commands',
+    commands: 3,
+  },
+  {
+    kind: 'review',
+    at: at(25),
+    scope: 'code',
+    subject: 'c'.repeat(64),
+    label: 'app/dev main..feature',
+    round: 1,
+    approved: true,
+    blocking: 0,
+    reviewer: 'codex',
+  },
+  {
+    kind: 'gate',
+    at: at(24),
+    workId: 'w',
+    attempt: 3,
+    gate: 'e2e',
+    phase: 'candidate',
+    passed: false,
+    notLaunched: true,
   },
   {
     kind: 'review',
@@ -151,7 +192,22 @@ test('view r2: лента — события окна новыми сверху,
     by('review.changes-requested').plain,
     'reviewer codex вернул план g1: блокирующих замечаний 2, раунд 2',
   );
-  assert.match(by('review.approved').plain, /читал diff, ничего не запускал$/);
+  // Что делал reviewer — только по записи controller; без записи фраза молчит.
+  const approved = a.filter((x) => x.action === 'review.approved').map((x) => x.plain);
+  assert.deepEqual(approved, [
+    'reviewer codex одобрил код app/dev main..feature, раунд 1',
+    'reviewer claude одобрил изменения работы w (попытка 3, интеграция); запускал команды: 3',
+    'reviewer codex одобрил изменения работы w (попытка 3, кандидат); читал diff, ничего не запускал',
+  ]);
+  assert.equal(
+    by('gate.not-launched').plain,
+    'проверка e2e не запустилась — отказ среды, проверки не было (работа w, попытка 3, кандидат)',
+  );
+  assert.equal(
+    a.filter((x) => x.action === 'gate.failed').length,
+    1,
+    'незапуск — не провал проверки',
+  );
   assert.equal(by('review.escalated').subject, 'g1');
   assert.equal(
     by('gate.failed').plain,
@@ -197,8 +253,18 @@ test('view r2: лента — предел 50 и счёт опущенного; 
   assert.equal(view.activity!.length, OPERATOR_VIEW_LIMITS.activity);
   assert.equal(view.truncated?.activity, 10);
   assert.ok(view.health.warnings.some((w) => w.code === 'VIEW_TRUNCATED'));
-  // Самые старые (6 минут назад) опущены первыми.
-  assert.ok(view.activity!.every((x) => Date.parse(x.at) >= NOW - 6 * 60_000));
+  // Опущены самые старые: все 8 событий 6 минут назад и 2 из 8 событий 5
+  // минут назад — при равном времени остаются первые по фразе.
+  const ids = (min: number) => many.filter((e) => e.at === at(min)).map((e) => e.workId!);
+  const kept = new Set(view.activity!.map((x) => x.workId));
+  for (const id of ids(6)) assert.ok(!kept.has(id), id);
+  for (const m of [0, 1, 2, 3, 4]) for (const id of ids(m)) assert.ok(kept.has(id), id);
+  const phrase = (id: string) => `контроллер запустил попытку 1 работы ${id}; пишет claude`;
+  const five = ids(5).sort((x, y) => (phrase(x) < phrase(y) ? -1 : 1));
+  assert.deepEqual(
+    five.filter((id) => kept.has(id)),
+    five.slice(0, 6),
+  );
   const again = operatorView(baseInput({ activity: [...many].reverse() }));
   assert.deepEqual(again.activity, view.activity, 'порядок входа не меняет ленту');
   assert.equal(again.source.token, view.source.token);
@@ -207,6 +273,30 @@ test('view r2: лента — предел 50 и счёт опущенного; 
   assert.equal(none.activity, undefined, 'производитель без ленты — поля нет, а не пустая лента');
   const empty = operatorView(baseInput({ activity: [] }));
   assert.deepEqual(empty.activity, []);
+
+  // Границы окна: ровно начало окна и `now` — внутри; раньше начала и позже `now` — нет.
+  const from = NOW - 86_400_000;
+  const edge = (t: number, id: string): OperatorActivityInput => ({
+    kind: 'attempt.started',
+    at: new Date(t).toISOString(),
+    workId: id,
+    attempt: 1,
+    runtime: 'claude',
+  });
+  const bounded = operatorView(
+    baseInput({
+      activity: [
+        edge(from, 'start'),
+        edge(from - 1, 'before'),
+        edge(NOW, 'now'),
+        edge(NOW + 1, 'future'),
+      ],
+    }),
+  );
+  assert.deepEqual(
+    bounded.activity!.map((x) => x.workId),
+    ['now', 'start'],
+  );
 
   // Окно 7 дней видит событие суточной давности.
   const week = operatorView(baseInput({ activity: events }), { windowMs: 7 * 86_400_000 });
@@ -394,9 +484,11 @@ test('view r2: лента из записей движка — ревью пла
   );
   const failed = view.activity!.find((x) => x.action === 'attempt.failed')!;
   assert.equal(failed.workId, 'w');
-  assert.match(
+  // Без суффикса «не расходуется»: возврат попытки за вопрос решает движок
+  // по своему пределу, и лента его не утверждает.
+  assert.equal(
     failed.plain,
-    /^попытка 1 работы w не удалась: вопрос исполнителя — исполнитель задал вопрос/,
+    'попытка 1 работы w не удалась: вопрос исполнителя — исполнитель задал вопрос',
   );
   const answered = view.activity!.find((x) => x.action === 'question.answered')!;
   assert.equal(answered.subject, request!.id);
@@ -404,4 +496,126 @@ test('view r2: лента из записей движка — ревью пла
   // Причина ведущего — в основании ответа, не в ленте: лента без свободного текста ответа.
   assert.ok(!JSON.stringify(view.activity).includes('без зависимости'));
   env.store.close();
+});
+
+test('view r2: лента — фразы, совпавшие после обрезки, не зависят от порядка входа и на пределе', () => {
+  const long = 'x'.repeat(190);
+  const same: OperatorActivityInput[] = Array.from({ length: 51 }, (_, k) => ({
+    kind: 'attempt.started',
+    at: at(1),
+    workId: `${long}${String(k).padStart(2, '0')}`,
+    attempt: 1,
+    runtime: 'claude',
+  }));
+  const one = operatorView(baseInput({ activity: same }));
+  const two = operatorView(baseInput({ activity: [...same].reverse() }));
+  assert.equal(new Set(one.activity!.map((x) => x.plain)).size, 1, 'фразы совпали после обрезки');
+  assert.deepEqual(two.activity, one.activity);
+  assert.equal(two.source.token, one.source.token);
+  // На пределе опущено одно и то же событие: последнее по сырым полям.
+  assert.deepEqual(
+    one.activity!.map((x) => x.workId),
+    same.slice(0, 50).map((e) => e.workId),
+  );
+});
+
+test('view r2: ответ оператора и хоста — свой исполнитель и фраза', () => {
+  const view = operatorView(
+    baseInput({
+      activity: [
+        { kind: 'question.answered', at: at(3), workId: 'w', requestId: 'IR-2', by: 'operator' },
+        { kind: 'question.answered', at: at(2), workId: 'w', requestId: 'IR-3', by: 'host' },
+      ],
+    }),
+    { lang: 'en' },
+  );
+  assert.deepEqual(
+    view.activity!.map((x) => [x.actor, x.plain]),
+    [
+      ['host', 'the host answered question IR-3 on w'],
+      ['operator', 'the operator answered question IR-2 on w'],
+    ],
+  );
+});
+
+test('view r2: события из записей попытки — незапуск gate, что делал reviewer, перепроверка и перенос', () => {
+  const base = {
+    id: 'run-1',
+    workId: 'w',
+    repositoryId: 'app',
+    attempt: 2,
+    runtime: 'claude',
+    reviewer: 'codex',
+    status: 'failed',
+    failureKind: 'gate',
+    startedAt: at(30),
+    finishedAt: at(20),
+    candidateSha: sha('a'),
+  };
+  const ev = (over: Record<string, unknown>) => ({
+    id: `e-${String(over.gate)}-${String(over.createdAt)}`,
+    runId: 'run-1',
+    kind: 'test',
+    phase: 'candidate',
+    sha: sha('a'),
+    passed: true,
+    createdAt: at(25),
+    command: [],
+    exitCode: 0,
+    log: '',
+    digest: 'd'.repeat(64),
+    summary: 'код выхода 0',
+    ...over,
+  });
+  const attemptState = {
+    ...base,
+    evidence: [
+      ev({ gate: 'unit', passed: false, exitCode: 1, summary: 'код выхода 1' }),
+      ev({
+        gate: 'e2e',
+        passed: false,
+        summary: 'песочница ОС не запустила команду: отказ запуска',
+      }),
+      ev({ gate: 'unit', createdAt: at(24), recheck: { of: 'e-unit', outcome: 'flaky' } }),
+      ev({
+        gate: 'independent-review',
+        kind: 'review',
+        createdAt: at(23),
+        inspection: {
+          mode: 'commands',
+          source: 'controller-probes',
+          commands: [],
+          reason: null,
+          total: 2,
+        },
+      }),
+      ev({
+        gate: 'independent-review',
+        kind: 'review',
+        phase: 'integration',
+        createdAt: at(22),
+        inspection: { mode: 'diff-only', source: 'unavailable', commands: [], reason: null },
+      }),
+    ],
+  } as unknown as AttemptState;
+  const events = activityInputOf({ repositories: [] }, [attemptState], [], [], []);
+  const view = operatorView(baseInput({ activity: events }));
+  const plain = (action: string) =>
+    view.activity!.filter((x) => x.action === action).map((x) => x.plain);
+  assert.deepEqual(plain('gate.not-launched'), [
+    'проверка e2e не запустилась — отказ среды, проверки не было (работа w, попытка 2, кандидат)',
+  ]);
+  assert.deepEqual(plain('gate.failed'), [
+    'контроллер запустил проверку unit: не прошла (работа w, попытка 2, кандидат)',
+  ]);
+  assert.equal(plain('gate.recheck').length, 1);
+  // Запись без источника наблюдения (`source: unavailable`) — неизвестно, а не «ничего не запускал».
+  assert.deepEqual(plain('review.approved'), [
+    'reviewer codex одобрил изменения работы w (попытка 2, интеграция)',
+    'reviewer codex одобрил изменения работы w (попытка 2, кандидат); запускал команды: 2',
+  ]);
+  assert.match(
+    plain('attempt.failed')[0]!,
+    /^попытка 2 работы w не удалась: дефект — не прошли проверки/,
+  );
 });

@@ -101,7 +101,7 @@ const gateName = (r: Pick<VerificationRow, 'gate' | 'consumer'>) =>
  * Запуск gate не состоялся: итог записи начинается текстом controller об
  * отказе запуска песочницы (вывод команды начинается иначе — «код выхода»).
  */
-const notLaunched = (summary: string) => /^песочница ОС не запустила команду/.test(summary);
+export const notLaunched = (summary: string) => /^песочница ОС не запустила команду/.test(summary);
 
 /**
  * ID для вывода: допустимый ID (`[A-Za-z0-9_-]`, до 80 символов); иное —
@@ -110,7 +110,9 @@ const notLaunched = (summary: string) => /^песочница ОС не запу
 export const displayId = (id: string) => (/^[A-Za-z0-9_-]{1,80}$/.test(id) ? id : 'unnamed');
 
 /** Что известно о действиях reviewer по записи ревью. */
-function reviewFacts(e: AttemptState['evidence'][number]): NonNullable<VerificationRow['review']> {
+export function reviewFacts(
+  e: AttemptState['evidence'][number],
+): NonNullable<VerificationRow['review']> {
   const protocol = e.reviewRound?.protocol;
   const i = e.inspection;
   const inspection: 'commands' | 'diff-only' | 'unknown' =

@@ -11,6 +11,16 @@ export interface AcceptedWork {
   acceptedSha: string;
 }
 
+/**
+ * Сверка только читает локальный репозиторий: ни один транспорт git не
+ * разрешён (и ленивая догрузка объектов partial clone, и любой fetch). Явные
+ * имена протоколов перекрывают их `allow` из config пользователя.
+ */
+const offline = [
+  'protocol.allow',
+  ...['file', 'git', 'http', 'https', 'ssh', 'ext'].map((p) => `protocol.${p}.allow`),
+].flatMap((key) => ['-c', `${key}=never`]);
+
 /** Предел одного вызова git сверки и всей сверки одного ответа. */
 const TARGET_GIT_TIMEOUT_MS = 10_000;
 const TARGET_TOTAL_MS = 30_000;
@@ -61,6 +71,8 @@ interface RemoteBranch {
   short?: string;
   sha?: string;
   checkedAt?: string;
+  /** Куда отправлять: имя удалённого репозитория и ветка в нём (`git push <remote> <targetRef>:<ref>`). */
+  push?: { remote: string; ref: string };
   reason?: { ru: string; en: string };
 }
 
@@ -77,12 +89,13 @@ const REMOTE_UNREADABLE = {
 /** Состояние удалённой ветки простыми словами (RU и EN). */
 export function remoteOf(
   state: Remote['state'],
-  branch: Pick<RemoteBranch, 'short' | 'checkedAt' | 'reason'>,
+  branch: Pick<RemoteBranch, 'short' | 'checkedAt' | 'reason' | 'push'>,
 ): Remote {
   const name = branch.short ?? '';
   const base = {
     state,
     ...(branch.short ? { trackingRef: branch.short } : {}),
+    ...(branch.push ? { pushRemote: branch.push.remote, pushRef: branch.push.ref } : {}),
     ...(branch.checkedAt ? { checkedAt: branch.checkedAt } : {}),
   };
   if (state === 'pushed')
@@ -113,6 +126,7 @@ const reasonEnOf: Record<string, string> = {
   'checkout репозитория не доверен': 'the repository checkout is not trusted',
   'git не ответил вовремя': 'git did not answer in time',
   'git не найден': 'git is not found',
+  [REMOTE_UNREADABLE.ru]: REMOTE_UNREADABLE.en,
 };
 
 /**
@@ -135,11 +149,17 @@ export function acceptedTargets(
   const run = (cwd: string, args: string[], raw = false) => {
     const left = deadline - Date.now();
     if (left <= 0) throw Object.assign(new Error('deadline'), { code: 'DEADLINE' });
-    const out = execFileSync('git', hostGitArgs(cwd, args), {
+    const out = execFileSync('git', hostGitArgs(cwd, [...offline, ...args]), {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1' },
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: '0',
+        GIT_NO_REPLACE_OBJECTS: '1',
+        // Недостающий объект partial clone не догружается из сети.
+        GIT_NO_LAZY_FETCH: '1',
+      },
       maxBuffer: 64 * 1024 * 1024,
       timeout: Math.min(TARGET_GIT_TIMEOUT_MS, left),
     });
@@ -167,36 +187,69 @@ export function acceptedTargets(
   // Удалённая ветка — только локальные ref и config: upstream ветки, иначе
   // `origin/<имя>`. Ни fetch, ни обращения к сети.
   const branchOf = (path: string, ref: string): RemoteBranch => {
-    let full = '';
+    const unreadable = (error: unknown) => ({
+      reason: asReason(reason(error, REMOTE_UNREADABLE.ru)),
+    });
+    // Строка ровно этой ветки: шаблон for-each-ref совпадает и с потомками
+    // (`<ref>/x`), а их upstream — не upstream целевой ветки.
+    let upstream: { full: string; remote: string; remoteRef: string } | undefined;
     try {
-      full = run(path, ['for-each-ref', '--format=%(upstream)', '--end-of-options', ref]);
+      const rows = run(
+        path,
+        [
+          'for-each-ref',
+          '--format=%(refname)%00%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)',
+          '--end-of-options',
+          ref,
+        ],
+        true,
+      ).split('\n');
+      const own = rows.map((r) => r.split('\0')).find((r) => r[0] === ref);
+      if (own && own[1]) upstream = { full: own[1], remote: own[2] ?? '', remoteRef: own[3] ?? '' };
     } catch (error) {
-      return { reason: asReason(reason(error, REMOTE_UNREADABLE.ru)) };
+      return unreadable(error);
     }
-    if (!full) {
-      const origin = 'refs/remotes/origin/' + ref.replace(/^refs\/heads\//, '');
+    const exists = (full: string) => {
       try {
-        run(path, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${origin}^{commit}`]);
-        full = origin;
+        run(path, ['show-ref', '--verify', '--quiet', full]);
+        return true;
       } catch (error) {
-        const e = error as { status?: number; code?: string };
-        return e.status === 1
-          ? { reason: NO_REMOTE }
-          : { reason: asReason(reason(error, REMOTE_UNREADABLE.ru)) };
+        if ((error as { status?: number }).status === 1) return false;
+        throw error;
       }
+    };
+    let full: string;
+    let push: { remote: string; ref: string } | undefined;
+    try {
+      if (upstream) {
+        // Upstream — не удалённая ветка (`branch.<имя>.remote = .`): удалённой нет.
+        if (!upstream.full.startsWith('refs/remotes/')) return { reason: NO_REMOTE };
+        full = upstream.full;
+        if (upstream.remote && upstream.remoteRef)
+          push = { remote: upstream.remote, ref: upstream.remoteRef };
+        if (!exists(full))
+          return {
+            full,
+            short: full.slice('refs/remotes/'.length),
+            ...(push ? { push } : {}),
+            reason: NOT_FETCHED,
+          };
+      } else {
+        const name = ref.replace(/^refs\/heads\//, '');
+        full = 'refs/remotes/origin/' + name;
+        if (!exists(full)) return { reason: NO_REMOTE };
+        push = { remote: 'origin', ref: 'refs/heads/' + name };
+      }
+    } catch (error) {
+      return unreadable(error);
     }
-    if (!full.startsWith('refs/remotes/')) return { reason: NO_REMOTE };
     const short = full.slice('refs/remotes/'.length);
+    const named = { full, short, ...(push ? { push } : {}) };
     let sha: string;
     try {
-      sha = run(path, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${full}^{commit}`]);
+      sha = run(path, ['rev-parse', '--verify', '--end-of-options', `${full}^{commit}`]);
     } catch (error) {
-      const e = error as { status?: number };
-      return {
-        full,
-        short,
-        reason: e.status === 1 ? NOT_FETCHED : asReason(reason(error, REMOTE_UNREADABLE.ru)),
-      };
+      return { ...named, ...unreadable(error) };
     }
     let checkedAt: string | undefined;
     try {
@@ -216,7 +269,7 @@ export function acceptedTargets(
     } catch {
       // Нет reflog — время обновления неизвестно, состояние читается.
     }
-    return { full, short, sha, ...(checkedAt ? { checkedAt } : {}) };
+    return { ...named, sha, ...(checkedAt ? { checkedAt } : {}) };
   };
   const remoteFor = (
     work: AcceptedWork,
@@ -354,8 +407,14 @@ export function reportTargets(
     .map((w) => ({ id: w.id, repositoryId: w.order.repositoryId, acceptedSha: w.resultSha! }))
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const targets = acceptedTargets(policy, repoPath, accepted);
+  // Раздел отчёта — о дрейфе после приёмки; удалённую ветку показывают
+  // status, result и представление оператора.
   const drifted = accepted
-    .map((w) => ({ workId: w.id, ...targets.get(w.id)! }))
+    .map((w) => {
+      const t = { ...targets.get(w.id)! };
+      delete t.remote;
+      return { workId: w.id, ...t };
+    })
     .filter((t) => t.unavailable !== undefined || t.diverged || (t.commitsSinceAccepted ?? 0) > 0);
   return {
     checked: accepted.length,

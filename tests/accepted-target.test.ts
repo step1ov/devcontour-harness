@@ -146,7 +146,22 @@ test('P2-c: принято локально против удалённой ве
   assert.equal(r.trackingRef, `origin/${branch}`);
   assert.equal(r.line, `принято локально; в удалённой ветке origin/${branch} ещё нет`);
   assert.equal(r.lineEn, `accepted locally; not yet on the remote branch origin/${branch}`);
-  assert.ok(r.checkedAt && Number.isFinite(Date.parse(r.checkedAt)), JSON.stringify(r));
+  // Время — последнее обновление ref на машине (reflog), а не часы запроса.
+  const gd = p.git(
+    'reflog',
+    'show',
+    '-n',
+    '1',
+    '--date=iso-strict',
+    '--format=%gd',
+    `refs/remotes/origin/${branch}`,
+  );
+  assert.equal(r.checkedAt, new Date(/@\{([^}]+)\}$/.exec(gd)![1]!).toISOString());
+  assert.deepEqual(
+    { remote: r.pushRemote, ref: r.pushRef },
+    { remote: 'origin', ref: REF },
+    'куда отправлять — ветка upstream',
+  );
   const human = p.harness('status', '--state', p.state, '--human');
   assert.ok(human.stdout.includes(`удалённая ветка: ${r.line}`), human.stdout);
 
@@ -155,11 +170,28 @@ test('P2-c: принято локально против удалённой ве
   execFileSync('git', ['--git-dir', origin, 'fetch', '-q', p.app, `+${REF}:${REF}`]);
   assert.equal(remote().state, 'not-pushed');
 
-  // Отправлено: принятый коммит в истории remote-tracking ref.
+  // Отправлено: принятый коммит в истории remote-tracking ref, вершина ушла
+  // дальше (коммит поверх принятого в удалённом репозитории): сверка по
+  // истории, а не по равенству SHA.
   p.git('push', '-q', 'origin', REF);
+  const ahead = p.git(
+    'commit-tree',
+    '-p',
+    p.acceptedSha,
+    '-m',
+    'remote ahead',
+    `${p.acceptedSha}^{tree}`,
+  );
+  p.git('push', '-q', 'origin', `${ahead}:${REF}`);
+  assert.equal(p.git('rev-parse', `refs/remotes/origin/${branch}`), ahead);
   r = remote();
   assert.equal(r.state, 'pushed');
   assert.equal(r.line, `уже в удалённой ветке origin/${branch}`);
+  // Раздел отчёта «после приёмки» — о дрейфе: удалённой ветки в нём нет.
+  const report = cliDataSchemas.report.parse(
+    p.harness('report', '--state', p.state).json.data,
+  ) as any;
+  assert.ok(!JSON.stringify(report.targets).includes('remote'), JSON.stringify(report.targets));
   const result = cliDataSchemas.result.parse(
     p.harness('result', '--state', p.state, '--work', 'add-greeting').json.data,
   );
@@ -189,9 +221,27 @@ test('P2-c: принято локально против удалённой ве
   assert.equal(acceptedRow.workId, 'add-greeting');
   assert.match(acceptedRow.plain, new RegExp(`on ${REF}, locally$`));
 
+  // Upstream с другим именем ветки: сверка и адрес отправки — по нему.
+  p.git('push', '-q', 'origin', `${p.acceptedSha}^:refs/heads/release`);
+  p.git('branch', '-q', '--set-upstream-to=origin/release', branch);
+  r = remote();
+  assert.deepEqual(
+    { state: r.state, trackingRef: r.trackingRef, pushRemote: r.pushRemote, pushRef: r.pushRef },
+    {
+      state: 'not-pushed',
+      trackingRef: 'origin/release',
+      pushRemote: 'origin',
+      pushRef: 'refs/heads/release',
+    },
+  );
+  p.git('push', '-q', 'origin', `${REF}:refs/heads/release`);
+  assert.equal(remote().state, 'pushed');
+
   // Без upstream — та же ветка origin/<имя>.
   p.git('branch', '-q', '--unset-upstream', branch);
-  assert.equal(remote().state, 'pushed');
+  r = remote();
+  assert.equal(r.state, 'pushed');
+  assert.equal(r.trackingRef, `origin/${branch}`);
   // Upstream настроен, а remote-tracking ref на машине нет — неизвестно.
   p.git('config', `branch.${branch}.remote`, 'origin');
   p.git('config', `branch.${branch}.merge`, 'refs/heads/elsewhere');

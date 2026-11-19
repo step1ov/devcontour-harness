@@ -34,6 +34,7 @@ import {
 import { HARNESS_VERSION } from '../package.ts';
 import { callCostKnown, failureBucketOf, interruptedByShutdown } from '../report/compute.ts';
 import { failurePlainOf } from '../report/failure-plain.ts';
+import { notLaunched, reviewFacts } from '../report/verification.ts';
 import { callRecords } from '../engine/usage.ts';
 import { legacyGroupCall } from '../engine/budget.ts';
 import { requestsOf } from '../engine/input-requests.ts';
@@ -503,8 +504,13 @@ export function activityInputOf(
           passed: e.passed,
           ...(e.recheck ? { recheck: e.recheck.outcome } : {}),
           ...(e.reusedEvidence ? { reused: true } : {}),
+          // Правило строк проверки (`verificationRows`): запуск не состоялся.
+          ...(!e.passed && !e.reusedEvidence && notLaunched(e.summary)
+            ? { notLaunched: true }
+            : {}),
         });
-      else if (e.kind === 'review' && (!e.reviewRound || e.reviewRound.protocol === 'valid'))
+      else if (e.kind === 'review' && (!e.reviewRound || e.reviewRound.protocol === 'valid')) {
+        const facts = reviewFacts(e);
         out.push({
           kind: 'review',
           at: e.createdAt,
@@ -516,7 +522,12 @@ export function activityInputOf(
           approved: e.passed,
           blocking: blockingOf(e.findings ?? []),
           reviewer: a.reviewer,
+          ...(facts.inspection === 'diff-only' ? { inspection: 'diff-only' as const } : {}),
+          ...(facts.inspection === 'commands'
+            ? { inspection: 'commands' as const, commands: facts.commands ?? 0 }
+            : {}),
         });
+      }
     }
   }
   // Эскалация — в раунде, где находка впервые ждёт решения.

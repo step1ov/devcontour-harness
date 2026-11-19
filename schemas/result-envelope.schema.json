@@ -1899,6 +1899,16 @@
               "minLength": 1,
               "maxLength": 500
             },
+            "pushRemote": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "pushRef": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
             "checkedAt": {
               "type": "string",
               "format": "date-time",
