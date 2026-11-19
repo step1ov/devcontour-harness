@@ -10,7 +10,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cpSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,7 +56,7 @@ function accepted() {
   const state = join(root, 'state');
   const harness = (...args: string[]) => {
     const r = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), cli, ...args], {
-      cwd: app,
+      cwd: existsSync(app) ? app : root,
       encoding: 'utf8',
       env: {
         ...process.env,
@@ -195,4 +203,26 @@ test('H11: строки target укладываются в предел при �
     unavailable: 'ref не прочитан',
   });
   assert.ok(t.line.length <= 500 && t.lineEn.length <= 500);
+});
+
+test('H11: имена из пробелов и с переводом строки считаются; испорченный binding.json — отказ report; пропавший checkout — unavailable', () => {
+  const p = accepted();
+  p.commitOnRef({ '   ': 'spaces\n', 'a\nb.txt': 'newline\n' });
+  const status = cliDataSchemas.status.parse(p.harness('status', '--state', p.state).json.data);
+  assert.equal(status.works[0]!.target!.filesSinceAccepted, 2);
+  assert.equal(status.works[0]!.target!.commitsSinceAccepted, 1);
+
+  const bindingPath = join(p.state, 'binding.json');
+  const saved = readFileSync(bindingPath, 'utf8');
+  writeFileSync(bindingPath, '{broken');
+  const broken = p.harness('report', '--state', p.state);
+  assert.equal(broken.json.ok, false, broken.stdout);
+  writeFileSync(bindingPath, saved);
+
+  renameSync(p.app, p.app + '-moved');
+  const moved = p.harness('result', '--state', p.state, '--work', 'add-greeting');
+  assert.equal(moved.status, 0, moved.stdout + moved.stderr);
+  const target = cliDataSchemas.result.parse(moved.json.data).target!;
+  assert.equal(target.unavailable, 'checkout репозитория не найден');
+  assert.ok(!target.line.includes(p.app));
 });

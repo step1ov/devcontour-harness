@@ -1893,12 +1893,12 @@ SHA.
 reviewer называет состояние прежних открытых находок; тот же одобренный `head`, автор, назначение и итог gates — тот же раунд без вызова; предел раундов —
 `maxAttempts × 2`. Запись (`codeReviewRecordSchema`) хранится в `code-reviews`
 у `@workspace` и в `<state>/review-code/<id>/` (запрос, `review.json`). Exit 0 —
-одобрено, 3 — нет. Поручения, попытки и target ref не меняются: это не приёмка.
+одобрено, 3 — нет; прерывание (SIGINT, SIGTERM, предел `runTimeoutMs`) — `CANCELLED`, рабочее дерево убирается, раунд не записывается. Поручения, попытки и target ref не меняются: это не приёмка.
 
 **Принятая версия против target ref.** `status` (`works[].target`), `result` и
 `deliver` (`target`) для принятой работы и `report` (`targets`: принятые
 поручения, у которых ref ушёл вперёд, переписан или не прочитан; `checked` —
-сверено всего; нет поля — в каталоге нет `binding.json`) отдают
+сверено всего; нет поля — в каталоге нет `binding.json`, испорченный `binding.json` — отказ) отдают
 `acceptedTargetSchema`: `repositoryId`, `ref`, `acceptedSha`, `head`,
 `commitsSinceAccepted` (`acceptedSha..head`), `filesSinceAccepted`, `diverged`
 (принятый коммит не предок ref), `unavailable` (git не ответил — не отказ

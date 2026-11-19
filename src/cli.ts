@@ -808,12 +808,8 @@ async function run(
       // (неизменяемое открытие с проверкой после чтения, `readOnce`).
       // Политика каталога состояния (если есть): по ней принятые поручения
       // сверяются с текущими target ref. Нет политики — отчёт без сверки.
-      let bound: Binding | undefined;
-      try {
-        bound = binding(state);
-      } catch {
-        bound = undefined;
-      }
+      // Нет `binding.json` — отчёт без сверки; испорченный — отказ, а не тихий пропуск.
+      const bound = existsSync(bindingFile(state)) ? binding(state) : undefined;
       const report = SqliteExecutionStore.readOnce(
         file,
         'devcontour-harness@' + HARNESS_VERSION,
@@ -973,6 +969,11 @@ async function run(
       const author = v.author ? parseWith(authorSchema, v.author, 'author') : undefined;
       const b = v.policy ? binding(state, v.policy, true) : binding(state);
       const h = open(state, b, false);
+      // Прерывание (Ctrl-C, SIGTERM) останавливает reviewer, и рабочее дерево обзора убирается.
+      const abort = new AbortController();
+      const stop = () => abort.abort(new Error('Обзор прерван сигналом'));
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
       try {
         const record = await h.reviewCode({
           base: need('base'),
@@ -980,9 +981,15 @@ async function run(
           ...optional('role', v.role),
           ...optional('author', author),
           ...optional('repositoryId', v.repository),
+          signal: AbortSignal.any([
+            abort.signal,
+            AbortSignal.timeout(b.policy.runTimeoutMs + 5000),
+          ]),
         });
         return { command, data: record, code: record.approved ? 0 : exitCodes.refused };
       } finally {
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
         h.close();
       }
     }

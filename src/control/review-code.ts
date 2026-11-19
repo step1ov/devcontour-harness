@@ -46,6 +46,7 @@ const rawGit = (cwd: string, args: string[], options: { maxBuffer?: number } = {
         cwd,
         encoding: 'buffer',
         maxBuffer: options.maxBuffer ?? 64 * 1024 * 1024,
+        timeout: REVIEW_CODE_GIT_TIMEOUT_MS,
         env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1' },
       },
       (error, stdout) => {
@@ -54,6 +55,17 @@ const rawGit = (cwd: string, args: string[], options: { maxBuffer?: number } = {
       },
     );
   });
+
+/** Прерванный обзор (сигнал, предел времени) — отказ CANCELLED; раунд не записывается. */
+const cancelled = (signal: AbortSignal) =>
+  new HarnessError(
+    'CANCELLED',
+    'Обзор кода прерван: ' +
+      (signal.reason instanceof Error ? signal.reason.message : 'предел времени'),
+  );
+
+/** Предел одного вызова git подготовки обзора (diff, имена). */
+const REVIEW_CODE_GIT_TIMEOUT_MS = 120_000;
 
 /** Предел diff обзора: больший — отказ до вызова (сузьте диапазон). */
 export const REVIEW_CODE_DIFF_LIMIT = 4 * 1024 * 1024;
@@ -341,6 +353,7 @@ export async function reviewCode(
     .join('\n\n');
   await writeFile(join(dir, 'prompt.txt'), prompt);
 
+  const signal = input.signal ?? AbortSignal.timeout(policy.runTimeoutMs + 5000);
   let added = false;
   let response: Awaited<ReturnType<typeof measuredInvoke>>;
   // Reviewer только читает: изменённое им дерево (файлы, HEAD) — отказ раунда,
@@ -375,16 +388,21 @@ export async function reviewCode(
         artifactDir: dir,
         secrets: [...(execution.redact.secrets ?? [])],
       },
-      input.signal ?? AbortSignal.timeout(policy.runTimeoutMs + 5000),
+      signal,
       { repositoryId: repo.id, subjectId: subject, subjectKind: 'other', stage: 'code-review' },
     ).catch((error: unknown) => {
+      if (signal.aborted) throw cancelled(signal);
       if (error instanceof TaskFailure && error.kind === 'budget')
         throw new HarnessError('BUDGET_EXHAUSTED', error.message);
       throw error;
     });
-    const dirty = await git(cwd, 'status', '--porcelain', '--untracked-files=all').catch(
-      () => '(git status не ответил)',
-    );
+    const dirty = await git(
+      cwd,
+      'status',
+      '--porcelain',
+      '--untracked-files=all',
+      '--ignored',
+    ).catch(() => '(git status не ответил)');
     const now = await git(cwd, 'rev-parse', 'HEAD').catch(() => '');
     if (dirty || now !== head)
       mutated = `reviewer изменил рабочее дерево обзора${now !== head ? ' (HEAD сдвинут)' : ''}`;
@@ -393,6 +411,7 @@ export async function reviewCode(
     await rm(cwd, { recursive: true, force: true }).catch(() => undefined);
     if (trees !== dir) await rmdir(trees).catch(() => undefined);
   }
+  if (signal.aborted) throw cancelled(signal);
   if (response.status !== 'ok')
     throw new HarnessError(
       'RUNTIME_UNAVAILABLE',
@@ -419,7 +438,12 @@ export async function reviewCode(
     ...lastFindings.map((f) => {
       const t = transitions.get(f.id);
       if (f.status === 'open' && t)
-        return { ...f, status: t.status, changedIn: round, basis: t.basis.slice(0, 4000) };
+        return {
+          ...f,
+          status: t.status,
+          changedIn: round,
+          basis: execution.redact(t.basis).slice(0, 4000),
+        };
       if (f.status !== 'open' && reported.some((r) => r.id === f.id))
         return { ...f, status: 'open' as const, changedIn: round, basis: 'найдена снова' };
       return f;
@@ -430,8 +454,8 @@ export async function reviewCode(
         id: f.id,
         severity: f.severity,
         message: execution.redact(f.message).slice(0, 12000),
-        ...(f.rule ? { rule: f.rule.slice(0, 200) } : {}),
-        path: f.path ? f.path.slice(0, 500) : null,
+        ...(f.rule ? { rule: execution.redact(f.rule).slice(0, 200) } : {}),
+        path: f.path ? execution.redact(f.path).slice(0, 500) : null,
         line: f.line ?? null,
         status: 'open' as const,
         openedIn: round,
@@ -492,7 +516,9 @@ export async function reviewCode(
       2,
     ),
   );
-  const saved = redactDeep(record, execution.redact);
+  // Сохраняемое представление — после маскировки, проверенное схемой: поля
+  // уже замаскированы до обрезки, повторная маскировка их не удлиняет.
+  const saved = codeReviewRecordSchema.parse(redactDeep(record, execution.redact));
   engine.host.store.transact('findings.recorded', (tx) => {
     // Нумерация раундов предмета — подряд: параллельный обзор того же предмета
     // не записывает второй раунд с тем же номером.

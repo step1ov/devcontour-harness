@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import type { AcceptedTarget, ExecutionPolicy } from '../contracts/index.ts';
 import { hostGitArgs } from '../environment/process.ts';
 
@@ -70,21 +71,28 @@ export function acceptedTargets(
   const out = new Map<string, AcceptedTarget>();
   const heads = new Map<string, { head?: string; error?: string }>();
   const cache = new Map<string, Omit<AcceptedTarget, 'line' | 'lineEn'>>();
-  const run = (cwd: string, args: string[]) =>
-    execFileSync('git', hostGitArgs(cwd, args), {
+  const deadline = Date.now() + TARGET_TOTAL_MS;
+  // Каждый вызов — не дольше остатка общей сверки; исчерпанный остаток —
+  // без вызова. `raw` — вывод без обрезки (имена `-z`).
+  const run = (cwd: string, args: string[], raw = false) => {
+    const left = deadline - Date.now();
+    if (left <= 0) throw Object.assign(new Error('deadline'), { code: 'DEADLINE' });
+    const out = execFileSync('git', hostGitArgs(cwd, args), {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1' },
       maxBuffer: 64 * 1024 * 1024,
-      timeout: TARGET_GIT_TIMEOUT_MS,
-    }).trim();
+      timeout: Math.min(TARGET_GIT_TIMEOUT_MS, left),
+    });
+    return raw ? out : out.trim();
+  };
   // Причина — класс, а не сырой stderr: текст git несёт пути машины, а сверка
   // попадает в отчёт.
   const reason = (error: unknown, what: string) => {
     const e = error as { code?: string; signal?: string; stderr?: string; message?: string };
-    if (e.code === 'ETIMEDOUT' || e.signal === 'SIGTERM')
-      return `git не ответил за ${TARGET_GIT_TIMEOUT_MS / 1000} с`;
+    if (e.code === 'DEADLINE') return `сверка прервана: предел ${TARGET_TOTAL_MS / 1000} с`;
+    if (e.code === 'ETIMEDOUT' || e.signal === 'SIGTERM') return 'git не ответил вовремя';
     if (e.code === 'ENOENT') return 'git не найден';
     if (
       /trusted|доверен|safe\.directory|symlink|ссылк/i.test(`${e.message ?? ''} ${e.stderr ?? ''}`)
@@ -92,7 +100,6 @@ export function acceptedTargets(
       return 'checkout репозитория не доверен';
     return what;
   };
-  const deadline = Date.now() + TARGET_TOTAL_MS;
   for (const work of works) {
     const repo = policy.repositories.find((r) => r.id === work.repositoryId);
     const ref = repo?.targetRef ?? '(нет репозитория)';
@@ -104,6 +111,7 @@ export function acceptedTargets(
       else {
         const path = repoPath(repo.path);
         let head = heads.get(repo.id);
+        if (!head && !existsSync(path)) head = { error: 'checkout репозитория не найден' };
         if (!head) {
           try {
             head = {
@@ -136,14 +144,11 @@ export function acceptedTargets(
             const commits = Number(
               run(path, ['rev-list', '--count', `${work.acceptedSha}..${head.head}`]),
             );
-            const files = run(path, [
-              'diff',
-              '--name-only',
-              '-z',
-              '--no-renames',
-              work.acceptedSha,
-              head.head,
-            ])
+            const files = run(
+              path,
+              ['diff', '--name-only', '-z', '--no-renames', work.acceptedSha, head.head],
+              true,
+            )
               .split('\0')
               .filter((n) => n.length > 0).length;
             base = {

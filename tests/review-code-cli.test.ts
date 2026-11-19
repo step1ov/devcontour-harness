@@ -10,7 +10,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 import {
   cpSync,
   existsSync,
@@ -336,4 +337,62 @@ test('H10: review-code — diff между 2 и 4 МиБ доходит до rev
   assert.equal(refused.json.error.code, 'INVALID_INPUT');
   assert.match(String(refused.json.error.message), /предела/);
   assert.equal(fixtureCalls(q.scenarioPath, 'codex', 'reviewer'), 0);
+});
+
+test('H10: review-code — игнорируемый файл, созданный reviewer, тоже изменение дерева', () => {
+  const p = project();
+  p.git('branch', 'feat');
+  p.commitOn('feat', '.gitignore', '*.log\n');
+  p.scenario({ reviewer: { ...verdict(true), files: { 'out.log': 'x\n' } } });
+  const r = p.reviewCode();
+  assert.equal(r.status, exitCodes.refused, r.stdout);
+  assert.equal(record(r.json).approved, false);
+});
+
+test('H10: review-code — SIGTERM во время вызова reviewer: CANCELLED, раунд не записан, дерево убрано', async () => {
+  const p = project();
+  p.git('branch', 'feat');
+  p.commitOn('feat', 'src/greet.js', 'exports.greet = () => 1;\n');
+  p.scenario({ reviewer: { ...verdict(true), sleepMs: 60_000 } });
+  const child = spawn(
+    process.execPath,
+    [
+      '--import',
+      import.meta.resolve('tsx'),
+      cli,
+      'review-code',
+      '--state',
+      p.state,
+      '--policy',
+      'policy.json',
+      '--base',
+      'main',
+      '--head',
+      'feat',
+    ],
+    {
+      cwd: p.app,
+      env: {
+        ...process.env,
+        NODE_OPTIONS: '',
+        HARNESS_CLAUDE_BIN: bin('fake-claude'),
+        HARNESS_CODEX_BIN: bin('fake-codex'),
+      },
+    },
+  );
+  let stdout = '';
+  child.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
+  const started = p.scenarioPath + '.reviewer.0.started';
+  const until = Date.now() + 30_000;
+  while (!existsSync(started) && Date.now() < until) await delay(100);
+  assert.ok(existsSync(started), 'reviewer запущен');
+  child.kill('SIGTERM');
+  const code = await new Promise<number | null>((done) => child.on('close', done));
+  const json = JSON.parse(stdout);
+  assert.equal(json.error.code, 'CANCELLED', stdout);
+  assert.equal(code, exitCodes.refused);
+  assert.equal(p.git('worktree', 'list', '--porcelain').match(/^worktree /gm)?.length, 1);
+  // Раунд не записан: следующий обзор — раунд 1.
+  p.scenario({ reviewer: verdict(true) });
+  assert.equal(record(p.reviewCode().json).round, 1);
 });
