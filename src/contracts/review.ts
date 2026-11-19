@@ -126,6 +126,13 @@ const reviewResultFindingSchema = z.object({
   evidence: z.string().nullable().optional(),
   // Негодное воспроизведение отбрасывает только его, а не весь оплаченный вердикт.
   reproduction: reproductionSchema.nullable().optional().catch(null),
+  /**
+   * Ревью плана и контракта: ID прежней находки предмета, которую reviewer
+   * поднимает снова (в том числе другими словами). Находка сохраняет ID и счёт
+   * раундов. Нет поля или `null` — сопоставление по пути и правилу
+   * (docs/review-protocol.md, §8). Ревью кода поле не читает.
+   */
+  sameAs: z.string().max(200).nullable().optional(),
 });
 
 /**
@@ -161,9 +168,18 @@ export const storedReviewResultSchema = reviewResultSchema.extend({
   previous: z.array(findingTransitionSchema).default([]),
 });
 
-/** Идентичность находки: предмет, класс и текст. Новый текст — новая находка. */
+/**
+ * ID новой находки плана или контракта: предмет, класс и текст. Находка,
+ * поднятая снова (`sameAs`, тот же путь и правило или тот же текст),
+ * сохраняет прежний ID: переформулировка не заводит новую находку.
+ */
 export const findingId = (subject: string, finding: { rule?: string | null; message: string }) =>
   digestOf({ subject, rule: finding.rule ?? null, message: finding.message });
+
+/** Решение по находке плана или контракта до следующего раунда. */
+export const reviewDecisions = ['accepted-limitation', 'continue'] as const;
+export type ReviewDecision = (typeof reviewDecisions)[number];
+export const reviewDeciders = ['lead', 'operator'] as const;
 
 export const reviewFindingSchema = z.strictObject({
   id: digestSchema,
@@ -172,12 +188,46 @@ export const reviewFindingSchema = z.strictObject({
   rule: z.string().max(200).optional(),
   path: z.string().max(500).nullable().optional(),
   line: z.number().int().positive().nullable().optional(),
+  /**
+   * Принятое ограничение (решение ведущего или оператора) — `withdrawn` с
+   * `disposition.decision: 'accepted-limitation'`: перечень прежний, и
+   * читатель прежней версии видит снятую с основанием находку.
+   */
   status: z.enum(['open', 'closed', 'withdrawn']),
   /** Раунд, в котором находка появилась, и раунд последнего изменения статуса. */
   openedIn: z.number().int().positive(),
   changedIn: z.number().int().positive(),
   basis: z.string().max(4000).optional(),
+  /**
+   * Раундов, в которых находка оставалась открытой (поднята или не закрыта).
+   * Нет поля — запись прежней версии: счёт выводится из `openedIn`.
+   */
+  rounds: z.number().int().positive().optional(),
+  /**
+   * Последнее решение по находке: `accepted-limitation` (ограничение принято)
+   * или `continue` (оператор разрешил ещё раунды после эскалации). `rounds` —
+   * счёт раундов на момент решения.
+   */
+  disposition: z
+    .strictObject({
+      decision: z.enum(reviewDecisions),
+      by: z.enum(reviewDeciders),
+      reason: z.string().min(1).max(4000),
+      round: z.number().int().positive(),
+      rounds: z.number().int().min(0),
+    })
+    .optional(),
 });
+export type ReviewFinding = z.infer<typeof reviewFindingSchema>;
+
+/** Решение ведущего или оператора по открытой находке, применяемое следующим раундом. */
+export const reviewDispositionSchema = z.strictObject({
+  finding: digestSchema,
+  decision: z.enum(reviewDecisions),
+  by: z.enum(reviewDeciders),
+  reason: z.string().trim().min(3).max(4000),
+});
+export type ReviewDisposition = z.infer<typeof reviewDispositionSchema>;
 
 /**
  * Раунд технического ревью плана (графа) или контракта. Раунды предмета
@@ -221,6 +271,66 @@ export const reviewRecordSchema = z.strictObject({
   artifact: z.string().max(1000),
 });
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
+
+/**
+ * Сводка истории ревью предмета (плана или контракта) для `status`, `explain`
+ * и отчёта: последний раунд, предел раундов, открытые находки, принятые
+ * ограничения, расход вызовов ревью и решение, которого ждёт эскалация.
+ * Одобрение с открытыми заметками допустимо (§3), но видно явно.
+ */
+export const reviewSubjectSummarySchema = z.strictObject({
+  kind: z.enum(['plan', 'contract']),
+  subject: idSchema,
+  digest: digestSchema,
+  approved: z.boolean(),
+  /** Раундов проведено (номер последнего) и предел раундов; `null` — без предела. */
+  rounds: z.strictObject({
+    used: z.number().int().positive(),
+    max: z.number().int().positive().nullable(),
+  }),
+  open: z.strictObject({ blocking: z.number().int().min(0), notes: z.number().int().min(0) }),
+  accepted: z.number().int().min(0),
+  /** Расход вызовов ревью предмета по записям учёта; `unknownCalls` — без известной стоимости. */
+  spend: z.strictObject({
+    calls: z.number().int().min(0),
+    knownUsd: z.number().min(0),
+    unknownCalls: z.number().int().min(0),
+  }),
+  /**
+   * Находки, открытые `REVIEW_ESCALATION_ROUNDS` раундов подряд: следующий
+   * раунд не запускается до решения оператора (вопрос с вариантами).
+   */
+  escalation: z
+    .strictObject({
+      question: z.string().max(1500),
+      options: z
+        .array(
+          z.strictObject({
+            id: z.string().max(40),
+            label: z.string().max(300),
+            consequence: z.string().max(1000).nullable(),
+          }),
+        )
+        .max(6),
+      recommended: z.string().max(40).nullable(),
+      findings: z
+        .array(
+          z.strictObject({
+            id: digestSchema,
+            severity: z.enum(['blocking', 'note']),
+            message: z.string().max(500),
+            rounds: z.number().int().positive(),
+          }),
+        )
+        .max(50),
+      /** Как записать ответ: аргументы следующего review-plan / review-contract. */
+      answer: z.string().max(1000),
+    })
+    .optional(),
+  /** Строка для человека: «одобрено, открытых заметок 2; раундов 3/6; ревью $0.40». */
+  line: z.string().max(1000),
+});
+export type ReviewSubjectSummary = z.infer<typeof reviewSubjectSummarySchema>;
 
 /**
  * Согласованность ответа reviewer с историей предмета: approved без

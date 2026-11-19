@@ -12,6 +12,7 @@ import { attemptSummaryLine, attemptSummaryOf, type AttemptBudget } from '../rep
 import { budgetOverview } from '../engine/budget.ts';
 import type { Engine } from '../engine/engine.ts';
 import { requestsOf } from '../engine/input-requests.ts';
+import { reviewSummaries, reviewsText } from './review-summary.ts';
 import { MAX_NEUTRAL_FAILURES } from '../contracts/repair-policy.ts';
 import { nextRunControl, repairJobOf, type StopSource } from '../explain/state.ts';
 import {
@@ -150,6 +151,9 @@ export function statusOf(
         attemptSummary: summaryOf(w),
       })),
       ...((budgets) => (budgets ? { budgets } : {}))(budgetOverview(engine.budgetContext(), v)),
+      ...((reviews) => (reviews.length ? { reviews } : {}))(
+        reviewSummaries(v, source.policy, graphId === undefined ? {} : { graphId }),
+      ),
       ...(options.detail ? { detail: statusDetail(source, v, graphId) } : {}),
     };
   });
@@ -231,5 +235,5 @@ export function statusText(data: z.output<typeof statusDataSchema>): string {
     out.push(`${w.id} [${w.status}]${w.attemptSummary ? ': ' + w.attemptSummary.line : ''}`);
     if (w.blockers.length) out.push(`  блокировки: ${w.blockers.map((b) => b.code).join(', ')}`);
   }
-  return out.join('\n') + '\n';
+  return out.join('\n') + '\n' + reviewsText(data.reviews);
 }

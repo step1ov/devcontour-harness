@@ -158,7 +158,14 @@
       },
       "blockingClosed": 1,
       "blockingOpen": 0,
-      "blockingWithdrawn": 0
+      "blockingWithdrawn": 0,
+      "approvedWithOpenNotes": 1,
+      "openNotes": 1,
+      "acceptedLimitations": 0,
+      "escalated": 0,
+      "calls": 1,
+      "knownUsd": 0.5,
+      "unknownCostCalls": 0
     },
     "withdrawn": {
       "value": 1,

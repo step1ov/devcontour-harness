@@ -1,9 +1,10 @@
 import { resolve } from 'node:path';
 import { cliAdapter } from '../agents/cli-adapter.ts';
-import type { ExecutionPolicy, RuntimeName } from '../contracts/index.ts';
+import type { ExecutionPolicy, ReviewSubjectSummary, RuntimeName } from '../contracts/index.ts';
 import type { RuntimeAdapter } from '../contracts/ports.ts';
 import { doctor } from '../control/doctor.ts';
 import { Harness } from '../control/harness.ts';
+import { reviewSummaries, reviewsText } from '../control/review-summary.ts';
 import { attemptSummaries, type attemptSummaryView } from '../control/status.ts';
 import { explainStop, type StopDiagnosis, type StopInput } from '../projections/stop.ts';
 import { stopInputsOf } from './state.ts';
@@ -37,6 +38,7 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
   let stateInputs: StopInput[];
   let attempts: AttemptSummaryRow[];
   let attemptsTruncated: number;
+  let reviews: ReviewSubjectSummary[];
   try {
     stateInputs = stopInputsOf(h, {
       maxAttempts: policy.maxAttempts,
@@ -57,6 +59,8 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
         attemptsTruncated: Math.max(0, works.length - EXPLAIN_ATTEMPT_ROWS),
       };
     }));
+    // Ревью плана и контрактов — та же сводка, что у `status`.
+    reviews = h.engine.read((v) => reviewSummaries(v, policy));
   } finally {
     h.close();
   }
@@ -76,6 +80,7 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
     diagnoses: [...runtimes, ...stateInputs].map(explainStop),
     attempts,
     ...(attemptsTruncated ? { attemptsTruncated } : {}),
+    ...(reviews.length ? { reviews } : {}),
   };
 }
 
@@ -87,6 +92,7 @@ export interface ExplainData {
   diagnoses: StopDiagnosis[];
   attempts?: AttemptSummaryRow[];
   attemptsTruncated?: number;
+  reviews?: ReviewSubjectSummary[];
 }
 
 /** Предел строк сводки попыток в ответе `explain`; остальные — `attemptsTruncated`. */
@@ -112,7 +118,8 @@ export function explainText(data: ExplainData): string {
   return (
     stops +
     attemptsText(data.attempts ?? []) +
-    (data.attemptsTruncated ? `  … и ещё поручений: ${data.attemptsTruncated}\n` : '')
+    (data.attemptsTruncated ? `  … и ещё поручений: ${data.attemptsTruncated}\n` : '') +
+    reviewsText(data.reviews)
   );
 }
 

@@ -169,6 +169,24 @@ review under the reviewer rule and approves it.
 the findings in advance. With `approvalMode: operator` a human approves with
 `$H approve`.
 
+**Review rounds that go in circles.** Each plan or contract review round is a
+paid call; `status` / `explain` `data.reviews[].line` shows the verdict, rounds
+used of the cap and the review spend (in Russian: «одобрено, открытых заметок
+2; раундов 3/6; ревью $0.75»). Approval may leave open notes: say so to the
+user instead of reporting a clean approval. A finding the reviewer raises
+again in other words keeps its ID (`sameAs`, or the same path and rule), so
+`rounds` counts how long it has stayed open.
+
+- If a finding is a known limitation you accept, record it in the next round:
+  `$H review-plan … --accept-limitation <id> --reason "<why>"`. The reviewer
+  sees the reason and does not re-raise it without new evidence. This is not
+  an approval; never use it to silence a defect you can fix.
+- A blocking finding open for 3 rounds stops the next round before the call
+  (`INPUT_REQUIRED`, `data.reviews[].escalation`): give the user the question
+  and its options, then record their answer with `--actor operator`
+  (`--accept-limitation <id> --reason …`, or `--continue-review <id> --reason …`
+  for three more rounds). Do not answer it yourself.
+
 ### 7. Run
 
 ```sh

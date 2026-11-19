@@ -220,3 +220,24 @@ export const alreadySatisfiedReviewOutputSchema = {
   },
   required: [...reviewOutputSchema.required, 'alreadySatisfied'],
 };
+
+/**
+ * Ответ reviewer плана и контракта: протокол ревью и `sameAs` у находки — ID
+ * прежней находки предмета, поднятой снова (`null` — новая или без ссылки).
+ * Ревью кода отвечает прежней схемой: его вид ответа не меняется.
+ */
+const reviewFindingItem = reviewOutputSchema.properties.findings.items;
+export const technicalReviewOutputSchema = {
+  ...reviewOutputSchema,
+  properties: {
+    ...reviewOutputSchema.properties,
+    findings: {
+      ...reviewOutputSchema.properties.findings,
+      items: {
+        ...reviewFindingItem,
+        properties: { ...reviewFindingItem.properties, sameAs: { type: ['string', 'null'] } },
+        required: [...reviewFindingItem.required, 'sameAs'],
+      },
+    },
+  },
+};

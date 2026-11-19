@@ -151,6 +151,15 @@ const ADDITIVE_ARGS = new Set([
   'init--lead',
   'init--review',
   'init--model',
+  // Решения по находкам плана и контракта (0.1.0-alpha.54).
+  'review-plan--accept-limitation',
+  'review-plan--continue-review',
+  'review-plan--reason',
+  'review-plan--actor',
+  'review-contract--accept-limitation',
+  'review-contract--continue-review',
+  'review-contract--reason',
+  'review-contract--actor',
 ]);
 /**
  * Текст `--writer` init в H2. 0.1.0-alpha.50 меняет умолчание: writer —
@@ -254,11 +263,19 @@ test('H3-01: каждая общая операция читается из до
     // Вход строгий: лишний ключ отвергается.
     assert.equal(op.input.safeParse({ unknownArg: 'x' }).success, false, c);
   }
-  // multiple объявлен только у --requirements plan-request и --intent handoff.
+  // multiple объявлен только у --requirements plan-request, --intent handoff и
+  // решений по находкам review-plan / review-contract.
   const multiple = Object.entries(cliCommands).flatMap(([c, contract]) =>
     (contract.args as readonly CliArgument[]).filter((a) => a.multiple).map((a) => c + a.name),
   );
-  assert.deepEqual(multiple, ['handoff--intent', 'plan-request--requirements']);
+  assert.deepEqual(multiple, [
+    'review-plan--accept-limitation',
+    'review-plan--continue-review',
+    'review-contract--accept-limitation',
+    'review-contract--continue-review',
+    'handoff--intent',
+    'plan-request--requirements',
+  ]);
   assert.deepEqual(Object.keys(sharedOperations.capabilities.input.shape), []);
 });
 
@@ -442,17 +459,29 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.attemptSummary;
       return rest;
     }
-    // Аддитивное поле explain — сводка попыток по поручениям (0.1.0-alpha.52).
+    // Аддитивное поле explain — сводка попыток по поручениям (0.1.0-alpha.52)
+    // и сводка ревью плана и контрактов (0.1.0-alpha.54).
     if (k === 'properties' && v && typeof v === 'object' && 'diagnoses' in v && 'attempts' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.attempts;
       delete rest.attemptsTruncated;
+      delete rest.reviews;
       return rest;
     }
-    // Аддитивное поле status — снимок наблюдателя `--detail`.
+    // Аддитивные поля status — снимок наблюдателя `--detail`, сводка ревью
+    // плана и контрактов (0.1.0-alpha.54).
     if (k === 'properties' && v && typeof v === 'object' && 'detail' in v && 'stateVersion' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.detail;
+      delete rest.reviews;
+      return rest;
+    }
+    // Аддитивные поля находки плана или контракта: счёт раундов и решение
+    // ведущего или оператора (0.1.0-alpha.54).
+    if (k === 'properties' && v && typeof v === 'object' && 'openedIn' in v && 'changedIn' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.rounds;
+      delete rest.disposition;
       return rest;
     }
     // Аддитивное поле `joint.finished` — проверка прервана до результата gates (alpha.44).
