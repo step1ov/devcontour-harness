@@ -237,7 +237,10 @@ export type TruncatedKey =
   | 'roles'
   | 'reviewRules'
   | 'warnings'
-  | 'budgets';
+  | 'budgets'
+  | 'blockers'
+  | 'dependsOn'
+  | 'alternates';
 
 export interface ViewSource {
   producer: string;
@@ -305,7 +308,17 @@ export interface WorkDetailView {
   questions: OperatorQuestion[];
   drift?: DriftView;
   truncated?: Partial<
-    Record<'attempts' | 'findings' | 'verification' | 'stages' | 'reviews' | 'questions', number>
+    Record<
+      | 'attempts'
+      | 'findings'
+      | 'verification'
+      | 'stages'
+      | 'reviews'
+      | 'questions'
+      | 'blockers'
+      | 'dependsOn',
+      number
+    >
   >;
 }
 
@@ -556,6 +569,8 @@ export interface OperatorViewInput {
   /** `budgetOverview`; `undefined` — в политике нет бюджетов. */
   budgets?: readonly OperatorBudgetInput[];
   warnings?: readonly { code: string; message: string; messageEn?: string }[];
+  /** Предметов ревью, которых нет в `reviews` (предел сводки загрузчика). */
+  reviewsOmitted?: number;
   /** Что маскировать: домашний каталог, корни репозиториев, значения секретов. */
   mask?: MaskContext;
 }
@@ -643,11 +658,18 @@ const take = <X>(xs: readonly X[], n: number, truncated: Record<string, number>,
   return xs.slice(0, n);
 };
 
-const bindingOf = (b: Pick<RuntimeBinding, 'runtime' | 'model' | 'effort'>): ViewBinding => ({
-  runtime: b.runtime,
-  ...(b.model ? { model: b.model.slice(0, T.model) } : {}),
-  ...(b.effort ? { effort: b.effort } : {}),
-});
+const bindingOf = (
+  b: Pick<RuntimeBinding, 'runtime' | 'model' | 'effort'>,
+  mask: MaskContext,
+): ViewBinding => {
+  // Имя модели — свободная строка политики: маскируется до обрезки, как текст.
+  const model = maskText(b.model, T.model, mask);
+  return {
+    runtime: b.runtime,
+    ...(model ? { model } : {}),
+    ...(b.effort ? { effort: b.effort } : {}),
+  };
+};
 
 /* ------------------------------------------------------------------ */
 /* Разделы                                                             */
@@ -655,12 +677,13 @@ const bindingOf = (b: Pick<RuntimeBinding, 'runtime' | 'model' | 'effort'>): Vie
 
 function settingsOf(i: OperatorViewInput, truncated: Record<string, number>): ViewSettings {
   const p = i.policy;
+  const mask = i.mask ?? {};
   const roles: ViewSettings['roles'] = [
-    ...Object.entries(p.roles).map(([role, b]) => ({ role, writer: bindingOf(b.writer) })),
+    ...Object.entries(p.roles).map(([role, b]) => ({ role, writer: bindingOf(b.writer, mask) })),
     ...p.repositories.flatMap((r) =>
       Object.entries(r.roles ?? {}).map(([role, b]) => ({
         role,
-        writer: bindingOf(b.writer),
+        writer: bindingOf(b.writer, mask),
         repositoryId: r.id,
       })),
     ),
@@ -675,8 +698,10 @@ function settingsOf(i: OperatorViewInput, truncated: Record<string, number>): Vi
     kind,
     scope,
     ...extra,
-    reviewer: bindingOf(r.reviewer),
-    alternates: (r.alternates ?? []).map(bindingOf),
+    reviewer: bindingOf(r.reviewer, mask),
+    alternates: take(r.alternates ?? [], L.alternates, truncated, 'alternates').map((x) =>
+      bindingOf(x, mask),
+    ),
     vendor: r.vendor ?? 'different-vendor',
   });
   const reviews: ViewSettings['reviews'] = [
@@ -766,7 +791,7 @@ const remoteUnknown = (lang: 'ru' | 'en') => ({
       : 'эта версия harness не читает remote-tracking ref',
 });
 
-function workView(c: Ctx, w: OperatorWorkInput): WorkView {
+function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number>): WorkView {
   const s = w.stage;
   const a = w.attemptSummary;
   const facts = w.spendFacts ?? { uncoveredRuns: 0, incompleteCalls: 0 };
@@ -813,7 +838,7 @@ function workView(c: Ctx, w: OperatorWorkInput): WorkView {
     ...(w.liveness ? { liveness: w.liveness } : w.active ? { liveness: 'active' as const } : {}),
     ...(w.active ? { runtime: w.active.runtime } : {}),
     ...(w.active?.model ? { model: w.active.model.slice(0, T.model) } : {}),
-    blockers: w.blockers.slice(0, L.blockersPerWork).map((b) => {
+    blockers: take(w.blockers, L.blockersPerWork, truncated, 'blockers').map((b) => {
       const plain = c.lang === 'en' && b.plainEn ? b.plainEn : b.plain;
       return {
         code: b.code,
@@ -822,7 +847,9 @@ function workView(c: Ctx, w: OperatorWorkInput): WorkView {
         actor: b.actor !== undefined ? actorOf(b.actor) : needsActor,
       };
     }),
-    ...(w.dependsOn?.length ? { dependsOn: w.dependsOn.slice(0, L.dependsOn) } : {}),
+    ...(w.dependsOn?.length
+      ? { dependsOn: take(w.dependsOn, L.dependsOn, truncated, 'dependsOn') }
+      : {}),
     ...(w.status === 'done' && w.target
       ? {
           target: {
@@ -878,7 +905,7 @@ function reviewView(
     rounds: { ...r.rounds },
     open: { ...r.open },
     accepted: r.accepted,
-    ...(r.reviewer ? { reviewer: bindingOf(r.reviewer as RuntimeBinding) } : {}),
+    ...(r.reviewer ? { reviewer: bindingOf(r.reviewer as RuntimeBinding, c.mask) } : {}),
     ...(r.sameVendor !== undefined ? { sameVendor: r.sameVendor } : {}),
     spend: {
       calls: r.spend.calls,
@@ -894,7 +921,7 @@ function reviewView(
           escalation: {
             // У эскалации ревью нет запроса ввода: ID — предмет и раунд.
             requestId: `${r.kind}:${r.subject}:${r.escalation.round}`,
-            findings: r.escalation.findings.slice(0, L.findingsPerSubject),
+            findings: take(r.escalation.findings, L.findingsPerSubject, truncated, 'findings'),
             answered: false,
           },
         }
@@ -952,6 +979,8 @@ function windowOf(now: number, o: OperatorViewOptions) {
     (windowMs > OPERATOR_VIEW_DEFAULT_WINDOW_MS ? 3_600_000 : OPERATOR_VIEW_DEFAULT_BUCKET_MS);
   if (!Number.isInteger(bucketMs) || bucketMs < 60_000)
     throw new HarnessError('INVALID_INPUT', 'Интервал истории: целое число мс, не меньше минуты');
+  if (windowMs % bucketMs !== 0)
+    throw new HarnessError('INVALID_INPUT', 'Окно истории должно делиться на интервал без остатка');
   if (!Number.isInteger(windowMs) || windowMs < bucketMs || windowMs > L.windowMs)
     throw new HarnessError(
       'INVALID_INPUT',
@@ -1143,8 +1172,9 @@ function healthOf(
     }).length,
     budgeting: i.budgets ? 'on' : 'off',
     budgets: take(budgets, L.reviews, truncated, 'budgets'),
+    // Сумма — как `report.cost.knownUsd`: до центов.
     spentTotalUsd: boundedUsd({
-      knownUsd: known.reduce((s, x) => s + x.knownUsd!, 0),
+      knownUsd: Math.round(known.reduce((s, x) => s + x.knownUsd!, 0) * 100) / 100,
       knownCalls: known.length,
       unknownCalls,
       uncoveredRuns: uncovered,
@@ -1250,6 +1280,7 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
   const maxBytes = o.maxBytes ?? L.bytes;
   const truncated: Record<string, number> = {};
   const settings = settingsOf(i, truncated);
+  if (i.reviewsOmitted) truncated.reviews = i.reviewsOmitted;
   const history = historyOf(i, o);
   const health = healthOf(c, o, truncated);
   const byStage: Record<string, number> = {};
@@ -1267,7 +1298,7 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
     generatedAt: iso(i.now),
     source: sourceOf(i),
     settings,
-    works: take(i.works, L.works, truncated, 'works').map((w) => workView(c, w)),
+    works: take(i.works, L.works, truncated, 'works').map((w) => workView(c, w, truncated)),
     reviews: take(i.reviews, L.reviews, truncated, 'reviews').map((r) =>
       reviewView(c, r, truncated),
     ),
@@ -1403,7 +1434,7 @@ export function workDetailView(
     viewRevision: OPERATOR_VIEW_REVISION,
     generatedAt: iso(i.now),
     source: sourceOf(i),
-    work: workView(c, w),
+    work: workView(c, w, truncated),
     attempts: rows,
     ...(verification ? { verification } : {}),
     reviews: take(reviews, L.reviews, truncated, 'reviews').map((r) => reviewView(c, r, truncated)),
@@ -1417,7 +1448,14 @@ export function workDetailView(
   };
   const fitted = draft;
   const tr = truncation<
-    'attempts' | 'findings' | 'verification' | 'stages' | 'reviews' | 'questions'
+    | 'attempts'
+    | 'findings'
+    | 'verification'
+    | 'stages'
+    | 'reviews'
+    | 'questions'
+    | 'blockers'
+    | 'dependsOn'
   >(truncated);
   return finish({ ...fitted, ...(tr ? { truncated: tr } : {}) }, maxBytes);
 }

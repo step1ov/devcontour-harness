@@ -178,7 +178,7 @@ test('view: числа работ, прогресса и расходов рав
     assert.deepEqual(view.progress.byStage, byStage);
     assert.equal(view.progress.done, status.works.filter((w) => w.stage.name === 'done').length);
     // Отчёт по всем данным: известные расходы и граница.
-    assert.equal(Math.round(view.health.spentTotalUsd.value * 100) / 100, report.cost.knownUsd);
+    assert.equal(view.health.spentTotalUsd.value, report.cost.knownUsd);
     assert.equal(view.health.spentTotalUsd.bound, 'lower');
     assert.ok(report.cost.unknown.total > 0 || report.cost.attemptsWithoutCalls > 0);
     // Ревью плана и контракта — те же сводки, что у status.
@@ -648,4 +648,47 @@ test('view: SHA-256 проекции совпадает с node:crypto', () => {
     readFileSync(new URL(import.meta.url), 'utf8'),
   ])
     assert.equal(sha256Hex(s), createHash('sha256').update(s, 'utf8').digest('hex'));
+});
+
+test('view loader: прежний вызов без workId — по предмету, как status; неполный usage — не exact', () => {
+  const s = viewState(
+    () => {},
+    (input) => {
+      const c = input.calls!.find((x) => x.id === 'c-cancel-1') ?? input.calls![0]!;
+      const legacy = { ...c, id: 'c-legacy', subjectId: 'first', subjectKind: 'work' as const };
+      delete (legacy as { runId?: string }).runId;
+      delete (legacy as { workId?: string }).workId;
+      legacy.usage = { ...legacy.usage, complete: false };
+      legacy.costUsd = 0.5;
+      (input.calls as (typeof legacy)[]).push(legacy);
+    },
+  );
+  const view = harnessView({ stateDir: s.state, policyPath: s.policyPath, now: NOW });
+  const first = (
+    view as { works: { id: string; spend: { calls: number; usd: { bound: string } } }[] }
+  ).works.find((w) => w.id === 'first')!;
+  assert.equal(first.spend.calls, 3);
+  assert.notEqual(first.spend.usd.bound, 'exact');
+});
+
+test('view loader: одни часы на всё чтение — вызов без конца не меняет байты между чтениями', () => {
+  const s = viewState(
+    () => {},
+    (input) => {
+      // Вызов без конца: его время считается до часов чтения.
+      const c = input.calls![0]!;
+      delete c.finishedAt;
+    },
+  );
+  const a = JSON.stringify(harnessView({ stateDir: s.state, policyPath: s.policyPath, now: NOW }));
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1100);
+  const b = JSON.stringify(harnessView({ stateDir: s.state, policyPath: s.policyPath, now: NOW }));
+  assert.equal(a, b);
+});
+
+test('view: окно, не кратное интервалу, — INVALID_INPUT, а не окно длиннее запрошенного', () => {
+  assert.throws(
+    () => operatorView(baseInput(), { windowMs: 7 * DAY, bucketMs: 5 * DAY }),
+    (e: unknown) => e instanceof HarnessError && e.code === 'INVALID_INPUT',
+  );
 });

@@ -30,6 +30,7 @@ export const OPERATOR_VIEW_LIMITS = {
   stagesPerAttempt: 50,
   blockersPerWork: 10,
   dependsOn: 50,
+  alternates: 10,
   buckets: 500,
   windowMs: 7 * DAY_MS,
   bytes: 262144,

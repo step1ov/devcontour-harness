@@ -52,7 +52,7 @@ export const viewSettingsSchema = z.strictObject({
         repositoryId: id.optional(),
         role: id.optional(),
         reviewer: bindingSchema,
-        alternates: z.array(bindingSchema).max(10),
+        alternates: z.array(bindingSchema).max(L.alternates),
         vendor: z.enum(['different-vendor', 'same-vendor-allowed']),
       }),
     )
@@ -366,6 +366,9 @@ export const operatorViewSchema = z.strictObject({
       reviewRules: truncatedCount.optional(),
       warnings: truncatedCount.optional(),
       budgets: truncatedCount.optional(),
+      blockers: truncatedCount.optional(),
+      dependsOn: truncatedCount.optional(),
+      alternates: truncatedCount.optional(),
       activity: truncatedCount.optional(),
       decisions: truncatedCount.optional(),
     })
@@ -435,6 +438,8 @@ export const workDetailViewSchema = z.strictObject({
       stages: truncatedCount.optional(),
       reviews: truncatedCount.optional(),
       questions: truncatedCount.optional(),
+      blockers: truncatedCount.optional(),
+      dependsOn: truncatedCount.optional(),
     })
     .optional(),
 });

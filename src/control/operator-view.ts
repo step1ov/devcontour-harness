@@ -24,12 +24,14 @@ import {
   type ExecutionPolicy,
   type ExecutionView,
   type InputRequest,
+  type CallRecord,
   type ReviewRecord,
   type statusDataSchema,
 } from '../contracts/index.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import { callCostKnown, failureBucketOf, interruptedByShutdown } from '../report/compute.ts';
 import { callRecords } from '../engine/usage.ts';
+import { legacyGroupCall } from '../engine/budget.ts';
 import { requestsOf } from '../engine/input-requests.ts';
 import { inputStateOf } from '../projections/input.ts';
 import { explainStop } from '../projections/stop.ts';
@@ -235,12 +237,19 @@ const findingsOf = (findings: ReviewRecord['findings']) =>
     message: f.message,
   }));
 
-function reviewsOf(v: ExecutionView, policy: ExecutionPolicy): OperatorReviewInput[] {
+function reviewsOf(
+  v: ExecutionView,
+  policy: ExecutionPolicy,
+  omitted: { count: number },
+): OperatorReviewInput[] {
   const records = lastBySubject(
     v.locals('reviews', WORKSPACE_OWNER).map((r) => r.value),
     (r) => `${r.kind}\0${r.subject}`,
   );
-  const plans: OperatorReviewInput[] = reviewSummaries(v, policy).map((s) => {
+  const summaries = reviewSummaries(v, policy);
+  // Предметов больше предела сводки status: опущенные — числом в `truncated.reviews`.
+  omitted.count = Math.max(0, records.size - summaries.length);
+  const plans: OperatorReviewInput[] = summaries.map((s) => {
     const r = records.get(`${s.kind}\0${s.subject}`)!;
     const counts = findingCounts(r.findings);
     return {
@@ -342,6 +351,19 @@ function statusWithTargets(s: ViewSource): StatusData {
   };
 }
 
+/**
+ * Поручение прежней записи вызова без `workId` — то же правило, что у
+ * `status` (`recordWorkOf`): по попытке, затем по ID предмета, если это не
+ * вызов о группе.
+ */
+function legacyWork(r: CallRecord, runWork: Map<string, string>, works: Set<string>) {
+  const byRun = r.runId !== undefined ? runWork.get(r.runId) : undefined;
+  if (byRun) return byRun;
+  if (r.subjectKind && r.subjectKind !== 'work') return undefined;
+  if (legacyGroupCall(r)) return undefined;
+  return r.subjectId && works.has(r.subjectId) ? r.subjectId : undefined;
+}
+
 /** «Что изменится для пользователя»: строка рекомендованного варианта, иначе первая названная. */
 function plainOf(r: InputRequest): string | undefined {
   type Option = { id: string; forUser?: string | null };
@@ -397,13 +419,16 @@ export function collectOperatorViewInput(
       : source;
   const policy = h.policy;
   const now = options.now ?? h.engine.clock();
-  const status = statusWithTargets(h);
-  const jobs = h.workflows.list().filter((j) => j.kind === 'graph');
+  // Один снимок: вложенные чтения хранилища (status, задания графов) видят
+  // ту же транзакцию, что и записи ниже.
   return h.engine.read((v) => {
+    const status = statusWithTargets(h);
+    const jobs = h.workflows.list().filter((j) => j.kind === 'graph');
     const attempts = v.attempts();
     const attemptsOf = new Map<string, typeof attempts>();
     for (const a of attempts) attemptsOf.set(a.workId, [...(attemptsOf.get(a.workId) ?? []), a]);
     const runWork = new Map(attempts.map((a) => [a.id, a.workId]));
+    const known = new Set(v.works().map((w) => w.id));
     const records = callRecords(v);
     const complete = (r: (typeof records)[number]) =>
       r.outcome !== 'active' && r.outcome !== 'abandoned' && r.usage.complete && r.costUsd !== null;
@@ -440,10 +465,7 @@ export function collectOperatorViewInput(
       const w = v.work(sw.id)!;
       const own = attemptsOf.get(sw.id) ?? [];
       const ownRecords = records.filter(
-        (r) =>
-          !r.workIds &&
-          (r.workId === sw.id ||
-            (!r.workId && r.runId !== undefined && runWork.get(r.runId) === sw.id)),
+        (r) => !r.workIds && (r.workId ?? legacyWork(r, runWork, known)) === sw.id,
       );
       const active = sw.activeRunId ? v.attempt(sw.activeRunId) : undefined;
       const summary = sw.attemptSummary!;
@@ -523,6 +545,7 @@ export function collectOperatorViewInput(
       });
     const control = v.control();
     const controller = v.controller();
+    const omittedReviews = { count: 0 };
     const raw = view.raw;
     return {
       now,
@@ -569,7 +592,8 @@ export function collectOperatorViewInput(
         complete: complete(r),
       })),
       questions,
-      reviews: reviewsOf(v, policy),
+      reviews: reviewsOf(v, policy, omittedReviews),
+      ...(omittedReviews.count ? { reviewsOmitted: omittedReviews.count } : {}),
       stops,
       queue: {
         paused: control.paused,
@@ -674,7 +698,10 @@ export function harnessView(options: HarnessViewOptions): OperatorView | WorkDet
     join(stateDir, 'state.sqlite'),
     'devcontour-harness@' + HARNESS_VERSION,
     (store) => {
+      // Одни часы на всё чтение: этап, живость и окно истории — от одного `now`.
+      const now = options.now ?? Date.now();
       const engine = new Engine({
+        now: () => now,
         host: standaloneHost(store, policy.policy),
         policy: policy.policy,
       });
@@ -687,7 +714,7 @@ export function harnessView(options: HarnessViewOptions): OperatorView | WorkDet
       };
       return project(
         collectOperatorViewInput(source, policy, {
-          ...(options.now !== undefined ? { now: options.now } : {}),
+          now,
           ...(options.lang ? { lang: options.lang } : {}),
         }),
       );

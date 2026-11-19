@@ -31,9 +31,37 @@ const secretPair =
   /\b((?:pass(?:word|wd)?|secret|api[_-]?key|access[_-]?key|token|auth)\s*[=:]\s*)("?)[^\s"',;]{4,}\2/gi;
 const longHex = /\b[A-Fa-f0-9]{32,}\b/g;
 const longBase64 = /[A-Za-z0-9+/_=-]{32,}/g;
-const windowsPath = /\b[A-Za-z]:\\[^\s"'<>|]*/g;
-// Абсолютный POSIX-путь: начало строки или разделитель перед `/`, не `//` URL.
-const posixPath = /(^|[\s"'(=,[{<])\/(?!\/)[^\s"'()<>,;\]}]*/g;
+// `file://…`, путь Windows с любым разделителем и путь UNC (`\\host\share`).
+const fileUri = /\bfile:\/\/[^\s"'<>]*/gi;
+const windowsPath = /\b[A-Za-z]:[\\/][^\s"'<>|]*/g;
+const uncPath = /\\\\[^\s"'<>|\\]+\\[^\s"'<>|]*/g;
+// Абсолютный POSIX-путь: начало строки или разделитель (в том числе `:`) перед
+// `/`, не `//` URL.
+const posixPath = /(^|[\s"'(=,:[{<])\/(?!\/)[^\s"'()<>,;\]}]*/g;
+
+const xml = (v: string) =>
+  v.replace(
+    /[&<>"']/g,
+    (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[ch]!,
+  );
+/**
+ * Формы известного секрета в тексте — те же, что у `redactor` хранилища:
+ * исходная, URI, XML и JSON-экранирование одного и двух уровней.
+ */
+function secretForms(secret: string): string[] {
+  const out = new Set([secret, xml(secret)]);
+  try {
+    out.add(encodeURIComponent(secret));
+  } catch {
+    /* одиночный суррогат — без URI-формы */
+  }
+  let escaped = secret;
+  for (let level = 0; level < 2; level++) {
+    escaped = JSON.stringify(escaped).slice(1, -1);
+    out.add(escaped);
+  }
+  return [...out];
+}
 
 /** Похоже на путь: каждый сегмент — короткое слово, а не одна длинная строка. */
 const pathLike = (s: string) =>
@@ -50,9 +78,9 @@ const trimSlash = (p: string) => (p.length > 1 ? p.replace(/[/\\]+$/, '') : p);
 export function maskSecrets(text: string, context: MaskContext = {}): string {
   let out = text;
   // 1. Известные значения: длинные первыми, чтобы часть не открыла остаток.
-  for (const secret of [...new Set(context.secrets ?? [])]
-    .filter((s) => s.length >= 4)
-    .sort((a, b) => b.length - a.length))
+  for (const secret of [
+    ...new Set((context.secrets ?? []).filter(Boolean).flatMap(secretForms)),
+  ].sort((a, b) => b.length - a.length))
     out = out.split(secret).join(MASKED);
   // 2. Формы токенов.
   out = out
@@ -78,6 +106,8 @@ export function maskSecrets(text: string, context: MaskContext = {}): string {
   // Домашние каталоги других пользователей и других машин.
   out = out.replace(/(^|[^\w~.-])\/(?:Users|home)\/[^/\s"'()<>,;]+/g, '$1~');
   out = out
+    .replace(fileUri, MASKED_PATH)
+    .replace(uncPath, MASKED_PATH)
     .replace(windowsPath, MASKED_PATH)
     .replace(posixPath, (m, lead: string) => `${lead}${MASKED_PATH}`);
   return out;

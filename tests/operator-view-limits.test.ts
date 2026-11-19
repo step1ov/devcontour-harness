@@ -134,19 +134,48 @@ test('view limits: truncated считает каждый усечённый сп
     ...input,
     works: input.works.map(({ target, ...w }, k) => ({
       ...w,
-      dependsOn: [],
-      blockers: [],
+      // Списки внутри работы — сверх предела только у первой.
+      dependsOn: k === 0 ? Array.from({ length: L.dependsOn + over }, (_, d) => id('dep', d)) : [],
+      blockers:
+        k === 0
+          ? Array.from({ length: L.blockersPerWork + over }, () => ({
+              code: 'NOT_READY',
+              actor: 'controller' as const,
+            }))
+          : [],
       ...(k < L.drift + over ? { target: target! } : {}),
     })),
-    reviews: input.reviews.map((r) => ({
+    reviews: input.reviews.map((r, k) => ({
       ...r,
       findings: r.findings.slice(0, L.findingsPerSubject + over),
+      // Эскалация с находками сверх предела — у первого предмета.
+      ...(k === 0
+        ? {
+            escalation: {
+              round: 4,
+              findings: Array.from({ length: L.findingsPerSubject + over }, (_, f) => 'e' + f),
+            },
+          }
+        : {}),
     })),
+    reviewsOmitted: 2,
     policy: policy((raw) => {
       raw.roles = Object.fromEntries(
         Array.from({ length: L.roles + over }, (_, k) => [
           `role-${k}`,
-          { writer: { runtime: 'claude' }, review: { reviewer: { runtime: 'codex' } } },
+          {
+            writer: { runtime: 'claude' },
+            review: {
+              reviewer: { runtime: 'codex' },
+              ...(k === 0
+                ? {
+                    alternates: Array.from({ length: L.alternates + over }, () => ({
+                      runtime: 'claude',
+                    })),
+                  }
+                : {}),
+            },
+          },
         ]),
       );
     }),
@@ -154,12 +183,18 @@ test('view limits: truncated считает каждый усечённый сп
   const view = operatorView(small, { titles: false, maxBytes: 64 * 1024 * 1024 });
   operatorViewSchema.parse(view);
   assert.deepEqual(view.truncated, {
+    alternates: over,
+    blockers: over,
+    dependsOn: over,
     drift: over,
-    escalations: over,
-    findings: over * L.reviews,
+    // Остановки сверх предела и эскалация ревью первого предмета.
+    escalations: over + 1,
+    // Находки предметов сверх предела и находки эскалации первого предмета.
+    findings: over * L.reviews + over,
     questions: over,
     reviewRules: 3 + L.roles + over - L.reviewRules,
-    reviews: over,
+    // Сверх предела списка и опущенные загрузчиком.
+    reviews: over + 2,
     roles: over,
     warnings: over + 1,
     works: over,

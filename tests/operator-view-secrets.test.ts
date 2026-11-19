@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { operatorViewSchema, workDetailViewSchema } from '../src/contracts/index.ts';
 import { harnessView } from '../src/control/operator-view.ts';
 import { maskText, operatorView, workDetailView } from '../src/projections/index.ts';
-import { at, baseInput, review, work } from './operator-view-input.ts';
+import { at, baseInput, policy, review, work } from './operator-view-input.ts';
 import { viewState } from './view-fixture.ts';
 
 const KEY = 'sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789';
@@ -113,6 +113,34 @@ test('view secrets: маска — пути репозитория относи�
   assert.equal(maskText('C:\\Users\\bob\\key.txt', 200), '‹path›');
   // Маскирование до обрезки: префикс ключа не остаётся у границы.
   assert.equal(maskText('ab ' + KEY, 10), 'ab ‹masked');
+  // Формы путей: file URI, после двоеточия, Windows с `/`, UNC.
+  for (const path of [
+    'file:///opt/private/k.pem',
+    'path:/opt/private/k.pem',
+    'C:/private/k.pem',
+    '\\\\srv\\share\\k.pem',
+  ])
+    assert.ok(
+      !maskText(path, 200)!.includes('private') && !maskText(path, 200)!.includes('share'),
+      path,
+    );
+  // Известные значения — любой длины и в формах URI, XML и JSON.
+  const known = { secrets: ['a&b-secret', '123'] };
+  for (const t of ['a%26b-secret', 'a&amp;b-secret', 'pin 123', JSON.stringify('a&b-secret"')])
+    assert.ok(!/a(&|%26|&amp;)b-secret|123/.test(maskText(t, 200, known)!), t);
+});
+
+test('view secrets: имена моделей политики маскируются до обрезки', () => {
+  const p = policy((raw) => {
+    (raw.roles as Record<string, { writer: Record<string, unknown> }>).developer!.writer.model =
+      'x'.repeat(140) + ' ' + KEY;
+    (raw.review as Record<string, { reviewer: Record<string, unknown> }>).code!.reviewer.model =
+      `model-${KNOWN}`;
+  });
+  const view = operatorView(baseInput({ policy: p, mask: { secrets: [KNOWN] } }));
+  operatorViewSchema.parse(view);
+  assertClean(JSON.stringify(view));
+  assert.ok(view.settings.roles[0]!.writer.model!.length <= 200);
 });
 
 test('view secrets: загрузчик маскирует заголовки и находки состояния (домашний каталог, ключ)', () => {
