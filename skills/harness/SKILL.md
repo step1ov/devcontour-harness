@@ -307,7 +307,9 @@ $H status --state <state> --human --watch [--interval 10]
 
 It refreshes until no attempt is running and no live controller will move an
 order, or until Ctrl-C. When asked what is going on, quote `stage.line`
-instead of describing or estimating it.
+instead of describing or estimating it. An operator UI reads `harness view`
+(`$H view --state <state> [--lang en]`): one read-only JSON document from the
+harness itself, never your retelling.
 
 **Progress and "how long" questions.** `status` (`works[].attemptSummary`)
 and `explain` (`attempts[]`) give one line per order, counted from the store
