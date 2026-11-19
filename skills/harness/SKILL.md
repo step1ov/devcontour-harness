@@ -275,7 +275,7 @@ writer stopped and asks the human. Do not answer it yourself:
 1. `$H input-show --state <state> --request <id>` gives the question, the
    options (id, label, consequence), the recommended option, the severity and
    its rationale.
-2. Relay all of it to the human verbatim: the question text, every option with
+2. Pass all of it on to the human verbatim: the question text, every option with
    its consequence, the writer's recommendation and the severity. Do not
    shorten, reword, rank or pre-select an option.
 3. Record the human's answer in their own words:
