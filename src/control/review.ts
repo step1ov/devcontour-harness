@@ -6,6 +6,7 @@ import {
   REVIEW_ITEMS_LIMIT,
   WORKSPACE_OWNER,
   contextDigest,
+  digestOf,
   findingId,
   mcpEnvironment,
   issuePath,
@@ -492,59 +493,87 @@ export function mergeTechnicalRound(
   const issues: string[] = [];
   const notes: string[] = [];
   const byId = new Map(prior.map((f) => [f.id, f]));
-  const claimed = new Map<string, number>();
-  const match: (ReviewFinding | undefined)[] = [];
-  const how: ('sameAs' | 'text' | 'rule')[] = [];
-  const claim = (i: number, f: ReviewFinding, by: 'sameAs' | 'text' | 'rule') => {
-    claimed.set(f.id, i);
-    match[i] = f;
-    how[i] = by;
-  };
   const reported = result.findings;
-  // 1. Явная ссылка reviewer. Неизвестная или повторная — подсказка, а не
-  // ошибка протокола: находка сопоставляется дальше, оплаченный вердикт цел.
+  const pathOf = (p: string | null | undefined) => (p?.trim() ? redact(p) : null);
+  // Каноническая цель каждой находки ответа: прежняя находка (с тем, как
+  // сопоставлена) или ID новой. Повторы одной цели — одна запись.
+  const target: ({ prior: ReviewFinding; how: 'sameAs' | 'text' | 'rule' } | { id: string })[] = [];
+  const targeted = new Set<string>();
+  const aim = (i: number, f: ReviewFinding, how: 'sameAs' | 'text' | 'rule') => {
+    target[i] = { prior: f, how };
+    targeted.add(f.id);
+  };
+  // 1. Явная ссылка reviewer. Неизвестная — подсказка, а не ошибка протокола:
+  // находка сопоставляется дальше, оплаченный вердикт цел.
   reported.forEach((r, i) => {
     if (!r.sameAs) return;
     const f = byId.get(r.sameAs);
-    if (f && !claimed.has(f.id)) claim(i, f, 'sameAs');
-    else notes.push(`sameAs не применён (${f ? 'повтор' : 'неизвестная находка'}): ${r.sameAs}`);
+    if (f) aim(i, f, 'sameAs');
+    else notes.push(`sameAs не применён (неизвестная находка): ${r.sameAs}`);
   });
-  // 2. Тот же текст: ID новой находки — ID прежней или её текущей формулировки.
+  // 2. Тот же текст: ID находки — ID прежней или её текущей формулировки.
+  // Принятое ограничение подавляет повтор, поэтому тем же текстом оно
+  // сопоставляется только на том же пути: на другом пути это другая находка.
   reported.forEach((r, i) => {
-    if (match[i]) return;
+    if (target[i]) return;
     const id = findingId(subject, r);
     const f = prior.find(
-      (p) => !claimed.has(p.id) && (p.id === id || findingId(subject, p) === id),
+      (p) =>
+        (p.id === id || findingId(subject, p) === id) &&
+        (!acceptedLimitation(p) || (p.path ?? null) === pathOf(r.path)),
     );
-    if (f) claim(i, f, 'text');
+    if (f) aim(i, f, 'text');
   });
   // 3. Тот же непустой путь и правило: переформулировка той же находки.
+  // Принятое ограничение так не сопоставляется никогда; находка, уже ставшая
+  // целью другой находки ответа, — тоже (две разные находки не сливаются
+  // догадкой).
   reported.forEach((r, i) => {
-    if (match[i]) return;
+    if (target[i]) return;
     const rule = r.rule?.trim() ? redact(r.rule).slice(0, 200) : undefined;
-    const path = r.path?.trim() ? redact(r.path) : undefined;
+    const path = pathOf(r.path);
     if (!rule || !path) return;
-    // Принятое ограничение подавляет повтор, поэтому сопоставляется только
-    // явно (`sameAs`) или тем же текстом: другая находка на том же пути и
-    // правиле — новая и блокирует как новая.
     const candidates = prior.filter(
-      (p) =>
-        !claimed.has(p.id) &&
-        !acceptedLimitation(p) &&
-        p.rule === rule &&
-        (p.path ?? undefined) === path,
+      (p) => !targeted.has(p.id) && !acceptedLimitation(p) && p.rule === rule && p.path === path,
     );
     const open = candidates.filter((p) => p.status === 'open');
     const f = candidates.length === 1 ? candidates[0] : open.length === 1 ? open[0] : undefined;
-    if (f) claim(i, f, 'rule');
+    if (f) aim(i, f, 'rule');
   });
+  // 4. Новые находки: ID по тексту; совпавший с прежней находкой, которую
+  // текст не сопоставил (принятое ограничение на другом пути), — ID с путём.
+  reported.forEach((r, i) => {
+    if (target[i]) return;
+    let id = findingId(subject, r);
+    if (byId.has(id))
+      id = digestOf({ subject, rule: r.rule ?? null, message: r.message, path: pathOf(r.path) });
+    target[i] = { id };
+  });
+
+  // Группы по цели: серьёзность — блокирующая, если блокирует хоть один
+  // повтор; доказательства — первые непустые; формулировка — последняя.
+  type Group = { rs: (typeof reported)[number][]; how?: 'sameAs' | 'text' | 'rule' };
+  const groups = new Map<string, Group>();
+  reported.forEach((r, i) => {
+    const t = target[i]!;
+    const key = 'prior' in t ? t.prior.id : t.id;
+    const g = groups.get(key) ?? { rs: [], ...('prior' in t ? { how: t.how } : {}) };
+    g.rs.push(r);
+    groups.set(key, g);
+  });
+  const severityOf = (g: Group) =>
+    g.rs.some((r) => r.severity === 'blocking') ? ('blocking' as const) : ('note' as const);
+  const evidenceOf = (g: Group) => g.rs.map((r) => r.evidence?.trim()).find(Boolean);
+  const lastOf = (g: Group) => g.rs.at(-1)!;
+
   // Принятое ограничение без новых доказательств остаётся принятым.
-  const ignored = reported.map(
-    (r, i) => !!match[i] && acceptedLimitation(match[i]) && !r.evidence?.trim(),
+  const ignored = new Set(
+    prior
+      .filter((f) => acceptedLimitation(f) && groups.has(f.id) && !evidenceOf(groups.get(f.id)!))
+      .map((f) => f.id),
   );
-  const ignoredIds = match.filter((f, i) => f && ignored[i]).map((f) => f!.id);
-  if (ignoredIds.length)
-    notes.push('повтор принятого ограничения без новых доказательств: ' + ignoredIds.join(', '));
+  if (ignored.size)
+    notes.push('повтор принятого ограничения без новых доказательств: ' + [...ignored].join(', '));
 
   // Переходы: только открытые находки, каждая — один раз; открытая, не
   // поднятая снова, обязана быть названа.
@@ -555,29 +584,30 @@ export function mergeTechnicalRound(
     named.add(t.id);
   }
   for (const f of prior)
-    if (f.status === 'open' && !named.has(f.id) && !claimed.has(f.id))
+    if (f.status === 'open' && !named.has(f.id) && !groups.has(f.id))
       issues.push('Не названо состояние прежней находки ' + f.id);
+
   const transitions = new Map(result.previous.map((t) => [t.id, t]));
   const findings: ReviewRecord['findings'] = prior.map((f) => {
-    const i = claimed.get(f.id);
+    const g = groups.get(f.id);
     const t = transitions.get(f.id);
-    if (i !== undefined && !ignored[i]) {
-      const r = reported[i]!;
+    if (g && !ignored.has(f.id)) {
+      const r = lastOf(g);
       const wasOpen = f.status === 'open';
-      const by = { sameAs: 'sameAs', text: 'тот же текст', rule: 'тот же путь и правило' }[how[i]!];
+      const by = { sameAs: 'sameAs', text: 'тот же текст', rule: 'тот же путь и правило' }[g.how!];
       const basis = wasOpen
         ? t?.status === 'open'
           ? t.basis
           : `поднята снова (${by})` + (t ? `; переход ${t.status} отклонён: ${t.basis}` : '')
         : acceptedLimitation(f)
-          ? `новые доказательства: ${r.evidence ?? ''}`
+          ? `новые доказательства: ${evidenceOf(g) ?? ''}`
           : 'найдена снова';
       // Переход в открытую из иного состояния начинает счёт раундов и
       // снимает прежнее решение по находке.
       const { disposition, ...rest } = f;
       return {
         ...(wasOpen ? { ...rest, ...(disposition ? { disposition } : {}) } : rest),
-        severity: r.severity,
+        severity: severityOf(g),
         message: redact(r.message).slice(0, 12000),
         ...(r.rule?.trim() ? { rule: redact(r.rule).slice(0, 200) } : {}),
         path: r.path ?? f.path ?? null,
@@ -598,26 +628,13 @@ export function mergeTechnicalRound(
       };
     return f;
   });
-  // Одна находка — одна запись: повтор того же ID в ответе сливается с ней,
-  // и блокирующая серьёзность любого повтора сохраняется.
-  const byResult = new Map(findings.map((f, i) => [f.id, i]));
-  const added = new Map<string, ReviewFinding>();
-  reported.forEach((r, i) => {
-    if (match[i]) return;
-    const id = findingId(subject, r);
-    const at = byResult.get(id);
-    const same = at !== undefined ? findings[at]! : added.get(id);
-    if (same) {
-      if (r.severity === 'blocking' && same.status === 'open' && same.severity !== 'blocking') {
-        const upgraded = { ...same, severity: 'blocking' as const };
-        if (at !== undefined) findings[at] = upgraded;
-        else added.set(id, upgraded);
-      }
-      return;
-    }
-    added.set(id, {
+  const added: ReviewFinding[] = [];
+  for (const [id, g] of groups) {
+    if (byId.has(id)) continue;
+    const r = lastOf(g);
+    added.push({
       id,
-      severity: r.severity,
+      severity: severityOf(g),
       message: redact(r.message).slice(0, 12000),
       ...(r.rule ? { rule: redact(r.rule).slice(0, 200) } : {}),
       path: r.path ?? null,
@@ -627,8 +644,9 @@ export function mergeTechnicalRound(
       changedIn: round,
       rounds: 1,
     });
-  });
-  const merged = [...findings, ...added.values()];
+  }
+  const merged = [...findings, ...added];
+  // Одобрение — по итоговой истории раунда.
   if (result.approved && merged.some((f) => f.status === 'open' && f.severity === 'blocking'))
     issues.push('approved при блокирующей находке');
   return { findings: merged, issues, notes };

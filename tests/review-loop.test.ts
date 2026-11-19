@@ -23,7 +23,9 @@ import {
   reviewResultSchema,
   reviewSubjectSummarySchema,
   statusDataSchema,
+  type CallRecord,
   type ErrorCode,
+  type ExecutionView,
   type ReviewRecord,
   type RuntimeAdapter,
   type RuntimeName,
@@ -35,6 +37,8 @@ import { applyDispositions, mergeTechnicalRound, technicalReview } from '../src/
 import { statusText } from '../src/control/status.ts';
 import { technicalReviewOutputSchema } from '../src/agents/schemas.ts';
 import { valueReport } from '../src/report/compute.ts';
+import { reviewSummaries } from '../src/control/review-summary.ts';
+import { escalatedFindings } from '../src/contracts/review-loop.ts';
 import { reportMarkdown } from '../src/report/markdown.ts';
 import { graphOf, policyOf } from './engine-fixture.ts';
 
@@ -446,7 +450,10 @@ test('H14: mergeTechnicalRound — sameAs неизвестен — подска�
     'g',
   );
   assert.deepEqual(m.issues, []);
+  assert.equal(m.findings.length, 1, 'открыта прежняя запись, а не новая');
   const reopened = m.findings[0]!;
+  assert.equal(reopened.id, z);
+  assert.equal(reopened.openedIn, 1);
   assert.equal(reopened.status, 'open');
   assert.equal(reopened.rounds, 1);
   assert.equal(reopened.disposition, undefined);
@@ -710,4 +717,186 @@ test('H14 r1: повтор одного ID в ответе не обходит �
   assert.equal(m.findings.length, 2, 'новая находка не поглощена принятым ограничением');
   assert.deepEqual(m.issues, ['approved при блокирующей находке']);
   assert.equal(m.findings[0]!.status, 'withdrawn');
+});
+
+test('H14 r2: повторы одной цели сливаются по каноническому ID — доказательства и серьёзность любого повтора, счёт раундов прежней; тот же текст на другом пути принятого ограничения — новая находка', () => {
+  const parse = (r: unknown) => reviewResultSchema.parse(r);
+  const x = findingId('g', { rule: 'acceptance-measurable', message: 'дефект' });
+  const base = {
+    id: x,
+    severity: 'blocking' as const,
+    message: 'дефект',
+    rule: 'acceptance-measurable',
+    path: 'orders[0].acceptance',
+    line: null,
+    openedIn: 1,
+    changedIn: 2,
+  };
+  const accepted = {
+    ...base,
+    status: 'withdrawn' as const,
+    rounds: 1,
+    disposition: {
+      decision: 'accepted-limitation' as const,
+      by: 'lead' as const,
+      reason: 'ок',
+      round: 2,
+      rounds: 1,
+    },
+  };
+  // Повтор принятого ограничения дважды: без доказательств и с ними — в
+  // любом порядке находка открывается, одобрение при ней — ошибка.
+  for (const order of [
+    [{}, { evidence: 'новый вход ломает' }],
+    [{ evidence: 'новый вход ломает' }, {}],
+  ]) {
+    const m = mergeTechnicalRound(
+      [accepted],
+      parse(
+        verdict(
+          true,
+          order.map((e) => finding('дефект', e)),
+        ),
+      ),
+      3,
+      'g',
+    );
+    assert.equal(m.findings.length, 1);
+    assert.equal(m.findings[0]!.status, 'open');
+    assert.deepEqual(m.issues, ['approved при блокирующей находке']);
+  }
+
+  // Открытая два раунда находка, поднятая дважды другими словами через
+  // sameAs (заметка, затем блокирующая): одна запись, блокирующая, счёт 3 —
+  // эскалация.
+  const open2 = { ...base, status: 'open' as const, rounds: 2 };
+  const m = mergeTechnicalRound(
+    [open2],
+    parse(
+      verdict(false, [
+        finding('иначе сказано', { sameAs: x, severity: 'note' }),
+        finding('иначе сказано', { sameAs: x }),
+      ]),
+    ),
+    3,
+    'g',
+  );
+  assert.deepEqual(m.issues, []);
+  assert.equal(m.findings.length, 1);
+  assert.equal(m.findings[0]!.id, x);
+  assert.equal(m.findings[0]!.severity, 'blocking');
+  assert.equal(m.findings[0]!.rounds, 3);
+  assert.equal(escalatedFindings(m.findings, 3).length, 1);
+
+  // Тот же текст и правило на другом пути, без sameAs: принятое ограничение
+  // не подавляет — новая находка с другим ID, одобрение при ней — ошибка.
+  const other = mergeTechnicalRound(
+    [accepted],
+    parse(verdict(true, [finding('дефект', { path: 'orders[1].acceptance' })])),
+    3,
+    'g',
+  );
+  assert.equal(other.findings.length, 2);
+  assert.equal(other.findings[0]!.status, 'withdrawn');
+  assert.notEqual(other.findings[1]!.id, x);
+  assert.equal(other.findings[1]!.path, 'orders[1].acceptance');
+  assert.deepEqual(other.issues, ['approved при блокирующей находке']);
+});
+
+test('H14 r2: отчёт и сводка — блокирующая, ставшая заметкой, не открытая блокирующая; принятое ограничение не входит в снятые reviewer; оценка прерванного вызова — неизвестная стоимость', () => {
+  const at = (d: number) => new Date(Date.UTC(2026, 10, d)).toISOString();
+  const f = {
+    id: 'a'.repeat(64),
+    severity: 'blocking' as const,
+    message: 'm',
+    path: null,
+    line: null,
+    status: 'open' as const,
+    openedIn: 1,
+    changedIn: 1,
+    rounds: 1,
+  };
+  const accepted = {
+    ...f,
+    id: 'b'.repeat(64),
+    status: 'withdrawn' as const,
+    disposition: {
+      decision: 'accepted-limitation' as const,
+      by: 'lead' as const,
+      reason: 'ок',
+      round: 2,
+      rounds: 1,
+    },
+  };
+  const record = (round: number, findings: ReviewRecord['findings'], approved: boolean) =>
+    ({
+      id: `RV-plan-g-${round}`,
+      kind: 'plan',
+      subject: 'g',
+      digest: String(round).repeat(64),
+      round,
+      at: at(round),
+      approved,
+      summary: 's',
+      authorRuntime: 'claude',
+      reviewerRuntime: 'codex',
+      sameVendor: false,
+      findings,
+      artifact: 'x',
+    }) as ReviewRecord;
+  const reviews = [
+    record(1, [f], false),
+    record(2, [{ ...f, severity: 'note', changedIn: 2, rounds: 2 }, accepted], true),
+  ];
+  const call = (id: string, extra: Record<string, unknown>) =>
+    ({
+      id,
+      subjectId: 'g',
+      subjectKind: 'group',
+      stage: 'plan-review',
+      runtime: 'codex',
+      model: null,
+      runtimeVersion: null,
+      startedAt: at(1),
+      finishedAt: at(1),
+      outcome: 'returned',
+      promptBytes: 1,
+      promptDigest: 'c'.repeat(64),
+      usage: {
+        inputTokens: 1,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reportedUsd: null,
+        complete: true,
+        source: 'claude-result',
+      },
+      costUsd: 0.5,
+      costSource: 'provider-reported',
+      ...extra,
+    }) as unknown as CallRecord;
+  const calls = [
+    call('c1', {}),
+    call('c2', { outcome: 'abandoned', costSource: 'tariff-estimate', costUsd: 0.5 }),
+  ];
+  const report = valueReport({ works: [], attempts: [], reviews, calls });
+  const pc = report.defects.planContract;
+  assert.equal(pc.blockingOpen, 0, 'блокирующая стала заметкой');
+  assert.equal(pc.approvedWithOpenNotes, 1);
+  assert.equal(pc.acceptedLimitations, 1);
+  assert.equal(pc.knownUsd, 0.5);
+  assert.equal(pc.unknownCostCalls, 1);
+  assert.equal(pc.blockingWithdrawn, 0, 'принятое ограничение — не снятая reviewer');
+  assert.equal(report.defects.withdrawn.value, 0);
+  const view = {
+    locals: (ns: string) =>
+      (ns === 'reviews' ? reviews : calls).map((value: unknown, i: number) => ({
+        owner: '@workspace',
+        key: String(i),
+        value,
+      })),
+  } as unknown as ExecutionView;
+  const [row] = reviewSummaries(view, { maxAttempts: 3 });
+  assert.deepEqual(row!.spend, { calls: 2, knownUsd: 0.5, unknownCalls: 1 });
+  assert.match(row!.line, /ревью \$0\.50 \+ вызовов без стоимости 1/);
 });
