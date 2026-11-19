@@ -201,7 +201,7 @@ test('H12: кто ответил — в status, status --human, explain, пак�
     harnessVersion: 'test',
     asOf: '2026-01-02T00:00:00.000Z',
   });
-  assert.deepEqual(report.inputs?.answeredBy, { operator: 1, lead: 0, host: 0 });
+  assert.deepEqual(report.inputs?.answeredBy, { operator: 1, lead: 0, host: 0, leadTechnical: 0 });
   assert.match(
     reportMarkdown(report),
     /Executor questions that stopped an attempt: 1 \(answered by the operator 1, by the lead agent 0\)/,
@@ -490,7 +490,7 @@ test('H12: отчёт считает ответивших по последне�
     harnessVersion: 'test',
     asOf: '2026-01-02T00:00:00.000Z',
   });
-  assert.deepEqual(report.inputs?.answeredBy, { operator: 1, lead: 1, host: 1 });
+  assert.deepEqual(report.inputs?.answeredBy, { operator: 1, lead: 1, host: 1, leadTechnical: 0 });
   const line =
     'Executor questions that stopped an attempt: 3 (answered by the operator 1, by the lead agent 1, by the host 1)';
   assert.ok(reportMarkdown(report).includes(line));
@@ -538,7 +538,7 @@ test('H12: отчёт и статус называют актёра послед
     harnessVersion: 'test',
     asOf: '2026-01-02T00:00:00.000Z',
   });
-  assert.deepEqual(report.inputs?.answeredBy, { operator: 0, lead: 1, host: 0 });
+  assert.deepEqual(report.inputs?.answeredBy, { operator: 0, lead: 1, host: 0, leadTechnical: 0 });
   assert.equal(
     statusOf({ engine: env.engine, policy: env.engine.policy }).works[0]!.input?.answeredBy,
     'lead',

@@ -25,7 +25,11 @@ keeps no "current project".
 ### 0. What to ask the user
 
 Only the repository path, the goal and the constraints (what must not change,
-limits). Everything else — profile, gates, roles, paths, state — comes from
+limits), and one choice for a new project: may you, the lead, decide the
+executor's technical questions yourself (the result for the user stays the
+same; you record why), so that only questions that change the result for the
+user reach them? Yes — pass `--lead-technical-answers` to `init`; the default
+is no. Everything else — profile, gates, roles, paths, state — comes from
 `harness init`. Preconditions: Node.js ≥ 24.3, `git`, `npm` or `pnpm`, and a
 signed-in `claude` and/or `codex` CLI.
 
@@ -68,7 +72,9 @@ Schema of input and response, and the byte limits. Read only.
    user; otherwise a reviewer of the other vendor. Read `data.warnings`,
    `data.files`
    (`create` / `preserve` / `conflict`), `data.conflicts`,
-   `data.toolchain.problems`, `data.facts` and `data.manifest.paths.state`.
+   `data.toolchain.problems`, `data.facts`, `data.manifest.paths.state` and
+   `data.questions.line` — who answers executor questions, in plain words;
+   tell the user this rule.
    Exit 3 means the plan has conflicts or the toolchain is not ready.
 2. Fix what you may fix, or hand it to the user (see the table).
 3. `$H init --repository <repo>` is create-only: `.harness/.gitignore`,
@@ -79,21 +85,22 @@ Schema of input and response, and the byte limits. Read only.
    interruption it resumes from the saved manifest decisions and writes only
    what is missing.
 
-| Conflict or refusal                                 | Meaning                                                                                                                                                                                            | Action                                                                                                                      |
-| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `symlink`                                           | the path or an ancestor (`conflictPath`) is a symlink                                                                                                                                              | never write through it; the user replaces the link                                                                          |
-| `ancestor-not-directory`                            | an ancestor of the path is a file                                                                                                                                                                  | ask the user; never delete their files                                                                                      |
-| `not-regular-file`                                  | the destination exists and is not a regular file                                                                                                                                                   | ask the user                                                                                                                |
-| `outside-root`                                      | the destination resolves outside the repository                                                                                                                                                    | ask the user                                                                                                                |
-| `content-differs` on `.harness/project.json`        | an explicit `--lead`, `--writer`, `--review`, `--model`, `--profile` or `--lean` differs from the saved manifest; after an upgrade or a move, also a changed built-in profile, root or API version | keep the saved decision, or the user confirms the change explicitly; for `--lean` use `$H lean --repository <repo> --plan`  |
-| `content-differs` on `.harness/policy.json`         | the saved policy assigns no allowed reviewer for the decisions (plan and contract of the lead, code of the writer); the refusal names the reason                                                   | pass the `--lead` / `--writer` the policy was made for, or the user confirms the change explicitly                          |
-| `NOT_READY` `lead-unknown`                          | no `--lead`, no saved manifest and no session marker                                                                                                                                               | pass `--lead claude` or `--lead codex` (who leads this session)                                                             |
-| `INVALID_INPUT` with a path                         | not a Git root, invalid manifest or policy (also a truncated write), `--state` inside the repository                                                                                               | read the issue path; a broken file is removed by a human, not overwritten                                                   |
-| `NOT_READY` `no-commits`                            | the repository has no commits                                                                                                                                                                      | the user commits first                                                                                                      |
-| `NOT_READY` `stack-ambiguous` / `stack-unsupported` | both lockfiles, or none                                                                                                                                                                            | pass `--profile`; when profile gates do not fit, write `.harness/profile.json` and pass `--profile ./.harness/profile.json` |
-| `NOT_READY` toolchain problems                      | missing scripts, wrong tool versions                                                                                                                                                               | fix the project or hand it to the user; never weaken the policy                                                             |
-| `CONTROLLER_BUSY` from `lean`                       | a run of this project is in progress (live controller, attempt or joint verification)                                                                                                              | wait for the run to finish, then repeat `lean`; never edit the policy under a running controller                            |
-| `CONTROLLER_BUSY`                                   | the repository is already owned by another controller                                                                                                                                              | stop: a second controller and state are not created                                                                         |
+| Conflict or refusal                                                         | Meaning                                                                                                                                                                                            | Action                                                                                                                      |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `symlink`                                                                   | the path or an ancestor (`conflictPath`) is a symlink                                                                                                                                              | never write through it; the user replaces the link                                                                          |
+| `ancestor-not-directory`                                                    | an ancestor of the path is a file                                                                                                                                                                  | ask the user; never delete their files                                                                                      |
+| `not-regular-file`                                                          | the destination exists and is not a regular file                                                                                                                                                   | ask the user                                                                                                                |
+| `outside-root`                                                              | the destination resolves outside the repository                                                                                                                                                    | ask the user                                                                                                                |
+| `content-differs` on `.harness/project.json`                                | an explicit `--lead`, `--writer`, `--review`, `--model`, `--profile` or `--lean` differs from the saved manifest; after an upgrade or a move, also a changed built-in profile, root or API version | keep the saved decision, or the user confirms the change explicitly; for `--lean` use `$H lean --repository <repo> --plan`  |
+| `content-differs` on `.harness/policy.json`                                 | the saved policy assigns no allowed reviewer for the decisions (plan and contract of the lead, code of the writer); the refusal names the reason                                                   | pass the `--lead` / `--writer` the policy was made for, or the user confirms the change explicitly                          |
+| `content-differs` on `.harness/policy.json` from `--lead-technical-answers` | the saved policy does not let the lead decide technical questions                                                                                                                                  | the user confirms the change; then add `inputPolicy.leadAnswers.technical: true` to `.harness/policy.json` (between runs)   |
+| `NOT_READY` `lead-unknown`                                                  | no `--lead`, no saved manifest and no session marker                                                                                                                                               | pass `--lead claude` or `--lead codex` (who leads this session)                                                             |
+| `INVALID_INPUT` with a path                                                 | not a Git root, invalid manifest or policy (also a truncated write), `--state` inside the repository                                                                                               | read the issue path; a broken file is removed by a human, not overwritten                                                   |
+| `NOT_READY` `no-commits`                                                    | the repository has no commits                                                                                                                                                                      | the user commits first                                                                                                      |
+| `NOT_READY` `stack-ambiguous` / `stack-unsupported`                         | both lockfiles, or none                                                                                                                                                                            | pass `--profile`; when profile gates do not fit, write `.harness/profile.json` and pass `--profile ./.harness/profile.json` |
+| `NOT_READY` toolchain problems                                              | missing scripts, wrong tool versions                                                                                                                                                               | fix the project or hand it to the user; never weaken the policy                                                             |
+| `CONTROLLER_BUSY` from `lean`                                               | a run of this project is in progress (live controller, attempt or joint verification)                                                                                                              | wait for the run to finish, then repeat `lean`; never edit the policy under a running controller                            |
+| `CONTROLLER_BUSY`                                                           | the repository is already owned by another controller                                                                                                                                              | stop: a second controller and state are not created                                                                         |
 
 ### 4. Plan the graph
 
@@ -273,20 +280,42 @@ questions are their decisions.
 writer stopped and asks the human. Do not answer it yourself:
 
 1. `$H input-show --state <state> --request <id>` gives the question, the
-   options (id, label, consequence), the recommended option, the severity and
-   its rationale.
-2. Pass all of it on to the human verbatim: the question text, every option with
-   its consequence, the writer's recommendation and the severity. Do not
-   shorten, reword, rank or pre-select an option.
+   options (id, label, consequence and, when the writer gave it, `forUser` —
+   what changes for the user), the recommended option, the severity and its
+   rationale, and `impact` (`technical`, or absent — the choice changes the
+   result for the user).
+2. Before the question, add one line of your own in plain words, marked as
+   yours: what this decision is about and why the work stopped on it, without
+   technical terms. Then pass on the question verbatim: the question text, every
+   option with its consequence and `forUser`, the writer's recommendation and
+   the severity. Do not shorten, reword, rank, merge or pre-select an option,
+   and do not put your explanation inside an option.
 3. Record the human's answer in their own words:
    `$H input-answer --state <state> --request <id> --text "<their words>"
 [--option <id they chose>] --actor operator --request-version <n>`.
 4. Then continue with the `lead` steps of `apply-input` above.
 
-Never close such a question with `--actor lead`: the harness refuses it with
-`OPERATOR_ANSWER_REQUIRED` (exit 3) unless the human has put
-`inputPolicy.leadAnswers {maxSeverity}` into the policy, and even then only up
-to that severity. Pending non-blocking requests to you (`kind: follow-up`,
+**Technical question decided by you (`INPUT_REQUIRED`, `actor: lead`,
+`answer-input`).** Only when the human opted in with
+`inputPolicy.leadAnswers.technical: true` (`init --lead-technical-answers`;
+`doctor` and `init --plan` print the rule in `questions.line`) and the writer
+marked the question `impact: technical` with no floor (critical area or
+critical path). `explain` and `status` then name you (`leadMay: technical`).
+Read the options, choose, and record the choice with the reason:
+`$H input-answer --state <state> --request <id> --text "<your decision>"
+[--option <id>] --actor lead --reason "<why this option>" --request-version <n>`
+(no `--reason` — `INVALID_INPUT`). It is shown as «решено ведущим (технический
+вопрос)» in `status`, `explain`, `handoff` and the report (a count there);
+`explain` and `handoff` also carry your reason.
+If you see that an option would in fact change what the user sees or gets,
+do not decide it: pass it on to the human as above.
+
+Never close a question that changes the result for the user (`impact`
+absent or `user-visible`) with `--actor lead`: the harness refuses it with
+`OPERATOR_ANSWER_REQUIRED` (exit 3). The only exception is a policy that has
+`inputPolicy.leadAnswers {maxSeverity}` without `technical: true`: then you
+may answer up to that severity. With `technical: true` such questions always
+go to the human. Pending non-blocking requests to you (`kind: follow-up`,
 from the autonomous mode) you answer yourself with `--actor lead`; a question
 below the threshold is recorded closed (the writer decided) and takes no
 answer. Who answered is
@@ -298,8 +327,14 @@ stage (`writer` — the writer is coding, `gates`, `review`, `integration`,
 `done`) with the time spent in it, the stages still ahead, what is needed from
 the operator (`needs`, same `actor`/`action` as `explain`) and the order's
 spend so far, plus one plain line (`stage.line` in Russian, `stage.lineEn` in
-English). When you start a long `run`, tell the operator that you work through
-the harness and give them the watch command to see it themselves:
+English). When you start a long `run` (several orders, or work that will take
+more than a few minutes), give the operator a way to watch it themselves and
+tell them that what they see comes from the harness itself, not from your
+retelling:
+
+1. If the `harness-ui` skill is installed, start the read-only operator panel
+   with it and give the operator its local URL.
+2. Otherwise give them the watch command:
 
 ```sh
 $H status --state <state> --human --watch [--interval 10]

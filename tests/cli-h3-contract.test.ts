@@ -166,6 +166,8 @@ const ADDITIVE_ARGS = new Set([
   // Обновляемый текст status для человека (0.1.0-alpha.54).
   'status--watch',
   'status--interval',
+  // Технические вопросы решает ведущий (0.1.0-alpha.55).
+  'init--lead-technical-answers',
 ]);
 /**
  * Текст `--writer` init в H2. 0.1.0-alpha.50 меняет умолчание: writer —
@@ -358,7 +360,10 @@ test('H3-01: прежние команды и схемы их данных не 
     if (v && typeof v === 'object' && !Array.isArray(v) && 'properties' in v) {
       const o = v as { properties: Record<string, unknown>; required?: string[] };
       if (o.properties && 'facts' in o.properties && 'lead' in o.properties) {
-        const added = ['lead', 'review', 'runtimes', 'warnings'];
+        // `questions` — правило ответов на вопросы исполнителя (0.1.0-alpha.55).
+        // Необязательное: в `required` его нет (ответ прежней версии валиден).
+        assert.ok(!o.required?.includes('questions'), 'init.questions необязательно');
+        const added = ['lead', 'review', 'runtimes', 'warnings', 'questions'];
         const properties = { ...o.properties };
         for (const key of added) delete properties[key];
         return { ...o, properties, required: o.required?.filter((r) => !added.includes(r)) };
@@ -444,6 +449,8 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.checkouts;
       delete rest.ports;
       delete rest.warnings;
+      // Правило ответов на вопросы исполнителя словами (0.1.0-alpha.55).
+      delete rest.questions;
       return rest;
     }
     // Аддитивные поля ответов коннектора: пакеты `tasks[].context` (alpha.13) и

@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import {
   STATE_VERSION,
+  inputPolicyOf,
   type statusDataSchema,
   type AttemptState,
   type CallRecord,
@@ -178,7 +179,11 @@ export function statusOf(
           const needs =
             needsOf?.(w) ??
             (input?.state === 'awaiting-answer'
-              ? { actor: 'user' as const, action: 'answer-input' as const }
+              ? {
+                  // Технический вопрос при leadAnswers.technical решает ведущий.
+                  actor: input.leadMay === 'technical' ? ('lead' as const) : ('user' as const),
+                  action: 'answer-input' as const,
+                }
               : undefined);
           const plainContext = {
             control: v.control(),
@@ -215,7 +220,7 @@ export function statusOf(
             }),
             ...(verification ? { verification } : {}),
           };
-        })(workInputOf(requestsOf(v, w)), engine.blockers(w, v)),
+        })(workInputOf(requestsOf(v, w), inputPolicyOf(source.policy)), engine.blockers(w, v)),
       })),
       ...((budgets) => (budgets ? { budgets } : {}))(budgetOverview(engine.budgetContext(), v)),
       ...(({ reviews, reviewsTruncated }) => ({
@@ -361,12 +366,16 @@ export function statusText(data: z.output<typeof statusDataSchema>): string {
     if (w.stage) out.push(`  сейчас: ${w.stage.line.slice(w.id.length + 2)}`);
     if (w.input)
       out.push(
-        `  вопрос ${w.input.requestId} [${w.input.state}, серьёзность ${w.input.severity}]` +
-          (w.input.answeredBy
-            ? `: ответил ${answeredBy[w.input.answeredBy]}`
-            : w.input.state === 'awaiting-answer'
-              ? ': ждёт ответа человека (input-show, input-answer --actor operator)'
-              : ''),
+        `  вопрос ${w.input.requestId} [${w.input.state}, серьёзность ${w.input.severity}${w.input.impact === 'technical' ? ', технический' : ''}]` +
+          (w.input.answerBasis === 'technical'
+            ? ': решено ведущим (технический вопрос)'
+            : w.input.answeredBy
+              ? `: ответил ${answeredBy[w.input.answeredBy]}`
+              : w.input.state === 'awaiting-answer'
+                ? w.input.leadMay === 'technical'
+                  ? ': технический вопрос — решает ведущий (input-answer --actor lead --reason)'
+                  : ': ждёт ответа человека (input-show, input-answer --actor operator)'
+                : ''),
       );
     // Блокировки простыми словами (кто снимает — в скобках), коды — после.
     if (w.blockers.length)

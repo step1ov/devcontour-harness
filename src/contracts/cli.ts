@@ -50,6 +50,7 @@ import {
   inputRequestSchema,
   inputStateNames,
   inputTargetSchema,
+  leadAnswerBases,
 } from './input.ts';
 
 /**
@@ -556,6 +557,13 @@ export const cliCommands = {
       },
       { name: '--plan', value: 'flag', required: false, description: 'Только план, без записи' },
       {
+        name: '--lead-technical-answers',
+        value: 'flag',
+        required: false,
+        description:
+          'Технические вопросы исполнителя (результат для пользователя не меняется) решает ведущий с записанной причиной: inputPolicy.leadAnswers.technical в новой политике; без флага на вопросы, останавливающие работу, отвечает человек. Сохранённая политика без этого правила — PATH_CONFLICT content-differs',
+      },
+      {
         name: '--lean',
         value: 'flag',
         required: false,
@@ -914,7 +922,14 @@ export const cliCommands = {
         value: 'text',
         required: false,
         description:
-          'Кто отвечает: operator (по умолчанию; словами человека) или lead — только на неблокирующие запросы или с разрешения inputPolicy.leadAnswers',
+          'Кто отвечает: operator (по умолчанию; словами человека) или lead — только на неблокирующие запросы или с разрешения inputPolicy.leadAnswers (technical: технические вопросы с --reason; maxSeverity: до порога серьёзности)',
+      },
+      {
+        name: '--reason',
+        value: 'text',
+        required: false,
+        description:
+          'Почему ведущий выбрал ответ (до 1000 знаков); обязательна для --actor lead на технический вопрос по inputPolicy.leadAnswers.technical',
       },
       requestVersionArg,
     ],
@@ -1424,6 +1439,12 @@ export const statusDataSchema = z.strictObject({
           severity: z.number().int().min(1).max(10),
           /** Кто записал последний ответ; нет поля — ответа нет. */
           answeredBy: z.enum(['operator', 'lead', 'host']).optional(),
+          /** Исполнитель пометил вопрос техническим; нет поля — вопрос меняет результат для пользователя. */
+          impact: z.literal('technical').optional(),
+          /** Правило политики, по которому принят последний ответ ведущего (`technical` — «решено ведущим (технический вопрос)»). */
+          answerBasis: z.enum(leadAnswerBases).optional(),
+          /** Ждёт ответа, и действующая политика разрешает ответ ведущему — по этому правилу. */
+          leadMay: z.enum(leadAnswerBases).optional(),
         })
         .optional(),
       /** Неблокирующие запросы ведущему в ожидании (автономный режим). */
@@ -1628,6 +1649,19 @@ export const doctorDataSchema = z.strictObject({
     )
     .optional(),
   problems: z.array(z.string()),
+  /**
+   * Действующее правило ответов на вопросы исполнителя (есть, когда задана
+   * политика): технические решает ведущий (`inputPolicy.leadAnswers.technical`),
+   * порог ответов ведущего (`maxSeverity`), правило простыми словами.
+   */
+  questions: z
+    .strictObject({
+      leadTechnical: z.boolean(),
+      maxSeverity: z.number().int().min(1).max(10).optional(),
+      line: z.string(),
+      lineEn: z.string(),
+    })
+    .optional(),
   /**
    * Предупреждения, не делающие среду негодной; есть, когда задана политика.
    * Источники: порт ресурса занят только на wildcard-адресе, а loopback
@@ -1982,6 +2016,23 @@ export const initDataSchema = z.strictObject({
       auth: z.enum(['ok', 'missing', 'unknown']),
     }),
   ),
+  /**
+   * Кто отвечает на вопросы исполнителя, останавливающие работу, при
+   * действующей политике: технические решает ведущий (`leadTechnical`,
+   * `inputPolicy.leadAnswers.technical`; `init --lead-technical-answers`) или
+   * все — человек; `maxSeverity` — прежний порог ответов ведущего. Источник —
+   * флаг для новой политики, сохранённая политика или умолчание; `line` /
+   * `lineEn` — правило простыми словами. Нет поля — ответ до alpha.55.
+   */
+  questions: z
+    .strictObject({
+      leadTechnical: z.boolean(),
+      maxSeverity: z.number().int().min(1).max(10).optional(),
+      source: z.enum(['option', 'policy', 'default']),
+      line: z.string(),
+      lineEn: z.string(),
+    })
+    .optional(),
   /** Предупреждения подготовки: не отказ, но требуют внимания до запуска. */
   warnings: z.array(
     z.strictObject({

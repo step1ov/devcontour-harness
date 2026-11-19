@@ -513,9 +513,12 @@ function build(
               digest: answer.digest,
               excerpt: text(answer.text, HANDOFF_LIMITS.answerChars),
               by: answer.actor.kind,
+              ...opt('basis', answer.basis),
+              ...(answer.reason ? { reason: text(answer.reason, HANDOFF_LIMITS.answerChars) } : {}),
             },
           }
         : {}),
+      ...(r.question.impact === 'technical' ? { impact: 'technical' as const } : {}),
       origin: {
         graphDigest: r.originBasis.graphDigest,
         orderDigest: r.originBasis.orderDigest,

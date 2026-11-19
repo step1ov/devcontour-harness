@@ -151,10 +151,10 @@ export function handoffMarkdown(pack: HandoffPack): string {
     out.push('', '## Вопросы исполнителя', '');
     for (const r of pack.inputs ?? [])
       out.push(
-        `- ${r.requestId} ${r.workId} [${r.kind}, ${r.state}, серьёзность ${r.severity}]: ${cell(r.question)}` +
+        `- ${r.requestId} ${r.workId} [${r.kind}, ${r.state}, серьёзность ${r.severity}${r.impact === 'technical' ? ', технический' : ''}]: ${cell(r.question)}` +
           (r.options.length ? ` (варианты: ${r.options.join(', ')})` : '') +
           (r.answer
-            ? ` — ответ r${r.answer.revision} ${r.answer.digest.slice(0, 12)}${r.answer.by ? ` (ответил: ${answeredBy[r.answer.by]})` : ''}: ${cell(r.answer.excerpt)}`
+            ? ` — ответ r${r.answer.revision} ${r.answer.digest.slice(0, 12)}${r.answer.basis === 'technical' ? ` (решено ведущим (технический вопрос)${r.answer.reason ? `: ${cell(r.answer.reason)}` : ''})` : r.answer.by ? ` (ответил: ${answeredBy[r.answer.by]})` : ''}: ${cell(r.answer.excerpt)}`
             : ''),
       );
     out.push(...more(pack.truncated.inputs, 'вопросов'));

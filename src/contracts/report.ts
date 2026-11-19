@@ -544,7 +544,19 @@ export const valueReportSchema = z.strictObject({
        * оператор (человек), ведущий агент (только с `inputPolicy.leadAnswers`)
        * или хост от их имени. Нет поля — отчёт до alpha.54.
        */
-      answeredBy: z.strictObject({ operator: count, lead: count, host: count }).optional(),
+      answeredBy: z
+        .strictObject({
+          operator: count,
+          lead: count,
+          host: count,
+          /**
+           * Из ответов ведущего — решённые им как технический вопрос
+           * (`inputPolicy.leadAnswers.technical`, с причиной). Нет поля —
+           * отчёт до alpha.55.
+           */
+          leadTechnical: count.optional(),
+        })
+        .optional(),
     })
     .optional(),
   works: z.strictObject({
