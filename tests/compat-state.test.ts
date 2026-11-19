@@ -219,7 +219,9 @@ test(
         works.every((w) => (w.verification as { rows: unknown[] } | undefined)?.rows.length),
       );
       // Причина блокировки простыми словами (0.1.0-alpha.55): аддитивные
-      // `plain`/`plainEn`/`actor` у каждого blocker; `code` и `message` прежние.
+      // `plain`/`plainEn`/`actor` у каждого blocker; `code` прежний. Текст
+      // `message` с числом согласует слово с числом (0.1.0-alpha.56): «из 1
+      // попытки» вместо «из 1 попыток» — сверяем его по прежнему тексту.
       for (const w of works)
         for (const b of w.blockers as Record<string, unknown>[]) {
           assert.equal(b.plain, 'уже принято', 'blocker ' + String(b.code));
@@ -237,7 +239,14 @@ test(
             {
               ...w,
               blockers: (blockers as Record<string, unknown>[]).map(
-                ({ plain: _p, plainEn: _e, actor: _r, ...b }) => (void _p, void _e, void _r, b),
+                ({ plain: _p, plainEn: _e, actor: _r, ...b }) => (
+                  void _p,
+                  void _e,
+                  void _r,
+                  typeof b.message === 'string'
+                    ? { ...b, message: b.message.replace(/из 1 попытки$/, 'из 1 попыток') }
+                    : b
+                ),
               ),
             }
           ),
