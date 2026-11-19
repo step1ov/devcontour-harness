@@ -5,7 +5,7 @@ Headless-движок исполнения инженерных поручени
 интеграция с принятой веткой через compare-and-swap и машинный результат с SHA
 и доказательствами.
 
-> Статус: `0.1.0-alpha.53` — предварительный выпуск (alpha). Договоры
+> Статус: `0.1.0-alpha.54` — предварительный выпуск (alpha). Договоры
 > `v1alpha1` могут измениться между alpha-версиями; закрепляйте точную версию.
 > Файл → ревью плана → кандидат → интеграция → принятие → результат JSON, с
 > ограниченным восстановлением, повторным использованием кандидата, бюджетами,
@@ -28,7 +28,7 @@ Headless-движок исполнения инженерных поручени
 Из npm — точная версия (воспроизводимо) или последняя alpha по тегу:
 
 ```sh
-npm install --save-exact devcontour-harness@0.1.0-alpha.53   # точная версия
+npm install --save-exact devcontour-harness@0.1.0-alpha.54   # точная версия
 # или: npm install --save-exact devcontour-harness@alpha     # текущая alpha
 npx harness --version
 ```
@@ -106,6 +106,7 @@ git rev-parse refs/heads/harness/accepted   # совпадает с data.result.
 | `handoff --state D [--format md] [--intent T]…` | Пакет передачи контекста новой сессии агента       |
 | `input-list / input-show / input-answer …`      | Вопрос исполнителя: ответ, снимок, применение      |
 | `review-code --state D --base A --head B`       | Обзор написанной ветки: ревью, не приёмка          |
+| `smoke --state D --sha HEAD [--human]`          | Окружение на коммите без gates и моделей           |
 
 stdout — один JSON (`devcontour-harness/v1alpha1`), диагностика — stderr. Exit
 codes: 0 успех, 2 неверный вход, 3 отказ/блокировка, 4 инфраструктура.
@@ -149,6 +150,22 @@ PASS» нет. Адаптеры хоста реализуют порты `Execut
 `/contracts` и `/testing`; JSON-схемы входов и выходов —
 `devcontour-harness/schemas/<имя>.schema.json`. Декларации используют типы
 Node.js: TypeScript-потребителю нужен `@types/node` (или `skipLibCheck`).
+
+## Выпуск 0.1.0-alpha.54
+
+Блокирующий вопрос исполнителя отвечает человек: `input-answer --actor lead`
+на него требует `inputPolicy.leadAnswers` в политике, иначе
+`OPERATOR_ANSWER_REQUIRED`. `status` показывает этап поручения одной строкой
+(`works[].stage`) и обновляется по `status --human --watch`. Ревью плана и
+контракта сохраняет идентичность находок между раундами, принимает решение
+`--accept-limitation` и эскалирует оператору находку, открытую 3 раунда.
+`review-code` даёт независимое ревью уже написанной ветки (не приёмку), а
+`status`, `result` и отчёт называют коммиты после приёмки. `harness smoke`
+и `lifecyclePreflight: "cached"` проверяют окружение до платных попыток.
+Новые коды `LIFECYCLE_FAILED` и `CONNECTOR_VERSION_MISMATCH`, полный вывод
+git и маска секретов до обрезки. Перед откатом уберите `lifecyclePreflight`
+и `inputPolicy.leadAnswers` из политики. Подробно —
+[заметки выпуска](docs/release-notes/0.1.0-alpha.54.md).
 
 ## Выпуск 0.1.0-alpha.53
 

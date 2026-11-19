@@ -1282,37 +1282,83 @@ handoff` (`handoffPack`) больше не содержит попыток, пр
   метке `leaseRows` в базе.
 - Откат на 0.1.0-alpha.52 не требует действий с данными.
 
-### 0.1.0-alpha.54 (черновик): `harness smoke`, `lifecyclePreflight`, `CONNECTOR_VERSION_MISMATCH`
+### 0.1.0-alpha.54: вопросы для человека, этап в `status`, раунды ревью, `review-code`, `harness smoke`
 
-Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`). Прежние
-команды и их данные не меняются.
+Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`,
+`handoffVersion: 1`, `reportVersion: 1`). Новые поля ответов, команды и
+флаги аддитивны; прежние команды и их данные не меняются, кроме одного
+изменения поведения (первый пункт).
 
+- **Изменение поведения: блокирующий вопрос исполнителя отвечает человек.**
+  `input-answer --actor lead` (`answerInput` с `actor.kind: lead`) на
+  блокирующий вопрос (`kind: question`, `blocking`) отказывает
+  `OPERATOR_ANSWER_REQUIRED` (класс `refused`, exit 3) без записи, если
+  политика не содержит `inputPolicy.leadAnswers {maxSeverity: 1–10}` или
+  действующая серьёзность вопроса выше `maxSeverity`. Ведущий агент передаёт
+  вопрос человеку и записывает ответ `--actor operator`; чтобы ведущий
+  отвечал сам, человек добавляет поле в политику. Неблокирующие запросы
+  (`kind: follow-up`) — как прежде. Новое поле ответов
+  `works[].input.answeredBy`, `inputs[].answer.by` пакета передачи и
+  `inputs.answeredBy` отчёта.
+- **Этап поручения.** `status` — `works[].stage` (этап, время в нём,
+  оставшиеся этапы, что нужно и от кого, расход, строки `line`/`lineEn`);
+  `status --human --watch [--interval S]` — обновляемый текст до
+  успокоения доски или Ctrl-C.
+- **Раунды ревью плана и контракта.** Находки получают устойчивую
+  идентичность (`sameAs` в ответе reviewer, счёт `rounds`); `review-plan` /
+  `review-contract` принимают `--accept-limitation <id>` и
+  `--continue-review <id>` с `--reason` и `--actor lead|operator`;
+  блокирующая находка, открытая 3 раунда подряд, останавливает следующий
+  раунд отказом `INPUT_REQUIRED` до вызова reviewer. `status` и `explain` —
+  поле `reviews`, отчёт — сводка `defects.planContract`. Записи находок
+  получают необязательные `rounds` и `disposition`.
+- **`harness review-code`.** `review-code --state D [--policy F] --base A
+--head B [--role R] [--author A] [--repository ID]` — независимое ревью уже
+  написанной ветки; запись `CodeReviewRecord` с `acceptance: false` в новом
+  локальном пространстве `code-reviews`, артефакты — в
+  `<state>/review-code/`. `harness gates` пишет итог в
+  `<state>/gates-at/<id>/result.json`. Хранилищу хоста пространство нужно,
+  только если хост вызывает `reviewCode`.
+- **Принятая работа против target ref.** `status` (`works[].target`),
+  `result` и `deliver` (`target`) и отчёт (`targets`, раздел «After
+  acceptance») называют коммиты и файлы после приёмки. `statusOf` поверх
+  движка хоста `target` не вычисляет.
 - **Команда `harness smoke`.** `smoke --state D [--policy F] --sha SHA|HEAD
 [--repository ID] [--human]` поднимает только окружение репозитория
   (снимки зависимостей, рабочее дерево, lifecycle, хранилище зависимостей,
   `prepare`, `teardown`) без gates и моделей и печатает каждый шаг с
   длительностью. Отказ — данные `failure` (класс `port-busy`, `timeout`,
   `crash`, `missing-tool`, `cleanup`, `tree-changed`, `environment`, совет)
-  и exit 4 (`LIFECYCLE_FAILED`). `--sha` и `--human` теперь принимает и она.
-  Библиотека: `smokeLifecycle`; `runGatesAt` получил необязательные
-  `lifecycleOnly` и `onStep` (по умолчанию прежнее поведение).
+  и exit 4 (`LIFECYCLE_FAILED`). Библиотека: `smokeLifecycle`; `runGatesAt`
+  получил необязательные `lifecycleOnly` и `onStep` (по умолчанию прежнее
+  поведение).
 - **Поле политики `lifecyclePreflight: "cached"`** (opt-in): перед `run` —
   та же проверка на `targetRef` каждого репозитория с незавершёнными
   поручениями, успех кэшируется в `<state>/preflight/` по (деревья базы и
   зависимостей, `executionDigest`, `stallSweep`, digest окружения процесса,
-  версия harness). Отказ — `LIFECYCLE_FAILED` до ревью
-  плана и первой попытки. Поле не входит в `executionDigest`: включение не
-  требует нового согласования. Без поля поведение прежнее. Прежняя версия
-  пакета политику с этим полем не примет (строгая схема): перед откатом
-  уберите поле.
-- **Коды отказов.** Новые `LIFECYCLE_FAILED` и `CONNECTOR_VERSION_MISMATCH`
-  (класс `infrastructure`, exit 4). Relay v1 с `contractVersion` не 1 и
-  Relay-2 с sha256 binary не из `relay.build` теперь отказывают
-  `CONNECTOR_VERSION_MISMATCH` вместо `NOT_READY`; потребитель, который
-  разбирал код отказа `source-*`, должен принять новый код. `source-check` при
-  несовпадении отвечает этим отказом (exit 4), а не данными с `problems`.
-- Откат на 0.1.0-alpha.53: убрать `lifecyclePreflight` из политики; каталог
-  `<state>/preflight/` прежняя версия не читает, его можно удалить.
+  версия harness). Отказ — `LIFECYCLE_FAILED` до ревью плана и первой
+  попытки. Поле не входит в `executionDigest`: включение не требует нового
+  согласования. Без поля поведение прежнее.
+- **Коды отказов.** Новые `OPERATOR_ANSWER_REQUIRED` (`refused`, exit 3),
+  `LIFECYCLE_FAILED` и `CONNECTOR_VERSION_MISMATCH` (`infrastructure`,
+  exit 4). Relay v1 с `contractVersion` не 1 и Relay-2 с sha256 binary не
+  из `relay.build` теперь отказывают `CONNECTOR_VERSION_MISMATCH` вместо
+  `NOT_READY`; потребитель, который разбирал код отказа `source-*`, должен
+  принять новый код. `source-check` при несовпадении отвечает этим отказом
+  (exit 4), а не данными с `problems`.
+- **Надёжность.** Вывод `git()` собирается целиком до предела
+  `GIT_OUTPUT_LIMIT` (отказ `GitOutputLimit`, а не молча обрезанный хвост);
+  отказ запуска `ps`/`lsof` больше не завершает процесс хоста; секреты в
+  записях ревью маскируются до обрезки. Действий при обновлении не требуется.
+- **Откат на 0.1.0-alpha.53.** Перед откатом уберите `lifecyclePreflight` и
+  `inputPolicy.leadAnswers` и из `.harness/policy.json`, и из
+  `<state>/binding.json`: прежняя строгая схема политику с ними не примет.
+  Записи ревью плана и контракта с новыми полями находок (`rounds`,
+  `disposition`) alpha.53 не читает — откат после таких раундов не
+  поддерживается, откатывайтесь на копию состояния, снятую до обновления.
+  Записи `code-reviews` прежняя версия не читает; каталоги
+  `<state>/review-code/`, `<state>/preflight/` и файлы
+  `<state>/gates-at/*/result.json` можно удалить.
 
 ## Перед обновлением
 
