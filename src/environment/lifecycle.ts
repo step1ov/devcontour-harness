@@ -102,6 +102,8 @@ export function executionEnvironment(
     redact: Redactor;
     /** Вложенные `.git`, созданные подготовкой фазы (`preparationGuard`). */
     prepared?: PreparedProtected;
+    /** Наблюдатель шагов `runSteps` (lifecycle, prepare): замер и исход каждого шага. */
+    onStep?: (step: StepOutcome) => void;
   } = { env, redact: redactor(secretValues) };
   return result;
 }
@@ -133,6 +135,26 @@ export function availableRedactor(profiles: (Environment | undefined)[], source 
   }
   return redactor(values);
 }
+/**
+ * Исход одного шага `runSteps` для наблюдателя (`execution.onStep`): стадия —
+ * имя каталога логов шага (`setup`, `ready`, `prepare`, `teardown`).
+ */
+export interface StepOutcome {
+  stage: string;
+  id: string;
+  durationMs: number;
+  /** Шаг прошёл: exit 0, без предела и отмены. */
+  ok: boolean;
+  /** Код выхода; нет — процесс не запустился (`spawnError`). */
+  exitCode?: number;
+  timedOut: boolean;
+  /** Шаг остановлен сигналом фазы (отмена, предел фазы). */
+  aborted: boolean;
+  /** Код системной ошибки запуска (`ENOENT` — нет исполняемого файла, `EACCES`). */
+  spawnError?: string;
+  log?: string;
+}
+
 export async function runSteps(
   steps: Step[],
   cwd: string,
@@ -145,14 +167,41 @@ export async function runSteps(
   await mkdir(dir, { recursive: true });
   for (const step of steps) {
     signal.throwIfAborted();
-    const result = await command(step.command, cwd, {
-      activity: { kind: 'step', label: step.id },
-      signal,
-      timeoutMs: step.timeoutMs,
-      env: execution.env,
-      redact: execution.redact,
+    const started = Date.now();
+    const stage = basename(dir);
+    let result: Awaited<ReturnType<typeof command>>;
+    try {
+      result = await command(step.command, cwd, {
+        activity: { kind: 'step', label: step.id },
+        signal,
+        timeoutMs: step.timeoutMs,
+        env: execution.env,
+        redact: execution.redact,
+      });
+    } catch (error) {
+      execution.onStep?.({
+        stage,
+        id: step.id,
+        durationMs: Date.now() - started,
+        ok: false,
+        timedOut: false,
+        aborted: signal.aborted,
+        spawnError: (error as NodeJS.ErrnoException).code ?? 'ERROR',
+      });
+      throw error;
+    }
+    const log = join(dir, step.id + '.log');
+    await writeFile(log, result.stdout + '\n' + result.stderr);
+    execution.onStep?.({
+      stage,
+      id: step.id,
+      durationMs: Date.now() - started,
+      ok: !result.code && !result.timedOut && !signal.aborted,
+      exitCode: result.code,
+      timedOut: result.timedOut,
+      aborted: signal.aborted,
+      log,
     });
-    await writeFile(join(dir, step.id + '.log'), result.stdout + '\n' + result.stderr);
     if (result.code || result.timedOut || signal.aborted) {
       const message = `Шаг ${step.id}: exit=${result.code}; timeout=${result.timedOut}`;
       // Шаг установки зависимостей, упавший на сети или реестре: отказ среды

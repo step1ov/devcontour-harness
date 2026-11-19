@@ -447,6 +447,19 @@ export const executionPolicySchema = z.strictObject({
    */
   integrationReuse: z.literal('identical-tree').optional(),
   /**
+   * Проверка окружения перед `run` (opt-in). `cached`: до ревью плана и
+   * первой попытки controller поднимает окружение каждого репозитория с
+   * незавершёнными поручениями на его `targetRef` — как `harness smoke`
+   * (lifecycle, `prepare`, хранилище зависимостей, без gates и моделей) — и
+   * запоминает успех в каталоге состояния по ключу (дерево базы, digest
+   * исполнительной политики, версия harness). Тот же ключ — без повторной
+   * проверки; отказ не запоминается. Отказ останавливает запуск
+   * `LIFECYCLE_FAILED` до любой платной попытки. Нет поля — проверки нет;
+   * умолчание не подставляется, digest прежних политик не меняется. В
+   * `executionDigest` не входит: это надзор, а не условие исполнения кода.
+   */
+  lifecyclePreflight: z.literal('cached').optional(),
+  /**
    * Когда исполнитель останавливается с вопросом, а когда решает сам и
    * записывает допущение (`inputPolicySchema`, docs/contracts.md «Вопрос
    * исполнителя»). Нет поля — `DEFAULT_INPUT_POLICY` (порог 7); умолчание не
@@ -499,7 +512,8 @@ export const policyDigest = (policy: ExecutionPolicy) => digestOf(policy);
  * согласования (как в DevContour). Обход зависших (`stallSweep`) — тоже
  * надзор, а не условие исполнения кода: его пороги меняются без новой
  * попытки и не трогают основания reuse. Политика вопросов исполнителя
- * (`inputPolicy`) закрепляется в попытке при выдаче и тоже не входит.
+ * (`inputPolicy`) закрепляется в попытке при выдаче и тоже не входит;
+ * проверка окружения перед запуском (`lifecyclePreflight`) — тоже надзор.
  * `policyDigest` — digest загруженной
  * политики целиком: им сверяются применение политики (`appliedPolicy`) и
  * запрос операции reconfigure.
@@ -511,6 +525,7 @@ export const executionDigest = (policy: ExecutionPolicy) =>
     prices: undefined,
     stallSweep: undefined,
     inputPolicy: undefined,
+    lifecyclePreflight: undefined,
   });
 
 /**

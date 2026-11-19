@@ -193,6 +193,22 @@ prerequisite failed) or `skipped` (after the first failure with
 `--fail-fast`); exit 0 when all passed, 3 otherwise; `--human` prints a table.
 A green `gates` is not acceptance: only `run` accepts work.
 
+When the project has `lifecycle`, `prepare` or a dependency store, check the
+environment alone first — never debug lifecycle or seed through paid attempts:
+
+```sh
+$H smoke --state <manifest.paths.state> --policy .harness/policy.json --sha HEAD --human
+```
+
+It brings up only the environment (lifecycle, store, prepare, teardown) with
+no gates and no model call and times each step. Exit 4 (`LIFECYCLE_FAILED`)
+names `failure.class` (`port-busy`, `timeout`, `crash`, `missing-tool`,
+`cleanup`, `tree-changed`, `environment`) and `failure.advice`; fix the
+environment (free the port, install the tool, raise the step timeout), not
+the task code. `"lifecyclePreflight": "cached"` in the policy runs the same
+check before every `run`, once per base tree, and stops the run before any
+paid attempt.
+
 ### 8. When it stops
 
 `$H explain --state <state> --policy .harness/policy.json [--work <id>]` is

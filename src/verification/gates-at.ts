@@ -17,6 +17,7 @@ import {
   preparesTree,
   runSteps,
   withEnvironment,
+  type StepOutcome,
 } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { removeSnapshots, snapshotDependencies, type DependencySnapshot } from './dependencies.ts';
@@ -72,6 +73,19 @@ export interface GatesAtInput {
    * проверки. Нагрузка — как у события `attempt.liveness`.
    */
   onLiveness?(report: LivenessReport): void;
+  /**
+   * Только окружение (`harness smoke`): снимки зависимостей, рабочее дерево,
+   * lifecycle `setup`/`ready`, хранилище зависимостей, `prepare` и
+   * `teardown` — без gates. `gates` тогда может быть пустым: он лишь сужает
+   * ресурсы, которые держит проверка (нет — ресурсы всех gates репозитория).
+   */
+  lifecycleOnly?: boolean;
+  /**
+   * Исход каждого шага окружения по мере исполнения: шаги lifecycle и
+   * `prepare` (`StepOutcome` из `runSteps`), а также стадии `dependencies`,
+   * `worktree` и `dependency-store` (без кода выхода).
+   */
+  onStep?(step: StepOutcome): void;
 }
 
 /** Переход живости проверки вне попытки (нагрузка `attempt.liveness`). */
@@ -163,13 +177,40 @@ const stalledBy = (signal?: AbortSignal) =>
 async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesAtResult> {
   const repo = ctx.policy.repositories.find((r) => r.id === input.repositoryId);
   if (!repo) throw new HarnessError('NOT_FOUND', 'Репозиторий не объявлен: ' + input.repositoryId);
-  if (!input.gates.length) throw new HarnessError('INVALID_INPUT', 'Не названы gates проверки');
+  if (!input.gates.length && !input.lifecycleOnly)
+    throw new HarnessError('INVALID_INPUT', 'Не названы gates проверки');
   for (const gid of input.gates)
     if (!repo.gates.some((g) => g.id === gid))
       throw new HarnessError('NOT_FOUND', `Gate ${gid} не объявлен в ${repo.id}`);
   // Та же область и тот же порядок, что исполнила бы попытка с областью из
   // этих gates и их предпосылок (`standaloneScope`, `orderedScope`).
-  const gates = orderedScope(repo.gates, standaloneScope(repo.gates, input.gates));
+  const scope = input.gates.length
+    ? orderedScope(repo.gates, standaloneScope(repo.gates, input.gates))
+    : repo.gates;
+  // Только окружение: gates не исполняются, но их ресурсы проверка держит —
+  // службы lifecycle поднимаются для них (порт, устройство).
+  const gates = input.lifecycleOnly ? [] : scope;
+  /** Замер стадии окружения без команды (снимки, дерево, хранилище). */
+  const staged = async <T>(stage: string, action: () => Promise<T>) => {
+    const started = Date.now();
+    const outcome = (ok: boolean) =>
+      input.onStep?.({
+        stage,
+        id: stage,
+        durationMs: Date.now() - started,
+        ok,
+        timedOut: false,
+        aborted: signal.aborted,
+      });
+    try {
+      const result = await action();
+      outcome(true);
+      return result;
+    } catch (error) {
+      outcome(false);
+      throw error;
+    }
+  };
   const id = input.id ?? 'GA-' + randomUUID();
   const path = ctx.repoPath(repo);
   await git(path, 'cat-file', '-e', `${input.sha}^{commit}`).catch(() => {
@@ -230,7 +271,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
         leaseMs: ctx.policy.leaseMs,
         resourceDatabase: ctx.resourceDatabase ?? defaultResourceDatabase(),
       },
-      [...new Set(gates.flatMap((g) => g.resources ?? []))],
+      [...new Set(scope.flatMap((g) => g.resources ?? []))],
       `${ctx.stateDir}:${id}`,
       signal,
       async (signal, resources) => {
@@ -243,18 +284,20 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
           path: (r: Repo) => ctx.repoPath(r),
         };
         if (repo.dependsOn.length)
-          snapshots = await snapshotDependencies({
-            repos,
-            repositoryId: repo.id,
-            dir: join(trees, 'dependencies'),
-            artifacts,
-            runId: id,
-            policy: ctx.policy,
-            environment: source,
-            signal,
-            store,
-          });
-        await git(path, 'worktree', 'add', '--detach', cwd, input.sha);
+          snapshots = await staged('dependencies', () =>
+            snapshotDependencies({
+              repos,
+              repositoryId: repo.id,
+              dir: join(trees, 'dependencies'),
+              artifacts,
+              runId: id,
+              policy: ctx.policy,
+              environment: source,
+              signal,
+              store,
+            }),
+          );
+        await staged('worktree', () => git(path, 'worktree', 'add', '--detach', cwd, input.sha));
         added = true;
         const execution = executionEnvironment(
           [ctx.policy.environment, repo.environment],
@@ -271,6 +314,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
           },
           source,
         );
+        if (input.onStep) execution.onStep = (step) => input.onStep!(step);
         const boundary = ctx.boundary();
         const prepared = preparation.guard(
           ctx.policy.isolation.mode === 'os',
@@ -284,7 +328,11 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
           execution,
           signal,
           async () => {
-            await materializeStore(store, { repo, cwd, execution, signal, dir: artifacts });
+            if (repo.dependencyStore)
+              await staged('dependency-store', () =>
+                materializeStore(store, { repo, cwd, execution, signal, dir: artifacts }),
+              );
+            else await materializeStore(store, { repo, cwd, execution, signal, dir: artifacts });
             await runSteps(repo.prepare, cwd, join(artifacts, 'prepare'), execution, signal);
             prepared(execution);
             let reapedBy: string | undefined;

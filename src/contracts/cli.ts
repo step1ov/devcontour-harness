@@ -1003,6 +1003,39 @@ export const cliCommands = {
     ],
     refusals: ['GATE_FAILED', 'CANCELLED', 'NOT_FOUND'],
   },
+  smoke: {
+    description:
+      'Поднять только окружение репозитория на коммите — снимки зависимостей, рабочее дерево, lifecycle setup/ready, хранилище зависимостей, prepare, teardown — тем же исполнением, что integration, без gates и без вызовов моделей; замер каждого шага и класс отказа (port-busy, timeout, crash, missing-tool, cleanup, tree-changed, environment)',
+    writes: true,
+    idempotency:
+      'Каждый вызов — новая проверка со своими логами в <state>/gates-at/<id>; база состояния, попытки и поручения не меняются',
+    args: [
+      {
+        ...state,
+        description: 'Каталог состояния: логи шагов; политика — из него, если нет --policy',
+      },
+      { ...policy, required: false },
+      {
+        name: '--sha',
+        value: 'text',
+        required: true,
+        description: 'Проверяемый коммит: SHA, ref или HEAD checkout репозитория',
+      },
+      {
+        name: '--repository',
+        value: 'id',
+        required: false,
+        description: 'ID репозитория политики; нужен, если их несколько',
+      },
+      {
+        name: '--human',
+        value: 'flag',
+        required: false,
+        description: 'Таблица шагов, класс отказа и совет для человека вместо JSON',
+      },
+    ],
+    refusals: ['CANCELLED', 'NOT_FOUND'],
+  },
 } as const satisfies Record<string, CliCommandContract>;
 export type CliCommand = keyof typeof cliCommands;
 
@@ -1423,6 +1456,52 @@ export const gatesDataSchema = z.strictObject({
    * Предупреждения пробы портов ресурсов: порт на всех адресах держит чужой
    * процесс, loopback свободен (например, AirPlay Receiver на macOS).
    */
+  warnings: z.array(z.string()).optional(),
+});
+
+/** Ответ `smoke`: шаги окружения на коммите без gates, их длительность и класс отказа. */
+export const smokeDataSchema = z.strictObject({
+  /** ID проверки (`DEVCONTOUR_RUN_ID` шагов, каталог логов). */
+  id: z.string().min(1).max(200),
+  repositoryId: idSchema,
+  sha: gitShaSchema,
+  /** Все шаги окружения прошли, teardown — тоже. */
+  passed: z.boolean(),
+  durationMs: z.number().int().nonnegative(),
+  /**
+   * Шаги в порядке исполнения: `dependencies`, `worktree`, `setup`, `ready`,
+   * `dependency-store`, `prepare`, `teardown` (стадия) и ID шага политики.
+   */
+  steps: z.array(
+    z.strictObject({
+      stage: z.string().min(1).max(200),
+      id: z.string().min(1).max(200),
+      status: z.enum(['passed', 'failed']),
+      durationMs: z.number().int().nonnegative(),
+      exitCode: z.number().int().optional(),
+      timedOut: z.boolean().optional(),
+      log: z.string().optional(),
+    }),
+  ),
+  /** Отказ окружения: класс, где, сообщение и что сделать. */
+  failure: z
+    .strictObject({
+      class: z.enum([
+        'port-busy',
+        'timeout',
+        'crash',
+        'missing-tool',
+        'cleanup',
+        'tree-changed',
+        'environment',
+      ]),
+      stage: z.string().optional(),
+      step: z.string().optional(),
+      message: z.string(),
+      advice: z.string(),
+    })
+    .optional(),
+  logs: z.string(),
   warnings: z.array(z.string()).optional(),
 });
 
@@ -1864,6 +1943,7 @@ export const cliDataSchemas = {
   'input-cancel': inputCloseDataSchema,
   'input-supersede': inputCloseDataSchema,
   gates: gatesDataSchema,
+  smoke: smokeDataSchema,
   version: versionDataSchema,
 } as const satisfies Record<CliCommand | 'version', z.ZodType>;
 

@@ -1282,6 +1282,36 @@ handoff` (`handoffPack`) больше не содержит попыток, пр
   метке `leaseRows` в базе.
 - Откат на 0.1.0-alpha.52 не требует действий с данными.
 
+### 0.1.0-alpha.54 (черновик): `harness smoke`, `lifecyclePreflight`, `CONNECTOR_VERSION_MISMATCH`
+
+Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`). Прежние
+команды и их данные не меняются.
+
+- **Команда `harness smoke`.** `smoke --state D [--policy F] --sha SHA|HEAD
+[--repository ID] [--human]` поднимает только окружение репозитория
+  (снимки зависимостей, рабочее дерево, lifecycle, хранилище зависимостей,
+  `prepare`, `teardown`) без gates и моделей и печатает каждый шаг с
+  длительностью. Отказ — данные `failure` (класс `port-busy`, `timeout`,
+  `crash`, `missing-tool`, `cleanup`, `tree-changed`, `environment`, совет)
+  и exit 4 (`LIFECYCLE_FAILED`). `--sha` и `--human` теперь принимает и она.
+  Библиотека: `smokeLifecycle`; `runGatesAt` получил необязательные
+  `lifecycleOnly` и `onStep` (по умолчанию прежнее поведение).
+- **Поле политики `lifecyclePreflight: "cached"`** (opt-in): перед `run` —
+  та же проверка на `targetRef` каждого репозитория с незавершёнными
+  поручениями, успех кэшируется в `<state>/preflight/` по (дерево базы,
+  `executionDigest`, версия harness). Отказ — `LIFECYCLE_FAILED` до ревью
+  плана и первой попытки. Поле не входит в `executionDigest`: включение не
+  требует нового согласования. Без поля поведение прежнее. Прежняя версия
+  пакета политику с этим полем не примет (строгая схема): перед откатом
+  уберите поле.
+- **Коды отказов.** Новые `LIFECYCLE_FAILED` и `CONNECTOR_VERSION_MISMATCH`
+  (класс `infrastructure`, exit 4). Relay v1 с `contractVersion` не 1 и
+  Relay-2 с sha256 binary не из `relay.build` теперь отказывают
+  `CONNECTOR_VERSION_MISMATCH` вместо `NOT_READY`; потребитель, который
+  разбирал код отказа `source-*`, должен принять новый код.
+- Откат на 0.1.0-alpha.53: убрать `lifecyclePreflight` из политики; каталог
+  `<state>/preflight/` прежняя версия не читает, его можно удалить.
+
 ## Перед обновлением
 
 1. **Остановить записывающих.** Запретить новые выдачи (`harness pause`),

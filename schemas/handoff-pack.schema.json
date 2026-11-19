@@ -198,6 +198,8 @@
             "REVIEW_PROTOCOL_INVALID",
             "SANDBOX_UNAVAILABLE",
             "GIT_FAILED",
+            "LIFECYCLE_FAILED",
+            "CONNECTOR_VERSION_MISMATCH",
             "STORAGE_FAILED",
             "DELIVERY_FAILED",
             "INTERNAL"
@@ -609,6 +611,8 @@
                     "REVIEW_PROTOCOL_INVALID",
                     "SANDBOX_UNAVAILABLE",
                     "GIT_FAILED",
+                    "LIFECYCLE_FAILED",
+                    "CONNECTOR_VERSION_MISMATCH",
                     "STORAGE_FAILED",
                     "DELIVERY_FAILED",
                     "INTERNAL"
@@ -767,6 +771,8 @@
               "REVIEW_PROTOCOL_INVALID",
               "SANDBOX_UNAVAILABLE",
               "GIT_FAILED",
+              "LIFECYCLE_FAILED",
+              "CONNECTOR_VERSION_MISMATCH",
               "STORAGE_FAILED",
               "DELIVERY_FAILED",
               "INTERNAL"
@@ -1042,6 +1048,8 @@
               "REVIEW_PROTOCOL_INVALID",
               "SANDBOX_UNAVAILABLE",
               "GIT_FAILED",
+              "LIFECYCLE_FAILED",
+              "CONNECTOR_VERSION_MISMATCH",
               "STORAGE_FAILED",
               "DELIVERY_FAILED",
               "INTERNAL"
@@ -1470,6 +1478,8 @@
             "REVIEW_PROTOCOL_INVALID",
             "SANDBOX_UNAVAILABLE",
             "GIT_FAILED",
+            "LIFECYCLE_FAILED",
+            "CONNECTOR_VERSION_MISMATCH",
             "STORAGE_FAILED",
             "DELIVERY_FAILED",
             "INTERNAL"
