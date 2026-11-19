@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import type { AcceptedTarget, ExecutionPolicy } from '../contracts/index.ts';
+import { RU, ruCount } from '../contracts/plural.ts';
 import { hostGitArgs } from '../environment/process.ts';
 
 /** Принятая работа: репозиторий и принятый SHA (`work.resultSha`, `result.shas.result`). */
@@ -18,11 +19,6 @@ const LINE_LIMIT = 500;
 const clip = (text: string) =>
   text.length > LINE_LIMIT ? text.slice(0, LINE_LIMIT - 1) + '…' : text;
 
-const ru = (n: number, one: string, few: string, many: string) => {
-  const d = n % 10;
-  const h = n % 100;
-  return `${n} ${d === 1 && h !== 11 ? one : d >= 2 && d <= 4 && (h < 12 || h > 14) ? few : many}`;
-};
 const en = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
 
 /** Строки «принято на X; после приёмки …» (RU и EN) по вычисленным полям. */
@@ -53,7 +49,7 @@ function rawLines(t: Omit<AcceptedTarget, 'line' | 'lineEn'>) {
       lineEn: `accepted at ${sha}; no commits since acceptance`,
     };
   return {
-    line: `принято на ${sha}; после приёмки ${ru(n, 'коммит', 'коммита', 'коммитов')} (${ru(f, 'файл', 'файла', 'файлов')}) — не проверены`,
+    line: `принято на ${sha}; после приёмки ${ruCount(n, RU.commit)} (${ruCount(f, RU.file)}) — не проверены`,
     lineEn: `accepted at ${sha}; ${en(n, 'commit')} (${en(f, 'file')}) since acceptance are not verified`,
   };
 }

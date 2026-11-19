@@ -188,7 +188,8 @@ for (const required of [
 // от их index.js, лежит в своём каталоге или в разрешённых листах contracts и
 // не импортирует node:* (Q3, K1). `contracts/review-loop.js` — лист счёта
 // раундов ревью без импортов (0.1.0-alpha.54); `contracts/operator-view-limits.js`
-// — версия и пределы представления оператора без импортов (0.1.0-alpha.55).
+// — версия и пределы представления оператора без импортов (0.1.0-alpha.55);
+// `contracts/plural.js` — русские формы при числе без импортов (0.1.0-alpha.56).
 const libDir = join(unpacked, 'package', 'lib');
 const browserGraph = (entry) => {
   const files = new Set();
@@ -202,7 +203,8 @@ const browserGraph = (entry) => {
       rel !== 'contracts/repair-policy.js' &&
       rel !== 'contracts/input-state.js' &&
       rel !== 'contracts/review-loop.js' &&
-      rel !== 'contracts/operator-view-limits.js'
+      rel !== 'contracts/operator-view-limits.js' &&
+      rel !== 'contracts/plural.js'
     )
       fail(`./${entry} достигает ` + rel);
     const text = readFileSync(file, 'utf8');

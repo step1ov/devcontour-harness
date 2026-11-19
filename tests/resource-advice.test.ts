@@ -57,7 +57,7 @@ test('LOW_RESOURCES: слабая машина и параллельность 2
   assert.equal(calls, 1);
   assert.deepEqual(codes(report.warnings), ['LOW_RESOURCES']);
   const [warning] = report.warnings!;
-  assert.match(warning!, /4 производительных ядер и 8 ГБ памяти/);
+  assert.match(warning!, /4 производительных ядра и 8 ГБ памяти/);
   assert.match(warning!, /параллельность политики 2/);
   // Политика вне проекта: сначала поля политики, затем команда для проекта
   // harness и init --lean для нового.

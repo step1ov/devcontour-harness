@@ -1,3 +1,4 @@
+import { RU, ruCount } from '../contracts/plural.ts';
 import { errorCodes, type ErrorCode } from '../contracts/errors.ts';
 import { repairPolicy, repairRepeats } from '../contracts/repair-policy.ts';
 import { CLIP_DIAGNOSTIC, clipText } from './clip.ts';
@@ -398,7 +399,7 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
   const kind: FailureKind = work.failureKind ?? 'unknown';
   // Отказ до начала работы — фаза preflight, какой бы ни была фаза попытки.
   const phase = work.preflight ? 'preflight' : (input.phase ?? failurePhase[kind]);
-  const exhausted = `Исчерпано ${work.attempt} из ${maxAttempts} попыток; сброс — решение человека.`;
+  const exhausted = `Исчерпано ${work.attempt} из ${ruCount(maxAttempts, RU.attemptGen)}; сброс — решение человека.`;
   if (work.status === 'done')
     return {
       code: 'NOT_READY',

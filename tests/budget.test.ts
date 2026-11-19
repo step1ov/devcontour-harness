@@ -281,7 +281,7 @@ test('B03: вызов умершего процесса закрывается �
     assert.equal(all.find((r) => r.id === 'crashed')!.durationUnknown, true);
     const s = status(f.engine, { kind: 'total' })!;
     assert.equal(s.state, 'undetermined');
-    assert.match(s.reason!, /у 1 вызовов неизвестна стоимость/);
+    assert.match(s.reason!, /у 1 вызова неизвестна стоимость/);
   } finally {
     owner.kill();
     f.close();
@@ -445,7 +445,7 @@ test('T25: попытки без учёта вызовов, вызовы о гр
     });
     const legacy = status(f.engine, { kind: 'work', id: 'a' })!;
     assert.equal(legacy.state, 'undetermined');
-    assert.match(legacy.reason!, /у 1 попыток вызовы не записаны/);
+    assert.match(legacy.reason!, /у 1 попытки вызовы не записаны/);
     const lenient = f.reopen({ work: { usd: 5 }, group: { usd: 5 }, onUnknown: 'continue' });
     // Идущий вызов не останавливает параллельный вызов той же области.
     let inner: unknown;

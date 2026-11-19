@@ -1,3 +1,4 @@
+import { RU, ruCount } from '../../contracts/plural.ts';
 import {
   sha256,
   type AttemptState,
@@ -172,7 +173,10 @@ export class HistoryRecorder {
         };
       }
       if (found.length > 1)
-        return { state: 'ambiguous', reason: `сессия с маркером найдена ${found.length} раз` };
+        return {
+          state: 'ambiguous',
+          reason: `сессия с маркером найдена ${ruCount(found.length, RU.time)}`,
+        };
       if (parent && parent.revision === ifRevision)
         return { state: 'absent', reason: 'ревизия корня не изменилась, fork нет' };
       if (parent) return { state: 'foreign', reason: 'ревизия корня изменилась без нашего fork' };
@@ -193,7 +197,10 @@ export class HistoryRecorder {
           result: { checkpointId: mine[0]!.id, revision: session.revision },
         };
       if (mine.length > 1)
-        return { state: 'ambiguous', reason: `checkpoint с маркером найден ${mine.length} раз` };
+        return {
+          state: 'ambiguous',
+          reason: `checkpoint с маркером найден ${ruCount(mine.length, RU.time)}`,
+        };
     } else {
       const target =
         purpose === 'attach'

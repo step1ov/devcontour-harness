@@ -1,3 +1,4 @@
+import { ruCount } from '../contracts/plural.ts';
 import { execFileSync } from 'node:child_process';
 import { availableParallelism, cpus, loadavg, totalmem } from 'node:os';
 
@@ -15,7 +16,7 @@ export interface HostLoad {
 }
 /** Нагрузка хоста словами — свидетельство в тексте отказа. */
 export const loadText = (load: HostLoad) =>
-  `нагрузка хоста ${Math.round(load.load1 * 10) / 10} на ${load.cpus} ядер`;
+  `нагрузка хоста ${Math.round(load.load1 * 10) / 10} на ${ruCount(load.cpus, ['ядро', 'ядра', 'ядер'])}`;
 
 /** Ресурсы машины: память, производительные ядра и, на macOS, тепловое ограничение. */
 export interface HostResources {

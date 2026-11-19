@@ -321,7 +321,7 @@ test('gateTimeoutFloorMs поднимает короткий объявленн�
   assert.equal(bare.evidence.passed, false, 'без нижней границы — отказ по объявленному пределу');
   assert.match(
     bare.failure?.message ?? '',
-    /превысила timeout: предел 0\.3 с, нагрузка хоста 3 на 4 ядер$/,
+    /превысила timeout: предел 0\.3 с, нагрузка хоста 3 на 4 ядра$/,
   );
   // Таймаут самого gate — класс `gate`, нагрузка ниже порога повтора.
   assert.ok(bare.failure instanceof GateTimeout);

@@ -1,3 +1,4 @@
+import { ruCount } from '../contracts/plural.ts';
 import { lstatSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import type { ExecutionPolicy } from '../contracts/index.ts';
@@ -71,8 +72,12 @@ export function resourceWarnings(
   if (low && policy.concurrency > 1) {
     const cores =
       resources.coresSource === 'perflevel0'
-        ? `${resources.performanceCores} производительных ядер`
-        : `${resources.performanceCores} ядер`;
+        ? ruCount(resources.performanceCores, [
+            'производительное ядро',
+            'производительных ядра',
+            'производительных ядер',
+          ])
+        : ruCount(resources.performanceCores, ['ядро', 'ядра', 'ядер']);
     const thermal =
       resources.cpuSpeedLimit !== undefined && resources.cpuSpeedLimit < 100
         ? `; сейчас macOS ограничивает частоту процессора до ${resources.cpuSpeedLimit}% (pmset -g therm)`

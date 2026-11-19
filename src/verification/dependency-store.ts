@@ -1,3 +1,4 @@
+import { RU, ruCount } from '../contracts/plural.ts';
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import {
@@ -756,7 +757,7 @@ async function buildSeed(s: Store, key: string, lock: string, lockSha256: string
       });
     if (built.files.size > storeTree.maxFiles)
       throw new BuildFailed(
-        `seed из ${built.files.size} файлов больше предела ${storeTree.maxFiles}`,
+        `seed из ${ruCount(built.files.size, RU.fileGen)} больше предела ${storeTree.maxFiles}`,
         true,
         { untouched: true },
       );

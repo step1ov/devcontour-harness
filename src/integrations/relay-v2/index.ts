@@ -8,6 +8,7 @@
  * workspace); cwd процесса на выбор проекта не влияет. Мутации выполняются
  * один раз, без повторов; перед каждой сверяется projectId хранилища.
  */
+import { RU, ruCount } from '../../contracts/plural.ts';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { isAbsolute } from 'node:path';
@@ -379,7 +380,7 @@ export class RelayV2Transport implements RelayTransport {
     throw this.fail(
       'conflict',
       operation,
-      `данные менялись во время чтения ${restarts + 1} раз подряд`,
+      `данные менялись во время чтения ${ruCount(restarts + 1, RU.time)} подряд`,
       {
         code: 'SNAPSHOT_CONFLICT',
         mutation: false,
@@ -513,7 +514,7 @@ export class RelayV2Transport implements RelayTransport {
       throw this.fail(
         'refused',
         op,
-        `doctor check: ${doctor.issues.length} нарушений целостности`,
+        `doctor check: ${ruCount(doctor.issues.length, RU.violation)} целостности`,
         { code: 'INTEGRITY_INVALID', mutation: false },
       );
 

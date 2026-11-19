@@ -1,3 +1,4 @@
+import { RU, ruCount } from '../contracts/plural.ts';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -416,7 +417,7 @@ export function applyDispositions(
     if (escalated.has(f.id) && d.by !== 'operator')
       throw new HarnessError(
         'INPUT_REQUIRED',
-        `Находка ${d.finding} открыта ${openRounds(f, lastRound)} раундов подряд: решение за оператором (--actor operator)`,
+        `Находка ${d.finding} открыта ${ruCount(openRounds(f, lastRound), RU.round)} подряд: решение за оператором (--actor operator)`,
         [{ path: ['dispositions', d.finding], message: 'operator-decision' }],
       );
     if (d.decision === 'continue' && !escalated.has(f.id))
@@ -466,7 +467,7 @@ function escalationError(
     `${q.question} Варианты: ${q.options.map((o) => `${o.id} — ${o.label}`).join('; ')}. Ответ: ${q.answer.replace('ID — в findings[]', 'ID — в issues[].path')}`,
     waiting.map((f) => ({
       path: ['findings', f.id],
-      message: `открыта ${openRounds(f, lastRound)} раундов: ${f.message.slice(0, 300)}`,
+      message: `открыта ${ruCount(openRounds(f, lastRound), RU.round)}: ${f.message.slice(0, 300)}`,
     })),
   );
 }

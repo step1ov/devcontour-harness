@@ -13,6 +13,7 @@ import type {
   ExecutionView,
   WorkState,
 } from '../src/contracts/index.ts';
+import { RU, ruCount } from '../src/contracts/plural.ts';
 import { TaskFailure } from '../src/engine/failure.ts';
 import { callRecords, liveCall, usageTotals } from '../src/engine/usage.ts';
 
@@ -226,12 +227,14 @@ export function budgetStatus(
   const settledUnknown = spent.unknownCalls - spent.liveCalls;
   const unknown = [
     ...(limit.usd !== undefined && settledUnknown
-      ? [`у ${settledUnknown} вызовов неизвестна стоимость`]
+      ? [`у ${ruCount(settledUnknown, RU.callGen)} неизвестна стоимость`]
       : []),
     ...(limit.timeMs !== undefined && spent.unknownDurationCalls
-      ? [`у ${spent.unknownDurationCalls} вызовов неизвестно время`]
+      ? [`у ${ruCount(spent.unknownDurationCalls, RU.callGen)} неизвестно время`]
       : []),
-    ...(spent.uncoveredRuns ? [`у ${spent.uncoveredRuns} попыток вызовы не записаны`] : []),
+    ...(spent.uncoveredRuns
+      ? [`у ${ruCount(spent.uncoveredRuns, RU.attemptGen)} вызовы не записаны`]
+      : []),
   ];
   if (unknown.length)
     return {

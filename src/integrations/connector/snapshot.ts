@@ -1,3 +1,4 @@
+import { ruCount } from '../../contracts/plural.ts';
 import { existsSync, statSync } from 'node:fs';
 import {
   API_VERSION,
@@ -261,7 +262,7 @@ export async function readStable(
   }
   throw new HarnessError(
     'NOT_READY',
-    `Снимок не согласован: данные менялись во время чтения (${rounds} чтений, предел rereads=${rereads}); граф не собирается из разных редакций`,
+    `Снимок не согласован: данные менялись во время чтения (${ruCount(rounds, ['чтение', 'чтения', 'чтений'])}, предел rereads=${rereads}); граф не собирается из разных редакций`,
   );
 }
 
@@ -465,7 +466,7 @@ export function buildSnapshot(input: {
       if (found.length !== 1)
         problem(
           'DOCUMENT_MISSING',
-          `Обязательный документ ${needle}: найдено ${found.length} связанных документов`,
+          `Обязательный документ ${needle}: найдено ${ruCount(found.length, ['связанный документ', 'связанных документа', 'связанных документов'])}`,
         );
       else required.add(found[0]!.id);
     }
