@@ -1982,6 +1982,36 @@
                   "vendor"
                 ],
                 "additionalProperties": false
+              },
+              "review": {
+                "type": "object",
+                "properties": {
+                  "inspection": {
+                    "type": "string",
+                    "enum": [
+                      "commands",
+                      "diff-only",
+                      "unknown"
+                    ]
+                  },
+                  "commands": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "protocol": {
+                    "type": "string",
+                    "enum": [
+                      "valid",
+                      "invalid",
+                      "unsafe"
+                    ]
+                  }
+                },
+                "required": [
+                  "inspection"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [

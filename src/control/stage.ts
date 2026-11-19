@@ -232,7 +232,8 @@ const pipelineText: Record<PipelineStage, { ru: string; en: string }> = {
   integration: { ru: 'интеграция', en: 'integration' },
 };
 
-const actionText: Record<NextAction, { ru: string; en: string }> = {
+/** Действие диагноза простыми словами (строка этапа, блокировки). */
+export const actionText: Record<NextAction, { ru: string; en: string }> = {
   none: { ru: 'ничего', en: 'nothing' },
   wait: { ru: 'ждать', en: 'wait' },
   'review-plan': { ru: 'согласовать план', en: 'approve the plan' },

@@ -19,7 +19,7 @@ import { MAX_NEUTRAL_FAILURES } from '../contracts/repair-policy.ts';
 import { nextRunControl, repairJobOf, stopInputsIn, type StopSource } from '../explain/state.ts';
 import { explainStop } from '../projections/stop.ts';
 import { workStageOf, type StageNeeds } from './stage.ts';
-import { plainBlocker } from './blocker-plain.ts';
+import { blockerCodeText, plainBlocker, type BlockerCode } from './blocker-plain.ts';
 import { verificationOf } from '../report/verification.ts';
 import {
   CLIP_DIAGNOSTIC,
@@ -175,7 +175,18 @@ export function statusOf(
             view.input && w.status !== 'done' && w.status !== 'cancelled' ? view.input : undefined;
           const active = w.activeRunId ? v.attempt(w.activeRunId) : undefined;
           // Причина простыми словами и кто её снимает — рядом с кодом и сообщением.
-          const plainContext = { control: v.control(), approvalMode: source.policy.approvalMode };
+          const needs =
+            needsOf?.(w) ??
+            (input?.state === 'awaiting-answer'
+              ? { actor: 'user' as const, action: 'answer-input' as const }
+              : undefined);
+          const plainContext = {
+            control: v.control(),
+            approvalMode: source.policy.approvalMode,
+            work: w,
+            statusOf: (id: string) => v.work(id)?.status,
+            ...(needs ? { needs } : {}),
+          };
           const blockers = raw.map((b) => ({ ...b, ...plainBlocker(b, plainContext) }));
           // Строка этапа называет блокировку, которую снимает человек, раньше
           // хода ведущего и harness (порядок `blockers` прежний).
@@ -197,12 +208,7 @@ export function statusOf(
               maxAttempts: source.policy.maxAttempts,
               ...(attemptSummary.lastFailure ? { lastFailure: attemptSummary.lastFailure } : {}),
               ...(first ? { blockedBy: first } : {}),
-              ...((needs) => (needs ? { needs } : {}))(
-                needsOf?.(w) ??
-                  (input?.state === 'awaiting-answer'
-                    ? { actor: 'user' as const, action: 'answer-input' as const }
-                    : undefined),
-              ),
+              ...(needs ? { needs } : {}),
               now,
             }),
             ...(verification ? { verification } : {}),
@@ -365,7 +371,11 @@ export function statusText(data: z.output<typeof statusDataSchema>): string {
         `  не выдаётся: ${[...w.blockers]
           .sort((a, b) => actorRank(a.actor) - actorRank(b.actor))
           .map((b) =>
-            b.plain ? `${b.plain}${b.actor ? ` (${actorText[b.actor]})` : ''}` : b.message,
+            // Без простого текста (ответ другой версии) — общий текст кода,
+            // а не сообщение: в нём может быть текст хоста.
+            b.plain
+              ? `${b.plain}${b.actor ? ` (${actorText[b.actor]})` : ''}`
+              : (blockerCodeText[b.code as BlockerCode]?.ru ?? b.code),
           )
           .join('; ')} [коды: ${w.blockers.map((b) => b.code).join(', ')}]`,
       );

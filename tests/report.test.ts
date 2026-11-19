@@ -496,6 +496,49 @@ test('report: пределы — 50 строк поручений, 50 ссыло
   assert.ok(Buffer.byteLength(big.md) <= REPORT_LIMITS.htmlBytes);
 });
 
+test('report: проверка поручений в пределе байт — длинные ID gates с экранированием не ломают JSON ≤ 512 КБ', () => {
+  const input = reportFixture();
+  const template = input.attempts.find((a) => a.id === 'run-gate-2')!;
+  const ok = input.attempts.find((a) => a.id === 'run-gate-3')!;
+  const base = input.works.find((w) => w.id === 'gate')!;
+  const works: WorkState[] = [];
+  const attempts: AttemptState[] = [];
+  // Каждый символ ID экранируется в JSON шестью байтами (\u0001).
+  const gate = (k: number) => '\u0001'.repeat(190) + `-${k}`;
+  for (let i = 0; i < 60; i++) {
+    const id = `work-${String(i).padStart(3, '0')}`;
+    works.push({ ...base, id, order: { ...base.order, id, title: 'T'.repeat(180) } });
+    const evidence = Array.from({ length: 8 }, (_, k) => ({
+      ...template.evidence[0]!,
+      id: `${id}-e${k}`,
+      runId: `${id}-1`,
+      gate: gate(k),
+      passed: true,
+    }));
+    attempts.push({
+      ...ok,
+      id: `${id}-1`,
+      workId: id,
+      token: tokenOf(`${id}-1`),
+      requiredGates: Array.from({ length: 12 }, (_, k) => gate(k)),
+      evidence,
+    });
+  }
+  const big = render({ works, attempts });
+  valueReportSchema.parse(big.report);
+  assert.ok(Buffer.byteLength(JSON.stringify(big.report)) <= REPORT_LIMITS.jsonBytes);
+  const rows = big.report.works.rows;
+  const withRows = rows.filter((r) => r.verification?.rows.length);
+  const lean = rows.filter((r) => r.verification && !r.verification.rows.length);
+  assert.ok(withRows.length > 0, 'первые поручения — со строками');
+  assert.ok(
+    lean.length + rows.filter((r) => !r.verification).length > 0,
+    'сверх предела — без строк',
+  );
+  for (const r of lean) assert.ok(r.verification!.rowsTruncated! > 0, 'число строк названо');
+  assert.ok(Buffer.byteLength(big.html) <= REPORT_LIMITS.htmlBytes);
+});
+
 test('report: ISO-неделя UTC с понедельника, включая границу года', () => {
   assert.equal(isoWeekOf(Date.parse('2026-10-05T00:00:00Z')), '2026-W41');
   assert.equal(isoWeekOf(Date.parse('2026-10-04T23:59:59Z')), '2026-W40');

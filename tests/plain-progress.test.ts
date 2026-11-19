@@ -19,7 +19,12 @@ import {
   type ControlState,
 } from '../src/contracts/index.ts';
 import { statusOf, statusText } from '../src/control/status.ts';
-import { blockerCodeText, plainBlocker, type BlockerCode } from '../src/control/blocker-plain.ts';
+import {
+  blockerCodeText,
+  plainBlocker,
+  type BlockerCode,
+  type BlockerContext,
+} from '../src/control/blocker-plain.ts';
 import { stageLine, workStageOf } from '../src/control/stage.ts';
 import { Harness } from '../src/control/harness.ts';
 import { explainText } from '../src/explain/diagnose.ts';
@@ -212,9 +217,16 @@ test('P1-c: у каждого кода Engine.blockers есть простой �
 });
 
 test('P1-c: разновидности блокировок — зависимость, черновик, согласование, вопрос, пауза очереди по причине', () => {
-  const ctx = {
-    control: { paused: false } as ControlState,
-    approvalMode: 'agent' as 'agent' | 'operator',
+  const work = {
+    order: { dependsOn: ['a', 'f', 'x'] },
+    hold: { operation: 'base-move', reason: 'x' },
+  };
+  const statuses: Record<string, string> = { a: 'ready', f: 'failed', x: 'cancelled' };
+  const ctx: BlockerContext = {
+    control: { paused: false },
+    approvalMode: 'agent',
+    work: work,
+    statusOf: (id) => statuses[id],
   };
   const of = (code: BlockerCode, message: string, c = ctx) => plainBlocker({ code, message }, c);
   assert.deepEqual(of('NOT_READY', 'Ждёт a'), {
@@ -260,6 +272,73 @@ test('P1-c: разновидности блокировок — зависимо
   );
   // Сообщение хоста — общий текст кода, без пересказа сообщения.
   assert.equal(of('NOT_READY', 'Продуктовое условие X').plain, blockerCodeText.NOT_READY.ru);
+  // Сообщение хоста под шаблон движка: в текст попадает только то, что
+  // подтверждает состояние поручения.
+  assert.equal(of('NOT_READY', 'Ждёт token=sk-secret').plain, 'ждёт другой задачи');
+  assert.equal(
+    of('NOT_READY', 'Удержано операцией token=sk-secret; npm run private-gate').plain,
+    'удержано операцией — ждёт её конца',
+  );
+  // Зависимость остановлена или отменена — нужен ход ведущего, а не ожидание.
+  assert.deepEqual(
+    [of('NOT_READY', 'Ждёт f').actor, of('NOT_READY', 'Ждёт x').actor],
+    ['lead', 'lead'],
+  );
+  assert.match(of('NOT_READY', 'Ждёт x').plain, /^зависимость x отменена/);
+  // Остановленное — кто и что дальше по диагнозу explain.
+  assert.deepEqual(
+    of('NOT_READY', 'Статус failed', {
+      ...ctx,
+      needs: { actor: 'user', action: 'user-decision' },
+    }),
+    {
+      plain: 'остановлено после отказа — дальше: принять решение',
+      plainEn: 'stopped after a failure — next: make a decision',
+      actor: 'user',
+    },
+  );
+  assert.equal(
+    of('NOT_READY', 'Разбор свойства p: x', {
+      ...ctx,
+      work: { ...work, recovery: { status: 'awaiting-user' } } as unknown as BlockerContext['work'],
+    }).actor,
+    'user',
+  );
+  assert.match(
+    of('APPROVAL_STALE', 'Процесс работает не с применённой политикой (x); перезапустите его')
+      .plain,
+    /перезапустите его/,
+  );
+  assert.match(
+    of('BUDGET_EXHAUSTED', 'Бюджет work a не определён: у 2 вызовов неизвестна стоимость; x').plain,
+    /^бюджет не определён: .*поднятие предела не поможет/,
+  );
+  assert.equal(
+    of('BUDGET_EXHAUSTED', 'Бюджет work a исчерпан: предел $5; x').plain,
+    'бюджет исчерпан — нужно ваше решение поднять бюджет',
+  );
+});
+
+test('P1-c: status --human без простого текста (ответ другой версии) — общий текст кода, не сообщение', () => {
+  const text = statusText({
+    stateVersion: 1,
+    control: { paused: false },
+    graphs: [],
+    works: [
+      {
+        id: 'w',
+        graphId: 'g',
+        status: 'ready',
+        attempt: 0,
+        blockers: [{ code: 'NOT_READY', message: 'host token=sk-secret' }],
+      },
+    ],
+  } as never);
+  assert.ok(
+    text.includes(`  не выдаётся: ${blockerCodeText.NOT_READY.ru} [коды: NOT_READY]\n`),
+    text,
+  );
+  assert.ok(!text.includes('sk-secret'));
 });
 
 test('P1-c: status — blockers[] с plain и actor (прежние поля на месте), queued «просто ждёт очереди», --human — простым текстом', () => {
@@ -299,40 +378,56 @@ test('P1-c: status — blockers[] с plain и actor (прежние поля н�
   );
 });
 
-test('P1-d: строки проверки — запущено harness, повтор, неприменимо, взято с кандидата, ревью читал агент, не запускался', () => {
-  const at = '2026-01-01T03:00:00.000+03:00';
-  const rec = (patch: Record<string, unknown>) => ({
-    id: String(patch.gate) + String(patch.phase),
-    runId: 'r1',
-    kind: 'test',
-    phase: 'candidate',
-    sha: sha('a'),
-    passed: true,
-    createdAt: at,
-    command: ['npm', 'run', 'secret-gate-command'],
-    exitCode: 0,
-    log: '',
-    digest: digestOf('x'),
-    summary: '',
-    ...patch,
-  });
+const record = (patch: Record<string, unknown>) => ({
+  id: `${String(patch.gate)}-${typeof patch.phase === 'string' ? patch.phase : 'candidate'}`,
+  runId: 'r1',
+  kind: 'test',
+  phase: 'candidate',
+  sha: sha('a'),
+  passed: true,
+  createdAt: '2026-01-01T03:00:00.000+03:00',
+  command: ['npm', 'run', 'secret-gate-command'],
+  exitCode: 0,
+  log: '',
+  digest: digestOf('x'),
+  summary: '',
+  ...patch,
+});
+
+test('P1-d: строки проверки — запущено harness, повтор, неприменимо, взято с кандидата, ревью, не запускался', () => {
   const attempt = {
     id: 'r1',
     status: 'succeeded',
     reviewer: 'codex',
+    candidateSha: sha('a'),
+    integrationSha: sha('b'),
     requiredGates: ['lint', 'unit', 'e2e', 'smoke'],
     evidence: [
-      rec({ gate: 'lint' }),
-      rec({ gate: 'unit', passed: false }),
-      rec({ gate: 'unit', recheck: { of: 'unitcandidate', outcome: 'flaky' } }),
-      rec({ gate: 'e2e', kind: 'not-applicable', passed: false }),
-      rec({ gate: 'independent-review', kind: 'review' }),
-      rec({
+      // Запись прежнего SHA кандидата — не проверка текущего.
+      record({ gate: 'smoke', sha: sha('9') }),
+      record({ gate: 'lint' }),
+      record({ gate: 'unit', passed: false }),
+      record({ gate: 'unit', recheck: { of: 'unitcandidate', outcome: 'flaky' } }),
+      record({ gate: 'e2e', kind: 'not-applicable', passed: false }),
+      record({
+        gate: 'independent-review',
+        kind: 'review',
+        inspection: { mode: 'diff-only', source: 'codex-events', commands: [], reason: null },
+      }),
+      record({
         gate: 'lint',
         phase: 'integration',
+        sha: sha('b'),
         reusedEvidence: { evidenceId: 'x', phase: 'candidate', sha: sha('a'), tree: sha('c') },
       }),
-      rec({ gate: 'unit', phase: 'integration', passed: false }),
+      record({ gate: 'unit', phase: 'integration', sha: sha('b'), passed: false }),
+      record({
+        gate: 'e2e',
+        phase: 'integration',
+        sha: sha('b'),
+        kind: 'not-applicable',
+        passed: false,
+      }),
     ],
   } as unknown as AttemptState;
   const rows = verificationRows(attempt);
@@ -345,19 +440,22 @@ test('P1-d: строки проверки — запущено harness, повт
       ['candidate', 'independent-review', 'passed', 'read-by-reviewer'],
       ['integration', 'lint', 'reused', 'reused-evidence'],
       ['integration', 'unit', 'failed', 'executed-by-harness'],
+      ['integration', 'e2e', 'not-applicable', 'not-run'],
       ['candidate', 'smoke', 'skipped', 'not-run'],
+      ['integration', 'smoke', 'skipped', 'not-run'],
     ],
   );
   assert.equal(rows[0]!.at, '2026-01-01T00:00:00.000Z', 'момент — в UTC');
   assert.deepEqual(rows[3]!.reviewer, { runtime: 'codex', vendor: vendorOf('codex') });
+  assert.deepEqual(rows[3]!.review, { inspection: 'diff-only' });
   const { line, lineEn } = verificationLines(rows);
   assert.equal(
     line,
-    'Проверено harness (запущено): ничего; не прошло (запущено harness): unit; взято из записи кандидата (то же дерево): lint; ревью: прочитал агент openai (codex), только diff, ничего не запускал — одобрил; не проверялось: e2e (изменения его не задели), smoke (не запускался)',
+    'Проверено harness (запущено): lint; на интеграции взято из записи кандидата (то же дерево): lint; не прошло (запущено harness): unit; ревью: прочитал агент openai (codex), только diff, ничего не запускал — одобрил; не проверялось: e2e (изменения его не задели), smoke (не запускался)',
   );
   assert.equal(
     lineEn,
-    'Checked by harness (executed): nothing; failed (executed by harness): unit; reused from the candidate record (same tree): lint; review: read by agent openai (codex), diff only, ran nothing — approved; not covered: e2e (not touched by the changes), smoke (not run)',
+    'Checked by harness (executed): lint; at integration reused from the candidate record (same tree): lint; failed (executed by harness): unit; review: read by agent openai (codex), diff only, ran nothing — approved; not covered: e2e (not touched by the changes), smoke (not run)',
   );
   // Только ID gates: команды в ответ не попадают.
   assert.ok(!JSON.stringify({ rows, line, lineEn }).includes('secret-gate-command'));
@@ -370,6 +468,59 @@ test('P1-d: строки проверки — запущено harness, повт
     verificationOf({ status: 'running' }, [{ ...attempt, status: 'active', evidence: [] }]),
     undefined,
   );
+});
+
+test('P1-d: песочница не запустила gate — not-run; ревью с командами и без вердикта; потребитель без записи; интеграция не начата', () => {
+  const attempt = {
+    id: 'r1',
+    status: 'failed',
+    reviewer: 'claude',
+    requiredGates: ['unit', 'lint'],
+    consumers: [{ repositoryId: 'web', gates: ['e2e'] }],
+    evidence: [
+      record({ gate: 'unit', passed: false, summary: 'песочница ОС не запустила команду' }),
+      record({ gate: 'lint' }),
+      record({
+        gate: 'independent-review',
+        kind: 'review',
+        passed: false,
+        inspection: {
+          mode: 'commands',
+          source: 'controller-probes',
+          commands: [{ command: 'npm test', exitCode: 0, output: '' }],
+          total: 2,
+          reason: null,
+        },
+        reviewRound: { protocol: 'invalid' },
+      }),
+    ],
+  } as unknown as AttemptState;
+  const rows = verificationRows(attempt);
+  assert.deepEqual(
+    rows.map((r) => [r.phase, r.consumer ?? '', r.gate, r.result, r.how]),
+    [
+      ['candidate', '', 'unit', 'failed', 'not-run'],
+      ['candidate', '', 'lint', 'passed', 'executed-by-harness'],
+      ['candidate', '', 'independent-review', 'failed', 'read-by-reviewer'],
+      // До интеграции попытка не дошла: строк интеграции своих gates нет.
+      ['integration', 'web', 'e2e', 'skipped', 'not-run'],
+    ],
+  );
+  assert.deepEqual(rows[2]!.review, { inspection: 'commands', commands: 2, protocol: 'invalid' });
+  const { line } = verificationLines(rows);
+  assert.equal(
+    line,
+    'Проверено harness (запущено): lint; ревью: прочитал агент anthropic (claude) и запускал команды: 2 (по записи controller) — ответ не по протоколу — вердикта нет; не проверялось: unit (не запустилась — отказ среды), e2e@web (не запускался)',
+  );
+  assert.ok(!line.includes('npm test'), 'команды reviewer не выводятся');
+  // Запись ревью без сведений о командах — «не записано», а не «ничего не запускал».
+  const unknown = verificationLines(
+    verificationRows({
+      ...attempt,
+      evidence: [record({ gate: 'independent-review', kind: 'review' })],
+    } as unknown as AttemptState),
+  ).line;
+  assert.match(unknown, /прочитал агент anthropic \(claude\), запуск команд не записан — одобрил/);
 });
 
 test('P1-d: status, explain, result и report называют, что проверено и как; текст для человека без голого «проверено»', () => {
@@ -393,7 +544,7 @@ test('P1-d: status, explain, result и report называют, что пров�
   const reviewer = env.engine.read((x) => x.attempt(a.id))!.reviewer;
   assert.equal(
     v.line,
-    `Проверено harness (запущено): unit; ревью: прочитал агент ${vendorOf(reviewer)} (${reviewer}), только diff, ничего не запускал — одобрил`,
+    `Проверено harness (запущено): unit; ревью: прочитал агент ${vendorOf(reviewer)} (${reviewer}), запуск команд не записан — одобрил`,
   );
   const other = data.works.find((w) => w.id !== a.workId)!;
   assert.equal(other.verification, undefined, 'без попыток — проверки нет');

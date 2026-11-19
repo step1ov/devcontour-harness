@@ -737,6 +737,9 @@
               "reviewer": {
                 "runtime": "codex",
                 "vendor": "openai"
+              },
+              "review": {
+                "inspection": "unknown"
               }
             },
             {
@@ -746,10 +749,17 @@
               "at": "2026-11-03T10:40:00.000Z",
               "result": "failed",
               "how": "executed-by-harness"
+            },
+            {
+              "gate": "unit",
+              "kind": "gate",
+              "phase": "integration",
+              "result": "skipped",
+              "how": "not-run"
             }
           ],
-          "line": "Проверено harness (запущено): unit; не прошло (запущено harness): install; ревью: прочитал агент openai (codex), только diff, ничего не запускал — одобрил",
-          "lineEn": "Checked by harness (executed): unit; failed (executed by harness): install; review: read by agent openai (codex), diff only, ran nothing — approved"
+          "line": "Проверено harness (запущено): unit; на интеграции не запускались: unit; не прошло (запущено harness): install; ревью: прочитал агент openai (codex), запуск команд не записан — одобрил",
+          "lineEn": "Checked by harness (executed): unit; not run at integration: unit; failed (executed by harness): install; review: read by agent openai (codex), command runs not recorded — approved"
         }
       },
       {
@@ -798,6 +808,9 @@
               "reviewer": {
                 "runtime": "codex",
                 "vendor": "openai"
+              },
+              "review": {
+                "inspection": "unknown"
               }
             },
             {
@@ -817,8 +830,8 @@
               "how": "executed-by-harness"
             }
           ],
-          "line": "Проверено harness (запущено): install, unit; ревью: прочитал агент openai (codex), только diff, ничего не запускал — одобрил",
-          "lineEn": "Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved"
+          "line": "Проверено harness (запущено): install, unit; ревью: прочитал агент openai (codex), запуск команд не записан — одобрил",
+          "lineEn": "Checked by harness (executed): install, unit; review: read by agent openai (codex), command runs not recorded — approved"
         }
       },
       {
@@ -867,6 +880,9 @@
               "reviewer": {
                 "runtime": "codex",
                 "vendor": "openai"
+              },
+              "review": {
+                "inspection": "unknown"
               }
             },
             {
@@ -886,8 +902,8 @@
               "how": "executed-by-harness"
             }
           ],
-          "line": "Проверено harness (запущено): install, unit; ревью: прочитал агент openai (codex), только diff, ничего не запускал — одобрил",
-          "lineEn": "Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved"
+          "line": "Проверено harness (запущено): install, unit; ревью: прочитал агент openai (codex), запуск команд не записан — одобрил",
+          "lineEn": "Checked by harness (executed): install, unit; review: read by agent openai (codex), command runs not recorded — approved"
         }
       },
       {
@@ -936,6 +952,9 @@
               "reviewer": {
                 "runtime": "codex",
                 "vendor": "openai"
+              },
+              "review": {
+                "inspection": "unknown"
               }
             },
             {
@@ -955,8 +974,8 @@
               "how": "executed-by-harness"
             }
           ],
-          "line": "Проверено harness (запущено): install, unit; ревью: прочитал агент openai (codex), только diff, ничего не запускал — одобрил",
-          "lineEn": "Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved"
+          "line": "Проверено harness (запущено): install, unit; ревью: прочитал агент openai (codex), запуск команд не записан — одобрил",
+          "lineEn": "Checked by harness (executed): install, unit; review: read by agent openai (codex), command runs not recorded — approved"
         }
       },
       {
@@ -1000,6 +1019,9 @@
               "reviewer": {
                 "runtime": "codex",
                 "vendor": "openai"
+              },
+              "review": {
+                "inspection": "unknown"
               }
             },
             {
@@ -1019,8 +1041,8 @@
               "how": "executed-by-harness"
             }
           ],
-          "line": "Проверено harness (запущено): install, unit; ревью: прочитал агент openai (codex), только diff, ничего не запускал — одобрил",
-          "lineEn": "Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved"
+          "line": "Проверено harness (запущено): install, unit; ревью: прочитал агент openai (codex), запуск команд не записан — одобрил",
+          "lineEn": "Checked by harness (executed): install, unit; review: read by agent openai (codex), command runs not recorded — approved"
         }
       },
       {
@@ -1069,6 +1091,9 @@
               "reviewer": {
                 "runtime": "codex",
                 "vendor": "openai"
+              },
+              "review": {
+                "inspection": "unknown"
               }
             },
             {
@@ -1088,8 +1113,8 @@
               "how": "executed-by-harness"
             }
           ],
-          "line": "Проверено harness (запущено): install, unit; ревью: прочитал агент openai (codex), только diff, ничего не запускал — одобрил",
-          "lineEn": "Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved"
+          "line": "Проверено harness (запущено): install, unit; ревью: прочитал агент openai (codex), запуск команд не записан — одобрил",
+          "lineEn": "Checked by harness (executed): install, unit; review: read by agent openai (codex), command runs not recorded — approved"
         }
       }
     ],

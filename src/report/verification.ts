@@ -24,6 +24,12 @@ export const verificationRowLimit = 40;
 export const verificationReportRowLimit = 6;
 /** Предел сводной строки у поручения отчёта: отчёт держит предел байт (`REPORT_LIMITS`). */
 export const verificationReportLineLimit = 500;
+/**
+ * Общий предел байт проверки поручений отчёта (JSON UTF-8): сверх него у
+ * поручения остаются только строки `line`/`lineEn` с числом `rowsTruncated`,
+ * затем проверка опускается — отчёт держит `REPORT_LIMITS.jsonBytes`.
+ */
+export const verificationReportBytes = 64 * 1024;
 
 export type VerificationResult = (typeof verificationResultNames)[number];
 export type VerificationHow = (typeof verificationHowNames)[number];
@@ -37,6 +43,17 @@ export interface VerificationRow {
   how: VerificationHow;
   at?: string;
   reviewer?: { runtime: AttemptState['reviewer']; vendor: string };
+  /**
+   * Только у ревью: что reviewer делал по записи controller (`inspection`:
+   * `diff-only` — команд не запускал, `commands` — запускал, `commands` —
+   * их число; `unknown` — не записано) и протокол ответа (`invalid`,
+   * `unsafe` — вердикта нет).
+   */
+  review?: {
+    inspection: 'commands' | 'diff-only' | 'unknown';
+    commands?: number;
+    protocol?: 'valid' | 'invalid' | 'unsafe';
+  };
 }
 
 export interface WorkVerification {
@@ -80,10 +97,35 @@ const utc = (iso: string) => {
 const gateName = (r: Pick<VerificationRow, 'gate' | 'consumer'>) =>
   r.consumer ? `${r.gate}@${r.consumer}` : r.gate;
 
-/** Строки проверки попытки: последняя запись каждого gate и ревью в каждой фазе. */
+/** Запуск gate не состоялся: песочница не запустила команду (отказ среды). */
+const notLaunched = (summary: string) => summary.includes('песочница ОС не запустила команду');
+
+/** Что известно о действиях reviewer по записи ревью. */
+function reviewFacts(e: AttemptState['evidence'][number]): NonNullable<VerificationRow['review']> {
+  const protocol = e.reviewRound?.protocol;
+  const i = e.inspection;
+  const inspection: 'commands' | 'diff-only' | 'unknown' =
+    !i || i.source === 'unavailable' ? 'unknown' : i.mode;
+  return {
+    inspection,
+    ...(inspection === 'commands' ? { commands: i!.total ?? i!.commands.length } : {}),
+    ...(protocol ? { protocol } : {}),
+  };
+}
+
+/**
+ * Строки проверки попытки: последняя запись каждого gate и ревью в каждой
+ * фазе на текущем SHA фазы (запись прежнего SHA кандидата — не проверка
+ * текущего). У закончившейся попытки обязательный gate без записи — `skipped`:
+ * кандидата всегда, интеграции — если попытка дошла до неё; gate потребителя
+ * без записи — `skipped` интеграции.
+ */
 export function verificationRows(a: AttemptState): VerificationRow[] {
   const rows = new Map<string, VerificationRow>();
+  const current = { candidate: a.candidateSha, integration: a.integrationSha };
   for (const e of a.evidence) {
+    const at = current[e.phase];
+    if (at && e.sha !== at) continue;
     const kind = e.kind === 'review' ? 'review' : 'gate';
     const key = [e.phase, kind, e.consumer ?? '', e.gate].join('\0');
     const base = {
@@ -96,17 +138,21 @@ export function verificationRows(a: AttemptState): VerificationRow[] {
     } as const;
     // Повтор того же gate в фазе (recheck) заменяет прежнюю запись.
     rows.delete(key);
-    if (e.kind === 'review')
+    if (e.kind === 'review') {
+      const review = reviewFacts(e);
       rows.set(key, {
         ...base,
         result: e.passed ? 'passed' : 'failed',
         how: 'read-by-reviewer',
         reviewer: { runtime: a.reviewer, vendor: vendorOfRuntime(a.reviewer) },
+        review,
       });
-    else if (e.kind === 'not-applicable')
+    } else if (e.kind === 'not-applicable')
       rows.set(key, { ...base, result: 'not-applicable', how: 'not-run' });
     else if (e.reusedEvidence)
       rows.set(key, { ...base, result: e.passed ? 'reused' : 'failed', how: 'reused-evidence' });
+    else if (!e.passed && notLaunched(e.summary))
+      rows.set(key, { ...base, result: 'failed', how: 'not-run' });
     else
       rows.set(key, {
         ...base,
@@ -117,16 +163,32 @@ export function verificationRows(a: AttemptState): VerificationRow[] {
   const out = [...rows.values()].sort((x, y) =>
     x.phase === y.phase ? 0 : x.phase === 'candidate' ? -1 : 1,
   );
-  // Обязательный gate закончившейся попытки без записи кандидата — не исполнялся.
-  if (a.status !== 'active')
-    for (const gate of a.requiredGates ?? [])
-      if (
-        !out.some(
-          (r) => r.kind === 'gate' && r.phase === 'candidate' && r.gate === gate && !r.consumer,
-        )
-      )
-        out.push({ gate, kind: 'gate', phase: 'candidate', result: 'skipped', how: 'not-run' });
-  return out;
+  if (a.status === 'active') return out;
+  const has = (phase: VerificationRow['phase'], gate: string, consumer?: string) =>
+    out.some(
+      (r) => r.kind === 'gate' && r.phase === phase && r.gate === gate && r.consumer === consumer,
+    );
+  const missing: VerificationRow[] = [];
+  const reachedIntegration =
+    !!a.integrationSha || a.evidence.some((e) => e.phase === 'integration');
+  for (const phase of reachedIntegration
+    ? (['candidate', 'integration'] as const)
+    : (['candidate'] as const))
+    for (const gate of new Set(a.requiredGates ?? []))
+      if (!has(phase, gate))
+        missing.push({ gate, kind: 'gate', phase, result: 'skipped', how: 'not-run' });
+  for (const c of a.consumers ?? [])
+    for (const gate of new Set(c.gates))
+      if (!has('integration', gate, c.repositoryId) && !has('candidate', gate, c.repositoryId))
+        missing.push({
+          gate,
+          kind: 'gate',
+          phase: 'integration',
+          consumer: c.repositoryId,
+          result: 'skipped',
+          how: 'not-run',
+        });
+  return [...out, ...missing];
 }
 
 const list = (xs: readonly string[]) => {
@@ -135,28 +197,44 @@ const list = (xs: readonly string[]) => {
 };
 
 /**
- * Сводная строка проверки: по gate — итог последней фазы (интеграция, иначе
- * кандидат); ревью — кто читал и что решил. Слово «проверено» — только с
- * тем, кто и как проверял.
+ * Сводная строка проверки по gate обеих фаз: запущен harness (и что было на
+ * интеграции — запись кандидата или не запускался), не прошёл, взят из
+ * записи кандидата, не запустился, неприменим, не запускался; ревью — кто
+ * читал, запускал ли команды по записи controller и что решил. Слово
+ * «проверено» — только с тем, кто и как проверял.
  */
 export function verificationLines(
   rows: readonly VerificationRow[],
   lineMax = 1000,
 ): { line: string; lineEn: string } {
-  const final = new Map<string, VerificationRow>();
+  const gates = new Map<string, { candidate?: VerificationRow; integration?: VerificationRow }>();
   for (const r of rows) {
     if (r.kind !== 'gate') continue;
-    const key = gateName(r);
-    const prior = final.get(key);
-    if (!prior || r.phase === 'integration' || prior.phase !== 'integration') final.set(key, r);
+    const g = gates.get(gateName(r)) ?? {};
+    g[r.phase] = r;
+    gates.set(gateName(r), g);
   }
-  const by = (result: VerificationResult) =>
-    [...final.values()].filter((r) => r.result === result).map(gateName);
-  const executed = by('passed');
-  const failed = by('failed');
-  const reused = by('reused');
-  const notApplicable = by('not-applicable');
-  const skipped = by('skipped');
+  const executed: string[] = [];
+  const failed: string[] = [];
+  const reused: string[] = [];
+  const integrationReused: string[] = [];
+  const integrationSkipped: string[] = [];
+  const notLaunched: string[] = [];
+  const notApplicable: string[] = [];
+  const skipped: string[] = [];
+  for (const [name, g] of gates) {
+    const both = [g.candidate, g.integration].filter((r): r is VerificationRow => !!r);
+    const ran = (r?: VerificationRow) => r?.how === 'executed-by-harness';
+    if (both.some((r) => r.result === 'failed' && ran(r))) failed.push(name);
+    else if (both.some((r) => r.result === 'failed')) notLaunched.push(name);
+    else if (both.some((r) => r.result === 'passed' && ran(r))) {
+      executed.push(name);
+      if (g.integration?.result === 'reused') integrationReused.push(name);
+      if (g.integration?.result === 'skipped') integrationSkipped.push(name);
+    } else if (both.some((r) => r.result === 'reused')) reused.push(name);
+    else if (both.some((r) => r.result === 'not-applicable')) notApplicable.push(name);
+    else skipped.push(name);
+  }
   const reviews = rows.filter((r) => r.kind === 'review');
   const review = reviews.find((r) => r.phase === 'integration') ?? reviews.at(-1);
   const ru: string[] = [
@@ -165,6 +243,16 @@ export function verificationLines(
   const en: string[] = [
     `Checked by harness (executed): ${executed.length ? list(executed) : 'nothing'}`,
   ];
+  if (integrationReused.length) {
+    ru.push(`на интеграции взято из записи кандидата (то же дерево): ${list(integrationReused)}`);
+    en.push(
+      `at integration reused from the candidate record (same tree): ${list(integrationReused)}`,
+    );
+  }
+  if (integrationSkipped.length) {
+    ru.push(`на интеграции не запускались: ${list(integrationSkipped)}`);
+    en.push(`not run at integration: ${list(integrationSkipped)}`);
+  }
   if (failed.length) {
     ru.push(`не прошло (запущено harness): ${list(failed)}`);
     en.push(`failed (executed by harness): ${list(failed)}`);
@@ -175,21 +263,35 @@ export function verificationLines(
   }
   if (review) {
     const who = review.reviewer ? `${review.reviewer.vendor} (${review.reviewer.runtime})` : '—';
-    ru.push(
-      `ревью: прочитал агент ${who}, только diff, ничего не запускал — ${review.result === 'passed' ? 'одобрил' : 'отклонил'}`,
-    );
-    en.push(
-      `review: read by agent ${who}, diff only, ran nothing — ${review.result === 'passed' ? 'approved' : 'rejected'}`,
-    );
+    const facts = review.review;
+    const did =
+      facts?.inspection === 'diff-only'
+        ? { ru: ', только diff, ничего не запускал', en: ', diff only, ran nothing' }
+        : facts?.inspection === 'commands'
+          ? {
+              ru: ` и запускал команды: ${facts.commands ?? 0} (по записи controller)`,
+              en: ` and ran commands: ${facts.commands ?? 0} (controller record)`,
+            }
+          : { ru: ', запуск команд не записан', en: ', command runs not recorded' };
+    const verdict =
+      facts?.protocol === 'invalid' || facts?.protocol === 'unsafe'
+        ? { ru: 'ответ не по протоколу — вердикта нет', en: 'protocol failure — no verdict' }
+        : review.result === 'passed'
+          ? { ru: 'одобрил', en: 'approved' }
+          : { ru: 'отклонил', en: 'rejected' };
+    ru.push(`ревью: прочитал агент ${who}${did.ru} — ${verdict.ru}`);
+    en.push(`review: read by agent ${who}${did.en} — ${verdict.en}`);
   } else {
     ru.push('ревью: не проводилось');
     en.push('review: none');
   }
   const notRu = [
+    ...notLaunched.map((g) => `${g} (не запустилась — отказ среды)`),
     ...notApplicable.map((g) => `${g} (изменения его не задели)`),
     ...skipped.map((g) => `${g} (не запускался)`),
   ];
   const notEn = [
+    ...notLaunched.map((g) => `${g} (did not start — environment failure)`),
     ...notApplicable.map((g) => `${g} (not touched by the changes)`),
     ...skipped.map((g) => `${g} (not run)`),
   ];

@@ -32,7 +32,7 @@ export const failureKindText: Record<FailureKind, PlainText> = {
     ru: 'нет доступа к модели (вход или ключ)',
     en: 'no access to the model (login or key)',
   },
-  environment: { ru: 'окружение не поднялось', en: 'the environment did not start' },
+  environment: { ru: 'сбой окружения', en: 'environment failure' },
   timeout: { ru: 'превышен предел времени', en: 'the time limit was exceeded' },
   stalled: { ru: 'процесс завис без движения', en: 'the process hung without progress' },
   'context-exhausted': {
@@ -52,7 +52,7 @@ export const failureKindText: Record<FailureKind, PlainText> = {
     ru: 'ревьюер ответил не по протоколу',
     en: 'the reviewer broke the review protocol',
   },
-  merge: { ru: 'конфликт при слиянии', en: 'merge conflict' },
+  merge: { ru: 'слияние не удалось', en: 'the merge failed' },
   cancelled: { ru: 'попытку отменили', en: 'the attempt was cancelled' },
   budget: { ru: 'исчерпан бюджет', en: 'the budget ran out' },
   'needs-lead': { ru: 'нужно решение ведущего', en: 'the lead has to decide' },

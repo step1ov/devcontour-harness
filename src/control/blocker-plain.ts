@@ -1,13 +1,17 @@
 // Почему поручение не выдаётся — простыми словами и кто это снимает
 // (`status`, `works[].blockers[].plain`/`plainEn`/`actor`). Код блокировки
 // — `Engine.blockers`; разновидность внутри кода — по сообщению движка
-// (его тексты — константы этого пакета) и по состоянию выдачи. Сообщение
-// хоста (`HostGuards.claimable`) в простой текст не переносится: у него —
-// общий текст кода, само сообщение остаётся в `message`.
+// (его тексты — константы этого пакета) и по состоянию поручения. Из
+// сообщения в простой текст переносятся только идентификаторы, которые
+// подтверждает состояние (зависимость поручения, операция удержания) и
+// числа попыток; сообщение хоста (`HostGuards.claimable`), совпавшее с
+// шаблоном движка, ничего своего в текст не добавляет — само сообщение
+// остаётся в `message`.
 
-import type { ControlState, ExecutionPolicy } from '../contracts/index.ts';
+import type { ControlState, ExecutionPolicy, WorkState } from '../contracts/index.ts';
 import type { Engine } from '../engine/engine.ts';
-import type { Actor } from '../projections/index.ts';
+import type { Actor, NextAction } from '../projections/index.ts';
+import { actionText } from './stage.ts';
 
 /** Коды блокировок `Engine.blockers`: у каждого — простой текст (`blockerCodeText`). */
 export type BlockerCode = ReturnType<Engine['blockers']>[number]['code'];
@@ -47,8 +51,8 @@ export const blockerCodeText: Record<BlockerCode, Text> = {
     actor: 'lead',
   },
   BUDGET_EXHAUSTED: {
-    ru: 'бюджет исчерпан — нужно ваше решение поднять бюджет',
-    en: 'the budget is used up — you decide whether to raise it',
+    ru: 'бюджет исчерпан или не определён — нужно ваше решение',
+    en: 'the budget is used up or undetermined — your decision is needed',
     actor: 'user',
   },
   REVIEWER_SAME_VENDOR: {
@@ -118,7 +122,8 @@ const pauseText = (control: ControlState): Text => {
   }
 };
 
-const statusText = (status: string, mode: ExecutionPolicy['approvalMode']): Text | undefined => {
+const statusText = (status: string, ctx: BlockerContext): Text | undefined => {
+  const mode = ctx.approvalMode;
   switch (status) {
     case 'draft':
       return {
@@ -127,11 +132,18 @@ const statusText = (status: string, mode: ExecutionPolicy['approvalMode']): Text
         actor: approver(mode),
       };
     case 'failed':
-      return {
-        ru: 'остановлено после отказа — ждёт разбора и повтора',
-        en: 'stopped after a failure — waiting for diagnosis and a retry',
-        actor: 'lead',
-      };
+      // Кто и что дальше — диагноз `explain` поручения (`stage.needs`).
+      return ctx.needs && ctx.needs.action !== 'none' && ctx.needs.action !== 'wait'
+        ? {
+            ru: `остановлено после отказа — дальше: ${actionText[ctx.needs.action].ru}`,
+            en: `stopped after a failure — next: ${actionText[ctx.needs.action].en}`,
+            actor: ctx.needs.actor,
+          }
+        : {
+            ru: 'остановлено после отказа — ждёт разбора',
+            en: 'stopped after a failure — waiting for diagnosis',
+            actor: ctx.needs?.actor ?? 'lead',
+          };
     case 'done':
       return { ru: 'уже принято', en: 'already accepted', actor: null };
     case 'cancelled':
@@ -147,24 +159,56 @@ const statusText = (status: string, mode: ExecutionPolicy['approvalMode']): Text
 };
 
 const clip = (s: string) => (s.length > 300 ? s.slice(0, 299) + '…' : s);
-const idPart = (s: string) => clip(s.trim()).slice(0, 200);
 
-function textOf(
-  b: { code: BlockerCode; message: string },
-  ctx: { control: ControlState; approvalMode: ExecutionPolicy['approvalMode'] },
-): Text {
+/** Что известно о поручении, кроме сообщения блокировки. */
+export interface BlockerContext {
+  control: ControlState;
+  approvalMode: ExecutionPolicy['approvalMode'];
+  /** Поручение: подтверждает зависимость, операцию удержания и разбор. */
+  work?: Pick<WorkState, 'hold' | 'recovery'> & { order: { dependsOn: readonly string[] } };
+  /** Статус другого поручения (зависимости). */
+  statusOf?: (workId: string) => string | undefined;
+  /** Диагноз `explain` поручения: кто и что дальше (`stage.needs`). */
+  needs?: { actor: Actor; action: NextAction };
+}
+
+function dependencyText(id: string, ctx: BlockerContext): Text {
+  if (!ctx.work?.order.dependsOn.includes(id))
+    return {
+      ru: 'ждёт другой задачи',
+      en: 'waiting for another task',
+      actor: 'controller',
+    };
+  switch (ctx.statusOf?.(id)) {
+    case 'failed':
+      return {
+        ru: `ждёт зависимости ${id} — она остановлена отказом, нужен её разбор`,
+        en: `waiting for dependency ${id} — it stopped with a failure and needs diagnosis`,
+        actor: 'lead',
+      };
+    case 'cancelled':
+      return {
+        ru: `зависимость ${id} отменена — нужно перепланировать зависимые`,
+        en: `dependency ${id} was cancelled — the dependents need replanning`,
+        actor: 'lead',
+      };
+    default:
+      return {
+        ru: `ждёт зависимости ${id}`,
+        en: `waiting for dependency ${id}`,
+        actor: 'controller',
+      };
+  }
+}
+
+function textOf(b: { code: BlockerCode; message: string }, ctx: BlockerContext): Text {
   const m = b.message;
   switch (b.code) {
     case 'NOT_READY': {
       const dep = /^Ждёт (\S+)$/.exec(m);
-      if (dep)
-        return {
-          ru: `ждёт зависимости ${idPart(dep[1]!)}`,
-          en: `waiting for dependency ${idPart(dep[1]!)}`,
-          actor: 'controller',
-        };
+      if (dep) return dependencyText(dep[1]!, ctx);
       const status = /^Статус (\S+)$/.exec(m);
-      if (status) return statusText(status[1]!, ctx.approvalMode) ?? blockerCodeText.NOT_READY;
+      if (status) return statusText(status[1]!, ctx) ?? blockerCodeText.NOT_READY;
       if (m.startsWith('Идёт совместная проверка'))
         return {
           ru: 'ждёт конца совместной проверки репозиториев — ничего не нужно',
@@ -172,18 +216,26 @@ function textOf(
           actor: 'controller',
         };
       const hold = /^Удержано операцией (.+)$/.exec(m);
-      if (hold)
+      if (hold) {
+        const op = ctx.work?.hold?.operation === hold[1] ? ` ${hold[1]}` : '';
         return {
-          ru: `удержано операцией ${idPart(hold[1]!)} — ждёт её конца`,
-          en: `held by operation ${idPart(hold[1]!)} — waiting for it to finish`,
+          ru: `удержано операцией${op} — ждёт её конца`,
+          en: `held by an operation${op} — waiting for it to finish`,
           actor: 'controller',
         };
+      }
       if (m.startsWith('Разбор свойства'))
-        return {
-          ru: 'повторяющийся отказ на разборе — ждёт решения о восстановлении',
-          en: 'a repeating failure is under analysis — waiting for a recovery decision',
-          actor: 'lead',
-        };
+        return ctx.work?.recovery?.status === 'awaiting-user'
+          ? {
+              ru: 'повторяющийся отказ — ждёт вашего решения о восстановлении',
+              en: 'a repeating failure — waiting for your recovery decision',
+              actor: 'user',
+            }
+          : {
+              ru: 'повторяющийся отказ на разборе — ждёт решения ведущего о восстановлении',
+              en: 'a repeating failure is under analysis — waiting for the lead recovery decision',
+              actor: 'lead',
+            };
       return blockerCodeText.NOT_READY;
     }
     case 'PAUSED':
@@ -214,6 +266,12 @@ function textOf(
         };
       return blockerCodeText.APPROVAL_REQUIRED;
     case 'APPROVAL_STALE':
+      if (m.startsWith('Процесс работает не с применённой политикой'))
+        return {
+          ru: 'процесс harness работает со старой политикой — перезапустите его с применённой',
+          en: 'the harness process runs an old policy — restart it with the applied one',
+          actor: 'lead',
+        };
       if (m.startsWith('Политика изменилась'))
         return {
           ru: 'политика изменилась после согласования — нужно согласовать план заново',
@@ -251,6 +309,20 @@ function textOf(
           }
         : blockerCodeText.ATTEMPTS_EXHAUSTED;
     }
+    case 'BUDGET_EXHAUSTED':
+      if (/^Бюджет .* не определён/.test(m))
+        return {
+          ru: 'бюджет не определён: у вызовов неизвестна стоимость или время — нужны цены или учёт вызовов (поднятие предела не поможет)',
+          en: 'the budget is undetermined: some calls have no known cost or time — configure prices or call records (raising the limit will not help)',
+          actor: 'user',
+        };
+      if (/^Бюджет .*исчерпан/.test(m))
+        return {
+          ru: 'бюджет исчерпан — нужно ваше решение поднять бюджет',
+          en: 'the budget is used up — you decide whether to raise it',
+          actor: 'user',
+        };
+      return blockerCodeText.BUDGET_EXHAUSTED;
     default:
       return blockerCodeText[b.code];
   }
@@ -259,7 +331,7 @@ function textOf(
 /** Блокировка простыми словами и кто её снимает. */
 export function plainBlocker(
   b: { code: BlockerCode; message: string },
-  ctx: { control: ControlState; approvalMode: ExecutionPolicy['approvalMode'] },
+  ctx: BlockerContext,
 ): PlainBlocker {
   const t = textOf(b, ctx);
   return { plain: clip(t.ru), plainEn: clip(t.en), actor: t.actor };

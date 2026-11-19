@@ -30,6 +30,7 @@ import {
 import { failurePlainOf } from './failure-plain.ts';
 import {
   verificationOf,
+  verificationReportBytes,
   verificationReportLineLimit,
   verificationReportRowLimit,
 } from './verification.ts';
@@ -1302,6 +1303,33 @@ export function valueReport(
   const rowsAll = finished
     .slice()
     .sort((a, b) => timeOrder(b.finishedAt, a.finishedAt) || cmp(a.work.id, b.work.id));
+  // Проверка поручений — в общем пределе байт (`verificationReportBytes`):
+  // сверх него строки заменяются числом, затем проверка поручения опускается.
+  let verificationBytes = 0;
+  const bytesOf = (x: unknown) => new TextEncoder().encode(JSON.stringify(x)).length;
+  const verificationRow = (f: (typeof rowsAll)[number]) => {
+    const full = verificationOf(f.work, f.attempts, {
+      rows: verificationReportRowLimit,
+      line: verificationReportLineLimit,
+    });
+    if (!full) return {};
+    const { rows, rowsTruncated, ...rest } = full;
+    const lean = {
+      ...rest,
+      rows: [],
+      ...(rows.length + (rowsTruncated ?? 0)
+        ? { rowsTruncated: rows.length + (rowsTruncated ?? 0) }
+        : {}),
+    };
+    for (const v of [full, lean]) {
+      const n = bytesOf(v);
+      if (verificationBytes + n <= verificationReportBytes) {
+        verificationBytes += n;
+        return { verification: v };
+      }
+    }
+    return {};
+  };
   const workRows = rowsAll.slice(0, reportLimits.works).map((f) => {
     const cost = workCost(f);
     return {
@@ -1316,12 +1344,7 @@ export function valueReport(
       unknownCalls: cost.unknown,
       costBound: cost.bound,
       rejections: attemptSummaryOf(f.work, f.attempts).failures,
-      ...((x) => (x ? { verification: x } : {}))(
-        verificationOf(f.work, f.attempts, {
-          rows: verificationReportRowLimit,
-          line: verificationReportLineLimit,
-        }),
-      ),
+      ...verificationRow(f),
     };
   });
 

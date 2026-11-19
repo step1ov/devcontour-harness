@@ -11,8 +11,9 @@ import { idSchema, isoTimeSchema, runtimeNameSchema } from './primitives.ts';
  *   gate закончившейся попытки без записи, `not-applicable` — gate с
  *   `when.paths` не исполнялся: diff его не задел;
  * - `how`: `executed-by-harness` — команду gate запустил harness,
- *   `reused-evidence` — взята прежняя запись, `read-by-reviewer` — агент
- *   прочитал diff и ничего не запускал, `not-run` — не исполнялось.
+ *   `reused-evidence` — взята прежняя запись, `read-by-reviewer` — ревью
+ *   агента (что он запускал — `review.inspection`), `not-run` — не
+ *   исполнялось (в том числе песочница не запустила команду).
  */
 export const verificationResults = [
   'passed',
@@ -48,6 +49,19 @@ export const verificationRowSchema = z.strictObject({
   /** Только у ревью: runtime и вендор reviewer. */
   reviewer: z
     .strictObject({ runtime: runtimeNameSchema, vendor: z.string().min(1).max(40) })
+    .optional(),
+  /**
+   * Только у ревью: что reviewer делал по записи controller — `inspection`
+   * (`diff-only` — команд не запускал, `commands` — запускал, `commands` —
+   * их число; `unknown` — не записано) и протокол ответа (`invalid`,
+   * `unsafe` — вердикта нет).
+   */
+  review: z
+    .strictObject({
+      inspection: z.enum(['commands', 'diff-only', 'unknown']),
+      commands: z.number().int().min(0).optional(),
+      protocol: z.enum(['valid', 'invalid', 'unsafe']).optional(),
+    })
     .optional(),
 });
 

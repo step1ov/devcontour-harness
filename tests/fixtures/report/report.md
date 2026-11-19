@@ -133,12 +133,12 @@ Failed attempts: 7, of them 6 classified; attempts interrupted by shutdown are n
 ### What was verified and how
 
 - cancel: Checked by harness (executed): nothing; review: none; not covered: install (not run), unit (not run).
-- broken: Checked by harness (executed): unit; failed (executed by harness): install; review: read by agent openai (codex), diff only, ran nothing — approved.
-- env: Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved.
-- review: Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved.
-- gate: Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved.
-- first: Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved.
-- legacy: Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved.
+- broken: Checked by harness (executed): unit; not run at integration: unit; failed (executed by harness): install; review: read by agent openai (codex), command runs not recorded — approved.
+- env: Checked by harness (executed): install, unit; review: read by agent openai (codex), command runs not recorded — approved.
+- review: Checked by harness (executed): install, unit; review: read by agent openai (codex), command runs not recorded — approved.
+- gate: Checked by harness (executed): install, unit; review: read by agent openai (codex), command runs not recorded — approved.
+- first: Checked by harness (executed): install, unit; review: read by agent openai (codex), command runs not recorded — approved.
+- legacy: Checked by harness (executed): install, unit; review: read by agent openai (codex), command runs not recorded — approved.
 
 ## Limits and unknowns
 
