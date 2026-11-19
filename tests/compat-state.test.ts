@@ -189,8 +189,14 @@ test(
       assert.equal(doctor.json.data.state?.compatible, true, 'состояние alpha.5 несовместимо');
       // Аддитивное поле result (0.1.0-alpha.54) — принятая версия против
       // target ref, из тех же записей и Git; без него результат тот же.
-      const { target: resultTarget, ...nowResult } = now.result.data as Record<string, unknown>;
+      const {
+        target: resultTarget,
+        verification: resultVerification,
+        ...nowResult
+      } = now.result.data as Record<string, unknown>;
       assert.equal((resultTarget as { commitsSinceAccepted?: number }).commitsSinceAccepted, 0);
+      // «Что проверено и как» (0.1.0-alpha.55) — аддитивно, из доказательств alpha.5.
+      assert.ok((resultVerification as { rows: unknown[] }).rows.length > 0);
       assert.deepEqual(nowResult, before.result.data, 'результат alpha.5 читается иначе');
       assert.deepEqual(now.events.data, before.events.data, 'журнал alpha.5 читается иначе');
       // Аддитивное поле текущей версии — сводка попыток поручения: без него
@@ -208,10 +214,33 @@ test(
         (reviews as { approved: boolean }[]).length &&
           (reviews as { approved: boolean }[]).every((r) => r.approved),
       );
+      // «Что проверено и как» по поручению (0.1.0-alpha.55) — из доказательств alpha.5.
+      assert.ok(
+        works.every((w) => (w.verification as { rows: unknown[] } | undefined)?.rows.length),
+      );
+      // Причина блокировки простыми словами (0.1.0-alpha.55): аддитивные
+      // `plain`/`plainEn`/`actor` у каждого blocker; `code` и `message` прежние.
+      for (const w of works)
+        for (const b of w.blockers as Record<string, unknown>[]) {
+          assert.equal(b.plain, 'уже принято', 'blocker ' + String(b.code));
+          assert.equal(b.plainEn, 'already accepted', 'blocker ' + String(b.code));
+          assert.equal(b.actor, null, 'blocker ' + String(b.code));
+        }
       const stripped = {
         ...nowStatus,
         works: works.map(
-          ({ attemptSummary: _s, stage: _t, target: _a, ...w }) => (void _s, void _t, void _a, w),
+          ({ attemptSummary: _s, stage: _t, target: _a, verification: _v, blockers, ...w }) => (
+            void _s,
+            void _t,
+            void _a,
+            void _v,
+            {
+              ...w,
+              blockers: (blockers as Record<string, unknown>[]).map(
+                ({ plain: _p, plainEn: _e, actor: _r, ...b }) => (void _p, void _e, void _r, b),
+              ),
+            }
+          ),
         ),
       };
       assert.deepEqual(stripped, before.status.data, 'статус alpha.5 читается иначе');
@@ -231,7 +260,12 @@ test(
       assert.equal(again.status, 0, 'deliver: ' + JSON.stringify(again.json));
       assert.equal(readFileSync(sinkFile, 'utf8'), delivered, 'запись получателя переписана');
       const after = readAll(root);
-      const { target: _afterTarget, ...afterResult } = after.result.data as Record<string, unknown>;
+      const {
+        target: _afterTarget,
+        verification: _afterVerification,
+        ...afterResult
+      } = after.result.data as Record<string, unknown>;
+      assert.deepEqual(_afterVerification, resultVerification, 'доставка изменила «что проверено»');
       assert.deepEqual(_afterTarget, resultTarget, 'доставка изменила сверку с target ref');
       assert.deepEqual(
         afterResult,
