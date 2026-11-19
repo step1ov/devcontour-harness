@@ -1,3 +1,4 @@
+import { RU, ruCount } from '../contracts/plural.ts';
 import { existsSync, realpathSync } from 'node:fs';
 import { basename, isAbsolute, posix, resolve, sep } from 'node:path';
 import type { z } from 'zod';
@@ -1122,7 +1123,7 @@ export async function assertToolchainReady(
   if (problems.length)
     throw new HarnessError(
       'NOT_READY',
-      `Preflight toolchain: ${problems.length} проблем(ы); исправьте конфигурацию до запуска`,
+      `Preflight toolchain: ${ruCount(problems.length, RU.problem)}; исправьте конфигурацию до запуска`,
       problems.map(({ problem: p }) => ({
         path: ['policy', ...p.field],
         message: `${p.code}: ${p.message}${p.path ? ` (${p.path})` : ''}`,

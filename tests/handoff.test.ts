@@ -228,7 +228,7 @@ test('handoff: истёкшее владение — незавершённая 
     assert.equal(pack.active[0]?.stale, true);
     const md = handoffMarkdown(pack);
     assert.match(md, /владение истекло/);
-    assert.match(md, /… и ещё 2 провалов/);
+    assert.match(md, /… и ещё 2 провала \(за пределами пакета\)/);
   } finally {
     h.close();
   }
@@ -519,7 +519,7 @@ test('handoff: пауза очереди — одна остановка без 
     assert.equal(pack.truncated.budgetsWithin, 71, 'в пределах и без расхода');
     const md = handoffMarkdown(pack);
     assert.match(md, /очередь PAUSED .* Поручений: 70 \(w00, /);
-    assert.match(md, /… и ещё 21 поручений/);
+    assert.match(md, /… и ещё 21 поручение \(за пределами пакета\)/);
     assert.match(md, /Бюджеты поручений в пределах и без расхода не показаны: 71/);
   } finally {
     h.close();
@@ -694,7 +694,7 @@ test('handoff: бюджеты — расход против предела, не
       [partial.complete, partial.unknownCalls, partial.remainingUsd],
       [false, 1, null],
     );
-    assert.match(handoffMarkdown(pack), /≥ \$0\.40 \(неполно: 1 вызовов без стоимости\)/);
+    assert.match(handoffMarkdown(pack), /≥ \$0\.40 \(неполно: 1 вызов без стоимости\)/);
 
     // --graph: бюджеты поручений и групп чужого графа не показываются.
     const other = handoffPack(h, { graphId: 'g2' });

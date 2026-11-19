@@ -28,7 +28,7 @@ test('view: пустой вход — корректный документ по
   const view = operatorView(baseInput());
   operatorViewSchema.parse(view);
   assert.equal(view.viewVersion, OPERATOR_VIEW_VERSION);
-  assert.equal(view.viewRevision, 0);
+  assert.equal(view.viewRevision, 1);
   assert.equal(view.generatedAt, new Date(NOW).toISOString());
   assert.deepEqual(view.works, []);
   assert.equal(view.progress.total, 0);
@@ -397,6 +397,7 @@ test('view: эскалации — остановки человеку и вед
       ['g1', 'REVIEW_ESCALATION', 'operator', 'user-decision'],
     ],
   );
+  // Остановка без времени и в хранилище — момент запроса (since обязателен в версии 1).
   assert.equal(view.escalations[1]!.since, new Date(NOW).toISOString());
   assert.deepEqual(view.reviews[0]!.escalation, {
     requestId: 'plan:g1:4',

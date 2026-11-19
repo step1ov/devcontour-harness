@@ -1146,6 +1146,52 @@
               "host"
             ]
           },
+          "answerBasis": {
+            "type": "object",
+            "properties": {
+              "by": {
+                "type": "string",
+                "enum": [
+                  "operator",
+                  "lead",
+                  "host"
+                ]
+              },
+              "rule": {
+                "type": "string",
+                "enum": [
+                  "technical",
+                  "severity"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "impact": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              },
+              "line": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "required": [
+              "by",
+              "impact",
+              "at",
+              "line"
+            ],
+            "additionalProperties": false
+          },
           "title": {
             "type": "string",
             "maxLength": 200
@@ -1464,6 +1510,132 @@
         "budgetUsd": {
           "type": "number",
           "minimum": 0
+        },
+        "totals": {
+          "type": "object",
+          "properties": {
+            "attemptsStarted": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "attemptsFailed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "failuresByBucket": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40
+              },
+              "additionalProperties": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "gatesPassed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "gatesFailed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "gatesReused": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "reviewRounds": {
+              "type": "object",
+              "properties": {
+                "plan": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "contract": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "code": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "attempt": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "plan",
+                "contract",
+                "code",
+                "attempt"
+              ],
+              "additionalProperties": false
+            },
+            "spendUsd": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "bound": {
+                  "type": "string",
+                  "enum": [
+                    "exact",
+                    "lower",
+                    "unknown"
+                  ]
+                }
+              },
+              "required": [
+                "value",
+                "bound"
+              ],
+              "additionalProperties": false
+            },
+            "wallMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "attemptMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "loadPeak": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "attemptsStarted",
+            "attemptsFailed",
+            "failuresByBucket",
+            "gatesPassed",
+            "gatesFailed",
+            "gatesReused",
+            "reviewRounds",
+            "spendUsd",
+            "wallMs",
+            "attemptMs",
+            "loadPeak"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

@@ -1,3 +1,4 @@
+import { ruCount } from '../contracts/plural.ts';
 import { randomUUID } from 'node:crypto';
 import type { AttemptState, FailureKind, PropertyRecovery, WorkState } from '../contracts/index.ts';
 import { episodeBasis } from '../verification/checks.ts';
@@ -165,7 +166,7 @@ export function afterFailure(
         {
           at,
           event: 'opened',
-          detail: `${streak.runs.length} содержательных отказа по свойству ${property} подряд`,
+          detail: `${ruCount(streak.runs.length, ['содержательный отказ', 'содержательных отказа', 'содержательных отказов'])} по свойству ${property} подряд`,
         },
       ],
       version: 1,

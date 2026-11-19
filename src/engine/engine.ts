@@ -1,3 +1,4 @@
+import { RU, ruCount } from '../contracts/plural.ts';
 import { randomUUID } from 'node:crypto';
 import {
   STAGE_NAME_LIMIT,
@@ -387,7 +388,7 @@ export class Engine {
     if (issues.length)
       throw new HarnessError(
         issues[0]!.code,
-        `Граф отклонён: ${issues.length} нарушений`,
+        `Граф отклонён: ${ruCount(issues.length, RU.violation)}`,
         issues.map(({ path, message }) => ({ path: ['graph', ...path], message })),
       );
     const digest = workGraphDigest(graph);
@@ -1238,7 +1239,7 @@ export class Engine {
     if (work.attempt >= this.policy.maxAttempts)
       out.push({
         code: 'ATTEMPTS_EXHAUSTED',
-        message: `Исчерпано ${work.attempt} из ${this.policy.maxAttempts} попыток`,
+        message: `Исчерпано ${work.attempt} из ${ruCount(this.policy.maxAttempts, RU.attemptGen)}`,
       });
     if (work.hold)
       out.push({ code: 'NOT_READY', message: 'Удержано операцией ' + work.hold.operation });
@@ -3422,7 +3423,7 @@ export class Engine {
           request,
           blocker: {
             code: 'ATTEMPTS_EXHAUSTED' as const,
-            message: `Исчерпано ${work.attempt} из ${this.policy.maxAttempts} попыток; ответ сохранён, продолжение — со сбросом и причиной`,
+            message: `Исчерпано ${work.attempt} из ${ruCount(this.policy.maxAttempts, RU.attemptGen)}; ответ сохранён, продолжение — со сбросом и причиной`,
           },
         };
       const budget = this.budgetBlockOf(work.id, tx);
@@ -3623,7 +3624,7 @@ export class Engine {
           request,
           blocker: {
             code: 'ATTEMPTS_EXHAUSTED' as const,
-            message: `Исчерпано ${work.attempt} из ${this.policy.maxAttempts} попыток; перенос — со сбросом и причиной`,
+            message: `Исчерпано ${work.attempt} из ${ruCount(this.policy.maxAttempts, RU.attemptGen)}; перенос — со сбросом и причиной`,
           },
         };
       const budget = this.budgetBlockOf(work.id, tx);
@@ -3855,7 +3856,7 @@ export class Engine {
       const confirmed = outcomes.filter((o) => o.outcome === 'confirmed').length;
       if (confirmed && w.attempt < this.policy.maxAttempts) {
         r.status = 'retry';
-        r.reason = `${confirmed} из ${outcomes.length} случаев подтверждено`;
+        r.reason = `${confirmed} из ${ruCount(outcomes.length, RU.caseGen)} подтверждено`;
       } else {
         r.status = 'stopped';
         r.reason = confirmed
@@ -4591,7 +4592,7 @@ export class Engine {
     if (counted >= this.policy.maxAttempts)
       return `Исчерпан предел совместных проверок этого набора: ${counted} из ${this.policy.maxAttempts}. Не считаются только проверки, прерванные остановкой или потерей владения до результата gates. Предел снимает принятие хостом успешной проверки набора; явный сброс (jointBudgetReset) с причиной снимает только проверки без результата gates`;
     if (interrupted >= MAX_NEUTRAL_FAILURES)
-      return `Совместные проверки этого набора прерваны до результата gates ${interrupted} раз (предел ${MAX_NEUTRAL_FAILURES}): устраните причину остановок или потери владения и сбросьте бюджет явно (jointBudgetReset) с причиной`;
+      return `Совместные проверки этого набора прерваны до результата gates ${ruCount(interrupted, RU.time)} (предел ${MAX_NEUTRAL_FAILURES}): устраните причину остановок или потери владения и сбросьте бюджет явно (jointBudgetReset) с причиной`;
     return undefined;
   }
 

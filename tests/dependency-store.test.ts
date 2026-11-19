@@ -915,10 +915,10 @@ test(
     const many = await crowded.check(crowded.repo.head());
     gatesPassed(many);
     assert.equal(many.receipt.outcome, 'miss');
-    assert.match(many.receipt.reason, /файлов больше предела/);
+    assert.match(many.receipt.reason, /(файла|файлов) больше предела/);
     assert.deepEqual(many.receipt.env, {}, 'предел: окружение как без хранилища');
     const repeated = await crowded.check(crowded.repo.head());
-    assert.match(repeated.receipt.reason, /файлов больше предела/);
+    assert.match(repeated.receipt.reason, /(файла|файлов) больше предела/);
     assert.deepEqual(repeated.receipt.env, {}, 'и по пометке о прошлом отказе');
     storeTree.maxFiles = limit;
 

@@ -1,3 +1,4 @@
+import { RU, ruCount } from '../../contracts/plural.ts';
 import { hostname } from 'node:os';
 import {
   HarnessError,
@@ -532,7 +533,7 @@ export class RelaySink implements ResultSink {
             if (found.length === 1) return { state: 'found', result: { commentId: found[0]!.id } };
             return {
               state: 'ambiguous',
-              reason: `комментарий с маркером найден ${found.length} раз (ожидался ровно один)`,
+              reason: `комментарий с маркером найден ${ruCount(found.length, RU.time)} (ожидался ровно один)`,
             };
           },
         };

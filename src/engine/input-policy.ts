@@ -1,3 +1,4 @@
+import { ruCount } from '../contracts/plural.ts';
 import {
   INPUT_AUTONOMOUS,
   INPUT_FOR_USER_MAX,
@@ -285,7 +286,10 @@ export function normalizeImplementation(
       .map((a) => areaAliases[text(a).trim().toLowerCase()])
       .filter((a): a is (typeof criticalAreas)[number] => a !== undefined);
     const unknown = list.length - known.length;
-    if (unknown) issues.push(`${what}: ${unknown} нераспознанных областей`);
+    if (unknown)
+      issues.push(
+        `${what}: ${ruCount(unknown, ['нераспознанная область', 'нераспознанные области', 'нераспознанных областей'])}`,
+      );
     return { areas: [...new Set(known)], unmapped: unknown > 0 && !known.length };
   };
   /** Серьёзность с минимумом области: названная нераспознанная область — потолок. */

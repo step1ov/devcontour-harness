@@ -1,4 +1,5 @@
 import { HANDOFF_LIMITS, type HandoffPack } from '../contracts/handoff.ts';
+import { RU, ruCount, type RuForms } from '../contracts/plural.ts';
 
 /** Кто ответил на вопрос исполнителя. */
 const answeredBy = { operator: 'оператор', lead: 'ведущий', host: 'хост' } as const;
@@ -10,8 +11,8 @@ const cell = (s: string | number | undefined | null) =>
     .replace(/\|/g, '\\|');
 const secs = (ms: number | undefined) => (ms === undefined ? '—' : `${Math.round(ms / 1000)} с`);
 const who = (actor: string | null | undefined) => actor ?? '—';
-const more = (n: number, what: string) =>
-  n > 0 ? [`… и ещё ${n} ${what} (не вошли в пакет)`] : [];
+const more = (n: number, what: RuForms) =>
+  n > 0 ? [`… и ещё ${ruCount(n, what)} (за пределами пакета)`] : [];
 const usd = (n: number | null | undefined) =>
   n === null || n === undefined ? '—' : `$${n.toFixed(2)}`;
 type Budget = NonNullable<HandoffPack['budgets']>['entries'][number];
@@ -22,10 +23,14 @@ function spent(b: Budget) {
     b.estimatedUsd > 0 ? ` (сообщено ${usd(b.reportedUsd)}, оценено ${usd(b.estimatedUsd)})` : '';
   if (b.complete) return total + split;
   const gaps = [
-    ...(b.unknownCalls ? [`${b.unknownCalls} вызовов без стоимости`] : []),
-    ...(b.unfinishedCalls ? [`${b.unfinishedCalls} незавершённых`] : []),
-    ...(b.abandonedCalls ? [`${b.abandonedCalls} брошенных`] : []),
-    ...(b.uncoveredRuns ? [`${b.uncoveredRuns} попыток без учёта`] : []),
+    ...(b.unknownCalls ? [`${ruCount(b.unknownCalls, RU.call)} без стоимости`] : []),
+    ...(b.unfinishedCalls
+      ? [ruCount(b.unfinishedCalls, ['незавершённый', 'незавершённых', 'незавершённых'])]
+      : []),
+    ...(b.abandonedCalls
+      ? [ruCount(b.abandonedCalls, ['брошенный', 'брошенных', 'брошенных'])]
+      : []),
+    ...(b.uncoveredRuns ? [`${ruCount(b.uncoveredRuns, RU.attempt)} без учёта`] : []),
   ];
   return `≥ ${total}${split} (неполно: ${gaps.join(', ')})`;
 }
@@ -103,7 +108,7 @@ export function handoffMarkdown(pack: HandoffPack): string {
             ...(u.interrupted ? ['прервана остановкой'] : []),
           ].join(', '),
       );
-    out.push(...more(pack.truncated.unfinished, 'попыток'));
+    out.push(...more(pack.truncated.unfinished, RU.attempt));
   }
   out.push('', '## Решения и остановки', '');
   if (!pack.stops.length) out.push('Остановок нет.');
@@ -116,7 +121,7 @@ export function handoffMarkdown(pack: HandoffPack): string {
           ? ` Поручений: ${d.worksCount} (${d.works!.join(', ')}${d.worksCount > d.works!.length ? ', …' : ''}).`
           : ''),
     );
-  out.push(...more(pack.truncated.stops, 'остановок'));
+  out.push(...more(pack.truncated.stops, ['остановка', 'остановки', 'остановок']));
   out.push('', '## Открытые поручения', '');
   if (!pack.works.length) out.push('Открытых поручений нет.');
   else {
@@ -141,7 +146,7 @@ export function handoffMarkdown(pack: HandoffPack): string {
       );
     }
   }
-  out.push(...more(pack.truncated.works, 'поручений'));
+  out.push(...more(pack.truncated.works, ['поручение', 'поручения', 'поручений']));
   if (
     pack.queue.paused &&
     pack.works.some((w) => w.next.actor === 'controller' && w.next.action === 'retry')
@@ -157,7 +162,7 @@ export function handoffMarkdown(pack: HandoffPack): string {
             ? ` — ответ r${r.answer.revision} ${r.answer.digest.slice(0, 12)}${r.answer.basis === 'technical' ? ` (решено ведущим (технический вопрос)${r.answer.reason ? `: ${cell(r.answer.reason)}` : ''})` : r.answer.by ? ` (ответил: ${answeredBy[r.answer.by]})` : ''}: ${cell(r.answer.excerpt)}`
             : ''),
       );
-    out.push(...more(pack.truncated.inputs, 'вопросов'));
+    out.push(...more(pack.truncated.inputs, ['вопрос', 'вопроса', 'вопросов']));
   }
   out.push('', '## Последние провалы', '');
   if (!pack.failures.length) out.push('Провалов нет.');
@@ -166,7 +171,7 @@ export function handoffMarkdown(pack: HandoffPack): string {
       `- ${f.finishedAt ?? '—'} ${f.workId}${f.workStatus ? ` (сейчас ${f.workStatus})` : ''} #${f.attempt} (${f.runId}) ${f.status} на ${f.phase}: ` +
         `${f.failureKind ?? 'unknown'} / ${f.code}${f.error ? ` — ${cell(f.error)}` : ''}`,
     );
-  out.push(...more(pack.truncated.failures, 'провалов'));
+  out.push(...more(pack.truncated.failures, ['провал', 'провала', 'провалов']));
   if (pack.interruptions)
     out.push(
       `Прервано штатной остановкой (не провалы, работа продолжается): ${pack.interruptions}.`,
@@ -188,7 +193,7 @@ export function handoffMarkdown(pack: HandoffPack): string {
           `${usd(b.remainingUsd)}${b.remainingMs !== null && b.limitMs !== undefined ? ` / ${secs(b.remainingMs)}` : ''} | ` +
           `${secs(b.durationMs)} | ${b.unknownCalls} |`,
       );
-    out.push(...more(pack.truncated.budgets, 'бюджетов'));
+    out.push(...more(pack.truncated.budgets, ['бюджет', 'бюджета', 'бюджетов']));
     if (pack.truncated.budgetsWithin)
       out.push(
         `Бюджеты поручений в пределах и без расхода не показаны: ${pack.truncated.budgetsWithin}.`,
@@ -202,7 +207,7 @@ export function handoffMarkdown(pack: HandoffPack): string {
     out.push('', 'Восстановления заданий:');
     for (const r of pack.repairs)
       out.push(`- ${r.graphId} (${r.status}): потрачено ${r.used} из ${r.budget}`);
-    out.push(...more(pack.truncated.repairs, 'заданий'));
+    out.push(...more(pack.truncated.repairs, ['задание', 'задания', 'заданий']));
   }
   out.push('', '## Намерения', '');
   if (!pack.intentions.length)

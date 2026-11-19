@@ -1,3 +1,4 @@
+import { RU, ruCount } from '../contracts/plural.ts';
 import {
   WORKSPACE_OWNER,
   digestOf,
@@ -239,7 +240,7 @@ function referenceProblems(o: Obligation, gates: string[], artifacts: string[]) 
     const own = set.families.reduce((n, f) => n + f.minCases, 0);
     if (own > set.minCases)
       problems.push(
-        `${label}: семейства требуют ${own} входов, больше минимума набора ${set.minCases}`,
+        `${label}: семейства требуют ${ruCount(own, RU.input)}, больше минимума набора ${set.minCases}`,
       );
     for (const f of set.families)
       if (!families.has(f.id)) problems.push(`${label}: семейство ${f.id} не объявлено в покрытии`);
@@ -251,13 +252,13 @@ function referenceProblems(o: Obligation, gates: string[], artifacts: string[]) 
       problems.push(`${at}: gate ${id} не сверяет ни одного эталонного набора`);
   if (total < o.coverage.minCases)
     problems.push(
-      `${at}: наборы требуют ${total} входов, меньше общего минимума ${o.coverage.minCases}`,
+      `${at}: наборы требуют ${ruCount(total, RU.input)}, меньше общего минимума ${o.coverage.minCases}`,
     );
   for (const f of o.coverage.families) {
     const seen = families.get(f.id) ?? 0;
     if (seen < f.minCases)
       problems.push(
-        `${at}, семейство ${f.id}: наборы требуют ${seen} входов, меньше минимума семейства ${f.minCases}`,
+        `${at}, семейство ${f.id}: наборы требуют ${ruCount(seen, RU.input)}, меньше минимума семейства ${f.minCases}`,
       );
   }
   return problems;
@@ -294,7 +295,7 @@ export function declarationProblems(
     const sum = o.coverage.families.reduce((n, f) => n + f.minCases, 0);
     if (sum > o.coverage.minCases)
       problems.push(
-        `${at}: семейства требуют ${sum} входов, больше общего минимума ${o.coverage.minCases}`,
+        `${at}: семейства требуют ${ruCount(sum, RU.input)}, больше общего минимума ${o.coverage.minCases}`,
       );
     for (const path of o.method.artifacts)
       if (!context.artifacts.includes(path))

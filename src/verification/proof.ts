@@ -1,3 +1,4 @@
+import { RU, ruCount } from '../contracts/plural.ts';
 import {
   gateDigest,
   type EvidenceRecord,
@@ -92,7 +93,7 @@ export function requirementProof(
     return {
       ...base,
       level: 'none',
-      reason: `Тест ${link.testId} встречается ${found.length} раза: неясно, какой проверяет сценарий`,
+      reason: `Тест ${link.testId} встречается ${ruCount(found.length, RU.time)}: неясно, какой проверяет сценарий`,
     };
   if (found[0]!.status !== 'passed')
     return { ...base, level: 'none', reason: `Тест ${link.testId}: ${found[0]!.status}` };

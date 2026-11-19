@@ -1,3 +1,4 @@
+import { RU, ruCount } from '../contracts/plural.ts';
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
@@ -712,7 +713,7 @@ export async function initProject(options: InitOptions): Promise<InitData> {
   if (problems.length)
     throw new HarnessError(
       'NOT_READY',
-      `Preflight toolchain: ${problems.length} проблем(ы); исправьте конфигурацию до запуска`,
+      `Preflight toolchain: ${ruCount(problems.length, RU.problem)}; исправьте конфигурацию до запуска`,
       problems.map((p) => ({
         path: ['policy', ...p.field],
         message: `${p.code}: ${p.message}${p.path ? ` (${p.path})` : ''}`,

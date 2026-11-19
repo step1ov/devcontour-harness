@@ -141,6 +141,21 @@ export const operatorQuestionSchema = z.strictObject({
   impact: token(40).optional(),
   plain: freeText(T.questionPlain).optional(),
   answeredBy: z.enum(['operator', 'lead', 'host']).optional(),
+  /**
+   * Основание последнего ответа (ревизия 1): кто ответил, по какому правилу
+   * политики ответил ведущий (`technical`, `severity`), его причина и влияние
+   * вопроса — панель показывает «ответил ведущий: <причина>» строкой `line`.
+   */
+  answerBasis: z
+    .strictObject({
+      by: z.enum(['operator', 'lead', 'host']),
+      rule: z.enum(['technical', 'severity']).optional(),
+      reason: freeText(T.reason).optional(),
+      impact: token(40),
+      at: isoTimeSchema,
+      line: z.string().min(1).max(T.line),
+    })
+    .optional(),
   title: freeText(T.questionTitle).optional(),
   createdAt: isoTimeSchema,
 });
@@ -151,6 +166,11 @@ const escalationSchema = z.strictObject({
   code: token(80),
   actor: viewActor,
   action: token(80),
+  /**
+   * С какого момента ждёт — время из хранилища. Поле обязательно в версии 1;
+   * только у паузы записи прежней версии без `pausedAt` времени нет — тогда
+   * это момент запроса (и токен такого состояния меняется от запуска к запуску).
+   */
   since: isoTimeSchema,
 });
 
@@ -178,7 +198,12 @@ export const workViewSchema = z.strictObject({
     since: isoTimeSchema.optional(),
     next: z.array(token(40)).max(10),
     needs: z.strictObject({ actor: viewActor.nullable(), action: token(80) }).optional(),
-    /** P2. */
+    /**
+     * Наблюдаемая длительность этапа по закончившимся этапам попыток этого
+     * состояния (ревизия 1): p50 и p90 по ближайшему рангу, `samples` — сколько
+     * образцов; нет поля — образцов меньше `OPERATOR_VIEW_TYPICAL_MIN_SAMPLES`.
+     * Это наблюдение, не обещание.
+     */
     typical: z
       .strictObject({ p50Ms: count, p90Ms: count, samples: z.number().int().positive() })
       .optional(),
@@ -248,6 +273,33 @@ export const viewHistorySchema = z.strictObject({
   spendBound: z.enum(['exact', 'lower', 'unknown']),
   spendOpeningUsd: boundedSchema,
   budgetUsd: usd.optional(),
+  /**
+   * Итоги окна (ревизия 1): те же правила, что ряды; `failuresByBucket` — те
+   * же неудачные попытки, что `attemptsFailed`, по классам отказа (сумма
+   * равна `attemptsFailed`).
+   */
+  totals: z
+    .strictObject({
+      attemptsStarted: count,
+      attemptsFailed: count,
+      failuresByBucket: z.record(token(40), count),
+      gatesPassed: count,
+      gatesFailed: count,
+      gatesReused: count,
+      reviewRounds: z.strictObject({
+        plan: count,
+        contract: count,
+        code: count,
+        attempt: count,
+      }),
+      spendUsd: boundedSchema,
+      /** Время окна, когда шла хотя бы одна попытка. */
+      wallMs: count,
+      /** Сумма времени попыток в окне (параллельные складываются). */
+      attemptMs: count,
+      loadPeak: count,
+    })
+    .optional(),
 });
 
 export const viewHealthSchema = z.strictObject({

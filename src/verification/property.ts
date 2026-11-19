@@ -1,3 +1,4 @@
+import { RU, ruCount } from '../contracts/plural.ts';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
@@ -124,7 +125,7 @@ export function propertyCoverage(
   const counts = new Map<string, number>();
   for (const p of report.properties) counts.set(p.testId, (counts.get(p.testId) ?? 0) + 1);
   for (const [id, n] of counts)
-    if (n > 1) problems.push(`свойство ${id} указано в отчёте ${n} раза`);
+    if (n > 1) problems.push(`свойство ${id} указано в отчёте ${ruCount(n, RU.time)}`);
   for (const p of report.properties)
     if (p.status === 'passed' && p.cases < 1)
       problems.push(`свойство ${p.testId}: passed без единого проверенного входа`);
@@ -144,20 +145,23 @@ export function propertyCoverage(
       if (p.status !== 'passed') continue;
       if (p.cases < m.minCases)
         problems.push(
-          `свойство ${m.id}: проверено ${p.cases} входов из обязательных ${m.minCases}`,
+          `свойство ${m.id}: проверено ${ruCount(p.cases, RU.input)} из обязательных ${m.minCases}`,
         );
       for (const f of m.families) {
         const seen = p.families?.[f.id] ?? 0;
         if (seen < f.minCases)
           problems.push(
-            `свойство ${m.id}, семейство ${f.id}: проверено ${seen} входов из обязательных ${f.minCases}`,
+            `свойство ${m.id}, семейство ${f.id}: проверено ${ruCount(seen, RU.input)} из обязательных ${f.minCases}`,
           );
       }
     }
   const corpus = manifest?.corpus;
   if (corpus && corpus.cases.length) {
     const ran = report.corpus;
-    if (!ran) problems.push(`обязательный корпус (${corpus.cases.length} случаев) не выполнялся`);
+    if (!ran)
+      problems.push(
+        `обязательный корпус (${ruCount(corpus.cases.length, ['случай', 'случая', 'случаев'])}) не выполнялся`,
+      );
     else if (ran.digest !== corpus.digest)
       problems.push('выполнен корпус другой версии, чем закреплён за поручением');
     else {
@@ -213,7 +217,7 @@ export function propertyCoverage(
                 : ''),
           );
         } else if (found.length > 1)
-          problems.push(`testcase ${id} встречается ${found.length} раза`);
+          problems.push(`testcase ${id} встречается ${ruCount(found.length, RU.time)}`);
         else if (p?.status === 'passed' && found[0]!.status !== 'passed')
           problems.push(`testcase ${id}: ${found[0]!.status}, хотя отчёт свойств сообщает passed`);
       }

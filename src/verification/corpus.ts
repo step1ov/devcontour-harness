@@ -1,3 +1,4 @@
+import { RU, ruCount } from '../contracts/plural.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -414,7 +415,7 @@ export class CorpusStore {
           const limit = this.declarationOf(tx, suite)?.corpus?.maxCases ?? 500;
           if (!same && perProperty >= limit) {
             made.outcome = 'rejected';
-            made.reason = `корпус свойства достиг предела ${limit} случаев: расширьте генератор или эталон обычным изменением договора`;
+            made.reason = `корпус свойства достиг предела ${ruCount(limit, RU.caseGen)}: расширьте генератор или эталон обычным изменением договора`;
           } else {
             if (!same)
               suite.cases[id] = {

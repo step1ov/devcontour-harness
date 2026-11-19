@@ -1,3 +1,4 @@
+import { RU, ruCount } from '../contracts/plural.ts';
 import type { AttemptState, ExecutionView, FailureKind, WorkState } from '../contracts/index.ts';
 import { MAX_NEUTRAL_FAILURES, repairPolicy } from './failure.ts';
 import {
@@ -190,7 +191,7 @@ export function repairDecision(
       action: 'stop',
       workId: work.id,
       kind,
-      reason: `${work.id}: ${work.neutralFailures} отказов окружения или провайдера после начала работы — предел ${MAX_NEUTRAL_FAILURES}. Это неисправность среды; устраните её и повторите со сбросом, указав его.${detail}`,
+      reason: `${work.id}: ${ruCount(work.neutralFailures ?? 0, RU.failure)} окружения или провайдера после начала работы — предел ${MAX_NEUTRAL_FAILURES}. Это неисправность среды; устраните её и повторите со сбросом, указав его.${detail}`,
     };
 
   // Тексты отказов ревью разные, и предел одинаковых отпечатков их не
@@ -202,7 +203,7 @@ export function repairDecision(
       workId: work.id,
       kind,
       gap,
-      reason: `${work.id}: пробел приёмки — ревью ${gap.runs.length} раза подряд отклонило по одному и тому же ${gapSubject(gap.key)} при зелёных проверках (попытки ${gap.runs.join(', ')}). Третья слепая попытка не выдаётся: приёмка этот класс не проверяет. Решение ведущего — закрепить класс проверкой (корпус, эталонный набор, свойство в договоре проверки) или разделить задачу.${detail}`,
+      reason: `${work.id}: пробел приёмки — ревью ${ruCount(gap.runs.length, RU.time)} подряд отклонило по одному и тому же ${gapSubject(gap.key)} при зелёных проверках (попытки ${gap.runs.join(', ')}). Третья слепая попытка не выдаётся: приёмка этот класс не проверяет. Решение ведущего — закрепить класс проверкой (корпус, эталонный набор, свойство в договоре проверки) или разделить задачу.${detail}`,
     };
 
   const fingerprint = work.failureFingerprint;
@@ -216,7 +217,7 @@ export function repairDecision(
       workId: work.id,
       kind,
       reason: fingerprint
-        ? `${work.id}: одна и та же причина ${identical} раз подряд, новой гипотезы нет. ${rule.explain}${detail}`
+        ? `${work.id}: одна и та же причина ${ruCount(identical, RU.time)} подряд, новой гипотезы нет. ${rule.explain}${detail}`
         : `${work.id}: отказ записан без отпечатка, повторы считать нечем.${detail}`,
     };
 
