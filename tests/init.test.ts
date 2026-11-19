@@ -868,6 +868,11 @@ test('alpha.55: --lead-technical-answers — правило в новой пол
   assert.equal(plain.questions!.source, 'default');
   assert.match(plain.questions!.line, /отвечает человек/);
   assert.match(initText(plain), /questions: .*init --lead-technical-answers/);
+  // Ответ прежней версии без поля — валиден и печатается без строки questions.
+  const { questions: _q, ...legacy } = plain;
+  void _q;
+  initDataSchema.parse(legacy);
+  assert.doesNotMatch(initText(legacy), /questions:/);
   // С флагом: правило в сгенерированной политике.
   const planned = await initProject(p.opts({ plan: true, leadTechnicalAnswers: true }));
   assert.equal(planned.questions!.leadTechnical, true);

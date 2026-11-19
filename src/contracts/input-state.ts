@@ -30,9 +30,11 @@ const blockingQuestion = (r: Pick<InputRequest, 'kind' | 'blocking'>) =>
  * только человек.
  */
 export function leadAnswerBasis(
-  r: Pick<InputRequest, 'kind' | 'blocking' | 'effectiveSeverity' | 'floors'> & {
-    question: Pick<InputQuestion, 'impact'>;
-  },
+  r: Pick<InputRequest, 'kind' | 'blocking' | 'effectiveSeverity'> &
+    Partial<Pick<InputRequest, 'floors'>> & {
+      /** Нет `question` или `floors` (вызов alpha.54) — технический путь закрыт. */
+      question?: Pick<InputQuestion, 'impact'>;
+    },
   policy: Pick<InputPolicy, 'leadAnswers'>,
 ): 'non-blocking' | LeadAnswerBasis | null {
   if (!blockingQuestion(r)) return 'non-blocking';
@@ -40,7 +42,11 @@ export function leadAnswerBasis(
   if (!lead) return null;
   const withinMax = lead.maxSeverity === undefined || r.effectiveSeverity <= lead.maxSeverity;
   if (lead.technical === true)
-    return impactOf(r.question) === 'technical' && r.floors.length === 0 && withinMax
+    return r.question !== undefined &&
+      r.floors !== undefined &&
+      impactOf(r.question) === 'technical' &&
+      r.floors.length === 0 &&
+      withinMax
       ? 'technical'
       : null;
   return lead.maxSeverity !== undefined && withinMax ? 'severity' : null;

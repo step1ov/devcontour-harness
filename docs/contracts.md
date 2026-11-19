@@ -1091,7 +1091,9 @@ expectedVersion)` — новая версия ответа с `answerDigest`; р
    технический, с минимумом или серьёзнее `maxSeverity`; без него —
    серьёзнее `maxSeverity`. Правило `technical` требует причины (`reason`, до 1000 знаков; нет — `INVALID_INPUT`
    `reason-required`). Принятый ответ ведущего на блокирующий вопрос несёт
-   `basis: technical | severity` и `reason` (в `answerDigest` не входят);
+   `basis: technical | severity` и `reason` (в `answerDigest` не входят;
+   `basis` — только у ответа ведущего, `technical` — только с причиной: это
+   держат Zod и движок, JSON Schema описывает форму полей);
    `technical` показывается как «решено ведущим (технический вопрос)» в
    `status` (`works[].input.answerBasis`; `impact`, `leadMay` — правило, по
    которому ведущий может ответить на ждущий вопрос), `explain` (тогда

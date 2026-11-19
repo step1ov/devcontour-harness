@@ -361,6 +361,8 @@ test('H3-01: прежние команды и схемы их данных не 
       const o = v as { properties: Record<string, unknown>; required?: string[] };
       if (o.properties && 'facts' in o.properties && 'lead' in o.properties) {
         // `questions` — правило ответов на вопросы исполнителя (0.1.0-alpha.55).
+        // Необязательное: в `required` его нет (ответ прежней версии валиден).
+        assert.ok(!o.required?.includes('questions'), 'init.questions необязательно');
         const added = ['lead', 'review', 'runtimes', 'warnings', 'questions'];
         const properties = { ...o.properties };
         for (const key of added) delete properties[key];

@@ -227,9 +227,11 @@ export const forOperator = (r: Pick<InputRequest, 'kind' | 'blocking'>) =>
  * серьёзность не выше порога.
  */
 export const leadMayAnswer = (
-  r: Pick<InputRequest, 'kind' | 'blocking' | 'effectiveSeverity' | 'floors'> & {
-    question: Pick<InputQuestion, 'impact'>;
-  },
+  r: Pick<InputRequest, 'kind' | 'blocking' | 'effectiveSeverity'> &
+    Partial<Pick<InputRequest, 'floors'>> & {
+      /** Нет `question` или `floors` (вызов alpha.54) — технический путь закрыт. */
+      question?: Pick<InputQuestion, 'impact'>;
+    },
   policy: Pick<InputPolicy, 'leadAnswers'>,
 ) => leadAnswerBasis(r, policy) !== null;
 
@@ -267,6 +269,8 @@ export const inputAnswerSchema = z
     digest: digestSchema,
     at: isoTimeSchema,
   })
+  // Смысловые правила записи — как у вопроса (`recommended` из вариантов):
+  // их держат Zod и движок; JSON Schema в `schemas/` описывает форму полей.
   .superRefine((a, ctx) => {
     // Правило приёма — только у ответа ведущего; технический — только с причиной.
     if (a.basis !== undefined && a.actor.kind !== 'lead')

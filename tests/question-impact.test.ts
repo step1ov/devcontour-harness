@@ -20,6 +20,7 @@ import {
   inputPolicySchema,
   inputRequestSchema,
   leadAnswerBasis,
+  leadMayAnswer,
   leadAnswersRule,
   type InputFloor,
   type InputOutcome,
@@ -105,6 +106,9 @@ function stopped(
   const [request] = env.engine.inputRequests({ workId: 'w' });
   return { ...env, attempt, request: request! };
 }
+
+/** `answerDigest` этого содержания, посчитанный пакетом 0.1.0-alpha.53 (до полей basis/reason). */
+const LEGACY_DIGEST = 'c3b511ed934da63752499e5a100dea845e3385f7e87942d0b798a299fc3ec26d';
 
 const TECHNICAL = { threshold: 7, leadAnswers: { technical: true } };
 
@@ -295,6 +299,32 @@ test('alpha.55: ведущий решает технический вопрос 
   assert.equal(
     answer.digest,
     answerDigest(id, { revision: 1, text: 'Intl', optionId: 'native', kind: 'clarification' }),
+  );
+  // Независимое значение прежней версии: digest этого содержания до alpha.55.
+  assert.equal(answer.digest.length, 64);
+  assert.equal(
+    answerDigest('IR-000000000000000000000000', {
+      revision: 1,
+      text: 'Intl',
+      optionId: 'native',
+      kind: 'clarification',
+    }),
+    LEGACY_DIGEST,
+  );
+  // Вызов alpha.54 без floors и question — тип принимается, технический путь закрыт.
+  assert.equal(
+    leadMayAnswer(
+      { kind: 'question', blocking: true, effectiveSeverity: 8 },
+      { leadAnswers: { maxSeverity: 8 } },
+    ),
+    true,
+  );
+  assert.equal(
+    leadMayAnswer(
+      { kind: 'question', blocking: true, effectiveSeverity: 3 },
+      { leadAnswers: { technical: true } },
+    ),
+    false,
   );
   // Повтор с той же причиной — тот же ответ; другая причина — новая версия.
   const same = env.engine.answerInput(
