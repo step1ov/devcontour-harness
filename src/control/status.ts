@@ -394,6 +394,8 @@ export function statusText(data: z.output<typeof statusDataSchema>): string {
     if (w.verification) out.push(`  проверки: ${w.verification.line}`);
     // Принятая версия против текущего target ref: непроверенное после приёмки.
     if (w.target) out.push(`  ${w.target.line} (${w.target.lineEn})`);
+    // Удалённая ветка — по локальной remote-tracking ref, без fetch.
+    if (w.target?.remote) out.push(`  удалённая ветка: ${w.target.remote.line}`);
   }
   return out.join('\n') + '\n' + reviewsText(data.reviews, data.reviewsTruncated);
 }

@@ -26,12 +26,14 @@ import {
   type ExecutionView,
   type InputRequest,
   type CallRecord,
+  type CodeReviewRecord,
   type ReviewRecord,
   type statusDataSchema,
   type AttemptState,
 } from '../contracts/index.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import { callCostKnown, failureBucketOf, interruptedByShutdown } from '../report/compute.ts';
+import { failurePlainOf } from '../report/failure-plain.ts';
 import { callRecords } from '../engine/usage.ts';
 import { legacyGroupCall } from '../engine/budget.ts';
 import { requestsOf } from '../engine/input-requests.ts';
@@ -42,6 +44,7 @@ import { policySecrets } from '../environment/redaction.ts';
 import {
   operatorView,
   workDetailView,
+  type OperatorActivityInput,
   type OperatorReviewInput,
   type OperatorView,
   type OperatorViewInput,
@@ -428,6 +431,158 @@ export function stageTypicalOf(
   return out;
 }
 
+/**
+ * События ленты «кто что делал» из записей, которые представление уже
+ * читает: попытки и их записи проверок и ревью, раунды ревью плана,
+ * контракта и кода, вопросы исполнителя и ответы. Окно и предел — у проекции.
+ */
+export function activityInputOf(
+  policy: Pick<ExecutionPolicy, 'repositories'>,
+  attempts: readonly AttemptState[],
+  planRows: readonly ReviewRecord[],
+  codeRows: readonly CodeReviewRecord[],
+  requests: readonly InputRequest[],
+): OperatorActivityInput[] {
+  const out: OperatorActivityInput[] = [];
+  const blockingOf = (fs: readonly { severity: string; status?: string }[]) =>
+    fs.filter((f) => f.severity === 'blocking' && (f.status === undefined || f.status === 'open'))
+      .length;
+  for (const a of attempts) {
+    out.push({
+      kind: 'attempt.started',
+      at: a.startedAt,
+      workId: a.workId,
+      attempt: a.attempt,
+      runtime: a.runtime,
+    });
+    if (a.status === 'succeeded' && a.finishedAt)
+      out.push({
+        kind: 'work.accepted',
+        at: a.finishedAt,
+        workId: a.workId,
+        attempt: a.attempt,
+        ...(a.integrationSha ? { sha: a.integrationSha } : {}),
+        ...((ref) => (ref ? { ref } : {}))(
+          policy.repositories.find((r) => r.id === a.repositoryId)?.targetRef,
+        ),
+      });
+    else if (a.status !== 'active' && a.finishedAt) {
+      const interrupted = interruptedByShutdown(a);
+      const bucket = failureBucketOf(a);
+      out.push({
+        kind: 'attempt.ended',
+        at: a.finishedAt,
+        workId: a.workId,
+        attempt: a.attempt,
+        outcome: interrupted
+          ? 'interrupted'
+          : a.status === 'cancelled' || a.status === 'expired'
+            ? a.status
+            : 'failed',
+        ...(bucket ? { reason: failurePlainOf(a, bucket) } : {}),
+        // Правило движка: не засчитаны прерванные остановкой, отказы до работы,
+        // окружения и провайдера, истёкшее владение.
+        ...(interrupted ||
+        a.blocked ||
+        a.status === 'expired' ||
+        a.failureKind === 'environment' ||
+        a.failureKind === 'provider-auth'
+          ? { uncounted: true }
+          : {}),
+      });
+    }
+    for (const e of a.evidence) {
+      if (e.kind === 'test')
+        out.push({
+          kind: 'gate',
+          at: e.createdAt,
+          workId: a.workId,
+          attempt: a.attempt,
+          gate: e.consumer ? `${e.gate}@${e.consumer}` : e.gate,
+          phase: e.phase,
+          passed: e.passed,
+          ...(e.recheck ? { recheck: e.recheck.outcome } : {}),
+          ...(e.reusedEvidence ? { reused: true } : {}),
+        });
+      else if (e.kind === 'review' && (!e.reviewRound || e.reviewRound.protocol === 'valid'))
+        out.push({
+          kind: 'review',
+          at: e.createdAt,
+          scope: 'attempt',
+          subject: a.workId,
+          workId: a.workId,
+          attempt: a.attempt,
+          phase: e.phase,
+          approved: e.passed,
+          blocking: blockingOf(e.findings ?? []),
+          reviewer: a.reviewer,
+        });
+    }
+  }
+  // Эскалация — в раунде, где находка впервые ждёт решения.
+  const escalated = new Set<string>();
+  const rounds = <R extends { subject: string; round: number }>(rows: readonly R[]) =>
+    [...rows].sort((x, y) => x.round - y.round);
+  for (const r of rounds(planRows)) {
+    out.push({
+      kind: 'review',
+      at: r.at,
+      scope: r.kind,
+      subject: r.subject,
+      round: r.round,
+      approved: r.approved,
+      blocking: blockingOf(r.findings),
+      reviewer: r.reviewerRuntime,
+    });
+    const fresh = escalatedFindings(r.findings, r.round).filter(
+      (f) => !escalated.has(`${r.kind}\0${r.subject}\0${f.id}`),
+    );
+    for (const f of fresh) escalated.add(`${r.kind}\0${r.subject}\0${f.id}`);
+    if (fresh.length)
+      out.push({
+        kind: 'review.escalated',
+        at: r.at,
+        scope: r.kind,
+        subject: r.subject,
+        findings: fresh.length,
+        round: r.round,
+      });
+  }
+  for (const r of rounds(codeRows)) {
+    out.push({
+      kind: 'review',
+      at: r.at,
+      scope: 'code',
+      subject: r.subject,
+      label: `${r.repositoryId}/${r.role} ${r.refs.base}..${r.refs.head}`,
+      round: r.round,
+      approved: r.approved,
+      blocking: blockingOf(r.findings),
+      reviewer: r.reviewerRuntime,
+    });
+  }
+  for (const q of requests) {
+    if (q.kind !== 'question') continue;
+    out.push({
+      kind: 'question.asked',
+      at: q.createdAt,
+      workId: q.workId,
+      requestId: q.id,
+      severity: q.effectiveSeverity,
+    });
+    for (const x of q.answers)
+      out.push({
+        kind: 'question.answered',
+        at: x.at,
+        workId: q.workId,
+        requestId: q.id,
+        by: x.actor.kind,
+        ...(x.actor.kind === 'lead' && x.basis ? { basis: x.basis } : {}),
+      });
+  }
+  return out;
+}
+
 /** Вызов полностью учтён: завершён, usage полный, цена есть (правило отчёта). */
 const callComplete = (r: CallRecord) =>
   r.outcome !== 'active' && r.outcome !== 'abandoned' && r.usage.complete && r.costUsd !== null;
@@ -684,6 +839,13 @@ export function collectOperatorViewInput(
         ];
       });
     const reviews = reviewsOf(v, policy);
+    const activity = activityInputOf(
+      policy,
+      attempts,
+      v.locals('reviews', WORKSPACE_OWNER).map((r) => r.value),
+      v.locals('code-reviews', WORKSPACE_OWNER).map((r) => r.value),
+      requestsOf(v),
+    );
     const control = v.control();
     const controller = v.controller();
     const raw = view.raw;
@@ -756,6 +918,7 @@ export function collectOperatorViewInput(
       },
       ...(controller ? { controller: { leaseUntil: controller.leaseUntil } } : {}),
       ...(status.budgets ? { budgets: status.budgets.budgets } : {}),
+      activity,
       warnings: view.warnings,
       mask: maskContextOf(policy, view.baseDir, h.stateDir),
     };
@@ -795,6 +958,7 @@ function emptyInput(policy: ViewPolicy, now: number, stateDir: string): Operator
     reviews: [],
     stops: [],
     queue: { paused: false },
+    activity: [],
     ...(policy.policy.budgets ? { budgets: [] } : {}),
     warnings: [
       ...policy.warnings,

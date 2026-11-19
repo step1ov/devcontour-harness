@@ -22,7 +22,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cliDataSchemas } from '../src/contracts/index.ts';
+import { cliDataSchemas, operatorViewSchema } from '../src/contracts/index.ts';
 import { targetLines } from '../src/control/target.ts';
 import { bin, implement } from './runner-fixture.ts';
 import { verdict } from './review-fixture.ts';
@@ -104,7 +104,7 @@ test('H11: принятая работа без коммитов после пр
   const work = status.works[0]!;
   assert.equal(work.status, 'done');
   assert.deepEqual(
-    { ...work.target, line: undefined, lineEn: undefined },
+    { ...work.target, line: undefined, lineEn: undefined, remote: undefined },
     {
       repositoryId: 'app',
       ref: REF,
@@ -114,9 +114,91 @@ test('H11: принятая работа без коммитов после пр
       filesSinceAccepted: 0,
       line: undefined,
       lineEn: undefined,
+      remote: undefined,
     },
   );
   assert.match(work.target!.line, /после приёмки коммитов нет/);
+  // Удалённой ветки нет: «неизвестно», а не «не отправлено».
+  assert.deepEqual(work.target!.remote, {
+    state: 'unknown',
+    reason: 'нет удалённой ветки',
+    reasonEn: 'no remote branch',
+    line: 'неизвестно (нет удалённой ветки)',
+    lineEn: 'unknown (no remote branch)',
+  });
+});
+
+test('P2-c: принято локально против удалённой ветки — только по локальной remote-tracking ref, без fetch', () => {
+  const p = accepted();
+  const origin = p.app + '-origin.git';
+  execFileSync('git', ['init', '-q', '--bare', origin]);
+  p.git('remote', 'add', 'origin', origin);
+  const branch = REF.replace('refs/heads/', '');
+  // Удалённая ветка на родителе принятого коммита, upstream настроен.
+  p.git('push', '-q', 'origin', `${p.acceptedSha}^:${REF}`);
+  p.git('fetch', '-q', 'origin');
+  p.git('branch', '-q', `--set-upstream-to=origin/${branch}`, branch);
+  const remote = () =>
+    cliDataSchemas.status.parse(p.harness('status', '--state', p.state).json.data).works[0]!.target!
+      .remote!;
+  let r = remote();
+  assert.equal(r.state, 'not-pushed');
+  assert.equal(r.trackingRef, `origin/${branch}`);
+  assert.equal(r.line, `принято локально; в удалённой ветке origin/${branch} ещё нет`);
+  assert.equal(r.lineEn, `accepted locally; not yet on the remote branch origin/${branch}`);
+  assert.ok(r.checkedAt && Number.isFinite(Date.parse(r.checkedAt)), JSON.stringify(r));
+  const human = p.harness('status', '--state', p.state, '--human');
+  assert.ok(human.stdout.includes(`удалённая ветка: ${r.line}`), human.stdout);
+
+  // Коммит появился в удалённом репозитории, но ref на этой машине не обновлён:
+  // без fetch состояние остаётся прежним (сети нет).
+  execFileSync('git', ['--git-dir', origin, 'fetch', '-q', p.app, `+${REF}:${REF}`]);
+  assert.equal(remote().state, 'not-pushed');
+
+  // Отправлено: принятый коммит в истории remote-tracking ref.
+  p.git('push', '-q', 'origin', REF);
+  r = remote();
+  assert.equal(r.state, 'pushed');
+  assert.equal(r.line, `уже в удалённой ветке origin/${branch}`);
+  const result = cliDataSchemas.result.parse(
+    p.harness('result', '--state', p.state, '--work', 'add-greeting').json.data,
+  );
+  assert.equal(result.target!.remote!.state, 'pushed');
+  // Представление оператора: та же сверка в работе и лента из записей прогона.
+  const detail = cliDataSchemas.view.parse(
+    p.harness('view', '--state', p.state, '--work', 'add-greeting').json.data,
+  ) as any;
+  assert.deepEqual(
+    { state: detail.work.target.remote.state, trackingRef: detail.work.target.remote.trackingRef },
+    { state: 'pushed', trackingRef: `origin/${branch}` },
+  );
+  assert.equal(detail.work.target.remote.line, `уже в удалённой ветке origin/${branch}`);
+  const overview = operatorViewSchema.parse(
+    p.harness('view', '--state', p.state, '--lang', 'en').json.data,
+  );
+  const activity = overview.activity ?? [];
+  const actions = new Set(activity.map((x) => `${x.actor} ${x.action}`));
+  for (const a of [
+    'controller attempt.started',
+    'controller gate.passed',
+    'reviewer review.approved',
+    'controller work.accepted',
+  ])
+    assert.ok(actions.has(a), `${a}: ${[...actions].join(', ')}`);
+  const acceptedRow = activity.find((x) => x.action === 'work.accepted')!;
+  assert.equal(acceptedRow.workId, 'add-greeting');
+  assert.match(acceptedRow.plain, new RegExp(`on ${REF}, locally$`));
+
+  // Без upstream — та же ветка origin/<имя>.
+  p.git('branch', '-q', '--unset-upstream', branch);
+  assert.equal(remote().state, 'pushed');
+  // Upstream настроен, а remote-tracking ref на машине нет — неизвестно.
+  p.git('config', `branch.${branch}.remote`, 'origin');
+  p.git('config', `branch.${branch}.merge`, 'refs/heads/elsewhere');
+  r = remote();
+  assert.equal(r.state, 'unknown');
+  assert.equal(r.reason, 'удалённая ветка ещё не получена на этой машине');
+  assert.equal(r.trackingRef, 'origin/elsewhere');
 });
 
 test('H11: коммиты на target ref после приёмки — status, status --human, result и report называют их непроверенными', () => {
@@ -225,4 +307,7 @@ test('H11: имена из пробелов и с переводом строк�
   const target = cliDataSchemas.result.parse(moved.json.data).target!;
   assert.equal(target.unavailable, 'checkout репозитория не найден');
   assert.ok(!target.line.includes(p.app));
+  assert.equal(target.remote!.state, 'unknown');
+  assert.equal(target.remote!.reason, 'checkout репозитория не найден');
+  assert.equal(target.remote!.line, 'неизвестно (checkout репозитория не найден)');
 });

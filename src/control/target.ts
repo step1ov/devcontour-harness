@@ -54,6 +54,67 @@ function rawLines(t: Omit<AcceptedTarget, 'line' | 'lineEn'>) {
   };
 }
 
+type Remote = NonNullable<AcceptedTarget['remote']>;
+/** Удалённая ветка репозитория: её имя, вершина и последнее обновление на этой машине. */
+interface RemoteBranch {
+  full?: string;
+  short?: string;
+  sha?: string;
+  checkedAt?: string;
+  reason?: { ru: string; en: string };
+}
+
+const NO_REMOTE = { ru: 'нет удалённой ветки', en: 'no remote branch' };
+const NOT_FETCHED = {
+  ru: 'удалённая ветка ещё не получена на этой машине',
+  en: 'the remote branch is not fetched on this machine',
+};
+const REMOTE_UNREADABLE = {
+  ru: 'удалённая ветка не прочитана',
+  en: 'the remote branch could not be read',
+};
+
+/** Состояние удалённой ветки простыми словами (RU и EN). */
+export function remoteOf(
+  state: Remote['state'],
+  branch: Pick<RemoteBranch, 'short' | 'checkedAt' | 'reason'>,
+): Remote {
+  const name = branch.short ?? '';
+  const base = {
+    state,
+    ...(branch.short ? { trackingRef: branch.short } : {}),
+    ...(branch.checkedAt ? { checkedAt: branch.checkedAt } : {}),
+  };
+  if (state === 'pushed')
+    return {
+      ...base,
+      line: clip(`уже в удалённой ветке ${name}`),
+      lineEn: clip(`already on the remote branch ${name}`),
+    };
+  if (state === 'not-pushed')
+    return {
+      ...base,
+      line: clip(`принято локально; в удалённой ветке ${name} ещё нет`),
+      lineEn: clip(`accepted locally; not yet on the remote branch ${name}`),
+    };
+  const reason = branch.reason ?? NO_REMOTE;
+  return {
+    ...base,
+    reason: reason.ru,
+    reasonEn: reason.en,
+    line: clip(`неизвестно (${reason.ru})`),
+    lineEn: clip(`unknown (${reason.en})`),
+  };
+}
+
+const reasonEnOf: Record<string, string> = {
+  'репозиторий не объявлен в политике': 'the repository is not declared in the policy',
+  'checkout репозитория не найден': 'the repository checkout is not found',
+  'checkout репозитория не доверен': 'the repository checkout is not trusted',
+  'git не ответил вовремя': 'git did not answer in time',
+  'git не найден': 'git is not found',
+};
+
 /**
  * Принятые версии против текущих target ref (`status`, `result`, `report`):
  * один `rev-parse` на репозиторий и по три вызова git на различный принятый
@@ -66,6 +127,7 @@ export function acceptedTargets(
 ): Map<string, AcceptedTarget> {
   const out = new Map<string, AcceptedTarget>();
   const heads = new Map<string, { head?: string; error?: string }>();
+  const branches = new Map<string, RemoteBranch>();
   const cache = new Map<string, Omit<AcceptedTarget, 'line' | 'lineEn'>>();
   const deadline = Date.now() + TARGET_TOTAL_MS;
   // Каждый вызов — не дольше остатка общей сверки; исчерпанный остаток —
@@ -95,6 +157,97 @@ export function acceptedTargets(
     )
       return 'checkout репозитория не доверен';
     return what;
+  };
+  const asReason = (ru: string) => ({
+    ru,
+    en:
+      reasonEnOf[ru] ??
+      ru.replace(/^сверка прервана: предел (\d+) с$/, 'the check was cut off: the $1 s limit'),
+  });
+  // Удалённая ветка — только локальные ref и config: upstream ветки, иначе
+  // `origin/<имя>`. Ни fetch, ни обращения к сети.
+  const branchOf = (path: string, ref: string): RemoteBranch => {
+    let full = '';
+    try {
+      full = run(path, ['for-each-ref', '--format=%(upstream)', '--end-of-options', ref]);
+    } catch (error) {
+      return { reason: asReason(reason(error, REMOTE_UNREADABLE.ru)) };
+    }
+    if (!full) {
+      const origin = 'refs/remotes/origin/' + ref.replace(/^refs\/heads\//, '');
+      try {
+        run(path, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${origin}^{commit}`]);
+        full = origin;
+      } catch (error) {
+        const e = error as { status?: number; code?: string };
+        return e.status === 1
+          ? { reason: NO_REMOTE }
+          : { reason: asReason(reason(error, REMOTE_UNREADABLE.ru)) };
+      }
+    }
+    if (!full.startsWith('refs/remotes/')) return { reason: NO_REMOTE };
+    const short = full.slice('refs/remotes/'.length);
+    let sha: string;
+    try {
+      sha = run(path, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${full}^{commit}`]);
+    } catch (error) {
+      const e = error as { status?: number };
+      return {
+        full,
+        short,
+        reason: e.status === 1 ? NOT_FETCHED : asReason(reason(error, REMOTE_UNREADABLE.ru)),
+      };
+    }
+    let checkedAt: string | undefined;
+    try {
+      const gd = run(path, [
+        'reflog',
+        'show',
+        '-n',
+        '1',
+        '--date=iso-strict',
+        '--format=%gd',
+        '--end-of-options',
+        full,
+      ]);
+      const m = /@\{([^}]+)\}$/.exec(gd);
+      const t = m ? Date.parse(m[1]!) : NaN;
+      if (Number.isFinite(t)) checkedAt = new Date(t).toISOString();
+    } catch {
+      // Нет reflog — время обновления неизвестно, состояние читается.
+    }
+    return { full, short, sha, ...(checkedAt ? { checkedAt } : {}) };
+  };
+  const remoteFor = (
+    work: AcceptedWork,
+    path: string | undefined,
+    ref: string,
+    unreachable?: string,
+  ): Remote => {
+    if (path === undefined)
+      return remoteOf('unknown', { reason: asReason(unreachable ?? REMOTE_UNREADABLE.ru) });
+    const repoKey = work.repositoryId;
+    let branch = branches.get(repoKey);
+    if (!branch) {
+      try {
+        branch = branchOf(path, ref);
+      } catch (error) {
+        branch = { reason: asReason(reason(error, REMOTE_UNREADABLE.ru)) };
+      }
+      branches.set(repoKey, branch);
+    }
+    if (!branch.sha) return remoteOf('unknown', branch);
+    if (branch.sha === work.acceptedSha) return remoteOf('pushed', branch);
+    try {
+      run(path, ['merge-base', '--is-ancestor', work.acceptedSha, branch.sha]);
+      return remoteOf('pushed', branch);
+    } catch (error) {
+      if ((error as { status?: number }).status === 1) return remoteOf('not-pushed', branch);
+      return remoteOf('unknown', {
+        ...branch,
+        reason: asReason(reason(error, REMOTE_UNREADABLE.ru)),
+      });
+    }
   };
   for (const work of works) {
     const repo = policy.repositories.find((r) => r.id === work.repositoryId);
@@ -162,6 +315,16 @@ export function acceptedTargets(
             };
           }
       }
+      const path = repo ? repoPath(repo.path) : undefined;
+      base = {
+        ...base,
+        remote: remoteFor(
+          work,
+          path !== undefined && existsSync(path) ? path : undefined,
+          ref,
+          repo ? 'checkout репозитория не найден' : 'репозиторий не объявлен в политике',
+        ),
+      };
       cache.set(key, base);
     }
     out.set(work.id, { ...base, ...targetLines(base) });

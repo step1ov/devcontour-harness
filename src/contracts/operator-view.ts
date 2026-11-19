@@ -244,10 +244,21 @@ export const workViewSchema = z.strictObject({
       repositoryId: id,
       ref: z.string().min(1).max(500),
       acceptedSha: sha.optional(),
+      /**
+       * Есть ли принятый коммит в удалённой ветке (ревизия 2): `state` —
+       * `pushed`, `not-pushed` или `unknown`, только по локальной
+       * remote-tracking ref, без fetch и сети. `trackingRef` — короткое имя
+       * удалённой ветки (`origin/main`), `checkedAt` — когда git на этой
+       * машине последний раз обновил её (reflog; нет — неизвестно), `line` —
+       * та же сводка простыми словами. Неизвестное значение `state` читается
+       * как `unknown`.
+       */
       remote: z.strictObject({
         state: token(40),
         trackingRef: z.string().min(1).max(500).optional(),
+        checkedAt: isoTimeSchema.optional(),
         reason: freeText(T.reason).optional(),
+        line: z.string().min(1).max(T.line).optional(),
       }),
     })
     .optional(),
@@ -328,14 +339,19 @@ export const viewHealthSchema = z.strictObject({
     .max(L.warnings),
 });
 
-/** P2: кто что делал. */
+/**
+ * Кто что делал (ревизия 2): события из записей хранилища за окно истории,
+ * новые сверху. `actor` — `controller`, `writer`, `reviewer`, `lead`,
+ * `operator`, `host`; `action` — код события (docs/operator-view.md), `plain`
+ * — фраза обычными словами. Нет поля — производитель ленту не ведёт.
+ */
 const activitySchema = z.strictObject({
   at: isoTimeSchema,
   actor: viewActor,
   action: token(80),
   workId: id.optional(),
   subject: id.optional(),
-  plain: z.string().min(1).max(200),
+  plain: z.string().min(1).max(T.activity),
 });
 
 /** P2: решения; обязательные сочетания — design §3.9. */
