@@ -48,6 +48,7 @@ import {
   type WorkState,
 } from '../contracts/index.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
+import { codeReviewDiff } from './review-diff.ts';
 import { worktreeKey } from '../environment/git-trust.ts';
 import {
   attemptRefusal,
@@ -3207,12 +3208,7 @@ export class Runner {
   ) {
     const dir = join(artifacts, phase, 'review');
     await mkdir(dir, { recursive: true });
-    const diff = await git(cwd, 'diff', '--no-ext-diff', '--no-textconv', base, sha);
-    if (diff.length > 1_000_000)
-      throw new TaskFailure(
-        'review',
-        'Diff превышает лимит независимого ревью; разделите поручение',
-      );
+    const diff = await codeReviewDiff(cwd, base, sha);
     const status = await git(cwd, 'status', '--porcelain', '--untracked-files=all');
     const repo = this.repo(attempt.repositoryId);
     const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
@@ -3369,7 +3365,12 @@ export class Runner {
               },
             ],
           }
-        : checkCodeReview(response.output, history, { runId: attempt.id, phase, sha }, { legacy });
+        : checkCodeReview(
+            response.output,
+            history,
+            { runId: attempt.id, phase, sha },
+            { legacy, redact: response.redact },
+          );
       const result = verdict.result;
       // Проверки reviewer — по журналу controller, а не по самоотчёту модели.
       const journal = probe ? await readProbeJournal(probe.log) : undefined;
