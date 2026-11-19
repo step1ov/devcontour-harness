@@ -4,7 +4,7 @@ import type { ExecutionPolicy, ReviewSubjectSummary, RuntimeName } from '../cont
 import type { RuntimeAdapter } from '../contracts/ports.ts';
 import { doctor } from '../control/doctor.ts';
 import { Harness } from '../control/harness.ts';
-import { reviewSummaries, reviewsText } from '../control/review-summary.ts';
+import { reviewSummaryRows, reviewsText } from '../control/review-summary.ts';
 import { attemptSummaries, type attemptSummaryView } from '../control/status.ts';
 import { explainStop, type StopDiagnosis, type StopInput } from '../projections/stop.ts';
 import { stopInputsOf } from './state.ts';
@@ -39,6 +39,7 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
   let attempts: AttemptSummaryRow[];
   let attemptsTruncated: number;
   let reviews: ReviewSubjectSummary[];
+  let reviewsTruncated: number;
   try {
     stateInputs = stopInputsOf(h, {
       maxAttempts: policy.maxAttempts,
@@ -60,7 +61,7 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
       };
     }));
     // Ревью плана и контрактов — та же сводка, что у `status`.
-    reviews = h.engine.read((v) => reviewSummaries(v, policy));
+    ({ reviews, reviewsTruncated } = h.engine.read((v) => reviewSummaryRows(v, policy)));
   } finally {
     h.close();
   }
@@ -81,6 +82,7 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
     attempts,
     ...(attemptsTruncated ? { attemptsTruncated } : {}),
     ...(reviews.length ? { reviews } : {}),
+    ...(reviewsTruncated ? { reviewsTruncated } : {}),
   };
 }
 
@@ -93,6 +95,7 @@ export interface ExplainData {
   attempts?: AttemptSummaryRow[];
   attemptsTruncated?: number;
   reviews?: ReviewSubjectSummary[];
+  reviewsTruncated?: number;
 }
 
 /** Предел строк сводки попыток в ответе `explain`; остальные — `attemptsTruncated`. */
@@ -119,7 +122,7 @@ export function explainText(data: ExplainData): string {
     stops +
     attemptsText(data.attempts ?? []) +
     (data.attemptsTruncated ? `  … и ещё поручений: ${data.attemptsTruncated}\n` : '') +
-    reviewsText(data.reviews)
+    reviewsText(data.reviews, data.reviewsTruncated)
   );
 }
 

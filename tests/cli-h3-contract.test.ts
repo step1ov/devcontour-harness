@@ -481,20 +481,22 @@ test('H3-01: прежние команды и схемы их данных не 
       return rest;
     }
     // Аддитивное поле explain — сводка попыток по поручениям (0.1.0-alpha.52)
-    // и сводка ревью плана и контрактов (0.1.0-alpha.54).
+    // и сводка ревью плана и контрактов с числом сверх предела (0.1.0-alpha.54).
     if (k === 'properties' && v && typeof v === 'object' && 'diagnoses' in v && 'attempts' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.attempts;
       delete rest.attemptsTruncated;
       delete rest.reviews;
+      delete rest.reviewsTruncated;
       return rest;
     }
     // Аддитивные поля status — снимок наблюдателя `--detail`, сводка ревью
-    // плана и контрактов (0.1.0-alpha.54).
+    // плана и контрактов с числом сверх предела (0.1.0-alpha.54).
     if (k === 'properties' && v && typeof v === 'object' && 'detail' in v && 'stateVersion' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.detail;
       delete rest.reviews;
+      delete rest.reviewsTruncated;
       return rest;
     }
     // Аддитивные поля находки плана или контракта: счёт раундов и решение

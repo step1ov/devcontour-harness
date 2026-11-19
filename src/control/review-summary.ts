@@ -29,6 +29,18 @@ export function reviewSummaries(
   policy: Pick<ExecutionPolicy, 'maxAttempts'>,
   options: { graphId?: string } = {},
 ): ReviewSubjectSummary[] {
+  return reviewSummaryRows(view, policy, options).reviews;
+}
+
+/**
+ * Та же сводка с числом предметов сверх предела: `reviewsTruncated` — сколько
+ * предметов не вошло в `REVIEW_SUMMARY_ROWS` (0 — все показаны).
+ */
+export function reviewSummaryRows(
+  view: ExecutionView,
+  policy: Pick<ExecutionPolicy, 'maxAttempts'>,
+  options: { graphId?: string } = {},
+): { reviews: ReviewSubjectSummary[]; reviewsTruncated: number } {
   const last = new Map<string, ReviewRecord>();
   for (const { value: r } of view.locals('reviews', WORKSPACE_OWNER)) {
     if (options.graphId !== undefined && !(r.kind === 'plan' && r.subject === options.graphId))
@@ -37,7 +49,7 @@ export function reviewSummaries(
     const prev = last.get(key);
     if (!prev || r.round > prev.round) last.set(key, r);
   }
-  if (!last.size) return [];
+  if (!last.size) return { reviews: [], reviewsTruncated: 0 };
   const spend = new Map<string, { calls: number; knownUsd: number; unknownCalls: number }>();
   for (const c of callRecords(view)) {
     if ((c.stage !== 'plan-review' && c.stage !== 'contract-review') || !c.subjectId) continue;
@@ -49,10 +61,11 @@ export function reviewSummaries(
     spend.set(key, s);
   }
   const max = reviewRoundCap(policy);
-  return [...last.entries()]
+  const reviews = [...last.entries()]
     .sort((a, b) => b[1].at.localeCompare(a[1].at) || a[0].localeCompare(b[0]))
     .slice(0, REVIEW_SUMMARY_ROWS)
     .map(([key, r]) => reviewSubjectSummary(r, max, spend.get(key)));
+  return { reviews, reviewsTruncated: Math.max(0, last.size - REVIEW_SUMMARY_ROWS) };
 }
 
 /** Сводка одного предмета по его последнему раунду. */
@@ -104,8 +117,20 @@ export function reviewSubjectSummary(
   };
 }
 
-/** Раздел «Ревью» текста `--human` (`status`, `explain`). */
-export function reviewsText(rows: readonly { line: string }[] | undefined): string {
+/**
+ * Раздел «Ревью» текста `--human` (`status`, `explain`); предметы сверх
+ * предела — числом сразу после строк раздела.
+ */
+export function reviewsText(
+  rows: readonly { line: string }[] | undefined,
+  truncated?: number,
+): string {
   if (!rows?.length) return '';
-  return ['Ревью:', ...rows.map((r) => `  ${r.line}`)].join('\n').concat('\n');
+  return [
+    'Ревью:',
+    ...rows.map((r) => `  ${r.line}`),
+    ...(truncated ? [`  … и ещё предметов ревью: ${truncated}`] : []),
+  ]
+    .join('\n')
+    .concat('\n');
 }

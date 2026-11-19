@@ -1455,6 +1455,8 @@ export const statusDataSchema = z.strictObject({
    * эскалация, ждущая решения оператора. Нет поля — раундов ревью нет.
    */
   reviews: z.array(reviewSubjectSummarySchema).max(50).optional(),
+  /** Предметов ревью сверх предела строк `reviews` (50); нет поля — все показаны. */
+  reviewsTruncated: z.number().int().positive().optional(),
   /**
    * Только `status --detail`: время снимка, почему стоит выдача и активные
    * попытки (стадия, длительность, владение, gates). Без флага поля нет.
@@ -2038,6 +2040,8 @@ export const explainDataSchema = z.strictObject({
   attemptsTruncated: z.number().int().positive().optional(),
   /** Сводка ревью плана и контрактов — та же, что у `status`; нет поля — раундов нет. */
   reviews: z.array(reviewSubjectSummarySchema).max(50).optional(),
+  /** Предметов ревью сверх предела строк `reviews` (50); нет поля — все показаны. */
+  reviewsTruncated: z.number().int().positive().optional(),
 });
 
 const requestIdSchema = inputRequestSchema.shape.id;

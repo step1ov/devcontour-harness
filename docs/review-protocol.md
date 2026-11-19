@@ -330,7 +330,10 @@ reason, round, rounds}`; от снятой reviewer находки её отли
 учёта, известная стоимость, вызовы без стоимости), `escalation` (вопрос,
 варианты, находки, как ответить) и строка `line`, например
 `план g: одобрено, открытых заметок 2; раундов 3/6; ревью $0.75`. `--human`
-печатает раздел «Ревью». Отчёт (`defects.planContract`) получает
+печатает раздел «Ревью». Предметов не больше 50 (`REVIEW_SUMMARY_ROWS`,
+последние по времени раунда), остальные — числом `reviewsTruncated`; в
+`--human` — строкой «… и ещё предметов ревью: N» в конце раздела. Отчёт
+(`defects.planContract`) получает
 необязательные `approvedWithOpenNotes`, `openNotes`, `acceptedLimitations`,
 `escalated`, `calls`, `knownUsd`, `unknownCostCalls`; Markdown и HTML —
 «N subject approved, M open notes; review calls K, known spend $X».

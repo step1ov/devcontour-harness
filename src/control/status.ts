@@ -14,7 +14,7 @@ import { budgetOverview, legacyGroupCall } from '../engine/budget.ts';
 import { callRecords } from '../engine/usage.ts';
 import type { Engine } from '../engine/engine.ts';
 import { requestsOf } from '../engine/input-requests.ts';
-import { reviewSummaries, reviewsText } from './review-summary.ts';
+import { reviewSummaryRows, reviewsText } from './review-summary.ts';
 import { MAX_NEUTRAL_FAILURES } from '../contracts/repair-policy.ts';
 import { nextRunControl, repairJobOf, stopInputsIn, type StopSource } from '../explain/state.ts';
 import { explainStop } from '../projections/stop.ts';
@@ -196,9 +196,10 @@ export function statusOf(
         })(workInputOf(requestsOf(v, w)), engine.blockers(w, v)),
       })),
       ...((budgets) => (budgets ? { budgets } : {}))(budgetOverview(engine.budgetContext(), v)),
-      ...((reviews) => (reviews.length ? { reviews } : {}))(
-        reviewSummaries(v, source.policy, graphId === undefined ? {} : { graphId }),
-      ),
+      ...(({ reviews, reviewsTruncated }) => ({
+        ...(reviews.length ? { reviews } : {}),
+        ...(reviewsTruncated ? { reviewsTruncated } : {}),
+      }))(reviewSummaryRows(v, source.policy, graphId === undefined ? {} : { graphId })),
       ...(options.detail ? { detail: statusDetail(source, v, graphId) } : {}),
     };
   });
@@ -340,7 +341,7 @@ export function statusText(data: z.output<typeof statusDataSchema>): string {
     // Принятая версия против текущего target ref: непроверенное после приёмки.
     if (w.target) out.push(`  ${w.target.line} (${w.target.lineEn})`);
   }
-  return out.join('\n') + '\n' + reviewsText(data.reviews);
+  return out.join('\n') + '\n' + reviewsText(data.reviews, data.reviewsTruncated);
 }
 
 /**

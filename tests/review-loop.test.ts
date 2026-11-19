@@ -37,7 +37,12 @@ import { applyDispositions, mergeTechnicalRound, technicalReview } from '../src/
 import { statusText } from '../src/control/status.ts';
 import { technicalReviewOutputSchema } from '../src/agents/schemas.ts';
 import { valueReport } from '../src/report/compute.ts';
-import { reviewSummaries } from '../src/control/review-summary.ts';
+import {
+  REVIEW_SUMMARY_ROWS,
+  reviewSummaries,
+  reviewSummaryRows,
+  reviewsText,
+} from '../src/control/review-summary.ts';
 import { escalatedFindings } from '../src/contracts/review-loop.ts';
 import { reportMarkdown } from '../src/report/markdown.ts';
 import { graphOf, policyOf } from './engine-fixture.ts';
@@ -899,6 +904,42 @@ test('H14 r2: отчёт и сводка — блокирующая, ставш�
   const [row] = reviewSummaries(view, { maxAttempts: 3 });
   assert.deepEqual(row!.spend, { calls: 2, knownUsd: 0.5, unknownCalls: 1 });
   assert.match(row!.line, /ревью \$0\.50 \+ вызовов без стоимости 1/);
+});
+
+test('H14: сводка ревью — не больше REVIEW_SUMMARY_ROWS предметов, остальные — reviewsTruncated сразу после раздела', () => {
+  const reviews = Array.from({ length: REVIEW_SUMMARY_ROWS + 2 }, (_, i) => ({
+    id: `RV-plan-g${i}-1`,
+    kind: 'plan',
+    subject: `g${i}`,
+    digest: 'a'.repeat(64),
+    round: 1,
+    at: new Date(Date.UTC(2026, 10, 1, 0, 0, i)).toISOString(),
+    approved: true,
+    summary: 's',
+    authorRuntime: 'claude',
+    reviewerRuntime: 'codex',
+    sameVendor: false,
+    findings: [],
+    artifact: 'x',
+  })) as unknown as ReviewRecord[];
+  const view = {
+    locals: (ns: string) =>
+      (ns === 'reviews' ? reviews : []).map((value: unknown, i: number) => ({
+        owner: '@workspace',
+        key: String(i),
+        value,
+      })),
+  } as unknown as ExecutionView;
+  const { reviews: rows, reviewsTruncated } = reviewSummaryRows(view, { maxAttempts: 3 });
+  assert.equal(rows.length, REVIEW_SUMMARY_ROWS);
+  assert.equal(reviewsTruncated, 2);
+  // Последние по времени раунда: два самых ранних предмета не вошли.
+  assert.ok(!rows.some((r) => r.subject === 'g0' || r.subject === 'g1'));
+  assert.deepEqual(reviewSummaries(view, { maxAttempts: 3 }), rows);
+  const text = reviewsText(rows, reviewsTruncated);
+  assert.match(text, /^Ревью:\n/);
+  assert.match(text, /\n {2}план g2: [^\n]*\n {2}… и ещё предметов ревью: 2\n$/);
+  assert.ok(!reviewsText(rows, 0).includes('… и ещё'));
 });
 
 test('H14: основание решения и перехода маскируется до обрезки — префикс секрета на границе 4000 не остаётся', () => {
