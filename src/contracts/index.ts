@@ -10,6 +10,8 @@ export * from './events.ts';
 export * from './execution.ts';
 export * from './input.ts';
 export * from './review.ts';
+export * from './code-review.ts';
+export * from './target.ts';
 export * from './checks.ts';
 export * from './profiles.ts';
 export * from './toolchain.ts';

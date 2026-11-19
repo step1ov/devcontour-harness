@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { baseMoveActors, cancelActors, environmentCauses, retryActors } from './events.ts';
 import { failureKindSchema, jointResetActors, pauseReasons } from './execution.ts';
 import { isoTimeSchema } from './primitives.ts';
+import { acceptedTargetSchema } from './target.ts';
 
 /**
  * Отчёт об эффекте harness (`harness report`, `valueReport`): что дали
@@ -513,6 +514,20 @@ export const valueReportSchema = z.strictObject({
     total: count,
     truncated: z.boolean(),
   }),
+  /**
+   * Принятые поручения, у которых target ref ушёл вперёд после приёмки (или
+   * не прочитан): состояние Git на момент отчёта, не окна. `checked` —
+   * принятых поручений сверено. Нет поля — сверка не выполнялась (нет
+   * политики в каталоге состояния).
+   */
+  targets: z
+    .strictObject({
+      checked: count,
+      rows: z.array(acceptedTargetSchema.extend({ workId: label })).max(REPORT_LIMITS.works),
+      total: count,
+      truncated: z.boolean(),
+    })
+    .optional(),
   limitations: z
     .array(z.strictObject({ id: z.string().min(1).max(60), text: sentence }))
     .min(1)

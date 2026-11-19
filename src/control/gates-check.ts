@@ -1,3 +1,4 @@
+import { writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import {
   HarnessError,
@@ -146,7 +147,7 @@ export async function checkGates(input: GateCheckInput) {
       ...(message ? { message } : {}),
     };
   });
-  return {
+  const data = {
     id: result.id,
     repositoryId: repo.id,
     sha,
@@ -158,7 +159,17 @@ export async function checkGates(input: GateCheckInput) {
     logs: join(stateDir, 'gates-at', result.id),
     ...(result.warnings?.length ? { warnings: result.warnings } : {}),
   };
+  // Итог рядом с логами: `review-code` прикладывает его к обзору того же SHA.
+  // Неудачная запись итога не отменяет проверку.
+  await writeFile(
+    join(data.logs, GATES_RESULT_FILE),
+    JSON.stringify({ at: new Date().toISOString(), data }, null, 2),
+  ).catch(() => undefined);
+  return data;
 }
+
+/** Файл итога проверки `harness gates` в её каталоге `gates-at/<id>`. */
+export const GATES_RESULT_FILE = 'result.json';
 
 /** Таблица исходов для человека (`harness gates --human`). */
 export function gatesText(data: Awaited<ReturnType<typeof checkGates>>) {

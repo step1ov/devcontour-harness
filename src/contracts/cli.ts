@@ -22,6 +22,8 @@ import {
 import { readRunEventSchema } from './events.ts';
 import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
 import { reviewRecordSchema } from './review.ts';
+import { codeReviewRecordSchema } from './code-review.ts';
+import { acceptedTargetSchema } from './target.ts';
 import { sourceRefSchema } from './work.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
 import {
@@ -1003,6 +1005,61 @@ export const cliCommands = {
     ],
     refusals: ['GATE_FAILED', 'CANCELLED', 'NOT_FOUND'],
   },
+  'review-code': {
+    description:
+      'Технический обзор уже написанной ветки (код вне harness): reviewer по правилу ревью кода роли читает diff merge-base(base, head)..head в отдельном рабочем дереве на head, только чтение; итог `harness gates --sha` на head прикладывается, если он есть. Запись — наблюдение, не приёмка: поручений, попыток и target ref не меняет',
+    writes: true,
+    idempotency:
+      'Повтор по тем же ref — следующий раунд предмета (repositoryId, роль, base, head как названы): reviewer называет состояние прежних открытых находок. Те же SHA, автор и назначение reviewer, уже одобренные последним раундом, — тот же раунд без вызова модели. Автор, не допускаемый правилом вендора, — REVIEWER_SAME_VENDOR до вызова модели',
+    args: [
+      {
+        ...state,
+        description:
+          'Каталог состояния: запись обзора и его артефакты; политика — из него, если нет --policy',
+      },
+      { ...policy, required: false },
+      {
+        name: '--base',
+        value: 'text',
+        required: true,
+        description: 'База обзора: SHA или ref; diff считается от merge-base(base, head)',
+      },
+      {
+        name: '--head',
+        value: 'text',
+        required: true,
+        description: 'Проверяемый коммит: SHA, ref или HEAD checkout репозитория',
+      },
+      {
+        name: '--role',
+        value: 'id',
+        required: false,
+        description:
+          'Роль политики, чьё правило ревью кода выбирает reviewer; нужна, если ролей несколько',
+      },
+      {
+        ...author,
+        required: false,
+        description:
+          'Автор кода: codex, claude, fixture или external; по нему применяется правило вендора. Нет — writer роли',
+      },
+      {
+        name: '--repository',
+        value: 'id',
+        required: false,
+        description: 'ID репозитория политики; нужен, если их несколько',
+      },
+    ],
+    refusals: [
+      'REVIEW_REJECTED',
+      'REVIEWER_SAME_VENDOR',
+      'REVIEWER_MISSING',
+      'ATTEMPTS_EXHAUSTED',
+      'BUDGET_EXHAUSTED',
+      'BUDGET_UNKNOWN',
+      'NOT_FOUND',
+    ],
+  },
 } as const satisfies Record<string, CliCommandContract>;
 export type CliCommand = keyof typeof cliCommands;
 
@@ -1200,6 +1257,12 @@ export const statusDataSchema = z.strictObject({
       blockers: z.array(blocker),
       /** Сводка попыток и остаток пределов (`attemptSummarySchema`). */
       attemptSummary: attemptSummarySchema.optional(),
+      /**
+       * Принятая работа против текущего target ref (`harness status`): коммиты
+       * и файлы после приёмки не проверены. Нет поля — работа не принята или
+       * хост его не вычисляет.
+       */
+      target: acceptedTargetSchema.optional(),
     }),
   ),
   /**
@@ -1864,6 +1927,7 @@ export const cliDataSchemas = {
   'input-cancel': inputCloseDataSchema,
   'input-supersede': inputCloseDataSchema,
   gates: gatesDataSchema,
+  'review-code': codeReviewRecordSchema,
   version: versionDataSchema,
 } as const satisfies Record<CliCommand | 'version', z.ZodType>;
 

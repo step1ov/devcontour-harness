@@ -59,6 +59,8 @@ const laterCommands: readonly string[] = [
   'gates',
   // Переключение слоя lean в подготовленном проекте (0.1.0-alpha.51).
   'lean',
+  // Обзор уже написанной ветки (0.1.0-alpha.54).
+  'review-code',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -440,6 +442,14 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.input;
       delete rest.followUps;
       delete rest.attemptSummary;
+      // Принятая версия против текущего target ref (`works[].target`, 0.1.0-alpha.54).
+      delete rest.target;
+      return rest;
+    }
+    // Аддитивное поле result/deliver — принятая версия против target ref (0.1.0-alpha.54).
+    if (k === 'properties' && v && typeof v === 'object' && 'result' in v && 'delivery' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.target;
       return rest;
     }
     // Аддитивное поле explain — сводка попыток по поручениям (0.1.0-alpha.52).
@@ -481,6 +491,9 @@ test('H3-01: прежние команды и схемы их данных не 
   assert.ok(JSON.stringify(data).includes('"reused"'), 'gates.reused попытки');
   assert.ok(JSON.stringify(data).includes('"reusedFrom"'), 'attempt.gate.reusedFrom');
   assert.ok(JSON.stringify(data).includes('"reusedEvidence"'), 'evidence.reusedEvidence');
+  // Хеш H2 вырезает target status и result (0.1.0-alpha.54): объявление держит эта проверка.
+  assert.ok(JSON.stringify(data.status).includes('"commitsSinceAccepted"'), 'status: target');
+  assert.ok(JSON.stringify(data.result).includes('"commitsSinceAccepted"'), 'result: target');
   // Хеш H2 вырезает пробу портов и предупреждения doctor: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.doctor).includes('"ports"'), 'doctor: проба портов');
   assert.ok(JSON.stringify(data.doctor).includes('"warnings"'), 'doctor: предупреждения');
