@@ -187,7 +187,11 @@ test(
       const doctor = cli(root, 'doctor', '--state', state);
       assert.equal(doctor.json.ok, true, 'doctor --state: ' + JSON.stringify(doctor.json));
       assert.equal(doctor.json.data.state?.compatible, true, 'состояние alpha.5 несовместимо');
-      assert.deepEqual(now.result.data, before.result.data, 'результат alpha.5 читается иначе');
+      // Аддитивное поле result (0.1.0-alpha.54) — принятая версия против
+      // target ref, из тех же записей и Git; без него результат тот же.
+      const { target: resultTarget, ...nowResult } = now.result.data as Record<string, unknown>;
+      assert.equal((resultTarget as { commitsSinceAccepted?: number }).commitsSinceAccepted, 0);
+      assert.deepEqual(nowResult, before.result.data, 'результат alpha.5 читается иначе');
       assert.deepEqual(now.events.data, before.events.data, 'журнал alpha.5 читается иначе');
       // Аддитивное поле текущей версии — сводка попыток поручения: без него
       // статус тот же; сама сводка читается из записей alpha.5.
@@ -196,9 +200,19 @@ test(
       assert.ok(
         summary.length && summary.every((x) => x?.accepted === 1 && /принято 1/.test(x.line)),
       );
+      // Этап для оператора (0.1.0-alpha.54) — тоже аддитивный, из тех же записей.
+      assert.ok(works.every((w) => (w.stage as { name: string } | undefined)?.name === 'done'));
+      // Сводка ревью плана и контрактов (0.1.0-alpha.54) — из записей ревью alpha.5.
+      const { reviews, ...nowStatus } = now.status.data as Record<string, unknown>;
+      assert.ok(
+        (reviews as { approved: boolean }[]).length &&
+          (reviews as { approved: boolean }[]).every((r) => r.approved),
+      );
       const stripped = {
-        ...now.status.data,
-        works: works.map(({ attemptSummary: _s, ...w }) => (void _s, w)),
+        ...nowStatus,
+        works: works.map(
+          ({ attemptSummary: _s, stage: _t, target: _a, ...w }) => (void _s, void _t, void _a, w),
+        ),
       };
       assert.deepEqual(stripped, before.status.data, 'статус alpha.5 читается иначе');
       assert.deepEqual(dump(), stateBefore, 'чтение изменило содержимое базы');
@@ -217,8 +231,10 @@ test(
       assert.equal(again.status, 0, 'deliver: ' + JSON.stringify(again.json));
       assert.equal(readFileSync(sinkFile, 'utf8'), delivered, 'запись получателя переписана');
       const after = readAll(root);
+      const { target: _afterTarget, ...afterResult } = after.result.data as Record<string, unknown>;
+      assert.deepEqual(_afterTarget, resultTarget, 'доставка изменила сверку с target ref');
       assert.deepEqual(
-        after.result.data,
+        afterResult,
         before.result.data,
         'доставка изменила результат или запись доставки',
       );

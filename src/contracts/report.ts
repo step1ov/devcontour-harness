@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { baseMoveActors, cancelActors, environmentCauses, retryActors } from './events.ts';
 import { failureKindSchema, jointResetActors, pauseReasons } from './execution.ts';
 import { isoTimeSchema } from './primitives.ts';
+import { acceptedTargetSchema } from './target.ts';
 
 /**
  * Отчёт об эффекте harness (`harness report`, `valueReport`): что дали
@@ -269,6 +270,21 @@ export const valueReportSchema = z.strictObject({
       blockingClosed: count,
       blockingOpen: count,
       blockingWithdrawn: count,
+      /**
+       * Предметы, последний раунд окна которых одобрил с открытыми заметками
+       * («approved, N open notes»), и число этих заметок. Нет поля — отчёт
+       * прежней версии.
+       */
+      approvedWithOpenNotes: count.optional(),
+      openNotes: count.optional(),
+      /** Находки, принятые ведущим или оператором известным ограничением. */
+      acceptedLimitations: count.optional(),
+      /** Предметы, чей следующий раунд ждёт решения оператора (эскалация). */
+      escalated: count.optional(),
+      /** Вызовы ревью плана и контрактов в окне и их известная стоимость. */
+      calls: count.optional(),
+      knownUsd: z.number().min(0).optional(),
+      unknownCostCalls: count.optional(),
     }),
     withdrawn: reportMeasureSchema,
     items: z.array(evidenceRefSchema).max(REPORT_LIMITS.evidence),
@@ -506,6 +522,12 @@ export const valueReportSchema = z.strictObject({
       declined: count,
       followUps: count,
       assumptions: count,
+      /**
+       * Кто ответил на блокирующие вопросы окна (по последнему ответу):
+       * оператор (человек), ведущий агент (только с `inputPolicy.leadAnswers`)
+       * или хост от их имени. Нет поля — отчёт до alpha.54.
+       */
+      answeredBy: z.strictObject({ operator: count, lead: count, host: count }).optional(),
     })
     .optional(),
   works: z.strictObject({
@@ -513,6 +535,20 @@ export const valueReportSchema = z.strictObject({
     total: count,
     truncated: z.boolean(),
   }),
+  /**
+   * Принятые поручения, у которых target ref ушёл вперёд после приёмки (или
+   * не прочитан): состояние Git на момент отчёта, не окна. `checked` —
+   * принятых поручений сверено. Нет поля — сверка не выполнялась (нет
+   * политики в каталоге состояния).
+   */
+  targets: z
+    .strictObject({
+      checked: count,
+      rows: z.array(acceptedTargetSchema.extend({ workId: label })).max(REPORT_LIMITS.works),
+      total: count,
+      truncated: z.boolean(),
+    })
+    .optional(),
   limitations: z
     .array(z.strictObject({ id: z.string().min(1).max(60), text: sentence }))
     .min(1)

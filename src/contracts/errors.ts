@@ -46,6 +46,12 @@ export const errorCodes = {
    * неприменённым ответом не активируется обходным согласованием.
    */
   INPUT_REQUIRED: 'refused',
+  /**
+   * Блокирующий вопрос исполнителя адресован человеку (`actor: user`): ответ
+   * ведущего (`--actor lead`) не принимается, пока политика явно не
+   * разрешила его до порога серьёзности (`inputPolicy.leadAnswers`).
+   */
+  OPERATOR_ANSWER_REQUIRED: 'refused',
   REVISION_CONFLICT: 'refused',
   CANCELLED: 'refused',
   NOT_FOUND: 'refused',
@@ -57,6 +63,18 @@ export const errorCodes = {
   REVIEW_PROTOCOL_INVALID: 'infrastructure',
   SANDBOX_UNAVAILABLE: 'infrastructure',
   GIT_FAILED: 'infrastructure',
+  /**
+   * Окружение проекта не поднялось без gates и моделей: шаг lifecycle,
+   * `prepare` или хранилища зависимостей упал, порт занят, команды нет
+   * (`harness smoke`, preflight `lifecyclePreflight` перед `run`). Класс
+   * причины и совет — в сообщении и `issues`.
+   */
+  LIFECYCLE_FAILED: 'infrastructure',
+  /**
+   * Версия договора или сборка backend коннектора задач не та, с которой
+   * проверен коннектор (Relay v1 `contractVersion`, Relay-2 sha256 binary).
+   */
+  CONNECTOR_VERSION_MISMATCH: 'infrastructure',
   STORAGE_FAILED: 'infrastructure',
   DELIVERY_FAILED: 'infrastructure',
   INTERNAL: 'infrastructure',

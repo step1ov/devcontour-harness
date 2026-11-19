@@ -169,6 +169,24 @@ review under the reviewer rule and approves it.
 the findings in advance. With `approvalMode: operator` a human approves with
 `$H approve`.
 
+**Review rounds that go in circles.** Each plan or contract review round is a
+paid call; `status` / `explain` `data.reviews[].line` shows the verdict, rounds
+used of the cap and the review spend (in Russian: «одобрено, открытых заметок
+2; раундов 3/6; ревью $0.75»). Approval may leave open notes: say so to the
+user instead of reporting a clean approval. A finding the reviewer raises
+again in other words keeps its ID (`sameAs`, or the same path and rule), so
+`rounds` counts how long it has stayed open.
+
+- If a finding is a known limitation you accept, record it in the next round:
+  `$H review-plan … --accept-limitation <id> --reason "<why>"`. The reviewer
+  sees the reason and does not re-raise it without new evidence. This is not
+  an approval; never use it to silence a defect you can fix.
+- A blocking finding open for 3 rounds stops the next round before the call
+  (`INPUT_REQUIRED`, `data.reviews[].escalation`): give the user the question
+  and its options, then record their answer with `--actor operator`
+  (`--accept-limitation <id> --reason …`, or `--continue-review <id> --reason …`
+  for three more rounds). Do not answer it yourself.
+
 ### 7. Run
 
 ```sh
@@ -193,6 +211,45 @@ prerequisite failed) or `skipped` (after the first failure with
 `--fail-fast`); exit 0 when all passed, 3 otherwise; `--human` prints a table.
 A green `gates` is not acceptance: only `run` accepts work.
 
+**Code written outside the harness.** When you (or the user) already wrote
+the code on a branch — a hotfix, a change made before the harness was set up,
+commits added after acceptance — get an independent technical review of
+exactly that diff instead of reviewing it yourself:
+
+```sh
+$H gates --state <manifest.paths.state> --policy .harness/policy.json --sha <head>   # optional, first
+$H review-code --state <manifest.paths.state> --policy .harness/policy.json \
+  --base <main> --head <branch> [--role <role>] [--author <who wrote it>]
+```
+
+The reviewer is chosen by the role's code review rule against the author's
+vendor (`--author` defaults to the role's writer; name yourself when you wrote
+the code): another vendor, or the same one only with `same-vendor-allowed`
+(`REVIEWER_SAME_VENDOR` otherwise, before any model call; tell the user when
+`sameVendor` is true). It reads the diff `merge-base(base, head)..head` in a
+read-only checkout of `head`; a `gates --sha` result for that `head` is
+attached as `gates`. Exit 0 — approved, 3 — blocking findings; fix them on the
+branch and repeat with the same `--base`/`--head`: the reviewer must state
+each previous finding. The record says `acceptance: false`: an approved
+`review-code` is a review, not acceptance — say so to the user, and use
+`run` when the work must be accepted.
+
+When the project has `lifecycle`, `prepare` or a dependency store, check the
+environment alone first — never debug lifecycle or seed through paid attempts:
+
+```sh
+$H smoke --state <manifest.paths.state> --policy .harness/policy.json --sha HEAD --human
+```
+
+It brings up only the environment (lifecycle, store, prepare, teardown) with
+no gates and no model call and times each step. Exit 4 (`LIFECYCLE_FAILED`)
+names `failure.class` (`port-busy`, `timeout`, `crash`, `missing-tool`,
+`cleanup`, `tree-changed`, `environment`) and `failure.advice`; fix the
+environment (free the port, install the tool, raise the step timeout), not
+the task code. `"lifecyclePreflight": "cached"` in the policy runs the same
+check before every `run`, once per base tree, and stops the run before any
+paid attempt.
+
 ### 8. When it stops
 
 `$H explain --state <state> --policy .harness/policy.json [--work <id>]` is
@@ -200,15 +257,57 @@ read only (no retries, model calls or state changes). For every stopped order
 it returns `code`, `cause`, `phase`, `actor`, `action`, `retryPlanned`,
 `message` and `evidence`.
 
-| `actor`      | `action`                                                                                           | Who acts                                                     |
-| ------------ | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `controller` | `wait`, `retry`                                                                                    | you: wait, or run `$H run` again                             |
-| `lead`       | `review-plan`, `diagnose-failure`, `replan-dependents`, `wait`                                     | you: fix the graph, policy or code by the evidence, then run |
-| `user`       | `fix-access`, `fix-environment`, `raise-budget`, `reset-attempts`, `user-decision`, `resume-queue` | hand it to the user with the message and evidence            |
-| `null`       | `none`                                                                                             | nothing to do                                                |
+| `actor`      | `action`                                                                                                           | Who acts                                                                     |
+| ------------ | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `controller` | `wait`, `retry`                                                                                                    | you: wait, or run `$H run` again                                             |
+| `lead`       | `review-plan`, `diagnose-failure`, `replan-dependents`, `wait`                                                     | you: fix the graph, policy or code by the evidence, then run                 |
+| `user`       | `fix-access`, `fix-environment`, `raise-budget`, `reset-attempts`, `user-decision`, `resume-queue`, `answer-input` | hand it to the user with the message and evidence                            |
+| `lead`       | `apply-input`                                                                                                      | you: `input-context`, `review-plan --context`, `input-target`, `input-apply` |
+| `null`       | `none`                                                                                                             | nothing to do                                                                |
 
 Only `user` actions go to the human: access, environment, budgets, attempt
-resets, goal decisions and resuming a paused queue are their decisions.
+resets, goal decisions, resuming a paused queue and answers to executor
+questions are their decisions.
+
+**Executor question (`INPUT_REQUIRED`, `actor: user`, `answer-input`).** The
+writer stopped and asks the human. Do not answer it yourself:
+
+1. `$H input-show --state <state> --request <id>` gives the question, the
+   options (id, label, consequence), the recommended option, the severity and
+   its rationale.
+2. Pass all of it on to the human verbatim: the question text, every option with
+   its consequence, the writer's recommendation and the severity. Do not
+   shorten, reword, rank or pre-select an option.
+3. Record the human's answer in their own words:
+   `$H input-answer --state <state> --request <id> --text "<their words>"
+[--option <id they chose>] --actor operator --request-version <n>`.
+4. Then continue with the `lead` steps of `apply-input` above.
+
+Never close such a question with `--actor lead`: the harness refuses it with
+`OPERATOR_ANSWER_REQUIRED` (exit 3) unless the human has put
+`inputPolicy.leadAnswers {maxSeverity}` into the policy, and even then only up
+to that severity. Pending non-blocking requests to you (`kind: follow-up`,
+from the autonomous mode) you answer yourself with `--actor lead`; a question
+below the threshold is recorded closed (the writer decided) and takes no
+answer. Who answered is
+recorded and shown in `status`, `explain`, `handoff` and the report.
+
+**What is happening now.** `status` gives every order a `stage`: the current
+stage (`writer` — the writer is coding, `gates`, `review`, `integration`,
+`input` — waiting on an executor question, `queued`, `blocked`, `stopped`,
+`done`) with the time spent in it, the stages still ahead, what is needed from
+the operator (`needs`, same `actor`/`action` as `explain`) and the order's
+spend so far, plus one plain line (`stage.line` in Russian, `stage.lineEn` in
+English). When you start a long `run`, tell the operator that you work through
+the harness and give them the watch command to see it themselves:
+
+```sh
+$H status --state <state> --human --watch [--interval 10]
+```
+
+It refreshes until no attempt is running and no live controller will move an
+order, or until Ctrl-C. When asked what is going on, quote `stage.line`
+instead of describing or estimating it.
 
 **Progress and "how long" questions.** `status` (`works[].attemptSummary`)
 and `explain` (`attempts[]`) give one line per order, counted from the store
@@ -248,6 +347,18 @@ of editing the policy by hand:
 `$H result --state <state> --work <id>`: `data.result.outcome` must be
 `accepted` and `data.result.shas.result` must equal `git rev-parse <targetRef>`
 in the repository. Report what the harness recorded, not your own summary.
+
+After acceptance the target ref can move on. `result` (`data.target`) and
+`status` (`works[].target`) compare the accepted SHA with the current ref:
+`commitsSinceAccepted`, `filesSinceAccepted`, `diverged` (ref rewritten),
+`unavailable`, and `line` / `lineEn` («принято на X; после приёмки N коммитов
+— не проверены» / "accepted at X; N commits since acceptance are not
+verified"). When `commitsSinceAccepted` is above 0 or `diverged` is set,
+quote that line: those commits are **not accepted**. They need a new harness
+order (`run`), or at least `$H gates --sha <targetRef>` (`HEAD` when the
+checkout is on it; a check, not acceptance) and
+`review-code --base <acceptedSha> --head <targetRef>`. Never report the current ref
+as accepted because an earlier order on it was.
 
 ### 10. New session
 
@@ -291,7 +402,8 @@ not copy acceptance logs or attempt state into notes.
   is a separate first task.
 
 - Do not edit the target ref or the attempt worktrees yourself; acceptance
-  happens only through `harness run`.
+  happens only through `harness run`. An approved `review-code` and a green
+  `gates` are not acceptance either.
 - A green exit code is not acceptance. Read `result.outcome` and the evidence.
 - A refusal (exit 3) names its code (`GATE_FAILED`, `REVIEW_REJECTED`,
   `SCOPE_VIOLATION`, `BUDGET_EXHAUSTED`, `REVIEWER_SAME_VENDOR`,

@@ -9,6 +9,7 @@ import {
   targetRefSchema,
 } from './primitives.ts';
 import { sourceRefSchema } from './work.ts';
+import { acceptedTargetSchema } from './target.ts';
 import { errorCodes, type ErrorCode } from './errors.ts';
 
 export const findingSchema = z.strictObject({
@@ -319,6 +320,12 @@ export const resultEnvelopeSchema = z.strictObject({
   apiVersion: z.literal(API_VERSION),
   result: runResultSchema,
   delivery: z.array(deliveryStateSchema),
+  /**
+   * Принятый результат против текущего target ref (`harness result`): коммиты
+   * и файлы после приёмки этим результатом не проверены. Нет поля — результат
+   * не принят или хост его не вычисляет.
+   */
+  target: acceptedTargetSchema.optional(),
 });
 export type ResultEnvelope = z.infer<typeof resultEnvelopeSchema>;
 

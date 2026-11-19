@@ -180,7 +180,8 @@ for (const required of [
 
 // ./projections и ./report годятся для браузерного бандла: всё, что достижимо
 // от их index.js, лежит в своём каталоге или в разрешённых листах contracts и
-// не импортирует node:* (Q3, K1).
+// не импортирует node:* (Q3, K1). `contracts/review-loop.js` — лист счёта
+// раундов ревью без импортов (0.1.0-alpha.54).
 const libDir = join(unpacked, 'package', 'lib');
 const browserGraph = (entry) => {
   const files = new Set();
@@ -192,7 +193,8 @@ const browserGraph = (entry) => {
       !rel.startsWith(entry + '/') &&
       rel !== 'contracts/errors.js' &&
       rel !== 'contracts/repair-policy.js' &&
-      rel !== 'contracts/input-state.js'
+      rel !== 'contracts/input-state.js' &&
+      rel !== 'contracts/review-loop.js'
     )
       fail(`./${entry} достигает ` + rel);
     const text = readFileSync(file, 'utf8');

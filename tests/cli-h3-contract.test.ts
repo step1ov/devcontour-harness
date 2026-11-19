@@ -57,8 +57,11 @@ const laterCommands: readonly string[] = [
   'input-cancel',
   'input-supersede',
   'gates',
+  'smoke',
   // Переключение слоя lean в подготовленном проекте (0.1.0-alpha.51).
   'lean',
+  // Обзор уже написанной ветки (0.1.0-alpha.54).
+  'review-code',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -151,6 +154,18 @@ const ADDITIVE_ARGS = new Set([
   'init--lead',
   'init--review',
   'init--model',
+  // Решения по находкам плана и контракта (0.1.0-alpha.54).
+  'review-plan--accept-limitation',
+  'review-plan--continue-review',
+  'review-plan--reason',
+  'review-plan--actor',
+  'review-contract--accept-limitation',
+  'review-contract--continue-review',
+  'review-contract--reason',
+  'review-contract--actor',
+  // Обновляемый текст status для человека (0.1.0-alpha.54).
+  'status--watch',
+  'status--interval',
 ]);
 /**
  * Текст `--writer` init в H2. 0.1.0-alpha.50 меняет умолчание: writer —
@@ -176,6 +191,11 @@ const ADDITIVE_ENUM_VALUES = new Set([
   'carry-stale',
   // Вид evidence неисполненного условного gate (`when.paths`).
   'not-applicable',
+  // H12: блокирующий вопрос к человеку не отвечает ведущий (0.1.0-alpha.54).
+  'OPERATOR_ANSWER_REQUIRED',
+  // Отказ окружения `harness smoke` и preflight; несовпадение версии backend коннектора.
+  'LIFECYCLE_FAILED',
+  'CONNECTOR_VERSION_MISMATCH',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
@@ -254,11 +274,19 @@ test('H3-01: каждая общая операция читается из до
     // Вход строгий: лишний ключ отвергается.
     assert.equal(op.input.safeParse({ unknownArg: 'x' }).success, false, c);
   }
-  // multiple объявлен только у --requirements plan-request и --intent handoff.
+  // multiple объявлен только у --requirements plan-request, --intent handoff и
+  // решений по находкам review-plan / review-contract.
   const multiple = Object.entries(cliCommands).flatMap(([c, contract]) =>
     (contract.args as readonly CliArgument[]).filter((a) => a.multiple).map((a) => c + a.name),
   );
-  assert.deepEqual(multiple, ['handoff--intent', 'plan-request--requirements']);
+  assert.deepEqual(multiple, [
+    'review-plan--accept-limitation',
+    'review-plan--continue-review',
+    'review-contract--accept-limitation',
+    'review-contract--continue-review',
+    'handoff--intent',
+    'plan-request--requirements',
+  ]);
   assert.deepEqual(Object.keys(sharedOperations.capabilities.input.shape), []);
 });
 
@@ -433,26 +461,50 @@ test('H3-01: прежние команды и схемы их данных не 
     }
     // Аддитивные поля status — живость активной попытки (`works[].liveness`),
     // вопрос исполнителя и запросы ведущему (`works[].input`, `followUps`, H02),
-    // сводка попыток (`works[].attemptSummary`, 0.1.0-alpha.52).
+    // сводка попыток (`works[].attemptSummary`, 0.1.0-alpha.52), этап для
+    // оператора (`works[].stage`, 0.1.0-alpha.54).
     if (k === 'properties' && v && typeof v === 'object' && 'liveness' in v && 'blockers' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.liveness;
       delete rest.input;
       delete rest.followUps;
       delete rest.attemptSummary;
+      delete rest.stage;
+      // Принятая версия против текущего target ref (`works[].target`, 0.1.0-alpha.54).
+      delete rest.target;
       return rest;
     }
-    // Аддитивное поле explain — сводка попыток по поручениям (0.1.0-alpha.52).
+    // Аддитивное поле result/deliver — принятая версия против target ref (0.1.0-alpha.54).
+    if (k === 'properties' && v && typeof v === 'object' && 'result' in v && 'delivery' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.target;
+      return rest;
+    }
+    // Аддитивное поле explain — сводка попыток по поручениям (0.1.0-alpha.52)
+    // и сводка ревью плана и контрактов с числом сверх предела (0.1.0-alpha.54).
     if (k === 'properties' && v && typeof v === 'object' && 'diagnoses' in v && 'attempts' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.attempts;
       delete rest.attemptsTruncated;
+      delete rest.reviews;
+      delete rest.reviewsTruncated;
       return rest;
     }
-    // Аддитивное поле status — снимок наблюдателя `--detail`.
+    // Аддитивные поля status — снимок наблюдателя `--detail`, сводка ревью
+    // плана и контрактов с числом сверх предела (0.1.0-alpha.54).
     if (k === 'properties' && v && typeof v === 'object' && 'detail' in v && 'stateVersion' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.detail;
+      delete rest.reviews;
+      delete rest.reviewsTruncated;
+      return rest;
+    }
+    // Аддитивные поля находки плана или контракта: счёт раундов и решение
+    // ведущего или оператора (0.1.0-alpha.54).
+    if (k === 'properties' && v && typeof v === 'object' && 'openedIn' in v && 'changedIn' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.rounds;
+      delete rest.disposition;
       return rest;
     }
     // Аддитивное поле `joint.finished` — проверка прервана до результата gates (alpha.44).
@@ -481,6 +533,9 @@ test('H3-01: прежние команды и схемы их данных не 
   assert.ok(JSON.stringify(data).includes('"reused"'), 'gates.reused попытки');
   assert.ok(JSON.stringify(data).includes('"reusedFrom"'), 'attempt.gate.reusedFrom');
   assert.ok(JSON.stringify(data).includes('"reusedEvidence"'), 'evidence.reusedEvidence');
+  // Хеш H2 вырезает target status и result (0.1.0-alpha.54): объявление держит эта проверка.
+  assert.ok(JSON.stringify(data.status).includes('"commitsSinceAccepted"'), 'status: target');
+  assert.ok(JSON.stringify(data.result).includes('"commitsSinceAccepted"'), 'result: target');
   // Хеш H2 вырезает пробу портов и предупреждения doctor: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.doctor).includes('"ports"'), 'doctor: проба портов');
   assert.ok(JSON.stringify(data.doctor).includes('"warnings"'), 'doctor: предупреждения');

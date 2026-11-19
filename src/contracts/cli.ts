@@ -21,7 +21,9 @@ import {
 } from './execution.ts';
 import { readRunEventSchema } from './events.ts';
 import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
-import { reviewRecordSchema } from './review.ts';
+import { reviewRecordSchema, reviewSubjectSummarySchema } from './review.ts';
+import { codeReviewRecordSchema } from './code-review.ts';
+import { acceptedTargetSchema } from './target.ts';
 import { sourceRefSchema } from './work.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
 import {
@@ -150,6 +152,42 @@ const contextDigestArg: CliArgument = {
   description: 'Digest снимка контекста с ответом (input-context), прошедшего review-plan',
 };
 
+/**
+ * Решения по находкам плана и контракта (docs/review-protocol.md, §8):
+ * применяются раундом, который запускает команда.
+ */
+const reviewDecisionArgs: CliArgument[] = [
+  {
+    name: '--accept-limitation',
+    value: 'id',
+    required: false,
+    multiple: true,
+    description:
+      'ID открытой находки (или список через запятую), принятой известным ограничением; требует --reason. Следующий раунд видит решение, reviewer не поднимает находку без новых доказательств',
+  },
+  {
+    name: '--continue-review',
+    value: 'id',
+    required: false,
+    multiple: true,
+    description:
+      'ID эскалированной находки (открыта 3+ раундов подряд), по которой оператор разрешает ещё раунды; требует --reason и --actor operator',
+  },
+  {
+    name: '--reason',
+    value: 'text',
+    required: false,
+    description: 'Основание решения по находкам (не короче трёх знаков)',
+  },
+  {
+    name: '--actor',
+    value: 'text',
+    required: false,
+    description:
+      'Кто решает: lead (по умолчанию) или operator; эскалированные находки решает только operator',
+  },
+];
+
 export const cliCommands = {
   validate: {
     description:
@@ -178,6 +216,7 @@ export const cliCommands = {
         description:
           'Конфигурация коннектора задач: внешние предпосылки графа допускаются по решению источника (trusts) и доступности SHA в target ref; без неё доверенных receipt нет',
       },
+      ...reviewDecisionArgs,
     ],
     refusals: [
       'REVIEW_REJECTED',
@@ -185,6 +224,7 @@ export const cliCommands = {
       'BUDGET_EXHAUSTED',
       'BUDGET_UNKNOWN',
       'NOT_READY',
+      'INPUT_REQUIRED',
     ],
   },
   'review-contract': {
@@ -196,8 +236,15 @@ export const cliCommands = {
       { name: '--contract', value: 'path', required: true, description: 'ContractDocument JSON' },
       policy,
       author,
+      ...reviewDecisionArgs,
     ],
-    refusals: ['REVIEW_REJECTED', 'ATTEMPTS_EXHAUSTED', 'BUDGET_EXHAUSTED', 'BUDGET_UNKNOWN'],
+    refusals: [
+      'REVIEW_REJECTED',
+      'ATTEMPTS_EXHAUSTED',
+      'BUDGET_EXHAUSTED',
+      'BUDGET_UNKNOWN',
+      'INPUT_REQUIRED',
+    ],
   },
   approve: {
     description:
@@ -287,7 +334,21 @@ export const cliCommands = {
         name: '--human',
         value: 'flag',
         required: false,
-        description: 'Текст для человека вместо JSON: строка сводки попыток на поручение',
+        description:
+          'Текст для человека вместо JSON: строка сводки попыток и этап простыми словами на поручение',
+      },
+      {
+        name: '--watch',
+        value: 'flag',
+        required: false,
+        description:
+          'Только с --human: обновлять текст, пока идут попытки или их сдвинет живой controller; выход — когда доска успокоилась или по Ctrl-C',
+      },
+      {
+        name: '--interval',
+        value: 'number',
+        required: false,
+        description: 'Период обновления --watch в секундах (1–3600, по умолчанию 5)',
       },
     ],
     refusals: ['NOT_FOUND'],
@@ -579,7 +640,7 @@ export const cliCommands = {
       'Отчёт об эффекте по данным каталога состояния: принятые поручения, отказы проверок и ревью, автономность, скорость, расход, окружение, недели; только чтение, без вызовов моделей',
     writes: false,
     idempotency:
-      'Только чтение. Тот же каталог и те же параметры дают те же байты: момент отчёта по умолчанию — последняя метка времени в данных, а не часы',
+      'Только чтение. Тот же каталог, те же параметры и те же target ref дают те же байты: момент отчёта по умолчанию — последняя метка времени в данных, а не часы; сверка принятых поручений (`targets`) читает текущие target ref',
     args: [
       state,
       {
@@ -851,11 +912,12 @@ export const cliCommands = {
         name: '--actor',
         value: 'text',
         required: false,
-        description: 'Кто отвечает: operator (по умолчанию) или lead',
+        description:
+          'Кто отвечает: operator (по умолчанию; словами человека) или lead — только на неблокирующие запросы или с разрешения inputPolicy.leadAnswers',
       },
       requestVersionArg,
     ],
-    refusals: ['NOT_FOUND', 'REVISION_CONFLICT', 'NOT_READY'],
+    refusals: ['NOT_FOUND', 'REVISION_CONFLICT', 'NOT_READY', 'OPERATOR_ANSWER_REQUIRED'],
   },
   'input-context': {
     description:
@@ -1002,6 +1064,95 @@ export const cliCommands = {
       },
     ],
     refusals: ['GATE_FAILED', 'CANCELLED', 'NOT_FOUND'],
+  },
+  'review-code': {
+    description:
+      'Технический обзор уже написанной ветки (код вне harness): reviewer по правилу ревью кода роли читает diff merge-base(base, head)..head в отдельном рабочем дереве на head, только чтение; итог `harness gates --sha` на head прикладывается, если он есть. Запись — наблюдение, не приёмка: поручений, попыток и target ref не меняет',
+    writes: true,
+    idempotency:
+      'Повтор по тем же ref — следующий раунд предмета (repositoryId, роль, base, head как названы): reviewer называет состояние прежних открытых находок. Те же SHA, автор, назначение reviewer и итог gates на head, уже одобренные последним раундом, — тот же раунд без вызова модели. Автор, не допускаемый правилом вендора, — REVIEWER_SAME_VENDOR до вызова модели',
+    args: [
+      {
+        ...state,
+        description:
+          'Каталог состояния: запись обзора и его артефакты; политика — из него, если нет --policy',
+      },
+      { ...policy, required: false },
+      {
+        name: '--base',
+        value: 'text',
+        required: true,
+        description: 'База обзора: SHA или ref; diff считается от merge-base(base, head)',
+      },
+      {
+        name: '--head',
+        value: 'text',
+        required: true,
+        description: 'Проверяемый коммит: SHA, ref или HEAD checkout репозитория',
+      },
+      {
+        name: '--role',
+        value: 'id',
+        required: false,
+        description:
+          'Роль политики, чьё правило ревью кода выбирает reviewer; нужна, если ролей несколько',
+      },
+      {
+        ...author,
+        required: false,
+        description:
+          'Автор кода: codex, claude, fixture или external; по нему применяется правило вендора. Нет — writer роли',
+      },
+      {
+        name: '--repository',
+        value: 'id',
+        required: false,
+        description: 'ID репозитория политики; нужен, если их несколько',
+      },
+    ],
+    refusals: [
+      'REVIEW_REJECTED',
+      'CANCELLED',
+      'REVIEWER_SAME_VENDOR',
+      'REVIEWER_MISSING',
+      'ATTEMPTS_EXHAUSTED',
+      'BUDGET_EXHAUSTED',
+      'BUDGET_UNKNOWN',
+      'NOT_FOUND',
+    ],
+  },
+  smoke: {
+    description:
+      'Поднять только окружение репозитория на коммите — снимки зависимостей, рабочее дерево, lifecycle setup/ready, хранилище зависимостей, prepare, teardown — тем же исполнением, что integration, без gates и без вызовов моделей; замер каждого шага и класс отказа (port-busy, timeout, crash, missing-tool, cleanup, tree-changed, environment)',
+    writes: true,
+    idempotency:
+      'Каждый вызов — новая проверка со своими логами в <state>/gates-at/<id>; база состояния, попытки и поручения не меняются',
+    args: [
+      {
+        ...state,
+        description: 'Каталог состояния: логи шагов; политика — из него, если нет --policy',
+      },
+      { ...policy, required: false },
+      {
+        name: '--sha',
+        value: 'text',
+        required: true,
+        description: 'Проверяемый коммит: SHA, ref или HEAD checkout репозитория',
+      },
+      {
+        name: '--repository',
+        value: 'id',
+        required: false,
+        description: 'ID репозитория политики; нужен, если их несколько',
+      },
+      {
+        name: '--human',
+        value: 'flag',
+        required: false,
+        description: 'Таблица шагов, класс отказа и совет для человека вместо JSON',
+      },
+    ],
+    refusals: ['CANCELLED', 'NOT_FOUND'],
   },
 } as const satisfies Record<string, CliCommandContract>;
 export type CliCommand = keyof typeof cliCommands;
@@ -1156,6 +1307,58 @@ export const attemptSummarySchema = z.strictObject({
   line: z.string().max(1000),
 });
 
+/**
+ * Этапы поручения для оператора (`works[].stage.name`, `src/control/stage.ts`):
+ * ждёт выдачи, не выдаётся, подготовка зависимостей, исполнитель пишет код,
+ * проверки, независимое ревью, интеграция, ждёт вопроса исполнителя,
+ * остановлено, принято, отменено.
+ */
+export const workStages = [
+  'queued',
+  'blocked',
+  'prepare',
+  'writer',
+  'gates',
+  'review',
+  'integration',
+  'input',
+  'stopped',
+  'done',
+  'cancelled',
+] as const;
+/** Этапы попытки по порядку: `works[].stage.next` — оставшиеся. */
+export const pipelineStages = ['writer', 'gates', 'review', 'integration'] as const;
+
+/**
+ * Прогресс поручения глазами оператора: текущий этап и время в нём
+ * (`since`, `elapsedMs`; у идущей попытки — открытый замер `step` события
+ * `attempt.stage`), оставшиеся этапы, что нужно и от кого (`needs` — как у
+ * диагноза `explain`; нет поля — неизвестно), собственный расход вызовов
+ * поручения и одна строка — по-русски (`line`) и по-английски (`lineEn`).
+ * Ведущий агент на вопрос «что сейчас происходит» цитирует строку.
+ */
+export const workStageSchema = z.strictObject({
+  name: z.enum(workStages),
+  step: z.string().min(1).max(300).optional(),
+  since: isoTimeSchema.optional(),
+  elapsedMs: z.number().int().min(0).optional(),
+  next: z.array(z.enum(pipelineStages)).max(pipelineStages.length),
+  needs: z
+    .strictObject({
+      actor: z.enum(diagnosisActors).nullable(),
+      action: z.enum(diagnosisActions),
+    })
+    .optional(),
+  spend: z.strictObject({
+    calls: z.number().int().min(0),
+    knownUsd: z.number().min(0),
+    unknownCalls: z.number().int().min(0),
+    durationMs: z.number().int().min(0),
+  }),
+  line: z.string().max(1000),
+  lineEn: z.string().max(1000),
+});
+
 export const statusDataSchema = z.strictObject({
   stateVersion: z.literal(STATE_VERSION),
   control: controlStateSchema,
@@ -1192,6 +1395,8 @@ export const statusDataSchema = z.strictObject({
           state: z.enum(inputStateNames),
           version: z.number().int().positive(),
           severity: z.number().int().min(1).max(10),
+          /** Кто записал последний ответ; нет поля — ответа нет. */
+          answeredBy: z.enum(['operator', 'lead', 'host']).optional(),
         })
         .optional(),
       /** Неблокирующие запросы ведущему в ожидании (автономный режим). */
@@ -1200,6 +1405,14 @@ export const statusDataSchema = z.strictObject({
       blockers: z.array(blocker),
       /** Сводка попыток и остаток пределов (`attemptSummarySchema`). */
       attemptSummary: attemptSummarySchema.optional(),
+      /** Этап, время в нём, что дальше и что нужно от оператора (`workStageSchema`). */
+      stage: workStageSchema.optional(),
+      /**
+       * Принятая работа против текущего target ref (`harness status`): коммиты
+       * и файлы после приёмки не проверены. Нет поля — работа не принята или
+       * хост его не вычисляет.
+       */
+      target: acceptedTargetSchema.optional(),
     }),
   ),
   /**
@@ -1236,6 +1449,14 @@ export const statusDataSchema = z.strictObject({
       ),
     })
     .optional(),
+  /**
+   * Ревью плана и контрактов: на предмет — итог последнего раунда
+   * («одобрено, открытых заметок N»), раунды из предела, расход ревью и
+   * эскалация, ждущая решения оператора. Нет поля — раундов ревью нет.
+   */
+  reviews: z.array(reviewSubjectSummarySchema).max(50).optional(),
+  /** Предметов ревью сверх предела строк `reviews` (50); нет поля — все показаны. */
+  reviewsTruncated: z.number().int().positive().optional(),
   /**
    * Только `status --detail`: время снимка, почему стоит выдача и активные
    * попытки (стадия, длительность, владение, gates). Без флага поля нет.
@@ -1423,6 +1644,55 @@ export const gatesDataSchema = z.strictObject({
    * Предупреждения пробы портов ресурсов: порт на всех адресах держит чужой
    * процесс, loopback свободен (например, AirPlay Receiver на macOS).
    */
+  warnings: z.array(z.string()).optional(),
+});
+
+/** Ответ `smoke`: шаги окружения на коммите без gates, их длительность и класс отказа. */
+export const smokeDataSchema = z.strictObject({
+  /** ID проверки (`DEVCONTOUR_RUN_ID` шагов, каталог логов). */
+  id: z.string().min(1).max(200),
+  repositoryId: idSchema,
+  sha: gitShaSchema,
+  /** Все шаги окружения прошли, teardown — тоже. */
+  passed: z.boolean(),
+  durationMs: z.number().int().nonnegative(),
+  /**
+   * Шаги в порядке исполнения: `dependencies`, `dependency-build:<репозиторий>`,
+   * `worktree`, `setup`, `ready`, `dependency-store`, `prepare`, `teardown`
+   * (стадия) и ID шага политики.
+   */
+  steps: z.array(
+    z.strictObject({
+      stage: z.string().min(1).max(200),
+      id: z.string().min(1).max(200),
+      status: z.enum(['passed', 'failed']),
+      durationMs: z.number().int().nonnegative(),
+      exitCode: z.number().int().optional(),
+      timedOut: z.boolean().optional(),
+      log: z.string().optional(),
+      /** Исход хранилища зависимостей: `hit`, `partial`, `miss: причина` (промах — не отказ). */
+      detail: z.string().optional(),
+    }),
+  ),
+  /** Отказ окружения: класс, где, сообщение и что сделать. */
+  failure: z
+    .strictObject({
+      class: z.enum([
+        'port-busy',
+        'timeout',
+        'crash',
+        'missing-tool',
+        'cleanup',
+        'tree-changed',
+        'environment',
+      ]),
+      stage: z.string().optional(),
+      step: z.string().optional(),
+      message: z.string(),
+      advice: z.string(),
+    })
+    .optional(),
+  logs: z.string(),
   warnings: z.array(z.string()).optional(),
 });
 
@@ -1768,6 +2038,10 @@ export const explainDataSchema = z.strictObject({
     .optional(),
   /** Поручений сверх предела строк `attempts` (100); нет поля — все показаны. */
   attemptsTruncated: z.number().int().positive().optional(),
+  /** Сводка ревью плана и контрактов — та же, что у `status`; нет поля — раундов нет. */
+  reviews: z.array(reviewSubjectSummarySchema).max(50).optional(),
+  /** Предметов ревью сверх предела строк `reviews` (50); нет поля — все показаны. */
+  reviewsTruncated: z.number().int().positive().optional(),
 });
 
 const requestIdSchema = inputRequestSchema.shape.id;
@@ -1864,6 +2138,8 @@ export const cliDataSchemas = {
   'input-cancel': inputCloseDataSchema,
   'input-supersede': inputCloseDataSchema,
   gates: gatesDataSchema,
+  'review-code': codeReviewRecordSchema,
+  smoke: smokeDataSchema,
   version: versionDataSchema,
 } as const satisfies Record<CliCommand | 'version', z.ZodType>;
 

@@ -154,6 +154,18 @@ export function readFailure(error: unknown, what: string): HarnessError {
         'NOT_READY',
         `${where}: запись недоступна (${error.kind}): ${error.message}`,
       );
+    // Версия договора или сборка backend не та, с которой проверен коннектор.
+    if (
+      error.kind === 'unsupported' &&
+      (error.details.code === 'CONNECTOR_VERSION_MISMATCH' ||
+        error.details.code === 'BUILD_MISMATCH')
+    )
+      return new HarnessError(
+        'CONNECTOR_VERSION_MISMATCH',
+        `${where}: версия backend не совпадает с проверенной: ${error.message}. ` +
+          'Поставьте пару версий harness и backend из docs/compatibility-versions.md ' +
+          '(или обновите ожидаемую сборку в конфигурации коннектора) и повторите source-check',
+      );
     if (error.kind === 'unsupported')
       return new HarnessError(
         'NOT_READY',

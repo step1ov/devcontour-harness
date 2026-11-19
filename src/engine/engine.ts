@@ -54,6 +54,8 @@ import {
   inputRequestId,
   inputSourceId,
   latestAnswer,
+  leadMayAnswer,
+  pinnedInputPolicy,
   targetDigest,
   type JointVerification,
   type JointVerificationState,
@@ -1446,7 +1448,7 @@ export class Engine {
         },
         // Порог вопросов исполнителя закрепляется при выдаче: смена политики
         // действует со следующей попытки.
-        inputPolicy: structuredClone(inputPolicyOf(this.policy)),
+        inputPolicy: pinnedInputPolicy(inputPolicyOf(this.policy)),
         dispatch: {
           policy: 'fifo-ready-v1',
           at: iso(at),
@@ -2583,7 +2585,7 @@ export class Engine {
       policyDigest: a.policyDigest,
       contextDigest: a.contextSnapshot ?? null,
       baseSha: a.baseSha ?? null,
-      inputPolicy: structuredClone(a.inputPolicy ?? inputPolicyOf(this.policy)),
+      inputPolicy: pinnedInputPolicy(a.inputPolicy ?? inputPolicyOf(this.policy)),
       contentDigest: contentDigest(w.order),
     };
   }
@@ -2763,6 +2765,19 @@ export class Engine {
   ) {
     return this.tx('input.answered', (tx) => {
       const { owner, request } = this.requestIn(tx, id);
+      // Блокирующий вопрос адресован человеку: ведущий отвечает только с явного
+      // разрешения политики и до её порога серьёзности. Проверка — до повтора:
+      // прежний ответ ведущего не подтверждается после отзыва разрешения.
+      const inputPolicy = inputPolicyOf(this.policy);
+      if (answer.actor.kind === 'lead' && !leadMayAnswer(request, inputPolicy))
+        throw new HarnessError(
+          'OPERATOR_ANSWER_REQUIRED',
+          `Запрос ${id}: блокирующий вопрос исполнителя (серьёзность ${request.effectiveSeverity}) адресован человеку — ` +
+            (inputPolicy.leadAnswers
+              ? `политика разрешает ведущему ответы до серьёзности ${inputPolicy.leadAnswers.maxSeverity}. `
+              : 'политика не разрешает ответы ведущего (inputPolicy.leadAnswers). ') +
+            'Передайте человеку вопрос, варианты и рекомендацию дословно и запишите его ответ: input-answer --actor operator.',
+        );
       const text = answer.text.trim();
       const content = {
         text,

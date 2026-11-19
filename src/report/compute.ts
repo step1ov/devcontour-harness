@@ -17,6 +17,7 @@ import type { EnvironmentCause, RunEvent, RunEventPayload } from '../contracts/e
 import type { ReviewRecord } from '../contracts/review.ts';
 import type { InputRequest } from '../contracts/input.ts';
 import { inputStateOf, type InputState } from '../contracts/input-state.ts';
+import { acceptedLimitation, escalatedFindings, findingCounts } from '../contracts/review-loop.ts';
 import type { FailureBucket, ReportDist, ReportMeasure, ValueReport } from '../contracts/report.ts';
 import {
   formatDuration,
@@ -203,6 +204,8 @@ function inputCounts(
   // перенесённый ответ, устаревший до выдачи (`carry-stale`), держит работу —
   // он ждёт решения, а не закрыт.
   const state = (s: InputState) => questions.filter((r) => inputStateOf(r) === s).length;
+  const by = (kind: InputRequest['answers'][number]['actor']['kind']) =>
+    questions.filter((r) => r.answers.at(-1)?.actor.kind === kind).length;
   return {
     questions: questions.length,
     awaitingAnswer: state('awaiting-answer'),
@@ -216,6 +219,11 @@ function inputCounts(
     declined: inside.filter((r) => r.kind === 'question' && !r.blocking).length,
     followUps: inside.filter((r) => r.kind === 'follow-up').length,
     assumptions: attempts.reduce((n, a) => n + (a.assumptions?.length ?? 0), 0),
+    answeredBy: {
+      operator: by('operator'),
+      lead: by('lead'),
+      host: by('host'),
+    },
   };
 }
 
@@ -699,12 +707,38 @@ export function valueReport(
   }
 
   // D6: раунды ревью плана и контрактов; блокирующие находки — по ID, последний статус.
-  const pcFindings = new Map<string, string>();
+  // Последнее состояние и серьёзность находки: находка, ставшая заметкой,
+  // перестаёт считаться блокирующей.
+  const pcFindings = new Map<string, { status: string; severity: string }>();
   for (const r of windowReviews)
     for (const f of r.findings)
-      if (f.severity === 'blocking')
-        pcFindings.set(`${r.kind}\u0000${r.subject}\u0000${f.id}`, f.status);
-  const pcStatuses = [...pcFindings.values()];
+      pcFindings.set(`${r.kind}\u0000${r.subject}\u0000${f.id}`, {
+        status: acceptedLimitation(f) ? 'accepted' : f.status,
+        severity: f.severity,
+      });
+  const pcStatuses = [...pcFindings.values()]
+    .filter((f) => f.severity === 'blocking')
+    .map((f) => f.status);
+  // Последний раунд окна каждого предмета: одобрение с открытыми заметками,
+  // принятые ограничения и эскалация видны явно (docs/review-protocol.md, §8).
+  const pcLast = new Map<string, ReviewRecord>();
+  for (const r of windowReviews) pcLast.set(`${r.kind}\u0000${r.subject}`, r);
+  let approvedWithOpenNotes = 0;
+  let openNotes = 0;
+  let acceptedLimitations = 0;
+  let pcEscalated = 0;
+  for (const r of pcLast.values()) {
+    const c = findingCounts(r.findings);
+    acceptedLimitations += c.accepted;
+    if (r.approved && c.notes) {
+      approvedWithOpenNotes += 1;
+      openNotes += c.notes;
+    }
+    if (escalatedFindings(r.findings, r.round).length) pcEscalated += 1;
+  }
+  const pcCalls = windowCalls.filter(
+    (c) => c.stage === 'plan-review' || c.stage === 'contract-review',
+  );
   const kindRounds = (kind: 'plan' | 'contract') => {
     const list = windowReviews.filter((r) => r.kind === kind);
     return { rounds: list.length, rejected: list.filter((r) => !r.approved).length };
@@ -720,7 +754,11 @@ export function valueReport(
         else withoutId += 1;
       }
   for (const r of windowReviews)
-    for (const f of r.findings) statusOf.set(`${r.kind}\u0000${r.subject}\u0000${f.id}`, f.status);
+    for (const f of r.findings)
+      // Принятое ограничение снял ведущий или оператор, а не reviewer: в
+      // прокси точности reviewer оно не входит.
+      if (acceptedLimitation(f)) statusOf.delete(`${r.kind}\u0000${r.subject}\u0000${f.id}`);
+      else statusOf.set(`${r.kind}\u0000${r.subject}\u0000${f.id}`, f.status);
   const statuses = [...statusOf.values()];
   const withStatus = statuses.filter((s) => s !== undefined);
 
@@ -1312,6 +1350,14 @@ export function valueReport(
         blockingClosed: pcStatuses.filter((s) => s === 'closed').length,
         blockingOpen: pcStatuses.filter((s) => s === 'open').length,
         blockingWithdrawn: pcStatuses.filter((s) => s === 'withdrawn').length,
+        approvedWithOpenNotes,
+        openNotes,
+        acceptedLimitations,
+        escalated: pcEscalated,
+        calls: pcCalls.length,
+        knownUsd:
+          Math.round(sum(pcCalls.filter(callCostKnown).map((c) => c.costUsd ?? 0)) * 1e6) / 1e6,
+        unknownCostCalls: pcCalls.filter((c) => !callCostKnown(c)).length,
       },
       withdrawn: measure(
         withStatus.filter((s) => s === 'withdrawn').length,

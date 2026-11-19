@@ -4,7 +4,7 @@ import { join, sep } from 'node:path';
 import type { ExecutionPolicy } from '../contracts/index.ts';
 import type { AttemptState } from '../contracts/index.ts';
 import { git } from '../environment/process.ts';
-import { executionEnvironment, runSteps } from '../environment/lifecycle.ts';
+import { executionEnvironment, runSteps, type StepOutcome } from '../environment/lifecycle.ts';
 import { materializeStore, type StoreContext } from './dependency-store.ts';
 
 type Repo = ExecutionPolicy['repositories'][number];
@@ -68,6 +68,8 @@ export async function snapshotDependencies(input: {
   overrides?: Map<string, { path: string; sha: string }>;
   /** Хранилище зависимостей для `dependencyBuild` снимков. */
   store?: StoreContext;
+  /** Исход каждого шага `dependencyBuild` (стадия `dependency-build:<репозиторий>`). */
+  onStep?: (step: StepOutcome) => void;
 }) {
   const { repos, signal } = input;
   const ids = dependencyOrder(repos, repos.repo(input.repositoryId).dependsOn);
@@ -120,6 +122,9 @@ export async function snapshotDependencies(input: {
         },
         input.environment,
       );
+      if (input.onStep)
+        execution.onStep = (step) =>
+          input.onStep!({ ...step, stage: 'dependency-build:' + repo.id });
       // Подставленное дерево (`overrides`) снимку не принадлежит: его хранилище
       // уже развёрнуто на своей фазе.
       if (input.store && repo.dependencyBuild.length && created.includes(snapshot))

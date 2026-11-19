@@ -140,6 +140,53 @@
           "basis": {
             "type": "string",
             "maxLength": 4000
+          },
+          "rounds": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "disposition": {
+            "type": "object",
+            "properties": {
+              "decision": {
+                "type": "string",
+                "enum": [
+                  "accepted-limitation",
+                  "continue"
+                ]
+              },
+              "by": {
+                "type": "string",
+                "enum": [
+                  "lead",
+                  "operator"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4000
+              },
+              "round": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "rounds": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "decision",
+              "by",
+              "reason",
+              "round",
+              "rounds"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [

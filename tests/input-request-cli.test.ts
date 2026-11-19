@@ -9,7 +9,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   cpSync,
   existsSync,
@@ -21,7 +21,10 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { exitCodes } from '../src/contracts/index.ts';
+import { executionPolicySchema, exitCodes } from '../src/contracts/index.ts';
+import { Engine } from '../src/engine/engine.ts';
+import { standaloneHost } from '../src/engine/standalone.ts';
+import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import { approve, bin, greet } from './runner-fixture.ts';
 
 const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
@@ -90,17 +93,21 @@ function project() {
   git('init', '-q', '-b', 'main');
   git('add', '-A');
   git('commit', '-qm', 'init');
+  const env = {
+    ...process.env,
+    NODE_OPTIONS: '',
+    HARNESS_CLAUDE_BIN: bin('fake-claude'),
+    HARNESS_CODEX_BIN: bin('fake-codex'),
+  };
+  const argvOf = (args: string[]) => ['--import', import.meta.resolve('tsx'), cli, ...args];
+  /** Ответ CLI как есть (для --human): exit, stdout, stderr. */
+  const raw = (...args: string[]) =>
+    spawnSync(process.execPath, argvOf(args), { cwd: app, encoding: 'utf8', env });
+  /** Процесс CLI без ожидания (для --watch). */
+  const spawnCli = (...args: string[]) =>
+    spawn(process.execPath, argvOf(args), { cwd: app, env, stdio: ['ignore', 'pipe', 'pipe'] });
   const harness = (...args: string[]) => {
-    const r = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), cli, ...args], {
-      cwd: app,
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        NODE_OPTIONS: '',
-        HARNESS_CLAUDE_BIN: bin('fake-claude'),
-        HARNESS_CODEX_BIN: bin('fake-codex'),
-      },
-    });
+    const r = raw(...args);
     return {
       status: r.status,
       stderr: r.stderr,
@@ -111,7 +118,16 @@ function project() {
     const file = `${scenario}.codex.reviewer.count`;
     return existsSync(file) ? Number(readFileSync(file, 'utf8')) : 0;
   };
-  return { root, app, harness, scenario, reviews, state: join(root, 'state') };
+  return {
+    root,
+    app,
+    harness,
+    raw,
+    spawnCli,
+    scenario,
+    reviews,
+    state: join(root, 'state'),
+  };
 }
 
 test('H02 CLI: вопрос → ответ → снимок → review-plan → input-target → input-apply → run; обход до apply — INPUT_REQUIRED без платного ревью', () => {
@@ -228,4 +244,173 @@ test('H02 CLI: вопрос → ответ → снимок → review-plan → 
   const shown = p.harness('input-show', '--state', p.state, '--request', id);
   assert.equal(shown.json.data.lifecycle, 'applied');
   assert.ok(shown.json.data.delivered?.callId, 'доставка подтверждена вызовом');
+});
+
+test('H12/H15 CLI: ответ ведущего на вопрос к человеку — OPERATOR_ANSWER_REQUIRED; status --human — этап и кто ответил', () => {
+  const p = project();
+  const base = ['--graph', 'graph.json', '--policy', 'policy.json', '--state', p.state];
+  assert.equal(p.harness('run', ...base).status, exitCodes.refused);
+  const id: string = p.harness('input-list', '--state', p.state).json.data.requests[0].id;
+  const answer = (actor: string, text: string) =>
+    p.harness(
+      'input-answer',
+      '--state',
+      p.state,
+      '--request',
+      id,
+      '--text',
+      text,
+      '--actor',
+      actor,
+      '--request-version',
+      '1',
+    );
+  const eventsBefore = p.harness('events', '--state', p.state, '--limit', '500').json.data;
+  const lead = answer('lead', 'Hi <name>');
+  assert.equal(lead.status, exitCodes.refused, lead.stderr);
+  assert.deepEqual(
+    p.harness('events', '--state', p.state, '--limit', '500').json.data,
+    eventsBefore,
+    'отказ не записал событий',
+  );
+  assert.deepEqual(
+    p.harness('input-show', '--state', p.state, '--request', id).json.data.answers,
+    [],
+  );
+  assert.equal(lead.json.error?.code, 'OPERATOR_ANSWER_REQUIRED');
+  assert.match(lead.stderr, /OPERATOR_ANSWER_REQUIRED/);
+  const still = p.harness('status', '--state', p.state);
+  assert.deepEqual(
+    [still.json.data.works[0].input.state, still.json.data.works[0].input.version],
+    ['awaiting-answer', 1],
+    'отказ ничего не записал',
+  );
+  const stage = still.json.data.works[0].stage;
+  assert.equal(stage.name, 'input');
+  assert.deepEqual(stage.needs, { actor: 'user', action: 'answer-input' });
+  const human = p.raw('status', '--state', p.state, '--human');
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(
+    human.stdout,
+    /\n {2}сейчас: ждёт ответа на вопрос исполнителя — \d+ с; дальше: код, проверки, ревью, интеграция; от вас: ответить на вопрос исполнителя; потрачено: /,
+  );
+  assert.match(human.stdout, /ждёт ответа человека \(input-show, input-answer --actor operator\)/);
+
+  const operator = answer('operator', 'Use exactly Hello, <name>!');
+  assert.equal(operator.status, 0, operator.stderr);
+  const after = p.harness('status', '--state', p.state);
+  assert.equal(after.json.data.works[0].input.answeredBy, 'operator');
+  assert.match(p.raw('status', '--state', p.state, '--human').stdout, /: ответил оператор\n/);
+  const explain = p.harness('explain', '--state', p.state, '--policy', 'policy.json');
+  assert.match(
+    JSON.stringify(explain.json.data.diagnoses),
+    /\(ответил: оператор\) записан, но не применён/,
+  );
+
+  // --watch: только со --human; --interval — только с --watch и в пределах.
+  const refused = (...args: string[]) => {
+    const r = p.raw('status', '--state', p.state, ...args);
+    assert.equal(r.status, exitCodes.input, `${args.join(' ')}: ${r.stderr}`);
+    return r.stderr;
+  };
+  assert.match(refused('--watch'), /--watch — только вместе с --human/);
+  assert.match(refused('--human', '--interval', '2'), /--interval — только вместе с --watch/);
+  assert.match(refused('--human', '--watch', '--interval', '0'), /--interval: целое/);
+  assert.match(refused('--human', '--watch', '--interval', '1.5'), /--interval: целое/);
+  assert.equal(p.raw('events', '--state', p.state, '--watch').status, exitCodes.input);
+  // Доска успокоилась (попыток нет, controller не жив): один кадр и выход 0.
+  const settled = p.raw('status', '--state', p.state, '--human', '--watch', '--interval', '1');
+  assert.equal(settled.status, 0, settled.stderr);
+  assert.equal(settled.stdout.split('harness status — ').length - 1, 1, settled.stdout);
+  assert.match(settled.stdout, /обновление каждые 1 с; Ctrl-C — выход\)\n/);
+  assert.match(settled.stdout, /сейчас: ждёт ответа на вопрос исполнителя/);
+});
+
+test('H15 CLI: status --human --watch обновляет кадр, пока живой controller сдвинет работу; сам выходит, когда доска успокоилась; Ctrl-C прерывает сразу', async () => {
+  const p = project();
+  const base = ['--graph', 'graph.json', '--policy', 'policy.json', '--state', p.state];
+  const review = p.harness('review-plan', ...base, '--author', 'external');
+  assert.equal(review.status, 0, review.stderr);
+  const policy = executionPolicySchema.parse(
+    JSON.parse(readFileSync(join(p.app, 'policy.json'), 'utf8')),
+  );
+  // Роль controller держит другой процесс: готовое поручение он выдаст.
+  const other = new Engine({
+    host: standaloneHost(new SqliteExecutionStore(join(p.state, 'state.sqlite'), 'other'), policy),
+    policy,
+  });
+  const watch = (interval: string) => {
+    const child = p.spawnCli(
+      'status',
+      '--state',
+      p.state,
+      '--human',
+      '--watch',
+      '--interval',
+      interval,
+    );
+    const io = { out: '', err: '' };
+    child.stdout.on('data', (b: Buffer) => (io.out += b.toString()));
+    child.stderr.on('data', (b: Buffer) => (io.err += b.toString()));
+    const closed = new Promise<number | null>((done) => child.on('close', (c) => done(c)));
+    // Выход процесса с пределом: зависший watch роняет тест, а не вешает его.
+    const exited = (ms = 20_000) =>
+      Promise.race([
+        closed,
+        new Promise<never>((_, fail) =>
+          setTimeout(() => fail(new Error(`watch не вышел за ${ms} мс: ${io.err}`)), ms).unref(),
+        ),
+      ]);
+    const frames = () => io.out.split('harness status — ').length - 1;
+    const until = async (cond: () => boolean, ms: number) => {
+      const deadline = Date.now() + ms;
+      while (!cond() && Date.now() < deadline && child.exitCode === null)
+        await new Promise((r) => setTimeout(r, 50));
+    };
+    return { child, io, exited, frames, until };
+  };
+  let released = false;
+  try {
+    assert.equal(other.lead('occupied-controller'), true);
+    // План согласован и выдача идёт: поручение готово, его выдаст controller.
+    const graphId = other.read((v) => v.graphs()[0]!.id);
+    other.approve(graphId, policy.approvalMode);
+    other.resume();
+
+    // 1. Каждую секунду новый кадр; controller отпустил роль — выход сам, exit 0.
+    const a = watch('1');
+    try {
+      await a.until(() => a.frames() >= 2, 60_000);
+      assert.ok(a.frames() >= 2, `два кадра: ${a.io.out}\n${a.io.err}`);
+      assert.equal(a.child.exitCode, null, 'пока controller жив, доска не успокоилась');
+      assert.match(
+        a.io.out,
+        /сейчас: ждёт выдачи; дальше: код, проверки, ревью, интеграция; от вас: ничего;/,
+      );
+      other.release('occupied-controller');
+      released = true;
+      assert.equal(await a.exited(), 0, a.io.err);
+    } finally {
+      a.child.kill('SIGKILL');
+    }
+
+    // 2. Длинный период: Ctrl-C будит ожидание сразу, а не по таймеру.
+    assert.equal(other.lead('occupied-controller'), true);
+    released = false;
+    const b = watch('3600');
+    try {
+      await b.until(() => b.frames() >= 1, 60_000);
+      assert.equal(b.frames(), 1, b.io.err);
+      const sent = Date.now();
+      b.child.kill('SIGINT');
+      assert.equal(await b.exited(10_000), 0, b.io.err);
+      assert.ok(Date.now() - sent < 10_000, 'выход по Ctrl-C без ожидания периода');
+      assert.equal(b.frames(), 2, 'последний кадр — при выходе');
+    } finally {
+      b.child.kill('SIGKILL');
+    }
+  } finally {
+    if (!released) other.release('occupied-controller');
+    other.host.store.close();
+  }
 });

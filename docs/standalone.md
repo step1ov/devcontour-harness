@@ -361,6 +361,17 @@ $H result --state <manifest.paths.state> --work <order-id>
 `git rev-parse refs/heads/harness/accepted`, — приёмка; зелёный exit сам по
 себе ею не является.
 
+**Принятая версия и текущая.** У принятого поручения `status`
+(`works[].target`), `result` (`target`) и `report` (раздел «After acceptance»,
+`targets`) сверяют принятый SHA с текущим target ref: `acceptedSha`, `head`,
+`commitsSinceAccepted`, `filesSinceAccepted`, `diverged` (ref переписан) или
+`unavailable` (git не ответил) и строку `line` / `lineEn`, например
+«принято на 3f2a…; после приёмки 2 коммита (3 файла) — не проверены»
+(`status --human` печатает обе). Коммиты после приёмки этим принятием не
+проверены: их принимает новое поручение `harness run`, а проверяет
+`harness gates --sha <target ref>` и `review-code --base <acceptedSha> --head <target ref>` (проверка, не приёмка). Сверка — только чтение Git:
+один `rev-parse` на репозиторий и по три вызова на принятый SHA, не дольше 10 с на вызов и 30 с на ответ; причина `unavailable` — класс (ref не прочитан, git не ответил, checkout не доверен), без путей машины.
+
 ## Gates на коммите: `harness gates`
 
 Перед долгим циклом сначала прогоните дешёвые решающие gates:
@@ -379,6 +390,39 @@ $H gates --state <manifest.paths.state> --policy .harness/policy.json \
 прошли, 3 — нет. Без `--gate` исполняются все gates; без `--fail-fast` провал
 не останавливает остальные. Логи — в `data.logs`. Это проверка, а не приёмка:
 принимает работу только `run`.
+Итог проверки записывается рядом с логами (`<state>/gates-at/<id>/result.json`):
+его прикладывает `review-code` того же SHA.
+
+## Обзор написанной ветки: `harness review-code`
+
+Код, написанный вне harness (ведущим агентом или человеком), можно отдать на
+независимый технический обзор без поручения:
+
+```sh
+$H review-code --state <manifest.paths.state> [--policy .harness/policy.json] \
+  --base main --head feat/x [--role developer] [--author claude] [--repository app]
+```
+
+Reviewer выбирается правилом ревью кода роли (`--role`; одна роль — по
+умолчанию) по вендору автора (`--author`, по умолчанию writer роли): другой
+вендор, тот же — только при `vendor: same-vendor-allowed`, иначе
+`REVIEWER_SAME_VENDOR` до вызова модели; запись отмечает `sameVendor`. Reviewer
+получает diff `merge-base(base, head)..head` (не больше 4 МиБ) и читает
+отдельное рабочее дерево на `head`, только чтение; дерево убирается после
+вызова. Если в каталоге состояния есть итог `harness gates --sha` на этом
+`head`, он прикладывается к запросу и к записи (`gates`); gates команда сама не
+исполняет.
+
+Ответ — запись `kind: code`, `acceptance: false` (`cliDataSchemas['review-code']`):
+`base`, `head`, `mergeBase`, `files`, `commits`, `approved`, `summary`,
+reviewer, находки в той же форме, что у ревью плана, и путь `artifact`. Exit 0 —
+одобрено, 3 — не одобрено (блокирующие находки, ответ вне протокола, изменённое
+reviewer дерево) или прервано (`CANCELLED`). Повтор по тем же `--base`/`--head`
+(как названы) — следующий раунд: reviewer называет состояние прежних открытых
+находок; тот же одобренный `head` с тем же reviewer и тем же итогом gates — тот
+же раунд без вызова.
+Записи хранятся в `code-reviews` каталога состояния. Это наблюдение, а не
+приёмка: поручения, попытки и target ref не меняются, принимает только `run`.
 
 ## `harness explain`
 

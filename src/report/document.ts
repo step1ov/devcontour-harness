@@ -77,6 +77,22 @@ const causeLabels: Record<string, string> = {
   none: 'not an environment cause',
 };
 
+/**
+ * Вопросы исполнителя окна одной строкой: сколько остановок вопросом и кто на
+ * них ответил (человек или ведущий агент), сколько ждут ответа.
+ */
+function inputsLine(i: NonNullable<ValueReport['inputs']>) {
+  const by = i.answeredBy;
+  return (
+    `Executor questions that stopped an attempt: ${i.questions}` +
+    (by
+      ? ` (answered by the operator ${by.operator}, by the lead agent ${by.lead}${by.host ? `, by the host ${by.host}` : ''})`
+      : '') +
+    `; awaiting an answer ${i.awaitingAnswer}, answered but not applied ${i.answeredNotApplied}. ` +
+    `Below the threshold (the executor decided): ${i.declined}; requests to the lead: ${i.followUps}; executor assumptions: ${i.assumptions}.`
+  );
+}
+
 /** Блоки отчёта в порядке разделов (`docs/contracts.md`, «Отчёт»). */
 export function reportBlocks(r: ValueReport): Block[] {
   const c = r.coverage;
@@ -113,7 +129,7 @@ export function reportBlocks(r: ValueReport): Block[] {
     `Rejected reviews: ${d.reviews.rejected} (candidate ${d.reviews.candidate}, integration ${d.reviews.integration}) with ${d.reviews.blockingFindings} blocking findings; ${d.reviews.withoutFindings} without findings.`,
     `Rejected by review although every required check passed on the same commit: ${formatMeasureRatio(d.afterGreenGates)} green candidates (diagnostic: what the checks did not catch).`,
     `Caught only against the current target branch (integration): ${d.integration}.`,
-    `Plan and contract review: ${d.planContract.rounds} rounds, ${d.planContract.rejected} rejected (plans ${d.planContract.plans.rejected} of ${d.planContract.plans.rounds}, contracts ${d.planContract.contracts.rejected} of ${d.planContract.contracts.rounds}); blocking findings closed before code ${d.planContract.blockingClosed}, open ${d.planContract.blockingOpen}, withdrawn ${d.planContract.blockingWithdrawn}.`,
+    `Plan and contract review: ${d.planContract.rounds} rounds, ${d.planContract.rejected} rejected (plans ${d.planContract.plans.rejected} of ${d.planContract.plans.rounds}, contracts ${d.planContract.contracts.rejected} of ${d.planContract.contracts.rounds}); blocking findings closed before code ${d.planContract.blockingClosed}, open ${d.planContract.blockingOpen}, withdrawn ${d.planContract.blockingWithdrawn}.${planContractTail(d.planContract)}`,
     `Findings withdrawn by the reviewer (precision proxy): ${formatMeasureRatio(d.withdrawn)}${d.withdrawn.unknown ? `; ${plural(d.withdrawn.unknown, 'finding')} without a status` : ''}.`,
   ]);
   if (d.byGate.length) {
@@ -170,6 +186,7 @@ export function reportBlocks(r: ValueReport): Block[] {
       ? 'Plan approvals: unknown (no approval records).'
       : `Plan approvals: operator ${a.approvals.operator}, agent ${a.approvals.agent} (${a.approvals.source === 'events' ? 'from events' : a.approvals.source === 'state' ? 'current approvals of graphs only' : 'from events, and current approvals of graphs without events'}).`,
     `Escalations to a person (recovery awaiting the user or stopped): ${a.escalations}.`,
+    ...(r.inputs ? [inputsLine(r.inputs)] : []),
   ]);
   if (a.pauses.length)
     table(
@@ -295,6 +312,25 @@ export function reportBlocks(r: ValueReport): Block[] {
       p(`Showing the newest ${r.works.rows.length} of ${r.works.total} tasks.`, true);
   } else p('No task finished in the window.', true);
 
+  if (r.targets) {
+    h(2, 'After acceptance');
+    if (r.targets.rows.length) {
+      list(r.targets.rows.map((t) => `${t.workId}: ${t.lineEn}.`));
+      if (r.targets.truncated)
+        p(`Showing ${r.targets.rows.length} of ${r.targets.total} tasks.`, true);
+      p(
+        'Commits after acceptance are not accepted: they need a new harness task; `harness gates --sha <target ref>` and `harness review-code --base <accepted> --head <target ref>` check them without accepting.',
+        true,
+      );
+    } else
+      p(
+        r.targets.checked
+          ? `All ${plural(r.targets.checked, 'accepted task')} match their target refs.`
+          : 'No accepted tasks to compare with their target refs.',
+        true,
+      );
+  }
+
   h(2, 'Limits and unknowns');
   list(r.limitations.map((l) => l.text));
 
@@ -307,4 +343,25 @@ export function reportBlocks(r: ValueReport): Block[] {
     `Tokens in the window: input ${k.tokens.input}, output ${k.tokens.output}, cache read ${k.tokens.cacheRead}, cache write ${k.tokens.cacheWrite}; calls with incomplete token counts ${k.tokens.incompleteCalls}.`,
   ]);
   return blocks;
+}
+
+/**
+ * Хвост строки ревью плана и контрактов: одобрения с открытыми заметками
+ * («approved, N open notes»), принятые ограничения, эскалации и расход
+ * вызовов ревью. У отчёта прежней версии полей нет — хвоста нет.
+ */
+function planContractTail(pc: ValueReport['defects']['planContract']): string {
+  const parts: string[] = [];
+  if (pc.approvedWithOpenNotes)
+    parts.push(
+      `${plural(pc.approvedWithOpenNotes, 'subject')} approved, ${plural(pc.openNotes ?? 0, 'open note')}`,
+    );
+  if (pc.acceptedLimitations) parts.push(plural(pc.acceptedLimitations, 'accepted limitation'));
+  if (pc.escalated)
+    parts.push(`${plural(pc.escalated, 'subject')} waiting for an operator decision`);
+  if (pc.calls)
+    parts.push(
+      `review calls ${pc.calls}, known spend $${(pc.knownUsd ?? 0).toFixed(2)}${pc.unknownCostCalls ? ` (${plural(pc.unknownCostCalls, 'call')} without a known cost)` : ''}`,
+    );
+  return parts.length ? ' ' + parts.join('; ') + '.' : '';
 }

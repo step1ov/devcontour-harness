@@ -211,6 +211,8 @@ export class Connector {
     try {
       identity = await checkIdentity(this.transport, config);
     } catch (error) {
+      // Несовпадение версии backend — именованный отказ (exit 4), не проблема сверки.
+      if (error instanceof HarnessError && error.code === 'CONNECTOR_VERSION_MISMATCH') throw error;
       const message = this.redact(error instanceof Error ? error.message : String(error));
       return this.checkReport(undefined, false, [message], []);
     }

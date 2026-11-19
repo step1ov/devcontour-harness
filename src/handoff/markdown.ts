@@ -1,5 +1,8 @@
 import { HANDOFF_LIMITS, type HandoffPack } from '../contracts/handoff.ts';
 
+/** Кто ответил на вопрос исполнителя. */
+const answeredBy = { operator: 'оператор', lead: 'ведущий', host: 'хост' } as const;
+
 /** Ячейка таблицы Markdown: одна строка, без разделителей колонок. */
 const cell = (s: string | number | undefined | null) =>
   String(s ?? '—')
@@ -151,7 +154,7 @@ export function handoffMarkdown(pack: HandoffPack): string {
         `- ${r.requestId} ${r.workId} [${r.kind}, ${r.state}, серьёзность ${r.severity}]: ${cell(r.question)}` +
           (r.options.length ? ` (варианты: ${r.options.join(', ')})` : '') +
           (r.answer
-            ? ` — ответ r${r.answer.revision} ${r.answer.digest.slice(0, 12)}: ${cell(r.answer.excerpt)}`
+            ? ` — ответ r${r.answer.revision} ${r.answer.digest.slice(0, 12)}${r.answer.by ? ` (ответил: ${answeredBy[r.answer.by]})` : ''}: ${cell(r.answer.excerpt)}`
             : ''),
       );
     out.push(...more(pack.truncated.inputs, 'вопросов'));

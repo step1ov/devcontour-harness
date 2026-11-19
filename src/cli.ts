@@ -8,13 +8,15 @@ import {
   writeFileSync,
   mkdirSync,
 } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import {
   API_VERSION,
   HarnessError,
   authorSchema,
+  reviewDispositionSchema,
+  type ReviewDisposition,
   cliCommands,
   cliDataSchemas,
   contractViolation,
@@ -41,7 +43,7 @@ import { cliAdapter } from './agents/cli-adapter.ts';
 import { initProject, initText } from './init/project.ts';
 import { leanMismatch, leanText, switchLean } from './init/lean.ts';
 import { diagnoseState, explainText } from './explain/diagnose.ts';
-import { statusText } from './control/status.ts';
+import { statusFrame, statusSettled, statusText } from './control/status.ts';
 import { planCheck, planRequestOf } from './planning/check.ts';
 import { checkJsonBytes } from './catalog/bytes.ts';
 import { isSharedOperation, sharedOperations } from './catalog/shared.ts';
@@ -51,11 +53,13 @@ import { hostGitArgs } from './environment/process.ts';
 import { FileContextSource, FileResultSink, FileWorkSource } from './connectors/files.ts';
 import { SqliteExecutionStore } from './storage/sqlite.ts';
 import { collectReportInput } from './control/report.ts';
+import { reportTargets } from './control/target.ts';
 import { writeReportFile } from './control/report-file.ts';
 import { valueReport, reportHtml, reportMarkdown } from './report/index.ts';
 import { handoffMarkdown, handoffPack } from './handoff/index.ts';
 import { inputStateOf } from './projections/input.ts';
 import { checkGates, gatesText } from './control/gates-check.ts';
+import { smokeLifecycle, smokeText } from './control/lifecycle-smoke.ts';
 import { defaultResourceDatabase } from './environment/resources.ts';
 
 const usage = `harness ${HARNESS_VERSION}
@@ -316,6 +320,13 @@ const options = {
   sha: { type: 'string' },
   gate: { type: 'string' },
   'fail-fast': { type: 'boolean' },
+  'accept-limitation': { type: 'string', multiple: true },
+  'continue-review': { type: 'string', multiple: true },
+  watch: { type: 'boolean' },
+  interval: { type: 'string' },
+  base: { type: 'string' },
+  head: { type: 'string' },
+  role: { type: 'string' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -327,7 +338,7 @@ const flagOwners = {
   lead: ['init'],
   review: ['init'],
   model: ['init'],
-  human: ['init', 'lean', 'status', 'explain', 'plan-request', 'gates'],
+  human: ['init', 'lean', 'status', 'explain', 'plan-request', 'gates', 'smoke'],
   draft: ['plan-check'],
   basis: ['plan-check'],
   brief: ['plan-request', 'plan-check'],
@@ -353,15 +364,22 @@ const flagOwners = {
   text: ['input-answer'],
   option: ['input-answer'],
   kind: ['input-answer'],
-  actor: ['input-answer'],
+  actor: ['input-answer', 'review-plan', 'review-contract'],
+  'accept-limitation': ['review-plan', 'review-contract'],
+  'continue-review': ['review-plan', 'review-contract'],
   'request-version': ['input-answer', 'input-apply', 'input-cancel', 'input-supersede'],
   'context-digest': ['input-target', 'input-apply'],
   answer: ['input-apply'],
   target: ['input-apply'],
   successor: ['input-supersede'],
-  sha: ['gates'],
+  sha: ['gates', 'smoke'],
   gate: ['gates'],
   'fail-fast': ['gates'],
+  watch: ['status'],
+  interval: ['status'],
+  base: ['review-code'],
+  head: ['review-code'],
+  role: ['review-code'],
 } as const;
 
 /** Явное человеческое представление успешного ответа (`--human`). */
@@ -372,6 +390,7 @@ const presenters: Partial<Record<CliCommand, (data: never) => string>> = {
   explain: explainText,
   'plan-request': (data: { prompt: string }) => data.prompt + '\n',
   gates: gatesText,
+  smoke: smokeText,
 };
 
 /**
@@ -441,6 +460,122 @@ const readText = (path: string, what: string) => {
 
 const reportFormats = ['json', 'md', 'html'] as const;
 
+/**
+ * Решения по находкам из флагов review-plan / review-contract: ID — списком
+ * через запятую или повтором флага; основание обязательно, решающий — lead
+ * (по умолчанию) или operator.
+ */
+function reviewDispositionsOf(v: {
+  'accept-limitation'?: string[];
+  'continue-review'?: string[];
+  reason?: string;
+  actor?: string;
+}): ReviewDisposition[] {
+  const ids = (list?: string[]) =>
+    (list ?? [])
+      .flatMap((x) => x.split(','))
+      .map((x) => x.trim())
+      .filter(Boolean);
+  const accept = ids(v['accept-limitation']);
+  const proceed = ids(v['continue-review']);
+  if (!accept.length && !proceed.length) {
+    if (v.actor !== undefined)
+      throw new HarnessError(
+        'INVALID_INPUT',
+        '--actor задаёт решающего: нужны --accept-limitation или --continue-review',
+      );
+    return [];
+  }
+  const by = v.actor ?? 'lead';
+  if (by !== 'lead' && by !== 'operator')
+    throw new HarnessError('INVALID_INPUT', '--actor: ожидается lead или operator', [
+      { path: ['--actor'], message: by },
+    ]);
+  return [
+    ...accept.map((finding) => ({ finding, decision: 'accepted-limitation' as const })),
+    ...proceed.map((finding) => ({ finding, decision: 'continue' as const })),
+  ].map((d) =>
+    parseWith(reviewDispositionSchema, { ...d, by, reason: v.reason ?? '' }, 'disposition'),
+  );
+}
+
+/**
+ * `status --human --watch [--interval S]`: кадр `statusFrame` каждые S секунд
+ * (по умолчанию 5, от 1 до 3600) до того, как доска успокоится
+ * (`statusSettled`), или до Ctrl-C (SIGINT, SIGTERM). Каждый кадр — новое
+ * чтение только для чтения; на терминале кадр заменяет прежний. Последний
+ * кадр печатает основной вывод, данные — последний снимок status.
+ */
+async function watchStatus(
+  state: string,
+  v: { watch?: boolean; human?: boolean; interval?: string; graph?: string },
+): Promise<{ data: unknown; text: string }> {
+  if (!v.watch) throw new HarnessError('INVALID_INPUT', '--interval — только вместе с --watch');
+  if (!v.human)
+    throw new HarnessError(
+      'INVALID_INPUT',
+      '--watch — только вместе с --human (текст для человека)',
+    );
+  const seconds = v.interval === undefined ? 5 : Number(v.interval);
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 3600)
+    throw new HarnessError('INVALID_INPUT', '--interval: целое число секунд от 1 до 3600', [
+      { path: ['--interval'], message: String(v.interval) },
+    ]);
+  const intervalMs = seconds * 1000;
+  let wake: (() => void) | undefined;
+  let stopped = false;
+  const onSignal = () => {
+    stopped = true;
+    wake?.();
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  const clear = process.stdout.isTTY === true ? '\x1b[H\x1b[2J' : '';
+  try {
+    for (;;) {
+      // Привязка — заново на каждый кадр: применённая новая политика меняет
+      // пределы, блокировки и диагнозы.
+      const h = open(state, binding(state), 'state');
+      let snapshot: { data: z.output<typeof cliDataSchemas.status>; liveJobs: number };
+      const now = Date.now();
+      try {
+        // Статус и задания графов — одним снимком (вложенное чтение SQLite
+        // берёт внешний): иначе восстановление группы между двумя чтениями
+        // выглядит как успокоившаяся доска. detail — для свежести владения
+        // идущих попыток (`statusSettled`).
+        snapshot = h.engine.read(() => ({
+          data: cliDataSchemas.status.parse(h.status(v.graph, { detail: true })),
+          liveJobs: h.workflows
+            .list()
+            .filter(
+              (j) =>
+                j.status === 'running' &&
+                (j.leaseUntil ?? 0) > now &&
+                (!v.graph || j.kind !== 'graph' || j.id === v.graph),
+            ).length,
+        }));
+      } finally {
+        h.close();
+      }
+      const { data, liveJobs } = snapshot;
+      const frame = statusFrame(data, now, intervalMs);
+      if (stopped || statusSettled(data, now, { liveJobs })) return { data, text: clear + frame };
+      process.stdout.write(clear + frame + (clear ? '' : '\n'));
+      await new Promise<void>((done) => {
+        const timer = setTimeout(done, intervalMs);
+        wake = () => {
+          clearTimeout(timer);
+          done();
+        };
+      });
+      wake = undefined;
+    }
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+  }
+}
+
 async function run(
   argv: string[],
 ): Promise<{ command: CliCommand | 'version'; data: unknown; code?: number; text?: string }> {
@@ -503,6 +638,7 @@ async function run(
     case 'review-plan':
     case 'review-contract': {
       const author = parseWith(authorSchema, need('author'), 'author');
+      const dispositions = reviewDispositionsOf(v);
       const b = binding(need('state'), need('policy'), true);
       const h = open(need('state'), b, false);
       try {
@@ -538,6 +674,7 @@ async function run(
             graph,
             author,
             ...(ctx ? { context: ctx } : {}),
+            ...(dispositions.length ? { dispositions } : {}),
           });
         } else {
           const contract = parseWith(
@@ -545,7 +682,12 @@ async function run(
             readJson(need('contract'), 'contract'),
             'contract',
           );
-          record = await h.review({ kind: 'contract', contract, author });
+          record = await h.review({
+            kind: 'contract',
+            contract,
+            author,
+            ...(dispositions.length ? { dispositions } : {}),
+          });
         }
         return { command, data: record, code: record.approved ? 0 : exitCodes.refused };
       } finally {
@@ -605,6 +747,8 @@ async function run(
     case 'status':
     case 'events':
     case 'result': {
+      if (command === 'status' && (v.watch || v.interval !== undefined))
+        return { command, ...(await watchStatus(need('state'), v)) };
       const h = open(need('state'), binding(need('state')), 'state');
       try {
         if (command === 'status')
@@ -799,11 +943,16 @@ async function run(
         throw new HarnessError('NOT_FOUND', 'Каталог состояния не найден: ' + state);
       // Однократное чтение без записи и без файлов в каталоге состояния
       // (неизменяемое открытие с проверкой после чтения, `readOnce`).
+      // Политика каталога состояния (если есть): по ней принятые поручения
+      // сверяются с текущими target ref. Нет политики — отчёт без сверки.
+      // Нет `binding.json` — отчёт без сверки; испорченный — отказ, а не тихий пропуск.
+      const bound = existsSync(bindingFile(state)) ? binding(state) : undefined;
       const report = SqliteExecutionStore.readOnce(
         file,
         'devcontour-harness@' + HARNESS_VERSION,
-        (store) =>
-          valueReport(collectReportInput(store), {
+        (store) => {
+          const input = collectReportInput(store);
+          const value = valueReport(input, {
             ...optional('since', v.since),
             ...optional('until', v.until),
             ...optional('asOf', v['as-of']),
@@ -811,7 +960,18 @@ async function run(
             label: basename(resolve(state)),
             stateDir: resolve(state),
             harnessVersion: HARNESS_VERSION,
-          }),
+          });
+          if (!bound) return value;
+          const b = bound;
+          return {
+            ...value,
+            targets: reportTargets(
+              b.policy,
+              (p) => (isAbsolute(p) ? p : resolve(b.baseDir, p)),
+              input.works,
+            ),
+          };
+        },
       );
       if (format === 'json' && !v.out) return { command, data: report };
       const text =
@@ -935,6 +1095,68 @@ async function run(
           command,
           data,
           ...(data.passed ? {} : { code: exitCodes[errorCodes.GATE_FAILED] }),
+        };
+      } finally {
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
+      }
+    }
+    case 'review-code': {
+      const state = need('state');
+      const author = v.author ? parseWith(authorSchema, v.author, 'author') : undefined;
+      const b = v.policy ? binding(state, v.policy, true) : binding(state);
+      const h = open(state, b, false);
+      // Прерывание (Ctrl-C, SIGTERM) останавливает reviewer, и рабочее дерево обзора убирается.
+      const abort = new AbortController();
+      const stop = () => abort.abort(new Error('Обзор прерван сигналом'));
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+      try {
+        const record = await h.reviewCode({
+          base: need('base'),
+          head: need('head'),
+          ...optional('role', v.role),
+          ...optional('author', author),
+          ...optional('repositoryId', v.repository),
+          signal: AbortSignal.any([
+            abort.signal,
+            AbortSignal.timeout(b.policy.runTimeoutMs + 5000),
+          ]),
+        });
+        return { command, data: record, code: record.approved ? 0 : exitCodes.refused };
+      } finally {
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
+        h.close();
+      }
+    }
+    case 'smoke': {
+      const state = need('state');
+      const b = v.policy ? loadPolicy(v.policy) : binding(state);
+      const abort = new AbortController();
+      const stop = () => abort.abort(new Error('Проверка прервана сигналом'));
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+      try {
+        const data = await smokeLifecycle({
+          policy: b.policy,
+          baseDir: b.baseDir,
+          stateDir: state,
+          rev: need('sha'),
+          ...optional('repositoryId', v.repository),
+          signal: abort.signal,
+          resourceDatabase: defaultResourceDatabase(),
+          // Ход — диагностика в stderr: stdout остаётся одним JSON.
+          onStep: (s) =>
+            process.stderr.write(
+              `harness smoke: ${s.stage}/${s.id} ${s.status} ${Math.round(s.durationMs / 1000)} с\n`,
+            ),
+        });
+        // Отказ окружения — данные и exit 4 (LIFECYCLE_FAILED).
+        return {
+          command,
+          data,
+          ...(data.passed ? {} : { code: exitCodes[errorCodes.LIFECYCLE_FAILED] }),
         };
       } finally {
         process.off('SIGINT', stop);

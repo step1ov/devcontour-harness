@@ -295,5 +295,14 @@ test('explain: строк сводки не больше EXPLAIN_ATTEMPT_ROWS, �
   assert.ok(cliDataSchemas.explain.safeParse(data).success);
   assert.equal(data.attempts?.length, EXPLAIN_ATTEMPT_ROWS);
   assert.equal(data.attemptsTruncated, 2);
-  assert.match(explainText(data), /… и ещё поручений: 2\n$/);
+  // Маркер — сразу за последней строкой раздела «Попытки»; следом идёт
+  // следующий раздел (строка без отступа) или конец текста.
+  const text = explainText(data);
+  assert.match(
+    text,
+    new RegExp(
+      `\\n {2}w${EXPLAIN_ATTEMPT_ROWS - 1}: [^\\n]*\\n {2}… и ещё поручений: 2\\n(?:$|\\S)`,
+    ),
+  );
+  assert.equal(text.split('… и ещё поручений').length, 2);
 });

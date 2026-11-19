@@ -189,6 +189,7 @@
             "ATTEMPTS_EXHAUSTED",
             "CONTEXT_EXHAUSTED",
             "INPUT_REQUIRED",
+            "OPERATOR_ANSWER_REQUIRED",
             "REVISION_CONFLICT",
             "CANCELLED",
             "NOT_FOUND",
@@ -198,6 +199,8 @@
             "REVIEW_PROTOCOL_INVALID",
             "SANDBOX_UNAVAILABLE",
             "GIT_FAILED",
+            "LIFECYCLE_FAILED",
+            "CONNECTOR_VERSION_MISMATCH",
             "STORAGE_FAILED",
             "DELIVERY_FAILED",
             "INTERNAL"
@@ -600,6 +603,7 @@
                     "ATTEMPTS_EXHAUSTED",
                     "CONTEXT_EXHAUSTED",
                     "INPUT_REQUIRED",
+                    "OPERATOR_ANSWER_REQUIRED",
                     "REVISION_CONFLICT",
                     "CANCELLED",
                     "NOT_FOUND",
@@ -609,6 +613,8 @@
                     "REVIEW_PROTOCOL_INVALID",
                     "SANDBOX_UNAVAILABLE",
                     "GIT_FAILED",
+                    "LIFECYCLE_FAILED",
+                    "CONNECTOR_VERSION_MISMATCH",
                     "STORAGE_FAILED",
                     "DELIVERY_FAILED",
                     "INTERNAL"
@@ -758,6 +764,7 @@
               "ATTEMPTS_EXHAUSTED",
               "CONTEXT_EXHAUSTED",
               "INPUT_REQUIRED",
+              "OPERATOR_ANSWER_REQUIRED",
               "REVISION_CONFLICT",
               "CANCELLED",
               "NOT_FOUND",
@@ -767,6 +774,8 @@
               "REVIEW_PROTOCOL_INVALID",
               "SANDBOX_UNAVAILABLE",
               "GIT_FAILED",
+              "LIFECYCLE_FAILED",
+              "CONNECTOR_VERSION_MISMATCH",
               "STORAGE_FAILED",
               "DELIVERY_FAILED",
               "INTERNAL"
@@ -1033,6 +1042,7 @@
               "ATTEMPTS_EXHAUSTED",
               "CONTEXT_EXHAUSTED",
               "INPUT_REQUIRED",
+              "OPERATOR_ANSWER_REQUIRED",
               "REVISION_CONFLICT",
               "CANCELLED",
               "NOT_FOUND",
@@ -1042,6 +1052,8 @@
               "REVIEW_PROTOCOL_INVALID",
               "SANDBOX_UNAVAILABLE",
               "GIT_FAILED",
+              "LIFECYCLE_FAILED",
+              "CONNECTOR_VERSION_MISMATCH",
               "STORAGE_FAILED",
               "DELIVERY_FAILED",
               "INTERNAL"
@@ -1298,6 +1310,14 @@
               "excerpt": {
                 "type": "string",
                 "maxLength": 501
+              },
+              "by": {
+                "type": "string",
+                "enum": [
+                  "operator",
+                  "lead",
+                  "host"
+                ]
               }
             },
             "required": [
@@ -1461,6 +1481,7 @@
             "ATTEMPTS_EXHAUSTED",
             "CONTEXT_EXHAUSTED",
             "INPUT_REQUIRED",
+            "OPERATOR_ANSWER_REQUIRED",
             "REVISION_CONFLICT",
             "CANCELLED",
             "NOT_FOUND",
@@ -1470,6 +1491,8 @@
             "REVIEW_PROTOCOL_INVALID",
             "SANDBOX_UNAVAILABLE",
             "GIT_FAILED",
+            "LIFECYCLE_FAILED",
+            "CONNECTOR_VERSION_MISMATCH",
             "STORAGE_FAILED",
             "DELIVERY_FAILED",
             "INTERNAL"

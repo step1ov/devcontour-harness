@@ -13,6 +13,7 @@ import {
   type Author,
   type ContextSnapshot,
   type ContractDocument,
+  type ReviewDisposition,
   type PropertyRecovery,
   type DeliveryState,
   type ExecutionPolicy,
@@ -39,7 +40,10 @@ import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { validateInputs } from '../validate.ts';
 import { WorkflowQueue } from './workflow.ts';
 import { statusOf } from './status.ts';
-import { technicalReview } from './review.ts';
+import { acceptedTargets } from './target.ts';
+import { reviewRoundCap, technicalReview } from './review.ts';
+import { reviewCode, type CodeReviewInput } from './review-code.ts';
+import { lifecyclePreflight } from './preflight.ts';
 import { policySourceChanged, type PolicySource } from './provenance.ts';
 import { JointRunner } from '../engine/joint-runner.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
@@ -263,9 +267,16 @@ export class Harness {
    * состояние каждой прежней открытой находки; история не переписывается.
    */
   async review(
-    input:
+    input: (
       | { kind: 'plan'; graph: WorkGraph; context?: ContextSnapshot; author: Author }
-      | { kind: 'contract'; contract: ContractDocument; author: Author },
+      | { kind: 'contract'; contract: ContractDocument; author: Author }
+    ) & {
+      /**
+       * Решения ведущего или оператора по открытым находкам последнего
+       * раунда; применяются этим раундом (docs/review-protocol.md, §8).
+       */
+      dispositions?: ReviewDisposition[];
+    },
   ) {
     const subject = input.kind === 'plan' ? input.graph.id : input.contract.id;
     const digest = input.kind === 'plan' ? workGraphDigest(input.graph) : digestOf(input.contract);
@@ -310,9 +321,30 @@ export class Harness {
           ? { group: { id: subject, workIds: input.graph.orders.map((o) => o.id) } }
           : {}),
       },
-      maxRounds: this.policy.maxAttempts * 2,
+      maxRounds: reviewRoundCap(this.policy),
+      ...(input.dispositions?.length ? { dispositions: input.dispositions } : {}),
       ...(this.options.environment ? { environment: this.options.environment } : {}),
     });
+  }
+
+  /**
+   * Технический обзор уже написанной ветки (`harness review-code`): reviewer
+   * по правилу ревью кода роли, diff merge-base(base, head)..head, только
+   * чтение. Запись в `code-reviews` — наблюдение, не приёмка.
+   */
+  reviewCode(input: CodeReviewInput) {
+    return reviewCode(
+      {
+        engine: this.engine,
+        policy: this.policy,
+        adapters: this.adapters,
+        stateDir: this.options.stateDir,
+        repoPath: (path) => this.repoPath(path),
+        ...(this.options.checkoutRoot ? { checkoutRoot: this.options.checkoutRoot } : {}),
+        ...(this.options.environment ? { environment: this.options.environment } : {}),
+      },
+      input,
+    );
   }
 
   /**
@@ -646,6 +678,30 @@ export class Harness {
     // Согласование связано с контекстом, который видел reviewer плана: снимок
     // хранится по digest, но действующим становится только вместе с
     // согласованием. Другой снимок при том же графе требует нового раунда.
+    // Окружение проекта — до ревью плана и первой попытки: отказ lifecycle,
+    // prepare или хранилища не тратит ни одного платного вызова.
+    if (this.policy.lifecyclePreflight === 'cached') {
+      // Целевые ветки создаются до проверки (первый запуск); очередь выдаёт
+      // работу всех графов, поэтому проверяются репозитории всех незавершённых.
+      await this.runner.init();
+      const pending = this.engine.read((v) =>
+        v
+          .works()
+          .filter((w) => w.status !== 'done' && w.status !== 'cancelled')
+          .map((w) => w.order.repositoryId),
+      );
+      await lifecyclePreflight({
+        policy: this.policy,
+        baseDir: this.options.baseDir,
+        stateDir: this.options.stateDir,
+        repositoryIds: pending,
+        ...(this.options.resourceDatabase
+          ? { resourceDatabase: this.options.resourceDatabase }
+          : {}),
+        ...(this.options.checkoutRoot ? { checkoutRoot: this.options.checkoutRoot } : {}),
+        ...(this.options.environment ? { environment: this.options.environment } : {}),
+      });
+    }
     const contextKey = context ? contextDigest(context) : null;
     const contextChanged = (graph.approval?.context?.digest ?? null) !== contextKey;
     if (
@@ -912,7 +968,25 @@ export class Harness {
    * движком и политикой хоста — `statusOf`.
    */
   status(graphId?: string, options: { detail?: boolean } = {}) {
-    return statusOf(this, graphId, options);
+    const data = statusOf(this, graphId, options);
+    // Принятые работы против текущего target ref: что после приёмки не проверено.
+    const accepted = this.engine.read((v) =>
+      data.works.flatMap((w) => {
+        const work = w.status === 'done' && w.resultSha ? v.work(w.id) : undefined;
+        return work
+          ? [{ id: w.id, repositoryId: work.order.repositoryId, acceptedSha: w.resultSha! }]
+          : [];
+      }),
+    );
+    if (!accepted.length) return data;
+    const targets = acceptedTargets(this.policy, (p) => this.repoPath(p), accepted);
+    return {
+      ...data,
+      works: data.works.map((w) => {
+        const target = targets.get(w.id);
+        return target ? { ...w, target } : w;
+      }),
+    };
   }
 
   /**
@@ -934,6 +1008,16 @@ export class Harness {
 
   /** Результат завершённой попытки поручения (последней или `runId`) и состояние его доставки. */
   result(workId: string, runId?: string): ResultEnvelope {
+    const envelope = this.resultEnvelope(workId, runId);
+    const { result } = envelope;
+    if (result.outcome !== 'accepted' || !result.shas.result) return envelope;
+    const target = acceptedTargets(this.policy, (p) => this.repoPath(p), [
+      { id: workId, repositoryId: result.repositoryId, acceptedSha: result.shas.result },
+    ]).get(workId);
+    return target ? { ...envelope, target } : envelope;
+  }
+
+  private resultEnvelope(workId: string, runId?: string): ResultEnvelope {
     return this.engine.read((v) => {
       const work = v.work(workId);
       if (!work) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);

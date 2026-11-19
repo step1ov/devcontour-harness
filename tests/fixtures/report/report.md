@@ -24,7 +24,7 @@ _Coverage: 13 attempts on 7 tasks; failure class on 6 of 7 failed; stage timings
 - Rejected reviews: 1 (candidate 1, integration 0) with 2 blocking findings; 0 without findings.
 - Rejected by review although every required check passed on the same commit: 1 of 7 green candidates (diagnostic: what the checks did not catch).
 - Caught only against the current target branch (integration): 1.
-- Plan and contract review: 3 rounds, 1 rejected (plans 1 of 2, contracts 0 of 1); blocking findings closed before code 1, open 0, withdrawn 0.
+- Plan and contract review: 3 rounds, 1 rejected (plans 1 of 2, contracts 0 of 1); blocking findings closed before code 1, open 0, withdrawn 0. 1 subject approved, 1 open note; review calls 1, known spend $0.50.
 - Findings withdrawn by the reviewer (precision proxy): 1 of 4; 1 finding without a status.
 
 ### Rejections by check

@@ -145,6 +145,22 @@ const phaseOf: Partial<Record<WorkStatus, StopPhase>> = {
  * постановки, `claimable`, группа бюджета при пределе группы).
  */
 export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInput[] {
+  const jobs = h.workflows.list().filter((j) => j.kind === 'graph');
+  const now = h.engine.clock();
+  return h.engine.read((v) => stopInputsIn(h, options, v, { jobs, now }));
+}
+
+/**
+ * `stopInputsOf` над готовым видом хранилища: тот же расчёт внутри чтения
+ * вызывающего (`status` — один снимок для этапа и диагноза). `jobs` — задания
+ * `kind: 'graph'` (`workflows.list()`), `now` — часы движка вызывающего.
+ */
+export function stopInputsIn(
+  h: StopSource,
+  options: StopInputOptions,
+  view: ExecutionView,
+  context: { jobs: readonly WorkflowJob[]; now: number },
+): StopInput[] {
   if (options.workId !== undefined && options.workIds !== undefined)
     throw new HarnessError('INVALID_INPUT', 'Укажите workId или workIds, не оба');
   const selected =
@@ -153,9 +169,8 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
       : options.workId !== undefined
         ? new Set([options.workId])
         : undefined;
-  const jobs = h.workflows.list().filter((j) => j.kind === 'graph');
-  const now = h.engine.clock();
-  return h.engine.read((v) => {
+  const { jobs, now } = context;
+  return ((v: ExecutionView) => {
     const works = v.works();
     // Первая работа с этим id — как `v.work(id)`; все зависимости графа — в нём.
     const byId = new Map<string, WorkState>();
@@ -324,7 +339,12 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
         state: inputStateOf(question)!,
         question: question.question.question,
         options: question.question.options.map((o) => o.id),
-        ...(answer ? { answer: { revision: answer.revision, digest: answer.digest } } : {}),
+        ...(question.question.recommended !== null
+          ? { recommended: question.question.recommended }
+          : {}),
+        ...(answer
+          ? { answer: { revision: answer.revision, digest: answer.digest, by: answer.actor.kind } }
+          : {}),
         ...(refusal.length ? { refusal: refusal.join('; ') } : {}),
         ...(own ? { assumptions: own } : {}),
         ...(followUps ? { followUps } : {}),
@@ -497,7 +517,7 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
           });
     }
     return inputs;
-  });
+  })(view);
 }
 
 type View = Parameters<Parameters<Engine['read']>[0]>[0];
