@@ -201,7 +201,8 @@ export async function technicalReview(
   ]
     .filter(Boolean)
     .join('\n\n');
-  await writeFile(join(dir, 'prompt.txt'), prompt);
+  // Сохранённый запрос маскируется: находки прежнего хоста приходят без маски.
+  await writeFile(join(dir, 'prompt.txt'), execution.redact(prompt));
   // Вызов под учётом: бюджет проверяется до вызова, расход закрепляется за предметом.
   const response = await measuredInvoke(
     engine,
@@ -240,10 +241,14 @@ export async function technicalReview(
       'RUNTIME_UNAVAILABLE',
       `Ревью ${kind}: ${response.status}${response.diagnostics.reason ? ': ' + response.diagnostics.reason : ''}`,
     );
-  // Ответ reviewer маскируется полным окружением вызова до разбора и любой
-  // обрезки: обрезка до маски оставляла бы префикс секрета на границе.
-  const output = redactDeep(response.output, execution.redact);
-  const parsed = reviewResultSchema.safeParse(output);
+  const parsed = reviewResultSchema.safeParse(response.output);
+  // Маска до любой обрезки: основание перехода и правило находки режутся
+  // пределами схемы. Текст находки маскируется при записи (ID — по исходному
+  // тексту); правило с секретом получает ID по замаскированному правилу.
+  if (parsed.success) {
+    for (const t of parsed.data.previous) t.basis = execution.redact(t.basis);
+    for (const f of parsed.data.findings) if (f.rule) f.rule = execution.redact(f.rule);
+  }
   const issue = parsed.error?.issues[0];
   const issues = parsed.success
     ? reviewIssues(parsed.data, open)

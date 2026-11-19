@@ -3365,7 +3365,12 @@ export class Runner {
               },
             ],
           }
-        : checkCodeReview(response.output, history, { runId: attempt.id, phase, sha }, { legacy });
+        : checkCodeReview(
+            response.output,
+            history,
+            { runId: attempt.id, phase, sha },
+            { legacy, redact: response.redact },
+          );
       const result = verdict.result;
       // Проверки reviewer — по журналу controller, а не по самоотчёту модели.
       const journal = probe ? await readProbeJournal(probe.log) : undefined;

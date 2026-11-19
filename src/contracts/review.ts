@@ -610,7 +610,11 @@ export function checkCodeReview(
    * прежних открытых находок (их состояние не требуется, ссылки на прежние
    * ID неизвестны). Схема и противоречивый approved — по-прежнему ошибки.
    */
-  options: { legacy?: boolean } = {},
+  options: {
+    legacy?: boolean;
+    /** Маска основания перехода — до обрезки: обрезка до маски оставляла бы префикс секрета. */
+    redact?: (text: string) => string;
+  } = {},
 ): CodeReviewVerdict {
   const parsed = reviewResultSchema.safeParse(output);
   if (!parsed.success)
@@ -655,7 +659,12 @@ export function checkCodeReview(
       });
       return;
     }
-    transitions.push({ id: t.id, from: known.status, to: t.status, basis: t.basis.slice(0, 4000) });
+    transitions.push({
+      id: t.id,
+      from: known.status,
+      to: t.status,
+      basis: (options.redact ? options.redact(t.basis) : t.basis).slice(0, 4000),
+    });
   });
   for (const f of prior)
     if (f.status === 'open' && !named.has(f.id))

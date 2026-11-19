@@ -567,7 +567,10 @@ export class GitOutputLimit extends Error {
   }
 }
 
-/** Вывод git целиком (без пробелов по краям); больше `GIT_OUTPUT_LIMIT` — отказ. */
+/**
+ * Вывод git целиком (без пробелов по краям, кроме `-z`-вывода); больше
+ * `GIT_OUTPUT_LIMIT` — отказ.
+ */
 export async function git(cwd: string, ...args: string[]) {
   return gitWithLimit(cwd, GIT_OUTPUT_LIMIT, ...args);
 }
@@ -603,7 +606,8 @@ export async function gitWithLimit(cwd: string, limit: number, ...args: string[]
     throw new Error(`git ${args[0]}: ${result.stderr.trim() || result.stdout.trim()}`);
   if (added) rememberWorktree(resolve(cwd, added));
   if (removed) forgetWorktree(removed);
-  return text.trim();
+  // `-z`-вывод не обрезается: пробел в начале первого пути — часть пути.
+  return args.includes('-z') ? text : text.trim();
 }
 
 /**

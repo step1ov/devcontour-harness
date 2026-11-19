@@ -6,11 +6,13 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   TaskFailure,
+  checkCodeReview,
   findingId,
+  type CodeReviewHistory,
   type RuntimeAdapter,
   type RuntimeName,
 } from '../src/contracts/index.ts';
@@ -97,6 +99,20 @@ test('CR-1: diff ревью кода больше предела — явный 
     assert.match(full, /\+line 0000000 /);
     assert.match(full, /\+line 0059999 /);
     assert.match(full, /src\/small\.txt/);
+  } finally {
+    drop(r.dir);
+  }
+});
+
+test('CR-1: -z-вывод git не теряет пробел в начале первого пути', async () => {
+  const r = repo({ 'README.md': 'app\n' });
+  try {
+    const base = r.head();
+    write(r.dir, { ' src/x.txt': 'x\n' });
+    r.git('add', '-A');
+    r.git('commit', '-q', '-m', 'space');
+    const out = await git(r.dir, 'diff', '--no-renames', '--name-only', '-z', base, r.head());
+    assert.deepEqual(out.split('\0').filter(Boolean), [' src/x.txt']);
   } finally {
     drop(r.dir);
   }
@@ -249,6 +265,8 @@ test('CR-3: ревью плана не сохраняет префикс сек�
     assert.equal(record.findings.length, 2, JSON.stringify(record.findings.map((f) => f.id)));
     const stored = JSON.stringify(h.engine.reviews('plan', graph.id));
     const artifact = readFileSync(record.artifact, 'utf8');
+    const prompt = readFileSync(join(dirname(record.artifact), 'prompt.txt'), 'utf8');
+    assert.ok(!prompt.includes(prefix), 'сохранённый запрос: находка хоста замаскирована');
     for (const [what, text] of [
       ['запись раунда', stored],
       ['артефакт', artifact],
@@ -271,4 +289,41 @@ test('CR-3: ревью плана не сохраняет префикс сек�
     if (stateDir.startsWith(join(tmpdir(), 'harness-cr3-')))
       rmSync(stateDir, { recursive: true, force: true });
   }
+});
+
+test('CR-3: основание перехода ревью кода маскируется до обрезки', () => {
+  const secret = 'code-review-secret-91b2';
+  const redact = (t: string) => t.split(secret).join('[REDACTED]');
+  const id = 'c'.repeat(64);
+  const history: CodeReviewHistory = {
+    scope: 'd'.repeat(64),
+    round: 1,
+    findings: [
+      {
+        id,
+        severity: 'blocking',
+        message: 'm',
+        path: null,
+        line: null,
+        status: 'open',
+        origin: { runId: 'r', phase: 'candidate', sha: 'a'.repeat(40), round: 1, evidence: 'e' },
+        openedIn: 1,
+        changedIn: 1,
+        transitions: [],
+      },
+    ],
+  };
+  const output = {
+    approved: false,
+    summary: 's',
+    findings: [],
+    previous: [{ id, status: 'closed', basis: 'b'.repeat(3990) + secret }],
+  };
+  const origin = { runId: 'r2', phase: 'candidate' as const, sha: 'a'.repeat(40) };
+  const verdict = checkCodeReview(output, history, origin, { redact });
+  assert.ok(verdict.valid, JSON.stringify(!verdict.valid && verdict.issues));
+  const basis = verdict.transitions[0]!.basis;
+  assert.equal(basis.length, 4000);
+  assert.ok(!basis.includes(secret.slice(0, 8)), basis.slice(-20));
+  assert.ok(basis.endsWith('[REDACTED]'.slice(0, 10)));
 });
