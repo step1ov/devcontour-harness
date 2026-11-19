@@ -32,6 +32,42 @@ export interface GateCheckInput {
   resourceDatabase?: string;
 }
 
+type Repo = ExecutionPolicy['repositories'][number];
+
+/** Репозиторий проверки: названный или единственный в политике. */
+export function repositoryOf(policy: ExecutionPolicy, repositoryId?: string): Repo {
+  const repo = repositoryId
+    ? policy.repositories.find((r) => r.id === repositoryId)
+    : policy.repositories.length === 1
+      ? policy.repositories[0]
+      : undefined;
+  if (!repo)
+    throw new HarnessError(
+      repositoryId ? 'NOT_FOUND' : 'INVALID_INPUT',
+      repositoryId
+        ? 'Репозиторий не объявлен в политике: ' + repositoryId
+        : `В политике несколько репозиториев (${policy.repositories.map((r) => r.id).join(', ')}): назовите --repository`,
+    );
+  return repo;
+}
+
+/** Путь checkout репозитория политики: относительный — от каталога политики. */
+export const repositoryPath =
+  (baseDir: string) =>
+  (r: { path: string }): string =>
+    isAbsolute(r.path) ? r.path : resolve(baseDir, r.path);
+
+/** SHA коммита по SHA, ref или `HEAD` checkout; нет — `NOT_FOUND`. */
+export async function commitOf(path: string, rev: string, repositoryId: string) {
+  try {
+    return await git(path, 'rev-parse', '--verify', '--end-of-options', `${rev}^{commit}`);
+  } catch {
+    throw new HarnessError('NOT_FOUND', `Коммит ${rev} не найден в ${repositoryId}`, [
+      { path: ['--sha'], message: rev },
+    ]);
+  }
+}
+
 /**
  * Gates на коммите вне попытки (`harness gates`): то же исполнение, что
  * `runGatesAt` — отдельное рабочее дерево, снимки зависимостей, ресурсы,
@@ -42,20 +78,8 @@ export interface GateCheckInput {
  */
 export async function checkGates(input: GateCheckInput) {
   const { policy } = input;
-  const repo = input.repositoryId
-    ? policy.repositories.find((r) => r.id === input.repositoryId)
-    : policy.repositories.length === 1
-      ? policy.repositories[0]
-      : undefined;
-  if (!repo)
-    throw new HarnessError(
-      input.repositoryId ? 'NOT_FOUND' : 'INVALID_INPUT',
-      input.repositoryId
-        ? 'Репозиторий не объявлен в политике: ' + input.repositoryId
-        : `В политике несколько репозиториев (${policy.repositories.map((r) => r.id).join(', ')}): назовите --repository`,
-    );
-  const repoPath = (r: { path: string }) =>
-    isAbsolute(r.path) ? r.path : resolve(input.baseDir, r.path);
+  const repo = repositoryOf(policy, input.repositoryId);
+  const repoPath = repositoryPath(input.baseDir);
   let ids: string[];
   try {
     ids = expandGateRefs(repo, input.gates);
@@ -65,20 +89,7 @@ export async function checkGates(input: GateCheckInput) {
       { path: ['--gate'], message: (error as Error).message },
     ]);
   }
-  let sha: string;
-  try {
-    sha = await git(
-      repoPath(repo),
-      'rev-parse',
-      '--verify',
-      '--end-of-options',
-      `${input.rev}^{commit}`,
-    );
-  } catch {
-    throw new HarnessError('NOT_FOUND', `Коммит ${input.rev} не найден в ${repo.id}`, [
-      { path: ['--sha'], message: input.rev },
-    ]);
-  }
+  const sha = await commitOf(repoPath(repo), input.rev, repo.id);
   const stateDir = resolve(input.stateDir);
   const repos = policy.repositories.map(repoPath);
   const started = Date.now();

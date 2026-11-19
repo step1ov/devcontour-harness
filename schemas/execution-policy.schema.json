@@ -2194,6 +2194,10 @@
       "type": "string",
       "const": "identical-tree"
     },
+    "lifecyclePreflight": {
+      "type": "string",
+      "const": "cached"
+    },
     "inputPolicy": {
       "type": "object",
       "properties": {

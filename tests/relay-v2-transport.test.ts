@@ -7,6 +7,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { TransportError } from '../src/integrations/connector/transport.ts';
 import { createTransport, type RelayV2CallLog } from '../src/integrations/relay-v2/index.ts';
 import { HarnessError } from '../src/contracts/errors.ts';
+import { checkIdentity } from '../src/integrations/connector/snapshot.ts';
+import type { ConnectorConfig } from '../src/integrations/connector/config.ts';
 
 /**
  * R02: transport tests на поддельном CLI. Поддельный binary — небольшой Node
@@ -496,6 +498,11 @@ test('R02/transport: идентичность — несовпадение sha25
       build: { sha256: 'f'.repeat(64), commit: 'a3ee804' },
     });
     await rejects(badBuild.identity(), { kind: 'unsupported', code: 'BUILD_MISMATCH' });
+    // Ядро коннектора называет это несовпадением версии backend.
+    await assert.rejects(
+      checkIdentity(badBuild, { provider: 'relay-v2-cli', projectId: PROJECT } as ConnectorConfig),
+      (e: unknown) => e instanceof HarnessError && e.code === 'CONNECTOR_VERSION_MISMATCH',
+    );
     await rejects(badBuild.move('PRODUCT-2', { column: 'done', ifRevision: 1 }), {
       code: 'BUILD_MISMATCH',
     });

@@ -178,6 +178,16 @@ export {
 } from './verification/gates-at.ts';
 export { checkGates, type GateCheckInput, type GateCheckStatus } from './control/gates-check.ts';
 export {
+  smokeLifecycle,
+  classifyLifecycleFailure,
+  type LifecycleFailureClass,
+  type LifecycleSmokeFailure,
+  type LifecycleSmokeInput,
+  type LifecycleSmokeResult,
+  type LifecycleSmokeStep,
+} from './control/lifecycle-smoke.ts';
+export { lifecyclePreflight, preflightFile, type PreflightOutcome } from './control/preflight.ts';
+export {
   dependencyStoreRoot,
   materializeStore,
   type StoreContext,

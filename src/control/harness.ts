@@ -43,6 +43,7 @@ import { statusOf } from './status.ts';
 import { acceptedTargets } from './target.ts';
 import { reviewRoundCap, technicalReview } from './review.ts';
 import { reviewCode, type CodeReviewInput } from './review-code.ts';
+import { lifecyclePreflight } from './preflight.ts';
 import { policySourceChanged, type PolicySource } from './provenance.ts';
 import { JointRunner } from '../engine/joint-runner.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
@@ -677,6 +678,30 @@ export class Harness {
     // Согласование связано с контекстом, который видел reviewer плана: снимок
     // хранится по digest, но действующим становится только вместе с
     // согласованием. Другой снимок при том же графе требует нового раунда.
+    // Окружение проекта — до ревью плана и первой попытки: отказ lifecycle,
+    // prepare или хранилища не тратит ни одного платного вызова.
+    if (this.policy.lifecyclePreflight === 'cached') {
+      // Целевые ветки создаются до проверки (первый запуск); очередь выдаёт
+      // работу всех графов, поэтому проверяются репозитории всех незавершённых.
+      await this.runner.init();
+      const pending = this.engine.read((v) =>
+        v
+          .works()
+          .filter((w) => w.status !== 'done' && w.status !== 'cancelled')
+          .map((w) => w.order.repositoryId),
+      );
+      await lifecyclePreflight({
+        policy: this.policy,
+        baseDir: this.options.baseDir,
+        stateDir: this.options.stateDir,
+        repositoryIds: pending,
+        ...(this.options.resourceDatabase
+          ? { resourceDatabase: this.options.resourceDatabase }
+          : {}),
+        ...(this.options.checkoutRoot ? { checkoutRoot: this.options.checkoutRoot } : {}),
+        ...(this.options.environment ? { environment: this.options.environment } : {}),
+      });
+    }
     const contextKey = context ? contextDigest(context) : null;
     const contextChanged = (graph.approval?.context?.digest ?? null) !== contextKey;
     if (

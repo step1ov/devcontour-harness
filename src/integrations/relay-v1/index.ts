@@ -166,6 +166,13 @@ const documentDetailSchema = entitySummarySchema.extend({
 });
 
 const healthSchema = z.object({ status: z.string(), contractVersion: z.number().int() });
+/**
+ * Версия договора REST Relay v1 (`GET /api/v1/health` → `contractVersion`),
+ * с которой проверен этот транспорт. Другая версия — отказ
+ * `CONNECTOR_VERSION_MISMATCH` до чтения проекта и любых мутаций: поля и
+ * коды отказов другой версии транспорт не знает.
+ */
+export const RELAY_V1_CONTRACT_VERSION = 1;
 const contextSchema = z.object({
   projectId: z.string().min(1),
   capabilities: z.array(z.string()).max(MAX_ITEMS).optional(),
@@ -346,6 +353,8 @@ export class RelayV1Transport implements RelayTransport {
     o: CallOptions,
   ): Promise<z.output<T>> {
     const mutation = o.method === 'POST';
+    // Мутация — только после сверки версии договора сервера (один раз на транспорт).
+    if (mutation) await this.compatible(operation, o.signal);
     if (o.signal?.aborted)
       throw this.fail('unavailable', operation, 'aborted before send', { mutation: false });
     const controller = new AbortController();
@@ -579,13 +588,62 @@ export class RelayV1Transport implements RelayTransport {
 
   /* ---------------- Подключение ---------------- */
 
-  async identity(signal?: AbortSignal): Promise<TransportIdentity> {
-    const health = await this.call('identity.health', healthSchema, {
+  /** Сверенная версия договора сервера; отказ сверки запоминается. */
+  private version?: Promise<z.output<typeof healthSchema>>;
+
+  /** Health и сверка `contractVersion` (`RELAY_V1_CONTRACT_VERSION`). */
+  private async health(operation: string, signal?: AbortSignal) {
+    const health = await this.call(`${operation}.health`, healthSchema, {
       method: 'GET',
       path: '/api/v1/health',
       root: true,
       signal,
     });
+    if (health.contractVersion !== RELAY_V1_CONTRACT_VERSION)
+      throw this.fail(
+        'unsupported',
+        `${operation}.health`,
+        `сервер сообщает contractVersion ${health.contractVersion}, транспорт проверен с ${RELAY_V1_CONTRACT_VERSION}`,
+        { code: 'CONNECTOR_VERSION_MISMATCH', mutation: false },
+      );
+    return health;
+  }
+
+  /**
+   * Версия договора сверена до первой мутации: путь доставки и разбора не
+   * обязан начинаться с `identity`. Отказ несовпадения запоминается; сбой
+   * сети — нет (следующая мутация сверяет снова).
+   */
+  private async compatible(operation: string, signal?: AbortSignal) {
+    if (!this.version) {
+      const p = this.health(operation, signal);
+      this.version = p;
+      p.catch((error: unknown) => {
+        if (
+          this.version === p &&
+          !(error instanceof TransportError && error.details.code === 'CONNECTOR_VERSION_MISMATCH')
+        )
+          this.version = undefined;
+      });
+    }
+    await this.version;
+  }
+
+  async identity(signal?: AbortSignal): Promise<TransportIdentity> {
+    let health: z.output<typeof healthSchema>;
+    try {
+      health = await this.health('identity', signal);
+    } catch (error) {
+      // Несовпадение, замеченное identity, закрывает и мутации — даже после
+      // прежней успешной сверки.
+      if (error instanceof TransportError && error.details.code === 'CONNECTOR_VERSION_MISMATCH') {
+        const refused = Promise.reject(error);
+        refused.catch(() => undefined);
+        this.version = refused;
+      }
+      throw error;
+    }
+    this.version = Promise.resolve(health);
     const ctx = await this.call('identity.context', contextSchema, {
       method: 'GET',
       path: '/context',

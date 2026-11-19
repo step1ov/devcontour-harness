@@ -57,6 +57,7 @@ const laterCommands: readonly string[] = [
   'input-cancel',
   'input-supersede',
   'gates',
+  'smoke',
   // Переключение слоя lean в подготовленном проекте (0.1.0-alpha.51).
   'lean',
   // Обзор уже написанной ветки (0.1.0-alpha.54).
@@ -192,6 +193,9 @@ const ADDITIVE_ENUM_VALUES = new Set([
   'not-applicable',
   // H12: блокирующий вопрос к человеку не отвечает ведущий (0.1.0-alpha.54).
   'OPERATOR_ANSWER_REQUIRED',
+  // Отказ окружения `harness smoke` и preflight; несовпадение версии backend коннектора.
+  'LIFECYCLE_FAILED',
+  'CONNECTOR_VERSION_MISMATCH',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =

@@ -59,6 +59,7 @@ import { valueReport, reportHtml, reportMarkdown } from './report/index.ts';
 import { handoffMarkdown, handoffPack } from './handoff/index.ts';
 import { inputStateOf } from './projections/input.ts';
 import { checkGates, gatesText } from './control/gates-check.ts';
+import { smokeLifecycle, smokeText } from './control/lifecycle-smoke.ts';
 import { defaultResourceDatabase } from './environment/resources.ts';
 
 const usage = `harness ${HARNESS_VERSION}
@@ -337,7 +338,7 @@ const flagOwners = {
   lead: ['init'],
   review: ['init'],
   model: ['init'],
-  human: ['init', 'lean', 'status', 'explain', 'plan-request', 'gates'],
+  human: ['init', 'lean', 'status', 'explain', 'plan-request', 'gates', 'smoke'],
   draft: ['plan-check'],
   basis: ['plan-check'],
   brief: ['plan-request', 'plan-check'],
@@ -371,7 +372,7 @@ const flagOwners = {
   answer: ['input-apply'],
   target: ['input-apply'],
   successor: ['input-supersede'],
-  sha: ['gates'],
+  sha: ['gates', 'smoke'],
   gate: ['gates'],
   'fail-fast': ['gates'],
   watch: ['status'],
@@ -389,6 +390,7 @@ const presenters: Partial<Record<CliCommand, (data: never) => string>> = {
   explain: explainText,
   'plan-request': (data: { prompt: string }) => data.prompt + '\n',
   gates: gatesText,
+  smoke: smokeText,
 };
 
 /**
@@ -1126,6 +1128,39 @@ async function run(
         process.off('SIGINT', stop);
         process.off('SIGTERM', stop);
         h.close();
+      }
+    }
+    case 'smoke': {
+      const state = need('state');
+      const b = v.policy ? loadPolicy(v.policy) : binding(state);
+      const abort = new AbortController();
+      const stop = () => abort.abort(new Error('Проверка прервана сигналом'));
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+      try {
+        const data = await smokeLifecycle({
+          policy: b.policy,
+          baseDir: b.baseDir,
+          stateDir: state,
+          rev: need('sha'),
+          ...optional('repositoryId', v.repository),
+          signal: abort.signal,
+          resourceDatabase: defaultResourceDatabase(),
+          // Ход — диагностика в stderr: stdout остаётся одним JSON.
+          onStep: (s) =>
+            process.stderr.write(
+              `harness smoke: ${s.stage}/${s.id} ${s.status} ${Math.round(s.durationMs / 1000)} с\n`,
+            ),
+        });
+        // Отказ окружения — данные и exit 4 (LIFECYCLE_FAILED).
+        return {
+          command,
+          data,
+          ...(data.passed ? {} : { code: exitCodes[errorCodes.LIFECYCLE_FAILED] }),
+        };
+      } finally {
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
       }
     }
     case 'doctor': {
