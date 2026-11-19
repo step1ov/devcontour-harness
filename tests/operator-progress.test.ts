@@ -22,7 +22,7 @@ import { handoffPack } from '../src/handoff/pack.ts';
 import { handoffMarkdown } from '../src/handoff/markdown.ts';
 import { collectReportInput } from '../src/control/report.ts';
 import { valueReport, reportHtml, reportMarkdown } from '../src/report/index.ts';
-import { engineOf, graphOf, policyOf, ready } from './engine-fixture.ts';
+import { engineOf, graphOf, planReview, policyOf, ready, trustNone } from './engine-fixture.ts';
 
 const question = (severity: number): InputQuestion => ({
   question: 'Какой формат приветствия?',
@@ -495,4 +495,106 @@ test('H12: отчёт считает ответивших по последне�
     'Executor questions that stopped an attempt: 3 (answered by the operator 1, by the lead agent 1, by the host 1)';
   assert.ok(reportMarkdown(report).includes(line));
   assert.ok(reportHtml(report).includes(line));
+});
+
+test('H12: порог разрешения — по действующей серьёзности (поднятой минимумом), а не по самооценке', () => {
+  const raised = (cap: number) => {
+    const env = engineOf(
+      policyOf((p) => (p.inputPolicy = { threshold: 7, leadAnswers: { maxSeverity: cap } })),
+    );
+    ready(env.engine, graphOf({ w: [] }));
+    const attempt = env.engine.claim('c1')!;
+    env.engine.fail(attempt.id, attempt.token, 'вопрос', {
+      kind: 'needs-input',
+      input: {
+        ...outcome(3),
+        question: {
+          question: { ...question(3), affects: ['api'] },
+          effectiveSeverity: 10,
+          floors: ['declared'],
+          mode: 'request',
+        },
+      },
+    });
+    const [request] = env.engine.inputRequests({ workId: 'w' });
+    assert.deepEqual([request!.question.severity, request!.effectiveSeverity], [3, 10]);
+    return code(() =>
+      env.engine.answerInput(request!.id, { text: 'Hello', actor: { kind: 'lead' } }, 1),
+    );
+  };
+  assert.equal(raised(9), 'OPERATOR_ANSWER_REQUIRED');
+  assert.equal(raised(10), 'ok');
+});
+
+test('H12: отчёт и статус называют актёра последнего ответа, а не первого', () => {
+  const env = stopped(
+    8,
+    (p) => (p.inputPolicy = { threshold: 7, leadAnswers: { maxSeverity: 10 } }),
+  );
+  env.engine.answerInput(env.request.id, { text: 'Hello', actor: { kind: 'operator' } }, 1);
+  env.engine.answerInput(env.request.id, { text: 'Hi', actor: { kind: 'lead' } }, 2);
+  const report = valueReport(collectReportInput(env.store), {
+    stateDir: env.dir,
+    harnessVersion: 'test',
+    asOf: '2026-01-02T00:00:00.000Z',
+  });
+  assert.deepEqual(report.inputs?.answeredBy, { operator: 0, lead: 1, host: 0 });
+  assert.equal(
+    statusOf({ engine: env.engine, policy: env.engine.policy }).works[0]!.input?.answeredBy,
+    'lead',
+  );
+});
+
+test('H15: отменённое без ждущих — needs none, как у доски explain (не диагноз выбранной работы)', () => {
+  // Согласование оператора устарело для новой политики: выбранная работа x
+  // получила бы review-plan, доска её не называет.
+  const env = engineOf(policyOf((p) => (p.approvalMode = 'operator')));
+  const { graph } = env.engine.register(graphOf({ w: [], x: [] }), trustNone);
+  env.engine.recordReview(planReview(env.engine, graph, 1));
+  env.engine.approve(graph.id, 'operator');
+  env.engine.cancel('x', 'не нужно', 'operator');
+  env.store.close();
+  const next = engineOf(
+    policyOf((p) => {
+      p.approvalMode = 'operator';
+      p.maxAttempts = 5;
+    }),
+    env.dir,
+  );
+  const source = { engine: next.engine, policy: next.engine.policy, workflows: noJobs };
+  const limits = { maxAttempts: 5, repairBudget: next.engine.policy.repairBudget };
+  const selectedX = stopInputsOf(source, { ...limits, workId: 'x' }).map(explainStop);
+  assert.deepEqual(
+    selectedX.map((d) => [d.actor, d.action]),
+    [['lead', 'review-plan']],
+    'выбранная отменённая получила бы шаг',
+  );
+  const board = stopInputsOf(source, limits);
+  assert.ok(!board.some((i) => i.kind === 'work' && i.work.id === 'x'), 'доска её не называет');
+  for (const g of [undefined, 'g']) {
+    const works = statusOf(source, g).works;
+    const x = works.find((w) => w.id === 'x')!;
+    assert.deepEqual([x.stage.name, x.stage.needs], ['cancelled', { actor: null, action: 'none' }]);
+    assert.deepEqual(works.find((w) => w.id === 'w')!.stage.needs, {
+      actor: 'lead',
+      action: 'review-plan',
+    });
+  }
+  next.store.close();
+});
+
+test('H15: расход — прежняя запись только с ID предмета и вызов о группе по правилу recordWorkOf', () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ w: [] }));
+  env.store.transact('run.context', (tx) => {
+    tx.putLocal('usage', 'app', 's1', call('s1', { subjectId: 'w' }));
+    // Вид предмета назван иначе — не расход поручения, даже при совпадении ID.
+    tx.putLocal('usage', 'app', 's2', call('s2', { subjectId: 'w', subjectKind: 'group' }));
+    // Прежний вызов о группе: группа без поручения и попытки.
+    tx.putLocal('usage', 'app', 's3', call('s3', { subjectId: 'w', groupId: 'grp' }));
+    // Попытка неизвестна — по ID предмета.
+    tx.putLocal('usage', 'app', 's4', call('s4', { runId: 'gone', subjectId: 'w' }));
+  });
+  const w = statusOf({ engine: env.engine, policy: env.engine.policy }).works[0]!;
+  assert.equal(w.stage.spend.calls, 2);
 });

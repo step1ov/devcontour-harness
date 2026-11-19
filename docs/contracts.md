@@ -1995,9 +1995,10 @@ gate, `dependency-network: … Шаг <id>: …` у шага `prepare`. Текс
 - `next` — оставшиеся этапы попытки (`writer`, `gates`, `review`,
   `integration`): после `writer` — три, после остановки и в очереди — все;
 - `needs` — что нужно и от кого: `actor` и `action` диагноза `explain`
-  (`stopInputsOf` → `explainStop`, отдельное чтение) при `StatusSource.workflows`;
-  без заданий графов — только `user`/`answer-input` открытого вопроса, иначе
-  поля нет (неизвестно, а не «ничего»);
+  (`stopInputsIn` → `explainStop`, отбор доски, в том же чтении и по тем же
+  часам, что весь ответ `status`) при `StatusSource.workflows`; без заданий
+  графов — только `user`/`answer-input` открытого вопроса, иначе поля нет
+  (неизвестно, а не «ничего»);
 - `spend` — собственные вызовы поручения (его попытки и вызовы о нём; ревью
   плана группы не входит): `calls`, `knownUsd`, `unknownCalls` (без цены),
   `durationMs`;
@@ -2007,8 +2008,9 @@ gate, `dependency-network: … Шаг <id>: …` у шага `prepare`. Текс
 
 `status --human --watch [--interval S]` (1–3600 с, по умолчанию 5) печатает
 тот же текст заново каждые S секунд, пока доска не успокоится: нет идущих
-попыток и нет открытого поручения, которое сдвинет живой controller
-(`statusSettled`); Ctrl-C (SIGINT/SIGTERM) завершает с exit 0. `--watch` без
+попыток с действующим владением, нет задания графа с действующей арендой
+(восстановление группы) и нет открытого поручения, которое сдвинет живой
+controller (`statusSettled`; статус и задания — одним снимком); Ctrl-C (SIGINT/SIGTERM) завершает с exit 0. `--watch` без
 `--human` и `--interval` без `--watch` — `INVALID_INPUT`. Каждый кадр —
 отдельное чтение только для чтения.
 

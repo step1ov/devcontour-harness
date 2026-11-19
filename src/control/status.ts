@@ -10,7 +10,7 @@ import {
   type WorkflowJob,
 } from '../contracts/index.ts';
 import { attemptSummaryLine, attemptSummaryOf, type AttemptBudget } from '../report/compute.ts';
-import { budgetOverview, recordWorkOf } from '../engine/budget.ts';
+import { budgetOverview, legacyGroupCall } from '../engine/budget.ts';
 import { callRecords } from '../engine/usage.ts';
 import type { Engine } from '../engine/engine.ts';
 import { requestsOf } from '../engine/input-requests.ts';
@@ -123,18 +123,18 @@ export function statusOf(
     const attemptsOf = attemptsByWork(v);
     const selected = v.works(graphId);
     // Что нужно от кого — диагнозом explain по тому же виду и часам.
-    const needsOf = jobs ? stageNeedsOf(source, v, selected, { jobs, now }) : undefined;
+    const needsOf = jobs ? stageNeedsOf(source, v, { jobs, now }) : undefined;
     // Собственные вызовы поручения (без вызовов о группе) — одним проходом;
-    // попытка записи без поручения — по индексу попыток, а не поиском.
+    // прежняя запись без поручения — по индексам попыток и поручений (правило
+    // `recordWorkOf`), а не поиском по хранилищу на каждую запись.
     const runWork = new Map<string, string>();
     for (const a of v.attempts()) runWork.set(a.id, a.workId);
-    const legacy = recordWorkOf(v);
+    const known = new Set(v.works().map((w) => w.id));
     const ids = new Set(selected.map((w) => w.id));
     const recordsByWork = new Map<string, CallRecord[]>();
     for (const r of callRecords(v)) {
       if (r.workIds) continue;
-      const id =
-        r.workId ?? (r.runId !== undefined ? runWork.get(r.runId) : undefined) ?? legacy(r);
+      const id = r.workId ?? legacyWork(r, runWork, known);
       if (!id || !ids.has(id)) continue;
       const list = recordsByWork.get(id);
       if (list) list.push(r);
@@ -202,24 +202,21 @@ export function statusOf(
 
 /**
  * Что нужно по каждому поручению — `actor` и `action` диагноза `explain`
- * (`stopInputsIn` → `explainStop`) в виде и по часам вызывающего чтения.
- * Принятое поручение и отменённое без ждущих в диагнозы не входят: им ничего
- * не нужно; идущему без остановки — ход controller.
+ * (`stopInputsIn` → `explainStop`, отбор доски) в виде и по часам
+ * вызывающего чтения. Принятое поручение и отменённое без ждущих в диагнозы
+ * не входят: им ничего не нужно; идущему без остановки — ход controller.
  */
 function stageNeedsOf(
   source: StatusSource,
   v: ExecutionView,
-  works: readonly WorkState[],
   context: { jobs: readonly WorkflowJob[]; now: number },
 ): (w: WorkState) => StageNeeds {
   const byWork = new Map<string, StageNeeds>();
+  // Отбор доски, как у `explain` без `--work`: отменённая без ждущих в него
+  // не входит (ей ничего не нужно), а не получает диагноз выбранной работы.
   for (const input of stopInputsIn(
     { engine: source.engine, policy: source.policy, workflows: source.workflows! },
-    {
-      maxAttempts: source.policy.maxAttempts,
-      repairBudget: source.policy.repairBudget,
-      workIds: [...new Set(works.map((w) => w.id))],
-    },
+    { maxAttempts: source.policy.maxAttempts, repairBudget: source.policy.repairBudget },
     v,
     context,
   ))
@@ -232,6 +229,19 @@ function stageNeedsOf(
     (w.status === 'done' || w.status === 'cancelled'
       ? { actor: null, action: 'none' }
       : { actor: 'controller', action: 'wait' });
+}
+
+/**
+ * Поручение прежней записи вызова без `workId` — правило `recordWorkOf`
+ * (`subjectWork`) по готовым индексам: сначала по попытке, затем по ID
+ * предмета, если вид предмета не назван иначе и это не прежний вызов о группе.
+ */
+function legacyWork(r: CallRecord, runWork: Map<string, string>, works: Set<string>) {
+  const byRun = r.runId !== undefined ? runWork.get(r.runId) : undefined;
+  if (byRun) return byRun;
+  if (r.subjectKind && r.subjectKind !== 'work') return undefined;
+  if (legacyGroupCall(r)) return undefined;
+  return r.subjectId && works.has(r.subjectId) ? r.subjectId : undefined;
 }
 
 function statusDetail(source: StatusSource, v: ExecutionView, graphId?: string) {

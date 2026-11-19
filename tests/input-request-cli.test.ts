@@ -352,7 +352,15 @@ test('H15 CLI: status --human --watch обновляет кадр, пока жи
     const io = { out: '', err: '' };
     child.stdout.on('data', (b: Buffer) => (io.out += b.toString()));
     child.stderr.on('data', (b: Buffer) => (io.err += b.toString()));
-    const exited = new Promise<number | null>((done) => child.on('exit', (c) => done(c)));
+    const closed = new Promise<number | null>((done) => child.on('close', (c) => done(c)));
+    // Выход процесса с пределом: зависший watch роняет тест, а не вешает его.
+    const exited = (ms = 20_000) =>
+      Promise.race([
+        closed,
+        new Promise<never>((_, fail) =>
+          setTimeout(() => fail(new Error(`watch не вышел за ${ms} мс: ${io.err}`)), ms).unref(),
+        ),
+      ]);
     const frames = () => io.out.split('harness status — ').length - 1;
     const until = async (cond: () => boolean, ms: number) => {
       const deadline = Date.now() + ms;
@@ -381,8 +389,7 @@ test('H15 CLI: status --human --watch обновляет кадр, пока жи
       );
       other.release('occupied-controller');
       released = true;
-      await a.until(() => false, 15_000);
-      assert.equal(await a.exited, 0, a.io.err);
+      assert.equal(await a.exited(), 0, a.io.err);
     } finally {
       a.child.kill('SIGKILL');
     }
@@ -396,7 +403,7 @@ test('H15 CLI: status --human --watch обновляет кадр, пока жи
       assert.equal(b.frames(), 1, b.io.err);
       const sent = Date.now();
       b.child.kill('SIGINT');
-      assert.equal(await b.exited, 0, b.io.err);
+      assert.equal(await b.exited(10_000), 0, b.io.err);
       assert.ok(Date.now() - sent < 10_000, 'выход по Ctrl-C без ожидания периода');
       assert.equal(b.frames(), 2, 'последний кадр — при выходе');
     } finally {
