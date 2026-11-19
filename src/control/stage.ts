@@ -96,6 +96,22 @@ export interface WorkStageInput {
   records: readonly CallRecord[];
   needs?: StageNeeds;
   now: number;
+  /** Предел попыток политики: с ним строка называет «попытка N из M». */
+  maxAttempts?: number;
+  /**
+   * Последний отказ поручения простыми словами (`attemptSummary.lastFailure`):
+   * строка называет его, если это последняя закончившаяся попытка.
+   */
+  lastFailure?: { runId: string; bucket?: string; plain: string; plainEn: string };
+  /** Первая блокировка простыми словами (`blockers[].plain`): строка этапа `blocked`. */
+  blockedBy?: { plain: string; plainEn: string };
+}
+
+/** Повтор и блокировка в строке этапа (`stageLine`). */
+export interface StageLineExtra {
+  attempt?: { n: number; max: number; used: boolean };
+  lastFailure?: { relation: 'previous' | 'last'; ru: string; en: string };
+  blockedBy?: { ru: string; en: string };
 }
 
 /** Этап поручения, время в нём, оставшиеся этапы, расход и строки. */
@@ -122,13 +138,16 @@ export function workStageOf(input: WorkStageInput): WorkStageView {
   else if (work.status === 'failed') name = 'stopped';
   else if (work.status === 'draft' || input.blocked) name = 'blocked';
   else name = 'queued';
-  const last = input.attempts.filter((a) => a.status !== 'active' && a.finishedAt).at(-1);
+  const last = input.attempts
+    .filter((a) => a.status !== 'active' && a.finishedAt && a.interrupted !== 'shutdown')
+    .at(-1);
+  const lastEnded = input.attempts.filter((a) => a.status !== 'active' && a.finishedAt).at(-1);
   const since = live
     ? (step?.startedAt ?? live.startedAt)
     : // Ожидание остановленного и ждущего вопроса считается от конца попытки;
       // у итога и у ждущего выдачи времени этапа нет.
       name === 'stopped' || name === 'input'
-      ? last?.finishedAt
+      ? lastEnded?.finishedAt
       : undefined;
   const totals = usageTotals([...input.records], false, now);
   const spend = {
@@ -145,15 +164,55 @@ export function workStageOf(input: WorkStageInput): WorkStageView {
     ...(input.needs ? { needs: input.needs } : {}),
     spend,
   };
+  const extra = stageExtra(input, name, !!live, last);
   return {
     ...view,
-    line: stageLine(work.id, view, 'ru'),
-    lineEn: stageLine(work.id, view, 'en'),
+    line: stageLine(work.id, view, 'ru', extra),
+    lineEn: stageLine(work.id, view, 'en', extra),
   };
 }
 
+/**
+ * Почему повтор: номер попытки из предела и причина остановки последней
+ * закончившейся попытки — у идущей («прошлая»), у ждущей и остановленной
+ * («последняя»). У итога (`done`, `cancelled`) — ничего; у первой попытки без
+ * отказа — ничего.
+ */
+function stageExtra(
+  input: WorkStageInput,
+  name: WorkStage,
+  live: boolean,
+  last: AttemptState | undefined,
+): StageLineExtra {
+  const extra: StageLineExtra = {};
+  if (name === 'blocked' && input.blockedBy)
+    extra.blockedBy = { ru: input.blockedBy.plain, en: input.blockedBy.plainEn };
+  if (name === 'done' || name === 'cancelled') return extra;
+  // Ждущее ответа на вопрос: этап уже называет причину остановки.
+  const failure =
+    input.lastFailure &&
+    last &&
+    input.lastFailure.runId === last.id &&
+    !(name === 'input' && input.lastFailure.bucket === 'input')
+      ? input.lastFailure
+      : undefined;
+  const n = input.work.attempt;
+  if (input.maxAttempts && n > 0 && (failure || n > 1))
+    extra.attempt = { n, max: input.maxAttempts, used: !live };
+  if (failure)
+    extra.lastFailure = {
+      relation: live ? 'previous' : 'last',
+      ru: failure.plain,
+      en: failure.plainEn,
+    };
+  return extra;
+}
+
 const stageText: Record<WorkStage, { ru: string; en: string }> = {
-  queued: { ru: 'ждёт выдачи', en: 'queued' },
+  queued: {
+    ru: 'просто ждёт очереди — ничего не нужно',
+    en: 'just waiting in the queue — nothing needed',
+  },
   blocked: { ru: 'не выдаётся (см. блокировки)', en: 'blocked (see blockers)' },
   prepare: { ru: 'подготовка зависимостей', en: 'preparing dependencies' },
   writer: { ru: 'исполнитель пишет код', en: 'writer coding' },
@@ -219,12 +278,25 @@ export function stageLine(
   id: string,
   s: Omit<WorkStageView, 'line' | 'lineEn'>,
   lang: 'ru' | 'en',
+  extra: StageLineExtra = {},
 ): string {
   const ru = lang === 'ru';
   const head =
-    stageText[s.name][lang] +
+    (s.name === 'blocked' && extra.blockedBy
+      ? (ru ? 'не выдаётся: ' : 'blocked: ') + extra.blockedBy[lang]
+      : stageText[s.name][lang]) +
     (s.step ? ` (${s.step})` : '') +
-    (s.elapsedMs !== undefined ? ` — ${durationText(s.elapsedMs, lang)}` : '');
+    (s.elapsedMs !== undefined ? ` — ${durationText(s.elapsedMs, lang)}` : '') +
+    (extra.attempt
+      ? ru
+        ? `; ${extra.attempt.used ? 'попыток использовано' : 'попытка'} ${extra.attempt.n} из ${extra.attempt.max}`
+        : `; ${extra.attempt.used ? 'attempts used' : 'attempt'} ${extra.attempt.n} of ${extra.attempt.max}`
+      : '') +
+    (extra.lastFailure
+      ? ru
+        ? `; ${extra.lastFailure.relation === 'previous' ? 'прошлая' : 'последняя'} остановлена: ${extra.lastFailure.ru}`
+        : `; ${extra.lastFailure.relation === 'previous' ? 'previous' : 'last'} stopped: ${extra.lastFailure.en}`
+      : '');
   const next = s.next.length ? s.next.map((x) => pipelineText[x][lang]).join(', ') : '—';
   const usd = `${s.spend.unknownCalls ? '≥' : ''}$${s.spend.knownUsd.toFixed(2)}`;
   const spend = ru

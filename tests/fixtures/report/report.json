@@ -668,7 +668,28 @@
             "key": "operator",
             "count": 1
           }
-        ]
+        ],
+        "verification": {
+          "runId": "run-cancel-1",
+          "rows": [
+            {
+              "gate": "install",
+              "kind": "gate",
+              "phase": "candidate",
+              "result": "skipped",
+              "how": "not-run"
+            },
+            {
+              "gate": "unit",
+              "kind": "gate",
+              "phase": "candidate",
+              "result": "skipped",
+              "how": "not-run"
+            }
+          ],
+          "line": "Проверено harness (запущено): ничего; ревью: не проводилось; не проверялось: install (не запускался), unit (не запускался)",
+          "lineEn": "Checked by harness (executed): nothing; review: none; not covered: install (not run), unit (not run)"
+        }
       },
       {
         "id": "broken",
@@ -686,7 +707,50 @@
             "key": "defect",
             "count": 2
           }
-        ]
+        ],
+        "verification": {
+          "runId": "run-broken-2",
+          "rows": [
+            {
+              "gate": "install",
+              "kind": "gate",
+              "phase": "candidate",
+              "at": "2026-11-03T10:20:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "unit",
+              "kind": "gate",
+              "phase": "candidate",
+              "at": "2026-11-03T10:22:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "independent-review",
+              "kind": "review",
+              "phase": "candidate",
+              "at": "2026-11-03T10:30:00.000Z",
+              "result": "passed",
+              "how": "read-by-reviewer",
+              "reviewer": {
+                "runtime": "codex",
+                "vendor": "openai"
+              }
+            },
+            {
+              "gate": "install",
+              "kind": "gate",
+              "phase": "integration",
+              "at": "2026-11-03T10:40:00.000Z",
+              "result": "failed",
+              "how": "executed-by-harness"
+            }
+          ],
+          "line": "Проверено harness (запущено): unit; не прошло (запущено harness): install; ревью: прочитал агент openai (codex), только diff, ничего не запускал — одобрил",
+          "lineEn": "Checked by harness (executed): unit; failed (executed by harness): install; review: read by agent openai (codex), diff only, ran nothing — approved"
+        }
       },
       {
         "id": "env",
@@ -704,7 +768,58 @@
             "key": "environment",
             "count": 1
           }
-        ]
+        ],
+        "verification": {
+          "runId": "run-env-2",
+          "rows": [
+            {
+              "gate": "install",
+              "kind": "gate",
+              "phase": "candidate",
+              "at": "2026-10-28T11:20:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "unit",
+              "kind": "gate",
+              "phase": "candidate",
+              "at": "2026-10-28T11:22:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "independent-review",
+              "kind": "review",
+              "phase": "candidate",
+              "at": "2026-10-28T11:30:00.000Z",
+              "result": "passed",
+              "how": "read-by-reviewer",
+              "reviewer": {
+                "runtime": "codex",
+                "vendor": "openai"
+              }
+            },
+            {
+              "gate": "install",
+              "kind": "gate",
+              "phase": "integration",
+              "at": "2026-10-28T11:40:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "unit",
+              "kind": "gate",
+              "phase": "integration",
+              "at": "2026-10-28T11:42:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            }
+          ],
+          "line": "Проверено harness (запущено): install, unit; ревью: прочитал агент openai (codex), только diff, ничего не запускал — одобрил",
+          "lineEn": "Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved"
+        }
       },
       {
         "id": "review",
@@ -722,7 +837,58 @@
             "key": "defect",
             "count": 1
           }
-        ]
+        ],
+        "verification": {
+          "runId": "run-review-2",
+          "rows": [
+            {
+              "gate": "install",
+              "kind": "gate",
+              "phase": "candidate",
+              "at": "2026-10-27T10:20:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "unit",
+              "kind": "gate",
+              "phase": "candidate",
+              "at": "2026-10-27T10:22:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "independent-review",
+              "kind": "review",
+              "phase": "candidate",
+              "at": "2026-10-27T10:30:00.000Z",
+              "result": "passed",
+              "how": "read-by-reviewer",
+              "reviewer": {
+                "runtime": "codex",
+                "vendor": "openai"
+              }
+            },
+            {
+              "gate": "install",
+              "kind": "gate",
+              "phase": "integration",
+              "at": "2026-10-27T10:40:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "unit",
+              "kind": "gate",
+              "phase": "integration",
+              "at": "2026-10-27T10:42:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            }
+          ],
+          "line": "Проверено harness (запущено): install, unit; ревью: прочитал агент openai (codex), только diff, ничего не запускал — одобрил",
+          "lineEn": "Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved"
+        }
       },
       {
         "id": "gate",
@@ -740,7 +906,58 @@
             "key": "defect",
             "count": 1
           }
-        ]
+        ],
+        "verification": {
+          "runId": "run-gate-3",
+          "rows": [
+            {
+              "gate": "install",
+              "kind": "gate",
+              "phase": "candidate",
+              "at": "2026-10-13T10:20:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "unit",
+              "kind": "gate",
+              "phase": "candidate",
+              "at": "2026-10-13T10:22:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "independent-review",
+              "kind": "review",
+              "phase": "candidate",
+              "at": "2026-10-13T10:30:00.000Z",
+              "result": "passed",
+              "how": "read-by-reviewer",
+              "reviewer": {
+                "runtime": "codex",
+                "vendor": "openai"
+              }
+            },
+            {
+              "gate": "install",
+              "kind": "gate",
+              "phase": "integration",
+              "at": "2026-10-13T10:40:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "unit",
+              "kind": "gate",
+              "phase": "integration",
+              "at": "2026-10-13T10:42:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            }
+          ],
+          "line": "Проверено harness (запущено): install, unit; ревью: прочитал агент openai (codex), только diff, ничего не запускал — одобрил",
+          "lineEn": "Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved"
+        }
       },
       {
         "id": "first",
@@ -753,7 +970,58 @@
         "knownUsd": 1.2,
         "unknownCalls": 1,
         "costBound": "lower",
-        "rejections": []
+        "rejections": [],
+        "verification": {
+          "runId": "run-first-1",
+          "rows": [
+            {
+              "gate": "install",
+              "kind": "gate",
+              "phase": "candidate",
+              "at": "2026-10-05T10:20:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "unit",
+              "kind": "gate",
+              "phase": "candidate",
+              "at": "2026-10-05T10:22:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "independent-review",
+              "kind": "review",
+              "phase": "candidate",
+              "at": "2026-10-05T10:30:00.000Z",
+              "result": "passed",
+              "how": "read-by-reviewer",
+              "reviewer": {
+                "runtime": "codex",
+                "vendor": "openai"
+              }
+            },
+            {
+              "gate": "install",
+              "kind": "gate",
+              "phase": "integration",
+              "at": "2026-10-05T10:40:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "unit",
+              "kind": "gate",
+              "phase": "integration",
+              "at": "2026-10-05T10:42:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            }
+          ],
+          "line": "Проверено harness (запущено): install, unit; ревью: прочитал агент openai (codex), только diff, ничего не запускал — одобрил",
+          "lineEn": "Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved"
+        }
       },
       {
         "id": "legacy",
@@ -771,7 +1039,58 @@
             "key": "unclassified",
             "count": 1
           }
-        ]
+        ],
+        "verification": {
+          "runId": "run-legacy-2",
+          "rows": [
+            {
+              "gate": "install",
+              "kind": "gate",
+              "phase": "candidate",
+              "at": "2026-09-29T10:20:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "unit",
+              "kind": "gate",
+              "phase": "candidate",
+              "at": "2026-09-29T10:22:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "independent-review",
+              "kind": "review",
+              "phase": "candidate",
+              "at": "2026-09-29T10:30:00.000Z",
+              "result": "passed",
+              "how": "read-by-reviewer",
+              "reviewer": {
+                "runtime": "codex",
+                "vendor": "openai"
+              }
+            },
+            {
+              "gate": "install",
+              "kind": "gate",
+              "phase": "integration",
+              "at": "2026-09-29T10:40:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            },
+            {
+              "gate": "unit",
+              "kind": "gate",
+              "phase": "integration",
+              "at": "2026-09-29T10:42:00.000Z",
+              "result": "passed",
+              "how": "executed-by-harness"
+            }
+          ],
+          "line": "Проверено harness (запущено): install, unit; ревью: прочитал агент openai (codex), только diff, ничего не запускал — одобрил",
+          "lineEn": "Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved"
+        }
       }
     ],
     "total": 7,

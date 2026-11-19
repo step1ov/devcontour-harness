@@ -27,6 +27,12 @@ import {
   formatUsd,
   formatWindow,
 } from './format.ts';
+import { failurePlainOf } from './failure-plain.ts';
+import {
+  verificationOf,
+  verificationReportLineLimit,
+  verificationReportRowLimit,
+} from './verification.ts';
 
 /** Литералы `src/contracts/report.ts` (тест сверяет поэлементно). */
 export const reportVersion = 1;
@@ -308,6 +314,21 @@ export interface AttemptSummary {
   interrupted: number;
   /** Принятые: 1 — у принятого поручения есть принявшая попытка (`acceptingAttemptOf`). */
   accepted: number;
+  /**
+   * Последний отказ (последняя по порядку попытка с корзиной): корзина,
+   * класс и причина простыми словами (`failurePlainOf`). Нет — отказов нет.
+   */
+  lastFailure?: LastFailure;
+}
+
+/** Последний отказ попытки поручения простыми словами (`attemptSummaryOf`). */
+export interface LastFailure {
+  runId: string;
+  bucket: FailureBucket;
+  kind?: FailureKind;
+  at?: string;
+  plain: string;
+  plainEn: string;
 }
 
 /**
@@ -321,10 +342,15 @@ export function attemptSummaryOf(
   attempts: readonly AttemptState[],
 ): AttemptSummary {
   const buckets = new Map<FailureBucket, number>();
+  let last: { a: AttemptState; b: FailureBucket } | undefined;
   for (const a of attempts) {
     const b = failureBucketOf(a);
-    if (b) buckets.set(b, (buckets.get(b) ?? 0) + 1);
+    if (b) {
+      buckets.set(b, (buckets.get(b) ?? 0) + 1);
+      last = { a, b };
+    }
   }
+  const lastFailure = last ? lastFailureView(last.a, last.b) : undefined;
   const failures = failureBucketNames
     .filter((b) => buckets.has(b))
     .map((b) => ({ key: b, count: buckets.get(b)! }));
@@ -336,6 +362,19 @@ export function attemptSummaryOf(
     timeouts: buckets.get('time-limit') ?? 0,
     interrupted: attempts.filter(interruptedByShutdown).length,
     accepted: acceptingAttemptOf(work, attempts) ? 1 : 0,
+    ...(lastFailure ? { lastFailure } : {}),
+  };
+}
+
+function lastFailureView(a: AttemptState, bucket: FailureBucket): LastFailure {
+  const p = failurePlainOf(a, bucket);
+  return {
+    runId: a.id,
+    bucket,
+    ...(a.failureKind ? { kind: a.failureKind } : {}),
+    ...(a.finishedAt ? { at: a.finishedAt } : {}),
+    plain: p.ru,
+    plainEn: p.en,
   };
 }
 
@@ -1277,6 +1316,12 @@ export function valueReport(
       unknownCalls: cost.unknown,
       costBound: cost.bound,
       rejections: attemptSummaryOf(f.work, f.attempts).failures,
+      ...((x) => (x ? { verification: x } : {}))(
+        verificationOf(f.work, f.attempts, {
+          rows: verificationReportRowLimit,
+          line: verificationReportLineLimit,
+        }),
+      ),
     };
   });
 

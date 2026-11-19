@@ -251,6 +251,14 @@ test('status и explain: строка сводки на поручение со�
     const { workId: _id, ...fromExplain } = all.attempts[0]!;
     void _id;
     assert.deepEqual(fromExplain, w);
+    // Что проверено и как — та же проверка, что у status (0.1.0-alpha.55).
+    const verified = status.works.find((y) => y.id === 'w')!.verification!;
+    // Принятие записью хранилища без evidence: обязательный gate не запускался.
+    assert.deepEqual(
+      verified.rows.map((r) => [r.gate, r.result, r.how]),
+      [['unit', 'skipped', 'not-run']],
+    );
+    assert.deepEqual(all.verification, [{ workId: 'w', ...verified }]);
     const one = await diagnoseState({ ...opts, workId: 'x' });
     assert.deepEqual(
       one.attempts?.map((r) => r.workId),
@@ -295,5 +303,6 @@ test('explain: строк сводки не больше EXPLAIN_ATTEMPT_ROWS, �
   assert.ok(cliDataSchemas.explain.safeParse(data).success);
   assert.equal(data.attempts?.length, EXPLAIN_ATTEMPT_ROWS);
   assert.equal(data.attemptsTruncated, 2);
-  assert.match(explainText(data), /… и ещё поручений: 2\n$/);
+  // После строк попыток — раздел ревью плана (0.1.0-alpha.54).
+  assert.match(explainText(data), /… и ещё поручений: 2\n(Ревью:\n(  .*\n)+)?$/);
 });

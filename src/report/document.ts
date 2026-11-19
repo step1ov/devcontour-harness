@@ -310,6 +310,12 @@ export function reportBlocks(r: ValueReport): Block[] {
     );
     if (r.works.truncated)
       p(`Showing the newest ${r.works.rows.length} of ${r.works.total} tasks.`, true);
+    // Что проверено и как: кто запускал gates, кто читал diff, что не проверялось.
+    const verified = r.works.rows.filter((x) => x.verification);
+    if (verified.length) {
+      h(3, 'What was verified and how');
+      list(verified.map((x) => `${x.id}: ${x.verification!.lineEn}.`));
+    }
   } else p('No task finished in the window.', true);
 
   if (r.targets) {

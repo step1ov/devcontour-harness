@@ -333,7 +333,15 @@ export {
   type WorkStage,
   type WorkStageView,
   type StageNeeds,
+  type StageLineExtra,
 } from './control/stage.ts';
+// Блокировки простыми словами и кто их снимает (`works[].blockers[].plain`).
+export {
+  plainBlocker,
+  blockerCodeText,
+  type BlockerCode,
+  type PlainBlocker,
+} from './control/blocker-plain.ts';
 export {
   inspectPath,
   checkDestination,

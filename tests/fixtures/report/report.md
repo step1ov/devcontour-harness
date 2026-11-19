@@ -130,6 +130,16 @@ Failed attempts: 7, of them 6 classified; attempts interrupted by shutdown are n
 | first: Add the greeting | accepted | 2026-10-05T10:50:00.000Z | 1 | 1 | 2.8 h | ≥ $1.20 (+1 unpriced) |  |
 | legacy: Old task from before classification | accepted | 2026-09-29T12:00:00.000Z | 2 | 2 | 8.2 d | unknown | unclassified 1 |
 
+### What was verified and how
+
+- cancel: Checked by harness (executed): nothing; review: none; not covered: install (not run), unit (not run).
+- broken: Checked by harness (executed): unit; failed (executed by harness): install; review: read by agent openai (codex), diff only, ran nothing — approved.
+- env: Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved.
+- review: Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved.
+- gate: Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved.
+- first: Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved.
+- legacy: Checked by harness (executed): install, unit; review: read by agent openai (codex), diff only, ran nothing — approved.
+
 ## Limits and unknowns
 
 - There is no before-harness baseline: the report does not compare with work done without the harness.

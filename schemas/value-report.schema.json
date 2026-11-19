@@ -2855,6 +2855,123 @@
                   ],
                   "additionalProperties": false
                 }
+              },
+              "verification": {
+                "type": "object",
+                "properties": {
+                  "runId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "rows": {
+                    "maxItems": 6,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "gate": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "gate",
+                            "review"
+                          ]
+                        },
+                        "phase": {
+                          "type": "string",
+                          "enum": [
+                            "candidate",
+                            "integration"
+                          ]
+                        },
+                        "consumer": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                        },
+                        "result": {
+                          "type": "string",
+                          "enum": [
+                            "passed",
+                            "failed",
+                            "reused",
+                            "skipped",
+                            "not-applicable"
+                          ]
+                        },
+                        "how": {
+                          "type": "string",
+                          "enum": [
+                            "executed-by-harness",
+                            "reused-evidence",
+                            "read-by-reviewer",
+                            "not-run"
+                          ]
+                        },
+                        "at": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "reviewer": {
+                          "type": "object",
+                          "properties": {
+                            "runtime": {
+                              "type": "string",
+                              "enum": [
+                                "codex",
+                                "claude",
+                                "fixture"
+                              ]
+                            },
+                            "vendor": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 40
+                            }
+                          },
+                          "required": [
+                            "runtime",
+                            "vendor"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "gate",
+                        "kind",
+                        "phase",
+                        "result",
+                        "how"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "rowsTruncated": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "line": {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  "lineEn": {
+                    "type": "string",
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "runId",
+                  "rows",
+                  "line",
+                  "lineEn"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [

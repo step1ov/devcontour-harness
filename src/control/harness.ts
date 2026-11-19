@@ -40,6 +40,11 @@ import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { validateInputs } from '../validate.ts';
 import { WorkflowQueue } from './workflow.ts';
 import { statusOf } from './status.ts';
+import {
+  verificationLines,
+  verificationRowLimit,
+  verificationRows,
+} from '../report/verification.ts';
 import { acceptedTargets } from './target.ts';
 import { reviewRoundCap, technicalReview } from './review.ts';
 import { reviewCode, type CodeReviewInput } from './review-code.ts';
@@ -1027,9 +1032,19 @@ export class Harness {
         .at(-1);
       if (!attempt)
         throw new HarnessError('NOT_FOUND', 'У поручения нет завершённой попытки: ' + workId);
+      // Что проверено и как у попытки результата: записи её evidence.
+      const rows = verificationRows(attempt);
       return {
         apiVersion: API_VERSION,
         result: runResult(attempt, HARNESS_VERSION),
+        verification: {
+          runId: attempt.id,
+          rows: rows.slice(0, verificationRowLimit),
+          ...(rows.length > verificationRowLimit
+            ? { rowsTruncated: rows.length - verificationRowLimit }
+            : {}),
+          ...verificationLines(rows),
+        },
         delivery: v
           .locals('delivery', WORKSPACE_OWNER)
           .map((d) => d.value)
