@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   HarnessError,
+  TaskFailure,
   cliDataSchemas,
   cliErrorSchema,
   executionDigest,
@@ -407,6 +408,8 @@ test('preflight: ключ меняют дерево зависимости, ок
     });
     p.repositories[0].dependsOn = ['lib'];
     p.environment = { inherit: ['SMOKE_TEST_VALUE'] };
+    // Привязка только зависимости: её сборка снимка — тоже вход окружения.
+    p.repositories[1].environment = { inherit: ['SMOKE_LIB_VALUE'] };
   });
   lib.git('update-ref', 'refs/heads/harness/accepted', 'HEAD');
   const input = {
@@ -415,7 +418,7 @@ test('preflight: ключ меняют дерево зависимости, ок
     stateDir: f.state,
     repositoryIds: ['app'],
     resourceDatabase: join(f.root, 'resources.sqlite'),
-    environment: { ...process.env, SMOKE_TEST_VALUE: 'one' },
+    environment: { ...process.env, SMOKE_TEST_VALUE: 'one', SMOKE_LIB_VALUE: 'a' },
   };
   const first = await lifecyclePreflight(input);
   assert.equal(first[0]!.cached, false);
@@ -431,8 +434,11 @@ test('preflight: ключ меняют дерево зависимости, ок
   assert.equal((await lifecyclePreflight(input))[0]!.cached, false);
   assert.equal((await lifecyclePreflight(input))[0]!.cached, true);
   // Другое значение наследуемой переменной — новая проверка.
-  const other = { ...input, environment: { ...process.env, SMOKE_TEST_VALUE: 'two' } };
+  const other = { ...input, environment: { ...input.environment, SMOKE_TEST_VALUE: 'two' } };
   assert.equal((await lifecyclePreflight(other))[0]!.cached, false);
+  // Значение привязки зависимости — тоже.
+  const libValue = { ...input, environment: { ...input.environment, SMOKE_LIB_VALUE: 'b' } };
+  assert.equal((await lifecyclePreflight(libValue))[0]!.cached, false);
   // Другой обход зависших — новая проверка.
   const stall = {
     ...input,
@@ -443,8 +449,17 @@ test('preflight: ключ меняют дерево зависимости, ок
   };
   assert.equal((await lifecyclePreflight(stall))[0]!.cached, false);
   // Переменной нет — отказ до кэша, хотя успех на этом дереве записан.
-  const env = { ...process.env };
+  const env: NodeJS.ProcessEnv = { ...input.environment };
   delete env.SMOKE_TEST_VALUE;
+  const noLib: NodeJS.ProcessEnv = { ...input.environment };
+  delete noLib.SMOKE_LIB_VALUE;
+  await assert.rejects(
+    lifecyclePreflight({ ...input, environment: noLib }),
+    (e: unknown) =>
+      e instanceof HarnessError &&
+      e.code === 'LIFECYCLE_FAILED' &&
+      /SMOKE_LIB_VALUE/.test(e.message),
+  );
   await assert.rejects(
     lifecyclePreflight({ ...input, environment: env }),
     (e: unknown) =>
@@ -511,4 +526,11 @@ test('classifyLifecycleFailure: исходный отказ не приписы�
     { policy, timedOut: true },
   );
   assert.equal(cut.class, 'timeout');
+  // setup упал сам, затем проверка замолкла в teardown (stallSweep) — тоже crash шага.
+  const stalled = classifyLifecycleFailure(
+    new TaskFailure('stalled', 'замолкла'),
+    { ...teardown, stage: 'setup', id: 'start', exitCode: 2 },
+    { policy, timedOut: false },
+  );
+  assert.equal(stalled.class, 'crash');
 });

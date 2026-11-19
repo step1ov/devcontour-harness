@@ -630,7 +630,19 @@ export class RelayV1Transport implements RelayTransport {
   }
 
   async identity(signal?: AbortSignal): Promise<TransportIdentity> {
-    const health = await this.health('identity', signal);
+    let health: z.output<typeof healthSchema>;
+    try {
+      health = await this.health('identity', signal);
+    } catch (error) {
+      // Несовпадение, замеченное identity, закрывает и мутации — даже после
+      // прежней успешной сверки.
+      if (error instanceof TransportError && error.details.code === 'CONNECTOR_VERSION_MISMATCH') {
+        const refused = Promise.reject(error);
+        refused.catch(() => undefined);
+        this.version = refused;
+      }
+      throw error;
+    }
     this.version = Promise.resolve(health);
     const ctx = await this.call('identity.context', contextSchema, {
       method: 'GET',

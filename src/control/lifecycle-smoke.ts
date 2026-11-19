@@ -120,9 +120,15 @@ export function classifyLifecycleFailure(
         ' и остановите его (часто — старый dev-сервер или служба прошлой попытки), затем повторите smoke. Код задачи не меняйте.',
     };
   }
-  // Шаг упал сам (не отменён пределом), а предел истёк позже — в уборке:
-  // причина — шаг.
-  if (context.timedOut && failed && !failed.ok && !failed.aborted && failed.stage !== 'teardown')
+  // Шаг упал сам (не отменён пределом), а предел истёк или проверка замолкла
+  // позже — в уборке: причина — шаг.
+  if (
+    (context.timedOut || (error instanceof TaskFailure && error.kind === 'stalled')) &&
+    failed &&
+    !failed.ok &&
+    !failed.aborted &&
+    failed.stage !== 'teardown'
+  )
     return classifyLifecycleFailure(new Error(message), failed, { ...context, timedOut: false });
   if (context.timedOut)
     return {

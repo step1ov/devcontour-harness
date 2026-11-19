@@ -169,6 +169,27 @@ void describe('relay-v1 transport (fake HTTP)', () => {
       );
       await rejects(fresh.move('Task0001', { column: 'done', ifRevision: 3 }), 'unsupported');
       assert.equal(srv.posts().length, 0, 'мутация не отправлена');
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it('H1: успешная сверка, затем identity видит другую версию — мутации закрыты', async () => {
+    let version = RELAY_V1_CONTRACT_VERSION;
+    const srv = await fake((r) =>
+      r.path === '/api/v1/health'
+        ? ok({ status: 'ok', stage: 'ready', contractVersion: version })
+        : undefined,
+    );
+    try {
+      const t = transportFor(srv.url);
+      await t.identity();
+      version = RELAY_V1_CONTRACT_VERSION + 1;
+      await rejects(t.identity(), 'unsupported');
+      await rejects(t.move('Task0001', { column: 'done', ifRevision: 3 }), 'unsupported', (e) =>
+        assert.equal(e.details.code, 'CONNECTOR_VERSION_MISMATCH'),
+      );
+      assert.equal(srv.posts().length, 0);
       // Ядро коннектора отвечает именованным отказом, а не общим NOT_READY.
       await assert.rejects(
         checkIdentity(t, { provider: 'relay-v1-http', projectId: P } as ConnectorConfig),

@@ -114,12 +114,16 @@ export async function lifecyclePreflight(input: {
     // только digest-ом.
     let environment: string;
     try {
+      // Свои привязки у репозитория и у каждой зависимости (их сборка снимков).
       environment = digestOf(
-        executionEnvironment(
-          [policy.environment, repo.environment],
-          {},
-          input.environment ?? process.env,
-        ).env,
+        [repo.id, ...Object.keys(dependencies)].map((rid) => [
+          rid,
+          executionEnvironment(
+            [policy.environment, policy.repositories.find((r) => r.id === rid)!.environment],
+            {},
+            input.environment ?? process.env,
+          ).env,
+        ]),
       );
     } catch (error) {
       throw new HarnessError(
