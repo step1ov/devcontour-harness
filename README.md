@@ -5,7 +5,7 @@ Headless-движок исполнения инженерных поручени
 интеграция с принятой веткой через compare-and-swap и машинный результат с SHA
 и доказательствами.
 
-> Статус: `0.1.0-alpha.54` — предварительный выпуск (alpha). Договоры
+> Статус: `0.1.0-alpha.55` — предварительный выпуск (alpha). Договоры
 > `v1alpha1` могут измениться между alpha-версиями; закрепляйте точную версию.
 > Файл → ревью плана → кандидат → интеграция → принятие → результат JSON, с
 > ограниченным восстановлением, повторным использованием кандидата, бюджетами,
@@ -28,7 +28,7 @@ Headless-движок исполнения инженерных поручени
 Из npm — точная версия (воспроизводимо) или последняя alpha по тегу:
 
 ```sh
-npm install --save-exact devcontour-harness@0.1.0-alpha.54   # точная версия
+npm install --save-exact devcontour-harness@0.1.0-alpha.55   # точная версия
 # или: npm install --save-exact devcontour-harness@alpha     # текущая alpha
 npx harness --version
 ```
@@ -151,6 +151,23 @@ PASS» нет. Адаптеры хоста реализуют порты `Execut
 `/contracts` и `/testing`; JSON-схемы входов и выходов —
 `devcontour-harness/schemas/<имя>.schema.json`. Декларации используют типы
 Node.js: TypeScript-потребителю нужен `@types/node` (или `skipLibCheck`).
+
+## Выпуск 0.1.0-alpha.55
+
+`status`, `explain`, `result` и отчёт говорят простыми словами, почему
+поручение повторяется (`attemptSummary.lastFailure`), почему не выдаётся
+(`blockers[].plain`, кто снимает) и что проверено и как (`verification`:
+кто запускал gates, кто читал diff, что не проверялось). Вопрос исполнителя
+помечается `impact` (`technical` или для пользователя) и `forUser`; с
+`inputPolicy.leadAnswers.technical: true` технический вопрос решает ведущий
+с обязательной причиной (`input-answer --actor lead --reason`), вопрос для
+пользователя — по-прежнему человек. Новая команда `harness view` даёт панели
+оператора один JSON-документ только для чтения (`OperatorView`,
+`WorkDetailView`); новые коды `POLICY_REQUIRED` и `VIEW_TOO_LARGE`. Перед
+откатом уберите `inputPolicy.leadAnswers.technical` из политики и
+`<state>/binding.json`; записи вопросов с `impact` или `basis` alpha.54 не
+читает — откат только на копию состояния до обновления. Подробно —
+[заметки выпуска](docs/release-notes/0.1.0-alpha.55.md).
 
 ## Выпуск 0.1.0-alpha.54
 

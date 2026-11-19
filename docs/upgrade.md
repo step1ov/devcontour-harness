@@ -1360,7 +1360,7 @@ handoff` (`handoffPack`) больше не содержит попыток, пр
   `<state>/review-code/`, `<state>/preflight/` и файлы
   `<state>/gates-at/*/result.json` можно удалить.
 
-### 0.1.0-alpha.55: понятный прогресс, технические вопросы решает ведущий
+### 0.1.0-alpha.55: понятный прогресс, технические вопросы решает ведущий, `harness view`
 
 Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`,
 `handoffVersion: 1`, `reportVersion: 1`). Новые поля ответов и записей
@@ -1409,13 +1409,25 @@ handoff` (`handoffPack`) больше не содержит попыток, пр
   `lineEn`). `init --lead-technical-answers` при сохранённой политике без
   этого правила — `PATH_CONFLICT` `content-differs` на `.harness/policy.json`:
   правило меняется правкой политики между запусками.
+- **Команда `harness view`.** `view --state D [--policy F] [--work ID]
+[--no-titles] [--window 24h|7d] [--bucket 15m|1h] [--lang ru|en]
+[--view-version 1]` — документ только для чтения для панели оператора
+  (`OperatorView`, с `--work` — `WorkDetailView`; схемы
+  `operator-view.schema.json`, `work-detail-view.schema.json`). Новые коды
+  `POLICY_REQUIRED` (exit 2: нет состояния и нет `--policy`) и
+  `VIEW_TOO_LARGE` (exit 4: документ больше 256 КБ). Состояние команда не
+  пишет; потребитель `capabilities` со строгим списком команд должен принять
+  `view`.
 - **Откат на 0.1.0-alpha.54.** Уберите `inputPolicy.leadAnswers.technical`
   и из `.harness/policy.json`, и из `<state>/binding.json`; `leadAnswers`
   без `maxSeverity` уберите целиком — схема alpha.54 требует `maxSeverity`.
   Записи `input-requests` с `impact`, `forUser`, `basis` или `reason`
   alpha.54 не читает (строгая схема): откат после вопросов исполнителя этой
   версии не поддерживается — откатывайтесь на копию состояния, снятую до
-  обновления.
+  обновления. Команды `view` и кодов `POLICY_REQUIRED`, `VIEW_TOO_LARGE` в
+  alpha.54 нет: панель, которая вызывает `harness view`, после отката
+  получает `UNSUPPORTED_COMMAND`. Поля понятного прогресса действий с
+  данными при откате не требуют.
 
 ## Перед обновлением
 
