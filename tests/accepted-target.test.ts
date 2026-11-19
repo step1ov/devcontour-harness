@@ -162,8 +162,15 @@ test('H11: переписанный target ref — diverged; отсутству�
   const r = p.harness('status', '--state', p.state);
   assert.equal(r.status, 0);
   status = cliDataSchemas.status.parse(r.json.data);
-  assert.ok(status.works[0]!.target!.unavailable);
+  assert.equal(status.works[0]!.target!.unavailable, 'ref не прочитан');
   assert.match(status.works[0]!.target!.line, /не проверено/);
+  // Причина — класс, без путей машины (сверка попадает в отчёт).
+  assert.ok(!status.works[0]!.target!.line.includes(p.app));
+  const report = cliDataSchemas.report.parse(
+    p.harness('report', '--state', p.state).json.data,
+  ) as any;
+  assert.ok(!JSON.stringify(report.targets).includes(p.app));
+  assert.equal(report.targets.rows[0].unavailable, 'ref не прочитан');
 });
 
 test('H11: строки target — русские формы числа', () => {
@@ -177,4 +184,15 @@ test('H11: строки target — русские формы числа', () => 
     targetLines({ ...base, commitsSinceAccepted: 1, filesSinceAccepted: 1 }).lineEn,
     /1 commit \(1 file\)/,
   );
+});
+
+test('H11: строки target укладываются в предел при длинном ref; причина unavailable без путей машины', () => {
+  const long = 'refs/heads/' + 'x'.repeat(480);
+  const t = targetLines({
+    repositoryId: 'app',
+    ref: long,
+    acceptedSha: 'a'.repeat(40),
+    unavailable: 'ref не прочитан',
+  });
+  assert.ok(t.line.length <= 500 && t.lineEn.length <= 500);
 });

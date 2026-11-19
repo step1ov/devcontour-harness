@@ -369,8 +369,8 @@ $H result --state <manifest.paths.state> --work <order-id>
 «принято на 3f2a…; после приёмки 2 коммита (3 файла) — не проверены»
 (`status --human` печатает обе). Коммиты после приёмки этим принятием не
 проверены: их принимает новое поручение `harness run`, а проверяет
-`harness gates --sha HEAD` (проверка, не приёмка). Сверка — только чтение Git:
-один `rev-parse` на репозиторий и по три вызова на принятый SHA.
+`harness gates --sha <target ref>` и `review-code --base <acceptedSha> --head <target ref>` (проверка, не приёмка). Сверка — только чтение Git:
+один `rev-parse` на репозиторий и по три вызова на принятый SHA, не дольше 10 с на вызов и 30 с на ответ; причина `unavailable` — класс (ref не прочитан, git не ответил, checkout не доверен), без путей машины.
 
 ## Gates на коммите: `harness gates`
 

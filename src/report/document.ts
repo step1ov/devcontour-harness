@@ -302,7 +302,7 @@ export function reportBlocks(r: ValueReport): Block[] {
       if (r.targets.truncated)
         p(`Showing ${r.targets.rows.length} of ${r.targets.total} tasks.`, true);
       p(
-        'Commits after acceptance are not accepted: they need a new harness task or `harness gates --sha HEAD`.',
+        'Commits after acceptance are not accepted: they need a new harness task; `harness gates --sha <target ref>` and `harness review-code --base <accepted> --head <target ref>` check them without accepting.',
         true,
       );
     } else

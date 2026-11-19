@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -28,12 +29,31 @@ import { redactInspection } from '../agents/inspect.ts';
 import { chooseCheckoutRoot, checkoutPath } from '../environment/checkout-root.ts';
 import { credentialPaths } from '../environment/isolation.ts';
 import { executionEnvironment } from '../environment/lifecycle.ts';
-import { git } from '../environment/process.ts';
+import { git, hostGitArgs } from '../environment/process.ts';
 import { redactDeep } from '../environment/redaction.ts';
 import type { Engine } from '../engine/engine.ts';
 import { TaskFailure } from '../engine/failure.ts';
 import { measuredInvoke } from '../engine/measured.ts';
 import { GATES_RESULT_FILE } from './gates-check.ts';
+
+/** Git без обрезки вывода: stdout целиком (Buffer), предел — `maxBuffer`. */
+const rawGit = (cwd: string, args: string[], options: { maxBuffer?: number } = {}) =>
+  new Promise<Buffer>((resolveOut, reject) => {
+    execFile(
+      'git',
+      hostGitArgs(cwd, args),
+      {
+        cwd,
+        encoding: 'buffer',
+        maxBuffer: options.maxBuffer ?? 64 * 1024 * 1024,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1' },
+      },
+      (error, stdout) => {
+        if (error) reject(error instanceof Error ? error : new Error('git: отказ'));
+        else resolveOut(stdout);
+      },
+    );
+  });
 
 /** Предел diff обзора: больший — отказ до вызова (сузьте диапазон). */
 export const REVIEW_CODE_DIFF_LIMIT = 4 * 1024 * 1024;
@@ -185,22 +205,33 @@ export async function reviewCode(
       { path: ['--base'], message: input.base },
     ]);
   }
-  const names = (await git(path, 'diff', '--name-only', '--no-renames', mergeBase, head))
-    .split('\n')
-    .filter(Boolean);
+  // Полный вывод git без обрезки (`git()` хранит только хвост stdout) и имена
+  // без C-кавычек и обрезки пробелов (`-z`).
+  const names = (await rawGit(path, ['diff', '--name-only', '-z', '--no-renames', mergeBase, head]))
+    .toString('utf8')
+    .split('\0')
+    .filter((n) => n.length > 0);
   if (!names.length)
     throw new HarnessError(
       'INVALID_INPUT',
       `review-code: между merge-base(${input.base}, ${input.head}) и ${input.head} нет изменений`,
       [{ path: ['--head'], message: input.head }],
     );
-  const diff = await git(path, 'diff', '--no-ext-diff', '--no-textconv', mergeBase, head);
-  if (Buffer.byteLength(diff) > REVIEW_CODE_DIFF_LIMIT)
+  let diff: string;
+  try {
+    diff = (
+      await rawGit(path, ['diff', '--no-ext-diff', '--no-textconv', mergeBase, head], {
+        maxBuffer: REVIEW_CODE_DIFF_LIMIT,
+      })
+    ).toString('utf8');
+  } catch (error) {
+    if ((error as { code?: string }).code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') throw error;
     throw new HarnessError(
       'INVALID_INPUT',
-      `review-code: diff ${Buffer.byteLength(diff)} байт больше предела ${REVIEW_CODE_DIFF_LIMIT}; сузьте диапазон`,
+      `review-code: diff больше предела ${REVIEW_CODE_DIFF_LIMIT} байт; сузьте диапазон`,
       [{ path: ['--base'], message: input.base }],
     );
+  }
   const commits = Number(await git(path, 'rev-list', '--count', `${mergeBase}..${head}`));
   const subject = digestOf({
     kind: 'code-review',
@@ -218,13 +249,17 @@ export async function reviewCode(
       .sort((a, b) => a.round - b.round),
   );
   const last = rounds.at(-1);
+  // Итог gates на head — часть основания раунда: новый итог (в том числе
+  // провал после прежнего PASS) — новый раунд, а не прежнее одобрение.
+  const gates = await gatesEvidenceFor(ctx.stateDir, repo.id, head);
   if (
     last &&
     last.approved &&
     last.head === head &&
     last.mergeBase === mergeBase &&
     last.authorRuntime === author &&
-    last.reviewerBinding === reviewerBinding
+    last.reviewerBinding === reviewerBinding &&
+    last.gates?.id === gates?.id
   )
     return last;
   const before = last?.round ?? 0;
@@ -248,7 +283,6 @@ export async function reviewCode(
       `Обзор ${repo.id}: открытых находок больше предела ${REVIEW_ITEMS_LIMIT}; нового вызова нет`,
     );
   const round = before + 1;
-  const gates = await gatesEvidenceFor(ctx.stateDir, repo.id, head);
 
   const tools = profile ? policy.toolProfiles[profile] : undefined;
   let execution: ReturnType<typeof executionEnvironment>;
@@ -309,6 +343,9 @@ export async function reviewCode(
 
   let added = false;
   let response: Awaited<ReturnType<typeof measuredInvoke>>;
+  // Reviewer только читает: изменённое им дерево (файлы, HEAD) — отказ раунда,
+  // проверяется до уборки дерева.
+  let mutated: string | undefined;
   try {
     await git(path, 'worktree', 'add', '--detach', cwd, head);
     added = true;
@@ -345,6 +382,12 @@ export async function reviewCode(
         throw new HarnessError('BUDGET_EXHAUSTED', error.message);
       throw error;
     });
+    const dirty = await git(cwd, 'status', '--porcelain', '--untracked-files=all').catch(
+      () => '(git status не ответил)',
+    );
+    const now = await git(cwd, 'rev-parse', 'HEAD').catch(() => '');
+    if (dirty || now !== head)
+      mutated = `reviewer изменил рабочее дерево обзора${now !== head ? ' (HEAD сдвинут)' : ''}`;
   } finally {
     if (added) await git(path, 'worktree', 'remove', '--force', cwd).catch(() => undefined);
     await rm(cwd, { recursive: true, force: true }).catch(() => undefined);
@@ -357,13 +400,16 @@ export async function reviewCode(
     );
   const parsed = reviewResultSchema.safeParse(response.output);
   const issue = parsed.error?.issues[0];
-  const issues = parsed.success
-    ? reviewIssues(parsed.data, open)
-    : [
-        execution
-          .redact(`Ответ ревью вне схемы: ${issuePath(issue?.path ?? [])}: ${issue?.message}`)
-          .slice(0, 500),
-      ];
+  const issues = [
+    ...(parsed.success
+      ? reviewIssues(parsed.data, open)
+      : [
+          execution
+            .redact(`Ответ ревью вне схемы: ${issuePath(issue?.path ?? [])}: ${issue?.message}`)
+            .slice(0, 500),
+        ]),
+    ...(mutated ? [mutated] : []),
+  ];
   // Как ревью плана (docs/review-protocol.md, §8): ответ применяется только
   // целиком валидным; иначе раунд неодобрен, прежние находки не меняются.
   const applied = parsed.success && !issues.length ? parsed.data : undefined;
@@ -385,7 +431,7 @@ export async function reviewCode(
         severity: f.severity,
         message: execution.redact(f.message).slice(0, 12000),
         ...(f.rule ? { rule: f.rule.slice(0, 200) } : {}),
-        path: f.path ?? null,
+        path: f.path ? f.path.slice(0, 500) : null,
         line: f.line ?? null,
         status: 'open' as const,
         openedIn: round,
@@ -409,11 +455,17 @@ export async function reviewCode(
     diffDigest: digestOf(diff),
     round,
     at: new Date().toISOString(),
-    approved: parsed.success && parsed.data.approved && !issues.length,
-    summary:
-      execution
-        .redact(parsed.success ? parsed.data.summary : 'Ответ ревью вне схемы')
-        .slice(0, 12000) + (issues.length ? ' / ' + issues.join('; ') : ''),
+    // Одобрение — и по итоговым находкам: повторно открытая блокирующая
+    // находка (тот же текст, сообщённый заметкой) раунд не одобряет.
+    approved:
+      parsed.success &&
+      parsed.data.approved &&
+      !issues.length &&
+      !findings.some((f) => f.status === 'open' && f.severity === 'blocking'),
+    summary: (
+      execution.redact(parsed.success ? parsed.data.summary : 'Ответ ревью вне схемы') +
+      (issues.length ? ' / ' + issues.join('; ') : '')
+    ).slice(0, 12000),
     authorRuntime: author,
     reviewerRuntime: choice.reviewer.runtime,
     ...(response.model ? { reviewerModel: response.model } : {}),

@@ -255,3 +255,85 @@ test('H10: review-code — нет изменений и неизвестный �
   assert.equal(missing.json.error.code, 'NOT_FOUND');
   assert.equal(fixtureCalls(p.scenarioPath, 'codex', 'reviewer'), 0);
 });
+
+test('H10: review-code — reviewer, изменивший рабочее дерево, раунд не одобряет; дерево убрано', () => {
+  const p = project();
+  p.git('branch', 'feat');
+  p.commitOn('feat', 'src/greet.js', 'exports.greet = () => 1;\n');
+  p.scenario({ reviewer: { ...verdict(true), files: { 'src/greet.js': 'hacked\n' } } });
+  const r = p.reviewCode();
+  assert.equal(r.status, exitCodes.refused, r.stdout);
+  const rec = record(r.json);
+  assert.equal(rec.approved, false);
+  assert.match(rec.summary, /изменил рабочее дерево/);
+  assert.equal(p.git('worktree', 'list', '--porcelain').match(/^worktree /gm)?.length, 1);
+});
+
+test('H10: review-code — одобрение без состояния прежней открытой находки и с повторно открытой блокирующей — не одобрено', () => {
+  const p = project();
+  p.git('branch', 'feat');
+  p.commitOn('feat', 'src/greet.js', 'exports.greet = () => 1;\n');
+  const blocker = finding('Нет обработки пустого имени');
+  p.scenario({ reviewer: verdict(false, { findings: [blocker] }) });
+  const r1 = record(p.reviewCode().json);
+  // Раунд 2: approved без `previous` — прежняя открытая находка не названа.
+  p.commitOn('feat', 'src/greet.js', 'exports.greet = () => 2;\n');
+  p.scenario({ reviewer: verdict(true) });
+  const second = p.reviewCode();
+  assert.equal(second.status, exitCodes.refused, second.stdout);
+  const r2 = record(second.json);
+  assert.equal(r2.approved, false);
+  assert.equal(r2.findings[0]!.status, 'open');
+  // Раунд 3: закрыть, раунд 4: то же сообщение заметкой — старая блокирующая снова открыта.
+  const id = r1.findings[0]!.id;
+  p.commitOn('feat', 'src/greet.js', 'exports.greet = () => 3;\n');
+  p.scenario({
+    reviewer: verdict(true, { previous: [{ id, status: 'closed', basis: 'Исправлено' }] }),
+  });
+  assert.equal(record(p.reviewCode().json).approved, true);
+  p.commitOn('feat', 'src/greet.js', 'exports.greet = () => 4;\n');
+  p.scenario({ reviewer: verdict(true, { findings: [{ ...blocker, severity: 'note' }] }) });
+  const fourth = p.reviewCode();
+  const r4 = record(fourth.json);
+  assert.equal(r4.findings.find((f) => f.id === id)?.status, 'open');
+  assert.equal(r4.approved, false);
+  assert.equal(fourth.status, exitCodes.refused);
+});
+
+test('H10: review-code — новый итог gates после одобрения — новый раунд, а не прежнее одобрение', () => {
+  const p = project();
+  p.git('branch', 'feat');
+  p.commitOn('feat', 'src/greet.js', "exports.greet = (name) => 'Hello, ' + name + '!';\n");
+  p.scenario({ reviewer: verdict(true) });
+  const r1 = record(p.reviewCode().json);
+  assert.equal(r1.gates, undefined);
+  const gates = p.harness('gates', '--state', p.state, '--policy', 'policy.json', '--sha', 'feat');
+  assert.equal(gates.json?.ok, true, gates.stdout);
+  const r2 = record(p.reviewCode().json);
+  assert.equal(r2.round, 2);
+  assert.equal(r2.gates?.id, gates.json.data.id);
+  // Тот же итог — тот же раунд без вызова.
+  assert.equal(record(p.reviewCode().json).id, r2.id);
+});
+
+test('H10: review-code — diff между 2 и 4 МиБ доходит до reviewer целиком; больше 4 МиБ — отказ до вызова', () => {
+  const p = project();
+  p.git('branch', 'feat');
+  const line = (i: number) => `line ${i} ${'x'.repeat(60)}\n`;
+  const big = Array.from({ length: 40_000 }, (_, i) => line(i)).join(''); // ≈2.7 MB
+  p.commitOn('feat', 'src/big.txt', 'FIRST-MARK\n' + big + 'LAST-MARK\n');
+  p.scenario({ reviewer: { ...verdict(true), recordPrompt: true } });
+  const r = p.reviewCode();
+  assert.equal(r.status, 0, r.stdout.slice(0, 2000));
+  const prompt = recordedPrompt(p.scenarioPath, 'reviewer', 0);
+  assert.ok(prompt.includes('+FIRST-MARK') && prompt.includes('+LAST-MARK'), 'diff целиком');
+
+  const q = project();
+  q.git('branch', 'feat');
+  q.commitOn('feat', 'src/big.txt', big + big);
+  q.scenario({ reviewer: verdict(true) });
+  const refused = q.reviewCode();
+  assert.equal(refused.json.error.code, 'INVALID_INPUT');
+  assert.match(String(refused.json.error.message), /предела/);
+  assert.equal(fixtureCalls(q.scenarioPath, 'codex', 'reviewer'), 0);
+});

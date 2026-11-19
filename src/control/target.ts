@@ -9,6 +9,14 @@ export interface AcceptedWork {
   acceptedSha: string;
 }
 
+/** Предел одного вызова git сверки и всей сверки одного ответа. */
+const TARGET_GIT_TIMEOUT_MS = 10_000;
+const TARGET_TOTAL_MS = 30_000;
+/** Предел строк `line` / `lineEn` (`acceptedTargetSchema`). */
+const LINE_LIMIT = 500;
+const clip = (text: string) =>
+  text.length > LINE_LIMIT ? text.slice(0, LINE_LIMIT - 1) + '…' : text;
+
 const ru = (n: number, one: string, few: string, many: string) => {
   const d = n % 10;
   const h = n % 100;
@@ -20,6 +28,11 @@ const en = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
 export function targetLines(
   t: Omit<AcceptedTarget, 'line' | 'lineEn'>,
 ): Pick<AcceptedTarget, 'line' | 'lineEn'> {
+  const lines = rawLines(t);
+  return { line: clip(lines.line), lineEn: clip(lines.lineEn) };
+}
+
+function rawLines(t: Omit<AcceptedTarget, 'line' | 'lineEn'>) {
   const sha = t.acceptedSha.slice(0, 12);
   if (t.unavailable !== undefined)
     return {
@@ -64,14 +77,22 @@ export function acceptedTargets(
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1' },
       maxBuffer: 64 * 1024 * 1024,
+      timeout: TARGET_GIT_TIMEOUT_MS,
     }).trim();
-  const reason = (error: unknown) =>
-    (
-      (error as { stderr?: string }).stderr?.trim() ||
-      (error instanceof Error ? error.message : String(error))
+  // Причина — класс, а не сырой stderr: текст git несёт пути машины, а сверка
+  // попадает в отчёт.
+  const reason = (error: unknown, what: string) => {
+    const e = error as { code?: string; signal?: string; stderr?: string; message?: string };
+    if (e.code === 'ETIMEDOUT' || e.signal === 'SIGTERM')
+      return `git не ответил за ${TARGET_GIT_TIMEOUT_MS / 1000} с`;
+    if (e.code === 'ENOENT') return 'git не найден';
+    if (
+      /trusted|доверен|safe\.directory|symlink|ссылк/i.test(`${e.message ?? ''} ${e.stderr ?? ''}`)
     )
-      .split('\n')[0]!
-      .slice(0, 300);
+      return 'checkout репозитория не доверен';
+    return what;
+  };
+  const deadline = Date.now() + TARGET_TOTAL_MS;
   for (const work of works) {
     const repo = policy.repositories.find((r) => r.id === work.repositoryId);
     const ref = repo?.targetRef ?? '(нет репозитория)';
@@ -89,11 +110,17 @@ export function acceptedTargets(
               head: run(path, ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`]),
             };
           } catch (error) {
-            head = { error: reason(error) };
+            head = { error: reason(error, 'ref не прочитан') };
           }
           heads.set(repo.id, head);
         }
-        if (!head.head) base = { ...common, unavailable: head.error ?? 'нет ref' };
+        if (!head.head) base = { ...common, unavailable: head.error ?? 'ref не прочитан' };
+        else if (Date.now() > deadline)
+          base = {
+            ...common,
+            head: head.head,
+            unavailable: `сверка прервана: предел ${TARGET_TOTAL_MS / 1000} с`,
+          };
         else if (head.head === work.acceptedSha)
           base = { ...common, head: head.head, commitsSinceAccepted: 0, filesSinceAccepted: 0 };
         else
@@ -112,12 +139,13 @@ export function acceptedTargets(
             const files = run(path, [
               'diff',
               '--name-only',
+              '-z',
               '--no-renames',
               work.acceptedSha,
               head.head,
             ])
-              .split('\n')
-              .filter(Boolean).length;
+              .split('\0')
+              .filter((n) => n.length > 0).length;
             base = {
               ...common,
               head: head.head,
@@ -126,7 +154,11 @@ export function acceptedTargets(
               ...(ancestor ? {} : { diverged: true as const }),
             };
           } catch (error) {
-            base = { ...common, head: head.head, unavailable: reason(error) };
+            base = {
+              ...common,
+              head: head.head,
+              unavailable: reason(error, 'принятый коммит не прочитан'),
+            };
           }
       }
       cache.set(key, base);

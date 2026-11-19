@@ -279,8 +279,9 @@ After acceptance the target ref can move on. `result` (`data.target`) and
 — не проверены» / "accepted at X; N commits since acceptance are not
 verified"). When `commitsSinceAccepted` is above 0 or `diverged` is set,
 quote that line: those commits are **not accepted**. They need a new harness
-order (`run`), or at least `$H gates --sha HEAD` (a check, not acceptance) and
-`review-code --base <acceptedSha> --head HEAD`. Never report the current ref
+order (`run`), or at least `$H gates --sha <targetRef>` (`HEAD` when the
+checkout is on it; a check, not acceptance) and
+`review-code --base <acceptedSha> --head <targetRef>`. Never report the current ref
 as accepted because an earlier order on it was.
 
 ### 10. New session
