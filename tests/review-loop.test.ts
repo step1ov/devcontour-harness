@@ -12,7 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,7 +31,7 @@ import {
   type WorkGraph,
 } from '../src/contracts/index.ts';
 import { Harness } from '../src/control/harness.ts';
-import { applyDispositions, mergeTechnicalRound } from '../src/control/review.ts';
+import { applyDispositions, mergeTechnicalRound, technicalReview } from '../src/control/review.ts';
 import { statusText } from '../src/control/status.ts';
 import { technicalReviewOutputSchema } from '../src/agents/schemas.ts';
 import { valueReport } from '../src/report/compute.ts';
@@ -220,7 +220,7 @@ test('H14: reviewer переформулирует ту же находку — 
   assert.equal(r4.approved, true, r4.summary);
   assert.equal(r4.findings.length, 1);
   const f4 = r4.findings[0]!;
-  assert.equal(f4.status, 'accepted-limitation');
+  assert.equal(f4.status, 'withdrawn');
   assert.equal(f4.changedIn, 4);
   assert.deepEqual(f4.disposition, {
     decision: 'accepted-limitation',
@@ -301,7 +301,7 @@ test('H14: решение ведущего accepted-limitation по неэска
       { finding: a, decision: 'accepted-limitation', by: 'lead', reason: 'вне объёма плана' },
     ],
   });
-  assert.equal(r2.findings.find((f) => f.id === a)!.status, 'accepted-limitation');
+  assert.equal(r2.findings.find((f) => f.id === a)!.status, 'withdrawn');
   assert.equal(r2.findings.find((f) => f.id === a)!.disposition!.by, 'lead');
   assert.equal(r2.findings.find((f) => f.id === b)!.rounds, 2);
   // Решение по не открытой находке — отказ до вызова.
@@ -345,6 +345,23 @@ test('H14: решение ведущего accepted-limitation по неэска
     refused('INPUT_REQUIRED'),
   );
   assert.equal(requests.length, 6);
+  // Продолжение оператора не снимает предел раундов (maxAttempts × 2 = 6):
+  // отказ без вызова и без записи раунда.
+  await assert.rejects(
+    h.review({
+      kind: 'plan',
+      graph: revise(graph, 7),
+      author: 'claude',
+      dispositions: [{ ...proceed, reason: 'ещё раз' }],
+    }),
+    refused('ATTEMPTS_EXHAUSTED'),
+  );
+  assert.equal(requests.length, 6);
+  assert.equal(h.engine.reviews('plan', 'g').length, 6);
+  assert.equal(
+    h.engine.read((v) => v.locals('usage').length),
+    6,
+  );
   h.close();
 });
 
@@ -419,7 +436,7 @@ test('H14: mergeTechnicalRound — sameAs неизвестен — подска�
   // Принятое ограничение с новыми доказательствами открывается заново: счёт и
   // решение сбрасываются.
   const accepted = base(z, {
-    status: 'accepted-limitation',
+    status: 'withdrawn',
     disposition: { decision: 'accepted-limitation', by: 'lead', reason: 'ок', round: 2, rounds: 1 },
   });
   m = mergeTechnicalRound(
@@ -487,7 +504,7 @@ test('H14: запись прежней версии без rounds — счёт �
     4,
     3,
   );
-  assert.equal(decided[1]!.status, 'accepted-limitation');
+  assert.equal(decided[1]!.status, 'withdrawn');
   assert.equal(decided[1]!.disposition!.rounds, 3);
 });
 
@@ -499,7 +516,9 @@ test('H14: CLI — решения по находкам только у review-p
       encoding: 'utf8',
       env: { ...process.env, NODE_OPTIONS: '' },
     });
-    const json = JSON.parse(r.stdout) as { error: { code: string; message: string } };
+    const json = JSON.parse(r.stdout) as {
+      error: { code: string; message: string; issues: { path: unknown[] }[] };
+    };
     return { status: r.status, json };
   };
   const common = [
@@ -522,6 +541,8 @@ test('H14: CLI — решения по находкам только у review-p
   );
   assert.equal(r.status, 2);
   assert.equal(r.json.error.code, 'INVALID_INPUT');
+  assert.deepEqual(r.json.error.issues[0]!.path, ['disposition', 'finding']);
+  assert.equal(existsSync(join(dir, 'state')), false, 'отказ до открытия состояния');
   r = harness(
     'review-plan',
     ...common,
@@ -540,4 +561,153 @@ test('H14: CLI — решения по находкам только у review-p
   r = harness('status', '--state', join(dir, 'state'), '--accept-limitation', 'a'.repeat(64));
   assert.equal(r.status, 2);
   assert.match(r.json.error.message, /review-plan, review-contract/);
+});
+
+test('H14 r1: невалидный ответ не записывает решений; решение библиотеки проверяется схемой; находка прежней версии не растёт невалидными раундами', async () => {
+  const graph = graphOf({ a: [] });
+  const a = findingId('g', { rule: 'acceptance-measurable', message: 'A' });
+  const { h, requests } = open([
+    verdict(false, [finding('A')]),
+    // 2: ответ вне протокола (переход неизвестной находки), 3: вне схемы.
+    verdict(false, [], [{ id: 'f'.repeat(64), status: 'open', basis: 'нет такой' }]),
+    { approved: 'нет' },
+  ]);
+  await h.review({ kind: 'plan', graph, author: 'claude' });
+  const accept = {
+    finding: a,
+    decision: 'accepted-limitation' as const,
+    by: 'lead' as const,
+    reason: 'известное ограничение',
+  };
+  // Пустое основание через библиотеку — отказ до вызова, как в CLI.
+  await assert.rejects(
+    h.review({
+      kind: 'plan',
+      graph: revise(graph, 2),
+      author: 'claude',
+      dispositions: [{ ...accept, reason: '  ' }],
+    }),
+    refused('INVALID_INPUT'),
+  );
+  assert.equal(requests.length, 1);
+  for (const n of [2, 3]) {
+    const r = await h.review({
+      kind: 'plan',
+      graph: revise(graph, n),
+      author: 'claude',
+      dispositions: [accept],
+    });
+    assert.equal(r.approved, false);
+    const f = r.findings.find((x) => x.id === a)!;
+    assert.equal(f.status, 'open', 'невалидный ответ не записал решение');
+    assert.equal(f.disposition, undefined);
+    assert.equal(f.rounds, 1, 'невалидный раунд не растит счёт');
+  }
+  assert.equal(requests.length, 3);
+  h.close();
+
+  // Находка прежней версии (раунд хоста, без rounds): невалидные раунды
+  // замораживают выведенный счёт, а не растят его номером раунда.
+  const { requests: calls2, adapters } = scripted([
+    verdict(false, []),
+    verdict(false, []),
+    verdict(false, [], [{ id: a, status: 'open', basis: 'остаётся' }]),
+  ]);
+  const h2 = Harness.open({
+    policy: policyOf(),
+    stateDir: mkdtempSync(join(tmpdir(), 'harness-review-loop-')),
+    baseDir: process.cwd(),
+    adapters,
+  });
+  const call = (n: number) =>
+    technicalReview(h2.engine, policyOf(), adapters, {
+      kind: 'plan',
+      subject: 'g',
+      digest: String(n).repeat(64),
+      author: 'claude',
+      instructions: ['x'],
+      cwd: process.cwd(),
+      artifactDir: mkdtempSync(join(tmpdir(), 'harness-review-loop-art-')),
+      denied: [],
+      meta: { subjectId: 'g', subjectKind: 'group' },
+      history: {
+        rounds: 1,
+        findings: [{ severity: 'blocking', message: 'A', rule: 'acceptance-measurable' }],
+      },
+    });
+  assert.equal((await call(2)).findings[0]!.rounds, 1);
+  assert.equal((await call(3)).findings[0]!.rounds, 1);
+  const r4 = await call(4);
+  assert.equal(calls2.length, 3, 'эскалации нет: валидных раундов с находкой два');
+  assert.equal(r4.findings[0]!.rounds, 2);
+  h2.close();
+});
+
+test('H14 r1: повтор одного ID в ответе не обходит блокирующую серьёзность; другая находка на пути принятого ограничения не подавляется', () => {
+  const parse = (r: unknown) => reviewResultSchema.parse(r);
+  const x = findingId('g', { rule: 'acceptance-measurable', message: 'дефект' });
+  const prior = [
+    {
+      id: x,
+      severity: 'blocking' as const,
+      message: 'дефект',
+      rule: 'acceptance-measurable',
+      path: 'orders[0].acceptance',
+      line: null,
+      status: 'closed' as const,
+      openedIn: 1,
+      changedIn: 2,
+      rounds: 1,
+    },
+  ];
+  // Тот же текст дважды: блокирующая и заметка — одна запись, блокирующая.
+  let m = mergeTechnicalRound(
+    prior,
+    parse(verdict(false, [finding('дефект'), finding('дефект', { severity: 'note' })])),
+    3,
+    'g',
+  );
+  assert.equal(m.findings.length, 1);
+  assert.equal(m.findings[0]!.severity, 'blocking');
+  assert.deepEqual(new Set(m.findings.map((f) => f.id)).size, m.findings.length);
+  m = mergeTechnicalRound(
+    prior,
+    parse(verdict(false, [finding('дефект', { severity: 'note' }), finding('дефект')])),
+    3,
+    'g',
+  );
+  assert.equal(m.findings.length, 1);
+  assert.equal(m.findings[0]!.severity, 'blocking', 'порядок повторов не важен');
+  // Следующий раунд: одобрение при этой открытой блокирующей — ошибка.
+  const next = mergeTechnicalRound(
+    m.findings,
+    parse(verdict(true, [], [{ id: x, status: 'open', basis: 'остаётся' }])),
+    4,
+    'g',
+  );
+  assert.deepEqual(next.issues, ['approved при блокирующей находке']);
+
+  // Принятое ограничение на том же пути и правиле: другая находка — новая.
+  const accepted = [
+    {
+      ...prior[0]!,
+      status: 'withdrawn' as const,
+      disposition: {
+        decision: 'accepted-limitation' as const,
+        by: 'lead' as const,
+        reason: 'ок',
+        round: 2,
+        rounds: 1,
+      },
+    },
+  ];
+  m = mergeTechnicalRound(
+    accepted,
+    parse(verdict(true, [finding('совсем другой дефект')])),
+    3,
+    'g',
+  );
+  assert.equal(m.findings.length, 2, 'новая находка не поглощена принятым ограничением');
+  assert.deepEqual(m.issues, ['approved при блокирующей находке']);
+  assert.equal(m.findings[0]!.status, 'withdrawn');
 });

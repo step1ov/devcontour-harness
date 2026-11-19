@@ -176,19 +176,6 @@ export const storedReviewResultSchema = reviewResultSchema.extend({
 export const findingId = (subject: string, finding: { rule?: string | null; message: string }) =>
   digestOf({ subject, rule: finding.rule ?? null, message: finding.message });
 
-/**
- * Состояния находки плана или контракта. `accepted-limitation` — решение
- * ведущего или оператора: известное ограничение принято с основанием;
- * reviewer видит его и не поднимает снова без новых доказательств.
- */
-export const technicalFindingStatuses = [
-  'open',
-  'closed',
-  'withdrawn',
-  'accepted-limitation',
-] as const;
-export type TechnicalFindingStatus = (typeof technicalFindingStatuses)[number];
-
 /** Решение по находке плана или контракта до следующего раунда. */
 export const reviewDecisions = ['accepted-limitation', 'continue'] as const;
 export type ReviewDecision = (typeof reviewDecisions)[number];
@@ -201,7 +188,12 @@ export const reviewFindingSchema = z.strictObject({
   rule: z.string().max(200).optional(),
   path: z.string().max(500).nullable().optional(),
   line: z.number().int().positive().nullable().optional(),
-  status: z.enum(technicalFindingStatuses),
+  /**
+   * Принятое ограничение (решение ведущего или оператора) — `withdrawn` с
+   * `disposition.decision: 'accepted-limitation'`: перечень прежний, и
+   * читатель прежней версии видит снятую с основанием находку.
+   */
+  status: z.enum(['open', 'closed', 'withdrawn']),
   /** Раунд, в котором находка появилась, и раунд последнего изменения статуса. */
   openedIn: z.number().int().positive(),
   changedIn: z.number().int().positive(),

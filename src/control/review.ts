@@ -9,8 +9,10 @@ import {
   findingId,
   mcpEnvironment,
   issuePath,
+  acceptedLimitation,
   escalatedFindings,
   openRounds,
+  reviewDispositionSchema,
   reviewResultSchema,
   selectReviewer,
   escalationQuestion,
@@ -148,7 +150,21 @@ export async function technicalReview(
   }
   const round = before + 1;
   // Решения ведущего и оператора — до вызова: reviewer видит их результат.
-  const decided = applyDispositions(lastFindings, input.dispositions ?? [], round, before);
+  // Схема — на общей границе: библиотека получает те же правила, что CLI.
+  const dispositions = (input.dispositions ?? []).map((d, i) => {
+    const parsed = reviewDispositionSchema.safeParse(d);
+    if (!parsed.success)
+      throw new HarnessError(
+        'INVALID_INPUT',
+        'Решение по находке не прошло проверку схемы',
+        parsed.error.issues.map((x) => ({
+          path: ['dispositions', i, ...(x.path as (string | number)[])],
+          message: x.message,
+        })),
+      );
+    return parsed.data;
+  });
+  const decided = applyDispositions(lastFindings, dispositions, round, before);
   // Находка, открытая раундами подряд, — решение оператора, а не ещё один
   // оплаченный раунд: вызова нет, пока решения нет.
   const waiting = escalatedFindings(decided, before);
@@ -260,10 +276,18 @@ export async function technicalReview(
           .slice(0, 500),
       ];
   // Ответ применяется только целиком валидным (docs/review-protocol.md, §8):
-  // невалидный не закрывает прежних находок и не заводит новых — раунд
-  // записывается неодобренным с причинами; решения ведущего и оператора
-  // этого раунда сохраняются (они приняты до вызова).
-  const findings: ReviewRecord['findings'] = merged && !issues.length ? merged.findings : decided;
+  // невалидный не закрывает прежних находок, не заводит новых и не
+  // записывает решений ведущего и оператора — раунд записывается
+  // неодобренным с причинами, история остаётся прежней. Счёт раундов
+  // записи прежней версии замораживается: невалидный раунд его не растит.
+  const findings: ReviewRecord['findings'] =
+    merged && !issues.length
+      ? merged.findings
+      : lastFindings.map((f) =>
+          f.status === 'open' && f.rounds === undefined
+            ? { ...f, rounds: openRounds(f, before) }
+            : f,
+        );
   const notes = merged && !issues.length ? merged.notes : [];
   const record: ReviewRecord = {
     id: `RV-${kind}-${subject}-${round}`,
@@ -380,7 +404,7 @@ export function applyDispositions(
     return d.decision === 'accepted-limitation'
       ? {
           ...f,
-          status: 'accepted-limitation' as const,
+          status: 'withdrawn' as const,
           changedIn: round,
           basis: d.reason.slice(0, 4000),
           disposition,
@@ -403,7 +427,7 @@ function escalationError(
   );
   return new HarnessError(
     'INPUT_REQUIRED',
-    `${q.question} Варианты: ${q.options.map((o) => `${o.id} — ${o.label}`).join('; ')}. Ответ: ${q.answer}`,
+    `${q.question} Варианты: ${q.options.map((o) => `${o.id} — ${o.label}`).join('; ')}. Ответ: ${q.answer.replace('ID — в findings[]', 'ID — в issues[].path')}`,
     waiting.map((f) => ({
       path: ['findings', f.id],
       message: `открыта ${openRounds(f, lastRound)} раундов: ${f.message.slice(0, 300)}`,
@@ -421,9 +445,9 @@ const HISTORY_IN_PROMPT = 50;
  */
 function findingSections(findings: ReviewRecord['findings'], lastRound: number): string[] {
   const open = findings.filter((f) => f.status === 'open');
-  const accepted = findings.filter((f) => f.status === 'accepted-limitation');
+  const accepted = findings.filter(acceptedLimitation);
   const closed = findings
-    .filter((f) => f.status === 'closed' || f.status === 'withdrawn')
+    .filter((f) => (f.status === 'closed' || f.status === 'withdrawn') && !acceptedLimitation(f))
     .slice(-HISTORY_IN_PROMPT);
   const brief = (f: ReviewFinding) => ({
     id: f.id,
@@ -500,8 +524,15 @@ export function mergeTechnicalRound(
     const rule = r.rule?.trim() ? redact(r.rule).slice(0, 200) : undefined;
     const path = r.path?.trim() ? redact(r.path) : undefined;
     if (!rule || !path) return;
+    // Принятое ограничение подавляет повтор, поэтому сопоставляется только
+    // явно (`sameAs`) или тем же текстом: другая находка на том же пути и
+    // правиле — новая и блокирует как новая.
     const candidates = prior.filter(
-      (p) => !claimed.has(p.id) && p.rule === rule && (p.path ?? undefined) === path,
+      (p) =>
+        !claimed.has(p.id) &&
+        !acceptedLimitation(p) &&
+        p.rule === rule &&
+        (p.path ?? undefined) === path,
     );
     const open = candidates.filter((p) => p.status === 'open');
     const f = candidates.length === 1 ? candidates[0] : open.length === 1 ? open[0] : undefined;
@@ -509,7 +540,7 @@ export function mergeTechnicalRound(
   });
   // Принятое ограничение без новых доказательств остаётся принятым.
   const ignored = reported.map(
-    (r, i) => match[i]?.status === 'accepted-limitation' && !r.evidence?.trim(),
+    (r, i) => !!match[i] && acceptedLimitation(match[i]) && !r.evidence?.trim(),
   );
   const ignoredIds = match.filter((f, i) => f && ignored[i]).map((f) => f!.id);
   if (ignoredIds.length)
@@ -526,13 +557,6 @@ export function mergeTechnicalRound(
   for (const f of prior)
     if (f.status === 'open' && !named.has(f.id) && !claimed.has(f.id))
       issues.push('Не названо состояние прежней находки ' + f.id);
-  const blockingReported = reported.some((r, i) => r.severity === 'blocking' && !ignored[i]);
-  const stillBlocking = result.previous.some(
-    (t) => t.status === 'open' && !claimed.has(t.id) && byId.get(t.id)?.severity === 'blocking',
-  );
-  if (result.approved && (blockingReported || stillBlocking))
-    issues.push('approved при блокирующей находке');
-
   const transitions = new Map(result.previous.map((t) => [t.id, t]));
   const findings: ReviewRecord['findings'] = prior.map((f) => {
     const i = claimed.get(f.id);
@@ -545,7 +569,7 @@ export function mergeTechnicalRound(
         ? t?.status === 'open'
           ? t.basis
           : `поднята снова (${by})` + (t ? `; переход ${t.status} отклонён: ${t.basis}` : '')
-        : f.status === 'accepted-limitation'
+        : acceptedLimitation(f)
           ? `новые доказательства: ${r.evidence ?? ''}`
           : 'найдена снова';
       // Переход в открытую из иного состояния начинает счёт раундов и
@@ -574,11 +598,23 @@ export function mergeTechnicalRound(
       };
     return f;
   });
+  // Одна находка — одна запись: повтор того же ID в ответе сливается с ней,
+  // и блокирующая серьёзность любого повтора сохраняется.
+  const byResult = new Map(findings.map((f, i) => [f.id, i]));
   const added = new Map<string, ReviewFinding>();
   reported.forEach((r, i) => {
     if (match[i]) return;
     const id = findingId(subject, r);
-    if (added.has(id)) return;
+    const at = byResult.get(id);
+    const same = at !== undefined ? findings[at]! : added.get(id);
+    if (same) {
+      if (r.severity === 'blocking' && same.status === 'open' && same.severity !== 'blocking') {
+        const upgraded = { ...same, severity: 'blocking' as const };
+        if (at !== undefined) findings[at] = upgraded;
+        else added.set(id, upgraded);
+      }
+      return;
+    }
     added.set(id, {
       id,
       severity: r.severity,
@@ -592,7 +628,10 @@ export function mergeTechnicalRound(
       rounds: 1,
     });
   });
-  return { findings: [...findings, ...added.values()], issues, notes };
+  const merged = [...findings, ...added.values()];
+  if (result.approved && merged.some((f) => f.status === 'open' && f.severity === 'blocking'))
+    issues.push('approved при блокирующей находке');
+  return { findings: merged, issues, notes };
 }
 
 /** Предел раундов ревью плана и контракта по политике (`Harness.review`). */

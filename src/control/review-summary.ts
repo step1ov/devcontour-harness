@@ -11,7 +11,7 @@ import {
   type ReviewRecord,
   type ReviewSubjectSummary,
 } from '../contracts/index.ts';
-import { callRecords } from '../engine/usage.ts';
+import { callRecords, knownCost } from '../engine/usage.ts';
 import { reviewRoundCap } from './review.ts';
 
 /** Предел предметов в сводке ревью `status` и `explain`: последние по времени раунда. */
@@ -44,8 +44,8 @@ export function reviewSummaries(
     const key = `${c.stage === 'plan-review' ? 'plan' : 'contract'}\u0000${c.subjectId}`;
     const s = spend.get(key) ?? { calls: 0, knownUsd: 0, unknownCalls: 0 };
     s.calls += 1;
-    if (c.costUsd === null) s.unknownCalls += 1;
-    else s.knownUsd += c.costUsd;
+    if (knownCost(c)) s.knownUsd += c.costUsd ?? 0;
+    else s.unknownCalls += 1;
     spend.set(key, s);
   }
   const max = reviewRoundCap(policy);
@@ -76,7 +76,7 @@ export function reviewSubjectSummary(
           rounds: openRounds(f, r.round),
         }));
         const q = escalationQuestion(r.kind, r.subject, rows);
-        return { ...q, answer: q.answer.slice(0, 1000), findings: rows };
+        return { ...q, findings: rows };
       })()
     : undefined;
   const spend = { ...spent, knownUsd: Math.round(spent.knownUsd * 1e6) / 1e6 };

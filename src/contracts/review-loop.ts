@@ -50,13 +50,28 @@ export function escalatedFindings<F extends RoundedFinding & { severity: string 
   );
 }
 
+/**
+ * Принятое ограничение: находка снята решением ведущего или оператора
+ * (`withdrawn` с `disposition.decision: 'accepted-limitation'`), а не reviewer.
+ */
+export const acceptedLimitation = (f: {
+  status: string;
+  disposition?: { decision: string } | undefined;
+}) => f.status === 'withdrawn' && f.disposition?.decision === 'accepted-limitation';
+
 /** Открытые находки последнего раунда: блокирующие и заметки, принятые ограничения. */
-export function findingCounts(findings: readonly { status: string; severity: string }[]) {
+export function findingCounts(
+  findings: readonly {
+    status: string;
+    severity: string;
+    disposition?: { decision: string } | undefined;
+  }[],
+) {
   let blocking = 0;
   let notes = 0;
   let accepted = 0;
   for (const f of findings) {
-    if (f.status === 'accepted-limitation') accepted += 1;
+    if (acceptedLimitation(f)) accepted += 1;
     else if (f.status === 'open') {
       if (f.severity === 'blocking') blocking += 1;
       else notes += 1;
@@ -99,7 +114,6 @@ export function escalationQuestion(
   subject: string,
   findings: readonly { id: string; rounds: number }[],
 ) {
-  const ids = findings.map((f) => f.id).join(',');
   const command = kind === 'plan' ? 'review-plan' : 'review-contract';
   return {
     question: `Ревью ${kind === 'plan' ? 'плана' : 'контракта'} ${subject}: ${findings.length === 1 ? 'находка открыта' : 'находки открыты'} ${REVIEW_ESCALATION_ROUNDS}+ раундов подряд — reviewer поднимает ${findings.length === 1 ? 'её' : 'их'} снова. Следующий оплаченный раунд не запускается до решения.`,
@@ -122,6 +136,6 @@ export function escalationQuestion(
       },
     ],
     recommended: null,
-    answer: `${command} … --actor operator --reason "<основание>" и --accept-limitation ${ids} или --continue-review ${ids}`,
+    answer: `${command} … --actor operator --reason "<основание>" и --accept-limitation <id[,id…]> или --continue-review <id[,id…]>; ID — в findings[]`,
   };
 }

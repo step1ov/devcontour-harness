@@ -17,7 +17,7 @@ import type { EnvironmentCause, RunEvent, RunEventPayload } from '../contracts/e
 import type { ReviewRecord } from '../contracts/review.ts';
 import type { InputRequest } from '../contracts/input.ts';
 import { inputStateOf, type InputState } from '../contracts/input-state.ts';
-import { escalatedFindings, findingCounts } from '../contracts/review-loop.ts';
+import { acceptedLimitation, escalatedFindings, findingCounts } from '../contracts/review-loop.ts';
 import type { FailureBucket, ReportDist, ReportMeasure, ValueReport } from '../contracts/report.ts';
 import {
   formatDuration,
@@ -700,12 +700,18 @@ export function valueReport(
   }
 
   // D6: раунды ревью плана и контрактов; блокирующие находки — по ID, последний статус.
-  const pcFindings = new Map<string, string>();
+  // Последнее состояние и серьёзность находки: находка, ставшая заметкой,
+  // перестаёт считаться блокирующей.
+  const pcFindings = new Map<string, { status: string; severity: string }>();
   for (const r of windowReviews)
     for (const f of r.findings)
-      if (f.severity === 'blocking')
-        pcFindings.set(`${r.kind}\u0000${r.subject}\u0000${f.id}`, f.status);
-  const pcStatuses = [...pcFindings.values()];
+      pcFindings.set(`${r.kind}\u0000${r.subject}\u0000${f.id}`, {
+        status: acceptedLimitation(f) ? 'accepted' : f.status,
+        severity: f.severity,
+      });
+  const pcStatuses = [...pcFindings.values()]
+    .filter((f) => f.severity === 'blocking')
+    .map((f) => f.status);
   // Последний раунд окна каждого предмета: одобрение с открытыми заметками,
   // принятые ограничения и эскалация видны явно (docs/review-protocol.md, §8).
   const pcLast = new Map<string, ReviewRecord>();
@@ -741,7 +747,11 @@ export function valueReport(
         else withoutId += 1;
       }
   for (const r of windowReviews)
-    for (const f of r.findings) statusOf.set(`${r.kind}\u0000${r.subject}\u0000${f.id}`, f.status);
+    for (const f of r.findings)
+      // Принятое ограничение снял ведущий или оператор, а не reviewer: в
+      // прокси точности reviewer оно не входит.
+      if (acceptedLimitation(f)) statusOf.delete(`${r.kind}\u0000${r.subject}\u0000${f.id}`);
+      else statusOf.set(`${r.kind}\u0000${r.subject}\u0000${f.id}`, f.status);
   const statuses = [...statusOf.values()];
   const withStatus = statuses.filter((s) => s !== undefined);
 
@@ -1338,8 +1348,9 @@ export function valueReport(
         acceptedLimitations,
         escalated: pcEscalated,
         calls: pcCalls.length,
-        knownUsd: Math.round(sum(pcCalls.map((c) => c.costUsd ?? 0)) * 1e6) / 1e6,
-        unknownCostCalls: pcCalls.filter((c) => c.costUsd === null).length,
+        knownUsd:
+          Math.round(sum(pcCalls.filter(callCostKnown).map((c) => c.costUsd ?? 0)) * 1e6) / 1e6,
+        unknownCostCalls: pcCalls.filter((c) => !callCostKnown(c)).length,
       },
       withdrawn: measure(
         withStatus.filter((s) => s === 'withdrawn').length,

@@ -185,8 +185,6 @@ const ADDITIVE_ENUM_VALUES = new Set([
   'carry-stale',
   // Вид evidence неисполненного условного gate (`when.paths`).
   'not-applicable',
-  // Принятое ограничение — состояние находки плана или контракта (0.1.0-alpha.54).
-  'accepted-limitation',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
