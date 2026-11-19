@@ -63,20 +63,8 @@ export function outputRedactor(redact?: Redactor) {
   };
 }
 
-/**
- * Замаскировать, затем обрезать до `max` символов. Обратный порядок оставлял
- * бы префикс секрета, разрезанного границей обрезки: маска его уже не узнаёт.
- * `suffix` (уже замаскированный) сохраняется целиком, обрезается текст перед ним.
- */
-export function redactThenClip(
-  text: string,
-  max: number,
-  redact?: (text: string) => string,
-  suffix = '',
-) {
-  const masked = redact ? redact(text) : text;
-  return (masked.slice(0, Math.max(0, max - suffix.length)) + suffix).slice(0, max);
-}
+// Одна реализация с проекциями (браузерный модуль без node:*).
+export { redactThenClip } from '../projections/clip.ts';
 
 /**
  * Замаскировать все строки во вложенной структуре перед сохранением.

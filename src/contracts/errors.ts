@@ -26,6 +26,11 @@ export const errorCodes = {
   REVIEWER_MISSING: 'input',
   /** Ответ не помещается в предел транспорта даже одним элементом. */
   RESPONSE_TOO_LARGE: 'input',
+  /**
+   * Чтение без привязанной политики: каталога состояния (или его
+   * `binding.json`) нет, а `--policy` не передан (`harness view`).
+   */
+  POLICY_REQUIRED: 'input',
   APPROVAL_STALE: 'refused',
   APPROVAL_REQUIRED: 'refused',
   LEASE_STALE: 'refused',
@@ -76,6 +81,11 @@ export const errorCodes = {
    */
   CONNECTOR_VERSION_MISMATCH: 'infrastructure',
   STORAGE_FAILED: 'infrastructure',
+  /**
+   * Представление оператора больше байтового предела (`OPERATOR_VIEW_LIMITS.bytes`)
+   * при списках в своих пределах: частичный документ не выдаётся.
+   */
+  VIEW_TOO_LARGE: 'infrastructure',
   DELIVERY_FAILED: 'infrastructure',
   INTERNAL: 'infrastructure',
 } as const satisfies Record<string, ErrorClass>;

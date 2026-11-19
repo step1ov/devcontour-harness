@@ -53,6 +53,8 @@ import { hostGitArgs } from './environment/process.ts';
 import { FileContextSource, FileResultSink, FileWorkSource } from './connectors/files.ts';
 import { SqliteExecutionStore } from './storage/sqlite.ts';
 import { collectReportInput } from './control/report.ts';
+import { harnessView } from './control/operator-view.ts';
+import { OPERATOR_VIEW_VERSION } from './contracts/operator-view-limits.ts';
 import { reportTargets } from './control/target.ts';
 import { writeReportFile } from './control/report-file.ts';
 import { valueReport, reportHtml, reportMarkdown } from './report/index.ts';
@@ -327,6 +329,10 @@ const options = {
   base: { type: 'string' },
   head: { type: 'string' },
   role: { type: 'string' },
+  window: { type: 'string' },
+  bucket: { type: 'string' },
+  lang: { type: 'string' },
+  'view-version': { type: 'string' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -350,7 +356,11 @@ const flagOwners = {
   until: ['report'],
   'as-of': ['report'],
   format: ['report', 'handoff'],
-  'no-titles': ['report'],
+  'no-titles': ['report', 'view'],
+  window: ['view'],
+  bucket: ['view'],
+  lang: ['view'],
+  'view-version': ['view'],
   intent: ['handoff'],
   request: [
     'input-show',
@@ -1046,6 +1056,44 @@ async function run(
       // Ответ с проблемами — данные; exit по классу первой проблемы.
       const first = data.issues[0];
       return { command, data, ...(first ? { code: exitCodes[errorCodes[first.code]] } : {}) };
+    }
+    case 'view': {
+      // Окно и интервал истории: Nm, Nh или Nd.
+      const duration = (value: string | undefined, flag: string) => {
+        if (value === undefined) return undefined;
+        const m = /^(\d{1,4})(m|h|d)$/.exec(value);
+        if (!m)
+          throw new HarnessError(
+            'INVALID_INPUT',
+            `--${flag}: ожидается Nm, Nh или Nd (например 24h, 7d, 15m)`,
+            [{ path: ['--' + flag], message: value }],
+          );
+        return Number(m[1]) * { m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2] as 'm' | 'h' | 'd'];
+      };
+      if (v['view-version'] !== undefined && v['view-version'] !== String(OPERATOR_VIEW_VERSION))
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `--view-version: поддерживается ${OPERATOR_VIEW_VERSION}`,
+          [{ path: ['--view-version'], message: String(v['view-version']) }],
+        );
+      if (v.lang !== undefined && v.lang !== 'ru' && v.lang !== 'en')
+        throw new HarnessError('INVALID_INPUT', '--lang: ожидается ru или en', [
+          { path: ['--lang'], message: v.lang },
+        ]);
+      const windowMs = duration(v.window, 'window');
+      const bucketMs = duration(v.bucket, 'bucket');
+      return {
+        command,
+        data: harnessView({
+          stateDir: need('state'),
+          ...optional('policyPath', v.policy),
+          ...optional('workId', v.work),
+          ...(v['no-titles'] ? { titles: false } : {}),
+          ...optional('windowMs', windowMs),
+          ...optional('bucketMs', bucketMs),
+          ...(v.lang === 'ru' || v.lang === 'en' ? { lang: v.lang } : {}),
+        }),
+      };
     }
     case 'capabilities':
       return { command, data: harnessCapabilities() };

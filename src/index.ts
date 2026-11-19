@@ -301,6 +301,20 @@ export * from './projections/index.ts';
 export * from './report/index.ts';
 export { collectReportInput } from './control/report.ts';
 /**
+ * Представление оператора (`harness view`): загрузчик для node над открытым
+ * harness и операция по каталогу состояния. Чистая проекция
+ * (`operatorView`, `workDetailView`) — в `devcontour-harness/projections`.
+ */
+export {
+  collectOperatorViewInput,
+  defaultedPaths,
+  harnessView,
+  maskContextOf,
+  viewPolicy,
+  type HarnessViewOptions,
+  type ViewPolicy,
+} from './control/operator-view.ts';
+/**
  * Запись файла отчёта (`harness report --out`): во временный файл каталога
  * цели и rename, без записи сквозь symlink и жёсткие ссылки, вне каталога
  * состояния; новый файл — `0600`. Использует `node:fs`, поэтому только в

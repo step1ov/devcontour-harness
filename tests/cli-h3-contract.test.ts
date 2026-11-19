@@ -62,6 +62,8 @@ const laterCommands: readonly string[] = [
   'lean',
   // Обзор уже написанной ветки (0.1.0-alpha.54).
   'review-code',
+  // Представление оператора (0.1.0-alpha.55).
+  'view',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -196,6 +198,9 @@ const ADDITIVE_ENUM_VALUES = new Set([
   // Отказ окружения `harness smoke` и preflight; несовпадение версии backend коннектора.
   'LIFECYCLE_FAILED',
   'CONNECTOR_VERSION_MISMATCH',
+  // Представление оператора (`harness view`, 0.1.0-alpha.55).
+  'POLICY_REQUIRED',
+  'VIEW_TOO_LARGE',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
@@ -210,10 +215,10 @@ test('H3-01: capabilities объявлена в договоре CLI — без 
   assert.equal(root.operationCatalogSchema, operationCatalogSchema);
 });
 
-test('H3-01: ключи sharedOperations = sharedOperationNames — пять операций в порядке декларации', () => {
+test('H3-01: ключи sharedOperations = sharedOperationNames — операции в порядке декларации', () => {
   assert.deepEqual(
     [...sharedOperationNames],
-    ['init', 'explain', 'plan-request', 'plan-check', 'capabilities'],
+    ['init', 'explain', 'plan-request', 'plan-check', 'capabilities', 'view'],
   );
   assert.deepEqual(Object.keys(sharedOperations), [...sharedOperationNames]);
   for (const name of Object.keys(cliCommands))
@@ -298,6 +303,7 @@ test('H3-01: API каждой общей операции опубликован
     'plan-request': 'planRequestOf',
     'plan-check': 'planCheck',
     capabilities: 'harnessCapabilities',
+    view: 'harnessView',
   });
   const exports = root as unknown as Record<string, unknown>;
   for (const c of sharedOperationNames)

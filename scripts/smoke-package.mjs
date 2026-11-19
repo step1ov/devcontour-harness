@@ -175,13 +175,20 @@ for (const required of [
   'lib/handoff/index.js',
   'lib/contracts/handoff.js',
   'schemas/handoff-pack.schema.json',
+  // Представление оператора (`harness view`, 0.1.0-alpha.55).
+  'lib/projections/operator-view.js',
+  'lib/control/operator-view.js',
+  'lib/contracts/operator-view.js',
+  'schemas/operator-view.schema.json',
+  'schemas/work-detail-view.schema.json',
 ])
   if (!packed.files.some((f) => f.path === required)) fail('нет файла ' + required);
 
 // ./projections и ./report годятся для браузерного бандла: всё, что достижимо
 // от их index.js, лежит в своём каталоге или в разрешённых листах contracts и
 // не импортирует node:* (Q3, K1). `contracts/review-loop.js` — лист счёта
-// раундов ревью без импортов (0.1.0-alpha.54).
+// раундов ревью без импортов (0.1.0-alpha.54); `contracts/operator-view-limits.js`
+// — версия и пределы представления оператора без импортов (0.1.0-alpha.55).
 const libDir = join(unpacked, 'package', 'lib');
 const browserGraph = (entry) => {
   const files = new Set();
@@ -194,7 +201,8 @@ const browserGraph = (entry) => {
       rel !== 'contracts/errors.js' &&
       rel !== 'contracts/repair-policy.js' &&
       rel !== 'contracts/input-state.js' &&
-      rel !== 'contracts/review-loop.js'
+      rel !== 'contracts/review-loop.js' &&
+      rel !== 'contracts/operator-view-limits.js'
     )
       fail(`./${entry} достигает ` + rel);
     const text = readFileSync(file, 'utf8');
@@ -390,8 +398,11 @@ if (reportDiffer.length) throw new Error('корень и ./report: разные
 for (const name of ['valueReport', 'reportMarkdown', 'reportHtml'])
   if (typeof rp[name] !== 'function') throw new Error('нет экспорта ./report ' + name);
 if (typeof m.collectReportInput !== 'function') throw new Error('нет экспорта collectReportInput');
-for (const name of ['chainRoots', 'workProgress', 'nextAction', 'queueStop', 'explainStop', 'stopCodeOf', 'clipText', 'clipDeep'])
+for (const name of ['chainRoots', 'workProgress', 'nextAction', 'queueStop', 'explainStop', 'stopCodeOf', 'clipText', 'clipDeep', 'operatorView', 'workDetailView', 'viewToken', 'maskText', 'redactThenClip', 'sha256Hex'])
   if (typeof p[name] !== 'function') throw new Error('нет экспорта ./projections ' + name);
+if (p.OPERATOR_VIEW_LIMITS !== (await import('devcontour-harness/contracts')).OPERATOR_VIEW_LIMITS) throw new Error('OPERATOR_VIEW_LIMITS: проекция и /contracts — разные объекты');
+for (const name of ['harnessView', 'collectOperatorViewInput'])
+  if (typeof m[name] !== 'function') throw new Error('нет экспорта ' + name);
 for (const name of ['handoffPack', 'handoffMarkdown', 'statusOf', 'policySecrets', 'redactor', 'composeRedactors', 'writeReportFile'])
   if (typeof m[name] !== 'function') throw new Error('нет экспорта ' + name);
 if (typeof m.HANDOFF_MIN_BYTES !== 'number' || m.HANDOFF_MIN_BYTES !== (await import('devcontour-harness/contracts')).HANDOFF_MIN_BYTES) throw new Error('HANDOFF_MIN_BYTES');
@@ -541,7 +552,7 @@ if (
   catalog.maxInputBytes !== 100000 ||
   catalog.maxResultBytes !== 1048576 ||
   JSON.stringify(catalog.tools.map((t) => t.name)) !==
-    JSON.stringify(['init', 'explain', 'plan-request', 'plan-check', 'capabilities'])
+    JSON.stringify(['init', 'explain', 'plan-request', 'plan-check', 'capabilities', 'view'])
 )
   fail(
     'capabilities: ' +
