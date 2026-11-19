@@ -200,15 +200,55 @@ read only (no retries, model calls or state changes). For every stopped order
 it returns `code`, `cause`, `phase`, `actor`, `action`, `retryPlanned`,
 `message` and `evidence`.
 
-| `actor`      | `action`                                                                                           | Who acts                                                     |
-| ------------ | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `controller` | `wait`, `retry`                                                                                    | you: wait, or run `$H run` again                             |
-| `lead`       | `review-plan`, `diagnose-failure`, `replan-dependents`, `wait`                                     | you: fix the graph, policy or code by the evidence, then run |
-| `user`       | `fix-access`, `fix-environment`, `raise-budget`, `reset-attempts`, `user-decision`, `resume-queue` | hand it to the user with the message and evidence            |
-| `null`       | `none`                                                                                             | nothing to do                                                |
+| `actor`      | `action`                                                                                                           | Who acts                                                                     |
+| ------------ | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `controller` | `wait`, `retry`                                                                                                    | you: wait, or run `$H run` again                                             |
+| `lead`       | `review-plan`, `diagnose-failure`, `replan-dependents`, `wait`                                                     | you: fix the graph, policy or code by the evidence, then run                 |
+| `user`       | `fix-access`, `fix-environment`, `raise-budget`, `reset-attempts`, `user-decision`, `resume-queue`, `answer-input` | hand it to the user with the message and evidence                            |
+| `lead`       | `apply-input`                                                                                                      | you: `input-context`, `review-plan --context`, `input-target`, `input-apply` |
+| `null`       | `none`                                                                                                             | nothing to do                                                                |
 
 Only `user` actions go to the human: access, environment, budgets, attempt
-resets, goal decisions and resuming a paused queue are their decisions.
+resets, goal decisions, resuming a paused queue and answers to executor
+questions are their decisions.
+
+**Executor question (`INPUT_REQUIRED`, `actor: user`, `answer-input`).** The
+writer stopped and asks the human. Do not answer it yourself:
+
+1. `$H input-show --state <state> --request <id>` gives the question, the
+   options (id, label, consequence), the recommended option, the severity and
+   its rationale.
+2. Relay all of it to the human verbatim: the question text, every option with
+   its consequence, the writer's recommendation and the severity. Do not
+   shorten, reword, rank or pre-select an option.
+3. Record the human's answer in their own words:
+   `$H input-answer --state <state> --request <id> --text "<their words>"
+[--option <id they chose>] --actor operator --request-version <n>`.
+4. Then continue with the `lead` steps of `apply-input` above.
+
+Never close such a question with `--actor lead`: the harness refuses it with
+`OPERATOR_ANSWER_REQUIRED` (exit 3) unless the human has put
+`inputPolicy.leadAnswers {maxSeverity}` into the policy, and even then only up
+to that severity. Non-blocking requests to you (follow-ups, questions below
+the threshold) you answer yourself with `--actor lead`. Who answered is
+recorded and shown in `status`, `explain`, `handoff` and the report.
+
+**What is happening now.** `status` gives every order a `stage`: the current
+stage (`writer` — the writer is coding, `gates`, `review`, `integration`,
+`input` — waiting on an executor question, `queued`, `blocked`, `stopped`,
+`done`) with the time spent in it, the stages still ahead, what is needed from
+the operator (`needs`, same `actor`/`action` as `explain`) and the order's
+spend so far, plus one plain line (`stage.line` in Russian, `stage.lineEn` in
+English). When you start a long `run`, tell the operator that you work through
+the harness and give them the watch command to see it themselves:
+
+```sh
+$H status --state <state> --human --watch [--interval 10]
+```
+
+It refreshes until no attempt is running and no live controller will move an
+order, or until Ctrl-C. When asked what is going on, quote `stage.line`
+instead of describing or estimating it.
 
 **Progress and "how long" questions.** `status` (`works[].attemptSummary`)
 and `explain` (`attempts[]`) give one line per order, counted from the store

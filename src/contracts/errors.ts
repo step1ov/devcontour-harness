@@ -46,6 +46,12 @@ export const errorCodes = {
    * неприменённым ответом не активируется обходным согласованием.
    */
   INPUT_REQUIRED: 'refused',
+  /**
+   * Блокирующий вопрос исполнителя адресован человеку (`actor: user`): ответ
+   * ведущего (`--actor lead`) не принимается, пока политика явно не
+   * разрешила его до порога серьёзности (`inputPolicy.leadAnswers`).
+   */
+  OPERATOR_ANSWER_REQUIRED: 'refused',
   REVISION_CONFLICT: 'refused',
   CANCELLED: 'refused',
   NOT_FOUND: 'refused',

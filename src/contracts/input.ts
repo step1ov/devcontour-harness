@@ -122,9 +122,51 @@ export type RecordedAssumption = z.infer<typeof recordedAssumptionSchema>;
 export const inputPolicySchema = z.strictObject({
   threshold: z.number().int().min(1).max(INPUT_AUTONOMOUS).default(7),
   criticalPaths: z.array(relativePathSchema).max(50).default([]),
+  /**
+   * Явное согласие человека, что ведущий агент отвечает на блокирующие
+   * вопросы исполнителя сам (`input-answer --actor lead`) — только с
+   * действующей серьёзностью не выше `maxSeverity`. Нет поля — блокирующий
+   * вопрос адресован человеку, ответ ведущего отклоняется
+   * (`OPERATOR_ANSWER_REQUIRED`). Критический вопрос (минимумы `affects` и
+   * `criticalPaths`) поднят до 10: его ведущий отвечает только при
+   * `maxSeverity: 10`. Действует текущая политика процесса, а не
+   * закреплённая в попытке: в попытку и в основание вопроса поле не пишется.
+   */
+  leadAnswers: z.strictObject({ maxSeverity: severitySchema }).optional(),
 });
 export type InputPolicy = z.infer<typeof inputPolicySchema>;
 export const DEFAULT_INPUT_POLICY: InputPolicy = { threshold: 7, criticalPaths: [] };
+
+/**
+ * Политика вопросов в объёме, который закрепляется в попытке и основании
+ * вопроса: порог и критические пути. Разрешение ответов ведущего
+ * (`leadAnswers`) — правило приёма ответа, а не исполнения попытки: оно не
+ * закрепляется, и прежние версии читают записи без нового поля.
+ */
+export const pinnedInputPolicy = (p: InputPolicy): InputPolicy => ({
+  threshold: p.threshold,
+  criticalPaths: [...p.criticalPaths],
+});
+
+/**
+ * Кому адресован запрос: блокирующий вопрос (`kind: question`,
+ * `blocking`) — человеку, неблокирующие запросы (follow-up, вопрос ниже
+ * порога) — ведущему.
+ */
+export const forOperator = (r: Pick<InputRequest, 'kind' | 'blocking'>) =>
+  r.kind === 'question' && r.blocking;
+
+/**
+ * Может ли ведущий агент ответить на запрос: неблокирующий — всегда;
+ * блокирующий — только когда политика разрешила (`leadAnswers`) и действующая
+ * серьёзность не выше порога.
+ */
+export const leadMayAnswer = (
+  r: Pick<InputRequest, 'kind' | 'blocking' | 'effectiveSeverity'>,
+  policy: Pick<InputPolicy, 'leadAnswers'>,
+) =>
+  !forOperator(r) ||
+  (policy.leadAnswers !== undefined && r.effectiveSeverity <= policy.leadAnswers.maxSeverity);
 
 /** Кто ответил или закрыл запрос: оператор, ведущий агент или хост от их имени. */
 export const inputActorSchema = z.strictObject({

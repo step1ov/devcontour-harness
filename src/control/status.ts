@@ -3,17 +3,21 @@ import {
   STATE_VERSION,
   type statusDataSchema,
   type AttemptState,
+  type CallRecord,
   type ExecutionPolicy,
   type ExecutionView,
   type WorkState,
   type WorkflowJob,
 } from '../contracts/index.ts';
 import { attemptSummaryLine, attemptSummaryOf, type AttemptBudget } from '../report/compute.ts';
-import { budgetOverview } from '../engine/budget.ts';
+import { budgetOverview, recordWorkOf } from '../engine/budget.ts';
+import { callRecords } from '../engine/usage.ts';
 import type { Engine } from '../engine/engine.ts';
 import { requestsOf } from '../engine/input-requests.ts';
 import { MAX_NEUTRAL_FAILURES } from '../contracts/repair-policy.ts';
-import { nextRunControl, repairJobOf, type StopSource } from '../explain/state.ts';
+import { nextRunControl, repairJobOf, stopInputsOf, type StopSource } from '../explain/state.ts';
+import { explainStop } from '../projections/stop.ts';
+import { workStageOf, type StageNeeds } from './stage.ts';
 import {
   CLIP_DIAGNOSTIC,
   attemptView,
@@ -110,9 +114,24 @@ export function statusOf(
   options: { detail?: boolean } = {},
 ) {
   const { engine } = source;
+  // Что нужно от кого — диагнозом `explain` (его отдельное чтение), если
+  // источник передал задания графов; без них — только по вопросу исполнителя.
+  const needsOf = stageNeedsOf(source);
   // Задания и попытки — внутри того же чтения: один снимок хранилища.
   return engine.read((v) => {
     const summaryOf = attemptSummaries(source, v);
+    const now = engine.clock();
+    const attemptsOf = attemptsByWork(v);
+    // Собственные вызовы поручения (без вызовов о группе) — одним проходом.
+    const workOf = recordWorkOf(v);
+    const recordsByWork = new Map<string, CallRecord[]>();
+    for (const r of callRecords(v)) {
+      const id = r.workIds ? undefined : workOf(r);
+      if (!id) continue;
+      const list = recordsByWork.get(id);
+      if (list) list.push(r);
+      else recordsByWork.set(id, [r]);
+    }
     return {
       stateVersion: STATE_VERSION,
       control: v.control(),
@@ -140,19 +159,62 @@ export function statusOf(
         // Вопрос исполнителя: ID, состояние, версия и серьёзность, без текста;
         // неблокирующие запросы ведущему — числом.
         // У итоговой работы вопрос — история: статус его не показывает.
-        ...((view) => ({
-          ...(view.input && w.status !== 'done' && w.status !== 'cancelled'
-            ? { input: view.input }
-            : {}),
-          ...(view.followUps ? { followUps: view.followUps } : {}),
-        }))(workInputOf(requestsOf(v, w))),
-        blockers: engine.blockers(w, v),
-        attemptSummary: summaryOf(w),
+        ...((view, blockers) => {
+          const input =
+            view.input && w.status !== 'done' && w.status !== 'cancelled' ? view.input : undefined;
+          const active = w.activeRunId ? v.attempt(w.activeRunId) : undefined;
+          return {
+            ...(input ? { input } : {}),
+            ...(view.followUps ? { followUps: view.followUps } : {}),
+            blockers,
+            attemptSummary: summaryOf(w),
+            stage: workStageOf({
+              work: w,
+              attempts: attemptsOf(w.id),
+              ...(active ? { active } : {}),
+              ...(input ? { inputState: input.state } : {}),
+              blocked: blockers.length > 0,
+              records: recordsByWork.get(w.id) ?? [],
+              ...((needs) => (needs ? { needs } : {}))(
+                needsOf?.(w) ??
+                  (input?.state === 'awaiting-answer'
+                    ? { actor: 'user' as const, action: 'answer-input' as const }
+                    : undefined),
+              ),
+              now,
+            }),
+          };
+        })(workInputOf(requestsOf(v, w)), engine.blockers(w, v)),
       })),
       ...((budgets) => (budgets ? { budgets } : {}))(budgetOverview(engine.budgetContext(), v)),
       ...(options.detail ? { detail: statusDetail(source, v, graphId) } : {}),
     };
   });
+}
+
+/**
+ * Что нужно по каждому поручению — `actor` и `action` диагноза `explain`
+ * (`stopInputsOf` → `explainStop`) одним чтением; без заданий графов —
+ * undefined. Принятое поручение и отменённое без ждущих в диагнозы не входят:
+ * им ничего не нужно; идущему без остановки — ход controller.
+ */
+function stageNeedsOf(source: StatusSource): ((w: WorkState) => StageNeeds) | undefined {
+  const workflows = source.workflows;
+  if (!workflows) return undefined;
+  const byWork = new Map<string, StageNeeds>();
+  for (const input of stopInputsOf(
+    { engine: source.engine, policy: source.policy, workflows },
+    { maxAttempts: source.policy.maxAttempts, repairBudget: source.policy.repairBudget },
+  ))
+    if (input.kind === 'work' && !byWork.has(input.work.id)) {
+      const d = explainStop(input);
+      byWork.set(input.work.id, { actor: d.actor, action: d.action });
+    }
+  return (w) =>
+    byWork.get(w.id) ??
+    (w.status === 'done' || w.status === 'cancelled'
+      ? { actor: null, action: 'none' }
+      : { actor: 'controller', action: 'wait' });
 }
 
 function statusDetail(source: StatusSource, v: ExecutionView, graphId?: string) {
@@ -217,9 +279,13 @@ function statusDetail(source: StatusSource, v: ExecutionView, graphId?: string) 
   };
 }
 
+const answeredBy = { operator: 'оператор', lead: 'ведущий', host: 'хост' } as const;
+
 /**
  * Текст `status --human`: состояние выдачи и строка на поручение — статус и
- * сводка попыток (`attemptSummaryLine`); блокировки — кодами с отступом.
+ * сводка попыток (`attemptSummaryLine`); с отступом — этап простыми словами
+ * (`works[].stage.line`), вопрос исполнителя с тем, кто ответил, и
+ * блокировки кодами.
  */
 export function statusText(data: z.output<typeof statusDataSchema>): string {
   const c = data.control;
@@ -229,7 +295,53 @@ export function statusText(data: z.output<typeof statusDataSchema>): string {
   if (!data.works.length) out.push('Поручений нет.');
   for (const w of data.works) {
     out.push(`${w.id} [${w.status}]${w.attemptSummary ? ': ' + w.attemptSummary.line : ''}`);
+    if (w.stage) out.push(`  сейчас: ${w.stage.line.slice(w.id.length + 2)}`);
+    if (w.input)
+      out.push(
+        `  вопрос ${w.input.requestId} [${w.input.state}, серьёзность ${w.input.severity}]` +
+          (w.input.answeredBy
+            ? `: ответил ${answeredBy[w.input.answeredBy]}`
+            : w.input.state === 'awaiting-answer'
+              ? ': ждёт ответа человека (input-show, input-answer --actor operator)'
+              : ''),
+      );
     if (w.blockers.length) out.push(`  блокировки: ${w.blockers.map((b) => b.code).join(', ')}`);
   }
   return out.join('\n') + '\n';
+}
+
+/**
+ * Доска «успокоилась» для `status --human --watch`: ничего не сдвинется без
+ * человека или ведущего. Не успокоилась, пока идёт попытка с действующим
+ * владением (по `detail.attempts[].lease.stale`; без `detail` — любая
+ * активная) или живой controller (`controller.leaseUntil` в будущем) сдвинет
+ * открытое поручение, которому ничего не нужно от человека или ведущего
+ * (`stage.needs.actor` controller или неизвестно). Попытка умершего владельца
+ * без живого controller сама не продолжится.
+ */
+export function statusSettled(data: z.output<typeof statusDataSchema>, now: number): boolean {
+  const live = !!data.controller && data.controller.leaseUntil > now;
+  const stale = new Set(
+    (data.detail?.attempts ?? []).filter((a) => a.lease.stale).map((a) => a.runId),
+  );
+  if (data.works.some((w) => w.activeRunId && (live || !stale.has(w.activeRunId)))) return false;
+  if (!live) return true;
+  return !data.works.some(
+    (w) =>
+      w.status !== 'done' &&
+      w.status !== 'cancelled' &&
+      (w.stage?.needs?.actor ?? 'controller') === 'controller',
+  );
+}
+
+/** Кадр `status --human --watch`: время снимка, период, текст `statusText`. */
+export function statusFrame(
+  data: z.output<typeof statusDataSchema>,
+  at: number,
+  intervalMs: number,
+): string {
+  return (
+    `harness status — ${new Date(at).toISOString()} (обновление каждые ${Math.round(intervalMs / 1000)} с; Ctrl-C — выход)\n` +
+    statusText(data)
+  );
 }

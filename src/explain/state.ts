@@ -324,7 +324,12 @@ export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInpu
         state: inputStateOf(question)!,
         question: question.question.question,
         options: question.question.options.map((o) => o.id),
-        ...(answer ? { answer: { revision: answer.revision, digest: answer.digest } } : {}),
+        ...(question.question.recommended !== null
+          ? { recommended: question.question.recommended }
+          : {}),
+        ...(answer
+          ? { answer: { revision: answer.revision, digest: answer.digest, by: answer.actor.kind } }
+          : {}),
         ...(refusal.length ? { refusal: refusal.join('; ') } : {}),
         ...(own ? { assumptions: own } : {}),
         ...(followUps ? { followUps } : {}),

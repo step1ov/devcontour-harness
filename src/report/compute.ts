@@ -203,6 +203,8 @@ function inputCounts(
   // перенесённый ответ, устаревший до выдачи (`carry-stale`), держит работу —
   // он ждёт решения, а не закрыт.
   const state = (s: InputState) => questions.filter((r) => inputStateOf(r) === s).length;
+  const by = (kind: InputRequest['answers'][number]['actor']['kind']) =>
+    questions.filter((r) => r.answers.at(-1)?.actor.kind === kind).length;
   return {
     questions: questions.length,
     awaitingAnswer: state('awaiting-answer'),
@@ -216,6 +218,11 @@ function inputCounts(
     declined: inside.filter((r) => r.kind === 'question' && !r.blocking).length,
     followUps: inside.filter((r) => r.kind === 'follow-up').length,
     assumptions: attempts.reduce((n, a) => n + (a.assumptions?.length ?? 0), 0),
+    answeredBy: {
+      operator: by('operator'),
+      lead: by('lead'),
+      host: by('host'),
+    },
   };
 }
 

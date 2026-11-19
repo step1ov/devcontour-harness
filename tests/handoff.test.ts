@@ -1194,7 +1194,19 @@ test('handoff: узкий источник хоста (не Harness) даёт т
       statusOf(source, undefined, { detail: true }),
       h.status(undefined, { detail: true }),
     );
-    assert.deepEqual(statusOf({ engine, policy }), h.status());
+    // Без заданий графов `needs` этапа неизвестно (диагноз explain требует
+    // заданий): остальное — то же, этапы — те же.
+    const narrow = statusOf({ engine, policy });
+    const full = h.status();
+    const strip = (s: typeof full) => ({
+      ...s,
+      works: s.works.map(({ stage: _stage, ...w }) => (void _stage, w)),
+    });
+    assert.deepEqual(strip(narrow), strip(full));
+    assert.deepEqual(
+      narrow.works.map((w) => [w.stage.name, w.stage.next, w.stage.spend]),
+      full.works.map((w) => [w.stage.name, w.stage.next, w.stage.spend]),
+    );
   } finally {
     h.close();
   }

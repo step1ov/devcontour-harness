@@ -345,6 +345,8 @@ export const handoffPackSchema = z.strictObject({
             revision: z.number().int().positive(),
             digest: digestSchema,
             excerpt: clipped(HANDOFF_LIMITS.answerChars),
+            /** Кто записал ответ: оператор (человек), ведущий или хост. Нет поля — пакет прежней версии. */
+            by: z.enum(['operator', 'lead', 'host']).optional(),
           })
           .optional(),
         origin: z.strictObject({

@@ -2,22 +2,33 @@
 // explain, handoff и браузер хоста.
 
 import { inputStateOf, type InputState, type RequestLike } from '../contracts/input-state.ts';
+import type { InputRequest } from '../contracts/input.ts';
 
 export { inputStates, inputStateOf, type InputState } from '../contracts/input-state.ts';
 
-/** Сводка вопроса поручения для статуса: только ID, состояние, версия и серьёзность — без текста. */
+/** Кто ответил: оператор (человек), ведущий агент или хост от их имени. */
+export type AnswerActor = InputRequest['answers'][number]['actor']['kind'];
+
+/**
+ * Сводка вопроса поручения для статуса: только ID, состояние, версия и
+ * серьёзность — без текста; `answeredBy` — кто записал последний ответ (нет
+ * поля — ответа нет).
+ */
 export interface WorkInputView {
   requestId: string;
   state: InputState;
   version: number;
   severity: number;
+  answeredBy?: AnswerActor;
 }
 
 /**
  * Последний незакрытый вопрос поручения (`kind: question`) — тот, о котором
  * говорит статус; неблокирующие запросы считаются отдельно (`followUps`).
  */
-export function workInputOf(requests: readonly RequestLike[]): {
+export function workInputOf(
+  requests: readonly (RequestLike & Partial<Pick<InputRequest, 'answers'>>)[],
+): {
   input?: WorkInputView;
   followUps: number;
 } {
@@ -28,6 +39,7 @@ export function workInputOf(requests: readonly RequestLike[]): {
   const followUps = requests.filter(
     (r) => r.kind === 'follow-up' && r.lifecycle === 'pending',
   ).length;
+  const by = question?.answers?.at(-1)?.actor.kind;
   return {
     ...(question
       ? {
@@ -36,6 +48,7 @@ export function workInputOf(requests: readonly RequestLike[]): {
             state: inputStateOf(question)!,
             version: question.version,
             severity: question.effectiveSeverity,
+            ...(by ? { answeredBy: by } : {}),
           },
         }
       : {}),
