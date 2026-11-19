@@ -7,8 +7,11 @@ import { TransportError } from '../src/integrations/connector/transport.ts';
 import {
   classifyCode,
   createTransport,
+  RELAY_V1_CONTRACT_VERSION,
   WORK_HISTORY_CAPABILITY,
 } from '../src/integrations/relay-v1/index.ts';
+import { checkIdentity } from '../src/integrations/connector/snapshot.ts';
+import type { ConnectorConfig } from '../src/integrations/connector/config.ts';
 
 /*
  * R01 transport tests: поддельный HTTP-сервер (node:http) для точных отказов.
@@ -139,6 +142,38 @@ void describe('relay-v1 transport (fake HTTP)', () => {
     );
     const t = createTransport({ endpoint: 'http://127.0.0.1:1/api/v1/', projectId: P, actor: 'a' });
     assert.equal(t.provider, 'relay-v1-http');
+  });
+
+  it('H1: другой contractVersion сервера — CONNECTOR_VERSION_MISMATCH до чтения проекта', async () => {
+    const srv = await fake((r) =>
+      r.path === '/api/v1/health'
+        ? ok({ status: 'ok', stage: 'ready', contractVersion: RELAY_V1_CONTRACT_VERSION + 1 })
+        : undefined,
+    );
+    try {
+      const t = transportFor(srv.url);
+      await rejects(t.identity(), 'unsupported', (e) => {
+        assert.equal(e.details.code, 'CONNECTOR_VERSION_MISMATCH');
+        assert.equal(e.details.mutation, false);
+        assert.match(e.message, /contractVersion 2, транспорт проверен с 1/);
+      });
+      assert.deepEqual(
+        srv.seen.map((s) => `${s.method} ${s.path}`),
+        ['GET /api/v1/health'],
+        'контекст проекта не читается',
+      );
+      // Ядро коннектора отвечает именованным отказом, а не общим NOT_READY.
+      await assert.rejects(
+        checkIdentity(t, { provider: 'relay-v1-http', projectId: P } as ConnectorConfig),
+        (e: unknown) =>
+          e instanceof HarnessError &&
+          e.code === 'CONNECTOR_VERSION_MISMATCH' &&
+          e.class === 'infrastructure' &&
+          /compatibility-versions\.md/.test(e.message),
+      );
+    } finally {
+      await srv.close();
+    }
   });
 
   it('R01: identity is read-only, project-scoped and returns declared capabilities', async () => {

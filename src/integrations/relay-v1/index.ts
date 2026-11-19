@@ -166,6 +166,13 @@ const documentDetailSchema = entitySummarySchema.extend({
 });
 
 const healthSchema = z.object({ status: z.string(), contractVersion: z.number().int() });
+/**
+ * Версия договора REST Relay v1 (`GET /api/v1/health` → `contractVersion`),
+ * с которой проверен этот транспорт. Другая версия — отказ
+ * `CONNECTOR_VERSION_MISMATCH` до чтения проекта и любых мутаций: поля и
+ * коды отказов другой версии транспорт не знает.
+ */
+export const RELAY_V1_CONTRACT_VERSION = 1;
 const contextSchema = z.object({
   projectId: z.string().min(1),
   capabilities: z.array(z.string()).max(MAX_ITEMS).optional(),
@@ -586,6 +593,13 @@ export class RelayV1Transport implements RelayTransport {
       root: true,
       signal,
     });
+    if (health.contractVersion !== RELAY_V1_CONTRACT_VERSION)
+      throw this.fail(
+        'unsupported',
+        'identity.health',
+        `сервер сообщает contractVersion ${health.contractVersion}, транспорт проверен с ${RELAY_V1_CONTRACT_VERSION}`,
+        { code: 'CONNECTOR_VERSION_MISMATCH', mutation: false },
+      );
     const ctx = await this.call('identity.context', contextSchema, {
       method: 'GET',
       path: '/context',
