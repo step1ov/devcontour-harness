@@ -590,6 +590,123 @@ test('P1-d: status, explain, result и report называют, что пров�
   assertNoBareChecked(text, 'explain --human');
 });
 
+test('P1-d: ID gate не по форме ID — постоянная метка; отказ запуска — только по тексту controller в начале итога', () => {
+  const attempt = {
+    id: 'r1',
+    status: 'failed',
+    failureKind: 'gate',
+    reviewer: 'codex',
+    requiredGates: ['unit'],
+    evidence: [
+      record({ gate: 'npm run private-gate --token=sk-secret', passed: false }),
+      record({
+        gate: 'unit',
+        passed: false,
+        summary: 'код выхода 1: песочница ОС не запустила команду',
+      }),
+      record({
+        gate: 'lint',
+        passed: false,
+        summary: 'песочница ОС не запустила команду проверки',
+      }),
+    ],
+  } as unknown as AttemptState;
+  const rows = verificationRows(attempt);
+  assert.deepEqual(
+    rows.map((r) => [r.gate, r.result, r.how]),
+    [
+      ['unnamed', 'failed', 'executed-by-harness'],
+      ['unit', 'failed', 'executed-by-harness'],
+      ['lint', 'failed', 'not-run'],
+    ],
+  );
+  const text = JSON.stringify({ rows, lines: verificationLines(rows) });
+  assert.ok(!text.includes('sk-secret') && !text.includes('npm run'), text);
+  const plain = failurePlainOf(attempt, 'defect');
+  assert.equal(plain.ru, 'дефект — не прошли проверки: unnamed, unit, lint');
+  assert.ok(!plain.ru.includes('sk-secret'));
+});
+
+test('P1-d: сводка по фазам — кандидат прошёл, на интеграции не запустилась; неприменим на кандидате и не запускался на интеграции', () => {
+  const rows = verificationRows({
+    id: 'r1',
+    status: 'failed',
+    reviewer: 'codex',
+    candidateSha: sha('a'),
+    integrationSha: sha('b'),
+    requiredGates: ['unit', 'e2e'],
+    evidence: [
+      record({ gate: 'unit' }),
+      record({ gate: 'e2e', kind: 'not-applicable', passed: false }),
+      record({
+        gate: 'unit',
+        phase: 'integration',
+        sha: sha('b'),
+        passed: false,
+        summary: 'песочница ОС не запустила команду проверки',
+      }),
+    ],
+  } as unknown as AttemptState);
+  assert.equal(
+    verificationLines(rows).line,
+    'Проверено harness (запущено): unit; на интеграции не запустились — отказ среды: unit; ревью: не проводилось; не проверялось: e2e (не запускался)',
+  );
+  // Прежний отказ gate на другом SHA кандидата — не причина последнего отказа.
+  const plain = failurePlainOf(
+    {
+      id: 'r2',
+      status: 'failed',
+      failureKind: 'gate',
+      candidateSha: sha('c'),
+      evidence: [
+        record({ gate: 'ui', passed: false, sha: sha('b') }),
+        record({ gate: 'ui', kind: 'not-applicable', passed: false, sha: sha('c') }),
+        record({ gate: 'unit', passed: false, sha: sha('c') }),
+      ],
+    } as unknown as AttemptState,
+    'defect',
+  );
+  assert.equal(plain.ru, 'дефект — не прошли проверки: unit');
+});
+
+test('P1-c: итог — блокировки ничего не требуют; зависимость с автоматическим повтором — ход harness; очередь ещё не запускали', () => {
+  const env = engineOf(policyOf((p) => (p.maxAttempts = 1)));
+  ready(env.engine, graphOf({ w: [] }));
+  accept(env.engine, env.engine.claim('c1')!);
+  const done = cliDataSchemas.status.parse(statusOf(sourceOf(env.engine))).works[0]!;
+  assert.equal(done.status, 'done');
+  assert.ok(
+    done.blockers.some((b) => b.code === 'ATTEMPTS_EXHAUSTED'),
+    'код остаётся',
+  );
+  for (const b of done.blockers) assert.deepEqual([b.plain, b.actor], ['уже принято', null]);
+  assert.doesNotMatch(
+    statusText(cliDataSchemas.status.parse(statusOf(sourceOf(env.engine)))),
+    /сброс/,
+  );
+
+  const ctx: BlockerContext = {
+    control: { paused: false },
+    approvalMode: 'agent',
+    work: { order: { dependsOn: ['a'] } },
+    statusOf: () => 'failed',
+    needsOf: () => ({ actor: 'controller', action: 'retry' }),
+  };
+  assert.deepEqual(plainBlocker({ code: 'NOT_READY', message: 'Ждёт a' }, ctx), {
+    plain: 'ждёт зависимости a — она остановлена, дальше: повтор',
+    plainEn: 'waiting for dependency a — it stopped, next: retry',
+    actor: 'controller',
+  });
+  const initial = plainBlocker(
+    { code: 'PAUSED', message: 'Очередь на паузе: operator' },
+    { control: { paused: true }, approvalMode: 'agent' },
+  );
+  assert.deepEqual(
+    [initial.plain, initial.actor],
+    ['очередь ещё не запускали — снимет следующий запуск', 'controller'],
+  );
+});
+
 test('P1-d: тексты для человека — словари этапов, блокировок и отказов без голого «проверено»/"checked"', () => {
   const texts: string[] = [];
   for (const t of Object.values(blockerCodeText)) texts.push(t.ru, t.en);

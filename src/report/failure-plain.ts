@@ -5,6 +5,7 @@
 
 import type { AttemptState, FailureKind } from '../contracts/execution.ts';
 import type { FailureBucket } from '../contracts/report.ts';
+import { verificationRows } from './verification.ts';
 
 export interface PlainText {
   ru: string;
@@ -67,12 +68,15 @@ const clip = (s: string) => (s.length > PLAIN_MAX ? s.slice(0, PLAIN_MAX - 1) + 
 const busyPort = (error: string | undefined) =>
   error ? /Порт (\d{1,5})[^.;\n]*занят/.exec(error)?.[1] : undefined;
 
-/** Упавшие gates попытки: последняя запись каждого gate не прошла. */
+/**
+ * Упавшие gates попытки — по строкам проверки (`verificationRows`): записи
+ * текущего SHA фазы, последняя запись gate в фазе; ID — только допустимые.
+ */
 function failingGates(a: AttemptState): string[] {
-  const last = new Map<string, boolean>();
-  for (const e of a.evidence)
-    if (e.kind === 'test') last.set(e.consumer ? `${e.gate}@${e.consumer}` : e.gate, e.passed);
-  return [...last].filter(([, ok]) => !ok).map(([g]) => g);
+  const failed = verificationRows(a)
+    .filter((r) => r.kind === 'gate' && r.result === 'failed')
+    .map((r) => (r.consumer ? `${r.gate}@${r.consumer}` : r.gate));
+  return [...new Set(failed)];
 }
 
 /**

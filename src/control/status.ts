@@ -183,8 +183,10 @@ export function statusOf(
           const plainContext = {
             control: v.control(),
             approvalMode: source.policy.approvalMode,
+            status: w.status,
             work: w,
             statusOf: (id: string) => v.work(id)?.status,
+            needsOf: (id: string) => ((d) => (d ? needsOf?.(d) : undefined))(v.work(id)),
             ...(needs ? { needs } : {}),
           };
           const blockers = raw.map((b) => ({ ...b, ...plainBlocker(b, plainContext) }));

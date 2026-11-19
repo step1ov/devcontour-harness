@@ -113,6 +113,12 @@ const pauseText = (control: ControlState): Text => {
         en: 'queue paused: a new policy is being applied',
         actor: 'controller',
       };
+    case undefined:
+      return {
+        ru: 'очередь ещё не запускали — снимет следующий запуск',
+        en: 'the queue has not been started yet — the next run lifts it',
+        actor: 'controller',
+      };
     default:
       return {
         ru: 'пауза очереди: поставил оператор — снимите паузу, когда готовы',
@@ -164,12 +170,16 @@ const clip = (s: string) => (s.length > 300 ? s.slice(0, 299) + '…' : s);
 export interface BlockerContext {
   control: ControlState;
   approvalMode: ExecutionPolicy['approvalMode'];
+  /** Статус поручения: у итога (`done`, `cancelled`) блокировка ничего не требует. */
+  status?: string;
   /** Поручение: подтверждает зависимость, операцию удержания и разбор. */
   work?: Pick<WorkState, 'hold' | 'recovery'> & { order: { dependsOn: readonly string[] } };
   /** Статус другого поручения (зависимости). */
   statusOf?: (workId: string) => string | undefined;
   /** Диагноз `explain` поручения: кто и что дальше (`stage.needs`). */
   needs?: { actor: Actor; action: NextAction };
+  /** Диагноз `explain` другого поручения (зависимости); нет — неизвестно. */
+  needsOf?: (workId: string) => { actor: Actor; action: NextAction } | undefined;
 }
 
 function dependencyText(id: string, ctx: BlockerContext): Text {
@@ -180,12 +190,22 @@ function dependencyText(id: string, ctx: BlockerContext): Text {
       actor: 'controller',
     };
   switch (ctx.statusOf?.(id)) {
-    case 'failed':
+    case 'failed': {
+      // Что дальше с зависимостью — её диагноз `explain` (повтор harness,
+      // разбор ведущего, решение человека).
+      const next = ctx.needsOf?.(id);
+      if (next && next.action !== 'none' && next.action !== 'wait')
+        return {
+          ru: `ждёт зависимости ${id} — она остановлена, дальше: ${actionText[next.action].ru}`,
+          en: `waiting for dependency ${id} — it stopped, next: ${actionText[next.action].en}`,
+          actor: next.actor,
+        };
       return {
         ru: `ждёт зависимости ${id} — она остановлена отказом, нужен её разбор`,
         en: `waiting for dependency ${id} — it stopped with a failure and needs diagnosis`,
-        actor: 'lead',
+        actor: next?.actor ?? 'lead',
       };
+    }
     case 'cancelled':
       return {
         ru: `зависимость ${id} отменена — нужно перепланировать зависимые`,
@@ -333,6 +353,11 @@ export function plainBlocker(
   b: { code: BlockerCode; message: string },
   ctx: BlockerContext,
 ): PlainBlocker {
-  const t = textOf(b, ctx);
+  // Итог: блокировка выдачи ничего не требует — поручение уже принято или
+  // отменено (код и сообщение остаются для диагностики).
+  const t =
+    ctx.status === 'done' || ctx.status === 'cancelled'
+      ? statusText(ctx.status, ctx)!
+      : textOf(b, ctx);
   return { plain: clip(t.ru), plainEn: clip(t.en), actor: t.actor };
 }

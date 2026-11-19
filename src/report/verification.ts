@@ -97,8 +97,17 @@ const utc = (iso: string) => {
 const gateName = (r: Pick<VerificationRow, 'gate' | 'consumer'>) =>
   r.consumer ? `${r.gate}@${r.consumer}` : r.gate;
 
-/** Запуск gate не состоялся: песочница не запустила команду (отказ среды). */
-const notLaunched = (summary: string) => summary.includes('песочница ОС не запустила команду');
+/**
+ * Запуск gate не состоялся: итог записи начинается текстом controller об
+ * отказе запуска песочницы (вывод команды начинается иначе — «код выхода»).
+ */
+const notLaunched = (summary: string) => /^песочница ОС не запустила команду/.test(summary);
+
+/**
+ * ID для вывода: допустимый ID (`[A-Za-z0-9_-]`, до 80 символов); иное —
+ * постоянная метка: запись прежней версии или хоста не выводит свой текст.
+ */
+export const displayId = (id: string) => (/^[A-Za-z0-9_-]{1,80}$/.test(id) ? id : 'unnamed');
 
 /** Что известно о действиях reviewer по записи ревью. */
 function reviewFacts(e: AttemptState['evidence'][number]): NonNullable<VerificationRow['review']> {
@@ -129,10 +138,10 @@ export function verificationRows(a: AttemptState): VerificationRow[] {
     const kind = e.kind === 'review' ? 'review' : 'gate';
     const key = [e.phase, kind, e.consumer ?? '', e.gate].join('\0');
     const base = {
-      gate: e.gate,
+      gate: displayId(e.gate),
       kind,
       phase: e.phase,
-      ...(e.consumer ? { consumer: e.consumer } : {}),
+      ...(e.consumer ? { consumer: displayId(e.consumer) } : {}),
       // Момент — в UTC: тот же момент с другим поясом даёт ту же строку.
       at: utc(e.createdAt),
     } as const;
@@ -174,11 +183,11 @@ export function verificationRows(a: AttemptState): VerificationRow[] {
   for (const phase of reachedIntegration
     ? (['candidate', 'integration'] as const)
     : (['candidate'] as const))
-    for (const gate of new Set(a.requiredGates ?? []))
+    for (const gate of new Set((a.requiredGates ?? []).map(displayId)))
       if (!has(phase, gate))
         missing.push({ gate, kind: 'gate', phase, result: 'skipped', how: 'not-run' });
   for (const c of a.consumers ?? [])
-    for (const gate of new Set(c.gates))
+    for (const gate of new Set(c.gates.map(displayId)))
       if (!has('integration', gate, c.repositoryId) && !has('candidate', gate, c.repositoryId))
         missing.push({
           gate,
@@ -222,18 +231,21 @@ export function verificationLines(
   const notLaunched: string[] = [];
   const notApplicable: string[] = [];
   const skipped: string[] = [];
+  const integrationNotLaunched: string[] = [];
   for (const [name, g] of gates) {
     const both = [g.candidate, g.integration].filter((r): r is VerificationRow => !!r);
     const ran = (r?: VerificationRow) => r?.how === 'executed-by-harness';
+    const unlaunched = (r?: VerificationRow) => r?.result === 'failed' && r.how === 'not-run';
     if (both.some((r) => r.result === 'failed' && ran(r))) failed.push(name);
-    else if (both.some((r) => r.result === 'failed')) notLaunched.push(name);
     else if (both.some((r) => r.result === 'passed' && ran(r))) {
       executed.push(name);
       if (g.integration?.result === 'reused') integrationReused.push(name);
       if (g.integration?.result === 'skipped') integrationSkipped.push(name);
-    } else if (both.some((r) => r.result === 'reused')) reused.push(name);
-    else if (both.some((r) => r.result === 'not-applicable')) notApplicable.push(name);
-    else skipped.push(name);
+      if (unlaunched(g.integration)) integrationNotLaunched.push(name);
+    } else if (both.some(unlaunched)) notLaunched.push(name);
+    else if (both.some((r) => r.result === 'reused')) reused.push(name);
+    else if (both.some((r) => r.result === 'skipped')) skipped.push(name);
+    else notApplicable.push(name);
   }
   const reviews = rows.filter((r) => r.kind === 'review');
   const review = reviews.find((r) => r.phase === 'integration') ?? reviews.at(-1);
@@ -248,6 +260,10 @@ export function verificationLines(
     en.push(
       `at integration reused from the candidate record (same tree): ${list(integrationReused)}`,
     );
+  }
+  if (integrationNotLaunched.length) {
+    ru.push(`на интеграции не запустились — отказ среды: ${list(integrationNotLaunched)}`);
+    en.push(`did not start at integration — environment failure: ${list(integrationNotLaunched)}`);
   }
   if (integrationSkipped.length) {
     ru.push(`на интеграции не запускались: ${list(integrationSkipped)}`);
