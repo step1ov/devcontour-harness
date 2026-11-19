@@ -1,5 +1,5 @@
 import { HarnessError } from '../contracts/errors.ts';
-import { blocksWork } from '../contracts/index.ts';
+import { blocksWork, inputPolicyOf, leadAnswerBasis } from '../contracts/index.ts';
 import {
   MAX_NEUTRAL_FAILURES,
   failedBeforeWork,
@@ -342,8 +342,22 @@ export function stopInputsIn(
         ...(question.question.recommended !== null
           ? { recommended: question.question.recommended }
           : {}),
+        ...(question.question.impact === 'technical' ? { impact: 'technical' as const } : {}),
+        ...((basis) => (basis === 'technical' || basis === 'severity' ? { leadMay: basis } : {}))(
+          question.lifecycle === 'pending'
+            ? leadAnswerBasis(question, inputPolicyOf(h.policy))
+            : undefined,
+        ),
         ...(answer
-          ? { answer: { revision: answer.revision, digest: answer.digest, by: answer.actor.kind } }
+          ? {
+              answer: {
+                revision: answer.revision,
+                digest: answer.digest,
+                by: answer.actor.kind,
+                ...(answer.basis ? { basis: answer.basis } : {}),
+                ...(answer.reason ? { reason: answer.reason } : {}),
+              },
+            }
           : {}),
         ...(refusal.length ? { refusal: refusal.join('; ') } : {}),
         ...(own ? { assumptions: own } : {}),

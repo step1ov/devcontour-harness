@@ -4,6 +4,8 @@ import {
   API_VERSION,
   HarnessError,
   STATE_VERSION,
+  inputPolicyOf,
+  leadAnswersRule,
   runtimeAssignments,
   sameVendorReviews,
   type Author,
@@ -201,6 +203,7 @@ export async function doctor(
     ...(toolchains ? { toolchains } : {}),
     ...(ports.length ? { ports } : {}),
     problems,
+    ...(policy ? { questions: questionRule(policy) } : {}),
     // Предупреждения не делают среду негодной: порт только на wildcard, ревью
     // тем же вендором, пределы шагов фазы больше `runTimeoutMs`
     // (`timeBudgetWarnings`, худший случай) и советы о ресурсах машины
@@ -248,4 +251,18 @@ async function portStatus(policy: ExecutionPolicy, database: string) {
     out.push({ id: r.id, port, ...(await inspectPort(port, known ? database : undefined)) });
   }
   return out;
+}
+
+/** Кто отвечает на вопросы исполнителя при политике — простыми словами. */
+function questionRule(policy: ExecutionPolicy) {
+  const input = inputPolicyOf(policy);
+  const rule = leadAnswersRule(input);
+  return {
+    leadTechnical: input.leadAnswers?.technical === true,
+    ...(input.leadAnswers?.maxSeverity !== undefined
+      ? { maxSeverity: input.leadAnswers.maxSeverity }
+      : {}),
+    line: rule.ru,
+    lineEn: rule.en,
+  };
 }

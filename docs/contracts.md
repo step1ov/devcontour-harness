@@ -993,13 +993,36 @@ Writer, которому для продолжения нужно решение
 Wire-схема CLI runtime объявляет оба поля (`inputRequest` — объект или
 `null`).
 
+**Влияние вопроса** (0.1.0-alpha.55). Вопрос несёт необязательное `impact`:
+`technical` — ни один вариант не меняет того, что видит и получает
+пользователь продукта (выбор внутри реализации), `user-visible` — меняет.
+Нет поля или `null` — `user-visible` (консервативно: вопрос человеку). Вариант
+несёт необязательное `forUser` — одну строку простыми словами (до 300 знаков)
+«что изменится для пользователя». Запрос writer называет правило
+классификации («в сомнении — `user-visible`»). Wire-схема объявляет оба поля
+обязательными с `null`; `null` в каноническую запись не попадает, поэтому
+запрос без них — тот же, что запрос прежней версии. Значение `impact` вне
+перечня приводится к отсутствию поля (`normalized`); область `affects`,
+названная строкой, читается как список из неё, иным значением — как
+нераспознанная (минимум `declared`, вопрос человеку).
+
 **Политика вопросов** — `ExecutionPolicy.inputPolicy`
-(`{threshold: 1–11, criticalPaths: [], leadAnswers?: {maxSeverity: 1–10}}`;
-нет поля — порог 7 без критических путей, умолчание в политику не
-подставляется). `leadAnswers` — явное согласие человека, что ведущий агент
-отвечает на блокирующие вопросы до этой серьёзности (критический вопрос
-поднят до 10); оно действует по текущей политике процесса и в попытку и
-основание вопроса не закрепляется. Порог закрепляется в попытке
+(`{threshold: 1–11, criticalPaths: [], leadAnswers?: {maxSeverity?: 1–10,
+technical?: boolean}}`; нет поля — порог 7 без критических путей, умолчание в
+политику не подставляется). `leadAnswers` — явное согласие человека, что
+ведущий агент отвечает на блокирующие вопросы сам: `maxSeverity` — до этой
+серьёзности (критический вопрос поднят до 10); `technical: true` — только
+на технические вопросы (`impact: technical`) без минимумов, с обязательной
+причиной. Нужно хотя бы одно из двух (схема — объединение двух вариантов,
+JSON Schema — `anyOf`). С `technical: true` вопрос, меняющий результат для
+пользователя, и вопрос с минимумом (`declared`, `critical-path`) остаются
+человеку при любом `maxSeverity`; `maxSeverity` тогда лишь дополнительно
+ограничивает серьёзность технических вопросов. Без `technical` — правило
+`maxSeverity` alpha.54. Согласие действует по текущей политике
+процесса и в попытку и основание вопроса не закрепляется. `doctor`
+(`questions`) и `init --plan` (`questions`) называют действующее правило
+простыми словами (`line`, `lineEn`); `init --lead-technical-answers` пишет
+`leadAnswers.technical: true` в новую политику. Порог закрепляется в попытке
 при выдаче (`AttemptState.inputPolicy`) и в `executionDigest` не входит: смена
 порога действует со следующей попытки без нового согласования. Порог и шкала
 называются в запросе writer. Действующая серьёзность — самооценка, поднятая
@@ -1059,12 +1082,24 @@ controller; сброс попыток его не обнуляет). Следу�
 
 1. `answerInput(id, {text, optionId?, kind, actor, messageRef?},
 expectedVersion)` — новая версия ответа с `answerDigest`; работу ответ не
-   возобновляет. Тот же текст, вариант и вид — прежний ответ без записи.
+   возобновляет. Тот же текст, вариант, вид, актёр, причина и правило приёма —
+   прежний ответ без записи.
    Блокирующий вопрос (`kind: question`, `blocking`) адресован человеку:
    ответ с `actor.kind: lead` отклоняется `OPERATOR_ANSWER_REQUIRED` (класс
    `refused`, без записи, и до проверки повтора), если текущая политика не
-   разрешила его `inputPolicy.leadAnswers {maxSeverity: 1–10}` и действующая
-   серьёзность вопроса выше `maxSeverity`. Неблокирующий запрос ведущему в ожидании
+   разрешила его `inputPolicy.leadAnswers`: при `technical: true` — вопрос не
+   технический, с минимумом или серьёзнее `maxSeverity`; без него —
+   серьёзнее `maxSeverity`. Правило `technical` требует причины (`reason`, до 1000 знаков; нет — `INVALID_INPUT`
+   `reason-required`). Принятый ответ ведущего на блокирующий вопрос несёт
+   `basis: technical | severity` и `reason` (в `answerDigest` не входят;
+   `basis` — только у ответа ведущего, `technical` — только с причиной: это
+   держат Zod и движок, JSON Schema описывает форму полей);
+   `technical` показывается как «решено ведущим (технический вопрос)» в
+   `status` (`works[].input.answerBasis`; `impact`, `leadMay` — правило, по
+   которому ведущий может ответить на ждущий вопрос), `explain` (тогда
+   `actor: lead`, `answer-input`), пакете передачи (`inputs[].impact`,
+   `inputs[].answer.basis/reason`) и отчёте (`inputs.answeredBy.leadTechnical`).
+   Неблокирующий запрос ведущему в ожидании
    (`kind: follow-up`) ведущий отвечает без разрешения; вопрос ниже порога
    записан закрытым и ответа не принимает; `operator` и `host` —
    как прежде. Кто ответил (актёр последнего ответа) показывают `status`
@@ -1473,6 +1508,80 @@ prompt, вывода runtime, текстов находок, ошибок и п�
 недели без активности — `gap`), 50 строк gates и стадий; JSON ≤ 512 КБ,
 HTML ≤ 1 МБ. Усечение отмечено флагом и ограничением.
 
+### OperatorView
+
+Представление оператора (`harness view`, `harnessView(options)` корня пакета;
+чистые `operatorView(input, options)` и `workDetailView(input, workId, options)`
+из `devcontour-harness/projections`; загрузчик для node —
+`collectOperatorViewInput`). Один JSON-документ только для чтения, который
+рисует панель оператора. Схемы — `operatorViewSchema`, `workDetailViewSchema`
+(`schemas/operator-view.schema.json`, `schemas/work-detail-view.schema.json`).
+
+**Версии.** `viewVersion` — мажорная (сейчас `1`): меняется, только когда поле
+удалено, переименовано или меняет смысл. `viewRevision` (сейчас `0`) растёт при
+добавлениях: необязательное поле, новое значение перечисления с безопасным
+чтением по умолчанию, новый раздел. Читатель принимает свою мажорную версию с
+любой ревизией и игнорирует неизвестные поля. Выпущенная мажорная версия
+держится всю линию `0.1.x`; `--view-version N` оставит прежнюю доступной ещё
+минимум один минорный выпуск после появления новой. `stateVersion`
+копируется как есть.
+
+**Разделы.** `settings` (действующая политика: роли и правила ревью по
+областям, пороги, бюджеты, тайм-ауты, слой `lean`, `defaulted` — пути,
+взятые из умолчаний), `works[]` (порядок `status`: этап, сводка попыток,
+блокировки, вопрос, расход с границей `exact | lower | unknown`, принятое),
+`reviews[]` (план, контракт и код), `questions[]` (открытые состояния
+`inputStates`, `answerableBy`, `impact`), `escalations[]` (остановки, которые
+ждут человека или ведущего, эскалации ревью, пауза очереди), `drift[]`,
+`progress` (счётчики по всем работам), `history` (ряды по интервалам окна:
+нагрузка, начатые и упавшие попытки, gates пройденные, упавшие и
+перенесённые, расходы и остаток до окна) и `health`. `activity[]` и
+`decisions[]` схема описывает, harness их пока не выдаёт. Обязательные сочетания
+(`decisions[]`; `verification[]`: `executed` требует `by` и `attempt`,
+`reused` — `attempt`) проверяет Zod-схема; опубликованная JSON Schema их не
+выражает. Поля alpha.55
+(`attempts.lastFailure`, `blockers[].plain`, `verification[]`,
+`questions[].impact/plain`) заполняются, когда их даёт `status`.
+
+**Числа не выводятся заново.** Этап, сводка попыток и расход работы — те же,
+что `status.works[]`; известные расходы и их граница — по правилам стоимости
+отчёта (`callCostKnown`, полнота usage, попытки без записей вызовов);
+неизвестная цена никогда не показывается точным нулём.
+
+**Пределы.** `OPERATOR_VIEW_LIMITS`: работы 500, предметы ревью 50, находки
+на предмет 50, вопросы 50, эскалации 50, дрейф 50, роли и правила ревью по
+100, предупреждения 20, попытки деталей 20, проверки на работу 50, интервалы
+истории 500, окно до 7 дней. Список сверх предела усекается (первые записи в
+порядке harness), выброшенное — числом в `truncated`, плюс предупреждение
+`VIEW_TRUNCATED`. Документ больше 256 КБ UTF-8 — отказ `VIEW_TOO_LARGE`
+(exit 4); частичного документа нет.
+
+**Маскирование.** Каждая свободная строка (заголовки, `stage.step`, `line`,
+`plain`, `queue.detail`, `warnings[].message`, `drift[].unavailable`,
+`target.remote.reason`, тексты вопросов и находок) сначала маскируется, затем
+обрезается до своего предела (`OPERATOR_VIEW_TEXT`): ключи провайдеров,
+`Bearer …`, учётные данные в URL, пары `password=…`, длинные hex и base64 и
+значения секретов политики становятся `‹masked›`; домашний каталог — `~`,
+путь внутри репозитория — относительным, прочий абсолютный путь — `‹path›`.
+`--no-titles` убирает заголовки работ, тексты вопросов и находок и
+`queue.detail`.
+
+**Токен.** `source.token` — SHA-256 канонических байтов документа без
+`generatedAt` и `source.token` (ключи отсортированы): равный токен — то же
+представление. Истечение аренды, живость и сдвиг окна меняют токен без
+записи в хранилище.
+
+**Политика и отсутствующее состояние.** Без `--policy` — привязанная к
+состоянию; нет состояния и нет `--policy` — `POLICY_REQUIRED` (exit 2), с
+`--policy` — пустое представление по ней и предупреждение `STATE_NOT_FOUND`.
+`--policy`, отличная от привязанной, — предупреждение
+`POLICY_DIGEST_MISMATCH`. Каталог состояния не создаётся и не пишется: чтение
+неизменяемое, как у `report`, и всё представление собирается из одного
+снимка по одним часам. Если журнал WAL уже есть (идёт `run`), чтение
+повторяется обычным открытием только для чтения, и SQLite может создать
+служебный `-shm`, как у `status`. Неизвестный `--work`, `--view-version`,
+`--lang`, окно или интервал — `INVALID_INPUT` (exit 2).
+
 ### HandoffPack
 
 Пакет передачи контекста (`harness handoff`, `handoffPack(source, options)`
@@ -1768,9 +1877,9 @@ exit code CLI.
 | Exit | Класс            | Коды                                                                                                                                                                                                                                                                                                                                               |
 | ---- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0    | успех            | —                                                                                                                                                                                                                                                                                                                                                  |
-| 2    | `input`          | `INVALID_INPUT`, `UNSUPPORTED_COMMAND`, `UNSUPPORTED_VERSION`, `GRAPH_*`, `GATE_*`, `REVIEWER_*`, `RESPONSE_TOO_LARGE`                                                                                                                                                                                                                             |
+| 2    | `input`          | `INVALID_INPUT`, `UNSUPPORTED_COMMAND`, `UNSUPPORTED_VERSION`, `GRAPH_*`, `GATE_*`, `REVIEWER_*`, `RESPONSE_TOO_LARGE`, `POLICY_REQUIRED`                                                                                                                                                                                                          |
 | 3    | `refused`        | `APPROVAL_STALE`, `APPROVAL_REQUIRED`, `LEASE_STALE`, `CONTROLLER_BUSY`, `PAUSED`, `NOT_READY`, `SCOPE_VIOLATION`, `GATE_FAILED`, `REVIEW_REJECTED`, `BUDGET_EXHAUSTED`, `BUDGET_UNKNOWN`, `ATTEMPTS_EXHAUSTED`, `CONTEXT_EXHAUSTED`, `INPUT_REQUIRED`, `OPERATOR_ANSWER_REQUIRED`, `REVISION_CONFLICT`, `CANCELLED`, `NOT_FOUND`, `PATH_CONFLICT` |
-| 4    | `infrastructure` | `STATE_VERSION_UNSUPPORTED`, `RUNTIME_UNAVAILABLE`, `REVIEW_PROTOCOL_INVALID`, `SANDBOX_UNAVAILABLE`, `GIT_FAILED`, `LIFECYCLE_FAILED`, `CONNECTOR_VERSION_MISMATCH`, `STORAGE_FAILED`, `DELIVERY_FAILED`, `INTERNAL`                                                                                                                              |
+| 4    | `infrastructure` | `STATE_VERSION_UNSUPPORTED`, `RUNTIME_UNAVAILABLE`, `REVIEW_PROTOCOL_INVALID`, `SANDBOX_UNAVAILABLE`, `GIT_FAILED`, `LIFECYCLE_FAILED`, `CONNECTOR_VERSION_MISMATCH`, `STORAGE_FAILED`, `VIEW_TOO_LARGE`, `DELIVERY_FAILED`, `INTERNAL`                                                                                                            |
 
 Exit 1 не используется: им Node завершает процесс при необработанном
 исключении.
@@ -1828,45 +1937,46 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 читающие на отсутствующем каталоге отвечают `NOT_FOUND` и ничего не создают.
 Бинарник не хранит настроек проекта и не помнит «последний активный проект».
 
-| Команда            | Аргументы                                                                                                  | Пишет | `data`                                                                                            | Повтор                                                                                                                                                 |
-| ------------------ | ---------------------------------------------------------------------------------------------------------- | ----- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `validate`         | `--graph F --policy F [--context F]`                                                                       | нет   | digests, число поручений                                                                          | Чистая функция входов                                                                                                                                  |
-| `review-plan`      | `--state D --graph F --policy F --author A [--context F]`                                                  | да    | `ReviewRecord`                                                                                    | Тот же digest и автор, уже согласованные, — тот же раунд без вызова модели; автор, не допускаемый правилом вендора, — `REVIEWER_SAME_VENDOR` до вызова |
-| `review-contract`  | `--state D --contract F --policy F --author A`                                                             | да    | `ReviewRecord`                                                                                    | Как `review-plan`                                                                                                                                      |
-| `approve`          | `--state D --subject ID --digest H`                                                                        | да    | subject, digest, at                                                                               | Тот же digest — без изменений; только `approvalMode: operator`                                                                                         |
-| `run`              | `--state D --graph F --policy F [--context F] [--sink file:D] [--once]`                                    | да    | граф, поручения и их блокеры, задание `workflow`                                                  | Та же редакция продолжает работу; другой digest той же редакции — `REVISION_CONFLICT`                                                                  |
-| `status`           | `--state D [--graph ID] [--detail] [--human [--watch [--interval S]]]`                                     | нет   | очередь, графы, поручения с блокерами, сводкой попыток и этапом, бюджеты; с `--detail` — `detail` | Только чтение                                                                                                                                          |
-| `events`           | `--state D [--after N] [--limit 1–500]`                                                                    | нет   | события (неизвестный тип — `unknown`), `next`                                                     | Только чтение                                                                                                                                          |
-| `pause`            | `--state D`                                                                                                | да    | `ControlState`                                                                                    | Без изменений                                                                                                                                          |
-| `resume`           | `--state D`                                                                                                | да    | `ControlState`                                                                                    | Решение человека: снимает паузу оператора, штатной остановки и отказа runtime вместе с её классами; паузу операции reconfigure — `PAUSED`              |
-| `cancel`           | `--state D --work ID [--reason T]`                                                                         | да    | статус поручения                                                                                  | Отменённое — без изменений; это не retry                                                                                                               |
-| `retry`            | `--state D --work ID [--reset --reason T]`                                                                 | да    | статус поручения                                                                                  | В пределах `maxAttempts` и бюджета; `--reset` с причиной сбрасывает счётчик попыток, но не учёт расходов                                               |
-| `result`           | `--state D --work ID`                                                                                      | нет   | `ResultEnvelope`                                                                                  | Только чтение                                                                                                                                          |
-| `deliver`          | `--state D --work ID --sink file:D`                                                                        | да    | `ResultEnvelope`                                                                                  | Доставленное не доставляется повторно; моделей и интеграции нет                                                                                        |
-| `cleanup`          | `--state D --run ID`                                                                                       | да    | исход очистки попытки                                                                             |
-| `worktree-cleanup` | `--state D [--dry-run]`                                                                                    | да    | счётчики и `worktrees[]` с действием и причиной отказа                                            |
-| `profile`          | `--profile ID\|./F [--repository D]`                                                                       | нет   | закрепление (`pin`) и разрешённый профиль                                                         | Чистая функция файлов профиля; команды проекта не исполняются                                                                                          |
-| `doctor`           | `[--state D] [--policy F]`                                                                                 | нет   | версии, runtime, sandbox, совместимость состояния и версии движка в нём                           | Без live-вызова модели                                                                                                                                 |
-| `init`             | `--repository D [--profile P] [--writer R] [--state D] [--plan]`                                           | да    | план файлов, `created`, `manifest`, `facts`, `toolchain`, `next`                                  | Create-only `.harness/`, manifest до политики, политика последней; повтор — `created: []`; иное решение — `PATH_CONFLICT`                              |
-| `lean`             | `--repository D [--state D] [--off] [--plan] [--human]`                                                    | да    | изменения полей (`changes`), `problems`, `policyDigest` до и после, `staleApprovals`              | То же направление — `changed: false`; прерванное дописывается; файл изменён после чтения — `REVISION_CONFLICT`                                         |
-| `explain`          | `--state D --policy F [--work ID]`                                                                         | нет   | `diagnoses[]` (`StopDiagnosis`), `attempts[]` (сводка попыток)                                    | Только чтение: без повторов, вызовов моделей и изменений состояния                                                                                     |
-| `report`           | `--state D [--since T\|Nd\|Nw] [--until T] [--as-of T] [--format json\|md\|html] [--no-titles] [--out F]`  | нет   | `ValueReport`; с `--out` — `{out, format, bytes, asOf}`                                           | Только чтение; те же данные, параметры и target ref — те же байты                                                                                      |
-| `handoff`          | `--state D [--graph ID] [--intent T]… [--format json\|md]`                                                 | нет   | `HandoffPack`; с `--format md` — Markdown без конверта                                            | Только чтение; агент добавляет только намерения                                                                                                        |
-| `plan-request`     | `--brief F --policy F [--context F] [--contracts D] [--requirements [R:]F]… [--human]`                     | нет   | `prompt`, `readOnly`, `recommendedTasks`, `maxTasks`, `basis`, `facts` (`PlanningFacts`)          | Чистая функция входов: та же постановка и те же факты — тот же prompt и `basis`; модель не вызывается                                                  |
-| `plan-check`       | `--draft F --policy F [--context F] [--contracts D] [--brief F [--basis H]]`                               | нет   | `issues`, `checkPlan`; без проблем — `graph`, `graphDigest`, `basis`                              | Чистая функция входов и `HEAD` источников требований; согласования не выдаёт, gates не запускает; расхождение `--basis` — `APPROVAL_STALE`             |
-| `input-list`       | `--state D [--work ID]`                                                                                    | нет   | запросы: ID, поручение, вид, состояние, серьёзность, версия — без текста                          | Только чтение                                                                                                                                          |
-| `input-show`       | `--state D --request ID`                                                                                   | нет   | `InputRequest`                                                                                    | Только чтение                                                                                                                                          |
-| `input-answer`     | `--state D --request ID --text T [--option ID] [--kind K] [--actor A] --request-version N`                 | да    | запрос, ответ, `changed`                                                                          | Тот же текст, вариант и вид — прежний ответ; иначе новая версия при совпадении версии (CAS)                                                            |
-| `input-context`    | `--state D --request ID --out F`                                                                           | да    | `requestId`, `answerDigest`, `digest`, `out`                                                      | Тот же ответ и тот же действующий снимок — тот же digest; снимок не активируется                                                                       |
-| `input-target`     | `--state D --request ID --context-digest H`                                                                | нет   | основание продолжения и `problems`                                                                | Только чтение                                                                                                                                          |
-| `input-apply`      | `--state D --request ID --answer H --request-version N --context-digest H --target H [--reset --reason T]` | да    | `applied`, `changed`, поручение; `active` или `blocker`                                           | Повтор — без изменений и второй попытки; не применено — exit 3, запрос прежний                                                                         |
-| `input-cancel`     | `--state D --request ID --request-version N --reason T`                                                    | да    | `lifecycle`, `version`, `changed`                                                                 | Отменённый — без изменений                                                                                                                             |
-| `input-supersede`  | `--state D --request ID --request-version N --reason T --successor ID`                                     | да    | `lifecycle`, `version`, `changed`                                                                 | Заменённый — без изменений                                                                                                                             |
-| `gates`            | `--state D [--policy F] --sha SHA\|HEAD [--gate a,b,@g] [--repository ID] [--fail-fast] [--human]`         | да    | исход каждого gate (`passed`, `failed`, `not-run`, `skipped`), SHA, каталог логов                 |
-| `review-code`      | `--state D [--policy F] --base REF --head REF [--role R] [--author A] [--repository ID]`                   | да    | `CodeReviewRecord` (`kind: code`, `acceptance: false`)                                            | Те же ref — следующий раунд; тот же одобренный `head` и reviewer — тот же раунд без вызова; не приёмка                                                 |
-| `smoke`            | `--state D [--policy F] --sha SHA\|HEAD [--repository ID] [--human]`                                       | да    | шаги окружения с длительностью, `passed`, класс отказа и совет, каталог логов                     | Каждый вызов — новая проверка; gates и модели не вызываются, база состояния не открывается                                                             |
-| `capabilities`     | —                                                                                                          | нет   | каталог общих операций (`OperationCatalog`)                                                       | Чистая функция установленной версии пакета                                                                                                             |
-| `--version`        | —                                                                                                          | нет   | версия пакета и API                                                                               | —                                                                                                                                                      |
+| Команда            | Аргументы                                                                                                                   | Пишет | `data`                                                                                            | Повтор                                                                                                                                                 |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------- | ----- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `validate`         | `--graph F --policy F [--context F]`                                                                                        | нет   | digests, число поручений                                                                          | Чистая функция входов                                                                                                                                  |
+| `review-plan`      | `--state D --graph F --policy F --author A [--context F]`                                                                   | да    | `ReviewRecord`                                                                                    | Тот же digest и автор, уже согласованные, — тот же раунд без вызова модели; автор, не допускаемый правилом вендора, — `REVIEWER_SAME_VENDOR` до вызова |
+| `review-contract`  | `--state D --contract F --policy F --author A`                                                                              | да    | `ReviewRecord`                                                                                    | Как `review-plan`                                                                                                                                      |
+| `approve`          | `--state D --subject ID --digest H`                                                                                         | да    | subject, digest, at                                                                               | Тот же digest — без изменений; только `approvalMode: operator`                                                                                         |
+| `run`              | `--state D --graph F --policy F [--context F] [--sink file:D] [--once]`                                                     | да    | граф, поручения и их блокеры, задание `workflow`                                                  | Та же редакция продолжает работу; другой digest той же редакции — `REVISION_CONFLICT`                                                                  |
+| `status`           | `--state D [--graph ID] [--detail] [--human [--watch [--interval S]]]`                                                      | нет   | очередь, графы, поручения с блокерами, сводкой попыток и этапом, бюджеты; с `--detail` — `detail` | Только чтение                                                                                                                                          |
+| `events`           | `--state D [--after N] [--limit 1–500]`                                                                                     | нет   | события (неизвестный тип — `unknown`), `next`                                                     | Только чтение                                                                                                                                          |
+| `pause`            | `--state D`                                                                                                                 | да    | `ControlState`                                                                                    | Без изменений                                                                                                                                          |
+| `resume`           | `--state D`                                                                                                                 | да    | `ControlState`                                                                                    | Решение человека: снимает паузу оператора, штатной остановки и отказа runtime вместе с её классами; паузу операции reconfigure — `PAUSED`              |
+| `cancel`           | `--state D --work ID [--reason T]`                                                                                          | да    | статус поручения                                                                                  | Отменённое — без изменений; это не retry                                                                                                               |
+| `retry`            | `--state D --work ID [--reset --reason T]`                                                                                  | да    | статус поручения                                                                                  | В пределах `maxAttempts` и бюджета; `--reset` с причиной сбрасывает счётчик попыток, но не учёт расходов                                               |
+| `result`           | `--state D --work ID`                                                                                                       | нет   | `ResultEnvelope`                                                                                  | Только чтение                                                                                                                                          |
+| `deliver`          | `--state D --work ID --sink file:D`                                                                                         | да    | `ResultEnvelope`                                                                                  | Доставленное не доставляется повторно; моделей и интеграции нет                                                                                        |
+| `cleanup`          | `--state D --run ID`                                                                                                        | да    | исход очистки попытки                                                                             |
+| `worktree-cleanup` | `--state D [--dry-run]`                                                                                                     | да    | счётчики и `worktrees[]` с действием и причиной отказа                                            |
+| `profile`          | `--profile ID\|./F [--repository D]`                                                                                        | нет   | закрепление (`pin`) и разрешённый профиль                                                         | Чистая функция файлов профиля; команды проекта не исполняются                                                                                          |
+| `doctor`           | `[--state D] [--policy F]`                                                                                                  | нет   | версии, runtime, sandbox, совместимость состояния и версии движка в нём                           | Без live-вызова модели                                                                                                                                 |
+| `init`             | `--repository D [--profile P] [--writer R] [--state D] [--plan]`                                                            | да    | план файлов, `created`, `manifest`, `facts`, `toolchain`, `next`                                  | Create-only `.harness/`, manifest до политики, политика последней; повтор — `created: []`; иное решение — `PATH_CONFLICT`                              |
+| `lean`             | `--repository D [--state D] [--off] [--plan] [--human]`                                                                     | да    | изменения полей (`changes`), `problems`, `policyDigest` до и после, `staleApprovals`              | То же направление — `changed: false`; прерванное дописывается; файл изменён после чтения — `REVISION_CONFLICT`                                         |
+| `explain`          | `--state D --policy F [--work ID]`                                                                                          | нет   | `diagnoses[]` (`StopDiagnosis`), `attempts[]` (сводка попыток)                                    | Только чтение: без повторов, вызовов моделей и изменений состояния                                                                                     |
+| `report`           | `--state D [--since T\|Nd\|Nw] [--until T] [--as-of T] [--format json\|md\|html] [--no-titles] [--out F]`                   | нет   | `ValueReport`; с `--out` — `{out, format, bytes, asOf}`                                           | Только чтение; те же данные, параметры и target ref — те же байты                                                                                      |
+| `handoff`          | `--state D [--graph ID] [--intent T]… [--format json\|md]`                                                                  | нет   | `HandoffPack`; с `--format md` — Markdown без конверта                                            | Только чтение; агент добавляет только намерения                                                                                                        |
+| `plan-request`     | `--brief F --policy F [--context F] [--contracts D] [--requirements [R:]F]… [--human]`                                      | нет   | `prompt`, `readOnly`, `recommendedTasks`, `maxTasks`, `basis`, `facts` (`PlanningFacts`)          | Чистая функция входов: та же постановка и те же факты — тот же prompt и `basis`; модель не вызывается                                                  |
+| `plan-check`       | `--draft F --policy F [--context F] [--contracts D] [--brief F [--basis H]]`                                                | нет   | `issues`, `checkPlan`; без проблем — `graph`, `graphDigest`, `basis`                              | Чистая функция входов и `HEAD` источников требований; согласования не выдаёт, gates не запускает; расхождение `--basis` — `APPROVAL_STALE`             |
+| `input-list`       | `--state D [--work ID]`                                                                                                     | нет   | запросы: ID, поручение, вид, состояние, серьёзность, версия — без текста                          | Только чтение                                                                                                                                          |
+| `input-show`       | `--state D --request ID`                                                                                                    | нет   | `InputRequest`                                                                                    | Только чтение                                                                                                                                          |
+| `input-answer`     | `--state D --request ID --text T [--option ID] [--kind K] [--actor A] --request-version N`                                  | да    | запрос, ответ, `changed`                                                                          | Тот же текст, вариант и вид — прежний ответ; иначе новая версия при совпадении версии (CAS)                                                            |
+| `input-context`    | `--state D --request ID --out F`                                                                                            | да    | `requestId`, `answerDigest`, `digest`, `out`                                                      | Тот же ответ и тот же действующий снимок — тот же digest; снимок не активируется                                                                       |
+| `input-target`     | `--state D --request ID --context-digest H`                                                                                 | нет   | основание продолжения и `problems`                                                                | Только чтение                                                                                                                                          |
+| `input-apply`      | `--state D --request ID --answer H --request-version N --context-digest H --target H [--reset --reason T]`                  | да    | `applied`, `changed`, поручение; `active` или `blocker`                                           | Повтор — без изменений и второй попытки; не применено — exit 3, запрос прежний                                                                         |
+| `input-cancel`     | `--state D --request ID --request-version N --reason T`                                                                     | да    | `lifecycle`, `version`, `changed`                                                                 | Отменённый — без изменений                                                                                                                             |
+| `input-supersede`  | `--state D --request ID --request-version N --reason T --successor ID`                                                      | да    | `lifecycle`, `version`, `changed`                                                                 | Заменённый — без изменений                                                                                                                             |
+| `gates`            | `--state D [--policy F] --sha SHA\|HEAD [--gate a,b,@g] [--repository ID] [--fail-fast] [--human]`                          | да    | исход каждого gate (`passed`, `failed`, `not-run`, `skipped`), SHA, каталог логов                 |
+| `review-code`      | `--state D [--policy F] --base REF --head REF [--role R] [--author A] [--repository ID]`                                    | да    | `CodeReviewRecord` (`kind: code`, `acceptance: false`)                                            | Те же ref — следующий раунд; тот же одобренный `head` и reviewer — тот же раунд без вызова; не приёмка                                                 |
+| `smoke`            | `--state D [--policy F] --sha SHA\|HEAD [--repository ID] [--human]`                                                        | да    | шаги окружения с длительностью, `passed`, класс отказа и совет, каталог логов                     | Каждый вызов — новая проверка; gates и модели не вызываются, база состояния не открывается                                                             |
+| `view`             | `--state D [--policy F] [--work ID] [--no-titles] [--window 24h\|7d] [--bucket 15m\|1h] [--lang ru\|en] [--view-version 1]` | нет   | `OperatorView`; с `--work` — `WorkDetailView`                                                     | Только чтение, без файлов в каталоге состояния; те же состояние, политика, часы и параметры — те же байты                                              |
+| `capabilities`     | —                                                                                                                           | нет   | каталог общих операций (`OperationCatalog`)                                                       | Чистая функция установленной версии пакета                                                                                                             |
+| `--version`        | —                                                                                                                           | нет   | версия пакета и API                                                                               | —                                                                                                                                                      |
 
 Полная форма каждой команды — `cliCommands` (аргументы, обязательность,
 идемпотентность, отказы exit 3). Все команды реализованы. `run` принимает `--author` (по умолчанию `external`) — автора графа для ревью плана. `HARNESS_CODEX_BIN` и `HARNESS_CLAUDE_BIN` подменяют исполняемые файлы runtime (fixture executables в тестах).
@@ -2015,6 +2125,14 @@ gate, `dependency-network: … Шаг <id>: …` у шага `prepare`. Текс
   `repairs` — `used`, `budget` (`repairBudget`) и `left` задания графа по
   правилу `explain` (`repairJobOf`: задание, которое продолжит работу, или
   новое при устаревшем согласовании в режиме agent; нет — нет поля);
+- `lastFailure` — почему поручение повторяется: последний отказ (последняя
+  по порядку попытка с корзиной `failureBucketOf`) — `runId`, `bucket`,
+  `kind` (класс отказа, если записан), `at` и причина простыми словами
+  по-русски (`plain`) и по-английски (`plainEn`), например «окружение — порт
+  3000 занят», «дефект — не прошли проверки: lint, unit». Текст строится из
+  класса отказа, ID упавших gates и номера занятого порта; свободный текст
+  ошибки попытки (вывод команд, пути, секреты) в него не попадает; предел —
+  300 символов. Нет поля — отказов нет;
 - `line` — та же сводка одной строкой (`attemptSummaryLine`), её же печатают
   `status --human` и `explain --human` (раздел «Попытки»).
 
@@ -2036,7 +2154,8 @@ gate, `dependency-network: … Шаг <id>: …` у шага `prepare`. Текс
   зависимостей), `gates` (проверки кандидата), `review` (независимое ревью),
   `integration` (интеграция с целевой веткой, включая её gates и ревью),
   `input` (ждёт ответа или применения ответа на вопрос исполнителя), `queued`
-  (ждёт выдачи), `blocked` (не выдаётся — см. `blockers`), `stopped`
+  (просто ждёт очереди — ничего не нужно), `blocked` (не выдаётся — см.
+  `blockers`), `stopped`
   (остановлено отказом), `done`, `cancelled`. У идущей попытки этап —
   по последнему открытому замеру (`attempt.stage`, `step`, например
   `candidate-test:lint`), без замера — по статусу поручения; фаза интеграции
@@ -2057,8 +2176,98 @@ gate, `dependency-network: … Шаг <id>: …` у шага `prepare`. Текс
   плана группы не входит): `calls`, `knownUsd`, `unknownCalls` (без цены),
   `durationMs`;
 - `line` (по-русски) и `lineEn` (по-английски) — одна строка: этап и время,
-  дальше, «от вас», потрачено. `status --human` печатает её строкой
-  `сейчас:` под строкой сводки попыток.
+  почему повтор, дальше, «от вас», потрачено. `status --human` печатает её
+  строкой `сейчас:` под строкой сводки попыток. Почему повтор: если
+  последняя закончившаяся попытка (без прерванных штатной остановкой)
+  отказала или засчитано больше одной попытки, строка называет номер
+  попытки из `maxAttempts` и причину отказа (`attemptSummary.lastFailure`):
+  у идущей — «попытка 3 из 6; прошлая остановлена: окружение — порт 3000
+  занят», у ждущей и остановленной — «попыток использовано 3 из 6;
+  последняя остановлена: …». У `input` вопрос исполнителя причиной не
+  повторяется, у итога и первой попытки без отказа части нет. У `queued` —
+  «просто ждёт очереди — ничего не нужно», у `blocked` — «не выдаётся:» и
+  первая по актёру блокировка простыми словами (`blockers[].plain`: сначала
+  то, что нужно от человека, затем ход ведущего, затем harness).
+
+**Блокировки простыми словами (`status`, `works[].blockers[]`).** К прежним
+`code` и `message` у каждой блокировки `status` добавлены `plain` (по-русски),
+`plainEn` и `actor` — кто её снимает (`user`, `lead`, `controller`; `null` —
+никто, итог), как у диагноза `explain`. Разновидность внутри кода — по
+сообщению движка и состоянию поручения (`plainBlocker`,
+`src/control/blocker-plain.ts`): «ждёт зависимости a» (остановленная
+зависимость — что дальше по её диагнозу `explain`, например «дальше:
+повтор» ходом harness; отменённая — «нужно перепланировать зависимые»), «черновик — не утверждён», «ждёт согласования плана»
+(согласует ведущий, при `approvalMode: operator` — человек), «остановлено
+после отказа — дальше: <действие диагноза `explain`>» (актёр — из
+`stage.needs`), «ждёт вашего ответа на вопрос исполнителя», «ответ записан —
+ждёт применения ведущим», «пауза очереди: поставил оператор», «пауза
+очереди: бюджет», «пауза очереди: штатная остановка — снимет следующий
+запуск», «очередь ещё не запускали — снимет следующий запуск», «попытки
+исчерпаны (3 из 3) — нужен ваш сброс попыток», «бюджет
+исчерпан» и «бюджет не определён … (поднятие предела не поможет)»,
+«процесс harness работает со старой политикой — перезапустите его»,
+«удержано операцией X», «ждёт конца совместной проверки репозиториев» и
+другие. Из сообщения в текст переносятся только идентификаторы, которые
+подтверждает состояние поручения (его зависимость, операция удержания), и
+числа попыток: сообщение хоста (`HostGuards.claimable`), даже совпавшее с
+шаблоном движка, ничего своего в текст не добавляет — у него общий текст кода
+(`blockerCodeText`), само сообщение остаётся в `message`. У каждого кода
+`Engine.blockers` есть текст — тест падает, если код добавлен без него. У
+принятого и отменённого поручения блокировки выдачи ничего не требуют:
+«уже принято» / «отменено», `actor: null` (код и сообщение прежние). Ответ
+`run` (`works[].blockers`) полей не несёт. `status --human` печатает строку
+`не выдаётся: <простой текст> (<кто снимает>); … [коды: …]` (сначала то, что
+нужно от человека) вместо прежней `блокировки: <коды>`; у блокировки без
+`plain` (ответ другой версии) — общий текст кода, а не `message`.
+
+**Что проверено и как (`status`, `explain`, `result`, `report`).** Поле
+`verification` (`workVerificationSchema`, `src/contracts/verification-view.ts`;
+функции `verificationOf`, `verificationRows`, `verificationLines` —
+`devcontour-harness/report`, модуль без zod) — записи evidence одной попытки:
+у принятого поручения — принявшей, иначе последней (`runId`); у `result` —
+попытки результата. ID gates и потребителей, не подходящие под форму ID
+(`[A-Za-z0-9_-]{1,80}`), выводятся постоянной меткой `unnamed`. Берутся
+записи текущего SHA фазы (`candidateSha`,
+`integrationSha`): запись прежнего SHA — не проверка текущего. Нет поля —
+попыток нет или идущая попытка ещё ничего не записала.
+
+- `rows[]` — строка на gate и на ревью в каждой фазе (последняя запись:
+  повтор `recheck` заменяет первую): `gate` (ID, без команды), `kind`
+  (`gate`, `review`), `phase`, `consumer`, `result` (`passed`, `failed`,
+  `reused` — запись интеграции взята из записи кандидата при том же дереве,
+  `skipped` — у закончившейся попытки обязательный gate без записи
+  кандидата, а если попытка дошла до интеграции — и интеграции; gate
+  потребителя без записи — строкой интеграции с `consumer`;
+  `not-applicable` — gate с `when.paths` не исполнялся), `how`
+  (`executed-by-harness` — команду запустил harness, `reused-evidence`,
+  `read-by-reviewer` — ревью агента, `not-run` — не исполнялось, в том числе
+  песочница не запустила команду: `failed` с `not-run`), `at` (момент записи
+  в UTC); у ревью — `reviewer {runtime, vendor}` и `review {inspection,
+commands, protocol}`: по записи controller `diff-only` — команд не
+  запускал, `commands` — запускал (число), `unknown` — не записано;
+  `protocol: invalid|unsafe` — ответ не по протоколу, вердикта нет. Строк не
+  больше 40 (`rowsTruncated` — остальные), у отчёта — 6, и проверки всех
+  поручений отчёта — не больше 64 КБ JSON: сверх предела у поручения
+  остаются строки `line`/`lineEn` с `rowsTruncated`, затем поле опускается;
+- `line` / `lineEn` — одна строка по gate обеих фаз: «Проверено harness
+  (запущено): lint, unit; на интеграции взято из записи кандидата (то же
+  дерево): lint; на интеграции не запускались: …; не прошло (запущено
+  harness): …; взято из записи кандидата (то же дерево): …; ревью: прочитал
+  агент openai (codex), только diff, ничего не запускал — одобрил; не
+  проверялось: e2e (изменения его не задели), smoke (не запускался), x (не
+  запустилась — отказ среды)». У ревью вместо «только diff, ничего не
+  запускал» — «и запускал команды: N (по записи controller)» или «запуск
+  команд не записан», вместо вердикта при ошибке протокола — «ответ не по
+  протоколу — вердикта нет». Предел — 1000 символов, у отчёта — 500.
+
+`status` — `works[].verification` (`status --human` — строка `проверки:`),
+`explain` — `verification[]` (`workId` и те же поля, не больше 100 строк;
+`explain --human` — раздел «Проверки и ревью — кто и как»), `result` и
+`deliver` — `verification`, отчёт — `works.rows[].verification` (раздел
+«What was verified and how» в Markdown и HTML). Текст для человека не
+говорит «проверено» или "checked" без того, кто и как проверял: тест
+сканирует вывод `status --human`, `explain --human`, отчёта и словари
+текстов.
 
 `status --human --watch [--interval S]` (1–3600 с, по умолчанию 5) печатает
 тот же текст заново каждые S секунд, пока доска не успокоится: нет идущих

@@ -11,6 +11,7 @@ import {
 import { sourceRefSchema } from './work.ts';
 import { acceptedTargetSchema } from './target.ts';
 import { errorCodes, type ErrorCode } from './errors.ts';
+import { workVerificationSchema } from './verification-view.ts';
 
 export const findingSchema = z.strictObject({
   /** Уровень находки как его назвал reviewer: `blocking` или `note`. */
@@ -326,6 +327,11 @@ export const resultEnvelopeSchema = z.strictObject({
    * не принят или хост его не вычисляет.
    */
   target: acceptedTargetSchema.optional(),
+  /**
+   * Что проверено и как у попытки результата (`workVerificationSchema`):
+   * gates и ревью её записей, сводная строка. Нет поля — ответ прежней версии.
+   */
+  verification: workVerificationSchema.optional(),
 });
 export type ResultEnvelope = z.infer<typeof resultEnvelopeSchema>;
 

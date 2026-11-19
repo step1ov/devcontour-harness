@@ -151,6 +151,11 @@ export function generatePolicy(input: {
   packageManager?: { name: string; version?: string };
   /** Хранилище зависимостей pnpm (`init --lean` в pnpm-репозитории). */
   dependencyStore?: boolean;
+  /**
+   * Технические вопросы исполнителя решает ведущий
+   * (`init --lead-technical-answers`): `inputPolicy.leadAnswers.technical`.
+   */
+  leadTechnicalAnswers?: boolean;
 }): GeneratedPolicy {
   const { profile, writer, packageManager, model } = input;
   const lead = input.lead ?? writer;
@@ -211,6 +216,9 @@ export function generatePolicy(input: {
     roles,
     review: { code: rule(writer), plan: rule(lead), contract: rule(lead) },
     ...profileExecution(profile),
+    ...(input.leadTechnicalAnswers
+      ? { inputPolicy: { threshold: 7, criticalPaths: [], leadAnswers: { technical: true } } }
+      : {}),
   };
   const { runTimeoutMs } = executionFieldsOf(policy, profile);
   if (runTimeoutMs !== policy.runTimeoutMs) policy.runTimeoutMs = runTimeoutMs;

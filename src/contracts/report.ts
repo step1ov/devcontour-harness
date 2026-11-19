@@ -3,6 +3,11 @@ import { baseMoveActors, cancelActors, environmentCauses, retryActors } from './
 import { failureKindSchema, jointResetActors, pauseReasons } from './execution.ts';
 import { isoTimeSchema } from './primitives.ts';
 import { acceptedTargetSchema } from './target.ts';
+import {
+  VERIFICATION_REPORT_LINE,
+  VERIFICATION_REPORT_ROWS,
+  workVerificationSchema,
+} from './verification-view.ts';
 
 /**
  * Отчёт об эффекте harness (`harness report`, `valueReport`): что дали
@@ -171,6 +176,18 @@ const workRowSchema = z.strictObject({
   unknownCalls: count,
   costBound: z.enum(reportBounds),
   rejections: z.array(countRow(z.enum(failureBuckets))).max(failureBuckets.length),
+  /**
+   * Что проверено и как у принявшей (иначе последней) попытки: не больше
+   * `VERIFICATION_REPORT_ROWS` строк и сводная строка. Нет поля — у поручения
+   * нет попыток или отчёт прежней версии.
+   */
+  verification: workVerificationSchema
+    .extend({
+      rows: workVerificationSchema.shape.rows.max(VERIFICATION_REPORT_ROWS),
+      line: z.string().max(VERIFICATION_REPORT_LINE),
+      lineEn: z.string().max(VERIFICATION_REPORT_LINE),
+    })
+    .optional(),
 });
 
 export const valueReportSchema = z.strictObject({
@@ -527,7 +544,19 @@ export const valueReportSchema = z.strictObject({
        * оператор (человек), ведущий агент (только с `inputPolicy.leadAnswers`)
        * или хост от их имени. Нет поля — отчёт до alpha.54.
        */
-      answeredBy: z.strictObject({ operator: count, lead: count, host: count }).optional(),
+      answeredBy: z
+        .strictObject({
+          operator: count,
+          lead: count,
+          host: count,
+          /**
+           * Из ответов ведущего — решённые им как технический вопрос
+           * (`inputPolicy.leadAnswers.technical`, с причиной). Нет поля —
+           * отчёт до alpha.55.
+           */
+          leadTechnical: count.optional(),
+        })
+        .optional(),
     })
     .optional(),
   works: z.strictObject({

@@ -8,6 +8,7 @@ import {
   HarnessError,
   REPORT_LIMITS,
   REPORT_VERSION,
+  attemptStateSchema,
   containsToken,
   failureBuckets,
   valueReportSchema,
@@ -494,6 +495,61 @@ test('report: пределы — 50 строк поручений, 50 ссыло
   assert.ok(Buffer.byteLength(JSON.stringify(r)) <= REPORT_LIMITS.jsonBytes);
   assert.ok(Buffer.byteLength(big.html) <= REPORT_LIMITS.htmlBytes);
   assert.ok(Buffer.byteLength(big.md) <= REPORT_LIMITS.htmlBytes);
+});
+
+test('report: проверка поручений в пределе байт — длинные ID gates не ломают JSON ≤ 512 КБ', () => {
+  const input = reportFixture();
+  const template = input.attempts.find((a) => a.id === 'run-gate-2')!;
+  const ok = input.attempts.find((a) => a.id === 'run-gate-3')!;
+  const base = input.works.find((w) => w.id === 'gate')!;
+  const works: WorkState[] = [];
+  const attempts: AttemptState[] = [];
+  // Наибольший допустимый ID gate (80 символов).
+  const gate = (k: number) => 'g'.repeat(78) + String(k).padStart(2, '0');
+  for (let i = 0; i < 60; i++) {
+    const id = `work-${String(i).padStart(3, '0')}`;
+    works.push({ ...base, id, order: { ...base.order, id, title: 'T'.repeat(180) } });
+    const evidence = Array.from({ length: 8 }, (_, k) => ({
+      ...template.evidence[0]!,
+      id: `${id}-e${k}`,
+      runId: `${id}-1`,
+      phase: 'candidate' as const,
+      sha: ok.candidateSha!,
+      gate: gate(k),
+      passed: true,
+    }));
+    attempts.push(
+      attemptStateSchema.parse({
+        ...ok,
+        id: `${id}-1`,
+        workId: id,
+        token: tokenOf(`${id}-1`),
+        requiredGates: Array.from({ length: 12 }, (_, k) => gate(k)),
+        evidence,
+      }),
+    );
+  }
+  const big = render({ works, attempts });
+  valueReportSchema.parse(big.report);
+  assert.ok(Buffer.byteLength(JSON.stringify(big.report)) <= REPORT_LIMITS.jsonBytes);
+  const rows = big.report.works.rows;
+  const verification = rows.filter((r) => r.verification).map((r) => r.verification!);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(verification)) <= 64 * 1024 + rows.length * 2,
+    'проверки — в своём пределе',
+  );
+  const withRows = verification.filter((v) => v.rows.length);
+  assert.ok(withRows.length > 0, 'первые поручения — со строками');
+  assert.ok(
+    withRows[0]!.rows.some((r) => r.how === 'executed-by-harness'),
+    'запись кандидата текущего SHA — запущено harness',
+  );
+  assert.ok(
+    verification.length < rows.length || verification.some((v) => !v.rows.length),
+    'сверх предела — без строк или без проверки',
+  );
+  for (const v of verification.filter((x) => !x.rows.length)) assert.ok(v.rowsTruncated! > 0);
+  assert.ok(Buffer.byteLength(big.html) <= REPORT_LIMITS.htmlBytes);
 });
 
 test('report: ISO-неделя UTC с понедельника, включая границу года', () => {

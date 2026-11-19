@@ -1,6 +1,9 @@
 import {
   INPUT_AUTONOMOUS,
+  INPUT_FOR_USER_MAX,
   INPUT_LIMITS,
+  canonicalQuestion,
+  inputImpacts,
   INPUT_SEVERITY_MAX,
   criticalAreas,
   implementationResultSchema,
@@ -114,7 +117,10 @@ export function evaluateInput(
   const request = output.inputRequest ?? undefined;
   if (!output.completed) {
     if (!request) return { decision: { kind: 'unfinished' }, assumptions, followUps, criticalHits };
-    const question: RatedQuestion = { question: request, ...rate(request, criticalHits) };
+    const question: RatedQuestion = {
+      question: canonicalQuestion(request),
+      ...rate(request, criticalHits),
+    };
     if (stops(policy, question.effectiveSeverity))
       return {
         decision: { kind: 'stop', question, fromAssumption: false },
@@ -170,7 +176,15 @@ export function evaluateInput(
 }
 
 /** Пределы вопроса и допущений, названные writer: ответ сверх них — вне схемы. */
-const INPUT_LIMITS_TEXT = `Limits: question up to ${INPUT_LIMITS.question} characters; up to ${INPUT_LIMITS.options} options, each id matching [A-Za-z0-9_-]{1,40} (no spaces), label up to 300 characters, consequence up to 1000 characters or null; recommended is one of the option ids or null; rationale up to ${INPUT_LIMITS.rationale} characters; severity an integer 1-10; affects only from the listed areas; up to ${INPUT_LIMITS.assumptions} assumptions, each chosen up to 300 characters.`;
+const INPUT_LIMITS_TEXT = `Limits: question up to ${INPUT_LIMITS.question} characters; up to ${INPUT_LIMITS.options} options, each id matching [A-Za-z0-9_-]{1,40} (no spaces), label up to 300 characters, consequence up to 1000 characters or null, forUser up to ${INPUT_FOR_USER_MAX} characters or null; impact "user-visible", "technical" or null; recommended is one of the option ids or null; rationale up to ${INPUT_LIMITS.rationale} characters; severity an integer 1-10; affects only from the listed areas; up to ${INPUT_LIMITS.assumptions} assumptions, each chosen up to 300 characters.`;
+
+/**
+ * Как writer классифицирует вопрос: технический — только когда ни один
+ * вариант не меняет того, что видит и получает пользователь продукта; в
+ * сомнении — `user-visible`. `forUser` — строка для человека без терминов.
+ */
+const IMPACT_TEXT =
+  'Classify the question with `impact`: "technical" only when no option changes what the users of the product see or get — behaviour, texts, data, timing, access or cost stay the same and the choice is internal (a library, code structure, internal naming, a test approach); otherwise "user-visible". When unsure, use "user-visible": such a question goes to a person, a technical one may be decided by the lead. For each option give `forUser`: one short sentence in plain words, without technical terms and in the language of the work order, saying what changes for the user if this option is chosen (for a technical question say that nothing changes for the user), or null if you cannot tell.';
 
 /** Раздел запроса writer: порог, шкала, критические области и пути, как задать вопрос. */
 export function inputPolicyText(policy: InputPolicy) {
@@ -194,7 +208,8 @@ export function inputPolicyText(policy: InputPolicy) {
     scale,
     critical,
     `If a fork has severity below ${policy.threshold}, decide it yourself, continue, and record it in \`assumptions\` (question, chosen, rationale, severity, affects).`,
-    `If a fork has severity ${policy.threshold} or higher, do not guess: stop, leave your partial edits in the worktree uncommitted, and return completed=false with \`inputRequest\` (question, up to 6 options each with its consequence, recommended option id or null, severity, rationale, affects). Asking below the threshold is a protocol violation and the attempt counts as unfinished.`,
+    `If a fork has severity ${policy.threshold} or higher, do not guess: stop, leave your partial edits in the worktree uncommitted, and return completed=false with \`inputRequest\` (question, up to 6 options each with its consequence and forUser, recommended option id or null, severity, rationale, affects, impact). Asking below the threshold is a protocol violation and the attempt counts as unfinished.`,
+    IMPACT_TEXT,
     'Otherwise return `inputRequest`: null. completed=true together with an inputRequest is invalid.',
     INPUT_LIMITS_TEXT,
   ].join(' ');
@@ -262,7 +277,10 @@ export function normalizeImplementation(
     'schema-migration': 'migration',
   };
   const areas = (value: unknown, what: string) => {
-    const list = Array.isArray(value) ? value : [];
+    // Одна область строкой — как список из неё; иное непустое значение не
+    // списком — названная, но нераспознанная область (минимум остаётся).
+    const scalar = !Array.isArray(value) && value !== undefined && value !== null && value !== '';
+    const list = Array.isArray(value) ? value : scalar ? [value] : [];
     const known = list
       .map((a) => areaAliases[text(a).trim().toLowerCase()])
       .filter((a): a is (typeof criticalAreas)[number] => a !== undefined);
@@ -296,13 +314,23 @@ export function normalizeImplementation(
       o.consequence === null || o.consequence === undefined
         ? null
         : clip(o.consequence, 1000, `последствие ${id}`);
-    return { id, label, consequence };
+    const forUser =
+      o.forUser === null || o.forUser === undefined
+        ? undefined
+        : clip(o.forUser, INPUT_FOR_USER_MAX, `для пользователя ${id}`) || undefined;
+    return { id, label, consequence, ...(forUser ? { forUser } : {}) };
   });
   const recommended =
     typeof q.recommended === 'string' && ids.has(q.recommended) ? ids.get(q.recommended)! : null;
   if (q.recommended !== null && q.recommended !== undefined && recommended === null)
     issues.push('рекомендуемый вариант не из вариантов — снят');
   const questionAreas = areas(q.affects, 'вопрос');
+  // Влияние вне перечня — консервативно `user-visible` (поле снято).
+  const impact = (inputImpacts as readonly unknown[]).includes(q.impact)
+    ? (q.impact as (typeof inputImpacts)[number])
+    : undefined;
+  if (q.impact !== null && q.impact !== undefined && impact === undefined)
+    issues.push('влияние вопроса вне перечня — снято (вопрос человеку)');
   const question = {
     question: clip(q.question, INPUT_LIMITS.question, 'вопрос') || 'Вопрос без текста',
     options,
@@ -310,6 +338,7 @@ export function normalizeImplementation(
     severity: rated(q.severity, 'вопрос', questionAreas),
     rationale: clip(q.rationale, INPUT_LIMITS.rationale, 'основание'),
     affects: questionAreas.areas,
+    ...(impact ? { impact } : {}),
   };
   const rawAssumptions = Array.isArray(raw.assumptions) ? raw.assumptions.filter(isRecord) : [];
   if (rawAssumptions.length > INPUT_LIMITS.assumptions)

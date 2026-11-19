@@ -24,6 +24,8 @@ import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
 import { reviewRecordSchema, reviewSubjectSummarySchema } from './review.ts';
 import { codeReviewRecordSchema } from './code-review.ts';
 import { acceptedTargetSchema } from './target.ts';
+import { workVerificationSchema } from './verification-view.ts';
+import { viewDataSchema } from './operator-view.ts';
 import { sourceRefSchema } from './work.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
 import {
@@ -49,6 +51,7 @@ import {
   inputRequestSchema,
   inputStateNames,
   inputTargetSchema,
+  leadAnswerBases,
 } from './input.ts';
 
 /**
@@ -555,6 +558,13 @@ export const cliCommands = {
       },
       { name: '--plan', value: 'flag', required: false, description: 'Только план, без записи' },
       {
+        name: '--lead-technical-answers',
+        value: 'flag',
+        required: false,
+        description:
+          'Технические вопросы исполнителя (результат для пользователя не меняется) решает ведущий с записанной причиной: inputPolicy.leadAnswers.technical в новой политике; без флага на вопросы, останавливающие работу, отвечает человек. Сохранённая политика без этого правила — PATH_CONFLICT content-differs',
+      },
+      {
         name: '--lean',
         value: 'flag',
         required: false,
@@ -791,6 +801,60 @@ export const cliCommands = {
     args: [],
     refusals: [],
   },
+  view: {
+    description:
+      'Представление оператора: один документ только для чтения для панели оператора (настройки, работы с этапом и попытками, ревью, вопросы, эскалации, сверка принятого, прогресс, история за окно, здоровье) с viewVersion и viewRevision; с --work — детали работы; не пишет и не создаёт каталог состояния',
+    writes: false,
+    idempotency:
+      'Только чтение. Те же состояние, политика, часы и параметры дают те же байты; source.token — SHA-256 содержимого без generatedAt: равный токен — то же представление',
+    args: [
+      state,
+      {
+        name: '--policy',
+        value: 'path',
+        required: false,
+        description:
+          'Политика исполнения; без неё — привязанная к состоянию (binding.json). Нет состояния и нет --policy — POLICY_REQUIRED; нет состояния с --policy — пустое представление. Отличие от привязанной — предупреждение POLICY_DIGEST_MISMATCH',
+      },
+      {
+        name: '--work',
+        value: 'id',
+        required: false,
+        description: 'Детали работы (WorkDetailView): строки попыток, проверки, ревью, вопросы',
+      },
+      {
+        name: '--no-titles',
+        value: 'flag',
+        required: false,
+        description: 'Без заголовков работ, текста вопросов и находок и queue.detail',
+      },
+      {
+        name: '--window',
+        value: 'text',
+        required: false,
+        description: 'Окно истории: 24h (по умолчанию) или 7d',
+      },
+      {
+        name: '--bucket',
+        value: 'text',
+        required: false,
+        description: 'Интервал истории: 15m (по умолчанию) или 1h',
+      },
+      {
+        name: '--lang',
+        value: 'text',
+        required: false,
+        description: 'Язык простых строк harness: ru (по умолчанию) или en',
+      },
+      {
+        name: '--view-version',
+        value: 'number',
+        required: false,
+        description: 'Мажорная версия документа; поддерживается 1',
+      },
+    ],
+    refusals: [],
+  },
   'source-check': {
     description:
       'Коннектор задач: подключение, идентичность и capabilities backend, совпадение проекта, проверка mapping; без мутаций, записи истории и создания состояния',
@@ -913,7 +977,14 @@ export const cliCommands = {
         value: 'text',
         required: false,
         description:
-          'Кто отвечает: operator (по умолчанию; словами человека) или lead — только на неблокирующие запросы или с разрешения inputPolicy.leadAnswers',
+          'Кто отвечает: operator (по умолчанию; словами человека) или lead — только на неблокирующие запросы или с разрешения inputPolicy.leadAnswers (technical: технические вопросы с --reason; maxSeverity: до порога серьёзности)',
+      },
+      {
+        name: '--reason',
+        value: 'text',
+        required: false,
+        description:
+          'Почему ведущий выбрал ответ (до 1000 знаков); обязательна для --actor lead на технический вопрос по inputPolicy.leadAnswers.technical',
       },
       requestVersionArg,
     ],
@@ -1164,6 +1235,15 @@ export type CliCommand = keyof typeof cliCommands;
 const blocker = z.strictObject({
   code: z.enum(Object.keys(errorCodes) as [ErrorCode, ...ErrorCode[]]),
   message: z.string().max(4000),
+  /**
+   * Только `status`: причина простыми словами по-русски и по-английски
+   * («ждёт зависимости a», «пауза очереди: бюджет») и кто её снимает
+   * (`actor` — как у диагноза `explain`; `null` — никто, итог). Нет полей —
+   * ответ другой команды или версии.
+   */
+  plain: z.string().min(1).max(300).optional(),
+  plainEn: z.string().min(1).max(300).optional(),
+  actor: z.enum(diagnosisActors).nullable().optional(),
 });
 
 export const validateDataSchema = z.strictObject({
@@ -1304,6 +1384,23 @@ export const attemptSummarySchema = z.strictObject({
       left: z.number().int().min(0),
     })
     .optional(),
+  /**
+   * Почему поручение повторяется: последний отказ (последняя по порядку
+   * попытка с корзиной `failureBucketOf`) — попытка, корзина, класс, время и
+   * причина простыми словами по-русски и по-английски («окружение — порт
+   * 3000 занят»). Текст строится из класса отказа, ID gates и номера порта,
+   * без свободного текста ошибки. Нет поля — отказов нет.
+   */
+  lastFailure: z
+    .strictObject({
+      runId: z.string().min(1).max(200),
+      bucket: z.enum(failureBuckets),
+      kind: failureKindSchema.optional(),
+      at: isoTimeSchema.optional(),
+      plain: z.string().min(1).max(300),
+      plainEn: z.string().min(1).max(300),
+    })
+    .optional(),
   line: z.string().max(1000),
 });
 
@@ -1397,6 +1494,12 @@ export const statusDataSchema = z.strictObject({
           severity: z.number().int().min(1).max(10),
           /** Кто записал последний ответ; нет поля — ответа нет. */
           answeredBy: z.enum(['operator', 'lead', 'host']).optional(),
+          /** Исполнитель пометил вопрос техническим; нет поля — вопрос меняет результат для пользователя. */
+          impact: z.literal('technical').optional(),
+          /** Правило политики, по которому принят последний ответ ведущего (`technical` — «решено ведущим (технический вопрос)»). */
+          answerBasis: z.enum(leadAnswerBases).optional(),
+          /** Ждёт ответа, и действующая политика разрешает ответ ведущему — по этому правилу. */
+          leadMay: z.enum(leadAnswerBases).optional(),
         })
         .optional(),
       /** Неблокирующие запросы ведущему в ожидании (автономный режим). */
@@ -1407,6 +1510,12 @@ export const statusDataSchema = z.strictObject({
       attemptSummary: attemptSummarySchema.optional(),
       /** Этап, время в нём, что дальше и что нужно от оператора (`workStageSchema`). */
       stage: workStageSchema.optional(),
+      /**
+       * Что проверено и как: gates и ревью принявшей (иначе последней)
+       * попытки и сводная строка (`workVerificationSchema`). Нет поля —
+       * попыток нет или идущая попытка ещё ничего не записала.
+       */
+      verification: workVerificationSchema.optional(),
       /**
        * Принятая работа против текущего target ref (`harness status`): коммиты
        * и файлы после приёмки не проверены. Нет поля — работа не принята или
@@ -1595,6 +1704,19 @@ export const doctorDataSchema = z.strictObject({
     )
     .optional(),
   problems: z.array(z.string()),
+  /**
+   * Действующее правило ответов на вопросы исполнителя (есть, когда задана
+   * политика): технические решает ведущий (`inputPolicy.leadAnswers.technical`),
+   * порог ответов ведущего (`maxSeverity`), правило простыми словами.
+   */
+  questions: z
+    .strictObject({
+      leadTechnical: z.boolean(),
+      maxSeverity: z.number().int().min(1).max(10).optional(),
+      line: z.string(),
+      lineEn: z.string(),
+    })
+    .optional(),
   /**
    * Предупреждения, не делающие среду негодной; есть, когда задана политика.
    * Источники: порт ресурса занят только на wildcard-адресе, а loopback
@@ -1949,6 +2071,23 @@ export const initDataSchema = z.strictObject({
       auth: z.enum(['ok', 'missing', 'unknown']),
     }),
   ),
+  /**
+   * Кто отвечает на вопросы исполнителя, останавливающие работу, при
+   * действующей политике: технические решает ведущий (`leadTechnical`,
+   * `inputPolicy.leadAnswers.technical`; `init --lead-technical-answers`) или
+   * все — человек; `maxSeverity` — прежний порог ответов ведущего. Источник —
+   * флаг для новой политики, сохранённая политика или умолчание; `line` /
+   * `lineEn` — правило простыми словами. Нет поля — ответ до alpha.55.
+   */
+  questions: z
+    .strictObject({
+      leadTechnical: z.boolean(),
+      maxSeverity: z.number().int().min(1).max(10).optional(),
+      source: z.enum(['option', 'policy', 'default']),
+      line: z.string(),
+      lineEn: z.string(),
+    })
+    .optional(),
   /** Предупреждения подготовки: не отказ, но требуют внимания до запуска. */
   warnings: z.array(
     z.strictObject({
@@ -2038,6 +2177,14 @@ export const explainDataSchema = z.strictObject({
     .optional(),
   /** Поручений сверх предела строк `attempts` (100); нет поля — все показаны. */
   attemptsTruncated: z.number().int().positive().optional(),
+  /**
+   * Что проверено и как по каждому поручению выбора с попытками — та же
+   * проверка, что `status` (`workVerificationSchema`); строк не больше 100.
+   */
+  verification: z
+    .array(z.strictObject({ workId: idSchema, ...workVerificationSchema.shape }))
+    .max(100)
+    .optional(),
   /** Сводка ревью плана и контрактов — та же, что у `status`; нет поля — раундов нет. */
   reviews: z.array(reviewSubjectSummarySchema).max(50).optional(),
   /** Предметов ревью сверх предела строк `reviews` (50); нет поля — все показаны. */
@@ -2124,6 +2271,7 @@ export const cliDataSchemas = {
   'plan-request': planRequestDataSchema,
   'plan-check': planCheckDataSchema,
   capabilities: operationCatalogSchema,
+  view: viewDataSchema,
   'source-check': sourceCheckDataSchema,
   'source-snapshot': sourceSnapshotDataSchema,
   'source-status': sourceStatusDataSchema,

@@ -86,7 +86,7 @@ function inputsLine(i: NonNullable<ValueReport['inputs']>) {
   return (
     `Executor questions that stopped an attempt: ${i.questions}` +
     (by
-      ? ` (answered by the operator ${by.operator}, by the lead agent ${by.lead}${by.host ? `, by the host ${by.host}` : ''})`
+      ? ` (answered by the operator ${by.operator}, by the lead agent ${by.lead}${by.leadTechnical ? ` — of them decided by the lead as technical questions ${by.leadTechnical}` : ''}${by.host ? `, by the host ${by.host}` : ''})`
       : '') +
     `; awaiting an answer ${i.awaitingAnswer}, answered but not applied ${i.answeredNotApplied}. ` +
     `Below the threshold (the executor decided): ${i.declined}; requests to the lead: ${i.followUps}; executor assumptions: ${i.assumptions}.`
@@ -310,6 +310,12 @@ export function reportBlocks(r: ValueReport): Block[] {
     );
     if (r.works.truncated)
       p(`Showing the newest ${r.works.rows.length} of ${r.works.total} tasks.`, true);
+    // Что проверено и как: кто запускал gates, кто читал diff, что не проверялось.
+    const verified = r.works.rows.filter((x) => x.verification);
+    if (verified.length) {
+      h(3, 'What was verified and how');
+      list(verified.map((x) => `${x.id}: ${x.verification!.lineEn}.`));
+    }
   } else p('No task finished in the window.', true);
 
   if (r.targets) {

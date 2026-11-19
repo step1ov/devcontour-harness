@@ -62,6 +62,8 @@ const laterCommands: readonly string[] = [
   'lean',
   // Обзор уже написанной ветки (0.1.0-alpha.54).
   'review-code',
+  // Представление оператора (0.1.0-alpha.55).
+  'view',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -166,6 +168,8 @@ const ADDITIVE_ARGS = new Set([
   // Обновляемый текст status для человека (0.1.0-alpha.54).
   'status--watch',
   'status--interval',
+  // Технические вопросы решает ведущий (0.1.0-alpha.55).
+  'init--lead-technical-answers',
 ]);
 /**
  * Текст `--writer` init в H2. 0.1.0-alpha.50 меняет умолчание: writer —
@@ -196,6 +200,9 @@ const ADDITIVE_ENUM_VALUES = new Set([
   // Отказ окружения `harness smoke` и preflight; несовпадение версии backend коннектора.
   'LIFECYCLE_FAILED',
   'CONNECTOR_VERSION_MISMATCH',
+  // Представление оператора (`harness view`, 0.1.0-alpha.55).
+  'POLICY_REQUIRED',
+  'VIEW_TOO_LARGE',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
@@ -210,10 +217,10 @@ test('H3-01: capabilities объявлена в договоре CLI — без 
   assert.equal(root.operationCatalogSchema, operationCatalogSchema);
 });
 
-test('H3-01: ключи sharedOperations = sharedOperationNames — пять операций в порядке декларации', () => {
+test('H3-01: ключи sharedOperations = sharedOperationNames — операции в порядке декларации', () => {
   assert.deepEqual(
     [...sharedOperationNames],
-    ['init', 'explain', 'plan-request', 'plan-check', 'capabilities'],
+    ['init', 'explain', 'plan-request', 'plan-check', 'capabilities', 'view'],
   );
   assert.deepEqual(Object.keys(sharedOperations), [...sharedOperationNames]);
   for (const name of Object.keys(cliCommands))
@@ -298,6 +305,7 @@ test('H3-01: API каждой общей операции опубликован
     'plan-request': 'planRequestOf',
     'plan-check': 'planCheck',
     capabilities: 'harnessCapabilities',
+    view: 'harnessView',
   });
   const exports = root as unknown as Record<string, unknown>;
   for (const c of sharedOperationNames)
@@ -358,7 +366,10 @@ test('H3-01: прежние команды и схемы их данных не 
     if (v && typeof v === 'object' && !Array.isArray(v) && 'properties' in v) {
       const o = v as { properties: Record<string, unknown>; required?: string[] };
       if (o.properties && 'facts' in o.properties && 'lead' in o.properties) {
-        const added = ['lead', 'review', 'runtimes', 'warnings'];
+        // `questions` — правило ответов на вопросы исполнителя (0.1.0-alpha.55).
+        // Необязательное: в `required` его нет (ответ прежней версии валиден).
+        assert.ok(!o.required?.includes('questions'), 'init.questions необязательно');
+        const added = ['lead', 'review', 'runtimes', 'warnings', 'questions'];
         const properties = { ...o.properties };
         for (const key of added) delete properties[key];
         return { ...o, properties, required: o.required?.filter((r) => !added.includes(r)) };
@@ -444,6 +455,8 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.checkouts;
       delete rest.ports;
       delete rest.warnings;
+      // Правило ответов на вопросы исполнителя словами (0.1.0-alpha.55).
+      delete rest.questions;
       return rest;
     }
     // Аддитивные поля ответов коннектора: пакеты `tasks[].context` (alpha.13) и
@@ -472,12 +485,31 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.stage;
       // Принятая версия против текущего target ref (`works[].target`, 0.1.0-alpha.54).
       delete rest.target;
+      // Что проверено и как (`works[].verification`, 0.1.0-alpha.55).
+      delete rest.verification;
+      return rest;
+    }
+    // Аддитивные поля блокировки — причина простыми словами и кто её снимает
+    // (`blockers[].plain`, `plainEn`, `actor`, 0.1.0-alpha.55).
+    if (k === 'properties' && v && typeof v === 'object' && 'code' in v && 'plain' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.plain;
+      delete rest.plainEn;
+      delete rest.actor;
+      return rest;
+    }
+    // Аддитивное поле строки поручения отчёта — что проверено и как (0.1.0-alpha.55).
+    if (k === 'properties' && v && typeof v === 'object' && 'rejections' in v && 'costBound' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.verification;
       return rest;
     }
     // Аддитивное поле result/deliver — принятая версия против target ref (0.1.0-alpha.54).
     if (k === 'properties' && v && typeof v === 'object' && 'result' in v && 'delivery' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.target;
+      // Что проверено и как у попытки результата (0.1.0-alpha.55).
+      delete rest.verification;
       return rest;
     }
     // Аддитивное поле explain — сводка попыток по поручениям (0.1.0-alpha.52)
@@ -488,6 +520,8 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.attemptsTruncated;
       delete rest.reviews;
       delete rest.reviewsTruncated;
+      // Что проверено и как по поручениям (0.1.0-alpha.55).
+      delete rest.verification;
       return rest;
     }
     // Аддитивные поля status — снимок наблюдателя `--detail`, сводка ревью
@@ -536,6 +570,12 @@ test('H3-01: прежние команды и схемы их данных не 
   // Хеш H2 вырезает target status и result (0.1.0-alpha.54): объявление держит эта проверка.
   assert.ok(JSON.stringify(data.status).includes('"commitsSinceAccepted"'), 'status: target');
   assert.ok(JSON.stringify(data.result).includes('"commitsSinceAccepted"'), 'result: target');
+  // Хеш H2 вырезает проверку, простые блокировки и последний отказ (0.1.0-alpha.55).
+  assert.ok(JSON.stringify(data.status).includes('"read-by-reviewer"'), 'status: verification');
+  assert.ok(JSON.stringify(data.result).includes('"read-by-reviewer"'), 'result: verification');
+  assert.ok(JSON.stringify(data.explain).includes('"read-by-reviewer"'), 'explain: verification');
+  assert.ok(JSON.stringify(data.status).includes('"plainEn"'), 'status: blockers[].plain');
+  assert.ok(JSON.stringify(data.status).includes('"lastFailure"'), 'status: lastFailure');
   // Хеш H2 вырезает пробу портов и предупреждения doctor: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.doctor).includes('"ports"'), 'doctor: проба портов');
   assert.ok(JSON.stringify(data.doctor).includes('"warnings"'), 'doctor: предупреждения');

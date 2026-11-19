@@ -251,6 +251,14 @@ test('status и explain: строка сводки на поручение со�
     const { workId: _id, ...fromExplain } = all.attempts[0]!;
     void _id;
     assert.deepEqual(fromExplain, w);
+    // Что проверено и как — та же проверка, что у status (0.1.0-alpha.55).
+    const verified = status.works.find((y) => y.id === 'w')!.verification!;
+    // Принятие записью хранилища без evidence: обязательный gate не запускался.
+    assert.deepEqual(
+      verified.rows.map((r) => [r.gate, r.result, r.how]),
+      [['unit', 'skipped', 'not-run']],
+    );
+    assert.deepEqual(all.verification, [{ workId: 'w', ...verified }]);
     const one = await diagnoseState({ ...opts, workId: 'x' });
     assert.deepEqual(
       one.attempts?.map((r) => r.workId),

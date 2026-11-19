@@ -54,7 +54,8 @@ import {
   inputRequestId,
   inputSourceId,
   latestAnswer,
-  leadMayAnswer,
+  leadAnswerBasis,
+  impactOf,
   pinnedInputPolicy,
   targetDigest,
   type JointVerification,
@@ -2760,24 +2761,52 @@ export class Engine {
       kind?: InputAnswer['kind'];
       actor: InputActor;
       messageRef?: string;
+      /** Почему ведущий выбрал ответ; обязательна для технического вопроса (`leadAnswers.technical`). */
+      reason?: string;
     },
     expectedVersion: number,
   ) {
     return this.tx('input.answered', (tx) => {
       const { owner, request } = this.requestIn(tx, id);
       // Блокирующий вопрос адресован человеку: ведущий отвечает только с явного
-      // разрешения политики и до её порога серьёзности. Проверка — до повтора:
-      // прежний ответ ведущего не подтверждается после отзыва разрешения.
+      // разрешения политики — технический вопрос без минимумов
+      // (`leadAnswers.technical`, с причиной) или до порога серьёзности
+      // (`leadAnswers.maxSeverity`). Проверка — до повтора: прежний ответ
+      // ведущего не подтверждается после отзыва разрешения.
       const inputPolicy = inputPolicyOf(this.policy);
-      if (answer.actor.kind === 'lead' && !leadMayAnswer(request, inputPolicy))
+      const basis =
+        answer.actor.kind === 'lead' ? leadAnswerBasis(request, inputPolicy) : undefined;
+      if (basis === null) {
+        const lead = inputPolicy.leadAnswers;
+        const impact = impactOf(request.question);
+        const why =
+          lead?.technical === true
+            ? 'политика разрешает ведущему только технические вопросы без критических областей и путей' +
+              (lead.maxSeverity !== undefined ? ` до серьёзности ${lead.maxSeverity}` : '') +
+              (impact !== 'technical'
+                ? ', а этот меняет результат для пользователя'
+                : request.floors.length
+                  ? ', а этот касается критической области или пути'
+                  : ', а этот серьёзнее порога')
+            : lead?.maxSeverity !== undefined
+              ? `политика разрешает ведущему ответы до серьёзности ${lead.maxSeverity}`
+              : 'политика не разрешает ответы ведущего (inputPolicy.leadAnswers)';
         throw new HarnessError(
           'OPERATOR_ANSWER_REQUIRED',
-          `Запрос ${id}: блокирующий вопрос исполнителя (серьёзность ${request.effectiveSeverity}) адресован человеку — ` +
-            (inputPolicy.leadAnswers
-              ? `политика разрешает ведущему ответы до серьёзности ${inputPolicy.leadAnswers.maxSeverity}. `
-              : 'политика не разрешает ответы ведущего (inputPolicy.leadAnswers). ') +
+          `Запрос ${id}: блокирующий вопрос исполнителя (серьёзность ${request.effectiveSeverity}, ${impact === 'technical' ? 'технический' : 'меняет результат для пользователя'}) адресован человеку — ` +
+            why +
+            '. ' +
             'Передайте человеку вопрос, варианты и рекомендацию дословно и запишите его ответ: input-answer --actor operator.',
         );
+      }
+      const reason = answer.reason?.trim() || undefined;
+      if (basis === 'technical' && !reason)
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `Запрос ${id}: технический вопрос ведущий решает с причиной — input-answer --actor lead --reason "<почему этот вариант>"`,
+          [{ path: ['--reason'], message: 'reason-required' }],
+        );
+      const leadBasis = basis === 'technical' || basis === 'severity' ? basis : undefined;
       const text = answer.text.trim();
       const content = {
         text,
@@ -2793,7 +2822,10 @@ export class Engine {
         // Другой актёр или другое сообщение хоста — другой ответ, а не повтор.
         last.actor.kind === answer.actor.kind &&
         last.actor.id === answer.actor.id &&
-        last.messageRef === answer.messageRef
+        last.messageRef === answer.messageRef &&
+        // Другая причина или другое правило приёма — новая версия ответа.
+        last.reason === reason &&
+        last.basis === leadBasis
       )
         return { request, answer: last, changed: false };
       if (!['pending', 'answered'].includes(request.lifecycle))
@@ -2822,6 +2854,8 @@ export class Engine {
         ...content,
         actor: structuredClone(answer.actor),
         ...(answer.messageRef ? { messageRef: answer.messageRef } : {}),
+        ...(leadBasis ? { basis: leadBasis } : {}),
+        ...(reason ? { reason } : {}),
         digest: answerDigest(id, { revision, ...content }),
         at: iso(this.now()),
       };

@@ -5,7 +5,8 @@ import type { RuntimeAdapter } from '../contracts/ports.ts';
 import { doctor } from '../control/doctor.ts';
 import { Harness } from '../control/harness.ts';
 import { reviewSummaryRows, reviewsText } from '../control/review-summary.ts';
-import { attemptSummaries, type attemptSummaryView } from '../control/status.ts';
+import { attemptSummaries, attemptsByWork, type attemptSummaryView } from '../control/status.ts';
+import { verificationOf, type WorkVerification } from '../report/verification.ts';
 import { explainStop, type StopDiagnosis, type StopInput } from '../projections/stop.ts';
 import { stopInputsOf } from './state.ts';
 
@@ -38,6 +39,7 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
   let stateInputs: StopInput[];
   let attempts: AttemptSummaryRow[];
   let attemptsTruncated: number;
+  let verification: VerificationRow[];
   let reviews: ReviewSubjectSummary[];
   let reviewsTruncated: number;
   try {
@@ -48,16 +50,21 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
     });
     // Сводка попыток каждого поручения выбора — та же, что `status`; строк
     // не больше `EXPLAIN_ATTEMPT_ROWS`, остальные — числом.
-    ({ attempts, attemptsTruncated } = h.engine.read((v) => {
+    ({ attempts, attemptsTruncated, verification } = h.engine.read((v) => {
       const summaryOf = attemptSummaries(h, v);
+      const attemptsOf = attemptsByWork(v);
       const works = v
         .works()
         .filter((w) => options.workId === undefined || w.id === options.workId);
+      const shown = works.slice(0, EXPLAIN_ATTEMPT_ROWS);
       return {
-        attempts: works
-          .slice(0, EXPLAIN_ATTEMPT_ROWS)
-          .map((w) => ({ workId: w.id, ...summaryOf(w) })),
+        attempts: shown.map((w) => ({ workId: w.id, ...summaryOf(w) })),
         attemptsTruncated: Math.max(0, works.length - EXPLAIN_ATTEMPT_ROWS),
+        // Что проверено и как — та же проверка, что у `status`.
+        verification: shown.flatMap((w) => {
+          const x = verificationOf(w, attemptsOf(w.id));
+          return x ? [{ workId: w.id, ...x }] : [];
+        }),
       };
     }));
     // Ревью плана и контрактов — та же сводка, что у `status`.
@@ -81,10 +88,14 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
     diagnoses: [...runtimes, ...stateInputs].map(explainStop),
     attempts,
     ...(attemptsTruncated ? { attemptsTruncated } : {}),
+    ...(verification.length ? { verification } : {}),
     ...(reviews.length ? { reviews } : {}),
     ...(reviewsTruncated ? { reviewsTruncated } : {}),
   };
 }
+
+/** Строка проверки поручения в ответе `explain`. */
+export type VerificationRow = { workId: string } & WorkVerification;
 
 /** Строка сводки попыток поручения в ответе `explain`. */
 export type AttemptSummaryRow = { workId: string } & ReturnType<typeof attemptSummaryView>;
@@ -94,6 +105,7 @@ export interface ExplainData {
   diagnoses: StopDiagnosis[];
   attempts?: AttemptSummaryRow[];
   attemptsTruncated?: number;
+  verification?: VerificationRow[];
   reviews?: ReviewSubjectSummary[];
   reviewsTruncated?: number;
 }
@@ -120,10 +132,19 @@ export function explainText(data: ExplainData): string {
     : 'Остановок нет.\n';
   return (
     stops +
+    verificationText(data.verification ?? []) +
     attemptsText(data.attempts ?? []) +
     (data.attemptsTruncated ? `  … и ещё поручений: ${data.attemptsTruncated}\n` : '') +
     reviewsText(data.reviews, data.reviewsTruncated)
   );
+}
+
+/** Раздел «Проверки и ревью — кто и как» текста `--human`: сводная строка на поручение. */
+export function verificationText(rows: readonly { workId: string; line: string }[]): string {
+  if (!rows.length) return '';
+  return ['Проверки и ревью — кто и как:', ...rows.map((r) => `  ${r.workId}: ${r.line}`)]
+    .join('\n')
+    .concat('\n');
 }
 
 /** Раздел «Попытки» текста `--human`: строка сводки на поручение. */

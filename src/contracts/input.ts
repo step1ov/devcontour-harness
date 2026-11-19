@@ -8,6 +8,17 @@ import {
 } from './primitives.ts';
 import { sourceRefSchema } from './work.ts';
 import { digestOf } from './digest.ts';
+import { inputImpacts, leadAnswerBasis, leadAnswerBases } from './input-state.ts';
+
+export {
+  impactOf,
+  inputImpacts,
+  type InputImpact,
+  leadAnswerBasis,
+  leadAnswerBases,
+  leadAnswersRule,
+  type LeadAnswerBasis,
+} from './input-state.ts';
 
 /**
  * Вопрос исполнителя и продолжение после ответа (H02).
@@ -40,10 +51,22 @@ export const INPUT_LIMITS = {
   answers: 20,
   assumptions: 20,
   rationale: 2000,
+  /** Причина ответа ведущего на технический вопрос. */
+  reason: 1000,
 } as const;
 
 /** Потолок серьёзности; порог 11 — полностью автономный режим (исполнитель не останавливается). */
 export const INPUT_SEVERITY_MAX = 10;
+/** Предел строки варианта «что изменится для пользователя» (`forUser`). */
+export const INPUT_FOR_USER_MAX = 300;
+
+/**
+ * Влияние вопроса: `user-visible` — выбор меняет то, что увидит или получит
+ * пользователь продукта (поведение, тексты, данные, сроки, доступ);
+ * `technical` — выбор внутри реализации, результат для пользователя тот же.
+ * Нет поля — `user-visible` (консервативно: вопрос адресован человеку).
+ */
+export const inputImpactSchema = z.enum(inputImpacts);
 export const INPUT_AUTONOMOUS = 11;
 
 const severitySchema = z.number().int().min(1).max(INPUT_SEVERITY_MAX);
@@ -53,6 +76,12 @@ export const inputOptionSchema = z.strictObject({
   label: z.string().min(1).max(300),
   /** Чем обернётся выбор этого варианта; `null` — исполнитель не назвал. */
   consequence: z.string().max(1000).nullable(),
+  /**
+   * Что изменится для пользователя продукта при этом варианте — одна строка
+   * простыми словами, без терминов. Нет поля (или `null` в ответе writer) —
+   * исполнитель не назвал. Ведущий передаёт её человеку дословно.
+   */
+  forUser: z.string().max(INPUT_FOR_USER_MAX).nullable().optional(),
 });
 export type InputOption = z.infer<typeof inputOptionSchema>;
 
@@ -70,6 +99,11 @@ export const inputQuestionSchema = z
     severity: severitySchema,
     rationale: z.string().max(INPUT_LIMITS.rationale),
     affects: z.array(criticalAreaSchema).max(criticalAreas.length),
+    /**
+     * Влияние выбора (`inputImpacts`); нет поля или `null` — `user-visible`.
+     * Controller хранит только `technical` и `user-visible`, `null` снимает.
+     */
+    impact: inputImpactSchema.nullable().optional(),
   })
   .superRefine((q, ctx) => {
     const ids = q.options.map((o) => o.id);
@@ -83,6 +117,22 @@ export const inputQuestionSchema = z
       });
   });
 export type InputQuestion = z.infer<typeof inputQuestionSchema>;
+
+/**
+ * Каноническая запись вопроса: `null` необязательных полей ответа writer
+ * (`impact`, `forUser` вариантов) не хранится — запись без них та же, что у
+ * вопроса прежнего формата.
+ */
+export function canonicalQuestion(q: InputQuestion): InputQuestion {
+  const { impact, ...rest } = q;
+  return {
+    ...rest,
+    options: q.options.map(({ forUser, ...o }) =>
+      forUser === null || forUser === undefined ? o : { ...o, forUser },
+    ),
+    ...(impact === null || impact === undefined ? {} : { impact }),
+  };
+}
 
 /** Развилка, которую исполнитель решил сам: вопрос, выбор, основание, самооценка, области. */
 export const assumptionSchema = z.strictObject({
@@ -132,7 +182,22 @@ export const inputPolicySchema = z.strictObject({
    * `maxSeverity: 10`. Действует текущая политика процесса, а не
    * закреплённая в попытке: в попытку и в основание вопроса поле не пишется.
    */
-  leadAnswers: z.strictObject({ maxSeverity: severitySchema }).optional(),
+  leadAnswers: z
+    .union([
+      /** Прежнее правило (alpha.54): до порога серьёзности; `technical` — уточнение ниже. */
+      z.strictObject({ maxSeverity: severitySchema, technical: z.boolean().optional() }),
+      /**
+       * Явное согласие (opt-in), что ведущий решает технические вопросы
+       * (`impact: technical`) сам — `input-answer --actor lead` с
+       * обязательной причиной (`--reason`). С `technical: true` вопрос,
+       * меняющий результат для пользователя (`user-visible` или без поля), и
+       * вопрос с минимумом (`floors`: критическая область или критический
+       * путь) — только человеку при любом `maxSeverity`; `maxSeverity` тогда
+       * дополнительно ограничивает серьёзность технических вопросов.
+       */
+      z.strictObject({ maxSeverity: severitySchema.optional(), technical: z.literal(true) }),
+    ])
+    .optional(),
 });
 export type InputPolicy = z.infer<typeof inputPolicySchema>;
 export const DEFAULT_INPUT_POLICY: InputPolicy = { threshold: 7, criticalPaths: [] };
@@ -162,11 +227,13 @@ export const forOperator = (r: Pick<InputRequest, 'kind' | 'blocking'>) =>
  * серьёзность не выше порога.
  */
 export const leadMayAnswer = (
-  r: Pick<InputRequest, 'kind' | 'blocking' | 'effectiveSeverity'>,
+  r: Pick<InputRequest, 'kind' | 'blocking' | 'effectiveSeverity'> &
+    Partial<Pick<InputRequest, 'floors'>> & {
+      /** Нет `question` или `floors` (вызов alpha.54) — технический путь закрыт. */
+      question?: Pick<InputQuestion, 'impact'>;
+    },
   policy: Pick<InputPolicy, 'leadAnswers'>,
-) =>
-  !forOperator(r) ||
-  (policy.leadAnswers !== undefined && r.effectiveSeverity <= policy.leadAnswers.maxSeverity);
+) => leadAnswerBasis(r, policy) !== null;
 
 /** Кто ответил или закрыл запрос: оператор, ведущий агент или хост от их имени. */
 export const inputActorSchema = z.strictObject({
@@ -182,16 +249,39 @@ export type InputActor = z.infer<typeof inputActorSchema>;
  * непрозрачная ссылка хоста на сообщение обсуждения. `digest` —
  * `answerDigest(requestId, answer)`.
  */
-export const inputAnswerSchema = z.strictObject({
-  revision: z.number().int().positive(),
-  text: z.string().min(1).max(INPUT_LIMITS.answer),
-  optionId: z.string().max(40).nullable(),
-  kind: z.enum(['clarification', 'requirement-change']),
-  actor: inputActorSchema,
-  messageRef: z.string().min(1).max(300).optional(),
-  digest: digestSchema,
-  at: isoTimeSchema,
-});
+export const inputAnswerSchema = z
+  .strictObject({
+    revision: z.number().int().positive(),
+    text: z.string().min(1).max(INPUT_LIMITS.answer),
+    optionId: z.string().max(40).nullable(),
+    kind: z.enum(['clarification', 'requirement-change']),
+    actor: inputActorSchema,
+    messageRef: z.string().min(1).max(300).optional(),
+    /**
+     * Ответ ведущего на блокирующий вопрос: по какому правилу политики он
+     * принят (`technical` — технический вопрос, `severity` — до порога
+     * серьёзности). Нет поля — ответ человека, хоста, на неблокирующий запрос
+     * или запись прежней версии. В digest ответа не входит.
+     */
+    basis: z.enum(leadAnswerBases).optional(),
+    /** Почему ведущий выбрал этот ответ; обязательна при `basis: technical`. */
+    reason: z.string().min(1).max(INPUT_LIMITS.reason).optional(),
+    digest: digestSchema,
+    at: isoTimeSchema,
+  })
+  // Смысловые правила записи — как у вопроса (`recommended` из вариантов):
+  // их держат Zod и движок; JSON Schema в `schemas/` описывает форму полей.
+  .superRefine((a, ctx) => {
+    // Правило приёма — только у ответа ведущего; технический — только с причиной.
+    if (a.basis !== undefined && a.actor.kind !== 'lead')
+      ctx.addIssue({
+        code: 'custom',
+        path: ['basis'],
+        message: 'basis — только у ответа ведущего',
+      });
+    if (a.basis === 'technical' && !a.reason?.trim())
+      ctx.addIssue({ code: 'custom', path: ['reason'], message: 'basis technical — с причиной' });
+  });
 export type InputAnswer = z.infer<typeof inputAnswerSchema>;
 
 /** Digest ответа: запрос, номер версии и содержание (без времени). */
