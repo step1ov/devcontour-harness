@@ -2888,6 +2888,97 @@
       ],
       "additionalProperties": false
     },
+    "targets": {
+      "type": "object",
+      "properties": {
+        "checked": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "rows": {
+          "maxItems": 50,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "repositoryId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+              },
+              "ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "acceptedSha": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{40}([a-f0-9]{24})?$"
+              },
+              "head": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{40}([a-f0-9]{24})?$"
+              },
+              "commitsSinceAccepted": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "filesSinceAccepted": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "diverged": {
+                "type": "boolean",
+                "const": true
+              },
+              "unavailable": {
+                "type": "string",
+                "maxLength": 500
+              },
+              "line": {
+                "type": "string",
+                "maxLength": 500
+              },
+              "lineEn": {
+                "type": "string",
+                "maxLength": 500
+              },
+              "workId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "required": [
+              "repositoryId",
+              "ref",
+              "acceptedSha",
+              "line",
+              "lineEn",
+              "workId"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "checked",
+        "rows",
+        "total",
+        "truncated"
+      ],
+      "additionalProperties": false
+    },
     "limitations": {
       "minItems": 1,
       "maxItems": 40,

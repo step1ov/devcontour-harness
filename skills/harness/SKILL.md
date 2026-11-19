@@ -211,6 +211,29 @@ prerequisite failed) or `skipped` (after the first failure with
 `--fail-fast`); exit 0 when all passed, 3 otherwise; `--human` prints a table.
 A green `gates` is not acceptance: only `run` accepts work.
 
+**Code written outside the harness.** When you (or the user) already wrote
+the code on a branch — a hotfix, a change made before the harness was set up,
+commits added after acceptance — get an independent technical review of
+exactly that diff instead of reviewing it yourself:
+
+```sh
+$H gates --state <manifest.paths.state> --policy .harness/policy.json --sha <head>   # optional, first
+$H review-code --state <manifest.paths.state> --policy .harness/policy.json \
+  --base <main> --head <branch> [--role <role>] [--author <who wrote it>]
+```
+
+The reviewer is chosen by the role's code review rule against the author's
+vendor (`--author` defaults to the role's writer; name yourself when you wrote
+the code): another vendor, or the same one only with `same-vendor-allowed`
+(`REVIEWER_SAME_VENDOR` otherwise, before any model call; tell the user when
+`sameVendor` is true). It reads the diff `merge-base(base, head)..head` in a
+read-only checkout of `head`; a `gates --sha` result for that `head` is
+attached as `gates`. Exit 0 — approved, 3 — blocking findings; fix them on the
+branch and repeat with the same `--base`/`--head`: the reviewer must state
+each previous finding. The record says `acceptance: false`: an approved
+`review-code` is a review, not acceptance — say so to the user, and use
+`run` when the work must be accepted.
+
 ### 8. When it stops
 
 `$H explain --state <state> --policy .harness/policy.json [--work <id>]` is
@@ -309,6 +332,18 @@ of editing the policy by hand:
 `accepted` and `data.result.shas.result` must equal `git rev-parse <targetRef>`
 in the repository. Report what the harness recorded, not your own summary.
 
+After acceptance the target ref can move on. `result` (`data.target`) and
+`status` (`works[].target`) compare the accepted SHA with the current ref:
+`commitsSinceAccepted`, `filesSinceAccepted`, `diverged` (ref rewritten),
+`unavailable`, and `line` / `lineEn` («принято на X; после приёмки N коммитов
+— не проверены» / "accepted at X; N commits since acceptance are not
+verified"). When `commitsSinceAccepted` is above 0 or `diverged` is set,
+quote that line: those commits are **not accepted**. They need a new harness
+order (`run`), or at least `$H gates --sha <targetRef>` (`HEAD` when the
+checkout is on it; a check, not acceptance) and
+`review-code --base <acceptedSha> --head <targetRef>`. Never report the current ref
+as accepted because an earlier order on it was.
+
 ### 10. New session
 
 Nothing is asked again:
@@ -351,7 +386,8 @@ not copy acceptance logs or attempt state into notes.
   is a separate first task.
 
 - Do not edit the target ref or the attempt worktrees yourself; acceptance
-  happens only through `harness run`.
+  happens only through `harness run`. An approved `review-code` and a green
+  `gates` are not acceptance either.
 - A green exit code is not acceptance. Read `result.outcome` and the evidence.
 - A refusal (exit 3) names its code (`GATE_FAILED`, `REVIEW_REJECTED`,
   `SCOPE_VIOLATION`, `BUDGET_EXHAUSTED`, `REVIEWER_SAME_VENDOR`,

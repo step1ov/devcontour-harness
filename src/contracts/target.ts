@@ -1,0 +1,26 @@
+import { z } from 'zod';
+import { gitShaSchema, idSchema } from './primitives.ts';
+
+/**
+ * Принятая версия поручения против текущего target ref (`status`, `result`,
+ * `report`): коммиты и файлы после приёмки этим принятием не проверены.
+ * `unavailable` — git не ответил (нет репозитория, ref или коммита).
+ */
+export const acceptedTargetSchema = z.strictObject({
+  repositoryId: idSchema,
+  ref: z.string().min(1).max(500),
+  acceptedSha: gitShaSchema,
+  head: gitShaSchema.optional(),
+  /** Коммиты `acceptedSha..head`. */
+  commitsSinceAccepted: z.number().int().nonnegative().optional(),
+  /** Файлы, изменённые между `acceptedSha` и `head`. */
+  filesSinceAccepted: z.number().int().nonnegative().optional(),
+  /** Принятый коммит не предок текущего ref (ref переписан). */
+  diverged: z.literal(true).optional(),
+  unavailable: z.string().max(500).optional(),
+  /** Строка для человека: «принято на X; после приёмки N коммитов — не проверены». */
+  line: z.string().max(500),
+  /** Та же строка по-английски. */
+  lineEn: z.string().max(500),
+});
+export type AcceptedTarget = z.infer<typeof acceptedTargetSchema>;

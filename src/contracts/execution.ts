@@ -23,6 +23,7 @@ import {
 } from './result.ts';
 import { findingStatuses, reviewRecordSchema, reviewRoundSchema } from './review.ts';
 import { contractDocumentSchema, spikeSchema } from './checks.ts';
+import { codeReviewRecordSchema } from './code-review.ts';
 import {
   INPUT_LIMITS,
   inputPolicySchema,
@@ -1213,6 +1214,12 @@ export const localSchemas = {
   delivery: deliveryStateSchema,
   /** История технического ревью плана и контрактов. */
   reviews: reviewRecordSchema,
+  /**
+   * Технические обзоры уже написанных веток (`harness review-code`) по ID
+   * записи, у `@workspace`. Наблюдение, а не приёмка: поручений и target ref
+   * не меняют.
+   */
+  'code-reviews': codeReviewRecordSchema,
   /** Наборы корпуса подтверждённых случаев (у DevContour — `check-suites`). */
   'check-suites': checkSuiteSchema,
   /** Техническая очередь ведущего (у DevContour — `lead`). */

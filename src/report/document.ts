@@ -312,6 +312,25 @@ export function reportBlocks(r: ValueReport): Block[] {
       p(`Showing the newest ${r.works.rows.length} of ${r.works.total} tasks.`, true);
   } else p('No task finished in the window.', true);
 
+  if (r.targets) {
+    h(2, 'After acceptance');
+    if (r.targets.rows.length) {
+      list(r.targets.rows.map((t) => `${t.workId}: ${t.lineEn}.`));
+      if (r.targets.truncated)
+        p(`Showing ${r.targets.rows.length} of ${r.targets.total} tasks.`, true);
+      p(
+        'Commits after acceptance are not accepted: they need a new harness task; `harness gates --sha <target ref>` and `harness review-code --base <accepted> --head <target ref>` check them without accepting.',
+        true,
+      );
+    } else
+      p(
+        r.targets.checked
+          ? `All ${plural(r.targets.checked, 'accepted task')} match their target refs.`
+          : 'No accepted tasks to compare with their target refs.',
+        true,
+      );
+  }
+
   h(2, 'Limits and unknowns');
   list(r.limitations.map((l) => l.text));
 

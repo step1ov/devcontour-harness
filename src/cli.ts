@@ -8,7 +8,7 @@ import {
   writeFileSync,
   mkdirSync,
 } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import {
@@ -53,6 +53,7 @@ import { hostGitArgs } from './environment/process.ts';
 import { FileContextSource, FileResultSink, FileWorkSource } from './connectors/files.ts';
 import { SqliteExecutionStore } from './storage/sqlite.ts';
 import { collectReportInput } from './control/report.ts';
+import { reportTargets } from './control/target.ts';
 import { writeReportFile } from './control/report-file.ts';
 import { valueReport, reportHtml, reportMarkdown } from './report/index.ts';
 import { handoffMarkdown, handoffPack } from './handoff/index.ts';
@@ -322,6 +323,9 @@ const options = {
   'continue-review': { type: 'string', multiple: true },
   watch: { type: 'boolean' },
   interval: { type: 'string' },
+  base: { type: 'string' },
+  head: { type: 'string' },
+  role: { type: 'string' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -372,6 +376,9 @@ const flagOwners = {
   'fail-fast': ['gates'],
   watch: ['status'],
   interval: ['status'],
+  base: ['review-code'],
+  head: ['review-code'],
+  role: ['review-code'],
 } as const;
 
 /** Явное человеческое представление успешного ответа (`--human`). */
@@ -934,11 +941,16 @@ async function run(
         throw new HarnessError('NOT_FOUND', 'Каталог состояния не найден: ' + state);
       // Однократное чтение без записи и без файлов в каталоге состояния
       // (неизменяемое открытие с проверкой после чтения, `readOnce`).
+      // Политика каталога состояния (если есть): по ней принятые поручения
+      // сверяются с текущими target ref. Нет политики — отчёт без сверки.
+      // Нет `binding.json` — отчёт без сверки; испорченный — отказ, а не тихий пропуск.
+      const bound = existsSync(bindingFile(state)) ? binding(state) : undefined;
       const report = SqliteExecutionStore.readOnce(
         file,
         'devcontour-harness@' + HARNESS_VERSION,
-        (store) =>
-          valueReport(collectReportInput(store), {
+        (store) => {
+          const input = collectReportInput(store);
+          const value = valueReport(input, {
             ...optional('since', v.since),
             ...optional('until', v.until),
             ...optional('asOf', v['as-of']),
@@ -946,7 +958,18 @@ async function run(
             label: basename(resolve(state)),
             stateDir: resolve(state),
             harnessVersion: HARNESS_VERSION,
-          }),
+          });
+          if (!bound) return value;
+          const b = bound;
+          return {
+            ...value,
+            targets: reportTargets(
+              b.policy,
+              (p) => (isAbsolute(p) ? p : resolve(b.baseDir, p)),
+              input.works,
+            ),
+          };
+        },
       );
       if (format === 'json' && !v.out) return { command, data: report };
       const text =
@@ -1074,6 +1097,35 @@ async function run(
       } finally {
         process.off('SIGINT', stop);
         process.off('SIGTERM', stop);
+      }
+    }
+    case 'review-code': {
+      const state = need('state');
+      const author = v.author ? parseWith(authorSchema, v.author, 'author') : undefined;
+      const b = v.policy ? binding(state, v.policy, true) : binding(state);
+      const h = open(state, b, false);
+      // Прерывание (Ctrl-C, SIGTERM) останавливает reviewer, и рабочее дерево обзора убирается.
+      const abort = new AbortController();
+      const stop = () => abort.abort(new Error('Обзор прерван сигналом'));
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+      try {
+        const record = await h.reviewCode({
+          base: need('base'),
+          head: need('head'),
+          ...optional('role', v.role),
+          ...optional('author', author),
+          ...optional('repositoryId', v.repository),
+          signal: AbortSignal.any([
+            abort.signal,
+            AbortSignal.timeout(b.policy.runTimeoutMs + 5000),
+          ]),
+        });
+        return { command, data: record, code: record.approved ? 0 : exitCodes.refused };
+      } finally {
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
+        h.close();
       }
     }
     case 'doctor': {

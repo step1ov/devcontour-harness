@@ -1849,7 +1849,7 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `init`             | `--repository D [--profile P] [--writer R] [--state D] [--plan]`                                           | да    | план файлов, `created`, `manifest`, `facts`, `toolchain`, `next`                                  | Create-only `.harness/`, manifest до политики, политика последней; повтор — `created: []`; иное решение — `PATH_CONFLICT`                              |
 | `lean`             | `--repository D [--state D] [--off] [--plan] [--human]`                                                    | да    | изменения полей (`changes`), `problems`, `policyDigest` до и после, `staleApprovals`              | То же направление — `changed: false`; прерванное дописывается; файл изменён после чтения — `REVISION_CONFLICT`                                         |
 | `explain`          | `--state D --policy F [--work ID]`                                                                         | нет   | `diagnoses[]` (`StopDiagnosis`), `attempts[]` (сводка попыток)                                    | Только чтение: без повторов, вызовов моделей и изменений состояния                                                                                     |
-| `report`           | `--state D [--since T\|Nd\|Nw] [--until T] [--as-of T] [--format json\|md\|html] [--no-titles] [--out F]`  | нет   | `ValueReport`; с `--out` — `{out, format, bytes, asOf}`                                           | Только чтение; те же данные и параметры — те же байты                                                                                                  |
+| `report`           | `--state D [--since T\|Nd\|Nw] [--until T] [--as-of T] [--format json\|md\|html] [--no-titles] [--out F]`  | нет   | `ValueReport`; с `--out` — `{out, format, bytes, asOf}`                                           | Только чтение; те же данные, параметры и target ref — те же байты                                                                                      |
 | `handoff`          | `--state D [--graph ID] [--intent T]… [--format json\|md]`                                                 | нет   | `HandoffPack`; с `--format md` — Markdown без конверта                                            | Только чтение; агент добавляет только намерения                                                                                                        |
 | `plan-request`     | `--brief F --policy F [--context F] [--contracts D] [--requirements [R:]F]… [--human]`                     | нет   | `prompt`, `readOnly`, `recommendedTasks`, `maxTasks`, `basis`, `facts` (`PlanningFacts`)          | Чистая функция входов: та же постановка и те же факты — тот же prompt и `basis`; модель не вызывается                                                  |
 | `plan-check`       | `--draft F --policy F [--context F] [--contracts D] [--brief F [--basis H]]`                               | нет   | `issues`, `checkPlan`; без проблем — `graph`, `graphDigest`, `basis`                              | Чистая функция входов и `HEAD` источников требований; согласования не выдаёт, gates не запускает; расхождение `--basis` — `APPROVAL_STALE`             |
@@ -1862,6 +1862,7 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `input-cancel`     | `--state D --request ID --request-version N --reason T`                                                    | да    | `lifecycle`, `version`, `changed`                                                                 | Отменённый — без изменений                                                                                                                             |
 | `input-supersede`  | `--state D --request ID --request-version N --reason T --successor ID`                                     | да    | `lifecycle`, `version`, `changed`                                                                 | Заменённый — без изменений                                                                                                                             |
 | `gates`            | `--state D [--policy F] --sha SHA\|HEAD [--gate a,b,@g] [--repository ID] [--fail-fast] [--human]`         | да    | исход каждого gate (`passed`, `failed`, `not-run`, `skipped`), SHA, каталог логов                 |
+| `review-code`      | `--state D [--policy F] --base REF --head REF [--role R] [--author A] [--repository ID]`                   | да    | `CodeReviewRecord` (`kind: code`, `acceptance: false`)                                            | Те же ref — следующий раунд; тот же одобренный `head` и reviewer — тот же раунд без вызова; не приёмка                                                 |
 | `capabilities`     | —                                                                                                          | нет   | каталог общих операций (`OperationCatalog`)                                                       | Чистая функция установленной версии пакета                                                                                                             |
 | `--version`        | —                                                                                                          | нет   | версия пакета и API                                                                               | —                                                                                                                                                      |
 
@@ -1888,9 +1889,41 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 исход каждого gate — в `error.issues` (`gates.<id>`), прерванный gate —
 `cancelled`, следующие — `not-run`; рабочее дерево убирается. Остановка
 обходом зависших (`stallSweep: stop`) — по-прежнему провал gate.
+Итог проверки записывается в `<state>/gates-at/<id>/result.json`
+(`{at, data}`, `data` — ответ команды): его прикладывает `review-code` того же
+SHA.
+
+**`review-code`.** Технический обзор ветки, написанной вне harness: reviewer —
+по правилу ревью кода роли (`--role`; одна роль репозитория — по умолчанию) и
+правилу вендора относительно автора (`--author`, по умолчанию writer роли;
+недопустимый — `REVIEWER_SAME_VENDOR` до вызова, `same-vendor-allowed` —
+`sameVendor: true` в записи). Diff — `merge-base(base, head)..head`; пустой,
+больше 4 МиБ или без общего предка — `INVALID_INPUT`, неизвестный коммит —
+`NOT_FOUND`, всё до вызова модели. Reviewer читает отдельное рабочее дерево на
+`head` (только чтение, состояние и исходные checkout закрыты, их `.git` открыт
+на чтение); дерево убирается после вызова. Последний итог `harness gates` на
+`head` из `<state>/gates-at/*/result.json` прикладывается к запросу и записи
+(`gates`). Изменённое reviewer дерево (файлы, HEAD) — раунд неодобрен. Ответ reviewer проверяется как у ревью плана (§8 протокола ревью), одобрение — и по итоговым находкам (открытая блокирующая не одобряет):
+невалидный — раунд неодобрен, прежние находки прежние. Предмет —
+`(repositoryId, роль, --base, --head как названы)`: повтор — следующий раунд,
+reviewer называет состояние прежних открытых находок; тот же одобренный `head`, автор, назначение и итог gates — тот же раунд без вызова; предел раундов —
+`maxAttempts × 2`. Запись (`codeReviewRecordSchema`) хранится в `code-reviews`
+у `@workspace` и в `<state>/review-code/<id>/` (запрос, `review.json`). Exit 0 —
+одобрено, 3 — нет; прерывание (SIGINT, SIGTERM, предел `runTimeoutMs`) — `CANCELLED`, рабочее дерево убирается, раунд не записывается. Поручения, попытки и target ref не меняются: это не приёмка.
+
+**Принятая версия против target ref.** `status` (`works[].target`), `result` и
+`deliver` (`target`) для принятой работы и `report` (`targets`: принятые
+поручения, у которых ref ушёл вперёд, переписан или не прочитан; `checked` —
+сверено всего; нет поля — в каталоге нет `binding.json`, испорченный `binding.json` — отказ) отдают
+`acceptedTargetSchema`: `repositoryId`, `ref`, `acceptedSha`, `head`,
+`commitsSinceAccepted` (`acceptedSha..head`), `filesSinceAccepted`, `diverged`
+(принятый коммит не предок ref), `unavailable` (git не ответил — не отказ
+команды) и строки `line` / `lineEn`. Значения — состояние Git на момент
+вызова; `status --human` печатает строку под поручением. Хост, вызывающий
+`statusOf` со своим движком, поле не получает.
 
 **`report`.** Читает каталог состояния только для чтения и строит
-`ValueReport` (`valueReport`); `binding.json` не нужен. Чтение однократное
+`ValueReport` (`valueReport`); `binding.json` не нужен (с ним — сверка принятых поручений с target ref, `targets`). Чтение однократное
 (`SqliteExecutionStore.readOnce`): база без журнала (`-wal`, `-journal`)
 открывается неизменяемой (`immutable=1`) — в каталоге не появляется ни одного
 файла; после чтения проверяется, что журнал не появился, а размер и время

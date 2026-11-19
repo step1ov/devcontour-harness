@@ -337,6 +337,8 @@ export function statusText(data: z.output<typeof statusDataSchema>): string {
               : ''),
       );
     if (w.blockers.length) out.push(`  блокировки: ${w.blockers.map((b) => b.code).join(', ')}`);
+    // Принятая версия против текущего target ref: непроверенное после приёмки.
+    if (w.target) out.push(`  ${w.target.line} (${w.target.lineEn})`);
   }
   return out.join('\n') + '\n' + reviewsText(data.reviews);
 }
