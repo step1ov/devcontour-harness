@@ -1254,7 +1254,8 @@
         "required": [
           "code",
           "actor",
-          "action"
+          "action",
+          "since"
         ],
         "additionalProperties": false
       }

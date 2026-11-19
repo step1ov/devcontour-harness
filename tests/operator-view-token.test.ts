@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { operatorView, viewToken, workDetailView } from '../src/projections/index.ts';
-import { NOW, baseInput, work } from './operator-view-input.ts';
+import { NOW, at, attempt, baseInput, work } from './operator-view-input.ts';
 import { collectOperatorViewInput, harnessView, latestTime } from '../src/control/operator-view.ts';
 import type { WorkflowQueue } from '../src/control/workflow.ts';
 import { engineOf, graphOf, trustNone } from './engine-fixture.ts';
@@ -109,20 +109,46 @@ test('view token r1: остановка без начала этапа — since
   env.store.close();
 });
 
-test('view token r1: пауза без pausedAt — since нет (время неизвестно), токен не зависит от часов', () => {
+test('view token r1: пауза с pausedAt — since из хранилища, токен не зависит от часов; без pausedAt — момент запроса', () => {
   const env = engineOf();
   env.engine.register(graphOf({ w: [] }), trustNone);
-  // Запись паузы прежней версии: без момента начала.
-  env.store.transact('run.phase', (tx) => tx.setControl({ paused: true, pauseReason: 'operator' }));
+  const pausedAt = new Date(env.clock.now).toISOString();
+  env.store.transact('run.phase', (tx) =>
+    tx.setControl({ paused: true, pauseReason: 'operator', pausedAt }),
+  );
   const t0 = env.clock.now + 60_000;
   const a = operatorView(collectAt(env, t0));
   const b = operatorView(collectAt(env, t0 + 10 * 60_000));
-  operatorViewSchema.parse(a);
-  const pause = a.escalations.find((e) => e.workId === undefined && e.subject === undefined);
-  assert.ok(pause, 'эскалация паузы очереди есть');
-  assert.equal(pause.since, undefined);
+  const pause = (v: typeof a) =>
+    v.escalations.find((e) => e.workId === undefined && e.subject === undefined);
+  assert.equal(pause(a)?.since, pausedAt);
   assert.equal(b.source.token, a.source.token);
+  // Запись паузы прежней версии без момента начала: since обязателен в версии 1 —
+  // момент запроса (единственный случай, когда токен идёт за часами).
+  env.store.transact('run.phase', (tx) => tx.setControl({ paused: true, pauseReason: 'operator' }));
+  const legacy = operatorView(collectAt(env, t0));
+  operatorViewSchema.parse(legacy);
+  assert.equal(pause(legacy)?.since, new Date(t0).toISOString());
   env.store.close();
+});
+
+test('view token r1: история с записями — сдвиг часов внутри интервала не меняет токен, переход интервала — меняет', () => {
+  const input = baseInput({
+    works: [work('a')],
+    // Внутри интервалов, не на их границах (15 мин от конца окна).
+    attempts: [attempt('a', 1, { startedAt: at(112), finishedAt: at(108) })],
+  });
+  const a = operatorView(input);
+  // Окно сдвинулось на 1 мс и на 1 мин: запись в том же интервале, ряды те же —
+  // тот же токен.
+  for (const d of [1, 60_000])
+    assert.equal(operatorView({ ...input, now: NOW + d }).source.token, a.source.token);
+  // Через полный интервал (15 мин) запись переезжает в предыдущий интервал ряда:
+  // это изменение содержимого скользящей истории, токен меняется.
+  const moved = operatorView({ ...input, now: NOW + 15 * 60_000 });
+  assert.notDeepEqual(moved.history.attemptsStarted, a.history.attemptsStarted);
+  assert.notEqual(moved.source.token, a.source.token);
+  assert.deepEqual(moved.history.totals, a.history.totals);
 });
 
 test('view token r1: latestTime — самый поздний момент по времени, а не по строке', () => {

@@ -146,8 +146,7 @@ export interface Escalation {
   code: string;
   actor: string;
   action: string;
-  /** Нет — время неизвестно; часы проекции не подставляются. */
-  since?: string;
+  since: string;
 }
 
 export interface DriftView {
@@ -1378,6 +1377,9 @@ function healthOf(
 
 function escalationsOf(c: Ctx): Escalation[] {
   const i = c.i;
+  // Время из хранилища; момент запроса — только когда его нет и там (пауза
+  // записи прежней версии без `pausedAt`): `since` обязателен в версии 1.
+  const at = iso(i.now);
   const stops = i.stops
     .filter((s) => s.actor === 'user' || s.actor === 'lead' || s.actor === 'operator')
     .map((s) => ({
@@ -1386,7 +1388,7 @@ function escalationsOf(c: Ctx): Escalation[] {
       code: s.code,
       actor: actorOf(s.actor)!,
       action: s.action,
-      ...(s.since ? { since: s.since } : {}),
+      since: s.since ?? at,
     }));
   const reviews = i.reviews
     .filter((r) => r.escalation)

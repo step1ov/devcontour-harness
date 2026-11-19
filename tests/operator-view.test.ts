@@ -397,8 +397,8 @@ test('view: эскалации — остановки человеку и вед
       ['g1', 'REVIEW_ESCALATION', 'operator', 'user-decision'],
     ],
   );
-  // Остановка без времени — поле отсутствует, часы проекции не подставляются (r1).
-  assert.equal(view.escalations[1]!.since, undefined);
+  // Остановка без времени и в хранилище — момент запроса (since обязателен в версии 1).
+  assert.equal(view.escalations[1]!.since, new Date(NOW).toISOString());
   assert.deepEqual(view.reviews[0]!.escalation, {
     requestId: 'plan:g1:4',
     findings: ['f1'],
