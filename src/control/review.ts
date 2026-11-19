@@ -184,7 +184,9 @@ export async function technicalReview(
       );
     return parsed.data;
   });
-  const decided = applyDispositions(lastFindings, dispositions, round, before);
+  // Проверка решений и эскалации — до окружения reviewer (порядок отказов
+  // прежний); основание решения маскируется ниже, когда маска известна.
+  let decided = applyDispositions(lastFindings, dispositions, round, before);
   // Находка, открытая раундами подряд, — решение оператора, а не ещё один
   // оплаченный раунд: вызова нет, пока решения нет.
   const waiting = escalatedFindings(decided, before);
@@ -235,6 +237,9 @@ export async function technicalReview(
       error instanceof Error ? error.message : String(error),
     );
   }
+  // Основание решения — маска до обрезки: обрезка до маски оставляла бы префикс секрета.
+  if (dispositions.length)
+    decided = applyDispositions(lastFindings, dispositions, round, before, execution.redact);
   const prompt = [
     ...input.instructions,
     `Subject: ${kind} ${subject}, digest ${digest}, round ${round}. Author: ${input.author}.`,
@@ -388,6 +393,8 @@ export function applyDispositions(
   dispositions: readonly ReviewDisposition[],
   round: number,
   lastRound: number,
+  /** Маска основания решения — до обрезки до предела схемы. */
+  redact?: (text: string) => string,
 ): ReviewRecord['findings'] {
   if (!dispositions.length) return findings;
   const byId = new Map(dispositions.map((d) => [d.finding, d]));
@@ -422,10 +429,11 @@ export function applyDispositions(
   return findings.map((f) => {
     const d = byId.get(f.id);
     if (!d) return f;
+    const reason = redactThenClip(d.reason, 4000, redact);
     const disposition = {
       decision: d.decision,
       by: d.by,
-      reason: d.reason.slice(0, 4000),
+      reason,
       round,
       rounds: openRounds(f, lastRound),
     };
@@ -434,7 +442,7 @@ export function applyDispositions(
           ...f,
           status: 'withdrawn' as const,
           changedIn: round,
-          basis: d.reason.slice(0, 4000),
+          basis: reason,
           disposition,
         }
       : { ...f, disposition };
@@ -650,7 +658,7 @@ export function mergeTechnicalRound(
         ...f,
         status: t.status,
         changedIn: round,
-        basis: t.basis.slice(0, 4000),
+        basis: redactThenClip(t.basis, 4000, redact),
         ...(t.status === 'open' ? { rounds: openRounds(f, round - 1) + 1 } : {}),
       };
     return f;

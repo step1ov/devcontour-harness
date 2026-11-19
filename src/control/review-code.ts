@@ -30,7 +30,7 @@ import { chooseCheckoutRoot, checkoutPath } from '../environment/checkout-root.t
 import { credentialPaths } from '../environment/isolation.ts';
 import { executionEnvironment } from '../environment/lifecycle.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
-import { redactDeep } from '../environment/redaction.ts';
+import { redactDeep, redactThenClip } from '../environment/redaction.ts';
 import type { Engine } from '../engine/engine.ts';
 import { TaskFailure } from '../engine/failure.ts';
 import { measuredInvoke } from '../engine/measured.ts';
@@ -469,11 +469,16 @@ export async function reviewCode(
     subject,
     repositoryId: repo.id,
     role,
-    refs: { base: input.base.slice(0, 500), head: input.head.slice(0, 500) },
+    // Свободный текст — маска до обрезки: обрезка до маски (`redactDeep` ниже)
+    // оставляла бы префикс секрета.
+    refs: {
+      base: redactThenClip(input.base, 500, execution.redact),
+      head: redactThenClip(input.head, 500, execution.redact),
+    },
     base,
     head,
     mergeBase,
-    files: names.slice(0, 500).map((n) => n.slice(0, 1000)),
+    files: names.slice(0, 500).map((n) => redactThenClip(n, 1000, execution.redact)),
     filesTotal: names.length,
     commits,
     diffDigest: digestOf(diff),
@@ -486,10 +491,12 @@ export async function reviewCode(
       parsed.data.approved &&
       !issues.length &&
       !findings.some((f) => f.status === 'open' && f.severity === 'blocking'),
-    summary: (
-      execution.redact(parsed.success ? parsed.data.summary : 'Ответ ревью вне схемы') +
-      (issues.length ? ' / ' + issues.join('; ') : '')
-    ).slice(0, 12000),
+    summary: redactThenClip(
+      (parsed.success ? parsed.data.summary : 'Ответ ревью вне схемы') +
+        (issues.length ? ' / ' + issues.join('; ') : ''),
+      12000,
+      execution.redact,
+    ),
     authorRuntime: author,
     reviewerRuntime: choice.reviewer.runtime,
     ...(response.model ? { reviewerModel: response.model } : {}),

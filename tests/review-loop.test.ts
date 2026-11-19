@@ -900,3 +900,43 @@ test('H14 r2: отчёт и сводка — блокирующая, ставш�
   assert.deepEqual(row!.spend, { calls: 2, knownUsd: 0.5, unknownCalls: 1 });
   assert.match(row!.line, /ревью \$0\.50 \+ вызовов без стоимости 1/);
 });
+
+test('H14: основание решения и перехода маскируется до обрезки — префикс секрета на границе 4000 не остаётся', () => {
+  const secret = 'SECRET-VALUE-0123456789';
+  const redact = (t: string) => t.split(secret).join('[REDACTED]');
+  // Секрет пересекает границу обрезки: обрезка до маски оставила бы «SECRE».
+  const reason = 'a'.repeat(3995) + secret;
+  assert.ok(redact(reason.slice(0, 4000)).includes('SECRE'));
+  const open = {
+    id: 'a'.repeat(64),
+    severity: 'blocking' as const,
+    message: 'm',
+    path: null,
+    line: null,
+    status: 'open' as const,
+    openedIn: 1,
+    changedIn: 1,
+    rounds: 1,
+  };
+  const [accepted] = applyDispositions(
+    [open],
+    [{ finding: open.id, decision: 'accepted-limitation', by: 'lead', reason }],
+    2,
+    1,
+    redact,
+  );
+  assert.equal(accepted!.basis, 'a'.repeat(3995) + '[REDA');
+  assert.equal(accepted!.disposition!.reason, accepted!.basis);
+  assert.ok(!accepted!.basis.includes('SECRE'));
+
+  const m = mergeTechnicalRound(
+    [open],
+    reviewResultSchema.parse(verdict(false, [], [{ id: open.id, status: 'open', basis: reason }])),
+    2,
+    'g',
+    redact,
+  );
+  const kept = m.findings.find((f) => f.id === open.id)!;
+  assert.equal(kept.basis, 'a'.repeat(3995) + '[REDA');
+  assert.ok(!kept.basis.includes('SECRE'));
+});
