@@ -347,8 +347,14 @@ export const handoffPackSchema = z.strictObject({
             excerpt: clipped(HANDOFF_LIMITS.answerChars),
             /** Кто записал ответ: оператор (человек), ведущий или хост. Нет поля — пакет прежней версии. */
             by: z.enum(['operator', 'lead', 'host']).optional(),
+            /** Правило политики ответа ведущего: `technical` — «решено ведущим (технический вопрос)». */
+            basis: z.enum(['severity', 'technical']).optional(),
+            /** Причина ответа ведущего (усечена). */
+            reason: clipped(HANDOFF_LIMITS.answerChars).optional(),
           })
           .optional(),
+        /** Исполнитель пометил вопрос техническим; нет поля — меняет результат для пользователя. */
+        impact: z.literal('technical').optional(),
         origin: z.strictObject({
           graphDigest: digestSchema,
           orderDigest: digestSchema,

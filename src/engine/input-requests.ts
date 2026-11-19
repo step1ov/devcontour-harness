@@ -121,13 +121,17 @@ export function inputContextSource(
       ? [
           '## Options',
           ...q.options.map(
-            (o) => `- ${o.id}: ${o.label}${o.consequence ? ` — ${o.consequence}` : ''}`,
+            (o) =>
+              `- ${o.id}: ${o.label}${o.consequence ? ` — ${o.consequence}` : ''}${o.forUser ? ` (for the user: ${o.forUser})` : ''}`,
           ),
           q.recommended ? `Recommended by the writer: ${q.recommended}.` : '',
         ]
       : []),
     `## Answer (revision ${answer.revision}, ${answer.kind})`,
     answer.optionId ? `Chosen option: ${answer.optionId}.` : '',
+    answer.basis === 'technical'
+      ? `Decided by the lead (technical question): ${answer.reason ?? ''}`.trim()
+      : '',
     answer.text,
   ]
     .filter((line) => line !== '')

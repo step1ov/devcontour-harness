@@ -1318,6 +1318,17 @@
                   "lead",
                   "host"
                 ]
+              },
+              "basis": {
+                "type": "string",
+                "enum": [
+                  "severity",
+                  "technical"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 501
               }
             },
             "required": [
@@ -1326,6 +1337,10 @@
               "excerpt"
             ],
             "additionalProperties": false
+          },
+          "impact": {
+            "type": "string",
+            "const": "technical"
           },
           "origin": {
             "type": "object",

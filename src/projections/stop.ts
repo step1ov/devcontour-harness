@@ -182,8 +182,21 @@ export type StopInput =
           options?: string[];
           /** Рекомендуемый исполнителем вариант (ID). */
           recommended?: string;
-          /** Последний ответ; `by` — кто его записал (оператор, ведущий, хост). */
-          answer?: { revision: number; digest: string; by?: 'operator' | 'lead' | 'host' };
+          /** Исполнитель пометил вопрос техническим (`impact: technical`). */
+          impact?: 'technical';
+          /** Вопрос ждёт ответа, и политика разрешает ответ ведущему — по этому правилу. */
+          leadMay?: 'technical' | 'severity';
+          /**
+           * Последний ответ; `by` — кто его записал (оператор, ведущий, хост);
+           * `basis` — правило политики ответа ведущего, `reason` — его причина.
+           */
+          answer?: {
+            revision: number;
+            digest: string;
+            by?: 'operator' | 'lead' | 'host';
+            basis?: 'technical' | 'severity';
+            reason?: string;
+          };
           refusal?: string;
           assumptions?: number;
           followUps?: number;
@@ -497,13 +510,33 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       question.state === 'carry-stale')
   ) {
     const head = `Вопрос ${question.requestId}${question.question ? `: «${clipText(question.question, 200)}»` : ''}${question.options?.length ? `; варианты: ${question.options.join(', ')}` : ''}${question.recommended ? `; рекомендация исполнителя: ${question.recommended}` : ''}.`;
-    const by = question.answer?.by ? ` (ответил: ${answerActorText[question.answer.by]})` : '';
+    const by =
+      question.answer?.basis === 'technical'
+        ? ` (решено ведущим (технический вопрос)${question.answer.reason ? `: ${clipText(question.answer.reason, 200)}` : ''})`
+        : question.answer?.by
+          ? ` (ответил: ${answerActorText[question.answer.by]})`
+          : '';
     const own = [
       question.assumptions ? `Решено исполнителем: ${question.assumptions}.` : '',
       question.followUps ? `Запросов ведущему: ${question.followUps}.` : '',
     ]
       .filter(Boolean)
       .join(' ');
+    if (question.state === 'awaiting-answer' && question.leadMay === 'technical')
+      return {
+        code: 'INPUT_REQUIRED',
+        cause: 'needs-input',
+        phase,
+        actor: 'lead',
+        action: 'answer-input',
+        note: [
+          head,
+          'Технический вопрос: политика разрешает ведущему решить его самому (inputPolicy.leadAnswers.technical) — harness input-answer --actor lead --reason "<почему>"; ответ будет показан как «решено ведущим (технический вопрос)». Если выбор всё же меняет то, что увидит пользователь, передайте вопрос человеку дословно с одной строкой пояснения.',
+          own,
+        ]
+          .filter(Boolean)
+          .join(' '),
+      };
     if (question.state === 'awaiting-answer')
       return {
         code: 'INPUT_REQUIRED',

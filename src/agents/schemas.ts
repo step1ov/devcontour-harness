@@ -4,7 +4,12 @@ import {
   REVIEW_ITEMS_LIMIT,
   findingStatuses,
 } from '../contracts/review.ts';
-import { INPUT_LIMITS, INPUT_SEVERITY_MAX, criticalAreas } from '../contracts/input.ts';
+import {
+  INPUT_LIMITS,
+  INPUT_SEVERITY_MAX,
+  criticalAreas,
+  inputImpacts,
+} from '../contracts/input.ts';
 
 /**
  * JSON Schema структурированного ответа для CLI runtime. Codex требует
@@ -50,16 +55,18 @@ const inputRequest = {
           id: { type: 'string' },
           label: { type: 'string' },
           consequence: { type: ['string', 'null'] },
+          forUser: { type: ['string', 'null'] },
         },
-        required: ['id', 'label', 'consequence'],
+        required: ['id', 'label', 'consequence', 'forUser'],
       },
     },
     recommended: { type: ['string', 'null'] },
     severity,
     rationale: { type: 'string' },
     affects: areas,
+    impact: { type: ['string', 'null'], enum: [...inputImpacts, null] },
   },
-  required: ['question', 'options', 'recommended', 'severity', 'rationale', 'affects'],
+  required: ['question', 'options', 'recommended', 'severity', 'rationale', 'affects', 'impact'],
 };
 
 const assumption = {

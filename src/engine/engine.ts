@@ -54,7 +54,8 @@ import {
   inputRequestId,
   inputSourceId,
   latestAnswer,
-  leadMayAnswer,
+  leadAnswerBasis,
+  impactOf,
   pinnedInputPolicy,
   targetDigest,
   type JointVerification,
@@ -2760,24 +2761,49 @@ export class Engine {
       kind?: InputAnswer['kind'];
       actor: InputActor;
       messageRef?: string;
+      /** Почему ведущий выбрал ответ; обязательна для технического вопроса (`leadAnswers.technical`). */
+      reason?: string;
     },
     expectedVersion: number,
   ) {
     return this.tx('input.answered', (tx) => {
       const { owner, request } = this.requestIn(tx, id);
       // Блокирующий вопрос адресован человеку: ведущий отвечает только с явного
-      // разрешения политики и до её порога серьёзности. Проверка — до повтора:
-      // прежний ответ ведущего не подтверждается после отзыва разрешения.
+      // разрешения политики — технический вопрос без минимумов
+      // (`leadAnswers.technical`, с причиной) или до порога серьёзности
+      // (`leadAnswers.maxSeverity`). Проверка — до повтора: прежний ответ
+      // ведущего не подтверждается после отзыва разрешения.
       const inputPolicy = inputPolicyOf(this.policy);
-      if (answer.actor.kind === 'lead' && !leadMayAnswer(request, inputPolicy))
+      const basis =
+        answer.actor.kind === 'lead' ? leadAnswerBasis(request, inputPolicy) : undefined;
+      if (basis === null) {
+        const lead = inputPolicy.leadAnswers;
+        const impact = impactOf(request.question);
+        const allowed = [
+          lead?.technical === true
+            ? impact !== 'technical'
+              ? 'технические вопросы, а этот меняет результат для пользователя'
+              : 'технические вопросы, но этот касается критической области или пути'
+            : '',
+          lead?.maxSeverity !== undefined ? `ответы до серьёзности ${lead.maxSeverity}` : '',
+        ].filter(Boolean);
         throw new HarnessError(
           'OPERATOR_ANSWER_REQUIRED',
-          `Запрос ${id}: блокирующий вопрос исполнителя (серьёзность ${request.effectiveSeverity}) адресован человеку — ` +
-            (inputPolicy.leadAnswers
-              ? `политика разрешает ведущему ответы до серьёзности ${inputPolicy.leadAnswers.maxSeverity}. `
+          `Запрос ${id}: блокирующий вопрос исполнителя (серьёзность ${request.effectiveSeverity}, ${impact === 'technical' ? 'технический' : 'меняет результат для пользователя'}) адресован человеку — ` +
+            (allowed.length
+              ? `политика разрешает ведущему ${allowed.join('; ')}. `
               : 'политика не разрешает ответы ведущего (inputPolicy.leadAnswers). ') +
             'Передайте человеку вопрос, варианты и рекомендацию дословно и запишите его ответ: input-answer --actor operator.',
         );
+      }
+      const reason = answer.reason?.trim() || undefined;
+      if (basis === 'technical' && !reason)
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `Запрос ${id}: технический вопрос ведущий решает с причиной — input-answer --actor lead --reason "<почему этот вариант>"`,
+          [{ path: ['--reason'], message: 'reason-required' }],
+        );
+      const leadBasis = basis === 'technical' || basis === 'severity' ? basis : undefined;
       const text = answer.text.trim();
       const content = {
         text,
@@ -2822,6 +2848,8 @@ export class Engine {
         ...content,
         actor: structuredClone(answer.actor),
         ...(answer.messageRef ? { messageRef: answer.messageRef } : {}),
+        ...(leadBasis ? { basis: leadBasis } : {}),
+        ...(reason ? { reason } : {}),
         digest: answerDigest(id, { revision, ...content }),
         at: iso(this.now()),
       };

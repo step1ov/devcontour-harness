@@ -223,6 +223,7 @@ function inputCounts(
       operator: by('operator'),
       lead: by('lead'),
       host: by('host'),
+      leadTechnical: questions.filter((r) => r.answers.at(-1)?.basis === 'technical').length,
     },
   };
 }

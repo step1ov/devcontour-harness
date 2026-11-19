@@ -433,8 +433,16 @@ test('Skills и шаблоны: шаблоны проходят validate; инс
   });
   const skill = readFileSync(join(root, 'skills/harness/SKILL.md'), 'utf8');
   assert.match(skill, /^---\nname: harness\ndescription: .+\n---\n/);
+  // Единственное исключение: необязательная панель оператора отдельного skill
+  // `harness-ui` в начале долгого запуска — только «если установлен», с
+  // текстовым `status --watch` иначе; без неё ничего не отключается.
+  const optionalPanel = /If the `harness-ui` skill is installed,[^]*?URL\./;
+  assert.match(skill, optionalPanel, 'панель названа только как необязательная');
+  assert.match(skill, /Otherwise give them the watch command/);
   for (const file of ['skills/harness/SKILL.md', 'templates/AGENTS.md']) {
-    const text = readFileSync(join(root, file), 'utf8').replaceAll('devcontour-harness', '');
+    const text = readFileSync(join(root, file), 'utf8')
+      .replace(optionalPanel, '')
+      .replaceAll('devcontour-harness', '');
     assert.doesNotMatch(text, /devcontour|relay|панел|памят|\bmemory\b|\bmcp\b|panel/i, file);
     assert.match(text, /enforce|checked by the harness/i, file + ': проверки принадлежат harness');
   }

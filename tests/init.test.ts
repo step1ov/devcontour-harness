@@ -858,3 +858,50 @@ test('H1-02 (B3): политика отредактирована на writer co
   assert.equal(readFileSync(manifestPath, 'utf8'), manifestBytes);
   assert.deepEqual(outside(p.root), before);
 });
+
+test('alpha.55: --lead-technical-answers — правило в новой политике, init называет его словами; сохранённая политика без правила — конфликт', async () => {
+  const p = project();
+  // Без флага: человек отвечает на все вопросы, init подсказывает флаг.
+  const plain = await initProject(p.opts({ plan: true }));
+  initDataSchema.parse(plain);
+  assert.equal(plain.questions.leadTechnical, false);
+  assert.equal(plain.questions.source, 'default');
+  assert.match(plain.questions.line, /отвечает человек/);
+  assert.match(initText(plain), /questions: .*init --lead-technical-answers/);
+  // С флагом: правило в сгенерированной политике.
+  const planned = await initProject(p.opts({ plan: true, leadTechnicalAnswers: true }));
+  assert.equal(planned.questions.leadTechnical, true);
+  assert.equal(planned.questions.source, 'option');
+  assert.match(planned.questions.line, /Технические вопросы/);
+  const applied = await initProject(p.opts({ leadTechnicalAnswers: true }));
+  assert.equal(applied.conflicts, 0);
+  const policy = executionPolicySchema.parse(
+    JSON.parse(readFileSync(join(p.root, '.harness/policy.json'), 'utf8')),
+  );
+  assert.deepEqual(policy.inputPolicy?.leadAnswers, { technical: true });
+  // Повтор без флага: правило из сохранённой политики, без подсказки.
+  const again = await initProject(p.opts({ plan: true }));
+  assert.equal(again.questions.leadTechnical, true);
+  assert.equal(again.questions.source, 'policy');
+  assert.doesNotMatch(initText(again), /init --lead-technical-answers/);
+  assert.equal(again.conflicts, 0);
+
+  // Сохранённая политика без правила и флаг — конфликт, а не молча неработающий флаг.
+  const q = project();
+  await initProject(q.opts());
+  const policyPath = join(q.root, '.harness/policy.json');
+  const bytes = readFileSync(policyPath, 'utf8');
+  const conflict = await initProject(q.opts({ plan: true, leadTechnicalAnswers: true }));
+  assert.equal(conflict.conflicts, 1);
+  assert.ok(
+    conflict.files.some(
+      (f) => f.path === policyPath && f.action === 'conflict' && f.conflict === 'content-differs',
+    ),
+  );
+  const refused = await refusal(
+    initProject(q.opts({ leadTechnicalAnswers: true })),
+    'PATH_CONFLICT',
+  );
+  assert.match(refused.message, /inputPolicy\.leadAnswers\.technical: true/);
+  assert.equal(readFileSync(policyPath, 'utf8'), bytes, 'политика не переписана');
+});

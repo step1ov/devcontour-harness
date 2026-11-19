@@ -2225,11 +2225,11 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 10
+            },
+            "technical": {
+              "type": "boolean"
             }
           },
-          "required": [
-            "maxSeverity"
-          ],
           "additionalProperties": false
         }
       },

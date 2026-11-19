@@ -51,7 +51,7 @@ const ask = {
   },
 };
 
-function project() {
+function project(variant: { impact?: 'technical'; leadAnswers?: Record<string, unknown> } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-cli-input-')));
   const app = join(root, 'greeting');
   cpSync(example, app, { recursive: true });
@@ -60,7 +60,15 @@ function project() {
     scenario,
     JSON.stringify({
       writer: [
-        ask,
+        variant.impact
+          ? {
+              ...ask,
+              result: {
+                ...ask.result,
+                inputRequest: { ...ask.result.inputRequest, impact: variant.impact },
+              },
+            }
+          : ask,
         {
           recordPrompt: true,
           files: { 'src/greet.js': greet },
@@ -76,7 +84,11 @@ function project() {
   >;
   policy.isolation = { mode: 'none', domains: [] };
   policy.environment = { values: { FIXTURE_SCENARIO: scenario } };
-  policy.inputPolicy = { threshold: 7, criticalPaths: [] };
+  policy.inputPolicy = {
+    threshold: 7,
+    criticalPaths: [],
+    ...(variant.leadAnswers ? { leadAnswers: variant.leadAnswers } : {}),
+  };
   writeFileSync(join(app, 'policy.json'), JSON.stringify(policy, null, 2));
   const git = (...args: string[]) =>
     execFileSync('git', args, {
@@ -413,4 +425,74 @@ test('H15 CLI: status --human --watch обновляет кадр, пока жи
     if (!released) other.release('occupied-controller');
     other.host.store.close();
   }
+});
+
+test('alpha.55 CLI: технический вопрос при leadAnswers.technical — input-answer --actor lead только с --reason; doctor и status называют правило', () => {
+  const p = project({ impact: 'technical', leadAnswers: { technical: true } });
+  const base = ['--graph', 'graph.json', '--policy', 'policy.json', '--state', p.state];
+  assert.equal(p.harness('run', ...base).status, exitCodes.refused);
+  const id: string = p.harness('input-list', '--state', p.state).json.data.requests[0].id;
+  assert.equal(
+    p.harness('input-show', '--state', p.state, '--request', id).json.data.question.impact,
+    'technical',
+  );
+  const waiting = p.harness('status', '--state', p.state).json.data.works[0];
+  assert.equal(waiting.input.leadMay, 'technical');
+  assert.deepEqual(waiting.stage.needs, { actor: 'lead', action: 'answer-input' });
+  const args = ['--state', p.state, '--request', id, '--text', 'Hello', '--option', 'hello'];
+  const noReason = p.harness('input-answer', ...args, '--actor', 'lead', '--request-version', '1');
+  assert.equal(noReason.status, exitCodes.input, noReason.stderr);
+  assert.equal(noReason.json.error?.code, 'INVALID_INPUT');
+  const ok = p.harness(
+    'input-answer',
+    ...args,
+    '--actor',
+    'lead',
+    '--reason',
+    'the recommended option keeps the existing text',
+    '--request-version',
+    '1',
+  );
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(ok.json.data.answer.basis, 'technical');
+  assert.equal(ok.json.data.answer.reason, 'the recommended option keeps the existing text');
+  assert.match(
+    p.raw('status', '--state', p.state, '--human').stdout,
+    /технический\]: решено ведущим \(технический вопрос\)\n/,
+  );
+  const doctor = p.harness('doctor', '--policy', 'policy.json');
+  assert.equal(doctor.json.data.questions.leadTechnical, true);
+  assert.match(doctor.json.data.questions.line, /Технические вопросы/);
+  // --lead-technical-answers — только у init.
+  assert.equal(
+    p.raw('status', '--state', p.state, '--lead-technical-answers').status,
+    exitCodes.input,
+  );
+});
+
+test('alpha.55 CLI: вопрос для пользователя при leadAnswers.technical — OPERATOR_ANSWER_REQUIRED и с --reason', () => {
+  const p = project({ leadAnswers: { technical: true } });
+  const base = ['--graph', 'graph.json', '--policy', 'policy.json', '--state', p.state];
+  assert.equal(p.harness('run', ...base).status, exitCodes.refused);
+  const id: string = p.harness('input-list', '--state', p.state).json.data.requests[0].id;
+  const r = p.harness(
+    'input-answer',
+    '--state',
+    p.state,
+    '--request',
+    id,
+    '--text',
+    'Hello',
+    '--actor',
+    'lead',
+    '--reason',
+    'r',
+    '--request-version',
+    '1',
+  );
+  assert.equal(r.status, exitCodes.refused, r.stderr);
+  assert.equal(r.json.error?.code, 'OPERATOR_ANSWER_REQUIRED');
+  const waiting = p.harness('status', '--state', p.state).json.data.works[0];
+  assert.equal(waiting.input.leadMay, undefined);
+  assert.deepEqual(waiting.stage.needs, { actor: 'user', action: 'answer-input' });
 });

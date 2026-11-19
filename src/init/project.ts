@@ -12,6 +12,8 @@ import {
   PROJECT_POLICY_PATH,
   PROJECT_WORK_DIR,
   executionPolicySchema,
+  inputPolicyOf,
+  leadAnswersRule,
   projectManifestSchema,
   runtimeAssignments,
   sameVendorReviews,
@@ -150,6 +152,11 @@ export interface InitOptions {
   plan?: boolean;
   /** Слой `lean` поверх профиля; в pnpm-репозитории — ещё и `dependencyStore`. */
   lean?: boolean;
+  /**
+   * Технические вопросы исполнителя решает ведущий (`inputPolicy.leadAnswers.technical`
+   * в новой политике). Без флага — человек отвечает на все вопросы, останавливающие работу.
+   */
+  leadTechnicalAnswers?: boolean;
   env?: NodeJS.ProcessEnv;
   probe?: ToolProbe;
 }
@@ -174,6 +181,7 @@ export interface InitPlanned {
   warnings: InitData['warnings'];
   /** Почему сохранённая политика расходится с решениями (конфликт `policy.json`). */
   policyConflict?: string;
+  questions: InitData['questions'];
 }
 
 const readme = `# .harness
@@ -344,6 +352,7 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
     lstat(join(root, 'pnpm-lock.yaml'))?.isFile()
       ? { dependencyStore: true }
       : {}),
+    ...(options.leadTechnicalAnswers ? { leadTechnicalAnswers: true } : {}),
   });
   const policyPath = join(root, PROJECT_POLICY_PATH);
   const policy = savedPolicy ?? executionPolicySchema.parse(generated.input);
@@ -406,7 +415,13 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
         .map(([kind, author]) => selectReviewer(savedPolicy, kind, { runtime: author }))
         .find((c) => !c.ok)
     : undefined;
-  if (refusedReview)
+  // Правило технических вопросов сохранённой политики меняется её правкой, а не
+  // флагом поверх неё: иначе флаг молча не действовал бы.
+  const technicalConflict =
+    options.leadTechnicalAnswers && savedPolicy
+      ? inputPolicyOf(savedPolicy).leadAnswers?.technical !== true
+      : false;
+  if (refusedReview || technicalConflict)
     workConflicts.push({ path: policyPath, action: 'conflict', conflict: 'content-differs' });
   const harnessDir = join(root, HARNESS_PROJECT_DIR);
   if (!plan.entries.some((e) => e.conflictPath === harnessDir))
@@ -447,7 +462,38 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
     review,
     runtimes,
     warnings: initWarnings(policy, lead.runtime, runtimes),
-    ...(refusedReview && !refusedReview.ok ? { policyConflict: refusedReview.message } : {}),
+    ...(refusedReview && !refusedReview.ok
+      ? { policyConflict: refusedReview.message }
+      : technicalConflict
+        ? {
+            policyConflict:
+              '--lead-technical-answers: сохранённая политика не разрешает ведущему технические вопросы; добавьте inputPolicy.leadAnswers.technical: true в .harness/policy.json',
+          }
+        : {}),
+    questions: questionsOf(
+      policy,
+      savedPolicy ? 'policy' : options.leadTechnicalAnswers ? 'option' : 'default',
+    ),
+  };
+}
+
+/**
+ * Кто отвечает на вопросы исполнителя при действующей политике — решение,
+ * которое `init --plan` показывает человеку: технические вопросы решает
+ * ведущий (`--lead-technical-answers`) или все — человек.
+ */
+function questionsOf(
+  policy: ExecutionPolicy,
+  source: InitData['questions']['source'],
+): InitData['questions'] {
+  const lead = inputPolicyOf(policy).leadAnswers;
+  const rule = leadAnswersRule(inputPolicyOf(policy));
+  return {
+    leadTechnical: lead?.technical === true,
+    ...(lead?.maxSeverity !== undefined ? { maxSeverity: lead.maxSeverity } : {}),
+    source,
+    line: rule.ru,
+    lineEn: rule.en,
   };
 }
 
@@ -573,6 +619,7 @@ function dataOf(
     review: planned.review,
     runtimes: planned.runtimes,
     warnings: planned.warnings,
+    questions: planned.questions,
     facts: {
       repositoryId: repository.id,
       targetRef: repository.targetRef,
@@ -684,6 +731,10 @@ export function initText(data: InitData): string {
     `lead: ${data.lead.runtime} (${data.lead.source})`,
     `review: ${data.review.mode} (${data.review.source})`,
     `runtimes: writer ${data.manifest.runtimes.writer}, reviewer ${data.manifest.runtimes.reviewer}`,
+    `questions: ${data.questions.line}` +
+      (data.questions.leadTechnical || data.questions.source === 'policy'
+        ? ''
+        : ' Чтобы технические вопросы решал ведущий — init --lead-technical-answers.'),
     ...data.runtimes.map(
       (r) => `  ${r.runtime}: ${r.status}${r.version ? ' ' + r.version : ''}, auth ${r.auth}`,
     ),

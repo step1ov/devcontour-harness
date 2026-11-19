@@ -81,6 +81,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "forUser": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 300
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -124,6 +135,20 @@
               "migration"
             ]
           }
+        },
+        "impact": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "user-visible",
+                "technical"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -288,11 +313,11 @@
                   "type": "integer",
                   "minimum": 1,
                   "maximum": 10
+                },
+                "technical": {
+                  "type": "boolean"
                 }
               },
-              "required": [
-                "maxSeverity"
-              ],
               "additionalProperties": false
             }
           },
@@ -385,6 +410,18 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 300
+          },
+          "basis": {
+            "type": "string",
+            "enum": [
+              "severity",
+              "technical"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
           },
           "digest": {
             "type": "string",

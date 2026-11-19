@@ -1360,6 +1360,43 @@ handoff` (`handoffPack`) больше не содержит попыток, пр
   `<state>/review-code/`, `<state>/preflight/` и файлы
   `<state>/gates-at/*/result.json` можно удалить.
 
+### 0.1.0-alpha.55: технические вопросы решает ведущий, панель в начале запуска
+
+Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`,
+`handoffVersion: 1`, `reportVersion: 1`). Новые поля необязательны; без
+нового поля политики поведение alpha.54 не меняется.
+
+- **Влияние вопроса.** Вопрос исполнителя получил необязательное `impact`
+  (`technical` | `user-visible`; нет поля — `user-visible`), вариант —
+  необязательное `forUser` («что изменится для пользователя»). Wire-схема
+  ответа writer (`implementationOutputSchema`) объявляет оба поля
+  обязательными с `null`: хост, который передаёт свою копию схемы runtime,
+  должен обновить её, иначе writer их не вернёт (вопрос тогда — человеку).
+- **Поле политики `inputPolicy.leadAnswers.technical: true`** (opt-in,
+  `init --lead-technical-answers` для новой политики): ведущий отвечает на
+  технический вопрос без минимумов `input-answer --actor lead --reason "…"`;
+  без `--reason` — `INVALID_INPUT`. `leadAnswers.maxSeverity` стал
+  необязательным, но `leadAnswers` без `maxSeverity` и без `technical: true`
+  отвергается схемой. Ответ ведущего на блокирующий вопрос получает
+  `basis` (`technical` | `severity`) и `reason`; `status`
+  (`works[].input.impact/answerBasis/leadMay`), `explain`, пакет передачи
+  (`inputs[].impact`, `inputs[].answer.basis/reason`) и отчёт
+  (`inputs.answeredBy.leadTechnical`) показывают «решено ведущим
+  (технический вопрос)». При разрешённом техническом пути `explain` называет
+  `actor: lead` вместо `user`.
+- **Правило словами.** `doctor --policy` — поле `questions`, `init` —
+  поле `questions` (`leadTechnical`, `maxSeverity`, `source`, `line`,
+  `lineEn`). `init --lead-technical-answers` при сохранённой политике без
+  этого правила — `PATH_CONFLICT` `content-differs` на `.harness/policy.json`:
+  правило меняется правкой политики между запусками.
+- **Откат на 0.1.0-alpha.54.** Уберите `inputPolicy.leadAnswers.technical`
+  и из `.harness/policy.json`, и из `<state>/binding.json`; `leadAnswers`
+  без `maxSeverity` уберите целиком — схема alpha.54 требует `maxSeverity`.
+  Записи `input-requests` с `impact`, `forUser`, `basis` или `reason`
+  alpha.54 не читает (строгая схема): откат после вопросов исполнителя этой
+  версии не поддерживается — откатывайтесь на копию состояния, снятую до
+  обновления.
+
 ## Перед обновлением
 
 1. **Остановить записывающих.** Запретить новые выдачи (`harness pause`),

@@ -323,6 +323,7 @@ const options = {
   'accept-limitation': { type: 'string', multiple: true },
   'continue-review': { type: 'string', multiple: true },
   watch: { type: 'boolean' },
+  'lead-technical-answers': { type: 'boolean' },
   interval: { type: 'string' },
   base: { type: 'string' },
   head: { type: 'string' },
@@ -332,6 +333,7 @@ const options = {
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
 const flagOwners = {
   plan: ['init', 'lean'],
+  'lead-technical-answers': ['init'],
   lean: ['init'],
   off: ['lean'],
   writer: ['init'],
@@ -903,6 +905,7 @@ async function run(
         ...(v.state ? { state: v.state } : {}),
         ...(v.plan ? { plan: true } : {}),
         ...(v.lean ? { lean: true } : {}),
+        ...(v['lead-technical-answers'] ? { leadTechnicalAnswers: true } : {}),
       });
       // План с конфликтами или неготовым toolchain — отказ по существу с данными.
       const blocked = data.mode === 'plan' && (data.conflicts > 0 || !data.toolchain.ready);
@@ -1255,6 +1258,7 @@ async function run(
                 ...optional('optionId', v.option),
                 kind,
                 actor: { kind: actor },
+                ...optional('reason', v.reason),
               },
               version(),
             ),
