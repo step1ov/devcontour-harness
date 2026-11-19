@@ -13,6 +13,7 @@ import {
   type Author,
   type ContextSnapshot,
   type ContractDocument,
+  type ReviewDisposition,
   type PropertyRecovery,
   type DeliveryState,
   type ExecutionPolicy,
@@ -39,7 +40,7 @@ import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { validateInputs } from '../validate.ts';
 import { WorkflowQueue } from './workflow.ts';
 import { statusOf } from './status.ts';
-import { technicalReview } from './review.ts';
+import { reviewRoundCap, technicalReview } from './review.ts';
 import { policySourceChanged, type PolicySource } from './provenance.ts';
 import { JointRunner } from '../engine/joint-runner.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
@@ -263,9 +264,16 @@ export class Harness {
    * состояние каждой прежней открытой находки; история не переписывается.
    */
   async review(
-    input:
+    input: (
       | { kind: 'plan'; graph: WorkGraph; context?: ContextSnapshot; author: Author }
-      | { kind: 'contract'; contract: ContractDocument; author: Author },
+      | { kind: 'contract'; contract: ContractDocument; author: Author }
+    ) & {
+      /**
+       * Решения ведущего или оператора по открытым находкам последнего
+       * раунда; применяются этим раундом (docs/review-protocol.md, §8).
+       */
+      dispositions?: ReviewDisposition[];
+    },
   ) {
     const subject = input.kind === 'plan' ? input.graph.id : input.contract.id;
     const digest = input.kind === 'plan' ? workGraphDigest(input.graph) : digestOf(input.contract);
@@ -310,7 +318,8 @@ export class Harness {
           ? { group: { id: subject, workIds: input.graph.orders.map((o) => o.id) } }
           : {}),
       },
-      maxRounds: this.policy.maxAttempts * 2,
+      maxRounds: reviewRoundCap(this.policy),
+      ...(input.dispositions?.length ? { dispositions: input.dispositions } : {}),
       ...(this.options.environment ? { environment: this.options.environment } : {}),
     });
   }

@@ -15,6 +15,8 @@ import {
   API_VERSION,
   HarnessError,
   authorSchema,
+  reviewDispositionSchema,
+  type ReviewDisposition,
   cliCommands,
   cliDataSchemas,
   contractViolation,
@@ -316,6 +318,8 @@ const options = {
   sha: { type: 'string' },
   gate: { type: 'string' },
   'fail-fast': { type: 'boolean' },
+  'accept-limitation': { type: 'string', multiple: true },
+  'continue-review': { type: 'string', multiple: true },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -353,7 +357,9 @@ const flagOwners = {
   text: ['input-answer'],
   option: ['input-answer'],
   kind: ['input-answer'],
-  actor: ['input-answer'],
+  actor: ['input-answer', 'review-plan', 'review-contract'],
+  'accept-limitation': ['review-plan', 'review-contract'],
+  'continue-review': ['review-plan', 'review-contract'],
   'request-version': ['input-answer', 'input-apply', 'input-cancel', 'input-supersede'],
   'context-digest': ['input-target', 'input-apply'],
   answer: ['input-apply'],
@@ -441,6 +447,45 @@ const readText = (path: string, what: string) => {
 
 const reportFormats = ['json', 'md', 'html'] as const;
 
+/**
+ * Решения по находкам из флагов review-plan / review-contract: ID — списком
+ * через запятую или повтором флага; основание обязательно, решающий — lead
+ * (по умолчанию) или operator.
+ */
+function reviewDispositionsOf(v: {
+  'accept-limitation'?: string[];
+  'continue-review'?: string[];
+  reason?: string;
+  actor?: string;
+}): ReviewDisposition[] {
+  const ids = (list?: string[]) =>
+    (list ?? [])
+      .flatMap((x) => x.split(','))
+      .map((x) => x.trim())
+      .filter(Boolean);
+  const accept = ids(v['accept-limitation']);
+  const proceed = ids(v['continue-review']);
+  if (!accept.length && !proceed.length) {
+    if (v.actor !== undefined)
+      throw new HarnessError(
+        'INVALID_INPUT',
+        '--actor задаёт решающего: нужны --accept-limitation или --continue-review',
+      );
+    return [];
+  }
+  const by = v.actor ?? 'lead';
+  if (by !== 'lead' && by !== 'operator')
+    throw new HarnessError('INVALID_INPUT', '--actor: ожидается lead или operator', [
+      { path: ['--actor'], message: by },
+    ]);
+  return [
+    ...accept.map((finding) => ({ finding, decision: 'accepted-limitation' as const })),
+    ...proceed.map((finding) => ({ finding, decision: 'continue' as const })),
+  ].map((d) =>
+    parseWith(reviewDispositionSchema, { ...d, by, reason: v.reason ?? '' }, 'disposition'),
+  );
+}
+
 async function run(
   argv: string[],
 ): Promise<{ command: CliCommand | 'version'; data: unknown; code?: number; text?: string }> {
@@ -503,6 +548,7 @@ async function run(
     case 'review-plan':
     case 'review-contract': {
       const author = parseWith(authorSchema, need('author'), 'author');
+      const dispositions = reviewDispositionsOf(v);
       const b = binding(need('state'), need('policy'), true);
       const h = open(need('state'), b, false);
       try {
@@ -538,6 +584,7 @@ async function run(
             graph,
             author,
             ...(ctx ? { context: ctx } : {}),
+            ...(dispositions.length ? { dispositions } : {}),
           });
         } else {
           const contract = parseWith(
@@ -545,7 +592,12 @@ async function run(
             readJson(need('contract'), 'contract'),
             'contract',
           );
-          record = await h.review({ kind: 'contract', contract, author });
+          record = await h.review({
+            kind: 'contract',
+            contract,
+            author,
+            ...(dispositions.length ? { dispositions } : {}),
+          });
         }
         return { command, data: record, code: record.approved ? 0 : exitCodes.refused };
       } finally {

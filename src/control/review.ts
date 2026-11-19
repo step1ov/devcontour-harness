@@ -8,19 +8,24 @@ import {
   contextDigest,
   findingId,
   mcpEnvironment,
-  reviewIssues,
   issuePath,
+  escalatedFindings,
+  openRounds,
   reviewResultSchema,
   selectReviewer,
+  escalationQuestion,
   type Author,
   type ContextSnapshot,
   type ContractDocument,
   type ExecutionPolicy,
+  type ReviewDisposition,
+  type ReviewFinding,
   type ReviewRecord,
+  type ReviewResult,
   type RuntimeAdapter,
   type RuntimeName,
 } from '../contracts/index.ts';
-import { reviewOutputSchema } from '../agents/schemas.ts';
+import { technicalReviewOutputSchema } from '../agents/schemas.ts';
 import { redactInspection } from '../agents/inspect.ts';
 import { executionEnvironment } from '../environment/lifecycle.ts';
 import { redactDeep } from '../environment/redaction.ts';
@@ -78,6 +83,13 @@ export interface TechnicalReviewInput {
     rounds: number;
     findings: { severity: 'blocking' | 'note'; message: string; rule?: string }[];
   };
+  /**
+   * Решения ведущего или оператора по открытым находкам последнего раунда
+   * (`accepted-limitation`, `continue`): применяются этим раундом до вызова
+   * reviewer и записываются в его историю. Находку, открытую
+   * `REVIEW_ESCALATION_ROUNDS` раундов подряд, решает только оператор.
+   */
+  dispositions?: ReviewDisposition[];
   /** Источник значений окружения (по умолчанию `process.env`). */
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
@@ -124,17 +136,35 @@ export async function technicalReview(
     last.approved &&
     last.reviewerBinding === binding &&
     last.contextDigest === contextKey
-  )
+  ) {
+    // Решение записывается только раундом: одобренный предмет без нового
+    // раунда его не примет, и молча потерянное решение хуже отказа.
+    if (input.dispositions?.length)
+      throw new HarnessError(
+        'INVALID_INPUT',
+        `Ревью ${kind} ${subject}: digest уже одобрен раундом ${last.round}; решения по находкам применяет следующий раунд`,
+      );
     return last;
+  }
+  const round = before + 1;
+  // Решения ведущего и оператора — до вызова: reviewer видит их результат.
+  const decided = applyDispositions(lastFindings, input.dispositions ?? [], round, before);
+  // Находка, открытая раундами подряд, — решение оператора, а не ещё один
+  // оплаченный раунд: вызова нет, пока решения нет.
+  const waiting = escalatedFindings(decided, before);
+  if (waiting.length) throw escalationError(kind, subject, waiting, before);
   if (input.maxRounds !== undefined && before >= input.maxRounds)
-    throw new HarnessError('ATTEMPTS_EXHAUSTED', `Исчерпаны раунды ревью ${kind} ${subject}`);
+    throw new HarnessError(
+      'ATTEMPTS_EXHAUSTED',
+      `Исчерпаны раунды ревью ${kind} ${subject}: ${before} из ${input.maxRounds}`,
+    );
   const adapter = adapters[choice.reviewer.runtime];
   if (!adapter)
     throw new HarnessError(
       'RUNTIME_UNAVAILABLE',
       'Runtime не подключён: ' + choice.reviewer.runtime,
     );
-  const open = lastFindings.filter((f) => f.status === 'open');
+  const open = decided.filter((f) => f.status === 'open');
   // Ответ обязан назвать каждую открытую находку по ID, а `previous` ограничен:
   // такой раунд не одобрить, и вызов модели был бы оплачен впустую.
   const named = new Set(open.map((f) => f.id)).size;
@@ -143,7 +173,6 @@ export async function technicalReview(
       'REVIEW_PROTOCOL_INVALID',
       `Ревью ${kind} ${subject}: открытых находок ${named}, предел раунда ревью ${REVIEW_ITEMS_LIMIT}; нового вызова нет`,
     );
-  const round = before + 1;
   const dir = input.artifactDir;
   await mkdir(dir, { recursive: true });
   const repo =
@@ -174,11 +203,8 @@ export async function technicalReview(
     ...input.instructions,
     `Subject: ${kind} ${subject}, digest ${digest}, round ${round}. Author: ${input.author}.`,
     context ? `Pinned context snapshot ${contextKey}.\n\n` + contextText(context) : '',
-    open.length
-      ? 'Previous open findings. For each, report its state in `previous` (closed, open or withdrawn) with a concrete basis: ' +
-        JSON.stringify(open.map((f) => ({ id: f.id, severity: f.severity, message: f.message })))
-      : '',
-    'Report execution.commands or an empty list with execution.noCommandsReason. Findings need a message; use null where a field does not apply.',
+    ...findingSections(decided, before),
+    'Report execution.commands or an empty list with execution.noCommandsReason. Findings need a message; use null where a field does not apply. Give a finding a stable `rule` (its class) and a `path` (the field or file it is about) where they apply.',
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -193,7 +219,7 @@ export async function technicalReview(
       binding: choice.reviewer,
       cwd: input.cwd,
       prompt,
-      outputSchema: reviewOutputSchema,
+      outputSchema: technicalReviewOutputSchema,
       session: { kind: 'fresh' },
       sandbox: {
         mode: policy.isolation.mode,
@@ -223,8 +249,11 @@ export async function technicalReview(
     );
   const parsed = reviewResultSchema.safeParse(response.output);
   const issue = parsed.error?.issues[0];
-  const issues = parsed.success
-    ? reviewIssues(parsed.data, open)
+  const merged = parsed.success
+    ? mergeTechnicalRound(decided, parsed.data, round, subject, execution.redact)
+    : undefined;
+  const issues = merged
+    ? merged.issues
     : [
         execution
           .redact(`Ответ ревью вне схемы: ${issuePath(issue?.path ?? [])}: ${issue?.message}`)
@@ -232,35 +261,10 @@ export async function technicalReview(
       ];
   // Ответ применяется только целиком валидным (docs/review-protocol.md, §8):
   // невалидный не закрывает прежних находок и не заводит новых — раунд
-  // записывается неодобренным с причинами, история остаётся прежней.
-  const applied = parsed.success && !issues.length ? parsed.data : undefined;
-  const transitions = new Map((applied?.previous ?? []).map((t) => [t.id, t]));
-  const reported = (applied?.findings ?? []).map((f) => ({ ...f, id: findingId(subject, f) }));
-  const findings: ReviewRecord['findings'] = [
-    ...lastFindings.map((f) => {
-      const t = transitions.get(f.id);
-      if (f.status === 'open' && t)
-        return { ...f, status: t.status, changedIn: round, basis: t.basis.slice(0, 4000) };
-      // Повторно найденная закрытая/снятая находка открывается снова, а не
-      // теряется как дубликат по ID.
-      if (f.status !== 'open' && reported.some((r) => r.id === f.id))
-        return { ...f, status: 'open' as const, changedIn: round, basis: 'найдена снова' };
-      return f;
-    }),
-    ...reported
-      .filter((f) => !lastFindings.some((p) => p.id === f.id))
-      .map((f) => ({
-        id: f.id,
-        severity: f.severity,
-        message: execution.redact(f.message).slice(0, 12000),
-        ...(f.rule ? { rule: f.rule.slice(0, 200) } : {}),
-        path: f.path ?? null,
-        line: f.line ?? null,
-        status: 'open' as const,
-        openedIn: round,
-        changedIn: round,
-      })),
-  ];
+  // записывается неодобренным с причинами; решения ведущего и оператора
+  // этого раунда сохраняются (они приняты до вызова).
+  const findings: ReviewRecord['findings'] = merged && !issues.length ? merged.findings : decided;
+  const notes = merged && !issues.length ? merged.notes : [];
   const record: ReviewRecord = {
     id: `RV-${kind}-${subject}-${round}`,
     kind,
@@ -269,10 +273,15 @@ export async function technicalReview(
     round,
     at: new Date().toISOString(),
     approved: parsed.success && parsed.data.approved && !issues.length,
-    summary:
-      execution
-        .redact(parsed.success ? parsed.data.summary : 'Ответ ревью вне схемы')
-        .slice(0, 12000) + (issues.length ? ' / ' + issues.join('; ') : ''),
+    summary: ((suffix) =>
+      (
+        execution
+          .redact(parsed.success ? parsed.data.summary : 'Ответ ревью вне схемы')
+          .slice(0, Math.max(0, 12000 - suffix.length)) + suffix
+      ).slice(0, 12000))(
+      (issues.length ? ' / ' + issues.join('; ') : '') +
+        (notes.length ? ' / ' + notes.join('; ') : ''),
+    ),
     authorRuntime: input.author,
     reviewerRuntime: choice.reviewer.runtime,
     ...(response.model ? { reviewerModel: response.model } : {}),
@@ -314,3 +323,278 @@ export async function technicalReview(
     prior?.rounds ?? 0,
   );
 }
+
+/**
+ * Решения ведущего и оператора по открытым находкам последнего раунда:
+ * `accepted-limitation` — находка принята ограничением с основанием,
+ * `continue` — оператор разрешил ещё раунды после эскалации. Решение по
+ * неизвестной или не открытой находке, повтор находки и решение ведущего по
+ * эскалированной находке — отказ до вызова reviewer.
+ */
+export function applyDispositions(
+  findings: ReviewRecord['findings'],
+  dispositions: readonly ReviewDisposition[],
+  round: number,
+  lastRound: number,
+): ReviewRecord['findings'] {
+  if (!dispositions.length) return findings;
+  const byId = new Map(dispositions.map((d) => [d.finding, d]));
+  if (byId.size !== dispositions.length)
+    throw new HarnessError('INVALID_INPUT', 'Решение по одной находке названо дважды');
+  const escalated = new Set(escalatedFindings(findings, lastRound).map((f) => f.id));
+  for (const d of dispositions) {
+    const f = findings.find((x) => x.id === d.finding);
+    if (!f)
+      throw new HarnessError('INVALID_INPUT', 'Находки нет в истории предмета: ' + d.finding, [
+        { path: ['dispositions', d.finding], message: 'unknown' },
+      ]);
+    if (f.status !== 'open')
+      throw new HarnessError(
+        'INVALID_INPUT',
+        `Находка ${d.finding} не открыта (${f.status}): решение не нужно`,
+        [{ path: ['dispositions', d.finding], message: 'not-open' }],
+      );
+    if (escalated.has(f.id) && d.by !== 'operator')
+      throw new HarnessError(
+        'INPUT_REQUIRED',
+        `Находка ${d.finding} открыта ${openRounds(f, lastRound)} раундов подряд: решение за оператором (--actor operator)`,
+        [{ path: ['dispositions', d.finding], message: 'operator-decision' }],
+      );
+    if (d.decision === 'continue' && !escalated.has(f.id))
+      throw new HarnessError(
+        'INVALID_INPUT',
+        `Находка ${d.finding} не ждёт решения: продолжение нужно только после эскалации`,
+        [{ path: ['dispositions', d.finding], message: 'not-escalated' }],
+      );
+  }
+  return findings.map((f) => {
+    const d = byId.get(f.id);
+    if (!d) return f;
+    const disposition = {
+      decision: d.decision,
+      by: d.by,
+      reason: d.reason.slice(0, 4000),
+      round,
+      rounds: openRounds(f, lastRound),
+    };
+    return d.decision === 'accepted-limitation'
+      ? {
+          ...f,
+          status: 'accepted-limitation' as const,
+          changedIn: round,
+          basis: d.reason.slice(0, 4000),
+          disposition,
+        }
+      : { ...f, disposition };
+  });
+}
+
+/** Отказ до вызова: находки ждут решения оператора (вопрос с вариантами). */
+function escalationError(
+  kind: 'plan' | 'contract',
+  subject: string,
+  waiting: ReviewRecord['findings'],
+  lastRound: number,
+) {
+  const q = escalationQuestion(
+    kind,
+    subject,
+    waiting.map((f) => ({ id: f.id, rounds: openRounds(f, lastRound) })),
+  );
+  return new HarnessError(
+    'INPUT_REQUIRED',
+    `${q.question} Варианты: ${q.options.map((o) => `${o.id} — ${o.label}`).join('; ')}. Ответ: ${q.answer}`,
+    waiting.map((f) => ({
+      path: ['findings', f.id],
+      message: `открыта ${openRounds(f, lastRound)} раундов: ${f.message.slice(0, 300)}`,
+    })),
+  );
+}
+
+/** Предел истории закрытых находок в запросе reviewer. */
+const HISTORY_IN_PROMPT = 50;
+
+/**
+ * Разделы запроса о находках предмета: открытые (назвать состояние),
+ * принятые ограничения (не поднимать без новых доказательств) и недавняя
+ * история закрытых (поднять снова — через `sameAs`).
+ */
+function findingSections(findings: ReviewRecord['findings'], lastRound: number): string[] {
+  const open = findings.filter((f) => f.status === 'open');
+  const accepted = findings.filter((f) => f.status === 'accepted-limitation');
+  const closed = findings
+    .filter((f) => f.status === 'closed' || f.status === 'withdrawn')
+    .slice(-HISTORY_IN_PROMPT);
+  const brief = (f: ReviewFinding) => ({
+    id: f.id,
+    severity: f.severity,
+    message: f.message,
+    ...(f.rule ? { rule: f.rule } : {}),
+    ...(f.path ? { path: f.path } : {}),
+  });
+  return [
+    open.length
+      ? 'Previous open findings. For each, report its state in `previous` (closed, open or withdrawn) with a concrete basis: ' +
+        JSON.stringify(open.map((f) => ({ ...brief(f), rounds: openRounds(f, lastRound) })))
+      : '',
+    accepted.length
+      ? 'Accepted limitations (decided by the lead or the operator, with the reason). Do not report them again and do not list them in `previous`. Re-raise one only with new evidence the reason does not cover: then set `sameAs` to its id and put the new evidence in `evidence`; a re-raise without evidence is ignored: ' +
+        JSON.stringify(accepted.map((f) => ({ ...brief(f), reason: f.basis ?? '' })))
+      : '',
+    closed.length
+      ? 'Closed or withdrawn findings (history; do not list them in `previous`). If one is present again, report it with `sameAs` set to its id: ' +
+        JSON.stringify(closed.map((f) => ({ ...brief(f), status: f.status })))
+      : '',
+    'A finding you report that is the same problem as a finding above — even in other words — must carry `sameAs` with that id; do not close the old finding and open a new one for it. Use `sameAs: null` for a new problem.',
+  ];
+}
+
+/**
+ * Применение валидного по схеме ответа reviewer к истории предмета
+ * (docs/review-protocol.md, §8). Находка ответа поднимает прежнюю — и
+ * сохраняет её ID и счёт раундов — по `sameAs`, по тому же тексту или по
+ * тому же непустому пути и правилу; иначе это новая находка. Поднятая снова
+ * открытая находка не требует записи в `previous`, а поднятая вопреки
+ * переходу `closed`/`withdrawn` остаётся открытой. Принятое ограничение без
+ * новых доказательств (`evidence`) не открывается и не блокирует одобрение.
+ */
+export function mergeTechnicalRound(
+  prior: ReviewRecord['findings'],
+  result: ReviewResult,
+  round: number,
+  subject: string,
+  redact: (text: string) => string = (t) => t,
+): { findings: ReviewRecord['findings']; issues: string[]; notes: string[] } {
+  const issues: string[] = [];
+  const notes: string[] = [];
+  const byId = new Map(prior.map((f) => [f.id, f]));
+  const claimed = new Map<string, number>();
+  const match: (ReviewFinding | undefined)[] = [];
+  const how: ('sameAs' | 'text' | 'rule')[] = [];
+  const claim = (i: number, f: ReviewFinding, by: 'sameAs' | 'text' | 'rule') => {
+    claimed.set(f.id, i);
+    match[i] = f;
+    how[i] = by;
+  };
+  const reported = result.findings;
+  // 1. Явная ссылка reviewer. Неизвестная или повторная — подсказка, а не
+  // ошибка протокола: находка сопоставляется дальше, оплаченный вердикт цел.
+  reported.forEach((r, i) => {
+    if (!r.sameAs) return;
+    const f = byId.get(r.sameAs);
+    if (f && !claimed.has(f.id)) claim(i, f, 'sameAs');
+    else notes.push(`sameAs не применён (${f ? 'повтор' : 'неизвестная находка'}): ${r.sameAs}`);
+  });
+  // 2. Тот же текст: ID новой находки — ID прежней или её текущей формулировки.
+  reported.forEach((r, i) => {
+    if (match[i]) return;
+    const id = findingId(subject, r);
+    const f = prior.find(
+      (p) => !claimed.has(p.id) && (p.id === id || findingId(subject, p) === id),
+    );
+    if (f) claim(i, f, 'text');
+  });
+  // 3. Тот же непустой путь и правило: переформулировка той же находки.
+  reported.forEach((r, i) => {
+    if (match[i]) return;
+    const rule = r.rule?.trim() ? redact(r.rule).slice(0, 200) : undefined;
+    const path = r.path?.trim() ? redact(r.path) : undefined;
+    if (!rule || !path) return;
+    const candidates = prior.filter(
+      (p) => !claimed.has(p.id) && p.rule === rule && (p.path ?? undefined) === path,
+    );
+    const open = candidates.filter((p) => p.status === 'open');
+    const f = candidates.length === 1 ? candidates[0] : open.length === 1 ? open[0] : undefined;
+    if (f) claim(i, f, 'rule');
+  });
+  // Принятое ограничение без новых доказательств остаётся принятым.
+  const ignored = reported.map(
+    (r, i) => match[i]?.status === 'accepted-limitation' && !r.evidence?.trim(),
+  );
+  const ignoredIds = match.filter((f, i) => f && ignored[i]).map((f) => f!.id);
+  if (ignoredIds.length)
+    notes.push('повтор принятого ограничения без новых доказательств: ' + ignoredIds.join(', '));
+
+  // Переходы: только открытые находки, каждая — один раз; открытая, не
+  // поднятая снова, обязана быть названа.
+  const named = new Set<string>();
+  for (const t of result.previous) {
+    if (byId.get(t.id)?.status !== 'open') issues.push('Состояние неизвестной находки: ' + t.id);
+    if (named.has(t.id)) issues.push('Состояние находки названо дважды: ' + t.id);
+    named.add(t.id);
+  }
+  for (const f of prior)
+    if (f.status === 'open' && !named.has(f.id) && !claimed.has(f.id))
+      issues.push('Не названо состояние прежней находки ' + f.id);
+  const blockingReported = reported.some((r, i) => r.severity === 'blocking' && !ignored[i]);
+  const stillBlocking = result.previous.some(
+    (t) => t.status === 'open' && !claimed.has(t.id) && byId.get(t.id)?.severity === 'blocking',
+  );
+  if (result.approved && (blockingReported || stillBlocking))
+    issues.push('approved при блокирующей находке');
+
+  const transitions = new Map(result.previous.map((t) => [t.id, t]));
+  const findings: ReviewRecord['findings'] = prior.map((f) => {
+    const i = claimed.get(f.id);
+    const t = transitions.get(f.id);
+    if (i !== undefined && !ignored[i]) {
+      const r = reported[i]!;
+      const wasOpen = f.status === 'open';
+      const by = { sameAs: 'sameAs', text: 'тот же текст', rule: 'тот же путь и правило' }[how[i]!];
+      const basis = wasOpen
+        ? t?.status === 'open'
+          ? t.basis
+          : `поднята снова (${by})` + (t ? `; переход ${t.status} отклонён: ${t.basis}` : '')
+        : f.status === 'accepted-limitation'
+          ? `новые доказательства: ${r.evidence ?? ''}`
+          : 'найдена снова';
+      // Переход в открытую из иного состояния начинает счёт раундов и
+      // снимает прежнее решение по находке.
+      const { disposition, ...rest } = f;
+      return {
+        ...(wasOpen ? { ...rest, ...(disposition ? { disposition } : {}) } : rest),
+        severity: r.severity,
+        message: redact(r.message).slice(0, 12000),
+        ...(r.rule?.trim() ? { rule: redact(r.rule).slice(0, 200) } : {}),
+        path: r.path ?? f.path ?? null,
+        line: r.line ?? f.line ?? null,
+        status: 'open' as const,
+        changedIn: round,
+        basis: redact(basis).slice(0, 4000),
+        rounds: wasOpen ? openRounds(f, round - 1) + 1 : 1,
+      };
+    }
+    if (f.status === 'open' && t)
+      return {
+        ...f,
+        status: t.status,
+        changedIn: round,
+        basis: t.basis.slice(0, 4000),
+        ...(t.status === 'open' ? { rounds: openRounds(f, round - 1) + 1 } : {}),
+      };
+    return f;
+  });
+  const added = new Map<string, ReviewFinding>();
+  reported.forEach((r, i) => {
+    if (match[i]) return;
+    const id = findingId(subject, r);
+    if (added.has(id)) return;
+    added.set(id, {
+      id,
+      severity: r.severity,
+      message: redact(r.message).slice(0, 12000),
+      ...(r.rule ? { rule: redact(r.rule).slice(0, 200) } : {}),
+      path: r.path ?? null,
+      line: r.line ?? null,
+      status: 'open',
+      openedIn: round,
+      changedIn: round,
+      rounds: 1,
+    });
+  });
+  return { findings: [...findings, ...added.values()], issues, notes };
+}
+
+/** Предел раундов ревью плана и контракта по политике (`Harness.review`). */
+export const reviewRoundCap = (policy: Pick<ExecutionPolicy, 'maxAttempts'>) =>
+  policy.maxAttempts * 2;

@@ -17,6 +17,7 @@ import type { EnvironmentCause, RunEvent, RunEventPayload } from '../contracts/e
 import type { ReviewRecord } from '../contracts/review.ts';
 import type { InputRequest } from '../contracts/input.ts';
 import { inputStateOf, type InputState } from '../contracts/input-state.ts';
+import { escalatedFindings, findingCounts } from '../contracts/review-loop.ts';
 import type { FailureBucket, ReportDist, ReportMeasure, ValueReport } from '../contracts/report.ts';
 import {
   formatDuration,
@@ -705,6 +706,26 @@ export function valueReport(
       if (f.severity === 'blocking')
         pcFindings.set(`${r.kind}\u0000${r.subject}\u0000${f.id}`, f.status);
   const pcStatuses = [...pcFindings.values()];
+  // Последний раунд окна каждого предмета: одобрение с открытыми заметками,
+  // принятые ограничения и эскалация видны явно (docs/review-protocol.md, §8).
+  const pcLast = new Map<string, ReviewRecord>();
+  for (const r of windowReviews) pcLast.set(`${r.kind}\u0000${r.subject}`, r);
+  let approvedWithOpenNotes = 0;
+  let openNotes = 0;
+  let acceptedLimitations = 0;
+  let pcEscalated = 0;
+  for (const r of pcLast.values()) {
+    const c = findingCounts(r.findings);
+    acceptedLimitations += c.accepted;
+    if (r.approved && c.notes) {
+      approvedWithOpenNotes += 1;
+      openNotes += c.notes;
+    }
+    if (escalatedFindings(r.findings, r.round).length) pcEscalated += 1;
+  }
+  const pcCalls = windowCalls.filter(
+    (c) => c.stage === 'plan-review' || c.stage === 'contract-review',
+  );
   const kindRounds = (kind: 'plan' | 'contract') => {
     const list = windowReviews.filter((r) => r.kind === kind);
     return { rounds: list.length, rejected: list.filter((r) => !r.approved).length };
@@ -1312,6 +1333,13 @@ export function valueReport(
         blockingClosed: pcStatuses.filter((s) => s === 'closed').length,
         blockingOpen: pcStatuses.filter((s) => s === 'open').length,
         blockingWithdrawn: pcStatuses.filter((s) => s === 'withdrawn').length,
+        approvedWithOpenNotes,
+        openNotes,
+        acceptedLimitations,
+        escalated: pcEscalated,
+        calls: pcCalls.length,
+        knownUsd: Math.round(sum(pcCalls.map((c) => c.costUsd ?? 0)) * 1e6) / 1e6,
+        unknownCostCalls: pcCalls.filter((c) => c.costUsd === null).length,
       },
       withdrawn: measure(
         withStatus.filter((s) => s === 'withdrawn').length,

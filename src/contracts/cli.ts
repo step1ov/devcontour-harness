@@ -21,7 +21,7 @@ import {
 } from './execution.ts';
 import { readRunEventSchema } from './events.ts';
 import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
-import { reviewRecordSchema } from './review.ts';
+import { reviewRecordSchema, reviewSubjectSummarySchema } from './review.ts';
 import { sourceRefSchema } from './work.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
 import {
@@ -150,6 +150,42 @@ const contextDigestArg: CliArgument = {
   description: 'Digest снимка контекста с ответом (input-context), прошедшего review-plan',
 };
 
+/**
+ * Решения по находкам плана и контракта (docs/review-protocol.md, §8):
+ * применяются раундом, который запускает команда.
+ */
+const reviewDecisionArgs: CliArgument[] = [
+  {
+    name: '--accept-limitation',
+    value: 'id',
+    required: false,
+    multiple: true,
+    description:
+      'ID открытой находки (или список через запятую), принятой известным ограничением; требует --reason. Следующий раунд видит решение, reviewer не поднимает находку без новых доказательств',
+  },
+  {
+    name: '--continue-review',
+    value: 'id',
+    required: false,
+    multiple: true,
+    description:
+      'ID эскалированной находки (открыта 3+ раундов подряд), по которой оператор разрешает ещё раунды; требует --reason и --actor operator',
+  },
+  {
+    name: '--reason',
+    value: 'text',
+    required: false,
+    description: 'Основание решения по находкам (не короче трёх знаков)',
+  },
+  {
+    name: '--actor',
+    value: 'text',
+    required: false,
+    description:
+      'Кто решает: lead (по умолчанию) или operator; эскалированные находки решает только operator',
+  },
+];
+
 export const cliCommands = {
   validate: {
     description:
@@ -178,6 +214,7 @@ export const cliCommands = {
         description:
           'Конфигурация коннектора задач: внешние предпосылки графа допускаются по решению источника (trusts) и доступности SHA в target ref; без неё доверенных receipt нет',
       },
+      ...reviewDecisionArgs,
     ],
     refusals: [
       'REVIEW_REJECTED',
@@ -185,6 +222,7 @@ export const cliCommands = {
       'BUDGET_EXHAUSTED',
       'BUDGET_UNKNOWN',
       'NOT_READY',
+      'INPUT_REQUIRED',
     ],
   },
   'review-contract': {
@@ -196,8 +234,15 @@ export const cliCommands = {
       { name: '--contract', value: 'path', required: true, description: 'ContractDocument JSON' },
       policy,
       author,
+      ...reviewDecisionArgs,
     ],
-    refusals: ['REVIEW_REJECTED', 'ATTEMPTS_EXHAUSTED', 'BUDGET_EXHAUSTED', 'BUDGET_UNKNOWN'],
+    refusals: [
+      'REVIEW_REJECTED',
+      'ATTEMPTS_EXHAUSTED',
+      'BUDGET_EXHAUSTED',
+      'BUDGET_UNKNOWN',
+      'INPUT_REQUIRED',
+    ],
   },
   approve: {
     description:
@@ -1237,6 +1282,12 @@ export const statusDataSchema = z.strictObject({
     })
     .optional(),
   /**
+   * Ревью плана и контрактов: на предмет — итог последнего раунда
+   * («одобрено, открытых заметок N»), раунды из предела, расход ревью и
+   * эскалация, ждущая решения оператора. Нет поля — раундов ревью нет.
+   */
+  reviews: z.array(reviewSubjectSummarySchema).max(50).optional(),
+  /**
    * Только `status --detail`: время снимка, почему стоит выдача и активные
    * попытки (стадия, длительность, владение, gates). Без флага поля нет.
    */
@@ -1768,6 +1819,8 @@ export const explainDataSchema = z.strictObject({
     .optional(),
   /** Поручений сверх предела строк `attempts` (100); нет поля — все показаны. */
   attemptsTruncated: z.number().int().positive().optional(),
+  /** Сводка ревью плана и контрактов — та же, что у `status`; нет поля — раундов нет. */
+  reviews: z.array(reviewSubjectSummarySchema).max(50).optional(),
 });
 
 const requestIdSchema = inputRequestSchema.shape.id;

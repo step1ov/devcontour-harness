@@ -269,6 +269,21 @@ export const valueReportSchema = z.strictObject({
       blockingClosed: count,
       blockingOpen: count,
       blockingWithdrawn: count,
+      /**
+       * Предметы, последний раунд окна которых одобрил с открытыми заметками
+       * («approved, N open notes»), и число этих заметок. Нет поля — отчёт
+       * прежней версии.
+       */
+      approvedWithOpenNotes: count.optional(),
+      openNotes: count.optional(),
+      /** Находки, принятые ведущим или оператором известным ограничением. */
+      acceptedLimitations: count.optional(),
+      /** Предметы, чей следующий раунд ждёт решения оператора (эскалация). */
+      escalated: count.optional(),
+      /** Вызовы ревью плана и контрактов в окне и их известная стоимость. */
+      calls: count.optional(),
+      knownUsd: z.number().min(0).optional(),
+      unknownCostCalls: count.optional(),
     }),
     withdrawn: reportMeasureSchema,
     items: z.array(evidenceRefSchema).max(REPORT_LIMITS.evidence),
