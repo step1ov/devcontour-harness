@@ -27,3 +27,4 @@ export * from './catalog.ts';
 export * from './report.ts';
 export * from './verification-view.ts';
 export * from './handoff.ts';
+export * from './operator-view.ts';

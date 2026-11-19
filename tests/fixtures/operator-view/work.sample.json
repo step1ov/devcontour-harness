@@ -1,0 +1,166 @@
+{
+  "viewVersion": 1,
+  "viewRevision": 0,
+  "generatedAt": "2026-11-19T12:00:00.000Z",
+  "source": {
+    "producer": "fixture",
+    "producerVersion": "0.0.0",
+    "stateVersion": 1,
+    "token": "fixture-1"
+  },
+  "work": {
+    "id": "locale-format",
+    "graphId": "g1",
+    "title": "Format dates by locale",
+    "status": "verifying",
+    "stage": {
+      "name": "gates",
+      "step": "candidate-test:unit",
+      "since": "2026-11-19T11:52:10.000Z",
+      "next": ["review", "integration"],
+      "typical": {
+        "p50Ms": 300000,
+        "p90Ms": 720000,
+        "samples": 6
+      }
+    },
+    "attempts": {
+      "used": 2,
+      "max": 3,
+      "left": 1,
+      "failed": 1,
+      "interrupted": 0,
+      "rechecks": 1,
+      "neutral": {
+        "used": 0,
+        "max": 3
+      },
+      "line": "2 attempts: 1 failed (check), 1 running; 1 left",
+      "lastFailure": {
+        "attempt": 1,
+        "bucket": "defect",
+        "plain": "a check failed: lint found an unused import",
+        "at": "2026-11-19T11:40:30.000Z"
+      }
+    },
+    "liveness": "active",
+    "runtime": "claude",
+    "model": "example-writer",
+    "blockers": [],
+    "spend": {
+      "calls": 5,
+      "usd": {
+        "value": 3.4,
+        "bound": "lower"
+      },
+      "durationMs": 1900000
+    }
+  },
+  "attempts": [
+    {
+      "attempt": 2,
+      "status": "running",
+      "runtime": "claude",
+      "model": "example-writer",
+      "startedAt": "2026-11-19T11:41:00.000Z",
+      "stages": [
+        {
+          "stage": "prepare",
+          "durationMs": 20000,
+          "outcome": "passed"
+        },
+        {
+          "stage": "writer",
+          "durationMs": 600000,
+          "outcome": "passed"
+        },
+        {
+          "stage": "gates"
+        }
+      ]
+    },
+    {
+      "attempt": 1,
+      "status": "failed",
+      "failureBucket": "defect",
+      "runtime": "claude",
+      "model": "example-writer",
+      "startedAt": "2026-11-19T11:28:00.000Z",
+      "finishedAt": "2026-11-19T11:40:30.000Z",
+      "stages": [
+        {
+          "stage": "prepare",
+          "durationMs": 15000,
+          "outcome": "passed"
+        },
+        {
+          "stage": "writer",
+          "durationMs": 690000,
+          "outcome": "passed"
+        },
+        {
+          "stage": "gates",
+          "durationMs": 45000,
+          "outcome": "failed"
+        }
+      ]
+    }
+  ],
+  "verification": [
+    {
+      "gate": "lint",
+      "kind": "gate",
+      "result": "passed",
+      "how": "executed",
+      "by": "claude",
+      "attempt": 2,
+      "at": "2026-11-19T11:51:40.000Z"
+    },
+    {
+      "gate": "typecheck",
+      "kind": "gate",
+      "result": "reused",
+      "how": "reused",
+      "by": "claude",
+      "attempt": 1,
+      "at": "2026-11-19T11:39:50.000Z"
+    },
+    {
+      "gate": "unit",
+      "kind": "gate",
+      "result": "not-run",
+      "how": "not-checked",
+      "attempt": 2
+    },
+    {
+      "gate": "g1",
+      "kind": "review",
+      "result": "passed",
+      "how": "read",
+      "by": "codex",
+      "at": "2026-11-19T11:10:00.000Z"
+    },
+    {
+      "gate": "e2e",
+      "kind": "gate",
+      "result": "skipped",
+      "how": "not-checked"
+    }
+  ],
+  "reviews": [],
+  "questions": [
+    {
+      "requestId": "q-12",
+      "workId": "locale-format",
+      "state": "delivered",
+      "version": 1,
+      "severity": 6,
+      "answerableBy": "operator-or-lead",
+      "impact": "technical",
+      "plain": "Nothing changes for the user: dates look the same.",
+      "answeredBy": "lead",
+      "title": "Which date library should the formatter use?",
+      "createdAt": "2026-11-19T11:25:00.000Z"
+    }
+  ]
+}

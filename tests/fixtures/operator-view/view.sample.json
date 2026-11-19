@@ -1,0 +1,478 @@
+{
+  "viewVersion": 1,
+  "viewRevision": 0,
+  "generatedAt": "2026-11-19T12:00:00.000Z",
+  "source": {
+    "producer": "fixture",
+    "producerVersion": "0.0.0",
+    "stateVersion": 1,
+    "token": "fixture-1"
+  },
+  "settings": {
+    "policyDigest": "sha256:0f3c",
+    "approvalMode": "agent",
+    "mode": "live",
+    "concurrency": 2,
+    "roles": [
+      {
+        "role": "backend",
+        "writer": {
+          "runtime": "claude",
+          "model": "example-writer",
+          "effort": "high"
+        }
+      },
+      {
+        "role": "frontend",
+        "writer": {
+          "runtime": "claude",
+          "model": "example-writer"
+        }
+      }
+    ],
+    "reviews": [
+      {
+        "kind": "code",
+        "scope": "global",
+        "reviewer": {
+          "runtime": "codex",
+          "model": "example-reviewer"
+        },
+        "alternates": [],
+        "vendor": "different-vendor"
+      },
+      {
+        "kind": "plan",
+        "scope": "global",
+        "reviewer": {
+          "runtime": "codex"
+        },
+        "alternates": [],
+        "vendor": "different-vendor"
+      }
+    ],
+    "thresholds": {
+      "inputSeverity": 7,
+      "leadAnswersMaxSeverity": 4,
+      "criticalPaths": 2,
+      "maxAttempts": 3,
+      "repairBudget": 6,
+      "maxNeutralFailures": 3,
+      "reviewRoundCap": 6,
+      "reviewEscalationRounds": 3,
+      "leadAnswersTechnical": true
+    },
+    "budgets": [
+      {
+        "scope": "total",
+        "usd": 40
+      },
+      {
+        "scope": "work",
+        "usd": 8
+      }
+    ],
+    "budgetOnUnknown": "stop",
+    "timeouts": {
+      "runTimeoutMs": 900000,
+      "leaseMs": 30000,
+      "stall": {
+        "intervalMs": 30000,
+        "quietMs": 180000,
+        "stalledMs": 600000,
+        "action": "report"
+      }
+    },
+    "lean": {
+      "state": "off"
+    },
+    "defaulted": ["repairBudget", "timeouts.runTimeoutMs", "timeouts.leaseMs", "timeouts.stall"]
+  },
+  "works": [
+    {
+      "id": "add-greeting",
+      "graphId": "g1",
+      "title": "Add greet(name)",
+      "status": "done",
+      "stage": {
+        "name": "done",
+        "next": []
+      },
+      "attempts": {
+        "used": 1,
+        "max": 3,
+        "left": 2,
+        "failed": 0,
+        "interrupted": 0,
+        "rechecks": 0,
+        "neutral": {
+          "used": 0,
+          "max": 3
+        },
+        "line": "1 attempt, accepted on the first"
+      },
+      "blockers": [],
+      "spend": {
+        "calls": 3,
+        "usd": {
+          "value": 1.92,
+          "bound": "exact"
+        },
+        "durationMs": 840000
+      },
+      "resultSha": "3b1f9e0c2a7d",
+      "target": {
+        "repositoryId": "app",
+        "ref": "refs/heads/harness/accepted",
+        "acceptedSha": "3b1f9e0c2a7d",
+        "remote": {
+          "state": "not-pushed",
+          "trackingRef": "refs/remotes/origin/harness/accepted"
+        }
+      }
+    },
+    {
+      "id": "locale-format",
+      "graphId": "g1",
+      "title": "Format dates by locale",
+      "status": "verifying",
+      "stage": {
+        "name": "gates",
+        "step": "candidate-test:unit",
+        "since": "2026-11-19T11:52:10.000Z",
+        "next": ["review", "integration"],
+        "typical": {
+          "p50Ms": 300000,
+          "p90Ms": 720000,
+          "samples": 6
+        }
+      },
+      "attempts": {
+        "used": 2,
+        "max": 3,
+        "left": 1,
+        "failed": 1,
+        "interrupted": 0,
+        "rechecks": 1,
+        "neutral": {
+          "used": 0,
+          "max": 3
+        },
+        "line": "2 attempts: 1 failed (check), 1 running; 1 left",
+        "lastFailure": {
+          "attempt": 1,
+          "bucket": "defect",
+          "plain": "a check failed: lint found an unused import",
+          "at": "2026-11-19T11:40:30.000Z"
+        }
+      },
+      "liveness": "active",
+      "runtime": "claude",
+      "model": "example-writer",
+      "blockers": [],
+      "spend": {
+        "calls": 5,
+        "usd": {
+          "value": 3.4,
+          "bound": "lower"
+        },
+        "durationMs": 1900000
+      }
+    },
+    {
+      "id": "export-csv",
+      "graphId": "g1",
+      "title": "Export report as CSV",
+      "status": "held",
+      "stage": {
+        "name": "input",
+        "next": ["writer", "gates", "review", "integration"],
+        "needs": {
+          "actor": "operator",
+          "action": "answer"
+        }
+      },
+      "attempts": {
+        "used": 1,
+        "max": 3,
+        "left": 2,
+        "failed": 0,
+        "interrupted": 0,
+        "rechecks": 0,
+        "neutral": {
+          "used": 0,
+          "max": 3
+        }
+      },
+      "blockers": [
+        {
+          "code": "INPUT_REQUIRED",
+          "plain": "waits for your answer to question q-17",
+          "actor": "operator"
+        }
+      ],
+      "question": {
+        "requestId": "q-17",
+        "state": "awaiting-answer",
+        "severity": 8
+      },
+      "spend": {
+        "calls": 2,
+        "usd": {
+          "value": 0.7,
+          "bound": "exact"
+        },
+        "durationMs": 420000
+      },
+      "dependsOn": ["add-greeting"]
+    },
+    {
+      "id": "docs-page",
+      "graphId": "g1",
+      "title": "Document the export",
+      "status": "ready",
+      "stage": {
+        "name": "queued",
+        "next": ["writer", "gates", "review", "integration"]
+      },
+      "attempts": {
+        "used": 0,
+        "max": 3,
+        "left": 3,
+        "failed": 0,
+        "interrupted": 0,
+        "rechecks": 0,
+        "neutral": {
+          "used": 0,
+          "max": 3
+        }
+      },
+      "blockers": [
+        {
+          "code": "DEPENDENCY_INCOMPLETE",
+          "plain": "just waits for export-csv to be accepted; nothing is needed",
+          "actor": null
+        }
+      ],
+      "spend": {
+        "calls": 0,
+        "usd": {
+          "value": 0,
+          "bound": "exact"
+        },
+        "durationMs": 0
+      },
+      "dependsOn": ["export-csv"]
+    }
+  ],
+  "reviews": [
+    {
+      "kind": "plan",
+      "subject": "g1",
+      "approved": true,
+      "rounds": {
+        "used": 2,
+        "max": 6
+      },
+      "open": {
+        "blocking": 0,
+        "notes": 0
+      },
+      "accepted": 1,
+      "reviewer": {
+        "runtime": "codex"
+      },
+      "sameVendor": false,
+      "spend": {
+        "calls": 2,
+        "usd": {
+          "value": 0.6,
+          "bound": "exact"
+        }
+      },
+      "findings": [
+        {
+          "id": "F1",
+          "severity": "high",
+          "status": "closed",
+          "rounds": 1
+        },
+        {
+          "id": "F2",
+          "severity": "note",
+          "status": "accepted-limitation",
+          "rounds": 2,
+          "disposition": {
+            "decision": "accepted-limitation",
+            "by": "lead",
+            "round": 2
+          }
+        }
+      ],
+      "line": "plan approved after 2 rounds, 1 note accepted as a limitation"
+    }
+  ],
+  "questions": [
+    {
+      "requestId": "q-17",
+      "workId": "export-csv",
+      "state": "awaiting-answer",
+      "version": 1,
+      "severity": 8,
+      "answerableBy": "operator",
+      "title": "Which delimiter should the CSV use?",
+      "createdAt": "2026-11-19T11:40:00.000Z",
+      "impact": "user-visible",
+      "plain": "Changes how the exported file opens in spreadsheet programs."
+    },
+    {
+      "requestId": "q-12",
+      "workId": "locale-format",
+      "state": "delivered",
+      "version": 1,
+      "severity": 6,
+      "answerableBy": "operator-or-lead",
+      "impact": "technical",
+      "plain": "Nothing changes for the user: dates look the same.",
+      "answeredBy": "lead",
+      "title": "Which date library should the formatter use?",
+      "createdAt": "2026-11-19T11:25:00.000Z"
+    }
+  ],
+  "escalations": [],
+  "drift": [
+    {
+      "workId": "add-greeting",
+      "repositoryId": "app",
+      "ref": "refs/heads/harness/accepted",
+      "acceptedSha": "3b1f9e0c2a7d",
+      "head": "9c04d1aa77e2",
+      "commitsSinceAccepted": 2,
+      "filesSinceAccepted": 3
+    }
+  ],
+  "progress": {
+    "total": 4,
+    "byStage": {
+      "done": 1,
+      "gates": 1,
+      "input": 1,
+      "queued": 1
+    },
+    "running": 1,
+    "done": 1,
+    "waitingOperator": 1,
+    "queue": {
+      "paused": false
+    }
+  },
+  "history": {
+    "from": "2026-11-18T12:00:00.000Z",
+    "to": "2026-11-19T12:00:00.000Z",
+    "bucketMs": 3600000,
+    "load": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 1, 1, 2, 1, 1],
+    "attemptsStarted": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 1, 1, 2, 1, 1, 1],
+    "attemptsFailed": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+    "gatesPassed": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 3, 3, 3, 3, 3],
+    "gatesFailed": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+    "spendUsd": [
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7
+    ],
+    "spendBound": "lower",
+    "budgetUsd": 40,
+    "gatesReused": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0],
+    "spendOpeningUsd": {
+      "value": 1.2,
+      "bound": "exact"
+    }
+  },
+  "health": {
+    "controller": {
+      "present": true,
+      "leaseUntil": "2026-11-19T12:00:25.000Z"
+    },
+    "stalledAttempts": 0,
+    "quietAttempts": 0,
+    "environmentFailures": 0,
+    "budgeting": "on",
+    "budgets": [
+      {
+        "scope": "total",
+        "state": "within",
+        "spentUsd": {
+          "value": 6.02,
+          "bound": "lower"
+        },
+        "limitUsd": 40
+      },
+      {
+        "scope": "work",
+        "id": "locale-format",
+        "state": "within",
+        "spentUsd": {
+          "value": 3.4,
+          "bound": "lower"
+        },
+        "limitUsd": 8
+      }
+    ],
+    "spentTotalUsd": {
+      "value": 6.02,
+      "bound": "lower"
+    },
+    "drift": {
+      "checked": 1,
+      "drifted": 1,
+      "unavailable": 0
+    },
+    "warnings": []
+  },
+  "activity": [
+    {
+      "at": "2026-11-19T11:52:10.000Z",
+      "actor": "harness",
+      "action": "attempt.gate",
+      "workId": "locale-format",
+      "plain": "harness started check candidate-test:unit for locale-format"
+    },
+    {
+      "at": "2026-11-19T11:40:00.000Z",
+      "actor": "writer",
+      "action": "input.request",
+      "workId": "export-csv",
+      "plain": "the writer asked a question (q-17) and paused export-csv"
+    },
+    {
+      "at": "2026-11-19T11:20:00.000Z",
+      "actor": "lead",
+      "action": "run.start",
+      "plain": "the lead started the run of graph g1",
+      "subject": "g1"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "d-2",
+      "kind": "technical-answer",
+      "by": "lead",
+      "at": "2026-11-19T11:30:00.000Z",
+      "workId": "locale-format",
+      "requestId": "q-12",
+      "temporary": false,
+      "title": "Lead chose the date library already in use",
+      "reason": "technical: no change for the user"
+    },
+    {
+      "id": "d-1",
+      "kind": "accepted-limitation",
+      "by": "lead",
+      "at": "2026-11-19T11:10:00.000Z",
+      "subject": "g1",
+      "findingId": "F2",
+      "temporary": true,
+      "revisit": "before the release",
+      "title": "Plan note F2 accepted for now",
+      "reason": "a wording note in the plan; no change for the user"
+    }
+  ]
+}

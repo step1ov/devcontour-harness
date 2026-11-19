@@ -97,6 +97,7 @@ git rev-parse refs/heads/harness/accepted   # совпадает с data.result.
 | `approve --state D --subject ID --digest H`     | Согласование оператором (`approvalMode: operator`) |
 | `run --graph F --policy F --state D`            | Регистрация, согласование и работа до простоя      |
 | `status / events / result --state D`            | Чтение без побочных эффектов                       |
+| `view --state D [--policy F] [--work ID]`       | Представление оператора для панели (только чтение) |
 | `pause / resume / cancel / retry --state D`     | Управление очередью и поручением                   |
 | `deliver --state D --work ID --sink file:D`     | Повтор доставки без моделей и интеграции           |
 | `worktree-cleanup --state D [--dry-run]`        | Уборка деревьев завершённых попыток                |

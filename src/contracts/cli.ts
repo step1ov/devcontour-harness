@@ -25,6 +25,7 @@ import { reviewRecordSchema, reviewSubjectSummarySchema } from './review.ts';
 import { codeReviewRecordSchema } from './code-review.ts';
 import { acceptedTargetSchema } from './target.ts';
 import { workVerificationSchema } from './verification-view.ts';
+import { viewDataSchema } from './operator-view.ts';
 import { sourceRefSchema } from './work.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
 import {
@@ -798,6 +799,60 @@ export const cliCommands = {
     writes: false,
     idempotency: 'Чистая функция установленной версии пакета',
     args: [],
+    refusals: [],
+  },
+  view: {
+    description:
+      'Представление оператора: один документ только для чтения для панели оператора (настройки, работы с этапом и попытками, ревью, вопросы, эскалации, сверка принятого, прогресс, история за окно, здоровье) с viewVersion и viewRevision; с --work — детали работы; не пишет и не создаёт каталог состояния',
+    writes: false,
+    idempotency:
+      'Только чтение. Те же состояние, политика, часы и параметры дают те же байты; source.token — SHA-256 содержимого без generatedAt: равный токен — то же представление',
+    args: [
+      state,
+      {
+        name: '--policy',
+        value: 'path',
+        required: false,
+        description:
+          'Политика исполнения; без неё — привязанная к состоянию (binding.json). Нет состояния и нет --policy — POLICY_REQUIRED; нет состояния с --policy — пустое представление. Отличие от привязанной — предупреждение POLICY_DIGEST_MISMATCH',
+      },
+      {
+        name: '--work',
+        value: 'id',
+        required: false,
+        description: 'Детали работы (WorkDetailView): строки попыток, проверки, ревью, вопросы',
+      },
+      {
+        name: '--no-titles',
+        value: 'flag',
+        required: false,
+        description: 'Без заголовков работ, текста вопросов и находок и queue.detail',
+      },
+      {
+        name: '--window',
+        value: 'text',
+        required: false,
+        description: 'Окно истории: 24h (по умолчанию) или 7d',
+      },
+      {
+        name: '--bucket',
+        value: 'text',
+        required: false,
+        description: 'Интервал истории: 15m (по умолчанию) или 1h',
+      },
+      {
+        name: '--lang',
+        value: 'text',
+        required: false,
+        description: 'Язык простых строк harness: ru (по умолчанию) или en',
+      },
+      {
+        name: '--view-version',
+        value: 'number',
+        required: false,
+        description: 'Мажорная версия документа; поддерживается 1',
+      },
+    ],
     refusals: [],
   },
   'source-check': {
@@ -2216,6 +2271,7 @@ export const cliDataSchemas = {
   'plan-request': planRequestDataSchema,
   'plan-check': planCheckDataSchema,
   capabilities: operationCatalogSchema,
+  view: viewDataSchema,
   'source-check': sourceCheckDataSchema,
   'source-snapshot': sourceSnapshotDataSchema,
   'source-status': sourceStatusDataSchema,

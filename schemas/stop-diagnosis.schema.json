@@ -18,6 +18,7 @@
         "REVIEWER_SAME_VENDOR",
         "REVIEWER_MISSING",
         "RESPONSE_TOO_LARGE",
+        "POLICY_REQUIRED",
         "APPROVAL_STALE",
         "APPROVAL_REQUIRED",
         "LEASE_STALE",
@@ -45,6 +46,7 @@
         "LIFECYCLE_FAILED",
         "CONNECTOR_VERSION_MISMATCH",
         "STORAGE_FAILED",
+        "VIEW_TOO_LARGE",
         "DELIVERY_FAILED",
         "INTERNAL"
       ]
