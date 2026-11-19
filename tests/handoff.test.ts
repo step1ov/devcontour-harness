@@ -1195,12 +1195,19 @@ test('handoff: узкий источник хоста (не Harness) даёт т
       h.status(undefined, { detail: true }),
     );
     // Без заданий графов `needs` этапа неизвестно (диагноз explain требует
-    // заданий): остальное — то же, этапы — те же.
+    // заданий): остальное — то же, этапы — те же. Простой текст блокировки
+    // остановленного поручения называет действие диагноза — без заданий его
+    // нет (0.1.0-alpha.55); коды и сообщения те же.
     const narrow = statusOf({ engine, policy });
     const full = h.status();
     const strip = (s: typeof full) => ({
       ...s,
-      works: s.works.map(({ stage: _stage, ...w }) => (void _stage, w)),
+      works: s.works.map(
+        ({ stage: _stage, ...w }) => (
+          void _stage,
+          { ...w, blockers: w.blockers.map((b) => ({ code: b.code, message: b.message })) }
+        ),
+      ),
     });
     assert.deepEqual(strip(narrow), strip(full));
     assert.deepEqual(

@@ -27,6 +27,13 @@ import {
   formatUsd,
   formatWindow,
 } from './format.ts';
+import { failurePlainOf } from './failure-plain.ts';
+import {
+  verificationOf,
+  verificationReportBytes,
+  verificationReportLineLimit,
+  verificationReportRowLimit,
+} from './verification.ts';
 
 /** Литералы `src/contracts/report.ts` (тест сверяет поэлементно). */
 export const reportVersion = 1;
@@ -308,6 +315,21 @@ export interface AttemptSummary {
   interrupted: number;
   /** Принятые: 1 — у принятого поручения есть принявшая попытка (`acceptingAttemptOf`). */
   accepted: number;
+  /**
+   * Последний отказ (последняя по порядку попытка с корзиной): корзина,
+   * класс и причина простыми словами (`failurePlainOf`). Нет — отказов нет.
+   */
+  lastFailure?: LastFailure;
+}
+
+/** Последний отказ попытки поручения простыми словами (`attemptSummaryOf`). */
+export interface LastFailure {
+  runId: string;
+  bucket: FailureBucket;
+  kind?: FailureKind;
+  at?: string;
+  plain: string;
+  plainEn: string;
 }
 
 /**
@@ -321,10 +343,15 @@ export function attemptSummaryOf(
   attempts: readonly AttemptState[],
 ): AttemptSummary {
   const buckets = new Map<FailureBucket, number>();
+  let last: { a: AttemptState; b: FailureBucket } | undefined;
   for (const a of attempts) {
     const b = failureBucketOf(a);
-    if (b) buckets.set(b, (buckets.get(b) ?? 0) + 1);
+    if (b) {
+      buckets.set(b, (buckets.get(b) ?? 0) + 1);
+      last = { a, b };
+    }
   }
+  const lastFailure = last ? lastFailureView(last.a, last.b) : undefined;
   const failures = failureBucketNames
     .filter((b) => buckets.has(b))
     .map((b) => ({ key: b, count: buckets.get(b)! }));
@@ -336,6 +363,19 @@ export function attemptSummaryOf(
     timeouts: buckets.get('time-limit') ?? 0,
     interrupted: attempts.filter(interruptedByShutdown).length,
     accepted: acceptingAttemptOf(work, attempts) ? 1 : 0,
+    ...(lastFailure ? { lastFailure } : {}),
+  };
+}
+
+function lastFailureView(a: AttemptState, bucket: FailureBucket): LastFailure {
+  const p = failurePlainOf(a, bucket);
+  return {
+    runId: a.id,
+    bucket,
+    ...(a.failureKind ? { kind: a.failureKind } : {}),
+    ...(a.finishedAt ? { at: a.finishedAt } : {}),
+    plain: p.ru,
+    plainEn: p.en,
   };
 }
 
@@ -1263,6 +1303,33 @@ export function valueReport(
   const rowsAll = finished
     .slice()
     .sort((a, b) => timeOrder(b.finishedAt, a.finishedAt) || cmp(a.work.id, b.work.id));
+  // Проверка поручений — в общем пределе байт (`verificationReportBytes`):
+  // сверх него строки заменяются числом, затем проверка поручения опускается.
+  let verificationBytes = 0;
+  const bytesOf = (x: unknown) => new TextEncoder().encode(JSON.stringify(x)).length;
+  const verificationRow = (f: (typeof rowsAll)[number]) => {
+    const full = verificationOf(f.work, f.attempts, {
+      rows: verificationReportRowLimit,
+      line: verificationReportLineLimit,
+    });
+    if (!full) return {};
+    const { rows, rowsTruncated, ...rest } = full;
+    const lean = {
+      ...rest,
+      rows: [],
+      ...(rows.length + (rowsTruncated ?? 0)
+        ? { rowsTruncated: rows.length + (rowsTruncated ?? 0) }
+        : {}),
+    };
+    for (const v of [full, lean]) {
+      const n = bytesOf(v);
+      if (verificationBytes + n <= verificationReportBytes) {
+        verificationBytes += n;
+        return { verification: v };
+      }
+    }
+    return {};
+  };
   const workRows = rowsAll.slice(0, reportLimits.works).map((f) => {
     const cost = workCost(f);
     return {
@@ -1277,6 +1344,7 @@ export function valueReport(
       unknownCalls: cost.unknown,
       costBound: cost.bound,
       rejections: attemptSummaryOf(f.work, f.attempts).failures,
+      ...verificationRow(f),
     };
   });
 

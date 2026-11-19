@@ -3,6 +3,11 @@ import { baseMoveActors, cancelActors, environmentCauses, retryActors } from './
 import { failureKindSchema, jointResetActors, pauseReasons } from './execution.ts';
 import { isoTimeSchema } from './primitives.ts';
 import { acceptedTargetSchema } from './target.ts';
+import {
+  VERIFICATION_REPORT_LINE,
+  VERIFICATION_REPORT_ROWS,
+  workVerificationSchema,
+} from './verification-view.ts';
 
 /**
  * Отчёт об эффекте harness (`harness report`, `valueReport`): что дали
@@ -171,6 +176,18 @@ const workRowSchema = z.strictObject({
   unknownCalls: count,
   costBound: z.enum(reportBounds),
   rejections: z.array(countRow(z.enum(failureBuckets))).max(failureBuckets.length),
+  /**
+   * Что проверено и как у принявшей (иначе последней) попытки: не больше
+   * `VERIFICATION_REPORT_ROWS` строк и сводная строка. Нет поля — у поручения
+   * нет попыток или отчёт прежней версии.
+   */
+  verification: workVerificationSchema
+    .extend({
+      rows: workVerificationSchema.shape.rows.max(VERIFICATION_REPORT_ROWS),
+      line: z.string().max(VERIFICATION_REPORT_LINE),
+      lineEn: z.string().max(VERIFICATION_REPORT_LINE),
+    })
+    .optional(),
 });
 
 export const valueReportSchema = z.strictObject({

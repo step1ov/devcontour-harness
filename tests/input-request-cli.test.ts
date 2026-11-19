@@ -385,7 +385,7 @@ test('H15 CLI: status --human --watch обновляет кадр, пока жи
       assert.equal(a.child.exitCode, null, 'пока controller жив, доска не успокоилась');
       assert.match(
         a.io.out,
-        /сейчас: ждёт выдачи; дальше: код, проверки, ревью, интеграция; от вас: ничего;/,
+        /сейчас: просто ждёт очереди — ничего не нужно; дальше: код, проверки, ревью, интеграция; от вас: ничего;/,
       );
       other.release('occupied-controller');
       released = true;

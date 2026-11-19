@@ -19,6 +19,8 @@ import { MAX_NEUTRAL_FAILURES } from '../contracts/repair-policy.ts';
 import { nextRunControl, repairJobOf, stopInputsIn, type StopSource } from '../explain/state.ts';
 import { explainStop } from '../projections/stop.ts';
 import { workStageOf, type StageNeeds } from './stage.ts';
+import { blockerCodeText, plainBlocker, type BlockerCode } from './blocker-plain.ts';
+import { verificationOf } from '../report/verification.ts';
 import {
   CLIP_DIAGNOSTIC,
   attemptView,
@@ -168,15 +170,36 @@ export function statusOf(
         // Вопрос исполнителя: ID, состояние, версия и серьёзность, без текста;
         // неблокирующие запросы ведущему — числом.
         // У итоговой работы вопрос — история: статус его не показывает.
-        ...((view, blockers) => {
+        ...((view, raw) => {
           const input =
             view.input && w.status !== 'done' && w.status !== 'cancelled' ? view.input : undefined;
           const active = w.activeRunId ? v.attempt(w.activeRunId) : undefined;
+          // Причина простыми словами и кто её снимает — рядом с кодом и сообщением.
+          const needs =
+            needsOf?.(w) ??
+            (input?.state === 'awaiting-answer'
+              ? { actor: 'user' as const, action: 'answer-input' as const }
+              : undefined);
+          const plainContext = {
+            control: v.control(),
+            approvalMode: source.policy.approvalMode,
+            status: w.status,
+            work: w,
+            statusOf: (id: string) => v.work(id)?.status,
+            needsOf: (id: string) => ((d) => (d ? needsOf?.(d) : undefined))(v.work(id)),
+            ...(needs ? { needs } : {}),
+          };
+          const blockers = raw.map((b) => ({ ...b, ...plainBlocker(b, plainContext) }));
+          // Строка этапа называет блокировку, которую снимает человек, раньше
+          // хода ведущего и harness (порядок `blockers` прежний).
+          const first = [...blockers].sort((a, b) => actorRank(a.actor) - actorRank(b.actor))[0];
+          const attemptSummary = summaryOf(w);
+          const verification = verificationOf(w, attemptsOf(w.id));
           return {
             ...(input ? { input } : {}),
             ...(view.followUps ? { followUps: view.followUps } : {}),
             blockers,
-            attemptSummary: summaryOf(w),
+            attemptSummary,
             stage: workStageOf({
               work: w,
               attempts: attemptsOf(w.id),
@@ -184,14 +207,13 @@ export function statusOf(
               ...(input ? { inputState: input.state } : {}),
               blocked: blockers.length > 0,
               records: recordsByWork.get(w.id) ?? [],
-              ...((needs) => (needs ? { needs } : {}))(
-                needsOf?.(w) ??
-                  (input?.state === 'awaiting-answer'
-                    ? { actor: 'user' as const, action: 'answer-input' as const }
-                    : undefined),
-              ),
+              maxAttempts: source.policy.maxAttempts,
+              ...(attemptSummary.lastFailure ? { lastFailure: attemptSummary.lastFailure } : {}),
+              ...(first ? { blockedBy: first } : {}),
+              ...(needs ? { needs } : {}),
               now,
             }),
+            ...(verification ? { verification } : {}),
           };
         })(workInputOf(requestsOf(v, w)), engine.blockers(w, v)),
       })),
@@ -312,12 +334,21 @@ function statusDetail(source: StatusSource, v: ExecutionView, graphId?: string) 
 }
 
 const answeredBy = { operator: 'оператор', lead: 'ведущий', host: 'хост' } as const;
+/** Порядок блокировок для человека: его ход, ход ведущего, harness, итог. */
+const actorRank = (actor: string | null | undefined) =>
+  actor === 'user' ? 0 : actor === 'lead' ? 1 : actor === 'controller' ? 2 : 3;
+const actorText = {
+  user: 'нужно от вас',
+  lead: 'ход ведущего',
+  controller: 'harness сам',
+} as const;
 
 /**
  * Текст `status --human`: состояние выдачи и строка на поручение — статус и
  * сводка попыток (`attemptSummaryLine`); с отступом — этап простыми словами
- * (`works[].stage.line`), вопрос исполнителя с тем, кто ответил, и
- * блокировки кодами.
+ * (`works[].stage.line`), вопрос исполнителя с тем, кто ответил,
+ * блокировки простыми словами с кодами и что проверено и как
+ * (`works[].verification.line`).
  */
 export function statusText(data: z.output<typeof statusDataSchema>): string {
   const c = data.control;
@@ -337,7 +368,21 @@ export function statusText(data: z.output<typeof statusDataSchema>): string {
               ? ': ждёт ответа человека (input-show, input-answer --actor operator)'
               : ''),
       );
-    if (w.blockers.length) out.push(`  блокировки: ${w.blockers.map((b) => b.code).join(', ')}`);
+    // Блокировки простыми словами (кто снимает — в скобках), коды — после.
+    if (w.blockers.length)
+      out.push(
+        `  не выдаётся: ${[...w.blockers]
+          .sort((a, b) => actorRank(a.actor) - actorRank(b.actor))
+          .map((b) =>
+            // Без простого текста (ответ другой версии) — общий текст кода,
+            // а не сообщение: в нём может быть текст хоста.
+            b.plain
+              ? `${b.plain}${b.actor ? ` (${actorText[b.actor]})` : ''}`
+              : (blockerCodeText[b.code as BlockerCode]?.ru ?? b.code),
+          )
+          .join('; ')} [коды: ${w.blockers.map((b) => b.code).join(', ')}]`,
+      );
+    if (w.verification) out.push(`  проверки: ${w.verification.line}`);
     // Принятая версия против текущего target ref: непроверенное после приёмки.
     if (w.target) out.push(`  ${w.target.line} (${w.target.lineEn})`);
   }

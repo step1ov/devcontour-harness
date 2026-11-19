@@ -24,6 +24,7 @@ import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
 import { reviewRecordSchema, reviewSubjectSummarySchema } from './review.ts';
 import { codeReviewRecordSchema } from './code-review.ts';
 import { acceptedTargetSchema } from './target.ts';
+import { workVerificationSchema } from './verification-view.ts';
 import { sourceRefSchema } from './work.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
 import {
@@ -1164,6 +1165,15 @@ export type CliCommand = keyof typeof cliCommands;
 const blocker = z.strictObject({
   code: z.enum(Object.keys(errorCodes) as [ErrorCode, ...ErrorCode[]]),
   message: z.string().max(4000),
+  /**
+   * Только `status`: причина простыми словами по-русски и по-английски
+   * («ждёт зависимости a», «пауза очереди: бюджет») и кто её снимает
+   * (`actor` — как у диагноза `explain`; `null` — никто, итог). Нет полей —
+   * ответ другой команды или версии.
+   */
+  plain: z.string().min(1).max(300).optional(),
+  plainEn: z.string().min(1).max(300).optional(),
+  actor: z.enum(diagnosisActors).nullable().optional(),
 });
 
 export const validateDataSchema = z.strictObject({
@@ -1304,6 +1314,23 @@ export const attemptSummarySchema = z.strictObject({
       left: z.number().int().min(0),
     })
     .optional(),
+  /**
+   * Почему поручение повторяется: последний отказ (последняя по порядку
+   * попытка с корзиной `failureBucketOf`) — попытка, корзина, класс, время и
+   * причина простыми словами по-русски и по-английски («окружение — порт
+   * 3000 занят»). Текст строится из класса отказа, ID gates и номера порта,
+   * без свободного текста ошибки. Нет поля — отказов нет.
+   */
+  lastFailure: z
+    .strictObject({
+      runId: z.string().min(1).max(200),
+      bucket: z.enum(failureBuckets),
+      kind: failureKindSchema.optional(),
+      at: isoTimeSchema.optional(),
+      plain: z.string().min(1).max(300),
+      plainEn: z.string().min(1).max(300),
+    })
+    .optional(),
   line: z.string().max(1000),
 });
 
@@ -1407,6 +1434,12 @@ export const statusDataSchema = z.strictObject({
       attemptSummary: attemptSummarySchema.optional(),
       /** Этап, время в нём, что дальше и что нужно от оператора (`workStageSchema`). */
       stage: workStageSchema.optional(),
+      /**
+       * Что проверено и как: gates и ревью принявшей (иначе последней)
+       * попытки и сводная строка (`workVerificationSchema`). Нет поля —
+       * попыток нет или идущая попытка ещё ничего не записала.
+       */
+      verification: workVerificationSchema.optional(),
       /**
        * Принятая работа против текущего target ref (`harness status`): коммиты
        * и файлы после приёмки не проверены. Нет поля — работа не принята или
@@ -2038,6 +2071,14 @@ export const explainDataSchema = z.strictObject({
     .optional(),
   /** Поручений сверх предела строк `attempts` (100); нет поля — все показаны. */
   attemptsTruncated: z.number().int().positive().optional(),
+  /**
+   * Что проверено и как по каждому поручению выбора с попытками — та же
+   * проверка, что `status` (`workVerificationSchema`); строк не больше 100.
+   */
+  verification: z
+    .array(z.strictObject({ workId: idSchema, ...workVerificationSchema.shape }))
+    .max(100)
+    .optional(),
   /** Сводка ревью плана и контрактов — та же, что у `status`; нет поля — раундов нет. */
   reviews: z.array(reviewSubjectSummarySchema).max(50).optional(),
   /** Предметов ревью сверх предела строк `reviews` (50); нет поля — все показаны. */

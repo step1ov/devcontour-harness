@@ -472,12 +472,31 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.stage;
       // Принятая версия против текущего target ref (`works[].target`, 0.1.0-alpha.54).
       delete rest.target;
+      // Что проверено и как (`works[].verification`, 0.1.0-alpha.55).
+      delete rest.verification;
+      return rest;
+    }
+    // Аддитивные поля блокировки — причина простыми словами и кто её снимает
+    // (`blockers[].plain`, `plainEn`, `actor`, 0.1.0-alpha.55).
+    if (k === 'properties' && v && typeof v === 'object' && 'code' in v && 'plain' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.plain;
+      delete rest.plainEn;
+      delete rest.actor;
+      return rest;
+    }
+    // Аддитивное поле строки поручения отчёта — что проверено и как (0.1.0-alpha.55).
+    if (k === 'properties' && v && typeof v === 'object' && 'rejections' in v && 'costBound' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.verification;
       return rest;
     }
     // Аддитивное поле result/deliver — принятая версия против target ref (0.1.0-alpha.54).
     if (k === 'properties' && v && typeof v === 'object' && 'result' in v && 'delivery' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.target;
+      // Что проверено и как у попытки результата (0.1.0-alpha.55).
+      delete rest.verification;
       return rest;
     }
     // Аддитивное поле explain — сводка попыток по поручениям (0.1.0-alpha.52)
@@ -488,6 +507,8 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.attemptsTruncated;
       delete rest.reviews;
       delete rest.reviewsTruncated;
+      // Что проверено и как по поручениям (0.1.0-alpha.55).
+      delete rest.verification;
       return rest;
     }
     // Аддитивные поля status — снимок наблюдателя `--detail`, сводка ревью
@@ -536,6 +557,12 @@ test('H3-01: прежние команды и схемы их данных не 
   // Хеш H2 вырезает target status и result (0.1.0-alpha.54): объявление держит эта проверка.
   assert.ok(JSON.stringify(data.status).includes('"commitsSinceAccepted"'), 'status: target');
   assert.ok(JSON.stringify(data.result).includes('"commitsSinceAccepted"'), 'result: target');
+  // Хеш H2 вырезает проверку, простые блокировки и последний отказ (0.1.0-alpha.55).
+  assert.ok(JSON.stringify(data.status).includes('"read-by-reviewer"'), 'status: verification');
+  assert.ok(JSON.stringify(data.result).includes('"read-by-reviewer"'), 'result: verification');
+  assert.ok(JSON.stringify(data.explain).includes('"read-by-reviewer"'), 'explain: verification');
+  assert.ok(JSON.stringify(data.status).includes('"plainEn"'), 'status: blockers[].plain');
+  assert.ok(JSON.stringify(data.status).includes('"lastFailure"'), 'status: lastFailure');
   // Хеш H2 вырезает пробу портов и предупреждения doctor: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.doctor).includes('"ports"'), 'doctor: проба портов');
   assert.ok(JSON.stringify(data.doctor).includes('"warnings"'), 'doctor: предупреждения');
