@@ -229,8 +229,10 @@ writer stopped and asks the human. Do not answer it yourself:
 Never close such a question with `--actor lead`: the harness refuses it with
 `OPERATOR_ANSWER_REQUIRED` (exit 3) unless the human has put
 `inputPolicy.leadAnswers {maxSeverity}` into the policy, and even then only up
-to that severity. Non-blocking requests to you (follow-ups, questions below
-the threshold) you answer yourself with `--actor lead`. Who answered is
+to that severity. Pending non-blocking requests to you (`kind: follow-up`,
+from the autonomous mode) you answer yourself with `--actor lead`; a question
+below the threshold is recorded closed (the writer decided) and takes no
+answer. Who answered is
 recorded and shown in `status`, `explain`, `handoff` and the report.
 
 **What is happening now.** `status` gives every order a `stage`: the current

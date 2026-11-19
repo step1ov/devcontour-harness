@@ -43,14 +43,21 @@ export interface WorkStageView {
 
 const ms = (iso: string) => Date.parse(iso);
 
-/** Этап попытки по имени замера; фаза интеграции важнее имени. */
-export function stageOfStep(step: string): PipelineStage | 'prepare' {
-  const family = step.split(':')[0]!;
-  if (family.startsWith('integration')) return 'integration';
+/**
+ * Этап попытки по имени замера; `undefined` — по имени не решить, этап — по
+ * статусу поручения. Окружение кандидата (`candidate-environment:*`)
+ * охватывает всю фазу кандидата: его `setup`, `ready` и проба портов идут до
+ * исполнителя (подготовка), `cleanup` — после ревью (этап — по статусу).
+ * Интеграцию задаёт ещё и статус поручения (`integrating`).
+ */
+export function stageOfStep(step: string): PipelineStage | 'prepare' | undefined {
+  const [family, sub] = step.split(':');
+  if (family!.startsWith('integration')) return 'integration';
+  if (family === 'candidate-environment') return sub === 'cleanup' ? undefined : 'prepare';
   if (family === 'candidate-review') return 'review';
   if (family === 'implementation' || family === 'implementation-reuse') return 'writer';
   if (family === 'dependency-store' || family === 'writer-dependencies') return 'prepare';
-  // candidate-test, candidate-recheck, candidate-consumer, candidate-environment, generate.
+  // candidate-test, candidate-recheck, candidate-consumer, generate.
   return 'gates';
 }
 
@@ -102,7 +109,7 @@ export function workStageOf(input: WorkStageInput): WorkStageView {
       work.status === 'integrating'
         ? 'integration'
         : step
-          ? stageOfStep(step.stage)
+          ? (stageOfStep(step.stage) ?? byStatus[work.status] ?? 'writer')
           : (byStatus[work.status] ?? 'writer');
   else if (work.status === 'done') name = 'done';
   else if (work.status === 'cancelled') name = 'cancelled';

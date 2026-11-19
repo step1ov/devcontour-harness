@@ -15,7 +15,7 @@ import { callRecords } from '../engine/usage.ts';
 import type { Engine } from '../engine/engine.ts';
 import { requestsOf } from '../engine/input-requests.ts';
 import { MAX_NEUTRAL_FAILURES } from '../contracts/repair-policy.ts';
-import { nextRunControl, repairJobOf, stopInputsOf, type StopSource } from '../explain/state.ts';
+import { nextRunControl, repairJobOf, stopInputsIn, type StopSource } from '../explain/state.ts';
 import { explainStop } from '../projections/stop.ts';
 import { workStageOf, type StageNeeds } from './stage.ts';
 import {
@@ -114,20 +114,28 @@ export function statusOf(
   options: { detail?: boolean } = {},
 ) {
   const { engine } = source;
-  // Что нужно от кого — диагнозом `explain` (его отдельное чтение), если
-  // источник передал задания графов; без них — только по вопросу исполнителя.
-  const needsOf = stageNeedsOf(source);
-  // Задания и попытки — внутри того же чтения: один снимок хранилища.
+  // Задания графов — из их адаптера до чтения (как у explain); диагноз,
+  // этап и всё остальное — внутри одного чтения: один снимок хранилища.
+  const jobs = source.workflows?.list().filter((j) => j.kind === 'graph');
   return engine.read((v) => {
     const summaryOf = attemptSummaries(source, v);
     const now = engine.clock();
     const attemptsOf = attemptsByWork(v);
-    // Собственные вызовы поручения (без вызовов о группе) — одним проходом.
-    const workOf = recordWorkOf(v);
+    const selected = v.works(graphId);
+    // Что нужно от кого — диагнозом explain по тому же виду и часам.
+    const needsOf = jobs ? stageNeedsOf(source, v, selected, { jobs, now }) : undefined;
+    // Собственные вызовы поручения (без вызовов о группе) — одним проходом;
+    // попытка записи без поручения — по индексу попыток, а не поиском.
+    const runWork = new Map<string, string>();
+    for (const a of v.attempts()) runWork.set(a.id, a.workId);
+    const legacy = recordWorkOf(v);
+    const ids = new Set(selected.map((w) => w.id));
     const recordsByWork = new Map<string, CallRecord[]>();
     for (const r of callRecords(v)) {
-      const id = r.workIds ? undefined : workOf(r);
-      if (!id) continue;
+      if (r.workIds) continue;
+      const id =
+        r.workId ?? (r.runId !== undefined ? runWork.get(r.runId) : undefined) ?? legacy(r);
+      if (!id || !ids.has(id)) continue;
       const list = recordsByWork.get(id);
       if (list) list.push(r);
       else recordsByWork.set(id, [r]);
@@ -145,7 +153,7 @@ export function statusOf(
           source: g.graph.source,
           approved: g.approval?.digest === g.digest,
         })),
-      works: v.works(graphId).map((w) => ({
+      works: selected.map((w) => ({
         id: w.id,
         graphId: w.graphId,
         status: w.status,
@@ -194,17 +202,26 @@ export function statusOf(
 
 /**
  * Что нужно по каждому поручению — `actor` и `action` диагноза `explain`
- * (`stopInputsOf` → `explainStop`) одним чтением; без заданий графов —
- * undefined. Принятое поручение и отменённое без ждущих в диагнозы не входят:
- * им ничего не нужно; идущему без остановки — ход controller.
+ * (`stopInputsIn` → `explainStop`) в виде и по часам вызывающего чтения.
+ * Принятое поручение и отменённое без ждущих в диагнозы не входят: им ничего
+ * не нужно; идущему без остановки — ход controller.
  */
-function stageNeedsOf(source: StatusSource): ((w: WorkState) => StageNeeds) | undefined {
-  const workflows = source.workflows;
-  if (!workflows) return undefined;
+function stageNeedsOf(
+  source: StatusSource,
+  v: ExecutionView,
+  works: readonly WorkState[],
+  context: { jobs: readonly WorkflowJob[]; now: number },
+): (w: WorkState) => StageNeeds {
   const byWork = new Map<string, StageNeeds>();
-  for (const input of stopInputsOf(
-    { engine: source.engine, policy: source.policy, workflows },
-    { maxAttempts: source.policy.maxAttempts, repairBudget: source.policy.repairBudget },
+  for (const input of stopInputsIn(
+    { engine: source.engine, policy: source.policy, workflows: source.workflows! },
+    {
+      maxAttempts: source.policy.maxAttempts,
+      repairBudget: source.policy.repairBudget,
+      workIds: [...new Set(works.map((w) => w.id))],
+    },
+    v,
+    context,
   ))
     if (input.kind === 'work' && !byWork.has(input.work.id)) {
       const d = explainStop(input);
@@ -316,10 +333,18 @@ export function statusText(data: z.output<typeof statusDataSchema>): string {
  * владением (по `detail.attempts[].lease.stale`; без `detail` — любая
  * активная) или живой controller (`controller.leaseUntil` в будущем) сдвинет
  * открытое поручение, которому ничего не нужно от человека или ведущего
- * (`stage.needs.actor` controller или неизвестно). Попытка умершего владельца
- * без живого controller сама не продолжится.
+ * (`stage.needs.actor` controller или неизвестно), или идёт задание графа с
+ * действующей арендой (`liveJobs`: восстановление группы). Попытка умершего
+ * владельца без живого controller сама не продолжится.
  */
-export function statusSettled(data: z.output<typeof statusDataSchema>, now: number): boolean {
+export function statusSettled(
+  data: z.output<typeof statusDataSchema>,
+  now: number,
+  options: { liveJobs?: number } = {},
+): boolean {
+  // Восстановление группы идёт под арендой задания графа, после того как
+  // run отпустил роль controller: живое задание — тоже движение.
+  if (options.liveJobs) return false;
   const live = !!data.controller && data.controller.leaseUntil > now;
   const stale = new Set(
     (data.detail?.attempts ?? []).filter((a) => a.lease.stale).map((a) => a.runId),

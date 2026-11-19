@@ -468,7 +468,6 @@ async function watchStatus(
       { path: ['--interval'], message: String(v.interval) },
     ]);
   const intervalMs = seconds * 1000;
-  const b = binding(state);
   let wake: (() => void) | undefined;
   let stopped = false;
   const onSignal = () => {
@@ -480,17 +479,28 @@ async function watchStatus(
   const clear = process.stdout.isTTY === true ? '\x1b[H\x1b[2J' : '';
   try {
     for (;;) {
-      const h = open(state, b, 'state');
+      // Привязка — заново на каждый кадр: применённая новая политика меняет
+      // пределы, блокировки и диагнозы.
+      const h = open(state, binding(state), 'state');
       let data;
+      let liveJobs = 0;
+      const now = Date.now();
       try {
         // detail — для свежести владения идущих попыток (`statusSettled`).
         data = cliDataSchemas.status.parse(h.status(v.graph, { detail: true }));
+        liveJobs = h.workflows
+          .list()
+          .filter(
+            (j) =>
+              j.status === 'running' &&
+              (j.leaseUntil ?? 0) > now &&
+              (!v.graph || j.kind !== 'graph' || j.id === v.graph),
+          ).length;
       } finally {
         h.close();
       }
-      const now = Date.now();
       const frame = statusFrame(data, now, intervalMs);
-      if (stopped || statusSettled(data, now)) return { data, text: clear + frame };
+      if (stopped || statusSettled(data, now, { liveJobs })) return { data, text: clear + frame };
       process.stdout.write(clear + frame + (clear ? '' : '\n'));
       await new Promise<void>((done) => {
         const timer = setTimeout(done, intervalMs);

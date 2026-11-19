@@ -21,7 +21,7 @@ import { explainStop } from '../src/projections/stop.ts';
 import { handoffPack } from '../src/handoff/pack.ts';
 import { handoffMarkdown } from '../src/handoff/markdown.ts';
 import { collectReportInput } from '../src/control/report.ts';
-import { valueReport, reportMarkdown } from '../src/report/index.ts';
+import { valueReport, reportHtml, reportMarkdown } from '../src/report/index.ts';
 import { engineOf, graphOf, policyOf, ready } from './engine-fixture.ts';
 
 const question = (severity: number): InputQuestion => ({
@@ -217,7 +217,13 @@ test('H15: имя замера → этап; интеграция по фазе'
   assert.equal(stageOfStep('implementation-reuse'), 'writer');
   assert.equal(stageOfStep('writer-dependencies'), 'prepare');
   assert.equal(stageOfStep('candidate-test:lint'), 'gates');
-  assert.equal(stageOfStep('candidate-environment:setup'), 'gates');
+  // Окружение кандидата охватывает всю фазу: setup/ready — до исполнителя,
+  // cleanup — после ревью (этап по статусу поручения).
+  assert.equal(stageOfStep('candidate-environment:setup'), 'prepare');
+  assert.equal(stageOfStep('candidate-environment:ready'), 'prepare');
+  assert.equal(stageOfStep('candidate-environment:port-shared:3000'), 'prepare');
+  assert.equal(stageOfStep('candidate-environment:cleanup'), undefined);
+  assert.equal(stageOfStep('dependency-store'), 'prepare');
   assert.equal(stageOfStep('generate:api'), 'gates');
   assert.equal(stageOfStep('candidate-review'), 'review');
   assert.equal(stageOfStep('integration-test:unit'), 'integration');
@@ -397,4 +403,96 @@ test('H15: statusSettled — попытка умершего владельца 
   // Без detail свежесть владения неизвестна: активная попытка считается идущей.
   const plain = cliDataSchemas.status.parse(statusOf(source));
   assert.equal(statusSettled(plain, env.clock.now), false);
+});
+
+test('H15: открытый замер против статуса — интеграция по статусу, cleanup окружения — по статусу', () => {
+  const now = Date.parse('2026-01-01T00:10:00.000Z');
+  const active = (stage: string) =>
+    ({
+      id: 'r1',
+      status: 'active',
+      startedAt: '2026-01-01T00:00:00.000Z',
+      timings: [{ id: 't1', stage, startedAt: '2026-01-01T00:09:00.000Z' }],
+    }) as never;
+  const work = (status: string) => ({ id: 'w', status, activeRunId: 'r1' }) as never;
+  const base = { attempts: [], records: [], blocked: false, now };
+  const of = (status: string, stage: string) =>
+    workStageOf({ ...base, work: work(status), active: active(stage) });
+  // Статус integrating важнее имени замера (окружение без префикса фазы).
+  assert.deepEqual(
+    [of('integrating', 'dependency-store').name, of('integrating', 'dependency-store').next],
+    ['integration', []],
+  );
+  const cleanup = of('reviewing', 'candidate-environment:cleanup');
+  assert.deepEqual(
+    [cleanup.name, cleanup.step, cleanup.next],
+    ['review', 'candidate-environment:cleanup', ['integration']],
+  );
+  const setup = of('running', 'candidate-environment:setup');
+  assert.deepEqual(
+    [setup.name, setup.next],
+    ['prepare', ['writer', 'gates', 'review', 'integration']],
+  );
+  assert.equal(setup.elapsedMs, 60_000);
+});
+
+test('H15: расход — прежняя запись вызова без workId засчитывается по попытке; чужое поручение — нет', () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ w: [], x: [] }));
+  const attempt = env.engine.claim('c1')!;
+  env.store.transact('run.context', (tx) => {
+    // Запись прежней версии: поручения нет, есть попытка.
+    tx.putLocal('usage', 'app', 'old', call('old', { runId: attempt.id }));
+    tx.putLocal(
+      'usage',
+      'app',
+      'other',
+      call('other', { workId: attempt.workId === 'w' ? 'x' : 'w' }),
+    );
+  });
+  const works = statusOf({ engine: env.engine, policy: env.engine.policy }).works;
+  const own = works.find((w) => w.id === attempt.workId)!;
+  const other = works.find((w) => w.id !== attempt.workId)!;
+  assert.deepEqual([own.stage.spend.calls, own.stage.spend.knownUsd], [1, 0.25]);
+  assert.deepEqual([other.stage.spend.calls, other.stage.spend.knownUsd], [1, 0.25]);
+  // Отбор графа не теряет расход своих поручений.
+  const one = statusOf({ engine: env.engine, policy: env.engine.policy }, 'g').works;
+  assert.equal(one.find((w) => w.id === attempt.workId)!.stage.spend.calls, 1);
+});
+
+test('H15: statusSettled — живое задание графа (восстановление группы) — ещё движение', () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ w: [] }));
+  const data = cliDataSchemas.status.parse(
+    statusOf({ engine: env.engine, policy: env.engine.policy, workflows: noJobs }),
+  );
+  const later = data.controller!.leaseUntil + 1;
+  assert.equal(statusSettled(data, later), true);
+  assert.equal(statusSettled(data, later, { liveJobs: 1 }), false);
+});
+
+test('H12: отчёт считает ответивших по последнему ответу — оператор, ведущий, хост; строка и в html', () => {
+  const env = engineOf(
+    policyOf((p) => (p.inputPolicy = { threshold: 7, leadAnswers: { maxSeverity: 10 } })),
+  );
+  ready(env.engine, graphOf({ a: [], b: [], c: [] }));
+  for (const actor of ['operator', 'lead', 'host'] as const) {
+    const attempt = env.engine.claim('c1')!;
+    env.engine.fail(attempt.id, attempt.token, 'вопрос', {
+      kind: 'needs-input',
+      input: outcome(8),
+    });
+    const [request] = env.engine.inputRequests({ workId: attempt.workId });
+    env.engine.answerInput(request!.id, { text: 'Hello', actor: { kind: actor } }, 1);
+  }
+  const report = valueReport(collectReportInput(env.store), {
+    stateDir: env.dir,
+    harnessVersion: 'test',
+    asOf: '2026-01-02T00:00:00.000Z',
+  });
+  assert.deepEqual(report.inputs?.answeredBy, { operator: 1, lead: 1, host: 1 });
+  const line =
+    'Executor questions that stopped an attempt: 3 (answered by the operator 1, by the lead agent 1, by the host 1)';
+  assert.ok(reportMarkdown(report).includes(line));
+  assert.ok(reportHtml(report).includes(line));
 });

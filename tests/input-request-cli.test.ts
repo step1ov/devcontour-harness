@@ -265,8 +265,18 @@ test('H12/H15 CLI: ответ ведущего на вопрос к челове
       '--request-version',
       '1',
     );
+  const eventsBefore = p.harness('events', '--state', p.state, '--limit', '500').json.data;
   const lead = answer('lead', 'Hi <name>');
   assert.equal(lead.status, exitCodes.refused, lead.stderr);
+  assert.deepEqual(
+    p.harness('events', '--state', p.state, '--limit', '500').json.data,
+    eventsBefore,
+    'отказ не записал событий',
+  );
+  assert.deepEqual(
+    p.harness('input-show', '--state', p.state, '--request', id).json.data.answers,
+    [],
+  );
   assert.equal(lead.json.error?.code, 'OPERATOR_ANSWER_REQUIRED');
   assert.match(lead.stderr, /OPERATOR_ANSWER_REQUIRED/);
   const still = p.harness('status', '--state', p.state);
@@ -316,7 +326,7 @@ test('H12/H15 CLI: ответ ведущего на вопрос к челове
   assert.match(settled.stdout, /сейчас: ждёт ответа на вопрос исполнителя/);
 });
 
-test('H15 CLI: status --human --watch обновляет кадр, пока живой controller сдвинет работу; Ctrl-C — выход 0', async () => {
+test('H15 CLI: status --human --watch обновляет кадр, пока живой controller сдвинет работу; сам выходит, когда доска успокоилась; Ctrl-C прерывает сразу', async () => {
   const p = project();
   const base = ['--graph', 'graph.json', '--policy', 'policy.json', '--state', p.state];
   const review = p.harness('review-plan', ...base, '--author', 'external');
@@ -329,31 +339,71 @@ test('H15 CLI: status --human --watch обновляет кадр, пока жи
     host: standaloneHost(new SqliteExecutionStore(join(p.state, 'state.sqlite'), 'other'), policy),
     policy,
   });
+  const watch = (interval: string) => {
+    const child = p.spawnCli(
+      'status',
+      '--state',
+      p.state,
+      '--human',
+      '--watch',
+      '--interval',
+      interval,
+    );
+    const io = { out: '', err: '' };
+    child.stdout.on('data', (b: Buffer) => (io.out += b.toString()));
+    child.stderr.on('data', (b: Buffer) => (io.err += b.toString()));
+    const exited = new Promise<number | null>((done) => child.on('exit', (c) => done(c)));
+    const frames = () => io.out.split('harness status — ').length - 1;
+    const until = async (cond: () => boolean, ms: number) => {
+      const deadline = Date.now() + ms;
+      while (!cond() && Date.now() < deadline && child.exitCode === null)
+        await new Promise((r) => setTimeout(r, 50));
+    };
+    return { child, io, exited, frames, until };
+  };
+  let released = false;
   try {
     assert.equal(other.lead('occupied-controller'), true);
     // План согласован и выдача идёт: поручение готово, его выдаст controller.
     const graphId = other.read((v) => v.graphs()[0]!.id);
     other.approve(graphId, policy.approvalMode);
     other.resume();
-    const child = p.spawnCli('status', '--state', p.state, '--human', '--watch', '--interval', '1');
-    let out = '';
-    let err = '';
-    child.stdout.on('data', (b: Buffer) => (out += b.toString()));
-    child.stderr.on('data', (b: Buffer) => (err += b.toString()));
-    const exited = new Promise<number | null>((done) => child.on('exit', (c) => done(c)));
-    const frames = () => out.split('harness status — ').length - 1;
-    const deadline = Date.now() + 60_000;
-    while (frames() < 2 && Date.now() < deadline && child.exitCode === null)
-      await new Promise((r) => setTimeout(r, 100));
-    assert.ok(frames() >= 2, `два кадра до Ctrl-C: ${out}\n${err}`);
-    child.kill('SIGINT');
-    assert.equal(await exited, 0, err);
-    assert.match(
-      out,
-      /сейчас: ждёт выдачи; дальше: код, проверки, ревью, интеграция; от вас: ничего;/,
-    );
+
+    // 1. Каждую секунду новый кадр; controller отпустил роль — выход сам, exit 0.
+    const a = watch('1');
+    try {
+      await a.until(() => a.frames() >= 2, 60_000);
+      assert.ok(a.frames() >= 2, `два кадра: ${a.io.out}\n${a.io.err}`);
+      assert.equal(a.child.exitCode, null, 'пока controller жив, доска не успокоилась');
+      assert.match(
+        a.io.out,
+        /сейчас: ждёт выдачи; дальше: код, проверки, ревью, интеграция; от вас: ничего;/,
+      );
+      other.release('occupied-controller');
+      released = true;
+      await a.until(() => false, 15_000);
+      assert.equal(await a.exited, 0, a.io.err);
+    } finally {
+      a.child.kill('SIGKILL');
+    }
+
+    // 2. Длинный период: Ctrl-C будит ожидание сразу, а не по таймеру.
+    assert.equal(other.lead('occupied-controller'), true);
+    released = false;
+    const b = watch('3600');
+    try {
+      await b.until(() => b.frames() >= 1, 60_000);
+      assert.equal(b.frames(), 1, b.io.err);
+      const sent = Date.now();
+      b.child.kill('SIGINT');
+      assert.equal(await b.exited, 0, b.io.err);
+      assert.ok(Date.now() - sent < 10_000, 'выход по Ctrl-C без ожидания периода');
+      assert.equal(b.frames(), 2, 'последний кадр — при выходе');
+    } finally {
+      b.child.kill('SIGKILL');
+    }
   } finally {
-    other.release('occupied-controller');
+    if (!released) other.release('occupied-controller');
     other.host.store.close();
   }
 });
