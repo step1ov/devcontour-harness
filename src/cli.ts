@@ -43,7 +43,7 @@ import { cliAdapter } from './agents/cli-adapter.ts';
 import { initProject, initText } from './init/project.ts';
 import { leanMismatch, leanText, switchLean } from './init/lean.ts';
 import { diagnoseState, explainText } from './explain/diagnose.ts';
-import { statusText } from './control/status.ts';
+import { statusFrame, statusSettled, statusText } from './control/status.ts';
 import { planCheck, planRequestOf } from './planning/check.ts';
 import { checkJsonBytes } from './catalog/bytes.ts';
 import { isSharedOperation, sharedOperations } from './catalog/shared.ts';
@@ -320,6 +320,8 @@ const options = {
   'fail-fast': { type: 'boolean' },
   'accept-limitation': { type: 'string', multiple: true },
   'continue-review': { type: 'string', multiple: true },
+  watch: { type: 'boolean' },
+  interval: { type: 'string' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -368,6 +370,8 @@ const flagOwners = {
   sha: ['gates'],
   gate: ['gates'],
   'fail-fast': ['gates'],
+  watch: ['status'],
+  interval: ['status'],
 } as const;
 
 /** Явное человеческое представление успешного ответа (`--human`). */
@@ -484,6 +488,83 @@ function reviewDispositionsOf(v: {
   ].map((d) =>
     parseWith(reviewDispositionSchema, { ...d, by, reason: v.reason ?? '' }, 'disposition'),
   );
+}
+
+/**
+ * `status --human --watch [--interval S]`: кадр `statusFrame` каждые S секунд
+ * (по умолчанию 5, от 1 до 3600) до того, как доска успокоится
+ * (`statusSettled`), или до Ctrl-C (SIGINT, SIGTERM). Каждый кадр — новое
+ * чтение только для чтения; на терминале кадр заменяет прежний. Последний
+ * кадр печатает основной вывод, данные — последний снимок status.
+ */
+async function watchStatus(
+  state: string,
+  v: { watch?: boolean; human?: boolean; interval?: string; graph?: string },
+): Promise<{ data: unknown; text: string }> {
+  if (!v.watch) throw new HarnessError('INVALID_INPUT', '--interval — только вместе с --watch');
+  if (!v.human)
+    throw new HarnessError(
+      'INVALID_INPUT',
+      '--watch — только вместе с --human (текст для человека)',
+    );
+  const seconds = v.interval === undefined ? 5 : Number(v.interval);
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 3600)
+    throw new HarnessError('INVALID_INPUT', '--interval: целое число секунд от 1 до 3600', [
+      { path: ['--interval'], message: String(v.interval) },
+    ]);
+  const intervalMs = seconds * 1000;
+  let wake: (() => void) | undefined;
+  let stopped = false;
+  const onSignal = () => {
+    stopped = true;
+    wake?.();
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  const clear = process.stdout.isTTY === true ? '\x1b[H\x1b[2J' : '';
+  try {
+    for (;;) {
+      // Привязка — заново на каждый кадр: применённая новая политика меняет
+      // пределы, блокировки и диагнозы.
+      const h = open(state, binding(state), 'state');
+      let snapshot: { data: z.output<typeof cliDataSchemas.status>; liveJobs: number };
+      const now = Date.now();
+      try {
+        // Статус и задания графов — одним снимком (вложенное чтение SQLite
+        // берёт внешний): иначе восстановление группы между двумя чтениями
+        // выглядит как успокоившаяся доска. detail — для свежести владения
+        // идущих попыток (`statusSettled`).
+        snapshot = h.engine.read(() => ({
+          data: cliDataSchemas.status.parse(h.status(v.graph, { detail: true })),
+          liveJobs: h.workflows
+            .list()
+            .filter(
+              (j) =>
+                j.status === 'running' &&
+                (j.leaseUntil ?? 0) > now &&
+                (!v.graph || j.kind !== 'graph' || j.id === v.graph),
+            ).length,
+        }));
+      } finally {
+        h.close();
+      }
+      const { data, liveJobs } = snapshot;
+      const frame = statusFrame(data, now, intervalMs);
+      if (stopped || statusSettled(data, now, { liveJobs })) return { data, text: clear + frame };
+      process.stdout.write(clear + frame + (clear ? '' : '\n'));
+      await new Promise<void>((done) => {
+        const timer = setTimeout(done, intervalMs);
+        wake = () => {
+          clearTimeout(timer);
+          done();
+        };
+      });
+      wake = undefined;
+    }
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+  }
 }
 
 async function run(
@@ -657,6 +738,8 @@ async function run(
     case 'status':
     case 'events':
     case 'result': {
+      if (command === 'status' && (v.watch || v.interval !== undefined))
+        return { command, ...(await watchStatus(need('state'), v)) };
       const h = open(need('state'), binding(need('state')), 'state');
       try {
         if (command === 'status')

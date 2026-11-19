@@ -77,6 +77,22 @@ const causeLabels: Record<string, string> = {
   none: 'not an environment cause',
 };
 
+/**
+ * Вопросы исполнителя окна одной строкой: сколько остановок вопросом и кто на
+ * них ответил (человек или ведущий агент), сколько ждут ответа.
+ */
+function inputsLine(i: NonNullable<ValueReport['inputs']>) {
+  const by = i.answeredBy;
+  return (
+    `Executor questions that stopped an attempt: ${i.questions}` +
+    (by
+      ? ` (answered by the operator ${by.operator}, by the lead agent ${by.lead}${by.host ? `, by the host ${by.host}` : ''})`
+      : '') +
+    `; awaiting an answer ${i.awaitingAnswer}, answered but not applied ${i.answeredNotApplied}. ` +
+    `Below the threshold (the executor decided): ${i.declined}; requests to the lead: ${i.followUps}; executor assumptions: ${i.assumptions}.`
+  );
+}
+
 /** Блоки отчёта в порядке разделов (`docs/contracts.md`, «Отчёт»). */
 export function reportBlocks(r: ValueReport): Block[] {
   const c = r.coverage;
@@ -170,6 +186,7 @@ export function reportBlocks(r: ValueReport): Block[] {
       ? 'Plan approvals: unknown (no approval records).'
       : `Plan approvals: operator ${a.approvals.operator}, agent ${a.approvals.agent} (${a.approvals.source === 'events' ? 'from events' : a.approvals.source === 'state' ? 'current approvals of graphs only' : 'from events, and current approvals of graphs without events'}).`,
     `Escalations to a person (recovery awaiting the user or stopped): ${a.escalations}.`,
+    ...(r.inputs ? [inputsLine(r.inputs)] : []),
   ]);
   if (a.pauses.length)
     table(

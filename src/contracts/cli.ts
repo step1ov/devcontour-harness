@@ -332,7 +332,21 @@ export const cliCommands = {
         name: '--human',
         value: 'flag',
         required: false,
-        description: 'Текст для человека вместо JSON: строка сводки попыток на поручение',
+        description:
+          'Текст для человека вместо JSON: строка сводки попыток и этап простыми словами на поручение',
+      },
+      {
+        name: '--watch',
+        value: 'flag',
+        required: false,
+        description:
+          'Только с --human: обновлять текст, пока идут попытки или их сдвинет живой controller; выход — когда доска успокоилась или по Ctrl-C',
+      },
+      {
+        name: '--interval',
+        value: 'number',
+        required: false,
+        description: 'Период обновления --watch в секундах (1–3600, по умолчанию 5)',
       },
     ],
     refusals: ['NOT_FOUND'],
@@ -896,11 +910,12 @@ export const cliCommands = {
         name: '--actor',
         value: 'text',
         required: false,
-        description: 'Кто отвечает: operator (по умолчанию) или lead',
+        description:
+          'Кто отвечает: operator (по умолчанию; словами человека) или lead — только на неблокирующие запросы или с разрешения inputPolicy.leadAnswers',
       },
       requestVersionArg,
     ],
-    refusals: ['NOT_FOUND', 'REVISION_CONFLICT', 'NOT_READY'],
+    refusals: ['NOT_FOUND', 'REVISION_CONFLICT', 'NOT_READY', 'OPERATOR_ANSWER_REQUIRED'],
   },
   'input-context': {
     description:
@@ -1201,6 +1216,58 @@ export const attemptSummarySchema = z.strictObject({
   line: z.string().max(1000),
 });
 
+/**
+ * Этапы поручения для оператора (`works[].stage.name`, `src/control/stage.ts`):
+ * ждёт выдачи, не выдаётся, подготовка зависимостей, исполнитель пишет код,
+ * проверки, независимое ревью, интеграция, ждёт вопроса исполнителя,
+ * остановлено, принято, отменено.
+ */
+export const workStages = [
+  'queued',
+  'blocked',
+  'prepare',
+  'writer',
+  'gates',
+  'review',
+  'integration',
+  'input',
+  'stopped',
+  'done',
+  'cancelled',
+] as const;
+/** Этапы попытки по порядку: `works[].stage.next` — оставшиеся. */
+export const pipelineStages = ['writer', 'gates', 'review', 'integration'] as const;
+
+/**
+ * Прогресс поручения глазами оператора: текущий этап и время в нём
+ * (`since`, `elapsedMs`; у идущей попытки — открытый замер `step` события
+ * `attempt.stage`), оставшиеся этапы, что нужно и от кого (`needs` — как у
+ * диагноза `explain`; нет поля — неизвестно), собственный расход вызовов
+ * поручения и одна строка — по-русски (`line`) и по-английски (`lineEn`).
+ * Ведущий агент на вопрос «что сейчас происходит» цитирует строку.
+ */
+export const workStageSchema = z.strictObject({
+  name: z.enum(workStages),
+  step: z.string().min(1).max(300).optional(),
+  since: isoTimeSchema.optional(),
+  elapsedMs: z.number().int().min(0).optional(),
+  next: z.array(z.enum(pipelineStages)).max(pipelineStages.length),
+  needs: z
+    .strictObject({
+      actor: z.enum(diagnosisActors).nullable(),
+      action: z.enum(diagnosisActions),
+    })
+    .optional(),
+  spend: z.strictObject({
+    calls: z.number().int().min(0),
+    knownUsd: z.number().min(0),
+    unknownCalls: z.number().int().min(0),
+    durationMs: z.number().int().min(0),
+  }),
+  line: z.string().max(1000),
+  lineEn: z.string().max(1000),
+});
+
 export const statusDataSchema = z.strictObject({
   stateVersion: z.literal(STATE_VERSION),
   control: controlStateSchema,
@@ -1237,6 +1304,8 @@ export const statusDataSchema = z.strictObject({
           state: z.enum(inputStateNames),
           version: z.number().int().positive(),
           severity: z.number().int().min(1).max(10),
+          /** Кто записал последний ответ; нет поля — ответа нет. */
+          answeredBy: z.enum(['operator', 'lead', 'host']).optional(),
         })
         .optional(),
       /** Неблокирующие запросы ведущему в ожидании (автономный режим). */
@@ -1245,6 +1314,8 @@ export const statusDataSchema = z.strictObject({
       blockers: z.array(blocker),
       /** Сводка попыток и остаток пределов (`attemptSummarySchema`). */
       attemptSummary: attemptSummarySchema.optional(),
+      /** Этап, время в нём, что дальше и что нужно от оператора (`workStageSchema`). */
+      stage: workStageSchema.optional(),
     }),
   ),
   /**

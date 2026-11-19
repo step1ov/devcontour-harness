@@ -512,6 +512,7 @@ function build(
               revision: answer.revision,
               digest: answer.digest,
               excerpt: text(answer.text, HANDOFF_LIMITS.answerChars),
+              by: answer.actor.kind,
             },
           }
         : {}),

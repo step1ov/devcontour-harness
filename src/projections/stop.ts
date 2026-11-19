@@ -180,7 +180,10 @@ export type StopInput =
           state: InputState;
           question?: string;
           options?: string[];
-          answer?: { revision: number; digest: string };
+          /** Рекомендуемый исполнителем вариант (ID). */
+          recommended?: string;
+          /** Последний ответ; `by` — кто его записал (оператор, ведущий, хост). */
+          answer?: { revision: number; digest: string; by?: 'operator' | 'lead' | 'host' };
           refusal?: string;
           assumptions?: number;
           followUps?: number;
@@ -227,6 +230,9 @@ export interface StopDiagnosis {
   workId?: string;
   runId?: string;
 }
+
+/** Кто ответил на вопрос исполнителя — словами сообщения. */
+const answerActorText = { operator: 'оператор', lead: 'ведущий', host: 'хост' } as const;
 
 /** Русский шаблон сообщения по причине остановки. */
 const causeText: Record<StopCause, string> = {
@@ -490,7 +496,8 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       question.state === 'answered-not-applied' ||
       question.state === 'carry-stale')
   ) {
-    const head = `Вопрос ${question.requestId}${question.question ? `: «${clipText(question.question, 200)}»` : ''}${question.options?.length ? `; варианты: ${question.options.join(', ')}` : ''}.`;
+    const head = `Вопрос ${question.requestId}${question.question ? `: «${clipText(question.question, 200)}»` : ''}${question.options?.length ? `; варианты: ${question.options.join(', ')}` : ''}${question.recommended ? `; рекомендация исполнителя: ${question.recommended}` : ''}.`;
+    const by = question.answer?.by ? ` (ответил: ${answerActorText[question.answer.by]})` : '';
     const own = [
       question.assumptions ? `Решено исполнителем: ${question.assumptions}.` : '',
       question.followUps ? `Запросов ведущему: ${question.followUps}.` : '',
@@ -504,7 +511,13 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
         phase,
         actor: 'user',
         action: 'answer-input',
-        note: [head, 'Ответьте: harness input-answer.', own].filter(Boolean).join(' '),
+        note: [
+          head,
+          'Вопрос к человеку: передайте ему вопрос, варианты и рекомендацию дословно и запишите его ответ его словами — harness input-answer --actor operator; ведущий (--actor lead) сам не отвечает, если политика этого не разрешила (inputPolicy.leadAnswers).',
+          own,
+        ]
+          .filter(Boolean)
+          .join(' '),
       };
     if (question.state === 'carry-stale')
       return {
@@ -515,7 +528,7 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
         action: 'apply-input',
         note: [
           head,
-          `Перенесённый ответ r${question.answer?.revision ?? '?'} устарел до выдачи${question.refusal ? `: ${question.refusal}` : ''}.`,
+          `Перенесённый ответ r${question.answer?.revision ?? '?'}${by} устарел до выдачи${question.refusal ? `: ${question.refusal}` : ''}.`,
           'Выходы: перенести снова (input-context, review-plan, carryInput) или снять перенесённый ответ (input-cancel) — работа продолжится без него.',
           own,
         ]
@@ -530,7 +543,7 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       action: 'apply-input',
       note: [
         head,
-        `Ответ r${question.answer?.revision ?? '?'} (${question.answer?.digest.slice(0, 12) ?? '—'}) записан, но не применён${question.refusal ? `: ${question.refusal}` : ''}.`,
+        `Ответ r${question.answer?.revision ?? '?'} (${question.answer?.digest.slice(0, 12) ?? '—'})${by} записан, но не применён${question.refusal ? `: ${question.refusal}` : ''}.`,
         'Дальше: input-context, review-plan со снимком, input-apply.',
         own,
       ]

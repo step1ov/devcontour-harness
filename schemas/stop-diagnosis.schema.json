@@ -32,6 +32,7 @@
         "ATTEMPTS_EXHAUSTED",
         "CONTEXT_EXHAUSTED",
         "INPUT_REQUIRED",
+        "OPERATOR_ANSWER_REQUIRED",
         "REVISION_CONFLICT",
         "CANCELLED",
         "NOT_FOUND",

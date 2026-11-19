@@ -196,9 +196,11 @@ test(
       assert.ok(
         summary.length && summary.every((x) => x?.accepted === 1 && /принято 1/.test(x.line)),
       );
+      // Этап для оператора (0.1.0-alpha.54) — тоже аддитивный, из тех же записей.
+      assert.ok(works.every((w) => (w.stage as { name: string } | undefined)?.name === 'done'));
       const stripped = {
         ...now.status.data,
-        works: works.map(({ attemptSummary: _s, ...w }) => (void _s, w)),
+        works: works.map(({ attemptSummary: _s, stage: _t, ...w }) => (void _s, void _t, w)),
       };
       assert.deepEqual(stripped, before.status.data, 'статус alpha.5 читается иначе');
       assert.deepEqual(dump(), stateBefore, 'чтение изменило содержимое базы');

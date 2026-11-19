@@ -582,10 +582,10 @@ test('Ответ: новая неизменяемая версия; повтор
   assert.equal(again.changed, false);
   assert.equal(again.answer.digest, first.answer.digest);
   assert.equal(
-    code(() => env.engine.answerInput(r.id, { text: 'Unix', actor: { kind: 'lead' } }, 1)),
+    code(() => env.engine.answerInput(r.id, { text: 'Unix', actor: { kind: 'operator' } }, 1)),
     'REVISION_CONFLICT',
   );
-  const second = env.engine.answerInput(r.id, { text: 'Unix', actor: { kind: 'lead' } }, 2);
+  const second = env.engine.answerInput(r.id, { text: 'Unix', actor: { kind: 'operator' } }, 2);
   assert.deepEqual(
     second.request.answers.map((a) => [a.revision, a.text]),
     [
@@ -595,7 +595,7 @@ test('Ответ: новая неизменяемая версия; повтор
   );
   assert.equal(
     code(() =>
-      env.engine.answerInput(r.id, { text: 'x', optionId: 'nope', actor: { kind: 'lead' } }, 3),
+      env.engine.answerInput(r.id, { text: 'x', optionId: 'nope', actor: { kind: 'operator' } }, 3),
     ),
     'INVALID_INPUT',
   );

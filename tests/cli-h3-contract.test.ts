@@ -160,6 +160,9 @@ const ADDITIVE_ARGS = new Set([
   'review-contract--continue-review',
   'review-contract--reason',
   'review-contract--actor',
+  // Обновляемый текст status для человека (0.1.0-alpha.54).
+  'status--watch',
+  'status--interval',
 ]);
 /**
  * Текст `--writer` init в H2. 0.1.0-alpha.50 меняет умолчание: writer —
@@ -185,6 +188,8 @@ const ADDITIVE_ENUM_VALUES = new Set([
   'carry-stale',
   // Вид evidence неисполненного условного gate (`when.paths`).
   'not-applicable',
+  // H12: блокирующий вопрос к человеку не отвечает ведущий (0.1.0-alpha.54).
+  'OPERATOR_ANSWER_REQUIRED',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
@@ -450,13 +455,15 @@ test('H3-01: прежние команды и схемы их данных не 
     }
     // Аддитивные поля status — живость активной попытки (`works[].liveness`),
     // вопрос исполнителя и запросы ведущему (`works[].input`, `followUps`, H02),
-    // сводка попыток (`works[].attemptSummary`, 0.1.0-alpha.52).
+    // сводка попыток (`works[].attemptSummary`, 0.1.0-alpha.52), этап для
+    // оператора (`works[].stage`, 0.1.0-alpha.54).
     if (k === 'properties' && v && typeof v === 'object' && 'liveness' in v && 'blockers' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.liveness;
       delete rest.input;
       delete rest.followUps;
       delete rest.attemptSummary;
+      delete rest.stage;
       return rest;
     }
     // Аддитивное поле explain — сводка попыток по поручениям (0.1.0-alpha.52)

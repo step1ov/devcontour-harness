@@ -521,6 +521,12 @@ export const valueReportSchema = z.strictObject({
       declined: count,
       followUps: count,
       assumptions: count,
+      /**
+       * Кто ответил на блокирующие вопросы окна (по последнему ответу):
+       * оператор (человек), ведущий агент (только с `inputPolicy.leadAnswers`)
+       * или хост от их имени. Нет поля — отчёт до alpha.54.
+       */
+      answeredBy: z.strictObject({ operator: count, lead: count, host: count }).optional(),
     })
     .optional(),
   works: z.strictObject({

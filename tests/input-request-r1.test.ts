@@ -216,7 +216,8 @@ test('m-1: manifest ответа не JSON — причина «не прочи�
 });
 
 test('m-3: тот же текст от другого актёра или с другой ссылкой хоста — новая версия, не повтор', () => {
-  const env = stopped();
+  // Ответ ведущего на блокирующий вопрос — только с разрешения политики (H12).
+  const env = stopped((p) => (p.inputPolicy = { threshold: 7, leadAnswers: { maxSeverity: 10 } }));
   const id = env.request.id;
   env.engine.answerInput(id, { text: 'ISO', actor: { kind: 'operator' }, messageRef: 'm-1' }, 1);
   const lead = env.engine.answerInput(
