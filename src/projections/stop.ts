@@ -433,18 +433,9 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       action: 'none',
       note: 'Поручение принято.',
     };
-  // Ревью плана уже идёт в живом run: согласование ведёт harness, всё
-  // остальное (сброс, ответ) — после его итога.
-  if (work.planReview && !activePhase[work.status])
-    return {
-      code: work.approvalStale ? 'APPROVAL_STALE' : 'APPROVAL_REQUIRED',
-      cause: 'approval-required',
-      phase: 'claim',
-      actor: 'controller',
-      action: 'review-plan',
-      note: `Идёт ревью плана (harness run, с ${work.planReview.since}): согласование — по его итогу, ведущему ничего делать не нужно.`,
-    };
-  if (work.approvalStale)
+  // Ревью плана уже идёт: согласование ведёт harness (ниже, вместо шага
+  // согласования); вопрос, исчерпание и отказ остаются впереди.
+  if (work.approvalStale && !work.planReview)
     return {
       code: 'APPROVAL_STALE',
       cause: 'approval-required',
@@ -733,6 +724,17 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       note: `Ждёт ${work.waitingOn.join(', ')}: сама эта работа ничего не требует; на зависимости движок остановится, следующий шаг — по её диагнозу.`,
     };
   if (work.status === 'cancelled') return cancelledOutcome(work.openDependents, 'claim');
+  // Шаг согласования, пока идёт ревью плана (запуск, review-plan или
+  // повторное согласование с ответом): ход harness, а не ведущего.
+  if (work.planReview && (work.status === 'draft' || work.approvalStale))
+    return {
+      code: work.approvalStale ? 'APPROVAL_STALE' : 'APPROVAL_REQUIRED',
+      cause: 'approval-required',
+      phase: 'claim',
+      actor: 'controller',
+      action: 'review-plan',
+      note: `Идёт ревью плана (с ${work.planReview.since}): согласование — по его итогу, ведущему для него ничего делать не нужно.`,
+    };
   if (work.status === 'draft')
     return {
       code: 'APPROVAL_REQUIRED',

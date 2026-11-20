@@ -28,6 +28,7 @@ import { explainStop } from '../projections/stop.ts';
 import { workStageOf, type StageNeeds } from './stage.ts';
 import { blockerCodeText, plainBlocker, type BlockerCode } from './blocker-plain.ts';
 import { verificationOf } from '../report/verification.ts';
+import { carrierLine } from '../projections/operator-view.ts';
 import {
   CLIP_DIAGNOSTIC,
   attemptView,
@@ -139,6 +140,8 @@ export function statusOf(
     const needsOf = jobs ? stageNeedsOf(source, v, { jobs, now }) : undefined;
     // Ревью плана, идущее в живом `harness run`: согласование — ход harness.
     const planReviews = livePlanReviews(v, source.policy, now);
+    // Итоговое «что нужно» каждого поручения — для строки `runner`.
+    const needsByWork = new Map<string, StageNeeds>();
     // Собственные вызовы поручения (без вызовов о группе) — одним проходом;
     // прежняя запись без поручения — по индексам попыток и поручений (правило
     // `recordWorkOf`), а не поиском по хранилищу на каждую запись.
@@ -194,16 +197,20 @@ export function statusOf(
               ? { since: reviewSince }
               : undefined;
           // Причина простыми словами и кто её снимает — рядом с кодом и сообщением.
-          const needs = planReview
-            ? { actor: 'controller' as const, action: 'review-plan' as const }
-            : (needsOf?.(w) ??
-              (input?.state === 'awaiting-answer'
-                ? {
-                    // Технический вопрос при leadAnswers.technical решает ведущий.
-                    actor: input.leadMay === 'technical' ? ('lead' as const) : ('user' as const),
-                    action: 'answer-input' as const,
-                  }
-                : undefined));
+          // Ревью плана снимает только шаг согласования: вопрос, исчерпание и
+          // отказ называет диагноз explain (`needsOf`) раньше него.
+          const needs =
+            needsOf?.(w) ??
+            (input?.state === 'awaiting-answer'
+              ? {
+                  // Технический вопрос при leadAnswers.technical решает ведущий.
+                  actor: input.leadMay === 'technical' ? ('lead' as const) : ('user' as const),
+                  action: 'answer-input' as const,
+                }
+              : planReview && w.status === 'draft'
+                ? { actor: 'controller' as const, action: 'review-plan' as const }
+                : undefined);
+          if (needs) needsByWork.set(w.id, needs);
           const plainContext = {
             control: v.control(),
             approvalMode: source.policy.approvalMode,
@@ -245,7 +252,7 @@ export function statusOf(
         })(workInputOf(requestsOf(v, w), inputPolicyOf(source.policy)), engine.blockers(w, v)),
       })),
       ...((r) => (r ? { runner: r } : {}))(
-        runnerOf(v, selected, planReviews, now, (w) => needsOf?.(w)),
+        runnerOf(v, selected, planReviews, now, (w) => needsByWork.get(w.id)),
       ),
       ...((budgets) => (budgets ? { budgets } : {}))(budgetOverview(engine.budgetContext(), v)),
       ...(({ reviews, reviewsTruncated }) => ({
@@ -258,10 +265,12 @@ export function statusOf(
 }
 
 /**
- * Применённый ответ и попытка, за которой он закреплён при выдаче
- * (`AttemptState.input`): идёт она — ответ уже у попытки (`delivered`, ждать
- * нечего); закончилась, не передав его исполнителю, — ответ получит
- * следующая попытка (`carrier.running: false`).
+ * Применённый ответ и последняя попытка поручения, если ответ закреплён за
+ * ней при выдаче (`AttemptState.input`): идёт она — ответ уже у попытки
+ * (`delivered`, ждать нечего); закончилась — `carrier.running: false`
+ * (у `applied-awaiting-claim` ответ получит следующая попытка, у `delivered`
+ * — ответ был передан этой попытке). Последняя попытка без этого ответа —
+ * без `carrier`: где ответ, по ней не сказать.
  */
 export function carriedInput<T extends { requestId: string; state: string }>(
   input: T | undefined,
@@ -269,8 +278,8 @@ export function carriedInput<T extends { requestId: string; state: string }>(
 ): (T & { carrier?: { attempt: number; running: boolean } }) | undefined {
   if (!input || (input.state !== 'applied-awaiting-claim' && input.state !== 'delivered'))
     return input;
-  const carrier = attempts.findLast((a) => a.input?.requestId === input.requestId);
-  if (!carrier) return input;
+  const carrier = attempts.at(-1);
+  if (!carrier || carrier.input?.requestId !== input.requestId) return input;
   const running = carrier.status === 'active';
   return {
     ...input,
@@ -332,11 +341,22 @@ function runnerOf(
   });
   if (reviews.length) {
     const ids = reviews.map((r) => r.graphId).join(', ');
+    // Ревью снимает только согласование: ход человека или ведущего по
+    // открытым работам (вопрос, сброс, разбор) остаётся — строка его называет.
+    const who = new Set(
+      open.map((w) => needsOf(w)?.actor).filter((a) => a === 'user' || a === 'lead'),
+    );
+    const ru = [who.has('user') ? 'от вас' : '', who.has('lead') ? 'от ведущего' : '']
+      .filter(Boolean)
+      .join(' и ');
+    const en = [who.has('user') ? 'from you' : '', who.has('lead') ? 'from the lead' : '']
+      .filter(Boolean)
+      .join(' and ');
     return {
       state: 'running' as const,
       planReviews: reviews.slice(0, 50),
-      line: `Идёт ревью плана ${ids} (harness run) — выдача начнётся после согласования; от вас ничего не нужно.`,
-      lineEn: `The plan review of ${ids} is running (harness run) — work starts after approval; nothing is needed from you.`,
+      line: `Идёт ревью плана ${ids} — выдача начнётся после согласования; ${ru ? `ещё нужно ${ru} (см. работы)` : 'от вас ничего не нужно'}.`,
+      lineEn: `The plan review of ${ids} is running — work starts after approval; ${en ? `still needed ${en} (see the works)` : 'nothing is needed from you'}.`,
     };
   }
   if ((lease && lease.leaseUntil > now) || attempt)
@@ -506,11 +526,7 @@ export function statusText(data: z.output<typeof statusDataSchema>): string {
     if (w.input)
       out.push(
         `  вопрос ${w.input.requestId} [${w.input.state}, серьёзность ${w.input.severity}${w.input.impact === 'technical' ? ', технический' : ''}]` +
-          (w.input.carrier
-            ? w.input.carrier.running
-              ? `: ответ у идущей попытки ${w.input.carrier.attempt} — ждать нечего`
-              : `: ответ был у попытки ${w.input.carrier.attempt}, она остановилась до передачи исполнителю — его получит следующая попытка`
-            : '') +
+          ((l) => (l ? `: ${l}` : ''))(carrierLine(w.input.carrier, 'ru', w.input.state)) +
           (w.input.answerBasis === 'technical'
             ? ': решено ведущим (технический вопрос)'
             : w.input.answeredBy
