@@ -1113,6 +1113,93 @@ export const cliCommands = {
     ],
     refusals: ['NOT_FOUND', 'REVISION_CONFLICT', 'NOT_READY'],
   },
+  'input-resolve': {
+    description:
+      'От ответа до применения одним вызовом: снимок с последним ответом (хранится по digest, файлов не нужно), ревью плана с ним (прежний одобренный раунд того же снимка под текущей политикой — без вызова модели), основание и input-apply с точными версией и digest; работа ушла из остановки вопроса — отказ с выходом input-carry',
+    writes: true,
+    idempotency:
+      'Применённый запрос — applied:true, changed:false без записи; идущие попытки графа, исчерпанные попытки или бюджет — applied:false с причиной (exit 3), ответ сохранён',
+    args: [
+      state,
+      inputRequestArg,
+      {
+        ...policy,
+        required: false,
+        description:
+          'ExecutionPolicy JSON: после правки политики — применяемая политика (как у run); без неё — политика каталога состояния',
+      },
+      {
+        ...author,
+        required: false,
+        description:
+          'Runtime ведущего (автор плана) для ревью плана со снимком ответа; не нужен, если этот снимок уже одобрен последним раундом',
+      },
+      {
+        name: '--reset',
+        value: 'flag',
+        required: false,
+        description: 'Сбросить исчерпанный счётчик попыток; требует --reason',
+      },
+      { name: '--reason', value: 'text', required: false, description: 'Причина сброса' },
+    ],
+    refusals: [
+      'NOT_FOUND',
+      'NOT_READY',
+      'INPUT_REQUIRED',
+      'APPROVAL_REQUIRED',
+      'APPROVAL_STALE',
+      'REVIEW_REJECTED',
+      'REVISION_CONFLICT',
+      'ATTEMPTS_EXHAUSTED',
+      'BUDGET_EXHAUSTED',
+    ],
+  },
+  'input-carry': {
+    description:
+      'Перенести ответ в новую попытку или редакцию одним вызовом: вопрос, исходная остановка которого не держится (была другая попытка, новая редакция постановки), заменяется той же работой с причиной; затем снимок с ответом, ревью плана с ним, основание и перенос в действующее согласование; упавшая вопросом работа возвращается в очередь',
+    writes: true,
+    idempotency:
+      'Повтор того же переноса — carried:true, changed:false; исходная остановка держится — отказ NOT_READY с выходом input-resolve',
+    args: [
+      state,
+      inputRequestArg,
+      {
+        name: '--reason',
+        value: 'text',
+        required: true,
+        description: 'Почему ответ переносится (запись замены вопроса и причина сброса с --reset)',
+      },
+      {
+        ...policy,
+        required: false,
+        description:
+          'ExecutionPolicy JSON: после правки политики — применяемая политика (как у run); без неё — политика каталога состояния',
+      },
+      {
+        ...author,
+        required: false,
+        description:
+          'Runtime ведущего (автор плана) для ревью плана со снимком ответа; не нужен, если этот снимок уже одобрен последним раундом',
+      },
+      {
+        name: '--reset',
+        value: 'flag',
+        required: false,
+        description: 'Сбросить исчерпанный счётчик попыток (причина — --reason)',
+      },
+    ],
+    refusals: [
+      'NOT_FOUND',
+      'NOT_READY',
+      'INPUT_REQUIRED',
+      'APPROVAL_REQUIRED',
+      'APPROVAL_STALE',
+      'REVIEW_REJECTED',
+      'REVISION_CONFLICT',
+      'ATTEMPTS_EXHAUSTED',
+      'BUDGET_EXHAUSTED',
+    ],
+  },
   'input-supersede': {
     description:
       'Заменить вопрос преемником: ответ меняет требования — новая ревизия или работа, а не продолжение этой',
@@ -2369,6 +2456,34 @@ export const inputApplyDataSchema = z.strictObject({
   joint: z.literal(true).optional(),
   blocker: blocker.optional(),
 });
+/** Ответ `input-resolve` и `input-carry`: что сделано за один вызов. */
+const inputResolveFields = {
+  requestId: requestIdSchema,
+  changed: z.boolean(),
+  lifecycle: z.enum(inputLifecycles),
+  /** Снимок с ответом (хранится по digest). */
+  contextDigest: digestSchema.optional(),
+  /** Раунд ревью плана, на котором основано применение. */
+  reviewRound: z.number().int().positive().optional(),
+  /** `reused` — прежний одобренный раунд этого снимка; `new` — проведён сейчас. */
+  reviewed: z.enum(['reused', 'new']).optional(),
+  work: z
+    .strictObject({ id: idSchema, status: workStatusSchema, attempt: z.number().int().min(0) })
+    .optional(),
+  active: z.array(z.strictObject({ id: z.string().min(1), workId: idSchema })).optional(),
+  joint: z.literal(true).optional(),
+  blocker: blocker.optional(),
+};
+export const inputResolveDataSchema = z.strictObject({
+  ...inputResolveFields,
+  applied: z.boolean(),
+});
+export const inputCarryDataSchema = z.strictObject({
+  ...inputResolveFields,
+  carried: z.boolean(),
+  /** Вопрос заменён этим вызовом (исходная остановка не держалась). */
+  superseded: z.boolean(),
+});
 export const inputCloseDataSchema = z.strictObject({
   requestId: requestIdSchema,
   lifecycle: z.enum(inputLifecycles),
@@ -2418,6 +2533,8 @@ export const cliDataSchemas = {
   'input-apply': inputApplyDataSchema,
   'input-cancel': inputCloseDataSchema,
   'input-supersede': inputCloseDataSchema,
+  'input-resolve': inputResolveDataSchema,
+  'input-carry': inputCarryDataSchema,
   gates: gatesDataSchema,
   'review-code': codeReviewRecordSchema,
   smoke: smokeDataSchema,

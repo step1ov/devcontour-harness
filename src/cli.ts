@@ -28,6 +28,7 @@ import {
   exitCodeOf,
   exitCodes,
   projectManifestSchema,
+  type CliArgument,
   type CliCommand,
   type CliEnvelope,
   type ExecutionPolicy,
@@ -90,7 +91,13 @@ Runtime: codex и claude из PATH; HARNESS_CODEX_BIN / HARNESS_CLAUDE_BIN по�
  * отказы — из того же договора `cliCommands`, по которому разбираются флаги.
  */
 function commandHelp(name: CliCommand) {
-  const c = cliCommands[name];
+  const c = cliCommands[name] as {
+    description: string;
+    writes: boolean;
+    idempotency: string;
+    args: readonly CliArgument[];
+    refusals: readonly string[];
+  };
   const sign = (a: (typeof c.args)[number]) =>
     a.value === 'flag' ? a.name : `${a.name} <${a.value}>`;
   const width = Math.max(...c.args.map((a) => sign(a).length), 10) + 2;
@@ -396,6 +403,8 @@ const flagOwners = {
   'view-version': ['view'],
   intent: ['handoff'],
   request: [
+    'input-resolve',
+    'input-carry',
     'input-show',
     'input-answer',
     'input-context',
@@ -1345,6 +1354,51 @@ async function run(
               createdAt: r.createdAt,
             })),
           },
+        };
+      } finally {
+        h.close();
+      }
+    }
+    case 'input-resolve':
+    case 'input-carry': {
+      const b = binding(need('state'), v.policy, Boolean(v.policy));
+      const h = open(need('state'), b, false);
+      try {
+        const id = need('request');
+        const author = v.author ? parseWith(authorSchema, v.author, 'author') : undefined;
+        const reset = v.reset ? { reason: need('reason') } : undefined;
+        const out =
+          command === 'input-resolve'
+            ? await h.resolveInput(id, {
+                ...optional('author', author),
+                ...optional('reset', reset),
+              })
+            : await h.carryInputOf(id, {
+                reason: need('reason'),
+                ...optional('author', author),
+                ...optional('reset', reset),
+              });
+        const done = 'applied' in out ? out.applied : out.carried;
+        return {
+          command,
+          data: {
+            requestId: out.requestId,
+            ...('applied' in out ? { applied: out.applied } : { carried: out.carried }),
+            ...('superseded' in out ? { superseded: out.superseded } : {}),
+            changed: out.changed,
+            lifecycle: out.lifecycle,
+            ...optional('contextDigest', out.contextDigest),
+            ...('reviewRound' in out
+              ? { reviewRound: out.reviewRound, reviewed: out.reviewed }
+              : {}),
+            ...('work' in out && out.work
+              ? { work: { id: out.work.id, status: out.work.status, attempt: out.work.attempt } }
+              : {}),
+            ...('active' in out && out.active ? { active: out.active } : {}),
+            ...('joint' in out && out.joint ? { joint: true as const } : {}),
+            ...('blocker' in out && out.blocker ? { blocker: out.blocker } : {}),
+          },
+          ...(done ? {} : { code: exitCodes.refused }),
         };
       } finally {
         h.close();

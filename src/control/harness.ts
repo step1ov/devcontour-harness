@@ -624,6 +624,169 @@ export class Harness {
     return this.engine.carryInput(id, options);
   }
 
+  /**
+   * Раунд ревью плана для снимка с ответом: последний раунд уже одобрил этот
+   * снимок под текущей политикой — он и используется (`reused`); иначе — новый
+   * раунд `review` (автор обязателен; тот же digest и автор при одобренном
+   * последнем раунде модель не вызывают). Отказ ревью — `REVIEW_REJECTED`.
+   */
+  private async reviewSnapshot(
+    graphId: string,
+    snapshot: ContextSnapshot,
+    digest: string,
+    author: Author | undefined,
+  ) {
+    const last = this.engine.reviews('plan', graphId).at(-1);
+    const policy = executionDigest(this.policy);
+    if (
+      last?.approved &&
+      (last.contextDigest ?? null) === digest &&
+      (last.policyDigest === undefined || last.policyDigest === policy)
+    )
+      return { round: last.round, reviewed: 'reused' as const };
+    if (!author)
+      throw new HarnessError(
+        'APPROVAL_REQUIRED',
+        'Снимок с ответом ещё не прошёл ревью плана под текущей политикой: повторите с --author <runtime ведущего> — harness проведёт review-plan сам',
+      );
+    const graph = this.engine.read((v) => v.graph(graphId)?.graph);
+    if (!graph) throw new HarnessError('NOT_FOUND', 'Граф не найден: ' + graphId);
+    const record = await this.review({ kind: 'plan', graph, context: snapshot, author });
+    if (!record.approved)
+      throw new HarnessError(
+        'REVIEW_REJECTED',
+        `Ревью плана со снимком ответа не одобрило граф (раунд ${record.round}): ${record.summary}`,
+      );
+    return { round: record.round, reviewed: 'new' as const };
+  }
+
+  /**
+   * От ответа до применения одним вызовом (`harness input-resolve`): снимок с
+   * последним ответом (`inputContext`, хранится по digest — без файлов),
+   * ревью плана с ним (`reviewSnapshot`), основание (`proposeTarget`) и
+   * `applyInput` с точными версией, digest ответа и основания. Работа ушла из
+   * исходной остановки — отказ `NOT_READY` с выходом `input-carry`. Правила
+   * применения те же, что у `applyInput`: идущие попытки, исчерпанные попытки и
+   * бюджет — `applied: false` с причиной.
+   */
+  async resolveInput(id: string, options: { author?: Author; reset?: { reason: string } } = {}) {
+    const request = this.engine.inputRequest(id);
+    if (request.lifecycle === 'applied')
+      return {
+        requestId: id,
+        applied: true as const,
+        changed: false,
+        lifecycle: request.lifecycle,
+        ...(request.target?.contextDigest ? { contextDigest: request.target.contextDigest } : {}),
+      };
+    if (request.lifecycle === 'pending')
+      throw new HarnessError('INPUT_REQUIRED', `На вопрос ${id} ещё нет ответа: input-answer`);
+    if (request.lifecycle === 'superseded')
+      throw new HarnessError(
+        'NOT_READY',
+        `Запрос ${id} заменён: перенос ответа — harness input-carry --request ${id}`,
+      );
+    if (request.lifecycle !== 'answered')
+      throw new HarnessError('NOT_READY', `Запрос ${id} ${request.lifecycle}: применять нечего`);
+    if (!this.engine.read((v) => this.engine.originHolds(v, request)))
+      throw new HarnessError(
+        'NOT_READY',
+        `Работа ${request.workId} уже не в остановке вопроса ${id} (была другая попытка или новая редакция постановки): перенесите ответ — harness input-carry --request ${id} --reason <почему>`,
+      );
+    const ctx = this.inputContext(id);
+    const review = await this.reviewSnapshot(
+      request.graphId,
+      ctx.snapshot,
+      ctx.digest,
+      options.author,
+    );
+    const proposed = this.proposeTarget(id, ctx.digest);
+    if (!proposed.target)
+      throw new HarnessError(
+        'NOT_READY',
+        'Основание не построено: ' + proposed.problems.join('; '),
+      );
+    const result = this.applyInput(id, {
+      answerDigest: ctx.answerDigest,
+      expectedVersion: proposed.request.version,
+      contextDigest: ctx.digest,
+      targetDigest: proposed.target.digest,
+      actor: this.policy.approvalMode,
+      ...(options.reset ? { reset: options.reset } : {}),
+    });
+    return {
+      requestId: id,
+      contextDigest: ctx.digest,
+      reviewRound: review.round,
+      reviewed: review.reviewed,
+      ...result,
+      lifecycle: result.request.lifecycle,
+    };
+  }
+
+  /**
+   * Перенос ответа одним вызовом (`harness input-carry`): вопрос, исходная
+   * остановка которого больше не держится (была другая попытка, новая
+   * редакция постановки), сначала заменяется преемником — той же работой — с
+   * причиной; затем снимок с ответом, ревью плана с ним, основание
+   * (`proposeCarry`) и `carryInput`. Применённый ответ, основание которого
+   * устарело, и исходная остановка держится, — `input-resolve`, а не перенос.
+   */
+  async carryInputOf(
+    id: string,
+    options: { reason: string; author?: Author; reset?: { reason: string } },
+  ) {
+    let request = this.engine.inputRequest(id);
+    if (request.kind !== 'question' || !request.blocking)
+      throw new HarnessError('INVALID_INPUT', `Запрос ${id} неблокирующий: переносить нечего`);
+    let superseded = false;
+    if (request.lifecycle === 'answered') {
+      if (this.engine.read((v) => this.engine.originHolds(v, request)))
+        throw new HarnessError(
+          'NOT_READY',
+          `Исходная остановка вопроса ${id} держится: продолжение — harness input-resolve --request ${id}`,
+        );
+      request = this.engine.supersedeInput(
+        id,
+        { by: 'operator', reason: options.reason, successor: request.workId },
+        request.version,
+      ).request;
+      superseded = true;
+    } else if (request.lifecycle === 'pending')
+      throw new HarnessError('INPUT_REQUIRED', `На вопрос ${id} ещё нет ответа: input-answer`);
+    else if (request.lifecycle !== 'superseded')
+      throw new HarnessError('NOT_READY', `Запрос ${id} ${request.lifecycle}: переносить нечего`);
+    const ctx = this.inputContext(id);
+    const review = await this.reviewSnapshot(
+      request.graphId,
+      ctx.snapshot,
+      ctx.digest,
+      options.author,
+    );
+    const proposed = this.proposeCarry(id, ctx.digest);
+    if (!proposed.target)
+      throw new HarnessError(
+        'NOT_READY',
+        'Основание не построено: ' + proposed.problems.join('; '),
+      );
+    const result = this.carryInput(id, {
+      contextDigest: ctx.digest,
+      actor: this.policy.approvalMode,
+      expectedVersion: proposed.request.version,
+      targetDigest: proposed.target.digest,
+      ...(options.reset ? { reset: options.reset } : {}),
+    });
+    return {
+      requestId: id,
+      superseded,
+      contextDigest: ctx.digest,
+      reviewRound: review.round,
+      reviewed: review.reviewed,
+      ...result,
+      lifecycle: result.request.lifecycle,
+    };
+  }
+
   /** Отменить вопрос: работа больше его не ждёт. */
   cancelInput(id: string, input: Parameters<Engine['cancelInput']>[1], expectedVersion: number) {
     return this.engine.cancelInput(id, input, expectedVersion);
@@ -642,7 +805,8 @@ export class Harness {
    * Контекст запуска с применёнными ответами: переданный снимок (или
    * отсутствие снимка) вместе с источниками применённых ответов действующего
    * согласования — это тот же действующий снимок, а не изменение контекста.
-   * Иначе — переданный снимок как есть.
+   * Иначе — переданный снимок с перенесёнными в него применёнными ответами
+   * (новый снимок: новое ревью плана видит их вместе с правкой).
    */
   private withAppliedInputs(graphId: string, context: ContextSnapshot | undefined) {
     const approved = this.contextOf(graphId);
@@ -659,7 +823,11 @@ export class Harness {
       (snapshot, entry) => withInput(snapshot, entry),
       context,
     );
-    return carried && contextDigest(carried) === contextDigest(approved) ? approved : context;
+    // Другой снимок (ведущий поправил контекст) применённые ответы не теряет:
+    // они переносятся в него, и новый снимок проходит обычное ревью плана
+    // вместе с ними — иначе правка контекста молча вернула бы ответ в
+    // «ждёт применения».
+    return carried && contextDigest(carried) === contextDigest(approved) ? approved : carried;
   }
 
   /**

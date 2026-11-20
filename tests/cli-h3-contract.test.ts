@@ -66,6 +66,9 @@ const laterCommands: readonly string[] = [
   'view',
   // Повторное согласование после правки политики (0.1.0-alpha.59).
   'reapprove',
+  // Ответ до применения и перенос ответа одной командой (0.1.0-alpha.60).
+  'input-resolve',
+  'input-carry',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [

@@ -1302,8 +1302,8 @@ export class Engine {
           question.lifecycle === 'pending'
             ? `Ждёт ответа на вопрос исполнителя ${question.id}`
             : question.lifecycle === 'superseded'
-              ? `Перенесённый ответ на вопрос ${question.id} устарел до выдачи: нужен новый перенос (carryInput)`
-              : `Ответ на вопрос ${question.id} записан, но не применён (applyInput)`,
+              ? `Перенесённый ответ на вопрос ${question.id} устарел до выдачи: нужен новый перенос (harness input-carry)`
+              : `Ответ на вопрос ${question.id} записан, но не применён (harness input-resolve)`,
       });
     // Записанный budgetBlock — кэш расчёта claim: готовую работу держит текущий расчёт.
     const budget = work.status === 'ready' ? this.budgetBlockOf(work.id, view) : undefined;
@@ -1542,7 +1542,7 @@ export class Engine {
       if (
         target &&
         answered &&
-        target.policyDigest === attempt.policyDigest &&
+        (target.policyDigest === attempt.policyDigest || this.approvalRebound(tx, work)) &&
         !this.targetDrift(tx, work, answered, target)
       )
         attempt.input = {
@@ -3125,7 +3125,7 @@ export class Engine {
    * (остановлена needs-input или готова после устаревшего применения), граф
    * и постановка — те же. Тогда продолжение — только `applyInput`.
    */
-  private originHolds(view: ExecutionView, request: InputRequest) {
+  originHolds(view: ExecutionView, request: InputRequest) {
     const work = view.work(request.workId);
     if (!work) return false;
     const atOrigin =
@@ -3221,7 +3221,11 @@ export class Engine {
     // Граф целиком не сравнивается: согласование другой работы того же графа
     // применённый ответ не обесценивает (причина `graph` больше не ставится).
     if (this.orderMoved(view, work, target)) return 'order' as const;
-    if (target.policyDigest !== this.host.basis.policyDigest(work, view)) return 'policy' as const;
+    if (
+      target.policyDigest !== this.host.basis.policyDigest(work, view) &&
+      !this.approvalRebound(view, work)
+    )
+      return 'policy' as const;
     const pin = this.contextPinOf(view, work) ?? null;
     // Другой снимок, который несёт тот же ответ (например, с ответом на
     // второй вопрос графа), основание не обесценивает.
@@ -3229,6 +3233,24 @@ export class Engine {
     if (target.contextDigest !== pin && !(answer && this.carriesAnswer(view, request, answer, pin)))
       return 'context' as const;
     return undefined;
+  }
+
+  /**
+   * Правка политики, после которой граф снова согласован под текущей
+   * политикой (reapprove или новый раунд ревью плана), применённый ответ не
+   * обесценивает: его основание — то же согласование, а снимок контекста
+   * проверяется отдельно (`targetDrift`: действующий снимок обязан нести этот
+   * ответ). Только standalone: у хоста с портом согласования основание
+   * политики решает хост.
+   */
+  private approvalRebound(view: ExecutionView, work: WorkState) {
+    if (this.host.input) return false;
+    const graph = view.graph(work.graphId);
+    return (
+      !!graph?.approval &&
+      graph.approval.digest === graph.digest &&
+      graph.policyDigest === this.host.basis.policyDigest(work, view)
+    );
   }
 
   /** Вернуть в `answered` применённые, но не переданные ответы с устаревшим основанием. */
@@ -3322,7 +3344,7 @@ export class Engine {
         (work.status === 'failed' && work.failureKind === 'needs-input') || work.status === 'ready';
       if (!atOrigin || last?.id !== request.runId || this.orderMoved(v, work, request.originBasis))
         problems.push(
-          'работа уже не в исходной остановке (новая редакция постановки или другая попытка): выход — supersedeInput и перенос ответа в контекст новой редакции (input-context, review-plan, согласование)',
+          'работа уже не в исходной остановке (новая редакция постановки или другая попытка): выход — перенос ответа одной командой: harness input-carry --request <id> --reason …',
         );
       const answer = latestAnswer(request);
       if (!answer) {

@@ -581,7 +581,7 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
         note: [
           head,
           `Перенесённый ответ r${question.answer?.revision ?? '?'}${by} устарел до выдачи${question.refusal ? `: ${question.refusal}` : ''}.`,
-          'Выходы: перенести снова (input-context, review-plan, carryInput) или снять перенесённый ответ (input-cancel) — работа продолжится без него.',
+          'Выходы: перенести снова (harness input-carry --request <id> --reason …) или снять перенесённый ответ (input-cancel) — работа продолжится без него.',
           own,
         ]
           .filter(Boolean)
@@ -596,7 +596,7 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       note: [
         head,
         `Ответ r${question.answer?.revision ?? '?'} (${question.answer?.digest.slice(0, 12) ?? '—'})${by} записан, но не применён${question.refusal ? `: ${question.refusal}` : ''}.`,
-        'Дальше: input-context, review-plan со снимком, input-apply.',
+        'Дальше: harness input-resolve --request <id> (снимок, ревью плана и применение одним вызовом; по шагам — input-context, review-plan со снимком, input-apply).',
         own,
       ]
         .filter(Boolean)
