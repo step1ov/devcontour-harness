@@ -435,6 +435,33 @@ test('C02/HP09: адаптер хоста без протокола перехо
   }
 });
 
+test('F-AX: адаптер без протокола переходов не получает меток поздних находок — он не видит прежних', async () => {
+  const { hsetup } = await import('./harness-fixture.ts');
+  const ctx = hsetup({
+    scenario: {
+      writer: [implement(), implement()],
+      reviewer: [
+        verdict(true), // ревью плана
+        verdict(false, { findings: [finding('Нет обработки пустого имени')] }),
+        verdict(false, {
+          findings: [{ ...finding('Раннер не проверяет код выхода'), path: 'test/run.js' }],
+        }),
+      ],
+    },
+    policy: (p: any) => (p.maxAttempts = 2),
+  });
+  const h = ctx.open(ctx.policy, legacyAdapter);
+  await h.run({ graph: ctx.graph, author: 'claude' });
+  const all = h.engine.read((v) => v.attempts(WORK));
+  assert.equal(all.length, 2);
+  const e = all[1]!.evidence.find((x) => x.kind === 'review' && x.phase === 'candidate')!;
+  assert.equal(e.reviewRound?.mode, 'legacy');
+  assert.equal(e.findings?.length, 1);
+  assert.equal(e.findings?.[0]?.late, undefined, 'test/run.js не менялся, но адаптер legacy');
+  assert.doesNotMatch(e.summary, /поздние находки/);
+  h.close();
+});
+
 test('C02: cliAdapter объявляет протокол переходов; capabilities без поля — прежний адаптер', async () => {
   const { cliAdapter } = await import('../src/agents/cli-adapter.ts');
   const { bin } = await import('./runner-fixture.ts');
