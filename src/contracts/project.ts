@@ -86,6 +86,7 @@ export const initWarningCodes = [
   'review-same-vendor',
   'runtime-missing',
   'runtime-unauthenticated',
+  'lead-sandbox',
 ] as const;
 
 export const fileConflicts = [
