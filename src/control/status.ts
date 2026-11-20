@@ -78,6 +78,9 @@ export function attemptSummaries(source: StatusSource, v: ExecutionView) {
  * `maxAttempts`, восстановлений — по заданию графа и `repairBudget`; `line` —
  * `attemptSummaryLine`.
  */
+/** Предел `attempts.line` схемы `status` (`attemptSummarySchema.line`). */
+const ATTEMPT_LINE_MAX = 1000;
+
 export function attemptSummaryView(
   work: WorkState,
   attempts: readonly AttemptState[],
@@ -102,7 +105,7 @@ export function attemptSummaryView(
     ...(budget.repairs
       ? { repairs: { ...budget.repairs, left: left(budget.repairs.used, budget.repairs.budget) } }
       : {}),
-    line: attemptSummaryLine(summary, budget),
+    line: attemptSummaryLine(summary, budget, 'ru', ATTEMPT_LINE_MAX),
   };
 }
 

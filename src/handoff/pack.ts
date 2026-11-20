@@ -475,10 +475,26 @@ function build(
     : undefined;
 
   const graphIds = new Set(status.graphs.map((g) => g.id));
-  const repairsAll = h.workflows
-    .list()
-    .filter((j) => j.kind === 'graph' && graphIds.has(j.id) && j.status !== 'completed')
-    .map((j) => ({
+  // Сначала задания, которые ещё действуют: не `stale` и не замещённые более
+  // новым заданием того же графа (`list()` — от старых к новым; прежнее
+  // задание становится `stale` лениво, при следующем захвате). Внутри
+  // группы — новые первыми. Так предел пакета не вытесняет действующее
+  // задание — ни своего графа, ни чужого — историей устаревших.
+  const graphJobs = [...h.workflows.list()]
+    .reverse()
+    .filter((j) => j.kind === 'graph' && graphIds.has(j.id));
+  const newestOf = new Set<string>();
+  const superseded = new Set<string>();
+  for (const j of graphJobs) {
+    if (newestOf.has(j.id)) superseded.add(j.key);
+    else newestOf.add(j.id);
+  }
+  const outdated = (j: (typeof graphJobs)[number]) => j.status === 'stale' || superseded.has(j.key);
+  const repairsAll = graphJobs
+    .filter((j) => j.status !== 'completed')
+    .map((j, i) => ({ j, i }))
+    .sort((a, b) => Number(outdated(a.j)) - Number(outdated(b.j)) || a.i - b.i)
+    .map(({ j }) => ({
       graphId: j.id,
       key: j.key,
       status: j.status,

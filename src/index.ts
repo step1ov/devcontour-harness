@@ -119,7 +119,13 @@ export {
  * исполнение gate, доказательство testcase, наблюдение команд reviewer,
  * маскирование и ограниченный разбор по свойству.
  */
-export { WorkflowQueue, GRAPH_STAGES, type WorkflowSubjects } from './control/workflow.ts';
+export {
+  WorkflowQueue,
+  GRAPH_STAGES,
+  compareWorkflowJobs,
+  newestWorkflowJob,
+  type WorkflowSubjects,
+} from './control/workflow.ts';
 export {
   acceptanceGap,
   repairDecision,
