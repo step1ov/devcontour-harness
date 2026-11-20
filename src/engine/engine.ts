@@ -304,6 +304,9 @@ export function activeOf(v: ExecutionView): AttemptState[] {
   return v.activeAttempts ? v.activeAttempts() : v.attempts().filter((a) => a.status === 'active');
 }
 
+/** Операция паузы `harness update` (пакеты harness и панели меняются). */
+export const UPDATE_PAUSE_OPERATION = 'harness-update';
+
 export class Engine {
   readonly host: ExecutionHost;
   readonly policy: ExecutionPolicy;
@@ -400,6 +403,7 @@ export class Engine {
     const digest = workGraphDigest(graph);
     const key = digestOf([graph.source.connector, graph.source.ref, graph.source.revision]);
     return this.tx('graph.registered', (tx) => {
+      this.assertNoUpdate(tx);
       const known = tx.local('run-keys', WORKSPACE_OWNER, key);
       const existing = tx.graph(graph.id);
       if (known && known.digest !== digest)
@@ -633,6 +637,7 @@ export class Engine {
     } = {},
   ) {
     return this.tx('graph.approved', (tx) => {
+      this.assertNoUpdate(tx);
       const { graph, last } = this.approvalCheck(tx, graphId, actor);
       // Снимок с ответом на вопрос исполнителя становится действующим только
       // через applyInput: обходное согласование его не активирует.
@@ -864,6 +869,53 @@ export class Engine {
     );
   }
 
+  /**
+   * Роль controller для операции вне run (`harness update`): захват или
+   * продление без записи политики; пока роль жива, `harness run` не
+   * становится controller и не пишет состояние.
+   */
+  holdController(owner: string, takeOver?: (lease: ControllerLease) => boolean): boolean {
+    return this.tx('heartbeat', (tx) => {
+      const lease = tx.controller();
+      const live = !!lease && lease.leaseUntil > this.now();
+      // Роль умершего процесса той же операции (`takeOver`) переходит сразу.
+      if (
+        live &&
+        (lease.owner !== owner || lease.engineVersion !== this.version) &&
+        !takeOver?.(lease)
+      )
+        return false;
+      tx.setController({
+        owner,
+        leaseUntil: this.now() + this.policy.leaseMs,
+        engineVersion: this.version,
+      });
+      return true;
+    });
+  }
+
+  /**
+   * Идёт обновление пакетов (`harness update`): роль controller у
+   * `harness-update:<pid>` или пауза его операции (обновление идёт или
+   * прервалось). Регистрация графа, согласование и совместная проверка в это
+   * время отказывают `CONTROLLER_BUSY`: они писали бы состояние посреди
+   * установки, и возврат копии их бы потерял.
+   */
+  private assertNoUpdate(view: ExecutionView) {
+    const lease = view.controller();
+    const control = view.control();
+    if (
+      (lease && lease.leaseUntil > this.now() && lease.owner.startsWith('harness-update:')) ||
+      (control.paused &&
+        control.pauseReason === 'reconfigure' &&
+        control.pauseOperation === UPDATE_PAUSE_OPERATION)
+    )
+      throw new HarnessError(
+        'CONTROLLER_BUSY',
+        'Идёт обновление harness (harness update): дождитесь его окончания; если обновление прервалось — harness update --check или resume',
+      );
+  }
+
   /** Захват или продление роли единственного controller. */
   lead(owner: string): boolean {
     let acquired = false;
@@ -914,6 +966,15 @@ export class Engine {
       const control = tx.control();
       if (control.paused && reason === 'shutdown' && control.pauseReason !== 'reconfigure')
         return { control, changed: false };
+      // Пауза обновления пакетов (`harness update`) штатной остановкой не подменяется:
+      // иначе следующий run снял бы её посреди установки.
+      if (
+        control.paused &&
+        reason === 'shutdown' &&
+        control.pauseReason === 'reconfigure' &&
+        control.pauseOperation === UPDATE_PAUSE_OPERATION
+      )
+        return { control, changed: false };
       // Повторная пауза человека — его новое решение: время паузы обновляется.
       // Хост сравнивает его с началом своей работы (пауза до старта снимается
       // циклом, после — нет), и сохранённое прежнее время выдало бы свежее
@@ -945,7 +1006,12 @@ export class Engine {
     return this.tx('scheduler.started', (tx) => {
       const control = tx.control();
       if (!control.paused) return { control, changed: false };
-      if (control.pauseReason === 'reconfigure')
+      // Паузу обновления пакетов человек снять может (обновление прервалось);
+      // пока обновление идёт, run всё равно не начнётся: роль controller у него.
+      if (
+        control.pauseReason === 'reconfigure' &&
+        control.pauseOperation !== UPDATE_PAUSE_OPERATION
+      )
         throw new HarnessError(
           'PAUSED',
           'Выдачу держит операция применения политики; её снимает сама операция',
@@ -4143,6 +4209,16 @@ export class Engine {
     });
   }
 
+  /**
+   * Запись о смене пакетов harness и панели (`harness update`): одно событие
+   * `harness.updated` в журнале; состояние модели не меняется.
+   */
+  recordUpdate(payload: RunEventPayload<'harness.updated'>) {
+    this.tx('harness.updated', (tx) => {
+      tx.emit({ type: 'harness.updated', payload });
+    });
+  }
+
   /** Снять паузу операции — только свою; паузу человека она не трогает. */
   operationResume(operation: string) {
     return this.tx('scheduler.started', (tx) => {
@@ -4485,6 +4561,7 @@ export class Engine {
       throw new HarnessError('INVALID_INPUT', 'Нужен непустой набор разных поручений');
     return this.tx('workspace.verification.started', (tx) => {
       this.assertCurrentPolicy(tx);
+      this.assertNoUpdate(tx);
       const reconfigure = this.reconfiguring(tx);
       if (reconfigure)
         throw new HarnessError(

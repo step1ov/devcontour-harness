@@ -15,7 +15,7 @@ fencing, write scope and budgets are enforced by the harness itself, whether or
 not this file is installed.
 
 Every command takes explicit paths and prints one JSON envelope on stdout
-(`ok` with `data`, or `error`). `--human` (only `init`, `status`, `explain`, `plan-request` and `gates`) prints
+(`ok` with `data`, or `error`). `--human` (only `init`, `status`, `explain`, `plan-request`, `gates` and `update`) prints
 text instead of a successful envelope; a refusal stays JSON. Exit codes:
 0 success, 2 invalid input, 3 refusal or block, 4 infrastructure. The tool
 keeps no "current project".
@@ -566,6 +566,18 @@ Nothing is asked again:
    source is updated. Product questions you record in the task source as
    question documents appear in `$H view` (`sourceQuestions`) after the next
    `source-snapshot` or `run --source`; the owner answers them there.
+6. Updates, one line to the user: `$H update --check --state <paths.state>`
+   (it reaches only the npm registry, no telemetry;
+   offline it answers «Не удалось проверить обновления» and nothing else
+   changes). With `"mode": "off"` in `.harness/updates.json` skip the call and
+   say nothing. Quote `data.line` as is: «Доступна harness … — что нового: …;
+   обновить — …», «Обновлений нет», or «Нужно ваше решение: …» (a format
+   change: never apply it yourself; ask the user and, with their yes, run the
+   `data.check.command`). Apply an `available` pair only when the user asks
+   or the mode is `auto`: `$H update --apply --state <paths.state> --wait 30`
+   — it never installs during a run, copies the state, checks the new version
+   and goes back by itself on failure; report `data.line`. Do not run it in
+   the middle of your own `run`.
 
 ### 11. Notes
 

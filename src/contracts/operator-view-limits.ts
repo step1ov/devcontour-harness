@@ -45,6 +45,8 @@ export const OPERATOR_VIEW_LIMITS = {
   questionOptions: 10,
   /** Связки с источниками задач в здоровье (`health.sources`, ревизия 4). */
   sources: 10,
+  /** Пунктов «что нового» в `updates.whatsNew` (ревизия 4). */
+  updatesWhatsNew: 10,
 } as const;
 
 /** Пределы свободных строк (символов) после маскирования. */
@@ -67,6 +69,8 @@ export const OPERATOR_VIEW_TEXT = {
   rationale: 200,
   /** Ссылка на запись источника задач (ревизия 4). */
   url: 500,
+  /** Строка, пункт «что нового» и команда `updates` (ревизия 4). */
+  updateLine: 300,
 } as const;
 
 /**

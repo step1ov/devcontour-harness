@@ -110,6 +110,8 @@ git rev-parse refs/heads/harness/accepted   # совпадает с data.result.
 | `review-code --state D --base A --head B`       | Обзор написанной ветки: ревью, не приёмка          |
 | `smoke --state D --sha HEAD [--human]`          | Окружение на коммите без gates и моделей           |
 | `smoke … --writer-probe`                        | Команды исполнителя в его изоляции, без модели     |
+| `update --state D --check/--apply/--rollback`   | Обновления harness и панели: проверка, откат       |
+| `update --state D --schedule daily\|off`        | Ежедневная проверка (launchd; Linux — текст)       |
 
 stdout — один JSON (`devcontour-harness/v1alpha1`), диагностика — stderr. Exit
 codes: 0 успех, 2 неверный вход, 3 отказ/блокировка, 4 инфраструктура.

@@ -637,13 +637,18 @@ test('alpha.60 CLI (F-AL): input-carry — ответ на вопрос преж
   assert.match(readFileSync(`${p.scenario}.writer.1.prompt`, 'utf8'), /Use exactly Hello, <name>!/);
 });
 
-test('alpha.60 CLI: status --human — строка «кто двигает очередь» и строка прогноза выпуска вместе', () => {
+test('alpha.60 CLI: status --human — строки очереди, обновлений и прогноза выпуска вместе', () => {
   const p = project();
   const base = ['--graph', 'graph.json', '--policy', 'policy.json', '--state', p.state];
   assert.equal(p.harness('run', ...base).status, exitCodes.refused);
+  // Настройка обновлений рядом с политикой, проверки ещё не было (alpha.60 update).
+  writeFileSync(join(p.app, 'updates.json'), JSON.stringify({ mode: 'notify' }));
   const human = p.raw('status', '--state', p.state, '--human');
   assert.equal(human.status, 0, human.stderr);
   const lines = human.stdout.trimEnd().split('\n');
+  // Строка обновлений — вторая, сразу после строки очереди.
+  assert.match(lines[1]!, /^Обновления: /);
+  assert.equal(lines.filter((l) => l.startsWith('Обновления:')).length, 1);
   // Первая строка — кто двигает очередь (alpha.60 P1), последняя — прогноз (P11).
   assert.match(lines[0]!, /^Очередь стоит — никто не запущен: .*\(ведущий: harness run\)\.$/);
   assert.match(lines.at(-1)!, /^Прогноз выпуска: готово ~0 %, осталось задач: 1 из 1; /);
@@ -653,6 +658,7 @@ test('alpha.60 CLI: status --human — строка «кто двигает оч
   const watch = p.raw('status', '--state', p.state, '--human', '--watch');
   assert.equal(watch.status, 0, watch.stderr);
   assert.equal(watch.stdout.trimEnd().split('\n').at(-1), lines.at(-1));
+  assert.match(watch.stdout, /\nОбновления: /);
   // С --graph строки — одного графа, а прогноз — по всему прогону: его нет.
   const graph = p.raw('status', '--state', p.state, '--human', '--graph', 'greeting');
   assert.equal(graph.status, 0, graph.stderr);

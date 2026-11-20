@@ -55,6 +55,7 @@ supports it).
 | Docker environment         | none                                                                                                          | gates need a database or other service                                                                                                                |
 | Project rule conflicts     | —                                                                                                             | a project rule forbids what setup creates (for example new `.md` files: `.harness/README.md`)                                                         |
 | Commit, Relay writes, runs | —                                                                                                             | always confirm: committing the setup, `run --source` / `source-deliver` / `source-reconcile`, any live `run` or `review-plan`                         |
+| Update mode                | ask once: `auto` (recommended for a non-technical operator), `notify` (default) or `off` (step 10a)           | never change it later unasked                                                                                                                         |
 
 ## Install
 
@@ -457,11 +458,38 @@ local packs (`localContext`) and a context over the limits as
 `source-deliver` and `source-reconcile` write to Relay: run them only after
 the user says so.
 
+### 10a. Updates
+
+Ask once, in the first round of questions, how updates of harness and the
+operator panel should arrive (multiple choice):
+
+- **auto** (recommend it for managers and other non-technical operators):
+  installed by itself once a day, only when nothing runs, with a state copy,
+  a check of the new version and an automatic return on failure; a version
+  that changes data formats is never installed by itself — it becomes a
+  decision for the owner;
+- **notify** (the default): only a line in the panel, `status --human` and
+  from the lead at the start of a session;
+- **off**: nothing is checked.
+
+Write the answer and, for `auto` (or `notify` when the user wants the daily
+check without a session), the daily job:
+
+```sh
+$H update --mode <auto|notify|off> --state <paths.state>
+$H update --schedule daily --state <paths.state>   # macOS launchd; Linux prints systemd/cron text
+$H update --check --state <paths.state>
+```
+
+`.harness/updates.json` is committed with the setup (step 11). The only
+network call is the npm registry query of `harness update`, through npm and
+its configuration, without telemetry.
+
 ### 11. Commit
 
 With the user's yes: commit on the setup branch `.harness/.gitignore`,
 `.harness/README.md`, `.harness/policy.json`, `.harness/profile.json`,
-`.harness/connector.json`, `.harness/acceptance/` and the bridge files when
+`.harness/connector.json`, `.harness/updates.json`, `.harness/acceptance/` and the bridge files when
 present, and, for an npm source inside the project,
 `.harness-tools/.gitignore`, `.harness-tools/package.json`,
 `.harness-tools/package-lock.json`. Never `project.json`, `node_modules/` or
@@ -478,6 +506,14 @@ edits, controller mode, the connector check and snapshot (`graphId`,
 `review-plan` calls paid models: start it when the user asks.
 
 ## Upgrade
+
+From 0.1.0-alpha.60 the routine upgrade is one command: `$H update --check
+--state <state>` shows the pair, what is new and whether formats change;
+`$H update --apply --state <state> --wait 30` installs it when nothing runs
+(state copy, exact versions in the same `<tooldir>`, `doctor`, automatic
+return on failure); `$H update --rollback --state <state>` goes back. Use
+the manual steps below for a format change the owner approved, for a
+tarball source, or when `update` refuses.
 
 An upgrade changes only the package. Policy, profiles, graphs, accepted
 results and `.harness/project.json` stay as they are unless the user decides

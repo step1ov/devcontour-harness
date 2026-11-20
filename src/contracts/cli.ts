@@ -30,6 +30,7 @@ import { codeReviewRecordSchema } from './code-review.ts';
 import { acceptedTargetSchema } from './target.ts';
 import { workVerificationSchema } from './verification-view.ts';
 import { viewDataSchema } from './operator-view.ts';
+import { updateDataSchema, updateCheckStates } from './update.ts';
 import { sourceRefSchema } from './work.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
 import {
@@ -1414,6 +1415,94 @@ export const cliCommands = {
     ],
     refusals: ['CANCELLED', 'NOT_FOUND'],
   },
+  update: {
+    description:
+      'Обновления harness и панели оператора: проверить в реестре npm (единственный сетевой запрос harness, через npm, без телеметрии), поставить совместимую пару только когда нет прогона — с копией состояния, doctor и автоматическим откатом, — откатить, включить ежедневную проверку; смена форматов договоров — только решением владельца',
+    writes: true,
+    idempotency:
+      'check пишет только <state>-updates/last-check.json; повтор apply без новой версии — up-to-date; rollback снимает одну запись истории; schedule daily перезаписывает своё задание',
+    args: [
+      {
+        ...state,
+        description:
+          'Каталог состояния: копии, история и последняя проверка — рядом, в <state>-updates',
+      },
+      {
+        ...policy,
+        required: false,
+        description:
+          'ExecutionPolicy JSON: каталог .harness проекта, если у состояния нет привязки',
+      },
+      {
+        name: '--check',
+        value: 'flag',
+        required: false,
+        description:
+          'Проверить реестр: текущая и доступная пара, что нового простыми словами, нужна ли смена форматов; офлайн — «не удалось проверить»',
+      },
+      {
+        name: '--apply',
+        value: 'flag',
+        required: false,
+        description:
+          'Поставить найденную пару: не во время прогона, копия состояния, точные версии, doctor, перезапуск панели; при сбое — автоматический возврат',
+      },
+      {
+        name: '--rollback',
+        value: 'flag',
+        required: false,
+        description:
+          'Вернуть прошлую пару; состояние — из последней копии, только если форматы различались',
+      },
+      {
+        name: '--schedule',
+        value: 'text',
+        required: false,
+        description:
+          'daily — ежедневное задание launchd пользователя (macOS; для Linux — текст systemd/cron), off — убрать',
+      },
+      {
+        name: '--mode',
+        value: 'text',
+        required: false,
+        description: 'Записать режим в .harness/updates.json: auto, notify или off',
+      },
+      {
+        name: '--prefix',
+        value: 'dir',
+        required: false,
+        description: 'Каталог установки пакетов; по умолчанию — корень проекта (родитель .harness)',
+      },
+      {
+        name: '--wait',
+        value: 'number',
+        required: false,
+        description:
+          'apply/rollback: идёт прогон — поставить очередь на паузу и ждать его окончания до N минут (1–720)',
+      },
+      {
+        name: '--scheduled',
+        value: 'flag',
+        required: false,
+        description:
+          'apply из расписания: notify — только проверка, auto — установка в пределах autoScope, off — ничего',
+      },
+      {
+        name: '--confirm-formats',
+        value: 'text',
+        required: false,
+        description:
+          'apply: решение владельца поставить пару со сменой форматов — ровно harness@<версия>[+ui@<версия>] из --check; другая пара — отказ; из расписания не принимается',
+      },
+      {
+        name: '--human',
+        value: 'flag',
+        required: false,
+        description: 'Строка для человека, что нового и шаги вместо JSON',
+      },
+    ],
+    refusals: ['CONTROLLER_BUSY', 'APPROVAL_REQUIRED', 'NOT_FOUND'],
+  },
 } as const satisfies Record<string, CliCommandContract>;
 export type CliCommand = keyof typeof cliCommands;
 
@@ -1656,6 +1745,16 @@ export const workStageSchema = z.strictObject({
 
 export const statusDataSchema = z.strictObject({
   stateVersion: z.literal(STATE_VERSION),
+  /**
+   * Обновления по последней проверке `harness update --check` (0.1.0-alpha.60):
+   * исход и строка для человека; проверки не было и режим off — поля нет.
+   */
+  updates: z
+    .strictObject({
+      state: z.enum([...updateCheckStates, 'not-checked']),
+      line: z.string().min(1).max(300),
+    })
+    .optional(),
   control: controlStateSchema,
   controller: controllerLeaseSchema.optional(),
   graphs: z.array(
@@ -2697,6 +2796,7 @@ export const cliDataSchemas = {
   gates: gatesDataSchema,
   'review-code': codeReviewRecordSchema,
   smoke: smokeDataSchema,
+  update: updateDataSchema,
   version: versionDataSchema,
 } as const satisfies Record<CliCommand | 'version', z.ZodType>;
 

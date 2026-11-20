@@ -141,4 +141,10 @@ export const validPayloads: Record<EventType, Record<string, unknown>> = {
   'delivery.failed': { ...delivery, error: 'sink down' },
   'delivery.conflict': { ...delivery, currentRevision: '2' },
   'delivery.uncertain': { ...delivery, operation: 'op-1', reason: 'timeout' },
+  'harness.updated': {
+    action: 'applied',
+    from: { harness: '0.1.0-alpha.60', ui: '0.1.0-alpha.4' },
+    to: { harness: '0.1.0-alpha.61', ui: '0.1.0-alpha.5' },
+    by: 'operator',
+  },
 };

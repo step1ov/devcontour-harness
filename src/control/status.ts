@@ -519,6 +519,9 @@ export function statusText(data: z.output<typeof statusDataSchema>): string {
       : (data.runner?.line ?? 'Выдача идёт.'),
   ];
   if (c.paused && !lifted && data.runner?.state === 'not-running') out.push(data.runner.line);
+  // Обновления по последней проверке `harness update --check` (alpha.60).
+  if (data.updates && data.updates.state !== 'up-to-date')
+    out.push(`Обновления: ${data.updates.line}`);
   if (!data.works.length) out.push('Поручений нет.');
   for (const w of data.works) {
     out.push(`${w.id} [${w.status}]${w.attemptSummary ? ': ' + w.attemptSummary.line : ''}`);

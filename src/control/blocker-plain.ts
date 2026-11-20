@@ -109,6 +109,12 @@ const pauseText = (control: ControlState): Text => {
         actor: 'user',
       };
     case 'reconfigure':
+      if (control.pauseOperation === 'harness-update')
+        return {
+          ru: 'пауза очереди: обновляется harness — снимется сама после обновления (если обновление прервалось — harness update --check или resume)',
+          en: 'queue paused: harness is being updated — lifts itself afterwards (if the update was interrupted: harness update --check or resume)',
+          actor: 'controller',
+        };
       return {
         ru: 'пауза очереди: применяется новая политика',
         en: 'queue paused: a new policy is being applied',
