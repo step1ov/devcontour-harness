@@ -573,6 +573,11 @@ export interface OperatorReviewInput {
   escalation?: { round: number; findings: readonly string[] };
   line?: string;
   lineEn?: string;
+  /**
+   * Те же строки по частям: имена (ID предмета, refs) проекция маскирует и
+   * сокращает серединой, вердикт и раунды остаются. Есть — вместо `line`.
+   */
+  lineParts?: { ru: readonly LinePart[]; en: readonly LinePart[] };
 }
 
 /** Фаза записи проверки или ревью попытки. */
@@ -1007,14 +1012,15 @@ function remoteView(
   const trackingRef = text(c, r.trackingRef, 500);
   const reasonText = text(c, reason, T.reason);
   // Строка собирается заново под предел представления: имя ветки
-  // сокращается серединой, слова состояния остаются. Без имени (ветка
-  // длиннее предела договора) — строка загрузчика: состояние в ней стоит до
-  // имени, обрезка с конца его не задевает.
+  // маскируется и сокращается серединой, слова состояния остаются. Без
+  // `trackingRef` (имя длиннее предела договора) точного имени нет: строка
+  // загрузчика несёт его уже сокращённым, без маски — имя заменяет «…».
   const line =
-    (r.state === 'unknown' && reasonText) ||
-    ((r.state === 'pushed' || r.state === 'not-pushed') && trackingRef)
-      ? fit(c, remoteLineParts(r.state, c.lang, trackingRef ?? '', reasonText ?? ''), T.line)
-      : text(c, c.lang === 'en' ? r.lineEn : r.line, T.line);
+    r.state === 'pushed' || r.state === 'not-pushed'
+      ? fit(c, remoteLineParts(r.state, c.lang, trackingRef ?? '…'), T.line)
+      : r.state === 'unknown' && reasonText
+        ? fit(c, remoteLineParts(r.state, c.lang, '', reasonText), T.line)
+        : text(c, c.lang === 'en' ? r.lineEn : r.line, T.line);
   return {
     state: r.state,
     ...(trackingRef ? { trackingRef } : {}),
@@ -1167,8 +1173,10 @@ function reviewView(
           },
         }
       : {}),
-    ...((line) => (line ? { line: text(c, line, T.line) } : {}))(
-      c.lang === 'en' ? r.lineEn : r.line,
+    ...((line) => (line ? { line } : {}))(
+      r.lineParts
+        ? fit(c, r.lineParts[c.lang], T.line)
+        : text(c, c.lang === 'en' ? r.lineEn : r.line, T.line),
     ),
   };
 }

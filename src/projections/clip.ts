@@ -114,5 +114,13 @@ export function fitLine(
       return elideMiddle(values[i]!, sizes[i]!);
     })
     .join('');
-  return line.length > max ? line.slice(0, Math.max(0, max - 1)) + '…' : line;
+  return line.length > max ? clipEnd(line, max) : line;
+}
+
+/** Обрезать с конца до `max` code units с «…», не разрезая суррогатную пару. */
+function clipEnd(text: string, max: number): string {
+  if (max <= 0) return '';
+  let head = max - 1;
+  if (/[\uD800-\uDBFF]/.test(text[head - 1] ?? '')) head -= 1;
+  return text.slice(0, head) + '…';
 }

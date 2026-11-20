@@ -11,6 +11,8 @@
 import type { ControlState, ExecutionPolicy, WorkState } from '../contracts/index.ts';
 import type { Engine } from '../engine/engine.ts';
 import type { Actor, NextAction } from '../projections/index.ts';
+import { OPERATOR_VIEW_TEXT } from '../contracts/operator-view-limits.ts';
+import { fitLine, named } from '../projections/clip.ts';
 import { actionText } from './stage.ts';
 
 /** Коды блокировок `Engine.blockers`: у каждого — простой текст (`blockerCodeText`). */
@@ -237,10 +239,14 @@ function textOf(b: { code: BlockerCode; message: string }, ctx: BlockerContext):
         };
       const hold = /^Удержано операцией (.+)$/.exec(m);
       if (hold) {
-        const op = ctx.work?.hold?.operation === hold[1] ? ` ${hold[1]}` : '';
+        const op = ctx.work?.hold?.operation === hold[1] ? hold[1] : '';
+        // Имя операции не ограничено договором: оно сокращается серединой,
+        // «ждёт её конца» остаётся в пределе строки представления.
+        const line = (head: string, tail: string) =>
+          op ? fitLine([head + ' ', named(op), tail], OPERATOR_VIEW_TEXT.plain) : head + tail;
         return {
-          ru: `удержано операцией${op} — ждёт её конца`,
-          en: `held by an operation${op} — waiting for it to finish`,
+          ru: line('удержано операцией', ' — ждёт её конца'),
+          en: line('held by an operation', ' — waiting for it to finish'),
           actor: 'controller',
         };
       }

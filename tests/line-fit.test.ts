@@ -7,15 +7,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { OPERATOR_VIEW_TEXT, operatorViewSchema } from '../src/contracts/index.ts';
-import { codeReviewLine } from '../src/control/operator-view.ts';
+import { plainBlocker, type BlockerContext } from '../src/control/blocker-plain.ts';
+import { codeReviewLineParts } from '../src/control/operator-view.ts';
 import { remoteOf } from '../src/control/target.ts';
 import { elideMiddle, fitLine, named, operatorView } from '../src/projections/index.ts';
 import type { OperatorActivityInput } from '../src/projections/operator-view.ts';
-import { at, baseInput, work } from './operator-view-input.ts';
+import { at, baseInput, review, work } from './operator-view-input.ts';
 import { sha } from './engine-fixture.ts';
 
 const branch = (n: number) =>
-  n === 0 ? '' : ('origin/' + 'b'.repeat(Math.max(0, n - 'origin/'.length - 4)) + '-end').slice(-n);
+  n === 0 ? '' : ('origin/' + 'z'.repeat(Math.max(0, n - 'origin/'.length - 4)) + '-end').slice(-n);
 
 test('elideMiddle: начало и конец имени, длина ровно предел, суррогатная пара не режется', () => {
   assert.equal(elideMiddle('abcdef', 6), 'abcdef');
@@ -54,6 +55,8 @@ test('fitLine: текст шаблона целиком, имена делят �
   assert.equal(masked, 'key ‹masked› end');
   // Шаблон длиннее предела — обрезка с конца, но не длиннее предела.
   assert.ok(fitLine(['x'.repeat(30), named('n')], 10).length <= 10);
+  assert.equal(fitLine(['x'], 0), '');
+  assert.equal(fitLine(['😀z'], 2), '…');
 });
 
 test('remoteOf: «ещё нет» / «not yet» сохраняются при имени 0, у предела и 500+ символов', () => {
@@ -116,7 +119,10 @@ test('view: строка удалённой ветки ≤ 200 и с «ещё н
         const line = r.line!;
         assert.ok(line.length <= OPERATOR_VIEW_TEXT.line, `${lang} ${n}: ${line.length}`);
         assert.ok(line.startsWith(words), `${lang} ${n}: ${line}`);
-        if (n) assert.ok(line.endsWith('-end'.slice(-Math.min(4, n))), `${lang} ${n}: ${line}`);
+        // Имя длиннее договора (нет trackingRef): точного имени нет — «…».
+        if (n > 500) assert.ok(line.endsWith(' …'), `${lang} ${n}: ${line}`);
+        else if (n)
+          assert.ok(line.endsWith('-end'.slice(-Math.min(4, n))), `${lang} ${n}: ${line}`);
       }
     }
   }
@@ -168,7 +174,7 @@ test('лента: длинные ID и ветка сокращаются, «ло
       at: at(13),
       scope: 'code',
       subject: 's',
-      label: `app/writer ${'b'.repeat(500)}..${'h'.repeat(500)}`,
+      label: `app/writer ${'q'.repeat(500)}..${'w'.repeat(500)}`,
       reviewer: 'codex',
       approved: false,
       blocking: 2,
@@ -211,20 +217,120 @@ test('лента: длинные ID и ветка сокращаются, «ло
 
 test('ревью кода: refs до 500 символов сокращаются, вердикт и раунды остаются', () => {
   const counts = { blocking: 2, notes: 1, accepted: 0 };
-  for (const n of [1, 40, 60, 100, 500]) {
+  const verdict = {
+    ru: ': не одобрено, открытых блокирующих 2, открытых заметок 1;',
+    en: ': not approved, 2 open blocking findings, 1 open note;',
+  };
+  const ns = [1, 40, 60, 100, 500];
+  const reviews = ns.map((n) => {
     const r = {
-      repositoryId: 'a'.repeat(80),
+      repositoryId: 'p'.repeat(80),
       role: 'r'.repeat(80),
-      refs: { base: 'refs/heads/' + 'b'.repeat(n), head: 'refs/heads/' + 'h'.repeat(n) },
+      refs: { base: 'refs/heads/' + 'q'.repeat(n), head: 'refs/heads/' + 'w'.repeat(n - 1) + 'Z' },
       approved: false,
       round: 7,
     };
-    for (const lang of ['ru', 'en'] as const) {
-      const line = codeReviewLine(r, counts, lang);
+    const ru = codeReviewLineParts(r, counts, 'ru');
+    const en = codeReviewLineParts(r, counts, 'en');
+    const join = (p: typeof ru) => p.map((x) => (typeof x === 'string' ? x : x.name)).join('');
+    return review(`c${n}`, {
+      kind: 'code',
+      approved: false,
+      line: join(ru),
+      lineEn: join(en),
+      lineParts: { ru, en },
+    });
+  });
+  for (const lang of ['ru', 'en'] as const) {
+    const view = operatorView(baseInput({ reviews }), { lang });
+    operatorViewSchema.parse(view);
+    for (const n of ns) {
+      const line = view.reviews.find((r) => r.subject === `c${n}`)!.line!;
       assert.ok(line.length <= OPERATOR_VIEW_TEXT.line, `${lang} ${n}: ${line.length}`);
       assert.ok(line.startsWith(lang === 'ru' ? 'код ' : 'code '), line);
+      assert.ok(line.includes(verdict[lang]), `${lang} ${n}: вердикт: ${line}`);
       assert.ok(line.endsWith(lang === 'ru' ? '; раундов 7' : '; rounds 7'), line);
-      assert.ok(line.includes('..'), line);
+      assert.ok(line.includes('Z:'), `${lang} ${n}: конец head виден: ${line}`);
+    }
+  }
+});
+
+test('ревью плана: ID предмета 80 символов сокращается, хвост строки остаётся', () => {
+  const subject = 's'.repeat(80);
+  const tail = '; раундов 3/6; ревью $0.25 + вызовов без стоимости 1; ждёт решения оператора';
+  const ru = [`план `, { name: subject }, `: ${'x'.repeat(60)}${tail}`];
+  const view = operatorView(
+    baseInput({
+      reviews: [
+        review(subject, {
+          line: ru.map((p) => (typeof p === 'string' ? p : p.name)).join(''),
+          lineParts: { ru, en: ru },
+        }),
+      ],
+    }),
+  );
+  const line = view.reviews[0]!.line!;
+  assert.ok(line.length <= OPERATOR_VIEW_TEXT.line, String(line.length));
+  assert.ok(line.endsWith(tail), line);
+});
+
+test('маска — до сокращения: секрет в refs и в имени ветки не оставляет префикса', () => {
+  const secret = 'SECRET' + 'Q'.repeat(294);
+  const counts = { blocking: 0, notes: 0, accepted: 0 };
+  const parts = codeReviewLineParts(
+    {
+      repositoryId: 'app',
+      role: 'writer',
+      refs: { base: 'refs/heads/' + secret, head: 'refs/heads/main' },
+      approved: true,
+      round: 1,
+    },
+    counts,
+    'ru',
+  );
+  const huge = 'origin/' + secret + 'z'.repeat(300);
+  const input = baseInput({
+    reviews: [review('c', { kind: 'code', lineParts: { ru: parts, en: parts } })],
+    works: [
+      work('t', {
+        status: 'done',
+        target: { ...target, remote: remoteOf('not-pushed', { short: huge }) },
+      }),
+      work('s', {
+        status: 'done',
+        target: { ...target, remote: remoteOf('not-pushed', { short: 'origin/' + secret }) },
+      }),
+    ],
+    mask: { secrets: [secret] },
+  });
+  const view = operatorView(input);
+  const s = JSON.stringify(view);
+  assert.ok(!s.includes('SECRETQQ'), s);
+  const remote = (id: string) => view.works.find((w) => w.id === id)!.target!.remote;
+  assert.equal(remote('t').trackingRef, undefined);
+  assert.equal(remote('t').line, 'принято локально; ещё нет в удалённой ветке …');
+  assert.ok(
+    remote('s').line!.startsWith('принято локально; ещё нет в удалённой ветке origin/‹masked›'),
+    remote('s').line,
+  );
+});
+
+test('блокировка удержания: длинное имя операции сокращается, «ждёт её конца» остаётся', () => {
+  for (const n of [1, 100, 140, 500]) {
+    const operation = 'op-' + 'o'.repeat(n);
+    const ctx = {
+      control: { paused: false },
+      approvalMode: 'agent',
+      work: { hold: { operation, reason: 'r' } },
+      statusOf: () => undefined,
+    } as unknown as BlockerContext;
+    const b = plainBlocker({ code: 'NOT_READY', message: 'Удержано операцией ' + operation }, ctx);
+    for (const [line, head, tail] of [
+      [b.plain, 'удержано операцией op-', ' — ждёт её конца'],
+      [b.plainEn, 'held by an operation op-', ' — waiting for it to finish'],
+    ] as const) {
+      assert.ok(line.length <= OPERATOR_VIEW_TEXT.plain, `${n}: ${line.length}`);
+      assert.ok(line.startsWith(head) && line.endsWith(tail), line);
     }
   }
 });
