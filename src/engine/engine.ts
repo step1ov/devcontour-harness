@@ -4076,6 +4076,16 @@ export class Engine {
     });
   }
 
+  /**
+   * Запись о смене пакетов harness и панели (`harness update`): одно событие
+   * `harness.updated` в журнале; состояние модели не меняется.
+   */
+  recordUpdate(payload: RunEventPayload<'harness.updated'>) {
+    this.tx('harness.updated', (tx) => {
+      tx.emit({ type: 'harness.updated', payload });
+    });
+  }
+
   /** Снять паузу операции — только свою; паузу человека она не трогает. */
   operationResume(operation: string) {
     return this.tx('scheduler.started', (tx) => {

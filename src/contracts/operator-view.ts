@@ -422,6 +422,23 @@ export const operatorViewSchema = z.strictObject({
   health: viewHealthSchema,
   activity: z.array(activitySchema).max(L.activity).optional(),
   decisions: z.array(decisionSchema).max(L.decisions).optional(),
+  /**
+   * Обновления harness и панели по последней проверке `harness update
+   * --check` (ревизия 4, harness 0.1.0-alpha.60): панель показывает
+   * «Доступна … — что нового · как обновить».
+   */
+  updates: z
+    .strictObject({
+      state: z.enum(['up-to-date', 'available', 'needs-decision', 'unavailable', 'not-checked']),
+      mode: z.enum(['auto', 'notify', 'off']),
+      current: z.strictObject({ harness: token(100), ui: token(100).optional() }),
+      available: z.strictObject({ harness: token(100), ui: token(100).optional() }).optional(),
+      checkedAt: isoTimeSchema.optional(),
+      line: freeText(T.updateLine),
+      whatsNew: z.array(freeText(T.updateLine)).max(L.updatesWhatsNew).optional(),
+      command: freeText(T.updateLine).optional(),
+    })
+    .optional(),
   truncated: z
     .strictObject({
       works: truncatedCount.optional(),

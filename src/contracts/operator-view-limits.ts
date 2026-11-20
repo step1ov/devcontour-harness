@@ -5,7 +5,7 @@
 /** Мажорная версия документа: меняется, только когда поле удалено, переименовано или меняет смысл. */
 export const OPERATOR_VIEW_VERSION = 1 as const;
 /** Ревизия внутри мажорной версии: растёт при добавлениях (необязательное поле, значение перечисления). */
-export const OPERATOR_VIEW_REVISION = 3;
+export const OPERATOR_VIEW_REVISION = 4;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -37,6 +37,8 @@ export const OPERATOR_VIEW_LIMITS = {
   activity: 50,
   decisions: 50,
   verificationPerWork: 50,
+  /** Пунктов «что нового» в `updates.whatsNew` (ревизия 4). */
+  updatesWhatsNew: 10,
 } as const;
 
 /** Пределы свободных строк (символов) после маскирования. */
@@ -53,6 +55,8 @@ export const OPERATOR_VIEW_TEXT = {
   model: 200,
   reason: 200,
   activity: 200,
+  /** Строка, пункт «что нового» и команда `updates` (ревизия 4). */
+  updateLine: 300,
 } as const;
 
 /**

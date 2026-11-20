@@ -1610,6 +1610,69 @@ view`) в пределе длины сохраняет хвост — остат
   тарифов, обхода зависших и правила вопросов, — новый платный раунд. Откат на alpha.58: записи раундов и согласований с
   новыми полями строгая схема alpha.58 не читает — через копию состояния.
 
+### 0.1.0-alpha.60 (не выпущен)
+
+- **Обновление одной командой: `harness update`.** `--check` спрашивает
+  реестр npm о версиях канала (dist-tag, по умолчанию `alpha`) для
+  devcontour-harness и devcontour-harness-ui и выбирает новейшую совместимую
+  пару по peer-диапазону панели; «что нового» — из заметок выпуска внутри
+  tarball (`docs/release-notes/<версия>.md`); смена форматов — по новому полю
+  package.json `devcontourHarness.formats` (`api`, `state`, `policy`,
+  `handoff`, `report`, `view`). Это единственный сетевой запрос harness: идёт
+  через npm (его registry, proxy, сертификаты и ключи), без телеметрии;
+  движок во время работы в сеть по-прежнему не ходит. Реестр недоступен —
+  исход `unavailable` («Не удалось проверить обновления: …»), exit 0.
+  `--apply` ставит пару только когда нет прогона (живая роль controller,
+  попытка, совместная проверка, задание графа): иначе отказ `busy` (exit 3)
+  или, с `--wait <минуты>`, пауза выдачи операцией `harness-update` и
+  ожидание. Дальше — копия каталога состояния с SHA-256 (`<state>-updates/copies`,
+  база — снимком `VACUUM INTO`, без рабочих деревьев), сохранение
+  package.json и lockfile, установка точных версий обоих пакетов туда, где
+  они стоят (`--save-exact`, тот же раздел; каталог `.harness-tools` — с
+  `--omit=dev --ignore-scripts`; pnpm — `pnpm add`), `doctor` и `status` новой
+  версии её процессом, `devcontour-harness-ui --check`, событие
+  `harness.updated`, перезапуск запущенной панели этого каталога состояния.
+  Сбой после начала установки — автоматический возврат прежних
+  package.json, lockfile и пакетов, а если состояние успели изменить — и
+  копии (изменённые файлы переносятся в `<state>-updates/replaced`, не
+  удаляются); exit 4. `--rollback` возвращает прошлую пару: прежняя версия
+  читает живое состояние — оно остаётся (работа после обновления не
+  теряется), иначе состояние — из последней копии. Хранятся две последние
+  пары и одна копия состояния. Версия со сменой форматов автоматически не
+  ставится никогда: исход `needs-decision` (exit 3) с последствиями и
+  командой `--apply --confirm-formats` (из расписания не принимается).
+- **Настройка `.harness/updates.json`** (схема `schemas/updates-config.schema.json`):
+  `mode` — `auto`, `notify` (по умолчанию) или `off`; `channel` — dist-tag;
+  `autoScope` — `same-formats` (по умолчанию) или `ui-only`; необязательный
+  `registry` (http/https). `harness update --mode auto|notify|off` пишет её.
+  Файл не по схеме — `INVALID_INPUT` у `update`; `status` и `view` его
+  пропускают.
+- **Расписание.** `harness update --schedule daily` создаёт задание launchd
+  пользователя (`~/Library/LaunchAgents/dev.devcontour-harness.update.<hash>.plist`,
+  каждый день в 09:30): `harness update --apply --scheduled` — в notify
+  только проверка, в auto — установка в пределах `autoScope`, когда нет
+  прогона (ожидание до 30 минут), в off — ничего; пара, которую уже
+  вернули после сбоя проверки, по расписанию не повторяется. `--schedule off`
+  убирает задание. На Linux задание не создаётся: ответ печатает текст
+  systemd user timer и строку cron (ниже, «Обновление командой»).
+- **Где видно.** Необязательное поле `updates` представления оператора
+  (ревизия 4: `state`, `mode`, `current`, `available`, `checkedAt`, `line`,
+  `whatsNew`, `command`), необязательное поле `updates` ответа `status` и
+  строка «Обновления: …» в `status --human` — по сохранённой проверке
+  (`<state>-updates/last-check.json`), без сети. Навык `harness` в начале
+  сессии говорит об обновлении одной строкой; навык `harness-setup`
+  спрашивает режим обновлений.
+- **Совместимость.** Новое событие `harness.updated` (прежние версии читают
+  его как `unknown`), новое необязательное поле представления и `status`,
+  новая команда; `stateVersion`, `policyVersion`, `handoffVersion`,
+  `reportVersion`, `viewVersion` прежние. Откат на alpha.59: событие
+  `harness.updated` alpha.59 читает как `unknown`, состояние — без копии.
+  Пределы: обновляются только npm- и pnpm-установки (yarn и bun — отказ);
+  перезапуск панели — только процесса, чья командная строка однозначно
+  указывает на пакет в каталоге установки и на этот каталог состояния,
+  иначе ответ говорит, как перезапустить; совместимость с Relay эта
+  проверка пока не сверяет.
+
 ## Перед обновлением
 
 1. **Остановить записывающих.** Запретить новые выдачи (`harness pause`),
@@ -1648,6 +1711,50 @@ view`) в пределе длины сохраняет хвост — остат
 
 Установка новой версии не меняет политику, профили, закрепления контекста,
 инструкции агентам и принятые результаты.
+
+## Обновление командой `harness update` (0.1.0-alpha.60)
+
+Те же шаги — остановка записывающих, копия, установка точной версии,
+проверка, откат при сбое — делает одна команда:
+
+```sh
+harness update --check --state D            # что доступно и что нового
+harness update --apply --state D [--wait 30] # поставить, когда нет прогона
+harness update --rollback --state D         # вернуть прошлую пару
+harness update --mode auto --state D        # режим в .harness/updates.json
+harness update --schedule daily --state D   # ежедневно (macOS launchd)
+```
+
+Каталог установки — `--prefix`, иначе каталог, откуда запущен harness,
+иначе `<проект>/.harness-tools`, иначе корень проекта. Копии, история пар,
+журнал (`journal.jsonl`) и последняя проверка лежат рядом с каталогом
+состояния, в `<state>-updates`. Прервавшееся обновление (процесс умер)
+оставляет паузу выдачи операции `harness-update`; её снимает следующий
+`harness update` (например, `--check`).
+
+Linux — задание пишется руками; `harness update --schedule daily` печатает
+его со своими путями:
+
+```ini
+# ~/.config/systemd/user/harness-update.service
+[Unit]
+Description=devcontour-harness update
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/node <prefix>/node_modules/devcontour-harness/lib/cli.js update --apply --scheduled --state <state>
+
+# ~/.config/systemd/user/harness-update.timer
+[Unit]
+Description=devcontour-harness update daily
+[Timer]
+OnCalendar=*-*-* 09:30
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
+
+`systemctl --user daemon-reload && systemctl --user enable --now harness-update.timer`;
+или cron: `30 9 * * * /usr/bin/node <prefix>/node_modules/devcontour-harness/lib/cli.js update --apply --scheduled --state <state>`.
 
 ## Откат
 

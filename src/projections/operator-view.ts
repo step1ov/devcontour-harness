@@ -321,6 +321,7 @@ export interface OperatorView {
   history: ViewHistory;
   health: ViewHealth;
   activity?: ActivityView[];
+  updates?: UpdatesView;
   truncated?: Partial<Record<TruncatedKey, number>>;
 }
 
@@ -770,6 +771,23 @@ export interface OperatorViewInput {
   activity?: readonly OperatorActivityInput[];
   /** Что маскировать: домашний каталог, корни репозиториев, значения секретов. */
   mask?: MaskContext;
+  /** Обновления по последней проверке `harness update --check` (ревизия 4); нет — поля нет. */
+  updates?: UpdatesView;
+}
+
+/**
+ * Обновления harness и панели (ревизия 4): что стоит, что доступно, режим,
+ * время проверки, строка для человека, что нового и команда установки.
+ */
+export interface UpdatesView {
+  state: 'up-to-date' | 'available' | 'needs-decision' | 'unavailable' | 'not-checked';
+  mode: 'auto' | 'notify' | 'off';
+  current: { harness: string; ui?: string };
+  available?: { harness: string; ui?: string };
+  checkedAt?: string;
+  line: string;
+  whatsNew?: string[];
+  command?: string;
 }
 
 export interface OperatorViewOptions {
@@ -1968,6 +1986,7 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
     history,
     health,
     ...(activity ? { activity } : {}),
+    ...(i.updates ? { updates: updatesOf(c, i.updates) } : {}),
   };
   const fitted = draft;
   let warnings = [...fitted.health.warnings];
@@ -1996,6 +2015,26 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
     },
     maxBytes,
   );
+}
+
+/** Обновления: строки через ту же маску (путь каталога состояния в команде), с пределами. */
+function updatesOf(c: Ctx, u: UpdatesView): UpdatesView {
+  return {
+    state: u.state,
+    mode: u.mode,
+    current: u.current,
+    ...(u.available ? { available: u.available } : {}),
+    ...(u.checkedAt ? { checkedAt: u.checkedAt } : {}),
+    line: text(c, u.line, T.updateLine) ?? '',
+    ...(u.whatsNew?.length
+      ? {
+          whatsNew: u.whatsNew
+            .slice(0, L.updatesWhatsNew)
+            .map((x) => text(c, x, T.updateLine) ?? ''),
+        }
+      : {}),
+    ...(u.command ? { command: text(c, u.command, T.updateLine) ?? '' } : {}),
+  };
 }
 
 /** Строки проверки alpha.55 в словаре представления. */

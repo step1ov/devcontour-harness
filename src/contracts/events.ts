@@ -17,6 +17,7 @@ import {
   workStatusSchema,
 } from './execution.ts';
 import { inputFloorSchema, inputRequestSchema } from './input.ts';
+import { updatePairSchema, updateRecordActions } from './update.ts';
 
 const inputRequestId = inputRequestSchema.shape.id;
 
@@ -427,6 +428,18 @@ export const eventPayloads = {
     operation: z.string().min(1).max(300),
     reason: text,
   }),
+  /**
+   * Пакеты harness и панели сменились командой `harness update`
+   * (0.1.0-alpha.60): поставлены (`applied`), возвращены после сбоя
+   * проверки (`restored`) или откатом (`rolled-back`).
+   */
+  'harness.updated': z.strictObject({
+    action: z.enum(updateRecordActions),
+    from: updatePairSchema,
+    to: updatePairSchema,
+    by: z.enum(['operator', 'schedule']),
+    reason: z.string().max(500).optional(),
+  }),
 } as const;
 export type EventType = keyof typeof eventPayloads;
 /** Нагрузка события своего типа. */
@@ -591,5 +604,7 @@ export const transactionKinds = [
   'input.closed',
   /** Подтверждение передачи ответа началом вызова (`input.delivered`). */
   'input.delivered',
+  /** Запись о смене пакетов командой `harness update` (`harness.updated`). */
+  'harness.updated',
 ] as const;
 export type TransactionKind = (typeof transactionKinds)[number];

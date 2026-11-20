@@ -66,6 +66,8 @@ const laterCommands: readonly string[] = [
   'view',
   // Повторное согласование после правки политики (0.1.0-alpha.59).
   'reapprove',
+  // Обновления harness и панели (0.1.0-alpha.60).
+  'update',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -148,6 +150,8 @@ const ADDITIVE_EVENT_TYPES = new Set([
   'attempt.assumptions',
   // alpha.44: явный сброс бюджета совместных проверок набора.
   'joint.budget-reset',
+  // alpha.60: смена пакетов командой `harness update`.
+  'harness.updated',
 ]);
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([
@@ -567,6 +571,8 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.detail;
       delete rest.reviews;
       delete rest.reviewsTruncated;
+      // Обновления по последней проверке `harness update --check` (0.1.0-alpha.60).
+      delete rest.updates;
       return rest;
     }
     // Аддитивные поля находки плана или контракта: счёт раундов и решение

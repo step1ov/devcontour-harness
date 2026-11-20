@@ -8,7 +8,8 @@ import {
   writeFileSync,
   mkdirSync,
 } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import {
@@ -64,6 +65,31 @@ import { inputStateOf } from './projections/input.ts';
 import { checkGates, gatesText } from './control/gates-check.ts';
 import { smokeLifecycle, smokeText } from './control/lifecycle-smoke.ts';
 import { defaultResourceDatabase } from './environment/resources.ts';
+import {
+  UPDATE_OPERATION,
+  applyUpdate,
+  recoverInterrupted,
+  rollbackUpdate,
+  type UpdateHost,
+} from './update/apply.ts';
+import {
+  cachedUpdates,
+  checkUpdates,
+  loadUpdatesConfig,
+  saveLastCheck,
+  updatesDir,
+  writeUpdatesConfig,
+} from './update/check.ts';
+import { liveWork } from './update/live.ts';
+import { HARNESS_PACKAGE, installedPackage } from './update/install.ts';
+import {
+  disableSchedule,
+  enableSchedule,
+  linuxInstructions,
+  scheduleArgs,
+} from './update/schedule.ts';
+import { updateText } from './update/text.ts';
+import { updateModes, updatesConfigSchema } from './contracts/update.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -337,6 +363,15 @@ const options = {
   bucket: { type: 'string' },
   lang: { type: 'string' },
   'view-version': { type: 'string' },
+  check: { type: 'boolean' },
+  apply: { type: 'boolean' },
+  rollback: { type: 'boolean' },
+  schedule: { type: 'string' },
+  mode: { type: 'string' },
+  prefix: { type: 'string' },
+  wait: { type: 'string' },
+  scheduled: { type: 'boolean' },
+  'confirm-formats': { type: 'boolean' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -349,7 +384,7 @@ const flagOwners = {
   lead: ['init'],
   review: ['init'],
   model: ['init'],
-  human: ['init', 'lean', 'status', 'explain', 'plan-request', 'gates', 'smoke'],
+  human: ['init', 'lean', 'status', 'explain', 'plan-request', 'gates', 'smoke', 'update'],
   draft: ['plan-check'],
   basis: ['plan-check'],
   brief: ['plan-request', 'plan-check'],
@@ -397,6 +432,15 @@ const flagOwners = {
   base: ['review-code'],
   head: ['review-code'],
   role: ['review-code'],
+  check: ['update'],
+  apply: ['update'],
+  rollback: ['update'],
+  schedule: ['update'],
+  mode: ['update'],
+  prefix: ['update'],
+  wait: ['update'],
+  scheduled: ['update'],
+  'confirm-formats': ['update'],
 } as const;
 
 /** Явное человеческое представление успешного ответа (`--human`). */
@@ -408,6 +452,7 @@ const presenters: Partial<Record<CliCommand, (data: never) => string>> = {
   'plan-request': (data: { prompt: string }) => data.prompt + '\n',
   gates: gatesText,
   smoke: smokeText,
+  update: updateText,
 };
 
 /**
@@ -591,6 +636,231 @@ async function watchStatus(
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
   }
+}
+
+/**
+ * Хост обновления для каталога состояния: живость, пауза операции
+ * `harness-update`, событие `harness.updated`. Каждое действие открывает и
+ * закрывает базу заново: возврат копии состояния подменяет файл базы, и
+ * долгоживущее соединение писало бы в перенесённый файл.
+ */
+function updateHost(state: string): UpdateHost {
+  const usable = () => existsSync(bindingFile(state)) && existsSync(join(state, 'state.sqlite'));
+  const withHarness = <T>(fn: (h: Harness) => T, fallback: T): T => {
+    if (!usable()) return fallback;
+    const h = open(state, binding(state), true);
+    try {
+      return fn(h);
+    } finally {
+      h.close();
+    }
+  };
+  return {
+    live: () => (usable() ? liveWork(state, binding(state).policy) : []),
+    pause: () => withHarness((h) => h.engine.operationPause(UPDATE_OPERATION), false),
+    resume: () => withHarness((h) => h.engine.operationResume(UPDATE_OPERATION), false),
+    record: (payload) => withHarness((h) => h.engine.recordUpdate(payload), undefined),
+  };
+}
+
+/** Каталог .harness проекта, каталог установки и настройка обновлений. */
+function updateContext(state: string, v: { policy?: string; prefix?: string }) {
+  const harnessDir = v.policy
+    ? dirname(resolve(v.policy))
+    : existsSync(bindingFile(state))
+      ? binding(state).baseDir
+      : undefined;
+  // Каталог установки: --prefix; иначе тот, откуда запущен этот harness
+  // (`<prefix>/node_modules/devcontour-harness`); иначе `.harness-tools`
+  // проекта (место навыка harness-setup); иначе корень проекта.
+  const root = harnessDir
+    ? basename(harnessDir) === '.harness'
+      ? dirname(harnessDir)
+      : harnessDir
+    : undefined;
+  const self = fileURLToPath(import.meta.url);
+  const at = self.indexOf(`${sep}node_modules${sep}`);
+  const candidates = [
+    ...(at > 0 ? [self.slice(0, at)] : []),
+    ...(root ? [join(root, '.harness-tools'), root] : []),
+  ];
+  const prefix = v.prefix
+    ? resolve(v.prefix)
+    : (candidates.find((c) => installedPackage(c, HARNESS_PACKAGE)) ?? root);
+  const { config, exists } = loadUpdatesConfig(harnessDir);
+  return {
+    harnessDir,
+    prefix,
+    config,
+    configExists: exists,
+    npm: {
+      cwd: prefix ?? process.cwd(),
+      ...(config.registry ? { registry: config.registry } : {}),
+    },
+  };
+}
+
+/** Строка об обновлениях для status: настройка не по схеме не ломает status. */
+function statusUpdates(state: string, baseDir: string) {
+  try {
+    const { config, exists } = loadUpdatesConfig(baseDir);
+    const cached = cachedUpdates(state, config);
+    if (!cached || (!exists && cached.state === 'not-checked')) return undefined;
+    return { state: cached.state, line: cached.line };
+  } catch (error) {
+    return { state: 'unavailable' as const, line: (error as Error).message.slice(0, 300) };
+  }
+}
+
+async function runUpdate(
+  v: Record<string, string | boolean | string[] | undefined>,
+  state: string,
+): Promise<{ data: unknown; code?: number }> {
+  const flag = (k: string) => v[k] !== undefined;
+  const actions = ['check', 'apply', 'rollback', 'schedule', 'mode'].filter(flag);
+  if (actions.length !== 1)
+    throw new HarnessError(
+      'INVALID_INPUT',
+      'update: нужно ровно одно из --check, --apply, --rollback, --schedule, --mode',
+    );
+  const action = actions[0]!;
+  if (flag('wait') && action !== 'apply' && action !== 'rollback')
+    throw new HarnessError('INVALID_INPUT', '--wait — только с --apply или --rollback');
+  for (const only of ['scheduled', 'confirm-formats'])
+    if (flag(only) && action !== 'apply')
+      throw new HarnessError('INVALID_INPUT', `--${only} — только с --apply`);
+  if (v.scheduled && v['confirm-formats'])
+    throw new HarnessError(
+      'INVALID_INPUT',
+      '--confirm-formats — решение владельца; из расписания оно не принимается',
+    );
+  let waitMs: number | undefined;
+  if (typeof v.wait === 'string') {
+    const minutes = Number(v.wait);
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 720)
+      throw new HarnessError('INVALID_INPUT', '--wait: целое число минут от 1 до 720', [
+        { path: ['--wait'], message: v.wait },
+      ]);
+    waitMs = minutes * 60_000;
+  }
+  const ctx = updateContext(state, {
+    ...optional('policy', typeof v.policy === 'string' ? v.policy : undefined),
+    ...optional('prefix', typeof v.prefix === 'string' ? v.prefix : undefined),
+  });
+  const host = updateHost(state);
+  if (action === 'mode') {
+    const mode = String(v.mode);
+    if (!(updateModes as readonly string[]).includes(mode))
+      throw new HarnessError('INVALID_INPUT', '--mode: ожидается auto, notify или off', [
+        { path: ['--mode'], message: mode },
+      ]);
+    if (!ctx.harnessDir)
+      throw new HarnessError(
+        'POLICY_REQUIRED',
+        '--mode: каталог .harness не найден — передайте --policy .harness/policy.json',
+      );
+    const config = updatesConfigSchema.parse({ ...ctx.config, mode });
+    const file = writeUpdatesConfig(ctx.harnessDir, config);
+    return {
+      data: {
+        action: 'mode',
+        config,
+        line: `Режим обновлений: ${mode} (${file}).${mode === 'auto' ? ' Ставится само только в пределах ' + config.autoScope + ' и когда нет прогона; включите ежедневную проверку: harness update --schedule daily --state ' + state : ''}`,
+      },
+    };
+  }
+  if (action === 'check') {
+    // Прервавшееся обновление (процесс умер) оставило паузу операции — снять.
+    try {
+      recoverInterrupted(state, host);
+    } catch {
+      // идёт другое обновление: его пауза — его
+    }
+    const check = await checkUpdates({
+      stateDir: state,
+      ...optional('prefix', ctx.prefix),
+      config: ctx.config,
+      npm: ctx.npm,
+    });
+    saveLastCheck(state, check);
+    return { data: { action: 'check', check, line: check.line } };
+  }
+  if (action === 'schedule') {
+    const what = String(v.schedule);
+    if (what !== 'daily' && what !== 'off')
+      throw new HarnessError('INVALID_INPUT', '--schedule: ожидается daily или off', [
+        { path: ['--schedule'], message: what },
+      ]);
+    const installed = ctx.prefix ? installedPackage(ctx.prefix, HARNESS_PACKAGE) : undefined;
+    const bin = installed?.bin ?? resolve(process.argv[1] ?? 'harness');
+    const args = scheduleArgs(bin, state, typeof v.prefix === 'string' ? v.prefix : undefined);
+    if (process.platform !== 'darwin')
+      return {
+        data: {
+          action: 'schedule',
+          schedule: { enabled: false, instructions: linuxInstructions(args) },
+          line:
+            what === 'daily'
+              ? 'Задание создаётся само только на macOS; для этой ОС — текст ниже (systemd user timer или cron).'
+              : 'На этой ОС задание не создавалось harness; уберите своё systemd/cron задание, если создавали.',
+        },
+      };
+    if (what === 'off') {
+      const r = disableSchedule(state);
+      return {
+        data: {
+          action: 'schedule',
+          schedule: { enabled: false, file: r.file },
+          line: r.existed
+            ? `Ежедневная проверка выключена: ${r.file} удалён.`
+            : 'Ежедневной проверки не было.',
+        },
+      };
+    }
+    const r = enableSchedule(state, args, join(updatesDir(state), 'schedule.log'));
+    return {
+      data: {
+        action: 'schedule',
+        schedule: { enabled: true, file: r.file },
+        line: r.loaded
+          ? `Ежедневная проверка включена (каждый день в 09:30, режим ${ctx.config.mode}): ${r.file}.`
+          : `Файл задания записан (${r.file}), но launchctl его не загрузил: ${r.reason ?? 'причина неизвестна'}. Загрузите: launchctl bootstrap gui/$(id -u) ${r.file}`,
+      },
+    };
+  }
+  if (!ctx.prefix)
+    throw new HarnessError(
+      'POLICY_REQUIRED',
+      'Каталог установки не найден: передайте --prefix <каталог проекта> или --policy .harness/policy.json',
+    );
+  if (!installedPackage(ctx.prefix, HARNESS_PACKAGE))
+    throw new HarnessError(
+      'NOT_FOUND',
+      `harness не установлен в ${ctx.prefix}/node_modules: обновление ставит пакеты туда, где они стоят; укажите --prefix`,
+    );
+  if (action === 'apply') {
+    const r = await applyUpdate({
+      stateDir: state,
+      prefix: ctx.prefix,
+      config: ctx.config,
+      npm: ctx.npm,
+      host,
+      by: v.scheduled ? 'schedule' : 'operator',
+      scheduled: Boolean(v.scheduled),
+      confirmFormats: Boolean(v['confirm-formats']),
+      // Из расписания — ждать окончания прогона до 30 минут.
+      ...optional('waitMs', waitMs ?? (v.scheduled ? 30 * 60_000 : undefined)),
+    });
+    return { data: r.data, code: r.code };
+  }
+  const r = await rollbackUpdate({
+    stateDir: state,
+    config: ctx.config,
+    npm: ctx.npm,
+    host,
+    ...optional('waitMs', waitMs),
+  });
+  return { data: r.data, code: r.code };
 }
 
 async function run(
@@ -789,8 +1059,16 @@ async function run(
         return { command, ...(await watchStatus(need('state'), v)) };
       const h = open(need('state'), binding(need('state')), 'state');
       try {
-        if (command === 'status')
-          return { command, data: h.status(v.graph, { detail: Boolean(v.detail) }) };
+        if (command === 'status') {
+          const updates = statusUpdates(resolve(need('state')), binding(need('state')).baseDir);
+          return {
+            command,
+            data: {
+              ...h.status(v.graph, { detail: Boolean(v.detail) }),
+              ...optional('updates', updates),
+            },
+          };
+        }
         if (command === 'events')
           return { command, data: h.events(Number(v.after ?? 0), Number(v.limit ?? 100)) };
         return { command, data: h.result(need('work')) };
@@ -1256,6 +1534,10 @@ async function run(
         process.off('SIGINT', stop);
         process.off('SIGTERM', stop);
       }
+    }
+    case 'update': {
+      const r = await runUpdate(v, resolve(need('state')));
+      return { command, data: r.data, ...optional('code', r.code) };
     }
     case 'doctor': {
       const b = v.policy ? loadPolicy(v.policy) : v.state ? binding(v.state) : undefined;

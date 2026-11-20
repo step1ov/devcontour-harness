@@ -181,6 +181,24 @@ harness смотрит только на то, что git уже знает на
 а не пересказ агента. Если хотите понять, что происходило, пока вас не
 было, смотрите сюда.
 
+## Обновления
+
+Панель пишет «Доступна harness … и панель … — что нового · как обновить»,
+когда вышла новая версия. Как harness обновляется, задаёт режим в
+`.harness/updates.json` (его ставит ведущий при настройке):
+
+- **auto** — ставится сам раз в день, но только когда ничего не идёт, с
+  копией данных и проверкой; если новая версия не прошла проверку, прежняя
+  возвращается сама. Версии, которые меняют формат данных, сами не ставятся
+  никогда: вы увидите «Нужно ваше решение» и что это значит.
+- **notify** (по умолчанию) — только сообщение; обновить — попросите
+  ведущего или выполните команду из панели.
+- **off** — ничего не проверяется.
+
+Вернуть прежнюю версию — `harness update --rollback --state <каталог
+состояния>`. Во время прогона обновление не ставится: оно ждёт окончания.
+Harness ходит в сеть только этой проверкой (к реестру npm), без телеметрии.
+
 ## Короткий словарь
 
 - **Gates, проверки** — команды проекта (тесты, lint, сборка), которые
@@ -254,6 +272,17 @@ remote branch", "accepted locally; not yet on the remote branch" or
 "unknown (no remote branch)" — unknown is neither yes nor no. The harness
 reads only what git already knows locally (no fetch) and never pushes: you
 or the lead push, the lead only after your yes.
+
+**Updates.** The panel says "harness … and panel … available — what's
+new · how to update" when a new version is out. The mode in
+`.harness/updates.json` (set by the lead at setup) decides what happens:
+**auto** installs by itself once a day, only when nothing runs, with a copy
+of the data and a check, and goes back to the previous version by itself
+if the check fails — a version that changes the data format is never
+installed by itself ("Needs your decision"); **notify** (default) only tells
+you; **off** checks nothing. `harness update --rollback --state <state dir>`
+returns the previous version. The only network call is this check against
+the npm registry; no telemetry.
 
 **Who did what** lists the harness's own events of the last day (or 7
 days): attempts, checks, review verdicts, questions and answers,

@@ -15,6 +15,16 @@
   "engines": {
     "node": ">=24.3.0"
   },
+  "devcontourHarness": {
+    "formats": {
+      "api": "devcontour-harness/v1alpha1",
+      "state": 1,
+      "policy": 1,
+      "handoff": 1,
+      "report": 1,
+      "view": 1
+    }
+  },
   "bin": {
     "harness": "lib/cli.js"
   },

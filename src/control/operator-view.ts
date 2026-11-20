@@ -65,6 +65,8 @@ import { WorkflowQueue } from './workflow.ts';
 import { reviewRoundCap } from './review.ts';
 import { reviewSubjectSummary } from './review-summary.ts';
 import { stageOfStep } from './stage.ts';
+import { cachedUpdates, loadUpdatesConfig } from '../update/check.ts';
+import type { UpdatesView } from '../projections/operator-view.ts';
 
 type StatusData = z.output<typeof statusDataSchema>;
 /** Поручение `status`; поля alpha.55 (`verification`, `lastFailure`, `plain`) — по наличию. */
@@ -1061,10 +1063,11 @@ export function harnessView(options: HarnessViewOptions): OperatorView | WorkDet
     ...(options.titles !== undefined ? { titles: options.titles } : {}),
     ...(options.lang ? { lang: options.lang } : {}),
   };
+  const updates = options.workId === undefined ? updatesInput(stateDir, policy.baseDir) : undefined;
   const project = (input: OperatorViewInput) =>
     options.workId !== undefined
       ? workDetailView(input, options.workId, projection)
-      : operatorView(input, projection);
+      : operatorView(updates ? { ...input, updates } : input, projection);
   if (!existsSync(join(stateDir, 'state.sqlite')))
     return project(emptyInput(policy, options.now ?? Date.now(), stateDir));
   // Однократное чтение без файлов в каталоге состояния (как `report`):
@@ -1095,4 +1098,35 @@ export function harnessView(options: HarnessViewOptions): OperatorView | WorkDet
       );
     },
   );
+}
+
+/**
+ * Обновления для представления: последняя проверка `harness update --check`
+ * из `<state>-updates/last-check.json` и режим из `.harness/updates.json`.
+ * Ни настройки, ни проверки — поля нет; настройка не по схеме — тоже нет
+ * (представление не ломается, отказ видно в `harness update`).
+ */
+function updatesInput(stateDir: string, baseDir: string): UpdatesView | undefined {
+  try {
+    const { config, exists } = loadUpdatesConfig(baseDir);
+    const cached = cachedUpdates(stateDir, config);
+    if (!cached || (!exists && cached.state === 'not-checked')) return undefined;
+    const c = cached.check;
+    const current =
+      c && cached.state !== 'up-to-date'
+        ? c.current
+        : { harness: HARNESS_VERSION, ...(c?.current.ui ? { ui: c.current.ui } : {}) };
+    return {
+      state: cached.state,
+      mode: config.mode,
+      current,
+      ...(c?.available && cached.state !== 'up-to-date' ? { available: c.available } : {}),
+      ...(c ? { checkedAt: c.checkedAt } : {}),
+      line: cached.line,
+      ...(c?.whatsNew?.length && cached.state !== 'up-to-date' ? { whatsNew: c.whatsNew } : {}),
+      ...(c?.command && cached.state !== 'up-to-date' ? { command: c.command } : {}),
+    };
+  } catch {
+    return undefined;
+  }
 }

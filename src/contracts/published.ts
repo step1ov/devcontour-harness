@@ -15,6 +15,7 @@ import { valueReportSchema } from './report.ts';
 import { handoffPackSchema } from './handoff.ts';
 import { inputRequestSchema } from './input.ts';
 import { operatorViewSchema, workDetailViewSchema } from './operator-view.ts';
+import { updatesConfigSchema } from './update.ts';
 
 /**
  * Схемы, публикуемые как JSON Schema (`schemas/<имя>.schema.json`).
@@ -49,4 +50,6 @@ export const publishedSchemas = {
   'input-request': inputRequestSchema,
   'operator-view': operatorViewSchema,
   'work-detail-view': workDetailViewSchema,
+  /** `.harness/updates.json`: настройка `harness update` (0.1.0-alpha.60). */
+  'updates-config': updatesConfigSchema,
 } as const satisfies Record<string, z.ZodType>;

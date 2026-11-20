@@ -363,6 +363,9 @@ export function statusText(data: z.output<typeof statusDataSchema>): string {
   const out = [
     c.paused ? `Выдача на паузе${c.pauseReason ? ` (${c.pauseReason})` : ''}.` : 'Выдача идёт.',
   ];
+  // Обновления по последней проверке `harness update --check` (alpha.60).
+  if (data.updates && data.updates.state !== 'up-to-date')
+    out.push(`Обновления: ${data.updates.line}`);
   if (!data.works.length) out.push('Поручений нет.');
   for (const w of data.works) {
     out.push(`${w.id} [${w.status}]${w.attemptSummary ? ': ' + w.attemptSummary.line : ''}`);
