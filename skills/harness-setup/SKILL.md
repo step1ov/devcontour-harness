@@ -309,6 +309,56 @@ adapt the compose model to the project and add `repositories[0].lifecycle`
 `<pkg>/docs/turbo-starter.md`; gates that need the service run through
 `node .harness/compose-bridge.mjs exec -- <command>`.
 
+### Lead inside a Codex sandbox
+
+A lead started as `codex exec -s workspace-write` runs `harness` inside the
+Codex seatbelt. There `.git` is read-only (`git switch -c` fails with "cannot
+lock ref ... Operation not permitted", `smoke`/`gates`/`run` cannot create
+`.git/worktrees`), `ps` is denied, and harness's own OS isolation of writers,
+gates and reviewers does not start nested on macOS
+(`sandbox_apply: Operation not permitted`).
+
+Run `$H doctor` first. When `data.leadSandbox.inside` is true, `problems`
+carries a `lead-sandbox:` line with the reason and the exact flags; `init`
+adds the warning `lead-sandbox`. Follow it:
+
+- the lead needs write access to the repository `.git` (the git common dir),
+  to the harness state directory, and network for the writer CLIs;
+- on a trusted machine run the lead unsandboxed:
+  `codex exec --dangerously-bypass-approvals-and-sandbox`;
+- the narrow variant
+  `codex exec -s workspace-write --add-dir <repo>/.git --add-dir <state> -c sandbox_workspace_write.network_access=true`
+  fixes git and the state directory, but commands that start models or gates
+  (`run`, `smoke`, `gates`, `review-plan`) still need an unsandboxed lead or an
+  operator outside the sandbox.
+
+Do not work around the denials (do not switch the policy isolation off, do not edit `.git` by hand):
+report the `doctor` line to the user and restart the lead with the flags.
+
+### Dependency cache
+
+Right after `init` run `$H smoke` and read the prepare time and the
+dependency-store advice. Prepare longer than a minute → enable
+`dependencyStore` through `$H lean`. A package manager version the store does
+not support → report it to the operator as a harness finding; do not build a
+cache of your own into step or gate arguments (no store or cache directory
+inside the attempt worktree, no absolute shared paths). Do not start a paid
+`run` until prepare fits a reasonable time.
+
+### Writer probe
+
+Read the product AGENTS.md files and skills for commands the writer must run:
+generators (`pnpm dlx …`, `pnpm run create`), local servers and browser checks
+(`agent-browser`, Playwright), tools that keep state in the home directory,
+reads from a tracker. Propose each as `repositories[].writerProbe`
+(`{ "id", "command": [argv], "timeoutMs" }`; a command that can run quickly,
+for example `--help` of the generator or a server start that exits) and run
+`$H smoke --sha HEAD --writer-probe --human` before the first paid attempt.
+For every `blocked` command give the user the advice and the choice: allow
+it in the policy, run it in `prepare`, move it into a harness gate, or waive
+the product rule under the harness (controller-mode overlay). Never debug
+these conflicts through paid attempts.
+
 ### 9. Controller mode
 
 When the product AGENTS.md tells an agent to create worktrees, commit, merge,
@@ -330,6 +380,10 @@ const baselineSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo }).to
 controllerContext({ repo, baselineSha, upstream: null }, repo + '/.harness/work/context');
 "
 ```
+
+The overlay (v2) also tells the writer to implement first when the sandbox
+blocks a mandated step, run what it can, and then ask a technical question
+naming the blocked step instead of stopping before coding.
 
 It writes `.harness/work/context/controller-mode/` (the unchanged overlay,
 `references/` with the product AGENTS.md files, `provenance.json`); a rebuild

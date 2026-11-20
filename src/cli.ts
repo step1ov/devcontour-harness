@@ -41,6 +41,7 @@ import { assertToolchainReady, inspectPolicy } from './toolchains/inspect.ts';
 import { profilePin, resolveProfile } from './profiles/resolve.ts';
 import { cliAdapter } from './agents/cli-adapter.ts';
 import { initProject, initText } from './init/project.ts';
+import { leadSandboxCheck } from './environment/lead-sandbox.ts';
 import { leanMismatch, leanText, switchLean } from './init/lean.ts';
 import { diagnoseState, explainText } from './explain/diagnose.ts';
 import { statusFrame, statusSettled, statusText } from './control/status.ts';
@@ -322,6 +323,7 @@ const options = {
   sha: { type: 'string' },
   gate: { type: 'string' },
   'fail-fast': { type: 'boolean' },
+  'writer-probe': { type: 'boolean' },
   'accept-limitation': { type: 'string', multiple: true },
   'continue-review': { type: 'string', multiple: true },
   watch: { type: 'boolean' },
@@ -387,6 +389,7 @@ const flagOwners = {
   sha: ['gates', 'smoke'],
   gate: ['gates'],
   'fail-fast': ['gates'],
+  'writer-probe': ['smoke'],
   watch: ['status'],
   interval: ['status'],
   base: ['review-code'],
@@ -917,6 +920,12 @@ async function run(
         ...(v.lean ? { lean: true } : {}),
         ...(v['lead-technical-answers'] ? { leadTechnicalAnswers: true } : {}),
       });
+      // Ведущий внутри песочницы (Codex seatbelt): предупреждение с флагами запуска.
+      const sandboxed = leadSandboxCheck({
+        repositories: [resolve(need('repository'))],
+        ...(v.state ? { stateDir: v.state } : {}),
+      });
+      if (sandboxed.inside) data.warnings.push({ code: 'lead-sandbox', message: sandboxed.advice });
       // План с конфликтами или неготовым toolchain — отказ по существу с данными.
       const blocked = data.mode === 'plan' && (data.conflicts > 0 || !data.toolchain.ready);
       return { command, data, ...(blocked ? { code: exitCodes.refused } : {}) };
@@ -1197,6 +1206,15 @@ async function run(
           ...optional('repositoryId', v.repository),
           signal: abort.signal,
           resourceDatabase: defaultResourceDatabase(),
+          ...(v['writer-probe']
+            ? {
+                writerProbe: true,
+                executables: {
+                  ...optional('codex', process.env.HARNESS_CODEX_BIN || undefined),
+                  ...optional('claude', process.env.HARNESS_CLAUDE_BIN || undefined),
+                },
+              }
+            : {}),
           // Ход — диагностика в stderr: stdout остаётся одним JSON.
           onStep: (s) =>
             process.stderr.write(
@@ -1207,7 +1225,9 @@ async function run(
         return {
           command,
           data,
-          ...(data.passed ? {} : { code: exitCodes[errorCodes.LIFECYCLE_FAILED] }),
+          ...(data.passed && (data.writerProbe?.ok ?? true)
+            ? {}
+            : { code: exitCodes[errorCodes.LIFECYCLE_FAILED] }),
         };
       } finally {
         process.off('SIGINT', stop);
@@ -1231,7 +1251,10 @@ async function run(
             }
           : undefined,
         b && v.state ? { baseDir: b.baseDir } : undefined,
-        optional('planAuthors', v.policy ? manifestLead(v.policy) : undefined),
+        {
+          ...optional('planAuthors', v.policy ? manifestLead(v.policy) : undefined),
+          leadSandbox: true,
+        },
       );
       // Manifest проекта рядом с политикой расходится с ней по слою lean — предупреждение.
       const mismatch = v.policy ? leanMismatch(resolve(v.policy)) : [];

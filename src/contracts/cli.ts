@@ -1222,6 +1222,13 @@ export const cliCommands = {
         required: false,
         description: 'Таблица шагов, класс отказа и совет для человека вместо JSON',
       },
+      {
+        name: '--writer-probe',
+        value: 'flag',
+        required: false,
+        description:
+          'После prepare прогнать команды writerProbe репозитория в точной изоляции каждого его исполнителя (окружение, TMPDIR, сеть, области записи), без модели: по каждой ok/blocked, причина и совет; закрытый шаг — exit 4',
+      },
     ],
     refusals: ['CANCELLED', 'NOT_FOUND'],
   },
@@ -1389,7 +1396,8 @@ export const attemptSummarySchema = z.strictObject({
    * попытка с корзиной `failureBucketOf`) — попытка, корзина, класс, время и
    * причина простыми словами по-русски и по-английски («окружение — порт
    * 3000 занят»). Текст строится из класса отказа, ID gates и номера порта,
-   * без свободного текста ошибки. Нет поля — отказов нет.
+   * без свободного текста ошибки; исключение — итог исполнителя
+   * незавершённой попытки (`writerSummary`) в кавычках. Нет поля — отказов нет.
    */
   lastFailure: z
     .strictObject({
@@ -1703,6 +1711,22 @@ export const doctorDataSchema = z.strictObject({
       }),
     )
     .optional(),
+  /**
+   * Ведущий внутри песочницы (например, Codex seatbelt): признаки
+   * (`nested-sandbox`, `ps-denied`, `git-readonly:<путь>`, `state-readonly`,
+   * `codex-env` — подсказка), совет простыми словами и флаги запуска ведущего.
+   * Есть, когда проверка выполнялась (CLI `doctor`).
+   */
+  leadSandbox: z
+    .strictObject({
+      inside: z.boolean(),
+      signals: z.array(z.string()),
+      advice: z.string(),
+      adviceEn: z.string(),
+      flags: z.string(),
+      narrowFlags: z.string(),
+    })
+    .optional(),
   problems: z.array(z.string()),
   /**
    * Действующее правило ответов на вопросы исполнителя (есть, когда задана
@@ -1816,6 +1840,48 @@ export const smokeDataSchema = z.strictObject({
     .optional(),
   logs: z.string(),
   warnings: z.array(z.string()).optional(),
+  /** Проба исполнителя (`--writer-probe`): команды `writerProbe` в изоляции каждого исполнителя. */
+  writerProbe: z
+    .strictObject({
+      ok: z.boolean(),
+      writers: z.array(
+        z.strictObject({
+          runtime: runtimeNameSchema,
+          toolProfile: z.string().optional(),
+          roles: z.array(z.string()),
+          mechanism: z.enum(['codex-sandbox', 'sandbox-runtime', 'none']),
+          network: z.boolean(),
+          commands: z.array(
+            z.strictObject({
+              id: z.string().min(1).max(200),
+              command: z.array(z.string()),
+              status: z.enum(['ok', 'blocked', 'failed']),
+              exitCode: z.number().int().optional(),
+              timedOut: z.boolean().optional(),
+              durationMs: z.number().int().nonnegative(),
+              reason: z
+                .enum([
+                  'listen-denied',
+                  'network-denied',
+                  'write-denied',
+                  'process-abort',
+                  'missing-tool',
+                  'timeout',
+                  'no-shell',
+                  'environment',
+                  'failed',
+                ])
+                .optional(),
+              evidence: z.string().optional(),
+              advice: z.string().optional(),
+              log: z.string().optional(),
+            }),
+          ),
+        }),
+      ),
+      notes: z.array(z.string()).optional(),
+    })
+    .optional(),
 });
 
 export const profileDataSchema = z.strictObject({

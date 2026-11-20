@@ -203,6 +203,9 @@ const ADDITIVE_ENUM_VALUES = new Set([
   // Представление оператора (`harness view`, 0.1.0-alpha.55).
   'POLICY_REQUIRED',
   'VIEW_TOO_LARGE',
+  // Остановка исполнителя из-за окружения; предупреждение init о песочнице ведущего (0.1.0-alpha.59).
+  'writer-environment',
+  'lead-sandbox',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
@@ -457,6 +460,8 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.warnings;
       // Правило ответов на вопросы исполнителя словами (0.1.0-alpha.55).
       delete rest.questions;
+      // Ведущий внутри песочницы (0.1.0-alpha.59).
+      delete rest.leadSandbox;
       return rest;
     }
     // Аддитивные поля ответов коннектора: пакеты `tasks[].context` (alpha.13) и
@@ -577,6 +582,7 @@ test('H3-01: прежние команды и схемы их данных не 
   assert.ok(JSON.stringify(data.status).includes('"plainEn"'), 'status: blockers[].plain');
   assert.ok(JSON.stringify(data.status).includes('"lastFailure"'), 'status: lastFailure');
   // Хеш H2 вырезает пробу портов и предупреждения doctor: объявление держит эта проверка.
+  assert.ok(JSON.stringify(data.doctor).includes('"leadSandbox"'), 'doctor: песочница ведущего');
   assert.ok(JSON.stringify(data.doctor).includes('"ports"'), 'doctor: проба портов');
   assert.ok(JSON.stringify(data.doctor).includes('"warnings"'), 'doctor: предупреждения');
   // Хеш H2 выше вырезает поля ведущего и ревью: объявление держит эта проверка.

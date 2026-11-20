@@ -60,6 +60,32 @@ With `--policy`, `data.warnings` carries machine advice: `LOW_RESOURCES`
 `plan-request`, `plan-check`, `capabilities`): description, `readOnly`, JSON
 Schema of input and response, and the byte limits. Read only.
 
+### Lead inside a Codex sandbox
+
+A lead started as `codex exec -s workspace-write` runs `harness` inside the
+Codex seatbelt. There `.git` is read-only (`git switch -c` fails with "cannot
+lock ref ... Operation not permitted", `smoke`/`gates`/`run` cannot create
+`.git/worktrees`), `ps` is denied, and harness's own OS isolation of writers,
+gates and reviewers does not start nested on macOS
+(`sandbox_apply: Operation not permitted`).
+
+Run `$H doctor` first. When `data.leadSandbox.inside` is true, `problems`
+carries a `lead-sandbox:` line with the reason and the exact flags; `init`
+adds the warning `lead-sandbox`. Follow it:
+
+- the lead needs write access to the repository `.git` (the git common dir),
+  to the harness state directory, and network for the writer CLIs;
+- on a trusted machine run the lead unsandboxed:
+  `codex exec --dangerously-bypass-approvals-and-sandbox`;
+- the narrow variant
+  `codex exec -s workspace-write --add-dir <repo>/.git --add-dir <state> -c sandbox_workspace_write.network_access=true`
+  fixes git and the state directory, but commands that start models or gates
+  (`run`, `smoke`, `gates`, `review-plan`) still need an unsandboxed lead or an
+  operator outside the sandbox.
+
+Do not work around the denials (do not switch the policy isolation off, do not edit `.git` by hand):
+report the `doctor` line to the user and restart the lead with the flags.
+
 ### 3. Prepare the repository
 
 1. `$H init --repository <repo> --plan` writes nothing. The lead is you:
@@ -257,6 +283,45 @@ the task code. `"lifecyclePreflight": "cached"` in the policy runs the same
 check before every `run`, once per base tree, and stops the run before any
 paid attempt.
 
+**Probe the writer before the first paid attempt.** Product rules often make
+the writer run steps its sandbox may close: a generator fetched from the
+registry, a local server for browser checks, a browser tool, a tool that
+writes into the home directory, reading the task from a tracker. List those
+commands in `repositories[].writerProbe` (`[{ "id", "command": [argv],
+"timeoutMs" }]`; `harness-setup` proposes them) and run
+
+```sh
+$H smoke --state <manifest.paths.state> --policy .harness/policy.json --sha HEAD --writer-probe --human
+```
+
+After `prepare` every command runs in the exact isolation of each writer of
+the repository — same environment and tool profile, its own `TMPDIR`, same
+write and read areas, same network, same mechanism (`codex sandbox` for
+Codex, sandbox-runtime for Claude) — with no model call. `data.writerProbe`
+gives per command `ok`, `blocked` or `failed`, the `reason`
+(`listen-denied`, `network-denied`, `write-denied`, `process-abort`,
+`missing-tool`, `timeout`, `no-shell`, `environment`), the matching output
+line and plain `advice`; exit 4 when anything is blocked. Resolve every
+blocked step before `run`: enable it in the policy, prepare it in `prepare`,
+move it into a harness gate (gates run outside the writer sandbox and may
+listen on localhost), or record that the product rule is waived under the
+harness (controller-mode overlay). A browser that aborts under the macOS
+sandbox (`process-abort`) cannot run inside the writer at all.
+
+**Dependency cache (prepare time).**
+
+1. Right after `init` run `$H smoke` and read the prepare time and the
+   dependency-store advice in `data.steps` / `warnings`.
+2. Prepare longer than a minute → enable `dependencyStore` through
+   `$H lean`.
+3. The package manager version is not supported by the store → report it to
+   the operator as a harness finding. Do not build your own shared cache into
+   the step or gate arguments (no store or cache directory inside the attempt
+   worktree, no absolute shared paths): a per-worktree store downloads every
+   package on every attempt, and a shared mutable path breaks isolation and
+   portability.
+4. Do not start a paid `run` until prepare fits a reasonable time.
+
 ### 8. When it stops
 
 `$H explain --state <state> --policy .harness/policy.json [--work <id>]` is
@@ -275,6 +340,18 @@ it returns `code`, `cause`, `phase`, `actor`, `action`, `retryPlanned`,
 Only `user` actions go to the human: access, environment, budgets, attempt
 resets, goal decisions, resuming a paused queue and answers to executor
 questions are their decisions.
+
+**Writer stopped on the environment (`APPROVAL_REQUIRED`, `cause:
+needs-lead`, `actor: lead`, `diagnose-failure`).** The writer reported that
+its sandbox closed a mandated step (network, local server, tool, task
+source); its own words are in `message` and in `status` / `view`
+`lastFailure`. The attempt was not counted, and harness does not retry it:
+the same sandbox would hit the same step. This is your move — reproduce it
+with `$H smoke --writer-probe`, fix the cause (policy, `prepare`, pinned
+context, a harness gate), then `$H retry --work <id>`. Never retry it
+unchanged. The same applies when `explain` says the same testcase failed
+twice in a row: read the gate log (expected and actual), fix the task or its
+context, then retry or split the task.
 
 **Executor question (`INPUT_REQUIRED`, `actor: user`, `answer-input`).** The
 writer stopped and asks the human. Do not answer it yourself:
@@ -444,6 +521,12 @@ not copy acceptance logs or attempt state into notes.
   integration).
 
 ## Don'ts
+
+- Use only the public CLI (`$H <command>`). Never import or call the
+  package's library internals (`Engine`, `approve`, `carryInput`, isolation
+  helpers) from your own scripts: approvals, answers and policy changes made
+  that way bypass the review and the audit trail. When no command does what
+  you need, stop and report it to the user as a harness finding.
 
 - Do not call a separate model to plan, and do not mark a plan or draft as
   approved: approval comes only from `review-plan` / `approve` / `run`.
