@@ -21,7 +21,7 @@ import {
 import type { ExecutionPolicy, RuntimeBinding } from '../contracts/policy.ts';
 import { fitLine, named, type LinePart } from './clip.ts';
 import { maskSecrets, maskText, type MaskContext } from './mask.ts';
-import { attemptLine, type AttemptLineFacts } from './attempt-line.ts';
+import { attemptLine, type AttemptLineFacts } from '../contracts/attempt-line.ts';
 import { holdLineParts } from './blocker-line.ts';
 import { remoteLineParts } from './remote-line.ts';
 import { sha256Hex } from './sha256.ts';

@@ -38,7 +38,7 @@ import { notLaunched, reviewFacts } from '../report/verification.ts';
 import { callRecords } from '../engine/usage.ts';
 import { legacyGroupCall } from '../engine/budget.ts';
 import { requestsOf } from '../engine/input-requests.ts';
-import { attemptLine, type AttemptLineFacts } from '../projections/attempt-line.ts';
+import { attemptLine, type AttemptLineFacts } from '../contracts/attempt-line.ts';
 import { named, type LinePart } from '../projections/clip.ts';
 import { inputStateOf } from '../projections/input.ts';
 import { explainStop } from '../projections/stop.ts';

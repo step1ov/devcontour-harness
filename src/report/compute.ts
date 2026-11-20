@@ -2,7 +2,7 @@
 // node:* и без zod — его импортирует браузер; схема ответа —
 // `valueReportSchema` (src/contracts/report.ts).
 
-import { attemptLine, type AttemptLineFacts } from '../projections/attempt-line.ts';
+import { attemptLine, type AttemptLineFacts } from '../contracts/attempt-line.ts';
 import { HarnessError } from '../contracts/errors.ts';
 import type {
   AttemptState,
