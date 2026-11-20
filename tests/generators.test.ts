@@ -53,7 +53,7 @@ if (process.argv.includes('--link')) fs.symlinkSync('../../../admin/data/catalog
 if (process.argv.includes('--needs-dep')) require(process.cwd() + '/node_modules/dep');
 if (process.argv.includes('--commit'))
   require('child_process').execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'sneak']);
-if (process.env.GEN_SLEEP_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.GEN_SLEEP_MS));
+if (process.env.GEN_SLEEP_MS && (!process.env.GEN_SLEEP_PHASE || process.env.DEVCONTOUR_PHASE === process.env.GEN_SLEEP_PHASE)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.GEN_SLEEP_MS));
 if (process.env.GEN_MARK) fs.appendFileSync(process.env.GEN_MARK, 'ran\\n');
 `;
 const check = `
@@ -698,17 +698,33 @@ test('Игнорируемые файлы, бывшие в выходе до г�
 });
 
 test('Генерация получает свой предел фазы: исполнитель и генератор вместе дольше runTimeoutMs, попытка принимается', async () => {
+  // Каждый из двух шагов — 60 % предела попытки, вместе — 120 %. Запас каждой
+  // фазы — 40 % предела (6 с) на запуск процессов, git и проверки, так что
+  // нагрузка машины не съедает его; а если бы генерация шла в счёт времени
+  // исполнителя, фаза исполнителя превысила бы предел на 20 % (3 с) при любой
+  // нагрузке. Генератор спит только при записи на кандидате: проверка
+  // генератора на integration — отдельная фаза, к свойству не относится.
+  const runTimeoutMs = 15_000;
+  const stepMs = 9_000;
   const f = fixture({
-    writer: { ...implement({ [DATA]: data(['apple', ...items]) }), sleepMs: 2000 },
-    // Генератор один дольше половины предела попытки, вместе с исполнителем — дольше
-    // всего предела; исполнителю нужно мало, чтобы проверкам кандидата хватило
-    // остатка предела и на загруженной машине.
-    environment: { GEN_SLEEP_MS: '9000' },
-    policy: (p) => (p.runTimeoutMs = 10000),
+    writer: { ...implement({ [DATA]: data(['apple', ...items]) }), sleepMs: stepMs },
+    environment: { GEN_SLEEP_MS: String(stepMs), GEN_SLEEP_PHASE: 'candidate' },
+    policy: (p) => (p.runTimeoutMs = runTimeoutMs),
   });
   await runAll(f.ctx);
   const work = f.work();
   assert.equal(work.status, 'done', work.failure);
-  const timing = f.attempts()[0]!.timings!.find((t) => t.stage === 'generate:catalog')!;
-  assert.ok(Date.parse(timing.finishedAt!) - Date.parse(timing.startedAt) >= 9000);
+  const timings = f.attempts()[0]!.timings!;
+  const at = (stage: string) => {
+    const t = timings.find((x) => x.stage === stage);
+    assert.ok(t?.finishedAt, `стадия ${stage} завершена`);
+    return { start: Date.parse(t.startedAt), end: Date.parse(t.finishedAt) };
+  };
+  const implementation = at('implementation');
+  const generate = at('generate:catalog');
+  // Измеренные, а не заданные длительности: исполнитель до генерации и
+  // генератор каждый не меньше своего сна, а вместе — дольше предела попытки.
+  assert.ok(generate.start - implementation.start >= stepMs, 'исполнитель спал до генерации');
+  assert.ok(generate.end - generate.start >= stepMs, 'генератор спал');
+  assert.ok(generate.end - implementation.start > runTimeoutMs, 'вместе дольше runTimeoutMs');
 });
