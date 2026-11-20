@@ -165,6 +165,37 @@ export interface ScopeView {
   }[];
 }
 
+/**
+ * Прогноз выпуска (ревизия 4, P11): готовность всего объёма и время. Числа
+ * и строки — одни для `status --human` и панели. Неизвестное — без поля,
+ * никогда не нулём.
+ */
+export interface ForecastView {
+  progress: {
+    /** Готово, % от всего объёма (взвешенно по этапам). */
+    percent: number;
+    /** Сумма весов: принято — 1, в работе — доля пройденных этапов. */
+    weighted: number;
+    total: number;
+    done: number;
+    inWork: number;
+    left: number;
+    /** Объём: срез прогона связки (`scope`) или только работы harness. */
+    basis: 'scope' | 'works';
+    line: string;
+  };
+  time: {
+    /** С начала первой попытки этого объёма. */
+    elapsedMs?: number;
+    /** Осталось: диапазон по наблюдённым попыткам; нет — неизвестно. */
+    remaining?: { loMs: number; hiMs: number; samples: number; attemptsPerTask: number };
+    /** Ожидание людей и ведущего сейчас — в прогноз не входит. */
+    humanWait: { works: number; ms: number };
+    line: string;
+  };
+  assumptions: string[];
+}
+
 /** Основание последнего ответа на вопрос (ревизия 1). */
 export interface AnswerBasisView {
   by: 'operator' | 'lead' | 'host';
@@ -369,6 +400,7 @@ export interface OperatorView {
   activity?: ActivityView[];
   scope?: ScopeView;
   sourceQuestions?: SourceQuestionView[];
+  forecast?: ForecastView;
   truncated?: Partial<Record<TruncatedKey, number>>;
 }
 
@@ -1475,6 +1507,160 @@ function sourceQuestionsOf(
   return take(all, L.sourceQuestions, truncated, 'sourceQuestions');
 }
 
+/** Этапы попытки по порядку: вес работы в прогнозе — доля пройденных до текущего. */
+const STAGE_ORDER = ['prepare', 'writer', 'gates', 'review', 'integration'] as const;
+
+/** Длительность словами: «2 ч 50 мин», «45 мин», «меньше минуты». */
+export function durationText(msValue: number, lang: 'ru' | 'en'): string {
+  const minutes = Math.round(msValue / 60_000);
+  if (minutes < 1) return lang === 'en' ? 'under a minute' : 'меньше минуты';
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (lang === 'en') return h ? `${h} h${m ? ` ${m} min` : ''}` : `${m} min`;
+  return h ? `${h} ч${m ? ` ${m} мин` : ''}` : `${m} мин`;
+}
+
+const rank = (sorted: number[], q: number) =>
+  sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))]!;
+
+/**
+ * Прогноз выпуска (P11). Объём — срез прогона связки, если он есть (задачи,
+ * ещё не переданные в harness, считаются с весом 0), иначе работы harness;
+ * отменённые не входят. Принятая работа — 1, работа на этапе попытки — доля
+ * этапов до текущего (`prepare` … `integration`), остальные — 0. Осталось:
+ * незавершённая доля объёма × длительность попытки (p50 / p90 закончившихся
+ * попыток, не меньше 5 образцов) × попыток на принятую задачу; нижняя граница
+ * — параллельно на `concurrency`, верхняя — последовательно. Ожидание людей и
+ * ведущего в прогноз не входит и называется отдельно.
+ */
+function forecastOf(c: Ctx, scope: ScopeView | undefined): ForecastView | undefined {
+  const i = c.i;
+  const en = c.lang === 'en';
+  const work = new Map(i.works.map((w) => [w.id, w]));
+  const weightOf = (w: OperatorWorkInput | undefined) => {
+    if (!w) return 0;
+    if (w.status === 'done' || w.stage.name === 'done') return 1;
+    const k = (STAGE_ORDER as readonly string[]).indexOf(w.stage.name);
+    return k < 0 ? 0 : k / STAGE_ORDER.length;
+  };
+  const units: (OperatorWorkInput | undefined)[] = scope
+    ? (c.i.sources ?? []).flatMap((src) =>
+        src.tasks.map((t) => work.get(t.workId ?? t.orderId)),
+      )
+    : [...i.works];
+  const live = units.filter((w) => w?.status !== 'cancelled');
+  if (!live.length) return undefined;
+  const total = live.length;
+  const weighted = live.reduce((n, w) => n + weightOf(w), 0);
+  const done = live.filter((w) => weightOf(w) === 1).length;
+  const inWork = live.filter((w) => {
+    const x = weightOf(w);
+    return w !== undefined && x < 1 && runningStages.has(w.stage.name);
+  }).length;
+  const percent = Math.round((100 * weighted) / total);
+  const left = total - done;
+  const unitIds = new Set(live.flatMap((w) => (w ? [w.id] : [])));
+  const own = i.attempts.filter((a) => unitIds.has(a.workId));
+  const firstStart = own.map((a) => ms(a.startedAt)).filter(Number.isFinite);
+  const elapsedMs = firstStart.length ? Math.max(0, i.now - Math.min(...firstStart)) : undefined;
+  const samples = own
+    .filter((a) => a.status !== 'active' && a.finishedAt && !a.interrupted)
+    .map((a) => ms(a.finishedAt) - ms(a.startedAt))
+    .filter((d) => Number.isFinite(d) && d >= 0)
+    .sort((a, b) => a - b);
+  const accepted = live.filter((w) => w && weightOf(w) === 1);
+  const acceptedAttempts = own.filter(
+    (a) => a.status !== 'active' && accepted.some((w) => w!.id === a.workId),
+  ).length;
+  const attemptsPerTask = accepted.length
+    ? Math.max(1, Math.round((acceptedAttempts / accepted.length) * 10) / 10)
+    : 1;
+  const rest = total - weighted;
+  const concurrency = Math.max(1, i.policy.concurrency);
+  const remaining =
+    samples.length >= OPERATOR_VIEW_TYPICAL_MIN_SAMPLES && rest > 0
+      ? {
+          loMs: Math.round((rest * rank(samples, 0.5) * attemptsPerTask) / concurrency),
+          hiMs: Math.round(rest * rank(samples, 0.9) * attemptsPerTask),
+          samples: samples.length,
+          attemptsPerTask,
+        }
+      : undefined;
+  const waits = i.stops.filter(
+    (s) => (s.actor === 'user' || s.actor === 'lead') && s.workId && unitIds.has(s.workId),
+  );
+  const waitMs = waits.reduce(
+    (n, s) => n + (Number.isFinite(ms(s.since)) ? Math.max(0, i.now - ms(s.since)) : 0),
+    0,
+  );
+  const humanWait = { works: new Set(waits.map((s) => s.workId)).size, ms: waitMs };
+  const progressLine = en
+    ? `done ~${percent} %, ${left} of ${total} task(s) left` + (inWork ? `, ${inWork} in work` : '')
+    : `готово ~${percent} %, осталось задач: ${left} из ${total}` +
+      (inWork ? `, в работе: ${inWork}` : '');
+  const elapsedText =
+    elapsedMs === undefined
+      ? en
+        ? 'not started yet'
+        : 'ещё не начиналось'
+      : (en ? 'elapsed ' : 'прошло ') + durationText(elapsedMs, c.lang);
+  const remainingText =
+    rest <= 0
+      ? en
+        ? 'nothing left'
+        : 'осталось: ничего'
+      : remaining
+        ? (en ? 'left ~' : 'осталось ~') +
+          (durationText(remaining.loMs, c.lang) === durationText(remaining.hiMs, c.lang)
+            ? durationText(remaining.hiMs, c.lang)
+            : `${durationText(remaining.loMs, c.lang)} – ${durationText(remaining.hiMs, c.lang)}`)
+        : en
+          ? `time left unknown (fewer than ${OPERATOR_VIEW_TYPICAL_MIN_SAMPLES} finished attempts)`
+          : `сколько осталось — неизвестно (закончившихся попыток меньше ${OPERATOR_VIEW_TYPICAL_MIN_SAMPLES})`;
+  const waitText = humanWait.works
+    ? en
+      ? `; waiting for people now: ${humanWait.works} work(s), ${durationText(waitMs, c.lang)} — not in the estimate`
+      : `; ждут людей сейчас: ${humanWait.works}, ${durationText(waitMs, c.lang)} — в прогноз не входит`
+    : '';
+  const timeLine = `${elapsedText} · ${remainingText}${waitText}`;
+  const assumptions = en
+    ? [
+        scope
+          ? 'scope: all tasks of the run slice, including ones not handed over to harness (weight 0)'
+          : 'scope: harness works only (no task source slice)',
+        'accepted = 100 %; a work in an attempt counts the stages before its current one (prepare, writer, gates, review, integration)',
+        'time left: unfinished share × attempt duration p50–p90 × attempts per accepted task; low end in parallel on concurrency, high end sequential',
+        'waiting for people and the lead is not in the estimate',
+      ]
+    : [
+        scope
+          ? 'объём: все задачи среза прогона, в том числе не переданные в harness (вес 0)'
+          : 'объём: только работы harness (среза связки нет)',
+        'принято — 100 %; работа в попытке — доля этапов до текущего (подготовка, написание, проверки, ревью, интеграция)',
+        'осталось: незавершённая доля × длительность попытки p50–p90 × попыток на принятую задачу; нижняя граница — параллельно по concurrency, верхняя — последовательно',
+        'ожидание людей и ведущего в прогноз не входит',
+      ];
+  return {
+    progress: {
+      percent,
+      weighted: Math.round(weighted * 100) / 100,
+      total,
+      done,
+      inWork,
+      left,
+      basis: scope ? 'scope' : 'works',
+      line: progressLine.slice(0, T.line),
+    },
+    time: {
+      ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+      ...(remaining ? { remaining } : {}),
+      humanWait,
+      line: timeLine.slice(0, T.line),
+    },
+    assumptions,
+  };
+}
+
 /** Строка совместимости связки для раздела «Здоровье». */
 function sourceLine(
   c: Ctx,
@@ -2168,6 +2354,8 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
   const activity = activityOf(c, o, truncated);
   const scope = scopeOf(c, truncated);
   const sourceQuestions = sourceQuestionsOf(c, truncated);
+  // Прогноз — по всему срезу, даже если `scope` в документе усечён.
+  const forecast = forecastOf(c, scope);
   const draft: OperatorView = {
     viewVersion: OPERATOR_VIEW_VERSION,
     viewRevision: OPERATOR_VIEW_REVISION,
@@ -2205,6 +2393,7 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
     ...(activity ? { activity } : {}),
     ...(scope ? { scope } : {}),
     ...(sourceQuestions ? { sourceQuestions } : {}),
+    ...(forecast ? { forecast } : {}),
   };
   const fitted = draft;
   let warnings = [...fitted.health.warnings];

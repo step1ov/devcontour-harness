@@ -29,7 +29,7 @@ import {
 } from '../src/integrations/connector/transport.ts';
 import { connectorSources, harnessView } from '../src/control/operator-view.ts';
 import { operatorView } from '../src/projections/operator-view.ts';
-import { baseInput } from './operator-view-input.ts';
+import { at, attempt, baseInput, NOW, work } from './operator-view-input.ts';
 
 const fi = (
   body = '## Вклад сайта\nСтраница каталога с фильтром.',
@@ -719,4 +719,79 @@ test('alpha.60: ссылка на вопрос — без учётных дан�
     '/',
   ).config;
   assert.equal(webBaseOf(config), 'http://127.0.0.1:4700/projects/P1');
+});
+
+test('alpha.60 (P11): прогноз выпуска — готовность всего среза, время по попыткам, ожидание людей отдельно', () => {
+  const stage = (name: string) => ({
+    name,
+    next: [],
+    spend: { calls: 0, knownUsd: 0, unknownCalls: 0, durationMs: 0 },
+  });
+  const done = work('w1', { status: 'done', stage: stage('done') });
+  const writing = work('w2', { status: 'running', stage: stage('writer') });
+  // Пять закончившихся попыток по 10 мин; принятая задача заняла две попытки.
+  const attempts = [
+    attempt('w1', 1, { startedAt: at(100), finishedAt: at(90), status: 'failed' }),
+    attempt('w1', 2, { startedAt: at(90), finishedAt: at(80) }),
+    attempt('w2', 1, { startedAt: at(80), finishedAt: at(70), status: 'failed' }),
+    attempt('w2', 2, { startedAt: at(70), finishedAt: at(60), status: 'failed' }),
+    attempt('w2', 3, { startedAt: at(60), finishedAt: at(50), status: 'failed' }),
+  ];
+  const input = baseInput({
+    works: [done, writing],
+    attempts,
+    stops: [
+      {
+        workId: 'w2',
+        code: 'INPUT_REQUIRED',
+        actor: 'user',
+        action: 'answer-input',
+        since: at(15),
+      },
+    ],
+    sources: [
+      {
+        connector: 'c',
+        provider: 'relay-v1-http',
+        tasks: [
+          { id: 'T1', key: 'WEB-1', orderId: 'w1', workId: 'w1', problems: [] },
+          { id: 'T2', key: 'WEB-2', orderId: 'w2', workId: 'w2', problems: [] },
+          { id: 'T3', key: 'WEB-3', orderId: 'w3', problems: [] },
+        ],
+        observedAt: at(5),
+      },
+    ],
+  });
+  const view = operatorView(input);
+  operatorViewSchema.parse(view);
+  const f = view.forecast!;
+  // (1 + 1/5 + 0) / 3 = 40 %
+  assert.deepEqual(
+    [f.progress.percent, f.progress.done, f.progress.left, f.progress.total, f.progress.basis],
+    [40, 1, 2, 3, 'scope'],
+  );
+  assert.equal(f.progress.line, 'готово ~40 %, осталось задач: 2 из 3, в работе: 1');
+  assert.equal(f.time.elapsedMs, 100 * 60_000);
+  // Осталось 1,8 задачи × 10 мин × 2 попытки: последовательно 36 мин, параллельно / concurrency.
+  const concurrency = input.policy.concurrency;
+  assert.deepEqual(f.time.remaining, {
+    loMs: Math.round((1.8 * 600_000 * 2) / concurrency),
+    hiMs: 1.8 * 600_000 * 2,
+    samples: 5,
+    attemptsPerTask: 2,
+  });
+  assert.deepEqual(f.time.humanWait, { works: 1, ms: 15 * 60_000 });
+  assert.match(f.time.line, /^прошло 1 ч 40 мин · осталось ~/);
+  assert.match(f.time.line, /ждут людей сейчас: 1, 15 мин — в прогноз не входит/);
+  assert.ok(f.assumptions.length >= 3);
+  const en = operatorView(input, { lang: 'en' }).forecast!;
+  assert.equal(en.progress.line, 'done ~40 %, 2 of 3 task(s) left, 1 in work');
+
+  // Мало образцов — время неизвестно, а не ноль.
+  const few = operatorView({ ...input, attempts: attempts.slice(0, 2) }).forecast!;
+  assert.equal(few.time.remaining, undefined);
+  assert.match(few.time.line, /неизвестно/);
+  // Нет работ и среза — прогноза нет.
+  assert.equal(operatorView(baseInput()).forecast, undefined);
+  void NOW;
 });

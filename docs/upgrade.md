@@ -1643,14 +1643,15 @@ view`) в пределе длины сохраняет хвост — остат
   теперь говорит, что обновить (прежний фрагмент «contractVersion N,
   транспорт проверен с 1» сохранён).
 - **Представление оператора, ревизия 4.** Необязательные `scope`,
-  `sourceQuestions`, `health.sources`, `questions[].options`,
+  `sourceQuestions`, `forecast`, `health.sources`, `questions[].options`,
   `questions[].rationale`; `truncated.scope`, `truncated.sourceQuestions`.
   Читатель, который игнорирует неизвестные поля (договор представления),
   работает без изменений; хост, проверяющий документ строгой копией схемы
   ревизии 3, должен принять новые поля, в том числе `options` и `rationale`
   внутри `questions[]`. Документ, который с новыми разделами больше 256 КБ,
   выдаётся без `scope` и `sourceQuestions` (предупреждение
-  `VIEW_SECTIONS_DROPPED`, число опущенного — в `truncated`).
+  `VIEW_SECTIONS_DROPPED`, число опущенного — в `truncated`). `status
+--human` дописывает строку «Прогноз выпуска: …» (JSON `status` не меняется).
 - **Состояние связки.** В SQLite связки появляется таблица `observations`
   (последнее наблюдение Relay для показа). Прежняя версия harness её не
   читает и не мешает ей; откат на alpha.59 без копии состояния связки

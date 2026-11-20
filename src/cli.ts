@@ -244,6 +244,19 @@ const connectorOf = async (path: string, state: string, policy?: ExecutionPolicy
   });
 };
 
+/** Строки прогноза выпуска для `status --human`; представление недоступно — без них. */
+const forecastLines = (state: string): string | undefined => {
+  try {
+    const view = harnessView({ stateDir: state }) as {
+      forecast?: { progress: { line: string }; time: { line: string } };
+    };
+    const f = view.forecast;
+    return f ? `Прогноз выпуска: ${f.progress.line}; ${f.time.line}.\n` : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 /**
  * Сверка Relay для `doctor`/`init`: явный `--source` или найденный файл
  * связки. Нет ни того, ни другого — `undefined` (связка не настроена).
@@ -804,8 +817,17 @@ async function run(
         return { command, ...(await watchStatus(need('state'), v)) };
       const h = open(need('state'), binding(need('state')), 'state');
       try {
-        if (command === 'status')
-          return { command, data: h.status(v.graph, { detail: Boolean(v.detail) }) };
+        if (command === 'status') {
+          const data = h.status(v.graph, { detail: Boolean(v.detail) });
+          if (!v.human) return { command, data };
+          // Прогноз выпуска — та же строка, что у панели (`view.forecast`).
+          const forecast = forecastLines(need('state'));
+          return {
+            command,
+            data,
+            ...(forecast ? { text: statusText(data) + forecast } : {}),
+          };
+        }
         if (command === 'events')
           return { command, data: h.events(Number(v.after ?? 0), Number(v.limit ?? 100)) };
         return { command, data: h.result(need('work')) };

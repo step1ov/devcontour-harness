@@ -463,6 +463,38 @@ const decisionSchema = z
       need(d.findingId !== undefined, 'findingId', 'accepted-limitation требует findingId');
   });
 
+/**
+ * Прогноз выпуска (ревизия 4, P11): готовность всего объёма и время; те же
+ * строки, что в `status --human`. Неизвестное время — без поля `remaining`
+ * (никогда не ноль). Формула и допущения — в `assumptions` и docs/contracts.md.
+ */
+const forecastSchema = z.strictObject({
+  progress: z.strictObject({
+    percent: z.number().int().min(0).max(100),
+    weighted: z.number().min(0),
+    total: z.number().int().positive(),
+    done: count,
+    inWork: count,
+    left: count,
+    basis: z.enum(['scope', 'works']),
+    line: z.string().min(1).max(T.line),
+  }),
+  time: z.strictObject({
+    elapsedMs: count.optional(),
+    remaining: z
+      .strictObject({
+        loMs: count,
+        hiMs: count,
+        samples: z.number().int().positive(),
+        attemptsPerTask: z.number().min(1),
+      })
+      .optional(),
+    humanWait: z.strictObject({ works: count, ms: count }),
+    line: z.string().min(1).max(T.line),
+  }),
+  assumptions: z.array(z.string().min(1).max(400)).max(10),
+});
+
 const sourceSchema = z.strictObject({
   producer: token(100),
   producerVersion: token(100),
@@ -504,6 +536,7 @@ export const operatorViewSchema = z.strictObject({
   decisions: z.array(decisionSchema).max(L.decisions).optional(),
   scope: scopeSchema.optional(),
   sourceQuestions: z.array(sourceQuestionViewSchema).max(L.sourceQuestions).optional(),
+  forecast: forecastSchema.optional(),
   truncated: z
     .strictObject({
       scope: truncatedCount.optional(),

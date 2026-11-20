@@ -2207,6 +2207,154 @@
         "additionalProperties": false
       }
     },
+    "forecast": {
+      "type": "object",
+      "properties": {
+        "progress": {
+          "type": "object",
+          "properties": {
+            "percent": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "weighted": {
+              "type": "number",
+              "minimum": 0
+            },
+            "total": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "done": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "inWork": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "left": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "basis": {
+              "type": "string",
+              "enum": [
+                "scope",
+                "works"
+              ]
+            },
+            "line": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "required": [
+            "percent",
+            "weighted",
+            "total",
+            "done",
+            "inWork",
+            "left",
+            "basis",
+            "line"
+          ],
+          "additionalProperties": false
+        },
+        "time": {
+          "type": "object",
+          "properties": {
+            "elapsedMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "remaining": {
+              "type": "object",
+              "properties": {
+                "loMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "hiMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "samples": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "attemptsPerTask": {
+                  "type": "number",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "loMs",
+                "hiMs",
+                "samples",
+                "attemptsPerTask"
+              ],
+              "additionalProperties": false
+            },
+            "humanWait": {
+              "type": "object",
+              "properties": {
+                "works": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "works",
+                "ms"
+              ],
+              "additionalProperties": false
+            },
+            "line": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "required": [
+            "humanWait",
+            "line"
+          ],
+          "additionalProperties": false
+        },
+        "assumptions": {
+          "maxItems": 10,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 400
+          }
+        }
+      },
+      "required": [
+        "progress",
+        "time",
+        "assumptions"
+      ],
+      "additionalProperties": false
+    },
     "truncated": {
       "type": "object",
       "properties": {
