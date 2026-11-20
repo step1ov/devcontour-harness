@@ -141,7 +141,8 @@ export class ConnectorStore {
         CREATE TABLE IF NOT EXISTS operations (key TEXT PRIMARY KEY, work_id TEXT NOT NULL, run_id TEXT NOT NULL, task_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS leases (key TEXT PRIMARY KEY, token TEXT NOT NULL, owner TEXT NOT NULL, expires_at INTEGER NOT NULL, fence INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS receipts (operation TEXT PRIMARY KEY, order_id TEXT NOT NULL, data TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS history (key TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);`);
+        CREATE TABLE IF NOT EXISTS history (key TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS observations (key TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL);`);
       const ins = this.db.prepare('INSERT OR IGNORE INTO meta VALUES(?, ?)');
       ins.run('schema', SCHEMA_VERSION);
       ins.run('provider', identity.provider);
@@ -401,6 +402,33 @@ export class ConnectorStore {
       .prepare('SELECT key, data FROM history WHERE substr(key, 1, length(:p)) = :p ORDER BY rowid')
       .all({ p: prefix }) as { key: string; data: string }[];
     return rows.map((r) => ({ key: r.key, value: JSON.parse(r.data) as T }));
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Наблюдения backend                                                */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Последнее наблюдение backend (`relay` — совместимость, открытые вопросы
+   * владельцу): только для показа, не влияет на снимки и доставку. Таблицы
+   * нет (состояние до alpha.60, открытое только на чтение) — `undefined`.
+   */
+  observation<T>(key: string): T | undefined {
+    try {
+      const row = this.db.prepare('SELECT data FROM observations WHERE key=?').get(key) as
+        { data: string } | undefined;
+      return row ? (JSON.parse(row.data) as T) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  putObservation<T>(key: string, value: T) {
+    this.tx(() => {
+      this.db
+        .prepare('INSERT OR REPLACE INTO observations VALUES(?, ?, ?)')
+        .run(key, JSON.stringify(value), now());
+    }, 'observation');
   }
 
   /** Записать связь истории; `mutate` получает прежнее значение. */

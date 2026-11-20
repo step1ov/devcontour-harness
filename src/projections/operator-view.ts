@@ -128,9 +128,75 @@ export interface OperatorQuestion {
   answeredBy?: 'operator' | 'lead' | 'host';
   answerBasis?: AnswerBasisView;
   title?: string;
+  /** Варианты ответа (ревизия 4). */
+  options?: { id: string; label: string; recommended?: true }[];
+  /** Обоснование исполнителя (ревизия 4). */
+  rationale?: string;
   createdAt: string;
   /** Ревизия 4: где применённый ответ (`carrierLine`). */
   line?: string;
+}
+
+/** Вопрос владельцу из источника задач (ревизия 4), только чтение. */
+export interface SourceQuestionView {
+  connector: string;
+  provider: string;
+  id: string;
+  ref: string;
+  title?: string;
+  question?: string;
+  options?: string[];
+  recommendation?: string;
+  provisional?: string;
+  tasks?: string[];
+  url?: string;
+  readAt: string;
+}
+
+/** Весь срез прогона (ревизия 4, P10). */
+export interface ScopeView {
+  total?: number;
+  tasks: {
+    id: string;
+    connector: string;
+    key?: string;
+    title?: string;
+    workId?: string;
+    state: 'in-harness' | 'not-handed-over' | 'not-ready';
+    plain?: string;
+  }[];
+}
+
+/**
+ * Прогноз выпуска (ревизия 4, P11): готовность всего объёма и время. Числа
+ * и строки — одни для `status --human` и панели. Неизвестное — без поля,
+ * никогда не нулём.
+ */
+export interface ForecastView {
+  progress: {
+    /** Готово, % от всего объёма (взвешенно по этапам). */
+    percent: number;
+    /** Сумма весов: принято — 1, в работе — доля пройденных этапов. */
+    weighted: number;
+    total: number;
+    done: number;
+    inWork: number;
+    left: number;
+    /** Объём: срез прогона связки (`scope`) или только работы harness. */
+    basis: 'scope' | 'works';
+    line: string;
+  };
+  time: {
+    /** Начало первой попытки этого объёма и сколько прошло с него. */
+    startedAt?: string;
+    elapsedMs?: number;
+    /** Осталось: диапазон по наблюдённым попыткам; нет — неизвестно. */
+    remaining?: { loMs: number; hiMs: number; samples: number; attemptsPerTask: number };
+    /** Ожидание людей и ведущего сейчас (`ms` — самое долгое) — в прогноз не входит. */
+    humanWait: { works: number; ms: number; since?: string };
+    line: string;
+  };
+  assumptions: string[];
 }
 
 /** Основание последнего ответа на вопрос (ревизия 1). */
@@ -290,9 +356,21 @@ export interface ViewHealth {
   spentTotalUsd: Bounded;
   drift: { checked: number; drifted: number; unavailable: number };
   warnings: { code: string; message: string }[];
+  /** Связки с источниками задач (ревизия 4). */
+  sources?: {
+    connector: string;
+    provider: string;
+    level?: string;
+    taskContext?: boolean;
+    contractVersion?: number;
+    line?: string;
+    checkedAt: string;
+  }[];
 }
 
 export type TruncatedKey =
+  | 'scope'
+  | 'sourceQuestions'
   | 'works'
   | 'reviews'
   | 'findings'
@@ -347,6 +425,9 @@ export interface OperatorView {
   history: ViewHistory;
   health: ViewHealth;
   activity?: ActivityView[];
+  scope?: ScopeView;
+  sourceQuestions?: SourceQuestionView[];
+  forecast?: ForecastView;
   truncated?: Partial<Record<TruncatedKey, number>>;
 }
 
@@ -590,6 +671,11 @@ export interface OperatorQuestionInput {
   };
   /** Работа закрыта (`done`, `cancelled`): вопрос виден только в деталях работы. */
   closed?: boolean;
+  /** Варианты ответа (сырые) и рекомендуемый вариант. */
+  options?: readonly { id: string; label: string }[];
+  recommended?: string | null;
+  /** Сырое обоснование исполнителя. */
+  rationale?: string;
   /** Действующая политика разрешает ответ ведущему (`leadMayAnswer`). */
   leadMay: boolean;
   /** Попытка, за которой закреплён применённый ответ (`status.works[].input.carrier`). */
@@ -817,6 +903,49 @@ export interface OperatorViewInput {
   activity?: readonly OperatorActivityInput[];
   /** Что маскировать: домашний каталог, корни репозиториев, значения секретов. */
   mask?: MaskContext;
+  /**
+   * Связки с источниками задач (состояние коннекторов в каталоге состояния):
+   * последний снимок и последнее наблюдение backend. Нет — связок нет (полей
+   * `scope`, `sourceQuestions`, `health.sources` в документе нет).
+   */
+  sources?: readonly OperatorSourceInput[];
+}
+
+/** Связка с источником задач: срез последнего снимка, совместимость, вопросы владельцу. */
+export interface OperatorSourceInput {
+  connector: string;
+  provider: string;
+  /** Задачи последнего снимка в порядке конфигурации. */
+  tasks: readonly {
+    id: string;
+    key: string;
+    title?: string;
+    /** ID работы harness (`orderId`), если такая работа зарегистрирована. */
+    workId?: string;
+    orderId: string;
+    /** Коды и сырые причины, по которым задача не допускается к запуску. */
+    problems: readonly { code: string; message: string }[];
+  }[];
+  compatibility?: {
+    level: string;
+    taskContext: boolean;
+    taskContextUsed: boolean;
+    contractVersion: number | null;
+    recommended: string;
+  };
+  /** Когда связка последний раз читала backend (наблюдение). */
+  observedAt?: string;
+  questions?: readonly {
+    id: string;
+    key: string;
+    title: string;
+    question?: string;
+    options: readonly string[];
+    recommendation?: string;
+    provisional?: string;
+    targets: readonly string[];
+    url?: string;
+  }[];
 }
 
 export interface OperatorViewOptions {
@@ -910,6 +1039,17 @@ export function viewToken(view: OperatorView | WorkDetailView): string {
     delete history.from;
     delete history.to;
     rest.history = history;
+  }
+  // Прогноз зависит от часов (прошло, ожидание сейчас) — в токен входят его
+  // точки отсчёта (`startedAt`, `humanWait.since`), а не прошедшее время.
+  if ('forecast' in view && view.forecast) {
+    const time: Record<string, unknown> = { ...view.forecast.time };
+    delete time.elapsedMs;
+    delete time.line;
+    const wait: Record<string, unknown> = { ...view.forecast.time.humanWait };
+    delete wait.ms;
+    time.humanWait = wait;
+    rest.forecast = { ...view.forecast, time };
   }
   const src: Record<string, unknown> = { ...view.source };
   delete src.token;
@@ -1357,8 +1497,332 @@ function questionView(c: Ctx, q: OperatorQuestionInput): OperatorQuestion {
     ...(q.answeredBy ? { answeredBy: q.answeredBy } : {}),
     ...(basis ? { answerBasis: basis } : {}),
     ...(c.titles && q.text ? { title: text(c, q.text, T.questionTitle) } : {}),
+    ...(c.titles && q.options?.length
+      ? {
+          options: q.options.slice(0, L.questionOptions).map((x) => ({
+            id: x.id,
+            label: text(c, x.label, T.option) ?? x.id,
+            ...(q.recommended === x.id ? { recommended: true as const } : {}),
+          })),
+        }
+      : {}),
+    ...(c.titles && q.rationale?.trim() ? { rationale: text(c, q.rationale, T.rationale) } : {}),
     createdAt: q.createdAt,
     ...((l) => (l ? { line: l } : {}))(carrierLine(q.carrier, c.lang, q.state)),
+  };
+}
+
+/** Простые строки причин неготовности задачи по коду снимка (английские — по коду). */
+const notReadyEn: Record<string, string> = {
+  TASK_DONE: 'the task is already done',
+  TASK_CANCELLED: 'the task is cancelled',
+  COLUMN_NOT_ELIGIBLE: 'the task column does not allow a run',
+  DEPENDENCY_UNFINISHED: 'a dependency is not finished',
+  DEPENDENCY_UNPROVEN: 'a dependency is done without proof from this connector',
+  LIMIT_EXCEEDED: 'the task exceeds a context limit',
+  DOCUMENT_MISSING: 'a required document is missing',
+  MAPPING_INVALID: 'the criteria mapping does not match the task',
+};
+
+/** Срез прогона по связкам: все задачи последнего снимка (P10). */
+function scopeOf(c: Ctx, truncated: Record<string, number>): ScopeView | undefined {
+  const sources = c.i.sources;
+  if (!sources?.length) return undefined;
+  const works = new Set(c.i.works.map((w) => w.id));
+  // Две связки одного проекта (два файла состояния) — задача один раз.
+  const seen = new Set<string>();
+  const all = sources.flatMap((src) =>
+    src.tasks
+      .flatMap((t) => {
+        if (seen.has(t.orderId)) return [];
+        seen.add(t.orderId);
+        return [t];
+      })
+      .map((t) => {
+        const workId = t.workId ?? (works.has(t.orderId) ? t.orderId : undefined);
+        const first = t.problems[0];
+        const state: ScopeView['tasks'][number]['state'] = workId
+          ? 'in-harness'
+          : first
+            ? 'not-ready'
+            : 'not-handed-over';
+        const plain =
+          state === 'not-ready'
+            ? c.lang === 'en'
+              ? (notReadyEn[first!.code] ?? first!.code)
+              : text(c, first!.message, T.plain)
+            : state === 'not-handed-over'
+              ? c.lang === 'en'
+                ? 'not handed over to harness yet'
+                : 'ещё не передана в harness'
+              : undefined;
+        return {
+          id: t.id,
+          connector: src.connector,
+          ...(t.key ? { key: t.key.slice(0, 200) } : {}),
+          ...(c.titles && t.title ? { title: text(c, t.title, T.title) } : {}),
+          ...(workId ? { workId } : {}),
+          state,
+          ...(plain ? { plain } : {}),
+        };
+      }),
+  );
+  const tasks = take(all, L.scope, truncated, 'scope');
+  return { ...(all.length > tasks.length ? { total: all.length } : {}), tasks };
+}
+
+/** Вопросы владельцу из источников задач: последнее наблюдение связки. */
+function sourceQuestionsOf(
+  c: Ctx,
+  truncated: Record<string, number>,
+): SourceQuestionView[] | undefined {
+  const sources = c.i.sources?.filter((s) => s.questions && s.observedAt);
+  if (!sources?.length) return undefined;
+  const all = sources.flatMap((src) =>
+    src.questions!.map((q): SourceQuestionView => ({
+      connector: src.connector,
+      provider: src.provider,
+      id: q.id,
+      ref: (q.key || q.id).slice(0, 200),
+      ...(c.titles ? { title: text(c, q.title, T.questionTitle) } : {}),
+      ...(c.titles && q.question ? { question: text(c, q.question, T.questionTitle) } : {}),
+      ...(c.titles && q.options.length
+        ? {
+            options: q.options.slice(0, L.questionOptions).map((x) => text(c, x, T.option) ?? ''),
+          }
+        : {}),
+      ...(c.titles && q.recommendation
+        ? { recommendation: text(c, q.recommendation, T.questionPlain) }
+        : {}),
+      ...(c.titles && q.provisional
+        ? { provisional: text(c, q.provisional, T.questionPlain) }
+        : {}),
+      ...((tasks) => (tasks.length ? { tasks } : {}))(
+        q.targets
+          .filter((x) => x.length > 0)
+          .slice(0, 20)
+          .map((x) => x.slice(0, 200)),
+      ),
+      ...(q.url && q.url.length <= T.url ? { url: q.url } : {}),
+      readAt: src.observedAt!,
+    })),
+  );
+  return take(all, L.sourceQuestions, truncated, 'sourceQuestions');
+}
+
+/** Этапы попытки по порядку: вес работы в прогнозе — доля пройденных до текущего. */
+const STAGE_ORDER = ['prepare', 'writer', 'gates', 'review', 'integration'] as const;
+
+/** Длительность словами: «2 ч 50 мин», «45 мин», «меньше минуты». */
+function durationText(msValue: number, lang: 'ru' | 'en'): string {
+  const minutes = Math.round(msValue / 60_000);
+  if (minutes < 1) return lang === 'en' ? 'under a minute' : 'меньше минуты';
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (lang === 'en') return h ? `${h} h${m ? ` ${m} min` : ''}` : `${m} min`;
+  return h ? `${h} ч${m ? ` ${m} мин` : ''}` : `${m} мин`;
+}
+
+const rank = (sorted: number[], q: number) =>
+  sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))]!;
+
+/**
+ * Прогноз выпуска (P11). Объём — срез прогона связки, если он есть (задачи,
+ * ещё не переданные в harness, считаются с весом 0), иначе работы harness;
+ * отменённые не входят. Принятая работа — 1, работа на этапе попытки — доля
+ * этапов до текущего (`prepare` … `integration`), остальные — 0. Осталось:
+ * незавершённая доля объёма × длительность попытки (p50 / p90 закончившихся
+ * попыток, не меньше 5 образцов) × попыток на принятую задачу; нижняя граница
+ * — параллельно на `concurrency`, верхняя — последовательно. Ожидание людей и
+ * ведущего в прогноз не входит и называется отдельно.
+ */
+function forecastOf(c: Ctx, scope: ScopeView | undefined): ForecastView | undefined {
+  const i = c.i;
+  const en = c.lang === 'en';
+  const work = new Map(i.works.map((w) => [w.id, w]));
+  const weightOf = (w: OperatorWorkInput | undefined) => {
+    if (!w) return 0;
+    if (w.status === 'done' || w.stage.name === 'done') return 1;
+    const k = (STAGE_ORDER as readonly string[]).indexOf(w.stage.name);
+    return k < 0 ? 0 : k / STAGE_ORDER.length;
+  };
+  // Единица объёма: работа harness или задача среза без работы. Задача,
+  // закрытая в источнике без работы harness (`TASK_DONE`), — готова;
+  // отменённая (`TASK_CANCELLED`) и отменённая работа в объём не входят.
+  type Unit = { work?: OperatorWorkInput; closed?: true };
+  const seen = new Set<string>();
+  const units: Unit[] =
+    scope && scope.tasks.length
+      ? (c.i.sources ?? []).flatMap((src) =>
+          src.tasks.flatMap((t): Unit[] => {
+            const id = t.workId ?? t.orderId;
+            if (seen.has(id)) return [];
+            seen.add(id);
+            const w = work.get(id);
+            if (w) return [{ work: w }];
+            if (t.problems.some((p) => p.code === 'TASK_CANCELLED')) return [];
+            return t.problems.some((p) => p.code === 'TASK_DONE') ? [{ closed: true }] : [{}];
+          }),
+        )
+      : i.works.map((w) => ({ work: w }));
+  const live = units.filter((u) => u.work?.status !== 'cancelled');
+  const unitWeight = (u: Unit) => (u.closed ? 1 : weightOf(u.work));
+  if (!live.length) return undefined;
+  const total = live.length;
+  const weighted = live.reduce((n, u) => n + unitWeight(u), 0);
+  const done = live.filter((u) => unitWeight(u) === 1).length;
+  const inWork = live.filter(
+    (u) => u.work !== undefined && unitWeight(u) < 1 && runningStages.has(u.work.stage.name),
+  ).length;
+  const left = total - done;
+  // Пока задачи остаются, «100 %» не показывается.
+  const percent = Math.min(left > 0 ? 99 : 100, Math.round((100 * weighted) / total));
+  const unitIds = new Set(live.flatMap((u) => (u.work ? [u.work.id] : [])));
+  const own = i.attempts.filter((a) => unitIds.has(a.workId));
+  const firstStart = own.map((a) => ms(a.startedAt)).filter(Number.isFinite);
+  const elapsedMs = firstStart.length ? Math.max(0, i.now - Math.min(...firstStart)) : undefined;
+  const samples = own
+    .filter((a) => a.status !== 'active' && a.finishedAt && !a.interrupted)
+    .map((a) => ms(a.finishedAt) - ms(a.startedAt))
+    .filter((d) => Number.isFinite(d) && d >= 0)
+    .sort((a, b) => a - b);
+  const accepted = new Set(
+    live.flatMap((u) => (u.work && weightOf(u.work) === 1 ? [u.work.id] : [])),
+  );
+  // Попытки, прерванные остановкой, не считаются ни образцами, ни попытками задачи.
+  const acceptedAttempts = own.filter(
+    (a) => a.status !== 'active' && !a.interrupted && accepted.has(a.workId),
+  ).length;
+  const attemptsPerTask = accepted.size
+    ? Math.max(1, Math.round((acceptedAttempts / accepted.size) * 10) / 10)
+    : 1;
+  const rest = total - weighted;
+  const concurrency = Math.max(1, i.policy.concurrency);
+  const remaining =
+    samples.length >= OPERATOR_VIEW_TYPICAL_MIN_SAMPLES && rest > 0
+      ? {
+          // Параллельно — не быстрее одной задачи: недоделанная задача не делится.
+          loMs: Math.round(
+            Math.max(rest / concurrency, Math.min(rest, 1)) * rank(samples, 0.5) * attemptsPerTask,
+          ),
+          hiMs: Math.round(rest * rank(samples, 0.9) * attemptsPerTask),
+          samples: samples.length,
+          attemptsPerTask,
+        }
+      : undefined;
+  const waits = i.stops.filter(
+    (s) => (s.actor === 'user' || s.actor === 'lead') && s.workId && unitIds.has(s.workId),
+  );
+  // Самое долгое текущее ожидание (не сумма: работы ждут параллельно).
+  const waitMs = waits.reduce(
+    (n, s) => Math.max(n, Number.isFinite(ms(s.since)) ? Math.max(0, i.now - ms(s.since)) : 0),
+    0,
+  );
+  const since = waits
+    .map((s) => ms(s.since))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b)[0];
+  const humanWait = {
+    works: new Set(waits.map((s) => s.workId)).size,
+    ms: waitMs,
+    ...(since !== undefined ? { since: iso(since) } : {}),
+  };
+  const progressLine = en
+    ? `done ~${percent} %, ${left} of ${total} task(s) left` + (inWork ? `, ${inWork} in work` : '')
+    : `готово ~${percent} %, осталось задач: ${left} из ${total}` +
+      (inWork ? `, в работе: ${inWork}` : '');
+  const elapsedText =
+    elapsedMs === undefined
+      ? en
+        ? 'not started yet'
+        : 'ещё не начиналось'
+      : (en ? 'elapsed ' : 'прошло ') + durationText(elapsedMs, c.lang);
+  const remainingText =
+    rest <= 0
+      ? en
+        ? 'nothing left'
+        : 'осталось: ничего'
+      : remaining
+        ? (en ? 'left ~' : 'осталось ~') +
+          (durationText(remaining.loMs, c.lang) === durationText(remaining.hiMs, c.lang)
+            ? durationText(remaining.hiMs, c.lang)
+            : `${durationText(remaining.loMs, c.lang)} – ${durationText(remaining.hiMs, c.lang)}`)
+        : en
+          ? `time left unknown (fewer than ${OPERATOR_VIEW_TYPICAL_MIN_SAMPLES} finished attempts)`
+          : `сколько осталось — неизвестно (закончившихся попыток меньше ${OPERATOR_VIEW_TYPICAL_MIN_SAMPLES})`;
+  const waitText = humanWait.works
+    ? en
+      ? `; waiting for people now: ${humanWait.works} work(s), up to ${durationText(waitMs, c.lang)} — not in the estimate`
+      : `; ждут людей сейчас: ${humanWait.works}, до ${durationText(waitMs, c.lang)} — в прогноз не входит`
+    : '';
+  const timeLine = `${elapsedText} · ${remainingText}${waitText}`;
+  const assumptions = en
+    ? [
+        scope?.tasks.length
+          ? 'scope: all tasks of the run slice, including ones not handed over to harness (weight 0); done in the source without harness — 100 %, cancelled — out of scope'
+          : 'scope: harness works only (no task source slice)',
+        'accepted = 100 %; a work in an attempt counts the stages before its current one (prepare, writer, gates, review, integration); between attempts (waiting, queued) it counts 0',
+        'time left: unfinished share × attempt duration p50–p90 × attempts per accepted task; low end in parallel on concurrency, high end sequential',
+        'waiting for people and the lead is not in the estimate',
+      ]
+    : [
+        scope?.tasks.length
+          ? 'объём: все задачи среза прогона, в том числе не переданные в harness (вес 0); закрытая в источнике без harness — 100 %, отменённая — вне объёма'
+          : 'объём: только работы harness (среза связки нет)',
+        'принято — 100 %; работа в попытке — доля этапов до текущего (подготовка, написание, проверки, ревью, интеграция); между попытками (ожидание, очередь) — 0',
+        'осталось: незавершённая доля × длительность попытки p50–p90 × попыток на принятую задачу; нижняя граница — параллельно по concurrency, верхняя — последовательно',
+        'ожидание людей и ведущего в прогноз не входит',
+      ];
+  return {
+    progress: {
+      percent,
+      weighted: Math.round(weighted * 100) / 100,
+      total,
+      done,
+      inWork,
+      left,
+      basis: scope?.tasks.length ? 'scope' : 'works',
+      line: progressLine.slice(0, T.line),
+    },
+    time: {
+      ...(elapsedMs !== undefined ? { startedAt: iso(Math.min(...firstStart)), elapsedMs } : {}),
+      ...(remaining ? { remaining } : {}),
+      humanWait,
+      line: timeLine.slice(0, T.line),
+    },
+    assumptions,
+  };
+}
+
+/** Строка совместимости связки для раздела «Здоровье». */
+function sourceLine(
+  c: Ctx,
+  src: OperatorSourceInput,
+): NonNullable<ViewHealth['sources']>[number] | undefined {
+  if (!src.observedAt) return undefined;
+  const k = src.compatibility;
+  const line = !k
+    ? undefined
+    : k.taskContextUsed
+      ? c.lang === 'en'
+        ? 'Relay with task context: the writer gets the feature and scenario description'
+        : 'Relay с контекстом задачи: исполнитель получает описание функции и сценария'
+      : k.taskContext
+        ? c.lang === 'en'
+          ? 'task context is turned off in the connector configuration'
+          : 'контекст задачи выключен в конфигурации связки'
+        : c.lang === 'en'
+          ? `Relay without task context: the writer does not get the feature and scenario description; Relay ≥ ${k.recommended} (expected release) or a build with task context is needed`
+          : `Relay без контекста задачи: исполнитель не получит описание функции и сценария; нужна Relay ≥ ${k.recommended} (ожидаемый выпуск) или сборка с контекстом задачи`;
+  return {
+    connector: src.connector,
+    provider: src.provider,
+    ...(k ? { level: k.level, taskContext: k.taskContext } : {}),
+    ...(k?.contractVersion !== null && k?.contractVersion !== undefined
+      ? { contractVersion: k.contractVersion }
+      : {}),
+    ...(line ? { line } : {}),
+    checkedAt: src.observedAt,
   };
 }
 
@@ -1666,6 +2130,11 @@ function healthOf(
       unavailable: driftUnavailable,
     },
     warnings,
+    ...((list) => (list.length ? { sources: list.slice(0, L.sources) } : {}))(
+      (i.sources ?? [])
+        .map((src) => sourceLine(c, src))
+        .filter((x): x is NonNullable<typeof x> => !!x),
+    ),
   };
 }
 
@@ -2016,6 +2485,10 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
   const q = i.queue;
   const drift = i.works.map((w) => driftOf(c, w)).filter((d): d is DriftView => !!d);
   const activity = activityOf(c, o, truncated);
+  const scope = scopeOf(c, truncated);
+  const sourceQuestions = sourceQuestionsOf(c, truncated);
+  // Прогноз — по всему срезу, даже если `scope` в документе усечён.
+  const forecast = forecastOf(c, scope);
   const draft: OperatorView = {
     viewVersion: OPERATOR_VIEW_VERSION,
     viewRevision: OPERATOR_VIEW_REVISION,
@@ -2056,6 +2529,9 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
     history,
     health,
     ...(activity ? { activity } : {}),
+    ...(scope ? { scope } : {}),
+    ...(sourceQuestions ? { sourceQuestions } : {}),
+    ...(forecast ? { forecast } : {}),
   };
   const fitted = draft;
   let warnings = [...fitted.health.warnings];
@@ -2076,14 +2552,43 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
     ];
   }
   const tr = truncation<TruncatedKey>(truncated);
-  return finish(
-    {
-      ...fitted,
-      health: { ...fitted.health, warnings: warnings.slice(0, L.warnings) },
-      ...(tr ? { truncated: tr } : {}),
-    },
-    maxBytes,
-  );
+  const full: OperatorView = {
+    ...fitted,
+    health: { ...fitted.health, warnings: warnings.slice(0, L.warnings) },
+    ...(tr ? { truncated: tr } : {}),
+  };
+  try {
+    return finish(full, maxBytes);
+  } catch (error) {
+    // Разделы связки (ревизия 4) необязательны: документ сверх предела
+    // выдаётся без них, с числом опущенного, а не отказом всего представления.
+    if (
+      !(error instanceof HarnessError && error.code === 'VIEW_TOO_LARGE') ||
+      (!full.scope && !full.sourceQuestions)
+    )
+      throw error;
+    const { scope, sourceQuestions, ...rest } = full;
+    const dropped: Record<string, number> = { ...(full.truncated ?? {}) };
+    if (scope) dropped.scope = (dropped.scope ?? 0) + scope.tasks.length;
+    if (sourceQuestions)
+      dropped.sourceQuestions = (dropped.sourceQuestions ?? 0) + sourceQuestions.length;
+    const note = {
+      code: 'VIEW_SECTIONS_DROPPED',
+      message:
+        c.lang === 'en'
+          ? 'the run scope and source questions exceed the view size limit and are omitted'
+          : 'срез прогона и вопросы источника не помещаются в предел представления и опущены',
+    };
+    const kept = rest.health.warnings.slice(0, L.warnings - 1);
+    return finish(
+      {
+        ...rest,
+        health: { ...rest.health, warnings: [...kept, note] },
+        truncated: truncation<TruncatedKey>(dropped)!,
+      },
+      maxBytes,
+    );
+  }
 }
 
 /** Строки проверки alpha.55 в словаре представления. */

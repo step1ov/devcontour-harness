@@ -37,6 +37,14 @@ export const OPERATOR_VIEW_LIMITS = {
   activity: 50,
   decisions: 50,
   verificationPerWork: 50,
+  /** Задачи среза прогона (`scope.tasks`, ревизия 4). */
+  scope: 200,
+  /** Вопросы владельцу из источника задач (`sourceQuestions`, ревизия 4). */
+  sourceQuestions: 50,
+  /** Варианты ответа вопроса (`questions[].options`, `sourceQuestions[].options`). */
+  questionOptions: 10,
+  /** Связки с источниками задач в здоровье (`health.sources`, ревизия 4). */
+  sources: 10,
 } as const;
 
 /** Пределы свободных строк (символов) после маскирования. */
@@ -53,6 +61,12 @@ export const OPERATOR_VIEW_TEXT = {
   model: 200,
   reason: 200,
   activity: 200,
+  /** Вариант ответа вопроса (ревизия 4). */
+  option: 200,
+  /** Обоснование вопроса (ревизия 4). */
+  rationale: 200,
+  /** Ссылка на запись источника задач (ревизия 4). */
+  url: 500,
 } as const;
 
 /**

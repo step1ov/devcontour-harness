@@ -121,7 +121,12 @@ const common = {
     /** Путь репозитория для сверки с политикой (относительно файла конфигурации). */
     path: z.string().min(1).max(1000).optional(),
   }),
-  tasks: z.array(taskMappingSchema).min(1).max(50),
+  /**
+   * Задачи конфигурации. Пустой список допустим: связку можно проверить
+   * (`source-check`, `doctor`) до появления задач; снимок и запуск без задач
+   * отказывают `NOT_READY` с причиной.
+   */
+  tasks: z.array(taskMappingSchema).max(50).default([]),
   baseline: baselineSchema.optional(),
   completion: z
     .strictObject({
@@ -133,6 +138,54 @@ const common = {
       historicalComment: z.boolean().default(false),
     })
     .default({ mode: 'complete', historicalComment: false }),
+  /**
+   * Контекст исполнения задачи из backend (Relay `relay-task-context-v1`):
+   * полные FI/SI, фичи, сценарии, приложения, паспорт и документы целей в
+   * пакете исполнителя. `auto` — когда backend объявил capability; `off` — не
+   * читать. Ни одно поле не входит в semantic digest задачи.
+   */
+  taskContext: z
+    .strictObject({
+      mode: z.enum(['auto', 'off']).default('auto'),
+      /** Включать документы, прикреплённые к целям, их фичам, сценариям и приложениям. */
+      targetDocuments: z.boolean().default(true),
+      /** Предел контекста одной задачи (ответ и файл пакета); больше — задача без контекста, с отметкой. */
+      maxBytes: z
+        .number()
+        .int()
+        .min(1024)
+        .max(2 * 1024 * 1024)
+        .default(1024 * 1024),
+      /** Предел контекста всех задач снимка вместе. */
+      totalBytes: z
+        .number()
+        .int()
+        .min(1024)
+        .max(8 * 1024 * 1024)
+        .default(8 * 1024 * 1024),
+    })
+    .default({
+      mode: 'auto',
+      targetDocuments: true,
+      maxBytes: 1024 * 1024,
+      totalBytes: 8 * 1024 * 1024,
+    }),
+  /**
+   * Комментарии в задаче backend. `final` (по умолчанию) — комментарий пишет
+   * только доставка принятого результата; отклонённые и остановленные попытки
+   * видны в harness, но в обсуждение задачи не пишут. `all` — как до
+   * alpha.60: комментарий о каждой доставленной попытке. Не входит в digest.
+   */
+  comments: z
+    .strictObject({ attempts: z.enum(['final', 'all']).default('final') })
+    .default({ attempts: 'final' }),
+  /** Вопросы владельцу, записанные в backend (`Вопрос: …`), — в представлении оператора. */
+  questions: z
+    .strictObject({
+      enabled: z.boolean().default(true),
+      limit: z.number().int().min(1).max(50).default(20),
+    })
+    .default({ enabled: true, limit: 20 }),
   eligibility: z
     .strictObject({
       /** Колонки, в которых задача допускается к запуску. done/cancelled не допускаются никогда. */

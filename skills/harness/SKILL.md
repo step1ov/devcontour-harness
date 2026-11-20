@@ -559,6 +559,13 @@ Nothing is asked again:
 2. `$H status --state <paths.state>` — `NOT_FOUND` means "never run".
 3. `$H explain --state <paths.state> --policy <repo>/.harness/policy.json`.
 4. Read `.harness/work/*.json` and the notes.
+5. With a task-source connector (`connector.json` next to the policy),
+   `$H doctor --policy <repo>/.harness/policy.json` also checks the source
+   version. When `warnings` carries its compatibility line, tell the operator
+   that line once: the writer works without the full task context until the
+   source is updated. Product questions you record in the task source as
+   question documents appear in `$H view` (`sourceQuestions`) after the next
+   `source-snapshot` or `run --source`; the owner answers them there.
 
 ### 11. Notes
 

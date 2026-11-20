@@ -279,6 +279,34 @@ const connectorOf = async (path: string, state: string, policy?: ExecutionPolicy
   });
 };
 
+/** Строки прогноза выпуска для `status --human`; представление недоступно — без них. */
+const forecastLines = (state: string): string | undefined => {
+  try {
+    const view = harnessView({ stateDir: state }) as {
+      forecast?: { progress: { line: string }; time: { line: string } };
+    };
+    const f = view.forecast;
+    return f ? `Прогноз выпуска: ${f.progress.line}; ${f.time.line}.\n` : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Сверка Relay для `doctor`/`init`: явный `--source` или найденный файл
+ * связки. Нет ни того, ни другого — `undefined` (связка не настроена).
+ */
+const relayCheck = async (
+  explicit: string | undefined,
+  candidate: string | undefined,
+  state?: string,
+) => {
+  const file = explicit ?? (candidate && existsSync(candidate) ? candidate : undefined);
+  if (!file) return undefined;
+  const { relayCompatibilityCheck } = await import('./integrations/connector/commands.ts');
+  return relayCompatibilityCheck(file, { stateDir: resolve(state ?? '.') });
+};
+
 /**
  * Получатель-каталог. Текущая редакция поручения читается из файла графа,
  * из которого он зарегистрирован: если там уже другая редакция (или
@@ -850,8 +878,17 @@ async function run(
         return { command, ...(await watchStatus(need('state'), v)) };
       const h = open(need('state'), binding(need('state')), 'state');
       try {
-        if (command === 'status')
-          return { command, data: h.status(v.graph, { detail: Boolean(v.detail) }) };
+        if (command === 'status') {
+          const data = h.status(v.graph, { detail: Boolean(v.detail) });
+          if (!v.human) return { command, data };
+          // Прогноз выпуска — та же строка, что у панели (`view.forecast`).
+          const forecast = forecastLines(need('state'));
+          return {
+            command,
+            data,
+            ...(forecast ? { text: statusText(data) + forecast } : {}),
+          };
+        }
         if (command === 'events')
           return { command, data: h.events(Number(v.after ?? 0), Number(v.limit ?? 100)) };
         return { command, data: h.result(need('work')) };
@@ -1011,6 +1048,14 @@ async function run(
         ...(v.state ? { stateDir: v.state } : {}),
       });
       if (sandboxed.inside) data.warnings.push({ code: 'lead-sandbox', message: sandboxed.advice });
+      // Связка с Relay уже настроена (или указана): версия Relay ниже рекомендуемой — предупреждение.
+      const relay = await relayCheck(
+        v.source,
+        join(resolve(need('repository')), '.harness', 'connector.json'),
+        v.state,
+      );
+      if (relay?.warning)
+        data.warnings.push({ code: 'relay-compatibility', message: relay.warning });
       // План с конфликтами или неготовым toolchain — отказ по существу с данными.
       const blocked = data.mode === 'plan' && (data.conflicts > 0 || !data.toolchain.ready);
       return { command, data, ...(blocked ? { code: exitCodes.refused } : {}) };
@@ -1344,7 +1389,27 @@ async function run(
       // Manifest проекта рядом с политикой расходится с ней по слою lean — предупреждение.
       const mismatch = v.policy ? leanMismatch(resolve(v.policy)) : [];
       if (mismatch.length) report.warnings = [...(report.warnings ?? []), ...mismatch];
-      return { command, data: report };
+      // Связка с Relay: --source или connector.json рядом с политикой.
+      const relay = await relayCheck(
+        v.source,
+        v.policy ? join(dirname(resolve(v.policy)), 'connector.json') : undefined,
+        v.state,
+      );
+      if (!relay) return { command, data: report };
+      if (relay.warning)
+        report.warnings = [...(report.warnings ?? []), `RELAY_COMPATIBILITY: ${relay.warning}`];
+      return {
+        command,
+        data: {
+          ...report,
+          relay: {
+            source: relay.source,
+            ...(relay.compatibility ? { compatibility: relay.compatibility } : {}),
+            ...(relay.code ? { code: relay.code } : {}),
+            ...(relay.error ? { error: relay.error } : {}),
+          },
+        },
+      };
     }
     case 'input-list':
     case 'input-show':

@@ -271,7 +271,13 @@ export class RelaySink implements ResultSink {
       }));
     }
     const criteria = this.criteriaPlan(result, read, mapping!);
-    const steps: StepRecord[] = [newStep(1, 'comment', op.key, { ...base, criteria })];
+    // Комментарий в задаче — только итог: по умолчанию его пишет доставка
+    // принятого результата, а отклонённая или остановленная попытка видна в
+    // harness и не шумит в обсуждении задачи (`comments.attempts: all` — как прежде).
+    const comment = result.outcome === 'accepted' || this.config.comments.attempts === 'all';
+    const steps: StepRecord[] = comment
+      ? [newStep(1, 'comment', op.key, { ...base, criteria })]
+      : [];
     for (const c of criteria.filter((x) => x.outcome === 'closed'))
       steps.push(newStep(steps.length + 1, 'criterion', op.key, { criterionId: c.criterionId }));
     const move = this.movePlan(result, read, criteria);
@@ -282,7 +288,12 @@ export class RelaySink implements ResultSink {
       planned: true,
       steps,
       status: 'in-progress',
-      receipt: { criteria, completion: move.reason, casRevision: read.task.revision },
+      receipt: {
+        criteria,
+        completion: move.reason,
+        casRevision: read.task.revision,
+        ...(comment ? {} : { comment: 'skipped: comments.attempts=final' }),
+      },
     }));
   }
 

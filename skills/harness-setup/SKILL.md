@@ -429,7 +429,17 @@ first graph.
   `work/context` next to `connector.json`;
 - `completion: { "mode": "review-only" }` unless the user chose `complete`;
   `eligibility.columns` from the project's board; `history.enabled: true`;
-- no `stateDir` (pass `--state <manifest.paths.state>`), no secret values.
+- no `stateDir` (pass `--state <manifest.paths.state>`), no secret values;
+- `tasks` may stay empty while the board has no tasks yet: `source-check`
+  then verifies the connection and warns; add tasks before the snapshot.
+
+The connector puts the full task context (FI/SI, their features and
+scenarios, application, product passport, documents) into the writer's pack
+when Relay declares `relay-task-context-v1`. When `source-check` returns a
+`warnings` line about Relay below the recommended version, tell the user
+that one line: the writer will not get the feature and scenario description
+until Relay is updated; continuing is their choice. In the product's
+AGENTS.md rule "read the task in Relay", the pack replaces the read.
 
 Checks that do not write to Relay:
 

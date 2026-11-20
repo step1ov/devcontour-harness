@@ -636,3 +636,32 @@ test('alpha.60 CLI (F-AL): input-carry — ответ на вопрос преж
   assert.equal(done.json.data.works[0].status, 'done');
   assert.match(readFileSync(`${p.scenario}.writer.1.prompt`, 'utf8'), /Use exactly Hello, <name>!/);
 });
+
+test('alpha.60 CLI: status --human — строка «кто двигает очередь» и строка прогноза выпуска вместе', () => {
+  const p = project();
+  const base = ['--graph', 'graph.json', '--policy', 'policy.json', '--state', p.state];
+  assert.equal(p.harness('run', ...base).status, exitCodes.refused);
+  const human = p.raw('status', '--state', p.state, '--human');
+  assert.equal(human.status, 0, human.stderr);
+  const lines = human.stdout.trimEnd().split('\n');
+  // Первая строка — кто двигает очередь (alpha.60 P1), последняя — прогноз (P11).
+  assert.match(lines[0]!, /^Очередь стоит — никто не запущен: .*\(ведущий: harness run\)\.$/);
+  assert.match(lines.at(-1)!, /^Прогноз выпуска: готово ~0 %, осталось задач: 1 из 1; /);
+  assert.equal(lines.filter((l) => l.startsWith('Прогноз выпуска:')).length, 1);
+  assert.equal(lines.filter((l) => l.startsWith('Очередь стоит')).length, 1);
+  // JSON `status` не меняется от --human: прогноза в нём нет, runner — есть.
+  const json = p.harness('status', '--state', p.state).json.data;
+  assert.equal(json.runner.state, 'not-running');
+  assert.equal(json.forecast, undefined);
+  // Представление того же состояния — та же строка очереди и тот же прогноз.
+  const view = p.harness('view', '--state', p.state).json.data;
+  assert.equal(view.progress.queue.runner, 'not-running');
+  assert.equal(view.progress.queue.line, json.runner.line);
+  assert.ok(lines.at(-1)!.includes(view.forecast.progress.line));
+  // Вопрос в представлении из настоящего состояния — с вариантами и обоснованием (P12).
+  assert.deepEqual(
+    view.questions[0].options.map((o: { id: string }) => o.id),
+    ['hello', 'hi'],
+  );
+  assert.equal(view.questions[0].rationale, 'User-visible text');
+});
