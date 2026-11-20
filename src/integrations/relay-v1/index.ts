@@ -25,7 +25,10 @@ import {
   type ProviderId,
   type RelayTransport,
   type SessionRecord,
+  type SourceQuestionRecord,
   type TaskColumn,
+  type TaskContextOutcome,
+  type TaskContextRecord,
   type TaskRead,
   type TaskSummary,
   type TransportErrorKind,
@@ -35,6 +38,17 @@ import {
 export const RELAY_V1_PROVIDER = 'relay-v1-http' as const satisfies ProviderId;
 /** Capability истории работы; без неё методы истории не вызывают routes. */
 export const WORK_HISTORY_CAPABILITY = 'relay-work-history-v1';
+/**
+ * Capability контекста исполнения задачи (`GET /board-tasks/:ref/context`).
+ * Без неё транспорт контекст не читает, и связка работает как прежде.
+ */
+export const TASK_CONTEXT_CAPABILITY = 'relay-task-context-v1';
+/** Версия формы ответа контекста (`TaskContext.contractVersion`), с которой проверен транспорт. */
+export const TASK_CONTEXT_CONTRACT_VERSION = 1;
+/** Capability библиотеки документов: фильтр по типу и состоянию документа. */
+export const DOCUMENT_LIBRARY_CAPABILITY = 'relay-document-library-v1';
+/** Признак документа-вопроса владельцу по соглашению Relay (`Вопрос: …`). */
+export const QUESTION_TITLE = /^\s*(вопрос|question)\s*:/i;
 
 /* ------------------------------------------------------------------ */
 /* Настройки                                                           */
@@ -166,6 +180,66 @@ const documentDetailSchema = entitySummarySchema.extend({
 });
 
 const healthSchema = z.object({ status: z.string(), contractVersion: z.number().int() });
+
+const refSchema = z.object({ kind: z.string().min(1), id: idString });
+/** Запись контекста: только поля, которые переносятся в пакет (лишние поля backend допустимы). */
+const contextRecordSchema = z.object({
+  record: z.object({
+    ref: refSchema,
+    key: z.string(),
+    title: z.string(),
+    summary: z.string().optional(),
+    revision: revisionSchema,
+    implementation: z
+      .object({
+        type: z.string(),
+        application: z.object({ key: z.string() }).nullable().optional(),
+        target: z.object({ key: z.string() }).nullable().optional(),
+      })
+      .nullable()
+      .optional(),
+    data: z.object({
+      description: z.string().optional(),
+      body: z.string().optional(),
+      summary: z.string().optional(),
+    }),
+  }),
+  reasons: z
+    .array(z.object({ code: z.string().min(1).max(80), from: refSchema.nullable() }))
+    .min(1)
+    .max(MAX_ITEMS),
+});
+const contextRecords = z.array(contextRecordSchema).max(MAX_ITEMS);
+const taskContextSchema = z.object({
+  contractVersion: z.number().int(),
+  task: z.object({ id: idString, key: z.string(), revision: revisionSchema }),
+  targets: contextRecords,
+  requirements: contextRecords,
+  applications: contextRecords,
+  product: contextRecordSchema.nullable(),
+  documents: contextRecords,
+  consistency: z.string().min(1).max(500),
+  complete: z.literal(true),
+});
+const questionSummarySchema = entitySummarySchema.extend({
+  title: z.string(),
+  updatedAt: z.string().optional(),
+});
+const questionDetailSchema = documentDetailSchema.extend({
+  data: z.object({
+    kind: z.literal('document'),
+    name: z.string(),
+    body: z.string(),
+    relations: z
+      .array(z.object({ target: refSchema }))
+      .max(MAX_ITEMS)
+      .optional(),
+  }),
+  references: z
+    .array(z.object({ ref: refSchema, key: z.string() }))
+    .max(MAX_ITEMS)
+    .optional(),
+});
 /**
  * Версия договора REST Relay v1 (`GET /api/v1/health` → `contractVersion`),
  * с которой проверен этот транспорт. Другая версия — отказ
@@ -299,9 +373,14 @@ interface CallOptions {
   body?: Record<string, unknown>;
   root?: boolean;
   signal?: AbortSignal | undefined;
+  /** Предел ответа этого вызова; по умолчанию `maxResponseBytes`. */
+  maxBytes?: number;
 }
 
 class PageRestart extends Error {}
+
+/** Код ответа больше локального предела чтения (не код backend). */
+const RESPONSE_LIMIT = 'RESPONSE_LIMIT';
 
 export class RelayV1Transport implements RelayTransport {
   readonly provider = RELAY_V1_PROVIDER;
@@ -388,7 +467,7 @@ export class RelayV1Transport implements RelayTransport {
       }
       status = res.status;
       try {
-        text = await this.readLimited(res, operation, mutation);
+        text = await this.readLimited(res, operation, mutation, o.maxBytes);
       } catch (e) {
         if (e instanceof TransportError) throw e;
         throw this.transportFailure(operation, e, mutation, timedOut, 'response');
@@ -472,11 +551,17 @@ export class RelayV1Transport implements RelayTransport {
     return this.fail('unavailable', operation, `${reason} during ${phase}`, { mutation: false });
   }
 
-  private async readLimited(res: Response, operation: string, mutation: boolean): Promise<string> {
-    const max = this.settings.maxResponseBytes;
+  private async readLimited(
+    res: Response,
+    operation: string,
+    mutation: boolean,
+    limit?: number,
+  ): Promise<string> {
+    const max = limit ?? this.settings.maxResponseBytes;
     const declared = Number(res.headers.get('content-length') ?? NaN);
     const tooLarge = () =>
       this.fail('protocol', operation, `response exceeds ${max} bytes (HTTP ${res.status})`, {
+        code: RESPONSE_LIMIT,
         mutation,
       });
     if (Number.isFinite(declared) && declared > max) {
@@ -603,7 +688,10 @@ export class RelayV1Transport implements RelayTransport {
       throw this.fail(
         'unsupported',
         `${operation}.health`,
-        `сервер сообщает contractVersion ${health.contractVersion}, транспорт проверен с ${RELAY_V1_CONTRACT_VERSION}`,
+        `Relay сообщает версию договора REST ${health.contractVersion}, а этот harness работает с версией ${RELAY_V1_CONTRACT_VERSION} (Relay 0.13.x и новее с тем же договором; сервер сообщает contractVersion ${health.contractVersion}, транспорт проверен с ${RELAY_V1_CONTRACT_VERSION}). ` +
+          (health.contractVersion > RELAY_V1_CONTRACT_VERSION
+            ? 'Relay новее, чем знает harness: обновите devcontour-harness'
+            : 'Relay старее, чем нужно harness: обновите Relay'),
         { code: 'CONNECTOR_VERSION_MISMATCH', mutation: false },
       );
     return health;
@@ -659,8 +747,8 @@ export class RelayV1Transport implements RelayTransport {
     };
   }
 
-  /** Capability истории (кэш на транспорт); без неё route не вызывается. */
-  private async requireHistory(operation: string, signal?: AbortSignal): Promise<void> {
+  /** Capabilities проекта (кэш на транспорт); сбой чтения не кэшируется. */
+  private async capabilityList(operation: string, signal?: AbortSignal): Promise<string[]> {
     if (!this.capabilities) {
       const p = this.call(`${operation}.capabilities`, contextSchema, {
         method: 'GET',
@@ -672,17 +760,21 @@ export class RelayV1Transport implements RelayTransport {
         if (this.capabilities === p) this.capabilities = undefined;
       });
     }
-    const caps = await this.capabilities;
-    if (!caps.includes(WORK_HISTORY_CAPABILITY)) {
-      throw this.fail(
-        'unsupported',
-        operation,
-        `server does not declare ${WORK_HISTORY_CAPABILITY}`,
-        {
-          code: 'UNSUPPORTED',
-        },
-      );
+    return this.capabilities;
+  }
+
+  private async requireCapability(operation: string, capability: string, signal?: AbortSignal) {
+    const caps = await this.capabilityList(operation, signal);
+    if (!caps.includes(capability)) {
+      throw this.fail('unsupported', operation, `server does not declare ${capability}`, {
+        code: 'UNSUPPORTED',
+      });
     }
+  }
+
+  /** Capability истории (кэш на транспорт); без неё route не вызывается. */
+  private requireHistory(operation: string, signal?: AbortSignal): Promise<void> {
+    return this.requireCapability(operation, WORK_HISTORY_CAPABILITY, signal);
   }
 
   /* ---------------- Задачи ---------------- */
@@ -850,6 +942,152 @@ export class RelayV1Transport implements RelayTransport {
     }
     /* Не согласовалось за отведённые повторы: ядро увидит before ≠ after. */
     return last!;
+  }
+
+  /**
+   * Контекст исполнения задачи одним чтением (`relay-task-context-v1`).
+   * Ответ больше `maxBytes` или `CONTEXT_TOO_LARGE` backend — `too-large`:
+   * усечённого контекста нет. Другая версия формы ответа — именованный отказ
+   * `CONNECTOR_VERSION_MISMATCH`, а не чтение по догадке.
+   */
+  async readTaskContext(
+    ref: string,
+    options: { targetDocuments: boolean; maxBytes: number },
+    signal?: AbortSignal,
+  ): Promise<TaskContextOutcome> {
+    const op = 'task.context';
+    await this.requireCapability(op, TASK_CONTEXT_CAPABILITY, signal);
+    let raw: unknown;
+    try {
+      raw = await this.call(op, z.unknown(), {
+        method: 'GET',
+        path: `/board-tasks/${this.enc(ref)}/context`,
+        query: { targetDocuments: options.targetDocuments ? 'true' : 'false' },
+        signal,
+        maxBytes: options.maxBytes,
+      });
+    } catch (error) {
+      if (
+        error instanceof TransportError &&
+        (error.details.code === 'CONTEXT_TOO_LARGE' || error.details.code === RESPONSE_LIMIT)
+      )
+        return {
+          status: 'too-large',
+          reason:
+            error.details.code === RESPONSE_LIMIT
+              ? `ответ больше предела ${options.maxBytes} байт`
+              : 'Relay: контекст больше предела сервера (CONTEXT_TOO_LARGE)',
+        };
+      throw error;
+    }
+    const version = (raw as { contractVersion?: unknown } | null)?.contractVersion;
+    if (version !== TASK_CONTEXT_CONTRACT_VERSION)
+      throw this.fail(
+        'unsupported',
+        op,
+        `Relay отдаёт контекст задачи в форме версии ${String(version)}, а этот harness читает версию ${TASK_CONTEXT_CONTRACT_VERSION}: обновите devcontour-harness или Relay до пары из docs/compatibility-versions.md`,
+        { code: 'CONNECTOR_VERSION_MISMATCH', mutation: false },
+      );
+    const parsed = taskContextSchema.safeParse(raw);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      throw this.fail(
+        'protocol',
+        op,
+        `incompatible response data at ${issue?.path.join('.') || '<root>'}: ${safe(issue?.message ?? 'invalid')}`,
+      );
+    }
+    const data = parsed.data;
+    const keys = new Map<string, string>([[data.task.id, data.task.key]]);
+    type Entry = [TaskContextRecord['section'], z.output<typeof contextRecordSchema>];
+    const tag =
+      (section: TaskContextRecord['section']) =>
+      (r: Entry[1]): Entry => [section, r];
+    const all: Entry[] = [
+      ...data.targets.map(tag('target')),
+      ...data.requirements.map(tag('requirement')),
+      ...data.applications.map(tag('application')),
+      ...(data.product ? [tag('product')(data.product)] : []),
+      ...data.documents.map(tag('document')),
+    ];
+    for (const [, r] of all) keys.set(r.record.ref.id, r.record.key);
+    const records: TaskContextRecord[] = all.map(([section, r]) => {
+      const rec = r.record;
+      const impl = rec.implementation;
+      return {
+        section,
+        kind: rec.ref.kind,
+        id: rec.ref.id,
+        key: rec.key,
+        title: rec.title,
+        revision: rec.revision,
+        summary: rec.summary ?? rec.data.summary ?? '',
+        body: rec.data.description ?? rec.data.body ?? '',
+        ...(impl
+          ? {
+              implementation: {
+                type: impl.type,
+                ...(impl.application ? { application: impl.application.key } : {}),
+                ...(impl.target ? { target: impl.target.key } : {}),
+              },
+            }
+          : {}),
+        reasons: r.reasons.map((x) => ({
+          code: x.code,
+          from: x.from ? (keys.get(x.from.id) ?? x.from.id) : null,
+        })),
+      };
+    });
+    return {
+      status: 'ok',
+      context: {
+        contractVersion: data.contractVersion,
+        consistency: data.consistency,
+        taskRevision: data.task.revision,
+        records,
+      },
+    };
+  }
+
+  /**
+   * Открытые вопросы владельцу по соглашению Relay: документы `Вопрос: …`
+   * типа `proposal` в состоянии `draft`. Только чтение; полный текст — для
+   * первых `limit` вопросов, `total` — сколько открытых всего.
+   */
+  async listOpenQuestions(
+    options: { limit: number },
+    signal?: AbortSignal,
+  ): Promise<{ questions: SourceQuestionRecord[]; total: number }> {
+    const op = 'question.list';
+    await this.requireCapability(op, DOCUMENT_LIBRARY_CAPABILITY, signal);
+    const list = await this.pages(
+      op,
+      questionSummarySchema,
+      '/entities',
+      { kind: 'document', documentKind: 'proposal', status: 'draft' },
+      signal,
+    );
+    const open = list.items.filter((d) => QUESTION_TITLE.test(d.title));
+    const questions: SourceQuestionRecord[] = [];
+    for (const d of open.slice(0, options.limit)) {
+      const full = await this.call(op, questionDetailSchema, {
+        method: 'GET',
+        path: '/entities/get',
+        query: { ref: d.ref.id, kind: 'document' },
+        signal,
+      });
+      const keyOf = new Map((full.references ?? []).map((r) => [r.ref.id, r.key]));
+      questions.push({
+        id: full.ref.id,
+        key: full.key,
+        title: full.data.name,
+        revision: full.revision,
+        body: full.data.body,
+        targets: (full.data.relations ?? []).map((r) => keyOf.get(r.target.id) ?? r.target.id),
+        ...(d.updatedAt ? { updatedAt: d.updatedAt } : {}),
+      });
+    }
+    return { questions, total: open.length };
   }
 
   async listComments(ref: string, signal?: AbortSignal): Promise<CommentRecord[]> {

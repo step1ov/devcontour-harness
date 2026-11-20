@@ -245,6 +245,21 @@ const connectorOf = async (path: string, state: string, policy?: ExecutionPolicy
 };
 
 /**
+ * Сверка Relay для `doctor`/`init`: явный `--source` или найденный файл
+ * связки. Нет ни того, ни другого — `undefined` (связка не настроена).
+ */
+const relayCheck = async (
+  explicit: string | undefined,
+  candidate: string | undefined,
+  state?: string,
+) => {
+  const file = explicit ?? (candidate && existsSync(candidate) ? candidate : undefined);
+  if (!file) return undefined;
+  const { relayCompatibilityCheck } = await import('./integrations/connector/commands.ts');
+  return relayCompatibilityCheck(file, { stateDir: resolve(state ?? '.') });
+};
+
+/**
  * Получатель-каталог. Текущая редакция поручения читается из файла графа,
  * из которого он зарегистрирован: если там уже другая редакция (или
  * поручения больше нет), старый результат её не закрывает.
@@ -949,6 +964,14 @@ async function run(
         ...(v.state ? { stateDir: v.state } : {}),
       });
       if (sandboxed.inside) data.warnings.push({ code: 'lead-sandbox', message: sandboxed.advice });
+      // Связка с Relay уже настроена (или указана): версия Relay ниже рекомендуемой — предупреждение.
+      const relay = await relayCheck(
+        v.source,
+        join(resolve(need('repository')), '.harness', 'connector.json'),
+        v.state,
+      );
+      if (relay?.warning)
+        data.warnings.push({ code: 'relay-compatibility', message: relay.warning });
       // План с конфликтами или неготовым toolchain — отказ по существу с данными.
       const blocked = data.mode === 'plan' && (data.conflicts > 0 || !data.toolchain.ready);
       return { command, data, ...(blocked ? { code: exitCodes.refused } : {}) };
@@ -1282,7 +1305,27 @@ async function run(
       // Manifest проекта рядом с политикой расходится с ней по слою lean — предупреждение.
       const mismatch = v.policy ? leanMismatch(resolve(v.policy)) : [];
       if (mismatch.length) report.warnings = [...(report.warnings ?? []), ...mismatch];
-      return { command, data: report };
+      // Связка с Relay: --source или connector.json рядом с политикой.
+      const relay = await relayCheck(
+        v.source,
+        v.policy ? join(dirname(resolve(v.policy)), 'connector.json') : undefined,
+        v.state,
+      );
+      if (!relay) return { command, data: report };
+      if (relay.warning)
+        report.warnings = [...(report.warnings ?? []), `RELAY_COMPATIBILITY: ${relay.warning}`];
+      return {
+        command,
+        data: {
+          ...report,
+          relay: {
+            source: relay.source,
+            ...(relay.compatibility ? { compatibility: relay.compatibility } : {}),
+            ...(relay.code ? { code: relay.code } : {}),
+            ...(relay.error ? { error: relay.error } : {}),
+          },
+        },
+      };
     }
     case 'input-list':
     case 'input-show':

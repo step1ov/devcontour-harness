@@ -31,10 +31,13 @@ import {
   matchCriterion,
   readStable,
   semanticDigest,
+  taskContextOptions,
   type BaselineManifest,
   type SnapshotManifest,
 } from './snapshot.ts';
 import { RelayWorkSource } from './source.ts';
+import { relayCompatibility, type RelayCompatibility } from './compat.ts';
+import { RELAY_OBSERVATION, readQuestions, type RelayObservation } from './questions.ts';
 import { redactingTransport, settingsSecrets } from './redact.ts';
 import { ConnectorStore } from './store.ts';
 import type { RelayTransport } from './transport.ts';
@@ -64,6 +67,54 @@ export async function openConnector(source: string | LoadedConfig, options: Open
   const loaded = typeof source === 'string' ? loadConfig(source) : source;
   const transport = options.transport ?? (await createTransportFor(loaded));
   return new Connector(loaded, transport, options);
+}
+
+/** Итог сверки Relay для `doctor` и `init`: совместимость или причина простыми словами. */
+export interface RelayCompatibilityCheck {
+  source: string;
+  compatibility?: RelayCompatibility;
+  /** Код отказа: CONNECTOR_VERSION_MISMATCH (неизвестный или старый договор), DELIVERY_FAILED (недоступен) и т. п. */
+  code?: string;
+  error?: string;
+  /** Предупреждение одной строкой (нет — Relay рекомендуемой версии). */
+  warning?: string;
+}
+
+/**
+ * Сверка Relay по конфигурации связки без записей и без каталога состояния:
+ * идентичность backend (договор, capabilities) → уровень совместимости.
+ * Ошибка — не отказ команды, а строка предупреждения.
+ */
+export async function relayCompatibilityCheck(
+  source: string,
+  options: { stateDir: string; transport?: RelayTransport } = { stateDir: '.' },
+): Promise<RelayCompatibilityCheck> {
+  let connector: Connector | undefined;
+  try {
+    connector = await openConnector(source, {
+      stateDir: options.stateDir,
+      ...(options.transport ? { transport: options.transport } : {}),
+    });
+    const identity = await checkIdentity(connector.transport, connector.config);
+    const compatibility = relayCompatibility(identity, connector.config);
+    return {
+      source,
+      ...(compatibility ? { compatibility } : {}),
+      ...(compatibility && !compatibility.taskContextUsed ? { warning: compatibility.line } : {}),
+    };
+  } catch (error) {
+    const code = error instanceof HarnessError ? error.code : undefined;
+    const message = error instanceof Error ? error.message : String(error);
+    const warning =
+      code === 'CONNECTOR_VERSION_MISMATCH'
+        ? `Relay несовместим с этим harness: ${message}`
+        : code === 'INVALID_INPUT'
+          ? `Конфигурация связки ${source} не прочитана: ${message}`
+          : `Relay не проверен (нет связи или проект не тот): ${message}`;
+    return { source, ...(code ? { code } : {}), error: message, warning };
+  } finally {
+    connector?.close();
+  }
 }
 
 export class Connector {
@@ -193,6 +244,28 @@ export class Connector {
     if (issue) throw new HarnessError('NOT_READY', issue);
   }
 
+  /**
+   * Наблюдение backend для представления оператора: совместимость и открытые
+   * вопросы владельцу. Только для показа — сбой чтения вопросов или записи
+   * наблюдения не останавливает снимок и запуск.
+   */
+  private async observe(compatibility: RelayCompatibility | undefined) {
+    try {
+      const questions = await readQuestions(this.config, this.transport, this.redact);
+      const value: RelayObservation = {
+        at: new Date().toISOString(),
+        provider: this.config.provider,
+        projectId: this.config.projectId,
+        connector: this.id,
+        ...(compatibility ? { compatibility } : {}),
+        ...(questions ? { questions } : {}),
+      };
+      this.store.putObservation(RELAY_OBSERVATION, value);
+    } catch {
+      /* наблюдение необязательно */
+    }
+  }
+
   /* ---------------------------------------------------------------- */
   /* source-check                                                      */
   /* ---------------------------------------------------------------- */
@@ -216,7 +289,12 @@ export class Connector {
       const message = this.redact(error instanceof Error ? error.message : String(error));
       return this.checkReport(undefined, false, [message], []);
     }
-    const mapping: { ref: string; key?: string; problems: string[] }[] = [];
+    const mapping: {
+      ref: string;
+      key?: string;
+      problems: string[];
+      taskContext?: 'included' | 'too-large';
+    }[] = [];
     try {
       const local = await localContext(config, this.contextDir);
       if (local.length)
@@ -231,6 +309,8 @@ export class Connector {
         this.transport,
         config.tasks.map((t) => t.ref),
         config.limits.rereads,
+        undefined,
+        taskContextOptions(config, identity, this.transport),
       );
       reads.forEach((read, i) => {
         const m = config.tasks[i]!;
@@ -260,7 +340,14 @@ export class Connector {
                 issues.push(`gate ${c.gate} критерия ${c.id ?? c.title} не объявлен в политике`);
           if (!policy.roles[m.role]) issues.push(`роль ${m.role} не объявлена в политике`);
         }
-        mapping.push({ ref: m.ref, key: read.task.key, problems: issues });
+        mapping.push({
+          ref: m.ref,
+          key: read.task.key,
+          problems: issues,
+          ...(read.context
+            ? { taskContext: read.context.status === 'ok' ? 'included' : 'too-large' }
+            : {}),
+        });
         problems.push(
           ...issues.filter((x) => !x.startsWith('ручные')).map((x) => `${read.task.key}: ${x}`),
         );
@@ -275,9 +362,23 @@ export class Connector {
     identity: Awaited<ReturnType<typeof checkIdentity>> | undefined,
     projectMatches: boolean,
     problems: string[],
-    mapping: { ref: string; key?: string; problems: string[] }[],
+    mapping: {
+      ref: string;
+      key?: string;
+      problems: string[];
+      taskContext?: 'included' | 'too-large';
+    }[],
   ) {
     const caps = identity?.capabilities ?? [];
+    const compatibility = identity ? relayCompatibility(identity, this.config) : undefined;
+    const warnings = [
+      ...(compatibility && !compatibility.taskContextUsed ? [compatibility.line] : []),
+      ...(this.config.tasks.length
+        ? []
+        : [
+            'В конфигурации связки пока нет задач: подключение проверено; снимок и запуск — после того, как задачи добавлены в tasks[]',
+          ]),
+    ];
     return {
       provider: this.config.provider,
       projectId: this.config.projectId,
@@ -291,6 +392,8 @@ export class Connector {
       },
       mapping,
       ownership: { stateDir: this.stateDir, store: this.storeFile, note: OWNERSHIP_NOTE },
+      ...(compatibility ? { compatibility } : {}),
+      ...(warnings.length ? { warnings } : {}),
       problems,
     };
   }
@@ -314,6 +417,7 @@ export class Connector {
       context: snapshot.context,
       manifest: snapshot.manifest,
     });
+    await this.observe(snapshot.manifest.compatibility);
     const dir = resolve(
       outDir ?? join(this.stateDir, 'connectors', 'snapshots', snapshot.graph.id),
     );
@@ -338,6 +442,9 @@ export class Connector {
       problems: snapshot.problems.map((p) => `${p.key}: ${p.code}: ${p.message}`),
       truncated: snapshot.manifest.truncated,
       ...(snapshot.manifest.baseline ? { baseline: snapshot.manifest.baseline } : {}),
+      ...(snapshot.manifest.compatibility
+        ? { compatibility: snapshot.manifest.compatibility }
+        : {}),
       tasks: snapshot.manifest.tasks.map((t) => ({
         identity: t.identity,
         key: t.key,
@@ -345,6 +452,7 @@ export class Connector {
         semanticDigest: t.semanticDigest,
         casRevision: t.casRevision,
         column: t.column,
+        ...(t.taskContext ? { taskContext: t.taskContext } : {}),
       })),
       files,
       snapshot,
@@ -368,6 +476,7 @@ export class Connector {
   }> {
     this.assertBaselineProtected(h.policy, h.options.baseDir);
     const fresh = await this.source.snapshot();
+    await this.observe(fresh.manifest.compatibility);
     const stored = this.store.latestSnapshot(fresh.graph.id);
     if (!stored)
       throw new HarnessError(
@@ -516,10 +625,23 @@ export class Connector {
           remote,
         });
       }
+      // Совместимость и открытые вопросы — живым чтением (status ничего не пишет).
+      let compatibility: RelayCompatibility | undefined;
+      try {
+        compatibility = relayCompatibility(await this.transport.identity(), this.config);
+      } catch {
+        compatibility = undefined;
+      }
+      const questions = await readQuestions(this.config, this.transport, this.redact);
       return {
         connector: this.id,
         provider: this.config.provider,
         projectId: this.config.projectId,
+        ...(compatibility ? { compatibility } : {}),
+        ...(compatibility && !compatibility.taskContextUsed
+          ? { warnings: [compatibility.line] }
+          : {}),
+        ...(questions ? { questions } : {}),
         ...(manifest
           ? {
               snapshot: {

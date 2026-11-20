@@ -172,6 +172,9 @@ const ADDITIVE_ARGS = new Set([
   'status--interval',
   // Технические вопросы решает ведущий (0.1.0-alpha.55).
   'init--lead-technical-answers',
+  // Сверка версии Relay по связке задач (0.1.0-alpha.60).
+  'doctor--source',
+  'init--source',
 ]);
 /**
  * Текст `--writer` init в H2. 0.1.0-alpha.50 меняет умолчание: writer —
@@ -211,6 +214,8 @@ const ADDITIVE_ENUM_VALUES = new Set([
   // Предупреждения init о хранилище зависимостей (0.1.0-alpha.59).
   'dependency-store-unsupported',
   'dependency-cache-path',
+  // Предупреждение init о версии Relay (0.1.0-alpha.60).
+  'relay-compatibility',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
@@ -493,6 +498,29 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.questions;
       // Ведущий внутри песочницы (0.1.0-alpha.59).
       delete rest.leadSandbox;
+      // Сверка Relay по связке задач (0.1.0-alpha.60).
+      delete rest.relay;
+      return rest;
+    }
+    // Аддитивные поля ответов коннектора (0.1.0-alpha.60): совместимость с
+    // Relay, предупреждения простыми словами, открытые вопросы владельцу.
+    if (k === 'properties' && v && typeof v === 'object' && 'compatibility' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.compatibility;
+      delete rest.warnings;
+      delete rest.questions;
+      v = rest;
+    }
+    // Контекст исполнения задачи у строки mapping и задачи снимка (0.1.0-alpha.60).
+    if (
+      k === 'properties' &&
+      v &&
+      typeof v === 'object' &&
+      'taskContext' in v &&
+      ('problems' in v || 'semanticDigest' in v)
+    ) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.taskContext;
       return rest;
     }
     // Аддитивные поля ответов коннектора: пакеты `tasks[].context` (alpha.13) и
@@ -623,6 +651,15 @@ test('H3-01: прежние команды и схемы их данных не 
     JSON.stringify(data['source-snapshot']).includes('"localContext"'),
     'source-snapshot объявляет пакеты контекста',
   );
+  // Хеш H2 вырезает поля совместимости с Relay (0.1.0-alpha.60): объявление держит эта проверка.
+  assert.ok(JSON.stringify(data.doctor).includes('"relay"'), 'doctor: сверка Relay');
+  for (const command of ['source-check', 'source-snapshot', 'source-status'])
+    assert.ok(
+      JSON.stringify(data[command]).includes('"compatibility"'),
+      command + ' объявляет compatibility',
+    );
+  assert.ok(JSON.stringify(data['source-status']).includes('"questions"'), 'source-status: вопросы');
+  assert.ok(JSON.stringify(data['source-snapshot']).includes('"taskContext"'), 'снимок: контекст');
   // Хеш H2 выше вырезает `baseline`, поэтому только эта проверка держит объявление.
   for (const command of ['run', 'source-snapshot', 'source-status'])
     assert.ok(

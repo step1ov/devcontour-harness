@@ -128,7 +128,41 @@ export interface OperatorQuestion {
   answeredBy?: 'operator' | 'lead' | 'host';
   answerBasis?: AnswerBasisView;
   title?: string;
+  /** Варианты ответа (ревизия 4). */
+  options?: { id: string; label: string; recommended?: true }[];
+  /** Обоснование исполнителя (ревизия 4). */
+  rationale?: string;
   createdAt: string;
+}
+
+/** Вопрос владельцу из источника задач (ревизия 4), только чтение. */
+export interface SourceQuestionView {
+  connector: string;
+  provider: string;
+  id: string;
+  ref: string;
+  title?: string;
+  question?: string;
+  options?: string[];
+  recommendation?: string;
+  provisional?: string;
+  tasks?: string[];
+  url?: string;
+  readAt: string;
+}
+
+/** Весь срез прогона (ревизия 4, P10). */
+export interface ScopeView {
+  total?: number;
+  tasks: {
+    id: string;
+    connector: string;
+    key?: string;
+    title?: string;
+    workId?: string;
+    state: 'in-harness' | 'not-handed-over' | 'not-ready';
+    plain?: string;
+  }[];
 }
 
 /** Основание последнего ответа на вопрос (ревизия 1). */
@@ -274,9 +308,21 @@ export interface ViewHealth {
   spentTotalUsd: Bounded;
   drift: { checked: number; drifted: number; unavailable: number };
   warnings: { code: string; message: string }[];
+  /** Связки с источниками задач (ревизия 4). */
+  sources?: {
+    connector: string;
+    provider: string;
+    level?: string;
+    taskContext?: boolean;
+    contractVersion?: number;
+    line?: string;
+    checkedAt: string;
+  }[];
 }
 
 export type TruncatedKey =
+  | 'scope'
+  | 'sourceQuestions'
   | 'works'
   | 'reviews'
   | 'findings'
@@ -321,6 +367,8 @@ export interface OperatorView {
   history: ViewHistory;
   health: ViewHealth;
   activity?: ActivityView[];
+  scope?: ScopeView;
+  sourceQuestions?: SourceQuestionView[];
   truncated?: Partial<Record<TruncatedKey, number>>;
 }
 
@@ -550,6 +598,11 @@ export interface OperatorQuestionInput {
   };
   /** Работа закрыта (`done`, `cancelled`): вопрос виден только в деталях работы. */
   closed?: boolean;
+  /** Варианты ответа (сырые) и рекомендуемый вариант. */
+  options?: readonly { id: string; label: string }[];
+  recommended?: string | null;
+  /** Сырое обоснование исполнителя. */
+  rationale?: string;
   /** Действующая политика разрешает ответ ведущему (`leadMayAnswer`). */
   leadMay: boolean;
 }
@@ -770,6 +823,49 @@ export interface OperatorViewInput {
   activity?: readonly OperatorActivityInput[];
   /** Что маскировать: домашний каталог, корни репозиториев, значения секретов. */
   mask?: MaskContext;
+  /**
+   * Связки с источниками задач (состояние коннекторов в каталоге состояния):
+   * последний снимок и последнее наблюдение backend. Нет — связок нет (полей
+   * `scope`, `sourceQuestions`, `health.sources` в документе нет).
+   */
+  sources?: readonly OperatorSourceInput[];
+}
+
+/** Связка с источником задач: срез последнего снимка, совместимость, вопросы владельцу. */
+export interface OperatorSourceInput {
+  connector: string;
+  provider: string;
+  /** Задачи последнего снимка в порядке конфигурации. */
+  tasks: readonly {
+    id: string;
+    key: string;
+    title?: string;
+    /** ID работы harness (`orderId`), если такая работа зарегистрирована. */
+    workId?: string;
+    orderId: string;
+    /** Коды и сырые причины, по которым задача не допускается к запуску. */
+    problems: readonly { code: string; message: string }[];
+  }[];
+  compatibility?: {
+    level: string;
+    taskContext: boolean;
+    taskContextUsed: boolean;
+    contractVersion: number | null;
+    recommended: string;
+  };
+  /** Когда связка последний раз читала backend (наблюдение). */
+  observedAt?: string;
+  questions?: readonly {
+    id: string;
+    key: string;
+    title: string;
+    question?: string;
+    options: readonly string[];
+    recommendation?: string;
+    provisional?: string;
+    targets: readonly string[];
+    url?: string;
+  }[];
 }
 
 export interface OperatorViewOptions {
@@ -1275,7 +1371,134 @@ function questionView(c: Ctx, q: OperatorQuestionInput): OperatorQuestion {
     ...(q.answeredBy ? { answeredBy: q.answeredBy } : {}),
     ...(basis ? { answerBasis: basis } : {}),
     ...(c.titles && q.text ? { title: text(c, q.text, T.questionTitle) } : {}),
+    ...(c.titles && q.options?.length
+      ? {
+          options: q.options.slice(0, L.questionOptions).map((x) => ({
+            id: x.id,
+            label: text(c, x.label, T.option) ?? x.id,
+            ...(q.recommended === x.id ? { recommended: true as const } : {}),
+          })),
+        }
+      : {}),
+    ...(c.titles && q.rationale?.trim() ? { rationale: text(c, q.rationale, T.rationale) } : {}),
     createdAt: q.createdAt,
+  };
+}
+
+/** Простые строки причин неготовности задачи по коду снимка (английские — по коду). */
+const notReadyEn: Record<string, string> = {
+  TASK_DONE: 'the task is already done',
+  TASK_CANCELLED: 'the task is cancelled',
+  COLUMN_NOT_ELIGIBLE: 'the task column does not allow a run',
+  DEPENDENCY_UNFINISHED: 'a dependency is not finished',
+  DEPENDENCY_UNPROVEN: 'a dependency is done without proof from this connector',
+  LIMIT_EXCEEDED: 'the task exceeds a context limit',
+  DOCUMENT_MISSING: 'a required document is missing',
+  MAPPING_INVALID: 'the criteria mapping does not match the task',
+};
+
+/** Срез прогона по связкам: все задачи последнего снимка (P10). */
+function scopeOf(c: Ctx, truncated: Record<string, number>): ScopeView | undefined {
+  const sources = c.i.sources;
+  if (!sources?.length) return undefined;
+  const works = new Set(c.i.works.map((w) => w.id));
+  const all = sources.flatMap((src) =>
+    src.tasks.map((t) => {
+      const workId = t.workId ?? (works.has(t.orderId) ? t.orderId : undefined);
+      const first = t.problems[0];
+      const state: ScopeView['tasks'][number]['state'] = workId
+        ? 'in-harness'
+        : first
+          ? 'not-ready'
+          : 'not-handed-over';
+      const plain =
+        state === 'not-ready'
+          ? c.lang === 'en'
+            ? (notReadyEn[first!.code] ?? first!.code)
+            : text(c, first!.message, T.plain)
+          : state === 'not-handed-over'
+            ? c.lang === 'en'
+              ? 'not handed over to harness yet'
+              : 'ещё не передана в harness'
+            : undefined;
+      return {
+        id: t.id,
+        connector: src.connector,
+        key: t.key,
+        ...(c.titles && t.title ? { title: text(c, t.title, T.title) } : {}),
+        ...(workId ? { workId } : {}),
+        state,
+        ...(plain ? { plain } : {}),
+      };
+    }),
+  );
+  const tasks = take(all, L.scope, truncated, 'scope');
+  return { ...(all.length > tasks.length ? { total: all.length } : {}), tasks };
+}
+
+/** Вопросы владельцу из источников задач: последнее наблюдение связки. */
+function sourceQuestionsOf(
+  c: Ctx,
+  truncated: Record<string, number>,
+): SourceQuestionView[] | undefined {
+  const sources = c.i.sources?.filter((s) => s.questions && s.observedAt);
+  if (!sources?.length) return undefined;
+  const all = sources.flatMap((src) =>
+    src.questions!.map((q): SourceQuestionView => ({
+      connector: src.connector,
+      provider: src.provider,
+      id: q.id,
+      ref: q.key || q.id,
+      ...(c.titles ? { title: text(c, q.title, T.questionTitle) } : {}),
+      ...(c.titles && q.question ? { question: text(c, q.question, T.questionTitle) } : {}),
+      ...(c.titles && q.options.length
+        ? {
+            options: q.options.slice(0, L.questionOptions).map((x) => text(c, x, T.option) ?? ''),
+          }
+        : {}),
+      ...(c.titles && q.recommendation
+        ? { recommendation: text(c, q.recommendation, T.questionPlain) }
+        : {}),
+      ...(c.titles && q.provisional
+        ? { provisional: text(c, q.provisional, T.questionPlain) }
+        : {}),
+      ...(q.targets.length ? { tasks: q.targets.slice(0, 20).map((x) => x.slice(0, 200)) } : {}),
+      ...(q.url && q.url.length <= T.url ? { url: q.url } : {}),
+      readAt: src.observedAt!,
+    })),
+  );
+  return take(all, L.sourceQuestions, truncated, 'sourceQuestions');
+}
+
+/** Строка совместимости связки для раздела «Здоровье». */
+function sourceLine(
+  c: Ctx,
+  src: OperatorSourceInput,
+): NonNullable<ViewHealth['sources']>[number] | undefined {
+  if (!src.observedAt) return undefined;
+  const k = src.compatibility;
+  const line = !k
+    ? undefined
+    : k.taskContextUsed
+      ? c.lang === 'en'
+        ? 'Relay with task context: the writer gets the feature and scenario description'
+        : 'Relay с контекстом задачи: исполнитель получает описание функции и сценария'
+      : k.taskContext
+        ? c.lang === 'en'
+          ? 'task context is turned off in the connector configuration'
+          : 'контекст задачи выключен в конфигурации связки'
+        : c.lang === 'en'
+          ? `Relay without task context: the writer does not get the feature and scenario description; Relay ≥ ${k.recommended} is needed`
+          : `Relay без контекста задачи: исполнитель не получит описание функции и сценария; нужна Relay ≥ ${k.recommended}`;
+  return {
+    connector: src.connector,
+    provider: src.provider,
+    ...(k ? { level: k.level, taskContext: k.taskContext } : {}),
+    ...(k?.contractVersion !== null && k?.contractVersion !== undefined
+      ? { contractVersion: k.contractVersion }
+      : {}),
+    ...(line ? { line } : {}),
+    checkedAt: src.observedAt,
   };
 }
 
@@ -1583,6 +1806,11 @@ function healthOf(
       unavailable: driftUnavailable,
     },
     warnings,
+    ...((list) => (list.length ? { sources: list.slice(0, L.sources) } : {}))(
+      (i.sources ?? [])
+        .map((src) => sourceLine(c, src))
+        .filter((x): x is NonNullable<typeof x> => !!x),
+    ),
   };
 }
 
@@ -1933,6 +2161,8 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
   const q = i.queue;
   const drift = i.works.map((w) => driftOf(c, w)).filter((d): d is DriftView => !!d);
   const activity = activityOf(c, o, truncated);
+  const scope = scopeOf(c, truncated);
+  const sourceQuestions = sourceQuestionsOf(c, truncated);
   const draft: OperatorView = {
     viewVersion: OPERATOR_VIEW_VERSION,
     viewRevision: OPERATOR_VIEW_REVISION,
@@ -1968,6 +2198,8 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
     history,
     health,
     ...(activity ? { activity } : {}),
+    ...(scope ? { scope } : {}),
+    ...(sourceQuestions ? { sourceQuestions } : {}),
   };
   const fitted = draft;
   let warnings = [...fitted.health.warnings];

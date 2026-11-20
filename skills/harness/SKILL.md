@@ -519,6 +519,13 @@ Nothing is asked again:
 2. `$H status --state <paths.state>` — `NOT_FOUND` means "never run".
 3. `$H explain --state <paths.state> --policy <repo>/.harness/policy.json`.
 4. Read `.harness/work/*.json` and the notes.
+5. With a Relay connector: `$H doctor --policy <repo>/.harness/policy.json`
+   checks the Relay version (`connector.json` next to the policy). When it
+   warns `RELAY_COMPATIBILITY`, tell the operator that one line once: the
+   writer works without the feature and scenario description until Relay is
+   updated. Product questions you record in Relay as `Вопрос: …` documents
+   (Relay convention) appear in `harness view` (`sourceQuestions`) after the
+   next `source-snapshot` or `run --source`; the owner answers them in Relay.
 
 ### 11. Notes
 

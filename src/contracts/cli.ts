@@ -540,6 +540,12 @@ export const cliCommands = {
     args: [
       { ...state, required: false },
       { ...policy, required: false },
+      {
+        ...source,
+        required: false,
+        description:
+          'Конфигурация связки задач: сверить версию Relay (договор и capabilities) и предупредить, если она ниже рекомендуемой; без флага — connector.json рядом с --policy, если он есть',
+      },
     ],
     refusals: [],
   },
@@ -617,6 +623,12 @@ export const cliCommands = {
         value: 'flag',
         required: false,
         description: 'Текст для человека вместо JSON',
+      },
+      {
+        ...source,
+        required: false,
+        description:
+          'Конфигурация связки задач: сверить версию Relay и предупредить (relay-compatibility), если она ниже рекомендуемой; без флага — .harness/connector.json репозитория, если он есть',
       },
     ],
     refusals: ['PATH_CONFLICT', 'CONTROLLER_BUSY', 'NOT_READY'],
@@ -1711,6 +1723,19 @@ export const reapproveDataSchema = z.strictObject({
   round: z.number().int().positive().optional(),
 });
 
+/** Совместимость с Relay v1 по договору REST и capabilities (alpha.60). */
+export const relayCompatibilitySchema = z.strictObject({
+  provider: z.literal('relay-v1-http'),
+  contractVersion: z.number().int().nullable(),
+  taskContext: z.boolean(),
+  taskContextUsed: z.boolean(),
+  level: z.enum(['recommended', 'below-recommended']),
+  minimum: z.string(),
+  recommended: z.string(),
+  line: z.string(),
+  lineEn: z.string(),
+});
+
 export const doctorDataSchema = z.strictObject({
   harness: z.string(),
   apiVersion: z.literal(API_VERSION),
@@ -1803,9 +1828,19 @@ export const doctorDataSchema = z.strictObject({
    * одной фазы больше `runTimeoutMs` (`timeBudgetWarnings`); советы о ресурсах
    * машины — `DEPENDENCY_STORE_RECOMMENDED`, `LOW_RESOURCES`,
    * `DIGEST_THREADS_INVALID` (`resourceWarnings`); расхождение manifest
-   * проекта рядом с политикой и её полей по слою lean — `LEAN_MISMATCH`.
+   * проекта рядом с политикой и её полей по слою lean — `LEAN_MISMATCH`;
+   * Relay ниже рекомендуемой или несовместим — `RELAY_COMPATIBILITY`.
    */
   warnings: z.array(z.string()).optional(),
+  /** Сверка Relay по связке (`--source` или connector.json рядом с политикой), alpha.60. */
+  relay: z
+    .strictObject({
+      source: z.string(),
+      compatibility: relayCompatibilitySchema.optional(),
+      code: z.string().optional(),
+      error: z.string().optional(),
+    })
+    .optional(),
 });
 
 /** Ответ `gates`: исход каждого gate проверки на коммите вне попытки. */
@@ -1955,6 +1990,34 @@ const ownershipSchema = z.strictObject({
   note: z.string(),
 });
 
+/** Открытый вопрос владельцу из backend (документ `Вопрос: …`), только чтение (alpha.60). */
+export const sourceQuestionSchema = z.strictObject({
+  id: z.string(),
+  key: z.string(),
+  title: z.string(),
+  revision: z.number().int(),
+  question: z.string().optional(),
+  options: z.array(z.string()),
+  recommendation: z.string().optional(),
+  provisional: z.string().optional(),
+  targets: z.array(z.string()),
+  updatedAt: z.string().optional(),
+  url: z.string().optional(),
+});
+const sourceQuestionsSchema = z.strictObject({
+  items: z.array(sourceQuestionSchema),
+  total: z.number().int().nonnegative(),
+  error: z.string().optional(),
+});
+
+const taskContextManifestSchema = z.strictObject({
+  status: z.enum(['included', 'too-large']),
+  records: z.number().int().nonnegative().optional(),
+  bytes: z.number().int().nonnegative().optional(),
+  digest: digestSchema.optional(),
+  reason: z.string().optional(),
+});
+
 export const sourceCheckDataSchema = z.strictObject({
   provider: providerSchema,
   projectId: z.string(),
@@ -1966,9 +2029,18 @@ export const sourceCheckDataSchema = z.strictObject({
     .optional(),
   history: z.strictObject({ enabled: z.boolean(), capability: z.boolean() }),
   mapping: z.array(
-    z.strictObject({ ref: z.string(), key: z.string().optional(), problems: z.array(z.string()) }),
+    z.strictObject({
+      ref: z.string(),
+      key: z.string().optional(),
+      problems: z.array(z.string()),
+      /** Контекст исполнения задачи из backend прочитан (`included`) или не помещается (`too-large`). */
+      taskContext: z.enum(['included', 'too-large']).optional(),
+    }),
   ),
   ownership: ownershipSchema,
+  compatibility: relayCompatibilitySchema.optional(),
+  /** Предупреждения простыми словами (не отказ): Relay ниже рекомендуемой, задач ещё нет. */
+  warnings: z.array(z.string()).optional(),
   problems: z.array(z.string()),
 });
 
@@ -1996,6 +2068,7 @@ export const sourceSnapshotDataSchema = z.strictObject({
   problems: z.array(z.string()),
   truncated: z.array(z.string()),
   baseline: baselineViewSchema.optional(),
+  compatibility: relayCompatibilitySchema.optional(),
   tasks: z.array(
     z.strictObject({
       identity: z.string(),
@@ -2004,6 +2077,7 @@ export const sourceSnapshotDataSchema = z.strictObject({
       semanticDigest: digestSchema,
       casRevision: z.number().int(),
       column: z.string(),
+      taskContext: taskContextManifestSchema.optional(),
     }),
   ),
   files: z.strictObject({ graph: z.string(), context: z.string(), manifest: z.string() }),
@@ -2031,6 +2105,9 @@ export const sourceStatusDataSchema = z.strictObject({
   connector: idSchema,
   provider: providerSchema,
   projectId: z.string(),
+  compatibility: relayCompatibilitySchema.optional(),
+  warnings: z.array(z.string()).optional(),
+  questions: sourceQuestionsSchema.optional(),
   snapshot: z
     .strictObject({
       revision: digestSchema,

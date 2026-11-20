@@ -157,7 +157,68 @@ export const operatorQuestionSchema = z.strictObject({
     })
     .optional(),
   title: freeText(T.questionTitle).optional(),
+  /**
+   * Варианты ответа и рекомендуемый (ревизия 4): то же, что `harness
+   * input-show`, после маскирования и обрезки; без `--no-titles`.
+   */
+  options: z
+    .array(
+      z.strictObject({
+        id: token(40),
+        label: freeText(T.option),
+        recommended: z.literal(true).optional(),
+      }),
+    )
+    .max(L.questionOptions)
+    .optional(),
+  /** Обоснование исполнителя (ревизия 4); без `--no-titles`. */
+  rationale: freeText(T.rationale).optional(),
   createdAt: isoTimeSchema,
+});
+
+/**
+ * Вопрос владельцу из источника задач (ревизия 4): документ `Вопрос: …`
+ * (тип `proposal`, состояние `draft`), который ведущий записал в Relay.
+ * Только чтение: отвечают в источнике, ссылка — `url` или `ref`. Список —
+ * последнее наблюдение связки (`readAt`) при `source-snapshot` или `run --source`.
+ */
+const sourceQuestionViewSchema = z.strictObject({
+  connector: id,
+  provider: token(40),
+  id,
+  ref: token(200),
+  title: freeText(T.questionTitle).optional(),
+  question: freeText(T.questionTitle).optional(),
+  options: z.array(freeText(T.option)).max(L.questionOptions).optional(),
+  recommendation: freeText(T.questionPlain).optional(),
+  provisional: freeText(T.questionPlain).optional(),
+  tasks: z.array(token(200)).max(20).optional(),
+  url: z.string().min(1).max(T.url).optional(),
+  readAt: isoTimeSchema,
+});
+
+/**
+ * Весь срез прогона (ревизия 4, P10): все задачи последнего снимка связки,
+ * в том числе ещё не готовые. `state`: `in-harness` — работа harness есть
+ * (`workId`), `not-ready` — задача не допускается к запуску (`plain` — почему),
+ * `not-handed-over` — снимок есть, работа ещё не создана. Прогресс по-прежнему
+ * считает только работы harness.
+ */
+const scopeSchema = z.strictObject({
+  total: count.optional(),
+  tasks: z
+    .array(
+      z.strictObject({
+        id,
+        connector: id,
+        key: token(200).optional(),
+        title: freeText(T.title).optional(),
+        workId: id.optional(),
+        state: z.enum(['in-harness', 'not-handed-over', 'not-ready']),
+        plain: freeText(T.plain).optional(),
+      }),
+    )
+    .max(L.scope),
 });
 
 const escalationSchema = z.strictObject({
@@ -337,6 +398,25 @@ export const viewHealthSchema = z.strictObject({
   warnings: z
     .array(z.strictObject({ code: token(80), message: freeText(T.message) }))
     .max(L.warnings),
+  /**
+   * Связки с источниками задач (ревизия 4): совместимость Relay по последнему
+   * наблюдению связки — `level` (`recommended`, `below-recommended`), есть ли
+   * контекст задачи, версия договора и строка простыми словами.
+   */
+  sources: z
+    .array(
+      z.strictObject({
+        connector: id,
+        provider: token(40),
+        level: token(40).optional(),
+        taskContext: z.boolean().optional(),
+        contractVersion: z.number().int().optional(),
+        line: z.string().min(1).max(T.line).optional(),
+        checkedAt: isoTimeSchema,
+      }),
+    )
+    .max(L.sources)
+    .optional(),
 });
 
 /**
@@ -422,8 +502,12 @@ export const operatorViewSchema = z.strictObject({
   health: viewHealthSchema,
   activity: z.array(activitySchema).max(L.activity).optional(),
   decisions: z.array(decisionSchema).max(L.decisions).optional(),
+  scope: scopeSchema.optional(),
+  sourceQuestions: z.array(sourceQuestionViewSchema).max(L.sourceQuestions).optional(),
   truncated: z
     .strictObject({
+      scope: truncatedCount.optional(),
+      sourceQuestions: truncatedCount.optional(),
       works: truncatedCount.optional(),
       reviews: truncatedCount.optional(),
       findings: truncatedCount.optional(),

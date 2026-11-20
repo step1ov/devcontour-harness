@@ -5,7 +5,9 @@
 // (`operatorView`, `workDetailView`) только раскладывает и маскирует.
 // Только чтение: каталог состояния не создаётся и не пишется.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+import { pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { z } from 'zod';
@@ -49,6 +51,7 @@ import {
   workDetailView,
   type OperatorActivityInput,
   type OperatorReviewInput,
+  type OperatorSourceInput,
   type OperatorView,
   type OperatorViewInput,
   type OperatorViewOptions,
@@ -901,6 +904,9 @@ export function collectOperatorViewInput(
                 }
               : {}),
             ...(closed.has(r.workId) ? { closed: true } : {}),
+            options: r.question.options.map((o) => ({ id: o.id, label: o.label })),
+            recommended: r.question.recommended,
+            ...(r.question.rationale ? { rationale: r.question.rationale } : {}),
             leadMay: leadMayAnswer(r, inputPolicy),
           },
         ];
@@ -987,8 +993,122 @@ export function collectOperatorViewInput(
       activity,
       warnings: view.warnings,
       mask: maskContextOf(policy, view.baseDir, h.stateDir),
+      ...((sources) => (sources.length ? { sources } : {}))(connectorSources(h.stateDir, known)),
     };
   });
+}
+
+/**
+ * Связки с источниками задач в каталоге состояния
+ * (`<state>/connectors/*.sqlite`): срез последнего снимка, совместимость и
+ * вопросы владельцу из последнего наблюдения. Только чтение, без сети;
+ * повреждённая или чужая база пропускается (представление не отказывает).
+ */
+export function connectorSources(
+  stateDir: string,
+  works: ReadonlySet<string> = new Set(),
+): OperatorSourceInput[] {
+  const dir = join(resolve(stateDir), 'connectors');
+  let files: string[];
+  try {
+    files = readdirSync(dir)
+      .filter((f) => f.endsWith('.sqlite'))
+      .sort();
+  } catch {
+    return [];
+  }
+  const out: OperatorSourceInput[] = [];
+  for (const file of files) {
+    let db: DatabaseSync | undefined;
+    try {
+      const path = join(dir, file);
+      // Без журнала — неизменяемое открытие: ни одного файла рядом с базой.
+      if (existsSync(path + '-wal') || existsSync(path + '-journal'))
+        db = new DatabaseSync(path, { readOnly: true });
+      else {
+        const url = pathToFileURL(path);
+        url.searchParams.set('mode', 'ro');
+        url.searchParams.set('immutable', '1');
+        db = new DatabaseSync(url, { readOnly: true });
+      }
+      const meta = (k: string) =>
+        (db!.prepare('SELECT value FROM meta WHERE key=?').get(k) as { value: string } | undefined)
+          ?.value;
+      const provider = meta('provider');
+      const projectId = meta('projectId');
+      if (!provider || !projectId) continue;
+      const row = db.prepare('SELECT data FROM snapshots ORDER BY rowid DESC LIMIT 1').get() as
+        { data: string } | undefined;
+      const manifest = row
+        ? (JSON.parse(row.data) as { manifest?: SnapshotManifestLike }).manifest
+        : undefined;
+      let observation: RelayObservationLike | undefined;
+      try {
+        const o = db.prepare('SELECT data FROM observations WHERE key=?').get('relay') as
+          { data: string } | undefined;
+        observation = o ? (JSON.parse(o.data) as RelayObservationLike) : undefined;
+      } catch {
+        observation = undefined;
+      }
+      if (!manifest && !observation) continue;
+      const connector =
+        manifest?.connector ?? observation?.connector ?? file.replace(/\.sqlite$/, '');
+      const compatibility = observation?.compatibility ?? manifest?.compatibility;
+      out.push({
+        connector,
+        provider,
+        tasks: (manifest?.tasks ?? []).map((t) => ({
+          id: t.id,
+          key: t.key,
+          ...(t.title ? { title: t.title } : {}),
+          orderId: t.orderId,
+          ...(works.has(t.orderId) ? { workId: t.orderId } : {}),
+          problems: (manifest?.problems ?? [])
+            .filter((p) => p.taskId === t.id)
+            .map((p) => ({ code: p.code, message: p.message })),
+        })),
+        ...(compatibility
+          ? {
+              compatibility: {
+                level: compatibility.level,
+                taskContext: compatibility.taskContext,
+                taskContextUsed: compatibility.taskContextUsed,
+                contractVersion: compatibility.contractVersion,
+                recommended: compatibility.recommended,
+              },
+            }
+          : {}),
+        ...((at) => (at ? { observedAt: at } : {}))(observation?.at ?? manifest?.readAt),
+        ...(observation?.questions ? { questions: observation.questions.items } : {}),
+      });
+    } catch {
+      /* не база коннектора или другой версии — пропустить */
+    } finally {
+      db?.close();
+    }
+  }
+  return out;
+}
+
+/** Поля manifest снимка коннектора, которые читает представление. */
+interface SnapshotManifestLike {
+  connector?: string;
+  readAt?: string;
+  tasks?: { id: string; key: string; title?: string; orderId: string }[];
+  problems?: { taskId: string; code: string; message: string }[];
+  compatibility?: RelayObservationLike['compatibility'];
+}
+interface RelayObservationLike {
+  at?: string;
+  connector?: string;
+  compatibility?: {
+    level: string;
+    taskContext: boolean;
+    taskContextUsed: boolean;
+    contractVersion: number | null;
+    recommended: string;
+  };
+  questions?: { items: NonNullable<OperatorSourceInput['questions']> };
 }
 
 /** Что маскировать: домашний каталог, корни репозиториев и каталог политики, секреты политики. */
@@ -1035,6 +1155,7 @@ function emptyInput(policy: ViewPolicy, now: number, stateDir: string): Operator
       },
     ],
     mask: maskContextOf(policy.policy, policy.baseDir, stateDir),
+    ...((sources) => (sources.length ? { sources } : {}))(connectorSources(stateDir)),
   };
 }
 

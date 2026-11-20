@@ -7,6 +7,8 @@ import { TransportError } from '../src/integrations/connector/transport.ts';
 import {
   classifyCode,
   createTransport,
+  DOCUMENT_LIBRARY_CAPABILITY,
+  TASK_CONTEXT_CAPABILITY,
   RELAY_V1_CONTRACT_VERSION,
   WORK_HISTORY_CAPABILITY,
 } from '../src/integrations/relay-v1/index.ts';
@@ -619,6 +621,258 @@ void describe('relay-v1 transport (fake HTTP)', () => {
       assert.equal(a?.body?.actor, 'dc-test');
       assert.equal(a?.body?.description, 'b');
       assert.equal(a?.path, `${BASE}/board-tasks/PRODUCT-1/comments`);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  /* ---------------- alpha.60: контекст задачи и вопросы владельцу ---------------- */
+
+  const record = (
+    kind: string,
+    id: string,
+    key: string,
+    data: Record<string, unknown>,
+    extra = {},
+  ) => ({
+    ref: { kind, id },
+    key,
+    title: `${key} title`,
+    summary: '',
+    revision: 2,
+    status: 'partial',
+    active: true,
+    data: { kind, ...data },
+    references: [],
+    ...extra,
+  });
+  const contextBody = (over: Record<string, unknown> = {}) => ({
+    contractVersion: 1,
+    task: { ...taskView(), criteria: [] },
+    targets: [
+      {
+        record: record(
+          'implementation',
+          'Fi000001',
+          'WEB-FI-1',
+          { description: '## FI body' },
+          {
+            implementation: {
+              type: 'FI',
+              application: { ref: { kind: 'application', id: 'App00001' }, key: 'WEB', title: 'W' },
+              target: { ref: { kind: 'feature', id: 'Fe000001' }, key: 'FEATURE-1', title: 'F' },
+            },
+            futureField: { ignored: true },
+          },
+        ),
+        reasons: [{ code: 'task-target', from: { kind: 'task', id: 'Task0001' } }],
+      },
+    ],
+    requirements: [
+      {
+        record: record('feature', 'Fe000001', 'FEATURE-1', {
+          description: '## Feature',
+          name: 'F',
+        }),
+        reasons: [{ code: 'target-feature', from: { kind: 'implementation', id: 'Fi000001' } }],
+      },
+    ],
+    applications: [],
+    product: {
+      record: record('product', 'passport', 'PRODUCT', { description: '' }, { revision: 0 }),
+      reasons: [{ code: 'product-passport', from: null }],
+    },
+    documents: [
+      {
+        record: record('document', 'Doc00001', 'DOC-1', { body: '# Rules', name: 'Rules' }),
+        reasons: [{ code: 'target-document', from: { kind: 'feature', id: 'Fe000001' } }],
+      },
+    ],
+    dependencies: [],
+    children: [],
+    consistency: 'task-context-v1:abc',
+    complete: true,
+    limits: { records: 1000, bytes: 16777216 },
+    ...over,
+  });
+  const contextRoutes =
+    (body: () => Reply, caps = [...CAPS, TASK_CONTEXT_CAPABILITY]): Handler =>
+    (r) => {
+      if (r.path === `${BASE}/context`)
+        return ok({ projectId: P, capabilities: caps, project: 'x' });
+      if (r.path === `${BASE}/board-tasks/Task0001/context`) return body();
+      return undefined;
+    };
+
+  it('alpha.60: контекст задачи — записи с ключами оснований, лишние поля backend допустимы', async () => {
+    const srv = await fake(contextRoutes(() => ok(contextBody())));
+    try {
+      const out = await transportFor(srv.url).readTaskContext('Task0001', {
+        targetDocuments: true,
+        maxBytes: 1 << 20,
+      });
+      assert.equal(out.status, 'ok');
+      if (out.status !== 'ok') return;
+      assert.equal(out.context.taskRevision, 3);
+      assert.equal(out.context.consistency, 'task-context-v1:abc');
+      assert.deepEqual(
+        out.context.records.map((r) => [r.section, r.key, r.body, r.reasons]),
+        [
+          ['target', 'WEB-FI-1', '## FI body', [{ code: 'task-target', from: 'PRODUCT-1' }]],
+          [
+            'requirement',
+            'FEATURE-1',
+            '## Feature',
+            [{ code: 'target-feature', from: 'WEB-FI-1' }],
+          ],
+          ['product', 'PRODUCT', '', [{ code: 'product-passport', from: null }]],
+          ['document', 'DOC-1', '# Rules', [{ code: 'target-document', from: 'FEATURE-1' }]],
+        ],
+      );
+      assert.deepEqual(out.context.records[0]!.implementation, {
+        type: 'FI',
+        application: 'WEB',
+        target: 'FEATURE-1',
+      });
+      const call = srv.seen.find(
+        (x) => x.path.endsWith('/context') && x.path.includes('board-tasks'),
+      )!;
+      assert.equal(
+        (call as Seen & { query: URLSearchParams }).query.get('targetDocuments'),
+        'true',
+      );
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it('alpha.60: CONTEXT_TOO_LARGE и ответ больше предела — too-large без усечения', async () => {
+    const srv = await fake(contextRoutes(() => err(413, 'CONTEXT_TOO_LARGE')));
+    try {
+      const out = await transportFor(srv.url).readTaskContext('Task0001', {
+        targetDocuments: false,
+        maxBytes: 1 << 20,
+      });
+      assert.equal(out.status, 'too-large');
+    } finally {
+      await srv.close();
+    }
+    const big = await fake(
+      contextRoutes(() =>
+        ok(
+          contextBody({
+            documents: [
+              {
+                record: record('document', 'Doc00001', 'DOC-1', { body: 'x'.repeat(5000) }),
+                reasons: [{ code: 'task-document', from: { kind: 'task', id: 'Task0001' } }],
+              },
+            ],
+          }),
+        ),
+      ),
+    );
+    try {
+      const out = await transportFor(big.url).readTaskContext('Task0001', {
+        targetDocuments: false,
+        maxBytes: 2048,
+      });
+      assert.equal(out.status, 'too-large');
+      if (out.status === 'too-large') assert.match(out.reason, /2048/);
+    } finally {
+      await big.close();
+    }
+  });
+
+  it('alpha.60: другая форма контекста — CONNECTOR_VERSION_MISMATCH; без capability — route не вызывается', async () => {
+    const srv = await fake(contextRoutes(() => ok(contextBody({ contractVersion: 2 }))));
+    try {
+      await rejects(
+        transportFor(srv.url).readTaskContext('Task0001', {
+          targetDocuments: true,
+          maxBytes: 1 << 20,
+        }),
+        'unsupported',
+        (e) => {
+          assert.equal(e.details.code, 'CONNECTOR_VERSION_MISMATCH');
+          assert.match(e.message, /версии 2/);
+        },
+      );
+    } finally {
+      await srv.close();
+    }
+    const old = await fake(contextRoutes(() => ok(contextBody()), CAPS));
+    try {
+      await rejects(
+        transportFor(old.url).readTaskContext('Task0001', {
+          targetDocuments: true,
+          maxBytes: 1 << 20,
+        }),
+        'unsupported',
+      );
+      assert.ok(
+        !old.seen.some((x) => x.path.includes('/board-tasks/')),
+        'route контекста не вызван',
+      );
+    } finally {
+      await old.close();
+    }
+  });
+
+  it('alpha.60: вопросы владельцу — документы «Вопрос: …» proposal/draft с прикреплениями', async () => {
+    const summary = (id: string, title: string) => ({
+      ref: { kind: 'document', id },
+      key: 'DOC-' + id,
+      title,
+      summary: '',
+      revision: 1,
+      status: 'draft',
+      active: true,
+      updatedAt: '2026-11-20T10:00:00.000Z',
+    });
+    const srv = await fake((r) => {
+      if (r.path === `${BASE}/context`)
+        return ok({
+          projectId: P,
+          capabilities: [...CAPS, DOCUMENT_LIBRARY_CAPABILITY],
+          project: 'x',
+        });
+      const q = (r as Seen & { query: URLSearchParams }).query;
+      if (r.path === `${BASE}/entities`) {
+        assert.equal(q.get('documentKind'), 'proposal');
+        assert.equal(q.get('status'), 'draft');
+        return ok({
+          items: [summary('1', 'Вопрос: Нужна ли доставка?'), summary('2', 'Черновик плана')],
+          total: 2,
+          nextOffset: null,
+          version: 'v1',
+        });
+      }
+      if (r.path === `${BASE}/entities/get`)
+        return ok({
+          ...summary(q.get('ref')!, 'Вопрос: Нужна ли доставка?'),
+          data: {
+            kind: 'document',
+            name: 'Вопрос: Нужна ли доставка?',
+            body: '## Вопрос\nНужна?\n\n## Варианты\n- да\n- нет\n',
+            documentKind: 'proposal',
+            relations: [
+              { target: { kind: 'task', id: 'Task0001' }, type: 'references', description: '' },
+            ],
+          },
+          references: [
+            { ref: { kind: 'task', id: 'Task0001' }, key: 'WEB-1', title: 't', revision: 1 },
+          ],
+        });
+      return undefined;
+    });
+    try {
+      const out = await transportFor(srv.url).listOpenQuestions({ limit: 10 });
+      assert.equal(out.total, 1, 'черновик без «Вопрос:» не вопрос');
+      assert.deepEqual(
+        out.questions.map((x) => [x.key, x.targets]),
+        [['DOC-1', ['WEB-1']]],
+      );
+      assert.match(out.questions[0]!.body, /## Варианты/);
     } finally {
       await srv.close();
     }

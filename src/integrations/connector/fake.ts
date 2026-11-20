@@ -1009,6 +1009,9 @@ export function faultyTransport(
     attach: wrap('attach'),
     takeover: wrap('takeover'),
     finishSession: wrap('finishSession'),
+    // Необязательные методы — только если они есть у внутреннего транспорта.
+    ...(inner.readTaskContext ? { readTaskContext: wrap('readTaskContext') } : {}),
+    ...(inner.listOpenQuestions ? { listOpenQuestions: wrap('listOpenQuestions') } : {}),
   };
   return proxy as unknown as RelayTransport & { calls: Record<string, number> };
 }

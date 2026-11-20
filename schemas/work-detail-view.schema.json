@@ -978,6 +978,37 @@
             "type": "string",
             "maxLength": 200
           },
+          "options": {
+            "maxItems": 10,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 40
+                },
+                "label": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "recommended": {
+                  "type": "boolean",
+                  "const": true
+                }
+              },
+              "required": [
+                "id",
+                "label"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "rationale": {
+            "type": "string",
+            "maxLength": 200
+          },
           "createdAt": {
             "type": "string",
             "format": "date-time",
