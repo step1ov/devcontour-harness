@@ -36,6 +36,11 @@ export interface Isolation {
   readable: string[];
   domains: string[];
   /**
+   * Локальные порты (listen и connect на loopback). Нет поля — открыты, как
+   * прежде у проверок и claude; `false` — закрыты (сеть `none` профиля).
+   */
+  localBinding?: boolean;
+  /**
    * Имена элементов каталога контура, которые хост создаёт по ходу работы
    * (конфигурация, журналы). Закрываются заранее вместе с известными harness.
    */
@@ -113,6 +118,21 @@ export function isolation(options: {
   };
 }
 
+/**
+ * Изоляция исполнителя с сетью профиля (`toolProfiles.<id>.network`):
+ * `none` и `loopback` снимают внешние домены, `none` закрывает и локальные
+ * порты. Без режима (claude без поля) граница прежняя. `full` у sandbox
+ * Claude Code и sandbox-runtime не выражается: его отклоняет `policyIssues`.
+ */
+export function withWriterNetwork(
+  policy: Isolation,
+  network: 'none' | 'loopback' | 'full' | undefined,
+): Isolation {
+  if (network === 'none') return { ...policy, domains: [], localBinding: false };
+  if (network === 'loopback') return { ...policy, domains: [], localBinding: true };
+  return policy;
+}
+
 /** Sandbox Claude Code: применяется к Bash; без запасного выхода из песочницы. */
 export function claudeSandbox(policy: Isolation, review: boolean, cwd: string) {
   return {
@@ -122,7 +142,7 @@ export function claudeSandbox(policy: Isolation, review: boolean, cwd: string) {
       failIfUnavailable: true,
       allowUnsandboxedCommands: false,
       autoAllowBashIfSandboxed: true,
-      network: { allowedDomains: policy.domains, allowLocalBinding: true },
+      network: { allowedDomains: policy.domains, allowLocalBinding: policy.localBinding !== false },
       filesystem: {
         allowWrite: policy.write,
         // Ревьюер не пишет в проверяемый каталог, даже если он совпал с
@@ -227,8 +247,19 @@ function closedEntries(policy: Isolation) {
  * побеждает, поэтому worktree внутри скрытого каталога контура остаётся
  * доступным. Временный каталог открыт на запись: проверкам ревьюера и
  * исполнителя нужна запись вне проверяемого кода.
+ *
+ * Сеть: `true`/`full` — вся, `false`/`none` — закрыта, локальные порты тоже.
+ * `loopback` — управляемый прокси сети codex (функция `network_proxy`) без
+ * разрешённых доменов и с `allow_local_binding`: listen и connect на
+ * 127.0.0.1 и ::1 открыты, интернет закрыт и в обход прокси. Без функции
+ * `network_proxy` codex читает `enabled=true` как всю сеть и неизвестную
+ * функцию молча пропускает, поэтому вызывающий сначала проверяет её
+ * (`codexLoopbackSupport`).
  */
-export function codexPermissions(policy: Isolation, network: boolean) {
+export function codexPermissions(
+  policy: Isolation,
+  network: boolean | 'none' | 'loopback' | 'full',
+) {
   const entries: [string, string][] = [
     [':root', 'read'],
     [':tmpdir', 'write'],
@@ -239,12 +270,48 @@ export function codexPermissions(policy: Isolation, network: boolean) {
   const filesystem = [...new Map(entries)]
     .map(([path, level]) => `${tomlString(path)}=${tomlString(level)}`)
     .join(', ');
+  const mode = network === true ? 'full' : network === false ? 'none' : network;
   return [
+    ...(mode === 'loopback' ? ['-c', 'features.network_proxy=true'] : []),
     '-c',
     'default_permissions="harness"',
     '-c',
-    `permissions.harness={filesystem={${filesystem}}, network={enabled=${network}}}`,
+    `permissions.harness={filesystem={${filesystem}}, network={${
+      mode === 'loopback' ? 'enabled=true, allow_local_binding=true' : `enabled=${mode === 'full'}`
+    }}}`,
   ];
+}
+
+const loopbackSupport = new Map<string, Promise<string | null>>();
+/**
+ * Умеет ли codex сеть `loopback`: в `codex features list` есть функция
+ * `network_proxy` (не `removed`). `null` — умеет; иначе — причина отказа.
+ * Ответ кешируется на процесс по исполняемому файлу и PATH.
+ */
+export function codexLoopbackSupport(executable: string, env?: NodeJS.ProcessEnv) {
+  const key = JSON.stringify([executable, env?.PATH ?? process.env.PATH]);
+  if (!loopbackSupport.has(key))
+    loopbackSupport.set(
+      key,
+      new Promise<string | null>((resolve) => {
+        const child = spawn(executable, ['features', 'list'], {
+          env: env ?? process.env,
+          stdio: ['ignore', 'pipe', 'ignore'],
+          timeout: 15_000,
+        });
+        let out = '';
+        child.stdout.on('data', (d: Buffer) => (out += d.toString()));
+        child.on('error', (e) => resolve(`codex features list не запустился: ${e.message}`));
+        child.on('close', () =>
+          resolve(
+            /^network_proxy\s+(?!removed\b)\S+/m.test(out)
+              ? null
+              : 'этот codex не поддерживает сеть loopback (нет функции network_proxy в codex features list): обновите codex или выберите network: none либо full',
+          ),
+        );
+      }),
+    );
+  return loopbackSupport.get(key)!;
 }
 
 const srtCli = createRequire(import.meta.url).resolve('@anthropic-ai/sandbox-runtime/dist/cli.js');
@@ -1144,7 +1211,11 @@ export async function isolatedCommand(
     settings,
     JSON.stringify(
       {
-        network: { allowedDomains: policy.domains, deniedDomains: [], allowLocalBinding: true },
+        network: {
+          allowedDomains: policy.domains,
+          deniedDomains: [],
+          allowLocalBinding: policy.localBinding !== false,
+        },
         filesystem: {
           allowWrite: policy.write,
           denyWrite: denies ?? (platform === 'linux' ? linuxWriteDenies(protect) : []),

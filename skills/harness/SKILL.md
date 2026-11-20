@@ -341,7 +341,13 @@ probed. Resolve every
 blocked step before `run`: enable it in the policy, prepare it in `prepare`,
 move it into a harness gate (gates run outside the writer sandbox and may
 listen on localhost), or record that the product rule is waived under the
-harness (controller-mode overlay). A browser that aborts under the macOS
+harness (controller-mode overlay). For a local server the writer must start
+itself (`listen-denied`), set `"network": "loopback"` on the writer's tool
+profile: listen and connect on 127.0.0.1/::1 only, no internet — do not turn
+on the full network (`codexNetwork: true`) for it. On Linux the server and
+its client must run in one shell command; Codex needs the `network_proxy`
+feature (the probe reports `environment` otherwise). Changing `network` needs
+a new plan review. A browser that aborts under the macOS
 sandbox (`process-abort`) cannot run inside the writer at all.
 
 ### 8. When it stops

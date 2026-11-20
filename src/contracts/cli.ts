@@ -2004,6 +2004,8 @@ export const smokeDataSchema = z.strictObject({
           roles: z.array(z.string()),
           mechanism: z.enum(['codex-sandbox', 'sandbox-runtime', 'none']),
           network: z.boolean(),
+          /** Режим сети исполнителя: `none`, `loopback` (127.0.0.1 и ::1), `domains`, `full`. */
+          networkMode: z.enum(['none', 'loopback', 'domains', 'full']).optional(),
           commands: z.array(
             z.strictObject({
               id: z.string().min(1).max(200),

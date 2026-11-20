@@ -18,12 +18,19 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
   mcpEnvironment,
+  profileNetwork,
   roleBinding,
   type ExecutionPolicy,
   type RuntimeName,
 } from '../contracts/index.ts';
 import { writerRunsChecks } from '../agents/cli-adapter.ts';
-import { codexPermissions, isolatedCommand, isolation } from '../environment/isolation.ts';
+import {
+  codexLoopbackSupport,
+  codexPermissions,
+  isolatedCommand,
+  isolation,
+  withWriterNetwork,
+} from '../environment/isolation.ts';
 import { executionEnvironment } from '../environment/lifecycle.ts';
 import { command } from '../environment/process.ts';
 import { writerScratch } from '../engine/writer-block.ts';
@@ -65,8 +72,14 @@ export interface WriterProbeWriter {
   roles: string[];
   /** Механизм изоляции пробы: тот же, что у вызова исполнителя. */
   mechanism: 'codex-sandbox' | 'sandbox-runtime' | 'none';
-  /** Сеть исполнителя: codex — `codexNetwork` профиля; claude — домены политики. */
+  /** Внешняя сеть исполнителя: codex — `network`/`codexNetwork` профиля; claude — домены политики. */
   network: boolean;
+  /**
+   * Режим сети исполнителя: `none` — закрыта и локальные порты; `loopback` —
+   * только 127.0.0.1 и ::1; `domains` — домены `isolation.domains` и
+   * локальные порты (claude без поля `network`); `full` — вся сеть.
+   */
+  networkMode: 'none' | 'loopback' | 'domains' | 'full';
   commands: WriterProbeCommand[];
 }
 
@@ -87,9 +100,9 @@ const lineOf = (text: string, re: RegExp) =>
 
 const ADVICE: Record<WriterProbeReason, string> = {
   'listen-denied':
-    'Исполнителю закрыт локальный сервер (listen). Варианты: вынести проверку с сервером в gate harness (gates слушают localhost); включить сеть исполнителя в профиле инструментов (codexNetwork: true — откроет и интернет); отключить это правило шаблона для режима harness (раздел controller-mode).',
+    'Исполнителю закрыт локальный сервер (listen). Варианты: вынести проверку с сервером в gate harness (gates слушают localhost); дать исполнителю только локальную сеть: network: loopback в профиле инструментов (listen и connect на 127.0.0.1 и ::1, без интернета); отключить это правило шаблона для режима harness (раздел controller-mode).',
   'network-denied':
-    'Исполнителю закрыта сеть (реестр пакетов или внешний адрес). Варианты: выполнить шаг заранее в prepare (кеш вне рабочего дерева, harness lean); открыть домен в isolation.domains или сеть в профиле инструментов (codexNetwork: true); вынести шаг в prepare или gate.',
+    'Исполнителю закрыта сеть (реестр пакетов или внешний адрес). Варианты: выполнить шаг заранее в prepare (кеш вне рабочего дерева, harness lean); открыть домен в isolation.domains (claude) или всю сеть в профиле инструментов (network: full у codex); вынести шаг в prepare или gate.',
   'write-denied':
     'Команда пишет вне области записи исполнителя (путь — в строке вывода). Варианты: направить её каталог в рабочее дерево или во временный каталог переменной окружения профиля; выполнить шаг заранее в prepare.',
   'process-abort':
@@ -216,12 +229,18 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
         : runtime === 'codex'
           ? 'codex-sandbox'
           : 'sandbox-runtime';
+    const network = profileNetwork(runtime, profile);
+    // Claude без поля `network`: домены политики и локальные порты, как прежде.
+    const networkMode =
+      network ??
+      (policy.isolation.domains.length > 0 ? ('domains' as const) : ('loopback' as const));
     const report: WriterProbeWriter = {
       runtime,
       ...(w.toolProfile ? { toolProfile: w.toolProfile } : {}),
       roles: w.roles,
       mechanism,
-      network: runtime === 'codex' ? !!profile?.codexNetwork : policy.isolation.domains.length > 0,
+      network: networkMode === 'full' || networkMode === 'domains',
+      networkMode,
       commands: [],
     };
     writers.push(report);
@@ -240,6 +259,18 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
     if (!writerRunsChecks(runtime, profile)) {
       blockAll('no-shell');
       continue;
+    }
+    // Сеть loopback у codex — только с функцией network_proxy: без неё
+    // исполнитель не запустится, и проба говорит это заранее.
+    if (mechanism === 'codex-sandbox' && network === 'loopback') {
+      const refused = await codexLoopbackSupport(
+        input.executables?.codex ?? 'codex',
+        input.environment ?? process.env,
+      );
+      if (refused) {
+        blockAll('environment', refused);
+        continue;
+      }
     }
     let execution;
     try {
@@ -273,13 +304,16 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
     const temp = await writerScratch(execution.env);
     const scratch = temp.dir;
     try {
-      const iso = isolation({
-        write: [cwd, scratch],
-        controller: [...input.boundary.hidden, temp.parent],
-        readable: [cwd, scratch, ...input.boundary.readable],
-        domains: policy.isolation.domains,
-        ...(input.boundary.checkouts.length ? { checkouts: input.boundary.checkouts } : {}),
-      });
+      const iso = withWriterNetwork(
+        isolation({
+          write: [cwd, scratch],
+          controller: [...input.boundary.hidden, temp.parent],
+          readable: [cwd, scratch, ...input.boundary.readable],
+          domains: policy.isolation.domains,
+          ...(input.boundary.checkouts.length ? { checkouts: input.boundary.checkouts } : {}),
+        }),
+        runtime === 'claude' ? network : undefined,
+      );
       for (const step of steps) {
         let argv: string[];
         let env: NodeJS.ProcessEnv = execution.env;
@@ -289,7 +323,7 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
           argv = [
             input.executables?.codex ?? 'codex',
             'sandbox',
-            ...codexPermissions(iso, !!profile?.codexNetwork),
+            ...codexPermissions(iso, network ?? 'none'),
             '--',
             ...step.command,
           ];
@@ -382,12 +416,19 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
   };
 }
 
+const NETWORK_TEXT: Record<WriterProbeWriter['networkMode'], string> = {
+  none: 'закрыта (и локальные порты)',
+  loopback: 'только локальная (127.0.0.1, ::1)',
+  domains: 'домены isolation.domains и локальная',
+  full: 'есть',
+};
+
 /** Строки пробы для человека (`harness smoke --writer-probe --human`). */
 export function writerProbeText(probe: WriterProbeResult) {
   const lines = [`проба исполнителя: ${probe.ok ? 'всё доступно' : 'есть закрытые шаги'}`];
   for (const w of probe.writers) {
     lines.push(
-      `  исполнитель ${w.runtime}${w.toolProfile ? ` (${w.toolProfile})` : ''}, роли ${w.roles.join(', ')}; изоляция ${w.mechanism}; сеть ${w.network ? 'есть' : 'закрыта'}`,
+      `  исполнитель ${w.runtime}${w.toolProfile ? ` (${w.toolProfile})` : ''}, роли ${w.roles.join(', ')}; изоляция ${w.mechanism}; сеть ${NETWORK_TEXT[w.networkMode]}`,
     );
     for (const c of w.commands)
       lines.push(

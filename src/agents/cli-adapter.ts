@@ -12,14 +12,17 @@ import type {
   RuntimeResponse,
   toolProfileSchema,
 } from '../contracts/index.ts';
+import { profileNetwork } from '../contracts/index.ts';
 import { OversizedFile, readBounded } from '../environment/bounded-read.ts';
 import { command } from '../environment/process.ts';
 import {
   claudeFileDenies,
   claudeFileTools,
   claudeSandbox,
+  codexLoopbackSupport,
   codexPermissions,
   isolation,
+  withWriterNetwork,
   type Isolation,
 } from '../environment/isolation.ts';
 import { redactor } from '../environment/redaction.ts';
@@ -177,7 +180,7 @@ function codexTools(profile: ToolProfile | undefined, review: boolean, probe?: P
     '-c',
     `features.shell_tool=${profile.codexShell}`,
     '-c',
-    `sandbox_workspace_write.network_access=${profile.codexNetwork}`,
+    `sandbox_workspace_write.network_access=${profileNetwork('codex', profile) === 'full'}`,
   ];
 }
 
@@ -243,7 +246,13 @@ export function cliAdapter(
       const mcp = !!probe || Object.keys(profile?.mcp ?? {}).length > 0;
       if (runtime === 'claude' && mcp)
         await writeFile(mcpPath, JSON.stringify(claudeMcp(probe, profile), null, 2));
-      const policy: Isolation = isolation({
+      // Сеть профиля — только исполнителю; ревьюер её не получает.
+      const network = review ? undefined : profileNetwork(runtime, profile);
+      if (runtime === 'codex' && network === 'loopback') {
+        const refused = await codexLoopbackSupport(executable, r.env);
+        if (refused) throw new Error(`codex: ${refused}`);
+      }
+      const bounds: Isolation = isolation({
         write: r.sandbox.writable,
         controller: r.sandbox.denied,
         readable: [...(r.sandbox.readable ?? []), ...(review ? [r.cwd] : [])],
@@ -251,6 +260,7 @@ export function cliAdapter(
         ...(options.controllerEntries ? { entries: options.controllerEntries } : {}),
         ...(r.sandbox.checkouts?.length ? { checkouts: r.sandbox.checkouts } : {}),
       });
+      const policy: Isolation = runtime === 'claude' ? withWriterNetwork(bounds, network) : bounds;
       const argv =
         runtime === 'codex'
           ? [
@@ -266,7 +276,7 @@ export function cliAdapter(
               ...(r.binding.model ? ['--model', r.binding.model] : []),
               ...(r.binding.effort ? ['-c', `model_reasoning_effort="${r.binding.effort}"`] : []),
               ...codexTools(profile, review, review ? r.probe : undefined),
-              ...codexPermissions(policy, !review && !!profile?.codexNetwork),
+              ...codexPermissions(policy, review ? 'none' : (network ?? 'none')),
               '-',
             ]
           : [
