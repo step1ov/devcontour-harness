@@ -187,6 +187,24 @@ test('WP01a: предупреждение pnpm о ~/.npmrc — шум; прич�
     'Error: actual compilation failure\nDeprecationWarning: the X option is deprecated',
   );
   assert.equal(notThrown.evidence, 'Error: actual compilation failure');
+  // Невыброшенное предупреждение со словами ошибки или EPERM — тоже не причина.
+  assert.equal(
+    v(
+      'Error: actual compilation failure\n@app/web:build: DeprecationWarning: This will become an error in a future version',
+    ).evidence,
+    'Error: actual compilation failure',
+  );
+  assert.notEqual(
+    v("Error: boom\nExperimentalWarning: EPERM: operation not permitted, open '/x/y'").reason,
+    'write-denied',
+  );
+  // Каждый кадр выброса сам по себе достаточен.
+  for (const frame of ['node:internal/process/warning:63', '      throw warning;'])
+    assert.equal(
+      v(`${frame}\nDeprecationWarning: gone`).evidence,
+      'DeprecationWarning: gone',
+      frame,
+    );
   // Из нескольких причин одного класса — последняя.
   assert.match(
     v(

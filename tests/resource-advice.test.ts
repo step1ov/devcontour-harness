@@ -469,6 +469,36 @@ test('DEPENDENCY_STORE_REGISTRY: .npmrc проекта задаёт реестр
     }).length,
     1,
   );
+  // Одно значение под разным регистром — то же значение: совета нет.
+  assert.deepEqual(
+    warn((p) => {
+      p.environment = {
+        values: {
+          NPM_CONFIG_REGISTRY: 'https://npm.corp.test/api/npm/private/',
+          npm_config_registry: 'https://npm.corp.test/api/npm/private/',
+          pnpm_config_registry: 'https://npm.corp.test/api/npm/private/',
+        },
+        inherit: [],
+        secrets: {},
+      };
+    }),
+    [],
+  );
+  // Разные значения под pnpm_ — совет есть.
+  assert.equal(
+    warn((p) => {
+      p.environment = {
+        values: {
+          npm_config_registry: 'https://npm.corp.test/api/npm/private/',
+          PNPM_CONFIG_REGISTRY: 'https://npm.corp.test/other/',
+          pnpm_config_registry: 'https://npm.corp.test/api/npm/private/',
+        },
+        inherit: [],
+        secrets: {},
+      };
+    }).length,
+    1,
+  );
   // Реестр области, совпавший с реестром по умолчанию только одного префикса, —
   // pnpm другой версии его не увидит.
   npmrc('@acme:registry=https://corp.test/repo/\n');

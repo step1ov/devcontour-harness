@@ -133,22 +133,28 @@ const noise =
   // строка `XWarning: …` без неё — выброшенное предупреждение
   // (`--throw-deprecation`) и бывает причиной.
   /^(?:\[WARN\]|WARN\b|npm warn\b|warning\b|\(node:\d+\) (?:\[\w+\] )?(?:\w*Warning)\b)|Issue while reading "[^"]*\.npmrc"/i;
+/** Предупреждение, выброшенное как ошибка (`--throw-deprecation`): `XWarning: …` после кадра `throw warning`. */
+const thrownWarning = /^\w+Warning:/;
+const thrownContext = /node:internal\/process\/warning|^\s*throw warning;/;
 /** Строки вывода без цвета, префикса задачи и шума — в исходном порядке. */
 function significant(text: string) {
-  return text
+  const lines = text
     .replace(ansi, '')
     .split('\n')
-    .map((l) => l.replace(/\r$/, '').trim())
-    .filter((l) => l && !noise.test(l.replace(taskPrefix, '')));
+    .map((l) => l.replace(/\r$/, '').trim());
+  // `XWarning: …` без кадра выброса — обычный вывод (console.warn): шум для
+  // всех классов, а не только для итоговой ошибки.
+  const thrown = lines.some((l) => thrownContext.test(l.replace(taskPrefix, '')));
+  return lines.filter((l) => {
+    const bare = l.replace(taskPrefix, '');
+    return l && !noise.test(bare) && (thrown || !thrownWarning.test(bare));
+  });
 }
 /** Последняя значимая строка с признаком: причина печатается после предупреждений. */
 const lastOf = (lines: string[], re: RegExp) => lines.findLast((l) => re.test(l));
 /** Строка похожа на итоговую ошибку команды. */
 const fatal =
   /\b(?:error|ERR!|ERR_[A-Z_]+|failed|fatal|panicked|Cannot find|not found)\b|Error:|Не удалось/i;
-/** Предупреждение, выброшенное как ошибка (`--throw-deprecation`): `XWarning: …` после кадра `throw warning`. */
-const thrownWarning = /^\w+Warning:/;
-const thrownContext = /node:internal\/process\/warning|^\s*throw warning;/;
 /** Итог менеджера или оркестратора задач: повторяет код выхода, не причину. */
 const wrapper =
   /^(?:ELIFECYCLE\b|ERROR\s+run failed\b|npm (?:error|ERR!) (?:code|path|command|Lifecycle|A complete log|errno)\b|Command failed with exit code\b|Failed:\s|\S+#\S+: command .*exited|ERROR: command finished with error\b)/;
@@ -227,10 +233,8 @@ export function classifyProbe(result: {
   // Без признаков песочницы: последняя строка ошибки — подсказка, где искать;
   // итог обёртки (pnpm, npm, turbo) — только когда другой строки нет.
   const own = lines.filter((l) => !wrapper.test(l.replace(taskPrefix, '')));
-  // `XWarning:` без кадра выброса — обычный вывод (console.warn), не причина.
-  const thrown = lines.some((l) => thrownContext.test(l.replace(taskPrefix, '')));
-  const isCause = (l: string) =>
-    fatal.test(l) || (thrown && thrownWarning.test(l.replace(taskPrefix, '')));
+  // Невыброшенные `XWarning:` уже отсеяны (`significant`); оставшиеся — причина.
+  const isCause = (l: string) => fatal.test(l) || thrownWarning.test(l.replace(taskPrefix, ''));
   const pick = (list: string[]) => list.findLast(isCause);
   const cause = pick(own) ?? pick(lines);
   return { status: 'failed', reason: 'failed', ...(cause ? { evidence: cause } : {}) };
