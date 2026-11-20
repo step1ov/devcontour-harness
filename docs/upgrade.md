@@ -1861,6 +1861,28 @@ view`) в пределе длины сохраняет хвост — остат
   `harness update --check`.
 - **Прогноз выпуска.** Ожидание людей короче минуты — «ждут людей сейчас: N,
   меньше минуты» (без «до»).
+- **Хранилище зависимостей до первого `run`.** Пока целевой ветки
+  (`targetRef`) нет, seed собирается по lockfile `HEAD` checkout репозитория —
+  от него `run` создаст ветку; квитанция называет источник в новом поле
+  `ref`. `harness smoke` сразу после `init` больше не промахивается с
+  «pnpm-lock.yaml нет в refs/heads/harness/accepted»; после первого `run`
+  тот же lockfile даёт тот же seed без новой сборки.
+- **Сеть сборки seed.** Песочница сборки seed получает к `isolation.domains`
+  хост реестра из окружения политики (`npm_config_registry`/
+  `pnpm_config_registry`, иначе `registry.npmjs.org`) и хосты `tarball:`
+  lockfile — только она, writers и gates их не получают. Политике
+  `init --lean` домен реестра больше не нужен; `policyDigest` не меняется.
+  Добавлять `registry.npmjs.org` в `isolation.domains` ради хранилища не нужно
+  (уже добавленный домен не мешает).
+- **`DEPENDENCY_STORE_REGISTRY`.** `doctor` (`warnings`), `init`
+  (`warnings[]`, новый код `dependency-store-registry`) и `lean` (`notes`)
+  предупреждают, когда `.npmrc` в корне репозитория задаёт реестр, которого
+  сборка seed не увидит: она `.npmrc` проекта не читает.
+- **Честный шаг `dependency-store` в `harness smoke`.** Промах, отказ и
+  истёкший бюджет сборки seed — шаг с `unused: true` (аддитивное поле
+  `data.steps[]`; `status` остаётся `passed`, это не отказ окружения) и
+  причиной в `detail`. Таблица `--human` и ход в stderr печатают `miss` и
+  «не используется: причина» с настоящим временем вместо «passed 601 с».
 - **Проверка репозитория.** `DS42` находит pnpm 11 сам: `HARNESS_TEST_PNPM11_DIR`,
   pnpm 11 из PATH или новейший pnpm 11 из кэша npx (`npx pnpm@11 --version`
   кладёт его туда); пропуск по-прежнему проваливает полный прогон. Тест

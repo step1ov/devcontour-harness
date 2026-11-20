@@ -33,6 +33,12 @@ export interface LifecycleSmokeStep {
   log?: string;
   /** Пояснение стадии: исход хранилища зависимостей (`hit`, `partial`, `miss: причина`). */
   detail?: string;
+  /**
+   * Шаг не отказал, но ничего не дал: хранилище зависимостей не использовано
+   * (промах или отказ сборки seed, причина — в `detail`). Таблица `--human`
+   * показывает такой шаг как `miss`, а не `passed` (alpha.61).
+   */
+  unused?: boolean;
 }
 
 export interface LifecycleSmokeFailure {
@@ -91,7 +97,16 @@ const stepOf = (s: StepOutcome): LifecycleSmokeStep => ({
   ...(s.timedOut ? { timedOut: true } : {}),
   ...(s.log ? { log: s.log } : {}),
   ...(s.detail ? { detail: s.detail } : {}),
+  ...(s.unused ? { unused: true } : {}),
 });
+
+/** Статус шага для человека: неиспользованная стадия — `miss`, а не `passed`. */
+export const stepStatusText = (s: Pick<LifecycleSmokeStep, 'status' | 'unused'>) =>
+  s.unused && s.status === 'passed' ? 'miss' : s.status;
+
+/** Пояснение шага для человека: промах хранилища — «не используется: причина». */
+export const stepDetailText = (s: Pick<LifecycleSmokeStep, 'detail' | 'unused'>) =>
+  s.detail && s.unused ? 'не используется: ' + s.detail.replace(/^miss(?::\s*)?/, '') : s.detail;
 
 const seconds = (ms: number) => `${Math.round(ms / 1000)} с`;
 
@@ -326,9 +341,10 @@ export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<Lifecy
 /** Таблица шагов для человека (`harness smoke --human`). */
 export function smokeText(data: LifecycleSmokeResult) {
   const width = Math.max(5, ...data.steps.map((s) => `${s.stage}/${s.id}`.length));
-  const lines = data.steps.map((s) =>
-    `${`${s.stage}/${s.id}`.padEnd(width)}  ${s.status.padEnd(6)}  ${String(s.exitCode ?? '-').padEnd(4)}  ${seconds(s.durationMs)}${s.timedOut ? ' (timeout)' : ''}`.trimEnd(),
-  );
+  const lines = data.steps.map((s) => {
+    const detail = stepDetailText(s);
+    return `${`${s.stage}/${s.id}`.padEnd(width)}  ${stepStatusText(s).padEnd(6)}  ${String(s.exitCode ?? '-').padEnd(4)}  ${seconds(s.durationMs)}${s.timedOut ? ' (timeout)' : ''}${detail ? '  ' + detail : ''}`.trimEnd();
+  });
   return (
     [
       `${data.repositoryId} @ ${data.sha.slice(0, 12)} — окружение ${data.passed ? 'PASS' : 'FAIL'} (${seconds(data.durationMs)})`,

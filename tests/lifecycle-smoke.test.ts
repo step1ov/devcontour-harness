@@ -31,7 +31,12 @@ import {
   executionPolicySchema,
   type ExecutionPolicy,
 } from '../src/contracts/index.ts';
-import { classifyLifecycleFailure, smokeLifecycle } from '../src/control/lifecycle-smoke.ts';
+import {
+  classifyLifecycleFailure,
+  smokeLifecycle,
+  smokeText,
+  type LifecycleSmokeResult,
+} from '../src/control/lifecycle-smoke.ts';
 import { CleanupFailure } from '../src/environment/lifecycle.ts';
 import { lifecyclePreflight } from '../src/control/preflight.ts';
 import { example } from './fixtures.ts';
@@ -489,7 +494,49 @@ test('smoke: отмена после последнего шага — CANCELLED
   assert.equal(data.passed, true, JSON.stringify(data.failure));
   const step = data.steps.find((s) => s.stage === 'dependency-store')!;
   assert.equal(step.status, 'passed');
+  assert.equal(step.unused, true, 'промах — хранилище не использовано');
   assert.match(step.detail ?? '', /^miss: isolation\.mode: none/);
+  const table = smokeText(data);
+  assert.match(
+    table,
+    /\ndependency-store\/dependency-store\s+miss\s+-\s+\d+ с\s+не используется: isolation\.mode: none/,
+  );
+  assert.doesNotMatch(table, /dependency-store\/dependency-store\s+passed/);
+});
+
+test('smokeText: промах и отказ сборки seed — miss с причиной и настоящим временем; попадание — passed', () => {
+  const data: LifecycleSmokeResult = {
+    id: 'LS-1',
+    repositoryId: 'app',
+    sha: 'a'.repeat(40),
+    passed: true,
+    durationMs: 866000,
+    logs: '/logs',
+    steps: [
+      { stage: 'worktree', id: 'worktree', status: 'passed', durationMs: 0 },
+      {
+        stage: 'dependency-store',
+        id: 'dependency-store',
+        status: 'passed',
+        durationMs: 600668,
+        detail: 'miss: бюджет хранилища 600000 мс истёк',
+        unused: true,
+      },
+      { stage: 'prepare', id: 'install', status: 'passed', durationMs: 251000, exitCode: 0 },
+    ],
+  };
+  const text = smokeText(data);
+  assert.match(
+    text,
+    /\ndependency-store\/dependency-store\s+miss\s+-\s+601 с\s+не используется: бюджет хранилища 600000 мс истёк\n/,
+  );
+  assert.match(text, /\nworktree\/worktree\s+passed\s+-\s+0 с\n/);
+  const hit = smokeText({
+    ...data,
+    steps: [{ ...data.steps[1]!, durationMs: 5000, detail: 'hit', unused: false }],
+  });
+  assert.match(hit, /\ndependency-store\/dependency-store\s+passed\s+-\s+5 с\s+hit\n/);
+  cliDataSchemas.smoke.parse(data);
 });
 
 test('classifyLifecycleFailure: исходный отказ не приписывается teardown; уборка после предела не прячет упавший шаг', () => {

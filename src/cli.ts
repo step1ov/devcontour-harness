@@ -64,7 +64,12 @@ import { valueReport, reportHtml, reportMarkdown } from './report/index.ts';
 import { handoffMarkdown, handoffPack } from './handoff/index.ts';
 import { inputStateOf } from './projections/input.ts';
 import { checkGates, gatesText } from './control/gates-check.ts';
-import { smokeLifecycle, smokeText } from './control/lifecycle-smoke.ts';
+import {
+  smokeLifecycle,
+  smokeText,
+  stepDetailText,
+  stepStatusText,
+} from './control/lifecycle-smoke.ts';
 import { defaultResourceDatabase } from './environment/resources.ts';
 import {
   UPDATE_OPERATION,
@@ -1737,7 +1742,7 @@ async function run(
           // Ход — диагностика в stderr: stdout остаётся одним JSON.
           onStep: (s) =>
             process.stderr.write(
-              `harness smoke: ${s.stage}/${s.id} ${s.status} ${Math.round(s.durationMs / 1000)} с\n`,
+              `harness smoke: ${s.stage}/${s.id} ${stepStatusText(s)} ${Math.round(s.durationMs / 1000)} с${s.unused && s.detail ? ` (${stepDetailText(s)})` : ''}\n`,
             ),
         });
         // Отказ окружения — данные и exit 4 (LIFECYCLE_FAILED).

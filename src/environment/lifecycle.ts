@@ -155,6 +155,11 @@ export interface StepOutcome {
   log?: string;
   /** Пояснение стадии без команды (исход хранилища зависимостей). */
   detail?: string;
+  /**
+   * Стадия прошла, но ничего не дала: хранилище зависимостей не использовано
+   * (промах, отказ сборки seed). Не отказ — и не «пройдено».
+   */
+  unused?: boolean;
 }
 
 export async function runSteps(

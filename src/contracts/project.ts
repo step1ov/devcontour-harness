@@ -89,6 +89,7 @@ export const initWarningCodes = [
   'lead-sandbox',
   'dependency-store-unsupported',
   'dependency-cache-path',
+  'dependency-store-registry',
   'relay-compatibility',
 ] as const;
 
