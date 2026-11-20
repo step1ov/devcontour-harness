@@ -187,8 +187,8 @@ const contentDigest = (order: WorkState['order']) =>
  * (`repairPolicy.blocksQueue`), а повтор ограничен пределом одинаковых
  * отпечатков и общим бюджетом восстановлений.
  */
-const uncounted = (kind: FailureKind, blocked: boolean) =>
-  blocked || kind === 'environment' || kind === 'provider-auth';
+const uncounted = (kind: FailureKind, blocked: boolean, writerBlocked = false) =>
+  blocked || kind === 'environment' || kind === 'provider-auth' || writerBlocked;
 
 /**
  * Остановка вопросом (`needs-input`) — не неудача работы: попытка
@@ -224,6 +224,7 @@ const causeOf = (
   if (blocked && kind !== 'provider-auth' && kind !== 'environment') return 'preflight';
   if (kind === 'provider-auth')
     return cause === 'provider-limit' ? 'provider-limit' : 'provider-auth';
+  if (kind === 'needs-lead' && cause === 'writer-environment') return cause;
   if (kind !== 'environment') return 'none';
   return cause && cause !== 'none' && cause !== 'provider-auth' && cause !== 'provider-limit'
     ? cause
@@ -2410,9 +2411,13 @@ export class Engine {
        * блокирующий запрос; `unfinished` — отклонённый вопрос ниже порога).
        */
       input?: InputOutcome;
+      /** Итог исполнителя незавершённой попытки своими словами (до 500 знаков). */
+      writerSummary?: string;
     } = {},
   ) {
     const kind = options.kind ?? 'unknown';
+    // Исполнитель остановился из-за окружения: ход ведущего, попытка не засчитана.
+    const writerBlocked = kind === 'needs-lead' && options.cause === 'writer-environment';
     return this.withAttempt(id, token, 'run.failed', (a, w, tx) => {
       const fingerprint = failureFingerprint(kind, error);
       const prefix = a.error?.startsWith(HEARTBEAT_FAILED)
@@ -2441,6 +2446,10 @@ export class Engine {
         status: 'failed',
         error: shown,
         ...(blocked ? { blocked: true } : {}),
+        ...(writerBlocked ? { writerBlocked: true as const } : {}),
+        ...(options.writerSummary?.trim()
+          ? { writerSummary: options.writerSummary.trim().slice(0, 500) }
+          : {}),
         failureKind: kind,
         ...(kind === 'context-exhausted' && options.contextLimit
           ? { contextLimit: options.contextLimit }
@@ -2494,13 +2503,13 @@ export class Engine {
             }),
         activeRunId: undefined,
         attempt:
-          (interrupted || uncounted(kind, blocked) || givesBack) && w.attempt > 0
+          (interrupted || uncounted(kind, blocked, writerBlocked) || givesBack) && w.attempt > 0
             ? w.attempt - 1
             : w.attempt,
         // Отказ до работы (blocked), штатная остановка и вопрос предел
         // незасчитанных отказов не тратят; вопрос сверх своего предела
         // засчитан как попытка.
-        ...(uncounted(kind, blocked) && !blocked && !interrupted
+        ...(uncounted(kind, blocked, writerBlocked) && !blocked && !interrupted
           ? { neutralFailures: (w.neutralFailures ?? 0) + 1 }
           : {}),
       });
@@ -2521,7 +2530,7 @@ export class Engine {
         payload: {
           failureKind: kind,
           cause: interrupted ? 'shutdown' : causeOf(kind, options.cause, blocked),
-          counted: !interrupted && !uncounted(kind, blocked) && !givesBack,
+          counted: !interrupted && !uncounted(kind, blocked, writerBlocked) && !givesBack,
         },
       });
       if (options.input && !interrupted)

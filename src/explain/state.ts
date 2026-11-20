@@ -3,6 +3,7 @@ import { blocksWork, inputPolicyOf, leadAnswerBasis } from '../contracts/index.t
 import {
   MAX_NEUTRAL_FAILURES,
   failedBeforeWork,
+  writerBlockedStop,
   lastContextLimit,
   repairPolicy,
   repairRepeats,
@@ -18,7 +19,7 @@ import type {
   WorkflowJob,
 } from '../contracts/index.ts';
 import type { Engine } from '../engine/engine.ts';
-import { acceptanceGap, repairDecision } from '../engine/repair.ts';
+import { acceptanceGap, repairDecision, repeatedTestcase } from '../engine/repair.ts';
 import { requestsIndex } from '../engine/input-requests.ts';
 import { activeOf } from '../engine/engine.ts';
 import { inputStateOf } from '../projections/input.ts';
@@ -462,6 +463,14 @@ export function stopInputsIn(
           ...(work.status === 'failed' && failedBeforeWork(kind, attempts)
             ? { preflight: true }
             : {}),
+          ...((last) =>
+            work.status === 'failed' && writerBlockedStop(kind, attempts)
+              ? {
+                  writerBlocked: {
+                    ...(last?.writerSummary ? { summary: last.writerSummary } : {}),
+                  },
+                }
+              : {})(attempts.findLast((a) => a.status !== 'active')),
           ...(work.hold
             ? { hold: { operation: work.hold.operation, reason: work.hold.reason } }
             : {}),
@@ -671,6 +680,7 @@ function outlookOf(
       rule.action === 'retry' &&
       identical - 1 < repeats &&
       !acceptanceGap(ctx.v, w) &&
+      !repeatedTestcase(ctx.v, w) &&
       (w.neutralFailures ?? 0) < MAX_NEUTRAL_FAILURES &&
       w.attempt < options.maxAttempts &&
       used + i < options.repairBudget;

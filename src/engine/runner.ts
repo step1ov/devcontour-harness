@@ -171,6 +171,7 @@ import {
 } from './classify.ts';
 import { TaskFailure, type FailureKind } from './failure.ts';
 import { activeOf, crashedRecheck, namesFailingCases, type Engine } from './engine.ts';
+import { environmentBlockOf, writerScratch } from './writer-block.ts';
 import { prompt } from './prompt.ts';
 import { scopeViolations } from './scope.ts';
 import { generatorNote, runGenerators, selectGenerators } from '../verification/generators.ts';
@@ -848,6 +849,10 @@ export class Runner {
     // Окружение вызова — с профилем инструментов его назначения.
     const execution = this.environment(input.attempt, input.phase, input.cwd, binding.toolProfile);
     const boundary = this.boundary(input.attempt.dependencies);
+    // Временный каталог исполнителя — всегда внутри его области записи
+    // (`writerScratch`): иначе shell и инструменты, пишущие в TMPDIR
+    // (here-document zsh, кеши генераторов), получали отказ песочницы.
+    const scratch = review ? undefined : await writerScratch(input.dir, execution.env);
     // Вызов под учётом: бюджет проверяется до вызова, расход закрепляется за попыткой.
     const response = await measuredInvoke(
       this.engine,
@@ -868,11 +873,12 @@ export class Runner {
         session: { kind: 'fresh' },
         sandbox: {
           mode: this.policy.isolation.mode,
-          writable: review ? [] : [input.cwd],
+          writable: review ? [] : [input.cwd, ...(scratch ? [scratch] : [])],
           denied: boundary.hidden,
           ...(boundary.checkouts.length ? { checkouts: boundary.checkouts } : {}),
           readable: [
             input.cwd,
+            ...(scratch ? [scratch] : []),
             ...boundary.readable,
             // Самопроверка исполнителя: план и полный корпус вне worktree.
             ...(!review && this.selfChecks.has(input.attempt.id)
@@ -896,6 +902,9 @@ export class Runner {
         runId: input.attempt.id,
         stage: review ? input.phase + '-review' : 'implementation',
       },
+    ).finally(() =>
+      // Временные файлы исполнителя — не артефакт попытки: каталог свой, создан выше.
+      scratch ? rm(scratch, { recursive: true, force: true }).catch(() => undefined) : undefined,
     );
     // Ответ «передан исполнителю» — только когда runtime вызова writer
     // попытки, выданной с ним, действительно работал (ответ не
@@ -1320,17 +1329,37 @@ export class Runner {
           undefined,
           outcome({ ...decision.question, mode: 'declined' }),
         );
-      case 'unfinished':
+      case 'unfinished': {
+        const summary = output.summary.trim().slice(0, 500);
+        const extra =
+          evaluation.assumptions.length || evaluation.followUps.length ? outcome() : undefined;
+        // Исполнитель назвал причиной окружение (сеть, сервер, инструмент,
+        // источник закрыты его песочницей): повтор в той же песочнице
+        // упрётся в тот же шаг. Это ход ведущего, а не автоматический повтор;
+        // попытка не засчитывается (writer-block.ts).
+        if (environmentBlockOf(summary))
+          throw new TaskFailure(
+            'needs-lead',
+            'Исполнитель остановился: окружение закрыло обязательный шаг. Итог исполнителя: ' +
+              summary,
+            undefined,
+            'writer-environment',
+            undefined,
+            extra,
+            summary,
+          );
         // Не доделано — свой класс: повтор продолжит с черновика, а не
         // остановится как неизвестный отказ.
         throw new TaskFailure(
           'unfinished',
-          'Исполнитель сообщил о незавершённой работе: ' + output.summary.slice(0, 500),
+          'Исполнитель сообщил о незавершённой работе: ' + summary,
           undefined,
           undefined,
           undefined,
-          evaluation.assumptions.length || evaluation.followUps.length ? outcome() : undefined,
+          extra,
+          summary || undefined,
         );
+      }
       case 'continue':
         if (evaluation.assumptions.length || evaluation.followUps.length)
           this.engine.recordAssumptions(attempt.id, attempt.token, outcome());
@@ -2099,11 +2128,14 @@ export class Runner {
           ...(heartbeatCause ? { heartbeatCause } : {}),
         };
         const input = !stalled && origin instanceof TaskFailure ? origin.input : undefined;
+        const writerSummary =
+          !stalled && origin instanceof TaskFailure ? origin.writerSummary : undefined;
         let recorded: { kind: FailureKind; message: string } = { kind, message: reported };
         try {
           this.engine.fail(attempt.id, attempt.token, reported, {
             ...failure,
             ...(input ? { input } : {}),
+            ...(writerSummary ? { writerSummary } : {}),
           });
         } catch (refused) {
           // Запрос не записался (откат той же транзакции, что и отказ):

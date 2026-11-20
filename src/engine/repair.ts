@@ -6,6 +6,7 @@ import {
   lastContextLimit,
   repairExplain,
   repairRepeats,
+  writerBlockedStop,
 } from '../contracts/repair-policy.ts';
 import { RECOVERY_THRESHOLD, isNeutral } from './property-recovery.ts';
 import { blockingRequest } from './input-requests.ts';
@@ -92,6 +93,50 @@ export function acceptanceGap(view: ExecutionView, work: WorkState): AcceptanceG
   return undefined;
 }
 
+/** Упавшие testcases проверок попытки (записи JUnit `tests` непрошедших gates). */
+function failedTestcases(a: AttemptState) {
+  return new Set(
+    a.evidence
+      .filter((e) => e.kind === 'test' && !e.passed)
+      .flatMap((e) => (e.tests ?? []).filter((t) => t.status === 'failed' && !t.opaque))
+      .map((t) => t.id),
+  );
+}
+
+/** Один и тот же testcase упал в двух содержательных отказах gate подряд. */
+export interface RepeatedTestcase {
+  testcases: string[];
+  runs: string[];
+}
+
+/**
+ * Повтор с выводом проверки уже был, а упал тот же testcase: у исполнителя
+ * нет новой гипотезы, и последняя попытка ушла бы на тот же провал. Последний
+ * отказ поручения — `gate`, предыдущий содержательный (инфраструктурные
+ * отказы пропускаются) — тоже `gate` того же основания, и общие упавшие
+ * testcases есть. Отпечаток отказа здесь не годится: вывод проверки меняется
+ * от попытки к попытке, а testcase — нет.
+ */
+export function repeatedTestcase(
+  view: ExecutionView,
+  work: WorkState,
+): RepeatedTestcase | undefined {
+  const own = view.attempts(work.id).filter((a) => a.status !== 'active');
+  const last = own.at(-1);
+  if (!last || last.status !== 'failed' || last.failureKind !== 'gate') return undefined;
+  const failed = failedTestcases(last);
+  if (!failed.size) return undefined;
+  for (let i = own.length - 2; i >= 0; i--) {
+    const a = own[i]!;
+    if (a.episodeBasis !== last.episodeBasis) return undefined;
+    if (isNeutral(a)) continue;
+    if (a.status !== 'failed' || a.failureKind !== 'gate') return undefined;
+    const same = [...failedTestcases(a)].filter((t) => failed.has(t)).sort();
+    return same.length ? { testcases: same.slice(0, 5), runs: [a.id, last.id] } : undefined;
+  }
+  return undefined;
+}
+
 /** Предмет серии словами: свойство и класс, только свойство или только класс. */
 function gapSubject(key: string) {
   const [kind, rest] = [key.slice(0, key.indexOf(':')), key.slice(key.indexOf(':') + 1)];
@@ -163,7 +208,7 @@ export function repairDecision(
       action: 'stop',
       workId: work.id,
       kind,
-      reason: `${work.id}: ${repairExplain(kind, failedBeforeWork(kind, view.attempts(work.id)))}${detail}`,
+      reason: `${work.id}: ${repairExplain(kind, failedBeforeWork(kind, view.attempts(work.id)), writerBlockedStop(kind, view.attempts(work.id)))}${detail}`,
     };
 
   if (options.budgetLeft <= 0)
@@ -204,6 +249,17 @@ export function repairDecision(
       kind,
       gap,
       reason: `${work.id}: пробел приёмки — ревью ${ruCount(gap.runs.length, RU.time)} подряд отклонило по одному и тому же ${gapSubject(gap.key)} при зелёных проверках (попытки ${gap.runs.join(', ')}). Третья слепая попытка не выдаётся: приёмка этот класс не проверяет. Решение ведущего — закрепить класс проверкой (корпус, эталонный набор, свойство в договоре проверки) или разделить задачу.${detail}`,
+    };
+
+  // Тот же упавший testcase после повтора с выводом проверки: ведущему, а не
+  // последней попытке.
+  const repeated = repeatedTestcase(view, work);
+  if (repeated)
+    return {
+      action: 'stop',
+      workId: work.id,
+      kind,
+      reason: `${work.id}: тот же testcase упал второй раз подряд (${repeated.testcases.join(', ')}; попытки ${repeated.runs.join(', ')}), хотя повтор получил вывод проверки. Следующая слепая попытка не выдаётся: у исполнителя нет новой гипотезы. Решение ведущего — разобрать провал (ожидаемое и полученное — в логе gate), уточнить постановку или контекст, затем повторить работу (harness retry) или разделить задачу.${detail}`,
     };
 
   const fingerprint = work.failureFingerprint;

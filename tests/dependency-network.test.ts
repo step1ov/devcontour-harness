@@ -891,3 +891,22 @@ test('Probe reviewer: gate установки, упавший на реестр�
     c.cleanup();
   }
 });
+
+test('A59: обрыв загрузки fetch («terminated» + стек прерванного TLS-сокета) — сетевой отказ установки', () => {
+  const output = [
+    'Progress: resolved 395, reused 0, downloaded 394, added 394',
+    '[ERROR] terminated',
+    '',
+    'pnpm: terminated',
+    '    at Fetch.onAborted (file:///x/pnpm.mjs:1:1)',
+    '    at Fetch.terminate (file:///x/pnpm.mjs:2:2)',
+    '    at TLSSocket.onHttpSocketClose (file:///x/pnpm.mjs:3:3)',
+  ].join('\n');
+  const argv = ['pnpm', '--filter', 'web...', 'install', '--frozen-lockfile'];
+  assert.ok(line(argv, output));
+  // Слово без кадра прерванного запроса и упавший скрипт — не сеть.
+  assert.equal(line(argv, 'pnpm: terminated\n'), undefined);
+  assert.equal(line(argv, output + '\n ELIFECYCLE  Command failed with exit code 1.'), undefined);
+  // Не установка — не распознаётся.
+  assert.equal(line(['pnpm', 'run', 'build'], output), undefined);
+});

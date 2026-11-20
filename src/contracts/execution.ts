@@ -546,6 +546,14 @@ export const attemptStateSchema = z.strictObject({
   error: z.string().optional(),
   /** Отказ окружения: исполнителю не дали работать, попытка не засчитана. */
   blocked: z.boolean().optional(),
+  /**
+   * Исполнитель остановился, назвав причиной окружение (`needs-lead` с
+   * причиной `writer-environment`): попытка не засчитана, тратится предел
+   * незасчитанных отказов; повтора без ведущего нет.
+   */
+  writerBlocked: z.literal(true).optional(),
+  /** Итог исполнителя незавершённой попытки своими словами (до 500 знаков). */
+  writerSummary: z.string().max(500).optional(),
   failureKind: failureKindSchema.optional(),
   /** Предел окна контекста — только у отказа `context-exhausted`. */
   contextLimit: contextLimitSchema.optional(),

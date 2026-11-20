@@ -710,13 +710,16 @@ test('T15: одна и та же причина сверх предела кла
   const h = ctx.open();
   const data = await h.run({ graph: ctx.graph, author: 'claude' });
   assert.equal(data.works[0]!.status, 'failed');
+  // Тот же упавший testcase после повтора с выводом проверки останавливает
+  // раньше предела одинаковых отпечатков класса (alpha.59).
   assert.equal(
     h.engine.read((v) => v.attempts('add-greeting').length),
-    repairPolicy.gate.repeats + 1,
+    2,
   );
+  assert.ok(repairPolicy.gate.repeats >= 1);
   assert.equal(data.workflow?.status, 'failed');
-  assert.equal(data.workflow?.repairs, repairPolicy.gate.repeats);
-  assert.match(data.workflow.error!, /одна и та же причина/);
+  assert.equal(data.workflow?.repairs, 1);
+  assert.match(data.workflow.error!, /тот же testcase упал второй раз подряд/);
   h.close();
 });
 
@@ -825,30 +828,32 @@ test('T15: бюджет восстановлений тратится накоп
     scenario: { writer: [wrong('A'), wrong('B'), wrong('C'), implement()], reviewer: approve() },
     policy: (p: any) => {
       p.maxAttempts = 10;
-      p.repairBudget = 2;
+      // Один повтор: второй отказ того же testcase остановил бы и без бюджета,
+      // но бюджет проверяется раньше и называет себя.
+      p.repairBudget = 1;
     },
   });
   let h = ctx.open();
   const data = await h.run({ graph: ctx.graph, author: 'claude' });
   assert.equal(
     h.engine.read((v) => v.attempts('add-greeting').length),
-    3,
+    2,
   );
-  assert.equal(data.workflow?.repairs, 2);
+  assert.equal(data.workflow?.repairs, 1);
   assert.equal(data.workflow?.status, 'failed');
   assert.match(data.workflow.error!, /бюджет автоматических восстановлений/);
   h.close();
   // Новый процесс: учёт не обнуляется, остановленное задание само не продолжается.
   h = ctx.open();
   const again = await h.run({ graph: ctx.graph, author: 'claude' });
-  assert.equal(again.workflow?.repairs, 2);
+  assert.equal(again.workflow?.repairs, 1);
   assert.equal(again.workflow?.status, 'failed');
   assert.equal(
     h.engine.read((v) => v.attempts('add-greeting').length),
-    3,
+    2,
     'новых попыток нет',
   );
-  assert.equal(ctx.calls('claude', 'writer'), 3);
+  assert.equal(ctx.calls('claude', 'writer'), 2);
   h.close();
 });
 

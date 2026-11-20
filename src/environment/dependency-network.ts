@@ -208,7 +208,21 @@ export function registryFailureLine(
       found ??= line.trim();
     }
   }
+  // Обрыв загрузки без кода менеджера: fetch (undici) прерван закрытием
+  // сокета TLS — менеджер печатает «terminated» и стек прерванного запроса.
+  // Засчитывается только пара «terminated» + кадр прерванного fetch/TLS-сокета.
+  found ??= abortedFetch(text);
   return found && (found.length > 200 ? found.slice(0, 200) + '…' : found);
+}
+
+/** Строка «<менеджер>: terminated» рядом с кадром прерванного fetch или TLS-сокета. */
+const abortedFetchLine =
+  /^\s*(?:\[ERROR\]\s+|(?:pnpm|npm error|npm ERR!|yarn):?\s+)?(?:TypeError: )?terminated\s*$/m;
+const abortedFetchFrame =
+  /^\s*at (?:Fetch\.onAborted|TLSSocket\.onHttpSocketClose|Socket\.onHttpSocketClose|Fetch\.terminate)\b/m;
+function abortedFetch(text: string) {
+  const line = abortedFetchLine.exec(text);
+  return line && abortedFetchFrame.test(text) ? line[0].trim() : undefined;
 }
 
 /** Файлы конфигурации и lockfiles менеджеров: сверяются побайтно. */

@@ -129,3 +129,10 @@ test('NET07: прежние признаки environment, BlockedError и отм
   );
   assert.equal(classifyFailure(new TaskFailure('cancelled', 'прогон прерван'), 'x'), 'cancelled');
 });
+
+test('NET08: «timeout=false» в сообщении шага — не превышение времени', () => {
+  // Сообщение упавшего шага подготовки: предела не было, это не корзина «время».
+  assert.notEqual(kindOf('Шаг install-web: exit=1; timeout=false'), 'timeout');
+  assert.equal(kindOf('Шаг install-web: exit=1; timeout=true'), 'timeout');
+  assert.notEqual(kindOf('Gate combo: exit=null; TIMEOUT=false'), 'timeout');
+});

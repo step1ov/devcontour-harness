@@ -164,10 +164,32 @@ export const PREFLIGHT_NEEDS_LEAD_EXPLAIN =
   'Работа отказала до начала, при загрузке своих входов: например, не найден снимок контекста, закреплённый при выдаче. Попытка не засчитана, исполнитель не вызывался, очередь не остановлена, автоматического повтора нет: держится только эта работа. Ведущий восстанавливает входы (снимок) или согласует работу заново, затем повторяет её.';
 
 /**
- * Причина остановки по классу отказа; отказ до начала работы (`preflight`)
- * у `needs-lead` объясняется своими словами, а не пустым результатом.
+ * Исполнитель остановился, назвав причиной окружение (`writerBlocked`): шаг,
+ * который требуют правила проекта, закрыт его песочницей. Повтор в той же
+ * песочнице упрётся в тот же шаг.
  */
-export function repairExplain(kind: FailureKind, preflight = false): string {
+export const WRITER_BLOCKED_EXPLAIN =
+  'Исполнитель остановился, не доделав работу: окружение закрыло обязательный шаг (сеть, локальный сервер, инструмент или источник задачи — см. его итог). Попытка не засчитана (тратится предел незасчитанных отказов), автоматического повтора нет: в той же песочнице он упрётся в тот же шаг. Ведущий устраняет причину — проверяет шаг командой harness smoke --writer-probe, разрешает его в политике, кладёт источник в контекст или выносит шаг в проверки harness, — затем повторяет работу (harness retry).';
+
+/**
+ * Последняя завершившаяся попытка — остановка исполнителя из-за окружения
+ * (`writerBlocked`) с тем же классом.
+ */
+export function writerBlockedStop(
+  kind: FailureKind,
+  attempts: readonly Pick<AttemptState, 'status' | 'failureKind' | 'writerBlocked'>[],
+): boolean {
+  const last = attempts.findLast((a) => a.status !== 'active');
+  return kind === 'needs-lead' && last?.failureKind === kind && last.writerBlocked === true;
+}
+
+/**
+ * Причина остановки по классу отказа; отказ до начала работы (`preflight`)
+ * у `needs-lead` объясняется своими словами, а не пустым результатом, как и
+ * остановка исполнителя из-за окружения (`writerBlocked`).
+ */
+export function repairExplain(kind: FailureKind, preflight = false, writerBlocked = false): string {
+  if (kind === 'needs-lead' && writerBlocked) return WRITER_BLOCKED_EXPLAIN;
   return preflight && kind === 'needs-lead'
     ? PREFLIGHT_NEEDS_LEAD_EXPLAIN
     : repairPolicy[kind].explain;

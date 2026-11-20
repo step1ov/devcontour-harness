@@ -1222,6 +1222,7 @@
                 "process-reap",
                 "cleanup",
                 "resource-busy",
+                "writer-environment",
                 "other",
                 "none"
               ]

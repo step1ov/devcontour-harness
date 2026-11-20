@@ -1,7 +1,8 @@
 // Почему поручение повторяется — простыми словами: класс и причина последнего
 // отказа попытки. Модуль без node:* и без zod (его импортирует браузер через
 // отчёт). Свободный текст ошибки попытки сюда не попадает: из него берётся
-// только номер занятого порта; остальное — ID gates и класс отказа.
+// только номер занятого порта; остальное — ID gates и класс отказа. Исключение
+// — итог исполнителя (`writerSummary`) незавершённой попытки, в кавычках.
 
 import type { AttemptState, FailureKind } from '../contracts/execution.ts';
 import type { FailureBucket } from '../contracts/report.ts';
@@ -88,6 +89,11 @@ export function failurePlainOf(a: AttemptState, bucket: FailureBucket): PlainTex
   let detail: PlainText;
   const port = busyPort(a.error);
   if (port) detail = { ru: `порт ${port} занят`, en: `port ${port} is busy` };
+  else if (a.writerBlocked)
+    detail = {
+      ru: 'окружение закрыло исполнителю обязательный шаг',
+      en: 'the environment blocked a step the writer must run',
+    };
   else if (a.failureKind === 'gate') {
     const gates = failingGates(a).slice(0, 8);
     detail = gates.length
@@ -106,5 +112,12 @@ export function failurePlainOf(a: AttemptState, bucket: FailureBucket): PlainTex
     };
   else if (a.status === 'cancelled') detail = failureKindText.cancelled;
   else detail = failureKindText.unknown;
-  return { ru: clip(`${head.ru} — ${detail.ru}`), en: clip(`${head.en} — ${detail.en}`) };
+  // Итог исполнителя своими словами — единственный свободный текст здесь: без
+  // него «не доделано» не говорит, чего не хватило (источник, инструмент, сеть).
+  const said = a.writerSummary?.trim().replace(/\s+/g, ' ');
+  const quote = said ? `: «${said.length > 200 ? said.slice(0, 199) + '…' : said}»` : '';
+  return {
+    ru: clip(`${head.ru} — ${detail.ru}${quote}`),
+    en: clip(`${head.en} — ${detail.en}${quote}`),
+  };
 }

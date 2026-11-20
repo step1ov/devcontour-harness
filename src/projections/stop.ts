@@ -138,6 +138,11 @@ export type StopInput =
          * `needs-lead` — неполные входы работы, а не пустой результат.
          */
         preflight?: boolean;
+        /**
+         * Исполнитель остановился, назвав причиной окружение (`writerBlocked`
+         * последней попытки): ход ведущего; `summary` — итог исполнителя.
+         */
+        writerBlocked?: { summary?: string };
         hold?: { operation: string; reason: string };
         budgetBlock?: { reason: string };
         /**
@@ -320,6 +325,14 @@ const preflightNeedsLeadText =
 /** Последствия и шаг — без повтора причины (полное объяснение — `PREFLIGHT_NEEDS_LEAD_EXPLAIN`). */
 const preflightNeedsLeadSteps =
   'Попытка не засчитана, исполнитель не вызывался, очередь не остановлена, автоматического повтора нет: восстановите входы (снимок) или согласуйте работу заново, затем повторите.';
+
+/** Шаблон `needs-lead` для остановки исполнителя из-за окружения (`writerBlocked`). */
+const writerBlockedText =
+  'Исполнитель остановился, не доделав работу: окружение закрыло обязательный шаг; решение ведущего.';
+/** Итог исполнителя и шаг ведущего (полное объяснение — `WRITER_BLOCKED_EXPLAIN`). */
+const writerBlockedSteps = (summary: string | undefined) =>
+  (summary ? `Итог исполнителя: «${clipText(summary, 300)}». ` : '') +
+  'Попытка не засчитана, автоматического повтора нет: проверьте шаг (harness smoke --writer-probe), разрешите его в политике, положите источник в контекст или вынесите шаг в проверки harness, затем повторите работу.';
 
 const message = (cause: StopCause, ...parts: (string | undefined)[]) =>
   messageWith(causeText[cause], ...parts);
@@ -630,9 +643,14 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
           phase,
           actor: 'lead',
           action: 'diagnose-failure',
-          ...(work.preflight
-            ? { text: preflightNeedsLeadText, note: preflightNeedsLeadSteps }
-            : {}),
+          ...(work.writerBlocked
+            ? {
+                text: writerBlockedText,
+                note: writerBlockedSteps(work.writerBlocked.summary),
+              }
+            : work.preflight
+              ? { text: preflightNeedsLeadText, note: preflightNeedsLeadSteps }
+              : {}),
         };
       case 'review-protocol':
       case 'unknown':

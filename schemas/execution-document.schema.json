@@ -1471,6 +1471,14 @@
           "blocked": {
             "type": "boolean"
           },
+          "writerBlocked": {
+            "type": "boolean",
+            "const": true
+          },
+          "writerSummary": {
+            "type": "string",
+            "maxLength": 500
+          },
           "failureKind": {
             "type": "string",
             "enum": [

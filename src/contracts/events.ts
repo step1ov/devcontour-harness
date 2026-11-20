@@ -46,6 +46,12 @@ export const environmentCauses = [
   'process-reap',
   'cleanup',
   'resource-busy',
+  /**
+   * Исполнитель остановился, не доделав работу, и назвал причиной окружение:
+   * обязательный шаг (сеть, локальный сервер, инструмент, источник) закрыт
+   * его песочницей. Класс отказа — `needs-lead`, попытка не засчитана.
+   */
+  'writer-environment',
   'other',
   'none',
 ] as const;
