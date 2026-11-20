@@ -8,8 +8,7 @@ import {
   writeFileSync,
   mkdirSync,
 } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import {
@@ -81,6 +80,7 @@ import {
 } from './update/apply.ts';
 import {
   cachedUpdates,
+  installedHarness,
   checkUpdates,
   loadUpdatesConfig,
   saveLastCheck,
@@ -88,7 +88,7 @@ import {
   writeUpdatesConfig,
 } from './update/check.ts';
 import { deadUpdater, liveWork } from './update/live.ts';
-import { HARNESS_PACKAGE, installedPackage } from './update/install.ts';
+import { HARNESS_PACKAGE, installPrefix, installedPackage } from './update/install.ts';
 import {
   disableSchedule,
   enableSchedule,
@@ -762,23 +762,7 @@ function updateContext(state: string, v: { policy?: string; prefix?: string }) {
     : existsSync(bindingFile(state))
       ? binding(state).baseDir
       : undefined;
-  // Каталог установки: --prefix; иначе тот, откуда запущен этот harness
-  // (`<prefix>/node_modules/devcontour-harness`); иначе `.harness-tools`
-  // проекта (место навыка harness-setup); иначе корень проекта.
-  const root = harnessDir
-    ? basename(harnessDir) === '.harness'
-      ? dirname(harnessDir)
-      : harnessDir
-    : undefined;
-  const self = fileURLToPath(import.meta.url);
-  const at = self.indexOf(`${sep}node_modules${sep}`);
-  const candidates = [
-    ...(at > 0 ? [self.slice(0, at)] : []),
-    ...(root ? [join(root, '.harness-tools'), root] : []),
-  ];
-  const prefix = v.prefix
-    ? resolve(v.prefix)
-    : (candidates.find((c) => installedPackage(c, HARNESS_PACKAGE)) ?? root);
+  const prefix = installPrefix(harnessDir, v.prefix);
   const { config, exists } = loadUpdatesConfig(harnessDir);
   return {
     harnessDir,
@@ -813,7 +797,7 @@ function statusUpdates(state: string, baseDir: string) {
     return undefined;
   }
   try {
-    const cached = cachedUpdates(state, loaded.config);
+    const cached = cachedUpdates(state, loaded.config, installedHarness(baseDir));
     if (!cached || (!loaded.exists && cached.state === 'not-checked')) return undefined;
     return { state: cached.state, line: cached.line };
   } catch {

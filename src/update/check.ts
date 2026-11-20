@@ -21,6 +21,7 @@ import {
   UI_PACKAGE,
   formatChanges,
   formatsOf,
+  installPrefix,
   installedPackage,
 } from './install.ts';
 import {
@@ -296,9 +297,19 @@ export async function checkUpdates(ctx: CheckContext): Promise<UpdateCheck> {
 }
 
 /**
+ * Версия harness, с которой сравнивает `update --check`: установленная в
+ * каталоге установки проекта (то же правило, что у `update`), а не версия
+ * запущенного файла — они расходятся, когда harness запущен не из каталога
+ * установки (глобальный, из исходников) или процесс пережил обновление.
+ */
+export const installedHarness = (harnessDir: string | undefined) =>
+  currentPair(installPrefix(harnessDir)).pair.harness;
+
+/**
  * Строка об обновлениях по сохранённой проверке для `status --human`,
  * представления оператора и ведущего: проверка старше установленной версии
- * (пару уже поставили) — «обновлений нет».
+ * (пару уже поставили) — «обновлений нет». `installed` — та же «текущая»
+ * версия, что у `update --check` (installedHarness каталога .harness).
  */
 export function cachedUpdates(
   stateDir: string,

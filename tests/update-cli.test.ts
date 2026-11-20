@@ -27,6 +27,7 @@ import {
   updateDataSchema,
 } from '../src/contracts/index.ts';
 import { Engine } from '../src/engine/engine.ts';
+import { HARNESS_VERSION } from '../src/package.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import { processStartedAt } from '../src/environment/live-calls.ts';
@@ -42,6 +43,20 @@ import {
 
 const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
 
+/**
+ * Версии поддельных пакетов выводятся из версии этого репозитория и далеко
+ * впереди неё: выпуск harness не делает «новую» пару текущей и не ломает набор.
+ */
+const fakeVersion = (offset: number) =>
+  HARNESS_VERSION.replace(/\d+$/, (n) => String(Number(n) + offset));
+const LOW = fakeVersion(95);
+const CUR = fakeVersion(100);
+const NEW = fakeVersion(101);
+const NEW2 = fakeVersion(102);
+/** Регулярное выражение из текста с версиями (точки — буквально). */
+const rx = (text: string, end = '', start = '') =>
+  new RegExp(start + text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + end);
+
 interface Project {
   dir: string;
   state: string;
@@ -56,7 +71,7 @@ interface Project {
 
 function project(
   registry: FakeRegistry,
-  o: { ui?: boolean; leaseMs?: number; config?: Record<string, unknown> } = {},
+  o: { ui?: boolean; leaseMs?: number; config?: Record<string, unknown>; harness?: string } = {},
 ): Project {
   const base = mkdtempSync(join(tmpdir(), 'harness-update-'));
   const dir = join(base, 'project');
@@ -65,7 +80,7 @@ function project(
   mkdirSync(join(dir, '.harness'), { recursive: true });
   mkdirSync(home, { recursive: true });
   const env = { ...npmEnv(registry.url, home), HOME: home };
-  const deps: Record<string, string> = { 'devcontour-harness': '0.1.0-alpha.60' };
+  const deps: Record<string, string> = { 'devcontour-harness': o.harness ?? CUR };
   if (o.ui !== false) deps['devcontour-harness-ui'] = '0.1.0-alpha.4';
   writeFileSync(
     join(dir, 'package.json'),
@@ -158,10 +173,7 @@ async function registryWith(...versions: ReturnType<typeof fakeHarness>[]) {
   return r;
 }
 
-const base = () => [
-  fakeHarness('0.1.0-alpha.60'),
-  fakeUi('0.1.0-alpha.4', '>=0.1.0-alpha.55 <0.2.0'),
-];
+const base = () => [fakeHarness(CUR), fakeUi('0.1.0-alpha.4', `>=${LOW} <0.2.0`)];
 
 test('UP01: --check — доступная пара, что нового из заметок tarball, запросы только к реестру; офлайн — «не удалось проверить», exit 0', async () => {
   const registry = await registryWith(...base());
@@ -172,22 +184,22 @@ test('UP01: --check — доступная пара, что нового из з
     assert.equal(none.json.data.check.state, 'up-to-date', JSON.stringify(none.json.data.check));
     assert.match(
       none.json.data.line,
-      /Обновлений нет: установлены harness 0\.1\.0-alpha\.60 и панель 0\.1\.0-alpha\.4/,
+      rx(`Обновлений нет: установлены harness ${CUR} и панель 0.1.0-alpha.4`),
     );
 
-    registry.publish(fakeHarness('0.1.0-alpha.61'));
-    registry.publish(fakeUi('0.1.0-alpha.5', '>=0.1.0-alpha.60 <0.2.0'));
+    registry.publish(fakeHarness(NEW));
+    registry.publish(fakeUi('0.1.0-alpha.5', `>=${CUR} <0.2.0`));
     registry.resetRequests();
     const r = p.harness('update', '--check', '--state', p.state);
     assert.equal(r.status, 0, r.stderr);
     updateDataSchema.parse(r.json.data);
     const c = r.json.data.check;
     assert.equal(c.state, 'available');
-    assert.deepEqual(c.current, { harness: '0.1.0-alpha.60', ui: '0.1.0-alpha.4' });
-    assert.deepEqual(c.available, { harness: '0.1.0-alpha.61', ui: '0.1.0-alpha.5' });
+    assert.deepEqual(c.current, { harness: CUR, ui: '0.1.0-alpha.4' });
+    assert.deepEqual(c.available, { harness: NEW, ui: '0.1.0-alpha.5' });
     assert.deepEqual(c.whatsNew, [
-      'harness 0.1.0-alpha.61: Новое в 0.1.0-alpha.61',
-      'harness 0.1.0-alpha.61: Второе в 0.1.0-alpha.61',
+      `harness ${NEW}: Новое в ${NEW}`,
+      `harness ${NEW}: Второе в ${NEW}`,
       'панель 0.1.0-alpha.5: Панель 0.1.0-alpha.5 показывает обновления',
     ]);
     assert.equal(c.formatChanges, undefined);
@@ -198,7 +210,7 @@ test('UP01: --check — доступная пара, что нового из з
       registry.requests.join('\n'),
     );
     // Ничего не поставлено.
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.equal(p.installed('devcontour-harness'), CUR);
     // Сохранённая проверка — в <state>-updates.
     assert.equal(
       JSON.parse(readFileSync(p.state + '-updates/last-check.json', 'utf8')).state,
@@ -206,7 +218,7 @@ test('UP01: --check — доступная пара, что нового из з
     );
 
     const human = p.harness('update', '--check', '--state', p.state, '--human');
-    assert.match(human.stdout, /Что нового:\n {2}• harness 0\.1\.0-alpha\.61: Новое/);
+    assert.match(human.stdout, rx(`Что нового:\n  • harness ${NEW}: Новое`));
 
     await registry.close();
     const offline = p.harness('update', '--check', '--state', p.state);
@@ -215,7 +227,7 @@ test('UP01: --check — доступная пара, что нового из з
     assert.match(offline.json.data.line, /^Не удалось проверить обновления: /);
     // Найденная раньше пара остаётся видна.
     assert.deepEqual(offline.json.data.check.available, {
-      harness: '0.1.0-alpha.61',
+      harness: NEW,
       ui: '0.1.0-alpha.5',
     });
   } finally {
@@ -227,19 +239,16 @@ test('UP02: пара по peer-диапазону — новейшая пане�
   const registry = await registryWith(...base());
   try {
     const p = project(registry);
-    registry.publish(fakeHarness('0.1.0-alpha.61'));
-    registry.publish(fakeUi('0.1.0-alpha.5', '>=0.1.0-alpha.60 <0.2.0'), '');
-    registry.publish(fakeUi('0.1.0-alpha.6', '>=0.1.0-alpha.62 <0.2.0'));
+    registry.publish(fakeHarness(NEW));
+    registry.publish(fakeUi('0.1.0-alpha.5', `>=${CUR} <0.2.0`), '');
+    registry.publish(fakeUi('0.1.0-alpha.6', `>=${NEW2} <0.2.0`));
     const r = p.harness('update', '--check', '--state', p.state);
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(r.json.data.check.available, {
-      harness: '0.1.0-alpha.61',
+      harness: NEW,
       ui: '0.1.0-alpha.5',
     });
-    assert.match(
-      r.json.data.check.note,
-      /Панель 0\.1\.0-alpha\.6 не подходит к harness 0\.1\.0-alpha\.61/,
-    );
+    assert.match(r.json.data.check.note, rx(`Панель 0.1.0-alpha.6 не подходит к harness ${NEW}`));
   } finally {
     await registry.close();
   }
@@ -249,13 +258,13 @@ test('UP03: --apply — точные версии обоих пакетов, к�
   const registry = await registryWith(...base());
   try {
     const p = project(registry);
-    registry.publish(fakeHarness('0.1.0-alpha.61'));
-    registry.publish(fakeUi('0.1.0-alpha.5', '>=0.1.0-alpha.60 <0.2.0'));
+    registry.publish(fakeHarness(NEW));
+    registry.publish(fakeUi('0.1.0-alpha.5', `>=${CUR} <0.2.0`));
     const r = p.harness('update', '--apply', '--state', p.state);
     assert.equal(r.status, 0, r.stderr + r.stdout);
     const d = updateDataSchema.parse(r.json.data);
     assert.equal(d.outcome, 'applied');
-    assert.deepEqual(d.to, { harness: '0.1.0-alpha.61', ui: '0.1.0-alpha.5' });
+    assert.deepEqual(d.to, { harness: NEW, ui: '0.1.0-alpha.5' });
     assert.deepEqual(
       d.steps!.map((s) => [s.step, s.ok]),
       [
@@ -270,11 +279,11 @@ test('UP03: --apply — точные версии обоих пакетов, к�
         ['event', true],
       ],
     );
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.61');
+    assert.equal(p.installed('devcontour-harness'), NEW);
     assert.equal(p.installed('devcontour-harness-ui'), '0.1.0-alpha.5');
     // --save-exact в тот же раздел.
     assert.deepEqual(p.manifest().devDependencies, {
-      'devcontour-harness': '0.1.0-alpha.61',
+      'devcontour-harness': NEW,
       'devcontour-harness-ui': '0.1.0-alpha.5',
     });
     // Копия состояния с контрольной суммой.
@@ -286,8 +295,8 @@ test('UP03: --apply — точные версии обоих пакетов, к�
     assert.equal(updated.length, 1);
     assert.deepEqual(updated[0].payload, {
       action: 'applied',
-      from: { harness: '0.1.0-alpha.60', ui: '0.1.0-alpha.4' },
-      to: { harness: '0.1.0-alpha.61', ui: '0.1.0-alpha.5' },
+      from: { harness: CUR, ui: '0.1.0-alpha.4' },
+      to: { harness: NEW, ui: '0.1.0-alpha.5' },
       by: 'operator',
     });
     const status = p.harness('status', '--state', p.state);
@@ -305,7 +314,7 @@ test('UP04: идёт run (живая роль controller) — отказ busy б
   const registry = await registryWith(...base());
   try {
     const p = project(registry, { leaseMs: 5000 });
-    registry.publish(fakeHarness('0.1.0-alpha.61'));
+    registry.publish(fakeHarness(NEW));
     const e = p.engine();
     assert.equal(e.engine.lead('c1'), true);
     e.close();
@@ -314,14 +323,14 @@ test('UP04: идёт run (живая роль controller) — отказ busy б
     assert.equal(busy.status, 3, busy.stderr);
     assert.equal(busy.json.data.outcome, 'busy');
     assert.match(busy.json.data.line, /идёт harness run \(c1\)/);
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.equal(p.installed('devcontour-harness'), CUR);
     assert.equal(readFileSync(join(p.dir, 'package.json'), 'utf8'), before);
     assert.equal(existsSync(p.state + '-updates/copies'), false, 'копии нет — ничего не начато');
     // Роль controller без продления истекает через leaseMs: --wait дожидается.
     const waited = p.harness('update', '--apply', '--state', p.state, '--wait', '1');
     assert.equal(waited.status, 0, waited.stderr + waited.stdout);
     assert.equal(waited.json.data.outcome, 'applied');
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.61');
+    assert.equal(p.installed('devcontour-harness'), NEW);
   } finally {
     await registry.close();
   }
@@ -331,8 +340,8 @@ test('UP05: сбой проверки новой версии — автомат
   const registry = await registryWith(...base());
   try {
     const p = project(registry);
-    registry.publish(fakeHarness('0.1.0-alpha.61', { fail: true }));
-    registry.publish(fakeUi('0.1.0-alpha.5', '>=0.1.0-alpha.60 <0.2.0'));
+    registry.publish(fakeHarness(NEW, { fail: true }));
+    registry.publish(fakeUi('0.1.0-alpha.5', `>=${CUR} <0.2.0`));
     const before = readFileSync(join(p.dir, 'package.json'), 'utf8');
     const lock = readFileSync(join(p.dir, 'package-lock.json'), 'utf8');
     const r = p.harness('update', '--apply', '--state', p.state);
@@ -341,7 +350,7 @@ test('UP05: сбой проверки новой версии — автомат
     assert.equal(d.outcome, 'restored');
     assert.ok(d.steps!.some((s) => s.step === 'doctor' && !s.ok));
     assert.ok(d.steps!.some((s) => s.step === 'restore-packages' && s.ok));
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.equal(p.installed('devcontour-harness'), CUR);
     assert.equal(p.installed('devcontour-harness-ui'), '0.1.0-alpha.4');
     assert.equal(readFileSync(join(p.dir, 'package.json'), 'utf8'), before);
     assert.equal(readFileSync(join(p.dir, 'package-lock.json'), 'utf8'), lock);
@@ -362,7 +371,7 @@ test('UP05: сбой проверки новой версии — автомат
       scheduled.json.data.line,
       /по расписанию не ставится: не прошла проверку и была возвращена/,
     );
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.equal(p.installed('devcontour-harness'), CUR);
   } finally {
     await registry.close();
   }
@@ -372,24 +381,24 @@ test('UP06: смена форматов — решение владельца: a
   const registry = await registryWith(...base());
   try {
     const p = project(registry, { ui: false, config: { mode: 'auto' } });
-    registry.publish(fakeHarness('0.1.0-alpha.61', { formats: { ...FORMATS, state: 2 } }));
+    registry.publish(fakeHarness(NEW, { formats: { ...FORMATS, state: 2 } }));
     const check = p.harness('update', '--check', '--state', p.state);
     assert.equal(check.json.data.check.state, 'needs-decision');
     assert.deepEqual(check.json.data.check.formatChanges, ['stateVersion: 1 → 2']);
-    assert.match(check.json.data.check.command, / --confirm-formats harness@0\.1\.0-alpha\.61$/);
+    assert.match(check.json.data.check.command, rx(` --confirm-formats harness@${NEW}`, '$'));
     for (const args of [[], ['--scheduled']]) {
       const r = p.harness('update', '--apply', '--state', p.state, ...args);
       assert.equal(r.status, 3, r.stderr);
       assert.equal(r.json.data.outcome, 'needs-decision');
       assert.match(r.json.data.line, /^Нужно ваше решение: /);
-      assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+      assert.equal(p.installed('devcontour-harness'), CUR);
     }
     const refused = p.harness(
       'update',
       '--apply',
       '--scheduled',
       '--confirm-formats',
-      'harness@0.1.0-alpha.61',
+      `harness@${NEW}`,
       '--state',
       p.state,
     );
@@ -400,26 +409,26 @@ test('UP06: смена форматов — решение владельца: a
       'update',
       '--apply',
       '--confirm-formats',
-      'harness@0.1.0-alpha.62',
+      `harness@${NEW2}`,
       '--state',
       p.state,
     );
     assert.equal(other.status, 3, other.stderr);
     assert.match(
       other.json.data.line,
-      /^Решение было о harness@0\.1\.0-alpha\.62, а реестр сейчас предлагает harness@0\.1\.0-alpha\.61/,
+      rx(`Решение было о harness@${NEW2}, а реестр сейчас предлагает harness@${NEW}`, '', '^'),
     );
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.equal(p.installed('devcontour-harness'), CUR);
     const applied = p.harness(
       'update',
       '--apply',
       '--confirm-formats',
-      'harness@0.1.0-alpha.61',
+      `harness@${NEW}`,
       '--state',
       p.state,
     );
     assert.equal(applied.status, 0, applied.stderr + applied.stdout);
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.61');
+    assert.equal(p.installed('devcontour-harness'), NEW);
     // Работа после обновления (событие) — затем откат: формат различался, состояние — из копии.
     const e = p.engine();
     e.engine.pause('operator');
@@ -427,7 +436,7 @@ test('UP06: смена форматов — решение владельца: a
     const rb = p.harness('update', '--rollback', '--state', p.state);
     assert.equal(rb.status, 0, rb.stderr + rb.stdout);
     assert.equal(rb.json.data.outcome, 'rolled-back');
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.equal(p.installed('devcontour-harness'), CUR);
     assert.match(rb.json.data.line, /состояние возвращено из копии/);
     const replaced = join(p.state + '-updates', 'replaced');
     assert.equal(readdirSync(replaced).length, 1, 'состояние новой версии перенесено, не удалено');
@@ -446,16 +455,16 @@ test('UP07: откат при тех же форматах — прежняя п
   const registry = await registryWith(...base());
   try {
     const p = project(registry);
-    registry.publish(fakeHarness('0.1.0-alpha.61'));
-    registry.publish(fakeUi('0.1.0-alpha.5', '>=0.1.0-alpha.60 <0.2.0'));
+    registry.publish(fakeHarness(NEW));
+    registry.publish(fakeUi('0.1.0-alpha.5', `>=${CUR} <0.2.0`));
     assert.equal(p.harness('update', '--apply', '--state', p.state).status, 0);
     const e = p.engine();
     e.engine.pause('operator');
     e.close();
     const rb = p.harness('update', '--rollback', '--state', p.state);
     assert.equal(rb.status, 0, rb.stderr + rb.stdout);
-    assert.deepEqual(rb.json.data.to, { harness: '0.1.0-alpha.60', ui: '0.1.0-alpha.4' });
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.deepEqual(rb.json.data.to, { harness: CUR, ui: '0.1.0-alpha.4' });
+    assert.equal(p.installed('devcontour-harness'), CUR);
     assert.equal(p.installed('devcontour-harness-ui'), '0.1.0-alpha.4');
     assert.match(rb.json.data.line, /состояние читается прежней версией — оставлено как есть/);
     // Пауза оператора после обновления — в живом состоянии, не потеряна.
@@ -478,8 +487,8 @@ test('UP08: view и status --human показывают доступное об�
   const registry = await registryWith(...base());
   try {
     const p = project(registry, { config: { mode: 'notify' } });
-    registry.publish(fakeHarness('0.1.0-alpha.61'));
-    registry.publish(fakeUi('0.1.0-alpha.5', '>=0.1.0-alpha.60 <0.2.0'));
+    registry.publish(fakeHarness(NEW));
+    registry.publish(fakeUi('0.1.0-alpha.5', `>=${CUR} <0.2.0`));
     assert.equal(p.harness('update', '--check', '--state', p.state).status, 0);
     registry.resetRequests();
     const view = p.harness('view', '--state', p.state);
@@ -488,15 +497,35 @@ test('UP08: view и status --human показывают доступное об�
     assert.equal(doc.viewRevision, 4);
     assert.equal(doc.updates?.state, 'available');
     assert.equal(doc.updates?.mode, 'notify');
-    assert.deepEqual(doc.updates?.available, { harness: '0.1.0-alpha.61', ui: '0.1.0-alpha.5' });
+    assert.deepEqual(doc.updates?.available, { harness: NEW, ui: '0.1.0-alpha.5' });
     assert.ok(doc.updates?.whatsNew?.length);
     const status = p.harness('status', '--state', p.state, '--human');
     assert.equal(status.status, 0, status.stderr);
-    assert.match(
-      status.stdout,
-      /Обновления: Доступна harness 0\.1\.0-alpha\.61 и панель 0\.1\.0-alpha\.5/,
-    );
+    assert.match(status.stdout, rx(`Обновления: Доступна harness ${NEW} и панель 0.1.0-alpha.5`));
     assert.deepEqual(registry.requests, [], 'view и status в сеть не ходят');
+  } finally {
+    await registry.close();
+  }
+});
+
+test('UP08b: view и status сравнивают проверку с установленной в проекте версией, а не с запущенным harness', async () => {
+  // Запущенный harness (исходники репозитория) новее установленного в проекте и
+  // равен найденной паре: проверка всё равно «доступна», как у update --check.
+  const old = fakeVersion(-1);
+  const registry = await registryWith(fakeHarness(old));
+  try {
+    const p = project(registry, { ui: false, harness: old, config: { mode: 'notify' } });
+    registry.publish(fakeHarness(HARNESS_VERSION));
+    const check = p.harness('update', '--check', '--state', p.state);
+    assert.equal(check.status, 0, check.stderr);
+    assert.deepEqual(check.json.data.check.available, { harness: HARNESS_VERSION });
+    const view = p.harness('view', '--state', p.state);
+    assert.equal(view.status, 0, view.stderr);
+    const doc = operatorViewSchema.parse(view.json.data);
+    assert.equal(doc.updates?.state, 'available');
+    assert.deepEqual(doc.updates?.current, { harness: old });
+    const status = p.harness('status', '--state', p.state, '--human');
+    assert.match(status.stdout, rx(`Обновления: Доступна harness ${HARNESS_VERSION}`));
   } finally {
     await registry.close();
   }
@@ -554,7 +583,7 @@ test('UP10: запущенная панель этого каталога сос
   const registry = await registryWith(...base());
   try {
     const p = project(registry);
-    registry.publish(fakeUi('0.1.0-alpha.5', '>=0.1.0-alpha.60 <0.2.0'));
+    registry.publish(fakeUi('0.1.0-alpha.5', `>=${CUR} <0.2.0`));
     const panel = spawn(
       process.execPath,
       [join(p.dir, 'node_modules', '.bin', 'devcontour-harness-ui'), '--state', p.state],
@@ -643,8 +672,8 @@ test('UP13: новая версия успела изменить состоян
   const registry = await registryWith(...base());
   try {
     const p = project(registry);
-    registry.publish(fakeHarness('0.1.0-alpha.61', { fail: true, touch: true }));
-    registry.publish(fakeUi('0.1.0-alpha.5', '>=0.1.0-alpha.60 <0.2.0'));
+    registry.publish(fakeHarness(NEW, { fail: true, touch: true }));
+    registry.publish(fakeUi('0.1.0-alpha.5', `>=${CUR} <0.2.0`));
     const r = p.harness('update', '--apply', '--state', p.state);
     assert.equal(r.status, 4, r.stderr + r.stdout);
     const d = updateDataSchema.parse(r.json.data);
@@ -662,7 +691,7 @@ test('UP13: новая версия успела изменить состоян
       'изменённое перенесено, не удалено',
     );
     assert.ok(d.stateCopy && existsSync(d.stateCopy.path), 'копия, которой вернули, сохранена');
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.equal(p.installed('devcontour-harness'), CUR);
     // Возвращённое состояние читается и очередь идёт.
     const status = p.harness('status', '--state', p.state);
     assert.equal(status.status, 0, status.stderr);
@@ -677,7 +706,7 @@ test('UP14: очередь на паузе человека до обновле�
   const registry = await registryWith(...base());
   try {
     const p = project(registry);
-    registry.publish(fakeHarness('0.1.0-alpha.61'));
+    registry.publish(fakeHarness(NEW));
     const e = p.engine();
     e.engine.pause('operator');
     e.close();
@@ -697,7 +726,7 @@ test('UP15: замок живого процесса — CONTROLLER_BUSY, нич
   const registry = await registryWith(...base());
   try {
     const p = project(registry);
-    registry.publish(fakeHarness('0.1.0-alpha.61'));
+    registry.publish(fakeHarness(NEW));
     mkdirSync(p.state + '-updates', { recursive: true });
     const lock = p.state + '-updates/lock';
     writeFileSync(
@@ -707,11 +736,11 @@ test('UP15: замок живого процесса — CONTROLLER_BUSY, нич
     const busy = p.harness('update', '--apply', '--state', p.state);
     assert.equal(busy.status, 3, busy.stderr);
     assert.equal(busy.json.error.code, 'CONTROLLER_BUSY');
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.equal(p.installed('devcontour-harness'), CUR);
     writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: 1, at: 'x' }));
     const r = p.harness('update', '--apply', '--state', p.state);
     assert.equal(r.status, 0, r.stderr + r.stdout);
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.61');
+    assert.equal(p.installed('devcontour-harness'), NEW);
     assert.equal(existsSync(lock), false);
   } finally {
     await registry.close();
@@ -722,8 +751,8 @@ test('UP16: после ручного отката расписание в ре�
   const registry = await registryWith(...base());
   try {
     const p = project(registry, { config: { mode: 'auto' } });
-    registry.publish(fakeHarness('0.1.0-alpha.61'));
-    registry.publish(fakeUi('0.1.0-alpha.5', '>=0.1.0-alpha.60 <0.2.0'));
+    registry.publish(fakeHarness(NEW));
+    registry.publish(fakeUi('0.1.0-alpha.5', `>=${CUR} <0.2.0`));
     assert.equal(
       p.harness('update', '--apply', '--scheduled', '--state', p.state).json.data.outcome,
       'applied',
@@ -735,13 +764,13 @@ test('UP16: после ручного отката расписание в ре�
     // status после отката называет установленную версию, а не прежнюю проверку.
     assert.match(
       p.harness('status', '--state', p.state, '--human').stdout,
-      /Возвращены harness 0\.1\.0-alpha\.60/,
+      rx(`Возвращены harness ${CUR}`),
     );
     const s = p.harness('update', '--apply', '--scheduled', '--state', p.state);
     assert.equal(s.status, 0, s.stderr);
     assert.equal(s.json.data.outcome, 'skipped');
     assert.match(s.json.data.line, /откачена вручную/);
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.equal(p.installed('devcontour-harness'), CUR);
     assert.match(
       p.harness('status', '--state', p.state, '--human').stdout,
       /по расписанию не ставится: откачена вручную/,
@@ -757,8 +786,8 @@ test('UP17: процесс убит после установки, до пров
   const registry = await registryWith(...base());
   try {
     const p = project(registry);
-    registry.publish(fakeHarness('0.1.0-alpha.61'));
-    registry.publish(fakeUi('0.1.0-alpha.5', '>=0.1.0-alpha.60 <0.2.0'));
+    registry.publish(fakeHarness(NEW));
+    registry.publish(fakeUi('0.1.0-alpha.5', `>=${CUR} <0.2.0`));
     // npm, который после установки убивает вызвавший его harness (SIGKILL: finally не идёт).
     const wrapper = join(p.home, 'npm-killer');
     writeFileSync(
@@ -776,18 +805,18 @@ test('UP17: процесс убит после установки, до пров
       },
     );
     assert.equal(killed.signal, 'SIGKILL', killed.stderr);
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.61', 'пакеты остались новыми');
+    assert.equal(p.installed('devcontour-harness'), NEW, 'пакеты остались новыми');
     assert.ok(existsSync(p.state + '-updates/in-progress.json'));
     assert.equal(p.harness('status', '--state', p.state).json.data.control.paused, true);
     const r = p.harness('update', '--check', '--state', p.state);
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.match(
       r.json.data.line,
-      /^Прерванное обновление завершено возвратом: harness 0\.1\.0-alpha\.60/,
+      rx(`Прерванное обновление завершено возвратом: harness ${CUR}`, '', '^'),
     );
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.equal(p.installed('devcontour-harness'), CUR);
     assert.equal(p.installed('devcontour-harness-ui'), '0.1.0-alpha.4');
-    assert.equal(p.manifest().devDependencies['devcontour-harness'], '0.1.0-alpha.60');
+    assert.equal(p.manifest().devDependencies['devcontour-harness'], CUR);
     assert.equal(existsSync(p.state + '-updates/in-progress.json'), false);
     const status = p.harness('status', '--state', p.state);
     assert.equal(status.json.data.control.paused, false);
@@ -807,8 +836,8 @@ test('UP18: откат в проекте меняет только записи 
   const registry = await registryWith(...base());
   try {
     const p = project(registry);
-    registry.publish(fakeHarness('0.1.0-alpha.61'));
-    registry.publish(fakeUi('0.1.0-alpha.5', '>=0.1.0-alpha.60 <0.2.0'));
+    registry.publish(fakeHarness(NEW));
+    registry.publish(fakeUi('0.1.0-alpha.5', `>=${CUR} <0.2.0`));
     assert.equal(p.harness('update', '--apply', '--state', p.state).json.data.outcome, 'applied');
     mkdirSync(join(p.dir, 'local-dep'));
     writeFileSync(
@@ -827,10 +856,10 @@ test('UP18: откат в проекте меняет только записи 
     assert.equal(add.status, 0, add.stderr);
     const rb = p.harness('update', '--rollback', '--state', p.state);
     assert.equal(rb.status, 0, rb.stderr + rb.stdout);
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.equal(p.installed('devcontour-harness'), CUR);
     assert.equal(p.installed('devcontour-harness-ui'), '0.1.0-alpha.4');
     const deps = p.manifest().devDependencies;
-    assert.equal(deps['devcontour-harness'], '0.1.0-alpha.60');
+    assert.equal(deps['devcontour-harness'], CUR);
     assert.equal(deps['local-dep'], 'file:local-dep');
     assert.ok(existsSync(join(p.dir, 'node_modules', 'local-dep', 'package.json')));
   } finally {
@@ -910,7 +939,7 @@ test('UP20: база состояния без binding.json — apply и rollbac
   const registry = await registryWith(...base());
   try {
     const p = project(registry);
-    registry.publish(fakeHarness('0.1.0-alpha.61'));
+    registry.publish(fakeHarness(NEW));
     rmSync(join(p.state, 'binding.json'));
     const e = p.engine();
     assert.equal(e.engine.lead('c1'), true);
@@ -923,7 +952,7 @@ test('UP20: база состояния без binding.json — apply и rollbac
     assert.equal(busy.status, 3, busy.stderr);
     assert.equal(busy.json.data.outcome, 'busy');
     assert.match(busy.json.data.line, /идёт harness run \(c1\)/);
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.equal(p.installed('devcontour-harness'), CUR);
   } finally {
     await registry.close();
   }
@@ -933,7 +962,7 @@ test('UP21: общий каталог установки — замок у ка�
   const registry = await registryWith(...base());
   try {
     const p = project(registry);
-    registry.publish(fakeHarness('0.1.0-alpha.61'));
+    registry.publish(fakeHarness(NEW));
     writeFileSync(
       join(p.dir, '.harness-update.lock'),
       JSON.stringify({
@@ -949,7 +978,7 @@ test('UP21: общий каталог установки — замок у ка�
       r.json.error.message,
       /Пакеты этого каталога установки уже обновляет другой harness update/,
     );
-    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.equal(p.installed('devcontour-harness'), CUR);
     const gates = p.harness('gates', '--state', p.state, '--sha', 'HEAD');
     assert.equal(gates.json.error.code, 'CONTROLLER_BUSY');
     assert.match(gates.json.error.message, /пакетов в /);

@@ -561,6 +561,12 @@ export const operatorViewSchema = z.strictObject({
        * то же фразой. `paused: false` при `not-running` — не «очередь идёт».
        */
       runner: z.enum(['running', 'not-running']).optional(),
+      /**
+       * 0.1.0-alpha.62: harness с этим каталогом ещё ничего не запускал (нет
+       * состояния или в нём нет ни работ, ни попыток, ни controller); `line`
+       * — фраза о первом запуске. Не «очередь идёт» и не «очередь стоит».
+       */
+      neverRun: z.literal(true).optional(),
       restartBy: viewActor.optional(),
       line: freeText(T.line).optional(),
     }),
@@ -570,6 +576,13 @@ export const operatorViewSchema = z.strictObject({
   activity: z.array(activitySchema).max(L.activity).optional(),
   decisions: z.array(decisionSchema).max(L.decisions).optional(),
   scope: scopeSchema.optional(),
+  /**
+   * 0.1.0-alpha.62: почему `scope` нет — `no-snapshot`: ни одна связка ещё не
+   * записала снимок задач трекера; `unreadable`: база коннектора есть, но эта
+   * версия её не прочитала. Опущенный по размеру `scope` называет
+   * `truncated.scope`.
+   */
+  scopeReason: z.enum(['no-snapshot', 'unreadable']).optional(),
   sourceQuestions: z.array(sourceQuestionViewSchema).max(L.sourceQuestions).optional(),
   forecast: forecastSchema.optional(),
   /**

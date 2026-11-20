@@ -7,6 +7,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   cpSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -15,6 +16,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import {
   cliCommands,
@@ -23,6 +25,7 @@ import {
   workDetailViewSchema,
 } from '../src/contracts/index.ts';
 import { harnessCapabilities } from '../src/catalog/harness.ts';
+import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import { approve, bin, implement } from './runner-fixture.ts';
 
 const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
@@ -101,6 +104,7 @@ test('harness view: после run — одна работа done, resultSha = r
   assert.equal(w!.title, 'Add a greeting function');
   assert.equal(w!.resultSha, result.json.data.result.shas.result);
   assert.equal(view.progress.done, 1);
+  assert.equal(view.progress.queue.neverRun, undefined, 'после run — не «ещё ничего не запускали»');
   assert.equal(view.health.drift.checked, 1);
   assert.ok(view.reviews.some((x) => x.kind === 'plan' && x.subject === 'greeting'));
   assert.ok(view.history.attemptsStarted.reduce((a, b) => a + b, 0) >= 1);
@@ -149,12 +153,86 @@ test('harness view: нет состояния — с --policy пустое пр�
   assert.equal(view.settings.roles[0]!.role, 'developer');
   assert.ok(view.health.warnings.some((w) => w.code === 'STATE_NOT_FOUND'));
   assert.ok(view.settings.defaulted.includes('thresholds.maxAttempts'));
+  // Ничего не запускали: очередь не «идёт» и не «стоит», среза задач ещё нет.
+  assert.deepEqual(view.progress.queue, {
+    paused: false,
+    neverRun: true,
+    line: 'Ещё ничего не запускали — ведущий начнёт с harness run.',
+  });
+  assert.equal(view.scope, undefined);
+  assert.equal(view.scopeReason, 'no-snapshot');
+  const en = p.harness('view', '--state', missing, '--policy', 'policy.json', '--lang', 'en');
+  assert.equal(
+    en.json.data.progress.queue.line,
+    'Nothing has run yet — the lead starts with harness run.',
+  );
   assert.equal(existsSync(missing), false);
 
   const refused = p.harness('view', '--state', missing);
   assert.equal(refused.status, exitCodes.input);
   assert.equal(refused.json.error.code, 'POLICY_REQUIRED');
   assert.equal(existsSync(missing), false);
+});
+
+test('harness view: пустая база состояния — тоже «ещё ничего не запускали»; --no-titles строку оставляет', () => {
+  const p = project();
+  // База создана (например, открыта другой командой), но работ, попыток,
+  // записей вызовов и controller в ней нет.
+  mkdirSync(p.state, { recursive: true });
+  new SqliteExecutionStore(join(p.state, 'state.sqlite'), 'test').close();
+  for (const args of [[], ['--no-titles']]) {
+    const r = p.harness('view', '--state', p.state, '--policy', 'policy.json', ...args);
+    assert.equal(r.status, 0, r.stderr);
+    const view = operatorViewSchema.parse(r.json.data);
+    assert.ok(!view.health.warnings.some((w) => w.code === 'STATE_NOT_FOUND'), 'база есть');
+    assert.equal(view.progress.queue.neverRun, true, args.join(' '));
+    assert.equal(view.progress.queue.runner, undefined);
+    assert.equal(
+      view.progress.queue.line,
+      'Ещё ничего не запускали — ведущий начнёт с harness run.',
+    );
+    assert.equal(view.scopeReason, 'no-snapshot');
+  }
+});
+
+test('harness view: scopeReason — база связки без снимка — no-snapshot, нечитаемая — unreadable', () => {
+  const p = project();
+  const dir = join(p.root, 'no-state', 'connectors');
+  mkdirSync(dir, { recursive: true });
+  const view = () => {
+    const r = p.harness('view', '--state', join(p.root, 'no-state'), '--policy', 'policy.json');
+    assert.equal(r.status, 0, r.stderr);
+    return operatorViewSchema.parse(r.json.data);
+  };
+  // Связка известной схемы, трекер ещё не читали: ни снимка, ни наблюдения.
+  const db = new DatabaseSync(join(dir, 'relay-p1.sqlite'));
+  db.exec(
+    'CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT); CREATE TABLE snapshots(data TEXT); CREATE TABLE observations(key TEXT PRIMARY KEY, data TEXT);',
+  );
+  for (const [k, v] of [
+    ['provider', 'relay'],
+    ['projectId', 'p1'],
+    ['schema', '1'],
+  ] as const)
+    db.prepare('INSERT INTO meta(key, value) VALUES (?, ?)').run(k, v);
+  db.close();
+  assert.equal(view().scopeReason, 'no-snapshot');
+  // Рядом база, которую эта версия не читает (другая схема): не «снимка нет».
+  const other = new DatabaseSync(join(dir, 'relay-p2.sqlite'));
+  other.exec('CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);');
+  for (const [k, v] of [
+    ['provider', 'relay'],
+    ['projectId', 'p2'],
+    ['schema', '2'],
+  ] as const)
+    other.prepare('INSERT INTO meta(key, value) VALUES (?, ?)').run(k, v);
+  other.close();
+  const v = view();
+  assert.equal(v.scope, undefined);
+  assert.equal(v.scopeReason, 'unreadable');
+  // Повреждённый файл — тоже нечитаемая база.
+  writeFileSync(join(dir, 'relay-p2.sqlite'), 'not a database');
+  assert.equal(view().scopeReason, 'unreadable');
 });
 
 test('harness view: другая политика — POLICY_DIGEST_MISMATCH; view в capabilities, только чтение', () => {
