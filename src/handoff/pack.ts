@@ -475,8 +475,10 @@ function build(
     : undefined;
 
   const graphIds = new Set(status.graphs.map((g) => g.id));
-  const repairsAll = h.workflows
-    .list()
+  // Новые задания первыми (`list()` — от старых к новым): предел пакета не
+  // вытесняет действующее задание прежними устаревшими.
+  const repairsAll = [...h.workflows.list()]
+    .reverse()
     .filter((j) => j.kind === 'graph' && graphIds.has(j.id) && j.status !== 'completed')
     .map((j) => ({
       graphId: j.id,

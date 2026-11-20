@@ -118,6 +118,29 @@ for (const lang of ['ru', 'en'] as const) {
     assert.ok(line.endsWith(tails[lang]), line);
     assert.match(line, lang === 'ru' ? /и ещё \d+/ : /and \d+ more/);
   });
+
+  test(`view ${lang}: маска удлиняет строку — хвост всё равно целиком`, () => {
+    const f = facts();
+    const input = baseInput({
+      works: [
+        work('w', {
+          attemptSummary: {
+            ...work('w').attemptSummary,
+            line: attemptLine(f, 'ru'),
+            lineEn: attemptLine(f, 'en'),
+            lineFacts: f,
+          },
+        }),
+      ],
+      // «40» — известный секрет: маска заменяет число длинной меткой.
+      mask: { secrets: ['40'] },
+    });
+    const line = operatorView(input, { lang }).works[0]!.attempts.line!;
+    assert.ok(line.length <= T.line, line);
+    assert.match(line, /‹masked›/);
+    assert.doesNotMatch(line, /40/);
+    assert.ok(line.endsWith(tails[lang]), line);
+  });
 }
 
 test('attemptSummaryLine: предел длины сохраняет «повтор — только со сбросом»', () => {

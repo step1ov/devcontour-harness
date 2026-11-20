@@ -62,12 +62,14 @@ function clipEnd(text: string, max: number): string {
  * не помещается — список отказов сокращается до первых корзин и «и ещё N»
  * (`and N more`), затем, если и без списка длинно, обрезается начало строки
  * до хвоста. Хвост длиннее предела — обрезается с конца (предел меньше
- * шаблона хвоста).
+ * шаблона хвоста). `redact` (маска) применяется к каждому кандидату до
+ * сравнения с пределом: результат уже замаскирован и не длиннее `max`.
  */
 export function attemptLine(
   f: AttemptLineFacts,
   lang: 'ru' | 'en' = 'ru',
   max = Number.POSITIVE_INFINITY,
+  redact: (text: string) => string = (t) => t,
 ): string {
   const w = words[lang];
   const left = (used: number, of: number) => Math.max(0, of - used);
@@ -84,10 +86,13 @@ export function attemptLine(
     const failed = w.failed(f.failed) + (list.length ? ` (${list.join(', ')})` : '');
     return [w.total(f.total, f.active), failed, ...rest].join('; ');
   };
+  // Предел — для строки после маски: маска удлиняет текст, и обрезка после
+  // неё отрезала бы хвост.
   for (let shown = f.failures.length; shown >= 0; shown--) {
-    const line = lineWith(shown) + '; ' + tail;
+    const line = redact(lineWith(shown) + '; ' + tail);
     if (line.length <= max) return line;
   }
-  if (tail.length + 2 >= max) return clipEnd(tail, max);
-  return clipEnd(lineWith(0), max - tail.length - 2) + '; ' + tail;
+  const end = redact(tail);
+  if (end.length + 2 >= max) return clipEnd(end, max);
+  return clipEnd(redact(lineWith(0)), max - end.length - 2) + '; ' + end;
 }

@@ -1099,7 +1099,7 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
       neutral: { used: a.neutral.used, max: a.neutral.max },
       ...((line) => (line ? { line: text(c, line, T.line) } : {}))(
         a.lineFacts && (c.lang === 'en' ? a.lineEn : a.line) !== undefined
-          ? attemptLine(a.lineFacts, c.lang, T.line)
+          ? attemptLine(a.lineFacts, c.lang, T.line, (t) => maskSecrets(t, c.mask))
           : c.lang === 'en'
             ? a.lineEn
             : a.line,

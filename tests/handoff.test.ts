@@ -392,6 +392,25 @@ test('handoff: восстановления заданий несут ключ �
   }
 });
 
+test('handoff: при пределе восстановлений действующее задание не вытесняется прежними', () => {
+  const ctx = hsetup({ scenario: {} });
+  const h = ctx.open();
+  try {
+    let current = '';
+    // 11 редакций графа — 11 заданий, предел пакета 10.
+    for (let i = 1; i <= 11; i++) {
+      const g = ready(h.engine, graphOf({ a: [], ...(i > 1 ? { [`b${i}`]: [] } : {}) }, String(i)));
+      current = h.workflows.start({ kind: 'graph', id: g.id, authorRuntime: 'claude' }).key;
+    }
+    const pack = handoffPack(h);
+    assert.equal(pack.repairs.length, 10);
+    assert.equal(pack.repairs[0]!.key, current, 'новейшее задание — первым');
+    assert.equal(pack.truncated?.repairs, 1);
+  } finally {
+    h.close();
+  }
+});
+
 test('handoff next: попытка без живого владельца — harness run, а не ожидание', () => {
   const ctx = hsetup({ scenario: {} });
   const h = ctx.open();

@@ -100,9 +100,10 @@ test('compareWorkflowJobs: прежние записи — по времени (
     startedAt,
     ...(seq ? { seq } : {}),
   });
-  // Смещение зоны: по строке '…+03:00' раньше, по времени — позже.
-  const late = j('a', '2026-01-01T12:30:00.000+03:00');
-  const early = j('b', '2026-01-01T09:00:00.000Z');
+  // '12:00+03:00' (09:00Z) по строке позже '09:30Z', по времени — раньше.
+  const early = j('a', '2026-01-01T12:00:00.000+03:00');
+  const late = j('b', '2026-01-01T09:30:00.000Z');
+  assert.ok(early.startedAt.localeCompare(late.startedAt) > 0, 'лексический порядок обратный');
   assert.ok(compareWorkflowJobs(early, late) < 0);
   assert.ok(compareWorkflowJobs(j('a', early.startedAt), j('b', early.startedAt)) < 0);
   assert.ok(compareWorkflowJobs(late, j('z', '2000-01-01T00:00:00.000Z', 1)) < 0);
