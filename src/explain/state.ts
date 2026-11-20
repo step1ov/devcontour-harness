@@ -182,7 +182,9 @@ export function stopInputsIn(
         if (!byId.has(id)) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + id);
     const inputs: StopInput[] = [];
     const lease = v.controller();
-    if (lease && lease.leaseUntil > now)
+    // Разбор одной работы (`--work`) — чтение во время идущего запуска: занятая
+    // роль controller не причина остановки этой работы и не ход ведущего.
+    if (lease && lease.leaseUntil > now && !selected)
       inputs.push({
         kind: 'error',
         error: {

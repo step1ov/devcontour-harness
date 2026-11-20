@@ -422,6 +422,8 @@ test('H1-03: действующая роль controller другого проц�
     ]);
     assert.equal(d.workId, undefined);
     assert.match(d.message, /occupied-controller/);
+    // F-R: разбор одной работы во время идущего запуска — без шума CONTROLLER_BUSY.
+    assert.deepEqual(await explain(p, { work: GREETING }), []);
     assert.equal(
       other.read((v) => v.controller()?.owner),
       'occupied-controller',

@@ -437,7 +437,7 @@ export const cliCommands = {
   },
   retry: {
     description:
-      'Новая попытка неуспешного (failed) поручения в пределах maxAttempts и бюджета; --reset сбрасывает счётчик попыток с причиной — и у готовой к выдаче работы (ответ reset: выполнен или почему нет; во время попытки — отказ NOT_READY), учёт расходов не сбрасывается',
+      'Новая попытка неуспешного (failed) поручения в пределах maxAttempts и бюджета; --reset сбрасывает счётчик попыток с причиной, учёт расходов не сбрасывается',
     writes: true,
     idempotency: 'Повтор для уже готового к выдаче поручения ничего не меняет',
     args: [
@@ -453,6 +453,7 @@ export const cliCommands = {
     ],
     refusals: [
       'NOT_FOUND',
+      'NOT_READY',
       'ATTEMPTS_EXHAUSTED',
       'BUDGET_EXHAUSTED',
       'BUDGET_UNKNOWN',

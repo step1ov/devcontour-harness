@@ -84,6 +84,34 @@ Runtime: codex и claude из PATH; HARNESS_CODEX_BIN / HARNESS_CLAUDE_BIN по�
 (например, fixture executable в тестах — это не живая модель).
 `;
 
+/**
+ * Справка одной команды (`harness <команда> --help`, `harness help <команда>`):
+ * описание, параметры с обязательностью, запись состояния, идемпотентность и
+ * отказы — из того же договора `cliCommands`, по которому разбираются флаги.
+ */
+function commandHelp(name: CliCommand) {
+  const c = cliCommands[name];
+  const sign = (a: (typeof c.args)[number]) =>
+    a.value === 'flag' ? a.name : `${a.name} <${a.value}>`;
+  const width = Math.max(...c.args.map((a) => sign(a).length), 10) + 2;
+  return [
+    `harness ${name} — ${c.description}`,
+    '',
+    `Использование: harness ${name} ${c.args.map((a) => (a.required ? sign(a) : `[${sign(a)}]`)).join(' ')}`.trimEnd(),
+    '',
+    'Параметры:',
+    ...c.args.map(
+      (a) =>
+        `  ${sign(a).padEnd(width)}${a.required ? '(обязательный) ' : ''}${a.multiple ? '(можно повторить) ' : ''}${a.description}`,
+    ),
+    '',
+    `Пишет состояние: ${c.writes ? 'да' : 'нет'}. Повтор: ${c.idempotency}`,
+    ...(c.refusals.length ? [`Отказы: ${c.refusals.join(', ')}`] : []),
+    `stdout — JSON (${API_VERSION}); диагностика — stderr.`,
+    '',
+  ].join('\n');
+}
+
 const readJson = (path: string, what: string): unknown => readJsonFile(path, what).value;
 const readJsonFile = (path: string, what: string): { text: string; value: unknown } => {
   let text: string;
@@ -1422,9 +1450,22 @@ async function run(
 }
 
 const argv = process.argv.slice(2);
-if (argv[0] === '--help' || argv[0] === 'help') {
-  process.stderr.write(usage);
+// Справка команды: `harness <команда> --help|-h` или `harness help <команда>` —
+// текст на stdout, exit 0; неизвестная команда — обычный отказ ниже.
+const helpOf =
+  argv[0] === 'help' || argv[0] === '--help'
+    ? argv[1]
+    : argv.slice(1).some((a) => a === '--help' || a === '-h')
+      ? argv[0]
+      : undefined;
+if (helpOf && helpOf in cliCommands) {
+  process.stdout.write(commandHelp(helpOf as CliCommand));
   process.exit(exitCodes.ok);
+}
+if (argv[0] === '--help' || argv[0] === 'help') {
+  if (helpOf) process.stderr.write(`harness: неизвестная команда: ${helpOf}\n\n`);
+  process.stderr.write(usage);
+  process.exit(helpOf ? exitCodes.input : exitCodes.ok);
 }
 let envelope: CliEnvelope;
 let code: number = exitCodes.ok;

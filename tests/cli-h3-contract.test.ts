@@ -182,6 +182,11 @@ const H2_INIT_WRITER = 'Runtime writer: claude (по умолчанию) или 
 const eventTypeOf = (v: unknown) =>
   (v as { properties?: { type?: { const?: unknown } } } | null)?.properties?.type?.const as
     string | undefined;
+/** Прежние коды отказов, названные у прежней команды позже (команда:код). */
+const ADDITIVE_REFUSALS = new Set([
+  // retry: идущая попытка при --reset и повтор не после отказа (0.1.0-alpha.60).
+  'retry:NOT_READY',
+]);
 /** Аддитивные значения перечней после H2. */
 const ADDITIVE_ENUM_VALUES = new Set([
   'unfinished',
@@ -343,7 +348,9 @@ test('H3-01: прежние команды и схемы их данных не 
           ...contract,
           ...(c === 'init' ? { description: H2_INIT_DESCRIPTION } : {}),
           // Аддитивный код отказа (alpha.35: CONTEXT_EXHAUSTED у run).
-          refusals: contract.refusals.filter((code) => !ADDITIVE_ENUM_VALUES.has(code)),
+          refusals: contract.refusals.filter(
+            (code) => !ADDITIVE_ENUM_VALUES.has(code) && !ADDITIVE_REFUSALS.has(`${c}:${code}`),
+          ),
           args: (contract.args as readonly CliArgument[])
             .filter((arg) => !ADDITIVE_ARGS.has(c + arg.name))
             .map((arg) => {
@@ -433,6 +440,20 @@ test('H3-01: прежние команды и схемы их данных не 
     if (k === 'properties' && v && typeof v === 'object' && 'actor' in v && 'reapproval' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.reapproval;
+      v = rest;
+    }
+    // Итог `retry --reset` (0.1.0-alpha.60): необязательное поле ответа retry и cancel.
+    if (
+      k === 'properties' &&
+      v &&
+      typeof v === 'object' &&
+      'workId' in v &&
+      'attempt' in v &&
+      'changed' in v &&
+      'reset' in v
+    ) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.reset;
       v = rest;
     }
     if (k === 'properties' && v && typeof v === 'object' && 'outcome' in v && 'unused' in v) {
@@ -687,6 +708,28 @@ test('H3-01: прежние команды и схемы их данных не 
     JSON.stringify(data.profile).includes('"artifacts"'),
     'gates профиля объявляют artifacts',
   );
+});
+
+test('F-B: справка каждой команды — <команда> --help, -h и help <команда>: stdout, exit 0, все флаги договора', () => {
+  const call = (args: string[]) =>
+    spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), cli, ...args], {
+      encoding: 'utf8',
+      env: { ...process.env, NODE_OPTIONS: '' },
+    });
+  for (const [name, c] of Object.entries(cliCommands)) {
+    const help = call([name, '--help']);
+    assert.equal(help.status, 0, name + ': ' + help.stderr);
+    assert.ok(help.stdout.startsWith(`harness ${name} — `), name);
+    for (const a of c.args) assert.ok(help.stdout.includes(a.name), `${name}: ${a.name}`);
+  }
+  // Флаги перед --help не разбираются: справка не требует обязательных.
+  const short = call(['init', '--repository', '.', '-h']);
+  assert.equal(short.status, 0);
+  assert.match(short.stdout, /--lead-technical-answers/);
+  assert.equal(call(['help', 'retry']).stdout, call(['retry', '--help']).stdout);
+  const unknown = call(['help', 'nope']);
+  assert.equal(unknown.status, 2);
+  assert.match(unknown.stderr, /неизвестная команда: nope/);
 });
 
 test('H3-01: --help называет capabilities; прежние команды и capabilities отвечают тем же конвертом', () => {
