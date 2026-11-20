@@ -1285,17 +1285,20 @@ export class Harness {
     return this.engine.read((v) => {
       const work = v.work(workId);
       if (!work) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
-      const attempt = v
-        .attempts(workId)
-        .filter((a) => a.status !== 'active' && (!runId || a.id === runId))
-        .at(-1);
+      const all = v.attempts(workId);
+      const attempt = all.filter((a) => a.status !== 'active' && (!runId || a.id === runId)).at(-1);
       if (!attempt)
         throw new HarnessError('NOT_FOUND', 'У поручения нет завершённой попытки: ' + workId);
       // Что проверено и как у попытки результата: записи её evidence.
       const rows = verificationRows(attempt);
       return {
         apiVersion: API_VERSION,
-        result: runResult(attempt, HARNESS_VERSION, work.codeReviewDecisions),
+        result: runResult(
+          attempt,
+          HARNESS_VERSION,
+          work.codeReviewDecisions,
+          all.slice(0, all.indexOf(attempt) + 1),
+        ),
         verification: {
           runId: attempt.id,
           rows: rows.slice(0, verificationRowLimit),

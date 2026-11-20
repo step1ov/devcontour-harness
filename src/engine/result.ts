@@ -6,6 +6,8 @@ import {
   vendorOf,
   type AttemptState,
   type CodeReviewDecision,
+  codeReviewHistory,
+  codeReviewScope,
   type ErrorCode,
   type EvidenceRecord,
   type RunResult,
@@ -110,6 +112,33 @@ const ref = (e: EvidenceRecord, attempt: AttemptState) => ({
 });
 
 /**
+ * Принятые ограничения ревью кода, в силе на конец попытки: история находок
+ * по попыткам до неё включительно и решениям, принятым до её начала; находка,
+ * открытая позже явным reopen, не входит.
+ */
+function acceptedLimitations(
+  attempt: AttemptState,
+  decisions: readonly CodeReviewDecision[],
+  prior: readonly AttemptState[],
+) {
+  const inForce = decisions.filter((d) => d.at <= attempt.startedAt);
+  if (!inForce.length) return [];
+  return codeReviewHistory(
+    [...prior],
+    codeReviewScope(attempt.repositoryId, attempt.workId),
+    inForce,
+  )
+    .findings.filter((f) => f.disposition?.decision === 'accepted-limitation')
+    .slice(0, 100)
+    .map((f) =>
+      `Принятое ограничение ревью кода ${f.id} (${f.disposition!.by}, после раунда ${f.disposition!.round}): ${f.disposition!.reason}`.slice(
+        0,
+        1000,
+      ),
+    );
+}
+
+/**
  * Машинный результат завершённой попытки. Строится только из записей самой
  * попытки и оснований, закреплённых за ней при выдаче (`pinned`): новая
  * редакция графа, изменение или удаление поручения не переписывают
@@ -125,6 +154,8 @@ export function runResult(
    * шли её раунды; позднейшие решения завершённую историю не переписывают.
    */
   decisions: readonly CodeReviewDecision[] = [],
+  /** Попытки поручения до этой и она сама (по порядку): история находок на её момент. */
+  prior: readonly AttemptState[] = [attempt],
 ): RunResult {
   if (!attempt.pinned)
     throw new HarnessError(
@@ -199,15 +230,7 @@ export function runResult(
         ...(f.status !== undefined ? { status: f.status } : {}),
         ...(f.late ? { late: f.late } : {}),
       })),
-    limitations: decisions
-      .filter((d) => d.at <= attempt.startedAt)
-      .slice(0, 100)
-      .map((d) =>
-        `Принятое ограничение ревью кода ${d.finding} (${d.by}, после раунда ${d.round}): ${d.reason}`.slice(
-          0,
-          1000,
-        ),
-      ),
+    limitations: acceptedLimitations(attempt, decisions, prior),
     finishedAt: attempt.finishedAt ?? attempt.startedAt,
   };
   const value =

@@ -3651,7 +3651,11 @@ export class Runner {
       const unconfirmed = decision && !decision.ok ? decision.problem : undefined;
       const passed = verdict.result.approved && !unconfirmed;
       // Поздние находки — только метка для ведущего: вердикт и gates прежние.
-      const late = await lateFindings(cwd, previousRound, sha, record.findings ?? []);
+      // Адаптер без протокола переходов прежних находок не видит и называет
+      // неисправленную находку заново новой: это не «движущаяся цель».
+      const late = legacy
+        ? []
+        : await lateFindings(cwd, previousRound, sha, record.findings ?? [], history.findings);
       const lateCount = late.filter(Boolean).length;
       const lateText = lateCount
         ? ` [поздние находки: ${lateCount} — blocking на путях без изменений с раунда ${previousRound!.round}]`
@@ -4381,17 +4385,32 @@ const findingPath = (path: string) =>
     .replace(/:\d+(:\d+)?$/, '')
     .replace(/\/+$/, '');
 
+/** Текст находки для сравнения: регистр, пунктуация и пробелы не различаются. */
+const findingText = (message: string) =>
+  message
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+
 /**
  * Поздние находки раунда (docs/review-protocol.md §10): новая blocking-находка
  * с путём, который не менялся между SHA прошлого валидного раунда фазы и
- * текущим (файл или каталог не задет diff). Нет прошлого раунда, нет пути или
+ * текущим (файл или каталог не задет diff) и которая не повторяет находку
+ * прежних раундов (тот же путь и severity или почти тот же текст). Адаптер
+ * без протокола переходов меток не получает. Нет прошлого раунда, нет пути или
  * diff не прочитан — метки нет: сомнение не делает находку поздней.
  */
 async function lateFindings(
   cwd: string,
   previous: { round: number; sha: string } | undefined,
   sha: string,
-  findings: readonly { severity: string; path?: string | null | undefined }[],
+  findings: readonly {
+    severity: string;
+    message: string;
+    path?: string | null | undefined;
+  }[],
+  /** Находки прежних раундов области: повтор одной из них — не поздняя находка. */
+  prior: readonly { severity: string; message: string; path: string | null }[],
 ): Promise<(LateFinding | undefined)[]> {
   if (!previous || !findings.some((f) => f.severity === 'blocking' && f.path?.trim()))
     return findings.map(() => undefined);
@@ -4408,10 +4427,23 @@ async function lateFindings(
     return findings.map(() => undefined);
   }
   const touched = (p: string) => changed.some((c) => c === p || c.startsWith(p + '/'));
+  const priorPaths = new Set(
+    prior.filter((x) => x.path?.trim()).map((x) => `${x.severity}\u0000${findingPath(x.path!)}`),
+  );
+  const priorTexts = prior.map((x) => findingText(x.message)).filter(Boolean);
+  // Повтор прежней находки (тот же путь и severity или почти тот же текст) —
+  // не новое замечание, даже под новым ID.
+  const repeats = (f: { severity: string; message: string }, p: string) =>
+    priorPaths.has(`${f.severity}\u0000${p}`) ||
+    ((t) =>
+      !!t &&
+      priorTexts.some(
+        (x) => x === t || (Math.min(x.length, t.length) >= 20 && (x.includes(t) || t.includes(x))),
+      ))(findingText(f.message));
   return findings.map((f) => {
     if (f.severity !== 'blocking' || !f.path?.trim()) return undefined;
     const p = findingPath(f.path);
-    if (!p || touched(p)) return undefined;
+    if (!p || touched(p) || repeats(f, p)) return undefined;
     return {
       since: { round: previous.round, sha: previous.sha },
       reason: `путь ${p.slice(0, 300)} не менялся с раунда ${previous.round}`,
