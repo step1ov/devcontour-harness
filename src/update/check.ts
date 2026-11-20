@@ -69,6 +69,18 @@ export function loadUpdatesConfig(harnessDir: string | undefined): {
       `${path}: невалидный JSON: ${(error as Error).message}`,
     );
   }
+  // Поля новее этой версии (настройку записала более новая) пропускаются, а не
+  // ломают update после отката; известные поля проверяются строго.
+  const known = Object.keys(updatesConfigSchema.shape);
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const extra = Object.keys(raw).filter((k) => !known.includes(k));
+    if (extra.length) {
+      process.stderr.write(
+        `harness update: ${path}: поля не этой версии пропущены: ${extra.join(', ')}\n`,
+      );
+      raw = Object.fromEntries(Object.entries(raw).filter(([k]) => known.includes(k)));
+    }
+  }
   const parsed = updatesConfigSchema.safeParse(raw);
   if (!parsed.success)
     throw new HarnessError(

@@ -1,6 +1,9 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
+  closeSync,
   copyFileSync,
+  openSync,
+  readSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -64,7 +67,36 @@ function walk(root: string, rel = ''): { rel: string; abs: string }[] {
   return out;
 }
 
-const isDatabase = (name: string) => name.endsWith('.sqlite') || name.endsWith('.db');
+/** База SQLite — по заголовку файла, не по имени. */
+const isDatabase = (file: string) => {
+  try {
+    const fd = openSync(file, 'r');
+    try {
+      const head = Buffer.alloc(16);
+      readSync(fd, head, 0, 16, 0);
+      return head.toString('latin1') === 'SQLite format 3\0';
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+};
+
+/** Служебные файлы баз (-wal, -shm, -journal) на любой глубине, кроме рабочих деревьев. */
+function journals(root: string, rel = ''): string[] {
+  const dir = join(root, rel);
+  const out: string[] = [];
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const r = rel ? join(rel, e.name) : e.name;
+    if (e.isDirectory()) {
+      if (!rel && e.name === 'worktrees') continue;
+      if (existsSync(join(root, r, '.git'))) continue;
+      out.push(...journals(root, r));
+    } else if (skippedFile(e.name)) out.push(r);
+  }
+  return out;
+}
 
 /** Скопировать каталог состояния в `target` (каталог создаётся, должен быть новым). */
 export function copyState(stateDir: string, target: string): StateCopy {
@@ -81,7 +113,7 @@ export function copyState(stateDir: string, target: string): StateCopy {
         const link = readlinkSync(f.abs);
         symlinkSync(link, dest);
         entries.push({ path: f.rel, kind: 'symlink', sha256: sha(link), target: link });
-      } else if (isDatabase(f.rel)) {
+      } else if (isDatabase(f.abs)) {
         const db = new DatabaseSync(f.abs, { readOnly: true });
         try {
           db.exec(`VACUUM INTO '${dest.replaceAll("'", "''")}'`);
@@ -127,32 +159,76 @@ export function verifyCopy(copy: string, digest?: string): Entry[] {
 }
 
 /**
- * Вернуть копию в каталог состояния. Сначала сверка копии; затем живые
- * файлы, которые копия покрывает (и служебные файлы базы), переносятся в
- * `aside`; затем файлы копии кладутся на место. Рабочие деревья не трогаются.
+ * Вернуть копию в каталог состояния без полусостояния: сверка копии и всех
+ * путей; файлы копии сначала собираются во временный каталог рядом с
+ * каталогом состояния (сбой — живые файлы не тронуты); затем живые файлы,
+ * которые копия заменяет, и служебные файлы баз на любой глубине переносятся
+ * в `aside`, а собранные — переименованием на их место. Сбой посреди
+ * переноса возвращает перенесённое обратно. Рабочие деревья не трогаются.
  */
 export function restoreState(stateDir: string, copy: string, aside: string, digest?: string) {
   const entries = verifyCopy(copy, digest);
-  mkdirSync(aside, { recursive: true });
-  if (existsSync(stateDir))
-    for (const f of walk(stateDir)) {
-      const dest = join(aside, f.rel);
-      mkdirSync(dirname(dest), { recursive: true });
-      renameSync(f.abs, dest);
-    }
-  // Служебные файлы баз (-wal, -shm, -journal) относятся к перенесённой базе.
-  if (existsSync(stateDir))
-    for (const name of readdirSync(stateDir))
-      if (skippedFile(name)) renameSync(join(stateDir, name), join(aside, name));
-  mkdirSync(stateDir, { recursive: true });
+  const root = resolve(stateDir);
   for (const e of entries) {
-    const src = join(copy, 'files', e.path);
-    const dest = join(stateDir, e.path);
-    if (!resolve(dest).startsWith(resolve(stateDir) + sep))
+    const dest = resolve(root, e.path);
+    if (!dest.startsWith(root + sep))
       throw new HarnessError('PATH_CONFLICT', 'Путь копии вне каталога состояния: ' + e.path);
-    mkdirSync(dirname(dest), { recursive: true });
-    if (e.kind === 'symlink') symlinkSync(e.target!, dest);
-    else copyFileSync(src, dest);
+  }
+  const staging = `${root}.restore-${randomBytes(4).toString('hex')}`;
+  mkdirSync(staging, { recursive: true });
+  try {
+    for (const e of entries) {
+      const dest = join(staging, e.path);
+      mkdirSync(dirname(dest), { recursive: true });
+      if (e.kind === 'symlink') symlinkSync(e.target!, dest);
+      else copyFileSync(join(copy, 'files', e.path), dest);
+    }
+  } catch (error) {
+    rmSync(staging, { recursive: true, force: true });
+    throw error;
+  }
+  const moved: { from: string; to: string }[] = [];
+  const move = (from: string, to: string) => {
+    mkdirSync(dirname(to), { recursive: true });
+    renameSync(from, to);
+    moved.push({ from, to });
+  };
+  try {
+    mkdirSync(aside, { recursive: true });
+    if (existsSync(root)) {
+      for (const f of walk(root)) move(f.abs, join(aside, f.rel));
+      for (const j of journals(root)) move(join(root, j), join(aside, j));
+    }
+    mkdirSync(root, { recursive: true });
+    for (const e of entries) {
+      const dest = join(root, e.path);
+      mkdirSync(dirname(dest), { recursive: true });
+      renameSync(join(staging, e.path), dest);
+    }
+  } catch (error) {
+    // Вернуть живые файлы на место: копия не встала, данные не теряются.
+    for (const e of entries) {
+      const dest = join(root, e.path);
+      if (!existsSync(join(staging, e.path)) && existsSync(dest)) {
+        try {
+          renameSync(dest, join(staging, e.path));
+        } catch {
+          // оставить: перенос обратно ниже не перезапишет
+        }
+      }
+    }
+    for (const m of moved.reverse())
+      try {
+        renameSync(m.to, m.from);
+      } catch {
+        // остаётся в aside — путь назван в отказе
+      }
+    throw new HarnessError(
+      'STATE_VERSION_UNSUPPORTED',
+      `Возврат копии состояния не удался (${(error as Error).message}); живые файлы возвращены на место, что не вернулось — в ${aside}`,
+    );
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
   }
   return { files: entries.length, aside };
 }

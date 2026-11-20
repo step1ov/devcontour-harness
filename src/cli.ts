@@ -80,7 +80,7 @@ import {
   updatesDir,
   writeUpdatesConfig,
 } from './update/check.ts';
-import { liveWork } from './update/live.ts';
+import { deadUpdater, liveWork } from './update/live.ts';
 import { HARNESS_PACKAGE, installedPackage } from './update/install.ts';
 import {
   disableSchedule,
@@ -646,6 +646,7 @@ async function watchStatus(
  */
 function updateHost(state: string): UpdateHost {
   const usable = () => existsSync(bindingFile(state)) && existsSync(join(state, 'state.sqlite'));
+  const owner = `harness-update:${process.pid}`;
   const withHarness = <T>(fn: (h: Harness) => T, fallback: T): T => {
     if (!usable()) return fallback;
     const h = open(state, binding(state), true);
@@ -655,10 +656,16 @@ function updateHost(state: string): UpdateHost {
       h.close();
     }
   };
+  const leaseMs = () => (existsSync(bindingFile(state)) ? binding(state).policy.leaseMs : 30_000);
   return {
-    live: () => (usable() ? liveWork(state, binding(state).policy) : []),
+    live: () => (usable() ? liveWork(state, binding(state).policy, Date.now(), owner) : []),
     pause: () => withHarness((h) => h.engine.operationPause(UPDATE_OPERATION), false),
     resume: () => withHarness((h) => h.engine.operationResume(UPDATE_OPERATION), false),
+    // Без базы состояния писать некому: роль «взята».
+    hold: () =>
+      withHarness((h) => h.engine.holdController(owner, (lease) => deadUpdater(lease.owner)), true),
+    release: () => withHarness((h) => h.engine.release(owner), false),
+    heartbeatMs: Math.max(1000, Math.floor(leaseMs() / 3)),
     record: (payload) => withHarness((h) => h.engine.recordUpdate(payload), undefined),
   };
 }
@@ -770,11 +777,13 @@ async function runUpdate(
     };
   }
   if (action === 'check') {
-    // Прервавшееся обновление (процесс умер) оставило паузу операции — снять.
+    // Прервавшееся обновление (процесс умер): снять его паузу, завершить возврат.
+    let recovered: string | undefined;
     try {
-      recoverInterrupted(state, host);
-    } catch {
-      // идёт другое обновление: его пауза — его
+      recovered = await recoverInterrupted(state, { config: ctx.config, npm: ctx.npm, host });
+    } catch (error) {
+      // Идёт другое обновление (замок занят): его пауза — его.
+      if (!(error instanceof HarnessError && error.code === 'CONTROLLER_BUSY')) throw error;
     }
     const check = await checkUpdates({
       stateDir: state,
@@ -783,7 +792,13 @@ async function runUpdate(
       npm: ctx.npm,
     });
     saveLastCheck(state, check);
-    return { data: { action: 'check', check, line: check.line } };
+    return {
+      data: {
+        action: 'check',
+        check,
+        line: ((recovered ? recovered + ' ' : '') + check.line).slice(0, 500),
+      },
+    };
   }
   if (action === 'schedule') {
     const what = String(v.schedule);
@@ -817,6 +832,7 @@ async function runUpdate(
         },
       };
     }
+    mkdirSync(updatesDir(state), { recursive: true });
     const r = enableSchedule(state, args, join(updatesDir(state), 'schedule.log'));
     return {
       data: {

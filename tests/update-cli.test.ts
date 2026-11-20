@@ -28,6 +28,7 @@ import {
 import { Engine } from '../src/engine/engine.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
+import { processStartedAt } from '../src/environment/live-calls.ts';
 import { example } from './fixtures.ts';
 import {
   FORMATS,
@@ -356,7 +357,10 @@ test('UP05: сбой проверки новой версии — автомат
     const scheduled = p.harness('update', '--apply', '--scheduled', '--state', p.state);
     assert.equal(scheduled.status, 0, scheduled.stderr);
     assert.equal(scheduled.json.data.outcome, 'skipped');
-    assert.match(scheduled.json.data.line, /не прошло проверку и было возвращено/);
+    assert.match(
+      scheduled.json.data.line,
+      /по расписанию не ставится: не прошла проверку и была возвращена/,
+    );
     assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
   } finally {
     await registry.close();
@@ -606,6 +610,170 @@ test('UP12: прерванное обновление (замок умершег
     assert.equal(r.status, 0, r.stderr);
     assert.equal(p.harness('status', '--state', p.state).json.data.control.paused, false);
     assert.equal(existsSync(p.state + '-updates/lock'), false);
+  } finally {
+    await registry.close();
+  }
+});
+
+test('UP13: новая версия успела изменить состояние и не прошла проверку — состояние возвращено из копии, изменённое — в replaced', async () => {
+  const registry = await registryWith(...base());
+  try {
+    const p = project(registry);
+    registry.publish(fakeHarness('0.1.0-alpha.61', { fail: true, touch: true }));
+    registry.publish(fakeUi('0.1.0-alpha.5', '>=0.1.0-alpha.60 <0.2.0'));
+    const r = p.harness('update', '--apply', '--state', p.state);
+    assert.equal(r.status, 4, r.stderr + r.stdout);
+    const d = updateDataSchema.parse(r.json.data);
+    assert.equal(d.outcome, 'restored');
+    assert.match(d.line, /состояние возвращено из копии/);
+    assert.equal(
+      existsSync(join(p.state, 'touched-by-new')),
+      false,
+      'изменение новой версии убрано',
+    );
+    const replaced = join(p.state + '-updates', 'replaced');
+    const [dir] = readdirSync(replaced);
+    assert.ok(
+      existsSync(join(replaced, dir!, 'touched-by-new')),
+      'изменённое перенесено, не удалено',
+    );
+    assert.ok(d.stateCopy && existsSync(d.stateCopy.path), 'копия, которой вернули, сохранена');
+    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    // Возвращённое состояние читается и очередь идёт.
+    const status = p.harness('status', '--state', p.state);
+    assert.equal(status.status, 0, status.stderr);
+    assert.equal(status.json.data.control.paused, false);
+    assert.equal(existsSync(p.state + '-updates/in-progress.json'), false);
+  } finally {
+    await registry.close();
+  }
+});
+
+test('UP14: очередь на паузе человека до обновления — пауза остаётся; роль controller обновления отпущена', async () => {
+  const registry = await registryWith(...base());
+  try {
+    const p = project(registry);
+    registry.publish(fakeHarness('0.1.0-alpha.61'));
+    const e = p.engine();
+    e.engine.pause('operator');
+    e.close();
+    const r = p.harness('update', '--apply', '--state', p.state);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(r.json.data.steps[0].detail, /очередь уже была на паузе/);
+    const status = p.harness('status', '--state', p.state);
+    assert.equal(status.json.data.control.paused, true);
+    assert.equal(status.json.data.control.pauseReason, 'operator');
+    assert.equal(status.json.data.controller, undefined, 'роль controller отпущена');
+  } finally {
+    await registry.close();
+  }
+});
+
+test('UP15: замок живого процесса — CONTROLLER_BUSY, ничего не ставится; pid после перезагрузки (другой момент старта) — замок снят', async () => {
+  const registry = await registryWith(...base());
+  try {
+    const p = project(registry);
+    registry.publish(fakeHarness('0.1.0-alpha.61'));
+    mkdirSync(p.state + '-updates', { recursive: true });
+    const lock = p.state + '-updates/lock';
+    writeFileSync(
+      lock,
+      JSON.stringify({ pid: process.pid, startedAt: processStartedAt(process.pid), at: 'x' }),
+    );
+    const busy = p.harness('update', '--apply', '--state', p.state);
+    assert.equal(busy.status, 3, busy.stderr);
+    assert.equal(busy.json.error.code, 'CONTROLLER_BUSY');
+    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: 1, at: 'x' }));
+    const r = p.harness('update', '--apply', '--state', p.state);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.61');
+    assert.equal(existsSync(lock), false);
+  } finally {
+    await registry.close();
+  }
+});
+
+test('UP16: после ручного отката расписание в режиме auto ту же пару не ставит', async () => {
+  const registry = await registryWith(...base());
+  try {
+    const p = project(registry, { config: { mode: 'auto' } });
+    registry.publish(fakeHarness('0.1.0-alpha.61'));
+    registry.publish(fakeUi('0.1.0-alpha.5', '>=0.1.0-alpha.60 <0.2.0'));
+    assert.equal(
+      p.harness('update', '--apply', '--scheduled', '--state', p.state).json.data.outcome,
+      'applied',
+    );
+    assert.equal(
+      p.harness('update', '--rollback', '--state', p.state).json.data.outcome,
+      'rolled-back',
+    );
+    // status после отката называет установленную версию, а не прежнюю проверку.
+    assert.match(
+      p.harness('status', '--state', p.state, '--human').stdout,
+      /Возвращены harness 0\.1\.0-alpha\.60/,
+    );
+    const s = p.harness('update', '--apply', '--scheduled', '--state', p.state);
+    assert.equal(s.status, 0, s.stderr);
+    assert.equal(s.json.data.outcome, 'skipped');
+    assert.match(s.json.data.line, /откачена вручную/);
+    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.match(
+      p.harness('status', '--state', p.state, '--human').stdout,
+      /по расписанию не ставится: откачена вручную/,
+    );
+    // Вручную — ставится.
+    assert.equal(p.harness('update', '--apply', '--state', p.state).json.data.outcome, 'applied');
+  } finally {
+    await registry.close();
+  }
+});
+
+test('UP17: процесс убит после установки, до проверки — следующий update --check возвращает прежнюю пару и снимает паузу', async () => {
+  const registry = await registryWith(...base());
+  try {
+    const p = project(registry);
+    registry.publish(fakeHarness('0.1.0-alpha.61'));
+    registry.publish(fakeUi('0.1.0-alpha.5', '>=0.1.0-alpha.60 <0.2.0'));
+    // npm, который после установки убивает вызвавший его harness (SIGKILL: finally не идёт).
+    const wrapper = join(p.home, 'npm-killer');
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh\nnpm "$@"; code=$?\ncase " $* " in *" --save-exact "*) kill -9 $PPID;; esac\nexit $code\n`,
+      { mode: 0o755 },
+    );
+    const killed = spawnSync(
+      process.execPath,
+      ['--import', import.meta.resolve('tsx'), cli, 'update', '--apply', '--state', p.state],
+      {
+        cwd: p.dir,
+        env: { ...process.env, NODE_OPTIONS: '', ...p.env, HARNESS_NPM_BIN: wrapper },
+        encoding: 'utf8',
+      },
+    );
+    assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.61', 'пакеты остались новыми');
+    assert.ok(existsSync(p.state + '-updates/in-progress.json'));
+    assert.equal(p.harness('status', '--state', p.state).json.data.control.paused, true);
+    const r = p.harness('update', '--check', '--state', p.state);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(
+      r.json.data.line,
+      /^Прерванное обновление завершено возвратом: harness 0\.1\.0-alpha\.60/,
+    );
+    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.equal(p.installed('devcontour-harness-ui'), '0.1.0-alpha.4');
+    assert.equal(p.manifest().devDependencies['devcontour-harness'], '0.1.0-alpha.60');
+    assert.equal(existsSync(p.state + '-updates/in-progress.json'), false);
+    const status = p.harness('status', '--state', p.state);
+    assert.equal(status.json.data.control.paused, false);
+    const events = p.harness('events', '--state', p.state, '--limit', '1000');
+    assert.deepEqual(
+      events.json.data.events
+        .filter((x: any) => x.type === 'harness.updated')
+        .map((x: any) => x.payload.action),
+      ['restored'],
+    );
   } finally {
     await registry.close();
   }

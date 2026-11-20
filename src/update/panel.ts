@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync, realpathSync } from 'node:fs';
-import { resolve, sep } from 'node:path';
+import { isAbsolute, resolve, sep } from 'node:path';
 
 /**
  * Панель оператора, запущенная CLI devcontour-harness-ui для этого каталога
@@ -47,7 +47,9 @@ export function findPanels(prefix: string, stateDir: string): PanelProcess[] {
     if (at < 0) continue;
     const args = tokens.slice(at + 1);
     const s = args.indexOf('--state');
-    if (s < 0 || !args[s + 1] || real(args[s + 1]!) !== state) continue;
+    // Только абсолютный --state: относительный считался бы от каталога панели, не нашего.
+    if (s < 0 || !args[s + 1] || !isAbsolute(args[s + 1]!) || real(args[s + 1]!) !== state)
+      continue;
     found.push({ pid, script: tokens[at]!, args });
   }
   return found;
@@ -63,17 +65,11 @@ const alive = (pid: number) => {
 };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/**
- * Перезапустить панели новой версией (`bin` — исполняемый файл нового
- * пакета). Вывод нового процесса — в `log`; успех — первая строка JSON с
- * `ok: true` и адресом в течение 15 с.
- */
-export async function restartPanels(
+/** Остановить панели (SIGTERM, до 5 с каждую): до установки, чтобы они не звали полуустановленный harness. */
+export async function stopPanels(
   panels: PanelProcess[],
-  bin: string,
-  log: string,
-): Promise<{ restarted: { pid: number; url?: string }[]; failed: string[] }> {
-  const restarted: { pid: number; url?: string }[] = [];
+): Promise<{ stopped: PanelProcess[]; failed: string[] }> {
+  const stopped: PanelProcess[] = [];
   const failed: string[] = [];
   for (const p of panels) {
     try {
@@ -82,10 +78,25 @@ export async function restartPanels(
       // уже остановлена
     }
     for (let i = 0; i < 50 && alive(p.pid); i++) await sleep(100);
-    if (alive(p.pid)) {
-      failed.push(`панель (pid ${p.pid}) не остановилась за 5 с`);
-      continue;
-    }
+    if (alive(p.pid)) failed.push(`панель (pid ${p.pid}) не остановилась за 5 с`);
+    else stopped.push(p);
+  }
+  return { stopped, failed };
+}
+
+/**
+ * Запустить остановленные панели с прежними аргументами (`bin` — исполняемый
+ * файл установленного сейчас пакета). Вывод — в `log`; успех — первая строка
+ * JSON с `ok: true` и адресом в течение 15 с.
+ */
+export async function startPanels(
+  panels: PanelProcess[],
+  bin: string,
+  log: string,
+): Promise<{ restarted: { pid: number; url?: string }[]; failed: string[] }> {
+  const restarted: { pid: number; url?: string }[] = [];
+  const failed: string[] = [];
+  for (const p of panels) {
     const fd = openSync(log, 'w');
     const child = spawn(process.execPath, [bin, ...p.args], {
       detached: true,
@@ -106,7 +117,7 @@ export async function restartPanels(
     }
     if (child.pid !== undefined && alive(child.pid) && url !== undefined)
       restarted.push({ pid: child.pid, url });
-    else failed.push(`новая панель не запустилась; её вывод — ${log}`);
+    else failed.push(`панель не запустилась; её вывод — ${log}`);
   }
   return { restarted, failed };
 }

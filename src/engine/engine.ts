@@ -300,6 +300,9 @@ export function activeOf(v: ExecutionView): AttemptState[] {
   return v.activeAttempts ? v.activeAttempts() : v.attempts().filter((a) => a.status === 'active');
 }
 
+/** Операция паузы `harness update` (пакеты harness и панели меняются). */
+export const UPDATE_PAUSE_OPERATION = 'harness-update';
+
 export class Engine {
   readonly host: ExecutionHost;
   readonly policy: ExecutionPolicy;
@@ -821,6 +824,31 @@ export class Engine {
     );
   }
 
+  /**
+   * Роль controller для операции вне run (`harness update`): захват или
+   * продление без записи политики; пока роль жива, `harness run` не
+   * становится controller и не пишет состояние.
+   */
+  holdController(owner: string, takeOver?: (lease: ControllerLease) => boolean): boolean {
+    return this.tx('heartbeat', (tx) => {
+      const lease = tx.controller();
+      const live = !!lease && lease.leaseUntil > this.now();
+      // Роль умершего процесса той же операции (`takeOver`) переходит сразу.
+      if (
+        live &&
+        (lease.owner !== owner || lease.engineVersion !== this.version) &&
+        !takeOver?.(lease)
+      )
+        return false;
+      tx.setController({
+        owner,
+        leaseUntil: this.now() + this.policy.leaseMs,
+        engineVersion: this.version,
+      });
+      return true;
+    });
+  }
+
   /** Захват или продление роли единственного controller. */
   lead(owner: string): boolean {
     let acquired = false;
@@ -871,6 +899,15 @@ export class Engine {
       const control = tx.control();
       if (control.paused && reason === 'shutdown' && control.pauseReason !== 'reconfigure')
         return { control, changed: false };
+      // Пауза обновления пакетов (`harness update`) штатной остановкой не подменяется:
+      // иначе следующий run снял бы её посреди установки.
+      if (
+        control.paused &&
+        reason === 'shutdown' &&
+        control.pauseReason === 'reconfigure' &&
+        control.pauseOperation === UPDATE_PAUSE_OPERATION
+      )
+        return { control, changed: false };
       // Повторная пауза человека — его новое решение: время паузы обновляется.
       // Хост сравнивает его с началом своей работы (пауза до старта снимается
       // циклом, после — нет), и сохранённое прежнее время выдало бы свежее
@@ -902,7 +939,12 @@ export class Engine {
     return this.tx('scheduler.started', (tx) => {
       const control = tx.control();
       if (!control.paused) return { control, changed: false };
-      if (control.pauseReason === 'reconfigure')
+      // Паузу обновления пакетов человек снять может (обновление прервалось);
+      // пока обновление идёт, run всё равно не начнётся: роль controller у него.
+      if (
+        control.pauseReason === 'reconfigure' &&
+        control.pauseOperation !== UPDATE_PAUSE_OPERATION
+      )
         throw new HarnessError(
           'PAUSED',
           'Выдачу держит операция применения политики; её снимает сама операция',

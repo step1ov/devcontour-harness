@@ -278,3 +278,45 @@ test('UU10: cachedUpdates — нет проверки: подсказка (кр�
   assert.equal(cachedUpdates(state, cfg, '0.1.0-alpha.59')?.state, 'available');
   assert.equal(cachedUpdates(state, cfg, '0.1.0-alpha.60')?.state, 'up-to-date');
 });
+
+test('UU11: новый ключ форматов будущей версии называется сменой, а не «неизвестно»', async () => {
+  const { formatsFrom } = await import('../src/update/install.ts');
+  const next = formatsFrom({ ...RUNNING_FORMATS, relay: 1 });
+  assert.ok(next);
+  assert.deepEqual(formatChanges(RUNNING_FORMATS, next), ['relay: нет → 1']);
+  assert.equal(formatsFrom({ ...RUNNING_FORMATS, state: 'x' }), undefined);
+});
+
+test('UU12: пауза обновления — штатная остановка run её не подменяет, человек снимает; роль controller обновления держит run', async () => {
+  const { Engine } = await import('../src/engine/engine.ts');
+  const { standaloneHost } = await import('../src/engine/standalone.ts');
+  const { SqliteExecutionStore } = await import('../src/storage/sqlite.ts');
+  const { executionPolicySchema } = await import('../src/contracts/index.ts');
+  const { example } = await import('./fixtures.ts');
+  const policy = executionPolicySchema.parse(example('policy'));
+  const store = new SqliteExecutionStore(join(tmp(), 'state.sqlite'), 'test');
+  try {
+    const engine = new Engine({ host: standaloneHost(store, policy), policy });
+    engine.resume();
+    assert.equal(engine.operationPause('harness-update'), true);
+    assert.equal(engine.pause('shutdown').changed, false);
+    assert.equal(
+      engine.read((v) => v.control().pauseOperation),
+      'harness-update',
+    );
+    assert.equal(engine.holdController('harness-update:1'), true);
+    assert.equal(engine.lead('run-1'), false, 'run не становится controller');
+    assert.equal(engine.holdController('harness-update:2'), false);
+    assert.equal(
+      engine.holdController('harness-update:2', () => true),
+      true,
+      'роль умершего обновления переходит',
+    );
+    assert.equal(engine.resume().changed, true, 'человек снимает паузу прерванного обновления');
+    // Пауза операции применения политики по-прежнему только своя.
+    engine.operationPause('reconfigure-x');
+    assert.throws(() => engine.resume(), /операция применения политики/);
+  } finally {
+    store.close();
+  }
+});

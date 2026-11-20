@@ -47,7 +47,13 @@ function pack(dir: string): Buffer {
  */
 export function fakeHarness(
   version: string,
-  o: { formats?: Record<string, unknown> | null; notes?: string; fail?: boolean } = {},
+  o: {
+    formats?: Record<string, unknown> | null;
+    notes?: string;
+    fail?: boolean;
+    /** doctor пишет файл в каталог состояния (новая версия успела изменить состояние). */
+    touch?: boolean;
+  } = {},
 ): FakeVersion {
   const dir = join(root(), 'src');
   const pkg = join(dir, 'package');
@@ -81,6 +87,7 @@ if (args[0] === 'status') {
 }
 if (args[0] === 'doctor') {
   if (marker && mine > 1) fs.writeFileSync(marker, String(mine));
+  ${o.touch ? "if (stateArg) fs.writeFileSync(path.join(stateArg, 'touched-by-new'), 'x');" : ''}
   ${o.fail ? "console.log(JSON.stringify({ ok: false, error: { code: 'INTERNAL', message: 'broken' } })); process.exit(4);" : ''}
   console.log(JSON.stringify({ apiVersion: 'devcontour-harness/v1alpha1', command: 'doctor', ok: true, data: { harness: ${JSON.stringify(version)}, state: { stateVersion: 1, compatible: true } } }));
   process.exit(0);
