@@ -1866,6 +1866,26 @@ view`) в пределе длины сохраняет хвост — остат
   кладёт его туда); пропуск по-прежнему проваливает полный прогон. Тест
   `T05` восстанавливает права каталога, закрытого исполнителем, и уборка
   каталога прогона больше не печатает «Run directory not removed … ENOTEMPTY».
+- **Причина в пробе исполнителя (`harness smoke --writer-probe`).** Причину
+  называет последняя значимая строка вывода: предупреждения (`[WARN]`, в том
+  числе с префиксом задачи turbo, `npm warn`, `Warning` Node) и безвредное
+  чтение `~/.npmrc` pnpm под песочницей («Issue while reading … EPERM») не
+  считаются — раньше любой упавший шаг pnpm выходил `write-denied` с этой
+  строкой. Браузер, умерший при старте («Daemon process exited during
+  startup», «Failed to launch the browser process»), — `process-abort`. EPERM
+  без пути (`Operation not permitted (os error 1)` сборщика на Rust) остаётся
+  `write-denied`, но совет называет и локальный сокет, а при `network: none`
+  или `legacy` предлагает `network: loopback`. У `failed` в `evidence` —
+  последняя строка ошибки (итоговые строки pnpm, npm и turbo — только когда
+  другой нет). Набор причин и схема прежние.
+- **Предел времени загрузки при установке — `dependency-network`.** Вывод
+  `TimeoutError: The operation was aborted due to timeout` с кадром таймера
+  AbortController Node (`at Timeout._onTimeout (node:internal/abort_controller…`)
+  у установки зависимостей распознаётся так же, как обрыв «terminated»
+  alpha.59: отказ среды, попытку не тратит (при прочих условиях правила). В
+  `harness smoke` упавшая на сети или реестре установка — класс
+  `environment` (сообщение начинается с `dependency-network:`), а не `crash`;
+  в smoke входы с базой не сверяются — это только диагноз.
 
 ## Перед обновлением
 

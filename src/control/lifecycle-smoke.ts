@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { HarnessError, TaskFailure, type ExecutionPolicy } from '../contracts/index.ts';
 import { CleanupFailure, type StepOutcome } from '../environment/lifecycle.ts';
+import { DEPENDENCY_NETWORK } from '../environment/dependency-network.ts';
 import { runGatesAt } from '../verification/gates-at.ts';
 import { commitOf, repositoryOf, repositoryPath } from './gates-check.ts';
 import { probeWriter, writerProbeText, type WriterProbeResult } from './writer-probe.ts';
@@ -17,7 +18,8 @@ import { probeWriter, writerProbeText, type WriterProbeResult } from './writer-p
  * - `cleanup` — упал только `teardown`: службы могли остаться запущенными;
  * - `tree-changed` — подготовка изменила отслеживаемые файлы проверяемого SHA;
  * - `environment` — прочий отказ среды (переменная или секрет окружения не
- *   заданы, сеть реестра, защищённые пути, git).
+ *   заданы, сеть реестра — в том числе упавшая на ней установка
+ *   зависимостей, защищённые пути, git).
  */
 export type LifecycleFailureClass =
   'port-busy' | 'timeout' | 'crash' | 'missing-tool' | 'cleanup' | 'tree-changed' | 'environment';
@@ -182,6 +184,16 @@ export function classifyLifecycleFailure(
         ...where,
         message,
         advice: `Шаг ${failed.id} превысил свой timeoutMs (${seconds(failed.durationMs)}): поднимите timeoutMs шага, если он законно долгий, или проверьте, не ждёт ли он ввода, сети или службы.${log}`,
+      };
+    // Установка упала на сети или реестре (обрыв, предел времени, 403 прокси):
+    // отказ среды, а не настройка проекта; в `run` такой отказ попытку не
+    // тратит (dependency-network).
+    if (failed.registryFailure)
+      return {
+        class: 'environment',
+        ...where,
+        message: `${DEPENDENCY_NETWORK}: ${failed.registryFailure}. ${message}`,
+        advice: `Установка зависимостей не получила пакеты из реестра — отказ сети или реестра, а не проекта: повторите smoke; частые обрывы снимает хранилище зависимостей (dependencyStore, docs/slow-environments.md): prepare берёт пакеты из него, а не из сети.${log}`,
       };
     if (code !== undefined && code !== 0)
       return {

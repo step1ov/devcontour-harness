@@ -96,11 +96,6 @@ export interface WriterProbeResult {
 }
 
 const clip = (s: string, n = 300) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
-const lineOf = (text: string, re: RegExp) =>
-  text
-    .split('\n')
-    .find((l) => re.test(l))
-    ?.trim();
 
 const ADVICE: Record<WriterProbeReason, string> = {
   'listen-denied':
@@ -125,55 +120,109 @@ const ADVICE: Record<WriterProbeReason, string> = {
     'Команда завершилась ошибкой без признаков песочницы: причина — в ней самой (лог). Проверьте команду вне harness.',
 };
 
+const ansi = /\x1b\[[0-9;?]*[A-Za-z]/g;
+/** Префикс задачи turbo и подобных (`@scope/pkg:build: `) перед строкой вывода. */
+const taskPrefix = /^[\w@./-]+:[\w:.-]+:\s+/;
 /**
- * Причина по исходу команды. Экспортируется для тестов. Порядок — от самого
- * конкретного признака к общему: аварийное завершение раньше отказа записи
- * (браузер печатает «Permission denied» своего служебного вызова), listen
- * раньше прочих EPERM.
+ * Шум, который не бывает причиной: предупреждения менеджеров и Node и
+ * безвредное чтение `~/.npmrc` pnpm под песочницей («Issue while reading …
+ * EPERM» — pnpm идёт дальше без него).
+ */
+const noise =
+  /^(?:\[WARN\]|WARN\b|npm warn\b|warning\b|\(node:\d+\) (?:\[\w+\] )?(?:\w*Warning)\b|\w*Warning:)|Issue while reading "[^"]*\.npmrc"/i;
+/** Строки вывода без цвета, префикса задачи и шума — в исходном порядке. */
+function significant(text: string) {
+  return text
+    .replace(ansi, '')
+    .split('\n')
+    .map((l) => l.replace(/\r$/, '').trim())
+    .filter((l) => l && !noise.test(l.replace(taskPrefix, '')));
+}
+/** Последняя значимая строка с признаком: причина печатается после предупреждений. */
+const lastOf = (lines: string[], re: RegExp) => lines.findLast((l) => re.test(l));
+/** Строка похожа на итоговую ошибку команды. */
+const fatal =
+  /\b(?:error|ERR!|ERR_[A-Z_]+|failed|fatal|panicked|Cannot find|not found)\b|Error:|Не удалось/i;
+/** Итог менеджера или оркестратора задач: повторяет код выхода, не причину. */
+const wrapper =
+  /^(?:ELIFECYCLE\b|ERROR\s+run failed\b|npm (?:error|ERR!) (?:code|path|command|Lifecycle|A complete log|errno)\b|Command failed with exit code\b|Failed:\s|\S+#\S+: command .*exited)/;
+/** Путь файловой системы в строке: без него EPERM может быть и не записью. */
+const hasPath = /(?:^|[\s'"(=])(?:~?\/|[A-Za-z]:\\)[^\s'")]*\w/;
+
+/**
+ * Причина по исходу команды. Экспортируется для тестов. Причина — последняя
+ * значимая строка: предупреждения (`[WARN]`, `npm warn`, Node `Warning`) и
+ * безвредное чтение `~/.npmrc` pnpm не считаются, иначе их EPERM выдавал
+ * отказ записи раньше настоящей ошибки сборки. Порядок классов — от самого
+ * конкретного признака к общему: аварийное завершение и браузер, который не
+ * запустился, раньше отказа записи (браузер печатает «Permission denied»
+ * своего служебного вызова), listen раньше прочих EPERM. EPERM без пути
+ * (`Operation not permitted (os error 1)` сборщика на Rust) — отказ записи
+ * или локального сокета: совет называет оба.
  */
 export function classifyProbe(result: {
   code: number;
   timedOut: boolean;
   output: string;
   signal?: string | null;
-}): { status: WriterProbeCommand['status']; reason?: WriterProbeReason; evidence?: string } {
-  const text = result.output;
+  /** Режим сети исполнителя: при закрытой сети совет EPERM без пути называет loopback. */
+  networkMode?: WriterProbeWriter['networkMode'];
+}): {
+  status: WriterProbeCommand['status'];
+  reason?: WriterProbeReason;
+  evidence?: string;
+  /** Совет вместо общего `ADVICE[reason]`, когда причина неоднозначна. */
+  advice?: string;
+} {
   if (result.timedOut) return { status: 'blocked', reason: 'timeout' };
   if (result.code === 0) return { status: 'ok' };
+  const lines = significant(result.output);
+  const evidence = (re: RegExp) => ((l) => (l ? { evidence: l } : {}))(lastOf(lines, re));
   const abort =
     /Abort trap|SIGABRT|bootstrap_check_in|TransformProcessType|Trace\/BPT trap|sandbox initialization failed/;
-  if (result.code === 134 || result.signal === 'SIGABRT' || abort.test(text))
-    return {
-      status: 'blocked',
-      reason: 'process-abort',
-      ...((l) => (l ? { evidence: l } : {}))(lineOf(text, abort)),
-    };
+  // Браузерный инструмент, чей процесс браузера умер при старте: тот же класс,
+  // что аварийный выход под песочницей, а не отказ записи.
+  const browser =
+    /Daemon process exited during startup|Failed to launch (?:the )?browser process|Browser process exited|Chrome failed to start/i;
+  if (result.code === 134 || result.signal === 'SIGABRT' || lines.some((l) => abort.test(l)))
+    return { status: 'blocked', reason: 'process-abort', ...evidence(abort) };
+  if (lines.some((l) => browser.test(l)))
+    return { status: 'blocked', reason: 'process-abort', ...evidence(browser) };
   const listen = /listen E(?:PERM|ACCES)|bind\b.*(?:EPERM|EACCES|Operation not permitted)/i;
-  if (listen.test(text))
-    return {
-      status: 'blocked',
-      reason: 'listen-denied',
-      evidence: lineOf(text, listen) ?? 'listen',
-    };
+  if (lines.some((l) => listen.test(l)))
+    return { status: 'blocked', reason: 'listen-denied', evidence: lastOf(lines, listen)! };
   const network =
     /\b(?:ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ECONNREFUSED)\b|getaddrinfo|Could not resolve host|Temporary failure in name resolution|network is unreachable|ERR_PNPM_META_FETCH_FAIL|fetch failed/i;
-  if (network.test(text))
-    return {
-      status: 'blocked',
-      reason: 'network-denied',
-      evidence: lineOf(text, network) ?? 'network',
-    };
+  if (lines.some((l) => network.test(l)))
+    return { status: 'blocked', reason: 'network-denied', evidence: lastOf(lines, network)! };
   const write =
     /\b(?:EROFS|EPERM|EACCES)\b|read-only file system|Operation not permitted|Permission denied/i;
-  if (write.test(text))
-    return { status: 'blocked', reason: 'write-denied', evidence: lineOf(text, write) ?? 'write' };
-  if (result.code === 127 || /command not found|spawn \S+ ENOENT/i.test(text))
+  const denied = lastOf(lines, write);
+  if (denied) {
+    const pathless = !hasPath.test(denied);
     return {
-      status: 'failed',
-      reason: 'missing-tool',
-      ...((l) => (l ? { evidence: l } : {}))(lineOf(text, /not found|ENOENT/i)),
+      status: 'blocked',
+      reason: 'write-denied',
+      evidence: denied,
+      ...(pathless
+        ? {
+            advice:
+              'Отказ EPERM без пути: это запись вне области записи исполнителя или локальный сокет (сборщики на Rust, например Turbopack, открывают его на 127.0.0.1).' +
+              (result.networkMode === 'none' || result.networkMode === 'legacy'
+                ? ' Сеть исполнителя закрыта и для локальных портов: повторите пробу с network: loopback в профиле инструментов;'
+                : '') +
+              ' если отказ остаётся — направьте каталоги команды в рабочее дерево или во временный каталог профиля, либо выполните шаг заранее в prepare.',
+          }
+        : {}),
     };
-  return { status: 'failed', reason: 'failed' };
+  }
+  if (result.code === 127 || lines.some((l) => /command not found|spawn \S+ ENOENT/i.test(l)))
+    return { status: 'failed', reason: 'missing-tool', ...evidence(/not found|ENOENT/i) };
+  // Без признаков песочницы: последняя строка ошибки — подсказка, где искать;
+  // итог обёртки (pnpm, npm, turbo) — только когда другой строки нет.
+  const own = lines.filter((l) => !wrapper.test(l.replace(taskPrefix, '')));
+  const cause = lastOf(own, fatal) ?? lastOf(lines, fatal);
+  return { status: 'failed', reason: 'failed', ...(cause ? { evidence: cause } : {}) };
 }
 
 /** ID проверки границы loopback codex в отчёте пробы. */
@@ -506,6 +555,7 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
           timedOut: result.timedOut,
           output,
           signal: result.diagnostics.signal,
+          networkMode: report.networkMode,
         });
         report.commands.push({
           id: step.id,
@@ -516,7 +566,7 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
           durationMs: Date.now() - started,
           ...(verdict.reason ? { reason: verdict.reason } : {}),
           ...(verdict.evidence ? { evidence: clip(execution.redact(verdict.evidence)) } : {}),
-          ...(verdict.reason ? { advice: ADVICE[verdict.reason] } : {}),
+          ...(verdict.reason ? { advice: verdict.advice ?? ADVICE[verdict.reason] } : {}),
           log,
         });
       }

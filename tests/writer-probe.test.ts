@@ -75,6 +75,85 @@ test('WP01: причина отказа по выводу — listen, сеть, 
   assert.equal(v('listen EPERM 127.0.0.1').status, 'blocked');
 });
 
+test('WP01a: предупреждение pnpm о ~/.npmrc — шум; причина — последняя строка ошибки', () => {
+  const v = (output: string, code = 1, networkMode?: 'none' | 'loopback') =>
+    classifyProbe({ code, timedOut: false, output, ...(networkMode ? { networkMode } : {}) });
+  const npmrc =
+    '[WARN] Issue while reading "/home/u/.npmrc". EPERM: operation not permitted, open \'/home/u/.npmrc\'';
+  // Сборка Turbopack под закрытой сетью: EPERM без пути, рядом предупреждения
+  // pnpm с префиксом задачи turbo.
+  const turbopack = [
+    '• Packages in scope: @app/sdk, @app/web',
+    `@app/sdk:build: ${npmrc}`,
+    '@app/sdk:build: > tsc -p tsconfig.build.json',
+    `@app/web:build: ${npmrc}`,
+    '@app/web:build:    ▲ Next.js 16.3.4 (Turbopack)',
+    '@app/web:build: Error [TurbopackInternalError]: Operation not permitted (os error 1)',
+    '@app/web:build:  ELIFECYCLE  Command failed with exit code 1.',
+    ' ERROR  run failed: command  exited (1)',
+  ].join('\n');
+  const build = v(turbopack, 1, 'none');
+  assert.equal(build.reason, 'write-denied');
+  assert.match(build.evidence!, /TurbopackInternalError.*os error 1/);
+  assert.doesNotMatch(build.evidence!, /npmrc/);
+  assert.match(build.advice!, /локальный сокет/);
+  assert.match(build.advice!, /network: loopback/);
+  // При loopback совет не предлагает его снова; EPERM с путём — общий совет.
+  assert.doesNotMatch(v(turbopack, 1, 'loopback').advice!, /network: loopback/);
+  assert.equal(
+    v(`${npmrc}\nEPERM: operation not permitted, mkdir '/home/u/.tool'`).advice,
+    undefined,
+  );
+
+  // Не собран пакет SDK: ошибка проекта, а не песочница.
+  const sdk = v(
+    [
+      npmrc,
+      '> @app/web@0.1.0 build /w/apps/web',
+      '> next build',
+      "src/api.ts(3,28): error TS2307: Cannot find module '@app/sdk/http-client' or its corresponding type declarations.",
+      npmrc,
+      ' ELIFECYCLE  Command failed with exit code 1.',
+    ].join('\n'),
+  );
+  assert.deepEqual([sdk.status, sdk.reason], ['failed', 'failed']);
+  assert.match(sdk.evidence!, /error TS2307/);
+  assert.doesNotMatch(sdk.evidence!, /npmrc/);
+
+  // Браузер не запустился: не отказ записи.
+  const browser = v(
+    [
+      npmrc,
+      'server: http://127.0.0.1:41234 ready',
+      'Не удалось запустить браузер: Daemon process exited during startup',
+      npmrc,
+    ].join('\n'),
+    2,
+  );
+  assert.equal(browser.reason, 'process-abort');
+  assert.equal(
+    browser.evidence,
+    'Не удалось запустить браузер: Daemon process exited during startup',
+  );
+
+  // Одни предупреждения — не отказ записи; общая ошибка — последняя строка.
+  const warnOnly = v(`${npmrc}\nnpm warn config x\nWARN  deprecated y\nError: boom`);
+  assert.deepEqual([warnOnly.reason, warnOnly.evidence], ['failed', 'Error: boom']);
+  // Настоящий отказ записи после предупреждения находится, и строка — его.
+  const later = v(`${npmrc}\nError: EACCES: permission denied, open '/opt/tool/cache.json'`);
+  assert.deepEqual(
+    [later.reason, later.evidence],
+    ['write-denied', "Error: EACCES: permission denied, open '/opt/tool/cache.json'"],
+  );
+  // Из нескольких причин одного класса — последняя.
+  assert.match(
+    v(
+      "EPERM: operation not permitted, open '/a/one'\nEPERM: operation not permitted, open '/b/two'",
+    ).evidence!,
+    /\/b\/two/,
+  );
+});
+
 test('WP02: codex — команда под `codex sandbox` с профилем прав исполнителя; TMPDIR в области записи', async () => {
   const f = fixture((raw, root) => {
     raw.roles = { developer: { writer: { runtime: 'codex', toolProfile: 'web' } } };

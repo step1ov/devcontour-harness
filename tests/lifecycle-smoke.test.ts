@@ -130,6 +130,45 @@ test('smoke: lifecycle и prepare по порядку, замер каждого
   assert.equal(existsSync(join(f.state, 'state.sqlite')), false, 'база состояния не создаётся');
 });
 
+test('smoke: установка, упавшая на пределе времени запроса к реестру, — environment, а не crash', async () => {
+  // Поддельный pnpm печатает вывод pnpm 11 при TimeoutError загрузки и выходит с кодом 1.
+  const bin = realpathSync(mkdtempSync(join(tmpdir(), 'harness-smoke-pnpm-')));
+  const pnpm = join(bin, 'pnpm');
+  const output = [
+    'Progress: resolved 1111, reused 0, downloaded 1100, added 1108',
+    '[WARN] GET https://registry.npmjs.org/next/-/next-16.3.4.tgz error (23). Will retry in 1 minute. 1 retries left.',
+    '[23] The operation was aborted due to timeout',
+    '',
+    'TimeoutError: The operation was aborted due to timeout',
+    '    at new DOMException (node:internal/per_context/domexception:76:18)',
+    '    at Timeout._onTimeout (node:internal/abort_controller:210:9)',
+    '    at listOnTimeout (node:internal/timers:685:17)',
+  ].join('\n');
+  writeFileSync(
+    pnpm,
+    `#!${process.execPath}\nprocess.stderr.write(${JSON.stringify(output + '\n')});process.exit(1);\n`,
+    { mode: 0o755 },
+  );
+  const f = fixture(() => ({
+    prepare: [{ id: 'install', command: [pnpm, 'install', '--frozen-lockfile'], timeoutMs: 20000 }],
+  }));
+  const data = await f.smoke();
+  assert.equal(data.passed, false);
+  assert.equal(data.failure!.class, 'environment', JSON.stringify(data.failure));
+  assert.equal(data.failure!.stage, 'prepare');
+  assert.equal(data.failure!.step, 'install');
+  assert.match(
+    data.failure!.message,
+    /^dependency-network: TimeoutError: The operation was aborted due to timeout\. Шаг install: exit=1/,
+  );
+  assert.match(data.failure!.advice, /отказ сети или реестра/);
+  // Тот же код без сетевой подписи — по-прежнему crash.
+  writeFileSync(pnpm, `#!${process.execPath}\nconsole.error('boom');process.exit(1);\n`, {
+    mode: 0o755,
+  });
+  assert.equal((await f.smoke()).failure!.class, 'crash');
+});
+
 test('smoke: падение шага — crash с шагом и логом; teardown исполняется', async () => {
   const f = fixture((m) => ({ prepare: [mark(m, 'seed', 3)] }));
   const data = await f.smoke();

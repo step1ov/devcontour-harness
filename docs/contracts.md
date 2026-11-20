@@ -2301,7 +2301,8 @@ lifecycle `setup` и `ready`, хранилище зависимостей (`depe
 (`LIFECYCLE_FAILED`): `data.failure` с классом, стадией и шагом, сообщением и
 советом. Классы: `port-busy` (порт ресурса занят до окружения), `timeout`
 (шаг дольше своего `timeoutMs`, проверка дольше `runTimeoutMs` или замолкла
-дольше порога `stallSweep`), `crash` (ненулевой код шага), `missing-tool`
+дольше порога `stallSweep`), `crash` (ненулевой код шага; установка, упавшая
+на сети или реестре по правилу `dependency-network`, — `environment`), `missing-tool`
 (нет исполняемого файла: `ENOENT`, `EACCES`, код 126/127), `cleanup` (упал
 только `teardown`), `tree-changed` (подготовка изменила отслеживаемые файлы)
 и `environment` (прочее: переменные и секреты окружения, сеть реестра, git).
