@@ -125,7 +125,7 @@ const allowed = [
   /^examples\/turbo-starter\/harness\/env\/[a-z-]+\.env\.template$/,
   /^examples\/turbo-starter\/changes\/[a-z-]+\.patch$/,
   // Шаблоны controller mode.
-  /^templates\/controller-mode\/([A-Za-z.-]+\.md|[a-z-]+\.json)$/,
+  /^templates\/controller-mode\/([A-Za-z0-9.-]+\.md|[a-z-]+\.json)$/,
   /^profiles\/[a-z0-9-]+\.json$/,
   // Встроенные слои профилей (lean, alpha.50).
   /^profiles\/layers\/[a-z0-9-]+\.json$/,
