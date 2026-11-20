@@ -849,10 +849,10 @@ export class Runner {
     // Окружение вызова — с профилем инструментов его назначения.
     const execution = this.environment(input.attempt, input.phase, input.cwd, binding.toolProfile);
     const boundary = this.boundary(input.attempt.dependencies);
-    // Временный каталог исполнителя — всегда внутри его области записи
+    // Временный каталог исполнителя — свой и в его области записи
     // (`writerScratch`): иначе shell и инструменты, пишущие в TMPDIR
     // (here-document zsh, кеши генераторов), получали отказ песочницы.
-    const scratch = review ? undefined : await writerScratch(input.dir, execution.env);
+    const scratch = review ? undefined : await writerScratch(execution.env);
     // Вызов под учётом: бюджет проверяется до вызова, расход закрепляется за попыткой.
     const response = await measuredInvoke(
       this.engine,

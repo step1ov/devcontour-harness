@@ -904,6 +904,8 @@ test('A59: обрыв загрузки fetch («terminated» + стек прер
   ].join('\n');
   const argv = ['pnpm', '--filter', 'web...', 'install', '--frozen-lockfile'];
   assert.ok(line(argv, output));
+  // Заголовок обрыва в формате pnpm (« ERROR  terminated») — не код ошибки проекта.
+  assert.ok(line(argv, ' ERROR  terminated\n    at Fetch.onAborted (file:///x/pnpm.mjs:1:1)\n'));
   // Слово без кадра прерванного запроса и упавший скрипт — не сеть.
   assert.equal(line(argv, 'pnpm: terminated\n'), undefined);
   assert.equal(line(argv, output + '\n ELIFECYCLE  Command failed with exit code 1.'), undefined);

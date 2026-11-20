@@ -110,8 +110,9 @@ export interface RepeatedTestcase {
 }
 
 /**
- * Повтор с выводом проверки уже был, а упал тот же testcase: у исполнителя
- * нет новой гипотезы, и последняя попытка ушла бы на тот же провал. Последний
+ * Повтор с выводом проверки уже был, а упал тот же testcase, и следующая
+ * попытка — последняя: у исполнителя нет новой гипотезы, и последняя попытка
+ * ушла бы на тот же провал. Последний
  * отказ поручения — `gate`, предыдущий содержательный (инфраструктурные
  * отказы пропускаются) — тоже `gate` того же основания, и общие упавшие
  * testcases есть. Отпечаток отказа здесь не годится: вывод проверки меняется
@@ -120,7 +121,11 @@ export interface RepeatedTestcase {
 export function repeatedTestcase(
   view: ExecutionView,
   work: WorkState,
+  maxAttempts: number,
 ): RepeatedTestcase | undefined {
+  // Только перед последней попыткой: раньше повтор с выводом проверки ещё
+  // дёшев и разрешён пределом класса (`repairPolicy.gate.repeats`).
+  if (work.attempt + 1 < maxAttempts) return undefined;
   const own = view.attempts(work.id).filter((a) => a.status !== 'active');
   const last = own.at(-1);
   if (!last || last.status !== 'failed' || last.failureKind !== 'gate') return undefined;
@@ -253,7 +258,7 @@ export function repairDecision(
 
   // Тот же упавший testcase после повтора с выводом проверки: ведущему, а не
   // последней попытке.
-  const repeated = repeatedTestcase(view, work);
+  const repeated = repeatedTestcase(view, work, options.maxAttempts);
   if (repeated)
     return {
       action: 'stop',

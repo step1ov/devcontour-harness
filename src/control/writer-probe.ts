@@ -13,6 +13,7 @@
 // песочница Claude Code). Модель не вызывается, попытка не создаётся.
 
 import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
@@ -22,12 +23,7 @@ import {
   type RuntimeName,
 } from '../contracts/index.ts';
 import { writerRunsChecks } from '../agents/cli-adapter.ts';
-import {
-  codexPermissions,
-  isolatedCommand,
-  isolation,
-  srtTempDir,
-} from '../environment/isolation.ts';
+import { codexPermissions, isolatedCommand, isolation } from '../environment/isolation.ts';
 import { executionEnvironment } from '../environment/lifecycle.ts';
 import { command } from '../environment/process.ts';
 import { writerScratch } from '../engine/writer-block.ts';
@@ -209,8 +205,6 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
   if (policy.isolation.mode !== 'os')
     notes.push('isolation.mode не os: исполнитель работает без песочницы, проба тоже.');
   const writers: WriterProbeWriter[] = [];
-  /** Короткие временные каталоги srt, созданные пробой (только они и убираются). */
-  const srtTemps: string[] = [];
   let n = 0;
   for (const w of writersOf(policy, repo)) {
     if (w.runtime !== 'codex' && w.runtime !== 'claude') continue;
@@ -260,6 +254,9 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
           DEVCONTOUR_REPOSITORY_ID: repo.id,
           DEVCONTOUR_RUN_ID: input.runId,
           DEVCONTOUR_PHASE: 'candidate',
+          // Ресурсов и зависимостей у пробы нет: переменные есть, как у попытки.
+          DEVCONTOUR_RESOURCES_JSON: '[]',
+          DEVCONTOUR_DEPENDENCIES_JSON: '[]',
           DEVCONTOUR_COMPONENTS_JSON: JSON.stringify({ [repo.id]: cwd }),
         },
         input.environment ?? process.env,
@@ -268,10 +265,12 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
       blockAll('environment', error instanceof Error ? error.message : String(error));
       continue;
     }
+    // HOME — как у адаптера runtime.
+    execution.env.HOME ??= homedir();
     const callDir = join(input.dir, `writer-${++n}`);
     await mkdir(callDir, { recursive: true });
     // Свой TMPDIR в области записи — как у вызова исполнителя.
-    const scratch = await writerScratch(callDir, execution.env);
+    const scratch = await writerScratch(execution.env);
     const iso = isolation({
       write: [cwd, scratch],
       controller: input.boundary.hidden,
@@ -298,8 +297,6 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
           // только ей (как у gates); песочница исполнителя — та же граница.
           const marks = join(callDir, step.id + '.marks');
           await mkdir(marks, { recursive: true });
-          const srt = await srtTempDir();
-          if (srt.created) srtTemps.push(srt.dir);
           const wrapped = await isolatedCommand(
             { ...iso, write: [...iso.write, await realpath(marks)] },
             step.command,
@@ -311,7 +308,9 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
             input.platform ?? process.platform,
             '',
             randomBytes(6).toString('hex'),
-            srt.dir,
+            // Процесс песочницы получает тот же TMPDIR, что процесс
+            // исполнителя (claude кладёт туда сокеты своей песочницы).
+            scratch,
           );
           argv = wrapped.argv;
           env = { ...execution.env, ...wrapped.env };
@@ -329,6 +328,8 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
             activity: { kind: 'command', label: `writer-probe ${step.id}`.slice(0, 300) },
           });
         } catch (error) {
+          // Отмена вызывающим — не исход команды.
+          if (input.signal.aborted) throw error;
           const code = (error as NodeJS.ErrnoException).code;
           report.commands.push({
             id: step.id,
@@ -368,13 +369,13 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
       }
     } finally {
       await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
-      for (const dir of srtTemps.splice(0))
-        await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
   if (!writers.length) notes.push('Ни у одной роли репозитория нет исполнителя codex или claude.');
+  // Пустая проба ничего не доказала: без команд она не «зелёная».
+  const probed = writers.some((w) => w.commands.length > 0);
   return {
-    ok: writers.every((w) => w.commands.every((c) => c.status === 'ok')),
+    ok: probed && writers.every((w) => w.commands.every((c) => c.status === 'ok')),
     writers,
     ...(notes.length ? { notes } : {}),
   };

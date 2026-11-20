@@ -294,14 +294,18 @@ commands in `repositories[].writerProbe` (`[{ "id", "command": [argv],
 $H smoke --state <manifest.paths.state> --policy .harness/policy.json --sha HEAD --writer-probe --human
 ```
 
-After `prepare` every command runs in the exact isolation of each writer of
+After `prepare` every command runs in the isolation of each writer of
 the repository — same environment and tool profile, its own `TMPDIR`, same
-write and read areas, same network, same mechanism (`codex sandbox` for
-Codex, sandbox-runtime for Claude) — with no model call. `data.writerProbe`
+write and read areas, same network, the same class of mechanism (`codex
+sandbox` with the writer's permission profile for Codex; harness's
+sandbox-runtime with the same policy for Claude, not Claude Code's built-in
+sandbox) — with no model call. A blocked probe almost surely blocks the
+writer; a pass is strong but not absolute evidence. `data.writerProbe`
 gives per command `ok`, `blocked` or `failed`, the `reason`
 (`listen-denied`, `network-denied`, `write-denied`, `process-abort`,
 `missing-tool`, `timeout`, `no-shell`, `environment`), the matching output
-line and plain `advice`; exit 4 when anything is blocked. Resolve every
+line and plain `advice`; exit 4 when anything is blocked or no command was
+probed. Resolve every
 blocked step before `run`: enable it in the policy, prepare it in `prepare`,
 move it into a harness gate (gates run outside the writer sandbox and may
 listen on localhost), or record that the product rule is waived under the
@@ -350,7 +354,7 @@ the same sandbox would hit the same step. This is your move — reproduce it
 with `$H smoke --writer-probe`, fix the cause (policy, `prepare`, pinned
 context, a harness gate), then `$H retry --work <id>`. Never retry it
 unchanged. The same applies when `explain` says the same testcase failed
-twice in a row: read the gate log (expected and actual), fix the task or its
+twice in a row before the last attempt: read the gate log (expected and actual), fix the task or its
 context, then retry or split the task.
 
 **Executor question (`INPUT_REQUIRED`, `actor: user`, `answer-input`).** The

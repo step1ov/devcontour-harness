@@ -680,7 +680,7 @@ function outlookOf(
       rule.action === 'retry' &&
       identical - 1 < repeats &&
       !acceptanceGap(ctx.v, w) &&
-      !repeatedTestcase(ctx.v, w) &&
+      !repeatedTestcase(ctx.v, w, options.maxAttempts) &&
       (w.neutralFailures ?? 0) < MAX_NEUTRAL_FAILURES &&
       w.attempt < options.maxAttempts &&
       used + i < options.repairBudget;

@@ -7,7 +7,14 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -121,9 +128,11 @@ test('WP02: codex — команда под `codex sandbox` с профилем 
     'сеть профиля',
   );
   // TMPDIR исполнителя — свой каталог, открытый профилем прав на запись.
-  assert.ok(calls[0]!.tmp.endsWith('.tmp'), calls[0]!.tmp);
+  assert.match(calls[0]!.tmp, /\/dc-srt-\d+-[A-Za-z0-9]{6}$/, calls[0]!.tmp);
+  assert.ok(!calls[0]!.tmp.startsWith(f.root), 'вне каталога состояния');
   assert.ok(calls[0]!.a.some((x) => x.includes(JSON.stringify(calls[0]!.tmp) + '="write"')));
   assert.equal(calls[0]!.prefix, join(calls[0]!.tmp, 'zsh'));
+  assert.ok(!existsSync(calls[0]!.tmp), 'временный каталог пробы убран');
   assert.match(writerProbeText(probe), /listen: blocked — listen-denied/);
 });
 
@@ -144,7 +153,7 @@ test('WP03: исполнитель без shell и пустой writerProbe на
     raw.isolation = { mode: 'none', domains: [] };
   });
   const none = await empty.smoke();
-  assert.equal(none.writerProbe!.ok, true);
+  assert.equal(none.writerProbe!.ok, false, 'пустая проба ничего не доказала');
   assert.match(none.writerProbe!.notes!.join(' '), /нет writerProbe/);
 });
 

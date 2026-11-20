@@ -1227,7 +1227,7 @@ export const cliCommands = {
         value: 'flag',
         required: false,
         description:
-          'После prepare прогнать команды writerProbe репозитория в точной изоляции каждого его исполнителя (окружение, TMPDIR, сеть, области записи), без модели: по каждой ok/blocked, причина и совет; закрытый шаг — exit 4',
+          'После prepare прогнать команды writerProbe репозитория в изоляции каждого его исполнителя (окружение, TMPDIR, сеть, области записи; codex sandbox или sandbox-runtime), без модели: по каждой ok/blocked, причина и совет; закрытый шаг или пустой writerProbe — exit 4',
       },
     ],
     refusals: ['CANCELLED', 'NOT_FOUND'],

@@ -9,30 +9,34 @@
 //
 // Признак — итог исполнителя: структурированного поля для такой остановки в
 // ответе нет (правильный путь — вопрос с impact technical, его называет
-// запрос). Поэтому узнаются только явные признаки отказа среды: коды ОС и
-// сети, песочница, «нет сети/доступа», «не удалось запустить/прочитать».
+// запрос). Поэтому узнаются только явные признаки отказа среды: сообщения ОС
+// и сети в форме вывода ошибки и фразы «песочница/окружение запрещает», «нет
+// доступа к сети». Слово «sandbox», «permission denied», «не удалось
+// запустить/прочитать» без такой фразы — нет: это бывает и в тексте продукта.
 // Обычная незавершённость («не успел», «тесты ещё не написаны») сюда не
 // попадает и продолжается черновиком, как раньше.
 
-import { mkdir } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { mkdtemp, realpath } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { SRT_SHORT_BASE, srtSocketsFit } from '../environment/isolation.ts';
 
 const signals: RegExp[] = [
-  /\b(?:EPERM|EACCES|EROFS|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH)\b/,
-  /operation not permitted|permission denied|read-only file system|bootstrap_check_in/i,
-  /\bsandbox(?:ed)?\b|песочниц/i,
-  /\b(?:no|without) (?:network|internet|registry) access\b/i,
-  /\bnetwork (?:is )?(?:unavailable|blocked|disabled|denied|off)\b/i,
-  /(?:нет|без) (?:доступа к )?(?:сети|интернета|реестр[ау])/i,
-  /сет[ьи] (?:недоступн|закрыт|запрещ|отключ)/i,
-  // «Cannot read properties of undefined» — ошибка кода, не среды: чтение и
-  // открытие файла сюда не входят, запуск — только сервера или браузера.
-  /\b(?:cannot|can't|could not|couldn't|unable to|not allowed to|failed to) (?:listen|bind|reach|connect to|download|fetch|access the (?:network|registry|tracker|internet)|(?:start|launch) (?:the |a )?(?:local |dev |web )?(?:server|browser))\b/i,
-  /(?:не удалось|не могу|не смог|невозможно|нельзя|не получилось) (?:запустить|открыть|прочитать|скачать|загрузить|подключиться|достучаться|получить доступ|слушать)/i,
-  /\b(?:unavailable|not available|inaccessible) (?:in|inside|from|under) (?:the|this) (?:sandbox|environment|attempt)\b/i,
-  /недоступн\w* (?:в|из|внутри) (?:песочниц|окружени|сред)/i,
-  /(?:окружени\w*|сред\w*) (?:не (?:дал\w*|позволя\w*|пуска\w*)|запрещает|блокирует)/i,
-  /\benvironment (?:blocks|blocked|prevents|prevented|does not allow|doesn't allow|forbids)\b/i,
+  // Сообщения ОС и сети в форме вывода ошибки, а не упоминание кода в тексте
+  // («добавил обработку EACCES» сюда не попадает).
+  /\b(?:listen|bind|connect|open|mkdir|write|unlink|rename|spawn|scandir|access) (?:EPERM|EACCES|EROFS)\b/,
+  /\b(?:EPERM|EACCES|EROFS): (?:operation not permitted|permission denied|read-only file system)/i,
+  /\bgetaddrinfo (?:ENOTFOUND|EAI_AGAIN)\b|\bCould not resolve host\b/,
+  /\boperation not permitted\b|\bread-only file system\b|\bbootstrap_check_in\b|\bsandbox_apply\b/i,
+  // Явная фраза: песочница или окружение закрыли шаг.
+  /\bsandbox(?:ing)? (?:blocks|blocked|denies|denied|prevents|prevented|forbids|does not allow|doesn't allow)\b/i,
+  /\b(?:blocked|denied|prevented) by the (?:sandbox|environment)\b/i,
+  /\benvironment (?:blocks|blocked|prevents|prevented|forbids|does not allow|doesn't allow)\b/i,
+  /\b(?:no|without) (?:network|internet|registry) access\b|\bnetwork (?:access )?is (?:disabled|blocked|unavailable)\b/i,
+  /песочниц[а-яё]* (?:запрещает|запретила|не (?:даёт|дает|дала|позволяет|пускает)|блокирует|закрыва[а-яё]*)/i,
+  /(?:окружени[а-яё]*|сред[а-яё]*) (?:запрещает|запретил[а-яё]*|не (?:даёт|дает|дал[а-яё]*|позволя[а-яё]*|пуска[а-яё]*)|блокирует|закрыл[а-яё]*)/i,
+  /(?:нет|без) (?:доступа к )?(?:сети|интернет[а-яё]*|реестр[а-яё]*)|сеть (?:недоступна|закрыта|запрещена|отключена)/i,
+  /недоступн[а-яё]* (?:в|из|внутри) (?:песочниц|окружени|сред)[а-яё]*/i,
 ];
 
 /**
@@ -49,17 +53,22 @@ export function environmentBlockOf(summary: string): string | undefined {
 }
 
 /**
- * Временный каталог исполнителя внутри его области записи: `<каталог
- * вызова>.tmp` рядом с каталогом артефактов вызова (не внутри него —
- * `result.json` и журнал исполнитель не трогает). Окружение вызова получает
- * `TMPDIR`, `TMP`, `TEMP` и `TMPPREFIX` (zsh кладёт here-document не в
- * TMPDIR, а по TMPPREFIX, по умолчанию `/tmp/zsh`). TMPDIR, заданный
- * политикой, заменяется: каталог вне области записи песочница исполнителю не
- * открывает. Каталог убирается после вызова.
+ * Временный каталог исполнителя: свой на каждый вызов, вне каталога
+ * состояния (иначе граница codex перестала бы закрывать каталог артефактов
+ * целиком) и короткий — песочница Claude Code кладёт сокеты sandbox-runtime в
+ * TMPDIR процесса, а длинный путь не помещается в предел unix-сокета. База —
+ * TMPDIR процесса, если путь укладывается, иначе `/tmp`; имя `dc-srt-<pid>-…`
+ * убирает и уборка брошенных каталогов srt. Окружение вызова получает
+ * `TMPDIR`, `TMP`, `TEMP` и `TMPPREFIX` (zsh кладёт here-document не в TMPDIR,
+ * а по TMPPREFIX, по умолчанию `/tmp/zsh`, закрытому исполнителю). TMPDIR,
+ * заданный политикой, заменяется. Каталог убирает вызывающий после вызова.
  */
-export async function writerScratch(callDir: string, env: NodeJS.ProcessEnv) {
-  const dir = resolve(callDir) + '.tmp';
-  await mkdir(dir, { recursive: true });
+export async function writerScratch(env: NodeJS.ProcessEnv) {
+  const name = `dc-srt-${process.pid}-`;
+  const base =
+    [tmpdir(), SRT_SHORT_BASE].find((b) => srtSocketsFit(join(b, name + 'XXXXXX'))) ??
+    SRT_SHORT_BASE;
+  const dir = await realpath(await mkdtemp(join(base, name)));
   env.TMPDIR = dir;
   env.TMP = dir;
   env.TEMP = dir;

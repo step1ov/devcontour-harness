@@ -153,8 +153,14 @@ export function leadSandboxCheck(options: LeadSandboxOptions = {}): LeadSandboxR
       '/usr/bin/true',
     ]);
     if (r.errorCode !== 'ENOENT' && failedWithDenial(r)) signals.push('nested-sandbox');
-  } else if (probe.platform === 'linux') {
-    // bwrap есть не везде; нет его — проба пропускается.
+  } else if (
+    probe.platform === 'linux' &&
+    Object.keys(probe.env).some((k) => k === 'CODEX_SANDBOX' || k.startsWith('CODEX_SANDBOX_'))
+  ) {
+    // bwrap отказывает и на хосте без непривилегированных user namespaces
+    // (AppArmor, контейнеры): там это свойство хоста, а не песочница ведущего.
+    // Поэтому на Linux проба — только при переменных песочницы Codex; bwrap
+    // есть не везде, нет его — проба пропускается.
     const r = probe.run('bwrap', ['--ro-bind', '/', '/', '--dev', '/dev', 'true']);
     if (r.errorCode !== 'ENOENT' && failedWithDenial(r)) signals.push('nested-sandbox');
   }

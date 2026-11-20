@@ -15,7 +15,7 @@ import { explainStop } from '../src/projections/stop.ts';
 import { attemptSummaryOf } from '../src/report/compute.ts';
 import { repairDecision, repeatedTestcase } from '../src/engine/repair.ts';
 import { environmentBlockOf } from '../src/engine/writer-block.ts';
-import { ENVIRONMENT_BLOCK_WRITER_TEXT } from '../src/engine/prompt.ts';
+import { ENVIRONMENT_BLOCK_WRITER_TEXT, prompt } from '../src/engine/prompt.ts';
 import { hsetup } from './harness-fixture.ts';
 import { approve, implement } from './runner-fixture.ts';
 
@@ -26,8 +26,8 @@ test('WB01: признаки окружения в итоге исполните
     'Нет доступа к сети, обязательный генератор не скачать',
     'agent-browser cannot start: Operation not permitted',
     'The sandbox blocks the mandated browser check',
-    'Не удалось прочитать описание задачи из трекера',
-    'Unable to start the dev server for browser checks',
+    'Песочница не даёт прочитать описание задачи из трекера',
+    "Error: EACCES: permission denied, mkdir '/Users/x/.agent-browser'",
   ])
     assert.ok(environmentBlockOf(s), s);
   for (const s of [
@@ -35,6 +35,15 @@ test('WB01: признаки окружения в итоге исполните
     'форма и тесты ещё не реализованы',
     'Ran out of time',
     'Tests fail: Cannot read properties of undefined (reading "id")',
+    'ran checks in the sandbox; ran out of turns',
+    'Не удалось запустить тесты: компиляция падает на моём коде',
+    'Не удалось прочитать весь модуль за отведённое время',
+    'UI shows "Failed to fetch" until the endpoint exists',
+    'Added EACCES handling, the retry path is unfinished',
+    'Cannot connect to the database yet: migration not written',
+    'Permission denied page is half done',
+    'Sandbox feature flag wiring remains',
+    'Unable to fetch the user list: endpoint not implemented',
   ])
     assert.equal(environmentBlockOf(s), undefined, s);
 });
@@ -111,6 +120,10 @@ test('WB03: обычная незавершённость — повтор че�
   const work = h.engine.read((v) => v.work('add-greeting')!);
   const last = attemptSummaryOf(work, attempts.slice(0, 1)).lastFailure!;
   assert.equal(last.plain, 'не доделано — исполнитель не доделал работу: «Успел половину»');
+  // Свой временный каталог — у вызова исполнителя, не у ревьюера.
+  assert.ok(ctx.callEnv('claude', 'writer', 0)?.has('TMPPREFIX'), 'writer: TMPPREFIX');
+  assert.ok(ctx.callEnv('claude', 'writer', 0)?.has('TMP'), 'writer: TMP');
+  assert.equal(ctx.callEnv('codex', 'reviewer', 0)?.has('TMPPREFIX'), false, 'reviewer без него');
   h.close();
 });
 
@@ -148,7 +161,7 @@ test('WB04: тот же упавший testcase дважды подряд — к
     gateFail('a1', ['t.not-found', 't.home']),
     gateFail('a2', ['t.not-found']),
   ]);
-  assert.deepEqual(repeatedTestcase(same, work), {
+  assert.deepEqual(repeatedTestcase(same, work, 3), {
     testcases: ['t.not-found'],
     runs: ['a1', 'a2'],
   });
@@ -171,10 +184,18 @@ test('WB04: тот же упавший testcase дважды подряд — к
     repeatedTestcase(
       viewOf(work, [gateFail('a1', ['t.x']), neutral, gateFail('a2', ['t.x'])]),
       work,
+      3,
     ),
   );
+  // Раньше предпоследней попытки повтор с выводом проверки ещё разрешён.
+  assert.equal(repeatedTestcase(same, work, 4), undefined);
+  assert.equal(
+    repairDecision(same, [work], { budgetLeft: 6, maxAttempts: 4, blocking: () => undefined })!
+      .action,
+    'retry',
+  );
   const other = viewOf(work, [gateFail('a1', ['t.home']), gateFail('a2', ['t.not-found'])]);
-  assert.equal(repeatedTestcase(other, work), undefined);
+  assert.equal(repeatedTestcase(other, work, 3), undefined);
   assert.equal(
     repairDecision(other, [work], { budgetLeft: 6, maxAttempts: 3, blocking: () => undefined })!
       .action,
@@ -182,11 +203,33 @@ test('WB04: тот же упавший testcase дважды подряд — к
   );
 });
 
-test('WB05: запрос исполнителя — «сначала код, потом вопрос» при закрытом окружением шаге', () => {
-  assert.match(ENVIRONMENT_BLOCK_WRITER_TEXT, /Implement the work order first/);
-  assert.match(ENVIRONMENT_BLOCK_WRITER_TEXT, /impact "technical"/);
-  assert.match(
-    ENVIRONMENT_BLOCK_WRITER_TEXT,
-    /Never return completed=false for an environment reason/,
-  );
+test('WB05: запрос исполнителя — «сначала код, потом вопрос»; у ревьюера правила нет', () => {
+  const work = {
+    approvedDigest: 'd',
+    order: {
+      id: 'w',
+      role: 'developer',
+      repositoryId: 'r',
+      title: 't',
+      goal: 'g',
+      acceptance: [],
+      requirements: [],
+      dependsOn: [],
+      writeScope: ['src'],
+    },
+  } as unknown as WorkState;
+  const attempt = { id: 'a', baseSha: 'b' } as unknown as AttemptState;
+  const writer = prompt({ work, attempt, history: [], gates: [] });
+  assert.ok(writer.includes(ENVIRONMENT_BLOCK_WRITER_TEXT));
+  assert.match(writer, /Implement the work order first/);
+  assert.match(writer, /impact "technical"/);
+  assert.match(writer, /Never return completed=false for an environment reason/);
+  const reviewer = prompt({
+    work,
+    attempt,
+    history: [],
+    gates: [],
+    review: { sha: 's', phase: 'candidate', diff: '' },
+  });
+  assert.ok(!reviewer.includes(ENVIRONMENT_BLOCK_WRITER_TEXT));
 });
