@@ -169,7 +169,7 @@ Node.js: TypeScript-потребителю нужен `@types/node` (или `ski
 из записей harness, простыми словами на RU и EN) и у принятой работы —
 есть ли она в удалённой ветке (`target.remote`: «принято локально; в
 удалённой ветке origin/main ещё нет»), по локальной remote-tracking ref без
-fetch; то же поле — в `status`, `result` и отчёте. harness ничего не
+fetch; то же поле — в `status` и `result`. harness ничего не
 отправляет: skill предлагает отправку оператору. Новое
 [руководство оператора](docs/operator-guide.md). Форматы состояния прежние;
 выпуск включает alpha.56. Подробно —

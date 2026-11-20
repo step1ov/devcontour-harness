@@ -21,6 +21,18 @@ const offline = [
   ...['file', 'git', 'http', 'https', 'ssh', 'ext'].map((p) => `protocol.${p}.allow`),
 ].flatMap((key) => ['-c', `${key}=never`]);
 
+/**
+ * Окружение без `GIT_ALLOW_PROTOCOL`: унаследованный список разрешённых
+ * протоколов перекрыл бы `protocol.*.allow=never`. Без `GIT_NO_LAZY_FETCH`
+ * (git до 2.44) ленивая догрузка запускает fetch — его останавливает тот же
+ * запрет транспорта.
+ */
+const withoutAllowProtocol = (env: NodeJS.ProcessEnv) => {
+  const out = { ...env };
+  delete out.GIT_ALLOW_PROTOCOL;
+  return out;
+};
+
 /** Предел одного вызова git сверки и всей сверки одного ответа. */
 const TARGET_GIT_TIMEOUT_MS = 10_000;
 const TARGET_TOTAL_MS = 30_000;
@@ -73,6 +85,8 @@ interface RemoteBranch {
   checkedAt?: string;
   /** Куда отправлять: имя удалённого репозитория и ветка в нём (`git push <remote> <targetRef>:<ref>`). */
   push?: { remote: string; ref: string };
+  /** Репозиторий с неполной историей (shallow). */
+  shallow?: boolean;
   reason?: { ru: string; en: string };
 }
 
@@ -80,6 +94,10 @@ const NO_REMOTE = { ru: 'нет удалённой ветки', en: 'no remote b
 const NOT_FETCHED = {
   ru: 'удалённая ветка ещё не получена на этой машине',
   en: 'the remote branch is not fetched on this machine',
+};
+const SHALLOW = {
+  ru: 'история на этой машине неполная (shallow)',
+  en: 'the history on this machine is incomplete (shallow)',
 };
 const REMOTE_UNREADABLE = {
   ru: 'удалённая ветка не прочитана',
@@ -92,10 +110,15 @@ export function remoteOf(
   branch: Pick<RemoteBranch, 'short' | 'checkedAt' | 'reason' | 'push'>,
 ): Remote {
   const name = branch.short ?? '';
+  // Имя длиннее предела договора не обрезается (адрес отправки должен быть
+  // точным): поля нет, строка называет ветку с обрезкой.
+  const fits = (x: string, max: number) => x.length <= max;
   const base = {
     state,
-    ...(branch.short ? { trackingRef: branch.short } : {}),
-    ...(branch.push ? { pushRemote: branch.push.remote, pushRef: branch.push.ref } : {}),
+    ...(branch.short && fits(branch.short, 500) ? { trackingRef: branch.short } : {}),
+    ...(branch.push && fits(branch.push.remote, 200) && fits(branch.push.ref, 500)
+      ? { pushRemote: branch.push.remote, pushRef: branch.push.ref }
+      : {}),
     ...(branch.checkedAt ? { checkedAt: branch.checkedAt } : {}),
   };
   if (state === 'pushed')
@@ -154,7 +177,7 @@ export function acceptedTargets(
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
-        ...process.env,
+        ...withoutAllowProtocol(process.env),
         GIT_TERMINAL_PROMPT: '0',
         GIT_NO_REPLACE_OBJECTS: '1',
         // Недостающий объект partial clone не догружается из сети.
@@ -256,6 +279,8 @@ export function acceptedTargets(
       const gd = run(path, [
         'reflog',
         'show',
+        // Подпись вершины не проверяется: проверка запускает внешнюю программу.
+        '--no-show-signature',
         '-n',
         '1',
         '--date=iso-strict',
@@ -269,7 +294,13 @@ export function acceptedTargets(
     } catch {
       // Нет reflog — время обновления неизвестно, состояние читается.
     }
-    return { ...named, sha, ...(checkedAt ? { checkedAt } : {}) };
+    let shallow = false;
+    try {
+      shallow = run(path, ['rev-parse', '--is-shallow-repository']) === 'true';
+    } catch (error) {
+      return { ...named, ...unreadable(error) };
+    }
+    return { ...named, sha, ...(checkedAt ? { checkedAt } : {}), ...(shallow ? { shallow } : {}) };
   };
   const remoteFor = (
     work: AcceptedWork,
@@ -295,7 +326,11 @@ export function acceptedTargets(
       run(path, ['merge-base', '--is-ancestor', work.acceptedSha, branch.sha]);
       return remoteOf('pushed', branch);
     } catch (error) {
-      if ((error as { status?: number }).status === 1) return remoteOf('not-pushed', branch);
+      if ((error as { status?: number }).status === 1)
+        // За границей неполной (shallow) истории предок не виден: «нет» не доказано.
+        return branch.shallow
+          ? remoteOf('unknown', { ...branch, reason: SHALLOW })
+          : remoteOf('not-pushed', branch);
       return remoteOf('unknown', {
         ...branch,
         reason: asReason(reason(error, REMOTE_UNREADABLE.ru)),

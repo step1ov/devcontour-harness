@@ -141,6 +141,9 @@ test('P2-c: принято локально против удалённой ве
   const remote = () =>
     cliDataSchemas.status.parse(p.harness('status', '--state', p.state).json.data).works[0]!.target!
       .remote!;
+  const viewToken = () =>
+    operatorViewSchema.parse(p.harness('view', '--state', p.state).json.data).source.token;
+  const notPushedToken = viewToken();
   let r = remote();
   assert.equal(r.state, 'not-pushed');
   assert.equal(r.trackingRef, `origin/${branch}`);
@@ -187,6 +190,7 @@ test('P2-c: принято локально против удалённой ве
   r = remote();
   assert.equal(r.state, 'pushed');
   assert.equal(r.line, `уже в удалённой ветке origin/${branch}`);
+  assert.notEqual(viewToken(), notPushedToken, 'смена удалённой ветки меняет токен представления');
   // Раздел отчёта «после приёмки» — о дрейфе: удалённой ветки в нём нет.
   const report = cliDataSchemas.report.parse(
     p.harness('report', '--state', p.state).json.data,
@@ -242,6 +246,14 @@ test('P2-c: принято локально против удалённой ве
   r = remote();
   assert.equal(r.state, 'pushed');
   assert.equal(r.trackingRef, `origin/${branch}`);
+  // Дрейф после приёмки: строка отчёта есть, удалённой ветки в ней нет.
+  p.commitOnRef({ 'late.txt': 'late\n' });
+  const drifted = cliDataSchemas.report.parse(
+    p.harness('report', '--state', p.state).json.data,
+  ) as any;
+  assert.equal(drifted.targets.rows.length, 1);
+  assert.equal(drifted.targets.rows[0].commitsSinceAccepted, 1);
+  assert.equal(drifted.targets.rows[0].remote, undefined);
   // Upstream настроен, а remote-tracking ref на машине нет — неизвестно.
   p.git('config', `branch.${branch}.remote`, 'origin');
   p.git('config', `branch.${branch}.merge`, 'refs/heads/elsewhere');

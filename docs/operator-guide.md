@@ -106,7 +106,8 @@ harness запускает следующую, пока не кончится п
 - **время** — попытка не уложилась в отведённое время;
 - **вопрос исполнителя** — исполнитель остановился и ждёт ответа;
 - **прервана остановкой** — harness штатно остановили; попытка не
-  расходуется, следующая продолжит с того же места.
+  расходуется. Следующая продолжит с сохранённой работы, если её удалось
+  безопасно сохранить; иначе начнёт заново или попросит разобрать остановку.
 
 Перепроверка — повторный запуск той же проверки, чтобы отличить случайный
 провал от настоящего. Если попытки кончились, работа остановится и попросит
@@ -232,7 +233,8 @@ describe is checked: ask for end-to-end behaviour explicitly.
 
 **Why attempts repeat.** Each line says why the previous attempt stopped:
 defect, environment (not counted against attempts, own limit), time limit,
-an executor question, or a shutdown (not counted). A recheck reruns a check
+an executor question, or a shutdown (not counted; the next attempt continues
+from safely saved work when there is any). A recheck reruns a check
 to tell a random failure from a real one.
 
 **Blocks.** Waiting in the queue needs nothing. Waiting for someone names

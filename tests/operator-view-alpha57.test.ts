@@ -598,7 +598,7 @@ test('view r2: события из записей попытки — незап�
       }),
     ],
   } as unknown as AttemptState;
-  const events = activityInputOf({ repositories: [] }, [attemptState], [], [], []);
+  const events = activityInputOf([attemptState], [], [], []);
   const view = operatorView(baseInput({ activity: events }));
   const plain = (action: string) =>
     view.activity!.filter((x) => x.action === action).map((x) => x.plain);
@@ -618,4 +618,138 @@ test('view r2: события из записей попытки — незап�
     plain('attempt.failed')[0]!,
     /^попытка 2 работы w не удалась: дефект — не прошли проверки/,
   );
+});
+
+test('view r2: записи — перенос с кандидата, невалидное ревью, исходы попыток, ветка из попытки, эпизоды эскалации', () => {
+  const attemptOf = (over: Record<string, unknown>) =>
+    ({
+      workId: 'w',
+      repositoryId: 'app',
+      runtime: 'claude',
+      reviewer: 'codex',
+      startedAt: at(40),
+      finishedAt: at(35),
+      evidence: [],
+      ...over,
+    }) as unknown as AttemptState;
+  const ev = (over: Record<string, unknown>) => ({
+    id: `e-${String(over.id ?? over.createdAt)}`,
+    runId: 'r1',
+    kind: 'test',
+    phase: 'integration',
+    sha: sha('b'),
+    gate: 'unit',
+    passed: true,
+    createdAt: at(36),
+    command: [],
+    exitCode: 0,
+    log: '',
+    digest: 'd'.repeat(64),
+    summary: 'код выхода 0',
+    ...over,
+  });
+  const attempts = [
+    attemptOf({ id: 'r1', attempt: 1, status: 'cancelled' }),
+    attemptOf({ id: 'r2', attempt: 2, status: 'expired', startedAt: at(34), finishedAt: at(33) }),
+    attemptOf({
+      id: 'r3',
+      attempt: 3,
+      status: 'failed',
+      interrupted: 'shutdown',
+      startedAt: at(32),
+      finishedAt: at(31),
+    }),
+    attemptOf({
+      id: 'r4',
+      attempt: 4,
+      status: 'succeeded',
+      startedAt: at(30),
+      finishedAt: at(20),
+      integrationSha: sha('b'),
+      // Ветка при выдаче; политика с тех пор могла смениться.
+      pinned: { targetRef: 'refs/heads/before' },
+      evidence: [
+        ev({
+          id: 'reuse',
+          runId: 'r4',
+          reusedEvidence: { evidenceId: 'x', phase: 'candidate', sha: sha('a'), tree: sha('c') },
+        }),
+        ev({
+          id: 'bad-review',
+          runId: 'r4',
+          kind: 'review',
+          gate: 'independent-review',
+          passed: false,
+          reviewRound: { protocol: 'invalid' },
+        }),
+      ],
+    }),
+  ];
+  const plan = (round: number, disposition?: Record<string, unknown>) =>
+    ({
+      kind: 'plan',
+      subject: 'g1',
+      round,
+      at: at(60 - round),
+      approved: false,
+      reviewerRuntime: 'codex',
+      findings: [
+        {
+          id: 'F1',
+          severity: 'blocking',
+          status: 'open',
+          rounds: round,
+          ...(disposition ? { disposition } : {}),
+        },
+      ],
+    }) as never;
+  // F1 ждёт решения с раунда 3; «продолжать» в раунде 4 обнуляет счёт;
+  // снова ждёт с раунда 7 — вторая эскалация.
+  const cont = { decision: 'continue', by: 'operator', round: 4, rounds: 4 };
+  const rows = [
+    plan(1),
+    plan(2),
+    plan(3),
+    plan(4, cont),
+    plan(5, cont),
+    plan(6, cont),
+    plan(7, cont),
+    plan(8, cont),
+  ];
+  const events = activityInputOf(attempts, rows, [], []);
+  const view = operatorView(baseInput({ activity: events }));
+  operatorViewSchema.parse(view);
+  const plain = (action: string) =>
+    view.activity!.filter((x) => x.action === action).map((x) => x.plain);
+  assert.deepEqual(plain('attempt.cancelled'), [
+    'попытка 1 работы w отменена: оператор — попытку отменили',
+  ]);
+  assert.deepEqual(plain('attempt.expired'), [
+    'попытка 2 работы w потеряла владельца: окружение — процесс попытки пропал (владение истекло); попытка не расходуется',
+  ]);
+  assert.deepEqual(plain('attempt.interrupted'), [
+    'попытка 3 работы w прервана остановкой; попытка не расходуется',
+  ]);
+  assert.deepEqual(plain('work.accepted'), [
+    `работа w принята (попытка 4): ${sha('b').slice(0, 12)} в refs/heads/before, локально`,
+  ]);
+  assert.equal(plain('gate.reused').length, 1);
+  assert.equal(plain('gate.passed').length, 0, 'перенесённая запись — не запуск');
+  assert.equal(
+    view.activity!.filter((x) => x.actor === 'reviewer' && x.workId === 'w').length,
+    0,
+    'ответ reviewer не по протоколу — не раунд и не вердикт',
+  );
+  const esc = view.activity!.filter((x) => x.action === 'review.escalated');
+  assert.deepEqual(
+    esc.map((x) => x.at),
+    [at(60 - 7), at(60 - 3)],
+    'две эскалации: раунды 3 и 7',
+  );
+});
+
+test('view r2: токен меняется вместе с лентой', () => {
+  const one = operatorView(baseInput({ activity: events }));
+  const two = operatorView(baseInput({ activity: events.slice(1) }));
+  assert.notEqual(two.source.token, one.source.token);
 });

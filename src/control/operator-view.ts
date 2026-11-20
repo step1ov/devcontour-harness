@@ -438,7 +438,6 @@ export function stageTypicalOf(
  * контракта и кода, вопросы исполнителя и ответы. Окно и предел — у проекции.
  */
 export function activityInputOf(
-  policy: Pick<ExecutionPolicy, 'repositories'>,
   attempts: readonly AttemptState[],
   planRows: readonly ReviewRecord[],
   codeRows: readonly CodeReviewRecord[],
@@ -463,9 +462,8 @@ export function activityInputOf(
         workId: a.workId,
         attempt: a.attempt,
         ...(a.integrationSha ? { sha: a.integrationSha } : {}),
-        ...((ref) => (ref ? { ref } : {}))(
-          policy.repositories.find((r) => r.id === a.repositoryId)?.targetRef,
-        ),
+        // Ветка, закреплённая за попыткой при выдаче, а не нынешняя политики.
+        ...(a.pinned?.targetRef ? { ref: a.pinned.targetRef } : {}),
       });
     else if (a.status !== 'active' && a.finishedAt) {
       const interrupted = interruptedByShutdown(a);
@@ -530,8 +528,9 @@ export function activityInputOf(
       }
     }
   }
-  // Эскалация — в раунде, где находка впервые ждёт решения.
-  const escalated = new Set<string>();
+  // Эскалация — в раунде, где находка начала ждать решения: снова ждёт
+  // (после «продолжать» или повторного открытия) — новая эскалация.
+  const waiting = new Map<string, Set<string>>();
   const rounds = <R extends { subject: string; round: number }>(rows: readonly R[]) =>
     [...rows].sort((x, y) => x.round - y.round);
   for (const r of rounds(planRows)) {
@@ -545,10 +544,11 @@ export function activityInputOf(
       blocking: blockingOf(r.findings),
       reviewer: r.reviewerRuntime,
     });
-    const fresh = escalatedFindings(r.findings, r.round).filter(
-      (f) => !escalated.has(`${r.kind}\0${r.subject}\0${f.id}`),
-    );
-    for (const f of fresh) escalated.add(`${r.kind}\0${r.subject}\0${f.id}`);
+    const key = `${r.kind}\0${r.subject}`;
+    const now = escalatedFindings(r.findings, r.round);
+    const before = waiting.get(key) ?? new Set<string>();
+    const fresh = now.filter((f) => !before.has(String(f.id)));
+    waiting.set(key, new Set(now.map((f) => String(f.id))));
     if (fresh.length)
       out.push({
         kind: 'review.escalated',
@@ -851,7 +851,6 @@ export function collectOperatorViewInput(
       });
     const reviews = reviewsOf(v, policy);
     const activity = activityInputOf(
-      policy,
       attempts,
       v.locals('reviews', WORKSPACE_OWNER).map((r) => r.value),
       v.locals('code-reviews', WORKSPACE_OWNER).map((r) => r.value),

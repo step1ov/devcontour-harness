@@ -1612,7 +1612,7 @@ attempt}, spendUsd, wallMs, attemptMs, loadPeak}` — итоги окна тем
   (`works[].target.remote`, строка в `status --human`) и `result`
   (`data.target.remote`): поля `line` / `lineEn`, `reason` / `reasonEn` и
   `pushRemote` / `pushRef` — куда отправлять (`git push <pushRemote>
-<targetRef>:<pushRef>`). Upstream — ровно ветки `targetRef`. Вызовы git
+<targetRef>:<pushRef>`). Upstream — ровно ветки `targetRef`; при неполной (shallow) истории «ещё нет» не доказуемо — `unknown`; имя длиннее предела не обрезается — поля нет. Вызовы git
   сверки запрещают любой транспорт и ленивую догрузку объектов partial
   clone. Состояние может отставать от удалённого репозитория до следующего
   `git fetch` или `git push` на этой машине.
