@@ -353,7 +353,8 @@ probe after every codex upgrade — real runs do not repeat this check). A
 profile without the `network` field shows `legacy`: the old boundary, with the
 runtime's web tools not explicitly closed. The mode
 also turns off the runtime's own web tools (Codex web search, Claude
-WebFetch/WebSearch); MCP servers of the profile stay outside the boundary. Changing `network` needs
+WebFetch/WebSearch); external tool servers configured in the profile stay
+outside the boundary. Changing `network` needs
 a new plan review. A browser that aborts under the macOS
 sandbox (`process-abort`) cannot run inside the writer at all.
 

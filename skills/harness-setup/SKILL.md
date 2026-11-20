@@ -461,14 +461,14 @@ the user says so.
 ### 10a. Updates
 
 Ask once, in the first round of questions, how updates of harness and the
-operator panel should arrive (multiple choice):
+operator UI package should arrive (multiple choice):
 
 - **auto** (recommend it for managers and other non-technical operators):
   installed by itself once a day, only when nothing runs, with a state copy,
   a check of the new version and an automatic return on failure; a version
   that changes data formats is never installed by itself — it becomes a
   decision for the owner;
-- **notify** (the default): only a line in the panel, `status --human` and
+- **notify** (the default): only a line in the operator UI, `status --human` and
   from the lead at the start of a session;
 - **off**: nothing is checked.
 
@@ -507,8 +507,8 @@ edits, controller mode, the connector check and snapshot (`graphId`,
 
 ## Upgrade
 
-From 0.1.0-alpha.60 the routine upgrade is one command: `$H update --check
---state <state>` shows the pair, what is new and whether formats change;
+From 0.1.0-alpha.60 the routine upgrade is one command:
+`$H update --check --state <state>` shows the pair, what is new and whether formats change;
 `$H update --apply --state <state> --wait 30` installs it when nothing runs
 (state copy, exact versions in the same `<tooldir>`, `doctor`, automatic
 return on failure); `$H update --rollback --state <state>` goes back. Use
