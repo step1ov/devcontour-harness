@@ -941,7 +941,16 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     summary = '',
     log = `# harness gate ${gate.id}: cwd=${relative(root, gateCwd) || '.'} argv=${JSON.stringify(gate.command.map(redact))}${gate.kind === 'test' ? ` fresh=${redact(JSON.stringify(freshness))}` : ''}\n`,
     exitCode = -1,
-    manifest: ReturnType<typeof junitSummary> | undefined;
+    manifest: ReturnType<typeof junitSummary> | undefined,
+    /** SHA-256 сохранённого этим запуском `<gate>.xml`. */
+    reportDigest: string | undefined;
+  /** Отчёт сохраняется маскированным; digest — от записанных байтов. */
+  const keepReport = async (xml: string) => {
+    const masked = redact(xml);
+    await mkdir(artifactDir, { recursive: true });
+    await writeFile(join(artifactDir, `${gate.id}.xml`), masked);
+    reportDigest = sha256(masked);
+  };
   try {
     // Снимок защищённых путей до проверки: запреты песочницы видят только
     // путь операции, перенос готового каталога ими не закрыт.
@@ -1053,8 +1062,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         : undefined;
       if (counts) {
         manifest = counts;
-        await mkdir(artifactDir, { recursive: true });
-        await writeFile(join(artifactDir, `${gate.id}.xml`), redact(counts.xml));
+        await keepReport(counts.xml);
       }
       const blocked =
         run.policy.isolation.mode === 'os'
@@ -1132,8 +1140,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       summary = `${counts.tests} tests, ${counts.failures} failures, ${counts.skipped} skipped`;
       // Отчёт сохраняется и при провале с нулевым кодом выхода: из него
       // следующая попытка получает текст провала (`gateFeedback`).
-      await mkdir(artifactDir, { recursive: true });
-      await writeFile(join(artifactDir, `${gate.id}.xml`), redact(counts.xml));
+      await keepReport(counts.xml);
       if (counts.failures || counts.skipped)
         throw new Error(summary + (counts.failures ? `: ${failedCases(counts)}` : ''));
     } else summary = 'Команда завершилась успешно';
@@ -1306,6 +1313,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     summary: redact(summary),
     ...(manifest ? { tests: manifest.cases } : {}),
     ...(manifest?.truncated ? { testsTruncated: true } : {}),
+    ...(reportDigest ? { reportDigest } : {}),
     ...(run.consumer ? { consumer: run.consumer } : {}),
     ...(propertyEvidence ? { property: propertyEvidence } : {}),
     ...(artifactFiles ? { artifactFiles } : {}),
