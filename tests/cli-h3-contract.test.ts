@@ -69,6 +69,8 @@ const laterCommands: readonly string[] = [
   // Ответ до применения и перенос ответа одной командой (0.1.0-alpha.60).
   'input-resolve',
   'input-carry',
+  // Решение ведущего по находкам ревью кода поручения (0.1.0-alpha.60).
+  'review-accept',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -298,7 +300,7 @@ test('H3-01: каждая общая операция читается из до
     assert.equal(op.input.safeParse({ unknownArg: 'x' }).success, false, c);
   }
   // multiple объявлен только у --requirements plan-request, --intent handoff и
-  // решений по находкам review-plan / review-contract.
+  // решений по находкам review-plan / review-contract / review-accept.
   const multiple = Object.entries(cliCommands).flatMap(([c, contract]) =>
     (contract.args as readonly CliArgument[]).filter((a) => a.multiple).map((a) => c + a.name),
   );
@@ -307,6 +309,7 @@ test('H3-01: каждая общая операция читается из до
     'review-plan--continue-review',
     'review-contract--accept-limitation',
     'review-contract--continue-review',
+    'review-accept--accept-limitation',
     'handoff--intent',
     'plan-request--requirements',
   ]);
@@ -599,6 +602,12 @@ test('H3-01: прежние команды и схемы их данных не 
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.rounds;
       delete rest.disposition;
+      return rest;
+    }
+    // Аддитивная метка поздней находки ревью кода (0.1.0-alpha.60).
+    if (k === 'properties' && v && typeof v === 'object' && 'severity' in v && 'late' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.late;
       return rest;
     }
     // Аддитивное поле `joint.finished` — проверка прервана до результата gates (alpha.44).

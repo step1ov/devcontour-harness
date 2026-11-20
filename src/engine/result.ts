@@ -187,6 +187,7 @@ export function runResult(attempt: AttemptState, harnessVersion: string): RunRes
         ...(f.line !== undefined ? { line: f.line } : {}),
         ...(f.id !== undefined ? { id: f.id } : {}),
         ...(f.status !== undefined ? { status: f.status } : {}),
+        ...(f.late ? { late: f.late } : {}),
       })),
     limitations: [] as string[],
     finishedAt: attempt.finishedAt ?? attempt.startedAt,

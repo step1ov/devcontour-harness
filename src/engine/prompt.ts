@@ -31,6 +31,18 @@ export const OPEN_FINDINGS_HEADER = 'Open review findings issued by the controll
 export const CLOSED_FINDINGS_HEADER = 'Closed or withdrawn review findings (history)';
 
 /**
+ * Правило полноты раунда ревью кода (docs/review-protocol.md §10): все
+ * blocking-находки — сразу, у каждой прежней — состояние; новая blocking на
+ * неизменённом пути помечается поздней для ведущего.
+ */
+export const ROUND_COMPLETENESS_TEXT =
+  'Review completeness: report ALL blocking findings you can establish in this single pass, including test rigor, at once — do not hold some back for a later round. State the status of every previous open finding above. A new blocking finding in a later round on a file or area that did not change since the previous round is recorded as a late finding and shown to the lead as a moving target; raise one only with concrete evidence that was not available before.';
+
+/** Принятые ограничения (решение ведущего/оператора) в истории запроса reviewer. */
+export const ACCEPTED_FINDINGS_TEXT =
+  'Findings above with a `disposition` of accepted-limitation were accepted by the lead or operator as known limitations, with the reason given. Do not raise them again — neither as a reopen nor as a new finding with the same substance — unless you have new evidence that was not available when they were accepted; then reopen the same id with that evidence in the basis.';
+
+/**
  * История находок ревью кода в запросе. Reviewer получает открытые находки с
  * выданными ID, severity, origin и основанием, а закрытые — как историю;
  * writer — открытые находки, которые нужно устранить.
@@ -39,7 +51,8 @@ export function findingsText(history: CodeReviewHistory | undefined, review: boo
   if (!history) return '';
   if (!history.findings.length)
     return review
-      ? 'There are no controller-issued review findings. Return `previous` as exactly []. Historical attempt errors and gate observations are not review findings: do not invent or compute ids for them.'
+      ? 'There are no controller-issued review findings. Return `previous` as exactly []. Historical attempt errors and gate observations are not review findings: do not invent or compute ids for them.\n\n' +
+          ROUND_COMPLETENESS_TEXT
       : '';
   const open = history.findings.filter((f) => f.status === 'open');
   const closed = history.findings.filter((f) => f.status !== 'open');
@@ -58,6 +71,16 @@ export function findingsText(history: CodeReviewHistory | undefined, review: boo
       ...(f.origin.legacy ? { legacy: true } : {}),
     },
     ...(f.basis ? { basis: f.basis } : {}),
+    ...(f.disposition
+      ? {
+          disposition: {
+            decision: f.disposition.decision,
+            by: f.disposition.by,
+            reason: f.disposition.reason,
+          },
+        }
+      : {}),
+    ...(f.late ? { late: true } : {}),
   });
   if (!review)
     return open.length
@@ -73,6 +96,8 @@ export function findingsText(history: CodeReviewHistory | undefined, review: boo
       ? `${CLOSED_FINDINGS_HEADER}. Do not close them again. If the same defect is present in this commit, reopen it with an entry in \`previous\` (status open, basis) or report it as a new finding:\n` +
         JSON.stringify(closed.map(brief))
       : '',
+    closed.some((f) => f.disposition) ? `${ACCEPTED_FINDINGS_TEXT}` : '',
+    ROUND_COMPLETENESS_TEXT,
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -164,7 +189,7 @@ export function prompt(input: {
       ? 'Historical attempt errors and gate observations (diagnostic context only). Only controller-issued ids in the review findings sections below may appear in `previous`; do not derive ids from this history: '
       : 'Previous attempts, with the findings each review left. Address every finding that is still open first and say what you changed for it: ') +
       JSON.stringify(previousAttempts(input.history, attempt.id)),
-    findingsText(input.findings, !!review),
+    findingsText(input.findings, !!review) || (review ? ROUND_COMPLETENESS_TEXT : ''),
     !review && attempt.continuedFrom?.applied
       ? attempt.continuedFrom.kind === 'unfinished'
         ? `The previous attempt stopped before finishing (${attempt.continuedFrom.reason === 'timeout' ? 'ran out of time' : attempt.continuedFrom.reason === 'context-exhausted' ? 'ran out of the model context window' : attempt.continuedFrom.reason === 'needs-input' ? (attempt.input ? 'stopped to ask a question; the answer is in the pinned context below' : 'stopped to ask a question; if the pinned context below has an input-answer source for it, that is the answer, otherwise the question was withdrawn without an answer') : attempt.continuedFrom.reason}). Its unfinished, unverified changes are already applied in this worktree as uncommitted edits (${attempt.continuedFrom.files.join(', ')}). Continue from them: check what is done and what is broken, finish the work and make the gates pass. Treat them as a draft, not as reviewed work.`

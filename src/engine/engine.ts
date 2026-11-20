@@ -2,6 +2,10 @@ import { RU, ruCount } from '../contracts/plural.ts';
 import { randomUUID } from 'node:crypto';
 import {
   STAGE_NAME_LIMIT,
+  codeReviewDecisionSchema,
+  codeReviewHistory,
+  codeReviewScope,
+  type CodeReviewDecision,
   roleBinding,
   integrationReuseProblem,
   executionDigest,
@@ -5057,5 +5061,104 @@ export class Engine {
           }
         : {}),
     };
+  }
+
+  /**
+   * Решение ведущего или оператора по открытым находкам ревью кода поручения
+   * (`review-accept`, docs/review-protocol.md §10): находки принимаются
+   * известным ограничением с основанием. Решение — не одобрение и не повтор:
+   * оно записывается у поручения и применяется историей находок со
+   * следующего раунда (reviewer видит его и не поднимает находку без новых
+   * доказательств; writer её больше не исправляет). Неизвестная, не открытая
+   * или повторённая находка и поручение с активной попыткой или уже принятое —
+   * отказ до записи. Уже принятая тем же решением находка — без изменений.
+   */
+  acceptCodeFindings(
+    workId: string,
+    findings: readonly string[],
+    reason: string,
+    by: CodeReviewDecision['by'],
+  ) {
+    return this.tx('findings.recorded', (tx) => {
+      const w = tx.work(workId);
+      if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
+      if (w.activeRunId || w.status === 'done')
+        throw new HarnessError(
+          'NOT_READY',
+          w.activeRunId
+            ? `Поручение ${workId} исполняется (${w.activeRunId}): решение по находкам — после завершения попытки`
+            : `Поручение ${workId} уже принято: следующего раунда ревью нет`,
+        );
+      if (!findings.length)
+        throw new HarnessError('INVALID_INPUT', 'Нужна хотя бы одна находка (--accept-limitation)');
+      const history = codeReviewHistory(
+        tx.attempts(workId),
+        codeReviewScope(w.order.repositoryId, workId),
+        w.codeReviewDecisions,
+      );
+      const byId = new Map(history.findings.map((f) => [f.id, f]));
+      const at = iso(this.now());
+      const seen = new Set<string>();
+      const fresh: CodeReviewDecision[] = [];
+      for (const id of findings) {
+        if (seen.has(id))
+          throw new HarnessError('INVALID_INPUT', 'Находка названа повторно: ' + id, [
+            { path: ['--accept-limitation'], message: id },
+          ]);
+        seen.add(id);
+        const f = byId.get(id);
+        if (!f)
+          throw new HarnessError(
+            'INVALID_INPUT',
+            'Находки нет в истории ревью кода поручения: ' + id,
+            [{ path: ['--accept-limitation'], message: id }],
+          );
+        if (f.disposition?.decision === 'accepted-limitation' && f.status === 'withdrawn') continue;
+        if (f.status !== 'open')
+          throw new HarnessError(
+            'INVALID_INPUT',
+            `Находка ${id} уже ${f.status}: принять можно только открытую`,
+            [{ path: ['--accept-limitation'], message: id }],
+          );
+        const decision = codeReviewDecisionSchema.safeParse({
+          finding: id,
+          decision: 'accepted-limitation',
+          by,
+          reason,
+          round: history.round,
+          at,
+        });
+        if (!decision.success)
+          throw new HarnessError('INVALID_INPUT', '--reason: основание не короче трёх знаков', [
+            { path: ['--reason'], message: decision.error.issues[0]?.message ?? '' },
+          ]);
+        fresh.push(decision.data);
+      }
+      const decisions = [...(w.codeReviewDecisions ?? []), ...fresh];
+      if (decisions.length > 500)
+        throw new HarnessError('INVALID_INPUT', 'Предел решений по находкам поручения — 500');
+      if (fresh.length) tx.putWork({ ...w, codeReviewDecisions: decisions });
+      const after = codeReviewHistory(
+        tx.attempts(workId),
+        codeReviewScope(w.order.repositoryId, workId),
+        decisions,
+      );
+      return {
+        workId,
+        changed: fresh.length > 0,
+        round: history.round,
+        accepted: after.findings
+          .filter((f) => seen.has(f.id))
+          .map((f) => ({
+            id: f.id,
+            severity: f.severity,
+            message: f.message.slice(0, 4000),
+            path: f.path,
+            status: f.status,
+            ...(f.disposition ? { disposition: f.disposition } : {}),
+            ...(f.late ? { late: f.late } : {}),
+          })),
+      };
+    });
   }
 }

@@ -396,6 +396,18 @@ unchanged. The same applies when `explain` says the same testcase failed
 twice in a row before the last attempt: read the gate log (expected and actual), fix the task or its
 context, then retry or split the task.
 
+**Code review keeps raising new findings (`REVIEW_REJECTED`).** The reviewer
+must list all blocking findings in one round. A new blocking finding on a path
+that did not change since the previous round is marked `late` in
+`$H result --work <id>` (`findings[].late`) and the failure reads «поздние
+находки: N»: a moving target. Fix real defects. For a finding that is a known
+limitation of this task (for example, test rigor beyond the acceptance), record
+it before the retry:
+`$H review-accept --state <state> --work <id> --accept-limitation <finding id>
+--reason "<why>"` (add `--actor operator` when the user decided), then
+`$H retry --work <id>`. The next round sees the decision and does not re-raise
+it without new evidence. It is not an approval and does not skip the gates.
+
 **Executor question (`INPUT_REQUIRED`, `actor: user`, `answer-input`).** The
 writer stopped and asks the human. Do not answer it yourself:
 

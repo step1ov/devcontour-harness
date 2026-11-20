@@ -200,6 +200,54 @@ test('HP03: история находок переживает новый про
   dump('HP03', 'restart-result', r2);
 });
 
+test('F-AX: review-accept — ведущий принимает находку ревью кода ограничением; следующий раунд видит решение', () => {
+  const p = project({
+    writer: [implement(), implement({})],
+    reviewer: [
+      verdict(true), // ревью плана
+      verdict(false, { findings: [defect] }),
+      { ...verdict(true, { previous: [] }), recordPrompt: true },
+      verdict(true),
+    ],
+  });
+  assert.equal(p.run().status, 3);
+  const id = p.harness('result', '--state', p.state, '--work', 'add-greeting').json.data.result
+    .findings[0].id as string;
+  const accept = (...extra: string[]) =>
+    p.harness('review-accept', '--state', p.state, '--work', 'add-greeting', ...extra);
+  // Без основания и с чужим ID — отказ входа до записи.
+  assert.equal(accept('--accept-limitation', id).status, exitCodes.input);
+  const unknown = accept('--accept-limitation', digestOf('чужая'), '--reason', 'Известно');
+  assert.equal(unknown.status, exitCodes.input);
+  assert.equal(unknown.json.error.code, 'INVALID_INPUT');
+  assert.equal(
+    accept('--accept-limitation', id, '--reason', 'Ok', '--actor', 'robot').status,
+    exitCodes.input,
+  );
+  const ok = accept(
+    '--accept-limitation',
+    id,
+    '--reason',
+    'Пустое имя — известное ограничение',
+    '--actor',
+    'operator',
+  );
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  assert.equal(ok.json.data.changed, true);
+  assert.deepEqual(
+    ok.json.data.accepted.map((f: any) => [f.id, f.status, f.disposition.by]),
+    [[id, 'withdrawn', 'operator']],
+  );
+  assert.equal(p.harness('retry', '--state', p.state, '--work', 'add-greeting').status, 0);
+  const second = p.run();
+  assert.equal(second.status, 0, second.stderr + second.stdout);
+  const prompt = recordedPrompt(p.scenarioPath, 'reviewer', 2);
+  assert.ok(prompt.includes(id) && /accepted-limitation/.test(prompt));
+  // Решение принятой находки после приёмки — NOT_READY.
+  const done = accept('--accept-limitation', id, '--reason', 'Повтор решения');
+  assert.equal(done.json.error.code, 'NOT_READY');
+});
+
 /**
  * HP06/R2-F01: controller убит во время вызова reviewer (барьер fixture —
  * SIGKILL процесса harness до ответа). Новый процесс засчитывает начатый

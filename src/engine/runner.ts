@@ -22,6 +22,7 @@ import {
   type ReviewRound,
   type CodeReviewVerdict,
   type CodeReviewHistory,
+  type LateFinding,
   type ReviewRequestFindings,
   REVIEW_ITEMS_LIMIT,
   storedReviewResultSchema,
@@ -1830,6 +1831,7 @@ export class Runner {
                               codeReviewHistory(
                                 v.attempts(attempt.workId),
                                 codeReviewScope(attempt.repositoryId, attempt.workId),
+                                v.work(attempt.workId)?.codeReviewDecisions,
                               ),
                             ),
                           }
@@ -3340,8 +3342,19 @@ export class Runner {
     const legacy = !(await this.reviewProtocol(attempt.reviewer));
     // История находок и счёт вызовов — по записанному состоянию всех попыток
     // поручения: новая попытка, фаза и рестарт их не обнуляют.
-    const { history, lastIssues, spec } = this.engine.read((v) => {
+    const { history, lastIssues, spec, previousRound } = this.engine.read((v) => {
       const attempts = v.attempts(attempt.workId);
+      // Прошлый валидный раунд той же фазы: от его SHA считается, какие пути
+      // менялись (поздние находки, §10).
+      const prior = attempts
+        .flatMap((a) => a.evidence)
+        .findLast(
+          (e) =>
+            e.kind === 'review' &&
+            e.phase === phase &&
+            e.reviewRound?.scope === scope &&
+            e.reviewRound.protocol === 'valid',
+        );
       const last = attempts
         .flatMap((a) => a.evidence)
         .findLast(
@@ -3352,10 +3365,15 @@ export class Runner {
             e.reviewRound?.scope === scope &&
             e.reviewRound.protocol === 'invalid',
         );
+      const work = v.work(attempt.workId);
       return {
-        history: codeReviewHistory(attempts, scope),
+        history: codeReviewHistory(attempts, scope, work?.codeReviewDecisions),
         lastIssues: last?.reviewRound?.issues ?? [],
-        spec: v.work(attempt.workId)?.approvedDigest,
+        spec: work?.approvedDigest,
+        previousRound:
+          prior?.reviewRound && !prior.reviewRound.mode
+            ? { round: prior.reviewRound.round, sha: prior.sha }
+            : undefined,
       };
     });
     const expected = legacy
@@ -3644,6 +3662,12 @@ export class Runner {
           : undefined;
       const unconfirmed = decision && !decision.ok ? decision.problem : undefined;
       const passed = verdict.result.approved && !unconfirmed;
+      // Поздние находки — только метка для ведущего: вердикт и gates прежние.
+      const late = await lateFindings(cwd, previousRound, sha, record.findings ?? []);
+      const lateCount = late.filter(Boolean).length;
+      const lateText = lateCount
+        ? ` [поздние находки: ${lateCount} — blocking на путях без изменений с раунда ${previousRound!.round}]`
+        : '';
       // Вердикт, новые находки с выданными ID и переходы прежних — одна запись
       // под fencing: попытка, утратившая владение, их не сохраняет.
       this.engine.evidence(attempt.id, attempt.token, {
@@ -3659,7 +3683,8 @@ export class Runner {
         digest,
         summary: redact(
           `[${inspection.mode}] ${record.summary}` +
-            (unconfirmed ? ` (не подтверждено, что приёмка уже выполнена: ${unconfirmed})` : ''),
+            (unconfirmed ? ` (не подтверждено, что приёмка уже выполнена: ${unconfirmed})` : '') +
+            lateText,
         ).slice(0, 4000),
         ...(unchanged && passed && claim && decision?.ok
           ? {
@@ -3677,6 +3702,7 @@ export class Runner {
           line: f.line ?? null,
           id: verdict.findings[i]!.id,
           status: 'open' as const,
+          ...(late[i] ? { late: late[i] } : {}),
         })),
         reviewRound: {
           ...reviewRound,
@@ -3708,7 +3734,7 @@ export class Runner {
         const pairs = classifiedOf(record.findings ?? []);
         throw new TaskFailure(
           'review',
-          'Независимое ревью отклонило результат: ' + redact(record.summary),
+          'Независимое ревью отклонило результат: ' + redact(record.summary) + lateText,
           named.length || classes.length
             ? {
                 bound: [...new Set(named.filter((p) => declared.has(p)))],
@@ -4357,6 +4383,52 @@ function protocolText(issues: ProtocolIssue[]) {
       .map((i) => `${i.path} ${i.reason}: ${i.message}`)
       .join('; ') || 'причина не записана'
   ).slice(0, 3000);
+}
+
+/** Путь находки без `./` и суффикса `:строка[:колонка]`. */
+const findingPath = (path: string) =>
+  path
+    .trim()
+    .replace(/^\.\//, '')
+    .replace(/:\d+(:\d+)?$/, '')
+    .replace(/\/+$/, '');
+
+/**
+ * Поздние находки раунда (docs/review-protocol.md §10): новая blocking-находка
+ * с путём, который не менялся между SHA прошлого валидного раунда фазы и
+ * текущим (файл или каталог не задет diff). Нет прошлого раунда, нет пути или
+ * diff не прочитан — метки нет: сомнение не делает находку поздней.
+ */
+async function lateFindings(
+  cwd: string,
+  previous: { round: number; sha: string } | undefined,
+  sha: string,
+  findings: readonly { severity: string; path?: string | null | undefined }[],
+): Promise<(LateFinding | undefined)[]> {
+  if (!previous || !findings.some((f) => f.severity === 'blocking' && f.path?.trim()))
+    return findings.map(() => undefined);
+  let changed: string[];
+  try {
+    changed =
+      previous.sha === sha
+        ? []
+        : (await git(cwd, 'diff', '--name-only', '--no-renames', previous.sha, sha))
+            .split('\n')
+            .map((x) => x.trim())
+            .filter(Boolean);
+  } catch {
+    return findings.map(() => undefined);
+  }
+  const touched = (p: string) => changed.some((c) => c === p || c.startsWith(p + '/'));
+  return findings.map((f) => {
+    if (f.severity !== 'blocking' || !f.path?.trim()) return undefined;
+    const p = findingPath(f.path);
+    if (!p || touched(p)) return undefined;
+    return {
+      since: { round: previous.round, sha: previous.sha },
+      reason: `путь ${p.slice(0, 300)} не менялся с раунда ${previous.round}`,
+    };
+  });
 }
 
 /** Структурированная история находок для запроса reviewer (`RuntimeRequest.findings`). */

@@ -21,7 +21,11 @@ import {
 } from './execution.ts';
 import { readRunEventSchema } from './events.ts';
 import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
-import { reviewRecordSchema, reviewSubjectSummarySchema } from './review.ts';
+import {
+  reviewAcceptDataSchema,
+  reviewRecordSchema,
+  reviewSubjectSummarySchema,
+} from './review.ts';
 import { codeReviewRecordSchema } from './code-review.ts';
 import { acceptedTargetSchema } from './target.ts';
 import { workVerificationSchema } from './verification-view.ts';
@@ -248,6 +252,37 @@ export const cliCommands = {
       'BUDGET_UNKNOWN',
       'INPUT_REQUIRED',
     ],
+  },
+  'review-accept': {
+    description:
+      'Принять открытые находки ревью кода поручения (candidate/integration) известным ограничением с основанием и решающим; следующий раунд видит решение, reviewer не поднимает находку без новых доказательств; не одобрение и не повтор — повтор отдельно (retry); модель не вызывается',
+    writes: true,
+    idempotency: 'Повтор для уже принятой находки ничего не меняет (changed: false)',
+    args: [
+      state,
+      work,
+      {
+        name: '--accept-limitation',
+        value: 'id',
+        required: true,
+        multiple: true,
+        description:
+          'ID открытой находки ревью кода поручения (из result: findings[].id) или список через запятую',
+      },
+      {
+        name: '--reason',
+        value: 'text',
+        required: true,
+        description: 'Основание решения (не короче трёх знаков)',
+      },
+      {
+        name: '--actor',
+        value: 'text',
+        required: false,
+        description: 'Кто решает: lead (по умолчанию) или operator',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'NOT_READY'],
   },
   approve: {
     description:
@@ -2498,6 +2533,7 @@ export const cliDataSchemas = {
   validate: validateDataSchema,
   'review-plan': reviewRecordSchema,
   'review-contract': reviewRecordSchema,
+  'review-accept': reviewAcceptDataSchema,
   approve: approveDataSchema,
   reapprove: reapproveDataSchema,
   run: runDataSchema,

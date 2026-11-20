@@ -11,6 +11,7 @@ import {
 import { sourceRefSchema } from './work.ts';
 import { acceptedTargetSchema } from './target.ts';
 import { errorCodes, type ErrorCode } from './errors.ts';
+import { lateFindingSchema } from './review.ts';
 import { workVerificationSchema } from './verification-view.ts';
 
 export const findingSchema = z.strictObject({
@@ -24,6 +25,8 @@ export const findingSchema = z.strictObject({
   id: digestSchema.optional(),
   /** Статус находки на момент раунда, в котором она записана. */
   status: z.enum(['open', 'closed', 'withdrawn']).optional(),
+  /** Поздняя находка: путь не менялся с прошлого раунда фазы (docs/review-protocol.md §10). */
+  late: lateFindingSchema.optional(),
 });
 export type Finding = z.infer<typeof findingSchema>;
 
