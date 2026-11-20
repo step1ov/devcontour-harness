@@ -858,6 +858,26 @@ test('UP19: во время обновления (или до возврата �
       assert.equal(r.json.error.code, 'CONTROLLER_BUSY', args[0]);
       assert.match(r.json.error.message, /идёт harness update/, args[0]);
     }
+    // Команды чтения идут.
+    for (const args of [
+      ['status', '--state', p.state],
+      ['view', '--state', p.state],
+      ['events', '--state', p.state],
+      ['doctor', '--state', p.state],
+    ]) {
+      const r = p.harness(...args);
+      assert.equal(r.status, 0, args[0] + ' ' + r.stderr);
+    }
+    const plan = p.harness(
+      'review-plan',
+      '--state',
+      p.state,
+      '--graph',
+      'g.json',
+      '--author',
+      'claude',
+    );
+    assert.equal(plan.json.error.code, 'CONTROLLER_BUSY');
     rmSync(p.state + '-updates/lock');
     writeFileSync(p.state + '-updates/in-progress.json', JSON.stringify({ id: 'x' }));
     const r = p.harness('gates', '--state', p.state, '--sha', 'HEAD');
@@ -886,6 +906,45 @@ test('UP20: база состояния без binding.json — apply и rollbac
     assert.equal(busy.json.data.outcome, 'busy');
     assert.match(busy.json.data.line, /идёт harness run \(c1\)/);
     assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+  } finally {
+    await registry.close();
+  }
+});
+
+test('UP21: общий каталог установки — замок у каталога установки держит update второго каталога состояния и его gates', async () => {
+  const registry = await registryWith(...base());
+  try {
+    const p = project(registry);
+    registry.publish(fakeHarness('0.1.0-alpha.61'));
+    writeFileSync(
+      join(p.dir, '.harness-update.lock'),
+      JSON.stringify({
+        pid: process.pid,
+        startedAt: processStartedAt(process.pid),
+        at: 'other-state',
+      }),
+    );
+    const r = p.harness('update', '--apply', '--state', p.state);
+    assert.equal(r.status, 3, r.stderr);
+    assert.equal(r.json.error.code, 'CONTROLLER_BUSY');
+    assert.match(
+      r.json.error.message,
+      /Пакеты этого каталога установки уже обновляет другой harness update/,
+    );
+    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    const gates = p.harness('gates', '--state', p.state, '--sha', 'HEAD');
+    assert.equal(gates.json.error.code, 'CONTROLLER_BUSY');
+    assert.match(gates.json.error.message, /пакетов в /);
+    // Пустая пара в --confirm-formats — неверный вход.
+    assert.equal(p.harness('update', '--apply', '--confirm-formats', '--state', p.state).status, 2);
+    rmSync(join(p.dir, '.harness-update.lock'));
+    const ok = p.harness('update', '--apply', '--state', p.state);
+    assert.equal(ok.status, 0, ok.stderr + ok.stdout);
+    assert.equal(
+      existsSync(join(p.dir, '.harness-update.lock')),
+      false,
+      'замок снят после обновления',
+    );
   } finally {
     await registry.close();
   }

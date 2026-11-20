@@ -136,6 +136,9 @@ export interface CheckContext {
   now?: () => number;
 }
 
+/** Пара одной строкой для решения владельца: `harness@<версия>[+ui@<версия>]`. */
+export const pairToken = (p: UpdatePair) => `harness@${p.harness}${p.ui ? `+ui@${p.ui}` : ''}`;
+
 const pairText = (p: UpdatePair) => `harness ${p.harness}${p.ui ? ` и панель ${p.ui}` : ''}`;
 
 export function currentPair(prefix: string | undefined): {
@@ -250,7 +253,7 @@ export async function checkUpdates(ctx: CheckContext): Promise<UpdateCheck> {
     }
     const decision = changes.length > 0;
     // Решение владельца привязано к паре, которую он видел: другая пара — отказ.
-    const command = `harness update --apply ${stateArg}${decision ? ` --confirm-formats harness@${chosen.harness}${chosen.ui ? `+ui@${chosen.ui}` : ''}` : ''}`;
+    const command = `harness update --apply ${stateArg}${decision ? ` --confirm-formats ${pairToken(chosen)}` : ''}`;
     const line = decision
       ? `Доступна ${pairText(chosen)} со сменой форматов (${changes.join(', ')}): автоматически не ставится — нужно ваше решение. Поставить: ${command}`
       : `Доступна ${pairText(chosen)} (сейчас ${pairText(current)}). Что нового — harness update --check; обновить — ${command}`;

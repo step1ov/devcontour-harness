@@ -829,7 +829,13 @@ async function runUpdate(
       ]);
     const installed = ctx.prefix ? installedPackage(ctx.prefix, HARNESS_PACKAGE) : undefined;
     const bin = installed?.bin ?? resolve(process.argv[1] ?? 'harness');
-    const args = scheduleArgs(bin, state, typeof v.prefix === 'string' ? v.prefix : undefined);
+    const args = [
+      ...scheduleArgs(bin, state, typeof v.prefix === 'string' ? v.prefix : undefined),
+      // Каталог без привязки: задание передаёт политику, иначе apply отказал бы каждый день.
+      ...(!existsSync(bindingFile(state)) && typeof v.policy === 'string'
+        ? ['--policy', resolve(v.policy)]
+        : []),
+    ];
     if (process.platform !== 'darwin')
       return {
         data: {
@@ -925,21 +931,41 @@ async function run(
   for (const [flag, owners] of Object.entries(flagOwners))
     if (v[flag as keyof typeof v] !== undefined && !(owners as readonly string[]).includes(command))
       throw new HarnessError('INVALID_INPUT', `--${flag} поддерживают: ${owners.join(', ')}`);
-  // Команды, которые пишут состояние или запускают проверки без роли controller,
-  // во время обновления пакетов (или до возврата прерванного) отказывают.
-  if (
-    typeof v.state === 'string' &&
-    [
-      'gates',
-      'smoke',
-      'review-code',
-      'review-plan',
-      'review-contract',
-      'approve',
-      'reapprove',
-    ].includes(command)
-  ) {
-    const updating = updateInProgress(resolve(v.state));
+  // Во время обновления пакетов (или до возврата прерванного) с --state идут
+  // только команды чтения: прочие писали бы состояние после копии (возврат
+  // копии их потерял бы) или запускали бы заменяемые сейчас пакеты.
+  const readOnly = [
+    'status',
+    'events',
+    'result',
+    'view',
+    'report',
+    'explain',
+    'doctor',
+    'capabilities',
+    'validate',
+    'update',
+    'input-list',
+    'input-show',
+    'input-target',
+    'source-status',
+    'source-check',
+    'handoff',
+    'profile',
+    'plan-request',
+    'plan-check',
+  ];
+  if (typeof v.state === 'string' && !readOnly.includes(command)) {
+    const state = resolve(v.state);
+    let prefix: string | undefined;
+    try {
+      prefix = updateContext(state, {
+        ...optional('policy', typeof v.policy === 'string' ? v.policy : undefined),
+      }).prefix;
+    } catch {
+      prefix = undefined;
+    }
+    const updating = updateInProgress(state, prefix);
     if (updating)
       throw new HarnessError(
         'CONTROLLER_BUSY',

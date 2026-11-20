@@ -23,7 +23,7 @@ import {
 } from '../contracts/index.ts';
 import type { RunEventPayload } from '../contracts/events.ts';
 import { processStartedAt } from '../environment/live-calls.ts';
-import { checkUpdates, saveLastCheck, updatesDir, writeAtomic } from './check.ts';
+import { checkUpdates, pairToken, saveLastCheck, updatesDir, writeAtomic } from './check.ts';
 import {
   HARNESS_PACKAGE,
   UI_PACKAGE,
@@ -149,8 +149,6 @@ const newId = (ms: number) =>
     .replace(/\.\d+Z$/, 'Z') +
   '-' +
   randomBytes(3).toString('hex');
-/** Пара одной строкой для решения владельца: `harness@<версия>[+ui@<версия>]`. */
-export const pairToken = (p: UpdatePair) => `harness@${p.harness}${p.ui ? `+ui@${p.ui}` : ''}`;
 const pairText = (p: UpdatePair) => `harness ${p.harness}${p.ui ? ` и панель ${p.ui}` : ''}`;
 const samePair = (a: UpdatePair | undefined, b: UpdatePair | undefined) =>
   !!a && !!b && a.harness === b.harness && a.ui === b.ui;
@@ -266,6 +264,15 @@ export function acquireLockAt(
     at: new Date().toISOString() + '-' + randomBytes(3).toString('hex'),
   };
   let recovered = false;
+  // Хвосты прерванных попыток взять замок (временные и снятые файлы) старше минуты.
+  for (const n of readdirSync(dir))
+    if (n.startsWith(`.${name}.`) && n !== name)
+      try {
+        if (Date.now() - statSync(join(dir, n)).mtimeMs > 60_000)
+          rmSync(join(dir, n), { force: true });
+      } catch {
+        // уже убран
+      }
   const refuse = (held?: LockBody) =>
     new HarnessError(
       'CONTROLLER_BUSY',
@@ -306,10 +313,11 @@ export function acquireLockAt(
       // Переименовали не умерший замок, а только что взятый другим: вернуть.
       try {
         linkSync(stale, lock);
+        rmSync(stale, { force: true });
       } catch {
-        // на месте уже третий замок — оставить его
+        // На месте уже третий замок: тело второго не удалять — оно остаётся
+        // рядом (`.stale`), и ответ — занято.
       }
-      rmSync(stale, { force: true });
       throw refuse(taken);
     }
     rmSync(stale, { force: true });
@@ -323,7 +331,7 @@ function lockBoth(stateDir: string, prefix: string | undefined) {
   const state = acquireLock(stateDir);
   let pre: { release: () => void } | undefined;
   try {
-    if (prefix && existsSync(join(prefix, 'node_modules'))) pre = acquirePrefixLock(prefix);
+    if (prefix && existsSync(join(prefix, 'package.json'))) pre = acquirePrefixLock(prefix);
   } catch (error) {
     state.release();
     throw error;
@@ -342,13 +350,14 @@ export const acquireLock = (stateDir: string) =>
   acquireLockAt(updatesDir(stateDir), 'lock', 'Обновление уже идёт');
 
 /**
- * Замок каталога установки (`<prefix>/node_modules/.harness-update.lock`):
+ * Замок каталога установки (`<prefix>/.harness-update.lock`, рядом с
+ * package.json — pnpm может пересоздать node_modules):
  * два каталога состояния с общим каталогом установки не ставят пакеты
  * одновременно.
  */
 export const acquirePrefixLock = (prefix: string) =>
   acquireLockAt(
-    join(prefix, 'node_modules'),
+    prefix,
     '.harness-update.lock',
     'Пакеты этого каталога установки уже обновляет другой harness update',
   );
@@ -359,9 +368,12 @@ export const acquirePrefixLock = (prefix: string) =>
  * проверки без роли controller (`gates`, `smoke`, `review-code`, ревью плана),
  * в это время отказывают.
  */
-export function updateInProgress(stateDir: string): string | undefined {
+export function updateInProgress(stateDir: string, prefix?: string): string | undefined {
   const held = readJson<LockBody>(file(stateDir, 'lock'));
   if (holds(held)) return `идёт harness update (процесс ${held!.pid})`;
+  // Общий каталог установки обновляет другой каталог состояния: пакеты меняются.
+  const pre = prefix ? readJson<LockBody>(join(prefix, '.harness-update.lock')) : undefined;
+  if (holds(pre)) return `идёт harness update пакетов в ${prefix} (процесс ${pre!.pid})`;
   if (readInProgress(stateDir))
     return 'прерванное обновление ждёт возврата: harness update --check';
   return undefined;
@@ -856,6 +868,22 @@ export async function applyUpdate(o: ApplyOptions): Promise<Result> {
     if ((check.state === 'up-to-date' || !check.available) && !pending)
       return { data: { ...base, outcome: 'up-to-date', line: check.line }, code: 0 };
     const target = check.available;
+    // Решение владельца — о конкретной паре: другая пара не ставится, даже без смены форматов.
+    if (
+      target &&
+      o.confirmFormats !== undefined &&
+      o.confirmFormats !== pairToken(target) &&
+      !pending
+    )
+      return {
+        data: {
+          ...base,
+          to: target,
+          outcome: 'needs-decision',
+          line: `Решение было о ${o.confirmFormats}, а реестр сейчас предлагает ${pairToken(target)}: ничего не поставлено. Проверьте: harness update --check --state ${o.stateDir}`,
+        },
+        code: 3,
+      };
     if (
       target &&
       check.state === 'needs-decision' &&
