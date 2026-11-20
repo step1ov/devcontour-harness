@@ -450,11 +450,14 @@ function statusDetail(source: StatusSource, v: ExecutionView, graphId?: string) 
     policy.repositories.find((r) => r.id === id)?.gates.map((g) => g.id);
   // Пауза, которую снимет следующий run, глазами explain: выдача не стоит,
   // поручения ждут controller.
-  const queue = nextRunControl(source, v).lifted
+  const next = nextRunControl(source, v);
+  const queue = next.lifted
     ? {
         paused: true,
         ...(control.pauseReason ? { reason: control.pauseReason } : {}),
-        detail: 'Паузу снимет следующий harness run',
+        detail: next.staleUpdate
+          ? `Пауза прерванного обновления: процесс harness update ${next.staleUpdate.pid} завершился до изменений, возврата не нужно — паузу снимет следующий harness run (или harness update --check, resume)`
+          : 'Паузу снимет следующий harness run',
         ...(control.pausedAt ? { since: control.pausedAt } : {}),
         ...(control.pauseOperation ? { operation: control.pauseOperation } : {}),
         liftedByRun: true as const,

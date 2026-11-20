@@ -5,13 +5,14 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -406,4 +407,171 @@ test('UU15: замок — снятие умершего не уводит за�
   assert.throws(() => acquirePrefixLock(prefix), /другой harness update/);
   first.release();
   acquirePrefixLock(prefix).release();
+});
+
+/** pid процесса, который уже завершился. */
+const deadPid = () => {
+  const r = spawnSync(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  assert.equal(r.status, 0);
+  return r.pid;
+};
+
+test('UU16: пауза обновления, убитого во время --wait — run, регистрация и совместная проверка её не ждут; незавершённый возврат или живой процесс — ждут', async () => {
+  await import('../src/environment/live-calls.ts');
+  const { processStartedAt } = await import('../src/environment/live-calls.ts');
+  const { HarnessError } = await import('../src/contracts/index.ts');
+  const { Engine } = await import('../src/engine/engine.ts');
+  const { standaloneHost } = await import('../src/engine/standalone.ts');
+  const { SqliteExecutionStore } = await import('../src/storage/sqlite.ts');
+  const { graphOf, policyOf, ready } = await import('./engine-fixture.ts');
+  const policy = policyOf((p: { workspaceGates?: unknown[] }) => {
+    p.workspaceGates = [
+      {
+        id: 'combo',
+        kind: 'test',
+        repositoryId: 'app',
+        command: ['node', 'combo.js'],
+        report: { type: 'junit', path: 'reports/combo.xml' },
+      },
+    ];
+  });
+  let pending: string | undefined;
+  const store = new SqliteExecutionStore(join(tmp(), 'state.sqlite'), 'test');
+  try {
+    const engine = new Engine({
+      host: standaloneHost(store, policy),
+      policy,
+      updateBusy: () => pending,
+    });
+    ready(engine, graphOf({ a: [] }));
+    store.transact('task.done', (tx) => {
+      tx.putWork({ ...tx.work('a')!, status: 'done', resultSha: 'a'.repeat(40) });
+    });
+    engine.release('c1');
+    const busy = (e: unknown) =>
+      e instanceof HarnessError &&
+      e.code === 'CONTROLLER_BUSY' &&
+      /обновление harness/.test(e.message);
+    const register = (id: string) =>
+      engine.register(graphOf({ [id]: [] }, '1', 'g-' + id), {
+        trusted: () => false,
+        reachable: () => true,
+      });
+    // Обновление убито во время --wait: процесса нет, возврата нет.
+    const dead = deadPid();
+    assert.equal(engine.operationPause('harness-update', { pid: dead, startedAt: 1 }), true);
+    assert.deepEqual(
+      engine.read((v) => v.control().pauseOwner),
+      { pid: dead, startedAt: 1 },
+      'пауза помнит процесс обновления',
+    );
+    assert.deepEqual(
+      engine.read((v) => engine.staleUpdatePause(v)),
+      { pid: dead },
+    );
+    register('b');
+    assert.ok(engine.jointStart({ workIds: ['a'] }).id);
+    // Незавершённый возврат держит, даже если процесса нет.
+    pending = 'прерванное обновление ждёт возврата: harness update --check';
+    assert.equal(
+      engine.read((v) => engine.staleUpdatePause(v)),
+      undefined,
+    );
+    assert.throws(() => register('c'), busy);
+    assert.equal(engine.clearStaleUpdatePause(), false);
+    pending = undefined;
+    // run снимает такую паузу.
+    assert.equal(engine.clearStaleUpdatePause(), true);
+    assert.equal(
+      engine.read((v) => v.control().paused),
+      false,
+    );
+    assert.equal(
+      engine.read((v) => v.control().pauseOwner),
+      undefined,
+    );
+    // Живой процесс обновления — пауза держит.
+    const me = { pid: process.pid, startedAt: processStartedAt(process.pid)! };
+    assert.ok(me.startedAt !== undefined);
+    engine.operationPause('harness-update', me);
+    assert.throws(() => register('d'), busy);
+    assert.equal(engine.clearStaleUpdatePause(), false);
+    engine.operationResume('harness-update');
+    // pid достался другому процессу (момент старта другой) — пауза устарела.
+    engine.operationPause('harness-update', { pid: process.pid, startedAt: me.startedAt - 5000 });
+    assert.ok(engine.read((v) => engine.staleUpdatePause(v)));
+    engine.operationResume('harness-update');
+    // Пауза без записи процесса (до alpha.61) — по-прежнему держит.
+    engine.operationPause('harness-update');
+    assert.throws(() => register('e'), busy);
+    assert.equal(engine.clearStaleUpdatePause(), false);
+    engine.operationResume('harness-update');
+    // Роль controller умершего обновления — не «идёт обновление».
+    assert.equal(engine.holdController(`harness-update:${dead}`), true);
+    register('f');
+  } finally {
+    store.close();
+  }
+});
+
+test('UU17: записи библиотеки во время обновления — CONTROLLER_BUSY, как у CLI; resolveInput — до вызова модели', async () => {
+  const { HarnessError } = await import('../src/contracts/index.ts');
+  const { hsetup } = await import('./harness-fixture.ts');
+  const { approve, implement } = await import('./runner-fixture.ts');
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const busy = (e: unknown) =>
+    e instanceof HarnessError &&
+    e.code === 'CONTROLLER_BUSY' &&
+    /обновление harness/.test(e.message);
+  const updates = ctx.state.replace(/[/\\]+$/, '') + '-updates';
+  const h = ctx.open();
+  try {
+    await h.run({ graph: ctx.graph, author: 'claude', once: true });
+    const workId = ctx.graph.orders[0]!.id;
+    // Обновление идёт: замок живого процесса (этого) — запись в <state>-updates.
+    mkdirSync(updates, { recursive: true });
+    const { processStartedAt } = await import('../src/environment/live-calls.ts');
+    writeFileSync(
+      join(updates, 'lock'),
+      JSON.stringify({ pid: process.pid, startedAt: processStartedAt(process.pid), at: 'x' }),
+    );
+    const before = ctx.calls('codex', 'reviewer');
+    await assert.rejects(h.resolveInput('IR-x', { author: 'claude' }), busy);
+    await assert.rejects(h.carryInputOf('IR-x', { reason: 'r', author: 'claude' }), busy);
+    assert.equal(ctx.calls('codex', 'reviewer'), before, 'модель не вызывалась');
+    assert.throws(() => h.engine.retry(workId, { reason: 'r' }, 'operator'), busy);
+    assert.throws(() => h.engine.acceptCodeFindings(workId, ['f1'], 'r', 'lead'), busy);
+    assert.throws(() => h.engine.cancel(workId, 'r', 'operator'), busy);
+    assert.throws(() => h.engine.refreshApplied('IR-x'), busy);
+    assert.throws(
+      () => h.engine.answerInput('IR-x', { by: 'operator', text: 'да' } as never, 1),
+      busy,
+    );
+    assert.throws(() => h.cancelInput('IR-x', { by: 'operator', reason: 'r' }, 1), busy);
+    // Незавершённый возврат — тоже.
+    rmSync(join(updates, 'lock'));
+    writeFileSync(join(updates, 'in-progress.json'), JSON.stringify({ id: 'x' }));
+    assert.throws(() => h.engine.retry(workId, { reason: 'r' }, 'operator'), busy);
+    // Обновления нет — отказ уже по существу (запроса нет), а не CONTROLLER_BUSY.
+    rmSync(join(updates, 'in-progress.json'));
+    assert.throws(
+      () => h.engine.refreshApplied('IR-x'),
+      (e: unknown) => e instanceof HarnessError && e.code !== 'CONTROLLER_BUSY',
+    );
+    // Пауза обновления, умершего до изменений: status объясняет, run снимает.
+    h.engine.operationPause('harness-update', { pid: deadPid(), startedAt: 1 });
+    const queue = h.status(undefined, { detail: true }).detail!.queue;
+    assert.equal('liftedByRun' in queue && queue.liftedByRun, true);
+    assert.match(
+      queue.detail ?? '',
+      /^Пауза прерванного обновления: процесс harness update \d+ завершился до изменений/,
+    );
+    await h.run({ graph: ctx.graph, author: 'claude', once: true });
+    assert.equal(
+      h.engine.read((v) => v.control().paused),
+      false,
+    );
+  } finally {
+    h.close();
+  }
 });

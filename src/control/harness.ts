@@ -39,6 +39,7 @@ import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { validateInputs } from '../validate.ts';
 import { WorkflowQueue } from './workflow.ts';
+import { updateInProgress } from '../update/busy.ts';
 import { statusOf } from './status.ts';
 import {
   verificationLines,
@@ -135,6 +136,9 @@ export class Harness {
       host: standaloneHost(this.store, this.policy),
       policy: this.policy,
       ...(source ? { provenance: () => policySourceChanged(source) } : {}),
+      // Обновление пакетов этого каталога состояния (замок, запись «идёт»):
+      // записи библиотеки отказывают так же, как команды CLI.
+      updateBusy: () => updateInProgress(options.stateDir),
     });
     this.workflows = new WorkflowQueue(this.store, this.policy, () => this.engine.clock());
     this.adapters = options.adapters ?? {
@@ -664,6 +668,8 @@ export class Harness {
    * бюджет — `applied: false` с причиной.
    */
   async resolveInput(id: string, options: { author?: Author; reset?: { reason: string } } = {}) {
+    // Во время обновления пакетов — отказ до вызова модели (как у CLI).
+    this.engine.assertNotUpdating();
     // Применённый ответ, основание которого уже разошлось, — не «готово»:
     // перепроверка сейчас возвращает его в answered, и он применяется заново.
     const request = this.engine.refreshApplied(id);
@@ -738,6 +744,7 @@ export class Harness {
       by?: 'operator' | 'lead';
     },
   ) {
+    this.engine.assertNotUpdating();
     let request = this.engine.inputRequest(id);
     if (request.kind !== 'question' || !request.blocking)
       throw new HarnessError('INVALID_INPUT', `Запрос ${id} неблокирующий: переносить нечего`);
@@ -865,6 +872,9 @@ export class Harness {
      */
     source?: WorkSource;
   }) {
+    // Пауза обновления, умершего до изменений (нет ни процесса, ни
+    // незавершённого возврата), выдачу больше не держит: run её снимает.
+    this.engine.clearStaleUpdatePause();
     // Обязательный контекст — одинаково для библиотеки и CLI: без снимка нужных источников граф не исполняется.
     const needed = [...new Set(input.graph.orders.flatMap((o) => o.context))];
     if (needed.length && !input.context)

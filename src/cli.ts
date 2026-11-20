@@ -83,6 +83,7 @@ import {
   writeUpdatesConfig,
 } from './update/check.ts';
 import { deadUpdater, liveWork } from './update/live.ts';
+import { processStartedAt } from './environment/live-calls.ts';
 import { HARNESS_PACKAGE, installedPackage } from './update/install.ts';
 import {
   disableSchedule,
@@ -739,7 +740,17 @@ function updateHost(state: string, policyPath?: string): UpdateHost {
   const leaseMs = () => bound()?.policy.leaseMs ?? 30_000;
   return {
     live: () => (usable() ? liveWork(state, bound()!.policy, Date.now(), owner) : []),
-    pause: () => withHarness((h) => h.engine.operationPause(UPDATE_OPERATION), false),
+    // Пауза помнит процесс обновления (pid и момент старта): пауза умершего до
+    // изменений обновления не держит run (alpha.61).
+    pause: () =>
+      withHarness(
+        (h) =>
+          h.engine.operationPause(UPDATE_OPERATION, {
+            pid: process.pid,
+            ...optional('startedAt', processStartedAt(process.pid)),
+          }),
+        false,
+      ),
     resume: () => withHarness((h) => h.engine.operationResume(UPDATE_OPERATION), false),
     // Без базы состояния писать некому: роль «взята».
     hold: () =>
@@ -787,15 +798,32 @@ function updateContext(state: string, v: { policy?: string; prefix?: string }) {
   };
 }
 
-/** Строка об обновлениях для status: настройка не по схеме не ломает status. */
+let updatesConfigWarned = false;
+/**
+ * Строка об обновлениях для status. Настройка `.harness/updates.json` не по
+ * схеме status не ломает и в строку «Обновления:» не попадает: поля нет, на
+ * stderr — одно предупреждение простыми словами (отказ с подробностями — у
+ * `harness update`).
+ */
 function statusUpdates(state: string, baseDir: string) {
+  let loaded: ReturnType<typeof loadUpdatesConfig>;
   try {
-    const { config, exists } = loadUpdatesConfig(baseDir);
-    const cached = cachedUpdates(state, config);
-    if (!cached || (!exists && cached.state === 'not-checked')) return undefined;
+    loaded = loadUpdatesConfig(baseDir);
+  } catch {
+    if (!updatesConfigWarned) {
+      updatesConfigWarned = true;
+      process.stderr.write(
+        'harness status: настройка обновлений .harness/updates.json не по схеме и пропущена; подробности — harness update --check\n',
+      );
+    }
+    return undefined;
+  }
+  try {
+    const cached = cachedUpdates(state, loaded.config);
+    if (!cached || (!loaded.exists && cached.state === 'not-checked')) return undefined;
     return { state: cached.state, line: cached.line };
-  } catch (error) {
-    return { state: 'unavailable' as const, line: (error as Error).message.slice(0, 300) };
+  } catch {
+    return undefined;
   }
 }
 

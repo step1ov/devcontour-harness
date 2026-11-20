@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
@@ -279,6 +279,56 @@ test('status и explain: строка сводки на поручение со�
     assert.match(human.stdout.slice(text.length), /^Прогноз выпуска: [^\n]+\.\n$/);
     assert.ok(human.stdout.includes(`w [done]: ${w.line}\n`));
     assert.ok(human.stdout.includes(`x [ready]: ${x.line}\n`));
+
+    // alpha.61: доступное обновление — строка «Обновления:» вместе со строкой
+    // runner и прогнозом выпуска в конце.
+    const updates = ctx.state.replace(/[/\\]+$/, '') + '-updates';
+    mkdirSync(updates, { recursive: true });
+    const line = 'Доступна harness 0.1.0-alpha.99 — что нового · harness update --apply';
+    writeFileSync(
+      join(updates, 'last-check.json'),
+      JSON.stringify({
+        checkedAt: new Date().toISOString(),
+        state: 'available',
+        mode: 'notify',
+        channel: 'alpha',
+        current: { harness: '0.1.0-alpha.60' },
+        available: { harness: '0.1.0-alpha.99' },
+        line,
+      }),
+    );
+    const withUpdate = harness(['status', '--state', ctx.state, '--human']);
+    assert.equal(withUpdate.status, 0, withUpdate.stderr);
+    const statusJson = JSON.parse(harness(['status', '--state', ctx.state]).stdout) as {
+      data: typeof status;
+    };
+    assert.deepEqual(statusJson.data.updates, { state: 'available', line });
+    const upText = statusText(statusJson.data);
+    assert.ok(withUpdate.stdout.startsWith(upText), withUpdate.stdout);
+    assert.ok(upText.includes(`Обновления: ${line}\n`), upText);
+    assert.ok(statusJson.data.runner && upText.includes(statusJson.data.runner.line), upText);
+    assert.match(withUpdate.stdout.slice(upText.length), /^Прогноз выпуска: [^\n]+\.\n$/);
+    assert.ok(!/до меньше минуты/.test(withUpdate.stdout));
+    // Настройка обновлений не по схеме: status не падает и не печатает
+    // «Обновления: <ошибка>» — поля нет, одно предупреждение на stderr.
+    const baseDir = (
+      JSON.parse(readFileSync(join(ctx.state, 'binding.json'), 'utf8')) as {
+        baseDir: string;
+      }
+    ).baseDir;
+    writeFileSync(join(baseDir, 'updates.json'), JSON.stringify({ mode: 'sometimes' }));
+    const bad = harness(['status', '--state', ctx.state, '--human']);
+    assert.equal(bad.status, 0, bad.stderr);
+    assert.ok(!bad.stdout.includes('Обновления:'), bad.stdout);
+    assert.equal(
+      bad.stderr.split('\n').filter((l) => l.includes('updates.json')).length,
+      1,
+      bad.stderr,
+    );
+    const badJson = harness(['status', '--state', ctx.state]);
+    assert.equal(badJson.status, 0, badJson.stderr);
+    assert.equal((JSON.parse(badJson.stdout) as { data: typeof status }).data.updates, undefined);
+    rmSync(join(baseDir, 'updates.json'));
   } finally {
     if (open) h.close();
   }

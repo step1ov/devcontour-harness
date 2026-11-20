@@ -74,12 +74,15 @@ export function nextRunControl(h: { readonly engine: Engine }, v: ExecutionView)
     h.engine.reconfigureApplies(v) &&
     raw.pauseReason === 'reconfigure' &&
     raw.pauseOperation === raw.reconfigure?.operation;
+  // Пауза обновления, умершего до изменений, — её снимет run (alpha.61).
+  const staleUpdate = h.engine.staleUpdatePause(v);
   const lifted =
-    raw.paused && (!raw.pauseReason || raw.pauseReason === 'shutdown' || liftsReconfigure);
+    raw.paused &&
+    (!raw.pauseReason || raw.pauseReason === 'shutdown' || liftsReconfigure || !!staleUpdate);
   const control: ControlState = lifted
     ? { ...raw, paused: false, pauseReason: undefined, pauseFailures: undefined }
     : raw;
-  return { control, lifted };
+  return { control, lifted, ...(staleUpdate ? { staleUpdate } : {}) };
 }
 
 /**
