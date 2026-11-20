@@ -100,6 +100,27 @@ test('view limits: наибольший документ (все списки д
   assert.equal(view.drift[0]!.unavailable!.length, T.unavailable);
 });
 
+const REV4_WORKS = 10;
+/** Поля ревизии 4 у работы: класс отказа и где применённый ответ. */
+const revision4 = (id: string) => ({
+  attemptSummary: {
+    ...work(id).attemptSummary,
+    lastFailure: {
+      runId: `${id}-r1`,
+      bucket: 'environment',
+      plain: 'An ordinary sentence of about sixty characters, plain words.',
+      kind: 'environment',
+      counted: false,
+    },
+  },
+  input: {
+    requestId: `${id}-q`,
+    state: 'delivered',
+    severity: 5,
+    carrier: { attempt: 1, running: false },
+  },
+});
+
 test('view limits: типичный документ (500 работ без заголовков, остальные списки до предела) — не больше 256 КБ', () => {
   // Строки — обычной длины (60 символов), не на пределе.
   const input = full(0, () => 'An ordinary sentence of about sixty characters, plain words.');
@@ -112,11 +133,39 @@ test('view limits: типичный документ (500 работ без за
       status: 'done',
       stage: { ...work(w.id).stage, name: 'done', next: [] },
       ...(k < L.drift ? { target: w.target! } : {}),
+      // Ревизия 4: класс отказа последней попытки и где применённый ответ —
+      // у первых 10 работ (~280 байт на работу; запас документа ~10 КБ).
+      ...(k < REV4_WORKS ? revision4(w.id) : {}),
     })),
+    attempts: [
+      ...input.attempts,
+      ...input.works.slice(0, REV4_WORKS).map((w) =>
+        attempt(w.id, 1, {
+          runId: `${w.id}-r1`,
+          status: 'failed',
+          // До окна истории: лента и ряды — уже на пределе выше.
+          startedAt: at(3 * 24 * 60),
+          finishedAt: at(3 * 24 * 60 - 10),
+        }),
+      ),
+    ],
     reviews: input.reviews.map((r) => ({ ...r, findings: r.findings.slice(0, 2) })),
     warnings: input.warnings!.slice(0, 2),
+    queue: {
+      paused: false,
+      runner: 'not-running' as const,
+      restartBy: 'lead' as const,
+      line: 'An ordinary sentence of about sixty characters, plain words.',
+    },
   };
   const view = operatorView(typical, { titles: false });
+  // Ревизия 4: прогноз и поля P1 входят в типичный документ.
+  assert.ok(view.forecast);
+  assert.equal(
+    view.works.filter((w) => w.attempts.lastFailure?.kind === 'environment').length,
+    REV4_WORKS,
+  );
+  assert.equal(view.works.filter((w) => w.question?.line).length, REV4_WORKS);
   operatorViewSchema.parse(view);
   assert.equal(view.works.length, L.works);
   assert.equal(view.questions.length, L.questions);

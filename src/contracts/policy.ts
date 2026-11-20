@@ -322,6 +322,9 @@ export const mcpServerSchema = z
   });
 export type McpServer = z.infer<typeof mcpServerSchema>;
 
+export const writerNetworkSchema = z.enum(['none', 'loopback', 'full']);
+export type WriterNetwork = z.infer<typeof writerNetworkSchema>;
+
 export const toolProfileSchema = z.strictObject({
   runtime: z.enum(['codex', 'claude']),
   environment: environmentSchema.optional(),
@@ -331,7 +334,35 @@ export const toolProfileSchema = z.strictObject({
   claudeAllowedTools: z.array(z.string().min(1)).default([]),
   codexShell: z.boolean().default(true),
   codexNetwork: z.boolean().default(false),
+  /**
+   * Сеть исполнителя профиля. `none` — закрыта целиком, и локальные порты
+   * тоже; `loopback` — только локальный сервер: listen и connect на
+   * 127.0.0.1 и ::1, без интернета и доменов `isolation.domains`; `full` —
+   * вся сеть (только codex, то же, что `codexNetwork: true`). Нет поля —
+   * прежнее поведение: codex — по `codexNetwork`, claude — домены
+   * `isolation.domains` и локальные порты. Ревьюер сети профиля не получает.
+   * `none` и `loopback` закрывают и веб-инструменты runtime (веб-поиск codex,
+   * WebFetch/WebSearch claude); MCP-серверы профиля — вне этой границы.
+   * Поле входит в `isolationDigest` (через `toolProfiles`): его смена требует
+   * нового ревью плана.
+   */
+  network: writerNetworkSchema.optional(),
 });
+export type ToolProfile = z.infer<typeof toolProfileSchema>;
+
+/**
+ * Действующая сеть исполнителя профиля: поле `network`, иначе у codex —
+ * `codexNetwork`. `undefined` — claude без поля: прежняя сеть (домены
+ * `isolation.domains` и локальные порты).
+ */
+export function profileNetwork(
+  runtime: RuntimeName,
+  profile: ToolProfile | undefined,
+): WriterNetwork | undefined {
+  if (profile?.network) return profile.network;
+  if (runtime === 'codex') return profile?.codexNetwork ? 'full' : 'none';
+  return undefined;
+}
 
 /** Тариф модели за миллион токенов, USD. Форма совпадает с сохранёнными тарифами DevContour. */
 export const priceSchema = z.strictObject({
@@ -834,6 +865,31 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
       ['gateTimeoutFloorMs'],
       `gateTimeoutFloorMs (${policy.gateTimeoutFloorMs} мс) больше runTimeoutMs (${policy.runTimeoutMs} мс)`,
     );
+  // Сеть профиля однозначна: `network` не спорит с `codexNetwork`, а вся сеть
+  // claude задаётся доменами `isolation.domains`, не профилем.
+  for (const [id, profile] of Object.entries(policy.toolProfiles)) {
+    if (profile.network && profile.network !== 'full' && profile.codexNetwork)
+      add(
+        'INVALID_INPUT',
+        ['toolProfiles', id, 'network'],
+        `network: ${profile.network} противоречит codexNetwork: true — уберите codexNetwork`,
+      );
+    // Без интернета веб-инструменты claude закрыты: разрешение на них — спор с режимом.
+    if (profile.network === 'none' || profile.network === 'loopback')
+      for (const rule of profile.claudeAllowedTools)
+        if (/^Web(?:Fetch|Search)(?:$|\()/.test(rule))
+          add(
+            'INVALID_INPUT',
+            ['toolProfiles', id, 'claudeAllowedTools'],
+            `${rule} ходит в сеть мимо песочницы: с network: ${profile.network} он закрыт — уберите правило или выберите другой режим`,
+          );
+    if (profile.network === 'full' && profile.runtime !== 'codex')
+      add(
+        'INVALID_INPUT',
+        ['toolProfiles', id, 'network'],
+        'network: full поддерживается только для codex; claude получает внешние адреса через isolation.domains',
+      );
+  }
   // Тариф однозначен: у модели не бывает двух тарифов на один момент.
   const tariffs = new Set<string>();
   policy.prices.forEach((p, i) => {

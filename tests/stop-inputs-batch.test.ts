@@ -66,6 +66,7 @@ test('stopInputsOf совпадает с прежней реализацией (
     const opts = { maxAttempts: board.policy.maxAttempts, repairBudget: board.policy.repairBudget };
     const ids = board.ids();
     const full = stopInputsOf(board.source, opts);
+    if (full.some((i) => i.kind === 'error')) seen.add('controller-busy');
     assert.deepEqual(
       withoutPreflight(full),
       referenceStopInputsOf(board.source, opts),
@@ -82,7 +83,8 @@ test('stopInputsOf совпадает с прежней реализацией (
       );
       assert.deepEqual(ofWork(batch, id), own, `seed ${seed}: ${id} в наборе`);
       for (const i of own) {
-        if (i.kind === 'error') seen.add('controller-busy');
+        // Занятая роль controller — вход доски, не разбор выбранной работы.
+        assert.notEqual(i.kind, 'error', `seed ${seed}: ${id} без CONTROLLER_BUSY`);
         if (i.kind === 'input') seen.add('follow-up');
         if (i.kind !== 'work') continue;
         const w = i.work;
@@ -128,8 +130,10 @@ test('stopInputsOf совпадает с прежней реализацией (
           !i.work.openDependents.length
         ),
     );
-    assert.deepEqual(full, shown, `seed ${seed}: доска = набор всех`);
-    assert.deepEqual(full.map(explainStop), shown.map(explainStop));
+    // Вход действующей роли controller есть только у доски (без выбора).
+    const works = full.filter((i) => i.kind !== 'error');
+    assert.deepEqual(works, shown, `seed ${seed}: доска = набор всех`);
+    assert.deepEqual(works.map(explainStop), shown.map(explainStop));
     // Случайное подмножество — в порядке состояния, независимо от порядка запроса.
     const rnd = mulberry32(seed * 31);
     const subset = ids.filter(() => rnd() < 0.3).reverse();

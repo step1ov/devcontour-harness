@@ -1,6 +1,6 @@
 {
   "name": "devcontour-harness",
-  "version": "0.1.0-alpha.59",
+  "version": "0.1.0-alpha.60",
   "description": "Headless execution harness: work graph, isolated attempts, gates, independent reviews and accepted results.",
   "type": "module",
   "license": "MIT",
@@ -14,6 +14,16 @@
   },
   "engines": {
     "node": ">=24.3.0"
+  },
+  "devcontourHarness": {
+    "formats": {
+      "api": "devcontour-harness/v1alpha1",
+      "state": 1,
+      "policy": 1,
+      "handoff": 1,
+      "report": 1,
+      "view": 1
+    }
   },
   "bin": {
     "harness": "lib/cli.js"

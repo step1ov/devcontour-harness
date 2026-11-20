@@ -1,0 +1,36 @@
+{
+  "$id": "devcontour-harness/v1alpha1/updates-config.schema.json",
+  "title": "updates-config",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "mode": {
+      "default": "notify",
+      "type": "string",
+      "enum": [
+        "auto",
+        "notify",
+        "off"
+      ]
+    },
+    "channel": {
+      "default": "alpha",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9._-]{0,40}$"
+    },
+    "autoScope": {
+      "default": "same-formats",
+      "type": "string",
+      "enum": [
+        "same-formats",
+        "ui-only"
+      ]
+    },
+    "registry": {
+      "type": "string",
+      "maxLength": 500,
+      "format": "uri"
+    }
+  },
+  "additionalProperties": false
+}

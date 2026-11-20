@@ -66,6 +66,13 @@ const laterCommands: readonly string[] = [
   'view',
   // Повторное согласование после правки политики (0.1.0-alpha.59).
   'reapprove',
+  // Ответ до применения и перенос ответа одной командой (0.1.0-alpha.60).
+  'input-resolve',
+  'input-carry',
+  // Решение ведущего по находкам ревью кода поручения (0.1.0-alpha.60).
+  'review-accept',
+  // Обновления harness и панели (0.1.0-alpha.60).
+  'update',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -148,6 +155,10 @@ const ADDITIVE_EVENT_TYPES = new Set([
   'attempt.assumptions',
   // alpha.44: явный сброс бюджета совместных проверок набора.
   'joint.budget-reset',
+  // alpha.60: решение ведущего по находкам ревью кода (`review-accept`).
+  'work.findings-accepted',
+  // alpha.60: смена пакетов командой `harness update`.
+  'harness.updated',
 ]);
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([
@@ -172,6 +183,9 @@ const ADDITIVE_ARGS = new Set([
   'status--interval',
   // Технические вопросы решает ведущий (0.1.0-alpha.55).
   'init--lead-technical-answers',
+  // Сверка версии Relay по связке задач (0.1.0-alpha.60).
+  'doctor--source',
+  'init--source',
 ]);
 /**
  * Текст `--writer` init в H2. 0.1.0-alpha.50 меняет умолчание: writer —
@@ -182,6 +196,11 @@ const H2_INIT_WRITER = 'Runtime writer: claude (по умолчанию) или 
 const eventTypeOf = (v: unknown) =>
   (v as { properties?: { type?: { const?: unknown } } } | null)?.properties?.type?.const as
     string | undefined;
+/** Прежние коды отказов, названные у прежней команды позже (команда:код). */
+const ADDITIVE_REFUSALS = new Set([
+  // retry: идущая попытка при --reset и повтор не после отказа (0.1.0-alpha.60).
+  'retry:NOT_READY',
+]);
 /** Аддитивные значения перечней после H2. */
 const ADDITIVE_ENUM_VALUES = new Set([
   'unfinished',
@@ -211,6 +230,8 @@ const ADDITIVE_ENUM_VALUES = new Set([
   // Предупреждения init о хранилище зависимостей (0.1.0-alpha.59).
   'dependency-store-unsupported',
   'dependency-cache-path',
+  // Предупреждение init о версии Relay (0.1.0-alpha.60).
+  'relay-compatibility',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
@@ -290,7 +311,7 @@ test('H3-01: каждая общая операция читается из до
     assert.equal(op.input.safeParse({ unknownArg: 'x' }).success, false, c);
   }
   // multiple объявлен только у --requirements plan-request, --intent handoff и
-  // решений по находкам review-plan / review-contract.
+  // решений по находкам review-plan / review-contract / review-accept.
   const multiple = Object.entries(cliCommands).flatMap(([c, contract]) =>
     (contract.args as readonly CliArgument[]).filter((a) => a.multiple).map((a) => c + a.name),
   );
@@ -299,6 +320,7 @@ test('H3-01: каждая общая операция читается из до
     'review-plan--continue-review',
     'review-contract--accept-limitation',
     'review-contract--continue-review',
+    'review-accept--accept-limitation',
     'handoff--intent',
     'plan-request--requirements',
   ]);
@@ -343,7 +365,9 @@ test('H3-01: прежние команды и схемы их данных не 
           ...contract,
           ...(c === 'init' ? { description: H2_INIT_DESCRIPTION } : {}),
           // Аддитивный код отказа (alpha.35: CONTEXT_EXHAUSTED у run).
-          refusals: contract.refusals.filter((code) => !ADDITIVE_ENUM_VALUES.has(code)),
+          refusals: contract.refusals.filter(
+            (code) => !ADDITIVE_ENUM_VALUES.has(code) && !ADDITIVE_REFUSALS.has(`${c}:${code}`),
+          ),
           args: (contract.args as readonly CliArgument[])
             .filter((arg) => !ADDITIVE_ARGS.has(c + arg.name))
             .map((arg) => {
@@ -435,6 +459,20 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.reapproval;
       v = rest;
     }
+    // Итог `retry --reset` (0.1.0-alpha.60): необязательное поле ответа retry и cancel.
+    if (
+      k === 'properties' &&
+      v &&
+      typeof v === 'object' &&
+      'workId' in v &&
+      'attempt' in v &&
+      'changed' in v &&
+      'reset' in v
+    ) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.reset;
+      v = rest;
+    }
     if (k === 'properties' && v && typeof v === 'object' && 'outcome' in v && 'unused' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.unused;
@@ -493,6 +531,29 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.questions;
       // Ведущий внутри песочницы (0.1.0-alpha.59).
       delete rest.leadSandbox;
+      // Сверка Relay по связке задач (0.1.0-alpha.60).
+      delete rest.relay;
+      return rest;
+    }
+    // Аддитивные поля ответов коннектора (0.1.0-alpha.60): совместимость с
+    // Relay, предупреждения простыми словами, открытые вопросы владельцу.
+    if (k === 'properties' && v && typeof v === 'object' && 'compatibility' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.compatibility;
+      delete rest.warnings;
+      delete rest.questions;
+      v = rest;
+    }
+    // Контекст исполнения задачи у строки mapping и задачи снимка (0.1.0-alpha.60).
+    if (
+      k === 'properties' &&
+      v &&
+      typeof v === 'object' &&
+      'taskContext' in v &&
+      ('problems' in v || 'semanticDigest' in v)
+    ) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.taskContext;
       return rest;
     }
     // Аддитивные поля ответов коннектора: пакеты `tasks[].context` (alpha.13) и
@@ -532,6 +593,8 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.plain;
       delete rest.plainEn;
       delete rest.actor;
+      // Порядок снятия блокировок разных людей (`blockers[].step`, 0.1.0-alpha.60).
+      delete rest.step;
       return rest;
     }
     // Аддитивное поле строки поручения отчёта — что проверено и как (0.1.0-alpha.55).
@@ -567,6 +630,10 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.detail;
       delete rest.reviews;
       delete rest.reviewsTruncated;
+      // Кто двигает очередь (`runner`, 0.1.0-alpha.60).
+      delete rest.runner;
+      // Обновления по последней проверке `harness update --check` (0.1.0-alpha.60).
+      delete rest.updates;
       return rest;
     }
     // Аддитивные поля находки плана или контракта: счёт раундов и решение
@@ -575,6 +642,12 @@ test('H3-01: прежние команды и схемы их данных не 
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.rounds;
       delete rest.disposition;
+      return rest;
+    }
+    // Аддитивная метка поздней находки ревью кода (0.1.0-alpha.60).
+    if (k === 'properties' && v && typeof v === 'object' && 'severity' in v && 'late' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.late;
       return rest;
     }
     // Аддитивное поле `joint.finished` — проверка прервана до результата gates (alpha.44).
@@ -623,6 +696,18 @@ test('H3-01: прежние команды и схемы их данных не 
     JSON.stringify(data['source-snapshot']).includes('"localContext"'),
     'source-snapshot объявляет пакеты контекста',
   );
+  // Хеш H2 вырезает поля совместимости с Relay (0.1.0-alpha.60): объявление держит эта проверка.
+  assert.ok(JSON.stringify(data.doctor).includes('"relay"'), 'doctor: сверка Relay');
+  for (const command of ['source-check', 'source-snapshot', 'source-status'])
+    assert.ok(
+      JSON.stringify(data[command]).includes('"compatibility"'),
+      command + ' объявляет compatibility',
+    );
+  assert.ok(
+    JSON.stringify(data['source-status']).includes('"questions"'),
+    'source-status: вопросы',
+  );
+  assert.ok(JSON.stringify(data['source-snapshot']).includes('"taskContext"'), 'снимок: контекст');
   // Хеш H2 выше вырезает `baseline`, поэтому только эта проверка держит объявление.
   for (const command of ['run', 'source-snapshot', 'source-status'])
     assert.ok(
@@ -687,6 +772,38 @@ test('H3-01: прежние команды и схемы их данных не 
     JSON.stringify(data.profile).includes('"artifacts"'),
     'gates профиля объявляют artifacts',
   );
+});
+
+test('F-B: справка каждой команды — <команда> --help, -h и help <команда>: stdout, exit 0, все флаги договора', () => {
+  const call = (args: string[]) =>
+    spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), cli, ...args], {
+      encoding: 'utf8',
+      env: { ...process.env, NODE_OPTIONS: '' },
+    });
+  for (const [name, c] of Object.entries(cliCommands)) {
+    const help = call([name, '--help']);
+    assert.equal(help.status, 0, name + ': ' + help.stderr);
+    assert.ok(help.stdout.startsWith(`harness ${name} — `), name);
+    for (const a of c.args) assert.ok(help.stdout.includes(a.name), `${name}: ${a.name}`);
+  }
+  // Флаги перед --help не разбираются: справка не требует обязательных.
+  const short = call(['init', '--repository', '.', '-h']);
+  assert.equal(short.status, 0);
+  assert.match(short.stdout, /--lead-technical-answers/);
+  assert.equal(call(['help', 'retry']).stdout, call(['retry', '--help']).stdout);
+  // Значение строкового параметра `-h` справку не вызывает; ключи прототипа — не команды.
+  const valued = call(['input-answer', '--text', '-h']);
+  assert.equal(valued.status, 2);
+  assert.doesNotMatch(valued.stdout, /^harness input-answer — /);
+  const proto = call(['constructor', '--help']);
+  assert.equal(proto.status, 2, proto.stderr);
+  assert.doesNotMatch(proto.stderr, /at .*cli\.ts/);
+  const meta = call(['help', '--help']);
+  assert.equal(meta.status, 0);
+  assert.match(meta.stderr, /Использование: harness <команда>/);
+  const unknown = call(['help', 'nope']);
+  assert.equal(unknown.status, 2);
+  assert.match(unknown.stderr, /неизвестная команда: nope/);
 });
 
 test('H3-01: --help называет capabilities; прежние команды и capabilities отвечают тем же конвертом', () => {

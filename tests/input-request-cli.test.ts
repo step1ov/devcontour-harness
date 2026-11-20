@@ -496,3 +496,187 @@ test('alpha.55 CLI: вопрос для пользователя при leadAnsw
   assert.equal(waiting.input.leadMay, undefined);
   assert.deepEqual(waiting.stage.needs, { actor: 'user', action: 'answer-input' });
 });
+
+/** Вопрос задан и отвечен: id запроса. */
+function answeredQuestion(p: ReturnType<typeof project>) {
+  const base = ['--graph', 'graph.json', '--policy', 'policy.json', '--state', p.state];
+  const first = p.harness('run', ...base);
+  assert.equal(first.status, exitCodes.refused, first.stderr);
+  const id: string = p.harness('input-list', '--state', p.state).json.data.requests[0].id;
+  const answered = p.harness(
+    'input-answer',
+    '--state',
+    p.state,
+    '--request',
+    id,
+    '--text',
+    'Use exactly Hello, <name>!',
+    '--option',
+    'hello',
+    '--request-version',
+    '1',
+  );
+  assert.equal(answered.status, 0, answered.stderr);
+  return { base, id };
+}
+
+test('alpha.60 CLI (F-AD, F-AK): input-resolve — от ответа до применения одним вызовом; правка политики после применения не отменяет ответ', () => {
+  const p = project();
+  const { base, id } = answeredQuestion(p);
+  // Снимок с ответом ещё не прошёл ревью: без --author — отказ с подсказкой, ничего не применено.
+  const noAuthor = p.harness('input-resolve', '--state', p.state, '--request', id);
+  assert.equal(noAuthor.json.error?.code, 'APPROVAL_REQUIRED');
+  assert.match(noAuthor.stderr, /--author/);
+  const resolved = p.harness(
+    'input-resolve',
+    '--state',
+    p.state,
+    '--request',
+    id,
+    '--author',
+    'external',
+  );
+  assert.equal(resolved.status, 0, resolved.stderr);
+  assert.equal(resolved.json.data.applied, true);
+  assert.equal(resolved.json.data.reviewed, 'new');
+  assert.equal(resolved.json.data.lifecycle, 'applied');
+  assert.equal(resolved.json.data.work.status, 'ready');
+  const again = p.harness('input-resolve', '--state', p.state, '--request', id);
+  assert.equal(again.status, 0, again.stderr);
+  assert.deepEqual([again.json.data.applied, again.json.data.changed], [true, false]);
+
+  // Правка политики вне изоляции и сети, затем run под ней: граф согласуется
+  // заново, применённый ответ остаётся применённым и доходит до исполнителя.
+  const policy = JSON.parse(readFileSync(join(p.app, 'policy.json'), 'utf8')) as Record<
+    string,
+    unknown
+  >;
+  policy.runTimeoutMs = 1234567;
+  writeFileSync(join(p.app, 'policy.json'), JSON.stringify(policy, null, 2));
+  const second = p.harness('run', ...base);
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(second.json.data.works[0].status, 'done');
+  const shown = p.harness('input-show', '--state', p.state, '--request', id);
+  assert.equal(shown.json.data.lifecycle, 'applied');
+  assert.equal(shown.json.data.stale, undefined, 'ответ не устарел из-за правки политики');
+  assert.ok(shown.json.data.delivered?.callId);
+  assert.match(readFileSync(`${p.scenario}.writer.1.prompt`, 'utf8'), /Use exactly Hello, <name>!/);
+});
+
+test('alpha.60 CLI (F-AL): input-carry — ответ на вопрос прежней редакции переносится одной командой; input-resolve отказывает с выходом', () => {
+  const p = project();
+  const { base, id } = answeredQuestion(p);
+  // Новая редакция постановки: исходная остановка вопроса больше не держится.
+  const graph = JSON.parse(readFileSync(join(p.app, 'graph.json'), 'utf8')) as {
+    source: { revision: string };
+    orders: { goal: string; source: { revision: string } }[];
+  };
+  graph.source.revision = '2';
+  graph.orders[0]!.goal += ' Keep the function pure.';
+  graph.orders[0]!.source.revision = '2';
+  writeFileSync(join(p.app, 'graph.json'), JSON.stringify(graph, null, 2));
+  const rerun = p.harness('run', ...base);
+  // Новая редакция согласована, но вопрос без применённого ответа держит выдачу.
+  assert.equal(rerun.json.data?.works[0].status, 'ready', rerun.stderr);
+  const resolve = p.harness('input-resolve', '--state', p.state, '--request', id);
+  assert.equal(resolve.json.error?.code, 'NOT_READY', resolve.stderr);
+  assert.match(resolve.stderr, /input-carry/);
+  const noReason = p.harness('input-carry', '--state', p.state, '--request', id);
+  assert.equal(noReason.json.error?.code, 'INVALID_INPUT');
+  // Без --author перенос не довести до конца: отказ до записи, вопрос не заменён.
+  const noAuthor = p.harness(
+    'input-carry',
+    '--state',
+    p.state,
+    '--request',
+    id,
+    '--reason',
+    'x-y-z',
+  );
+  assert.equal(noAuthor.json.error?.code, 'APPROVAL_REQUIRED');
+  assert.equal(
+    p.harness('input-show', '--state', p.state, '--request', id).json.data.lifecycle,
+    'answered',
+  );
+  const carried = p.harness(
+    'input-carry',
+    '--state',
+    p.state,
+    '--request',
+    id,
+    '--reason',
+    'постановка уточнена, ответ в силе',
+    '--author',
+    'external',
+    '--actor',
+    'lead',
+  );
+  assert.equal(carried.status, 0, carried.stderr);
+  assert.equal(carried.json.data.carried, true);
+  assert.equal(carried.json.data.superseded, true);
+  assert.equal(carried.json.data.lifecycle, 'superseded');
+  assert.equal(
+    p.harness('input-show', '--state', p.state, '--request', id).json.data.closed?.by,
+    'lead',
+    'замену записал ведущий',
+  );
+  const repeat = p.harness(
+    'input-carry',
+    '--state',
+    p.state,
+    '--request',
+    id,
+    '--reason',
+    'повтор',
+  );
+  assert.equal(repeat.status, 0, repeat.stderr);
+  assert.deepEqual([repeat.json.data.carried, repeat.json.data.changed], [true, false]);
+  const done = p.harness('run', ...base);
+  assert.equal(done.status, 0, done.stderr);
+  assert.equal(done.json.data.works[0].status, 'done');
+  assert.match(readFileSync(`${p.scenario}.writer.1.prompt`, 'utf8'), /Use exactly Hello, <name>!/);
+});
+
+test('alpha.60 CLI: status --human — строки очереди, обновлений и прогноза выпуска вместе', () => {
+  const p = project();
+  const base = ['--graph', 'graph.json', '--policy', 'policy.json', '--state', p.state];
+  assert.equal(p.harness('run', ...base).status, exitCodes.refused);
+  // Настройка обновлений рядом с политикой, проверки ещё не было (alpha.60 update).
+  writeFileSync(join(p.app, 'updates.json'), JSON.stringify({ mode: 'notify' }));
+  const human = p.raw('status', '--state', p.state, '--human');
+  assert.equal(human.status, 0, human.stderr);
+  const lines = human.stdout.trimEnd().split('\n');
+  // Строка обновлений — вторая, сразу после строки очереди.
+  assert.match(lines[1]!, /^Обновления: /);
+  assert.equal(lines.filter((l) => l.startsWith('Обновления:')).length, 1);
+  // Первая строка — кто двигает очередь (alpha.60 P1), последняя — прогноз (P11).
+  assert.match(lines[0]!, /^Очередь стоит — никто не запущен: .*\(ведущий: harness run\)\.$/);
+  assert.match(lines.at(-1)!, /^Прогноз выпуска: готово ~0 %, осталось задач: 1 из 1; /);
+  assert.equal(lines.filter((l) => l.startsWith('Прогноз выпуска:')).length, 1);
+  assert.equal(lines.filter((l) => l.startsWith('Очередь стоит')).length, 1);
+  // Доска успокоилась: --watch печатает один кадр — с той же строкой прогноза.
+  const watch = p.raw('status', '--state', p.state, '--human', '--watch');
+  assert.equal(watch.status, 0, watch.stderr);
+  assert.equal(watch.stdout.trimEnd().split('\n').at(-1), lines.at(-1));
+  assert.match(watch.stdout, /\nОбновления: /);
+  // С --graph строки — одного графа, а прогноз — по всему прогону: его нет.
+  const graph = p.raw('status', '--state', p.state, '--human', '--graph', 'greeting');
+  assert.equal(graph.status, 0, graph.stderr);
+  assert.match(graph.stdout, /^Очередь стоит — никто не запущен/);
+  assert.doesNotMatch(graph.stdout, /Прогноз выпуска/);
+  // JSON `status` не меняется от --human: прогноза в нём нет, runner — есть.
+  const json = p.harness('status', '--state', p.state).json.data;
+  assert.equal(json.runner.state, 'not-running');
+  assert.equal(json.forecast, undefined);
+  // Представление того же состояния — та же строка очереди и тот же прогноз.
+  const view = p.harness('view', '--state', p.state).json.data;
+  assert.equal(view.progress.queue.runner, 'not-running');
+  assert.equal(view.progress.queue.line, json.runner.line);
+  assert.ok(lines.at(-1)!.includes(view.forecast.progress.line));
+  // Вопрос в представлении из настоящего состояния — с вариантами и обоснованием (P12).
+  assert.deepEqual(
+    view.questions[0].options.map((o: { id: string }) => o.id),
+    ['hello', 'hi'],
+  );
+  assert.equal(view.questions[0].rationale, 'User-visible text');
+});

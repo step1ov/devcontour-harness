@@ -5,6 +5,9 @@ import {
   runResultSchema,
   vendorOf,
   type AttemptState,
+  type CodeReviewDecision,
+  codeReviewHistory,
+  codeReviewScope,
   type ErrorCode,
   type EvidenceRecord,
   type RunResult,
@@ -109,13 +112,51 @@ const ref = (e: EvidenceRecord, attempt: AttemptState) => ({
 });
 
 /**
+ * Принятые ограничения ревью кода, в силе на конец попытки: история находок
+ * по попыткам до неё включительно и решениям, принятым до её начала; находка,
+ * открытая позже явным reopen, не входит.
+ */
+function acceptedLimitations(
+  attempt: AttemptState,
+  decisions: readonly CodeReviewDecision[],
+  prior: readonly AttemptState[],
+) {
+  const inForce = decisions.filter((d) => d.at <= attempt.startedAt);
+  if (!inForce.length) return [];
+  return codeReviewHistory(
+    [...prior],
+    codeReviewScope(attempt.repositoryId, attempt.workId),
+    inForce,
+  )
+    .findings.filter((f) => f.disposition?.decision === 'accepted-limitation')
+    .slice(0, 100)
+    .map((f) =>
+      `Принятое ограничение ревью кода ${f.id} (${f.disposition!.by}, после раунда ${f.disposition!.round}): ${f.disposition!.reason}`.slice(
+        0,
+        1000,
+      ),
+    );
+}
+
+/**
  * Машинный результат завершённой попытки. Строится только из записей самой
  * попытки и оснований, закреплённых за ней при выдаче (`pinned`): новая
  * редакция графа, изменение или удаление поручения не переписывают
  * завершённую историю. `accepted` — только успешная попытка: её integration
  * SHA — result SHA. Недостающие сведения не выдумываются.
  */
-export function runResult(attempt: AttemptState, harnessVersion: string): RunResult {
+export function runResult(
+  attempt: AttemptState,
+  harnessVersion: string,
+  /**
+   * Решения по находкам ревью кода поручения (`WorkState.codeReviewDecisions`):
+   * в результат входят только принятые до начала попытки — те, под которыми
+   * шли её раунды; позднейшие решения завершённую историю не переписывают.
+   */
+  decisions: readonly CodeReviewDecision[] = [],
+  /** Попытки поручения до этой и она сама (по порядку): история находок на её момент. */
+  prior: readonly AttemptState[] = [attempt],
+): RunResult {
   if (!attempt.pinned)
     throw new HarnessError(
       'NOT_FOUND',
@@ -187,8 +228,9 @@ export function runResult(attempt: AttemptState, harnessVersion: string): RunRes
         ...(f.line !== undefined ? { line: f.line } : {}),
         ...(f.id !== undefined ? { id: f.id } : {}),
         ...(f.status !== undefined ? { status: f.status } : {}),
+        ...(f.late ? { late: f.late } : {}),
       })),
-    limitations: [] as string[],
+    limitations: acceptedLimitations(attempt, decisions, prior),
     finishedAt: attempt.finishedAt ?? attempt.startedAt,
   };
   const value =

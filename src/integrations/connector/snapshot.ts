@@ -37,9 +37,12 @@ import {
   type CriterionRecord,
   type DocumentRecord,
   type RelayTransport,
+  type TaskContextRead,
+  type TaskContextRecord,
   type TaskRead,
   type TransportIdentity,
 } from './transport.ts';
+import { relayCompatibility } from './compat.ts';
 import { FileContextSource } from '../../connectors/files.ts';
 
 /**
@@ -105,6 +108,21 @@ export interface TaskManifest {
   }[];
   children: { id: string; key: string; column: string; finished: boolean }[];
   documents: DocumentManifest[];
+  /**
+   * Контекст исполнения задачи из backend (`relay-context.md` пакета).
+   * `included` — файл в пакете; `too-large` — не поместился в пределы, задача
+   * идёт по-прежнему (задача, критерии, документы задачи). Нет поля —
+   * backend контекст не объявил или он выключен в конфигурации.
+   */
+  taskContext?: {
+    status: 'included' | 'too-large';
+    records?: number;
+    bytes?: number;
+    digest?: string;
+    reason?: string;
+  };
+  /** Название задачи (для состава прогона в представлении оператора). */
+  title?: string;
 }
 
 export interface SnapshotManifest {
@@ -129,6 +147,8 @@ export interface SnapshotManifest {
   localContext?: LocalContextManifest[];
   /** Зависимости, принятые человеком по базовой линии; без них поля нет. */
   baseline?: BaselineManifest;
+  /** Совместимость с Relay v1 по договору и capabilities (только relay-v1-http). */
+  compatibility?: ReturnType<typeof relayCompatibility>;
 }
 
 export interface BaselineManifest {
@@ -208,8 +228,21 @@ export async function checkIdentity(
   return identity;
 }
 
+/**
+ * Содержимое чтения для сверки раундов. Токен согласованности контекста
+ * backend не входит: он может меняться вместе с вычисляемыми полями;
+ * сравниваются записи контекста и ревизия задачи в нём.
+ */
 const contentOf = (read: TaskRead) =>
-  digestOf({ ...read, consistency: undefined, task: { ...read.task } });
+  digestOf({
+    ...read,
+    consistency: undefined,
+    task: { ...read.task },
+    context:
+      read.context?.status === 'ok'
+        ? { ...read.context, context: { ...read.context.context, consistency: undefined } }
+        : read.context,
+  });
 
 /**
  * Полное согласованное чтение набора задач. Раунд — чтение всех задач; у
@@ -224,6 +257,8 @@ export async function readStable(
   refs: string[],
   rereads: number,
   signal?: AbortSignal,
+  /** Читать контекст исполнения задачи (backend объявил capability, конфигурация не выключила). */
+  context?: { targetDocuments: boolean; maxBytes: number },
 ): Promise<{ reads: TaskRead[]; rounds: number }> {
   const round = async () => {
     const out: TaskRead[] = [];
@@ -235,6 +270,18 @@ export async function readStable(
         throw readFailure(error, 'Задача ' + ref);
       }
       if (read.consistency.before !== read.consistency.after) return undefined;
+      if (context && transport.readTaskContext) {
+        let outcome;
+        try {
+          outcome = await transport.readTaskContext(read.task.id, context, signal);
+        } catch (error) {
+          throw readFailure(error, 'Контекст задачи ' + ref);
+        }
+        // Контекст другой редакции задачи — раунд не согласован.
+        if (outcome.status === 'ok' && outcome.context.taskRevision !== read.task.revision)
+          return undefined;
+        read = { ...read, context: outcome };
+      }
       out.push(read);
     }
     return out;
@@ -315,6 +362,91 @@ const pin = (path: string, text: string): PinnedFile => ({
   content: { encoding: 'utf8', data: text },
 });
 
+const reasonText: Record<string, string> = {
+  'task-target': 'цель задачи',
+  'target-feature': 'фича цели',
+  'target-scenario': 'сценарий цели',
+  'target-application': 'приложение цели',
+  'product-passport': 'паспорт продукта',
+  'task-document': 'документ задачи',
+  'target-document': 'документ цели',
+};
+
+const sectionTitle: Record<TaskContextRecord['section'], string> = {
+  target: 'Цели задачи (реализации FI/SI, фичи, сценарии)',
+  requirement: 'Требования целей (фичи и сценарии)',
+  application: 'Приложения',
+  product: 'Паспорт продукта',
+  document: 'Документы',
+};
+
+/** Имя файла контекста задачи в пакете поручения. */
+export const TASK_CONTEXT_FILE = 'relay-context.md';
+
+/**
+ * Markdown контекста исполнения задачи: только постановка — ключ, название,
+ * аннотация, полный Markdown и основания включения (ревизия записи — только
+ * в manifest: её может поднять и служебная запись backend). Вычисляемые
+ * поля backend (готовность, блокеры, время, токен согласованности) не
+ * переносятся: файл и его digest меняются только при правке записей.
+ * Документы, уже закреплённые как документы задачи, называются ссылкой на
+ * их файл, без повтора текста.
+ */
+export function renderTaskContext(
+  key: string,
+  context: TaskContextRead,
+  pinnedDocs: Map<string, string>,
+): string {
+  const lines: string[] = [
+    `# Контекст задачи ${key} из Relay`,
+    '',
+    'Полное описание того, что реализует задача, прочитанное одним согласованным чтением Relay при снимке. ' +
+      'Это и есть постановка: читать Relay не нужно (из песочницы исполнителя он недоступен).',
+    '',
+  ];
+  const sections: TaskContextRecord['section'][] = [
+    'target',
+    'requirement',
+    'application',
+    'product',
+    'document',
+  ];
+  for (const section of sections) {
+    const records = context.records.filter((r) => r.section === section);
+    if (!records.length) continue;
+    lines.push(`## ${sectionTitle[section]}`, '');
+    for (const r of records) {
+      const pinned = section === 'document' ? pinnedDocs.get(r.id) : undefined;
+      const head = r.key && r.title ? `${r.key}: ${oneLine(r.title)}` : r.key || oneLine(r.title);
+      // Тело записи — свой Markdown со своими заголовками: границы записей явные.
+      lines.push('---', '', `### ${head}`, '');
+      const facts = [
+        r.implementation
+          ? `реализация ${r.implementation.type}` +
+            (r.implementation.application ? ` · приложение ${r.implementation.application}` : '') +
+            (r.implementation.target ? ` · цель ${r.implementation.target}` : '')
+          : r.kind,
+        'включена: ' +
+          r.reasons
+            .map((x) => (reasonText[x.code] ?? x.code) + (x.from ? ` (${x.from})` : ''))
+            .join(', '),
+      ];
+      lines.push(facts.join(' · '), '');
+      if (pinned) {
+        lines.push(`Текст — в файле ${pinned} этого контекста.`, '');
+        continue;
+      }
+      if (section === 'product' && r.revision === 0 && !r.body.trim()) {
+        lines.push('Паспорт продукта не заполнен.', '');
+        continue;
+      }
+      if (r.summary.trim()) lines.push(`> ${oneLine(r.summary)}`, '');
+      lines.push(r.body.trim() ? r.body.trim() : '(полное описание пусто)', '');
+    }
+  }
+  return lines.join('\n');
+}
+
 /** Прочитанная задача и её доверенные предпосылки → граф, контекст и manifest. */
 export function buildSnapshot(input: {
   config: ConnectorConfig;
@@ -340,6 +472,9 @@ export function buildSnapshot(input: {
   const packsByTask: [string, string[]][] = [];
   const truncated: string[] = [];
   let totalBytes = 0;
+  let contextBytes = 0;
+  /** Контекст задач по идентичности: часть ревизии набора (новое согласование при правке FI/SI). */
+  const contextBy: [string, string][] = [];
   const limits = config.limits;
 
   reads.forEach((read, index) => {
@@ -549,6 +684,56 @@ export function buildSnapshot(input: {
       documents.push({ ...base, included, includedBytes: size });
     }
 
+    // Контекст исполнения задачи: целиком или явная отметка, без усечения.
+    let taskContext: TaskManifest['taskContext'];
+    const outcome = read.context;
+    if (outcome) {
+      const fallback = (reason: string) => {
+        taskContext = { status: 'too-large', reason };
+        contextBy.push([identityOf, 'too-large']);
+        missing.push({
+          id: 'x' + sha256(identityOf + ':task-context').slice(0, 20),
+          reason: `Контекст задачи ${task.key} из Relay не включён: ${reason}. Исполнитель получает задачу, критерии и документы задачи, но не описание функции и сценария`,
+        });
+      };
+      if (outcome.status === 'too-large') fallback(outcome.reason);
+      else {
+        const pinnedDocs = new Map(
+          documents
+            // Ссылка вместо текста — только на документ, закреплённый целиком.
+            .filter((d) => d.included === 'full')
+            .map((d) => [d.id, `documents/${d.id.replace(/[^A-Za-z0-9_-]/g, '_')}.md`]),
+        );
+        const text = renderTaskContext(task.key, outcome.context, pinnedDocs);
+        const bytes = Buffer.byteLength(text);
+        const max = config.taskContext.maxBytes;
+        if (bytes > max) fallback(`${bytes} байт больше предела taskContext.maxBytes=${max}`);
+        else if (contextBytes + bytes > config.taskContext.totalBytes)
+          fallback(
+            `контекст задач снимка больше предела taskContext.totalBytes=${config.taskContext.totalBytes}`,
+          );
+        else {
+          const file = pin(TASK_CONTEXT_FILE, text);
+          files.push(file);
+          contextBytes += bytes;
+          taskContext = {
+            status: 'included',
+            records: outcome.context.records.length,
+            bytes,
+            digest: file.digest,
+          };
+          contextBy.push([identityOf, file.digest]);
+        }
+      }
+      // Исполнителю сказано, где постановка (или что её нет): строка в task.md.
+      const note =
+        taskContext?.status === 'included'
+          ? `\n## Контекст из Relay\n\nПолное описание функции и сценария (FI/SI), их фичи и сценарии, приложение, паспорт продукта и документы целей — в файле ${TASK_CONTEXT_FILE} этого контекста. Читать Relay не нужно.\n`
+          : `\n## Контекст из Relay\n\nПолный контекст задачи не поместился в пределы и не передан; работайте по постановке и документам задачи. Если без описания функции или сценария работу не сделать, задайте вопрос.\n`;
+      const index = files.findIndex((f) => f.path === 'task.md');
+      if (index >= 0) files[index] = pin('task.md', taskText + note);
+    }
+
     // Provenance без операционных полей (CAS-ревизии — только в manifest).
     const provenance = JSON.stringify(
       {
@@ -565,6 +750,7 @@ export function buildSnapshot(input: {
           included: d.included,
           required: d.required,
         })),
+        ...(taskContext ? { taskContext } : {}),
       },
       null,
       2,
@@ -638,6 +824,8 @@ export function buildSnapshot(input: {
         finished: c.finished,
       })),
       documents,
+      ...(taskContext ? { taskContext } : {}),
+      title: cut(oneLine(task.title), 200),
     });
   });
 
@@ -659,6 +847,11 @@ export function buildSnapshot(input: {
           context: (input.local ?? []).map((s) => [s.id, s.digest]),
           contextBy: [...packsByTask].sort(([a], [b]) => (a < b ? -1 : 1)),
         }
+      : {}),
+    // Контекст задачи из backend: правка FI/SI, фичи, сценария, паспорта или
+    // документа цели — новое согласование. Без контекста ревизия прежняя.
+    ...(contextBy.length
+      ? { taskContext: [...contextBy].sort(([a], [b]) => (a < b ? -1 : 1)) }
       : {}),
   });
   const joined = `${config.provider}:${config.projectId}:${taskIds.join('+')}`;
@@ -713,6 +906,7 @@ export function buildSnapshot(input: {
     truncated,
     problems,
     ...(input.local?.length ? { localContext: input.local.map(localManifest) } : {}),
+    ...((c) => (c ? { compatibility: c } : {}))(relayCompatibility(identity, config)),
     ...(accepted.size
       ? {
           baseline: {
@@ -801,6 +995,11 @@ export async function takeSnapshot(input: {
   contextDir?: string;
   signal?: AbortSignal;
 }): Promise<BuiltSnapshot> {
+  if (!input.config.tasks.length)
+    throw new HarnessError(
+      'NOT_READY',
+      'В конфигурации коннектора нет задач (tasks пуст): связку можно проверить source-check, а снимок и запуск — после того, как задачи добавлены в tasks[]',
+    );
   const local = await localContext(input.config, input.contextDir);
   const identity = await checkIdentity(input.transport, input.config, input.signal);
   const { reads, rounds } = await readStable(
@@ -808,6 +1007,7 @@ export async function takeSnapshot(input: {
     input.config.tasks.map((t) => t.ref),
     input.config.limits.rereads,
     input.signal,
+    taskContextOptions(input.config, identity, input.transport),
   );
   return buildSnapshot({
     config: input.config,
@@ -817,6 +1017,20 @@ export async function takeSnapshot(input: {
     receiptOf: input.receiptOf,
     ...(local.length ? { local } : {}),
   });
+}
+
+/** Читать ли контекст задачи: backend объявил capability, транспорт умеет, конфигурация не выключила. */
+export function taskContextOptions(
+  config: ConnectorConfig,
+  identity: Pick<TransportIdentity, 'provider' | 'capabilities' | 'build'>,
+  transport: RelayTransport,
+): { targetDocuments: boolean; maxBytes: number } | undefined {
+  if (!transport.readTaskContext) return undefined;
+  if (!relayCompatibility(identity, config)?.taskContextUsed) return undefined;
+  return {
+    targetDocuments: config.taskContext.targetDocuments,
+    maxBytes: config.taskContext.maxBytes,
+  };
 }
 
 /** Отказ по eligibility/limits: причина и предел в сообщении, без запуска. */

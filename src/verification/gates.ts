@@ -208,6 +208,74 @@ export function junitSummary(
   if (!summary.tests) throw new Error('JUnit не содержит выполненных testcases');
   return summary;
 }
+/** Провал одного testcase с полным текстом: сообщение и тело элемента. */
+export interface JunitFailure {
+  testcase: string;
+  kind: 'failure' | 'error';
+  message: string;
+  body: string;
+}
+/**
+ * Упавшие testcases JUnit с сообщением и телом (ожидаемое и полученное,
+ * стек). `junitSummary` хранит только первую строку сообщения; следующей
+ * попытке нужен весь текст. `redact` — до любой обрезки; объём ограничивает
+ * вызывающий.
+ */
+export function junitFailures(
+  xml: string,
+  redact: (value: string) => string = (value) => value,
+  limit = 50,
+): JunitFailure[] {
+  if (xml.includes('<!DOCTYPE') || XMLValidator.validate(xml) !== true)
+    throw new Error('Некорректный JUnit XML');
+  const document: unknown = new XMLParser({
+    ignoreAttributes: false,
+    processEntities: false,
+  }).parse(xml);
+  const out: JunitFailure[] = [];
+  const text = (node: unknown): { message: string; body: string } => {
+    const first: unknown = Array.isArray(node) ? (node as unknown[])[0] : node;
+    if (typeof first === 'string') return { message: '', body: entities(first) };
+    if (first && typeof first === 'object') {
+      const named = first as Record<string, unknown>;
+      const message = named['@_message'];
+      const body = named['#text'];
+      return {
+        message: typeof message === 'string' ? xmlAttribute(message) : '',
+        body: typeof body === 'string' ? entities(body) : '',
+      };
+    }
+    return { message: '', body: '' };
+  };
+  function visit(value: unknown, key = '') {
+    if (out.length >= limit) return;
+    if (Array.isArray(value)) {
+      value.forEach((v) => visit(v, key));
+      return;
+    }
+    if (key === 'testcase') {
+      if (!value || typeof value !== 'object') return;
+      const named = value as Record<string, unknown>;
+      const kind = 'failure' in named ? 'failure' : 'error' in named ? 'error' : undefined;
+      if (!kind) return;
+      const name = [named['@_classname'], named['@_name']]
+        .filter(Boolean)
+        .map((v) => xmlAttribute(String(v)))
+        .join('.');
+      const { message, body } = text(named[kind]);
+      out.push({
+        testcase: portableTest({ id: redact(name) }).id,
+        kind,
+        message: redact(message).trim(),
+        body: redact(body).trim(),
+      });
+      return;
+    }
+    if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) visit(v, k);
+  }
+  visit(document);
+  return out;
+}
 const ansiEscape = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 /** Путь с расширением и координаты, после необязательного префикса `пакет скрипт: `. */
 const compilerError =
@@ -873,7 +941,16 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     summary = '',
     log = `# harness gate ${gate.id}: cwd=${relative(root, gateCwd) || '.'} argv=${JSON.stringify(gate.command.map(redact))}${gate.kind === 'test' ? ` fresh=${redact(JSON.stringify(freshness))}` : ''}\n`,
     exitCode = -1,
-    manifest: ReturnType<typeof junitSummary> | undefined;
+    manifest: ReturnType<typeof junitSummary> | undefined,
+    /** SHA-256 сохранённого этим запуском `<gate>.xml`. */
+    reportDigest: string | undefined;
+  /** Отчёт сохраняется маскированным; digest — от записанных байтов. */
+  const keepReport = async (xml: string) => {
+    const masked = redact(xml);
+    await mkdir(artifactDir, { recursive: true });
+    await writeFile(join(artifactDir, `${gate.id}.xml`), masked);
+    reportDigest = sha256(masked);
+  };
   try {
     // Снимок защищённых путей до проверки: запреты песочницы видят только
     // путь операции, перенос готового каталога ими не закрыт.
@@ -985,8 +1062,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         : undefined;
       if (counts) {
         manifest = counts;
-        await mkdir(artifactDir, { recursive: true });
-        await writeFile(join(artifactDir, `${gate.id}.xml`), redact(counts.xml));
+        await keepReport(counts.xml);
       }
       const blocked =
         run.policy.isolation.mode === 'os'
@@ -1062,10 +1138,11 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     if (reportPath) {
       const counts = (manifest = await readReport(reportPath, cwd, redact));
       summary = `${counts.tests} tests, ${counts.failures} failures, ${counts.skipped} skipped`;
+      // Отчёт сохраняется и при провале с нулевым кодом выхода: из него
+      // следующая попытка получает текст провала (`gateFeedback`).
+      await keepReport(counts.xml);
       if (counts.failures || counts.skipped)
         throw new Error(summary + (counts.failures ? `: ${failedCases(counts)}` : ''));
-      await mkdir(artifactDir, { recursive: true });
-      await writeFile(join(artifactDir, `${gate.id}.xml`), redact(counts.xml));
     } else summary = 'Команда завершилась успешно';
     if ((await git(cwd, 'rev-parse', 'HEAD')) !== expectedHead)
       throw new Error('Gate изменил HEAD');
@@ -1236,6 +1313,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     summary: redact(summary),
     ...(manifest ? { tests: manifest.cases } : {}),
     ...(manifest?.truncated ? { testsTruncated: true } : {}),
+    ...(reportDigest ? { reportDigest } : {}),
     ...(run.consumer ? { consumer: run.consumer } : {}),
     ...(propertyEvidence ? { property: propertyEvidence } : {}),
     ...(artifactFiles ? { artifactFiles } : {}),

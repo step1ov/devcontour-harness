@@ -8,7 +8,8 @@ import {
   writeFileSync,
   mkdirSync,
 } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import {
@@ -28,6 +29,7 @@ import {
   exitCodeOf,
   exitCodes,
   projectManifestSchema,
+  type CliArgument,
   type CliCommand,
   type CliEnvelope,
   type ExecutionPolicy,
@@ -64,6 +66,32 @@ import { inputStateOf } from './projections/input.ts';
 import { checkGates, gatesText } from './control/gates-check.ts';
 import { smokeLifecycle, smokeText } from './control/lifecycle-smoke.ts';
 import { defaultResourceDatabase } from './environment/resources.ts';
+import {
+  UPDATE_OPERATION,
+  applyUpdate,
+  recoverInterrupted,
+  rollbackUpdate,
+  updateInProgress,
+  type UpdateHost,
+} from './update/apply.ts';
+import {
+  cachedUpdates,
+  checkUpdates,
+  loadUpdatesConfig,
+  saveLastCheck,
+  updatesDir,
+  writeUpdatesConfig,
+} from './update/check.ts';
+import { deadUpdater, liveWork } from './update/live.ts';
+import { HARNESS_PACKAGE, installedPackage } from './update/install.ts';
+import {
+  disableSchedule,
+  enableSchedule,
+  linuxInstructions,
+  scheduleArgs,
+} from './update/schedule.ts';
+import { updateText } from './update/text.ts';
+import { updateModes, updatesConfigSchema } from './contracts/update.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -83,6 +111,40 @@ run: отказ по существу (GATE_FAILED, REVIEW_REJECTED, …) — 3;
 Runtime: codex и claude из PATH; HARNESS_CODEX_BIN / HARNESS_CLAUDE_BIN подменяют исполняемый файл
 (например, fixture executable в тестах — это не живая модель).
 `;
+
+/**
+ * Справка одной команды (`harness <команда> --help`, `harness help <команда>`):
+ * описание, параметры с обязательностью, запись состояния, идемпотентность и
+ * отказы — из того же договора `cliCommands`, по которому разбираются флаги.
+ */
+function commandHelp(name: CliCommand) {
+  const c = cliCommands[name] as {
+    description: string;
+    writes: boolean;
+    idempotency: string;
+    args: readonly CliArgument[];
+    refusals: readonly string[];
+  };
+  const sign = (a: (typeof c.args)[number]) =>
+    a.value === 'flag' ? a.name : `${a.name} <${a.value}>`;
+  const width = Math.max(...c.args.map((a) => sign(a).length), 10) + 2;
+  return [
+    `harness ${name} — ${c.description}`,
+    '',
+    `Использование: harness ${name} ${c.args.map((a) => (a.required ? sign(a) : `[${sign(a)}]`)).join(' ')}`.trimEnd(),
+    '',
+    'Параметры:',
+    ...c.args.map(
+      (a) =>
+        `  ${sign(a).padEnd(width)}${a.required ? '(обязательный) ' : ''}${a.multiple ? '(можно повторить) ' : ''}${a.description}`,
+    ),
+    '',
+    `Пишет состояние: ${c.writes ? 'да' : 'нет'}. Повтор: ${c.idempotency}`,
+    ...(c.refusals.length ? [`Отказы: ${c.refusals.join(', ')}`] : []),
+    `stdout — JSON (${API_VERSION}); диагностика — stderr.`,
+    '',
+  ].join('\n');
+}
 
 const readJson = (path: string, what: string): unknown => readJsonFile(path, what).value;
 const readJsonFile = (path: string, what: string): { text: string; value: unknown } => {
@@ -244,6 +306,34 @@ const connectorOf = async (path: string, state: string, policy?: ExecutionPolicy
   });
 };
 
+/** Строки прогноза выпуска для `status --human`; представление недоступно — без них. */
+const forecastLines = (state: string): string | undefined => {
+  try {
+    const view = harnessView({ stateDir: state }) as {
+      forecast?: { progress: { line: string }; time: { line: string } };
+    };
+    const f = view.forecast;
+    return f ? `Прогноз выпуска: ${f.progress.line}; ${f.time.line}.\n` : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Сверка Relay для `doctor`/`init`: явный `--source` или найденный файл
+ * связки. Нет ни того, ни другого — `undefined` (связка не настроена).
+ */
+const relayCheck = async (
+  explicit: string | undefined,
+  candidate: string | undefined,
+  state?: string,
+) => {
+  const file = explicit ?? (candidate && existsSync(candidate) ? candidate : undefined);
+  if (!file) return undefined;
+  const { relayCompatibilityCheck } = await import('./integrations/connector/commands.ts');
+  return relayCompatibilityCheck(file, { stateDir: resolve(state ?? '.') });
+};
+
 /**
  * Получатель-каталог. Текущая редакция поручения читается из файла графа,
  * из которого он зарегистрирован: если там уже другая редакция (или
@@ -337,6 +427,15 @@ const options = {
   bucket: { type: 'string' },
   lang: { type: 'string' },
   'view-version': { type: 'string' },
+  check: { type: 'boolean' },
+  apply: { type: 'boolean' },
+  rollback: { type: 'boolean' },
+  schedule: { type: 'string' },
+  mode: { type: 'string' },
+  prefix: { type: 'string' },
+  wait: { type: 'string' },
+  scheduled: { type: 'boolean' },
+  'confirm-formats': { type: 'string' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -349,7 +448,7 @@ const flagOwners = {
   lead: ['init'],
   review: ['init'],
   model: ['init'],
-  human: ['init', 'lean', 'status', 'explain', 'plan-request', 'gates', 'smoke'],
+  human: ['init', 'lean', 'status', 'explain', 'plan-request', 'gates', 'smoke', 'update'],
   draft: ['plan-check'],
   basis: ['plan-check'],
   brief: ['plan-request', 'plan-check'],
@@ -368,6 +467,8 @@ const flagOwners = {
   'view-version': ['view'],
   intent: ['handoff'],
   request: [
+    'input-resolve',
+    'input-carry',
     'input-show',
     'input-answer',
     'input-context',
@@ -379,9 +480,9 @@ const flagOwners = {
   text: ['input-answer'],
   option: ['input-answer'],
   kind: ['input-answer'],
-  actor: ['input-answer', 'review-plan', 'review-contract'],
+  actor: ['input-answer', 'input-carry', 'review-plan', 'review-contract', 'review-accept'],
   by: ['reapprove'],
-  'accept-limitation': ['review-plan', 'review-contract'],
+  'accept-limitation': ['review-plan', 'review-contract', 'review-accept'],
   'continue-review': ['review-plan', 'review-contract'],
   'request-version': ['input-answer', 'input-apply', 'input-cancel', 'input-supersede'],
   'context-digest': ['input-target', 'input-apply'],
@@ -397,6 +498,15 @@ const flagOwners = {
   base: ['review-code'],
   head: ['review-code'],
   role: ['review-code'],
+  check: ['update'],
+  apply: ['update'],
+  rollback: ['update'],
+  schedule: ['update'],
+  mode: ['update'],
+  prefix: ['update'],
+  wait: ['update'],
+  scheduled: ['update'],
+  'confirm-formats': ['update'],
 } as const;
 
 /** Явное человеческое представление успешного ответа (`--human`). */
@@ -408,6 +518,7 @@ const presenters: Partial<Record<CliCommand, (data: never) => string>> = {
   'plan-request': (data: { prompt: string }) => data.prompt + '\n',
   gates: gatesText,
   smoke: smokeText,
+  update: updateText,
 };
 
 /**
@@ -561,7 +672,11 @@ async function watchStatus(
         // выглядит как успокоившаяся доска. detail — для свежести владения
         // идущих попыток (`statusSettled`).
         snapshot = h.engine.read(() => ({
-          data: cliDataSchemas.status.parse(h.status(v.graph, { detail: true })),
+          // Обновления — по сохранённой проверке, как у одиночного `status`.
+          data: cliDataSchemas.status.parse({
+            ...h.status(v.graph, { detail: true }),
+            ...optional('updates', statusUpdates(resolve(state), binding(state).baseDir)),
+          }),
           liveJobs: h.workflows
             .list()
             .filter(
@@ -575,7 +690,9 @@ async function watchStatus(
         h.close();
       }
       const { data, liveJobs } = snapshot;
-      const frame = statusFrame(data, now, intervalMs);
+      // Прогноз — по всему прогону: с --graph его нет (строки статуса — одного графа).
+      const frame =
+        statusFrame(data, now, intervalMs) + (v.graph ? '' : (forecastLines(state) ?? ''));
       if (stopped || statusSettled(data, now, { liveJobs })) return { data, text: clear + frame };
       process.stdout.write(clear + frame + (clear ? '' : '\n'));
       await new Promise<void>((done) => {
@@ -593,6 +710,277 @@ async function watchStatus(
   }
 }
 
+/**
+ * Хост обновления для каталога состояния: живость, пауза операции
+ * `harness-update`, событие `harness.updated`. Каждое действие открывает и
+ * закрывает базу заново: возврат копии состояния подменяет файл базы, и
+ * долгоживущее соединение писало бы в перенесённый файл.
+ */
+function updateHost(state: string, policyPath?: string): UpdateHost {
+  // Привязка каталога состояния, иначе политика из --policy: база без привязки
+  // тоже охраняется (живость, пауза, роль controller).
+  const bound = (): Binding | undefined =>
+    existsSync(bindingFile(state))
+      ? binding(state)
+      : policyPath
+        ? loadPolicy(policyPath)
+        : undefined;
+  const usable = () => existsSync(join(state, 'state.sqlite')) && bound() !== undefined;
+  const owner = `harness-update:${process.pid}`;
+  const withHarness = <T>(fn: (h: Harness) => T, fallback: T): T => {
+    if (!usable()) return fallback;
+    const h = open(state, bound()!, true);
+    try {
+      return fn(h);
+    } finally {
+      h.close();
+    }
+  };
+  const leaseMs = () => bound()?.policy.leaseMs ?? 30_000;
+  return {
+    live: () => (usable() ? liveWork(state, bound()!.policy, Date.now(), owner) : []),
+    pause: () => withHarness((h) => h.engine.operationPause(UPDATE_OPERATION), false),
+    resume: () => withHarness((h) => h.engine.operationResume(UPDATE_OPERATION), false),
+    // Без базы состояния писать некому: роль «взята».
+    hold: () =>
+      withHarness((h) => h.engine.holdController(owner, (lease) => deadUpdater(lease.owner)), true),
+    release: () => withHarness((h) => h.engine.release(owner), false),
+    heartbeatMs: Math.max(1000, Math.floor(leaseMs() / 3)),
+    record: (payload) => withHarness((h) => h.engine.recordUpdate(payload), undefined),
+  };
+}
+
+/** Каталог .harness проекта, каталог установки и настройка обновлений. */
+function updateContext(state: string, v: { policy?: string; prefix?: string }) {
+  const harnessDir = v.policy
+    ? dirname(resolve(v.policy))
+    : existsSync(bindingFile(state))
+      ? binding(state).baseDir
+      : undefined;
+  // Каталог установки: --prefix; иначе тот, откуда запущен этот harness
+  // (`<prefix>/node_modules/devcontour-harness`); иначе `.harness-tools`
+  // проекта (место навыка harness-setup); иначе корень проекта.
+  const root = harnessDir
+    ? basename(harnessDir) === '.harness'
+      ? dirname(harnessDir)
+      : harnessDir
+    : undefined;
+  const self = fileURLToPath(import.meta.url);
+  const at = self.indexOf(`${sep}node_modules${sep}`);
+  const candidates = [
+    ...(at > 0 ? [self.slice(0, at)] : []),
+    ...(root ? [join(root, '.harness-tools'), root] : []),
+  ];
+  const prefix = v.prefix
+    ? resolve(v.prefix)
+    : (candidates.find((c) => installedPackage(c, HARNESS_PACKAGE)) ?? root);
+  const { config, exists } = loadUpdatesConfig(harnessDir);
+  return {
+    harnessDir,
+    prefix,
+    config,
+    configExists: exists,
+    npm: {
+      cwd: prefix ?? process.cwd(),
+      ...(config.registry ? { registry: config.registry } : {}),
+    },
+  };
+}
+
+/** Строка об обновлениях для status: настройка не по схеме не ломает status. */
+function statusUpdates(state: string, baseDir: string) {
+  try {
+    const { config, exists } = loadUpdatesConfig(baseDir);
+    const cached = cachedUpdates(state, config);
+    if (!cached || (!exists && cached.state === 'not-checked')) return undefined;
+    return { state: cached.state, line: cached.line };
+  } catch (error) {
+    return { state: 'unavailable' as const, line: (error as Error).message.slice(0, 300) };
+  }
+}
+
+async function runUpdate(
+  v: Record<string, string | boolean | string[] | undefined>,
+  state: string,
+): Promise<{ data: unknown; code?: number }> {
+  const flag = (k: string) => v[k] !== undefined;
+  const actions = ['check', 'apply', 'rollback', 'schedule', 'mode'].filter(flag);
+  if (actions.length !== 1)
+    throw new HarnessError(
+      'INVALID_INPUT',
+      'update: нужно ровно одно из --check, --apply, --rollback, --schedule, --mode',
+    );
+  const action = actions[0]!;
+  if (flag('wait') && action !== 'apply' && action !== 'rollback')
+    throw new HarnessError('INVALID_INPUT', '--wait — только с --apply или --rollback');
+  for (const only of ['scheduled', 'confirm-formats'])
+    if (flag(only) && action !== 'apply')
+      throw new HarnessError('INVALID_INPUT', `--${only} — только с --apply`);
+  if (v.scheduled && v['confirm-formats'])
+    throw new HarnessError(
+      'INVALID_INPUT',
+      '--confirm-formats — решение владельца; из расписания оно не принимается',
+    );
+  let waitMs: number | undefined;
+  if (typeof v.wait === 'string') {
+    const minutes = Number(v.wait);
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 720)
+      throw new HarnessError('INVALID_INPUT', '--wait: целое число минут от 1 до 720', [
+        { path: ['--wait'], message: v.wait },
+      ]);
+    waitMs = minutes * 60_000;
+  }
+  const ctx = updateContext(state, {
+    ...optional('policy', typeof v.policy === 'string' ? v.policy : undefined),
+    ...optional('prefix', typeof v.prefix === 'string' ? v.prefix : undefined),
+  });
+  const policyArg = typeof v.policy === 'string' ? v.policy : undefined;
+  const host = updateHost(state, policyArg);
+  // База состояния без привязки и без --policy: прогон в ней не увидеть — не ставить.
+  if (
+    (action === 'apply' || action === 'rollback') &&
+    existsSync(join(state, 'state.sqlite')) &&
+    !existsSync(bindingFile(state)) &&
+    !policyArg
+  )
+    throw new HarnessError(
+      'POLICY_REQUIRED',
+      'У каталога состояния есть база, но нет привязки (binding.json): передайте --policy .harness/policy.json, чтобы обновление видело прогоны',
+    );
+  if (action === 'mode') {
+    const mode = String(v.mode);
+    if (!(updateModes as readonly string[]).includes(mode))
+      throw new HarnessError('INVALID_INPUT', '--mode: ожидается auto, notify или off', [
+        { path: ['--mode'], message: mode },
+      ]);
+    if (!ctx.harnessDir)
+      throw new HarnessError(
+        'POLICY_REQUIRED',
+        '--mode: каталог .harness не найден — передайте --policy .harness/policy.json',
+      );
+    const config = updatesConfigSchema.parse({ ...ctx.config, mode });
+    const file = writeUpdatesConfig(ctx.harnessDir, config);
+    return {
+      data: {
+        action: 'mode',
+        config,
+        line: `Режим обновлений: ${mode} (${file}).${mode === 'auto' ? ' Ставится само только в пределах ' + config.autoScope + ' и когда нет прогона; включите ежедневную проверку: harness update --schedule daily --state ' + state : ''}`,
+      },
+    };
+  }
+  if (action === 'check') {
+    // Прервавшееся обновление (процесс умер): снять его паузу, завершить возврат.
+    let recovered: string | undefined;
+    try {
+      recovered = await recoverInterrupted(state, { config: ctx.config, npm: ctx.npm, host });
+    } catch (error) {
+      // Идёт другое обновление (замок занят): его пауза — его.
+      if (!(error instanceof HarnessError && error.code === 'CONTROLLER_BUSY')) throw error;
+    }
+    const check = await checkUpdates({
+      stateDir: state,
+      ...optional('prefix', ctx.prefix),
+      config: ctx.config,
+      npm: ctx.npm,
+    });
+    saveLastCheck(state, check);
+    return {
+      data: {
+        action: 'check',
+        check,
+        line: ((recovered ? recovered + ' ' : '') + check.line).slice(0, 500),
+      },
+    };
+  }
+  if (action === 'schedule') {
+    const what = String(v.schedule);
+    if (what !== 'daily' && what !== 'off')
+      throw new HarnessError('INVALID_INPUT', '--schedule: ожидается daily или off', [
+        { path: ['--schedule'], message: what },
+      ]);
+    const installed = ctx.prefix ? installedPackage(ctx.prefix, HARNESS_PACKAGE) : undefined;
+    const bin = installed?.bin ?? resolve(process.argv[1] ?? 'harness');
+    const args = [
+      ...scheduleArgs(bin, state, typeof v.prefix === 'string' ? v.prefix : undefined),
+      // Каталог без привязки: задание передаёт политику, иначе apply отказал бы каждый день.
+      ...(!existsSync(bindingFile(state)) && typeof v.policy === 'string'
+        ? ['--policy', resolve(v.policy)]
+        : []),
+    ];
+    if (process.platform !== 'darwin')
+      return {
+        data: {
+          action: 'schedule',
+          schedule: { enabled: false, instructions: linuxInstructions(args) },
+          line:
+            what === 'daily'
+              ? 'Задание создаётся само только на macOS; для этой ОС — текст ниже (systemd user timer или cron).'
+              : 'На этой ОС задание не создавалось harness; уберите своё systemd/cron задание, если создавали.',
+        },
+      };
+    if (what === 'off') {
+      const r = disableSchedule(state);
+      return {
+        data: {
+          action: 'schedule',
+          schedule: { enabled: false, file: r.file },
+          line: r.existed
+            ? `Ежедневная проверка выключена: ${r.file} удалён.`
+            : 'Ежедневной проверки не было.',
+        },
+      };
+    }
+    mkdirSync(updatesDir(state), { recursive: true });
+    const r = enableSchedule(state, args, join(updatesDir(state), 'schedule.log'));
+    return {
+      data: {
+        action: 'schedule',
+        schedule: { enabled: true, file: r.file },
+        line: r.loaded
+          ? `Ежедневная проверка включена (каждый день в 09:30, режим ${ctx.config.mode}): ${r.file}.`
+          : `Файл задания записан (${r.file}), но launchctl его не загрузил: ${r.reason ?? 'причина неизвестна'}. Загрузите: launchctl bootstrap gui/$(id -u) ${r.file}`,
+      },
+    };
+  }
+  if (!ctx.prefix)
+    throw new HarnessError(
+      'POLICY_REQUIRED',
+      'Каталог установки не найден: передайте --prefix <каталог проекта> или --policy .harness/policy.json',
+    );
+  if (!installedPackage(ctx.prefix, HARNESS_PACKAGE))
+    throw new HarnessError(
+      'NOT_FOUND',
+      `harness не установлен в ${ctx.prefix}/node_modules: обновление ставит пакеты туда, где они стоят; укажите --prefix`,
+    );
+  if (action === 'apply') {
+    const r = await applyUpdate({
+      stateDir: state,
+      prefix: ctx.prefix,
+      config: ctx.config,
+      npm: ctx.npm,
+      host,
+      by: v.scheduled ? 'schedule' : 'operator',
+      scheduled: Boolean(v.scheduled),
+      ...optional(
+        'confirmFormats',
+        typeof v['confirm-formats'] === 'string' ? v['confirm-formats'] : undefined,
+      ),
+      // Из расписания — без ожидания: пауза оборвала бы идущий run, а
+      // перезапустить его некому; идёт работа — попытка завтра.
+      ...optional('waitMs', waitMs),
+    });
+    return { data: r.data, code: r.code };
+  }
+  const r = await rollbackUpdate({
+    stateDir: state,
+    config: ctx.config,
+    npm: ctx.npm,
+    host,
+    ...optional('waitMs', waitMs),
+  });
+  return { data: r.data, code: r.code };
+}
+
 async function run(
   argv: string[],
 ): Promise<{ command: CliCommand | 'version'; data: unknown; code?: number; text?: string }> {
@@ -604,7 +992,7 @@ async function run(
         throw new HarnessError('INVALID_INPUT', `--${flag} поддерживают: ${owners.join(', ')}`);
     return { command: 'version', data: { harness: HARNESS_VERSION, apiVersion: API_VERSION } };
   }
-  if (!name || !(name in cliCommands))
+  if (!name || !Object.hasOwn(cliCommands, name))
     throw new HarnessError(
       'UNSUPPORTED_COMMAND',
       name ? 'Неизвестная команда: ' + name : 'Не указана команда',
@@ -614,6 +1002,47 @@ async function run(
   for (const [flag, owners] of Object.entries(flagOwners))
     if (v[flag as keyof typeof v] !== undefined && !(owners as readonly string[]).includes(command))
       throw new HarnessError('INVALID_INPUT', `--${flag} поддерживают: ${owners.join(', ')}`);
+  // Во время обновления пакетов (или до возврата прерванного) с --state идут
+  // только команды чтения: прочие писали бы состояние после копии (возврат
+  // копии их потерял бы) или запускали бы заменяемые сейчас пакеты.
+  const readOnly = [
+    'status',
+    'events',
+    'result',
+    'view',
+    'report',
+    'explain',
+    'doctor',
+    'capabilities',
+    'validate',
+    'update',
+    'input-list',
+    'input-show',
+    'input-target',
+    'source-status',
+    'source-check',
+    'handoff',
+    'profile',
+    'plan-request',
+    'plan-check',
+  ];
+  if (typeof v.state === 'string' && !readOnly.includes(command)) {
+    const state = resolve(v.state);
+    let prefix: string | undefined;
+    try {
+      prefix = updateContext(state, {
+        ...optional('policy', typeof v.policy === 'string' ? v.policy : undefined),
+      }).prefix;
+    } catch {
+      prefix = undefined;
+    }
+    const updating = updateInProgress(state, prefix);
+    if (updating)
+      throw new HarnessError(
+        'CONTROLLER_BUSY',
+        `Сейчас ${updating}: дождитесь окончания обновления`,
+      );
+  }
   if (isSharedOperation(command)) {
     // Транспортная граница общей операции: значения аргументов в UTF-8 байтах.
     const limit = sharedOperations[command].limits.maxInputBytes;
@@ -711,6 +1140,30 @@ async function run(
         h.close();
       }
     }
+    case 'review-accept': {
+      // Решение по находкам ревью кода поручения (docs/review-protocol.md §10).
+      const [accept] = reviewDispositionsOf({
+        'accept-limitation': v['accept-limitation'],
+        reason: need('reason'),
+        ...(v.actor !== undefined ? { actor: v.actor } : {}),
+      });
+      const ids = (v['accept-limitation'] ?? []).flatMap((x) =>
+        x
+          .split(',')
+          .map((y) => y.trim())
+          .filter(Boolean),
+      );
+      if (!accept) throw new HarnessError('INVALID_INPUT', '--accept-limitation: нужен ID находки');
+      const h = open(need('state'), binding(need('state')), true);
+      try {
+        return {
+          command,
+          data: h.engine.acceptCodeFindings(need('work'), ids, accept.reason, accept.by),
+        };
+      } finally {
+        h.close();
+      }
+    }
     case 'reapprove': {
       const by = need('by').trim();
       const reason = need('reason').trim();
@@ -789,8 +1242,23 @@ async function run(
         return { command, ...(await watchStatus(need('state'), v)) };
       const h = open(need('state'), binding(need('state')), 'state');
       try {
-        if (command === 'status')
-          return { command, data: h.status(v.graph, { detail: Boolean(v.detail) }) };
+        if (command === 'status') {
+          const updates = statusUpdates(resolve(need('state')), binding(need('state')).baseDir);
+          const data = {
+            ...h.status(v.graph, { detail: Boolean(v.detail) }),
+            ...optional('updates', updates),
+          };
+          if (!v.human) return { command, data };
+          // Прогноз выпуска — та же строка, что у панели (`view.forecast`), по
+          // всему прогону: с --graph строки статуса — одного графа, прогноза нет.
+          // «Обновления:» печатает сам `statusText` (поле `updates`).
+          const forecast = v.graph ? undefined : forecastLines(need('state'));
+          return {
+            command,
+            data,
+            ...(forecast ? { text: statusText(data) + forecast } : {}),
+          };
+        }
         if (command === 'events')
           return { command, data: h.events(Number(v.after ?? 0), Number(v.limit ?? 100)) };
         return { command, data: h.result(need('work')) };
@@ -828,6 +1296,7 @@ async function run(
             status: result.work.status,
             attempt: result.work.attempt,
             changed: result.changed,
+            ...('reset' in result && result.reset ? { reset: result.reset } : {}),
           },
         };
       } finally {
@@ -890,7 +1359,9 @@ async function run(
       const state = need('state');
       const b = binding(state);
       const connector = await connectorOf(need('source'), state, b.policy);
-      const h = open(state, b, command === 'source-status');
+      // source-status — чтение (в том числе во время обновления пакетов): база
+      // состояния открывается только для чтения, без отметки writer и миграций.
+      const h = open(state, b, command === 'source-status' ? 'state' : false);
       try {
         if (command === 'source-status') return { command, data: await connector.status(h) };
         if (command === 'source-deliver') {
@@ -949,6 +1420,14 @@ async function run(
         ...(v.state ? { stateDir: v.state } : {}),
       });
       if (sandboxed.inside) data.warnings.push({ code: 'lead-sandbox', message: sandboxed.advice });
+      // Связка с Relay уже настроена (или указана): версия Relay ниже рекомендуемой — предупреждение.
+      const relay = await relayCheck(
+        v.source,
+        join(resolve(need('repository')), '.harness', 'connector.json'),
+        v.state,
+      );
+      if (relay?.warning)
+        data.warnings.push({ code: 'relay-compatibility', message: relay.warning });
       // План с конфликтами или неготовым toolchain — отказ по существу с данными.
       const blocked = data.mode === 'plan' && (data.conflicts > 0 || !data.toolchain.ready);
       return { command, data, ...(blocked ? { code: exitCodes.refused } : {}) };
@@ -1257,6 +1736,10 @@ async function run(
         process.off('SIGTERM', stop);
       }
     }
+    case 'update': {
+      const r = await runUpdate(v, resolve(need('state')));
+      return { command, data: r.data, ...optional('code', r.code) };
+    }
     case 'doctor': {
       const b = v.policy ? loadPolicy(v.policy) : v.state ? binding(v.state) : undefined;
       const report = await doctor(
@@ -1282,7 +1765,27 @@ async function run(
       // Manifest проекта рядом с политикой расходится с ней по слою lean — предупреждение.
       const mismatch = v.policy ? leanMismatch(resolve(v.policy)) : [];
       if (mismatch.length) report.warnings = [...(report.warnings ?? []), ...mismatch];
-      return { command, data: report };
+      // Связка с Relay: --source или connector.json рядом с политикой.
+      const relay = await relayCheck(
+        v.source,
+        v.policy ? join(dirname(resolve(v.policy)), 'connector.json') : undefined,
+        v.state,
+      );
+      if (!relay) return { command, data: report };
+      if (relay.warning)
+        report.warnings = [...(report.warnings ?? []), `RELAY_COMPATIBILITY: ${relay.warning}`];
+      return {
+        command,
+        data: {
+          ...report,
+          relay: {
+            source: relay.source,
+            ...(relay.compatibility ? { compatibility: relay.compatibility } : {}),
+            ...(relay.code ? { code: relay.code } : {}),
+            ...(relay.error ? { error: relay.error } : {}),
+          },
+        },
+      };
     }
     case 'input-list':
     case 'input-show':
@@ -1316,6 +1819,52 @@ async function run(
               createdAt: r.createdAt,
             })),
           },
+        };
+      } finally {
+        h.close();
+      }
+    }
+    case 'input-resolve':
+    case 'input-carry': {
+      const b = binding(need('state'), v.policy, Boolean(v.policy));
+      const h = open(need('state'), b, false);
+      try {
+        const id = need('request');
+        const author = v.author ? parseWith(authorSchema, v.author, 'author') : undefined;
+        const reset = v.reset ? { reason: need('reason') } : undefined;
+        const out =
+          command === 'input-resolve'
+            ? await h.resolveInput(id, {
+                ...optional('author', author),
+                ...optional('reset', reset),
+              })
+            : await h.carryInputOf(id, {
+                reason: need('reason'),
+                by: parseWith(z.enum(['operator', 'lead']), v.actor ?? 'lead', 'actor'),
+                ...optional('author', author),
+                ...optional('reset', reset),
+              });
+        const done = 'applied' in out ? out.applied : out.carried;
+        return {
+          command,
+          data: {
+            requestId: out.requestId,
+            ...('applied' in out ? { applied: out.applied } : { carried: out.carried }),
+            ...('superseded' in out ? { superseded: out.superseded } : {}),
+            changed: out.changed,
+            lifecycle: out.lifecycle,
+            ...optional('contextDigest', out.contextDigest),
+            ...('reviewRound' in out
+              ? { reviewRound: out.reviewRound, reviewed: out.reviewed }
+              : {}),
+            ...('work' in out && out.work
+              ? { work: { id: out.work.id, status: out.work.status, attempt: out.work.attempt } }
+              : {}),
+            ...('active' in out && out.active ? { active: out.active } : {}),
+            ...('joint' in out && out.joint ? { joint: true as const } : {}),
+            ...('blocker' in out && out.blocker ? { blocker: out.blocker } : {}),
+          },
+          ...(done ? {} : { code: exitCodes.refused }),
         };
       } finally {
         h.close();
@@ -1421,9 +1970,30 @@ async function run(
 }
 
 const argv = process.argv.slice(2);
-if (argv[0] === '--help' || argv[0] === 'help') {
-  process.stderr.write(usage);
+// Справка команды: `harness <команда> --help|-h` или `harness help <команда>` —
+// текст на stdout, exit 0; неизвестная команда — обычный отказ ниже.
+// `-h`/`--help` — только на месте флага: значение строкового параметра
+// (`--text -h`) справку не вызывает.
+const valued = (token: string | undefined) =>
+  !!token?.startsWith('--') &&
+  !token.includes('=') &&
+  (options as Record<string, { type: string }>)[token.slice(2)]?.type === 'string';
+const helpOf =
+  argv[0] === 'help' || argv[0] === '--help'
+    ? argv[1] === '--help' || argv[1] === '-h'
+      ? undefined
+      : argv[1]
+    : argv.slice(1).some((a, i) => (a === '--help' || a === '-h') && !valued(argv[i]))
+      ? argv[0]
+      : undefined;
+if (helpOf && Object.hasOwn(cliCommands, helpOf)) {
+  process.stdout.write(commandHelp(helpOf as CliCommand));
   process.exit(exitCodes.ok);
+}
+if (argv[0] === '--help' || argv[0] === 'help') {
+  if (helpOf) process.stderr.write(`harness: неизвестная команда: ${helpOf}\n\n`);
+  process.stderr.write(usage);
+  process.exit(helpOf ? exitCodes.input : exitCodes.ok);
 }
 let envelope: CliEnvelope;
 let code: number = exitCodes.ok;
@@ -1453,7 +2023,7 @@ try {
           ? contractViolation(error)
           : new HarnessError('INTERNAL', (error as Error)?.message ?? String(error));
   code = exitCodeOf(known);
-  const command = argv[0] && argv[0] in cliCommands ? (argv[0] as CliCommand) : null;
+  const command = argv[0] && Object.hasOwn(cliCommands, argv[0]) ? (argv[0] as CliCommand) : null;
   envelope = { apiVersion: API_VERSION, command, ok: false, error: known.toJSON() };
   process.stderr.write(`harness: ${known.code}: ${known.message}\n`);
   for (const issue of known.issues)

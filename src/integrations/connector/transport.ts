@@ -87,6 +87,65 @@ export interface TaskRead {
   dependencies: TaskSummary[];
   documents: DocumentRecord[];
   consistency: { before: string; after: string };
+  /**
+   * Контекст исполнения задачи, если его читал снимок (capability backend и
+   * `taskContext.mode: auto`). Транспорт в `readTask` его не заполняет.
+   */
+  context?: TaskContextOutcome;
+}
+
+/**
+ * Запись контекста исполнения задачи (Relay `relay-task-context-v1`): цель
+ * FI/SI, её фича или сценарий, приложение, паспорт продукта или документ — с
+ * полным Markdown, ключом, ревизией и основаниями включения. Вычисляемые поля
+ * backend (готовность, блокеры, время) сюда не переносятся: они меняются без
+ * правки записи и не являются постановкой.
+ */
+export interface TaskContextRecord {
+  section: 'target' | 'requirement' | 'application' | 'product' | 'document';
+  kind: string;
+  id: string;
+  key: string;
+  title: string;
+  revision: number;
+  summary: string;
+  /** Полный Markdown записи (`description`, у документа — `body`). */
+  body: string;
+  /** Реализация FI/SI: тип, приложение и цель (ключи). */
+  implementation?: { type: string; application?: string; target?: string };
+  /** Основания: код и ключ записи, через которую включена (`null` — паспорт). */
+  reasons: { code: string; from: string | null }[];
+}
+
+/** Контекст исполнения задачи одним согласованным чтением. */
+export interface TaskContextRead {
+  /** Версия формы ответа backend (`contractVersion`). */
+  contractVersion: number;
+  /** Токен согласованности ответа backend (меняется при любом изменении, в том числе вычисляемом). */
+  consistency: string;
+  /** Ревизия задачи в этом ответе: сверяется с полным чтением задачи. */
+  taskRevision: number;
+  records: TaskContextRecord[];
+}
+
+/** Итог чтения контекста: прочитан целиком или не помещается в пределы (без усечения). */
+export type TaskContextOutcome =
+  { status: 'ok'; context: TaskContextRead } | { status: 'too-large'; reason: string };
+
+/**
+ * Открытый вопрос владельцу, записанный в backend документом по соглашению
+ * Relay (`Вопрос: …`, тип `proposal`, состояние `draft`). Только чтение.
+ */
+export interface SourceQuestionRecord {
+  id: string;
+  key: string;
+  title: string;
+  revision: number;
+  /** Полный Markdown документа (разделы вопроса, вариантов, рекомендации, временного ответа). */
+  body: string;
+  /** Ключи записей, к которым прикреплён вопрос (ID, если ключ неизвестен). */
+  targets: string[];
+  updatedAt?: string;
 }
 
 export interface SessionRecord {
@@ -184,6 +243,21 @@ export interface RelayTransport {
   identity(signal?: AbortSignal): Promise<TransportIdentity>;
 
   readTask(ref: string, signal?: AbortSignal): Promise<TaskRead>;
+  /**
+   * Контекст исполнения задачи (необязательный метод): вызывается, только
+   * если backend объявил capability контекста. Превышение пределов —
+   * `too-large`, а не усечённый ответ; прочие отказы — исключение.
+   */
+  readTaskContext?(
+    ref: string,
+    options: { targetDocuments: boolean; maxBytes: number },
+    signal?: AbortSignal,
+  ): Promise<TaskContextOutcome>;
+  /** Открытые вопросы владельцу (необязательный метод, только чтение). */
+  listOpenQuestions?(
+    options: { limit: number },
+    signal?: AbortSignal,
+  ): Promise<{ questions: SourceQuestionRecord[]; total: number }>;
   listComments(ref: string, signal?: AbortSignal): Promise<CommentRecord[]>;
 
   addComment(

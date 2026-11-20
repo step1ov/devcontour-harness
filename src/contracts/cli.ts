@@ -21,11 +21,16 @@ import {
 } from './execution.ts';
 import { readRunEventSchema } from './events.ts';
 import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
-import { reviewRecordSchema, reviewSubjectSummarySchema } from './review.ts';
+import {
+  reviewAcceptDataSchema,
+  reviewRecordSchema,
+  reviewSubjectSummarySchema,
+} from './review.ts';
 import { codeReviewRecordSchema } from './code-review.ts';
 import { acceptedTargetSchema } from './target.ts';
 import { workVerificationSchema } from './verification-view.ts';
 import { viewDataSchema } from './operator-view.ts';
+import { updateDataSchema, updateCheckStates } from './update.ts';
 import { sourceRefSchema } from './work.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
 import {
@@ -249,6 +254,37 @@ export const cliCommands = {
       'INPUT_REQUIRED',
     ],
   },
+  'review-accept': {
+    description:
+      'Принять открытые находки ревью кода поручения (candidate/integration) известным ограничением с основанием и решающим; следующий раунд видит решение, reviewer не поднимает находку без новых доказательств; не одобрение и не повтор — повтор отдельно (retry); reviewer без протокола переходов может поднять ту же проблему под новым ID — тогда решение не держится; модель не вызывается',
+    writes: true,
+    idempotency: 'Повтор для уже принятой находки ничего не меняет (changed: false)',
+    args: [
+      state,
+      work,
+      {
+        name: '--accept-limitation',
+        value: 'id',
+        required: true,
+        multiple: true,
+        description:
+          'ID открытой находки ревью кода поручения (из result: findings[].id) или список через запятую',
+      },
+      {
+        name: '--reason',
+        value: 'text',
+        required: true,
+        description: 'Основание решения (не короче трёх знаков)',
+      },
+      {
+        name: '--actor',
+        value: 'text',
+        required: false,
+        description: 'Кто решает: lead (по умолчанию) или operator',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'NOT_READY', 'INVALID_INPUT'],
+  },
   approve: {
     description:
       'Согласование оператором (approvalMode: operator) конкретного digest графа или контракта, уже прошедшего ревью',
@@ -453,6 +489,7 @@ export const cliCommands = {
     ],
     refusals: [
       'NOT_FOUND',
+      'NOT_READY',
       'ATTEMPTS_EXHAUSTED',
       'BUDGET_EXHAUSTED',
       'BUDGET_UNKNOWN',
@@ -540,6 +577,12 @@ export const cliCommands = {
     args: [
       { ...state, required: false },
       { ...policy, required: false },
+      {
+        ...source,
+        required: false,
+        description:
+          'Конфигурация связки задач: сверить версию Relay (договор и capabilities) и предупредить, если она ниже рекомендуемой; без флага — connector.json рядом с --policy, если он есть',
+      },
     ],
     refusals: [],
   },
@@ -617,6 +660,12 @@ export const cliCommands = {
         value: 'flag',
         required: false,
         description: 'Текст для человека вместо JSON',
+      },
+      {
+        ...source,
+        required: false,
+        description:
+          'Конфигурация связки задач: сверить версию Relay и предупредить (relay-compatibility), если она ниже рекомендуемой; без флага — .harness/connector.json репозитория, если он есть',
       },
     ],
     refusals: ['PATH_CONFLICT', 'CONTROLLER_BUSY', 'NOT_READY'],
@@ -1112,6 +1161,99 @@ export const cliCommands = {
     ],
     refusals: ['NOT_FOUND', 'REVISION_CONFLICT', 'NOT_READY'],
   },
+  'input-resolve': {
+    description:
+      'От ответа до применения одним вызовом: снимок с последним ответом (хранится по digest, файлов не нужно), ревью плана с ним (прежний одобренный раунд того же снимка под текущей политикой — без вызова модели), основание и input-apply с точными версией и digest; работа ушла из остановки вопроса — отказ с выходом input-carry',
+    writes: true,
+    idempotency:
+      'Применённый запрос — applied:true, changed:false без записи; идущие попытки графа, исчерпанные попытки или бюджет — applied:false с причиной (exit 3), ответ сохранён',
+    args: [
+      state,
+      inputRequestArg,
+      {
+        ...policy,
+        required: false,
+        description:
+          'ExecutionPolicy JSON: после правки политики — применяемая политика (как у run); без неё — политика каталога состояния',
+      },
+      {
+        ...author,
+        required: false,
+        description:
+          'Runtime ведущего (автор плана) для ревью плана со снимком ответа; не нужен, если этот снимок уже одобрен последним раундом',
+      },
+      {
+        name: '--reset',
+        value: 'flag',
+        required: false,
+        description: 'Сбросить исчерпанный счётчик попыток; требует --reason',
+      },
+      { name: '--reason', value: 'text', required: false, description: 'Причина сброса' },
+    ],
+    refusals: [
+      'NOT_FOUND',
+      'NOT_READY',
+      'INPUT_REQUIRED',
+      'APPROVAL_REQUIRED',
+      'APPROVAL_STALE',
+      'REVIEW_REJECTED',
+      'REVISION_CONFLICT',
+      'ATTEMPTS_EXHAUSTED',
+      'BUDGET_EXHAUSTED',
+    ],
+  },
+  'input-carry': {
+    description:
+      'Перенести ответ в новую попытку или редакцию одним вызовом: вопрос, исходная остановка которого не держится (была другая попытка, новая редакция постановки), заменяется той же работой с причиной; затем снимок с ответом, ревью плана с ним, основание и перенос в действующее согласование; упавшая вопросом работа возвращается в очередь',
+    writes: true,
+    idempotency:
+      'Повтор того же переноса — carried:true, changed:false; исходная остановка держится — отказ NOT_READY с выходом input-resolve',
+    args: [
+      state,
+      inputRequestArg,
+      {
+        name: '--reason',
+        value: 'text',
+        required: true,
+        description: 'Почему ответ переносится (запись замены вопроса и причина сброса с --reset)',
+      },
+      {
+        ...policy,
+        required: false,
+        description:
+          'ExecutionPolicy JSON: после правки политики — применяемая политика (как у run); без неё — политика каталога состояния',
+      },
+      {
+        ...author,
+        required: false,
+        description:
+          'Runtime ведущего (автор плана) для ревью плана со снимком ответа; не нужен, если этот снимок уже одобрен последним раундом',
+      },
+      {
+        name: '--reset',
+        value: 'flag',
+        required: false,
+        description: 'Сбросить исчерпанный счётчик попыток (причина — --reason)',
+      },
+      {
+        name: '--actor',
+        value: 'text',
+        required: false,
+        description: 'Кто заменяет вопрос: lead (по умолчанию) или operator — запись замены',
+      },
+    ],
+    refusals: [
+      'NOT_FOUND',
+      'NOT_READY',
+      'INPUT_REQUIRED',
+      'APPROVAL_REQUIRED',
+      'APPROVAL_STALE',
+      'REVIEW_REJECTED',
+      'REVISION_CONFLICT',
+      'ATTEMPTS_EXHAUSTED',
+      'BUDGET_EXHAUSTED',
+    ],
+  },
   'input-supersede': {
     description:
       'Заменить вопрос преемником: ответ меняет требования — новая ревизия или работа, а не продолжение этой',
@@ -1273,6 +1415,94 @@ export const cliCommands = {
     ],
     refusals: ['CANCELLED', 'NOT_FOUND'],
   },
+  update: {
+    description:
+      'Обновления harness и панели оператора: проверить в реестре npm (единственный сетевой запрос harness, через npm, без телеметрии), поставить совместимую пару только когда нет прогона — с копией состояния, doctor и автоматическим откатом, — откатить, включить ежедневную проверку; смена форматов договоров — только решением владельца',
+    writes: true,
+    idempotency:
+      'check пишет только <state>-updates/last-check.json; повтор apply без новой версии — up-to-date; rollback снимает одну запись истории; schedule daily перезаписывает своё задание',
+    args: [
+      {
+        ...state,
+        description:
+          'Каталог состояния: копии, история и последняя проверка — рядом, в <state>-updates',
+      },
+      {
+        ...policy,
+        required: false,
+        description:
+          'ExecutionPolicy JSON: каталог .harness проекта, если у состояния нет привязки',
+      },
+      {
+        name: '--check',
+        value: 'flag',
+        required: false,
+        description:
+          'Проверить реестр: текущая и доступная пара, что нового простыми словами, нужна ли смена форматов; офлайн — «не удалось проверить»',
+      },
+      {
+        name: '--apply',
+        value: 'flag',
+        required: false,
+        description:
+          'Поставить найденную пару: не во время прогона, копия состояния, точные версии, doctor, перезапуск панели; при сбое — автоматический возврат',
+      },
+      {
+        name: '--rollback',
+        value: 'flag',
+        required: false,
+        description:
+          'Вернуть прошлую пару; состояние — из последней копии, только если форматы различались',
+      },
+      {
+        name: '--schedule',
+        value: 'text',
+        required: false,
+        description:
+          'daily — ежедневное задание launchd пользователя (macOS; для Linux — текст systemd/cron), off — убрать',
+      },
+      {
+        name: '--mode',
+        value: 'text',
+        required: false,
+        description: 'Записать режим в .harness/updates.json: auto, notify или off',
+      },
+      {
+        name: '--prefix',
+        value: 'dir',
+        required: false,
+        description: 'Каталог установки пакетов; по умолчанию — корень проекта (родитель .harness)',
+      },
+      {
+        name: '--wait',
+        value: 'number',
+        required: false,
+        description:
+          'apply/rollback: идёт прогон — поставить очередь на паузу и ждать его окончания до N минут (1–720)',
+      },
+      {
+        name: '--scheduled',
+        value: 'flag',
+        required: false,
+        description:
+          'apply из расписания: notify — только проверка, auto — установка в пределах autoScope, off — ничего',
+      },
+      {
+        name: '--confirm-formats',
+        value: 'text',
+        required: false,
+        description:
+          'apply: решение владельца поставить пару со сменой форматов — ровно harness@<версия>[+ui@<версия>] из --check; другая пара — отказ; из расписания не принимается',
+      },
+      {
+        name: '--human',
+        value: 'flag',
+        required: false,
+        description: 'Строка для человека, что нового и шаги вместо JSON',
+      },
+    ],
+    refusals: ['CONTROLLER_BUSY', 'APPROVAL_REQUIRED', 'NOT_FOUND'],
+  },
 } as const satisfies Record<string, CliCommandContract>;
 export type CliCommand = keyof typeof cliCommands;
 
@@ -1292,6 +1522,12 @@ const blocker = z.strictObject({
   plain: z.string().min(1).max(300).optional(),
   plainEn: z.string().min(1).max(300).optional(),
   actor: z.enum(diagnosisActors).nullable().optional(),
+  /**
+   * Только `status` (alpha.60): порядок снятия, когда блокировок несколько —
+   * 1 снимается первым (согласование раньше сброса попыток: сброс до него
+   * ничего не изменит). Нет поля — блокировка одна или порядок не важен.
+   */
+  step: z.number().int().positive().optional(),
 });
 
 export const validateDataSchema = z.strictObject({
@@ -1462,6 +1698,8 @@ export const attemptSummarySchema = z.strictObject({
 export const workStages = [
   'queued',
   'blocked',
+  /** Ревью плана идёт в живом процессе `harness run` (alpha.60): harness сам. */
+  'plan-review',
   'prepare',
   'writer',
   'gates',
@@ -1507,6 +1745,16 @@ export const workStageSchema = z.strictObject({
 
 export const statusDataSchema = z.strictObject({
   stateVersion: z.literal(STATE_VERSION),
+  /**
+   * Обновления по последней проверке `harness update --check` (0.1.0-alpha.60):
+   * исход и строка для человека; проверки не было и режим off — поля нет.
+   */
+  updates: z
+    .strictObject({
+      state: z.enum([...updateCheckStates, 'not-checked']),
+      line: z.string().min(1).max(300),
+    })
+    .optional(),
   control: controlStateSchema,
   controller: controllerLeaseSchema.optional(),
   graphs: z.array(
@@ -1549,6 +1797,15 @@ export const statusDataSchema = z.strictObject({
           answerBasis: z.enum(leadAnswerBases).optional(),
           /** Ждёт ответа, и действующая политика разрешает ответ ведущему — по этому правилу. */
           leadMay: z.enum(leadAnswerBases).optional(),
+          /**
+           * Попытка, за которой закреплён применённый ответ (alpha.60):
+           * `running` — она идёт (состояние тогда `delivered`: ответ уже у
+           * попытки, ждать нечего); `false` — она закончилась, не передав
+           * ответ исполнителю, и ответ получит следующая попытка.
+           */
+          carrier: z
+            .strictObject({ attempt: z.number().int().positive(), running: z.boolean() })
+            .optional(),
         })
         .optional(),
       /** Неблокирующие запросы ведущему в ожидании (автономный режим). */
@@ -1573,6 +1830,26 @@ export const statusDataSchema = z.strictObject({
       target: acceptedTargetSchema.optional(),
     }),
   ),
+  /**
+   * Кто двигает очередь (alpha.60): `running` — живой controller, идущая
+   * попытка с действующим владением или ревью плана в живом `harness run`
+   * (`planReviews`); `not-running` — никто не запущен, и открытые поручения
+   * сдвинет только новый запуск (`restartBy` — кто его делает: ведущий,
+   * `harness run`). `line`/`lineEn` — то же одной фразой. Нет поля — открытых
+   * поручений нет.
+   */
+  runner: z
+    .strictObject({
+      state: z.enum(['running', 'not-running']),
+      planReviews: z
+        .array(z.strictObject({ graphId: idSchema, since: isoTimeSchema }))
+        .max(50)
+        .optional(),
+      restartBy: z.enum(diagnosisActors).optional(),
+      line: z.string().min(1).max(500),
+      lineEn: z.string().min(1).max(500),
+    })
+    .optional(),
   /**
    * Бюджеты по сохранённым записям вызовов: общий, групп с незавершённой
    * работой и незавершённых поручений. Нет поля — бюджеты не заданы.
@@ -1689,6 +1966,17 @@ export const workActionDataSchema = z.strictObject({
   status: workStatusSchema,
   attempt: z.number().int().min(0),
   changed: z.boolean(),
+  /**
+   * Итог `retry --reset`: сброс выполнен (сколько попыток было потрачено) или
+   * не выполнен с объяснением; без `--reset` поля нет.
+   */
+  reset: z
+    .strictObject({
+      performed: z.boolean(),
+      spent: z.number().int().min(0).optional(),
+      note: z.string().optional(),
+    })
+    .optional(),
 });
 
 export const approveDataSchema = z.strictObject({
@@ -1709,6 +1997,19 @@ export const reapproveDataSchema = z.strictObject({
   previousPolicyDigest: digestSchema,
   /** Раунд ревью плана, на котором держится согласование. */
   round: z.number().int().positive().optional(),
+});
+
+/** Совместимость с Relay v1 по договору REST и capabilities (alpha.60). */
+export const relayCompatibilitySchema = z.strictObject({
+  provider: z.literal('relay-v1-http'),
+  contractVersion: z.number().int().nullable(),
+  taskContext: z.boolean(),
+  taskContextUsed: z.boolean(),
+  level: z.enum(['recommended', 'below-recommended']),
+  minimum: z.string(),
+  recommended: z.string(),
+  line: z.string(),
+  lineEn: z.string(),
 });
 
 export const doctorDataSchema = z.strictObject({
@@ -1803,9 +2104,19 @@ export const doctorDataSchema = z.strictObject({
    * одной фазы больше `runTimeoutMs` (`timeBudgetWarnings`); советы о ресурсах
    * машины — `DEPENDENCY_STORE_RECOMMENDED`, `LOW_RESOURCES`,
    * `DIGEST_THREADS_INVALID` (`resourceWarnings`); расхождение manifest
-   * проекта рядом с политикой и её полей по слою lean — `LEAN_MISMATCH`.
+   * проекта рядом с политикой и её полей по слою lean — `LEAN_MISMATCH`;
+   * Relay ниже рекомендуемой или несовместим — `RELAY_COMPATIBILITY`.
    */
   warnings: z.array(z.string()).optional(),
+  /** Сверка Relay по связке (`--source` или connector.json рядом с политикой), alpha.60. */
+  relay: z
+    .strictObject({
+      source: z.string(),
+      compatibility: relayCompatibilitySchema.optional(),
+      code: z.string().optional(),
+      error: z.string().optional(),
+    })
+    .optional(),
 });
 
 /** Ответ `gates`: исход каждого gate проверки на коммите вне попытки. */
@@ -1905,6 +2216,8 @@ export const smokeDataSchema = z.strictObject({
           roles: z.array(z.string()),
           mechanism: z.enum(['codex-sandbox', 'sandbox-runtime', 'none']),
           network: z.boolean(),
+          /** Режим сети исполнителя: `none`, `loopback` (127.0.0.1 и ::1), `full`; `legacy` — профиль без поля `network`. */
+          networkMode: z.enum(['none', 'loopback', 'full', 'legacy']).optional(),
           commands: z.array(
             z.strictObject({
               id: z.string().min(1).max(200),
@@ -1917,6 +2230,7 @@ export const smokeDataSchema = z.strictObject({
                 .enum([
                   'listen-denied',
                   'network-denied',
+                  'network-open',
                   'write-denied',
                   'process-abort',
                   'missing-tool',
@@ -1955,6 +2269,34 @@ const ownershipSchema = z.strictObject({
   note: z.string(),
 });
 
+/** Открытый вопрос владельцу из backend (документ `Вопрос: …`), только чтение (alpha.60). */
+export const sourceQuestionSchema = z.strictObject({
+  id: z.string(),
+  key: z.string(),
+  title: z.string(),
+  revision: z.number().int(),
+  question: z.string().optional(),
+  options: z.array(z.string()),
+  recommendation: z.string().optional(),
+  provisional: z.string().optional(),
+  targets: z.array(z.string()),
+  updatedAt: z.string().optional(),
+  url: z.string().optional(),
+});
+const sourceQuestionsSchema = z.strictObject({
+  items: z.array(sourceQuestionSchema),
+  total: z.number().int().nonnegative(),
+  error: z.string().optional(),
+});
+
+const taskContextManifestSchema = z.strictObject({
+  status: z.enum(['included', 'too-large']),
+  records: z.number().int().nonnegative().optional(),
+  bytes: z.number().int().nonnegative().optional(),
+  digest: digestSchema.optional(),
+  reason: z.string().optional(),
+});
+
 export const sourceCheckDataSchema = z.strictObject({
   provider: providerSchema,
   projectId: z.string(),
@@ -1966,9 +2308,18 @@ export const sourceCheckDataSchema = z.strictObject({
     .optional(),
   history: z.strictObject({ enabled: z.boolean(), capability: z.boolean() }),
   mapping: z.array(
-    z.strictObject({ ref: z.string(), key: z.string().optional(), problems: z.array(z.string()) }),
+    z.strictObject({
+      ref: z.string(),
+      key: z.string().optional(),
+      problems: z.array(z.string()),
+      /** Контекст исполнения задачи из backend прочитан (`included`) или не помещается (`too-large`). */
+      taskContext: z.enum(['included', 'too-large']).optional(),
+    }),
   ),
   ownership: ownershipSchema,
+  compatibility: relayCompatibilitySchema.optional(),
+  /** Предупреждения простыми словами (не отказ): Relay ниже рекомендуемой, задач ещё нет. */
+  warnings: z.array(z.string()).optional(),
   problems: z.array(z.string()),
 });
 
@@ -1996,6 +2347,7 @@ export const sourceSnapshotDataSchema = z.strictObject({
   problems: z.array(z.string()),
   truncated: z.array(z.string()),
   baseline: baselineViewSchema.optional(),
+  compatibility: relayCompatibilitySchema.optional(),
   tasks: z.array(
     z.strictObject({
       identity: z.string(),
@@ -2004,6 +2356,7 @@ export const sourceSnapshotDataSchema = z.strictObject({
       semanticDigest: digestSchema,
       casRevision: z.number().int(),
       column: z.string(),
+      taskContext: taskContextManifestSchema.optional(),
     }),
   ),
   files: z.strictObject({ graph: z.string(), context: z.string(), manifest: z.string() }),
@@ -2031,6 +2384,9 @@ export const sourceStatusDataSchema = z.strictObject({
   connector: idSchema,
   provider: providerSchema,
   projectId: z.string(),
+  compatibility: relayCompatibilitySchema.optional(),
+  warnings: z.array(z.string()).optional(),
+  questions: sourceQuestionsSchema.optional(),
   snapshot: z
     .strictObject({
       revision: digestSchema,
@@ -2357,6 +2713,34 @@ export const inputApplyDataSchema = z.strictObject({
   joint: z.literal(true).optional(),
   blocker: blocker.optional(),
 });
+/** Ответ `input-resolve` и `input-carry`: что сделано за один вызов. */
+const inputResolveFields = {
+  requestId: requestIdSchema,
+  changed: z.boolean(),
+  lifecycle: z.enum(inputLifecycles),
+  /** Снимок с ответом (хранится по digest). */
+  contextDigest: digestSchema.optional(),
+  /** Раунд ревью плана, на котором основано применение. */
+  reviewRound: z.number().int().positive().optional(),
+  /** `reused` — прежний одобренный раунд этого снимка; `new` — проведён сейчас. */
+  reviewed: z.enum(['reused', 'new']).optional(),
+  work: z
+    .strictObject({ id: idSchema, status: workStatusSchema, attempt: z.number().int().min(0) })
+    .optional(),
+  active: z.array(z.strictObject({ id: z.string().min(1), workId: idSchema })).optional(),
+  joint: z.literal(true).optional(),
+  blocker: blocker.optional(),
+};
+export const inputResolveDataSchema = z.strictObject({
+  ...inputResolveFields,
+  applied: z.boolean(),
+});
+export const inputCarryDataSchema = z.strictObject({
+  ...inputResolveFields,
+  carried: z.boolean(),
+  /** Вопрос заменён этим вызовом (исходная остановка не держалась). */
+  superseded: z.boolean(),
+});
 export const inputCloseDataSchema = z.strictObject({
   requestId: requestIdSchema,
   lifecycle: z.enum(inputLifecycles),
@@ -2369,6 +2753,7 @@ export const cliDataSchemas = {
   validate: validateDataSchema,
   'review-plan': reviewRecordSchema,
   'review-contract': reviewRecordSchema,
+  'review-accept': reviewAcceptDataSchema,
   approve: approveDataSchema,
   reapprove: reapproveDataSchema,
   run: runDataSchema,
@@ -2406,9 +2791,12 @@ export const cliDataSchemas = {
   'input-apply': inputApplyDataSchema,
   'input-cancel': inputCloseDataSchema,
   'input-supersede': inputCloseDataSchema,
+  'input-resolve': inputResolveDataSchema,
+  'input-carry': inputCarryDataSchema,
   gates: gatesDataSchema,
   'review-code': codeReviewRecordSchema,
   smoke: smokeDataSchema,
+  update: updateDataSchema,
   version: versionDataSchema,
 } as const satisfies Record<CliCommand | 'version', z.ZodType>;
 

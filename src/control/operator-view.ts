@@ -5,7 +5,9 @@
 // (`operatorView`, `workDetailView`) только раскладывает и маскирует.
 // Только чтение: каталог состояния не создаётся и не пишется.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+import { pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { z } from 'zod';
@@ -32,7 +34,12 @@ import {
   type AttemptState,
 } from '../contracts/index.ts';
 import { HARNESS_VERSION } from '../package.ts';
-import { callCostKnown, failureBucketOf, interruptedByShutdown } from '../report/compute.ts';
+import {
+  attemptCounted,
+  callCostKnown,
+  failureBucketOf,
+  interruptedByShutdown,
+} from '../report/compute.ts';
 import { failurePlainOf } from '../report/failure-plain.ts';
 import { notLaunched, reviewFacts } from '../report/verification.ts';
 import { callRecords } from '../engine/usage.ts';
@@ -49,6 +56,7 @@ import {
   workDetailView,
   type OperatorActivityInput,
   type OperatorReviewInput,
+  type OperatorSourceInput,
   type OperatorView,
   type OperatorViewInput,
   type OperatorViewOptions,
@@ -59,12 +67,14 @@ import { Engine } from '../engine/engine.ts';
 import { standaloneHost } from '../engine/standalone.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { Harness } from './harness.ts';
-import { statusOf } from './status.ts';
+import { carriedInput, statusOf } from './status.ts';
 import { acceptedTargets } from './target.ts';
 import { WorkflowQueue } from './workflow.ts';
 import { reviewRoundCap } from './review.ts';
 import { reviewSubjectSummary } from './review-summary.ts';
 import { stageOfStep } from './stage.ts';
+import { cachedUpdates, loadUpdatesConfig } from '../update/check.ts';
+import type { UpdatesView } from '../projections/operator-view.ts';
 
 type StatusData = z.output<typeof statusDataSchema>;
 /** Поручение `status`; поля alpha.55 (`verification`, `lastFailure`, `plain`) — по наличию. */
@@ -139,9 +149,9 @@ export function viewPolicy(stateDir: string, policyPath?: string): ViewPolicy {
             {
               code: 'POLICY_DIGEST_MISMATCH',
               message:
-                'политика --policy отличается от привязанной к состоянию: представление построено по --policy',
+                'Файл политики, переданный панели, отличается от политики, с которой работает harness: настройки и числа показаны по файлу. Чтобы видеть действующую политику, откройте представление без --policy.',
               messageEn:
-                'the --policy file differs from the policy bound to the state: the view uses --policy',
+                'The policy file given to the panel differs from the policy harness runs with: settings and numbers follow the file. To see the policy in effect, open the view without --policy.',
             },
           ]
         : [];
@@ -837,6 +847,18 @@ export function collectOperatorViewInput(
         },
         attemptSummary: {
           ...summary,
+          // Класс отказа и засчитана ли попытка — фактами, не фразой (P13).
+          ...((last) =>
+            last
+              ? {
+                  lastFailure: {
+                    ...last,
+                    ...((a) => (a ? { counted: attemptCounted(a, own, policy.maxAttempts) } : {}))(
+                      own.find((x) => x.id === last.runId),
+                    ),
+                  },
+                }
+              : {})(summary.lastFailure),
           ...((facts) => (facts ? { lineEn: attemptLine(facts, 'en'), lineFacts: facts } : {}))(
             attemptFacts(summary, sw.status === 'done' || sw.status === 'cancelled'),
           ),
@@ -872,8 +894,13 @@ export function collectOperatorViewInput(
     const questions = requestsOf(v)
       .filter((r) => r.kind === 'question')
       .flatMap((r) => {
-        const state = inputStateOf(r) ?? (closed.has(r.workId) ? r.lifecycle : undefined);
-        if (!state) return [];
+        const raw = inputStateOf(r) ?? (closed.has(r.workId) ? r.lifecycle : undefined);
+        if (!raw) return [];
+        // Ответ у идущей попытки — `delivered` (как `status.works[].input`).
+        const carried = closed.has(r.workId)
+          ? undefined
+          : carriedInput({ requestId: r.id, state: raw }, attemptsOf.get(r.workId) ?? []);
+        const state = carried?.state ?? raw;
         const impact = (r.question as { impact?: string | null }).impact ?? undefined;
         const plain = plainOf(r);
         const last = r.answers.at(-1);
@@ -901,6 +928,10 @@ export function collectOperatorViewInput(
                 }
               : {}),
             ...(closed.has(r.workId) ? { closed: true } : {}),
+            ...(carried?.carrier ? { carrier: carried.carrier } : {}),
+            options: r.question.options.map((o) => ({ id: o.id, label: o.label })),
+            recommended: r.question.recommended,
+            ...(r.question.rationale ? { rationale: r.question.rationale } : {}),
             leadMay: leadMayAnswer(r, inputPolicy),
           },
         ];
@@ -981,14 +1012,172 @@ export function collectOperatorViewInput(
           : {}),
         ...(queue?.actor !== undefined ? { actor: queue.actor } : {}),
         ...(queue?.action ? { action: queue.action } : {}),
+        ...(status.runner
+          ? {
+              runner: status.runner.state,
+              ...(status.runner.restartBy ? { restartBy: status.runner.restartBy } : {}),
+              line: status.runner.line,
+              lineEn: status.runner.lineEn,
+            }
+          : {}),
       },
       ...(controller ? { controller: { leaseUntil: controller.leaseUntil } } : {}),
       ...(status.budgets ? { budgets: status.budgets.budgets } : {}),
       activity,
       warnings: view.warnings,
       mask: maskContextOf(policy, view.baseDir, h.stateDir),
+      ...((sources) => (sources.length ? { sources } : {}))(connectorSources(h.stateDir, known)),
     };
   });
+}
+
+/**
+ * Связки с источниками задач в каталоге состояния
+ * (`<state>/connectors/*.sqlite`): срез последнего снимка, совместимость и
+ * вопросы владельцу из последнего наблюдения. Только чтение, без сети;
+ * повреждённая или чужая база пропускается (представление не отказывает).
+ */
+export function connectorSources(
+  stateDir: string,
+  works: ReadonlySet<string> = new Set(),
+): OperatorSourceInput[] {
+  const dir = join(resolve(stateDir), 'connectors');
+  let files: string[];
+  try {
+    files = readdirSync(dir)
+      .filter((f) => f.endsWith('.sqlite'))
+      .sort();
+  } catch {
+    return [];
+  }
+  const out: OperatorSourceInput[] = [];
+  for (const file of files) {
+    const path = join(dir, file);
+    // Без журнала — неизменяемое открытие (ни одного файла рядом с базой); если
+    // за время чтения база изменилась, чтение повторяется обычным открытием.
+    const mark = () => {
+      const st = statSync(path, { throwIfNoEntry: false });
+      return JSON.stringify([
+        st?.size,
+        st?.mtimeMs,
+        existsSync(path + '-wal'),
+        existsSync(path + '-journal'),
+      ]);
+    };
+    const before = mark();
+    const journal = existsSync(path + '-wal') || existsSync(path + '-journal');
+    let source = readConnectorDb(path, file, works, !journal);
+    if (!journal && mark() !== before) source = readConnectorDb(path, file, works, false);
+    if (source) out.push(source);
+  }
+  return out;
+}
+
+function readConnectorDb(
+  path: string,
+  file: string,
+  works: ReadonlySet<string>,
+  immutable: boolean,
+): OperatorSourceInput | undefined {
+  let db: DatabaseSync | undefined;
+  try {
+    if (!immutable) db = new DatabaseSync(path, { readOnly: true });
+    else {
+      const url = pathToFileURL(path);
+      url.searchParams.set('mode', 'ro');
+      url.searchParams.set('immutable', '1');
+      db = new DatabaseSync(url, { readOnly: true });
+    }
+    const meta = (k: string) =>
+      (db!.prepare('SELECT value FROM meta WHERE key=?').get(k) as { value: string } | undefined)
+        ?.value;
+    const provider = meta('provider');
+    const projectId = meta('projectId');
+    // Только база коннектора известной схемы: чужая или другой версии — пропуск.
+    if (!provider || !projectId || meta('schema') !== '1') return undefined;
+    const row = db.prepare('SELECT data FROM snapshots ORDER BY rowid DESC LIMIT 1').get() as
+      { data: string } | undefined;
+    const manifest = row
+      ? (JSON.parse(row.data) as { manifest?: SnapshotManifestLike }).manifest
+      : undefined;
+    let observation: RelayObservationLike | undefined;
+    try {
+      const o = db.prepare('SELECT data FROM observations WHERE key=?').get('relay') as
+        { data: string } | undefined;
+      observation = o ? (JSON.parse(o.data) as RelayObservationLike) : undefined;
+    } catch {
+      observation = undefined;
+    }
+    if (!manifest && !observation) return undefined;
+    const connector =
+      manifest?.connector ?? observation?.connector ?? file.replace(/\.sqlite$/, '');
+    const compatibility = observation?.compatibility ?? manifest?.compatibility;
+    // Срез — из последнего чтения (наблюдение), а не из записи снимка: запись
+    // той же ревизии не обновляется, а колонка и зависимости меняются без неё.
+    const scope = observation?.scope ?? {
+      readAt: manifest?.readAt,
+      tasks: manifest?.tasks ?? [],
+      problems: manifest?.problems ?? [],
+    };
+    return {
+      connector,
+      provider,
+      tasks: scope.tasks.map((t) => ({
+        id: t.id,
+        key: t.key,
+        ...(t.title ? { title: t.title } : {}),
+        orderId: t.orderId,
+        ...(works.has(t.orderId) ? { workId: t.orderId } : {}),
+        problems: scope.problems
+          .filter((p) => p.taskId === t.id)
+          .map((p) => ({ code: p.code, message: p.message })),
+      })),
+      ...(compatibility
+        ? {
+            compatibility: {
+              level: compatibility.level,
+              taskContext: compatibility.taskContext,
+              taskContextUsed: compatibility.taskContextUsed,
+              contractVersion: compatibility.contractVersion,
+              recommended: compatibility.recommended,
+            },
+          }
+        : {}),
+      ...((at) => (at ? { observedAt: at } : {}))(observation?.at ?? manifest?.readAt),
+      ...(observation?.questions ? { questions: observation.questions.items } : {}),
+    };
+  } catch {
+    /* не база коннектора или другой версии — пропустить */
+    return undefined;
+  } finally {
+    db?.close();
+  }
+}
+
+/** Поля manifest снимка коннектора, которые читает представление. */
+interface SnapshotManifestLike {
+  connector?: string;
+  readAt?: string;
+  tasks?: { id: string; key: string; title?: string; orderId: string }[];
+  problems?: { taskId: string; code: string; message: string }[];
+  compatibility?: RelayObservationLike['compatibility'];
+}
+interface RelayObservationLike {
+  at?: string;
+  connector?: string;
+  compatibility?: {
+    level: string;
+    taskContext: boolean;
+    taskContextUsed: boolean;
+    contractVersion: number | null;
+    recommended: string;
+  };
+  questions?: { items: NonNullable<OperatorSourceInput['questions']> };
+  scope?: {
+    readAt?: string;
+    tasks: { id: string; key: string; title?: string; orderId: string }[];
+    problems: { taskId: string; code: string; message: string }[];
+  };
 }
 
 /** Что маскировать: домашний каталог, корни репозиториев и каталог политики, секреты политики. */
@@ -1035,6 +1224,7 @@ function emptyInput(policy: ViewPolicy, now: number, stateDir: string): Operator
       },
     ],
     mask: maskContextOf(policy.policy, policy.baseDir, stateDir),
+    ...((sources) => (sources.length ? { sources } : {}))(connectorSources(stateDir)),
   };
 }
 
@@ -1061,10 +1251,11 @@ export function harnessView(options: HarnessViewOptions): OperatorView | WorkDet
     ...(options.titles !== undefined ? { titles: options.titles } : {}),
     ...(options.lang ? { lang: options.lang } : {}),
   };
+  const updates = options.workId === undefined ? updatesInput(stateDir, policy.baseDir) : undefined;
   const project = (input: OperatorViewInput) =>
     options.workId !== undefined
       ? workDetailView(input, options.workId, projection)
-      : operatorView(input, projection);
+      : operatorView(updates ? { ...input, updates } : input, projection);
   if (!existsSync(join(stateDir, 'state.sqlite')))
     return project(emptyInput(policy, options.now ?? Date.now(), stateDir));
   // Однократное чтение без файлов в каталоге состояния (как `report`):
@@ -1095,4 +1286,35 @@ export function harnessView(options: HarnessViewOptions): OperatorView | WorkDet
       );
     },
   );
+}
+
+/**
+ * Обновления для представления: последняя проверка `harness update --check`
+ * из `<state>-updates/last-check.json` и режим из `.harness/updates.json`.
+ * Ни настройки, ни проверки — поля нет; настройка не по схеме — тоже нет
+ * (представление не ломается, отказ видно в `harness update`).
+ */
+function updatesInput(stateDir: string, baseDir: string): UpdatesView | undefined {
+  try {
+    const { config, exists } = loadUpdatesConfig(baseDir);
+    const cached = cachedUpdates(stateDir, config);
+    if (!cached || (!exists && cached.state === 'not-checked')) return undefined;
+    const c = cached.check;
+    const current =
+      c && cached.state !== 'up-to-date'
+        ? c.current
+        : { harness: HARNESS_VERSION, ...(c?.current.ui ? { ui: c.current.ui } : {}) };
+    return {
+      state: cached.state,
+      mode: config.mode,
+      current,
+      ...(c?.available && cached.state !== 'up-to-date' ? { available: c.available } : {}),
+      ...(c ? { checkedAt: c.checkedAt } : {}),
+      line: cached.line,
+      ...(c?.whatsNew?.length && cached.state !== 'up-to-date' ? { whatsNew: c.whatsNew } : {}),
+      ...(c?.command && cached.state !== 'up-to-date' ? { command: c.command } : {}),
+    };
+  } catch {
+    return undefined;
+  }
 }

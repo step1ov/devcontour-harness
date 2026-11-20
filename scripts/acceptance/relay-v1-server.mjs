@@ -134,6 +134,18 @@ export function buildInfo(paths = relayV1Paths()) {
   };
 }
 
+let portCounter = 0;
+/**
+ * Порт сервера: `options.port`, иначе от `DC_RELAY_V1_PORT_BASE` (свой
+ * диапазон на процесс), иначе 0 — свободный порт системы.
+ */
+function serverPort(options) {
+  if (options.port !== undefined) return options.port;
+  const base = Number(process.env.DC_RELAY_V1_PORT_BASE);
+  if (!Number.isInteger(base) || base <= 0) return 0;
+  return base + (process.pid % 20) * 50 + (portCounter++ % 50);
+}
+
 /**
  * Поднимает изолированный сервер с новым проектом. Возвращает url, projectId,
  * REST-хелперы для fixtures и `stop()` (обязательно вызвать в finally).
@@ -175,7 +187,7 @@ export async function startRelayServer(options = {}) {
         '--config',
         config,
         '--port',
-        '0',
+        String(serverPort(options)),
         '--actor',
         'relay-fixture',
         '--format',

@@ -13,11 +13,10 @@ import {
 } from '../contracts/index.ts';
 import { callRecords, knownCost } from '../engine/usage.ts';
 import { reviewRoundCap } from './review.ts';
+import { spendText } from './stage.ts';
 
 /** Предел предметов в сводке ревью `status` и `explain`: последние по времени раунда. */
 export const REVIEW_SUMMARY_ROWS = 50;
-
-const usd = (x: number) => '$' + x.toFixed(2);
 
 /**
  * Сводка ревью плана и контрактов по хранилищу (`status`, `explain`): на
@@ -96,7 +95,7 @@ export function reviewSubjectSummary(
   const line = [
     `${r.kind === 'plan' ? 'план' : 'контракт'} ${r.subject}: ${reviewVerdictText(r.approved, counts, 'ru')}`,
     `раундов ${r.round}${max === null ? '' : '/' + max}`,
-    `ревью ${usd(spend.knownUsd)}${spend.unknownCalls ? ` + вызовов без стоимости ${spend.unknownCalls}` : ''}`,
+    `ревью ${spendText(spend, 'ru')}`,
     ...(escalation
       ? [
           `ждёт решения оператора: находок ${waiting.length} открыты ${REVIEW_ESCALATION_ROUNDS}+ раундов`,

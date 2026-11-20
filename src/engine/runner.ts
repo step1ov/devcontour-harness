@@ -13,6 +13,7 @@ import {
   implementationResultSchema,
   codeReviewHistory,
   codeReviewScope,
+  previousReviewRound,
   checkCodeReview,
   logicalReview,
   type CallRecord,
@@ -22,6 +23,7 @@ import {
   type ReviewRound,
   type CodeReviewVerdict,
   type CodeReviewHistory,
+  type LateFinding,
   type ReviewRequestFindings,
   REVIEW_ITEMS_LIMIT,
   storedReviewResultSchema,
@@ -173,6 +175,12 @@ import { TaskFailure, type FailureKind } from './failure.ts';
 import { activeOf, crashedRecheck, namesFailingCases, type Engine } from './engine.ts';
 import { environmentBlockOf, writerScratch } from './writer-block.ts';
 import { prompt } from './prompt.ts';
+import {
+  FEEDBACK_CASE_LIMIT,
+  FEEDBACK_TOTAL_LIMIT,
+  gateFeedback,
+  type GateFeedback,
+} from './gate-feedback.ts';
 import { scopeViolations } from './scope.ts';
 import { generatorNote, runGenerators, selectGenerators } from '../verification/generators.ts';
 import {
@@ -360,6 +368,11 @@ export class Runner {
   private placement?: CheckoutRoot;
   /** Когда истекает текущий предел времени попытки: от остатка считается бюджет хранилища. */
   private phaseDeadlines = new Map<string, number>();
+  /**
+   * Текст провала gates попытки-источника для writer продолжения (по ID
+   * попытки): собирается при наложении черновика, расходуется запросом.
+   */
+  private gateFeedback = new Map<string, GateFeedback>();
   /**
    * Действующий корень рабочих деревьев (`checkout-root.ts`): хост
    * показывает его в диагностике. Выбирается один раз на исполнитель.
@@ -1469,6 +1482,7 @@ export class Runner {
     work: WorkState,
     repoPath: string,
     cwd: string,
+    redact: Redactor,
   ): Promise<AttemptState> {
     const draft = this.engine.read((v) => continuableDraft(v, work, attempt.id));
     if (!draft) return attempt;
@@ -1523,6 +1537,17 @@ export class Runner {
     };
     await writeFile(join(dir, 'continuation.json'), JSON.stringify(continuedFrom, null, 2));
     this.engine.continuation(attempt.id, attempt.token, continuedFrom);
+    // Кандидат отклонён проверкой: writer получает текст провала (сообщение и
+    // ожидаемое/полученное упавших testcases), а не только их имена. Блок
+    // собирается и тогда, когда изменения не наложились: провал всё равно
+    // описывает, чего ждут проверки.
+    if (draft.kind === 'candidate' && draft.reason === 'gate') {
+      const source = this.engine.read((v) => v.attempt(draft.runId));
+      const feedback = source
+        ? await gateFeedback(source, redact).catch(() => undefined)
+        : undefined;
+      if (feedback) this.gateFeedback.set(attempt.id, feedback);
+    }
     return { ...attempt, continuedFrom };
   }
 
@@ -1713,7 +1738,7 @@ export class Runner {
               // Черновик прежней попытки — до установки: манифесты, которые он
               // меняет, исполнитель увидит уже установленными.
               if (!attempt.reusedFrom)
-                attempt = await this.continueDraft(attempt, work, repoPath, cwd);
+                attempt = await this.continueDraft(attempt, work, repoPath, cwd, execution.redact);
               // Зависимости в дереве исполнителя — до его работы и до снимка
               // защищённых путей: песочница исполнителя установку не пропускает.
               // Взятый кандидат исполнителя не вызывает — ставить незачем.
@@ -1782,6 +1807,56 @@ export class Runner {
                         );
                       throw error;
                     }
+                    const feedback = this.gateFeedback.get(attempt.id);
+                    this.gateFeedback.delete(attempt.id);
+                    const request = prompt({
+                      work,
+                      attempt,
+                      history: this.history(attempt),
+                      context,
+                      gates: gates.map((g) => ({ id: g.id, command: g.command })),
+                      inputPolicy: attempt.inputPolicy ?? inputPolicyOf(this.policy),
+                      notes: [
+                        ...this.notes(attempt, false),
+                        ...(await this.hostNotes(work, attempt, false)),
+                        ...(dependencies ? [writerDependenciesNote(dependencies)] : []),
+                        ...(repo.generators?.length ? [generatorNote(repo.generators)!] : []),
+                        ALREADY_SATISFIED_WRITER_NOTE,
+                      ],
+                      // Открытые находки ревью с выданными ID — из истории
+                      // поручения; только когда reviewer ведёт протокол
+                      // переходов (иначе их никто не закроет).
+                      ...((await this.reviewProtocol(attempt.reviewer))
+                        ? {
+                            findings: this.engine.read((v) =>
+                              codeReviewHistory(
+                                v.attempts(attempt.workId),
+                                codeReviewScope(attempt.repositoryId, attempt.workId),
+                                v.work(attempt.workId)?.codeReviewDecisions,
+                              ),
+                            ),
+                          }
+                        : {}),
+                      ...(feedback ? { feedback: feedback.text } : {}),
+                    });
+                    // Блок провала и digest запроса, в котором он ушёл, — для
+                    // аудита; сам запрос (stdin) не сохраняется.
+                    if (feedback)
+                      await writeFile(
+                        join(dir, 'feedback.json'),
+                        JSON.stringify(
+                          {
+                            ...feedback,
+                            limits: {
+                              perCase: FEEDBACK_CASE_LIMIT,
+                              total: FEEDBACK_TOTAL_LIMIT,
+                            },
+                            promptDigest: sha256(request),
+                          },
+                          null,
+                          2,
+                        ),
+                      );
                     const response = await this.call(
                       this.adapter(attempt.runtime),
                       {
@@ -1790,34 +1865,7 @@ export class Runner {
                         cwd,
                         dir,
                         phase: 'candidate',
-                        prompt: prompt({
-                          work,
-                          attempt,
-                          history: this.history(attempt),
-                          context,
-                          gates: gates.map((g) => ({ id: g.id, command: g.command })),
-                          inputPolicy: attempt.inputPolicy ?? inputPolicyOf(this.policy),
-                          notes: [
-                            ...this.notes(attempt, false),
-                            ...(await this.hostNotes(work, attempt, false)),
-                            ...(dependencies ? [writerDependenciesNote(dependencies)] : []),
-                            ...(repo.generators?.length ? [generatorNote(repo.generators)!] : []),
-                            ALREADY_SATISFIED_WRITER_NOTE,
-                          ],
-                          // Открытые находки ревью с выданными ID — из истории
-                          // поручения; только когда reviewer ведёт протокол
-                          // переходов (иначе их никто не закроет).
-                          ...((await this.reviewProtocol(attempt.reviewer))
-                            ? {
-                                findings: this.engine.read((v) =>
-                                  codeReviewHistory(
-                                    v.attempts(attempt.workId),
-                                    codeReviewScope(attempt.repositoryId, attempt.workId),
-                                  ),
-                                ),
-                              }
-                            : {}),
-                        }),
+                        prompt: request,
                       },
                       signal,
                     );
@@ -2203,6 +2251,7 @@ export class Runner {
       clearInterval(heartbeat);
       this.selfChecks.delete(attempt.id);
       this.portWarnings.delete(attempt.id);
+      this.gateFeedback.delete(attempt.id);
       // Рабочие деревья попытки убираются; ветка попытки и объекты остаются —
       // по ним recovery и следующая попытка видят кандидата. Снимки
       // зависимостей: SHA, tree и artifacts записаны в попытке. Что убрать не
@@ -3295,7 +3344,7 @@ export class Runner {
     const legacy = !(await this.reviewProtocol(attempt.reviewer));
     // История находок и счёт вызовов — по записанному состоянию всех попыток
     // поручения: новая попытка, фаза и рестарт их не обнуляют.
-    const { history, lastIssues, spec } = this.engine.read((v) => {
+    const { history, lastIssues, spec, previousRound } = this.engine.read((v) => {
       const attempts = v.attempts(attempt.workId);
       const last = attempts
         .flatMap((a) => a.evidence)
@@ -3307,10 +3356,12 @@ export class Runner {
             e.reviewRound?.scope === scope &&
             e.reviewRound.protocol === 'invalid',
         );
+      const work = v.work(attempt.workId);
       return {
-        history: codeReviewHistory(attempts, scope),
+        history: codeReviewHistory(attempts, scope, work?.codeReviewDecisions),
         lastIssues: last?.reviewRound?.issues ?? [],
-        spec: v.work(attempt.workId)?.approvedDigest,
+        spec: work?.approvedDigest,
+        previousRound: previousReviewRound(attempts, scope, phase),
       };
     });
     const expected = legacy
@@ -3599,6 +3650,16 @@ export class Runner {
           : undefined;
       const unconfirmed = decision && !decision.ok ? decision.problem : undefined;
       const passed = verdict.result.approved && !unconfirmed;
+      // Поздние находки — только метка для ведущего: вердикт и gates прежние.
+      // Адаптер без протокола переходов прежних находок не видит и называет
+      // неисправленную находку заново новой: это не «движущаяся цель».
+      const late = legacy
+        ? []
+        : await lateFindings(cwd, previousRound, sha, record.findings ?? [], history.findings);
+      const lateCount = late.filter(Boolean).length;
+      const lateText = lateCount
+        ? ` [поздние находки: ${lateCount} — blocking на путях без изменений с раунда ${previousRound!.round}]`
+        : '';
       // Вердикт, новые находки с выданными ID и переходы прежних — одна запись
       // под fencing: попытка, утратившая владение, их не сохраняет.
       this.engine.evidence(attempt.id, attempt.token, {
@@ -3614,7 +3675,8 @@ export class Runner {
         digest,
         summary: redact(
           `[${inspection.mode}] ${record.summary}` +
-            (unconfirmed ? ` (не подтверждено, что приёмка уже выполнена: ${unconfirmed})` : ''),
+            (unconfirmed ? ` (не подтверждено, что приёмка уже выполнена: ${unconfirmed})` : '') +
+            lateText,
         ).slice(0, 4000),
         ...(unchanged && passed && claim && decision?.ok
           ? {
@@ -3632,6 +3694,7 @@ export class Runner {
           line: f.line ?? null,
           id: verdict.findings[i]!.id,
           status: 'open' as const,
+          ...(late[i] ? { late: late[i] } : {}),
         })),
         reviewRound: {
           ...reviewRound,
@@ -3663,7 +3726,7 @@ export class Runner {
         const pairs = classifiedOf(record.findings ?? []);
         throw new TaskFailure(
           'review',
-          'Независимое ревью отклонило результат: ' + redact(record.summary),
+          'Независимое ревью отклонило результат: ' + redact(record.summary) + lateText,
           named.length || classes.length
             ? {
                 bound: [...new Set(named.filter((p) => declared.has(p)))],
@@ -4312,6 +4375,80 @@ function protocolText(issues: ProtocolIssue[]) {
       .map((i) => `${i.path} ${i.reason}: ${i.message}`)
       .join('; ') || 'причина не записана'
   ).slice(0, 3000);
+}
+
+/** Путь находки без `./` и суффикса `:строка[:колонка]`. */
+const findingPath = (path: string) =>
+  path
+    .trim()
+    .replace(/^\.\//, '')
+    .replace(/:\d+(:\d+)?$/, '')
+    .replace(/\/+$/, '');
+
+/** Текст находки для сравнения: регистр, пунктуация и пробелы не различаются. */
+const findingText = (message: string) =>
+  message
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+
+/**
+ * Поздние находки раунда (docs/review-protocol.md §10): новая blocking-находка
+ * с путём, который не менялся между SHA прошлого валидного раунда фазы и
+ * текущим (файл или каталог не задет diff) и которая не повторяет находку
+ * прежних раундов (тот же путь и severity или почти тот же текст). Адаптер
+ * без протокола переходов меток не получает. Нет прошлого раунда, нет пути или
+ * diff не прочитан — метки нет: сомнение не делает находку поздней.
+ */
+async function lateFindings(
+  cwd: string,
+  previous: { round: number; sha: string } | undefined,
+  sha: string,
+  findings: readonly {
+    severity: string;
+    message: string;
+    path?: string | null | undefined;
+  }[],
+  /** Находки прежних раундов области: повтор одной из них — не поздняя находка. */
+  prior: readonly { severity: string; message: string; path: string | null }[],
+): Promise<(LateFinding | undefined)[]> {
+  if (!previous || !findings.some((f) => f.severity === 'blocking' && f.path?.trim()))
+    return findings.map(() => undefined);
+  let changed: string[];
+  try {
+    changed =
+      previous.sha === sha
+        ? []
+        : (await git(cwd, 'diff', '--name-only', '--no-renames', previous.sha, sha))
+            .split('\n')
+            .map((x) => x.trim())
+            .filter(Boolean);
+  } catch {
+    return findings.map(() => undefined);
+  }
+  const touched = (p: string) => changed.some((c) => c === p || c.startsWith(p + '/'));
+  const priorPaths = new Set(
+    prior.filter((x) => x.path?.trim()).map((x) => `${x.severity}\u0000${findingPath(x.path!)}`),
+  );
+  const priorTexts = prior.map((x) => findingText(x.message)).filter(Boolean);
+  // Повтор прежней находки (тот же путь и severity или почти тот же текст) —
+  // не новое замечание, даже под новым ID.
+  const repeats = (f: { severity: string; message: string }, p: string) =>
+    priorPaths.has(`${f.severity}\u0000${p}`) ||
+    ((t) =>
+      !!t &&
+      priorTexts.some(
+        (x) => x === t || (Math.min(x.length, t.length) >= 20 && (x.includes(t) || t.includes(x))),
+      ))(findingText(f.message));
+  return findings.map((f) => {
+    if (f.severity !== 'blocking' || !f.path?.trim()) return undefined;
+    const p = findingPath(f.path);
+    if (!p || touched(p) || repeats(f, p)) return undefined;
+    return {
+      since: { round: previous.round, sha: previous.sha },
+      reason: `путь ${p.slice(0, 300)} не менялся с раунда ${previous.round}`,
+    };
+  });
 }
 
 /** Структурированная история находок для запроса reviewer (`RuntimeRequest.findings`). */

@@ -1032,7 +1032,11 @@ test('explain: стадия хранилища на integration — не «ис�
     work({
       work: {
         status: 'integrating',
-        openStage: { stage: 'dependency-store', startedAt: '2026-01-01T00:00:01.000Z', preparing: true },
+        openStage: {
+          stage: 'dependency-store',
+          startedAt: '2026-01-01T00:00:01.000Z',
+          preparing: true,
+        },
       },
     }),
   );

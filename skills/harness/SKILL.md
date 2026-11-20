@@ -15,7 +15,7 @@ fencing, write scope and budgets are enforced by the harness itself, whether or
 not this file is installed.
 
 Every command takes explicit paths and prints one JSON envelope on stdout
-(`ok` with `data`, or `error`). `--human` (only `init`, `status`, `explain`, `plan-request` and `gates`) prints
+(`ok` with `data`, or `error`). `--human` (only `init`, `status`, `explain`, `plan-request`, `gates` and `update`) prints
 text instead of a successful envelope; a refusal stays JSON. Exit codes:
 0 success, 2 invalid input, 3 refusal or block, 4 infrastructure. The tool
 keeps no "current project".
@@ -341,7 +341,21 @@ probed. Resolve every
 blocked step before `run`: enable it in the policy, prepare it in `prepare`,
 move it into a harness gate (gates run outside the writer sandbox and may
 listen on localhost), or record that the product rule is waived under the
-harness (controller-mode overlay). A browser that aborts under the macOS
+harness (controller-mode overlay). For a local server the writer must start
+itself (`listen-denied`), set `"network": "loopback"` on the writer's tool
+profile: listen and connect on 127.0.0.1/::1 only, no internet — do not turn
+on the full network (`codexNetwork: true`) for it. On Linux the server and
+its client must run in one shell command; Codex needs the `network_proxy`
+feature (the probe reports `environment` otherwise), and the probe's first
+line `harness-loopback-check` proves the boundary (`network-open` means this
+codex lets external traffic through: do not run the writer with it; rerun the
+probe after every codex upgrade — real runs do not repeat this check). A
+profile without the `network` field shows `legacy`: the old boundary, with the
+runtime's web tools not explicitly closed. The mode
+also turns off the runtime's own web tools (Codex web search, Claude
+WebFetch/WebSearch); external tool servers configured in the profile stay
+outside the boundary. Changing `network` needs
+a new plan review. A browser that aborts under the macOS
 sandbox (`process-abort`) cannot run inside the writer at all.
 
 ### 8. When it stops
@@ -356,8 +370,23 @@ it returns `code`, `cause`, `phase`, `actor`, `action`, `retryPlanned`,
 | `controller` | `wait`, `retry`                                                                                                    | you: wait, or run `$H run` again                                             |
 | `lead`       | `review-plan`, `diagnose-failure`, `replan-dependents`, `wait`                                                     | you: fix the graph, policy or code by the evidence, then run                 |
 | `user`       | `fix-access`, `fix-environment`, `raise-budget`, `reset-attempts`, `user-decision`, `resume-queue`, `answer-input` | hand it to the user with the message and evidence                            |
-| `lead`       | `apply-input`                                                                                                      | you: `input-context`, `review-plan --context`, `input-target`, `input-apply` |
+| `lead`       | `apply-input`                                                                                                      | you: `input-resolve --request ID [--author A]` (or `input-carry`, see below) |
 | `null`       | `none`                                                                                                             | nothing to do                                                                |
+
+After an answer: `$H input-resolve --state D --request ID --author <your runtime>`
+builds the answer snapshot (stored by digest, no files), reviews the plan with
+it (an approved round for the same snapshot is reused, no model call), and
+applies it. If the work has moved on since the question (another attempt ran,
+or the order was edited), `input-resolve` refuses with `NOT_READY` and names
+`$H input-carry --state D --request ID --reason "…" [--author A]`, which
+supersedes the question onto the same work and carries the answer. Both take
+`--reset --reason` for exhausted attempts and `--policy F` after a policy edit.
+A policy edit does not un-apply an applied answer once the graph is
+re-approved (`reapprove` or `run`) and the approved snapshot still carries the
+answer; `run` with a changed `--context` carries applied answers into it. An
+order edit does make the answer stale — then use `input-carry`. `retry --reset`
+on a ready work resets the counter (the reply says `reset.performed`); while
+an attempt runs it refuses. Every command has `$H <command> --help`.
 
 Only `user` actions go to the human: access, environment, budgets, attempt
 resets, goal decisions, resuming a paused queue and answers to executor
@@ -374,6 +403,18 @@ context, a harness gate), then `$H retry --work <id>`. Never retry it
 unchanged. The same applies when `explain` says the same testcase failed
 twice in a row before the last attempt: read the gate log (expected and actual), fix the task or its
 context, then retry or split the task.
+
+**Code review keeps raising new findings (`REVIEW_REJECTED`).** The reviewer
+must list all blocking findings in one round. A new blocking finding on a path
+that did not change since the previous round is marked `late` in
+`$H result --work <id>` (`findings[].late`) and the failure reads «поздние
+находки: N»: a moving target. Fix real defects. For a finding that is a known
+limitation of this task (for example, test rigor beyond the acceptance), record
+it before the retry:
+`$H review-accept --state <state> --work <id> --accept-limitation <finding id>
+--reason "<why>"` (add `--actor operator` when the user decided), then
+`$H retry --work <id>`. The next round sees the decision and does not re-raise
+it without new evidence. It is not an approval and does not skip the gates.
 
 **Executor question (`INPUT_REQUIRED`, `actor: user`, `answer-input`).** The
 writer stopped and asks the human. Do not answer it yourself:
@@ -519,6 +560,25 @@ Nothing is asked again:
 2. `$H status --state <paths.state>` — `NOT_FOUND` means "never run".
 3. `$H explain --state <paths.state> --policy <repo>/.harness/policy.json`.
 4. Read `.harness/work/*.json` and the notes.
+5. With a task-source connector (`connector.json` next to the policy),
+   `$H doctor --policy <repo>/.harness/policy.json` also checks the source
+   version. When `warnings` carries its compatibility line, tell the operator
+   that line once: the writer works without the full task context until the
+   source is updated. Product questions you record in the task source as
+   question documents appear in `$H view` (`sourceQuestions`) after the next
+   `source-snapshot` or `run --source`; the owner answers them there.
+6. Updates, one line to the user: `$H update --check --state <paths.state>`
+   (it reaches only the npm registry, no telemetry;
+   offline it answers «Не удалось проверить обновления» and nothing else
+   changes). With `"mode": "off"` in `.harness/updates.json` skip the call and
+   say nothing. Quote `data.line` as is: «Доступна harness … — что нового: …;
+   обновить — …», «Обновлений нет», or «Нужно ваше решение: …» (a format
+   change: never apply it yourself; ask the user and, with their yes, run the
+   `data.check.command`). Apply an `available` pair only when the user asks
+   or the mode is `auto`: `$H update --apply --state <paths.state> --wait 30`
+   — it never installs during a run, copies the state, checks the new version
+   and goes back by itself on failure; report `data.line`. Do not run it in
+   the middle of your own `run`.
 
 ### 11. Notes
 

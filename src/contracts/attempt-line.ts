@@ -31,6 +31,8 @@ const words = {
     neutralOut: (used: number, max: number) =>
       `исчерпан предел незасчитанных отказов ${used} из ${max}: повтор — только со сбросом`,
     left: (left: number, max: number) => `осталось попыток ${left} из ${max}`,
+    lastRunning: (used: number, max: number) =>
+      `идёт последняя засчитанная попытка (${used} из ${max})`,
     repairs: (left: number, budget: number) => `, восстановлений группы ${left} из ${budget}`,
   },
   en: {
@@ -43,6 +45,8 @@ const words = {
     neutralOut: (used: number, max: number) =>
       `the limit of uncounted failures is used up (${used} of ${max}): retry only after a reset`,
     left: (left: number, max: number) => `attempts left ${left} of ${max}`,
+    lastRunning: (used: number, max: number) =>
+      `the last counted attempt is running (${used} of ${max})`,
     repairs: (left: number, budget: number) => `, group repairs left ${left} of ${budget}`,
   },
 } as const;
@@ -76,7 +80,11 @@ export function attemptLine(
   const tail =
     (f.neutralOut
       ? w.neutralOut(f.neutralOut.used, f.neutralOut.max)
-      : w.left(left(f.attempts.used, f.attempts.max), f.attempts.max)) +
+      : // Идёт попытка на пределе: «осталось 0» рядом с «идёт» читается как
+        // исчерпание, а сброс понадобится, только если она не удастся.
+        f.active > 0 && f.attempts.used >= f.attempts.max
+        ? w.lastRunning(f.attempts.used, f.attempts.max)
+        : w.left(left(f.attempts.used, f.attempts.max), f.attempts.max)) +
     (f.repairs ? w.repairs(left(f.repairs.used, f.repairs.budget), f.repairs.budget) : '');
   const rest = [w.timeouts(f.timeouts), w.interrupted(f.interrupted), w.accepted(f.accepted)];
   const lineWith = (shown: number) => {

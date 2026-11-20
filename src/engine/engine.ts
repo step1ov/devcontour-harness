@@ -2,6 +2,10 @@ import { RU, ruCount } from '../contracts/plural.ts';
 import { randomUUID } from 'node:crypto';
 import {
   STAGE_NAME_LIMIT,
+  codeReviewDecisionSchema,
+  codeReviewHistory,
+  codeReviewScope,
+  type CodeReviewDecision,
   roleBinding,
   integrationReuseProblem,
   executionDigest,
@@ -300,6 +304,9 @@ export function activeOf(v: ExecutionView): AttemptState[] {
   return v.activeAttempts ? v.activeAttempts() : v.attempts().filter((a) => a.status === 'active');
 }
 
+/** Операция паузы `harness update` (пакеты harness и панели меняются). */
+export const UPDATE_PAUSE_OPERATION = 'harness-update';
+
 export class Engine {
   readonly host: ExecutionHost;
   readonly policy: ExecutionPolicy;
@@ -396,6 +403,7 @@ export class Engine {
     const digest = workGraphDigest(graph);
     const key = digestOf([graph.source.connector, graph.source.ref, graph.source.revision]);
     return this.tx('graph.registered', (tx) => {
+      this.assertNoUpdate(tx);
       const known = tx.local('run-keys', WORKSPACE_OWNER, key);
       const existing = tx.graph(graph.id);
       if (known && known.digest !== digest)
@@ -629,6 +637,7 @@ export class Engine {
     } = {},
   ) {
     return this.tx('graph.approved', (tx) => {
+      this.assertNoUpdate(tx);
       const { graph, last } = this.approvalCheck(tx, graphId, actor);
       // Снимок с ответом на вопрос исполнителя становится действующим только
       // через applyInput: обходное согласование его не активирует.
@@ -662,6 +671,45 @@ export class Engine {
   approvalCheck(tx: ExecutionTransaction, graphId: string, actor: TechnicalApproval['actor']) {
     this.assertCurrentPolicy(tx);
     return this.approvalRules(tx, graphId, actor);
+  }
+
+  /**
+   * Перепроверить основание применённого, но ещё не переданного ответа сейчас,
+   * а не при следующей выдаче: разошлось (постановка, контекст, у хоста —
+   * политика) — запрос возвращается в `answered` с записью `stale`, как при
+   * claim. Возвращает текущий запрос.
+   */
+  refreshApplied(id: string) {
+    return this.tx('input.applied', (tx) => {
+      const { request } = this.requestIn(tx, id);
+      const work = tx.work(request.workId);
+      if (work && linksAnswer(request) && !request.delivered && request.target)
+        this.staleTargets(tx, work);
+      return this.requestIn(tx, id).request;
+    });
+  }
+
+  /**
+   * Покрывает ли последний раунд ревью плана снимок `contextDigest` по тем же
+   * правилам, что у согласования (`approvalRules`): `{ round }` — да, иначе
+   * причина. Только чтение; им `Harness.resolveInput` и `carryInputOf`
+   * решают, нужен ли новый раунд.
+   */
+  planRoundCovers(graphId: string, contextDigest: string | null) {
+    return this.read((v): { round: number } | { reason: string } => {
+      try {
+        const { last } = this.approvalRules(v, graphId, this.policy.approvalMode);
+        // Отклонённый раунд не переиспользуется ни в каком режиме: новый раунд
+        // с отказом — тоже отказ (REVIEW_REJECTED).
+        if (!last.approved) return { reason: `раунд ${last.round} не одобрил граф` };
+        if ((last.contextDigest ?? null) !== contextDigest)
+          return { reason: `раунд ${last.round} рассматривал другой снимок контекста` };
+        return { round: last.round };
+      } catch (error) {
+        if (!(error instanceof HarnessError)) throw error;
+        return { reason: error.message };
+      }
+    });
   }
 
   /**
@@ -821,6 +869,53 @@ export class Engine {
     );
   }
 
+  /**
+   * Роль controller для операции вне run (`harness update`): захват или
+   * продление без записи политики; пока роль жива, `harness run` не
+   * становится controller и не пишет состояние.
+   */
+  holdController(owner: string, takeOver?: (lease: ControllerLease) => boolean): boolean {
+    return this.tx('heartbeat', (tx) => {
+      const lease = tx.controller();
+      const live = !!lease && lease.leaseUntil > this.now();
+      // Роль умершего процесса той же операции (`takeOver`) переходит сразу.
+      if (
+        live &&
+        (lease.owner !== owner || lease.engineVersion !== this.version) &&
+        !takeOver?.(lease)
+      )
+        return false;
+      tx.setController({
+        owner,
+        leaseUntil: this.now() + this.policy.leaseMs,
+        engineVersion: this.version,
+      });
+      return true;
+    });
+  }
+
+  /**
+   * Идёт обновление пакетов (`harness update`): роль controller у
+   * `harness-update:<pid>` или пауза его операции (обновление идёт или
+   * прервалось). Регистрация графа, согласование и совместная проверка в это
+   * время отказывают `CONTROLLER_BUSY`: они писали бы состояние посреди
+   * установки, и возврат копии их бы потерял.
+   */
+  private assertNoUpdate(view: ExecutionView) {
+    const lease = view.controller();
+    const control = view.control();
+    if (
+      (lease && lease.leaseUntil > this.now() && lease.owner.startsWith('harness-update:')) ||
+      (control.paused &&
+        control.pauseReason === 'reconfigure' &&
+        control.pauseOperation === UPDATE_PAUSE_OPERATION)
+    )
+      throw new HarnessError(
+        'CONTROLLER_BUSY',
+        'Идёт обновление harness (harness update): дождитесь его окончания; если обновление прервалось — harness update --check или resume',
+      );
+  }
+
   /** Захват или продление роли единственного controller. */
   lead(owner: string): boolean {
     let acquired = false;
@@ -871,6 +966,15 @@ export class Engine {
       const control = tx.control();
       if (control.paused && reason === 'shutdown' && control.pauseReason !== 'reconfigure')
         return { control, changed: false };
+      // Пауза обновления пакетов (`harness update`) штатной остановкой не подменяется:
+      // иначе следующий run снял бы её посреди установки.
+      if (
+        control.paused &&
+        reason === 'shutdown' &&
+        control.pauseReason === 'reconfigure' &&
+        control.pauseOperation === UPDATE_PAUSE_OPERATION
+      )
+        return { control, changed: false };
       // Повторная пауза человека — его новое решение: время паузы обновляется.
       // Хост сравнивает его с началом своей работы (пауза до старта снимается
       // циклом, после — нет), и сохранённое прежнее время выдало бы свежее
@@ -902,7 +1006,12 @@ export class Engine {
     return this.tx('scheduler.started', (tx) => {
       const control = tx.control();
       if (!control.paused) return { control, changed: false };
-      if (control.pauseReason === 'reconfigure')
+      // Паузу обновления пакетов человек снять может (обновление прервалось);
+      // пока обновление идёт, run всё равно не начнётся: роль controller у него.
+      if (
+        control.pauseReason === 'reconfigure' &&
+        control.pauseOperation !== UPDATE_PAUSE_OPERATION
+      )
         throw new HarnessError(
           'PAUSED',
           'Выдачу держит операция применения политики; её снимает сама операция',
@@ -1302,8 +1411,8 @@ export class Engine {
           question.lifecycle === 'pending'
             ? `Ждёт ответа на вопрос исполнителя ${question.id}`
             : question.lifecycle === 'superseded'
-              ? `Перенесённый ответ на вопрос ${question.id} устарел до выдачи: нужен новый перенос (carryInput)`
-              : `Ответ на вопрос ${question.id} записан, но не применён (applyInput)`,
+              ? `Перенесённый ответ на вопрос ${question.id} устарел до выдачи: нужен новый перенос (harness input-carry)`
+              : `Ответ на вопрос ${question.id} записан, но не применён (harness input-resolve)`,
       });
     // Записанный budgetBlock — кэш расчёта claim: готовую работу держит текущий расчёт.
     const budget = work.status === 'ready' ? this.budgetBlockOf(work.id, view) : undefined;
@@ -1542,7 +1651,7 @@ export class Engine {
       if (
         target &&
         answered &&
-        target.policyDigest === attempt.policyDigest &&
+        (target.policyDigest === attempt.policyDigest || this.approvalRebound(tx, work)) &&
         !this.targetDrift(tx, work, answered, target)
       )
         attempt.input = {
@@ -3125,7 +3234,7 @@ export class Engine {
    * (остановлена needs-input или готова после устаревшего применения), граф
    * и постановка — те же. Тогда продолжение — только `applyInput`.
    */
-  private originHolds(view: ExecutionView, request: InputRequest) {
+  originHolds(view: ExecutionView, request: InputRequest) {
     const work = view.work(request.workId);
     if (!work) return false;
     const atOrigin =
@@ -3221,7 +3330,13 @@ export class Engine {
     // Граф целиком не сравнивается: согласование другой работы того же графа
     // применённый ответ не обесценивает (причина `graph` больше не ставится).
     if (this.orderMoved(view, work, target)) return 'order' as const;
-    if (target.policyDigest !== this.host.basis.policyDigest(work, view)) return 'policy' as const;
+    // Standalone: правка политики применённый ответ сама не обесценивает —
+    // граф под новой политикой не выдаётся до повторного согласования
+    // (reapprove или новый раунд ревью), а оно проверяется ниже снимком:
+    // действующий снимок обязан нести этот ответ. Пока граф не согласован
+    // заново, устаревания нет (выдача другого графа его не вызывает).
+    if (this.host.input && target.policyDigest !== this.host.basis.policyDigest(work, view))
+      return 'policy' as const;
     const pin = this.contextPinOf(view, work) ?? null;
     // Другой снимок, который несёт тот же ответ (например, с ответом на
     // второй вопрос графа), основание не обесценивает.
@@ -3229,6 +3344,24 @@ export class Engine {
     if (target.contextDigest !== pin && !(answer && this.carriesAnswer(view, request, answer, pin)))
       return 'context' as const;
     return undefined;
+  }
+
+  /**
+   * Правка политики, после которой граф снова согласован под текущей
+   * политикой (reapprove или новый раунд ревью плана), применённый ответ не
+   * обесценивает: его основание — то же согласование, а снимок контекста
+   * проверяется отдельно (`targetDrift`: действующий снимок обязан нести этот
+   * ответ). Только standalone: у хоста с портом согласования основание
+   * политики решает хост.
+   */
+  private approvalRebound(view: ExecutionView, work: WorkState) {
+    if (this.host.input) return false;
+    const graph = view.graph(work.graphId);
+    return (
+      !!graph?.approval &&
+      graph.approval.digest === graph.digest &&
+      graph.policyDigest === this.host.basis.policyDigest(work, view)
+    );
   }
 
   /** Вернуть в `answered` применённые, но не переданные ответы с устаревшим основанием. */
@@ -3322,7 +3455,7 @@ export class Engine {
         (work.status === 'failed' && work.failureKind === 'needs-input') || work.status === 'ready';
       if (!atOrigin || last?.id !== request.runId || this.orderMoved(v, work, request.originBasis))
         problems.push(
-          'работа уже не в исходной остановке (новая редакция постановки или другая попытка): выход — supersedeInput и перенос ответа в контекст новой редакции (input-context, review-plan, согласование)',
+          'работа уже не в исходной остановке (новая редакция постановки или другая попытка): выход — перенос ответа одной командой: harness input-carry --request <id> --reason …',
         );
       const answer = latestAnswer(request);
       if (!answer) {
@@ -4076,6 +4209,16 @@ export class Engine {
     });
   }
 
+  /**
+   * Запись о смене пакетов harness и панели (`harness update`): одно событие
+   * `harness.updated` в журнале; состояние модели не меняется.
+   */
+  recordUpdate(payload: RunEventPayload<'harness.updated'>) {
+    this.tx('harness.updated', (tx) => {
+      tx.emit({ type: 'harness.updated', payload });
+    });
+  }
+
   /** Снять паузу операции — только свою; паузу человека она не трогает. */
   operationResume(operation: string) {
     return this.tx('scheduler.started', (tx) => {
@@ -4418,6 +4561,7 @@ export class Engine {
       throw new HarnessError('INVALID_INPUT', 'Нужен непустой набор разных поручений');
     return this.tx('workspace.verification.started', (tx) => {
       this.assertCurrentPolicy(tx);
+      this.assertNoUpdate(tx);
       const reconfigure = this.reconfiguring(tx);
       if (reconfigure)
         throw new HarnessError(
@@ -4965,20 +5109,51 @@ export class Engine {
         'INPUT_REQUIRED',
         `Поручение ждёт ${question.lifecycle === 'pending' ? 'ответа' : 'применения ответа'} на вопрос исполнителя ${question.id}; повтор без ответа запрещён`,
       );
+    // Принятая работа не повторяется: ни обычный повтор, ни сброс попыток
+    // не возвращают её в очередь.
+    if (w.status === 'done')
+      throw new HarnessError('NOT_READY', `Поручение ${workId} принято: повторять нечего`);
     const exhausted = w.attempt >= this.policy.maxAttempts || neutralExhausted(w);
-    if (w.status === 'ready' && !exhausted) return { work: w, changed: false };
-    if (!['failed', 'cancelled'].includes(w.status) && !(exhausted && !w.activeRunId))
+    // Сброс назван явно (с причиной): он выполняется и тогда, когда попытки
+    // ещё не исчерпаны, — ведущий возвращает полный лимит до выдачи. Молча
+    // проигнорированного сброса нет: нечего сбросить — это сказано в ответе.
+    const resetAsked = !!reset?.reason.trim();
+    const spent = w.attempt > 0 || (w.neutralFailures ?? 0) > 0;
+    if (w.status === 'ready' && !exhausted && !(resetAsked && spent))
+      return {
+        work: w,
+        changed: false,
+        ...(resetAsked
+          ? {
+              reset: {
+                performed: false as const,
+                note: 'Сбрасывать нечего: попытки этой работы ещё не тратились',
+              },
+            }
+          : {}),
+      };
+    if (resetAsked && w.activeRunId)
+      throw new HarnessError(
+        'NOT_READY',
+        `Идёт попытка ${w.activeRunId}: сброс попыток — после её окончания`,
+      );
+    if (
+      !['failed', 'cancelled'].includes(w.status) &&
+      !(exhausted && !w.activeRunId) &&
+      !(w.status === 'ready' && resetAsked)
+    )
       throw new HarnessError('NOT_READY', 'Повтор доступен после отказа или отмены');
-    if (exhausted && !reset?.reason.trim())
+    if (exhausted && !resetAsked)
       throw new HarnessError(
         'ATTEMPTS_EXHAUSTED',
         'Исчерпан лимит попыток; повторите со сбросом и причиной',
       );
+    const doReset = exhausted || (resetAsked && spent);
     const next: WorkState = {
       ...w,
       status: w.approvedDigest ? 'ready' : 'draft',
-      attempt: exhausted ? 0 : w.attempt,
-      neutralFailures: exhausted ? undefined : w.neutralFailures,
+      attempt: doReset ? 0 : w.attempt,
+      neutralFailures: doReset ? undefined : w.neutralFailures,
       failure: undefined,
       failureKind: undefined,
       failureFingerprint: undefined,
@@ -4990,10 +5165,135 @@ export class Engine {
       workId,
       payload: {
         by,
-        reset: exhausted,
-        ...(exhausted ? { spent: w.attempt, reasonLength: reset!.reason.trim().length } : {}),
+        reset: doReset,
+        ...(doReset ? { spent: w.attempt, reasonLength: reset!.reason.trim().length } : {}),
       },
     });
-    return { work: next, changed: true };
+    return {
+      work: next,
+      changed: true,
+      ...(resetAsked
+        ? {
+            reset: doReset
+              ? { performed: true as const, spent: w.attempt }
+              : {
+                  performed: false as const,
+                  note: 'Сбрасывать нечего: попытки этой работы ещё не тратились',
+                },
+          }
+        : {}),
+    };
+  }
+
+  /**
+   * Решение ведущего или оператора по открытым находкам ревью кода поручения
+   * (`review-accept`, docs/review-protocol.md §10): находки принимаются
+   * известным ограничением с основанием. Решение — не одобрение и не повтор:
+   * оно записывается у поручения и применяется историей находок со
+   * следующего раунда (reviewer видит его и не поднимает находку без новых
+   * доказательств; writer её больше не исправляет). Неизвестная, не открытая
+   * или повторённая находка и поручение с активной попыткой или уже принятое —
+   * отказ до записи. Уже принятая тем же решением находка — без изменений.
+   */
+  acceptCodeFindings(
+    workId: string,
+    findings: readonly string[],
+    reason: string,
+    by: CodeReviewDecision['by'],
+  ) {
+    return this.tx('findings.recorded', (tx) => {
+      const w = tx.work(workId);
+      if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
+      if (w.activeRunId || w.status === 'done')
+        throw new HarnessError(
+          'NOT_READY',
+          w.activeRunId
+            ? `Поручение ${workId} исполняется (${w.activeRunId}): решение по находкам — после завершения попытки`
+            : `Поручение ${workId} уже принято: следующего раунда ревью нет`,
+        );
+      if (!findings.length)
+        throw new HarnessError('INVALID_INPUT', 'Нужна хотя бы одна находка (--accept-limitation)');
+      const history = codeReviewHistory(
+        tx.attempts(workId),
+        codeReviewScope(w.order.repositoryId, workId),
+        w.codeReviewDecisions,
+      );
+      const byId = new Map(history.findings.map((f) => [f.id, f]));
+      const at = iso(this.now());
+      const seen = new Set<string>();
+      const fresh: CodeReviewDecision[] = [];
+      for (const id of findings) {
+        if (seen.has(id))
+          throw new HarnessError('INVALID_INPUT', 'Находка названа повторно: ' + id, [
+            { path: ['--accept-limitation'], message: id },
+          ]);
+        seen.add(id);
+        const f = byId.get(id);
+        if (!f)
+          throw new HarnessError(
+            'INVALID_INPUT',
+            'Находки нет в истории ревью кода поручения: ' + id,
+            [{ path: ['--accept-limitation'], message: id }],
+          );
+        if (f.disposition?.decision === 'accepted-limitation' && f.status === 'withdrawn') continue;
+        if (f.status !== 'open')
+          throw new HarnessError(
+            'INVALID_INPUT',
+            `Находка ${id} уже ${f.status}: принять можно только открытую`,
+            [{ path: ['--accept-limitation'], message: id }],
+          );
+        const decision = codeReviewDecisionSchema.safeParse({
+          finding: id,
+          decision: 'accepted-limitation',
+          by,
+          reason,
+          round: history.round,
+          at,
+        });
+        if (!decision.success)
+          throw new HarnessError('INVALID_INPUT', '--reason: основание не короче трёх знаков', [
+            { path: ['--reason'], message: decision.error.issues[0]?.message ?? '' },
+          ]);
+        fresh.push(decision.data);
+      }
+      const decisions = [...(w.codeReviewDecisions ?? []), ...fresh];
+      if (decisions.length > 500)
+        throw new HarnessError('INVALID_INPUT', 'Предел решений по находкам поручения — 500');
+      if (fresh.length) {
+        tx.putWork({ ...w, codeReviewDecisions: decisions });
+        tx.emit({
+          type: 'work.findings-accepted',
+          graphId: w.graphId,
+          workId,
+          payload: {
+            findings: fresh.map((d) => d.finding),
+            by,
+            round: history.round,
+            reasonLength: fresh[0]!.reason.length,
+          },
+        });
+      }
+      const after = codeReviewHistory(
+        tx.attempts(workId),
+        codeReviewScope(w.order.repositoryId, workId),
+        decisions,
+      );
+      return {
+        workId,
+        changed: fresh.length > 0,
+        round: history.round,
+        accepted: after.findings
+          .filter((f) => seen.has(f.id))
+          .map((f) => ({
+            id: f.id,
+            severity: f.severity,
+            message: f.message.slice(0, 4000),
+            path: f.path,
+            status: f.status,
+            ...(f.disposition ? { disposition: f.disposition } : {}),
+            ...(f.late ? { late: f.late } : {}),
+          })),
+      };
+    });
   }
 }

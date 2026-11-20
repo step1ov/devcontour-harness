@@ -46,8 +46,11 @@ function schemaPaths(node: any, path = '', out = new Map<string, any>()) {
   return out;
 }
 const paths = schemaPaths(accepted);
-/** Контейнеры верхнего уровня: их поля описаны по отдельности. */
-const containers = new Set(['source', 'inputs', 'checked', 'shas']);
+/**
+ * Контейнеры: их поля описаны по отдельности (верхнего уровня и обязательный
+ * объект `since` внутри необязательной отметки `late`).
+ */
+const containers = new Set(['source', 'inputs', 'checked', 'shas', 'findings[].late.since']);
 
 /** Поля, отсутствие которых получатель заменяет своим ожиданием. */
 const absentEquivalent = new Set(['inputs.writer', 'inputs.requiredGates']);
@@ -269,6 +272,11 @@ function withInformative(result: RunResult) {
       // ID и статус находки протокола ревью (docs/review-protocol.md).
       id: 'f'.repeat(64),
       status: 'open',
+      // Отметка контроллера о поздней находке: путь не менялся с прошлого раунда.
+      late: {
+        since: { round: 1, sha: sha('7') },
+        reason: 'путь не менялся с раунда 1',
+      },
     },
   ];
   r.limitations = ['не проверено на устройстве'];

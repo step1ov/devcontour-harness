@@ -17,6 +17,7 @@ import {
   workStatusSchema,
 } from './execution.ts';
 import { inputFloorSchema, inputRequestSchema } from './input.ts';
+import { updatePairSchema, updateRecordActions } from './update.ts';
 
 const inputRequestId = inputRequestSchema.shape.id;
 
@@ -245,6 +246,20 @@ export const eventPayloads = {
     reasonLength: z.number().int().min(0).optional(),
   }),
   /**
+   * Находки ревью кода поручения приняты известным ограничением
+   * (`review-accept`, docs/review-protocol.md §10): ID, решающий, раунд
+   * области на момент решения; основания нет — только его длина.
+   */
+  'work.findings-accepted': z.strictObject({
+    findings: z
+      .array(z.string().regex(/^[0-9a-f]{64}$/))
+      .min(1)
+      .max(500),
+    by: z.enum(['lead', 'operator']),
+    round: z.number().int().min(0),
+    reasonLength: z.number().int().min(0),
+  }),
+  /**
    * Поручение отменено (`engine.cancel` или новая редакция графа).
    * `hadAttempt` — отменена и активная попытка (её `attempt.cancelled` — в
    * той же транзакции).
@@ -427,6 +442,18 @@ export const eventPayloads = {
     operation: z.string().min(1).max(300),
     reason: text,
   }),
+  /**
+   * Пакеты harness и панели сменились командой `harness update`
+   * (0.1.0-alpha.60): поставлены (`applied`), возвращены после сбоя
+   * проверки (`restored`) или откатом (`rolled-back`).
+   */
+  'harness.updated': z.strictObject({
+    action: z.enum(updateRecordActions),
+    from: updatePairSchema,
+    to: updatePairSchema,
+    by: z.enum(['operator', 'schedule']),
+    reason: z.string().max(500).optional(),
+  }),
 } as const;
 export type EventType = keyof typeof eventPayloads;
 /** Нагрузка события своего типа. */
@@ -591,5 +618,7 @@ export const transactionKinds = [
   'input.closed',
   /** Подтверждение передачи ответа началом вызова (`input.delivered`). */
   'input.delivered',
+  /** Запись о смене пакетов командой `harness update` (`harness.updated`). */
+  'harness.updated',
 ] as const;
 export type TransactionKind = (typeof transactionKinds)[number];
