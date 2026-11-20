@@ -1060,7 +1060,8 @@ function readConnectorDb(
         ?.value;
     const provider = meta('provider');
     const projectId = meta('projectId');
-    if (!provider || !projectId) return undefined;
+    // Только база коннектора известной схемы: чужая или другой версии — пропуск.
+    if (!provider || !projectId || meta('schema') !== '1') return undefined;
     const row = db.prepare('SELECT data FROM snapshots ORDER BY rowid DESC LIMIT 1').get() as
       { data: string } | undefined;
     const manifest = row

@@ -185,12 +185,13 @@ export interface ForecastView {
     line: string;
   };
   time: {
-    /** С начала первой попытки этого объёма. */
+    /** Начало первой попытки этого объёма и сколько прошло с него. */
+    startedAt?: string;
     elapsedMs?: number;
     /** Осталось: диапазон по наблюдённым попыткам; нет — неизвестно. */
     remaining?: { loMs: number; hiMs: number; samples: number; attemptsPerTask: number };
-    /** Ожидание людей и ведущего сейчас — в прогноз не входит. */
-    humanWait: { works: number; ms: number };
+    /** Ожидание людей и ведущего сейчас (`ms` — самое долгое) — в прогноз не входит. */
+    humanWait: { works: number; ms: number; since?: string };
     line: string;
   };
   assumptions: string[];
@@ -986,6 +987,17 @@ export function viewToken(view: OperatorView | WorkDetailView): string {
     delete history.to;
     rest.history = history;
   }
+  // Прогноз зависит от часов (прошло, ожидание сейчас) — в токен входят его
+  // точки отсчёта (`startedAt`, `humanWait.since`), а не прошедшее время.
+  if ('forecast' in view && view.forecast) {
+    const time: Record<string, unknown> = { ...view.forecast.time };
+    delete time.elapsedMs;
+    delete time.line;
+    const wait: Record<string, unknown> = { ...view.forecast.time.humanWait };
+    delete wait.ms;
+    time.humanWait = wait;
+    rest.forecast = { ...view.forecast, time };
+  }
   const src: Record<string, unknown> = { ...view.source };
   delete src.token;
   return sha256Hex(JSON.stringify(canonical({ ...rest, source: src })));
@@ -1434,35 +1446,43 @@ function scopeOf(c: Ctx, truncated: Record<string, number>): ScopeView | undefin
   const sources = c.i.sources;
   if (!sources?.length) return undefined;
   const works = new Set(c.i.works.map((w) => w.id));
+  // Две связки одного проекта (два файла состояния) — задача один раз.
+  const seen = new Set<string>();
   const all = sources.flatMap((src) =>
-    src.tasks.map((t) => {
-      const workId = t.workId ?? (works.has(t.orderId) ? t.orderId : undefined);
-      const first = t.problems[0];
-      const state: ScopeView['tasks'][number]['state'] = workId
-        ? 'in-harness'
-        : first
-          ? 'not-ready'
-          : 'not-handed-over';
-      const plain =
-        state === 'not-ready'
-          ? c.lang === 'en'
-            ? (notReadyEn[first!.code] ?? first!.code)
-            : text(c, first!.message, T.plain)
-          : state === 'not-handed-over'
+    src.tasks
+      .flatMap((t) => {
+        if (seen.has(t.orderId)) return [];
+        seen.add(t.orderId);
+        return [t];
+      })
+      .map((t) => {
+        const workId = t.workId ?? (works.has(t.orderId) ? t.orderId : undefined);
+        const first = t.problems[0];
+        const state: ScopeView['tasks'][number]['state'] = workId
+          ? 'in-harness'
+          : first
+            ? 'not-ready'
+            : 'not-handed-over';
+        const plain =
+          state === 'not-ready'
             ? c.lang === 'en'
-              ? 'not handed over to harness yet'
-              : 'ещё не передана в harness'
-            : undefined;
-      return {
-        id: t.id,
-        connector: src.connector,
-        key: t.key,
-        ...(c.titles && t.title ? { title: text(c, t.title, T.title) } : {}),
-        ...(workId ? { workId } : {}),
-        state,
-        ...(plain ? { plain } : {}),
-      };
-    }),
+              ? (notReadyEn[first!.code] ?? first!.code)
+              : text(c, first!.message, T.plain)
+            : state === 'not-handed-over'
+              ? c.lang === 'en'
+                ? 'not handed over to harness yet'
+                : 'ещё не передана в harness'
+              : undefined;
+        return {
+          id: t.id,
+          connector: src.connector,
+          ...(t.key ? { key: t.key.slice(0, 200) } : {}),
+          ...(c.titles && t.title ? { title: text(c, t.title, T.title) } : {}),
+          ...(workId ? { workId } : {}),
+          state,
+          ...(plain ? { plain } : {}),
+        };
+      }),
   );
   const tasks = take(all, L.scope, truncated, 'scope');
   return { ...(all.length > tasks.length ? { total: all.length } : {}), tasks };
@@ -1511,7 +1531,7 @@ function sourceQuestionsOf(
 const STAGE_ORDER = ['prepare', 'writer', 'gates', 'review', 'integration'] as const;
 
 /** Длительность словами: «2 ч 50 мин», «45 мин», «меньше минуты». */
-export function durationText(msValue: number, lang: 'ru' | 'en'): string {
+function durationText(msValue: number, lang: 'ru' | 'en'): string {
   const minutes = Math.round(msValue / 60_000);
   if (minutes < 1) return lang === 'en' ? 'under a minute' : 'меньше минуты';
   const h = Math.floor(minutes / 60);
@@ -1543,23 +1563,38 @@ function forecastOf(c: Ctx, scope: ScopeView | undefined): ForecastView | undefi
     const k = (STAGE_ORDER as readonly string[]).indexOf(w.stage.name);
     return k < 0 ? 0 : k / STAGE_ORDER.length;
   };
-  const units: (OperatorWorkInput | undefined)[] = scope
-    ? (c.i.sources ?? []).flatMap((src) =>
-        src.tasks.map((t) => work.get(t.workId ?? t.orderId)),
-      )
-    : [...i.works];
-  const live = units.filter((w) => w?.status !== 'cancelled');
+  // Единица объёма: работа harness или задача среза без работы. Задача,
+  // закрытая в источнике без работы harness (`TASK_DONE`), — готова;
+  // отменённая (`TASK_CANCELLED`) и отменённая работа в объём не входят.
+  type Unit = { work?: OperatorWorkInput; closed?: true };
+  const seen = new Set<string>();
+  const units: Unit[] =
+    scope && scope.tasks.length
+      ? (c.i.sources ?? []).flatMap((src) =>
+          src.tasks.flatMap((t): Unit[] => {
+            const id = t.workId ?? t.orderId;
+            if (seen.has(id)) return [];
+            seen.add(id);
+            const w = work.get(id);
+            if (w) return [{ work: w }];
+            if (t.problems.some((p) => p.code === 'TASK_CANCELLED')) return [];
+            return t.problems.some((p) => p.code === 'TASK_DONE') ? [{ closed: true }] : [{}];
+          }),
+        )
+      : i.works.map((w) => ({ work: w }));
+  const live = units.filter((u) => u.work?.status !== 'cancelled');
+  const unitWeight = (u: Unit) => (u.closed ? 1 : weightOf(u.work));
   if (!live.length) return undefined;
   const total = live.length;
-  const weighted = live.reduce((n, w) => n + weightOf(w), 0);
-  const done = live.filter((w) => weightOf(w) === 1).length;
-  const inWork = live.filter((w) => {
-    const x = weightOf(w);
-    return w !== undefined && x < 1 && runningStages.has(w.stage.name);
-  }).length;
-  const percent = Math.round((100 * weighted) / total);
+  const weighted = live.reduce((n, u) => n + unitWeight(u), 0);
+  const done = live.filter((u) => unitWeight(u) === 1).length;
+  const inWork = live.filter(
+    (u) => u.work !== undefined && unitWeight(u) < 1 && runningStages.has(u.work.stage.name),
+  ).length;
   const left = total - done;
-  const unitIds = new Set(live.flatMap((w) => (w ? [w.id] : [])));
+  // Пока задачи остаются, «100 %» не показывается.
+  const percent = Math.min(left > 0 ? 99 : 100, Math.round((100 * weighted) / total));
+  const unitIds = new Set(live.flatMap((u) => (u.work ? [u.work.id] : [])));
   const own = i.attempts.filter((a) => unitIds.has(a.workId));
   const firstStart = own.map((a) => ms(a.startedAt)).filter(Number.isFinite);
   const elapsedMs = firstStart.length ? Math.max(0, i.now - Math.min(...firstStart)) : undefined;
@@ -1568,19 +1603,25 @@ function forecastOf(c: Ctx, scope: ScopeView | undefined): ForecastView | undefi
     .map((a) => ms(a.finishedAt) - ms(a.startedAt))
     .filter((d) => Number.isFinite(d) && d >= 0)
     .sort((a, b) => a - b);
-  const accepted = live.filter((w) => w && weightOf(w) === 1);
+  const accepted = new Set(
+    live.flatMap((u) => (u.work && weightOf(u.work) === 1 ? [u.work.id] : [])),
+  );
+  // Попытки, прерванные остановкой, не считаются ни образцами, ни попытками задачи.
   const acceptedAttempts = own.filter(
-    (a) => a.status !== 'active' && accepted.some((w) => w!.id === a.workId),
+    (a) => a.status !== 'active' && !a.interrupted && accepted.has(a.workId),
   ).length;
-  const attemptsPerTask = accepted.length
-    ? Math.max(1, Math.round((acceptedAttempts / accepted.length) * 10) / 10)
+  const attemptsPerTask = accepted.size
+    ? Math.max(1, Math.round((acceptedAttempts / accepted.size) * 10) / 10)
     : 1;
   const rest = total - weighted;
   const concurrency = Math.max(1, i.policy.concurrency);
   const remaining =
     samples.length >= OPERATOR_VIEW_TYPICAL_MIN_SAMPLES && rest > 0
       ? {
-          loMs: Math.round((rest * rank(samples, 0.5) * attemptsPerTask) / concurrency),
+          // Параллельно — не быстрее одной задачи: недоделанная задача не делится.
+          loMs: Math.round(
+            Math.max(rest / concurrency, Math.min(rest, 1)) * rank(samples, 0.5) * attemptsPerTask,
+          ),
           hiMs: Math.round(rest * rank(samples, 0.9) * attemptsPerTask),
           samples: samples.length,
           attemptsPerTask,
@@ -1589,11 +1630,20 @@ function forecastOf(c: Ctx, scope: ScopeView | undefined): ForecastView | undefi
   const waits = i.stops.filter(
     (s) => (s.actor === 'user' || s.actor === 'lead') && s.workId && unitIds.has(s.workId),
   );
+  // Самое долгое текущее ожидание (не сумма: работы ждут параллельно).
   const waitMs = waits.reduce(
-    (n, s) => n + (Number.isFinite(ms(s.since)) ? Math.max(0, i.now - ms(s.since)) : 0),
+    (n, s) => Math.max(n, Number.isFinite(ms(s.since)) ? Math.max(0, i.now - ms(s.since)) : 0),
     0,
   );
-  const humanWait = { works: new Set(waits.map((s) => s.workId)).size, ms: waitMs };
+  const since = waits
+    .map((s) => ms(s.since))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b)[0];
+  const humanWait = {
+    works: new Set(waits.map((s) => s.workId)).size,
+    ms: waitMs,
+    ...(since !== undefined ? { since: iso(since) } : {}),
+  };
   const progressLine = en
     ? `done ~${percent} %, ${left} of ${total} task(s) left` + (inWork ? `, ${inWork} in work` : '')
     : `готово ~${percent} %, осталось задач: ${left} из ${total}` +
@@ -1619,24 +1669,24 @@ function forecastOf(c: Ctx, scope: ScopeView | undefined): ForecastView | undefi
           : `сколько осталось — неизвестно (закончившихся попыток меньше ${OPERATOR_VIEW_TYPICAL_MIN_SAMPLES})`;
   const waitText = humanWait.works
     ? en
-      ? `; waiting for people now: ${humanWait.works} work(s), ${durationText(waitMs, c.lang)} — not in the estimate`
-      : `; ждут людей сейчас: ${humanWait.works}, ${durationText(waitMs, c.lang)} — в прогноз не входит`
+      ? `; waiting for people now: ${humanWait.works} work(s), up to ${durationText(waitMs, c.lang)} — not in the estimate`
+      : `; ждут людей сейчас: ${humanWait.works}, до ${durationText(waitMs, c.lang)} — в прогноз не входит`
     : '';
   const timeLine = `${elapsedText} · ${remainingText}${waitText}`;
   const assumptions = en
     ? [
-        scope
-          ? 'scope: all tasks of the run slice, including ones not handed over to harness (weight 0)'
+        scope?.tasks.length
+          ? 'scope: all tasks of the run slice, including ones not handed over to harness (weight 0); done in the source without harness — 100 %, cancelled — out of scope'
           : 'scope: harness works only (no task source slice)',
-        'accepted = 100 %; a work in an attempt counts the stages before its current one (prepare, writer, gates, review, integration)',
+        'accepted = 100 %; a work in an attempt counts the stages before its current one (prepare, writer, gates, review, integration); between attempts (waiting, queued) it counts 0',
         'time left: unfinished share × attempt duration p50–p90 × attempts per accepted task; low end in parallel on concurrency, high end sequential',
         'waiting for people and the lead is not in the estimate',
       ]
     : [
-        scope
-          ? 'объём: все задачи среза прогона, в том числе не переданные в harness (вес 0)'
+        scope?.tasks.length
+          ? 'объём: все задачи среза прогона, в том числе не переданные в harness (вес 0); закрытая в источнике без harness — 100 %, отменённая — вне объёма'
           : 'объём: только работы harness (среза связки нет)',
-        'принято — 100 %; работа в попытке — доля этапов до текущего (подготовка, написание, проверки, ревью, интеграция)',
+        'принято — 100 %; работа в попытке — доля этапов до текущего (подготовка, написание, проверки, ревью, интеграция); между попытками (ожидание, очередь) — 0',
         'осталось: незавершённая доля × длительность попытки p50–p90 × попыток на принятую задачу; нижняя граница — параллельно по concurrency, верхняя — последовательно',
         'ожидание людей и ведущего в прогноз не входит',
       ];
@@ -1648,11 +1698,11 @@ function forecastOf(c: Ctx, scope: ScopeView | undefined): ForecastView | undefi
       done,
       inWork,
       left,
-      basis: scope ? 'scope' : 'works',
+      basis: scope?.tasks.length ? 'scope' : 'works',
       line: progressLine.slice(0, T.line),
     },
     time: {
-      ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+      ...(elapsedMs !== undefined ? { startedAt: iso(Math.min(...firstStart)), elapsedMs } : {}),
       ...(remaining ? { remaining } : {}),
       humanWait,
       line: timeLine.slice(0, T.line),
@@ -2431,7 +2481,7 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
       throw error;
     const { scope, sourceQuestions, ...rest } = full;
     const dropped: Record<string, number> = { ...(full.truncated ?? {}) };
-    if (scope) dropped.scope = (dropped.scope ?? 0) + (scope.total ?? scope.tasks.length);
+    if (scope) dropped.scope = (dropped.scope ?? 0) + scope.tasks.length;
     if (sourceQuestions)
       dropped.sourceQuestions = (dropped.sourceQuestions ?? 0) + sourceQuestions.length;
     const note = {

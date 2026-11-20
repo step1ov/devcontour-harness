@@ -28,7 +28,7 @@ import {
   type TaskContextRecord,
 } from '../src/integrations/connector/transport.ts';
 import { connectorSources, harnessView } from '../src/control/operator-view.ts';
-import { operatorView } from '../src/projections/operator-view.ts';
+import { operatorView, viewToken } from '../src/projections/operator-view.ts';
 import { at, attempt, baseInput, NOW, work } from './operator-view-input.ts';
 
 const fi = (
@@ -675,7 +675,7 @@ test('alpha.60: вид сверх предела — без среза и воп
       {
         connector: 'relay-v1-http-abc',
         provider: 'relay-v1-http',
-        tasks: Array.from({ length: 200 }, (_, k) => ({
+        tasks: Array.from({ length: 230 }, (_, k) => ({
           id: 'T' + k,
           key: 'WEB-' + k,
           title: big,
@@ -700,7 +700,7 @@ test('alpha.60: вид сверх предела — без среза и воп
   operatorViewSchema.parse(view);
   assert.equal(view.scope, undefined);
   assert.equal(view.sourceQuestions, undefined);
-  assert.equal(view.truncated?.scope, 200);
+  assert.equal(view.truncated?.scope, 230, 'усечённые и опущенные — без двойного счёта');
   assert.equal(view.truncated?.sourceQuestions, 50);
   assert.ok(view.health.warnings.some((w) => w.code === 'VIEW_SECTIONS_DROPPED'));
 });
@@ -772,17 +772,27 @@ test('alpha.60 (P11): прогноз выпуска — готовность в�
   );
   assert.equal(f.progress.line, 'готово ~40 %, осталось задач: 2 из 3, в работе: 1');
   assert.equal(f.time.elapsedMs, 100 * 60_000);
-  // Осталось 1,8 задачи × 10 мин × 2 попытки: последовательно 36 мин, параллельно / concurrency.
+  // Осталось 1,8 задачи × 10 мин × 2 попытки: последовательно 36 мин; параллельно —
+  // не быстрее одной задачи.
   const concurrency = input.policy.concurrency;
   assert.deepEqual(f.time.remaining, {
-    loMs: Math.round((1.8 * 600_000 * 2) / concurrency),
+    loMs: Math.round(Math.max(1.8 / concurrency, 1) * 600_000 * 2),
     hiMs: 1.8 * 600_000 * 2,
     samples: 5,
     attemptsPerTask: 2,
   });
-  assert.deepEqual(f.time.humanWait, { works: 1, ms: 15 * 60_000 });
+  assert.deepEqual(f.time.humanWait, { works: 1, ms: 15 * 60_000, since: at(15) });
+  assert.equal(f.time.startedAt, at(100));
+  // Ход часов меняет «прошло» и ожидание, но не токен содержимого; точки отсчёта — меняют.
+  const later = operatorView({ ...input, now: input.now + 60_000 }).forecast!;
+  assert.equal(later.time.elapsedMs, f.time.elapsedMs + 60_000);
+  const moved = structuredClone(view);
+  moved.forecast!.time = { ...later.time };
+  assert.equal(viewToken(moved), view.source.token);
+  moved.forecast!.time.startedAt = at(101);
+  assert.notEqual(viewToken(moved), view.source.token);
   assert.match(f.time.line, /^прошло 1 ч 40 мин · осталось ~/);
-  assert.match(f.time.line, /ждут людей сейчас: 1, 15 мин — в прогноз не входит/);
+  assert.match(f.time.line, /ждут людей сейчас: 1, до 15 мин — в прогноз не входит/);
   assert.ok(f.assumptions.length >= 3);
   const en = operatorView(input, { lang: 'en' }).forecast!;
   assert.equal(en.progress.line, 'done ~40 %, 2 of 3 task(s) left, 1 in work');
@@ -794,4 +804,77 @@ test('alpha.60 (P11): прогноз выпуска — готовность в�
   // Нет работ и среза — прогноза нет.
   assert.equal(operatorView(baseInput()).forecast, undefined);
   void NOW;
+});
+
+test('alpha.60 (P11): прогноз — p50/p90 разных попыток, закрытая и отменённая в источнике, прерванная попытка, ~99 %', () => {
+  const stage = (name: string) => ({
+    name,
+    next: [],
+    spend: { calls: 0, knownUsd: 0, unknownCalls: 0, durationMs: 0 },
+  });
+  const minutes = [5, 10, 15, 20, 60];
+  const attempts = [
+    ...minutes.map((m, k) =>
+      attempt('w1', k + 1, {
+        startedAt: at(200),
+        finishedAt: at(200 - m),
+        status: k < 4 ? 'failed' : 'succeeded',
+      }),
+    ),
+    // Прерванная остановкой — ни образец, ни попытка задачи.
+    attempt('w1', 6, { startedAt: at(100), finishedAt: at(99), interrupted: true }),
+  ];
+  const input = baseInput({
+    works: [work('w1', { status: 'done', stage: stage('done') })],
+    attempts,
+    sources: [
+      {
+        connector: 'c',
+        provider: 'relay-v1-http',
+        tasks: [
+          { id: 'T1', key: 'WEB-1', orderId: 'w1', workId: 'w1', problems: [] },
+          {
+            id: 'T2',
+            key: 'WEB-2',
+            orderId: 'o2',
+            problems: [{ code: 'TASK_DONE', message: 'done' }],
+          },
+          {
+            id: 'T3',
+            key: 'WEB-3',
+            orderId: 'o3',
+            problems: [{ code: 'TASK_CANCELLED', message: 'x' }],
+          },
+          { id: 'T4', key: 'WEB-4', orderId: 'o4', problems: [] },
+        ],
+        observedAt: at(5),
+      },
+    ],
+  });
+  const f = operatorView(input).forecast!;
+  // Объём 3 (отменённая вне объёма): 1 + 1 + 0 = 67 %.
+  assert.deepEqual(
+    [f.progress.total, f.progress.done, f.progress.left, f.progress.percent],
+    [3, 2, 1, 67],
+  );
+  // p50 = 15 мин, p90 = 60 мин; попыток на принятую задачу 5 (прерванная не считается).
+  assert.deepEqual(f.time.remaining, {
+    loMs: 15 * 60_000 * 5,
+    hiMs: 60 * 60_000 * 5,
+    samples: 5,
+    attemptsPerTask: 5,
+  });
+  // 199 готовых из 200 с одной в интеграции — не «100 %».
+  const many = baseInput({
+    works: [
+      ...Array.from({ length: 199 }, (_, k) =>
+        work('d' + k, { status: 'done', stage: stage('done') }),
+      ),
+      work('x', { status: 'running', stage: stage('integration') }),
+    ],
+  });
+  const m = operatorView(many).forecast!;
+  assert.equal(m.progress.basis, 'works');
+  assert.equal(m.progress.percent, 99);
+  assert.equal(m.progress.left, 1);
 });

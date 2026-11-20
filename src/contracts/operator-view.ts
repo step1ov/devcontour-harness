@@ -201,8 +201,8 @@ const sourceQuestionViewSchema = z.strictObject({
  * Весь срез прогона (ревизия 4, P10): все задачи последнего снимка связки,
  * в том числе ещё не готовые. `state`: `in-harness` — работа harness есть
  * (`workId`), `not-ready` — задача не допускается к запуску (`plain` — почему),
- * `not-handed-over` — снимок есть, работа ещё не создана. Прогресс по-прежнему
- * считает только работы harness.
+ * `not-handed-over` — снимок есть, работа ещё не создана. `progress`
+ * по-прежнему считает только работы harness; весь срез считает `forecast`.
  */
 const scopeSchema = z.strictObject({
   total: count.optional(),
@@ -480,6 +480,7 @@ const forecastSchema = z.strictObject({
     line: z.string().min(1).max(T.line),
   }),
   time: z.strictObject({
+    startedAt: isoTimeSchema.optional(),
     elapsedMs: count.optional(),
     remaining: z
       .strictObject({
@@ -489,7 +490,7 @@ const forecastSchema = z.strictObject({
         attemptsPerTask: z.number().min(1),
       })
       .optional(),
-    humanWait: z.strictObject({ works: count, ms: count }),
+    humanWait: z.strictObject({ works: count, ms: count, since: isoTimeSchema.optional() }),
     line: z.string().min(1).max(T.line),
   }),
   assumptions: z.array(z.string().min(1).max(400)).max(10),
