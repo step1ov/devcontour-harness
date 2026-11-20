@@ -649,6 +649,15 @@ test('alpha.60 CLI: status --human — строка «кто двигает оч
   assert.match(lines.at(-1)!, /^Прогноз выпуска: готово ~0 %, осталось задач: 1 из 1; /);
   assert.equal(lines.filter((l) => l.startsWith('Прогноз выпуска:')).length, 1);
   assert.equal(lines.filter((l) => l.startsWith('Очередь стоит')).length, 1);
+  // Доска успокоилась: --watch печатает один кадр — с той же строкой прогноза.
+  const watch = p.raw('status', '--state', p.state, '--human', '--watch');
+  assert.equal(watch.status, 0, watch.stderr);
+  assert.equal(watch.stdout.trimEnd().split('\n').at(-1), lines.at(-1));
+  // С --graph строки — одного графа, а прогноз — по всему прогону: его нет.
+  const graph = p.raw('status', '--state', p.state, '--human', '--graph', 'greeting');
+  assert.equal(graph.status, 0, graph.stderr);
+  assert.match(graph.stdout, /^Очередь стоит — никто не запущен/);
+  assert.doesNotMatch(graph.stdout, /Прогноз выпуска/);
   // JSON `status` не меняется от --human: прогноза в нём нет, runner — есть.
   const json = p.harness('status', '--state', p.state).json.data;
   assert.equal(json.runner.state, 'not-running');

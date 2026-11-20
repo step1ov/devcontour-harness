@@ -640,7 +640,9 @@ async function watchStatus(
         h.close();
       }
       const { data, liveJobs } = snapshot;
-      const frame = statusFrame(data, now, intervalMs);
+      // Прогноз — по всему прогону: с --graph его нет (строки статуса — одного графа).
+      const frame =
+        statusFrame(data, now, intervalMs) + (v.graph ? '' : (forecastLines(state) ?? ''));
       if (stopped || statusSettled(data, now, { liveJobs })) return { data, text: clear + frame };
       process.stdout.write(clear + frame + (clear ? '' : '\n'));
       await new Promise<void>((done) => {
@@ -881,8 +883,9 @@ async function run(
         if (command === 'status') {
           const data = h.status(v.graph, { detail: Boolean(v.detail) });
           if (!v.human) return { command, data };
-          // Прогноз выпуска — та же строка, что у панели (`view.forecast`).
-          const forecast = forecastLines(need('state'));
+          // Прогноз выпуска — та же строка, что у панели (`view.forecast`), по
+          // всему прогону: с --graph строки статуса — одного графа, прогноза нет.
+          const forecast = v.graph ? undefined : forecastLines(need('state'));
           return {
             command,
             data,

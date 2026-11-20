@@ -751,6 +751,17 @@ test('alpha.60: срез, прогноз и строка очереди, шаг�
   const input = (tasks: number) =>
     baseInput({
       works: [blocked],
+      // Прошедшее время и ожидание людей идут с часами (а токен — нет).
+      attempts: [attempt('w1', 1, { startedAt: at(30), finishedAt: at(20), status: 'failed' })],
+      stops: [
+        {
+          workId: 'w1',
+          code: 'ATTEMPTS_EXHAUSTED',
+          actor: 'user',
+          action: 'reset-attempts',
+          since: at(10),
+        },
+      ],
       queue: { paused: false, runner: 'not-running', restartBy: 'lead', line, lineEn: 'idle' },
       sources: [source(tasks)],
     });
@@ -776,14 +787,18 @@ test('alpha.60: срез, прогноз и строка очереди, шаг�
   assert.equal(fits.scope?.tasks.length, 6);
   assert.equal(fits.forecast!.progress.basis, 'scope');
   assert.equal(fits.forecast!.progress.total, 6);
-  assert.equal(
-    operatorView({ ...input(5), now: input(5).now + 60_000 }, { maxBytes: 120_000 }).source.token,
-    fits.source.token,
-  );
+  const later = operatorView({ ...input(5), now: input(5).now + 60_000 }, { maxBytes: 120_000 });
+  assert.equal(later.forecast!.time.elapsedMs, fits.forecast!.time.elapsedMs! + 60_000);
+  assert.equal(later.forecast!.time.humanWait.ms, fits.forecast!.time.humanWait.ms + 60_000);
+  // Ряды истории сдвигаются с окном честно; часы прогноза в токен не входят.
+  const moved = structuredClone(fits);
+  moved.forecast!.time = { ...later.forecast!.time };
+  assert.equal(viewToken(moved), fits.source.token);
   // Не помещается: опущены срез и вопросы источника, а очередь, шаги и прогноз — нет.
   const over = operatorView(input(230), { maxBytes: 120_000 });
   check(over);
   assert.equal(over.scope, undefined);
+  assert.equal(over.truncated?.scope, 231, 'опущен весь срез, без двойного счёта');
   assert.ok(over.health.warnings.some((w) => w.code === 'VIEW_SECTIONS_DROPPED'));
   assert.equal(over.forecast!.progress.total, 231, 'прогноз — по всему срезу, даже опущенному');
 });

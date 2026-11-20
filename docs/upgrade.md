@@ -1692,7 +1692,8 @@ view`) в пределе длины сохраняет хвост — остат
   `source-check` проверяет подключение и предупреждает; снимок и запуск без
   задач — `NOT_READY`.
 - **Совместимость с Relay.** `source-check`, `source-snapshot`,
-  `source-status` возвращают `compatibility` и `warnings`; `doctor` и `init`
+  `source-status` возвращают `compatibility` (уровень и строка простыми
+  словами), `source-check` и `source-status` — ещё `warnings`; `doctor` и `init`
   принимают `--source` (или находят `connector.json` рядом с политикой /
   `.harness/connector.json`) и предупреждают, если Relay ниже рекомендуемой
   (`RELAY_COMPATIBILITY` у doctor, `relay-compatibility` у init — новое
@@ -1717,9 +1718,14 @@ view`) в пределе длины сохраняет хвост — остат
   (последнее наблюдение Relay для показа). Прежняя версия harness её не
   читает и не мешает ей; откат на alpha.59 без копии состояния связки
   безопасен.
-- **Откат.** Конфигурация с `taskContext`, `comments` или `questions`, а
-  также с пустым `tasks`, не проходит строгую схему alpha.59: перед откатом
-  уберите эти поля.
+- **Откат.** Конфигурация связки с `taskContext`, `comments` или
+  `questions`, а также с пустым `tasks`, не проходит строгую схему alpha.59:
+  перед откатом уберите эти поля. Политику с `toolProfiles.<id>.network`
+  alpha.59 тоже не принимает — уберите поле. Состояние, в котором уже есть
+  решения `review-accept` (`WorkState.codeReviewDecisions`, событие
+  `work.findings-accepted`), записи gates с `evidence.reportDigest` или
+  находки с `late`, строгая схема alpha.59 не читает — откат только через
+  копию состояния, снятую перед обновлением.
 
 ## Перед обновлением
 
