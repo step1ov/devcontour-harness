@@ -852,6 +852,24 @@ test('UP19: во время обновления (или до возврата �
       ['smoke', '--state', p.state, '--sha', 'HEAD'],
       ['review-code', '--state', p.state, '--base', 'HEAD', '--head', 'HEAD'],
       ['approve', '--state', p.state, '--subject', 'g', '--digest', 'sha256:' + '0'.repeat(64)],
+      // Команды записи alpha.60 (ответы, находки ревью, сброс, связка с источником).
+      ['input-resolve', '--state', p.state, '--request', 'IR-x'],
+      ['input-carry', '--state', p.state, '--request', 'IR-x', '--reason', 'r'],
+      [
+        'review-accept',
+        '--state',
+        p.state,
+        '--work',
+        'w',
+        '--accept-limitation',
+        'f',
+        '--reason',
+        'r',
+      ],
+      ['retry', '--state', p.state, '--work', 'w', '--reset', '--reason', 'r'],
+      ['source-snapshot', '--state', p.state, '--source', 'connector.json'],
+      ['source-deliver', '--state', p.state, '--source', 'connector.json'],
+      ['run', '--state', p.state, '--source', 'connector.json', '--policy', 'policy.json'],
     ]) {
       const r = p.harness(...args);
       assert.equal(r.status, 3, args[0] + ' ' + r.stderr);

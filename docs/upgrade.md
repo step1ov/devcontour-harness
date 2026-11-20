@@ -1706,14 +1706,15 @@ view`) в пределе длины сохраняет хвост — остат
   `works[].question.line`, `questions[].line`,
   `works[].attempts.lastFailure.kind`/`counted` (см. выше), `scope`,
   `sourceQuestions`, `forecast`, `health.sources`, `questions[].options`,
-  `questions[].rationale`; `truncated.scope`, `truncated.sourceQuestions`.
+  `questions[].rationale`, `updates` (ниже, «Где видно»); `truncated.scope`,
+  `truncated.sourceQuestions`.
   Читатель, который игнорирует неизвестные поля (договор представления),
   работает без изменений; хост, проверяющий документ строгой копией схемы
   ревизии 3, должен принять новые поля, в том числе `options` и `rationale`
   внутри `questions[]`. Документ, который с новыми разделами больше 256 КБ,
   выдаётся без `scope` и `sourceQuestions` (предупреждение
   `VIEW_SECTIONS_DROPPED`, число опущенного — в `truncated`). `status
---human` дописывает строку «Прогноз выпуска: …» (JSON `status` не меняется).
+--human` дописывает строку «Прогноз выпуска: …» (прогноза в JSON `status` нет).
 - **Состояние связки.** В SQLite связки появляется таблица `observations`
   (последнее наблюдение Relay для показа). Прежняя версия harness её не
   читает и не мешает ей; откат на alpha.59 без копии состояния связки
@@ -1726,7 +1727,8 @@ view`) в пределе длины сохраняет хвост — остат
   package.json `devcontourHarness.formats` (`api`, `state`, `policy`,
   `handoff`, `report`, `view`). Кроме связки с источником задач (если она
   настроена), это единственный сетевой запрос harness: идёт через npm (его registry, proxy, сертификаты и ключи), без телеметрии;
-  движок во время работы в сеть по-прежнему не ходит. Реестр недоступен —
+  движок сам в сеть по-прежнему не ходит (во время `run --source` к
+  источнику задач обращается связка). Реестр недоступен —
   исход `unavailable` («Не удалось проверить обновления: …»), exit 0.
   `--apply` ставит пару только когда нет прогона (живая роль controller,
   попытка, совместная проверка, задание графа): иначе отказ `busy` (exit 3)

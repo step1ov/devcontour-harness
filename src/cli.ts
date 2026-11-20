@@ -1359,7 +1359,9 @@ async function run(
       const state = need('state');
       const b = binding(state);
       const connector = await connectorOf(need('source'), state, b.policy);
-      const h = open(state, b, command === 'source-status');
+      // source-status — чтение (в том числе во время обновления пакетов): база
+      // состояния открывается только для чтения, без отметки writer и миграций.
+      const h = open(state, b, command === 'source-status' ? 'state' : false);
       try {
         if (command === 'source-status') return { command, data: await connector.status(h) };
         if (command === 'source-deliver') {
