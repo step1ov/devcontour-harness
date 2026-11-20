@@ -2096,6 +2096,7 @@ export const smokeDataSchema = z.strictObject({
                 .enum([
                   'listen-denied',
                   'network-denied',
+                  'network-open',
                   'write-denied',
                   'process-abort',
                   'missing-tool',

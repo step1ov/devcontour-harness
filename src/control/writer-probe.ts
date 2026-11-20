@@ -41,6 +41,7 @@ type Repo = ExecutionPolicy['repositories'][number];
 export type WriterProbeReason =
   | 'listen-denied'
   | 'network-denied'
+  | 'network-open'
   | 'write-denied'
   | 'process-abort'
   | 'missing-tool'
@@ -103,6 +104,8 @@ const ADVICE: Record<WriterProbeReason, string> = {
     'Исполнителю закрыт локальный сервер (listen). Варианты: вынести проверку с сервером в gate harness (gates слушают localhost); дать исполнителю только локальную сеть: network: loopback в профиле инструментов (listen и connect на 127.0.0.1 и ::1, без интернета); отключить это правило шаблона для режима harness (раздел controller-mode).',
   'network-denied':
     'Исполнителю закрыта сеть (реестр пакетов или внешний адрес). Варианты: выполнить шаг заранее в prepare (кеш вне рабочего дерева, harness lean); открыть домен в isolation.domains (claude) или всю сеть в профиле инструментов (network: full у codex); вынести шаг в prepare или gate.',
+  'network-open':
+    'Песочница codex в режиме network: loopback пропустила соединение с внешним адресом: эта версия codex не держит границу loopback. Не запускайте исполнителя с ней: выберите network: none или обновите codex и повторите пробу.',
   'write-denied':
     'Команда пишет вне области записи исполнителя (путь — в строке вывода). Варианты: направить её каталог в рабочее дерево или во временный каталог переменной окружения профиля; выполнить шаг заранее в prepare.',
   'process-abort':
@@ -168,6 +171,100 @@ export function classifyProbe(result: {
       ...((l) => (l ? { evidence: l } : {}))(lineOf(text, /not found|ENOENT/i)),
     };
   return { status: 'failed', reason: 'failed' };
+}
+
+/** ID проверки границы loopback codex в отчёте пробы. */
+export const LOOPBACK_CHECK = 'harness-loopback-check';
+
+/**
+ * Скрипт проверки границы: локальный сервер на 127.0.0.1, прямое соединение
+ * с внешним IP и CONNECT через прокси из окружения. Печатает по строке на
+ * исход; сам всегда выходит с кодом 0, решает `loopbackVerdict`.
+ */
+const LOOPBACK_SCRIPT = `const net=require('net');const r={};
+const fin=()=>{for(const k of ['loopback','direct','proxy'])console.log('harness-loopback-check:'+k+':'+r[k]);process.exit(0)};
+const tcp=(host,port,cb)=>{const c=net.connect({host,port});const t=setTimeout(()=>{c.destroy();cb('closed:timeout')},5000);
+c.on('connect',()=>{clearTimeout(t);cb('open',c)});c.on('error',e=>{clearTimeout(t);cb('closed:'+(e.code||e.message))})};
+const proxy=()=>{const u=process.env.HTTPS_PROXY||process.env.https_proxy||process.env.HTTP_PROXY||process.env.http_proxy;
+if(!u){r.proxy='none';return fin()}let p;try{p=new URL(u)}catch{r.proxy='none';return fin()}
+tcp(p.hostname,Number(p.port||80),(s,c)=>{if(!c){r.proxy=s;return fin()}let b='';
+c.on('data',d=>{b+=d;if(b.includes('\\r\\n')){r.proxy=/^HTTP\\/1\\.[01] 2\\d\\d/.test(b)?'open':'closed:'+b.split('\\r\\n')[0].slice(0,80);c.destroy();fin()}});
+c.write('CONNECT example.com:443 HTTP/1.1\\r\\nHost: example.com:443\\r\\n\\r\\n')})};
+const s=net.createServer(c=>c.end('ok')).on('error',e=>{r.loopback='fail:'+e.code;direct()});
+const direct=()=>tcp('1.1.1.1',443,(st,c)=>{if(c)c.destroy();r.direct=st;proxy()});
+s.listen(0,'127.0.0.1',()=>tcp('127.0.0.1',s.address().port,(st,c)=>{r.loopback=st==='open'?'ok':'fail:'+st;if(c)c.destroy();s.close();direct()}));`;
+
+/** Исход проверки границы loopback по её выводу. Экспортируется для тестов. */
+export function loopbackVerdict(
+  code: number,
+  output: string,
+): Pick<WriterProbeCommand, 'status' | 'reason' | 'evidence'> {
+  const value = (k: string) =>
+    new RegExp(`^${LOOPBACK_CHECK}:${k}:(.*)$`, 'm').exec(output)?.[1]?.trim();
+  const [loopback, direct, proxy] = [value('loopback'), value('direct'), value('proxy')];
+  if (code !== 0 || !loopback || !direct || !proxy)
+    return {
+      status: 'failed',
+      reason: 'failed',
+      evidence: clip(output.trim().split('\n').slice(-3).join(' | ') || `exit=${code}`),
+    };
+  if (direct === 'open' || proxy === 'open')
+    return {
+      status: 'blocked',
+      reason: 'network-open',
+      evidence: `внешний адрес доступен: напрямую ${direct}, через прокси ${proxy}`,
+    };
+  if (loopback !== 'ok')
+    return { status: 'blocked', reason: 'listen-denied', evidence: `loopback ${loopback}` };
+  return { status: 'ok' };
+}
+
+async function loopbackCheck(
+  sandbox: string[],
+  cwd: string,
+  execution: { env: NodeJS.ProcessEnv; redact: (s: string) => string },
+  callDir: string,
+  signal: AbortSignal,
+): Promise<WriterProbeCommand> {
+  const check = [process.execPath, '-e', LOOPBACK_SCRIPT];
+  const started = Date.now();
+  const base = { id: LOOPBACK_CHECK, command: [process.execPath, '-e', '<loopback-check>'] };
+  let result;
+  try {
+    result = await command([...sandbox, '--', ...check], cwd, {
+      env: execution.env,
+      timeoutMs: 60_000,
+      signal,
+      redact: execution.redact,
+      activity: { kind: 'command', label: 'writer-probe loopback-check' },
+    });
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return {
+      ...base,
+      status: 'failed',
+      durationMs: Date.now() - started,
+      reason: 'missing-tool',
+      evidence: clip(`${sandbox[0]}: ${(error as NodeJS.ErrnoException).code ?? String(error)}`),
+      advice:
+        'Не запускается codex sandbox: установите codex (тот же, что у исполнителя) или задайте HARNESS_CODEX_BIN.',
+    };
+  }
+  const output = result.stdout + '\n' + result.stderr;
+  const log = join(callDir, LOOPBACK_CHECK + '.log');
+  await writeFile(log, output);
+  const verdict = loopbackVerdict(result.timedOut ? -1 : result.code, output);
+  return {
+    ...base,
+    status: verdict.status,
+    exitCode: result.code,
+    ...(result.timedOut ? { timedOut: true } : {}),
+    durationMs: Date.now() - started,
+    ...(verdict.reason ? { reason: verdict.reason } : {}),
+    ...(verdict.evidence ? { evidence: clip(execution.redact(verdict.evidence)) } : {}),
+    ...(verdict.reason ? { advice: ADVICE[verdict.reason] } : {}),
+    log,
+  };
 }
 
 /** Различные исполнители ролей репозитория (runtime и профиль инструментов). */
@@ -314,6 +411,19 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
         }),
         runtime === 'claude' ? network : undefined,
       );
+      // Граница loopback codex проверяется на деле: функция network_proxy
+      // есть, но прокси будущей версии мог бы пропускать всё. Локальный
+      // сервер должен работать, внешний адрес — нет (напрямую и через прокси).
+      if (mechanism === 'codex-sandbox' && network === 'loopback')
+        report.commands.push(
+          await loopbackCheck(
+            [input.executables?.codex ?? 'codex', 'sandbox', ...codexPermissions(iso, network)],
+            cwd,
+            execution,
+            callDir,
+            input.signal,
+          ),
+        );
       for (const step of steps) {
         let argv: string[];
         let env: NodeJS.ProcessEnv = execution.env;
@@ -408,7 +518,7 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
   }
   if (!writers.length) notes.push('Ни у одной роли репозитория нет исполнителя codex или claude.');
   // Пустая проба ничего не доказала: без команд она не «зелёная».
-  const probed = writers.some((w) => w.commands.length > 0);
+  const probed = writers.some((w) => w.commands.some((c) => c.id !== LOOPBACK_CHECK));
   return {
     ok: probed && writers.every((w) => w.commands.every((c) => c.status === 'ok')),
     writers,

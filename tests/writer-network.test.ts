@@ -69,6 +69,14 @@ test('WN02: противоречивая сеть профиля отклоня�
     /противоречит codexNetwork/,
   );
   assert.match(msgs({ a: { runtime: 'claude', network: 'full' } })[0]!, /только для codex/);
+  // Веб-инструменты claude ходят в сеть мимо песочницы: с режимом без интернета — отказ.
+  for (const rule of ['WebFetch', 'WebSearch', 'WebFetch(domain:example.com)'])
+    assert.match(
+      msgs({ a: { runtime: 'claude', network: 'loopback', claudeAllowedTools: [rule] } })[0]!,
+      /мимо песочницы/,
+      rule,
+    );
+  assert.deepEqual(msgs({ a: { runtime: 'claude', claudeAllowedTools: ['WebFetch'] } }), []);
 });
 
 test('WN03: аргументы codex и настройки claude по режиму сети', () => {
@@ -113,7 +121,7 @@ async function invoke(
   root: string,
   runtime: 'codex' | 'claude',
   bin: string,
-  network: 'none' | 'loopback',
+  network: 'none' | 'loopback' | undefined,
   task: RuntimeRequest['task'] = 'implement',
 ) {
   const worktree = join(root, 'wt');
@@ -121,7 +129,9 @@ async function invoke(
   const argsFile = join(root, `args-${runtime}-${network}-${task}.json`);
   await cliAdapter(runtime, {
     executable: bin,
-    toolProfiles: { p: parse({ p: { runtime, network } }).toolProfiles.p! },
+    toolProfiles: {
+      p: parse({ p: { runtime, ...(network ? { network } : {}) } }).toolProfiles.p!,
+    },
   }).invoke(
     {
       callId: 'c1',
@@ -156,8 +166,13 @@ test('WN04: адаптер — loopback исполнителю codex и claude; 
     assert.match(codex, /features\.network_proxy=true/);
     assert.match(codex, /network=\{enabled=true, allow_local_binding=true\}/);
     assert.match(codex, /sandbox_workspace_write\.network_access=false/);
+    assert.match(codex, /web_search="disabled"/);
+    assert.match((await invoke(root, 'codex', bin, 'none')).join(' '), /web_search="disabled"/);
+    // Без поля network — прежний вызов: веб-поиск codex не трогается.
+    assert.ok(!(await invoke(root, 'codex', bin, undefined)).join(' ').includes('web_search'));
     const review = (await invoke(root, 'codex', bin, 'loopback', 'review-code')).join(' ');
     assert.ok(!review.includes('network_proxy'));
+    assert.ok(!review.includes('web_search'));
     assert.match(review, /network=\{enabled=false\}/);
 
     const claude = await invoke(root, 'claude', bin, 'loopback');
@@ -165,6 +180,8 @@ test('WN04: адаптер — loopback исполнителю codex и claude; 
       sandbox: { network: unknown };
     };
     assert.deepEqual(settings.sandbox.network, { allowedDomains: [], allowLocalBinding: true });
+    assert.equal(claude[claude.indexOf('--disallowedTools') + 1], 'WebFetch,WebSearch');
+    assert.ok(!(await invoke(root, 'claude', bin, undefined)).includes('--disallowedTools'));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -177,6 +194,9 @@ test('WN05: codex без функции network_proxy — отказ вызов�
       root,
       'network_proxy                            removed            false\n',
     );
+    await assert.rejects(invoke(root, 'codex', bin, 'loopback'), /не поддерживает сеть loopback/);
+    // Определённый ответ кешируется: повтор не спрашивает codex заново.
+    writeFileSync(bin, readFileSync(bin, 'utf8').replace('removed   ', 'experimental'));
     await assert.rejects(invoke(root, 'codex', bin, 'loopback'), /не поддерживает сеть loopback/);
     // Режим none проверки не требует.
     assert.match((await invoke(root, 'codex', bin, 'none')).join(' '), /network=\{enabled=false\}/);
@@ -263,6 +283,112 @@ test('WN07: проба исполнителя называет режим сет
     );
     assert.match(w.commands[0]!.evidence!, /network_proxy/);
     assert.match(writerProbeText(data.writerProbe!), /сеть только локальная \(127\.0\.0\.1, ::1\)/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('WN08: сбой проверки network_proxy назван сбоем и не кешируется', async () => {
+  const { codexLoopbackSupport } = await import('../src/environment/isolation.ts');
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-wnet-')));
+  try {
+    const bin = join(root, 'flaky-codex');
+    const flag = join(root, 'fail');
+    writeFileSync(flag, '');
+    writeFileSync(
+      bin,
+      `#!${process.execPath}
+if(require('fs').existsSync(${JSON.stringify(flag)})){console.error('boom');process.exit(3)}
+process.stdout.write('network_proxy   experimental   false\\n');
+`,
+    );
+    chmodSync(bin, 0o755);
+    const first = await codexLoopbackSupport(bin);
+    assert.match(first!, /не удалось проверить поддержку сети loopback у codex.*код 3/);
+    assert.doesNotMatch(first!, /не поддерживает/);
+    await rm(flag);
+    assert.equal(await codexLoopbackSupport(bin), null, 'после сбоя спрашивается заново');
+    const missing = await codexLoopbackSupport(join(root, 'no-such-codex'));
+    assert.match(missing!, /не удалось проверить.*ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('WN09: проба проверяет границу loopback codex на деле; открытый внешний адрес — blocked', async () => {
+  const { loopbackVerdict, LOOPBACK_CHECK } = await import('../src/control/writer-probe.ts');
+  const line = (k: string, v: string) => `${LOOPBACK_CHECK}:${k}:${v}`;
+  const out = (l: string, d: string, p: string) =>
+    [line('loopback', l), line('direct', d), line('proxy', p)].join('\n');
+  assert.deepEqual(loopbackVerdict(0, out('ok', 'closed:EPERM', 'closed:HTTP/1.1 403')), {
+    status: 'ok',
+  });
+  assert.equal(loopbackVerdict(0, out('ok', 'open', 'none')).reason, 'network-open');
+  assert.equal(loopbackVerdict(0, out('ok', 'closed:EPERM', 'open')).reason, 'network-open');
+  assert.equal(
+    loopbackVerdict(0, out('fail:EPERM', 'closed:EPERM', 'none')).reason,
+    'listen-denied',
+  );
+  assert.equal(loopbackVerdict(0, 'garbage').status, 'failed');
+  assert.equal(loopbackVerdict(1, out('ok', 'closed:x', 'none')).status, 'failed');
+
+  // Подставной codex поддерживает network_proxy, но «пропускает» внешний адрес.
+  const { smokeLifecycle } = await import('../src/control/lifecycle-smoke.ts');
+  const { repo } = await import('./git-fixture.ts');
+  const r = repo({ 'README.md': 'app\n' });
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-wnet-')));
+  try {
+    const raw = structuredClone(example('policy')) as Record<string, any>;
+    raw.repositories[0].path = r.dir;
+    raw.runTimeoutMs = 60000;
+    raw.roles = { developer: { writer: { runtime: 'codex', toolProfile: 'web' } } };
+    raw.toolProfiles = { web: { runtime: 'codex', network: 'loopback' } };
+    raw.isolation = { mode: 'os', domains: [] };
+    raw.repositories[0].writerProbe = [{ id: 'serve', command: [process.execPath, '-e', '0'] }];
+    const policy = executionPolicySchema.parse(raw);
+    r.git('update-ref', policy.repositories[0]!.targetRef, 'HEAD');
+    const fake = join(root, 'codex');
+    const argvLog = join(root, 'argv.jsonl');
+    writeFileSync(
+      fake,
+      `#!${process.execPath}
+const fs=require('fs');const a=process.argv.slice(2);
+if(a[0]==='features'){process.stdout.write('network_proxy   experimental   false\\n');process.exit(0)}
+fs.appendFileSync(${JSON.stringify(argvLog)},JSON.stringify(a)+'\\n');
+const i=a.indexOf('--');
+if(a[i+2]==='-e'&&a[i+3].includes(${JSON.stringify(LOOPBACK_CHECK)})){
+  console.log(${JSON.stringify(out('ok', 'open', 'none'))});process.exit(0)}
+const r=require('child_process').spawnSync(a[i+1],a.slice(i+2),{stdio:'inherit'});process.exit(r.status??1);
+`,
+    );
+    chmodSync(fake, 0o755);
+    const data = await smokeLifecycle({
+      policy,
+      baseDir: root,
+      stateDir: join(root, 'state'),
+      rev: 'HEAD',
+      resourceDatabase: join(root, 'resources.sqlite'),
+      writerProbe: true,
+      executables: { codex: fake },
+    });
+    const w = data.writerProbe!.writers[0]!;
+    assert.equal(data.writerProbe!.ok, false);
+    assert.deepEqual(
+      w.commands.map((c) => [c.id, c.status, c.reason]),
+      [
+        [LOOPBACK_CHECK, 'blocked', 'network-open'],
+        ['serve', 'ok', undefined],
+      ],
+    );
+    assert.match(w.commands[0]!.advice!, /не держит границу loopback/);
+    // Проверка идёт с теми же аргументами песочницы, что у шагов исполнителя.
+    const calls = readFileSync(argvLog, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as string[]);
+    const head = (a: string[]) => a.slice(0, a.indexOf('--')).join(' ');
+    assert.equal(head(calls[0]!), head(calls[1]!));
+    assert.match(head(calls[0]!), /features\.network_proxy=true.*allow_local_binding=true/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

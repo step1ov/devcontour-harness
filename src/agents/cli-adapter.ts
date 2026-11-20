@@ -58,6 +58,8 @@ type ToolProfile = z.infer<typeof toolProfileSchema>;
 export const CODEX_RESULT_LIMIT = 4 * 1024 * 1024;
 
 /** Встроенные инструменты исполнителя claude, когда профиль их не называет; shell — в песочнице ОС. */
+/** Встроенные инструменты claude, которые ходят в сеть мимо песочницы Bash. */
+export const claudeNetworkTools = ['WebFetch', 'WebSearch'] as const;
 export const claudeWriterTools = ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'] as const;
 const writerTools = (profile?: ToolProfile): readonly string[] =>
   profile?.claudeTools ?? claudeWriterTools;
@@ -248,6 +250,10 @@ export function cliAdapter(
         await writeFile(mcpPath, JSON.stringify(claudeMcp(probe, profile), null, 2));
       // Сеть профиля — только исполнителю; ревьюер её не получает.
       const network = review ? undefined : profileNetwork(runtime, profile);
+      // Явный режим без интернета закрывает и инструменты runtime, которые
+      // ходят в сеть мимо песочницы shell: веб-поиск codex, WebFetch и
+      // WebSearch claude. Без поля `network` вызов прежний.
+      const offline = !review && (profile?.network === 'none' || profile?.network === 'loopback');
       if (runtime === 'codex' && network === 'loopback') {
         const refused = await codexLoopbackSupport(executable, r.env);
         if (refused) throw new Error(`codex: ${refused}`);
@@ -277,6 +283,7 @@ export function cliAdapter(
               ...(r.binding.effort ? ['-c', `model_reasoning_effort="${r.binding.effort}"`] : []),
               ...codexTools(profile, review, review ? r.probe : undefined),
               ...codexPermissions(policy, review ? 'none' : (network ?? 'none')),
+              ...(offline ? ['-c', 'web_search="disabled"'] : []),
               '-',
             ]
           : [
@@ -309,7 +316,9 @@ export function cliAdapter(
                       ...(reviewerRunsChecks('claude', profile) ? [] : ['Bash']),
                     ].join(','),
                   ]
-                : []),
+                : offline
+                  ? ['--disallowedTools', claudeNetworkTools.join(',')]
+                  : []),
               ...(profile?.claudeAllowedTools.length || mcp
                 ? [
                     '--allowedTools',

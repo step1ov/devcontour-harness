@@ -341,6 +341,8 @@ export const toolProfileSchema = z.strictObject({
    * вся сеть (только codex, то же, что `codexNetwork: true`). Нет поля —
    * прежнее поведение: codex — по `codexNetwork`, claude — домены
    * `isolation.domains` и локальные порты. Ревьюер сети профиля не получает.
+   * `none` и `loopback` закрывают и веб-инструменты runtime (веб-поиск codex,
+   * WebFetch/WebSearch claude); MCP-серверы профиля — вне этой границы.
    * Поле входит в `isolationDigest` (через `toolProfiles`): его смена требует
    * нового ревью плана.
    */
@@ -872,6 +874,15 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
         ['toolProfiles', id, 'network'],
         `network: ${profile.network} противоречит codexNetwork: true — уберите codexNetwork`,
       );
+    // Без интернета веб-инструменты claude закрыты: разрешение на них — спор с режимом.
+    if (profile.network === 'none' || profile.network === 'loopback')
+      for (const rule of profile.claudeAllowedTools)
+        if (/^Web(?:Fetch|Search)(?:$|\()/.test(rule))
+          add(
+            'INVALID_INPUT',
+            ['toolProfiles', id, 'claudeAllowedTools'],
+            `${rule} ходит в сеть мимо песочницы: с network: ${profile.network} он закрыт — уберите правило или выберите другой режим`,
+          );
     if (profile.network === 'full' && profile.runtime !== 'codex')
       add(
         'INVALID_INPUT',
