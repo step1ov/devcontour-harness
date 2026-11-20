@@ -286,32 +286,53 @@ const loopbackSupport = new Map<string, Promise<string | null>>();
 /**
  * Умеет ли codex сеть `loopback`: в `codex features list` есть функция
  * `network_proxy` (не `removed`). `null` — умеет; иначе — причина отказа.
- * Ответ кешируется на процесс по исполняемому файлу и PATH.
+ * Кешируется на процесс по исполняемому файлу и PATH только определённый
+ * ответ (команда завершилась с кодом 0): сбой запуска, предел времени и
+ * ненулевой код называются сбоем проверки и при следующем вызове
+ * проверяются заново.
  */
 export function codexLoopbackSupport(executable: string, env?: NodeJS.ProcessEnv) {
   const key = JSON.stringify([executable, env?.PATH ?? process.env.PATH]);
-  if (!loopbackSupport.has(key))
-    loopbackSupport.set(
-      key,
-      new Promise<string | null>((resolve) => {
-        const child = spawn(executable, ['features', 'list'], {
-          env: env ?? process.env,
-          stdio: ['ignore', 'pipe', 'ignore'],
-          timeout: 15_000,
-        });
-        let out = '';
-        child.stdout.on('data', (d: Buffer) => (out += d.toString()));
-        child.on('error', (e) => resolve(`codex features list не запустился: ${e.message}`));
-        child.on('close', () =>
-          resolve(
-            /^network_proxy\s+(?!removed\b)\S+/m.test(out)
-              ? null
-              : 'этот codex не поддерживает сеть loopback (нет функции network_proxy в codex features list): обновите codex или выберите network: none либо full',
-          ),
-        );
-      }),
-    );
-  return loopbackSupport.get(key)!;
+  const cached = loopbackSupport.get(key);
+  if (cached) return cached;
+  let definite = false;
+  const answer = new Promise<string | null>((resolve) => {
+    const failed = (why: string) =>
+      resolve(
+        `не удалось проверить поддержку сети loopback у codex (codex features list: ${why}); вызов не запускается, чтобы не открыть всю сеть — повторите позже или выберите network: none либо full`,
+      );
+    let child;
+    try {
+      child = spawn(executable, ['features', 'list'], {
+        env: env ?? process.env,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 15_000,
+      });
+    } catch (error) {
+      failed((error as Error).message);
+      return;
+    }
+    let out = '';
+    child.stdout.on('data', (d: Buffer) => (out += d.toString()));
+    child.on('error', (e) => failed(e.message));
+    child.on('close', (code, signal) => {
+      if (code !== 0) {
+        failed(signal ? `прерван сигналом ${signal}` : `код ${code}`);
+        return;
+      }
+      definite = true;
+      resolve(
+        /^network_proxy\s+(?!removed\b)\S+/m.test(out)
+          ? null
+          : 'этот codex не поддерживает сеть loopback (нет функции network_proxy в codex features list): обновите codex или выберите network: none либо full',
+      );
+    });
+  });
+  loopbackSupport.set(key, answer);
+  void answer.then(() => {
+    if (!definite) loopbackSupport.delete(key);
+  });
+  return answer;
 }
 
 const srtCli = createRequire(import.meta.url).resolve('@anthropic-ai/sandbox-runtime/dist/cli.js');

@@ -346,7 +346,11 @@ itself (`listen-denied`), set `"network": "loopback"` on the writer's tool
 profile: listen and connect on 127.0.0.1/::1 only, no internet — do not turn
 on the full network (`codexNetwork: true`) for it. On Linux the server and
 its client must run in one shell command; Codex needs the `network_proxy`
-feature (the probe reports `environment` otherwise). Changing `network` needs
+feature (the probe reports `environment` otherwise), and the probe's first
+line `harness-loopback-check` proves the boundary (`network-open` means this
+codex lets external traffic through: do not run the writer with it). The mode
+also turns off the runtime's own web tools (Codex web search, Claude
+WebFetch/WebSearch); MCP servers of the profile stay outside the boundary. Changing `network` needs
 a new plan review. A browser that aborts under the macOS
 sandbox (`process-abort`) cannot run inside the writer at all.
 
