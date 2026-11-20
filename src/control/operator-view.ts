@@ -73,7 +73,7 @@ import { WorkflowQueue } from './workflow.ts';
 import { reviewRoundCap } from './review.ts';
 import { reviewSubjectSummary } from './review-summary.ts';
 import { stageOfStep } from './stage.ts';
-import { cachedUpdates, loadUpdatesConfig } from '../update/check.ts';
+import { cachedUpdates, installedHarness, loadUpdatesConfig } from '../update/check.ts';
 import type { UpdatesView } from '../projections/operator-view.ts';
 
 type StatusData = z.output<typeof statusDataSchema>;
@@ -1333,13 +1333,14 @@ export function harnessView(options: HarnessViewOptions): OperatorView | WorkDet
 function updatesInput(stateDir: string, baseDir: string): UpdatesView | undefined {
   try {
     const { config, exists } = loadUpdatesConfig(baseDir, { quiet: true });
-    const cached = cachedUpdates(stateDir, config);
+    const installed = installedHarness(baseDir);
+    const cached = cachedUpdates(stateDir, config, installed);
     if (!cached || (!exists && cached.state === 'not-checked')) return undefined;
     const c = cached.check;
     const current =
       c && cached.state !== 'up-to-date'
         ? c.current
-        : { harness: HARNESS_VERSION, ...(c?.current.ui ? { ui: c.current.ui } : {}) };
+        : { harness: installed, ...(c?.current.ui ? { ui: c.current.ui } : {}) };
     return {
       state: cached.state,
       mode: config.mode,

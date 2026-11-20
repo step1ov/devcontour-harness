@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { HarnessError, packageFormatsSchema, type PackageFormats } from '../contracts/index.ts';
 import { npm, npmBin, npmReason, runTool, type NpmResult } from './npm.ts';
 
@@ -13,6 +14,31 @@ export interface InstalledPackage {
   /** Путь исполняемого файла пакета (поле `bin`). */
   bin?: string;
   formats?: Formats;
+}
+
+/**
+ * Каталог установки пакетов: `explicit` (`--prefix`); иначе тот, откуда
+ * запущен этот harness (`<prefix>/node_modules/devcontour-harness`); иначе
+ * `.harness-tools` проекта (место навыка harness-setup); иначе корень проекта.
+ * Одно правило для `update` и для чтения сохранённой проверки в view/status.
+ */
+export function installPrefix(
+  harnessDir: string | undefined,
+  explicit?: string,
+  self: string = fileURLToPath(import.meta.url),
+): string | undefined {
+  if (explicit) return resolve(explicit);
+  const root = harnessDir
+    ? basename(harnessDir) === '.harness'
+      ? dirname(harnessDir)
+      : harnessDir
+    : undefined;
+  const at = self.indexOf(`${sep}node_modules${sep}`);
+  const candidates = [
+    ...(at > 0 ? [self.slice(0, at)] : []),
+    ...(root ? [join(root, '.harness-tools'), root] : []),
+  ];
+  return candidates.find((c) => installedPackage(c, HARNESS_PACKAGE)) ?? root;
 }
 
 /** Установленный в `prefix` пакет (`node_modules/<name>/package.json`); нет — undefined. */
