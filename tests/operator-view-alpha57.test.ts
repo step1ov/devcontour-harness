@@ -369,7 +369,7 @@ test('view r2: удалённая ветка принятой работы — �
           remote: {
             state: 'not-pushed',
             trackingRef: 'origin/main',
-            line: 'принято локально; в удалённой ветке origin/main ещё нет',
+            line: 'принято локально; ещё нет в удалённой ветке origin/main',
             lineEn: 'accepted locally; not yet on the remote branch origin/main',
           },
         },
@@ -399,7 +399,7 @@ test('view r2: удалённая ветка принятой работы — �
     line: 'уже в удалённой ветке origin/main',
   });
   assert.equal(remote('local').state, 'not-pushed');
-  assert.equal(remote('local').line, 'принято локально; в удалённой ветке origin/main ещё нет');
+  assert.equal(remote('local').line, 'принято локально; ещё нет в удалённой ветке origin/main');
   assert.deepEqual(remote('none'), {
     state: 'unknown',
     reason: 'нет удалённой ветки',

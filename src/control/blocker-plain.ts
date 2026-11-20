@@ -11,6 +11,7 @@
 import type { ControlState, ExecutionPolicy, WorkState } from '../contracts/index.ts';
 import type { Engine } from '../engine/engine.ts';
 import type { Actor, NextAction } from '../projections/index.ts';
+import { holdLine } from '../projections/blocker-line.ts';
 import { actionText } from './stage.ts';
 
 /** Коды блокировок `Engine.blockers`: у каждого — простой текст (`blockerCodeText`). */
@@ -237,10 +238,12 @@ function textOf(b: { code: BlockerCode; message: string }, ctx: BlockerContext):
         };
       const hold = /^Удержано операцией (.+)$/.exec(m);
       if (hold) {
-        const op = ctx.work?.hold?.operation === hold[1] ? ` ${hold[1]}` : '';
+        const op = ctx.work?.hold?.operation === hold[1] ? (hold[1] ?? '') : '';
+        // Имя операции не ограничено договором: оно сокращается серединой,
+        // «ждёт её конца» остаётся (представление маскирует и сокращает сам).
         return {
-          ru: `удержано операцией${op} — ждёт её конца`,
-          en: `held by an operation${op} — waiting for it to finish`,
+          ru: holdLine('ru', op),
+          en: holdLine('en', op),
           actor: 'controller',
         };
       }

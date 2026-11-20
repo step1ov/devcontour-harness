@@ -19,7 +19,10 @@ import {
   OPERATOR_VIEW_VERSION,
 } from '../contracts/operator-view-limits.ts';
 import type { ExecutionPolicy, RuntimeBinding } from '../contracts/policy.ts';
-import { maskText, type MaskContext } from './mask.ts';
+import { fitLine, named, type LinePart } from './clip.ts';
+import { maskSecrets, maskText, type MaskContext } from './mask.ts';
+import { holdLineParts } from './blocker-line.ts';
+import { remoteLineParts } from './remote-line.ts';
 import { sha256Hex } from './sha256.ts';
 
 export {
@@ -571,6 +574,11 @@ export interface OperatorReviewInput {
   escalation?: { round: number; findings: readonly string[] };
   line?: string;
   lineEn?: string;
+  /**
+   * Те же строки по частям: имена (ID предмета, refs) проекция маскирует и
+   * сокращает серединой, вердикт и раунды остаются. Есть — вместо `line`.
+   */
+  lineParts?: { ru: readonly LinePart[]; en: readonly LinePart[] };
 }
 
 /** Фаза записи проверки или ревью попытки. */
@@ -975,6 +983,30 @@ interface Ctx {
 }
 
 const text = (c: Ctx, s: string | undefined, max: number) => maskText(s, max, c.mask);
+/**
+ * Строка из частей не длиннее `max`: имена маскируются и сокращаются
+ * серединой, текст шаблона сохраняется (`fitLine`); затем вся строка — через
+ * ту же маску, что и `text`.
+ */
+const fit = (c: Ctx, parts: readonly LinePart[], max: number) =>
+  maskText(
+    fitLine(parts, max, (t) => maskSecrets(t, c.mask)),
+    max,
+    c.mask,
+  );
+
+/**
+ * Имя ветки без `trackingRef`: строка загрузчика длиннее строки без имени —
+ * имя было (длиннее предела договора), его заменяет «…»; иначе имени нет.
+ */
+function unnamed(
+  r: { state: 'pushed' | 'not-pushed'; line: string; lineEn: string },
+  lang: 'ru' | 'en',
+) {
+  const loader = (lang === 'en' ? r.lineEn : r.line).trimEnd();
+  const bare = fitLine(remoteLineParts(r.state, lang, ''), Infinity).trimEnd();
+  return loader.length > bare.length ? '…' : '';
+}
 
 /** Удалённая ветка принятой работы: из сверки загрузчика, иначе «неизвестно». */
 function remoteView(
@@ -991,12 +1023,32 @@ function remoteView(
     };
   }
   const reason = c.lang === 'en' ? (r.reasonEn ?? r.reason) : r.reason;
+  const trackingRef = text(c, r.trackingRef, 500);
+  const reasonText = text(c, reason, T.reason);
+  // Строка собирается заново под предел представления: имя ветки
+  // маскируется и сокращается серединой, слова состояния остаются. Без
+  // `trackingRef` (имя длиннее предела договора) точного имени нет: строка
+  // загрузчика несёт его уже сокращённым, без маски — имя заменяет «…».
+  const line =
+    r.state === 'pushed' || r.state === 'not-pushed'
+      ? fit(
+          c,
+          remoteLineParts(
+            r.state,
+            c.lang,
+            trackingRef ?? unnamed({ ...r, state: r.state }, c.lang),
+          ),
+          T.line,
+        )
+      : r.state === 'unknown' && reasonText
+        ? fit(c, remoteLineParts(r.state, c.lang, '', reasonText), T.line)
+        : text(c, c.lang === 'en' ? r.lineEn : r.line, T.line);
   return {
     state: r.state,
-    ...((t) => (t ? { trackingRef: t } : {}))(text(c, r.trackingRef, 500)),
+    ...(trackingRef ? { trackingRef } : {}),
     ...(r.checkedAt ? { checkedAt: r.checkedAt } : {}),
-    ...((t) => (t ? { reason: t } : {}))(text(c, reason, T.reason)),
-    ...((t) => (t ? { line: t } : {}))(text(c, c.lang === 'en' ? r.lineEn : r.line, T.line)),
+    ...(reasonText ? { reason: reasonText } : {}),
+    ...(line ? { line } : {}),
   };
 }
 
@@ -1058,7 +1110,13 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
       const plain = c.lang === 'en' && b.plainEn ? b.plainEn : b.plain;
       return {
         code: b.code,
-        ...(plain ? { plain: text(c, plain, T.plain) } : {}),
+        ...((t) => (t ? { plain: t } : {}))(
+          plain
+            ? ((parts) => (parts ? fit(c, parts, T.plain) : text(c, plain, T.plain)))(
+                holdLineParts(plain),
+              )
+            : undefined,
+        ),
         // Без поля alpha.55 — кто действует по диагнозу этапа работы.
         actor: b.actor !== undefined ? actorOf(b.actor) : needsActor,
       };
@@ -1143,8 +1201,10 @@ function reviewView(
           },
         }
       : {}),
-    ...((line) => (line ? { line: text(c, line, T.line) } : {}))(
-      c.lang === 'en' ? r.lineEn : r.line,
+    ...((line) => (line ? { line } : {}))(
+      r.lineParts
+        ? fit(c, r.lineParts[c.lang], T.line)
+        : text(c, c.lang === 'en' ? r.lineEn : r.line, T.line),
     ),
   };
 }
@@ -1558,11 +1618,28 @@ const whoAnswered = {
 } as const;
 const sha12 = (x: string | undefined) => (x ? x.slice(0, 12) : undefined);
 
+/**
+ * Фраза из частей: строка подстановки — имя (ID, ветка, gate; сокращается
+ * серединой), число и массив частей — текст шаблона (не сокращается).
+ */
+function parts(strings: TemplateStringsArray, ...values: (string | number | LinePart[])[]) {
+  const out: LinePart[] = [];
+  strings.forEach((fixed, i) => {
+    if (fixed) out.push(fixed);
+    if (i >= values.length) return;
+    const v = values[i]!;
+    if (typeof v === 'string') out.push(named(v));
+    else if (typeof v === 'number') out.push(String(v));
+    else out.push(...v);
+  });
+  return out;
+}
+
 /** Фраза, исполнитель и код одного события ленты. */
 function activityLine(
   e: OperatorActivityInput,
   lang: 'ru' | 'en',
-): { actor: string; action: string; plain: string; workId?: string; subject?: string } {
+): { actor: string; action: string; plain: LinePart[]; workId?: string; subject?: string } {
   const ru = lang === 'ru';
   switch (e.kind) {
     case 'attempt.started':
@@ -1571,8 +1648,8 @@ function activityLine(
         action: e.kind,
         workId: e.workId,
         plain: ru
-          ? `контроллер запустил попытку ${e.attempt} работы ${e.workId}; пишет ${e.runtime}`
-          : `the controller started attempt ${e.attempt} of ${e.workId}; ${e.runtime} writes`,
+          ? parts`контроллер запустил попытку ${e.attempt} работы ${e.workId}; пишет ${e.runtime}`
+          : parts`the controller started attempt ${e.attempt} of ${e.workId}; ${e.runtime} writes`,
       };
     case 'attempt.ended': {
       const why = e.reason ? (ru ? e.reason.ru : e.reason.en) : undefined;
@@ -1583,39 +1660,47 @@ function activityLine(
         : '';
       const head = ru
         ? {
-            failed: `попытка ${e.attempt} работы ${e.workId} не удалась`,
-            cancelled: `попытка ${e.attempt} работы ${e.workId} отменена`,
-            expired: `попытка ${e.attempt} работы ${e.workId} потеряла владельца`,
-            interrupted: `попытка ${e.attempt} работы ${e.workId} прервана остановкой`,
+            failed: parts`попытка ${e.attempt} работы ${e.workId} не удалась`,
+            cancelled: parts`попытка ${e.attempt} работы ${e.workId} отменена`,
+            expired: parts`попытка ${e.attempt} работы ${e.workId} потеряла владельца`,
+            interrupted: parts`попытка ${e.attempt} работы ${e.workId} прервана остановкой`,
           }[e.outcome]
         : {
-            failed: `attempt ${e.attempt} of ${e.workId} failed`,
-            cancelled: `attempt ${e.attempt} of ${e.workId} was cancelled`,
-            expired: `attempt ${e.attempt} of ${e.workId} lost its owner`,
-            interrupted: `attempt ${e.attempt} of ${e.workId} was interrupted by a shutdown`,
+            failed: parts`attempt ${e.attempt} of ${e.workId} failed`,
+            cancelled: parts`attempt ${e.attempt} of ${e.workId} was cancelled`,
+            expired: parts`attempt ${e.attempt} of ${e.workId} lost its owner`,
+            interrupted: parts`attempt ${e.attempt} of ${e.workId} was interrupted by a shutdown`,
           }[e.outcome];
       return {
         actor: 'controller',
         action: `attempt.${e.outcome}`,
         workId: e.workId,
-        plain: `${head}${why ? `: ${why}` : ''}${free}`,
+        plain: [...head, ...(why ? [': ', named(why)] : []), free],
       };
     }
     case 'work.accepted': {
-      const at = [sha12(e.sha), e.ref].filter(Boolean);
+      const sha = sha12(e.sha);
+      const at: LinePart[] =
+        sha && e.ref
+          ? parts`: ${[sha]}${[ru ? ' в ' : ' on ']}${e.ref}`
+          : sha
+            ? [': ' + sha]
+            : e.ref
+              ? parts`: ${e.ref}`
+              : [];
       return {
         actor: 'controller',
         action: e.kind,
         workId: e.workId,
         plain: ru
-          ? `работа ${e.workId} принята (попытка ${e.attempt})${at.length ? `: ${at.join(' в ')}` : ''}, локально`
-          : `${e.workId} was accepted (attempt ${e.attempt})${at.length ? `: ${at.join(' on ')}` : ''}, locally`,
+          ? parts`работа ${e.workId} принята (попытка ${e.attempt})${at}, локально`
+          : parts`${e.workId} was accepted (attempt ${e.attempt})${at}, locally`,
       };
     }
     case 'gate': {
       const where = ru
-        ? `работа ${e.workId}, попытка ${e.attempt}, ${phaseWord.ru[e.phase]}`
-        : `${e.workId}, attempt ${e.attempt}, ${phaseWord.en[e.phase]}`;
+        ? parts`работа ${e.workId}, попытка ${e.attempt}, ${[phaseWord.ru[e.phase]]}`
+        : parts`${e.workId}, attempt ${e.attempt}, ${[phaseWord.en[e.phase]]}`;
       const action = e.notLaunched
         ? 'gate.not-launched'
         : e.reused
@@ -1627,40 +1712,42 @@ function activityLine(
               : 'gate.failed';
       const plain = e.notLaunched
         ? ru
-          ? `проверка ${e.gate} не запустилась — отказ среды, проверки не было (${where})`
-          : `check ${e.gate} did not start — environment failure, nothing was checked (${where})`
+          ? parts`проверка ${e.gate} не запустилась — отказ среды, проверки не было (${where})`
+          : parts`check ${e.gate} did not start — environment failure, nothing was checked (${where})`
         : e.reused
           ? ru
-            ? `проверка ${e.gate} взята с кандидата: то же дерево, не запускалась (${where})`
-            : `check ${e.gate} was reused from the candidate: same tree, not run (${where})`
+            ? parts`проверка ${e.gate} взята с кандидата: то же дерево, не запускалась (${where})`
+            : parts`check ${e.gate} was reused from the candidate: same tree, not run (${where})`
           : e.recheck
             ? e.recheck === 'flaky'
               ? ru
-                ? `перепроверка ${e.gate} прошла: первый провал был случайным (${where})`
-                : `recheck of ${e.gate} passed: the first failure was random (${where})`
+                ? parts`перепроверка ${e.gate} прошла: первый провал был случайным (${where})`
+                : parts`recheck of ${e.gate} passed: the first failure was random (${where})`
               : ru
-                ? `перепроверка ${e.gate} подтвердила провал (${where})`
-                : `recheck of ${e.gate} confirmed the failure (${where})`
+                ? parts`перепроверка ${e.gate} подтвердила провал (${where})`
+                : parts`recheck of ${e.gate} confirmed the failure (${where})`
             : ru
-              ? `контроллер запустил проверку ${e.gate}: ${e.passed ? 'прошла' : 'не прошла'} (${where})`
-              : `the controller ran check ${e.gate}: ${e.passed ? 'passed' : 'failed'} (${where})`;
+              ? parts`контроллер запустил проверку ${e.gate}: ${[e.passed ? 'прошла' : 'не прошла']} (${where})`
+              : parts`the controller ran check ${e.gate}: ${[e.passed ? 'passed' : 'failed']} (${where})`;
       return { actor: 'controller', action, workId: e.workId, plain };
     }
     case 'review': {
+      const phase = e.phase ? [`, ${phaseWord[lang][e.phase]}`] : [];
+      const attempt = e.attempt !== undefined ? e.attempt : '?';
       const what =
         e.scope === 'attempt'
           ? ru
-            ? `изменения работы ${e.workId ?? e.subject} (попытка ${e.attempt ?? '?'}${e.phase ? `, ${phaseWord.ru[e.phase]}` : ''})`
-            : `the changes of ${e.workId ?? e.subject} (attempt ${e.attempt ?? '?'}${e.phase ? `, ${phaseWord.en[e.phase]}` : ''})`
-          : `${scopeWord[lang][e.scope]} ${e.label ?? e.subject}`;
+            ? parts`изменения работы ${e.workId ?? e.subject} (попытка ${[String(attempt)]}${phase})`
+            : parts`the changes of ${e.workId ?? e.subject} (attempt ${[String(attempt)]}${phase})`
+          : parts`${[scopeWord[lang][e.scope]]} ${e.label ?? e.subject}`;
       const round = e.round !== undefined ? (ru ? `, раунд ${e.round}` : `, round ${e.round}`) : '';
       const verdict = e.approved
         ? ru
-          ? `одобрил ${what}`
-          : `approved ${what}`
+          ? parts`одобрил ${what}`
+          : parts`approved ${what}`
         : ru
-          ? `вернул ${what}: блокирующих замечаний ${e.blocking}`
-          : `returned ${what}: ${e.blocking} blocking finding${e.blocking === 1 ? '' : 's'}`;
+          ? parts`вернул ${what}: блокирующих замечаний ${e.blocking}`
+          : parts`returned ${what}: ${e.blocking} blocking finding${[e.blocking === 1 ? '' : 's']}`;
       const read =
         e.inspection === 'diff-only'
           ? ru
@@ -1676,7 +1763,7 @@ function activityLine(
         action: e.approved ? 'review.approved' : 'review.changes-requested',
         ...(e.workId ? { workId: e.workId } : {}),
         subject: e.subject,
-        plain: `reviewer ${e.reviewer} ${verdict}${round}${read}`,
+        plain: parts`reviewer ${e.reviewer} ${verdict}${[round]}${[read]}`,
       };
     }
     case 'review.escalated':
@@ -1686,8 +1773,8 @@ function activityLine(
         ...(e.workId ? { workId: e.workId } : {}),
         subject: e.subject,
         plain: ru
-          ? `эскалация: ${scopeWord.ru[e.scope]} ${e.subject} — блокирующие замечания не решились за раунды ревью (${e.findings}), решение за человеком или ведущим`
-          : `escalation: ${scopeWord.en[e.scope]} ${e.subject} — blocking findings were not resolved by review rounds (${e.findings}); a person or the lead decides`,
+          ? parts`эскалация: ${[scopeWord.ru[e.scope]]} ${e.subject} — блокирующие замечания не решились за раунды ревью (${e.findings}), решение за человеком или ведущим`
+          : parts`escalation: ${[scopeWord.en[e.scope]]} ${e.subject} — blocking findings were not resolved by review rounds (${e.findings}); a person or the lead decides`,
       };
     case 'question.asked':
       return {
@@ -1696,8 +1783,8 @@ function activityLine(
         workId: e.workId,
         subject: e.requestId,
         plain: ru
-          ? `исполнитель задал вопрос ${e.requestId} по работе ${e.workId} (важность ${e.severity})`
-          : `the writer asked question ${e.requestId} on ${e.workId} (severity ${e.severity})`,
+          ? parts`исполнитель задал вопрос ${e.requestId} по работе ${e.workId} (важность ${e.severity})`
+          : parts`the writer asked question ${e.requestId} on ${e.workId} (severity ${e.severity})`,
       };
     case 'question.answered': {
       const rule = e.basis ? (ru ? ruleText.ru[e.basis] : ruleText.en[e.basis]) : undefined;
@@ -1707,8 +1794,8 @@ function activityLine(
         workId: e.workId,
         subject: e.requestId,
         plain: ru
-          ? `${whoAnswered.ru[e.by]} ответил на вопрос ${e.requestId} по работе ${e.workId}${rule ? ` (${rule})` : ''}`
-          : `${whoAnswered.en[e.by]} answered question ${e.requestId} on ${e.workId}${rule ? ` (${rule})` : ''}`,
+          ? parts`${[whoAnswered.ru[e.by]]} ответил на вопрос ${e.requestId} по работе ${e.workId}${[rule ? ` (${rule})` : '']}`
+          : parts`${[whoAnswered.en[e.by]]} answered question ${e.requestId} on ${e.workId}${[rule ? ` (${rule})` : '']}`,
       };
     }
   }
@@ -1743,7 +1830,7 @@ function activityOf(
           action: line.action,
           ...(line.workId ? { workId: line.workId } : {}),
           ...(line.subject ? { subject: line.subject } : {}),
-          plain: text(c, line.plain, T.activity) || line.action,
+          plain: fit(c, line.plain, T.activity) || line.action,
         },
       };
     })

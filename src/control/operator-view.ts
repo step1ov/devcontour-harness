@@ -38,6 +38,7 @@ import { notLaunched, reviewFacts } from '../report/verification.ts';
 import { callRecords } from '../engine/usage.ts';
 import { legacyGroupCall } from '../engine/budget.ts';
 import { requestsOf } from '../engine/input-requests.ts';
+import { named, type LinePart } from '../projections/clip.ts';
 import { inputStateOf } from '../projections/input.ts';
 import { explainStop } from '../projections/stop.ts';
 import { stopInputsIn } from '../explain/state.ts';
@@ -262,7 +263,44 @@ const roundsOf = <R extends { subject: string; round: number; at: string }>(
   return out;
 };
 
-function reviewsOf(
+/**
+ * Строка ревью кода по частям: «код app/writer base..head: вердикт; раундов
+ * N». Refs (до 500 символов) — имена: проекция маскирует их и сокращает
+ * серединой, вердикт и раунды остаются в пределе строки представления.
+ */
+export function codeReviewLineParts(
+  r: {
+    repositoryId: string;
+    role: string;
+    refs: { base: string; head: string };
+    approved: boolean;
+    round: number;
+  },
+  counts: Parameters<typeof reviewVerdictText>[1],
+  lang: 'ru' | 'en',
+): LinePart[] {
+  const ru = lang === 'ru';
+  return [
+    ru ? 'код ' : 'code ',
+    named(`${r.repositoryId}/${r.role}`),
+    ' ',
+    named(r.refs.base),
+    '..',
+    named(r.refs.head),
+    `: ${reviewVerdictText(r.approved, counts, lang)}; ${ru ? 'раундов' : 'rounds'} ${r.round}`,
+  ];
+}
+
+/** Строка ревью плана или контракта: ID предмета — имя, остальное — шаблон. */
+function subjectLineParts(line: string, head: string, subject: string): LinePart[] {
+  const prefix = `${head} ${subject}`;
+  return line.startsWith(prefix) ? [head + ' ', named(subject), line.slice(prefix.length)] : [line];
+}
+
+const joinParts = (parts: readonly LinePart[]) =>
+  parts.map((p) => (typeof p === 'string' ? p : p.name)).join('');
+
+export function reviewsOf(
   v: ExecutionView,
   policy: ExecutionPolicy,
 ): { reviews: OperatorReviewInput[]; rounds: ReviewRound[] } {
@@ -313,15 +351,22 @@ function reviewsOf(
       ...(waiting.length
         ? { escalation: { round: r.round, findings: waiting.map((f) => f.id) } }
         : {}),
-      line: s.line,
-      lineEn: `${s.kind} ${s.subject}: ${reviewVerdictText(s.approved, counts, 'en')}; rounds ${s.rounds.used}${s.rounds.max === null ? '' : '/' + s.rounds.max}`,
+      ...((en) => ({
+        line: s.line,
+        lineEn: en,
+        lineParts: {
+          ru: subjectLineParts(s.line, s.kind === 'plan' ? 'план' : 'контракт', s.subject),
+          en: subjectLineParts(en, s.kind, s.subject),
+        },
+      }))(
+        `${s.kind} ${s.subject}: ${reviewVerdictText(s.approved, counts, 'en')}; rounds ${s.rounds.used}${s.rounds.max === null ? '' : '/' + s.rounds.max}`,
+      ),
     };
   });
   const codeRows = v.locals('code-reviews', WORKSPACE_OWNER).map((r) => r.value);
   const code = [...lastBySubject(codeRows, (r) => r.subject).values()].map(
     (r): OperatorReviewInput => {
       const counts = findingCounts(r.findings);
-      const scope = `${r.repositoryId}/${r.role} ${r.refs.base}..${r.refs.head}`;
       return {
         kind: 'code',
         subject: r.subject,
@@ -337,8 +382,10 @@ function reviewsOf(
         sameVendor: r.sameVendor,
         spend: spend.get(`code\0${r.subject}`) ?? none,
         findings: findingsOf(r.findings),
-        line: `код ${scope}: ${reviewVerdictText(r.approved, counts, 'ru')}; раундов ${r.round}`,
-        lineEn: `code ${scope}: ${reviewVerdictText(r.approved, counts, 'en')}; rounds ${r.round}`,
+        ...((ru, en) => ({ line: joinParts(ru), lineEn: joinParts(en), lineParts: { ru, en } }))(
+          codeReviewLineParts(r, counts, 'ru'),
+          codeReviewLineParts(r, counts, 'en'),
+        ),
       };
     },
   );

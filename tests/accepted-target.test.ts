@@ -147,7 +147,7 @@ test('P2-c: принято локально против удалённой ве
   let r = remote();
   assert.equal(r.state, 'not-pushed');
   assert.equal(r.trackingRef, `origin/${branch}`);
-  assert.equal(r.line, `принято локально; в удалённой ветке origin/${branch} ещё нет`);
+  assert.equal(r.line, `принято локально; ещё нет в удалённой ветке origin/${branch}`);
   assert.equal(r.lineEn, `accepted locally; not yet on the remote branch origin/${branch}`);
   // Время — последнее обновление ref на машине (reflog), а не часы запроса.
   const gd = p.git(
