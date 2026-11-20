@@ -4,6 +4,7 @@ import { HarnessError, TaskFailure, type ExecutionPolicy } from '../contracts/in
 import { CleanupFailure, type StepOutcome } from '../environment/lifecycle.ts';
 import { runGatesAt } from '../verification/gates-at.ts';
 import { commitOf, repositoryOf, repositoryPath } from './gates-check.ts';
+import { probeWriter, writerProbeText, type WriterProbeResult } from './writer-probe.ts';
 
 /**
  * Класс отказа окружения `harness smoke`:
@@ -54,6 +55,8 @@ export interface LifecycleSmokeResult {
   failure?: LifecycleSmokeFailure;
   logs: string;
   warnings?: string[];
+  /** Проба исполнителя (`--writer-probe`): команды `writerProbe` в его изоляции. */
+  writerProbe?: WriterProbeResult;
 }
 
 export interface LifecycleSmokeInput {
@@ -70,6 +73,13 @@ export interface LifecycleSmokeInput {
   environment?: NodeJS.ProcessEnv;
   /** Каждый шаг по мере исполнения (CLI печатает ход в stderr). */
   onStep?(step: LifecycleSmokeStep): void;
+  /**
+   * После `prepare` прогнать команды `writerProbe` репозитория в точной
+   * изоляции каждого его исполнителя (без модели): что закрыто и почему.
+   */
+  writerProbe?: boolean;
+  /** Исполняемые файлы runtime для пробы (`HARNESS_<RUNTIME>_BIN`). */
+  executables?: Partial<Record<'codex' | 'claude', string>>;
 }
 
 const stepOf = (s: StepOutcome): LifecycleSmokeStep => ({
@@ -230,6 +240,7 @@ export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<Lifecy
   const started = Date.now();
   let warnings: string[] | undefined;
   let failure: LifecycleSmokeFailure | undefined;
+  let probe: WriterProbeResult | undefined;
   try {
     const result = await runGatesAt(
       {
@@ -260,6 +271,23 @@ export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<Lifecy
           input.onStep?.(step);
         },
         ...(input.signal ? { signal: input.signal } : {}),
+        ...(input.writerProbe
+          ? {
+              afterPrepare: async (ctx) => {
+                probe = await probeWriter({
+                  policy,
+                  repo,
+                  cwd: ctx.cwd,
+                  boundary: ctx.boundary,
+                  dir: join(stateDir, 'gates-at', id, 'writer-probe'),
+                  runId: id,
+                  signal: ctx.signal,
+                  ...(input.environment ? { environment: input.environment } : {}),
+                  ...(input.executables ? { executables: input.executables } : {}),
+                });
+              },
+            }
+          : {}),
       },
     );
     warnings = result.warnings;
@@ -291,6 +319,7 @@ export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<Lifecy
     ...(failure ? { failure } : {}),
     logs: join(stateDir, 'gates-at', id),
     ...(warnings?.length ? { warnings } : {}),
+    ...(probe ? { writerProbe: probe } : {}),
   };
 }
 
@@ -313,6 +342,8 @@ export function smokeText(data: LifecycleSmokeResult) {
         : []),
       `логи: ${data.logs}`,
       ...(data.warnings ?? []).map((w) => `предупреждение: ${w}`),
-    ].join('\n') + '\n'
+    ].join('\n') +
+    '\n' +
+    (data.writerProbe ? writerProbeText(data.writerProbe) : '')
   );
 }

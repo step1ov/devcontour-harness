@@ -1,0 +1,398 @@
+// Пробный запуск исполнителя без модели (`harness smoke --writer-probe`).
+//
+// Правила шаблона требуют от исполнителя шагов, которые его песочница может
+// закрыть: генератор из реестра (сеть), локальный сервер для проверок в
+// браузере (listen), браузерный инструмент (запуск процесса), служебный
+// каталог в домашнем каталоге (запись). Без пробы каждый такой конфликт
+// находила платная попытка, и исполнитель останавливался до кода. Здесь
+// команды `writerProbe` политики исполняются в той же изоляции, что вызов
+// исполнителя: то же окружение (профиль инструментов назначения, переменные
+// контура, свой TMPDIR в области записи), те же области записи и чтения, та
+// же сеть, тем же механизмом — песочница codex (`codex sandbox` с профилем
+// прав harness) или sandbox-runtime для claude (тот же класс механизма, что
+// песочница Claude Code). Модель не вызывается, попытка не создаётся.
+
+import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import {
+  mcpEnvironment,
+  roleBinding,
+  type ExecutionPolicy,
+  type RuntimeName,
+} from '../contracts/index.ts';
+import { writerRunsChecks } from '../agents/cli-adapter.ts';
+import {
+  codexPermissions,
+  isolatedCommand,
+  isolation,
+  srtTempDir,
+} from '../environment/isolation.ts';
+import { executionEnvironment } from '../environment/lifecycle.ts';
+import { command } from '../environment/process.ts';
+import { writerScratch } from '../engine/writer-block.ts';
+
+type Repo = ExecutionPolicy['repositories'][number];
+
+/** Почему команда исполнителю закрыта (или не прошла сама). */
+export type WriterProbeReason =
+  | 'listen-denied'
+  | 'network-denied'
+  | 'write-denied'
+  | 'process-abort'
+  | 'missing-tool'
+  | 'timeout'
+  | 'no-shell'
+  | 'environment'
+  | 'failed';
+
+export interface WriterProbeCommand {
+  id: string;
+  command: string[];
+  /** `ok` — прошла; `blocked` — закрыта изоляцией исполнителя; `failed` — упала сама. */
+  status: 'ok' | 'blocked' | 'failed';
+  exitCode?: number;
+  timedOut?: boolean;
+  durationMs: number;
+  reason?: WriterProbeReason;
+  /** Строка вывода, по которой узнана причина (замаскирована, до 300 знаков). */
+  evidence?: string;
+  /** Что сделать простыми словами: варианты решения. */
+  advice?: string;
+  log?: string;
+}
+
+export interface WriterProbeWriter {
+  runtime: RuntimeName;
+  toolProfile?: string;
+  /** Роли, у которых этот исполнитель. */
+  roles: string[];
+  /** Механизм изоляции пробы: тот же, что у вызова исполнителя. */
+  mechanism: 'codex-sandbox' | 'sandbox-runtime' | 'none';
+  /** Сеть исполнителя: codex — `codexNetwork` профиля; claude — домены политики. */
+  network: boolean;
+  commands: WriterProbeCommand[];
+}
+
+export interface WriterProbeResult {
+  /** Все команды всех исполнителей прошли. */
+  ok: boolean;
+  writers: WriterProbeWriter[];
+  /** Пояснение: команд нет, исполнители без shell и т. п. */
+  notes?: string[];
+}
+
+const clip = (s: string, n = 300) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+const lineOf = (text: string, re: RegExp) =>
+  text
+    .split('\n')
+    .find((l) => re.test(l))
+    ?.trim();
+
+const ADVICE: Record<WriterProbeReason, string> = {
+  'listen-denied':
+    'Исполнителю закрыт локальный сервер (listen). Варианты: вынести проверку с сервером в gate harness (gates слушают localhost); включить сеть исполнителя в профиле инструментов (codexNetwork: true — откроет и интернет); отключить это правило шаблона для режима harness (раздел controller-mode).',
+  'network-denied':
+    'Исполнителю закрыта сеть (реестр пакетов или внешний адрес). Варианты: выполнить шаг заранее в prepare (кеш вне рабочего дерева, harness lean); открыть домен в isolation.domains или сеть в профиле инструментов (codexNetwork: true); вынести шаг в prepare или gate.',
+  'write-denied':
+    'Команда пишет вне области записи исполнителя (путь — в строке вывода). Варианты: направить её каталог в рабочее дерево или во временный каталог переменной окружения профиля; выполнить шаг заранее в prepare.',
+  'process-abort':
+    'Процесс аварийно завершился в песочнице: так ведёт себя браузер без окна на macOS под Seatbelt. Исполнитель этот шаг не выполнит: вынести его в gate harness или службу lifecycle вне песочницы исполнителя, либо отключить правило шаблона для режима harness.',
+  'missing-tool':
+    'Команда не найдена в PATH исполнителя: установите инструмент, укажите абсолютный путь или поставьте его шагом prepare.',
+  timeout:
+    'Команда не уложилась в timeoutMs: часто она ждёт сети, ввода или службы. Проверьте её отдельно; ожидание сети — та же причина, что network-denied.',
+  'no-shell':
+    'У исполнителя нет shell (профиль инструментов): команды он не запустит вовсе. Дайте профилю shell (codexShell / claudeTools: Bash) или вынесите шаг в prepare или gate.',
+  environment:
+    'Окружение исполнителя не собирается (переменная или секрет профиля не задан): задайте их до запуска.',
+  failed:
+    'Команда завершилась ошибкой без признаков песочницы: причина — в ней самой (лог). Проверьте команду вне harness.',
+};
+
+/**
+ * Причина по исходу команды. Экспортируется для тестов. Порядок — от самого
+ * конкретного признака к общему: аварийное завершение раньше отказа записи
+ * (браузер печатает «Permission denied» своего служебного вызова), listen
+ * раньше прочих EPERM.
+ */
+export function classifyProbe(result: {
+  code: number;
+  timedOut: boolean;
+  output: string;
+  signal?: string | null;
+}): { status: WriterProbeCommand['status']; reason?: WriterProbeReason; evidence?: string } {
+  const text = result.output;
+  if (result.timedOut) return { status: 'blocked', reason: 'timeout' };
+  if (result.code === 0) return { status: 'ok' };
+  const abort =
+    /Abort trap|SIGABRT|bootstrap_check_in|TransformProcessType|Trace\/BPT trap|sandbox initialization failed/;
+  if (result.code === 134 || result.signal === 'SIGABRT' || abort.test(text))
+    return {
+      status: 'blocked',
+      reason: 'process-abort',
+      ...((l) => (l ? { evidence: l } : {}))(lineOf(text, abort)),
+    };
+  const listen = /listen E(?:PERM|ACCES)|bind\b.*(?:EPERM|EACCES|Operation not permitted)/i;
+  if (listen.test(text))
+    return {
+      status: 'blocked',
+      reason: 'listen-denied',
+      evidence: lineOf(text, listen) ?? 'listen',
+    };
+  const network =
+    /\b(?:ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ECONNREFUSED)\b|getaddrinfo|Could not resolve host|Temporary failure in name resolution|network is unreachable|ERR_PNPM_META_FETCH_FAIL|fetch failed/i;
+  if (network.test(text))
+    return {
+      status: 'blocked',
+      reason: 'network-denied',
+      evidence: lineOf(text, network) ?? 'network',
+    };
+  const write =
+    /\b(?:EROFS|EPERM|EACCES)\b|read-only file system|Operation not permitted|Permission denied/i;
+  if (write.test(text))
+    return { status: 'blocked', reason: 'write-denied', evidence: lineOf(text, write) ?? 'write' };
+  if (result.code === 127 || /command not found|spawn \S+ ENOENT/i.test(text))
+    return {
+      status: 'failed',
+      reason: 'missing-tool',
+      ...((l) => (l ? { evidence: l } : {}))(lineOf(text, /not found|ENOENT/i)),
+    };
+  return { status: 'failed', reason: 'failed' };
+}
+
+/** Различные исполнители ролей репозитория (runtime и профиль инструментов). */
+function writersOf(policy: ExecutionPolicy, repo: Repo) {
+  const roles = [...new Set([...Object.keys(policy.roles), ...Object.keys(repo.roles ?? {})])];
+  const out = new Map<string, { runtime: RuntimeName; toolProfile?: string; roles: string[] }>();
+  for (const role of roles) {
+    const writer = roleBinding(policy, role, repo.id)?.writer;
+    if (!writer) continue;
+    const key = `${writer.runtime}\u0000${writer.toolProfile ?? ''}`;
+    const entry = out.get(key) ?? {
+      runtime: writer.runtime,
+      ...(writer.toolProfile ? { toolProfile: writer.toolProfile } : {}),
+      roles: [],
+    };
+    entry.roles.push(role);
+    out.set(key, entry);
+  }
+  return [...out.values()];
+}
+
+export interface WriterProbeInput {
+  policy: ExecutionPolicy;
+  repo: Repo;
+  /** Подготовленное рабочее дерево (после prepare). */
+  cwd: string;
+  /** Граница проверки — та же, что у вызова исполнителя. */
+  boundary: { hidden: string[]; readable: string[]; checkouts: string[] };
+  /** Каталог логов пробы. */
+  dir: string;
+  runId: string;
+  signal: AbortSignal;
+  environment?: NodeJS.ProcessEnv;
+  /** Исполняемые файлы runtime (`HARNESS_<RUNTIME>_BIN`); по умолчанию — имя из PATH. */
+  executables?: Partial<Record<'codex' | 'claude', string>>;
+  platform?: NodeJS.Platform;
+}
+
+/** Команды `writerProbe` репозитория в изоляции каждого его исполнителя. */
+export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeResult> {
+  const { policy, repo, cwd } = input;
+  const steps = repo.writerProbe ?? [];
+  const notes: string[] = [];
+  if (!steps.length)
+    notes.push(
+      `У репозитория ${repo.id} нет writerProbe: перечислите команды, которые правила проекта (AGENTS.md, навыки) требуют от исполнителя, — harness-setup предлагает их.`,
+    );
+  if (policy.isolation.mode !== 'os')
+    notes.push('isolation.mode не os: исполнитель работает без песочницы, проба тоже.');
+  const writers: WriterProbeWriter[] = [];
+  /** Короткие временные каталоги srt, созданные пробой (только они и убираются). */
+  const srtTemps: string[] = [];
+  let n = 0;
+  for (const w of writersOf(policy, repo)) {
+    if (w.runtime !== 'codex' && w.runtime !== 'claude') continue;
+    const runtime = w.runtime;
+    const profile = w.toolProfile ? policy.toolProfiles[w.toolProfile] : undefined;
+    const mechanism =
+      policy.isolation.mode !== 'os'
+        ? 'none'
+        : runtime === 'codex'
+          ? 'codex-sandbox'
+          : 'sandbox-runtime';
+    const report: WriterProbeWriter = {
+      runtime,
+      ...(w.toolProfile ? { toolProfile: w.toolProfile } : {}),
+      roles: w.roles,
+      mechanism,
+      network: runtime === 'codex' ? !!profile?.codexNetwork : policy.isolation.domains.length > 0,
+      commands: [],
+    };
+    writers.push(report);
+    const blockAll = (reason: WriterProbeReason, evidence?: string) => {
+      for (const step of steps)
+        report.commands.push({
+          id: step.id,
+          command: step.command,
+          status: 'blocked',
+          durationMs: 0,
+          reason,
+          ...(evidence ? { evidence: clip(evidence) } : {}),
+          advice: ADVICE[reason],
+        });
+    };
+    if (!writerRunsChecks(runtime, profile)) {
+      blockAll('no-shell');
+      continue;
+    }
+    let execution;
+    try {
+      execution = executionEnvironment(
+        [
+          policy.environment,
+          repo.environment,
+          profile?.environment,
+          ...(profile ? [mcpEnvironment(profile)] : []),
+        ],
+        {
+          DEVCONTOUR_REPOSITORY_ID: repo.id,
+          DEVCONTOUR_RUN_ID: input.runId,
+          DEVCONTOUR_PHASE: 'candidate',
+          DEVCONTOUR_COMPONENTS_JSON: JSON.stringify({ [repo.id]: cwd }),
+        },
+        input.environment ?? process.env,
+      );
+    } catch (error) {
+      blockAll('environment', error instanceof Error ? error.message : String(error));
+      continue;
+    }
+    const callDir = join(input.dir, `writer-${++n}`);
+    await mkdir(callDir, { recursive: true });
+    // Свой TMPDIR в области записи — как у вызова исполнителя.
+    const scratch = await writerScratch(callDir, execution.env);
+    const iso = isolation({
+      write: [cwd, scratch],
+      controller: input.boundary.hidden,
+      readable: [cwd, scratch, ...input.boundary.readable],
+      domains: policy.isolation.domains,
+      ...(input.boundary.checkouts.length ? { checkouts: input.boundary.checkouts } : {}),
+    });
+    try {
+      for (const step of steps) {
+        let argv: string[];
+        let env: NodeJS.ProcessEnv = execution.env;
+        let runCwd = cwd;
+        if (mechanism === 'codex-sandbox')
+          // Профиль прав — тот же, что у `codex exec` исполнителя.
+          argv = [
+            input.executables?.codex ?? 'codex',
+            'sandbox',
+            ...codexPermissions(iso, !!profile?.codexNetwork),
+            '--',
+            ...step.command,
+          ];
+        else if (mechanism === 'sandbox-runtime') {
+          // Метка старта обёртки — в своём каталоге, открытом на запись
+          // только ей (как у gates); песочница исполнителя — та же граница.
+          const marks = join(callDir, step.id + '.marks');
+          await mkdir(marks, { recursive: true });
+          const srt = await srtTempDir();
+          if (srt.created) srtTemps.push(srt.dir);
+          const wrapped = await isolatedCommand(
+            { ...iso, write: [...iso.write, await realpath(marks)] },
+            step.command,
+            join(callDir, step.id + '.settings'),
+            scratch,
+            join(marks, 'started'),
+            await realpath(cwd),
+            [await realpath(cwd)],
+            input.platform ?? process.platform,
+            '',
+            randomBytes(6).toString('hex'),
+            srt.dir,
+          );
+          argv = wrapped.argv;
+          env = { ...execution.env, ...wrapped.env };
+          runCwd = wrapped.cwd;
+        } else argv = step.command;
+        const started = Date.now();
+        let result;
+        try {
+          result = await command(argv, runCwd, {
+            env,
+            timeoutMs: step.timeoutMs,
+            signal: input.signal,
+            redact: execution.redact,
+            contain: { dirs: [cwd, scratch] },
+            activity: { kind: 'command', label: `writer-probe ${step.id}`.slice(0, 300) },
+          });
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          report.commands.push({
+            id: step.id,
+            command: step.command,
+            status: 'failed',
+            durationMs: Date.now() - started,
+            reason: 'missing-tool',
+            evidence: clip(`${argv[0]}: ${code ?? String(error)}`),
+            advice:
+              mechanism === 'codex-sandbox' && argv[0] !== step.command[0]
+                ? 'Не запускается codex sandbox: установите codex (тот же, что у исполнителя) или задайте HARNESS_CODEX_BIN.'
+                : ADVICE['missing-tool'],
+          });
+          continue;
+        }
+        const output = result.stdout + '\n' + result.stderr;
+        const log = join(callDir, step.id + '.log');
+        await writeFile(log, output);
+        const verdict = classifyProbe({
+          code: result.code,
+          timedOut: result.timedOut,
+          output,
+          signal: result.diagnostics.signal,
+        });
+        report.commands.push({
+          id: step.id,
+          command: step.command,
+          status: verdict.status,
+          exitCode: result.code,
+          ...(result.timedOut ? { timedOut: true } : {}),
+          durationMs: Date.now() - started,
+          ...(verdict.reason ? { reason: verdict.reason } : {}),
+          ...(verdict.evidence ? { evidence: clip(execution.redact(verdict.evidence)) } : {}),
+          ...(verdict.reason ? { advice: ADVICE[verdict.reason] } : {}),
+          log,
+        });
+      }
+    } finally {
+      await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
+      for (const dir of srtTemps.splice(0))
+        await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+  if (!writers.length) notes.push('Ни у одной роли репозитория нет исполнителя codex или claude.');
+  return {
+    ok: writers.every((w) => w.commands.every((c) => c.status === 'ok')),
+    writers,
+    ...(notes.length ? { notes } : {}),
+  };
+}
+
+/** Строки пробы для человека (`harness smoke --writer-probe --human`). */
+export function writerProbeText(probe: WriterProbeResult) {
+  const lines = [`проба исполнителя: ${probe.ok ? 'всё доступно' : 'есть закрытые шаги'}`];
+  for (const w of probe.writers) {
+    lines.push(
+      `  исполнитель ${w.runtime}${w.toolProfile ? ` (${w.toolProfile})` : ''}, роли ${w.roles.join(', ')}; изоляция ${w.mechanism}; сеть ${w.network ? 'есть' : 'закрыта'}`,
+    );
+    for (const c of w.commands)
+      lines.push(
+        `    ${c.id}: ${c.status}${c.reason && c.status !== 'ok' ? ` — ${c.reason}` : ''}${c.evidence ? ` (${c.evidence})` : ''}`,
+        ...(c.advice && c.status !== 'ok' ? [`      что сделать: ${c.advice}`] : []),
+      );
+  }
+  for (const note of probe.notes ?? []) lines.push(`  заметка: ${note}`);
+  return lines.join('\n') + '\n';
+}

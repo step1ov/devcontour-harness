@@ -86,6 +86,16 @@ export interface GatesAtInput {
    * `worktree` и `dependency-store` (без кода выхода).
    */
   onStep?(step: StepOutcome): void;
+  /**
+   * Только окружение: вызов после `prepare` в подготовленном дереве, пока
+   * службы lifecycle подняты (`harness smoke --writer-probe`). Граница —
+   * та же, что у gates этой проверки.
+   */
+  afterPrepare?(ctx: {
+    cwd: string;
+    boundary: { hidden: string[]; readable: string[]; checkouts: string[] };
+    signal: AbortSignal;
+  }): Promise<void>;
 }
 
 /** Переход живости проверки вне попытки (нагрузка `attempt.liveness`). */
@@ -345,6 +355,21 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
             else await materializeStore(store, { repo, cwd, execution, signal, dir: artifacts });
             await runSteps(repo.prepare, cwd, join(artifacts, 'prepare'), execution, signal);
             prepared(execution);
+            if (input.lifecycleOnly && input.afterPrepare)
+              await input.afterPrepare({
+                cwd,
+                boundary: {
+                  hidden: boundary.hidden,
+                  readable: [...boundary.readable, ...snapshots.map((d) => d.path)],
+                  checkouts: [
+                    ...new Set([
+                      ...(boundary.checkouts ?? []),
+                      ...(placement.root ? [placement.root] : []),
+                    ]),
+                  ],
+                },
+                signal,
+              });
             let reapedBy: string | undefined;
             for (const gate of gates) {
               if (interrupted) {

@@ -280,6 +280,14 @@ export const repositoryPolicySchema = z.strictObject({
    * Необязательное поле без умолчания: политика без него сохраняет digest.
    */
   generators: z.array(generatorSchema).max(MAX_GENERATORS).optional(),
+  /**
+   * Команды, которые правила проекта требуют от исполнителя (генератор,
+   * локальный сервер, браузерный инструмент): `harness smoke --writer-probe`
+   * прогоняет их в точной изоляции исполнителя без модели и называет, что
+   * закрыто. На попытки не влияют. Необязательное поле без умолчания:
+   * политика без него сохраняет digest.
+   */
+  writerProbe: z.array(stepSchema).max(20).optional(),
 });
 
 /** Предел расходов (USD) и/или времени вызовов; хотя бы одно поле — выражено вариантами. */
@@ -864,6 +872,7 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
       setup: lifecycle.setup,
       ready: lifecycle.ready,
       teardown: lifecycle.teardown,
+      writerProbe: repo.writerProbe ?? [],
     }))
       if (new Set(steps.map((s) => s.id)).size !== steps.length)
         add('INVALID_INPUT', ['repositories', r, name], 'Step ids должны быть уникальны');
