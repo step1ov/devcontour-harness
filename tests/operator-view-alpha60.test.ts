@@ -25,7 +25,7 @@ import { spendText } from '../src/control/stage.ts';
 import { collectOperatorViewInput, viewPolicy } from '../src/control/operator-view.ts';
 import { stopInputsOf } from '../src/explain/state.ts';
 import { explainStop } from '../src/projections/stop.ts';
-import { boundedUsd, operatorView } from '../src/projections/operator-view.ts';
+import { boundedUsd, carrierLine, operatorView } from '../src/projections/operator-view.ts';
 import { attemptCounted } from '../src/report/compute.ts';
 import { CURRENT_PROCESS } from '../src/environment/live-calls.ts';
 import { endActive, startActive } from '../src/engine/usage.ts';
@@ -52,14 +52,13 @@ const viewOf = (env: ReturnType<typeof engineOf>) =>
     ),
   );
 
-test('F-G: ревью плана в живом run — этап plan-review, действует harness, не ведущий', () => {
-  const env = engineOf();
-  const { graph } = env.engine.register(graphOf({ a: [] }), trustNone);
+/** Открытый вызов ревью плана графа в этом (живом) процессе. */
+function livePlanReview(env: ReturnType<typeof engineOf>, graphId: string) {
   const call = env.engine.beginCall(
     {
-      id: 'call-plan-1',
+      id: `call-plan-${graphId}`,
       stage: 'plan-review',
-      subjectId: graph.id,
+      subjectId: graphId,
       runtime: 'codex',
       model: null,
       runtimeVersion: null,
@@ -72,9 +71,16 @@ test('F-G: ревью плана в живом run — этап plan-review, д�
       costUsd: null,
       costSource: 'unknown',
     } as never,
-    { stage: 'plan-review', subjectId: graph.id },
+    { stage: 'plan-review', subjectId: graphId },
   );
   startActive(call.id);
+  return call;
+}
+
+test('F-G: ревью плана в живом run — этап plan-review, действует harness, не ведущий', () => {
+  const env = engineOf();
+  const { graph } = env.engine.register(graphOf({ a: [] }), trustNone);
+  const call = livePlanReview(env, graph.id);
   try {
     const data = status(env.engine);
     const a = data.works[0]!;
@@ -93,7 +99,11 @@ test('F-G: ревью плана в живом run — этап plan-review, д�
       [graph.id],
     );
     const human = statusText(data);
-    assert.match(human.split('\n')[0]!, /^Идёт ревью плана g \(harness run\)/);
+    assert.match(
+      human.split('\n')[0]!,
+      /^Идёт ревью плана g — выдача начнётся после согласования; от вас ничего не нужно\.$/,
+    );
+    assert.doesNotMatch(human.split('\n')[0]!, /harness run/);
     assert.doesNotMatch(human, /ход ведущего \(согласовать план\)/);
     assert.doesNotMatch(human, /Выдача на паузе/);
     // explain: тот же ход harness.
@@ -109,6 +119,33 @@ test('F-G: ревью плана в живом run — этап plan-review, д�
   // Вызов закончился (процесс его больше не ведёт) — снова ход ведущего.
   const after = status(env.engine).works[0]!;
   assert.notEqual(after.stage!.name, 'plan-review');
+});
+
+test('F-G: ревью плана не прячет ход людей — исчерпание и отказ остаются впереди', () => {
+  const env = engineOf(policyOf((p) => (p.maxAttempts = 1)));
+  ready(env.engine, graphOf({ a: [], b: [] }));
+  const a = env.engine.claim('c1')!;
+  env.engine.fail(a.id, a.token, 'gate unit failed', { kind: 'gate' });
+  // Новое ревью плана того же графа (review-plan, input-resolve, run).
+  const call = livePlanReview(env, 'g');
+  try {
+    const data = status(env.engine);
+    const wa = data.works.find((w) => w.id === 'a')!;
+    assert.deepEqual(wa.stage!.needs, { actor: 'user', action: 'reset-attempts' });
+    assert.equal(wa.stage!.name, 'stopped');
+    assert.equal(wa.blockers.find((b) => b.code === 'ATTEMPTS_EXHAUSTED')!.actor, 'user');
+    const d = explainStop(
+      stopInputsOf(sourceOf(env.engine), { maxAttempts: 1, repairBudget: 2, workId: 'a' }).find(
+        (i) => i.kind === 'work',
+      )!,
+    );
+    assert.deepEqual([d.actor, d.action], ['user', 'reset-attempts']);
+    assert.equal(data.runner?.state, 'running');
+    assert.match(data.runner.line, /^Идёт ревью плана g — .*ещё нужно от вас \(см\. работы\)\.$/);
+    assert.doesNotMatch(data.runner.line, /ничего не нужно/);
+  } finally {
+    endActive(call.id);
+  }
 });
 
 test('F-X: никто не запущен — очередь стоит, перезапуск делает ведущий; в представлении runner', () => {
@@ -140,7 +177,7 @@ test('F-V/F-AG: идёт последняя попытка — не «нужен
   ready(env.engine, graphOf({ a: [] }));
   const first = env.engine.claim('c1')!;
   env.engine.fail(first.id, first.token, 'gate unit failed', { kind: 'gate' });
-  env.engine.retry('a', { reason: 'повтор' });
+  env.engine.retry('a');
   const second = env.engine.claim('c1')!;
   assert.ok(second);
   const data = status(env.engine);
@@ -176,6 +213,21 @@ test('F-AG: применённый ответ у идущей попытки —
     carrier: { attempt: 3, running: false },
   });
   assert.equal(carriedInput(input, []), input);
+  // Ответ передан закончившейся попытке (потом упал gate): не «получит следующая».
+  const delivered = carriedInput({ requestId: 'Q1', state: 'delivered' }, [attempt('failed')]);
+  assert.deepEqual(delivered?.carrier, { attempt: 3, running: false });
+  assert.equal(carrierLine(delivered.carrier, 'ru', 'delivered'), 'ответ передан попытке 3');
+  assert.match(
+    carrierLine({ attempt: 3, running: false }, 'ru', 'applied-awaiting-claim')!,
+    /получит следующая попытка$/,
+  );
+  // Последняя попытка выдана без ответа: где ответ, по ней не сказать.
+  const without = {
+    id: 'r4',
+    attempt: 4,
+    status: 'active',
+  } as unknown as AttemptState;
+  assert.equal(carriedInput(input, [attempt('failed'), without]), input);
   // Представление: строка вопроса называет, где ответ.
   const view = operatorView(
     baseInput({

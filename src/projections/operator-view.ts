@@ -1121,12 +1121,18 @@ function remoteView(
 export function carrierLine(
   carrier: { attempt: number; running: boolean } | undefined,
   lang: 'ru' | 'en',
+  state?: string,
 ): string | undefined {
   if (!carrier) return undefined;
   if (carrier.running)
     return lang === 'en'
       ? `the answer is with running attempt ${carrier.attempt} — nothing to wait for`
       : `ответ у идущей попытки ${carrier.attempt} — ждать нечего`;
+  // Передан исполнителю закончившейся попыткой: он его получил.
+  if (state === 'delivered')
+    return lang === 'en'
+      ? `the answer was passed to attempt ${carrier.attempt}`
+      : `ответ передан попытке ${carrier.attempt}`;
   return lang === 'en'
     ? `attempt ${carrier.attempt} had the answer and stopped before passing it to the writer — the next attempt gets it`
     : `ответ был у попытки ${carrier.attempt}, она остановилась до передачи исполнителю — его получит следующая попытка`;
@@ -1228,7 +1234,7 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
             requestId: w.input.requestId,
             state: w.input.state,
             severity: w.input.severity,
-            ...((l) => (l ? { line: l } : {}))(carrierLine(w.input.carrier, c.lang)),
+            ...((l) => (l ? { line: l } : {}))(carrierLine(w.input.carrier, c.lang, w.input.state)),
           },
         }
       : {}),
@@ -1352,7 +1358,7 @@ function questionView(c: Ctx, q: OperatorQuestionInput): OperatorQuestion {
     ...(basis ? { answerBasis: basis } : {}),
     ...(c.titles && q.text ? { title: text(c, q.text, T.questionTitle) } : {}),
     createdAt: q.createdAt,
-    ...((l) => (l ? { line: l } : {}))(carrierLine(q.carrier, c.lang)),
+    ...((l) => (l ? { line: l } : {}))(carrierLine(q.carrier, c.lang, q.state)),
   };
 }
 

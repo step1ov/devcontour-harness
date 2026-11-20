@@ -132,7 +132,6 @@ export function workStageOf(input: WorkStageInput): WorkStageView {
           : (byStatus[work.status] ?? 'writer');
   else if (work.status === 'done') name = 'done';
   else if (work.status === 'cancelled') name = 'cancelled';
-  else if (input.planReview) name = 'plan-review';
   else if (
     input.inputState === 'awaiting-answer' ||
     input.inputState === 'answered-not-applied' ||
@@ -140,6 +139,13 @@ export function workStageOf(input: WorkStageInput): WorkStageView {
   )
     name = 'input';
   else if (work.status === 'failed') name = 'stopped';
+  // Ревью плана — этап, только когда дальше по работе именно согласование
+  // (вопрос, отказ и исчерпание — выше или в `needs`).
+  else if (
+    input.planReview &&
+    (!input.needs || (input.needs.actor === 'controller' && input.needs.action === 'review-plan'))
+  )
+    name = 'plan-review';
   else if (work.status === 'draft' || input.blocked) name = 'blocked';
   else name = 'queued';
   const last = input.attempts
