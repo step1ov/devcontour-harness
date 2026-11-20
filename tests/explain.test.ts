@@ -1026,3 +1026,16 @@ test('explain: идёт подготовка (prepare) — заметка наз
   assert.match(writing.message, /Поручение выполняется \(running\)\./);
   assert.doesNotMatch(writing.message, /подготовка/);
 });
+
+test('explain: стадия хранилища на integration — не «исполнитель ещё не запущен»', () => {
+  const d = explainStop(
+    work({
+      work: {
+        status: 'integrating',
+        openStage: { stage: 'dependency-store', startedAt: '2026-01-01T00:00:01.000Z', preparing: true },
+      },
+    }),
+  );
+  assert.equal(d.phase, 'integration');
+  assert.doesNotMatch(d.message, /исполнитель ещё не запущен/);
+});

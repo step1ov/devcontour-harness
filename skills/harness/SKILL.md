@@ -196,11 +196,14 @@ the findings in advance. With `approvalMode: operator` a human approves with
 under: after you edit `.harness/policy.json` (or `lean` changes it) the graph
 is `APPROVAL_STALE`, and `review-plan` holds a new round instead of returning
 the stored one. When the change does not touch isolation, network domains,
-tool profiles or role assignments (for example a gate timeout), re-approve
+tool profiles, role or review assignments (for example a gate timeout), re-approve
 through the CLI with an audit record:
 `$H reapprove --state … --policy .harness/policy.json --subject <graph-id> --digest <graph digest> --by "<who>" --reason "<what changed and why the last review still covers it>"`.
-A change to isolation, network or tool profiles always needs a fresh
-`review-plan` — `reapprove` and `approve` refuse it (`APPROVAL_REQUIRED`).
+A change to isolation, network, tool profiles (or which profile a role or
+reviewer uses), inherited host variables, secrets or `protectedPaths` always
+needs a fresh `review-plan` — `reapprove` and `approve` refuse it
+(`APPROVAL_REQUIRED`). In operator mode `approve` of an already approved graph
+after a policy edit also points to `reapprove`.
 Never call library internals (`Engine.approve`, store writes) to approve.
 
 **Review rounds that go in circles.** Each plan or contract review round is a

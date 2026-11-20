@@ -447,7 +447,14 @@ export class Harness {
     if (!graph) throw new HarnessError('NOT_FOUND', 'Граф не найден: ' + subject);
     if (graph.digest !== digest)
       throw new HarnessError('APPROVAL_STALE', 'Digest не совпадает с зарегистрированным графом');
-    const before = graph.approval?.digest === digest;
+    const before =
+      graph.approval?.digest === digest && graph.policyDigest === executionDigest(this.policy);
+    // Тот же граф, другая политика — повторное согласование с записью, кто и почему.
+    if (graph.approval?.digest === digest && !before)
+      throw new HarnessError(
+        'APPROVAL_REQUIRED',
+        'Граф согласован под прежней политикой: harness reapprove --by --reason (с записью), а после правки изоляции, сети или профилей — новый review-plan',
+      );
     this.engine.approve(subject, 'operator', { bindContext: true });
     const at = this.engine.read((v) => v.graph(subject)!.approval!.at);
     return { subject, digest, at, changed: !before };
@@ -471,6 +478,13 @@ export class Harness {
       throw new HarnessError(
         'APPROVAL_REQUIRED',
         'Граф ещё не согласован: повторное согласование — только после review-plan (и approve в режиме operator)',
+      );
+    // Повторное согласование — только того же графа: новый digest согласует
+    // review-plan (и approve оператора), а не reapprove.
+    if (graph.approval.digest !== digest)
+      throw new HarnessError(
+        'APPROVAL_REQUIRED',
+        'Согласован другой digest графа: новый граф согласует review-plan (и approve в режиме operator), а не reapprove',
       );
     const previous = graph.policyDigest;
     const current = executionDigest(this.policy);

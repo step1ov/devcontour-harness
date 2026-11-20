@@ -300,8 +300,8 @@ test('DEPENDENCY_CACHE_PATH: свой store/кэш pnpm в командах и �
     return hit;
   };
   assert.match(line(/prepare\[0\] deps/), /внутри рабочей копии/);
-  assert.match(line(/gates\[\d\] shared/), /общему абсолютному пути/);
-  assert.match(line(/gates\[\d\] sh: .*config set cache-dir/), /общему абсолютному пути/);
+  assert.match(line(/gates\[\d\] shared/), /общему пути вне рабочей копии/);
+  assert.match(line(/gates\[\d\] sh: .*config set cache-dir/), /общему пути вне рабочей копии/);
   assert.match(
     line(/repositories\[0\]\.environment: .*pnpm_config_store_dir/),
     /внутри рабочей копии/,
@@ -330,7 +330,7 @@ test('DEPENDENCY_CACHE_PATH: свой store/кэш pnpm в командах и �
   assert.match(unsupported!, /для pnpm 12\.0\.0 не действует — сообщите это оператору как находку/);
 });
 
-test('doctor: одно предупреждение из двух источников печатается один раз', async (t) => {
+test('doctor: находка UNSUPPORTED репозитория — одна строка, повторов в предупреждениях нет', async (t) => {
   const dir = pinnedRepository(t, '12.0.0');
   const { report } = await doctorWith(t, large, (p) => {
     const repo = (p.repositories as Record<string, any>[])[0]!;
@@ -344,4 +344,35 @@ test('doctor: одно предупреждение из двух источни
   const warnings = report.warnings ?? [];
   assert.equal(new Set(warnings).size, warnings.length);
   assert.equal(codes(warnings).filter((c) => c === 'DEPENDENCY_STORE_UNSUPPORTED').length, 1);
+});
+
+test('DEPENDENCY_CACHE_PATH: флаги чужих инструментов не находка; путь выше рабочей копии — общий; секреты и окружение профилей', (t) => {
+  const dir = pinnedRepository(t, '11.25.0');
+  const found = resourceWarnings(
+    policyOf((p) => {
+      const repo = (p.repositories as Record<string, any>[])[0]!;
+      repo.path = dir;
+      repo.gates = [
+        ...repo.gates,
+        { id: 'turbo', kind: 'check', command: ['turbo', 'run', 'build', '--cache-dir', '.turbo'] },
+        { id: 'ruff', kind: 'check', command: ['sh', '-c', 'ruff check --cache-dir x && pnpm i'] },
+        { id: 'up', kind: 'check', command: ['pnpm', 'install', '--store-dir', '../shared-store'] },
+      ];
+      p.toolProfiles = {
+        w: { runtime: 'claude', environment: { values: { pnpm_config_cache_dir: '/tmp/c' } } },
+      };
+      p.environment = { secrets: { NPM_CONFIG_CACHE_DIR: 'CACHE' } };
+    }),
+    '/',
+    large,
+  ).filter((w) => w.startsWith('DEPENDENCY_CACHE_PATH'));
+  assert.equal(
+    found.some((w) => / turbo:| ruff:/.test(w)),
+    false,
+    found.join('\n'),
+  );
+  assert.match(found.find((w) => / up:/.test(w)) ?? '', /общему пути вне рабочей копии/);
+  assert.ok(found.some((w) => /toolProfiles\.w\.environment: .*pnpm_config_cache_dir/.test(w)));
+  assert.ok(found.some((w) => /NPM_CONFIG_CACHE_DIR \(секрет\)/.test(w)));
+  assert.equal(found.length, 3, found.join('\n'));
 });

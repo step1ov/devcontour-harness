@@ -42,8 +42,11 @@ const projectRootOf = (baseDir: string) => {
 /** Закреплённая версия pnpm репозитория из `package.json`, если она есть. */
 export function pinnedPnpm(repoDir: string) {
   try {
-    const raw = readFileSync(join(repoDir, 'package.json'));
-    if (raw.length > MANIFEST_LIMIT) return undefined;
+    // Не по ссылке и не больше предела: файл пишет проект.
+    const path = join(repoDir, 'package.json');
+    const st = lstatSync(path);
+    if (!st.isFile() || st.size > MANIFEST_LIMIT) return undefined;
+    const raw = readFileSync(path);
     const field = (JSON.parse(raw.toString('utf8')) as { packageManager?: unknown } | null)
       ?.packageManager;
     return declaredManagerVersion(field, 'pnpm');
@@ -65,7 +68,10 @@ type Where = 'worktree' | 'shared';
 function placeOf(value: string): Where {
   const v = value.replace(/^['"]|['"]$/g, '');
   if (/^(?:~|\$HOME|\$\{HOME\}|\$XDG_|\$\{XDG_|\$TMPDIR|\$\{TMPDIR\})/.test(v)) return 'shared';
-  if (/^(?:\$PWD|\$\{PWD\}|\$\(pwd\))/.test(v)) return 'worktree';
+  const local = v.replace(/^(?:\$PWD|\$\{PWD\}|\$\(pwd\))\/?/, '');
+  // Путь, уходящий выше корня рабочей копии, — общий.
+  if (local.split('/').includes('..')) return 'shared';
+  if (local !== v) return 'worktree';
   return isAbsolute(v) ? 'shared' : 'worktree';
 }
 
@@ -75,19 +81,43 @@ interface Found {
   where: Where;
 }
 
-/** Store и кэш pnpm в аргументах одной команды (и в строке `sh -c`). */
+const MANAGER = /(?:^|\/)(?:pnpm|pnpx|npm|npx|corepack)$/;
+const SEPARATOR = /^(?:&&|\|\||;|\||&)$/;
+
+/**
+ * Store и кэш pnpm в аргументах одной команды (и в строке `sh -c`). Флаги
+ * `--store-dir`/`--cache-dir` считаются только в части команды с менеджером
+ * пакетов (`pnpm`, `npm`, `corepack`): у turbo, pip, ruff они свои.
+ */
 function argvCaches(argv: string[], at: string, out: Found[]) {
-  const tokens = argv.flatMap((a) => a.split(/\s+/).filter(Boolean));
+  const tokens = argv.flatMap((a) =>
+    a
+      .split(/\s+/)
+      .flatMap((t) => t.split(/(&&|\|\||;)/))
+      .filter(Boolean),
+  );
+  const manager = new Array<boolean>(tokens.length).fill(false);
+  let segment = 0;
+  let seen = false;
+  tokens.forEach((t, i) => {
+    if (SEPARATOR.test(t)) {
+      for (let j = segment; j < i; j++) manager[j] = seen;
+      segment = i + 1;
+      seen = false;
+    } else if (MANAGER.test(t)) seen = true;
+  });
+  for (let j = segment; j < tokens.length; j++) manager[j] = seen;
   tokens.forEach((token, i) => {
     const flag = CACHE_FLAG.exec(token);
     const assign = CACHE_ASSIGN.exec(token);
     const next = tokens[i + 1];
-    if (flag) {
+    if (flag && manager[i]) {
       const value = flag[2] ?? (next && !next.startsWith('-') ? next : undefined);
       if (value !== undefined)
         out.push({ at, what: `--${flag[1]!.toLowerCase()}-dir ${value}`, where: placeOf(value) });
     } else if (assign) out.push({ at, what: token, where: placeOf(assign[2]!) });
     else if (
+      manager[i] &&
       CACHE_SETTING.test(token) &&
       tokens[i - 1] === 'set' &&
       tokens[i - 2] === 'config' &&
@@ -103,6 +133,8 @@ function envCaches(env: ExecutionPolicy['environment'], at: string, out: Found[]
     if (CACHE_KEY.test(key)) out.push({ at, what: `${key}=${value}`, where: placeOf(value) });
   for (const key of env.inherit)
     if (CACHE_KEY.test(key)) out.push({ at, what: `${key} (из окружения хоста)`, where: 'shared' });
+  for (const key of Object.keys(env.secrets))
+    if (CACHE_KEY.test(key)) out.push({ at, what: `${key} (секрет)`, where: 'shared' });
 }
 
 export function storeAdvice(policy: ExecutionPolicy, baseDir: string): StoreAdvice[] {
@@ -160,6 +192,8 @@ export function storeAdvice(policy: ExecutionPolicy, baseDir: string): StoreAdvi
   });
   const global: Found[] = [];
   envCaches(policy.environment, 'environment', global);
+  for (const [id, profile] of Object.entries(policy.toolProfiles))
+    envCaches(profile.environment, `toolProfiles.${id}.environment`, global);
   policy.workspaceGates.forEach((gate, j) =>
     argvCaches(gate.command, `workspaceGates[${j}] ${gate.id}`, global),
   );
@@ -183,7 +217,7 @@ function cacheAdvice(
       `${repo ? `репозиторий ${repo}: ` : ''}${f.at}: свой store/кэш pnpm (${f.what}) ` +
       (f.where === 'worktree'
         ? 'внутри рабочей копии: у каждой попытки он свой и пустой, и пакеты скачиваются заново в каждой попытке'
-        : 'по общему абсолютному пути: общее изменяемое состояние попыток вне границы доверия хранилища (его байты никто не сверяет), путь не переносим') +
+        : 'по общему пути вне рабочей копии: общее изменяемое состояние попыток вне границы доверия хранилища (его байты никто не сверяет), путь не переносим') +
       `. Исправление: ${fix}`,
   };
 }

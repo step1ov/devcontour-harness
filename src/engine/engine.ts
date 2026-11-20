@@ -512,6 +512,13 @@ export class Engine {
   recordReview(record: ReviewRecord, document?: ContractDocument, historyRounds = 0) {
     if (document && (record.kind !== 'contract' || digestOf(document) !== record.digest))
       throw new HarnessError('INVALID_INPUT', 'Документ не соответствует ревью контракта');
+    // Раунд отмечает политику, под которой он записан: прежний раунд не покроет
+    // её правку, что бы ни передал вызывающий.
+    record = {
+      ...record,
+      policyDigest: executionDigest(this.policy),
+      isolationDigest: isolationDigest(this.policy),
+    };
     return this.tx('graph.reviewed', (tx) => {
       if (document) tx.putLocal('contract-documents', WORKSPACE_OWNER, record.digest, document);
       const previous = tx
@@ -689,7 +696,7 @@ export class Engine {
     // alpha.59) покрывает лишь политику, под которой граф уже согласован.
     const covered = last.isolationDigest
       ? last.isolationDigest === isolationDigest(this.policy)
-      : graph.policyDigest === executionDigest(this.policy);
+      : Boolean(graph.approval) && graph.policyDigest === executionDigest(this.policy);
     if (!covered)
       throw new HarnessError(
         'APPROVAL_REQUIRED',
