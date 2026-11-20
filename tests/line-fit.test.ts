@@ -8,12 +8,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { OPERATOR_VIEW_TEXT, operatorViewSchema } from '../src/contracts/index.ts';
 import { plainBlocker, type BlockerContext } from '../src/control/blocker-plain.ts';
-import { codeReviewLineParts } from '../src/control/operator-view.ts';
+import { codeReviewLineParts, reviewsOf } from '../src/control/operator-view.ts';
 import { remoteOf } from '../src/control/target.ts';
 import { elideMiddle, fitLine, named, operatorView } from '../src/projections/index.ts';
+import { BLOCKER_PLAIN_MAX } from '../src/projections/blocker-line.ts';
 import type { OperatorActivityInput } from '../src/projections/operator-view.ts';
 import { at, baseInput, review, work } from './operator-view-input.ts';
-import { sha } from './engine-fixture.ts';
+import { policyOf, sha } from './engine-fixture.ts';
 
 const branch = (n: number) =>
   n === 0 ? '' : ('origin/' + 'z'.repeat(Math.max(0, n - 'origin/'.length - 4)) + '-end').slice(-n);
@@ -315,22 +316,127 @@ test('маска — до сокращения: секрет в refs и в им�
   );
 });
 
-test('блокировка удержания: длинное имя операции сокращается, «ждёт её конца» остаётся', () => {
-  for (const n of [1, 100, 140, 500]) {
-    const operation = 'op-' + 'o'.repeat(n);
+test('блокировка удержания: имя сокращается, «ждёт её конца» остаётся; маска — до сокращения', () => {
+  const secret = 'SECRET' + 'Q'.repeat(174);
+  const cases = [
+    ...[1, 100, 140, 290, 500].map((n) => 'op-' + 'o'.repeat(n)),
+    'op-' + secret,
+    'op-' + secret + 'o'.repeat(300),
+  ];
+  const blockers = cases.map((operation) => {
     const ctx = {
       control: { paused: false },
       approvalMode: 'agent',
       work: { hold: { operation, reason: 'r' } },
       statusOf: () => undefined,
     } as unknown as BlockerContext;
-    const b = plainBlocker({ code: 'NOT_READY', message: 'Удержано операцией ' + operation }, ctx);
-    for (const [line, head, tail] of [
-      [b.plain, 'удержано операцией op-', ' — ждёт её конца'],
-      [b.plainEn, 'held by an operation op-', ' — waiting for it to finish'],
-    ] as const) {
-      assert.ok(line.length <= OPERATOR_VIEW_TEXT.plain, `${n}: ${line.length}`);
-      assert.ok(line.startsWith(head) && line.endsWith(tail), line);
+    return plainBlocker({ code: 'NOT_READY', message: 'Удержано операцией ' + operation }, ctx);
+  });
+  const tails = {
+    ru: ['удержано операцией ', ' — ждёт её конца'],
+    en: ['held by an operation ', ' — waiting for it to finish'],
+  } as const;
+  for (const b of blockers)
+    for (const line of [b.plain, b.plainEn]) {
+      assert.ok(line.length <= BLOCKER_PLAIN_MAX, String(line.length));
+      assert.ok(line.endsWith(line === b.plain ? tails.ru[1] : tails.en[1]), line);
     }
+  const input = baseInput({
+    works: blockers.map((b, k) =>
+      work(`h${k}`, { blockers: [{ code: 'NOT_READY', message: 'm', ...b }] }),
+    ),
+    mask: { secrets: [secret] },
+  });
+  for (const lang of ['ru', 'en'] as const) {
+    const view = operatorView(input, { lang });
+    operatorViewSchema.parse(view);
+    assert.ok(!JSON.stringify(view).includes('SECRETQ'), lang);
+    cases.forEach((operation, k) => {
+      const plain = view.works.find((w) => w.id === `h${k}`)!.blockers[0]!.plain!;
+      const [head, tail] = tails[lang];
+      assert.ok(plain.length <= OPERATOR_VIEW_TEXT.plain, `${lang} ${k}: ${plain.length}`);
+      assert.ok(
+        plain.startsWith(head + 'op') || plain === head + '…' + tail,
+        `${lang} ${k}: ${plain}`,
+      );
+      assert.ok(plain.endsWith(tail), `${lang} ${k}: ${plain}`);
+      if (operation.length <= 100) assert.equal(plain, head + operation + tail);
+    });
   }
+});
+
+test('ревью из загрузчика: план, контракт и код приходят частями, хвост и маска сохраняются', () => {
+  const secret = 'SECRET' + 'Q'.repeat(294);
+  const base = {
+    round: 3,
+    approved: false,
+    findings: [],
+    at: at(5),
+    reviewerRuntime: 'codex',
+    sameVendor: false,
+  };
+  const plan = { ...base, kind: 'plan', subject: 's'.repeat(80) };
+  const contract = { ...base, kind: 'contract', subject: 'k'.repeat(80) };
+  const code = {
+    ...base,
+    subject: 'c1',
+    repositoryId: 'app',
+    role: 'writer',
+    refs: { base: 'refs/heads/' + secret, head: 'refs/heads/' + 'w'.repeat(400) + 'Z' },
+  };
+  const v = {
+    locals: (k: string) =>
+      k === 'reviews'
+        ? [{ value: plan }, { value: contract }]
+        : k === 'code-reviews'
+          ? [{ value: code }]
+          : [],
+  };
+  const { reviews } = reviewsOf(v as never, policyOf());
+  assert.equal(reviews.length, 3);
+  assert.ok(
+    reviews.every((r) => r.lineParts),
+    'загрузчик передаёт части',
+  );
+  for (const lang of ['ru', 'en'] as const) {
+    const view = operatorView(baseInput({ reviews, mask: { secrets: [secret] } }), { lang });
+    operatorViewSchema.parse(view);
+    assert.ok(!JSON.stringify(view).includes('SECRETQ'), lang);
+    for (const r of view.reviews) {
+      assert.ok(r.line!.length <= OPERATOR_VIEW_TEXT.line, r.line);
+      assert.match(
+        r.line!,
+        lang === 'ru' ? /: не одобрено; раундов 3/ : /: not approved; rounds 3/,
+        r.line,
+      );
+    }
+    const codeLine = view.reviews.find((r) => r.kind === 'code')!.line!;
+    assert.ok(codeLine.includes('Z:'), codeLine);
+  }
+  // Короткие имена: строка представления — ровно строка загрузчика.
+  const short = reviewsOf(
+    {
+      locals: (k: string) => (k === 'reviews' ? [{ value: { ...plan, subject: 'g' } }] : []),
+    } as never,
+    policyOf(),
+  ).reviews;
+  const view = operatorView(baseInput({ reviews: short }));
+  assert.equal(view.reviews[0]!.line, short[0]!.line);
+});
+
+test('view: строка без имени ветки не получает «…»', () => {
+  const input = baseInput({
+    works: (['pushed', 'not-pushed'] as const).map((state) =>
+      work(state, { status: 'done', target: { ...target, remote: remoteOf(state, {}) } }),
+    ),
+  });
+  const view = operatorView(input, { lang: 'en' });
+  assert.equal(
+    view.works.find((w) => w.id === 'pushed')!.target!.remote.line,
+    'already on the remote branch',
+  );
+  assert.equal(
+    view.works.find((w) => w.id === 'not-pushed')!.target!.remote.line,
+    'accepted locally; not yet on the remote branch',
+  );
 });

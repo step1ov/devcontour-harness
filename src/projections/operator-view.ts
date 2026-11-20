@@ -21,6 +21,7 @@ import {
 import type { ExecutionPolicy, RuntimeBinding } from '../contracts/policy.ts';
 import { fitLine, named, type LinePart } from './clip.ts';
 import { maskSecrets, maskText, type MaskContext } from './mask.ts';
+import { holdLineParts } from './blocker-line.ts';
 import { remoteLineParts } from './remote-line.ts';
 import { sha256Hex } from './sha256.ts';
 
@@ -994,6 +995,19 @@ const fit = (c: Ctx, parts: readonly LinePart[], max: number) =>
     c.mask,
   );
 
+/**
+ * Имя ветки без `trackingRef`: строка загрузчика длиннее строки без имени —
+ * имя было (длиннее предела договора), его заменяет «…»; иначе имени нет.
+ */
+function unnamed(
+  r: { state: 'pushed' | 'not-pushed'; line: string; lineEn: string },
+  lang: 'ru' | 'en',
+) {
+  const loader = (lang === 'en' ? r.lineEn : r.line).trimEnd();
+  const bare = fitLine(remoteLineParts(r.state, lang, ''), Infinity).trimEnd();
+  return loader.length > bare.length ? '…' : '';
+}
+
 /** Удалённая ветка принятой работы: из сверки загрузчика, иначе «неизвестно». */
 function remoteView(
   c: Ctx,
@@ -1017,7 +1031,15 @@ function remoteView(
   // загрузчика несёт его уже сокращённым, без маски — имя заменяет «…».
   const line =
     r.state === 'pushed' || r.state === 'not-pushed'
-      ? fit(c, remoteLineParts(r.state, c.lang, trackingRef ?? '…'), T.line)
+      ? fit(
+          c,
+          remoteLineParts(
+            r.state,
+            c.lang,
+            trackingRef ?? unnamed({ ...r, state: r.state }, c.lang),
+          ),
+          T.line,
+        )
       : r.state === 'unknown' && reasonText
         ? fit(c, remoteLineParts(r.state, c.lang, '', reasonText), T.line)
         : text(c, c.lang === 'en' ? r.lineEn : r.line, T.line);
@@ -1088,7 +1110,13 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
       const plain = c.lang === 'en' && b.plainEn ? b.plainEn : b.plain;
       return {
         code: b.code,
-        ...(plain ? { plain: text(c, plain, T.plain) } : {}),
+        ...((t) => (t ? { plain: t } : {}))(
+          plain
+            ? ((parts) => (parts ? fit(c, parts, T.plain) : text(c, plain, T.plain)))(
+                holdLineParts(plain),
+              )
+            : undefined,
+        ),
         // Без поля alpha.55 — кто действует по диагнозу этапа работы.
         actor: b.actor !== undefined ? actorOf(b.actor) : needsActor,
       };

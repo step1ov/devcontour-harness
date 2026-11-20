@@ -300,7 +300,7 @@ function subjectLineParts(line: string, head: string, subject: string): LinePart
 const joinParts = (parts: readonly LinePart[]) =>
   parts.map((p) => (typeof p === 'string' ? p : p.name)).join('');
 
-function reviewsOf(
+export function reviewsOf(
   v: ExecutionView,
   policy: ExecutionPolicy,
 ): { reviews: OperatorReviewInput[]; rounds: ReviewRound[] } {
