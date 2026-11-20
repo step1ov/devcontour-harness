@@ -77,10 +77,13 @@ export interface WriterProbeWriter {
   network: boolean;
   /**
    * Режим сети исполнителя: `none` — закрыта и локальные порты; `loopback` —
-   * только 127.0.0.1 и ::1; `domains` — домены `isolation.domains` и
-   * локальные порты (claude без поля `network`); `full` — вся сеть.
+   * только 127.0.0.1 и ::1; `full` — вся сеть (поле `network` или
+   * `codexNetwork: true`). `legacy` — профиль без поля `network`: у codex
+   * закрыта сеть shell, у claude — домены `isolation.domains` и локальные
+   * порты; сетевые инструменты runtime (веб-поиск codex, WebFetch/WebSearch
+   * claude) этим режимом явно не закрыты.
    */
-  networkMode: 'none' | 'loopback' | 'domains' | 'full';
+  networkMode: 'none' | 'loopback' | 'full' | 'legacy';
   commands: WriterProbeCommand[];
 }
 
@@ -327,16 +330,21 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
           ? 'codex-sandbox'
           : 'sandbox-runtime';
     const network = profileNetwork(runtime, profile);
-    // Claude без поля `network`: домены политики и локальные порты, как прежде.
-    const networkMode =
-      network ??
-      (policy.isolation.domains.length > 0 ? ('domains' as const) : ('loopback' as const));
+    // Без поля `network` граница прежняя и инструменты runtime не закрыты:
+    // проба не называет её режимом `none` или `loopback`.
+    const networkMode: WriterProbeWriter['networkMode'] = profile?.network
+      ? profile.network
+      : network === 'full'
+        ? 'full'
+        : 'legacy';
     const report: WriterProbeWriter = {
       runtime,
       ...(w.toolProfile ? { toolProfile: w.toolProfile } : {}),
       roles: w.roles,
       mechanism,
-      network: networkMode === 'full' || networkMode === 'domains',
+      network:
+        networkMode === 'full' ||
+        (networkMode === 'legacy' && runtime === 'claude' && policy.isolation.domains.length > 0),
       networkMode,
       commands: [],
     };
@@ -526,19 +534,25 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
   };
 }
 
-const NETWORK_TEXT: Record<WriterProbeWriter['networkMode'], string> = {
+const NETWORK_TEXT: Record<Exclude<WriterProbeWriter['networkMode'], 'legacy'>, string> = {
   none: 'закрыта (и локальные порты)',
   loopback: 'только локальная (127.0.0.1, ::1)',
-  domains: 'домены isolation.domains и локальная',
   full: 'есть',
 };
+const networkText = (w: WriterProbeWriter) =>
+  w.networkMode !== 'legacy'
+    ? NETWORK_TEXT[w.networkMode]
+    : (w.runtime === 'codex'
+        ? 'shell закрыта (профиль без поля network)'
+        : 'домены isolation.domains и локальная (профиль без поля network)') +
+      ', сетевые инструменты runtime не закрыты';
 
 /** Строки пробы для человека (`harness smoke --writer-probe --human`). */
 export function writerProbeText(probe: WriterProbeResult) {
   const lines = [`проба исполнителя: ${probe.ok ? 'всё доступно' : 'есть закрытые шаги'}`];
   for (const w of probe.writers) {
     lines.push(
-      `  исполнитель ${w.runtime}${w.toolProfile ? ` (${w.toolProfile})` : ''}, роли ${w.roles.join(', ')}; изоляция ${w.mechanism}; сеть ${NETWORK_TEXT[w.networkMode]}`,
+      `  исполнитель ${w.runtime}${w.toolProfile ? ` (${w.toolProfile})` : ''}, роли ${w.roles.join(', ')}; изоляция ${w.mechanism}; сеть ${networkText(w)}`,
     );
     for (const c of w.commands)
       lines.push(

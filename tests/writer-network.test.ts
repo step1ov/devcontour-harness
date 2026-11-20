@@ -20,6 +20,7 @@ import {
   type RuntimeRequest,
 } from '../src/contracts/index.ts';
 import {
+  CODEX_LOOPBACK_NETWORK,
   claudeSandbox,
   codexPermissions,
   isolatedCommand,
@@ -90,8 +91,10 @@ test('WN03: аргументы codex и настройки claude по режи�
   assert.ok(!text(true).includes('network_proxy'));
   const loop = codexPermissions(iso, 'loopback');
   assert.deepEqual(loop.slice(0, 2), ['-c', 'features.network_proxy=true']);
-  assert.match(loop.join(' '), /network=\{enabled=true, allow_local_binding=true\}\}$/);
-  assert.ok(!/domains/.test(loop.join(' ')), 'разрешённых доменов нет');
+  assert.ok(loop.join(' ').endsWith(`network={${CODEX_LOOPBACK_NETWORK}}}`));
+  for (const key of ['domains={}', 'allow_local_binding=true', 'allow_upstream_proxy=false'])
+    assert.ok(CODEX_LOOPBACK_NETWORK.includes(key), key);
+  assert.ok(!/domains=\{"/.test(loop.join(' ')), 'разрешённых доменов нет');
 
   const net = (n: Parameters<typeof withWriterNetwork>[1]) =>
     claudeSandbox(withWriterNetwork(iso, n), false, tmpdir()).sandbox.network;
@@ -164,7 +167,7 @@ test('WN04: адаптер — loopback исполнителю codex и claude; 
     );
     const codex = (await invoke(root, 'codex', bin, 'loopback')).join(' ');
     assert.match(codex, /features\.network_proxy=true/);
-    assert.match(codex, /network=\{enabled=true, allow_local_binding=true\}/);
+    assert.ok(codex.includes(`network={${CODEX_LOOPBACK_NETWORK}}`));
     assert.match(codex, /sandbox_workspace_write\.network_access=false/);
     assert.match(codex, /web_search="disabled"/);
     assert.match((await invoke(root, 'codex', bin, 'none')).join(' '), /web_search="disabled"/);
@@ -389,6 +392,65 @@ const r=require('child_process').spawnSync(a[i+1],a.slice(i+2),{stdio:'inherit'}
     const head = (a: string[]) => a.slice(0, a.indexOf('--')).join(' ');
     assert.equal(head(calls[0]!), head(calls[1]!));
     assert.match(head(calls[0]!), /features\.network_proxy=true.*allow_local_binding=true/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('WN10: профиль без поля network — режим legacy, а не none: инструменты runtime не закрыты', async () => {
+  const { smokeLifecycle } = await import('../src/control/lifecycle-smoke.ts');
+  const { writerProbeText, LOOPBACK_CHECK } = await import('../src/control/writer-probe.ts');
+  const { repo } = await import('./git-fixture.ts');
+  const r = repo({ 'README.md': 'app\n' });
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-wnet-')));
+  try {
+    const raw = structuredClone(example('policy')) as Record<string, any>;
+    raw.repositories[0].path = r.dir;
+    raw.runTimeoutMs = 60000;
+    raw.roles = {
+      developer: { writer: { runtime: 'codex', toolProfile: 'old' } },
+      tester: { writer: { runtime: 'codex', toolProfile: 'closed' } },
+    };
+    raw.toolProfiles = {
+      old: { runtime: 'codex' },
+      closed: { runtime: 'codex', network: 'none' },
+    };
+    raw.isolation = { mode: 'os', domains: [] };
+    raw.repositories[0].writerProbe = [{ id: 'step', command: [process.execPath, '-e', '0'] }];
+    const policy = executionPolicySchema.parse(raw);
+    r.git('update-ref', policy.repositories[0]!.targetRef, 'HEAD');
+    const fake = join(root, 'codex');
+    writeFileSync(
+      fake,
+      `#!${process.execPath}
+const a=process.argv.slice(2);const i=a.indexOf('--');
+const r=require('child_process').spawnSync(a[i+1],a.slice(i+2),{stdio:'inherit'});process.exit(r.status??1);
+`,
+    );
+    chmodSync(fake, 0o755);
+    const data = await smokeLifecycle({
+      policy,
+      baseDir: root,
+      stateDir: join(root, 'state'),
+      rev: 'HEAD',
+      resourceDatabase: join(root, 'resources.sqlite'),
+      writerProbe: true,
+      executables: { codex: fake },
+    });
+    const writers = data.writerProbe!.writers;
+    const by = {
+      old: writers.find((w) => w.toolProfile === 'old'),
+      closed: writers.find((w) => w.toolProfile === 'closed'),
+    };
+    assert.deepEqual([by.old!.networkMode, by.old!.network], ['legacy', false]);
+    assert.deepEqual([by.closed!.networkMode, by.closed!.network], ['none', false]);
+    assert.ok(!by.old!.commands.some((c) => c.id === LOOPBACK_CHECK));
+    const text = writerProbeText(data.writerProbe!);
+    assert.match(
+      text,
+      /\(old\).*сеть shell закрыта \(профиль без поля network\), сетевые инструменты runtime не закрыты/,
+    );
+    assert.match(text, /\(closed\).*сеть закрыта \(и локальные порты\)/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
