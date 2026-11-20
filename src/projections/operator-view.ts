@@ -1448,7 +1448,7 @@ function sourceQuestionsOf(
       connector: src.connector,
       provider: src.provider,
       id: q.id,
-      ref: q.key || q.id,
+      ref: (q.key || q.id).slice(0, 200),
       ...(c.titles ? { title: text(c, q.title, T.questionTitle) } : {}),
       ...(c.titles && q.question ? { question: text(c, q.question, T.questionTitle) } : {}),
       ...(c.titles && q.options.length
@@ -1462,7 +1462,12 @@ function sourceQuestionsOf(
       ...(c.titles && q.provisional
         ? { provisional: text(c, q.provisional, T.questionPlain) }
         : {}),
-      ...(q.targets.length ? { tasks: q.targets.slice(0, 20).map((x) => x.slice(0, 200)) } : {}),
+      ...((tasks) => (tasks.length ? { tasks } : {}))(
+        q.targets
+          .filter((x) => x.length > 0)
+          .slice(0, 20)
+          .map((x) => x.slice(0, 200)),
+      ),
       ...(q.url && q.url.length <= T.url ? { url: q.url } : {}),
       readAt: src.observedAt!,
     })),
@@ -1488,8 +1493,8 @@ function sourceLine(
           ? 'task context is turned off in the connector configuration'
           : 'контекст задачи выключен в конфигурации связки'
         : c.lang === 'en'
-          ? `Relay without task context: the writer does not get the feature and scenario description; Relay ≥ ${k.recommended} is needed`
-          : `Relay без контекста задачи: исполнитель не получит описание функции и сценария; нужна Relay ≥ ${k.recommended}`;
+          ? `Relay without task context: the writer does not get the feature and scenario description; Relay ≥ ${k.recommended} (expected release) or a build with task context is needed`
+          : `Relay без контекста задачи: исполнитель не получит описание функции и сценария; нужна Relay ≥ ${k.recommended} (ожидаемый выпуск) или сборка с контекстом задачи`;
   return {
     connector: src.connector,
     provider: src.provider,
@@ -2220,14 +2225,43 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
     ];
   }
   const tr = truncation<TruncatedKey>(truncated);
-  return finish(
-    {
-      ...fitted,
-      health: { ...fitted.health, warnings: warnings.slice(0, L.warnings) },
-      ...(tr ? { truncated: tr } : {}),
-    },
-    maxBytes,
-  );
+  const full: OperatorView = {
+    ...fitted,
+    health: { ...fitted.health, warnings: warnings.slice(0, L.warnings) },
+    ...(tr ? { truncated: tr } : {}),
+  };
+  try {
+    return finish(full, maxBytes);
+  } catch (error) {
+    // Разделы связки (ревизия 4) необязательны: документ сверх предела
+    // выдаётся без них, с числом опущенного, а не отказом всего представления.
+    if (
+      !(error instanceof HarnessError && error.code === 'VIEW_TOO_LARGE') ||
+      (!full.scope && !full.sourceQuestions)
+    )
+      throw error;
+    const { scope, sourceQuestions, ...rest } = full;
+    const dropped: Record<string, number> = { ...(full.truncated ?? {}) };
+    if (scope) dropped.scope = (dropped.scope ?? 0) + (scope.total ?? scope.tasks.length);
+    if (sourceQuestions)
+      dropped.sourceQuestions = (dropped.sourceQuestions ?? 0) + sourceQuestions.length;
+    const note = {
+      code: 'VIEW_SECTIONS_DROPPED',
+      message:
+        c.lang === 'en'
+          ? 'the run scope and source questions exceed the view size limit and are omitted'
+          : 'срез прогона и вопросы источника не помещаются в предел представления и опущены',
+    };
+    const kept = rest.health.warnings.slice(0, L.warnings - 1);
+    return finish(
+      {
+        ...rest,
+        health: { ...rest.health, warnings: [...kept, note] },
+        truncated: truncation<TruncatedKey>(dropped)!,
+      },
+      maxBytes,
+    );
+  }
 }
 
 /** Строки проверки alpha.55 в словаре представления. */

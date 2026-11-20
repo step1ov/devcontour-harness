@@ -763,7 +763,7 @@ void describe('relay-v1 transport (fake HTTP)', () => {
           contextBody({
             documents: [
               {
-                record: record('document', 'Doc00001', 'DOC-1', { body: 'x'.repeat(5000) }),
+                record: record('document', 'Doc00001', 'DOC-1', { body: 'x'.repeat(12000) }),
                 reasons: [{ code: 'task-document', from: { kind: 'task', id: 'Task0001' } }],
               },
             ],

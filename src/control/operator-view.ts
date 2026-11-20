@@ -5,7 +5,7 @@
 // (`operatorView`, `workDetailView`) только раскладывает и маскирует.
 // Только чтение: каталог состояния не создаётся и не пишется.
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
@@ -1019,75 +1019,105 @@ export function connectorSources(
   }
   const out: OperatorSourceInput[] = [];
   for (const file of files) {
-    let db: DatabaseSync | undefined;
-    try {
-      const path = join(dir, file);
-      // Без журнала — неизменяемое открытие: ни одного файла рядом с базой.
-      if (existsSync(path + '-wal') || existsSync(path + '-journal'))
-        db = new DatabaseSync(path, { readOnly: true });
-      else {
-        const url = pathToFileURL(path);
-        url.searchParams.set('mode', 'ro');
-        url.searchParams.set('immutable', '1');
-        db = new DatabaseSync(url, { readOnly: true });
-      }
-      const meta = (k: string) =>
-        (db!.prepare('SELECT value FROM meta WHERE key=?').get(k) as { value: string } | undefined)
-          ?.value;
-      const provider = meta('provider');
-      const projectId = meta('projectId');
-      if (!provider || !projectId) continue;
-      const row = db.prepare('SELECT data FROM snapshots ORDER BY rowid DESC LIMIT 1').get() as
-        { data: string } | undefined;
-      const manifest = row
-        ? (JSON.parse(row.data) as { manifest?: SnapshotManifestLike }).manifest
-        : undefined;
-      let observation: RelayObservationLike | undefined;
-      try {
-        const o = db.prepare('SELECT data FROM observations WHERE key=?').get('relay') as
-          { data: string } | undefined;
-        observation = o ? (JSON.parse(o.data) as RelayObservationLike) : undefined;
-      } catch {
-        observation = undefined;
-      }
-      if (!manifest && !observation) continue;
-      const connector =
-        manifest?.connector ?? observation?.connector ?? file.replace(/\.sqlite$/, '');
-      const compatibility = observation?.compatibility ?? manifest?.compatibility;
-      out.push({
-        connector,
-        provider,
-        tasks: (manifest?.tasks ?? []).map((t) => ({
-          id: t.id,
-          key: t.key,
-          ...(t.title ? { title: t.title } : {}),
-          orderId: t.orderId,
-          ...(works.has(t.orderId) ? { workId: t.orderId } : {}),
-          problems: (manifest?.problems ?? [])
-            .filter((p) => p.taskId === t.id)
-            .map((p) => ({ code: p.code, message: p.message })),
-        })),
-        ...(compatibility
-          ? {
-              compatibility: {
-                level: compatibility.level,
-                taskContext: compatibility.taskContext,
-                taskContextUsed: compatibility.taskContextUsed,
-                contractVersion: compatibility.contractVersion,
-                recommended: compatibility.recommended,
-              },
-            }
-          : {}),
-        ...((at) => (at ? { observedAt: at } : {}))(observation?.at ?? manifest?.readAt),
-        ...(observation?.questions ? { questions: observation.questions.items } : {}),
-      });
-    } catch {
-      /* не база коннектора или другой версии — пропустить */
-    } finally {
-      db?.close();
-    }
+    const path = join(dir, file);
+    // Без журнала — неизменяемое открытие (ни одного файла рядом с базой); если
+    // за время чтения база изменилась, чтение повторяется обычным открытием.
+    const mark = () => {
+      const st = statSync(path, { throwIfNoEntry: false });
+      return JSON.stringify([
+        st?.size,
+        st?.mtimeMs,
+        existsSync(path + '-wal'),
+        existsSync(path + '-journal'),
+      ]);
+    };
+    const before = mark();
+    const journal = existsSync(path + '-wal') || existsSync(path + '-journal');
+    let source = readConnectorDb(path, file, works, !journal);
+    if (!journal && mark() !== before) source = readConnectorDb(path, file, works, false);
+    if (source) out.push(source);
   }
   return out;
+}
+
+function readConnectorDb(
+  path: string,
+  file: string,
+  works: ReadonlySet<string>,
+  immutable: boolean,
+): OperatorSourceInput | undefined {
+  let db: DatabaseSync | undefined;
+  try {
+    if (!immutable) db = new DatabaseSync(path, { readOnly: true });
+    else {
+      const url = pathToFileURL(path);
+      url.searchParams.set('mode', 'ro');
+      url.searchParams.set('immutable', '1');
+      db = new DatabaseSync(url, { readOnly: true });
+    }
+    const meta = (k: string) =>
+      (db!.prepare('SELECT value FROM meta WHERE key=?').get(k) as { value: string } | undefined)
+        ?.value;
+    const provider = meta('provider');
+    const projectId = meta('projectId');
+    if (!provider || !projectId) return undefined;
+    const row = db.prepare('SELECT data FROM snapshots ORDER BY rowid DESC LIMIT 1').get() as
+      { data: string } | undefined;
+    const manifest = row
+      ? (JSON.parse(row.data) as { manifest?: SnapshotManifestLike }).manifest
+      : undefined;
+    let observation: RelayObservationLike | undefined;
+    try {
+      const o = db.prepare('SELECT data FROM observations WHERE key=?').get('relay') as
+        { data: string } | undefined;
+      observation = o ? (JSON.parse(o.data) as RelayObservationLike) : undefined;
+    } catch {
+      observation = undefined;
+    }
+    if (!manifest && !observation) return undefined;
+    const connector =
+      manifest?.connector ?? observation?.connector ?? file.replace(/\.sqlite$/, '');
+    const compatibility = observation?.compatibility ?? manifest?.compatibility;
+    // Срез — из последнего чтения (наблюдение), а не из записи снимка: запись
+    // той же ревизии не обновляется, а колонка и зависимости меняются без неё.
+    const scope = observation?.scope ?? {
+      readAt: manifest?.readAt,
+      tasks: manifest?.tasks ?? [],
+      problems: manifest?.problems ?? [],
+    };
+    return {
+      connector,
+      provider,
+      tasks: scope.tasks.map((t) => ({
+        id: t.id,
+        key: t.key,
+        ...(t.title ? { title: t.title } : {}),
+        orderId: t.orderId,
+        ...(works.has(t.orderId) ? { workId: t.orderId } : {}),
+        problems: scope.problems
+          .filter((p) => p.taskId === t.id)
+          .map((p) => ({ code: p.code, message: p.message })),
+      })),
+      ...(compatibility
+        ? {
+            compatibility: {
+              level: compatibility.level,
+              taskContext: compatibility.taskContext,
+              taskContextUsed: compatibility.taskContextUsed,
+              contractVersion: compatibility.contractVersion,
+              recommended: compatibility.recommended,
+            },
+          }
+        : {}),
+      ...((at) => (at ? { observedAt: at } : {}))(observation?.at ?? manifest?.readAt),
+      ...(observation?.questions ? { questions: observation.questions.items } : {}),
+    };
+  } catch {
+    /* не база коннектора или другой версии — пропустить */
+    return undefined;
+  } finally {
+    db?.close();
+  }
 }
 
 /** Поля manifest снимка коннектора, которые читает представление. */
@@ -1109,6 +1139,11 @@ interface RelayObservationLike {
     recommended: string;
   };
   questions?: { items: NonNullable<OperatorSourceInput['questions']> };
+  scope?: {
+    readAt?: string;
+    tasks: { id: string; key: string; title?: string; orderId: string }[];
+    problems: { taskId: string; code: string; message: string }[];
+  };
 }
 
 /** Что маскировать: домашний каталог, корни репозиториев и каталог политики, секреты политики. */

@@ -94,7 +94,7 @@ if (step.spawnHanging) {
 if (step.sleepMs) await new Promise((r) => setTimeout(r, step.sleepMs));
 // Шаг держится, пока тест не создаст файл: событие вместо подобранной паузы.
 // Предел — на случай, если тест умер и файла не будет.
-for (const end = Date.now() + 600_000; step.holdUntil && !existsSync(step.holdUntil); ) {
+for (const end = Date.now() + 600_000; step.holdUntil && !existsSync(step.holdUntil);) {
   if (Date.now() > end) {
     console.error('fixture: holdUntil не дождался файла');
     process.exit(2);

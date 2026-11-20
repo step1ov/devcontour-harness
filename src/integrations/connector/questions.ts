@@ -33,9 +33,22 @@ export interface RelayObservation {
   connector: string;
   compatibility?: RelayCompatibility;
   questions?: { items: SourceQuestion[]; total: number; error?: string };
+  /**
+   * Срез последнего чтения задач (снимок или `run --source`): задачи с
+   * названием и причинами неготовности. Запись снимка с той же ревизией не
+   * обновляется, а eligibility (колонка, зависимости) меняется без новой
+   * ревизии — поэтому срез хранится здесь и пишется при каждом чтении.
+   */
+  scope?: {
+    readAt: string;
+    tasks: { id: string; key: string; title?: string; orderId: string }[];
+    problems: { taskId: string; code: string; message: string }[];
+  };
 }
 
 export const RELAY_OBSERVATION = 'relay';
+/** Предел времени чтения вопросов владельцу за одно наблюдение. */
+export const QUESTIONS_TIMEOUT_MS = 20_000;
 
 const SECTION_MAX = 2000;
 
@@ -92,13 +105,24 @@ export function parseQuestion(record: SourceQuestionRecord, webBase?: string): S
   };
 }
 
-/** Адрес проекта в веб-интерфейсе Relay v1 (`<origin>/projects/<id>`); у Relay-2 его нет. */
+/**
+ * Адрес проекта в веб-интерфейсе Relay v1 (`<origin>/projects/<id>`); у
+ * Relay-2 его нет. Строится из origin и пути endpoint без `/api/v1`: учётные
+ * данные, query и fragment endpoint в ссылку не попадают.
+ */
 export function webBaseOf(config: ConnectorConfig): string | undefined {
   if (config.provider !== 'relay-v1-http') return undefined;
   const raw = (config.relay as { endpoint?: unknown }).endpoint;
-  const endpoint = typeof raw === 'string' ? raw : '';
-  if (!/^https?:\/\//.test(endpoint)) return undefined;
-  return `${endpoint.replace(/\/+$/, '').replace(/\/api\/v1$/, '')}/projects/${encodeURIComponent(config.projectId)}`;
+  if (typeof raw !== 'string') return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
+  const path = url.pathname.replace(/\/+$/, '').replace(/\/api\/v1$/, '');
+  return `${url.origin}${path}/projects/${encodeURIComponent(config.projectId)}`;
 }
 
 /** Открытые вопросы backend; нет метода у транспорта — `undefined`, сбой — с причиной. */
@@ -110,9 +134,11 @@ export async function readQuestions(
 ): Promise<RelayObservation['questions']> {
   if (!config.questions.enabled || !transport.listOpenQuestions) return undefined;
   try {
+    // Наблюдение необязательно: общий предел времени, чтобы не задерживать run.
+    const bound = AbortSignal.timeout(QUESTIONS_TIMEOUT_MS);
     const { questions, total } = await transport.listOpenQuestions(
       { limit: config.questions.limit },
-      signal,
+      signal ? AbortSignal.any([signal, bound]) : bound,
     );
     const base = webBaseOf(config);
     return { items: questions.map((q) => parseQuestion(q, base)), total };

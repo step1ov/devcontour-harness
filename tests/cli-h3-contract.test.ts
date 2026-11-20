@@ -658,7 +658,10 @@ test('H3-01: прежние команды и схемы их данных не 
       JSON.stringify(data[command]).includes('"compatibility"'),
       command + ' объявляет compatibility',
     );
-  assert.ok(JSON.stringify(data['source-status']).includes('"questions"'), 'source-status: вопросы');
+  assert.ok(
+    JSON.stringify(data['source-status']).includes('"questions"'),
+    'source-status: вопросы',
+  );
   assert.ok(JSON.stringify(data['source-snapshot']).includes('"taskContext"'), 'снимок: контекст');
   // Хеш H2 выше вырезает `baseline`, поэтому только эта проверка держит объявление.
   for (const command of ['run', 'source-snapshot', 'source-status'])

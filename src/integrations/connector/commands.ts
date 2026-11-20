@@ -100,7 +100,8 @@ export async function relayCompatibilityCheck(
     return {
       source,
       ...(compatibility ? { compatibility } : {}),
-      ...(compatibility && !compatibility.taskContextUsed ? { warning: compatibility.line } : {}),
+      // Выключенный в конфигурации контекст — выбор оператора, не предупреждение.
+      ...(compatibility && !compatibility.taskContext ? { warning: compatibility.line } : {}),
     };
   } catch (error) {
     const code = error instanceof HarnessError ? error.code : undefined;
@@ -249,8 +250,9 @@ export class Connector {
    * вопросы владельцу. Только для показа — сбой чтения вопросов или записи
    * наблюдения не останавливает снимок и запуск.
    */
-  private async observe(compatibility: RelayCompatibility | undefined) {
+  private async observe(manifest: SnapshotManifest) {
     try {
+      const compatibility = manifest.compatibility;
       const questions = await readQuestions(this.config, this.transport, this.redact);
       const value: RelayObservation = {
         at: new Date().toISOString(),
@@ -259,6 +261,20 @@ export class Connector {
         connector: this.id,
         ...(compatibility ? { compatibility } : {}),
         ...(questions ? { questions } : {}),
+        scope: {
+          readAt: manifest.readAt,
+          tasks: manifest.tasks.map((t) => ({
+            id: t.id,
+            key: t.key,
+            ...(t.title ? { title: t.title } : {}),
+            orderId: t.orderId,
+          })),
+          problems: manifest.problems.map((p) => ({
+            taskId: p.taskId,
+            code: p.code,
+            message: p.message,
+          })),
+        },
       };
       this.store.putObservation(RELAY_OBSERVATION, value);
     } catch {
@@ -372,7 +388,7 @@ export class Connector {
     const caps = identity?.capabilities ?? [];
     const compatibility = identity ? relayCompatibility(identity, this.config) : undefined;
     const warnings = [
-      ...(compatibility && !compatibility.taskContextUsed ? [compatibility.line] : []),
+      ...(compatibility && !compatibility.taskContext ? [compatibility.line] : []),
       ...(this.config.tasks.length
         ? []
         : [
@@ -417,7 +433,7 @@ export class Connector {
       context: snapshot.context,
       manifest: snapshot.manifest,
     });
-    await this.observe(snapshot.manifest.compatibility);
+    await this.observe(snapshot.manifest);
     const dir = resolve(
       outDir ?? join(this.stateDir, 'connectors', 'snapshots', snapshot.graph.id),
     );
@@ -476,7 +492,7 @@ export class Connector {
   }> {
     this.assertBaselineProtected(h.policy, h.options.baseDir);
     const fresh = await this.source.snapshot();
-    await this.observe(fresh.manifest.compatibility);
+    await this.observe(fresh.manifest);
     const stored = this.store.latestSnapshot(fresh.graph.id);
     if (!stored)
       throw new HarnessError(
@@ -638,9 +654,7 @@ export class Connector {
         provider: this.config.provider,
         projectId: this.config.projectId,
         ...(compatibility ? { compatibility } : {}),
-        ...(compatibility && !compatibility.taskContextUsed
-          ? { warnings: [compatibility.line] }
-          : {}),
+        ...(compatibility && !compatibility.taskContext ? { warnings: [compatibility.line] } : {}),
         ...(questions ? { questions } : {}),
         ...(manifest
           ? {

@@ -540,3 +540,183 @@ test('alpha.60: разбор документа-вопроса по раздел
   assert.deepEqual(bare.options, []);
   assert.equal(bare.question, undefined);
 });
+
+test('alpha.60: усечённый документ задачи — в контексте полный текст, а не ссылка на усечённый файл', async () => {
+  const s = await scenario(fakeSuiteBackend(), {
+    config: (c) =>
+      void ((c as Record<string, unknown>).limits = { documentBytes: 1024, leaseMs: 2000 }),
+  });
+  try {
+    const doc = await s.project.admin.addDocument(s.task.id, {
+      name: 'Big',
+      body: 'y'.repeat(3000),
+    });
+    const ctx = contextual(s.project.transport(), {
+      records: () => [
+        fi(),
+        {
+          section: 'document',
+          kind: 'document',
+          id: doc.id,
+          key: 'DOC-9',
+          title: 'Big',
+          revision: 1,
+          summary: '',
+          body: 'y'.repeat(3000),
+          reasons: [{ code: 'task-document', from: 'PRODUCT-1' }],
+        },
+      ],
+    });
+    const a = await openConnector(s.loaded(), { stateDir: s.state, transport: ctx.transport });
+    const snap = await a.source.snapshot();
+    a.close();
+    assert.equal(snap.manifest.tasks[0]!.documents[0]!.included, 'truncated');
+    const text = snap.context.sources[0]!.files.find((f) => f.path === TASK_CONTEXT_FILE)!.content
+      .data;
+    assert.ok(text.includes('y'.repeat(3000)), 'полный текст документа в контексте');
+    assert.doesNotMatch(text, /Текст — в файле/);
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test('alpha.60: предел контекста всех задач и меняющийся токен согласованности', async () => {
+  const s = await scenario(fakeSuiteBackend());
+  try {
+    const cfg = structuredClone(s.config) as Record<string, unknown>;
+    cfg.taskContext = { totalBytes: 1024 };
+    const big = contextual(s.project.transport(), { records: () => [fi('z'.repeat(2000))] });
+    const a = await openConnector(parseConfig(cfg, s.root), {
+      stateDir: s.state,
+      transport: big.transport,
+    });
+    const snap = await a.source.snapshot();
+    a.close();
+    assert.equal(snap.manifest.tasks[0]!.taskContext?.status, 'too-large');
+    assert.match(snap.manifest.tasks[0]!.taskContext?.reason ?? '', /totalBytes=1024/);
+
+    // Токен меняется с вычисляемыми полями при каждом чтении — снимок всё равно согласован.
+    const moving = contextual(s.project.transport(), {
+      outcome: (revision, call) => ({
+        status: 'ok',
+        context: {
+          contractVersion: 1,
+          consistency: 'tick-' + call,
+          taskRevision: revision,
+          records: [fi()],
+        },
+      }),
+    });
+    const b = await openConnector(s.loaded(), { stateDir: s.state, transport: moving.transport });
+    const one = await b.source.snapshot();
+    const two = await b.source.snapshot();
+    b.close();
+    assert.equal(one.revision, two.revision, 'токен не входит в ревизию');
+    // Запись изменилась между раундами — снимок не из разных редакций.
+    let n = 0;
+    const changing = contextual(s.project.transport(), { records: () => [fi('body ' + n++)] });
+    const c = await openConnector(s.loaded(), { stateDir: s.state, transport: changing.transport });
+    await assert.rejects(
+      c.source.snapshot(),
+      (e: unknown) =>
+        e instanceof HarnessError && e.code === 'NOT_READY' && /не согласован/.test(e.message),
+    );
+    c.close();
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test('alpha.60: срез в представлении — по последнему чтению, а не по записи снимка той же ревизии', async () => {
+  const s = await scenario(fakeSuiteBackend());
+  try {
+    await s.project.admin.move(s.task.id, 'inbox');
+    const open = () =>
+      openConnector(s.loaded(), {
+        stateDir: s.state,
+        transport: contextual(s.project.transport()).transport,
+      });
+    const a = await open();
+    await a.snapshot(join(s.root, 'a'));
+    a.close();
+    assert.equal(connectorSources(s.state)[0]!.tasks[0]!.problems[0]?.code, 'COLUMN_NOT_ELIGIBLE');
+    await s.project.admin.move(s.task.id, 'ready');
+    const b = await open();
+    const again = await b.snapshot(join(s.root, 'b'));
+    b.close();
+    assert.equal(again.created, false, 'та же ревизия — запись снимка прежняя');
+    const view = operatorView(baseInput({ sources: connectorSources(s.state) }));
+    assert.deepEqual(
+      view.scope!.tasks.map((t) => t.state),
+      ['not-handed-over'],
+      'колонка изменилась без новой ревизии — срез свежий',
+    );
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test('alpha.60: принятый результат по умолчанию пишет ровно один комментарий', async () => {
+  const s = await scenario(fakeSuiteBackend());
+  try {
+    const { opened } = await s.snapshotAndRun();
+    assert.equal(opened.h.result(s.workId).result?.outcome, 'accepted');
+    assert.equal((await s.project.transport().listComments(s.task.id)).length, 1);
+    opened.close();
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test('alpha.60: вид сверх предела — без среза и вопросов источника, а не отказ', () => {
+  const big = 'ж'.repeat(300);
+  const input = baseInput({
+    sources: [
+      {
+        connector: 'relay-v1-http-abc',
+        provider: 'relay-v1-http',
+        tasks: Array.from({ length: 200 }, (_, k) => ({
+          id: 'T' + k,
+          key: 'WEB-' + k,
+          title: big,
+          orderId: 'o' + k,
+          problems: [{ code: 'DEPENDENCY_UNFINISHED', message: big }],
+        })),
+        observedAt: '2026-11-19T11:00:00.000Z',
+        questions: Array.from({ length: 50 }, (_, k) => ({
+          id: 'Q' + k,
+          key: 'DOC-' + k,
+          title: big,
+          question: big,
+          options: Array.from({ length: 10 }, () => big),
+          recommendation: big,
+          provisional: big,
+          targets: ['WEB-1'],
+        })),
+      },
+    ],
+  });
+  const view = operatorView(input, { maxBytes: 120_000 });
+  operatorViewSchema.parse(view);
+  assert.equal(view.scope, undefined);
+  assert.equal(view.sourceQuestions, undefined);
+  assert.equal(view.truncated?.scope, 200);
+  assert.equal(view.truncated?.sourceQuestions, 50);
+  assert.ok(view.health.warnings.some((w) => w.code === 'VIEW_SECTIONS_DROPPED'));
+});
+
+test('alpha.60: ссылка на вопрос — без учётных данных, query и fragment endpoint', async () => {
+  const { webBaseOf } = await import('../src/integrations/connector/questions.ts');
+  const config = parseConfig(
+    {
+      version: 1,
+      provider: 'relay-v1-http',
+      relay: { endpoint: 'http://user:secret@127.0.0.1:4700/api/v1?token=x#y' },
+      projectId: 'P1',
+      actor: 'a',
+      repository: { id: 'app' },
+    },
+    '/',
+  ).config;
+  assert.equal(webBaseOf(config), 'http://127.0.0.1:4700/projects/P1');
+});

@@ -224,6 +224,11 @@ const taskContextSchema = z.object({
 const questionSummarySchema = entitySummarySchema.extend({
   title: z.string(),
   updatedAt: z.string().optional(),
+  status: z.string().nullable().optional(),
+  document: z
+    .object({ kind: z.string().optional(), status: z.string().optional() })
+    .nullable()
+    .optional(),
 });
 const questionDetailSchema = documentDetailSchema.extend({
   data: z.object({
@@ -964,7 +969,9 @@ export class RelayV1Transport implements RelayTransport {
         path: `/board-tasks/${this.enc(ref)}/context`,
         query: { targetDocuments: options.targetDocuments ? 'true' : 'false' },
         signal,
-        maxBytes: options.maxBytes,
+        // Ответ JSON больше файла пакета (обёртка и служебные поля): свой
+        // предел, не выше общего предела ответа транспорта.
+        maxBytes: Math.min(this.settings.maxResponseBytes, options.maxBytes * 4),
       });
     } catch (error) {
       if (
@@ -975,7 +982,7 @@ export class RelayV1Transport implements RelayTransport {
           status: 'too-large',
           reason:
             error.details.code === RESPONSE_LIMIT
-              ? `ответ больше предела ${options.maxBytes} байт`
+              ? `ответ Relay больше предела ${Math.min(this.settings.maxResponseBytes, options.maxBytes * 4)} байт (taskContext.maxBytes=${options.maxBytes})`
               : 'Relay: контекст больше предела сервера (CONTEXT_TOO_LARGE)',
         };
       throw error;
@@ -1067,7 +1074,13 @@ export class RelayV1Transport implements RelayTransport {
       { kind: 'document', documentKind: 'proposal', status: 'draft' },
       signal,
     );
-    const open = list.items.filter((d) => QUESTION_TITLE.test(d.title));
+    // Фильтр сервера перепроверяется: открытый вопрос — proposal в draft.
+    const open = list.items.filter(
+      (d) =>
+        QUESTION_TITLE.test(d.title) &&
+        (d.document?.kind ?? 'proposal') === 'proposal' &&
+        (d.document?.status ?? d.status ?? 'draft') === 'draft',
+    );
     const questions: SourceQuestionRecord[] = [];
     for (const d of open.slice(0, options.limit)) {
       const full = await this.call(op, questionDetailSchema, {
@@ -1083,7 +1096,9 @@ export class RelayV1Transport implements RelayTransport {
         title: full.data.name,
         revision: full.revision,
         body: full.data.body,
-        targets: (full.data.relations ?? []).map((r) => keyOf.get(r.target.id) ?? r.target.id),
+        targets: (full.data.relations ?? [])
+          .map((r) => keyOf.get(r.target.id) || r.target.id)
+          .filter((x) => x.length > 0),
         ...(d.updatedAt ? { updatedAt: d.updatedAt } : {}),
       });
     }

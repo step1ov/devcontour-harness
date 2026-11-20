@@ -228,8 +228,21 @@ export async function checkIdentity(
   return identity;
 }
 
+/**
+ * Содержимое чтения для сверки раундов. Токен согласованности контекста
+ * backend не входит: он может меняться вместе с вычисляемыми полями;
+ * сравниваются записи контекста и ревизия задачи в нём.
+ */
 const contentOf = (read: TaskRead) =>
-  digestOf({ ...read, consistency: undefined, task: { ...read.task } });
+  digestOf({
+    ...read,
+    consistency: undefined,
+    task: { ...read.task },
+    context:
+      read.context?.status === 'ok'
+        ? { ...read.context, context: { ...read.context.context, consistency: undefined } }
+        : read.context,
+  });
 
 /**
  * Полное согласованное чтение набора задач. Раунд — чтение всех задач; у
@@ -372,7 +385,8 @@ export const TASK_CONTEXT_FILE = 'relay-context.md';
 
 /**
  * Markdown контекста исполнения задачи: только постановка — ключ, название,
- * ревизия, аннотация, полный Markdown и основания включения. Вычисляемые
+ * аннотация, полный Markdown и основания включения (ревизия записи — только
+ * в manifest: её может поднять и служебная запись backend). Вычисляемые
  * поля backend (готовность, блокеры, время, токен согласованности) не
  * переносятся: файл и его digest меняются только при правке записей.
  * Документы, уже закреплённые как документы задачи, называются ссылкой на
@@ -412,7 +426,6 @@ export function renderTaskContext(
             (r.implementation.application ? ` · приложение ${r.implementation.application}` : '') +
             (r.implementation.target ? ` · цель ${r.implementation.target}` : '')
           : r.kind,
-        `ревизия ${r.revision}`,
         'включена: ' +
           r.reasons
             .map((x) => (reasonText[x.code] ?? x.code) + (x.from ? ` (${x.from})` : ''))
@@ -687,7 +700,8 @@ export function buildSnapshot(input: {
       else {
         const pinnedDocs = new Map(
           documents
-            .filter((d) => d.included !== 'omitted')
+            // Ссылка вместо текста — только на документ, закреплённый целиком.
+            .filter((d) => d.included === 'full')
             .map((d) => [d.id, `documents/${d.id.replace(/[^A-Za-z0-9_-]/g, '_')}.md`]),
         );
         const text = renderTaskContext(task.key, outcome.context, pinnedDocs);
