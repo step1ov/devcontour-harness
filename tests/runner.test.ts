@@ -1,7 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -153,7 +161,16 @@ test(
         },
       });
       const before = target(ctx);
-      await runAll(ctx);
+      try {
+        await runAll(ctx);
+      } finally {
+        // Исполнитель закрыл каталог (mode 0): уборка рабочего дерева его не
+        // удаляет, а без прав его не удалит и уборка каталога прогона.
+        const worktrees = join(ctx.state, 'worktrees');
+        for (const id of existsSync(worktrees) ? readdirSync(worktrees) : [])
+          for (const rel of Object.keys(modes))
+            if (existsSync(join(worktrees, id, rel))) chmodSync(join(worktrees, id, rel), 0o755);
+      }
       const work = ctx.engine.read((v) => v.work('add-greeting')!);
       if (!reason) assert.equal(work.status, 'done', work.failure);
       else {

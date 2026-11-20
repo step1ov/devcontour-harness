@@ -20,7 +20,7 @@ import {
 } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
@@ -2440,19 +2440,52 @@ test('DS41: черновик без манифестов не делает ус�
 });
 
 /**
+ * pnpm 11 из кэша npx (`npx pnpm@11 --version` кладёт его в
+ * `<npm cache>/_npx/<hash>`): новейший 11-й. Без сети и без установки.
+ */
+const npxPnpm11 = (): string | undefined => {
+  const npx = join(process.env.npm_config_cache || join(homedir(), '.npm'), '_npx');
+  let hashes: string[] = [];
+  try {
+    hashes = readdirSync(npx);
+  } catch {
+    return undefined;
+  }
+  const found = hashes.flatMap((hash) => {
+    const modules = join(npx, hash, 'node_modules');
+    try {
+      const { version } = JSON.parse(readFileSync(join(modules, 'pnpm', 'package.json'), 'utf8'));
+      return typeof version === 'string' &&
+        version.startsWith('11.') &&
+        existsSync(join(modules, '.bin', 'pnpm'))
+        ? [{ dir: join(modules, '.bin'), version }]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  found.sort((a, b) => b.version.localeCompare(a.version, undefined, { numeric: true }));
+  return found[0]?.dir;
+};
+
+/**
  * pnpm 11: настройки только из `pnpm_config_*`, store `v11` с базой `index.db`,
  * а `pnpm fetch` регистрирует проект ссылкой `v11/projects/<hash>`. Каталог с
- * pnpm 11 — `HARNESS_TEST_PNPM11_DIR` или сам pnpm из PATH, если он 11-й.
+ * pnpm 11 — `HARNESS_TEST_PNPM11_DIR`, сам pnpm из PATH, если он 11-й, иначе
+ * кэш npx. Пропуск — ошибка полного прогона (scripts/test.mjs): без pnpm 11
+ * прогон проваливается с подсказкой, где его взять.
  */
 const pnpm11Dir =
-  process.env.HARNESS_TEST_PNPM11_DIR ?? (pnpm && pnpmMajor === 11 ? join(pnpm, '..') : undefined);
+  process.env.HARNESS_TEST_PNPM11_DIR ??
+  (pnpm && pnpmMajor === 11 ? join(pnpm, '..') : undefined) ??
+  npxPnpm11();
 const pnpm11Version = pnpm11Dir
   ? spawnSync(join(pnpm11Dir, 'pnpm'), ['--version'], { cwd: tmpdir() }).stdout?.toString().trim()
   : undefined;
 const pnpm11Missing =
   unavailable ||
   (!pnpm11Version?.startsWith('11.')
-    ? 'pnpm 11 не найден: задайте HARNESS_TEST_PNPM11_DIR (каталог с pnpm 11)'
+    ? 'pnpm 11 не найден: задайте HARNESS_TEST_PNPM11_DIR (каталог с pnpm 11) или выполните npx pnpm@11 --version'
     : false);
 
 test(
