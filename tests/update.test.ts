@@ -314,7 +314,10 @@ test('UU12: пауза обновления — штатная остановк�
       'роль умершего обновления переходит',
     );
     assert.equal(engine.resume().changed, true, 'человек снимает паузу прерванного обновления');
-    // Пауза операции применения политики по-прежнему только своя.
+    // Пауза операции применения политики по-прежнему только своя (во время
+    // обновления она не ставится — роль обновления сначала отпущена).
+    assert.throws(() => engine.operationPause('reconfigure-x'), /обновление harness/);
+    engine.release('harness-update:2');
     engine.operationPause('reconfigure-x');
     assert.throws(() => engine.resume(), /операция применения политики/);
   } finally {
@@ -481,6 +484,22 @@ test('UU16: пауза обновления, убитого во время --wa
     // pid достался другому процессу (момент старта другой) — тоже умер.
     lock({ pid: process.pid, startedAt: me.startedAt - 5000, at: 'x' });
     assert.deepEqual(stale(), { pid: process.pid });
+    // Момент старта узнать нельзя (ps недоступен) — живой процесс не «умер».
+    const { holds } = await import('../src/update/busy.ts');
+    const live = { pid: process.pid, startedAt: me.startedAt, at: 'x' };
+    lock(live);
+    assert.equal(
+      deadUpdateLock(dir, () => undefined),
+      undefined,
+    );
+    assert.equal(
+      holds(live, () => undefined),
+      true,
+    );
+    assert.equal(
+      holds({ pid: dead, startedAt: 1 }, () => undefined),
+      false,
+    );
     // Незавершённый возврат держит, даже если процесса нет.
     lock({ pid: dead, startedAt: 1, at: 'x' });
     writeFileSync(join(updates, 'in-progress.json'), JSON.stringify({ id: 'x' }));
@@ -566,6 +585,12 @@ test('UU17: записи библиотеки во время обновлени
       ['requestReconfigure', () => h.engine.requestReconfigure('op', 'a'.repeat(64))],
     ];
     for (const [name, write] of writes) assert.throws(write, busy, name);
+    // Запрос политики через Harness не оставляет паузы без запроса.
+    assert.throws(() => h.requestReconfigure('op-x', 'a'.repeat(64)), busy);
+    assert.equal(
+      h.engine.read((v) => v.control().pauseOperation),
+      undefined,
+    );
     // Незавершённый возврат — тоже.
     rmSync(join(updates, 'lock'));
     writeFileSync(join(updates, 'in-progress.json'), JSON.stringify({ id: 'x' }));

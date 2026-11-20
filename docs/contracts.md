@@ -1788,8 +1788,10 @@ remaining?, humanWait, line}`: `elapsedMs` — от начала первой п
 
 Начиная со второго шага — предупреждение `VIEW_SIZE_REDUCED`;
 `VIEW_TRUNCATED` остаётся всегда. Счётчики `progress`, `forecast`, `updates`,
-`health` и `history` не опускаются. Отказ `VIEW_TOO_LARGE` (exit 4) остаётся
-только для предела (`maxBytes`), меньшего документа без всех этих списков.
+`health`, `history` и `settings` не опускаются. Отказ `VIEW_TOO_LARGE`
+(exit 4) остаётся, когда предела (`maxBytes`, по умолчанию 256 КБ) не хватает
+и документу без всех этих списков — например, при сотне ролей с запасными
+reviewer в `settings`.
 
 **Маскирование.** Каждая свободная строка (заголовки, `stage.step`, `line`,
 `plain`, `queue.detail`, `warnings[].message`, `drift[].unavailable`,

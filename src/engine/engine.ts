@@ -4271,6 +4271,9 @@ export class Engine {
    */
   operationPause(operation: string) {
     return this.tx('scheduler.paused', (tx) => {
+      // Пауза другой операции (применение политики) во время обновления не
+      // ставится: следом её запрос отказал бы, и пауза осталась бы без него.
+      if (operation !== UPDATE_PAUSE_OPERATION) this.assertNoUpdate(tx);
       const control = tx.control();
       if (control.paused) return false;
       tx.setControl({

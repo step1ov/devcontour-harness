@@ -32,11 +32,20 @@ export interface LockBody {
   startedAt?: number;
   at?: string;
 }
-/** Держатель замка жив: тот же pid и тот же момент старта процесса. */
-export const holds = (held: LockBody | undefined) =>
-  held?.pid !== undefined &&
-  alive(held.pid) &&
-  (held.startedAt === undefined || processStartedAt(held.pid) === held.startedAt);
+/**
+ * Держатель замка жив: pid существует и момент старта тот же. Момент старта
+ * узнать не удалось (ps недоступен) — держатель считается живым: умершим
+ * замок признаётся только доказанно.
+ */
+export const holds = (
+  held: LockBody | undefined,
+  startOf: (pid: number) => number | undefined = processStartedAt,
+) => {
+  if (held?.pid === undefined || !alive(held.pid)) return false;
+  if (held.startedAt === undefined) return true;
+  const now = startOf(held.pid);
+  return now === undefined || now === held.startedAt;
+};
 
 /** Запись «обновление или откат идёт» прерванного обновления ждёт возврата. */
 export const restorePending = (stateDir: string) =>
@@ -64,8 +73,13 @@ export function updateInProgress(stateDir: string, prefix?: string): string | un
  * другому процессу), и незавершённого возврата нет: обновление умерло до
  * изменений (например, во время `--wait`). Его пауза устарела.
  */
-export function deadUpdateLock(stateDir: string): { pid: number } | undefined {
+export function deadUpdateLock(
+  stateDir: string,
+  startOf: (pid: number) => number | undefined = processStartedAt,
+): { pid: number } | undefined {
   const held = readJsonFile<LockBody>(join(updatesDir(stateDir), 'lock'));
-  if (held?.pid === undefined || holds(held) || restorePending(stateDir)) return undefined;
+  if (held?.pid === undefined || restorePending(stateDir)) return undefined;
+  // Умер — только доказанно (`holds`): неизвестный момент старта — не «умер».
+  if (holds(held, startOf)) return undefined;
   return { pid: held.pid };
 }
