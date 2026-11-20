@@ -55,6 +55,11 @@ With `--policy`, `data.warnings` carries machine advice: `LOW_RESOURCES`
 (weak machine, `concurrency` above 1) and `DEPENDENCY_STORE_RECOMMENDED`
 (pnpm without `dependencyStore`). For a new project answer them with
 `init --lean`; for a prepared one see "Weak machine" (step 8).
+`DEPENDENCY_STORE_UNSUPPORTED` (the pinned pnpm is outside the verified
+versions: the store is not applied and every checkout installs everything from
+the network) and `DEPENDENCY_CACHE_PATH` (a gate, `prepare` step or policy
+environment sets its own pnpm store/cache) are loud on purpose — see
+"Package cache" below.
 
 `$H capabilities` — the catalog of the shared operations (`init`, `explain`,
 `plan-request`, `plan-check`, `capabilities`): description, `readOnly`, JSON
@@ -101,6 +106,17 @@ Schema of input and response, and the byte limits. Read only.
 | `NOT_READY` toolchain problems                                              | missing scripts, wrong tool versions                                                                                                                                                               | fix the project or hand it to the user; never weaken the policy                                                             |
 | `CONTROLLER_BUSY` from `lean`                                               | a run of this project is in progress (live controller, attempt or joint verification)                                                                                                              | wait for the run to finish, then repeat `lean`; never edit the policy under a running controller                            |
 | `CONTROLLER_BUSY`                                                           | the repository is already owned by another controller                                                                                                                                              | stop: a second controller and state are not created                                                                         |
+
+**Package cache.** Right after `init`, run `$H smoke` (step 7) and read the
+prepare time and the dependency store advice. Prepare longer than a minute →
+enable `dependencyStore` with `$H lean --repository <repo> --plan`, then
+without `--plan`. A package manager version the store does not support →
+report it to the operator as a harness finding. Never build your own shared
+cache in gate or `prepare` arguments (`--store-dir`, `store-dir`, `cache-dir`,
+`pnpm_config_store_dir`): an absolute path and shared mutable state bypass
+the store's trust boundary and do not move to another machine; a path inside
+the worktree starts empty in every attempt. Do not start a paid `run` until
+prepare fits a reasonable time.
 
 ### 4. Plan the graph
 
@@ -175,6 +191,17 @@ review under the reviewer rule and approves it.
 `$H review-plan --state … --graph … --policy … --author <your runtime>` shows
 the findings in advance. With `approvalMode: operator` a human approves with
 `$H approve`.
+
+**After a policy change.** An approval belongs to the policy it was made
+under: after you edit `.harness/policy.json` (or `lean` changes it) the graph
+is `APPROVAL_STALE`, and `review-plan` holds a new round instead of returning
+the stored one. When the change does not touch isolation, network domains,
+tool profiles or role assignments (for example a gate timeout), re-approve
+through the CLI with an audit record:
+`$H reapprove --state … --policy .harness/policy.json --subject <graph-id> --digest <graph digest> --by "<who>" --reason "<what changed and why the last review still covers it>"`.
+A change to isolation, network or tool profiles always needs a fresh
+`review-plan` — `reapprove` and `approve` refuse it (`APPROVAL_REQUIRED`).
+Never call library internals (`Engine.approve`, store writes) to approve.
 
 **Review rounds that go in circles.** Each plan or contract review round is a
 paid call; `status` / `explain` `data.reviews[].line` shows the verdict, rounds
@@ -373,7 +400,8 @@ of editing the policy by hand:
    `data.problems`: `CONTROLLER_BUSY` — a run is in progress, wait for it;
    `PATH_CONFLICT` — a field was edited by hand, the user decides.
 2. `$H lean --repository <repo>` applies it. The policy digest changes:
-   graphs in `data.staleApprovals` need `review-plan` again, and the next
+   graphs in `data.staleApprovals` need `review-plan` again (or `reapprove`
+   with `--by` / `--reason`, see step 6 "After a policy change"), and the next
    `run --policy .harness/policy.json` uses the new policy.
 3. `$H lean --repository <repo> --off` restores the recorded values exactly
    (`--plan` first). `NOT_READY` without `.harness/project.json`: run
@@ -446,7 +474,8 @@ not copy acceptance logs or attempt state into notes.
 ## Don'ts
 
 - Do not call a separate model to plan, and do not mark a plan or draft as
-  approved: approval comes only from `review-plan` / `approve` / `run`.
+  approved: approval comes only from `review-plan` / `approve` / `reapprove`
+  / `run`. Never approve by calling library internals (`Engine.approve`).
 - Do not weaken or remove gates or requirements so that a new feature test
   is green before its implementation; a project already failing on its base
   is a separate first task.
