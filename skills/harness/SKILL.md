@@ -348,7 +348,10 @@ on the full network (`codexNetwork: true`) for it. On Linux the server and
 its client must run in one shell command; Codex needs the `network_proxy`
 feature (the probe reports `environment` otherwise), and the probe's first
 line `harness-loopback-check` proves the boundary (`network-open` means this
-codex lets external traffic through: do not run the writer with it). The mode
+codex lets external traffic through: do not run the writer with it; rerun the
+probe after every codex upgrade — real runs do not repeat this check). A
+profile without the `network` field shows `legacy`: the old boundary, with the
+runtime's web tools not explicitly closed. The mode
 also turns off the runtime's own web tools (Codex web search, Claude
 WebFetch/WebSearch); MCP servers of the profile stay outside the boundary. Changing `network` needs
 a new plan review. A browser that aborts under the macOS

@@ -256,6 +256,16 @@ function closedEntries(policy: Isolation) {
  * функцию молча пропускает, поэтому вызывающий сначала проверяет её
  * (`codexLoopbackSupport`).
  */
+/**
+ * Таблица сети codex для `loopback`: прокси включён, разрешённых доменов нет
+ * явно (`domains={}` заменяет домены из другого слоя конфигурации), режим
+ * `limited`, без цепочки к внешнему прокси хоста, без нелокального прокси и
+ * без всех Unix-сокетов. Запрет всего (`"*"="deny"`) codex 0.165 не
+ * принимает: шаблон `*` для запрещённых доменов недопустим.
+ */
+export const CODEX_LOOPBACK_NETWORK =
+  'enabled=true, mode="limited", domains={}, allow_local_binding=true, allow_upstream_proxy=false, dangerously_allow_non_loopback_proxy=false, dangerously_allow_all_unix_sockets=false';
+
 export function codexPermissions(
   policy: Isolation,
   network: boolean | 'none' | 'loopback' | 'full',
@@ -277,7 +287,7 @@ export function codexPermissions(
     'default_permissions="harness"',
     '-c',
     `permissions.harness={filesystem={${filesystem}}, network={${
-      mode === 'loopback' ? 'enabled=true, allow_local_binding=true' : `enabled=${mode === 'full'}`
+      mode === 'loopback' ? CODEX_LOOPBACK_NETWORK : `enabled=${mode === 'full'}`
     }}}`,
   ];
 }
