@@ -41,6 +41,8 @@ import { parseArgs } from 'node:util';
 /** Каталог примера (этот файл лежит в нём) и шаблон controller mode пакета. */
 export const EXAMPLE = dirname(fileURLToPath(import.meta.url));
 export const CONTROLLER_TEMPLATE = resolve(EXAMPLE, '..', '..', 'templates', 'controller-mode');
+/** Действующая версия оверлея: v2 — «сначала код, потом вопрос» при закрытом окружением шаге. */
+export const OVERLAY = { file: 'AGENTS.controller.v2.md', version: 2 };
 export const STARTER = Object.freeze({
   url: 'https://github.com/oim-dev/turbo-starter',
   commit: '78f1e76b80f76ae9d4289e0b0994df8a6f2b89cc',
@@ -261,7 +263,7 @@ export function controllerContext(fixture, dir) {
   // остаются, а закоммиченный пакет и .harness/ не попадают в свои же справки.
   rmSync(target, { recursive: true, force: true });
   mkdirSync(join(target, 'references'), { recursive: true });
-  const overlay = readFileSync(join(CONTROLLER_TEMPLATE, 'AGENTS.controller.md'));
+  const overlay = readFileSync(join(CONTROLLER_TEMPLATE, OVERLAY.file));
   writeFileSync(join(target, 'AGENTS.controller.md'), overlay);
   const inside = relative(fixture.repo, resolve(target));
   const exclude = [':(exclude).harness/**'];
@@ -284,8 +286,8 @@ export function controllerContext(fixture, dir) {
   });
   const provenance = {
     overlay: {
-      template: 'templates/controller-mode/AGENTS.controller.md',
-      version: 1,
+      template: 'templates/controller-mode/' + OVERLAY.file,
+      version: OVERLAY.version,
       sha256: sha256(overlay),
     },
     product: { baselineSha: fixture.baselineSha, upstream: fixture.upstream, files: references },

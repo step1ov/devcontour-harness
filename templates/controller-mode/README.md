@@ -1,4 +1,4 @@
-# Controller mode (opt-in, v1)
+# Controller mode (opt-in, v2)
 
 `AGENTS.controller.md` is an overlay for projects whose own AGENTS.md tells an
 agent to manage worktrees, commits, merges or Relay history itself. Turbo
@@ -12,8 +12,10 @@ not a file committed to the target repository. Some projects forbid new
 `.md` files, and their own AGENTS.md files stay unchanged and keep applying.
 
 1. Next to the graph, create the context source directory
-   `context/controller-mode/` and copy `AGENTS.controller.md` into it
-   unchanged.
+   `context/controller-mode/` and copy the current overlay
+   `AGENTS.controller.v2.md` into it unchanged as `AGENTS.controller.md`.
+   v2 adds «implement first, then ask» for steps the writer sandbox blocks;
+   `AGENTS.controller.md` (v1) stays for existing pins.
 2. Put copies of the product AGENTS.md files under
    `context/controller-mode/references/`. Keep their repository paths, for
    example `references/AGENTS.md` and `references/apps/nest-backend/AGENTS.md`.
