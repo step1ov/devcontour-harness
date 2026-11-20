@@ -2,6 +2,7 @@
 // node:* и без zod — его импортирует браузер; схема ответа —
 // `valueReportSchema` (src/contracts/report.ts).
 
+import { attemptLine, type AttemptLineFacts } from '../projections/attempt-line.ts';
 import { HarnessError } from '../contracts/errors.ts';
 import type {
   AttemptState,
@@ -403,21 +404,31 @@ export interface AttemptBudget {
  * оценки времени. «Принято» — только принятая попытка (после gates,
  * независимого ревью и интеграции), не исправление и не пройденная проверка.
  */
-export function attemptSummaryLine(s: AttemptSummary, budget: AttemptBudget): string {
-  const left = (used: number, max: number) => Math.max(0, max - used);
-  return [
-    `попыток ${s.total}${s.active ? ` (идёт ${s.active})` : ''}`,
-    `отказов ${s.failed}${s.failures.length ? ` (${s.failures.map((f) => `${f.key} ${f.count}`).join(', ')})` : ''}`,
-    `по времени ${s.timeouts}`,
-    `прервано остановкой ${s.interrupted}`,
-    `принято ${s.accepted}`,
-    (budget.neutral && budget.neutral.used >= budget.neutral.max
-      ? `исчерпан предел незасчитанных отказов ${budget.neutral.used} из ${budget.neutral.max}: повтор — только со сбросом`
-      : `осталось попыток ${left(budget.attempts.used, budget.attempts.max)} из ${budget.attempts.max}`) +
-      (budget.repairs
-        ? `, восстановлений группы ${left(budget.repairs.used, budget.repairs.budget)} из ${budget.repairs.budget}`
-        : ''),
-  ].join('; ');
+export function attemptSummaryLine(
+  s: AttemptSummary,
+  budget: AttemptBudget,
+  lang: 'ru' | 'en' = 'ru',
+  max?: number,
+): string {
+  return attemptLine(attemptLineFacts(s, budget), lang, max);
+}
+
+/** Факты строки сводки (`attemptLine`): числа сводки и остаток пределов. */
+export function attemptLineFacts(s: AttemptSummary, budget: AttemptBudget): AttemptLineFacts {
+  return {
+    total: s.total,
+    active: s.active,
+    failed: s.failed,
+    failures: s.failures,
+    timeouts: s.timeouts,
+    interrupted: s.interrupted,
+    accepted: s.accepted,
+    attempts: budget.attempts,
+    ...(budget.neutral && budget.neutral.used >= budget.neutral.max
+      ? { neutralOut: budget.neutral }
+      : {}),
+    ...(budget.repairs ? { repairs: budget.repairs } : {}),
+  };
 }
 
 /* ------------------------------------------------------------------ */

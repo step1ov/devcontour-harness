@@ -38,6 +38,7 @@ import { notLaunched, reviewFacts } from '../report/verification.ts';
 import { callRecords } from '../engine/usage.ts';
 import { legacyGroupCall } from '../engine/budget.ts';
 import { requestsOf } from '../engine/input-requests.ts';
+import { attemptLine, type AttemptLineFacts } from '../projections/attempt-line.ts';
 import { named, type LinePart } from '../projections/clip.ts';
 import { inputStateOf } from '../projections/input.ts';
 import { explainStop } from '../projections/stop.ts';
@@ -193,23 +194,30 @@ function manifestLayers(baseDir: string): string[] | undefined {
   }
 }
 
-/** Английская строка сводки попыток — те же числа, что `attemptSummaryLine`. */
-function attemptLineEn(s: StatusWork['attemptSummary'], final: boolean): string | undefined {
+/**
+ * Факты строки сводки попыток (`attemptLine`) — те же числа, что
+ * `attemptSummaryLine`: проекция собирает из них строку в своём пределе, не
+ * теряя хвоста («повтор — только со сбросом»).
+ */
+function attemptFacts(
+  s: StatusWork['attemptSummary'],
+  final: boolean,
+): AttemptLineFacts | undefined {
   if (!s) return undefined;
-  const left = (used: number, max: number) => Math.max(0, max - used);
   // Как `attemptSummaryView`: у итоговой работы предел незасчитанных не держит.
   const neutralOut = !final && s.neutral.used >= s.neutral.max;
-  return [
-    `attempts ${s.total}${s.active ? ` (${s.active} running)` : ''}`,
-    `failures ${s.failed}${s.failures.length ? ` (${s.failures.map((f) => `${f.key} ${f.count}`).join(', ')})` : ''}`,
-    `time limit ${s.timeouts}`,
-    `interrupted by shutdown ${s.interrupted}`,
-    `accepted ${s.accepted}`,
-    (neutralOut
-      ? `the limit of uncounted failures is used up (${s.neutral.used} of ${s.neutral.max}): retry only after a reset`
-      : `attempts left ${left(s.attempts.used, s.attempts.max)} of ${s.attempts.max}`) +
-      (s.repairs ? `, group repairs left ${s.repairs.left} of ${s.repairs.budget}` : ''),
-  ].join('; ');
+  return {
+    total: s.total,
+    active: s.active,
+    failed: s.failed,
+    failures: s.failures,
+    timeouts: s.timeouts,
+    interrupted: s.interrupted,
+    accepted: s.accepted,
+    attempts: { used: s.attempts.used, max: s.attempts.max },
+    ...(neutralOut ? { neutralOut: s.neutral } : {}),
+    ...(s.repairs ? { repairs: { used: s.repairs.used, budget: s.repairs.budget } } : {}),
+  };
 }
 
 const lastBySubject = <R extends { subject: string; round: number }>(
@@ -828,8 +836,8 @@ export function collectOperatorViewInput(
         },
         attemptSummary: {
           ...summary,
-          ...((en) => (en ? { lineEn: en } : {}))(
-            attemptLineEn(summary, sw.status === 'done' || sw.status === 'cancelled'),
+          ...((facts) => (facts ? { lineEn: attemptLine(facts, 'en'), lineFacts: facts } : {}))(
+            attemptFacts(summary, sw.status === 'done' || sw.status === 'cancelled'),
           ),
         },
         rechecks: own.reduce((n, a) => n + a.evidence.filter((e) => e.recheck).length, 0),

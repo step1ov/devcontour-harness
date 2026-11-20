@@ -17,6 +17,38 @@ export const GRAPH_STAGES = 2;
 const iso = (ms: number) => new Date(ms).toISOString();
 
 /**
+ * Порядок заданий: от старых к новым. Задания с номером постановки (`seq`) —
+ * по номеру; задания прежних версий без номера старше любого с номером и
+ * между собой идут по моменту `startedAt` (по времени, не по строке), затем
+ * по ключу. Часы для заданий с номером не участвуют: откат или равенство
+ * `startedAt` порядок не меняют.
+ */
+export function compareWorkflowJobs(
+  a: Pick<WorkflowJob, 'seq' | 'startedAt' | 'key'>,
+  b: Pick<WorkflowJob, 'seq' | 'startedAt' | 'key'>,
+): number {
+  if (a.seq !== undefined || b.seq !== undefined) {
+    if (a.seq === undefined) return -1;
+    if (b.seq === undefined) return 1;
+    if (a.seq !== b.seq) return a.seq - b.seq;
+  } else {
+    const d = Date.parse(a.startedAt) - Date.parse(b.startedAt);
+    if (d) return d;
+  }
+  return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+}
+
+/** Самое новое задание по `compareWorkflowJobs`; пустой список — `undefined`. */
+export function newestWorkflowJob<T extends Pick<WorkflowJob, 'seq' | 'startedAt' | 'key'>>(
+  jobs: readonly T[],
+): T | undefined {
+  return jobs.reduce<T | undefined>(
+    (best, j) => (!best || compareWorkflowJobs(j, best) > 0 ? j : best),
+    undefined,
+  );
+}
+
+/**
  * Техническая очередь ведущего: долговечные задания над группой поручений
  * (у standalone — граф). Постановка идемпотентна по ключу (предмет и digest
  * входа); владелец задания fenced токеном и сроком; смена или удаление входа
@@ -111,10 +143,13 @@ export class WorkflowQueue {
     return owner ?? WORKSPACE_OWNER;
   }
 
-  /** Задания владельца (по умолчанию — общие). */
+  /** Задания владельца (по умолчанию — общие), от старых к новым (`compareWorkflowJobs`). */
   list(owner?: string) {
     return this.store.read((v) =>
-      v.locals('workflow-jobs', WorkflowQueue.owner(owner)).map((r) => r.value),
+      v
+        .locals('workflow-jobs', WorkflowQueue.owner(owner))
+        .map((r) => r.value)
+        .sort(compareWorkflowJobs),
     );
   }
 
@@ -174,6 +209,9 @@ export class WorkflowQueue {
         attempts: 0,
         status: 'queued',
         startedAt: iso(this.now()),
+        // Номер постановки — следующий за наибольшим в хранилище (все
+        // владельцы): задания не удаляются, номер растёт и переживает рестарт.
+        seq: 1 + tx.locals('workflow-jobs').reduce((max, r) => Math.max(max, r.value.seq ?? 0), 0),
         history: [],
       };
       tx.putLocal('workflow-jobs', WorkflowQueue.owner(job.owner), key, job);

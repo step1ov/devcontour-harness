@@ -19,6 +19,7 @@ export {
 } from './progress.ts';
 export { nextAction, nextSteps, type NextInput, type NextStep, type NextView } from './next.ts';
 export { queueStop, type QueueStopInput, type QueueStopView } from './queue.ts';
+export { attemptLine, type AttemptLineFacts } from './attempt-line.ts';
 export {
   attemptView,
   type AttemptView,

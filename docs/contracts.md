@@ -610,7 +610,11 @@ writer и reviewer кода получают список файлов набо�
 Локальные записи адресуются `(namespace, owner, key)`; пространства и их
 схемы — `localSchemas` (`usage`, `context-snapshots`, `run-keys`, `delivery`,
 `reviews`, `check-suites` — корпус подтверждённых случаев, `workflow-jobs` —
-техническая очередь ведущего, `contract-documents` — документы контрактов,
+техническая очередь ведущего (с 0.1.0-alpha.58 у задания `seq` — номер
+постановки в хранилище: `WorkflowQueue.list()` идёт по нему от старых к
+новым, `newestWorkflowJob` — новейшее; откат или равенство часов
+`startedAt` порядок не меняют; задания без `seq` старше любого с номером и
+между собой идут по `startedAt`, затем по ключу — `compareWorkflowJobs`), `contract-documents` — документы контрактов,
 прошедшие ревью, по digest, `spikes` — эксперименты выполнимости
 репозитория, `reproductions` — реестр воспроизведений из находок ревью по
 поручениям, `input-requests` — вопросы исполнителей и ответы на них,
@@ -1760,7 +1764,7 @@ escape-последовательностей терминала (ANSI CSI, OSC)
 
 **Хост.** Источник пакета — `HandoffSource`: `{ engine, policy, workflows }`,
 где `engine` — `Engine` над хранилищем хоста, `policy` — его
-`ExecutionPolicy`, `workflows` — `list()` заданий (пакет и диагнозы берут
+`ExecutionPolicy`, `workflows` — `list()` заданий от старых к новым (пакет и диагнозы берут
 задания `kind: "graph"`) и `continues(job, view, { reconfigureApplies })`,
 продолжит ли очередь задание сама. `Harness` удовлетворяет типу структурно;
 хост со своим движком передаёт свой адаптер заданий без экземпляра
@@ -2222,7 +2226,12 @@ gate, `dependency-network: … Шаг <id>: …` у шага `prepare`. Текс
   ошибки попытки (вывод команд, пути, секреты) в него не попадает; предел —
   300 символов. Нет поля — отказов нет;
 - `line` — та же сводка одной строкой (`attemptSummaryLine`), её же печатают
-  `status --human` и `explain --human` (раздел «Попытки»).
+  `status --human` и `explain --human` (раздел «Попытки»). Строку собирает
+  `attemptLine` (`devcontour-harness/projections`) в пределе длины (1000 у
+  `status`, 200 у `harness view`): хвост — остаток попыток или «повтор —
+  только со сбросом» (`retry only after a reset`) и восстановления группы —
+  не обрезается; при нехватке места сначала сокращается список отказов
+  («defect 1, … и ещё 5», `and 5 more`), затем начало строки.
 
 У `explain` строк не больше 100 (`EXPLAIN_ATTEMPT_ROWS`), остальные —
 числом `attemptsTruncated`. Попытки читаются одним проходом на чтение.

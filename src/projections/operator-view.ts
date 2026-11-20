@@ -21,6 +21,7 @@ import {
 import type { ExecutionPolicy, RuntimeBinding } from '../contracts/policy.ts';
 import { fitLine, named, type LinePart } from './clip.ts';
 import { maskSecrets, maskText, type MaskContext } from './mask.ts';
+import { attemptLine, type AttemptLineFacts } from './attempt-line.ts';
 import { holdLineParts } from './blocker-line.ts';
 import { remoteLineParts } from './remote-line.ts';
 import { sha256Hex } from './sha256.ts';
@@ -421,6 +422,13 @@ export interface OperatorWorkInput {
     line?: string;
     /** Та же строка по-английски (`--lang en`); нет — строки нет. */
     lineEn?: string;
+    /**
+     * Числа той же строки (`attemptLine`). Есть — проекция собирает строку
+     * сама в пределе `line`: при нехватке места сокращается список отказов
+     * («и ещё N»), а остаток попыток или «повтор — только со сбросом»
+     * сохраняется. Нет — `line`/`lineEn`, обрезанные с конца.
+     */
+    lineFacts?: AttemptLineFacts;
     /** alpha.55 (`attemptSummary.lastFailure`). */
     lastFailure?: { runId: string; bucket: string; plain: string; plainEn?: string; at?: string };
   };
@@ -1090,7 +1098,11 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
       rechecks: w.rechecks,
       neutral: { used: a.neutral.used, max: a.neutral.max },
       ...((line) => (line ? { line: text(c, line, T.line) } : {}))(
-        c.lang === 'en' ? a.lineEn : a.line,
+        a.lineFacts && (c.lang === 'en' ? a.lineEn : a.line) !== undefined
+          ? attemptLine(a.lineFacts, c.lang, T.line)
+          : c.lang === 'en'
+            ? a.lineEn
+            : a.line,
       ),
       ...(last && lastAttempt !== undefined && lastPlain
         ? {
