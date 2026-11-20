@@ -145,6 +145,8 @@ for (const lang of ['ru', 'en'] as const) {
     const line = operatorView(input, { lang }).works[0]!.attempts.line!;
     assert.ok(line.length <= T.line, line);
     assert.match(line, /‹masked›/);
+    // Вторая маска поверх готовой строки дала бы вложенную метку «‹‹masked››».
+    assert.doesNotMatch(line, /‹‹|››/);
     assert.doesNotMatch(line, /40|36/);
     // Без маски при подборе строка на этих секретах длиннее предела.
     const unfitted = maskText(attemptLine(f, lang, T.line), 10_000, { secrets: ['40', '36'] })!;
