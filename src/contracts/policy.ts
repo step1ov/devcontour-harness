@@ -746,6 +746,61 @@ export function sameVendorReviews(
   return out;
 }
 
+/** Правило ревью кода роли, которое отдаёт reviewer запрещённого вендора. */
+export type ReviewVendorConflict = {
+  role: string;
+  repositoryId?: string;
+  writer: RuntimeName;
+  reviewer: RuntimeName;
+  /** Где записано правило: у роли, у репозитория или `review.code`. */
+  source: string;
+};
+
+/**
+ * Роли, чьё правило ревью кода отдаёт reviewer того же вендора, что writer
+ * роли, а правило этого не разрешает (`vendor: different-vendor`, нет
+ * запасного reviewer другого вендора). Решает тот же `selectReviewer`, что
+ * движок и приёмка: поручение такой роли не выдаётся (блокер
+ * `REVIEWER_SAME_VENDOR`), результат с таким ревью приёмка отклоняет.
+ */
+export function reviewVendorConflicts(policy: PolicyBindings): ReviewVendorConflict[] {
+  const out: ReviewVendorConflict[] = [];
+  for (const { role, binding, repositoryId } of roleEntries(policy)) {
+    const writer = binding.writer.runtime;
+    const choice = selectReviewer(policy, 'code', { runtime: writer }, role, repositoryId);
+    if (choice.ok || choice.code !== 'REVIEWER_SAME_VENDOR') continue;
+    const index = policy.repositories.findIndex((r) => r.id === repositoryId);
+    const source = binding.review
+      ? repositoryId === undefined
+        ? `roles.${role}.review`
+        : `repositories.${index}.roles.${role}.review`
+      : index >= 0 && policy.repositories[index]!.review
+        ? `repositories.${index}.review`
+        : 'review.code';
+    out.push({
+      role,
+      ...(repositoryId === undefined ? {} : { repositoryId }),
+      writer,
+      reviewer: codeReview(policy, role, repositoryId).reviewer.runtime,
+      source,
+    });
+  }
+  return out;
+}
+
+/** Строка о противоречии правила ревью кода роли: что сломается и как исправить. */
+export function reviewVendorConflictMessage(c: ReviewVendorConflict): string {
+  return (
+    `Правило ревью кода роли ${c.role}${c.repositoryId ? ` (репозиторий ${c.repositoryId})` : ''} (${c.source}): ` +
+    `reviewer ${c.reviewer} того же поставщика, что writer ${c.writer}, а правило требует другого (vendor: different-vendor) — ` +
+    'поручения роли не будут выданы, приёмка откажет. Исправьте: назначьте в этом правиле reviewer другого вендора, ' +
+    'либо разрешите ревью тем же вендором явно (vendor: same-vendor-allowed)' +
+    (c.source.includes('.roles.') || c.source.startsWith('roles.')
+      ? ', либо уберите правило review из роли (и reviewer из роли профиля) — тогда действует общее правило'
+      : '')
+  );
+}
+
 type Issue = CodedIssue;
 type Repo = z.infer<typeof repositoryPolicySchema>;
 

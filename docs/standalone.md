@@ -96,10 +96,14 @@ reviewer кода — для writer.
 `--model` закрепляет одну модель на writer и всех reviewers (поле `model`
 привязок); при ревью другим вендором это отказ `INVALID_INPUT`
 (`model-cross-vendor`). Роли профиля со своими runtime не меняются; их
-отсутствующий CLI — предупреждение `runtime-missing`.
+отсутствующий CLI — предупреждение `runtime-missing`. Reviewer роли профиля
+того же вендора, что её writer, при `same` получает в правиле роли то же
+`vendor: same-vendor-allowed`; при `cross` правило роли остаётся
+`different-vendor`, и такую роль движок не выдаст — init предупреждает
+`review-vendor-conflict`, `doctor` называет это проблемой.
 
 `data.warnings` — предупреждения, не отказ: `review-same-vendor`,
-`runtime-missing`, `runtime-unauthenticated`. Те же правила видны дальше:
+`review-vendor-conflict`, `runtime-missing`, `runtime-unauthenticated`. Те же правила видны дальше:
 `doctor` предупреждает о ревью тем же вендором (`warnings`) и называет
 отсутствующий назначенный CLI с его назначениями в `problems`; `report`
 добавляет ограничение `review-same-vendor`, если в окне были такие ревью.

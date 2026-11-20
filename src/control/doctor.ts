@@ -6,6 +6,8 @@ import {
   STATE_VERSION,
   inputPolicyOf,
   leadAnswersRule,
+  reviewVendorConflictMessage,
+  reviewVendorConflicts,
   runtimeAssignments,
   sameVendorReviews,
   type Author,
@@ -40,7 +42,10 @@ export type ToolchainInspect = (
  * (`warnings`): порт ресурса только на wildcard, ревью тем же вендором
  * (`review-same-vendor: …`), сумма пределов шагов фазы больше `runTimeoutMs`
  * (`timeBudgetWarnings`), советы о ресурсах машины (`resourceWarnings`); они
- * не попадают в `problems`.
+ * не попадают в `problems`. Правило ревью кода роли с reviewer того же
+ * вендора, что writer, без `vendor: same-vendor-allowed`
+ * (`review-vendor-conflict: …`) — проблема: движок не выдаст поручение роли,
+ * приёмка отклонит результат.
  */
 export async function doctor(
   policy: ExecutionPolicy | undefined,
@@ -186,6 +191,11 @@ export async function doctor(
       warnings.push(
         `Порт ${p.port} (ресурс ${p.id}) на всех адресах держит ${p.holder}; loopback свободен — служба попытки должна слушать 127.0.0.1. ${PORT_ADVICE}`,
       );
+  // Правило ревью кода роли, которое движок и приёмка не исполнят (reviewer
+  // того же вендора без разрешения), — проблема: поручения роли не выдаются.
+  if (policy)
+    for (const conflict of reviewVendorConflicts(policy))
+      problems.push('review-vendor-conflict: ' + reviewVendorConflictMessage(conflict));
   // Ревью тем же вендором — не отказ, но явное предупреждение.
   const same = policy
     ? sameVendorReviews(
