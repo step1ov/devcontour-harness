@@ -140,7 +140,8 @@ test('F-V/F-AG: идёт последняя попытка — не «нужен
   ready(env.engine, graphOf({ a: [] }));
   const first = env.engine.claim('c1')!;
   env.engine.fail(first.id, first.token, 'gate unit failed', { kind: 'gate' });
-  env.engine.retry('a', { reason: 'повтор' });
+  // Обычный повтор: сброс с причиной (alpha.60) вернул бы полный лимит.
+  env.engine.retry('a');
   const second = env.engine.claim('c1')!;
   assert.ok(second);
   const data = status(env.engine);
