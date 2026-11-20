@@ -1019,7 +1019,9 @@ export function collectOperatorViewInput(
               line: status.runner.line,
               lineEn: status.runner.lineEn,
             }
-          : {}),
+          : !works.length && !attempts.length && !records.length && !controller
+            ? NEVER_RUN
+            : {}),
       },
       ...(controller ? { controller: { leaseUntil: controller.leaseUntil } } : {}),
       ...(status.budgets ? { budgets: status.budgets.budgets } : {}),
@@ -1190,6 +1192,16 @@ export function maskContextOf(policy: ExecutionPolicy, baseDir: string, stateDir
   return { home: homedir(), roots, secrets: policySecrets(policy) };
 }
 
+/**
+ * Очередь каталога, с которым harness ещё ничего не запускал: не «идёт» и не
+ * «стоит» — первый запуск делает ведущий.
+ */
+const NEVER_RUN = {
+  neverRun: true,
+  line: 'Ещё ничего не запускали — ведущий начнёт с harness run.',
+  lineEn: 'Nothing has run yet — the lead starts with harness run.',
+} as const;
+
 /** Пустой вход: состояния ещё нет, настройки — из политики. */
 function emptyInput(policy: ViewPolicy, now: number, stateDir: string): OperatorViewInput {
   return {
@@ -1212,7 +1224,7 @@ function emptyInput(policy: ViewPolicy, now: number, stateDir: string): Operator
     questions: [],
     reviews: [],
     stops: [],
-    queue: { paused: false },
+    queue: { paused: false, ...NEVER_RUN },
     activity: [],
     ...(policy.policy.budgets ? { budgets: [] } : {}),
     warnings: [

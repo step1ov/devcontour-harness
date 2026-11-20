@@ -420,6 +420,12 @@ export interface OperatorView {
       action?: string;
       /** Ревизия 4: кто двигает очередь (`status.runner`). */
       runner?: 'running' | 'not-running';
+      /**
+       * Ревизия 4 (0.1.0-alpha.62): harness с этим каталогом ещё ничего не
+       * запускал — ни работ, ни попыток, ни controller; `line` — фраза о
+       * первом запуске. Поля нет — состояние уже есть.
+       */
+      neverRun?: true;
       restartBy?: string;
       line?: string;
     };
@@ -428,6 +434,12 @@ export interface OperatorView {
   health: ViewHealth;
   activity?: ActivityView[];
   scope?: ScopeView;
+  /**
+   * Почему `scope` нет (0.1.0-alpha.62): `no-snapshot` — ни одна связка ещё не
+   * записала снимок задач трекера в каталог состояния. Раздел `scope`, опущенный
+   * по размеру, называет `truncated.scope`, а не это поле.
+   */
+  scopeReason?: 'no-snapshot';
   sourceQuestions?: SourceQuestionView[];
   forecast?: ForecastView;
   updates?: UpdatesView;
@@ -892,6 +904,8 @@ export interface OperatorViewInput {
     action?: string;
     /** `status.runner`: кто двигает очередь и фраза о нём. */
     runner?: 'running' | 'not-running';
+    /** Состояния ещё нет или в нём нет ни работ, ни попыток, ни controller; `line` — о первом запуске. */
+    neverRun?: boolean;
     restartBy?: HarnessActor;
     line?: string;
     lineEn?: string;
@@ -2545,6 +2559,7 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
         ...(q.actor !== undefined && q.actor !== null ? { actor: actorOf(q.actor)! } : {}),
         ...(q.action ? { action: q.action } : {}),
         ...(q.runner ? { runner: q.runner } : {}),
+        ...(q.neverRun && !q.runner ? { neverRun: true as const } : {}),
         ...(q.restartBy ? { restartBy: actorOf(q.restartBy)! } : {}),
         ...((l) => (l ? { line: text(c, l, T.line) } : {}))(
           c.lang === 'en' ? (q.lineEn ?? q.line) : q.line,
@@ -2554,7 +2569,7 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
     history,
     health,
     ...(activity ? { activity } : {}),
-    ...(scope ? { scope } : {}),
+    ...(scope ? { scope } : { scopeReason: 'no-snapshot' as const }),
     ...(sourceQuestions ? { sourceQuestions } : {}),
     ...(forecast ? { forecast } : {}),
     ...(i.updates ? { updates: updatesOf(c, i.updates, truncated) } : {}),

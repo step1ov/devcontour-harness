@@ -101,6 +101,7 @@ test('harness view: после run — одна работа done, resultSha = r
   assert.equal(w!.title, 'Add a greeting function');
   assert.equal(w!.resultSha, result.json.data.result.shas.result);
   assert.equal(view.progress.done, 1);
+  assert.equal(view.progress.queue.neverRun, undefined, 'после run — не «ещё ничего не запускали»');
   assert.equal(view.health.drift.checked, 1);
   assert.ok(view.reviews.some((x) => x.kind === 'plan' && x.subject === 'greeting'));
   assert.ok(view.history.attemptsStarted.reduce((a, b) => a + b, 0) >= 1);
@@ -149,6 +150,19 @@ test('harness view: нет состояния — с --policy пустое пр�
   assert.equal(view.settings.roles[0]!.role, 'developer');
   assert.ok(view.health.warnings.some((w) => w.code === 'STATE_NOT_FOUND'));
   assert.ok(view.settings.defaulted.includes('thresholds.maxAttempts'));
+  // Ничего не запускали: очередь не «идёт» и не «стоит», среза задач ещё нет.
+  assert.deepEqual(view.progress.queue, {
+    paused: false,
+    neverRun: true,
+    line: 'Ещё ничего не запускали — ведущий начнёт с harness run.',
+  });
+  assert.equal(view.scope, undefined);
+  assert.equal(view.scopeReason, 'no-snapshot');
+  const en = p.harness('view', '--state', missing, '--policy', 'policy.json', '--lang', 'en');
+  assert.equal(
+    en.json.data.progress.queue.line,
+    'Nothing has run yet — the lead starts with harness run.',
+  );
   assert.equal(existsSync(missing), false);
 
   const refused = p.harness('view', '--state', missing);

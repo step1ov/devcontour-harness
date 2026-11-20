@@ -491,6 +491,8 @@ test('alpha.60: срез прогона — не готовая и не пере
   assert.equal(en.scope!.tasks[1]!.plain, 'a dependency is not finished');
   const none = operatorView(baseInput());
   assert.equal(none.scope, undefined);
+  assert.equal(none.scopeReason, 'no-snapshot', 'нет снимка — причина названа');
+  assert.equal(view.scopeReason, undefined);
   assert.equal(none.sourceQuestions, undefined);
   assert.equal(none.health.sources, undefined);
 });
@@ -710,6 +712,7 @@ test('alpha.60: вид сверх предела — без среза и воп
   const view = operatorView(input, { maxBytes: 120_000 });
   operatorViewSchema.parse(view);
   assert.equal(view.scope, undefined);
+  assert.equal(view.scopeReason, undefined, 'опущенный по размеру срез — не «снимка нет»');
   assert.equal(view.sourceQuestions, undefined);
   assert.equal(view.truncated?.scope, 230, 'усечённые и опущенные — без двойного счёта');
   assert.equal(view.truncated?.sourceQuestions, 50);

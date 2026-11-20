@@ -1449,6 +1449,10 @@
                 "not-running"
               ]
             },
+            "neverRun": {
+              "type": "boolean",
+              "const": true
+            },
             "restartBy": {
               "type": "string",
               "minLength": 1,
@@ -2163,6 +2167,12 @@
         "tasks"
       ],
       "additionalProperties": false
+    },
+    "scopeReason": {
+      "type": "string",
+      "enum": [
+        "no-snapshot"
+      ]
     },
     "sourceQuestions": {
       "maxItems": 50,
