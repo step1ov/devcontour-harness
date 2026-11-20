@@ -25,7 +25,17 @@ export {
   type AttemptViewInput,
   type AttemptViewOptions,
 } from './attempt.ts';
-export { CLIP_SHORT, CLIP_DIAGNOSTIC, clipText, clipDeep, redactThenClip } from './clip.ts';
+export {
+  CLIP_SHORT,
+  CLIP_DIAGNOSTIC,
+  clipText,
+  clipDeep,
+  redactThenClip,
+  elideMiddle,
+  fitLine,
+  named,
+  type LinePart,
+} from './clip.ts';
 export { MASKED, MASKED_PATH, maskSecrets, maskText, type MaskContext } from './mask.ts';
 export { sha256Hex } from './sha256.ts';
 export * from './operator-view.ts';

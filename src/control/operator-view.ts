@@ -38,6 +38,8 @@ import { notLaunched, reviewFacts } from '../report/verification.ts';
 import { callRecords } from '../engine/usage.ts';
 import { legacyGroupCall } from '../engine/budget.ts';
 import { requestsOf } from '../engine/input-requests.ts';
+import { OPERATOR_VIEW_TEXT } from '../contracts/operator-view-limits.ts';
+import { fitLine, named } from '../projections/clip.ts';
 import { inputStateOf } from '../projections/input.ts';
 import { explainStop } from '../projections/stop.ts';
 import { stopInputsIn } from '../explain/state.ts';
@@ -262,6 +264,37 @@ const roundsOf = <R extends { subject: string; round: number; at: string }>(
   return out;
 };
 
+/**
+ * Строка ревью кода: «код app/writer base..head: вердикт; раундов N». Refs
+ * (до 500 символов) сокращаются серединой: вердикт и раунды остаются в
+ * пределе строки представления.
+ */
+export function codeReviewLine(
+  r: {
+    repositoryId: string;
+    role: string;
+    refs: { base: string; head: string };
+    approved: boolean;
+    round: number;
+  },
+  counts: Parameters<typeof reviewVerdictText>[1],
+  lang: 'ru' | 'en',
+): string {
+  const ru = lang === 'ru';
+  return fitLine(
+    [
+      ru ? 'код ' : 'code ',
+      named(`${r.repositoryId}/${r.role}`),
+      ' ',
+      named(r.refs.base),
+      '..',
+      named(r.refs.head),
+      `: ${reviewVerdictText(r.approved, counts, lang)}; ${ru ? 'раундов' : 'rounds'} ${r.round}`,
+    ],
+    OPERATOR_VIEW_TEXT.line,
+  );
+}
+
 function reviewsOf(
   v: ExecutionView,
   policy: ExecutionPolicy,
@@ -321,7 +354,6 @@ function reviewsOf(
   const code = [...lastBySubject(codeRows, (r) => r.subject).values()].map(
     (r): OperatorReviewInput => {
       const counts = findingCounts(r.findings);
-      const scope = `${r.repositoryId}/${r.role} ${r.refs.base}..${r.refs.head}`;
       return {
         kind: 'code',
         subject: r.subject,
@@ -337,8 +369,8 @@ function reviewsOf(
         sameVendor: r.sameVendor,
         spend: spend.get(`code\0${r.subject}`) ?? none,
         findings: findingsOf(r.findings),
-        line: `код ${scope}: ${reviewVerdictText(r.approved, counts, 'ru')}; раундов ${r.round}`,
-        lineEn: `code ${scope}: ${reviewVerdictText(r.approved, counts, 'en')}; rounds ${r.round}`,
+        line: codeReviewLine(r, counts, 'ru'),
+        lineEn: codeReviewLine(r, counts, 'en'),
       };
     },
   );

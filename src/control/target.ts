@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import type { AcceptedTarget, ExecutionPolicy } from '../contracts/index.ts';
 import { RU, ruCount } from '../contracts/plural.ts';
 import { hostGitArgs } from '../environment/process.ts';
+import { remoteLine } from '../projections/remote-line.ts';
 
 /** Принятая работа: репозиторий и принятый SHA (`work.resultSha`, `result.shas.result`). */
 export interface AcceptedWork {
@@ -107,7 +108,7 @@ export function remoteOf(
 ): Remote {
   const name = branch.short ?? '';
   // Имя длиннее предела договора не обрезается (адрес отправки должен быть
-  // точным): поля нет, строка называет ветку с обрезкой.
+  // точным): поля нет, строка называет ветку, сокращённую серединой.
   const fits = (x: string, max: number) => x.length <= max;
   const base = {
     state,
@@ -117,25 +118,19 @@ export function remoteOf(
       : {}),
     ...(branch.checkedAt ? { checkedAt: branch.checkedAt } : {}),
   };
-  if (state === 'pushed')
+  if (state !== 'unknown')
     return {
       ...base,
-      line: clip(`уже в удалённой ветке ${name}`),
-      lineEn: clip(`already on the remote branch ${name}`),
-    };
-  if (state === 'not-pushed')
-    return {
-      ...base,
-      line: clip(`принято локально; в удалённой ветке ${name} ещё нет`),
-      lineEn: clip(`accepted locally; not yet on the remote branch ${name}`),
+      line: remoteLine(state, 'ru', name, LINE_LIMIT),
+      lineEn: remoteLine(state, 'en', name, LINE_LIMIT),
     };
   const reason = branch.reason ?? NO_REMOTE;
   return {
     ...base,
     reason: reason.ru,
     reasonEn: reason.en,
-    line: clip(`неизвестно (${reason.ru})`),
-    lineEn: clip(`unknown (${reason.en})`),
+    line: remoteLine(state, 'ru', name, LINE_LIMIT, reason.ru),
+    lineEn: remoteLine(state, 'en', name, LINE_LIMIT, reason.en),
   };
 }
 
