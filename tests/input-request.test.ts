@@ -1388,7 +1388,7 @@ test('alpha.60 (F-AK): правка политики и выдача друго�
   const kept = e2.inputRequest(env.request.id);
   assert.equal(kept.lifecycle, 'applied', 'ответ графа g не вернулся в answered');
   assert.equal(kept.stale, undefined);
-  e2.fail(x!.id, x!.token, 'стоп', { kind: 'stale-base' });
+  e2.fail(x.id, x.token, 'стоп', { kind: 'stale-base' });
   // Повторное согласование g под новой политикой (тот же снимок с ответом).
   e2.recordReview({
     ...planReview(e2, env.graph, e2.reviews('plan', env.graph.id).length + 1),
