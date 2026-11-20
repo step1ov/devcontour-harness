@@ -270,15 +270,16 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
     const callDir = join(input.dir, `writer-${++n}`);
     await mkdir(callDir, { recursive: true });
     // Свой TMPDIR в области записи — как у вызова исполнителя.
-    const scratch = await writerScratch(execution.env);
-    const iso = isolation({
-      write: [cwd, scratch],
-      controller: input.boundary.hidden,
-      readable: [cwd, scratch, ...input.boundary.readable],
-      domains: policy.isolation.domains,
-      ...(input.boundary.checkouts.length ? { checkouts: input.boundary.checkouts } : {}),
-    });
+    const temp = await writerScratch(execution.env);
+    const scratch = temp.dir;
     try {
+      const iso = isolation({
+        write: [cwd, scratch],
+        controller: [...input.boundary.hidden, temp.parent],
+        readable: [cwd, scratch, ...input.boundary.readable],
+        domains: policy.isolation.domains,
+        ...(input.boundary.checkouts.length ? { checkouts: input.boundary.checkouts } : {}),
+      });
       for (const step of steps) {
         let argv: string[];
         let env: NodeJS.ProcessEnv = execution.env;

@@ -14,7 +14,10 @@ import { stopInputsOf } from '../src/explain/state.ts';
 import { explainStop } from '../src/projections/stop.ts';
 import { attemptSummaryOf } from '../src/report/compute.ts';
 import { repairDecision, repeatedTestcase } from '../src/engine/repair.ts';
-import { environmentBlockOf } from '../src/engine/writer-block.ts';
+import { environmentBlockOf, writerScratch } from '../src/engine/writer-block.ts';
+import { codexPermissions, isolation, srtSocketsFit } from '../src/environment/isolation.ts';
+import { rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { ENVIRONMENT_BLOCK_WRITER_TEXT, prompt } from '../src/engine/prompt.ts';
 import { hsetup } from './harness-fixture.ts';
 import { approve, implement } from './runner-fixture.ts';
@@ -28,6 +31,13 @@ test('WB01: признаки окружения в итоге исполните
     'The sandbox blocks the mandated browser check',
     'Песочница не даёт прочитать описание задачи из трекера',
     "Error: EACCES: permission denied, mkdir '/Users/x/.agent-browser'",
+    'Network requests are blocked in this environment',
+    'Сетевые запросы заблокированы в песочнице',
+    'writing to ~/.cache/ms-playwright fails with EACCES',
+    'could not bind to port 5173 (EPERM)',
+    'Отказано в доступе при записи в ~/.cache — песочница',
+    'ERR_PNPM_META_FETCH_FAIL: connect ECONNREFUSED',
+    'Среда запрещает открыть сервер на 127.0.0.1 (listen EPERM), поэтому проверки в браузере недоступны',
   ])
     assert.ok(environmentBlockOf(s), s);
   for (const s of [
@@ -44,6 +54,22 @@ test('WB01: признаки окружения в итоге исполните
     'Permission denied page is half done',
     'Sandbox feature flag wiring remains',
     'Unable to fetch the user list: endpoint not implemented',
+    "the test asserts the error 'EACCES: permission denied' is surfaced",
+    'Added handling for connect EACCES in the client',
+    'Fixed the bug where getaddrinfo ENOTFOUND was swallowed',
+    "shows 'Network is unavailable' banner",
+    'works without network access; remaining: e2e',
+    'Mocked fetch so tests run without network access',
+    'Handle read-only file system errors in the exporter',
+    'Implemented the Operation not permitted error mapping',
+    'The environment blocks the user from saving when the form is invalid',
+    'sandbox prevents payments in staging',
+    'Добавил экран «Нет доступа к сети»',
+    'Реализовал работу без интернета',
+    'Сеть отключена в тестах через мок',
+    'без доступа к реестру благодаря офлайн-кэшу',
+    'Нет реестра пользователей, форма не доделана',
+    'Тестовая среда не даёт стабильных результатов',
   ])
     assert.equal(environmentBlockOf(s), undefined, s);
 });
@@ -201,6 +227,29 @@ test('WB04: тот же упавший testcase дважды подряд — к
       .action,
     'retry',
   );
+});
+
+test('WB06: временные каталоги исполнителей — свои, соседний закрыт границей codex', async () => {
+  const a: NodeJS.ProcessEnv = {};
+  const b: NodeJS.ProcessEnv = {};
+  const one = await writerScratch(a);
+  const two = await writerScratch(b);
+  try {
+    assert.equal(one.parent, two.parent);
+    assert.notEqual(one.dir, two.dir);
+    assert.equal(a.TMPDIR, one.dir);
+    assert.equal(a.TMPPREFIX, join(one.dir, 'zsh'));
+    assert.ok(srtSocketsFit(one.dir), 'путь оставляет место сокетам песочницы');
+    const profile = codexPermissions(
+      isolation({ write: [one.dir], controller: [one.parent], readable: [one.dir] }),
+      false,
+    ).join(' ');
+    assert.ok(profile.includes(JSON.stringify(two.dir) + '="none"'), profile);
+    assert.ok(profile.includes(JSON.stringify(one.dir) + '="write"'), profile);
+  } finally {
+    rmSync(one.dir, { recursive: true, force: true });
+    rmSync(two.dir, { recursive: true, force: true });
+  }
 });
 
 test('WB05: запрос исполнителя — «сначала код, потом вопрос»; у ревьюера правила нет', () => {

@@ -9,69 +9,108 @@
 //
 // Признак — итог исполнителя: структурированного поля для такой остановки в
 // ответе нет (правильный путь — вопрос с impact technical, его называет
-// запрос). Поэтому узнаются только явные признаки отказа среды: сообщения ОС
-// и сети в форме вывода ошибки и фразы «песочница/окружение запрещает», «нет
-// доступа к сети». Слово «sandbox», «permission denied», «не удалось
-// запустить/прочитать» без такой фразы — нет: это бывает и в тексте продукта.
+// запрос). Итог часто говорит о продукте теми же словами («экран „нет сети“»,
+// «обработка EACCES», «работа без интернета»), поэтому одного слова мало.
+// Фраза засчитывается, только когда в одной фразе итога (между . ; ! ? и
+// переводом строки) есть все три части:
+// - техническое: код ОС или сети (EPERM, ENOTFOUND…), сеть, реестр, порт,
+//   сервер, браузер, генератор, трекер, домашний каталог;
+// - отказ: «не удалось», «cannot», «blocked», «запрещает», «недоступен»…;
+// - среда: песочница, окружение, изоляция или сам код ОС.
+// Текст в кавычках ('…', "…", «…») не учитывается: так пишут тексты и
+// сообщения продукта. Несколько явных формулировок засчитываются сами
+// («нет доступа к сети», «network is blocked», коды отказа песочницы).
 // Обычная незавершённость («не успел», «тесты ещё не написаны») сюда не
 // попадает и продолжается черновиком, как раньше.
 
-import { mkdtemp, realpath } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SRT_SHORT_BASE, srtSocketsFit } from '../environment/isolation.ts';
 
-const signals: RegExp[] = [
-  // Сообщения ОС и сети в форме вывода ошибки, а не упоминание кода в тексте
-  // («добавил обработку EACCES» сюда не попадает).
-  /\b(?:listen|bind|connect|open|mkdir|write|unlink|rename|spawn|scandir|access) (?:EPERM|EACCES|EROFS)\b/,
-  /\b(?:EPERM|EACCES|EROFS): (?:operation not permitted|permission denied|read-only file system)/i,
-  /\bgetaddrinfo (?:ENOTFOUND|EAI_AGAIN)\b|\bCould not resolve host\b/,
-  /\boperation not permitted\b|\bread-only file system\b|\bbootstrap_check_in\b|\bsandbox_apply\b/i,
-  // Явная фраза: песочница или окружение закрыли шаг.
-  /\bsandbox(?:ing)? (?:blocks|blocked|denies|denied|prevents|prevented|forbids|does not allow|doesn't allow)\b/i,
-  /\b(?:blocked|denied|prevented) by the (?:sandbox|environment)\b/i,
-  /\benvironment (?:blocks|blocked|prevents|prevented|forbids|does not allow|doesn't allow)\b/i,
-  /\b(?:no|without) (?:network|internet|registry) access\b|\bnetwork (?:access )?is (?:disabled|blocked|unavailable)\b/i,
-  /песочниц[а-яё]* (?:запрещает|запретила|не (?:даёт|дает|дала|позволяет|пускает)|блокирует|закрыва[а-яё]*)/i,
-  /(?:окружени[а-яё]*|сред[а-яё]*) (?:запрещает|запретил[а-яё]*|не (?:даёт|дает|дал[а-яё]*|позволя[а-яё]*|пуска[а-яё]*)|блокирует|закрыл[а-яё]*)/i,
-  /(?:нет|без) (?:доступа к )?(?:сети|интернет[а-яё]*|реестр[а-яё]*)|сеть (?:недоступна|закрыта|запрещена|отключена)/i,
-  /недоступн[а-яё]* (?:в|из|внутри) (?:песочниц|окружени|сред)[а-яё]*/i,
-];
+/** Коды и сообщения ОС и сети: и техническое, и среда. */
+const osCode =
+  /\b(?:EPERM|EACCES|EROFS|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH)\b|operation not permitted|permission denied|read-only file system|getaddrinfo|could not resolve host/gi;
+/** Признаки, достаточные сами по себе: их печатает только отказ песочницы или реестра. */
+const decisive =
+  /\bbootstrap_check_in\b|\bsandbox_apply\b|\bERR_PNPM_META_FETCH_FAIL\b|\bno (?:network|internet) access\b|\bnetwork (?:access )?is (?:disabled|blocked|unavailable|off)\b|нет доступа к (?:сети|интернет)|сеть недоступна/i;
+const technical =
+  /\b(?:network|internet|registry|dns|listen|bind|port|localhost|127\.0\.0\.1|browser|chrom(?:e|ium)|server|generator|tracker|home director(?:y|ies))\b|~\/|сет[ьиеюя]|сетев|интернет|реестр|порт|сервер|браузер|генератор|трекер|домашн/i;
+const refusal =
+  /\b(?:cannot|can't|could not|couldn't|unable|fails?|failed|blocked|blocks|denied|denies|not allowed|refused|forbid(?:s|den)?|prevents?|prevented)\b|\berror:|не смог|не удалось|не могу|невозможно|нельзя|отказ|заблокир|запрещ|не да[её]т|не позволя|недоступ|закрыт/i;
+const environment =
+  /\bsandbox(?:ed|ing)?\b|\benvironment\b|\bisolation\b|песочниц|окружени|изоляци|(?:^|[^а-яё])сред[аеуы](?![а-яё])/i;
+/** Текст в кавычках — слова продукта, не отчёт о среде. */
+const quoted = /'[^'\n]*'|"[^"\n]*"|«[^»\n]*»/g;
 
 /**
  * Итог исполнителя называет причиной остановки окружение. Возвращает
- * совпавший фрагмент (для диагностики) или `undefined`.
+ * совпавшую фразу (для диагностики) или `undefined`.
  */
 export function environmentBlockOf(summary: string): string | undefined {
-  const text = summary.slice(0, 4000);
-  for (const re of signals) {
-    const m = re.exec(text);
-    if (m) return m[0];
+  const clauses = summary
+    .slice(0, 4000)
+    .replace(quoted, ' ')
+    .split(/[.;!?](?:\s|$)|\n/);
+  for (const raw of clauses) {
+    const clause = raw.trim();
+    if (!clause) continue;
+    if (decisive.test(clause)) return clause.slice(0, 300);
+    // Код ОС — и техническое, и среда, но не отказ: «permission denied» в
+    // описании обработки ошибки ещё не говорит, что шаг не выполнен.
+    const code = new RegExp(osCode.source, 'i').test(clause);
+    if (
+      (code || technical.test(clause)) &&
+      refusal.test(clause.replace(osCode, ' ')) &&
+      (code || environment.test(clause))
+    )
+      return clause.slice(0, 300);
   }
   return undefined;
 }
+
+/** Общий родитель временных каталогов исполнителей этого процесса. */
+let scratchParent: Promise<string> | undefined;
 
 /**
  * Временный каталог исполнителя: свой на каждый вызов, вне каталога
  * состояния (иначе граница codex перестала бы закрывать каталог артефактов
  * целиком) и короткий — песочница Claude Code кладёт сокеты sandbox-runtime в
- * TMPDIR процесса, а длинный путь не помещается в предел unix-сокета. База —
- * TMPDIR процесса, если путь укладывается, иначе `/tmp`; имя `dc-srt-<pid>-…`
- * убирает и уборка брошенных каталогов srt. Окружение вызова получает
- * `TMPDIR`, `TMP`, `TEMP` и `TMPPREFIX` (zsh кладёт here-document не в TMPDIR,
- * а по TMPPREFIX, по умолчанию `/tmp/zsh`, закрытому исполнителю). TMPDIR,
- * заданный политикой, заменяется. Каталог убирает вызывающий после вызова.
+ * TMPDIR процесса, а длинный путь не помещается в предел unix-сокета.
+ *
+ * Каталоги вызовов лежат в общем родителе процесса (`dc-srt-<pid>-…` в TMPDIR
+ * процесса, если путь укладывается, иначе в `/tmp`; так же его убирает уборка
+ * брошенных каталогов srt). Родитель (`parent`) вызывающий закрывает
+ * исполнителю на чтение, собственный каталог открыт более конкретным
+ * разрешением: соседние исполнители временных файлов друг друга не видят
+ * (у codex — те, что есть при построении профиля, как у каталога состояния).
+ *
+ * Окружение вызова получает `TMPDIR`, `TMP`, `TEMP` и `TMPPREFIX` (zsh кладёт
+ * here-document не в TMPDIR, а по TMPPREFIX, по умолчанию `/tmp/zsh`,
+ * закрытому исполнителю). TMPDIR, заданный политикой, заменяется. Каталог
+ * вызова убирает вызывающий после вызова.
  */
 export async function writerScratch(env: NodeJS.ProcessEnv) {
-  const name = `dc-srt-${process.pid}-`;
-  const base =
-    [tmpdir(), SRT_SHORT_BASE].find((b) => srtSocketsFit(join(b, name + 'XXXXXX'))) ??
-    SRT_SHORT_BASE;
-  const dir = await realpath(await mkdtemp(join(base, name)));
+  scratchParent ??= (async () => {
+    const name = `dc-srt-${process.pid}-`;
+    const base =
+      [tmpdir(), SRT_SHORT_BASE].find((b) => srtSocketsFit(join(b, name + 'XXXXXX/w-XXXXXX'))) ??
+      SRT_SHORT_BASE;
+    return realpath(await mkdtemp(join(base, name)));
+  })();
+  let parent: string;
+  try {
+    parent = await scratchParent;
+    // Родителя могла убрать уборка: создаётся заново тем же путём.
+    await mkdir(parent, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    scratchParent = undefined;
+    throw error;
+  }
+  const dir = await mkdtemp(join(parent, 'w-'));
   env.TMPDIR = dir;
   env.TMP = dir;
   env.TEMP = dir;
   env.TMPPREFIX = join(dir, 'zsh');
-  return dir;
+  return { dir, parent };
 }

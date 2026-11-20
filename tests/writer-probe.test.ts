@@ -128,7 +128,7 @@ test('WP02: codex — команда под `codex sandbox` с профилем 
     'сеть профиля',
   );
   // TMPDIR исполнителя — свой каталог, открытый профилем прав на запись.
-  assert.match(calls[0]!.tmp, /\/dc-srt-\d+-[A-Za-z0-9]{6}$/, calls[0]!.tmp);
+  assert.match(calls[0]!.tmp, /\/dc-srt-\d+-[A-Za-z0-9]{6}\/w-[A-Za-z0-9]{6}$/, calls[0]!.tmp);
   assert.ok(!calls[0]!.tmp.startsWith(f.root), 'вне каталога состояния');
   assert.ok(calls[0]!.a.some((x) => x.includes(JSON.stringify(calls[0]!.tmp) + '="write"')));
   assert.equal(calls[0]!.prefix, join(calls[0]!.tmp, 'zsh'));

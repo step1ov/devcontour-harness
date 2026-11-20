@@ -852,7 +852,18 @@ export class Runner {
     // Временный каталог исполнителя — свой и в его области записи
     // (`writerScratch`): иначе shell и инструменты, пишущие в TMPDIR
     // (here-document zsh, кеши генераторов), получали отказ песочницы.
-    const scratch = review ? undefined : await writerScratch(execution.env);
+    let temp: Awaited<ReturnType<typeof writerScratch>> | undefined;
+    try {
+      temp = review ? undefined : await writerScratch(execution.env);
+    } catch (error) {
+      throw new TaskFailure(
+        'environment',
+        `Временный каталог исполнителя не создан: ${error instanceof Error ? error.message : String(error)}. Задайте TMPDIR, доступный на запись, или освободите /tmp`,
+        undefined,
+        'sandbox-filesystem',
+      );
+    }
+    const scratch = temp?.dir;
     // Вызов под учётом: бюджет проверяется до вызова, расход закрепляется за попыткой.
     const response = await measuredInvoke(
       this.engine,
@@ -874,7 +885,9 @@ export class Runner {
         sandbox: {
           mode: this.policy.isolation.mode,
           writable: review ? [] : [input.cwd, ...(scratch ? [scratch] : [])],
-          denied: boundary.hidden,
+          // Родитель временных каталогов закрыт: соседние исполнители не
+          // видят временных файлов друг друга; свой каталог открыт ниже.
+          denied: [...boundary.hidden, ...(temp ? [temp.parent] : [])],
           ...(boundary.checkouts.length ? { checkouts: boundary.checkouts } : {}),
           readable: [
             input.cwd,
@@ -1337,7 +1350,7 @@ export class Runner {
         // источник закрыты его песочницей): повтор в той же песочнице
         // упрётся в тот же шаг. Это ход ведущего, а не автоматический повтор;
         // попытка не засчитывается (writer-block.ts).
-        if (environmentBlockOf(summary))
+        if (environmentBlockOf(output.summary))
           throw new TaskFailure(
             'needs-lead',
             'Исполнитель остановился: окружение закрыло обязательный шаг. Итог исполнителя: ' +
