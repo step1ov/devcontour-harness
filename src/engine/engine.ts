@@ -4966,19 +4966,46 @@ export class Engine {
         `Поручение ждёт ${question.lifecycle === 'pending' ? 'ответа' : 'применения ответа'} на вопрос исполнителя ${question.id}; повтор без ответа запрещён`,
       );
     const exhausted = w.attempt >= this.policy.maxAttempts || neutralExhausted(w);
-    if (w.status === 'ready' && !exhausted) return { work: w, changed: false };
-    if (!['failed', 'cancelled'].includes(w.status) && !(exhausted && !w.activeRunId))
+    // Сброс назван явно (с причиной): он выполняется и тогда, когда попытки
+    // ещё не исчерпаны, — ведущий возвращает полный лимит до выдачи. Молча
+    // проигнорированного сброса нет: нечего сбросить — это сказано в ответе.
+    const resetAsked = !!reset?.reason.trim();
+    const spent = w.attempt > 0 || (w.neutralFailures ?? 0) > 0;
+    if (w.status === 'ready' && !exhausted && !(resetAsked && spent))
+      return {
+        work: w,
+        changed: false,
+        ...(resetAsked
+          ? {
+              reset: {
+                performed: false as const,
+                note: 'Сбрасывать нечего: попытки этой работы ещё не тратились',
+              },
+            }
+          : {}),
+      };
+    if (resetAsked && w.activeRunId)
+      throw new HarnessError(
+        'NOT_READY',
+        `Идёт попытка ${w.activeRunId}: сброс попыток — после её окончания`,
+      );
+    if (
+      !['failed', 'cancelled'].includes(w.status) &&
+      !(exhausted && !w.activeRunId) &&
+      !(w.status === 'ready' && resetAsked)
+    )
       throw new HarnessError('NOT_READY', 'Повтор доступен после отказа или отмены');
-    if (exhausted && !reset?.reason.trim())
+    if (exhausted && !resetAsked)
       throw new HarnessError(
         'ATTEMPTS_EXHAUSTED',
         'Исчерпан лимит попыток; повторите со сбросом и причиной',
       );
+    const doReset = exhausted || (resetAsked && spent);
     const next: WorkState = {
       ...w,
       status: w.approvedDigest ? 'ready' : 'draft',
-      attempt: exhausted ? 0 : w.attempt,
-      neutralFailures: exhausted ? undefined : w.neutralFailures,
+      attempt: doReset ? 0 : w.attempt,
+      neutralFailures: doReset ? undefined : w.neutralFailures,
       failure: undefined,
       failureKind: undefined,
       failureFingerprint: undefined,
@@ -4990,10 +5017,23 @@ export class Engine {
       workId,
       payload: {
         by,
-        reset: exhausted,
-        ...(exhausted ? { spent: w.attempt, reasonLength: reset!.reason.trim().length } : {}),
+        reset: doReset,
+        ...(doReset ? { spent: w.attempt, reasonLength: reset!.reason.trim().length } : {}),
       },
     });
-    return { work: next, changed: true };
+    return {
+      work: next,
+      changed: true,
+      ...(resetAsked
+        ? {
+            reset: doReset
+              ? { performed: true as const, spent: w.attempt }
+              : {
+                  performed: false as const,
+                  note: 'Сбрасывать нечего: попытки этой работы ещё не тратились',
+                },
+          }
+        : {}),
+    };
   }
 }

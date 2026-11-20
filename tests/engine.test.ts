@@ -474,6 +474,38 @@ test('T10: повторы ограничены maxAttempts; после исче�
   assert.equal(engine.claim('c1')?.attempt, 1, 'сброс начинает счёт заново');
 });
 
+test('F-AQ: retry --reset у готовой работы выполняет сброс или объясняет, почему нет; во время попытки — отказ', () => {
+  const { engine } = engineOf(policyOf((p) => ((p as { maxAttempts: number }).maxAttempts = 3)));
+  ready(engine, graphOf({ a: [] }));
+  // Ни одной попытки: сбрасывать нечего — сказано в ответе, не молча.
+  const none = engine.retry('a', { reason: 'полный лимит' });
+  assert.equal(none.changed, false);
+  assert.deepEqual(none.reset?.performed, false);
+  assert.match(none.reset!.note!, /нечего/);
+  // Две потраченные попытки, работа снова готова (обычный повтор).
+  for (let i = 0; i < 2; i++) {
+    const a = engine.claim('c1')!;
+    engine.fail(a.id, a.token, 'cannot lock ref', { kind: 'stale-base' });
+    engine.retry('a');
+  }
+  assert.equal(
+    engine.read((v) => v.work('a')!.status),
+    'ready',
+  );
+  assert.equal(
+    engine.read((v) => v.work('a')!.attempt),
+    2,
+  );
+  const reset = engine.retry('a', { reason: 'политика поправлена, нужен полный лимит' });
+  assert.equal(reset.changed, true);
+  assert.deepEqual(reset.reset, { performed: true, spent: 2 });
+  assert.equal(reset.work.attempt, 0);
+  assert.equal(engine.claim('c1')?.attempt, 1, 'после сброса — попытка 1');
+  // Идёт попытка: сброс — отказ с причиной.
+  assert.throws(() => engine.retry('a', { reason: 'во время попытки' }), refused('NOT_READY'));
+  // Без --reset поведение прежнее: готовая работа — без изменений и без поля reset.
+});
+
 test('S2-R1-10/T06: без PASS gate кандидата приёмки нет, даже если gate интеграции и оба ревью зелёные', () => {
   const { engine } = engineOf();
   ready(engine, graphOf({ a: [] }));

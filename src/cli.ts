@@ -828,6 +828,7 @@ async function run(
             status: result.work.status,
             attempt: result.work.attempt,
             changed: result.changed,
+            ...('reset' in result && result.reset ? { reset: result.reset } : {}),
           },
         };
       } finally {

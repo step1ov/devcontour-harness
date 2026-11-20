@@ -437,7 +437,7 @@ export const cliCommands = {
   },
   retry: {
     description:
-      'Новая попытка неуспешного (failed) поручения в пределах maxAttempts и бюджета; --reset сбрасывает счётчик попыток с причиной, учёт расходов не сбрасывается',
+      'Новая попытка неуспешного (failed) поручения в пределах maxAttempts и бюджета; --reset сбрасывает счётчик попыток с причиной — и у готовой к выдаче работы (ответ reset: выполнен или почему нет; во время попытки — отказ NOT_READY), учёт расходов не сбрасывается',
     writes: true,
     idempotency: 'Повтор для уже готового к выдаче поручения ничего не меняет',
     args: [
@@ -1689,6 +1689,17 @@ export const workActionDataSchema = z.strictObject({
   status: workStatusSchema,
   attempt: z.number().int().min(0),
   changed: z.boolean(),
+  /**
+   * Итог `retry --reset`: сброс выполнен (сколько попыток было потрачено) или
+   * не выполнен с объяснением; без `--reset` поля нет.
+   */
+  reset: z
+    .strictObject({
+      performed: z.boolean(),
+      spent: z.number().int().min(0).optional(),
+      note: z.string().optional(),
+    })
+    .optional(),
 });
 
 export const approveDataSchema = z.strictObject({
