@@ -399,6 +399,7 @@ export class Engine {
     const digest = workGraphDigest(graph);
     const key = digestOf([graph.source.connector, graph.source.ref, graph.source.revision]);
     return this.tx('graph.registered', (tx) => {
+      this.assertNoUpdate(tx);
       const known = tx.local('run-keys', WORKSPACE_OWNER, key);
       const existing = tx.graph(graph.id);
       if (known && known.digest !== digest)
@@ -632,6 +633,7 @@ export class Engine {
     } = {},
   ) {
     return this.tx('graph.approved', (tx) => {
+      this.assertNoUpdate(tx);
       const { graph, last } = this.approvalCheck(tx, graphId, actor);
       // Снимок с ответом на вопрос исполнителя становится действующим только
       // через applyInput: обходное согласование его не активирует.
@@ -847,6 +849,28 @@ export class Engine {
       });
       return true;
     });
+  }
+
+  /**
+   * Идёт обновление пакетов (`harness update`): роль controller у
+   * `harness-update:<pid>` или пауза его операции (обновление идёт или
+   * прервалось). Регистрация графа, согласование и совместная проверка в это
+   * время отказывают `CONTROLLER_BUSY`: они писали бы состояние посреди
+   * установки, и возврат копии их бы потерял.
+   */
+  private assertNoUpdate(view: ExecutionView) {
+    const lease = view.controller();
+    const control = view.control();
+    if (
+      (lease && lease.leaseUntil > this.now() && lease.owner.startsWith('harness-update:')) ||
+      (control.paused &&
+        control.pauseReason === 'reconfigure' &&
+        control.pauseOperation === UPDATE_PAUSE_OPERATION)
+    )
+      throw new HarnessError(
+        'CONTROLLER_BUSY',
+        'Идёт обновление harness (harness update): дождитесь его окончания; если обновление прервалось — harness update --check или resume',
+      );
   }
 
   /** Захват или продление роли единственного controller. */
@@ -4470,6 +4494,7 @@ export class Engine {
       throw new HarnessError('INVALID_INPUT', 'Нужен непустой набор разных поручений');
     return this.tx('workspace.verification.started', (tx) => {
       this.assertCurrentPolicy(tx);
+      this.assertNoUpdate(tx);
       const reconfigure = this.reconfiguring(tx);
       if (reconfigure)
         throw new HarnessError(

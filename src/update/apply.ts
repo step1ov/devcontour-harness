@@ -123,7 +123,8 @@ export interface ApplyOptions {
   host: UpdateHost;
   by: 'operator' | 'schedule';
   scheduled?: boolean;
-  confirmFormats?: boolean;
+  /** Решение владельца о смене форматов: ровно пара из `--check` (`pairToken`). */
+  confirmFormats?: string;
   /** Ждать окончания прогона до этого срока (мс); 0 — не ждать. */
   waitMs?: number;
   pollMs?: number;
@@ -148,6 +149,8 @@ const newId = (ms: number) =>
     .replace(/\.\d+Z$/, 'Z') +
   '-' +
   randomBytes(3).toString('hex');
+/** Пара одной строкой для решения владельца: `harness@<версия>[+ui@<версия>]`. */
+export const pairToken = (p: UpdatePair) => `harness@${p.harness}${p.ui ? `+ui@${p.ui}` : ''}`;
 const pairText = (p: UpdatePair) => `harness ${p.harness}${p.ui ? ` и панель ${p.ui}` : ''}`;
 const samePair = (a: UpdatePair | undefined, b: UpdatePair | undefined) =>
   !!a && !!b && a.harness === b.harness && a.ui === b.ui;
@@ -228,25 +231,48 @@ const alive = (pid: number) => {
   }
 };
 
+interface LockBody {
+  pid?: number;
+  startedAt?: number;
+  at?: string;
+}
+/** Держатель замка жив: тот же pid и тот же момент старта процесса. */
+const holds = (held: LockBody | undefined) =>
+  held?.pid !== undefined &&
+  alive(held.pid) &&
+  (held.startedAt === undefined || processStartedAt(held.pid) === held.startedAt);
+const sameBody = (a: LockBody | undefined, b: LockBody | undefined) =>
+  !!a && !!b && a.pid === b.pid && a.startedAt === b.startedAt && a.at === b.at;
+
 /**
- * Замок каталога обновлений: одно обновление за раз. Создаётся атомарно
- * (полная запись во временный файл и `link`); держатель — pid и момент
- * старта процесса (pid, занятый после перезагрузки другим процессом, — не
- * держатель). Нечитаемый замок моложе 30 с считается занятым. Замок
- * умершего процесса снимается переименованием — снять его может только один.
+ * Замок `<dir>/<name>`: создаётся атомарно (полная запись во временный файл
+ * и `link`); держатель — pid и момент старта процесса (pid, занятый после
+ * перезагрузки другим процессом, — не держатель). Нечитаемый замок моложе
+ * 30 с считается занятым. Замок умершего процесса снимается
+ * переименованием; переименованный файл сверяется с тем, что признан
+ * умершим, — если за это время замок взял другой процесс, он возвращается
+ * на место (`link`), и ответ — занято.
  */
-export function acquireLock(stateDir: string): { release: () => void; recovered: boolean } {
-  const dir = updatesDir(stateDir);
+export function acquireLockAt(
+  dir: string,
+  name: string,
+  busy: string,
+): { release: () => void; recovered: boolean } {
   mkdirSync(dir, { recursive: true });
-  const lock = join(dir, 'lock');
+  const lock = join(dir, name);
   const me = {
     pid: process.pid,
     startedAt: processStartedAt(process.pid),
-    at: new Date().toISOString(),
+    at: new Date().toISOString() + '-' + randomBytes(3).toString('hex'),
   };
   let recovered = false;
+  const refuse = (held?: LockBody) =>
+    new HarnessError(
+      'CONTROLLER_BUSY',
+      `${busy}${held?.pid ? ` (процесс ${held.pid})` : ''}; дождитесь его окончания`,
+    );
   for (let i = 0; i < 3; i++) {
-    const tmp = join(dir, `.lock.${process.pid}.${randomBytes(3).toString('hex')}`);
+    const tmp = join(dir, `.${name}.${process.pid}.${randomBytes(3).toString('hex')}`);
     writeFileSync(tmp, JSON.stringify(me));
     try {
       linkSync(tmp, lock);
@@ -254,40 +280,91 @@ export function acquireLock(stateDir: string): { release: () => void; recovered:
       return {
         recovered,
         release: () => {
-          const held = readJson<{ pid?: number; at?: string }>(lock);
-          if (held?.pid === me.pid && held.at === me.at) rmSync(lock, { force: true });
+          if (sameBody(readJson<LockBody>(lock), me)) rmSync(lock, { force: true });
         },
       };
     } catch (error) {
       rmSync(tmp, { force: true });
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     }
-    const held = readJson<{ pid?: number; startedAt?: number }>(lock);
+    const held = readJson<LockBody>(lock);
     let young = false;
     try {
       young = Date.now() - statSync(lock).mtimeMs < 30_000;
     } catch {
       continue;
     }
-    const holder =
-      held?.pid !== undefined &&
-      alive(held.pid) &&
-      (held.startedAt === undefined || processStartedAt(held.pid) === held.startedAt);
-    if (holder || (!held && young))
-      throw new HarnessError(
-        'CONTROLLER_BUSY',
-        `Обновление уже идёт${held?.pid ? ` (процесс ${held.pid})` : ''}; дождитесь его окончания`,
-      );
+    if (holds(held) || (!held && young)) throw refuse(held);
+    const stale = join(dir, `.${name}.stale.${randomBytes(3).toString('hex')}`);
     try {
-      renameSync(lock, join(dir, `.lock.stale.${randomBytes(3).toString('hex')}`));
-      recovered = true;
+      renameSync(lock, stale);
     } catch {
-      // замок уже снял другой процесс — пробуем взять снова
+      continue; // замок уже снял другой процесс — пробуем взять снова
     }
-    for (const name of readdirSync(dir))
-      if (name.startsWith('.lock.stale.')) rmSync(join(dir, name), { force: true });
+    const taken = readJson<LockBody>(stale);
+    if (held ? !sameBody(taken, held) : taken !== undefined) {
+      // Переименовали не умерший замок, а только что взятый другим: вернуть.
+      try {
+        linkSync(stale, lock);
+      } catch {
+        // на месте уже третий замок — оставить его
+      }
+      rmSync(stale, { force: true });
+      throw refuse(taken);
+    }
+    rmSync(stale, { force: true });
+    recovered = true;
   }
-  throw new HarnessError('CONTROLLER_BUSY', 'Замок обновления не взят');
+  throw refuse();
+}
+
+/** Замки каталога состояния и каталога установки (второй — если он есть). */
+function lockBoth(stateDir: string, prefix: string | undefined) {
+  const state = acquireLock(stateDir);
+  let pre: { release: () => void } | undefined;
+  try {
+    if (prefix && existsSync(join(prefix, 'node_modules'))) pre = acquirePrefixLock(prefix);
+  } catch (error) {
+    state.release();
+    throw error;
+  }
+  return {
+    recovered: state.recovered,
+    release: () => {
+      pre?.release();
+      state.release();
+    },
+  };
+}
+
+/** Замок каталога обновлений этого каталога состояния. */
+export const acquireLock = (stateDir: string) =>
+  acquireLockAt(updatesDir(stateDir), 'lock', 'Обновление уже идёт');
+
+/**
+ * Замок каталога установки (`<prefix>/node_modules/.harness-update.lock`):
+ * два каталога состояния с общим каталогом установки не ставят пакеты
+ * одновременно.
+ */
+export const acquirePrefixLock = (prefix: string) =>
+  acquireLockAt(
+    join(prefix, 'node_modules'),
+    '.harness-update.lock',
+    'Пакеты этого каталога установки уже обновляет другой harness update',
+  );
+
+/**
+ * Идёт или прервано обновление этого каталога состояния: живой держатель
+ * замка или запись «идёт». Команды, которые пишут состояние или запускают
+ * проверки без роли controller (`gates`, `smoke`, `review-code`, ревью плана),
+ * в это время отказывают.
+ */
+export function updateInProgress(stateDir: string): string | undefined {
+  const held = readJson<LockBody>(file(stateDir, 'lock'));
+  if (holds(held)) return `идёт harness update (процесс ${held!.pid})`;
+  if (readInProgress(stateDir))
+    return 'прерванное обновление ждёт возврата: harness update --check';
+  return undefined;
 }
 
 /**
@@ -711,7 +788,7 @@ export async function recoverInterrupted(
   stateDir: string,
   o: { config: UpdatesConfig; npm: NpmOptions; host: UpdateHost; now?: () => number },
 ): Promise<string | undefined> {
-  const lock = acquireLock(stateDir);
+  const lock = lockBoth(stateDir, readInProgress(stateDir)?.prefix);
   try {
     const progress = readInProgress(stateDir);
     if (!progress) {
@@ -749,7 +826,7 @@ async function settlePast(
 
 export async function applyUpdate(o: ApplyOptions): Promise<Result> {
   const now = o.now ?? Date.now;
-  const lock = acquireLock(o.stateDir);
+  const lock = lockBoth(o.stateDir, readInProgress(o.stateDir)?.prefix ?? o.prefix);
   try {
     // Под замком, без записи «идёт», пауза операции обновления — ничья: снять.
     if (!readInProgress(o.stateDir)) o.host.resume();
@@ -782,7 +859,7 @@ export async function applyUpdate(o: ApplyOptions): Promise<Result> {
     if (
       target &&
       check.state === 'needs-decision' &&
-      (o.scheduled || !o.confirmFormats) &&
+      (o.scheduled || o.confirmFormats !== pairToken(target)) &&
       !pending
     )
       return {
@@ -790,7 +867,7 @@ export async function applyUpdate(o: ApplyOptions): Promise<Result> {
           ...base,
           to: target,
           outcome: 'needs-decision',
-          line: `Нужно ваше решение: ${pairText(target)} меняет форматы (${(check.formatChanges ?? []).join(', ')}); автоматически не ставится. Последствия: прежняя версия не прочтёт новое состояние без отката копией. Поставить: ${check.command ?? 'harness update --apply --confirm-formats'}`,
+          line: `${o.confirmFormats && o.confirmFormats !== pairToken(target) ? `Решение было о ${o.confirmFormats}, а реестр сейчас предлагает ${pairToken(target)}: ничего не поставлено. ` : ''}Нужно ваше решение: ${pairText(target)} меняет форматы (${(check.formatChanges ?? []).join(', ')}); автоматически не ставится. Последствия: прежняя версия не прочтёт новое состояние без отката копией. Поставить: ${check.command ?? 'harness update --apply --confirm-formats'}`,
         },
         code: 3,
       };
@@ -1091,7 +1168,10 @@ export interface RollbackOptions {
  */
 export async function rollbackUpdate(o: RollbackOptions): Promise<Result> {
   const now = o.now ?? Date.now;
-  const lock = acquireLock(o.stateDir);
+  const lock = lockBoth(
+    o.stateDir,
+    readInProgress(o.stateDir)?.prefix ?? readHistory(o.stateDir).at(-1)?.prefix,
+  );
   try {
     if (!readInProgress(o.stateDir)) o.host.resume();
     const history = readHistory(o.stateDir);

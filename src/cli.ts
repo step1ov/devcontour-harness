@@ -70,6 +70,7 @@ import {
   applyUpdate,
   recoverInterrupted,
   rollbackUpdate,
+  updateInProgress,
   type UpdateHost,
 } from './update/apply.ts';
 import {
@@ -371,7 +372,7 @@ const options = {
   prefix: { type: 'string' },
   wait: { type: 'string' },
   scheduled: { type: 'boolean' },
-  'confirm-formats': { type: 'boolean' },
+  'confirm-formats': { type: 'string' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -644,21 +645,29 @@ async function watchStatus(
  * закрывает базу заново: возврат копии состояния подменяет файл базы, и
  * долгоживущее соединение писало бы в перенесённый файл.
  */
-function updateHost(state: string): UpdateHost {
-  const usable = () => existsSync(bindingFile(state)) && existsSync(join(state, 'state.sqlite'));
+function updateHost(state: string, policyPath?: string): UpdateHost {
+  // Привязка каталога состояния, иначе политика из --policy: база без привязки
+  // тоже охраняется (живость, пауза, роль controller).
+  const bound = (): Binding | undefined =>
+    existsSync(bindingFile(state))
+      ? binding(state)
+      : policyPath
+        ? loadPolicy(policyPath)
+        : undefined;
+  const usable = () => existsSync(join(state, 'state.sqlite')) && bound() !== undefined;
   const owner = `harness-update:${process.pid}`;
   const withHarness = <T>(fn: (h: Harness) => T, fallback: T): T => {
     if (!usable()) return fallback;
-    const h = open(state, binding(state), true);
+    const h = open(state, bound()!, true);
     try {
       return fn(h);
     } finally {
       h.close();
     }
   };
-  const leaseMs = () => (existsSync(bindingFile(state)) ? binding(state).policy.leaseMs : 30_000);
+  const leaseMs = () => bound()?.policy.leaseMs ?? 30_000;
   return {
-    live: () => (usable() ? liveWork(state, binding(state).policy, Date.now(), owner) : []),
+    live: () => (usable() ? liveWork(state, bound()!.policy, Date.now(), owner) : []),
     pause: () => withHarness((h) => h.engine.operationPause(UPDATE_OPERATION), false),
     resume: () => withHarness((h) => h.engine.operationResume(UPDATE_OPERATION), false),
     // Без базы состояния писать некому: роль «взята».
@@ -754,7 +763,19 @@ async function runUpdate(
     ...optional('policy', typeof v.policy === 'string' ? v.policy : undefined),
     ...optional('prefix', typeof v.prefix === 'string' ? v.prefix : undefined),
   });
-  const host = updateHost(state);
+  const policyArg = typeof v.policy === 'string' ? v.policy : undefined;
+  const host = updateHost(state, policyArg);
+  // База состояния без привязки и без --policy: прогон в ней не увидеть — не ставить.
+  if (
+    (action === 'apply' || action === 'rollback') &&
+    existsSync(join(state, 'state.sqlite')) &&
+    !existsSync(bindingFile(state)) &&
+    !policyArg
+  )
+    throw new HarnessError(
+      'POLICY_REQUIRED',
+      'У каталога состояния есть база, но нет привязки (binding.json): передайте --policy .harness/policy.json, чтобы обновление видело прогоны',
+    );
   if (action === 'mode') {
     const mode = String(v.mode);
     if (!(updateModes as readonly string[]).includes(mode))
@@ -863,7 +884,10 @@ async function runUpdate(
       host,
       by: v.scheduled ? 'schedule' : 'operator',
       scheduled: Boolean(v.scheduled),
-      confirmFormats: Boolean(v['confirm-formats']),
+      ...optional(
+        'confirmFormats',
+        typeof v['confirm-formats'] === 'string' ? v['confirm-formats'] : undefined,
+      ),
       // Из расписания — без ожидания: пауза оборвала бы идущий run, а
       // перезапустить его некому; идёт работа — попытка завтра.
       ...optional('waitMs', waitMs),
@@ -901,6 +925,27 @@ async function run(
   for (const [flag, owners] of Object.entries(flagOwners))
     if (v[flag as keyof typeof v] !== undefined && !(owners as readonly string[]).includes(command))
       throw new HarnessError('INVALID_INPUT', `--${flag} поддерживают: ${owners.join(', ')}`);
+  // Команды, которые пишут состояние или запускают проверки без роли controller,
+  // во время обновления пакетов (или до возврата прерванного) отказывают.
+  if (
+    typeof v.state === 'string' &&
+    [
+      'gates',
+      'smoke',
+      'review-code',
+      'review-plan',
+      'review-contract',
+      'approve',
+      'reapprove',
+    ].includes(command)
+  ) {
+    const updating = updateInProgress(resolve(v.state));
+    if (updating)
+      throw new HarnessError(
+        'CONTROLLER_BUSY',
+        `Сейчас ${updating}: дождитесь окончания обновления`,
+      );
+  }
   if (isSharedOperation(command)) {
     // Транспортная граница общей операции: значения аргументов в UTF-8 байтах.
     const limit = sharedOperations[command].limits.maxInputBytes;

@@ -249,7 +249,8 @@ export async function checkUpdates(ctx: CheckContext): Promise<UpdateCheck> {
       whatsNew.push(...whatsNewOf(files, 'панель', current.ui, chosen.ui!, 4));
     }
     const decision = changes.length > 0;
-    const command = `harness update --apply ${stateArg}${decision ? ' --confirm-formats' : ''}`;
+    // Решение владельца привязано к паре, которую он видел: другая пара — отказ.
+    const command = `harness update --apply ${stateArg}${decision ? ` --confirm-formats harness@${chosen.harness}${chosen.ui ? `+ui@${chosen.ui}` : ''}` : ''}`;
     const line = decision
       ? `Доступна ${pairText(chosen)} со сменой форматов (${changes.join(', ')}): автоматически не ставится — нужно ваше решение. Поставить: ${command}`
       : `Доступна ${pairText(chosen)} (сейчас ${pairText(current)}). Что нового — harness update --check; обновить — ${command}`;

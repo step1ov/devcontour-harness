@@ -1348,10 +1348,10 @@ export const cliCommands = {
       },
       {
         name: '--confirm-formats',
-        value: 'flag',
+        value: 'text',
         required: false,
         description:
-          'apply: решение владельца поставить версию со сменой форматов договоров (никогда из расписания)',
+          'apply: решение владельца поставить пару со сменой форматов — ровно harness@<версия>[+ui@<версия>] из --check; другая пара — отказ; из расписания не принимается',
       },
       {
         name: '--human',

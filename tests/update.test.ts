@@ -345,3 +345,65 @@ test('UU13: отпечаток не меняется от продления р�
     store.close();
   }
 });
+
+test('UU14: идёт обновление — регистрация графа, согласование и совместная проверка отказывают CONTROLLER_BUSY; после — идут', async () => {
+  const { HarnessError } = await import('../src/contracts/index.ts');
+  const { engineOf, graphOf, policyOf, ready } = await import('./engine-fixture.ts');
+  const policy = policyOf((p: { workspaceGates?: unknown[] }) => {
+    p.workspaceGates = [
+      {
+        id: 'combo',
+        kind: 'test',
+        repositoryId: 'app',
+        command: ['node', 'combo.js'],
+        report: { type: 'junit', path: 'reports/combo.xml' },
+      },
+    ];
+  });
+  const { engine } = engineOf(policy);
+  ready(engine, graphOf({ a: [] }));
+  engine.host.store.transact('task.done', (tx) => {
+    tx.putWork({ ...tx.work('a')!, status: 'done', resultSha: 'a'.repeat(40) });
+  });
+  const busy = (e: unknown) =>
+    e instanceof HarnessError &&
+    e.code === 'CONTROLLER_BUSY' &&
+    /обновление harness/.test(e.message);
+  engine.release('c1'); // ready() взял роль controller для c1
+  assert.equal(engine.holdController('harness-update:1'), true);
+  assert.throws(() => engine.jointStart({ workIds: ['a'] }), busy);
+  assert.throws(
+    () => engine.register(graphOf({ b: [] }), { trusted: () => false, reachable: () => true }),
+    busy,
+  );
+  assert.throws(() => engine.approve('g', 'agent'), busy);
+  engine.release('harness-update:1');
+  // Пауза прерванного обновления держит те же операции, пока её не снимут.
+  engine.resume();
+  engine.operationPause('harness-update');
+  assert.throws(() => engine.jointStart({ workIds: ['a'] }), busy);
+  engine.operationResume('harness-update');
+  const v = engine.jointStart({ workIds: ['a'] });
+  assert.ok(v.id);
+});
+
+test('UU15: замок — снятие умершего не уводит замок, только что взятый другим; общий каталог установки держит второй update', async () => {
+  const { acquireLockAt, acquirePrefixLock } = await import('../src/update/apply.ts');
+  const dir = tmp();
+  // Умерший держатель (несуществующий pid) — замок снимается и берётся.
+  writeFileSync(join(dir, 'lock'), JSON.stringify({ pid: 999999, at: 'old' }));
+  const a = acquireLockAt(dir, 'lock', 'занято');
+  assert.equal(a.recovered, true);
+  assert.throws(() => acquireLockAt(dir, 'lock', 'занято'), /занято \(процесс \d+\)/);
+  a.release();
+  assert.equal(existsSync(join(dir, 'lock')), false);
+  // Нечитаемый молодой замок — занят.
+  writeFileSync(join(dir, 'lock'), '');
+  assert.throws(() => acquireLockAt(dir, 'lock', 'занято'), /занято/);
+  const prefix = tmp();
+  mkdirSync(join(prefix, 'node_modules'));
+  const first = acquirePrefixLock(prefix);
+  assert.throws(() => acquirePrefixLock(prefix), /другой harness update/);
+  first.release();
+  acquirePrefixLock(prefix).release();
+});

@@ -12,6 +12,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
+  rmSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -375,7 +376,7 @@ test('UP06: смена форматов — решение владельца: a
     const check = p.harness('update', '--check', '--state', p.state);
     assert.equal(check.json.data.check.state, 'needs-decision');
     assert.deepEqual(check.json.data.check.formatChanges, ['stateVersion: 1 → 2']);
-    assert.match(check.json.data.check.command, /--confirm-formats$/);
+    assert.match(check.json.data.check.command, / --confirm-formats harness@0\.1\.0-alpha\.61$/);
     for (const args of [[], ['--scheduled']]) {
       const r = p.harness('update', '--apply', '--state', p.state, ...args);
       assert.equal(r.status, 3, r.stderr);
@@ -388,12 +389,35 @@ test('UP06: смена форматов — решение владельца: a
       '--apply',
       '--scheduled',
       '--confirm-formats',
+      'harness@0.1.0-alpha.61',
       '--state',
       p.state,
     );
     assert.equal(refused.status, 2);
 
-    const applied = p.harness('update', '--apply', '--confirm-formats', '--state', p.state);
+    // Решение о другой паре (или флаг без пары, что видел владелец) — не ставит.
+    const other = p.harness(
+      'update',
+      '--apply',
+      '--confirm-formats',
+      'harness@0.1.0-alpha.62',
+      '--state',
+      p.state,
+    );
+    assert.equal(other.status, 3, other.stderr);
+    assert.match(
+      other.json.data.line,
+      /^Решение было о harness@0\.1\.0-alpha\.62, а реестр сейчас предлагает harness@0\.1\.0-alpha\.61/,
+    );
+    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    const applied = p.harness(
+      'update',
+      '--apply',
+      '--confirm-formats',
+      'harness@0.1.0-alpha.61',
+      '--state',
+      p.state,
+    );
     assert.equal(applied.status, 0, applied.stderr + applied.stdout);
     assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.61');
     // Работа после обновления (событие) — затем откат: формат различался, состояние — из копии.
@@ -809,6 +833,59 @@ test('UP18: откат в проекте меняет только записи 
     assert.equal(deps['devcontour-harness'], '0.1.0-alpha.60');
     assert.equal(deps['local-dep'], 'file:local-dep');
     assert.ok(existsSync(join(p.dir, 'node_modules', 'local-dep', 'package.json')));
+  } finally {
+    await registry.close();
+  }
+});
+
+test('UP19: во время обновления (или до возврата прерванного) gates, smoke, review-code и согласование отказывают CONTROLLER_BUSY', async () => {
+  const registry = await registryWith(...base());
+  try {
+    const p = project(registry);
+    mkdirSync(p.state + '-updates', { recursive: true });
+    writeFileSync(
+      p.state + '-updates/lock',
+      JSON.stringify({ pid: process.pid, startedAt: processStartedAt(process.pid), at: 'x' }),
+    );
+    for (const args of [
+      ['gates', '--state', p.state, '--sha', 'HEAD'],
+      ['smoke', '--state', p.state, '--sha', 'HEAD'],
+      ['review-code', '--state', p.state, '--base', 'HEAD', '--head', 'HEAD'],
+      ['approve', '--state', p.state, '--subject', 'g', '--digest', 'sha256:' + '0'.repeat(64)],
+    ]) {
+      const r = p.harness(...args);
+      assert.equal(r.status, 3, args[0] + ' ' + r.stderr);
+      assert.equal(r.json.error.code, 'CONTROLLER_BUSY', args[0]);
+      assert.match(r.json.error.message, /идёт harness update/, args[0]);
+    }
+    rmSync(p.state + '-updates/lock');
+    writeFileSync(p.state + '-updates/in-progress.json', JSON.stringify({ id: 'x' }));
+    const r = p.harness('gates', '--state', p.state, '--sha', 'HEAD');
+    assert.equal(r.json.error.code, 'CONTROLLER_BUSY');
+    assert.match(r.json.error.message, /прерванное обновление ждёт возврата/);
+  } finally {
+    await registry.close();
+  }
+});
+
+test('UP20: база состояния без binding.json — apply и rollback требуют --policy; с --policy — охраняется как обычно', async () => {
+  const registry = await registryWith(...base());
+  try {
+    const p = project(registry);
+    registry.publish(fakeHarness('0.1.0-alpha.61'));
+    rmSync(join(p.state, 'binding.json'));
+    const e = p.engine();
+    assert.equal(e.engine.lead('c1'), true);
+    e.close();
+    const args = ['update', '--apply', '--state', p.state, '--prefix', p.dir];
+    const refused = p.harness(...args);
+    assert.equal(refused.status, 2, refused.stderr);
+    assert.equal(refused.json.error.code, 'POLICY_REQUIRED');
+    const busy = p.harness(...args, '--policy', join(p.dir, '.harness', 'policy.json'));
+    assert.equal(busy.status, 3, busy.stderr);
+    assert.equal(busy.json.data.outcome, 'busy');
+    assert.match(busy.json.data.line, /идёт harness run \(c1\)/);
+    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
   } finally {
     await registry.close();
   }
