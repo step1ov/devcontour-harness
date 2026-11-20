@@ -453,6 +453,49 @@ test('DEPENDENCY_STORE_REGISTRY: .npmrc проекта задаёт реестр
     1,
   );
 
+  // Один ключ под разным регистром с разными значениями — менеджер может взять
+  // любое: совет есть.
+  assert.equal(
+    warn((p) => {
+      p.environment = {
+        values: {
+          NPM_CONFIG_REGISTRY: 'https://npm.corp.test/api/npm/private/',
+          npm_config_registry: 'https://npm.corp.test/other/',
+          pnpm_config_registry: 'https://npm.corp.test/api/npm/private/',
+        },
+        inherit: [],
+        secrets: {},
+      };
+    }).length,
+    1,
+  );
+  // Реестр области, совпавший с реестром по умолчанию только одного префикса, —
+  // pnpm другой версии его не увидит.
+  npmrc('@acme:registry=https://corp.test/repo/\n');
+  assert.equal(
+    warn((p) => {
+      p.environment = {
+        values: { npm_config_registry: 'https://corp.test/repo/' },
+        inherit: [],
+        secrets: {},
+      };
+    }).length,
+    1,
+  );
+  assert.deepEqual(
+    warn((p) => {
+      p.environment = {
+        values: {
+          npm_config_registry: 'https://corp.test/repo/',
+          pnpm_config_registry: 'https://corp.test/repo/',
+        },
+        inherit: [],
+        secrets: {},
+      };
+    }),
+    [],
+  );
+
   // Реестр области — свой совет: окружение политики его не задаёт.
   npmrc('@acme:registry=https://acme.test/\n');
   const [scoped] = warn();

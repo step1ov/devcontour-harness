@@ -4,7 +4,6 @@ import type { ExecutionPolicy } from '../contracts/index.ts';
 import {
   DEFAULT_REGISTRY_HOST,
   registryUrl,
-  seedRegistries,
   seedRegistryHosts,
 } from '../verification/store-registry.ts';
 import {
@@ -213,24 +212,34 @@ export function storeAdvice(policy: ExecutionPolicy, baseDir: string): StoreAdvi
         for (const [key, from] of Object.entries(profile.secrets)) env[key] = process.env[from];
       }
       const hosts = seedRegistryHosts(env);
-      const seeds = seedRegistries(env);
       // Домен в isolation.domains не помогает: сборка не знает, что пакеты идут туда.
       // Сравнивается адрес реестра целиком (хост, порт, путь): два репозитория
       // одного сервера — разные реестры.
       // Реестр по умолчанию pnpm 10 берёт из npm_config_registry, pnpm 11 — из
       // pnpm_config_registry: совпадение засчитывается, только когда оба
       // префикса называют этот реестр (или это registry.npmjs.org без них).
-      const defaultOf = (prefix: string) => {
-        const entry = Object.entries(env).find(
-          ([k, v]) => k.toLowerCase() === `${prefix}_config_registry` && v,
+      // Значение ключа окружения без учёта регистра; разные значения под
+      // разным регистром — неизвестно, какое возьмёт менеджер: «не видит».
+      const valueOf = (key: string): string | null | undefined => {
+        const urls = new Set(
+          Object.entries(env)
+            .filter(([k, v]) => k.toLowerCase() === key && v)
+            .map(([, v]) => registryUrl(v!) ?? ''),
         );
-        return entry ? registryUrl(entry[1]!) : `https://${DEFAULT_REGISTRY_HOST}/`;
+        return urls.size > 1 ? null : [...urls][0];
       };
-      const foreign = projectRegistries(dir).filter((r) =>
-        r.key === 'registry'
-          ? defaultOf('npm') !== r.url || defaultOf('pnpm') !== r.url
-          : !seeds.some((x) => x.url === r.url),
-      );
+      // Адрес, с которого менеджер с этим префиксом возьмёт пакеты ключа
+      // (`registry` или `@scope:registry`): свой ключ, иначе реестр по умолчанию.
+      const effective = (prefix: string, key: string) => {
+        const own = key === 'registry' ? undefined : valueOf(`${prefix}_config_${key}`);
+        if (own !== undefined) return own;
+        const base = valueOf(`${prefix}_config_registry`);
+        return base === undefined ? `https://${DEFAULT_REGISTRY_HOST}/` : base;
+      };
+      const foreign = projectRegistries(dir).filter((r) => {
+        const key = r.key.toLowerCase();
+        return effective('npm', key) !== r.url || effective('pnpm', key) !== r.url;
+      });
       if (!foreign.length) return;
       const scoped = foreign.some((r) => r.key !== 'registry');
       advice.push({

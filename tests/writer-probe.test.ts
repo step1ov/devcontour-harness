@@ -169,6 +169,24 @@ test('WP01a: предупреждение pnpm о ~/.npmrc — шум; прич�
     [thrown.reason, thrown.evidence],
     ['failed', 'DeprecationWarning: this API must be removed'],
   );
+  // Тот же выброс с префиксом задачи turbo и обёрткой после него.
+  const thrownTurbo = v(
+    [
+      '@app/web:build: node:internal/process/warning:63',
+      '@app/web:build:       throw warning;',
+      '@app/web:build: DeprecationWarning: this API must be removed',
+      '@app/web:build: ERROR: command finished with error: command (/w/apps/web) pnpm run build exited (1)',
+    ].join('\n'),
+  );
+  assert.equal(
+    thrownTurbo.evidence,
+    '@app/web:build: DeprecationWarning: this API must be removed',
+  );
+  // `XWarning:` без выброса (console.warn) после настоящей ошибки — не причина.
+  const notThrown = v(
+    'Error: actual compilation failure\nDeprecationWarning: the X option is deprecated',
+  );
+  assert.equal(notThrown.evidence, 'Error: actual compilation failure');
   // Из нескольких причин одного класса — последняя.
   assert.match(
     v(

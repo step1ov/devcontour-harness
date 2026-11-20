@@ -145,7 +145,10 @@ function significant(text: string) {
 const lastOf = (lines: string[], re: RegExp) => lines.findLast((l) => re.test(l));
 /** Строка похожа на итоговую ошибку команды. */
 const fatal =
-  /\b(?:error|ERR!|ERR_[A-Z_]+|failed|fatal|panicked|Cannot find|not found)\b|Error:|^\w+Warning:|Не удалось/i;
+  /\b(?:error|ERR!|ERR_[A-Z_]+|failed|fatal|panicked|Cannot find|not found)\b|Error:|Не удалось/i;
+/** Предупреждение, выброшенное как ошибка (`--throw-deprecation`): `XWarning: …` после кадра `throw warning`. */
+const thrownWarning = /^\w+Warning:/;
+const thrownContext = /node:internal\/process\/warning|^\s*throw warning;/;
 /** Итог менеджера или оркестратора задач: повторяет код выхода, не причину. */
 const wrapper =
   /^(?:ELIFECYCLE\b|ERROR\s+run failed\b|npm (?:error|ERR!) (?:code|path|command|Lifecycle|A complete log|errno)\b|Command failed with exit code\b|Failed:\s|\S+#\S+: command .*exited|ERROR: command finished with error\b)/;
@@ -224,7 +227,12 @@ export function classifyProbe(result: {
   // Без признаков песочницы: последняя строка ошибки — подсказка, где искать;
   // итог обёртки (pnpm, npm, turbo) — только когда другой строки нет.
   const own = lines.filter((l) => !wrapper.test(l.replace(taskPrefix, '')));
-  const cause = lastOf(own, fatal) ?? lastOf(lines, fatal);
+  // `XWarning:` без кадра выброса — обычный вывод (console.warn), не причина.
+  const thrown = lines.some((l) => thrownContext.test(l.replace(taskPrefix, '')));
+  const isCause = (l: string) =>
+    fatal.test(l) || (thrown && thrownWarning.test(l.replace(taskPrefix, '')));
+  const pick = (list: string[]) => list.findLast(isCause);
+  const cause = pick(own) ?? pick(lines);
   return { status: 'failed', reason: 'failed', ...(cause ? { evidence: cause } : {}) };
 }
 

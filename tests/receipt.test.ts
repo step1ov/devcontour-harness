@@ -606,6 +606,35 @@ test('Правило ревью кода роли строже общего: п�
         source: 'repositories.0.review',
       },
     ]);
+    // Два репозитория со своей ролью-переопределением writer под общим строгим
+    // правилом: находка у каждого.
+    const other = runtime === 'claude' ? 'codex' : 'claude';
+    const base = done.context.policy;
+    const twoRepos = {
+      ...base,
+      review: {
+        ...base.review,
+        code: { reviewer: { runtime }, vendor: 'different-vendor' as const },
+      },
+      roles: {
+        ...base.roles,
+        developer: { ...base.roles.developer!, writer: { runtime: other } },
+      },
+      repositories: [
+        base.repositories[0]!,
+        { ...base.repositories[0]!, id: 'lib', path: 'lib' },
+      ].map((r) => ({
+        ...r,
+        roles: { developer: { ...base.roles.developer!, writer: { runtime } } },
+      })),
+    };
+    assert.deepEqual(
+      reviewVendorConflicts(twoRepos as typeof base).map((c) => [c.repositoryId, c.source]),
+      [
+        [repoId, 'review.code'],
+        ['lib', 'review.code'],
+      ],
+    );
     same.store.close();
   }
 });

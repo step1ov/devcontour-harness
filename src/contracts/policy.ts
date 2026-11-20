@@ -795,14 +795,13 @@ export function reviewVendorConflicts(policy: PolicyBindings): ReviewVendorConfl
         ? `repositories.${index}.review`
         : 'review.code';
     // То же правило той же роли с тем же writer — одна находка.
-    const key = `${role}|${source}|${writer}`;
+    const scopedToRepo = own || source.startsWith('repositories.');
+    const key = `${role}|${source}|${writer}|${scopedToRepo ? repositoryId : ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({
       role,
-      ...(repositoryId !== undefined && (own || source.startsWith('repositories.'))
-        ? { repositoryId }
-        : {}),
+      ...(repositoryId !== undefined && scopedToRepo ? { repositoryId } : {}),
       writer,
       reviewer: codeReview(policy, role, repositoryId).reviewer.runtime,
       source,
