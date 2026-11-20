@@ -296,11 +296,11 @@ test('H15: идущая попытка — этап по открытому за
   assert.deepEqual(stage.needs?.actor, 'controller');
   assert.equal(
     stage.line,
-    'w: исполнитель пишет код (implementation) — 4 мин 12 с; дальше: проверки, ревью, интеграция; от вас: ничего; потрачено: ≥$0.25, вызовов 2 (без цены 1), время моделей 2 мин',
+    'w: исполнитель пишет код (implementation) — 4 мин 12 с; дальше: проверки, ревью, интеграция; от вас: ничего; потрачено: ≥$0.25, вызовов 2 (без стоимости 1), время моделей 2 мин',
   );
   assert.equal(
     stage.lineEn,
-    'w: writer coding (implementation) — 4m 12s; next: gates, review, integration; from you: nothing; spent: ≥$0.25, 2 calls (1 unpriced), model time 2m',
+    'w: writer coding (implementation) — 4m 12s; next: gates, review, integration; from you: nothing; spent: ≥$0.25, 2 calls (1 without cost), model time 2m',
   );
   assert.ok(statusText(data).includes(`  сейчас: ${stage.line.slice(3)}\n`));
   // Следующая стадия — проверки: этап и время сменились.

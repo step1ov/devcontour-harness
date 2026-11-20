@@ -155,6 +155,12 @@ export type StopInput =
         /** Согласование графа устарело для этой политики (режим operator). */
         approvalStale?: string;
         /**
+         * Ревью плана графа идёт в живом процессе `harness run` (запись вызова
+         * `plan-review` открыта, её процесс жив): согласование — ход harness,
+         * а не ведущего. `since` — начало вызова.
+         */
+        planReview?: { since: string };
+        /**
          * У отменённой работы: незавершённые работы, которые прямо от неё
          * зависят. Пусто — перепланировать нечего (действия нет); не задано —
          * неизвестно, прежнее replan-dependents.
@@ -426,6 +432,17 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       actor: null,
       action: 'none',
       note: 'Поручение принято.',
+    };
+  // Ревью плана уже идёт в живом run: согласование ведёт harness, всё
+  // остальное (сброс, ответ) — после его итога.
+  if (work.planReview && !activePhase[work.status])
+    return {
+      code: work.approvalStale ? 'APPROVAL_STALE' : 'APPROVAL_REQUIRED',
+      cause: 'approval-required',
+      phase: 'claim',
+      actor: 'controller',
+      action: 'review-plan',
+      note: `Идёт ревью плана (harness run, с ${work.planReview.since}): согласование — по его итогу, ведущему ничего делать не нужно.`,
     };
   if (work.approvalStale)
     return {
@@ -708,9 +725,12 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       code: 'NOT_READY',
       cause: 'not-ready',
       phase: 'claim',
-      actor: 'lead',
-      action: 'diagnose-failure',
-      note: `Ждёт ${work.waitingOn.join(', ')}: на них движок остановится; следующий шаг — по их диагнозу.`,
+      // Ожидание зависимости — не ход по этой работе: по ней не действует
+      // никто (движок её не сдвинет, ведущему разбирать нечего); что делать,
+      // говорит диагноз самой зависимости (её разбор, сброс, решение человека).
+      actor: null,
+      action: 'wait',
+      note: `Ждёт ${work.waitingOn.join(', ')}: сама эта работа ничего не требует; на зависимости движок остановится, следующий шаг — по её диагнозу.`,
     };
   if (work.status === 'cancelled') return cancelledOutcome(work.openDependents, 'claim');
   if (work.status === 'draft')
