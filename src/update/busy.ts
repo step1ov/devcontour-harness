@@ -58,3 +58,14 @@ export function updateInProgress(stateDir: string, prefix?: string): string | un
     return 'прерванное обновление ждёт возврата: harness update --check';
   return undefined;
 }
+
+/**
+ * Замок обновления остался от процесса, которого больше нет (или pid достался
+ * другому процессу), и незавершённого возврата нет: обновление умерло до
+ * изменений (например, во время `--wait`). Его пауза устарела.
+ */
+export function deadUpdateLock(stateDir: string): { pid: number } | undefined {
+  const held = readJsonFile<LockBody>(join(updatesDir(stateDir), 'lock'));
+  if (held?.pid === undefined || holds(held) || restorePending(stateDir)) return undefined;
+  return { pid: held.pid };
+}

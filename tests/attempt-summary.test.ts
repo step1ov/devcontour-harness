@@ -316,7 +316,10 @@ test('status и explain: строка сводки на поручение со�
         baseDir: string;
       }
     ).baseDir;
-    writeFileSync(join(baseDir, 'updates.json'), JSON.stringify({ mode: 'sometimes' }));
+    writeFileSync(
+      join(baseDir, 'updates.json'),
+      JSON.stringify({ mode: 'sometimes', future: true }),
+    );
     const bad = harness(['status', '--state', ctx.state, '--human']);
     assert.equal(bad.status, 0, bad.stderr);
     assert.ok(!bad.stdout.includes('Обновления:'), bad.stdout);

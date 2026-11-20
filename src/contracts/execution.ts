@@ -845,14 +845,6 @@ export const controlStateSchema = z.strictObject({
   pauseReason: z.enum(pauseReasons).optional(),
   pausedAt: isoTimeSchema.optional(),
   pauseOperation: z.string().optional(),
-  /**
-   * Процесс, поставивший паузу операции (`harness update`, 0.1.0-alpha.61):
-   * pid и момент старта по ОС. Пауза умершего процесса без незавершённого
-   * возврата не держит `run`, регистрацию и совместную проверку.
-   */
-  pauseOwner: z
-    .strictObject({ pid: z.number().int().positive(), startedAt: z.number().optional() })
-    .optional(),
   pauseFailures: z.array(failureKindSchema).optional(),
   waits: z
     .array(

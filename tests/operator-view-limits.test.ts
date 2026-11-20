@@ -94,6 +94,24 @@ test('view limits: наибольший документ (все списки д
   assert.equal(fitted.drift.length + (fitted.truncated?.drift ?? 0), L.works);
   assert.ok(fitted.works.length > 0, 'доля — наибольшая, что помещается, а не пустой документ');
   assert.equal(fitted.progress.total, L.works);
+  // Доля — наибольшая: документ заполнен почти до предела (шаг доли — 1/64 списков).
+  assert.ok(bytes(fitted) > L.bytes * 0.9, `${bytes(fitted)}`);
+  // Находки сохраняются счётом: показанные (и находки эскалаций) плюс опущенные.
+  const withEscalation = {
+    ...input,
+    reviews: input.reviews.map((r) => ({
+      ...r,
+      escalation: { round: 4, findings: Array.from({ length: 30 }, (_, f) => 'e' + f) },
+    })),
+  };
+  const esc = operatorView(withEscalation);
+  operatorViewSchema.parse(esc);
+  const shown = esc.reviews.reduce(
+    (n, r) => n + r.findings.length + (r.escalation?.findings.length ?? 0),
+    0,
+  );
+  assert.ok(esc.reviews.length < L.reviews, 'часть предметов опущена');
+  assert.equal(shown + (esc.truncated?.findings ?? 0), L.reviews * (L.findingsPerSubject + 30));
   // Отказ остаётся только для предела меньше документа без списков.
   assert.throws(
     () => operatorView(input, { maxBytes: 2000 }),
@@ -309,12 +327,19 @@ test('alpha.61: 500 работ со всеми полями ревизии 4 и 
   // Опущены поля ревизии 4 у всех оставшихся работ и хвост работ — с числом.
   const kept = view.works.length;
   assert.ok(kept > L.works / 2, `${kept}`);
+  assert.ok(bytes(view) > L.bytes * 0.97, 'доля — наибольшая, что помещается');
   assert.equal(kept + (view.truncated?.works ?? 0), L.works);
   assert.equal(view.truncated?.workFields, kept, 'опущенные целиком работы — не в workFields');
   assert.ok(view.works.every((w) => w.question && w.question.line === undefined));
   assert.ok(view.works.every((w) => w.blockers.every((b) => b.step === undefined)));
   assert.ok(
-    view.works.every((w) => w.attempts.lastFailure && w.attempts.lastFailure.kind === undefined),
+    view.works.every(
+      (w) =>
+        w.attempts.lastFailure &&
+        w.attempts.lastFailure.kind === undefined &&
+        w.attempts.lastFailure.counted === undefined &&
+        w.attempts.lastFailure.plain,
+    ),
   );
   assert.equal(view.progress.total, L.works, 'счётчики — по всем работам');
   assert.ok(view.forecast, 'прогноз не опускается');

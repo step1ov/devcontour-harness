@@ -173,6 +173,12 @@ export interface EngineOptions {
    * controller и пауза обновления в состоянии.
    */
   updateBusy?: () => string | undefined;
+  /**
+   * Процесс обновления, чей замок остался (`<state>-updates/lock`), умер — нет
+   * его или pid достался другому процессу — и незавершённого возврата нет:
+   * его pid. Тогда пауза обновления устарела. Без чтения — устаревших пауз нет.
+   */
+  updaterGone?: () => { pid: number } | undefined;
 }
 
 export type Phase = 'running' | 'verifying' | 'reviewing' | 'integrating';
@@ -332,6 +338,7 @@ export class Engine {
 
   private readonly recordOnLead: boolean;
   private readonly updateBusy: () => string | undefined;
+  private readonly updaterGone: () => { pid: number } | undefined;
   constructor(options: EngineOptions) {
     this.host = options.host;
     this.policy = options.policy;
@@ -343,6 +350,7 @@ export class Engine {
     this.provenance = options.provenance ?? (() => undefined);
     this.recordOnLead = options.recordPolicyOnLead !== false;
     this.updateBusy = options.updateBusy ?? (() => undefined);
+    this.updaterGone = options.updaterGone ?? (() => undefined);
     this.loadedContent = policyDigest(this.policy);
     this.loadedPolicy = options.policyIdentity ?? this.loadedContent;
     this.observedGeneration = this.host.store.read(
@@ -538,6 +546,7 @@ export class Engine {
       isolationDigest: isolationDigest(this.policy),
     };
     return this.tx('graph.reviewed', (tx) => {
+      this.assertNoUpdate(tx);
       if (document) tx.putLocal('contract-documents', WORKSPACE_OWNER, record.digest, document);
       const previous = tx
         .locals('reviews', WORKSPACE_OWNER)
@@ -905,11 +914,11 @@ export class Engine {
   }
 
   /**
-   * Пауза обновления пакетов, поставленная процессом, которого больше нет, и
-   * без незавершённого возврата (`in-progress.json`): обновление умерло до
-   * изменений (например, во время `--wait`). Такая пауза не держит `run`,
-   * регистрацию и совместную проверку; `run` её снимает. Пауза без записи
-   * процесса (до 0.1.0-alpha.61) устаревшей не считается.
+   * Пауза обновления пакетов, чей процесс умер до изменений (например, во
+   * время `--wait`): замок обновления называет процесс, которого больше нет,
+   * и незавершённого возврата (`in-progress.json`) нет (`updaterGone`). Такая
+   * пауза не держит `run`, регистрацию и совместную проверку; `run` её
+   * снимает. Нет замка или он живой — пауза держит.
    */
   staleUpdatePause(view: ExecutionView): { pid: number } | undefined {
     const control = view.control();
@@ -917,12 +926,10 @@ export class Engine {
       !control.paused ||
       control.pauseReason !== 'reconfigure' ||
       control.pauseOperation !== UPDATE_PAUSE_OPERATION ||
-      !control.pauseOwner ||
-      !processGone(control.pauseOwner) ||
       this.updateBusy()
     )
       return undefined;
-    return { pid: control.pauseOwner.pid };
+    return this.updaterGone();
   }
 
   /** Снять устаревшую паузу обновления (`staleUpdatePause`); true — снята. */
@@ -935,7 +942,6 @@ export class Engine {
         paused: false,
         pauseReason: undefined,
         pauseOperation: undefined,
-        pauseOwner: undefined,
         pausedAt: undefined,
       });
       tx.emit({ type: 'control.resumed', payload: { reason: 'reconfigure' } });
@@ -1051,7 +1057,6 @@ export class Engine {
         pauseReason: reason,
         pausedAt: iso(this.now()),
         pauseOperation: undefined,
-        pauseOwner: undefined,
         pauseFailures: undefined,
       };
       tx.setControl(next);
@@ -1090,7 +1095,6 @@ export class Engine {
         pauseReason: undefined,
         pausedAt: undefined,
         pauseOperation: undefined,
-        pauseOwner: undefined,
         pauseFailures: undefined,
         waits: control.waits?.filter((w) => w.kind !== 'base-check'),
       };
@@ -4265,7 +4269,7 @@ export class Engine {
    * Пауза операции: ставится, только если очередь не остановлена, и
    * помечается операцией. Пауза человека не перезаписывается.
    */
-  operationPause(operation: string, owner?: { pid: number; startedAt?: number }) {
+  operationPause(operation: string) {
     return this.tx('scheduler.paused', (tx) => {
       const control = tx.control();
       if (control.paused) return false;
@@ -4274,12 +4278,6 @@ export class Engine {
         paused: true,
         pauseReason: 'reconfigure',
         pauseOperation: operation,
-        pauseOwner: owner
-          ? {
-              pid: owner.pid,
-              ...(owner.startedAt !== undefined ? { startedAt: owner.startedAt } : {}),
-            }
-          : undefined,
         pausedAt: iso(this.now()),
       });
       tx.emit({ type: 'control.paused', payload: { reason: 'reconfigure' } });
@@ -4312,7 +4310,6 @@ export class Engine {
         paused: false,
         pauseReason: undefined,
         pauseOperation: undefined,
-        pauseOwner: undefined,
         pausedAt: undefined,
       });
       tx.emit({ type: 'control.resumed', payload: { reason: 'reconfigure' } });
@@ -4328,6 +4325,7 @@ export class Engine {
    */
   requestReconfigure(operation: string, digest: string) {
     return this.tx('config.reconfigure-requested', (tx) => {
+      this.assertNoUpdate(tx);
       const control = tx.control();
       const current = control.reconfigure;
       if (current && current.operation === operation && current.digest === digest) {
@@ -4432,7 +4430,6 @@ export class Engine {
               paused: false,
               pauseReason: undefined,
               pauseOperation: undefined,
-              pauseOwner: undefined,
               pausedAt: undefined,
             }
           : {}),

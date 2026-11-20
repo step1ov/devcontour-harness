@@ -1296,7 +1296,7 @@ export function harnessView(options: HarnessViewOptions): OperatorView | WorkDet
  */
 function updatesInput(stateDir: string, baseDir: string): UpdatesView | undefined {
   try {
-    const { config, exists } = loadUpdatesConfig(baseDir);
+    const { config, exists } = loadUpdatesConfig(baseDir, { quiet: true });
     const cached = cachedUpdates(stateDir, config);
     if (!cached || (!exists && cached.state === 'not-checked')) return undefined;
     const c = cached.check;

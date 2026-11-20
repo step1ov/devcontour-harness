@@ -39,7 +39,7 @@ import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { validateInputs } from '../validate.ts';
 import { WorkflowQueue } from './workflow.ts';
-import { updateInProgress } from '../update/busy.ts';
+import { deadUpdateLock, updateInProgress } from '../update/busy.ts';
 import { statusOf } from './status.ts';
 import {
   verificationLines,
@@ -63,6 +63,12 @@ import { valueReport, type ValueReportOptions } from '../report/compute.ts';
 export interface HarnessOptions {
   /** Каталог состояния исполнения: база, worktrees, артефакты. */
   stateDir: string;
+  /**
+   * Каталог установки пакетов harness (`harness update --prefix`): его замок
+   * обновления (общий для нескольких каталогов состояния) тоже держит записи
+   * библиотеки. Без него — только замок и записи `<state>-updates`.
+   */
+  installPrefix?: string;
   policy: ExecutionPolicy;
   /** Каталог, от которого разрешаются относительные пути репозиториев политики. */
   baseDir: string;
@@ -138,7 +144,8 @@ export class Harness {
       ...(source ? { provenance: () => policySourceChanged(source) } : {}),
       // Обновление пакетов этого каталога состояния (замок, запись «идёт»):
       // записи библиотеки отказывают так же, как команды CLI.
-      updateBusy: () => updateInProgress(options.stateDir),
+      updateBusy: () => updateInProgress(options.stateDir, options.installPrefix),
+      updaterGone: () => deadUpdateLock(options.stateDir),
     });
     this.workflows = new WorkflowQueue(this.store, this.policy, () => this.engine.clock());
     this.adapters = options.adapters ?? {
@@ -287,6 +294,8 @@ export class Harness {
       dispositions?: ReviewDisposition[];
     },
   ) {
+    // Во время обновления пакетов — отказ до вызова модели.
+    this.engine.assertNotUpdating();
     const subject = input.kind === 'plan' ? input.graph.id : input.contract.id;
     const digest = input.kind === 'plan' ? workGraphDigest(input.graph) : digestOf(input.contract);
     // Структурные пропуски договора проверки и незакреплённые файлы — отказ до
@@ -342,6 +351,8 @@ export class Harness {
    * чтение. Запись в `code-reviews` — наблюдение, не приёмка.
    */
   reviewCode(input: CodeReviewInput) {
+    // Во время обновления пакетов — отказ до вызова модели.
+    this.engine.assertNotUpdating();
     return reviewCode(
       {
         engine: this.engine,

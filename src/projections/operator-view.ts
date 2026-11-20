@@ -2734,7 +2734,9 @@ function fitSize(
       extra[key] = (extra[key] ?? 0) + k;
     };
     const reviews = share(v.reviews, n, put('reviews'));
-    for (const r of v.reviews.slice(reviews.length)) put('findings')(r.findings.length);
+    // Опущенный предмет уносит и находки, и находки своей эскалации.
+    for (const r of v.reviews.slice(reviews.length))
+      put('findings')(r.findings.length + (r.escalation?.findings.length ?? 0));
     return assemble(
       {
         ...v,

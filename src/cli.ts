@@ -83,7 +83,6 @@ import {
   writeUpdatesConfig,
 } from './update/check.ts';
 import { deadUpdater, liveWork } from './update/live.ts';
-import { processStartedAt } from './environment/live-calls.ts';
 import { HARNESS_PACKAGE, installedPackage } from './update/install.ts';
 import {
   disableSchedule,
@@ -740,17 +739,7 @@ function updateHost(state: string, policyPath?: string): UpdateHost {
   const leaseMs = () => bound()?.policy.leaseMs ?? 30_000;
   return {
     live: () => (usable() ? liveWork(state, bound()!.policy, Date.now(), owner) : []),
-    // Пауза помнит процесс обновления (pid и момент старта): пауза умершего до
-    // изменений обновления не держит run (alpha.61).
-    pause: () =>
-      withHarness(
-        (h) =>
-          h.engine.operationPause(UPDATE_OPERATION, {
-            pid: process.pid,
-            ...optional('startedAt', processStartedAt(process.pid)),
-          }),
-        false,
-      ),
+    pause: () => withHarness((h) => h.engine.operationPause(UPDATE_OPERATION), false),
     resume: () => withHarness((h) => h.engine.operationResume(UPDATE_OPERATION), false),
     // Без базы состояния писать некому: роль «взята».
     hold: () =>
@@ -808,7 +797,7 @@ let updatesConfigWarned = false;
 function statusUpdates(state: string, baseDir: string) {
   let loaded: ReturnType<typeof loadUpdatesConfig>;
   try {
-    loaded = loadUpdatesConfig(baseDir);
+    loaded = loadUpdatesConfig(baseDir, { quiet: true });
   } catch {
     if (!updatesConfigWarned) {
       updatesConfigWarned = true;

@@ -4718,23 +4718,6 @@
         "pauseOperation": {
           "type": "string"
         },
-        "pauseOwner": {
-          "type": "object",
-          "properties": {
-            "pid": {
-              "type": "integer",
-              "exclusiveMinimum": 0,
-              "maximum": 9007199254740991
-            },
-            "startedAt": {
-              "type": "number"
-            }
-          },
-          "required": [
-            "pid"
-          ],
-          "additionalProperties": false
-        },
         "pauseFailures": {
           "type": "array",
           "items": {

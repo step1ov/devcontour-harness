@@ -1818,9 +1818,9 @@ view`) в пределе длины сохраняет хвост — остат
 ### 0.1.0-alpha.61 (не выпущен)
 
 Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`,
-`viewVersion: 1`, `viewRevision: 4`). Схемы расширены аддитивно
-(`ControlState.pauseOwner`, ключи `truncated.workFields` и
-`truncated.whatsNew` представления); прежние данные читаются без миграции.
+`viewVersion: 1`, `viewRevision: 4`). Схема представления расширена
+аддитивно (ключи `truncated.workFields` и `truncated.whatsNew`); схема
+состояния не меняется — откат на alpha.60 читает его как есть.
 
 - **Представление не отказывает по размеру.** Документ `harness view` больше
   256 КБ теряет необязательное в одном порядке, пока не поместится: разделы
@@ -1834,25 +1834,27 @@ view`) в пределе длины сохраняет хвост — остат
 - **`updates.whatsNew` сверх 10 пунктов** — число опущенного в
   `truncated.whatsNew`; раздел `updates` не опускается вместе с разделами
   связки.
-- **Пауза обновления, убитого во время `--wait`.** Пауза операции
-  `harness-update` помнит процесс обновления (`pauseOwner`: pid и момент
-  старта по ОС). Если процесса нет (или pid достался другому процессу) и
-  записи незавершённого возврата (`<state>-updates/in-progress.json`) нет,
-  такая пауза не держит `run`, регистрацию графа и совместную проверку:
-  `run` её снимает (событие `control.resumed`), `status --detail` и `explain`
-  говорят «пауза прерванного обновления: процесс … завершился до изменений —
-  паузу снимет следующий harness run». Пауза прежней версии без
-  `pauseOwner` держит, как раньше (`harness update --check` или `resume`).
-- **Записи библиотеки во время обновления.** `Harness.resolveInput` и
-  `Harness.carryInputOf` (до вызова модели), `Engine.applyInput`,
-  `carryInput`, `refreshApplied`, `answerInput`, `cancelInput`,
-  `supersedeInput`, `acceptCodeFindings`, `retry` (в том числе `--reset`) и
-  `cancel` отказывают `CONTROLLER_BUSY`, пока обновление держит состояние:
-  живая роль `harness-update:<pid>`, его пауза, замок живого
-  `harness update` или запись незавершённого возврата — тот же перечень
-  записей, что CLI отказывает во время обновления. `Harness` передаёт
-  движку чтение `<state>-updates` (`EngineOptions.updateBusy`); движок без
-  него судит по роли controller и паузе в состоянии.
+- **Пауза обновления, убитого во время `--wait`.** Замок обновления
+  (`<state>-updates/lock`) называет процесс (pid и момент старта по ОС). Если
+  этого процесса нет (или pid достался другому процессу) и записи
+  незавершённого возврата (`<state>-updates/in-progress.json`) нет, пауза
+  операции `harness-update` не держит `run`, регистрацию графа и совместную
+  проверку: `run` её снимает (событие `control.resumed`), `status --detail` и
+  `explain` говорят «пауза прерванного обновления: процесс … завершился до
+  изменений — паузу снимет следующий harness run». Нет замка (снят руками) —
+  пауза держит, как раньше (`harness update --check` или `resume`).
+- **Записи библиотеки во время обновления.** `Harness.resolveInput`,
+  `Harness.carryInputOf`, `Harness.review` и `Harness.reviewCode` (до вызова
+  модели), `Engine.applyInput`, `carryInput`, `refreshApplied`, `answerInput`,
+  `cancelInput`, `supersedeInput`, `acceptCodeFindings`, `retry` (в том числе
+  со сбросом), `cancel`, `recordReview` и `requestReconfigure` отказывают
+  `CONTROLLER_BUSY`, пока обновление держит состояние: живая роль
+  `harness-update:<pid>`, его пауза, замок живого `harness update` или запись
+  незавершённого возврата — тот же перечень записей, что CLI отказывает во
+  время обновления. `Harness` передаёт движку чтение `<state>-updates`
+  (`EngineOptions.updateBusy`, `updaterGone`); замок общего каталога установки
+  библиотека видит, если ей назвать его (`HarnessOptions.installPrefix`).
+  Движок без этих чтений судит по роли controller и паузе в состоянии.
 - **`status` и неверный `.harness/updates.json`.** Настройка не по схеме
   пропускается, как описано: поля `updates` нет, строки «Обновления: <ошибка>»
   нет, на stderr — одно предупреждение простыми словами; подробности —

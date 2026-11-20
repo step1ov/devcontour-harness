@@ -51,7 +51,11 @@ export const lastCheckFile = (stateDir: string) => join(updatesDir(stateDir), 'l
 export const configFile = (harnessDir: string) => join(harnessDir, 'updates.json');
 
 /** `.harness/updates.json`; файла нет — значения по умолчанию (notify, alpha). */
-export function loadUpdatesConfig(harnessDir: string | undefined): {
+export function loadUpdatesConfig(
+  harnessDir: string | undefined,
+  /** Без предупреждения о полях не этой версии (status и view их молча пропускают). */
+  options: { quiet?: boolean } = {},
+): {
   config: UpdatesConfig;
   path?: string;
   exists: boolean;
@@ -75,9 +79,10 @@ export function loadUpdatesConfig(harnessDir: string | undefined): {
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
     const extra = Object.keys(raw).filter((k) => !known.includes(k));
     if (extra.length) {
-      process.stderr.write(
-        `harness update: ${path}: поля не этой версии пропущены: ${extra.join(', ')}\n`,
-      );
+      if (!options.quiet)
+        process.stderr.write(
+          `harness update: ${path}: поля не этой версии пропущены: ${extra.join(', ')}\n`,
+        );
       raw = Object.fromEntries(Object.entries(raw).filter(([k]) => known.includes(k)));
     }
   }
