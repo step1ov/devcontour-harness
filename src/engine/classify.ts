@@ -65,7 +65,13 @@ export function classifyFailure(error: unknown, message: string): FailureKind {
   if (error instanceof HarnessError && byCode[error.code]) return byCode[error.code]!;
   if (providerRefusal(message)) return 'provider-auth';
   if (transportFailure(message)) return 'environment';
-  if (/исчерпан лимит времени|истёк|истек|тайм-?аут|timeout|превысил/i.test(message))
+  // Поле `timeout=false` в сообщении шага («Шаг X: exit=1; timeout=false»)
+  // говорит как раз, что предела не было: оно не признак превышения времени.
+  if (
+    /исчерпан лимит времени|истёк|истек|тайм-?аут|timeout|превысил/i.test(
+      message.replace(/\btimeout=false\b/gi, ''),
+    )
+  )
     return 'timeout';
   if (
     error instanceof BlockedError ||
@@ -96,6 +102,13 @@ export function environmentCauseOf(
 ): EnvironmentCause {
   if (kind === 'stalled') return 'stalled';
   if (kind === 'provider-auth') return providerLimit(message) ? 'provider-limit' : 'provider-auth';
+  // Остановка исполнителя из-за окружения — класс `needs-lead`, причина своя.
+  if (
+    kind === 'needs-lead' &&
+    error instanceof TaskFailure &&
+    error.diagnosis === 'writer-environment'
+  )
+    return 'writer-environment';
   if (kind !== 'environment') return 'none';
   if (error instanceof CleanupFailure)
     return error.original ? environmentCauseOf(error.original, message, kind) : 'cleanup';
@@ -132,6 +145,8 @@ export function withSuffix(failure: Error, suffix: string): Error {
         failure.properties,
         failure.diagnosis,
         failure.contextLimit,
+        failure.input,
+        failure.writerSummary,
       )
     : new Error(`${failure.message}; ${suffix}`, { cause: failure });
 }

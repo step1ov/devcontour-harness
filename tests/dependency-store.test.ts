@@ -72,6 +72,11 @@ const unavailable = !sandbox.ok
   : !pnpm
     ? 'pnpm не найден в PATH'
     : false;
+/** Major-версия pnpm из PATH: каталог store `v10` у pnpm 9–10, `v11` у pnpm 11. */
+const pnpmMajor = pnpm
+  ? Number(execFileSync(pnpm, ['--version'], { cwd: tmpdir() }).toString().split('.')[0])
+  : 0;
+const LAYOUT = pnpmMajor >= 11 ? 'v11' : 'v10';
 
 type Deps = Record<string, string>;
 const CONTENT = (name: string, version: string) => `module.exports = '${name}@${version}';\n`;
@@ -195,7 +200,12 @@ async function lockFor(url: string, deps: Deps) {
       cwd: dir,
       // Свой кэш: tarball каждого процесса теста свой, а кэш метаданных пользователя
       // привязан к адресу реестра. Порт повторяется, и lockfile получал чужой integrity.
-      env: { ...process.env, CI: '', npm_config_cache_dir: join(dir, '.cache') },
+      env: {
+        ...process.env,
+        CI: '',
+        npm_config_cache_dir: join(dir, '.cache'),
+        pnpm_config_cache_dir: join(dir, '.cache'),
+      },
     },
   );
   const text = readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8');
@@ -245,6 +255,9 @@ async function contour(
       p.isolation = { mode: 'os', domains: [] };
       p.environment.values.npm_config_registry = url;
       p.environment.values.npm_config_fetch_retries = '0';
+      // pnpm 11 читает настройки только из `pnpm_config_*`.
+      p.environment.values.pnpm_config_registry = url;
+      p.environment.values.pnpm_config_fetch_retries = '0';
       p.runTimeoutMs = 120000;
       options.policy?.(p);
     },
@@ -309,7 +322,7 @@ const gatesPassed = (r: { result: any }) =>
 
 const casOf = (store: string, text: string) => {
   const hash = createHash('sha512').update(text).digest('hex');
-  return join(store, 'v10', 'files', hash.slice(0, 2), hash.slice(2));
+  return join(store, LAYOUT, 'files', hash.slice(0, 2), hash.slice(2));
 };
 
 test(
@@ -485,7 +498,7 @@ for (const [name, tamper, why] of [
   ],
   [
     'лишний файл',
-    (s: { store: string }) => writeFileSync(join(s.store, 'v10', 'planted'), 'x'),
+    (s: { store: string }) => writeFileSync(join(s.store, LAYOUT, 'planted'), 'x'),
     /набор файлов/,
   ],
   [
@@ -588,7 +601,7 @@ test(
       ctx.scenarioPath,
       JSON.stringify({
         writer: {
-          ...implement({ 'src/greet.js': greet, '.pnpm-store/v10/planted': 'x' }),
+          ...implement({ 'src/greet.js': greet, ['.pnpm-store/' + LAYOUT + '/planted']: 'x' }),
           replace: { [rel]: poison },
         },
         reviewer: approve(),
@@ -632,7 +645,7 @@ test(
       readFileSync(casOf(seed.store, CONTENT('dep-a', '1.0.0')), 'utf8'),
       CONTENT('dep-a', '1.0.0'),
     );
-    assert.equal(existsSync(join(seed.store, 'v10', 'planted')), false);
+    assert.equal(existsSync(join(seed.store, LAYOUT, 'planted')), false);
     const changed = ctx.repo
       .git('diff', '--name-only', ctx.repo.git('rev-parse', `${target(ctx)}^`), target(ctx))
       .split('\n');
@@ -641,6 +654,13 @@ test(
       v.attempts(work.id).flatMap((a) => (a.timings ?? []).map((s) => s.stage)),
     );
     assert.equal(stages.filter((s) => s === 'dependency-store').length, 2);
+    // Seed развёрнут: стадия использована, а не «не используется».
+    assert.equal(
+      ctx.engine
+        .read((v) => v.attempts(work.id).flatMap((a) => a.timings ?? []))
+        .some((s) => s.stage === 'dependency-store' && s.unused),
+      false,
+    );
     gatesPassed(await ctx.check(ctx.repo.git('rev-parse', ctx.repoPolicy.targetRef)));
   },
 );
@@ -826,7 +846,7 @@ test(
                 'node',
                 '-e',
                 useGate('dep-a', '1.0.0') +
-                  `;if(process.env.npm_config_store_dir!==process.cwd()+'/.pnpm-store'){console.error('нет хранилища в окружении');process.exit(1)}` +
+                  `;if(process.env.npm_config_store_dir!==process.cwd()+'/.pnpm-store'||process.env.pnpm_config_store_dir!==process.cwd()+'/.pnpm-store'){console.error('нет хранилища в окружении');process.exit(1)}` +
                   `;require('fs').mkdirSync('reports',{recursive:true});require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="use"/></testsuite>')`,
               ],
               report: { type: 'junit', path: 'reports/joint-use.xml' },
@@ -1031,7 +1051,7 @@ test(
     const { clone, copy } = storeTree;
     let poisoned = false;
     const poison = (to: string) => {
-      if (poisoned || !existsSync(join(to, 'v10'))) return;
+      if (poisoned || !existsSync(join(to, LAYOUT))) return;
       poisoned = true;
       const file = casOf(to, CONTENT('dep-a', '1.0.0'));
       chmodSync(file, 0o644);
@@ -1095,7 +1115,7 @@ test(
     let planted = false;
     storeTree.clone = async (from, to, s) => {
       await clone.call(storeTree, from, to, s);
-      if (!planted) writeFileSync(join(to, 'v10', 'planted'), 'x');
+      if (!planted) writeFileSync(join(to, LAYOUT, 'planted'), 'x');
       planted = true;
     };
     t.after(() => {
@@ -1158,6 +1178,7 @@ test(
     );
     assert.equal(receipt!.outcome, 'hit');
     assert.equal(execution.env.npm_config_store_dir, join(worktree, '.pnpm-store'));
+    assert.equal(execution.env.pnpm_config_store_dir, join(worktree, '.pnpm-store'));
     assert.equal(
       ctx.repo.git('-C', worktree, 'status', '--porcelain', '--untracked-files=all'),
       '',
@@ -1318,7 +1339,7 @@ test(
     storeTree.run = async (h, options) => {
       runs++;
       const result = await run(h, options);
-      symlinkSync('/etc/hosts', join(options.write[0]!, 'store', 'v10', 'project-link'));
+      symlinkSync('/etc/hosts', join(options.write[0]!, 'store', LAYOUT, 'project-link'));
       return result;
     };
     t.after(() => {
@@ -1564,9 +1585,18 @@ test(
 );
 
 test('DS30: границы проверенных версий', () => {
-  for (const version of ['9.15.0', '10.12.3', '10.26.0', '10.26.9'])
+  for (const version of [
+    '9.15.0',
+    '10.12.3',
+    '10.26.0',
+    '10.27.0',
+    '10.34.9',
+    '11.0.0',
+    '11.25.0',
+    '11.99.9',
+  ])
     assert.equal(dependencyStoreSupports('pnpm', version), true, version);
-  for (const version of ['9.14.4', '10.27.0', '10.34.9', '11.0.0', '12.16.1'])
+  for (const version of ['9.14.4', '12.0.0', '12.16.1'])
     assert.equal(dependencyStoreSupports('pnpm', version), false, version);
 });
 
@@ -1587,7 +1617,7 @@ test('DS15: doctor предупреждает, а не останавливае�
   assert.ok(warned.includes('LOCKFILE_MISSING'), 'lockfile');
   assert.equal(report!.problems.filter((x) => x.code === 'LOCKFILE_MISSING').length, 0);
   const notes = report!.warnings.map((w) => w.message).join('\n');
-  assert.match(notes, /12\.16\.1 вне проверенных версий/);
+  assert.match(notes, /12\.16\.1 \(PATH\) вне проверенных версий .*НЕ ПРИМЕНЯЕТСЯ/);
   assert.match(notes, /код кандидата/);
   await assertToolchainReady(ctx.policy, ctx.repo.dir, options);
   const [silent] = await inspectPolicy(ctx.policy, ctx.repo.dir, {
@@ -1788,7 +1818,7 @@ test(
       command: [
         'node',
         '-e',
-        `if(process.env.npm_config_store_dir!==undefined){console.error('вмешательство');process.exit(1)}`,
+        `if(process.env.npm_config_store_dir!==undefined||process.env.pnpm_config_store_dir!==undefined){console.error('вмешательство');process.exit(1)}`,
       ],
     };
     const ctx = await contour(
@@ -1817,17 +1847,19 @@ test(
         files: {
           'package.json': JSON.stringify({
             ...JSON.parse(manifest({ 'dep-a': '1.0.0' })),
-            packageManager: 'pnpm@11.25.0',
+            packageManager: 'pnpm@12.0.0',
           }),
         },
         policy: (p) => {
           p.environment.values.npm_config_manage_package_manager_versions = 'false';
+          // pnpm 11 сверяет закреплённую версию с lockfile; проверка здесь — о хранилище.
+          p.environment.values.pnpm_config_pm_on_fail = 'ignore';
         },
       },
     );
     const declared = await pinned.check(pinned.repo.head(), ['no-store']);
     gatesPassed(declared);
-    assert.match(declared.receipt.reason, /11\.25\.0 вне проверенных версий/);
+    assert.match(declared.receipt.reason, /12\.0\.0 вне проверенных версий/);
   },
 );
 
@@ -1845,29 +1877,49 @@ test(
 -${CONTENT('dep-a', '1.0.0').trim()}
 +module.exports = 'patched';
 `;
+    // pnpm 11 читает patchedDependencies только из pnpm-workspace.yaml.
+    const workspace =
+      pnpmMajor >= 11 ? "patchedDependencies:\n  'dep-a@1.0.0': patches/dep-a.patch\n" : undefined;
     const pkg = JSON.stringify({
       ...JSON.parse(manifest(deps)),
-      pnpm: { patchedDependencies: { 'dep-a@1.0.0': 'patches/dep-a.patch' } },
+      ...(workspace
+        ? {}
+        : { pnpm: { patchedDependencies: { 'dep-a@1.0.0': 'patches/dep-a.patch' } } }),
     });
     mkdirSync(join(dir, 'patches'));
     writeFileSync(join(dir, 'patches', 'dep-a.patch'), patch);
     writeFileSync(join(dir, 'package.json'), pkg);
+    if (workspace) writeFileSync(join(dir, 'pnpm-workspace.yaml'), workspace);
     await promisify(execFile)(
       'pnpm',
-      ['install', '--lockfile-only', '--ignore-workspace', `--registry=${reg.url}`],
-      { cwd: dir, env: { ...process.env, CI: '', npm_config_cache_dir: join(dir, '.cache') } },
+      [
+        'install',
+        '--lockfile-only',
+        ...(workspace ? [] : ['--ignore-workspace']),
+        `--registry=${reg.url}`,
+      ],
+      {
+        cwd: dir,
+        env: {
+          ...process.env,
+          CI: '',
+          npm_config_cache_dir: join(dir, '.cache'),
+          pnpm_config_cache_dir: join(dir, '.cache'),
+        },
+      },
     );
     const ctx = await contour(reg.url, deps, {
       files: {
         'package.json': pkg,
         'pnpm-lock.yaml': readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8'),
         'patches/dep-a.patch': patch,
+        ...(workspace ? { 'pnpm-workspace.yaml': workspace } : {}),
       },
     });
     const first = await ctx.check(ctx.repo.head());
     gatesPassed(first);
     assert.equal(first.receipt.outcome, 'miss');
-    assert.match(first.receipt.reason, /PATCH_NOT_FOUND/);
+    assert.match(first.receipt.reason, /PATCH_(?:NOT_FOUND|FILE_PATH_MISSING)/);
     const root = join(ctx.state, 'dependency-store', ctx.repoPolicy.id, 'failed');
     const old = new Date(Date.now() - 3600_000);
     for (const name of readdirSync(root)) utimesSync(join(root, name), old, old);
@@ -1949,6 +2001,7 @@ test(
     assert.equal(receipt!.seed, undefined);
     assert.deepEqual(receipt!.env, {});
     assert.equal(execution.env.npm_config_store_dir, undefined);
+    assert.equal(execution.env.pnpm_config_store_dir, undefined);
     assert.equal(existsSync(join(cwd, '.pnpm-store')), false);
   },
 );
@@ -2385,3 +2438,205 @@ test('DS41: черновик без манифестов не делает ус�
   assert.equal(draftTouchesInstall(['.npmrc']), true);
   assert.equal(draftTouchesInstall(['docs/package.json.md']), false);
 });
+
+/**
+ * pnpm 11: настройки только из `pnpm_config_*`, store `v11` с базой `index.db`,
+ * а `pnpm fetch` регистрирует проект ссылкой `v11/projects/<hash>`. Каталог с
+ * pnpm 11 — `HARNESS_TEST_PNPM11_DIR` или сам pnpm из PATH, если он 11-й.
+ */
+const pnpm11Dir =
+  process.env.HARNESS_TEST_PNPM11_DIR ?? (pnpm && pnpmMajor === 11 ? join(pnpm, '..') : undefined);
+const pnpm11Version = pnpm11Dir
+  ? spawnSync(join(pnpm11Dir, 'pnpm'), ['--version'], { cwd: tmpdir() }).stdout?.toString().trim()
+  : undefined;
+const pnpm11Missing =
+  unavailable ||
+  (!pnpm11Version?.startsWith('11.')
+    ? 'pnpm 11 не найден: задайте HARNESS_TEST_PNPM11_DIR (каталог с pnpm 11)'
+    : false);
+
+test(
+  'DS42: pnpm 11 — seed без ссылки projects, store из pnpm_config_store_dir, попадание без скачивания, частичное докачивает разницу',
+  { skip: pnpm11Missing, timeout: 240000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(
+      reg.url,
+      { 'dep-a': '1.0.0' },
+      {
+        files: { '.gitignore': 'node_modules\n.store-path\n' },
+        policy: (p) => {
+          p.environment.values.PATH = pnpm11Dir + ':' + process.env.PATH;
+          p.repositories[0].prepare = [
+            { id: 'where', command: ['sh', '-c', 'pnpm store path > .store-path'] },
+          ];
+        },
+        extraGates: [
+          {
+            id: 'use-a',
+            kind: 'check',
+            command: [
+              'node',
+              '-e',
+              useGate('dep-a', '1.0.0') +
+                `;const w=require('fs').readFileSync('.store-path','utf8').trim();if(w!==process.cwd()+'/.pnpm-store/v11'){console.error('чужое хранилище: '+w);process.exit(1)}` +
+                `;if(process.env.pnpm_config_store_dir!==process.cwd()+'/.pnpm-store'){console.error('нет pnpm_config_store_dir');process.exit(1)}` +
+                `;const pv=require('child_process').execFileSync('pnpm',['--version']).toString().trim();if(!pv.startsWith('11.')){console.error('не pnpm 11: '+pv);process.exit(1)}`,
+            ],
+            dependsOn: ['install'],
+          },
+        ],
+      },
+    );
+    const base = ctx.repo.head();
+    const first = await ctx.check(base, ['use-a']);
+    gatesPassed(first);
+    assert.equal(first.receipt.outcome, 'hit', first.receipt.reason);
+    assert.equal(first.receipt.built, true);
+    assert.deepEqual(reg.downloads, ['dep-a-1.0.0.tgz'], 'пакет скачан один раз — сборкой seed');
+    const seed = ctx.seedOf();
+    assert.ok(existsSync(join(seed.store, 'v11', 'index.db')), 'store pnpm 11');
+    assert.equal(
+      existsSync(join(seed.store, 'v11', 'projects')),
+      false,
+      'ссылка проекта не в seed',
+    );
+    const manifestFiles = Object.keys(
+      JSON.parse(readFileSync(join(seed.dir, 'manifest.json'), 'utf8')).files,
+    );
+    assert.ok(manifestFiles.includes('v11/index.db'));
+    assert.equal(manifestFiles.filter((f) => f.includes('/projects/')).length, 0);
+
+    reg.downloads.length = 0;
+    const hit = await ctx.check(base, ['use-a']);
+    gatesPassed(hit);
+    assert.equal(hit.receipt.outcome, 'hit');
+    assert.equal(hit.receipt.built, undefined);
+    assert.deepEqual(reg.downloads, [], 'попадание ничего не качает');
+
+    ctx.repo.git('checkout', '-q', '-b', 'side');
+    const side = await ctx.commit({ 'dep-a': '1.0.0', 'dep-b': '1.0.0' }, 'refs/heads/side');
+    ctx.repo.git('checkout', '-q', 'main');
+    reg.downloads.length = 0;
+    const partial = await ctx.check(side);
+    gatesPassed(partial);
+    assert.equal(partial.receipt.outcome, 'partial');
+    assert.deepEqual(reg.downloads, ['dep-b-1.0.0.tgz'], 'докачана только разница');
+  },
+);
+
+test('DS43: одна версия из PATH и packageManager — одно предупреждение DEPENDENCY_STORE с обоими источниками', async () => {
+  const ctx = setup({
+    scenario: {},
+    files: { 'package.json': JSON.stringify({ name: 'app', packageManager: 'pnpm@12.16.1' }) },
+    policy: (p: Record<string, any>) => {
+      p.repositories[0].dependencyStore = { manager: 'pnpm' };
+    },
+  });
+  const [report] = await inspectPolicy(ctx.policy, ctx.repo.dir, {
+    probe: () =>
+      Promise.resolve({ code: 0, stdout: '12.16.1\n', stderr: '', timedOut: false as const }),
+  });
+  const versions = report!.warnings.filter(
+    (w) => w.code === 'DEPENDENCY_STORE' && w.message.includes('12.16.1'),
+  );
+  assert.equal(versions.length, 1, JSON.stringify(versions));
+  assert.match(versions[0]!.message, /\(PATH, packageManager\)/);
+});
+
+test(
+  'DS44: шаги prepare — своя стадия с замером на кандидате и integration; хранилище вне проверенных версий — стадия «не используется»',
+  { skip: unavailable, timeout: 240000 },
+  async (t) => {
+    const reg = await registry(t);
+    const bin = realpathSync(mkdtempSync(join(tmpdir(), 'harness-pnpm-')));
+    writeFileSync(
+      join(bin, 'pnpm'),
+      `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 12.16.1; exit 0; fi\nexec ${JSON.stringify(pnpm)} "$@"\n`,
+      { mode: 0o755 },
+    );
+    const ctx = await contour(
+      reg.url,
+      { 'dep-a': '1.0.0' },
+      {
+        scenario: { reviewer: approve() },
+        policy: (p) => {
+          p.environment.values.PATH = bin + ':' + process.env.PATH;
+          p.repositories[0].prepare = [
+            { id: 'warm', command: ['node', '-e', 'setTimeout(()=>{},300)'] },
+          ];
+        },
+      },
+    );
+    writeFileSync(
+      ctx.scenarioPath,
+      JSON.stringify({ writer: implement({ 'src/greet.js': greet }), reviewer: approve() }),
+    );
+    await runAll(ctx);
+    const work = ctx.engine.read((v) => v.work(ctx.graph.orders[0]!.id)!);
+    assert.equal(work.status, 'done', work.failure);
+    const timings = ctx.engine.read((v) => v.attempts(work.id).flatMap((a) => a.timings ?? []));
+    const names = timings.map((s) => s.stage);
+    // Подготовка — до исполнителя: замер `prepare` закрыт раньше `implementation`.
+    const prepare = timings.find((s) => s.stage === 'prepare');
+    const implementation = timings.find((s) => s.stage === 'implementation');
+    assert.ok(prepare && implementation, names.join(', '));
+    assert.equal(prepare.outcome, 'passed');
+    assert.ok(prepare.finishedAt! <= implementation.startedAt, 'prepare закрыт до исполнителя');
+    assert.ok(names.includes('integration-prepare'), names.join(', '));
+    const store = timings.filter((s) => s.stage === 'dependency-store');
+    assert.equal(store.length, 2);
+    for (const s of store) {
+      assert.equal(s.outcome, 'passed');
+      assert.equal(s.unused, true, 'хранилище не применялось');
+    }
+    const events = ctx.store
+      .events()
+      .filter(
+        (e) =>
+          e.type === 'attempt.stage' &&
+          (e.payload as { stage: string; phase: string }).stage === 'dependency-store' &&
+          (e.payload as { phase: string }).phase === 'finished',
+      );
+    assert.equal(events.length, 2);
+    for (const e of events)
+      assert.equal((e as unknown as { payload: { unused?: boolean } }).payload.unused, true);
+  },
+);
+
+test(
+  'DS45: PATH и packageManager называют разные major pnpm — формат store разный, хранилище не применяется',
+  { skip: unavailable, timeout: 120000 },
+  async (t) => {
+    const reg = await registry(t);
+    const bin = realpathSync(mkdtempSync(join(tmpdir(), 'harness-pnpm-')));
+    writeFileSync(
+      join(bin, 'pnpm'),
+      `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 11.25.0; exit 0; fi\nexec ${JSON.stringify(pnpm)} "$@"\n`,
+      { mode: 0o755 },
+    );
+    const ctx = await contour(
+      reg.url,
+      { 'dep-a': '1.0.0' },
+      {
+        files: {
+          'package.json': JSON.stringify({
+            ...JSON.parse(manifest({ 'dep-a': '1.0.0' })),
+            packageManager: 'pnpm@10.12.3',
+          }),
+        },
+        policy: (p) => {
+          p.environment.values.PATH = bin + ':' + process.env.PATH;
+          p.environment.values.npm_config_manage_package_manager_versions = 'false';
+          p.environment.values.pnpm_config_pm_on_fail = 'ignore';
+        },
+      },
+    );
+    const r = await ctx.check(ctx.repo.head());
+    gatesPassed(r);
+    assert.equal(r.receipt.outcome, 'miss');
+    assert.match(r.receipt.reason, /11\.25\.0 в PATH и 10\.12\.3 в packageManager — разные major/);
+    assert.deepEqual(r.receipt.env, {});
+    assert.equal(existsSync(ctx.seeds), false, 'seed не собирался');
+  },
+);

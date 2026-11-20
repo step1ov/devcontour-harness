@@ -488,6 +488,8 @@ export const workDetailViewSchema = z.strictObject({
               stage: z.string().min(1).max(T.step),
               durationMs: count.optional(),
               outcome: z.enum(['passed', 'failed']).optional(),
+              /** Ревизия 3: стадия прошла, но средство не применялось («не используется»). */
+              unused: z.literal(true).optional(),
             }),
           )
           .max(L.stagesPerAttempt),

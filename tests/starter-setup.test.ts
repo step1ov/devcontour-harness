@@ -171,7 +171,7 @@ test('S05: оверлей controller mode закреплён контексто�
   };
   const dir = join(r.dir, '..', 'ctx-' + Date.now());
   const { provenance } = controllerContext(fixture, dir);
-  assert.equal(provenance.overlay.version, 1);
+  assert.equal(provenance.overlay.version, 2);
   assert.deepEqual(
     provenance.product.files.map((f: { path: string }) => f.path),
     ['AGENTS.md', 'apps/web/AGENTS.md'],
@@ -189,7 +189,8 @@ test('S05: оверлей controller mode закреплён контексто�
     assert.equal(ref.digest, pinned.sha256, ref.path);
   }
   const text = contextText(snapshot);
-  assert.match(text, /# Controller mode \(devcontour-harness overlay v1\)/);
+  assert.match(text, /# Controller mode \(devcontour-harness overlay v2\)/);
+  assert.match(text, /When the environment blocks a mandated step/);
   assert.match(text, /References \(not inlined\): references\/AGENTS\.md/);
   assert.ok(!text.includes('Субагент коммитит'), 'правило product не вложено как инструкция');
   const writer = prompt({

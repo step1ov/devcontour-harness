@@ -5,6 +5,7 @@ import {
   roleBinding,
   integrationReuseProblem,
   executionDigest,
+  isolationDigest,
   HarnessError,
   WORKSPACE_OWNER,
   MAX_REPRODUCTIONS,
@@ -187,8 +188,8 @@ const contentDigest = (order: WorkState['order']) =>
  * (`repairPolicy.blocksQueue`), а повтор ограничен пределом одинаковых
  * отпечатков и общим бюджетом восстановлений.
  */
-const uncounted = (kind: FailureKind, blocked: boolean) =>
-  blocked || kind === 'environment' || kind === 'provider-auth';
+const uncounted = (kind: FailureKind, blocked: boolean, writerBlocked = false) =>
+  blocked || kind === 'environment' || kind === 'provider-auth' || writerBlocked;
 
 /**
  * Остановка вопросом (`needs-input`) — не неудача работы: попытка
@@ -224,6 +225,7 @@ const causeOf = (
   if (blocked && kind !== 'provider-auth' && kind !== 'environment') return 'preflight';
   if (kind === 'provider-auth')
     return cause === 'provider-limit' ? 'provider-limit' : 'provider-auth';
+  if (kind === 'needs-lead' && cause === 'writer-environment') return cause;
   if (kind !== 'environment') return 'none';
   return cause && cause !== 'none' && cause !== 'provider-auth' && cause !== 'provider-limit'
     ? cause
@@ -511,6 +513,13 @@ export class Engine {
   recordReview(record: ReviewRecord, document?: ContractDocument, historyRounds = 0) {
     if (document && (record.kind !== 'contract' || digestOf(document) !== record.digest))
       throw new HarnessError('INVALID_INPUT', 'Документ не соответствует ревью контракта');
+    // Раунд отмечает политику, под которой он записан: прежний раунд не покроет
+    // её правку, что бы ни передал вызывающий.
+    record = {
+      ...record,
+      policyDigest: executionDigest(this.policy),
+      isolationDigest: isolationDigest(this.policy),
+    };
     return this.tx('graph.reviewed', (tx) => {
       if (document) tx.putLocal('contract-documents', WORKSPACE_OWNER, record.digest, document);
       const previous = tx
@@ -615,6 +624,8 @@ export class Engine {
        * плана: другой снимок при том же графе — новое согласование.
        */
       bindContext?: boolean;
+      /** Кто и почему согласует заново после правки политики (`reapprove`): запись в согласовании и событии. */
+      reapproval?: { by: string; reason: string };
     } = {},
   ) {
     return this.tx('graph.approved', (tx) => {
@@ -681,6 +692,24 @@ export class Engine {
         'APPROVAL_REQUIRED',
         'Ревью плана проведено при другом назначении reviewer; нужен новый раунд',
       );
+    // Изоляция, сеть и профили инструментов — граница исполнения: её правку
+    // покрывает только раунд, проведённый под ней. Раунд без отметки (до
+    // alpha.59) покрывает лишь политику, под которой граф уже согласован.
+    const covered = last.isolationDigest
+      ? last.isolationDigest === isolationDigest(this.policy)
+      : Boolean(graph.approval) && graph.policyDigest === executionDigest(this.policy);
+    if (!covered && !last.isolationDigest)
+      throw new HarnessError(
+        'APPROVAL_REQUIRED',
+        `Раунд ревью плана ${last.round} записан версией до 0.1.0-alpha.59 без отметки политики: он не покрывает изменённую политику и не согласует граф впервые — нужен новый раунд review-plan`,
+      );
+    if (!covered)
+      throw new HarnessError(
+        'APPROVAL_REQUIRED',
+        'Изоляция, сеть или профили инструментов политики изменились после ревью плана (раунд ' +
+          last.round +
+          '): прежнее одобрение их не покрывает — нужен новый раунд review-plan',
+      );
     // Свойства поручений существуют в их договорах проверки и исполняются
     // их генеративными gates: иначе ожидаемая проверка не определена.
     const problems = tx.works(graphId).flatMap((w) => {
@@ -709,7 +738,7 @@ export class Engine {
     graph: GraphState,
     last: ReviewRecord,
     actor: TechnicalApproval['actor'],
-    options: { bindContext?: boolean } = {},
+    options: { bindContext?: boolean; reapproval?: { by: string; reason: string } } = {},
   ) {
     const graphId = graph.id;
     const policy = executionDigest(this.policy);
@@ -729,8 +758,28 @@ export class Engine {
       artifact: last.artifact,
       ...(context ? { context } : {}),
     };
-    tx.putGraph({ ...graph, policyDigest: policy, approval: { ...approval, at } });
-    tx.emit({ type: 'graph.approved', graphId, payload: { digest: graph.digest, actor } });
+    const reapproval =
+      options.reapproval && graph.policyDigest !== policy
+        ? {
+            ...options.reapproval,
+            round: last.round,
+            previousPolicyDigest: graph.policyDigest,
+          }
+        : undefined;
+    tx.putGraph({
+      ...graph,
+      policyDigest: policy,
+      approval: { ...approval, ...(reapproval ? { reapproval } : {}), at },
+    });
+    tx.emit({
+      type: 'graph.approved',
+      graphId,
+      payload: {
+        digest: graph.digest,
+        actor,
+        ...(reapproval ? { reapproval: { ...reapproval, policyDigest: policy } } : {}),
+      },
+    });
     for (const work of tx.works(graphId)) {
       if (work.status !== 'draft') continue;
       const ready: WorkState = structuredClone({
@@ -1176,7 +1225,7 @@ export class Engine {
         );
       }
       if (graphs.get(work.graphId))
-        return 'Политика изменилась после согласования; согласуйте заново';
+        return 'Политика изменилась после согласования; согласуйте заново: harness reapprove --by --reason (прежний раунд review-plan, с записью), а после правки изоляции, сети или профилей инструментов — новый review-plan';
       if (
         work.status === 'ready' &&
         work.approvedDigest !== this.host.basis.orderDigest(work, view)
@@ -1226,7 +1275,8 @@ export class Engine {
     if (graph?.approval && graph.policyDigest !== executionDigest(this.policy))
       out.push({
         code: 'APPROVAL_STALE',
-        message: 'Политика изменилась после согласования; согласуйте заново',
+        message:
+          'Политика изменилась после согласования; согласуйте заново: harness reapprove --by --reason (прежний раунд review-plan, с записью), а после правки изоляции, сети или профилей инструментов — новый review-plan',
       });
     else if (work.status !== 'ready')
       out.push({ code: 'NOT_READY', message: 'Статус ' + work.status });
@@ -1880,7 +1930,14 @@ export class Engine {
     });
   }
 
-  timingFinished(id: string, token: string, timingId: string, outcome: 'passed' | 'failed') {
+  timingFinished(
+    id: string,
+    token: string,
+    timingId: string,
+    outcome: 'passed' | 'failed',
+    /** `unused` — стадия прошла, но её средство не применялось (хранилище без seed). */
+    extra: { unused?: true } = {},
+  ) {
     this.withAttempt(id, token, 'run.timing.finished', (a, w, tx) => {
       const at = iso(this.now());
       const open = (a.timings ?? []).find((t) => t.id === timingId);
@@ -1890,7 +1947,9 @@ export class Engine {
       tx.putAttempt({
         ...a,
         timings: (a.timings ?? []).map((t) =>
-          t.id === timingId ? { ...t, finishedAt: at, outcome } : t,
+          t.id === timingId
+            ? { ...t, finishedAt: at, outcome, ...(extra.unused ? { unused: true as const } : {}) }
+            : t,
         ),
       });
       tx.emit({
@@ -1906,6 +1965,7 @@ export class Engine {
           at,
           durationMs: Math.max(0, Date.parse(at) - Date.parse(open.startedAt)),
           outcome,
+          ...(extra.unused ? { unused: true as const } : {}),
         },
       });
     });
@@ -2410,9 +2470,13 @@ export class Engine {
        * блокирующий запрос; `unfinished` — отклонённый вопрос ниже порога).
        */
       input?: InputOutcome;
+      /** Итог исполнителя незавершённой попытки своими словами (до 500 знаков). */
+      writerSummary?: string;
     } = {},
   ) {
     const kind = options.kind ?? 'unknown';
+    // Исполнитель остановился из-за окружения: ход ведущего, попытка не засчитана.
+    const writerBlocked = kind === 'needs-lead' && options.cause === 'writer-environment';
     return this.withAttempt(id, token, 'run.failed', (a, w, tx) => {
       const fingerprint = failureFingerprint(kind, error);
       const prefix = a.error?.startsWith(HEARTBEAT_FAILED)
@@ -2441,6 +2505,10 @@ export class Engine {
         status: 'failed',
         error: shown,
         ...(blocked ? { blocked: true } : {}),
+        ...(writerBlocked ? { writerBlocked: true as const } : {}),
+        ...(options.writerSummary?.trim()
+          ? { writerSummary: options.writerSummary.trim().slice(0, 500) }
+          : {}),
         failureKind: kind,
         ...(kind === 'context-exhausted' && options.contextLimit
           ? { contextLimit: options.contextLimit }
@@ -2494,13 +2562,13 @@ export class Engine {
             }),
         activeRunId: undefined,
         attempt:
-          (interrupted || uncounted(kind, blocked) || givesBack) && w.attempt > 0
+          (interrupted || uncounted(kind, blocked, writerBlocked) || givesBack) && w.attempt > 0
             ? w.attempt - 1
             : w.attempt,
         // Отказ до работы (blocked), штатная остановка и вопрос предел
         // незасчитанных отказов не тратят; вопрос сверх своего предела
         // засчитан как попытка.
-        ...(uncounted(kind, blocked) && !blocked && !interrupted
+        ...(uncounted(kind, blocked, writerBlocked) && !blocked && !interrupted
           ? { neutralFailures: (w.neutralFailures ?? 0) + 1 }
           : {}),
       });
@@ -2521,7 +2589,7 @@ export class Engine {
         payload: {
           failureKind: kind,
           cause: interrupted ? 'shutdown' : causeOf(kind, options.cause, blocked),
-          counted: !interrupted && !uncounted(kind, blocked) && !givesBack,
+          counted: !interrupted && !uncounted(kind, blocked, writerBlocked) && !givesBack,
         },
       });
       if (options.input && !interrupted)

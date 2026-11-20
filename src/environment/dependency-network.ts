@@ -196,6 +196,9 @@ export function registryFailureLine(
   let found: string | undefined;
   for (const raw of text.split('\n')) {
     const line = raw.replace(/\r$/, '');
+    // Заголовок «ERROR terminated» обрыва загрузки — не код менеджера: его
+    // разбирает `abortedFetch` ниже (вместе с кадром прерванного запроса).
+    if (/^[ \u2009]?ERROR[ \u2009]+terminated\s*$/.test(line)) continue;
     const header = pnpmHeader.exec(line)?.[1];
     const npm = npmCode.exec(line)?.[1];
     const yarn = yarnError.exec(line)?.[1];
@@ -208,7 +211,21 @@ export function registryFailureLine(
       found ??= line.trim();
     }
   }
+  // Обрыв загрузки без кода менеджера: fetch (undici) прерван закрытием
+  // сокета TLS — менеджер печатает «terminated» и стек прерванного запроса.
+  // Засчитывается только пара «terminated» + кадр прерванного fetch/TLS-сокета.
+  found ??= abortedFetch(text);
   return found && (found.length > 200 ? found.slice(0, 200) + '…' : found);
+}
+
+/** Строка «<менеджер>: terminated» рядом с кадром прерванного fetch или TLS-сокета. */
+const abortedFetchLine =
+  /^\s*(?:\[?ERROR\]?\s+|(?:pnpm|npm error|npm ERR!|yarn):?\s+)?(?:TypeError: )?terminated\s*$/m;
+const abortedFetchFrame =
+  /^\s*at (?:Fetch\.onAborted|TLSSocket\.onHttpSocketClose|Socket\.onHttpSocketClose|Fetch\.terminate)\b/m;
+function abortedFetch(text: string) {
+  const line = abortedFetchLine.exec(text);
+  return line && abortedFetchFrame.test(text) ? line[0].trim() : undefined;
 }
 
 /** Файлы конфигурации и lockfiles менеджеров: сверяются побайтно. */

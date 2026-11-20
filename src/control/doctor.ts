@@ -16,6 +16,7 @@ import {
 import { credentialPaths, isolationSupport } from '../environment/isolation.ts';
 import { chooseCheckoutRoot } from '../environment/checkout-root.ts';
 import { inspectPort, PORT_ADVICE } from '../environment/port-probe.ts';
+import { leadSandboxCheck, type LeadSandboxProbe } from '../environment/lead-sandbox.ts';
 import { defaultResourceDatabase, ResourcePool, resourceKey } from '../environment/resources.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
@@ -63,9 +64,15 @@ export async function doctor(
    * (по умолчанию общая база машины; читается, только если есть; `false` —
    * порты ресурсов не пробуются); `planAuthors` — авторы планов и контрактов
    * для предупреждения о ревью тем же вендором (ведущий из manifest проекта;
-   * нет — writers ролей политики).
+   * нет — writers ролей политики); `leadSandbox` — проверить, не работает ли
+   * ведущий внутри песочницы (`leadSandboxCheck`; объект — подменённые пробы):
+   * при признаках — строка в `problems` с объяснением и флагами Codex.
    */
-  options: { resourceDatabase?: string | false; planAuthors?: readonly Author[] } = {},
+  options: {
+    resourceDatabase?: string | false;
+    planAuthors?: readonly Author[];
+    leadSandbox?: true | Partial<LeadSandboxProbe>;
+  } = {},
 ) {
   const problems: string[] = [];
   const runtimes = [];
@@ -157,6 +164,18 @@ export async function doctor(
   const { resourceDatabase = defaultResourceDatabase(), planAuthors } = options;
   const ports =
     policy && resourceDatabase !== false ? await portStatus(policy, resourceDatabase) : [];
+  const leadSandbox = options.leadSandbox
+    ? leadSandboxCheck({
+        repositories: (policy?.repositories ?? []).map((r) =>
+          isAbsolute(r.path)
+            ? r.path
+            : resolve(toolchain?.baseDir ?? checkouts?.baseDir ?? process.cwd(), r.path),
+        ),
+        ...(stateDir ? { stateDir } : {}),
+        ...(options.leadSandbox === true ? {} : { probe: options.leadSandbox }),
+      })
+    : undefined;
+  if (leadSandbox?.inside) problems.push('lead-sandbox: ' + leadSandbox.advice);
   const warnings: string[] = [];
   for (const p of ports)
     if (p.status === 'busy')
@@ -202,6 +221,7 @@ export async function doctor(
     ...(checkoutRoot ? { checkouts: checkoutRoot } : {}),
     ...(toolchains ? { toolchains } : {}),
     ...(ports.length ? { ports } : {}),
+    ...(leadSandbox ? { leadSandbox } : {}),
     problems,
     ...(policy ? { questions: questionRule(policy) } : {}),
     // Предупреждения не делают среду негодной: порт только на wildcard, ревью
@@ -210,10 +230,16 @@ export async function doctor(
     // (`resourceWarnings`).
     ...(policy
       ? {
+          // Одно предупреждение из двух источников печатается один раз.
           warnings: [
-            ...warnings,
-            ...timeBudgetWarnings(policy).map((w) => w.message),
-            ...resourceWarnings(policy, toolchain?.baseDir ?? checkouts?.baseDir ?? process.cwd()),
+            ...new Set([
+              ...warnings,
+              ...timeBudgetWarnings(policy).map((w) => w.message),
+              ...resourceWarnings(
+                policy,
+                toolchain?.baseDir ?? checkouts?.baseDir ?? process.cwd(),
+              ),
+            ]),
           ],
         }
       : {}),

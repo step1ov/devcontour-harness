@@ -56,7 +56,8 @@ export function stageOfStep(step: string): PipelineStage | 'prepare' | undefined
   if (family === 'candidate-environment') return sub === 'cleanup' ? undefined : 'prepare';
   if (family === 'candidate-review') return 'review';
   if (family === 'implementation' || family === 'implementation-reuse') return 'writer';
-  if (family === 'dependency-store' || family === 'writer-dependencies') return 'prepare';
+  if (family === 'dependency-store' || family === 'writer-dependencies' || family === 'prepare')
+    return 'prepare';
   // candidate-test, candidate-recheck, candidate-consumer, generate.
   return 'gates';
 }

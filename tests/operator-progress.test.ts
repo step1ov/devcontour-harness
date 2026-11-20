@@ -224,6 +224,10 @@ test('H15: имя замера → этап; интеграция по фазе'
   assert.equal(stageOfStep('candidate-environment:port-shared:3000'), 'prepare');
   assert.equal(stageOfStep('candidate-environment:cleanup'), undefined);
   assert.equal(stageOfStep('dependency-store'), 'prepare');
+  // Шаги prepare — своя стадия (0.1.0-alpha.59); на integration — интеграция.
+  assert.equal(stageOfStep('prepare'), 'prepare');
+  assert.equal(stageOfStep('integration-prepare'), 'integration');
+  assert.equal(stageOfStep('integration-prepare:api'), 'integration');
   assert.equal(stageOfStep('generate:api'), 'gates');
   assert.equal(stageOfStep('candidate-review'), 'review');
   assert.equal(stageOfStep('integration-test:unit'), 'integration');
@@ -597,4 +601,36 @@ test('H15: расход — прежняя запись только с ID пр�
   });
   const w = statusOf({ engine: env.engine, policy: env.engine.policy }).works[0]!;
   assert.equal(w.stage.spend.calls, 2);
+});
+
+test('H15: шаги prepare идут — «подготовка зависимостей (prepare)» с временем, а не «исполнитель пишет код»', () => {
+  const now = Date.parse('2026-01-01T00:05:00.000Z');
+  const active = {
+    id: 'r1',
+    status: 'active',
+    startedAt: '2026-01-01T00:00:00.000Z',
+    timings: [
+      {
+        id: 't1',
+        stage: 'dependency-store',
+        startedAt: '2026-01-01T00:00:00.000Z',
+        finishedAt: '2026-01-01T00:00:01.000Z',
+        outcome: 'passed',
+        unused: true,
+      },
+      { id: 't2', stage: 'prepare', startedAt: '2026-01-01T00:00:01.000Z' },
+    ],
+  } as never;
+  const stage = workStageOf({
+    work: { id: 'w', status: 'running', activeRunId: 'r1' } as never,
+    attempts: [active],
+    active,
+    blocked: false,
+    records: [],
+    now,
+  });
+  assert.equal(stage.name, 'prepare');
+  assert.equal(stage.step, 'prepare');
+  assert.match(stage.line, /^w: подготовка зависимостей \(prepare\) — 4 мин 59 с/);
+  assert.doesNotMatch(stage.line, /исполнитель пишет код/);
 });

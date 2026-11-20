@@ -538,6 +538,7 @@ export function activityInputOf(
         // окружения и провайдера, истёкшее владение.
         ...(interrupted ||
         a.blocked ||
+        a.writerBlocked ||
         a.status === 'expired' ||
         a.failureKind === 'environment' ||
         a.failureKind === 'provider-auth'

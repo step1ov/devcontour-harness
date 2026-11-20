@@ -46,6 +46,8 @@ export class TaskFailure extends Error {
      * транзакции, что и отказ.
      */
     readonly input?: InputOutcome,
+    /** Итог исполнителя своими словами (`unfinished`, `needs-lead`): попадает в причину для людей. */
+    readonly writerSummary?: string,
   ) {
     super(message);
     this.name = 'TaskFailure';

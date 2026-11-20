@@ -1,4 +1,5 @@
 import { RU, ruCount } from '../contracts/plural.ts';
+import { storeAdvice } from '../control/store-advice.ts';
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
@@ -462,7 +463,7 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
     lead,
     review,
     runtimes,
-    warnings: initWarnings(policy, lead.runtime, runtimes),
+    warnings: initWarnings(policy, lead.runtime, runtimes, join(root, HARNESS_PROJECT_DIR)),
     ...(refusedReview && !refusedReview.ok
       ? { policyConflict: refusedReview.message }
       : technicalConflict
@@ -541,11 +542,16 @@ function reviewModeOf(policy: ExecutionPolicy, lead: 'claude' | 'codex'): 'cross
   return choice.ok && choice.sameVendor ? 'same' : 'cross';
 }
 
-/** Предупреждения действующей политики: ревью тем же вендором, отсутствующий CLI. */
+/**
+ * Предупреждения действующей политики: ревью тем же вендором, отсутствующий CLI,
+ * хранилище зависимостей, которое не применяется, и свой store/кэш в командах
+ * (`storeAdvice`; `baseDir` — каталог политики).
+ */
 export function initWarnings(
   policy: ExecutionPolicy,
   lead: 'claude' | 'codex',
   runtimes: RuntimeAvailability[],
+  baseDir?: string,
 ): InitData['warnings'] {
   const warnings: InitData['warnings'] = [];
   const same = sameVendorReviews(policy, [lead]);
@@ -581,6 +587,15 @@ export function initWarnings(
         message: `CLI ${runtime} не выполнил вход (${runtime === 'claude' ? 'claude auth status' : 'codex login status'}), а политика назначает его (${what.join(', ')}): выполните вход до запуска.`,
       });
   }
+  if (baseDir !== undefined)
+    for (const a of storeAdvice(policy, baseDir))
+      warnings.push({
+        code:
+          a.code === 'DEPENDENCY_STORE_UNSUPPORTED'
+            ? 'dependency-store-unsupported'
+            : 'dependency-cache-path',
+        message: a.message,
+      });
   return warnings;
 }
 

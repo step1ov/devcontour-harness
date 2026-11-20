@@ -1,8 +1,10 @@
 import { HarnessError } from '../contracts/errors.ts';
+import { stageOfStep } from '../control/stage.ts';
 import { blocksWork, inputPolicyOf, leadAnswerBasis } from '../contracts/index.ts';
 import {
   MAX_NEUTRAL_FAILURES,
   failedBeforeWork,
+  writerBlockedStop,
   lastContextLimit,
   repairPolicy,
   repairRepeats,
@@ -18,7 +20,7 @@ import type {
   WorkflowJob,
 } from '../contracts/index.ts';
 import type { Engine } from '../engine/engine.ts';
-import { acceptanceGap, repairDecision } from '../engine/repair.ts';
+import { acceptanceGap, repairDecision, repeatedTestcase } from '../engine/repair.ts';
 import { requestsIndex } from '../engine/input-requests.ts';
 import { activeOf } from '../engine/engine.ts';
 import { inputStateOf } from '../projections/input.ts';
@@ -462,6 +464,14 @@ export function stopInputsIn(
           ...(work.status === 'failed' && failedBeforeWork(kind, attempts)
             ? { preflight: true }
             : {}),
+          ...((last) =>
+            work.status === 'failed' && writerBlockedStop(kind, attempts)
+              ? {
+                  writerBlocked: {
+                    ...(last?.writerSummary ? { summary: last.writerSummary } : {}),
+                  },
+                }
+              : {})(attempts.findLast((a) => a.status !== 'active')),
           ...(work.hold
             ? { hold: { operation: work.hold.operation, reason: work.hold.reason } }
             : {}),
@@ -476,6 +486,20 @@ export function stopInputsIn(
               ? cancelledIn.get(work.graphId)
               : undefined,
           ),
+          ...((a) => {
+            const open = (a?.status === 'active' ? (a.timings ?? []) : [])
+              .filter((t) => !t.finishedAt)
+              .at(-1);
+            return open
+              ? {
+                  openStage: {
+                    stage: open.stage,
+                    startedAt: open.startedAt,
+                    preparing: stageOfStep(open.stage) === 'prepare',
+                  },
+                }
+              : {};
+          })(work.activeRunId ? v.attempt(work.activeRunId) : undefined),
           ...((live) =>
             live && live.state !== 'active'
               ? {
@@ -671,6 +695,7 @@ function outlookOf(
       rule.action === 'retry' &&
       identical - 1 < repeats &&
       !acceptanceGap(ctx.v, w) &&
+      !repeatedTestcase(ctx.v, w, options.maxAttempts) &&
       (w.neutralFailures ?? 0) < MAX_NEUTRAL_FAILURES &&
       w.attempt < options.maxAttempts &&
       used + i < options.repairBudget;

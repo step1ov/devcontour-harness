@@ -245,6 +245,8 @@ function inputCounts(
 export function failureBucketOf(a: AttemptState): FailureBucket | null {
   if (!finishedStatuses.has(a.status) || a.interrupted === 'shutdown') return null;
   if (a.blocked) return 'environment';
+  // Исполнитель остановился из-за окружения (`writerBlocked`): корзина среды.
+  if (a.writerBlocked) return 'environment';
   if (a.failureKind) return bucketOfKind[a.failureKind];
   if (a.status === 'expired') return 'environment';
   if (a.status === 'cancelled') return 'operator';
@@ -264,6 +266,7 @@ const counted = (a: AttemptState, givenBack: ReadonlySet<string>) =>
   a.status !== 'active' &&
   a.interrupted !== 'shutdown' &&
   !a.blocked &&
+  !a.writerBlocked &&
   a.status !== 'expired' &&
   a.failureKind !== 'environment' &&
   a.failureKind !== 'provider-auth' &&

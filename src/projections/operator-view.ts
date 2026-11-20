@@ -343,7 +343,7 @@ export interface AttemptRow {
   model?: string;
   startedAt: string;
   finishedAt?: string;
-  stages: { stage: string; durationMs?: number; outcome?: 'passed' | 'failed' }[];
+  stages: { stage: string; durationMs?: number; outcome?: 'passed' | 'failed'; unused?: true }[];
 }
 
 export interface ViewVerificationRow {
@@ -504,6 +504,7 @@ export interface OperatorAttemptInput {
     startedAt: string;
     finishedAt?: string;
     outcome?: 'passed' | 'failed';
+    unused?: true;
   }[];
 }
 
@@ -2048,6 +2049,7 @@ export function workDetailView(
         stage: text(c, s.stage, T.step) ?? 'stage',
         ...(Number.isFinite(d) ? { durationMs: Math.max(0, d) } : {}),
         ...(s.outcome ? { outcome: s.outcome } : {}),
+        ...(s.unused ? { unused: true as const } : {}),
       };
     }),
   }));

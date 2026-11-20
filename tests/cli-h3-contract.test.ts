@@ -64,6 +64,8 @@ const laterCommands: readonly string[] = [
   'review-code',
   // Представление оператора (0.1.0-alpha.55).
   'view',
+  // Повторное согласование после правки политики (0.1.0-alpha.59).
+  'reapprove',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -203,6 +205,12 @@ const ADDITIVE_ENUM_VALUES = new Set([
   // Представление оператора (`harness view`, 0.1.0-alpha.55).
   'POLICY_REQUIRED',
   'VIEW_TOO_LARGE',
+  // Остановка исполнителя из-за окружения; предупреждение init о песочнице ведущего (0.1.0-alpha.59).
+  'writer-environment',
+  'lead-sandbox',
+  // Предупреждения init о хранилище зависимостей (0.1.0-alpha.59).
+  'dependency-store-unsupported',
+  'dependency-cache-path',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
@@ -406,6 +414,32 @@ test('H3-01: прежние команды и схемы их данных не 
       if ('command' in rest && 'timeoutMs' in rest && !('repositoryId' in rest)) delete rest.when;
       v = rest;
     }
+    // Аддитивные поля раунда ревью (0.1.0-alpha.59): политика раунда и digest
+    // её границы исполнения.
+    if (
+      k === 'properties' &&
+      v &&
+      typeof v === 'object' &&
+      'reviewerBinding' in v &&
+      'contextDigest' in v
+    ) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.policyDigest;
+      delete rest.isolationDigest;
+      v = rest;
+    }
+    // Запись повторного согласования (`approval.reapproval`, событие
+    // `graph.approved`) и отметка «не используется» у стадии попытки (0.1.0-alpha.59).
+    if (k === 'properties' && v && typeof v === 'object' && 'actor' in v && 'reapproval' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.reapproval;
+      v = rest;
+    }
+    if (k === 'properties' && v && typeof v === 'object' && 'outcome' in v && 'unused' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.unused;
+      v = rest;
+    }
     if (Array.isArray(v))
       return (v as unknown[]).filter(
         (x) =>
@@ -457,6 +491,8 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.warnings;
       // Правило ответов на вопросы исполнителя словами (0.1.0-alpha.55).
       delete rest.questions;
+      // Ведущий внутри песочницы (0.1.0-alpha.59).
+      delete rest.leadSandbox;
       return rest;
     }
     // Аддитивные поля ответов коннектора: пакеты `tasks[].context` (alpha.13) и
@@ -577,6 +613,7 @@ test('H3-01: прежние команды и схемы их данных не 
   assert.ok(JSON.stringify(data.status).includes('"plainEn"'), 'status: blockers[].plain');
   assert.ok(JSON.stringify(data.status).includes('"lastFailure"'), 'status: lastFailure');
   // Хеш H2 вырезает пробу портов и предупреждения doctor: объявление держит эта проверка.
+  assert.ok(JSON.stringify(data.doctor).includes('"leadSandbox"'), 'doctor: песочница ведущего');
   assert.ok(JSON.stringify(data.doctor).includes('"ports"'), 'doctor: проба портов');
   assert.ok(JSON.stringify(data.doctor).includes('"warnings"'), 'doctor: предупреждения');
   // Хеш H2 выше вырезает поля ведущего и ревью: объявление держит эта проверка.

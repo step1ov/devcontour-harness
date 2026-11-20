@@ -106,6 +106,16 @@ export function contextText(snapshot: ContextSnapshot | undefined) {
   ].join('\n\n');
 }
 
+/**
+ * Правило writer «сначала код, потом вопрос»: шаг, обязательный по правилам
+ * проекта, но закрытый окружением попытки, не повод остановиться до кода.
+ * Без него исполнитель проверял весь набор инструментов до первой строки
+ * кода и останавливался на первом недоступном, а повтор в той же песочнице
+ * упирался в тот же шаг.
+ */
+export const ENVIRONMENT_BLOCK_WRITER_TEXT =
+  'Environment blocks: if a step that the project rules (AGENTS.md, skills, templates) make mandatory is blocked by this environment — no network or registry, a local server cannot listen, a tool or browser cannot start, a path is read-only, a source of the task is unreachable — do not stop before coding and do not spend the attempt on probing the toolchain first. Implement the work order first with what you have, run every check you can, and keep your edits in the worktree. The harness gates run acceptance outside your sandbox. Then: if the blocked step was only a self-check and the work is complete, return completed=true and name the unrun step, the exact error and why in the summary. If the blocked step is needed to finish the work and the input policy lets you ask, return completed=false with an inputRequest: impact "technical", the blocked step and the exact error in the question, concrete options (for example: the lead enables the step in the policy, the step moves to a harness gate, the rule is waived for this task), severity at least the input threshold; if the policy does not let you ask, return completed=false and name the blocked step and the exact error in the summary — the lead decides. Never return completed=false for an environment reason without having written the code you could write.';
+
 /** Запрос исполнителю или reviewer: исходные критерии, область, прежние находки, контекст. */
 export function prompt(input: {
   work: WorkState;
@@ -172,6 +182,7 @@ export function prompt(input: {
       ? 'The specification or its contracts changed after that attempt: check the applied changes against the current approved specification and contracts above, not against the old ones.'
       : '',
     !review && input.inputPolicy ? inputPolicyText(input.inputPolicy) : '',
+    !review ? ENVIRONMENT_BLOCK_WRITER_TEXT : '',
     `Base commit: ${attempt.baseSha ?? ''}.${review ? ` Review commit: ${review.sha} (${review.phase}).` : ''}`,
     ...(input.notes ?? []),
     contextText(input.context),

@@ -266,6 +266,17 @@ export const reviewRecordSchema = z.strictObject({
    * раунд, а не прежнее одобрение.
    */
   contextDigest: digestSchema.optional(),
+  /**
+   * `executionDigest` политики, под которой проведён раунд. Повтор ревью
+   * возвращает прежний раунд только под той же политикой; раунд без поля
+   * (до 0.1.0-alpha.59) не покрывает изменённую политику.
+   */
+  policyDigest: digestSchema.optional(),
+  /**
+   * `isolationDigest` политики раунда: изоляция, сеть и профили инструментов.
+   * Согласование после их изменения требует нового раунда.
+   */
+  isolationDigest: digestSchema.optional(),
   /** Все находки предмета на момент раунда: новые и прежние с их статусами. */
   findings: z.array(reviewFindingSchema),
   artifact: z.string().max(1000),

@@ -254,8 +254,12 @@ export async function inspectRepository(
   };
   const problem = (code: ToolchainProblemCode, f: Field, message: string, path?: string) =>
     report.problems.push({ code, field: f, message, ...(path !== undefined ? { path } : {}) });
-  const warning = (code: ToolchainProblemCode, f: Field, message: string) =>
-    report.warnings.push({ code, field: f, message });
+  // То же предупреждение с того же поля — одна запись.
+  const warning = (code: ToolchainProblemCode, f: Field, message: string) => {
+    const key = JSON.stringify([code, f, message]);
+    if (!report.warnings.some((w) => JSON.stringify([w.code, w.field, w.message]) === key))
+      report.warnings.push({ code, field: f, message });
+  };
   if (!existsSync(root)) {
     problem('REPOSITORY_MISSING', [...field, 'path'], 'Каталог репозитория не найден: ' + root);
     return report;
@@ -840,13 +844,21 @@ export async function inspectRepository(
           `Версия ${store.manager} не определена: хранилище не действует, установка обычная`,
         );
       const declared = packageManagerField(m, '.');
-      for (const v of [version, declared?.name === store.manager ? declared.version : undefined])
+      // PATH и `packageManager` обычно называют одну версию (corepack): одна строка
+      // на версию, с источниками.
+      const sources = new Map<string, string[]>();
+      for (const [v, source] of [
+        [version, 'PATH'],
+        [declared?.name === store.manager ? declared.version : undefined, 'packageManager'],
+      ] as const)
         if (v && !dependencyStoreSupports(store.manager, v))
-          warning(
-            'DEPENDENCY_STORE',
-            [...storeField, 'manager'],
-            `${store.manager} ${v} вне проверенных версий ${from} … <${below}: хранилище не действует, установка обычная`,
-          );
+          sources.set(v, [...(sources.get(v) ?? []), source]);
+      for (const [v, from_] of sources)
+        warning(
+          'DEPENDENCY_STORE',
+          [...storeField, 'manager'],
+          `${store.manager} ${v} (${from_.join(', ')}) вне проверенных версий ${from} … <${below}: хранилище НЕ ПРИМЕНЯЕТСЯ — каждый checkout ставит все пакеты из сети заново; сообщите оператору как находку по harness, свой общий кэш в аргументах проверок не собирайте`,
+        );
     }
     if (repo.prepare.length)
       warning(

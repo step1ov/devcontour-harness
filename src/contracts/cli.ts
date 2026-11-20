@@ -266,6 +266,47 @@ export const cliCommands = {
     ],
     refusals: ['APPROVAL_STALE', 'APPROVAL_REQUIRED', 'REVIEW_REJECTED', 'INPUT_REQUIRED'],
   },
+  reapprove: {
+    description:
+      'Повторное согласование графа после правки политики: тот же digest графа и последний раунд review-plan, согласование привязывается к новой политике с записью, кто и почему (approval.reapproval, событие graph.approved). Правку изоляции, сети, профилей инструментов и их выбора, окружения, protectedPaths, шагов на хосте (lifecycle, prepare, dependencyBuild, preflight), mode и approvalMode прежний раунд не покрывает; держится только на одобренном последнем раунде: отказ APPROVAL_REQUIRED — нужен новый review-plan. Как review-plan, привязывает --policy к каталогу состояния и при отказе. Внутренности библиотеки (Engine.approve) вместо этой команды не вызывать',
+    writes: true,
+    idempotency: 'Граф уже согласован под текущей политикой — ничего не меняет (changed: false)',
+    args: [
+      state,
+      {
+        name: '--policy',
+        value: 'path',
+        required: true,
+        description: 'Изменённая политика; привязывается к каталогу состояния, как в review-plan',
+      },
+      { name: '--subject', value: 'id', required: true, description: 'ID графа' },
+      {
+        name: '--digest',
+        value: 'digest',
+        required: true,
+        description: 'Digest графа из ReviewRecord последнего раунда',
+      },
+      {
+        name: '--by',
+        value: 'text',
+        required: true,
+        description: 'Кто согласует заново (ведущий, оператор): записывается в согласование',
+      },
+      {
+        name: '--reason',
+        value: 'text',
+        required: true,
+        description: 'Почему: какая правка политики и почему прежнее ревью её покрывает',
+      },
+    ],
+    refusals: [
+      'APPROVAL_STALE',
+      'APPROVAL_REQUIRED',
+      'REVIEW_REJECTED',
+      'INPUT_REQUIRED',
+      'NOT_FOUND',
+    ],
+  },
   run: {
     description:
       'Зарегистрировать согласованный граф (идемпотентно по connector, ref, revision, digest) и вести работу до простоя',
@@ -1222,6 +1263,13 @@ export const cliCommands = {
         required: false,
         description: 'Таблица шагов, класс отказа и совет для человека вместо JSON',
       },
+      {
+        name: '--writer-probe',
+        value: 'flag',
+        required: false,
+        description:
+          'После prepare прогнать команды writerProbe репозитория в изоляции каждого его исполнителя (окружение, TMPDIR, сеть, области записи; codex sandbox или sandbox-runtime), без модели: по каждой ok/blocked, причина и совет; закрытый шаг или пустой writerProbe — exit 4',
+      },
     ],
     refusals: ['CANCELLED', 'NOT_FOUND'],
   },
@@ -1389,7 +1437,8 @@ export const attemptSummarySchema = z.strictObject({
    * попытка с корзиной `failureBucketOf`) — попытка, корзина, класс, время и
    * причина простыми словами по-русски и по-английски («окружение — порт
    * 3000 занят»). Текст строится из класса отказа, ID gates и номера порта,
-   * без свободного текста ошибки. Нет поля — отказов нет.
+   * без свободного текста ошибки; исключение — итог исполнителя
+   * незавершённой попытки (`writerSummary`) в кавычках. Нет поля — отказов нет.
    */
   lastFailure: z
     .strictObject({
@@ -1649,6 +1698,19 @@ export const approveDataSchema = z.strictObject({
   changed: z.boolean(),
 });
 
+export const reapproveDataSchema = z.strictObject({
+  subject: idSchema,
+  digest: digestSchema,
+  at: isoTimeSchema,
+  changed: z.boolean(),
+  /** `executionDigest` политики, к которой привязано согласование. */
+  policyDigest: digestSchema,
+  /** Политика прежнего согласования. */
+  previousPolicyDigest: digestSchema,
+  /** Раунд ревью плана, на котором держится согласование. */
+  round: z.number().int().positive().optional(),
+});
+
 export const doctorDataSchema = z.strictObject({
   harness: z.string(),
   apiVersion: z.literal(API_VERSION),
@@ -1702,6 +1764,22 @@ export const doctorDataSchema = z.strictObject({
         holder: z.string().optional(),
       }),
     )
+    .optional(),
+  /**
+   * Ведущий внутри песочницы (например, Codex seatbelt): признаки
+   * (`nested-sandbox`, `ps-denied`, `git-readonly:<путь>`, `state-readonly`,
+   * `codex-env` — подсказка), совет простыми словами и флаги запуска ведущего.
+   * Есть, когда проверка выполнялась (CLI `doctor`).
+   */
+  leadSandbox: z
+    .strictObject({
+      inside: z.boolean(),
+      signals: z.array(z.string()),
+      advice: z.string(),
+      adviceEn: z.string(),
+      flags: z.string(),
+      narrowFlags: z.string(),
+    })
     .optional(),
   problems: z.array(z.string()),
   /**
@@ -1816,6 +1894,48 @@ export const smokeDataSchema = z.strictObject({
     .optional(),
   logs: z.string(),
   warnings: z.array(z.string()).optional(),
+  /** Проба исполнителя (`--writer-probe`): команды `writerProbe` в изоляции каждого исполнителя. */
+  writerProbe: z
+    .strictObject({
+      ok: z.boolean(),
+      writers: z.array(
+        z.strictObject({
+          runtime: runtimeNameSchema,
+          toolProfile: z.string().optional(),
+          roles: z.array(z.string()),
+          mechanism: z.enum(['codex-sandbox', 'sandbox-runtime', 'none']),
+          network: z.boolean(),
+          commands: z.array(
+            z.strictObject({
+              id: z.string().min(1).max(200),
+              command: z.array(z.string()),
+              status: z.enum(['ok', 'blocked', 'failed']),
+              exitCode: z.number().int().optional(),
+              timedOut: z.boolean().optional(),
+              durationMs: z.number().int().nonnegative(),
+              reason: z
+                .enum([
+                  'listen-denied',
+                  'network-denied',
+                  'write-denied',
+                  'process-abort',
+                  'missing-tool',
+                  'timeout',
+                  'no-shell',
+                  'environment',
+                  'failed',
+                ])
+                .optional(),
+              evidence: z.string().optional(),
+              advice: z.string().optional(),
+              log: z.string().optional(),
+            }),
+          ),
+        }),
+      ),
+      notes: z.array(z.string()).optional(),
+    })
+    .optional(),
 });
 
 export const profileDataSchema = z.strictObject({
@@ -2250,6 +2370,7 @@ export const cliDataSchemas = {
   'review-plan': reviewRecordSchema,
   'review-contract': reviewRecordSchema,
   approve: approveDataSchema,
+  reapprove: reapproveDataSchema,
   run: runDataSchema,
   status: statusDataSchema,
   events: eventsDataSchema,

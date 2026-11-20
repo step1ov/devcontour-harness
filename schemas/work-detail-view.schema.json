@@ -532,6 +532,10 @@
                     "passed",
                     "failed"
                   ]
+                },
+                "unused": {
+                  "type": "boolean",
+                  "const": true
                 }
               },
               "required": [

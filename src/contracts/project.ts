@@ -86,6 +86,9 @@ export const initWarningCodes = [
   'review-same-vendor',
   'runtime-missing',
   'runtime-unauthenticated',
+  'lead-sandbox',
+  'dependency-store-unsupported',
+  'dependency-cache-path',
 ] as const;
 
 export const fileConflicts = [

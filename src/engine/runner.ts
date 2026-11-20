@@ -171,6 +171,7 @@ import {
 } from './classify.ts';
 import { TaskFailure, type FailureKind } from './failure.ts';
 import { activeOf, crashedRecheck, namesFailingCases, type Engine } from './engine.ts';
+import { environmentBlockOf, writerScratch } from './writer-block.ts';
 import { prompt } from './prompt.ts';
 import { scopeViolations } from './scope.ts';
 import { generatorNote, runGenerators, selectGenerators } from '../verification/generators.ts';
@@ -848,6 +849,21 @@ export class Runner {
     // Окружение вызова — с профилем инструментов его назначения.
     const execution = this.environment(input.attempt, input.phase, input.cwd, binding.toolProfile);
     const boundary = this.boundary(input.attempt.dependencies);
+    // Временный каталог исполнителя — свой и в его области записи
+    // (`writerScratch`): иначе shell и инструменты, пишущие в TMPDIR
+    // (here-document zsh, кеши генераторов), получали отказ песочницы.
+    let temp: Awaited<ReturnType<typeof writerScratch>> | undefined;
+    try {
+      temp = review ? undefined : await writerScratch(execution.env);
+    } catch (error) {
+      throw new TaskFailure(
+        'environment',
+        `Временный каталог исполнителя не создан: ${error instanceof Error ? error.message : String(error)}. Задайте TMPDIR, доступный на запись, или освободите /tmp`,
+        undefined,
+        'sandbox-filesystem',
+      );
+    }
+    const scratch = temp?.dir;
     // Вызов под учётом: бюджет проверяется до вызова, расход закрепляется за попыткой.
     const response = await measuredInvoke(
       this.engine,
@@ -868,11 +884,14 @@ export class Runner {
         session: { kind: 'fresh' },
         sandbox: {
           mode: this.policy.isolation.mode,
-          writable: review ? [] : [input.cwd],
-          denied: boundary.hidden,
+          writable: review ? [] : [input.cwd, ...(scratch ? [scratch] : [])],
+          // Родитель временных каталогов закрыт: соседние исполнители не
+          // видят временных файлов друг друга; свой каталог открыт ниже.
+          denied: [...boundary.hidden, ...(temp ? [temp.parent] : [])],
           ...(boundary.checkouts.length ? { checkouts: boundary.checkouts } : {}),
           readable: [
             input.cwd,
+            ...(scratch ? [scratch] : []),
             ...boundary.readable,
             // Самопроверка исполнителя: план и полный корпус вне worktree.
             ...(!review && this.selfChecks.has(input.attempt.id)
@@ -896,6 +915,9 @@ export class Runner {
         runId: input.attempt.id,
         stage: review ? input.phase + '-review' : 'implementation',
       },
+    ).finally(() =>
+      // Временные файлы исполнителя — не артефакт попытки: каталог свой, создан выше.
+      scratch ? rm(scratch, { recursive: true, force: true }).catch(() => undefined) : undefined,
     );
     // Ответ «передан исполнителю» — только когда runtime вызова writer
     // попытки, выданной с ним, действительно работал (ответ не
@@ -1085,9 +1107,29 @@ export class Runner {
     dir: string,
   ) {
     if (!repo.dependencyStore) return;
-    await this.timed(attempt, 'dependency-store', () =>
-      materializeStore(this.storeContext(attempt), { repo, cwd, execution, signal, dir }),
+    // Промах — обычная установка без seed: стадия прошла, но хранилище не
+    // использовано (`unused`), а не «пройдено за 0 с».
+    await this.timed(
+      attempt,
+      'dependency-store',
+      () => materializeStore(this.storeContext(attempt), { repo, cwd, execution, signal, dir }),
+      (receipt) => (receipt && receipt.outcome !== 'miss' ? 'passed' : 'unused'),
     );
+  }
+
+  /**
+   * Шаги `prepare` репозитория — своя стадия с замером (`prepare`, на integration —
+   * `integration-prepare`): установка зависимостей в них занимает минуты, и
+   * оператор видит подготовку, а не «исполнитель пишет код». Без шагов стадии нет.
+   */
+  private async prepareSteps(
+    attempt: AttemptState,
+    stage: string,
+    steps: Repo['prepare'],
+    run: () => Promise<unknown>,
+  ) {
+    if (!steps.length) return;
+    await this.timed(attempt, stage, run);
   }
 
   /**
@@ -1098,7 +1140,7 @@ export class Runner {
     attempt: AttemptState,
     stage: string,
     fn: () => Promise<T>,
-    outcome?: (value: T) => 'passed' | 'failed',
+    outcome?: (value: T) => 'passed' | 'failed' | 'unused',
   ) {
     const id = this.engine.timingStarted(attempt.id, attempt.token, stage);
     // Граница стадии — движение попытки для обхода зависших.
@@ -1106,7 +1148,14 @@ export class Runner {
     try {
       const value = await fn();
       activityScope.getStore()?.moved();
-      this.engine.timingFinished(attempt.id, attempt.token, id, outcome?.(value) ?? 'passed');
+      const result = outcome?.(value) ?? 'passed';
+      this.engine.timingFinished(
+        attempt.id,
+        attempt.token,
+        id,
+        result === 'unused' ? 'passed' : result,
+        result === 'unused' ? { unused: true } : {},
+      );
       return value;
     } catch (error) {
       try {
@@ -1320,17 +1369,37 @@ export class Runner {
           undefined,
           outcome({ ...decision.question, mode: 'declined' }),
         );
-      case 'unfinished':
+      case 'unfinished': {
+        const summary = output.summary.trim().slice(0, 500);
+        const extra =
+          evaluation.assumptions.length || evaluation.followUps.length ? outcome() : undefined;
+        // Исполнитель назвал причиной окружение (сеть, сервер, инструмент,
+        // источник закрыты его песочницей): повтор в той же песочнице
+        // упрётся в тот же шаг. Это ход ведущего, а не автоматический повтор;
+        // попытка не засчитывается (writer-block.ts).
+        if (environmentBlockOf(output.summary))
+          throw new TaskFailure(
+            'needs-lead',
+            'Исполнитель остановился: окружение закрыло обязательный шаг. Итог исполнителя: ' +
+              summary,
+            undefined,
+            'writer-environment',
+            undefined,
+            extra,
+            summary,
+          );
         // Не доделано — свой класс: повтор продолжит с черновика, а не
         // остановится как неизвестный отказ.
         throw new TaskFailure(
           'unfinished',
-          'Исполнитель сообщил о незавершённой работе: ' + output.summary.slice(0, 500),
+          'Исполнитель сообщил о незавершённой работе: ' + summary,
           undefined,
           undefined,
           undefined,
-          evaluation.assumptions.length || evaluation.followUps.length ? outcome() : undefined,
+          extra,
+          summary || undefined,
         );
+      }
       case 'continue':
         if (evaluation.assumptions.length || evaluation.followUps.length)
           this.engine.recordAssumptions(attempt.id, attempt.token, outcome());
@@ -1630,13 +1699,15 @@ export class Runner {
                 signal,
                 join(artifacts, 'candidate'),
               );
-              await runSteps(
-                repo.prepare,
-                cwd,
-                join(artifacts, 'candidate', 'prepare'),
-                execution,
-                signal,
-                base,
+              await this.prepareSteps(attempt, 'prepare', repo.prepare, () =>
+                runSteps(
+                  repo.prepare,
+                  cwd,
+                  join(artifacts, 'candidate', 'prepare'),
+                  execution,
+                  signal,
+                  base,
+                ),
               );
               prepared(execution);
               // Черновик прежней попытки — до установки: манифесты, которые он
@@ -2099,11 +2170,14 @@ export class Runner {
           ...(heartbeatCause ? { heartbeatCause } : {}),
         };
         const input = !stalled && origin instanceof TaskFailure ? origin.input : undefined;
+        const writerSummary =
+          !stalled && origin instanceof TaskFailure ? origin.writerSummary : undefined;
         let recorded: { kind: FailureKind; message: string } = { kind, message: reported };
         try {
           this.engine.fail(attempt.id, attempt.token, reported, {
             ...failure,
             ...(input ? { input } : {}),
+            ...(writerSummary ? { writerSummary } : {}),
           });
         } catch (refused) {
           // Запрос не записался (откат той же транзакции, что и отказ):
@@ -2924,7 +2998,9 @@ export class Runner {
           signal,
           async () => {
             await this.dependencyStore(attempt, repo, dir, execution, signal, own);
-            await runSteps(repo.prepare, dir, join(own, 'prepare'), execution, signal);
+            await this.prepareSteps(attempt, `integration-prepare:${repo.id}`, repo.prepare, () =>
+              runSteps(repo.prepare, dir, join(own, 'prepare'), execution, signal),
+            );
             prepared(execution);
             await pinned('подготовка');
             for (const gate of ordered(repo.gates, consumer.gates))
@@ -4127,13 +4203,15 @@ export class Runner {
             signal,
             join(artifacts, 'integration'),
           );
-          await runSteps(
-            repo.prepare,
-            cwd,
-            join(artifacts, 'integration', 'prepare'),
-            execution,
-            signal,
-            attempt.baseSha,
+          await this.prepareSteps(attempt, 'integration-prepare', repo.prepare, () =>
+            runSteps(
+              repo.prepare,
+              cwd,
+              join(artifacts, 'integration', 'prepare'),
+              execution,
+              signal,
+              attempt.baseSha,
+            ),
           );
           prepared(execution);
           await checks(
