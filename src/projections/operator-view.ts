@@ -436,10 +436,12 @@ export interface OperatorView {
   scope?: ScopeView;
   /**
    * Почему `scope` нет (0.1.0-alpha.62): `no-snapshot` — ни одна связка ещё не
-   * записала снимок задач трекера в каталог состояния. Раздел `scope`, опущенный
-   * по размеру, называет `truncated.scope`, а не это поле.
+   * записала снимок задач трекера в каталог состояния; `unreadable` — база
+   * коннектора есть, но эта версия её не прочитала (чужая схема, другая
+   * версия, повреждение). Раздел `scope`, опущенный по размеру, называет
+   * `truncated.scope`, а не это поле.
    */
-  scopeReason?: 'no-snapshot';
+  scopeReason?: 'no-snapshot' | 'unreadable';
   sourceQuestions?: SourceQuestionView[];
   forecast?: ForecastView;
   updates?: UpdatesView;
@@ -926,6 +928,8 @@ export interface OperatorViewInput {
    * `scope`, `sourceQuestions`, `health.sources` в документе нет).
    */
   sources?: readonly OperatorSourceInput[];
+  /** Баз коннектора, которые есть, но не прочитаны; есть — `scopeReason: unreadable`, а не `no-snapshot`. */
+  sourcesUnread?: number;
   /** Обновления по последней проверке `harness update --check` (ревизия 4); нет — поля нет. */
   updates?: UpdatesView;
 }
@@ -2569,7 +2573,9 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
     history,
     health,
     ...(activity ? { activity } : {}),
-    ...(scope ? { scope } : { scopeReason: 'no-snapshot' as const }),
+    ...(scope
+      ? { scope }
+      : { scopeReason: i.sourcesUnread ? ('unreadable' as const) : ('no-snapshot' as const) }),
     ...(sourceQuestions ? { sourceQuestions } : {}),
     ...(forecast ? { forecast } : {}),
     ...(i.updates ? { updates: updatesOf(c, i.updates, truncated) } : {}),

@@ -492,6 +492,7 @@ test('alpha.60: срез прогона — не готовая и не пере
   const none = operatorView(baseInput());
   assert.equal(none.scope, undefined);
   assert.equal(none.scopeReason, 'no-snapshot', 'нет снимка — причина названа');
+  assert.equal(operatorView(baseInput({ sourcesUnread: 1 })).scopeReason, 'unreadable');
   assert.equal(view.scopeReason, undefined);
   assert.equal(none.sourceQuestions, undefined);
   assert.equal(none.health.sources, undefined);

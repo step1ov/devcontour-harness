@@ -2171,7 +2171,8 @@
     "scopeReason": {
       "type": "string",
       "enum": [
-        "no-snapshot"
+        "no-snapshot",
+        "unreadable"
       ]
     },
     "sourceQuestions": {

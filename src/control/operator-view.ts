@@ -1028,7 +1028,7 @@ export function collectOperatorViewInput(
       activity,
       warnings: view.warnings,
       mask: maskContextOf(policy, view.baseDir, h.stateDir),
-      ...((sources) => (sources.length ? { sources } : {}))(connectorSources(h.stateDir, known)),
+      ...sourcesInput(h.stateDir, known),
     };
   });
 }
@@ -1043,6 +1043,28 @@ export function connectorSources(
   stateDir: string,
   works: ReadonlySet<string> = new Set(),
 ): OperatorSourceInput[] {
+  return readConnectorSources(stateDir, works).sources;
+}
+
+/** Поля входа о связках: срезы и число баз, которые прочитать не удалось. */
+function sourcesInput(
+  stateDir: string,
+  works?: ReadonlySet<string>,
+): Pick<OperatorViewInput, 'sources' | 'sourcesUnread'> {
+  const { sources, unread } = readConnectorSources(stateDir, works);
+  return { ...(sources.length ? { sources } : {}), ...(unread ? { sourcesUnread: unread } : {}) };
+}
+
+/**
+ * Связки каталога состояния и число баз коннектора, которые есть, но не
+ * прочитаны (чужая схема, другая версия, повреждение): по ним нельзя сказать,
+ * что снимка нет. База известной схемы без снимка и наблюдения — не
+ * прочитанная трекером связка, а не ошибка чтения.
+ */
+function readConnectorSources(
+  stateDir: string,
+  works: ReadonlySet<string> = new Set(),
+): { sources: OperatorSourceInput[]; unread: number } {
   const dir = join(resolve(stateDir), 'connectors');
   let files: string[];
   try {
@@ -1050,9 +1072,10 @@ export function connectorSources(
       .filter((f) => f.endsWith('.sqlite'))
       .sort();
   } catch {
-    return [];
+    return { sources: [], unread: 0 };
   }
   const out: OperatorSourceInput[] = [];
+  let unread = 0;
   for (const file of files) {
     const path = join(dir, file);
     // Без журнала — неизменяемое открытие (ни одного файла рядом с базой); если
@@ -1070,9 +1093,10 @@ export function connectorSources(
     const journal = existsSync(path + '-wal') || existsSync(path + '-journal');
     let source = readConnectorDb(path, file, works, !journal);
     if (!journal && mark() !== before) source = readConnectorDb(path, file, works, false);
-    if (source) out.push(source);
+    if (source === 'unreadable') unread++;
+    else if (source !== 'empty') out.push(source);
   }
-  return out;
+  return { sources: out, unread };
 }
 
 function readConnectorDb(
@@ -1080,7 +1104,7 @@ function readConnectorDb(
   file: string,
   works: ReadonlySet<string>,
   immutable: boolean,
-): OperatorSourceInput | undefined {
+): OperatorSourceInput | 'empty' | 'unreadable' {
   let db: DatabaseSync | undefined;
   try {
     if (!immutable) db = new DatabaseSync(path, { readOnly: true });
@@ -1096,7 +1120,7 @@ function readConnectorDb(
     const provider = meta('provider');
     const projectId = meta('projectId');
     // Только база коннектора известной схемы: чужая или другой версии — пропуск.
-    if (!provider || !projectId || meta('schema') !== '1') return undefined;
+    if (!provider || !projectId || meta('schema') !== '1') return 'unreadable';
     const row = db.prepare('SELECT data FROM snapshots ORDER BY rowid DESC LIMIT 1').get() as
       { data: string } | undefined;
     const manifest = row
@@ -1110,7 +1134,7 @@ function readConnectorDb(
     } catch {
       observation = undefined;
     }
-    if (!manifest && !observation) return undefined;
+    if (!manifest && !observation) return 'empty';
     const connector =
       manifest?.connector ?? observation?.connector ?? file.replace(/\.sqlite$/, '');
     const compatibility = observation?.compatibility ?? manifest?.compatibility;
@@ -1150,7 +1174,7 @@ function readConnectorDb(
     };
   } catch {
     /* не база коннектора или другой версии — пропустить */
-    return undefined;
+    return 'unreadable';
   } finally {
     db?.close();
   }
@@ -1236,7 +1260,7 @@ function emptyInput(policy: ViewPolicy, now: number, stateDir: string): Operator
       },
     ],
     mask: maskContextOf(policy.policy, policy.baseDir, stateDir),
-    ...((sources) => (sources.length ? { sources } : {}))(connectorSources(stateDir)),
+    ...sourcesInput(stateDir),
   };
 }
 
