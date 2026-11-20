@@ -165,6 +165,11 @@ export interface StepOutcome {
    * диагноза `harness smoke`, попытки по нему не судятся.
    */
   registryFailure?: string;
+  /**
+   * Стадия прошла, но ничего не дала: хранилище зависимостей не использовано
+   * (промах, отказ сборки seed). Не отказ — и не «пройдено».
+   */
+  unused?: boolean;
 }
 
 export async function runSteps(

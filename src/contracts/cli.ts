@@ -2183,6 +2183,11 @@ export const smokeDataSchema = z.strictObject({
       log: z.string().optional(),
       /** Исход хранилища зависимостей: `hit`, `partial`, `miss: причина` (промах — не отказ). */
       detail: z.string().optional(),
+      /**
+       * Шаг не отказал, но ничего не дал: хранилище зависимостей не использовано
+       * (промах, отказ сборки seed; причина — в `detail`). alpha.61.
+       */
+      unused: z.boolean().optional(),
     }),
   ),
   /** Отказ окружения: класс, где, сообщение и что сделать. */

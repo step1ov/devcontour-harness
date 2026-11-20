@@ -211,7 +211,11 @@ harness smoke --state <state> --policy .harness/policy.json --sha HEAD --human
 ```
 
 Каждый шаг — строка с длительностью и кодом выхода (`data.steps[]`), лог —
-в `<state>/gates-at/<id>`. Отказ — exit 4 (`LIFECYCLE_FAILED`) и
+в `<state>/gates-at/<id>`. Хранилище зависимостей, которое не использовано
+(промах, отказ или истёкший бюджет сборки seed), — не отказ окружения и не
+«пройдено»: в JSON шаг `dependency-store` остаётся `status: passed` с
+`unused: true` и причиной в `detail` (`miss: …`), а таблица `--human` и ход в
+stderr показывают `miss` с настоящим временем и «не используется: причина». Отказ — exit 4 (`LIFECYCLE_FAILED`) и
 `data.failure` с классом и советом:
 
 | Класс          | Что случилось                                                                             |

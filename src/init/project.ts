@@ -601,7 +601,9 @@ export function initWarnings(
         code:
           a.code === 'DEPENDENCY_STORE_UNSUPPORTED'
             ? 'dependency-store-unsupported'
-            : 'dependency-cache-path',
+            : a.code === 'DEPENDENCY_STORE_REGISTRY'
+              ? 'dependency-store-registry'
+              : 'dependency-cache-path',
         message: a.message,
       });
   return warnings;

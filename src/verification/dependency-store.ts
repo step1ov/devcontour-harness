@@ -39,6 +39,7 @@ import {
 } from '../toolchains/probe.ts';
 import { fileDigests, NotRegularFile } from './file-digests.ts';
 import { runCheck, type Boundary } from './gates.ts';
+import { seedRegistryHosts } from './store-registry.ts';
 
 /**
  * Хранилище зависимостей: один seed на lockfile целевой ветки и его копия в
@@ -48,11 +49,20 @@ import { runCheck, type Boundary } from './gates.ts';
  * Граница доверия:
  *
  * - Seed собирается только из lockfile целевой ветки — принятой истории.
+ *   Пока целевой ветки нет (до первого `run`), — из lockfile `HEAD` checkout
+ *   репозитория: именно от него `run` создаёт целевую ветку, так что это та же
+ *   история, и `harness smoke` сразу после `init` уже попадает в хранилище.
+ *   Проверяемый SHA ключом не служит: это может быть кандидат.
  *   Сам harness не даёт кандидату запустить сборку или выбрать её содержимое:
  *   его lockfile только сравнивается с seed (частичное попадание).
- * - Сборка идёт в песочнице проверок с её `isolation.domains`, в каталоге из
- *   одного lockfile: `.npmrc`, `.pnpmfile.cjs` и `pnpm-workspace.yaml` проекта
- *   туда не попадают, и его хуки не исполняются.
+ * - Сборка идёт в песочнице проверок с её `isolation.domains` и, только для неё,
+ *   хостами реестра (`seedRegistryHosts`): адрес реестра из окружения политики
+ *   (`npm_config_registry`/`pnpm_config_registry`, иначе registry.npmjs.org) и
+ *   хосты `tarball:` принятого lockfile. Без них `pnpm fetch` в закрытой сети
+ *   сжигал бы весь бюджет хранилища. Writers и gates этих доменов не получают:
+ *   сборка исполняет только менеджер без скриптов над принятым lockfile.
+ *   Каталог сборки — из одного lockfile: `.npmrc`, `.pnpmfile.cjs` и
+ *   `pnpm-workspace.yaml` проекта туда не попадают, и его хуки не исполняются.
  * - Seed лежит под корнем рабочих деревьев или в каталоге состояния: оба
  *   закрыты песочницей на чтение и запись. Копия в checkout принадлежит этому
  *   checkout: обратно в seed ничего не возвращается, а integration и следующая
@@ -201,6 +211,11 @@ export interface StoreReceipt {
   durationMs: number;
   /** Причина промаха. */
   reason?: string;
+  /**
+   * Ref, по lockfile которого выбран seed: целевая ветка или `HEAD`, пока
+   * целевой ветки ещё нет (alpha.61).
+   */
+  ref?: string;
   /** Seeds, от которых отказались: причина отказа. */
   refused?: string[];
   /** Переменные окружения процессов этого checkout. */
@@ -246,7 +261,7 @@ interface Store {
   fullBudgetMs: number;
   logDir: string;
   identity: Identity;
-  receipt: Pick<StoreReceipt, 'refused' | 'built'> & {
+  receipt: Pick<StoreReceipt, 'refused' | 'built' | 'ref'> & {
     reason?: string;
     /** Хранилище не влезло бы в сверку защищённых путей: дерево и окружение не трогать. */
     untouched?: boolean;
@@ -697,8 +712,10 @@ async function fetchInto(s: Store, work: string, lock: string, settings: string,
   for (const [name, text] of Object.entries(s.manager.buildFiles))
     await writeFile(join(name === 'package.json' ? project : work, name), text);
   if (base) await place(base, store, s.outer);
+  const { isolation } = s.ctx.policy;
+  const domains = [...new Set([...isolation.domains, ...seedRegistryHosts(s.execution.env, lock)])];
   const result = await storeTree.run(
-    { config: s.ctx.policy },
+    { config: { isolation: { ...isolation, domains } } },
     {
       argv: s.manager.fetch(store),
       cwd: project,
@@ -896,15 +913,37 @@ async function collect(s: Store, current: string) {
   }
 }
 
+/**
+ * Ref, чей lockfile задаёт seed: целевая ветка, а пока её нет — `HEAD` checkout
+ * репозитория, от которого её создаст `run`.
+ */
+async function seedRef(s: Store) {
+  const path = s.ctx.repoPath(s.repo);
+  const exists = await gitOutput(
+    path,
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `${s.repo.targetRef}^{commit}`,
+  ).then(
+    () => true,
+    () => false,
+  );
+  return exists ? s.repo.targetRef : 'HEAD';
+}
+
 /** Точный seed целевой ветки (собирается при нужде), иначе свежий seed той же среды. */
 async function chooseSeed(s: Store) {
-  const lock = await gitOutput(
-    s.ctx.repoPath(s.repo),
-    'show',
-    `${s.repo.targetRef}:${s.spec.lockfile}`,
-  ).catch(() => undefined);
+  const ref = await seedRef(s);
+  s.receipt.ref = ref;
+  const lock = await gitOutput(s.ctx.repoPath(s.repo), 'show', `${ref}:${s.spec.lockfile}`).catch(
+    () => undefined,
+  );
   if (lock === undefined) {
-    s.receipt.reason = `${s.spec.lockfile} нет в ${s.repo.targetRef}`;
+    s.receipt.reason =
+      ref === 'HEAD'
+        ? `${s.spec.lockfile} нет ни в ${s.repo.targetRef} (ветки ещё нет), ни в HEAD`
+        : `${s.spec.lockfile} нет в ${s.repo.targetRef}`;
     return undefined;
   }
   const lockSha256 = sha256(lock);

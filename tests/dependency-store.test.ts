@@ -33,6 +33,7 @@ import {
   isolation,
   isolationSupport,
 } from '../src/environment/isolation.ts';
+import { smokeLifecycle, smokeText } from '../src/control/lifecycle-smoke.ts';
 import { executionEnvironment } from '../src/environment/lifecycle.ts';
 import { processStartedAt } from '../src/environment/live-calls.ts';
 import { ResourcePool, resourceKey } from '../src/environment/resources.ts';
@@ -45,6 +46,7 @@ import {
   type StoreContext,
 } from '../src/verification/dependency-store.ts';
 import { runGatesAt, type GatesAtContext } from '../src/verification/gates-at.ts';
+import { DEFAULT_REGISTRY_HOST, seedRegistryHosts } from '../src/verification/store-registry.ts';
 import {
   draftTouchesInstall,
   prepareWriterDependencies,
@@ -2671,5 +2673,153 @@ test(
     assert.match(r.receipt.reason, /11\.25\.0 в PATH и 10\.12\.3 в packageManager — разные major/);
     assert.deepEqual(r.receipt.env, {});
     assert.equal(existsSync(ctx.seeds), false, 'seed не собирался');
+  },
+);
+
+test(
+  'DS46: целевой ветки ещё нет — seed из lockfile HEAD (smoke до первого run попадает); после её создания — тот же seed без сборки',
+  { skip: unavailable, timeout: 180000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
+    ctx.repo.git('update-ref', '-d', ctx.repoPolicy.targetRef);
+    const head = ctx.repo.head();
+    const before = await ctx.check(head);
+    gatesPassed(before);
+    assert.equal(before.receipt.outcome, 'hit', JSON.stringify(before.receipt));
+    assert.equal(before.receipt.built, true, 'seed собран по lockfile HEAD');
+    assert.equal(before.receipt.ref, 'HEAD');
+    assert.deepEqual(reg.downloads, ['dep-a-1.0.0.tgz']);
+    // `run` создаёт целевую ветку от HEAD: тот же lockfile — тот же seed.
+    ctx.repo.git('update-ref', ctx.repoPolicy.targetRef, 'HEAD');
+    reg.downloads.length = 0;
+    const after = await ctx.check(head);
+    gatesPassed(after);
+    assert.equal(after.receipt.outcome, 'hit');
+    assert.equal(after.receipt.built, undefined);
+    assert.equal(after.receipt.ref, ctx.repoPolicy.targetRef);
+    assert.deepEqual(reg.downloads, []);
+  },
+);
+
+test(
+  'DS47: целевой ветки нет и lockfile нет в HEAD — промах называет обе ссылки; lockfile кандидата seed не создаёт',
+  { skip: unavailable, timeout: 180000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(reg.url, { 'dep-a': '1.0.0' }, { files: { 'pnpm-lock.yaml': null } });
+    ctx.repo.git('update-ref', '-d', ctx.repoPolicy.targetRef);
+    ctx.repo.git('checkout', '-q', '-b', 'side');
+    const side = await ctx.commit({ 'dep-a': '1.0.0' }, 'refs/heads/side');
+    ctx.repo.git('checkout', '-q', 'main');
+    const r = await ctx.check(side);
+    gatesPassed(r);
+    assert.equal(r.receipt.outcome, 'miss');
+    assert.equal(r.receipt.ref, 'HEAD');
+    assert.match(
+      r.receipt.reason,
+      /pnpm-lock\.yaml нет ни в refs\/heads\/\S+ \(ветки ещё нет\), ни в HEAD/,
+    );
+    assert.equal(existsSync(ctx.seeds), false, 'seed не собирался');
+  },
+);
+
+test(
+  'DS48: сборка seed получает хост реестра своей песочнице, isolation.domains политики остаются как есть',
+  { skip: unavailable, timeout: 120000 },
+  async (t) => {
+    const reg = await registry(t);
+    lowerBuildFloor(t);
+    const ctx = await contour(
+      reg.url,
+      { 'dep-a': '1.0.0' },
+      {
+        policy: (p) => {
+          p.isolation.domains = ['example.org'];
+          p.environment.values.npm_config_registry = 'https://npm.example.test/';
+          p.environment.values.pnpm_config_registry = 'https://npm.example.test/';
+        },
+      },
+    );
+    const run = storeTree.run;
+    const seen: string[][] = [];
+    storeTree.run = (h) => {
+      seen.push([...h.config.isolation.domains]);
+      return Promise.resolve({ code: 1, stdout: '', stderr: 'стоп', timedOut: false } as Awaited<
+        ReturnType<typeof run>
+      >);
+    };
+    t.after(() => {
+      storeTree.run = run;
+    });
+    const r = await placed(ctx, 'a');
+    storeTree.run = run;
+    assert.equal(r.receipt.outcome, 'miss');
+    assert.deepEqual(seen, [['example.org', 'npm.example.test']]);
+    assert.deepEqual(ctx.policy.isolation.domains, ['example.org'], 'политика не изменена');
+  },
+);
+
+test('DS49: хосты реестра сборки seed — окружение, иначе registry.npmjs.org; tarball lockfile; без loopback', () => {
+  assert.deepEqual(seedRegistryHosts({}), [DEFAULT_REGISTRY_HOST]);
+  assert.deepEqual(seedRegistryHosts({ npm_config_registry: 'https://npm.corp.test/repo/' }), [
+    'npm.corp.test',
+  ]);
+  // Реестр области не заменяет реестр по умолчанию.
+  assert.deepEqual(seedRegistryHosts({ 'npm_config_@acme:registry': 'https://acme.test/' }), [
+    DEFAULT_REGISTRY_HOST,
+    'acme.test',
+  ]);
+  assert.deepEqual(seedRegistryHosts({ pnpm_config_registry: 'http://127.0.0.1:4873/' }), []);
+  assert.deepEqual(seedRegistryHosts({ PNPM_CONFIG_REGISTRY: 'не адрес' }), [
+    DEFAULT_REGISTRY_HOST,
+  ]);
+  const lock = [
+    'packages:',
+    '  dep@https://codeload.github.com/o/r/tar.gz/abc:',
+    '    resolution: {tarball: https://codeload.github.com/o/r/tar.gz/abc}',
+    '  x@1.0.0:',
+    "    resolution: {integrity: sha512-x, tarball: 'https://files.example.test/x.tgz'}",
+  ].join('\n');
+  assert.deepEqual(seedRegistryHosts({}, lock), [
+    DEFAULT_REGISTRY_HOST,
+    'codeload.github.com',
+    'files.example.test',
+  ]);
+});
+
+test(
+  'DS50: harness smoke до первого run — хранилище попадает; отказ сборки seed в таблице — miss с причиной, не passed',
+  { skip: unavailable, timeout: 180000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
+    ctx.repo.git('update-ref', '-d', ctx.repoPolicy.targetRef);
+    const smoke = () =>
+      smokeLifecycle({
+        policy: ctx.policy,
+        baseDir: ctx.repo.dir,
+        stateDir: ctx.state,
+        rev: 'HEAD',
+        resourceDatabase: join(ctx.state, 'resources.sqlite'),
+      });
+    reg.failNext = 100;
+    const failed = await smoke();
+    assert.equal(failed.passed, true, JSON.stringify(failed.failure));
+    const miss = failed.steps.find((s) => s.stage === 'dependency-store')!;
+    assert.equal(miss.unused, true);
+    assert.match(miss.detail!, /^miss: сборка seed/);
+    assert.match(
+      smokeText(failed),
+      /dependency-store\/dependency-store\s+miss\s+-\s+\d+ с\s+не используется: сборка seed/,
+    );
+
+    reg.failNext = 0;
+    rmSync(failedDir(ctx), { recursive: true, force: true });
+    const hit = await smoke();
+    const step = hit.steps.find((s) => s.stage === 'dependency-store')!;
+    assert.equal(step.unused, undefined, JSON.stringify(step));
+    assert.equal(step.detail, 'hit');
+    assert.match(smokeText(hit), /dependency-store\/dependency-store\s+passed\s+-\s+\d+ с\s+hit/);
   },
 );
