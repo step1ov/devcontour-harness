@@ -87,6 +87,8 @@ export const initWarningCodes = [
   'runtime-missing',
   'runtime-unauthenticated',
   'lead-sandbox',
+  'dependency-store-unsupported',
+  'dependency-cache-path',
 ] as const;
 
 export const fileConflicts = [

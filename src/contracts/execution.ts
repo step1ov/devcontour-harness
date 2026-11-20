@@ -179,6 +179,18 @@ export const technicalApprovalSchema = z.strictObject({
    * исполняется и принимается только этот снимок.
    */
   context: z.strictObject({ digest: digestSchema.nullable() }).optional(),
+  /**
+   * Повторное согласование после правки политики (`harness reapprove`): кто и
+   * почему, раунд ревью, на котором оно держится, и прежний `policyDigest`.
+   */
+  reapproval: z
+    .strictObject({
+      by: z.string().min(1).max(200),
+      reason: z.string().min(1).max(2000),
+      round: z.number().int().positive(),
+      previousPolicyDigest: digestSchema,
+    })
+    .optional(),
 });
 export type TechnicalApproval = z.infer<typeof technicalApprovalSchema>;
 
@@ -647,6 +659,8 @@ export const attemptStateSchema = z.strictObject({
         startedAt: isoTimeSchema,
         finishedAt: isoTimeSchema.optional(),
         outcome: z.enum(['passed', 'failed']).optional(),
+        /** Стадия прошла, но её средство не применялось: хранилище зависимостей без seed. */
+        unused: z.literal(true).optional(),
       }),
     )
     .optional(),

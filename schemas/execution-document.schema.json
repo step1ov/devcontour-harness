@@ -457,6 +457,37 @@
                 ],
                 "additionalProperties": false
               },
+              "reapproval": {
+                "type": "object",
+                "properties": {
+                  "by": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "round": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "previousPolicyDigest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "by",
+                  "reason",
+                  "round",
+                  "previousPolicyDigest"
+                ],
+                "additionalProperties": false
+              },
               "at": {
                 "type": "string",
                 "format": "date-time",
@@ -870,6 +901,37 @@
                 },
                 "required": [
                   "digest"
+                ],
+                "additionalProperties": false
+              },
+              "reapproval": {
+                "type": "object",
+                "properties": {
+                  "by": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "round": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "previousPolicyDigest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "by",
+                  "reason",
+                  "round",
+                  "previousPolicyDigest"
                 ],
                 "additionalProperties": false
               }
@@ -2348,6 +2410,10 @@
                     "passed",
                     "failed"
                   ]
+                },
+                "unused": {
+                  "type": "boolean",
+                  "const": true
                 }
               },
               "required": [

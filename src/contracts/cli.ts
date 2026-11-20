@@ -266,6 +266,47 @@ export const cliCommands = {
     ],
     refusals: ['APPROVAL_STALE', 'APPROVAL_REQUIRED', 'REVIEW_REJECTED', 'INPUT_REQUIRED'],
   },
+  reapprove: {
+    description:
+      'Повторное согласование графа после правки политики: тот же digest графа и последний раунд review-plan, согласование привязывается к новой политике с записью, кто и почему (approval.reapproval, событие graph.approved). Правку изоляции, сети, профилей инструментов и их выбора, окружения, protectedPaths, шагов на хосте (lifecycle, prepare, dependencyBuild, preflight), mode и approvalMode прежний раунд не покрывает; держится только на одобренном последнем раунде: отказ APPROVAL_REQUIRED — нужен новый review-plan. Как review-plan, привязывает --policy к каталогу состояния и при отказе. Внутренности библиотеки (Engine.approve) вместо этой команды не вызывать',
+    writes: true,
+    idempotency: 'Граф уже согласован под текущей политикой — ничего не меняет (changed: false)',
+    args: [
+      state,
+      {
+        name: '--policy',
+        value: 'path',
+        required: true,
+        description: 'Изменённая политика; привязывается к каталогу состояния, как в review-plan',
+      },
+      { name: '--subject', value: 'id', required: true, description: 'ID графа' },
+      {
+        name: '--digest',
+        value: 'digest',
+        required: true,
+        description: 'Digest графа из ReviewRecord последнего раунда',
+      },
+      {
+        name: '--by',
+        value: 'text',
+        required: true,
+        description: 'Кто согласует заново (ведущий, оператор): записывается в согласование',
+      },
+      {
+        name: '--reason',
+        value: 'text',
+        required: true,
+        description: 'Почему: какая правка политики и почему прежнее ревью её покрывает',
+      },
+    ],
+    refusals: [
+      'APPROVAL_STALE',
+      'APPROVAL_REQUIRED',
+      'REVIEW_REJECTED',
+      'INPUT_REQUIRED',
+      'NOT_FOUND',
+    ],
+  },
   run: {
     description:
       'Зарегистрировать согласованный граф (идемпотентно по connector, ref, revision, digest) и вести работу до простоя',
@@ -1657,6 +1698,19 @@ export const approveDataSchema = z.strictObject({
   changed: z.boolean(),
 });
 
+export const reapproveDataSchema = z.strictObject({
+  subject: idSchema,
+  digest: digestSchema,
+  at: isoTimeSchema,
+  changed: z.boolean(),
+  /** `executionDigest` политики, к которой привязано согласование. */
+  policyDigest: digestSchema,
+  /** Политика прежнего согласования. */
+  previousPolicyDigest: digestSchema,
+  /** Раунд ревью плана, на котором держится согласование. */
+  round: z.number().int().positive().optional(),
+});
+
 export const doctorDataSchema = z.strictObject({
   harness: z.string(),
   apiVersion: z.literal(API_VERSION),
@@ -2316,6 +2370,7 @@ export const cliDataSchemas = {
   'review-plan': reviewRecordSchema,
   'review-contract': reviewRecordSchema,
   approve: approveDataSchema,
+  reapprove: reapproveDataSchema,
   run: runDataSchema,
   status: statusDataSchema,
   events: eventsDataSchema,

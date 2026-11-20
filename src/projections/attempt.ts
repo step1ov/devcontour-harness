@@ -20,6 +20,7 @@ export interface AttemptViewInput {
     startedAt: string;
     finishedAt?: string;
     outcome?: 'passed' | 'failed';
+    unused?: true;
   }[];
   /** Кандидат и интеграция попытки: gates считаются только по записям текущего SHA фазы. */
   candidateSha?: string;

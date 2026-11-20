@@ -64,6 +64,8 @@ const laterCommands: readonly string[] = [
   'review-code',
   // Представление оператора (0.1.0-alpha.55).
   'view',
+  // Повторное согласование после правки политики (0.1.0-alpha.59).
+  'reapprove',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -206,6 +208,9 @@ const ADDITIVE_ENUM_VALUES = new Set([
   // Остановка исполнителя из-за окружения; предупреждение init о песочнице ведущего (0.1.0-alpha.59).
   'writer-environment',
   'lead-sandbox',
+  // Предупреждения init о хранилище зависимостей (0.1.0-alpha.59).
+  'dependency-store-unsupported',
+  'dependency-cache-path',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
@@ -407,6 +412,32 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.reusedEvidence;
       // `when` — только у схемы gate задачи (у gate совместной проверки его нет).
       if ('command' in rest && 'timeoutMs' in rest && !('repositoryId' in rest)) delete rest.when;
+      v = rest;
+    }
+    // Аддитивные поля раунда ревью (0.1.0-alpha.59): политика раунда и digest
+    // её границы исполнения.
+    if (
+      k === 'properties' &&
+      v &&
+      typeof v === 'object' &&
+      'reviewerBinding' in v &&
+      'contextDigest' in v
+    ) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.policyDigest;
+      delete rest.isolationDigest;
+      v = rest;
+    }
+    // Запись повторного согласования (`approval.reapproval`, событие
+    // `graph.approved`) и отметка «не используется» у стадии попытки (0.1.0-alpha.59).
+    if (k === 'properties' && v && typeof v === 'object' && 'actor' in v && 'reapproval' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.reapproval;
+      v = rest;
+    }
+    if (k === 'properties' && v && typeof v === 'object' && 'outcome' in v && 'unused' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.unused;
       v = rest;
     }
     if (Array.isArray(v))

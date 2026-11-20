@@ -125,7 +125,20 @@ export const eventPayloads = {
     approved: z.boolean(),
     open: z.number().int().min(0),
   }),
-  'graph.approved': z.strictObject({ digest: digestSchema, actor: z.enum(['operator', 'agent']) }),
+  'graph.approved': z.strictObject({
+    digest: digestSchema,
+    actor: z.enum(['operator', 'agent']),
+    /** Повторное согласование после правки политики: кто, почему, раунд и политики. */
+    reapproval: z
+      .strictObject({
+        by: z.string().min(1).max(200),
+        reason: z.string().min(1).max(2000),
+        round: z.number().int().positive(),
+        previousPolicyDigest: digestSchema,
+        policyDigest: digestSchema,
+      })
+      .optional(),
+  }),
   'work.ready': z.strictObject({ orderDigest: digestSchema }),
   'work.held': z.strictObject({
     operation: z.string().min(1).max(200),
@@ -184,6 +197,12 @@ export const eventPayloads = {
     durationMs: z.number().int().min(0).optional(),
     /** Только у `finished`. */
     outcome: z.enum(['passed', 'failed']).optional(),
+    /**
+     * Только у `finished`: стадия прошла, но её средство не применялось —
+     * `dependency-store`, когда seed не развёрнут (версия менеджера вне
+     * проверенных, промах, нет lockfile) и установка идёт обычным путём.
+     */
+    unused: z.literal(true).optional(),
   }),
   /**
    * Обход controller сменил живость исполняющейся попытки (только переходы).

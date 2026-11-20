@@ -95,6 +95,7 @@ git rev-parse refs/heads/harness/accepted   # совпадает с data.result.
 | `validate --graph F --policy F`                 | Проверка входов без моделей и записи               |
 | `review-plan / review-contract … --author A`    | Раунд технического ревью с историей находок        |
 | `approve --state D --subject ID --digest H`     | Согласование оператором (`approvalMode: operator`) |
+| `reapprove … --by WHO --reason WHY`             | Согласование после правки политики, с записью      |
 | `run --graph F --policy F --state D`            | Регистрация, согласование и работа до простоя      |
 | `status / events / result --state D`            | Чтение без побочных эффектов                       |
 | `view --state D [--policy F] [--work ID]`       | Представление оператора для панели (только чтение) |

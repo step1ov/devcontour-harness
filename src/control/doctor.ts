@@ -230,10 +230,16 @@ export async function doctor(
     // (`resourceWarnings`).
     ...(policy
       ? {
+          // Одно предупреждение из двух источников печатается один раз.
           warnings: [
-            ...warnings,
-            ...timeBudgetWarnings(policy).map((w) => w.message),
-            ...resourceWarnings(policy, toolchain?.baseDir ?? checkouts?.baseDir ?? process.cwd()),
+            ...new Set([
+              ...warnings,
+              ...timeBudgetWarnings(policy).map((w) => w.message),
+              ...resourceWarnings(
+                policy,
+                toolchain?.baseDir ?? checkouts?.baseDir ?? process.cwd(),
+              ),
+            ]),
           ],
         }
       : {}),

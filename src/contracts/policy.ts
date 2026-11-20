@@ -537,6 +537,52 @@ export const executionDigest = (policy: ExecutionPolicy) =>
     lifecyclePreflight: undefined,
   });
 
+/** Пути `toolProfile` и `runtime` назначений в ролях и правилах ревью: какой профиль у кого. */
+function profileSelections(value: unknown, path: string, out: [string, unknown][]) {
+  if (Array.isArray(value)) value.forEach((v, i) => profileSelections(v, `${path}[${i}]`, out));
+  else if (value && typeof value === 'object')
+    for (const [k, v] of Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
+      if (k === 'toolProfile' || k === 'runtime') out.push([`${path}.${k}`, v]);
+      else profileSelections(v, `${path}.${k}`, out);
+  return out;
+}
+
+/**
+ * Digest границы исполнения политики: изоляция (`isolation`, режим и домены
+ * сети), профили инструментов (`toolProfiles`: сеть Codex, shell, инструменты
+ * Claude, MCP, окружение профиля), выбор профиля и runtime в ролях и правилах
+ * ревью (модель и effort не входят), окружение процессов (`environment`
+ * политики и репозиториев целиком: значения, переменные хоста, секреты),
+ * защищённые пути (`protectedPaths`), шаги на хосте вне песочницы исполнителя
+ * (`lifecycle`, `prepare`, `dependencyBuild`, `preflight`), установка
+ * зависимостей исполнителя (`writerDependencies`), режим (`mode`) и режим
+ * согласования (`approvalMode`).
+ * Раунд ревью плана записывает его; согласование под другим digest границы —
+ * только после нового раунда, а не по прежнему одобрению (ни `approve`, ни
+ * `reapprove`, ни библиотечный `Engine.approve`).
+ */
+export const isolationDigest = (policy: ExecutionPolicy) =>
+  digestOf({
+    isolation: policy.isolation,
+    toolProfiles: policy.toolProfiles,
+    selections: profileSelections({ roles: policy.roles, review: policy.review }, '', []),
+    environment: policy.environment ?? null,
+    lifecycle: policy.lifecycle ?? null,
+    mode: policy.mode,
+    approvalMode: policy.approvalMode,
+    repositories: policy.repositories.map((r) => [
+      r.id,
+      profileSelections({ roles: r.roles ?? null, review: r.review ?? null }, '', []),
+      r.environment ?? null,
+      r.protectedPaths,
+      r.lifecycle ?? null,
+      r.prepare,
+      r.dependencyBuild,
+      r.preflight,
+      r.writerDependencies ?? null,
+    ]),
+  });
+
 /**
  * Действующая политика вопросов: заданная или умолчание. Порог вопросов —
  * правило исполнителя, а не условие исполнения кода: как и `stallSweep`, он
