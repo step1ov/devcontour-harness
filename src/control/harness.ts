@@ -39,6 +39,7 @@ import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { validateInputs } from '../validate.ts';
 import { WorkflowQueue } from './workflow.ts';
+import { deadUpdateLock, updateInProgress } from '../update/busy.ts';
 import { statusOf } from './status.ts';
 import {
   verificationLines,
@@ -62,6 +63,12 @@ import { valueReport, type ValueReportOptions } from '../report/compute.ts';
 export interface HarnessOptions {
   /** Каталог состояния исполнения: база, worktrees, артефакты. */
   stateDir: string;
+  /**
+   * Каталог установки пакетов harness (`harness update --prefix`): его замок
+   * обновления (общий для нескольких каталогов состояния) тоже держит записи
+   * библиотеки. Без него — только замок и записи `<state>-updates`.
+   */
+  installPrefix?: string;
   policy: ExecutionPolicy;
   /** Каталог, от которого разрешаются относительные пути репозиториев политики. */
   baseDir: string;
@@ -135,6 +142,10 @@ export class Harness {
       host: standaloneHost(this.store, this.policy),
       policy: this.policy,
       ...(source ? { provenance: () => policySourceChanged(source) } : {}),
+      // Обновление пакетов этого каталога состояния (замок, запись «идёт»):
+      // записи библиотеки отказывают так же, как команды CLI.
+      updateBusy: () => updateInProgress(options.stateDir, options.installPrefix),
+      updaterGone: () => deadUpdateLock(options.stateDir),
     });
     this.workflows = new WorkflowQueue(this.store, this.policy, () => this.engine.clock());
     this.adapters = options.adapters ?? {
@@ -283,6 +294,8 @@ export class Harness {
       dispositions?: ReviewDisposition[];
     },
   ) {
+    // Во время обновления пакетов — отказ до вызова модели.
+    this.engine.assertNotUpdating();
     const subject = input.kind === 'plan' ? input.graph.id : input.contract.id;
     const digest = input.kind === 'plan' ? workGraphDigest(input.graph) : digestOf(input.contract);
     // Структурные пропуски договора проверки и незакреплённые файлы — отказ до
@@ -338,6 +351,8 @@ export class Harness {
    * чтение. Запись в `code-reviews` — наблюдение, не приёмка.
    */
   reviewCode(input: CodeReviewInput) {
+    // Во время обновления пакетов — отказ до вызова модели.
+    this.engine.assertNotUpdating();
     return reviewCode(
       {
         engine: this.engine,
@@ -664,6 +679,8 @@ export class Harness {
    * бюджет — `applied: false` с причиной.
    */
   async resolveInput(id: string, options: { author?: Author; reset?: { reason: string } } = {}) {
+    // Во время обновления пакетов — отказ до вызова модели (как у CLI).
+    this.engine.assertNotUpdating();
     // Применённый ответ, основание которого уже разошлось, — не «готово»:
     // перепроверка сейчас возвращает его в answered, и он применяется заново.
     const request = this.engine.refreshApplied(id);
@@ -738,6 +755,7 @@ export class Harness {
       by?: 'operator' | 'lead';
     },
   ) {
+    this.engine.assertNotUpdating();
     let request = this.engine.inputRequest(id);
     if (request.kind !== 'question' || !request.blocking)
       throw new HarnessError('INVALID_INPUT', `Запрос ${id} неблокирующий: переносить нечего`);
@@ -865,6 +883,9 @@ export class Harness {
      */
     source?: WorkSource;
   }) {
+    // Пауза обновления, умершего до изменений (нет ни процесса, ни
+    // незавершённого возврата), выдачу больше не держит: run её снимает.
+    this.engine.clearStaleUpdatePause();
     // Обязательный контекст — одинаково для библиотеки и CLI: без снимка нужных источников граф не исполняется.
     const needed = [...new Set(input.graph.orders.flatMap((o) => o.context))];
     if (needed.length && !input.context)

@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment --
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access --
  * Тесты правят сырой JSON политики до разбора схемой.
  */
 import { test } from 'node:test';
@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { doctor } from '../src/control/doctor.ts';
 import { resourceWarnings } from '../src/control/resource-advice.ts';
+import { initWarnings } from '../src/init/project.ts';
 import { hostLoad, type HostResources } from '../src/environment/host-load.ts';
 import { policyOf } from './engine-fixture.ts';
 
@@ -375,4 +376,188 @@ test('DEPENDENCY_CACHE_PATH: флаги чужих инструментов не
   assert.ok(found.some((w) => /toolProfiles\.w\.environment: .*pnpm_config_cache_dir/.test(w)));
   assert.ok(found.some((w) => /NPM_CONFIG_CACHE_DIR \(секрет\)/.test(w)));
   assert.equal(found.length, 3, found.join('\n'));
+});
+
+test('DEPENDENCY_STORE_REGISTRY: .npmrc проекта задаёт реестр, которого сборка seed не увидит — предупреждение; реестр в окружении политики — нет', (t) => {
+  const dir = pinnedRepository(t, '11.25.0');
+  const npmrc = (text: string) => writeFileSync(join(dir, '.npmrc'), text);
+  const warn = (patch: (p: Record<string, any>) => void = () => {}) =>
+    resourceWarnings(
+      policyOf((p) => {
+        const repo = (p.repositories as Record<string, any>[])[0]!;
+        repo.path = dir;
+        repo.dependencyStore = { manager: 'pnpm' };
+        p.isolation = { mode: 'os', domains: [] };
+        patch(p);
+      }),
+      '/',
+      large,
+    ).filter((w) => w.startsWith('DEPENDENCY_STORE_REGISTRY'));
+  npmrc('registry=https://npm.corp.test/repo/\n@acme:registry=https://registry.npmjs.org/\n');
+  const [line, ...rest] = warn();
+  assert.deepEqual(rest, []);
+  assert.match(
+    line!,
+    /\.npmrc проекта задаёт реестр https:\/\/npm\.corp\.test\/repo\/ \(registry\)/,
+  );
+  assert.match(line!, /берёт пакеты с registry\.npmjs\.org/);
+  assert.match(line!, /npm_config_registry и pnpm_config_registry/);
+  assert.doesNotMatch(line!, /@acme/, 'реестр, который seed и так видит, не находка');
+  // Домен не помогает: сборка seed не знает, что пакеты идут туда.
+  assert.equal(warn((p) => (p.isolation.domains = ['npm.corp.test'])).length, 1);
+  assert.deepEqual(
+    warn((p) => (p.isolation = { mode: 'none', domains: [] })),
+    [],
+  );
+
+  npmrc('registry=https://npm.corp.test/repo/\n');
+  assert.deepEqual(
+    warn((p) => {
+      p.environment = {
+        values: {
+          npm_config_registry: 'https://npm.corp.test/repo/',
+          pnpm_config_registry: 'https://npm.corp.test/repo/',
+        },
+        inherit: [],
+        secrets: {},
+      };
+    }),
+    [],
+  );
+
+  // Тот же хост, другой путь — другой реестр: совет есть.
+  npmrc('registry=https://npm.corp.test/api/npm/private/\n');
+  const env = (url: string) => (p: Record<string, any>) => {
+    p.environment = {
+      values: { npm_config_registry: url, pnpm_config_registry: url },
+      inherit: [],
+      secrets: {},
+    };
+  };
+  const [path] = warn(env('https://npm.corp.test/api/npm/public/'));
+  assert.match(path!, /https:\/\/npm\.corp\.test\/api\/npm\/private\/ \(registry\)/);
+  assert.deepEqual(
+    warn(env('https://npm.corp.test/api/npm/private')),
+    [],
+    'завершающий / не важен',
+  );
+  // Реестр только под одним префиксом: pnpm другой версии его не увидит.
+  assert.equal(
+    warn((p) => {
+      p.environment = {
+        values: { npm_config_registry: 'https://npm.corp.test/api/npm/private/' },
+        inherit: [],
+        secrets: {},
+      };
+    }).length,
+    1,
+  );
+
+  // Один ключ под разным регистром с разными значениями — менеджер может взять
+  // любое: совет есть.
+  assert.equal(
+    warn((p) => {
+      p.environment = {
+        values: {
+          NPM_CONFIG_REGISTRY: 'https://npm.corp.test/api/npm/private/',
+          npm_config_registry: 'https://npm.corp.test/other/',
+          pnpm_config_registry: 'https://npm.corp.test/api/npm/private/',
+        },
+        inherit: [],
+        secrets: {},
+      };
+    }).length,
+    1,
+  );
+  // Одно значение под разным регистром — то же значение: совета нет.
+  assert.deepEqual(
+    warn((p) => {
+      p.environment = {
+        values: {
+          NPM_CONFIG_REGISTRY: 'https://npm.corp.test/api/npm/private/',
+          npm_config_registry: 'https://npm.corp.test/api/npm/private/',
+          pnpm_config_registry: 'https://npm.corp.test/api/npm/private/',
+        },
+        inherit: [],
+        secrets: {},
+      };
+    }),
+    [],
+  );
+  // Разные значения под pnpm_ — совет есть.
+  assert.equal(
+    warn((p) => {
+      p.environment = {
+        values: {
+          npm_config_registry: 'https://npm.corp.test/api/npm/private/',
+          PNPM_CONFIG_REGISTRY: 'https://npm.corp.test/other/',
+          pnpm_config_registry: 'https://npm.corp.test/api/npm/private/',
+        },
+        inherit: [],
+        secrets: {},
+      };
+    }).length,
+    1,
+  );
+  // Реестр области, совпавший с реестром по умолчанию только одного префикса, —
+  // pnpm другой версии его не увидит.
+  npmrc('@acme:registry=https://corp.test/repo/\n');
+  assert.equal(
+    warn((p) => {
+      p.environment = {
+        values: { npm_config_registry: 'https://corp.test/repo/' },
+        inherit: [],
+        secrets: {},
+      };
+    }).length,
+    1,
+  );
+  assert.deepEqual(
+    warn((p) => {
+      p.environment = {
+        values: {
+          npm_config_registry: 'https://corp.test/repo/',
+          pnpm_config_registry: 'https://corp.test/repo/',
+        },
+        inherit: [],
+        secrets: {},
+      };
+    }),
+    [],
+  );
+
+  // Реестр области — свой совет: окружение политики его не задаёт.
+  npmrc('@acme:registry=https://acme.test/\n');
+  const [scoped] = warn();
+  assert.match(scoped!, /https:\/\/acme\.test\/ \(@acme:registry\)/);
+  assert.match(scoped!, /окружение политики задать не может/);
+  assert.doesNotMatch(scoped!, /Задайте реестр по умолчанию/);
+
+  // Без хранилища совета нет.
+  assert.deepEqual(
+    resourceWarnings(
+      policyOf((p) => {
+        (p.repositories as Record<string, any>[])[0]!.path = dir;
+      }),
+      '/',
+      large,
+    ).filter((w) => w.startsWith('DEPENDENCY_STORE_REGISTRY')),
+    [],
+  );
+});
+
+test('init: DEPENDENCY_STORE_REGISTRY — предупреждение dependency-store-registry', (t) => {
+  const dir = pinnedRepository(t, '11.25.0');
+  writeFileSync(join(dir, '.npmrc'), 'registry=https://npm.corp.test/\n');
+  const policy = policyOf((p) => {
+    const repo = (p.repositories as Record<string, any>[])[0]!;
+    repo.path = dir;
+    repo.dependencyStore = { manager: 'pnpm' };
+    p.isolation = { mode: 'os', domains: [] };
+  });
+  const found = (initWarnings(policy, 'codex', [], '/') ?? []).filter(
+    (w) => w.code === 'dependency-store-registry',
+  );
+  assert.equal(found.length, 1);
+  assert.match(found[0]!.message, /npm\.corp\.test/);
 });

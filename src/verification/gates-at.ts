@@ -205,9 +205,10 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
     stage: string,
     action: () => Promise<T>,
     detail?: (result: T) => string | undefined,
+    unused?: (result: T) => boolean,
   ) => {
     const started = Date.now();
-    const outcome = (ok: boolean, note?: string) =>
+    const outcome = (ok: boolean, note?: string, idle?: boolean) =>
       input.onStep?.({
         stage,
         id: stage,
@@ -216,10 +217,11 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
         timedOut: false,
         aborted: signal.aborted,
         ...(note ? { detail: note } : {}),
+        ...(idle ? { unused: true } : {}),
       });
     try {
       const result = await action();
-      outcome(true, detail?.(result));
+      outcome(true, detail?.(result), unused?.(result));
       return result;
     } catch (error) {
       outcome(false);
@@ -351,6 +353,8 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
                 'dependency-store',
                 () => materializeStore(store, { repo, cwd, execution, signal, dir: artifacts }),
                 (r) => r && `${r.outcome}${r.reason ? ': ' + r.reason : ''}`,
+                // Промах — хранилище не использовано: шаг не «пройден», как в замерах `run`.
+                (r) => !r || r.outcome === 'miss',
               );
             else await materializeStore(store, { repo, cwd, execution, signal, dir: artifacts });
             await runSteps(repo.prepare, cwd, join(artifacts, 'prepare'), execution, signal);

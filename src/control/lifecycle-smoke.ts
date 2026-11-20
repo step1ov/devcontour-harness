@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { HarnessError, TaskFailure, type ExecutionPolicy } from '../contracts/index.ts';
 import { CleanupFailure, type StepOutcome } from '../environment/lifecycle.ts';
+import { DEPENDENCY_NETWORK } from '../environment/dependency-network.ts';
 import { runGatesAt } from '../verification/gates-at.ts';
 import { commitOf, repositoryOf, repositoryPath } from './gates-check.ts';
 import { probeWriter, writerProbeText, type WriterProbeResult } from './writer-probe.ts';
@@ -17,7 +18,8 @@ import { probeWriter, writerProbeText, type WriterProbeResult } from './writer-p
  * - `cleanup` — упал только `teardown`: службы могли остаться запущенными;
  * - `tree-changed` — подготовка изменила отслеживаемые файлы проверяемого SHA;
  * - `environment` — прочий отказ среды (переменная или секрет окружения не
- *   заданы, сеть реестра, защищённые пути, git).
+ *   заданы, сеть реестра — в том числе упавшая на ней установка
+ *   зависимостей, защищённые пути, git).
  */
 export type LifecycleFailureClass =
   'port-busy' | 'timeout' | 'crash' | 'missing-tool' | 'cleanup' | 'tree-changed' | 'environment';
@@ -33,6 +35,12 @@ export interface LifecycleSmokeStep {
   log?: string;
   /** Пояснение стадии: исход хранилища зависимостей (`hit`, `partial`, `miss: причина`). */
   detail?: string;
+  /**
+   * Шаг не отказал, но ничего не дал: хранилище зависимостей не использовано
+   * (промах или отказ сборки seed, причина — в `detail`). Таблица `--human`
+   * показывает такой шаг как `miss`, а не `passed` (alpha.61).
+   */
+  unused?: boolean;
 }
 
 export interface LifecycleSmokeFailure {
@@ -91,7 +99,16 @@ const stepOf = (s: StepOutcome): LifecycleSmokeStep => ({
   ...(s.timedOut ? { timedOut: true } : {}),
   ...(s.log ? { log: s.log } : {}),
   ...(s.detail ? { detail: s.detail } : {}),
+  ...(s.unused ? { unused: true } : {}),
 });
+
+/** Статус шага для человека: неиспользованная стадия — `miss`, а не `passed`. */
+export const stepStatusText = (s: Pick<LifecycleSmokeStep, 'status' | 'unused'>) =>
+  s.unused && s.status === 'passed' ? 'miss' : s.status;
+
+/** Пояснение шага для человека: промах хранилища — «не используется: причина». */
+export const stepDetailText = (s: Pick<LifecycleSmokeStep, 'detail' | 'unused'>) =>
+  s.detail && s.unused ? 'не используется: ' + s.detail.replace(/^miss(?::\s*)?/, '') : s.detail;
 
 const seconds = (ms: number) => `${Math.round(ms / 1000)} с`;
 
@@ -182,6 +199,16 @@ export function classifyLifecycleFailure(
         ...where,
         message,
         advice: `Шаг ${failed.id} превысил свой timeoutMs (${seconds(failed.durationMs)}): поднимите timeoutMs шага, если он законно долгий, или проверьте, не ждёт ли он ввода, сети или службы.${log}`,
+      };
+    // Установка упала на сети или реестре (обрыв, предел времени, 403 прокси):
+    // отказ среды, а не настройка проекта; в `run` такой отказ попытку не
+    // тратит (dependency-network).
+    if (failed.registryFailure)
+      return {
+        class: 'environment',
+        ...where,
+        message: `${DEPENDENCY_NETWORK}: ${failed.registryFailure}. ${message}`,
+        advice: `Установка зависимостей не получила пакеты из реестра — отказ сети или реестра, а не проекта: повторите smoke; частые обрывы снимает хранилище зависимостей (dependencyStore, docs/slow-environments.md): prepare берёт пакеты из него, а не из сети.${log}`,
       };
     if (code !== undefined && code !== 0)
       return {
@@ -326,9 +353,10 @@ export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<Lifecy
 /** Таблица шагов для человека (`harness smoke --human`). */
 export function smokeText(data: LifecycleSmokeResult) {
   const width = Math.max(5, ...data.steps.map((s) => `${s.stage}/${s.id}`.length));
-  const lines = data.steps.map((s) =>
-    `${`${s.stage}/${s.id}`.padEnd(width)}  ${s.status.padEnd(6)}  ${String(s.exitCode ?? '-').padEnd(4)}  ${seconds(s.durationMs)}${s.timedOut ? ' (timeout)' : ''}`.trimEnd(),
-  );
+  const lines = data.steps.map((s) => {
+    const detail = stepDetailText(s);
+    return `${`${s.stage}/${s.id}`.padEnd(width)}  ${stepStatusText(s).padEnd(6)}  ${String(s.exitCode ?? '-').padEnd(4)}  ${seconds(s.durationMs)}${s.timedOut ? ' (timeout)' : ''}${detail ? '  ' + detail : ''}`.trimEnd();
+  });
   return (
     [
       `${data.repositoryId} @ ${data.sha.slice(0, 12)} — окружение ${data.passed ? 'PASS' : 'FAIL'} (${seconds(data.durationMs)})`,

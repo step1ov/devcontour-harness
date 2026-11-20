@@ -92,7 +92,7 @@ import {
   type CallMeta,
   type RecordWork,
 } from './budget.ts';
-import { callDurationMs, callOwner, callRecords, ownerGone } from './usage.ts';
+import { callDurationMs, callOwner, callRecords, ownerGone, processGone } from './usage.ts';
 import { MAX_NEUTRAL_FAILURES, failureFingerprint, repairPolicy } from './failure.ts';
 import { reusableImplementation } from './reuse.ts';
 import { uncoveredGates, unprovenReason } from '../verification/proof.ts';
@@ -166,6 +166,19 @@ export interface EngineOptions {
    * без запуска очереди тогда не меняет применённую политику.
    */
   recordPolicyOnLead?: boolean;
+  /**
+   * Обновление пакетов этого каталога состояния идёт или ждёт возврата
+   * (замок живого `harness update`, запись «идёт»): причина или `undefined`.
+   * `Harness` передаёт чтение `<state>-updates`; без него судят только роль
+   * controller и пауза обновления в состоянии.
+   */
+  updateBusy?: () => string | undefined;
+  /**
+   * Процесс обновления, чей замок остался (`<state>-updates/lock`), умер — нет
+   * его или pid достался другому процессу — и незавершённого возврата нет:
+   * его pid. Тогда пауза обновления устарела. Без чтения — устаревших пауз нет.
+   */
+  updaterGone?: () => { pid: number } | undefined;
 }
 
 export type Phase = 'running' | 'verifying' | 'reviewing' | 'integrating';
@@ -324,6 +337,8 @@ export class Engine {
   private ownLeader?: string;
 
   private readonly recordOnLead: boolean;
+  private readonly updateBusy: () => string | undefined;
+  private readonly updaterGone: () => { pid: number } | undefined;
   constructor(options: EngineOptions) {
     this.host = options.host;
     this.policy = options.policy;
@@ -334,6 +349,8 @@ export class Engine {
     this.id = options.id ?? randomUUID;
     this.provenance = options.provenance ?? (() => undefined);
     this.recordOnLead = options.recordPolicyOnLead !== false;
+    this.updateBusy = options.updateBusy ?? (() => undefined);
+    this.updaterGone = options.updaterGone ?? (() => undefined);
     this.loadedContent = policyDigest(this.policy);
     this.loadedPolicy = options.policyIdentity ?? this.loadedContent;
     this.observedGeneration = this.host.store.read(
@@ -529,6 +546,7 @@ export class Engine {
       isolationDigest: isolationDigest(this.policy),
     };
     return this.tx('graph.reviewed', (tx) => {
+      this.assertNoUpdate(tx);
       if (document) tx.putLocal('contract-documents', WORKSPACE_OWNER, record.digest, document);
       const previous = tx
         .locals('reviews', WORKSPACE_OWNER)
@@ -681,6 +699,7 @@ export class Engine {
    */
   refreshApplied(id: string) {
     return this.tx('input.applied', (tx) => {
+      this.assertNoUpdate(tx);
       const { request } = this.requestIn(tx, id);
       const work = tx.work(request.workId);
       if (work && linksAnswer(request) && !request.delivered && request.target)
@@ -895,25 +914,78 @@ export class Engine {
   }
 
   /**
-   * Идёт обновление пакетов (`harness update`): роль controller у
-   * `harness-update:<pid>` или пауза его операции (обновление идёт или
-   * прервалось). Регистрация графа, согласование и совместная проверка в это
-   * время отказывают `CONTROLLER_BUSY`: они писали бы состояние посреди
-   * установки, и возврат копии их бы потерял.
+   * Пауза обновления пакетов, чей процесс умер до изменений (например, во
+   * время `--wait`): замок обновления называет процесс, которого больше нет,
+   * и незавершённого возврата (`in-progress.json`) нет (`updaterGone`). Такая
+   * пауза не держит `run`, регистрацию и совместную проверку; `run` её
+   * снимает. Нет замка или он живой — пауза держит.
+   */
+  staleUpdatePause(view: ExecutionView): { pid: number } | undefined {
+    const control = view.control();
+    if (
+      !control.paused ||
+      control.pauseReason !== 'reconfigure' ||
+      control.pauseOperation !== UPDATE_PAUSE_OPERATION ||
+      this.updateBusy()
+    )
+      return undefined;
+    return this.updaterGone();
+  }
+
+  /** Снять устаревшую паузу обновления (`staleUpdatePause`); true — снята. */
+  clearStaleUpdatePause(): boolean {
+    return this.tx('scheduler.started', (tx) => {
+      if (!this.staleUpdatePause(tx)) return false;
+      const control = tx.control();
+      tx.setControl({
+        ...control,
+        paused: false,
+        pauseReason: undefined,
+        pauseOperation: undefined,
+        pausedAt: undefined,
+      });
+      tx.emit({ type: 'control.resumed', payload: { reason: 'reconfigure' } });
+      return true;
+    });
+  }
+
+  /**
+   * Идёт обновление пакетов (`harness update`): роль controller у живого
+   * `harness-update:<pid>`, пауза его операции (обновление идёт или
+   * прервалось с незавершённым возвратом) или замок и запись «идёт» каталога
+   * обновлений. Регистрация графа, согласование, совместная проверка и записи
+   * библиотеки (ответы, перенос, находки ревью, повтор) в это время отказывают
+   * `CONTROLLER_BUSY`: они писали бы состояние посреди установки, и возврат
+   * копии их бы потерял.
    */
   private assertNoUpdate(view: ExecutionView) {
     const lease = view.controller();
     const control = view.control();
-    if (
-      (lease && lease.leaseUntil > this.now() && lease.owner.startsWith('harness-update:')) ||
+    const updater = lease && /^harness-update:(\d+)$/.exec(lease.owner);
+    const busy =
+      this.updateBusy() ??
+      (lease &&
+      lease.leaseUntil > this.now() &&
+      updater &&
+      !processGone({ pid: Number(updater[1]) })
+        ? `идёт harness update (процесс ${updater[1]})`
+        : undefined) ??
       (control.paused &&
-        control.pauseReason === 'reconfigure' &&
-        control.pauseOperation === UPDATE_PAUSE_OPERATION)
-    )
+      control.pauseReason === 'reconfigure' &&
+      control.pauseOperation === UPDATE_PAUSE_OPERATION &&
+      !this.staleUpdatePause(view)
+        ? 'идёт harness update'
+        : undefined);
+    if (busy)
       throw new HarnessError(
         'CONTROLLER_BUSY',
-        'Идёт обновление harness (harness update): дождитесь его окончания; если обновление прервалось — harness update --check или resume',
+        `Идёт обновление harness (${busy}): дождитесь его окончания; если обновление прервалось — harness update --check или resume`,
       );
+  }
+
+  /** Проверка `assertNoUpdate` вне транзакции: перед долгими шагами библиотеки (вызов модели). */
+  assertNotUpdating() {
+    this.read((v) => this.assertNoUpdate(v));
   }
 
   /** Захват или продление роли единственного controller. */
@@ -2945,6 +3017,7 @@ export class Engine {
     expectedVersion: number,
   ) {
     return this.tx('input.answered', (tx) => {
+      this.assertNoUpdate(tx);
       const { owner, request } = this.requestIn(tx, id);
       // Блокирующий вопрос адресован человеку: ведущий отвечает только с явного
       // разрешения политики — технический вопрос без минимумов
@@ -3102,6 +3175,7 @@ export class Engine {
     expectedVersion: number,
   ) {
     return this.tx('input.closed', (tx) => {
+      this.assertNoUpdate(tx);
       const { owner, request } = this.requestIn(tx, id);
       // Перенесённый ответ, устаревший до выдачи, можно снять: работа
       // перестаёт его ждать и продолжает без него (второй выход — новый перенос).
@@ -3524,6 +3598,7 @@ export class Engine {
     },
   ) {
     return this.tx('input.applied', (tx) => {
+      this.assertNoUpdate(tx);
       const { owner, request } = this.requestIn(tx, id);
       const answer = latestAnswer(request);
       if (request.kind !== 'question' || !request.blocking)
@@ -3741,6 +3816,7 @@ export class Engine {
     },
   ) {
     return this.tx('input.applied', (tx) => {
+      this.assertNoUpdate(tx);
       const { owner, request } = this.requestIn(tx, id);
       if (request.kind !== 'question' || !request.blocking)
         throw new HarnessError('INVALID_INPUT', `Запрос ${id} неблокирующий: переносить нечего`);
@@ -4195,6 +4271,9 @@ export class Engine {
    */
   operationPause(operation: string) {
     return this.tx('scheduler.paused', (tx) => {
+      // Пауза другой операции (применение политики) во время обновления не
+      // ставится: следом её запрос отказал бы, и пауза осталась бы без него.
+      if (operation !== UPDATE_PAUSE_OPERATION) this.assertNoUpdate(tx);
       const control = tx.control();
       if (control.paused) return false;
       tx.setControl({
@@ -4249,6 +4328,7 @@ export class Engine {
    */
   requestReconfigure(operation: string, digest: string) {
     return this.tx('config.reconfigure-requested', (tx) => {
+      this.assertNoUpdate(tx);
       const control = tx.control();
       const current = control.reconfigure;
       if (current && current.operation === operation && current.digest === digest) {
@@ -5032,6 +5112,7 @@ export class Engine {
    */
   cancel(workId: string, reason = 'отменено оператором', by: CancelActor = 'host') {
     return this.tx('task.cancelled', (tx) => {
+      this.assertNoUpdate(tx);
       const w = tx.work(workId);
       if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
       if (w.status === 'done')
@@ -5082,6 +5163,7 @@ export class Engine {
    */
   retry(workId: string, reset?: { reason: string }, by: RetryActor = 'host') {
     return this.tx('task.retry', (tx) => {
+      this.assertNoUpdate(tx);
       const w = tx.work(workId);
       if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
       return this.retryIn(tx, w, reset, by);
@@ -5202,6 +5284,7 @@ export class Engine {
     by: CodeReviewDecision['by'],
   ) {
     return this.tx('findings.recorded', (tx) => {
+      this.assertNoUpdate(tx);
       const w = tx.work(workId);
       if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
       if (w.activeRunId || w.status === 'done')

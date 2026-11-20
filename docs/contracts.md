@@ -505,7 +505,10 @@ digest по формуле хоста — например, файла конф�
 «противоположного runtime» нет. Проверка входов отклоняет такую политику
 целиком; хост, ведущий движок без неё, получает блокер
 `REVIEWER_SAME_VENDOR` только у поручений этой роли — остальная очередь
-выдаётся.
+выдаётся. `reviewVendorConflicts(policy)` перечисляет роли, чьё правило ревью
+кода так отказывает writer роли (тем же `selectReviewer`): `doctor` называет
+каждую проблемой `review-vendor-conflict: …` (где записано правило и как
+исправить), `init` — предупреждением `review-vendor-conflict`.
 
 Правило может перечислить запасных reviewer (`alternates`, по порядку):
 берётся первый из `[reviewer, ...alternates]`, допустимый правилом вендора
@@ -1771,11 +1774,27 @@ remaining?, humanWait, line}`: `elapsedMs` — от начала первой п
 истории 500, окно до 7 дней; ревизия 4 — срез прогона 200 задач, вопросы
 источника 50, варианты вопроса 10, связки в здоровье 10. Список сверх предела
 усекается (первые записи в порядке harness), выброшенное — числом в
-`truncated`, плюс предупреждение `VIEW_TRUNCATED`. Документ больше 256 КБ
-UTF-8 сначала теряет необязательные разделы связки: без `scope` и
-`sourceQuestions` (их число — в `truncated`, предупреждение
-`VIEW_SECTIONS_DROPPED`); не помещается и без них — отказ `VIEW_TOO_LARGE`
-(exit 4); иного частичного документа нет.
+`truncated`, плюс предупреждение `VIEW_TRUNCATED` (пункты `updates.whatsNew`
+сверх 10 — `truncated.whatsNew`). Документ больше 256 КБ UTF-8 не
+отказывает целиком, а теряет необязательное в одном порядке, пока не
+поместится (с 0.1.0-alpha.61):
+
+1. разделы связки `scope` и `sourceQuestions` (их число — в `truncated`,
+   предупреждение `VIEW_SECTIONS_DROPPED`);
+2. поля ревизии 4 у работ — `attempts.lastFailure.kind` и `counted`,
+   `blockers[].step`, `question.line` (число оставшихся в документе работ без
+   них — `truncated.workFields`);
+3. лента `activity` (`truncated.activity`);
+4. хвосты списков `works`, `reviews` (и находок предметов), `questions`,
+   `escalations`, `drift` — одной долей `n/64`, наибольшей, при которой
+   документ помещается (опущенное — в `truncated` по спискам).
+
+Начиная со второго шага — предупреждение `VIEW_SIZE_REDUCED`;
+`VIEW_TRUNCATED` остаётся всегда. Счётчики `progress`, `forecast`, `updates`,
+`health`, `history` и `settings` не опускаются. Отказ `VIEW_TOO_LARGE`
+(exit 4) остаётся, когда предела (`maxBytes`, по умолчанию 256 КБ) не хватает
+и документу без всех этих списков — например, при сотне ролей с запасными
+reviewer в `settings`.
 
 **Маскирование.** Каждая свободная строка (заголовки, `stage.step`, `line`,
 `plain`, `queue.detail`, `warnings[].message`, `drift[].unavailable`,
@@ -2285,7 +2304,8 @@ lifecycle `setup` и `ready`, хранилище зависимостей (`depe
 (`LIFECYCLE_FAILED`): `data.failure` с классом, стадией и шагом, сообщением и
 советом. Классы: `port-busy` (порт ресурса занят до окружения), `timeout`
 (шаг дольше своего `timeoutMs`, проверка дольше `runTimeoutMs` или замолкла
-дольше порога `stallSweep`), `crash` (ненулевой код шага), `missing-tool`
+дольше порога `stallSweep`), `crash` (ненулевой код шага; установка, упавшая
+на сети или реестре по правилу `dependency-network`, — `environment`), `missing-tool`
 (нет исполняемого файла: `ENOENT`, `EACCES`, код 126/127), `cleanup` (упал
 только `teardown`), `tree-changed` (подготовка изменила отслеживаемые файлы)
 и `environment` (прочее: переменные и секреты окружения, сеть реестра, git).

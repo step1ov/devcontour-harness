@@ -716,6 +716,71 @@ test('alpha.60: вид сверх предела — без среза и воп
   assert.ok(view.health.warnings.some((w) => w.code === 'VIEW_SECTIONS_DROPPED'));
 });
 
+test('alpha.61: обновления переживают VIEW_SECTIONS_DROPPED; whatsNew сверх предела — число в truncated', () => {
+  const big = 'ж'.repeat(300);
+  const input = baseInput({
+    sources: [
+      {
+        connector: 'relay-v1-http-abc',
+        provider: 'relay-v1-http',
+        tasks: Array.from({ length: 230 }, (_, k) => ({
+          id: 'T' + k,
+          key: 'WEB-' + k,
+          title: big,
+          orderId: 'o' + k,
+          problems: [{ code: 'DEPENDENCY_UNFINISHED', message: big }],
+        })),
+        observedAt: '2026-11-19T11:00:00.000Z',
+        questions: [],
+      },
+    ],
+    updates: {
+      state: 'available',
+      mode: 'notify',
+      current: { harness: '0.1.0-alpha.60', ui: '0.1.0-alpha.4' },
+      available: { harness: '0.1.0-alpha.61', ui: '0.1.0-alpha.5' },
+      checkedAt: '2026-11-19T10:00:00.000Z',
+      line: 'Доступна harness 0.1.0-alpha.61 и панель 0.1.0-alpha.5',
+      whatsNew: Array.from({ length: 13 }, (_, k) => `пункт ${k + 1}`),
+      command: 'harness update --apply --state .harness/state',
+    },
+  });
+  const view = operatorView(input, { maxBytes: 120_000 });
+  operatorViewSchema.parse(view);
+  assert.equal(view.scope, undefined);
+  assert.ok(view.health.warnings.some((w) => w.code === 'VIEW_SECTIONS_DROPPED'));
+  assert.equal(view.updates?.state, 'available');
+  assert.deepEqual(view.updates?.available, { harness: '0.1.0-alpha.61', ui: '0.1.0-alpha.5' });
+  assert.equal(view.updates?.whatsNew?.length, 10);
+  assert.equal(view.updates?.whatsNew?.[9], 'пункт 10');
+  assert.equal(view.truncated?.whatsNew, 3);
+  assert.match(view.updates?.command ?? '', /harness update --apply/);
+});
+
+test('alpha.61: ожидание людей короче минуты — «меньше минуты», без «до»', () => {
+  const input = (minutesAgo: number) =>
+    baseInput({
+      works: [work('w1', { status: 'failed' })],
+      attempts: [attempt('w1', 1, { startedAt: at(30), finishedAt: at(20), status: 'failed' })],
+      stops: [
+        {
+          workId: 'w1',
+          code: 'ATTEMPTS_EXHAUSTED',
+          actor: 'user',
+          action: 'reset-attempts',
+          since: at(minutesAgo),
+        },
+      ],
+    });
+  const short = operatorView(input(0.2)).forecast!.time.line;
+  assert.match(short, /ждут людей сейчас: 1, меньше минуты — в прогноз не входит/);
+  assert.doesNotMatch(short, /до меньше/);
+  const long = operatorView(input(10)).forecast!.time.line;
+  assert.match(long, /ждут людей сейчас: 1, до 10 мин — в прогноз не входит/);
+  const en = operatorView(input(0.2), { lang: 'en' }).forecast!.time.line;
+  assert.match(en, /waiting for people now: 1 work\(s\), under a minute — not in the estimate/);
+});
+
 test('alpha.60: срез, прогноз и строка очереди, шаги блокировок вместе — в пределе; сверх предела уходят только разделы связки', () => {
   const big = 'ж'.repeat(300);
   const line = 'Очередь стоит — никто не запущен: нужен новый запуск (ведущий: harness run).';

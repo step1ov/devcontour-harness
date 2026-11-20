@@ -96,10 +96,14 @@ reviewer кода — для writer.
 `--model` закрепляет одну модель на writer и всех reviewers (поле `model`
 привязок); при ревью другим вендором это отказ `INVALID_INPUT`
 (`model-cross-vendor`). Роли профиля со своими runtime не меняются; их
-отсутствующий CLI — предупреждение `runtime-missing`.
+отсутствующий CLI — предупреждение `runtime-missing`. Reviewer роли профиля
+того же вендора, что её writer, при `same` получает в правиле роли то же
+`vendor: same-vendor-allowed`; при `cross` правило роли остаётся
+`different-vendor`, и такую роль движок не выдаст — init предупреждает
+`review-vendor-conflict`, `doctor` называет это проблемой.
 
 `data.warnings` — предупреждения, не отказ: `review-same-vendor`,
-`runtime-missing`, `runtime-unauthenticated`. Те же правила видны дальше:
+`review-vendor-conflict`, `runtime-missing`, `runtime-unauthenticated`. Те же правила видны дальше:
 `doctor` предупреждает о ревью тем же вендором (`warnings`) и называет
 отсутствующий назначенный CLI с его назначениями в `problems`; `report`
 добавляет ограничение `review-same-vendor`, если в окне были такие ревью.
@@ -184,8 +188,9 @@ manifest и политике. Manifest прежнего формата (без `
 - у pnpm-профиля с `pnpm-lock.yaml` в корне — `dependencyStore: { "manager": "pnpm" }`:
   пакеты не скачиваются заново в каждый checkout
   ([хранилище зависимостей](toolchains.md#хранилище-зависимостей); seed
-  собирается в песочнице, поэтому реестру нужен домен в `isolation.domains`,
-  иначе — обычная установка). Для npm хранилища нет.
+  собирается в песочнице, и сеть к реестру harness открывает только этой
+  сборке — домен в `isolation.domains` не нужен; реестр задаётся окружением
+  политики, `.npmrc` проекта сборка не читает). Для npm хранилища нет.
 
 Решение записывается в manifest (`profile.layers: ["lean"]`): повтор `init`
 без флага его сохраняет. В уже подготовленном проекте `init --lean` даёт

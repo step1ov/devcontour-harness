@@ -232,6 +232,8 @@ const ADDITIVE_ENUM_VALUES = new Set([
   'dependency-cache-path',
   // Предупреждение init о версии Relay (0.1.0-alpha.60).
   'relay-compatibility',
+  // Предупреждение init о реестре сборки seed хранилища (0.1.0-alpha.61).
+  'dependency-store-registry',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =

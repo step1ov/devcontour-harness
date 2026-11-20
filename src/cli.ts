@@ -64,7 +64,12 @@ import { valueReport, reportHtml, reportMarkdown } from './report/index.ts';
 import { handoffMarkdown, handoffPack } from './handoff/index.ts';
 import { inputStateOf } from './projections/input.ts';
 import { checkGates, gatesText } from './control/gates-check.ts';
-import { smokeLifecycle, smokeText } from './control/lifecycle-smoke.ts';
+import {
+  smokeLifecycle,
+  smokeText,
+  stepDetailText,
+  stepStatusText,
+} from './control/lifecycle-smoke.ts';
 import { defaultResourceDatabase } from './environment/resources.ts';
 import {
   UPDATE_OPERATION,
@@ -787,15 +792,32 @@ function updateContext(state: string, v: { policy?: string; prefix?: string }) {
   };
 }
 
-/** Строка об обновлениях для status: настройка не по схеме не ломает status. */
+let updatesConfigWarned = false;
+/**
+ * Строка об обновлениях для status. Настройка `.harness/updates.json` не по
+ * схеме status не ломает и в строку «Обновления:» не попадает: поля нет, на
+ * stderr — одно предупреждение простыми словами (отказ с подробностями — у
+ * `harness update`).
+ */
 function statusUpdates(state: string, baseDir: string) {
+  let loaded: ReturnType<typeof loadUpdatesConfig>;
   try {
-    const { config, exists } = loadUpdatesConfig(baseDir);
-    const cached = cachedUpdates(state, config);
-    if (!cached || (!exists && cached.state === 'not-checked')) return undefined;
+    loaded = loadUpdatesConfig(baseDir, { quiet: true });
+  } catch {
+    if (!updatesConfigWarned) {
+      updatesConfigWarned = true;
+      process.stderr.write(
+        'harness status: настройка обновлений .harness/updates.json не по схеме и пропущена; подробности — harness update --check\n',
+      );
+    }
+    return undefined;
+  }
+  try {
+    const cached = cachedUpdates(state, loaded.config);
+    if (!cached || (!loaded.exists && cached.state === 'not-checked')) return undefined;
     return { state: cached.state, line: cached.line };
-  } catch (error) {
-    return { state: 'unavailable' as const, line: (error as Error).message.slice(0, 300) };
+  } catch {
+    return undefined;
   }
 }
 
@@ -1720,7 +1742,7 @@ async function run(
           // Ход — диагностика в stderr: stdout остаётся одним JSON.
           onStep: (s) =>
             process.stderr.write(
-              `harness smoke: ${s.stage}/${s.id} ${s.status} ${Math.round(s.durationMs / 1000)} с\n`,
+              `harness smoke: ${s.stage}/${s.id} ${stepStatusText(s)} ${Math.round(s.durationMs / 1000)} с${s.unused && s.detail ? ` (${stepDetailText(s)})` : ''}\n`,
             ),
         });
         // Отказ окружения — данные и exit 4 (LIFECYCLE_FAILED).

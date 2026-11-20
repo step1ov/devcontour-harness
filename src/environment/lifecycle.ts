@@ -9,7 +9,11 @@ import {
   TaskFailure,
   type ExecutionPolicy,
 } from '../contracts/index.ts';
-import { dependencyNetworkFailure, dependencyNetworkMessage } from './dependency-network.ts';
+import {
+  dependencyNetworkFailure,
+  dependencyNetworkMessage,
+  registryFailureLine,
+} from './dependency-network.ts';
 import { protectedChanges, protectedSnapshot, SandboxPolicyError } from './isolation.ts';
 import { command } from './process.ts';
 import { ensurePortsFree } from './port-probe.ts';
@@ -155,6 +159,17 @@ export interface StepOutcome {
   log?: string;
   /** Пояснение стадии без команды (исход хранилища зависимостей). */
   detail?: string;
+  /**
+   * Подпись сетевого отказа реестра в выводе упавшей установки
+   * (`registryFailureLine`) — без сверки входов с базой: только для
+   * диагноза `harness smoke`, попытки по нему не судятся.
+   */
+  registryFailure?: string;
+  /**
+   * Стадия прошла, но ничего не дала: хранилище зависимостей не использовано
+   * (промах, отказ сборки seed). Не отказ — и не «пройдено».
+   */
+  unused?: boolean;
 }
 
 export async function runSteps(
@@ -194,6 +209,10 @@ export async function runSteps(
     }
     const log = join(dir, step.id + '.log');
     await writeFile(log, result.stdout + '\n' + result.stderr);
+    const registry =
+      result.code && !result.timedOut && !signal.aborted
+        ? registryFailureLine(step.command, result.code, result.stdout + '\n' + result.stderr)
+        : undefined;
     execution.onStep?.({
       stage,
       id: step.id,
@@ -203,6 +222,7 @@ export async function runSteps(
       timedOut: result.timedOut,
       aborted: signal.aborted,
       log,
+      ...(registry ? { registryFailure: execution.redact(registry) } : {}),
     });
     if (result.code || result.timedOut || signal.aborted) {
       const message = `Шаг ${step.id}: exit=${result.code}; timeout=${result.timedOut}`;

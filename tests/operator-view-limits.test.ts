@@ -77,17 +77,51 @@ function full(over: number, text: (n: number) => string | undefined): OperatorVi
   });
 }
 
-test('view limits: наибольший документ (все списки до предела, строки максимальной длины) — VIEW_TOO_LARGE', () => {
+test('view limits: наибольший документ (все списки до предела, строки максимальной длины) — хвосты списков опущены, а не отказ', () => {
   const input = full(0, long);
+  const fitted = operatorView(input);
+  operatorViewSchema.parse(fitted);
+  assert.ok(bytes(fitted) <= L.bytes, `${bytes(fitted)} > ${L.bytes}`);
+  const codes = fitted.health.warnings.map((w) => w.code);
+  assert.ok(codes.includes('VIEW_SIZE_REDUCED'), codes.join());
+  assert.ok(codes.includes('VIEW_TRUNCATED'), codes.join());
+  assert.ok(fitted.health.warnings.length <= L.warnings);
+  // Опущенное посчитано: всего работ — по-прежнему все.
+  assert.equal(fitted.works.length + (fitted.truncated?.works ?? 0), L.works);
+  assert.equal(fitted.reviews.length + (fitted.truncated?.reviews ?? 0), L.reviews);
+  assert.equal(fitted.questions.length + (fitted.truncated?.questions ?? 0), L.questions);
+  // Дрейф у каждой из 500 работ: до предела списка — 50, затем доля.
+  assert.equal(fitted.drift.length + (fitted.truncated?.drift ?? 0), L.works);
+  assert.ok(fitted.works.length > 0, 'доля — наибольшая, что помещается, а не пустой документ');
+  assert.equal(fitted.progress.total, L.works);
+  // Доля — наибольшая: документ заполнен почти до предела (шаг доли — 1/64 списков).
+  assert.ok(bytes(fitted) > L.bytes * 0.9, `${bytes(fitted)}`);
+  // Находки сохраняются счётом: показанные (и находки эскалаций) плюс опущенные.
+  const withEscalation = {
+    ...input,
+    reviews: input.reviews.map((r) => ({
+      ...r,
+      escalation: { round: 4, findings: Array.from({ length: 30 }, (_, f) => 'e' + f) },
+    })),
+  };
+  const esc = operatorView(withEscalation);
+  operatorViewSchema.parse(esc);
+  const shown = esc.reviews.reduce(
+    (n, r) => n + r.findings.length + (r.escalation?.findings.length ?? 0),
+    0,
+  );
+  assert.ok(esc.reviews.length < L.reviews, 'часть предметов опущена');
+  assert.equal(shown + (esc.truncated?.findings ?? 0), L.reviews * (L.findingsPerSubject + 30));
+  // Отказ остаётся только для предела меньше документа без списков.
   assert.throws(
-    () => operatorView(input),
+    () => operatorView(input, { maxBytes: 2000 }),
     (e: unknown) =>
       e instanceof HarnessError &&
       e.code === 'VIEW_TOO_LARGE' &&
       e.class === 'infrastructure' &&
-      /больше предела 262144/.test(e.message),
+      /больше предела 2000/.test(e.message),
   );
-  // Без предела байт тот же документ проходит схему: отказ — только по размеру.
+  // Без предела байт тот же документ проходит схему целиком.
   const view = operatorView(input, { maxBytes: 64 * 1024 * 1024 });
   operatorViewSchema.parse(view);
   assert.ok(bytes(view) > L.bytes);
@@ -253,4 +287,82 @@ test('view limits: truncated считает каждый усечённый сп
   // Счётчики прогресса — по всем работам, а не по усечённому списку.
   assert.equal(view.progress.total, L.works + over);
   assert.equal(view.progress.done, L.works + over);
+});
+
+test('alpha.61: 500 работ со всеми полями ревизии 4 и дрейфом у 50 — сначала поля работ, затем хвост работ; не отказ', () => {
+  const plain = 'An ordinary sentence of about sixty characters, plain words.';
+  const input = full(0, () => plain);
+  const all = {
+    ...input,
+    works: input.works.map((w, k) => ({
+      ...work(w.id),
+      status: 'done',
+      stage: { ...work(w.id).stage, name: 'done', next: [] },
+      ...(k < L.drift ? { target: w.target! } : {}),
+      ...revision4(w.id),
+      blockers: [{ code: 'ATTEMPTS_EXHAUSTED', actor: 'user' as const, step: 1 }],
+    })),
+    attempts: [
+      ...input.attempts,
+      ...input.works.map((w) =>
+        attempt(w.id, 1, {
+          runId: `${w.id}-r1`,
+          status: 'failed',
+          startedAt: at(3 * 24 * 60),
+          finishedAt: at(3 * 24 * 60 - 10),
+        }),
+      ),
+    ],
+    reviews: input.reviews.map((r) => ({ ...r, findings: r.findings.slice(0, 2) })),
+    warnings: input.warnings!.slice(0, 2),
+  };
+  // Без предела документ больше 256 КБ: поля ревизии 4 у каждой из 500 работ.
+  const whole = operatorView(all, { titles: false, maxBytes: 64 * 1024 * 1024 });
+  assert.ok(bytes(whole) > L.bytes, `${bytes(whole)}`);
+  assert.equal(whole.works.filter((w) => w.question?.line).length, L.works);
+  assert.equal(whole.drift.length, L.drift);
+  const view = operatorView(all, { titles: false });
+  operatorViewSchema.parse(view);
+  assert.ok(bytes(view) <= L.bytes, `${bytes(view)} > ${L.bytes}`);
+  // Опущены поля ревизии 4 у всех оставшихся работ и хвост работ — с числом.
+  const kept = view.works.length;
+  assert.ok(kept > L.works / 2, `${kept}`);
+  assert.ok(bytes(view) > L.bytes * 0.97, 'доля — наибольшая, что помещается');
+  assert.equal(kept + (view.truncated?.works ?? 0), L.works);
+  assert.equal(view.truncated?.workFields, kept, 'опущенные целиком работы — не в workFields');
+  assert.ok(view.works.every((w) => w.question && w.question.line === undefined));
+  assert.ok(view.works.every((w) => w.blockers.every((b) => b.step === undefined)));
+  assert.ok(
+    view.works.every(
+      (w) =>
+        w.attempts.lastFailure &&
+        w.attempts.lastFailure.kind === undefined &&
+        w.attempts.lastFailure.counted === undefined &&
+        w.attempts.lastFailure.plain,
+    ),
+  );
+  assert.equal(view.progress.total, L.works, 'счётчики — по всем работам');
+  assert.ok(view.forecast, 'прогноз не опускается');
+  const codes = view.health.warnings.map((w) => w.code);
+  assert.ok(codes.includes('VIEW_SIZE_REDUCED') && codes.includes('VIEW_TRUNCATED'), codes.join());
+  assert.ok(!codes.includes('VIEW_SECTIONS_DROPPED'), 'разделов связки нет — нечего опускать');
+  // Детерминированно: тот же вход — те же байты.
+  assert.equal(JSON.stringify(operatorView(all, { titles: false })), JSON.stringify(view));
+  // Где ответ и шаги блокировок у 80 работ: их снятия достаточно, все 500 работ остаются.
+  const some = {
+    ...all,
+    works: all.works.map((w, k) => ({
+      ...work(w.id),
+      status: 'done',
+      stage: { ...work(w.id).stage, name: 'done', next: [] },
+      ...(k < L.drift ? { target: w.target } : {}),
+      ...(k < 80 ? { input: w.input, blockers: w.blockers } : {}),
+    })),
+  };
+  assert.ok(bytes(operatorView(some, { titles: false, maxBytes: 1e9 })) > L.bytes);
+  const lighter = operatorView(some, { titles: false });
+  operatorViewSchema.parse(lighter);
+  assert.equal(lighter.works.length, L.works);
+  assert.equal(lighter.truncated?.works, undefined);
+  assert.equal(lighter.truncated?.workFields, 80);
 });

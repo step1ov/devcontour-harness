@@ -31,8 +31,11 @@
 //    — сетевой (HTTP 403/407/408/429/5xx реестра, errno соединения, TLS), у
 //    каждой строки ошибки yarn — сетевая подпись, а признаков ошибки проекта
 //    (lockfile, нет версии, 404, peer-зависимости, упавший скрипт, целостность)
-//    в выводе нет. Сетевые слова в выводе скриптов и предупреждениях повтора
-//    сами по себе не засчитываются.
+//    в выводе нет. Без кода менеджера засчитываются только обрыв загрузки
+//    («terminated» и кадр прерванного fetch или TLS-сокета) и предел времени
+//    запроса (`TimeoutError: The operation was aborted due to timeout` и кадр
+//    таймера AbortController Node). Сетевые слова в выводе скриптов и
+//    предупреждениях повтора сами по себе не засчитываются.
 //
 // Остаток риска — настоящий отказ реестра на входах базы. Он ограничен общими
 // пределами класса `environment`: повтор одного отпечатка, пауза очереди и
@@ -215,6 +218,9 @@ export function registryFailureLine(
   // сокета TLS — менеджер печатает «terminated» и стек прерванного запроса.
   // Засчитывается только пара «terminated» + кадр прерванного fetch/TLS-сокета.
   found ??= abortedFetch(text);
+  // Предел времени загрузки: AbortSignal.timeout прервал запрос к реестру —
+  // `TimeoutError` и кадр таймера AbortController Node.
+  found ??= abortedTimeout(text);
   return found && (found.length > 200 ? found.slice(0, 200) + '…' : found);
 }
 
@@ -226,6 +232,15 @@ const abortedFetchFrame =
 function abortedFetch(text: string) {
   const line = abortedFetchLine.exec(text);
   return line && abortedFetchFrame.test(text) ? line[0].trim() : undefined;
+}
+
+/** Строка `TimeoutError` прерванного по пределу запроса рядом с кадром таймера AbortController. */
+const abortedTimeoutLine =
+  /^\s*(?:\[?ERROR\]?\s+|(?:pnpm|npm error|npm ERR!|yarn):?\s+)?(?:TimeoutError|AbortError): The operation was aborted due to timeout\s*$/m;
+const abortedTimeoutFrame = /^\s*at Timeout\._onTimeout \(node:internal\/abort_controller:/m;
+function abortedTimeout(text: string) {
+  const line = abortedTimeoutLine.exec(text);
+  return line && abortedTimeoutFrame.test(text) ? line[0].trim() : undefined;
 }
 
 /** Файлы конфигурации и lockfiles менеджеров: сверяются побайтно. */

@@ -384,7 +384,9 @@ export type TruncatedKey =
   | 'blockers'
   | 'dependsOn'
   | 'alternates'
-  | 'activity';
+  | 'activity'
+  | 'workFields'
+  | 'whatsNew';
 
 export interface ViewSource {
   producer: string;
@@ -1768,10 +1770,15 @@ function forecastOf(c: Ctx, scope: ScopeView | undefined): ForecastView | undefi
         : en
           ? `time left unknown (fewer than ${OPERATOR_VIEW_TYPICAL_MIN_SAMPLES} finished attempts)`
           : `сколько осталось — неизвестно (закончившихся попыток меньше ${OPERATOR_VIEW_TYPICAL_MIN_SAMPLES})`;
+  // «до 45 мин», но «меньше минуты» — без «до».
+  const upTo =
+    waitMs < 30_000
+      ? durationText(waitMs, c.lang)
+      : (en ? 'up to ' : 'до ') + durationText(waitMs, c.lang);
   const waitText = humanWait.works
     ? en
-      ? `; waiting for people now: ${humanWait.works} work(s), up to ${durationText(waitMs, c.lang)} — not in the estimate`
-      : `; ждут людей сейчас: ${humanWait.works}, до ${durationText(waitMs, c.lang)} — в прогноз не входит`
+      ? `; waiting for people now: ${humanWait.works} work(s), ${upTo} — not in the estimate`
+      : `; ждут людей сейчас: ${humanWait.works}, ${upTo} — в прогноз не входит`
     : '';
   const timeLine = `${elapsedText} · ${remainingText}${waitText}`;
   const assumptions = en
@@ -2550,7 +2557,7 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
     ...(scope ? { scope } : {}),
     ...(sourceQuestions ? { sourceQuestions } : {}),
     ...(forecast ? { forecast } : {}),
-    ...(i.updates ? { updates: updatesOf(c, i.updates) } : {}),
+    ...(i.updates ? { updates: updatesOf(c, i.updates, truncated) } : {}),
   };
   const fitted = draft;
   let warnings = [...fitted.health.warnings];
@@ -2576,42 +2583,191 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
     health: { ...fitted.health, warnings: warnings.slice(0, L.warnings) },
     ...(tr ? { truncated: tr } : {}),
   };
-  try {
-    return finish(full, maxBytes);
-  } catch (error) {
-    // Разделы связки (ревизия 4) необязательны: документ сверх предела
-    // выдаётся без них, с числом опущенного, а не отказом всего представления.
-    if (
-      !(error instanceof HarnessError && error.code === 'VIEW_TOO_LARGE') ||
-      (!full.scope && !full.sourceQuestions)
-    )
-      throw error;
-    const { scope, sourceQuestions, ...rest } = full;
-    const dropped: Record<string, number> = { ...(full.truncated ?? {}) };
-    if (scope) dropped.scope = (dropped.scope ?? 0) + scope.tasks.length;
-    if (sourceQuestions)
-      dropped.sourceQuestions = (dropped.sourceQuestions ?? 0) + sourceQuestions.length;
-    const note = {
-      code: 'VIEW_SECTIONS_DROPPED',
-      message:
-        c.lang === 'en'
-          ? 'the run scope and source questions exceed the view size limit and are omitted'
-          : 'срез прогона и вопросы источника не помещаются в предел представления и опущены',
-    };
-    const kept = rest.health.warnings.slice(0, L.warnings - 1);
-    return finish(
-      {
-        ...rest,
-        health: { ...rest.health, warnings: [...kept, note] },
-        truncated: truncation<TruncatedKey>(dropped)!,
-      },
-      maxBytes,
-    );
+  return fitSize(full, maxBytes, c.lang, truncated);
+}
+
+/** Поля ревизии 4 у работы, которые документ сверх предела теряет первыми после разделов связки. */
+function withoutWorkFields(w: WorkView): WorkView | undefined {
+  const last = w.attempts.lastFailure;
+  const lastExtra = !!last && (last.kind !== undefined || last.counted !== undefined);
+  const steps = w.blockers.some((b) => b.step !== undefined);
+  const line = w.question?.line !== undefined;
+  if (!lastExtra && !steps && !line) return undefined;
+  const out: WorkView = { ...w };
+  if (lastExtra) {
+    const rest = { ...last };
+    delete rest.kind;
+    delete rest.counted;
+    out.attempts = { ...w.attempts, lastFailure: rest };
   }
+  if (steps)
+    out.blockers = w.blockers.map((b) => {
+      const copy = { ...b };
+      delete copy.step;
+      return copy;
+    });
+  if (line) {
+    const q = { ...w.question! };
+    delete q.line;
+    out.question = q;
+  }
+  return out;
+}
+
+/** Первые `n/64` записей списка (не меньше 0); опущенное — в счётчик. */
+const share = <T>(list: T[], n: number, add: (k: number) => void): T[] => {
+  const keep = Math.floor((list.length * n) / 64);
+  if (keep < list.length) add(list.length - keep);
+  return list.slice(0, keep);
+};
+
+/**
+ * Документ сверх байтового предела не отказывает целиком, а теряет
+ * необязательное в одном порядке (docs/contracts.md, «Размер»):
+ * 1. разделы связки `scope` и `sourceQuestions` (`VIEW_SECTIONS_DROPPED`);
+ * 2. поля ревизии 4 у работ — `attempts.lastFailure.kind`/`counted`,
+ *    `blockers[].step`, `question.line` (число работ — `truncated.workFields`);
+ * 3. лента `activity`;
+ * 4. хвосты списков `works`, `reviews` (и находок предметов), `questions`,
+ *    `escalations`, `drift` — одной долей, наибольшей, при которой документ
+ *    помещается (опущенное — в `truncated` по спискам).
+ * С шага 2 — предупреждение `VIEW_SIZE_REDUCED`. Отказ `VIEW_TOO_LARGE`
+ * остаётся только для предела меньше документа без всех этих списков.
+ */
+function fitSize(
+  full: OperatorView,
+  maxBytes: number,
+  lang: 'ru' | 'en',
+  counted: Record<string, number>,
+): OperatorView {
+  const tryFinish = (v: OperatorView) => {
+    try {
+      return finish(v, maxBytes);
+    } catch (error) {
+      if (error instanceof HarnessError && error.code === 'VIEW_TOO_LARGE') return undefined;
+      throw error;
+    }
+  };
+  const first = tryFinish(full);
+  if (first) return first;
+  const en = lang === 'en';
+  const truncated: Record<string, number> = { ...counted };
+  const add = (key: string) => (k: number) => {
+    if (k > 0) truncated[key] = (truncated[key] ?? 0) + k;
+  };
+  const base = full.health.warnings.filter((w) => w.code !== 'VIEW_TRUNCATED');
+  const truncatedNote = {
+    code: 'VIEW_TRUNCATED',
+    message: en
+      ? 'some lists exceed the view limits: see truncated for the omitted counts'
+      : 'часть списков длиннее пределов представления: число опущенных — в truncated',
+  };
+  const sectionsNote = {
+    code: 'VIEW_SECTIONS_DROPPED',
+    message: en
+      ? 'the run scope and source questions exceed the view size limit and are omitted'
+      : 'срез прогона и вопросы источника не помещаются в предел представления и опущены',
+  };
+  const reducedNote = {
+    code: 'VIEW_SIZE_REDUCED',
+    message: en
+      ? 'the view exceeds its size limit: optional work fields and list tails are omitted, see truncated'
+      : 'представление больше предела размера: необязательные поля работ и хвосты списков опущены — число в truncated',
+  };
+  // Работы, потерявшие поля ревизии 4: считаются только оставшиеся в документе
+  // (опущенная целиком работа — уже в `truncated.works`).
+  const stripped = new Set<string>();
+  const assemble = (v: OperatorView, extra: Record<string, number>, reduced: boolean) => {
+    const all = { ...truncated, ...extra };
+    for (const [k, n] of Object.entries(extra)) all[k] = (truncated[k] ?? 0) + n;
+    const fields = v.works.filter((w) => stripped.has(w.id)).length;
+    if (fields) all.workFields = fields;
+    const notes = [
+      ...(full.scope || full.sourceQuestions ? [sectionsNote] : []),
+      ...(reduced ? [reducedNote] : []),
+    ];
+    const room = L.warnings - 1 - notes.length;
+    const kept = base.slice(0, room);
+    if (base.length > kept.length) all.warnings = (all.warnings ?? 0) + base.length - kept.length;
+    // VIEW_TRUNCATED всегда виден: документ что-то опустил.
+    return {
+      ...v,
+      health: { ...v.health, warnings: [...kept, ...notes, truncatedNote] },
+      truncated: truncation<TruncatedKey>(all)!,
+    } as OperatorView;
+  };
+  // 1. Разделы связки.
+  const { scope, sourceQuestions, ...rest } = full;
+  let v: OperatorView = rest;
+  if (scope) add('scope')(scope.tasks.length);
+  if (sourceQuestions) add('sourceQuestions')(sourceQuestions.length);
+  if (scope || sourceQuestions) {
+    const done = tryFinish(assemble(v, {}, false));
+    if (done) return done;
+  }
+  // 2. Поля ревизии 4 у работ.
+  v = {
+    ...v,
+    works: v.works.map((w) => {
+      const out = withoutWorkFields(w);
+      if (out) stripped.add(w.id);
+      return out ?? w;
+    }),
+  };
+  {
+    const done = tryFinish(assemble(v, {}, true));
+    if (done) return done;
+  }
+  // 3. Лента.
+  if (v.activity) {
+    add('activity')(v.activity.length);
+    const noFeed = { ...v };
+    delete noFeed.activity;
+    v = noFeed;
+    const done = tryFinish(assemble(v, {}, true));
+    if (done) return done;
+  }
+  // 4. Хвосты списков одной долей n/64: наибольшая n, при которой помещается.
+  const cut = (n: number) => {
+    const extra: Record<string, number> = {};
+    const put = (key: string) => (k: number) => {
+      extra[key] = (extra[key] ?? 0) + k;
+    };
+    const reviews = share(v.reviews, n, put('reviews'));
+    // Опущенный предмет уносит и находки, и находки своей эскалации.
+    for (const r of v.reviews.slice(reviews.length))
+      put('findings')(r.findings.length + (r.escalation?.findings.length ?? 0));
+    return assemble(
+      {
+        ...v,
+        works: share(v.works, n, put('works')),
+        reviews: reviews.map((r) => ({ ...r, findings: share(r.findings, n, put('findings')) })),
+        questions: share(v.questions, n, put('questions')),
+        escalations: share(v.escalations, n, put('escalations')),
+        drift: share(v.drift, n, put('drift')),
+      },
+      extra,
+      true,
+    );
+  };
+  let lo = 0;
+  let hi = 63;
+  let best: OperatorView | undefined;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const done = tryFinish(cut(mid));
+    if (done) {
+      best = done;
+      lo = mid + 1;
+    } else hi = mid - 1;
+  }
+  return best ?? finish(cut(0), maxBytes);
 }
 
 /** Обновления: строки через ту же маску (путь каталога состояния в команде), с пределами. */
-function updatesOf(c: Ctx, u: UpdatesView): UpdatesView {
+function updatesOf(c: Ctx, u: UpdatesView, truncated: Record<string, number>): UpdatesView {
+  if (u.whatsNew && u.whatsNew.length > L.updatesWhatsNew)
+    truncated.whatsNew = u.whatsNew.length - L.updatesWhatsNew;
   return {
     state: u.state,
     mode: u.mode,

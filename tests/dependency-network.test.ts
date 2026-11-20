@@ -912,3 +912,27 @@ test('A59: обрыв загрузки fetch («terminated» + стек прер
   // Не установка — не распознаётся.
   assert.equal(line(['pnpm', 'run', 'build'], output), undefined);
 });
+
+test('A61: предел времени загрузки (TimeoutError + кадр таймера AbortController) — сетевой отказ установки', () => {
+  const output = [
+    'Progress: resolved 1111, reused 0, downloaded 1093, added 1100',
+    '[WARN] GET https://registry.npmjs.org/next/-/next-16.3.4.tgz error (23). Will retry in 1 minute. 1 retries left.',
+    'Progress: resolved 1111, reused 0, downloaded 1100, added 1108',
+    '[23] The operation was aborted due to timeout',
+    '',
+    'TimeoutError: The operation was aborted due to timeout',
+    '    at new DOMException (node:internal/per_context/domexception:76:18)',
+    '    at Timeout._onTimeout (node:internal/abort_controller:210:9)',
+    '    at listOnTimeout (node:internal/timers:685:17)',
+    '    at process.processTimers (node:internal/timers:618:7)',
+  ].join('\n');
+  const argv = ['pnpm', 'install', '--frozen-lockfile'];
+  assert.equal(line(argv, output), 'TimeoutError: The operation was aborted due to timeout');
+  // Строка без кадра таймера, упавший скрипт, не установка, выход по сигналу — не сеть.
+  assert.equal(line(argv, 'TimeoutError: The operation was aborted due to timeout\n'), undefined);
+  assert.equal(line(argv, output + '\n ELIFECYCLE  Command failed with exit code 1.'), undefined);
+  assert.equal(line(['pnpm', 'run', 'build'], output), undefined);
+  assert.equal(registryFailureLine(argv, 137, output), undefined);
+  // Код ошибки проекта рядом — не сеть.
+  assert.equal(line(argv, ' ERR_PNPM_OUTDATED_LOCKFILE  Cannot install\n' + output), undefined);
+});

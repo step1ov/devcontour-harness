@@ -24,6 +24,7 @@ import {
 import type { RunEventPayload } from '../contracts/events.ts';
 import { processStartedAt } from '../environment/live-calls.ts';
 import { checkUpdates, pairToken, saveLastCheck, updatesDir, writeAtomic } from './check.ts';
+import { holds, updateInProgress, type LockBody } from './busy.ts';
 import {
   HARNESS_PACKAGE,
   UI_PACKAGE,
@@ -220,25 +221,6 @@ function journal(stateDir: string, record: Record<string, unknown>) {
   }
 }
 
-const alive = (pid: number) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
-  }
-};
-
-interface LockBody {
-  pid?: number;
-  startedAt?: number;
-  at?: string;
-}
-/** Держатель замка жив: тот же pid и тот же момент старта процесса. */
-const holds = (held: LockBody | undefined) =>
-  held?.pid !== undefined &&
-  alive(held.pid) &&
-  (held.startedAt === undefined || processStartedAt(held.pid) === held.startedAt);
 const sameBody = (a: LockBody | undefined, b: LockBody | undefined) =>
   !!a && !!b && a.pid === b.pid && a.startedAt === b.startedAt && a.at === b.at;
 
@@ -362,22 +344,7 @@ export const acquirePrefixLock = (prefix: string) =>
     'Пакеты этого каталога установки уже обновляет другой harness update',
   );
 
-/**
- * Идёт или прервано обновление этого каталога состояния: живой держатель
- * замка или запись «идёт». Команды, которые пишут состояние или запускают
- * проверки без роли controller (`gates`, `smoke`, `review-code`, ревью плана),
- * в это время отказывают.
- */
-export function updateInProgress(stateDir: string, prefix?: string): string | undefined {
-  const held = readJson<LockBody>(file(stateDir, 'lock'));
-  if (holds(held)) return `идёт harness update (процесс ${held!.pid})`;
-  // Общий каталог установки обновляет другой каталог состояния: пакеты меняются.
-  const pre = prefix ? readJson<LockBody>(join(prefix, '.harness-update.lock')) : undefined;
-  if (holds(pre)) return `идёт harness update пакетов в ${prefix} (процесс ${pre!.pid})`;
-  if (readInProgress(stateDir))
-    return 'прерванное обновление ждёт возврата: harness update --check';
-  return undefined;
-}
+export { updateInProgress };
 
 /**
  * Охрана обновления: пауза выдачи, ожидание окончания работы, роль

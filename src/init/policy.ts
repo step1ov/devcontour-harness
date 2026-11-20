@@ -129,7 +129,9 @@ export function priorLayerRunTimeoutMs(
  * Роли — профиля, иначе одна `developer` с выбранным writer. Reviewer плана и
  * контракта выбирается для ведущего (`lead` — их автор), reviewer кода — для
  * writer: при `review: 'cross'` — другой вендор, при `'same'` — тот же runtime
- * с явным `vendor: same-vendor-allowed`. `model` закрепляется на каждом writer
+ * с явным `vendor: same-vendor-allowed`; правило ревью роли профиля с reviewer
+ * того же вендора, что её writer, при `'same'` получает то же разрешение.
+ * `model` закрепляется на каждом writer
  * и reviewer; одна модель у runtime двух вендоров — отказ. Параллельность и
  * нижняя граница предела gate — профиля (`profileExecution`); approval,
  * isolation и прочие бюджеты — умолчания схемы. Срок фазы (`runTimeoutMs`,
@@ -186,28 +188,42 @@ export function generatePolicy(input: {
     mode === 'cross'
       ? { reviewer: bind({ runtime: otherRuntime(author) }) }
       : { reviewer: bind({ runtime: author }), vendor: 'same-vendor-allowed' as const };
+  // Reviewer роли профиля того же вендора, что её writer, при `review: 'same'`
+  // наследует разрешение общей политики (`same-vendor-allowed`): иначе правило
+  // роли с умолчанием `different-vendor` запретило бы то, что выбрал init, и
+  // поручения роли остановились бы на ревью. При `cross` правило роли
+  // остаётся строгим, противоречие называют init и doctor.
+  const inherit = (role: ReturnType<typeof profileRoles>[string]) =>
+    mode === 'same' &&
+    role.review &&
+    vendorOf(role.review.reviewer.runtime) === vendorOf(role.writer.runtime)
+      ? { ...role, review: { ...role.review, vendor: 'same-vendor-allowed' as const } }
+      : role;
   const roles = Object.keys(profile.roles).length
     ? Object.fromEntries(
-        Object.entries(profileRoles(profile)).map(([id, role]) => [
-          id,
-          model
-            ? {
-                ...role,
-                writer: bind(role.writer),
-                ...(role.review
-                  ? {
-                      review: {
-                        ...role.review,
-                        reviewer: bind(role.review.reviewer),
-                        ...(role.review.alternates
-                          ? { alternates: role.review.alternates.map(bind) }
-                          : {}),
-                      },
-                    }
-                  : {}),
-              }
-            : role,
-        ]),
+        Object.entries(profileRoles(profile)).map(([id, profiled]) => {
+          const role = inherit(profiled);
+          return [
+            id,
+            model
+              ? {
+                  ...role,
+                  writer: bind(role.writer),
+                  ...(role.review
+                    ? {
+                        review: {
+                          ...role.review,
+                          reviewer: bind(role.review.reviewer),
+                          ...(role.review.alternates
+                            ? { alternates: role.review.alternates.map(bind) }
+                            : {}),
+                        },
+                      }
+                    : {}),
+                }
+              : role,
+          ];
+        }),
       )
     : { developer: { writer: bind({ runtime: writer }) } };
   const policy: z.input<typeof executionPolicySchema> = {

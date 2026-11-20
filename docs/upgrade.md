@@ -1815,6 +1815,116 @@ view`) в пределе длины сохраняет хвост — остат
   находки с `late`, строгая схема alpha.59 не читает — откат только через
   копию состояния, снятую перед обновлением.
 
+### 0.1.0-alpha.61
+
+Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`,
+`viewVersion: 1`, `viewRevision: 4`). Схема представления расширена
+аддитивно (ключи `truncated.workFields` и `truncated.whatsNew`); схема
+состояния не меняется — откат на alpha.60 читает его как есть.
+
+- **Представление не отказывает по размеру.** Документ `harness view` больше
+  256 КБ теряет необязательное в одном порядке, пока не поместится: разделы
+  связки (`scope`, `sourceQuestions`), поля ревизии 4 у работ
+  (`attempts.lastFailure.kind`/`counted`, `blockers[].step`,
+  `question.line`; число работ — `truncated.workFields`), ленту `activity`,
+  затем хвосты списков `works`, `reviews` (с находками), `questions`,
+  `escalations`, `drift` одной долей (опущенное — в `truncated`).
+  Предупреждение `VIEW_SIZE_REDUCED`; `VIEW_TOO_LARGE` — только когда
+  предела не хватает и документу без списков (настройки, здоровье, история). Порядок — docs/contracts.md.
+- **`updates.whatsNew` сверх 10 пунктов** — число опущенного в
+  `truncated.whatsNew`; раздел `updates` не опускается вместе с разделами
+  связки.
+- **Пауза обновления, убитого во время `--wait`.** Замок обновления
+  (`<state>-updates/lock`) называет процесс (pid и момент старта по ОС). Если
+  этого процесса нет (или pid достался другому процессу) и записи
+  незавершённого возврата (`<state>-updates/in-progress.json`) нет, пауза
+  операции `harness-update` не держит `run`, регистрацию графа и совместную
+  проверку: `run` её снимает (событие `control.resumed`), `status --detail` говорит
+  «пауза прерванного обновления: процесс … завершился до
+  изменений — паузу снимет следующий harness run». Нет замка (снят руками) —
+  пауза держит, как раньше (`harness update --check` или `resume`).
+- **Записи библиотеки во время обновления.** `Harness.resolveInput`,
+  `Harness.carryInputOf`, `Harness.review` и `Harness.reviewCode` (до вызова
+  модели), `Engine.applyInput`, `carryInput`, `refreshApplied`, `answerInput`,
+  `cancelInput`, `supersedeInput`, `acceptCodeFindings`, `retry` (в том числе
+  со сбросом), `cancel`, `recordReview` и `requestReconfigure` отказывают
+  `CONTROLLER_BUSY`, пока обновление держит состояние: живая роль
+  `harness-update:<pid>`, его пауза, замок живого `harness update` или запись
+  незавершённого возврата — тот же перечень записей, что CLI отказывает во
+  время обновления. `Harness` передаёт движку чтение `<state>-updates`
+  (`EngineOptions.updateBusy`, `updaterGone`); замок общего каталога установки
+  библиотека видит, если ей назвать его (`HarnessOptions.installPrefix`).
+  Движок без этих чтений судит по роли controller и паузе в состоянии.
+- **`status` и неверный `.harness/updates.json`.** Настройка не по схеме
+  пропускается, как описано: поля `updates` нет, строки «Обновления: <ошибка>»
+  нет, на stderr — одно предупреждение простыми словами; подробности —
+  `harness update --check`.
+- **Прогноз выпуска.** Ожидание людей короче минуты — «ждут людей сейчас: N,
+  меньше минуты» (без «до»).
+- **Хранилище зависимостей до первого `run`.** Пока целевой ветки
+  (`targetRef`) нет, seed собирается по lockfile `HEAD` checkout репозитория —
+  от него `run` создаст ветку; квитанция называет источник в новом поле
+  `ref`. `harness smoke` сразу после `init` больше не промахивается с
+  «pnpm-lock.yaml нет в refs/heads/harness/accepted»; после первого `run`
+  тот же lockfile даёт тот же seed без новой сборки.
+- **Сеть сборки seed.** Песочница сборки seed получает к `isolation.domains`
+  хост реестра из окружения политики (`npm_config_registry`/
+  `pnpm_config_registry`; пока реестр по умолчанию задан не под обоими
+  префиксами — и `registry.npmjs.org`) и хосты `tarball:` lockfile — только она, writers и gates их не получают. Политике
+  `init --lean` домен реестра больше не нужен; `policyDigest` не меняется.
+  Добавлять `registry.npmjs.org` в `isolation.domains` ради хранилища не нужно
+  (уже добавленный домен не мешает).
+- **`DEPENDENCY_STORE_REGISTRY`.** `doctor` (`warnings`), `init`
+  (`warnings[]`, новый код `dependency-store-registry`) и `lean` (`notes`)
+  предупреждают, когда `.npmrc` в корне репозитория задаёт реестр, которого
+  сборка seed не увидит: она `.npmrc` проекта не читает. Реестры сравниваются
+  адресом целиком (хост, порт, путь); реестр по умолчанию засчитывается, только
+  когда его называют оба префикса окружения.
+- **Честный шаг `dependency-store` в `harness smoke`.** Промах, отказ и
+  истёкший бюджет сборки seed — шаг с `unused: true` (аддитивное поле
+  `data.steps[]`; `status` остаётся `passed`, это не отказ окружения) и
+  причиной в `detail`. Таблица `--human` и ход в stderr печатают `miss` и
+  «не используется: причина» с настоящим временем вместо «passed 601 с».
+- **Проверка репозитория.** `DS42` находит pnpm 11 сам: `HARNESS_TEST_PNPM11_DIR`,
+  pnpm 11 из PATH или новейший pnpm 11 из кэша npx (`npx pnpm@11 --version`
+  кладёт его туда); пропуск по-прежнему проваливает полный прогон. Тест
+  `T05` восстанавливает права каталога, закрытого исполнителем, и уборка
+  каталога прогона больше не печатает «Run directory not removed … ENOTEMPTY».
+- **Причина в пробе исполнителя (`harness smoke --writer-probe`).** Причину
+  называет последняя значимая строка вывода: предупреждения (`[WARN]`, в том
+  числе с префиксом задачи turbo, `npm warn`, `(node:N) …Warning` Node; выброшенное
+  `--throw-deprecation` предупреждение — причина) и безвредное
+  чтение `~/.npmrc` pnpm под песочницей («Issue while reading … EPERM») не
+  считаются — раньше любой упавший шаг pnpm выходил `write-denied` с этой
+  строкой. Браузер, умерший при старте («Daemon process exited during
+  startup», «Failed to launch the browser process»), — `process-abort`. EPERM
+  без пути (`Operation not permitted (os error 1)` сборщика на Rust) остаётся
+  `write-denied`, но совет называет и локальный сокет, а при `network: none`
+  или `legacy` предлагает `network: loopback`. У `failed` в `evidence` —
+  последняя строка ошибки (итоговые строки pnpm, npm и turbo — только когда
+  другой нет). Набор причин и схема прежние.
+- **Предел времени загрузки при установке — `dependency-network`.** Вывод
+  `TimeoutError: The operation was aborted due to timeout` с кадром таймера
+  AbortController Node (`at Timeout._onTimeout (node:internal/abort_controller…`)
+  у установки зависимостей распознаётся так же, как обрыв «terminated»
+  alpha.59: отказ среды, попытку не тратит (при прочих условиях правила). В
+  `harness smoke` упавшая на сети или реестре установка — класс
+  `environment` (сообщение начинается с `dependency-network:`), а не `crash`;
+  в smoke входы с базой не сверяются — это только диагноз.
+- **Reviewer роли профиля того же вендора.** `init` (и `--lean`) с
+  `--review same` (в том числе выбранным `auto`) записывает в правило ревью
+  кода роли профиля, чей reviewer того же вендора, что writer роли,
+  `vendor: same-vendor-allowed` — как в общих правилах. Прежде правило роли
+  получало умолчание `different-vendor`: поручения роли стояли с блокером
+  `REVIEWER_SAME_VENDOR`, приёмка отклоняла результат, а `doctor` молчал.
+  Теперь `doctor` называет такое правило (любого происхождения) проблемой
+  `review-vendor-conflict: …` с местом правила и способом исправить, `init` —
+  предупреждением `review-vendor-conflict` (по каждому репозиторию: общая роль
+  под строгим правилом `review` репозитория тоже); решает тот же `selectReviewer`,
+  что движок и приёмка (`reviewVendorConflicts`). Уже записанную политику
+  исправьте руками: `vendor: same-vendor-allowed` в правиле роли или reviewer
+  другого вендора.
+
 ## Перед обновлением
 
 1. **Остановить записывающих.** Запретить новые выдачи (`harness pause`),

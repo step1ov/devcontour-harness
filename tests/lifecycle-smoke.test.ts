@@ -31,7 +31,12 @@ import {
   executionPolicySchema,
   type ExecutionPolicy,
 } from '../src/contracts/index.ts';
-import { classifyLifecycleFailure, smokeLifecycle } from '../src/control/lifecycle-smoke.ts';
+import {
+  classifyLifecycleFailure,
+  smokeLifecycle,
+  smokeText,
+  type LifecycleSmokeResult,
+} from '../src/control/lifecycle-smoke.ts';
 import { CleanupFailure } from '../src/environment/lifecycle.ts';
 import { lifecyclePreflight } from '../src/control/preflight.ts';
 import { example } from './fixtures.ts';
@@ -128,6 +133,45 @@ test('smoke: lifecycle и prepare по порядку, замер каждого
     1,
   );
   assert.equal(existsSync(join(f.state, 'state.sqlite')), false, 'база состояния не создаётся');
+});
+
+test('smoke: установка, упавшая на пределе времени запроса к реестру, — environment, а не crash', async () => {
+  // Поддельный pnpm печатает вывод pnpm 11 при TimeoutError загрузки и выходит с кодом 1.
+  const bin = realpathSync(mkdtempSync(join(tmpdir(), 'harness-smoke-pnpm-')));
+  const pnpm = join(bin, 'pnpm');
+  const output = [
+    'Progress: resolved 1111, reused 0, downloaded 1100, added 1108',
+    '[WARN] GET https://registry.npmjs.org/next/-/next-16.3.4.tgz error (23). Will retry in 1 minute. 1 retries left.',
+    '[23] The operation was aborted due to timeout',
+    '',
+    'TimeoutError: The operation was aborted due to timeout',
+    '    at new DOMException (node:internal/per_context/domexception:76:18)',
+    '    at Timeout._onTimeout (node:internal/abort_controller:210:9)',
+    '    at listOnTimeout (node:internal/timers:685:17)',
+  ].join('\n');
+  writeFileSync(
+    pnpm,
+    `#!${process.execPath}\nprocess.stderr.write(${JSON.stringify(output + '\n')});process.exit(1);\n`,
+    { mode: 0o755 },
+  );
+  const f = fixture(() => ({
+    prepare: [{ id: 'install', command: [pnpm, 'install', '--frozen-lockfile'], timeoutMs: 20000 }],
+  }));
+  const data = await f.smoke();
+  assert.equal(data.passed, false);
+  assert.equal(data.failure!.class, 'environment', JSON.stringify(data.failure));
+  assert.equal(data.failure!.stage, 'prepare');
+  assert.equal(data.failure!.step, 'install');
+  assert.match(
+    data.failure!.message,
+    /^dependency-network: TimeoutError: The operation was aborted due to timeout\. Шаг install: exit=1/,
+  );
+  assert.match(data.failure!.advice, /отказ сети или реестра/);
+  // Тот же код без сетевой подписи — по-прежнему crash.
+  writeFileSync(pnpm, `#!${process.execPath}\nconsole.error('boom');process.exit(1);\n`, {
+    mode: 0o755,
+  });
+  assert.equal((await f.smoke()).failure!.class, 'crash');
 });
 
 test('smoke: падение шага — crash с шагом и логом; teardown исполняется', async () => {
@@ -489,7 +533,49 @@ test('smoke: отмена после последнего шага — CANCELLED
   assert.equal(data.passed, true, JSON.stringify(data.failure));
   const step = data.steps.find((s) => s.stage === 'dependency-store')!;
   assert.equal(step.status, 'passed');
+  assert.equal(step.unused, true, 'промах — хранилище не использовано');
   assert.match(step.detail ?? '', /^miss: isolation\.mode: none/);
+  const table = smokeText(data);
+  assert.match(
+    table,
+    /\ndependency-store\/dependency-store\s+miss\s+-\s+\d+ с\s+не используется: isolation\.mode: none/,
+  );
+  assert.doesNotMatch(table, /dependency-store\/dependency-store\s+passed/);
+});
+
+test('smokeText: промах и отказ сборки seed — miss с причиной и настоящим временем; попадание — passed', () => {
+  const data: LifecycleSmokeResult = {
+    id: 'LS-1',
+    repositoryId: 'app',
+    sha: 'a'.repeat(40),
+    passed: true,
+    durationMs: 866000,
+    logs: '/logs',
+    steps: [
+      { stage: 'worktree', id: 'worktree', status: 'passed', durationMs: 0 },
+      {
+        stage: 'dependency-store',
+        id: 'dependency-store',
+        status: 'passed',
+        durationMs: 600668,
+        detail: 'miss: бюджет хранилища 600000 мс истёк',
+        unused: true,
+      },
+      { stage: 'prepare', id: 'install', status: 'passed', durationMs: 251000, exitCode: 0 },
+    ],
+  };
+  const text = smokeText(data);
+  assert.match(
+    text,
+    /\ndependency-store\/dependency-store\s+miss\s+-\s+601 с\s+не используется: бюджет хранилища 600000 мс истёк\n/,
+  );
+  assert.match(text, /\nworktree\/worktree\s+passed\s+-\s+0 с\n/);
+  const hit = smokeText({
+    ...data,
+    steps: [{ ...data.steps[1]!, durationMs: 5000, detail: 'hit', unused: false }],
+  });
+  assert.match(hit, /\ndependency-store\/dependency-store\s+passed\s+-\s+5 с\s+hit\n/);
+  cliDataSchemas.smoke.parse(data);
 });
 
 test('classifyLifecycleFailure: исходный отказ не приписывается teardown; уборка после предела не прячет упавший шаг', () => {

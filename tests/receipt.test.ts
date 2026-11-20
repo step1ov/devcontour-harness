@@ -3,7 +3,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runResultSchema, sha256 } from '../src/contracts/index.ts';
+import { reviewVendorConflicts, runResultSchema, sha256 } from '../src/contracts/index.ts';
 import { resultProblems, type ReceiverContext } from '../src/verification/acceptance.ts';
 import { graphOf, policyOf, sha } from './engine-fixture.ts';
 import { attempt, consumerAttempt, forge } from './receipt-fixtures.ts';
@@ -546,6 +546,95 @@ test('S2-R4-04: ревью подтверждено reviewer-ом политик
       },
     };
     assert.match(resultProblems(done.result, strict).join('; '), /того же вендора/);
+    same.store.close();
+  }
+});
+
+test('Правило ревью кода роли строже общего: приёмка отклоняет ревью тем же вендором ровно там, где reviewVendorConflicts (doctor) называет противоречие', () => {
+  for (const runtime of ['claude', 'codex'] as const) {
+    const allowed = policyOf((p: any) => {
+      p.roles.developer.writer.runtime = runtime;
+      p.review.code = { reviewer: { runtime }, vendor: 'same-vendor-allowed' };
+    });
+    const same = attempt(graphOf({ a: [] }), allowed);
+    const done = same.done();
+    const withRole = (vendor: 'different-vendor' | 'same-vendor-allowed') => {
+      const policy = {
+        ...done.context.policy,
+        roles: {
+          ...done.context.policy.roles,
+          developer: {
+            ...done.context.policy.roles.developer!,
+            review: { reviewer: { runtime }, vendor },
+          },
+        },
+      };
+      return { context: { ...done.context, policy }, conflicts: reviewVendorConflicts(policy) };
+    };
+    // Общее правило разрешает тот же вендор, правило роли — нет: оба отказывают.
+    const strict = withRole('different-vendor');
+    assert.match(resultProblems(done.result, strict.context).join('; '), /того же вендора/);
+    assert.deepEqual(strict.conflicts, [
+      { role: 'developer', writer: runtime, reviewer: runtime, source: 'roles.developer.review' },
+    ]);
+    // Правило роли наследует разрешение: оба согласны, что всё в порядке.
+    const inherited = withRole('same-vendor-allowed');
+    assert.deepEqual(resultProblems(done.result, inherited.context), [], `${runtime} → ${runtime}`);
+    assert.deepEqual(inherited.conflicts, []);
+    assert.deepEqual(reviewVendorConflicts(allowed), []);
+    // Репозиторий наследует общую роль, но своё правило review строже общего:
+    // и приёмка (по репозиторию поручения), и doctor называют это.
+    const repoId = done.context.policy.repositories[0]!.id;
+    const repoStrict = {
+      ...done.context.policy,
+      repositories: done.context.policy.repositories.map((r, i) =>
+        i === 0
+          ? { ...r, review: { reviewer: { runtime }, vendor: 'different-vendor' as const } }
+          : r,
+      ),
+    };
+    assert.match(
+      resultProblems(done.result, { ...done.context, policy: repoStrict }).join('; '),
+      /того же вендора/,
+    );
+    assert.deepEqual(reviewVendorConflicts(repoStrict), [
+      {
+        role: 'developer',
+        repositoryId: repoId,
+        writer: runtime,
+        reviewer: runtime,
+        source: 'repositories.0.review',
+      },
+    ]);
+    // Два репозитория со своей ролью-переопределением writer под общим строгим
+    // правилом: находка у каждого.
+    const other = runtime === 'claude' ? 'codex' : 'claude';
+    const base = done.context.policy;
+    const twoRepos = {
+      ...base,
+      review: {
+        ...base.review,
+        code: { reviewer: { runtime }, vendor: 'different-vendor' as const },
+      },
+      roles: {
+        ...base.roles,
+        developer: { ...base.roles.developer!, writer: { runtime: other } },
+      },
+      repositories: [
+        base.repositories[0]!,
+        { ...base.repositories[0]!, id: 'lib', path: 'lib' },
+      ].map((r) => ({
+        ...r,
+        roles: { developer: { ...base.roles.developer!, writer: { runtime } } },
+      })),
+    };
+    assert.deepEqual(
+      reviewVendorConflicts(twoRepos as typeof base).map((c) => [c.repositoryId, c.source]),
+      [
+        [repoId, 'review.code'],
+        ['lib', 'review.code'],
+      ],
+    );
     same.store.close();
   }
 });

@@ -180,6 +180,19 @@ export function liveCall(r: CallRecord, at: number, maxMs: number) {
  * опровергнуть, ушедшим не считается: восстановление не закрывает, возможно,
  * идущий вызов.
  */
+/**
+ * Процесс точно ушёл: его нет или pid достался другому (момент старта сверяет
+ * слой окружения). Этот процесс не ушёл; неизвестное — не «ушёл».
+ */
+export function processGone(p: { pid: number; startedAt?: number }) {
+  if (p.pid === process.pid && (!current || p.startedAt === current.startedAt)) return false;
+  return foreignGone({
+    id: '',
+    pid: p.pid,
+    ...(p.startedAt !== undefined ? { startedAt: p.startedAt } : {}),
+  });
+}
+
 export function ownerGone(r: CallRecord) {
   if (!r.process || (current && r.process.id === current.id)) return false;
   if (r.process.pid === process.pid) return true;

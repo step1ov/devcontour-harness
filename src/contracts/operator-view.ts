@@ -608,6 +608,14 @@ export const operatorViewSchema = z.strictObject({
       alternates: truncatedCount.optional(),
       activity: truncatedCount.optional(),
       decisions: truncatedCount.optional(),
+      /**
+       * Работы, у которых документ сверх предела размера опустил поля
+       * ревизии 4 (`attempts.lastFailure.kind`/`counted`, `blockers[].step`,
+       * `question.line`; harness 0.1.0-alpha.61).
+       */
+      workFields: truncatedCount.optional(),
+      /** Пункты `updates.whatsNew` сверх предела (harness 0.1.0-alpha.61). */
+      whatsNew: truncatedCount.optional(),
     })
     .optional(),
 });
