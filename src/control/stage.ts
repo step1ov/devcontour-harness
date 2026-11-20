@@ -106,6 +106,8 @@ export interface WorkStageInput {
   lastFailure?: { runId: string; bucket?: string; plain: string; plainEn: string };
   /** Первая блокировка простыми словами (`blockers[].plain`): строка этапа `blocked`. */
   blockedBy?: { plain: string; plainEn: string };
+  /** Ревью плана графа идёт в живом `harness run` (`livePlanReviews`): начало вызова. */
+  planReview?: { since: string };
 }
 
 /** Повтор и блокировка в строке этапа (`stageLine`). */
@@ -137,6 +139,13 @@ export function workStageOf(input: WorkStageInput): WorkStageView {
   )
     name = 'input';
   else if (work.status === 'failed') name = 'stopped';
+  // Ревью плана — этап, только когда дальше по работе именно согласование
+  // (вопрос, отказ и исчерпание — выше или в `needs`).
+  else if (
+    input.planReview &&
+    (!input.needs || (input.needs.actor === 'controller' && input.needs.action === 'review-plan'))
+  )
+    name = 'plan-review';
   else if (work.status === 'draft' || input.blocked) name = 'blocked';
   else name = 'queued';
   const last = input.attempts
@@ -149,7 +158,9 @@ export function workStageOf(input: WorkStageInput): WorkStageView {
       // у итога и у ждущего выдачи времени этапа нет.
       name === 'stopped' || name === 'input'
       ? lastEnded?.finishedAt
-      : undefined;
+      : name === 'plan-review'
+        ? input.planReview?.since
+        : undefined;
   const totals = usageTotals([...input.records], false, now);
   const spend = {
     calls: totals.calls,
@@ -166,10 +177,12 @@ export function workStageOf(input: WorkStageInput): WorkStageView {
     spend,
   };
   const extra = stageExtra(input, name, !!live, last);
+  // Идущая попытка ещё тратит: сумма — нижняя граница (`spendText`).
+  const lineView = live ? { ...view, running: true } : view;
   return {
     ...view,
-    line: stageLine(work.id, view, 'ru', extra),
-    lineEn: stageLine(work.id, view, 'en', extra),
+    line: stageLine(work.id, lineView, 'ru', extra),
+    lineEn: stageLine(work.id, lineView, 'en', extra),
   };
 }
 
@@ -215,6 +228,7 @@ const stageText: Record<WorkStage, { ru: string; en: string }> = {
     en: 'just waiting in the queue — nothing needed',
   },
   blocked: { ru: 'не выдаётся (см. блокировки)', en: 'blocked (see blockers)' },
+  'plan-review': { ru: 'идёт ревью плана', en: 'the plan review is running' },
   prepare: { ru: 'подготовка зависимостей', en: 'preparing dependencies' },
   writer: { ru: 'исполнитель пишет код', en: 'writer coding' },
   gates: { ru: 'проверки (gates)', en: 'gates' },
@@ -252,6 +266,33 @@ export const actionText: Record<NextAction, { ru: string; en: string }> = {
   'apply-input': { ru: 'применить ответ', en: 'apply the answer' },
 };
 
+/**
+ * Расход одной формулировкой для `status`, ревью и представления (та же
+ * граница, что `boundedUsd`): все вызовы с известной стоимостью и ничего не
+ * идёт — «$X»; ни одной известной стоимости при вызовах без неё или при
+ * идущей попытке (runtime по подписке стоимость не сообщает) — «неизвестно»;
+ * иначе нижняя граница «≥$X». Дальше — число вызовов и сколько без стоимости.
+ */
+export function spendText(
+  s: { calls: number; knownUsd: number; unknownCalls: number },
+  lang: 'ru' | 'en',
+  running = false,
+): string {
+  const known = s.calls - s.unknownCalls;
+  const usd = `$${s.knownUsd.toFixed(2)}`;
+  const value =
+    known === 0 && (s.unknownCalls > 0 || running)
+      ? lang === 'ru'
+        ? 'неизвестно'
+        : 'unknown'
+      : s.unknownCalls > 0 || running
+        ? '≥' + usd
+        : usd;
+  return lang === 'ru'
+    ? `${value}, вызовов ${s.calls}${s.unknownCalls ? ` (без стоимости ${s.unknownCalls})` : ''}`
+    : `${value}, ${s.calls} calls${s.unknownCalls ? ` (${s.unknownCalls} without cost)` : ''}`;
+}
+
 /** Длительность словами: «4 мин 12 с» / «4m 12s». */
 export function durationText(msValue: number, lang: 'ru' | 'en') {
   const s = Math.floor(msValue / 1000);
@@ -270,6 +311,10 @@ function needsText(needs: StageNeeds | undefined, lang: 'ru' | 'en') {
   if (needs.actor === 'user') return act;
   if (needs.actor === 'lead')
     return lang === 'ru' ? `ничего — ход ведущего (${act})` : `nothing — the lead acts (${act})`;
+  if (needs.actor === 'controller' && needs.action === 'review-plan')
+    return lang === 'ru'
+      ? 'ничего — harness сам (идёт ревью плана)'
+      : 'nothing — harness acts (the plan review is running)';
   if (needs.actor === 'controller' && needs.action !== 'none' && needs.action !== 'wait')
     return lang === 'ru' ? `ничего — harness сам (${act})` : `nothing — harness acts (${act})`;
   return lang === 'ru' ? 'ничего' : 'nothing';
@@ -278,7 +323,7 @@ function needsText(needs: StageNeeds | undefined, lang: 'ru' | 'en') {
 /** Строка этапа: «a: исполнитель пишет код — 4 мин 12 с; дальше: …; от вас: …; потрачено: …». */
 export function stageLine(
   id: string,
-  s: Omit<WorkStageView, 'line' | 'lineEn'>,
+  s: Omit<WorkStageView, 'line' | 'lineEn'> & { running?: boolean },
   lang: 'ru' | 'en',
   extra: StageLineExtra = {},
 ): string {
@@ -300,10 +345,7 @@ export function stageLine(
         : `; ${extra.lastFailure.relation === 'previous' ? 'previous' : 'last'} stopped: ${extra.lastFailure.en}`
       : '');
   const next = s.next.length ? s.next.map((x) => pipelineText[x][lang]).join(', ') : '—';
-  const usd = `${s.spend.unknownCalls ? '≥' : ''}$${s.spend.knownUsd.toFixed(2)}`;
-  const spend = ru
-    ? `${usd}, вызовов ${s.spend.calls}${s.spend.unknownCalls ? ` (без цены ${s.spend.unknownCalls})` : ''}, время моделей ${durationText(s.spend.durationMs, lang)}`
-    : `${usd}, ${s.spend.calls} calls${s.spend.unknownCalls ? ` (${s.spend.unknownCalls} unpriced)` : ''}, model time ${durationText(s.spend.durationMs, lang)}`;
+  const spend = `${spendText(s.spend, lang, !!s.running)}, ${ru ? 'время моделей' : 'model time'} ${durationText(s.spend.durationMs, lang)}`;
   const line = ru
     ? `${id}: ${head}; дальше: ${next}; от вас: ${needsText(s.needs, lang)}; потрачено: ${spend}`
     : `${id}: ${head}; next: ${next}; from you: ${needsText(s.needs, lang)}; spent: ${spend}`;

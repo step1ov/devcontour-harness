@@ -129,6 +129,8 @@ export interface OperatorQuestion {
   answerBasis?: AnswerBasisView;
   title?: string;
   createdAt: string;
+  /** Ревизия 4: где применённый ответ (`carrierLine`). */
+  line?: string;
 }
 
 /** Основание последнего ответа на вопрос (ревизия 1). */
@@ -169,6 +171,8 @@ export interface BlockerView {
   code: string;
   plain?: string;
   actor: string | null;
+  /** Ревизия 4: порядок снятия, когда блокировки снимают разные участники. */
+  step?: number;
 }
 
 export interface WorkView {
@@ -193,7 +197,18 @@ export interface WorkView {
     rechecks: number;
     neutral: { used: number; max: number };
     line?: string;
-    lastFailure?: { attempt: number; bucket: string; plain: string; at?: string };
+    /**
+     * `kind` — класс отказа движка (`failureKind`), `counted` — засчитана ли
+     * попытка в предел (ревизия 4): панель не разбирает фразу `plain`.
+     */
+    lastFailure?: {
+      attempt: number;
+      bucket: string;
+      plain: string;
+      at?: string;
+      kind?: string;
+      counted?: boolean;
+    };
   };
   liveness?: 'active' | 'quiet' | 'stalled';
   runtime?: string;
@@ -212,7 +227,8 @@ export interface WorkView {
       line?: string;
     };
   };
-  question?: { requestId: string; state: string; severity: number };
+  /** `line` (ревизия 4) — где ответ: у идущей попытки или ждёт следующей. */
+  question?: { requestId: string; state: string; severity: number; line?: string };
   spend: { calls: number; usd: Bounded; durationMs: number };
   resultSha?: string;
 }
@@ -316,7 +332,17 @@ export interface OperatorView {
     running: number;
     done: number;
     waitingOperator: number;
-    queue: { paused: boolean; reason?: string; detail?: string; actor?: string; action?: string };
+    queue: {
+      paused: boolean;
+      reason?: string;
+      detail?: string;
+      actor?: string;
+      action?: string;
+      /** Ревизия 4: кто двигает очередь (`status.runner`). */
+      runner?: 'running' | 'not-running';
+      restartBy?: string;
+      line?: string;
+    };
   };
   history: ViewHistory;
   health: ViewHealth;
@@ -429,8 +455,16 @@ export interface OperatorWorkInput {
      * сохраняется. Нет — `line`/`lineEn`, обрезанные с конца.
      */
     lineFacts?: AttemptLineFacts;
-    /** alpha.55 (`attemptSummary.lastFailure`). */
-    lastFailure?: { runId: string; bucket: string; plain: string; plainEn?: string; at?: string };
+    /** alpha.55 (`attemptSummary.lastFailure`); `kind`, `counted` — alpha.60. */
+    lastFailure?: {
+      runId: string;
+      bucket: string;
+      plain: string;
+      plainEn?: string;
+      at?: string;
+      kind?: string;
+      counted?: boolean;
+    };
   };
   /** Записи доказательств с `recheck` по всем попыткам работы. */
   rechecks: number;
@@ -443,8 +477,14 @@ export interface OperatorWorkInput {
     plain?: string;
     plainEn?: string;
     actor?: HarnessActor;
+    step?: number;
   }[];
-  input?: { requestId: string; state: string; severity: number };
+  input?: {
+    requestId: string;
+    state: string;
+    severity: number;
+    carrier?: { attempt: number; running: boolean };
+  };
   /** Принятая работа против target ref (`status.works[].target`). */
   target?: {
     repositoryId: string;
@@ -552,6 +592,8 @@ export interface OperatorQuestionInput {
   closed?: boolean;
   /** Действующая политика разрешает ответ ведущему (`leadMayAnswer`). */
   leadMay: boolean;
+  /** Попытка, за которой закреплён применённый ответ (`status.works[].input.carrier`). */
+  carrier?: { attempt: number; running: boolean };
 }
 
 /** Предмет ревью: план и контракт (`reviewSubjectSummary`) и код (`review-code`). */
@@ -759,6 +801,11 @@ export interface OperatorViewInput {
     detail?: string;
     actor?: HarnessActor;
     action?: string;
+    /** `status.runner`: кто двигает очередь и фраза о нём. */
+    runner?: 'running' | 'not-running';
+    restartBy?: HarnessActor;
+    line?: string;
+    lineEn?: string;
   };
   controller?: { leaseUntil: number };
   /** `budgetOverview`; `undefined` — в политике нет бюджетов. */
@@ -813,11 +860,17 @@ export function boundedUsd(facts: {
   unknownCalls: number;
   uncoveredRuns?: number;
   incompleteCalls?: number;
+  /**
+   * Идёт попытка: сумма ещё растёт — не `exact`; без единой известной
+   * стоимости — `unknown` (runtime по подписке стоимость не сообщает).
+   */
+  running?: boolean;
 }): Bounded {
   const uncovered = facts.uncoveredRuns ?? 0;
-  if (facts.knownCalls === 0 && (facts.unknownCalls > 0 || uncovered > 0))
+  if (facts.knownCalls === 0 && (facts.unknownCalls > 0 || uncovered > 0 || facts.running))
     return { value: 0, bound: 'unknown' };
-  const lower = facts.unknownCalls > 0 || uncovered > 0 || (facts.incompleteCalls ?? 0) > 0;
+  const lower =
+    facts.unknownCalls > 0 || uncovered > 0 || (facts.incompleteCalls ?? 0) > 0 || !!facts.running;
   return { value: round6(facts.knownUsd), bound: lower ? 'lower' : 'exact' };
 }
 
@@ -1061,6 +1114,30 @@ function remoteView(
   };
 }
 
+/**
+ * Где применённый ответ (ревизия 4): у идущей попытки — ждать нечего; у
+ * закончившейся, не передавшей его исполнителю, — его получит следующая.
+ */
+export function carrierLine(
+  carrier: { attempt: number; running: boolean } | undefined,
+  lang: 'ru' | 'en',
+  state?: string,
+): string | undefined {
+  if (!carrier) return undefined;
+  if (carrier.running)
+    return lang === 'en'
+      ? `the answer is with running attempt ${carrier.attempt} — nothing to wait for`
+      : `ответ у идущей попытки ${carrier.attempt} — ждать нечего`;
+  // Передан исполнителю закончившейся попыткой: он его получил.
+  if (state === 'delivered')
+    return lang === 'en'
+      ? `the answer was passed to attempt ${carrier.attempt}`
+      : `ответ передан попытке ${carrier.attempt}`;
+  return lang === 'en'
+    ? `attempt ${carrier.attempt} had the answer and stopped before passing it to the writer — the next attempt gets it`
+    : `ответ был у попытки ${carrier.attempt}, она остановилась до передачи исполнителю — его получит следующая попытка`;
+}
+
 /** Этапы, у которых есть наблюдаемая длительность: идущие этапы попытки. */
 const typicalStages = new Set(['prepare', 'writer', 'gates', 'review', 'integration']);
 
@@ -1113,6 +1190,8 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
               bucket: last.bucket,
               plain: lastPlain,
               ...(last.at ? { at: last.at } : {}),
+              ...(last.kind ? { kind: last.kind } : {}),
+              ...(last.counted !== undefined ? { counted: last.counted } : {}),
             },
           }
         : {}),
@@ -1133,6 +1212,7 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
         ),
         // Без поля alpha.55 — кто действует по диагнозу этапа работы.
         actor: b.actor !== undefined ? actorOf(b.actor) : needsActor,
+        ...(b.step !== undefined ? { step: b.step } : {}),
       };
     }),
     ...(w.dependsOn?.length
@@ -1154,6 +1234,7 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
             requestId: w.input.requestId,
             state: w.input.state,
             severity: w.input.severity,
+            ...((l) => (l ? { line: l } : {}))(carrierLine(w.input.carrier, c.lang, w.input.state)),
           },
         }
       : {}),
@@ -1165,6 +1246,7 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
         unknownCalls: s.spend.unknownCalls,
         uncoveredRuns: facts.uncoveredRuns,
         incompleteCalls: facts.incompleteCalls,
+        running: !!w.active,
       }),
       durationMs: s.spend.durationMs,
     },
@@ -1276,6 +1358,7 @@ function questionView(c: Ctx, q: OperatorQuestionInput): OperatorQuestion {
     ...(basis ? { answerBasis: basis } : {}),
     ...(c.titles && q.text ? { title: text(c, q.text, T.questionTitle) } : {}),
     createdAt: q.createdAt,
+    ...((l) => (l ? { line: l } : {}))(carrierLine(q.carrier, c.lang, q.state)),
   };
 }
 
@@ -1963,6 +2046,11 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
         ...(c.titles && q.detail ? { detail: text(c, q.detail, T.detail) } : {}),
         ...(q.actor !== undefined && q.actor !== null ? { actor: actorOf(q.actor)! } : {}),
         ...(q.action ? { action: q.action } : {}),
+        ...(q.runner ? { runner: q.runner } : {}),
+        ...(q.restartBy ? { restartBy: actorOf(q.restartBy)! } : {}),
+        ...((l) => (l ? { line: text(c, l, T.line) } : {}))(
+          c.lang === 'en' ? (q.lineEn ?? q.line) : q.line,
+        ),
       },
     },
     history,

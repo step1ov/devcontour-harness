@@ -599,7 +599,7 @@ test('H1-03: explain = движок — зависимая работа за о�
 
     assert.deepEqual(diagnose(ctx, h), [
       { workId: 'add-greeting', retryPlanned: false, actor: 'user', action: 'user-decision' },
-      { workId: 'dependent', retryPlanned: false, actor: 'lead', action: 'diagnose-failure' },
+      { workId: 'dependent', retryPlanned: false, actor: null, action: 'wait' },
     ]);
     assert.deepEqual(codes(ctx, h)[1], ['dependent', 'NOT_READY']);
 

@@ -3,8 +3,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { continuableDraft } from '../src/engine/reuse.ts';
+import { callRecords } from '../src/engine/usage.ts';
+import {
+  FEEDBACK_CASE_LIMIT,
+  FEEDBACK_TOTAL_LIMIT,
+  gateFeedback,
+} from '../src/engine/gate-feedback.ts';
+import { sha256, type AttemptState } from '../src/contracts/index.ts';
 import { approve, greet, implement, runAll, setup, target } from './runner-fixture.ts';
 
 // Сбой канала reviewer после готового кандидата: отказ окружения, не кода.
@@ -366,4 +373,166 @@ test('Черновик берётся у последней содержател
   assert.equal(draft?.runId, 'R2c');
   assert.equal(draft?.kind, 'unfinished');
   assert.equal(draft?.reason, 'unknown');
+});
+
+test('Кандидат, отклонённый проверкой: writer повтора получает текст провала testcase, замаскированный; блок и digest запроса — в артефактах', async () => {
+  const secret = 'gate-feedback-secret-60417';
+  process.env.HARNESS_GATE_FEEDBACK_SECRET = secret;
+  try {
+    const wrong = `exports.greet = (name) => 'Hi ${secret} ' + name;\n`;
+    const ctx = setup({
+      scenario: {
+        writer: [
+          implement({ 'src/greet.js': wrong }),
+          { observe: ['src/greet.js'], recordPrompt: true, ...implement() },
+        ],
+        reviewer: approve(),
+      },
+      policy: (p) => {
+        (p.environment as { secrets: Record<string, string> }).secrets = {
+          TOKEN: 'HARNESS_GATE_FEEDBACK_SECRET',
+        };
+      },
+    });
+    await runAll(ctx);
+    const [first] = ctx.engine.read((v) => v.attempts('add-greeting'));
+    assert.equal(first!.failureKind, 'gate', first!.error);
+    ctx.engine.retry('add-greeting');
+    await ctx.runner.drain();
+    const second = ctx.engine.read((v) => v.attempts('add-greeting')[1]!);
+    assert.equal(second.status, 'succeeded', second.error);
+    assert.equal(second.continuedFrom?.reason, 'gate');
+    const sent = readFileSync(`${ctx.scenarioPath}.writer.1.prompt`, 'utf8');
+    assert.match(sent, /Failure output of the gates that rejected the previous candidate/);
+    assert.match(sent, /testcase greet\.greets \(junit-failure\)\ngot Hi \[REDACTED\] Ada/);
+    assert.ok(!sent.includes(secret), 'секрет в запросе writer');
+    // Каталог артефактов попытки: лог её gate кандидата лежит в `<attempt>/candidate`.
+    const log = second.evidence.find((e) => e.kind === 'test' && e.phase === 'candidate')!.log;
+    const found = readFileSync(
+      join(dirname(dirname(log)), 'implementation', 'feedback.json'),
+      'utf8',
+    );
+    assert.ok(!found.includes(secret), 'секрет в артефакте');
+    const feedback = JSON.parse(found) as {
+      runId: string;
+      cases: { testcase: string; source: string; text: string }[];
+      promptDigest: string;
+    };
+    assert.equal(feedback.runId, first!.id);
+    assert.deepEqual(
+      feedback.cases.map((c) => [c.testcase, c.source]),
+      [['greet.greets', 'junit-failure']],
+    );
+    const call = ctx.engine.read((v) =>
+      callRecords(v).find((c) => c.runId === second.id && c.stage === 'implementation'),
+    );
+    assert.equal(feedback.promptDigest, call?.promptDigest, 'digest того запроса, что ушёл writer');
+    assert.match(feedback.promptDigest, /^[0-9a-f]{64}$/);
+  } finally {
+    delete process.env.HARNESS_GATE_FEEDBACK_SECRET;
+  }
+});
+
+test('Текст провала gates: тело и error JUnit, точные пределы по случаю и по сумме, хвост лога gate без отчёта, маскировка, отчёт и лог только своей записи', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-feedback-'));
+  const long = 'x'.repeat(FEEDBACK_CASE_LIMIT + 500);
+  const cases = Array.from(
+    { length: 6 },
+    (_, i) =>
+      `<testcase classname="suite" name="case ${i}"><failure message="expected 1 got ${i}">${long}</failure></testcase>`,
+  ).join('');
+  const xml = `<testsuite>${cases}<testcase name="boom"><error>TypeError: TOKEN-123 &lt;bad&gt;</error></testcase></testsuite>`;
+  const write = (name: string, text: string) => {
+    writeFileSync(join(dir, name), text);
+    return sha256(text);
+  };
+  const files = {
+    unit: write('unit.log', 'log'),
+    lint: write('lint.log', 'noise\n'.repeat(1000) + 'lint: error TOKEN-123 at a.ts:1'),
+    report: write('unit.xml', xml),
+  };
+  const record = (gate: string, extra: Record<string, unknown> = {}) => ({
+    kind: 'test',
+    phase: 'candidate',
+    gate,
+    passed: false,
+    log: join(dir, gate + '.log'),
+    digest: files[gate as 'unit' | 'lint'] ?? 'f'.repeat(64),
+    ...extra,
+  });
+  const from = {
+    id: 'run-1',
+    evidence: [
+      record('unit', { reportDigest: files.report }),
+      record('lint'),
+      { ...record('ok'), passed: true },
+    ],
+  } as unknown as AttemptState;
+  const redact = (t: string) => t.split('TOKEN-123').join('[REDACTED]');
+  const feedback = (await gateFeedback(from, redact))!;
+  assert.equal(feedback.runId, 'run-1');
+  assert.deepEqual(
+    feedback.cases.map((c) => [c.gate, c.testcase ?? null, c.source, !!c.truncated]),
+    [
+      ...Array.from({ length: 6 }, (_, i) => ['unit', `suite.case ${i}`, 'junit-failure', true]),
+      ['unit', 'boom', 'junit-error', false],
+      ['lint', null, 'log-tail', true],
+    ],
+  );
+  assert.match(feedback.cases[0]!.text, /^expected 1 got 0\nxxx/);
+  const dropped = Number(/\[truncated: (\d+) more characters\]$/.exec(feedback.cases[0]!.text)![1]);
+  assert.equal(feedback.cases[0]!.text.length, FEEDBACK_CASE_LIMIT, 'предел случая точный');
+  assert.equal(
+    feedback.cases[0]!.text.split('\n[truncated')[0]!.length + dropped,
+    `expected 1 got 0\n${long}`.length,
+    'число отброшенных символов верно',
+  );
+  assert.equal(feedback.cases[6]!.text, 'TypeError: [REDACTED] <bad>');
+  assert.match(feedback.cases[7]!.text, /lint: error \[REDACTED\] at a\.ts:1$/);
+  assert.equal(feedback.cases[7]!.text.length, FEEDBACK_CASE_LIMIT);
+  assert.ok(feedback.truncated);
+  assert.ok(feedback.text.length <= FEEDBACK_TOTAL_LIMIT, String(feedback.text.length));
+  assert.match(feedback.text, /\[feedback truncated: \d+ more failing case\(s\) not shown/);
+  assert.ok(!feedback.text.includes('TOKEN-123'));
+  // Один случай длиннее всего блока обрезается точно по общему пределу.
+  const huge = 'y'.repeat(FEEDBACK_TOTAL_LIMIT * 2);
+  const single = (await gateFeedback(
+    {
+      id: 'r',
+      evidence: [
+        record('unit', {
+          reportDigest: write(
+            'unit.xml',
+            `<testsuite><testcase name="big"><failure>${huge}</failure></testcase></testsuite>`,
+          ),
+        }),
+      ],
+    } as unknown as AttemptState,
+    redact,
+  ))!;
+  assert.ok(single.text.length <= FEEDBACK_TOTAL_LIMIT, String(single.text.length));
+  assert.match(single.text, /testcase big \(junit-failure\)/);
+  // Отчёт не той записи (прежний запуск gate в том же каталоге) не читается:
+  // остаётся хвост её собственного лога; лог с чужим digest — тоже нет.
+  const stale = (await gateFeedback(
+    {
+      id: 'r',
+      evidence: [record('unit', { reportDigest: files.report })],
+    } as unknown as AttemptState,
+    redact,
+  ))!;
+  assert.deepEqual(
+    stale.cases.map((c) => c.source),
+    ['log-tail'],
+  );
+  assert.equal(
+    await gateFeedback(
+      {
+        id: 'r',
+        evidence: [record('unit', { digest: 'e'.repeat(64) }), record('missing')],
+      } as unknown as AttemptState,
+      redact,
+    ),
+    undefined,
+  );
 });

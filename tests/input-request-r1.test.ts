@@ -547,7 +547,7 @@ test('M-2: новая редакция графа держит вопрос; в�
     .map(explainStop)[0]!;
   assert.deepEqual([diagnosis.code, diagnosis.action], ['INPUT_REQUIRED', 'apply-input']);
   assert.ok(
-    h.proposeTarget(id, null).problems.some((p) => /supersedeInput/.test(p)),
+    h.proposeTarget(id, null).problems.some((p) => /input-carry/.test(p)),
     'предложение называет выход',
   );
   // Выход: заменить вопрос новой редакцией работы и перенести ответ в контекст.
@@ -1802,7 +1802,7 @@ test('R5-3: перенесённый ответ — связан с попытк
   assert.ok(
     c.env.engine
       .read((v) => c.env.engine.blockers(v.work('w')!, v))
-      .some((b) => b.code === 'INPUT_REQUIRED' && /carryInput/.test(b.message)),
+      .some((b) => b.code === 'INPUT_REQUIRED' && /input-carry/.test(b.message)),
   );
   if (first) c.env.engine.fail(first.id, first.token, 'x', { kind: 'gate' });
   // Новый перенос — работа выдаётся с ответом, связанным с попыткой.
@@ -1951,7 +1951,7 @@ test('R6-1/R6-4: устаревший перенесённый ответ вид
     .filter((i) => i.kind === 'work' && i.work.id === a.workId)
     .map(explainStop)[0]!;
   assert.equal(diagnosis.code, 'INPUT_REQUIRED');
-  assert.match(diagnosis.message, /carryInput/);
+  assert.match(diagnosis.message, /input-carry/);
   assert.match(diagnosis.message, /input-cancel/);
   assert.equal(handoffPack(h).inputs?.[0]?.state, 'carry-stale');
   // R6-1: выход «снять» — работа продолжается без перенесённого ответа.

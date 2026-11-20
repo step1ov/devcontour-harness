@@ -181,6 +181,10 @@ export interface BlockerContext {
   needs?: { actor: Actor; action: NextAction };
   /** Диагноз `explain` другого поручения (зависимости); нет — неизвестно. */
   needsOf?: (workId: string) => { actor: Actor; action: NextAction } | undefined;
+  /** Попытка поручения идёт: исчерпание предела — ещё не ход человека. */
+  active?: boolean;
+  /** Ревью плана графа идёт в живом `harness run`: согласование ведёт harness. */
+  planReview?: boolean;
 }
 
 function dependencyText(id: string, ctx: BlockerContext): Text {
@@ -222,8 +226,25 @@ function dependencyText(id: string, ctx: BlockerContext): Text {
   }
 }
 
+const planReviewText: Text = {
+  ru: 'идёт ревью плана — harness сам, согласование по его итогу',
+  en: 'the plan review is running — harness acts, approval follows its result',
+  actor: 'controller',
+};
+
 function textOf(b: { code: BlockerCode; message: string }, ctx: BlockerContext): Text {
   const m = b.message;
+  // Ревью плана идёт: согласование (и пауза «очередь ещё не запускали»,
+  // которую снимет этот же run) — ход harness, а не ведущего.
+  if (
+    ctx.planReview &&
+    (b.code === 'APPROVAL_REQUIRED' ||
+      (b.code === 'APPROVAL_STALE' && m.startsWith('Политика изменилась')) ||
+      (b.code === 'PAUSED' &&
+        m.startsWith('Очередь на паузе') &&
+        (!ctx.control.pauseReason || ctx.control.pauseReason === 'shutdown')))
+  )
+    return planReviewText;
   switch (b.code) {
     case 'NOT_READY': {
       const dep = /^Ждёт (\S+)$/.exec(m);
@@ -324,6 +345,14 @@ function textOf(b: { code: BlockerCode; message: string }, ctx: BlockerContext):
       return blockerCodeText.INPUT_REQUIRED;
     case 'ATTEMPTS_EXHAUSTED': {
       const n = /^Исчерпано (\d+) из (\d+)/.exec(m);
+      // Идёт последняя засчитанная попытка: сброс понадобится, только если
+      // она не удастся, — сейчас это не действие человека.
+      if (ctx.active)
+        return {
+          ru: `идёт последняя попытка${n ? ` (${n[1]} из ${n[2]})` : ''} — сброс понадобится, только если она не удастся`,
+          en: `the last attempt is running${n ? ` (${n[1]} of ${n[2]})` : ''} — a reset is needed only if it fails`,
+          actor: 'controller',
+        };
       return n
         ? {
             ...blockerCodeText.ATTEMPTS_EXHAUSTED,

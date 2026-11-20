@@ -245,6 +245,20 @@ export const eventPayloads = {
     reasonLength: z.number().int().min(0).optional(),
   }),
   /**
+   * Находки ревью кода поручения приняты известным ограничением
+   * (`review-accept`, docs/review-protocol.md §10): ID, решающий, раунд
+   * области на момент решения; основания нет — только его длина.
+   */
+  'work.findings-accepted': z.strictObject({
+    findings: z
+      .array(z.string().regex(/^[0-9a-f]{64}$/))
+      .min(1)
+      .max(500),
+    by: z.enum(['lead', 'operator']),
+    round: z.number().int().min(0),
+    reasonLength: z.number().int().min(0),
+  }),
+  /**
    * Поручение отменено (`engine.cancel` или новая редакция графа).
    * `hadAttempt` — отменена и активная попытка (её `attempt.cancelled` — в
    * той же транзакции).

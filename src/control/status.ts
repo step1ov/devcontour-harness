@@ -17,11 +17,18 @@ import type { Engine } from '../engine/engine.ts';
 import { requestsOf } from '../engine/input-requests.ts';
 import { reviewSummaryRows, reviewsText } from './review-summary.ts';
 import { MAX_NEUTRAL_FAILURES } from '../contracts/repair-policy.ts';
-import { nextRunControl, repairJobOf, stopInputsIn, type StopSource } from '../explain/state.ts';
+import {
+  livePlanReviews,
+  nextRunControl,
+  repairJobOf,
+  stopInputsIn,
+  type StopSource,
+} from '../explain/state.ts';
 import { explainStop } from '../projections/stop.ts';
 import { workStageOf, type StageNeeds } from './stage.ts';
 import { blockerCodeText, plainBlocker, type BlockerCode } from './blocker-plain.ts';
 import { verificationOf } from '../report/verification.ts';
+import { carrierLine } from '../projections/operator-view.ts';
 import {
   CLIP_DIAGNOSTIC,
   attemptView,
@@ -131,6 +138,10 @@ export function statusOf(
     const selected = v.works(graphId);
     // Что нужно от кого — диагнозом explain по тому же виду и часам.
     const needsOf = jobs ? stageNeedsOf(source, v, { jobs, now }) : undefined;
+    // Ревью плана, идущее в живом `harness run`: согласование — ход harness.
+    const planReviews = livePlanReviews(v, source.policy, now);
+    // Итоговое «что нужно» каждого поручения — для строки `runner`.
+    const needsByWork = new Map<string, StageNeeds>();
     // Собственные вызовы поручения (без вызовов о группе) — одним проходом;
     // прежняя запись без поручения — по индексам попыток и поручений (правило
     // `recordWorkOf`), а не поиском по хранилищу на каждую запись.
@@ -175,10 +186,19 @@ export function statusOf(
         // неблокирующие запросы ведущему — числом.
         // У итоговой работы вопрос — история: статус его не показывает.
         ...((view, raw) => {
-          const input =
-            view.input && w.status !== 'done' && w.status !== 'cancelled' ? view.input : undefined;
           const active = w.activeRunId ? v.attempt(w.activeRunId) : undefined;
+          const input = carriedInput(
+            view.input && w.status !== 'done' && w.status !== 'cancelled' ? view.input : undefined,
+            attemptsOf(w.id),
+          );
+          const reviewSince = planReviews.get(w.graphId);
+          const planReview =
+            reviewSince && w.status !== 'done' && w.status !== 'cancelled' && !active
+              ? { since: reviewSince }
+              : undefined;
           // Причина простыми словами и кто её снимает — рядом с кодом и сообщением.
+          // Ревью плана снимает только шаг согласования: вопрос, исчерпание и
+          // отказ называет диагноз explain (`needsOf`) раньше него.
           const needs =
             needsOf?.(w) ??
             (input?.state === 'awaiting-answer'
@@ -187,7 +207,10 @@ export function statusOf(
                   actor: input.leadMay === 'technical' ? ('lead' as const) : ('user' as const),
                   action: 'answer-input' as const,
                 }
-              : undefined);
+              : planReview && w.status === 'draft'
+                ? { actor: 'controller' as const, action: 'review-plan' as const }
+                : undefined);
+          if (needs) needsByWork.set(w.id, needs);
           const plainContext = {
             control: v.control(),
             approvalMode: source.policy.approvalMode,
@@ -196,11 +219,13 @@ export function statusOf(
             statusOf: (id: string) => v.work(id)?.status,
             needsOf: (id: string) => ((d) => (d ? needsOf?.(d) : undefined))(v.work(id)),
             ...(needs ? { needs } : {}),
+            ...(active?.status === 'active' ? { active: true } : {}),
+            ...(planReview ? { planReview: true } : {}),
           };
-          const blockers = raw.map((b) => ({ ...b, ...plainBlocker(b, plainContext) }));
-          // Строка этапа называет блокировку, которую снимает человек, раньше
-          // хода ведущего и harness (порядок `blockers` прежний).
-          const first = [...blockers].sort((a, b) => actorRank(a.actor) - actorRank(b.actor))[0];
+          const blockers = withSteps(raw.map((b) => ({ ...b, ...plainBlocker(b, plainContext) })));
+          // Строка этапа называет блокировку, которую снимают первой
+          // (`blockerOrder`; порядок `blockers` прежний, порядок — в `step`).
+          const first = [...blockers].sort(blockerOrder)[0];
           const attemptSummary = summaryOf(w);
           const verification = verificationOf(w, attemptsOf(w.id));
           return {
@@ -219,12 +244,16 @@ export function statusOf(
               ...(attemptSummary.lastFailure ? { lastFailure: attemptSummary.lastFailure } : {}),
               ...(first ? { blockedBy: first } : {}),
               ...(needs ? { needs } : {}),
+              ...(planReview ? { planReview } : {}),
               now,
             }),
             ...(verification ? { verification } : {}),
           };
         })(workInputOf(requestsOf(v, w), inputPolicyOf(source.policy)), engine.blockers(w, v)),
       })),
+      ...((r) => (r ? { runner: r } : {}))(
+        runnerOf(v, selected, planReviews, now, (w) => needsByWork.get(w.id)),
+      ),
       ...((budgets) => (budgets ? { budgets } : {}))(budgetOverview(engine.budgetContext(), v)),
       ...(({ reviews, reviewsTruncated }) => ({
         ...(reviews.length ? { reviews } : {}),
@@ -233,6 +262,126 @@ export function statusOf(
       ...(options.detail ? { detail: statusDetail(source, v, graphId) } : {}),
     };
   });
+}
+
+/**
+ * Применённый ответ и последняя попытка поручения, если ответ закреплён за
+ * ней при выдаче (`AttemptState.input`): идёт она — ответ уже у попытки
+ * (`delivered`, ждать нечего); закончилась — `carrier.running: false`
+ * (у `applied-awaiting-claim` ответ получит следующая попытка, у `delivered`
+ * — ответ был передан этой попытке). Последняя попытка без этого ответа —
+ * без `carrier`: где ответ, по ней не сказать.
+ */
+export function carriedInput<T extends { requestId: string; state: string }>(
+  input: T | undefined,
+  attempts: readonly AttemptState[],
+): (T & { carrier?: { attempt: number; running: boolean } }) | undefined {
+  if (!input || (input.state !== 'applied-awaiting-claim' && input.state !== 'delivered'))
+    return input;
+  const carrier = attempts.at(-1);
+  if (!carrier || carrier.input?.requestId !== input.requestId) return input;
+  const running = carrier.status === 'active';
+  return {
+    ...input,
+    ...(running && input.state === 'applied-awaiting-claim' ? { state: 'delivered' } : {}),
+    carrier: { attempt: carrier.attempt, running },
+  };
+}
+
+/**
+ * Порядок снятия блокировок: согласование (и пауза очереди) раньше всего —
+ * без него сброс попыток и ответы ничего не изменят; дальше — по тому, кто
+ * действует: человек, ведущий, harness, никто.
+ */
+const codeRank = (code: string) =>
+  code === 'APPROVAL_STALE' || code === 'APPROVAL_REQUIRED' ? 0 : code === 'PAUSED' ? 1 : 2;
+export const blockerOrder = (
+  a: { code: string; actor?: string | null },
+  b: { code: string; actor?: string | null },
+) => codeRank(a.code) - codeRank(b.code) || actorRank(a.actor) - actorRank(b.actor);
+
+const person = (actor: string | null | undefined) => actor === 'user' || actor === 'lead';
+
+/**
+ * `step` — порядок снятия, когда блокировки снимают разные люди (человек и
+ * ведущий): у их блокировок 1, 2, … по `blockerOrder`; ход harness без номера.
+ */
+function withSteps<B extends { code: string; actor?: string | null }>(
+  blockers: B[],
+): (B & { step?: number })[] {
+  if (new Set(blockers.filter((b) => person(b.actor)).map((b) => b.actor)).size < 2)
+    return blockers;
+  const order = [...blockers].sort(blockerOrder).filter((b) => person(b.actor));
+  return blockers.map((b) => (person(b.actor) ? { ...b, step: order.indexOf(b) + 1 } : b));
+}
+
+/**
+ * Кто двигает очередь (`runner`): живой controller, попытка с действующим
+ * владением или ревью плана в живом run — `running`; иначе открытые
+ * поручения сдвинет только новый `harness run` (его делает ведущий). Нет
+ * открытых поручений — поля нет.
+ */
+function runnerOf(
+  v: ExecutionView,
+  works: readonly WorkState[],
+  planReviews: ReadonlyMap<string, string>,
+  now: number,
+  needsOf: (w: WorkState) => StageNeeds | undefined,
+) {
+  const open = works.filter((w) => w.status !== 'done' && w.status !== 'cancelled');
+  if (!open.length) return undefined;
+  const graphs = new Set(open.map((w) => w.graphId));
+  const reviews = [...planReviews]
+    .filter(([g]) => graphs.has(g))
+    .map(([graphId, since]) => ({ graphId, since }));
+  const lease = v.controller();
+  const attempt = open.some((w) => {
+    const a = w.activeRunId ? v.attempt(w.activeRunId) : undefined;
+    return a?.status === 'active' && a.leaseUntil > now;
+  });
+  if (reviews.length) {
+    const ids = reviews.map((r) => r.graphId).join(', ');
+    // Ревью снимает только согласование: ход человека или ведущего по
+    // открытым работам (вопрос, сброс, разбор) остаётся — строка его называет.
+    const who = new Set(
+      open.map((w) => needsOf(w)?.actor).filter((a) => a === 'user' || a === 'lead'),
+    );
+    const ru = [who.has('user') ? 'от вас' : '', who.has('lead') ? 'от ведущего' : '']
+      .filter(Boolean)
+      .join(' и ');
+    const en = [who.has('user') ? 'from you' : '', who.has('lead') ? 'from the lead' : '']
+      .filter(Boolean)
+      .join(' and ');
+    return {
+      state: 'running' as const,
+      planReviews: reviews.slice(0, 50),
+      line: `Идёт ревью плана ${ids} — выдача начнётся после согласования; ${ru ? `ещё нужно ${ru} (см. работы)` : 'от вас ничего не нужно'}.`,
+      lineEn: `The plan review of ${ids} is running — work starts after approval; ${en ? `still needed ${en} (see the works)` : 'nothing is needed from you'}.`,
+    };
+  }
+  if ((lease && lease.leaseUntil > now) || attempt)
+    return {
+      state: 'running' as const,
+      line: 'Очередь идёт: harness запущен.',
+      lineEn: 'The queue is running: harness is up.',
+    };
+  // Никто не запущен: ждут ли открытые поручения только запуска или сперва
+  // ответа, решения человека или хода ведущего.
+  // Нет диагноза — ход controller; `null` (ждёт зависимости) — ничей.
+  const waitsRun = open.some((w) => {
+    const needs = needsOf(w);
+    return !needs || needs.actor === 'controller';
+  });
+  return {
+    state: 'not-running' as const,
+    restartBy: 'lead' as const,
+    line: waitsRun
+      ? 'Очередь стоит — никто не запущен: работу сдвинет только новый запуск (ведущий: harness run).'
+      : 'Очередь стоит — никто не запущен: после ответа или решения нужен новый запуск (ведущий: harness run).',
+    lineEn: waitsRun
+      ? 'The queue is idle — nothing is running: only a new run moves the work (the lead: harness run).'
+      : 'The queue is idle — nothing is running: after the answer or decision a new run is needed (the lead: harness run).',
+  };
 }
 
 /**
@@ -345,6 +494,7 @@ const answeredBy = { operator: 'оператор', lead: 'ведущий', host:
 /** Порядок блокировок для человека: его ход, ход ведущего, harness, итог. */
 const actorRank = (actor: string | null | undefined) =>
   actor === 'user' ? 0 : actor === 'lead' ? 1 : actor === 'controller' ? 2 : 3;
+const actorWho = { user: 'вы', lead: 'ведущий', controller: 'harness' } as const;
 const actorText = {
   user: 'нужно от вас',
   lead: 'ход ведущего',
@@ -360,9 +510,15 @@ const actorText = {
  */
 export function statusText(data: z.output<typeof statusDataSchema>): string {
   const c = data.control;
+  // Пауза «очередь ещё не запускали» и штатная остановка снимет следующий
+  // run: о ней говорит строка `runner` (кто двигает очередь).
+  const lifted = c.paused && (!c.pauseReason || c.pauseReason === 'shutdown');
   const out = [
-    c.paused ? `Выдача на паузе${c.pauseReason ? ` (${c.pauseReason})` : ''}.` : 'Выдача идёт.',
+    c.paused && !(lifted && data.runner)
+      ? `Выдача на паузе${c.pauseReason ? ` (${c.pauseReason})` : ''}.`
+      : (data.runner?.line ?? 'Выдача идёт.'),
   ];
+  if (c.paused && !lifted && data.runner?.state === 'not-running') out.push(data.runner.line);
   if (!data.works.length) out.push('Поручений нет.');
   for (const w of data.works) {
     out.push(`${w.id} [${w.status}]${w.attemptSummary ? ': ' + w.attemptSummary.line : ''}`);
@@ -370,6 +526,7 @@ export function statusText(data: z.output<typeof statusDataSchema>): string {
     if (w.input)
       out.push(
         `  вопрос ${w.input.requestId} [${w.input.state}, серьёзность ${w.input.severity}${w.input.impact === 'technical' ? ', технический' : ''}]` +
+          ((l) => (l ? `: ${l}` : ''))(carrierLine(w.input.carrier, 'ru', w.input.state)) +
           (w.input.answerBasis === 'technical'
             ? ': решено ведущим (технический вопрос)'
             : w.input.answeredBy
@@ -381,19 +538,22 @@ export function statusText(data: z.output<typeof statusDataSchema>): string {
                 : ''),
       );
     // Блокировки простыми словами (кто снимает — в скобках), коды — после.
-    if (w.blockers.length)
+    if (w.blockers.length) {
+      const sorted = [...w.blockers].sort(blockerOrder);
+      // Снимают разные люди (`step`): «сначала ведущий: …; затем вы: …».
       out.push(
-        `  не выдаётся: ${[...w.blockers]
-          .sort((a, b) => actorRank(a.actor) - actorRank(b.actor))
-          .map((b) =>
+        `  не выдаётся: ${sorted
+          .map((b) => {
             // Без простого текста (ответ другой версии) — общий текст кода,
             // а не сообщение: в нём может быть текст хоста.
-            b.plain
-              ? `${b.plain}${b.actor ? ` (${actorText[b.actor]})` : ''}`
-              : (blockerCodeText[b.code as BlockerCode]?.ru ?? b.code),
-          )
+            const text = b.plain ?? blockerCodeText[b.code as BlockerCode]?.ru ?? b.code;
+            if (b.step !== undefined && b.actor && b.plain)
+              return `${b.step === 1 ? 'сначала' : 'затем'} ${actorWho[b.actor]}: ${text}`;
+            return b.plain && b.actor ? `${text} (${actorText[b.actor]})` : text;
+          })
           .join('; ')} [коды: ${w.blockers.map((b) => b.code).join(', ')}]`,
       );
+    }
     if (w.verification) out.push(`  проверки: ${w.verification.line}`);
     // Принятая версия против текущего target ref: непроверенное после приёмки.
     if (w.target) out.push(`  ${w.target.line} (${w.target.lineEn})`);
@@ -431,7 +591,8 @@ export function statusSettled(
     (w) =>
       w.status !== 'done' &&
       w.status !== 'cancelled' &&
-      (w.stage?.needs?.actor ?? 'controller') === 'controller',
+      // Нет диагноза — ход controller; `null` (ждёт зависимости) — ничей.
+      (w.stage?.needs ? w.stage.needs.actor : 'controller') === 'controller',
   );
 }
 

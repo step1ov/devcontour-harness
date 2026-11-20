@@ -21,7 +21,13 @@ import {
   jointPassedSchema,
   reusedEvidenceSchema,
 } from './result.ts';
-import { findingStatuses, reviewRecordSchema, reviewRoundSchema } from './review.ts';
+import {
+  codeReviewDecisionSchema,
+  findingStatuses,
+  lateFindingSchema,
+  reviewRecordSchema,
+  reviewRoundSchema,
+} from './review.ts';
 import { contractDocumentSchema, spikeSchema } from './checks.ts';
 import { codeReviewRecordSchema } from './code-review.ts';
 import {
@@ -350,6 +356,8 @@ export const evidenceFindingSchema = z.strictObject({
   id: digestSchema.optional(),
   /** Статус находки на момент раунда. */
   status: z.enum(findingStatuses).optional(),
+  /** Новая blocking-находка на пути без изменений с прошлого раунда фазы (docs/review-protocol.md §10). */
+  late: lateFindingSchema.optional(),
 });
 
 export const evidenceRecordSchema = z.strictObject({
@@ -413,6 +421,12 @@ export const evidenceRecordSchema = z.strictObject({
    * без `when` и у прежних записей.
    */
   gateBasis: digestSchema.optional(),
+  /**
+   * SHA-256 JUnit-отчёта (`<gate>.xml` рядом с логом), сохранённого этим
+   * запуском gate: по нему следующая попытка берёт текст провала только из
+   * отчёта той же записи. Нет у gate без отчёта и у прежних записей.
+   */
+  reportDigest: digestSchema.optional(),
   /** Только у записи `not-applicable`: правило и diff, по которым gate не исполнялся. */
   notApplicable: gateApplicabilitySchema.optional(),
   /**
@@ -789,6 +803,11 @@ export const workStateSchema = z.strictObject({
    * (`MAX_NEUTRAL_FAILURES`); сброс — вместе со сбросом попыток.
    */
   neutralFailures: z.number().int().min(0).optional(),
+  /**
+   * Решения ведущего/оператора по находкам ревью кода поручения
+   * (`review-accept`): применяются следующим раундом (docs/review-protocol.md §10).
+   */
+  codeReviewDecisions: z.array(codeReviewDecisionSchema).max(500).optional(),
 });
 export type WorkState = z.infer<typeof workStateSchema>;
 

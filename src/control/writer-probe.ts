@@ -18,12 +18,19 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
   mcpEnvironment,
+  profileNetwork,
   roleBinding,
   type ExecutionPolicy,
   type RuntimeName,
 } from '../contracts/index.ts';
 import { writerRunsChecks } from '../agents/cli-adapter.ts';
-import { codexPermissions, isolatedCommand, isolation } from '../environment/isolation.ts';
+import {
+  codexLoopbackSupport,
+  codexPermissions,
+  isolatedCommand,
+  isolation,
+  withWriterNetwork,
+} from '../environment/isolation.ts';
 import { executionEnvironment } from '../environment/lifecycle.ts';
 import { command } from '../environment/process.ts';
 import { writerScratch } from '../engine/writer-block.ts';
@@ -34,6 +41,7 @@ type Repo = ExecutionPolicy['repositories'][number];
 export type WriterProbeReason =
   | 'listen-denied'
   | 'network-denied'
+  | 'network-open'
   | 'write-denied'
   | 'process-abort'
   | 'missing-tool'
@@ -65,8 +73,17 @@ export interface WriterProbeWriter {
   roles: string[];
   /** Механизм изоляции пробы: тот же, что у вызова исполнителя. */
   mechanism: 'codex-sandbox' | 'sandbox-runtime' | 'none';
-  /** Сеть исполнителя: codex — `codexNetwork` профиля; claude — домены политики. */
+  /** Внешняя сеть исполнителя: codex — `network`/`codexNetwork` профиля; claude — домены политики. */
   network: boolean;
+  /**
+   * Режим сети исполнителя: `none` — закрыта и локальные порты; `loopback` —
+   * только 127.0.0.1 и ::1; `full` — вся сеть (поле `network` или
+   * `codexNetwork: true`). `legacy` — профиль без поля `network`: у codex
+   * закрыта сеть shell, у claude — домены `isolation.domains` и локальные
+   * порты; сетевые инструменты runtime (веб-поиск codex, WebFetch/WebSearch
+   * claude) этим режимом явно не закрыты.
+   */
+  networkMode: 'none' | 'loopback' | 'full' | 'legacy';
   commands: WriterProbeCommand[];
 }
 
@@ -87,9 +104,11 @@ const lineOf = (text: string, re: RegExp) =>
 
 const ADVICE: Record<WriterProbeReason, string> = {
   'listen-denied':
-    'Исполнителю закрыт локальный сервер (listen). Варианты: вынести проверку с сервером в gate harness (gates слушают localhost); включить сеть исполнителя в профиле инструментов (codexNetwork: true — откроет и интернет); отключить это правило шаблона для режима harness (раздел controller-mode).',
+    'Исполнителю закрыт локальный сервер (listen). Варианты: вынести проверку с сервером в gate harness (gates слушают localhost); дать исполнителю только локальную сеть: network: loopback в профиле инструментов (listen и connect на 127.0.0.1 и ::1, без интернета); отключить это правило шаблона для режима harness (раздел controller-mode).',
   'network-denied':
-    'Исполнителю закрыта сеть (реестр пакетов или внешний адрес). Варианты: выполнить шаг заранее в prepare (кеш вне рабочего дерева, harness lean); открыть домен в isolation.domains или сеть в профиле инструментов (codexNetwork: true); вынести шаг в prepare или gate.',
+    'Исполнителю закрыта сеть (реестр пакетов или внешний адрес). Варианты: выполнить шаг заранее в prepare (кеш вне рабочего дерева, harness lean); открыть домен в isolation.domains (claude) или всю сеть в профиле инструментов (network: full у codex); вынести шаг в prepare или gate.',
+  'network-open':
+    'Песочница codex в режиме network: loopback пропустила соединение с внешним адресом: эта версия codex не держит границу loopback. Не запускайте исполнителя с ней: выберите network: none или обновите codex и повторите пробу.',
   'write-denied':
     'Команда пишет вне области записи исполнителя (путь — в строке вывода). Варианты: направить её каталог в рабочее дерево или во временный каталог переменной окружения профиля; выполнить шаг заранее в prepare.',
   'process-abort':
@@ -157,6 +176,100 @@ export function classifyProbe(result: {
   return { status: 'failed', reason: 'failed' };
 }
 
+/** ID проверки границы loopback codex в отчёте пробы. */
+export const LOOPBACK_CHECK = 'harness-loopback-check';
+
+/**
+ * Скрипт проверки границы: локальный сервер на 127.0.0.1, прямое соединение
+ * с внешним IP и CONNECT через прокси из окружения. Печатает по строке на
+ * исход; сам всегда выходит с кодом 0, решает `loopbackVerdict`.
+ */
+const LOOPBACK_SCRIPT = `const net=require('net');const r={};
+const fin=()=>{for(const k of ['loopback','direct','proxy'])console.log('harness-loopback-check:'+k+':'+r[k]);process.exit(0)};
+const tcp=(host,port,cb)=>{const c=net.connect({host,port});const t=setTimeout(()=>{c.destroy();cb('closed:timeout')},5000);
+c.on('connect',()=>{clearTimeout(t);cb('open',c)});c.on('error',e=>{clearTimeout(t);cb('closed:'+(e.code||e.message))})};
+const proxy=()=>{const u=process.env.HTTPS_PROXY||process.env.https_proxy||process.env.HTTP_PROXY||process.env.http_proxy;
+if(!u){r.proxy='none';return fin()}let p;try{p=new URL(u)}catch{r.proxy='none';return fin()}
+tcp(p.hostname,Number(p.port||80),(s,c)=>{if(!c){r.proxy=s;return fin()}let b='';
+c.on('data',d=>{b+=d;if(b.includes('\\r\\n')){r.proxy=/^HTTP\\/1\\.[01] 2\\d\\d/.test(b)?'open':'closed:'+b.split('\\r\\n')[0].slice(0,80);c.destroy();fin()}});
+c.write('CONNECT example.com:443 HTTP/1.1\\r\\nHost: example.com:443\\r\\n\\r\\n')})};
+const s=net.createServer(c=>c.end('ok')).on('error',e=>{r.loopback='fail:'+e.code;direct()});
+const direct=()=>tcp('1.1.1.1',443,(st,c)=>{if(c)c.destroy();r.direct=st;proxy()});
+s.listen(0,'127.0.0.1',()=>tcp('127.0.0.1',s.address().port,(st,c)=>{r.loopback=st==='open'?'ok':'fail:'+st;if(c)c.destroy();s.close();direct()}));`;
+
+/** Исход проверки границы loopback по её выводу. Экспортируется для тестов. */
+export function loopbackVerdict(
+  code: number,
+  output: string,
+): Pick<WriterProbeCommand, 'status' | 'reason' | 'evidence'> {
+  const value = (k: string) =>
+    new RegExp(`^${LOOPBACK_CHECK}:${k}:(.*)$`, 'm').exec(output)?.[1]?.trim();
+  const [loopback, direct, proxy] = [value('loopback'), value('direct'), value('proxy')];
+  if (code !== 0 || !loopback || !direct || !proxy)
+    return {
+      status: 'failed',
+      reason: 'failed',
+      evidence: clip(output.trim().split('\n').slice(-3).join(' | ') || `exit=${code}`),
+    };
+  if (direct === 'open' || proxy === 'open')
+    return {
+      status: 'blocked',
+      reason: 'network-open',
+      evidence: `внешний адрес доступен: напрямую ${direct}, через прокси ${proxy}`,
+    };
+  if (loopback !== 'ok')
+    return { status: 'blocked', reason: 'listen-denied', evidence: `loopback ${loopback}` };
+  return { status: 'ok' };
+}
+
+async function loopbackCheck(
+  sandbox: string[],
+  cwd: string,
+  execution: { env: NodeJS.ProcessEnv; redact: (s: string) => string },
+  callDir: string,
+  signal: AbortSignal,
+): Promise<WriterProbeCommand> {
+  const check = [process.execPath, '-e', LOOPBACK_SCRIPT];
+  const started = Date.now();
+  const base = { id: LOOPBACK_CHECK, command: [process.execPath, '-e', '<loopback-check>'] };
+  let result;
+  try {
+    result = await command([...sandbox, '--', ...check], cwd, {
+      env: execution.env,
+      timeoutMs: 60_000,
+      signal,
+      redact: execution.redact,
+      activity: { kind: 'command', label: 'writer-probe loopback-check' },
+    });
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return {
+      ...base,
+      status: 'failed',
+      durationMs: Date.now() - started,
+      reason: 'missing-tool',
+      evidence: clip(`${sandbox[0]}: ${(error as NodeJS.ErrnoException).code ?? String(error)}`),
+      advice:
+        'Не запускается codex sandbox: установите codex (тот же, что у исполнителя) или задайте HARNESS_CODEX_BIN.',
+    };
+  }
+  const output = result.stdout + '\n' + result.stderr;
+  const log = join(callDir, LOOPBACK_CHECK + '.log');
+  await writeFile(log, output);
+  const verdict = loopbackVerdict(result.timedOut ? -1 : result.code, output);
+  return {
+    ...base,
+    status: verdict.status,
+    exitCode: result.code,
+    ...(result.timedOut ? { timedOut: true } : {}),
+    durationMs: Date.now() - started,
+    ...(verdict.reason ? { reason: verdict.reason } : {}),
+    ...(verdict.evidence ? { evidence: clip(execution.redact(verdict.evidence)) } : {}),
+    ...(verdict.reason ? { advice: ADVICE[verdict.reason] } : {}),
+    log,
+  };
+}
+
 /** Различные исполнители ролей репозитория (runtime и профиль инструментов). */
 function writersOf(policy: ExecutionPolicy, repo: Repo) {
   const roles = [...new Set([...Object.keys(policy.roles), ...Object.keys(repo.roles ?? {})])];
@@ -216,12 +329,23 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
         : runtime === 'codex'
           ? 'codex-sandbox'
           : 'sandbox-runtime';
+    const network = profileNetwork(runtime, profile);
+    // Без поля `network` граница прежняя и инструменты runtime не закрыты:
+    // проба не называет её режимом `none` или `loopback`.
+    const networkMode: WriterProbeWriter['networkMode'] = profile?.network
+      ? profile.network
+      : network === 'full'
+        ? 'full'
+        : 'legacy';
     const report: WriterProbeWriter = {
       runtime,
       ...(w.toolProfile ? { toolProfile: w.toolProfile } : {}),
       roles: w.roles,
       mechanism,
-      network: runtime === 'codex' ? !!profile?.codexNetwork : policy.isolation.domains.length > 0,
+      network:
+        networkMode === 'full' ||
+        (networkMode === 'legacy' && runtime === 'claude' && policy.isolation.domains.length > 0),
+      networkMode,
       commands: [],
     };
     writers.push(report);
@@ -240,6 +364,18 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
     if (!writerRunsChecks(runtime, profile)) {
       blockAll('no-shell');
       continue;
+    }
+    // Сеть loopback у codex — только с функцией network_proxy: без неё
+    // исполнитель не запустится, и проба говорит это заранее.
+    if (mechanism === 'codex-sandbox' && network === 'loopback') {
+      const refused = await codexLoopbackSupport(
+        input.executables?.codex ?? 'codex',
+        input.environment ?? process.env,
+      );
+      if (refused) {
+        blockAll('environment', refused);
+        continue;
+      }
     }
     let execution;
     try {
@@ -273,13 +409,29 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
     const temp = await writerScratch(execution.env);
     const scratch = temp.dir;
     try {
-      const iso = isolation({
-        write: [cwd, scratch],
-        controller: [...input.boundary.hidden, temp.parent],
-        readable: [cwd, scratch, ...input.boundary.readable],
-        domains: policy.isolation.domains,
-        ...(input.boundary.checkouts.length ? { checkouts: input.boundary.checkouts } : {}),
-      });
+      const iso = withWriterNetwork(
+        isolation({
+          write: [cwd, scratch],
+          controller: [...input.boundary.hidden, temp.parent],
+          readable: [cwd, scratch, ...input.boundary.readable],
+          domains: policy.isolation.domains,
+          ...(input.boundary.checkouts.length ? { checkouts: input.boundary.checkouts } : {}),
+        }),
+        runtime === 'claude' ? network : undefined,
+      );
+      // Граница loopback codex проверяется на деле: функция network_proxy
+      // есть, но прокси будущей версии мог бы пропускать всё. Локальный
+      // сервер должен работать, внешний адрес — нет (напрямую и через прокси).
+      if (mechanism === 'codex-sandbox' && network === 'loopback')
+        report.commands.push(
+          await loopbackCheck(
+            [input.executables?.codex ?? 'codex', 'sandbox', ...codexPermissions(iso, network)],
+            cwd,
+            execution,
+            callDir,
+            input.signal,
+          ),
+        );
       for (const step of steps) {
         let argv: string[];
         let env: NodeJS.ProcessEnv = execution.env;
@@ -289,7 +441,7 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
           argv = [
             input.executables?.codex ?? 'codex',
             'sandbox',
-            ...codexPermissions(iso, !!profile?.codexNetwork),
+            ...codexPermissions(iso, network ?? 'none'),
             '--',
             ...step.command,
           ];
@@ -374,7 +526,7 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
   }
   if (!writers.length) notes.push('Ни у одной роли репозитория нет исполнителя codex или claude.');
   // Пустая проба ничего не доказала: без команд она не «зелёная».
-  const probed = writers.some((w) => w.commands.length > 0);
+  const probed = writers.some((w) => w.commands.some((c) => c.id !== LOOPBACK_CHECK));
   return {
     ok: probed && writers.every((w) => w.commands.every((c) => c.status === 'ok')),
     writers,
@@ -382,12 +534,25 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
   };
 }
 
+const NETWORK_TEXT: Record<Exclude<WriterProbeWriter['networkMode'], 'legacy'>, string> = {
+  none: 'закрыта (и локальные порты)',
+  loopback: 'только локальная (127.0.0.1, ::1)',
+  full: 'есть',
+};
+const networkText = (w: WriterProbeWriter) =>
+  w.networkMode !== 'legacy'
+    ? NETWORK_TEXT[w.networkMode]
+    : (w.runtime === 'codex'
+        ? 'shell закрыта (профиль без поля network)'
+        : 'домены isolation.domains и локальная (профиль без поля network)') +
+      ', сетевые инструменты runtime не закрыты';
+
 /** Строки пробы для человека (`harness smoke --writer-probe --human`). */
 export function writerProbeText(probe: WriterProbeResult) {
   const lines = [`проба исполнителя: ${probe.ok ? 'всё доступно' : 'есть закрытые шаги'}`];
   for (const w of probe.writers) {
     lines.push(
-      `  исполнитель ${w.runtime}${w.toolProfile ? ` (${w.toolProfile})` : ''}, роли ${w.roles.join(', ')}; изоляция ${w.mechanism}; сеть ${w.network ? 'есть' : 'закрыта'}`,
+      `  исполнитель ${w.runtime}${w.toolProfile ? ` (${w.toolProfile})` : ''}, роли ${w.roles.join(', ')}; изоляция ${w.mechanism}; сеть ${networkText(w)}`,
     );
     for (const c of w.commands)
       lines.push(

@@ -18,6 +18,7 @@ import {
   checkCodeReview,
   codeReviewHistory,
   codeReviewScope,
+  previousReviewRound,
   digestOf,
   executionDigest,
   executionPolicySchema,
@@ -434,6 +435,33 @@ test('C02/HP09: адаптер хоста без протокола перехо
   }
 });
 
+test('F-AX: адаптер без протокола переходов не получает меток поздних находок — он не видит прежних', async () => {
+  const { hsetup } = await import('./harness-fixture.ts');
+  const ctx = hsetup({
+    scenario: {
+      writer: [implement(), implement()],
+      reviewer: [
+        verdict(true), // ревью плана
+        verdict(false, { findings: [finding('Нет обработки пустого имени')] }),
+        verdict(false, {
+          findings: [{ ...finding('Раннер не проверяет код выхода'), path: 'test/run.js' }],
+        }),
+      ],
+    },
+    policy: (p: any) => (p.maxAttempts = 2),
+  });
+  const h = ctx.open(ctx.policy, legacyAdapter);
+  await h.run({ graph: ctx.graph, author: 'claude' });
+  const all = h.engine.read((v) => v.attempts(WORK));
+  assert.equal(all.length, 2);
+  const e = all[1]!.evidence.find((x) => x.kind === 'review' && x.phase === 'candidate')!;
+  assert.equal(e.reviewRound?.mode, 'legacy');
+  assert.equal(e.findings?.length, 1);
+  assert.equal(e.findings?.[0]?.late, undefined, 'test/run.js не менялся, но адаптер legacy');
+  assert.doesNotMatch(e.summary, /поздние находки/);
+  h.close();
+});
+
 test('C02: cliAdapter объявляет протокол переходов; capabilities без поля — прежний адаптер', async () => {
   const { cliAdapter } = await import('../src/agents/cli-adapter.ts');
   const { bin } = await import('./runner-fixture.ts');
@@ -550,4 +578,100 @@ test('HP06/R2-F01: logicalReview — начатые вызовы по учёту
   );
   // Другой SHA — другое логическое ревью.
   assert.equal(logicalReview([a('A', 'expired')], scope, 'candidate', 'd'.repeat(40), of).used, 0);
+});
+
+test('F-AX: решение accepted-limitation применяется после своего раунда; явный reopen снимает его', () => {
+  const scope = codeReviewScope('app', WORK);
+  const id = digestOf('находка');
+  const round = (n: number, extra: Record<string, unknown>) => ({
+    id: 'e' + n,
+    runId: 'r' + n,
+    kind: 'review' as const,
+    phase: 'candidate' as const,
+    sha: String(n).repeat(40),
+    passed: false,
+    findings: [] as any[],
+    reviewRound: {
+      version: 1 as const,
+      scope,
+      round: n,
+      call: 1,
+      calls: 2,
+      protocol: 'valid' as const,
+      expected: [],
+      ...extra,
+    },
+  });
+  const first = round(1, {});
+  first.findings = [{ severity: 'blocking', message: 'Слабый тест', path: 'test/a.js', id }];
+  const decision = {
+    finding: id,
+    decision: 'accepted-limitation' as const,
+    by: 'lead' as const,
+    reason: 'Известное ограничение',
+    round: 1,
+    at: '2026-11-20T00:00:00.000Z',
+  };
+  const attempts = [{ id: 'a1', status: 'failed', evidence: [first] }];
+  const accepted = codeReviewHistory(attempts, scope, [decision]).findings[0]!;
+  assert.equal(accepted.status, 'withdrawn');
+  assert.equal(accepted.disposition?.by, 'lead');
+  assert.equal(codeReviewHistory(attempts, scope).findings[0]!.status, 'open', 'без решения');
+  const reopen = round(2, {
+    transitions: [
+      { id, from: 'withdrawn', to: 'open', basis: 'Новые доказательства: тест не падает' },
+    ],
+  });
+  const again = codeReviewHistory(
+    [...attempts, { id: 'a2', status: 'failed', evidence: [reopen] }],
+    scope,
+    [decision],
+  ).findings[0]!;
+  assert.equal(again.status, 'open');
+  assert.equal(again.disposition, undefined);
+});
+
+test('F-AX: прошлый раунд для поздних находок — валидный раунд фазы любого режима', () => {
+  const scope = codeReviewScope('app', WORK);
+  const ev = (n: number, phase: 'candidate' | 'integration', extra: Record<string, unknown>) => ({
+    id: 'e' + n,
+    runId: 'r' + n,
+    kind: 'review' as const,
+    phase,
+    sha: String(n).repeat(40),
+    passed: false,
+    reviewRound: {
+      version: 1 as const,
+      scope,
+      round: n,
+      call: 1,
+      calls: 2,
+      protocol: 'valid' as const,
+      expected: [],
+      ...extra,
+    },
+  });
+  const attempts = [
+    {
+      id: 'a',
+      status: 'failed',
+      evidence: [
+        ev(1, 'candidate', {}),
+        ev(2, 'candidate', { mode: 'strict' }),
+        ev(3, 'integration', {}),
+        ev(4, 'candidate', { protocol: 'invalid' }),
+      ],
+    },
+  ];
+  assert.deepEqual(previousReviewRound(attempts, scope, 'candidate'), {
+    round: 2,
+    sha: '2'.repeat(40),
+  });
+  attempts[0]!.evidence.push(ev(5, 'candidate', { mode: 'legacy' }));
+  assert.equal(previousReviewRound(attempts, scope, 'candidate')?.round, 5);
+  assert.equal(previousReviewRound(attempts, scope, 'integration')?.round, 3);
+  assert.equal(
+    previousReviewRound(attempts, codeReviewScope('app', 'other'), 'candidate'),
+    undefined,
+  );
 });

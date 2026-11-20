@@ -63,7 +63,7 @@ test('attemptSummaryLine: факты без оценки времени; ост�
   const line = attemptSummaryLine(
     {
       total: 4,
-      active: 1,
+      active: 0,
       failed: 2,
       failures: [
         { key: 'defect', count: 1 },
@@ -77,7 +77,7 @@ test('attemptSummaryLine: факты без оценки времени; ост�
   );
   assert.equal(
     line,
-    'попыток 4 (идёт 1); отказов 2 (defect 1, time-limit 1); по времени 1; прервано остановкой 1; принято 0; осталось попыток 0 из 3, восстановлений группы 4 из 6',
+    'попыток 4; отказов 2 (defect 1, time-limit 1); по времени 1; прервано остановкой 1; принято 0; осталось попыток 0 из 3, восстановлений группы 4 из 6',
   );
   assert.doesNotMatch(line, /мин|час|ETA|осталось времени/i);
 });

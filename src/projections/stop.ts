@@ -155,6 +155,12 @@ export type StopInput =
         /** Согласование графа устарело для этой политики (режим operator). */
         approvalStale?: string;
         /**
+         * Ревью плана графа идёт в живом процессе `harness run` (запись вызова
+         * `plan-review` открыта, её процесс жив): согласование — ход harness,
+         * а не ведущего. `since` — начало вызова.
+         */
+        planReview?: { since: string };
+        /**
          * У отменённой работы: незавершённые работы, которые прямо от неё
          * зависят. Пусто — перепланировать нечего (действия нет); не задано —
          * неизвестно, прежнее replan-dependents.
@@ -427,7 +433,9 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       action: 'none',
       note: 'Поручение принято.',
     };
-  if (work.approvalStale)
+  // Ревью плана уже идёт: согласование ведёт harness (ниже, вместо шага
+  // согласования); вопрос, исчерпание и отказ остаются впереди.
+  if (work.approvalStale && !work.planReview)
     return {
       code: 'APPROVAL_STALE',
       cause: 'approval-required',
@@ -581,7 +589,7 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
         note: [
           head,
           `Перенесённый ответ r${question.answer?.revision ?? '?'}${by} устарел до выдачи${question.refusal ? `: ${question.refusal}` : ''}.`,
-          'Выходы: перенести снова (input-context, review-plan, carryInput) или снять перенесённый ответ (input-cancel) — работа продолжится без него.',
+          'Выходы: перенести снова (harness input-carry --request <id> --reason …) или снять перенесённый ответ (input-cancel) — работа продолжится без него.',
           own,
         ]
           .filter(Boolean)
@@ -596,7 +604,7 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       note: [
         head,
         `Ответ r${question.answer?.revision ?? '?'} (${question.answer?.digest.slice(0, 12) ?? '—'})${by} записан, но не применён${question.refusal ? `: ${question.refusal}` : ''}.`,
-        'Дальше: input-context, review-plan со снимком, input-apply.',
+        'Дальше: harness input-resolve --request <id> (снимок, ревью плана и применение одним вызовом; по шагам — input-context, review-plan со снимком, input-apply).',
         own,
       ]
         .filter(Boolean)
@@ -708,11 +716,25 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       code: 'NOT_READY',
       cause: 'not-ready',
       phase: 'claim',
-      actor: 'lead',
-      action: 'diagnose-failure',
-      note: `Ждёт ${work.waitingOn.join(', ')}: на них движок остановится; следующий шаг — по их диагнозу.`,
+      // Ожидание зависимости — не ход по этой работе: по ней не действует
+      // никто (движок её не сдвинет, ведущему разбирать нечего); что делать,
+      // говорит диагноз самой зависимости (её разбор, сброс, решение человека).
+      actor: null,
+      action: 'wait',
+      note: `Ждёт ${work.waitingOn.join(', ')}: сама эта работа ничего не требует; на зависимости движок остановится, следующий шаг — по её диагнозу.`,
     };
   if (work.status === 'cancelled') return cancelledOutcome(work.openDependents, 'claim');
+  // Шаг согласования, пока идёт ревью плана (запуск, review-plan или
+  // повторное согласование с ответом): ход harness, а не ведущего.
+  if (work.planReview && (work.status === 'draft' || work.approvalStale))
+    return {
+      code: work.approvalStale ? 'APPROVAL_STALE' : 'APPROVAL_REQUIRED',
+      cause: 'approval-required',
+      phase: 'claim',
+      actor: 'controller',
+      action: 'review-plan',
+      note: `Идёт ревью плана (с ${work.planReview.since}): согласование — по его итогу, ведущему для него ничего делать не нужно.`,
+    };
   if (work.status === 'draft')
     return {
       code: 'APPROVAL_REQUIRED',

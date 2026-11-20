@@ -28,6 +28,7 @@ import {
   exitCodeOf,
   exitCodes,
   projectManifestSchema,
+  type CliArgument,
   type CliCommand,
   type CliEnvelope,
   type ExecutionPolicy,
@@ -83,6 +84,40 @@ run: отказ по существу (GATE_FAILED, REVIEW_REJECTED, …) — 3;
 Runtime: codex и claude из PATH; HARNESS_CODEX_BIN / HARNESS_CLAUDE_BIN подменяют исполняемый файл
 (например, fixture executable в тестах — это не живая модель).
 `;
+
+/**
+ * Справка одной команды (`harness <команда> --help`, `harness help <команда>`):
+ * описание, параметры с обязательностью, запись состояния, идемпотентность и
+ * отказы — из того же договора `cliCommands`, по которому разбираются флаги.
+ */
+function commandHelp(name: CliCommand) {
+  const c = cliCommands[name] as {
+    description: string;
+    writes: boolean;
+    idempotency: string;
+    args: readonly CliArgument[];
+    refusals: readonly string[];
+  };
+  const sign = (a: (typeof c.args)[number]) =>
+    a.value === 'flag' ? a.name : `${a.name} <${a.value}>`;
+  const width = Math.max(...c.args.map((a) => sign(a).length), 10) + 2;
+  return [
+    `harness ${name} — ${c.description}`,
+    '',
+    `Использование: harness ${name} ${c.args.map((a) => (a.required ? sign(a) : `[${sign(a)}]`)).join(' ')}`.trimEnd(),
+    '',
+    'Параметры:',
+    ...c.args.map(
+      (a) =>
+        `  ${sign(a).padEnd(width)}${a.required ? '(обязательный) ' : ''}${a.multiple ? '(можно повторить) ' : ''}${a.description}`,
+    ),
+    '',
+    `Пишет состояние: ${c.writes ? 'да' : 'нет'}. Повтор: ${c.idempotency}`,
+    ...(c.refusals.length ? [`Отказы: ${c.refusals.join(', ')}`] : []),
+    `stdout — JSON (${API_VERSION}); диагностика — stderr.`,
+    '',
+  ].join('\n');
+}
 
 const readJson = (path: string, what: string): unknown => readJsonFile(path, what).value;
 const readJsonFile = (path: string, what: string): { text: string; value: unknown } => {
@@ -368,6 +403,8 @@ const flagOwners = {
   'view-version': ['view'],
   intent: ['handoff'],
   request: [
+    'input-resolve',
+    'input-carry',
     'input-show',
     'input-answer',
     'input-context',
@@ -379,9 +416,9 @@ const flagOwners = {
   text: ['input-answer'],
   option: ['input-answer'],
   kind: ['input-answer'],
-  actor: ['input-answer', 'review-plan', 'review-contract'],
+  actor: ['input-answer', 'input-carry', 'review-plan', 'review-contract', 'review-accept'],
   by: ['reapprove'],
-  'accept-limitation': ['review-plan', 'review-contract'],
+  'accept-limitation': ['review-plan', 'review-contract', 'review-accept'],
   'continue-review': ['review-plan', 'review-contract'],
   'request-version': ['input-answer', 'input-apply', 'input-cancel', 'input-supersede'],
   'context-digest': ['input-target', 'input-apply'],
@@ -604,7 +641,7 @@ async function run(
         throw new HarnessError('INVALID_INPUT', `--${flag} поддерживают: ${owners.join(', ')}`);
     return { command: 'version', data: { harness: HARNESS_VERSION, apiVersion: API_VERSION } };
   }
-  if (!name || !(name in cliCommands))
+  if (!name || !Object.hasOwn(cliCommands, name))
     throw new HarnessError(
       'UNSUPPORTED_COMMAND',
       name ? 'Неизвестная команда: ' + name : 'Не указана команда',
@@ -707,6 +744,30 @@ async function run(
           });
         }
         return { command, data: record, code: record.approved ? 0 : exitCodes.refused };
+      } finally {
+        h.close();
+      }
+    }
+    case 'review-accept': {
+      // Решение по находкам ревью кода поручения (docs/review-protocol.md §10).
+      const [accept] = reviewDispositionsOf({
+        'accept-limitation': v['accept-limitation'],
+        reason: need('reason'),
+        ...(v.actor !== undefined ? { actor: v.actor } : {}),
+      });
+      const ids = (v['accept-limitation'] ?? []).flatMap((x) =>
+        x
+          .split(',')
+          .map((y) => y.trim())
+          .filter(Boolean),
+      );
+      if (!accept) throw new HarnessError('INVALID_INPUT', '--accept-limitation: нужен ID находки');
+      const h = open(need('state'), binding(need('state')), true);
+      try {
+        return {
+          command,
+          data: h.engine.acceptCodeFindings(need('work'), ids, accept.reason, accept.by),
+        };
       } finally {
         h.close();
       }
@@ -828,6 +889,7 @@ async function run(
             status: result.work.status,
             attempt: result.work.attempt,
             changed: result.changed,
+            ...('reset' in result && result.reset ? { reset: result.reset } : {}),
           },
         };
       } finally {
@@ -1321,6 +1383,52 @@ async function run(
         h.close();
       }
     }
+    case 'input-resolve':
+    case 'input-carry': {
+      const b = binding(need('state'), v.policy, Boolean(v.policy));
+      const h = open(need('state'), b, false);
+      try {
+        const id = need('request');
+        const author = v.author ? parseWith(authorSchema, v.author, 'author') : undefined;
+        const reset = v.reset ? { reason: need('reason') } : undefined;
+        const out =
+          command === 'input-resolve'
+            ? await h.resolveInput(id, {
+                ...optional('author', author),
+                ...optional('reset', reset),
+              })
+            : await h.carryInputOf(id, {
+                reason: need('reason'),
+                by: parseWith(z.enum(['operator', 'lead']), v.actor ?? 'lead', 'actor'),
+                ...optional('author', author),
+                ...optional('reset', reset),
+              });
+        const done = 'applied' in out ? out.applied : out.carried;
+        return {
+          command,
+          data: {
+            requestId: out.requestId,
+            ...('applied' in out ? { applied: out.applied } : { carried: out.carried }),
+            ...('superseded' in out ? { superseded: out.superseded } : {}),
+            changed: out.changed,
+            lifecycle: out.lifecycle,
+            ...optional('contextDigest', out.contextDigest),
+            ...('reviewRound' in out
+              ? { reviewRound: out.reviewRound, reviewed: out.reviewed }
+              : {}),
+            ...('work' in out && out.work
+              ? { work: { id: out.work.id, status: out.work.status, attempt: out.work.attempt } }
+              : {}),
+            ...('active' in out && out.active ? { active: out.active } : {}),
+            ...('joint' in out && out.joint ? { joint: true as const } : {}),
+            ...('blocker' in out && out.blocker ? { blocker: out.blocker } : {}),
+          },
+          ...(done ? {} : { code: exitCodes.refused }),
+        };
+      } finally {
+        h.close();
+      }
+    }
     case 'input-answer':
     case 'input-context':
     case 'input-apply':
@@ -1421,9 +1529,30 @@ async function run(
 }
 
 const argv = process.argv.slice(2);
-if (argv[0] === '--help' || argv[0] === 'help') {
-  process.stderr.write(usage);
+// Справка команды: `harness <команда> --help|-h` или `harness help <команда>` —
+// текст на stdout, exit 0; неизвестная команда — обычный отказ ниже.
+// `-h`/`--help` — только на месте флага: значение строкового параметра
+// (`--text -h`) справку не вызывает.
+const valued = (token: string | undefined) =>
+  !!token?.startsWith('--') &&
+  !token.includes('=') &&
+  (options as Record<string, { type: string }>)[token.slice(2)]?.type === 'string';
+const helpOf =
+  argv[0] === 'help' || argv[0] === '--help'
+    ? argv[1] === '--help' || argv[1] === '-h'
+      ? undefined
+      : argv[1]
+    : argv.slice(1).some((a, i) => (a === '--help' || a === '-h') && !valued(argv[i]))
+      ? argv[0]
+      : undefined;
+if (helpOf && Object.hasOwn(cliCommands, helpOf)) {
+  process.stdout.write(commandHelp(helpOf as CliCommand));
   process.exit(exitCodes.ok);
+}
+if (argv[0] === '--help' || argv[0] === 'help') {
+  if (helpOf) process.stderr.write(`harness: неизвестная команда: ${helpOf}\n\n`);
+  process.stderr.write(usage);
+  process.exit(helpOf ? exitCodes.input : exitCodes.ok);
 }
 let envelope: CliEnvelope;
 let code: number = exitCodes.ok;
@@ -1453,7 +1582,7 @@ try {
           ? contractViolation(error)
           : new HarnessError('INTERNAL', (error as Error)?.message ?? String(error));
   code = exitCodeOf(known);
-  const command = argv[0] && argv[0] in cliCommands ? (argv[0] as CliCommand) : null;
+  const command = argv[0] && Object.hasOwn(cliCommands, argv[0]) ? (argv[0] as CliCommand) : null;
   envelope = { apiVersion: API_VERSION, command, ok: false, error: known.toJSON() };
   process.stderr.write(`harness: ${known.code}: ${known.message}\n`);
   for (const issue of known.issues)
