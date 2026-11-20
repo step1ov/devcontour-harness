@@ -28,7 +28,7 @@ test('view: пустой вход — корректный документ по
   const view = operatorView(baseInput());
   operatorViewSchema.parse(view);
   assert.equal(view.viewVersion, OPERATOR_VIEW_VERSION);
-  assert.equal(view.viewRevision, 1);
+  assert.equal(view.viewRevision, 2);
   assert.equal(view.generatedAt, new Date(NOW).toISOString());
   assert.deepEqual(view.works, []);
   assert.equal(view.progress.total, 0);
@@ -440,7 +440,12 @@ test('view: дрейф — сдвинутые, переписанные и не�
     repositoryId: 'app',
     ref: 'refs/heads/main',
     acceptedSha: sha('a'),
-    remote: { state: 'unknown', reason: 'эта версия harness не читает remote-tracking ref' },
+    // Вход без сверки удалённой ветки (хост прежней версии) — «неизвестно», не «отправлено».
+    remote: {
+      state: 'unknown',
+      reason: 'удалённая ветка не проверялась',
+      line: 'неизвестно (удалённая ветка не проверялась)',
+    },
   });
 });
 

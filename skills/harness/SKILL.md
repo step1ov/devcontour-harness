@@ -397,6 +397,19 @@ checkout is on it; a check, not acceptance) and
 `review-code --base <acceptedSha> --head <targetRef>`. Never report the current ref
 as accepted because an earlier order on it was.
 
+"Accepted" is local: the harness moved the target ref in this repository and
+never pushes. `data.target.remote` (also `status` `works[].target.remote`)
+says whether the accepted commit is already on the remote branch, from the
+local remote-tracking ref only (no fetch): `state` `pushed`, `not-pushed` or
+`unknown`, and `line` («принято локально; в удалённой ветке origin/main ещё
+нет» / "accepted locally; not yet on the remote branch origin/main"). Quote
+that line to the operator. When it is `not-pushed`, **offer** to push with
+the destination the harness names — `git push <pushRemote>
+<targetRef>:<pushRef>` (the local branch may track a remote branch of another
+name) — and wait for their yes; never push on your own, and never report
+`unknown` as pushed or as not pushed. After that push, `status` shows
+`pushed` without a fetch (the push updates the tracking ref).
+
 ### 10. New session
 
 Nothing is asked again:

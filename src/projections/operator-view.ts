@@ -200,7 +200,13 @@ export interface WorkView {
     repositoryId: string;
     ref: string;
     acceptedSha?: string;
-    remote: { state: string; trackingRef?: string; reason?: string };
+    remote: {
+      state: string;
+      trackingRef?: string;
+      checkedAt?: string;
+      reason?: string;
+      line?: string;
+    };
   };
   question?: { requestId: string; state: string; severity: number };
   spend: { calls: number; usd: Bounded; durationMs: number };
@@ -279,7 +285,8 @@ export type TruncatedKey =
   | 'budgets'
   | 'blockers'
   | 'dependsOn'
-  | 'alternates';
+  | 'alternates'
+  | 'activity';
 
 export interface ViewSource {
   producer: string;
@@ -309,7 +316,18 @@ export interface OperatorView {
   };
   history: ViewHistory;
   health: ViewHealth;
+  activity?: ActivityView[];
   truncated?: Partial<Record<TruncatedKey, number>>;
+}
+
+/** Запись ленты «кто что делал» (ревизия 2). */
+export interface ActivityView {
+  at: string;
+  actor: string;
+  action: string;
+  workId?: string;
+  subject?: string;
+  plain: string;
 }
 
 export interface AttemptRow {
@@ -426,6 +444,18 @@ export interface OperatorWorkInput {
     filesSinceAccepted?: number;
     diverged?: true;
     unavailable?: string;
+    /** Удалённая ветка (`status.works[].target.remote`, alpha.57); нет — не читалась. */
+    remote?: {
+      state: 'pushed' | 'not-pushed' | 'unknown';
+      trackingRef?: string;
+      pushRemote?: string;
+      pushRef?: string;
+      checkedAt?: string;
+      reason?: string;
+      reasonEn?: string;
+      line: string;
+      lineEn: string;
+    };
   };
   /** alpha.55 (`status.works[].verification`). */
   verification?: {
@@ -543,6 +573,95 @@ export interface OperatorReviewInput {
   lineEn?: string;
 }
 
+/** Фаза записи проверки или ревью попытки. */
+type Phase = 'candidate' | 'integration';
+/** Простой текст на двух языках (причина отказа попытки). */
+interface Plain2 {
+  ru: string;
+  en: string;
+}
+
+/**
+ * Событие ленты «кто что делал» из записей хранилища (загрузчик): начало и
+ * конец попытки, приёмка, проверки, раунды ревью, эскалация, вопросы и
+ * ответы. Проекция формулирует фразу, отбирает окно, сортирует и усекает.
+ */
+export type OperatorActivityInput =
+  | { kind: 'attempt.started'; at: string; workId: string; attempt: number; runtime: string }
+  | {
+      kind: 'attempt.ended';
+      at: string;
+      workId: string;
+      attempt: number;
+      /** `failed`, `cancelled`, `expired`, `interrupted` (штатная остановка). */
+      outcome: 'failed' | 'cancelled' | 'expired' | 'interrupted';
+      /** Почему: класс отказа простыми словами. */
+      reason?: Plain2;
+      /** Попытка не засчитана в предел (окружение, остановка, вопрос). */
+      uncounted?: boolean;
+    }
+  | {
+      kind: 'work.accepted';
+      at: string;
+      workId: string;
+      attempt: number;
+      sha?: string;
+      ref?: string;
+    }
+  | {
+      kind: 'gate';
+      at: string;
+      workId: string;
+      attempt: number;
+      gate: string;
+      phase: Phase;
+      passed: boolean;
+      recheck?: 'flaky' | 'confirmed';
+      reused?: boolean;
+      /** Команда gate не запустилась (отказ песочницы): проверки не было. */
+      notLaunched?: boolean;
+    }
+  | {
+      kind: 'review';
+      at: string;
+      scope: 'plan' | 'contract' | 'code' | 'attempt';
+      subject: string;
+      /** Как назвать предмет во фразе (у ревью кода — область и refs); нет — `subject`. */
+      label?: string;
+      workId?: string;
+      attempt?: number;
+      phase?: Phase;
+      round?: number;
+      approved: boolean;
+      blocking: number;
+      reviewer: string;
+      /**
+       * Что reviewer делал по записи controller: `diff-only` — команд не
+       * запускал, `commands` — запускал (`commands` — сколько); нет —
+       * неизвестно, и фраза об этом молчит.
+       */
+      inspection?: 'diff-only' | 'commands';
+      commands?: number;
+    }
+  | {
+      kind: 'review.escalated';
+      at: string;
+      scope: 'plan' | 'contract' | 'code';
+      subject: string;
+      workId?: string;
+      findings: number;
+      round: number;
+    }
+  | { kind: 'question.asked'; at: string; workId: string; requestId: string; severity: number }
+  | {
+      kind: 'question.answered';
+      at: string;
+      workId: string;
+      requestId: string;
+      by: 'operator' | 'lead' | 'host';
+      basis?: 'technical' | 'severity';
+    };
+
 /** Бюджет области (`budgetView`). */
 export interface OperatorBudgetInput {
   scope: { kind: 'work' | 'group' | 'total'; id?: string };
@@ -630,6 +749,8 @@ export interface OperatorViewInput {
   warnings?: readonly { code: string; message: string; messageEn?: string }[];
   /** Предметов ревью, которых нет в `reviews` (предел сводки загрузчика). */
   reviewsOmitted?: number;
+  /** События ленты «кто что делал»; нет — производитель ленту не ведёт (поля нет в документе). */
+  activity?: readonly OperatorActivityInput[];
   /** Что маскировать: домашний каталог, корни репозиториев, значения секретов. */
   mask?: MaskContext;
 }
@@ -855,13 +976,29 @@ interface Ctx {
 
 const text = (c: Ctx, s: string | undefined, max: number) => maskText(s, max, c.mask);
 
-const remoteUnknown = (lang: 'ru' | 'en') => ({
-  state: 'unknown',
-  reason:
-    lang === 'en'
-      ? 'the remote-tracking ref is not read by this harness version'
-      : 'эта версия harness не читает remote-tracking ref',
-});
+/** Удалённая ветка принятой работы: из сверки загрузчика, иначе «неизвестно». */
+function remoteView(
+  c: Ctx,
+  r: NonNullable<OperatorWorkInput['target']>['remote'],
+): NonNullable<WorkView['target']>['remote'] {
+  if (!r) {
+    const reason =
+      c.lang === 'en' ? 'the remote branch was not checked' : 'удалённая ветка не проверялась';
+    return {
+      state: 'unknown',
+      reason,
+      line: c.lang === 'en' ? `unknown (${reason})` : `неизвестно (${reason})`,
+    };
+  }
+  const reason = c.lang === 'en' ? (r.reasonEn ?? r.reason) : r.reason;
+  return {
+    state: r.state,
+    ...((t) => (t ? { trackingRef: t } : {}))(text(c, r.trackingRef, 500)),
+    ...(r.checkedAt ? { checkedAt: r.checkedAt } : {}),
+    ...((t) => (t ? { reason: t } : {}))(text(c, reason, T.reason)),
+    ...((t) => (t ? { line: t } : {}))(text(c, c.lang === 'en' ? r.lineEn : r.line, T.line)),
+  };
+}
 
 /** Этапы, у которых есть наблюдаемая длительность: идущие этапы попытки. */
 const typicalStages = new Set(['prepare', 'writer', 'gates', 'review', 'integration']);
@@ -935,7 +1072,7 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
             repositoryId: w.target.repositoryId,
             ref: w.target.ref,
             acceptedSha: w.target.acceptedSha,
-            remote: remoteUnknown(c.lang),
+            remote: remoteView(c, w.target.remote),
           },
         }
       : {}),
@@ -1404,6 +1541,224 @@ function escalationsOf(c: Ctx): Escalation[] {
 }
 
 /* ------------------------------------------------------------------ */
+/* Кто что делал                                                       */
+/* ------------------------------------------------------------------ */
+
+const phaseWord = {
+  ru: { candidate: 'кандидат', integration: 'интеграция' },
+  en: { candidate: 'candidate', integration: 'integration' },
+} as const;
+const scopeWord = {
+  ru: { plan: 'план', contract: 'контракт', code: 'код', attempt: 'изменения работы' },
+  en: { plan: 'the plan', contract: 'the contract', code: 'the code', attempt: 'the changes of' },
+} as const;
+const whoAnswered = {
+  ru: { operator: 'оператор', lead: 'ведущий', host: 'хост' },
+  en: { operator: 'the operator', lead: 'the lead', host: 'the host' },
+} as const;
+const sha12 = (x: string | undefined) => (x ? x.slice(0, 12) : undefined);
+
+/** Фраза, исполнитель и код одного события ленты. */
+function activityLine(
+  e: OperatorActivityInput,
+  lang: 'ru' | 'en',
+): { actor: string; action: string; plain: string; workId?: string; subject?: string } {
+  const ru = lang === 'ru';
+  switch (e.kind) {
+    case 'attempt.started':
+      return {
+        actor: 'controller',
+        action: e.kind,
+        workId: e.workId,
+        plain: ru
+          ? `контроллер запустил попытку ${e.attempt} работы ${e.workId}; пишет ${e.runtime}`
+          : `the controller started attempt ${e.attempt} of ${e.workId}; ${e.runtime} writes`,
+      };
+    case 'attempt.ended': {
+      const why = e.reason ? (ru ? e.reason.ru : e.reason.en) : undefined;
+      const free = e.uncounted
+        ? ru
+          ? '; попытка не расходуется'
+          : '; the attempt is not counted'
+        : '';
+      const head = ru
+        ? {
+            failed: `попытка ${e.attempt} работы ${e.workId} не удалась`,
+            cancelled: `попытка ${e.attempt} работы ${e.workId} отменена`,
+            expired: `попытка ${e.attempt} работы ${e.workId} потеряла владельца`,
+            interrupted: `попытка ${e.attempt} работы ${e.workId} прервана остановкой`,
+          }[e.outcome]
+        : {
+            failed: `attempt ${e.attempt} of ${e.workId} failed`,
+            cancelled: `attempt ${e.attempt} of ${e.workId} was cancelled`,
+            expired: `attempt ${e.attempt} of ${e.workId} lost its owner`,
+            interrupted: `attempt ${e.attempt} of ${e.workId} was interrupted by a shutdown`,
+          }[e.outcome];
+      return {
+        actor: 'controller',
+        action: `attempt.${e.outcome}`,
+        workId: e.workId,
+        plain: `${head}${why ? `: ${why}` : ''}${free}`,
+      };
+    }
+    case 'work.accepted': {
+      const at = [sha12(e.sha), e.ref].filter(Boolean);
+      return {
+        actor: 'controller',
+        action: e.kind,
+        workId: e.workId,
+        plain: ru
+          ? `работа ${e.workId} принята (попытка ${e.attempt})${at.length ? `: ${at.join(' в ')}` : ''}, локально`
+          : `${e.workId} was accepted (attempt ${e.attempt})${at.length ? `: ${at.join(' on ')}` : ''}, locally`,
+      };
+    }
+    case 'gate': {
+      const where = ru
+        ? `работа ${e.workId}, попытка ${e.attempt}, ${phaseWord.ru[e.phase]}`
+        : `${e.workId}, attempt ${e.attempt}, ${phaseWord.en[e.phase]}`;
+      const action = e.notLaunched
+        ? 'gate.not-launched'
+        : e.reused
+          ? 'gate.reused'
+          : e.recheck
+            ? 'gate.recheck'
+            : e.passed
+              ? 'gate.passed'
+              : 'gate.failed';
+      const plain = e.notLaunched
+        ? ru
+          ? `проверка ${e.gate} не запустилась — отказ среды, проверки не было (${where})`
+          : `check ${e.gate} did not start — environment failure, nothing was checked (${where})`
+        : e.reused
+          ? ru
+            ? `проверка ${e.gate} взята с кандидата: то же дерево, не запускалась (${where})`
+            : `check ${e.gate} was reused from the candidate: same tree, not run (${where})`
+          : e.recheck
+            ? e.recheck === 'flaky'
+              ? ru
+                ? `перепроверка ${e.gate} прошла: первый провал был случайным (${where})`
+                : `recheck of ${e.gate} passed: the first failure was random (${where})`
+              : ru
+                ? `перепроверка ${e.gate} подтвердила провал (${where})`
+                : `recheck of ${e.gate} confirmed the failure (${where})`
+            : ru
+              ? `контроллер запустил проверку ${e.gate}: ${e.passed ? 'прошла' : 'не прошла'} (${where})`
+              : `the controller ran check ${e.gate}: ${e.passed ? 'passed' : 'failed'} (${where})`;
+      return { actor: 'controller', action, workId: e.workId, plain };
+    }
+    case 'review': {
+      const what =
+        e.scope === 'attempt'
+          ? ru
+            ? `изменения работы ${e.workId ?? e.subject} (попытка ${e.attempt ?? '?'}${e.phase ? `, ${phaseWord.ru[e.phase]}` : ''})`
+            : `the changes of ${e.workId ?? e.subject} (attempt ${e.attempt ?? '?'}${e.phase ? `, ${phaseWord.en[e.phase]}` : ''})`
+          : `${scopeWord[lang][e.scope]} ${e.label ?? e.subject}`;
+      const round = e.round !== undefined ? (ru ? `, раунд ${e.round}` : `, round ${e.round}`) : '';
+      const verdict = e.approved
+        ? ru
+          ? `одобрил ${what}`
+          : `approved ${what}`
+        : ru
+          ? `вернул ${what}: блокирующих замечаний ${e.blocking}`
+          : `returned ${what}: ${e.blocking} blocking finding${e.blocking === 1 ? '' : 's'}`;
+      const read =
+        e.inspection === 'diff-only'
+          ? ru
+            ? '; читал diff, ничего не запускал'
+            : '; read the diff, ran nothing'
+          : e.inspection === 'commands'
+            ? ru
+              ? `; запускал команды: ${e.commands ?? '?'}`
+              : `; ran commands: ${e.commands ?? '?'}`
+            : '';
+      return {
+        actor: 'reviewer',
+        action: e.approved ? 'review.approved' : 'review.changes-requested',
+        ...(e.workId ? { workId: e.workId } : {}),
+        subject: e.subject,
+        plain: `reviewer ${e.reviewer} ${verdict}${round}${read}`,
+      };
+    }
+    case 'review.escalated':
+      return {
+        actor: 'controller',
+        action: e.kind,
+        ...(e.workId ? { workId: e.workId } : {}),
+        subject: e.subject,
+        plain: ru
+          ? `эскалация: ${scopeWord.ru[e.scope]} ${e.subject} — блокирующие замечания не решились за раунды ревью (${e.findings}), решение за человеком или ведущим`
+          : `escalation: ${scopeWord.en[e.scope]} ${e.subject} — blocking findings were not resolved by review rounds (${e.findings}); a person or the lead decides`,
+      };
+    case 'question.asked':
+      return {
+        actor: 'writer',
+        action: e.kind,
+        workId: e.workId,
+        subject: e.requestId,
+        plain: ru
+          ? `исполнитель задал вопрос ${e.requestId} по работе ${e.workId} (важность ${e.severity})`
+          : `the writer asked question ${e.requestId} on ${e.workId} (severity ${e.severity})`,
+      };
+    case 'question.answered': {
+      const rule = e.basis ? (ru ? ruleText.ru[e.basis] : ruleText.en[e.basis]) : undefined;
+      return {
+        actor: e.by,
+        action: e.kind,
+        workId: e.workId,
+        subject: e.requestId,
+        plain: ru
+          ? `${whoAnswered.ru[e.by]} ответил на вопрос ${e.requestId} по работе ${e.workId}${rule ? ` (${rule})` : ''}`
+          : `${whoAnswered.en[e.by]} answered question ${e.requestId} on ${e.workId}${rule ? ` (${rule})` : ''}`,
+      };
+    }
+  }
+}
+
+/**
+ * Лента «кто что делал»: события окна истории, новые сверху, не больше
+ * `OPERATOR_VIEW_LIMITS.activity`; опущенное — `truncated.activity`. Нет
+ * событий у загрузчика — поля нет.
+ */
+function activityOf(
+  c: Ctx,
+  o: OperatorViewOptions,
+  truncated: Record<string, number>,
+): ActivityView[] | undefined {
+  const events = c.i.activity;
+  if (!events) return undefined;
+  const { from, to } = windowOf(c.i.now, o);
+  const rows = events
+    .map((e) => ({ t: ms(e.at), e }))
+    .filter((x) => Number.isFinite(x.t) && x.t >= from && x.t <= to)
+    .map(({ t, e }) => {
+      const line = activityLine(e, c.lang);
+      return {
+        t,
+        // Последний ключ порядка — само событие (сырые ID до маскирования и
+        // обрезки): совпавшие после обрезки фразы не зависят от порядка входа.
+        key: JSON.stringify(canonical(e)),
+        row: {
+          at: e.at,
+          actor: line.actor,
+          action: line.action,
+          ...(line.workId ? { workId: line.workId } : {}),
+          ...(line.subject ? { subject: line.subject } : {}),
+          plain: text(c, line.plain, T.activity) || line.action,
+        },
+      };
+    })
+    .sort(
+      (a, b) =>
+        b.t - a.t ||
+        (a.row.action < b.row.action ? -1 : a.row.action > b.row.action ? 1 : 0) ||
+        (a.row.plain < b.row.plain ? -1 : a.row.plain > b.row.plain ? 1 : 0) ||
+        (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
+    )
+    .map((x) => x.row);
+  return take(rows, L.activity, truncated, 'activity');
+}
+
+/* ------------------------------------------------------------------ */
 /* Размер                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -1476,6 +1831,7 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
   ).length;
   const q = i.queue;
   const drift = i.works.map((w) => driftOf(c, w)).filter((d): d is DriftView => !!d);
+  const activity = activityOf(c, o, truncated);
   const draft: OperatorView = {
     viewVersion: OPERATOR_VIEW_VERSION,
     viewRevision: OPERATOR_VIEW_REVISION,
@@ -1510,6 +1866,7 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
     },
     history,
     health,
+    ...(activity ? { activity } : {}),
   };
   const fitted = draft;
   let warnings = [...fitted.health.warnings];

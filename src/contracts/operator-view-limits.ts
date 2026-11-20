@@ -5,7 +5,7 @@
 /** Мажорная версия документа: меняется, только когда поле удалено, переименовано или меняет смысл. */
 export const OPERATOR_VIEW_VERSION = 1 as const;
 /** Ревизия внутри мажорной версии: растёт при добавлениях (необязательное поле, значение перечисления). */
-export const OPERATOR_VIEW_REVISION = 1;
+export const OPERATOR_VIEW_REVISION = 2;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -52,6 +52,7 @@ export const OPERATOR_VIEW_TEXT = {
   unavailable: 200,
   model: 200,
   reason: 200,
+  activity: 200,
 } as const;
 
 /**

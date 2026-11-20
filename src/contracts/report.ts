@@ -573,7 +573,9 @@ export const valueReportSchema = z.strictObject({
   targets: z
     .strictObject({
       checked: count,
-      rows: z.array(acceptedTargetSchema.extend({ workId: label })).max(REPORT_LIMITS.works),
+      rows: z
+        .array(acceptedTargetSchema.omit({ remote: true }).extend({ workId: label }))
+        .max(REPORT_LIMITS.works),
       total: count,
       truncated: z.boolean(),
     })
