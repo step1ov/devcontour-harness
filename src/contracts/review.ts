@@ -727,6 +727,29 @@ export function codeReviewHistory(
   return { scope, round, findings: [...byId.values()] };
 }
 
+/**
+ * Прошлый валидный раунд ревью кода фазы (§10): от его SHA считается, какие
+ * пути менялись с тех пор (поздние находки). Режим раунда (`strict`,
+ * `legacy`, нет поля) не важен: раунд адаптера без протокола переходов тоже
+ * видел этот код и мог назвать находку.
+ */
+export function previousReviewRound(
+  attempts: HistoryAttempt[],
+  scope: string,
+  phase: 'candidate' | 'integration',
+): { round: number; sha: string } | undefined {
+  const prior = attempts
+    .flatMap((a) => a.evidence)
+    .findLast(
+      (e) =>
+        e.kind === 'review' &&
+        e.phase === phase &&
+        e.reviewRound?.scope === scope &&
+        e.reviewRound.protocol === 'valid',
+    );
+  return prior?.reviewRound ? { round: prior.reviewRound.round, sha: prior.sha } : undefined;
+}
+
 /** Начатые вызовы reviewer попытки по фазе: записи учёта вызовов (до invoke). */
 export interface StartedReviewCalls {
   /** Число начатых вызовов (запись учёта создаётся до внешнего вызова). */

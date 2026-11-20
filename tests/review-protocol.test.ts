@@ -18,6 +18,7 @@ import {
   checkCodeReview,
   codeReviewHistory,
   codeReviewScope,
+  previousReviewRound,
   digestOf,
   executionDigest,
   executionPolicySchema,
@@ -601,4 +602,49 @@ test('F-AX: решение accepted-limitation применяется после
   ).findings[0]!;
   assert.equal(again.status, 'open');
   assert.equal(again.disposition, undefined);
+});
+
+test('F-AX: прошлый раунд для поздних находок — валидный раунд фазы любого режима', () => {
+  const scope = codeReviewScope('app', WORK);
+  const ev = (n: number, phase: 'candidate' | 'integration', extra: Record<string, unknown>) => ({
+    id: 'e' + n,
+    runId: 'r' + n,
+    kind: 'review' as const,
+    phase,
+    sha: String(n).repeat(40),
+    passed: false,
+    reviewRound: {
+      version: 1 as const,
+      scope,
+      round: n,
+      call: 1,
+      calls: 2,
+      protocol: 'valid' as const,
+      expected: [],
+      ...extra,
+    },
+  });
+  const attempts = [
+    {
+      id: 'a',
+      status: 'failed',
+      evidence: [
+        ev(1, 'candidate', {}),
+        ev(2, 'candidate', { mode: 'strict' }),
+        ev(3, 'integration', {}),
+        ev(4, 'candidate', { protocol: 'invalid' }),
+      ],
+    },
+  ];
+  assert.deepEqual(previousReviewRound(attempts, scope, 'candidate'), {
+    round: 2,
+    sha: '2'.repeat(40),
+  });
+  attempts[0]!.evidence.push(ev(5, 'candidate', { mode: 'legacy' }));
+  assert.equal(previousReviewRound(attempts, scope, 'candidate')?.round, 5);
+  assert.equal(previousReviewRound(attempts, scope, 'integration')?.round, 3);
+  assert.equal(
+    previousReviewRound(attempts, codeReviewScope('app', 'other'), 'candidate'),
+    undefined,
+  );
 });

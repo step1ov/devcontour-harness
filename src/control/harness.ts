@@ -1111,7 +1111,7 @@ export class Harness {
       const rows = verificationRows(attempt);
       return {
         apiVersion: API_VERSION,
-        result: runResult(attempt, HARNESS_VERSION),
+        result: runResult(attempt, HARNESS_VERSION, work.codeReviewDecisions),
         verification: {
           runId: attempt.id,
           rows: rows.slice(0, verificationRowLimit),

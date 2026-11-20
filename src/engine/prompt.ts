@@ -36,7 +36,11 @@ export const CLOSED_FINDINGS_HEADER = 'Closed or withdrawn review findings (hist
  * неизменённом пути помечается поздней для ведущего.
  */
 export const ROUND_COMPLETENESS_TEXT =
-  'Review completeness: report ALL blocking findings you can establish in this single pass, including test rigor, at once — do not hold some back for a later round. State the status of every previous open finding above. A new blocking finding in a later round on a file or area that did not change since the previous round is recorded as a late finding and shown to the lead as a moving target; raise one only with concrete evidence that was not available before.';
+  'Review completeness: report ALL blocking findings you can establish in this single pass, including test rigor, at once — do not hold some back for a later round. A new blocking finding in a later round on a file or area that did not change since the previous round is recorded as a late finding and shown to the lead as a moving target; raise one only with concrete evidence that was not available before.';
+
+/** Только с протоколом переходов и прежними открытыми находками: им есть что назвать. */
+export const PREVIOUS_STATUS_TEXT =
+  'State the status of every previous open finding listed above in `previous`, in this same response.';
 
 /** Принятые ограничения (решение ведущего/оператора) в истории запроса reviewer. */
 export const ACCEPTED_FINDINGS_TEXT =
@@ -97,6 +101,7 @@ export function findingsText(history: CodeReviewHistory | undefined, review: boo
         JSON.stringify(closed.map(brief))
       : '',
     closed.some((f) => f.disposition) ? `${ACCEPTED_FINDINGS_TEXT}` : '',
+    open.length ? PREVIOUS_STATUS_TEXT : '',
     ROUND_COMPLETENESS_TEXT,
   ]
     .filter(Boolean)

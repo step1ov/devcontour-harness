@@ -5,6 +5,7 @@ import {
   runResultSchema,
   vendorOf,
   type AttemptState,
+  type CodeReviewDecision,
   type ErrorCode,
   type EvidenceRecord,
   type RunResult,
@@ -115,7 +116,16 @@ const ref = (e: EvidenceRecord, attempt: AttemptState) => ({
  * завершённую историю. `accepted` — только успешная попытка: её integration
  * SHA — result SHA. Недостающие сведения не выдумываются.
  */
-export function runResult(attempt: AttemptState, harnessVersion: string): RunResult {
+export function runResult(
+  attempt: AttemptState,
+  harnessVersion: string,
+  /**
+   * Решения по находкам ревью кода поручения (`WorkState.codeReviewDecisions`):
+   * в результат входят только принятые до начала попытки — те, под которыми
+   * шли её раунды; позднейшие решения завершённую историю не переписывают.
+   */
+  decisions: readonly CodeReviewDecision[] = [],
+): RunResult {
   if (!attempt.pinned)
     throw new HarnessError(
       'NOT_FOUND',
@@ -189,7 +199,15 @@ export function runResult(attempt: AttemptState, harnessVersion: string): RunRes
         ...(f.status !== undefined ? { status: f.status } : {}),
         ...(f.late ? { late: f.late } : {}),
       })),
-    limitations: [] as string[],
+    limitations: decisions
+      .filter((d) => d.at <= attempt.startedAt)
+      .slice(0, 100)
+      .map((d) =>
+        `Принятое ограничение ревью кода ${d.finding} (${d.by}, после раунда ${d.round}): ${d.reason}`.slice(
+          0,
+          1000,
+        ),
+      ),
     finishedAt: attempt.finishedAt ?? attempt.startedAt,
   };
   const value =

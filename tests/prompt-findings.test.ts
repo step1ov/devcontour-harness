@@ -48,6 +48,45 @@ test('Native review: historical gate failures with no canonical findings require
   assert.doesNotMatch(native, /Address every finding that is still open first/);
   // Legacy requests do not declare the native findings protocol.
   assert.doesNotMatch(prompt(input), /Return `previous` as exactly \[\]/);
+  // F-AX: полнота раунда — всем reviewer; требование назвать состояние
+  // прежних находок — только при протоколе с открытыми находками.
+  assert.match(prompt(input), /report ALL blocking findings/);
+  assert.match(native, /report ALL blocking findings/);
+  assert.doesNotMatch(prompt(input), /State the status of every previous open finding/);
+  assert.doesNotMatch(native, /State the status of every previous open finding/);
+  const withOpen = codeReviewHistory(
+    [
+      {
+        id: 'old',
+        status: 'failed',
+        evidence: [
+          {
+            id: 'e1',
+            runId: 'old',
+            kind: 'review',
+            phase: 'candidate',
+            sha: sha('a'),
+            passed: false,
+            findings: [{ severity: 'blocking', message: 'm', id: 'c'.repeat(64) }],
+            reviewRound: {
+              version: 1,
+              scope: 'd'.repeat(64),
+              round: 1,
+              call: 1,
+              calls: 2,
+              protocol: 'valid',
+              expected: [],
+            },
+          },
+        ],
+      },
+    ],
+    'd'.repeat(64),
+  );
+  assert.match(
+    prompt({ ...input, findings: withOpen }),
+    /State the status of every previous open finding/,
+  );
   assert.equal(findingsText(findings, false), '');
 });
 
