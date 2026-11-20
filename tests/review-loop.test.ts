@@ -197,7 +197,7 @@ test('H14: reviewer переформулирует ту же находку — 
   );
   assert.match(
     row.line,
-    /не одобрено, открытых блокирующих 1; раундов 3\/6; ревью \$0\.75; ждёт решения оператора/,
+    /не одобрено, открытых блокирующих 1; раундов 3\/6; ревью \$0\.75, вызовов 3; ждёт решения оператора/,
   );
   assert.match(statusText(status), /Ревью:\n {2}план g: не одобрено/);
 
@@ -260,7 +260,10 @@ test('H14: одобрено с открытой заметкой — «одоб�
   const status = statusDataSchema.parse(h.status());
   const row = status.reviews![0]!;
   assert.deepEqual(row.open, { blocking: 0, notes: 1 });
-  assert.match(row.line, /^план g: одобрено, открытых заметок 1; раундов 1\/6; ревью \$0\.25$/);
+  assert.match(
+    row.line,
+    /^план g: одобрено, открытых заметок 1; раундов 1\/6; ревью \$0\.25, вызовов 1$/,
+  );
   const reviews = h.engine.read((v) => v.locals('reviews').map((r) => r.value));
   const calls = h.engine.read((v) => v.locals('usage').map((r) => r.value));
   h.close();
@@ -903,7 +906,7 @@ test('H14 r2: отчёт и сводка — блокирующая, ставш�
   } as unknown as ExecutionView;
   const [row] = reviewSummaries(view, { maxAttempts: 3 });
   assert.deepEqual(row!.spend, { calls: 2, knownUsd: 0.5, unknownCalls: 1 });
-  assert.match(row!.line, /ревью \$0\.50 \+ вызовов без стоимости 1/);
+  assert.match(row!.line, /ревью ≥\$0\.50, вызовов 2 \(без стоимости 1\)/);
 });
 
 test('H14: сводка ревью — не больше REVIEW_SUMMARY_ROWS предметов, остальные — reviewsTruncated сразу после раздела', () => {

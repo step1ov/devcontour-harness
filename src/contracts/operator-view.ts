@@ -158,6 +158,12 @@ export const operatorQuestionSchema = z.strictObject({
     .optional(),
   title: freeText(T.questionTitle).optional(),
   createdAt: isoTimeSchema,
+  /**
+   * Где применённый ответ (ревизия 4): у идущей попытки («ждать нечего»;
+   * состояние тогда `delivered`) или у закончившейся, не передавшей его
+   * исполнителю («его получит следующая попытка»).
+   */
+  line: freeText(T.line).optional(),
 });
 
 const escalationSchema = z.strictObject({
@@ -223,6 +229,13 @@ export const workViewSchema = z.strictObject({
         bucket: token(40),
         plain: z.string().min(1).max(T.plain),
         at: isoTimeSchema.optional(),
+        /**
+         * Ревизия 4: класс отказа движка (`failureKind`: `environment`,
+         * `needs-input`, `needs-lead`, `timeout`…) и засчитана ли попытка в
+         * предел — панель не разбирает фразу `plain`. Нет поля — неизвестно.
+         */
+        kind: token(40).optional(),
+        counted: z.boolean().optional(),
       })
       .optional(),
   }),
@@ -235,6 +248,11 @@ export const workViewSchema = z.strictObject({
         code: token(80),
         plain: freeText(T.plain).optional(),
         actor: viewActor.nullable(),
+        /**
+         * Ревизия 4: порядок снятия, когда блокировки снимают разные
+         * участники (1 — первой: согласование раньше сброса попыток).
+         */
+        step: z.number().int().positive().optional(),
       }),
     )
     .max(L.blockersPerWork),
@@ -263,7 +281,13 @@ export const workViewSchema = z.strictObject({
     })
     .optional(),
   question: z
-    .strictObject({ requestId: id, state: token(40), severity: z.number().int().min(1).max(10) })
+    .strictObject({
+      requestId: id,
+      state: token(40),
+      severity: z.number().int().min(1).max(10),
+      /** Ревизия 4: где применённый ответ (как `questions[].line`). */
+      line: freeText(T.line).optional(),
+    })
     .optional(),
   spend: z.strictObject({ calls: count, usd: boundedSchema, durationMs: count }),
   resultSha: sha.optional(),
@@ -416,6 +440,16 @@ export const operatorViewSchema = z.strictObject({
       detail: freeText(T.detail).optional(),
       actor: viewActor.optional(),
       action: token(80).optional(),
+      /**
+       * Ревизия 4: кто двигает очередь (`status.runner`): `running` — живой
+       * controller, идущая попытка или ревью плана в живом run;
+       * `not-running` — никто не запущен, открытые работы сдвинет только
+       * новый запуск, его делает `restartBy` (`lead`: harness run). `line` —
+       * то же фразой. `paused: false` при `not-running` — не «очередь идёт».
+       */
+      runner: z.enum(['running', 'not-running']).optional(),
+      restartBy: viewActor.optional(),
+      line: freeText(T.line).optional(),
     }),
   }),
   history: viewHistorySchema,

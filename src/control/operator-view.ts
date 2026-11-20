@@ -32,7 +32,12 @@ import {
   type AttemptState,
 } from '../contracts/index.ts';
 import { HARNESS_VERSION } from '../package.ts';
-import { callCostKnown, failureBucketOf, interruptedByShutdown } from '../report/compute.ts';
+import {
+  attemptCounted,
+  callCostKnown,
+  failureBucketOf,
+  interruptedByShutdown,
+} from '../report/compute.ts';
 import { failurePlainOf } from '../report/failure-plain.ts';
 import { notLaunched, reviewFacts } from '../report/verification.ts';
 import { callRecords } from '../engine/usage.ts';
@@ -59,7 +64,7 @@ import { Engine } from '../engine/engine.ts';
 import { standaloneHost } from '../engine/standalone.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { Harness } from './harness.ts';
-import { statusOf } from './status.ts';
+import { carriedInput, statusOf } from './status.ts';
 import { acceptedTargets } from './target.ts';
 import { WorkflowQueue } from './workflow.ts';
 import { reviewRoundCap } from './review.ts';
@@ -139,9 +144,9 @@ export function viewPolicy(stateDir: string, policyPath?: string): ViewPolicy {
             {
               code: 'POLICY_DIGEST_MISMATCH',
               message:
-                'политика --policy отличается от привязанной к состоянию: представление построено по --policy',
+                'Файл политики, переданный панели, отличается от политики, с которой работает harness: настройки и числа показаны по файлу. Чтобы видеть действующую политику, откройте представление без --policy.',
               messageEn:
-                'the --policy file differs from the policy bound to the state: the view uses --policy',
+                'The policy file given to the panel differs from the policy harness runs with: settings and numbers follow the file. To see the policy in effect, open the view without --policy.',
             },
           ]
         : [];
@@ -837,6 +842,18 @@ export function collectOperatorViewInput(
         },
         attemptSummary: {
           ...summary,
+          // Класс отказа и засчитана ли попытка — фактами, не фразой (P13).
+          ...((last) =>
+            last
+              ? {
+                  lastFailure: {
+                    ...last,
+                    ...((a) => (a ? { counted: attemptCounted(a, own, policy.maxAttempts) } : {}))(
+                      own.find((x) => x.id === last.runId),
+                    ),
+                  },
+                }
+              : {})(summary.lastFailure),
           ...((facts) => (facts ? { lineEn: attemptLine(facts, 'en'), lineFacts: facts } : {}))(
             attemptFacts(summary, sw.status === 'done' || sw.status === 'cancelled'),
           ),
@@ -872,8 +889,13 @@ export function collectOperatorViewInput(
     const questions = requestsOf(v)
       .filter((r) => r.kind === 'question')
       .flatMap((r) => {
-        const state = inputStateOf(r) ?? (closed.has(r.workId) ? r.lifecycle : undefined);
-        if (!state) return [];
+        const raw = inputStateOf(r) ?? (closed.has(r.workId) ? r.lifecycle : undefined);
+        if (!raw) return [];
+        // Ответ у идущей попытки — `delivered` (как `status.works[].input`).
+        const carried = closed.has(r.workId)
+          ? undefined
+          : carriedInput({ requestId: r.id, state: raw }, attemptsOf.get(r.workId) ?? []);
+        const state = carried?.state ?? raw;
         const impact = (r.question as { impact?: string | null }).impact ?? undefined;
         const plain = plainOf(r);
         const last = r.answers.at(-1);
@@ -901,6 +923,7 @@ export function collectOperatorViewInput(
                 }
               : {}),
             ...(closed.has(r.workId) ? { closed: true } : {}),
+            ...(carried?.carrier ? { carrier: carried.carrier } : {}),
             leadMay: leadMayAnswer(r, inputPolicy),
           },
         ];
@@ -981,6 +1004,14 @@ export function collectOperatorViewInput(
           : {}),
         ...(queue?.actor !== undefined ? { actor: queue.actor } : {}),
         ...(queue?.action ? { action: queue.action } : {}),
+        ...(status.runner
+          ? {
+              runner: status.runner.state,
+              ...(status.runner.restartBy ? { restartBy: status.runner.restartBy } : {}),
+              line: status.runner.line,
+              lineEn: status.runner.lineEn,
+            }
+          : {}),
       },
       ...(controller ? { controller: { leaseUntil: controller.leaseUntil } } : {}),
       ...(status.budgets ? { budgets: status.budgets.budgets } : {}),

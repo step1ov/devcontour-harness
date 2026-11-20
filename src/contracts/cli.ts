@@ -1292,6 +1292,12 @@ const blocker = z.strictObject({
   plain: z.string().min(1).max(300).optional(),
   plainEn: z.string().min(1).max(300).optional(),
   actor: z.enum(diagnosisActors).nullable().optional(),
+  /**
+   * Только `status` (alpha.60): порядок снятия, когда блокировок несколько —
+   * 1 снимается первым (согласование раньше сброса попыток: сброс до него
+   * ничего не изменит). Нет поля — блокировка одна или порядок не важен.
+   */
+  step: z.number().int().positive().optional(),
 });
 
 export const validateDataSchema = z.strictObject({
@@ -1462,6 +1468,8 @@ export const attemptSummarySchema = z.strictObject({
 export const workStages = [
   'queued',
   'blocked',
+  /** Ревью плана идёт в живом процессе `harness run` (alpha.60): harness сам. */
+  'plan-review',
   'prepare',
   'writer',
   'gates',
@@ -1549,6 +1557,15 @@ export const statusDataSchema = z.strictObject({
           answerBasis: z.enum(leadAnswerBases).optional(),
           /** Ждёт ответа, и действующая политика разрешает ответ ведущему — по этому правилу. */
           leadMay: z.enum(leadAnswerBases).optional(),
+          /**
+           * Попытка, за которой закреплён применённый ответ (alpha.60):
+           * `running` — она идёт (состояние тогда `delivered`: ответ уже у
+           * попытки, ждать нечего); `false` — она закончилась, не передав
+           * ответ исполнителю, и ответ получит следующая попытка.
+           */
+          carrier: z
+            .strictObject({ attempt: z.number().int().positive(), running: z.boolean() })
+            .optional(),
         })
         .optional(),
       /** Неблокирующие запросы ведущему в ожидании (автономный режим). */
@@ -1573,6 +1590,26 @@ export const statusDataSchema = z.strictObject({
       target: acceptedTargetSchema.optional(),
     }),
   ),
+  /**
+   * Кто двигает очередь (alpha.60): `running` — живой controller, идущая
+   * попытка с действующим владением или ревью плана в живом `harness run`
+   * (`planReviews`); `not-running` — никто не запущен, и открытые поручения
+   * сдвинет только новый запуск (`restartBy` — кто его делает: ведущий,
+   * `harness run`). `line`/`lineEn` — то же одной фразой. Нет поля — открытых
+   * поручений нет.
+   */
+  runner: z
+    .strictObject({
+      state: z.enum(['running', 'not-running']),
+      planReviews: z
+        .array(z.strictObject({ graphId: idSchema, since: isoTimeSchema }))
+        .max(50)
+        .optional(),
+      restartBy: z.enum(diagnosisActors).optional(),
+      line: z.string().min(1).max(500),
+      lineEn: z.string().min(1).max(500),
+    })
+    .optional(),
   /**
    * Бюджеты по сохранённым записям вызовов: общий, групп с незавершённой
    * работой и незавершённых поручений. Нет поля — бюджеты не заданы.

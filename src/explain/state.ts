@@ -23,6 +23,7 @@ import type { Engine } from '../engine/engine.ts';
 import { acceptanceGap, repairDecision, repeatedTestcase } from '../engine/repair.ts';
 import { requestsIndex } from '../engine/input-requests.ts';
 import { activeOf } from '../engine/engine.ts';
+import { callRecords, liveCall } from '../engine/usage.ts';
 import { inputStateOf } from '../projections/input.ts';
 import type { EvidenceLink, StopInput, StopPhase } from '../projections/stop.ts';
 
@@ -309,6 +310,7 @@ export function stopInputsIn(
     for (const w of works)
       if (w.status === 'cancelled' && !cancelledIn.has(w.graphId)) cancelledIn.set(w.graphId, w.id);
     const active = once(() => activeOf(v));
+    const planReviews = livePlanReviews(v, h.policy, now);
     // Вопрос исполнителя, держащий работу: состояние, вопрос и варианты
     // (усекает explain), ответ — версией и digest; почему ответ сейчас не
     // применится — по тем же пределам, что у applyInput.
@@ -479,6 +481,7 @@ export function stopInputsIn(
           ...(work.recovery ? { recovery: { status: work.recovery.status } } : {}),
           ...(waitingOn.length ? { waitingOn } : {}),
           ...(approvalStale ? { approvalStale } : {}),
+          ...((since) => (since ? { planReview: { since } } : {}))(planReviews.get(work.graphId)),
           ...(openDependents ? { openDependents } : {}),
           ...((stoppedBy) => (stoppedBy ? { repairStoppedBy: stoppedBy } : {}))(
             // Отмена в группе останавливает её восстановление: сёстрам — почему.
@@ -556,6 +559,30 @@ export function stopInputsIn(
     }
     return inputs;
   })(view);
+}
+
+/**
+ * Ревью плана, идущее сейчас в живом процессе (`harness run` в режиме
+ * agent): открытая запись вызова `plan-review` графа, чей процесс жив (как
+ * `liveCalls` бюджета: не старше двух `runTimeoutMs`). Граф → начало вызова.
+ */
+export function livePlanReviews(
+  v: ExecutionView,
+  policy: Pick<ExecutionPolicy, 'runTimeoutMs'>,
+  now: number,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const r of callRecords(v))
+    if (
+      r.stage === 'plan-review' &&
+      r.subjectId &&
+      r.outcome === 'active' &&
+      liveCall(r, now, 2 * policy.runTimeoutMs)
+    ) {
+      const prev = out.get(r.subjectId);
+      if (!prev || r.startedAt < prev) out.set(r.subjectId, r.startedAt);
+    }
+  return out;
 }
 
 type View = Parameters<Parameters<Engine['read']>[0]>[0];

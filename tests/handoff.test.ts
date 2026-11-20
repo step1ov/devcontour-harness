@@ -992,18 +992,20 @@ test('handoff: предел в байтах — поручение без реш
       [
         ['c', 'controller', 'wait'],
         ['a', 'lead', 'diagnose-failure'],
-        ['b', 'lead', 'diagnose-failure'],
+        ['b', null, 'wait'],
       ],
     );
-    // Предел, в который пакет входит без провалов и без поручения c.
+    // Предел, в который пакет входит без провалов и без одного поручения:
+    // уходит последнее без решения (b ждёт зависимости — по ней никто не
+    // действует, alpha.60), поручение с решением (a) остаётся.
     const manual = structuredClone(pack);
     manual.failures = [];
-    manual.works = manual.works.filter((w) => w.id !== 'c');
+    manual.works = manual.works.filter((w) => w.id !== 'b');
     const limit = Buffer.byteLength(JSON.stringify(manual)) + 8;
     const fitted = fitPack(structuredClone(pack), limit);
     assert.deepEqual(
       fitted.works.map((w) => w.id),
-      ['a', 'b'],
+      ['c', 'a'],
     );
     assert.deepEqual([fitted.truncated.failures, fitted.truncated.works], [1, 1]);
     assert.equal(fitted.stops.length, pack.stops.length, 'остановки целы');

@@ -384,6 +384,31 @@ function lastFailureView(a: AttemptState, bucket: FailureBucket): LastFailure {
   };
 }
 
+/**
+ * Засчитана ли закончившаяся попытка в предел попыток поручения — правило
+ * движка (`attempt.diagnosed.counted`): не засчитаны прерванная штатной
+ * остановкой, истёкшая по владению, отказ окружения или доступа, отказ до
+ * работы (`blocked`), остановка исполнителя по окружению (`writerBlocked`) и
+ * остановка вопросом в пределе таких остановок (`maxAttempts` за жизнь).
+ * `attempts` — попытки поручения в порядке хранилища.
+ */
+export function attemptCounted(
+  a: AttemptState,
+  attempts: readonly AttemptState[],
+  maxAttempts: number,
+): boolean {
+  if (a.status === 'active' || a.status === 'succeeded') return true;
+  if (a.interrupted || a.status === 'expired' || a.blocked || a.writerBlocked) return false;
+  if (a.failureKind === 'environment' || a.failureKind === 'provider-auth') return false;
+  if (a.failureKind === 'needs-input') {
+    const earlier = attempts
+      .slice(0, Math.max(0, attempts.indexOf(a)))
+      .filter((x) => x.failureKind === 'needs-input' && x.interrupted !== 'shutdown').length;
+    return earlier >= maxAttempts;
+  }
+  return true;
+}
+
 /** Остаток пределов поручения рядом со сводкой попыток. */
 export interface AttemptBudget {
   /**

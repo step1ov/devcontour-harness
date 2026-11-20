@@ -532,6 +532,8 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.plain;
       delete rest.plainEn;
       delete rest.actor;
+      // Порядок снятия блокировок разных людей (`blockers[].step`, 0.1.0-alpha.60).
+      delete rest.step;
       return rest;
     }
     // Аддитивное поле строки поручения отчёта — что проверено и как (0.1.0-alpha.55).
@@ -567,6 +569,8 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.detail;
       delete rest.reviews;
       delete rest.reviewsTruncated;
+      // Кто двигает очередь (`runner`, 0.1.0-alpha.60).
+      delete rest.runner;
       return rest;
     }
     // Аддитивные поля находки плана или контракта: счёт раундов и решение
