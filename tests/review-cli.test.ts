@@ -243,6 +243,14 @@ test('F-AX: review-accept — ведущий принимает находку �
   assert.equal(second.status, 0, second.stderr + second.stdout);
   const prompt = recordedPrompt(p.scenarioPath, 'reviewer', 2);
   assert.ok(prompt.includes(id) && /accepted-limitation/.test(prompt));
+  const result = p.harness('result', '--state', p.state, '--work', 'add-greeting').json.data.result;
+  assert.equal(result.outcome, 'accepted');
+  assert.ok(result.limitations.some((l: string) => l.includes(id) && l.includes('operator')));
+  const events = p.harness('events', '--state', p.state, '--limit', '500').json.data.events;
+  const accepted = events.filter((e: any) => e.type === 'work.findings-accepted');
+  assert.equal(accepted.length, 1, 'одно событие решения, повтор не пишет');
+  assert.deepEqual(accepted[0].payload.findings, [id]);
+  assert.equal(accepted[0].payload.by, 'operator');
   // Решение принятой находки после приёмки — NOT_READY.
   const done = accept('--accept-limitation', id, '--reason', 'Повтор решения');
   assert.equal(done.json.error.code, 'NOT_READY');

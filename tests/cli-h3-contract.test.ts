@@ -153,6 +153,8 @@ const ADDITIVE_EVENT_TYPES = new Set([
   'attempt.assumptions',
   // alpha.44: явный сброс бюджета совместных проверок набора.
   'joint.budget-reset',
+  // alpha.60: решение ведущего по находкам ревью кода (`review-accept`).
+  'work.findings-accepted',
 ]);
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([

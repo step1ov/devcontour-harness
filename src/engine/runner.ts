@@ -13,6 +13,7 @@ import {
   implementationResultSchema,
   codeReviewHistory,
   codeReviewScope,
+  previousReviewRound,
   checkCodeReview,
   logicalReview,
   type CallRecord,
@@ -3345,17 +3346,6 @@ export class Runner {
     // поручения: новая попытка, фаза и рестарт их не обнуляют.
     const { history, lastIssues, spec, previousRound } = this.engine.read((v) => {
       const attempts = v.attempts(attempt.workId);
-      // Прошлый валидный раунд той же фазы: от его SHA считается, какие пути
-      // менялись (поздние находки, §10).
-      const prior = attempts
-        .flatMap((a) => a.evidence)
-        .findLast(
-          (e) =>
-            e.kind === 'review' &&
-            e.phase === phase &&
-            e.reviewRound?.scope === scope &&
-            e.reviewRound.protocol === 'valid',
-        );
       const last = attempts
         .flatMap((a) => a.evidence)
         .findLast(
@@ -3371,10 +3361,7 @@ export class Runner {
         history: codeReviewHistory(attempts, scope, work?.codeReviewDecisions),
         lastIssues: last?.reviewRound?.issues ?? [],
         spec: work?.approvedDigest,
-        previousRound:
-          prior?.reviewRound && !prior.reviewRound.mode
-            ? { round: prior.reviewRound.round, sha: prior.sha }
-            : undefined,
+        previousRound: previousReviewRound(attempts, scope, phase),
       };
     });
     const expected = legacy

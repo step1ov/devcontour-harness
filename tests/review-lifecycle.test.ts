@@ -835,4 +835,10 @@ test('F-AX: новая blocking на неизменённом пути поме�
   assert.match(third, /There are no open review findings/);
   const f = history(ctx).findings;
   assert.ok(f.every((x) => x.status === 'withdrawn' && x.disposition?.by === 'lead'));
+  // Результат попытки, шедшей под решением, называет принятые ограничения;
+  // попытка до решения — нет (история не переписывается).
+  const decisions = work(ctx).codeReviewDecisions;
+  assert.equal(runResult(last, 'test', decisions).limitations.length, 3);
+  assert.match(runResult(last, 'test', decisions).limitations[0]!, /Строгость тестов/);
+  assert.deepEqual(runResult(second, 'test', decisions).limitations, []);
 });

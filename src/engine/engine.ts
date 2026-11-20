@@ -5163,7 +5163,20 @@ export class Engine {
       const decisions = [...(w.codeReviewDecisions ?? []), ...fresh];
       if (decisions.length > 500)
         throw new HarnessError('INVALID_INPUT', 'Предел решений по находкам поручения — 500');
-      if (fresh.length) tx.putWork({ ...w, codeReviewDecisions: decisions });
+      if (fresh.length) {
+        tx.putWork({ ...w, codeReviewDecisions: decisions });
+        tx.emit({
+          type: 'work.findings-accepted',
+          graphId: w.graphId,
+          workId,
+          payload: {
+            findings: fresh.map((d) => d.finding),
+            by,
+            round: history.round,
+            reasonLength: fresh[0]!.reason.length,
+          },
+        });
+      }
       const after = codeReviewHistory(
         tx.attempts(workId),
         codeReviewScope(w.order.repositoryId, workId),
