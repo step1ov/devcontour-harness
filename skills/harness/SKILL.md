@@ -356,8 +356,23 @@ it returns `code`, `cause`, `phase`, `actor`, `action`, `retryPlanned`,
 | `controller` | `wait`, `retry`                                                                                                    | you: wait, or run `$H run` again                                             |
 | `lead`       | `review-plan`, `diagnose-failure`, `replan-dependents`, `wait`                                                     | you: fix the graph, policy or code by the evidence, then run                 |
 | `user`       | `fix-access`, `fix-environment`, `raise-budget`, `reset-attempts`, `user-decision`, `resume-queue`, `answer-input` | hand it to the user with the message and evidence                            |
-| `lead`       | `apply-input`                                                                                                      | you: `input-context`, `review-plan --context`, `input-target`, `input-apply` |
+| `lead`       | `apply-input`                                                                                                      | you: `input-resolve --request ID [--author A]` (or `input-carry`, see below) |
 | `null`       | `none`                                                                                                             | nothing to do                                                                |
+
+After an answer: `$H input-resolve --state D --request ID --author <your runtime>`
+builds the answer snapshot (stored by digest, no files), reviews the plan with
+it (an approved round for the same snapshot is reused, no model call), and
+applies it. If the work has moved on since the question (another attempt ran,
+or the order was edited), `input-resolve` refuses with `NOT_READY` and names
+`$H input-carry --state D --request ID --reason "…" [--author A]`, which
+supersedes the question onto the same work and carries the answer. Both take
+`--reset --reason` for exhausted attempts and `--policy F` after a policy edit.
+A policy edit does not un-apply an applied answer once the graph is
+re-approved (`reapprove` or `run`) and the approved snapshot still carries the
+answer; `run` with a changed `--context` carries applied answers into it. An
+order edit does make the answer stale — then use `input-carry`. `retry --reset`
+on a ready work resets the counter (the reply says `reset.performed`); while
+an attempt runs it refuses. Every command has `$H <command> --help`.
 
 Only `user` actions go to the human: access, environment, budgets, attempt
 resets, goal decisions, resuming a paused queue and answers to executor
