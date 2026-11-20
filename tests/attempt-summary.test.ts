@@ -273,7 +273,10 @@ test('status и explain: строка сводки на поручение со�
     assert.deepEqual(envelope.data.works.find((y) => y.id === 'w')!.attemptSummary, w);
     const human = harness(['status', '--state', ctx.state, '--human']);
     assert.equal(human.status, 0, human.stderr);
-    assert.equal(human.stdout, statusText(envelope.data));
+    // `status --human` — `statusText` и строка прогноза выпуска (alpha.60, `view.forecast`).
+    const text = statusText(envelope.data);
+    assert.ok(human.stdout.startsWith(text), human.stdout);
+    assert.match(human.stdout.slice(text.length), /^Прогноз выпуска: [^\n]+\.\n$/);
     assert.ok(human.stdout.includes(`w [done]: ${w.line}\n`));
     assert.ok(human.stdout.includes(`x [ready]: ${x.line}\n`));
   } finally {
