@@ -13,7 +13,7 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import {
   HarnessError,
   type UpdateCheck,
@@ -188,6 +188,11 @@ interface Skip {
   reason: string;
   at: string;
 }
+/** Пара задета пропуском: тот же новый harness или та же новая панель. */
+const skippedBy = (skip: Skip, target: UpdatePair, current: UpdatePair) =>
+  (target.harness !== current.harness && skip.harness === target.harness) ||
+  (!!target.ui && target.ui !== current.ui && skip.ui === target.ui) ||
+  samePair(skip, target);
 const readSkips = (stateDir: string) =>
   readJson<{ pairs?: Skip[] }>(file(stateDir, 'skip.json'))?.pairs ?? [];
 function writeSkips(stateDir: string, pairs: Skip[]) {
@@ -296,7 +301,7 @@ async function guard(
   pollMs: number,
   now: () => number,
   steps: Steps,
-): Promise<{ reasons: string[]; end: () => void }> {
+): Promise<{ reasons: string[]; still: () => boolean; end: () => void }> {
   const paused = host.pause();
   steps.push(
     step(
@@ -308,24 +313,42 @@ async function guard(
   const deadline = now() + waitMs;
   let reasons: string[] = [];
   let held = false;
-  for (;;) {
-    reasons = host.live();
-    if (!reasons.length) {
-      held = host.hold();
-      if (held) {
-        reasons = host.live();
-        if (!reasons.length) break;
-        host.release();
-        held = false;
-      } else reasons = ['роль controller у другого процесса'];
+  try {
+    for (;;) {
+      reasons = host.live();
+      if (!reasons.length) {
+        held = host.hold();
+        if (held) {
+          reasons = host.live();
+          if (!reasons.length) break;
+          host.release();
+          held = false;
+        } else reasons = ['роль controller у другого процесса'];
+      }
+      if (now() >= deadline) break;
+      await sleep(Math.min(pollMs, Math.max(1, deadline - now())));
     }
-    if (now() >= deadline) break;
-    await sleep(Math.min(pollMs, Math.max(1, deadline - now())));
+  } catch (error) {
+    // Сбой посреди ожидания: роль и пауза не остаются.
+    if (held)
+      try {
+        host.release();
+      } catch {
+        // истечёт сама
+      }
+    if (paused)
+      try {
+        host.resume();
+      } catch {
+        // снимет следующий update
+      }
+    throw error;
   }
+  const state = { lost: false };
   const timer = held
     ? setInterval(() => {
         try {
-          host.hold();
+          if (!host.hold()) state.lost = true;
         } catch {
           // продление — при следующем тике
         }
@@ -339,6 +362,8 @@ async function guard(
   if (held) for (const s of signals) process.on(s, onSignal);
   return {
     reasons: held ? [] : reasons,
+    /** Роль ещё у обновления и ничего не идёт: проверяется перед изменением пакетов. */
+    still: () => !state.lost && host.hold() && host.live().length === 0,
     end: () => {
       if (timer) clearInterval(timer);
       for (const s of signals) process.off(s, onSignal);
@@ -506,6 +531,31 @@ async function restorePackages(
   }
 }
 
+/** Поставить пару точными версиями (только наши записи package.json), без скриптов. */
+async function exactPair(
+  place: InstallPlace,
+  to: UpdatePair,
+  registry: string | undefined,
+): Promise<{ ok: boolean; detail: string }> {
+  try {
+    const r = await installExact(
+      place,
+      { [HARNESS_PACKAGE]: to.harness, ...(to.ui ? { [UI_PACKAGE]: to.ui } : {}) },
+      registry,
+      true,
+    );
+    const got = installedPair(place.prefix);
+    return samePair(got, to)
+      ? { ok: true, detail: `поставлены ${pairText(to)}` }
+      : {
+          ok: false,
+          detail: `npm: ${npmReason(r)}; установлены ${got ? pairText(got) : 'нет harness'}`,
+        };
+  } catch (error) {
+    return { ok: false, detail: message(error) };
+  }
+}
+
 /** Стоп панелей этого каталога состояния до установки; запуск — после (любой версией). */
 async function stopPanel(prefix: string, stateDir: string) {
   const panels = findPanels(prefix, stateDir);
@@ -540,11 +590,8 @@ function prune(stateDir: string, entries: HistoryEntry[]): HistoryEntry[] {
     if (existsSync(dir)) removeInside(root, dir);
   }
   for (const e of kept.slice(0, -1)) delete e.stateCopy;
-  // Перенесённые живые файлы при возврате копии — два последних каталога.
-  const replaced = join(root, 'replaced');
-  if (existsSync(replaced))
-    for (const name of readdirSync(replaced).sort().slice(0, -2))
-      removeInside(root, join(replaced, name));
+  // Перенесённые живые файлы (`replaced/`) автоматически не удаляются никогда:
+  // это настоящее состояние, его убирает человек.
   return kept;
 }
 
@@ -566,6 +613,12 @@ function cleanUp(stateDir: string, entries: HistoryEntry[], keep: string[] = [])
   if (existsSync(dir))
     for (const name of readdirSync(dir))
       if (!copies.has(resolve(join(dir, name)))) removeInside(root, join(dir, name));
+  // Временный каталог прерванного возврата копии (`<state>.restore-*`) — только свой шаблон.
+  const state = resolve(stateDir);
+  const parent = resolve(state, '..');
+  for (const name of readdirSync(parent))
+    if (name.startsWith(`${basename(state)}.restore-`) && /\.restore-[0-9a-f]{8}$/.test(name))
+      rmSync(join(parent, name), { recursive: true, force: true });
   const ids = new Set([...entries.map((e) => e.id), ...(progress ? [progress.id] : [])]);
   const history = join(root, 'history');
   if (existsSync(history))
@@ -596,15 +649,21 @@ async function finishInterrupted(
   steps.push(step('restore-packages', packages.ok, packages.detail));
   let stateNote = 'состояние не менялось';
   let stateOk = true;
-  if (
-    progress.copy &&
-    progress.fingerprint &&
-    stateFingerprint(stateDir) !== progress.fingerprint
-  ) {
-    const aside = join(root, 'replaced', `${progress.id}-interrupted`);
+  const changed =
+    progress.copy && progress.fingerprint && stateFingerprint(stateDir) !== progress.fingerprint;
+  // Возвращённая версия читает живое состояние — оно остаётся: работу после
+  // прерванного обновления (например, после resume человека) не терять.
+  const restoredBin = installedPackage(progress.prefix, HARNESS_PACKAGE)?.bin;
+  const reads =
+    changed && packages.ok && bound(stateDir) && restoredBin
+      ? await readsState(restoredBin, stateDir, progress.prefix)
+      : undefined;
+  if (changed && reads?.ok)
+    stateNote = 'состояние изменилось, но читается возвращённой версией — оставлено как есть';
+  else if (changed && progress.copy) {
+    const aside = join(root, 'replaced', `${newId(o.now())}-interrupted`);
     try {
       restoreState(stateDir, progress.copy.path, aside, progress.copy.digest);
-      o.host.resume();
       stateNote = `состояние возвращено из копии; изменённые файлы — в ${aside}`;
     } catch (error) {
       stateOk = false;
@@ -635,6 +694,8 @@ async function finishInterrupted(
   journal(stateDir, { at: new Date(o.now()).toISOString(), ...record });
   clearInProgress(stateDir);
   cleanUp(stateDir, readHistory(stateDir));
+  // Пауза прерванного обновления (живая или из копии) — снять.
+  o.host.resume();
   return {
     ok,
     line: `Прерванное обновление завершено возвратом: ${pairText(progress.restoreTo)}, ${stateNote}.`,
@@ -690,8 +751,8 @@ export async function applyUpdate(o: ApplyOptions): Promise<Result> {
   const now = o.now ?? Date.now;
   const lock = acquireLock(o.stateDir);
   try {
-    // Пауза операции умершего процесса без записи «идёт» — снять.
-    if (lock.recovered && !readInProgress(o.stateDir)) o.host.resume();
+    // Под замком, без записи «идёт», пауза операции обновления — ничья: снять.
+    if (!readInProgress(o.stateDir)) o.host.resume();
     if (o.scheduled && o.config.mode === 'off')
       return {
         data: {
@@ -734,7 +795,7 @@ export async function applyUpdate(o: ApplyOptions): Promise<Result> {
         code: 3,
       };
     if (target && o.scheduled && !pending) {
-      const skipped = readSkips(o.stateDir).find((s) => samePair(s, target));
+      const skipped = readSkips(o.stateDir).find((s) => skippedBy(s, target, check.current));
       if (skipped) {
         const line = `${pairText(target)} по расписанию не ставится: ${skipped.reason}. Поставить вручную: harness update --apply --state ${o.stateDir}`;
         saveLastCheck(o.stateDir, { ...check, line: line.slice(0, 300) });
@@ -783,7 +844,7 @@ export async function applyUpdate(o: ApplyOptions): Promise<Result> {
             ...(target ? { to: target } : {}),
             outcome: 'busy',
             steps: [...steps, step('idle', false, g.reasons.join('; '))],
-            line: `Работа не закончилась за отведённое время (${g.reasons[0]}): обновление отложено, очередь снова идёт.`,
+            line: `Работа не закончилась за отведённое время (${g.reasons[0]}): обновление отложено, пакеты не тронуты, пауза обновления снята.`,
           },
           code: 3,
         };
@@ -808,7 +869,7 @@ export async function applyUpdate(o: ApplyOptions): Promise<Result> {
           code: 0,
         };
       if (!target) return { data: { ...base, outcome: 'up-to-date', line: check.line }, code: 0 };
-      return await install(o, check, target, steps, now);
+      return await install(o, check, target, steps, now, g.still);
     } finally {
       g.end();
     }
@@ -823,6 +884,7 @@ async function install(
   target: UpdatePair,
   steps: Steps,
   now: () => number,
+  still: () => boolean,
 ): Promise<Result> {
   const base = { action: 'apply' as const, check, from: check.current, to: target };
   const root = updatesDir(o.stateDir);
@@ -848,6 +910,23 @@ async function install(
     copy: { path: copy.path, digest: copy.digest },
     fingerprint,
   });
+  // Копия синхронна и могла занять дольше аренды: роль и тишина — ещё раз.
+  if (!still()) {
+    clearInProgress(o.stateDir);
+    cleanUp(o.stateDir, readHistory(o.stateDir));
+    return {
+      data: {
+        ...base,
+        outcome: 'busy',
+        steps: [
+          ...steps,
+          step('idle', false, 'за время копии началась работа или роль controller перешла'),
+        ],
+        line: 'За время подготовки началась работа: обновление отложено, пакеты не тронуты.',
+      },
+      code: 3,
+    };
+  }
   const panels = await stopPanel(o.prefix, o.stateDir);
   const versions: Record<string, string> = {};
   if (target.harness !== check.current.harness) versions[HARNESS_PACKAGE] = target.harness;
@@ -889,10 +968,8 @@ async function install(
     let restoredState = false;
     try {
       if (stateFingerprint(o.stateDir) !== fingerprint) {
-        const aside = join(root, 'replaced', id);
+        const aside = join(root, 'replaced', newId(now()));
         restoreState(o.stateDir, copy.path, aside, copy.digest);
-        // Копия снята после паузы обновления: в ней эта пауза — снять.
-        o.host.resume();
         restoredState = true;
         stateNote = `состояние возвращено из копии; изменённые файлы — в ${aside}`;
       }
@@ -956,9 +1033,10 @@ async function install(
   };
   const toFormats = installedPackage(o.prefix, HARNESS_PACKAGE)?.formats;
   if (toFormats) entry.toFormats = toFormats;
+  // Сначала закрыть «идёт»: падение между записями не откатит готовое обновление.
+  clearInProgress(o.stateDir);
   const kept = prune(o.stateDir, [...readHistory(o.stateDir), entry]);
   writeHistory(o.stateDir, kept);
-  clearInProgress(o.stateDir);
   cleanUp(o.stateDir, kept);
   writeSkips(
     o.stateDir,
@@ -1015,7 +1093,7 @@ export async function rollbackUpdate(o: RollbackOptions): Promise<Result> {
   const now = o.now ?? Date.now;
   const lock = acquireLock(o.stateDir);
   try {
-    if (lock.recovered && !readInProgress(o.stateDir)) o.host.resume();
+    if (!readInProgress(o.stateDir)) o.host.resume();
     const history = readHistory(o.stateDir);
     const entry = history.at(-1);
     const pending = readInProgress(o.stateDir);
@@ -1138,14 +1216,16 @@ async function rollBack(
         restoreState(
           o.stateDir,
           currentState.path,
-          join(root, 'replaced', `${id}-undo`),
+          join(root, 'replaced', `${newId(now())}-undo`),
           currentState.digest,
         );
       } catch (error) {
         stateOk = false;
         steps.push(step('restore-state', false, message(error)));
       }
-    const packages = await restorePackages(place, current, currentManifests, entry.to, registry);
+    const packages = place.dedicated
+      ? await restorePackages(place, current, currentManifests, entry.to, registry)
+      : await exactPair(place, entry.to, registry);
     steps.push(step('restore-packages', packages.ok, packages.detail));
     const ok = packages.ok && stateOk;
     if (ok) clearInProgress(o.stateDir);
@@ -1164,13 +1244,17 @@ async function rollBack(
       code: 4,
     };
   };
-  const back = await restorePackages(
-    place,
-    join(root, 'history', entry.id, 'manifests'),
-    entry.manifests,
-    entry.from,
-    registry,
-  );
+  // Каталог инструментов — целиком прежние файлы; проект — только наши две
+  // записи точными версиями: зависимости, добавленные после обновления, целы.
+  const back = place.dedicated
+    ? await restorePackages(
+        place,
+        join(root, 'history', entry.id, 'manifests'),
+        entry.manifests,
+        entry.from,
+        registry,
+      )
+    : await exactPair(place, entry.from, registry);
   steps.push(step('install', back.ok, back.detail));
   if (!back.ok) return await undo('установка прежних версий');
   // Прежняя версия читает живое состояние? Строгие схемы отклоняют поля новой версии.
@@ -1184,21 +1268,21 @@ async function rollBack(
       if (reads) steps.push(reads);
       return await undo('прежняя версия не читает состояние, а копии нет');
     }
-    const aside = join(root, 'replaced', id);
+    const aside = join(root, 'replaced', newId(now()));
     try {
       restoreState(o.stateDir, entry.stateCopy.path, aside, entry.stateCopy.digest);
-      // Копия снята после паузы обновления: в ней эта пауза — снять.
-      o.host.resume();
+      stateRestored = true;
     } catch (error) {
       return await undo('копия состояния: ' + message(error));
     }
-    stateRestored = true;
     stateNote = `состояние возвращено из копии ${entry.at} (${formatsDiffer ? 'форматы различались' : 'прежняя версия не читала новое'}); состояние новой версии — в ${aside}`;
   }
   steps.push(step('restore-state', true, stateNote));
   const verified = await verifyInstalled(entry.prefix, o.stateDir, entry.from);
   steps.push(...verified.steps);
   if (!verified.ok) return await undo(verified.steps.find((x) => !x.ok)?.detail ?? 'проверка');
+  // В возвращённой копии — пауза прошлого обновления: снять (своя пауза снимется в конце).
+  if (stateRestored) o.host.resume();
   const record = {
     action: 'rolled-back' as const,
     from: entry.to,
@@ -1213,8 +1297,8 @@ async function rollBack(
   journal(o.stateDir, { at: new Date(now()).toISOString(), ...record });
   addSkip(o.stateDir, entry.to, 'откачена вручную', new Date(now()).toISOString());
   const kept = history.slice(0, -1);
-  writeHistory(o.stateDir, kept);
   clearInProgress(o.stateDir);
+  writeHistory(o.stateDir, kept);
   // Копия перед откатом не нужна: состояние новой версии осталось живым или лежит в replaced.
   cleanUp(o.stateDir, kept);
   saveLastCheck(o.stateDir, {

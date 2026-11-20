@@ -864,8 +864,9 @@ async function runUpdate(
       by: v.scheduled ? 'schedule' : 'operator',
       scheduled: Boolean(v.scheduled),
       confirmFormats: Boolean(v['confirm-formats']),
-      // Из расписания — ждать окончания прогона до 30 минут.
-      ...optional('waitMs', waitMs ?? (v.scheduled ? 30 * 60_000 : undefined)),
+      // Из расписания — без ожидания: пауза оборвала бы идущий run, а
+      // перезапустить его некому; идёт работа — попытка завтра.
+      ...optional('waitMs', waitMs),
     });
     return { data: r.data, code: r.code };
   }

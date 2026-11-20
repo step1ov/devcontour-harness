@@ -320,3 +320,28 @@ test('UU12: пауза обновления — штатная остановк�
     store.close();
   }
 });
+
+test('UU13: отпечаток не меняется от продления роли controller обновления, меняется от события', async () => {
+  const { Engine } = await import('../src/engine/engine.ts');
+  const { standaloneHost } = await import('../src/engine/standalone.ts');
+  const { SqliteExecutionStore } = await import('../src/storage/sqlite.ts');
+  const { executionPolicySchema } = await import('../src/contracts/index.ts');
+  const { example } = await import('./fixtures.ts');
+  const policy = executionPolicySchema.parse(example('policy'));
+  const dir = join(tmp(), 'state');
+  mkdirSync(dir);
+  const store = new SqliteExecutionStore(join(dir, 'state.sqlite'), 'test');
+  try {
+    const engine = new Engine({ host: standaloneHost(store, policy), policy });
+    engine.resume();
+    engine.operationPause('harness-update');
+    assert.equal(engine.holdController('harness-update:1'), true);
+    const before = stateFingerprint(dir);
+    for (let i = 0; i < 3; i++) assert.equal(engine.holdController('harness-update:1'), true);
+    assert.equal(stateFingerprint(dir), before, 'продление аренды — не данные');
+    engine.pause('operator');
+    assert.notEqual(stateFingerprint(dir), before, 'пауза человека — данные');
+  } finally {
+    store.close();
+  }
+});

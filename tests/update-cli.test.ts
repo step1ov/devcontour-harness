@@ -352,7 +352,7 @@ test('UP05: сбой проверки новой версии — автомат
     );
     assert.equal(p.harness('status', '--state', p.state).json.data.control.paused, false);
     // Копия не понадобилась (состояние не менялось) и не копится.
-    assert.deepEqual(readdirSync(p.state + '-updates/copies'), []);
+    assert.deepEqual(readdirSync(p.state + '-updates/copies'), [], JSON.stringify(d.steps));
     writeFileSync(join(p.dir, '.harness', 'updates.json'), JSON.stringify({ mode: 'auto' }));
     const scheduled = p.harness('update', '--apply', '--scheduled', '--state', p.state);
     assert.equal(scheduled.status, 0, scheduled.stderr);
@@ -774,6 +774,41 @@ test('UP17: процесс убит после установки, до пров
         .map((x: any) => x.payload.action),
       ['restored'],
     );
+  } finally {
+    await registry.close();
+  }
+});
+
+test('UP18: откат в проекте меняет только записи двух пакетов — зависимость, добавленная после обновления, остаётся', async () => {
+  const registry = await registryWith(...base());
+  try {
+    const p = project(registry);
+    registry.publish(fakeHarness('0.1.0-alpha.61'));
+    registry.publish(fakeUi('0.1.0-alpha.5', '>=0.1.0-alpha.60 <0.2.0'));
+    assert.equal(p.harness('update', '--apply', '--state', p.state).json.data.outcome, 'applied');
+    mkdirSync(join(p.dir, 'local-dep'));
+    writeFileSync(
+      join(p.dir, 'local-dep', 'package.json'),
+      JSON.stringify({ name: 'local-dep', version: '1.0.0' }),
+    );
+    const add = spawnSync(
+      'npm',
+      ['install', '--save-dev', '--no-audit', '--no-fund', './local-dep'],
+      {
+        cwd: p.dir,
+        env: { ...process.env, ...p.env },
+        encoding: 'utf8',
+      },
+    );
+    assert.equal(add.status, 0, add.stderr);
+    const rb = p.harness('update', '--rollback', '--state', p.state);
+    assert.equal(rb.status, 0, rb.stderr + rb.stdout);
+    assert.equal(p.installed('devcontour-harness'), '0.1.0-alpha.60');
+    assert.equal(p.installed('devcontour-harness-ui'), '0.1.0-alpha.4');
+    const deps = p.manifest().devDependencies;
+    assert.equal(deps['devcontour-harness'], '0.1.0-alpha.60');
+    assert.equal(deps['local-dep'], 'file:local-dep');
+    assert.ok(existsSync(join(p.dir, 'node_modules', 'local-dep', 'package.json')));
   } finally {
     await registry.close();
   }

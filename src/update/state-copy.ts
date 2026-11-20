@@ -249,8 +249,21 @@ export function stateFingerprint(stateDir: string): string {
       const db = new DatabaseSync(f.abs, { readOnly: true });
       try {
         const all = (sql: string) => JSON.stringify(db.prepare(sql).all());
-        h.update(all('SELECT key, value FROM meta ORDER BY key'));
-        h.update(all('SELECT data FROM state'));
+        h.update(all("SELECT key, value FROM meta WHERE key <> 'dataVersion' ORDER BY key"));
+        // Роль controller (аренда, продлевается каждые несколько секунд, в том
+        // числе самим обновлением) — не данные: без неё.
+        const docs = (db.prepare('SELECT data FROM state').all() as { data: string }[]).map((r) => {
+          try {
+            const doc = JSON.parse(r.data) as Record<string, unknown>;
+            delete doc.controller;
+            // Счётчик транзакций растёт и от продления аренды.
+            delete doc.sequence;
+            return JSON.stringify(doc);
+          } catch {
+            return r.data;
+          }
+        });
+        h.update(JSON.stringify(docs));
         h.update(all('SELECT max(seq) AS seq FROM events'));
         h.update(
           all('SELECT namespace, owner, key, data FROM local ORDER BY namespace, owner, key'),
