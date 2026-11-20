@@ -582,6 +582,30 @@ test('Правило ревью кода роли строже общего: п�
     assert.deepEqual(resultProblems(done.result, inherited.context), [], `${runtime} → ${runtime}`);
     assert.deepEqual(inherited.conflicts, []);
     assert.deepEqual(reviewVendorConflicts(allowed), []);
+    // Репозиторий наследует общую роль, но своё правило review строже общего:
+    // и приёмка (по репозиторию поручения), и doctor называют это.
+    const repoId = done.context.policy.repositories[0]!.id;
+    const repoStrict = {
+      ...done.context.policy,
+      repositories: done.context.policy.repositories.map((r, i) =>
+        i === 0
+          ? { ...r, review: { reviewer: { runtime }, vendor: 'different-vendor' as const } }
+          : r,
+      ),
+    };
+    assert.match(
+      resultProblems(done.result, { ...done.context, policy: repoStrict }).join('; '),
+      /того же вендора/,
+    );
+    assert.deepEqual(reviewVendorConflicts(repoStrict), [
+      {
+        role: 'developer',
+        repositoryId: repoId,
+        writer: runtime,
+        reviewer: runtime,
+        source: 'repositories.0.review',
+      },
+    ]);
     same.store.close();
   }
 });

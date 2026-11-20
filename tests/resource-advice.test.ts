@@ -396,7 +396,10 @@ test('DEPENDENCY_STORE_REGISTRY: .npmrc проекта задаёт реестр
   npmrc('registry=https://npm.corp.test/repo/\n@acme:registry=https://registry.npmjs.org/\n');
   const [line, ...rest] = warn();
   assert.deepEqual(rest, []);
-  assert.match(line!, /\.npmrc проекта задаёт реестр npm\.corp\.test \(registry\)/);
+  assert.match(
+    line!,
+    /\.npmrc проекта задаёт реестр https:\/\/npm\.corp\.test\/repo\/ \(registry\)/,
+  );
   assert.match(line!, /берёт пакеты с registry\.npmjs\.org/);
   assert.match(line!, /npm_config_registry и pnpm_config_registry/);
   assert.doesNotMatch(line!, /@acme/, 'реестр, который seed и так видит, не находка');
@@ -422,10 +425,38 @@ test('DEPENDENCY_STORE_REGISTRY: .npmrc проекта задаёт реестр
     [],
   );
 
+  // Тот же хост, другой путь — другой реестр: совет есть.
+  npmrc('registry=https://npm.corp.test/api/npm/private/\n');
+  const env = (url: string) => (p: Record<string, any>) => {
+    p.environment = {
+      values: { npm_config_registry: url, pnpm_config_registry: url },
+      inherit: [],
+      secrets: {},
+    };
+  };
+  const [path] = warn(env('https://npm.corp.test/api/npm/public/'));
+  assert.match(path!, /https:\/\/npm\.corp\.test\/api\/npm\/private\/ \(registry\)/);
+  assert.deepEqual(
+    warn(env('https://npm.corp.test/api/npm/private')),
+    [],
+    'завершающий / не важен',
+  );
+  // Реестр только под одним префиксом: pnpm другой версии его не увидит.
+  assert.equal(
+    warn((p) => {
+      p.environment = {
+        values: { npm_config_registry: 'https://npm.corp.test/api/npm/private/' },
+        inherit: [],
+        secrets: {},
+      };
+    }).length,
+    1,
+  );
+
   // Реестр области — свой совет: окружение политики его не задаёт.
   npmrc('@acme:registry=https://acme.test/\n');
   const [scoped] = warn();
-  assert.match(scoped!, /acme\.test \(@acme:registry\)/);
+  assert.match(scoped!, /https:\/\/acme\.test\/ \(@acme:registry\)/);
   assert.match(scoped!, /окружение политики задать не может/);
   assert.doesNotMatch(scoped!, /Задайте реестр по умолчанию/);
 

@@ -18,19 +18,52 @@ const hostOf = (url: string) => {
   }
 };
 
+/** Адрес реестра для сравнения: схема, хост, порт и путь с завершающим `/`. */
+export function registryUrl(url: string): string | undefined {
+  try {
+    const u = new URL(url.trim().replace(/^['"]|['"]$/g, ''));
+    if (!u.hostname) return undefined;
+    const path = u.pathname.endsWith('/') ? u.pathname : u.pathname + '/';
+    return `${u.protocol}//${u.host.toLowerCase()}${path}`;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * Хосты, к которым сборке seed нужна сеть: реестр из окружения процесса сборки
- * (`npm_config_registry`, `pnpm_config_registry`, их `@scope:registry`), иначе
- * registry.npmjs.org, и хосты `tarball:` lockfile (git- и tarball-зависимости).
- * Loopback песочница проверок и так оставляет открытым: его в списке нет.
+ * Реестры, с которых сборка seed может брать пакеты: заданные окружением
+ * (`npm_config_registry`, `pnpm_config_registry`, их `@scope:registry`) и
+ * registry.npmjs.org, пока реестр по умолчанию задан не под обоими префиксами:
+ * pnpm 10 читает `npm_config_*`, pnpm 11 — `pnpm_config_*`, и под другим
+ * префиксом заданный реестр та версия не видит.
+ */
+export function seedRegistries(env: NodeJS.ProcessEnv): { key: string; url: string }[] {
+  const out: { key: string; url: string }[] = [];
+  const prefixes = new Set<string>();
+  for (const [key, value] of Object.entries(env)) {
+    if (!REGISTRY_KEY.test(key) || !value) continue;
+    const url = registryUrl(value);
+    if (!url) continue;
+    const name = key.replace(/^(?:npm|pnpm)_config_/i, '');
+    if (name.toLowerCase() === 'registry')
+      prefixes.add(key.slice(0, key.indexOf('_')).toLowerCase());
+    out.push({ key: name.toLowerCase() === 'registry' ? 'registry' : name, url });
+  }
+  if (!(prefixes.has('npm') && prefixes.has('pnpm')))
+    out.unshift({ key: 'registry', url: `https://${DEFAULT_REGISTRY_HOST}/` });
+  return out;
+}
+
+/**
+ * Хосты, к которым сборке seed нужна сеть: реестры `seedRegistries` и хосты
+ * `tarball:` lockfile (git- и tarball-зависимости). Loopback песочница
+ * проверок и так оставляет открытым: его в списке нет.
  */
 export function seedRegistryHosts(env: NodeJS.ProcessEnv, lock = '') {
-  const configured = Object.entries(env)
-    .filter(([key, value]) => REGISTRY_KEY.test(key) && value)
-    .map(([key, value]) => ({ scoped: key.includes('@'), host: hostOf(value!) }));
-  const hosts = configured.flatMap((c) => (c.host ? [c.host] : []));
-  // Реестр по умолчанию задан — пакеты без области идут к нему, а не к npmjs.
-  if (!configured.some((c) => !c.scoped && c.host)) hosts.unshift(DEFAULT_REGISTRY_HOST);
+  const hosts = seedRegistries(env).flatMap((r) => {
+    const host = hostOf(r.url);
+    return host ? [host] : [];
+  });
   for (const match of lock.matchAll(/\btarball:\s*['"]?(https?:\/\/[^\s'",}]+)/g)) {
     const host = hostOf(match[1]!);
     if (host) hosts.push(host);

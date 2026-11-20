@@ -1869,15 +1869,17 @@ view`) в пределе длины сохраняет хвост — остат
   тот же lockfile даёт тот же seed без новой сборки.
 - **Сеть сборки seed.** Песочница сборки seed получает к `isolation.domains`
   хост реестра из окружения политики (`npm_config_registry`/
-  `pnpm_config_registry`, иначе `registry.npmjs.org`) и хосты `tarball:`
-  lockfile — только она, writers и gates их не получают. Политике
+  `pnpm_config_registry`; пока реестр по умолчанию задан не под обоими
+  префиксами — и `registry.npmjs.org`) и хосты `tarball:` lockfile — только она, writers и gates их не получают. Политике
   `init --lean` домен реестра больше не нужен; `policyDigest` не меняется.
   Добавлять `registry.npmjs.org` в `isolation.domains` ради хранилища не нужно
   (уже добавленный домен не мешает).
 - **`DEPENDENCY_STORE_REGISTRY`.** `doctor` (`warnings`), `init`
   (`warnings[]`, новый код `dependency-store-registry`) и `lean` (`notes`)
   предупреждают, когда `.npmrc` в корне репозитория задаёт реестр, которого
-  сборка seed не увидит: она `.npmrc` проекта не читает.
+  сборка seed не увидит: она `.npmrc` проекта не читает. Реестры сравниваются
+  адресом целиком (хост, порт, путь); реестр по умолчанию засчитывается, только
+  когда его называют оба префикса окружения.
 - **Честный шаг `dependency-store` в `harness smoke`.** Промах, отказ и
   истёкший бюджет сборки seed — шаг с `unused: true` (аддитивное поле
   `data.steps[]`; `status` остаётся `passed`, это не отказ окружения) и
@@ -1890,7 +1892,8 @@ view`) в пределе длины сохраняет хвост — остат
   каталога прогона больше не печатает «Run directory not removed … ENOTEMPTY».
 - **Причина в пробе исполнителя (`harness smoke --writer-probe`).** Причину
   называет последняя значимая строка вывода: предупреждения (`[WARN]`, в том
-  числе с префиксом задачи turbo, `npm warn`, `Warning` Node) и безвредное
+  числе с префиксом задачи turbo, `npm warn`, `(node:N) …Warning` Node; выброшенное
+  `--throw-deprecation` предупреждение — причина) и безвредное
   чтение `~/.npmrc` pnpm под песочницей («Issue while reading … EPERM») не
   считаются — раньше любой упавший шаг pnpm выходил `write-denied` с этой
   строкой. Браузер, умерший при старте («Daemon process exited during
@@ -1916,7 +1919,8 @@ view`) в пределе длины сохраняет хвост — остат
   `REVIEWER_SAME_VENDOR`, приёмка отклоняла результат, а `doctor` молчал.
   Теперь `doctor` называет такое правило (любого происхождения) проблемой
   `review-vendor-conflict: …` с местом правила и способом исправить, `init` —
-  предупреждением `review-vendor-conflict`; решает тот же `selectReviewer`,
+  предупреждением `review-vendor-conflict` (по каждому репозиторию: общая роль
+  под строгим правилом `review` репозитория тоже); решает тот же `selectReviewer`,
   что движок и приёмка (`reviewVendorConflicts`). Уже записанную политику
   исправьте руками: `vendor: same-vendor-allowed` в правиле роли или reviewer
   другого вендора.

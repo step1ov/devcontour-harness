@@ -1,7 +1,12 @@
 import { lstatSync, readFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import type { ExecutionPolicy } from '../contracts/index.ts';
-import { seedRegistryHosts } from '../verification/store-registry.ts';
+import {
+  DEFAULT_REGISTRY_HOST,
+  registryUrl,
+  seedRegistries,
+  seedRegistryHosts,
+} from '../verification/store-registry.ts';
 import {
   declaredManagerVersion,
   dependencyStoreSupports,
@@ -74,7 +79,8 @@ function projectRegistries(repoDir: string) {
     return [...text.matchAll(NPMRC_REGISTRY)].flatMap((m) => {
       try {
         const host = new URL(m[2]!.replace(/^['"]|['"]$/g, '')).hostname.toLowerCase();
-        return host ? [{ key: m[1]!, host }] : [];
+        const url = registryUrl(m[2]!);
+        return host && url ? [{ key: m[1]!, host, url }] : [];
       } catch {
         return [];
       }
@@ -207,14 +213,30 @@ export function storeAdvice(policy: ExecutionPolicy, baseDir: string): StoreAdvi
         for (const [key, from] of Object.entries(profile.secrets)) env[key] = process.env[from];
       }
       const hosts = seedRegistryHosts(env);
+      const seeds = seedRegistries(env);
       // Домен в isolation.domains не помогает: сборка не знает, что пакеты идут туда.
-      const foreign = projectRegistries(dir).filter((r) => !hosts.includes(r.host));
+      // Сравнивается адрес реестра целиком (хост, порт, путь): два репозитория
+      // одного сервера — разные реестры.
+      // Реестр по умолчанию pnpm 10 берёт из npm_config_registry, pnpm 11 — из
+      // pnpm_config_registry: совпадение засчитывается, только когда оба
+      // префикса называют этот реестр (или это registry.npmjs.org без них).
+      const defaultOf = (prefix: string) => {
+        const entry = Object.entries(env).find(
+          ([k, v]) => k.toLowerCase() === `${prefix}_config_registry` && v,
+        );
+        return entry ? registryUrl(entry[1]!) : `https://${DEFAULT_REGISTRY_HOST}/`;
+      };
+      const foreign = projectRegistries(dir).filter((r) =>
+        r.key === 'registry'
+          ? defaultOf('npm') !== r.url || defaultOf('pnpm') !== r.url
+          : !seeds.some((x) => x.url === r.url),
+      );
       if (!foreign.length) return;
       const scoped = foreign.some((r) => r.key !== 'registry');
       advice.push({
         code: 'DEPENDENCY_STORE_REGISTRY',
         message: (
-          `репозиторий ${repo.id}: .npmrc проекта задаёт реестр ${foreign.map((r) => `${r.host} (${r.key})`).join(', ')}, ` +
+          `репозиторий ${repo.id}: .npmrc проекта задаёт реестр ${foreign.map((r) => `${r.url} (${r.key})`).join(', ')}, ` +
           `а сборка seed (repositories[${i}].dependencyStore) .npmrc проекта не читает (граница доверия) и берёт пакеты с ${hosts.join(', ') || 'реестра из окружения политики'}: ` +
           'пакеты этого реестра seed не соберёт — сборка откажет или каждый checkout докачает их из сети. ' +
           (foreign.some((r) => r.key === 'registry')

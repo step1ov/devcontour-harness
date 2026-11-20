@@ -145,6 +145,30 @@ test('WP01a: предупреждение pnpm о ~/.npmrc — шум; прич�
     [later.reason, later.evidence],
     ['write-denied', "Error: EACCES: permission denied, open '/opt/tool/cache.json'"],
   );
+  // Обёртка turbo после ошибки компилятора — не причина.
+  const turboWrapped = v(
+    [
+      "@app/web:build: src/api.ts(3,28): error TS2307: Cannot find module '@app/sdk/http-client'.",
+      '@app/web:build: ERROR: command finished with error: command (/w/apps/web) pnpm run build exited (1)',
+    ].join('\n'),
+  );
+  assert.match(turboWrapped.evidence!, /error TS2307/);
+  // Выброшенное предупреждение (`--throw-deprecation`) — причина, а обычное
+  // `(node:N) …Warning` — шум.
+  const thrown = v(
+    [
+      '(node:41) ExperimentalWarning: VM Modules is an experimental feature',
+      'node:internal/process/warning:63',
+      '      throw warning;',
+      '      ^',
+      'DeprecationWarning: this API must be removed',
+      '    at emitWarning (node:internal/process/warning:63:7)',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    [thrown.reason, thrown.evidence],
+    ['failed', 'DeprecationWarning: this API must be removed'],
+  );
   // Из нескольких причин одного класса — последняя.
   assert.match(
     v(

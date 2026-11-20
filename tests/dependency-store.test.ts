@@ -2762,15 +2762,36 @@ test(
 
 test('DS49: хосты реестра сборки seed — окружение, иначе registry.npmjs.org; tarball lockfile; без loopback', () => {
   assert.deepEqual(seedRegistryHosts({}), [DEFAULT_REGISTRY_HOST]);
+  // Реестр только под одним префиксом: другая версия pnpm (10 — npm_config_*,
+  // 11 — pnpm_config_*) его не видит и берёт registry.npmjs.org.
   assert.deepEqual(seedRegistryHosts({ npm_config_registry: 'https://npm.corp.test/repo/' }), [
+    DEFAULT_REGISTRY_HOST,
     'npm.corp.test',
   ]);
+  assert.deepEqual(seedRegistryHosts({ pnpm_config_registry: 'https://npm.corp.test/repo/' }), [
+    DEFAULT_REGISTRY_HOST,
+    'npm.corp.test',
+  ]);
+  // Под обоими — реестр по умолчанию заменён для любой версии.
+  assert.deepEqual(
+    seedRegistryHosts({
+      npm_config_registry: 'https://npm.corp.test/repo/',
+      pnpm_config_registry: 'https://npm.corp.test/repo/',
+    }),
+    ['npm.corp.test'],
+  );
   // Реестр области не заменяет реестр по умолчанию.
   assert.deepEqual(seedRegistryHosts({ 'npm_config_@acme:registry': 'https://acme.test/' }), [
     DEFAULT_REGISTRY_HOST,
     'acme.test',
   ]);
-  assert.deepEqual(seedRegistryHosts({ pnpm_config_registry: 'http://127.0.0.1:4873/' }), []);
+  assert.deepEqual(
+    seedRegistryHosts({
+      npm_config_registry: 'http://127.0.0.1:4873/',
+      pnpm_config_registry: 'http://127.0.0.1:4873/',
+    }),
+    [],
+  );
   assert.deepEqual(seedRegistryHosts({ PNPM_CONFIG_REGISTRY: 'не адрес' }), [
     DEFAULT_REGISTRY_HOST,
   ]);

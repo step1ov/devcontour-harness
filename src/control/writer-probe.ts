@@ -129,7 +129,10 @@ const taskPrefix = /^[\w@./-]+:[\w:.-]+:\s+/;
  * EPERM» — pnpm идёт дальше без него).
  */
 const noise =
-  /^(?:\[WARN\]|WARN\b|npm warn\b|warning\b|\(node:\d+\) (?:\[\w+\] )?(?:\w*Warning)\b|\w*Warning:)|Issue while reading "[^"]*\.npmrc"/i;
+  // Предупреждение Node — только в его обычной форме `(node:N) XWarning: …`;
+  // строка `XWarning: …` без неё — выброшенное предупреждение
+  // (`--throw-deprecation`) и бывает причиной.
+  /^(?:\[WARN\]|WARN\b|npm warn\b|warning\b|\(node:\d+\) (?:\[\w+\] )?(?:\w*Warning)\b)|Issue while reading "[^"]*\.npmrc"/i;
 /** Строки вывода без цвета, префикса задачи и шума — в исходном порядке. */
 function significant(text: string) {
   return text
@@ -142,10 +145,10 @@ function significant(text: string) {
 const lastOf = (lines: string[], re: RegExp) => lines.findLast((l) => re.test(l));
 /** Строка похожа на итоговую ошибку команды. */
 const fatal =
-  /\b(?:error|ERR!|ERR_[A-Z_]+|failed|fatal|panicked|Cannot find|not found)\b|Error:|Не удалось/i;
+  /\b(?:error|ERR!|ERR_[A-Z_]+|failed|fatal|panicked|Cannot find|not found)\b|Error:|^\w+Warning:|Не удалось/i;
 /** Итог менеджера или оркестратора задач: повторяет код выхода, не причину. */
 const wrapper =
-  /^(?:ELIFECYCLE\b|ERROR\s+run failed\b|npm (?:error|ERR!) (?:code|path|command|Lifecycle|A complete log|errno)\b|Command failed with exit code\b|Failed:\s|\S+#\S+: command .*exited)/;
+  /^(?:ELIFECYCLE\b|ERROR\s+run failed\b|npm (?:error|ERR!) (?:code|path|command|Lifecycle|A complete log|errno)\b|Command failed with exit code\b|Failed:\s|\S+#\S+: command .*exited|ERROR: command finished with error\b)/;
 /** Путь файловой системы в строке: без него EPERM может быть и не записью. */
 const hasPath = /(?:^|[\s'"(=])(?:~?\/|[A-Za-z]:\\)[^\s'")]*\w/;
 

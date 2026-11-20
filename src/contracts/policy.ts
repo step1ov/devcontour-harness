@@ -765,21 +765,44 @@ export type ReviewVendorConflict = {
  */
 export function reviewVendorConflicts(policy: PolicyBindings): ReviewVendorConflict[] {
   const out: ReviewVendorConflict[] = [];
-  for (const { role, binding, repositoryId } of roleEntries(policy)) {
+  const seen = new Set<string>();
+  // Действующие пары роль × репозиторий: общие роли без репозитория и в каждом
+  // репозитории (его правило review или своя роль их переопределяют), плюс
+  // роли, объявленные только в репозитории.
+  const contexts: { role: string; repositoryId?: string }[] = [
+    ...Object.keys(policy.roles).map((role) => ({ role })),
+    ...policy.repositories.flatMap((r) =>
+      [...new Set([...Object.keys(policy.roles), ...Object.keys(r.roles ?? {})])].map((role) => ({
+        role,
+        repositoryId: r.id,
+      })),
+    ),
+  ];
+  for (const { role, repositoryId } of contexts) {
+    const binding = roleBinding(policy, role, repositoryId);
+    if (!binding) continue;
     const writer = binding.writer.runtime;
     const choice = selectReviewer(policy, 'code', { runtime: writer }, role, repositoryId);
     if (choice.ok || choice.code !== 'REVIEWER_SAME_VENDOR') continue;
     const index = policy.repositories.findIndex((r) => r.id === repositoryId);
+    const repo = index >= 0 ? policy.repositories[index] : undefined;
+    const own = !!repo?.roles?.[role];
     const source = binding.review
-      ? repositoryId === undefined
-        ? `roles.${role}.review`
-        : `repositories.${index}.roles.${role}.review`
-      : index >= 0 && policy.repositories[index]!.review
+      ? own
+        ? `repositories.${index}.roles.${role}.review`
+        : `roles.${role}.review`
+      : repo?.review
         ? `repositories.${index}.review`
         : 'review.code';
+    // То же правило той же роли с тем же writer — одна находка.
+    const key = `${role}|${source}|${writer}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     out.push({
       role,
-      ...(repositoryId === undefined ? {} : { repositoryId }),
+      ...(repositoryId !== undefined && (own || source.startsWith('repositories.'))
+        ? { repositoryId }
+        : {}),
       writer,
       reviewer: codeReview(policy, role, repositoryId).reviewer.runtime,
       source,
