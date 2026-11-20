@@ -413,6 +413,12 @@ export const evidenceRecordSchema = z.strictObject({
    * без `when` и у прежних записей.
    */
   gateBasis: digestSchema.optional(),
+  /**
+   * SHA-256 JUnit-отчёта (`<gate>.xml` рядом с логом), сохранённого этим
+   * запуском gate: по нему следующая попытка берёт текст провала только из
+   * отчёта той же записи. Нет у gate без отчёта и у прежних записей.
+   */
+  reportDigest: digestSchema.optional(),
   /** Только у записи `not-applicable`: правило и diff, по которым gate не исполнялся. */
   notApplicable: gateApplicabilitySchema.optional(),
   /**

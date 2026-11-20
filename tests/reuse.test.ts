@@ -6,8 +6,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { continuableDraft } from '../src/engine/reuse.ts';
 import { callRecords } from '../src/engine/usage.ts';
-import { FEEDBACK_CASE_LIMIT, gateFeedback } from '../src/engine/gate-feedback.ts';
-import type { AttemptState } from '../src/contracts/index.ts';
+import {
+  FEEDBACK_CASE_LIMIT,
+  FEEDBACK_TOTAL_LIMIT,
+  gateFeedback,
+} from '../src/engine/gate-feedback.ts';
+import { sha256, type AttemptState } from '../src/contracts/index.ts';
 import { approve, greet, implement, runAll, setup, target } from './runner-fixture.ts';
 
 // Сбой канала reviewer после готового кандидата: отказ окружения, не кода.
@@ -429,7 +433,7 @@ test('Кандидат, отклонённый проверкой: writer пов
   }
 });
 
-test('Текст провала gates: тело и error JUnit, обрезка по случаю и по сумме, хвост лога gate без отчёта, маскировка', async () => {
+test('Текст провала gates: тело и error JUnit, точные пределы по случаю и по сумме, хвост лога gate без отчёта, маскировка, отчёт и лог только своей записи', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'harness-feedback-'));
   const long = 'x'.repeat(FEEDBACK_CASE_LIMIT + 500);
   const cases = Array.from(
@@ -437,22 +441,32 @@ test('Текст провала gates: тело и error JUnit, обрезка �
     (_, i) =>
       `<testcase classname="suite" name="case ${i}"><failure message="expected 1 got ${i}">${long}</failure></testcase>`,
   ).join('');
-  writeFileSync(
-    join(dir, 'unit.xml'),
-    `<testsuite>${cases}<testcase name="boom"><error>TypeError: TOKEN-123 &lt;bad&gt;</error></testcase></testsuite>`,
-  );
-  writeFileSync(join(dir, 'unit.log'), 'log');
-  writeFileSync(join(dir, 'lint.log'), 'noise\n'.repeat(1000) + 'lint: error TOKEN-123 at a.ts:1');
-  const record = (gate: string) => ({
+  const xml = `<testsuite>${cases}<testcase name="boom"><error>TypeError: TOKEN-123 &lt;bad&gt;</error></testcase></testsuite>`;
+  const write = (name: string, text: string) => {
+    writeFileSync(join(dir, name), text);
+    return sha256(text);
+  };
+  const files = {
+    unit: write('unit.log', 'log'),
+    lint: write('lint.log', 'noise\n'.repeat(1000) + 'lint: error TOKEN-123 at a.ts:1'),
+    report: write('unit.xml', xml),
+  };
+  const record = (gate: string, extra: Record<string, unknown> = {}) => ({
     kind: 'test',
     phase: 'candidate',
     gate,
     passed: false,
     log: join(dir, gate + '.log'),
+    digest: files[gate as 'unit' | 'lint'] ?? 'f'.repeat(64),
+    ...extra,
   });
   const from = {
     id: 'run-1',
-    evidence: [record('unit'), record('lint'), { ...record('ok'), passed: true }],
+    evidence: [
+      record('unit', { reportDigest: files.report }),
+      record('lint'),
+      { ...record('ok'), passed: true },
+    ],
   } as unknown as AttemptState;
   const redact = (t: string) => t.split('TOKEN-123').join('[REDACTED]');
   const feedback = (await gateFeedback(from, redact))!;
@@ -466,17 +480,57 @@ test('Текст провала gates: тело и error JUnit, обрезка �
     ],
   );
   assert.match(feedback.cases[0]!.text, /^expected 1 got 0\nxxx/);
-  assert.match(feedback.cases[0]!.text, /\[truncated: 517 more characters\]$/);
+  const dropped = Number(/\[truncated: (\d+) more characters\]$/.exec(feedback.cases[0]!.text)![1]);
+  assert.equal(feedback.cases[0]!.text.length, FEEDBACK_CASE_LIMIT, 'предел случая точный');
+  assert.equal(
+    feedback.cases[0]!.text.split('\n[truncated')[0]!.length + dropped,
+    `expected 1 got 0\n${long}`.length,
+    'число отброшенных символов верно',
+  );
   assert.equal(feedback.cases[6]!.text, 'TypeError: [REDACTED] <bad>');
   assert.match(feedback.cases[7]!.text, /lint: error \[REDACTED\] at a\.ts:1$/);
+  assert.equal(feedback.cases[7]!.text.length, FEEDBACK_CASE_LIMIT);
   assert.ok(feedback.truncated);
-  assert.ok(feedback.text.length <= 8000 + 200, String(feedback.text.length));
+  assert.ok(feedback.text.length <= FEEDBACK_TOTAL_LIMIT, String(feedback.text.length));
   assert.match(feedback.text, /\[feedback truncated: \d+ more failing case\(s\) not shown/);
   assert.ok(!feedback.text.includes('TOKEN-123'));
-  // Без отчёта и лога блока нет.
+  // Один случай длиннее всего блока обрезается точно по общему пределу.
+  const huge = 'y'.repeat(FEEDBACK_TOTAL_LIMIT * 2);
+  const single = (await gateFeedback(
+    {
+      id: 'r',
+      evidence: [
+        record('unit', {
+          reportDigest: write(
+            'unit.xml',
+            `<testsuite><testcase name="big"><failure>${huge}</failure></testcase></testsuite>`,
+          ),
+        }),
+      ],
+    } as unknown as AttemptState,
+    redact,
+  ))!;
+  assert.ok(single.text.length <= FEEDBACK_TOTAL_LIMIT, String(single.text.length));
+  assert.match(single.text, /testcase big \(junit-failure\)/);
+  // Отчёт не той записи (прежний запуск gate в том же каталоге) не читается:
+  // остаётся хвост её собственного лога; лог с чужим digest — тоже нет.
+  const stale = (await gateFeedback(
+    {
+      id: 'r',
+      evidence: [record('unit', { reportDigest: files.report })],
+    } as unknown as AttemptState,
+    redact,
+  ))!;
+  assert.deepEqual(
+    stale.cases.map((c) => c.source),
+    ['log-tail'],
+  );
   assert.equal(
     await gateFeedback(
-      { id: 'r', evidence: [record('missing')] } as unknown as AttemptState,
+      {
+        id: 'r',
+        evidence: [record('unit', { digest: 'e'.repeat(64) }), record('missing')],
+      } as unknown as AttemptState,
       redact,
     ),
     undefined,

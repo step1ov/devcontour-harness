@@ -3434,6 +3434,10 @@
                   "type": "string",
                   "pattern": "^[a-f0-9]{64}$"
                 },
+                "reportDigest": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
                 "notApplicable": {
                   "type": "object",
                   "properties": {

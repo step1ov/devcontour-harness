@@ -2248,6 +2248,7 @@ export class Runner {
       clearInterval(heartbeat);
       this.selfChecks.delete(attempt.id);
       this.portWarnings.delete(attempt.id);
+      this.gateFeedback.delete(attempt.id);
       // Рабочие деревья попытки убираются; ветка попытки и объекты остаются —
       // по ним recovery и следующая попытка видят кандидата. Снимки
       // зависимостей: SHA, tree и artifacts записаны в попытке. Что убрать не
