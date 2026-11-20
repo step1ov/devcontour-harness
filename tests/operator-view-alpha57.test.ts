@@ -703,18 +703,23 @@ test('view r2: записи — перенос с кандидата, невал
         },
       ],
     }) as never;
-  // F1 ждёт решения с раунда 3; «продолжать» в раунде 4 обнуляет счёт;
-  // снова ждёт с раунда 7 — вторая эскалация.
-  const cont = { decision: 'continue', by: 'operator', round: 4, rounds: 4 };
+  // F1 ждёт решения с раунда 3; «продолжать» после раунда 3 записывает
+  // прежний счёт (3, как движок); снова ждёт с раунда 6 — вторая эскалация.
+  // У другого предмета (g2) своя находка F1 — свои эпизоды.
+  const cont = { decision: 'continue', by: 'operator', round: 4, rounds: 3 };
+  const other = (round: number) => ({ ...(plan(round) as object), subject: 'g2' }) as never;
   const rows = [
     plan(1),
+    other(1),
     plan(2),
+    other(2),
     plan(3),
+    other(3),
     plan(4, cont),
+    other(4),
     plan(5, cont),
     plan(6, cont),
     plan(7, cont),
-    plan(8, cont),
   ];
   const events = activityInputOf(attempts, rows, [], []);
   const view = operatorView(baseInput({ activity: events }));
@@ -740,11 +745,17 @@ test('view r2: записи — перенос с кандидата, невал
     0,
     'ответ reviewer не по протоколу — не раунд и не вердикт',
   );
-  const esc = view.activity!.filter((x) => x.action === 'review.escalated');
+  const esc = (subject: string) =>
+    view.activity!.filter((x) => x.action === 'review.escalated' && x.subject === subject);
   assert.deepEqual(
-    esc.map((x) => x.at),
-    [at(60 - 7), at(60 - 3)],
-    'две эскалации: раунды 3 и 7',
+    esc('g1').map((x) => x.at),
+    [at(60 - 6), at(60 - 3)],
+    'две эскалации g1: раунды 3 и 6',
+  );
+  assert.deepEqual(
+    esc('g2').map((x) => x.at),
+    [at(60 - 3)],
+    'g2 ждёт с раунда 3 без перерыва — одна эскалация',
   );
 });
 

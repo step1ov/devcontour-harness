@@ -7,7 +7,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -20,7 +20,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { acceptedTargetSchema } from '../src/contracts/index.ts';
-import { acceptedTargets } from '../src/control/target.ts';
+import { acceptedTargets, remoteOf } from '../src/control/target.ts';
 
 const env = {
   ...process.env,
@@ -88,9 +88,10 @@ test('P2-c: partial clone — недостающий объект не догр�
   const objects = join(r.app, '.git/objects');
   const before = objectFiles(objects);
 
-  // Унаследованный список разрешённых протоколов запрет не снимает. На git,
-  // который знает GIT_NO_LAZY_FETCH (как этот), догрузку закрывает и он сам:
-  // снятие GIT_ALLOW_PROTOCOL здесь не различается — оно для git без него.
+  // Унаследованный список протоколов и разрешение в config запрет не снимают.
+  // На git, который знает GIT_NO_LAZY_FETCH (как этот), догрузку закрывает и
+  // он сам; запрет транспорта проверяется отдельно ниже.
+  r.git('config', 'protocol.file.allow', 'always');
   const saved = process.env.GIT_ALLOW_PROTOCOL;
   process.env.GIT_ALLOW_PROTOCOL = 'file:ssh:https';
   let t, drift;
@@ -108,6 +109,16 @@ test('P2-c: partial clone — недостающий объект не догр�
   assert.equal(drift.unavailable, 'принятый коммит не прочитан');
   assert.equal(objectFiles(objects), before, 'ни один объект не загружен');
   assert.ok(!existsSync(marker), 'транспорт не запускался');
+  // Запрет транспорта сам по себе (тот же env, что у сверки): fetch с
+  // разрешением в config всё равно отклонён.
+  const fetch = spawnSync('git', ['fetch', '-q', 'origin', 'main'], {
+    cwd: r.app,
+    env: { ...env, GIT_ALLOW_PROTOCOL: '' },
+    encoding: 'utf8',
+  });
+  assert.notEqual(fetch.status, 0);
+  assert.match(fetch.stderr, /transport 'file' not allowed/);
+  assert.ok(!existsSync(marker));
   // Контроль: обычный git в этом репозитории догружает объект через транспорт.
   r.git('rev-parse', '--verify', `${missing}^{commit}`);
   assert.ok(existsSync(marker), 'сценарий действительно вызывает транспорт');
@@ -255,4 +266,33 @@ test('P2-c: имя удалённой ветки длиннее предела �
   assert.equal(t.remote!.pushRef, undefined, 'адрес отправки не обрезается: его нет');
   assert.ok(t.remote!.line.length <= 500);
   rmSync(r.root, { recursive: true, force: true });
+});
+
+test('P2-c: границы имён — ровно предел сохраняется точно, сверх предела поля нет', () => {
+  const at = (remote: number, ref: number, short: number) =>
+    remoteOf('not-pushed', {
+      short: 's'.repeat(short),
+      push: { remote: 'r'.repeat(remote), ref: 'f'.repeat(ref) },
+    });
+  const ok = at(200, 500, 500);
+  assert.equal(ok.pushRemote, 'r'.repeat(200));
+  assert.equal(ok.pushRef, 'f'.repeat(500));
+  assert.equal(ok.trackingRef, 's'.repeat(500));
+  for (const [r, f] of [
+    [201, 500],
+    [200, 501],
+  ] as const) {
+    const x = at(r, f, 10);
+    assert.equal(x.pushRemote, undefined);
+    assert.equal(x.pushRef, undefined, 'адрес отправки — оба поля или ни одного');
+    assert.equal(x.trackingRef, 's'.repeat(10));
+  }
+  assert.equal(at(1, 1, 501).trackingRef, undefined);
+  assert.equal(at(1, 1, 501).pushRef, 'f');
+  for (const state of ['pushed', 'not-pushed'] as const) {
+    const x = remoteOf(state, { short: 'o/' + 'n'.repeat(600) });
+    acceptedTargetSchema.shape.remote.parse(x);
+    assert.equal(x.trackingRef, undefined);
+    assert.ok(x.line.length <= 500 && x.lineEn.length <= 500);
+  }
 });

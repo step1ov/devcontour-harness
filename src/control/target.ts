@@ -22,16 +22,12 @@ const offline = [
 ].flatMap((key) => ['-c', `${key}=never`]);
 
 /**
- * Окружение без `GIT_ALLOW_PROTOCOL`: унаследованный список разрешённых
- * протоколов перекрыл бы `protocol.*.allow=never`. Без `GIT_NO_LAZY_FETCH`
- * (git до 2.44) ленивая догрузка запускает fetch — его останавливает тот же
- * запрет транспорта.
+ * Пустой `GIT_ALLOW_PROTOCOL` — пустой список разрешённых протоколов: он
+ * перекрывает любой `protocol.<имя>.allow` из config (и `GIT_CONFIG_*`), в том
+ * числе протоколы внешних помощников (`hg::…`). Без `GIT_NO_LAZY_FETCH` (git до
+ * 2.44) ленивая догрузка запускает fetch — его останавливает этот запрет.
  */
-const withoutAllowProtocol = (env: NodeJS.ProcessEnv) => {
-  const out = { ...env };
-  delete out.GIT_ALLOW_PROTOCOL;
-  return out;
-};
+const withoutProtocols = (env: NodeJS.ProcessEnv) => ({ ...env, GIT_ALLOW_PROTOCOL: '' });
 
 /** Предел одного вызова git сверки и всей сверки одного ответа. */
 const TARGET_GIT_TIMEOUT_MS = 10_000;
@@ -177,7 +173,7 @@ export function acceptedTargets(
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
-        ...withoutAllowProtocol(process.env),
+        ...withoutProtocols(process.env),
         GIT_TERMINAL_PROMPT: '0',
         GIT_NO_REPLACE_OBJECTS: '1',
         // Недостающий объект partial clone не догружается из сети.
