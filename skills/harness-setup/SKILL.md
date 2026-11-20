@@ -337,9 +337,9 @@ report the `doctor` line to the user and restart the lead with the flags.
 
 ### Dependency cache
 
-Right after `init` run `$H smoke` and read the prepare time and the
+Right after `init` run `$H smoke --state <manifest.paths.state> --policy .harness/policy.json --sha HEAD --human` and read the prepare time and the
 dependency-store advice. Prepare longer than a minute → enable
-`dependencyStore` through `$H lean`. A package manager version the store does
+`dependencyStore` through `$H lean --repository <repo> --plan`. A package manager version the store does
 not support → report it to the operator as a harness finding; do not build a
 cache of your own into step or gate arguments (no store or cache directory
 inside the attempt worktree, no absolute shared paths). Do not start a paid
@@ -353,7 +353,7 @@ generators (`pnpm dlx …`, `pnpm run create`), local servers and browser checks
 reads from a tracker. Propose each as `repositories[].writerProbe`
 (`{ "id", "command": [argv], "timeoutMs" }`; a command that can run quickly,
 for example `--help` of the generator or a server start that exits) and run
-`$H smoke --sha HEAD --writer-probe --human` before the first paid attempt.
+`$H smoke --state <manifest.paths.state> --policy .harness/policy.json --sha HEAD --writer-probe --human` before the first paid attempt.
 For every `blocked` command give the user the advice and the choice: allow
 it in the policy, run it in `prepare`, move it into a harness gate, or waive
 the product rule under the harness (controller-mode overlay). Never debug
