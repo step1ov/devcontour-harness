@@ -71,7 +71,8 @@ const phaseOf: Partial<Record<WorkStatus, StopPhase>> = {
  * точке отказа); текст ошибки здесь не разбирается. Счётчики восстановления
  * подставляются так, как их видит `repairDecision` (h1-spec K4): без
  * отпечатка повторять нечего, без задания графа движок сам не чинит.
- * Первым идёт вход действующей роли controller, затем поручения (кроме
+ * Первым идёт вход действующей роли controller (только на доске, без
+ * выбранной работы), затем поручения (кроме
  * принятых) в порядке состояния.
  */
 export function referenceStopInputsOf(h: StopSource, options: StopInputOptions): StopInput[] {
@@ -83,7 +84,9 @@ export function referenceStopInputsOf(h: StopSource, options: StopInputOptions):
       throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + options.workId);
     const inputs: StopInput[] = [];
     const lease = v.controller();
-    if (lease && lease.leaseUntil > now)
+    // С alpha.60 разбор выбранной работы (`--work`) не называет занятую роль
+    // controller: идущий запуск — не причина остановки этой работы.
+    if (lease && lease.leaseUntil > now && options.workId === undefined)
       inputs.push({
         kind: 'error',
         error: {
