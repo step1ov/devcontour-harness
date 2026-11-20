@@ -274,6 +274,7 @@ const options = {
   work: { type: 'string' },
   sink: { type: 'string' },
   reason: { type: 'string' },
+  by: { type: 'string' },
   author: { type: 'string' },
   digest: { type: 'string' },
   subject: { type: 'string' },
@@ -377,6 +378,7 @@ const flagOwners = {
   option: ['input-answer'],
   kind: ['input-answer'],
   actor: ['input-answer', 'review-plan', 'review-contract'],
+  by: ['reapprove'],
   'accept-limitation': ['review-plan', 'review-contract'],
   'continue-review': ['review-plan', 'review-contract'],
   'request-version': ['input-answer', 'input-apply', 'input-cancel', 'input-supersede'],
@@ -702,6 +704,27 @@ async function run(
           });
         }
         return { command, data: record, code: record.approved ? 0 : exitCodes.refused };
+      } finally {
+        h.close();
+      }
+    }
+    case 'reapprove': {
+      const by = need('by').trim();
+      const reason = need('reason').trim();
+      if (!by || by.length > 200)
+        throw new HarnessError('INVALID_INPUT', '--by: от 1 до 200 знаков', [
+          { path: ['--by'], message: by },
+        ]);
+      if (reason.length < 3 || reason.length > 2000)
+        throw new HarnessError('INVALID_INPUT', '--reason: от 3 до 2000 знаков', [
+          { path: ['--reason'], message: reason },
+        ]);
+      const h = open(need('state'), binding(need('state'), need('policy'), true), false);
+      try {
+        return {
+          command,
+          data: h.reapprove(need('subject'), need('digest'), { by, reason }),
+        };
       } finally {
         h.close();
       }

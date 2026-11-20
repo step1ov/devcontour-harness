@@ -164,6 +164,11 @@ export type StopInput =
          * Активная попытка без движения по обходу controller: что не
          * двигалось, сколько и что controller сделает (`action` у stalled).
          */
+        /**
+         * Открытая стадия активной попытки (последний незакрытый замер) и её
+         * начало: подготовка (`prepare`, `dependency-store`) видна до исполнителя.
+         */
+        openStage?: { stage: string; startedAt: string; preparing: boolean };
         liveness?: {
           state: 'quiet' | 'stalled';
           lastMovementAt: string;
@@ -761,7 +766,9 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       phase: active,
       actor: 'controller',
       action: 'wait',
-      note: `Поручение выполняется (${work.status}).`,
+      note: work.openStage?.preparing
+        ? `Поручение выполняется (${work.status}): подготовка — ${work.openStage.stage} с ${work.openStage.startedAt}; исполнитель ещё не запущен.`
+        : `Поручение выполняется (${work.status}).`,
     };
   if (work.status === 'ready' && work.attempt >= maxAttempts)
     return {

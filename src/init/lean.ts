@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { storeAdvice } from '../control/store-advice.ts';
 import {
   chmodSync,
   closeSync,
@@ -557,6 +558,10 @@ export async function switchLeanWith(
   // Возвращённый срок фазы может не покрывать пределы шагов: политика — та, что была.
   if (policyChanged)
     for (const w of timeBudgetWarnings(after)) notes.push(`срок фазы: ${w.message}`);
+  // Слой добавляет хранилище, а оно не применяется или проверки собирают свой кэш:
+  // оператор видит это до запуска, а не по минутам установки в каждой попытке.
+  for (const a of storeAdvice(after, dirname(policyFile.path)))
+    notes.push(`${a.code}: ${a.message}`);
 
   const changed = changes.length > 0;
   if (!options.plan && problems.length)

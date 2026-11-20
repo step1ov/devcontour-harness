@@ -669,3 +669,27 @@ test('lean: политика init --lean до 0.1.0-alpha.51 (срок слоя 
     assert.match(leanMismatch(q.policyPath).join('\n'), /LEAN_MISMATCH: .*runTimeoutMs/, stack);
   }
 });
+
+test('lean pnpm: закреплённый pnpm вне проверенных — громкая заметка DEPENDENCY_STORE_UNSUPPORTED в плане', async () => {
+  const p = await project('pnpm');
+  const pkg = join(p.root, 'package.json');
+  writeFileSync(
+    pkg,
+    JSON.stringify({ ...JSON.parse(readFileSync(pkg, 'utf8')), packageManager: 'pnpm@12.0.0' }),
+  );
+  const plan = await p.lean({ plan: true });
+  const note = plan.notes.find((n) => n.startsWith('DEPENDENCY_STORE_UNSUPPORTED'));
+  assert.ok(note, plan.notes.join('\n'));
+  assert.match(note, /pnpm 12\.0\.0/);
+  assert.match(note, /НЕ ПРИМЕНЯЕТСЯ|не поможет/);
+  writeFileSync(
+    pkg,
+    JSON.stringify({ ...JSON.parse(readFileSync(pkg, 'utf8')), packageManager: 'pnpm@11.25.0' }),
+  );
+  const supported = await p.lean({ plan: true });
+  assert.equal(
+    supported.notes.some((n) => n.startsWith('DEPENDENCY_STORE_UNSUPPORTED')),
+    false,
+    'pnpm 11.25.0 поддержан',
+  );
+});

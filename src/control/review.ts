@@ -28,6 +28,8 @@ import {
   type ReviewResult,
   type RuntimeAdapter,
   type RuntimeName,
+  executionDigest,
+  isolationDigest,
 } from '../contracts/index.ts';
 import { technicalReviewOutputSchema } from '../agents/schemas.ts';
 import { redactInspection } from '../agents/inspect.ts';
@@ -158,7 +160,10 @@ export async function technicalReview(
     last.authorRuntime === input.author &&
     last.approved &&
     last.reviewerBinding === binding &&
-    last.contextDigest === contextKey
+    last.contextDigest === contextKey &&
+    // Прежний раунд подтверждает предмет только под той же политикой: после её
+    // правки — новый раунд, а не сохранённая запись.
+    last.policyDigest === executionDigest(policy)
   ) {
     // Решение записывается только раундом: одобренный предмет без нового
     // раунда его не примет, и молча потерянное решение хуже отказа.
@@ -346,6 +351,8 @@ export async function technicalReview(
     sameVendor: choice.sameVendor,
     reviewerBinding: binding,
     ...(contextKey ? { contextDigest: contextKey } : {}),
+    policyDigest: executionDigest(policy),
+    isolationDigest: isolationDigest(policy),
     findings,
     artifact: join(dir, 'review.json'),
   };

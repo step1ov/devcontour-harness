@@ -3,7 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   API_VERSION,
+  executionDigest,
   executionPolicySchema,
+  isolationDigest,
   workGraphSchema,
   type ExecutionPolicy,
   type ReviewRecord,
@@ -88,7 +90,13 @@ export const planReview = (
 ): ReviewRecord => {
   const engine = e instanceof Engine ? e : e.engine;
   const binding = engine.reviewerBinding('plan', 'claude');
-  return { ...review(graph, round, approved), ...(binding ? { reviewerBinding: binding } : {}) };
+  // Как `technicalReview`: раунд отмечает политику, под которой проведён.
+  return {
+    ...review(graph, round, approved),
+    ...(binding ? { reviewerBinding: binding } : {}),
+    policyDigest: executionDigest(engine.policy),
+    isolationDigest: isolationDigest(engine.policy),
+  };
 };
 
 export const trustNone = { trusted: () => false, reachable: () => true };

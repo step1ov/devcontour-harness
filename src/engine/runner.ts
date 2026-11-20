@@ -1085,9 +1085,29 @@ export class Runner {
     dir: string,
   ) {
     if (!repo.dependencyStore) return;
-    await this.timed(attempt, 'dependency-store', () =>
-      materializeStore(this.storeContext(attempt), { repo, cwd, execution, signal, dir }),
+    // Промах — обычная установка без seed: стадия прошла, но хранилище не
+    // использовано (`unused`), а не «пройдено за 0 с».
+    await this.timed(
+      attempt,
+      'dependency-store',
+      () => materializeStore(this.storeContext(attempt), { repo, cwd, execution, signal, dir }),
+      (receipt) => (receipt && receipt.outcome !== 'miss' ? 'passed' : 'unused'),
     );
+  }
+
+  /**
+   * Шаги `prepare` репозитория — своя стадия с замером (`prepare`, на integration —
+   * `integration-prepare`): установка зависимостей в них занимает минуты, и
+   * оператор видит подготовку, а не «исполнитель пишет код». Без шагов стадии нет.
+   */
+  private async prepareSteps(
+    attempt: AttemptState,
+    stage: string,
+    steps: Repo['prepare'],
+    run: () => Promise<unknown>,
+  ) {
+    if (!steps.length) return;
+    await this.timed(attempt, stage, run);
   }
 
   /**
@@ -1098,7 +1118,7 @@ export class Runner {
     attempt: AttemptState,
     stage: string,
     fn: () => Promise<T>,
-    outcome?: (value: T) => 'passed' | 'failed',
+    outcome?: (value: T) => 'passed' | 'failed' | 'unused',
   ) {
     const id = this.engine.timingStarted(attempt.id, attempt.token, stage);
     // Граница стадии — движение попытки для обхода зависших.
@@ -1106,7 +1126,14 @@ export class Runner {
     try {
       const value = await fn();
       activityScope.getStore()?.moved();
-      this.engine.timingFinished(attempt.id, attempt.token, id, outcome?.(value) ?? 'passed');
+      const result = outcome?.(value) ?? 'passed';
+      this.engine.timingFinished(
+        attempt.id,
+        attempt.token,
+        id,
+        result === 'unused' ? 'passed' : result,
+        result === 'unused' ? { unused: true } : {},
+      );
       return value;
     } catch (error) {
       try {
@@ -1630,13 +1657,15 @@ export class Runner {
                 signal,
                 join(artifacts, 'candidate'),
               );
-              await runSteps(
-                repo.prepare,
-                cwd,
-                join(artifacts, 'candidate', 'prepare'),
-                execution,
-                signal,
-                base,
+              await this.prepareSteps(attempt, 'prepare', repo.prepare, () =>
+                runSteps(
+                  repo.prepare,
+                  cwd,
+                  join(artifacts, 'candidate', 'prepare'),
+                  execution,
+                  signal,
+                  base,
+                ),
               );
               prepared(execution);
               // Черновик прежней попытки — до установки: манифесты, которые он
@@ -2924,7 +2953,9 @@ export class Runner {
           signal,
           async () => {
             await this.dependencyStore(attempt, repo, dir, execution, signal, own);
-            await runSteps(repo.prepare, dir, join(own, 'prepare'), execution, signal);
+            await this.prepareSteps(attempt, `integration-prepare:${repo.id}`, repo.prepare, () =>
+              runSteps(repo.prepare, dir, join(own, 'prepare'), execution, signal),
+            );
             prepared(execution);
             await pinned('подготовка');
             for (const gate of ordered(repo.gates, consumer.gates))
@@ -4127,13 +4158,15 @@ export class Runner {
             signal,
             join(artifacts, 'integration'),
           );
-          await runSteps(
-            repo.prepare,
-            cwd,
-            join(artifacts, 'integration', 'prepare'),
-            execution,
-            signal,
-            attempt.baseSha,
+          await this.prepareSteps(attempt, 'integration-prepare', repo.prepare, () =>
+            runSteps(
+              repo.prepare,
+              cwd,
+              join(artifacts, 'integration', 'prepare'),
+              execution,
+              signal,
+              attempt.baseSha,
+            ),
           );
           prepared(execution);
           await checks(

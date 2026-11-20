@@ -83,6 +83,16 @@ interface Manager {
   fetch(store: string): string[];
   /** Окружение процессов checkout: менеджер берёт хранилище именно отсюда. */
   env(store: string): NodeJS.ProcessEnv;
+  /**
+   * Служебные каталоги, которые менеджер пишет в store при сборке и которые seed не
+   * переносит: путь относительно корня store, `*` — любой один сегмент.
+   */
+  scratch: string[];
+  /**
+   * Файлы содержимого пакетов. Без них seed пуст, даже если менеджер записал
+   * служебные файлы (pnpm 11 создаёт `v11/index.db` и для пустого lockfile).
+   */
+  content: RegExp;
   /** Отказ сборки, который повторится на том же lockfile при любой сети. */
   permanent: RegExp;
   /** Окружение сборки: конфигурация и кэш хоста в seed не попадают. */
@@ -103,13 +113,25 @@ const managers: Record<DependencyStorePolicy['manager'], Manager> = {
       '--ignore-scripts',
       '--store-dir=' + store,
     ],
-    env: (store) => ({ npm_config_store_dir: store }),
-    // Патчи лежат в репозитории, а сборка видит только lockfile.
-    permanent: /ERR_PNPM_(?:PATCH_NOT_FOUND|BROKEN_LOCKFILE|LOCKFILE_BREAKING_CHANGE)/,
+    // pnpm 11 читает настройки только из `pnpm_config_*`, pnpm 9–10 — из
+    // `npm_config_*`: окружение задаёт обе, с одним значением.
+    env: (store) => ({ npm_config_store_dir: store, pnpm_config_store_dir: store }),
+    // С pnpm 10.27.0 `pnpm fetch` регистрирует проект в store: символическая ссылка
+    // `<store>/v10/projects/<hash>` (у pnpm 11 — `v11/projects`) ведёт в каталог
+    // сборки. Она нужна только `pnpm store prune` этого store и в seed не идёт.
+    scratch: ['*/projects'],
+    content: /^v\d+\/files\//,
+    // Патчи лежат в репозитории, а сборка видит только lockfile (у pnpm 11 —
+    // PATCH_FILE_PATH_MISSING).
+    permanent:
+      /ERR_PNPM_(?:PATCH_NOT_FOUND|PATCH_FILE_PATH_MISSING|BROKEN_LOCKFILE|LOCKFILE_BREAKING_CHANGE)/,
     buildEnv: (work) => ({
       npm_config_userconfig: join(work, 'npmrc'),
       npm_config_cache_dir: join(work, 'cache'),
       npm_config_state_dir: join(work, 'state'),
+      pnpm_config_userconfig: join(work, 'npmrc'),
+      pnpm_config_cache_dir: join(work, 'cache'),
+      pnpm_config_state_dir: join(work, 'state'),
     }),
     buildFiles: { 'package.json': '{}\n', npmrc: '' },
   },
@@ -706,11 +728,36 @@ async function fetchInto(s: Store, work: string, lock: string, settings: string,
     );
   }
   try {
+    await dropScratch(store, s.manager.scratch);
     return { store, ...(await fingerprint(store, s.outer)) };
   } catch (error) {
     // Отказ относится к тому, что менеджер только что записал, а не к основе.
     if (error instanceof SeedRefused) throw new BuildFailed(`сборка seed: ${error.message}`, true);
     throw error;
+  }
+}
+
+/**
+ * Убрать служебные каталоги менеджера из собранного store. `rm` не идёт по
+ * ссылкам: удаляется сама ссылка, а не то, куда она ведёт. Всё прочее, что не
+ * обычный файл, по-прежнему отказ отпечатка.
+ */
+async function dropScratch(store: string, patterns: string[]) {
+  for (const pattern of patterns) {
+    let paths = [store];
+    for (const part of pattern.split('/')) {
+      const next: string[] = [];
+      for (const at of paths) {
+        if (part !== '*') {
+          next.push(join(at, part));
+          continue;
+        }
+        for (const entry of await readdir(at, { withFileTypes: true }).catch(() => []))
+          if (entry.isDirectory()) next.push(join(at, entry.name));
+      }
+      paths = next;
+    }
+    for (const path of paths) await removeTree(path);
   }
 }
 
@@ -763,7 +810,8 @@ async function buildSeed(s: Store, key: string, lock: string, lockSha256: string
       );
     // Менеджер мог выйти с кодом 0 и ничего не сохранить: такой seed не ускоряет
     // ничего, а выглядел бы попаданием.
-    if (!built.files.size) throw new BuildFailed('менеджер не сохранил ни одного файла', true);
+    if (![...built.files.keys()].some((rel) => s.manager.content.test(rel)))
+      throw new BuildFailed('менеджер не сохранил ни одного файла', true);
     const manifest: Manifest = {
       format: FORMAT,
       key,

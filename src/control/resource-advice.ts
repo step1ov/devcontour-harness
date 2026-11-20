@@ -4,6 +4,8 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import type { ExecutionPolicy } from '../contracts/index.ts';
 import { hostLoad, type HostResources } from '../environment/host-load.ts';
 import { digestThreadsCap } from '../verification/file-digests.ts';
+import { dependencyStoreSupports } from '../toolchains/probe.ts';
+import { pinnedPnpm, storeAdvice } from './store-advice.ts';
 
 /**
  * Пороги слабой машины: не больше 4 производительных ядер или меньше 16 ГиБ
@@ -45,6 +47,9 @@ const gib = (bytes: number) => Math.round((bytes / 1024 ** 3) * 10) / 10;
  * - `LOW_RESOURCES` — слабая машина (пороги выше) при параллельности
  *   политики больше 1. Ограничение частоты macOS (`pmset -g therm`)
  *   упоминается, только когда оно меньше 100%.
+ * - `DEPENDENCY_STORE_UNSUPPORTED`, `DEPENDENCY_CACHE_PATH` — см. `storeAdvice`:
+ *   хранилище не применяется для закреплённой версии pnpm или проверки
+ *   собирают свой store/кэш.
  * - `DIGEST_THREADS_INVALID` — `HARNESS_DIGEST_THREADS` задана, но не целое
  *   1–8: значение не действует.
  */
@@ -58,7 +63,14 @@ export function resourceWarnings(
   const project = projectRootOf(baseDir);
   policy.repositories.forEach((repo, i) => {
     const at = isAbsolute(repo.path) ? repo.path : resolve(baseDir, repo.path);
-    if (!repo.dependencyStore && isFile(join(at, 'pnpm-lock.yaml')))
+    const pinned = pinnedPnpm(at);
+    // Версия вне проверенных: совет включить хранилище был бы пустым —
+    // о ней говорит DEPENDENCY_STORE_UNSUPPORTED.
+    if (
+      !repo.dependencyStore &&
+      isFile(join(at, 'pnpm-lock.yaml')) &&
+      !(pinned && !dependencyStoreSupports('pnpm', pinned))
+    )
       warnings.push(
         `DEPENDENCY_STORE_RECOMMENDED: репозиторий ${repo.id}: есть pnpm-lock.yaml, но нет dependencyStore — каждый checkout скачивает и распаковывает пакеты заново. ` +
           (project
@@ -90,6 +102,7 @@ export function resourceWarnings(
         thermal,
     );
   }
+  for (const a of storeAdvice(policy, baseDir)) warnings.push(`${a.code}: ${a.message}`);
   const threads = env.HARNESS_DIGEST_THREADS;
   if (threads !== undefined && digestThreadsCap(env) === undefined)
     warnings.push(

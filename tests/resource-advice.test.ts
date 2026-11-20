@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment --
+ * Тесты правят сырой JSON политики до разбора схемой.
+ */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -203,4 +206,142 @@ test('Советы о ресурсах называют harness lean с корн
     /"concurrency": 1, "runTimeoutMs": 1800000, "gateTimeoutFloorMs": 240000/,
   );
   assert.match(warnings[0]!, /или только хранилище: в политике repositories\[0\]/);
+});
+
+/** Репозиторий pnpm с закреплённой версией менеджера. */
+function pinnedRepository(t: { after: (fn: () => void) => void }, version: string) {
+  const dir = repository(t, 'pnpm-lock.yaml');
+  writeFileSync(
+    join(dir, 'package.json'),
+    JSON.stringify({ name: 'app', packageManager: `pnpm@${version}+sha512.abc` }),
+  );
+  return dir;
+}
+
+test('DEPENDENCY_STORE_UNSUPPORTED: pnpm вне проверенных — громко и без пустого совета включить хранилище', (t) => {
+  const dir = pinnedRepository(t, '12.0.0');
+  const plain = resourceWarnings(
+    policyOf((p) => {
+      (p.repositories as Record<string, unknown>[])[0]!.path = dir;
+    }),
+    '/',
+    large,
+  );
+  assert.deepEqual(codes(plain), ['DEPENDENCY_STORE_UNSUPPORTED']);
+  assert.match(plain[0]!, /pnpm 12\.0\.0/);
+  assert.match(plain[0]!, /dependencyStore не поможет/);
+  assert.match(plain[0]!, /ставит все пакеты из сети заново/);
+  assert.match(plain[0]!, /не собирайте свой общий кэш/);
+
+  const withStore = resourceWarnings(
+    policyOf((p) => {
+      const repo = (p.repositories as Record<string, unknown>[])[0]!;
+      repo.path = dir;
+      repo.dependencyStore = { manager: 'pnpm' };
+    }),
+    '/',
+    large,
+  );
+  assert.deepEqual(codes(withStore), ['DEPENDENCY_STORE_UNSUPPORTED']);
+  assert.match(withStore[0]!, /dependencyStore НЕ ПРИМЕНЯЕТСЯ/);
+
+  // pnpm 11 поддержан: прежний совет, без UNSUPPORTED.
+  const supported = pinnedRepository(t, '11.25.0');
+  const ok = resourceWarnings(
+    policyOf((p) => {
+      (p.repositories as Record<string, unknown>[])[0]!.path = supported;
+    }),
+    '/',
+    large,
+  );
+  assert.deepEqual(codes(ok), ['DEPENDENCY_STORE_RECOMMENDED']);
+});
+
+test('DEPENDENCY_CACHE_PATH: свой store/кэш pnpm в командах и окружении — внутри рабочей копии и по общему пути, с исправлением', (t) => {
+  const dir = pinnedRepository(t, '11.25.0');
+  const policy = policyOf((p) => {
+    const repo = (p.repositories as Record<string, any>[])[0]!;
+    repo.path = dir;
+    repo.prepare = [
+      {
+        id: 'deps',
+        command: ['pnpm', 'install', '--frozen-lockfile', '--store-dir', '.artifacts/pnpm-store'],
+      },
+    ];
+    repo.gates = [
+      ...repo.gates,
+      {
+        id: 'shared',
+        kind: 'check',
+        command: ['pnpm', 'install', '--store-dir=/Users/someone/shared-store'],
+      },
+      {
+        id: 'sh',
+        kind: 'check',
+        command: ['sh', '-c', 'pnpm config set cache-dir ~/.pnpm-cache && pnpm i'],
+      },
+      { id: 'plain', kind: 'check', command: ['pnpm', 'install', '--frozen-lockfile'] },
+    ];
+    repo.environment = {
+      values: { pnpm_config_store_dir: 'node_modules/.cache/harness-pnpm-store' },
+    };
+    p.environment = {
+      ...(p.environment as object),
+      values: { npm_config_cache_dir: '/var/cache/pnpm' },
+      inherit: ['PNPM_CONFIG_STORE_DIR'],
+    };
+  });
+  const found = resourceWarnings(policy, '/', large).filter((w) =>
+    w.startsWith('DEPENDENCY_CACHE_PATH'),
+  );
+  const line = (what: RegExp) => {
+    const hit = found.find((w) => what.test(w));
+    assert.ok(hit, `${what}: ${found.join('\n')}`);
+    return hit;
+  };
+  assert.match(line(/prepare\[0\] deps/), /внутри рабочей копии/);
+  assert.match(line(/gates\[\d\] shared/), /общему абсолютному пути/);
+  assert.match(line(/gates\[\d\] sh: .*config set cache-dir/), /общему абсолютному пути/);
+  assert.match(
+    line(/repositories\[0\]\.environment: .*pnpm_config_store_dir/),
+    /внутри рабочей копии/,
+  );
+  assert.match(line(/^DEPENDENCY_CACHE_PATH: environment: .*npm_config_cache_dir/), /общему/);
+  assert.match(line(/PNPM_CONFIG_STORE_DIR \(из окружения хоста\)/), /общему/);
+  assert.equal(
+    found.some((w) => / plain:/.test(w)),
+    false,
+    'обычная установка — не находка',
+  );
+  for (const w of found) assert.match(w, /harness lean --repository/);
+  assert.equal(found.length, 6);
+
+  // Версия вне проверенных: исправление — находка по harness, а не lean.
+  const old = pinnedRepository(t, '12.0.0');
+  const unsupported = resourceWarnings(
+    policyOf((p) => {
+      const repo = (p.repositories as Record<string, any>[])[0]!;
+      repo.path = old;
+      repo.prepare = [{ id: 'deps', command: ['pnpm', 'install', '--store-dir', '/tmp/s'] }];
+    }),
+    '/',
+    large,
+  ).find((w) => w.startsWith('DEPENDENCY_CACHE_PATH'));
+  assert.match(unsupported!, /для pnpm 12\.0\.0 не действует — сообщите это оператору как находку/);
+});
+
+test('doctor: одно предупреждение из двух источников печатается один раз', async (t) => {
+  const dir = pinnedRepository(t, '12.0.0');
+  const { report } = await doctorWith(t, large, (p) => {
+    const repo = (p.repositories as Record<string, any>[])[0]!;
+    repo.path = dir;
+    repo.prepare = [{ id: 'a', command: ['pnpm', 'install', '--store-dir', '/tmp/s'] }];
+    repo.gates = [
+      ...repo.gates,
+      { id: 'g', kind: 'check', command: ['pnpm', 'install', '--store-dir', '/tmp/s'] },
+    ];
+  });
+  const warnings = report.warnings ?? [];
+  assert.equal(new Set(warnings).size, warnings.length);
+  assert.equal(codes(warnings).filter((c) => c === 'DEPENDENCY_STORE_UNSUPPORTED').length, 1);
 });

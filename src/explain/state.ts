@@ -1,4 +1,5 @@
 import { HarnessError } from '../contracts/errors.ts';
+import { stageOfStep } from '../control/stage.ts';
 import { blocksWork, inputPolicyOf, leadAnswerBasis } from '../contracts/index.ts';
 import {
   MAX_NEUTRAL_FAILURES,
@@ -476,6 +477,20 @@ export function stopInputsIn(
               ? cancelledIn.get(work.graphId)
               : undefined,
           ),
+          ...((a) => {
+            const open = (a?.status === 'active' ? (a.timings ?? []) : [])
+              .filter((t) => !t.finishedAt)
+              .at(-1);
+            return open
+              ? {
+                  openStage: {
+                    stage: open.stage,
+                    startedAt: open.startedAt,
+                    preparing: stageOfStep(open.stage) === 'prepare',
+                  },
+                }
+              : {};
+          })(work.activeRunId ? v.attempt(work.activeRunId) : undefined),
           ...((live) =>
             live && live.state !== 'active'
               ? {

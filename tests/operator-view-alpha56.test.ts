@@ -82,7 +82,7 @@ function stopped() {
 test('view r1: ответ ведущего на технический вопрос — answerBasis с правилом, причиной и строкой', () => {
   const env = stopped();
   const before = operatorView(collect(env.engine, env.dir, env.clock.now));
-  assert.equal(before.viewRevision, 2);
+  assert.equal(before.viewRevision, 3);
   assert.equal(before.questions[0]!.answerBasis, undefined, 'без ответа основания нет');
 
   env.engine.answerInput(

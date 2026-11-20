@@ -530,6 +530,22 @@ export const executionDigest = (policy: ExecutionPolicy) =>
   });
 
 /**
+ * Digest границы исполнения политики: изоляция (`isolation`, режим и домены
+ * сети), профили инструментов (`toolProfiles`: сеть Codex, shell, инструменты
+ * Claude, MCP, окружение профиля) и назначения ролей, которые выбирают профиль.
+ * Раунд ревью плана записывает его; согласование под другим digest границы —
+ * только после нового раунда, а не по прежнему одобрению (ни `approve`, ни
+ * `reapprove`, ни библиотечный `Engine.approve`).
+ */
+export const isolationDigest = (policy: ExecutionPolicy) =>
+  digestOf({
+    isolation: policy.isolation,
+    toolProfiles: policy.toolProfiles,
+    roles: policy.roles,
+    repositoryRoles: policy.repositories.map((r) => [r.id, r.roles ?? null]),
+  });
+
+/**
  * Действующая политика вопросов: заданная или умолчание. Порог вопросов —
  * правило исполнителя, а не условие исполнения кода: как и `stallSweep`, он
  * не входит в `executionDigest`, а попытка закрепляет его при выдаче.

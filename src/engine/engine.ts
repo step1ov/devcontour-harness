@@ -5,6 +5,7 @@ import {
   roleBinding,
   integrationReuseProblem,
   executionDigest,
+  isolationDigest,
   HarnessError,
   WORKSPACE_OWNER,
   MAX_REPRODUCTIONS,
@@ -615,6 +616,8 @@ export class Engine {
        * плана: другой снимок при том же графе — новое согласование.
        */
       bindContext?: boolean;
+      /** Кто и почему согласует заново после правки политики (`reapprove`): запись в согласовании и событии. */
+      reapproval?: { by: string; reason: string };
     } = {},
   ) {
     return this.tx('graph.approved', (tx) => {
@@ -681,6 +684,19 @@ export class Engine {
         'APPROVAL_REQUIRED',
         'Ревью плана проведено при другом назначении reviewer; нужен новый раунд',
       );
+    // Изоляция, сеть и профили инструментов — граница исполнения: её правку
+    // покрывает только раунд, проведённый под ней. Раунд без отметки (до
+    // alpha.59) покрывает лишь политику, под которой граф уже согласован.
+    const covered = last.isolationDigest
+      ? last.isolationDigest === isolationDigest(this.policy)
+      : graph.policyDigest === executionDigest(this.policy);
+    if (!covered)
+      throw new HarnessError(
+        'APPROVAL_REQUIRED',
+        'Изоляция, сеть или профили инструментов политики изменились после ревью плана (раунд ' +
+          last.round +
+          '): прежнее одобрение их не покрывает — нужен новый раунд review-plan',
+      );
     // Свойства поручений существуют в их договорах проверки и исполняются
     // их генеративными gates: иначе ожидаемая проверка не определена.
     const problems = tx.works(graphId).flatMap((w) => {
@@ -709,7 +725,7 @@ export class Engine {
     graph: GraphState,
     last: ReviewRecord,
     actor: TechnicalApproval['actor'],
-    options: { bindContext?: boolean } = {},
+    options: { bindContext?: boolean; reapproval?: { by: string; reason: string } } = {},
   ) {
     const graphId = graph.id;
     const policy = executionDigest(this.policy);
@@ -729,8 +745,28 @@ export class Engine {
       artifact: last.artifact,
       ...(context ? { context } : {}),
     };
-    tx.putGraph({ ...graph, policyDigest: policy, approval: { ...approval, at } });
-    tx.emit({ type: 'graph.approved', graphId, payload: { digest: graph.digest, actor } });
+    const reapproval =
+      options.reapproval && graph.policyDigest !== policy
+        ? {
+            ...options.reapproval,
+            round: last.round,
+            previousPolicyDigest: graph.policyDigest,
+          }
+        : undefined;
+    tx.putGraph({
+      ...graph,
+      policyDigest: policy,
+      approval: { ...approval, ...(reapproval ? { reapproval } : {}), at },
+    });
+    tx.emit({
+      type: 'graph.approved',
+      graphId,
+      payload: {
+        digest: graph.digest,
+        actor,
+        ...(reapproval ? { reapproval: { ...reapproval, policyDigest: policy } } : {}),
+      },
+    });
     for (const work of tx.works(graphId)) {
       if (work.status !== 'draft') continue;
       const ready: WorkState = structuredClone({
@@ -1176,7 +1212,7 @@ export class Engine {
         );
       }
       if (graphs.get(work.graphId))
-        return 'Политика изменилась после согласования; согласуйте заново';
+        return 'Политика изменилась после согласования; согласуйте заново: harness reapprove --by --reason (прежний раунд review-plan, с записью), а после правки изоляции, сети или профилей инструментов — новый review-plan';
       if (
         work.status === 'ready' &&
         work.approvedDigest !== this.host.basis.orderDigest(work, view)
@@ -1226,7 +1262,8 @@ export class Engine {
     if (graph?.approval && graph.policyDigest !== executionDigest(this.policy))
       out.push({
         code: 'APPROVAL_STALE',
-        message: 'Политика изменилась после согласования; согласуйте заново',
+        message:
+          'Политика изменилась после согласования; согласуйте заново: harness reapprove --by --reason (прежний раунд review-plan, с записью), а после правки изоляции, сети или профилей инструментов — новый review-plan',
       });
     else if (work.status !== 'ready')
       out.push({ code: 'NOT_READY', message: 'Статус ' + work.status });
@@ -1880,7 +1917,14 @@ export class Engine {
     });
   }
 
-  timingFinished(id: string, token: string, timingId: string, outcome: 'passed' | 'failed') {
+  timingFinished(
+    id: string,
+    token: string,
+    timingId: string,
+    outcome: 'passed' | 'failed',
+    /** `unused` — стадия прошла, но её средство не применялось (хранилище без seed). */
+    extra: { unused?: true } = {},
+  ) {
     this.withAttempt(id, token, 'run.timing.finished', (a, w, tx) => {
       const at = iso(this.now());
       const open = (a.timings ?? []).find((t) => t.id === timingId);
@@ -1890,7 +1934,9 @@ export class Engine {
       tx.putAttempt({
         ...a,
         timings: (a.timings ?? []).map((t) =>
-          t.id === timingId ? { ...t, finishedAt: at, outcome } : t,
+          t.id === timingId
+            ? { ...t, finishedAt: at, outcome, ...(extra.unused ? { unused: true as const } : {}) }
+            : t,
         ),
       });
       tx.emit({
@@ -1906,6 +1952,7 @@ export class Engine {
           at,
           durationMs: Math.max(0, Date.parse(at) - Date.parse(open.startedAt)),
           outcome,
+          ...(extra.unused ? { unused: true as const } : {}),
         },
       });
     });

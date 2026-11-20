@@ -1,0 +1,189 @@
+import { lstatSync, readFileSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import type { ExecutionPolicy } from '../contracts/index.ts';
+import {
+  declaredManagerVersion,
+  dependencyStoreSupports,
+  dependencyStoreVersions,
+} from '../toolchains/probe.ts';
+
+/**
+ * Советы о хранилище зависимостей, которые нельзя пропустить: `doctor`, `init`
+ * и `lean` печатают их одинаково.
+ *
+ * - `DEPENDENCY_STORE_UNSUPPORTED` — репозиторий закрепил (`packageManager`)
+ *   версию pnpm вне проверенных: хранилище не применяется, и каждый checkout
+ *   (попытка, integration) ставит все пакеты из сети заново.
+ * - `DEPENDENCY_CACHE_PATH` — команда `prepare`/`dependencyBuild`/`preflight`/
+ *   `lifecycle`/gate или окружение политики задаёт свой store или кэш pnpm
+ *   (`--store-dir`, `--cache-dir`, `store-dir`/`cache-dir` в `pnpm config set`,
+ *   `npm_config_*`/`pnpm_config_*`). Относительный путь лежит в рабочей копии —
+ *   каждая попытка начинает с пустого и скачивает всё; абсолютный — общее
+ *   изменяемое состояние попыток вне границы доверия хранилища (seed сверяется
+ *   по манифесту, такой кэш — нет), и путь не переносим.
+ */
+export interface StoreAdvice {
+  code: 'DEPENDENCY_STORE_UNSUPPORTED' | 'DEPENDENCY_CACHE_PATH';
+  message: string;
+}
+
+const MANIFEST_LIMIT = 1024 * 1024;
+const CACHE_KEY = /^(?:npm|pnpm)_config_(?:store|cache)[-_]dir$/i;
+const CACHE_FLAG = /^--(?:config\.)?(store|cache)[-_]dir(?:=(.*))?$/i;
+const CACHE_ASSIGN = /^(?:npm|pnpm)_config_(store|cache)[-_]dir=(.*)$/i;
+const CACHE_SETTING = /^(store|cache)[-_]dir$/i;
+
+/** Корень проекта harness политики: каталог над `.harness/`; иначе политика вне проекта. */
+const projectRootOf = (baseDir: string) => {
+  const dir = resolve(baseDir);
+  return basename(dir) === '.harness' ? dirname(dir) : undefined;
+};
+
+/** Закреплённая версия pnpm репозитория из `package.json`, если она есть. */
+export function pinnedPnpm(repoDir: string) {
+  try {
+    const raw = readFileSync(join(repoDir, 'package.json'));
+    if (raw.length > MANIFEST_LIMIT) return undefined;
+    const field = (JSON.parse(raw.toString('utf8')) as { packageManager?: unknown } | null)
+      ?.packageManager;
+    return declaredManagerVersion(field, 'pnpm');
+  } catch {
+    return undefined;
+  }
+}
+
+const isFile = (path: string) => {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
+};
+
+type Where = 'worktree' | 'shared';
+/** Где лежит путь: в рабочей копии (у каждой попытки свой, пустой) или общий. */
+function placeOf(value: string): Where {
+  const v = value.replace(/^['"]|['"]$/g, '');
+  if (/^(?:~|\$HOME|\$\{HOME\}|\$XDG_|\$\{XDG_|\$TMPDIR|\$\{TMPDIR\})/.test(v)) return 'shared';
+  if (/^(?:\$PWD|\$\{PWD\}|\$\(pwd\))/.test(v)) return 'worktree';
+  return isAbsolute(v) ? 'shared' : 'worktree';
+}
+
+interface Found {
+  at: string;
+  what: string;
+  where: Where;
+}
+
+/** Store и кэш pnpm в аргументах одной команды (и в строке `sh -c`). */
+function argvCaches(argv: string[], at: string, out: Found[]) {
+  const tokens = argv.flatMap((a) => a.split(/\s+/).filter(Boolean));
+  tokens.forEach((token, i) => {
+    const flag = CACHE_FLAG.exec(token);
+    const assign = CACHE_ASSIGN.exec(token);
+    const next = tokens[i + 1];
+    if (flag) {
+      const value = flag[2] ?? (next && !next.startsWith('-') ? next : undefined);
+      if (value !== undefined)
+        out.push({ at, what: `--${flag[1]!.toLowerCase()}-dir ${value}`, where: placeOf(value) });
+    } else if (assign) out.push({ at, what: token, where: placeOf(assign[2]!) });
+    else if (
+      CACHE_SETTING.test(token) &&
+      tokens[i - 1] === 'set' &&
+      tokens[i - 2] === 'config' &&
+      next
+    )
+      out.push({ at, what: `config set ${token} ${next}`, where: placeOf(next) });
+  });
+}
+
+function envCaches(env: ExecutionPolicy['environment'], at: string, out: Found[]) {
+  if (!env) return;
+  for (const [key, value] of Object.entries(env.values))
+    if (CACHE_KEY.test(key)) out.push({ at, what: `${key}=${value}`, where: placeOf(value) });
+  for (const key of env.inherit)
+    if (CACHE_KEY.test(key)) out.push({ at, what: `${key} (из окружения хоста)`, where: 'shared' });
+}
+
+export function storeAdvice(policy: ExecutionPolicy, baseDir: string): StoreAdvice[] {
+  const advice: StoreAdvice[] = [];
+  const project = projectRootOf(baseDir);
+  const lean = project
+    ? `harness lean --repository ${project} --plan, затем без --plan`
+    : 'harness lean --repository <корень проекта> --plan, затем без --plan';
+  const { from, below } = dependencyStoreVersions.pnpm;
+  const unsupported = new Map<string, string>();
+  policy.repositories.forEach((repo, i) => {
+    const dir = isAbsolute(repo.path) ? repo.path : resolve(baseDir, repo.path);
+    const pnpmRepo = Boolean(repo.dependencyStore) || isFile(join(dir, 'pnpm-lock.yaml'));
+    const pinned = pnpmRepo ? pinnedPnpm(dir) : undefined;
+    if (pinned && !dependencyStoreSupports('pnpm', pinned)) {
+      unsupported.set(repo.id, pinned);
+      advice.push({
+        code: 'DEPENDENCY_STORE_UNSUPPORTED',
+        message:
+          `репозиторий ${repo.id}: package.json закрепил pnpm ${pinned}, а хранилище зависимостей проверено на ${from} … <${below} — ` +
+          (repo.dependencyStore
+            ? `repositories[${i}].dependencyStore НЕ ПРИМЕНЯЕТСЯ`
+            : 'dependencyStore не поможет') +
+          ': каждый checkout (попытка, integration) ставит все пакеты из сети заново, минуты на каждую попытку. ' +
+          'Сообщите оператору как находку по harness; не собирайте свой общий кэш в аргументах проверок (--store-dir, store-dir, cache-dir): абсолютный путь и общее изменяемое состояние обходят границу доверия хранилища и не переносимы',
+      });
+    }
+  });
+  policy.repositories.forEach((repo, i) => {
+    const found: Found[] = [];
+    const field = `repositories[${i}]`;
+    for (const [name, list] of [
+      ['prepare', repo.prepare],
+      ['dependencyBuild', repo.dependencyBuild],
+      ['preflight', repo.preflight],
+    ] as const)
+      list.forEach((step, j) =>
+        argvCaches(step.command, `${field}.${name}[${j}] ${step.id}`, found),
+      );
+    const lifecycle = repo.lifecycle ?? policy.lifecycle;
+    if (lifecycle)
+      for (const phase of ['setup', 'ready', 'teardown'] as const)
+        lifecycle[phase].forEach((step, j) =>
+          argvCaches(
+            step.command,
+            `${repo.lifecycle ? field + '.' : ''}lifecycle.${phase}[${j}] ${step.id}`,
+            found,
+          ),
+        );
+    repo.gates.forEach((gate, j) =>
+      argvCaches(gate.command, `${field}.gates[${j}] ${gate.id}`, found),
+    );
+    envCaches(repo.environment, `${field}.environment`, found);
+    for (const f of found) advice.push(cacheAdvice(repo.id, f, unsupported.get(repo.id), lean));
+  });
+  const global: Found[] = [];
+  envCaches(policy.environment, 'environment', global);
+  policy.workspaceGates.forEach((gate, j) =>
+    argvCaches(gate.command, `workspaceGates[${j}] ${gate.id}`, global),
+  );
+  for (const f of global) advice.push(cacheAdvice(undefined, f, undefined, lean));
+  // Одна и та же находка из двух мест — одна строка.
+  return [...new Map(advice.map((a) => [a.code + a.message, a])).values()];
+}
+
+function cacheAdvice(
+  repo: string | undefined,
+  f: Found,
+  unsupported: string | undefined,
+  lean: string,
+): StoreAdvice {
+  const fix = unsupported
+    ? `хранилище harness для pnpm ${unsupported} не действует — сообщите это оператору как находку по harness и уберите свой кэш, а не переносите его в общий путь`
+    : `уберите его и включите dependencyStore: ${lean} (общий seed по lockfile целевой ветки, сверка по манифесту, копия в каждом checkout)`;
+  return {
+    code: 'DEPENDENCY_CACHE_PATH',
+    message:
+      `${repo ? `репозиторий ${repo}: ` : ''}${f.at}: свой store/кэш pnpm (${f.what}) ` +
+      (f.where === 'worktree'
+        ? 'внутри рабочей копии: у каждой попытки он свой и пустой, и пакеты скачиваются заново в каждой попытке'
+        : 'по общему абсолютному пути: общее изменяемое состояние попыток вне границы доверия хранилища (его байты никто не сверяет), путь не переносим') +
+      `. Исправление: ${fix}`,
+  };
+}

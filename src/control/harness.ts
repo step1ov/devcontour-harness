@@ -453,6 +453,52 @@ export class Harness {
     return { subject, digest, at, changed: !before };
   }
 
+  /**
+   * Повторное согласование графа после правки политики (`harness reapprove`):
+   * тот же digest графа, последний раунд ревью плана — прежний, а согласование
+   * привязывается к текущей политике с записью, кто и почему (`approval.reapproval`,
+   * событие `graph.approved`). Правки изоляции, сети и профилей инструментов
+   * прежний раунд не покрывает — отказ `APPROVAL_REQUIRED` с требованием нового
+   * `review-plan`. Действует в режиме политики (`approvalMode`): в режиме
+   * `agent` последний раунд должен быть одобрен.
+   */
+  reapprove(subject: string, digest: string, audit: { by: string; reason: string }) {
+    const graph = this.engine.read((v) => v.graph(subject));
+    if (!graph) throw new HarnessError('NOT_FOUND', 'Граф не найден: ' + subject);
+    if (graph.digest !== digest)
+      throw new HarnessError('APPROVAL_STALE', 'Digest не совпадает с зарегистрированным графом');
+    if (!graph.approval)
+      throw new HarnessError(
+        'APPROVAL_REQUIRED',
+        'Граф ещё не согласован: повторное согласование — только после review-plan (и approve в режиме operator)',
+      );
+    const previous = graph.policyDigest;
+    const current = executionDigest(this.policy);
+    if (graph.approval.digest === digest && previous === current)
+      return {
+        subject,
+        digest,
+        at: graph.approval.at,
+        changed: false,
+        policyDigest: current,
+        previousPolicyDigest: previous,
+      };
+    this.engine.approve(subject, this.policy.approvalMode, {
+      bindContext: true,
+      reapproval: audit,
+    });
+    const after = this.engine.read((v) => v.graph(subject)!.approval!);
+    return {
+      subject,
+      digest,
+      at: after.at,
+      changed: true,
+      policyDigest: current,
+      previousPolicyDigest: previous,
+      ...(after.reapproval ? { round: after.reapproval.round } : {}),
+    };
+  }
+
   /* ---------------------------------------------------------------- */
   /* Работа                                                            */
   /* ---------------------------------------------------------------- */
