@@ -84,6 +84,7 @@ export type ProjectManifest = z.infer<typeof projectManifestSchema>;
 /** Предупреждения `init`: подготовка продолжается, но до запуска нужно решение. */
 export const initWarningCodes = [
   'review-same-vendor',
+  'review-vendor-conflict',
   'runtime-missing',
   'runtime-unauthenticated',
   'lead-sandbox',

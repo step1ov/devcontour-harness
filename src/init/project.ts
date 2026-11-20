@@ -18,6 +18,8 @@ import {
   leadAnswersRule,
   projectManifestSchema,
   runtimeAssignments,
+  reviewVendorConflictMessage,
+  reviewVendorConflicts,
   sameVendorReviews,
   selectReviewer,
   type ExecutionPolicy,
@@ -571,6 +573,12 @@ export function initWarnings(
         `Для ревью другим вендором установите ${others.join(', ')}, выполните вход и подготовьте политику с --review cross.`,
     });
   }
+  // Правило роли, которое движок не исполнит: поручения роли не будут выданы.
+  for (const conflict of reviewVendorConflicts(policy))
+    warnings.push({
+      code: 'review-vendor-conflict',
+      message: reviewVendorConflictMessage(conflict),
+    });
   for (const [runtime, what] of runtimeAssignments(policy)) {
     const r = runtimes.find((x) => x.runtime === runtime);
     if (!r) continue;

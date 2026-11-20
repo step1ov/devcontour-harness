@@ -3,7 +3,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runResultSchema, sha256 } from '../src/contracts/index.ts';
+import { reviewVendorConflicts, runResultSchema, sha256 } from '../src/contracts/index.ts';
 import { resultProblems, type ReceiverContext } from '../src/verification/acceptance.ts';
 import { graphOf, policyOf, sha } from './engine-fixture.ts';
 import { attempt, consumerAttempt, forge } from './receipt-fixtures.ts';
@@ -546,6 +546,42 @@ test('S2-R4-04: ревью подтверждено reviewer-ом политик
       },
     };
     assert.match(resultProblems(done.result, strict).join('; '), /того же вендора/);
+    same.store.close();
+  }
+});
+
+test('Правило ревью кода роли строже общего: приёмка отклоняет ревью тем же вендором ровно там, где reviewVendorConflicts (doctor) называет противоречие', () => {
+  for (const runtime of ['claude', 'codex'] as const) {
+    const allowed = policyOf((p: any) => {
+      p.roles.developer.writer.runtime = runtime;
+      p.review.code = { reviewer: { runtime }, vendor: 'same-vendor-allowed' };
+    });
+    const same = attempt(graphOf({ a: [] }), allowed);
+    const done = same.done();
+    const withRole = (vendor: 'different-vendor' | 'same-vendor-allowed') => {
+      const policy = {
+        ...done.context.policy,
+        roles: {
+          ...done.context.policy.roles,
+          developer: {
+            ...done.context.policy.roles.developer!,
+            review: { reviewer: { runtime }, vendor },
+          },
+        },
+      };
+      return { context: { ...done.context, policy }, conflicts: reviewVendorConflicts(policy) };
+    };
+    // Общее правило разрешает тот же вендор, правило роли — нет: оба отказывают.
+    const strict = withRole('different-vendor');
+    assert.match(resultProblems(done.result, strict.context).join('; '), /того же вендора/);
+    assert.deepEqual(strict.conflicts, [
+      { role: 'developer', writer: runtime, reviewer: runtime, source: 'roles.developer.review' },
+    ]);
+    // Правило роли наследует разрешение: оба согласны, что всё в порядке.
+    const inherited = withRole('same-vendor-allowed');
+    assert.deepEqual(resultProblems(done.result, inherited.context), [], `${runtime} → ${runtime}`);
+    assert.deepEqual(inherited.conflicts, []);
+    assert.deepEqual(reviewVendorConflicts(allowed), []);
     same.store.close();
   }
 });

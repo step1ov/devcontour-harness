@@ -595,3 +595,87 @@ test('doctor: автор планов для предупреждения о т�
   assert.match(sameVendor(byLead), /plan codex→codex/);
   assert.match(sameVendor(byLead), /code developer claude→claude/);
 });
+
+/** Локальный профиль: роль developer пишет codex, reviewer роли — тоже codex. */
+const sameVendorRoleProfile = (root: string) => {
+  mkdirSync(join(root, '.harness'), { recursive: true });
+  const profile = {
+    id: 'codex-only-roles',
+    version: '0.1.0',
+    extends: ['npm-ci'],
+    roles: {
+      developer: {
+        runtime: 'codex',
+        effort: 'medium',
+        reviewer: { runtime: 'codex', effort: 'medium' },
+      },
+    },
+  };
+  writeFileSync(join(root, '.harness/profile.json'), JSON.stringify(profile, null, 2) + '\n');
+};
+
+test('Reviewer роли профиля того же вендора: при review same (auto и явно, с --lean) правило роли наследует same-vendor-allowed; doctor и движок согласны', async () => {
+  const codex: RuntimeAdapter = {
+    runtime: 'codex',
+    capabilities: () => Promise.resolve({ runtime: 'codex', version: '1.2.3' } as any),
+    invoke: () => Promise.reject(new Error('не вызывается')),
+  };
+  for (const extra of [{}, { review: 'same' as const }, { lean: true }]) {
+    const p = project({ available: ['codex'] });
+    sameVendorRoleProfile(p.root);
+    const data = await initProject(
+      p.opts({ lead: 'codex', profile: './.harness/profile.json', ...extra }),
+    );
+    const label = JSON.stringify(extra);
+    assert.equal(data.review.mode, 'same', label);
+    const raw = JSON.parse(readFileSync(join(p.root, '.harness/policy.json'), 'utf8'));
+    assert.deepEqual(
+      raw.roles.developer.review,
+      { reviewer: { runtime: 'codex', effort: 'medium' }, vendor: 'same-vendor-allowed' },
+      label,
+    );
+    const policy = executionPolicySchema.parse(raw);
+    assert.equal(
+      selectReviewer(policy, 'code', { runtime: 'codex' }, 'developer').ok,
+      true,
+      'движок выдаст поручение роли: ' + label,
+    );
+    assert.equal(
+      data.warnings.some((w) => w.code === 'review-vendor-conflict'),
+      false,
+      JSON.stringify(data.warnings),
+    );
+    const report = await doctor(policy, { codex }, undefined, undefined, undefined, {
+      resourceDatabase: false,
+    });
+    assert.deepEqual(report.problems, [], label);
+    // Предупреждение о ревью тем же вендором называет и правило роли.
+    const same = report.warnings?.find((w) => w.startsWith('review-same-vendor: '));
+    assert.match(same ?? '', /code developer codex→codex/, label);
+  }
+});
+
+test('Reviewer роли профиля того же вендора при review cross: правило роли строгое, init и doctor называют противоречие', async () => {
+  const p = project();
+  sameVendorRoleProfile(p.root);
+  const data = await initProject(
+    p.opts({ lead: 'codex', review: 'cross', profile: './.harness/profile.json' }),
+  );
+  const raw = JSON.parse(readFileSync(join(p.root, '.harness/policy.json'), 'utf8'));
+  assert.equal(raw.roles.developer.review.vendor, 'different-vendor');
+  const warning = data.warnings.find((w) => w.code === 'review-vendor-conflict');
+  assert.ok(warning, JSON.stringify(data.warnings));
+  assert.match(warning.message, /роли developer \(roles\.developer\.review\)/);
+  assert.match(warning.message, /reviewer codex того же поставщика, что writer codex/);
+  assert.match(warning.message, /приёмка откажет/);
+  assert.match(warning.message, /same-vendor-allowed/);
+  const policy = executionPolicySchema.parse(raw);
+  const choice = selectReviewer(policy, 'code', { runtime: 'codex' }, 'developer');
+  assert.equal(choice.ok, false);
+  const report = await doctor(policy, {}, undefined, undefined, undefined, {
+    resourceDatabase: false,
+  });
+  const problem = report.problems.find((x) => x.startsWith('review-vendor-conflict: '));
+  assert.ok(problem, report.problems.join('\n'));
+  assert.equal(problem, 'review-vendor-conflict: ' + warning.message);
+});
