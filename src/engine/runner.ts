@@ -173,6 +173,12 @@ import { TaskFailure, type FailureKind } from './failure.ts';
 import { activeOf, crashedRecheck, namesFailingCases, type Engine } from './engine.ts';
 import { environmentBlockOf, writerScratch } from './writer-block.ts';
 import { prompt } from './prompt.ts';
+import {
+  FEEDBACK_CASE_LIMIT,
+  FEEDBACK_TOTAL_LIMIT,
+  gateFeedback,
+  type GateFeedback,
+} from './gate-feedback.ts';
 import { scopeViolations } from './scope.ts';
 import { generatorNote, runGenerators, selectGenerators } from '../verification/generators.ts';
 import {
@@ -360,6 +366,11 @@ export class Runner {
   private placement?: CheckoutRoot;
   /** Когда истекает текущий предел времени попытки: от остатка считается бюджет хранилища. */
   private phaseDeadlines = new Map<string, number>();
+  /**
+   * Текст провала gates попытки-источника для writer продолжения (по ID
+   * попытки): собирается при наложении черновика, расходуется запросом.
+   */
+  private gateFeedback = new Map<string, GateFeedback>();
   /**
    * Действующий корень рабочих деревьев (`checkout-root.ts`): хост
    * показывает его в диагностике. Выбирается один раз на исполнитель.
@@ -1469,6 +1480,7 @@ export class Runner {
     work: WorkState,
     repoPath: string,
     cwd: string,
+    redact: Redactor,
   ): Promise<AttemptState> {
     const draft = this.engine.read((v) => continuableDraft(v, work, attempt.id));
     if (!draft) return attempt;
@@ -1523,6 +1535,17 @@ export class Runner {
     };
     await writeFile(join(dir, 'continuation.json'), JSON.stringify(continuedFrom, null, 2));
     this.engine.continuation(attempt.id, attempt.token, continuedFrom);
+    // Кандидат отклонён проверкой: writer получает текст провала (сообщение и
+    // ожидаемое/полученное упавших testcases), а не только их имена. Блок
+    // собирается и тогда, когда изменения не наложились: провал всё равно
+    // описывает, чего ждут проверки.
+    if (draft.kind === 'candidate' && draft.reason === 'gate') {
+      const source = this.engine.read((v) => v.attempt(draft.runId));
+      const feedback = source
+        ? await gateFeedback(source, redact).catch(() => undefined)
+        : undefined;
+      if (feedback) this.gateFeedback.set(attempt.id, feedback);
+    }
     return { ...attempt, continuedFrom };
   }
 
@@ -1713,7 +1736,7 @@ export class Runner {
               // Черновик прежней попытки — до установки: манифесты, которые он
               // меняет, исполнитель увидит уже установленными.
               if (!attempt.reusedFrom)
-                attempt = await this.continueDraft(attempt, work, repoPath, cwd);
+                attempt = await this.continueDraft(attempt, work, repoPath, cwd, execution.redact);
               // Зависимости в дереве исполнителя — до его работы и до снимка
               // защищённых путей: песочница исполнителя установку не пропускает.
               // Взятый кандидат исполнителя не вызывает — ставить незачем.
@@ -1782,6 +1805,55 @@ export class Runner {
                         );
                       throw error;
                     }
+                    const feedback = this.gateFeedback.get(attempt.id);
+                    this.gateFeedback.delete(attempt.id);
+                    const request = prompt({
+                      work,
+                      attempt,
+                      history: this.history(attempt),
+                      context,
+                      gates: gates.map((g) => ({ id: g.id, command: g.command })),
+                      inputPolicy: attempt.inputPolicy ?? inputPolicyOf(this.policy),
+                      notes: [
+                        ...this.notes(attempt, false),
+                        ...(await this.hostNotes(work, attempt, false)),
+                        ...(dependencies ? [writerDependenciesNote(dependencies)] : []),
+                        ...(repo.generators?.length ? [generatorNote(repo.generators)!] : []),
+                        ALREADY_SATISFIED_WRITER_NOTE,
+                      ],
+                      // Открытые находки ревью с выданными ID — из истории
+                      // поручения; только когда reviewer ведёт протокол
+                      // переходов (иначе их никто не закроет).
+                      ...((await this.reviewProtocol(attempt.reviewer))
+                        ? {
+                            findings: this.engine.read((v) =>
+                              codeReviewHistory(
+                                v.attempts(attempt.workId),
+                                codeReviewScope(attempt.repositoryId, attempt.workId),
+                              ),
+                            ),
+                          }
+                        : {}),
+                      ...(feedback ? { feedback: feedback.text } : {}),
+                    });
+                    // Блок провала и digest запроса, в котором он ушёл, — для
+                    // аудита; сам запрос (stdin) не сохраняется.
+                    if (feedback)
+                      await writeFile(
+                        join(dir, 'feedback.json'),
+                        JSON.stringify(
+                          {
+                            ...feedback,
+                            limits: {
+                              perCase: FEEDBACK_CASE_LIMIT,
+                              total: FEEDBACK_TOTAL_LIMIT,
+                            },
+                            promptDigest: sha256(request),
+                          },
+                          null,
+                          2,
+                        ),
+                      );
                     const response = await this.call(
                       this.adapter(attempt.runtime),
                       {
@@ -1790,34 +1862,7 @@ export class Runner {
                         cwd,
                         dir,
                         phase: 'candidate',
-                        prompt: prompt({
-                          work,
-                          attempt,
-                          history: this.history(attempt),
-                          context,
-                          gates: gates.map((g) => ({ id: g.id, command: g.command })),
-                          inputPolicy: attempt.inputPolicy ?? inputPolicyOf(this.policy),
-                          notes: [
-                            ...this.notes(attempt, false),
-                            ...(await this.hostNotes(work, attempt, false)),
-                            ...(dependencies ? [writerDependenciesNote(dependencies)] : []),
-                            ...(repo.generators?.length ? [generatorNote(repo.generators)!] : []),
-                            ALREADY_SATISFIED_WRITER_NOTE,
-                          ],
-                          // Открытые находки ревью с выданными ID — из истории
-                          // поручения; только когда reviewer ведёт протокол
-                          // переходов (иначе их никто не закроет).
-                          ...((await this.reviewProtocol(attempt.reviewer))
-                            ? {
-                                findings: this.engine.read((v) =>
-                                  codeReviewHistory(
-                                    v.attempts(attempt.workId),
-                                    codeReviewScope(attempt.repositoryId, attempt.workId),
-                                  ),
-                                ),
-                              }
-                            : {}),
-                        }),
+                        prompt: request,
                       },
                       signal,
                     );

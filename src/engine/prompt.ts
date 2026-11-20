@@ -132,6 +132,8 @@ export function prompt(input: {
   retry?: { call: number; calls: number; issues: ProtocolIssue[] };
   /** Закреплённая в попытке политика вопросов: порог называется writer явно. */
   inputPolicy?: InputPolicy;
+  /** Текст провала gates отклонённого кандидата, который продолжает writer. */
+  feedback?: string;
 }) {
   const { work, attempt, review } = input;
   const order = work.order;
@@ -168,6 +170,7 @@ export function prompt(input: {
         ? `The previous attempt stopped before finishing (${attempt.continuedFrom.reason === 'timeout' ? 'ran out of time' : attempt.continuedFrom.reason === 'context-exhausted' ? 'ran out of the model context window' : attempt.continuedFrom.reason === 'needs-input' ? (attempt.input ? 'stopped to ask a question; the answer is in the pinned context below' : 'stopped to ask a question; if the pinned context below has an input-answer source for it, that is the answer, otherwise the question was withdrawn without an answer') : attempt.continuedFrom.reason}). Its unfinished, unverified changes are already applied in this worktree as uncommitted edits (${attempt.continuedFrom.files.join(', ')}). Continue from them: check what is done and what is broken, finish the work and make the gates pass. Treat them as a draft, not as reviewed work.`
         : `The previous attempt produced a candidate that failed (${attempt.continuedFrom.reason === 'review' ? 'rejected by review' : attempt.continuedFrom.reason}); see its error and findings above. Its changes are already applied in this worktree as uncommitted edits (${attempt.continuedFrom.files.join(', ')}). Fix what failed on top of them; if the failure shows the approach itself is wrong, replace it rather than patching around it. The gates and a new independent review decide again.`
       : '',
+    !review && input.feedback ? input.feedback : '',
     // Повтор writer после нехватки окна контекста: прошлый способ работы не
     // помещался. Reviewer той же попытки подсказку не получает; о самой
     // нехватке уже сказал абзац черновика, если черновик наложен.
