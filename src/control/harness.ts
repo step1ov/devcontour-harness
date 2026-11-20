@@ -447,10 +447,12 @@ export class Harness {
     if (!graph) throw new HarnessError('NOT_FOUND', 'Граф не найден: ' + subject);
     if (graph.digest !== digest)
       throw new HarnessError('APPROVAL_STALE', 'Digest не совпадает с зарегистрированным графом');
-    const before =
-      graph.approval?.digest === digest && graph.policyDigest === executionDigest(this.policy);
-    // Тот же граф, другая политика — повторное согласование с записью, кто и почему.
-    if (graph.approval?.digest === digest && !before)
+    const current = executionDigest(this.policy);
+    const before = graph.approval?.digest === digest && graph.policyDigest === current;
+    // Тот же граф, другая политика — повторное согласование с записью, кто и
+    // почему; новый раунд под текущей политикой согласуется обычным approve.
+    const fresh = this.engine.reviews('plan', subject).at(-1)?.policyDigest === current;
+    if (graph.approval?.digest === digest && !before && !fresh)
       throw new HarnessError(
         'APPROVAL_REQUIRED',
         'Граф согласован под прежней политикой: harness reapprove --by --reason (с записью), а после правки изоляции, сети или профилей — новый review-plan',
@@ -469,7 +471,12 @@ export class Harness {
    * `review-plan`. Действует в режиме политики (`approvalMode`): в режиме
    * `agent` последний раунд должен быть одобрен.
    */
-  reapprove(subject: string, digest: string, audit: { by: string; reason: string }) {
+  reapprove(subject: string, digest: string, input: { by: string; reason: string }) {
+    const audit = { by: input.by.trim(), reason: input.reason.trim() };
+    if (!audit.by || audit.by.length > 200)
+      throw new HarnessError('INVALID_INPUT', 'by: от 1 до 200 знаков');
+    if (audit.reason.length < 3 || audit.reason.length > 2000)
+      throw new HarnessError('INVALID_INPUT', 'reason: от 3 до 2000 знаков');
     const graph = this.engine.read((v) => v.graph(subject));
     if (!graph) throw new HarnessError('NOT_FOUND', 'Граф не найден: ' + subject);
     if (graph.digest !== digest)
@@ -497,6 +504,14 @@ export class Harness {
         policyDigest: current,
         previousPolicyDigest: previous,
       };
+    // Повторное согласование держится на одобренном раунде в любом режиме:
+    // смена approvalMode не превращает отклонённый раунд в согласование.
+    const last = this.engine.reviews('plan', subject).at(-1);
+    if (!last?.approved)
+      throw new HarnessError(
+        'REVIEW_REJECTED',
+        'Последний раунд ревью плана не одобрил граф: reapprove держится только на одобренном раунде',
+      );
     this.engine.approve(subject, this.policy.approvalMode, {
       bindContext: true,
       reapproval: audit,

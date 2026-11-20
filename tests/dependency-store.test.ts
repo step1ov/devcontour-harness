@@ -2603,3 +2603,40 @@ test(
       assert.equal((e as unknown as { payload: { unused?: boolean } }).payload.unused, true);
   },
 );
+
+test(
+  'DS45: PATH и packageManager называют разные major pnpm — формат store разный, хранилище не применяется',
+  { skip: unavailable, timeout: 120000 },
+  async (t) => {
+    const reg = await registry(t);
+    const bin = realpathSync(mkdtempSync(join(tmpdir(), 'harness-pnpm-')));
+    writeFileSync(
+      join(bin, 'pnpm'),
+      `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 11.25.0; exit 0; fi\nexec ${JSON.stringify(pnpm)} "$@"\n`,
+      { mode: 0o755 },
+    );
+    const ctx = await contour(
+      reg.url,
+      { 'dep-a': '1.0.0' },
+      {
+        files: {
+          'package.json': JSON.stringify({
+            ...JSON.parse(manifest({ 'dep-a': '1.0.0' })),
+            packageManager: 'pnpm@10.12.3',
+          }),
+        },
+        policy: (p) => {
+          p.environment.values.PATH = bin + ':' + process.env.PATH;
+          p.environment.values.npm_config_manage_package_manager_versions = 'false';
+          p.environment.values.pnpm_config_pm_on_fail = 'ignore';
+        },
+      },
+    );
+    const r = await ctx.check(ctx.repo.head());
+    gatesPassed(r);
+    assert.equal(r.receipt.outcome, 'miss');
+    assert.match(r.receipt.reason, /11\.25\.0 в PATH и 10\.12\.3 в packageManager — разные major/);
+    assert.deepEqual(r.receipt.env, {});
+    assert.equal(existsSync(ctx.seeds), false, 'seed не собирался');
+  },
+);

@@ -769,8 +769,8 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       // Интеграция повторяет стадии подготовки уже после исполнителя.
       note:
         work.status === 'running' && work.openStage?.preparing
-        ? `Поручение выполняется (${work.status}): подготовка — ${work.openStage.stage} с ${work.openStage.startedAt}; исполнитель ещё не запущен.`
-        : `Поручение выполняется (${work.status}).`,
+          ? `Поручение выполняется (${work.status}): подготовка — ${work.openStage.stage} с ${work.openStage.startedAt}; исполнитель ещё не запущен.`
+          : `Поручение выполняется (${work.status}).`,
     };
   if (work.status === 'ready' && work.attempt >= maxAttempts)
     return {

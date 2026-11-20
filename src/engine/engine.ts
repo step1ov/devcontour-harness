@@ -697,6 +697,11 @@ export class Engine {
     const covered = last.isolationDigest
       ? last.isolationDigest === isolationDigest(this.policy)
       : Boolean(graph.approval) && graph.policyDigest === executionDigest(this.policy);
+    if (!covered && !last.isolationDigest)
+      throw new HarnessError(
+        'APPROVAL_REQUIRED',
+        `Раунд ревью плана ${last.round} записан версией до 0.1.0-alpha.59 без отметки политики: он не покрывает изменённую политику и не согласует граф впервые — нужен новый раунд review-plan`,
+      );
     if (!covered)
       throw new HarnessError(
         'APPROVAL_REQUIRED',

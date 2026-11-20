@@ -979,7 +979,13 @@ async function unsupported(identity: Identity, spec: DependencyStorePolicy, cwd:
     (v) => v !== undefined,
   );
   const wrong = versions.find((v) => !dependencyStoreSupports(spec.manager, v));
-  return wrong && `${spec.manager} ${wrong} вне проверенных версий ${from} … <${below}`;
+  if (wrong) return `${spec.manager} ${wrong} вне проверенных версий ${from} … <${below}`;
+  // Формат store — по major-версии (`v10`, `v11`): seed, собранный менеджером из
+  // PATH, закреплённому менеджеру checkout другого major бесполезен.
+  const majors = new Set(versions.map((v) => v.split('.')[0]));
+  if (majors.size > 1)
+    return `${spec.manager} ${versions[0]} в PATH и ${versions[1]} в packageManager — разные major-версии: формат store разный, хранилище не применяется`;
+  return undefined;
 }
 
 /** Lockfile checkout: обычный файл внутри дерева или ничего; сверх предела — `oversized`. */

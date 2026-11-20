@@ -195,12 +195,14 @@ the findings in advance. With `approvalMode: operator` a human approves with
 **After a policy change.** An approval belongs to the policy it was made
 under: after you edit `.harness/policy.json` (or `lean` changes it) the graph
 is `APPROVAL_STALE`, and `review-plan` holds a new round instead of returning
-the stored one. When the change does not touch isolation, network domains,
-tool profiles, role or review assignments (for example a gate timeout), re-approve
+the stored one. When the change does not touch the execution boundary (list
+below) — for example a gate timeout — and the last round approved, re-approve
 through the CLI with an audit record:
 `$H reapprove --state … --policy .harness/policy.json --subject <graph-id> --digest <graph digest> --by "<who>" --reason "<what changed and why the last review still covers it>"`.
 A change to isolation, network, tool profiles (or which profile a role or
-reviewer uses), inherited host variables, secrets or `protectedPaths` always
+reviewer uses), the policy `environment`, `protectedPaths`, host steps
+(`lifecycle`, `prepare`, `dependencyBuild`, `preflight`), `mode` or
+`approvalMode` always
 needs a fresh `review-plan` — `reapprove` and `approve` refuse it
 (`APPROVAL_REQUIRED`). In operator mode `approve` of an already approved graph
 after a policy edit also points to `reapprove`.

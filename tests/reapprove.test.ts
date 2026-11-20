@@ -36,7 +36,7 @@ const refused = (code: ErrorCode, message?: RegExp) => (e: unknown) => {
   return true;
 };
 
-function reviewers() {
+function reviewers(decisions: boolean[] = []) {
   const requests: RuntimeRequest[] = [];
   const adapter = (runtime: RuntimeName): RuntimeAdapter => ({
     runtime,
@@ -48,7 +48,7 @@ function reviewers() {
         text: '',
         model: null,
         runtimeVersion: 'controlled',
-        output: { approved: true, summary: 'ok', findings: [], previous: [] },
+        output: { approved: decisions.shift() ?? true, summary: 'ok', findings: [], previous: [] },
         usage: {
           inputTokens: 0,
           outputTokens: 0,
@@ -325,7 +325,7 @@ test('RA07: раунд записывается с политикой движк
   );
   assert.throws(
     () => next.approve('g', 'agent', { bindContext: true }),
-    refused('APPROVAL_REQUIRED', /Изоляция, сеть или профили/),
+    refused('APPROVAL_REQUIRED', /версией до 0\.1\.0-alpha\.59/),
   );
 });
 
@@ -408,4 +408,98 @@ test('RA09: reapprove другого digest графа — отказ; approve �
     refused('APPROVAL_REQUIRED', /review-plan/),
   );
   h2.close();
+});
+
+test('RA10: operator — после правки изоляции новый review-plan согласуется обычным approve, без записи reapprove', async () => {
+  const operator = (p: any) => {
+    base(p);
+    p.approvalMode = 'operator';
+  };
+  const { adapters } = reviewers();
+  const stateDir = mkdtempSync(join(tmpdir(), 'harness-reapprove-'));
+  const h = Harness.open({
+    policy: policyOf(operator),
+    stateDir,
+    baseDir: process.cwd(),
+    adapters,
+  });
+  h.engine.register(graph(), trustNone);
+  const record = await h.review({ kind: 'plan', graph: graph(), author: 'claude' });
+  h.approve(record.subject, record.digest);
+  h.close();
+  const after = policyOf((p: any) => {
+    operator(p);
+    p.isolation = { mode: 'os', domains: ['example.com'] };
+  });
+  const h2 = Harness.open({ policy: after, stateDir, baseDir: process.cwd(), adapters });
+  assert.throws(
+    () => h2.reapprove(record.subject, record.digest, { by: 'оператор', reason: 'сеть' }),
+    refused('APPROVAL_REQUIRED', /Изоляция, сеть или профили/),
+  );
+  await h2.review({ kind: 'plan', graph: graph(), author: 'claude' });
+  const data = h2.approve(record.subject, record.digest);
+  assert.equal(data.changed, true);
+  const approval = h2.engine.read((v) => v.graph(record.subject)!);
+  assert.equal(approval.policyDigest, executionDigest(after));
+  assert.equal(approval.approval!.reapproval, undefined, 'новый раунд — не повторное согласование');
+  h2.close();
+});
+
+test('RA11: отклонённый последний раунд — reapprove отказывает и после смены approvalMode; окружение политики — граница', async () => {
+  const { adapters } = reviewers([true, false]);
+  const stateDir = mkdtempSync(join(tmpdir(), 'harness-reapprove-'));
+  const h = Harness.open({ policy: policyOf(base), stateDir, baseDir: process.cwd(), adapters });
+  h.engine.register(graph(), trustNone);
+  const record = await h.review({ kind: 'plan', graph: graph(), author: 'claude' });
+  h.engine.approve(record.subject, 'agent', { bindContext: true });
+  h.close();
+  // Под правленой политикой новый раунд отклоняет граф.
+  const edited = policyOf((p: any) => {
+    base(p);
+    p.runTimeoutMs = 900000;
+  });
+  const h2 = Harness.open({ policy: edited, stateDir, baseDir: process.cwd(), adapters });
+  const rejected = await h2.review({ kind: 'plan', graph: graph(), author: 'claude' });
+  assert.equal(rejected.approved, false);
+  assert.throws(
+    () => h2.reapprove(record.subject, record.digest, { by: 'lead', reason: 'обход' }),
+    refused('REVIEW_REJECTED'),
+  );
+  h2.close();
+  const operator = policyOf((p: any) => {
+    base(p);
+    p.runTimeoutMs = 900000;
+    p.approvalMode = 'operator';
+  });
+  const h3 = Harness.open({ policy: operator, stateDir, baseDir: process.cwd(), adapters });
+  assert.throws(
+    () => h3.reapprove(record.subject, record.digest, { by: 'lead', reason: 'обход' }),
+    refused('REVIEW_REJECTED'),
+  );
+  assert.throws(
+    () => h3.reapprove(record.subject, record.digest, { by: ' ', reason: 'обход' }),
+    refused('INVALID_INPUT'),
+  );
+  h3.close();
+});
+
+test('RA12: значения окружения политики и шаги prepare — граница исполнения', async () => {
+  for (const widen of [
+    (p: any) => (p.environment = { values: { NODE_OPTIONS: '--require ./x.js' } }),
+    (p: any) => (p.repositories[0].prepare = [{ id: 'x', command: ['sh', '-c', 'true'] }]),
+    (p: any) => (p.approvalMode = 'operator'),
+  ]) {
+    const { record, reopen } = await approvedUnder(policyOf(base));
+    const h = reopen(
+      policyOf((p: any) => {
+        base(p);
+        widen(p);
+      }),
+    );
+    assert.throws(
+      () => h.reapprove(record.subject, record.digest, { by: 'lead', reason: 'правка' }),
+      refused('APPROVAL_REQUIRED', /Изоляция, сеть или профили/),
+    );
+    h.close();
+  }
 });
