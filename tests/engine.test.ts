@@ -481,7 +481,7 @@ test('F-AQ: retry --reset у готовой работы выполняет сб
   const none = engine.retry('a', { reason: 'полный лимит' });
   assert.equal(none.changed, false);
   assert.deepEqual(none.reset?.performed, false);
-  assert.match(none.reset!.note!, /нечего/);
+  assert.match(none.reset.note, /нечего/);
   // Две потраченные попытки, работа снова готова (обычный повтор).
   for (let i = 0; i < 2; i++) {
     const a = engine.claim('c1')!;
