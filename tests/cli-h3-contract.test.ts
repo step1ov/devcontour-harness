@@ -752,6 +752,9 @@ test('F-B: справка каждой команды — <команда> --hel
   const proto = call(['constructor', '--help']);
   assert.equal(proto.status, 2, proto.stderr);
   assert.doesNotMatch(proto.stderr, /at .*cli\.ts/);
+  const meta = call(['help', '--help']);
+  assert.equal(meta.status, 0);
+  assert.match(meta.stderr, /Использование: harness <команда>/);
   const unknown = call(['help', 'nope']);
   assert.equal(unknown.status, 2);
   assert.match(unknown.stderr, /неизвестная команда: nope/);

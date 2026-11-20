@@ -669,6 +669,22 @@ export class Engine {
   }
 
   /**
+   * Перепроверить основание применённого, но ещё не переданного ответа сейчас,
+   * а не при следующей выдаче: разошлось (постановка, контекст, у хоста —
+   * политика) — запрос возвращается в `answered` с записью `stale`, как при
+   * claim. Возвращает текущий запрос.
+   */
+  refreshApplied(id: string) {
+    return this.tx('input.applied', (tx) => {
+      const { request } = this.requestIn(tx, id);
+      const work = tx.work(request.workId);
+      if (work && linksAnswer(request) && !request.delivered && request.target)
+        this.staleTargets(tx, work);
+      return this.requestIn(tx, id).request;
+    });
+  }
+
+  /**
    * Покрывает ли последний раунд ревью плана снимок `contextDigest` по тем же
    * правилам, что у согласования (`approvalRules`): `{ round }` — да, иначе
    * причина. Только чтение; им `Harness.resolveInput` и `carryInputOf`
@@ -678,6 +694,9 @@ export class Engine {
     return this.read((v): { round: number } | { reason: string } => {
       try {
         const { last } = this.approvalRules(v, graphId, this.policy.approvalMode);
+        // Отклонённый раунд не переиспользуется ни в каком режиме: новый раунд
+        // с отказом — тоже отказ (REVIEW_REJECTED).
+        if (!last.approved) return { reason: `раунд ${last.round} не одобрил граф` };
         if ((last.contextDigest ?? null) !== contextDigest)
           return { reason: `раунд ${last.round} рассматривал другой снимок контекста` };
         return { round: last.round };

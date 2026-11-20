@@ -1226,7 +1226,7 @@ export const cliCommands = {
         name: '--actor',
         value: 'text',
         required: false,
-        description: 'Кто заменяет вопрос: operator (по умолчанию) или lead — запись замены',
+        description: 'Кто заменяет вопрос: lead (по умолчанию) или operator — запись замены',
       },
     ],
     refusals: [

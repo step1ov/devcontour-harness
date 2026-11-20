@@ -1399,3 +1399,54 @@ test('alpha.60 (F-AK): правка политики и выдача друго�
   assert.equal(a?.workId, 'a');
   assert.equal(a?.input?.requestId, env.request.id, 'ответ связан с попыткой под новой политикой');
 });
+
+test('alpha.60 (F-AK, граница): правка изоляции после применения требует нового ревью плана; новый снимок без ответа делает его устаревшим', () => {
+  const env = stopped();
+  const prepared = prepare(env);
+  assert.equal(applyWith(env, prepared).applied, true);
+  env.engine.release('c1');
+  // Изоляция изменилась: прежний раунд её не покрывает — согласования нет.
+  const p2 = policyOf((p) => (p.isolation = { mode: 'os', domains: ['example.com'] }));
+  const e2 = new Engine({
+    host: standaloneHost(env.store, p2),
+    policy: p2,
+    now: () => env.clock.now,
+  });
+  e2.lead('c2');
+  assert.equal(
+    code(() => e2.approve(env.graph.id, 'agent', { bindContext: true })),
+    'APPROVAL_REQUIRED',
+  );
+  assert.equal(e2.claim('c2'), undefined, 'граф под новой изоляцией не выдаётся без нового раунда');
+  assert.equal(e2.inputRequest(env.request.id).lifecycle, 'applied');
+  // Новый раунд под новой изоляцией, но без снимка с ответом: ответ устарел.
+  e2.recordReview(planReview(e2, env.graph, e2.reviews('plan', env.graph.id).length + 1));
+  e2.approve(env.graph.id, 'agent', { bindContext: true });
+  const refreshed = e2.refreshApplied(env.request.id);
+  assert.equal(refreshed.lifecycle, 'answered');
+  assert.equal(refreshed.stale?.reason, 'context');
+});
+
+test('alpha.60: отклонённый раунд со снимком ответа не переиспользуется и в режиме operator', () => {
+  const env = stopped();
+  // Тот же каталог состояния под политикой approvalMode: operator.
+  const p2 = policyOf((p) => (p.approvalMode = 'operator'));
+  const e2 = new Engine({
+    host: standaloneHost(env.store, p2),
+    policy: p2,
+    now: () => env.clock.now,
+  });
+  const prepared = prepare(env, 'Hello, <name>!', false);
+  const round = (approved: boolean) =>
+    e2.recordReview({
+      ...planReview(e2, env.graph, e2.reviews('plan', env.graph.id).length + 1, approved),
+      contextDigest: prepared.digest,
+    });
+  round(false);
+  const covered = e2.planRoundCovers(env.graph.id, prepared.digest);
+  assert.ok('reason' in covered && /не одобрил/.test(covered.reason), JSON.stringify(covered));
+  round(true);
+  assert.deepEqual(e2.planRoundCovers(env.graph.id, prepared.digest), {
+    round: env.engine.reviews('plan', env.graph.id).at(-1)!.round,
+  });
+});

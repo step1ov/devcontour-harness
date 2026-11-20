@@ -1399,7 +1399,7 @@ async function run(
               })
             : await h.carryInputOf(id, {
                 reason: need('reason'),
-                by: parseWith(z.enum(['operator', 'lead']), v.actor ?? 'operator', 'actor'),
+                by: parseWith(z.enum(['operator', 'lead']), v.actor ?? 'lead', 'actor'),
                 ...optional('author', author),
                 ...optional('reset', reset),
               });
@@ -1539,7 +1539,9 @@ const valued = (token: string | undefined) =>
   (options as Record<string, { type: string }>)[token.slice(2)]?.type === 'string';
 const helpOf =
   argv[0] === 'help' || argv[0] === '--help'
-    ? argv[1]
+    ? argv[1] === '--help' || argv[1] === '-h'
+      ? undefined
+      : argv[1]
     : argv.slice(1).some((a, i) => (a === '--help' || a === '-h') && !valued(argv[i]))
       ? argv[0]
       : undefined;

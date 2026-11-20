@@ -664,7 +664,9 @@ export class Harness {
    * бюджет — `applied: false` с причиной.
    */
   async resolveInput(id: string, options: { author?: Author; reset?: { reason: string } } = {}) {
-    const request = this.engine.inputRequest(id);
+    // Применённый ответ, основание которого уже разошлось, — не «готово»:
+    // перепроверка сейчас возвращает его в answered, и он применяется заново.
+    const request = this.engine.refreshApplied(id);
     if (request.lifecycle === 'applied')
       return {
         requestId: id,
@@ -732,7 +734,7 @@ export class Harness {
       reason: string;
       author?: Author;
       reset?: { reason: string };
-      /** Кто заменяет вопрос (запись `closed.by`); по умолчанию — оператор. */
+      /** Кто заменяет вопрос (запись `closed.by`); по умолчанию — ведущий. */
       by?: 'operator' | 'lead';
     },
   ) {
@@ -756,7 +758,7 @@ export class Harness {
         );
       request = this.engine.supersedeInput(
         id,
-        { by: options.by ?? 'operator', reason: options.reason, successor: request.workId },
+        { by: options.by ?? 'lead', reason: options.reason, successor: request.workId },
         request.version,
       ).request;
       superseded = true;
@@ -765,12 +767,18 @@ export class Harness {
     else if (request.lifecycle !== 'superseded')
       throw new HarnessError('NOT_READY', `Запрос ${id} ${request.lifecycle}: переносить нечего`);
     const ctx = this.inputContext(id);
-    const review = await this.reviewSnapshot(
-      request.graphId,
-      ctx.snapshot,
-      ctx.digest,
-      options.author,
-    );
+    let review: { round: number; reviewed: 'reused' | 'new' };
+    try {
+      review = await this.reviewSnapshot(request.graphId, ctx.snapshot, ctx.digest, options.author);
+    } catch (error) {
+      // Вопрос уже заменён этим вызовом: состояние названо, повтор продолжит перенос.
+      if (superseded && error instanceof HarnessError)
+        throw new HarnessError(
+          error.code,
+          `${error.message}. Вопрос ${id} уже заменён (superseded) этим вызовом: повтор input-carry продолжит перенос`,
+        );
+      throw error;
+    }
     const proposed = this.proposeCarry(id, ctx.digest);
     if (!proposed.target)
       throw new HarnessError(
