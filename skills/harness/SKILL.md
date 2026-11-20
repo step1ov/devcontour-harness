@@ -344,20 +344,6 @@ listen on localhost), or record that the product rule is waived under the
 harness (controller-mode overlay). A browser that aborts under the macOS
 sandbox (`process-abort`) cannot run inside the writer at all.
 
-**Dependency cache (prepare time).**
-
-1. Right after `init` run `$H smoke` and read the prepare time and the
-   dependency-store advice in `data.steps` / `warnings`.
-2. Prepare longer than a minute → enable `dependencyStore` through
-   `$H lean`.
-3. The package manager version is not supported by the store → report it to
-   the operator as a harness finding. Do not build your own shared cache into
-   the step or gate arguments (no store or cache directory inside the attempt
-   worktree, no absolute shared paths): a per-worktree store downloads every
-   package on every attempt, and a shared mutable path breaks isolation and
-   portability.
-4. Do not start a paid `run` until prepare fits a reasonable time.
-
 ### 8. When it stops
 
 `$H explain --state <state> --policy .harness/policy.json [--work <id>]` is
