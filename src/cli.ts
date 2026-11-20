@@ -379,9 +379,9 @@ const flagOwners = {
   text: ['input-answer'],
   option: ['input-answer'],
   kind: ['input-answer'],
-  actor: ['input-answer', 'review-plan', 'review-contract'],
+  actor: ['input-answer', 'review-plan', 'review-contract', 'review-accept'],
   by: ['reapprove'],
-  'accept-limitation': ['review-plan', 'review-contract'],
+  'accept-limitation': ['review-plan', 'review-contract', 'review-accept'],
   'continue-review': ['review-plan', 'review-contract'],
   'request-version': ['input-answer', 'input-apply', 'input-cancel', 'input-supersede'],
   'context-digest': ['input-target', 'input-apply'],
@@ -707,6 +707,30 @@ async function run(
           });
         }
         return { command, data: record, code: record.approved ? 0 : exitCodes.refused };
+      } finally {
+        h.close();
+      }
+    }
+    case 'review-accept': {
+      // Решение по находкам ревью кода поручения (docs/review-protocol.md §10).
+      const [accept] = reviewDispositionsOf({
+        'accept-limitation': v['accept-limitation'],
+        reason: need('reason'),
+        ...(v.actor !== undefined ? { actor: v.actor } : {}),
+      });
+      const ids = (v['accept-limitation'] ?? []).flatMap((x) =>
+        x
+          .split(',')
+          .map((y) => y.trim())
+          .filter(Boolean),
+      );
+      if (!accept) throw new HarnessError('INVALID_INPUT', '--accept-limitation: нужен ID находки');
+      const h = open(need('state'), binding(need('state')), true);
+      try {
+        return {
+          command,
+          data: h.engine.acceptCodeFindings(need('work'), ids, accept.reason, accept.by),
+        };
       } finally {
         h.close();
       }

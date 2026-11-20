@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   authorSchema,
   digestSchema,
+  gitShaSchema,
   idSchema,
   isoTimeSchema,
   relativePathSchema,
@@ -441,6 +442,65 @@ export const reviewRoundSchema = z.strictObject({
 });
 export type ReviewRound = z.infer<typeof reviewRoundSchema>;
 
+/**
+ * Поздняя находка ревью кода (docs/review-protocol.md §10): новая blocking-
+ * находка раунда на пути, который не менялся с прошлого валидного раунда той
+ * же фазы (нет в diff прежнего и текущего SHA). Метка — для ведущего
+ * («движущаяся цель»): она не одобряет и не ослабляет gates.
+ */
+export const lateFindingSchema = z.strictObject({
+  /** Прошлый валидный раунд фазы, с которого путь не менялся. */
+  since: z.strictObject({ round: z.number().int().positive(), sha: gitShaSchema }),
+  reason: z.string().min(1).max(500),
+});
+export type LateFinding = z.infer<typeof lateFindingSchema>;
+
+/**
+ * Решение ведущего или оператора по открытой находке ревью кода поручения
+ * (`harness review-accept`). Хранится у поручения (`WorkState`) и
+ * применяется историей после раунда `round` (последний раунд области на
+ * момент решения): находка — `withdrawn` с `disposition`; reviewer видит её
+ * принятой и не поднимает без новых доказательств.
+ */
+export const codeReviewDecisionSchema = z.strictObject({
+  finding: digestSchema,
+  decision: z.literal('accepted-limitation'),
+  by: z.enum(reviewDeciders),
+  reason: z.string().trim().min(3).max(4000),
+  round: z.number().int().min(0),
+  at: isoTimeSchema,
+});
+export type CodeReviewDecision = z.infer<typeof codeReviewDecisionSchema>;
+
+/** Ответ `review-accept`: принятые находки поручения после решения. */
+export const reviewAcceptDataSchema = z.strictObject({
+  workId: idSchema,
+  /** false — все названные находки уже были приняты тем же решением. */
+  changed: z.boolean(),
+  /** Последний раунд области на момент решения: решение применяется со следующего. */
+  round: z.number().int().min(0),
+  accepted: z
+    .array(
+      z.strictObject({
+        id: digestSchema,
+        severity: z.string().min(1).max(40),
+        message: z.string().max(4000),
+        path: z.string().max(500).nullable(),
+        status: z.enum(findingStatuses),
+        disposition: z
+          .strictObject({
+            decision: z.literal('accepted-limitation'),
+            by: z.enum(reviewDeciders),
+            reason: z.string().min(1).max(4000),
+            round: z.number().int().min(0),
+          })
+          .optional(),
+        late: lateFindingSchema.optional(),
+      }),
+    )
+    .max(REVIEW_ITEMS_LIMIT),
+});
+
 /** Область истории находок ревью кода: поручение в репозитории. */
 export const codeReviewScope = (repositoryId: string, workId: string) =>
   digestOf({ kind: 'code-review', repositoryId, workId });
@@ -513,6 +573,15 @@ export interface CodeFinding {
   changedIn: number;
   basis?: string;
   transitions: FindingTransitionRecord[];
+  /** Принятое ограничение (`review-accept`): находка `withdrawn` решением ведущего или оператора. */
+  disposition?: {
+    decision: 'accepted-limitation';
+    by: (typeof reviewDeciders)[number];
+    reason: string;
+    round: number;
+  };
+  /** Поздняя находка: путь не менялся с прошлого валидного раунда фазы (§10). */
+  late?: LateFinding;
 }
 
 export interface CodeReviewHistory {
@@ -541,6 +610,7 @@ export interface HistoryAttempt {
           path?: string | null | undefined;
           line?: number | null | undefined;
           id?: string | undefined;
+          late?: LateFinding | undefined;
         }[]
       | undefined;
     reviewRound?: ReviewRound | undefined;
@@ -553,15 +623,35 @@ export interface HistoryAttempt {
  * Записи alpha.5 без `reviewRound`: находки отклонившего ревью открыты с
  * детерминированно восстановленным ID.
  */
-export function codeReviewHistory(attempts: HistoryAttempt[], scope: string): CodeReviewHistory {
+export function codeReviewHistory(
+  attempts: HistoryAttempt[],
+  scope: string,
+  /** Решения ведущего/оператора поручения (`WorkState.codeReviewDecisions`), по порядку записи. */
+  decisions: readonly CodeReviewDecision[] = [],
+): CodeReviewHistory {
   const byId = new Map<string, CodeFinding>();
   let round = 0;
+  // Решение применяется после своего раунда: позже раунд может явно открыть
+  // находку снова (reopen с новыми доказательствами) — тогда решение снято.
+  let pending = [...decisions];
+  const decide = (before: number) => {
+    const now = pending.filter((d) => d.round < before);
+    pending = pending.filter((d) => d.round >= before);
+    for (const d of now) {
+      const f = byId.get(d.finding);
+      if (!f || f.status !== 'open') continue;
+      f.status = 'withdrawn';
+      f.basis = d.reason;
+      f.disposition = { decision: d.decision, by: d.by, reason: d.reason, round: d.round };
+    }
+  };
   for (const a of attempts)
     for (const e of a.evidence) {
       if (e.kind !== 'review') continue;
       const r = e.reviewRound;
       if (!r) {
         // Запись прежней версии: свой раунд, находки отказа — открытые.
+        decide(round + 1);
         round++;
         if (e.passed) continue;
         (e.findings ?? []).forEach((f, index) => {
@@ -590,10 +680,12 @@ export function codeReviewHistory(attempts: HistoryAttempt[], scope: string): Co
         continue;
       }
       if (r.scope !== scope || r.protocol !== 'valid') continue;
+      decide(r.round);
       round = Math.max(round, r.round);
       for (const t of r.transitions ?? []) {
         const f = byId.get(t.id);
         if (!f) continue;
+        if (t.to === 'open') delete f.disposition;
         f.status = t.to;
         f.changedIn = r.round;
         f.basis = t.basis;
@@ -627,9 +719,11 @@ export function codeReviewHistory(attempts: HistoryAttempt[], scope: string): Co
           openedIn: r.round,
           changedIn: r.round,
           transitions: [],
+          ...(f.late ? { late: f.late } : {}),
         });
       }
     }
+  decide(Infinity);
   return { scope, round, findings: [...byId.values()] };
 }
 

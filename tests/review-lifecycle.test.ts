@@ -41,7 +41,11 @@ type Ctx = ReturnType<typeof setup>;
 const attempts = (ctx: Ctx) => ctx.engine.read((v) => v.attempts(WORK));
 const history = (ctx: Ctx) =>
   ctx.engine.read((v) =>
-    codeReviewHistory(v.attempts(WORK), codeReviewScope(ctx.policy.repositories[0]!.id, WORK)),
+    codeReviewHistory(
+      v.attempts(WORK),
+      codeReviewScope(ctx.policy.repositories[0]!.id, WORK),
+      v.work(WORK)?.codeReviewDecisions,
+    ),
   );
 const work = (ctx: Ctx) => ctx.engine.read((v) => v.work(WORK)!);
 const writerCalls = (ctx: Ctx) => fixtureCalls(ctx.scenarioPath, 'claude', 'writer');
@@ -754,4 +758,81 @@ test('HP06/HP09: протокольный отказ нейтрален для �
   assert.equal(last.reusedFrom?.candidateSha, all[0]!.candidateSha, 'кандидат взят без writer');
   assert.equal(writerCalls(ctx), 1);
   assert.equal(greet.length > 0, true);
+});
+
+test('F-AX: новая blocking на неизменённом пути помечена поздней; принятое ограничение видит следующий раунд, gates прежние', async () => {
+  const late = { ...finding('Тест не проверяет код выхода раннера'), path: 'test/run.js' };
+  const fresh = finding('greet не обрезает пробелы');
+  const ctx = setup({
+    scenario: {
+      writer: [implement(), implement({ 'src/greet.js': fixedGreet }), implement({})],
+      reviewer: [
+        verdict(false, { findings: [defect] }),
+        {
+          ...verdict(false, {
+            findings: [fresh, late],
+            previous: [{ id: '$open:0', status: 'open', basis: 'Пустое имя всё ещё не проверено' }],
+          }),
+          recordPrompt: true,
+        },
+        { ...verdict(true, { previous: [] }), recordPrompt: true },
+        verdict(true, { previous: [] }),
+      ],
+    },
+    policy: (p: any) => {
+      p.maxAttempts = 3;
+    },
+  });
+  await runAll(ctx);
+  ctx.engine.retry(WORK);
+  await ctx.runner.drain();
+  const second = attempts(ctx)[1]!;
+  assert.equal(second.status, 'failed');
+  assert.equal(second.failureKind, 'review', 'метка не меняет исход раунда');
+  // Правило полноты раунда — в запросе reviewer.
+  assert.match(recordedPrompt(ctx.scenarioPath, 'reviewer', 1), /report ALL blocking findings/);
+  const review = second.evidence.find((e) => e.kind === 'review' && e.phase === 'candidate')!;
+  const [onChanged, onUnchanged] = review.findings!;
+  assert.equal(onChanged!.late, undefined, 'src/greet.js менялся с раунда 1');
+  assert.equal(onUnchanged!.late?.since.round, 1);
+  assert.equal(onUnchanged!.late?.since.sha, attempts(ctx)[0]!.candidateSha);
+  assert.match(review.summary, /поздние находки: 1/);
+  assert.match(work(ctx).failure ?? '', /поздние находки: 1/, 'видно в status/explain');
+  const result = runResult(second, 'test');
+  assert.equal(result.findings.find((f) => f.path === 'test/run.js')?.late?.since.round, 1);
+  // Ведущий принимает все открытые находки известным ограничением.
+  const open = history(ctx).findings.filter((f) => f.status === 'open');
+  assert.equal(open.length, 3);
+  assert.throws(
+    () => ctx.engine.acceptCodeFindings(WORK, [digestOf('чужая')], 'Известное ограничение', 'lead'),
+    /INVALID_INPUT|нет в истории/,
+  );
+  const accepted = ctx.engine.acceptCodeFindings(
+    WORK,
+    open.map((f) => f.id),
+    'Строгость тестов — известное ограничение этой задачи',
+    'lead',
+  );
+  assert.equal(accepted.changed, true);
+  assert.deepEqual(
+    accepted.accepted.map((f) => [f.status, f.disposition?.by]),
+    open.map(() => ['withdrawn', 'lead']),
+  );
+  assert.equal(
+    ctx.engine.acceptCodeFindings(WORK, [open[0]!.id], 'Повтор того же решения', 'lead').changed,
+    false,
+    'повтор ничего не меняет',
+  );
+  assert.equal(work(ctx).codeReviewDecisions?.length, 3);
+  ctx.engine.retry(WORK);
+  await ctx.runner.drain();
+  const last = attempts(ctx).at(-1)!;
+  assert.equal(last.status, 'succeeded', last.error);
+  // Третий раунд: открытых нет, принятые — в истории с решением и основанием.
+  const third = recordedPrompt(ctx.scenarioPath, 'reviewer', 2);
+  assert.match(third, /accepted-limitation/);
+  assert.match(third, /Строгость тестов — известное ограничение/);
+  assert.match(third, /There are no open review findings/);
+  const f = history(ctx).findings;
+  assert.ok(f.every((x) => x.status === 'withdrawn' && x.disposition?.by === 'lead'));
 });

@@ -551,3 +551,54 @@ test('HP06/R2-F01: logicalReview — начатые вызовы по учёту
   // Другой SHA — другое логическое ревью.
   assert.equal(logicalReview([a('A', 'expired')], scope, 'candidate', 'd'.repeat(40), of).used, 0);
 });
+
+test('F-AX: решение accepted-limitation применяется после своего раунда; явный reopen снимает его', () => {
+  const scope = codeReviewScope('app', WORK);
+  const id = digestOf('находка');
+  const round = (n: number, extra: Record<string, unknown>) => ({
+    id: 'e' + n,
+    runId: 'r' + n,
+    kind: 'review' as const,
+    phase: 'candidate' as const,
+    sha: String(n).repeat(40),
+    passed: false,
+    findings: [] as any[],
+    reviewRound: {
+      version: 1 as const,
+      scope,
+      round: n,
+      call: 1,
+      calls: 2,
+      protocol: 'valid' as const,
+      expected: [],
+      ...extra,
+    },
+  });
+  const first = round(1, {});
+  first.findings = [{ severity: 'blocking', message: 'Слабый тест', path: 'test/a.js', id }];
+  const decision = {
+    finding: id,
+    decision: 'accepted-limitation' as const,
+    by: 'lead' as const,
+    reason: 'Известное ограничение',
+    round: 1,
+    at: '2026-11-20T00:00:00.000Z',
+  };
+  const attempts = [{ id: 'a1', status: 'failed', evidence: [first] }];
+  const accepted = codeReviewHistory(attempts, scope, [decision]).findings[0]!;
+  assert.equal(accepted.status, 'withdrawn');
+  assert.equal(accepted.disposition?.by, 'lead');
+  assert.equal(codeReviewHistory(attempts, scope).findings[0]!.status, 'open', 'без решения');
+  const reopen = round(2, {
+    transitions: [
+      { id, from: 'withdrawn', to: 'open', basis: 'Новые доказательства: тест не падает' },
+    ],
+  });
+  const again = codeReviewHistory(
+    [...attempts, { id: 'a2', status: 'failed', evidence: [reopen] }],
+    scope,
+    [decision],
+  ).findings[0]!;
+  assert.equal(again.status, 'open');
+  assert.equal(again.disposition, undefined);
+});
