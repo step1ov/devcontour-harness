@@ -1097,12 +1097,13 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
       interrupted: a.interrupted,
       rechecks: w.rechecks,
       neutral: { used: a.neutral.used, max: a.neutral.max },
-      ...((line) => (line ? { line: text(c, line, T.line) } : {}))(
+      // Из чисел строки — уже замаскирована и в пределе: вторая маска поверх
+      // метки удлинила бы строку и отрезала хвост. Иначе — строка загрузчика.
+      ...((line) => (line ? { line } : {}))(
         a.lineFacts && (c.lang === 'en' ? a.lineEn : a.line) !== undefined
-          ? attemptLine(a.lineFacts, c.lang, T.line, (t) => maskSecrets(t, c.mask))
-          : c.lang === 'en'
-            ? a.lineEn
-            : a.line,
+          ? attemptLine(a.lineFacts, c.lang, T.line, (t) => maskSecrets(t, c.mask)).trim() ||
+              undefined
+          : text(c, c.lang === 'en' ? a.lineEn : a.line, T.line),
       ),
       ...(last && lastAttempt !== undefined && lastPlain
         ? {

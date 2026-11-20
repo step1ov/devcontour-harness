@@ -9,7 +9,12 @@ import { OPERATOR_VIEW_TEXT as T, operatorViewSchema } from '../src/contracts/in
 import { Harness } from '../src/control/harness.ts';
 import { collectOperatorViewInput, viewPolicy } from '../src/control/operator-view.ts';
 import { attemptSummaryLine } from '../src/report/compute.ts';
-import { attemptLine, operatorView, type AttemptLineFacts } from '../src/projections/index.ts';
+import {
+  attemptLine,
+  maskText,
+  operatorView,
+  type AttemptLineFacts,
+} from '../src/projections/index.ts';
 import { NOW, baseInput, work } from './operator-view-input.ts';
 import { viewState } from './view-fixture.ts';
 
@@ -132,13 +137,18 @@ for (const lang of ['ru', 'en'] as const) {
           },
         }),
       ],
-      // «40» — известный секрет: маска заменяет число длинной меткой.
-      mask: { secrets: ['40'] },
+      // «40» и «36» — известные секреты: маска заменяет числа длинной меткой,
+      // и строка без учёта маски вышла бы за предел. «masked» — секрет,
+      // совпадающий с меткой: вторая маска поверх готовой строки удлинила бы её.
+      mask: { secrets: ['40', '36', 'masked'] },
     });
     const line = operatorView(input, { lang }).works[0]!.attempts.line!;
     assert.ok(line.length <= T.line, line);
     assert.match(line, /‹masked›/);
-    assert.doesNotMatch(line, /40/);
+    assert.doesNotMatch(line, /40|36/);
+    // Без маски при подборе строка на этих секретах длиннее предела.
+    const unfitted = maskText(attemptLine(f, lang, T.line), 10_000, { secrets: ['40', '36'] })!;
+    assert.ok(unfitted.length > T.line, `${unfitted.length}`);
     assert.ok(line.endsWith(tails[lang]), line);
   });
 }

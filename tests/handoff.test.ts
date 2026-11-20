@@ -411,6 +411,33 @@ test('handoff: при пределе восстановлений действу
   }
 });
 
+test('handoff: устаревшие задания одного графа не вытесняют действующее задание другого', () => {
+  const ctx = hsetup({ scenario: {} });
+  const h = ctx.open();
+  try {
+    // Граф A — одно действующее задание, поставленное первым.
+    const ga = ready(h.engine, graphOf({ a: [] }, '1', 'ga'));
+    const jobA = h.workflows.start({ kind: 'graph', id: ga.id, authorRuntime: 'claude' }).key;
+    // Граф B — 10 редакций: 9 замещённых заданий и действующее.
+    let current = '';
+    for (let i = 1; i <= 10; i++) {
+      const gb = ready(
+        h.engine,
+        graphOf({ b: [], ...(i > 1 ? { [`c${i}`]: [] } : {}) }, String(i), 'gb'),
+      );
+      current = h.workflows.start({ kind: 'graph', id: gb.id, authorRuntime: 'claude' }).key;
+    }
+    const pack = handoffPack(h);
+    assert.equal(pack.repairs.length, 10);
+    const keys = pack.repairs.map((r) => r.key);
+    assert.ok(keys.includes(jobA), 'действующее задание графа A в пакете');
+    assert.deepEqual(keys.slice(0, 2), [current, jobA], 'действующие — первыми, новые раньше');
+    assert.equal(pack.truncated.repairs, 1);
+  } finally {
+    h.close();
+  }
+});
+
 test('handoff next: попытка без живого владельца — harness run, а не ожидание', () => {
   const ctx = hsetup({ scenario: {} });
   const h = ctx.open();
