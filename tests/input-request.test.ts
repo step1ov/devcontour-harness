@@ -1364,3 +1364,38 @@ test('Проекции: неблокирующий запрос ведущему
 test('Проекции: перечень состояний вопроса без zod совпадает с договором', () => {
   assert.deepEqual([...inputStates], [...inputStateNames]);
 });
+
+test('alpha.60 (F-AK): правка политики и выдача другого графа до повторного согласования — применённый ответ не устаревает; после согласования он связан с попыткой', () => {
+  const env = stopped();
+  const prepared = prepare(env);
+  assert.equal(applyWith(env, prepared).applied, true);
+  // Второй граф того же каталога состояния.
+  const other = graphOf({ x: [] }, '1', 'h');
+  const { graph: h } = env.engine.register(other, trustNone);
+  env.engine.release('c1');
+  // Процесс с изменённой политикой (вне изоляции и сети).
+  const p2 = policyOf((p) => (p.runTimeoutMs = 1234567));
+  const e2 = new Engine({
+    host: standaloneHost(env.store, p2),
+    policy: p2,
+    now: () => env.clock.now,
+  });
+  e2.lead('c2');
+  e2.recordReview(planReview(e2, h, e2.reviews('plan', h.id).length + 1));
+  e2.approve(h.id, 'agent');
+  const x = e2.claim('c2');
+  assert.equal(x?.workId, 'x', 'выдан согласованный под новой политикой граф h');
+  const kept = e2.inputRequest(env.request.id);
+  assert.equal(kept.lifecycle, 'applied', 'ответ графа g не вернулся в answered');
+  assert.equal(kept.stale, undefined);
+  e2.fail(x!.id, x!.token, 'стоп', { kind: 'stale-base' });
+  // Повторное согласование g под новой политикой (тот же снимок с ответом).
+  e2.recordReview({
+    ...planReview(e2, env.graph, e2.reviews('plan', env.graph.id).length + 1),
+    contextDigest: prepared.digest,
+  });
+  e2.approve(env.graph.id, 'agent', { bindContext: true });
+  const a = e2.claim('c2');
+  assert.equal(a?.workId, 'a');
+  assert.equal(a?.input?.requestId, env.request.id, 'ответ связан с попыткой под новой политикой');
+});

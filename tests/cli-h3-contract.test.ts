@@ -743,6 +743,13 @@ test('F-B: справка каждой команды — <команда> --hel
   assert.equal(short.status, 0);
   assert.match(short.stdout, /--lead-technical-answers/);
   assert.equal(call(['help', 'retry']).stdout, call(['retry', '--help']).stdout);
+  // Значение строкового параметра `-h` справку не вызывает; ключи прототипа — не команды.
+  const valued = call(['input-answer', '--text', '-h']);
+  assert.equal(valued.status, 2);
+  assert.doesNotMatch(valued.stdout, /^harness input-answer — /);
+  const proto = call(['constructor', '--help']);
+  assert.equal(proto.status, 2, proto.stderr);
+  assert.doesNotMatch(proto.stderr, /at .*cli\.ts/);
   const unknown = call(['help', 'nope']);
   assert.equal(unknown.status, 2);
   assert.match(unknown.stderr, /неизвестная команда: nope/);

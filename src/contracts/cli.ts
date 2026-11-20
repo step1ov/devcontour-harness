@@ -1222,6 +1222,12 @@ export const cliCommands = {
         required: false,
         description: 'Сбросить исчерпанный счётчик попыток (причина — --reason)',
       },
+      {
+        name: '--actor',
+        value: 'text',
+        required: false,
+        description: 'Кто заменяет вопрос: operator (по умолчанию) или lead — запись замены',
+      },
     ],
     refusals: [
       'NOT_FOUND',

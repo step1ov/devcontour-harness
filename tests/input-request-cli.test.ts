@@ -583,6 +583,21 @@ test('alpha.60 CLI (F-AL): input-carry — ответ на вопрос преж
   assert.match(resolve.stderr, /input-carry/);
   const noReason = p.harness('input-carry', '--state', p.state, '--request', id);
   assert.equal(noReason.json.error?.code, 'INVALID_INPUT');
+  // Без --author перенос не довести до конца: отказ до записи, вопрос не заменён.
+  const noAuthor = p.harness(
+    'input-carry',
+    '--state',
+    p.state,
+    '--request',
+    id,
+    '--reason',
+    'x-y-z',
+  );
+  assert.equal(noAuthor.json.error?.code, 'APPROVAL_REQUIRED');
+  assert.equal(
+    p.harness('input-show', '--state', p.state, '--request', id).json.data.lifecycle,
+    'answered',
+  );
   const carried = p.harness(
     'input-carry',
     '--state',
@@ -593,11 +608,18 @@ test('alpha.60 CLI (F-AL): input-carry — ответ на вопрос преж
     'постановка уточнена, ответ в силе',
     '--author',
     'external',
+    '--actor',
+    'lead',
   );
   assert.equal(carried.status, 0, carried.stderr);
   assert.equal(carried.json.data.carried, true);
   assert.equal(carried.json.data.superseded, true);
   assert.equal(carried.json.data.lifecycle, 'superseded');
+  assert.equal(
+    p.harness('input-show', '--state', p.state, '--request', id).json.data.closed?.by,
+    'lead',
+    'замену записал ведущий',
+  );
   const repeat = p.harness(
     'input-carry',
     '--state',

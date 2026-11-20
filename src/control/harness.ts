@@ -636,18 +636,12 @@ export class Harness {
     digest: string,
     author: Author | undefined,
   ) {
-    const last = this.engine.reviews('plan', graphId).at(-1);
-    const policy = executionDigest(this.policy);
-    if (
-      last?.approved &&
-      (last.contextDigest ?? null) === digest &&
-      (last.policyDigest === undefined || last.policyDigest === policy)
-    )
-      return { round: last.round, reviewed: 'reused' as const };
+    const covered = this.engine.planRoundCovers(graphId, digest);
+    if ('round' in covered) return { round: covered.round, reviewed: 'reused' as const };
     if (!author)
       throw new HarnessError(
         'APPROVAL_REQUIRED',
-        'Снимок с ответом ещё не прошёл ревью плана под текущей политикой: повторите с --author <runtime ведущего> — harness проведёт review-plan сам',
+        `Снимок с ответом ещё не покрыт ревью плана (${covered.reason}): повторите с --author <runtime ведущего> — harness проведёт review-plan сам`,
       );
     const graph = this.engine.read((v) => v.graph(graphId)?.graph);
     if (!graph) throw new HarnessError('NOT_FOUND', 'Граф не найден: ' + graphId);
@@ -734,7 +728,13 @@ export class Harness {
    */
   async carryInputOf(
     id: string,
-    options: { reason: string; author?: Author; reset?: { reason: string } },
+    options: {
+      reason: string;
+      author?: Author;
+      reset?: { reason: string };
+      /** Кто заменяет вопрос (запись `closed.by`); по умолчанию — оператор. */
+      by?: 'operator' | 'lead';
+    },
   ) {
     let request = this.engine.inputRequest(id);
     if (request.kind !== 'question' || !request.blocking)
@@ -746,9 +746,17 @@ export class Harness {
           'NOT_READY',
           `Исходная остановка вопроса ${id} держится: продолжение — harness input-resolve --request ${id}`,
         );
+      // Замена — запись: до неё проверяется, что перенос можно довести до
+      // конца без нового входа. Снимок заменённого вопроса — новый, раунда
+      // ревью у него ещё нет: без --author дальше идти нечем.
+      if (!options.author)
+        throw new HarnessError(
+          'APPROVAL_REQUIRED',
+          `Перенос ответа на вопрос ${id} требует ревью плана со снимком ответа: повторите с --author <runtime ведущего>; вопрос не изменён`,
+        );
       request = this.engine.supersedeInput(
         id,
-        { by: 'operator', reason: options.reason, successor: request.workId },
+        { by: options.by ?? 'operator', reason: options.reason, successor: request.workId },
         request.version,
       ).request;
       superseded = true;

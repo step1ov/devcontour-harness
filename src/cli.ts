@@ -416,7 +416,7 @@ const flagOwners = {
   text: ['input-answer'],
   option: ['input-answer'],
   kind: ['input-answer'],
-  actor: ['input-answer', 'review-plan', 'review-contract', 'review-accept'],
+  actor: ['input-answer', 'input-carry', 'review-plan', 'review-contract', 'review-accept'],
   by: ['reapprove'],
   'accept-limitation': ['review-plan', 'review-contract', 'review-accept'],
   'continue-review': ['review-plan', 'review-contract'],
@@ -641,7 +641,7 @@ async function run(
         throw new HarnessError('INVALID_INPUT', `--${flag} поддерживают: ${owners.join(', ')}`);
     return { command: 'version', data: { harness: HARNESS_VERSION, apiVersion: API_VERSION } };
   }
-  if (!name || !(name in cliCommands))
+  if (!name || !Object.hasOwn(cliCommands, name))
     throw new HarnessError(
       'UNSUPPORTED_COMMAND',
       name ? 'Неизвестная команда: ' + name : 'Не указана команда',
@@ -1399,6 +1399,7 @@ async function run(
               })
             : await h.carryInputOf(id, {
                 reason: need('reason'),
+                by: parseWith(z.enum(['operator', 'lead']), v.actor ?? 'operator', 'actor'),
                 ...optional('author', author),
                 ...optional('reset', reset),
               });
@@ -1530,13 +1531,19 @@ async function run(
 const argv = process.argv.slice(2);
 // Справка команды: `harness <команда> --help|-h` или `harness help <команда>` —
 // текст на stdout, exit 0; неизвестная команда — обычный отказ ниже.
+// `-h`/`--help` — только на месте флага: значение строкового параметра
+// (`--text -h`) справку не вызывает.
+const valued = (token: string | undefined) =>
+  !!token?.startsWith('--') &&
+  !token.includes('=') &&
+  (options as Record<string, { type: string }>)[token.slice(2)]?.type === 'string';
 const helpOf =
   argv[0] === 'help' || argv[0] === '--help'
     ? argv[1]
-    : argv.slice(1).some((a) => a === '--help' || a === '-h')
+    : argv.slice(1).some((a, i) => (a === '--help' || a === '-h') && !valued(argv[i]))
       ? argv[0]
       : undefined;
-if (helpOf && helpOf in cliCommands) {
+if (helpOf && Object.hasOwn(cliCommands, helpOf)) {
   process.stdout.write(commandHelp(helpOf as CliCommand));
   process.exit(exitCodes.ok);
 }
@@ -1573,7 +1580,7 @@ try {
           ? contractViolation(error)
           : new HarnessError('INTERNAL', (error as Error)?.message ?? String(error));
   code = exitCodeOf(known);
-  const command = argv[0] && argv[0] in cliCommands ? (argv[0] as CliCommand) : null;
+  const command = argv[0] && Object.hasOwn(cliCommands, argv[0]) ? (argv[0] as CliCommand) : null;
   envelope = { apiVersion: API_VERSION, command, ok: false, error: known.toJSON() };
   process.stderr.write(`harness: ${known.code}: ${known.message}\n`);
   for (const issue of known.issues)

@@ -669,6 +669,26 @@ export class Engine {
   }
 
   /**
+   * Покрывает ли последний раунд ревью плана снимок `contextDigest` по тем же
+   * правилам, что у согласования (`approvalRules`): `{ round }` — да, иначе
+   * причина. Только чтение; им `Harness.resolveInput` и `carryInputOf`
+   * решают, нужен ли новый раунд.
+   */
+  planRoundCovers(graphId: string, contextDigest: string | null) {
+    return this.read((v): { round: number } | { reason: string } => {
+      try {
+        const { last } = this.approvalRules(v, graphId, this.policy.approvalMode);
+        if ((last.contextDigest ?? null) !== contextDigest)
+          return { reason: `раунд ${last.round} рассматривал другой снимок контекста` };
+        return { round: last.round };
+      } catch (error) {
+        if (!(error instanceof HarnessError)) throw error;
+        return { reason: error.message };
+      }
+    });
+  }
+
+  /**
    * Правила согласования без барьера политики (`approvalCheck` — с ним):
    * только чтение, отказ — исключение. Им же `proposeTarget` называет
    * причины отказа, не повторяя правил.
@@ -3225,10 +3245,12 @@ export class Engine {
     // Граф целиком не сравнивается: согласование другой работы того же графа
     // применённый ответ не обесценивает (причина `graph` больше не ставится).
     if (this.orderMoved(view, work, target)) return 'order' as const;
-    if (
-      target.policyDigest !== this.host.basis.policyDigest(work, view) &&
-      !this.approvalRebound(view, work)
-    )
+    // Standalone: правка политики применённый ответ сама не обесценивает —
+    // граф под новой политикой не выдаётся до повторного согласования
+    // (reapprove или новый раунд ревью), а оно проверяется ниже снимком:
+    // действующий снимок обязан нести этот ответ. Пока граф не согласован
+    // заново, устаревания нет (выдача другого графа его не вызывает).
+    if (this.host.input && target.policyDigest !== this.host.basis.policyDigest(work, view))
       return 'policy' as const;
     const pin = this.contextPinOf(view, work) ?? null;
     // Другой снимок, который несёт тот же ответ (например, с ответом на
@@ -4991,6 +5013,10 @@ export class Engine {
         'INPUT_REQUIRED',
         `Поручение ждёт ${question.lifecycle === 'pending' ? 'ответа' : 'применения ответа'} на вопрос исполнителя ${question.id}; повтор без ответа запрещён`,
       );
+    // Принятая работа не повторяется: ни обычный повтор, ни сброс попыток
+    // не возвращают её в очередь.
+    if (w.status === 'done')
+      throw new HarnessError('NOT_READY', `Поручение ${workId} принято: повторять нечего`);
     const exhausted = w.attempt >= this.policy.maxAttempts || neutralExhausted(w);
     // Сброс назван явно (с причиной): он выполняется и тогда, когда попытки
     // ещё не исчерпаны, — ведущий возвращает полный лимит до выдачи. Молча
