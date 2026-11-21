@@ -1040,3 +1040,28 @@ test('UP22: реестр не знает пакет или версию (E404, E
     await registry.close().catch(() => {});
   }
 });
+
+test('UP23: установлена версия новее опубликованной (тег канала старше) — строка говорит прямо: новее, ещё не опубликована, обновление не нужно', async () => {
+  // NEW есть в реестре (ставится точной версией), но тег alpha — на CUR:
+  // как сборка из репозитория до публикации.
+  const registry = await registryWith(...base());
+  registry.publish(fakeHarness(NEW), '');
+  try {
+    const p = project(registry, { harness: NEW });
+    const r = p.harness('update', '--check', '--state', p.state);
+    assert.equal(r.status, 0, r.stderr);
+    updateDataSchema.parse(r.json.data);
+    const c = r.json.data.check;
+    assert.equal(c.state, 'up-to-date', JSON.stringify(c));
+    assert.equal(c.available, undefined);
+    assert.match(
+      c.line,
+      rx(
+        `Обновление не нужно: установлен harness ${NEW} — новее опубликованного в npm ${CUR}: эта версия ещё не опубликована; панель 0.1.0-alpha.4 — последняя опубликованная (канал alpha).`,
+      ),
+    );
+    assert.doesNotMatch(c.line, /Обновлений нет/);
+  } finally {
+    await registry.close().catch(() => {});
+  }
+});

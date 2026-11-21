@@ -656,3 +656,123 @@ test('WD10: признак запуска браузера и команда п�
   assert.ok(!runner('agent-browser', 'install'));
   assert.ok(!runner('pnpm', 'exec', 'playwright', 'install', 'chromium'));
 });
+
+/**
+ * Сборка как `next build` с Turbopack: под закрытой сетью падает на локальном
+ * порту и оставляет кеш (метку в рабочем дереве и в TMPDIR); с меткой падает
+ * сразу, как повтор отказа из кеша, даже под loopback. Проходит только в
+ * чистом дереве и чистом TMPDIR под loopback.
+ */
+const DIRTY_BUILD =
+  "const fs=require('fs'),p=require('path');const marks=[p.join(process.cwd(),'.build-cache-marker'),p.join(process.env.TMPDIR||'/nonexistent','build-cache-marker')];" +
+  "if(marks.some(m=>fs.existsSync(m))){console.error('@app/web:build: - Operation not permitted (os error 1)');process.exit(1)}" +
+  "if(process.env.FAKE_NET!=='loopback'){for(const m of marks){try{fs.writeFileSync(m,'x')}catch{}}" +
+  "console.error(['@app/web:build: Error [TurbopackInternalError]: Failed to write app endpoint /page','@app/web:build: Caused by:','@app/web:build: - binding to a port','@app/web:build: - Operation not permitted (os error 1)'].join('\\n'));process.exit(1)}" +
+  "console.log('built')";
+
+test('WD11: повтор под loopback — в свежем дереве и TMPDIR: кеш закрытого прохода не повторяет его отказ; --apply-loopback проверяет политику тоже в свежем дереве', async () => {
+  let codex!: ReturnType<typeof fakeCodex>;
+  const f = fixture((raw, root) => {
+    raw.roles = { developer: { writer: { runtime: 'codex' } } };
+    raw.toolProfiles = {};
+    raw.repositories[0].writerProbe = [
+      { id: 'dev-server', command: fakeServe },
+      { id: 'web-build', command: node(DIRTY_BUILD) },
+    ];
+    codex = fakeCodex(root);
+  });
+  const data = await f.smoke({ executables: { codex: codex.fake } });
+  assert.equal(data.passed, true, JSON.stringify(data.failure));
+  cliDataSchemas.smoke.parse(data);
+  const probe = data.writerProbe!;
+  const w = probe.writers[0]!;
+  // «binding to a port» и EPERM без пути — закрытый локальный порт, не запись.
+  assert.deepEqual(
+    w.commands.map((c) => [c.id, c.status, c.reason]),
+    [
+      ['dev-server', 'blocked', 'listen-denied'],
+      ['web-build', 'blocked', 'listen-denied'],
+    ],
+  );
+  assert.match(w.commands[1]!.evidence!, /binding to a port/);
+  const loop = w.loopback!;
+  assert.equal(loop.status, 'resolves', loop.reason);
+  assert.deepEqual(loop.steps, ['dev-server', 'web-build']);
+  assert.deepEqual(
+    loop.commands.map((c) => [c.id, c.status]),
+    [
+      [LOOPBACK_CHECK, 'ok'],
+      ['dev-server', 'ok'],
+      ['web-build', 'ok'],
+    ],
+  );
+  assert.match(loop.reason, /свежем рабочем дереве/);
+  assert.equal(probe.ok, false, 'первый проход закрыт: проба не зелёная до применения');
+  assert.match(probe.loopbackCommand!, /--writer-probe --apply-loopback$/);
+  // Человеку — исход каждого шага повтора, не только итог.
+  const text = writerProbeText(probe);
+  assert.match(text, /сеть loopback \(повтор пробы\): resolves/);
+  assert.match(text, new RegExp(`повтор ${LOOPBACK_CHECK}: ok`));
+  assert.match(text, /повтор dev-server: ok/);
+  assert.match(text, /повтор web-build: ok/);
+  // Свежее дерево — отдельная проверка окружения: строк в таблице шагов нет.
+  assert.equal(
+    data.steps.filter((s) => s.stage === 'worktree').length,
+    1,
+    JSON.stringify(data.steps),
+  );
+
+  // Применение: проба под записанной политикой — тоже в свежем дереве.
+  const applied = await f.smoke({ executables: { codex: codex.fake }, applyLoopback: true });
+  const ap = applied.writerProbe!;
+  assert.ok(ap.loopbackApplied, JSON.stringify(ap));
+  assert.deepEqual(
+    ap.writers[0]!.commands.map((c) => [c.id, c.status]),
+    [
+      [LOOPBACK_CHECK, 'ok'],
+      ['dev-server', 'ok'],
+      ['web-build', 'ok'],
+    ],
+  );
+  assert.equal(ap.ok, true);
+  assert.equal(ap.writers[0]!.networkMode, 'loopback');
+
+  // Повтор, который не помог, печатает свой шаг с причиной.
+  const stuck = writerProbeText({
+    ok: false,
+    writers: [
+      {
+        ...w,
+        loopback: {
+          ...loop,
+          status: 'not-enough',
+          commands: [
+            {
+              id: 'web-build',
+              command: ['x'],
+              status: 'blocked',
+              durationMs: 1,
+              reason: 'write-denied',
+              evidence: '- Operation not permitted (os error 1)',
+            },
+          ],
+        },
+      },
+    ],
+  });
+  assert.match(
+    stuck,
+    /повтор web-build: blocked — write-denied \(- Operation not permitted \(os error 1\)\)/,
+  );
+});
+
+test('WD12: шаг только со справкой или версией (--help, --version) — не проверка в браузере для doctor', () => {
+  const runner = (...command: string[]) => isBrowserRunner({ id: 's', command });
+  assert.ok(!runner('pnpm', '--filter', '@oim/web', 'run', 'verify:browser', '--help'));
+  assert.ok(!runner('pnpm', '--dir', 'apps/web', 'exec', 'agent-browser', '--version'));
+  assert.ok(!runner('agent-browser', '--help'));
+  assert.ok(!runner('npx', 'playwright', 'test', '-h'));
+  assert.ok(!runner('pnpm', 'exec', 'cypress', 'run', '-V'));
+  assert.ok(runner('pnpm', '--filter', '@oim/web', 'run', 'verify:browser', '--no-build'));
+  assert.ok(runner('pnpm', '--dir', 'apps/web', 'exec', 'agent-browser', 'open', 'http://x'));
+});

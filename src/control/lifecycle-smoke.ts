@@ -5,7 +5,14 @@ import { CleanupFailure, type StepOutcome } from '../environment/lifecycle.ts';
 import { DEPENDENCY_NETWORK } from '../environment/dependency-network.ts';
 import { runGatesAt } from '../verification/gates-at.ts';
 import { commitOf, repositoryOf, repositoryPath } from './gates-check.ts';
-import { probeWriter, writerProbeText, type WriterProbeResult } from './writer-probe.ts';
+import {
+  loopbackTrials,
+  probeWriter,
+  trialLoopback,
+  writerProbeText,
+  type WriterProbeInput,
+  type WriterProbeResult,
+} from './writer-probe.ts';
 import { applyWriterLoopback, loopbackChanges } from './writer-loopback.ts';
 import { writeFile } from 'node:fs/promises';
 
@@ -289,81 +296,136 @@ export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<Lifecy
   let warnings: string[] | undefined;
   let failure: LifecycleSmokeFailure | undefined;
   let probe: WriterProbeResult | undefined;
+  const gatesContext = (p: ExecutionPolicy) => ({
+    policy: p,
+    stateDir,
+    repoPath,
+    boundary: () => ({
+      hidden: [...new Set([stateDir, ...repos])],
+      readable: repos.map((r) => join(r, '.git')),
+    }),
+    ...(input.resourceDatabase ? { resourceDatabase: input.resourceDatabase } : {}),
+    ...(input.checkoutRoot ? { checkoutRoot: input.checkoutRoot } : {}),
+    ...(input.environment ? { environment: input.environment } : {}),
+  });
+  const probeDir = join(stateDir, 'gates-at', id, 'writer-probe');
+  type TreeContext = Parameters<NonNullable<Parameters<typeof runGatesAt>[1]['afterPrepare']>>[0];
+  const probeInput = (p: ExecutionPolicy, ctx: TreeContext, sub = ''): WriterProbeInput => ({
+    policy: p,
+    repo: p.repositories.find((r) => r.id === repo.id) ?? repo,
+    cwd: ctx.cwd,
+    boundary: ctx.boundary,
+    dir: join(probeDir, sub),
+    runId: id,
+    signal: ctx.signal,
+    ...(input.environment ? { environment: input.environment } : {}),
+    ...(input.executables ? { executables: input.executables } : {}),
+  });
+  /**
+   * Свежее подготовленное дерево для прохода пробы — так же, как у первого
+   * прохода (снимки, дерево, хранилище, prepare), но без строк в таблице
+   * шагов: повтор под loopback и проба под записанной политикой не идут на
+   * остатках прежнего прохода (кеш сборщика повторяет его отказ). Проходы
+   * идут друг за другом: ресурсы gates держит один проход.
+   */
+  const inFreshTree = (
+    p: ExecutionPolicy,
+    suffix: string,
+    run: (ctx: TreeContext) => Promise<void>,
+  ) =>
+    runGatesAt(gatesContext(p), {
+      id: `${id}-${suffix}`,
+      repositoryId: repo.id,
+      sha,
+      gates: [],
+      lifecycleOnly: true,
+      record: () => {
+        throw new Error('smoke: gates не исполняются');
+      },
+      afterPrepare: run,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+  const failureText = (error: unknown) => (error instanceof Error ? error.message : String(error));
+  let firstInput: WriterProbeInput | undefined;
   try {
-    const result = await runGatesAt(
-      {
-        policy,
-        stateDir,
-        repoPath,
-        boundary: () => ({
-          hidden: [...new Set([stateDir, ...repos])],
-          readable: repos.map((r) => join(r, '.git')),
-        }),
-        ...(input.resourceDatabase ? { resourceDatabase: input.resourceDatabase } : {}),
-        ...(input.checkoutRoot ? { checkoutRoot: input.checkoutRoot } : {}),
-        ...(input.environment ? { environment: input.environment } : {}),
+    const result = await runGatesAt(gatesContext(policy), {
+      id,
+      repositoryId: repo.id,
+      sha,
+      gates: [],
+      lifecycleOnly: true,
+      record: () => {
+        throw new Error('smoke: gates не исполняются');
       },
-      {
-        id,
-        repositoryId: repo.id,
-        sha,
-        gates: [],
-        lifecycleOnly: true,
-        record: () => {
-          throw new Error('smoke: gates не исполняются');
-        },
-        onStep: (s) => {
-          outcomes.push(s);
-          const step = stepOf(s);
-          steps.push(step);
-          input.onStep?.(step);
-        },
-        ...(input.signal ? { signal: input.signal } : {}),
-        ...(input.writerProbe
-          ? {
-              afterPrepare: async (ctx) => {
-                const dir = join(stateDir, 'gates-at', id, 'writer-probe');
-                const run = (p: ExecutionPolicy, sub = '') =>
-                  probeWriter({
-                    policy: p,
-                    repo: p.repositories.find((r) => r.id === repo.id) ?? repo,
-                    cwd: ctx.cwd,
-                    boundary: ctx.boundary,
-                    dir: join(dir, sub),
-                    runId: id,
-                    signal: ctx.signal,
-                    ...(input.environment ? { environment: input.environment } : {}),
-                    ...(input.executables ? { executables: input.executables } : {}),
-                  });
-                const first = await run(policy);
-                probe = first;
-                if (!loopbackChanges(first).length) return;
-                if (!input.applyLoopback || !input.policyPath || !input.policySha) {
-                  // Одна команда: применить и повторить пробу — решение ведущего.
-                  first.loopbackCommand = `harness smoke --state ${stateDir} --policy ${input.policyPath ?? '<файл политики>'} --repository ${repo.id} --sha ${input.rev} --writer-probe --apply-loopback`;
-                  return;
-                }
-                const applied = applyWriterLoopback({
-                  policyPath: input.policyPath,
-                  probedSha: input.policySha,
-                  repositoryId: repo.id,
-                  probe: first,
-                });
-                await writeFile(
-                  join(dir, 'loopback-receipt.json'),
-                  JSON.stringify(applied.receipt, null, 2) + '\n',
-                );
-                // Повтор пробы под записанной политикой: исход — по ней.
-                probe = {
-                  ...(await run(applied.policy, 'applied')),
-                  loopbackApplied: applied.receipt,
-                };
-              },
-            }
-          : {}),
+      onStep: (s) => {
+        outcomes.push(s);
+        const step = stepOf(s);
+        steps.push(step);
+        input.onStep?.(step);
       },
-    );
+      ...(input.signal ? { signal: input.signal } : {}),
+      ...(input.writerProbe
+        ? {
+            afterPrepare: async (ctx: TreeContext) => {
+              firstInput = probeInput(policy, ctx);
+              probe = await probeWriter(firstInput);
+            },
+          }
+        : {}),
+    });
     warnings = result.warnings;
+    const first = probe;
+    if (first && firstInput) {
+      // Повтор под loopback — в свежем дереве и свежем TMPDIR, по одному на
+      // исполнителя: дерево первого прохода хранит кеш его отказа.
+      let k = 0;
+      for (const writer of loopbackTrials(first)) {
+        const suffix = `loopback-${++k}`;
+        try {
+          await inFreshTree(policy, suffix, (ctx) =>
+            trialLoopback(probeInput(policy, ctx), first, writer),
+          );
+        } catch (error) {
+          if (input.signal?.aborted) throw error;
+          if (!writer.loopback) await trialLoopback(firstInput, first, writer, failureText(error));
+        }
+      }
+      if (loopbackChanges(first).length) {
+        if (!input.applyLoopback || !input.policyPath || !input.policySha)
+          // Одна команда: применить и повторить пробу — решение ведущего.
+          first.loopbackCommand = `harness smoke --state ${stateDir} --policy ${input.policyPath ?? '<файл политики>'} --repository ${repo.id} --sha ${input.rev} --writer-probe --apply-loopback`;
+        else {
+          const applied = applyWriterLoopback({
+            policyPath: input.policyPath,
+            probedSha: input.policySha,
+            repositoryId: repo.id,
+            probe: first,
+          });
+          await writeFile(
+            join(probeDir, 'loopback-receipt.json'),
+            JSON.stringify(applied.receipt, null, 2) + '\n',
+          );
+          // Повтор пробы под записанной политикой — в свежем дереве: исход — по ней.
+          let again: WriterProbeResult | undefined;
+          try {
+            await inFreshTree(applied.policy, 'applied', async (ctx) => {
+              again = await probeWriter(probeInput(applied.policy, ctx, 'applied'));
+            });
+          } catch (error) {
+            if (input.signal?.aborted) throw error;
+            // Проба прошла, а упала уборка дерева: исход пробы остаётся.
+            again ??= {
+              ...first,
+              notes: [
+                ...(first.notes ?? []),
+                `Повтор пробы под записанной политикой не выполнен: свежее дерево не подготовлено (${failureText(error)}).`,
+              ],
+            };
+          }
+          probe = { ...(again ?? first), loopbackApplied: applied.receipt };
+        }
+      }
+    }
   } catch (error) {
     // Отмена вызывающим — не отказ окружения.
     if (input.signal?.aborted)

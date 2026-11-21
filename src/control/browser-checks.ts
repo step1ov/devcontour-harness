@@ -41,6 +41,8 @@ const VALUED = new Set([
   '-p',
 ]);
 const RUNNERS = new Set(['agent-browser', 'playwright', 'cypress']);
+/** Флаги справки и версии: команда с ними только печатает текст. */
+const INFO = new Set(['--help', '-h', '--version', '-V']);
 const base = (t: string) => t.split('/').pop() ?? t;
 
 /** Индекс следующей команды (не флага и не значения флага) с `from`; -1 — нет. */
@@ -60,7 +62,8 @@ function commandAt(argv: readonly string[], from: number) {
  * `npx`, `npm exec`, `pnpm dlx`, `yarn`; значения флагов вроде `--filter`
  * пропускаются). Проверка — `agent-browser`, `playwright test`, `cypress run`
  * или скрипт `verify:browser` и подобные; подкоманда установки (`playwright
- * install`, `agent-browser install`) — не проверка.
+ * install`, `agent-browser install`) и вызов только справки или версии
+ * (`--help`, `-h`, `--version`, `-V`) — не проверка.
  */
 export const isBrowserRunner = (step: { id: string; command: readonly string[] }) => {
   const argv = step.command;
@@ -71,6 +74,9 @@ export const isBrowserRunner = (step: { id: string; command: readonly string[] }
     if (i < 0) return false;
   }
   const command = base(argv[i] ?? '');
+  // Справка или версия инструмента (`agent-browser --version`,
+  // `verify:browser --help`) браузер не запускает: это не проверка.
+  if (argv.slice(i + 1).some((t) => INFO.has(t))) return false;
   if (SCRIPT.test(command)) return true;
   if (!RUNNERS.has(command)) return false;
   const j = commandAt(argv, i + 1);
