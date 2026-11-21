@@ -23,7 +23,12 @@ import { defaultResourceDatabase, withResources } from '../environment/resources
 import { removeSnapshots, snapshotDependencies, type DependencySnapshot } from './dependencies.ts';
 import { reapedFailure, runGate, type Boundary } from './gates.ts';
 import { checkoutPath, chooseCheckoutRoot } from '../environment/checkout-root.ts';
-import { dependencyStoreRoot, materializeStore, type StoreContext } from './dependency-store.ts';
+import {
+  dependencyStoreRoot,
+  materializeStore,
+  seedSourcesText,
+  type StoreContext,
+} from './dependency-store.ts';
 import { credentialPaths } from '../environment/isolation.ts';
 import { explicitPrerequisites, orderedScope, standaloneScope } from './gate-scope.ts';
 
@@ -45,6 +50,11 @@ export interface GatesAtContext {
   boundary(): Boundary;
   environment?: NodeJS.ProcessEnv;
   resourceDatabase?: string;
+  /**
+   * Явная команда оператора (`harness smoke`, `harness gates`): сборка seed,
+   * недавно упавшая из-за сети реестра, повторяется сразу (alpha.64).
+   */
+  retryStoreNetworkFailure?: boolean;
 }
 
 export interface GatesAtInput {
@@ -278,6 +288,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
     resourceDatabase: ctx.resourceDatabase ?? defaultResourceDatabase(),
     deadline: Date.now() + ctx.policy.runTimeoutMs,
     phaseMs: ctx.policy.runTimeoutMs,
+    ...(ctx.retryStoreNetworkFailure ? { retryNetworkFailure: true } : {}),
   };
   await mkdir(root, { recursive: true });
   await mkdir(dirname(cwd), { recursive: true });
@@ -352,7 +363,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
               await staged(
                 'dependency-store',
                 () => materializeStore(store, { repo, cwd, execution, signal, dir: artifacts }),
-                (r) => r && `${r.outcome}${r.reason ? ': ' + r.reason : ''}`,
+                (r) => r && `${r.outcome}${seedSourcesText(r)}${r.reason ? ': ' + r.reason : ''}`,
                 // Промах — хранилище не использовано: шаг не «пройден», как в замерах `run`.
                 (r) => !r || r.outcome === 'miss',
               );

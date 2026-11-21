@@ -30,6 +30,8 @@ export interface GateCheckInput {
   /** Каждое записанное evidence — до следующего gate (CLI печатает ход в stderr). */
   onEvidence?(evidence: EvidenceRecord): void;
   resourceDatabase?: string;
+  /** Явная команда (`harness gates`): сетевой отказ сборки seed повторяется сразу. */
+  retryStoreNetworkFailure?: boolean;
 }
 
 type Repo = ExecutionPolicy['repositories'][number];
@@ -105,6 +107,7 @@ export async function checkGates(input: GateCheckInput) {
         readable: repos.map((r) => join(r, '.git')),
       }),
       ...(input.resourceDatabase ? { resourceDatabase: input.resourceDatabase } : {}),
+      ...(input.retryStoreNetworkFailure ? { retryStoreNetworkFailure: true } : {}),
     },
     {
       repositoryId: repo.id,

@@ -91,6 +91,11 @@ export interface LifecycleSmokeInput {
   /** Каждый шаг по мере исполнения (CLI печатает ход в stderr). */
   onStep?(step: LifecycleSmokeStep): void;
   /**
+   * Явный запуск оператором (`harness smoke`): сборка seed, недавно упавшая
+   * из-за сети реестра, повторяется сразу, а не по сроку пометки.
+   */
+  retryStoreNetworkFailure?: boolean;
+  /**
    * После `prepare` прогнать команды `writerProbe` репозитория в точной
    * изоляции каждого его исполнителя (без модели): что закрыто и почему.
    */
@@ -307,6 +312,7 @@ export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<Lifecy
     ...(input.resourceDatabase ? { resourceDatabase: input.resourceDatabase } : {}),
     ...(input.checkoutRoot ? { checkoutRoot: input.checkoutRoot } : {}),
     ...(input.environment ? { environment: input.environment } : {}),
+    ...(input.retryStoreNetworkFailure ? { retryStoreNetworkFailure: true } : {}),
   });
   const probeDir = join(stateDir, 'gates-at', id, 'writer-probe');
   type TreeContext = Parameters<NonNullable<Parameters<typeof runGatesAt>[1]['afterPrepare']>>[0];

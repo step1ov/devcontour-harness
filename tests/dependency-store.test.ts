@@ -2840,7 +2840,213 @@ test(
     const hit = await smoke();
     const step = hit.steps.find((s) => s.stage === 'dependency-store')!;
     assert.equal(step.unused, undefined, JSON.stringify(step));
-    assert.equal(step.detail, 'hit');
+    // alpha.64: собранный seed называет источники пакетов.
+    assert.match(step.detail!, /^hit \(seed собран: из store хоста 0 из 1, из сети 1/);
     assert.match(smokeText(hit), /dependency-store\/dependency-store\s+passed\s+-\s+\d+ с\s+hit/);
+  },
+);
+
+/**
+ * Store хоста (alpha.64): проект оператора, установленный своим pnpm в
+ * `PNPM_HOME/store` — туда же ведёт `pnpm store path` checkout репозитория.
+ */
+async function hostInstall(url: string, deps: Deps, pnpmDir?: string) {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'harness-host-pnpm-')));
+  const project = join(home, 'project');
+  mkdirSync(project);
+  writeFileSync(join(project, 'package.json'), manifest(deps));
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    CI: '',
+    PNPM_HOME: home,
+    npm_config_cache_dir: join(home, '.cache'),
+    pnpm_config_cache_dir: join(home, '.cache'),
+    ...(pnpmDir ? { PATH: pnpmDir + ':' + process.env.PATH } : {}),
+  };
+  for (const key of Object.keys(env)) if (/_config_store_dir$/i.test(key)) delete env[key];
+  await promisify(execFile)('pnpm', ['install', '--ignore-workspace', `--registry=${url}`], {
+    cwd: project,
+    env,
+  });
+  const layout = readdirSync(join(home, 'store')).find((d) => /^v\d+$/.test(d))!;
+  return { home, root: join(home, 'store'), store: join(home, 'store', layout) };
+}
+
+/** Отпечаток дерева: пути, размеры, время изменения и хэши — запись в него видна. */
+const treePrint = (root: string) => {
+  const out: string[] = [];
+  const walk = (dir: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, e.name);
+      if (e.isDirectory()) walk(path);
+      else {
+        const st = lstatSync(path);
+        out.push(
+          `${path.slice(root.length)} ${st.size} ${st.mtimeMs} ${e.isFile() ? createHash('sha256').update(readFileSync(path)).digest('hex') : 'link'}`,
+        );
+      }
+    }
+  };
+  walk(root);
+  return out.sort();
+};
+
+async function hostSeedCase(t: TestContext, pnpmDir?: string) {
+  const reg = await registry(t);
+  const deps = { 'dep-a': '1.0.0', 'dep-b': '1.0.0' };
+  const host = await hostInstall(reg.url, deps, pnpmDir);
+  t.after(() => rmSync(host.home, { recursive: true, force: true }));
+  const gates = (['dep-a', 'dep-b'] as const).map((name) => ({
+    id: 'use-' + name,
+    kind: 'check',
+    command: ['node', '-e', useGate(name, '1.0.0')],
+    dependsOn: ['install'],
+  }));
+  const project = () =>
+    contour(reg.url, deps, {
+      policy: (p) => {
+        p.environment.values.PNPM_HOME = host.home;
+        if (pnpmDir) p.environment.values.PATH = pnpmDir + ':' + process.env.PATH;
+      },
+      extraGates: gates,
+    });
+  const ids = gates.map((g) => g.id);
+
+  const ctx = await project();
+  const before = treePrint(host.root);
+  reg.downloads.length = 0;
+  const first = await ctx.check(ctx.repo.head(), ids);
+  gatesPassed(first);
+  assert.equal(first.receipt.outcome, 'hit', first.receipt.reason);
+  assert.equal(first.receipt.built, true);
+  assert.deepEqual(reg.downloads, [], 'ни seed, ни установка ничего не скачали');
+  assert.equal(first.receipt.sources.packages, 2);
+  assert.equal(first.receipt.sources.host, 2, JSON.stringify(first.receipt.sources));
+  assert.equal(first.receipt.sources.network, 0);
+  assert.equal(first.receipt.sources.hostStore, host.store);
+  assert.deepEqual(treePrint(host.root), before, 'store хоста не изменён');
+
+  // Файл с чужими байтами под именем хэша: пакет не импортируется, его докачивает сеть.
+  const hash = createHash('sha512').update(CONTENT('dep-b', '1.0.0')).digest('hex');
+  const poisoned = join(host.store, 'files', hash.slice(0, 2), hash.slice(2));
+  chmodSync(poisoned, 0o644);
+  writeFileSync(poisoned, CONTENT('dep-x', '1.0.0'));
+  const other = await project();
+  reg.downloads.length = 0;
+  const second = await other.check(other.repo.head(), ids);
+  gatesPassed(second);
+  assert.equal(second.receipt.outcome, 'hit', second.receipt.reason);
+  assert.deepEqual(reg.downloads, ['dep-b-1.0.0.tgz'], 'скачан только отвергнутый пакет');
+  assert.equal(second.receipt.sources.host, 1);
+  assert.equal(second.receipt.sources.network, 1);
+  assert.match(second.receipt.sources.hostReason, /не сверены: dep-b@1\.0\.0: содержимое/);
+}
+
+test(
+  'DS51: первая сборка seed берёт пакеты из store хоста: скачивания нет, store хоста не меняется, файл с чужими байтами не импортируется',
+  { skip: unavailable, timeout: 240000 },
+  (t) => hostSeedCase(t),
+);
+
+test(
+  'DS52: pnpm 11 — импорт из store хоста через index.db: скачивания нет, store хоста не меняется, файл с чужими байтами не импортируется',
+  { skip: pnpm11Missing, timeout: 240000 },
+  (t) => hostSeedCase(t, pnpm11Dir),
+);
+
+test(
+  'DS53: сеть сборки seed — повторы и пределы по умолчанию, заданные политикой сильнее; обрыв TimeoutError повторяется один раз и докачивает',
+  { skip: unavailable, timeout: 180000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
+    const run = storeTree.run;
+    const backoff = storeTree.retryBackoffMs;
+    const envs: NodeJS.ProcessEnv[] = [];
+    storeTree.retryBackoffMs = 100;
+    storeTree.run = (h, options) => {
+      envs.push(options.env);
+      if (envs.length === 1)
+        return Promise.resolve({
+          code: 1,
+          stdout: 'Progress: resolved 1, reused 0, downloaded 0, added 0\n',
+          stderr:
+            '[23] The operation was aborted due to timeout\n\nTimeoutError: The operation was aborted due to timeout\n    at new DOMException (node:internal/per_context/domexception:76:18)\n',
+          timedOut: false,
+        } as any);
+      return run(h, options);
+    };
+    t.after(() => {
+      storeTree.run = run;
+      storeTree.retryBackoffMs = backoff;
+    });
+    const r = await ctx.check(ctx.repo.head());
+    gatesPassed(r);
+    assert.equal(r.receipt.outcome, 'hit', r.receipt.reason);
+    assert.equal(r.receipt.built, true);
+    assert.equal(r.receipt.sources.retries, 1);
+    assert.equal(envs.length, 2, 'одна повторная сборка');
+    for (const prefix of ['npm', 'pnpm']) {
+      // Задано политикой (`contour`): остаётся.
+      assert.equal(envs[1]![`${prefix}_config_fetch_retries`], '0');
+      assert.equal(envs[1]![`${prefix}_config_fetch_timeout`], '180000');
+      assert.equal(envs[1]![`${prefix}_config_network_concurrency`], '8');
+      assert.equal(envs[1]![`${prefix}_config_minimum_release_age`], '0');
+    }
+    const log = readFileSync(
+      join(ctx.state, 'gates-at', 'GA-1', 'artifacts', 'dependency-store.log'),
+      'utf8',
+    );
+    assert.match(log, /aborted due to timeout[\s\S]*повтор сборки после обрыва сети/);
+  },
+);
+
+test(
+  'DS54: сетевой отказ сборки seed — причина называет сеть npm; попытки ждут срока, явные smoke/gates повторяют сборку сразу',
+  { skip: unavailable, timeout: 180000 },
+  async (t) => {
+    const reg = await registry(t);
+    const ctx = await contour(reg.url, { 'dep-a': '1.0.0' });
+    const base = ctx.repo.head();
+    reg.failNext = 1;
+    const failed = await ctx.check(base);
+    gatesPassed(failed);
+    assert.equal(failed.receipt.outcome, 'miss');
+    assert.match(
+      failed.receipt.reason,
+      /^сборка seed: сеть реестра npm \(ответ 503\), а не lockfile; следующий harness smoke или harness gates повторит сборку сразу/,
+    );
+    assert.doesNotMatch(failed.receipt.reason, /\n\s+at /, 'без стека JavaScript');
+    // Пометка старше короткой паузы, но в сроке: попытка run ждёт.
+    const old = new Date(Date.now() - 30_000);
+    for (const name of readdirSync(failedDir(ctx)))
+      utimesSync(join(failedDir(ctx), name), old, old);
+    const cooling = await ctx.check(base);
+    assert.match(
+      cooling.receipt.reason,
+      /^недавняя сборка не удалась: сборка seed: сеть реестра npm/,
+    );
+    // Явная команда оператора: сборка сразу.
+    const explicit = await ctx.check(base, ['install'], { retryStoreNetworkFailure: true });
+    gatesPassed(explicit);
+    assert.equal(explicit.receipt.outcome, 'hit', explicit.receipt.reason);
+    assert.equal(explicit.receipt.built, true);
+
+    // Постоянный отказ явная команда не повторяет.
+    const moved = await ctx.commit({ 'dep-a': '1.0.0', 'dep-b': '1.0.0' });
+    const key = readdirSync(ctx.seeds);
+    assert.equal(key.length, 1);
+    reg.failNext = 1;
+    await ctx.check(moved);
+    for (const name of readdirSync(failedDir(ctx))) {
+      writeFileSync(
+        join(failedDir(ctx), name),
+        JSON.stringify({ reason: 'ERR_PNPM_BROKEN_LOCKFILE', permanent: true }),
+      );
+      utimesSync(join(failedDir(ctx), name), old, old);
+    }
+    const permanent = await ctx.check(moved, ['install'], { retryStoreNetworkFailure: true });
+    assert.equal(permanent.receipt.outcome, 'partial');
+    assert.match(permanent.receipt.reason, /^сборка этого lockfile невозможна/);
   },
 );

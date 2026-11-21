@@ -1646,6 +1646,7 @@ async function run(
           failFast: Boolean(v['fail-fast']),
           signal: abort.signal,
           resourceDatabase: defaultResourceDatabase(),
+          retryStoreNetworkFailure: true,
           // Ход проверки — диагностика в stderr: stdout остаётся одним JSON.
           onEvidence: (e) =>
             process.stderr.write(`harness gates: ${e.gate} ${e.passed ? 'passed' : 'failed'}\n`),
@@ -1723,6 +1724,7 @@ async function run(
           ...optional('repositoryId', v.repository),
           signal: abort.signal,
           resourceDatabase: defaultResourceDatabase(),
+          retryStoreNetworkFailure: true,
           ...(v['writer-probe']
             ? {
                 writerProbe: true,

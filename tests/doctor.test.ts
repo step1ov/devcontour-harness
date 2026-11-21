@@ -1,7 +1,8 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- фикстура правит сырой JSON политики. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { doctor } from '../src/control/doctor.ts';
@@ -80,6 +81,70 @@ test('doctor показывает будущий корень checkout без с
     for (const [key, value] of Object.entries(previous))
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('doctor (alpha.64): модель и effort по ролям из политики; модель Codex вне кэша моделей — предупреждение, не проблема', async () => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'harness-codex-home-')));
+  const before = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = home;
+  try {
+    const policy = policyOf((p: Record<string, any>) => {
+      p.roles = {
+        developer: { writer: { runtime: 'codex', model: 'gpt-known', effort: 'medium' } },
+      };
+      p.review = {
+        code: { reviewer: { runtime: 'claude', model: 'claude-x', effort: 'high' } },
+        plan: { reviewer: { runtime: 'codex', model: 'gpt-typo', effort: 'high' } },
+        contract: {
+          reviewer: { runtime: 'codex', model: 'gpt-known', effort: 'xhigh' },
+          alternates: [{ runtime: 'claude' }],
+        },
+      };
+    });
+    const run = () =>
+      doctor(policy, {}, undefined, undefined, undefined, { resourceDatabase: false });
+    const plain = await run();
+    assert.deepEqual(plain.models, [
+      { use: 'writer developer', runtime: 'codex', model: 'gpt-known', effort: 'medium' },
+      { use: 'code-review developer', runtime: 'claude', model: 'claude-x', effort: 'high' },
+      { use: 'plan-review', runtime: 'codex', model: 'gpt-typo', effort: 'high' },
+      { use: 'contract-review', runtime: 'codex', model: 'gpt-known', effort: 'xhigh' },
+      { use: 'contract-review (запасной 1)', runtime: 'claude' },
+    ]);
+    // Кэша моделей нет — проверки нет.
+    assert.equal(plain.warnings!.filter((w) => w.startsWith('codex-')).length, 0);
+
+    writeFileSync(
+      join(home, 'models_cache.json'),
+      JSON.stringify({
+        models: [
+          {
+            slug: 'gpt-known',
+            supported_reasoning_levels: [
+              { effort: 'low' },
+              { effort: 'medium' },
+              { effort: 'high' },
+            ],
+          },
+        ],
+      }),
+    );
+    const checked = await run();
+    const codex = checked.warnings!.filter((w) => w.startsWith('codex-'));
+    assert.equal(codex.length, 2, JSON.stringify(codex));
+    assert.match(codex[0]!, /^codex-model-unknown: модели gpt-typo \(plan-review\) нет/);
+    assert.match(codex[0]!, /model is not supported/);
+    assert.match(codex[1]!, /^codex-effort-unknown: gpt-known effort xhigh \(contract-review\)/);
+    assert.equal(
+      checked.problems.some((p) => p.includes('gpt-typo')),
+      false,
+      'неизвестная модель — предупреждение, а не проблема',
+    );
+  } finally {
+    if (before === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = before;
     rmSync(home, { recursive: true, force: true });
   }
 });
