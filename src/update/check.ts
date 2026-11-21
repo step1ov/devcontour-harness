@@ -201,8 +201,10 @@ export async function checkUpdates(ctx: CheckContext): Promise<UpdateCheck> {
       hCandidates.push(current.harness);
     let uiCandidates: string[] = [];
     let uiTag: string | undefined;
+    let uiVersions: string[] = [];
     if (current.ui) {
       const uiMeta = await packageVersions(UI_PACKAGE, config.channel, ctx.npm);
+      uiVersions = uiMeta?.versions ?? [];
       uiTag = uiMeta?.tags[config.channel];
       uiCandidates = uiMeta && uiTag ? candidates(uiMeta.versions, current.ui, uiTag, true) : [];
       if (!uiCandidates.includes(current.ui)) uiCandidates.push(current.ui);
@@ -234,13 +236,39 @@ export async function checkUpdates(ctx: CheckContext): Promise<UpdateCheck> {
     let note: string | undefined;
     if (current.ui && uiTag && chosen.ui && compareVersions(uiTag, chosen.ui) > 0)
       note = `Панель ${uiTag} не подходит к harness ${chosen.harness} по peer-диапазону; поставится панель ${chosen.ui}`;
-    if (!harnessChanged && !uiChanged)
+    if (!harnessChanged && !uiChanged) {
+      // Установлена версия новее тега канала. Её нет в списке версий реестра
+      // (сборка из репозитория до публикации) — «ещё не опубликована»; есть —
+      // опубликована, но тег канала на неё не указывает. Обновление не нужно,
+      // и строка говорит это прямо.
+      const ahead = (what: string, version: string, tag: string, versions: readonly string[]) =>
+        versions.some((v) => compareVersions(v, version) === 0)
+          ? `${what} ${version} — новее тега канала ${config.channel} (${tag}): версия опубликована, но тег канала на неё не указывает`
+          : `${what} ${version} — новее ${what === 'панель' ? 'опубликованной' : 'опубликованного'} в npm ${tag}: эта версия ещё не опубликована`;
+      const harnessAhead = compareVersions(current.harness, hTag) > 0;
+      const uiAhead = !!current.ui && !!uiTag && compareVersions(current.ui, uiTag) > 0;
+      const anyAhead = harnessAhead || uiAhead;
+      const parts = [
+        harnessAhead
+          ? `установлен ${ahead('harness', current.harness, hTag, hMeta.versions)}`
+          : `harness ${current.harness} — последний опубликованный`,
+        ...(current.ui
+          ? [
+              uiAhead
+                ? ahead('панель', current.ui, uiTag!, uiVersions)
+                : `панель ${current.ui} — последняя опубликованная`,
+            ]
+          : []),
+      ];
       return {
         ...base,
         state: 'up-to-date',
         ...(note ? { note } : {}),
-        line: `Обновлений нет: установлены ${pairText(current)} (канал ${config.channel}).`,
+        line: anyAhead
+          ? `Обновление не нужно: ${parts.join('; ')} (канал ${config.channel}).`.slice(0, 300)
+          : `Обновлений нет: установлены ${pairText(current)} (канал ${config.channel}).`,
       };
+    }
     const whatsNew: string[] = [];
     let changes: string[] = [];
     if (harnessChanged) {

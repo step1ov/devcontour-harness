@@ -96,7 +96,8 @@ export interface WriterProbeWriter {
   /**
    * Шаги закрыты только локальным портом, а сеть исполнителя закрыта и для
    * него: проба сама повторила команды под `network: loopback` (127.0.0.1 и
-   * ::1, без интернета) в той же изоляции. Есть, когда повтор выполнялся.
+   * ::1, без интернета) в той же изоляции, в свежем подготовленном дереве и
+   * свежем TMPDIR (`trialLoopback`). Есть, когда повтор выполнялся.
    */
   loopback?: WriterLoopbackTrial;
 }
@@ -275,13 +276,33 @@ export function classifyProbe(result: {
       evidence: lastOf(lines, listen)!,
       local: true,
     };
+  const write =
+    /\b(?:EROFS|EPERM|EACCES)\b|read-only file system|Operation not permitted|Permission denied/i;
+  // Отказ записи с явным путём (`EPERM: operation not permitted, open
+  // '/x/cache'`) — запись вне области записи, а не локальный порт: он
+  // главнее строк без пути где угодно в выводе.
+  const pathDenied = lines.findLast((l) => write.test(l) && hasPath.test(l));
+  // Сборщик на Rust (Turbopack) печатает цепочку причин строками: «binding to
+  // a port» и ниже EPERM без пути — это закрытый локальный порт, не запись
+  // (EPERM с путём — запись, ниже).
+  const binding = /\bbinding to (?:a |the )?(?:port|address|socket)\b|\bfailed to bind\b/i;
+  const eperm = /\bEPERM\b|Operation not permitted|\(os error 1\)/i;
+  if (
+    !pathDenied &&
+    lines.some((l) => binding.test(l)) &&
+    lines.some((l) => eperm.test(l) && !hasPath.test(l))
+  )
+    return {
+      status: 'blocked',
+      reason: 'listen-denied',
+      evidence: lastOf(lines, binding)!,
+      local: true,
+    };
   const network =
     /\b(?:ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ECONNREFUSED)\b|getaddrinfo|Could not resolve host|Temporary failure in name resolution|network is unreachable|ERR_PNPM_META_FETCH_FAIL|fetch failed/i;
   if (lines.some((l) => network.test(l)))
     return { status: 'blocked', reason: 'network-denied', evidence: lastOf(lines, network)! };
-  const write =
-    /\b(?:EROFS|EPERM|EACCES)\b|read-only file system|Operation not permitted|Permission denied/i;
-  const denied = lastOf(lines, write);
+  const denied = pathDenied ?? lastOf(lines, write);
   if (denied) {
     const pathless = !hasPath.test(denied);
     return {
@@ -445,7 +466,7 @@ export interface WriterProbeInput {
 
 /** Команды `writerProbe` репозитория в изоляции каждого его исполнителя. */
 export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeResult> {
-  const { policy, repo, cwd } = input;
+  const { policy, repo } = input;
   const steps = repo.writerProbe ?? [];
   const notes: string[] = [];
   if (!steps.length)
@@ -458,30 +479,18 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
   let n = 0;
   for (const w of writersOf(policy, repo)) {
     if (w.runtime !== 'codex' && w.runtime !== 'claude') continue;
-    const runtime = w.runtime;
-    const profile = w.toolProfile ? policy.toolProfiles[w.toolProfile] : undefined;
-    const mechanism =
-      policy.isolation.mode !== 'os'
-        ? 'none'
-        : runtime === 'codex'
-          ? 'codex-sandbox'
-          : 'sandbox-runtime';
-    const network = profileNetwork(runtime, profile);
-    // Без поля `network` граница прежняя и инструменты runtime не закрыты:
-    // проба не называет её режимом `none` или `loopback`.
-    const networkMode: WriterProbeWriter['networkMode'] = profile?.network
-      ? profile.network
-      : network === 'full'
-        ? 'full'
-        : 'legacy';
+    const spec: WriterSpec = { ...w, runtime: w.runtime };
+    const { profile, mechanism, network, networkMode } = writerShape(policy, spec);
     const report: WriterProbeWriter = {
-      runtime,
+      runtime: spec.runtime,
       ...(w.toolProfile ? { toolProfile: w.toolProfile } : {}),
       roles: w.roles,
       mechanism,
       network:
         networkMode === 'full' ||
-        (networkMode === 'legacy' && runtime === 'claude' && policy.isolation.domains.length > 0),
+        (networkMode === 'legacy' &&
+          spec.runtime === 'claude' &&
+          policy.isolation.domains.length > 0),
       networkMode,
       commands: [],
     };
@@ -498,7 +507,7 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
           advice: ADVICE[reason],
         });
     };
-    if (!writerRunsChecks(runtime, profile)) {
+    if (!writerRunsChecks(spec.runtime, profile)) {
       blockAll('no-shell');
       continue;
     }
@@ -514,250 +523,352 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
         continue;
       }
     }
-    let execution;
+    const index = ++n;
+    const callDir = join(input.dir, `writer-${index}`);
+    await mkdir(callDir, { recursive: true });
+    let rig: Rig;
     try {
-      execution = executionEnvironment(
-        [
-          policy.environment,
-          repo.environment,
-          profile?.environment,
-          ...(profile ? [mcpEnvironment(profile)] : []),
-        ],
-        {
-          DEVCONTOUR_REPOSITORY_ID: repo.id,
-          DEVCONTOUR_RUN_ID: input.runId,
-          DEVCONTOUR_PHASE: 'candidate',
-          // Ресурсов и зависимостей у пробы нет: переменные есть, как у попытки.
-          DEVCONTOUR_RESOURCES_JSON: '[]',
-          DEVCONTOUR_DEPENDENCIES_JSON: '[]',
-          DEVCONTOUR_COMPONENTS_JSON: JSON.stringify({ [repo.id]: cwd }),
-        },
-        input.environment ?? process.env,
-      );
+      rig = await writerRig(input, spec);
     } catch (error) {
       blockAll('environment', error instanceof Error ? error.message : String(error));
       continue;
     }
-    // HOME — как у адаптера runtime.
-    execution.env.HOME ??= homedir();
-    const env0 = execution;
-    const index = ++n;
-    const callDir = join(input.dir, `writer-${index}`);
-    await mkdir(callDir, { recursive: true });
-    // Свой TMPDIR в области записи — как у вызова исполнителя.
-    const temp = await writerScratch(execution.env);
-    const scratch = temp.dir;
-    const codexBin = input.executables?.codex ?? 'codex';
-    const bounds = isolation({
-      write: [cwd, scratch],
-      controller: [...input.boundary.hidden, temp.parent],
-      readable: [cwd, scratch, ...input.boundary.readable],
-      domains: policy.isolation.domains,
-      ...(input.boundary.checkouts.length ? { checkouts: input.boundary.checkouts } : {}),
-    });
-    type Net = ReturnType<typeof profileNetwork>;
-    const sandboxed = (net: Net) =>
-      withWriterNetwork(bounds, runtime === 'claude' ? net : undefined);
-    /** Все команды пробы при сети `net`; `local` — закрытые только локальным портом. */
-    const runSteps = async (net: Net, mode: WriterProbeWriter['networkMode'], dir: string) => {
-      const iso = sandboxed(net);
-      const commands: WriterProbeCommand[] = [];
-      const local: string[] = [];
-      for (const step of steps) {
-        let argv: string[];
-        let env: NodeJS.ProcessEnv = env0.env;
-        let runCwd = cwd;
-        if (mechanism === 'codex-sandbox')
-          // Профиль прав — тот же, что у `codex exec` исполнителя.
-          argv = [
-            codexBin,
-            'sandbox',
-            ...codexPermissions(iso, net ?? 'none'),
-            '--',
-            ...step.command,
-          ];
-        else if (mechanism === 'sandbox-runtime') {
-          // Метка старта обёртки — в своём каталоге, открытом на запись
-          // только ей (как у gates); песочница исполнителя — та же граница.
-          const marks = join(dir, step.id + '.marks');
-          await mkdir(marks, { recursive: true });
-          const wrapped = await isolatedCommand(
-            { ...iso, write: [...iso.write, await realpath(marks)] },
-            step.command,
-            join(dir, step.id + '.settings'),
-            scratch,
-            join(marks, 'started'),
-            await realpath(cwd),
-            [await realpath(cwd)],
-            input.platform ?? process.platform,
-            '',
-            randomBytes(6).toString('hex'),
-            // Процесс песочницы получает тот же TMPDIR, что процесс
-            // исполнителя (claude кладёт туда сокеты своей песочницы).
-            scratch,
-          );
-          argv = wrapped.argv;
-          env = { ...env0.env, ...wrapped.env };
-          runCwd = wrapped.cwd;
-        } else argv = step.command;
-        const started = Date.now();
-        let result;
-        try {
-          result = await command(argv, runCwd, {
-            env,
-            timeoutMs: step.timeoutMs,
-            signal: input.signal,
-            redact: env0.redact,
-            contain: { dirs: [cwd, scratch] },
-            activity: { kind: 'command', label: `writer-probe ${step.id}`.slice(0, 300) },
-          });
-        } catch (error) {
-          // Отмена вызывающим — не исход команды.
-          if (input.signal.aborted) throw error;
-          const code = (error as NodeJS.ErrnoException).code;
-          commands.push({
-            id: step.id,
-            command: step.command,
-            status: 'failed',
-            durationMs: Date.now() - started,
-            reason: 'missing-tool',
-            evidence: clip(`${argv[0]}: ${code ?? String(error)}`),
-            advice:
-              mechanism === 'codex-sandbox' && argv[0] !== step.command[0]
-                ? 'Не запускается codex sandbox: установите codex (тот же, что у исполнителя) или задайте HARNESS_CODEX_BIN.'
-                : ADVICE['missing-tool'],
-          });
-          continue;
-        }
-        const output = result.stdout + '\n' + result.stderr;
-        const log = join(dir, step.id + '.log');
-        await writeFile(log, output);
-        const verdict = classifyProbe({
-          code: result.code,
-          timedOut: result.timedOut,
-          output,
-          signal: result.diagnostics.signal,
-          networkMode: mode,
-        });
-        // Проверка в браузере, закрытая песочницей, — не работа исполнителя:
-        // ожидаемое состояние, а не закрытый шаг, который ждёт решения.
-        const outside =
-          verdict.status === 'blocked' && mechanism !== 'none' && verdict.browser === true;
-        if (verdict.status === 'blocked' && verdict.local && !outside) local.push(step.id);
-        commands.push({
-          id: step.id,
-          command: step.command,
-          status: outside ? 'outside' : verdict.status,
-          exitCode: result.code,
-          ...(result.timedOut ? { timedOut: true } : {}),
-          durationMs: Date.now() - started,
-          ...(verdict.reason ? { reason: verdict.reason } : {}),
-          ...(verdict.evidence ? { evidence: clip(env0.redact(verdict.evidence)) } : {}),
-          ...(outside
-            ? { advice: BROWSER_ADVICE }
-            : verdict.reason
-              ? { advice: verdict.advice ?? ADVICE[verdict.reason] }
-              : {}),
-          log,
-        });
-      }
-      return { commands, local };
-    };
     try {
       // Граница loopback codex проверяется на деле: функция network_proxy
       // есть, но прокси будущей версии мог бы пропускать всё. Локальный
       // сервер должен работать, внешний адрес — нет (напрямую и через прокси).
       if (mechanism === 'codex-sandbox' && network === 'loopback')
-        report.commands.push(
-          await loopbackCheck(
-            [codexBin, 'sandbox', ...codexPermissions(sandboxed(network), network)],
-            cwd,
-            execution,
-            callDir,
-            input.signal,
-          ),
-        );
-      const first = await runSteps(network, report.networkMode, callDir);
+        report.commands.push(await rig.check(network, callDir));
+      const first = await rig.runSteps(network, report.networkMode, callDir);
       report.commands.push(...first.commands);
       // Шаг закрыт только локальным портом, а сеть исполнителя закрыта и для
-      // него (codex без поля network или `none`; claude `none`): проба сама
-      // повторяет команды под loopback — интернет остаётся закрыт.
+      // него (codex без поля network или `none`; claude `none`): нужен повтор
+      // под loopback — интернет остаётся закрыт. Повтор идёт в свежем дереве
+      // (`trialLoopback`): дерево и TMPDIR первого прохода хранят кеш
+      // сборщика, который повторяет его отказ (Turbopack, `next build`).
       const closedLocal =
-        networkMode === 'none' || (networkMode === 'legacy' && runtime === 'codex');
-      if (first.local.length && mechanism !== 'none' && closedLocal) {
-        const dir = join(input.dir, `writer-${index}-loopback`);
-        await mkdir(dir, { recursive: true });
-        const trial: WriterProbeCommand[] = [];
-        let unavailable: string | undefined;
-        if (mechanism === 'codex-sandbox') {
-          unavailable =
-            (await codexLoopbackSupport(codexBin, input.environment ?? process.env)) ?? undefined;
-          if (!unavailable) {
-            const check = await loopbackCheck(
-              [codexBin, 'sandbox', ...codexPermissions(sandboxed('loopback'), 'loopback')],
-              cwd,
-              execution,
-              dir,
-              input.signal,
-            );
-            trial.push(check);
-            if (check.status !== 'ok')
-              unavailable = `проверка границы loopback: ${check.reason ?? check.status}${check.evidence ? ` (${check.evidence})` : ''}`;
-          }
-        }
-        if (!unavailable) trial.push(...(await runSteps('loopback', 'loopback', dir)).commands);
-        const after = new Map(trial.map((c) => [c.id, c]));
-        const opened = first.local.filter((id) => after.get(id)?.status === 'ok');
-        const closed = first.local.filter((id) => !opened.includes(id));
-        // Шаг, который проходил без loopback, должен проходить и с ним.
-        const broken = first.commands
-          .filter((c) => c.status === 'ok' && after.get(c.id)?.status !== 'ok')
-          .map((c) => c.id);
-        const status: WriterLoopbackTrial['status'] = unavailable
-          ? 'unavailable'
-          : !closed.length && !broken.length
-            ? 'resolves'
-            : 'not-enough';
-        const list = first.local.join(', ');
-        const reason =
-          status === 'resolves'
-            ? `Шаги ${list} закрыты только локальным портом; под network: loopback (127.0.0.1 и ::1, без интернета) они проходят — проба повторена в той же изоляции${mechanism === 'codex-sandbox' ? ', граница loopback проверена' : ''}.`
-            : status === 'unavailable'
-              ? `Шаги ${list} закрыты локальным портом, но сеть loopback недоступна: ${unavailable}.`
-              : `Шаги ${list} закрыты локальным портом, но под network: loopback ${[
-                  ...(closed.length ? [`не проходят ${closed.join(', ')}`] : []),
-                  ...(broken.length ? [`перестают проходить ${broken.join(', ')}`] : []),
-                ].join('; ')}: loopback не применяется.`;
-        report.loopback = {
-          status,
-          steps: first.local,
-          reason,
-          decision: 'lead',
-          change: {
-            toolProfile: w.toolProfile ?? freeProfileName(policy),
-            created: !w.toolProfile,
-            roles: w.roles,
-          },
-          commands: trial,
-        };
-        if (status === 'resolves')
-          for (const c of report.commands)
-            if (first.local.includes(c.id)) c.advice = LOOPBACK_ADVICE;
-      }
+        networkMode === 'none' || (networkMode === 'legacy' && spec.runtime === 'codex');
+      if (first.local.length && mechanism !== 'none' && closedLocal)
+        pending.set(report, { index, spec, local: first.local });
     } finally {
-      await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
+      await rig.cleanup();
     }
   }
   if (!writers.length) notes.push('Ни у одной роли репозитория нет исполнителя codex или claude.');
+  const result: WriterProbeResult = { ok: false, writers, ...(notes.length ? { notes } : {}) };
+  settle(result);
+  return result;
+}
+
+/** Исход пробы по командам (после первого прохода и после повтора). */
+function settle(result: WriterProbeResult) {
   // Пустая проба ничего не доказала: без команд она не «зелёная».
-  const probed = writers.some((w) => w.commands.some((c) => c.id !== LOOPBACK_CHECK));
+  const probed = result.writers.some((w) => w.commands.some((c) => c.id !== LOOPBACK_CHECK));
+  // Проверка в браузере вне исполнителя — ожидаемое состояние, не помеха.
+  result.ok =
+    probed &&
+    result.writers.every((w) =>
+      w.commands.every((c) => c.status === 'ok' || c.status === 'outside'),
+    );
+}
+
+/** Исполнитель, которому нужен повтор под loopback (заполняет `probeWriter`). */
+interface Pending {
+  index: number;
+  spec: WriterSpec;
+  /** Шаги первого прохода, закрытые только локальным портом. */
+  local: string[];
+}
+const pending = new WeakMap<WriterProbeWriter, Pending>();
+
+/**
+ * Исполнители пробы, которым нужен повтор под `network: loopback`: шаги
+ * закрыты только локальным портом, а сеть закрыта и для него. Повтор —
+ * `trialLoopback` в свежем подготовленном дереве, по одному на исполнителя.
+ */
+export const loopbackTrials = (probe: WriterProbeResult) =>
+  probe.writers.filter((w) => pending.has(w) && !w.loopback);
+
+/**
+ * Повтор пробы исполнителя `writer` под `network: loopback` в свежем
+ * подготовленном дереве `input.cwd` и свежем TMPDIR — как первый проход, а
+ * не на его остатках: кеш сборки, который оставил закрытый проход, повторяет
+ * его отказ и под loopback. Итог предварительный: функция возвращает `commit`,
+ * который записывает `writer.loopback`, и вызывающий вызывает его, только
+ * когда проход в свежем дереве завершился целиком (teardown и проверка
+ * дерева). `passFailed` — проход не завершился (тогда `unavailable` с
+ * причиной).
+ */
+export async function trialLoopback(
+  input: WriterProbeInput,
+  probe: WriterProbeResult,
+  writer: WriterProbeWriter,
+  passFailed?: string,
+): Promise<(() => void) | undefined> {
+  const p = pending.get(writer);
+  if (!p || writer.loopback) return undefined;
+  const { policy } = input;
+  const { mechanism } = writerShape(policy, p.spec);
+  const dir = join(input.dir, `writer-${p.index}-loopback`);
+  await mkdir(dir, { recursive: true });
+  const trial: WriterProbeCommand[] = [];
+  const codexBin = input.executables?.codex ?? 'codex';
+  let unavailable = passFailed && `проход в свежем дереве для повтора не завершился: ${passFailed}`;
+  if (!unavailable && mechanism === 'codex-sandbox')
+    unavailable =
+      (await codexLoopbackSupport(codexBin, input.environment ?? process.env)) ?? undefined;
+  if (!unavailable) {
+    let rig: Rig | undefined;
+    try {
+      rig = await writerRig(input, p.spec);
+      if (mechanism === 'codex-sandbox') {
+        const check = await rig.check('loopback', dir);
+        trial.push(check);
+        if (check.status !== 'ok')
+          unavailable = `проверка границы loopback: ${check.reason ?? check.status}${check.evidence ? ` (${check.evidence})` : ''}`;
+      }
+      if (!unavailable) trial.push(...(await rig.runSteps('loopback', 'loopback', dir)).commands);
+    } catch (error) {
+      if (input.signal.aborted) throw error;
+      unavailable = error instanceof Error ? error.message : String(error);
+    } finally {
+      await rig?.cleanup();
+    }
+  }
+  const after = new Map(trial.map((c) => [c.id, c]));
+  const opened = p.local.filter((id) => after.get(id)?.status === 'ok');
+  const closed = p.local.filter((id) => !opened.includes(id));
+  // Шаг, который проходил без loopback, должен проходить и с ним.
+  const broken = writer.commands
+    .filter((c) => c.status === 'ok' && c.id !== LOOPBACK_CHECK && after.get(c.id)?.status !== 'ok')
+    .map((c) => c.id);
+  const status: WriterLoopbackTrial['status'] = unavailable
+    ? 'unavailable'
+    : !closed.length && !broken.length
+      ? 'resolves'
+      : 'not-enough';
+  const list = p.local.join(', ');
+  const reason =
+    status === 'resolves'
+      ? `Шаги ${list} закрыты только локальным портом; под network: loopback (127.0.0.1 и ::1, без интернета) они проходят — проба повторена в той же изоляции, в свежем рабочем дереве${mechanism === 'codex-sandbox' ? ', граница loopback проверена' : ''}.`
+      : status === 'unavailable'
+        ? `Шаги ${list} закрыты локальным портом, но сеть loopback недоступна: ${unavailable}.`
+        : `Шаги ${list} закрыты локальным портом, но под network: loopback ${[
+            ...(closed.length ? [`не проходят ${closed.join(', ')}`] : []),
+            ...(broken.length ? [`перестают проходить ${broken.join(', ')}`] : []),
+          ].join('; ')}: loopback не применяется.`;
+  const loopback: WriterLoopbackTrial = {
+    status,
+    steps: p.local,
+    reason,
+    decision: 'lead',
+    change: {
+      toolProfile: p.spec.toolProfile ?? freeProfileName(policy),
+      created: !p.spec.toolProfile,
+      roles: p.spec.roles,
+    },
+    commands: trial,
+  };
+  return () => {
+    writer.loopback = loopback;
+    if (status === 'resolves')
+      for (const c of writer.commands) if (p.local.includes(c.id)) c.advice = LOOPBACK_ADVICE;
+    settle(probe);
+  };
+}
+
+type WriterSpec = { runtime: 'codex' | 'claude'; toolProfile?: string; roles: string[] };
+
+/** Профиль, механизм изоляции и сеть исполнителя. */
+function writerShape(policy: ExecutionPolicy, w: WriterSpec) {
+  const profile = w.toolProfile ? policy.toolProfiles[w.toolProfile] : undefined;
+  const mechanism: WriterProbeWriter['mechanism'] =
+    policy.isolation.mode !== 'os'
+      ? 'none'
+      : w.runtime === 'codex'
+        ? 'codex-sandbox'
+        : 'sandbox-runtime';
+  const network = profileNetwork(w.runtime, profile);
+  // Без поля `network` граница прежняя и инструменты runtime не закрыты:
+  // проба не называет её режимом `none` или `loopback`.
+  const networkMode: WriterProbeWriter['networkMode'] = profile?.network
+    ? profile.network
+    : network === 'full'
+      ? 'full'
+      : 'legacy';
+  return { profile, mechanism, network, networkMode };
+}
+
+type Net = ReturnType<typeof profileNetwork>;
+interface Rig {
+  /** Все команды пробы при сети `net`; `local` — закрытые только локальным портом. */
+  runSteps(
+    net: Net,
+    mode: WriterProbeWriter['networkMode'],
+    dir: string,
+  ): Promise<{ commands: WriterProbeCommand[]; local: string[] }>;
+  /** Проверка границы loopback codex. */
+  check(net: Net, dir: string): Promise<WriterProbeCommand>;
+  cleanup(): Promise<void>;
+}
+
+/**
+ * Окружение, свой TMPDIR и граница исполнителя в дереве `input.cwd` — как у
+ * вызова исполнителя. Отказ окружения — исключение. TMPDIR убирает `cleanup`.
+ */
+async function writerRig(input: WriterProbeInput, w: WriterSpec): Promise<Rig> {
+  const { policy, repo, cwd } = input;
+  const steps = repo.writerProbe ?? [];
+  const { profile, mechanism } = writerShape(policy, w);
+  const runtime = w.runtime;
+  const execution = executionEnvironment(
+    [
+      policy.environment,
+      repo.environment,
+      profile?.environment,
+      ...(profile ? [mcpEnvironment(profile)] : []),
+    ],
+    {
+      DEVCONTOUR_REPOSITORY_ID: repo.id,
+      DEVCONTOUR_RUN_ID: input.runId,
+      DEVCONTOUR_PHASE: 'candidate',
+      // Ресурсов и зависимостей у пробы нет: переменные есть, как у попытки.
+      DEVCONTOUR_RESOURCES_JSON: '[]',
+      DEVCONTOUR_DEPENDENCIES_JSON: '[]',
+      DEVCONTOUR_COMPONENTS_JSON: JSON.stringify({ [repo.id]: cwd }),
+    },
+    input.environment ?? process.env,
+  );
+  // HOME — как у адаптера runtime.
+  execution.env.HOME ??= homedir();
+  const env0 = execution;
+  // Свой TMPDIR в области записи — как у вызова исполнителя.
+  const temp = await writerScratch(execution.env);
+  const scratch = temp.dir;
+  const codexBin = input.executables?.codex ?? 'codex';
+  const bounds = isolation({
+    write: [cwd, scratch],
+    controller: [...input.boundary.hidden, temp.parent],
+    readable: [cwd, scratch, ...input.boundary.readable],
+    domains: policy.isolation.domains,
+    ...(input.boundary.checkouts.length ? { checkouts: input.boundary.checkouts } : {}),
+  });
+  const sandboxed = (net: Net) => withWriterNetwork(bounds, runtime === 'claude' ? net : undefined);
+  const runSteps: Rig['runSteps'] = async (net, mode, dir) => {
+    const iso = sandboxed(net);
+    const commands: WriterProbeCommand[] = [];
+    const local: string[] = [];
+    for (const step of steps) {
+      let argv: string[];
+      let env: NodeJS.ProcessEnv = env0.env;
+      let runCwd = cwd;
+      if (mechanism === 'codex-sandbox')
+        // Профиль прав — тот же, что у `codex exec` исполнителя.
+        argv = [
+          codexBin,
+          'sandbox',
+          ...codexPermissions(iso, net ?? 'none'),
+          '--',
+          ...step.command,
+        ];
+      else if (mechanism === 'sandbox-runtime') {
+        // Метка старта обёртки — в своём каталоге, открытом на запись
+        // только ей (как у gates); песочница исполнителя — та же граница.
+        const marks = join(dir, step.id + '.marks');
+        await mkdir(marks, { recursive: true });
+        const wrapped = await isolatedCommand(
+          { ...iso, write: [...iso.write, await realpath(marks)] },
+          step.command,
+          join(dir, step.id + '.settings'),
+          scratch,
+          join(marks, 'started'),
+          await realpath(cwd),
+          [await realpath(cwd)],
+          input.platform ?? process.platform,
+          '',
+          randomBytes(6).toString('hex'),
+          // Процесс песочницы получает тот же TMPDIR, что процесс
+          // исполнителя (claude кладёт туда сокеты своей песочницы).
+          scratch,
+        );
+        argv = wrapped.argv;
+        env = { ...env0.env, ...wrapped.env };
+        runCwd = wrapped.cwd;
+      } else argv = step.command;
+      const started = Date.now();
+      let result;
+      try {
+        result = await command(argv, runCwd, {
+          env,
+          timeoutMs: step.timeoutMs,
+          signal: input.signal,
+          redact: env0.redact,
+          contain: { dirs: [cwd, scratch] },
+          activity: { kind: 'command', label: `writer-probe ${step.id}`.slice(0, 300) },
+        });
+      } catch (error) {
+        // Отмена вызывающим — не исход команды.
+        if (input.signal.aborted) throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        commands.push({
+          id: step.id,
+          command: step.command,
+          status: 'failed',
+          durationMs: Date.now() - started,
+          reason: 'missing-tool',
+          evidence: clip(`${argv[0]}: ${code ?? String(error)}`),
+          advice:
+            mechanism === 'codex-sandbox' && argv[0] !== step.command[0]
+              ? 'Не запускается codex sandbox: установите codex (тот же, что у исполнителя) или задайте HARNESS_CODEX_BIN.'
+              : ADVICE['missing-tool'],
+        });
+        continue;
+      }
+      const output = result.stdout + '\n' + result.stderr;
+      const log = join(dir, step.id + '.log');
+      await writeFile(log, output);
+      const verdict = classifyProbe({
+        code: result.code,
+        timedOut: result.timedOut,
+        output,
+        signal: result.diagnostics.signal,
+        networkMode: mode,
+      });
+      // Проверка в браузере, закрытая песочницей, — не работа исполнителя:
+      // ожидаемое состояние, а не закрытый шаг, который ждёт решения.
+      const outside =
+        verdict.status === 'blocked' && mechanism !== 'none' && verdict.browser === true;
+      if (verdict.status === 'blocked' && verdict.local && !outside) local.push(step.id);
+      commands.push({
+        id: step.id,
+        command: step.command,
+        status: outside ? 'outside' : verdict.status,
+        exitCode: result.code,
+        ...(result.timedOut ? { timedOut: true } : {}),
+        durationMs: Date.now() - started,
+        ...(verdict.reason ? { reason: verdict.reason } : {}),
+        ...(verdict.evidence ? { evidence: clip(env0.redact(verdict.evidence)) } : {}),
+        ...(outside
+          ? { advice: BROWSER_ADVICE }
+          : verdict.reason
+            ? { advice: verdict.advice ?? ADVICE[verdict.reason] }
+            : {}),
+        log,
+      });
+    }
+    return { commands, local };
+  };
   return {
-    // Проверка в браузере вне исполнителя — ожидаемое состояние, не помеха.
-    ok:
-      probed &&
-      writers.every((w) => w.commands.every((c) => c.status === 'ok' || c.status === 'outside')),
-    writers,
-    ...(notes.length ? { notes } : {}),
+    runSteps,
+    check: (net, dir) =>
+      loopbackCheck(
+        [codexBin, 'sandbox', ...codexPermissions(sandboxed(net), net ?? 'none')],
+        cwd,
+        execution,
+        dir,
+        input.signal,
+      ),
+    cleanup: () => rm(scratch, { recursive: true, force: true }).catch(() => undefined),
   };
 }
 
@@ -803,11 +914,17 @@ export function writerProbeText(probe: WriterProbeResult) {
         ...(c.advice && c.status !== 'ok' ? [`      что сделать: ${c.advice}`] : []),
       );
     }
-    if (w.loopback)
+    if (w.loopback) {
       lines.push(
         `    сеть loopback (повтор пробы): ${w.loopback.status} — ${w.loopback.reason}` +
           (w.loopback.status === 'resolves' ? ' Решение техническое: ведущий, не владелец.' : ''),
       );
+      // Исход каждого шага повтора: какой шаг loopback открыл, какой нет.
+      for (const c of w.loopback.commands)
+        lines.push(
+          `      повтор ${c.id}: ${c.status}${c.reason && c.status !== 'ok' ? ` — ${c.reason}` : ''}${c.evidence && c.status !== 'ok' ? ` (${c.evidence})` : ''}`,
+        );
+    }
   }
   if (outside.length)
     lines.push(`  проверки в браузере (${outside.join(', ')}): ${BROWSER_ADVICE}`);
