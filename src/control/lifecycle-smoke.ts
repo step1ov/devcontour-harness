@@ -96,6 +96,12 @@ export interface LifecycleSmokeInput {
    * причиной и повторить пробу под новой политикой.
    */
   applyLoopback?: boolean;
+  /**
+   * sha256 байтов файла политики, из которых разобрана `policy` (CLI — при
+   * загрузке `--policy`). Нужен для `applyLoopback`: запись — только в ту же
+   * политику, которую проверила проба.
+   */
+  policySha?: string;
   /** Исполняемые файлы runtime для пробы (`HARNESS_<RUNTIME>_BIN`). */
   executables?: Partial<Record<'codex' | 'claude', string>>;
 }
@@ -266,6 +272,11 @@ export function classifyLifecycleFailure(
  */
 export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<LifecycleSmokeResult> {
   const { policy } = input;
+  if (input.applyLoopback && (!input.writerProbe || !input.policyPath || !input.policySha))
+    throw new HarnessError(
+      'INVALID_INPUT',
+      'applyLoopback записывает сеть loopback в файл политики по итогам пробы: нужны writerProbe, policyPath и policySha (sha256 разобранных байтов политики)',
+    );
   const repo = repositoryOf(policy, input.repositoryId);
   const repoPath = repositoryPath(input.baseDir);
   const sha = await commitOf(repoPath(repo), input.rev, repo.id);
@@ -327,13 +338,14 @@ export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<Lifecy
                 const first = await run(policy);
                 probe = first;
                 if (!loopbackChanges(first).length) return;
-                if (!input.applyLoopback || !input.policyPath) {
+                if (!input.applyLoopback || !input.policyPath || !input.policySha) {
                   // Одна команда: применить и повторить пробу — решение ведущего.
-                  first.loopbackCommand = `harness smoke --state ${stateDir} --policy ${input.policyPath ?? '<файл политики>'} --sha ${input.rev} --writer-probe --apply-loopback`;
+                  first.loopbackCommand = `harness smoke --state ${stateDir} --policy ${input.policyPath ?? '<файл политики>'} --repository ${repo.id} --sha ${input.rev} --writer-probe --apply-loopback`;
                   return;
                 }
                 const applied = applyWriterLoopback({
                   policyPath: input.policyPath,
+                  probedSha: input.policySha,
                   repositoryId: repo.id,
                   probe: first,
                 });

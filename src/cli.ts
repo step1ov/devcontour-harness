@@ -1727,7 +1727,9 @@ async function run(
             ? {
                 writerProbe: true,
                 ...optional('policyPath', v.policy ? resolve(v.policy) : undefined),
-                ...(v['apply-loopback'] ? { applyLoopback: true } : {}),
+                ...(v['apply-loopback'] && b.source
+                  ? { applyLoopback: true, policySha: b.source.sha }
+                  : {}),
                 executables: {
                   ...optional('codex', process.env.HARNESS_CODEX_BIN || undefined),
                   ...optional('claude', process.env.HARNESS_CLAUDE_BIN || undefined),

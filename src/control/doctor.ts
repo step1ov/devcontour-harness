@@ -24,7 +24,7 @@ import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import type { ToolchainReport } from '../toolchains/inspect.ts';
 import { resourceWarnings } from './resource-advice.ts';
-import { BROWSER_ADVICE, isBrowserStep } from './browser-checks.ts';
+import { BROWSER_ADVICE, isBrowserRunner } from './browser-checks.ts';
 import { timeBudgetWarnings } from '../verification/time-budget.ts';
 
 /** Диагностика toolchain политики (см. `inspectPolicy` в `./toolchains`). */
@@ -224,7 +224,7 @@ export async function doctor(
   // Проверки в браузере среди шагов пробы исполнителя — ожидаемое состояние,
   // а не проблема: песочница исполнителя браузер не запускает.
   const notes = (policy?.repositories ?? []).flatMap((r) => {
-    const browser = (r.writerProbe ?? []).filter(isBrowserStep).map((s) => s.id);
+    const browser = (r.writerProbe ?? []).filter(isBrowserRunner).map((s) => s.id);
     return browser.length
       ? [`browser-checks ${r.id} (${browser.join(', ')}): ${BROWSER_ADVICE}`]
       : [];

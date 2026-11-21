@@ -12,7 +12,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,10 +29,16 @@ import {
   isolationDigest,
   profileNetwork,
   roleBinding,
+  sha256,
 } from '../src/contracts/index.ts';
 import { smokeLifecycle } from '../src/control/lifecycle-smoke.ts';
 import { doctor } from '../src/control/doctor.ts';
-import { LOOPBACK_CHECK, isBrowserStep, writerProbeText } from '../src/control/writer-probe.ts';
+import {
+  LOOPBACK_CHECK,
+  classifyProbe,
+  isBrowserRunner,
+  writerProbeText,
+} from '../src/control/writer-probe.ts';
 import { withLoopback } from '../src/control/writer-loopback.ts';
 import { isolationSupport } from '../src/environment/isolation.ts';
 import { example } from './fixtures.ts';
@@ -61,6 +74,7 @@ function fixture(tune: (raw: any, root: string) => void) {
       resourceDatabase: join(root, 'resources.sqlite'),
       writerProbe: true,
       policyPath,
+      policySha: sha256(text),
       ...over,
     });
   return { r, root, raw, policy, policyPath, text, smoke };
@@ -73,7 +87,14 @@ function fixture(tune: (raw: any, root: string) => void) {
  * (`FAKE_NET`), как у настоящей песочницы codex. Проверка границы loopback
  * отвечает «внешний адрес закрыт».
  */
-function fakeCodex(root: string, o: { proxy?: boolean } = {}) {
+function fakeCodex(
+  root: string,
+  o: {
+    proxy?: boolean;
+    /** Первый вызов `sandbox` переписывает этот файл: политика меняется во время пробы. */
+    rewrite?: { file: string; text: string };
+  } = {},
+) {
   const fake = join(root, 'codex');
   const log = join(root, 'argv.jsonl');
   const line = (k: string, v: string) => `${LOOPBACK_CHECK}:${k}:${v}`;
@@ -82,6 +103,7 @@ function fakeCodex(root: string, o: { proxy?: boolean } = {}) {
     `#!${process.execPath}
 const fs=require('fs');const a=process.argv.slice(2);
 if(a[0]==='features'){process.stdout.write(${JSON.stringify(o.proxy === false ? 'shell_tool   stable   true\n' : 'network_proxy   experimental   false\n')});process.exit(0)}
+${o.rewrite ? `if(!fs.existsSync(${JSON.stringify(log)}))fs.writeFileSync(${JSON.stringify(o.rewrite.file)},${JSON.stringify(o.rewrite.text)});` : ''}
 fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(a)+'\\n');
 const loop=a.some(x=>x.includes('allow_local_binding=true'));
 const i=a.indexOf('--');
@@ -109,10 +131,21 @@ const fakeServe = node(
 const fakeInternet = node(
   "console.error('ERR_PNPM_META_FETCH_FAIL GET https://registry.npmjs.org/next: getaddrinfo ENOTFOUND registry.npmjs.org');process.exit(1)",
 );
-/** Браузер без окна под песочницей. */
-const fakeBrowser = node(
-  "console.error('Error: Failed to launch the browser process! Abort trap: 6');process.exit(1)",
-);
+/**
+ * Шаг — файл скрипта в `root/scripts`: в argv нет слов из его вывода, и
+ * классификация видит только вывод, как у настоящего `node scripts/e2e.js`.
+ */
+function script(root: string, name: string, body: string) {
+  mkdirSync(join(root, 'scripts'), { recursive: true });
+  const file = join(root, 'scripts', name);
+  writeFileSync(file, body);
+  return [process.execPath, file];
+}
+/** Браузер без окна под песочницей (Puppeteer, Chrome под Seatbelt). */
+const CHROME_ABORT =
+  "console.error('Error: Failed to launch the browser process! Abort trap: 6');process.exit(1)";
+/** Агент-браузер: демон браузера умер при старте. */
+const AGENT_BROWSER_DOWN = "console.error('Daemon process exited during startup');process.exit(1)";
 
 test('WD01: codex без профиля — локальный порт закрыт: проба сама повторяет шаги под loopback, интернет и браузер остаются как были', async () => {
   let codex!: ReturnType<typeof fakeCodex>;
@@ -122,18 +155,11 @@ test('WD01: codex без профиля — локальный порт закр
     raw.repositories[0].writerProbe = [
       { id: 'dev-server', command: fakeServe },
       { id: 'create', command: fakeInternet },
-      { id: 'verify-browser', command: ['pnpm', 'verify:browser'] },
-      { id: 'e2e', command: fakeBrowser },
+      { id: 'verify-browser', command: script(root, 'verify.js', AGENT_BROWSER_DOWN) },
+      { id: 'e2e', command: script(root, 'e2e.js', CHROME_ABORT) },
     ];
     codex = fakeCodex(root);
   });
-  // `pnpm verify:browser` подменён: шаг — браузерный по имени, падает как Chrome.
-  f.policy.repositories[0]!.writerProbe![2]!.command = [
-    ...fakeBrowser,
-    '--',
-    'pnpm',
-    'verify:browser',
-  ];
   const data = await f.smoke({ executables: { codex: codex.fake } });
   assert.equal(data.passed, true, JSON.stringify(data.failure));
   cliDataSchemas.smoke.parse(data);
@@ -179,7 +205,7 @@ test('WD01: codex без профиля — локальный порт закр
   assert.equal(probe.ok, false);
   assert.equal(
     probe.loopbackCommand,
-    `harness smoke --state ${join(f.root, 'state')} --policy ${f.policyPath} --sha HEAD --writer-probe --apply-loopback`,
+    `harness smoke --state ${join(f.root, 'state')} --policy ${f.policyPath} --repository app --sha HEAD --writer-probe --apply-loopback`,
   );
   // Без --apply-loopback политика не тронута.
   assert.equal(readFileSync(f.policyPath, 'utf8'), f.text);
@@ -343,16 +369,25 @@ test(
 );
 
 test('WD05: doctor называет проверки в браузере ожидаемым состоянием, не проблемой; CLI --apply-loopback требует --writer-probe и --policy', async () => {
-  assert.ok(isBrowserStep({ id: 'verify', command: ['pnpm', 'verify:browser'] }));
+  assert.ok(isBrowserRunner({ id: 'verify', command: ['pnpm', 'verify:browser'] }));
   assert.ok(
-    isBrowserStep({ id: 'ui', command: ['agent-browser', 'open', 'http://127.0.0.1:3000'] }),
+    isBrowserRunner({ id: 'ui', command: ['agent-browser', 'open', 'http://127.0.0.1:3000'] }),
   );
-  assert.ok(isBrowserStep({ id: 'shots', command: ['pnpm', 'exec', 'playwright', 'test'] }));
-  assert.ok(!isBrowserStep({ id: 'dev', command: ['pnpm', 'dev'] }));
+  assert.ok(isBrowserRunner({ id: 'shots', command: ['pnpm', 'exec', 'playwright', 'test'] }));
+  assert.ok(!isBrowserRunner({ id: 'dev', command: ['pnpm', 'dev'] }));
+  // Id и подстроки аргументов не делают шаг проверкой в браузере; установка — тоже.
+  const lookalikes = [
+    { id: 'browser-bundle', command: ['pnpm', 'build:bundle'] },
+    { id: 'headless-cms-build', command: ['pnpm', '--filter', 'headless-cms', 'build'] },
+    { id: 'pw', command: ['pnpm', 'add', '-D', '@playwright/test'] },
+    { id: 'pw-install', command: ['pnpm', 'exec', 'playwright', 'install', 'chromium'] },
+  ];
+  for (const step of lookalikes) assert.ok(!isBrowserRunner(step), step.id);
   const raw = structuredClone(example('policy')) as Record<string, any>;
   raw.repositories[0].writerProbe = [
     { id: 'dev', command: ['pnpm', 'dev'] },
     { id: 'verify-browser', command: ['pnpm', 'verify:browser'] },
+    ...lookalikes,
   ];
   const policy = executionPolicySchema.parse(raw);
   const report = await doctor(policy, {}, undefined, undefined, undefined, {
@@ -385,4 +420,152 @@ test('WD05: doctor называет проверки в браузере ожи�
     assert.equal(out.error.code, 'INVALID_INPUT');
     assert.match(out.error.message, /--apply-loopback .*--writer-probe и --policy/);
   }
+});
+
+test('WD06: outside — только по выводу о запуске браузера; похожие имена и отказ записи или сети остаются blocked', async () => {
+  // Аварийный выход браузера — браузер, а не просто process-abort.
+  const v = classifyProbe({
+    code: 1,
+    timedOut: false,
+    output: 'Error: Failed to launch the browser process! Abort trap: 6',
+  });
+  assert.deepEqual([v.status, v.reason, v.browser], ['blocked', 'process-abort', true]);
+  assert.equal(
+    classifyProbe({ code: 134, timedOut: false, output: 'Abort trap: 6' }).browser,
+    undefined,
+    'аварийный выход без браузера — не браузер',
+  );
+  let codex!: ReturnType<typeof fakeCodex>;
+  const f = fixture((raw, root) => {
+    raw.roles = { developer: { writer: { runtime: 'codex' } } };
+    raw.toolProfiles = {};
+    raw.repositories[0].writerProbe = [
+      {
+        id: 'browser-bundle',
+        command: script(
+          root,
+          'bundle.js',
+          'console.error("Error: EACCES: permission denied, open \'/Users/x/.cache/bundle\'");process.exit(1)',
+        ),
+      },
+      {
+        id: 'headless-cms-build',
+        command: script(
+          root,
+          'cms.js',
+          "console.error('getaddrinfo ENOTFOUND cms.example.com');process.exit(1)",
+        ),
+      },
+      {
+        id: 'pw',
+        command: [
+          ...script(
+            root,
+            'pnpm.js',
+            "console.error('ERR_PNPM_META_FETCH_FAIL GET https://registry.npmjs.org/@playwright%2Ftest: fetch failed');process.exit(1)",
+          ),
+          'add',
+          '-D',
+          '@playwright/test',
+        ],
+      },
+      // `node scripts/e2e.js`: в argv браузера нет, в выводе — его запуск.
+      { id: 'e2e', command: script(root, 'e2e.js', CHROME_ABORT) },
+    ];
+    codex = fakeCodex(root);
+  });
+  const data = await f.smoke({ executables: { codex: codex.fake } });
+  const w = data.writerProbe!.writers[0]!;
+  assert.deepEqual(
+    w.commands.map((c) => [c.id, c.status, c.reason]),
+    [
+      ['browser-bundle', 'blocked', 'write-denied'],
+      ['headless-cms-build', 'blocked', 'network-denied'],
+      ['pw', 'blocked', 'network-denied'],
+      ['e2e', 'outside', 'process-abort'],
+    ],
+  );
+  assert.equal(data.writerProbe!.ok, false);
+});
+
+test('WD07: политика изменилась во время пробы — --apply-loopback отказывает PATH_CONFLICT и не пишет loopback поверх непроверенной политики', async () => {
+  let codex!: ReturnType<typeof fakeCodex>;
+  const f = fixture((raw, root) => {
+    raw.roles = { developer: { writer: { runtime: 'codex' } } };
+    raw.toolProfiles = {};
+    raw.repositories[0].writerProbe = [{ id: 'dev-server', command: fakeServe }];
+    const changed = { ...raw, isolation: { mode: 'none', domains: [] } };
+    codex = fakeCodex(root, {
+      rewrite: { file: join(root, 'policy.json'), text: JSON.stringify(changed, null, 2) + '\n' },
+    });
+  });
+  await assert.rejects(
+    f.smoke({ executables: { codex: codex.fake }, applyLoopback: true }),
+    (e: { code?: string; message: string }) =>
+      e.code === 'PATH_CONFLICT' && /изменился после того, как проба/.test(e.message),
+  );
+  const after = JSON.parse(readFileSync(f.policyPath, 'utf8'));
+  assert.equal(after.isolation.mode, 'none', 'чужая правка осталась как есть');
+  assert.deepEqual(after.toolProfiles, {}, 'loopback не записан');
+  // Без sha проверенных байтов применение не начинается.
+  await assert.rejects(
+    f.smoke({ executables: { codex: codex.fake }, applyLoopback: true, policySha: undefined }),
+    (e: { code?: string }) => e.code === 'INVALID_INPUT',
+  );
+});
+
+test('WD08: две репозитории — команда применения называет --repository и проходит через CLI', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-wdef-multi-')));
+  const codex = fakeCodex(root);
+  const raw = structuredClone(example('policy')) as Record<string, any>;
+  const repos = ['app', 'web'].map((id) => {
+    const r = repo({ 'README.md': id + '\n' });
+    return { r, entry: { ...(structuredClone(raw.repositories[0]) as object), id, path: r.dir } };
+  });
+  raw.repositories = repos.map((x) => ({
+    ...x.entry,
+    writerProbe: [{ id: 'dev-server', command: fakeServe }],
+  }));
+  raw.roles = { developer: { writer: { runtime: 'codex' } } };
+  raw.toolProfiles = {};
+  raw.runTimeoutMs = 60000;
+  raw.isolation = { mode: 'os', domains: [] };
+  const policyPath = join(root, 'policy.json');
+  const text = JSON.stringify(raw, null, 2) + '\n';
+  writeFileSync(policyPath, text);
+  const policy = executionPolicySchema.parse(raw);
+  for (const x of repos) x.r.git('update-ref', policy.repositories[0]!.targetRef, 'HEAD');
+  const data = await smokeLifecycle({
+    policy,
+    baseDir: root,
+    stateDir: join(root, 'state'),
+    rev: 'HEAD',
+    repositoryId: 'web',
+    resourceDatabase: join(root, 'resources.sqlite'),
+    writerProbe: true,
+    policyPath,
+    policySha: sha256(text),
+    executables: { codex: codex.fake },
+  });
+  const command = data.writerProbe!.loopbackCommand!;
+  assert.match(command, / --repository web /);
+  const [bin, ...args] = command.split(' ');
+  assert.equal(bin, 'harness');
+  const r = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), cli, ...args], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      NODE_OPTIONS: '',
+      HARNESS_CODEX_BIN: codex.fake,
+    },
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const out = JSON.parse(r.stdout) as { data: any };
+  assert.equal(out.data.repositoryId, 'web');
+  assert.equal(out.data.writerProbe.ok, true, JSON.stringify(out.data.writerProbe));
+  assert.deepEqual(out.data.writerProbe.loopbackApplied.changes[0].roles, ['developer']);
+  const after = JSON.parse(readFileSync(policyPath, 'utf8'));
+  assert.deepEqual(after.toolProfiles, {
+    'writer-loopback': { runtime: 'codex', network: 'loopback' },
+  });
 });

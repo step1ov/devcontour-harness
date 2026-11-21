@@ -291,12 +291,17 @@ startup»), — `process-abort`; EPERM без пути (сборщик на Rust
 входит в `isolationDigest`, поэтому согласованные графы нужно согласовать
 заново (`review-plan`). Это техническое решение ведущего, не вопрос владельцу.
 
-**Проверки в браузере — вне исполнителя.** Шаг с агент-браузером, headless
-Chrome, Playwright с браузером или `verify:browser` (по id и argv) либо шаг,
-чей браузер не запустился, закрытый песочницей, — статус `outside`: ожидаемо,
-проба остаётся зелёной (exit 0), если остальное доступно. `doctor` с политикой
-называет такие шаги в `notes` (`browser-checks …`), не в `problems`. Такую
-проверку запускайте gate harness только если она проходит на HEAD под harness.
+**Проверки в браузере — вне исполнителя.** Шаг, в выводе которого браузер не
+запустился под песочницей (агент-браузер «Daemon process exited during
+startup», «Failed to launch the browser process», `browserType.launch`, Chrome
+или Chromium, в том числе с `Abort trap`), — статус `outside`: ожидаемо, проба
+остаётся зелёной (exit 0), если остальное доступно. Имя шага и его аргументы
+этого не доказывают: `browser-bundle` или `pnpm add -D @playwright/test` с
+отказом записи или сети остаются `blocked`. `doctor` с политикой, не исполняя
+команд, называет в `notes` (`browser-checks …`), не в `problems`, шаги с
+инструментом запуска браузера в argv (`agent-browser`, `playwright test`,
+`cypress run`, скрипт `verify:browser`). Такую проверку запускайте gate harness
+только если она проходит на HEAD под harness.
 
 ## Исследование: тёплый стенд между попытками
 

@@ -1025,6 +1025,12 @@ test('UP22: реестр не знает пакет или версию (E404, E
       peerDependencies('devcontour-harness-ui', '0.1.0-alpha.4', o),
       /пакет devcontour-harness-ui ещё не опубликован в npm/,
     );
+    // `npm view` версии, которой нет у опубликованного пакета, — E404 «No match
+    // found for version»: это версия, а не пакет.
+    await assert.rejects(
+      peerDependencies('devcontour-harness', NEW2, o),
+      rx(`версия ${NEW2} пакета devcontour-harness ещё не опубликована в npm`),
+    );
     // Иной отказ (реестр не отвечает) — прежняя строка npm, без «не опубликован».
     await registry.close();
     const offline = p.harness('update', '--check', '--state', p.state);

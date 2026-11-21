@@ -126,7 +126,9 @@ const notFound = (r: NpmResult) =>
  */
 export function registryReason(r: NpmResult, name: string, version: string): string {
   const text = r.stderr + '\n' + r.stdout;
-  if (/\bETARGET\b|No matching version found/.test(text))
+  // Пакет есть, версии нет: `npm pack` — ETARGET, `npm view` — E404 «No match
+  // found for version».
+  if (/\bETARGET\b|No matching version found|No match found for version/.test(text))
     return `версия ${version} пакета ${name} ещё не опубликована в npm (в реестре её нет)`;
   if (notFound(r))
     return `пакет ${name} ещё не опубликован в npm: реестр не знает ни его, ни версию ${version} (ответ 404)`;

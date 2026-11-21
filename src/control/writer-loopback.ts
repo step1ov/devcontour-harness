@@ -16,6 +16,7 @@ import {
   policyIssues,
   profileNetwork,
   roleBinding,
+  sha256,
   type ExecutionPolicy,
 } from '../contracts/index.ts';
 import type { WriterLoopbackReceipt, WriterProbeResult } from './writer-probe.ts';
@@ -91,6 +92,12 @@ export function withLoopback(raw: any, repositoryId: string, changes: Change[]):
  */
 export function applyWriterLoopback(input: {
   policyPath: string;
+  /**
+   * sha256 байтов файла политики, которые проба проверяла (прочитаны до
+   * пробы): другой файл к моменту записи — отказ `PATH_CONFLICT`, иначе
+   * изменение легло бы на политику, которую проба не видела.
+   */
+  probedSha: string;
   repositoryId: string;
   probe: WriterProbeResult;
   now?: () => number;
@@ -101,7 +108,13 @@ export function applyWriterLoopback(input: {
       'INVALID_INPUT',
       'Проба не нашла шагов, которые открывает сеть loopback',
     );
+  const conflict = () =>
+    new HarnessError(
+      'PATH_CONFLICT',
+      `Файл политики ${input.policyPath} изменился после того, как проба его прочитала: повторите пробу`,
+    );
   const text = readFileSync(input.policyPath, 'utf8');
+  if (sha256(text) !== input.probedSha) throw conflict();
   const raw = JSON.parse(text);
   const next = withLoopback(raw, input.repositoryId, changes);
   const policy = executionPolicySchema.parse(next);
@@ -129,10 +142,7 @@ export function applyWriterLoopback(input: {
   writeFileSync(temp, JSON.stringify(next, null, 2) + '\n');
   if (readFileSync(input.policyPath, 'utf8') !== text) {
     rmSync(temp, { force: true });
-    throw new HarnessError(
-      'PATH_CONFLICT',
-      `Файл политики ${input.policyPath} изменился во время пробы: повторите команду`,
-    );
+    throw conflict();
   }
   renameSync(temp, input.policyPath);
   const reason = input.probe.writers

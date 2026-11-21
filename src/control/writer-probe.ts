@@ -34,9 +34,9 @@ import {
 import { executionEnvironment } from '../environment/lifecycle.ts';
 import { command } from '../environment/process.ts';
 import { writerScratch } from '../engine/writer-block.ts';
-import { BROWSER_ADVICE, isBrowserStep } from './browser-checks.ts';
+import { BROWSER_ADVICE, BROWSER_LAUNCH, isBrowserRunner } from './browser-checks.ts';
 
-export { BROWSER_ADVICE, isBrowserStep };
+export { BROWSER_ADVICE, BROWSER_LAUNCH, isBrowserRunner };
 
 type Repo = ExecutionPolicy['repositories'][number];
 
@@ -256,14 +256,17 @@ export function classifyProbe(result: {
   const evidence = (re: RegExp) => ((l) => (l ? { evidence: l } : {}))(lastOf(lines, re));
   const abort =
     /Abort trap|SIGABRT|bootstrap_check_in|TransformProcessType|Trace\/BPT trap|sandbox initialization failed/;
-  // Браузерный инструмент, чей процесс браузера умер при старте: тот же класс,
-  // что аварийный выход под песочницей, а не отказ записи.
-  const browser =
-    /Daemon process exited during startup|Failed to launch (?:the )?browser process|Browser process exited|Chrome failed to start/i;
+  // Признак запуска браузера — строка вывода, а не имя шага: аварийный выход
+  // браузера (`… Abort trap: 6`) — тоже браузер, поэтому проверяется первым.
+  if (lines.some((l) => BROWSER_LAUNCH.test(l)))
+    return {
+      status: 'blocked',
+      reason: 'process-abort',
+      ...evidence(BROWSER_LAUNCH),
+      browser: true,
+    };
   if (result.code === 134 || result.signal === 'SIGABRT' || lines.some((l) => abort.test(l)))
     return { status: 'blocked', reason: 'process-abort', ...evidence(abort) };
-  if (lines.some((l) => browser.test(l)))
-    return { status: 'blocked', reason: 'process-abort', ...evidence(browser), browser: true };
   const listen = /listen E(?:PERM|ACCES)|bind\b.*(?:EPERM|EACCES|Operation not permitted)/i;
   if (lines.some((l) => listen.test(l)))
     return {
@@ -639,9 +642,7 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
         // Проверка в браузере, закрытая песочницей, — не работа исполнителя:
         // ожидаемое состояние, а не закрытый шаг, который ждёт решения.
         const outside =
-          verdict.status === 'blocked' &&
-          mechanism !== 'none' &&
-          (isBrowserStep(step) || verdict.browser === true);
+          verdict.status === 'blocked' && mechanism !== 'none' && verdict.browser === true;
         if (verdict.status === 'blocked' && verdict.local && !outside) local.push(step.id);
         commands.push({
           id: step.id,
