@@ -372,7 +372,7 @@ forks — decide them yourself and report them:
   browser, `verify:browser`): status `outside`, and `doctor` lists them in
   `notes` as `browser-checks`. The writer's sandbox does not start a browser;
   this is expected and needs no decision. Make such a check a harness gate
-  only if it passes on HEAD under harness (`$H gates --sha HEAD`); otherwise
+  only if it passes on HEAD under harness (`$H gates --state <manifest.paths.state> --policy .harness/policy.json --sha HEAD`); otherwise
   leave it to the human. Tell the user in one plain line.
 
 For every remaining `blocked` command (internet, writes outside the write
