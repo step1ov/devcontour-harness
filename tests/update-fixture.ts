@@ -11,6 +11,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -152,6 +153,8 @@ setInterval(() => {}, 1000);
 export interface FakeRegistry {
   url: string;
   publish(v: FakeVersion, tag?: string): void;
+  /** Убрать пакет из реестра целиком (реестр отвечает на него 404). */
+  unpublish(name: string): void;
   /** Запросы к реестру (метод и путь), по порядку. */
   readonly requests: string[];
   /** Забыть записанные запросы. */
@@ -250,6 +253,7 @@ export async function fakeRegistry(): Promise<FakeRegistry> {
       if (tag) meta.tags[tag] = v.version;
       writeFileSync(metaFile, JSON.stringify(meta));
     },
+    unpublish: (name) => rmSync(join(dir, name), { recursive: true, force: true }),
     close: () =>
       closed
         ? Promise.resolve()

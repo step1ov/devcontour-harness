@@ -274,6 +274,35 @@ startup»), — `process-abort`; EPERM без пути (сборщик на Rust
 режим сети проба печатает у каждого исполнителя. Команды пробы не должны менять
 отслеживаемые файлы: проверка дерева после smoke это заметит.
 
+**Сеть loopback — умолчание, а не развилка.** Шаг, закрытый только локальным
+портом (`listen-denied` или EPERM без пути), у исполнителя, чья сеть закрыта и
+для него (codex без поля `network` или с `none`, claude с `none`), проба сама
+повторяет под `network: loopback` в той же изоляции; у codex сначала —
+поддержка `network_proxy` и проверка границы `harness-loopback-check`. Итог —
+`writers[].loopback`: `resolves` (закрытые шаги проходят, прежде проходившие не
+сломались), `not-enough` или `unavailable`, причина простыми словами и
+`decision: "lead"`. При `resolves` проба печатает одну команду
+`loopbackCommand`: `harness smoke … --writer-probe --apply-loopback` записывает
+`network: "loopback"` в профиль исполнителя (нет профиля — новый
+`writer-loopback` у его ролей), кладёт запись с причиной в
+`writerProbe.loopbackApplied` и `loopback-receipt.json` каталога пробы и
+повторяет пробу под новой политикой. Больше ничего не меняется: интернет,
+домены, области записи, `isolation.mode` и сеть ревьюера прежние. Сеть профиля
+входит в `isolationDigest`, поэтому согласованные графы нужно согласовать
+заново (`review-plan`). Это техническое решение ведущего, не вопрос владельцу.
+
+**Проверки в браузере — вне исполнителя.** Шаг, в выводе которого браузер не
+запустился под песочницей (агент-браузер «Daemon process exited during
+startup», «Failed to launch the browser process», `browserType.launch`, Chrome
+или Chromium, в том числе с `Abort trap`), — статус `outside`: ожидаемо, проба
+остаётся зелёной (exit 0), если остальное доступно. Имя шага и его аргументы
+этого не доказывают: `browser-bundle` или `pnpm add -D @playwright/test` с
+отказом записи или сети остаются `blocked`. `doctor` с политикой, не исполняя
+команд, называет в `notes` (`browser-checks …`), не в `problems`, шаги с
+инструментом запуска браузера в argv (`agent-browser`, `playwright test`,
+`cypress run`, скрипт `verify:browser`). Такую проверку запускайте gate harness
+только если она проходит на HEAD под harness.
+
 ## Исследование: тёплый стенд между попытками
 
 _Это исследовательская заметка, а не обязательство: в harness такого режима

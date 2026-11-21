@@ -996,3 +996,47 @@ test('UP21: общий каталог установки — замок у ка�
     await registry.close();
   }
 });
+
+test('UP22: реестр не знает пакет или версию (E404, ETARGET) — причина простыми словами, а не «code E404»; прочие отказы прежние', async () => {
+  const { fetchTarball, peerDependencies } = await import('../src/update/npm.ts');
+  const registry = await registryWith(...base());
+  try {
+    const p = project(registry);
+    // Панель стоит в проекте, а в реестре её нет: настоящий npm отвечает E404.
+    registry.unpublish('devcontour-harness-ui');
+    const r = p.harness('update', '--check', '--state', p.state);
+    assert.equal(r.status, 0, r.stderr);
+    updateDataSchema.parse(r.json.data);
+    const c = r.json.data.check;
+    assert.equal(c.state, 'unavailable');
+    assert.match(
+      c.line,
+      /^Не удалось проверить обновления: пакет devcontour-harness-ui ещё не опубликован в npm/,
+    );
+    assert.match(c.error, /0\.1\.0-alpha\.4/);
+    assert.doesNotMatch(c.line + c.error, /E404/);
+    // Пакет есть, версии нет: настоящий npm отвечает ETARGET.
+    const o = { cwd: p.dir, registry: registry.url };
+    await assert.rejects(
+      fetchTarball('devcontour-harness', NEW2, o),
+      rx(`версия ${NEW2} пакета devcontour-harness ещё не опубликована в npm`),
+    );
+    await assert.rejects(
+      peerDependencies('devcontour-harness-ui', '0.1.0-alpha.4', o),
+      /пакет devcontour-harness-ui ещё не опубликован в npm/,
+    );
+    // `npm view` версии, которой нет у опубликованного пакета, — E404 «No match
+    // found for version»: это версия, а не пакет.
+    await assert.rejects(
+      peerDependencies('devcontour-harness', NEW2, o),
+      rx(`версия ${NEW2} пакета devcontour-harness ещё не опубликована в npm`),
+    );
+    // Иной отказ (реестр не отвечает) — прежняя строка npm, без «не опубликован».
+    await registry.close();
+    const offline = p.harness('update', '--check', '--state', p.state);
+    assert.equal(offline.json.data.check.state, 'unavailable');
+    assert.doesNotMatch(offline.json.data.line, /не опубликован/);
+  } finally {
+    await registry.close().catch(() => {});
+  }
+});

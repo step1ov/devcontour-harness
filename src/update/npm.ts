@@ -118,6 +118,23 @@ export function npmReason(r: NpmResult): string {
 const notFound = (r: NpmResult) =>
   /\bE404\b|404 Not Found|is not in this registry/.test(r.stderr + r.stdout);
 
+/**
+ * Причина отказа запроса о версии пакета простыми словами. Реестр не знает
+ * пакет (E404) — «ещё не опубликован в npm»; пакет есть, версии нет
+ * (ETARGET) — «версия ещё не опубликована». Иные отказы — прежняя строка
+ * npm (`npmReason`). Экспортируется для тестов.
+ */
+export function registryReason(r: NpmResult, name: string, version: string): string {
+  const text = r.stderr + '\n' + r.stdout;
+  // Пакет есть, версии нет: `npm pack` — ETARGET, `npm view` — E404 «No match
+  // found for version».
+  if (/\bETARGET\b|No matching version found|No match found for version/.test(text))
+    return `версия ${version} пакета ${name} ещё не опубликована в npm (в реестре её нет)`;
+  if (notFound(r))
+    return `пакет ${name} ещё не опубликован в npm: реестр не знает ни его, ни версию ${version} (ответ 404)`;
+  return npmReason(r);
+}
+
 export class RegistryUnavailable extends Error {}
 
 const json = (r: NpmResult): unknown => {
@@ -157,7 +174,7 @@ export async function peerDependencies(
   o: NpmOptions,
 ): Promise<Record<string, string>> {
   const r = await ask(['view', `${name}@${version}`, 'peerDependencies', '--json'], o);
-  if (r.code !== 0) throw new RegistryUnavailable(npmReason(r));
+  if (r.code !== 0) throw new RegistryUnavailable(registryReason(r, name, version));
   if (!r.stdout.trim()) return {};
   const data = json(r);
   return data && typeof data === 'object' && !Array.isArray(data)
@@ -176,7 +193,7 @@ export async function fetchTarball(name: string, version: string, o: NpmOptions)
       ...o,
       timeoutMs: o.timeoutMs ?? 300_000,
     });
-    if (r.code !== 0) throw new RegistryUnavailable(npmReason(r));
+    if (r.code !== 0) throw new RegistryUnavailable(registryReason(r, name, version));
     const file = readdirSync(dir).find((f) => f.endsWith('.tgz'));
     if (!file) throw new RegistryUnavailable('npm pack не оставил архив');
     return readFileSync(join(dir, file));

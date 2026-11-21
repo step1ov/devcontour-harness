@@ -6,6 +6,8 @@ import { DEPENDENCY_NETWORK } from '../environment/dependency-network.ts';
 import { runGatesAt } from '../verification/gates-at.ts';
 import { commitOf, repositoryOf, repositoryPath } from './gates-check.ts';
 import { probeWriter, writerProbeText, type WriterProbeResult } from './writer-probe.ts';
+import { applyWriterLoopback, loopbackChanges } from './writer-loopback.ts';
+import { writeFile } from 'node:fs/promises';
 
 /**
  * Класс отказа окружения `harness smoke`:
@@ -86,6 +88,20 @@ export interface LifecycleSmokeInput {
    * изоляции каждого его исполнителя (без модели): что закрыто и почему.
    */
   writerProbe?: boolean;
+  /** Файл политики (`--policy`): для команды применения loopback и самого применения. */
+  policyPath?: string;
+  /**
+   * Проба нашла шаги, которые открывает сеть loopback (`resolves`): записать
+   * `network: "loopback"` в файл политики `policyPath`, приложить запись с
+   * причиной и повторить пробу под новой политикой.
+   */
+  applyLoopback?: boolean;
+  /**
+   * sha256 байтов файла политики, из которых разобрана `policy` (CLI — при
+   * загрузке `--policy`). Нужен для `applyLoopback`: запись — только в ту же
+   * политику, которую проверила проба.
+   */
+  policySha?: string;
   /** Исполняемые файлы runtime для пробы (`HARNESS_<RUNTIME>_BIN`). */
   executables?: Partial<Record<'codex' | 'claude', string>>;
 }
@@ -256,6 +272,11 @@ export function classifyLifecycleFailure(
  */
 export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<LifecycleSmokeResult> {
   const { policy } = input;
+  if (input.applyLoopback && (!input.writerProbe || !input.policyPath || !input.policySha))
+    throw new HarnessError(
+      'INVALID_INPUT',
+      'applyLoopback записывает сеть loopback в файл политики по итогам пробы: нужны writerProbe, policyPath и policySha (sha256 разобранных байтов политики)',
+    );
   const repo = repositoryOf(policy, input.repositoryId);
   const repoPath = repositoryPath(input.baseDir);
   const sha = await commitOf(repoPath(repo), input.rev, repo.id);
@@ -301,17 +322,42 @@ export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<Lifecy
         ...(input.writerProbe
           ? {
               afterPrepare: async (ctx) => {
-                probe = await probeWriter({
-                  policy,
-                  repo,
-                  cwd: ctx.cwd,
-                  boundary: ctx.boundary,
-                  dir: join(stateDir, 'gates-at', id, 'writer-probe'),
-                  runId: id,
-                  signal: ctx.signal,
-                  ...(input.environment ? { environment: input.environment } : {}),
-                  ...(input.executables ? { executables: input.executables } : {}),
+                const dir = join(stateDir, 'gates-at', id, 'writer-probe');
+                const run = (p: ExecutionPolicy, sub = '') =>
+                  probeWriter({
+                    policy: p,
+                    repo: p.repositories.find((r) => r.id === repo.id) ?? repo,
+                    cwd: ctx.cwd,
+                    boundary: ctx.boundary,
+                    dir: join(dir, sub),
+                    runId: id,
+                    signal: ctx.signal,
+                    ...(input.environment ? { environment: input.environment } : {}),
+                    ...(input.executables ? { executables: input.executables } : {}),
+                  });
+                const first = await run(policy);
+                probe = first;
+                if (!loopbackChanges(first).length) return;
+                if (!input.applyLoopback || !input.policyPath || !input.policySha) {
+                  // Одна команда: применить и повторить пробу — решение ведущего.
+                  first.loopbackCommand = `harness smoke --state ${stateDir} --policy ${input.policyPath ?? '<файл политики>'} --repository ${repo.id} --sha ${input.rev} --writer-probe --apply-loopback`;
+                  return;
+                }
+                const applied = applyWriterLoopback({
+                  policyPath: input.policyPath,
+                  probedSha: input.policySha,
+                  repositoryId: repo.id,
+                  probe: first,
                 });
+                await writeFile(
+                  join(dir, 'loopback-receipt.json'),
+                  JSON.stringify(applied.receipt, null, 2) + '\n',
+                );
+                // Повтор пробы под записанной политикой: исход — по ней.
+                probe = {
+                  ...(await run(applied.policy, 'applied')),
+                  loopbackApplied: applied.receipt,
+                };
               },
             }
           : {}),
