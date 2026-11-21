@@ -40,7 +40,7 @@ import {
 } from '../toolchains/probe.ts';
 import { fileDigests, NotRegularFile } from './file-digests.ts';
 import { runCheck, type Boundary } from './gates.ts';
-import { importHostStore, inside, type HostImport } from './host-store.ts';
+import { importHostStore, inside, lockIntegrities, type HostImport } from './host-store.ts';
 import { seedRegistryHosts } from './store-registry.ts';
 
 /**
@@ -372,7 +372,7 @@ export function seedSourcesText(receipt: Pick<StoreReceipt, 'built' | 'sources'>
   if (s.base) parts.push(`из прежнего seed ${s.base}`);
   if (s.network !== undefined) parts.push(`из сети ${s.network}`);
   if (s.retries) parts.push('повтор после обрыва сети');
-  if (s.hostReason) parts.push('store хоста: ' + s.hostReason.slice(0, 200));
+  if (s.hostReason) parts.push('импорт: ' + s.hostReason.slice(0, 200));
   return ` (seed собран: ${parts.join(', ')})`;
 }
 
@@ -961,7 +961,7 @@ async function fetchInto(
     // Пакеты, которые уже есть на машине, не качаются: копия со сверкой байтов.
     const host = await fromHost(s, store, lock, join(work, 'host-index'));
     s.receipt.sources = {
-      packages: host.imported?.packages ?? 0,
+      packages: host.imported?.packages ?? lockIntegrities(lock).length,
       host: host.imported?.host ?? 0,
       base: host.imported?.present ?? 0,
       ...(host.hostStore ? { hostStore: host.hostStore } : {}),

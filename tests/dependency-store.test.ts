@@ -261,6 +261,11 @@ async function contour(
       p.environment.values.pnpm_config_registry = url;
       p.environment.values.pnpm_config_fetch_retries = '0';
       p.runTimeoutMs = 120000;
+      // Свой PNPM_HOME: store хоста по умолчанию (`pnpm store path`, alpha.64) —
+      // пустой каталог теста, а не store пользователя, куда пишут установки без хранилища.
+      p.environment.values.PNPM_HOME = realpathSync(
+        mkdtempSync(join(tmpdir(), 'harness-pnpm-home-')),
+      );
       options.policy?.(p);
     },
   });

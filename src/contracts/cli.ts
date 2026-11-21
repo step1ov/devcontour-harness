@@ -2110,6 +2110,22 @@ export const doctorDataSchema = z.strictObject({
     })
     .optional(),
   /**
+   * Модель и effort каждого назначения политики (alpha.64): `writer <роль>`,
+   * `code-review <роль>`, `plan-review`, `contract-review`, запасные reviewer
+   * и переопределения репозитория в скобках. Нет `model` — модель runtime по
+   * умолчанию. Есть, когда задана политика.
+   */
+  models: z
+    .array(
+      z.strictObject({
+        use: z.string(),
+        runtime: runtimeNameSchema,
+        model: z.string().optional(),
+        effort: z.enum(['low', 'medium', 'high', 'xhigh']).optional(),
+      }),
+    )
+    .optional(),
+  /**
    * Предупреждения, не делающие среду негодной; есть, когда задана политика.
    * Источники: порт ресурса занят только на wildcard-адресе, а loopback
    * свободен (служба попытки должна слушать 127.0.0.1); ревью тем же вендором,
@@ -2118,7 +2134,9 @@ export const doctorDataSchema = z.strictObject({
    * машины — `DEPENDENCY_STORE_RECOMMENDED`, `LOW_RESOURCES`,
    * `DIGEST_THREADS_INVALID` (`resourceWarnings`); расхождение manifest
    * проекта рядом с политикой и её полей по слою lean — `LEAN_MISMATCH`;
-   * Relay ниже рекомендуемой или несовместим — `RELAY_COMPATIBILITY`.
+   * Relay ниже рекомендуемой или несовместим — `RELAY_COMPATIBILITY`;
+   * модель Codex или её effort вне `$CODEX_HOME/models_cache.json` —
+   * `codex-model-unknown`, `codex-effort-unknown` (alpha.64).
    */
   warnings: z.array(z.string()).optional(),
   /** Сверка Relay по связке (`--source` или connector.json рядом с политикой), alpha.60. */

@@ -537,6 +537,8 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.relay;
       // Ожидаемые состояния словами: проверки в браузере вне исполнителя (0.1.0-alpha.63).
       delete rest.notes;
+      // Модель и effort по ролям политики (0.1.0-alpha.64).
+      delete rest.models;
       return rest;
     }
     // Аддитивные поля ответов коннектора (0.1.0-alpha.60): совместимость с
@@ -694,6 +696,7 @@ test('H3-01: прежние команды и схемы их данных не 
   assert.ok(JSON.stringify(data.doctor).includes('"ports"'), 'doctor: проба портов');
   assert.ok(JSON.stringify(data.doctor).includes('"warnings"'), 'doctor: предупреждения');
   assert.ok(JSON.stringify(data.doctor).includes('"notes"'), 'doctor: ожидаемые состояния');
+  assert.ok(JSON.stringify(data.doctor).includes('"models"'), 'doctor: модели по ролям');
   // Хеш H2 выше вырезает поля ведущего и ревью: объявление держит эта проверка.
   for (const field of ['"lead"', '"review"', '"runtimes"', '"warnings"'])
     assert.ok(JSON.stringify(data.init).includes(field), 'init объявляет ' + field);
