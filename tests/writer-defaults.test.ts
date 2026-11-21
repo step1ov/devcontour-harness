@@ -663,21 +663,32 @@ test('WD10: признак запуска браузера и команда п�
  * сразу, как повтор отказа из кеша, даже под loopback. Проходит только в
  * чистом дереве и чистом TMPDIR под loopback.
  */
-const DIRTY_BUILD =
+const dirtyBuild = (log: string) =>
   "const fs=require('fs'),p=require('path');const marks=[p.join(process.cwd(),'.build-cache-marker'),p.join(process.env.TMPDIR||'/nonexistent','build-cache-marker')];" +
+  `fs.appendFileSync(${JSON.stringify(log)},JSON.stringify({cwd:process.cwd(),tmp:process.env.TMPDIR,net:process.env.FAKE_NET})+'\\n');` +
   "if(marks.some(m=>fs.existsSync(m))){console.error('@app/web:build: - Operation not permitted (os error 1)');process.exit(1)}" +
   "if(process.env.FAKE_NET!=='loopback'){for(const m of marks){try{fs.writeFileSync(m,'x')}catch{}}" +
   "console.error(['@app/web:build: Error [TurbopackInternalError]: Failed to write app endpoint /page','@app/web:build: Caused by:','@app/web:build: - binding to a port','@app/web:build: - Operation not permitted (os error 1)'].join('\\n'));process.exit(1)}" +
   "console.log('built')";
+/** Запуски сборки: дерево, TMPDIR и сеть каждого. */
+const buildRuns = (log: string) =>
+  existsSync(log)
+    ? readFileSync(log, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l) as { cwd: string; tmp: string; net?: string })
+    : [];
 
 test('WD11: повтор под loopback — в свежем дереве и TMPDIR: кеш закрытого прохода не повторяет его отказ; --apply-loopback проверяет политику тоже в свежем дереве', async () => {
   let codex!: ReturnType<typeof fakeCodex>;
+  let log = '';
   const f = fixture((raw, root) => {
     raw.roles = { developer: { writer: { runtime: 'codex' } } };
     raw.toolProfiles = {};
+    log = join(root, 'build-runs.jsonl');
     raw.repositories[0].writerProbe = [
       { id: 'dev-server', command: fakeServe },
-      { id: 'web-build', command: node(DIRTY_BUILD) },
+      { id: 'web-build', command: node(dirtyBuild(log)) },
     ];
     codex = fakeCodex(root);
   });
@@ -722,8 +733,18 @@ test('WD11: повтор под loopback — в свежем дереве и TMP
     JSON.stringify(data.steps),
   );
 
+  // Повтор — в другом дереве и другом TMPDIR, чем закрытый проход.
+  const [closedRun, trialRun, ...more] = buildRuns(log);
+  assert.equal(more.length, 0, readFileSync(log, 'utf8'));
+  assert.equal(closedRun!.net, 'none');
+  assert.equal(trialRun!.net, 'loopback');
+  assert.notEqual(trialRun!.cwd, closedRun!.cwd);
+  assert.notEqual(trialRun!.tmp, closedRun!.tmp);
+
   // Применение: проба под записанной политикой — тоже в свежем дереве.
+  writeFileSync(log, '');
   const applied = await f.smoke({ executables: { codex: codex.fake }, applyLoopback: true });
+  assert.equal(applied.passed, true, JSON.stringify(applied.failure));
   const ap = applied.writerProbe!;
   assert.ok(ap.loopbackApplied, JSON.stringify(ap));
   assert.deepEqual(
@@ -736,6 +757,21 @@ test('WD11: повтор под loopback — в свежем дереве и TMP
   );
   assert.equal(ap.ok, true);
   assert.equal(ap.writers[0]!.networkMode, 'loopback');
+  // Три прохода — три дерева и три TMPDIR: проба под записанной политикой не
+  // идёт ни в дереве закрытого прохода (его кеш повторил бы отказ), ни в
+  // дереве повтора; после smoke ни дерева, ни TMPDIR не остаётся.
+  const runs = buildRuns(log);
+  assert.deepEqual(
+    runs.map((r) => r.net),
+    ['none', 'loopback', 'loopback'],
+    readFileSync(log, 'utf8'),
+  );
+  assert.equal(new Set(runs.map((r) => r.cwd)).size, 3, JSON.stringify(runs));
+  assert.equal(new Set(runs.map((r) => r.tmp)).size, 3, JSON.stringify(runs));
+  for (const r of [...runs, closedRun!, trialRun!]) {
+    assert.ok(!existsSync(r.cwd), `дерево осталось: ${r.cwd}`);
+    assert.ok(!existsSync(r.tmp), `TMPDIR остался: ${r.tmp}`);
+  }
 
   // Повтор, который не помог, печатает свой шаг с причиной.
   const stuck = writerProbeText({
@@ -775,4 +811,105 @@ test('WD12: шаг только со справкой или версией (--h
   assert.ok(!runner('pnpm', 'exec', 'cypress', 'run', '-V'));
   assert.ok(runner('pnpm', '--filter', '@oim/web', 'run', 'verify:browser', '--no-build'));
   assert.ok(runner('pnpm', '--dir', 'apps/web', 'exec', 'agent-browser', 'open', 'http://x'));
+  assert.ok(!runner('agent-browser', 'open', '--help'));
+  // Флаг справки среди других аргументов — проверка: `--help` здесь значение
+  // `--grep`, и playwright исполняет тесты.
+  assert.ok(runner('npx', 'playwright', 'test', '--grep', '--help'));
+  assert.ok(runner('pnpm', 'exec', 'playwright', 'test', '--grep', '-h'));
+  assert.ok(runner('pnpm', 'run', 'verify:browser', '--no-build', '--help'));
+  assert.ok(runner('agent-browser', 'open', 'http://x', '--version'));
+  assert.ok(runner('pnpm', 'exec', 'cypress', 'run', '--spec', '-V'));
 });
+
+test('WD13: Turbopack «binding to a port» и EPERM без пути — listen-denied; отказ записи с явным путём в том же выводе — write-denied, не кандидат loopback', () => {
+  // Строки настоящего прогона шаблона (Next.js 16, Turbopack, pnpm).
+  const turbopack = [
+    '@oim/web:build: Error [TurbopackInternalError]: Failed to write app endpoint /page',
+    '@oim/web:build: Caused by:',
+    '@oim/web:build: - binding to a port',
+    '@oim/web:build: - Operation not permitted (os error 1)',
+    '@oim/web:build:  ELIFECYCLE  Command failed with exit code 1.',
+  ];
+  const real = classifyProbe({ code: 1, timedOut: false, output: turbopack.join('\n') });
+  assert.equal(real.reason, 'listen-denied', JSON.stringify(real));
+  assert.equal(real.evidence, '@oim/web:build: - binding to a port');
+  assert.equal(real.local, true);
+
+  const outside = "Error: EPERM: operation not permitted, open '/outside/cache/next-build.lock'";
+  for (const output of [
+    [...turbopack, outside],
+    [outside, ...turbopack],
+    ['@oim/web:build: - binding to a port', '@oim/web:build: - EPERM', outside],
+  ]) {
+    const c = classifyProbe({ code: 1, timedOut: false, output: output.join('\n') });
+    assert.equal(c.reason, 'write-denied', JSON.stringify(c));
+    assert.equal(c.evidence, outside);
+    assert.equal(c.local, undefined, 'отказ записи с путём — не кандидат loopback');
+  }
+});
+
+/**
+ * Teardown репозитория считает свои вызовы (каждый проход — один вызов) и на
+ * вызове `at` падает (`exit`) или меняет отслеживаемый файл (`mutate`).
+ */
+function teardownAt(root: string, at: number, mode: 'exit' | 'mutate') {
+  const counter = join(root, 'teardown-count');
+  return {
+    id: 'stop',
+    command: node(
+      `const fs=require('fs');const f=${JSON.stringify(counter)};const n=(fs.existsSync(f)?+fs.readFileSync(f,'utf8'):0)+1;fs.writeFileSync(f,String(n));` +
+        `if(n===${at}){${mode === 'exit' ? "console.error('teardown failed');process.exit(1)" : "fs.writeFileSync('README.md','changed\\n')"}}`,
+    ),
+    timeoutMs: 20000,
+  };
+}
+
+for (const mode of ['exit', 'mutate'] as const)
+  test(`WD14 (${mode}): итог свежего прохода — только после его teardown и проверки дерева; отказ повтора — unavailable с причиной, отказ пробы под записанной политикой — FAIL`, async () => {
+    const make = (at: number) => {
+      let codex!: ReturnType<typeof fakeCodex>;
+      const f = fixture((raw, root) => {
+        raw.roles = { developer: { writer: { runtime: 'codex' } } };
+        raw.toolProfiles = {};
+        raw.repositories[0].writerProbe = [{ id: 'dev-server', command: fakeServe }];
+        raw.repositories[0].lifecycle = { teardown: [teardownAt(root, at, mode)] };
+        codex = fakeCodex(root);
+      });
+      return { f, codex };
+    };
+    const why = mode === 'exit' ? /teardown|stop|уборк/i : /изменила проверяемый код/;
+
+    // Повтор под loopback (второй проход): команда прошла, а проход — нет.
+    const retry = make(2);
+    const r1 = await retry.f.smoke({ executables: { codex: retry.codex.fake } });
+    assert.equal(r1.passed, true, JSON.stringify(r1.failure));
+    const loop = r1.writerProbe!.writers[0]!.loopback!;
+    assert.equal(loop.status, 'unavailable', JSON.stringify(loop));
+    assert.match(loop.reason, /проход в свежем дереве для повтора не завершился/);
+    assert.match(loop.reason, why);
+    assert.equal(r1.writerProbe!.loopbackCommand, undefined, 'unavailable — применять нечего');
+    assert.equal(r1.writerProbe!.ok, false);
+
+    // Проба под записанной политикой (третий проход) не завершилась: FAIL.
+    const apply = make(3);
+    const r2 = await apply.f.smoke({
+      executables: { codex: apply.codex.fake },
+      applyLoopback: true,
+    });
+    assert.equal(r2.passed, false, JSON.stringify(r2.writerProbe));
+    assert.equal(
+      r2.failure!.class,
+      mode === 'exit' ? 'cleanup' : 'tree-changed',
+      JSON.stringify(r2.failure),
+    );
+    assert.match(r2.failure!.message, /Повтор пробы под записанной политикой не завершился/);
+    assert.equal(r2.writerProbe!.ok, false);
+    // Политика записана — запись об этом остаётся, исход пробы — нет.
+    assert.ok(r2.writerProbe!.loopbackApplied, JSON.stringify(r2.writerProbe));
+    assert.ok(
+      r2.writerProbe!.notes!.some((n) =>
+        /Повтор пробы под записанной политикой не завершился/.test(n),
+      ),
+    );
+    cliDataSchemas.smoke.parse(r2);
+  });

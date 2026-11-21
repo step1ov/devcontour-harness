@@ -201,8 +201,10 @@ export async function checkUpdates(ctx: CheckContext): Promise<UpdateCheck> {
       hCandidates.push(current.harness);
     let uiCandidates: string[] = [];
     let uiTag: string | undefined;
+    let uiVersions: string[] = [];
     if (current.ui) {
       const uiMeta = await packageVersions(UI_PACKAGE, config.channel, ctx.npm);
+      uiVersions = uiMeta?.versions ?? [];
       uiTag = uiMeta?.tags[config.channel];
       uiCandidates = uiMeta && uiTag ? candidates(uiMeta.versions, current.ui, uiTag, true) : [];
       if (!uiCandidates.includes(current.ui)) uiCandidates.push(current.ui);
@@ -235,19 +237,25 @@ export async function checkUpdates(ctx: CheckContext): Promise<UpdateCheck> {
     if (current.ui && uiTag && chosen.ui && compareVersions(uiTag, chosen.ui) > 0)
       note = `Панель ${uiTag} не подходит к harness ${chosen.harness} по peer-диапазону; поставится панель ${chosen.ui}`;
     if (!harnessChanged && !uiChanged) {
-      // Установлена версия новее опубликованной (сборка из репозитория до
-      // публикации): обновление не нужно, и строка говорит это прямо.
+      // Установлена версия новее тега канала. Её нет в списке версий реестра
+      // (сборка из репозитория до публикации) — «ещё не опубликована»; есть —
+      // опубликована, но тег канала на неё не указывает. Обновление не нужно,
+      // и строка говорит это прямо.
+      const ahead = (what: string, version: string, tag: string, versions: readonly string[]) =>
+        versions.some((v) => compareVersions(v, version) === 0)
+          ? `${what} ${version} — новее тега канала ${config.channel} (${tag}): версия опубликована, но тег канала на неё не указывает`
+          : `${what} ${version} — новее ${what === 'панель' ? 'опубликованной' : 'опубликованного'} в npm ${tag}: эта версия ещё не опубликована`;
       const harnessAhead = compareVersions(current.harness, hTag) > 0;
       const uiAhead = !!current.ui && !!uiTag && compareVersions(current.ui, uiTag) > 0;
-      const ahead = harnessAhead || uiAhead;
+      const anyAhead = harnessAhead || uiAhead;
       const parts = [
         harnessAhead
-          ? `установлен harness ${current.harness} — новее опубликованного в npm ${hTag}: эта версия ещё не опубликована`
+          ? `установлен ${ahead('harness', current.harness, hTag, hMeta.versions)}`
           : `harness ${current.harness} — последний опубликованный`,
         ...(current.ui
           ? [
               uiAhead
-                ? `панель ${current.ui} — новее опубликованной в npm ${uiTag}: эта версия ещё не опубликована`
+                ? ahead('панель', current.ui, uiTag!, uiVersions)
                 : `панель ${current.ui} — последняя опубликованная`,
             ]
           : []),
@@ -256,7 +264,7 @@ export async function checkUpdates(ctx: CheckContext): Promise<UpdateCheck> {
         ...base,
         state: 'up-to-date',
         ...(note ? { note } : {}),
-        line: ahead
+        line: anyAhead
           ? `Обновление не нужно: ${parts.join('; ')} (канал ${config.channel}).`.slice(0, 300)
           : `Обновлений нет: установлены ${pairText(current)} (канал ${config.channel}).`,
       };

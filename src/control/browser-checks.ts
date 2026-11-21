@@ -44,6 +44,8 @@ const RUNNERS = new Set(['agent-browser', 'playwright', 'cypress']);
 /** Флаги справки и версии: команда с ними только печатает текст. */
 const INFO = new Set(['--help', '-h', '--version', '-V']);
 const base = (t: string) => t.split('/').pop() ?? t;
+/** Аргументы — ровно один флаг справки или версии, без других аргументов. */
+const infoOnly = (args: readonly string[]) => args.length === 1 && INFO.has(args[0]!);
 
 /** Индекс следующей команды (не флага и не значения флага) с `from`; -1 — нет. */
 function commandAt(argv: readonly string[], from: number) {
@@ -63,7 +65,8 @@ function commandAt(argv: readonly string[], from: number) {
  * пропускаются). Проверка — `agent-browser`, `playwright test`, `cypress run`
  * или скрипт `verify:browser` и подобные; подкоманда установки (`playwright
  * install`, `agent-browser install`) и вызов только справки или версии
- * (`--help`, `-h`, `--version`, `-V`) — не проверка.
+ * (после инструмента и его подкоманды — ровно один из `--help`, `-h`,
+ * `--version`, `-V`) — не проверка.
  */
 export const isBrowserRunner = (step: { id: string; command: readonly string[] }) => {
   const argv = step.command;
@@ -74,13 +77,16 @@ export const isBrowserRunner = (step: { id: string; command: readonly string[] }
     if (i < 0) return false;
   }
   const command = base(argv[i] ?? '');
-  // Справка или версия инструмента (`agent-browser --version`,
-  // `verify:browser --help`) браузер не запускает: это не проверка.
-  if (argv.slice(i + 1).some((t) => INFO.has(t))) return false;
+  // Только справка или версия инструмента (`agent-browser --version`,
+  // `verify:browser --help`, `playwright test -h`) браузер не запускает: это
+  // не проверка. Флаг среди других аргументов (`playwright test --grep
+  // --help` — значение `--grep`) — проверка.
+  if (infoOnly(argv.slice(i + 1))) return false;
   if (SCRIPT.test(command)) return true;
   if (!RUNNERS.has(command)) return false;
   const j = commandAt(argv, i + 1);
   const sub = j < 0 ? undefined : argv[j];
+  if (j === i + 1 && infoOnly(argv.slice(j + 1))) return false;
   if (sub === 'install' || sub === 'add' || sub === 'install-deps') return false;
   if (command === 'playwright') return sub === 'test';
   if (command === 'cypress') return sub === 'run';

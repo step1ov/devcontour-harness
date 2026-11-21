@@ -328,12 +328,15 @@ export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<Lifecy
    * остатках прежнего прохода (кеш сборщика повторяет его отказ). Проходы
    * идут друг за другом: ресурсы gates держит один проход.
    */
+  // Шаги последнего свежего прохода: упавший — причина его отказа.
+  let freshOutcomes: StepOutcome[] = [];
   const inFreshTree = (
     p: ExecutionPolicy,
     suffix: string,
     run: (ctx: TreeContext) => Promise<void>,
-  ) =>
-    runGatesAt(gatesContext(p), {
+  ) => {
+    freshOutcomes = [];
+    return runGatesAt(gatesContext(p), {
       id: `${id}-${suffix}`,
       repositoryId: repo.id,
       sha,
@@ -342,9 +345,11 @@ export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<Lifecy
       record: () => {
         throw new Error('smoke: gates не исполняются');
       },
+      onStep: (s) => freshOutcomes.push(s),
       afterPrepare: run,
       ...(input.signal ? { signal: input.signal } : {}),
     });
+  };
   const failureText = (error: unknown) => (error instanceof Error ? error.message : String(error));
   let firstInput: WriterProbeInput | undefined;
   try {
@@ -378,17 +383,22 @@ export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<Lifecy
     if (first && firstInput) {
       // Повтор под loopback — в свежем дереве и свежем TMPDIR, по одному на
       // исполнителя: дерево первого прохода хранит кеш его отказа.
+      // Итог повтора предварительный, пока проход не завершился целиком
+      // (teardown, проверка дерева): иначе отказ уборки держал бы ресурсы при
+      // PASS, а правка отслеживаемого файла давала бы `resolves`.
       let k = 0;
       for (const writer of loopbackTrials(first)) {
         const suffix = `loopback-${++k}`;
+        let commit: (() => void) | undefined;
         try {
-          await inFreshTree(policy, suffix, (ctx) =>
-            trialLoopback(probeInput(policy, ctx), first, writer),
-          );
+          await inFreshTree(policy, suffix, async (ctx) => {
+            commit = await trialLoopback(probeInput(policy, ctx), first, writer);
+          });
         } catch (error) {
           if (input.signal?.aborted) throw error;
-          if (!writer.loopback) await trialLoopback(firstInput, first, writer, failureText(error));
+          commit = await trialLoopback(firstInput, first, writer, failureText(error));
         }
+        commit?.();
       }
       if (loopbackChanges(first).length) {
         if (!input.applyLoopback || !input.policyPath || !input.policySha)
@@ -405,24 +415,36 @@ export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<Lifecy
             join(probeDir, 'loopback-receipt.json'),
             JSON.stringify(applied.receipt, null, 2) + '\n',
           );
-          // Повтор пробы под записанной политикой — в свежем дереве: исход — по ней.
+          // Повтор пробы под записанной политикой — в свежем дереве: исход —
+          // по ней, и только когда проход завершился целиком.
           let again: WriterProbeResult | undefined;
           try {
             await inFreshTree(applied.policy, 'applied', async (ctx) => {
               again = await probeWriter(probeInput(applied.policy, ctx, 'applied'));
             });
+            if (!again) throw new Error('проба в свежем дереве не исполнена');
+            probe = { ...again, loopbackApplied: applied.receipt };
           } catch (error) {
             if (input.signal?.aborted) throw error;
-            // Проба прошла, а упала уборка дерева: исход пробы остаётся.
-            again ??= {
+            // Политика уже записана (запись — в loopbackApplied), но её
+            // проверка не завершилась: проба не зелёная, smoke — FAIL.
+            const message = `Повтор пробы под записанной политикой не завершился: ${failureText(error)}`;
+            probe = {
               ...first,
-              notes: [
-                ...(first.notes ?? []),
-                `Повтор пробы под записанной политикой не выполнен: свежее дерево не подготовлено (${failureText(error)}).`,
-              ],
+              ok: false,
+              notes: [...(first.notes ?? []), message + '.'],
+              loopbackApplied: applied.receipt,
+            };
+            const timedOut = error instanceof HarnessError && error.code === 'CANCELLED';
+            failure = {
+              ...classifyLifecycleFailure(
+                error,
+                freshOutcomes.find((o) => !o.ok),
+                { policy: applied.policy, timedOut },
+              ),
+              message,
             };
           }
-          probe = { ...(again ?? first), loopbackApplied: applied.receipt };
         }
       }
     }

@@ -1041,9 +1041,8 @@ test('UP22: реестр не знает пакет или версию (E404, E
   }
 });
 
-test('UP23: установлена версия новее опубликованной (тег канала старше) — строка говорит прямо: новее, ещё не опубликована, обновление не нужно', async () => {
-  // NEW есть в реестре (ставится точной версией), но тег alpha — на CUR:
-  // как сборка из репозитория до публикации.
+test('UP23: установлена версия новее тега канала и есть в реестре — строка: опубликована, но тег канала на неё не указывает; обновление не нужно', async () => {
+  // NEW есть в реестре (ставится точной версией), но тег alpha — на CUR.
   const registry = await registryWith(...base());
   registry.publish(fakeHarness(NEW), '');
   try {
@@ -1057,10 +1056,43 @@ test('UP23: установлена версия новее опубликова�
     assert.match(
       c.line,
       rx(
-        `Обновление не нужно: установлен harness ${NEW} — новее опубликованного в npm ${CUR}: эта версия ещё не опубликована; панель 0.1.0-alpha.4 — последняя опубликованная (канал alpha).`,
+        `Обновление не нужно: установлен harness ${NEW} — новее тега канала alpha (${CUR}): версия опубликована, но тег канала на неё не указывает; панель 0.1.0-alpha.4 — последняя опубликованная (канал alpha).`,
       ),
     );
-    assert.doesNotMatch(c.line, /Обновлений нет/);
+    assert.doesNotMatch(c.line, /Обновлений нет|ещё не опубликована/);
+  } finally {
+    await registry.close().catch(() => {});
+  }
+});
+
+test('UP24: версия новее тега канала — «ещё не опубликована» только когда её нет в списке версий реестра; alpha.10 новее alpha.9 (не по строке)', async () => {
+  const OLDER = '0.1.0-alpha.9';
+  const NEWER = '0.1.0-alpha.10';
+  const registry = await registryWith(fakeHarness(OLDER));
+  registry.publish(fakeHarness(NEWER), '');
+  try {
+    const p = project(registry, { harness: NEWER, ui: false });
+    assert.equal(p.installed('devcontour-harness'), NEWER);
+    const listed = p.harness('update', '--check', '--state', p.state);
+    assert.equal(listed.status, 0, listed.stderr);
+    const a = listed.json.data.check;
+    assert.equal(a.state, 'up-to-date', JSON.stringify(a));
+    assert.equal(
+      a.line,
+      `Обновление не нужно: установлен harness ${NEWER} — новее тега канала alpha (${OLDER}): версия опубликована, но тег канала на неё не указывает (канал alpha).`,
+    );
+
+    // Версии в реестре нет (сборка до публикации): тег — на alpha.9.
+    registry.unpublish('devcontour-harness');
+    registry.publish(fakeHarness(OLDER));
+    const absent = p.harness('update', '--check', '--state', p.state);
+    assert.equal(absent.status, 0, absent.stderr);
+    const b = absent.json.data.check;
+    assert.equal(b.state, 'up-to-date', JSON.stringify(b));
+    assert.equal(
+      b.line,
+      `Обновление не нужно: установлен harness ${NEWER} — новее опубликованного в npm ${OLDER}: эта версия ещё не опубликована (канал alpha).`,
+    );
   } finally {
     await registry.close().catch(() => {});
   }

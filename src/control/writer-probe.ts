@@ -276,12 +276,22 @@ export function classifyProbe(result: {
       evidence: lastOf(lines, listen)!,
       local: true,
     };
+  const write =
+    /\b(?:EROFS|EPERM|EACCES)\b|read-only file system|Operation not permitted|Permission denied/i;
+  // Отказ записи с явным путём (`EPERM: operation not permitted, open
+  // '/x/cache'`) — запись вне области записи, а не локальный порт: он
+  // главнее строк без пути где угодно в выводе.
+  const pathDenied = lines.findLast((l) => write.test(l) && hasPath.test(l));
   // Сборщик на Rust (Turbopack) печатает цепочку причин строками: «binding to
   // a port» и ниже EPERM без пути — это закрытый локальный порт, не запись
   // (EPERM с путём — запись, ниже).
   const binding = /\bbinding to (?:a |the )?(?:port|address|socket)\b|\bfailed to bind\b/i;
   const eperm = /\bEPERM\b|Operation not permitted|\(os error 1\)/i;
-  if (lines.some((l) => binding.test(l)) && lines.some((l) => eperm.test(l) && !hasPath.test(l)))
+  if (
+    !pathDenied &&
+    lines.some((l) => binding.test(l)) &&
+    lines.some((l) => eperm.test(l) && !hasPath.test(l))
+  )
     return {
       status: 'blocked',
       reason: 'listen-denied',
@@ -292,9 +302,7 @@ export function classifyProbe(result: {
     /\b(?:ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ECONNREFUSED)\b|getaddrinfo|Could not resolve host|Temporary failure in name resolution|network is unreachable|ERR_PNPM_META_FETCH_FAIL|fetch failed/i;
   if (lines.some((l) => network.test(l)))
     return { status: 'blocked', reason: 'network-denied', evidence: lastOf(lines, network)! };
-  const write =
-    /\b(?:EROFS|EPERM|EACCES)\b|read-only file system|Operation not permitted|Permission denied/i;
-  const denied = lastOf(lines, write);
+  const denied = pathDenied ?? lastOf(lines, write);
   if (denied) {
     const pathless = !hasPath.test(denied);
     return {
@@ -585,24 +593,27 @@ export const loopbackTrials = (probe: WriterProbeResult) =>
  * Повтор пробы исполнителя `writer` под `network: loopback` в свежем
  * подготовленном дереве `input.cwd` и свежем TMPDIR — как первый проход, а
  * не на его остатках: кеш сборки, который оставил закрытый проход, повторяет
- * его отказ и под loopback. Итог — `writer.loopback`; `prepareFailed` — дерево
- * для повтора не подготовилось (тогда `unavailable` с причиной).
+ * его отказ и под loopback. Итог предварительный: функция возвращает `commit`,
+ * который записывает `writer.loopback`, и вызывающий вызывает его, только
+ * когда проход в свежем дереве завершился целиком (teardown и проверка
+ * дерева). `passFailed` — проход не завершился (тогда `unavailable` с
+ * причиной).
  */
 export async function trialLoopback(
   input: WriterProbeInput,
   probe: WriterProbeResult,
   writer: WriterProbeWriter,
-  prepareFailed?: string,
-) {
+  passFailed?: string,
+): Promise<(() => void) | undefined> {
   const p = pending.get(writer);
-  if (!p || writer.loopback) return;
+  if (!p || writer.loopback) return undefined;
   const { policy } = input;
   const { mechanism } = writerShape(policy, p.spec);
   const dir = join(input.dir, `writer-${p.index}-loopback`);
   await mkdir(dir, { recursive: true });
   const trial: WriterProbeCommand[] = [];
   const codexBin = input.executables?.codex ?? 'codex';
-  let unavailable = prepareFailed && `свежее дерево для повтора не подготовлено: ${prepareFailed}`;
+  let unavailable = passFailed && `проход в свежем дереве для повтора не завершился: ${passFailed}`;
   if (!unavailable && mechanism === 'codex-sandbox')
     unavailable =
       (await codexLoopbackSupport(codexBin, input.environment ?? process.env)) ?? undefined;
@@ -646,7 +657,7 @@ export async function trialLoopback(
             ...(closed.length ? [`не проходят ${closed.join(', ')}`] : []),
             ...(broken.length ? [`перестают проходить ${broken.join(', ')}`] : []),
           ].join('; ')}: loopback не применяется.`;
-  writer.loopback = {
+  const loopback: WriterLoopbackTrial = {
     status,
     steps: p.local,
     reason,
@@ -658,9 +669,12 @@ export async function trialLoopback(
     },
     commands: trial,
   };
-  if (status === 'resolves')
-    for (const c of writer.commands) if (p.local.includes(c.id)) c.advice = LOOPBACK_ADVICE;
-  settle(probe);
+  return () => {
+    writer.loopback = loopback;
+    if (status === 'resolves')
+      for (const c of writer.commands) if (p.local.includes(c.id)) c.advice = LOOPBACK_ADVICE;
+    settle(probe);
+  };
 }
 
 type WriterSpec = { runtime: 'codex' | 'claude'; toolProfile?: string; roles: string[] };
