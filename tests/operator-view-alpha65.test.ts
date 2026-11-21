@@ -15,6 +15,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import {
   API_VERSION,
+  cliCommands,
   cliDataSchemas,
   operatorViewSchema,
   setupViewSchema,
@@ -551,4 +552,31 @@ test('alpha.65: этап setup только до настройки; неисп�
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('alpha.65: capabilities и договор CLI называют --repository у view и status; --state не обязателен', () => {
+  const r = harness('capabilities');
+  assert.equal(r.status, 0, r.stderr);
+  const tools = (
+    JSON.parse(r.stdout) as {
+      data: {
+        tools: {
+          name: string;
+          inputSchema: { properties: Record<string, unknown>; required?: string[] };
+        }[];
+      };
+    }
+  ).data.tools;
+  const view = tools.find((t) => t.name === 'view')!;
+  assert.ok(view.inputSchema.properties.repository, 'view: --repository в inputSchema');
+  assert.ok(view.inputSchema.properties.state);
+  assert.ok(!(view.inputSchema.required ?? []).includes('state'), 'view: state не обязателен');
+  for (const command of ['view', 'status'] as const) {
+    const args = cliCommands[command].args;
+    assert.equal(args.find((a) => a.name === '--repository')?.required, false, command);
+    assert.equal(args.find((a) => a.name === '--state')?.required, false, command);
+  }
+  // Ни --state, ни --repository — по-прежнему неверный вход.
+  assert.equal(harness('view').status, 2);
+  assert.equal(harness('status').status, 2);
 });

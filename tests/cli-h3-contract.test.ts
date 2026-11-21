@@ -163,6 +163,8 @@ const ADDITIVE_EVENT_TYPES = new Set([
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([
   'status--detail',
+  // Корень проекта вместо --state (0.1.0-alpha.65).
+  'status--repository',
   // Текст сводки попыток для человека (0.1.0-alpha.52).
   'status--human',
   'init--lean',
@@ -376,6 +378,12 @@ test('H3-01: прежние команды и схемы их данных не 
               const copy: CliArgument = { ...arg };
               delete copy.multiple;
               if (c === 'init' && arg.name === '--writer') copy.description = H2_INIT_WRITER;
+              // alpha.65: --state у status заменим --repository — прежний обязательный аргумент.
+              if (c === 'status' && arg.name === '--state')
+                Object.assign(copy, {
+                  required: true,
+                  description: 'Каталог состояния исполнения',
+                });
               return copy;
             }),
         },

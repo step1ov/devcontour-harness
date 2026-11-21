@@ -102,6 +102,22 @@ const state: CliArgument = {
   required: true,
   description: 'Каталог состояния исполнения',
 };
+/**
+ * `--state` команд, которым его может заменить `--repository` (0.1.0-alpha.65):
+ * одно из двух обязательно, поэтому в договоре — необязательный.
+ */
+const stateOrRepository: CliArgument = {
+  ...state,
+  required: false,
+  description: 'Каталог состояния исполнения; без него — --repository',
+};
+/** Корень проекта: состояние и политика — из `.harness/project.json` при каждом вызове. */
+const projectRepository = (what: string): CliArgument => ({
+  name: '--repository',
+  value: 'dir',
+  required: false,
+  description: `Корень Git-репозитория проекта с .harness/project.json вместо --state: состояние и политика читаются из manifest при каждом вызове (0.1.0-alpha.65); ${what}`,
+});
 const graph: CliArgument = {
   name: '--graph',
   value: 'path',
@@ -401,7 +417,10 @@ export const cliCommands = {
     writes: false,
     idempotency: 'Только чтение',
     args: [
-      state,
+      stateOrRepository,
+      projectRepository(
+        'до настройки (нет manifest или базы состояния) — пустой статус с полем setup, а не NOT_FOUND',
+      ),
       { name: '--graph', value: 'id', required: false, description: 'Только этот граф' },
       {
         name: '--detail',
@@ -898,7 +917,10 @@ export const cliCommands = {
     idempotency:
       'Только чтение. Те же состояние, политика, часы и параметры дают те же байты; source.token — SHA-256 содержимого без generatedAt: равный токен — то же представление',
     args: [
-      state,
+      stateOrRepository,
+      projectRepository(
+        'до настройки (нет manifest или ни привязки, ни базы, ни политики) — документ настройки (setupViewSchema), а не отказ',
+      ),
       {
         name: '--policy',
         value: 'path',
