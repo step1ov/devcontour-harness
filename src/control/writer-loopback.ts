@@ -8,7 +8,16 @@
 // ничего в политике не меняется: области записи, домены, isolation.mode и
 // сеть ревьюера прежние.
 
-import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
+import { processAlive } from '../environment/lifecycle.ts';
 import { randomBytes } from 'node:crypto';
 import {
   HarnessError,
@@ -101,6 +110,8 @@ export function applyWriterLoopback(input: {
   repositoryId: string;
   probe: WriterProbeResult;
   now?: () => number;
+  /** Точки внутренних проверок записи (только тесты): перед rename и после него. */
+  hooks?: { beforeRename?: () => void; afterRename?: () => void };
 }): { policy: ExecutionPolicy; receipt: WriterLoopbackReceipt } {
   const changes = loopbackChanges(input.probe);
   if (!changes.length)
@@ -113,6 +124,20 @@ export function applyWriterLoopback(input: {
       'PATH_CONFLICT',
       `Файл политики ${input.policyPath} изменился после того, как проба его прочитала: повторите пробу`,
     );
+  const release = lockPolicy(input.policyPath);
+  try {
+    return applyLocked(input, changes, conflict);
+  } finally {
+    release();
+  }
+}
+
+/** Чтение, сверка и замена файла политики под замком (`applyWriterLoopback`). */
+function applyLocked(
+  input: Parameters<typeof applyWriterLoopback>[0],
+  changes: Change[],
+  conflict: () => HarnessError,
+): ReturnType<typeof applyWriterLoopback> {
   const text = readFileSync(input.policyPath, 'utf8');
   if (sha256(text) !== input.probedSha) throw conflict();
   const raw = JSON.parse(text);
@@ -138,13 +163,23 @@ export function applyWriterLoopback(input: {
       )
         throw new HarnessError('INTERNAL', `Роль ${role} не получила сеть loopback`);
     }
+  const written = JSON.stringify(next, null, 2) + '\n';
   const temp = `${input.policyPath}.${randomBytes(4).toString('hex')}.tmp`;
-  writeFileSync(temp, JSON.stringify(next, null, 2) + '\n');
+  writeFileSync(temp, written);
+  input.hooks?.beforeRename?.();
   if (readFileSync(input.policyPath, 'utf8') !== text) {
     rmSync(temp, { force: true });
     throw conflict();
   }
   renameSync(temp, input.policyPath);
+  input.hooks?.afterRename?.();
+  // Файл после замены — наш: запись другого процесса сразу после rename
+  // видна здесь, и harness не выдаёт чужой файл за применённый loopback.
+  if (readFileSync(input.policyPath, 'utf8') !== written)
+    throw new HarnessError(
+      'PATH_CONFLICT',
+      `Файл политики ${input.policyPath} перезаписан другим процессом сразу после записи loopback: проверьте файл и повторите пробу`,
+    );
   const reason = input.probe.writers
     .flatMap((w) => (w.loopback?.status === 'resolves' ? [w.loopback.reason] : []))
     .join(' ');
@@ -158,4 +193,47 @@ export function applyWriterLoopback(input: {
       note: 'Сеть профиля входит в digest изоляции: графы, согласованные под прежней политикой, получат APPROVAL_STALE — согласуйте их заново (review-plan). Интернет исполнителю закрыт, ревьюер сети профиля не получает.',
     },
   };
+}
+
+/**
+ * Исключительный замок записи файла политики: `<политика>.lock` с pid
+ * владельца, созданный атомарно (`wx`). Замок другого живого процесса —
+ * отказ `PATH_CONFLICT`; замок умершего процесса снимается. Возвращает
+ * снятие замка.
+ *
+ * Предел: замок согласительный. Его держат только вызовы harness, а редактор
+ * или другой инструмент, сохранивший файл между последней сверкой и rename,
+ * потеряет свою правку (rename атомарен, но заменяет файл целиком). Запись
+ * сразу после rename ловит сверка содержимого после замены.
+ */
+function lockPolicy(policyPath: string): () => void {
+  const lock = policyPath + '.lock';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(lock, 'wx', 0o600);
+      try {
+        writeSync(fd, JSON.stringify({ pid: process.pid }) + '\n');
+      } finally {
+        closeSync(fd);
+      }
+      return () => rmSync(lock, { force: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      let pid: number | undefined;
+      try {
+        pid = (JSON.parse(readFileSync(lock, 'utf8')) as { pid?: unknown }).pid as number;
+      } catch {
+        pid = undefined;
+      }
+      if (typeof pid === 'number' && Number.isInteger(pid) && !processAlive(pid)) {
+        rmSync(lock, { force: true });
+        continue;
+      }
+      throw new HarnessError(
+        'PATH_CONFLICT',
+        `Файл политики ${policyPath} сейчас записывает другой процесс (замок ${lock}${pid ? `, pid ${pid}` : ''}): повторите позже`,
+      );
+    }
+  }
+  throw new HarnessError('PATH_CONFLICT', `Не удалось взять замок ${lock}: повторите позже`);
 }

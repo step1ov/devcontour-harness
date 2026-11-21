@@ -14,9 +14,11 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   writeFileSync,
 } from 'node:fs';
@@ -568,4 +570,89 @@ test('WD08: две репозитории — команда применени�
   assert.deepEqual(after.toolProfiles, {
     'writer-loopback': { runtime: 'codex', network: 'loopback' },
   });
+});
+
+test('WD09: запись loopback под замком — чужой живой замок и запись сразу после rename дают PATH_CONFLICT; замок умершего снимается', async () => {
+  const { applyWriterLoopback } = await import('../src/control/writer-loopback.ts');
+  let codex!: ReturnType<typeof fakeCodex>;
+  const f = fixture((raw, root) => {
+    raw.roles = { developer: { writer: { runtime: 'codex' } } };
+    raw.toolProfiles = {};
+    raw.repositories[0].writerProbe = [{ id: 'dev-server', command: fakeServe }];
+    codex = fakeCodex(root);
+  });
+  const probe = (await f.smoke({ executables: { codex: codex.fake } })).writerProbe!;
+  const apply = (hooks?: { beforeRename?: () => void; afterRename?: () => void }) =>
+    applyWriterLoopback({
+      policyPath: f.policyPath,
+      probedSha: sha256(f.text),
+      repositoryId: 'app',
+      probe,
+      ...(hooks ? { hooks } : {}),
+    });
+  const lock = f.policyPath + '.lock';
+  const code = (e: { code?: string; message: string }) => e.code === 'PATH_CONFLICT';
+  // Замок живого процесса (этого) — отказ, файл не тронут, замок не снят.
+  writeFileSync(lock, JSON.stringify({ pid: process.pid }));
+  assert.throws(() => apply(), code);
+  assert.equal(readFileSync(f.policyPath, 'utf8'), f.text);
+  assert.ok(existsSync(lock), 'чужой замок остаётся');
+  // Замок умершего процесса снимается.
+  const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], {
+    encoding: 'utf8',
+  });
+  writeFileSync(lock, JSON.stringify({ pid: Number(dead.stdout) }));
+  // Чужая запись сразу после rename — отказ: применённым её не назовут.
+  const theirs = f.text.replace('"runTimeoutMs": 60000', '"runTimeoutMs": 61000');
+  assert.throws(() => apply({ afterRename: () => writeFileSync(f.policyPath, theirs) }), code);
+  assert.equal(readFileSync(f.policyPath, 'utf8'), theirs, 'чужая запись не затёрта');
+  assert.ok(!existsSync(lock), 'свой замок снят');
+  // Чужая запись перед rename — отказ, временный файл убран.
+  writeFileSync(f.policyPath, f.text);
+  assert.throws(() => apply({ beforeRename: () => writeFileSync(f.policyPath, theirs) }), code);
+  assert.equal(readFileSync(f.policyPath, 'utf8'), theirs);
+  assert.deepEqual(
+    readdirSync(f.root).filter((n) => n.endsWith('.tmp')),
+    [],
+    'временных файлов нет',
+  );
+  // Без помех — записано, замок снят.
+  writeFileSync(f.policyPath, f.text);
+  apply();
+  assert.equal(
+    JSON.parse(readFileSync(f.policyPath, 'utf8')).toolProfiles['writer-loopback'].network,
+    'loopback',
+  );
+  assert.ok(!existsSync(lock));
+});
+
+test('WD10: признак запуска браузера и команда проверки — по смыслу и месту, не по слову', () => {
+  const v = (output: string) => classifyProbe({ code: 1, timedOut: false, output });
+  // Ошибка настройки до запуска и чужой сервер с «browser» в имени — не браузер.
+  assert.equal(
+    v('browserType.launch: executablePath: expected string, got number').browser,
+    undefined,
+  );
+  const sync = v('Could not start browser-sync server: listen EADDRINUSE 127.0.0.1:3001');
+  assert.equal(sync.browser, undefined);
+  assert.notEqual(sync.status, 'outside');
+  for (const line of [
+    'browserType.launch: Target page, context or browser has been closed',
+    'browserType.launch: Browser closed.',
+    'Error: Failed to launch the browser process!',
+    'Daemon process exited during startup',
+    'Chromium exited unexpectedly',
+  ])
+    assert.equal(v(line).browser, true, line);
+  const runner = (...command: string[]) => isBrowserRunner({ id: 's', command });
+  assert.ok(!runner('pnpm', '--filter', 'agent-browser', 'build'));
+  assert.ok(!runner('node', 'scripts/build.mjs', '--out-dir', 'dist/agent-browser'));
+  assert.ok(runner('pnpm', 'dlx', 'playwright', 'test'));
+  assert.ok(runner('npx', 'playwright', 'test'));
+  assert.ok(runner('npm', 'exec', '--', 'cypress', 'run'));
+  assert.ok(runner('pnpm', '--filter', 'web', 'verify:browser'));
+  assert.ok(runner('pnpm', 'run', 'verify:browser'));
+  assert.ok(runner('/usr/local/bin/agent-browser', 'open', 'http://127.0.0.1:3000'));
+  assert.ok(!runner('agent-browser', 'install'));
+  assert.ok(!runner('pnpm', 'exec', 'playwright', 'install', 'chromium'));
 });
