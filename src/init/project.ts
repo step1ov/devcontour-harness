@@ -54,6 +54,7 @@ import {
   type RuntimeAvailability,
 } from './runtimes.ts';
 import { defaultProbe } from '../toolchains/probe.ts';
+import { proposeNodePin } from '../environment/toolchain-pin.ts';
 
 export type InitData = z.infer<typeof initDataSchema>;
 
@@ -183,6 +184,7 @@ export interface InitPlanned {
   review: InitData['review'];
   runtimes: RuntimeAvailability[];
   warnings: InitData['warnings'];
+  toolchainPin?: InitData['toolchainPin'];
   /** Почему сохранённая политика расходится с решениями (конфликт `policy.json`). */
   policyConflict?: string;
   questions: NonNullable<InitData['questions']>;
@@ -344,7 +346,11 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
             ? { mode: 'cross', source: 'legacy' }
             : { mode: reviewModeOf(savedPolicy!, lead.runtime), source: 'policy' };
   const declared = packageManagerField(new Manifests(root), '.');
+  // Закреплённый node: версия проекта (.nvmrc, .node-version, engines.node),
+  // если она точная и установлена, иначе node, который запускает init.
+  const toolchainPin = savedPolicy ? undefined : proposeNodePin(root, env);
   const generated = generatePolicy({
+    ...(toolchainPin ? { toolchainPin: toolchainPin.pin } : {}),
     profile,
     lead: lead.runtime,
     writer,
@@ -462,6 +468,15 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
     profile: pin,
     shadowed: generated.shadowed,
     toolchain,
+    ...(toolchainPin
+      ? {
+          toolchainPin: {
+            node: toolchainPin.pin.node,
+            version: toolchainPin.version,
+            source: toolchainPin.source,
+          },
+        }
+      : {}),
     lead,
     review,
     runtimes,
@@ -645,6 +660,7 @@ function dataOf(
     review: planned.review,
     runtimes: planned.runtimes,
     warnings: planned.warnings,
+    ...(planned.toolchainPin ? { toolchainPin: planned.toolchainPin } : {}),
     questions: planned.questions,
     facts: {
       repositoryId: repository.id,
@@ -757,6 +773,11 @@ export function initText(data: InitData): string {
     `lead: ${data.lead.runtime} (${data.lead.source})`,
     `review: ${data.review.mode} (${data.review.source})`,
     `runtimes: writer ${data.manifest.runtimes.writer}, reviewer ${data.manifest.runtimes.reviewer}`,
+    ...(data.toolchainPin
+      ? [
+          `toolchain.node: ${data.toolchainPin.node} (${data.toolchainPin.source}) — первым в PATH gates, writer и reviewers; другой node — поправьте policy.toolchain.node`,
+        ]
+      : []),
     ...(data.questions
       ? [
           `questions: ${data.questions.line}` +

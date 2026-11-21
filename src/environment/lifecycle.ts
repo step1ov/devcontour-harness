@@ -8,7 +8,9 @@ import {
   stepSchema,
   TaskFailure,
   type ExecutionPolicy,
+  type ToolchainPin,
 } from '../contracts/index.ts';
+import { pinnedSource } from './toolchain-pin.ts';
 import {
   dependencyNetworkFailure,
   dependencyNetworkMessage,
@@ -61,7 +63,14 @@ export function executionEnvironment(
   profiles: (Environment | undefined)[],
   devcontour: NodeJS.ProcessEnv = {},
   source = process.env,
+  /**
+   * Закреплённый toolchain политики (`policy.toolchain`): каталог node
+   * первым в PATH окружения, одинаково для каждой фазы и процесса. Не
+   * разрешился — `ToolchainPinError` (отказ окружения до работы).
+   */
+  toolchain?: ToolchainPin,
 ) {
+  source = pinnedSource(toolchain, source);
   // Окружение прогона — минимальное: исполнитель не должен наследовать всё,
   // что оказалось у оператора. Но учётные данные runtime живут в системном
   // хранилище, а найти их там нельзя, не зная имени учётной записи: без USER
@@ -497,10 +506,15 @@ export async function cleanupEnvironment(
   if (receipt.status === 'cleaned') return { status: 'already-cleaned' as const };
   if (receipt.ownerPid && receipt.ownerPid !== options.owner && processAlive(receipt.ownerPid))
     throw new Error('Процесс владельца окружения ещё существует; сначала остановите его');
-  const execution = executionEnvironment([policy.environment, repo?.environment], {
-    ...receipt.devcontourEnv,
-    ...(receipt.runId ? { DEVCONTOUR_RUN_ID: receipt.runId } : {}),
-  });
+  const execution = executionEnvironment(
+    [policy.environment, repo?.environment],
+    {
+      ...receipt.devcontourEnv,
+      ...(receipt.runId ? { DEVCONTOUR_RUN_ID: receipt.runId } : {}),
+    },
+    process.env,
+    policy.toolchain,
+  );
   await teardown(lifecycle, cwd, join(receiptPath, '..'), execution);
   await writeFile(receiptPath, JSON.stringify({ ...receipt, status: 'cleaned' }, null, 2));
   return { status: 'cleaned' as const };

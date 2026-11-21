@@ -73,6 +73,7 @@ const causeLabels: Record<string, string> = {
   'process-reap': 'command processes not stopped or not listed',
   cleanup: 'attempt resources not released (check folders, environment teardown)',
   'resource-busy': 'declared port held by a foreign process before the phase',
+  toolchain: 'toolchain differs from the passing baseline, or the pinned node is not installed',
   other: 'other',
   none: 'not an environment cause',
 };

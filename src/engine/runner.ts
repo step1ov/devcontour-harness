@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { toolchainBaseline } from '../environment/toolchain-pin.ts';
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
@@ -812,6 +813,7 @@ export class Runner {
         }),
       },
       this.options.environment ?? process.env,
+      this.policy.toolchain,
     );
   }
 
@@ -2944,6 +2946,24 @@ export class Runner {
       boundary: this.boundary(consumer?.dependencies ?? attempt.dependencies),
       ...(consumer ? { consumer: consumer.repositoryId } : {}),
       ...(property ? { property } : {}),
+      // Основание сверки toolchain провала: успешные запуски того же gate
+      // прежними попытками репозитория и `harness gates` каталога состояния.
+      ...(consumer
+        ? {}
+        : {
+            baseline: (id: string) =>
+              toolchainBaseline(
+                id,
+                attempt.repositoryId,
+                this.engine.read((v) =>
+                  v
+                    .attempts()
+                    .filter((a) => a.repositoryId === attempt.repositoryId && a.id !== attempt.id)
+                    .flatMap((a) => a.evidence),
+                ),
+                this.options.stateDir,
+              ),
+          }),
     });
   }
 

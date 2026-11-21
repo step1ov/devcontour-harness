@@ -158,6 +158,7 @@ export async function checkGates(input: GateCheckInput) {
       ...(evidence
         ? { exitCode: evidence.exitCode, summary: evidence.summary, log: evidence.log }
         : {}),
+      ...(evidence?.toolchain ? { toolchain: evidence.toolchain } : {}),
       ...(message ? { message } : {}),
     };
   });

@@ -22,6 +22,7 @@ import {
   type EvidenceRecord,
   type ExecutionPolicy,
   type GatePolicy,
+  type ToolchainFacts,
   gateTimeoutMs,
   gateTimeoutText,
 } from '../contracts/index.ts';
@@ -59,6 +60,7 @@ import {
 } from './property.ts';
 import { keepGateArtifacts } from './gate-artifacts.ts';
 import { ReapedGate } from './reaped.ts';
+import { sameNode, toolchainFacts, toolchainText, usesPnpm } from '../environment/toolchain-pin.ts';
 
 /** Длинное имя testcase заменяется хешем, а не обрезается: обрезка дала бы ложные совпадения. */
 export const TEST_ID_LIMIT = 1000;
@@ -830,6 +832,12 @@ export interface GateRun {
   /** Повтор провала: ID записи, которую повторяет запуск; исход пишется в `recheck`. */
   recheck?: string;
   /**
+   * Toolchain последнего успешного запуска того же gate на базе (evidence
+   * прежних попыток, `harness gates`): провал под другим node — отказ
+   * окружения `toolchain`. `where` — откуда запись, для текста отказа.
+   */
+  baseline?: (gate: string) => { toolchain: ToolchainFacts; where: string } | undefined;
+  /**
    * Закреплённый SHA базы попытки: только при нём упавшая установка
    * зависимостей может стать отказом среды `dependency-network` — входы
    * менеджера в дереве сверяются с этой базой. Нет — классификации нет.
@@ -918,6 +926,9 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   // Go не берёт результат из кэша тестов (`-count=1` в GOFLAGS, последним).
   // Восстановленный из cache зелёный отчёт иначе выглядел бы свежим.
   const freshness = freshnessEnv(gate.kind, run.execution.env);
+  // Фактический toolchain окружения фазы (первый node в PATH, pnpm у команд
+  // с pnpm): заголовок лога и evidence называют, чем проверка исполнялась.
+  const toolchain = toolchainFacts(run.execution.env.PATH, { pnpm: usesPnpm(gate.command) });
   let kind: FailureKind = 'gate';
   /** Причина отказа окружения (`attempt.diagnosed`), когда она известна здесь. */
   let cause: EnvironmentCause | undefined;
@@ -939,7 +950,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   let exitOnly = false;
   let passed = false,
     summary = '',
-    log = `# harness gate ${gate.id}: cwd=${relative(root, gateCwd) || '.'} argv=${JSON.stringify(gate.command.map(redact))}${gate.kind === 'test' ? ` fresh=${redact(JSON.stringify(freshness))}` : ''}\n`,
+    log = `# harness gate ${gate.id}: cwd=${relative(root, gateCwd) || '.'} argv=${JSON.stringify(gate.command.map(redact))}${gate.kind === 'test' ? ` fresh=${redact(JSON.stringify(freshness))}` : ''}\n# toolchain: ${toolchainText(toolchain)}\n`,
     exitCode = -1,
     manifest: ReturnType<typeof junitSummary> | undefined,
     /** SHA-256 сохранённого этим запуском `<gate>.xml`. */
@@ -1315,6 +1326,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     ...(manifest?.truncated ? { testsTruncated: true } : {}),
     ...(reportDigest ? { reportDigest } : {}),
     ...(run.consumer ? { consumer: run.consumer } : {}),
+    ...(toolchain.node ? { toolchain } : {}),
     ...(propertyEvidence ? { property: propertyEvidence } : {}),
     ...(artifactFiles ? { artifactFiles } : {}),
     ...(run.recheck
@@ -1362,6 +1374,17 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     // Таймаут без контрпримера свойства: повтор на том же SHA решает `Runner`.
     if (timedOut && kind === 'gate' && !failing.length && !timedOutFailures)
       throw new GateTimeout(message, timedOut);
+    // Провал под другим node, чем последний успешный запуск того же gate на
+    // базе: о коде он не говорит — отказ окружения `toolchain`, не засчитан.
+    const baseline = kind === 'gate' && !run.recheck ? run.baseline?.(gate.id) : undefined;
+    if (baseline && toolchain.node && !sameNode(toolchain.node, baseline.toolchain.node)) {
+      throw new TaskFailure(
+        'environment',
+        `${message}; toolchain отличается от успешного запуска ${gate.id} ${baseline.where}: ${toolchainText(toolchain)} вместо ${toolchainText(baseline.toolchain)} — закрепите policy.toolchain.node`,
+        properties,
+        'toolchain',
+      );
+    }
     throw new TaskFailure(kind, message, properties, kind === 'environment' ? cause : undefined);
   }
   return evidence;

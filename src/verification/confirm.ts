@@ -378,6 +378,7 @@ async function decide(
         DEVCONTOUR_PHASE: 'case',
       },
       ctx.environment ?? process.env,
+      ctx.policy.toolchain,
     );
     const limitMs = gateTimeoutMs(gate, ctx.policy) * 3 + 120000;
     const deadline = Date.now() + limitMs;

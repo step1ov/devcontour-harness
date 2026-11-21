@@ -203,6 +203,7 @@ export async function analyzeRecovery(
     [ctx.policy.environment, tools?.environment],
     {},
     ctx.environment ?? process.env,
+    ctx.policy.toolchain,
   );
   const response = await measuredInvoke(
     ctx.engine,

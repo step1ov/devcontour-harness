@@ -738,6 +738,7 @@ async function writerRig(input: WriterProbeInput, w: WriterSpec): Promise<Rig> {
       DEVCONTOUR_COMPONENTS_JSON: JSON.stringify({ [repo.id]: cwd }),
     },
     input.environment ?? process.env,
+    policy.toolchain,
   );
   // HOME — как у адаптера runtime.
   execution.env.HOME ??= homedir();

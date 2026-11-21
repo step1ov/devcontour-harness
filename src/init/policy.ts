@@ -158,6 +158,8 @@ export function generatePolicy(input: {
    * (`init --lead-technical-answers`): `inputPolicy.leadAnswers.technical`.
    */
   leadTechnicalAnswers?: boolean;
+  /** Закреплённый node (`policy.toolchain`): предложение init. */
+  toolchainPin?: { node: string };
 }): GeneratedPolicy {
   const { profile, writer, packageManager, model } = input;
   const lead = input.lead ?? writer;
@@ -232,6 +234,7 @@ export function generatePolicy(input: {
     roles,
     review: { code: rule(writer), plan: rule(lead), contract: rule(lead) },
     ...profileExecution(profile),
+    ...(input.toolchainPin ? { toolchain: input.toolchainPin } : {}),
     ...(input.leadTechnicalAnswers
       ? { inputPolicy: { threshold: 7, criticalPaths: [], leadAnswers: { technical: true } } }
       : {}),

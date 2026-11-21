@@ -308,6 +308,7 @@ export async function reviewCode(
       ],
       {},
       ctx.environment ?? process.env,
+      policy.toolchain,
     );
   } catch (error) {
     throw new HarnessError(
