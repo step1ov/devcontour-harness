@@ -1945,7 +1945,7 @@ view`) в пределе длины сохраняет хвост — остат
   исправьте руками: `vendor: same-vendor-allowed` в правиле роли или reviewer
   другого вендора.
 
-### 0.1.0-alpha.63 (не выпущен)
+### 0.1.0-alpha.63
 
 Номера форматов прежние (`stateVersion: 1`, `policyVersion: 1`,
 `viewVersion: 1`, `viewRevision: 4`). Схемы ответов `smoke` и `doctor`
