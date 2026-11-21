@@ -163,13 +163,23 @@ test('toolchain pin: незакреплённый в системе node — о�
     assert.match(a.error ?? '', /policy\.toolchain\.node=98\.7\.6/);
   }
   assert.equal(work.attempt, 0, 'ни одна попытка не засчитана');
+  // Причина — сам закреплённый toolchain, а не общий отказ до работы.
+  const causes = ctx.store
+    .events()
+    .filter((e) => e.type === 'attempt.diagnosed')
+    .map((e) => (e.payload as { cause: string }).cause);
+  assert.ok(causes.length >= 1);
+  assert.ok(
+    causes.every((c) => c === 'toolchain'),
+    causes.join(),
+  );
   assert.ok(
     !existsSync(f.log) || !/fake-/.test(readFileSync(f.log, 'utf8')),
     'writer не вызывался',
   );
 });
 
-test('P2-10: провал gate под другим node, чем успешный запуск того же gate на базе, — отказ окружения toolchain, не засчитан', async () => {
+test('P2-10: дефект под другим node, чем успешный прогон того же gate, — засчитанный провал gate с заметкой о node', async () => {
   const ctx = setup({
     scenario: {
       writer: implement({ 'src/greet.js': "exports.greet = () => 'broken';\n" }),
@@ -206,19 +216,21 @@ test('P2-10: провал gate под другим node, чем успешный
   const attempts = ctx.engine.read((v) => v.attempts(work.id));
   assert.ok(attempts.length >= 1);
   const first = attempts[0]!;
-  assert.equal(first.failureKind, 'environment', first.error ?? '');
-  assert.match(
-    first.error ?? '',
-    /toolchain отличается от успешного запуска unit в harness gates GA-base/,
-  );
-  assert.match(first.error ?? '', /вместо node v1\.2\.3 \(\/opt\/other-node\/bin\/node\)/);
+  // Настоящий дефект остаётся дефектом: класс gate, попытка засчитана.
+  assert.equal(first.failureKind, 'gate', first.error ?? '');
+  const note =
+    /node v\S+ \(.+\) отличается от последнего успешного прогона этого gate в harness gates GA-base[^:]*: v1\.2\.3 \(\/opt\/other-node\/bin\/node\); закрепите policy\.toolchain\.node/;
+  assert.match(first.error ?? '', note);
+  const failed = first.evidence.find((e) => e.gate === 'unit' && !e.passed)!;
+  assert.match(failed.summary ?? '', note);
+  assert.match(readFileSync(failed.log, 'utf8'), note);
   const diagnosed = ctx.store
     .events()
     .filter((e) => e.type === 'attempt.diagnosed')
     .map((e) => e.payload as { cause: string; counted: boolean });
-  assert.equal(diagnosed[0]?.cause, 'toolchain');
-  assert.equal(diagnosed[0]?.counted, false);
-  assert.equal(work.attempt, 0, 'отказ по toolchain не засчитан');
+  assert.equal(diagnosed[0]?.cause, 'none');
+  assert.equal(diagnosed[0]?.counted, true);
+  assert.ok(work.attempt >= 1, 'провал засчитан');
 });
 
 test('P2-10: провал под тем же node, что успешный запуск на базе, — по-прежнему дефект (gate)', async () => {
@@ -256,6 +268,7 @@ test('P2-10: провал под тем же node, что успешный за�
   const work = ctx.engine.read((v) => v.work(ctx.graph.orders[0]!.id)!);
   const first = ctx.engine.read((v) => v.attempts(work.id))[0]!;
   assert.equal(first.failureKind, 'gate', first.error ?? '');
+  assert.doesNotMatch(first.error ?? '', /отличается от последнего успешного прогона/);
 });
 
 test('doctor: node первым в PATH отличается от закреплённого — предупреждение и разрешённое закрепление', async () => {

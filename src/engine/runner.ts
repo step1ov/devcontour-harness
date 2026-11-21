@@ -785,6 +785,8 @@ export class Runner {
         ...(tools ? [mcpEnvironment(tools)] : []),
       ]);
     } catch (error) {
+      // Отказ закреплённого node сохраняет свой класс: причина — `toolchain`.
+      if (error instanceof BlockedError) throw error;
       throw new BlockedError(error instanceof Error ? error.message : String(error));
     }
   }

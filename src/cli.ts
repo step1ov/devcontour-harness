@@ -1263,9 +1263,10 @@ async function run(
     case 'status':
     case 'events':
     case 'result': {
-      // До настройки (нет manifest, привязки или базы состояния) статус — этап
-      // `setup` простыми строками, а не NOT_FOUND: панель и ведущий видят, что
-      // идёт настройка (ревизия 5 представления).
+      // До настройки статус — этап `setup` простыми строками, а не NOT_FOUND:
+      // `--repository` без manifest или с manifest, но ещё без базы состояния;
+      // `--state` — только каталог, которого нет совсем. База без привязки и
+      // пустой каталог — прежний отказ: это не настройка, а неисправность.
       if (command === 'status' && !v.watch && v.interval === undefined) {
         const located =
           v.repository && !v.state
@@ -1273,8 +1274,9 @@ async function run(
             : { stateDir: resolve(need('state')) };
         if (
           !located ||
-          !existsSync(join(located.stateDir, 'state.sqlite')) ||
-          !existsSync(bindingFile(located.stateDir))
+          (located.fromManifest
+            ? !existsSync(join(located.stateDir, 'state.sqlite'))
+            : !existsSync(located.stateDir))
         ) {
           const data = statusSetup(located ? 'state' : 'project');
           return {

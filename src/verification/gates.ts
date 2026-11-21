@@ -833,8 +833,8 @@ export interface GateRun {
   recheck?: string;
   /**
    * Toolchain последнего успешного запуска того же gate на базе (evidence
-   * прежних попыток, `harness gates`): провал под другим node — отказ
-   * окружения `toolchain`. `where` — откуда запись, для текста отказа.
+   * прежних попыток, `harness gates`): провал под другим node остаётся
+   * провалом gate, текст и evidence называют расхождение. `where` — откуда запись.
    */
   baseline?: (gate: string) => { toolchain: ToolchainFacts; where: string } | undefined;
   /**
@@ -1307,6 +1307,22 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         signal,
       })
     : undefined;
+  // Провал под другим node, чем последний успешный прогон того же gate:
+  // провал остаётся засчитанным провалом gate (класс не меняется), но текст
+  // отказа и evidence называют расхождение — ведущий видит, что закрепить.
+  if (!passed && !run.recheck) {
+    const baseline = run.baseline?.(gate.id);
+    if (
+      baseline &&
+      toolchain.node &&
+      baseline.toolchain.node &&
+      !sameNode(toolchain.node, baseline.toolchain.node)
+    ) {
+      const note = toolchainNote(toolchain.node, baseline.toolchain.node, baseline.where);
+      summary = summary ? `${summary}; ${note}` : note;
+      log += '\n' + note + '\n';
+    }
+  }
   await mkdir(artifactDir, { recursive: true });
   const logPath = join(artifactDir, `${gate.id}.log`);
   log = redact(log);
@@ -1374,21 +1390,18 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     // Таймаут без контрпримера свойства: повтор на том же SHA решает `Runner`.
     if (timedOut && kind === 'gate' && !failing.length && !timedOutFailures)
       throw new GateTimeout(message, timedOut);
-    // Провал под другим node, чем последний успешный запуск того же gate на
-    // базе: о коде он не говорит — отказ окружения `toolchain`, не засчитан.
-    const baseline = kind === 'gate' && !run.recheck ? run.baseline?.(gate.id) : undefined;
-    if (baseline && toolchain.node && !sameNode(toolchain.node, baseline.toolchain.node)) {
-      throw new TaskFailure(
-        'environment',
-        `${message}; toolchain отличается от успешного запуска ${gate.id} ${baseline.where}: ${toolchainText(toolchain)} вместо ${toolchainText(baseline.toolchain)} — закрепите policy.toolchain.node`,
-        properties,
-        'toolchain',
-      );
-    }
     throw new TaskFailure(kind, message, properties, kind === 'environment' ? cause : undefined);
   }
   return evidence;
 }
+
+/** Строка о node, отличном от последнего успешного прогона gate (не меняет класс провала). */
+export const toolchainNote = (
+  now: NonNullable<ToolchainFacts['node']>,
+  before: NonNullable<ToolchainFacts['node']>,
+  where: string,
+) =>
+  `node v${now.version} (${now.path}) отличается от последнего успешного прогона этого gate ${where}: v${before.version} (${before.path}); закрепите policy.toolchain.node`;
 
 /** Предел сводки отказа в запросе исполнителя: заметка, а не лог. */
 const WRITER_DEPENDENCIES_NOTE_LIMIT = 400;

@@ -1149,7 +1149,7 @@ function readConnectorDb(
       tasks: manifest?.tasks ?? [],
       problems: manifest?.problems ?? [],
     };
-    const release = releaseOf(db, scope, works);
+    const release = releaseOf(db, path, scope, works);
     const deliveries = sourceReviewsOf(db, release.tasks);
     return {
       connector,
@@ -1209,18 +1209,25 @@ const RELEASE_SNAPSHOTS = 500;
 type ScopeLike = NonNullable<RelayObservationLike['scope']>;
 type ReleaseTask = NonNullable<OperatorSourceInput['release']>[number];
 
+type SnapshotTask = { id: string; key: string; title?: string; orderId: string; column?: string };
+type SnapshotProblem = { taskId: string; code: string; message: string };
+type SnapshotRows = { at: string; tasks: SnapshotTask[]; problems: SnapshotProblem[] }[];
+
 /**
- * Объём выпуска (доска связки): все задачи всех снимков связки, а не только
- * последнего среза `run`. О каждой задаче — последнее, что о ней записано
- * (колонка, проблемы), и время, когда она впервые попала в снимок; последнее
- * чтение (наблюдение) дополняет и уточняет снимки.
+ * Разобранные снимки связки по файлу базы: представление опрашивается часто,
+ * а снимков до 500 — ключ кэша — размер и время изменения базы и её журнала.
  */
-function releaseOf(
-  db: DatabaseSync,
-  scope: ScopeLike,
-  works: ReadonlySet<string>,
-): { tasks: ReleaseTask[]; startedAt?: string } {
-  const rows = db
+const snapshotCache = new Map<string, { key: string; rows: SnapshotRows }>();
+
+function snapshotRows(db: DatabaseSync, path: string): SnapshotRows {
+  const stamp = (p: string) => {
+    const st = statSync(p, { throwIfNoEntry: false });
+    return st ? [st.size, st.mtimeMs] : null;
+  };
+  const key = JSON.stringify([stamp(path), stamp(path + '-wal')]);
+  const hit = snapshotCache.get(path);
+  if (hit && hit.key === key) return hit.rows;
+  const raw = db
     .prepare(
       `SELECT created_at AS at, json_extract(data, '$.manifest.tasks') AS tasks,
               json_extract(data, '$.manifest.problems') AS problems
@@ -1228,11 +1235,46 @@ function releaseOf(
         ORDER BY rowid`,
     )
     .all() as { at: string; tasks: string | null; problems: string | null }[];
+  const parse = <T>(text: string | null): T[] => {
+    try {
+      const v = text ? (JSON.parse(text) as unknown) : [];
+      return Array.isArray(v) ? (v as T[]) : [];
+    } catch {
+      return [];
+    }
+  };
+  const rows = raw.map((r) => ({
+    at: r.at,
+    tasks: parse<SnapshotTask>(r.tasks),
+    problems: parse<SnapshotProblem>(r.problems),
+  }));
+  // Предел кэша — несколько связок одного процесса (панель читает свои базы).
+  if (snapshotCache.size >= 32) snapshotCache.clear();
+  snapshotCache.set(path, { key, rows });
+  return rows;
+}
+
+/**
+ * Объём выпуска (доска связки): задачи всех снимков связки, а не только
+ * последнего среза `run`. О каждой задаче — последнее, что о ней записано
+ * (колонка, проблемы), и время, когда она впервые попала в снимок; последнее
+ * чтение (наблюдение или последний снимок) дополняет и уточняет снимки.
+ * Задача, которой нет в последнем чтении и у которой нет работы harness
+ * (удалена с доски или выведена из области), в выпуск не входит. Начало
+ * выпуска — первое появление задачи, оставшейся в нём.
+ */
+function releaseOf(
+  db: DatabaseSync,
+  path: string,
+  scope: ScopeLike,
+  works: ReadonlySet<string>,
+): { tasks: ReleaseTask[]; startedAt?: string } {
+  const rows = snapshotRows(db, path);
   const byId = new Map<string, ReleaseTask>();
   const put = (
     at: string | undefined,
-    tasks: readonly { id: string; key: string; title?: string; orderId: string; column?: string }[],
-    problems: readonly { taskId: string; code: string; message: string }[],
+    tasks: readonly SnapshotTask[],
+    problems: readonly SnapshotProblem[],
   ) => {
     for (const t of tasks) {
       const prev = byId.get(t.id);
@@ -1250,17 +1292,15 @@ function releaseOf(
       });
     }
   };
-  const parse = <T>(text: string | null): T[] => {
-    try {
-      const v = text ? (JSON.parse(text) as unknown) : [];
-      return Array.isArray(v) ? (v as T[]) : [];
-    } catch {
-      return [];
-    }
-  };
-  for (const r of rows) put(r.at, parse(r.tasks), parse(r.problems));
+  for (const r of rows) put(r.at, r.tasks, r.problems);
   put(scope.readAt, scope.tasks, scope.problems);
-  return { tasks: [...byId.values()], ...(rows[0]?.at ? { startedAt: rows[0].at } : {}) };
+  const latest = new Set(scope.tasks.map((t) => t.id));
+  const tasks = [...byId.values()].filter((t) => latest.has(t.id) || works.has(t.orderId));
+  const starts = tasks
+    .map((t) => t.firstSeenAt)
+    .filter((x): x is string => typeof x === 'string' && Number.isFinite(Date.parse(x)))
+    .sort((x, y) => Date.parse(x) - Date.parse(y));
+  return { tasks, ...(starts[0] ? { startedAt: starts[0] } : {}) };
 }
 
 /**
@@ -1273,19 +1313,22 @@ function sourceReviewsOf(
   db: DatabaseSync,
   release: readonly ReleaseTask[],
 ): NonNullable<OperatorSourceInput['reviews']> {
-  let rows: { task: string; work: string; data: string; at: string }[];
+  let rows: { task: string; work: string; status: string; data: string; at: string }[];
   try {
     rows = db
       .prepare(
-        `SELECT task_id AS task, work_id AS work, data, updated_at AS at FROM operations
-          WHERE status = 'delivered' ORDER BY updated_at, rowid`,
+        `SELECT task_id AS task, work_id AS work, status, data, updated_at AS at FROM operations
+          ORDER BY updated_at, rowid`,
       )
       .all() as typeof rows;
   } catch {
     return [];
   }
+  // Последняя операция задачи любого состояния заменяет прежние: новая
+  // доставка в работе или с конфликтом — уже не «ждёт проверки».
   const last = new Map<string, (typeof rows)[number]>();
   for (const r of rows) last.set(r.task, r);
+  for (const [task, r] of last) if (r.status !== 'delivered') last.delete(task);
   const tasks = new Map(release.map((t) => [t.id, t]));
   const out: NonNullable<OperatorSourceInput['reviews']>[number][] = [];
   for (const r of last.values()) {
@@ -1444,10 +1487,21 @@ export function harnessView(
     );
   if (!located) return setup('project');
   const stateDir = located.stateDir;
-  const policyPath = located.policyPath;
-  // Ни привязанного состояния, ни файла политики — harness ещё настраивается.
+  // Политика проекта из manifest, которой ещё нет, — не явный `--policy`:
+  // без неё действует привязка состояния (или прежний отказ POLICY_REQUIRED).
+  const policyPath =
+    located.policyPath && (options.policyPath || existsSync(located.policyPath))
+      ? located.policyPath
+      : undefined;
+  // Документ настройки — только для `--repository`: manifest есть, но ни
+  // привязки, ни политики проекта, ни базы состояния ещё нет. `--state`
+  // сохраняет прежнюю форму (пустой обзор по `--policy` или отказ), явный
+  // `--policy` без файла и база без привязки — прежние отказы.
   if (
+    located.fromManifest &&
+    !options.policyPath &&
     !existsSync(join(stateDir, 'binding.json')) &&
+    !existsSync(join(stateDir, 'state.sqlite')) &&
     (policyPath === undefined || !existsSync(policyPath))
   )
     return setup('policy');
@@ -1504,7 +1558,7 @@ export function locateProject(options: {
   stateDir?: string;
   repository?: string;
   policyPath?: string;
-}): { stateDir: string; policyPath?: string } | undefined {
+}): { stateDir: string; policyPath?: string; fromManifest?: true } | undefined {
   if (options.stateDir)
     return {
       stateDir: resolve(options.stateDir),
@@ -1523,10 +1577,12 @@ export function locateProject(options: {
       { path: [PROJECT_MANIFEST_PATH], message: manifest.error.issues[0]?.message ?? 'invalid' },
     ]);
   return {
-    stateDir: resolve(manifest.data.paths.state),
+    // Относительный каталог состояния — от корня репозитория, а не от cwd.
+    stateDir: resolve(root, manifest.data.paths.state),
     policyPath: options.policyPath
       ? resolve(options.policyPath)
       : join(root, manifest.data.paths.policy),
+    fromManifest: true,
   };
 }
 

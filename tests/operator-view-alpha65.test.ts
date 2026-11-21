@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import {
@@ -50,6 +50,7 @@ function connectorDb(
       outcome: 'accepted' | 'rejected';
       column?: string;
       at: string;
+      status?: string;
     }[];
   },
 ) {
@@ -96,7 +97,7 @@ function connectorDb(
       o.work,
       `run-${n}`,
       o.task,
-      'delivered',
+      o.status ?? 'delivered',
       JSON.stringify({
         outcome: o.outcome,
         steps: [
@@ -124,6 +125,9 @@ function releaseState() {
   const state = join(dir, 'state');
   connectorDb(state, {
     snapshots: [
+      // Задача, удалённая с доски до передачи в harness: в выпуск не входит
+      // и не сдвигает его начало.
+      { at: at(150), tasks: [{ id: 'T-0', key: 'WEB-0', orderId: 'w0' }] },
       { at: at(120), tasks: [tasks.a, tasks.b] },
       {
         at: at(60),
@@ -137,6 +141,9 @@ function releaseState() {
       { task: 'T-A', work: 'wa', outcome: 'accepted', column: 'review', at: at(70) },
       // Владелец уже закрыл WEB-2 в источнике (колонка done по более позднему снимку).
       { task: 'T-B', work: 'wb', outcome: 'accepted', column: 'review', at: at(65) },
+      // WEB-3: принятая доставка, затем новая операция ещё идёт — она заменяет прежнюю.
+      { task: 'T-C', work: 'wc', outcome: 'accepted', column: 'review', at: at(45) },
+      { task: 'T-C', work: 'wc', outcome: 'accepted', at: at(40), status: 'in-progress' },
     ],
   });
   return { dir, state, sources: connectorSources(state, new Set(['wa', 'wb', 'wc'])) };
@@ -170,9 +177,10 @@ test('alpha.65: связка отдаёт весь выпуск (все сним
         ['WEB-3', at(60)],
       ],
     );
+    // WEB-0 удалена с доски до передачи: её нет, и начало выпуска — не её снимок.
     assert.equal(src.releaseStartedAt, at(120));
     // WEB-1 оставлена на проверку (последняя доставка принята, колонка review);
-    // WEB-2 владелец уже закрыл — не ждёт.
+    // WEB-2 владелец уже закрыл, у WEB-3 последняя операция ещё идёт — не ждут.
     assert.deepEqual(src.reviews, [
       { taskId: 'T-A', key: 'WEB-1', workId: 'wa', column: 'review', since: at(70) },
     ]);
@@ -430,4 +438,117 @@ test('alpha.65: состояние без работ — этап setup в об�
     name: 'work',
     lines: [],
   });
+});
+
+test('alpha.65: снимки связки кэшируются по базе — новый снимок виден, без изменений тот же ответ', () => {
+  const r = releaseState();
+  try {
+    const works = new Set(['wa', 'wb', 'wc']);
+    assert.deepEqual(connectorSources(r.state, works), r.sources);
+    // Новый снимок с новой задачей: база изменилась — кэш не отдаёт старое.
+    const db = new DatabaseSync(
+      join(r.state, 'connectors', 'relay-v1-http-0123456789abcdef.sqlite'),
+    );
+    const d = { id: 'T-D', key: 'WEB-4', orderId: 'wd' };
+    db.prepare('INSERT INTO snapshots VALUES (?, ?, ?, ?)').run(
+      'rev-new',
+      'g1',
+      JSON.stringify({ manifest: { readAt: at(30), tasks: [tasks.c, d], problems: [] } }),
+      at(30),
+    );
+    db.prepare('UPDATE observations SET data = ? WHERE key = ?').run(
+      JSON.stringify({
+        at: at(30),
+        scope: { readAt: at(30), tasks: [tasks.c, d], problems: [] },
+      }),
+      'relay',
+    );
+    db.close();
+    const after = connectorSources(r.state, works)[0]!;
+    assert.deepEqual(
+      after.release!.map((t) => t.key),
+      ['WEB-1', 'WEB-2', 'WEB-3', 'WEB-4'],
+    );
+  } finally {
+    rmSync(r.dir, { recursive: true, force: true });
+  }
+});
+
+test('alpha.65: этап setup только до настройки; неисправности — прежние отказы', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-a65-errors-'));
+  try {
+    const s = viewState();
+    const repo = join(dir, 'repo');
+    mkdirSync(join(repo, '.harness'), { recursive: true });
+    const manifest = (state: string) =>
+      writeFileSync(
+        join(repo, '.harness', 'project.json'),
+        JSON.stringify({
+          apiVersion: API_VERSION,
+          kind: 'harness-project',
+          manifestVersion: 1,
+          projectId: 'p-0123456789abcdef',
+          root: repo,
+          repository: { id: 'app', targetRef: 'refs/heads/main' },
+          profile: {
+            ref: 'node-npm',
+            pin: { id: 'node-npm', version: '1.0.0', digest: 'a'.repeat(64) },
+          },
+          runtimes: { writer: 'codex', reviewer: 'claude' },
+          paths: {
+            policy: '.harness/policy.json',
+            work: '.harness/work',
+            notes: '.harness/work/context/notes',
+            state,
+          },
+        }),
+      );
+    // Manifest есть, состояния ещё нет: status и view — этап настройки.
+    manifest(join(dir, 'state-later'));
+    const early = harness('status', '--repository', repo);
+    assert.equal(early.status, 0, early.stderr);
+    assert.equal(
+      cliDataSchemas.status.parse((JSON.parse(early.stdout) as { data: unknown }).data).setup
+        ?.waitingFor,
+      'state',
+    );
+    assert.equal(
+      setupViewSchema.parse(harnessView({ repository: repo })).setup.waitingFor,
+      'policy',
+    );
+    // Явный --policy без файла — прежний отказ, а не настройка.
+    assert.throws(
+      () => harnessView({ repository: repo, policyPath: join(dir, 'missing.json') }),
+      /missing\.json|не найден|ENOENT/,
+    );
+    // База состояния есть, а привязки нет — неисправность: прежние отказы.
+    const broken = join(dir, 'broken');
+    mkdirSync(broken);
+    copyFileSync(join(s.state, 'state.sqlite'), join(broken, 'state.sqlite'));
+    manifest(broken);
+    const statusBroken = harness('status', '--repository', repo);
+    assert.equal(statusBroken.status, 3, statusBroken.stdout);
+    assert.equal(
+      (JSON.parse(statusBroken.stdout) as { error: { code: string } }).error.code,
+      'NOT_FOUND',
+    );
+    assert.throws(
+      () => harnessView({ repository: repo }),
+      (e: unknown) => (e as { code?: string }).code === 'POLICY_REQUIRED',
+    );
+    // --state: пустой существующий каталог — прежний NOT_FOUND; несуществующий — настройка.
+    const empty = join(dir, 'empty');
+    mkdirSync(empty);
+    const statusEmpty = harness('status', '--state', empty);
+    assert.equal(statusEmpty.status, 3, statusEmpty.stdout);
+    const statusMissing = harness('status', '--state', join(dir, 'nothing'));
+    assert.equal(statusMissing.status, 0, statusMissing.stderr);
+    // Относительный paths.state — от корня репозитория, а не от cwd.
+    copyFileSync(s.policyPath, join(repo, '.harness', 'policy.json'));
+    manifest(relative(repo, s.state));
+    const view = operatorViewSchema.parse(harnessView({ repository: repo }));
+    assert.ok(view.works.length > 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

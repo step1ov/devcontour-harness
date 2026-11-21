@@ -22,7 +22,6 @@ import {
   cliCommands,
   exitCodes,
   operatorViewSchema,
-  setupViewSchema,
   workDetailViewSchema,
 } from '../src/contracts/index.ts';
 import { harnessCapabilities } from '../src/catalog/harness.ts';
@@ -144,7 +143,7 @@ test('harness view: после run — одна работа done, resultSha = r
   }
 });
 
-test('harness view: нет состояния — с --policy пустое представление, без — документ настройки (alpha.65); каталог не создаётся', () => {
+test('harness view: нет состояния — с --policy пустое представление (этап setup), без — POLICY_REQUIRED; каталог не создаётся', () => {
   const p = project();
   const missing = join(p.root, 'no-state');
   const empty = p.harness('view', '--state', missing, '--policy', 'policy.json');
@@ -169,15 +168,15 @@ test('harness view: нет состояния — с --policy пустое пр�
   );
   assert.equal(existsSync(missing), false);
 
-  // alpha.65: ни привязки, ни политики — не отказ POLICY_REQUIRED, а этап настройки.
-  const setup = p.harness('view', '--state', missing);
-  assert.equal(setup.status, 0, setup.stderr);
-  const doc = setupViewSchema.parse(setup.json.data);
-  assert.deepEqual(doc.stage, {
+  // alpha.65: у пустого обзора — этап настройки; форма документа прежняя.
+  assert.deepEqual(view.stage, {
     name: 'setup',
     lines: ['Идёт настройка harness', 'Задач пока нет'],
   });
-  assert.equal(doc.setup.waitingFor, 'policy');
+  // `--state` без привязки и политики — прежний отказ; документ настройки — только у --repository.
+  const refused = p.harness('view', '--state', missing);
+  assert.equal(refused.status, exitCodes.input);
+  assert.equal(refused.json.error.code, 'POLICY_REQUIRED');
   assert.equal(existsSync(missing), false);
 });
 
