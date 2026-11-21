@@ -2,11 +2,13 @@ import { RU, ruCount } from '../contracts/plural.ts';
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import {
+  appendFile,
   copyFile,
   lstat,
   mkdir,
   readdir,
   readFile,
+  realpath,
   rename,
   rm,
   stat,
@@ -14,7 +16,7 @@ import {
   utimes,
   writeFile,
 } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   digestOf,
@@ -39,6 +41,7 @@ import {
 } from '../toolchains/probe.ts';
 import { fileDigests, NotRegularFile } from './file-digests.ts';
 import { runCheck, type Boundary } from './gates.ts';
+import { importHostStore, inside, lockIntegrities, type HostImport } from './host-store.ts';
 import { seedRegistryHosts } from './store-registry.ts';
 
 /**
@@ -72,6 +75,10 @@ import { seedRegistryHosts } from './store-registry.ts';
  *   дерева seed. Несовпадение — отказ от seed с причиной в квитанции.
  * - Байты, докачанные менеджером при частичном попадании, защищены не seed, а
  *   lockfile: в дереве кандидата они доверены не больше, чем `node_modules`.
+ * - Пакеты, уже лежащие в store менеджера хоста, сборка импортирует до сети
+ *   (`host-store.ts`): только integrity принятого lockfile, байты копии сверены
+ *   с индексом, store хоста только читается. Индексу хоста доверено столько же,
+ *   сколько собственной установке оператора.
  *
  * Условие границы: шаги `prepare` и `lifecycle` идут на хосте вне песочницы, а на
  * integration — над слитым деревом. Если они исполняют код кандидата (скрипт из
@@ -107,8 +114,37 @@ interface Manager {
   permanent: RegExp;
   /** Окружение сборки: конфигурация и кэш хоста в seed не попадают. */
   buildEnv(work: string): NodeJS.ProcessEnv;
+  /**
+   * Сеть сборки: повторы и пределы запросов реестра, пока окружение политики
+   * не задало их само (alpha.64). Медленный реестр не обрывает сборку на
+   * тысячном пакете.
+   */
+  networkEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
+  /** Путь store менеджера на хосте (`pnpm store path`): источник импорта. */
+  storePath: string[];
+  /** Сколько пакетов скачал менеджер: по выводу сборки. */
+  downloaded(output: string): number | undefined;
   buildFiles: Record<string, string>;
 }
+
+/**
+ * Настройки сети сборки seed по умолчанию. Окружение политики, задавшее
+ * настройку под любым префиксом, сильнее.
+ *
+ * `minimum-release-age: 0`: pnpm 11 проверяет возраст выпусков lockfile по
+ * метаданным реестра — тысяча запросов, которые не меняют ни байта store.
+ * Seed lockfile не принимает: правила проекта применяет установка в checkout
+ * с его конфигурацией. `prefer-offline`: метаданные из кэша, если они есть.
+ */
+const SEED_NETWORK: Record<string, string> = {
+  fetch_retries: '5',
+  fetch_retry_mintimeout: '10000',
+  fetch_retry_maxtimeout: '60000',
+  fetch_timeout: '180000',
+  network_concurrency: '8',
+  prefer_offline: 'true',
+  minimum_release_age: '0',
+};
 
 const managers: Record<DependencyStorePolicy['manager'], Manager> = {
   pnpm: {
@@ -143,6 +179,21 @@ const managers: Record<DependencyStorePolicy['manager'], Manager> = {
       pnpm_config_cache_dir: join(work, 'cache'),
       pnpm_config_state_dir: join(work, 'state'),
     }),
+    networkEnv(env) {
+      const set = new Set(Object.keys(env).map((k) => k.toLowerCase()));
+      const out: NodeJS.ProcessEnv = {};
+      for (const [name, value] of Object.entries(SEED_NETWORK)) {
+        const keys = ['npm_config_' + name, 'pnpm_config_' + name];
+        if (keys.some((k) => set.has(k))) continue;
+        for (const k of keys) out[k] = value;
+      }
+      return out;
+    },
+    storePath: ['pnpm', 'store', 'path'],
+    downloaded(output) {
+      const all = [...output.matchAll(/\bdownloaded (\d+)/g)];
+      return all.length ? Number(all.at(-1)![1]) : undefined;
+    },
     buildFiles: { 'package.json': '{}\n', npmrc: '' },
   },
 };
@@ -156,6 +207,22 @@ const CLONE_CONCURRENCY = 8;
 const CLONE_BATCH_DEPTH = 3;
 /** После отказа сборки: отказавший реестр не отнимает предел у каждой попытки. */
 const FAILED_BUILD_COOLDOWN_MS = 10 * 60 * 1000;
+/**
+ * Явный `harness smoke`/`gates` повторяет сборку, упавшую из-за сети, не ждя
+ * срока пометки: только если пометке не меньше этого и только раз за процесс —
+ * шаги одной команды не повторяют сборку друг за другом.
+ */
+const EXPLICIT_RETRY_AFTER_MS = 10 * 1000;
+/** Пауза перед повтором сборки после обрыва сети по времени (TimeoutError). */
+const SEED_RETRY_BACKOFF_MS = 5000;
+/** Отказ сборки из-за сети реестра: повторится с другой сетью, а не на том же lockfile. */
+const NETWORK_FAILURE =
+  /ERR_PNPM_(?:FETCH_\d+|META_FETCH_FAIL|TARBALL_\w+|UNEXPECTED_STORE)|TimeoutError|ETIMEDOUT|ESOCKETTIMEDOUT|ERR_SOCKET_TIMEOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|socket hang up|aborted due to timeout/;
+/** Из сетевых — обрыв по времени: его сборка повторяет сама, один раз. */
+const NETWORK_TIMEOUT =
+  /TimeoutError|ETIMEDOUT|ESOCKETTIMEDOUT|ERR_SOCKET_TIMEOUT|ECONNRESET|socket hang up|aborted due to timeout/;
+/** Сборки, уже повторённые явной командой в этом процессе. */
+const explicitRetries = new Set<string>();
 /** Запас свободного места поверх размера seed при обычном копировании. */
 const COPY_HEADROOM = 1.1;
 /**
@@ -196,6 +263,29 @@ export interface StoreContext {
   deadline: number;
   /** Полная длина этого предела фазы: так видно, что фаза пришла с остатком. */
   phaseMs: number;
+  /**
+   * Явная команда оператора (`harness smoke`, `harness gates`): сборку seed,
+   * недавно упавшую из-за сети, она повторяет сразу, а не по сроку пометки.
+   */
+  retryNetworkFailure?: boolean;
+}
+
+/** Откуда пришли пакеты собранного seed (alpha.64). */
+export interface SeedSources {
+  /** Пакетов lockfile с integrity. */
+  packages: number;
+  /** Импортировано из store хоста. */
+  host: number;
+  /** Уже было в основе — прежнем seed. */
+  base: number;
+  /** Скачано менеджером из сети (по его выводу). */
+  network?: number;
+  /** Store хоста, из которого шёл импорт. */
+  hostStore?: string;
+  /** Почему импорта с хоста не было или он неполный. */
+  hostReason?: string;
+  /** Повторов сборки после обрыва сети. */
+  retries?: number;
 }
 
 export interface StoreReceipt {
@@ -218,6 +308,8 @@ export interface StoreReceipt {
   ref?: string;
   /** Seeds, от которых отказались: причина отказа. */
   refused?: string[];
+  /** Источники пакетов seed, собранного этим вызовом. */
+  sources?: SeedSources;
   /** Переменные окружения процессов этого checkout. */
   env: NodeJS.ProcessEnv;
 }
@@ -261,11 +353,28 @@ interface Store {
   fullBudgetMs: number;
   logDir: string;
   identity: Identity;
-  receipt: Pick<StoreReceipt, 'refused' | 'built' | 'ref'> & {
+  /** Эта сборка повторяет недавний сетевой отказ по явной команде. */
+  retrying?: boolean;
+  receipt: Pick<StoreReceipt, 'refused' | 'built' | 'ref' | 'sources'> & {
     reason?: string;
     /** Хранилище не влезло бы в сверку защищённых путей: дерево и окружение не трогать. */
     untouched?: boolean;
   };
+}
+
+/**
+ * Откуда пришли пакеты seed, собранного этим вызовом, — для строки шага:
+ * ` (seed собран: из store хоста 1103 из 1246, из сети 8)`. Не собран — пусто.
+ */
+export function seedSourcesText(receipt: Pick<StoreReceipt, 'built' | 'sources'>) {
+  const s = receipt.sources;
+  if (!receipt.built || !s) return '';
+  const parts = [`из store хоста ${s.host} из ${s.packages}`];
+  if (s.base) parts.push(`из прежнего seed ${s.base}`);
+  if (s.network !== undefined) parts.push(`из сети ${s.network}`);
+  if (s.retries) parts.push('повтор после обрыва сети');
+  if (s.hostReason) parts.push('импорт: ' + s.hostReason.slice(0, 200));
+  return ` (seed собран: ${parts.join(', ')})`;
 }
 
 /** Каталог seeds: том рабочих деревьев и уже закрытое песочницей место. */
@@ -401,6 +510,22 @@ export const storeTree = {
   minBuildMs: 30000,
   /** Запуск сборки; тест подменяет его: исход гонки с отменой иначе не воспроизвести. */
   run: runCheck,
+  /** Пауза перед повтором сборки после обрыва сети; тест укорачивает её. */
+  retryBackoffMs: SEED_RETRY_BACKOFF_MS,
+  /** Импорт пакетов из store хоста (`host-store.ts`); тест подменяет его, чтобы проверить отказ. */
+  importHost: importHostStore,
+  /**
+   * Вывод `pnpm store path` в checkout репозитория (на хосте, как проба версий);
+   * отказ — исключение с причиной.
+   */
+  async hostStorePath(argv: string[], cwd: string, env: NodeJS.ProcessEnv) {
+    const done = await command(argv, cwd, { env, timeoutMs: IDENTITY_PROBE_MS });
+    if (done.code || done.timedOut)
+      throw new Error(
+        `код ${done.code}${done.timedOut ? ', предел времени' : ''}: ${(done.stderr || done.stdout).trim().slice(-300)}`,
+      );
+    return done.stdout;
+  },
   /** Запись `.gitignore` хранилища; тест подменяет её, чтобы проверить отказ. */
   ignore: (dest: string) => writeFile(join(dest, '.gitignore'), '*\n'),
   /**
@@ -663,6 +788,8 @@ interface FailedBuild {
   maxBytes?: number;
   /** Хранилище не влезло бы в сверку защищённых путей: дерево и окружение не трогать. */
   untouched?: boolean;
+  /** Отказ из-за сети реестра: явная команда повторяет сборку сразу. */
+  network?: boolean;
 }
 
 /** Действующая пометка отказа; нечитаемая равна её отсутствию и будет заменена. */
@@ -680,15 +807,52 @@ async function failedBuild(s: Store, key: string) {
   if (mark.maxBytes !== undefined && mark.maxBytes !== s.spec.maxBytes) return undefined;
   if (mark.permanent) return mark;
   const st = await stat(path).catch(() => undefined);
-  return st && Date.now() - st.mtimeMs < FAILED_BUILD_COOLDOWN_MS ? mark : undefined;
+  if (!st || Date.now() - st.mtimeMs >= FAILED_BUILD_COOLDOWN_MS) return undefined;
+  if (s.retrying) return undefined;
+  // Сеть могла вернуться: явная команда оператора не ждёт срока пометки.
+  const id = s.root + '\0' + key;
+  if (
+    mark.network &&
+    s.ctx.retryNetworkFailure &&
+    !explicitRetries.has(id) &&
+    Date.now() - st.mtimeMs >= EXPLICIT_RETRY_AFTER_MS
+  ) {
+    explicitRetries.add(id);
+    s.retrying = true;
+    return undefined;
+  }
+  return mark;
 }
 
 const failedReason = (mark: FailedBuild) =>
   (mark.permanent ? 'сборка этого lockfile невозможна: ' : 'недавняя сборка не удалась: ') +
   mark.reason;
 
+/** Вывод менеджера для причины: без стека JavaScript, последние строки. */
+const outputTail = (text: string) =>
+  text
+    .split('\n')
+    .filter((line) => !/^\s+at\s/.test(line))
+    .join('\n')
+    .trim()
+    .slice(-500);
+
+/** Простыми словами: отказ сети реестра и что будет дальше. */
+const networkHint = (output: string) => {
+  const what =
+    /TimeoutError|aborted due to timeout|ETIMEDOUT|ESOCKETTIMEDOUT|ERR_SOCKET_TIMEOUT/.test(output)
+      ? 'истёк предел запроса'
+      : /ERR_PNPM_FETCH_(\d+)/.exec(output)?.[1]
+        ? `ответ ${/ERR_PNPM_FETCH_(\d+)/.exec(output)![1]}`
+        : 'соединение не удалось';
+  return `сеть реестра npm (${what}), а не lockfile; следующий harness smoke или harness gates повторит сборку сразу, попытки run — не раньше чем через ${FAILED_BUILD_COOLDOWN_MS / 60000} мин`;
+};
+
 /** Запись через переименование: обрыв не оставляет половину пометки. */
 async function markFailed(s: Store, key: string, mark: FailedBuild) {
+  // Явная команда уже собирала этот seed в этом процессе: её следующие шаги
+  // (например, второй проход --writer-probe) сетевой отказ не повторяют.
+  if (mark.network && s.ctx.retryNetworkFailure) explicitRetries.add(s.root + '\0' + key);
   s.receipt.reason = mark.reason;
   if (mark.untouched) s.receipt.untouched = true;
   const dir = join(s.root, 'failed');
@@ -702,16 +866,118 @@ const remaining = (s: Store) => s.budgetEnds - Date.now();
 /** Пол не выше полного бюджета, иначе малый `timeoutMs` не дал бы собрать seed никогда. */
 const buildFloor = (s: Store) => Math.min(storeTree.minBuildMs, s.fullBudgetMs * FULL_BUDGET_SHARE);
 
-/** Один проход сборки в каталоге `work`; итог — дерево с отпечатком или причина отказа. */
-async function fetchInto(s: Store, work: string, lock: string, settings: string, base?: Seed) {
+/**
+ * Store менеджера на хосте: `pnpm store path` в checkout репозитория — с его
+ * конфигурацией, но без `store-dir` из окружения политики (оно может вести в
+ * хранилище checkout, которое писал кандидат). Store под каталогом seeds,
+ * рабочих деревьев или скрытых путей, кроме самого репозитория, не годится:
+ * туда мог писать код кандидата. Ответ — путь или причина.
+ */
+async function hostStore(s: Store): Promise<{ path: string } | { reason: string }> {
+  const env = Object.fromEntries(
+    Object.entries(s.execution.env).filter(([k]) => !/^(?:npm|pnpm)_config_store_dir$/i.test(k)),
+  );
+  const repo = s.ctx.repoPath(s.repo);
+  const probe = await storeTree
+    .hostStorePath(s.manager.storePath, repo, {
+      ...env,
+      npm_config_ignore_pnpmfile: 'true',
+      pnpm_config_ignore_pnpmfile: 'true',
+    })
+    .then(
+      (stdout) => ({ stdout }),
+      (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }),
+    );
+  if ('error' in probe) return { reason: `${s.manager.storePath.join(' ')}: ${probe.error}` };
+  const path = probe.stdout.trim().split('\n').at(-1)?.trim() ?? '';
+  if (!path.startsWith('/'))
+    return { reason: `${s.manager.storePath.join(' ')}: не путь: ${path}` };
+  const major = versionOf(s.identity.version)?.split('.')[0];
+  if (!/^v\d+$/.test(basename(path)) || basename(path) !== 'v' + major)
+    return {
+      reason: `store хоста ${path} другого формата, чем ${s.identity.manager} ${s.identity.version}`,
+    };
+  const st = await stat(path).catch(() => undefined);
+  if (!st?.isDirectory()) return { reason: `store хоста ${path} нет` };
+  // Сравниваются настоящие пути: `/var` и `/private/var`, корни через ссылку.
+  const real = async (p: string) => realpath(p).catch(() => resolve(p));
+  const hostReal = await real(path);
+  const repoReal = await real(repo);
+  const forbidden = [s.root, ...(s.ctx.boundary.checkouts ?? []), ...s.ctx.boundary.hidden];
+  for (const f of forbidden) {
+    const at = await real(f);
+    if (f !== s.root && at === repoReal) continue;
+    if (inside(hostReal, at) || inside(at, hostReal))
+      return { reason: `store хоста ${path} пересекается с ${f}: его мог писать кандидат` };
+  }
+  return { path: hostReal };
+}
+
+/** Пакеты lockfile из store хоста в сборочный store; отказ — только причина в источниках. */
+async function fromHost(
+  s: Store,
+  store: string,
+  lock: string,
+  scratch: string,
+): Promise<{ imported?: HostImport; hostStore?: string; hostReason?: string }> {
+  const found = await hostStore(s);
+  if ('reason' in found) return { hostReason: found.reason };
+  try {
+    const imported: HostImport = await storeTree.importHost({
+      host: found.path,
+      store,
+      lock,
+      scratch,
+      signal: s.signal,
+    });
+    return {
+      hostStore: found.path,
+      imported,
+      ...(imported.rejected ? { hostReason: 'не сверены: ' + imported.rejected.join('; ') } : {}),
+    };
+  } catch (error) {
+    if (s.signal.aborted) throw error;
+    return {
+      hostStore: found.path,
+      hostReason: 'импорт не удался: ' + (error instanceof Error ? error.message : String(error)),
+    };
+  }
+}
+
+/**
+ * Один проход сборки в каталоге `work`; итог — дерево с отпечатком или причина отказа.
+ * `resume` — повтор после обрыва сети: store и скачанное остаются, качается остаток.
+ */
+async function fetchInto(
+  s: Store,
+  work: string,
+  lock: string,
+  settings: string,
+  base?: Seed,
+  resume = false,
+) {
   const project = join(work, 'project');
   const store = join(work, 'store');
-  await removeTree(work);
-  await mkdir(project, { recursive: true });
-  await writeFile(join(project, s.spec.lockfile.split('/').at(-1)!), lock + '\n');
-  for (const [name, text] of Object.entries(s.manager.buildFiles))
-    await writeFile(join(name === 'package.json' ? project : work, name), text);
-  if (base) await place(base, store, s.outer);
+  if (!resume) {
+    await removeTree(work);
+    await mkdir(project, { recursive: true });
+    await writeFile(join(project, s.spec.lockfile.split('/').at(-1)!), lock + '\n');
+    for (const [name, text] of Object.entries(s.manager.buildFiles))
+      await writeFile(join(name === 'package.json' ? project : work, name), text);
+    if (base) await place(base, store, s.outer);
+    // Пакеты, которые уже есть на машине, не качаются: копия со сверкой байтов.
+    const host = await fromHost(s, store, lock, join(work, 'host-index'));
+    // Повтор после обрыва уже был (до отказа основы): счёт и бюджет повторов сохраняются.
+    const retries = s.receipt.sources?.retries;
+    s.receipt.sources = {
+      ...(retries ? { retries } : {}),
+      packages: host.imported?.packages ?? lockIntegrities(lock).length,
+      host: host.imported?.host ?? 0,
+      base: host.imported?.present ?? 0,
+      ...(host.hostStore ? { hostStore: host.hostStore } : {}),
+      ...(host.hostReason ? { hostReason: host.hostReason } : {}),
+    };
+  }
   const { isolation } = s.ctx.policy;
   const domains = [...new Set([...isolation.domains, ...seedRegistryHosts(s.execution.env, lock)])];
   const result = await storeTree.run(
@@ -719,7 +985,11 @@ async function fetchInto(s: Store, work: string, lock: string, settings: string,
     {
       argv: s.manager.fetch(store),
       cwd: project,
-      env: { ...s.execution.env, ...s.manager.buildEnv(work) },
+      env: {
+        ...s.execution.env,
+        ...s.manager.networkEnv(s.execution.env),
+        ...s.manager.buildEnv(work),
+      },
       redact: s.execution.redact,
       signal: s.signal,
       timeoutMs: s.budgetMs,
@@ -731,17 +1001,27 @@ async function fetchInto(s: Store, work: string, lock: string, settings: string,
     },
   );
   await mkdir(s.logDir, { recursive: true });
-  await writeFile(
+  const log = s.execution.redact(result.stdout + '\n' + result.stderr);
+  // Повтор дописывает журнал: обрыв первого прохода остаётся виден.
+  await (resume ? appendFile : writeFile)(
     join(s.logDir, 'dependency-store.log'),
-    s.execution.redact(result.stdout + '\n' + result.stderr),
+    resume ? '\n--- повтор сборки после обрыва сети ---\n' + log : log,
   );
+  const downloaded = s.manager.downloaded(result.stdout + '\n' + result.stderr);
+  if (downloaded !== undefined && s.receipt.sources)
+    s.receipt.sources.network = (s.receipt.sources.network ?? 0) + downloaded;
   // Прерванный менеджер мог выйти и без кода ошибки: его store не итог сборки, а
   // пустой store иначе выглядел бы неизбежным отказом самого lockfile.
   if (result.code || result.timedOut || s.signal.aborted) {
-    const output = s.execution.redact(result.stderr || result.stdout).trim();
+    const raw = result.stdout + '\n' + result.stderr;
+    const output = outputTail(s.execution.redact(result.stderr || result.stdout));
+    const permanent = !result.timedOut && s.manager.permanent.test(raw);
+    const network =
+      !permanent && !result.timedOut && !s.signal.aborted && NETWORK_FAILURE.test(raw);
     throw new BuildFailed(
-      `сборка seed: код ${result.code}${result.timedOut ? ', предел времени' : ''}: ${output.slice(-500)}`,
-      !result.timedOut && s.manager.permanent.test(result.stdout + result.stderr),
+      `сборка seed: ${network ? networkHint(raw) + ': ' : ''}код ${result.code}${result.timedOut ? ', предел времени' : ''}: ${output}`,
+      permanent,
+      network ? { network: true, timeout: NETWORK_TIMEOUT.test(raw) } : {},
     );
   }
   try {
@@ -782,7 +1062,10 @@ class BuildFailed extends Error {
   constructor(
     message: string,
     readonly permanent: boolean,
-    readonly detail: Pick<FailedBuild, 'maxBytes' | 'untouched'> = {},
+    readonly detail: Pick<FailedBuild, 'maxBytes' | 'untouched' | 'network'> & {
+      /** Обрыв сети по времени: сборка повторяется сама, один раз. */
+      timeout?: boolean;
+    } = {},
   ) {
     super(message);
   }
@@ -798,10 +1081,26 @@ async function buildSeed(s: Store, key: string, lock: string, lockSha256: string
     // Основа — свежий seed той же среды: сдвиг lockfile докачивает только разницу.
     let base = await newestSeed(s);
     let built: Awaited<ReturnType<typeof fetchInto>> | undefined;
+    let resume = false;
     for (;;) {
       try {
-        built = await fetchInto(s, work, lock, join(tmp, 'settings'), base);
+        built = await fetchInto(s, work, lock, join(tmp, 'settings'), base, resume);
+        resume = false;
       } catch (error) {
+        // Обрыв сети по времени — один повтор той же сборки после паузы: скачанное
+        // остаётся в store, менеджер докачивает остаток.
+        if (
+          error instanceof BuildFailed &&
+          error.detail.timeout &&
+          !s.receipt.sources?.retries &&
+          remaining(s) - storeTree.retryBackoffMs >= buildFloor(s)
+        ) {
+          s.receipt.sources = { packages: 0, host: 0, base: 0, ...s.receipt.sources, retries: 1 };
+          await delay(storeTree.retryBackoffMs, undefined, { signal: s.signal });
+          resume = true;
+          continue;
+        }
+        resume = false;
         if (!base) throw error;
         if (error instanceof SeedRefused) await refuse(s, base.key, error.message);
         // Приговор lockfile выносит только сборка без основы.
@@ -871,7 +1170,9 @@ async function buildSeed(s: Store, key: string, lock: string, lockSha256: string
       await markFailed(s, key, {
         reason,
         permanent: known?.permanent ?? false,
-        ...known?.detail,
+        ...(known?.detail.maxBytes !== undefined ? { maxBytes: known.detail.maxBytes } : {}),
+        ...(known?.detail.untouched ? { untouched: true } : {}),
+        ...(known?.detail.network ? { network: true } : {}),
       });
     return undefined;
   } finally {

@@ -1,7 +1,9 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import {
   API_VERSION,
+  codeReview,
   HarnessError,
   STATE_VERSION,
   inputPolicyOf,
@@ -13,6 +15,7 @@ import {
   type Author,
   type ExecutionPolicy,
   type RuntimeAdapter,
+  type RuntimeBinding,
   type RuntimeName,
 } from '../contracts/index.ts';
 import { credentialPaths, isolationSupport } from '../environment/isolation.ts';
@@ -229,6 +232,8 @@ export async function doctor(
       ? [`browser-checks ${r.id} (${browser.join(', ')}): ${BROWSER_ADVICE}`]
       : [];
   });
+  const models = policy ? policyModels(policy) : [];
+  if (policy) warnings.push(...codexModelWarnings(models));
   return {
     harness: HARNESS_VERSION,
     apiVersion: API_VERSION,
@@ -244,6 +249,8 @@ export async function doctor(
     problems,
     ...(notes.length ? { notes } : {}),
     ...(policy ? { questions: questionRule(policy) } : {}),
+    // Модель и effort каждого назначения: кто пишет и кто ревьюит, чем.
+    ...(policy ? { models } : {}),
     // Предупреждения не делают среду негодной: порт только на wildcard, ревью
     // тем же вендором, пределы шагов фазы больше `runTimeoutMs`
     // (`timeBudgetWarnings`, худший случай) и советы о ресурсах машины
@@ -311,4 +318,111 @@ function questionRule(policy: ExecutionPolicy) {
     line: rule.ru,
     lineEn: rule.en,
   };
+}
+
+/** Назначение политики: кто (writer роли, reviewer вида ревью), каким runtime, моделью и effort. */
+export interface PolicyModel {
+  /** `writer <роль>`, `code-review <роль>`, `plan-review`, `contract-review`; репозиторий — в скобках. */
+  use: string;
+  runtime: RuntimeName;
+  /** Нет — модель runtime по умолчанию. */
+  model?: string;
+  effort?: RuntimeBinding['effort'];
+}
+
+/**
+ * Модель и effort по ролям политики: writer каждой роли (и переопределения
+ * репозитория), reviewer кода роли, планов и контрактов, с запасными. Без
+ * модели — runtime выберет свою по умолчанию.
+ */
+export function policyModels(policy: ExecutionPolicy): PolicyModel[] {
+  const out: PolicyModel[] = [];
+  const add = (use: string, b: RuntimeBinding) =>
+    out.push({
+      use,
+      runtime: b.runtime,
+      ...(b.model ? { model: b.model } : {}),
+      ...(b.effort ? { effort: b.effort } : {}),
+    });
+  const rule = (use: string, r: { reviewer: RuntimeBinding; alternates?: RuntimeBinding[] }) => {
+    add(use, r.reviewer);
+    for (const [i, a] of (r.alternates ?? []).entries()) add(`${use} (запасной ${i + 1})`, a);
+  };
+  for (const [role, b] of Object.entries(policy.roles)) {
+    add(`writer ${role}`, b.writer);
+    rule(`code-review ${role}`, codeReview(policy, role));
+  }
+  for (const repo of policy.repositories) {
+    for (const [role, b] of Object.entries(repo.roles ?? {})) {
+      add(`writer ${role} (${repo.id})`, b.writer);
+      rule(`code-review ${role} (${repo.id})`, codeReview(policy, role, repo.id));
+    }
+    // Ревью кода репозитория меняет reviewer и для ролей политики в нём.
+    if (repo.review)
+      for (const role of Object.keys(policy.roles))
+        if (!repo.roles?.[role])
+          rule(`code-review ${role} (${repo.id})`, codeReview(policy, role, repo.id));
+  }
+  rule('plan-review', policy.review.plan);
+  rule('contract-review', policy.review.contract);
+  return out;
+}
+
+/**
+ * Модели Codex, которых нет в кэше моделей Codex (`$CODEX_HOME/models_cache.json`,
+ * по умолчанию `~/.codex`): с учётной записью ChatGPT такая модель отклоняется
+ * сразу («model is not supported…»). Нет файла или он не читается — проверки нет.
+ * Предупреждение, не проблема: кэш мог устареть.
+ */
+export function codexModelWarnings(
+  models: PolicyModel[],
+  file = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'models_cache.json'),
+) {
+  const codex = models.filter((m) => m.runtime === 'codex' && m.model);
+  if (!codex.length || !existsSync(file)) return [];
+  let known: Map<string, string[] | undefined>;
+  try {
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as {
+      models?: { slug?: unknown; supported_reasoning_levels?: { effort?: unknown }[] }[];
+    };
+    if (!Array.isArray(raw.models)) return [];
+    known = new Map(
+      raw.models.flatMap((m) =>
+        typeof m.slug === 'string'
+          ? [
+              [
+                m.slug,
+                Array.isArray(m.supported_reasoning_levels)
+                  ? m.supported_reasoning_levels.flatMap((l) =>
+                      typeof l.effort === 'string' ? [l.effort] : [],
+                    )
+                  : undefined,
+              ] as const,
+            ]
+          : [],
+      ),
+    );
+  } catch {
+    return [];
+  }
+  const warnings: string[] = [];
+  const unknown = new Map<string, string[]>();
+  const efforts = new Map<string, string[]>();
+  for (const m of codex) {
+    const levels = known.get(m.model!);
+    if (!known.has(m.model!)) unknown.set(m.model!, [...(unknown.get(m.model!) ?? []), m.use]);
+    else if (m.effort && levels && !levels.includes(m.effort)) {
+      const key = `${m.model} effort ${m.effort}`;
+      efforts.set(key, [...(efforts.get(key) ?? []), m.use]);
+    }
+  }
+  for (const [model, uses] of unknown)
+    warnings.push(
+      `codex-model-unknown: модели ${model} (${uses.join(', ')}) нет среди моделей Codex в ${file} (${[...known.keys()].join(', ')}); Codex с учётной записью ChatGPT отклонит её сразу («model is not supported») — проверьте имя модели в политике`,
+    );
+  for (const [what, uses] of efforts)
+    warnings.push(
+      `codex-effort-unknown: ${what} (${uses.join(', ')}) не входит в уровни этой модели по ${file}`,
+    );
+  return warnings;
 }
