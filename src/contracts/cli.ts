@@ -1410,7 +1410,14 @@ export const cliCommands = {
         value: 'flag',
         required: false,
         description:
-          'После prepare прогнать команды writerProbe репозитория в изоляции каждого его исполнителя (окружение, TMPDIR, сеть, области записи; codex sandbox или sandbox-runtime), без модели: по каждой ok/blocked, причина и совет; закрытый шаг или пустой writerProbe — exit 4',
+          'После prepare прогнать команды writerProbe репозитория в изоляции каждого его исполнителя (окружение, TMPDIR, сеть, области записи; codex sandbox или sandbox-runtime), без модели: по каждой ok/blocked/outside, причина и совет; шаг, закрытый только локальным портом, проба сама повторяет под network: loopback; проверка в браузере, которую песочница не запускает, — outside (ожидаемо, не помеха); закрытый шаг или пустой writerProbe — exit 4',
+      },
+      {
+        name: '--apply-loopback',
+        value: 'flag',
+        required: false,
+        description:
+          'С --writer-probe и --policy: если сеть loopback (127.0.0.1 и ::1, без интернета) открывает закрытые локальным портом шаги, записать network: "loopback" в профиль инструментов исполнителя (нет профиля — новый writer-loopback), приложить запись с причиной и повторить пробу; больше ничего в политике не меняется. Техническое решение ведущего',
       },
     ],
     refusals: ['CANCELLED', 'NOT_FOUND'],
@@ -2084,6 +2091,12 @@ export const doctorDataSchema = z.strictObject({
     .optional(),
   problems: z.array(z.string()),
   /**
+   * Ожидаемые состояния простыми словами — не проблема и не предупреждение:
+   * `browser-checks <repo> (<шаги>)` — проверки в браузере среди writerProbe,
+   * песочница исполнителя их не запускает.
+   */
+  notes: z.array(z.string()).optional(),
+  /**
    * Действующее правило ответов на вопросы исполнителя (есть, когда задана
    * политика): технические решает ведущий (`inputPolicy.leadAnswers.technical`),
    * порог ответов ведущего (`maxSeverity`), правило простыми словами.
@@ -2159,6 +2172,37 @@ export const gatesDataSchema = z.strictObject({
 });
 
 /** Ответ `smoke`: шаги окружения на коммите без gates, их длительность и класс отказа. */
+
+const writerProbeReasonSchema = z.enum([
+  'listen-denied',
+  'network-denied',
+  'network-open',
+  'write-denied',
+  'process-abort',
+  'missing-tool',
+  'timeout',
+  'no-shell',
+  'environment',
+  'failed',
+]);
+
+/**
+ * Исход команды пробы исполнителя: `outside` — проверка в браузере, которую
+ * песочница исполнителя не запускает (ожидаемо, не помеха пробе).
+ */
+const writerProbeCommandSchema = z.strictObject({
+  id: z.string().min(1).max(200),
+  command: z.array(z.string()),
+  status: z.enum(['ok', 'blocked', 'failed', 'outside']),
+  exitCode: z.number().int().optional(),
+  timedOut: z.boolean().optional(),
+  durationMs: z.number().int().nonnegative(),
+  reason: writerProbeReasonSchema.optional(),
+  evidence: z.string().optional(),
+  advice: z.string().optional(),
+  log: z.string().optional(),
+});
+
 export const smokeDataSchema = z.strictObject({
   /** ID проверки (`DEVCONTOUR_RUN_ID` шагов, каталог логов). */
   id: z.string().min(1).max(200),
@@ -2223,36 +2267,47 @@ export const smokeDataSchema = z.strictObject({
           network: z.boolean(),
           /** Режим сети исполнителя: `none`, `loopback` (127.0.0.1 и ::1), `full`; `legacy` — профиль без поля `network`. */
           networkMode: z.enum(['none', 'loopback', 'full', 'legacy']).optional(),
-          commands: z.array(
-            z.strictObject({
-              id: z.string().min(1).max(200),
-              command: z.array(z.string()),
-              status: z.enum(['ok', 'blocked', 'failed']),
-              exitCode: z.number().int().optional(),
-              timedOut: z.boolean().optional(),
-              durationMs: z.number().int().nonnegative(),
-              reason: z
-                .enum([
-                  'listen-denied',
-                  'network-denied',
-                  'network-open',
-                  'write-denied',
-                  'process-abort',
-                  'missing-tool',
-                  'timeout',
-                  'no-shell',
-                  'environment',
-                  'failed',
-                ])
-                .optional(),
-              evidence: z.string().optional(),
-              advice: z.string().optional(),
-              log: z.string().optional(),
-            }),
-          ),
+          commands: z.array(writerProbeCommandSchema),
+          /**
+           * Повтор пробы под `network: loopback`: шаги закрыты только
+           * локальным портом, а сеть исполнителя закрыта и для него.
+           */
+          loopback: z
+            .strictObject({
+              status: z.enum(['resolves', 'not-enough', 'unavailable']),
+              steps: z.array(z.string()),
+              reason: z.string(),
+              decision: z.literal('lead'),
+              change: z.strictObject({
+                toolProfile: z.string(),
+                created: z.boolean(),
+                roles: z.array(z.string()),
+              }),
+              commands: z.array(writerProbeCommandSchema),
+            })
+            .optional(),
         }),
       ),
       notes: z.array(z.string()).optional(),
+      /** Команда, которая применяет найденную сеть loopback и повторяет пробу. */
+      loopbackCommand: z.string().optional(),
+      /** Сеть loopback применена (`--apply-loopback`): запись с причиной. */
+      loopbackApplied: z
+        .strictObject({
+          policy: z.string(),
+          at: z.string(),
+          reason: z.string(),
+          changes: z.array(
+            z.strictObject({
+              runtime: runtimeNameSchema,
+              toolProfile: z.string(),
+              created: z.boolean(),
+              roles: z.array(z.string()),
+            }),
+          ),
+          note: z.string(),
+        })
+        .optional(),
     })
     .optional(),
 });

@@ -355,10 +355,31 @@ reads from a tracker. Propose each as `repositories[].writerProbe`
 (`{ "id", "command": [argv], "timeoutMs" }`; a command that can run quickly,
 for example `--help` of the generator or a server start that exits) and run
 `$H smoke --state <manifest.paths.state> --policy .harness/policy.json --sha HEAD --writer-probe --human` before the first paid attempt.
-For every `blocked` command give the user the advice and the choice: allow
-it in the policy, run it in `prepare`, move it into a harness gate, or waive
-the product rule under the harness (controller-mode overlay). Never debug
-these conflicts through paid attempts.
+Never debug these conflicts through paid attempts. Two results are not
+forks — decide them yourself and report them:
+
+- **Local server or port** (`listen-denied`, or EPERM without a path from a
+  Rust bundler): the probe re-runs the steps under `network: loopback`
+  itself (127.0.0.1/::1 only, no internet). When `writers[].loopback.status`
+  is `resolves`, run the one command it prints (`data.writerProbe.loopbackCommand`,
+  `… --writer-probe --apply-loopback`) without asking: it writes
+  `"network": "loopback"` into the writer's tool profile, records the reason
+  (`loopbackApplied`) and re-probes. It is a technical lead decision; internet,
+  write areas and OS isolation stay as they are. Report it in the setup
+  summary. `not-enough` or `unavailable` — treat those steps as blocked
+  (below).
+- **Browser checks** (`agent-browser`, headless Chrome, Playwright with a
+  browser, `verify:browser`): status `outside`, and `doctor` lists them in
+  `notes` as `browser-checks`. The writer's sandbox does not start a browser;
+  this is expected and needs no decision. Make such a check a harness gate
+  only if it passes on HEAD under harness (`$H gates --sha HEAD`); otherwise
+  leave it to the human. Tell the user in one plain line.
+
+For every remaining `blocked` command (internet, writes outside the write
+areas, missing tools) give the user the advice and the choice: run it in
+`prepare`, move it into a harness gate, allow it in the policy, or waive the
+product rule under the harness (controller-mode overlay). Do not open the
+writer's internet or switch OS isolation off to make the probe green.
 
 ### 9. Controller mode
 

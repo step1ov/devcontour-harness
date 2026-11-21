@@ -535,6 +535,8 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.leadSandbox;
       // Сверка Relay по связке задач (0.1.0-alpha.60).
       delete rest.relay;
+      // Ожидаемые состояния словами: проверки в браузере вне исполнителя (0.1.0-alpha.63).
+      delete rest.notes;
       return rest;
     }
     // Аддитивные поля ответов коннектора (0.1.0-alpha.60): совместимость с
@@ -691,6 +693,7 @@ test('H3-01: прежние команды и схемы их данных не 
   assert.ok(JSON.stringify(data.doctor).includes('"leadSandbox"'), 'doctor: песочница ведущего');
   assert.ok(JSON.stringify(data.doctor).includes('"ports"'), 'doctor: проба портов');
   assert.ok(JSON.stringify(data.doctor).includes('"warnings"'), 'doctor: предупреждения');
+  assert.ok(JSON.stringify(data.doctor).includes('"notes"'), 'doctor: ожидаемые состояния');
   // Хеш H2 выше вырезает поля ведущего и ревью: объявление держит эта проверка.
   for (const field of ['"lead"', '"review"', '"runtimes"', '"warnings"'])
     assert.ok(JSON.stringify(data.init).includes(field), 'init объявляет ' + field);

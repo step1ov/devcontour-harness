@@ -24,6 +24,7 @@ import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import type { ToolchainReport } from '../toolchains/inspect.ts';
 import { resourceWarnings } from './resource-advice.ts';
+import { BROWSER_ADVICE, isBrowserStep } from './browser-checks.ts';
 import { timeBudgetWarnings } from '../verification/time-budget.ts';
 
 /** Диагностика toolchain политики (см. `inspectPolicy` в `./toolchains`). */
@@ -220,6 +221,14 @@ export async function doctor(
         ),
       ].join(', ')}; независимость ниже, чем у ревью другим вендором`,
     );
+  // Проверки в браузере среди шагов пробы исполнителя — ожидаемое состояние,
+  // а не проблема: песочница исполнителя браузер не запускает.
+  const notes = (policy?.repositories ?? []).flatMap((r) => {
+    const browser = (r.writerProbe ?? []).filter(isBrowserStep).map((s) => s.id);
+    return browser.length
+      ? [`browser-checks ${r.id} (${browser.join(', ')}): ${BROWSER_ADVICE}`]
+      : [];
+  });
   return {
     harness: HARNESS_VERSION,
     apiVersion: API_VERSION,
@@ -233,6 +242,7 @@ export async function doctor(
     ...(ports.length ? { ports } : {}),
     ...(leadSandbox ? { leadSandbox } : {}),
     problems,
+    ...(notes.length ? { notes } : {}),
     ...(policy ? { questions: questionRule(policy) } : {}),
     // Предупреждения не делают среду негодной: порт только на wildcard, ревью
     // тем же вендором, пределы шагов фазы больше `runTimeoutMs`

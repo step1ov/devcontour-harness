@@ -420,6 +420,7 @@ const options = {
   gate: { type: 'string' },
   'fail-fast': { type: 'boolean' },
   'writer-probe': { type: 'boolean' },
+  'apply-loopback': { type: 'boolean' },
   'accept-limitation': { type: 'string', multiple: true },
   'continue-review': { type: 'string', multiple: true },
   watch: { type: 'boolean' },
@@ -498,6 +499,7 @@ const flagOwners = {
   gate: ['gates'],
   'fail-fast': ['gates'],
   'writer-probe': ['smoke'],
+  'apply-loopback': ['smoke'],
   watch: ['status'],
   interval: ['status'],
   base: ['review-code'],
@@ -1700,6 +1702,13 @@ async function run(
     }
     case 'smoke': {
       const state = need('state');
+      // Применение loopback пишет файл политики: нужны проба и сам файл.
+      if (v['apply-loopback'] && (!v['writer-probe'] || !v.policy))
+        throw new HarnessError(
+          'INVALID_INPUT',
+          '--apply-loopback записывает сеть loopback в файл политики по итогам пробы: укажите --writer-probe и --policy',
+          [{ path: ['--apply-loopback'], message: 'needs --writer-probe and --policy' }],
+        );
       const b = v.policy ? loadPolicy(v.policy) : binding(state);
       const abort = new AbortController();
       const stop = () => abort.abort(new Error('Проверка прервана сигналом'));
@@ -1717,6 +1726,8 @@ async function run(
           ...(v['writer-probe']
             ? {
                 writerProbe: true,
+                ...optional('policyPath', v.policy ? resolve(v.policy) : undefined),
+                ...(v['apply-loopback'] ? { applyLoopback: true } : {}),
                 executables: {
                   ...optional('codex', process.env.HARNESS_CODEX_BIN || undefined),
                   ...optional('claude', process.env.HARNESS_CLAUDE_BIN || undefined),

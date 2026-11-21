@@ -333,18 +333,27 @@ sandbox` with the writer's permission profile for Codex; harness's
 sandbox-runtime with the same policy for Claude, not Claude Code's built-in
 sandbox) — with no model call. A blocked probe almost surely blocks the
 writer; a pass is strong but not absolute evidence. `data.writerProbe`
-gives per command `ok`, `blocked` or `failed`, the `reason`
+gives per command `ok`, `blocked`, `failed` or `outside`, the `reason`
 (`listen-denied`, `network-denied`, `write-denied`, `process-abort`,
 `missing-tool`, `timeout`, `no-shell`, `environment`), the matching output
 line and plain `advice`; exit 4 when anything is blocked or no command was
-probed. Resolve every
+probed. `outside` is a browser check (`agent-browser`, headless Chrome,
+Playwright with a browser, `verify:browser`) the writer's sandbox does not
+start: expected, not a blocked step and not a question for anyone; make it a
+harness gate only if it passes on HEAD under harness, and `doctor` lists such
+steps in `notes` (`browser-checks`). Resolve every
 blocked step before `run`: enable it in the policy, prepare it in `prepare`,
 move it into a harness gate (gates run outside the writer sandbox and may
 listen on localhost), or record that the product rule is waived under the
 harness (controller-mode overlay). For a local server the writer must start
-itself (`listen-denied`), set `"network": "loopback"` on the writer's tool
-profile: listen and connect on 127.0.0.1/::1 only, no internet — do not turn
-on the full network (`codexNetwork: true`) for it. On Linux the server and
+itself (`listen-denied`, or EPERM without a path) the probe re-runs the steps
+under `"network": "loopback"` by itself; when `writers[].loopback.status` is
+`resolves`, run the printed `loopbackCommand` (`… --writer-probe
+--apply-loopback`) yourself — a technical lead decision, not an owner
+question: it writes the network into the writer's tool profile, records the
+reason in `loopbackApplied` and re-probes. Listen and connect on
+127.0.0.1/::1 only, no internet — do not turn on the full network
+(`codexNetwork: true`) for it. On Linux the server and
 its client must run in one shell command; Codex needs the `network_proxy`
 feature (the probe reports `environment` otherwise), and the probe's first
 line `harness-loopback-check` proves the boundary (`network-open` means this

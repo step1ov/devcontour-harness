@@ -34,6 +34,9 @@ import {
 import { executionEnvironment } from '../environment/lifecycle.ts';
 import { command } from '../environment/process.ts';
 import { writerScratch } from '../engine/writer-block.ts';
+import { BROWSER_ADVICE, isBrowserStep } from './browser-checks.ts';
+
+export { BROWSER_ADVICE, isBrowserStep };
 
 type Repo = ExecutionPolicy['repositories'][number];
 
@@ -53,8 +56,13 @@ export type WriterProbeReason =
 export interface WriterProbeCommand {
   id: string;
   command: string[];
-  /** `ok` — прошла; `blocked` — закрыта изоляцией исполнителя; `failed` — упала сама. */
-  status: 'ok' | 'blocked' | 'failed';
+  /**
+   * `ok` — прошла; `blocked` — закрыта изоляцией исполнителя; `failed` — упала
+   * сама; `outside` — проверка в браузере, которую песочница исполнителя не
+   * запускает: ожидаемо, не блокирует пробу и не требует решения (её место —
+   * gate harness, если она проходит на HEAD под harness).
+   */
+  status: 'ok' | 'blocked' | 'failed' | 'outside';
   exitCode?: number;
   timedOut?: boolean;
   durationMs: number;
@@ -85,21 +93,69 @@ export interface WriterProbeWriter {
    */
   networkMode: 'none' | 'loopback' | 'full' | 'legacy';
   commands: WriterProbeCommand[];
+  /**
+   * Шаги закрыты только локальным портом, а сеть исполнителя закрыта и для
+   * него: проба сама повторила команды под `network: loopback` (127.0.0.1 и
+   * ::1, без интернета) в той же изоляции. Есть, когда повтор выполнялся.
+   */
+  loopback?: WriterLoopbackTrial;
+}
+
+/** Профиль инструментов, который проба предлагает исполнителю без профиля. */
+export const LOOPBACK_PROFILE = 'writer-loopback';
+
+/** Повтор пробы под `network: loopback` (см. `WriterProbeWriter.loopback`). */
+export interface WriterLoopbackTrial {
+  /**
+   * `resolves` — закрытые локальным портом шаги проходят и ничего не
+   * сломалось: сеть loopback — умолчание, решение техническое (ведущий);
+   * `not-enough` — loopback их не открыл; `unavailable` — loopback
+   * недоступен (codex без `network_proxy`, граница loopback не держится).
+   */
+  status: 'resolves' | 'not-enough' | 'unavailable';
+  /** Шаги, закрытые только локальным портом (listen или EPERM без пути). */
+  steps: string[];
+  /** Причина простыми словами. */
+  reason: string;
+  /** Кто решает: техническое решение ведущего, не вопрос владельцу. */
+  decision: 'lead';
+  /** Изменение политики: профиль инструментов с `network: loopback` у этих ролей. */
+  change: { toolProfile: string; created: boolean; roles: string[] };
+  /** Исход команд под loopback (первая у codex — проверка границы). */
+  commands: WriterProbeCommand[];
+}
+
+/** Запись о применённой сети loopback (`smoke --writer-probe --apply-loopback`). */
+export interface WriterLoopbackReceipt {
+  policy: string;
+  at: string;
+  reason: string;
+  changes: { runtime: RuntimeName; toolProfile: string; created: boolean; roles: string[] }[];
+  /** Что меняется дальше: новый digest изоляции и ревью плана. */
+  note: string;
 }
 
 export interface WriterProbeResult {
-  /** Все команды всех исполнителей прошли. */
+  /** Все команды всех исполнителей прошли (проверки в браузере вне исполнителя — не помеха). */
   ok: boolean;
   writers: WriterProbeWriter[];
   /** Пояснение: команд нет, исполнители без shell и т. п. */
   notes?: string[];
+  /**
+   * Одна команда, которая применяет сеть loopback, найденную пробой, и
+   * повторяет пробу; техническое решение ведущего. Есть, когда хоть у одного
+   * исполнителя `loopback.status` — `resolves` и сеть ещё не применена.
+   */
+  loopbackCommand?: string;
+  /** Сеть loopback применена этой командой: запись с причиной. */
+  loopbackApplied?: WriterLoopbackReceipt;
 }
 
 const clip = (s: string, n = 300) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 
 const ADVICE: Record<WriterProbeReason, string> = {
   'listen-denied':
-    'Исполнителю закрыт локальный сервер (listen). Варианты: вынести проверку с сервером в gate harness (gates слушают localhost); дать исполнителю только локальную сеть: network: loopback в профиле инструментов (listen и connect на 127.0.0.1 и ::1, без интернета); отключить это правило шаблона для режима harness (раздел controller-mode).',
+    'Исполнителю закрыт локальный сервер (listen). Сеть loopback (listen и connect на 127.0.0.1 и ::1, без интернета) проба пробует сама, когда сеть исполнителя закрыта; если она не помогла — вынести проверку с сервером в gate harness (gates слушают localhost) или отключить это правило шаблона для режима harness (раздел controller-mode).',
   'network-denied':
     'Исполнителю закрыта сеть (реестр пакетов или внешний адрес). Варианты: выполнить шаг заранее в prepare (кеш вне рабочего дерева, harness lean); открыть домен в isolation.domains (claude) или всю сеть в профиле инструментов (network: full у codex); вынести шаг в prepare или gate.',
   'network-open':
@@ -119,6 +175,10 @@ const ADVICE: Record<WriterProbeReason, string> = {
   failed:
     'Команда завершилась ошибкой без признаков песочницы: причина — в ней самой (лог). Проверьте команду вне harness.',
 };
+
+/** Совет шагу, который открывает сеть loopback (повтор пробы прошёл). */
+const LOOPBACK_ADVICE =
+  'Шаг закрыт только локальным портом: под network: loopback (127.0.0.1 и ::1, без интернета) он проходит — проба повторена в той же изоляции. Это умолчание harness и техническое решение ведущего, не вопрос владельцу: примените команду loopbackCommand (smoke --writer-probe --apply-loopback). Интернет исполнителю остаётся закрыт.';
 
 const ansi = /\x1b\[[0-9;?]*[A-Za-z]/g;
 /** Префикс задачи turbo и подобных (`@scope/pkg:build: `) перед строкой вывода. */
@@ -185,6 +245,10 @@ export function classifyProbe(result: {
   evidence?: string;
   /** Совет вместо общего `ADVICE[reason]`, когда причина неоднозначна. */
   advice?: string;
+  /** Не запустился браузер (вывод браузерного инструмента). */
+  browser?: true;
+  /** Отказ похож на закрытый локальный порт: listen или EPERM без пути. */
+  local?: true;
 } {
   if (result.timedOut) return { status: 'blocked', reason: 'timeout' };
   if (result.code === 0) return { status: 'ok' };
@@ -199,10 +263,15 @@ export function classifyProbe(result: {
   if (result.code === 134 || result.signal === 'SIGABRT' || lines.some((l) => abort.test(l)))
     return { status: 'blocked', reason: 'process-abort', ...evidence(abort) };
   if (lines.some((l) => browser.test(l)))
-    return { status: 'blocked', reason: 'process-abort', ...evidence(browser) };
+    return { status: 'blocked', reason: 'process-abort', ...evidence(browser), browser: true };
   const listen = /listen E(?:PERM|ACCES)|bind\b.*(?:EPERM|EACCES|Operation not permitted)/i;
   if (lines.some((l) => listen.test(l)))
-    return { status: 'blocked', reason: 'listen-denied', evidence: lastOf(lines, listen)! };
+    return {
+      status: 'blocked',
+      reason: 'listen-denied',
+      evidence: lastOf(lines, listen)!,
+      local: true,
+    };
   const network =
     /\b(?:ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ECONNREFUSED)\b|getaddrinfo|Could not resolve host|Temporary failure in name resolution|network is unreachable|ERR_PNPM_META_FETCH_FAIL|fetch failed/i;
   if (lines.some((l) => network.test(l)))
@@ -218,6 +287,7 @@ export function classifyProbe(result: {
       evidence: denied,
       ...(pathless
         ? {
+            local: true as const,
             advice:
               'Отказ EPERM без пути: это запись вне области записи исполнителя или локальный сокет (сборщики на Rust, например Turbopack, открывают его на 127.0.0.1).' +
               (result.networkMode === 'none' || result.networkMode === 'legacy'
@@ -467,57 +537,51 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
     }
     // HOME — как у адаптера runtime.
     execution.env.HOME ??= homedir();
-    const callDir = join(input.dir, `writer-${++n}`);
+    const env0 = execution;
+    const index = ++n;
+    const callDir = join(input.dir, `writer-${index}`);
     await mkdir(callDir, { recursive: true });
     // Свой TMPDIR в области записи — как у вызова исполнителя.
     const temp = await writerScratch(execution.env);
     const scratch = temp.dir;
-    try {
-      const iso = withWriterNetwork(
-        isolation({
-          write: [cwd, scratch],
-          controller: [...input.boundary.hidden, temp.parent],
-          readable: [cwd, scratch, ...input.boundary.readable],
-          domains: policy.isolation.domains,
-          ...(input.boundary.checkouts.length ? { checkouts: input.boundary.checkouts } : {}),
-        }),
-        runtime === 'claude' ? network : undefined,
-      );
-      // Граница loopback codex проверяется на деле: функция network_proxy
-      // есть, но прокси будущей версии мог бы пропускать всё. Локальный
-      // сервер должен работать, внешний адрес — нет (напрямую и через прокси).
-      if (mechanism === 'codex-sandbox' && network === 'loopback')
-        report.commands.push(
-          await loopbackCheck(
-            [input.executables?.codex ?? 'codex', 'sandbox', ...codexPermissions(iso, network)],
-            cwd,
-            execution,
-            callDir,
-            input.signal,
-          ),
-        );
+    const codexBin = input.executables?.codex ?? 'codex';
+    const bounds = isolation({
+      write: [cwd, scratch],
+      controller: [...input.boundary.hidden, temp.parent],
+      readable: [cwd, scratch, ...input.boundary.readable],
+      domains: policy.isolation.domains,
+      ...(input.boundary.checkouts.length ? { checkouts: input.boundary.checkouts } : {}),
+    });
+    type Net = ReturnType<typeof profileNetwork>;
+    const sandboxed = (net: Net) =>
+      withWriterNetwork(bounds, runtime === 'claude' ? net : undefined);
+    /** Все команды пробы при сети `net`; `local` — закрытые только локальным портом. */
+    const runSteps = async (net: Net, mode: WriterProbeWriter['networkMode'], dir: string) => {
+      const iso = sandboxed(net);
+      const commands: WriterProbeCommand[] = [];
+      const local: string[] = [];
       for (const step of steps) {
         let argv: string[];
-        let env: NodeJS.ProcessEnv = execution.env;
+        let env: NodeJS.ProcessEnv = env0.env;
         let runCwd = cwd;
         if (mechanism === 'codex-sandbox')
           // Профиль прав — тот же, что у `codex exec` исполнителя.
           argv = [
-            input.executables?.codex ?? 'codex',
+            codexBin,
             'sandbox',
-            ...codexPermissions(iso, network ?? 'none'),
+            ...codexPermissions(iso, net ?? 'none'),
             '--',
             ...step.command,
           ];
         else if (mechanism === 'sandbox-runtime') {
           // Метка старта обёртки — в своём каталоге, открытом на запись
           // только ей (как у gates); песочница исполнителя — та же граница.
-          const marks = join(callDir, step.id + '.marks');
+          const marks = join(dir, step.id + '.marks');
           await mkdir(marks, { recursive: true });
           const wrapped = await isolatedCommand(
             { ...iso, write: [...iso.write, await realpath(marks)] },
             step.command,
-            join(callDir, step.id + '.settings'),
+            join(dir, step.id + '.settings'),
             scratch,
             join(marks, 'started'),
             await realpath(cwd),
@@ -530,7 +594,7 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
             scratch,
           );
           argv = wrapped.argv;
-          env = { ...execution.env, ...wrapped.env };
+          env = { ...env0.env, ...wrapped.env };
           runCwd = wrapped.cwd;
         } else argv = step.command;
         const started = Date.now();
@@ -540,7 +604,7 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
             env,
             timeoutMs: step.timeoutMs,
             signal: input.signal,
-            redact: execution.redact,
+            redact: env0.redact,
             contain: { dirs: [cwd, scratch] },
             activity: { kind: 'command', label: `writer-probe ${step.id}`.slice(0, 300) },
           });
@@ -548,7 +612,7 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
           // Отмена вызывающим — не исход команды.
           if (input.signal.aborted) throw error;
           const code = (error as NodeJS.ErrnoException).code;
-          report.commands.push({
+          commands.push({
             id: step.id,
             command: step.command,
             status: 'failed',
@@ -563,27 +627,121 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
           continue;
         }
         const output = result.stdout + '\n' + result.stderr;
-        const log = join(callDir, step.id + '.log');
+        const log = join(dir, step.id + '.log');
         await writeFile(log, output);
         const verdict = classifyProbe({
           code: result.code,
           timedOut: result.timedOut,
           output,
           signal: result.diagnostics.signal,
-          networkMode: report.networkMode,
+          networkMode: mode,
         });
-        report.commands.push({
+        // Проверка в браузере, закрытая песочницей, — не работа исполнителя:
+        // ожидаемое состояние, а не закрытый шаг, который ждёт решения.
+        const outside =
+          verdict.status === 'blocked' &&
+          mechanism !== 'none' &&
+          (isBrowserStep(step) || verdict.browser === true);
+        if (verdict.status === 'blocked' && verdict.local && !outside) local.push(step.id);
+        commands.push({
           id: step.id,
           command: step.command,
-          status: verdict.status,
+          status: outside ? 'outside' : verdict.status,
           exitCode: result.code,
           ...(result.timedOut ? { timedOut: true } : {}),
           durationMs: Date.now() - started,
           ...(verdict.reason ? { reason: verdict.reason } : {}),
-          ...(verdict.evidence ? { evidence: clip(execution.redact(verdict.evidence)) } : {}),
-          ...(verdict.reason ? { advice: verdict.advice ?? ADVICE[verdict.reason] } : {}),
+          ...(verdict.evidence ? { evidence: clip(env0.redact(verdict.evidence)) } : {}),
+          ...(outside
+            ? { advice: BROWSER_ADVICE }
+            : verdict.reason
+              ? { advice: verdict.advice ?? ADVICE[verdict.reason] }
+              : {}),
           log,
         });
+      }
+      return { commands, local };
+    };
+    try {
+      // Граница loopback codex проверяется на деле: функция network_proxy
+      // есть, но прокси будущей версии мог бы пропускать всё. Локальный
+      // сервер должен работать, внешний адрес — нет (напрямую и через прокси).
+      if (mechanism === 'codex-sandbox' && network === 'loopback')
+        report.commands.push(
+          await loopbackCheck(
+            [codexBin, 'sandbox', ...codexPermissions(sandboxed(network), network)],
+            cwd,
+            execution,
+            callDir,
+            input.signal,
+          ),
+        );
+      const first = await runSteps(network, report.networkMode, callDir);
+      report.commands.push(...first.commands);
+      // Шаг закрыт только локальным портом, а сеть исполнителя закрыта и для
+      // него (codex без поля network или `none`; claude `none`): проба сама
+      // повторяет команды под loopback — интернет остаётся закрыт.
+      const closedLocal =
+        networkMode === 'none' || (networkMode === 'legacy' && runtime === 'codex');
+      if (first.local.length && mechanism !== 'none' && closedLocal) {
+        const dir = join(input.dir, `writer-${index}-loopback`);
+        await mkdir(dir, { recursive: true });
+        const trial: WriterProbeCommand[] = [];
+        let unavailable: string | undefined;
+        if (mechanism === 'codex-sandbox') {
+          unavailable =
+            (await codexLoopbackSupport(codexBin, input.environment ?? process.env)) ?? undefined;
+          if (!unavailable) {
+            const check = await loopbackCheck(
+              [codexBin, 'sandbox', ...codexPermissions(sandboxed('loopback'), 'loopback')],
+              cwd,
+              execution,
+              dir,
+              input.signal,
+            );
+            trial.push(check);
+            if (check.status !== 'ok')
+              unavailable = `проверка границы loopback: ${check.reason ?? check.status}${check.evidence ? ` (${check.evidence})` : ''}`;
+          }
+        }
+        if (!unavailable) trial.push(...(await runSteps('loopback', 'loopback', dir)).commands);
+        const after = new Map(trial.map((c) => [c.id, c]));
+        const opened = first.local.filter((id) => after.get(id)?.status === 'ok');
+        const closed = first.local.filter((id) => !opened.includes(id));
+        // Шаг, который проходил без loopback, должен проходить и с ним.
+        const broken = first.commands
+          .filter((c) => c.status === 'ok' && after.get(c.id)?.status !== 'ok')
+          .map((c) => c.id);
+        const status: WriterLoopbackTrial['status'] = unavailable
+          ? 'unavailable'
+          : !closed.length && !broken.length
+            ? 'resolves'
+            : 'not-enough';
+        const list = first.local.join(', ');
+        const reason =
+          status === 'resolves'
+            ? `Шаги ${list} закрыты только локальным портом; под network: loopback (127.0.0.1 и ::1, без интернета) они проходят — проба повторена в той же изоляции${mechanism === 'codex-sandbox' ? ', граница loopback проверена' : ''}.`
+            : status === 'unavailable'
+              ? `Шаги ${list} закрыты локальным портом, но сеть loopback недоступна: ${unavailable}.`
+              : `Шаги ${list} закрыты локальным портом, но под network: loopback ${[
+                  ...(closed.length ? [`не проходят ${closed.join(', ')}`] : []),
+                  ...(broken.length ? [`перестают проходить ${broken.join(', ')}`] : []),
+                ].join('; ')}: loopback не применяется.`;
+        report.loopback = {
+          status,
+          steps: first.local,
+          reason,
+          decision: 'lead',
+          change: {
+            toolProfile: w.toolProfile ?? freeProfileName(policy),
+            created: !w.toolProfile,
+            roles: w.roles,
+          },
+          commands: trial,
+        };
+        if (status === 'resolves')
+          for (const c of report.commands)
+            if (first.local.includes(c.id)) c.advice = LOOPBACK_ADVICE;
       }
     } finally {
       await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
@@ -593,10 +751,20 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
   // Пустая проба ничего не доказала: без команд она не «зелёная».
   const probed = writers.some((w) => w.commands.some((c) => c.id !== LOOPBACK_CHECK));
   return {
-    ok: probed && writers.every((w) => w.commands.every((c) => c.status === 'ok')),
+    // Проверка в браузере вне исполнителя — ожидаемое состояние, не помеха.
+    ok:
+      probed &&
+      writers.every((w) => w.commands.every((c) => c.status === 'ok' || c.status === 'outside')),
     writers,
     ...(notes.length ? { notes } : {}),
   };
+}
+
+/** Имя нового профиля loopback, не занятое политикой. */
+function freeProfileName(policy: ExecutionPolicy) {
+  let name = LOOPBACK_PROFILE;
+  for (let i = 2; name in policy.toolProfiles; i++) name = `${LOOPBACK_PROFILE}-${i}`;
+  return name;
 }
 
 const NETWORK_TEXT: Record<Exclude<WriterProbeWriter['networkMode'], 'legacy'>, string> = {
@@ -615,16 +783,38 @@ const networkText = (w: WriterProbeWriter) =>
 /** Строки пробы для человека (`harness smoke --writer-probe --human`). */
 export function writerProbeText(probe: WriterProbeResult) {
   const lines = [`проба исполнителя: ${probe.ok ? 'всё доступно' : 'есть закрытые шаги'}`];
+  const outside: string[] = [];
   for (const w of probe.writers) {
     lines.push(
       `  исполнитель ${w.runtime}${w.toolProfile ? ` (${w.toolProfile})` : ''}, роли ${w.roles.join(', ')}; изоляция ${w.mechanism}; сеть ${networkText(w)}`,
     );
-    for (const c of w.commands)
+    for (const c of w.commands) {
+      if (c.status === 'outside') {
+        // Ожидаемое состояние: одна строка, без «что сделать».
+        lines.push(
+          `    ${c.id}: вне исполнителя — проверка в браузере${c.reason ? ` (${c.reason})` : ''}`,
+        );
+        outside.push(c.id);
+        continue;
+      }
       lines.push(
         `    ${c.id}: ${c.status}${c.reason && c.status !== 'ok' ? ` — ${c.reason}` : ''}${c.evidence ? ` (${c.evidence})` : ''}`,
         ...(c.advice && c.status !== 'ok' ? [`      что сделать: ${c.advice}`] : []),
       );
+    }
+    if (w.loopback)
+      lines.push(
+        `    сеть loopback (повтор пробы): ${w.loopback.status} — ${w.loopback.reason}` +
+          (w.loopback.status === 'resolves' ? ' Решение техническое: ведущий, не владелец.' : ''),
+      );
   }
+  if (outside.length)
+    lines.push(`  проверки в браузере (${outside.join(', ')}): ${BROWSER_ADVICE}`);
+  if (probe.loopbackApplied)
+    lines.push(
+      `  применено: network: loopback — ${probe.loopbackApplied.changes.map((c) => `профиль ${c.toolProfile}${c.created ? ' (новый)' : ''}, роли ${c.roles.join(', ')}`).join('; ')}; ${probe.loopbackApplied.reason} ${probe.loopbackApplied.note}`,
+    );
+  else if (probe.loopbackCommand) lines.push(`  применить loopback: ${probe.loopbackCommand}`);
   for (const note of probe.notes ?? []) lines.push(`  заметка: ${note}`);
   return lines.join('\n') + '\n';
 }
