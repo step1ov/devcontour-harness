@@ -63,6 +63,7 @@ export async function runSpike(ctx: SpikeContext, raw: unknown): Promise<Spike> 
       [ctx.policy.environment, repo.environment],
       { DEVCONTOUR_SPIKE_SIZE: String(size), DEVCONTOUR_SEED: String(input.seed) },
       ctx.environment ?? process.env,
+      ctx.policy.toolchain,
     );
   let redact: (text: string) => string;
   try {

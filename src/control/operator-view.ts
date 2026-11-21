@@ -22,6 +22,7 @@ import {
   findingCounts,
   leadMayAnswer,
   policyDigest,
+  PROJECT_MANIFEST_PATH,
   projectManifestSchema,
   reviewVerdictText,
   type ExecutionPolicy,
@@ -53,7 +54,9 @@ import { stopInputsIn } from '../explain/state.ts';
 import { policySecrets } from '../environment/redaction.ts';
 import {
   operatorView,
+  setupView,
   workDetailView,
+  type SetupView,
   type OperatorActivityInput,
   type OperatorReviewInput,
   type OperatorSourceInput,
@@ -973,6 +976,7 @@ export function collectOperatorViewInput(
         runtime: a.runtime,
         ...(a.model ? { model: a.model } : {}),
         stages: a.timings ?? [],
+        ...((reached) => (reached ? { reached } : {}))(reachedStage(a.timings ?? [])),
       })),
       gateEvents: attempts.flatMap((a) =>
         a.evidence
@@ -1145,9 +1149,14 @@ function readConnectorDb(
       tasks: manifest?.tasks ?? [],
       problems: manifest?.problems ?? [],
     };
+    const release = releaseOf(db, path, scope, works);
+    const deliveries = sourceReviewsOf(db, release.tasks);
     return {
       connector,
       provider,
+      ...(release.tasks.length ? { release: release.tasks } : {}),
+      ...(release.startedAt ? { releaseStartedAt: release.startedAt } : {}),
+      ...(deliveries.length ? { reviews: deliveries } : {}),
       tasks: scope.tasks.map((t) => ({
         id: t.id,
         key: t.key,
@@ -1178,6 +1187,183 @@ function readConnectorDb(
   } finally {
     db?.close();
   }
+}
+
+/** Порядок этапов попытки для «дальше всего дошла» (`reachedStage`). */
+const REACHED_ORDER = ['prepare', 'writer', 'gates', 'review', 'integration'] as const;
+
+/** Самый дальний этап, до которого попытка дошла по своим замерам. */
+function reachedStage(timings: readonly { stage: string }[]): string | undefined {
+  let best = -1;
+  for (const t of timings) {
+    const stage = stageOfStep(t.stage);
+    const k = stage ? (REACHED_ORDER as readonly string[]).indexOf(stage) : -1;
+    if (k > best) best = k;
+  }
+  return best < 0 ? undefined : REACHED_ORDER[best];
+}
+
+/** Сколько последних снимков связки читает объём выпуска (`releaseOf`). */
+const RELEASE_SNAPSHOTS = 500;
+
+type ScopeLike = NonNullable<RelayObservationLike['scope']>;
+type ReleaseTask = NonNullable<OperatorSourceInput['release']>[number];
+
+type SnapshotTask = { id: string; key: string; title?: string; orderId: string; column?: string };
+type SnapshotProblem = { taskId: string; code: string; message: string };
+type SnapshotRows = { at: string; tasks: SnapshotTask[]; problems: SnapshotProblem[] }[];
+
+/**
+ * Разобранные снимки связки по файлу базы: представление опрашивается часто,
+ * а снимков до 500 — ключ кэша — размер и время изменения базы и её журнала.
+ */
+const snapshotCache = new Map<string, { key: string; rows: SnapshotRows }>();
+
+function snapshotRows(db: DatabaseSync, path: string): SnapshotRows {
+  const stamp = (p: string) => {
+    const st = statSync(p, { throwIfNoEntry: false });
+    return st ? [st.size, st.mtimeMs] : null;
+  };
+  const key = JSON.stringify([stamp(path), stamp(path + '-wal')]);
+  const hit = snapshotCache.get(path);
+  if (hit && hit.key === key) return hit.rows;
+  const raw = db
+    .prepare(
+      `SELECT created_at AS at, json_extract(data, '$.manifest.tasks') AS tasks,
+              json_extract(data, '$.manifest.problems') AS problems
+         FROM (SELECT rowid, created_at, data FROM snapshots ORDER BY rowid DESC LIMIT ${RELEASE_SNAPSHOTS})
+        ORDER BY rowid`,
+    )
+    .all() as { at: string; tasks: string | null; problems: string | null }[];
+  const parse = <T>(text: string | null): T[] => {
+    try {
+      const v = text ? (JSON.parse(text) as unknown) : [];
+      return Array.isArray(v) ? (v as T[]) : [];
+    } catch {
+      return [];
+    }
+  };
+  const rows = raw.map((r) => ({
+    at: r.at,
+    tasks: parse<SnapshotTask>(r.tasks),
+    problems: parse<SnapshotProblem>(r.problems),
+  }));
+  // Предел кэша — несколько связок одного процесса (панель читает свои базы).
+  if (snapshotCache.size >= 32) snapshotCache.clear();
+  snapshotCache.set(path, { key, rows });
+  return rows;
+}
+
+/**
+ * Объём выпуска (доска связки): задачи всех снимков связки, а не только
+ * последнего среза `run`. О каждой задаче — последнее, что о ней записано
+ * (колонка, проблемы), и время, когда она впервые попала в снимок; последнее
+ * чтение (наблюдение или последний снимок) дополняет и уточняет снимки.
+ * Задача, которой нет в последнем чтении и у которой нет работы harness
+ * (удалена с доски или выведена из области), в выпуск не входит. Начало
+ * выпуска — первое появление задачи, оставшейся в нём.
+ */
+function releaseOf(
+  db: DatabaseSync,
+  path: string,
+  scope: ScopeLike,
+  works: ReadonlySet<string>,
+): { tasks: ReleaseTask[]; startedAt?: string } {
+  const rows = snapshotRows(db, path);
+  const byId = new Map<string, ReleaseTask>();
+  const put = (
+    at: string | undefined,
+    tasks: readonly SnapshotTask[],
+    problems: readonly SnapshotProblem[],
+  ) => {
+    for (const t of tasks) {
+      const prev = byId.get(t.id);
+      byId.set(t.id, {
+        id: t.id,
+        key: t.key,
+        ...((title) => (title ? { title } : {}))(t.title ?? prev?.title),
+        orderId: t.orderId,
+        ...(works.has(t.orderId) ? { workId: t.orderId } : {}),
+        ...((column) => (column ? { column } : {}))(t.column ?? prev?.column),
+        ...((first) => (first ? { firstSeenAt: first } : {}))(prev?.firstSeenAt ?? at),
+        problems: problems
+          .filter((p) => p.taskId === t.id)
+          .map((p) => ({ code: p.code, message: p.message })),
+      });
+    }
+  };
+  for (const r of rows) put(r.at, r.tasks, r.problems);
+  put(scope.readAt, scope.tasks, scope.problems);
+  const latest = new Set(scope.tasks.map((t) => t.id));
+  const tasks = [...byId.values()].filter((t) => latest.has(t.id) || works.has(t.orderId));
+  const starts = tasks
+    .map((t) => t.firstSeenAt)
+    .filter((x): x is string => typeof x === 'string' && Number.isFinite(Date.parse(x)))
+    .sort((x, y) => Date.parse(x) - Date.parse(y));
+  return { tasks, ...(starts[0] ? { startedAt: starts[0] } : {}) };
+}
+
+/**
+ * Принятые работы, оставленные в источнике на проверку человеку: последняя
+ * доставка задачи — принятый результат, перенесённый в колонку не `done`
+ * (`completion.mode: review-only` или своя колонка), и по последнему
+ * чтению задача не закрыта и не отменена.
+ */
+function sourceReviewsOf(
+  db: DatabaseSync,
+  release: readonly ReleaseTask[],
+): NonNullable<OperatorSourceInput['reviews']> {
+  let rows: { task: string; work: string; status: string; data: string; at: string }[];
+  try {
+    rows = db
+      .prepare(
+        `SELECT task_id AS task, work_id AS work, status, data, updated_at AS at FROM operations
+          ORDER BY updated_at, rowid`,
+      )
+      .all() as typeof rows;
+  } catch {
+    return [];
+  }
+  // Последняя операция задачи любого состояния заменяет прежние: новая
+  // доставка в работе или с конфликтом — уже не «ждёт проверки».
+  const last = new Map<string, (typeof rows)[number]>();
+  for (const r of rows) last.set(r.task, r);
+  for (const [task, r] of last) if (r.status !== 'delivered') last.delete(task);
+  const tasks = new Map(release.map((t) => [t.id, t]));
+  const out: NonNullable<OperatorSourceInput['reviews']>[number][] = [];
+  for (const r of last.values()) {
+    let op: {
+      outcome?: string;
+      steps?: {
+        kind?: string;
+        status?: string;
+        input?: { column?: unknown };
+        updatedAt?: string;
+      }[];
+    };
+    try {
+      op = JSON.parse(r.data) as typeof op;
+    } catch {
+      continue;
+    }
+    if (op.outcome !== 'accepted') continue;
+    const move = op.steps?.find((s) => s.kind === 'move' && s.status === 'done');
+    const column = typeof move?.input?.column === 'string' ? move.input.column : undefined;
+    if (!column || column === 'done' || column === 'cancelled') continue;
+    const task = tasks.get(r.task);
+    const closed = task?.problems.some(
+      (p) => p.code === 'TASK_DONE' || p.code === 'TASK_CANCELLED',
+    );
+    if (closed || task?.column === 'done' || task?.column === 'cancelled') continue;
+    out.push({
+      taskId: r.task,
+      ...(task?.key ? { key: task.key } : {}),
+      workId: r.work,
+      column,
+      since: move?.updatedAt ?? r.at,
+    });
+  }
+  return out;
 }
 
 /** Поля manifest снимка коннектора, которые читает представление. */
@@ -1265,7 +1451,14 @@ function emptyInput(policy: ViewPolicy, now: number, stateDir: string): Operator
 }
 
 export interface HarnessViewOptions extends Omit<OperatorViewOptions, 'maxBytes'> {
-  stateDir: string;
+  /** Каталог состояния; без него — из `.harness/project.json` репозитория `repository`. */
+  stateDir?: string;
+  /**
+   * Корень репозитория проекта (ревизия 5): состояние и политика — из
+   * `.harness/project.json` и `.harness/policy.json` при каждом чтении, так что
+   * панель, запущенная до настройки, подхватит их, когда они появятся.
+   */
+  repository?: string;
   /** Файл политики; без него — привязанная к состоянию. */
   policyPath?: string;
   /** Детали работы вместо обзора. */
@@ -1278,9 +1471,41 @@ export interface HarnessViewOptions extends Omit<OperatorViewOptions, 'maxBytes'
  * Представление оператора по каталогу состояния (`harness view`): только
  * чтение; нет состояния — пустое представление по `--policy`.
  */
-export function harnessView(options: HarnessViewOptions): OperatorView | WorkDetailView {
-  const stateDir = resolve(options.stateDir);
-  const policy = viewPolicy(stateDir, options.policyPath);
+export function harnessView(
+  options: HarnessViewOptions,
+): OperatorView | WorkDetailView | SetupView {
+  const located = locateProject(options);
+  const setup = (waitingFor: 'project' | 'policy') =>
+    setupView(
+      {
+        now: options.now ?? Date.now(),
+        harnessVersion: HARNESS_VERSION,
+        stateVersion: STATE_VERSION,
+        waitingFor,
+      },
+      options.lang ? { lang: options.lang } : {},
+    );
+  if (!located) return setup('project');
+  const stateDir = located.stateDir;
+  // Политика проекта из manifest, которой ещё нет, — не явный `--policy`:
+  // без неё действует привязка состояния (или прежний отказ POLICY_REQUIRED).
+  const policyPath =
+    located.policyPath && (options.policyPath || existsSync(located.policyPath))
+      ? located.policyPath
+      : undefined;
+  // Документ настройки — только для `--repository`: manifest есть, но ни
+  // привязки, ни политики проекта, ни базы состояния ещё нет. `--state`
+  // сохраняет прежнюю форму (пустой обзор по `--policy` или отказ), явный
+  // `--policy` без файла и база без привязки — прежние отказы.
+  if (
+    located.fromManifest &&
+    !options.policyPath &&
+    !existsSync(join(stateDir, 'binding.json')) &&
+    !existsSync(join(stateDir, 'state.sqlite')) &&
+    (policyPath === undefined || !existsSync(policyPath))
+  )
+    return setup('policy');
+  const policy = viewPolicy(stateDir, policyPath);
   const projection: OperatorViewOptions = {
     ...(options.windowMs !== undefined ? { windowMs: options.windowMs } : {}),
     ...(options.bucketMs !== undefined ? { bucketMs: options.bucketMs } : {}),
@@ -1322,6 +1547,43 @@ export function harnessView(options: HarnessViewOptions): OperatorView | WorkDet
       );
     },
   );
+}
+
+/**
+ * Каталог состояния и файл политики представления: явные (`stateDir`,
+ * `policyPath`) или из manifest репозитория (`.harness/project.json`). Нет
+ * manifest — `undefined` (проект ещё не настроен).
+ */
+export function locateProject(options: {
+  stateDir?: string;
+  repository?: string;
+  policyPath?: string;
+}): { stateDir: string; policyPath?: string; fromManifest?: true } | undefined {
+  if (options.stateDir)
+    return {
+      stateDir: resolve(options.stateDir),
+      ...(options.policyPath ? { policyPath: resolve(options.policyPath) } : {}),
+    };
+  if (!options.repository)
+    throw new HarnessError('INVALID_INPUT', 'Нужен --state или --repository', [
+      { path: ['--state'], message: 'required without --repository' },
+    ]);
+  const root = resolve(options.repository);
+  const file = join(root, PROJECT_MANIFEST_PATH);
+  if (!existsSync(file)) return undefined;
+  const manifest = projectManifestSchema.safeParse(readJson(file, 'project'));
+  if (!manifest.success)
+    throw new HarnessError('INVALID_INPUT', 'Файл проекта не по схеме: ' + file, [
+      { path: [PROJECT_MANIFEST_PATH], message: manifest.error.issues[0]?.message ?? 'invalid' },
+    ]);
+  return {
+    // Относительный каталог состояния — от корня репозитория, а не от cwd.
+    stateDir: resolve(root, manifest.data.paths.state),
+    policyPath: options.policyPath
+      ? resolve(options.policyPath)
+      : join(root, manifest.data.paths.policy),
+    fromManifest: true,
+  };
 }
 
 /**

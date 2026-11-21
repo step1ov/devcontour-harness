@@ -122,6 +122,7 @@ export async function lifecyclePreflight(input: {
             [policy.environment, policy.repositories.find((r) => r.id === rid)!.environment],
             {},
             input.environment ?? process.env,
+            policy.toolchain,
           ).env,
         ]),
       );

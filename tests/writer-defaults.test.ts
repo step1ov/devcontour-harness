@@ -396,9 +396,11 @@ test('WD05: doctor называет проверки в браузере ожи�
     resourceDatabase: false,
   });
   cliDataSchemas.doctor.parse(report);
-  assert.equal(report.notes?.length, 1);
+  // alpha.65: без закреплённого node рядом — совет toolchain-pin; проверки браузера — одна заметка.
+  const browser = (report.notes ?? []).filter((n) => n.startsWith('browser-checks'));
+  assert.equal(browser.length, 1);
   assert.match(
-    report.notes[0] ?? '',
+    browser[0] ?? '',
     /^browser-checks \S+ \(verify-browser\): Проверки в браузере — вне исполнителя.*решения не требует/,
   );
   assert.ok(!report.problems.some((p) => /browser|браузер/i.test(p)), report.problems.join('\n'));

@@ -29,6 +29,7 @@ import type { ToolchainReport } from '../toolchains/inspect.ts';
 import { resourceWarnings } from './resource-advice.ts';
 import { BROWSER_ADVICE, isBrowserRunner } from './browser-checks.ts';
 import { timeBudgetWarnings } from '../verification/time-budget.ts';
+import { resolveNodePin, sameNode, toolchainFacts } from '../environment/toolchain-pin.ts';
 
 /** Диагностика toolchain политики (см. `inspectPolicy` в `./toolchains`). */
 export type ToolchainInspect = (
@@ -81,6 +82,8 @@ export async function doctor(
     resourceDatabase?: string | false;
     planAuthors?: readonly Author[];
     leadSandbox?: true | Partial<LeadSandboxProbe>;
+    /** Окружение для сверки закреплённого toolchain; по умолчанию `process.env`. */
+    environment?: NodeJS.ProcessEnv;
   } = {},
 ) {
   const problems: string[] = [];
@@ -234,6 +237,12 @@ export async function doctor(
   });
   const models = policy ? policyModels(policy) : [];
   if (policy) warnings.push(...codexModelWarnings(models));
+  // Закреплённый toolchain: каталог и версия, сверка с node первым в PATH
+  // этого процесса. Без закрепления — совет в notes (не предупреждение).
+  const pin = policy ? toolchainPinCheck(policy, options.environment ?? process.env) : undefined;
+  if (pin?.problem) problems.push(pin.problem);
+  if (pin?.warning) warnings.push(pin.warning);
+  if (pin?.note) notes.push(pin.note);
   return {
     harness: HARNESS_VERSION,
     apiVersion: API_VERSION,
@@ -244,6 +253,7 @@ export async function doctor(
     ...(state ? { state } : {}),
     ...(checkoutRoot ? { checkouts: checkoutRoot } : {}),
     ...(toolchains ? { toolchains } : {}),
+    ...(pin?.report ? { toolchainPin: pin.report } : {}),
     ...(ports.length ? { ports } : {}),
     ...(leadSandbox ? { leadSandbox } : {}),
     problems,
@@ -425,4 +435,61 @@ export function codexModelWarnings(
       `codex-effort-unknown: ${what} (${uses.join(', ')}) не входит в уровни этой модели по ${file}`,
     );
   return warnings;
+}
+
+/**
+ * Сверка закреплённого toolchain (`policy.toolchain.node`) для `doctor`:
+ * разрешённый каталог и версия; node первым в PATH процесса, если он другой
+ * (путь или версия), — предупреждение: процессы прогона получат закреплённый,
+ * а команды, запущенные вручную из этой оболочки, — другой. Не разрешилось —
+ * проблема. Нет закрепления — совет.
+ */
+export function toolchainPinCheck(
+  policy: Pick<ExecutionPolicy, 'toolchain'>,
+  env: NodeJS.ProcessEnv,
+): {
+  report?: DoctorToolchainPin;
+  problem?: string;
+  warning?: string;
+  note?: string;
+} {
+  const current = toolchainFacts(env.PATH).node;
+  if (!policy.toolchain)
+    return {
+      note: `toolchain-pin: node не закреплён — gates, writer и reviewers получают node из PATH того, кто запустил harness${current ? ` (сейчас v${current.version}, ${current.path})` : ''}; закрепите policy.toolchain.node (версия или каталог), чтобы каждый этап исполнялся одним node`,
+    };
+  let resolved: ReturnType<typeof resolveNodePin>;
+  try {
+    resolved = resolveNodePin(policy.toolchain, env);
+  } catch (error) {
+    return {
+      problem: 'toolchain-pin: ' + (error instanceof Error ? error.message : String(error)),
+    };
+  }
+  const pinned = { version: resolved.version, path: join(resolved.binDir, 'node') };
+  const matches = current ? sameNode(current, pinned) : false;
+  const report: DoctorToolchainPin = {
+    requested: resolved.requested,
+    binDir: resolved.binDir,
+    version: resolved.version,
+    ...(current ? { pathNode: current } : {}),
+    matches,
+  };
+  return {
+    report,
+    ...(matches
+      ? {}
+      : {
+          warning: `toolchain-pin: node первым в PATH (${current ? `v${current.version}, ${current.path}` : 'не найден'}) отличается от закреплённого policy.toolchain.node=${resolved.requested} (v${resolved.version}, ${pinned.path}): harness ставит закреплённый первым в PATH gates, writer и reviewers; команды, запущенные вручную из этой оболочки, получат другой node`,
+        }),
+  };
+}
+
+/** Закреплённый toolchain в ответе `doctor`. */
+export interface DoctorToolchainPin {
+  requested: string;
+  binDir: string;
+  version: string;
+  pathNode?: { version: string; path: string };
+  matches: boolean;
 }

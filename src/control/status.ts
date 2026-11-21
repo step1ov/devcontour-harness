@@ -613,3 +613,18 @@ export function statusFrame(
     statusText(data)
   );
 }
+
+/** Статус до настройки: пустой статус с этапом настройки (`statusDataSchema.setup`). */
+export function statusSetup(waitingFor: 'project' | 'state'): z.output<typeof statusDataSchema> {
+  return {
+    stateVersion: STATE_VERSION,
+    control: { paused: false },
+    graphs: [],
+    works: [],
+    setup: {
+      waitingFor,
+      lines: ['Идёт настройка harness', 'Задач пока нет'],
+      linesEn: ['Harness setup is in progress', 'No tasks yet'],
+    },
+  };
+}

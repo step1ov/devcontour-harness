@@ -14,7 +14,7 @@ import { planDraftSchema } from './planning.ts';
 import { valueReportSchema } from './report.ts';
 import { handoffPackSchema } from './handoff.ts';
 import { inputRequestSchema } from './input.ts';
-import { operatorViewSchema, workDetailViewSchema } from './operator-view.ts';
+import { operatorViewSchema, setupViewSchema, workDetailViewSchema } from './operator-view.ts';
 import { updatesConfigSchema } from './update.ts';
 
 /**
@@ -50,6 +50,7 @@ export const publishedSchemas = {
   'input-request': inputRequestSchema,
   'operator-view': operatorViewSchema,
   'work-detail-view': workDetailViewSchema,
+  'setup-view': setupViewSchema,
   /** `.harness/updates.json`: настройка `harness update` (0.1.0-alpha.60). */
   'updates-config': updatesConfigSchema,
 } as const satisfies Record<string, z.ZodType>;

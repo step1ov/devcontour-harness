@@ -100,3 +100,37 @@ export const toolchainReportSchema = z.strictObject({
   problems: z.array(problemSchema),
   warnings: z.array(problemSchema),
 });
+
+/**
+ * Закрепление toolchain политики (`policy.toolchain`): каталог Node.js,
+ * который harness ставит первым в PATH каждого процесса прогона — gates,
+ * `harness gates`, lifecycle и `smoke`, `prepare`, writer и reviewers, — кто
+ * бы ни запустил harness. `node` — абсолютный каталог с исполняемым `node`
+ * (`/opt/node/24.22.3/bin`) либо версия `24.22.3` / `24.22` / `24`: её
+ * разрешает самая новая установленная подходящая версия в известных
+ * каталогах (каталог текущего node, PATH, nvm, fnm, volta, asdf, mise,
+ * Homebrew, /usr/local/bin). Не разрешилось — отказ окружения до работы, не
+ * дефект. Поле необязательное, без умолчания: политика без него сохраняет
+ * digest; в `executionDigest` не входит (фактический toolchain записан в
+ * evidence каждой проверки).
+ */
+export const nodePinPattern = /^(?:\/.*|\d{1,3}(?:\.\d{1,4}){0,2})$/;
+export const toolchainPinSchema = z.strictObject({
+  node: z
+    .string()
+    .min(1)
+    .max(1000)
+    .regex(nodePinPattern, 'Абсолютный каталог node (/…/bin) либо версия: 24.22.3, 24.22 или 24'),
+});
+export type ToolchainPin = z.infer<typeof toolchainPinSchema>;
+
+/** Фактический toolchain процесса проверки: первый `node` в PATH и его версия, `pnpm` при наличии. */
+export const toolchainFactsSchema = z.strictObject({
+  node: z
+    .strictObject({ version: z.string().min(1).max(100), path: z.string().min(1).max(2000) })
+    .optional(),
+  pnpm: z
+    .strictObject({ version: z.string().min(1).max(100), path: z.string().min(1).max(2000) })
+    .optional(),
+});
+export type ToolchainFacts = z.infer<typeof toolchainFactsSchema>;

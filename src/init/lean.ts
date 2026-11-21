@@ -488,6 +488,12 @@ export async function switchLeanWith(
     });
     next = setField(next, field, value, EXECUTION_FIELDS);
   }
+  // Закреплённый node init пишет последним полем: добавленное слоем поле
+  // встаёт перед ним, и байты совпадают с init того же слоя.
+  if (Object.keys(raw).at(-1) === 'toolchain' && Object.keys(next).at(-1) !== 'toolchain') {
+    const { toolchain, ...rest } = next;
+    next = { ...rest, toolchain };
+  }
   if (store) {
     const repos = [...(next.repositories as Record<string, unknown>[])];
     const current = repos[repoIndex]!;

@@ -53,6 +53,12 @@ export const environmentCauses = [
    * его песочницей. Класс отказа — `needs-lead`, попытка не засчитана.
    */
   'writer-environment',
+  /**
+   * Toolchain среды: закреплённый `policy.toolchain` не разрешился, либо
+   * проверка упала под другим node, чем последний её успешный запуск на базе.
+   * О коде это не говорит; попытка не засчитана.
+   */
+  'toolchain',
   'other',
   'none',
 ] as const;

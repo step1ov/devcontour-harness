@@ -22,6 +22,7 @@ import {
   type EvidenceRecord,
   type ExecutionPolicy,
   type GatePolicy,
+  type ToolchainFacts,
   gateTimeoutMs,
   gateTimeoutText,
 } from '../contracts/index.ts';
@@ -59,6 +60,7 @@ import {
 } from './property.ts';
 import { keepGateArtifacts } from './gate-artifacts.ts';
 import { ReapedGate } from './reaped.ts';
+import { sameNode, toolchainFacts, toolchainText, usesPnpm } from '../environment/toolchain-pin.ts';
 
 /** Длинное имя testcase заменяется хешем, а не обрезается: обрезка дала бы ложные совпадения. */
 export const TEST_ID_LIMIT = 1000;
@@ -830,6 +832,12 @@ export interface GateRun {
   /** Повтор провала: ID записи, которую повторяет запуск; исход пишется в `recheck`. */
   recheck?: string;
   /**
+   * Toolchain последнего успешного запуска того же gate на базе (evidence
+   * прежних попыток, `harness gates`): провал под другим node остаётся
+   * провалом gate, текст и evidence называют расхождение. `where` — откуда запись.
+   */
+  baseline?: (gate: string) => { toolchain: ToolchainFacts; where: string } | undefined;
+  /**
    * Закреплённый SHA базы попытки: только при нём упавшая установка
    * зависимостей может стать отказом среды `dependency-network` — входы
    * менеджера в дереве сверяются с этой базой. Нет — классификации нет.
@@ -918,6 +926,9 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   // Go не берёт результат из кэша тестов (`-count=1` в GOFLAGS, последним).
   // Восстановленный из cache зелёный отчёт иначе выглядел бы свежим.
   const freshness = freshnessEnv(gate.kind, run.execution.env);
+  // Фактический toolchain окружения фазы (первый node в PATH, pnpm у команд
+  // с pnpm): заголовок лога и evidence называют, чем проверка исполнялась.
+  const toolchain = toolchainFacts(run.execution.env.PATH, { pnpm: usesPnpm(gate.command) });
   let kind: FailureKind = 'gate';
   /** Причина отказа окружения (`attempt.diagnosed`), когда она известна здесь. */
   let cause: EnvironmentCause | undefined;
@@ -939,7 +950,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   let exitOnly = false;
   let passed = false,
     summary = '',
-    log = `# harness gate ${gate.id}: cwd=${relative(root, gateCwd) || '.'} argv=${JSON.stringify(gate.command.map(redact))}${gate.kind === 'test' ? ` fresh=${redact(JSON.stringify(freshness))}` : ''}\n`,
+    log = `# harness gate ${gate.id}: cwd=${relative(root, gateCwd) || '.'} argv=${JSON.stringify(gate.command.map(redact))}${gate.kind === 'test' ? ` fresh=${redact(JSON.stringify(freshness))}` : ''}\n# toolchain: ${toolchainText(toolchain)}\n`,
     exitCode = -1,
     manifest: ReturnType<typeof junitSummary> | undefined,
     /** SHA-256 сохранённого этим запуском `<gate>.xml`. */
@@ -1296,6 +1307,22 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         signal,
       })
     : undefined;
+  // Провал под другим node, чем последний успешный прогон того же gate:
+  // провал остаётся засчитанным провалом gate (класс не меняется), но текст
+  // отказа и evidence называют расхождение — ведущий видит, что закрепить.
+  if (!passed && !run.recheck) {
+    const baseline = run.baseline?.(gate.id);
+    if (
+      baseline &&
+      toolchain.node &&
+      baseline.toolchain.node &&
+      !sameNode(toolchain.node, baseline.toolchain.node)
+    ) {
+      const note = toolchainNote(toolchain.node, baseline.toolchain.node, baseline.where);
+      summary = summary ? `${summary}; ${note}` : note;
+      log += '\n' + note + '\n';
+    }
+  }
   await mkdir(artifactDir, { recursive: true });
   const logPath = join(artifactDir, `${gate.id}.log`);
   log = redact(log);
@@ -1315,6 +1342,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     ...(manifest?.truncated ? { testsTruncated: true } : {}),
     ...(reportDigest ? { reportDigest } : {}),
     ...(run.consumer ? { consumer: run.consumer } : {}),
+    ...(toolchain.node ? { toolchain } : {}),
     ...(propertyEvidence ? { property: propertyEvidence } : {}),
     ...(artifactFiles ? { artifactFiles } : {}),
     ...(run.recheck
@@ -1366,6 +1394,14 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   }
   return evidence;
 }
+
+/** Строка о node, отличном от последнего успешного прогона gate (не меняет класс провала). */
+export const toolchainNote = (
+  now: NonNullable<ToolchainFacts['node']>,
+  before: NonNullable<ToolchainFacts['node']>,
+  where: string,
+) =>
+  `node v${now.version} (${now.path}) отличается от последнего успешного прогона этого gate ${where}: v${before.version} (${before.path}); закрепите policy.toolchain.node`;
 
 /** Предел сводки отказа в запросе исполнителя: заметка, а не лог. */
 const WRITER_DEPENDENCIES_NOTE_LIMIT = 400;

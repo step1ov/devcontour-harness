@@ -9,6 +9,7 @@ import {
 
 import { CleanupFailure } from '../environment/lifecycle.ts';
 import { ReapFailure } from '../environment/process.ts';
+import { ToolchainPinError } from '../environment/toolchain-pin.ts';
 import { ReapedGate } from '../verification/reaped.ts';
 
 export { BlockedError };
@@ -120,6 +121,8 @@ export function environmentCauseOf(
     )
   )
     return 'transport';
+  // Закреплённый node не разрешился — причина своя, а не общий отказ до работы.
+  if (error instanceof ToolchainPinError) return 'toolchain';
   if (error instanceof BlockedError) return 'preflight';
   return 'other';
 }

@@ -15,7 +15,7 @@ import {
 import { digestOf } from './digest.ts';
 import { DEFAULT_INPUT_POLICY, inputPolicySchema, type InputPolicy } from './input.ts';
 import type { CodedIssue, ErrorCode } from './errors.ts';
-import { toolchainSchema } from './toolchain.ts';
+import { toolchainPinSchema, toolchainSchema } from './toolchain.ts';
 import { gateArtifactLimits } from './result.ts';
 
 const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
@@ -411,6 +411,11 @@ export const executionPolicySchema = z.strictObject({
     .default({ mode: 'os', domains: [] }),
   toolProfiles: z.record(idSchema, toolProfileSchema).default({}),
   environment: environmentSchema.optional(),
+  /**
+   * Закреплённый toolchain (`toolchainPinSchema`): каталог Node.js первым в
+   * PATH каждого процесса прогона. Нет поля — PATH процесса harness.
+   */
+  toolchain: toolchainPinSchema.optional(),
   lifecycle: lifecycleSchema.optional(),
   resources: z
     .array(
@@ -553,7 +558,10 @@ export const policyDigest = (policy: ExecutionPolicy) => digestOf(policy);
  * надзор, а не условие исполнения кода: его пороги меняются без новой
  * попытки и не трогают основания reuse. Политика вопросов исполнителя
  * (`inputPolicy`) закрепляется в попытке при выдаче и тоже не входит;
- * проверка окружения перед запуском (`lifecyclePreflight`) — тоже надзор.
+ * проверка окружения перед запуском (`lifecyclePreflight`) — тоже надзор;
+ * закреплённый toolchain (`toolchain`) не входит: фактический toolchain
+ * каждой проверки записан в её evidence, и закрепление на идущем выпуске не
+ * требует нового согласования.
  * `policyDigest` — digest загруженной
  * политики целиком: им сверяются применение политики (`appliedPolicy`) и
  * запрос операции reconfigure.
@@ -566,6 +574,7 @@ export const executionDigest = (policy: ExecutionPolicy) =>
     stallSweep: undefined,
     inputPolicy: undefined,
     lifecyclePreflight: undefined,
+    toolchain: undefined,
   });
 
 /** Пути `toolProfile` и `runtime` назначений в ролях и правилах ревью: какой профиль у кого. */

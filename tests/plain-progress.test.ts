@@ -138,13 +138,13 @@ test('P1-b: повтор после отказа окружения — «поп
   assert.match(
     w.stage!.line,
     new RegExp(
-      `^w: исполнитель пишет код \\(implementation\\) — 0 с; попытка ${w.attempt} из ${max}; прошлая остановлена: окружение — порт 3000 занят; дальше:`,
+      `^w: исполнитель пишет код \\(implementation\\) — 0 с; попытка ${w.attempt} из ${max} \\(запусков 2\\); прошлая остановлена: окружение — порт 3000 занят; дальше:`,
     ),
   );
   assert.match(
     w.stage!.lineEn,
     new RegExp(
-      `attempt ${w.attempt} of ${max}; previous stopped: environment — port 3000 is busy; next:`,
+      `attempt ${w.attempt} of ${max} \\(runs 2\\); previous stopped: environment — port 3000 is busy; next:`,
     ),
   );
   // Свободный текст ошибки (держатель порта, токен) в простой текст не попадает.

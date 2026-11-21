@@ -236,6 +236,7 @@ export async function technicalReview(
       ],
       {},
       input.environment ?? process.env,
+      policy.toolchain,
     );
   } catch (error) {
     throw new HarnessError(

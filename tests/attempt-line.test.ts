@@ -37,7 +37,7 @@ const facts = (over: Partial<AttemptLineFacts> = {}): AttemptLineFacts => ({
   timeouts: 5,
   interrupted: 2,
   accepted: 0,
-  attempts: { used: 2, max: 6 },
+  attempts: { used: 40, max: 6 },
   neutralOut: { used: 3, max: 3 },
   repairs: { used: 1, budget: 6 },
   ...over,
@@ -90,7 +90,12 @@ for (const lang of ['ru', 'en'] as const) {
   });
 
   test(`attemptLine ${lang}: короткая строка не меняется пределом; без исчерпания — остаток попыток`, () => {
-    const short = facts({ failures: eight.slice(0, 2), neutralOut: undefined });
+    const short = facts({
+      total: 2,
+      attempts: { used: 2, max: 6 },
+      failures: eight.slice(0, 2),
+      neutralOut: undefined,
+    });
     assert.equal(attemptLine(short, lang, T.line), attemptLine(short, lang));
     assert.ok(
       attemptLine(short, lang, T.line).endsWith(

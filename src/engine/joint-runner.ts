@@ -221,7 +221,7 @@ export class JointRunner {
             this.policy.workspaceLifecycle,
             first,
             join(dir, 'environment'),
-            executionEnvironment([this.policy.environment], common, source),
+            executionEnvironment([this.policy.environment], common, source, this.policy.toolchain),
             signal,
             async () => {
               const gates = orderedWorkspaceGates(this.policy.workspaceGates).filter((g) =>
@@ -256,6 +256,7 @@ export class JointRunner {
                       [this.policy.environment, repo.environment],
                       common,
                       source,
+                      this.policy.toolchain,
                     ),
                     signal,
                     dir: join(dir, 'dependency-store', repo.id),
@@ -281,7 +282,12 @@ export class JointRunner {
                 // записи доказательства.
                 let redact: Redactor = availableRedactor(profiles, source);
                 try {
-                  const environment = executionEnvironment(profiles, { ...common }, source);
+                  const environment = executionEnvironment(
+                    profiles,
+                    { ...common },
+                    source,
+                    this.policy.toolchain,
+                  );
                   redact = environment.redact;
                   const reportPath = gate.report
                     ? await prepareReportPath(cwd, gate.report.path, 'Report выходит из компонента')

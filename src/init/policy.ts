@@ -158,6 +158,8 @@ export function generatePolicy(input: {
    * (`init --lead-technical-answers`): `inputPolicy.leadAnswers.technical`.
    */
   leadTechnicalAnswers?: boolean;
+  /** Закреплённый node (`policy.toolchain`): предложение init. */
+  toolchainPin?: { node: string };
 }): GeneratedPolicy {
   const { profile, writer, packageManager, model } = input;
   const lead = input.lead ?? writer;
@@ -238,6 +240,9 @@ export function generatePolicy(input: {
   };
   const { runTimeoutMs } = executionFieldsOf(policy, profile);
   if (runTimeoutMs !== policy.runTimeoutMs) policy.runTimeoutMs = runTimeoutMs;
+  // Закреплённый node — последним полем: `lean` дописывает и возвращает поля
+  // профиля на их место, и файл после `lean --off` совпадает с init без слоя.
+  if (input.toolchainPin) policy.toolchain = input.toolchainPin;
   // В файл пишется input-форма, но только прошедшая схему.
   const parsed = executionPolicySchema.parse(policy);
   if (model) {

@@ -98,7 +98,7 @@ test('attemptSummaryLine: на пределе незасчитанных отк�
   });
   assert.equal(
     line,
-    'попыток 3; отказов 3 (environment 3); по времени 0; прервано остановкой 0; принято 0; исчерпан предел незасчитанных отказов 3 из 3: повтор — только со сбросом',
+    'запусков 3, из них засчитано попыток 0; отказов 3 (environment 3); по времени 0; прервано остановкой 0; принято 0; исчерпан предел незасчитанных отказов 3 из 3: повтор — только со сбросом',
   );
   assert.doesNotMatch(line, /осталось попыток/);
   assert.match(
@@ -207,7 +207,7 @@ test('status и explain: строка сводки на поручение со�
     });
     assert.equal(
       w.line,
-      `попыток 7; отказов 5 (defect 2, environment 2, time-limit 1); по времени 1; прервано остановкой 1; принято 1; осталось попыток 1 из 6, восстановлений группы ${ctx.policy.repairBudget} из ${ctx.policy.repairBudget}`,
+      `запусков 7, из них засчитано попыток 5; отказов 5 (defect 2, environment 2, time-limit 1); по времени 1; прервано остановкой 1; принято 1; осталось попыток 1 из 6, восстановлений группы ${ctx.policy.repairBudget} из ${ctx.policy.repairBudget}`,
     );
     // Предел незасчитанных отказов — только у незавершённой работы; у
     // принятой и отменённой строка называет итог (остаток попыток).
@@ -276,7 +276,7 @@ test('status и explain: строка сводки на поручение со�
     // `status --human` — `statusText` и строка прогноза выпуска (alpha.60, `view.forecast`).
     const text = statusText(envelope.data);
     assert.ok(human.stdout.startsWith(text), human.stdout);
-    assert.match(human.stdout.slice(text.length), /^Прогноз выпуска: [^\n]+\.\n$/);
+    assert.match(human.stdout.slice(text.length), /^Прогноз выпуска: [^\n]+\.\n( {2}[^\n]+\n)*$/);
     assert.ok(human.stdout.includes(`w [done]: ${w.line}\n`));
     assert.ok(human.stdout.includes(`x [ready]: ${x.line}\n`));
 
@@ -307,7 +307,10 @@ test('status и explain: строка сводки на поручение со�
     assert.ok(withUpdate.stdout.startsWith(upText), withUpdate.stdout);
     assert.ok(upText.includes(`Обновления: ${line}\n`), upText);
     assert.ok(statusJson.data.runner && upText.includes(statusJson.data.runner.line), upText);
-    assert.match(withUpdate.stdout.slice(upText.length), /^Прогноз выпуска: [^\n]+\.\n$/);
+    assert.match(
+      withUpdate.stdout.slice(upText.length),
+      /^Прогноз выпуска: [^\n]+\.\n( {2}[^\n]+\n)*$/,
+    );
     assert.ok(!/до меньше минуты/.test(withUpdate.stdout));
     // Настройка обновлений не по схеме: status не падает и не печатает
     // «Обновления: <ошибка>» — поля нет, одно предупреждение на stderr.

@@ -5,7 +5,7 @@
 /** Мажорная версия документа: меняется, только когда поле удалено, переименовано или меняет смысл. */
 export const OPERATOR_VIEW_VERSION = 1 as const;
 /** Ревизия внутри мажорной версии: растёт при добавлениях (необязательное поле, значение перечисления). */
-export const OPERATOR_VIEW_REVISION = 4;
+export const OPERATOR_VIEW_REVISION = 5;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -47,6 +47,14 @@ export const OPERATOR_VIEW_LIMITS = {
   sources: 10,
   /** Пунктов «что нового» в `updates.whatsNew` (ревизия 4). */
   updatesWhatsNew: 10,
+  /** Задачи, добавленные в выпуск после его начала (`forecast.progress.added`, ревизия 5). */
+  forecastAdded: 10,
+  /** Незаконченные работы в `forecast.progress.works` (ревизия 5). */
+  forecastWorks: 50,
+  /** Задачи, ждущие проверки человека в источнике (`sourceReviews[].tasks`, ревизия 5). */
+  sourceReviewTasks: 50,
+  /** Строки этапа настройки (`stage.lines`, ревизия 5). */
+  stageLines: 5,
 } as const;
 
 /** Пределы свободных строк (символов) после маскирования. */

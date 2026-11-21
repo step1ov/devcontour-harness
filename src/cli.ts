@@ -45,7 +45,7 @@ import { initProject, initText } from './init/project.ts';
 import { leadSandboxCheck } from './environment/lead-sandbox.ts';
 import { leanMismatch, leanText, switchLean } from './init/lean.ts';
 import { diagnoseState, explainText } from './explain/diagnose.ts';
-import { statusFrame, statusSettled, statusText } from './control/status.ts';
+import { statusFrame, statusSettled, statusSetup, statusText } from './control/status.ts';
 import { planCheck, planRequestOf } from './planning/check.ts';
 import { checkJsonBytes } from './catalog/bytes.ts';
 import { isSharedOperation, sharedOperations } from './catalog/shared.ts';
@@ -55,7 +55,7 @@ import { hostGitArgs } from './environment/process.ts';
 import { FileContextSource, FileResultSink, FileWorkSource } from './connectors/files.ts';
 import { SqliteExecutionStore } from './storage/sqlite.ts';
 import { collectReportInput } from './control/report.ts';
-import { harnessView } from './control/operator-view.ts';
+import { harnessView, locateProject } from './control/operator-view.ts';
 import { OPERATOR_VIEW_VERSION } from './contracts/operator-view-limits.ts';
 import { reportTargets } from './control/target.ts';
 import { writeReportFile } from './control/report-file.ts';
@@ -315,10 +315,27 @@ const connectorOf = async (path: string, state: string, policy?: ExecutionPolicy
 const forecastLines = (state: string): string | undefined => {
   try {
     const view = harnessView({ stateDir: state }) as {
-      forecast?: { progress: { line: string }; time: { line: string } };
+      forecast?: {
+        progress: {
+          line: string;
+          added?: { line: string }[];
+          works?: { line: string; percent: number; attempt?: unknown }[];
+        };
+        time: { line: string };
+      };
+      sourceReviews?: { line: string }[];
     };
     const f = view.forecast;
-    return f ? `Прогноз выпуска: ${f.progress.line}; ${f.time.line}.\n` : undefined;
+    const out = [
+      ...(f ? [`Прогноз выпуска: ${f.progress.line}; ${f.time.line}.`] : []),
+      ...(f?.progress.added ?? []).map((a) => `  ${a.line}`),
+      // Готовность незаконченных работ: принятые уже видны строками работ.
+      ...(f?.progress.works ?? [])
+        .filter((w) => w.percent < 100 && w.attempt)
+        .map((w) => `  ${w.line}`),
+      ...(view.sourceReviews ?? []).map((r) => `От вас: ${r.line}.`),
+    ];
+    return out.length ? out.join('\n') + '\n' : undefined;
   } catch {
     return undefined;
   }
@@ -1246,6 +1263,30 @@ async function run(
     case 'status':
     case 'events':
     case 'result': {
+      // До настройки статус — этап `setup` простыми строками, а не NOT_FOUND:
+      // `--repository` без manifest или с manifest, но ещё без базы состояния;
+      // `--state` — только каталог, которого нет совсем. База без привязки и
+      // пустой каталог — прежний отказ: это не настройка, а неисправность.
+      if (command === 'status' && !v.watch && v.interval === undefined) {
+        const located =
+          v.repository && !v.state
+            ? locateProject({ repository: v.repository })
+            : { stateDir: resolve(need('state')) };
+        if (
+          !located ||
+          (located.fromManifest
+            ? !existsSync(join(located.stateDir, 'state.sqlite'))
+            : !existsSync(located.stateDir))
+        ) {
+          const data = statusSetup(located ? 'state' : 'project');
+          return {
+            command,
+            data,
+            ...(v.human ? { text: data.setup!.lines.join('\n') + '\n' } : {}),
+          };
+        }
+        v.state = located.stateDir;
+      }
       if (command === 'status' && (v.watch || v.interval !== undefined))
         return { command, ...(await watchStatus(need('state'), v)) };
       const h = open(need('state'), binding(need('state')), 'state');
@@ -1607,7 +1648,11 @@ async function run(
       return {
         command,
         data: harnessView({
-          stateDir: need('state'),
+          // Ревизия 5: `--repository <корень>` — состояние и политика из
+          // `.harness/project.json`; до настройки — документ этапа `setup`.
+          ...(v.repository && !v.state
+            ? { repository: v.repository }
+            : { stateDir: need('state') }),
           ...optional('policyPath', v.policy),
           ...optional('workId', v.work),
           ...(v['no-titles'] ? { titles: false } : {}),

@@ -181,6 +181,7 @@ for (const required of [
   'lib/contracts/operator-view.js',
   'schemas/operator-view.schema.json',
   'schemas/work-detail-view.schema.json',
+  'schemas/setup-view.schema.json',
 ])
   if (!packed.files.some((f) => f.path === required)) fail('нет файла ' + required);
 

@@ -12,6 +12,7 @@ import {
 } from './primitives.ts';
 import { workGraphSchema, workOrderSchema } from './work.ts';
 import { contextPinSchema, contextSnapshotSchema } from './context.ts';
+import { toolchainFactsSchema } from './toolchain.ts';
 import {
   deliveryStateSchema,
   gateApplicabilitySchema,
@@ -427,6 +428,11 @@ export const evidenceRecordSchema = z.strictObject({
    * отчёта той же записи. Нет у gate без отчёта и у прежних записей.
    */
   reportDigest: digestSchema.optional(),
+  /**
+   * Фактический toolchain процесса проверки (первый `node` в PATH окружения
+   * фазы, его версия; `pnpm` при наличии). Нет у прежних записей и у ревью.
+   */
+  toolchain: toolchainFactsSchema.optional(),
   /** Только у записи `not-applicable`: правило и diff, по которым gate не исполнялся. */
   notApplicable: gateApplicabilitySchema.optional(),
   /**

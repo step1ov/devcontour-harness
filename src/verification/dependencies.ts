@@ -121,6 +121,7 @@ export async function snapshotDependencies(input: {
           DEVCONTOUR_COMPONENTS_JSON: JSON.stringify(paths),
         },
         input.environment,
+        input.policy.toolchain,
       );
       if (input.onStep)
         execution.onStep = (step) =>

@@ -283,6 +283,13 @@ export const workViewSchema = z.strictObject({
     interrupted: count,
     rechecks: count,
     neutral: z.strictObject({ used: count, max: count }),
+    /**
+     * Ревизия 5: запусков всего, в том числе незасчитанных (вопрос
+     * исполнителя, отказ окружения, остановка controller). `used` — только
+     * засчитанные в предел `max`; строка `line` называет оба числа. Нет
+     * поля — запусков столько же, сколько засчитано.
+     */
+    runs: count.optional(),
     line: freeText(T.line).optional(),
     lastFailure: z
       .strictObject({
@@ -502,10 +509,42 @@ const forecastSchema = z.strictObject({
     left: count,
     basis: z.enum(['scope', 'works']),
     line: z.string().min(1).max(T.line),
+    /** Ревизия 5: задачи, добавленные в выпуск после его начала. */
+    added: z
+      .array(
+        z.strictObject({
+          key: token(200),
+          workId: id.optional(),
+          at: isoTimeSchema,
+          before: count,
+          after: count,
+          line: z.string().min(1).max(T.line),
+        }),
+      )
+      .max(L.forecastAdded)
+      .optional(),
+    /** Ревизия 5: готовность каждой работы (не падает на повторе) и её попытка из предела. */
+    works: z
+      .array(
+        z.strictObject({
+          workId: id,
+          key: token(200).optional(),
+          percent: z.number().int().min(0).max(100),
+          attempt: z
+            .strictObject({ n: z.number().int().positive(), max: z.number().int().positive() })
+            .optional(),
+          retry: z.enum(['repair', 'answer']).optional(),
+          line: z.string().min(1).max(T.line),
+        }),
+      )
+      .max(L.forecastWorks)
+      .optional(),
   }),
   time: z.strictObject({
     startedAt: isoTimeSchema.optional(),
     elapsedMs: count.optional(),
+    /** Ревизия 5: выпуск закончен — конец последней попытки (`elapsedMs` — до него). */
+    finishedAt: isoTimeSchema.optional(),
     remaining: z
       .strictObject({
         loMs: count,
@@ -514,6 +553,17 @@ const forecastSchema = z.strictObject({
         attemptsPerTask: z.number().min(1),
       })
       .optional(),
+    /** Ревизия 5: грубая оценка при 1–4 закончившихся попытках выпуска («грубо, по N попыткам»). */
+    rough: z
+      .strictObject({
+        loMs: count,
+        hiMs: count,
+        samples: z.number().int().positive(),
+        attemptsPerTask: z.number().min(1),
+      })
+      .optional(),
+    /** Ревизия 5: чем названо «осталось». */
+    estimate: z.enum(['precise', 'rough', 'unknown', 'nothing']).optional(),
     humanWait: z.strictObject({ works: count, ms: count, since: isoTimeSchema.optional() }),
     line: z.string().min(1).max(T.line),
   }),
@@ -584,6 +634,45 @@ export const operatorViewSchema = z.strictObject({
    */
   scopeReason: z.enum(['no-snapshot', 'unreadable']).optional(),
   sourceQuestions: z.array(sourceQuestionViewSchema).max(L.sourceQuestions).optional(),
+  /**
+   * Ревизия 5: принятые работы, оставленные в источнике задач на проверку
+   * человеку (`completion.mode: review-only` или колонка не done): по
+   * последней доставке и последнему чтению связки. Каждая задача — и
+   * эскалация `SOURCE_REVIEW` (actor `operator`).
+   */
+  sourceReviews: z
+    .array(
+      z.strictObject({
+        connector: id,
+        provider: token(80),
+        tasks: z
+          .array(
+            z.strictObject({
+              taskId: id,
+              key: token(200).optional(),
+              workId: id,
+              column: token(40),
+              since: isoTimeSchema,
+            }),
+          )
+          .min(1)
+          .max(L.sourceReviewTasks),
+        line: z.string().min(1).max(T.line),
+      }),
+    )
+    .max(L.sources)
+    .optional(),
+  /**
+   * Ревизия 5: этап проекта. `setup` — harness ещё настраивается (нет
+   * состояния, политики или ни одной работы): `lines` — простые фразы для
+   * панели («Идёт настройка harness», «Задач пока нет»). `work` — работы есть.
+   */
+  stage: z
+    .strictObject({
+      name: z.enum(['setup', 'work']),
+      lines: z.array(z.string().min(1).max(T.line)).max(L.stageLines),
+    })
+    .optional(),
   forecast: forecastSchema.optional(),
   /**
    * Обновления harness и панели по последней проверке `harness update
@@ -606,6 +695,10 @@ export const operatorViewSchema = z.strictObject({
     .strictObject({
       scope: truncatedCount.optional(),
       sourceQuestions: truncatedCount.optional(),
+      /** Ревизия 5: задачи `sourceReviews[].tasks` сверх предела. */
+      sourceReviews: truncatedCount.optional(),
+      /** Ревизия 5: незаконченные работы сверх `forecast.progress.works`. */
+      forecastWorks: truncatedCount.optional(),
       works: truncatedCount.optional(),
       reviews: truncatedCount.optional(),
       findings: truncatedCount.optional(),
@@ -705,5 +798,24 @@ export const workDetailViewSchema = z.strictObject({
 });
 export type WorkDetailViewDocument = z.infer<typeof workDetailViewSchema>;
 
-/** Ответ `harness view`: обзор или, с `--work`, детали работы. */
-export const viewDataSchema = z.union([operatorViewSchema, workDetailViewSchema]);
+/**
+ * Документ настройки (ревизия 5): harness в проекте ещё не настроен (нет
+ * `.harness/project.json`, политики или привязанного состояния). Вместо отказа
+ * `harness view` отдаёт этап `setup` с простыми строками; панель перечитывает
+ * представление, пока не придёт обзор.
+ */
+export const setupViewSchema = z.strictObject({
+  viewVersion: z.literal(OPERATOR_VIEW_VERSION),
+  viewRevision: count,
+  generatedAt: isoTimeSchema,
+  source: sourceSchema,
+  stage: z.strictObject({
+    name: z.literal('setup'),
+    lines: z.array(z.string().min(1).max(T.line)).min(1).max(L.stageLines),
+  }),
+  setup: z.strictObject({ waitingFor: z.enum(['project', 'policy']) }),
+});
+export type SetupViewDocument = z.infer<typeof setupViewSchema>;
+
+/** Ответ `harness view`: обзор, с `--work` — детали работы, до настройки — документ настройки. */
+export const viewDataSchema = z.union([operatorViewSchema, workDetailViewSchema, setupViewSchema]);

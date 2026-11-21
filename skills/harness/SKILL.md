@@ -299,6 +299,11 @@ each previous finding. The record says `acceptance: false`: an approved
 `review-code` is a review, not acceptance — say so to the user, and use
 `run` when the work must be accepted.
 
+Run the heavy commands — `smoke`, `smoke --writer-probe`, `gates`, `run` —
+**one at a time**, never in parallel or as concurrent background jobs: they
+share the dependency store, ports and CPU, and a parallel run fails for
+reasons that are not in the project.
+
 When the project has `lifecycle`, `prepare` or a dependency store, check the
 environment alone first — never debug lifecycle or seed through paid attempts:
 
@@ -534,6 +539,14 @@ of editing the policy by hand:
 `$H result --state <state> --work <id>`: `data.result.outcome` must be
 `accepted` and `data.result.shas.result` must equal `git rev-parse <targetRef>`
 in the repository. Report what the harness recorded, not your own summary.
+Link only addresses the user runs and keeps (their own site or dashboard),
+never a temporary port of a server you started in this session and stop:
+such links are dead once you leave. A gate that fails only for you
+while `doctor` warns that `PATH` Node differs from `toolchain.node` is an
+environment problem — fix the shell or the pin, not the code or the gate.
+A failed gate whose text says its node differs from the last passing run of
+that gate still counts as a failure: pin `toolchain.node` (or fix the shell)
+before you blame the code.
 
 After acceptance the target ref can move on. `result` (`data.target`) and
 `status` (`works[].target`) compare the accepted SHA with the current ref:

@@ -163,6 +163,8 @@ const ADDITIVE_EVENT_TYPES = new Set([
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([
   'status--detail',
+  // Корень проекта вместо --state (0.1.0-alpha.65).
+  'status--repository',
   // Текст сводки попыток для человека (0.1.0-alpha.52).
   'status--human',
   'init--lean',
@@ -376,6 +378,12 @@ test('H3-01: прежние команды и схемы их данных не 
               const copy: CliArgument = { ...arg };
               delete copy.multiple;
               if (c === 'init' && arg.name === '--writer') copy.description = H2_INIT_WRITER;
+              // alpha.65: --state у status заменим --repository — прежний обязательный аргумент.
+              if (c === 'status' && arg.name === '--state')
+                Object.assign(copy, {
+                  required: true,
+                  description: 'Каталог состояния исполнения',
+                });
               return copy;
             }),
         },
@@ -436,6 +444,8 @@ test('H3-01: прежние команды и схемы их данных не 
       // счёт взятых gates попытки и ссылка записи evidence.
       delete rest.reused;
       delete rest.reusedEvidence;
+      // Фактический toolchain проверки у evidence (0.1.0-alpha.65).
+      delete rest.toolchain;
       // `when` — только у схемы gate задачи (у gate совместной проверки его нет).
       if ('command' in rest && 'timeoutMs' in rest && !('repositoryId' in rest)) delete rest.when;
       v = rest;
@@ -480,6 +490,41 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.unused;
       v = rest;
     }
+    // Закреплённый toolchain (0.1.0-alpha.65): поле политики, toolchain
+    // запуска в итоге `harness gates`, предложение init, причина отказа
+    // окружения `toolchain`.
+    if (
+      k === 'properties' &&
+      v &&
+      typeof v === 'object' &&
+      'policyVersion' in v &&
+      'repositories' in v
+    ) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.toolchain;
+      v = rest;
+    }
+    if (
+      k === 'properties' &&
+      v &&
+      typeof v === 'object' &&
+      'exitCode' in v &&
+      'summary' in v &&
+      'log' in v &&
+      'message' in v &&
+      'gate' in v
+    ) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.toolchain;
+      v = rest;
+    }
+    if (k === 'properties' && v && typeof v === 'object' && 'facts' in v && 'manifestPath' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.toolchainPin;
+      v = rest;
+    }
+    if (k === 'enum' && Array.isArray(v) && v.includes('writer-environment'))
+      v = (v as unknown[]).filter((x) => x !== 'toolchain');
     if (Array.isArray(v))
       return (v as unknown[]).filter(
         (x) =>
@@ -539,6 +584,8 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.notes;
       // Модель и effort по ролям политики (0.1.0-alpha.64).
       delete rest.models;
+      // Закреплённый toolchain политики (0.1.0-alpha.65).
+      delete rest.toolchainPin;
       return rest;
     }
     // Аддитивные поля ответов коннектора (0.1.0-alpha.60): совместимость с
@@ -638,6 +685,8 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.reviewsTruncated;
       // Кто двигает очередь (`runner`, 0.1.0-alpha.60).
       delete rest.runner;
+      // Этап настройки до состояния (`setup`, 0.1.0-alpha.65).
+      delete rest.setup;
       // Обновления по последней проверке `harness update --check` (0.1.0-alpha.60).
       delete rest.updates;
       return rest;
@@ -830,8 +879,14 @@ test('H3-01: --help называет capabilities; прежние команды
     [['capabilities', '--human'], 2, ['apiVersion', 'command', 'ok', 'error']],
     [['capabilities', 'extra'], 2, ['apiVersion', 'command', 'ok', 'error']],
     [['profile', '--profile', 'npm-ci'], 0, ['apiVersion', 'command', 'ok', 'data']],
+    // alpha.65: статус до настройки — данные этапа setup, а не NOT_FOUND.
     [
       ['status', '--state', '/nonexistent-harness-state'],
+      0,
+      ['apiVersion', 'command', 'ok', 'data'],
+    ],
+    [
+      ['events', '--state', '/nonexistent-harness-state'],
       3,
       ['apiVersion', 'command', 'ok', 'error'],
     ],

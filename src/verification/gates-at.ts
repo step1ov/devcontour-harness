@@ -342,6 +342,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
             }),
           },
           source,
+          ctx.policy.toolchain,
         );
         if (input.onStep) execution.onStep = (step) => input.onStep!(step);
         const boundary = ctx.boundary();
