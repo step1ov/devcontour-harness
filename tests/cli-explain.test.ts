@@ -507,10 +507,13 @@ test('H1-03/H1-05: нет state — NOT_FOUND, каталог не создан;
   assert.equal(human.status, r.status);
   assert.deepEqual(JSON.parse(human.stdout), r.json, 'отказ при --human — тот же конверт');
   assert.equal(existsSync(missing), false);
-  // --human у status (сводка попыток): отказ — тот же JSON-конверт; у events --human нет.
+  // alpha.65: status без состояния — этап настройки (JSON и строки --human), каталог не создан.
   const status = p.json(['status', '--state', missing]);
+  assert.equal(status.status, 0);
+  assert.equal(status.json.data.setup.waitingFor, 'state');
   const statusHuman = p.harness(['status', '--state', missing, '--human']);
-  assert.equal(statusHuman.status, status.status);
-  assert.deepEqual(JSON.parse(statusHuman.stdout), status.json);
+  assert.equal(statusHuman.status, 0);
+  assert.equal(statusHuman.stdout, 'Идёт настройка harness\nЗадач пока нет\n');
+  assert.equal(existsSync(missing), false);
   assert.equal(p.harness(['events', '--state', missing, '--human']).status, exitCodes.input);
 });

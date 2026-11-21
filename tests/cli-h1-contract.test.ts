@@ -97,8 +97,14 @@ test('H1-05: прежние команды отвечают тем же конв
   const cases: [string[], number, string[]][] = [
     [['version'], 0, ['apiVersion', 'command', 'ok', 'data']],
     [['profile', '--profile', 'npm-ci'], 0, ['apiVersion', 'command', 'ok', 'data']],
+    // alpha.65: статус до настройки — данные этапа setup, а не NOT_FOUND.
     [
       ['status', '--state', '/nonexistent-harness-state'],
+      0,
+      ['apiVersion', 'command', 'ok', 'data'],
+    ],
+    [
+      ['events', '--state', '/nonexistent-harness-state'],
       3,
       ['apiVersion', 'command', 'ok', 'error'],
     ],

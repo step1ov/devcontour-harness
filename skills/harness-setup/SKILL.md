@@ -543,10 +543,10 @@ edits, controller mode, the connector check and snapshot (`graphId`,
 → `run` (for Relay: `review-plan` and `run --source`). A live `run` or
 `review-plan` calls paid models: start it when the user asks.
 
-Links in the report point to what stays up after you leave: the operator's
-panel or site the user runs (ask for its address when unknown). Never link a
-temporary port of a server or panel you started yourself and stop at the end
-of the session.
+Links in the report point to what stays up after you leave: the site or
+dashboard the user runs (ask for its address when unknown). Never link a
+temporary port of a server you started yourself and stop at the end of the
+session.
 
 ## Upgrade
 

@@ -96,7 +96,15 @@ test('Неизвестная команда и читающие команды �
   assert.equal(unknown.json.error?.code, 'UNSUPPORTED_COMMAND');
   assert.equal(unknown.json.command, null);
   assert.equal(unknown.untouched, true);
-  for (const command of ['status', 'events', 'pause', 'result']) {
+  // alpha.65: status без состояния — этап настройки, тоже без записи.
+  const setup = harness(['status', '--state', 'state']);
+  assert.equal(setup.status, 0);
+  assert.equal(
+    (setup.json.data as { setup?: { waitingFor?: string } })?.setup?.waitingFor,
+    'state',
+  );
+  assert.equal(setup.untouched, true);
+  for (const command of ['events', 'pause', 'result']) {
     const read = harness([command, '--state', 'state', '--work', 'w']);
     assert.equal(read.status, 3, command);
     assert.equal(read.json.command, command);

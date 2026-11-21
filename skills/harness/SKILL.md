@@ -539,9 +539,9 @@ of editing the policy by hand:
 `$H result --state <state> --work <id>`: `data.result.outcome` must be
 `accepted` and `data.result.shas.result` must equal `git rev-parse <targetRef>`
 in the repository. Report what the harness recorded, not your own summary.
-Link the operator's panel or site (the one the user runs and keeps), never a
-temporary port of a server, site or panel you started in this session and
-stop: such links are dead once you leave. A gate that fails only for you
+Link only addresses the user runs and keeps (their own site or dashboard),
+never a temporary port of a server you started in this session and stop:
+such links are dead once you leave. A gate that fails only for you
 while `doctor` warns that `PATH` Node differs from `toolchain.node` is an
 environment problem — fix the shell or the pin, not the code or the gate.
 

@@ -234,13 +234,15 @@ export function generatePolicy(input: {
     roles,
     review: { code: rule(writer), plan: rule(lead), contract: rule(lead) },
     ...profileExecution(profile),
-    ...(input.toolchainPin ? { toolchain: input.toolchainPin } : {}),
     ...(input.leadTechnicalAnswers
       ? { inputPolicy: { threshold: 7, criticalPaths: [], leadAnswers: { technical: true } } }
       : {}),
   };
   const { runTimeoutMs } = executionFieldsOf(policy, profile);
   if (runTimeoutMs !== policy.runTimeoutMs) policy.runTimeoutMs = runTimeoutMs;
+  // Закреплённый node — последним полем: `lean` дописывает и возвращает поля
+  // профиля на их место, и файл после `lean --off` совпадает с init без слоя.
+  if (input.toolchainPin) policy.toolchain = input.toolchainPin;
   // В файл пишется input-форма, но только прошедшая схему.
   const parsed = executionPolicySchema.parse(policy);
   if (model) {

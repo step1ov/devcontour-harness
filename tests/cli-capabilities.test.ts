@@ -173,10 +173,11 @@ test('H3-02: аргументы общей операции сверх пред�
 test('H3-02: команды вне каталога границей не ограничены — ни по аргументам, ни по ответу', () => {
   const big = 'g'.repeat(150_000);
   const status = harness(['status', '--state', '/nonexistent-harness-state', '--graph', big]);
-  assert.equal(status.status, exitCodes.refused, status.stderr);
+  // alpha.65: статус до настройки — этап setup, а не NOT_FOUND; длина аргумента не отказ.
+  assert.equal(status.status, exitCodes.ok, status.stderr);
   const s = oneJson(status.stdout);
-  assert.equal(s.error.code, 'NOT_FOUND');
-  assert.notDeepEqual(s.error.issues?.[0]?.path, ['argv']);
+  assert.equal(s.ok, true);
+  assert.equal(s.data.setup.waitingFor, 'state');
 });
 
 /** Пример пакета с собственным Git; codex/claude — fixture executables. */
