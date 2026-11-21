@@ -162,7 +162,7 @@ test('F-X: никто не запущен — очередь стоит, пер�
   const view = viewOf(env);
   assert.ok(operatorViewSchema.safeParse(view).success);
   assert.equal(view.viewRevision, OPERATOR_VIEW_REVISION);
-  assert.equal(OPERATOR_VIEW_REVISION, 4);
+  assert.equal(OPERATOR_VIEW_REVISION, 5);
   assert.equal(view.progress.queue.paused, false);
   assert.equal(view.progress.queue.runner, 'not-running');
   assert.equal(view.progress.queue.restartBy, 'lead');
@@ -391,7 +391,7 @@ test('attemptLine: «осталось 0» не стоит рядом с идущ
   };
   assert.equal(
     attemptLine(facts, 'ru'),
-    'попыток 4 (идёт 1); отказов 2 (gate 2); по времени 0; прервано остановкой 0; принято 0; идёт последняя засчитанная попытка (3 из 3)',
+    'запусков 4 (идёт 1), из них засчитано попыток 3; отказов 2 (gate 2); по времени 0; прервано остановкой 0; принято 0; идёт последняя засчитанная попытка (3 из 3)',
   );
   assert.match(attemptLine(facts, 'en'), /the last counted attempt is running \(3 of 3\)$/);
   assert.match(attemptLine({ ...facts, active: 0 }, 'ru'), /осталось попыток 0 из 3$/);

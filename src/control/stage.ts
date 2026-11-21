@@ -112,7 +112,8 @@ export interface WorkStageInput {
 
 /** Повтор и блокировка в строке этапа (`stageLine`). */
 export interface StageLineExtra {
-  attempt?: { n: number; max: number; used: boolean };
+  /** `n` — засчитанные попытки (`WorkState.attempt`); `runs` — запусков всего, если больше. */
+  attempt?: { n: number; max: number; used: boolean; runs?: number };
   lastFailure?: { relation: 'previous' | 'last'; ru: string; en: string };
   blockedBy?: { ru: string; en: string };
 }
@@ -211,8 +212,10 @@ function stageExtra(
       ? input.lastFailure
       : undefined;
   const n = input.work.attempt;
-  if (input.maxAttempts && n > 0 && (failure || n > 1))
-    extra.attempt = { n, max: input.maxAttempts, used: !live };
+  // Запусков больше засчитанных (вопрос исполнителя, отказ окружения) — оба числа.
+  const runs = input.attempts.length;
+  if (input.maxAttempts && n > 0 && (failure || n > 1 || runs > n))
+    extra.attempt = { n, max: input.maxAttempts, used: !live, ...(runs > n ? { runs } : {}) };
   if (failure)
     extra.lastFailure = {
       relation: live ? 'previous' : 'last',
@@ -336,8 +339,10 @@ export function stageLine(
     (s.elapsedMs !== undefined ? ` — ${durationText(s.elapsedMs, lang)}` : '') +
     (extra.attempt
       ? ru
-        ? `; ${extra.attempt.used ? 'попыток использовано' : 'попытка'} ${extra.attempt.n} из ${extra.attempt.max}`
-        : `; ${extra.attempt.used ? 'attempts used' : 'attempt'} ${extra.attempt.n} of ${extra.attempt.max}`
+        ? `; ${extra.attempt.used ? 'попыток использовано' : 'попытка'} ${extra.attempt.n} из ${extra.attempt.max}` +
+          (extra.attempt.runs ? ` (запусков ${extra.attempt.runs})` : '')
+        : `; ${extra.attempt.used ? 'attempts used' : 'attempt'} ${extra.attempt.n} of ${extra.attempt.max}` +
+          (extra.attempt.runs ? ` (runs ${extra.attempt.runs})` : '')
       : '') +
     (extra.lastFailure
       ? ru

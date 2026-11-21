@@ -23,6 +23,8 @@ export interface AttemptLineFacts {
 const words = {
   ru: {
     total: (n: number, active: number) => `попыток ${n}${active ? ` (идёт ${active})` : ''}`,
+    runs: (n: number, active: number, counted: number) =>
+      `запусков ${n}${active ? ` (идёт ${active})` : ''}, из них засчитано попыток ${counted}`,
     failed: (n: number) => `отказов ${n}`,
     more: (n: number) => `и ещё ${n}`,
     timeouts: (n: number) => `по времени ${n}`,
@@ -37,6 +39,8 @@ const words = {
   },
   en: {
     total: (n: number, active: number) => `attempts ${n}${active ? ` (${active} running)` : ''}`,
+    runs: (n: number, active: number, counted: number) =>
+      `runs ${n}${active ? ` (${active} running)` : ''}, counted attempts ${counted}`,
     failed: (n: number) => `failures ${n}`,
     more: (n: number) => `and ${n} more`,
     timeouts: (n: number) => `time limit ${n}`,
@@ -92,7 +96,15 @@ export function attemptLine(
     const hidden = f.failures.length - shown;
     if (hidden > 0) list.push(w.more(hidden));
     const failed = w.failed(f.failed) + (list.length ? ` (${list.join(', ')})` : '');
-    return [w.total(f.total, f.active), failed, ...rest].join('; ');
+    // Один смысл «попытки» во всех строках: засчитанная в предел. Запуски,
+    // которые предел не тратят (вопрос исполнителя, отказ окружения,
+    // остановка), названы отдельным числом — «попыток 3 … осталось 1 из 3»
+    // больше не расходится с «попытка 2 из 3».
+    const head =
+      f.total !== f.attempts.used
+        ? w.runs(f.total, f.active, f.attempts.used)
+        : w.total(f.total, f.active);
+    return [head, failed, ...rest].join('; ');
   };
   // Предел — для строки после маски: маска удлиняет текст, и обрезка после
   // неё отрезала бы хвост.

@@ -46,7 +46,7 @@ import {
   stopDiagnosisSchema,
 } from './diagnosis.ts';
 import { planCheckDataSchema, planRequestDataSchema } from './planning.ts';
-import { toolchainReportSchema } from './toolchain.ts';
+import { toolchainFactsSchema, toolchainReportSchema } from './toolchain.ts';
 import { operationCatalogSchema } from './catalog.ts';
 import { failureBuckets, reportDataSchema } from './report.ts';
 import { handoffPackSchema } from './handoff.ts';
@@ -1900,6 +1900,19 @@ export const statusDataSchema = z.strictObject({
   /** Предметов ревью сверх предела строк `reviews` (50); нет поля — все показаны. */
   reviewsTruncated: z.number().int().positive().optional(),
   /**
+   * 0.1.0-alpha.65: harness ещё настраивается — нет `.harness/project.json`
+   * (`waitingFor: project`) или привязанного состояния (`state`). Вместо
+   * NOT_FOUND — пустой статус с этапом настройки простыми строками
+   * («Идёт настройка harness», «Задач пока нет»). Нет поля — состояние есть.
+   */
+  setup: z
+    .strictObject({
+      waitingFor: z.enum(['project', 'state']),
+      lines: z.array(z.string().min(1).max(200)).min(1).max(5),
+      linesEn: z.array(z.string().min(1).max(200)).min(1).max(5),
+    })
+    .optional(),
+  /**
    * Только `status --detail`: время снимка, почему стоит выдача и активные
    * попытки (стадия, длительность, владение, gates). Без флага поля нет.
    */
@@ -2059,6 +2072,21 @@ export const doctorDataSchema = z.strictObject({
   /** Диагностика toolchain репозиториев политики; есть, когда задана политика. */
   toolchains: z.array(toolchainReportSchema).optional(),
   /**
+   * Закреплённый toolchain политики (`policy.toolchain.node`, 0.1.0-alpha.65):
+   * запрошенное, разрешённый каталог и версия, node первым в PATH процесса
+   * `doctor` и совпадают ли они. Нет — закрепления нет или оно не разрешилось
+   * (тогда строка в `problems`).
+   */
+  toolchainPin: z
+    .strictObject({
+      requested: z.string(),
+      binDir: z.string(),
+      version: z.string(),
+      pathNode: z.strictObject({ version: z.string(), path: z.string() }).optional(),
+      matches: z.boolean(),
+    })
+    .optional(),
+  /**
    * Порты ресурсов `port` политики: проба без остановки процессов; `leased` —
    * под арендой идущей попытки, не пробуется. Нет — портов в политике нет.
    */
@@ -2178,6 +2206,12 @@ export const gatesDataSchema = z.strictObject({
       /** Лог gate. */
       log: z.string().optional(),
       message: z.string().optional(),
+      /**
+       * Фактический toolchain запуска (0.1.0-alpha.65): первый node в PATH
+       * окружения проверки, его версия, pnpm при наличии. Успешный запуск —
+       * основание сверки провала попытки под другим node.
+       */
+      toolchain: toolchainFactsSchema.optional(),
     }),
   ),
   /** Каталог логов и артефактов проверки. */
@@ -2641,6 +2675,15 @@ export const initDataSchema = z.strictObject({
       line: z.string(),
       lineEn: z.string(),
     })
+    .optional(),
+  /**
+   * Закреплённый node новой политики (`policy.toolchain.node`,
+   * 0.1.0-alpha.65): версия и откуда она — `.nvmrc`, `.node-version`,
+   * `package.json engines.node` (точная и установленная) или node, который
+   * запустил init. Нет — политика сохранена прежде, закрепление не менялось.
+   */
+  toolchainPin: z
+    .strictObject({ node: z.string(), version: z.string(), source: z.string() })
     .optional(),
   /** Предупреждения подготовки: не отказ, но требуют внимания до запуска. */
   warnings: z.array(

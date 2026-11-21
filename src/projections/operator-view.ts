@@ -182,21 +182,65 @@ export interface ForecastView {
     done: number;
     inWork: number;
     left: number;
-    /** Объём: срез прогона связки (`scope`) или только работы harness. */
+    /**
+     * Объём: задачи связки (`scope`) или только работы harness. С ревизии 5
+     * `scope` — весь выпуск (все задачи всех снимков связки и все работы
+     * состояния), а не последний срез `run`.
+     */
     basis: 'scope' | 'works';
     line: string;
+    /** Ревизия 5: задачи, добавленные в выпуск после его начала (по первому снимку с ними). */
+    added?: {
+      key: string;
+      workId?: string;
+      at: string;
+      before: number;
+      after: number;
+      line: string;
+    }[];
+    /**
+     * Ревизия 5: готовность каждой работы — не падает на повторе (наибольший
+     * дошедший этап всех попыток), засчитанная попытка из предела и что идёт.
+     */
+    works?: {
+      workId: string;
+      key?: string;
+      percent: number;
+      attempt?: { n: number; max: number };
+      /** `repair` — повтор исправляет замечания прошлой попытки; `answer` — продолжает после вопроса. */
+      retry?: 'repair' | 'answer';
+      line: string;
+    }[];
   };
   time: {
-    /** Начало первой попытки этого объёма и сколько прошло с него. */
+    /** Начало выпуска (первый снимок связки или первая попытка объёма) и сколько прошло с него. */
     startedAt?: string;
     elapsedMs?: number;
+    /** Ревизия 5: выпуск закончен (всё принято) — конец последней попытки; `elapsedMs` — до него. */
+    finishedAt?: string;
     /** Осталось: диапазон по наблюдённым попыткам; нет — неизвестно. */
     remaining?: { loMs: number; hiMs: number; samples: number; attemptsPerTask: number };
+    /**
+     * Ревизия 5: грубая оценка, пока закончившихся попыток выпуска меньше
+     * `OPERATOR_VIEW_TYPICAL_MIN_SAMPLES` (но хотя бы одна): разброс — от
+     * самой короткой до самой долгой попытки; строка — «грубо, по N попыткам».
+     */
+    rough?: { loMs: number; hiMs: number; samples: number; attemptsPerTask: number };
+    /** Ревизия 5: чем названо «осталось» — `precise`, `rough`, `unknown` (ни одной закончившейся попытки) или `nothing`. */
+    estimate?: 'precise' | 'rough' | 'unknown' | 'nothing';
     /** Ожидание людей и ведущего сейчас (`ms` — самое долгое) — в прогноз не входит. */
     humanWait: { works: number; ms: number; since?: string };
     line: string;
   };
   assumptions: string[];
+}
+
+/** Принятые работы связки, оставленные на проверку человеку в источнике (ревизия 5). */
+export interface SourceReviewView {
+  connector: string;
+  provider: string;
+  tasks: { taskId: string; key?: string; workId: string; column: string; since: string }[];
+  line: string;
 }
 
 /** Основание последнего ответа на вопрос (ревизия 1). */
@@ -262,6 +306,8 @@ export interface WorkView {
     interrupted: number;
     rechecks: number;
     neutral: { used: number; max: number };
+    /** Ревизия 5: запусков всего, в том числе незасчитанных; `used` — засчитанные. */
+    runs?: number;
     line?: string;
     /**
      * `kind` — класс отказа движка (`failureKind`), `counted` — засчитана ли
@@ -371,6 +417,8 @@ export interface ViewHealth {
 export type TruncatedKey =
   | 'scope'
   | 'sourceQuestions'
+  | 'sourceReviews'
+  | 'forecastWorks'
   | 'works'
   | 'reviews'
   | 'findings'
@@ -443,6 +491,10 @@ export interface OperatorView {
    */
   scopeReason?: 'no-snapshot' | 'unreadable';
   sourceQuestions?: SourceQuestionView[];
+  /** Ревизия 5: принятые работы, ждущие проверки человека в источнике задач. */
+  sourceReviews?: SourceReviewView[];
+  /** Ревизия 5: этап проекта — `setup` (настройка, задач нет) или `work`. */
+  stage?: { name: 'setup' | 'work'; lines: string[] };
   forecast?: ForecastView;
   updates?: UpdatesView;
   truncated?: Partial<Record<TruncatedKey, number>>;
@@ -637,6 +689,8 @@ export interface OperatorAttemptInput {
   callsRecorded?: boolean;
   runtime: string;
   model?: string;
+  /** Самый дальний этап попытки (`prepare` … `integration`) по её замерам: прогресс не падает на повторе. */
+  reached?: string;
   stages?: readonly {
     stage: string;
     startedAt: string;
@@ -938,6 +992,30 @@ export interface OperatorViewInput {
 export interface OperatorSourceInput {
   connector: string;
   provider: string;
+  /**
+   * Объём выпуска: все задачи всех снимков связки (доска), с последним
+   * известным состоянием и временем первого снимка задачи. Нет — только срез.
+   */
+  release?: readonly {
+    id: string;
+    key: string;
+    title?: string;
+    workId?: string;
+    orderId: string;
+    column?: string;
+    firstSeenAt?: string;
+    problems: readonly { code: string; message: string }[];
+  }[];
+  /** Время первого снимка связки: начало выпуска по источнику. */
+  releaseStartedAt?: string;
+  /** Принятые работы, оставленные в источнике на проверку человеку (`completion.mode: review-only`). */
+  reviews?: readonly {
+    taskId: string;
+    key?: string;
+    workId: string;
+    column: string;
+    since: string;
+  }[];
   /** Задачи последнего снимка в порядке конфигурации. */
   tasks: readonly {
     id: string;
@@ -1353,6 +1431,8 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
       interrupted: a.interrupted,
       rechecks: w.rechecks,
       neutral: { used: a.neutral.used, max: a.neutral.max },
+      // Только при расхождении с засчитанными: иначе число то же, что `used`.
+      ...(a.lineFacts && a.lineFacts.total !== a.attempts.used ? { runs: a.lineFacts.total } : {}),
       // Из чисел строки — уже замаскирована и в пределе: вторая маска поверх
       // метки удлинила бы строку и отрезала хвост. Иначе — строка загрузчика.
       ...((line) => (line ? { line } : {}))(
@@ -1664,45 +1744,72 @@ function durationText(msValue: number, lang: 'ru' | 'en'): string {
 const rank = (sorted: number[], q: number) =>
   sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))]!;
 
+/** Попыток: «1 попытке», «2 попыткам», «5 попыткам» (дательный — «по N попыткам»). */
+const byAttempts = (n: number, en: boolean) =>
+  en
+    ? `${n} attempt${n === 1 ? '' : 's'}`
+    : `${n} ${n % 10 === 1 && n % 100 !== 11 ? 'попытке' : 'попыткам'}`;
+
 /**
- * Прогноз выпуска (P11). Объём — срез прогона связки, если он есть (задачи,
- * ещё не переданные в harness, считаются с весом 0), иначе работы harness;
- * отменённые не входят. Принятая работа — 1, работа на этапе попытки — доля
- * этапов до текущего (`prepare` … `integration`), остальные — 0. Осталось:
- * незавершённая доля объёма × длительность попытки (p50 / p90 закончившихся
- * попыток, не меньше 5 образцов) × попыток на принятую задачу; нижняя граница
- * — параллельно на `concurrency`, верхняя — последовательно. Ожидание людей и
- * ведущего в прогноз не входит и называется отдельно.
+ * Прогноз выпуска (P11, ревизия 5). Объём — весь выпуск: все задачи всех
+ * снимков связки (доска, а не последний срез `run`; не переданные в harness —
+ * с весом 0) и все работы состояния; отменённые не входят. Принятая работа —
+ * 1, остальные — доля этапов до наибольшего, до которого дошла любая её
+ * попытка (`prepare` … `integration`): повтор готовность не снижает.
+ * Осталось: незавершённая доля объёма × длительность попытки × попыток на
+ * принятую задачу — от 5 закончившихся попыток выпуска p50 / p90, меньше —
+ * грубый разброс от самой короткой до самой долгой; ни одной — неизвестно.
+ * Нижняя граница — параллельно на `concurrency`, верхняя — последовательно.
+ * Ожидание людей и ведущего в прогноз не входит и называется отдельно.
  */
-function forecastOf(c: Ctx, scope: ScopeView | undefined): ForecastView | undefined {
+function forecastOf(
+  c: Ctx,
+  scope: ScopeView | undefined,
+  truncated: Record<string, number>,
+): ForecastView | undefined {
   const i = c.i;
   const en = c.lang === 'en';
   const work = new Map(i.works.map((w) => [w.id, w]));
+  const stageWeight = (name: string | undefined) => {
+    const k = name ? (STAGE_ORDER as readonly string[]).indexOf(name) : -1;
+    return k < 0 ? 0 : k / STAGE_ORDER.length;
+  };
+  // Наибольший дошедший этап всех попыток работы: повтор не роняет готовность.
+  const reached = new Map<string, number>();
+  for (const a of i.attempts)
+    reached.set(a.workId, Math.max(reached.get(a.workId) ?? 0, stageWeight(a.reached)));
   const weightOf = (w: OperatorWorkInput | undefined) => {
     if (!w) return 0;
     if (w.status === 'done' || w.stage.name === 'done') return 1;
-    const k = (STAGE_ORDER as readonly string[]).indexOf(w.stage.name);
-    return k < 0 ? 0 : k / STAGE_ORDER.length;
+    return Math.max(stageWeight(w.stage.name), reached.get(w.id) ?? 0);
   };
-  // Единица объёма: работа harness или задача среза без работы. Задача,
-  // закрытая в источнике без работы harness (`TASK_DONE`), — готова;
-  // отменённая (`TASK_CANCELLED`) и отменённая работа в объём не входят.
-  type Unit = { work?: OperatorWorkInput; closed?: true };
+  // Единица объёма — работа harness или задача выпуска без работы. Выпуск —
+  // все задачи всех снимков связки (доска), а не последний срез `run`, и все
+  // работы состояния. Задача, закрытая в источнике без работы harness
+  // (`TASK_DONE`, колонка done), — готова; отменённая и отменённая работа в
+  // объём не входят.
+  type Unit = { work?: OperatorWorkInput; closed?: true; key?: string; firstSeenAt?: string };
   const seen = new Set<string>();
-  const units: Unit[] =
-    scope && scope.tasks.length
-      ? (c.i.sources ?? []).flatMap((src) =>
-          src.tasks.flatMap((t): Unit[] => {
-            const id = t.workId ?? t.orderId;
-            if (seen.has(id)) return [];
-            seen.add(id);
-            const w = work.get(id);
-            if (w) return [{ work: w }];
-            if (t.problems.some((p) => p.code === 'TASK_CANCELLED')) return [];
-            return t.problems.some((p) => p.code === 'TASK_DONE') ? [{ closed: true }] : [{}];
-          }),
-        )
-      : i.works.map((w) => ({ work: w }));
+  const tasks = (i.sources ?? []).flatMap((src) => src.release ?? src.tasks);
+  const fromTasks = tasks.flatMap((t): Unit[] => {
+    const id = t.workId ?? t.orderId;
+    if (seen.has(id)) return [];
+    seen.add(id);
+    const first = 'firstSeenAt' in t ? (t.firstSeenAt as string | undefined) : undefined;
+    const meta: Unit = { key: t.key, ...(first ? { firstSeenAt: first } : {}) };
+    const w = work.get(id);
+    if (w) return [{ work: w, ...meta }];
+    const column = 'column' in t ? (t.column as string | undefined) : undefined;
+    if (column === 'cancelled' || t.problems.some((p) => p.code === 'TASK_CANCELLED')) return [];
+    return column === 'done' || t.problems.some((p) => p.code === 'TASK_DONE')
+      ? [{ closed: true, ...meta }]
+      : [meta];
+  });
+  const units: Unit[] = [
+    ...fromTasks,
+    ...i.works.filter((w) => !seen.has(w.id)).map((w) => ({ work: w })),
+  ];
+  const basis: ForecastView['progress']['basis'] = tasks.length ? 'scope' : 'works';
   const live = units.filter((u) => u.work?.status !== 'cancelled');
   const unitWeight = (u: Unit) => (u.closed ? 1 : weightOf(u.work));
   if (!live.length) return undefined;
@@ -1717,8 +1824,23 @@ function forecastOf(c: Ctx, scope: ScopeView | undefined): ForecastView | undefi
   const percent = Math.min(left > 0 ? 99 : 100, Math.round((100 * weighted) / total));
   const unitIds = new Set(live.flatMap((u) => (u.work ? [u.work.id] : [])));
   const own = i.attempts.filter((a) => unitIds.has(a.workId));
-  const firstStart = own.map((a) => ms(a.startedAt)).filter(Number.isFinite);
-  const elapsedMs = firstStart.length ? Math.max(0, i.now - Math.min(...firstStart)) : undefined;
+  // Начало выпуска — первый снимок связки или первая попытка объёма, что раньше.
+  const starts = [
+    ...own.map((a) => ms(a.startedAt)),
+    ...(i.sources ?? []).map((src) => ms(src.releaseStartedAt)),
+  ].filter(Number.isFinite);
+  const startedAt = starts.length ? Math.min(...starts) : undefined;
+  // Выпуск закончен (всё принято, ничего не идёт) — время до последнего конца попытки.
+  const ends = own.map((a) => ms(a.finishedAt)).filter(Number.isFinite);
+  const finishedAt =
+    startedAt !== undefined &&
+    ends.length &&
+    own.every((a) => a.status !== 'active') &&
+    live.every((u) => unitWeight(u) === 1)
+      ? Math.max(startedAt, ...ends)
+      : undefined;
+  const elapsedMs =
+    startedAt !== undefined ? Math.max(0, (finishedAt ?? i.now) - startedAt) : undefined;
   const samples = own
     .filter((a) => a.status !== 'active' && a.finishedAt && !a.interrupted)
     .map((a) => ms(a.finishedAt) - ms(a.startedAt))
@@ -1736,18 +1858,23 @@ function forecastOf(c: Ctx, scope: ScopeView | undefined): ForecastView | undefi
     : 1;
   const rest = total - weighted;
   const concurrency = Math.max(1, i.policy.concurrency);
-  const remaining =
-    samples.length >= OPERATOR_VIEW_TYPICAL_MIN_SAMPLES && rest > 0
-      ? {
-          // Параллельно — не быстрее одной задачи: недоделанная задача не делится.
-          loMs: Math.round(
-            Math.max(rest / concurrency, Math.min(rest, 1)) * rank(samples, 0.5) * attemptsPerTask,
-          ),
-          hiMs: Math.round(rest * rank(samples, 0.9) * attemptsPerTask),
-          samples: samples.length,
-          attemptsPerTask,
-        }
+  // Параллельно — не быстрее одной задачи: недоделанная задача не делится.
+  const lowShare = Math.max(rest / concurrency, Math.min(rest, 1));
+  const range = (lo: number, hi: number) => ({
+    loMs: Math.round(lowShare * lo * attemptsPerTask),
+    hiMs: Math.round(rest * hi * attemptsPerTask),
+    samples: samples.length,
+    attemptsPerTask,
+  });
+  const precise = samples.length >= OPERATOR_VIEW_TYPICAL_MIN_SAMPLES;
+  const remaining = precise && rest > 0 ? range(rank(samples, 0.5), rank(samples, 0.9)) : undefined;
+  // Меньше образцов — грубый разброс от самой короткой до самой долгой попытки выпуска.
+  const rough =
+    !precise && samples.length > 0 && rest > 0
+      ? range(samples[0]!, samples[samples.length - 1]!)
       : undefined;
+  const estimate: NonNullable<ForecastView['time']['estimate']> =
+    rest <= 0 ? 'nothing' : remaining ? 'precise' : rough ? 'rough' : 'unknown';
   const waits = i.stops.filter(
     (s) => (s.actor === 'user' || s.actor === 'lead') && s.workId && unitIds.has(s.workId),
   );
@@ -1765,6 +1892,85 @@ function forecastOf(c: Ctx, scope: ScopeView | undefined): ForecastView | undefi
     ms: waitMs,
     ...(since !== undefined ? { since: iso(since) } : {}),
   };
+  // Задачи, добавленные после начала выпуска: первый снимок с ними позже первого снимка связки.
+  const firstSeen = live
+    .map((u) => ms(u.firstSeenAt))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  const releaseFirst = firstSeen[0];
+  const added = live
+    .filter((u) => u.key && Number.isFinite(ms(u.firstSeenAt)) && ms(u.firstSeenAt) > releaseFirst!)
+    .sort((a, b) => ms(a.firstSeenAt) - ms(b.firstSeenAt))
+    .slice(0, 10)
+    .map((u) => {
+      const at = ms(u.firstSeenAt);
+      const before = firstSeen.filter((x) => x < at).length;
+      const after = firstSeen.filter((x) => x <= at).length;
+      const key = text(c, u.key, 200) ?? u.key!;
+      return {
+        key,
+        ...(u.work ? { workId: u.work.id } : {}),
+        at: iso(at),
+        before,
+        after,
+        line: en
+          ? `task ${key} added (tasks ${before} → ${after})`
+          : `добавлена задача ${key} (задач ${before} → ${after})`,
+      };
+    });
+  // Только незаконченные работы: принятые видны в `works[]` и весят 100 %.
+  const open = live.filter((u) => u.work && unitWeight(u) < 1);
+  if (open.length > L.forecastWorks) truncated.forecastWorks = open.length - L.forecastWorks;
+  const works = open.slice(0, L.forecastWorks).map((u) => {
+    const w = u.work!;
+    const p = Math.round(100 * unitWeight(u));
+    const name = text(c, u.key, 200) ?? w.id;
+    const n = w.attemptSummary.attempts.used;
+    const max = w.attemptSummary.attempts.max;
+    const running = runningStages.has(w.stage.name);
+    const failedBefore = w.attemptSummary.failed > 0 || w.attemptSummary.interrupted > 0;
+    const retry: 'repair' | 'answer' | undefined =
+      running && failedBefore
+        ? w.attemptSummary.lastFailure?.bucket === 'input'
+          ? 'answer'
+          : 'repair'
+        : undefined;
+    const percentText = `~${Math.min(p === 100 || unitWeight(u) === 1 ? 100 : 99, p)} %`;
+    const line =
+      unitWeight(u) === 1
+        ? en
+          ? `${name}: accepted`
+          : `${name}: принято`
+        : running
+          ? en
+            ? `${name}: ${percentText}, attempt ${n} of ${max}` +
+              (retry === 'repair'
+                ? ', fixing the findings'
+                : retry === 'answer'
+                  ? ', continuing after the answer'
+                  : '')
+            : `${name}: ${percentText}, попытка ${n} из ${max}` +
+              (retry === 'repair'
+                ? ', исправляет замечания'
+                : retry === 'answer'
+                  ? ', продолжает после ответа'
+                  : '')
+          : n > 0 || failedBefore
+            ? en
+              ? `${name}: ${percentText}, between attempts (used ${n} of ${max})`
+              : `${name}: ${percentText}, между попытками (использовано ${n} из ${max})`
+            : en
+              ? `${name}: not started`
+              : `${name}: ещё не начата`;
+    return {
+      workId: w.id,
+      ...(u.key ? { key: name } : {}),
+      percent: unitWeight(u) === 1 ? 100 : Math.min(99, p),
+      ...(n > 0 ? { attempt: { n, max } } : {}),
+      ...(retry ? { retry } : {}),
+      line: line.slice(0, T.line),
+    };
+  });
   const progressLine = en
     ? `done ~${percent} %, ${left} of ${total} task(s) left` + (inWork ? `, ${inWork} in work` : '')
     : `готово ~${percent} %, осталось задач: ${left} из ${total}` +
@@ -1775,19 +1981,26 @@ function forecastOf(c: Ctx, scope: ScopeView | undefined): ForecastView | undefi
         ? 'not started yet'
         : 'ещё не начиналось'
       : (en ? 'elapsed ' : 'прошло ') + durationText(elapsedMs, c.lang);
+  const spanText = (r: { loMs: number; hiMs: number }) =>
+    durationText(r.loMs, c.lang) === durationText(r.hiMs, c.lang)
+      ? durationText(r.hiMs, c.lang)
+      : `${durationText(r.loMs, c.lang)} – ${durationText(r.hiMs, c.lang)}`;
   const remainingText =
-    rest <= 0
+    estimate === 'nothing'
       ? en
         ? 'nothing left'
         : 'осталось: ничего'
       : remaining
-        ? (en ? 'left ~' : 'осталось ~') +
-          (durationText(remaining.loMs, c.lang) === durationText(remaining.hiMs, c.lang)
-            ? durationText(remaining.hiMs, c.lang)
-            : `${durationText(remaining.loMs, c.lang)} – ${durationText(remaining.hiMs, c.lang)}`)
-        : en
-          ? `time left unknown (fewer than ${OPERATOR_VIEW_TYPICAL_MIN_SAMPLES} finished attempts)`
-          : `сколько осталось — неизвестно (закончившихся попыток меньше ${OPERATOR_VIEW_TYPICAL_MIN_SAMPLES})`;
+        ? (en ? 'left ~' : 'осталось ~') + spanText(remaining)
+        : rough
+          ? (en ? 'left ~' : 'осталось ~') +
+            spanText(rough) +
+            (en
+              ? ` (rough, from ${byAttempts(rough.samples, true)})`
+              : ` (грубо, по ${byAttempts(rough.samples, false)})`)
+          : en
+            ? 'time left unknown (no attempt has finished yet)'
+            : 'сколько осталось — неизвестно (ещё ни одна попытка не закончилась)';
   // «до 45 мин», но «меньше минуты» — без «до».
   const upTo =
     waitMs < 30_000
@@ -1801,21 +2014,22 @@ function forecastOf(c: Ctx, scope: ScopeView | undefined): ForecastView | undefi
   const timeLine = `${elapsedText} · ${remainingText}${waitText}`;
   const assumptions = en
     ? [
-        scope?.tasks.length
-          ? 'scope: all tasks of the run slice, including ones not handed over to harness (weight 0); done in the source without harness — 100 %, cancelled — out of scope'
-          : 'scope: harness works only (no task source slice)',
-        'accepted = 100 %; a work in an attempt counts the stages before its current one (prepare, writer, gates, review, integration); between attempts (waiting, queued) it counts 0',
-        'time left: unfinished share × attempt duration p50–p90 × attempts per accepted task; low end in parallel on concurrency, high end sequential',
-        'waiting for people and the lead is not in the estimate',
+        basis === 'scope'
+          ? 'scope: the whole release — tasks of all source snapshots and harness works; not handed over — 0; done in the source — 100 %; cancelled — out'
+          : 'scope: all harness works (no task source)',
+        'accepted = 100 %; a work — the furthest stage any of its attempts reached (prepare, writer, gates, review, integration)',
+        `time left: unfinished share × attempt duration × attempts per task; from ${OPERATOR_VIEW_TYPICAL_MIN_SAMPLES} attempts p50–p90, fewer — rough; low end parallel, high end sequential`,
+        'elapsed — from the release start; waiting for people and the lead is not in the estimate',
       ]
     : [
-        scope?.tasks.length
-          ? 'объём: все задачи среза прогона, в том числе не переданные в harness (вес 0); закрытая в источнике без harness — 100 %, отменённая — вне объёма'
-          : 'объём: только работы harness (среза связки нет)',
-        'принято — 100 %; работа в попытке — доля этапов до текущего (подготовка, написание, проверки, ревью, интеграция); между попытками (ожидание, очередь) — 0',
-        'осталось: незавершённая доля × длительность попытки p50–p90 × попыток на принятую задачу; нижняя граница — параллельно по concurrency, верхняя — последовательно',
-        'ожидание людей и ведущего в прогноз не входит',
+        basis === 'scope'
+          ? 'объём: весь выпуск — задачи всех снимков связки и работы harness; не переданные — 0; закрытая в источнике — 100 %; отменённая — вне'
+          : 'объём: все работы harness (связки нет)',
+        'принято — 100 %; работа — наибольший этап любой её попытки (подготовка, написание, проверки, ревью, интеграция)',
+        `осталось: незавершённая доля × длительность попытки × попыток на задачу; от ${OPERATOR_VIEW_TYPICAL_MIN_SAMPLES} попыток p50–p90, меньше — грубо; нижняя — параллельно, верхняя — последовательно`,
+        'прошло — от начала выпуска; ожидание людей и ведущего в прогноз не входит',
       ];
+  void scope;
   return {
     progress: {
       percent,
@@ -1824,12 +2038,19 @@ function forecastOf(c: Ctx, scope: ScopeView | undefined): ForecastView | undefi
       done,
       inWork,
       left,
-      basis: scope?.tasks.length ? 'scope' : 'works',
+      basis,
       line: progressLine.slice(0, T.line),
+      ...(added.length ? { added } : {}),
+      ...(works.length ? { works } : {}),
     },
     time: {
-      ...(elapsedMs !== undefined ? { startedAt: iso(Math.min(...firstStart)), elapsedMs } : {}),
+      ...(startedAt !== undefined && elapsedMs !== undefined
+        ? { startedAt: iso(startedAt), elapsedMs }
+        : {}),
+      ...(finishedAt !== undefined ? { finishedAt: iso(finishedAt) } : {}),
       ...(remaining ? { remaining } : {}),
+      ...(rough ? { rough } : {}),
+      estimate,
       humanWait,
       line: timeLine.slice(0, T.line),
     },
@@ -2206,7 +2427,105 @@ function escalationsOf(c: Ctx): Escalation[] {
       action: 'user-decision',
       since: r.at,
     }));
-  return [...stops, ...reviews];
+  // Принятые работы, оставленные в источнике на проверку человеку: ход владельца.
+  const checks = (i.sources ?? []).flatMap((src) =>
+    (src.reviews ?? []).map((r) => ({
+      workId: r.workId,
+      ...(r.key ? { subject: r.key.slice(0, 200) } : {}),
+      code: 'SOURCE_REVIEW',
+      actor: 'operator',
+      action: 'review-in-source',
+      since: r.since,
+    })),
+  );
+  return [...stops, ...reviews, ...checks];
+}
+
+/** Имя источника задач для людей: Relay у коннекторов relay-*, иначе провайдер. */
+const providerName = (provider: string) => (/^relay(-|$)/.test(provider) ? 'Relay' : provider);
+
+/** Принятые работы, ждущие проверки человека в источнике (ревизия 5). */
+function sourceReviewsOf(
+  c: Ctx,
+  truncated: Record<string, number>,
+): SourceReviewView[] | undefined {
+  const out = (c.i.sources ?? []).flatMap((src): SourceReviewView[] => {
+    if (!src.reviews?.length) return [];
+    const all = src.reviews.map((r) => ({
+      taskId: r.taskId,
+      ...(r.key ? { key: r.key.slice(0, 200) } : {}),
+      workId: r.workId,
+      column: r.column.slice(0, 40),
+      since: r.since,
+    }));
+    const tasks = take(all, L.sourceReviewTasks, truncated, 'sourceReviews');
+    const names = tasks.map((t) => t.key ?? t.workId);
+    const where = providerName(src.provider);
+    const line = (
+      c.lang === 'en'
+        ? `waiting for your review in ${where}: ${names.join(', ')}`
+        : `ждут вашей проверки в ${where}: ${names.join(', ')}`
+    ).slice(0, T.line);
+    return [{ connector: src.connector, provider: src.provider, tasks, line }];
+  });
+  return out.length ? out.slice(0, L.sources) : undefined;
+}
+
+/**
+ * Документ настройки (ревизия 5): harness в проекте ещё не настроен — нет
+ * manifest, политики или привязанного состояния. Панель, запущенная вместе с
+ * источником задач до настройки, показывает простые строки и перечитывает
+ * представление, пока не появится полный документ.
+ */
+export interface SetupView {
+  viewVersion: typeof OPERATOR_VIEW_VERSION;
+  viewRevision: number;
+  generatedAt: string;
+  source: ViewSource;
+  stage: { name: 'setup'; lines: string[] };
+  /** Чего ещё нет: `project` — `.harness/project.json`, `policy` — политики и привязки. */
+  setup: { waitingFor: 'project' | 'policy' };
+}
+
+export function setupView(
+  input: {
+    now: number;
+    harnessVersion: string;
+    stateVersion: number;
+    waitingFor: 'project' | 'policy';
+    producer?: string;
+  },
+  o: { lang?: 'ru' | 'en' } = {},
+): SetupView {
+  const stage = stageOf(0, o.lang ?? 'ru') as SetupView['stage'];
+  const body = { stage, setup: { waitingFor: input.waitingFor } };
+  return {
+    viewVersion: OPERATOR_VIEW_VERSION,
+    viewRevision: OPERATOR_VIEW_REVISION,
+    generatedAt: iso(input.now),
+    source: {
+      producer: input.producer ?? 'devcontour-harness',
+      producerVersion: input.harnessVersion,
+      stateVersion: input.stateVersion,
+      token: sha256Hex(JSON.stringify(canonical(body))),
+    },
+    ...body,
+  };
+}
+
+/** Этап проекта (ревизия 5): без работ — настройка, с простыми строками для панели. */
+export function stageOf(
+  works: number,
+  lang: 'ru' | 'en',
+): { name: 'setup' | 'work'; lines: string[] } {
+  if (works > 0) return { name: 'work', lines: [] };
+  return {
+    name: 'setup',
+    lines:
+      lang === 'en'
+        ? ['Harness setup is in progress', 'No tasks yet']
+        : ['Идёт настройка harness', 'Задач пока нет'],
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -2531,7 +2850,8 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
   const scope = scopeOf(c, truncated);
   const sourceQuestions = sourceQuestionsOf(c, truncated);
   // Прогноз — по всему срезу, даже если `scope` в документе усечён.
-  const forecast = forecastOf(c, scope);
+  const forecast = forecastOf(c, scope, truncated);
+  const sourceReviews = sourceReviewsOf(c, truncated);
   const draft: OperatorView = {
     viewVersion: OPERATOR_VIEW_VERSION,
     viewRevision: OPERATOR_VIEW_REVISION,
@@ -2577,6 +2897,8 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
       ? { scope }
       : { scopeReason: i.sourcesUnread ? ('unreadable' as const) : ('no-snapshot' as const) }),
     ...(sourceQuestions ? { sourceQuestions } : {}),
+    ...(sourceReviews ? { sourceReviews } : {}),
+    stage: stageOf(i.works.length, c.lang),
     ...(forecast ? { forecast } : {}),
     ...(i.updates ? { updates: updatesOf(c, i.updates, truncated) } : {}),
   };
@@ -2717,12 +3039,19 @@ function fitSize(
       truncated: truncation<TruncatedKey>(all)!,
     } as OperatorView;
   };
-  // 1. Разделы связки.
+  // 1. Разделы связки и готовность по работам в прогнозе (строки прогноза остаются).
   const { scope, sourceQuestions, ...rest } = full;
   let v: OperatorView = rest;
   if (scope) add('scope')(scope.tasks.length);
   if (sourceQuestions) add('sourceQuestions')(sourceQuestions.length);
-  if (scope || sourceQuestions) {
+  const perWork = v.forecast?.progress.works;
+  if (perWork) {
+    add('forecastWorks')(perWork.length);
+    const progress = { ...v.forecast!.progress };
+    delete progress.works;
+    v = { ...v, forecast: { ...v.forecast!, progress } };
+  }
+  if (scope || sourceQuestions || perWork) {
     const done = tryFinish(assemble(v, {}, false));
     if (done) return done;
   }

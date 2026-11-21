@@ -651,7 +651,7 @@ test('alpha.60 CLI: status --human — строки очереди, обновл
   assert.equal(lines.filter((l) => l.startsWith('Обновления:')).length, 1);
   // Первая строка — кто двигает очередь (alpha.60 P1), последняя — прогноз (P11).
   assert.match(lines[0]!, /^Очередь стоит — никто не запущен: .*\(ведущий: harness run\)\.$/);
-  assert.match(lines.at(-1)!, /^Прогноз выпуска: готово ~0 %, осталось задач: 1 из 1; /);
+  assert.match(lines.at(-1)!, /^Прогноз выпуска: готово ~\d+ %, осталось задач: 1 из 1; /);
   assert.equal(lines.filter((l) => l.startsWith('Прогноз выпуска:')).length, 1);
   assert.equal(lines.filter((l) => l.startsWith('Очередь стоит')).length, 1);
   // Доска успокоилась: --watch печатает один кадр — с той же строкой прогноза.

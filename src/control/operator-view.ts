@@ -22,6 +22,7 @@ import {
   findingCounts,
   leadMayAnswer,
   policyDigest,
+  PROJECT_MANIFEST_PATH,
   projectManifestSchema,
   reviewVerdictText,
   type ExecutionPolicy,
@@ -53,7 +54,9 @@ import { stopInputsIn } from '../explain/state.ts';
 import { policySecrets } from '../environment/redaction.ts';
 import {
   operatorView,
+  setupView,
   workDetailView,
+  type SetupView,
   type OperatorActivityInput,
   type OperatorReviewInput,
   type OperatorSourceInput,
@@ -973,6 +976,7 @@ export function collectOperatorViewInput(
         runtime: a.runtime,
         ...(a.model ? { model: a.model } : {}),
         stages: a.timings ?? [],
+        ...((reached) => (reached ? { reached } : {}))(reachedStage(a.timings ?? [])),
       })),
       gateEvents: attempts.flatMap((a) =>
         a.evidence
@@ -1145,9 +1149,14 @@ function readConnectorDb(
       tasks: manifest?.tasks ?? [],
       problems: manifest?.problems ?? [],
     };
+    const release = releaseOf(db, scope, works);
+    const deliveries = sourceReviewsOf(db, release.tasks);
     return {
       connector,
       provider,
+      ...(release.tasks.length ? { release: release.tasks } : {}),
+      ...(release.startedAt ? { releaseStartedAt: release.startedAt } : {}),
+      ...(deliveries.length ? { reviews: deliveries } : {}),
       tasks: scope.tasks.map((t) => ({
         id: t.id,
         key: t.key,
@@ -1178,6 +1187,140 @@ function readConnectorDb(
   } finally {
     db?.close();
   }
+}
+
+/** Порядок этапов попытки для «дальше всего дошла» (`reachedStage`). */
+const REACHED_ORDER = ['prepare', 'writer', 'gates', 'review', 'integration'] as const;
+
+/** Самый дальний этап, до которого попытка дошла по своим замерам. */
+function reachedStage(timings: readonly { stage: string }[]): string | undefined {
+  let best = -1;
+  for (const t of timings) {
+    const stage = stageOfStep(t.stage);
+    const k = stage ? (REACHED_ORDER as readonly string[]).indexOf(stage) : -1;
+    if (k > best) best = k;
+  }
+  return best < 0 ? undefined : REACHED_ORDER[best];
+}
+
+/** Сколько последних снимков связки читает объём выпуска (`releaseOf`). */
+const RELEASE_SNAPSHOTS = 500;
+
+type ScopeLike = NonNullable<RelayObservationLike['scope']>;
+type ReleaseTask = NonNullable<OperatorSourceInput['release']>[number];
+
+/**
+ * Объём выпуска (доска связки): все задачи всех снимков связки, а не только
+ * последнего среза `run`. О каждой задаче — последнее, что о ней записано
+ * (колонка, проблемы), и время, когда она впервые попала в снимок; последнее
+ * чтение (наблюдение) дополняет и уточняет снимки.
+ */
+function releaseOf(
+  db: DatabaseSync,
+  scope: ScopeLike,
+  works: ReadonlySet<string>,
+): { tasks: ReleaseTask[]; startedAt?: string } {
+  const rows = db
+    .prepare(
+      `SELECT created_at AS at, json_extract(data, '$.manifest.tasks') AS tasks,
+              json_extract(data, '$.manifest.problems') AS problems
+         FROM (SELECT rowid, created_at, data FROM snapshots ORDER BY rowid DESC LIMIT ${RELEASE_SNAPSHOTS})
+        ORDER BY rowid`,
+    )
+    .all() as { at: string; tasks: string | null; problems: string | null }[];
+  const byId = new Map<string, ReleaseTask>();
+  const put = (
+    at: string | undefined,
+    tasks: readonly { id: string; key: string; title?: string; orderId: string; column?: string }[],
+    problems: readonly { taskId: string; code: string; message: string }[],
+  ) => {
+    for (const t of tasks) {
+      const prev = byId.get(t.id);
+      byId.set(t.id, {
+        id: t.id,
+        key: t.key,
+        ...((title) => (title ? { title } : {}))(t.title ?? prev?.title),
+        orderId: t.orderId,
+        ...(works.has(t.orderId) ? { workId: t.orderId } : {}),
+        ...((column) => (column ? { column } : {}))(t.column ?? prev?.column),
+        ...((first) => (first ? { firstSeenAt: first } : {}))(prev?.firstSeenAt ?? at),
+        problems: problems
+          .filter((p) => p.taskId === t.id)
+          .map((p) => ({ code: p.code, message: p.message })),
+      });
+    }
+  };
+  const parse = <T>(text: string | null): T[] => {
+    try {
+      const v = text ? (JSON.parse(text) as unknown) : [];
+      return Array.isArray(v) ? (v as T[]) : [];
+    } catch {
+      return [];
+    }
+  };
+  for (const r of rows) put(r.at, parse(r.tasks), parse(r.problems));
+  put(scope.readAt, scope.tasks, scope.problems);
+  return { tasks: [...byId.values()], ...(rows[0]?.at ? { startedAt: rows[0].at } : {}) };
+}
+
+/**
+ * Принятые работы, оставленные в источнике на проверку человеку: последняя
+ * доставка задачи — принятый результат, перенесённый в колонку не `done`
+ * (`completion.mode: review-only` или своя колонка), и по последнему
+ * чтению задача не закрыта и не отменена.
+ */
+function sourceReviewsOf(
+  db: DatabaseSync,
+  release: readonly ReleaseTask[],
+): NonNullable<OperatorSourceInput['reviews']> {
+  let rows: { task: string; work: string; data: string; at: string }[];
+  try {
+    rows = db
+      .prepare(
+        `SELECT task_id AS task, work_id AS work, data, updated_at AS at FROM operations
+          WHERE status = 'delivered' ORDER BY updated_at, rowid`,
+      )
+      .all() as typeof rows;
+  } catch {
+    return [];
+  }
+  const last = new Map<string, (typeof rows)[number]>();
+  for (const r of rows) last.set(r.task, r);
+  const tasks = new Map(release.map((t) => [t.id, t]));
+  const out: NonNullable<OperatorSourceInput['reviews']>[number][] = [];
+  for (const r of last.values()) {
+    let op: {
+      outcome?: string;
+      steps?: {
+        kind?: string;
+        status?: string;
+        input?: { column?: unknown };
+        updatedAt?: string;
+      }[];
+    };
+    try {
+      op = JSON.parse(r.data) as typeof op;
+    } catch {
+      continue;
+    }
+    if (op.outcome !== 'accepted') continue;
+    const move = op.steps?.find((s) => s.kind === 'move' && s.status === 'done');
+    const column = typeof move?.input?.column === 'string' ? move.input.column : undefined;
+    if (!column || column === 'done' || column === 'cancelled') continue;
+    const task = tasks.get(r.task);
+    const closed = task?.problems.some(
+      (p) => p.code === 'TASK_DONE' || p.code === 'TASK_CANCELLED',
+    );
+    if (closed || task?.column === 'done' || task?.column === 'cancelled') continue;
+    out.push({
+      taskId: r.task,
+      ...(task?.key ? { key: task.key } : {}),
+      workId: r.work,
+      column,
+      since: move?.updatedAt ?? r.at,
+    });
+  }
+  return out;
 }
 
 /** Поля manifest снимка коннектора, которые читает представление. */
@@ -1265,7 +1408,14 @@ function emptyInput(policy: ViewPolicy, now: number, stateDir: string): Operator
 }
 
 export interface HarnessViewOptions extends Omit<OperatorViewOptions, 'maxBytes'> {
-  stateDir: string;
+  /** Каталог состояния; без него — из `.harness/project.json` репозитория `repository`. */
+  stateDir?: string;
+  /**
+   * Корень репозитория проекта (ревизия 5): состояние и политика — из
+   * `.harness/project.json` и `.harness/policy.json` при каждом чтении, так что
+   * панель, запущенная до настройки, подхватит их, когда они появятся.
+   */
+  repository?: string;
   /** Файл политики; без него — привязанная к состоянию. */
   policyPath?: string;
   /** Детали работы вместо обзора. */
@@ -1278,9 +1428,30 @@ export interface HarnessViewOptions extends Omit<OperatorViewOptions, 'maxBytes'
  * Представление оператора по каталогу состояния (`harness view`): только
  * чтение; нет состояния — пустое представление по `--policy`.
  */
-export function harnessView(options: HarnessViewOptions): OperatorView | WorkDetailView {
-  const stateDir = resolve(options.stateDir);
-  const policy = viewPolicy(stateDir, options.policyPath);
+export function harnessView(
+  options: HarnessViewOptions,
+): OperatorView | WorkDetailView | SetupView {
+  const located = locateProject(options);
+  const setup = (waitingFor: 'project' | 'policy') =>
+    setupView(
+      {
+        now: options.now ?? Date.now(),
+        harnessVersion: HARNESS_VERSION,
+        stateVersion: STATE_VERSION,
+        waitingFor,
+      },
+      options.lang ? { lang: options.lang } : {},
+    );
+  if (!located) return setup('project');
+  const stateDir = located.stateDir;
+  const policyPath = located.policyPath;
+  // Ни привязанного состояния, ни файла политики — harness ещё настраивается.
+  if (
+    !existsSync(join(stateDir, 'binding.json')) &&
+    (policyPath === undefined || !existsSync(policyPath))
+  )
+    return setup('policy');
+  const policy = viewPolicy(stateDir, policyPath);
   const projection: OperatorViewOptions = {
     ...(options.windowMs !== undefined ? { windowMs: options.windowMs } : {}),
     ...(options.bucketMs !== undefined ? { bucketMs: options.bucketMs } : {}),
@@ -1322,6 +1493,41 @@ export function harnessView(options: HarnessViewOptions): OperatorView | WorkDet
       );
     },
   );
+}
+
+/**
+ * Каталог состояния и файл политики представления: явные (`stateDir`,
+ * `policyPath`) или из manifest репозитория (`.harness/project.json`). Нет
+ * manifest — `undefined` (проект ещё не настроен).
+ */
+export function locateProject(options: {
+  stateDir?: string;
+  repository?: string;
+  policyPath?: string;
+}): { stateDir: string; policyPath?: string } | undefined {
+  if (options.stateDir)
+    return {
+      stateDir: resolve(options.stateDir),
+      ...(options.policyPath ? { policyPath: resolve(options.policyPath) } : {}),
+    };
+  if (!options.repository)
+    throw new HarnessError('INVALID_INPUT', 'Нужен --state или --repository', [
+      { path: ['--state'], message: 'required without --repository' },
+    ]);
+  const root = resolve(options.repository);
+  const file = join(root, PROJECT_MANIFEST_PATH);
+  if (!existsSync(file)) return undefined;
+  const manifest = projectManifestSchema.safeParse(readJson(file, 'project'));
+  if (!manifest.success)
+    throw new HarnessError('INVALID_INPUT', 'Файл проекта не по схеме: ' + file, [
+      { path: [PROJECT_MANIFEST_PATH], message: manifest.error.issues[0]?.message ?? 'invalid' },
+    ]);
+  return {
+    stateDir: resolve(manifest.data.paths.state),
+    policyPath: options.policyPath
+      ? resolve(options.policyPath)
+      : join(root, manifest.data.paths.policy),
+  };
 }
 
 /**

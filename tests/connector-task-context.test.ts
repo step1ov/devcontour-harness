@@ -416,7 +416,7 @@ test('alpha.60: вопросы владельцу из Relay и весь сре�
       typeof operatorView
     >;
     operatorViewSchema.parse(view);
-    assert.equal(view.viewRevision, 4);
+    assert.equal(view.viewRevision, 5);
     assert.deepEqual(
       view.scope?.tasks.map((t) => [t.key, t.state, t.workId]),
       [[s.task.key, 'in-harness', s.workId]],
@@ -964,10 +964,20 @@ test('alpha.60 (P11): прогноз выпуска — готовность в�
   const en = operatorView(input, { lang: 'en' }).forecast!;
   assert.equal(en.progress.line, 'done ~40 %, 2 of 3 task(s) left, 1 in work');
 
-  // Мало образцов — время неизвестно, а не ноль.
+  // Мало образцов (ревизия 5) — грубый разброс «по N попыткам», а не «неизвестно».
   const few = operatorView({ ...input, attempts: attempts.slice(0, 2) }).forecast!;
   assert.equal(few.time.remaining, undefined);
-  assert.match(few.time.line, /неизвестно/);
+  assert.equal(few.time.estimate, 'rough');
+  assert.equal(few.time.rough?.samples, 2);
+  assert.match(few.time.line, /осталось ~[^(]+\(грубо, по 2 попыткам\)/);
+  // Ни одной закончившейся попытки — неизвестно, а не ноль.
+  const none = operatorView({
+    ...input,
+    attempts: attempts.filter((a) => a.status === 'active'),
+  }).forecast!;
+  assert.equal(none.time.rough, undefined);
+  assert.equal(none.time.estimate, 'unknown');
+  assert.match(none.time.line, /неизвестно/);
   // Нет работ и среза — прогноза нет.
   assert.equal(operatorView(baseInput()).forecast, undefined);
   void NOW;
