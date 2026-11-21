@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { accessSync, constants, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { BlockedError, type ToolchainFacts, type ToolchainPin } from '../contracts/index.ts';
 import { resolveExecutable } from '../toolchains/probe.ts';
 
@@ -61,6 +61,20 @@ export const versionMatches = (version: string, pin: string) => {
   return want.every((p, i) => Number(p) === Number(have[i]));
 };
 
+/**
+ * Исполняемый файл есть: сначала `access` (без чтения каталога), затем
+ * `stat` — как поиск по PATH (`resolveExecutable`); отсутствующий файл не
+ * открывается и не читается.
+ */
+const runnable = (file: string) => {
+  try {
+    accessSync(file, constants.X_OK);
+    return statSync(file).isFile();
+  } catch {
+    return false;
+  }
+};
+
 const list = (dir: string) => {
   try {
     return readdirSync(dir);
@@ -79,7 +93,9 @@ export function nodeCandidates(env: NodeJS.ProcessEnv = process.env) {
   const out: { dir: string; version?: string }[] = [];
   const add = (dir: string, version?: string) => out.push({ dir, ...(version ? { version } : {}) });
   add(dirname(process.execPath));
-  for (const d of (env.PATH ?? '').split(delimiter)) if (d && isAbsolute(d)) add(d);
+  // Каталоги node_modules (`.bin` проекта) — не установка node, а код проекта.
+  for (const d of (env.PATH ?? '').split(delimiter))
+    if (d && isAbsolute(d) && !d.split(sep).includes('node_modules')) add(d);
   const named = (root: string, bin: (name: string) => string) => {
     for (const name of list(root)) {
       const v = /^v?(\d+\.\d+\.\d+)$/.exec(name)?.[1];
@@ -124,7 +140,7 @@ export function resolveNodePin(
   if (isAbsolute(pin.node)) {
     const dir = resolve(pin.node);
     const node = join(dir, 'node');
-    const version = existsSync(node) ? nodeVersionAt(node) : undefined;
+    const version = runnable(node) ? nodeVersionAt(node) : undefined;
     if (!version)
       throw new ToolchainPinError(
         `Закреплённый toolchain policy.toolchain.node=${pin.node}: в каталоге нет работающего node. ${advice}`,
@@ -137,7 +153,7 @@ export function resolveNodePin(
       if (seen.has(c.dir)) continue;
       seen.add(c.dir);
       const node = join(c.dir, 'node');
-      if (!existsSync(node)) continue;
+      if (!runnable(node)) continue;
       // Версию из имени каталога достаточно сверить с закреплением: проба —
       // только у подходящих и у каталогов без версии в имени.
       if (c.version && !versionMatches(c.version, pin.node)) continue;
