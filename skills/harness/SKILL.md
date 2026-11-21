@@ -544,6 +544,9 @@ never a temporary port of a server you started in this session and stop:
 such links are dead once you leave. A gate that fails only for you
 while `doctor` warns that `PATH` Node differs from `toolchain.node` is an
 environment problem — fix the shell or the pin, not the code or the gate.
+A failed gate whose text says its node differs from the last passing run of
+that gate still counts as a failure: pin `toolchain.node` (or fix the shell)
+before you blame the code.
 
 After acceptance the target ref can move on. `result` (`data.target`) and
 `status` (`works[].target`) compare the accepted SHA with the current ref:
