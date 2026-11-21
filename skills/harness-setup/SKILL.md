@@ -246,6 +246,16 @@ resolve every conflict or problem with the table of the `harness` skill
 `.harness/policy.json`. The state lives outside the repository
 (`HARNESS_STATE_HOME`, `XDG_STATE_HOME` or `~/.local/state/devcontour-harness`).
 
+**Toolchain pin.** `init` proposes `toolchain.node` in the policy: the Node
+version that runs `init` (or the exact version of `.nvmrc`, `.node-version`
+or `engines.node` when it is installed). Harness prepends that Node to `PATH`
+for every stage — gates, `gates`, `smoke`, prepare, writer and reviewers — so
+the result does not depend on whose shell starts harness (a login shell that
+reloads a version manager can put another Node first). Keep the pin; when
+`doctor` warns that the Node on `PATH` differs from the pin, report it and fix
+the shell or the pin, never the gate commands. Do not wrap gate commands in
+compatibility shims for a wrong Node.
+
 On a weak machine (`doctor --policy` reports `LOW_RESOURCES`: at most 4
 performance cores or less than 16 GB of RAM) add `--lean` to a new
 project's `init`. For an already prepared project, or when attempts hit their
@@ -335,6 +345,13 @@ adds the warning `lead-sandbox`. Follow it:
 
 Do not work around the denials (do not switch the policy isolation off, do not edit `.git` by hand):
 report the `doctor` line to the user and restart the lead with the flags.
+
+### Heavy commands run one at a time
+
+`smoke`, `smoke --writer-probe`, `gates` and `run` install dependencies and
+start servers: run them **sequentially**, never in parallel (in one shell or
+in background jobs). Parallel runs compete for the same store, ports and CPU,
+and their failures say nothing about the project.
 
 ### Dependency cache
 
@@ -525,6 +542,11 @@ edits, controller mode, the connector check and snapshot (`graphId`,
 `harness` skill: brief → `plan-request` → draft → `plan-check` → `validate`
 → `run` (for Relay: `review-plan` and `run --source`). A live `run` or
 `review-plan` calls paid models: start it when the user asks.
+
+Links in the report point to what stays up after you leave: the operator's
+panel or site the user runs (ask for its address when unknown). Never link a
+temporary port of a server or panel you started yourself and stop at the end
+of the session.
 
 ## Upgrade
 
