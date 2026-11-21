@@ -8,6 +8,7 @@ import {
   mkdir,
   readdir,
   readFile,
+  realpath,
   rename,
   rm,
   stat,
@@ -849,6 +850,9 @@ const networkHint = (output: string) => {
 
 /** Запись через переименование: обрыв не оставляет половину пометки. */
 async function markFailed(s: Store, key: string, mark: FailedBuild) {
+  // Явная команда уже собирала этот seed в этом процессе: её следующие шаги
+  // (например, второй проход --writer-probe) сетевой отказ не повторяют.
+  if (mark.network && s.ctx.retryNetworkFailure) explicitRetries.add(s.root + '\0' + key);
   s.receipt.reason = mark.reason;
   if (mark.untouched) s.receipt.untouched = true;
   const dir = join(s.root, 'failed');
@@ -895,15 +899,18 @@ async function hostStore(s: Store): Promise<{ path: string } | { reason: string 
     };
   const st = await stat(path).catch(() => undefined);
   if (!st?.isDirectory()) return { reason: `store хоста ${path} нет` };
-  const forbidden = [
-    s.root,
-    ...(s.ctx.boundary.checkouts ?? []),
-    ...s.ctx.boundary.hidden.filter((h) => resolve(h) !== resolve(repo)),
-  ];
-  const under = forbidden.find((f) => inside(path, f) || inside(f, path));
-  if (under)
-    return { reason: `store хоста ${path} пересекается с ${under}: его мог писать кандидат` };
-  return { path };
+  // Сравниваются настоящие пути: `/var` и `/private/var`, корни через ссылку.
+  const real = async (p: string) => realpath(p).catch(() => resolve(p));
+  const hostReal = await real(path);
+  const repoReal = await real(repo);
+  const forbidden = [s.root, ...(s.ctx.boundary.checkouts ?? []), ...s.ctx.boundary.hidden];
+  for (const f of forbidden) {
+    const at = await real(f);
+    if (f !== s.root && at === repoReal) continue;
+    if (inside(hostReal, at) || inside(at, hostReal))
+      return { reason: `store хоста ${path} пересекается с ${f}: его мог писать кандидат` };
+  }
+  return { path: hostReal };
 }
 
 /** Пакеты lockfile из store хоста в сборочный store; отказ — только причина в источниках. */
@@ -960,7 +967,10 @@ async function fetchInto(
     if (base) await place(base, store, s.outer);
     // Пакеты, которые уже есть на машине, не качаются: копия со сверкой байтов.
     const host = await fromHost(s, store, lock, join(work, 'host-index'));
+    // Повтор после обрыва уже был (до отказа основы): счёт и бюджет повторов сохраняются.
+    const retries = s.receipt.sources?.retries;
     s.receipt.sources = {
+      ...(retries ? { retries } : {}),
       packages: host.imported?.packages ?? lockIntegrities(lock).length,
       host: host.imported?.host ?? 0,
       base: host.imported?.present ?? 0,

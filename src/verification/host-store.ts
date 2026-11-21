@@ -59,6 +59,8 @@ export interface HostImport {
   files: number;
   /** Пакеты, найденные на хосте, но отвергнутые сверкой: первые причины. */
   rejected?: string[];
+  /** Записи хоста с результатами сборки (`sideEffects`) pnpm 11: не импортированы. */
+  sideEffects?: number;
 }
 
 const FILE_CONCURRENCY = 16;
@@ -125,9 +127,16 @@ export function decodeIndexRecord(buf: Uint8Array): unknown {
     return Object.fromEntries(o) as Record<string, unknown>;
   };
   const array = (n: number) => Array.from({ length: n }, () => read());
+  // Без прототипа и через defineProperty: ключ `__proto__` — обычный ключ, а не смена прототипа.
   const record = (keys: unknown[]) => {
-    const o: Record<string, unknown> = {};
-    for (const k of keys) o[String(k)] = read();
+    const o = Object.create(null) as Record<string, unknown>;
+    for (const k of keys)
+      Object.defineProperty(o, String(k), {
+        value: read(),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
     return o;
   };
   const read = (): unknown => {
@@ -212,7 +221,7 @@ export function decodeIndexRecord(buf: Uint8Array): unknown {
 /** Файлы пакета из записи индекса; запись не того вида — `undefined`. */
 function filesOf(entry: unknown, digestOf: (f: Record<string, unknown>) => string | undefined) {
   const files = (entry as { files?: unknown } | null)?.files;
-  if (!files || typeof files !== 'object') return undefined;
+  if (!files || typeof files !== 'object' || Array.isArray(files)) return undefined;
   const out: IndexedFile[] = [];
   for (const raw of Object.values(files as Record<string, unknown>)) {
     const f = raw as Record<string, unknown>;
@@ -226,8 +235,21 @@ function filesOf(entry: unknown, digestOf: (f: Record<string, unknown>) => strin
       return undefined;
     out.push({ digest, mode: f.mode, size: f.size });
   }
-  return out;
+  // Пакет без единого файла не импортируется: такая запись не похожа на настоящую.
+  return out.length ? out : undefined;
 }
+
+/**
+ * Запись хоста хранит `sideEffects` — результаты сборочных скриптов, которые
+ * выполнял хост (esbuild, prisma…). Seed скриптов не исполняет (`--ignore-scripts`),
+ * и их файлов в нём нет: такие записи в seed не переносятся.
+ */
+const hasSideEffects = (entry: unknown) => {
+  const side = (entry as { sideEffects?: unknown } | null)?.sideEffects;
+  return (
+    side !== undefined && side !== null && !(typeof side === 'object' && !Object.keys(side).length)
+  );
+};
 
 const digestV11 = (f: Record<string, unknown>) =>
   typeof f.digest === 'string' ? f.digest : undefined;
@@ -327,12 +349,20 @@ function indexV10(host: string, target: string): HostIndex {
         const raw = await readFile(join(host, rel)).catch(() => undefined);
         if (!raw) continue;
         let files: IndexedFile[] | undefined;
+        let text: string | undefined;
         try {
-          files = filesOf(JSON.parse(raw.toString('utf8')), digestV10);
+          const entry = JSON.parse(raw.toString('utf8')) as Record<string, unknown>;
+          files = filesOf(entry, digestV10);
+          // В seed — запись без результатов сборки хоста: их файлы не импортируются.
+          if (files && hasSideEffects(entry)) {
+            delete entry.sideEffects;
+            text = JSON.stringify(entry);
+          }
         } catch {
           files = undefined;
         }
         if (!files) continue;
+        const body = text ?? raw;
         out.push({
           name: basename(rel, '.json').slice(63),
           files,
@@ -340,7 +370,7 @@ function indexV10(host: string, target: string): HostIndex {
             await mkdir(dirname(join(target, rel)), { recursive: true });
             const staged = join(target, rel) + '.tmp';
             await rm(staged, { force: true });
-            await writeFile(staged, raw, { mode: 0o644 });
+            await writeFile(staged, body, { mode: 0o644 });
             await rename(staged, join(target, rel));
           },
         });
@@ -354,7 +384,12 @@ function indexV10(host: string, target: string): HostIndex {
   };
 }
 
-async function indexV11(host: string, target: string, scratch: string): Promise<HostIndex> {
+async function indexV11(
+  host: string,
+  target: string,
+  scratch: string,
+  skipped: { count: number },
+): Promise<HostIndex> {
   // Индекс хоста не открывается на месте: SQLite пишет рядом `-shm` даже при чтении.
   await mkdir(scratch, { recursive: true });
   const copy = join(scratch, 'index.db');
@@ -362,6 +397,8 @@ async function indexV11(host: string, target: string, scratch: string): Promise<
   await copyFile(join(host, 'index.db-wal'), copy + '-wal').catch(() => undefined);
   const source = new DatabaseSync(copy);
   let dest: DatabaseSync | undefined;
+  const destPath = join(target, 'index.db');
+  const created = !(await lstat(destPath).catch(() => undefined));
   try {
     const tables = source
       .prepare(
@@ -371,7 +408,7 @@ async function indexV11(host: string, target: string, scratch: string): Promise<
     if (!tables.some((t) => t.name === 'package_index'))
       throw new Error('в index.db нет таблицы package_index');
     await mkdir(target, { recursive: true });
-    dest = new DatabaseSync(join(target, 'index.db'));
+    dest = new DatabaseSync(destPath);
     const have = new Set(
       (
         dest.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as {
@@ -383,6 +420,8 @@ async function indexV11(host: string, target: string, scratch: string): Promise<
   } catch (error) {
     source.close();
     dest?.close();
+    // База, созданная этим вызовом, без записей не остаётся в сборочном store.
+    if (created) await rm(destPath, { force: true });
     throw error;
   }
   const db = dest;
@@ -405,7 +444,14 @@ async function indexV11(host: string, target: string, scratch: string): Promise<
       for (const row of rows) {
         let files: IndexedFile[] | undefined;
         try {
-          files = filesOf(decodeIndexRecord(row.data), digestV11);
+          const entry = decodeIndexRecord(row.data);
+          // Запись msgpack с результатами сборки хоста не перекодируется: пакет
+          // докачает pnpm fetch, как без хоста.
+          if (hasSideEffects(entry)) {
+            skipped.count++;
+            continue;
+          }
+          files = filesOf(entry, digestV11);
         } catch {
           files = undefined;
         }
@@ -455,22 +501,24 @@ export async function importHostStore(input: {
   const integrities = lockIntegrities(input.lock);
   const result: HostImport = { packages: integrities.length, host: 0, present: 0, files: 0 };
   if (!integrities.length) return result;
-  const index =
-    layout === 'v11'
-      ? await indexV11(input.host, target, input.scratch)
-      : layout === 'v10'
-        ? indexV10(input.host, target)
-        : undefined;
-  if (!index) throw new Error(`формат store ${layout} не поддерживается импортом`);
+  if (layout !== 'v11' && layout !== 'v10')
+    throw new Error(`формат store ${layout} не поддерживается импортом`);
   const rejected: string[] = [];
+  const skipped = { count: 0 };
+  let index: HostIndex | undefined;
   try {
+    index =
+      layout === 'v11'
+        ? await indexV11(input.host, target, input.scratch, skipped)
+        : indexV10(input.host, target);
+    const opened = index;
     await within(integrities, FILE_CONCURRENCY, async (integrity) => {
       input.signal.throwIfAborted();
-      if (await index.present(integrity)) {
+      if (await opened.present(integrity)) {
         result.present++;
         return;
       }
-      const found = await index.find(integrity);
+      const found = await opened.find(integrity);
       let imported = false;
       for (const pkg of found) {
         try {
@@ -487,9 +535,10 @@ export async function importHostStore(input: {
       if (imported) result.host++;
     });
   } finally {
-    index.close();
+    index?.close();
     await rm(input.scratch, { recursive: true, force: true }).catch(() => undefined);
   }
   if (rejected.length) result.rejected = rejected;
+  if (skipped.count) result.sideEffects = skipped.count;
   return result;
 }
