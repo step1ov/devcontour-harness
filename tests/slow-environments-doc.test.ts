@@ -4,6 +4,7 @@
  * даёт схема (`нет` — умолчания нет); заметка о тёплом стенде помечена как
  * исследование.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

@@ -10,6 +10,7 @@
  * доставки текущим кодом идемпотентен: прежняя запись доставки и получателя не
  * меняются. Нет коммита выпуска в клоне — BLOCKED (отказ), а не пропуск.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

@@ -4,6 +4,7 @@
  * транзакции, что изменение состояния, и под тем же fencing: отказ операции
  * не оставляет события. `base.moved` — в holds.test.ts (нужен Git).
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

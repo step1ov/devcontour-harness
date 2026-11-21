@@ -6,6 +6,7 @@
  * наследует встроенный `node-checks`, `chain.json` — локальный `base.json`.
  * Тексты отказов harness (K10) зафиксированы таблицей префиксов.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';

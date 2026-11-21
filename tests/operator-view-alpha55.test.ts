@@ -6,6 +6,7 @@
  * вопрос. Загрузчик берёт их из `status` и записей вопросов, а не из
  * синтетического входа: путь «поле отсутствует» здесь не проверяется.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {

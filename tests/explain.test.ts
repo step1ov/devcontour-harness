@@ -4,6 +4,7 @@
  * `retryPlanned` описывает решение `repairDecision`, ничего не планируя.
  * Модели не вызываются: состояния строятся операциями движка.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';

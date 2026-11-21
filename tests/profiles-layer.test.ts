@@ -6,6 +6,7 @@
  * без потери полей. Безопасность файлов, обход `extends`, сложение слоёв,
  * проверки gates, digest и тексты отказов K10 — прежние.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';

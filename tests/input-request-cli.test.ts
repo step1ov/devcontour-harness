@@ -7,6 +7,7 @@
  * обычный run. Runtime — fixture (`fake-claude` пишет, `fake-codex`
  * рецензирует), живых моделей нет.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';

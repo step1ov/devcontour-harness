@@ -8,6 +8,7 @@
  * записанный вывод pnpm 10 и npm 11 (подделки и настоящий отказ локального
  * реестра; пути обезличены).
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {

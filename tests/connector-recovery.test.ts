@@ -3,6 +3,7 @@
  * автоматического повтора нет; `recheck` оператора перечитывает постановку и
  * продолжает доставку от новой ревизии.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {

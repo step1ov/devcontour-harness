@@ -2,6 +2,7 @@
  * `worktree-cleanup` на настоящем Git: попытки проходят через Runner, оставшееся
  * рабочее дерево восстанавливается так, как его оставляет упавший процесс.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';

@@ -9,6 +9,7 @@
  * - проверка в браузере, которую песочница исполнителя не запускает, —
  *   ожидаемое состояние `outside`, не закрытый шаг (проба и doctor).
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

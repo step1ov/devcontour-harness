@@ -5,6 +5,7 @@
  * ходу; работы, ждущие проверки человека в источнике; этап настройки до
  * `init` и одно определение «попытки» в строках.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

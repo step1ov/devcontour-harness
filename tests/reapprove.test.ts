@@ -7,6 +7,7 @@
  * не обходится ни `reapprove`, ни библиотечным `Engine.approve`; `review-plan`
  * не возвращает раунд, проведённый под другой политикой.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

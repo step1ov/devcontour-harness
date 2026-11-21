@@ -4,6 +4,7 @@
  * группы, открытый разбор свойства у соседа, ожидающая перенастройка,
  * разрешённый повтор после неудачной попытки. Модели не вызываются.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import { existsSync, readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';

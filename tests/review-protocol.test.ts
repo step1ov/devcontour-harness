@@ -6,6 +6,7 @@
  * (HP04), записи alpha.5 и неизменность pins политики (HP09), атомарность
  * plan/contract technicalReview (HP03). docs/review-protocol.md.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

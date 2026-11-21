@@ -4,6 +4,7 @@
  * коннектора (подделка backend, настоящий Git и runner), `review-plan` — через
  * публичный CLI и настоящий адаптер relay-v1-http.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';

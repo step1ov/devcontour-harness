@@ -4,6 +4,7 @@
  * пакете передачи и отчёте; `status` называет этап поручения простыми
  * словами (этап и время в нём, что дальше, что нужно от оператора, расход).
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {

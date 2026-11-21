@@ -6,6 +6,7 @@
  * те же, что у замороженных бюджетов (`budget-oracle.ts`), в том числе после
  * изменения записей вызовов и попыток между выдачами (кэш не устаревает).
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { WORKSPACE_OWNER, type AttemptState } from '../src/contracts/index.ts';

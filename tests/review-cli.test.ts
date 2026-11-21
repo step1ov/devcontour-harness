@@ -8,6 +8,7 @@
  * завершения controller между ответами (HP06). Writer и reviewer — fixture
  * executables (HARNESS_*_BIN), не живые модели.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

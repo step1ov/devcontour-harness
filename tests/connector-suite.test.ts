@@ -3,6 +3,7 @@
  * backend (fixture). Настоящие Relay v1/Relay-2 запускают тот же набор в
  * tests/integration/.
  */
+import './temp-scope.ts';
 import { connectorSuite, fakeSuiteBackend } from '../src/integrations/connector/testing.ts';
 
 connectorSuite(fakeSuiteBackend('relay-v1-http'), {

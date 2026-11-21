@@ -8,6 +8,7 @@
  * «Ресурс» среды — файл во внешнем каталоге, который создаёт setup и
  * удаляет teardown.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';

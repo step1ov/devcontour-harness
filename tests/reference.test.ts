@@ -1,3 +1,4 @@
+import './temp-scope.ts';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';

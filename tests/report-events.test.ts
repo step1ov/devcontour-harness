@@ -4,6 +4,7 @@
  * ручные повторы, отмены, сдвиги базы, подпричины окружения. История до
  * этих событий остаётся «≥»/неизвестной; покрытие определяется по окну.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

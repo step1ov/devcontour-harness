@@ -4,6 +4,7 @@
  * состоянии. Состояние: отказы gate и ревью (defect), таймаут, прерывание
  * штатной остановкой и принятая попытка; соседнее поручение без попыток.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

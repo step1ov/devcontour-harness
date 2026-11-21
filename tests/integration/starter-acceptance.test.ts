@@ -9,6 +9,7 @@
  * Evidence/logs: STARTER_EVIDENCE_DIR / STARTER_LOGS_DIR (по умолчанию —
  * .private/integration-upgrade/{evidence,logs}).
  */
+import '../temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

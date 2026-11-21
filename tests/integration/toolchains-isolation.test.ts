@@ -2,6 +2,7 @@
    @typescript-eslint/no-unsafe-assignment --
  * Тест читает JSON-ответ CLI и состояние как есть.
  */
+import '../temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';

@@ -7,6 +7,7 @@
  * (`tests/fixtures/bin`), настоящие Git, gate и JUnit. ID находок reviewer
  * берёт только из своего запроса (`$open:N`), тест их не вычисляет.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';

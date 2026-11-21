@@ -5,6 +5,7 @@
  * исполнителя без модели — ok/blocked по каждой, причина и совет; свой
  * TMPDIR исполнителя в области записи.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {

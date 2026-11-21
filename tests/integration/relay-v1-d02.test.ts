@@ -6,6 +6,7 @@
  * независимым REST-клиентом, а не локальными вызовами; Git ref и вызовы
  * runtime проверяются отдельно.
  */
+import '../temp-scope.ts';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

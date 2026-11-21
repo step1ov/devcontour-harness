@@ -7,6 +7,7 @@
  * код обязан давать те же digest: иначе согласования и закрепления прежних
  * потребителей стали бы недействительны без изменения их входов.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

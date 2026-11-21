@@ -3,6 +3,7 @@
  * попыток или «повтор — только со сбросом» — сохраняется, сокращается список
  * отказов («и ещё N»), затем начало строки.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { OPERATOR_VIEW_TEXT as T, operatorViewSchema } from '../src/contracts/index.ts';

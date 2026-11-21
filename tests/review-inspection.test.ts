@@ -10,6 +10,7 @@
  * IN02/IN03 читают только обезличенные fixtures `tests/fixtures/inspection`
  * (происхождение и преобразования — в manifest.json).
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';

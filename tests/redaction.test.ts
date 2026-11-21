@@ -1,3 +1,4 @@
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { redactDeep, redactor } from '../src/environment/redaction.ts';

@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment --
  * Тесты правят сырой JSON политики и читают записанные fixture запросы как есть.
  */
+import './temp-scope.ts';
 import { close, verdict } from './review-fixture.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

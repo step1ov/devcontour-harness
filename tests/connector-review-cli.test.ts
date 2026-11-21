@@ -5,6 +5,7 @@
  * управляемая подделка (fixture) для подготовки receipt; review-plan и
  * approve — настоящий CLI с fixture-runtime reviewer.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

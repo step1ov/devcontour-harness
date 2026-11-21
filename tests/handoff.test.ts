@@ -6,6 +6,7 @@
  * Состояние создаётся операциями движка (выдача, отказ, стадия, учёт вызовов)
  * — без runtime и моделей.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

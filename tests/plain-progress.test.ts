@@ -5,6 +5,7 @@
  * кто запускал gates, кто читал diff, что не проверялось. Слово «проверено»
  * в тексте для человека — только с тем, кто и как проверял.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

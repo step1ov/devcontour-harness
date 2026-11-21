@@ -8,6 +8,7 @@
  * на доске из 400 работ число чтений вида не растёт с числом работ (и с
  * бюджетами тоже). Модели не вызываются.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { HarnessError } from '../src/contracts/errors.ts';
