@@ -9,6 +9,7 @@ import {
   gateScopeSchema,
 } from './primitives.ts';
 import { consumerSchema, propertyIdSchema, workGraphSchema } from './work.ts';
+import { workKindSchema } from './infra.ts';
 
 /**
  * Draft плана: то, что ведущий агент (или хост) предлагает до проверки и
@@ -110,6 +111,10 @@ export function planDraft<E extends z.ZodRawShape = Record<never, never>>(
 /** Draft самостоятельного проекта: общие поля и проверка потребителей библиотеки. */
 export const planDraftSchema = planDraft({
   consumers: z.array(consumerSchema).max(10).optional(),
+  /** Работа инфраструктуры harness (alpha.67, docs/infra-works.md); нет — продуктовая. */
+  kind: workKindSchema.optional(),
+  /** Только `infra`: файлы gates доверенной базы, которые работа меняет. */
+  gateChanges: z.array(draftPathSchema).min(1).max(50).optional(),
 });
 export type PlanDraft = z.output<ReturnType<typeof planDraft<Record<never, never>>>>;
 export type StandalonePlanDraft = z.output<typeof planDraftSchema>;

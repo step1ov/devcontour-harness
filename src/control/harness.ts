@@ -321,6 +321,9 @@ export class Harness {
           ? 'You independently review a plan: a graph of executable work orders. Check that each order is complete, testable, scoped and that dependencies are right. Do not edit files.'
           : 'You independently review a contract document. Check that every obligation is feasible and measurable. Do not edit files.',
         JSON.stringify(input.kind === 'plan' ? input.graph : input.contract, null, 2),
+        input.kind === 'plan' && input.graph.orders.some((o) => o.kind === 'infra')
+          ? 'Orders with kind "infra" write harness-owned infrastructure (bridges, gate wrappers, acceptance tests). Product orders of the same repository must depend on them. An infra order that lists gateChanges replaces the definition of an existing gate: approve it only if the order states what the new check proves and that it is not weaker than the old one.'
+          : '',
         input.kind === 'contract' ? this.spikeNote(input.contract) : '',
         input.kind === 'contract' ? referenceNote(input.contract.checks) : '',
       ],

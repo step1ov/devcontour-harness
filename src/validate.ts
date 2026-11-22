@@ -14,6 +14,7 @@ import {
   type ContextSnapshot,
   workGraphDigest,
   workGraphSchema,
+  withinInfra,
   type CodedIssue,
   type ErrorCode,
   type ExecutionPolicy,
@@ -179,6 +180,40 @@ export function crossIssues(graph: WorkGraph, policy: ExecutionPolicy): CodedIss
         );
       else expand(consumer, c.gates, at('consumers', k, 'gates'), `потребителя ${c.repositoryId}`);
     });
+    // Работа инфраструктуры (docs/infra-works.md): область записи — внутри
+    // области инфраструктуры репозитория; согласованные изменения gates — у
+    // неё одной и внутри той же области.
+    if (order.kind === 'infra') {
+      const infra = repo.infra?.paths ?? [];
+      if (!infra.length)
+        add(
+          'INVALID_INPUT',
+          at('kind'),
+          `Работа инфраструктуры в репозитории ${repo.id} без области инфраструктуры: объявите repositories[].infra.paths в политике`,
+        );
+      else
+        order.writeScope.forEach((p, k) => {
+          if (p === '.' || !withinInfra(p, infra))
+            add(
+              'INVALID_INPUT',
+              at('writeScope', k),
+              `Область записи работы инфраструктуры (${p}) вне области инфраструктуры ${JSON.stringify(infra)}`,
+            );
+        });
+      order.gateChanges?.forEach((p, k) => {
+        if (!withinPaths(p, order.writeScope))
+          add(
+            'INVALID_INPUT',
+            at('gateChanges', k),
+            `Изменение gate ${p} вне области записи работы инфраструктуры`,
+          );
+      });
+    } else if (order.gateChanges?.length)
+      add(
+        'INVALID_INPUT',
+        at('gateChanges'),
+        'gateChanges — только у работы инфраструктуры (kind: infra): продуктовая работа gates не меняет',
+      );
     if (order.relatedRepositories.length && new Set(order.relatedRepositories).size < 2)
       add(
         'INVALID_INPUT',
@@ -193,6 +228,46 @@ export function crossIssues(graph: WorkGraph, policy: ExecutionPolicy): CodedIss
           'Репозиторий не объявлен политикой: ' + r,
         );
     });
+  });
+  issues.push(...infraOrderIssues(graph));
+  return issues;
+}
+
+/**
+ * Работы инфраструктуры принимаются раньше продуктовых своего репозитория:
+ * продуктовая работа графа, у репозитория которой в том же графе есть работа
+ * инфраструктуры, зависит от неё (прямо или через другие работы). Так
+ * продуктовые работы получают gates и мосты из принятой ревизии
+ * инфраструктуры, а не из незаконченной.
+ */
+function infraOrderIssues(graph: WorkGraph): CodedIssue[] {
+  const issues: CodedIssue[] = [];
+  const byId = new Map(graph.orders.map((o) => [o.id, o]));
+  const infra = graph.orders.filter((o) => o.kind === 'infra');
+  if (!infra.length) return issues;
+  const reaches = (from: string, target: string) => {
+    const seen = new Set<string>();
+    const stack = [...(byId.get(from)?.dependsOn ?? [])];
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (id === target) return true;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      stack.push(...(byId.get(id)?.dependsOn ?? []));
+    }
+    return false;
+  };
+  graph.orders.forEach((order, i) => {
+    if (order.kind === 'infra') return;
+    const missing = infra
+      .filter((x) => x.repositoryId === order.repositoryId && !reaches(order.id, x.id))
+      .map((x) => x.id);
+    if (missing.length)
+      issues.push({
+        code: 'INVALID_INPUT',
+        path: ['graph', 'orders', i, 'dependsOn'],
+        message: `Продуктовая работа ${order.id} не зависит от работ инфраструктуры своего репозитория: ${missing.join(', ')} — добавьте их в dependsOn`,
+      });
   });
   return issues;
 }

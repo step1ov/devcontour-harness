@@ -195,6 +195,23 @@
               ],
               "additionalProperties": false
             }
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "product",
+              "infra"
+            ]
+          },
+          "gateChanges": {
+            "minItems": 1,
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
           }
         },
         "required": [

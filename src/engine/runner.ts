@@ -51,6 +51,10 @@ import {
   type ProbeServer,
   type RuntimeResponse,
   type WorkState,
+  gateDefinitionFiles,
+  hostStepFiles,
+  infraViolations,
+  withinInfra,
 } from '../contracts/index.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
 import { codeReviewDiff } from './review-diff.ts';
@@ -1068,18 +1072,52 @@ export class Runner {
       .filter((c) => (c.repositoryId ?? work.order.repositoryId) === repo.id)
       .flatMap((c) => (c.artifacts ?? []).map((a) => a.path));
     const role = roleBinding(this.policy, work.order.role, work.order.repositoryId)?.writePaths;
+    const kind = work.order.kind ?? 'product';
+    const infraPaths = repo.infra?.paths ?? [];
     const { forbidden, outside } = scopeViolations(changed, {
       protected: [...repo.protectedPaths, ...repo.generatedPaths],
       pinned: [...pinnedContext, ...checkers],
       writeScope: work.order.writeScope,
       ...(role ? { role } : {}),
       allowed,
+      ...(infraPaths.length || kind === 'infra' ? { infra: { kind, paths: infraPaths } } : {}),
     });
     if (forbidden.length)
       throw new TaskFailure(
         'scope-violation',
         `Изменены защищённые файлы: ${forbidden.join(', ')}`,
       );
+    // Работа инфраструктуры (docs/infra-works.md): файлы шагов на хосте она не
+    // меняет вовсе, а файлы gates доверенной базы — только согласованные
+    // планом (`gateChanges`): её gates исполняются по определению базы.
+    if (kind === 'infra') {
+      const base = range ? range[0] : 'HEAD';
+      const gateFiles = gateDefinitionFiles(repo);
+      const present = new Set<string>();
+      for (const path of changed)
+        if (withinInfra(path, gateFiles))
+          await git(cwd, 'cat-file', '-e', `${base}:${path}`)
+            .then(() => present.add(path))
+            .catch(() => undefined);
+      const { host, gate } = infraViolations(changed, {
+        kind,
+        paths: infraPaths,
+        gateFiles,
+        hostFiles: hostStepFiles(repo, this.policy.lifecycle),
+        gateChanges: work.order.gateChanges ?? [],
+        inBase: (p) => present.has(p),
+      });
+      if (host.length)
+        throw new TaskFailure(
+          'scope-violation',
+          `Изменены файлы шагов на хосте (lifecycle/prepare исполняются вне песочницы до ревью): ${host.join(', ')}; новую версию пишите отдельным файлом, переключает её политика`,
+        );
+      if (gate.length)
+        throw new TaskFailure(
+          'scope-violation',
+          `Изменены файлы gates доверенной базы без согласования планом: ${gate.join(', ')}; назовите их в gateChanges поручения и проведите ревью плана`,
+        );
+    }
     // Ответы эталонных наборов лежат в рабочем дереве: изменённый код,
     // который называет файл набора строковым литералом, читает эталон, а не
     // решает. Тесты исполнителя (не артефакты контракта) проверяются так же:
