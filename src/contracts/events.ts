@@ -265,6 +265,11 @@ export const eventPayloads = {
     index: z.number().int().min(1).optional(),
     cap: z.number().int().min(0).optional(),
     granted: z.number().int().min(1).optional(),
+    /**
+     * Повтор ведущего снял удержание этого gate (`ENVIRONMENT_GATE_HELD`,
+     * 0.1.0-alpha.66): тест исправлен, новая попытка проверит gate снова.
+     */
+    gateHoldLifted: z.string().optional(),
   }),
   /**
    * Ведущий записал диагностику повторных отказов (`harness diagnose`):

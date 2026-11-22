@@ -15,10 +15,8 @@ import {
 } from './writer-probe.ts';
 import { applyWriterLoopback, loopbackChanges } from './writer-loopback.ts';
 import { writeFile } from 'node:fs/promises';
-import { gitRawOutput } from '../environment/process.ts';
-import { processListBackend } from '../verification/gates.ts';
+import { processListBackend, processListCallers } from '../verification/gates.ts';
 import {
-  processListCallPatterns,
   processListLine,
   type ProcessListCapability,
 } from '../verification/process-list.ts';
@@ -142,38 +140,7 @@ export interface LifecycleSmokeInput {
   processList?: false | (() => Promise<ProcessListCapability>);
 }
 
-/**
- * Файлы дерева на коммите, которые вызывают список процессов (до 10):
- * абсолютный путь `ps`/`pgrep`/`top`, имя строкой, вызов в shell. Документы
- * (`*.md`) не смотрятся. Отказ git — пустой список.
- */
-export async function processListCallers(repoPath: string, sha: string): Promise<string[]> {
-  try {
-    const out = await gitRawOutput(
-      repoPath,
-      'grep',
-      '-l',
-      '-I',
-      '-E',
-      ...processListCallPatterns.flatMap((p) => ['-e', p]),
-      sha,
-      '--',
-      '.',
-      ':(exclude)*.md',
-    );
-    return [
-      ...new Set(
-        out
-          .split('\n')
-          .filter(Boolean)
-          .map((line) => line.slice(sha.length + 1)),
-      ),
-    ].slice(0, 10);
-  } catch {
-    // `git grep` без совпадений завершается кодом 1.
-    return [];
-  }
-}
+export { processListCallers } from '../verification/gates.ts';
 
 async function smokeProcessList(
   input: LifecycleSmokeInput,

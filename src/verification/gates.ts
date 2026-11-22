@@ -26,7 +26,7 @@ import {
   gateTimeoutMs,
   gateTimeoutText,
 } from '../contracts/index.ts';
-import { ReapFailure, command, git, gitOutput } from '../environment/process.ts';
+import { ReapFailure, command, git, gitOutput, gitRawOutput } from '../environment/process.ts';
 import {
   isolation,
   isolatedCommand,
@@ -61,6 +61,8 @@ import {
 import { keepGateArtifacts } from './gate-artifacts.ts';
 import { ReapedGate } from './reaped.ts';
 import {
+  processListCallPatterns,
+  processListCodeMessage,
   processListFailure,
   processListMessage,
   type ProcessListCapability,
@@ -780,6 +782,39 @@ export async function probeProcessList(
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
+/**
+ * Файлы дерева на коммите, которые вызывают список процессов (до 10):
+ * абсолютный путь `ps`/`pgrep`/`top`, имя строкой, вызов в shell. Документы
+ * (`*.md`) не смотрятся. Отказ git — пустой список.
+ */
+export async function processListCallers(repoPath: string, sha: string): Promise<string[]> {
+  try {
+    const out = await gitRawOutput(
+      repoPath,
+      'grep',
+      '-l',
+      '-I',
+      '-E',
+      ...processListCallPatterns.flatMap((p) => ['-e', p]),
+      sha,
+      '--',
+      '.',
+      ':(exclude)*.md',
+    );
+    return [
+      ...new Set(
+        out
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => line.slice(sha.length + 1)),
+      ),
+    ].slice(0, 10);
+  } catch {
+    // `git grep` без совпадений завершается кодом 1.
+    return [];
+  }
+}
+
 let processListCache: Promise<ProcessListCapability> | undefined;
 /**
  * Проба списка процессов, одна на процесс harness: ответ ядра на этой машине
@@ -1207,14 +1242,23 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
             )
           : undefined;
       if (listing && (await processListBackend.probe()).status === 'unavailable') {
+        const tail = `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`;
+        // Вызов ps добавил исполнитель: в базе попытки его нет, а в
+        // кандидате есть. Это дефект кода задачи, а не среды: засчитанный
+        // провал gate с советом убрать вызов. Вызов уже в базе — отказ среды
+        // (повтор и правка задачи его не снимут, ход ведущего).
+        const base = run.trustedBase;
+        const added =
+          base && base !== sha && !(await processListCallers(cwd, base)).length
+            ? await processListCallers(cwd, sha)
+            : [];
+        if (added.length)
+          throw new Error(
+            processListCodeMessage({ ...listing, line: redact(listing.line) }, added, tail),
+          );
         kind = 'environment';
         cause = 'sandbox-process-list';
-        throw new Error(
-          processListMessage(
-            { ...listing, line: redact(listing.line) },
-            `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
-          ),
-        );
+        throw new Error(processListMessage({ ...listing, line: redact(listing.line) }, tail));
       }
       // Установка зависимостей, закреплённая политикой, упала на сети или
       // реестре пакетов, а признаков ошибки проекта нет: правка кода её не

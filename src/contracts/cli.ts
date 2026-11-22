@@ -83,7 +83,8 @@ import {
  */
 export interface CliArgument {
   name: string;
-  value: 'path' | 'dir' | 'id' | 'digest' | 'number' | 'text' | 'flag' | 'sink';
+  /** `duration` — целое число с единицей `s`, `m` или `h` (`90s`, `30m`, `2h`); голое число — отказ. */
+  value: 'path' | 'dir' | 'id' | 'digest' | 'number' | 'duration' | 'text' | 'flag' | 'sink';
   required: boolean;
   description: string;
   /** Аргумент можно повторить; значения — список. */
@@ -515,7 +516,7 @@ export const cliCommands = {
         value: 'text',
         required: false,
         description:
-          'lead — сброс ведущего по свежему техническому разбору (policy.recovery.mode: lead, предел leadResets); без флага — решение оператора',
+          'lead — сброс ведущего по свежему техническому разбору (policy.recovery.mode: lead, предел leadResets); operator или без флага — решение оператора (operator явно не пишется в журнал ведущего и при его активной сессии)',
       },
       {
         name: '--diagnosis',
@@ -1619,9 +1620,10 @@ export const cliCommands = {
       state,
       {
         name: '--ttl',
-        value: 'number',
+        value: 'duration',
         required: false,
-        description: 'Аренда сессии в минутах: по умолчанию 30, от 1 до 720',
+        description:
+          'Аренда сессии — длительность с единицей s, m или h (90s, 30m, 2h): от 1m до 12h, по умолчанию 30m; голое число — отказ INVALID_INPUT',
       },
       {
         name: '--text',
@@ -1720,16 +1722,17 @@ export const cliCommands = {
       },
       {
         name: '--ttl',
-        value: 'number',
+        value: 'duration',
         required: false,
-        description: 'Срок жизни превью в секундах (1–86400); нет — ttlMs превью, иначе 2 ч',
+        description:
+          'Срок жизни превью — длительность с единицей s, m или h (90s, 30m, 2h): от 1s до 24h; голое число — отказ INVALID_INPUT; нет — ttlMs превью, иначе 2h',
       },
       {
         name: '--idle',
-        value: 'number',
+        value: 'duration',
         required: false,
         description:
-          'Остановить после стольких секунд без запросов (0 — не останавливать по простою, до 86400); нет — idleMs превью, иначе 30 мин',
+          'Остановить после такого простоя без запросов — длительность с единицей s, m или h (90s, 30m, 2h), до 24h; 0 — не останавливать по простою; другое голое число — отказ INVALID_INPUT; нет — idleMs превью, иначе 30m',
       },
     ],
     refusals: ['NOT_FOUND', 'NOT_READY'],

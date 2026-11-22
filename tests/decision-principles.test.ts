@@ -59,6 +59,7 @@ test('principle: техническое восстановление — у ве
     'diagnosis-required:diagnose',
     'diagnosis-split:review-plan',
     'environment-gate-command:fix-environment',
+    'environment-gate-held:fix-environment',
     'exhausted-diagnose:diagnose',
     'exhausted-lead-reset:reset-attempts',
     'input-technical:answer-input',
@@ -106,6 +107,12 @@ const inputs: Record<DecisionRuleKey, StopInput> = {
     attempt: 1,
     failureKind: 'environment',
     environmentCause: 'sandbox-process-list',
+  }),
+  'environment-gate-held': workInput({
+    status: 'ready',
+    attempt: 0,
+    failureKind: undefined,
+    gateHold: { gate: 'unit', workId: 'other', runId: 'r1' },
   }),
   'input-technical': workInput({
     attempt: 1,

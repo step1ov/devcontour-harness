@@ -80,6 +80,8 @@ export interface ResourcesInput {
   environmentsTruncated?: number;
   gates: { repositoryId: string; count: number }[];
   workspaceGates: number;
+  /** Удержанные gates (`Engine.environmentGateHolds`); нет — удержаний нет. */
+  heldGates?: { repositoryId: string; gate: string; workId: string }[];
 }
 
 export interface ResourcesRoleView {
@@ -128,6 +130,8 @@ export interface ResourcesView {
     workspace: number;
     repositories: { repositoryId: string; count: number }[];
     line: string;
+    held?: { repositoryId: string; gate: string; workId: string }[];
+    heldLine?: string;
   };
   lines: string[];
   truncated?: { roles?: number; tools?: number; services?: number; receipts?: number };
@@ -547,10 +551,30 @@ export function resourcesOf(input: ResourcesInput, opts: ResourcesOptions): Reso
   const gatesLine = ru
     ? `${ruCount(total, ['проверка', 'проверки', 'проверок'])} (gates)${gateParts.length > 1 || workspace ? ': ' + gateParts.join(', ') : ''}`
     : `${total} ${total === 1 ? 'check' : 'checks'} (gates)${gateParts.length > 1 || workspace ? ': ' + gateParts.join(', ') : ''}`;
-  const gates = { total, workspace, repositories: gateRepos, line: clipLine(gatesLine) };
+  const held = (input.heldGates ?? []).slice(0, L.repositories).map((h) => ({
+    repositoryId: mid(h.repositoryId),
+    gate: mid(h.gate),
+    workId: mid(h.workId),
+  }));
+  const heldLine = held.length
+    ? clipLine(
+        ru
+          ? `Удержано: ${held.map((h) => `${h.repositoryId}/${h.gate} (работа ${h.workId})`).join(', ')} — gate зовёт ps, а в песочнице проверок списка процессов нет; ход ведущего: поменять gate или исправить тест и повторить работу (retry --by lead)`
+          : `Held: ${held.map((h) => `${h.repositoryId}/${h.gate} (work ${h.workId})`).join(', ')} — the gate runs ps, and the check sandbox has no process list; the lead changes the gate, or fixes the test and retries the work (retry --by lead)`,
+      )
+    : undefined;
+  const gates = {
+    total,
+    workspace,
+    repositories: gateRepos,
+    line: clipLine(gatesLine),
+    ...(held.length ? { held, heldLine } : {}),
+  };
 
   // --- Сводка ---
   const lines: string[] = [];
+  // Удержание gate — то, что держит выдачу сейчас: первой строкой сводки.
+  if (gates.heldLine) lines.push(gates.heldLine);
   const group = (kind: ResourcesRoleView['kind']) => {
     const list = [
       ...new Set(

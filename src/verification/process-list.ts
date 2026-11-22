@@ -97,7 +97,53 @@ export function processListFailure(
     if (found.some((s) => !s)) return undefined;
     return found.find((s) => s!.named) ?? found[0];
   }
-  return processListSignature(output);
+  // Без отчёта JUnit упавшие тесты не сопоставить с признаком: отказ среды —
+  // только признак, называющий программу (голый `spawn EPERM` бывает и в
+  // предупреждении рядом с настоящим провалом), и ни одного другого
+  // признака провала: упавших тестов не больше строк признака, нет
+  // проваленных утверждений. Иначе — обычный засчитанный провал gate.
+  const signature = processListSignature(output);
+  if (!signature?.named) return undefined;
+  return otherFailures(output) ? undefined : signature;
+}
+
+/** Проваленное утверждение (node:assert, chai, jest/vitest), а не отказ запуска. */
+const assertionMarkers = [
+  /\bAssertionError\b/,
+  /\bERR_ASSERTION\b/,
+  /^\s*(?:Expected|Received)(?: value)?:/,
+  /\bexpected\b.+\bto (?:be|equal|deep|have|include|match|throw)/i,
+];
+/** Строка упавшего теста: TAP `not ok`, `✖`/`✗`/`×`/`●` в начале, jest `FAIL`. */
+const failedTestLine = /^\s*(?:not ok\b|[✖✗×●]\s|FAIL\s)/;
+/** Итог прогона с числом упавших: `# fail 2`, `ℹ fail 2`, `Tests: 2 failed`, `2 failing`. */
+const failedTotals = [
+  /^\s*(?:#|ℹ)\s*fail\s+(\d+)/,
+  /\bTests?:?\s.*?\b(\d+) failed\b/,
+  /^\s*(\d+) (?:failing|failed)\b/,
+];
+
+/**
+ * В выводе есть провал, который признак списка процессов не объясняет:
+ * проваленное утверждение или больше упавших тестов, чем строк признака.
+ * Отчёты повторяют упавший тест (список и итог), поэтому строки упавших
+ * считаются без повторов, и берётся большее из них и итога прогона.
+ */
+function otherFailures(output: string): boolean {
+  const lines = output.split('\n');
+  if (lines.some((l) => assertionMarkers.some((r) => r.test(l)))) return true;
+  const signatures = new Set(
+    lines.filter((l) => processListSignature(l)?.named).map((l) => l.trim()),
+  ).size;
+  const failedLines = new Set(lines.filter((l) => failedTestLine.test(l)).map((l) => l.trim()))
+    .size;
+  let total = 0;
+  for (const l of lines)
+    for (const r of failedTotals) {
+      const m = r.exec(l);
+      if (m) total = Math.max(total, Number(m[1]));
+    }
+  return Math.max(total, failedLines) > Math.max(signatures, 1);
 }
 
 /** Текст отказа gate для evidence и следующей попытки. */
@@ -105,7 +151,23 @@ export function processListMessage(signature: ProcessListSignature, tail: string
   return (
     `${GATE_SANDBOX_PROCESS_LIST}: gate запускает ps (список процессов), а в песочнице ОС проверок он недоступен — ` +
     `«${signature.line}». Ядро macOS не запускает setuid-программы (/bin/ps, /usr/bin/top) в песочнице, ` +
-    'а pgrep в ней не видит процессов вне песочницы; правка кода задачи этого не снимет. ' +
+    'а pgrep в ней не видит процессов вне песочницы; вызов не из изменения задачи, и его правка этого не снимет. ' +
+    `Что сделать: ${PROCESS_LIST_ADVICE}. ${tail}`
+  );
+}
+
+/**
+ * Текст провала gate, когда вызов списка процессов добавлен изменением
+ * задачи (в базе попытки его нет): исправляет исполнитель.
+ */
+export function processListCodeMessage(
+  signature: ProcessListSignature,
+  files: readonly string[],
+  tail: string,
+) {
+  return (
+    `${GATE_SANDBOX_PROCESS_LIST}: тест вызывает ps, в песочнице проверок это запрещено; уберите вызов — ` +
+    `«${signature.line}»; вызов добавлен изменением задачи (${files.join(', ')}), в базе его нет. ` +
     `Что сделать: ${PROCESS_LIST_ADVICE}. ${tail}`
   );
 }

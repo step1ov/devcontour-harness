@@ -474,8 +474,13 @@ about it (`sandbox-process-list`, with the files that call `ps`) before any
 paid attempt; `$H doctor` shows `sandbox.processList`. The engine does not
 retry this failure on its own and does not pause the queue: a retry would
 fail the same way, and the attempt is not counted. It is your move (explain:
-`lead`, `fix-environment`). Fix the gate or the command, then
-`$H retry --work <id>`.
+`lead`, `fix-environment`). While you have not, the gate is held: other works
+of that repository that need it are not started (`ENVIRONMENT_GATE_HELD`,
+`lead`, `fix-environment`; `view.resources.gates.heldLine`). Changing the
+gate definition lifts the hold by itself; after fixing the test instead, run
+`$H retry --work <id> --by lead` on the stopped work. When the task change
+itself added the `ps` call (the base has none), it is a normal counted gate
+failure for the writer («тест вызывает ps … уберите вызов»), not this case.
 
 **Code review keeps raising new findings (`REVIEW_REJECTED`).** The reviewer
 must list all blocking findings in one round. A new blocking finding on a path
@@ -701,7 +706,11 @@ writing in the task source, checking the site in a browser, fixing the
 connector — is invisible unless you say it:
 
 - At the start of your session: `$H lead begin --state <state>` (a lease of
-  30 minutes, `--ttl <minutes>`; each lead record extends it).
+  30 minutes; `--ttl` takes a unit — `90s`, `30m`, `2h`, a bare number is
+  refused; each of your records extends it). Your harness commands are
+  written to your log only while your session is active, or when they say
+  `--by lead` / `--actor lead` (`diagnose` is always yours); a command with `--actor operator` (or
+  `--by <human>`) is the operator's and does not extend your lease.
 - At each step outside harness, one short line in plain words, the way you
   would tell a non-developer: `$H lead note "Обновляю документ DOC-2 в источнике задач"
 --state <state>` (up to 200 characters; no secrets, no paths, no logs).

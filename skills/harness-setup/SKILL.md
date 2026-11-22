@@ -414,7 +414,7 @@ the app gets it as `PORT` and `{port}`, the host as `HOST=127.0.0.1` and
 (`["npm", "run", "start", "--", "--port", "{port}", "--host", "{host}"]`).
 Set `"services": true` only when the app needs the repository lifecycle
 (the database that `lifecycle.setup` starts). Check it once on HEAD:
-`$H preview-start --state <manifest.paths.state> --policy .harness/policy.json --ref HEAD --ttl 300`
+`$H preview-start --state <manifest.paths.state> --policy .harness/policy.json --ref HEAD --ttl 5m`
 must return a `url` that opens, then `$H preview-stop --state <manifest.paths.state>`.
 Previews do not change the execution digest and need no plan re-review. See
 `<pkg>/docs/previews.md`.

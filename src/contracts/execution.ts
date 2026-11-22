@@ -912,6 +912,12 @@ export const workStateSchema = z.strictObject({
       revision: z.number().int().positive(),
       budgets: z.number().int().min(0),
       fresh: z.boolean(),
+      /**
+       * Доработка продолжает оставленную (0.1.0-alpha.66): та же постановка
+       * после отказа — попытки, незасчитанные отказы и предел (эпоха
+       * сбросов ведущего) перенесены с неё, своего предела нет.
+       */
+      resumed: z.literal(true).optional(),
       accepted: z.strictObject({
         runId: z.string().min(1).optional(),
         resultSha: gitShaSchema,
@@ -938,6 +944,13 @@ export const workStateSchema = z.strictObject({
           by: z.enum(['operator', 'host', 'graph']),
           orderDigest: digestSchema,
           restored: z.boolean(),
+          /**
+           * Засчитанные попытки и незасчитанные отказы оставленной доработки:
+           * та же постановка в новой редакции графа продолжает их, а не
+           * открывает свой предел заново. Нет — запись прежней сборки.
+           */
+          attempt: z.number().int().min(0).optional(),
+          neutralFailures: z.number().int().min(0).optional(),
         })
         .optional(),
     })
@@ -949,6 +962,23 @@ export const workStateSchema = z.strictObject({
    * сбросом; нет поля — диагностик и учтённых сбросов не было.
    */
   leadRecovery: leadRecoverySchema.optional(),
+  /**
+   * Удержание gate по отказу окружения без повтора (0.1.0-alpha.66):
+   * попытка этой работы упала `sandbox-process-list` на вызове `ps`, который
+   * есть уже в базе. Пока определение gate (`gateDigest`) то же и ведущий не
+   * повторил эту работу (`retry --by lead`), работы репозитория, которым
+   * нужен этот gate, не выдаются (`ENVIRONMENT_GATE_HELD`): тот же gate в той
+   * же песочнице откажет снова. Держит, пока работа не принята и не отменена.
+   */
+  environmentHold: z
+    .strictObject({
+      repositoryId: idSchema,
+      gate: idSchema,
+      digest: digestSchema,
+      runId: z.string().min(1),
+      at: isoTimeSchema,
+    })
+    .optional(),
 });
 export type WorkState = z.infer<typeof workStateSchema>;
 

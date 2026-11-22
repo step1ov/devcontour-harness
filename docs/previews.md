@@ -72,7 +72,7 @@ loopback-прокси harness перед приложением.
 ## Команды
 
 ```sh
-harness preview-start --state D [--policy F] [--preview ID] [--ref accepted|SHA|REF] [--work ID] [--repository ID] [--ttl S] [--idle S]
+harness preview-start --state D [--policy F] [--preview ID] [--ref accepted|SHA|REF] [--work ID] [--repository ID] [--ttl 90s|30m|2h] [--idle 90s|30m|0]
 harness preview-list  --state D [--policy F]
 harness preview-stop  --state D [--policy F] [--preview ID] [--repository ID]
 ```

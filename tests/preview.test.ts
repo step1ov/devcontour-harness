@@ -8,7 +8,15 @@ import './temp-scope.ts';
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -28,9 +36,13 @@ import {
 import { repositoryFromProfile, resolveProfile } from '../src/profiles/resolve.ts';
 import {
   listPreviews,
+  livePreviews,
+  previewTiming,
+  processStart,
   readReceipt,
   startPreview,
   stopPreviews,
+  writeReceipt,
   type PreviewContext,
 } from '../src/control/preview.ts';
 import { processAlive } from '../src/environment/lifecycle.ts';
@@ -382,7 +394,7 @@ test('CLI preview-start/list/stop: договор, конверт и данны�
     '--ref',
     'accepted',
     '--ttl',
-    '600',
+    '600s',
     '--idle',
     '0',
   );
@@ -434,4 +446,142 @@ test('view: живые превью — поле previews с адресом и �
   assert.notEqual(live.source.token, empty.source.token, 'токен содержимого видит превью');
   await stopPreviews(ctx);
   assert.equal('previews' in view(), false);
+});
+
+test('preview-start: одновременные запуски того же превью — один supervisor, второй получает его превью', async () => {
+  const { ctx } = project();
+  const [a, b] = await Promise.all([
+    startPreview(ctx, { env: {} }),
+    startPreview(ctx, { env: {} }),
+  ]);
+  assert.deepEqual([a.changed, b.changed].sort(), [false, true]);
+  assert.equal(a.preview.pids.supervisor, b.preview.pids.supervisor, 'один supervisor');
+  assert.equal(a.preview.pids.app, b.preview.pids.app);
+  assert.equal(readReceipt(a.preview.dir)?.pids.supervisor, a.preview.pids.supervisor);
+  assert.equal(existsSync(join(a.preview.dir, 'start.lock')), false, 'блокировка снята');
+  await stopPreviews(ctx);
+});
+
+test('preview-start: брошенная блокировка (PID мёртв или переиспользован) не мешает; живой владелец — NOT_READY', async () => {
+  const { ctx } = project();
+  const dir = join(ctx.stateDir, 'previews', 'app', 'web');
+  const lock = join(dir, 'start.lock');
+  mkdirSync(dir, { recursive: true });
+  const dead = spawnSync(process.execPath, ['-e', ''], { stdio: 'ignore' }).pid;
+  assert.equal(processAlive(dead), false);
+  writeFileSync(lock, JSON.stringify({ pid: dead, start: 'x', nonce: 'dead' }));
+  const s = await startPreview(ctx, { env: {} });
+  assert.equal(s.changed, true);
+  assert.equal(existsSync(lock), false);
+  // PID жив, но время старта другое — переиспользованный PID: блокировка брошена.
+  writeFileSync(
+    lock,
+    JSON.stringify({ pid: process.pid, start: 'Mon Jan  1 00:00:00 2001', nonce: 'reused' }),
+  );
+  const again = await startPreview(ctx, { env: {} });
+  assert.equal(again.changed, false);
+  assert.equal(existsSync(lock), false);
+  // Живой владелец (тот же PID и время старта) — ожидание, затем отказ.
+  writeFileSync(
+    lock,
+    JSON.stringify({ pid: process.pid, start: processStart(process.pid), nonce: 'live' }),
+  );
+  previewTiming.lockWaitMs = 300;
+  try {
+    await assert.rejects(startPreview(ctx, { env: {} }), (error: Error & { code?: string }) => {
+      assert.equal(error.code, 'NOT_READY');
+      assert.match(error.message, /уже запускается/);
+      return true;
+    });
+    assert.equal(
+      (JSON.parse(readFileSync(lock, 'utf8')) as { nonce: string }).nonce,
+      'live',
+      'чужая живая блокировка не снята',
+    );
+  } finally {
+    delete previewTiming.lockWaitMs;
+    rmSync(lock, { force: true });
+  }
+  await stopPreviews(ctx);
+});
+
+test('livePreviews: живой PID с другим временем старта — не живое превью', () => {
+  const stateDir = realpathSync(mkdtempSync(join(tmpdir(), 'harness-preview-live-')));
+  const dir = join(stateDir, 'previews', 'app', 'web');
+  mkdirSync(dir, { recursive: true });
+  const at = new Date().toISOString();
+  const receipt = (start: string) =>
+    writeReceipt({
+      version: 1,
+      id: 'web',
+      repositoryId: 'app',
+      ref: 'accepted',
+      sha: 'a'.repeat(40),
+      worktree: join(dir, 'tree'),
+      dir,
+      log: join(dir, 'app.log'),
+      services: false,
+      pids: { supervisor: process.pid },
+      starts: { supervisor: start },
+      startedAt: at,
+      expiresAt: at,
+      ttlMs: 1000,
+      idleMs: 0,
+      state: 'running',
+    });
+  receipt('Mon Jan  1 00:00:00 2001');
+  assert.deepEqual(livePreviews(stateDir), [], 'переиспользованный PID');
+  receipt(processStart(process.pid)!);
+  assert.equal(livePreviews(stateDir).length, 1, 'тот же процесс');
+});
+
+const CHILD = `
+import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import http from 'node:http';
+const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+writeFileSync(process.env.CHILD_FILE, String(child.pid));
+if (process.env.MODE === 'early') process.exit(3);
+http
+  .createServer((req, res) => {
+    if (req.url === '/quit') {
+      res.end('bye');
+      setTimeout(() => process.exit(0), 50);
+      return;
+    }
+    res.end('ok');
+  })
+  .listen(Number(process.env.PORT), process.env.HOST);
+`;
+
+test('preview: лидер завершился — дети из его группы остановлены (до готовности и после)', async () => {
+  const marks = realpathSync(mkdtempSync(join(tmpdir(), 'harness-preview-child-')));
+  const childPid = (file: string) => Number(readFileSync(file, 'utf8'));
+  const setup = (mode: string) => {
+    const file = join(marks, mode);
+    const p = project({
+      start: [process.execPath, 'child.mjs'],
+      env: { CHILD_FILE: file, MODE: mode },
+    });
+    writeFileSync(join(p.r.dir, 'child.mjs'), CHILD);
+    p.r.git('add', '-A');
+    p.r.git('commit', '-q', '-m', 'child');
+    return { ...p, file };
+  };
+
+  // До готовности: лидер завершился, ребёнок в группе — остановлен.
+  const early = setup('early');
+  await assert.rejects(startPreview(early.ctx, { env: {} }), { code: 'LIFECYCLE_FAILED' });
+  await until(() => existsSync(early.file));
+  await until(() => !processAlive(childPid(early.file)));
+
+  // После готовности: лидер завершился сам — reason exited, ребёнок остановлен.
+  const late = setup('late');
+  const s = await startPreview(late.ctx, { env: {} });
+  const child = childPid(late.file);
+  assert.ok(processAlive(child));
+  await text(s.preview.url! + 'quit');
+  await until(() => readReceipt(s.preview.dir)?.state === 'failed');
+  assert.equal(readReceipt(s.preview.dir)?.reason, 'exited');
+  await until(() => !processAlive(child));
 });

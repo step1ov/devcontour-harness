@@ -19,6 +19,7 @@ import {
   type ReproductionRecord,
   digestOf,
   expandGateRefs,
+  gateDigest,
   policyDigest,
   graphIssues,
   selectReviewer,
@@ -76,6 +77,7 @@ import {
   type TechnicalApproval,
   type TransactionKind,
   type WorkGraph,
+  type WorkOrder,
   type WorkState,
 } from '../contracts/index.ts';
 import { HARNESS_VERSION } from '../package.ts';
@@ -119,6 +121,13 @@ import {
   closeIfBasisChanged,
 } from './property-recovery.ts';
 import { recoveryPolicyOf } from '../projections/decisions.ts';
+import { maskSecrets } from '../projections/mask.ts';
+import {
+  environmentGateHolds,
+  gateHoldLine,
+  gateHoldsFor,
+  type EnvironmentGateHold,
+} from '../projections/gate-hold.ts';
 import {
   LEAD_RECOVERY_LIMIT,
   type LeadDiagnosis,
@@ -572,16 +581,23 @@ export class Engine {
         // больше MAX_REWORK_BUDGETS раз, дальше счётчик переносится). У
         // непринятого счётчик и незасчитанные отказы остаются: новой
         // редакцией предел не обойти.
-        const reopen = prior?.status === 'done' ? this.reworkOf(tx, prior, at) : undefined;
+        const reopen = prior?.status === 'done' ? this.reworkOf(tx, prior, order, at) : undefined;
         const rework = reopen ?? prior?.rework;
         const fresh = reopen?.fresh === true;
-        const neutral = fresh ? undefined : prior?.neutralFailures;
+        // Та же постановка после отказа от доработки продолжает оставленную:
+        // её засчитанные попытки и незасчитанные отказы, а не предел заново.
+        const resumed = reopen?.resumed ? prior?.rework?.abandoned : undefined;
+        const neutral = fresh
+          ? undefined
+          : resumed
+            ? resumed.neutralFailures
+            : prior?.neutralFailures;
         tx.putWork({
           id: order.id,
           graphId: graph.id,
           order,
           status: 'draft',
-          attempt: fresh ? 0 : (prior?.attempt ?? 0),
+          attempt: fresh ? 0 : (resumed?.attempt ?? prior?.attempt ?? 0),
           ...(neutral ? { neutralFailures: neutral } : {}),
           ...(rework ? { rework } : {}),
           ...(corpus ? { checkVersion: corpus } : {}),
@@ -646,6 +662,7 @@ export class Engine {
   private reworkOf(
     tx: ExecutionView,
     prior: WorkState,
+    order: WorkOrder,
     at: string,
   ): WorkState['rework'] | undefined {
     const run = tx
@@ -655,11 +672,20 @@ export class Engine {
     const resultSha = prior.resultSha ?? run?.integrationSha;
     if (!resultSha) return undefined;
     const budgets = prior.rework?.budgets ?? 0;
-    const fresh = budgets < MAX_REWORK_BUDGETS;
+    // Отказ от доработки и та же постановка снова (P3-1): это продолжение
+    // оставленной доработки, а не новая — предел попыток, счёт сбросов
+    // ведущего (`budgets` — эпоха) и попытки переносятся с неё. Иначе
+    // «оставить и открыть заново» давал бы свежий предел каждый раз. Другая
+    // постановка после отказа — новая доработка по общему правилу: свой
+    // предел, пока таких меньше `MAX_REWORK_BUDGETS`, дальше — перенос.
+    const abandoned = prior.rework?.abandoned;
+    const resumed = !!abandoned && abandoned.orderDigest === contentDigest(order);
+    const fresh = !resumed && budgets < MAX_REWORK_BUDGETS;
     return {
       revision: (prior.rework?.revision ?? 0) + 1,
       budgets: fresh ? budgets + 1 : budgets,
       fresh,
+      ...(resumed ? { resumed: true as const } : {}),
       accepted: {
         ...(run ? { runId: run.id } : {}),
         resultSha,
@@ -713,6 +739,10 @@ export class Engine {
       ...(w.recoveryHistory ? { recoveryHistory: w.recoveryHistory } : {}),
       ...(w.neutralFailures ? { neutralFailures: w.neutralFailures } : {}),
       ...(w.codeReviewDecisions ? { codeReviewDecisions: w.codeReviewDecisions } : {}),
+      // Разборы и сбросы ведущего — история работы, как при новой редакции:
+      // отказом от доработки предел сбросов не обойти (номера D<n>, отказ от
+      // повторённой гипотезы и счёт сбросов предела `rework.budgets` остаются).
+      ...(w.leadRecovery ? { leadRecovery: w.leadRecovery } : {}),
       rework: {
         ...kept,
         abandoned: {
@@ -720,6 +750,10 @@ export class Engine {
           by,
           orderDigest: contentDigest(w.order),
           restored: acceptedOrder !== undefined,
+          // Засчитанные попытки оставленной доработки: та же постановка
+          // снова продолжает этот счёт, а не начинает предел заново.
+          attempt: w.attempt,
+          ...(w.neutralFailures ? { neutralFailures: w.neutralFailures } : {}),
         },
       },
     };
@@ -1641,6 +1675,7 @@ export class Engine {
         | 'PAUSED'
         | 'ATTEMPTS_EXHAUSTED'
         | 'DIAGNOSIS_REQUIRED'
+        | 'ENVIRONMENT_GATE_HELD'
         | 'APPROVAL_STALE'
         | 'APPROVAL_REQUIRED'
         | 'BUDGET_EXHAUSTED'
@@ -1689,9 +1724,11 @@ export class Engine {
         code: 'ATTEMPTS_EXHAUSTED',
         message:
           `Исчерпано ${work.attempt} из ${ruCount(this.policy.maxAttempts, RU.attemptGen)}` +
-          (work.rework && !work.rework.fresh
-            ? `; доработка ${work.rework.revision} после приёмки без своего предела: своих пределов у доработок не больше ${MAX_REWORK_BUDGETS}, попытки перенесены с прежней редакции`
-            : ''),
+          (work.rework?.resumed
+            ? `; доработка ${work.rework.revision} продолжает оставленную доработку той же постановки: попытки перенесены с неё`
+            : work.rework && !work.rework.fresh
+              ? `; доработка ${work.rework.revision} после приёмки без своего предела: своих пределов у доработок не больше ${MAX_REWORK_BUDGETS}, попытки перенесены с прежней редакции`
+              : ''),
       });
     if (work.hold)
       out.push({ code: 'NOT_READY', message: 'Удержано операцией ' + work.hold.operation });
@@ -1717,6 +1754,8 @@ export class Engine {
       });
     const hold = this.leadHoldOf(work, view);
     if (hold) out.push(leadHoldBlocker(hold));
+    for (const h of this.gateHoldsOf(work, this.environmentGateHolds(view)))
+      out.push({ code: 'ENVIRONMENT_GATE_HELD', message: gateHoldLine(h, work.id).ru });
     if (this.awaitsOperator(work, view))
       out.push({
         code: 'APPROVAL_REQUIRED',
@@ -1794,8 +1833,12 @@ export class Engine {
           this.recoveryEvent(tx, next, next.recoveryHistory!.at(-1)!);
         }
       }
+      const gateHolds = this.environmentGateHolds(tx);
       const eligible = tx.works().filter((w) => {
         if (w.status !== 'ready' || w.hold || w.budgetBlock) return false;
+        // Gate удержан отказом без повтора (ps в песочнице): тот же gate
+        // откажет снова — ход ведущего, а не новая попытка.
+        if (this.gateHoldsOf(w, gateHolds).length) return false;
         // Два содержательных отказа по одному свойству: третья выдача — только
         // после разбора. Принятие корпуса, ждущее оператора, удерживает выдачу.
         if (blocksClaim(w) || this.awaitsOperator(w, tx)) return false;
@@ -2959,8 +3002,13 @@ export class Engine {
       );
       if (episode && (episode.status !== before || !w.recovery || w.recovery.id !== episode.id))
         this.recoveryEvent(tx, w, episode);
+      // Отказ без повтора на вызове ps из базы: gate удержан для работ
+      // репозитория с этим gate, пока его определение то же и ведущий не
+      // повторил эту работу. Ни решения человека, ни общей паузы.
+      const environmentHold = noRetry && !interrupted ? this.environmentHoldOf(failed) : undefined;
       tx.putWork({
         ...next,
+        ...(environmentHold ? { environmentHold } : {}),
         // Прерванная остановкой работа не упала: она снова в очереди.
         ...(interrupted
           ? {
@@ -5434,6 +5482,53 @@ export class Engine {
   }
 
   /** Удержание выдачи правилом восстановления ведущим (`policy.recovery`). */
+  /**
+   * Удержание gate по отказу `sandbox-process-list` попытки: упавший gate —
+   * последний непройденный evidence попытки с этим кодом (не проверка
+   * потребителя), его определение — в политике репозитория попытки.
+   */
+  private environmentHoldOf(a: AttemptState): WorkState['environmentHold'] {
+    const e = a.evidence.findLast(
+      (x) => !x.passed && !x.consumer && x.summary.startsWith('GATE_SANDBOX_PROCESS_LIST'),
+    );
+    if (!e?.gate) return undefined;
+    const gate = this.policy.repositories
+      .find((r) => r.id === a.repositoryId)
+      ?.gates.find((g) => g.id === e.gate);
+    if (!gate) return undefined;
+    return {
+      repositoryId: a.repositoryId,
+      gate: gate.id,
+      digest: gateDigest(gate),
+      runId: a.id,
+      at: iso(this.now()),
+    };
+  }
+
+  /** Действующие удержания gates (`WorkState.environmentHold`) по текущей политике. */
+  environmentGateHolds(view: ExecutionView): EnvironmentGateHold[] {
+    return environmentGateHolds(view.works(), (repositoryId, id) => {
+      const gate = this.policy.repositories
+        .find((r) => r.id === repositoryId)
+        ?.gates.find((g) => g.id === id);
+      return gate ? gateDigest(gate) : undefined;
+    });
+  }
+
+  /** Удержания gates, которые нужны работе (её обязательные gates репозитория). */
+  gateHoldsOf(work: WorkState, holds: readonly EnvironmentGateHold[]): EnvironmentGateHold[] {
+    if (!holds.length) return [];
+    const repo = this.policy.repositories.find((r) => r.id === work.order.repositoryId);
+    if (!repo) return [];
+    let gates: string[];
+    try {
+      gates = expandGateRefs(repo, work.order.gates);
+    } catch {
+      return [];
+    }
+    return gateHoldsFor(holds, repo.id, gates);
+  }
+
   leadHoldOf(work: WorkState, view: ExecutionView): LeadHold | undefined {
     const rp = recoveryPolicyOf(this.policy);
     if (!rp.enabled) return undefined;
@@ -5472,6 +5567,25 @@ export class Engine {
     // проигнорированного сброса нет: нечего сбросить — это сказано в ответе.
     const resetAsked = !!reset?.reason.trim() || (by === 'lead' && !!reset);
     const spent = w.attempt > 0 || (w.neutralFailures ?? 0) > 0;
+    // Работа уже в очереди (повтор оператора), а gate удержан её отказом:
+    // повтор ведущего после исправления теста снимает удержание.
+    if (
+      w.status === 'ready' &&
+      !exhausted &&
+      !(resetAsked && spent) &&
+      by === 'lead' &&
+      w.environmentHold
+    ) {
+      const { environmentHold: held, ...rest } = w;
+      tx.putWork(rest);
+      tx.emit({
+        type: 'work.retried',
+        graphId: w.graphId,
+        workId,
+        payload: { by, reset: false, gateHoldLifted: held.gate },
+      });
+      return { work: rest as WorkState, changed: true };
+    }
     if (w.status === 'ready' && !exhausted && !(resetAsked && spent))
       return {
         work: w,
@@ -5526,9 +5640,11 @@ export class Engine {
         cap: grant.cap,
         failures: pendingFailures(w, attempts).slice(-20),
       };
-    } else if (doReset && rp.enabled) {
+    } else if (doReset) {
       // Сброс человеком — его решение по отказам без разбора и по удержанию
       // разбора (`split`, противоречие): оно записано и выдачу не держит.
+      // Записывается при любом правиле: после перехода на `lead` отказы,
+      // решённые этим сбросом, разбора не требуют.
       record = {
         by: 'operator',
         at,
@@ -5555,8 +5671,13 @@ export class Engine {
         ...(leadRecovery ?? { diagnoses: [], resets: [], seq: 0 }),
         resets: [...(leadRecovery?.resets ?? []), record].slice(-LEAD_RECOVERY_LIMIT),
       };
+    // Ведущий повторяет работу, остановленную отказом без повтора, после
+    // исправления теста: удержание gate снимается (новый отказ поставит его
+    // снова). Повтор оператора или движка его не снимает.
+    const lifted = by === 'lead' && w.environmentHold ? w.environmentHold : undefined;
     const next: WorkState = {
       ...w,
+      environmentHold: lifted ? undefined : w.environmentHold,
       status: w.approvedDigest ? 'ready' : 'draft',
       attempt: doReset ? 0 : w.attempt,
       neutralFailures: doReset ? undefined : w.neutralFailures,
@@ -5583,6 +5704,7 @@ export class Engine {
               granted: record.granted,
             }
           : {}),
+        ...(lifted ? { gateHoldLifted: lifted.gate } : {}),
       },
     });
     return {
@@ -5703,7 +5825,9 @@ export class Engine {
           'NOT_READY',
           'Засчитанных отказов без разбора нет: отказы окружения, провайдера, вопросы и остановки разбора не требуют',
         );
-      const hypothesis = input.hypothesis?.trim() || undefined;
+      // Разбор хранится и показывается в панели и журнале: секреты (токены,
+      // ключи, учётные данные в URL) маскируются до записи, как у заметок ведущего.
+      const hypothesis = maskSecrets(input.hypothesis ?? '').trim() || undefined;
       if ((input.cause === 'coverage' || input.cause === 'approach') && !hypothesis)
         throw new HarnessError(
           'INVALID_INPUT',
@@ -5726,7 +5850,7 @@ export class Engine {
           `Гипотеза повторяет разбор ${same.id}: третья попытка с той же гипотезой — та же слепая попытка; назовите новую или передайте решение человеку`,
           [{ path: ['--hypothesis'], message: same.id }],
         );
-      const evidence = (input.evidence ?? []).map((e) => e.trim()).filter(Boolean);
+      const evidence = (input.evidence ?? []).map((e) => maskSecrets(e).trim()).filter(Boolean);
       if (evidence.length > 10 || evidence.some((e) => e.length > 1000))
         throw new HarnessError('INVALID_INPUT', '--evidence: не больше 10, каждая до 1000 знаков');
       const seq = (w.leadRecovery?.seq ?? 0) + 1;

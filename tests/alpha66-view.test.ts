@@ -1,5 +1,5 @@
 /**
- * 0.1.0-alpha.66, ревизия 6 представления оператора (пилот 4):
+ * 0.1.0-alpha.66, ревизия 6 представления оператора (сценарий отменённых доработок):
  * - P4-7: отмена открытой доработки принятой работы — возврат к принятой
  *   редакции, а не «задача отменена»; прогноз считает попытки всех работ
  *   выпуска, в том числе отменённых;
@@ -128,12 +128,12 @@ function acceptAll(env: ReturnType<typeof engineOf>, n: number, letter: string) 
 const chain = { w1: [], w2: ['w1'], w3: ['w2'], w4: ['w3'] };
 
 /**
- * Пилот 4: четыре принятые работы, ведущий перепланировал их ради доставки
+ * Сценарий: четыре принятые работы, ведущий перепланировал их ради доставки
  * (четыре доработки), затем отменил доработки прежней версией harness
  * (работы `cancelled`), а пятая задача (PRODUCT-1) — отдельным графом —
  * принята. Отменённые доработки записаны так, как их записывала alpha.65.
  */
-function pilot4() {
+function abandonedReworks() {
   const env = engineOf();
   ready(env.engine, graphOf(chain));
   acceptAll(env, 4, 'f');
@@ -153,8 +153,8 @@ function pilot4() {
   return env;
 }
 
-test('P4-7: пилот 4 — отменённые прежней версией доработки остаются принятыми: 5 из 5, не «0 из 1»', () => {
-  const env = pilot4();
+test('P4-7: сценарий отменённых доработок — отменённые прежней версией доработки остаются принятыми: 5 из 5, не «0 из 1»', () => {
+  const env = abandonedReworks();
   const f = viewOf(env).forecast!;
   assert.equal(f.progress.total, 5);
   assert.equal(f.progress.done, 5);
@@ -167,8 +167,8 @@ test('P4-7: пилот 4 — отменённые прежней версией 
   assert.doesNotMatch(f.time.line, /ни одна попытка не закончилась/);
 });
 
-test('P4-7: пилот 4 — все 5 работ в представлении приняты; отменённые доработки помечены, состояние не переписано', () => {
-  const env = pilot4();
+test('P4-7: сценарий отменённых доработок — все 5 работ в представлении приняты; отменённые доработки помечены, состояние не переписано', () => {
+  const env = abandonedReworks();
   const view = viewOf(env);
   assert.deepEqual(
     view.works.map((w) => [w.id, w.status, w.stage.name]),
@@ -203,7 +203,7 @@ test('P4-7: пилот 4 — все 5 работ в представлении �
 });
 
 test('P4-7: cancel отменённой прежней версией доработки — возврат к принятой редакции', () => {
-  const env = pilot4();
+  const env = abandonedReworks();
   const before = env.engine.read((v) => v.work('w1')!);
   const r = env.engine.cancel('w1', 'вернуть принятое', 'operator');
   assert.equal(r.abandoned, true);
@@ -218,6 +218,8 @@ test('P4-7: cancel отменённой прежней версией дораб
     orderDigest: w.rework!.abandoned!.orderDigest,
     // Постановки принятой редакции у прежней доработки нет — остаётся текущая.
     restored: false,
+    // Попытки оставленной доработки — для её продолжения той же постановкой.
+    attempt: before.attempt,
   });
   const events = env.store.events(0, 1000).filter((e) => e.type === 'work.rework-abandoned');
   assert.deepEqual(
@@ -312,6 +314,8 @@ test('P4-7: CLI cancel открытой доработки отвечает aban
     JSON.stringify({ policy: env.engine.policy, baseDir: env.dir }),
   );
   env.store.close();
+  // Команда без явного актёра — ведущего, пока его сессия активна (ревью L4).
+  assert.equal(harness('lead', 'begin', '--state', env.dir, '--ttl', '30m').status, 0);
   const r = harness('cancel', '--state', env.dir, '--work', 'w');
   assert.equal(r.status, 0, r.stderr);
   const data = cliDataSchemas.cancel.parse(r.json.data);
@@ -331,7 +335,7 @@ test('P4-7: CLI cancel открытой доработки отвечает aban
 });
 
 test('P4-7: длительность попытки — по попыткам всех работ выпуска, в том числе отменённых', () => {
-  // Пилот 4 до приёмки PRODUCT-1: четыре отменённые работы с 8 закончившимися попытками.
+  // Сценарий до приёмки PRODUCT-1: четыре отменённые работы с 8 закончившимися попытками.
   const minutes: [string, number, number, string][] = [
     ['w1', 1, 9, 'failed'],
     ['w1', 2, 4, 'failed'],
@@ -430,7 +434,7 @@ const t = (k: number, key: string) => ({ id: `T${k}`, key, orderId: `w${k}` });
 test('P4-5: задача несогласованного снимка — планируемая: planned[], две цифры прогноза', () => {
   const env = engineOf();
   const state = env.dir;
-  // Пилот 4: полный план из пяти задач проверен (снимок графа gfull), но не
+  // Сценарий: полный план из пяти задач проверен (снимок графа gfull), но не
   // согласован; ведущий запустил выборку из четырёх (gnarrow) — последнее чтение без PRODUCT-1.
   const four = [t(1, 'API-1'), t(2, 'API-2'), t(3, 'WEB-1'), t(4, 'ADMIN-1')];
   connectorDb(
@@ -599,7 +603,7 @@ test('P4-10: CLI lead begin|note|end и release done — синонимы, до�
     JSON.stringify({ policy: env.engine.policy, baseDir: env.dir }),
   );
   env.store.close();
-  const begin = harness('lead', 'begin', '--state', env.dir, '--ttl', '45');
+  const begin = harness('lead', 'begin', '--state', env.dir, '--ttl', '45m');
   assert.equal(begin.status, 0, begin.stderr);
   assert.equal(cliDataSchemas['lead-begin'].parse(begin.json.data).lead.active, true);
   const note = harness('lead', 'note', 'Обновляю документ DOC-2 в Relay', '--state', env.dir);

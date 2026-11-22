@@ -49,6 +49,13 @@ export const errorCodes = {
    * `harness diagnose`): третьей слепой попытки нет.
    */
   DIAGNOSIS_REQUIRED: 'refused',
+  /**
+   * Gate работы удержан отказом окружения без повтора (`sandbox-process-list`
+   * на вызове `ps` из базы, 0.1.0-alpha.66): выдачи нет, пока ведущий не
+   * поменяет gate (другое определение) или не повторит остановленную работу
+   * после исправления теста (`retry --by lead`).
+   */
+  ENVIRONMENT_GATE_HELD: 'refused',
   /** Задача или её контекст не помещаются в окно контекста модели (`context-exhausted`). */
   CONTEXT_EXHAUSTED: 'refused',
   /**

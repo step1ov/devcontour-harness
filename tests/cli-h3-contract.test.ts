@@ -471,7 +471,29 @@ test('H3-01: прежние команды и схемы их данных не 
     if (k === 'enum' && Array.isArray(v) && v.includes('recovery') && v.includes('host'))
       v = (v as unknown[]).filter((x) => x !== 'lead');
     if (k === 'enum' && Array.isArray(v))
-      v = (v as unknown[]).filter((x) => x !== 'diagnose' && x !== 'DIAGNOSIS_REQUIRED');
+      v = (v as unknown[]).filter(
+        (x) => x !== 'diagnose' && x !== 'DIAGNOSIS_REQUIRED' && x !== 'ENVIRONMENT_GATE_HELD',
+      );
+    // Пределы восстановления после ревью alpha.66: продолжение оставленной
+    // доработки (`rework.resumed`, `abandoned.attempt/neutralFailures`),
+    // удержание gate (`environmentHold`, `work.retried.gateHoldLifted`,
+    // `resources.gates.held/heldLine`).
+    if (k === 'properties' && v && typeof v === 'object') {
+      const o = { ...(v as Record<string, unknown>) };
+      const before = Object.keys(o).length;
+      if ('orderDigest' in o && 'restored' in o) {
+        delete o.attempt;
+        delete o.neutralFailures;
+      }
+      if ('budgets' in o && 'fresh' in o) delete o.resumed;
+      delete o.environmentHold;
+      delete o.gateHoldLifted;
+      if ('workspace' in o && 'repositories' in o) {
+        delete o.held;
+        delete o.heldLine;
+      }
+      if (Object.keys(o).length !== before) v = o;
+    }
     // Аддитивные поля ответа init (0.1.0-alpha.50): ведущий, решение о
     // ревью, наличие CLI и предупреждения — обязательные, поэтому и в `required`.
     if (v && typeof v === 'object' && !Array.isArray(v) && 'properties' in v) {

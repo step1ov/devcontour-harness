@@ -46,6 +46,11 @@ export const blockerCodeText: Record<BlockerCode, Text> = {
     en: 'repeated failures — the lead diagnoses the cause before the next attempt (harness diagnose)',
     actor: 'lead',
   },
+  ENVIRONMENT_GATE_HELD: {
+    ru: 'gate удержан: зовёт ps, а в песочнице проверок список процессов недоступен — ведущий меняет gate или исправляет тест и повторяет работу (retry --by lead)',
+    en: 'a gate is held: it runs ps, and the check sandbox has no process list — the lead changes the gate, or fixes the test and retries the work (retry --by lead)',
+    actor: 'lead',
+  },
   APPROVAL_STALE: {
     ru: 'согласование устарело — нужно согласовать заново',
     en: 'the approval is stale — approve again',

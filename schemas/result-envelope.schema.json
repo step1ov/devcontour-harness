@@ -1793,6 +1793,7 @@
                     "BUDGET_UNKNOWN",
                     "ATTEMPTS_EXHAUSTED",
                     "DIAGNOSIS_REQUIRED",
+                    "ENVIRONMENT_GATE_HELD",
                     "CONTEXT_EXHAUSTED",
                     "INPUT_REQUIRED",
                     "OPERATOR_ANSWER_REQUIRED",

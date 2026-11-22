@@ -1461,6 +1461,10 @@
               "fresh": {
                 "type": "boolean"
               },
+              "resumed": {
+                "type": "boolean",
+                "const": true
+              },
               "accepted": {
                 "type": "object",
                 "properties": {
@@ -1768,6 +1772,16 @@
                   },
                   "restored": {
                     "type": "boolean"
+                  },
+                  "attempt": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "neutralFailures": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
@@ -1962,6 +1976,40 @@
               "diagnoses",
               "resets",
               "seq"
+            ],
+            "additionalProperties": false
+          },
+          "environmentHold": {
+            "type": "object",
+            "properties": {
+              "repositoryId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+              },
+              "gate": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "runId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              }
+            },
+            "required": [
+              "repositoryId",
+              "gate",
+              "digest",
+              "runId",
+              "at"
             ],
             "additionalProperties": false
           }

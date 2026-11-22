@@ -1126,6 +1126,9 @@ export function collectOperatorViewInput(
             const a = v.attempt(runId);
             return a ? a.status !== 'active' : undefined;
           },
+          heldGates: h.engine
+            .environmentGateHolds(v)
+            .map((x) => ({ repositoryId: x.repositoryId, gate: x.gate, workId: x.workId })),
         }),
       ),
       ...(status.budgets ? { budgets: status.budgets.budgets } : {}),

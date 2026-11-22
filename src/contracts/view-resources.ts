@@ -106,6 +106,17 @@ export const resourcesViewSchema = z.strictObject({
     workspace: count,
     repositories: z.array(z.strictObject({ repositoryId: id, count })).max(L.repositories),
     line,
+    /**
+     * Gates, удержанные отказом без повтора (`ENVIRONMENT_GATE_HELD`,
+     * 0.1.0-alpha.66): зовут ps, а в песочнице проверок списка процессов
+     * нет; `workId` — работа, чья попытка упала. Нет поля — удержаний нет.
+     */
+    held: z
+      .array(z.strictObject({ repositoryId: id, gate: id, workId: id }))
+      .max(L.repositories)
+      .optional(),
+    /** Строка об удержаниях (и первой строкой `lines`). */
+    heldLine: line.optional(),
   }),
   /** Короткие строки сводки для домашнего экрана. */
   lines: z.array(line).max(L.lines),

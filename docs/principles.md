@@ -13,7 +13,13 @@
 попытку не засчитывают и разбора не требуют. Отказ окружения, который повтор
 не снимет (gate запускает `ps`, а песочница ОС проверок его не даёт —
 `sandbox-process-list`), не повторяется автоматически и выдачу не держит:
-это ход ведущего — поменять gate или команду.
+это ход ведущего — поменять gate или команду. Пока он этого не сделал, gate
+удержан: работы репозитория, которым он нужен, не выдаются
+(`ENVIRONMENT_GATE_HELD`) — без решения человека и без общей паузы. Удержание
+снимается само, когда меняется определение gate, или когда ведущий, исправив
+тест, повторяет остановленную работу (`harness retry --work <id> --by lead`).
+Вызов `ps`, который добавило изменение задачи (в базе его нет), — не отказ
+окружения, а обычный засчитанный провал gate исполнителю с советом убрать вызов.
 
 ### Восстановление после повторных отказов
 
@@ -42,8 +48,13 @@ lead --diagnosis <D…>`. Не больше `recovery.leadResets` раз на п
 5. Предел сбросов ведущего считается на предел попыток работы. Доработка
    принятой работы со своим пределом попыток (не больше трёх таких
    доработок) начинает и свой счёт сбросов ведущего; доработка с
-   перенесённым счётчиком и перепланирование непринятой работы счёт не
-   обнуляют.
+   перенесённым счётчиком, перепланирование непринятой работы, отказ от
+   доработки и та же постановка после него (продолжение оставленной) счёт
+   не обнуляют.
+6. Согласованное разделение после разбора `split` на исчерпанных попытках —
+   технический ход: новый предел по этому разбору даёт ведущий в пределе
+   `recovery.leadResets`. Сброс человеком решает отказы до него при любом
+   правиле `recovery`.
 
 ### Какие события какой настройкой решаются
 
@@ -55,6 +66,7 @@ lead --diagnosis <D…>`. Не больше `recovery.leadResets` раз на п
 | Исчерпаны попытки, технический разбор   | ведущий: новый предел попыток                  | `recovery.leadResets`, `maxAttempts`                                  |
 | Исчерпаны попытки сверх предела сбросов | человек                                        | `recovery.leadResets`                                                 |
 | Gate зовёт `ps` в песочнице ОС          | ведущий: поменять gate или команду             | —                                                                     |
+| Gate удержан после такого отказа        | ведущий: поменять gate или исправить тест      | —                                                                     |
 | Противоречивое обещание                 | человек                                        | —                                                                     |
 | Бюджет расходов или времени исчерпан    | человек                                        | `budgets`                                                             |
 
@@ -77,17 +89,18 @@ lead --diagnosis <D…>`. Не больше `recovery.leadResets` раз на п
 
 <!-- decision-rules:start -->
 
-| Правило                    | Код                   | Кто    | Действие          | Вид             |
-| -------------------------- | --------------------- | ------ | ----------------- | --------------- |
-| `diagnosis-required`       | `DIAGNOSIS_REQUIRED`  | `lead` | `diagnose`        | `technical`     |
-| `exhausted-diagnose`       | `ATTEMPTS_EXHAUSTED`  | `lead` | `diagnose`        | `technical`     |
-| `exhausted-lead-reset`     | `ATTEMPTS_EXHAUSTED`  | `lead` | `reset-attempts`  | `technical`     |
-| `diagnosis-split`          | `NOT_READY`           | `lead` | `review-plan`     | `technical`     |
-| `environment-gate-command` | `RUNTIME_UNAVAILABLE` | `lead` | `fix-environment` | `technical`     |
-| `input-technical`          | `INPUT_REQUIRED`      | `lead` | `answer-input`    | `technical`     |
-| `diagnosis-contradiction`  | `NOT_READY`           | `user` | `user-decision`   | `contradiction` |
-| `input-user`               | `INPUT_REQUIRED`      | `user` | `answer-input`    | `product`       |
-| `exhausted-user`           | `ATTEMPTS_EXHAUSTED`  | `user` | `reset-attempts`  | `budget`        |
-| `budget-exhausted`         | `BUDGET_EXHAUSTED`    | `user` | `raise-budget`    | `budget`        |
+| Правило                    | Код                     | Кто    | Действие          | Вид             |
+| -------------------------- | ----------------------- | ------ | ----------------- | --------------- |
+| `diagnosis-required`       | `DIAGNOSIS_REQUIRED`    | `lead` | `diagnose`        | `technical`     |
+| `exhausted-diagnose`       | `ATTEMPTS_EXHAUSTED`    | `lead` | `diagnose`        | `technical`     |
+| `exhausted-lead-reset`     | `ATTEMPTS_EXHAUSTED`    | `lead` | `reset-attempts`  | `technical`     |
+| `diagnosis-split`          | `NOT_READY`             | `lead` | `review-plan`     | `technical`     |
+| `environment-gate-command` | `RUNTIME_UNAVAILABLE`   | `lead` | `fix-environment` | `technical`     |
+| `environment-gate-held`    | `ENVIRONMENT_GATE_HELD` | `lead` | `fix-environment` | `technical`     |
+| `input-technical`          | `INPUT_REQUIRED`        | `lead` | `answer-input`    | `technical`     |
+| `diagnosis-contradiction`  | `NOT_READY`             | `user` | `user-decision`   | `contradiction` |
+| `input-user`               | `INPUT_REQUIRED`        | `user` | `answer-input`    | `product`       |
+| `exhausted-user`           | `ATTEMPTS_EXHAUSTED`    | `user` | `reset-attempts`  | `budget`        |
+| `budget-exhausted`         | `BUDGET_EXHAUSTED`      | `user` | `raise-budget`    | `budget`        |
 
 <!-- decision-rules:end -->

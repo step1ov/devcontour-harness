@@ -8,6 +8,7 @@
 import {
   HarnessError,
   LEAD_LIMITS,
+  WORKSPACE_OWNER,
   type ExecutionView,
   type LeadData,
   type LeadEntry,
@@ -16,6 +17,7 @@ import {
 import type { Engine } from '../engine/engine.ts';
 import { ruCount } from '../contracts/plural.ts';
 import { maskSecrets } from '../projections/mask.ts';
+import { parseDurationFlag } from './duration.ts';
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -67,17 +69,16 @@ function leadState(log: LeadLog, now: number): LeadData['lead'] {
   };
 }
 
-/** Аренда сессии в минутах (`--ttl`): по умолчанию 30, от 1 до 720. */
-export function leadTtlMs(minutes: string | undefined): number {
-  if (minutes === undefined) return LEAD_LIMITS.ttlDefaultMs;
-  const n = Number(minutes);
-  const ms = Math.round(n * 60_000);
-  if (!Number.isFinite(n) || ms < LEAD_LIMITS.ttlMinMs || ms > LEAD_LIMITS.ttlMaxMs)
-    throw new HarnessError(
-      'INVALID_INPUT',
-      `--ttl: минуты от ${LEAD_LIMITS.ttlMinMs / 60_000} до ${LEAD_LIMITS.ttlMaxMs / 60_000}`,
-    );
-  return ms;
+/**
+ * Аренда сессии (`--ttl`): длительность с единицей (`90s`, `30m`, `2h`),
+ * от 1 минуты до 12 часов; без флага — 30 минут. Голое число — отказ.
+ */
+export function leadTtlMs(raw: string | undefined): number {
+  if (raw === undefined) return LEAD_LIMITS.ttlDefaultMs;
+  return parseDurationFlag('ttl', raw, {
+    minMs: LEAD_LIMITS.ttlMinMs,
+    maxMs: LEAD_LIMITS.ttlMaxMs,
+  });
 }
 
 /**
@@ -273,7 +274,7 @@ export function leadCommandEntry(
   data: unknown,
   phase: 'start' | 'end' = 'end',
 ): Omit<LeadEntry, 'at'> | undefined {
-  if (args.actor === 'operator') return undefined;
+  if (leadCommandActor(command, args) === 'operator') return undefined;
   const w = args.work;
   const d = data as CommandData;
   const one = (plain: string, plainEn: string, workId = w) => ({
@@ -413,10 +414,44 @@ export const LEAD_LOGGED_COMMANDS = [
   'input-supersede',
 ] as const;
 
-/** Записать команду ведущего в журнал (продлевает активную сессию). */
-export function recordLeadCommand(engine: Engine, entry: Omit<LeadEntry, 'at'>) {
+/** Команды, которые по договору подаёт только ведущий: `diagnose` — его разбор. */
+const LEAD_ONLY_COMMANDS: readonly string[] = ['diagnose'];
+
+/**
+ * Кто подал команду: явный `--by`/`--actor` решает сам — `lead` это ведущий,
+ * любое другое значение (`operator`, имя человека у `reapprove --by`) —
+ * оператор; команда только ведущего (`diagnose`) — ведущий. Иначе
+ * `undefined`: решает сессия ведущего (`recordLeadCommand`).
+ */
+export function leadCommandActor(
+  command: string,
+  args: LeadCommandArgs,
+): 'lead' | 'operator' | undefined {
+  const explicit = args.by ?? args.actor;
+  if (explicit !== undefined) return explicit === 'lead' ? 'lead' : 'operator';
+  return LEAD_ONLY_COMMANDS.includes(command) ? 'lead' : undefined;
+}
+
+/**
+ * Записать команду ведущего в журнал (продлевает активную сессию). Команда —
+ * ведущего, если `actor === 'lead'` (`leadCommandActor`: явный `--by lead`,
+ * `--actor lead`, команда только ведущего) или, без явного актёра, если сессия ведущего активна сейчас. Иначе это команда
+ * оператора: в журнал ведущего она не пишется, аренду не продлевает и запись
+ * `lead` состояния не трогает. Возвращает, записана ли строка.
+ */
+export function recordLeadCommand(
+  engine: Engine,
+  entry: Omit<LeadEntry, 'at'>,
+  actor?: 'lead' | 'operator',
+): boolean {
+  if (actor === 'operator') return false;
+  if (actor !== 'lead') {
+    const log = engine.read((v) => v.local('lead', WORKSPACE_OWNER, 'log'));
+    if (!log || !activeAt(log, engine.clock())) return false;
+  }
   engine.recordLead((log, now) => ({
     log: append(log, { ...entry, at: iso(now) }, now),
     result: undefined,
   }));
+  return true;
 }

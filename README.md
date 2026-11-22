@@ -130,6 +130,11 @@ git rev-parse refs/heads/harness/accepted   # совпадает с data.result.
 
 stdout — один JSON (`devcontour-harness/v1alpha1`), диагностика — stderr. Exit
 codes: 0 успех, 2 неверный вход, 3 отказ/блокировка, 4 инфраструктура.
+Длительности (`lead begin --ttl`, `preview-start --ttl` и `--idle`) — всегда
+с единицей: `90s`, `30m`, `2h`; голое число — неверный вход (кроме
+`--idle 0`). Команда попадает в журнал ведущего, только если она ведущего:
+`--by lead`/`--actor lead`, `diagnose` или, без явного актёра, при активной сессии
+`lead begin`; команды оператора аренду ведущего не продлевают.
 `HARNESS_CODEX_BIN` и `HARNESS_CLAUDE_BIN` подменяют исполняемые файлы runtime
 — например, fixture executable в тестах (это не живая модель).
 

@@ -106,10 +106,12 @@ import {
   leadCommandEntry,
   leadEnd,
   leadNote,
+  leadCommandActor,
   leadTtlMs,
   recordLeadCommand,
   releaseDone,
 } from './control/lead.ts';
+import { parseDurationFlag } from './control/duration.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -1435,10 +1437,13 @@ async function run(
             command,
             data: await h.deliver(need('work'), sinkOf(need('sink'), h, b.baseDir)!),
           };
-        if (command === 'retry' && v.by !== undefined && v.by !== 'lead')
-          throw new HarnessError('INVALID_INPUT', '--by: только lead (без флага — оператор)', [
-            { path: ['--by'], message: v.by },
-          ]);
+        // `--by operator` — то же, что без флага, но явно: журнал ведущего её не пишет.
+        if (command === 'retry' && v.by !== undefined && v.by !== 'lead' && v.by !== 'operator')
+          throw new HarnessError(
+            'INVALID_INPUT',
+            '--by: lead или operator (без флага — оператор)',
+            [{ path: ['--by'], message: v.by }],
+          );
         const lead = command === 'retry' && v.by === 'lead';
         if (v.diagnosis !== undefined && !(lead && v.reset))
           throw new HarnessError(
@@ -1996,20 +2001,19 @@ async function run(
             ...optional('previewId', v.preview),
           }),
         };
-      const seconds = (flag: 'ttl' | 'idle', min: number) => {
+      // Длительности — с единицей (`90s`, `30m`, `2h`), как у `lead-begin --ttl`;
+      // голое число отклоняется (кроме `--idle 0` — «не по простою»).
+      const duration = (flag: 'ttl' | 'idle') => {
         const raw = v[flag];
         if (raw === undefined) return undefined;
-        const n = Number(raw);
-        if (!Number.isInteger(n) || n < min || n > 86_400)
-          throw new HarnessError(
-            'INVALID_INPUT',
-            `--${flag}: целое число секунд от ${min} до 86400`,
-            [{ path: [`--${flag}`], message: raw }],
-          );
-        return n * 1000;
+        return parseDurationFlag(flag, raw, {
+          minMs: 1000,
+          maxMs: 86_400_000,
+          ...(flag === 'idle' ? { zero: true } : {}),
+        });
       };
-      const ttlMs = seconds('ttl', 1);
-      const idleMs = seconds('idle', 0);
+      const ttlMs = duration('ttl');
+      const idleMs = duration('idle');
       // Принятый результат поручения — из базы состояния, только чтение.
       const work = (id: string) => {
         if (!existsSync(join(resolve(state), 'state.sqlite'))) return undefined;
@@ -2301,32 +2305,39 @@ function leadAlias(args: string[]): string[] {
 /**
  * Записать команду ведущего в его журнал (P4-10 a): после успешной команды
  * (у `run` — и при старте), только для существующего состояния с привязкой;
- * сбой журнала команду не меняет — строка в stderr.
+ * сбой журнала команду не меняет — строка в stderr. Команда — ведущего, если
+ * она сама это говорит (`--by lead`, `--actor lead`) или, без явного актёра,
+ * если сессия ведущего активна (`diagnose` — всегда ведущего); `--by`/`--actor`
+ * с другим значением — команда
+ * оператора: в журнал ведущего не пишется и аренду не продлевает
+ * (`recordLeadCommand`). `actor` задаёт решение явно: конец `run` пишется,
+ * только если записан его старт. Возвращает, записана ли строка.
  */
-function journalLeadCommand(args: string[], phase: 'start' | 'end', data: unknown) {
+function journalLeadCommand(
+  args: string[],
+  phase: 'start' | 'end',
+  data: unknown,
+  actor?: 'lead' | 'operator',
+): boolean {
   const command = args[0];
-  if (!command || !(LEAD_LOGGED_COMMANDS as readonly string[]).includes(command)) return;
+  if (!command || !(LEAD_LOGGED_COMMANDS as readonly string[]).includes(command)) return false;
   try {
     const { values } = parseArgs({ args: args.slice(1), options, strict: false });
     const state = typeof values.state === 'string' ? values.state : undefined;
     if (!state || !existsSync(join(state, 'state.sqlite')) || !existsSync(bindingFile(state)))
-      return;
-    const entry = leadCommandEntry(
-      command,
-      {
-        ...optional('work', typeof values.work === 'string' ? values.work : undefined),
-        ...optional('request', typeof values.request === 'string' ? values.request : undefined),
-        ...optional('actor', typeof values.actor === 'string' ? values.actor : undefined),
-        ...(values.reset === true ? { reset: true } : {}),
-        ...(typeof values.by === 'string' ? { by: values.by } : {}),
-      },
-      data,
-      phase,
-    );
-    if (!entry) return;
+      return false;
+    const flags = {
+      ...optional('work', typeof values.work === 'string' ? values.work : undefined),
+      ...optional('request', typeof values.request === 'string' ? values.request : undefined),
+      ...optional('actor', typeof values.actor === 'string' ? values.actor : undefined),
+      ...(values.reset === true ? { reset: true } : {}),
+      ...(typeof values.by === 'string' ? { by: values.by } : {}),
+    };
+    const entry = leadCommandEntry(command, flags, data, phase);
+    if (!entry) return false;
     const h = open(state, binding(state), false);
     try {
-      recordLeadCommand(h.engine, entry);
+      return recordLeadCommand(h.engine, entry, actor ?? leadCommandActor(command, flags));
     } finally {
       h.close();
     }
@@ -2334,6 +2345,7 @@ function journalLeadCommand(args: string[], phase: 'start' | 'end', data: unknow
     process.stderr.write(
       `harness: журнал ведущего не записан: ${(error as Error)?.message ?? String(error)}\n`,
     );
+    return false;
   }
 }
 
@@ -2367,16 +2379,22 @@ let envelope: CliEnvelope;
 let code: number = exitCodes.ok;
 let text: string | undefined;
 try {
-  if (argv[0] === 'run') journalLeadCommand(argv, 'start', undefined);
+  // Конец `run` пишется в журнал ведущего, только если записан его старт.
+  const runBy =
+    argv[0] === 'run'
+      ? journalLeadCommand(argv, 'start', undefined)
+        ? ('lead' as const)
+        : ('operator' as const)
+      : undefined;
   let result: Awaited<ReturnType<typeof run>>;
   try {
     result = await run(argv);
   } catch (error) {
     // Запуск ведущего закончился отказом — тоже конец его run.
-    if (argv[0] === 'run') journalLeadCommand(argv, 'end', undefined);
+    if (runBy) journalLeadCommand(argv, 'end', undefined, runBy);
     throw error;
   }
-  journalLeadCommand(argv, 'end', result.data);
+  journalLeadCommand(argv, 'end', result.data, runBy);
   // Ответ проверяется схемой своей команды: CLI не может выдать данные вне договора.
   envelope = {
     apiVersion: API_VERSION,

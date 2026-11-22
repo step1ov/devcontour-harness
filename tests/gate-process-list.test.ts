@@ -12,7 +12,7 @@ import './temp-scope.ts';
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -64,7 +64,7 @@ async function withProbe<T>(capability: ProcessListCapability, body: () => Promi
 
 /**
  * Gate-скрипт: запускает `/bin/ps` (`execFileSync` — «spawnSync /bin/ps
- * EPERM», `spawn` — голое «spawn EPERM», как у пилота) и пишет JUnit с
+ * EPERM», `spawn` — голое «spawn EPERM», как в реальном отказе) и пишет JUnit с
  * исходом; `extra` — дополнительный упавший testcase без признака.
  */
 function psGate(how: 'execFileSync' | 'spawn', extra = false) {
@@ -91,8 +91,12 @@ process.exit(error || ${extra} ? 1 : 0);
   return [process.execPath, '-e', script];
 }
 
-async function gate(command: string[], mode: 'none' | 'os') {
-  const r = repo();
+async function gate(
+  command: string[],
+  mode: 'none' | 'os',
+  at?: { r: ReturnType<typeof repo>; trustedBase?: string },
+) {
+  const r = at?.r ?? repo();
   const recorded: Omit<EvidenceRecord, 'id' | 'runId' | 'createdAt'>[] = [];
   const full = {
     id: 'root-tests',
@@ -117,6 +121,7 @@ async function gate(command: string[], mode: 'none' | 'os') {
       signal: new AbortController().signal,
       execution: { env: { ...process.env }, redact: redactor([]) },
       boundary: { hidden: [], readable: [] },
+      ...(at?.trustedBase ? { trustedBase: at.trustedBase } : {}),
     });
   } catch (error) {
     if (!(error instanceof TaskFailure)) throw error;
@@ -157,6 +162,81 @@ test('признак при JUnit: каждый упавший testcase с пр�
   // Без упавших testcases решает вывод.
   assert.equal(processListFailure(`x\n${ps}`)?.named, true);
 });
+
+test('признак без JUnit: голый spawn EPERM рядом с провалами утверждений и лишние упавшие тесты — провал gate', () => {
+  const tap = [
+    'TAP version 13',
+    'not ok 1 - adds numbers',
+    '  error: AssertionError [ERR_ASSERTION]: 3 !== 4',
+    'not ok 2 - subtracts',
+    '  error: expected 1 to equal 2',
+    'warn: child_process spawn EPERM (ignored)',
+    '# fail 2',
+  ].join('\n');
+  assert.equal(processListFailure(tap), undefined, 'голый признак без JUnit — не среда');
+  const named = 'Error: spawnSync /bin/ps EPERM';
+  assert.equal(
+    processListFailure(tap.replace('warn: child_process spawn EPERM (ignored)', named)),
+    undefined,
+  );
+  // Названный признак, но упавших тестов больше, чем строк признака.
+  assert.equal(
+    processListFailure(
+      ['not ok 1 - lists', '  ' + named, 'not ok 2 - other', '# fail 2'].join('\n'),
+    ),
+    undefined,
+  );
+  // Единственный упавший тест — тот, что звал ps.
+  assert.equal(
+    processListFailure(['not ok 1 - lists', '  ' + named, '# fail 1'].join('\n'))?.named,
+    true,
+  );
+  assert.equal(processListFailure(`x\n${named}`)?.named, true);
+  assert.equal(processListFailure('x\nError: spawn EPERM'), undefined);
+});
+
+test(
+  'вызов ps добавлен кандидатом — засчитанный провал gate исполнителю; вызов уже в базе — отказ среды',
+  { skip: sandbox.ok ? false : 'песочница ОС недоступна: ' + sandbox.detail },
+  async () => {
+    const forged = [
+      process.execPath,
+      '-e',
+      `require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase name="t"><failure message="spawn /bin/ps EPERM"/></testcase></testsuite>'); console.error('Error: spawn /bin/ps EPERM'); process.exit(1)`,
+    ];
+    const r = repo({ 'README.md': 'app\n', 'src/app.ts': 'export const x = 1;\n' });
+    const base = r.head();
+    r.git('checkout', '-q', '-b', 'candidate');
+    writeFileSync(join(r.dir, 'ps.test.mjs'), "execFileSync('/bin/ps', ['-A'])\n");
+    r.git('add', '-A');
+    r.git('commit', '-q', '-m', 'candidate calls ps');
+    const added = await withProbe(unavailable, () => gate(forged, 'os', { r, trustedBase: base }));
+    assert.equal(added.failure?.kind, 'gate', added.evidence.summary);
+    assert.equal(added.failure?.diagnosis, undefined);
+    assert.match(
+      added.evidence.summary,
+      /тест вызывает ps, в песочнице проверок это запрещено; уберите вызов/,
+    );
+    assert.match(added.evidence.summary, /ps\.test\.mjs/);
+    assert.doesNotMatch(added.evidence.summary, /этого не снимет/);
+    // Тот же вызов уже в базе: отказ среды, ход ведущего.
+    const inBase = await withProbe(unavailable, () =>
+      gate(forged, 'os', { r, trustedBase: r.head() }),
+    );
+    assert.equal(inBase.failure?.diagnosis, 'sandbox-process-list', inBase.evidence.summary);
+    r.git('checkout', '-q', 'main');
+    writeFileSync(join(r.dir, 'base-ps.mjs'), "execFileSync('/bin/ps', ['-A'])\n");
+    r.git('add', '-A');
+    r.git('commit', '-q', '-m', 'base calls ps');
+    const base2 = r.head();
+    r.git('checkout', '-q', '-b', 'candidate2');
+    writeFileSync(join(r.dir, 'more-ps.mjs'), "execFileSync('/bin/ps', ['-x'])\n");
+    r.git('add', '-A');
+    r.git('commit', '-q', '-m', 'more');
+    const both = await withProbe(unavailable, () => gate(forged, 'os', { r, trustedBase: base2 }));
+    assert.equal(both.failure?.diagnosis, 'sandbox-process-list', 'вызов есть в базе — среда');
+  },
+);
 
 test(
   'проба harness: ps в песочнице проверок недоступен на macOS (setuid), на хосте — доступен',

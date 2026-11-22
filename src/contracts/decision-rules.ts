@@ -280,6 +280,17 @@ export const decisionRules = {
     action: 'fix-environment',
     kind: 'technical',
   },
+  /**
+   * Gate удержан отказом без повтора (ps из базы в песочнице, 0.1.0-alpha.66):
+   * работы с этим gate не выдаются, ведущий меняет gate или исправляет тест
+   * и повторяет остановленную работу (`retry --by lead`).
+   */
+  'environment-gate-held': {
+    code: 'ENVIRONMENT_GATE_HELD',
+    actor: 'lead',
+    action: 'fix-environment',
+    kind: 'technical',
+  },
   /** Технический вопрос исполнителя, политика разрешает ведущему. */
   'input-technical': {
     code: 'INPUT_REQUIRED',

@@ -1,5 +1,5 @@
 /**
- * P4-6 (пилот 4): все задачи приняты harness, доставки подтверждены, но
+ * P4-6: все задачи приняты harness, доставки подтверждены, но
  * задачи у получателя не закрыты — привязки критериев называли testcase без
  * classname (`orders.api.access` вместо `test.orders.api.access`: node:test
  * пишет `classname="test"`). Здесь то же на fixture: testcase отчёта

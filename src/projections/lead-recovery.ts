@@ -68,21 +68,34 @@ export const lastCountedFailure = (work: WorkFacts, attempts: readonly AttemptFa
   countedFailures(work, attempts).at(-1)?.id;
 
 /**
- * Засчитанные отказы без решения по ним: их не разобрала диагностика
- * ведущего, не покрыл сброс (ведущего или человека) и не разобрал эпизод
- * восстановления свойства с решением.
+ * Засчитанные отказы без решения по ним: после последнего сброса попыток,
+ * их не разобрала диагностика ведущего, не покрыл сброс (ведущего или
+ * человека) и не разобрал эпизод восстановления свойства с решением.
+ *
+ * Отказы до последнего сброса решены этим сбросом, даже без записи о нём
+ * (сброс человеком прежней сборки или при правиле `user`): засчитанных
+ * отказов текущего предела не больше счётчика попыток (`work.attempt` —
+ * засчитанный отказ его не возвращает), поэтому в расчёт идут только
+ * последние `attempt` из них. Разбор и сброс решают все отказы, ждавшие
+ * решения в их момент, а записывают не больше 20 последних: покрытым
+ * считается всё до последнего записанного ими отказа включительно, и
+ * больше 20 отказов не заставляют разбирать их снова.
  */
 export function pendingFailures(work: WorkFacts, attempts: readonly AttemptFacts[]): string[] {
-  const covered = new Set<string>([
+  const counted = countedFailures(work, attempts);
+  const current = work.attempt > 0 ? counted.slice(-work.attempt) : [];
+  const decided = new Set<string>([
     ...(work.leadRecovery?.diagnoses ?? []).flatMap((d) => d.failures),
     ...(work.leadRecovery?.resets ?? []).flatMap((r) => r.failures),
-    ...[...(work.recoveryHistory ?? []), ...(work.recovery ? [work.recovery] : [])]
+  ]);
+  const through = counted.findLastIndex((a) => decided.has(a.id));
+  const settled = new Set(counted.slice(0, through + 1).map((a) => a.id));
+  const episodes = new Set<string>(
+    [...(work.recoveryHistory ?? []), ...(work.recovery ? [work.recovery] : [])]
       .filter((r) => r.decision)
       .flatMap((r) => r.runs),
-  ]);
-  return countedFailures(work, attempts)
-    .filter((a) => !covered.has(a.id))
-    .map((a) => a.id);
+  );
+  return current.filter((a) => !settled.has(a.id) && !episodes.has(a.id)).map((a) => a.id);
 }
 
 export const latestDiagnosis = (work: WorkFacts) => work.leadRecovery?.diagnoses.at(-1);
@@ -181,7 +194,12 @@ export function exhaustedStep(
     return { actor: 'user', why: 'repeated', diagnosis: fresh };
   if (fresh.cause === 'split' && fresh.approvedDigest === work.approvedDigest)
     return { actor: 'lead', step: 'replan', diagnosis: fresh };
-  if (!technicalCause(fresh)) return { actor: 'user', why: 'cause', diagnosis: fresh };
+  // Разделение согласовано (другая постановка после разбора `split`): это
+  // технический ход ведущего, и новый предел попыток по этому разбору даёт
+  // он сам — в пределе `leadResets`, как по любому техническому разбору.
+  const replanned = fresh.cause === 'split' && fresh.approvedDigest !== work.approvedDigest;
+  if (!technicalCause(fresh) && !replanned)
+    return { actor: 'user', why: 'cause', diagnosis: fresh };
   return {
     actor: 'lead',
     step: 'reset',

@@ -9,6 +9,7 @@ import { CLIP_DIAGNOSTIC, clipText } from './clip.ts';
 import type { Actor, FailureKind, NextAction, PauseReason, WorkStatus } from './enums.ts';
 import type { InputState } from './input.ts';
 import { ruleOutcome } from './decisions.ts';
+import { gateHoldLine } from './gate-hold.ts';
 
 /**
  * Код остановки по классу отказа. Это та же таблица, которой RunResult
@@ -141,6 +142,11 @@ export type StopInput =
          * повтора нет, ход ведущего — поменять gate или команду.
          */
         environmentCause?: 'sandbox-process-list';
+        /**
+         * Gate работы удержан отказом без повтора (`ENVIRONMENT_GATE_HELD`,
+         * 0.1.0-alpha.66): `workId` — работа, чья попытка упала на ps из базы.
+         */
+        gateHold?: { gate: string; workId: string; runId: string };
         failure?: string;
         /**
          * Отказ до начала работы (причина `preflight`): последняя попытка не
@@ -687,6 +693,16 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
         .join(' '),
     };
   }
+  // Gate удержан отказом без повтора: выдачи нет, пока ведущий не поменяет
+  // gate или не повторит остановленную работу после исправления теста.
+  const gateHold = work.gateHold;
+  if (gateHold && (work.status === 'ready' || work.status === 'draft'))
+    return {
+      ...ruleOutcome('environment-gate-held'),
+      cause: 'environment',
+      phase: 'claim',
+      note: gateHoldLine({ ...gateHold, repositoryId: '', digest: '', at: '' }, work.id).ru + '.',
+    };
   // Восстановление ведущим держит выдачу: разбор, перепланирование или
   // решение человека по противоречию — раньше класса отказа и исчерпания.
   const hold = work.leadRecovery?.hold;

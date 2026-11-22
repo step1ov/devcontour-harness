@@ -3708,6 +3708,41 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 300
+            },
+            "held": {
+              "maxItems": 10,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "repositoryId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80
+                  },
+                  "gate": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80
+                  },
+                  "workId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80
+                  }
+                },
+                "required": [
+                  "repositoryId",
+                  "gate",
+                  "workId"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "heldLine": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
             }
           },
           "required": [

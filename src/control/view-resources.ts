@@ -39,6 +39,8 @@ export interface ResourcesLoadOptions {
   attemptFinished?: (runId: string) => boolean | undefined;
   /** Проверка процесса-владельца; тест подменяет. */
   processAlive?: (pid: number) => boolean;
+  /** Удержанные gates (`Engine.environmentGateHolds`). */
+  heldGates?: ResourcesInput['heldGates'];
 }
 
 const readJson = (path: string): unknown => {
@@ -344,6 +346,7 @@ export function resourcesInputOf(
       ...(env.skipped ? { environmentsTruncated: env.skipped } : {}),
       gates: policy.repositories.map((r) => ({ repositoryId: r.id, count: r.gates.length })),
       workspaceGates: policy.workspaceGates.length,
+      ...(options.heldGates?.length ? { heldGates: options.heldGates } : {}),
     };
   } catch {
     return undefined;

@@ -193,6 +193,7 @@ export function stopInputsIn(
       for (const id of selected)
         if (!byId.has(id)) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + id);
     const inputs: StopInput[] = [];
+    const gateHolds = h.engine.environmentGateHolds(v);
     const lease = v.controller();
     // Разбор одной работы (`--work`) — чтение во время идущего запуска: занятая
     // роль controller не причина остановки этой работы и не ход ведущего.
@@ -484,6 +485,10 @@ export function stopInputsIn(
           ...(work.status === 'failed' && lastNoRetryCause(attempts)
             ? { environmentCause: lastNoRetryCause(attempts) }
             : {}),
+          ...((held) =>
+            held ? { gateHold: { gate: held.gate, workId: held.workId, runId: held.runId } } : {})(
+            h.engine.gateHoldsOf(work, gateHolds)[0],
+          ),
           ...((input) => (input ? { input } : {}))(inputOf(work, attempts)),
           ...(work.failure !== undefined ? { failure: work.failure } : {}),
           ...(work.status === 'failed' && failedBeforeWork(kind, attempts)

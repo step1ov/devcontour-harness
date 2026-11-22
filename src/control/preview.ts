@@ -2,15 +2,19 @@ import { execFileSync, spawn } from 'node:child_process';
 import {
   closeSync,
   existsSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
   realpathSync,
+  statSync,
   renameSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { request } from 'node:http';
 import { createServer, connect, type Server, type Socket } from 'node:net';
 import { join, relative, resolve, sep } from 'node:path';
@@ -71,8 +75,17 @@ export const PREVIEW_DEFAULTS = {
   health: '/',
 } as const;
 
-/** Паузы надзора: опрос готовности, отсрочка между TERM и KILL, остановка supervisor. */
-export const previewTiming = {
+/**
+ * Паузы надзора: опрос готовности, отсрочка между TERM и KILL, остановка
+ * supervisor; `lockWaitMs` — сколько второй запуск того же превью ждёт
+ * блокировку первого (нет — весь предел запуска превью).
+ */
+export const previewTiming: {
+  pollMs: number;
+  termGraceMs: number;
+  stopGraceMs: number;
+  lockWaitMs?: number;
+} = {
   pollMs: 100,
   termGraceMs: 3000,
   stopGraceMs: 15_000,
@@ -171,20 +184,129 @@ const live = (r: PreviewReceipt) =>
 export const supervisorAlive = (r: PreviewReceipt) =>
   sameProcess(r.pids.supervisor, r.starts.supervisor);
 
-/** Живые превью для представления оператора: только чтение, без сверки и очистки. */
+/**
+ * Живые превью для представления оператора: только чтение, без сверки и
+ * очистки. Supervisor сверяется и по времени старта: переиспользованный PID
+ * не делает превью живым.
+ */
 export function livePreviews(stateDir: string): PreviewReceipt[] {
-  return previewReceipts(stateDir).filter(
-    (r) => r.state === 'running' && processAlive(r.pids.supervisor),
-  );
+  return previewReceipts(stateDir).filter((r) => r.state === 'running' && supervisorAlive(r));
 }
 
-/** Группа процессов приложения: TERM, затем KILL после отсрочки. */
-export async function stopGroup(pid: number, graceMs = previewTiming.termGraceMs) {
+/* Блокировка запуска превью: один `preview-start` на превью одновременно. */
+
+interface StartLock {
+  pid: number;
+  start?: string;
+  nonce: string;
+}
+const lockFile = (dir: string) => join(dir, 'start.lock');
+const readLock = (path: string): StartLock | undefined => {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<StartLock>;
+    return typeof parsed.pid === 'number' && typeof parsed.nonce === 'string'
+      ? (parsed as StartLock)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+};
+/** Владелец блокировки не жив: процесса нет или PID занят другим процессом (другое время старта). */
+const staleLock = (lock: StartLock) => {
+  if (!processAlive(lock.pid)) return true;
+  if (!lock.start) return false;
+  const now = processStart(lock.pid);
+  return now !== undefined && now !== lock.start;
+};
+const ownStart = (() => {
+  let cached: string | undefined | null = null;
+  return () => (cached === null ? (cached = processStart(process.pid)) : cached);
+})();
+
+/**
+ * Захват блокировки превью: файл `start.lock` создаётся атомарно вместе с
+ * содержимым (временный файл и `link`, отказ при существующем — как O_EXCL),
+ * в нём PID и время старта владельца. Блокировка пропавшего владельца
+ * (процесса нет или PID переиспользован) снимается. Живой владелец — ожидание
+ * до `waitMs`, затем отказ NOT_READY. Возвращает освобождение.
+ */
+export async function acquireStartLock(dir: string, previewId: string, waitMs: number) {
+  const path = lockFile(dir);
+  const mine: StartLock = { pid: process.pid, nonce: randomUUID() };
+  const start = ownStart();
+  if (start) mine.start = start;
+  const tmp = `${path}.${process.pid}.${mine.nonce}.tmp`;
+  writeFileSync(tmp, JSON.stringify(mine));
+  const end = Date.now() + waitMs;
+  try {
+    for (;;) {
+      try {
+        linkSync(tmp, path);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+      const held = readLock(path);
+      if (held && staleLock(held)) {
+        // Снять только ту блокировку, которую признали брошенной: переименовать
+        // в свой файл и сверить nonce; чужую свежую — вернуть на место.
+        const aside = `${path}.${mine.nonce}.stale`;
+        try {
+          renameSync(path, aside);
+          const moved = readLock(aside);
+          if (moved?.nonce !== held.nonce)
+            try {
+              linkSync(aside, path);
+            } catch {
+              /* на месте уже другая блокировка */
+            }
+          unlinkSync(aside);
+        } catch {
+          /* блокировку уже сняли или заменили */
+        }
+        continue;
+      }
+      if (!held) {
+        // Файл без разбираемого содержимого (не наш формат): брошенный, если старше паузы.
+        try {
+          const age = Date.now() - statSync(path).mtimeMs;
+          if (age > 5000) rmSync(path, { force: true });
+        } catch {
+          /* файл уже убран */
+        }
+      }
+      if (Date.now() >= end)
+        throw new HarnessError(
+          'NOT_READY',
+          `Превью ${previewId} уже запускается другим вызовом (PID ${held?.pid ?? '?'}); повторите после его завершения`,
+          [{ path: ['--preview'], message: 'start.lock' }],
+        );
+      await delay(previewTiming.pollMs);
+    }
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+  return () => {
+    if (readLock(path)?.nonce === mine.nonce) rmSync(path, { force: true });
+  };
+}
+
+/**
+ * Группа процессов приложения: TERM, затем KILL после отсрочки. `groupOnly` —
+ * лидер уже завершился: сигнал только группе (его детям), без запасного
+ * сигнала самому PID — он мог достаться другому процессу.
+ */
+export async function stopGroup(
+  pid: number,
+  graceMs = previewTiming.termGraceMs,
+  groupOnly = false,
+) {
   const signal = (s: NodeJS.Signals) => {
     try {
       process.kill(-pid, s);
       return true;
     } catch {
+      if (groupOnly) return false;
       try {
         process.kill(pid, s);
         return true;
@@ -245,8 +367,13 @@ async function cleanupDead(
   message?: string,
 ): Promise<PreviewReceipt> {
   const notes: string[] = message ? [message] : [];
-  if (receipt.pids.app && sameProcess(receipt.pids.app, receipt.starts.app))
-    await stopGroup(receipt.pids.app);
+  // Группа приложения — и когда лидер уже завершился (его дети остались в
+  // группе); PID, занятый другим процессом (другое время старта), не трогается.
+  if (receipt.pids.app) {
+    if (sameProcess(receipt.pids.app, receipt.starts.app)) await stopGroup(receipt.pids.app);
+    else if (!processAlive(receipt.pids.app))
+      await stopGroup(receipt.pids.app, previewTiming.termGraceMs, true);
+  }
   const repo = ctx.policy.repositories.find((r) => r.id === receipt.repositoryId);
   const envReceipt = join(receipt.dir, 'environment', 'environment.json');
   if (receipt.services && existsSync(envReceipt) && existsSync(receipt.worktree))
@@ -482,6 +609,40 @@ export async function startPreview(ctx: PreviewContext, input: StartPreviewInput
       `Превью ${preview.id} требует служб (services), а у репозитория ${repo.id} нет lifecycle`,
     );
   const dir = previewDir(ctx.stateDir, repo.id, preview.id);
+  const steps = (list: { timeoutMs: number }[] | undefined) =>
+    (list ?? []).reduce((a, s) => a + s.timeoutMs, 0);
+  const lifecycle = preview.services ? repo.lifecycle : undefined;
+  const budget =
+    steps(preview.build) +
+    (lifecycle ? steps(lifecycle.setup) + steps(lifecycle.ready) : 0) +
+    (preview.readyTimeoutMs ?? PREVIEW_DEFAULTS.readyTimeoutMs) +
+    30_000;
+  mkdirSync(dir, { recursive: true });
+  // Одновременные запуски того же превью: второй ждёт первый и получает его
+  // превью (тот же коммит) или заменяет его; иначе два supervisor на одном каталоге.
+  const release = await acquireStartLock(dir, preview.id, previewTiming.lockWaitMs ?? budget);
+  try {
+    return await startLocked(ctx, input, { repo, preview, repoPath, sha, ref, dir, budget });
+  } finally {
+    release();
+  }
+}
+
+/** Запуск превью под блокировкой `start.lock`. */
+async function startLocked(
+  ctx: PreviewContext,
+  input: StartPreviewInput,
+  at: {
+    repo: Repo;
+    preview: PreviewDefinition;
+    repoPath: string;
+    sha: string;
+    ref: string;
+    dir: string;
+    budget: number;
+  },
+) {
+  const { repo, preview, repoPath, sha, ref, dir } = at;
   const previous = readReceipt(dir);
   if (previous) {
     const current = await reconcile(ctx, previous);
@@ -493,7 +654,6 @@ export async function startPreview(ctx: PreviewContext, input: StartPreviewInput
   }
   const tree = join(dir, 'tree');
   const root = previewsRoot(ctx.stateDir);
-  mkdirSync(dir, { recursive: true });
   if (existsSync(tree)) await removeTree(repoPath, tree, root);
   if (existsSync(tree))
     throw new HarnessError('NOT_READY', 'Рабочее дерево прежнего превью не убрано: ' + tree);
@@ -551,14 +711,7 @@ export async function startPreview(ctx: PreviewContext, input: StartPreviewInput
     await removeTree(repoPath, tree, root);
     throw new HarnessError('LIFECYCLE_FAILED', 'Надзирающий процесс превью не запустился');
   }
-  const steps = (list: { timeoutMs: number }[] | undefined) =>
-    (list ?? []).reduce((a, s) => a + s.timeoutMs, 0);
-  const deadline =
-    Date.now() +
-    steps(preview.build) +
-    (spec.lifecycle ? steps(spec.lifecycle.setup) + steps(spec.lifecycle.ready) : 0) +
-    (preview.readyTimeoutMs ?? PREVIEW_DEFAULTS.readyTimeoutMs) +
-    30_000;
+  const deadline = Date.now() + at.budget;
   const failed = (message: string, receipt?: PreviewReceipt) =>
     new HarnessError('LIFECYCLE_FAILED', message, [
       { path: ['preview', preview.id], message: receipt?.reason ?? 'start' },
@@ -793,15 +946,22 @@ export async function supervisePreview(spec: PreviewSpec) {
         stage = 'health';
         const health = preview.health ?? PREVIEW_DEFAULTS.health;
         const ready = Date.now() + (preview.readyTimeoutMs ?? PREVIEW_DEFAULTS.readyTimeoutMs);
-        while (!(await healthy(appPort, health))) {
+        // Лидер завершился — до проверки готовности: иначе ответить мог бы
+        // оставшийся от него ребёнок, а превью стало бы running без лидера.
+        const exitedNow = () => exited;
+        for (;;) {
           abort.signal.throwIfAborted();
-          if (exited) {
+          // Через функцию: `exited` меняет обработчик события, сужение типа здесь неверно.
+          const gone = exitedNow();
+          if (gone) {
             stage = 'start';
+            if (appPid) await stopGroup(appPid, previewTiming.termGraceMs, true);
             throw new Error(
               failure ??
-                `приложение завершилось до готовности (код ${exited.code ?? exited.signal}); лог — ${spec.receipt.log}`,
+                `приложение завершилось до готовности (код ${gone.code ?? gone.signal}); лог — ${spec.receipt.log}`,
             );
           }
+          if (await healthy(appPort, health)) break;
           if (Date.now() > ready)
             throw new Error(
               `нет ответа меньше 400 на http://127.0.0.1:${appPort}${health} за ${Math.round((preview.readyTimeoutMs ?? PREVIEW_DEFAULTS.readyTimeoutMs) / 1000)} с; лог — ${spec.receipt.log}`,
@@ -844,7 +1004,8 @@ export async function supervisePreview(spec: PreviewSpec) {
         save({ state: 'stopping' });
         await proxy.close();
         proxy = undefined;
-        if (appPid && !exited) await stopGroup(appPid);
+        // Лидер завершился сам — его дети в группе всё равно останавливаются.
+        if (appPid) await stopGroup(appPid, previewTiming.termGraceMs, !!exited);
       },
     );
   } catch (error) {
@@ -858,7 +1019,13 @@ export async function supervisePreview(spec: PreviewSpec) {
   } finally {
     clearTimeout(ttl);
     if (proxy) await proxy.close();
-    if (app?.pid && app.exitCode === null && app.signalCode === null) await stopGroup(app.pid);
+    // Группа приложения — всегда: и живой лидер, и дети завершившегося лидера.
+    if (app?.pid)
+      await stopGroup(
+        app.pid,
+        previewTiming.termGraceMs,
+        app.exitCode !== null || app.signalCode !== null,
+      );
     await removeTree(spec.repoPath, spec.receipt.worktree, spec.previewsRoot);
   }
   const ok =
