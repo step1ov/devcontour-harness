@@ -1133,6 +1133,8 @@ export interface OperatorViewInput {
     restartBy?: HarnessActor;
     /** alpha.67: работы, которые сдвинет новый запуск (`status.runner.ready`). */
     ready?: number;
+    /** alpha.67: их ID (`status.runner.readyWorks`, первые 50). */
+    readyWorks?: readonly string[];
     /** alpha.67: работы, которые держит только вопрос исполнителя (`status.runner.heldByQuestion`). */
     heldByQuestion?: readonly string[];
     line?: string;
@@ -3598,17 +3600,37 @@ function acceptedAsRestored(i: OperatorViewInput): OperatorViewInput {
 function runnerWithSourceQuestions(
   q: OperatorViewInput['queue'],
   sources: OperatorViewInput['sources'],
+  works: OperatorViewInput['works'],
 ): OperatorViewInput['queue'] {
-  if (q.runner !== 'not-running' || !q.ready || q.heldByQuestion?.length) return q;
+  if (q.paused || q.runner !== 'not-running' || !q.ready || q.heldByQuestion?.length) return q;
   const tasks = [
     ...new Set((sources ?? []).flatMap((s) => (s.questions ?? []).flatMap((x) => x.targets))),
   ];
   if (!tasks.length) return q;
+  // Задачи вопроса — ключи или ID источника; работы — по связке задач. Вопрос
+  // держит и свои работы, и зависящие от них: из готовых они вычитаются.
+  const asked = new Set(tasks);
+  const held = new Set(
+    (sources ?? []).flatMap((s) =>
+      s.tasks
+        .filter((t) => t.workId && (asked.has(t.key) || asked.has(t.id)))
+        .map((t) => t.workId!),
+    ),
+  );
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const w of works)
+      if (!held.has(w.id) && (w.dependsOn ?? []).some((d) => held.has(d))) {
+        held.add(w.id);
+        grew = true;
+      }
+  }
+  const n = q.readyWorks ? q.ready - q.readyWorks.filter((id) => held.has(id)).length : q.ready;
+  if (n <= 0) return q;
   const ids =
     tasks.slice(0, 10).join(', ') + (tasks.length > 10 ? ` и ещё ${tasks.length - 10}` : '');
   const idsEn =
     tasks.slice(0, 10).join(', ') + (tasks.length > 10 ? ` and ${tasks.length - 10} more` : '');
-  const n = q.ready;
   return {
     ...q,
     restartBy: 'lead',
@@ -3633,7 +3655,7 @@ export function operatorView(input: OperatorViewInput, o: OperatorViewOptions = 
       ? w.stage.needs.actor === 'user' || w.stage.needs.actor === 'operator'
       : w.input?.state === 'awaiting-answer',
   ).length;
-  const q = runnerWithSourceQuestions(i.queue, i.sources);
+  const q = runnerWithSourceQuestions(i.queue, i.sources, i.works);
   const drift = i.works.map((w) => driftOf(c, w)).filter((d): d is DriftView => !!d);
   const activity = activityOf(c, o, truncated);
   const scope = scopeOf(c, truncated);

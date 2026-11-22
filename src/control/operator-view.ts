@@ -1099,6 +1099,7 @@ export function collectOperatorViewInput(
               runner: status.runner.state,
               ...(status.runner.restartBy ? { restartBy: status.runner.restartBy } : {}),
               ...(status.runner.ready ? { ready: status.runner.ready } : {}),
+              ...(status.runner.readyWorks ? { readyWorks: status.runner.readyWorks } : {}),
               ...(status.runner.heldByQuestion
                 ? { heldByQuestion: status.runner.heldByQuestion }
                 : {}),

@@ -170,6 +170,8 @@ export function statusOf(
     const planReviews = livePlanReviews(v, source.policy, now);
     // Итоговое «что нужно» каждого поручения — для строки `runner`.
     const needsByWork = new Map<string, StageNeeds>();
+    // Блокировки выдачи каждого поручения — для `runner.ready`.
+    const blockersByWork = new Map<string, ReturnType<Engine['blockers']>>();
     // Собственные вызовы поручения (без вызовов о группе) — одним проходом;
     // прежняя запись без поручения — по индексам попыток и поручений (правило
     // `recordWorkOf`), а не поиском по хранилищу на каждую запись.
@@ -239,6 +241,7 @@ export function statusOf(
                 ? { actor: 'controller' as const, action: 'review-plan' as const }
                 : undefined);
           if (needs) needsByWork.set(w.id, needs);
+          blockersByWork.set(w.id, raw);
           const plainContext = {
             control: v.control(),
             approvalMode: source.policy.approvalMode,
@@ -283,7 +286,12 @@ export function statusOf(
         })(workInputOf(requestsOf(v, w), inputPolicyOf(source.policy)), engine.blockers(w, v)),
       })),
       ...((r) => (r ? { runner: r } : {}))(
-        runnerOf(v, selected, planReviews, now, (w) => needsByWork.get(w.id)),
+        runnerOf(v, selected, planReviews, now, (w) => needsByWork.get(w.id), {
+          // Пауза, которую новый run не снимет (оператор, отказ провайдера,
+          // проверка базы, чужая операция), — запуск ничего не выдаст.
+          paused: nextRunControl(source, v).control.paused,
+          issuable: (w) => issuable(w, blockersByWork.get(w.id), needsByWork.get(w.id)),
+        }),
       ),
       ...((budgets) => (budgets ? { budgets } : {}))(budgetOverview(engine.budgetContext(), v)),
       ...(({ reviews, reviewsTruncated }) => ({
@@ -353,12 +361,32 @@ function withSteps<B extends { code: string; actor?: string | null }>(
  * поручения сдвинет только новый `harness run` (его делает ведущий). Нет
  * открытых поручений — поля нет.
  */
+/**
+ * Работу выдаст новый запуск (alpha.67, P5-4): готовая без блокировок выдачи
+ * (кроме паузы, которую run снимает сам, — её решает `paused` строки
+ * очереди), или упавшая, которую controller повторит в пределах бюджетов.
+ * Удержанная операцией, gate или ведущим, ждущая зависимости или ответа — не
+ * готова, даже если диагноз называет ход controller (`wait`).
+ */
+function issuable(
+  w: WorkState,
+  blockers: ReturnType<Engine['blockers']> | undefined,
+  needs: StageNeeds | undefined,
+) {
+  if (w.status === 'failed') return needs?.actor === 'controller' && needs.action === 'retry';
+  if (w.status !== 'ready') return false;
+  return (blockers ?? []).every(
+    (b) => b.code === 'PAUSED' && b.message.startsWith('Очередь на паузе'),
+  );
+}
+
 function runnerOf(
   v: ExecutionView,
   works: readonly WorkState[],
   planReviews: ReadonlyMap<string, string>,
   now: number,
   needsOf: (w: WorkState) => StageNeeds | undefined,
+  queue: { paused: boolean; issuable: (w: WorkState) => boolean },
 ) {
   const open = works.filter((w) => w.status !== 'done' && w.status !== 'cancelled');
   if (!open.length) return undefined;
@@ -406,12 +434,7 @@ function runnerOf(
   });
   // Вопрос держит только свою работу (alpha.67, P5-4): готовые независимые
   // работы двигает новый запуск, а не ответ — ход ведущего сейчас.
-  const ready = open.filter((w) => {
-    const needs = needsOf(w);
-    return (
-      (w.status === 'ready' || w.status === 'failed') && (!needs || needs.actor === 'controller')
-    );
-  });
+  const ready = queue.paused ? [] : open.filter(queue.issuable);
   const asked = open.filter((w) => needsOf(w)?.action === 'answer-input').map((w) => w.id);
   if (ready.length && asked.length) {
     const ids =
@@ -422,6 +445,7 @@ function runnerOf(
       state: 'not-running' as const,
       restartBy: 'lead' as const,
       ready: ready.length,
+      readyWorks: ready.slice(0, 50).map((w) => w.id),
       heldByQuestion: asked.slice(0, 50),
       line: `Очередь стоит — никто не запущен: запустите harness run: готово ${ruCount(ready.length, ['задача', 'задачи', 'задач'])}, ${asked.length > 1 ? 'вопросы блокируют' : 'вопрос блокирует'} только ${ids} (ведущий).`,
       lineEn: `The queue is idle — nothing is running: start harness run: ${ready.length} ${ready.length === 1 ? 'task is' : 'tasks are'} ready, the ${asked.length > 1 ? 'questions block' : 'question blocks'} only ${idsEn} (the lead).`,
@@ -430,7 +454,9 @@ function runnerOf(
   return {
     state: 'not-running' as const,
     restartBy: 'lead' as const,
-    ...(ready.length ? { ready: ready.length } : {}),
+    ...(ready.length
+      ? { ready: ready.length, readyWorks: ready.slice(0, 50).map((w) => w.id) }
+      : {}),
     line: waitsRun
       ? 'Очередь стоит — никто не запущен: работу сдвинет только новый запуск (ведущий: harness run).'
       : 'Очередь стоит — никто не запущен: после ответа или решения нужен новый запуск (ведущий: harness run).',

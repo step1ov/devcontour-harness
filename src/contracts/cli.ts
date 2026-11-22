@@ -2165,6 +2165,8 @@ export const statusDataSchema = z.strictObject({
        * готово N задач, вопрос блокирует только X» (ход ведущего).
        */
       ready: z.number().int().min(1).optional(),
+      /** alpha.67: ID готовых работ (первые 50) — панель сверяет их с задачами вопроса владельцу. */
+      readyWorks: z.array(idSchema).min(1).max(50).optional(),
       heldByQuestion: z.array(idSchema).min(1).max(50).optional(),
       line: z.string().min(1).max(500),
       lineEn: z.string().min(1).max(500),

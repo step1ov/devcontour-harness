@@ -144,3 +144,93 @@ test('alpha.67 P5-4: вопрос владельцу в источнике за�
   );
   assert.equal(idle.progress.queue.line, 'прежняя строка');
 });
+
+/** Вопрос у ask-a, независимая b-ready согласована, никто не запущен. */
+async function askedAndReady() {
+  const ctx = setup({
+    scenario: { writer: [ask], reviewer: approve() },
+    policy: (p: any) => (p.inputPolicy = { threshold: 7, criticalPaths: [] }),
+    graph: (g: any) => (g.orders[0].id = 'ask-a'),
+  });
+  await runAll(ctx);
+  ctx.runner.release();
+  const order = structuredClone(ctx.graph.orders[0]!) as any;
+  const second = workGraphSchema.parse({
+    ...ctx.graph,
+    id: 'second',
+    source: { ...ctx.graph.source, ref: 'second.json' },
+    orders: [{ ...order, id: 'b-ready', source: { ...order.source, ref: 'b-ready' } }],
+  });
+  const { graph } = ctx.engine.register(second, trustNone);
+  ctx.engine.recordReview({
+    ...review(graph, 1),
+    authorRuntime: ctx.policy.roles.developer!.writer.runtime,
+    reviewerRuntime: ctx.policy.review.plan.reviewer.runtime,
+    reviewerBinding: ctx.engine.reviewerBinding(
+      'plan',
+      ctx.policy.roles.developer!.writer.runtime,
+    )!,
+  });
+  ctx.engine.approve(graph.id, 'agent');
+  return ctx;
+}
+const runnerOfStatus = (ctx: Awaited<ReturnType<typeof askedAndReady>>) =>
+  statusDataSchema.parse(statusOf({ engine: ctx.engine, policy: ctx.policy })).runner;
+
+test('alpha.67 P5-4: пауза оператора — запуск ничего не выдаст: «запустите harness run» не предлагается', async () => {
+  const ctx = await askedAndReady();
+  assert.equal(runnerOfStatus(ctx)?.ready, 1);
+  assert.deepEqual(runnerOfStatus(ctx)?.readyWorks, ['b-ready']);
+  ctx.engine.pause('operator');
+  const runner = runnerOfStatus(ctx);
+  assert.equal(runner?.ready, undefined);
+  assert.equal(runner?.heldByQuestion, undefined);
+  assert.doesNotMatch(runner!.line, /запустите harness run/);
+  // Снятая пауза — готовая работа снова названа.
+  ctx.engine.resume();
+  assert.equal(runnerOfStatus(ctx)?.ready, 1);
+  ctx.store.close();
+});
+
+test('alpha.67 P5-4: удержанная операцией работа не готова, хотя её диагноз — ход controller', async () => {
+  const ctx = await askedAndReady();
+  ctx.engine.hold(['b-ready'], 'op-test', 'проверка удержания');
+  const runner = runnerOfStatus(ctx);
+  assert.equal(runner?.ready, undefined);
+  assert.doesNotMatch(runner!.line, /запустите harness run/);
+  ctx.store.close();
+});
+
+test('alpha.67 P5-4: вопрос владельцу держит и готовые работы своих задач — они не считаются в «готово N»', () => {
+  const input = baseInput({
+    queue: {
+      paused: false,
+      runner: 'not-running',
+      restartBy: 'lead',
+      ready: 2,
+      readyWorks: ['web-1', 'api-1'],
+      line: 'прежняя строка',
+    },
+    sources: [
+      {
+        connector: 'relay',
+        provider: 'relay-v2-cli',
+        tasks: [
+          { id: 't1', key: 'WEB-1', orderId: 'web-1', workId: 'web-1', problems: [] },
+          { id: 't2', key: 'API-1', orderId: 'api-1', workId: 'api-1', problems: [] },
+        ],
+        questions: [{ id: 'q1', key: 'DOC-2', title: 'Телефон', options: [], targets: ['WEB-1'] }],
+      },
+    ],
+  });
+  assert.equal(
+    operatorView(input).progress.queue.line,
+    'Очередь стоит — никто не запущен: запустите harness run: готово 1 задача, вопрос владельцу блокирует только WEB-1 (ведущий).',
+  );
+  // Вопрос держит все готовые — строка прежняя; пауза — тоже.
+  const all = structuredClone(input);
+  all.sources![0]!.questions![0]!.targets = ['WEB-1', 'API-1'];
+  assert.equal(operatorView(all).progress.queue.line, 'прежняя строка');
+  const paused = { ...input, queue: { ...input.queue, paused: true } };
+  assert.equal(operatorView(paused).progress.queue.line, 'прежняя строка');
+});
