@@ -169,9 +169,9 @@ export class RelaySink implements ResultSink {
     const mapping = this.mappingOf(read);
     if (mapping === undefined) return false;
     if (statementMatches(op.revision, this.config, mapping, read)) return true;
-    // Повторное доказательство результата до alpha.66: постановка сверена по
+    // Результат до alpha.66 с прежними привязками: постановка сверена по
     // закреплённому снимку при планировании (`legacyStatementSame`).
-    return op.reprove?.statement === semanticDigest(this.config, mapping, read);
+    return op.statement === semanticDigest(this.config, mapping, read);
   }
 
   private mappingOf(read: TaskRead): TaskMapping | undefined {
@@ -329,20 +329,12 @@ export class RelaySink implements ResultSink {
     const mapping = this.mappingOf(read);
     const digest = mapping ? semanticDigest(this.config, mapping, read) : 'unmapped';
     let same = mapping !== undefined && statementMatches(op.revision, this.config, mapping, read);
-    // Повторное доказательство результата прежней версии (digest v1 с
-    // прежними привязками): постановка сверяется с закреплённым снимком —
-    // текст задачи, обязательные документы, зависимости и поручение.
-    if (
-      !same &&
-      op.reprove &&
-      mapping &&
-      legacyStatementSame(store, op, read, mapping, this.config)
-    ) {
+    // Результат прежней версии (digest v1 с прежними привязками критериев):
+    // постановка сверяется с закреплённым снимком — текст задачи,
+    // обязательные документы, зависимости и поручение.
+    if (!same && mapping && legacyStatementSame(store, op, read, mapping, this.config)) {
       same = true;
-      op = store.updateOp(op.key, token, (o) => ({
-        ...o,
-        reprove: { ...o.reprove, statement: digest },
-      }));
+      op = store.updateOp(op.key, token, (o) => ({ ...o, statement: digest }));
     }
     const problem = !same
       ? `постановка изменилась после снимка (${op.revision.slice(0, 12)} → ${digest.slice(0, 12)}): результат относится к прежней редакции`

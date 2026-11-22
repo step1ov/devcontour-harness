@@ -73,10 +73,14 @@ export interface OperationRecord {
   /**
    * Повторное доказательство критериев принятого результата
    * (`source-deliver --reprove`): `of` — ключ обычной доставки того же
-   * результата, `statement` — digest v2 постановки, сверенной с закреплённым
-   * снимком (результат до alpha.66). Нет поля — обычная доставка.
+   * результата. Нет поля — обычная доставка.
    */
-  reprove?: { of?: string; statement?: string };
+  reprove?: { of?: string };
+  /**
+   * Digest v2 постановки, сверенной при планировании с закреплённым снимком
+   * (результат до alpha.66, digest v1 с прежними привязками критериев).
+   */
+  statement?: string;
   receipt?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
