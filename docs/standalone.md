@@ -489,7 +489,12 @@ $H explain --state <state> --policy .harness/policy.json [--work <id>] [--human]
 `devcontour-harness/projections` — чистые функции без `node:*` (подходят для
 браузерного бандла): `chainRoots`, `workProgress`, `nextAction`, `queueStop`,
 `explainStop`, `stopCodeOf`, `clipText`, `clipDeep` и их перечни. Корень пакета
-экспортирует те же функции — реализация одна. Безопасная запись файлов —
+экспортирует те же функции — реализация одна. С 0.1.0-alpha.66
+`nextAction` и `chainRoots` принимают `leadRecovery` (`leadRecoveryStep` над
+работой, её попытками и правилом `recovery`): по удержанию разбором и по
+исчерпанию ходит ведущий (`diagnose`, `reset-attempts`, `review-plan`), пока
+бюджет его сбросов не потрачен; человек — после него, при не технической
+причине и при правиле `user` (поля нет — прежние шаги). Безопасная запись файлов —
 `inspectPath`, `checkDestination`, `listRegularFiles`, `planFileWrites`,
 `applyFileWrites` из корня: план показывает все конфликты сразу, применение
 только создаёт файлы и повторно проверяет назначение перед каждой записью.

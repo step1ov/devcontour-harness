@@ -17,7 +17,15 @@ export {
   type ProgressReason,
   type ProgressView,
 } from './progress.ts';
-export { nextAction, nextSteps, type NextInput, type NextStep, type NextView } from './next.ts';
+export {
+  nextAction,
+  nextSteps,
+  leadRecoveryMove,
+  type NextInput,
+  type NextStep,
+  type NextView,
+} from './next.ts';
+export { leadRecoveryStep, type LeadRecoveryStep } from './lead-recovery.ts';
 export { queueStop, type QueueStopInput, type QueueStopView } from './queue.ts';
 export { attemptLine, type AttemptLineFacts } from '../contracts/attempt-line.ts';
 export {

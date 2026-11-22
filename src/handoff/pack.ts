@@ -19,6 +19,8 @@ import { requestsOf } from '../engine/input-requests.ts';
 import { inputStateOf } from '../projections/input.ts';
 import { activeStatuses } from '../projections/enums.ts';
 import { nextAction } from '../projections/next.ts';
+import { leadRecoveryStep } from '../projections/lead-recovery.ts';
+import { recoveryPolicyOf } from '../projections/decisions.ts';
 import { explainStop, stopCodeOf, type StopDiagnosis } from '../projections/stop.ts';
 
 export interface HandoffOptions {
@@ -297,6 +299,7 @@ function build(
     .map(({ d }) => d);
   const stops = diagnoses.slice(0, HANDOFF_LIMITS.stops);
 
+  const recovery = recoveryPolicyOf(h.policy);
   const works = open.slice(0, HANDOFF_LIMITS.works).map((w) => {
     const view = nextAction({
       status: w.status,
@@ -305,6 +308,19 @@ function build(
       ...opt('failureKind', w.failureKind),
       ...opt('hold', w.hold),
       ...opt('recovery', w.recovery),
+      // Восстановление ведущим: разбор или сброс ведущего вместо сброса человеком.
+      ...opt(
+        'leadRecovery',
+        w.status === 'failed'
+          ? leadRecoveryStep(
+              w,
+              read.attempts.filter((a) => a.workId === w.id),
+              recovery,
+              maxAttempts,
+              Boolean(blockersOf.get(w.id)?.some((b) => b.code === 'BUDGET_EXHAUSTED')),
+            )
+          : undefined,
+      ),
     });
     // Кто и что — по диагнозу explain, когда он есть; стадия и свойство — по nextAction.
     const d = diagnosisOf.get(w.id);

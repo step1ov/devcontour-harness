@@ -191,6 +191,32 @@ export function exhaustedStep(
   };
 }
 
+/**
+ * Ход восстановления ведущим одной записью для следующего шага (`nextAction`)
+ * и корней цепочки (`chainRoots`): удержание выдачи и ход по исчерпанным
+ * попыткам. Правило `user` — `undefined` (прежние шаги).
+ */
+export interface LeadRecoveryStep {
+  hold?: LeadHold['kind'];
+  exhausted?: { actor: 'lead'; step: 'diagnose' | 'reset' | 'replan' } | { actor: 'user' };
+}
+
+export function leadRecoveryStep(
+  work: WorkFacts,
+  attempts: readonly AttemptFacts[],
+  policy: RecoveryPolicy,
+  maxAttempts: number,
+  budgetHeld = false,
+): LeadRecoveryStep | undefined {
+  if (!policy.enabled) return undefined;
+  const hold = leadHold(work, attempts, policy, maxAttempts);
+  const step = exhaustedStep(work, attempts, policy, budgetHeld);
+  return {
+    ...(hold ? { hold: hold.kind } : {}),
+    exhausted: step.actor === 'lead' ? { actor: 'lead', step: step.step } : { actor: 'user' },
+  };
+}
+
 /** Причина разбора простыми словами. */
 export const causeText: Record<LeadDiagnosisCause, { ru: string; en: string }> = {
   coverage: { ru: 'слабое покрытие — добавить случаи', en: 'weak coverage — add cases' },
