@@ -1373,8 +1373,10 @@ hadAttempt}`. `engine.cancel(workId, reason?, by?)` (CLI `cancel` — `operator`
 конверт несёт `graphId`, `workId`, `runId`, `attempt`. Пишется сразу за
 `attempt.failed` (и `attempt.expired`) в той же транзакции под fencing.
 `cause` (`environmentCauses`): `sandbox-launch`, `sandbox-network`,
-`sandbox-filesystem`, `sandbox-policy`, `dependency-network` — ставит gate в
-точке обнаружения (`TaskFailure.diagnosis`); `transport`, `preflight`
+`sandbox-filesystem`, `sandbox-policy`, `sandbox-process-list`,
+`dependency-network` — ставит gate в точке обнаружения
+(`TaskFailure.diagnosis`; `sandbox-process-list` — см. «Список процессов в
+песочнице проверок» ниже); `transport`, `preflight`
 (`BlockedError` до работы), `provider-auth`, `provider-limit`, `stalled`,
 `shutdown` (прерывание штатной остановкой), `lease-expired` — по классу отказа
 и его признакам; `process-reap` — потомков сдерживаемой команды (gate,
@@ -2380,6 +2382,55 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 Итог проверки записывается в `<state>/gates-at/<id>/result.json`
 (`{at, data}`, `data` — ответ команды): его прикладывает `review-code` того же
 SHA.
+Провал gate, который gate назвал отказом среды, несёт `gates[].environment`
+(причина из `environmentCauses`, например `sandbox-process-list`); `--human`
+печатает её перед сообщением: `[среда: sandbox-process-list]`.
+
+**Список процессов в песочнице проверок.** При `isolation.mode: os` gate
+исполняется в песочнице ОС (sandbox-runtime). На macOS ядро не запускает
+setuid-программы из песочницы, даже при профиле `(allow default)`: `/bin/ps`
+и `/usr/bin/top` отвечают EPERM («Operation not permitted», в Node —
+`spawn EPERM`), а `pgrep`/`pkill` (не setuid) печатают «Cannot get process
+list»: песочница открывает сведения только о процессах той же песочницы.
+Ни правило Seatbelt, ни параметр sandbox-runtime этого не открывают, и
+открывать по умолчанию небезопасно: `ps -E` показывает окружение каждого
+процесса того же пользователя (хост harness, CLI моделей с токенами API), а
+код gate пишет исполнитель. Разрешения «этот gate вне песочницы» в политике
+нет: что исполняет gate, не ограничено его путями — импорты модулей,
+`package.json` и скрипты менеджера пакетов, `node_modules`, неотслеживаемые
+файлы дерева пишет исполнитель, и `when.paths` внутри `protectedPaths` этого
+не меняет (gate применим и по неявным входам — манифестам и lockfiles), а вне
+песочницы проверка читает учётные данные, ходит в сеть и пишет куда угодно.
+Поэтому harness распознаёт отказ и называет его:
+
+- gate под песочницей ОС завершился ненулевым кодом, и признак — `spawn
+/bin/ps EPERM`, `spawn EPERM` без пути, `/bin/ps: Operation not permitted`,
+  `execvp() of '/bin/ps' failed`, `Cannot get process list` — есть в выводе, а
+  если JUnit назвал упавшие testcases, — в тексте каждого из них (не больше
+  200; testcase без признака оставляет провал классом `gate`). Признак
+  подтверждает собственная проба harness (`probeProcessList`: `ps -o pid= -p
+1` тем же `runCheck`, что gates, одна на процесс): только при её ответе
+  `unavailable` провал — `environment` с причиной `sandbox-process-list`, не
+  засчитанный в `maxAttempts` (в пределах `MAX_NEUTRAL_FAILURES`, как прочие
+  отказы песочницы). Текст evidence начинается с кода
+  `GATE_SANDBOX_PROCESS_LIST` (метка текста отказа, а не код `HarnessError`:
+  отказ попытки — `environment`, `harness gates` — `GATE_FAILED`) и называет строку признака и совет: тест не
+  должен требовать список всех процессов хоста — свои дочерние процессы
+  проверяются по pid (`process.kill(pid, 0)`) или по файлам-меткам, либо такие
+  тесты выносятся из команды gate и запускаются на хосте; `isolation.mode:
+none` снимает песочницу со всех проверок и не рекомендуется. Признак,
+  напечатанный проверкой, делает провал лишь незасчитанным (не PASS) и
+  ограничен пределом незасчитанных отказов поручения.
+- `doctor` (CLI) отвечает `sandbox.processList` (`status`: `available`,
+  `unavailable`, `unknown`, `not-isolated`; `command`, `detail`, `line`); при
+  `unavailable` — строка `sandbox-process-list: …` в `notes` (не проблема:
+  gate может не вызывать `ps`).
+- `smoke` при `isolation.mode: os` отвечает `processList` (те же поля и
+  `callers` — до 10 файлов дерева на SHA, которые вызывают `ps`, `pgrep`,
+  `pkill` или `top`: абсолютный путь, имя строкой, вызов в shell; `*.md` не
+  смотрятся). Недоступен и такие файлы есть — предупреждение
+  `sandbox-process-list: <файлы> вызывают ps/pgrep/top; …`; `--human`
+  печатает строку возможности или это предупреждение.
 
 **`review-code`.** Технический обзор ветки, написанной вне harness: reviewer —
 по правилу ревью кода роли (`--role`; одна роль репозитория — по умолчанию) и
