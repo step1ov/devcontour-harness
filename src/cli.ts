@@ -70,6 +70,7 @@ import {
   stepStatusText,
 } from './control/lifecycle-smoke.ts';
 import { defaultResourceDatabase } from './environment/resources.ts';
+import { listPreviews, startPreview, stopPreviews } from './control/preview.ts';
 import {
   UPDATE_OPERATION,
   applyUpdate,
@@ -359,11 +360,38 @@ const relayCheck = async (
   explicit: string | undefined,
   candidate: string | undefined,
   state?: string,
+  policy?: ExecutionPolicy,
 ) => {
   const file = explicit ?? (candidate && existsSync(candidate) ? candidate : undefined);
   if (!file) return undefined;
   const { relayCompatibilityCheck } = await import('./integrations/connector/commands.ts');
-  return relayCompatibilityCheck(file, { stateDir: resolve(state ?? '.') });
+  const known = await knownTests(state);
+  return relayCompatibilityCheck(file, {
+    stateDir: resolve(state ?? '.'),
+    ...((policy ?? known?.policy) ? { policy: (policy ?? known?.policy)! } : {}),
+    ...(known ? { known: known.tests } : {}),
+  });
+};
+
+/**
+ * testcases gates из evidence попыток каталога состояния (только чтение) и
+ * его политика — для проверки привязок критериев коннектора. Нет каталога
+ * или он не инициализирован — undefined.
+ */
+const knownTests = async (state?: string) => {
+  if (!state || !existsSync(bindingFile(state))) return undefined;
+  try {
+    const b = binding(state);
+    const h = open(state, b, 'state');
+    try {
+      const { Connector } = await import('./integrations/connector/commands.ts');
+      return { tests: Connector.known(h), policy: b.policy, baseDir: b.baseDir };
+    } finally {
+      h.close();
+    }
+  } catch {
+    return undefined;
+  }
 };
 
 /**
@@ -446,6 +474,7 @@ const options = {
   sha: { type: 'string' },
   gate: { type: 'string' },
   'fail-fast': { type: 'boolean' },
+  reprove: { type: 'boolean' },
   'writer-probe': { type: 'boolean' },
   'apply-loopback': { type: 'boolean' },
   'accept-limitation': { type: 'string', multiple: true },
@@ -469,7 +498,10 @@ const options = {
   wait: { type: 'string' },
   scheduled: { type: 'boolean' },
   'confirm-formats': { type: 'string' },
+  preview: { type: 'string' },
+  ref: { type: 'string' },
   ttl: { type: 'string' },
+  idle: { type: 'string' },
   summary: { type: 'string' },
 } as const;
 
@@ -513,7 +545,7 @@ const flagOwners = {
     'input-supersede',
   ],
   text: ['input-answer', 'lead-begin', 'lead-note', 'lead-end'],
-  ttl: ['lead-begin'],
+  ttl: ['lead-begin', 'preview-start'],
   summary: ['release-done'],
   option: ['input-answer'],
   kind: ['input-answer'],
@@ -529,6 +561,7 @@ const flagOwners = {
   sha: ['gates', 'smoke'],
   gate: ['gates'],
   'fail-fast': ['gates'],
+  reprove: ['source-deliver'],
   'writer-probe': ['smoke'],
   'apply-loopback': ['smoke'],
   watch: ['status'],
@@ -545,6 +578,9 @@ const flagOwners = {
   wait: ['update'],
   scheduled: ['update'],
   'confirm-formats': ['update'],
+  preview: ['preview-start', 'preview-stop'],
+  ref: ['preview-start'],
+  idle: ['preview-start'],
 } as const;
 
 /** Явное человеческое представление успешного ответа (`--human`). */
@@ -1425,7 +1461,12 @@ async function run(
       const loaded = v.policy ? loadPolicy(v.policy) : undefined;
       const connector = await connectorOf(need('source'), v.state ?? '.', loaded?.policy);
       try {
-        const data = await connector.check(loaded?.policy, loaded?.baseDir);
+        const known = await knownTests(v.state);
+        const data = await connector.check(
+          loaded?.policy ?? known?.policy,
+          loaded?.baseDir ?? known?.baseDir,
+          known?.tests,
+        );
         const ok = data.connected && data.projectMatches && data.problems.length === 0;
         return { command, data, code: ok ? exitCodes.ok : exitCodes.refused };
       } finally {
@@ -1458,7 +1499,9 @@ async function run(
       try {
         if (command === 'source-status') return { command, data: await connector.status(h) };
         if (command === 'source-deliver') {
-          const data = await connector.deliver(h, v.work);
+          const data = v.reprove
+            ? await connector.reprove(h, v.work)
+            : await connector.deliver(h, v.work);
           const settled = data.deliveries.every((d) =>
             d.delivery.every((x) => x.status === 'delivered'),
           );
@@ -1846,6 +1889,67 @@ async function run(
         process.off('SIGTERM', stop);
       }
     }
+    case 'preview-start':
+    case 'preview-stop':
+    case 'preview-list': {
+      const state = need('state');
+      const b = v.policy ? loadPolicy(v.policy) : binding(state);
+      const ctx = { policy: b.policy, baseDir: b.baseDir, stateDir: resolve(state) };
+      if (command === 'preview-list') return { command, data: await listPreviews(ctx) };
+      if (command === 'preview-stop')
+        return {
+          command,
+          data: await stopPreviews(ctx, {
+            ...optional('repositoryId', v.repository),
+            ...optional('previewId', v.preview),
+          }),
+        };
+      const seconds = (flag: 'ttl' | 'idle', min: number) => {
+        const raw = v[flag];
+        if (raw === undefined) return undefined;
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < min || n > 86_400)
+          throw new HarnessError(
+            'INVALID_INPUT',
+            `--${flag}: целое число секунд от ${min} до 86400`,
+            [{ path: [`--${flag}`], message: raw }],
+          );
+        return n * 1000;
+      };
+      const ttlMs = seconds('ttl', 1);
+      const idleMs = seconds('idle', 0);
+      // Принятый результат поручения — из базы состояния, только чтение.
+      const work = (id: string) => {
+        if (!existsSync(join(resolve(state), 'state.sqlite'))) return undefined;
+        const h = open(state, b, 'state');
+        try {
+          return h.engine.read((view) => {
+            const w = view.work(id);
+            return w
+              ? {
+                  status: w.status,
+                  repositoryId: w.order.repositoryId,
+                  ...(w.resultSha ? { resultSha: w.resultSha } : {}),
+                }
+              : undefined;
+          });
+        } finally {
+          h.close();
+        }
+      };
+      return {
+        command,
+        data: await startPreview(ctx, {
+          ...optional('repositoryId', v.repository),
+          ...optional('previewId', v.preview),
+          ...optional('ref', v.ref),
+          ...optional('workId', v.work),
+          ...optional('ttlMs', ttlMs),
+          ...optional('idleMs', idleMs),
+          work,
+        }),
+      };
+    }
     case 'update': {
       const r = await runUpdate(v, resolve(need('state')));
       return { command, data: r.data, ...optional('code', r.code) };
@@ -1870,6 +1974,7 @@ async function run(
         {
           ...optional('planAuthors', v.policy ? manifestLead(v.policy) : undefined),
           leadSandbox: true,
+          processList: true,
         },
       );
       // Manifest проекта рядом с политикой расходится с ней по слою lean — предупреждение.
@@ -1880,10 +1985,17 @@ async function run(
         v.source,
         v.policy ? join(dirname(resolve(v.policy)), 'connector.json') : undefined,
         v.state,
+        b?.policy,
       );
       if (!relay) return { command, data: report };
       if (relay.warning)
         report.warnings = [...(report.warnings ?? []), `RELAY_COMPATIBILITY: ${relay.warning}`];
+      // Критерий, который коннектор не докажет, виден до запуска (P4-6).
+      if (relay.bindings?.length)
+        report.warnings = [
+          ...(report.warnings ?? []),
+          ...relay.bindings.map((b) => `RELAY_CRITERIA_BINDING: ${b}`),
+        ];
       return {
         command,
         data: {

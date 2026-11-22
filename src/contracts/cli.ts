@@ -19,7 +19,7 @@ import {
   livenessStateSchema,
   stallActionSchema,
 } from './execution.ts';
-import { readRunEventSchema } from './events.ts';
+import { environmentCauseSchema, readRunEventSchema } from './events.ts';
 import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
 import {
   reviewAcceptDataSchema,
@@ -49,6 +49,7 @@ import {
 import { planCheckDataSchema, planRequestDataSchema } from './planning.ts';
 import { toolchainFactsSchema, toolchainReportSchema } from './toolchain.ts';
 import { operationCatalogSchema } from './catalog.ts';
+import { previewListDataSchema, previewStartDataSchema, previewStopDataSchema } from './preview.ts';
 import { failureBuckets, reportDataSchema } from './report.ts';
 import { handoffPackSchema } from './handoff.ts';
 import {
@@ -1026,6 +1027,13 @@ export const cliCommands = {
       source,
       state,
       { ...work, required: false, description: 'ID поручения; без него — все с результатом' },
+      {
+        name: '--reprove',
+        value: 'flag',
+        required: false,
+        description:
+          'Повторно доказать критерии уже принятого результата по текущим привязкам criteria[] (после их правки): новый ключ операции, тот же результат и evidence, без моделей, gates и Git; те же привязки — тот же ключ, повтор ничего не отправляет; изменённая постановка — conflict с причиной',
+      },
     ],
     refusals: ['NOT_FOUND', 'CONTROLLER_BUSY', 'REVISION_CONFLICT'],
   },
@@ -1605,6 +1613,99 @@ export const cliCommands = {
     ],
     refusals: ['NOT_FOUND', 'NOT_READY'],
   },
+  'preview-start': {
+    description:
+      'Превью результата (docs/previews.md): собрать и запустить приложение по previews[] репозитория на принятом коммите в своём рабочем дереве каталога состояния, на свободном loopback-порту за loopback-прокси, с lifecycle репозитория при services; ждёт health и возвращает адрес. Harness сам останавливает превью по сроку (--ttl) и простою без запросов (--idle). Запускает только оператор или ведущий по его просьбе: внутри попытки и gate — отказ NOT_READY; run превью не запускает',
+    writes: true,
+    idempotency:
+      'То же превью на том же коммите уже идёт — возвращается оно (changed: false); на другом коммите прежнее останавливается (replaced) и запускается новое',
+    args: [
+      {
+        ...state,
+        description:
+          'Каталог состояния: рабочее дерево, логи и receipt превью — в <state>/previews; политика — из него, если нет --policy',
+      },
+      { ...policy, required: false },
+      {
+        name: '--preview',
+        value: 'id',
+        required: false,
+        description: 'ID превью из previews[] репозитория; нужен, если их несколько',
+      },
+      {
+        name: '--ref',
+        value: 'text',
+        required: false,
+        description:
+          'accepted (по умолчанию) — принятый результат: с --work принятый SHA поручения, без него — вершина target ref репозитория; иначе SHA или ref checkout',
+      },
+      {
+        ...work,
+        required: false,
+        description: 'Поручение, чей принятый результат показать (только с --ref accepted)',
+      },
+      {
+        name: '--repository',
+        value: 'id',
+        required: false,
+        description: 'ID репозитория политики; нужен, если превью есть у нескольких',
+      },
+      {
+        name: '--ttl',
+        value: 'number',
+        required: false,
+        description: 'Срок жизни превью в секундах (1–86400); нет — ttlMs превью, иначе 2 ч',
+      },
+      {
+        name: '--idle',
+        value: 'number',
+        required: false,
+        description:
+          'Остановить после стольких секунд без запросов (0 — не останавливать по простою, до 86400); нет — idleMs превью, иначе 30 мин',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'NOT_READY'],
+  },
+  'preview-stop': {
+    description:
+      'Остановить превью: группа процессов приложения (TERM, затем KILL), lifecycle teardown при services, рабочее дерево превью убирается, receipt — stopped; без --preview — все живые превью',
+    writes: true,
+    idempotency: 'Повтор для остановленного превью ничего не меняет (changed: false)',
+    args: [
+      {
+        ...state,
+        description: 'Каталог состояния; политика — из него, если нет --policy',
+      },
+      { ...policy, required: false },
+      {
+        name: '--preview',
+        value: 'id',
+        required: false,
+        description: 'ID превью; нет — все живые',
+      },
+      {
+        name: '--repository',
+        value: 'id',
+        required: false,
+        description: 'Только превью этого репозитория',
+      },
+    ],
+    refusals: ['NOT_FOUND'],
+  },
+  'preview-list': {
+    description:
+      'Превью каталога состояния с адресом, коммитом, сроком и состоянием; receipt сверяются с живыми процессами: превью, чей надзирающий процесс пропал, останавливается по receipt (приложение, teardown, рабочее дерево) и становится failed',
+    writes: true,
+    idempotency: 'Повтор без изменившихся процессов отвечает тем же списком',
+    args: [
+      {
+        ...state,
+        description: 'Каталог состояния; политика — из него, если нет --policy',
+      },
+      { ...policy, required: false },
+    ],
+    refusals: ['NOT_FOUND'],
+  },
 } as const satisfies Record<string, CliCommandContract>;
 export type CliCommand = keyof typeof cliCommands;
 
@@ -2149,6 +2250,19 @@ export const relayCompatibilitySchema = z.strictObject({
   lineEn: z.string(),
 });
 
+/**
+ * Список процессов (`ps`) в песочнице ОС проверок (0.1.0-alpha.66): проба
+ * `ps -o pid= -p 1` в той же изоляции, что gates. `unavailable` — gate,
+ * вызывающий ps/pgrep/top, упадёт `GATE_SANDBOX_PROCESS_LIST`.
+ */
+const processListCapabilitySchema = z.strictObject({
+  status: z.enum(['available', 'unavailable', 'unknown', 'not-isolated']),
+  command: z.array(z.string()).optional(),
+  detail: z.string(),
+  /** Строка для человека с советом. */
+  line: z.string(),
+});
+
 export const doctorDataSchema = z.strictObject({
   harness: z.string(),
   apiVersion: z.literal(API_VERSION),
@@ -2164,7 +2278,12 @@ export const doctorDataSchema = z.strictObject({
       reason: z.string().optional(),
     }),
   ),
-  sandbox: z.strictObject({ os: z.boolean(), reason: z.string().optional() }),
+  sandbox: z.strictObject({
+    os: z.boolean(),
+    reason: z.string().optional(),
+    /** Список процессов в песочнице проверок (CLI `doctor`). */
+    processList: processListCapabilitySchema.optional(),
+  }),
   state: z
     .strictObject({
       stateVersion: z.number().int(),
@@ -2329,6 +2448,12 @@ export const gatesDataSchema = z.strictObject({
        * основание сверки провала попытки под другим node.
        */
       toolchain: toolchainFactsSchema.optional(),
+      /**
+       * Причина отказа среды, названная gate (0.1.0-alpha.66), например
+       * `sandbox-process-list` — gate запускает ps, а в песочнице ОС список
+       * процессов недоступен. Правка кода её не снимет.
+       */
+      environment: environmentCauseSchema.optional(),
     }),
   ),
   /** Каталог логов и артефактов проверки. */
@@ -2423,6 +2548,13 @@ export const smokeDataSchema = z.strictObject({
     .optional(),
   logs: z.string(),
   warnings: z.array(z.string()).optional(),
+  /**
+   * Список процессов в песочнице проверок (`isolation.mode: os`) и файлы
+   * дерева, которые вызывают ps/pgrep/top (до 10).
+   */
+  processList: processListCapabilitySchema
+    .extend({ callers: z.array(z.string()).max(10).optional() })
+    .optional(),
   /** Проба исполнителя (`--writer-probe`): команды `writerProbe` в изоляции каждого исполнителя. */
   writerProbe: z
     .strictObject({
@@ -2654,12 +2786,27 @@ export const sourceStatusDataSchema = z.strictObject({
         }),
         z.strictObject({ reachable: z.literal(false), error: z.string() }),
       ]),
+      /**
+       * Принятое поручение, чья задача у получателя не закрыта: сколько
+       * критериев докажут текущие привязки (`reprovable`), что не доказано и
+       * почему, и следующий шаг (`source-deliver --reprove`, без нового
+       * плана). Нет поля — поручение не принято или задача закрыта.
+       */
+      proof: z
+        .strictObject({
+          reprovable: z.number().int().min(0),
+          unproven: z.array(z.strictObject({ title: z.string(), reason: z.string() })),
+          next: z.string().optional(),
+        })
+        .optional(),
     }),
   ),
 });
 
 export const sourceDeliverDataSchema = z.strictObject({
   connector: idSchema,
+  /** `source-deliver --reprove`: повторное доказательство критериев принятых результатов. */
+  reprove: z.literal(true).optional(),
   deliveries: z.array(
     z.strictObject({
       workId: idSchema,
@@ -2667,6 +2814,8 @@ export const sourceDeliverDataSchema = z.strictObject({
       delivery: z.array(deliveryStateSchema),
     }),
   ),
+  /** Только `--reprove` без `--work`: поручения без принятого результата. */
+  skipped: z.array(z.strictObject({ workId: idSchema, reason: z.string() })).optional(),
 });
 
 export const sourceReconcileDataSchema = z.strictObject({
@@ -3039,6 +3188,9 @@ export const cliDataSchemas = {
   'lead-note': leadDataSchema,
   'lead-end': leadDataSchema,
   'release-done': leadDataSchema,
+  'preview-start': previewStartDataSchema,
+  'preview-stop': previewStopDataSchema,
+  'preview-list': previewListDataSchema,
   version: versionDataSchema,
 } as const satisfies Record<CliCommand | 'version', z.ZodType>;
 

@@ -79,6 +79,10 @@ const laterCommands: readonly string[] = [
   'lead-note',
   'lead-end',
   'release-done',
+  // Превью результата (0.1.0-alpha.66).
+  'preview-start',
+  'preview-stop',
+  'preview-list',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -173,6 +177,8 @@ const ADDITIVE_EVENT_TYPES = new Set([
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([
   'status--detail',
+  // Повторное доказательство критериев принятого результата (0.1.0-alpha.66).
+  'source-deliver--reprove',
   // Корень проекта вместо --state (0.1.0-alpha.65).
   'status--repository',
   // Текст сводки попыток для человека (0.1.0-alpha.52).
@@ -246,6 +252,8 @@ const ADDITIVE_ENUM_VALUES = new Set([
   'relay-compatibility',
   // Предупреждение init о реестре сборки seed хранилища (0.1.0-alpha.61).
   'dependency-store-registry',
+  // Причина отказа среды: gate запускает ps в песочнице ОС (0.1.0-alpha.66).
+  'sandbox-process-list',
 ]);
 /** Текст cancel в H2: alpha.66 добавила отказ от открытой доработки принятого поручения. */
 const H2_CANCEL_DESCRIPTION =
@@ -489,6 +497,19 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.reapproval;
       v = rest;
     }
+    // Повторное доказательство критериев (0.1.0-alpha.66): необязательные поля
+    // ответа source-deliver (`reprove`, `skipped`) и задачи source-status (`proof`).
+    if (k === 'properties' && v && typeof v === 'object' && 'deliveries' in v && 'reprove' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.reprove;
+      delete rest.skipped;
+      v = rest;
+    }
+    if (k === 'properties' && v && typeof v === 'object' && 'remote' in v && 'proof' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.proof;
+      v = rest;
+    }
     // Итог `retry --reset` (0.1.0-alpha.60): необязательное поле ответа retry и cancel.
     if (
       k === 'properties' &&
@@ -543,6 +564,12 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.toolchainPin;
       v = rest;
     }
+    // Список процессов в песочнице проверок у doctor (0.1.0-alpha.66).
+    if (k === 'properties' && v && typeof v === 'object' && 'os' in v && 'reason' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.processList;
+      v = rest;
+    }
     if (k === 'enum' && Array.isArray(v) && v.includes('writer-environment'))
       v = (v as unknown[]).filter((x) => x !== 'toolchain');
     if (Array.isArray(v))
@@ -579,6 +606,8 @@ test('H3-01: прежние команды и схемы их данных не 
     if (k === 'properties' && v && typeof v === 'object' && 'closure' in v && 'runTimeoutMs' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.gateTimeoutFloorMs;
+      // Превью результата разрешённого профиля (0.1.0-alpha.66).
+      delete rest.previews;
       return rest;
     }
     if (k === 'properties' && v && typeof v === 'object' && 'pin' in v && 'ref' in v) {
@@ -836,6 +865,8 @@ test('H3-01: прежние команды и схемы их данных не 
   );
   for (const value of ADDITIVE_ENUM_VALUES)
     assert.ok(JSON.stringify(data).includes(JSON.stringify(value)), value + ' объявлен');
+  // Хеш H2 вырезает список процессов песочницы у doctor: объявление держит эта проверка.
+  assert.ok(JSON.stringify(data.doctor).includes('"processList"'), 'doctor: sandbox.processList');
   // Хеш H2 вырезает поля слоя lean: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.profile).includes('"gateTimeoutFloorMs"'), 'profile: граница gate');
   assert.ok(JSON.stringify(data.init).includes('"layers"'), 'init: слои профиля в manifest');

@@ -22,6 +22,15 @@ Headless-движок исполнения инженерных поручени
 - Node.js ≥ 24.3.0, Git.
 - CLI `codex` и `claude`, установленные и авторизованные (для живого запуска).
   `harness doctor` проверяет их без вызова модели.
+- Проверки (gates) по умолчанию исполняются в песочнице ОС (sandbox-runtime:
+  Seatbelt на macOS, bubblewrap на Linux; `isolation.mode: os`). На macOS в
+  ней не запускаются setuid-программы: тест, вызывающий `ps`, `pgrep` или
+  `top`, падает `spawn EPERM`, и harness называет это отказом среды
+  `GATE_SANDBOX_PROCESS_LIST`, а не провалом кода. Открыть список процессов
+  проверкам нельзя безопасно (`ps -E` показывает окружение всех процессов
+  пользователя, в том числе токены), поэтому такой тест проверяет свои
+  процессы по pid или выносится из gate. `harness doctor` и `harness smoke`
+  называют эту возможность заранее ([договоры](docs/contracts.md)).
 
 ## Установка
 
@@ -112,6 +121,8 @@ git rev-parse refs/heads/harness/accepted   # совпадает с data.result.
 | `smoke … --writer-probe`                        | Команды исполнителя в его изоляции, без модели     |
 | `update --state D --check/--apply/--rollback`   | Обновления harness и панели: проверка, откат       |
 | `update --state D --schedule daily\|off`        | Ежедневная проверка (launchd; Linux — текст)       |
+| `preview-start --state D [--work ID]`           | Превью принятого результата на loopback-адресе     |
+| `preview-list / preview-stop --state D`         | Живые превью; остановка, срок и простой            |
 
 stdout — один JSON (`devcontour-harness/v1alpha1`), диагностика — stderr. Exit
 codes: 0 успех, 2 неверный вход, 3 отказ/блокировка, 4 инфраструктура.
@@ -127,6 +138,9 @@ harness пишет «проверено», почему попытки повт�
 Следить за работой — в панели (skill `harness-ui`) или
 `harness status --state D --human --watch`; поля документа панели —
 [представление оператора](docs/operator-view.md).
+Посмотреть принятый результат в браузере — [превью](docs/previews.md):
+`harness preview-start --state D --ref accepted --work <id>` даёт адрес на
+этой машине, harness сам останавливает превью по сроку и простою.
 
 ## Что вы увидите: отчёт
 

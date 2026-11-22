@@ -29,6 +29,8 @@ import type { ToolchainReport } from '../toolchains/inspect.ts';
 import { resourceWarnings } from './resource-advice.ts';
 import { BROWSER_ADVICE, isBrowserRunner } from './browser-checks.ts';
 import { timeBudgetWarnings } from '../verification/time-budget.ts';
+import { processListBackend } from '../verification/gates.ts';
+import { processListLine, type ProcessListCapability } from '../verification/process-list.ts';
 import { resolveNodePin, sameNode, toolchainFacts } from '../environment/toolchain-pin.ts';
 
 /** Диагностика toolchain политики (см. `inspectPolicy` в `./toolchains`). */
@@ -84,6 +86,12 @@ export async function doctor(
     leadSandbox?: true | Partial<LeadSandboxProbe>;
     /** Окружение для сверки закреплённого toolchain; по умолчанию `process.env`. */
     environment?: NodeJS.ProcessEnv;
+    /**
+     * Пробовать список процессов в песочнице проверок (`ps` под той же
+     * изоляцией, что gates): `sandbox.processList` и строка в `notes`. CLI
+     * передаёт `true`; функция — подменённая проба.
+     */
+    processList?: true | (() => Promise<ProcessListCapability>);
   } = {},
 ) {
   const problems: string[] = [];
@@ -115,6 +123,15 @@ export async function doctor(
   }
   const sandbox = isolationSupport();
   if (!sandbox.ok && policy?.isolation.mode === 'os') problems.push(sandbox.detail);
+  // Список процессов в песочнице проверок: недоступен — не проблема среды
+  // (gate может его не вызывать), а строка с советом до первой попытки.
+  const processList = !options.processList
+    ? undefined
+    : policy?.isolation.mode === 'none'
+      ? ({ status: 'not-isolated', detail: 'isolation.mode: none' } as ProcessListCapability)
+      : sandbox.ok
+        ? await (options.processList === true ? processListBackend.probe : options.processList)()
+        : undefined;
   let state:
     | {
         stateVersion: number;
@@ -229,12 +246,18 @@ export async function doctor(
     );
   // Проверки в браузере среди шагов пробы исполнителя — ожидаемое состояние,
   // а не проблема: песочница исполнителя браузер не запускает.
-  const notes = (policy?.repositories ?? []).flatMap((r) => {
+  const notes: string[] = [
+    ...(processList?.status === 'unavailable'
+      ? ['sandbox-process-list: ' + processListLine(processList)]
+      : []),
+  ];
+  for (const note of (policy?.repositories ?? []).flatMap((r) => {
     const browser = (r.writerProbe ?? []).filter(isBrowserRunner).map((s) => s.id);
     return browser.length
       ? [`browser-checks ${r.id} (${browser.join(', ')}): ${BROWSER_ADVICE}`]
       : [];
-  });
+  }))
+    notes.push(note);
   const models = policy ? policyModels(policy) : [];
   if (policy) warnings.push(...codexModelWarnings(models));
   // Закреплённый toolchain: каталог и версия, сверка с node первым в PATH
@@ -249,7 +272,14 @@ export async function doctor(
     node: process.version,
     platform: `${process.platform}-${process.arch}`,
     runtimes,
-    sandbox: { os: sandbox.ok, ...(sandbox.ok ? {} : { reason: sandbox.detail }) },
+    sandbox: {
+      os: sandbox.ok,
+      ...(sandbox.ok ? {} : { reason: sandbox.detail }),
+      // Возможность списка процессов в песочнице проверок и её строка для человека.
+      ...(processList
+        ? { processList: { ...processList, line: processListLine(processList) } }
+        : {}),
+    },
     ...(state ? { state } : {}),
     ...(checkoutRoot ? { checkouts: checkoutRoot } : {}),
     ...(toolchains ? { toolchains } : {}),

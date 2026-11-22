@@ -15,6 +15,13 @@ import {
 } from './writer-probe.ts';
 import { applyWriterLoopback, loopbackChanges } from './writer-loopback.ts';
 import { writeFile } from 'node:fs/promises';
+import { gitRawOutput } from '../environment/process.ts';
+import { processListBackend } from '../verification/gates.ts';
+import {
+  processListCallPatterns,
+  processListLine,
+  type ProcessListCapability,
+} from '../verification/process-list.ts';
 
 /**
  * Класс отказа окружения `harness smoke`:
@@ -74,7 +81,18 @@ export interface LifecycleSmokeResult {
   warnings?: string[];
   /** Проба исполнителя (`--writer-probe`): команды `writerProbe` в его изоляции. */
   writerProbe?: WriterProbeResult;
+  /**
+   * Список процессов в песочнице ОС проверок (`isolation.mode: os`): проба
+   * `ps` в той же изоляции, что gates, строка для человека и файлы дерева на
+   * этом SHA, которые вызывают `ps`/`pgrep`/`top` (до 10). Недоступен и такие
+   * файлы есть — предупреждение `sandbox-process-list`: gate, исполняющий их,
+   * упадёт `GATE_SANDBOX_PROCESS_LIST`.
+   */
+  processList?: SmokeProcessList;
 }
+
+/** Список процессов в песочнице проверок в ответе `harness smoke`. */
+export type SmokeProcessList = ProcessListCapability & { line: string; callers?: string[] };
 
 export interface LifecycleSmokeInput {
   policy: ExecutionPolicy;
@@ -116,6 +134,61 @@ export interface LifecycleSmokeInput {
   policySha?: string;
   /** Исполняемые файлы runtime для пробы (`HARNESS_<RUNTIME>_BIN`). */
   executables?: Partial<Record<'codex' | 'claude', string>>;
+  /**
+   * Проба списка процессов в песочнице проверок: по умолчанию — общая
+   * (`processListBackend`) при `isolation.mode: os`; `false` — не пробовать;
+   * функция — подменённая проба.
+   */
+  processList?: false | (() => Promise<ProcessListCapability>);
+}
+
+/**
+ * Файлы дерева на коммите, которые вызывают список процессов (до 10):
+ * абсолютный путь `ps`/`pgrep`/`top`, имя строкой, вызов в shell. Документы
+ * (`*.md`) не смотрятся. Отказ git — пустой список.
+ */
+export async function processListCallers(repoPath: string, sha: string): Promise<string[]> {
+  try {
+    const out = await gitRawOutput(
+      repoPath,
+      'grep',
+      '-l',
+      '-I',
+      '-E',
+      ...processListCallPatterns.flatMap((p) => ['-e', p]),
+      sha,
+      '--',
+      '.',
+      ':(exclude)*.md',
+    );
+    return [
+      ...new Set(
+        out
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => line.slice(sha.length + 1)),
+      ),
+    ].slice(0, 10);
+  } catch {
+    // `git grep` без совпадений завершается кодом 1.
+    return [];
+  }
+}
+
+async function smokeProcessList(
+  input: LifecycleSmokeInput,
+  repoPath: string,
+  sha: string,
+): Promise<SmokeProcessList | undefined> {
+  if (input.processList === false || input.policy.isolation.mode !== 'os') return undefined;
+  const capability = await (input.processList ?? processListBackend.probe)();
+  const callers =
+    capability.status === 'unavailable' ? await processListCallers(repoPath, sha) : [];
+  return {
+    ...capability,
+    line: processListLine(capability),
+    ...(callers.length ? { callers } : {}),
+  };
 }
 
 const stepOf = (s: StepOutcome): LifecycleSmokeStep => ({
@@ -472,6 +545,14 @@ export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<Lifecy
       { policy, timedOut },
     );
   }
+  // Список процессов в песочнице проверок: о нём smoke говорит до попыток,
+  // а не gate после работы исполнителя.
+  const processList = await smokeProcessList(input, repoPath(repo), sha);
+  if (processList?.callers?.length)
+    warnings = [
+      ...(warnings ?? []),
+      `sandbox-process-list: ${processList.callers.join(', ')} вызывают ps/pgrep/top; ${processList.line}`,
+    ];
   return {
     id,
     repositoryId: repo.id,
@@ -483,6 +564,7 @@ export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<Lifecy
     logs: join(stateDir, 'gates-at', id),
     ...(warnings?.length ? { warnings } : {}),
     ...(probe ? { writerProbe: probe } : {}),
+    ...(processList ? { processList } : {}),
   };
 }
 
@@ -505,6 +587,9 @@ export function smokeText(data: LifecycleSmokeResult) {
           ]
         : []),
       `логи: ${data.logs}`,
+      ...(data.processList && !data.processList.callers?.length
+        ? [`возможность: ${data.processList.line}`]
+        : []),
       ...(data.warnings ?? []).map((w) => `предупреждение: ${w}`),
     ].join('\n') +
     '\n' +

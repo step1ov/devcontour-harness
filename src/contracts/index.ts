@@ -31,3 +31,4 @@ export * from './operator-view.ts';
 export * from './update.ts';
 export * from './lead.ts';
 export * from './view-resources.ts';
+export * from './preview.ts';

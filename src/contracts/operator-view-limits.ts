@@ -61,6 +61,8 @@ export const OPERATOR_VIEW_LIMITS = {
   planned: 200,
   /** Записи журнала ведущего в `lead.notes` (ревизия 6). */
   leadNotes: 20,
+  /** Живые превью результата (`previews`, 0.1.0-alpha.66). */
+  previews: 20,
 } as const;
 
 /** Пределы свободных строк (символов) после маскирования. */

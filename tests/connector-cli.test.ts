@@ -99,6 +99,27 @@ test('W01/cli: команды коннектора есть в договоре 
   }
 });
 
+test('P4-6/cli: source-deliver --reprove в договоре CLI; флаг только у source-deliver', () => {
+  assert.ok(cliCommands['source-deliver'].args.some((a) => a.name === '--reprove'));
+  const f = fixture();
+  try {
+    const other = harness(
+      ['source-status', '--source', f.source, '--state', f.state, '--reprove'],
+      f.dir,
+    );
+    assert.equal(other.json?.ok, false);
+    assert.equal(other.json?.error?.code, 'INVALID_INPUT');
+    const own = harness(
+      ['source-deliver', '--source', f.source, '--state', f.state, '--reprove'],
+      f.dir,
+    );
+    assert.equal(own.json?.ok, false);
+    assert.notEqual(own.json?.error?.code, 'INVALID_INPUT', 'флаг принят: отказ по состоянию');
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test('W04/cli: недоступный backend — явный отказ source-check/source-snapshot, без пустого снимка и без состояния', () => {
   const f = fixture();
   try {
