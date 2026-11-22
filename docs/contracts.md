@@ -79,6 +79,8 @@ SHA-256 канонического JSON (`canonicalJson`: ключи по пор
 | `requirements[]`   | Требование: текст, его SHA-256, test gate из области, testcase                                                                                                                                                           |
 | `contracts[]`      | `{id, digest}` закреплённых контрактов                                                                                                                                                                                   |
 | `context[]`        | ID обязательных источников контекста                                                                                                                                                                                     |
+| `kind`             | alpha.67: `infra` — работа инфраструктуры harness в `repositories[].infra.paths` ([работы инфраструктуры](infra-works.md)); нет поля — продуктовая работа, digest прежних поручений не меняется                          |
+| `gateChanges[]`    | alpha.67, только `kind: infra`: существующие файлы gates, которые работа меняет; входит в digest графа — изменение определения gate согласует ревью плана                                                                |
 
 ### WorkGraph
 
@@ -146,6 +148,14 @@ idleMs?}`: как собрать и запустить приложение на
 результат. Запускает только оператор (`harness preview-start`), никогда — `run`, попытка или
 gate. В `executionDigest` и `isolationDigest` не входит; нет поля — digest политики прежний.
 Подробно — [превью](previews.md).
+
+`repositories[].infra` — необязательная область инфраструктуры `{paths[]}` (до 32 путей,
+alpha.67): пути, которые меняют только работы `kind: infra`. Пути лежат внутри
+`protectedPaths`, не покрывают корни доверия (`.harness/policy.json`, `profile.json`,
+`connector.json`, `project.json`, `updates.json`, `.harness/work/`, `.harness-tools/` и др.) и
+файлы шагов на хосте (`lifecycle`, `prepare`, `dependencyBuild`, `preflight`, генераторы).
+Входит в `isolationDigest` (смена — новое ревью плана); нет поля — digest политики прежний.
+Подробно — [работы инфраструктуры](infra-works.md).
 
 `toolProfiles.<id>.network` — необязательная сеть исполнителя профиля: `none`, `loopback` или
 `full`. Нет поля — прежнее: codex — по `codexNetwork` (`true` — вся сеть, иначе закрыта), claude —
@@ -2109,6 +2119,27 @@ controller, живость, время идущей попытки (ряд `load
 повторяется обычным открытием только для чтения, и SQLite может создать
 служебный `-shm`, как у `status`. Неизвестный `--work`, `--view-version`,
 `--lang`, окно или интервал — `INVALID_INPUT` (exit 2).
+
+**Ревизия 7 (0.1.0-alpha.67).** Добавления, все необязательные в схеме;
+читатель ревизии 6 их игнорирует.
+
+- **Работа инфраструктуры** (`works[].kind: 'infra'`): работа
+  `kind: infra` ([работы инфраструктуры](infra-works.md)); нет поля —
+  продуктовая работа.
+- **Ход настройки** (`stage.progress`, обзор и документ настройки): пока
+  работ нет — `{since?, elapsedMs?, budgetMs, overBudget, steps[], line,
+lineEn}`, шаг — `{id, state, at?, elapsedMs?, line, lineEn}`; `id`:
+  `profile`, `init`, `doctor`, `smoke`, `probe`, `gates`, `connector`;
+  `state`: `done`, `failed`, `pending`, `skipped`, `unknown`. Поле есть,
+  только когда политика лежит в каталоге `.harness/` проекта. В
+  `source.token` не входят `elapsedMs`, `line`, `lineEn` хода настройки.
+  `stage.lines` прежние.
+- **Строка очереди** (`progress.queue.line`, без нового поля): когда никто
+  не запущен, готовые работы есть, а вопрос исполнителя
+  (`status.runner.heldByQuestion`) или вопрос владельцу в источнике задач
+  (`sourceQuestions[].tasks`) держит только свои работы, — «Очередь стоит —
+  никто не запущен: запустите harness run: готово N задач, вопрос блокирует
+  только X (ведущий).»; `restartBy: lead`.
 
 ### HandoffPack
 

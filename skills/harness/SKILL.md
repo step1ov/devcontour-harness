@@ -199,6 +199,32 @@ planning, and the draft approves nothing.
    validate, review and run it (steps 5–7). The review record of the plan
    carries the same digest as `data.graphDigest`.
 
+**Infra works.** Harness-owned infrastructure code — environment bridges,
+gate wrappers, validators, acceptance tests under `.harness/` — is planned
+as tasks with `"kind": "infra"`, not written by you during setup or between
+runs (`<pkg>/docs/infra-works.md`). The setup report lists such code and the
+inherited setup debts; each becomes an infra task:
+
+- the repository needs an infra scope in the policy:
+  `repositories[].infra.paths` (for example `.harness/acceptance/`,
+  `.harness/infra/`), inside `protectedPaths`, never covering
+  `.harness/policy.json`, `profile.json`, `connector.json`, `project.json`,
+  `.harness/work/` or a file that `lifecycle`/`prepare` steps run. Adding it
+  changes the isolation digest: the plan needs `review-plan` again;
+- an infra task's `writePaths` lie inside that scope; a file that host steps
+  run is never edited — write the new version next to it and switch the
+  policy after acceptance;
+- an existing gate file (a script or test directory a gate command names)
+  changes only when the task lists it in `gateChanges` and its description
+  says what the new check proves and why it is not weaker; plan review
+  approves that change, and the infra work's own gates run the trusted base;
+- every product task of the same repository depends on the infra tasks
+  (`plan-check` refuses a graph where it does not): product works run the
+  gates and bridges of the accepted infra revision.
+
+Infra works run through the normal loop (attempts, review-code, forecast);
+treat their failures like any other work's.
+
 A hand-written graph is still possible: start from
 `<tooldir>/node_modules/devcontour-harness/templates/graph.json` and take
 `repositoryId`, `role`, `gates` and the write scope only from `data.facts` of
@@ -512,6 +538,16 @@ writer stopped and asks the human. Do not answer it yourself:
    `$H input-answer --state <state> --request <id> --text "<their words>"
 [--option <id they chose>] --actor operator --request-version <n>`.
 4. Then continue with the `lead` steps of `apply-input` above.
+
+**A question blocks only its own work.** A blocking executor question, or a
+product question you recorded for the owner in the task source, holds only
+the works it names and the works that depend on them; every other ready work
+keeps going. Before you end a session to wait for an owner's answer, start
+the run for the ready works: when `status` (`runner.ready`,
+`runner.heldByQuestion`), `explain` (`queue`, `actor: lead`,
+`action: start-run`) or the panel says «запустите harness run: готово N
+задач, вопрос блокирует только X», that is your move now, not after the
+answer. Stop the session only when nothing is ready.
 
 **Technical question decided by you (`INPUT_REQUIRED`, `actor: lead`,
 `answer-input`).** Only when the human opted in with
