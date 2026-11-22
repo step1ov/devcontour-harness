@@ -263,6 +263,14 @@ export const workViewSchema = z.strictObject({
   status: token(40),
   /** Ревизия 6: план работы ещё не согласован, попыток не было — «ещё не утверждена». */
   planned: z.literal(true).optional(),
+  /**
+   * Ревизия 6: доработка, отменённая прежней версией harness, показана
+   * принятой работой (`done`, `resultSha` — прежняя приёмка); состояние не
+   * переписано, его чинит `harness cancel`. `restoredLine` — «принято на
+   * <sha>; доработка отменена».
+   */
+  restoredFrom: z.literal('cancelled-rework').optional(),
+  restoredLine: z.string().min(1).max(T.line).optional(),
   stage: z.strictObject({
     name: token(40),
     step: freeText(T.step).optional(),

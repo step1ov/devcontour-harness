@@ -167,6 +167,41 @@ test('P4-7: пилот 4 — отменённые прежней версией 
   assert.doesNotMatch(f.time.line, /ни одна попытка не закончилась/);
 });
 
+test('P4-7: пилот 4 — все 5 работ в представлении приняты; отменённые доработки помечены, состояние не переписано', () => {
+  const env = pilot4();
+  const view = viewOf(env);
+  assert.deepEqual(
+    view.works.map((w) => [w.id, w.status, w.stage.name]),
+    [
+      ['w1', 'done', 'done'],
+      ['w2', 'done', 'done'],
+      ['w3', 'done', 'done'],
+      ['w4', 'done', 'done'],
+      ['p', 'done', 'done'],
+    ],
+  );
+  for (const w of view.works.slice(0, 4)) {
+    assert.equal(w.restoredFrom, 'cancelled-rework', w.id);
+    const accepted = env.engine.read((v) => v.work(w.id)!.rework!.accepted.resultSha);
+    assert.equal(w.resultSha, accepted);
+    assert.equal(w.restoredLine, `принято на ${accepted.slice(0, 7)}; доработка отменена`);
+  }
+  assert.equal(view.works[4]!.restoredFrom, undefined);
+  assert.equal(view.progress.done, 5);
+  assert.equal(
+    viewOf(env, 'en').works[0]!.restoredLine,
+    `accepted at ${view.works[0]!.resultSha!.slice(0, 7)}; rework cancelled`,
+  );
+  // Состояние не переписано: работы по-прежнему `cancelled`, пока их не починит cancel.
+  assert.equal(
+    env.engine.read((v) => v.work('w1')!.status),
+    'cancelled',
+  );
+  env.engine.cancel('w1');
+  const repaired = viewOf(env).works[0]!;
+  assert.deepEqual([repaired.status, repaired.restoredFrom], ['done', undefined]);
+});
+
 test('P4-7: cancel отменённой прежней версией доработки — возврат к принятой редакции', () => {
   const env = pilot4();
   const before = env.engine.read((v) => v.work('w1')!);

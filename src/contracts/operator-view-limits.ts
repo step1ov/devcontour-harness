@@ -98,3 +98,27 @@ export const OPERATOR_VIEW_TYPICAL_MIN_SAMPLES = 5;
 /** Окно истории и интервал по умолчанию: 24 ч по 15 минут (96 значений). */
 export const OPERATOR_VIEW_DEFAULT_WINDOW_MS = DAY_MS;
 export const OPERATOR_VIEW_DEFAULT_BUCKET_MS = 15 * 60 * 1000;
+
+/** Пределы раздела «Что задействовано» (`resources`, ревизия 6): договор и проекция. */
+export const RESOURCES_LIMITS = {
+  /** Роли: исполнители, проверяющие (с запасными) и ведущий. */
+  roles: 100,
+  /** Закреплённые инструменты (`policy.toolchain` и `toolchain` репозиториев). */
+  tools: 50,
+  /** Репозитории в хранилище зависимостей и счёте проверок (как `policy.repositories`). */
+  repositories: 10,
+  /** Службы lifecycle (репозиторий × служба). */
+  services: 50,
+  /** Примеры попыток с оставшимся окружением у службы. */
+  leftoverRuns: 5,
+  /** Строки сводки для домашнего экрана. */
+  lines: 8,
+  /** Длины строк (символов) после маскирования. */
+  text: {
+    line: 300,
+    id: 80,
+    model: 200,
+    name: 120,
+    version: 120,
+  },
+} as const;

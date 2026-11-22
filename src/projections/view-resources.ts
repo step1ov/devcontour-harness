@@ -5,21 +5,10 @@
 // свободная строка проходит `mask`, каждый список ограничен.
 
 import { ruCount, ruForm, type RuForms } from '../contracts/plural.ts';
+import { RESOURCES_LIMITS } from '../contracts/operator-view-limits.ts';
 
-/**
- * Пределы — те же числа, что `RESOURCES_LIMITS` договора
- * (`src/contracts/view-resources.ts`); договор с zod в браузерный бандл не
- * входит, поэтому числа повторены здесь, а тест сверяет их.
- */
-export const RESOURCES_VIEW_LIMITS = {
-  roles: 100,
-  tools: 50,
-  repositories: 10,
-  services: 50,
-  leftoverRuns: 5,
-  lines: 8,
-  text: { line: 300, id: 80, model: 200, name: 120, version: 120 },
-} as const;
+/** Пределы — `RESOURCES_LIMITS` листа договоров (без zod): одни числа с договором. */
+export const RESOURCES_VIEW_LIMITS = RESOURCES_LIMITS;
 const L = RESOURCES_VIEW_LIMITS;
 const T = L.text;
 

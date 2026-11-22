@@ -158,8 +158,8 @@ function snapshot(dir: string): string {
   return out.join('\n');
 }
 
-test('пределы проекции совпадают с RESOURCES_LIMITS договора', () => {
-  assert.deepEqual(RESOURCES_VIEW_LIMITS, RESOURCES_LIMITS);
+test('пределы проекции — те же RESOURCES_LIMITS листа договоров, не копия', () => {
+  assert.equal(RESOURCES_VIEW_LIMITS, RESOURCES_LIMITS);
 });
 
 test('роли и вендоры: исполнители, проверяющие с запасными, ведущий из манифеста', () => {

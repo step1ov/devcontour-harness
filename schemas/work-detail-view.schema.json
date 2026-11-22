@@ -76,6 +76,15 @@
           "type": "boolean",
           "const": true
         },
+        "restoredFrom": {
+          "type": "string",
+          "const": "cancelled-rework"
+        },
+        "restoredLine": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
         "stage": {
           "type": "object",
           "properties": {

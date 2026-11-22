@@ -5,33 +5,12 @@ import { z } from 'zod';
  * вендоры ролей, изоляция, закреплённые версии инструментов, хранилище
  * зависимостей, службы lifecycle и число проверок — простыми словами для
  * человека не из разработки. Документ только для чтения; объекты закрыты,
- * списки и строки ограничены.
- *
- * Те же числа держит чистая проекция (`src/projections/view-resources.ts`,
- * браузерный бандл без zod): тест сверяет их с `RESOURCES_LIMITS`.
+ * списки и строки ограничены. Пределы — `RESOURCES_LIMITS` листа
+ * `operator-view-limits.ts`: те же числа читает чистая проекция.
  */
-export const RESOURCES_LIMITS = {
-  /** Роли: исполнители, проверяющие (с запасными) и ведущий. */
-  roles: 100,
-  /** Закреплённые инструменты (`policy.toolchain` и `toolchain` репозиториев). */
-  tools: 50,
-  /** Репозитории в хранилище зависимостей и счёте проверок (как `policy.repositories`). */
-  repositories: 10,
-  /** Службы lifecycle (репозиторий × служба). */
-  services: 50,
-  /** Примеры попыток с оставшимся окружением у службы. */
-  leftoverRuns: 5,
-  /** Строки сводки для домашнего экрана. */
-  lines: 8,
-  /** Длины строк (символов) после маскирования. */
-  text: {
-    line: 300,
-    id: 80,
-    model: 200,
-    name: 120,
-    version: 120,
-  },
-} as const;
+import { RESOURCES_LIMITS } from './operator-view-limits.ts';
+
+export { RESOURCES_LIMITS };
 
 const T = RESOURCES_LIMITS.text;
 const L = RESOURCES_LIMITS;

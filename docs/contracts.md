@@ -1910,6 +1910,12 @@ lines, linesEn}`: `--repository` без manifest или с manifest, но без
   `attemptSummary.rework` (доработка, отменённая alpha.65 и старше) в прогнозе
   — принятая: вес 1, `done`, а не «вне объёма»; `harness cancel` возвращает
   её к принятой редакции и в состоянии (событие `work.rework-abandoned`).
+  Представление показывает такую работу принятой и до починки: `works[]` —
+  `status: done`, этап `done`, `resultSha` — прежняя приёмка, блокировок
+  нет, `restoredFrom: 'cancelled-rework'` и `restoredLine` («принято на
+  <sha7>; доработка отменена» / "accepted at <sha7>; rework cancelled");
+  `progress.done` и `byStage` считают её принятой. Состояние при этом не
+  переписывается.
   Лента — `work.rework-abandoned` («доработка 1 работы W оставлена: работа
   вернулась к принятой на <sha> редакции»). Длительность попытки в
   `remaining`/`rough` — по закончившимся попыткам **всех** работ выпуска, в

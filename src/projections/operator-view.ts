@@ -338,6 +338,14 @@ export interface WorkView {
   status: string;
   /** Ревизия 6: план работы ещё не согласован, попыток не было — «ещё не утверждена». */
   planned?: true;
+  /**
+   * Ревизия 6: работа, отменённая прежней версией harness во время доработки
+   * после приёмки (`cancelled` с доработкой), показана принятой (`done`,
+   * `resultSha` — прежняя приёмка); состояние не переписано — его чинит
+   * `harness cancel`. `restoredLine` — «принято на <sha>; доработка отменена».
+   */
+  restoredFrom?: 'cancelled-rework';
+  restoredLine?: string;
   stage: {
     name: string;
     step?: string;
@@ -670,6 +678,8 @@ export interface OperatorWorkInput {
    * не было (не доработка) — планируемая, «ещё не утверждена».
    */
   planned?: true;
+  /** Ревизия 6: проекция показывает её принятой (`acceptedAsRestored`); загрузчик поле не ставит. */
+  restoredFrom?: 'cancelled-rework';
   resultSha?: string;
   dependsOn?: readonly string[];
   stage: {
@@ -1577,6 +1587,15 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
     ...(c.titles && w.title ? { title: text(c, w.title, T.title) } : {}),
     status: w.status,
     ...(w.planned ? { planned: true as const } : {}),
+    ...(w.restoredFrom
+      ? {
+          restoredFrom: w.restoredFrom,
+          restoredLine:
+            c.lang === 'en'
+              ? `accepted at ${w.resultSha?.slice(0, 7)}; rework cancelled`
+              : `принято на ${w.resultSha?.slice(0, 7)}; доработка отменена`,
+        }
+      : {}),
     stage: {
       name: s.name,
       ...(s.step ? { step: text(c, s.step, T.step) } : {}),
@@ -3448,7 +3467,36 @@ const questionOrder = (a: OperatorQuestionInput, b: OperatorQuestionInput) =>
  * опции — те же байты. Отказ — `HarnessError` (`INVALID_INPUT` для окна,
  * `VIEW_TOO_LARGE` для размера).
  */
-export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}): OperatorView {
+/**
+ * Доработка, отменённая alpha.65 и старше (P4-7): работа `cancelled` со
+ * сводкой доработки (`attemptSummary.rework`) — для представления принятая
+ * работа на прежней приёмке. Состояние не переписывается: его возвращает к
+ * принятой редакции `harness cancel` (событие `work.rework-abandoned`).
+ */
+function acceptedAsRestored(i: OperatorViewInput): OperatorViewInput {
+  if (!i.works.some((w) => w.status === 'cancelled' && w.attemptSummary.rework)) return i;
+  return {
+    ...i,
+    works: i.works.map((w) => {
+      const r = w.attemptSummary.rework;
+      if (w.status !== 'cancelled' || !r) return w;
+      const stage = { ...w.stage, name: 'done', next: [] as string[] };
+      delete stage.needs;
+      delete stage.step;
+      return {
+        ...w,
+        status: 'done',
+        stage,
+        resultSha: r.acceptedSha,
+        blockers: [],
+        restoredFrom: 'cancelled-rework' as const,
+      };
+    }),
+  };
+}
+
+export function operatorView(input: OperatorViewInput, o: OperatorViewOptions = {}): OperatorView {
+  const i = acceptedAsRestored(input);
   const c = context(i, o);
   const maxBytes = o.maxBytes ?? L.bytes;
   const truncated: Record<string, number> = {};
@@ -3795,10 +3843,11 @@ const howOf: Record<string, string> = {
  * принятого этой работы. Неизвестная работа — `INVALID_INPUT`.
  */
 export function workDetailView(
-  i: OperatorViewInput,
+  input: OperatorViewInput,
   workId: string,
   o: OperatorViewOptions = {},
 ): WorkDetailView {
+  const i = acceptedAsRestored(input);
   const c = context(i, o);
   const maxBytes = o.maxBytes ?? L.bytes;
   const w = i.works.find((x) => x.id === workId);
