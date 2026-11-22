@@ -668,7 +668,14 @@ export const executionDigest = (policy: ExecutionPolicy) =>
     inputPolicy: undefined,
     lifecyclePreflight: undefined,
     toolchain: undefined,
-    repositories: policy.repositories.map((r) => ({ ...r, previews: undefined })),
+    // Превью не входят в digest исполнения — кроме репозитория с областью
+    // инфраструктуры (alpha.67): там их команды — шаги на хосте, и их смена
+    // делает согласование устаревшим (маршрут прежний — `reapprove`). Gates и
+    // генераторы входят всегда. Без области digest прежний.
+    repositories: policy.repositories.map((r) => ({
+      ...r,
+      previews: r.infra ? r.previews : undefined,
+    })),
     recovery: undefined,
   });
 
@@ -716,20 +723,8 @@ export const isolationDigest = (policy: ExecutionPolicy) =>
       r.preflight,
       r.writerDependencies ?? null,
       // Область инфраструктуры — граница записи защищённых путей; без поля
-      // кортеж прежний, и digest прежних политик не меняется. С ней в
-      // границу входят и gates (по ним принимается работа инфраструктуры), и
-      // шаги на хосте вне прежнего кортежа (генераторы, превью): их смена —
-      // новое ревью плана, а не `reapprove`.
-      ...(r.infra
-        ? [
-            {
-              infra: r.infra,
-              gates: r.gates,
-              generators: r.generators ?? null,
-              previews: r.previews ?? null,
-            },
-          ]
-        : []),
+      // кортеж прежний, и digest прежних политик не меняется.
+      ...(r.infra ? [{ infra: r.infra }] : []),
     ]),
   });
 

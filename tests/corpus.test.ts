@@ -958,3 +958,26 @@ test('AC18: быстрый маршрут не удаляет, не заменя
   assert.equal(after.versions.length, 1, 'новой версии нет');
   assert.equal(after.cases[ok.decision.caseId!]!.expected, '12', 'принятое не переписано');
 });
+
+test('alpha.67 M5: воспроизведение на кандидате работы инфраструктуры не исполняет шаги на хосте — inconclusive, подготовка не вызывается', async () => {
+  const ctx = propertySetup({ writer: [implement({ 'src/knap.mjs': knap.firstThree })] });
+  await ctx.runner.init();
+  await runAll(ctx);
+  ctx.store.transact('task.held', (tx) => {
+    const w = tx.work('add-greeting')!;
+    tx.putWork({ ...w, order: { ...w.order, kind: 'infra' } });
+  });
+  await withPreparationStub(1, async (calls) => {
+    const r = await ctx.runner.submitCase({
+      workId: 'add-greeting',
+      property: 'knapsack-optimal',
+      input,
+      expected: '12',
+      key: 'case-infra',
+    });
+    assert.equal(r.decision.outcome, 'inconclusive');
+    assert.match(r.decision.reason ?? '', /работа инфраструктуры/);
+    assert.equal(r.version, null);
+    assert.equal(calls.length, 0, 'шаги подготовки не исполнялись');
+  });
+});

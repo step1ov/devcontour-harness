@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   commandPaths,
+  digestOf,
   executionDigest,
   executionPolicySchema,
   hostStepFiles,
@@ -13,6 +14,7 @@ import {
   isolationDigest,
   planDraftSchema,
   policyIssues,
+  resolutionFile,
   workGraphDigest,
   workGraphSchema,
   workOrderDigest,
@@ -23,13 +25,23 @@ import { crossIssues } from '../src/validate.ts';
 import { example } from './fixtures.ts';
 import { approve, implement, runAll, setup } from './runner-fixture.ts';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { repo } from './git-fixture.ts';
 import { changedFacts, resolveInTree, resolvedHostFiles } from '../src/engine/infra-guard.ts';
 import { reusableImplementation } from '../src/engine/reuse.ts';
 import { infraPendingOf } from '../src/engine/engine.ts';
+import { withBaseCheckout } from '../src/environment/trusted-tree.ts';
+import { explainStop } from '../src/projections/stop.ts';
 import { draftIssues } from '../src/planning/issues.ts';
 import { planningFactsOf } from '../src/planning/facts.ts';
 
@@ -406,7 +418,8 @@ const teardownScript = `
 const fs = require('fs');
 const mode = fs.readFileSync('.harness/infra/mode.txt', 'utf8').trim();
 const extra = fs.existsSync('.harness/infra/extra.js') ? 'present' : 'absent';
-fs.appendFileSync(process.env.MARKER, mode + ':' + extra + '\\n');
+const where = require('path').basename(process.cwd()).startsWith('trusted-base-') ? 'base-checkout' : 'tree';
+fs.appendFileSync(process.env.MARKER, mode + ':' + extra + ':' + where + '\\n');
 `;
 const teardownRun = (
   marker: string,
@@ -452,7 +465,12 @@ test('alpha.67 infra: teardown на хосте исполняет доверен
   // Каждая фаза окружения (кандидат и интеграция) — по базе: файл кандидата
   // в кандидате не виден teardown; интеграция — уже после ревью кода.
   const lines = readFileSync(marker, 'utf8').trim().split('\n');
-  assert.equal(lines[0], 'base:absent');
+  assert.equal(lines[0], 'base:absent:base-checkout');
+  // Отдельный checkout базы убран.
+  assert.doesNotMatch(
+    execFileSync('git', ['worktree', 'list'], { cwd: repoDir, encoding: 'utf8' }),
+    /trusted-base-/,
+  );
   assert.equal(
     execFileSync('git', ['show', `${work.resultSha}:.harness/infra/mode.txt`], {
       cwd: repoDir,
@@ -473,7 +491,7 @@ test('alpha.67 infra: отклонённый кандидат — teardown вс�
   );
   assert.equal(work.status, 'failed');
   assert.equal(work.failureKind, 'scope-violation');
-  assert.deepEqual(readFileSync(marker, 'utf8').trim().split('\n'), ['base:absent']);
+  assert.deepEqual(readFileSync(marker, 'utf8').trim().split('\n'), ['base:absent:base-checkout']);
 });
 
 test('alpha.67 infra: ссылки доверенной базы — файл шага на хосте защищён и по цели; ссылка в кандидате видна', async () => {
@@ -606,4 +624,155 @@ test('alpha.67 infra: продуктовая работа со связанны�
   assert.deepEqual(infraPendingOf(w('prod-0', 'g1', undefined, 'ready'), view), []);
   works[0].status = 'done';
   assert.deepEqual(infraPendingOf(works[1], view), []);
+});
+
+test('alpha.67 infra: checkout доверенной базы — дерево кандидата не меняется (ссылка на внешний каталог, удаления, файл вместо каталога), checkout убран', async () => {
+  const r = repo({
+    '.harness/infra/a/x.mjs': 'a\n',
+    '.harness/infra/gone.mjs': 'g\n',
+    '.harness/infra/dir/y.mjs': 'y\n',
+    'README.md': 'x\n',
+  });
+  const base = r.head();
+  const outside = mkdtempSync(join(tmpdir(), 'harness-outside-'));
+  writeFileSync(join(outside, 'x.mjs'), 'outside\n');
+  // Кандидат: предок заменён ссылкой наружу, файл удалён, каталог стал файлом.
+  rmSync(join(r.dir, '.harness/infra/a'), { recursive: true });
+  symlinkSync(outside, join(r.dir, '.harness/infra/a'));
+  rmSync(join(r.dir, '.harness/infra/gone.mjs'));
+  rmSync(join(r.dir, '.harness/infra/dir'), { recursive: true });
+  writeFileSync(join(r.dir, '.harness/infra/dir'), 'file now\n');
+  const env = mkdtempSync(join(tmpdir(), 'harness-env-'));
+  const seen = await withBaseCheckout(r.dir, base, env, (cwd) =>
+    Promise.resolve({
+      x: readFileSync(join(cwd, '.harness/infra/a/x.mjs'), 'utf8'),
+      gone: readFileSync(join(cwd, '.harness/infra/gone.mjs'), 'utf8'),
+      y: readFileSync(join(cwd, '.harness/infra/dir/y.mjs'), 'utf8'),
+      cwd,
+    }),
+  );
+  assert.deepEqual([seen.x, seen.gone, seen.y], ['a\n', 'g\n', 'y\n']);
+  assert.equal(readFileSync(join(outside, 'x.mjs'), 'utf8'), 'outside\n');
+  assert.equal(readFileSync(join(r.dir, '.harness/infra/dir'), 'utf8'), 'file now\n');
+  assert.equal(existsSync(join(r.dir, '.harness/infra/gone.mjs')), false);
+  assert.equal(existsSync(seen.cwd), false);
+  assert.doesNotMatch(r.git('worktree', 'list'), /trusted-base-/);
+  // Отказ шага тоже убирает checkout.
+  let failedAt = '';
+  await assert.rejects(
+    withBaseCheckout(r.dir, base, env, (cwd) => {
+      failedAt = cwd;
+      return Promise.reject(new Error('teardown failed'));
+    }),
+    /teardown failed/,
+  );
+  assert.equal(existsSync(failedAt), false);
+});
+
+test('alpha.67 infra: новые файлы, затеняющие базу рядом, и конфигурация Python — только по gateChanges', async () => {
+  for (const p of [
+    '.harness/acceptance/conftest.py',
+    '.harness/acceptance/pytest.ini',
+    '.harness/acceptance/pyproject.toml',
+    '.harness/acceptance/__mocks__/fs.js',
+    '.harness/acceptance/x.pth',
+    '.harness/acceptance/sitecustomize.py',
+  ])
+    assert.ok(resolutionFile(p), p);
+  assert.equal(resolutionFile('.harness/acceptance/new.test.mjs'), false);
+  const r = repo({
+    '.harness/infra/lib/index.js': 'module.exports = 1;\n',
+    '.harness/infra/util.mjs': 'export {};\n',
+    '.harness/infra/case\tgolden.json': '{}\n',
+    '.harness/infra/A.mjs': 'export {};\n',
+    'README.md': 'x\n',
+  });
+  const base = r.head();
+  writeFileSync(join(r.dir, '.harness/infra/lib.js'), 'module.exports = 2;\n');
+  writeFileSync(join(r.dir, '.harness/infra/util.js'), 'x\n');
+  mkdirSync(join(r.dir, '.harness/infra/util'));
+  writeFileSync(join(r.dir, '.harness/infra/util/index.js'), 'x\n');
+  writeFileSync(join(r.dir, '.harness/infra/fresh.test.mjs'), 'x\n');
+  writeFileSync(join(r.dir, '.harness/infra/case\tgolden.json'), '{"weaker":1}\n');
+  symlinkSync('A.mjs', join(r.dir, '.harness/infra/[A].mjs'));
+  r.git('add', '-A');
+  const changed = [
+    '.harness/infra/lib.js',
+    '.harness/infra/util.js',
+    '.harness/infra/util/index.js',
+    '.harness/infra/fresh.test.mjs',
+    '.harness/infra/case\tgolden.json',
+    '.harness/infra/[A].mjs',
+  ];
+  const facts = await changedFacts(r.dir, base, undefined, changed);
+  // Имя с табуляцией — существующий файл; `[A].mjs` — ссылка, а не `A.mjs`.
+  assert.deepEqual([...facts.present], ['.harness/infra/case\tgolden.json']);
+  assert.deepEqual([...facts.links], ['.harness/infra/[A].mjs']);
+  assert.deepEqual([...facts.shadows].sort(), [
+    '.harness/infra/lib.js',
+    '.harness/infra/util.js',
+    '.harness/infra/util/index.js',
+  ]);
+  const v = infraViolations(changed, {
+    kind: 'infra',
+    paths: ['.harness/infra/'],
+    hostFiles: [],
+    gateChanges: [],
+    inBase: (p) => facts.present.has(p),
+    isLink: (p) => facts.links.has(p),
+    isShadow: (p) => facts.shadows.has(p),
+  });
+  assert.deepEqual(v.link, ['.harness/infra/[A].mjs']);
+  assert.deepEqual(v.gate.sort(), [
+    '.harness/infra/case\tgolden.json',
+    '.harness/infra/lib.js',
+    '.harness/infra/util.js',
+    '.harness/infra/util/index.js',
+  ]);
+});
+
+test('alpha.67 infra: превью репозитория с областью инфраструктуры — в digest исполнения (маршрут reapprove), граница изоляции и digest без области прежние', () => {
+  const preview = (p: any) =>
+    (p.repositories[0].previews = [{ id: 'web', start: ['node', 'serve.mjs'] }]);
+  const legacy = (p: ReturnType<typeof policyWith>) =>
+    digestOf({
+      ...p,
+      budgets: undefined,
+      prices: undefined,
+      stallSweep: undefined,
+      inputPolicy: undefined,
+      lifecyclePreflight: undefined,
+      toolchain: undefined,
+      repositories: p.repositories.map((r) => ({ ...r, previews: undefined })),
+      recovery: undefined,
+    });
+  // Без области — тот же digest, что прежняя формула, и превью в него не входят.
+  const plain = policyWith(preview);
+  assert.equal(executionDigest(plain), legacy(plain));
+  assert.equal(executionDigest(plain), executionDigest(policyWith()));
+  // С областью — превью меняют digest исполнения, но не границу изоляции.
+  const infra = infraPolicy();
+  const infraPreview = infraPolicy(preview);
+  assert.notEqual(executionDigest(infra), executionDigest(infraPreview));
+  assert.equal(isolationDigest(infra), isolationDigest(infraPreview));
+  const gate = infraPolicy((p) => (p.repositories[0].gates[0].command = ['node', 'other.mjs']));
+  assert.equal(isolationDigest(infra), isolationDigest(gate));
+  assert.notEqual(executionDigest(infra), executionDigest(gate));
+});
+
+test('alpha.67 infra: продуктовая работа, которую держит инфраструктура прежнего графа, называет её в диагнозе', () => {
+  const d = explainStop({
+    kind: 'work',
+    work: { id: 'prod-a', status: 'ready', attempt: 0, infraWaitingOn: ['infra-a'] },
+    repair: {},
+    maxAttempts: 3,
+    records: [],
+    now: 0,
+  } as any);
+  assert.equal(d.actor, null);
+  assert.equal(d.action, 'wait');
+  assert.match(
+    d.message,
+    /Ждёт работы инфраструктуры прежнего графа infra-a.*harness explain --work infra-a/,
+  );
 });

@@ -199,21 +199,41 @@ export function hostStepFiles(repo: RepoLike, policy: PolicyLifecycles = {}): st
   return [...out];
 }
 
+/** Имена конфигурации и перехвата инструментов (Node, Python), даже без точки. */
+const RESOLUTION_NAMES = new Set([
+  'package.json',
+  'conftest.py',
+  'pytest.ini',
+  'tox.ini',
+  'setup.cfg',
+  'setup.py',
+  'pyproject.toml',
+  'Makefile',
+  'justfile',
+]);
+
 /**
  * Новый файл, который меняет, как инструменты находят и читают прежние
- * файлы области (манифест пакета, `node_modules`, конфигурация с точки или
- * `*.config.*`): новым файлом он не считается — как правка существующего,
- * только по `gateChanges`.
+ * файлы области: манифест пакета, `node_modules/`, `__mocks__/`, файл с
+ * точкой (`.mocharc`, `.npmrc`, `.env`), `*.config.*`, `tsconfig*.json`,
+ * конфигурация Python (`conftest.py`, `pytest.ini`, `tox.ini`, `setup.cfg`,
+ * `pyproject.toml`), `*.pth`, `sitecustomize`/`usercustomize`. Новым файлом он
+ * не считается — как правка существующего, только по `gateChanges`.
  */
 export const resolutionFile = (path: string) => {
   const segments = path.split('/');
   const name = segments.at(-1) ?? '';
+  const stem = name.replace(/\.[^.]*$/, '');
   return (
     segments.includes('node_modules') ||
-    name === 'package.json' ||
+    segments.includes('__mocks__') ||
+    RESOLUTION_NAMES.has(name) ||
     name.startsWith('.') ||
     /\.config\.[A-Za-z0-9]+$/.test(name) ||
-    /^tsconfig.*\.json$/.test(name)
+    /^tsconfig.*\.json$/.test(name) ||
+    /\.pth$/.test(name) ||
+    stem === 'sitecustomize' ||
+    stem === 'usercustomize'
   );
 };
 
@@ -272,6 +292,11 @@ export interface InfraScopeInput {
   inBase(path: string): boolean;
   /** Путь в кандидате — символическая ссылка. */
   isLink?(path: string): boolean;
+  /**
+   * Новый путь затеняет файл или каталог базы рядом (та же основа имени:
+   * `lib.js` рядом с `lib/`).
+   */
+  isShadow?(path: string): boolean;
 }
 
 /**
@@ -284,7 +309,8 @@ export interface InfraScopeInput {
  *   согласования планом (`gateChanges`). Любой существующий файл области
  *   может быть файлом gate или его зависимостью (импорт, файл по умолчанию,
  *   скрипт package manager): правка без согласования отклоняется, какой бы
- *   командой gate его ни читал. Новые файлы добавлять можно.
+ *   командой gate его ни читал. Новые файлы добавлять можно, кроме файлов
+ *   разрешения и затеняющих файл или каталог базы рядом.
  * Продуктовой работе ничего не добавляется: область инфраструктуры ей
  * защищена через `protected` (`scopeViolations`).
  */
@@ -297,7 +323,7 @@ export function infraViolations(changed: readonly string[], input: InfraScopeInp
     (p) =>
       !host.includes(p) &&
       !link.includes(p) &&
-      (input.inBase(p) || resolutionFile(p)) &&
+      (input.inBase(p) || resolutionFile(p) || input.isShadow?.(p) === true) &&
       !withinInfra(p, input.gateChanges),
   );
   return { host, gate, link };

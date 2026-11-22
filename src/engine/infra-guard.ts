@@ -11,15 +11,50 @@ const LINK_MODE = '120000';
 /** Предел переходов по ссылкам при разрешении одного пути. */
 const MAX_HOPS = 20;
 
-/** Режим и объект пути в дереве `rev` (`git ls-tree`); нет пути — `undefined`. */
+/**
+ * Записи `-z` вывода git (`<метаданные>\t<путь>`): путь — после первой
+ * табуляции, целиком (в имени файла может быть и табуляция).
+ */
+function records(out: string) {
+  return out
+    .split('\0')
+    .filter(Boolean)
+    .map((line) => {
+      const tab = line.indexOf('\t');
+      return { meta: line.slice(0, tab).split(' '), name: line.slice(tab + 1) };
+    });
+}
+
+/**
+ * Режим и объект пути в дереве `rev` (`git ls-tree`); нет пути — `undefined`.
+ * Путь — буквальный (`--literal-pathspecs`: `[A].mjs` не шаблон), запись —
+ * с точно тем же именем.
+ */
 async function entry(cwd: string, rev: string, path: string) {
-  const out = await git(cwd, 'ls-tree', '-z', rev, '--', path).catch(() => '');
-  const line = out.split('\0').find(Boolean);
-  if (!line) return undefined;
-  const [meta, name] = line.split('\t');
-  if (name !== path) return undefined;
-  const [mode, , object] = meta!.split(' ');
-  return { mode: mode!, object: object! };
+  const out = await git(cwd, '--literal-pathspecs', 'ls-tree', '-z', rev, '--', path).catch(
+    () => '',
+  );
+  const found = records(out).find((r) => r.name === path);
+  if (!found) return undefined;
+  return { mode: found.meta[0]!, object: found.meta[2]! };
+}
+
+/** Имена в каталоге `dir` дерева `rev` (`''` — корень). */
+async function names(cwd: string, rev: string, dir: string) {
+  const out = await git(
+    cwd,
+    '--literal-pathspecs',
+    'ls-tree',
+    '-z',
+    '--name-only',
+    rev,
+    '--',
+    ...(dir ? [dir + '/'] : []),
+  ).catch(() => '');
+  return out
+    .split('\0')
+    .filter(Boolean)
+    .map((p) => p.slice(dir ? dir.length + 1 : 0));
 }
 
 /**
@@ -82,11 +117,34 @@ export async function changedFacts(
     if (await entry(cwd, base, path)) present.add(path);
     const mode = head
       ? (await entry(cwd, head, path))?.mode
-      : (await git(cwd, 'ls-files', '-s', '-z', '--', path).catch(() => ''))
-          .split('\0')
-          .find(Boolean)
-          ?.split(' ')[0];
+      : records(
+          await git(cwd, '--literal-pathspecs', 'ls-files', '-s', '-z', '--', path).catch(() => ''),
+        ).find((r) => r.name === path)?.meta[0];
     if (mode === LINK_MODE) links.add(path);
   }
-  return { present, links };
+  // Новый путь, чей первый новый сегмент совпадает основой имени с файлом
+  // или каталогом базы рядом (`lib.js` рядом с `lib/`, `util.ts` рядом с
+  // `util.mjs`): он меняет, что найдёт разрешение модулей.
+  const shadows = new Set<string>();
+  const listed = new Map<string, Promise<string[]>>();
+  const list = (dir: string) => {
+    let p = listed.get(dir);
+    if (!p) listed.set(dir, (p = names(cwd, base, dir)));
+    return p;
+  };
+  const stem = (name: string) => name.replace(/\.[^.]*$/, '');
+  for (const path of changed) {
+    if (present.has(path)) continue;
+    const segments = path.split('/');
+    for (let i = 0; i < segments.length; i++) {
+      const prefix = segments.slice(0, i + 1).join('/');
+      if (i < segments.length - 1 && (await entry(cwd, base, prefix))) continue;
+      const dir = segments.slice(0, i).join('/');
+      const own = segments[i]!;
+      if ((await list(dir)).some((n) => n !== own && (stem(n) === stem(own) || n === stem(own))))
+        shadows.add(path);
+      break;
+    }
+  }
+  return { present, links, shadows };
 }

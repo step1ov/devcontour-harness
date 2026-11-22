@@ -215,13 +215,15 @@ inherited setup debts; each becomes an infra task:
   paths do not narrow it); a file that host steps name is never edited —
   write the new version next to it and switch the policy after acceptance;
 - any file of the scope that already exists in the base — a gate script or
-  test, a helper it imports, data — and any new `package.json`,
-  `node_modules/`, dot-file or `*.config.*` changes only when the task lists
+  test, a helper it imports, data — any new `package.json`, `node_modules/`,
+  dot-file, `*.config.*` or Python config, and any new file whose name stem
+  matches a base file or directory next to it changes only when the task lists
   it in `gateChanges` and its description says what the new check proves
   and why it is not weaker; plan review approves that change. New tests and
   helpers can be added freely; symlinks cannot. Host steps after the writer
-  (lifecycle teardown) run the trusted base of the scope, never the
-  candidate's code;
+  (lifecycle teardown) run in a separate clean checkout of the trusted base,
+  never on the candidate's code; keep bridge state in the environment
+  directory, not in files setup writes into the tree;
 - every product task of the same repository (or naming it in
   `relatedRepositories`) depends on the infra tasks (`plan-check` refuses a
   graph where it does not): product works run the gates and bridges of the

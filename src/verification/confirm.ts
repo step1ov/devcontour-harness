@@ -340,6 +340,17 @@ async function decide(
     contract: found.contract.id,
     basis: ref.suite.basis,
   };
+  // Работа инфраструктуры (docs/infra-works.md): воспроизведение исполнило
+  // бы lifecycle и prepare на хосте по её непринятому кандидату. Не
+  // исполняется — исход inconclusive, а не подтверждение.
+  if (work.order.kind === 'infra')
+    return {
+      input: text,
+      outcome: 'inconclusive',
+      reason:
+        'работа инфраструктуры: воспроизведение на её кандидате исполнило бы шаги на хосте (lifecycle, prepare) по непринятому коду',
+      method,
+    };
   const repoPath = ctx.repoPath(repo);
   try {
     await git(repoPath, 'cat-file', '-e', `${source.sha}^{commit}`);

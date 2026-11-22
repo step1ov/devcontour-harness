@@ -1091,7 +1091,7 @@ export class Runner {
     // планом (`gateChanges`): её gates исполняются по определению базы.
     if (kind === 'infra') {
       const base = range ? range[0] : 'HEAD';
-      const { present, links } = await changedFacts(cwd, base, range?.[1], changed);
+      const { present, links, shadows } = await changedFacts(cwd, base, range?.[1], changed);
       const { host, gate, link } = infraViolations(changed, {
         kind,
         paths: infraPaths,
@@ -1099,6 +1099,7 @@ export class Runner {
         gateChanges: work.order.gateChanges ?? [],
         inBase: (p) => present.has(p),
         isLink: (p) => links.has(p),
+        isShadow: (p) => shadows.has(p),
       });
       if (host.length)
         throw new TaskFailure(
@@ -1113,7 +1114,7 @@ export class Runner {
       if (gate.length)
         throw new TaskFailure(
           'scope-violation',
-          `Изменены файлы gates доверенной базы без согласования планом: ${gate.join(', ')}; существующие файлы области инфраструктуры (и новые файлы разрешения: package.json, node_modules, конфигурация) меняются только по gateChanges поручения с ревью плана`,
+          `Изменены файлы gates доверенной базы без согласования планом: ${gate.join(', ')}; существующие файлы области инфраструктуры, новые файлы разрешения (package.json, node_modules, конфигурация) и новые файлы с основой имени файла или каталога базы рядом меняются только по gateChanges поручения с ревью плана`,
         );
     }
     // Ответы эталонных наборов лежат в рабочем дереве: изменённый код,
