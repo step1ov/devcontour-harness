@@ -100,6 +100,8 @@ git rev-parse refs/heads/harness/accepted   # совпадает с data.result.
 | `status / events / result --state D`            | Чтение без побочных эффектов                       |
 | `view --state D [--policy F] [--work ID]`       | Представление оператора для панели (только чтение) |
 | `pause / resume / cancel / retry --state D`     | Управление очередью и поручением                   |
+| `diagnose --state D --work ID --cause C`        | Разбор ведущего повторных отказов (`--hypothesis`) |
+| `retry … --reset --by lead --diagnosis D1`      | Новый предел попыток от ведущего по разбору        |
 | `deliver --state D --work ID --sink file:D`     | Повтор доставки без моделей и интеграции           |
 | `worktree-cleanup --state D [--dry-run]`        | Уборка деревьев завершённых попыток                |
 | `profile --profile ID [--repository D]`         | Разрешение профиля стека без команд проекта        |
@@ -127,6 +129,11 @@ harness пишет «проверено», почему попытки повт�
 Следить за работой — в панели (skill `harness-ui`) или
 `harness status --state D --human --watch`; поля документа панели —
 [представление оператора](docs/operator-view.md).
+
+Кто что решает — ведущий агент или вы — описано в принципе
+[«Кто принимает решения»](docs/principles.md): технические решения о
+восстановлении ведущий принимает сам в пределах бюджета, вам приходят
+решения о продукте, противоречия, исчерпанный бюджет и явная эскалация.
 
 ## Что вы увидите: отчёт
 
