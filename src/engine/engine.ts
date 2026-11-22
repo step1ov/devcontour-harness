@@ -93,7 +93,12 @@ import {
   type RecordWork,
 } from './budget.ts';
 import { callDurationMs, callOwner, callRecords, ownerGone, processGone } from './usage.ts';
-import { MAX_NEUTRAL_FAILURES, failureFingerprint, repairPolicy } from './failure.ts';
+import {
+  MAX_NEUTRAL_FAILURES,
+  MAX_REWORK_BUDGETS,
+  failureFingerprint,
+  repairPolicy,
+} from './failure.ts';
 import { reusableImplementation } from './reuse.ts';
 import { uncoveredGates, unprovenReason } from '../verification/proof.ts';
 import { alreadySatisfiedVerdict, contractCheckGates } from '../verification/already-satisfied.ts';
@@ -432,7 +437,8 @@ export class Engine {
       // Новая редакция графа заменяет прежнюю, только пока у него нет активных
       // попыток. Принятые поручения с неизменной постановкой остаются принятыми;
       // изменённые и новые — черновики до нового согласования; история попыток
-      // не переписывается.
+      // не переписывается. Изменённое принятое — доработка (`rework`) со своим
+      // пределом попыток; изменённое непринятое сохраняет счётчик.
       if (existing && tx.works(graph.id).some((w) => w.activeRunId))
         throw new HarnessError(
           'REVISION_CONFLICT',
@@ -465,6 +471,7 @@ export class Engine {
         registeredAt: at,
       };
       tx.putGraph(state);
+      const reopened: { workId: string; rework: NonNullable<WorkState['rework']> }[] = [];
       for (const order of graph.orders) {
         const prior = tx.work(order.id);
         if (prior && prior.graphId !== graph.id)
@@ -489,12 +496,23 @@ export class Engine {
           )
             ? prior.checkVersion
             : undefined;
+        // Изменённая постановка принятого поручения — доработка, а не повтор
+        // проваленного договора: своя редакция со своим пределом попыток (не
+        // больше MAX_REWORK_BUDGETS раз, дальше счётчик переносится). У
+        // непринятого счётчик и незасчитанные отказы остаются: новой
+        // редакцией предел не обойти.
+        const reopen = prior?.status === 'done' ? this.reworkOf(tx, prior, at) : undefined;
+        const rework = reopen ?? prior?.rework;
+        const fresh = reopen?.fresh === true;
+        const neutral = fresh ? undefined : prior?.neutralFailures;
         tx.putWork({
           id: order.id,
           graphId: graph.id,
           order,
           status: 'draft',
-          attempt: prior?.attempt ?? 0,
+          attempt: fresh ? 0 : (prior?.attempt ?? 0),
+          ...(neutral ? { neutralFailures: neutral } : {}),
+          ...(rework ? { rework } : {}),
           ...(corpus ? { checkVersion: corpus } : {}),
           ...(prior?.recovery ? { recovery: prior.recovery } : {}),
           ...(prior?.recoveryHistory ? { recoveryHistory: prior.recoveryHistory } : {}),
@@ -502,6 +520,7 @@ export class Engine {
           // снимает — только release или передача владельцем.
           ...(prior?.hold ? { hold: prior.hold } : {}),
         });
+        if (reopen) reopened.push({ workId: order.id, rework: reopen });
       }
       for (const prior of existing ? tx.works(graph.id) : [])
         if (!graph.orders.some((o) => o.id === prior.id) && prior.status !== 'done') {
@@ -521,8 +540,54 @@ export class Engine {
         graphId: graph.id,
         payload: { digest, orders: graph.orders.length, source: graph.source },
       });
+      for (const { workId, rework } of reopened)
+        tx.emit({
+          type: 'work.reopened',
+          graphId: graph.id,
+          workId,
+          payload: {
+            revision: rework.revision,
+            budget: rework.fresh ? 'fresh' : 'carried',
+            acceptedSha: rework.accepted.resultSha,
+            spent: rework.spent,
+          },
+        });
       return { graph: state, resumed: false, replaced: Boolean(existing) };
     });
+  }
+
+  /**
+   * Доработка принятого поручения `prior` новой редакцией (`register`):
+   * приёмка, после которой она открыта, — принявшая попытка (последняя
+   * успешная) и результат поручения. Свой предел попыток — пока доработок с
+   * ним меньше `MAX_REWORK_BUDGETS`. Принятое без результата (не бывает у
+   * приёмки движком) доработкой не считается: счётчик остаётся.
+   */
+  private reworkOf(
+    tx: ExecutionView,
+    prior: WorkState,
+    at: string,
+  ): WorkState['rework'] | undefined {
+    const run = tx
+      .attempts(prior.id)
+      .filter((a) => a.status === 'succeeded')
+      .at(-1);
+    const resultSha = prior.resultSha ?? run?.integrationSha;
+    if (!resultSha) return undefined;
+    const budgets = prior.rework?.budgets ?? 0;
+    const fresh = budgets < MAX_REWORK_BUDGETS;
+    return {
+      revision: (prior.rework?.revision ?? 0) + 1,
+      budgets: fresh ? budgets + 1 : budgets,
+      fresh,
+      accepted: {
+        ...(run ? { runId: run.id } : {}),
+        resultSha,
+        ...(run?.finishedAt ? { at: run.finishedAt } : {}),
+      },
+      reopenedAt: at,
+      spent: prior.attempt,
+    };
   }
 
   /** Раунд технического ревью плана или контракта сохраняется в истории предмета. */
@@ -1470,7 +1535,11 @@ export class Engine {
     if (work.attempt >= this.policy.maxAttempts)
       out.push({
         code: 'ATTEMPTS_EXHAUSTED',
-        message: `Исчерпано ${work.attempt} из ${ruCount(this.policy.maxAttempts, RU.attemptGen)}`,
+        message:
+          `Исчерпано ${work.attempt} из ${ruCount(this.policy.maxAttempts, RU.attemptGen)}` +
+          (work.rework && !work.rework.fresh
+            ? `; доработка ${work.rework.revision} после приёмки без своего предела: своих пределов у доработок не больше ${MAX_REWORK_BUDGETS}, попытки перенесены с прежней редакции`
+            : ''),
       });
     if (work.hold)
       out.push({ code: 'NOT_READY', message: 'Удержано операцией ' + work.hold.operation });

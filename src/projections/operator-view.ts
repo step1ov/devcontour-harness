@@ -189,6 +189,8 @@ export interface ForecastView {
      */
     basis: 'scope' | 'works';
     line: string;
+    /** Открытые доработки после приёмки (вес 1 у работы, остаток — во времени); нет — доработок нет. */
+    rework?: number;
     /** Ревизия 5: задачи, добавленные в выпуск после его начала (по первому снимку с ними). */
     added?: {
       key: string;
@@ -209,6 +211,8 @@ export interface ForecastView {
       attempt?: { n: number; max: number };
       /** `repair` — повтор исправляет замечания прошлой попытки; `answer` — продолжает после вопроса. */
       retry?: 'repair' | 'answer';
+      /** Доработка после приёмки: `percent` — её готовность. */
+      rework?: true;
       line: string;
     }[];
   };
@@ -308,6 +312,8 @@ export interface WorkView {
     neutral: { used: number; max: number };
     /** Ревизия 5: запусков всего, в том числе незасчитанных; `used` — засчитанные. */
     runs?: number;
+    /** Доработка после приёмки: прежняя приёмка и свой ли предел попыток. */
+    rework?: { revision: number; fresh: boolean; acceptedSha: string; acceptedAt?: string };
     line?: string;
     /**
      * `kind` — класс отказа движка (`failureKind`), `counted` — засчитана ли
@@ -605,6 +611,17 @@ export interface OperatorWorkInput {
      * сохраняется. Нет — `line`/`lineEn`, обрезанные с конца.
      */
     lineFacts?: AttemptLineFacts;
+    /**
+     * Доработка после приёмки (`status` `attemptSummary.rework`): числа
+     * сводки — только её попытки. Нет — доработок не было.
+     */
+    rework?: {
+      revision: number;
+      fresh: boolean;
+      acceptedSha: string;
+      acceptedAt?: string;
+      earlierRuns: number;
+    };
     /** alpha.55 (`attemptSummary.lastFailure`); `kind`, `counted` — alpha.60. */
     lastFailure?: {
       runId: string;
@@ -679,6 +696,8 @@ export interface OperatorAttemptInput {
   workId: string;
   runId: string;
   attempt: number;
+  /** Попытка прежней редакции работы, доработанной после приёмки: готовность доработки её не считает. */
+  earlier?: true;
   status: string;
   startedAt: string;
   finishedAt?: string;
@@ -823,6 +842,17 @@ export type OperatorActivityInput =
       attempt: number;
       sha?: string;
       ref?: string;
+    }
+  | {
+      /** Новая редакция изменила постановку принятой работы: доработка `revision`. */
+      kind: 'work.reopened';
+      at: string;
+      workId: string;
+      revision: number;
+      /** Прежняя приёмка. */
+      sha: string;
+      /** У доработки свой предел попыток (иначе перенесён). */
+      fresh: boolean;
     }
   | {
       kind: 'gate';
@@ -1433,6 +1463,16 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
       neutral: { used: a.neutral.used, max: a.neutral.max },
       // Только при расхождении с засчитанными: иначе число то же, что `used`.
       ...(a.lineFacts && a.lineFacts.total !== a.attempts.used ? { runs: a.lineFacts.total } : {}),
+      ...(a.rework
+        ? {
+            rework: {
+              revision: a.rework.revision,
+              fresh: a.rework.fresh,
+              acceptedSha: a.rework.acceptedSha,
+              ...(a.rework.acceptedAt ? { acceptedAt: a.rework.acceptedAt } : {}),
+            },
+          }
+        : {}),
       // Из чисел строки — уже замаскирована и в пределе: вторая маска поверх
       // метки удлинила бы строку и отрезала хвост. Иначе — строка загрузчика.
       ...((line) => (line ? { line } : {}))(
@@ -1728,6 +1768,9 @@ function sourceQuestionsOf(
   return take(all, L.sourceQuestions, truncated, 'sourceQuestions');
 }
 
+/** Наименьший остаток открытой доработки в прогнозе времени (доля задачи). */
+const REWORK_MIN_REST = 0.05;
+
 /** Этапы попытки по порядку: вес работы в прогнозе — доля пройденных до текущего. */
 const STAGE_ORDER = ['prepare', 'writer', 'gates', 'review', 'integration'] as const;
 
@@ -1775,13 +1818,23 @@ function forecastOf(
     return k < 0 ? 0 : k / STAGE_ORDER.length;
   };
   // Наибольший дошедший этап всех попыток работы: повтор не роняет готовность.
+  // У доработки после приёмки — только попытки её редакции.
   const reached = new Map<string, number>();
   for (const a of i.attempts)
-    reached.set(a.workId, Math.max(reached.get(a.workId) ?? 0, stageWeight(a.reached)));
+    if (!a.earlier)
+      reached.set(a.workId, Math.max(reached.get(a.workId) ?? 0, stageWeight(a.reached)));
+  const accepted = (w: OperatorWorkInput) => w.status === 'done' || w.stage.name === 'done';
+  const progressOf = (w: OperatorWorkInput) =>
+    Math.max(stageWeight(w.stage.name), reached.get(w.id) ?? 0);
+  // Открытая доработка после приёмки: работа уже принималась, новая редакция — ещё нет.
+  const reopened = (w: OperatorWorkInput | undefined) =>
+    !!w && !!w.attemptSummary.rework && !accepted(w) && w.status !== 'cancelled';
+  // Принятая ранее работа весит 1 и на доработке: прежняя приёмка прогноз не
+  // роняет, остаток доработки входит во время, а не в процент.
   const weightOf = (w: OperatorWorkInput | undefined) => {
     if (!w) return 0;
-    if (w.status === 'done' || w.stage.name === 'done') return 1;
-    return Math.max(stageWeight(w.stage.name), reached.get(w.id) ?? 0);
+    if (accepted(w) || reopened(w)) return 1;
+    return progressOf(w);
   };
   // Единица объёма — работа harness или задача выпуска без работы. Выпуск —
   // все задачи всех снимков связки (доска), а не последний срез `run`, и все
@@ -1816,12 +1869,19 @@ function forecastOf(
   const total = live.length;
   const weighted = live.reduce((n, u) => n + unitWeight(u), 0);
   const done = live.filter((u) => unitWeight(u) === 1).length;
+  const reworks = live.filter((u) => reopened(u.work));
   const inWork = live.filter(
-    (u) => u.work !== undefined && unitWeight(u) < 1 && runningStages.has(u.work.stage.name),
+    (u) =>
+      u.work !== undefined &&
+      (unitWeight(u) < 1 || reopened(u.work)) &&
+      runningStages.has(u.work.stage.name),
   ).length;
   const left = total - done;
-  // Пока задачи остаются, «100 %» не показывается.
-  const percent = Math.min(left > 0 ? 99 : 100, Math.round((100 * weighted) / total));
+  // Пока задачи или доработки остаются, «100 %» не показывается.
+  const percent = Math.min(
+    left > 0 || reworks.length ? 99 : 100,
+    Math.round((100 * weighted) / total),
+  );
   const unitIds = new Set(live.flatMap((u) => (u.work ? [u.work.id] : [])));
   const own = i.attempts.filter((a) => unitIds.has(a.workId));
   // Начало выпуска — первый снимок связки или первая попытка объёма, что раньше.
@@ -1836,7 +1896,8 @@ function forecastOf(
     startedAt !== undefined &&
     ends.length &&
     own.every((a) => a.status !== 'active') &&
-    live.every((u) => unitWeight(u) === 1)
+    live.every((u) => unitWeight(u) === 1) &&
+    !reworks.length
       ? Math.max(startedAt, ...ends)
       : undefined;
   const elapsedMs =
@@ -1846,17 +1907,21 @@ function forecastOf(
     .map((a) => ms(a.finishedAt) - ms(a.startedAt))
     .filter((d) => Number.isFinite(d) && d >= 0)
     .sort((a, b) => a - b);
-  const accepted = new Set(
-    live.flatMap((u) => (u.work && weightOf(u.work) === 1 ? [u.work.id] : [])),
-  );
+  const acceptedIds = new Set(live.flatMap((u) => (u.work && accepted(u.work) ? [u.work.id] : [])));
   // Попытки, прерванные остановкой, не считаются ни образцами, ни попытками задачи.
+  // У принятой доработки — только попытки её редакции (как сводка попыток).
   const acceptedAttempts = own.filter(
-    (a) => a.status !== 'active' && !a.interrupted && accepted.has(a.workId),
+    (a) => a.status !== 'active' && !a.interrupted && !a.earlier && acceptedIds.has(a.workId),
   ).length;
-  const attemptsPerTask = accepted.size
-    ? Math.max(1, Math.round((acceptedAttempts / accepted.size) * 10) / 10)
+  const attemptsPerTask = acceptedIds.size
+    ? Math.max(1, Math.round((acceptedAttempts / acceptedIds.size) * 10) / 10)
     : 1;
-  const rest = total - weighted;
+  // Остаток объёма и остаток открытых доработок: открытая доработка не меньше
+  // малой доли — «осталось: ничего» при ней не говорится.
+  const rest =
+    total -
+    weighted +
+    reworks.reduce((n, u) => n + Math.max(REWORK_MIN_REST, 1 - progressOf(u.work!)), 0);
   const concurrency = Math.max(1, i.policy.concurrency);
   // Параллельно — не быстрее одной задачи: недоделанная задача не делится.
   const lowShare = Math.max(rest / concurrency, Math.min(rest, 1));
@@ -1874,7 +1939,7 @@ function forecastOf(
       ? range(samples[0]!, samples[samples.length - 1]!)
       : undefined;
   const estimate: NonNullable<ForecastView['time']['estimate']> =
-    rest <= 0 ? 'nothing' : remaining ? 'precise' : rough ? 'rough' : 'unknown';
+    rest <= 0 && !reworks.length ? 'nothing' : remaining ? 'precise' : rough ? 'rough' : 'unknown';
   const waits = i.stops.filter(
     (s) => (s.actor === 'user' || s.actor === 'lead') && s.workId && unitIds.has(s.workId),
   );
@@ -1918,12 +1983,15 @@ function forecastOf(
           : `добавлена задача ${key} (задач ${before} → ${after})`,
       };
     });
-  // Только незаконченные работы: принятые видны в `works[]` и весят 100 %.
-  const open = live.filter((u) => u.work && unitWeight(u) < 1);
+  // Только незаконченные работы и открытые доработки: принятые видны в
+  // `works[]` и весят 100 %.
+  const open = live.filter((u) => u.work && (unitWeight(u) < 1 || reopened(u.work)));
   if (open.length > L.forecastWorks) truncated.forecastWorks = open.length - L.forecastWorks;
   const works = open.slice(0, L.forecastWorks).map((u) => {
     const w = u.work!;
-    const p = Math.round(100 * unitWeight(u));
+    const rework = reopened(w);
+    const share = rework ? progressOf(w) : unitWeight(u);
+    const p = Math.round(100 * share);
     const name = text(c, u.key, 200) ?? w.id;
     const n = w.attemptSummary.attempts.used;
     const max = w.attemptSummary.attempts.max;
@@ -1935,46 +2003,57 @@ function forecastOf(
           ? 'answer'
           : 'repair'
         : undefined;
-    const percentText = `~${Math.min(p === 100 || unitWeight(u) === 1 ? 100 : 99, p)} %`;
-    const line =
-      unitWeight(u) === 1
+    const percentText = `~${Math.min(p === 100 || share === 1 ? 100 : 99, p)} %`;
+    const started = running || n > 0 || failedBefore;
+    const status =
+      share === 1
         ? en
-          ? `${name}: accepted`
-          : `${name}: принято`
+          ? 'accepted'
+          : 'принято'
         : running
           ? en
-            ? `${name}: ${percentText}, attempt ${n} of ${max}` +
+            ? `${percentText}, attempt ${n} of ${max}` +
               (retry === 'repair'
                 ? ', fixing the findings'
                 : retry === 'answer'
                   ? ', continuing after the answer'
                   : '')
-            : `${name}: ${percentText}, попытка ${n} из ${max}` +
+            : `${percentText}, попытка ${n} из ${max}` +
               (retry === 'repair'
                 ? ', исправляет замечания'
                 : retry === 'answer'
                   ? ', продолжает после ответа'
                   : '')
-          : n > 0 || failedBefore
+          : started
             ? en
-              ? `${name}: ${percentText}, between attempts (used ${n} of ${max})`
-              : `${name}: ${percentText}, между попытками (использовано ${n} из ${max})`
+              ? `${percentText}, between attempts (used ${n} of ${max})`
+              : `${percentText}, между попытками (использовано ${n} из ${max})`
             : en
-              ? `${name}: not started`
-              : `${name}: ещё не начата`;
+              ? 'not started'
+              : 'ещё не начата';
+    // Доработка принятой ранее работы: «принято ранее; доработка …».
+    const line = !rework
+      ? `${name}: ${status}`
+      : en
+        ? `${name}: accepted earlier; rework ${started ? '' : '— '}${status}`
+        : `${name}: принято ранее; доработка ${started ? '' : '— '}${status}`;
     return {
       workId: w.id,
       ...(u.key ? { key: name } : {}),
-      percent: unitWeight(u) === 1 ? 100 : Math.min(99, p),
+      percent: share === 1 ? 100 : Math.min(99, p),
       ...(n > 0 ? { attempt: { n, max } } : {}),
       ...(retry ? { retry } : {}),
+      ...(rework ? { rework: true as const } : {}),
       line: line.slice(0, T.line),
     };
   });
   const progressLine = en
-    ? `done ~${percent} %, ${left} of ${total} task(s) left` + (inWork ? `, ${inWork} in work` : '')
+    ? `done ~${percent} %, ${left} of ${total} task(s) left` +
+      (inWork ? `, ${inWork} in work` : '') +
+      (reworks.length ? `, reworks after acceptance: ${reworks.length}` : '')
     : `готово ~${percent} %, осталось задач: ${left} из ${total}` +
-      (inWork ? `, в работе: ${inWork}` : '');
+      (inWork ? `, в работе: ${inWork}` : '') +
+      (reworks.length ? `, доработок после приёмки: ${reworks.length}` : '');
   const elapsedText =
     elapsedMs === undefined
       ? en
@@ -2040,6 +2119,7 @@ function forecastOf(
       left,
       basis,
       line: progressLine.slice(0, T.line),
+      ...(reworks.length ? { rework: reworks.length } : {}),
       ...(added.length ? { added } : {}),
       ...(works.length ? { works } : {}),
     },
@@ -2623,6 +2703,24 @@ function activityLine(
         plain: ru
           ? parts`работа ${e.workId} принята (попытка ${e.attempt})${at}, локально`
           : parts`${e.workId} was accepted (attempt ${e.attempt})${at}, locally`,
+      };
+    }
+    case 'work.reopened': {
+      const sha = sha12(e.sha)!;
+      const budget = e.fresh
+        ? ru
+          ? 'свой предел попыток'
+          : 'its own attempt budget'
+        : ru
+          ? 'попытки перенесены'
+          : 'attempts carried over';
+      return {
+        actor: 'lead',
+        action: e.kind,
+        workId: e.workId,
+        plain: ru
+          ? parts`принятая на ${[sha]} работа ${e.workId} изменена новой редакцией: доработка ${e.revision}, ${[budget]}`
+          : parts`${e.workId}, accepted at ${[sha]}, was changed by a new revision: rework ${e.revision}, ${[budget]}`,
       };
     }
     case 'gate': {

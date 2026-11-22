@@ -7,6 +7,7 @@ import { Harness } from '../control/harness.ts';
 import { reviewSummaryRows, reviewsText } from '../control/review-summary.ts';
 import { attemptSummaries, attemptsByWork, type attemptSummaryView } from '../control/status.ts';
 import { verificationOf, type WorkVerification } from '../report/verification.ts';
+import { currentRevisionAttempts } from '../report/compute.ts';
 import { explainStop, type StopDiagnosis, type StopInput } from '../projections/stop.ts';
 import { stopInputsOf } from './state.ts';
 
@@ -62,7 +63,7 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
         attemptsTruncated: Math.max(0, works.length - EXPLAIN_ATTEMPT_ROWS),
         // Что проверено и как — та же проверка, что у `status`.
         verification: shown.flatMap((w) => {
-          const x = verificationOf(w, attemptsOf(w.id));
+          const x = verificationOf(w, currentRevisionAttempts(w, attemptsOf(w.id)));
           return x ? [{ workId: w.id, ...x }] : [];
         }),
       };

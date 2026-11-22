@@ -290,6 +290,21 @@ export const workViewSchema = z.strictObject({
      * поля — запусков столько же, сколько засчитано.
      */
     runs: count.optional(),
+    /**
+     * Доработка после приёмки (ревизия 5): новая редакция
+     * изменила постановку принятой работы. Числа попыток — только её;
+     * `acceptedSha`/`acceptedAt` — прежняя приёмка, `fresh` — у доработки
+     * свой предел попыток (иначе перенесён с прежней редакции). Нет поля —
+     * доработок не было.
+     */
+    rework: z
+      .strictObject({
+        revision: z.number().int().positive(),
+        fresh: z.boolean(),
+        acceptedSha: sha,
+        acceptedAt: isoTimeSchema.optional(),
+      })
+      .optional(),
     line: freeText(T.line).optional(),
     lastFailure: z
       .strictObject({
@@ -509,6 +524,12 @@ const forecastSchema = z.strictObject({
     left: count,
     basis: z.enum(['scope', 'works']),
     line: z.string().min(1).max(T.line),
+    /**
+     * Открытые доработки после приёмки: работы в `done` (вес 1 — прежняя
+     * приёмка прогноз не роняет), чья новая редакция ещё не принята. Их
+     * остаток входит в «осталось» времени. Нет поля — доработок нет.
+     */
+    rework: z.number().int().positive().optional(),
     /** Ревизия 5: задачи, добавленные в выпуск после его начала. */
     added: z
       .array(
@@ -534,6 +555,8 @@ const forecastSchema = z.strictObject({
             .strictObject({ n: z.number().int().positive(), max: z.number().int().positive() })
             .optional(),
           retry: z.enum(['repair', 'answer']).optional(),
+          /** Доработка после приёмки: `percent` — готовность доработки, работа уже в `done`. */
+          rework: z.literal(true).optional(),
           line: z.string().min(1).max(T.line),
         }),
       )

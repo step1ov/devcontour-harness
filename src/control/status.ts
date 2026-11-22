@@ -10,7 +10,12 @@ import {
   type WorkState,
   type WorkflowJob,
 } from '../contracts/index.ts';
-import { attemptSummaryLine, attemptSummaryOf, type AttemptBudget } from '../report/compute.ts';
+import {
+  attemptSummaryLine,
+  attemptSummaryOf,
+  currentRevisionAttempts,
+  type AttemptBudget,
+} from '../report/compute.ts';
 import { budgetOverview, legacyGroupCall } from '../engine/budget.ts';
 import { callRecords } from '../engine/usage.ts';
 import type { Engine } from '../engine/engine.ts';
@@ -94,7 +99,14 @@ export function attemptSummaryView(
   policy: Pick<ExecutionPolicy, 'maxAttempts' | 'repairBudget'>,
   job?: Pick<WorkflowJob, 'repairs'>,
 ) {
-  const summary = attemptSummaryOf(work, attempts);
+  // Доработка после приёмки: сводка и предел — по её попыткам, прежняя
+  // приёмка — началом строки и полем `rework`.
+  const own = currentRevisionAttempts(work, attempts);
+  const summary = attemptSummaryOf(work, own);
+  const r = work.rework;
+  const rework = r
+    ? { revision: r.revision, acceptedSha: r.accepted.resultSha, fresh: r.fresh }
+    : undefined;
   const neutral = { used: work.neutralFailures ?? 0, max: MAX_NEUTRAL_FAILURES };
   // Предел незасчитанных отказов держит только незавершённую работу: у
   // принятой или отменённой строка называет итог, а не повтор со сбросом.
@@ -103,10 +115,22 @@ export function attemptSummaryView(
     attempts: { used: work.attempt, max: policy.maxAttempts },
     ...(final ? {} : { neutral }),
     ...(job ? { repairs: { used: job.repairs ?? 0, budget: policy.repairBudget } } : {}),
+    ...(rework ? { rework } : {}),
   };
   const left = (used: number, max: number) => Math.max(0, max - used);
   return {
     ...summary,
+    ...(r
+      ? {
+          rework: {
+            revision: r.revision,
+            fresh: r.fresh,
+            acceptedSha: r.accepted.resultSha,
+            ...(r.accepted.at ? { acceptedAt: r.accepted.at } : {}),
+            earlierRuns: attempts.length - own.length,
+          },
+        }
+      : {}),
     attempts: { ...budget.attempts, left: left(work.attempt, policy.maxAttempts) },
     neutral,
     ...(budget.repairs
@@ -227,7 +251,7 @@ export function statusOf(
           // (`blockerOrder`; порядок `blockers` прежний, порядок — в `step`).
           const first = [...blockers].sort(blockerOrder)[0];
           const attemptSummary = summaryOf(w);
-          const verification = verificationOf(w, attemptsOf(w.id));
+          const verification = verificationOf(w, currentRevisionAttempts(w, attemptsOf(w.id)));
           return {
             ...(input ? { input } : {}),
             ...(view.followUps ? { followUps: view.followUps } : {}),
@@ -235,7 +259,7 @@ export function statusOf(
             attemptSummary,
             stage: workStageOf({
               work: w,
-              attempts: attemptsOf(w.id),
+              attempts: currentRevisionAttempts(w, attemptsOf(w.id)),
               ...(active ? { active } : {}),
               ...(input ? { inputState: input.state } : {}),
               blocked: blockers.length > 0,

@@ -158,6 +158,8 @@ const ADDITIVE_EVENT_TYPES = new Set([
   'joint.budget-reset',
   // alpha.60: решение ведущего по находкам ревью кода (`review-accept`).
   'work.findings-accepted',
+  // Доработка принятого поручения новой редакцией графа (`WorkState.rework`).
+  'work.reopened',
   // alpha.60: смена пакетов командой `harness update`.
   'harness.updated',
 ]);

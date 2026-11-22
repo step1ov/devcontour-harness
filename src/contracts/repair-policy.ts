@@ -41,6 +41,16 @@ export interface RepairRule {
  */
 export const MAX_NEUTRAL_FAILURES = 3;
 
+/**
+ * Доработок после приёмки со своим пределом попыток на поручение. Изменённая
+ * постановка уже принятого поручения — новая редакция (`WorkState.rework`), и
+ * каждую из них открывает новый раунд ревью плана. Сверх этого числа
+ * следующая доработка получает счётчик прежней редакции: перепланированием
+ * после каждой приёмки бесконечных попыток не набрать, а исчерпание снова
+ * решает человек (`retry --reset`).
+ */
+export const MAX_REWORK_BUDGETS = 3;
+
 export const repairPolicy: Record<FailureKind, RepairRule> = {
   'provider-auth': {
     action: 'stop',
