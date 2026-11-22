@@ -103,6 +103,9 @@ harness запускает следующую, пока не кончится п
   исправляет;
 - **окружение** — сбой не по вине кода (занят порт, нет сети, упал процесс).
   Такие сбои попытку не расходуют, но у них свой предел;
+  например, проверке нужен список процессов компьютера (`ps`), а в
+  защищённой среде проверок его нет — тогда переписать тест или вынести его
+  из проверки должен ведущий, повтор исполнителя этого не исправит;
 - **время** — попытка не уложилась в отведённое время;
 - **вопрос исполнителя** — исполнитель остановился и ждёт ответа;
 - **прервана остановкой** — harness штатно остановили; попытка не
@@ -251,7 +254,9 @@ is unknown), or not checked (which is not "fine"). Only what the task and the pr
 describe is checked: ask for end-to-end behaviour explicitly.
 
 **Why attempts repeat.** Each line says why the previous attempt stopped:
-defect, environment (not counted against attempts, own limit), time limit,
+defect, environment (not counted against attempts, own limit; for example a
+check that needs the computer's process list, `ps`, which the protected check
+environment does not provide — the lead rewrites or moves that test), time limit,
 an executor question, or a shutdown (not counted; the next attempt continues
 from safely saved work when there is any). A recheck reruns a check
 to tell a random failure from a real one.

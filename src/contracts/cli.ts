@@ -19,7 +19,7 @@ import {
   livenessStateSchema,
   stallActionSchema,
 } from './execution.ts';
-import { readRunEventSchema } from './events.ts';
+import { environmentCauseSchema, readRunEventSchema } from './events.ts';
 import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
 import {
   reviewAcceptDataSchema,
@@ -2078,6 +2078,19 @@ export const relayCompatibilitySchema = z.strictObject({
   lineEn: z.string(),
 });
 
+/**
+ * Список процессов (`ps`) в песочнице ОС проверок (0.1.0-alpha.66): проба
+ * `ps -o pid= -p 1` в той же изоляции, что gates. `unavailable` — gate,
+ * вызывающий ps/pgrep/top, упадёт `GATE_SANDBOX_PROCESS_LIST`.
+ */
+const processListCapabilitySchema = z.strictObject({
+  status: z.enum(['available', 'unavailable', 'unknown', 'not-isolated']),
+  command: z.array(z.string()).optional(),
+  detail: z.string(),
+  /** Строка для человека с советом. */
+  line: z.string(),
+});
+
 export const doctorDataSchema = z.strictObject({
   harness: z.string(),
   apiVersion: z.literal(API_VERSION),
@@ -2093,7 +2106,12 @@ export const doctorDataSchema = z.strictObject({
       reason: z.string().optional(),
     }),
   ),
-  sandbox: z.strictObject({ os: z.boolean(), reason: z.string().optional() }),
+  sandbox: z.strictObject({
+    os: z.boolean(),
+    reason: z.string().optional(),
+    /** Список процессов в песочнице проверок (CLI `doctor`). */
+    processList: processListCapabilitySchema.optional(),
+  }),
   state: z
     .strictObject({
       stateVersion: z.number().int(),
@@ -2258,6 +2276,12 @@ export const gatesDataSchema = z.strictObject({
        * основание сверки провала попытки под другим node.
        */
       toolchain: toolchainFactsSchema.optional(),
+      /**
+       * Причина отказа среды, названная gate (0.1.0-alpha.66), например
+       * `sandbox-process-list` — gate запускает ps, а в песочнице ОС список
+       * процессов недоступен. Правка кода её не снимет.
+       */
+      environment: environmentCauseSchema.optional(),
     }),
   ),
   /** Каталог логов и артефактов проверки. */
@@ -2352,6 +2376,13 @@ export const smokeDataSchema = z.strictObject({
     .optional(),
   logs: z.string(),
   warnings: z.array(z.string()).optional(),
+  /**
+   * Список процессов в песочнице проверок (`isolation.mode: os`) и файлы
+   * дерева, которые вызывают ps/pgrep/top (до 10).
+   */
+  processList: processListCapabilitySchema
+    .extend({ callers: z.array(z.string()).max(10).optional() })
+    .optional(),
   /** Проба исполнителя (`--writer-probe`): команды `writerProbe` в изоляции каждого исполнителя. */
   writerProbe: z
     .strictObject({

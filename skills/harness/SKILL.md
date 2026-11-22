@@ -418,6 +418,15 @@ unchanged. The same applies when `explain` says the same testcase failed
 twice in a row before the last attempt: read the gate log (expected and actual), fix the task or its
 context, then retry or split the task.
 
+**A gate needs `ps` (`GATE_SANDBOX_PROCESS_LIST`, cause
+`sandbox-process-list`).** The gate ran `ps`, `pgrep` or `top` inside the OS
+sandbox for gates, where macOS does not start them. Changing the task code
+does not help, and there is no per-gate policy switch for this. Rewrite the
+test to check its own child processes by pid (`process.kill(pid, 0)`) or by
+marker files, or take that test out of the gate command. `$H smoke` warns
+about it (`sandbox-process-list`, with the files that call `ps`) before any
+paid attempt; `$H doctor` shows `sandbox.processList`.
+
 **Code review keeps raising new findings (`REVIEW_REJECTED`).** The reviewer
 must list all blocking findings in one round. A new blocking finding on a path
 that did not change since the previous round is marked `late` in

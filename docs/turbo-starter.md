@@ -246,6 +246,17 @@ merge, история Relay, `pnpm run setup`, вложенные оркестр
 - Изоляция gates в примере выключена (`isolation.mode: none`). pnpm store,
   dlx-кэш и Docker socket лежат вне worktree. Песочница ОС для них
   потребует отдельного списка путей и доменов.
+- Тесты `scripts/worktrees` ищут процессы с меткой окружения через
+  `/bin/ps -A -E` (`scripts/worktrees/system.mjs`). При `isolation.mode: os`
+  на macOS ядро не запускает setuid-программу `/bin/ps` в песочнице: gate,
+  исполняющий эти тесты, падает `spawn EPERM`, и harness называет это
+  отказом среды `GATE_SANDBOX_PROCESS_LIST` (причина `sandbox-process-list`),
+  а не провалом кода. Заранее это видно в `harness smoke` (предупреждение
+  `sandbox-process-list` с файлами, которые вызывают `ps`) и в `harness
+doctor` (`sandbox.processList`). Разрешить список процессов одному gate
+  политика не позволяет: код gate пишет исполнитель, а `ps -E` показывает
+  окружение всех процессов пользователя, в том числе токены. Такие тесты
+  либо проверяют свои процессы по pid, либо не входят в команду gate.
 
 <!-- repo-only -->
 
