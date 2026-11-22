@@ -1351,7 +1351,9 @@ severity}` (`awaiting-answer | answered-not-applied | applied-awaiting-claim
 человека. Каждую доработку открывает новое согласование графа, то есть
 раунд ревью плана нового digest. Изменённая постановка **непринятого**
 поручения события не пишет и счётчик (`attempt`, `neutralFailures`) не
-трогает: новой редакцией предел не обойти. Пишется сразу за
+трогает: новой редакцией предел не обойти. Поручение с новым ID — новая
+задача со своим счётчиком (так было и раньше); от переименования ради
+попыток защищает раунд ревью плана, который согласует новую редакцию. Пишется сразу за
 `graph.registered` той же транзакции.
 
 `work.cancelled` — поручение отменено: `{by: 'operator'|'host'|'graph',
@@ -1489,7 +1491,11 @@ data:`), светлая и тёмная схема по `prefers-color-scheme`, 
   приёмки, попытки и вызовы — по началу, раунды ревью и события — по своему
   времени.
 - Попытки поручения считаются по записям попыток, а не по
-  `WorkState.attempt` (сброс возвращает счётчик к 0).
+  `WorkState.attempt` (сброс возвращает счётчик к 0). Отчёт, пакет передачи
+  и «принято с первой попытки» — цифры за всю жизнь поручения, вместе с
+  попытками прежних редакций доработки после приёмки (`WorkState.rework`);
+  `status`, `explain` и `harness view` считают только попытки текущей
+  редакции.
 - Корзины отказа попытки (`failureBucketOf`): `defect` (`gate`, `review`,
   `scope-violation`), `incomplete` (`empty-result`, `unfinished`,
   `needs-lead`, `context-exhausted`), `integration` (`stale-base`, `merge`), `environment`
@@ -1682,7 +1688,10 @@ attempt}, spendUsd, wallMs, attemptMs, loadPeak}` — итоги окна тем
   `attempt.expired`, `attempt.interrupted`, `work.accepted`, `gate.passed`,
   `gate.failed`, `gate.recheck`, `gate.reused`, `review.approved`,
   `review.changes-requested`, `review.escalated`, `question.asked`,
-  `question.answered`, `gate.not-launched` (открытое перечисление). У ревью
+  `question.answered`, `gate.not-launched`, `work.reopened` (`lead`:
+  новая редакция изменила постановку принятой работы — доработка N, свой
+  предел попыток или перенесённый; по последней доработке работы)
+  (открытое перечисление). У ревью
   попытки фраза говорит, что reviewer делал, только по записи controller
   (`inspection`). `plain` — фраза на языке
   `--lang`, маскированная и обрезанная до 200 символов; свободного текста

@@ -569,7 +569,9 @@ own attempt budget; `status` and `view` say «принято ранее на <sh
 keeps the earlier acceptance. A work gets at most 3 reworks with their own
 budget; after that the counter carries over, and an exhausted rework is the
 user's `reset-attempts`. Re-planning a work that was **not** accepted keeps
-its counter — never re-plan to dodge `ATTEMPTS_EXHAUSTED`. A source task
+its counter — never re-plan to dodge `ATTEMPTS_EXHAUSTED`. A new order id
+is a new task with its own counter; the plan review that approves the
+revision is the guard, so never rename an order to get attempts back. A source task
 already closed (`done`) refuses a run with a changed order (`TASK_DONE`): the
 operator moves it back out of `done` in the source first.
 
