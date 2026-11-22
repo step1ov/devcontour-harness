@@ -33,6 +33,8 @@ export function summaryText(input: {
   criteria: CriterionOutcome[];
   completion: string;
   historical?: boolean;
+  /** Повторное доказательство принятого результата после правки привязок критериев. */
+  reprove?: boolean;
   /** Зависимости задачи, принятые человеком по базовой линии (не доказаны). */
   baseline?: { tasks: string[]; sha: string; reason: string };
   redact?: Redactor;
@@ -55,6 +57,12 @@ export function summaryText(input: {
     input.historical
       ? `**devcontour-harness: исторический результат** — относится к прежней постановке (снимок ${input.snapshot.revision.slice(0, 12)}), **не подтверждает текущие критерии и не закрывает задачу**.`
       : `**devcontour-harness: ${r.outcome}** — ${input.task.key}`,
+    ...(input.reprove
+      ? [
+          '',
+          'Повторное доказательство того же принятого результата по исправленным привязкам критериев: код, gates и ревью не повторялись.',
+        ]
+      : []),
     '',
     `- Попытка: ${r.runId} (№ ${r.attempt}), репозиторий ${r.repositoryId}, target ${r.targetRef}`,
     r.outcome === 'accepted'

@@ -358,6 +358,32 @@ export const mappingDigest = (config: ConnectorConfig, mapping: TaskMapping) =>
   });
 
 /**
+ * Digest mapping постановки (semantic digest v2, alpha.66): без привязок
+ * критериев (`criteria[]`: gate, testId, evidence), без `completion` и без `requiredDocuments`
+ * (их содержимое входит в digest задачи отдельно). Привязки говорят доставке,
+ * чем доказать критерий, но не меняют поручение — в WorkOrder их нет. Их
+ * правка (исправленный testId) не делает принятый результат результатом
+ * прежней постановки и не требует нового плана: доказательство пересылается
+ * `source-deliver --reprove`.
+ */
+export const statementMappingDigest = (config: ConnectorConfig, mapping: TaskMapping) =>
+  digestOf({
+    mapping: {
+      ...mapping,
+      ref: undefined,
+      context: undefined,
+      criteria: undefined,
+      requiredDocuments: undefined,
+    },
+    // `completion` — как доставка закрывает задачу, не постановка: его правка
+    // тоже только конфигурация доставки.
+    repository: config.repository.id,
+  });
+
+/** Digest привязок критериев задачи: часть ключа повторного доказательства (`--reprove`). */
+export const bindingsDigest = (mapping: TaskMapping) => digestOf(mapping.criteria);
+
+/**
  * Запись базовой линии для зависимости; её digest — receipt предпосылки. Вся
  * `baseline` внутри: любая её правка отзывает выданные предпосылки.
  */

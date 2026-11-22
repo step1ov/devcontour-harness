@@ -1,6 +1,12 @@
 import { z } from 'zod';
 import { GATE_SCOPE_LIMIT, idSchema, relativePathSchema, roleIdSchema } from './primitives.ts';
-import { environmentSchema, gateSchema, lifecycleSchema, stepSchema } from './policy.ts';
+import {
+  environmentSchema,
+  gateSchema,
+  lifecycleSchema,
+  previewsSchema,
+  stepSchema,
+} from './policy.ts';
 import { toolchainSchema } from './toolchain.ts';
 
 /**
@@ -87,6 +93,11 @@ export const stackProfileSchema = z.strictObject({
   gateTimeoutFloorMs: z.number().int().min(1000).max(600_000).optional(),
   roles: z.record(roleIdSchema, profileRoleSchema).default({}),
   contextPacks: z.array(profileContextPackSchema).max(50).default([]),
+  /**
+   * Превью результата (`previewSchema` политики, docs/previews.md): слои
+   * объединяются по ID, повтор ID — конфликт. Нет поля — превью нет.
+   */
+  previews: previewsSchema.optional(),
 });
 export type StackProfile = z.infer<typeof stackProfileSchema>;
 
@@ -122,6 +133,7 @@ export const resolvedProfileSchema = z.strictObject({
   gateTimeoutFloorMs: z.number().int().optional(),
   roles: z.record(roleIdSchema, profileRoleSchema),
   contextPacks: z.array(profileContextPackSchema),
+  previews: previewsSchema.optional(),
   source: profileSourceSchema.optional(),
   closure: z.array(z.strictObject({ ref: z.string(), digest: z.string().regex(/^[a-f0-9]{64}$/) })),
 });

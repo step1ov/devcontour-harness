@@ -26,7 +26,7 @@ import {
   gateTimeoutMs,
   gateTimeoutText,
 } from '../contracts/index.ts';
-import { ReapFailure, command, git, gitOutput } from '../environment/process.ts';
+import { ReapFailure, command, git, gitOutput, gitRawOutput } from '../environment/process.ts';
 import {
   isolation,
   isolatedCommand,
@@ -60,6 +60,15 @@ import {
 } from './property.ts';
 import { keepGateArtifacts } from './gate-artifacts.ts';
 import { ReapedGate } from './reaped.ts';
+import {
+  processListCall,
+  processListCallPatterns,
+  processListCodeMessage,
+  processListFailure,
+  processListMessage,
+  processListSeen,
+  type ProcessListCapability,
+} from './process-list.ts';
 import { sameNode, toolchainFacts, toolchainText, usesPnpm } from '../environment/toolchain-pin.ts';
 
 /** Длинное имя testcase заменяется хешем, а не обрезается: обрезка дала бы ложные совпадения. */
@@ -722,6 +731,150 @@ export const checkCleanup = {
 };
 /** Проверка механизма песочницы; тест подменяет её, чтобы проверить отказ. */
 export const isolationBackend = { check: isolationSupport };
+
+/**
+ * Проба списка процессов в песочнице ОС проверок: `ps -o pid= -p 1` тем же
+ * `runCheck`, что и gates (sandbox-runtime, обёртка старта, TMPDIR проверки).
+ * Возможность — свойство машины, а не политики: сеть и пути пробе не нужны.
+ */
+export async function probeProcessList(
+  mode: ExecutionPolicy['isolation']['mode'] = 'os',
+): Promise<ProcessListCapability> {
+  if (mode !== 'os') return { status: 'not-isolated', detail: 'isolation.mode: none' };
+  const support = isolationBackend.check();
+  if (!support.ok) return { status: 'unknown', detail: support.detail };
+  const ps = ['/bin/ps', '/usr/bin/ps'].find((p) => existsSync(p));
+  if (!ps) return { status: 'unknown', detail: 'ps не найден в /bin и /usr/bin' };
+  const argv = [ps, '-o', 'pid=', '-p', '1'];
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'dc-ps-probe-')));
+  try {
+    const result = await runCheck(
+      { config: { isolation: { mode: 'os', domains: [] } } },
+      {
+        argv,
+        cwd: dir,
+        env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+        timeoutMs: 30_000,
+        signal: AbortSignal.timeout(60_000),
+        write: [dir],
+        readable: [],
+        controller: [],
+        settingsDir: join(dir, 'settings'),
+      },
+    );
+    if (result.code === 0) return { status: 'available', command: argv, detail: 'ps отработал' };
+    if (result.notStarted || result.timedOut)
+      return {
+        status: 'unknown',
+        command: argv,
+        detail: `песочница не исполнила пробу: код ${result.code}`,
+      };
+    return {
+      status: 'unavailable',
+      command: argv,
+      detail: `код ${result.code}: ${diagnostic(result.stderr, result.stdout) || 'без вывода'}`,
+    };
+  } catch (error) {
+    return {
+      status: 'unknown',
+      command: argv,
+      detail: 'проба не исполнилась: ' + (error instanceof Error ? error.message : String(error)),
+    };
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+/**
+ * Файлы дерева на коммите, которые вызывают список процессов (до 10):
+ * абсолютный путь `ps`/`pgrep`/`top`, имя строкой, вызов в shell. Документы
+ * (`*.md`) не смотрятся. Отказ git — пустой список.
+ */
+export async function processListCallers(repoPath: string, sha: string): Promise<string[]> {
+  try {
+    const out = await gitRawOutput(
+      repoPath,
+      'grep',
+      '-l',
+      '-I',
+      '-E',
+      ...processListCallPatterns.flatMap((p) => ['-e', p]),
+      sha,
+      '--',
+      '.',
+      ':(exclude)*.md',
+    );
+    return [
+      ...new Set(
+        out
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => line.slice(sha.length + 1)),
+      ),
+    ].slice(0, 10);
+  } catch {
+    // `git grep` без совпадений завершается кодом 1.
+    return [];
+  }
+}
+
+/**
+ * Файлы, в которые изменение `base..sha` добавило вызов списка процессов
+ * (до 10): добавленные строки диффа по `processListCallPatterns`. Смотрятся
+ * только отслеживаемые файлы коммита кандидата; `node_modules` и документы
+ * (`*.md`) — нет: зависимости и неотслеживаемые файлы исполнитель этим
+ * изменением не добавлял. Отказ git — пустой список.
+ */
+export async function processListAdded(
+  repoPath: string,
+  base: string,
+  sha: string,
+): Promise<string[]> {
+  let out: string;
+  try {
+    out = await gitRawOutput(
+      repoPath,
+      'diff',
+      '--no-color',
+      '--no-ext-diff',
+      '--unified=0',
+      base,
+      sha,
+      '--',
+      '.',
+      ':(exclude)*.md',
+      ':(exclude,glob)**/node_modules/**',
+    );
+  } catch {
+    return [];
+  }
+  const files = new Set<string>();
+  let file: string | undefined;
+  for (const line of out.split('\n')) {
+    if (line.startsWith('+++ ')) {
+      file = line.startsWith('+++ b/') ? line.slice(6) : undefined;
+      continue;
+    }
+    if (file && line.startsWith('+') && processListCall(line.slice(1))) files.add(file);
+  }
+  return [...files].slice(0, 10);
+}
+
+let processListCache: Promise<ProcessListCapability> | undefined;
+/**
+ * Проба списка процессов, одна на процесс harness: ответ ядра на этой машине
+ * не меняется между проверками. Тест подменяет `probe`.
+ */
+export const processListBackend = {
+  probe: (): Promise<ProcessListCapability> => {
+    // Неудачная проба (`unknown`) не кешируется: следующая проверка спросит снова.
+    const pending = (processListCache ??= probeProcessList('os'));
+    void pending.then((c) => {
+      processListSeen.status = c.status;
+      if (c.status === 'unknown' && processListCache === pending) processListCache = undefined;
+    });
+    return pending;
+  },
+};
 /**
  * Хосты, в сети к которым проверке, по всей видимости, отказала песочница.
  *
@@ -1113,6 +1266,43 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
             (denied.length > 3 ? ` и ещё ${denied.length - 3}` : '') +
             `. Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
         );
+      }
+      // Проверка запустила ps (pgrep, top), а в песочнице ОС список процессов
+      // недоступен: ядро не запускает setuid-программы в песочнице
+      // (`process-list.ts`). Признак — в выводе, а при упавших testcases — в
+      // тексте каждого из них; отказ подтверждает собственная проба harness
+      // в той же песочнице, а не только напечатанное проверкой.
+      const listing =
+        run.policy.isolation.mode === 'os'
+          ? processListFailure(
+              result.stdout + '\n' + result.stderr,
+              counts?.failures
+                ? {
+                    total: counts.failures,
+                    texts: junitFailures(counts.xml, redact, Math.min(counts.failures, 200)).map(
+                      (f) => `${f.message}\n${f.body}`,
+                    ),
+                  }
+                : undefined,
+            )
+          : undefined;
+      if (listing && (await processListBackend.probe()).status === 'unavailable') {
+        const tail = `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`;
+        // Вызов ps добавил исполнитель: добавленные строки изменения
+        // `база..кандидат` вызывают список процессов. Это дефект кода задачи,
+        // а не среды: засчитанный провал gate с советом убрать вызов и
+        // файлами. Изменение вызова не добавило (он в базе, в зависимости
+        // или в неотслеживаемом файле) — отказ среды: повтор и правка задачи
+        // его не снимут, ход ведущего.
+        const base = run.trustedBase;
+        const added = base && base !== sha ? await processListAdded(cwd, base, sha) : [];
+        if (added.length)
+          throw new Error(
+            processListCodeMessage({ ...listing, line: redact(listing.line) }, added, tail),
+          );
+        kind = 'environment';
+        cause = 'sandbox-process-list';
+        throw new Error(processListMessage({ ...listing, line: redact(listing.line) }, tail));
       }
       // Установка зависимостей, закреплённая политикой, упала на сети или
       // реестре пакетов, а признаков ошибки проекта нет: правка кода её не

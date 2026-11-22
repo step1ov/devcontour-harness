@@ -166,7 +166,7 @@ test('tasks[].context: нет каталога или пакета — NOT_READY
   }
 });
 
-test('tasks[].context: без поля снимок совпадает с alpha.12 байт в байт (ревизия, digest задачи, графа и контекста)', async () => {
+test('tasks[].context: без поля прежняя ревизия и digest задачи (legacyRevision, legacyDigest) совпадают с alpha.12; v2 закреплены', async () => {
   // Значения получены кодом v0.1.0-alpha.12 на тех же данных подделки backend.
   const backend = memoryBackend(emptyFakeState('relay-v1-http', 'p1'));
   const admin = new FakeAdmin(backend);
@@ -207,6 +207,19 @@ test('tasks[].context: без поля снимок совпадает с alpha.
   });
   try {
     const snap = await new RelayWorkSource({ config, transport, store }).snapshot();
+    // Ревизия и digest задачи по правилам до alpha.66 (v1) — те же, что у
+    // alpha.12: по ним закреплённый прежней версией снимок остаётся согласованным.
+    assert.deepEqual(
+      {
+        revision: snap.manifest.legacyRevision,
+        task: snap.manifest.tasks[0]!.legacyDigest,
+      },
+      {
+        revision: 'db75d555e496b0b09413a9c4d54c252685ba34a101952039e79745f0f9395db5',
+        task: 'c71481194cbdd61cb257385d6418061d4413ff2f3374c4522600a7492881de3e',
+      },
+    );
+    // alpha.66 (semantic digest v2): новые значения закреплены здесь.
     assert.deepEqual(
       {
         revision: snap.revision,
@@ -215,10 +228,10 @@ test('tasks[].context: без поля снимок совпадает с alpha.
         context: contextDigest(snap.context),
       },
       {
-        revision: 'db75d555e496b0b09413a9c4d54c252685ba34a101952039e79745f0f9395db5',
-        task: 'c71481194cbdd61cb257385d6418061d4413ff2f3374c4522600a7492881de3e',
-        graph: '6940a542b5104f39bca3898156a5aff308eea4a108b74c6f845beb6a0b8627fd',
-        context: 'e1c02061866cd3e6a0a0f775e61d2bdce0aa18f03bc502eaa172645646ebdec7',
+        revision: '973df4ea9830f0b13ca46ccbed52401c6cecca447ceec2bc3da0377a51cd6adf',
+        task: '05f3abaee18732bf349f152b92166f650a281b70300972a60481f6ed9d698850',
+        graph: 'd80ea6dbe0651ac5903cc0f97e00b74568cfd7f49ffb1b7eb0a378d034755647',
+        context: '3bf6d6c77518d064bf4cfae38e4f365c3a8ccbb6c8aa88b96d9459f6e06f6417',
       },
     );
   } finally {

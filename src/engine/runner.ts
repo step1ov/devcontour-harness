@@ -1,3 +1,5 @@
+import { freshDiagnosis } from '../projections/lead-recovery.ts';
+import type { LeadDiagnosis } from '../contracts/execution.ts';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -3918,6 +3920,11 @@ export class Runner {
           'Where a requirement names a testId, open that test. Reject it when the test does not exercise the stated scenario, or when it would still pass if the behaviour it claims to prove were broken. A matching name is not proof.',
         );
       }
+      // Разбор ведущего после повторных отказов (`harness diagnose`): причина
+      // и гипотеза — исполнителю следующей попытки.
+      const owner = v.work(attempt.workId);
+      const lead = !review && owner ? freshDiagnosis(owner, v.attempts(owner.id)) : undefined;
+      if (lead) out.push(leadDiagnosisNote(lead));
       const r = v.work(attempt.workId)?.recovery;
       if (!review && r?.decision && r.status === 'retrying' && r.retryRun === attempt.id) {
         const d = r.decision;
@@ -4553,4 +4560,29 @@ function inputClassesOf(
     return c ? [c.slice(0, 500)] : [];
   });
   return [...new Set(classes)].slice(0, 20);
+}
+
+/**
+ * Разбор ведущего — исполнителю: что не так с прежними попытками и что
+ * сделать иначе. `coverage` — добавить случаи, `approach` — сменить подход
+ * по гипотезе; гипотеза — проверяемое утверждение ведущего.
+ */
+export function leadDiagnosisNote(d: LeadDiagnosis) {
+  const action: Record<LeadDiagnosis['cause'], string> = {
+    coverage:
+      'Weak coverage: add test cases (добавить случаи) for the failing class of inputs and strengthen the check before changing the implementation.',
+    approach: 'Wrong approach: change the implementation approach as the hypothesis says.',
+    split: 'The task is too big: do only the part the current order still asks for.',
+    contradiction: 'The promise is contradictory: do not guess; stop and ask (needs-input).',
+    environment: 'The cause is in the environment, not in the code: do not rewrite working code.',
+    other: 'See the hypothesis.',
+  };
+  return [
+    `Lead diagnosis ${d.id} of the previous failed attempts (${d.failures.join(', ')}): cause ${d.cause}. ${action[d.cause]}`,
+    d.hypothesis ? `Hypothesis to test in this attempt: ${d.hypothesis}` : '',
+    d.evidence.length ? `Evidence: ${JSON.stringify(d.evidence)}` : '',
+    'Do not repeat the approach of the failed attempts.',
+  ]
+    .filter(Boolean)
+    .join(' ');
 }

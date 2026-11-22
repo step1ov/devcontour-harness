@@ -62,15 +62,23 @@ const configOf = (taskRef: string, patch: Partial<ConnectorConfigInput> = {}) =>
     '/project',
   ).config;
 
-test('W03/digest: semantic digest не зависит от колонки, комментариев, отметок критериев и ключа; зависит от текста, критериев, документов, зависимостей и mapping', async () => {
+test('W03/digest: semantic digest не зависит от колонки, комментариев, отметок критериев, ключа, привязок критериев и необязательных документов; зависит от текста, критериев, обязательных документов, зависимостей и поручения', async () => {
   const { admin, transport } = project();
   const task = admin.createTask({
     title: 'Greet',
     description: 'Add greet',
     criteria: [{ title: 'Greets' }],
   });
-  const config = configOf(task.id);
-  const mapping = config.tasks[0]!;
+  const config = configOf(task.id, {
+    tasks: [
+      {
+        ref: task.id,
+        writeScope: ['src'],
+        requiredDocuments: ['Spec'],
+        criteria: [{ title: 'Greets', gate: 'unit', testId: 'greet.greets' }],
+      },
+    ],
+  });
   const digest = async (cfg = config) =>
     semanticDigest(cfg, cfg.tasks[0]!, await transport.readTask(task.id));
   const base = await digest();
@@ -97,21 +105,47 @@ test('W03/digest: semantic digest не зависит от колонки, ко�
   );
   await changed('новый критерий', () => admin.addCriterion(task.id, 'Exports'));
   const doc = admin.addDocument(task.id, { name: 'Spec', body: 'v1' });
-  await changed('документ добавлен', () => undefined);
-  await changed('документ изменён', () => admin.updateDocument(doc.id, 'v2'));
+  await changed('обязательный документ добавлен', () => undefined);
+  await changed('обязательный документ изменён', () => admin.updateDocument(doc.id, 'v2'));
   const dep = admin.createTask({ title: 'Dep', description: 'dependency' });
   await changed('зависимость', () => admin.addDependency(task.id, dep.id));
-  const remapped = configOf(task.id, {
+  // Необязательный документ — контекст (ревизия набора), не постановка задачи.
+  const before = await digest();
+  const notes = admin.addDocument(task.id, { name: 'Notes', body: 'n1' });
+  assert.equal(await digest(), before, 'необязательный документ добавлен');
+  admin.updateDocument(notes.id, 'n2');
+  assert.equal(await digest(), before, 'необязательный документ изменён');
+  const mapped = (patch: Record<string, unknown>) =>
+    configOf(task.id, {
+      tasks: [
+        {
+          ref: task.id,
+          writeScope: ['src'],
+          requiredDocuments: ['Spec'],
+          criteria: [{ title: 'Greets', gate: 'unit', testId: 'greet.greets' }],
+          ...patch,
+        },
+      ],
+    });
+  // Привязка критерия — сведения доставки: поручение то же.
+  assert.equal(
+    await digest(mapped({ criteria: [{ title: 'Greets', gate: 'unit', testId: 'test.greets' }] })),
+    before,
+    'привязка критерия',
+  );
+  assert.ok(!seen.has(await digest(mapped({ writeScope: ['lib'] }))), 'writeScope поручения');
+  const review = configOf(task.id, {
+    completion: { mode: 'review-only' },
     tasks: [
       {
         ref: task.id,
         writeScope: ['src'],
-        criteria: [{ title: 'Greets', gate: 'unit', testId: 'greet.other' }],
+        requiredDocuments: ['Spec'],
+        criteria: [{ title: 'Greets', gate: 'unit', testId: 'greet.greets' }],
       },
     ],
   });
-  assert.ok(!seen.has(await digest(remapped)), 'mapping');
-  void mapping;
+  assert.equal(await digest(review), before, 'completion — конфигурация доставки');
 });
 
 test('W02/identity: provider, проект и задача разделены; одинаковый номер в разных проектах — разные поручения', () => {

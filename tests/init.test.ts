@@ -911,3 +911,32 @@ test('alpha.55: --lead-technical-answers — правило в новой пол
   assert.match(refused.message, /inputPolicy\.leadAnswers\.technical: true/);
   assert.equal(readFileSync(policyPath, 'utf8'), bytes, 'политика не переписана');
 });
+
+test('alpha.66: --recovery/--diagnose-after/--lead-resets — правило восстановления в новой политике; init называет итог; другое правило сохранённой политики — конфликт', async () => {
+  const p = project();
+  // Без флагов поля нет: правило выводится (user без технических ответов ведущего).
+  const plain = await initProject(p.opts({ plan: true }));
+  assert.equal(plain.decisions!.items.find((i) => i.key === 'recovery.mode')?.value, 'user');
+  assert.match(initText(plain), /recovery: после 3 отказов — решаете вы/);
+  const derived = await initProject(p.opts({ plan: true, leadTechnicalAnswers: true }));
+  assert.equal(derived.decisions!.items.find((i) => i.key === 'recovery.mode')?.source, 'derived');
+  const applied = await initProject(
+    p.opts({ recovery: { mode: 'lead', diagnoseAfter: 1, leadResets: 0 } }),
+  );
+  assert.equal(applied.conflicts, 0);
+  const policy = executionPolicySchema.parse(
+    JSON.parse(readFileSync(join(p.root, '.harness/policy.json'), 'utf8')),
+  );
+  assert.deepEqual(policy.recovery, { mode: 'lead', diagnoseAfter: 1, leadResets: 0 });
+  assert.match(
+    initText(applied),
+    /recovery: после 1 отказа — разбор ведущего; ещё попытки даёте только вы; дальше — вы/,
+  );
+  // Необычное сочетание названо предупреждением блока решений.
+  assert.ok(applied.decisions!.warning?.ru.includes('recovery.mode: lead'));
+  // Сохранённая политика с другим правилом и флаг — конфликт, а не молча неработающий флаг.
+  const conflict = await initProject(p.opts({ plan: true, recovery: { mode: 'user' } }));
+  assert.equal(conflict.conflicts, 1);
+  const error = await refusal(initProject(p.opts({ recovery: { mode: 'user' } })), 'PATH_CONFLICT');
+  assert.match(error.message, /правило восстановления/);
+});

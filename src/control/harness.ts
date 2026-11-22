@@ -57,6 +57,7 @@ import { analyzeRecovery, applyCases } from './recovery.ts';
 import { declarationProblems, referenceNote } from '../verification/checks.ts';
 import { spikeOf, spikesOf } from '../verification/spike.ts';
 import { staleArtifacts } from '../verification/confirm.ts';
+import { processListBackend } from '../verification/gates.ts';
 import { collectReportInput } from './report.ts';
 import { valueReport, type ValueReportOptions } from '../report/compute.ts';
 
@@ -886,6 +887,13 @@ export class Harness {
     // Пауза обновления, умершего до изменений (нет ни процесса, ни
     // незавершённого возврата), выдачу больше не держит: run её снимает.
     this.engine.clearStaleUpdatePause();
+    // Удержание gate отказом `ps` снимается, когда список процессов в
+    // песочнице стал доступен: проба (одна на процесс) — до выдачи.
+    if (
+      this.policy.isolation.mode === 'os' &&
+      this.engine.read((v) => this.engine.environmentGateHolds(v)).length
+    )
+      await processListBackend.probe().catch(() => undefined);
     // Обязательный контекст — одинаково для библиотеки и CLI: без снимка нужных источников граф не исполняется.
     const needed = [...new Set(input.graph.orders.flatMap((o) => o.context))];
     if (needed.length && !input.context)
@@ -1230,6 +1238,7 @@ export class Harness {
       const decided = repairDecision(tx, tx.works(graphId), {
         budgetLeft: this.policy.repairBudget - (job.repairs ?? 0),
         maxAttempts: this.policy.maxAttempts,
+        leadHold: (w) => this.engine.leadHoldOf(w, tx),
       });
       if (!decided || decided.action === 'stop') return decided;
       this.workflows.repair(job, `repair:${decided.kind}`, () => {
@@ -1341,11 +1350,21 @@ export class Harness {
    * попытка: повтор не создаёт второй записи и не вызывает моделей или
    * интеграции. Конфликт редакции записывается, результат её не закрывает.
    */
-  async deliver(workId: string, sink: ResultSink) {
-    const envelope = this.result(workId);
-    const key = `${sink.id}:${workId}:${envelope.result.runId}`;
+  async deliver(
+    workId: string,
+    sink: ResultSink,
+    /**
+     * `runId` — результат этой попытки (по умолчанию последней завершённой);
+     * `variant` — отдельная доставка того же результата (например,
+     * повторное доказательство критериев `reprove-<digest>`): свой ключ, своя
+     * запись, прежняя подтверждённая доставка не меняется.
+     */
+    options: { runId?: string; variant?: string } = {},
+  ) {
+    const envelope = this.result(workId, options.runId);
+    const key = `${sink.id}:${options.variant ? options.variant + ':' : ''}${workId}:${envelope.result.runId}`;
     const prior = this.engine.read((v) => v.local('delivery', WORKSPACE_OWNER, key));
-    if (prior?.status === 'delivered') return this.result(workId);
+    if (prior?.status === 'delivered') return this.result(workId, options.runId);
     const base: DeliveryState = prior ?? {
       sink: sink.id,
       key,
@@ -1448,7 +1467,7 @@ export class Harness {
         'delivery.failed',
       );
     }
-    return this.result(workId);
+    return this.result(workId, options.runId);
   }
 
   private async deliverAll(graphId: string, sink: ResultSink) {

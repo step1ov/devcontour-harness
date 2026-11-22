@@ -97,25 +97,26 @@ manifest снимка и в необязательном поле `baseline` о�
 
 ### ExecutionPolicy
 
-| Поле                                                         | Смысл                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `policyVersion`, `mode`                                      | `1`; `live` или `fixture` (runtime `fixture` только в нём)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `repositories[]`                                             | ID, путь, `targetRef` по правилам `git check-ref-format`, `dependsOn`, gates (`test` с обязательным JUnit внутри worktree, `check`), группы gates (≤100), защищённые и генерируемые пути, среда, lifecycle, шаги подготовки, сборки зависимостей и preflight, генераторы (`generators`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `workspaceGates[]`, `verificationMode`, `workspaceLifecycle` | Gates совместной проверки комбинации репозиториев; `all` или `affected`; окружение совместной проверки                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `roles{}`                                                    | `writer`, `writePaths`, своё правило `review` кода, `requiresContract`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `review.code / plan / contract`                              | `{reviewer, vendor}`; reviewer задан явно                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `approvalMode`                                               | `agent` или `operator` для технического согласования                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `isolation`                                                  | `{mode: 'os' \| 'none', domains[]}`, по умолчанию `os`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `toolProfiles{}`, `environment`, `lifecycle`, `resources[]`  | Инструменты (у профиля — встроенные инструменты claude, shell и сеть codex, сеть исполнителя `network`, MCP-серверы `mcp{}`: stdio-команда или http-адрес, только перечисленные `tools`, учётные данные — именами переменных `env`/`bearerTokenEnv`, передаются CLI по имени), среда, ресурсы (порты 1024–65535)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `concurrency`, `leaseMs`, `runTimeoutMs`, `reviewProbes`     | Пределы исполнения                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `maxAttempts`, `repairBudget`, `reuseImplementation`         | Повторы и повторное использование кандидата                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `stallSweep{intervalMs, quietMs, stalledMs, action}`         | Необязательное: обход зависших попыток controller ([ниже](#зависшие-попытки)); нет поля — 30 000 / 180 000 / 600 000 мс и `report`, умолчание не подставляется и digest политики не меняет                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `reviewProtocolRetries`                                      | Необязательное: дополнительные вызовы reviewer кода при ошибке протокола ответа (0–2; нет поля — 1, умолчание не подставляется и digest политики не меняет), [review-protocol.md](review-protocol.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `gateTimeoutFloorMs`                                         | Необязательное: нижняя граница предела времени каждого исполнения gate, мс (1000–600 000). Действующий предел — `max(gate.timeoutMs, gateTimeoutFloorMs)` на всех фазах (кандидат, интеграция, потребители, совместная проверка, проверки reviewer); объявленный `timeoutMs` в политике не меняется. Отказ по пределу называет действующий предел в секундах и объявленный, если его подняла граница. Граница не больше `runTimeoutMs`, иначе политика отклоняется. Нет поля — объявленный предел; умолчание не подставляется и digest политики не меняет. `timeoutMs` gate — защита от зависания, а не предел производительности: бюджеты производительности проверяются внутри самой проверки                                                                                                    |
-| `integrationReuse`                                           | Необязательное, только `identical-tree`: перенос evidence кандидата на интеграцию ([ниже](#перенос-evidence-кандидата-на-интеграцию)). Нет поля — каждый gate исполняется на интеграции; умолчание не подставляется и digest политики не меняет. Поле входит в `executionDigest`. Хост, который ведёт попытки сам, должен объявить поддержку (`ExecutionHost.capabilities.integrationReuse`), иначе `Engine` с такой политикой не создаётся                                                                                                                                                                                                                                                                                                                                                        |
-| `lifecyclePreflight`                                         | Необязательное, только `cached`: перед `run` (до ревью плана и первой попытки) controller поднимает окружение каждого репозитория с незавершёнными поручениями на его `targetRef`, как `harness smoke`, и записывает успех в `<state>/preflight/` по ключу (дерево базы и зависимостей, `executionDigest`, `stallSweep`, digest окружения процесса, версия harness); тот же ключ — без повторной проверки, отказ не переиспользуется. Отказ — `LIFECYCLE_FAILED` до любого платного вызова. Нет поля — проверки нет. В `executionDigest` не входит                                                                                                                                                                                                                                                 |
-| `toolchain{node}`                                            | Необязательное: закреплённый node (`policy.toolchain.node`) — абсолютный каталог с `node` или версия `24.22.3` / `24.22` / `24` (самая новая установленная подходящая: каталог текущего node, PATH, nvm, fnm, volta, asdf, mise, Homebrew, `/usr/local/bin`). Каталог ставится первым в PATH каждого процесса прогона (gates, `harness gates`, lifecycle и `smoke`, `prepare`, writer, reviewers, совместная проверка), кто бы ни запустил harness. Не разрешился — отказ окружения до работы (`toolchain`/`preflight`, не засчитан). Фактический node (версия, путь; pnpm у команд с pnpm) — строка `# toolchain:` лога gate и поле `toolchain` evidence и итога `harness gates`. Нет поля — PATH процесса harness. В `executionDigest` не входит ([toolchains](toolchains.md#закреплённый-node)) |
-| `budgets{work, group, total, onUnknown}`, `prices[]`         | Пределы USD и/или времени; тарифы                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Поле                                                         | Смысл                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `policyVersion`, `mode`                                      | `1`; `live` или `fixture` (runtime `fixture` только в нём)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `repositories[]`                                             | ID, путь, `targetRef` по правилам `git check-ref-format`, `dependsOn`, gates (`test` с обязательным JUnit внутри worktree, `check`), группы gates (≤100), защищённые и генерируемые пути, среда, lifecycle, шаги подготовки, сборки зависимостей и preflight, генераторы (`generators`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `workspaceGates[]`, `verificationMode`, `workspaceLifecycle` | Gates совместной проверки комбинации репозиториев; `all` или `affected`; окружение совместной проверки                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `roles{}`                                                    | `writer`, `writePaths`, своё правило `review` кода, `requiresContract`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `review.code / plan / contract`                              | `{reviewer, vendor}`; reviewer задан явно                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `approvalMode`                                               | `agent` или `operator` для технического согласования                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `isolation`                                                  | `{mode: 'os' \| 'none', domains[]}`, по умолчанию `os`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `toolProfiles{}`, `environment`, `lifecycle`, `resources[]`  | Инструменты (у профиля — встроенные инструменты claude, shell и сеть codex, сеть исполнителя `network`, MCP-серверы `mcp{}`: stdio-команда или http-адрес, только перечисленные `tools`, учётные данные — именами переменных `env`/`bearerTokenEnv`, передаются CLI по имени), среда, ресурсы (порты 1024–65535)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `concurrency`, `leaseMs`, `runTimeoutMs`, `reviewProbes`     | Пределы исполнения                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `maxAttempts`, `repairBudget`, `reuseImplementation`         | Повторы и повторное использование кандидата                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `stallSweep{intervalMs, quietMs, stalledMs, action}`         | Необязательное: обход зависших попыток controller ([ниже](#зависшие-попытки)); нет поля — 30 000 / 180 000 / 600 000 мс и `report`, умолчание не подставляется и digest политики не меняет                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `reviewProtocolRetries`                                      | Необязательное: дополнительные вызовы reviewer кода при ошибке протокола ответа (0–2; нет поля — 1, умолчание не подставляется и digest политики не меняет), [review-protocol.md](review-protocol.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `gateTimeoutFloorMs`                                         | Необязательное: нижняя граница предела времени каждого исполнения gate, мс (1000–600 000). Действующий предел — `max(gate.timeoutMs, gateTimeoutFloorMs)` на всех фазах (кандидат, интеграция, потребители, совместная проверка, проверки reviewer); объявленный `timeoutMs` в политике не меняется. Отказ по пределу называет действующий предел в секундах и объявленный, если его подняла граница. Граница не больше `runTimeoutMs`, иначе политика отклоняется. Нет поля — объявленный предел; умолчание не подставляется и digest политики не меняет. `timeoutMs` gate — защита от зависания, а не предел производительности: бюджеты производительности проверяются внутри самой проверки                                                                                                                                                                |
+| `integrationReuse`                                           | Необязательное, только `identical-tree`: перенос evidence кандидата на интеграцию ([ниже](#перенос-evidence-кандидата-на-интеграцию)). Нет поля — каждый gate исполняется на интеграции; умолчание не подставляется и digest политики не меняет. Поле входит в `executionDigest`. Хост, который ведёт попытки сам, должен объявить поддержку (`ExecutionHost.capabilities.integrationReuse`), иначе `Engine` с такой политикой не создаётся                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `lifecyclePreflight`                                         | Необязательное, только `cached`: перед `run` (до ревью плана и первой попытки) controller поднимает окружение каждого репозитория с незавершёнными поручениями на его `targetRef`, как `harness smoke`, и записывает успех в `<state>/preflight/` по ключу (дерево базы и зависимостей, `executionDigest`, `stallSweep`, digest окружения процесса, версия harness); тот же ключ — без повторной проверки, отказ не переиспользуется. Отказ — `LIFECYCLE_FAILED` до любого платного вызова. Нет поля — проверки нет. В `executionDigest` не входит                                                                                                                                                                                                                                                                                                             |
+| `recovery{mode, diagnoseAfter, leadResets}`                  | Необязательное: кто восстанавливает работу после повторных отказов ([принцип](principles.md#кто-принимает-решения)). `mode: lead` — после `diagnoseAfter` (1–10, по умолчанию 2) засчитанных отказов следующая попытка не выдаётся без разбора ведущего (`harness diagnose`, отказ `DIAGNOSIS_REQUIRED`), а при исчерпании ведущий сам даёт новый предел по свежему техническому разбору (`retry --reset --by lead --diagnosis`) не больше `leadResets` (0–5, по умолчанию 2) раз на предел попыток; `diagnoseAfter ≥ maxAttempts` — разбор только при исчерпании. `mode: user` — прежнее поведение. Нет поля — `lead` при `inputPolicy.leadAnswers.technical: true`, иначе `user`. Разборы и сбросы — `WorkState.leadRecovery`, события `work.diagnosed` и `work.retried` (`by: lead`, `diagnosis`, `index`, `cap`, `granted`). В `executionDigest` не входит |
+| `toolchain{node}`                                            | Необязательное: закреплённый node (`policy.toolchain.node`) — абсолютный каталог с `node` или версия `24.22.3` / `24.22` / `24` (самая новая установленная подходящая: каталог текущего node, PATH, nvm, fnm, volta, asdf, mise, Homebrew, `/usr/local/bin`). Каталог ставится первым в PATH каждого процесса прогона (gates, `harness gates`, lifecycle и `smoke`, `prepare`, writer, reviewers, совместная проверка), кто бы ни запустил harness. Не разрешился — отказ окружения до работы (`toolchain`/`preflight`, не засчитан). Фактический node (версия, путь; pnpm у команд с pnpm) — строка `# toolchain:` лога gate и поле `toolchain` evidence и итога `harness gates`. Нет поля — PATH процесса harness. В `executionDigest` не входит ([toolchains](toolchains.md#закреплённый-node))                                                             |
+| `budgets{work, group, total, onUnknown}`, `prices[]`         | Пределы USD и/или времени; тарифы                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 Переменные `HARNESS_*` и `DEVCONTOUR_*` политика задать не может.
 
@@ -138,6 +139,13 @@ digest политики не меняет. Подробно — [toolchains](too
 timeoutMs?}`: команды, которые правила проекта требуют от исполнителя. Их прогоняет только
 `harness smoke --writer-probe` в изоляции исполнителя, без модели; попытки и gates на них не
 смотрят. Нет поля — digest политики прежний.
+
+`repositories[].previews` — необязательный список (до 10, ID без повторов) превью результата
+`{id, title?, build?[], start[], cwd?, env?, services?, health?, readyTimeoutMs?, ttlMs?,
+idleMs?}`: как собрать и запустить приложение на принятом коммите, чтобы человек посмотрел
+результат. Запускает только оператор (`harness preview-start`), никогда — `run`, попытка или
+gate. В `executionDigest` и `isolationDigest` не входит; нет поля — digest политики прежний.
+Подробно — [превью](previews.md).
 
 `toolProfiles.<id>.network` — необязательная сеть исполнителя профиля: `none`, `loopback` или
 `full`. Нет поля — прежнее: codex — по `codexNetwork` (`true` — вся сеть, иначе закрыта), claude —
@@ -956,6 +964,19 @@ delivered | failed | conflict, attempts, lastError?, currentRevision?,
 receipt?, updatedAt}`. `harness result` выдаёт `{apiVersion, result,
 delivery[]}`.
 
+Отдельная доставка того же результата (`Harness.deliver(workId, sink,
+{ runId, variant })`) пишет свою запись с ключом
+`<sink>:<variant>:<workId>:<runId>`; прежняя подтверждённая доставка не
+меняется. Коннектор задач так выполняет повторное доказательство критериев
+принятого результата (`source-deliver --reprove`, вариант `reprove-<digest
+привязок>`): ответ `source-deliver` получает `reprove: true` и
+`skipped[] {workId, reason}` (поручения без принятого результата),
+`source-status` — `tasks[].proof {reprovable, unproven[] {title, reason},
+next?}` для принятого поручения с незакрытой задачей. Ревизия поручения
+из коннектора (`source.revision`) — semantic digest v2: без привязок
+критериев и необязательных документов (см.
+[connectors.md](connectors.md), «Идентичность и снимок»).
+
 ### JointVerification
 
 Совместная проверка закреплённой комбинации SHA нескольких репозиториев:
@@ -1356,6 +1377,26 @@ severity}` (`awaiting-answer | answered-not-applied | applied-awaiting-claim
 попыток защищает раунд ревью плана, который согласует новую редакцию. Пишется сразу за
 `graph.registered` той же транзакции.
 
+`work.rework-abandoned` (0.1.0-alpha.66) — доработка после приёмки
+оставлена: `{by: 'operator'|'host'|'graph', revision, acceptedSha, restored,
+hadAttempt}`. `cancel` открытой доработки (и повтор `cancel` для доработки,
+отменённой alpha.65 и старше, — состояние `cancelled` с `WorkState.rework`)
+или новая редакция графа, убравшая поручение с открытой доработкой, не
+отменяют задачу: работа возвращается к принятой редакции — `done`, результат
+`acceptedSha`, засчитанные попытки принятой редакции; идущая попытка
+доработки отменяется (`attempt.cancelled`, `hadAttempt: true`). `restored` —
+поручению возвращена принятая постановка (`WorkState.rework.acceptedOrder`,
+пишется с alpha.66 при открытии доработки); у доработки прежней версии
+постановки нет, остаётся текущая, а `WorkState.rework.abandoned.orderDigest`
+помнит её содержание: та же постановка в новой редакции графа снова
+открывает доработку, принятая — нет. Счёт доработок со своим пределом
+(`budgets`) сохраняется: отказом и новой доработкой предел не обойти.
+Решение — `cancel`, а не отдельная команда: принятый результат `cancel` и так
+не отменяет (`NOT_READY`), и у ведущего, который отменяет ненужную доработку,
+не остаётся способа потерять приёмку (прежде отмена доработок выводила
+принятые работы из выпуска). Ответ `cancel` — `abandoned: true`, `status:
+done`.
+
 `work.cancelled` — поручение отменено: `{by: 'operator'|'host'|'graph',
 hadAttempt}`. `engine.cancel(workId, reason?, by?)` (CLI `cancel` — `operator`,
 по умолчанию `host`); `graph` — новая редакция графа убрала поручение.
@@ -1373,8 +1414,10 @@ hadAttempt}`. `engine.cancel(workId, reason?, by?)` (CLI `cancel` — `operator`
 конверт несёт `graphId`, `workId`, `runId`, `attempt`. Пишется сразу за
 `attempt.failed` (и `attempt.expired`) в той же транзакции под fencing.
 `cause` (`environmentCauses`): `sandbox-launch`, `sandbox-network`,
-`sandbox-filesystem`, `sandbox-policy`, `dependency-network` — ставит gate в
-точке обнаружения (`TaskFailure.diagnosis`); `transport`, `preflight`
+`sandbox-filesystem`, `sandbox-policy`, `sandbox-process-list`,
+`dependency-network` — ставит gate в точке обнаружения
+(`TaskFailure.diagnosis`; `sandbox-process-list` — см. «Список процессов в
+песочнице проверок» ниже); `transport`, `preflight`
 (`BlockedError` до работы), `provider-auth`, `provider-limit`, `stalled`,
 `shutdown` (прерывание штатной остановкой), `lease-expired` — по классу отказа
 и его признакам; `process-reap` — потомков сдерживаемой команды (gate,
@@ -1754,6 +1797,13 @@ line, whatsNew?, command?}` — обновления harness и панели п�
   нового · как обновить»; не больше 10 пунктов `whatsNew`. Нет ни
   `.harness/updates.json`, ни проверки — поля нет. То же поле — в `status` (строка «Обновления: …» в
   `status --human`).
+- `previews[] {id, repositoryId, title?, url, ref, sha, workId?, startedAt,
+expiresAt, state}` (0.1.0-alpha.66, ревизия прежняя) — живые превью
+  результата (`harness preview-start`): receipt `running` с живым
+  supervisor, адрес `http://127.0.0.1:<порт>/`; не больше 20 (сверх —
+  `truncated.previews`). Панель показывает «Посмотреть результат» и
+  «остановить». Нет живых превью — поля нет. Подробно —
+  [превью](previews.md).
 - `progress.queue.runner` (`running` | `not-running`), `restartBy` и `line`
   — кто двигает очередь (как `status.runner`): `running` — живой
   controller, идущая попытка или ревью плана в живом run; `not-running` —
@@ -1880,6 +1930,105 @@ lines, linesEn}`: `--repository` без manifest или с manifest, но без
   `--repository` у `view` и `status`, а `--state` там — необязательный (одно
   из двух нужно): поддержку видно по флагу, без разбора схемы ответа.
 
+**Ревизия 6 (0.1.0-alpha.66).** Добавления, все необязательные в схеме;
+читатель ревизии 5 их игнорирует. Смысл меняют два прежних поля:
+`forecast.progress.percent` (теперь с шагами ведущего, 100 % — только после
+`release done`) и объём прогноза (планируемые задачи и отменённые доработки,
+ниже).
+
+- **Отменённая доработка — принятая работа** (P4-7). Работа `cancelled` с
+  `attemptSummary.rework` (доработка, отменённая alpha.65 и старше) в прогнозе
+  — принятая: вес 1, `done`, а не «вне объёма»; `harness cancel` возвращает
+  её к принятой редакции и в состоянии (событие `work.rework-abandoned`).
+  Представление показывает такую работу принятой и до починки: `works[]` —
+  `status: done`, этап `done`, `resultSha` — прежняя приёмка, блокировок
+  нет, `restoredFrom: 'cancelled-rework'` и `restoredLine` («принято на
+  <sha7>; доработка отменена» / "accepted at <sha7>; rework cancelled");
+  `progress.done` и `byStage` считают её принятой. Состояние при этом не
+  переписывается.
+  Лента — `work.rework-abandoned` («доработка 1 работы W оставлена: работа
+  вернулась к принятой на <sha> редакции»). Длительность попытки в
+  `remaining`/`rough` — по закончившимся попыткам **всех** работ выпуска, в
+  том числе отменённых: «ни одна попытка не закончилась» не говорится при
+  закончившихся попытках.
+- **Планируемая работа** (P4-5). Выпуск — ещё и задачи последнего снимка
+  каждой выборки (графа снимка `graph_id`), даже если последнее чтение связки
+  уже (`run --source` по части задач): проверенный, но не согласованный план.
+  Задача выпуска без работы harness — планируемая: `planned[] {id, connector,
+taskId, key?, title?, status: 'planned', from, graphId?, dependsOn?, line}`
+  (`from`: `validated` — в снимке, `read` — только в последнем чтении; не
+  больше 200, `truncated.planned`); попыток и действий нет, карточка «ещё не
+  утверждена». Зарегистрированная работа, план которой не согласован и
+  попыток не было (не доработка), — `works[].planned: true`. Обе — вес 0.
+  `forecast.progress.planned {count, keys (≤20), line}` и
+  `forecast.progress.approved {percent, total, done, left, loMs?, hiMs?}` —
+  две цифры: «по утверждённому плану ~X %, осталось ~A; с планируемыми (N
+  задач, не утверждены: …) ~Y %, осталось ~B» (только когда планируемые
+  есть). `progress.line` добавляет «планируемых (не утверждены): N»;
+  `progress.works[].line` планируемой работы — «W: ещё не утверждена».
+  Ограничение: задача, удалённая с доски, остаётся планируемой, пока
+  последний снимок её выборки её содержит, — связка не отличает удаление от
+  более узкой выборки.
+- **Критический путь** (P4-5). Нижняя граница «осталось» — не короче самой
+  длинной цепочки остатков по зависимостям (`works[].dependsOn`, у задач без
+  работы — `dependsOn` поручения снимка) и не короче доли на `concurrency`;
+  `forecast.time.chain` — длина цепочки в долях задачи.
+- **Шаги ведущего** (P4-10 e). `forecast.progress.lead {steps[] {step,
+weight, done}, weighted, total}`: `plan` (нет планируемых и работ в `draft`),
+  `questions` (только если вопросы были: открытых вопросов исполнителя и
+  вопросов источника нет), `delivery` (только со связкой: каждая принятая
+  работа связки доставлена — последняя операция доставки `delivered` с
+  принятым исходом), `report` (`release done` не раньше конца последней
+  попытки). Вместе — 10 % выпуска поровну (`weight` — доля выпуска), код —
+  90 %: `percent = round(100 × (0,9 × weighted / total + lead.weighted))`, не
+  больше 99, пока выпуск не готов; после `release done` — 100.
+- **Состояние выпуска** (P4-10 d). `forecast.progress.release {state, doneAt?,
+summary?, line}`: `in-work`, `code-accepted` (весь код принят, отчёта нет:
+  `progress.line` — «готово ~N % · код принят, ведущий ещё работает:
+  <последняя заметка>»), `done` («выпуск готов: ведущий написал итоговый
+  отчёт»; `summary` — его отчёт, до 2000 символов, без `--no-titles`).
+- **Работа ведущего во времени** (P4-10 e). `forecast.time.lead {ms, samples,
+line}` — отдельная доля, не входит в `remaining`: медиана разрывов «приёмка
+  → следующая попытка» этого проекта × (незаконченные единицы + несделанные
+  шаги ведущего); строка времени — «… + работа ведущего ~N мин». Разрывов нет
+  или выпуск готов — поля нет.
+- **Ведущий** (P4-10 a–c). `lead {active, since?, until?, endedAt?,
+lastNote? {at, plain}, notes[] {at, kind, action, workId?, plain}, line}` —
+  журнал ведущего (локальная запись `lead` состояния): сессия `harness lead
+begin|end` (аренда `until`; `active` — не закончена и аренда не истекла;
+  каждая запись ведущего продлевает её), заметки `lead note`, команды harness
+  ведущего (`kind: command`, `action: lead.<команда>` — `run` в начале и в
+  конце, `review-plan`, `review-contract`, `review-accept`, `approve`,
+  `reapprove`, `retry`, `cancel`, `pause`, `resume`, `deliver`,
+  `source-snapshot`, `source-deliver`, `source-reconcile`, ответы `input-*`;
+  команда — ведущего, только если она сама это говорит (`--by lead`,
+  `--actor lead`), это `diagnose` (только ведущего) или, без явного актёра,
+  сессия ведущего активна; с `--by`
+  или `--actor` другого значения и без сессии — не записываются и аренду не
+  продлевают; конец `run` — только если записан его старт), итог
+  `release.done`. `notes` —
+  новые сверху, не больше 20 (`truncated.leadNotes`); записи журнала — и в
+  `activity` с `actor: lead`. `line` — «ведущий работает: <заметка>» (время начала — в `since`, строка часов не несёт),
+  «ведущий давно не отмечался (срок сессии истёк)», «ведущий закончил
+  сессию», «ведущий сессию не начинал».
+- **Что задействовано** (P4-8). `resources {roles[], isolation, toolchain,
+dependencyStore, services[], gates, lines[], truncated?}` простыми словами
+  на языке `--lang`: модель и вендор каждой роли (ведущий из manifest,
+  исполнители ролей, reviewers плана, контракта и кода с запасными), изоляция
+  (`sandbox`, сеть исполнителей и проверок `closed`, `loopback`, `domains`,
+  `open`, `mixed`), закреплённый toolchain, хранилище зависимостей (`on`,
+  `partial`, `off`, готовые наборы), сервисы lifecycle сейчас — по квитанциям
+  окружения (`environment.json` попыток, `harness gates`/`smoke` и совместных
+  проверок): `running` (квитанция `active`, процесс-владелец жив, попытка
+  идёт), `stopped` (`cleaned`), `leftover` (`cleanup-failed` или `active` у
+  закончившейся попытки, `leftoverRuns` — до 5 ID для `harness cleanup
+--run`), число gates по репозиториям. Схема — `resourcesViewSchema`. Только
+  чтение файлов; единственная проверка вне них — жив ли процесс-владелец
+  квитанции `active`.
+- Порядок потерь документа сверх 256 КБ: на шаге 1 вместе с `scope` и
+  `sourceQuestions` опускаются `planned` и записи `lead.notes` (сводка
+  ведущего остаётся).
+
 **Числа не выводятся заново.** Этап, сводка попыток и расход работы — те же,
 что `status.works[]`; известные расходы и их граница — по правилам стоимости
 отчёта (`callCostKnown`, полнота usage, попытки без записей вызовов);
@@ -1894,20 +2043,28 @@ lines, linesEn}`: `--repository` без manifest или с manifest, но без
 `truncated`, плюс предупреждение `VIEW_TRUNCATED` (пункты `updates.whatsNew`
 сверх 10 — `truncated.whatsNew`). Документ больше 256 КБ UTF-8 не
 отказывает целиком, а теряет необязательное в одном порядке, пока не
-поместится (с 0.1.0-alpha.61):
+поместится (с 0.1.0-alpha.61; шаг 0 и состав шагов 1 и 3 — 0.1.0-alpha.66):
 
+0. путь работы `works[].track` у всех работ — самое объёмное поле работы,
+   целиком он есть в `view --work` (число оставшихся в документе работ без
+   опущенных полей — `truncated.workFields`);
 1. разделы связки `scope` и `sourceQuestions` (их число — в `truncated`,
-   предупреждение `VIEW_SECTIONS_DROPPED`);
+   предупреждение `VIEW_SECTIONS_DROPPED`), вместе с ними планируемые
+   задачи `planned` (`truncated.planned`), записи журнала ведущего
+   `lead.notes` (`truncated.leadNotes`) и готовность по работам
+   `forecast.progress.works` (`truncated.forecastWorks`);
 2. поля ревизии 4 у работ — `attempts.lastFailure.kind` и `counted`,
-   `blockers[].step`, `question.line` (число оставшихся в документе работ без
-   них — `truncated.workFields`);
-3. лента `activity` (`truncated.activity`);
+   `blockers[].step`, `question.line` (`truncated.workFields`);
+3. лента `activity` (`truncated.activity`), затем раздел «Что задействовано»
+   `resources` (`truncated.resources: 1`);
 4. хвосты списков `works`, `reviews` (и находок предметов), `questions`,
    `escalations`, `drift` — одной долей `n/64`, наибольшей, при которой
    документ помещается (опущенное — в `truncated` по спискам).
 
-Начиная со второго шага — предупреждение `VIEW_SIZE_REDUCED`;
-`VIEW_TRUNCATED` остаётся всегда. Счётчики `progress`, `forecast`, `updates`,
+С шага 0 (если путей работ нет — со второго) — предупреждение
+`VIEW_SIZE_REDUCED`; `VIEW_TRUNCATED` остаётся всегда. Живые превью
+`previews` (не больше 20), сессия ведущего и его последняя запись (`lead`
+без `notes`), строки прогноза и состояние выпуска не опускаются. Счётчики `progress`, `forecast`, `updates`,
 `health`, `history` и `settings` не опускаются. Отказ `VIEW_TOO_LARGE`
 (exit 4) остаётся, когда предела (`maxBytes`, по умолчанию 256 КБ) не хватает
 и документу без всех этих списков — например, при сотне ролей с запасными
@@ -1975,7 +2132,9 @@ controller, живость, время идущей попытки (ряд `load
   причина провала, удержание, эпизод восстановления с предложением,
   блокировки (без общей паузы очереди; сверх предела — `blockersTruncated`) и
   `next` — кто и что делает (по диагнозу `explain`; стадия и свойство — по
-  `nextAction`);
+  `nextAction`, с 0.1.0-alpha.66 — с восстановлением ведущим
+  `leadRecoveryStep`: на исчерпании шаг `attempts-exhausted` ведущего —
+  `diagnose` или `reset-attempts`, пока бюджет его сбросов не потрачен);
 - `stops` — диагнозы `explain` без проб runtime, кроме `action: none`.
   Отменённая работа (и упавшая с классом `cancelled`) — остановка
   (`CANCELLED`, lead `replan-dependents`), только пока от неё прямо зависит
@@ -2261,7 +2420,9 @@ Exit 1 не используется: им Node завершает процес�
 ### StackProfile
 
 Переносимый профиль стека (`schemas/stack-profile.schema.json`):
-`{id, version, extends[], capabilities[], gates[], prepare[], environment?, lifecycle?, protectedPaths[], generatedPaths[], concurrency?, runTimeoutMs?, gateTimeoutFloorMs?, roles{}, contextPacks[]}`.
+`{id, version, extends[], capabilities[], gates[], prepare[], environment?, lifecycle?, protectedPaths[], generatedPaths[], concurrency?, runTimeoutMs?, gateTimeoutFloorMs?, roles{}, contextPacks[], previews?[]}`.
+`previews` — превью результата ([превью](previews.md)): слои объединяются по ID, один ID в двух
+слоях — конфликт; `repositoryFromProfile` переносит их в репозиторий политики.
 `extends` — встроенный ID (`profiles/<id>.json` пакета, иначе слой
 `profiles/layers/<id>.json`) или относительный
 `./file.json` внутри репозитория; не глубже 16 слоёв и не больше 32 файлов,
@@ -2322,7 +2483,7 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `events`           | `--state D [--after N] [--limit 1–500]`                                                                                     | нет   | события (неизвестный тип — `unknown`), `next`                                                                                                                                                                                                               | Только чтение                                                                                                                                                                                         |
 | `pause`            | `--state D`                                                                                                                 | да    | `ControlState`                                                                                                                                                                                                                                              | Без изменений                                                                                                                                                                                         |
 | `resume`           | `--state D`                                                                                                                 | да    | `ControlState`                                                                                                                                                                                                                                              | Решение человека: снимает паузу оператора, штатной остановки и отказа runtime вместе с её классами; паузу операции reconfigure — `PAUSED`                                                             |
-| `cancel`           | `--state D --work ID [--reason T]`                                                                                          | да    | статус поручения                                                                                                                                                                                                                                            | Отменённое — без изменений; это не retry                                                                                                                                                              |
+| `cancel`           | `--state D --work ID [--reason T]`                                                                                          | да    | статус поручения; `abandoned: true` — открытая доработка оставлена, работа снова `done`                                                                                                                                                                     | Отменённое — без изменений; это не retry; принятый результат не отменяется                                                                                                                            |
 | `retry`            | `--state D --work ID [--reset --reason T]`                                                                                  | да    | статус поручения                                                                                                                                                                                                                                            | В пределах `maxAttempts` и бюджета; `--reset` с причиной сбрасывает счётчик попыток (и у готовой работы; ответ `reset`: выполнен или почему нет; во время попытки — `NOT_READY`), но не учёт расходов |
 | `result`           | `--state D --work ID`                                                                                                       | нет   | `ResultEnvelope`                                                                                                                                                                                                                                            | Только чтение                                                                                                                                                                                         |
 | `deliver`          | `--state D --work ID --sink file:D`                                                                                         | да    | `ResultEnvelope`                                                                                                                                                                                                                                            | Доставленное не доставляется повторно; моделей и интеграции нет                                                                                                                                       |
@@ -2350,7 +2511,14 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `gates`            | `--state D [--policy F] --sha SHA\|HEAD [--gate a,b,@g] [--repository ID] [--fail-fast] [--human]`                          | да    | исход каждого gate (`passed`, `failed`, `not-run`, `skipped`), SHA, каталог логов                                                                                                                                                                           |
 | `review-code`      | `--state D [--policy F] --base REF --head REF [--role R] [--author A] [--repository ID]`                                    | да    | `CodeReviewRecord` (`kind: code`, `acceptance: false`)                                                                                                                                                                                                      | Те же ref — следующий раунд; тот же одобренный `head` и reviewer — тот же раунд без вызова; не приёмка                                                                                                |
 | `smoke`            | `--state D [--policy F] --sha SHA\|HEAD [--repository ID] [--human]`                                                        | да    | шаги окружения с длительностью, `passed`, класс отказа и совет, каталог логов                                                                                                                                                                               | Каждый вызов — новая проверка; gates и модели не вызываются, база состояния не открывается                                                                                                            |
+| `preview-start`    | `--state D [--policy F] [--preview ID] [--ref accepted\|SHA\|REF] [--work ID] [--repository ID] [--ttl DUR] [--idle DUR]`   | да    | `{preview, changed}`: receipt превью — адрес на loopback, коммит, срок, PID                                                                                                                                                                                 | То же превью на том же коммите — `changed: false`; другой коммит заменяет прежнее; внутри попытки и gate — `NOT_READY`                                                                                |
+| `preview-stop`     | `--state D [--policy F] [--preview ID] [--repository ID] [--all]`                                                           | да    | `{previews[], changed}`: итоговые receipt                                                                                                                                                                                                                   | Остановленное — `changed: false`                                                                                                                                                                      |
+| `preview-list`     | `--state D [--policy F]`                                                                                                    | да    | `{previews[]}`: receipt после сверки с процессами                                                                                                                                                                                                           | Пропавший supervisor — очистка по receipt и `failed`                                                                                                                                                  |
 | `view`             | `--state D [--policy F] [--work ID] [--no-titles] [--window 24h\|7d] [--bucket 15m\|1h] [--lang ru\|en] [--view-version 1]` | нет   | `OperatorView`; с `--work` — `WorkDetailView`                                                                                                                                                                                                               | Только чтение, без файлов в каталоге состояния; те же состояние, политика, часы и параметры — те же байты                                                                                             |
+| `lead-begin`       | `--state D [--ttl DUR] [--text T]` (синоним `lead begin`)                                                                   | да    | `lead {active, since, until}`, запись, `line`                                                                                                                                                                                                               | Сессия ведущего с арендой (`--ttl` с единицей s/m/h: 30m по умолчанию, от 1m до 12h; голое число — `INVALID_INPUT`); повтор продлевает, начало прежнее                                                |
+| `lead-note`        | `--state D --text T [--work ID]` (синоним `lead note "T"`)                                                                  | да    | `lead {active, lastNote}`, запись, `line`                                                                                                                                                                                                                   | Каждый вызов — новая запись (до 200 символов, без управляющих символов и секретов); старые вытесняются пределом 200                                                                                   |
+| `lead-end`         | `--state D [--text T]` (синоним `lead end`)                                                                                 | да    | `lead {active: false, endedAt}`, запись, `line`                                                                                                                                                                                                             | Закрывает сессию                                                                                                                                                                                      |
+| `release-done`     | `--state D --summary T` (синоним `release done "T"`)                                                                        | да    | `release {doneAt, summary, works}`, `lead`, запись, `line`                                                                                                                                                                                                  | Только когда весь код принят (иначе `NOT_READY`); повтор заменяет отчёт                                                                                                                               |
 | `capabilities`     | —                                                                                                                           | нет   | каталог общих операций (`OperationCatalog`)                                                                                                                                                                                                                 | Чистая функция установленной версии пакета                                                                                                                                                            |
 | `--version`        | —                                                                                                                           | нет   | версия пакета и API                                                                                                                                                                                                                                         | —                                                                                                                                                                                                     |
 
@@ -2380,6 +2548,61 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 Итог проверки записывается в `<state>/gates-at/<id>/result.json`
 (`{at, data}`, `data` — ответ команды): его прикладывает `review-code` того же
 SHA.
+Провал gate, который gate назвал отказом среды, несёт `gates[].environment`
+(причина из `environmentCauses`, например `sandbox-process-list`); `--human`
+печатает её перед сообщением: `[среда: sandbox-process-list]`.
+
+**Список процессов в песочнице проверок.** При `isolation.mode: os` gate
+исполняется в песочнице ОС (sandbox-runtime). На macOS ядро не запускает
+setuid-программы из песочницы, даже при профиле `(allow default)`: `/bin/ps`
+и `/usr/bin/top` отвечают EPERM («Operation not permitted», в Node —
+`spawn EPERM`), а `pgrep`/`pkill` (не setuid) печатают «Cannot get process
+list»: песочница открывает сведения только о процессах той же песочницы.
+Ни правило Seatbelt, ни параметр sandbox-runtime этого не открывают, и
+открывать по умолчанию небезопасно: `ps -E` показывает окружение каждого
+процесса того же пользователя (хост harness, CLI моделей с токенами API), а
+код gate пишет исполнитель. Разрешения «этот gate вне песочницы» в политике
+нет: что исполняет gate, не ограничено его путями — импорты модулей,
+`package.json` и скрипты менеджера пакетов, `node_modules`, неотслеживаемые
+файлы дерева пишет исполнитель, и `when.paths` внутри `protectedPaths` этого
+не меняет (gate применим и по неявным входам — манифестам и lockfiles), а вне
+песочницы проверка читает учётные данные, ходит в сеть и пишет куда угодно.
+Поэтому harness распознаёт отказ и называет его:
+
+- gate под песочницей ОС завершился ненулевым кодом, и признак — `spawn
+/bin/ps EPERM`, `spawn EPERM` без пути, `/bin/ps: Operation not permitted`,
+  `execvp() of '/bin/ps' failed`, `Cannot get process list` — есть в выводе, а
+  если JUnit назвал упавшие testcases, — в тексте каждого из них (не больше
+  200; testcase без признака оставляет провал классом `gate`). Признак
+  подтверждает собственная проба harness (`probeProcessList`: `ps -o pid= -p
+1` тем же `runCheck`, что gates, одна на процесс): только при её ответе
+  `unavailable` провал — `environment` с причиной `sandbox-process-list`, не
+  засчитанный в `maxAttempts` (в пределах `MAX_NEUTRAL_FAILURES`, как прочие
+  отказы песочницы). С 0.1.0-alpha.66 такой отказ не повторяется
+  автоматически и выдачу не ставит на паузу: повтор дал бы тот же отказ.
+  Попытка хранит `environmentCause: sandbox-process-list`, `repairDecision`
+  сразу останавливается с объяснением, а explain называет ход ведущего:
+  `RUNTIME_UNAVAILABLE`, `lead`, `fix-environment` (правило
+  `environment-gate-command`, docs/principles.md). Ведущий меняет gate или
+  команду. Текст evidence начинается с кода
+  `GATE_SANDBOX_PROCESS_LIST` (метка текста отказа, а не код `HarnessError`:
+  отказ попытки — `environment`, `harness gates` — `GATE_FAILED`) и называет строку признака и совет: тест не
+  должен требовать список всех процессов хоста — свои дочерние процессы
+  проверяются по pid (`process.kill(pid, 0)`) или по файлам-меткам, либо такие
+  тесты выносятся из команды gate и запускаются на хосте; `isolation.mode:
+none` снимает песочницу со всех проверок и не рекомендуется. Признак,
+  напечатанный проверкой, делает провал лишь незасчитанным (не PASS) и
+  ограничен пределом незасчитанных отказов поручения.
+- `doctor` (CLI) отвечает `sandbox.processList` (`status`: `available`,
+  `unavailable`, `unknown`, `not-isolated`; `command`, `detail`, `line`); при
+  `unavailable` — строка `sandbox-process-list: …` в `notes` (не проблема:
+  gate может не вызывать `ps`).
+- `smoke` при `isolation.mode: os` отвечает `processList` (те же поля и
+  `callers` — до 10 файлов дерева на SHA, которые вызывают `ps`, `pgrep`,
+  `pkill` или `top`: абсолютный путь, имя строкой, вызов в shell; `*.md` не
+  смотрятся). Недоступен и такие файлы есть — предупреждение
+  `sandbox-process-list: <файлы> вызывают ps/pgrep/top; …`; `--human`
+  печатает строку возможности или это предупреждение.
 
 **`review-code`.** Технический обзор ветки, написанной вне harness: reviewer —
 по правилу ревью кода роли (`--role`; одна роль репозитория — по умолчанию) и
@@ -2429,6 +2652,20 @@ lifecycle `setup` и `ready`, хранилище зависимостей (`depe
 teardown исполняется и после отказа. Прерывание сигналом — `CANCELLED`.
 Логи шагов — в `<state>/gates-at/<id>` (`data.logs`), ход — в stderr.
 Библиотека: `smokeLifecycle`, `classifyLifecycleFailure`.
+
+**`preview-start`, `preview-stop`, `preview-list`.** Превью результата по
+`previews[]` репозитория (0.1.0-alpha.66): своё рабочее дерево на принятом
+коммите в `<state>/previews`, свободный loopback-порт приложения (`PORT`,
+`{port}`) за loopback-прокси, lifecycle при `services`, готовность по
+`health`; надзирающий процесс сам останавливает превью по сроку (`--ttl`,
+`ttlMs`) и простою без запросов (`--idle`, `idleMs`); `--ttl` и `--idle` —
+длительности с единицей `s`, `m` или `h` (`90s`, `30m`, `2h`), голое число —
+`INVALID_INPUT` (кроме `--idle 0` — не по простою). `--ref accepted` (по
+умолчанию) — с `--work` принятый SHA поручения, без него — вершина
+`targetRef`. Не поднялось — `LIFECYCLE_FAILED` (exit 4) с причиной и логом.
+Запускает только оператор: внутри попытки и gate — `NOT_READY`, `run` превью
+не запускает. Receipt, остановка и сверка — [превью](previews.md).
+Библиотека: `startPreview`, `stopPreviews`, `listPreviews`, `livePreviews`.
 
 **`report`.** Читает каталог состояния только для чтения и строит
 `ValueReport` (`valueReport`); `binding.json` не нужен (с ним — сверка принятых поручений с target ref, `targets`). Чтение однократное

@@ -5,6 +5,7 @@
 // (`operatorView`, `workDetailView`) только раскладывает и маскирует.
 // Только чтение: каталог состояния не создаётся и не пишется.
 
+import { resourcesInputOf } from './view-resources.ts';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
@@ -52,6 +53,9 @@ import { attemptLine, type AttemptLineFacts } from '../contracts/attempt-line.ts
 import { named, type LinePart } from '../projections/clip.ts';
 import { inputStateOf } from '../projections/input.ts';
 import { explainStop } from '../projections/stop.ts';
+import { workTrack } from '../projections/track.ts';
+import { recoveryPolicyOf } from '../projections/decisions.ts';
+import { blockingRequest } from '../engine/input-requests.ts';
 import { stopInputsIn } from '../explain/state.ts';
 import { policySecrets } from '../environment/redaction.ts';
 import {
@@ -79,7 +83,8 @@ import { reviewRoundCap } from './review.ts';
 import { reviewSubjectSummary } from './review-summary.ts';
 import { stageOfStep } from './stage.ts';
 import { cachedUpdates, installedHarness, loadUpdatesConfig } from '../update/check.ts';
-import type { UpdatesView } from '../projections/operator-view.ts';
+import type { PreviewView, UpdatesView } from '../projections/operator-view.ts';
+import { livePreviews } from './preview.ts';
 
 type StatusData = z.output<typeof statusDataSchema>;
 /** Поручение `status`; поля alpha.55 (`verification`, `lastFailure`, `plain`) — по наличию. */
@@ -191,6 +196,11 @@ export function defaultedPaths(policy: ExecutionPolicy, raw: unknown): string[] 
   const input = r.inputPolicy as Record<string, unknown> | undefined;
   if (input && typeof input === 'object' && !('threshold' in input))
     out.push('thresholds.inputSeverity');
+  // Числа восстановления, взятые из умолчаний (`settings.decisions[].source`).
+  const recovery = r.recovery as Record<string, unknown> | undefined;
+  if (recovery && typeof recovery === 'object')
+    for (const key of ['diagnoseAfter', 'leadResets'])
+      if (!(key in recovery)) out.push('decisions.recovery.' + key);
   const budgets = r.budgets as Record<string, unknown> | undefined;
   if (budgets && typeof budgets === 'object' && !('onUnknown' in budgets))
     out.push('budgetOnUnknown');
@@ -526,7 +536,7 @@ export function activityInputOf(
   const out: OperatorActivityInput[] = [];
   // Доработка после приёмки: последняя открытая новой редакцией (`WorkState.rework`).
   for (const w of works)
-    if (w.rework)
+    if (w.rework) {
       out.push({
         kind: 'work.reopened',
         at: w.rework.reopenedAt,
@@ -535,6 +545,17 @@ export function activityInputOf(
         sha: w.rework.accepted.resultSha,
         fresh: w.rework.fresh,
       });
+      // Ревизия 6: доработка оставлена — работа вернулась к принятой редакции.
+      if (w.rework.abandoned)
+        out.push({
+          kind: 'work.rework-abandoned',
+          at: w.rework.abandoned.at,
+          workId: w.id,
+          revision: w.rework.revision,
+          sha: w.rework.accepted.resultSha,
+          by: w.rework.abandoned.by,
+        });
+    }
   const blockingOf = (fs: readonly { severity: string; status?: string }[]) =>
     fs.filter((f) => f.severity === 'blocking' && (f.status === undefined || f.status === 'open'))
       .length;
@@ -813,6 +834,7 @@ export function collectOperatorViewInput(
         for (const a of own) if (!current.has(a.id)) earlier.add(a.id);
       }
     const known = new Set(v.works().map((w) => w.id));
+    const gateHolds = h.engine.environmentGateHolds(v);
     const records = callRecords(v);
     const complete = (r: (typeof records)[number]) =>
       r.outcome !== 'active' && r.outcome !== 'abandoned' && r.usage.complete && r.costUsd !== null;
@@ -861,11 +883,17 @@ export function collectOperatorViewInput(
       const active = sw.activeRunId ? v.attempt(sw.activeRunId) : undefined;
       const summary = sw.attemptSummary!;
       const stage = sw.stage!;
+      // Планируемая (ревизия 6): зарегистрирована, план не согласован, попыток
+      // не было и это не доработка принятой работы.
+      const graphState = v.graph(sw.graphId);
+      const unapproved = !graphState?.approval || graphState.approval.digest !== graphState.digest;
+      const planned = sw.status === 'draft' && unapproved && !own.length && !w.rework;
       return {
         id: sw.id,
         graphId: sw.graphId,
         status: sw.status,
         title: w.order.title,
+        ...(planned ? { planned: true as const } : {}),
         ...(sw.resultSha ? { resultSha: sw.resultSha } : {}),
         ...(w.order.dependsOn.length ? { dependsOn: w.order.dependsOn } : {}),
         stage: {
@@ -898,6 +926,18 @@ export function collectOperatorViewInput(
             attemptFacts(summary, sw.status === 'done' || sw.status === 'cancelled'),
           ),
         },
+        track: ((o) => ({
+          ru: workTrack(w, own, { ...o, lang: 'ru' }),
+          en: workTrack(w, own, { ...o, lang: 'en' }),
+        }))({
+          maxAttempts: policy.maxAttempts,
+          recovery: recoveryPolicyOf(policy),
+          question: !!blockingRequest(v, w),
+          budgetHeld: sw.blockers.some((b) => b.code === 'BUDGET_EXHAUSTED'),
+          ...((held) => (held ? { gateHold: held.gate } : {}))(
+            h.engine.gateHoldsOf(w, gateHolds)[0],
+          ),
+        }),
         rechecks: own.reduce((n, a) => n + a.evidence.filter((e) => e.recheck).length, 0),
         ...(sw.liveness ? { liveness: sw.liveness } : {}),
         ...(active?.status === 'active'
@@ -1062,6 +1102,39 @@ export function collectOperatorViewInput(
             : {}),
       },
       ...(controller ? { controller: { leaseUntil: controller.leaseUntil } } : {}),
+      ...((log) =>
+        log
+          ? {
+              lead: {
+                ...(log.session
+                  ? {
+                      session: {
+                        since: log.session.since,
+                        until: log.session.until,
+                        ...(log.session.endedAt ? { endedAt: log.session.endedAt } : {}),
+                      },
+                    }
+                  : {}),
+                entries: log.entries,
+                ...(log.release
+                  ? { release: { doneAt: log.release.doneAt, summary: log.release.summary } }
+                  : {}),
+              },
+            }
+          : {})(v.local('lead', WORKSPACE_OWNER, 'log')),
+      ...((r) => (r ? { resources: r } : {}))(
+        resourcesInputOf(policy, h.stateDir, view.baseDir, {
+          // Попытка закончилась по снимку хранилища: квитанция окружения
+          // «active» у закончившейся попытки — оставшееся после неё.
+          attemptFinished: (runId) => {
+            const a = v.attempt(runId);
+            return a ? a.status !== 'active' : undefined;
+          },
+          heldGates: h.engine
+            .environmentGateHolds(v)
+            .map((x) => ({ repositoryId: x.repositoryId, gate: x.gate, workId: x.workId })),
+        }),
+      ),
       ...(status.budgets ? { budgets: status.budgets.budgets } : {}),
       activity,
       warnings: view.warnings,
@@ -1185,12 +1258,14 @@ function readConnectorDb(
     };
     const release = releaseOf(db, path, scope, works);
     const deliveries = sourceReviewsOf(db, release.tasks);
+    const delivered = deliveredOf(db);
     return {
       connector,
       provider,
       ...(release.tasks.length ? { release: release.tasks } : {}),
       ...(release.startedAt ? { releaseStartedAt: release.startedAt } : {}),
       ...(deliveries.length ? { reviews: deliveries } : {}),
+      ...(delivered.length ? { delivered } : {}),
       tasks: scope.tasks.map((t) => ({
         id: t.id,
         key: t.key,
@@ -1245,7 +1320,15 @@ type ReleaseTask = NonNullable<OperatorSourceInput['release']>[number];
 
 type SnapshotTask = { id: string; key: string; title?: string; orderId: string; column?: string };
 type SnapshotProblem = { taskId: string; code: string; message: string };
-type SnapshotRows = { at: string; tasks: SnapshotTask[]; problems: SnapshotProblem[] }[];
+type SnapshotRows = {
+  at: string;
+  /** Граф снимка (выборка задач): у каждой выборки — своя последняя запись. */
+  graphId?: string;
+  tasks: SnapshotTask[];
+  problems: SnapshotProblem[];
+  /** Зависимости поручений снимка: orderId → orderId зависимостей. */
+  deps: Record<string, string[]>;
+}[];
 
 /**
  * Разобранные снимки связки по файлу базы: представление опрашивается часто,
@@ -1264,11 +1347,21 @@ function snapshotRows(db: DatabaseSync, path: string): SnapshotRows {
   const raw = db
     .prepare(
       `SELECT created_at AS at, json_extract(data, '$.manifest.tasks') AS tasks,
-              json_extract(data, '$.manifest.problems') AS problems
-         FROM (SELECT rowid, created_at, data FROM snapshots ORDER BY rowid DESC LIMIT ${RELEASE_SNAPSHOTS})
+              json_extract(data, '$.manifest.problems') AS problems,
+              graph_id AS graph,
+              (SELECT json_group_array(json_array(json_extract(o.value, '$.id'),
+                                                  json_extract(o.value, '$.dependsOn')))
+                 FROM json_each(data, '$.graph.orders') AS o) AS deps
+         FROM (SELECT rowid, created_at, graph_id, data FROM snapshots ORDER BY rowid DESC LIMIT ${RELEASE_SNAPSHOTS})
         ORDER BY rowid`,
     )
-    .all() as { at: string; tasks: string | null; problems: string | null }[];
+    .all() as {
+    at: string;
+    tasks: string | null;
+    problems: string | null;
+    graph: string | null;
+    deps: string | null;
+  }[];
   const parse = <T>(text: string | null): T[] => {
     try {
       const v = text ? (JSON.parse(text) as unknown) : [];
@@ -1277,10 +1370,29 @@ function snapshotRows(db: DatabaseSync, path: string): SnapshotRows {
       return [];
     }
   };
+  const depsOf = (text: string | null) => {
+    const out: Record<string, string[]> = {};
+    for (const pair of parse<unknown>(text)) {
+      if (!Array.isArray(pair) || typeof pair[0] !== 'string') continue;
+      let list: unknown = pair[1];
+      if (typeof list === 'string')
+        try {
+          list = JSON.parse(list);
+        } catch {
+          list = [];
+        }
+      out[pair[0]] = Array.isArray(list)
+        ? list.filter((x): x is string => typeof x === 'string').slice(0, 100)
+        : [];
+    }
+    return out;
+  };
   const rows = raw.map((r) => ({
     at: r.at,
+    ...(typeof r.graph === 'string' && r.graph ? { graphId: r.graph } : {}),
     tasks: parse<SnapshotTask>(r.tasks),
     problems: parse<SnapshotProblem>(r.problems),
+    deps: depsOf(r.deps),
   }));
   // Предел кэша — несколько связок одного процесса (панель читает свои базы).
   if (snapshotCache.size >= 32) snapshotCache.clear();
@@ -1309,9 +1421,12 @@ function releaseOf(
     at: string | undefined,
     tasks: readonly SnapshotTask[],
     problems: readonly SnapshotProblem[],
+    row?: SnapshotRows[number],
   ) => {
     for (const t of tasks) {
       const prev = byId.get(t.id);
+      const deps = row?.deps[t.orderId] ?? prev?.dependsOn;
+      const graphId = row?.graphId ?? prev?.graphId;
       byId.set(t.id, {
         id: t.id,
         key: t.key,
@@ -1320,16 +1435,28 @@ function releaseOf(
         ...(works.has(t.orderId) ? { workId: t.orderId } : {}),
         ...((column) => (column ? { column } : {}))(t.column ?? prev?.column),
         ...((first) => (first ? { firstSeenAt: first } : {}))(prev?.firstSeenAt ?? at),
+        ...(graphId ? { graphId } : {}),
+        ...(deps?.length ? { dependsOn: deps } : {}),
+        ...(row || prev?.snapshot ? { snapshot: true as const } : {}),
         problems: problems
           .filter((p) => p.taskId === t.id)
           .map((p) => ({ code: p.code, message: p.message })),
       });
     }
   };
-  for (const r of rows) put(r.at, r.tasks, r.problems);
+  for (const r of rows) put(r.at, r.tasks, r.problems, r);
   put(scope.readAt, scope.tasks, scope.problems);
   const latest = new Set(scope.tasks.map((t) => t.id));
-  const tasks = [...byId.values()].filter((t) => latest.has(t.id) || works.has(t.orderId));
+  // Планируемая работа (P4-5): задачи последней записи каждой выборки
+  // (графа снимка) — проверенный, но не согласованный план — входят в выпуск,
+  // даже если последнее чтение связки было уже (выборка `run --source`).
+  const lastOfGraph = new Map<string, SnapshotRows[number]>();
+  for (const r of rows) if (r.graphId) lastOfGraph.set(r.graphId, r);
+  const planned = new Set<string>();
+  for (const r of lastOfGraph.values()) for (const t of r.tasks) planned.add(t.id);
+  const tasks = [...byId.values()].filter(
+    (t) => latest.has(t.id) || works.has(t.orderId) || planned.has(t.id),
+  );
   const starts = tasks
     .map((t) => t.firstSeenAt)
     .filter((x): x is string => typeof x === 'string' && Number.isFinite(Date.parse(x)))
@@ -1398,6 +1525,36 @@ function sourceReviewsOf(
     });
   }
   return out;
+}
+
+/**
+ * Работы, доставленные в источник (ревизия 6, шаг ведущего «доставка»):
+ * последняя операция задачи доставлена и несёт принятый результат.
+ */
+function deliveredOf(db: DatabaseSync): string[] {
+  let rows: { task: string; work: string; status: string; data: string }[];
+  try {
+    rows = db
+      .prepare(
+        `SELECT task_id AS task, work_id AS work, status, data FROM operations
+          ORDER BY updated_at, rowid`,
+      )
+      .all() as typeof rows;
+  } catch {
+    return [];
+  }
+  const last = new Map<string, (typeof rows)[number]>();
+  for (const r of rows) last.set(r.task, r);
+  const out = new Set<string>();
+  for (const r of last.values()) {
+    if (r.status !== 'delivered') continue;
+    try {
+      if ((JSON.parse(r.data) as { outcome?: string }).outcome === 'accepted') out.add(r.work);
+    } catch {
+      /* запись не разобрана — не доставка */
+    }
+  }
+  return [...out].sort();
 }
 
 /** Поля manifest снимка коннектора, которые читает представление. */
@@ -1547,10 +1704,15 @@ export function harnessView(
     ...(options.lang ? { lang: options.lang } : {}),
   };
   const updates = options.workId === undefined ? updatesInput(stateDir, policy.baseDir) : undefined;
+  // Живые превью результата — из их receipt, только чтение (docs/previews.md).
+  const previews = options.workId === undefined ? previewsInput(stateDir) : undefined;
   const project = (input: OperatorViewInput) =>
     options.workId !== undefined
       ? workDetailView(input, options.workId, projection)
-      : operatorView(updates ? { ...input, updates } : input, projection);
+      : operatorView(
+          { ...input, ...(updates ? { updates } : {}), ...(previews ? { previews } : {}) },
+          projection,
+        );
   if (!existsSync(join(stateDir, 'state.sqlite')))
     return project(emptyInput(policy, options.now ?? Date.now(), stateDir));
   // Однократное чтение без файлов в каталоге состояния (как `report`):
@@ -1626,6 +1788,29 @@ export function locateProject(options: {
  * Ни настройки, ни проверки — поля нет; настройка не по схеме — тоже нет
  * (представление не ломается, отказ видно в `harness update`).
  */
+/** Живые превью для представления: receipt `running` с живым supervisor; нет — undefined. */
+function previewsInput(stateDir: string): PreviewView[] | undefined {
+  const list = livePreviews(stateDir).flatMap((r) =>
+    r.url
+      ? [
+          {
+            id: r.id,
+            repositoryId: r.repositoryId,
+            ...(r.title ? { title: r.title } : {}),
+            url: r.url,
+            ref: r.ref,
+            sha: r.sha,
+            ...(r.workId ? { workId: r.workId } : {}),
+            startedAt: r.startedAt,
+            expiresAt: r.expiresAt,
+            state: 'running' as const,
+          },
+        ]
+      : [],
+  );
+  return list.length ? list : undefined;
+}
+
 function updatesInput(stateDir: string, baseDir: string): UpdatesView | undefined {
   try {
     const { config, exists } = loadUpdatesConfig(baseDir, { quiet: true });

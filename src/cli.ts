@@ -27,6 +27,8 @@ import {
   executionPolicySchema,
   exitCodeOf,
   exitCodes,
+  leadDiagnosisCauses,
+  type LeadDiagnosisCause,
   projectManifestSchema,
   type CliArgument,
   type CliCommand,
@@ -70,6 +72,7 @@ import {
   stepStatusText,
 } from './control/lifecycle-smoke.ts';
 import { defaultResourceDatabase } from './environment/resources.ts';
+import { listPreviews, startPreview, stopPreviews } from './control/preview.ts';
 import {
   UPDATE_OPERATION,
   applyUpdate,
@@ -97,6 +100,18 @@ import {
 } from './update/schedule.ts';
 import { updateText } from './update/text.ts';
 import { updateModes, updatesConfigSchema } from './contracts/update.ts';
+import {
+  LEAD_LOGGED_COMMANDS,
+  leadBegin,
+  leadCommandEntry,
+  leadEnd,
+  leadNote,
+  leadCommandActor,
+  leadTtlMs,
+  recordLeadCommand,
+  releaseDone,
+} from './control/lead.ts';
+import { parseDurationFlag } from './control/duration.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -349,11 +364,38 @@ const relayCheck = async (
   explicit: string | undefined,
   candidate: string | undefined,
   state?: string,
+  policy?: ExecutionPolicy,
 ) => {
   const file = explicit ?? (candidate && existsSync(candidate) ? candidate : undefined);
   if (!file) return undefined;
   const { relayCompatibilityCheck } = await import('./integrations/connector/commands.ts');
-  return relayCompatibilityCheck(file, { stateDir: resolve(state ?? '.') });
+  const known = await knownTests(state);
+  return relayCompatibilityCheck(file, {
+    stateDir: resolve(state ?? '.'),
+    ...((policy ?? known?.policy) ? { policy: (policy ?? known?.policy)! } : {}),
+    ...(known ? { known: known.tests } : {}),
+  });
+};
+
+/**
+ * testcases gates из evidence попыток каталога состояния (только чтение) и
+ * его политика — для проверки привязок критериев коннектора. Нет каталога
+ * или он не инициализирован — undefined.
+ */
+const knownTests = async (state?: string) => {
+  if (!state || !existsSync(bindingFile(state))) return undefined;
+  try {
+    const b = binding(state);
+    const h = open(state, b, 'state');
+    try {
+      const { Connector } = await import('./integrations/connector/commands.ts');
+      return { tests: Connector.known(h), policy: b.policy, baseDir: b.baseDir };
+    } finally {
+      h.close();
+    }
+  } catch {
+    return undefined;
+  }
 };
 
 /**
@@ -395,6 +437,7 @@ const options = {
   limit: { type: 'string' },
   reset: { type: 'boolean' },
   once: { type: 'boolean' },
+  all: { type: 'boolean' },
   profile: { type: 'string' },
   repository: { type: 'string' },
   source: { type: 'string' },
@@ -436,6 +479,7 @@ const options = {
   sha: { type: 'string' },
   gate: { type: 'string' },
   'fail-fast': { type: 'boolean' },
+  reprove: { type: 'boolean' },
   'writer-probe': { type: 'boolean' },
   'apply-loopback': { type: 'boolean' },
   'accept-limitation': { type: 'string', multiple: true },
@@ -459,6 +503,18 @@ const options = {
   wait: { type: 'string' },
   scheduled: { type: 'boolean' },
   'confirm-formats': { type: 'string' },
+  preview: { type: 'string' },
+  ref: { type: 'string' },
+  ttl: { type: 'string' },
+  idle: { type: 'string' },
+  summary: { type: 'string' },
+  cause: { type: 'string' },
+  hypothesis: { type: 'string' },
+  evidence: { type: 'string', multiple: true },
+  diagnosis: { type: 'string' },
+  recovery: { type: 'string' },
+  'diagnose-after': { type: 'string' },
+  'lead-resets': { type: 'string' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -500,11 +556,20 @@ const flagOwners = {
     'input-cancel',
     'input-supersede',
   ],
-  text: ['input-answer'],
+  text: ['input-answer', 'lead-begin', 'lead-note', 'lead-end'],
+  ttl: ['lead-begin', 'preview-start'],
+  summary: ['release-done'],
   option: ['input-answer'],
   kind: ['input-answer'],
   actor: ['input-answer', 'input-carry', 'review-plan', 'review-contract', 'review-accept'],
-  by: ['reapprove'],
+  by: ['reapprove', 'retry'],
+  cause: ['diagnose'],
+  hypothesis: ['diagnose'],
+  evidence: ['diagnose'],
+  diagnosis: ['retry'],
+  recovery: ['init'],
+  'diagnose-after': ['init'],
+  'lead-resets': ['init'],
   'accept-limitation': ['review-plan', 'review-contract', 'review-accept'],
   'continue-review': ['review-plan', 'review-contract'],
   'request-version': ['input-answer', 'input-apply', 'input-cancel', 'input-supersede'],
@@ -515,6 +580,7 @@ const flagOwners = {
   sha: ['gates', 'smoke'],
   gate: ['gates'],
   'fail-fast': ['gates'],
+  reprove: ['source-deliver'],
   'writer-probe': ['smoke'],
   'apply-loopback': ['smoke'],
   watch: ['status'],
@@ -531,6 +597,9 @@ const flagOwners = {
   wait: ['update'],
   scheduled: ['update'],
   'confirm-formats': ['update'],
+  preview: ['preview-start', 'preview-stop'],
+  ref: ['preview-start'],
+  idle: ['preview-start'],
 } as const;
 
 /** Явное человеческое представление успешного ответа (`--human`). */
@@ -1006,6 +1075,45 @@ async function runUpdate(
   return { data: r.data, code: r.code };
 }
 
+/** `init --recovery lead|user --diagnose-after N --lead-resets N` → `policy.recovery`. */
+function recoveryFlags(v: {
+  recovery?: string | undefined;
+  'diagnose-after'?: string | undefined;
+  'lead-resets'?: string | undefined;
+}) {
+  const int = (flag: 'diagnose-after' | 'lead-resets', min: number, max: number) => {
+    const raw = v[flag];
+    if (raw === undefined) return undefined;
+    const n = Number(raw);
+    if (!/^\d+$/.test(raw) || n < min || n > max)
+      throw new HarnessError('INVALID_INPUT', `--${flag}: целое от ${min} до ${max}`, [
+        { path: ['--' + flag], message: raw },
+      ]);
+    return n;
+  };
+  const diagnoseAfter = int('diagnose-after', 1, 10);
+  const leadResets = int('lead-resets', 0, 5);
+  if (v.recovery === undefined) {
+    if (diagnoseAfter !== undefined || leadResets !== undefined)
+      throw new HarnessError(
+        'INVALID_INPUT',
+        '--diagnose-after и --lead-resets — вместе с --recovery lead|user',
+      );
+    return undefined;
+  }
+  const mode: 'lead' | 'user' | undefined =
+    v.recovery === 'lead' ? 'lead' : v.recovery === 'user' ? 'user' : undefined;
+  if (!mode)
+    throw new HarnessError('INVALID_INPUT', '--recovery: ожидается lead или user', [
+      { path: ['--recovery'], message: v.recovery },
+    ]);
+  return {
+    mode,
+    ...(diagnoseAfter !== undefined ? { diagnoseAfter } : {}),
+    ...(leadResets !== undefined ? { leadResets } : {}),
+  };
+}
+
 async function run(
   argv: string[],
 ): Promise<{ command: CliCommand | 'version'; data: unknown; code?: number; text?: string }> {
@@ -1330,13 +1438,32 @@ async function run(
             command,
             data: await h.deliver(need('work'), sinkOf(need('sink'), h, b.baseDir)!),
           };
+        // `--by operator` — то же, что без флага, но явно: журнал ведущего её не пишет.
+        if (command === 'retry' && v.by !== undefined && v.by !== 'lead' && v.by !== 'operator')
+          throw new HarnessError(
+            'INVALID_INPUT',
+            '--by: lead или operator (без флага — оператор)',
+            [{ path: ['--by'], message: v.by }],
+          );
+        const lead = command === 'retry' && v.by === 'lead';
+        if (v.diagnosis !== undefined && !(lead && v.reset))
+          throw new HarnessError(
+            'INVALID_INPUT',
+            '--diagnosis — только со сбросом ведущего (--reset --by lead)',
+          );
         const result =
           command === 'cancel'
             ? h.engine.cancel(need('work'), v.reason, 'operator')
             : h.engine.retry(
                 need('work'),
-                v.reset ? { reason: need('reason') } : undefined,
-                'operator',
+                v.reset
+                  ? {
+                      // Сброс ведущего называет причину разбором; своя причина — по желанию.
+                      reason: lead ? (v.reason ?? '') : need('reason'),
+                      ...(v.diagnosis !== undefined ? { diagnosis: v.diagnosis } : {}),
+                    }
+                  : undefined,
+                lead ? 'lead' : 'operator',
               );
         return {
           command,
@@ -1345,8 +1472,58 @@ async function run(
             status: result.work.status,
             attempt: result.work.attempt,
             changed: result.changed,
+            ...('abandoned' in result && result.abandoned ? { abandoned: true as const } : {}),
             ...('reset' in result && result.reset ? { reset: result.reset } : {}),
           },
+        };
+      } finally {
+        h.close();
+      }
+    }
+    case 'lead-begin':
+    case 'lead-note':
+    case 'lead-end':
+    case 'release-done': {
+      // Журнал ведущего (0.1.0-alpha.66): одна локальная запись состояния.
+      const h = open(need('state'), binding(need('state')), false);
+      try {
+        const data =
+          command === 'lead-begin'
+            ? leadBegin(h.engine, {
+                ttlMs: leadTtlMs(typeof v.ttl === 'string' ? v.ttl : undefined),
+                ...optional('text', typeof v.text === 'string' ? v.text : undefined),
+              })
+            : command === 'lead-note'
+              ? leadNote(h.engine, {
+                  text: need('text'),
+                  ...optional('workId', typeof v.work === 'string' ? v.work : undefined),
+                })
+              : command === 'lead-end'
+                ? leadEnd(
+                    h.engine,
+                    optional('text', typeof v.text === 'string' ? v.text : undefined),
+                  )
+                : releaseDone(h.engine, { summary: need('summary') });
+        return { command, data };
+      } finally {
+        h.close();
+      }
+    }
+    case 'diagnose': {
+      const cause = need('cause');
+      if (!(leadDiagnosisCauses as readonly string[]).includes(cause))
+        throw new HarnessError('INVALID_INPUT', `--cause: ${leadDiagnosisCauses.join(' | ')}`, [
+          { path: ['--cause'], message: cause },
+        ]);
+      const h = open(need('state'), binding(need('state')), true);
+      try {
+        return {
+          command,
+          data: h.engine.diagnose(need('work'), {
+            cause: cause as LeadDiagnosisCause,
+            ...(v.hypothesis !== undefined ? { hypothesis: v.hypothesis } : {}),
+            ...(v.evidence ? { evidence: v.evidence } : {}),
+          }),
         };
       } finally {
         h.close();
@@ -1381,7 +1558,12 @@ async function run(
       const loaded = v.policy ? loadPolicy(v.policy) : undefined;
       const connector = await connectorOf(need('source'), v.state ?? '.', loaded?.policy);
       try {
-        const data = await connector.check(loaded?.policy, loaded?.baseDir);
+        const known = await knownTests(v.state);
+        const data = await connector.check(
+          loaded?.policy ?? known?.policy,
+          loaded?.baseDir ?? known?.baseDir,
+          known?.tests,
+        );
         const ok = data.connected && data.projectMatches && data.problems.length === 0;
         return { command, data, code: ok ? exitCodes.ok : exitCodes.refused };
       } finally {
@@ -1414,7 +1596,9 @@ async function run(
       try {
         if (command === 'source-status') return { command, data: await connector.status(h) };
         if (command === 'source-deliver') {
-          const data = await connector.deliver(h, v.work);
+          const data = v.reprove
+            ? await connector.reprove(h, v.work)
+            : await connector.deliver(h, v.work);
           const settled = data.deliveries.every((d) =>
             d.delivery.every((x) => x.status === 'delivered'),
           );
@@ -1462,6 +1646,7 @@ async function run(
         ...(v.plan ? { plan: true } : {}),
         ...(v.lean ? { lean: true } : {}),
         ...(v['lead-technical-answers'] ? { leadTechnicalAnswers: true } : {}),
+        ...((r) => (r ? { recovery: r } : {}))(recoveryFlags(v)),
       });
       // Ведущий внутри песочницы (Codex seatbelt): предупреждение с флагами запуска.
       const sandboxed = leadSandboxCheck({
@@ -1802,6 +1987,67 @@ async function run(
         process.off('SIGTERM', stop);
       }
     }
+    case 'preview-start':
+    case 'preview-stop':
+    case 'preview-list': {
+      const state = need('state');
+      const b = v.policy ? loadPolicy(v.policy) : binding(state);
+      const ctx = { policy: b.policy, baseDir: b.baseDir, stateDir: resolve(state) };
+      if (command === 'preview-list') return { command, data: await listPreviews(ctx) };
+      if (command === 'preview-stop')
+        return {
+          command,
+          data: await stopPreviews(ctx, {
+            ...optional('repositoryId', v.repository),
+            ...optional('previewId', v.preview),
+            ...(v.all ? { all: true } : {}),
+          }),
+        };
+      // Длительности — с единицей (`90s`, `30m`, `2h`), как у `lead-begin --ttl`;
+      // голое число отклоняется (кроме `--idle 0` — «не по простою»).
+      const duration = (flag: 'ttl' | 'idle') => {
+        const raw = v[flag];
+        if (raw === undefined) return undefined;
+        return parseDurationFlag(flag, raw, {
+          minMs: 1000,
+          maxMs: 86_400_000,
+          ...(flag === 'idle' ? { zero: true } : {}),
+        });
+      };
+      const ttlMs = duration('ttl');
+      const idleMs = duration('idle');
+      // Принятый результат поручения — из базы состояния, только чтение.
+      const work = (id: string) => {
+        if (!existsSync(join(resolve(state), 'state.sqlite'))) return undefined;
+        const h = open(state, b, 'state');
+        try {
+          return h.engine.read((view) => {
+            const w = view.work(id);
+            return w
+              ? {
+                  status: w.status,
+                  repositoryId: w.order.repositoryId,
+                  ...(w.resultSha ? { resultSha: w.resultSha } : {}),
+                }
+              : undefined;
+          });
+        } finally {
+          h.close();
+        }
+      };
+      return {
+        command,
+        data: await startPreview(ctx, {
+          ...optional('repositoryId', v.repository),
+          ...optional('previewId', v.preview),
+          ...optional('ref', v.ref),
+          ...optional('workId', v.work),
+          ...optional('ttlMs', ttlMs),
+          ...optional('idleMs', idleMs),
+          work,
+        }),
+      };
+    }
     case 'update': {
       const r = await runUpdate(v, resolve(need('state')));
       return { command, data: r.data, ...optional('code', r.code) };
@@ -1826,6 +2072,7 @@ async function run(
         {
           ...optional('planAuthors', v.policy ? manifestLead(v.policy) : undefined),
           leadSandbox: true,
+          processList: true,
         },
       );
       // Manifest проекта рядом с политикой расходится с ней по слою lean — предупреждение.
@@ -1836,10 +2083,17 @@ async function run(
         v.source,
         v.policy ? join(dirname(resolve(v.policy)), 'connector.json') : undefined,
         v.state,
+        b?.policy,
       );
       if (!relay) return { command, data: report };
       if (relay.warning)
         report.warnings = [...(report.warnings ?? []), `RELAY_COMPATIBILITY: ${relay.warning}`];
+      // Критерий, который коннектор не докажет, виден до запуска (P4-6).
+      if (relay.bindings?.length)
+        report.warnings = [
+          ...(report.warnings ?? []),
+          ...relay.bindings.map((b) => `RELAY_CRITERIA_BINDING: ${b}`),
+        ];
       return {
         command,
         data: {
@@ -2035,7 +2289,69 @@ async function run(
   }
 }
 
-const argv = process.argv.slice(2);
+/**
+ * Синонимы журнала ведущего (0.1.0-alpha.66): `harness lead begin|note|end` и
+ * `harness release done`; строка без флага после `lead note` — `--text`,
+ * после `release done` — `--summary`.
+ */
+function leadAlias(args: string[]): string[] {
+  const [a, b, ...rest] = args;
+  const lifted = (flag: string) =>
+    rest[0] !== undefined && !rest[0].startsWith('--') ? [flag, rest[0], ...rest.slice(1)] : rest;
+  if (a === 'lead' && (b === 'begin' || b === 'end')) return [`lead-${b}`, ...rest];
+  if (a === 'lead' && b === 'note') return ['lead-note', ...lifted('--text')];
+  if (a === 'release' && b === 'done') return ['release-done', ...lifted('--summary')];
+  return args;
+}
+
+/**
+ * Записать команду ведущего в его журнал (P4-10 a): после успешной команды
+ * (у `run` — и при старте), только для существующего состояния с привязкой;
+ * сбой журнала команду не меняет — строка в stderr. Команда — ведущего, если
+ * она сама это говорит (`--by lead`, `--actor lead`) или, без явного актёра,
+ * если сессия ведущего активна (`diagnose` — всегда ведущего); `--by`/`--actor`
+ * с другим значением — команда
+ * оператора: в журнал ведущего не пишется и аренду не продлевает
+ * (`recordLeadCommand`). `actor` задаёт решение явно: конец `run` пишется,
+ * только если записан его старт. Возвращает, записана ли строка.
+ */
+function journalLeadCommand(
+  args: string[],
+  phase: 'start' | 'end',
+  data: unknown,
+  actor?: 'lead' | 'operator',
+): boolean {
+  const command = args[0];
+  if (!command || !(LEAD_LOGGED_COMMANDS as readonly string[]).includes(command)) return false;
+  try {
+    const { values } = parseArgs({ args: args.slice(1), options, strict: false });
+    const state = typeof values.state === 'string' ? values.state : undefined;
+    if (!state || !existsSync(join(state, 'state.sqlite')) || !existsSync(bindingFile(state)))
+      return false;
+    const flags = {
+      ...optional('work', typeof values.work === 'string' ? values.work : undefined),
+      ...optional('request', typeof values.request === 'string' ? values.request : undefined),
+      ...optional('actor', typeof values.actor === 'string' ? values.actor : undefined),
+      ...(values.reset === true ? { reset: true } : {}),
+      ...(typeof values.by === 'string' ? { by: values.by } : {}),
+    };
+    const entry = leadCommandEntry(command, flags, data, phase);
+    if (!entry) return false;
+    const h = open(state, binding(state), false);
+    try {
+      return recordLeadCommand(h.engine, entry, actor ?? leadCommandActor(command, flags));
+    } finally {
+      h.close();
+    }
+  } catch (error) {
+    process.stderr.write(
+      `harness: журнал ведущего не записан: ${(error as Error)?.message ?? String(error)}\n`,
+    );
+    return false;
+  }
+}
+
+const argv = leadAlias(process.argv.slice(2));
 // Справка команды: `harness <команда> --help|-h` или `harness help <команда>` —
 // текст на stdout, exit 0; неизвестная команда — обычный отказ ниже.
 // `-h`/`--help` — только на месте флага: значение строкового параметра
@@ -2065,7 +2381,22 @@ let envelope: CliEnvelope;
 let code: number = exitCodes.ok;
 let text: string | undefined;
 try {
-  const result = await run(argv);
+  // Конец `run` пишется в журнал ведущего, только если записан его старт.
+  const runBy =
+    argv[0] === 'run'
+      ? journalLeadCommand(argv, 'start', undefined)
+        ? ('lead' as const)
+        : ('operator' as const)
+      : undefined;
+  let result: Awaited<ReturnType<typeof run>>;
+  try {
+    result = await run(argv);
+  } catch (error) {
+    // Запуск ведущего закончился отказом — тоже конец его run.
+    if (runBy) journalLeadCommand(argv, 'end', undefined, runBy);
+    throw error;
+  }
+  journalLeadCommand(argv, 'end', result.data, runBy);
   // Ответ проверяется схемой своей команды: CLI не может выдать данные вне договора.
   envelope = {
     apiVersion: API_VERSION,

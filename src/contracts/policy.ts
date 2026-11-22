@@ -43,6 +43,58 @@ export const lifecycleSchema = z.strictObject({
   teardown: z.array(stepSchema).min(1),
 });
 
+/** Предел превью одного репозитория (`previews[]`). */
+export const PREVIEW_LIMIT = 10;
+/** Путь проверки готовности превью: абсолютный путь URL на loopback-порту приложения. */
+const previewHealthPath = z
+  .string()
+  .min(1)
+  .max(500)
+  .regex(/^\/\S*$/, 'health — путь URL от корня, например /health');
+/**
+ * Превью результата (`previews[]` репозитория и профиля, docs/previews.md):
+ * как собрать и запустить приложение на принятом коммите, чтобы человек
+ * посмотрел результат в браузере. Запускает только оператор или ведущий по
+ * его просьбе (`harness preview-start`), никогда — `run`, попытка или gate.
+ *
+ * - `build` — шаги до запуска (установка, сборка) в рабочем дереве превью;
+ * - `start` — команда долгоживущего процесса: порт приложения — в переменной
+ *   `PORT` и подстановке `{port}` (в `start` и значениях `env`), адрес —
+ *   `HOST=127.0.0.1` и `{host}`: приложение слушает только loopback;
+ * - `env` — значения окружения превью поверх окружения репозитория;
+ * - `services: true` — вокруг превью идут lifecycle `setup`/`ready`/`teardown`
+ *   репозитория (БД и прочие службы); нет поля — без lifecycle;
+ * - `health` — путь готовности (`/` по умолчанию): ответ меньше 400 на
+ *   `http://127.0.0.1:{port}{health}` до `readyTimeoutMs`;
+ * - `ttlMs`, `idleMs` — срок жизни и простой без запросов, после которых
+ *   harness останавливает превью сам (`idleMs: 0` — без остановки по простою).
+ *
+ * Необязательное поле без умолчания: политика и профиль без него сохраняют digest.
+ */
+export const previewSchema = z.strictObject({
+  id: idSchema,
+  title: trimmedText(1, 80).optional(),
+  build: z.array(stepSchema).max(20).optional(),
+  start: z.array(z.string().min(1)).min(1),
+  /** Каталог команд относительно корня дерева; нет — корень. */
+  cwd: relativePathSchema.optional(),
+  env: z.record(envKey, z.string()).optional(),
+  services: z.boolean().optional(),
+  health: previewHealthPath.optional(),
+  readyTimeoutMs: z.number().int().min(1000).max(600_000).optional(),
+  ttlMs: z.number().int().min(1000).max(86_400_000).optional(),
+  idleMs: z.number().int().min(0).max(86_400_000).optional(),
+});
+export type PreviewDefinition = z.infer<typeof previewSchema>;
+/** Список превью: ID без повторов. */
+export const previewsSchema = z
+  .array(previewSchema)
+  .min(1)
+  .max(PREVIEW_LIMIT)
+  .refine((list) => new Set(list.map((p) => p.id)).size === list.length, {
+    message: 'Повтор ID превью',
+  });
+
 const gateCommon = {
   id: idSchema,
   command: z.array(z.string().min(1)).min(1),
@@ -288,6 +340,13 @@ export const repositoryPolicySchema = z.strictObject({
    * политика без него сохраняет digest.
    */
   writerProbe: z.array(stepSchema).max(20).optional(),
+  /**
+   * Превью результата (`previewSchema`, docs/previews.md): запускает только
+   * оператор командой `harness preview-start`. Не условие исполнения кода —
+   * в `executionDigest` не входит. Необязательное поле без умолчания:
+   * политика без него сохраняет digest.
+   */
+  previews: previewsSchema.optional(),
 });
 
 /** Предел расходов (USD) и/или времени вызовов; хотя бы одно поле — выражено вариантами. */
@@ -512,6 +571,31 @@ export const executionPolicySchema = z.strictObject({
    * `executionDigest` не входит: закрепляется в попытке при выдаче.
    */
   inputPolicy: inputPolicySchema.optional(),
+  /**
+   * Кто восстанавливает работу после повторных отказов (docs/principles.md
+   * «Кто принимает решения»). `mode: lead` — после `diagnoseAfter`
+   * засчитанных отказов работы следующая попытка не выдаётся без
+   * диагностики ведущего (`harness diagnose`), а при исчерпанных попытках
+   * ведущий сам даёт новый предел (`retry --reset --by lead --diagnosis`) по
+   * свежей технической диагностике — не больше `leadResets` раз на предел
+   * попыток работы (0 — сбрасывает только человек). `mode: user` — прежнее
+   * поведение: шлюза диагностики нет, исчерпание — решение человека.
+   * `diagnoseAfter` — от 1 до 10; полезные значения — от 1 до
+   * `maxAttempts - 1`: при `diagnoseAfter ≥ maxAttempts` шлюза до исчерпания
+   * нет, разбор ведущего — только при исчерпании (doctor говорит об этом).
+   * Нет поля — `mode: lead`, если технические вопросы исполнителя решает
+   * ведущий (`inputPolicy.leadAnswers.technical`), иначе `user`; явное поле
+   * всегда главнее (`recoveryPolicyOf`). В `executionDigest` не входит: это
+   * правило надзора (кто решает), а не условие исполнения кода, и его
+   * включение не требует нового согласования графа.
+   */
+  recovery: z
+    .strictObject({
+      mode: z.enum(['lead', 'user']),
+      diagnoseAfter: z.number().int().min(1).max(10).default(2),
+      leadResets: z.number().int().min(0).max(5).default(2),
+    })
+    .optional(),
   maxAttempts: z.number().int().min(1).max(10).default(3),
   repairBudget: z.number().int().min(0).max(50).default(6),
   reuseImplementation: z.boolean().default(true),
@@ -561,7 +645,8 @@ export const policyDigest = (policy: ExecutionPolicy) => digestOf(policy);
  * проверка окружения перед запуском (`lifecyclePreflight`) — тоже надзор;
  * закреплённый toolchain (`toolchain`) не входит: фактический toolchain
  * каждой проверки записан в её evidence, и закрепление на идущем выпуске не
- * требует нового согласования.
+ * требует нового согласования. Превью репозиториев (`previews`) — не
+ * исполнение кода попытки, а просмотр принятого человеком: тоже не входят.
  * `policyDigest` — digest загруженной
  * политики целиком: им сверяются применение политики (`appliedPolicy`) и
  * запрос операции reconfigure.
@@ -575,6 +660,8 @@ export const executionDigest = (policy: ExecutionPolicy) =>
     inputPolicy: undefined,
     lifecyclePreflight: undefined,
     toolchain: undefined,
+    repositories: policy.repositories.map((r) => ({ ...r, previews: undefined })),
+    recovery: undefined,
   });
 
 /** Пути `toolProfile` и `runtime` назначений в ролях и правилах ревью: какой профиль у кого. */
@@ -630,6 +717,8 @@ export const isolationDigest = (policy: ExecutionPolicy) =>
  */
 export const inputPolicyOf = (policy: Pick<ExecutionPolicy, 'inputPolicy'>): InputPolicy =>
   policy.inputPolicy ?? DEFAULT_INPUT_POLICY;
+
+export { DEFAULT_RECOVERY, recoveryPolicyOf, type RecoveryPolicy } from './decision-rules.ts';
 
 export type ReviewKind = 'code' | 'plan' | 'contract';
 

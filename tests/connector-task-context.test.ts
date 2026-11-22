@@ -417,7 +417,7 @@ test('alpha.60: вопросы владельцу из Relay и весь сре�
       typeof operatorView
     >;
     operatorViewSchema.parse(view);
-    assert.equal(view.viewRevision, 5);
+    assert.equal(view.viewRevision, 6);
     assert.deepEqual(
       view.scope?.tasks.map((t) => [t.key, t.state, t.workId]),
       [[s.task.key, 'in-harness', s.workId]],
@@ -933,12 +933,24 @@ test('alpha.60 (P11): прогноз выпуска — готовность в�
   const view = operatorView(input);
   operatorViewSchema.parse(view);
   const f = view.forecast!;
-  // (1 + 1/5 + 0) / 3 = 40 %
+  // Код (1 + 1/5 + 0) / 3 — 90 % выпуска: 36 %; шаги ведущего (ревизия 6):
+  // план не согласован — WEB-3 ещё планируемая, доставки и отчёта нет.
   assert.deepEqual(
     [f.progress.percent, f.progress.done, f.progress.left, f.progress.total, f.progress.basis],
-    [40, 1, 2, 3, 'scope'],
+    [36, 1, 2, 3, 'scope'],
   );
-  assert.equal(f.progress.line, 'готово ~40 %, осталось задач: 2 из 3, в работе: 1');
+  assert.equal(
+    f.progress.line,
+    'готово ~36 %, осталось задач: 2 из 3, в работе: 1, планируемых (не утверждены): 1',
+  );
+  // Две цифры: по утверждённому плану (WEB-1, WEB-2) и с планируемой WEB-3.
+  assert.equal(f.progress.planned?.count, 1);
+  assert.deepEqual(f.progress.planned?.keys, ['WEB-3']);
+  assert.equal(f.progress.approved?.percent, 54);
+  assert.match(
+    f.progress.planned.line,
+    /^по утверждённому плану ~54 %, осталось ~.+; с планируемыми \(1 задача, не утверждены: WEB-3\) ~36 %, осталось ~/,
+  );
   assert.equal(f.time.elapsedMs, 100 * 60_000);
   // Осталось 1,8 задачи × 10 мин × 2 попытки: последовательно 36 мин; параллельно —
   // не быстрее одной задачи.
@@ -963,7 +975,10 @@ test('alpha.60 (P11): прогноз выпуска — готовность в�
   assert.match(f.time.line, /ждут людей сейчас: 1, до 15 мин — в прогноз не входит/);
   assert.ok(f.assumptions.length >= 3);
   const en = operatorView(input, { lang: 'en' }).forecast!;
-  assert.equal(en.progress.line, 'done ~40 %, 2 of 3 task(s) left, 1 in work');
+  assert.equal(
+    en.progress.line,
+    'done ~36 %, 2 of 3 task(s) left, 1 in work, planned (not approved): 1',
+  );
 
   // Мало образцов (ревизия 5) — грубый разброс «по N попыткам», а не «неизвестно».
   const few = operatorView({ ...input, attempts: attempts.slice(0, 2) }).forecast!;
@@ -1030,10 +1045,11 @@ test('alpha.60 (P11): прогноз — p50/p90 разных попыток, з
     ],
   });
   const f = operatorView(input).forecast!;
-  // Объём 3 (отменённая вне объёма): 1 + 1 + 0 = 67 %.
+  // Объём 3 (отменённая вне объёма): код (1 + 1 + 0) / 3 — 90 % выпуска: 60 %;
+  // шаги ведущего (ревизия 6) не сделаны: WEB-4 планируемая, доставки и отчёта нет.
   assert.deepEqual(
     [f.progress.total, f.progress.done, f.progress.left, f.progress.percent],
-    [3, 2, 1, 67],
+    [3, 2, 1, 60],
   );
   // p50 = 15 мин, p90 = 60 мин; попыток на принятую задачу 5 (прерванная не считается).
   assert.deepEqual(f.time.remaining, {
@@ -1053,6 +1069,7 @@ test('alpha.60 (P11): прогноз — p50/p90 разных попыток, з
   });
   const m = operatorView(many).forecast!;
   assert.equal(m.progress.basis, 'works');
-  assert.equal(m.progress.percent, 99);
+  // Код 199/200 — 90 % выпуска, план согласован (половина доли ведущего).
+  assert.equal(m.progress.percent, 95);
   assert.equal(m.progress.left, 1);
 });

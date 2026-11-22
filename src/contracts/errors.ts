@@ -43,6 +43,19 @@ export const errorCodes = {
   BUDGET_EXHAUSTED: 'refused',
   BUDGET_UNKNOWN: 'refused',
   ATTEMPTS_EXHAUSTED: 'refused',
+  /**
+   * Засчитанных отказов работы подряд столько, что следующая попытка не
+   * выдаётся без диагностики ведущего (`policy.recovery.requireDiagnosisAfter`,
+   * `harness diagnose`): третьей слепой попытки нет.
+   */
+  DIAGNOSIS_REQUIRED: 'refused',
+  /**
+   * Gate работы удержан отказом окружения без повтора (`sandbox-process-list`
+   * на вызове `ps` из базы, 0.1.0-alpha.66): выдачи нет, пока ведущий не
+   * поменяет gate (другое определение) или не повторит остановленную работу
+   * после исправления теста (`retry --by lead`).
+   */
+  ENVIRONMENT_GATE_HELD: 'refused',
   /** Задача или её контекст не помещаются в окно контекста модели (`context-exhausted`). */
   CONTEXT_EXHAUSTED: 'refused',
   /**

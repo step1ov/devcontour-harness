@@ -5,6 +5,8 @@ import {
   type NextAction,
   type WorkStatus,
 } from './enums.ts';
+import type { LeadRecoveryStep } from './lead-recovery.ts';
+import { leadRecoveryMove } from './next.ts';
 
 export interface ChainWork {
   id: string;
@@ -15,6 +17,12 @@ export interface ChainWork {
   hold?: { operation: string; reason: string };
   budgetBlock?: { reason: string };
   failureKind?: FailureKind;
+  /**
+   * Восстановление ведущим (`leadRecoveryStep`, 0.1.0-alpha.66): по
+   * исчерпанию ходит ведущий (разбор, сброс, перепланирование), пока бюджет
+   * его сбросов не потрачен. Нет поля — правило `user`.
+   */
+  leadRecovery?: LeadRecoveryStep;
 }
 export const chainRootCodes = [
   'failed',
@@ -83,15 +91,18 @@ export function chainRoots(works: ChainWork[], maxAttempts = 3): ChainRoot[] {
         ? { failureKind: t.failureKind }
         : {}),
     });
+    const lead = leadRecoveryMove(t.leadRecovery, exhausted);
     if (t.status === 'failed')
       return exhausted
-        ? root('failed-exhausted', 'user', 'reset-attempts')
-        : root('failed', 'controller', 'retry');
+        ? root('failed-exhausted', lead?.actor ?? 'user', lead?.action ?? 'reset-attempts')
+        : lead
+          ? root('failed', lead.actor, lead.action)
+          : root('failed', 'controller', 'retry');
     if (t.status === 'draft') return root('draft', 'lead', 'review-plan');
     if (t.status === 'cancelled') return root('cancelled', 'lead', 'replan-dependents');
     if (t.hold) return root('held', 'controller', 'wait', t.hold.reason);
     if (t.budgetBlock && !exhausted)
       return root('budget-blocked', 'user', 'raise-budget', t.budgetBlock.reason);
-    return root('attempts-exhausted', 'user', 'reset-attempts');
+    return root('attempts-exhausted', lead?.actor ?? 'user', lead?.action ?? 'reset-attempts');
   });
 }

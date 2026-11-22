@@ -788,17 +788,29 @@ export function connectorSuite(backend: SuiteBackend, options: SuiteOptions = {}
         current = await stale('документ', () =>
           s.project.admin.updateDocument(doc.id, '# Spec\n\nChanged format.\n'),
         );
-        // Mapping: другая конфигурация — другой digest.
-        const mapped = structuredClone(s.config);
-        (mapped.tasks as { criteria: { testId?: string }[] }[])[0]!.criteria[0]!.testId =
-          'greet.other';
-        const m = await openConnector(parseConfig(mapped, s.root), {
-          stateDir: s.state,
-          transport: s.project.transport(),
+        // Привязка критерия — сведения доставки: та же постановка, нового
+        // согласования нет (alpha.66). Поручение (writeScope) — новый digest.
+        const snapshotWith = async (patch: (t: Record<string, unknown>) => void) => {
+          const mapped = structuredClone(s.config);
+          patch((mapped.tasks as Record<string, unknown>[])[0]!);
+          const m = await openConnector(parseConfig(mapped, s.root), {
+            stateDir: s.state,
+            transport: s.project.transport(),
+          });
+          try {
+            return await m.source.snapshot();
+          } finally {
+            m.close();
+          }
+        };
+        const rebound = await snapshotWith((t) => {
+          (t.criteria as { testId?: string }[])[0]!.testId = 'greet.other';
         });
-        const remapped = await m.source.snapshot();
-        assert.notEqual(remapped.revision, current.revision, 'mapping меняет semantic digest');
-        m.close();
+        assert.equal(rebound.revision, current.revision, 'привязка критерия — не постановка');
+        const rescoped = await snapshotWith((t) => {
+          t.writeScope = ['lib'];
+        });
+        assert.notEqual(rescoped.revision, current.revision, 'поручение меняет semantic digest');
 
         // Свой in-progress и технический комментарий: та же постановка.
         const read = await o.transport.readTask(s.task.id);

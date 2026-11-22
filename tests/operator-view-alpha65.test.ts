@@ -228,7 +228,9 @@ test('alpha.65: прогноз — объём всего выпуска, «пр�
     assert.equal(f.progress.done, 2);
     // WEB-3 — 60 % (ревью первой попытки), а не 20 % этапа идущего повтора.
     assert.equal(f.progress.weighted, 2.6);
-    assert.equal(f.progress.percent, 87);
+    // Ревизия 6: код — 90 % выпуска (2,6 из 3), шаги ведущего — 10 %: план
+    // согласован (1 из 3 шагов: план, доставка, отчёт).
+    assert.equal(f.progress.percent, 81);
     assert.deepEqual(f.progress.added, [
       {
         key: 'WEB-3',
@@ -256,9 +258,13 @@ test('alpha.65: прогноз — объём всего выпуска, «пр�
     assert.equal(f.time.estimate, 'rough');
     assert.equal(f.time.remaining, undefined);
     assert.equal(f.time.rough?.samples, 3);
-    assert.match(f.time.line, /^прошло 2 ч · осталось ~[^(]+\(грубо, по 3 попыткам\)$/);
+    // Ревизия 6: работа ведущего — отдельной долей в конце строки.
+    assert.match(
+      f.time.line,
+      /^прошло 2 ч · осталось ~[^(]+\(грубо, по 3 попыткам\)( \+ работа ведущего ~.+)?$/,
+    );
     const en = operatorView(input, { lang: 'en' }).forecast!;
-    assert.match(en.time.line, /\(rough, from 3 attempts\)$/);
+    assert.match(en.time.line, /\(rough, from 3 attempts\)( \+ lead work ~.+)?$/);
     assert.equal(en.progress.added![0]!.line, 'task WEB-3 added (tasks 2 → 3)');
 
     // Повтор не роняет готовность: между попытками WEB-3 по-прежнему 60 %.
@@ -287,12 +293,32 @@ test('alpha.65: прогноз — объём всего выпуска, «пр�
         attempt('wc', 2, { startedAt: at(30), finishedAt: at(10) }),
       ],
     }).forecast!;
-    assert.equal(finished.progress.percent, 100);
+    // Ревизия 6: код принят, итогового отчёта ведущего нет — ниже 100 %
+    // (план согласован; доставка WEB-3 ещё идёт; отчёта нет).
+    assert.equal(finished.progress.percent, 93);
+    assert.equal(finished.progress.release?.state, 'code-accepted');
+    const reported = operatorView({
+      ...input,
+      now: NOW + 3_600_000,
+      works: [done('wa'), done('wb'), done('wc')],
+      attempts: [
+        ...input.attempts.filter((a) => a.status !== 'active'),
+        attempt('wc', 2, { startedAt: at(30), finishedAt: at(10) }),
+      ],
+      lead: { entries: [], release: { doneAt: at(5), summary: 'Выпуск готов.' } },
+    }).forecast!;
+    assert.equal(reported.progress.percent, 100);
+    assert.equal(reported.progress.release?.state, 'done');
     assert.equal(finished.progress.total, 3);
     assert.equal(finished.time.finishedAt, at(10));
     assert.equal(finished.time.elapsedMs, 110 * 60_000);
     assert.equal(finished.time.estimate, 'nothing');
-    assert.equal(finished.time.line, 'прошло 1 ч 50 мин · осталось: ничего');
+    // Ревизия 6: код принят, но ведущему осталось — его доля отдельно.
+    assert.equal(
+      finished.time.line,
+      'прошло 1 ч 50 мин · осталось: ничего + работа ведущего ~40 мин',
+    );
+    assert.equal(reported.time.line, 'прошло 1 ч 50 мин · осталось: ничего');
   } finally {
     rmSync(r.dir, { recursive: true, force: true });
   }

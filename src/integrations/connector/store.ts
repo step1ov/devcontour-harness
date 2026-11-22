@@ -70,6 +70,17 @@ export interface OperationRecord {
   reason?: string;
   /** Текущая редакция источника при конфликте. */
   currentRevision?: string;
+  /**
+   * Повторное доказательство критериев принятого результата
+   * (`source-deliver --reprove`): `of` — ключ обычной доставки того же
+   * результата. Нет поля — обычная доставка.
+   */
+  reprove?: { of?: string };
+  /**
+   * Digest v2 постановки, сверенной при планировании с закреплённым снимком
+   * (результат до alpha.66, digest v1 с прежними привязками критериев).
+   */
+  statement?: string;
   receipt?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -218,6 +229,14 @@ export class ConnectorStore {
     const row = this.db.prepare('SELECT data FROM snapshots WHERE revision=?').get(revision) as
       { data: string } | undefined;
     return row ? (JSON.parse(row.data) as SnapshotRecord) : undefined;
+  }
+
+  /** Все закреплённые снимки коннектора, новые первыми (сверка постановки прежних результатов). */
+  snapshots(): SnapshotRecord[] {
+    const rows = this.db.prepare('SELECT data FROM snapshots ORDER BY rowid DESC').all() as {
+      data: string;
+    }[];
+    return rows.map((r) => JSON.parse(r.data) as SnapshotRecord);
   }
 
   /** Последний закреплённый снимок графа: порядок записи, а не время создания редакции. */

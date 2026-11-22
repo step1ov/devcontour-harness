@@ -1,9 +1,15 @@
 import { RU, ruCount } from '../contracts/plural.ts';
 import { errorCodes, type ErrorCode } from '../contracts/errors.ts';
-import { repairPolicy, repairRepeats } from '../contracts/repair-policy.ts';
+import {
+  NO_RETRY_ENVIRONMENT_EXPLAIN,
+  repairPolicy,
+  repairRepeats,
+} from '../contracts/repair-policy.ts';
 import { CLIP_DIAGNOSTIC, clipText } from './clip.ts';
 import type { Actor, FailureKind, NextAction, PauseReason, WorkStatus } from './enums.ts';
 import type { InputState } from './input.ts';
+import { ruleOutcome } from './decisions.ts';
+import { gateHoldLine, type RetryRoute } from './gate-hold.ts';
 
 /**
  * Код остановки по классу отказа. Это та же таблица, которой RunResult
@@ -131,6 +137,22 @@ export type StopInput =
         failureKind?: FailureKind;
         /** Предел окна контекста последнего отказа `context-exhausted`. */
         contextLimit?: 'prompt-too-long' | 'blocking-limit';
+        /**
+         * Отказ окружения без повтора (`sandbox-process-list`, 0.1.0-alpha.66):
+         * повтора нет, ход ведущего — поменять gate или команду.
+         */
+        environmentCause?: 'sandbox-process-list';
+        /**
+         * Gate работы удержан отказом без повтора (`ENVIRONMENT_GATE_HELD`,
+         * 0.1.0-alpha.66): `workId` — работа, чья попытка упала на ps из базы.
+         */
+        gateHold?: { gate: string; workId: string; runId: string; route?: RetryRoute };
+        /**
+         * Отказ без повтора исчерпал предел незасчитанных отказов работы
+         * (`MAX_NEUTRAL_FAILURES`): маршрут повтора (`retryRoute`) — ход по
+         * исчерпанию, а не простой повтор ведущего.
+         */
+        retryRoute?: RetryRoute;
         failure?: string;
         /**
          * Отказ до начала работы (причина `preflight`): последняя попытка не
@@ -150,6 +172,28 @@ export type StopInput =
          * repair. Статус — как в `PropertyRecovery.status`.
          */
         recovery?: { status: string };
+        /**
+         * Восстановление ведущим (`policy.recovery.mode: lead`): удержание
+         * выдачи (разбор после `diagnoseAfter` отказов, перепланирование,
+         * противоречие), ход по исчерпанным попыткам и строка последнего
+         * сброса ведущего. Нет поля — правило `user`, explain прежний.
+         */
+        leadRecovery?: {
+          hold?:
+            | { kind: 'diagnosis-required'; failures: string[] }
+            | { kind: 'replan' | 'contradiction'; diagnosis: string; hypothesis?: string };
+          exhausted:
+            | {
+                actor: 'lead';
+                step: 'diagnose' | 'reset' | 'replan';
+                diagnosis?: string;
+                index?: number;
+                cap?: number;
+              }
+            | { actor: 'user'; why: string; diagnosis?: string };
+          leadResets: number;
+          line?: string;
+        };
         /** Незавершённые предпосылки, на которых движок остановит задание. */
         waitingOn?: string[];
         /** Согласование графа устарело для этой политики (режим operator). */
@@ -363,12 +407,14 @@ const messageWith = (head: string, ...parts: (string | undefined)[]) =>
 function retryPlannedOf(input: Extract<StopInput, { kind: 'work' }>) {
   const { work, repair, maxAttempts } = input;
   if (work.status !== 'failed') return false;
+  if (work.leadRecovery?.hold) return false;
   if (work.recovery) return work.recovery.status === 'retry' && repair.outlook === 'retry';
   if (repair.outlook !== undefined && repair.outlook !== 'retry') return false;
   const rule = repairPolicy[work.failureKind ?? 'unknown'];
   return (
     rule.action === 'retry' &&
-    repair.sameFailureRepairs < repairRepeats(work.failureKind ?? 'unknown', work.contextLimit) &&
+    repair.sameFailureRepairs <
+      repairRepeats(work.failureKind ?? 'unknown', work.contextLimit, work.environmentCause) &&
     work.attempt < maxAttempts &&
     repair.groupRepairsUsed < repair.groupRepairBudget
   );
@@ -424,6 +470,50 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
   // Отказ до начала работы — фаза preflight, какой бы ни была фаза попытки.
   const phase = work.preflight ? 'preflight' : (input.phase ?? failurePhase[kind]);
   const exhausted = `Исчерпано ${work.attempt} из ${ruCount(maxAttempts, RU.attemptGen)}; сброс — решение человека.`;
+  const exhaustedOutcome = (): Outcome => {
+    const lead = work.leadRecovery?.exhausted;
+    const head = `Исчерпано ${work.attempt} из ${ruCount(maxAttempts, RU.attemptGen)}`;
+    if (lead?.actor === 'lead')
+      return lead.step === 'reset'
+        ? {
+            ...ruleOutcome('exhausted-lead-reset'),
+            code: 'ATTEMPTS_EXHAUSTED',
+            cause: kind,
+            phase: 'claim',
+            note: `${head}; есть свежий технический разбор ${lead.diagnosis}: ведущий сам даёт новый предел (сброс ${lead.index} из ${lead.cap}) — harness retry --work ${work.id} --reset --by lead --diagnosis ${lead.diagnosis}.`,
+          }
+        : lead.step === 'replan'
+          ? {
+              ...ruleOutcome('diagnosis-split'),
+              cause: kind,
+              phase: 'claim',
+              note: `${head}; разбор ${lead.diagnosis}: задача велика — перепланируйте и согласуйте разделение.`,
+            }
+          : {
+              ...ruleOutcome('exhausted-diagnose'),
+              code: 'ATTEMPTS_EXHAUSTED',
+              cause: kind,
+              phase: 'claim',
+              note: `${head}; сбросы ведущего ещё есть: ведущий разбирает последний отказ (harness diagnose --work ${work.id} --cause … --hypothesis "…"), при технической причине даёт новый предел сам.`,
+            };
+    const why = lead?.actor === 'user' ? lead.why : undefined;
+    return {
+      ...ruleOutcome('exhausted-user'),
+      code: 'ATTEMPTS_EXHAUSTED',
+      cause: kind,
+      phase: 'claim',
+      note:
+        why === 'cap'
+          ? `${head}; сбросы ведущего потрачены (${work.leadRecovery!.leadResets}): сброс — решение человека.`
+          : why === 'cause'
+            ? `${head}; разбор ${lead!.diagnosis} — не техническая причина: сброс — решение человека.`
+            : why === 'repeated'
+              ? `${head}; по разбору ${lead!.diagnosis} уже сбрасывали: сброс — решение человека.`
+              : why === 'budget'
+                ? `${head}; бюджет работы исчерпан: решение человека.`
+                : exhausted,
+    };
+  };
   if (work.status === 'done')
     return {
       code: 'NOT_READY',
@@ -551,11 +641,10 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       .join(' ');
     if (question.state === 'awaiting-answer' && question.leadMay === 'technical')
       return {
+        ...ruleOutcome('input-technical'),
         code: 'INPUT_REQUIRED',
         cause: 'needs-input',
         phase,
-        actor: 'lead',
-        action: 'answer-input',
         note: [
           head,
           'Технический вопрос: политика разрешает ведущему решить его самому (inputPolicy.leadAnswers.technical) — harness input-answer --actor lead --reason "<почему>"; ответ будет показан как «решено ведущим (технический вопрос)». Если выбор всё же меняет то, что увидит пользователь, передайте вопрос человеку дословно с одной строкой пояснения.',
@@ -566,11 +655,10 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       };
     if (question.state === 'awaiting-answer')
       return {
+        ...ruleOutcome('input-user'),
         code: 'INPUT_REQUIRED',
         cause: 'needs-input',
         phase,
-        actor: 'user',
-        action: 'answer-input',
         note: [
           head,
           'Вопрос к человеку: передайте ему вопрос, варианты и рекомендацию дословно и запишите его ответ его словами — harness input-answer --actor operator; ведущий (--actor lead) сам не отвечает, если политика этого не разрешила (inputPolicy.leadAnswers).',
@@ -611,16 +699,43 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
         .join(' '),
     };
   }
-  if (work.status === 'failed') {
-    if (work.attempt >= maxAttempts)
+  // Gate удержан отказом без повтора: выдачи нет, пока ведущий не поменяет
+  // gate или не повторит остановленную работу после исправления теста.
+  const gateHold = work.gateHold;
+  if (gateHold && (work.status === 'ready' || work.status === 'draft'))
+    return {
+      ...ruleOutcome('environment-gate-held'),
+      cause: 'environment',
+      phase: 'claim',
+      note: gateHoldLine(gateHold, work.id, gateHold.route).ru + '.',
+    };
+  // Восстановление ведущим держит выдачу: разбор, перепланирование или
+  // решение человека по противоречию — раньше класса отказа и исчерпания.
+  const hold = work.leadRecovery?.hold;
+  if (hold && work.status !== 'cancelled') {
+    if (hold.kind === 'diagnosis-required')
       return {
-        code: 'ATTEMPTS_EXHAUSTED',
+        ...ruleOutcome('diagnosis-required'),
         cause: kind,
         phase: 'claim',
-        actor: 'user',
-        action: 'reset-attempts',
-        note: exhausted,
+        note: `Засчитанных отказов без разбора: ${hold.failures.length} (${hold.failures.join(', ')}). Третьей слепой попытки нет: ведущий разбирает причину — harness diagnose --work ${work.id} --cause coverage|approach|split|contradiction|environment|other --hypothesis "…"; следующая попытка получит гипотезу.`,
       };
+    if (hold.kind === 'replan')
+      return {
+        ...ruleOutcome('diagnosis-split'),
+        cause: kind,
+        phase: 'claim',
+        note: `Разбор ${hold.diagnosis}: задача велика — ведущий перепланирует (новая редакция графа с разделением) и проводит ревью плана; попыток это само не добавляет.`,
+      };
+    return {
+      ...ruleOutcome('diagnosis-contradiction'),
+      cause: kind,
+      phase: 'claim',
+      note: `Разбор ${hold.diagnosis}: противоречивое обещание${hold.hypothesis ? ` — «${clipText(hold.hypothesis, 300)}»` : ''}. Решение человека: уточнить постановку (новая редакция) или сбросить попытки с причиной.`,
+    };
+  }
+  if (work.status === 'failed') {
+    if (work.attempt >= maxAttempts) return exhaustedOutcome();
     if (retry)
       return {
         code: stopCodeOf(kind),
@@ -642,6 +757,36 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       case 'environment':
       case 'timeout':
       case 'stalled':
+        // Gate зовёт ps в песочнице ОС: повтор не поможет, правит ведущий.
+        if (kind === 'environment' && work.environmentCause) {
+          // Предел незасчитанных отказов исчерпан: простой повтор ведущего
+          // движок отклонит — ход по исчерпанию из того же правила.
+          const route = work.retryRoute;
+          if (route?.limit)
+            return {
+              ...ruleOutcome(
+                route.step === 'user-reset'
+                  ? 'exhausted-user'
+                  : route.step === 'reset'
+                    ? 'exhausted-lead-reset'
+                    : route.step === 'replan'
+                      ? 'diagnosis-split'
+                      : 'exhausted-diagnose',
+              ),
+              ...(route.step === 'replan' ? {} : { code: 'ATTEMPTS_EXHAUSTED' as const }),
+              cause: kind,
+              phase: 'claim',
+              note:
+                `${NO_RETRY_ENVIRONMENT_EXPLAIN[work.environmentCause]} У работы ${route.limit.ru}: ` +
+                `${route.actor === 'user' ? 'сброс — решение человека с причиной' : 'ход ведущего'} — ${route.command}.`,
+            };
+          return {
+            ...ruleOutcome('environment-gate-command'),
+            cause: kind,
+            phase,
+            note: NO_RETRY_ENVIRONMENT_EXPLAIN[work.environmentCause],
+          };
+        }
         return {
           code: 'RUNTIME_UNAVAILABLE',
           cause: kind,
@@ -812,15 +957,7 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
           ? `Поручение выполняется (${work.status}): подготовка — ${work.openStage.stage} с ${work.openStage.startedAt}; исполнитель ещё не запущен.`
           : `Поручение выполняется (${work.status}).`,
     };
-  if (work.status === 'ready' && work.attempt >= maxAttempts)
-    return {
-      code: 'ATTEMPTS_EXHAUSTED',
-      cause: kind,
-      phase: 'claim',
-      actor: 'user',
-      action: 'reset-attempts',
-      note: exhausted,
-    };
+  if (work.status === 'ready' && work.attempt >= maxAttempts) return exhaustedOutcome();
   return {
     code: 'NOT_READY',
     cause: 'not-ready',
@@ -873,9 +1010,11 @@ function errorOutcome(code: ErrorCode): Omit<Outcome, 'note'> {
       };
     case 'BUDGET_EXHAUSTED':
     case 'BUDGET_UNKNOWN':
-      return { code, cause: 'budget', phase: 'claim', actor: 'user', action: 'raise-budget' };
+      return { ...ruleOutcome('budget-exhausted'), code, cause: 'budget', phase: 'claim' };
     case 'ATTEMPTS_EXHAUSTED':
-      return { code, cause: 'unknown', phase: 'claim', actor: 'user', action: 'reset-attempts' };
+      return { ...ruleOutcome('exhausted-user'), code, cause: 'unknown', phase: 'claim' };
+    case 'DIAGNOSIS_REQUIRED':
+      return { ...ruleOutcome('diagnosis-required'), code, cause: 'not-ready', phase: 'claim' };
     case 'CONTEXT_EXHAUSTED':
       return {
         code,
@@ -987,6 +1126,9 @@ export function explainStop(input: StopInput): StopDiagnosis {
       note,
       input.work.repairStoppedBy && outcome.action !== 'retry'
         ? `Автоматическое восстановление группы остановлено отменой ${input.work.repairStoppedBy}.`
+        : undefined,
+      input.work.leadRecovery?.line && input.work.status !== 'done'
+        ? `Сейчас: ${input.work.leadRecovery.line}.`
         : undefined,
       input.work.failure ? `Отказ: ${input.work.failure}` : undefined,
     ),

@@ -1461,6 +1461,10 @@
               "fresh": {
                 "type": "boolean"
               },
+              "resumed": {
+                "type": "boolean",
+                "const": true
+              },
               "accepted": {
                 "type": "object",
                 "properties": {
@@ -1492,6 +1496,301 @@
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 9007199254740991
+              },
+              "acceptedOrder": {
+                "type": "object",
+                "properties": {
+                  "apiVersion": {
+                    "type": "string",
+                    "const": "devcontour-harness/v1alpha1"
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  },
+                  "source": {
+                    "type": "object",
+                    "properties": {
+                      "connector": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                      },
+                      "ref": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      },
+                      "revision": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    },
+                    "required": [
+                      "connector",
+                      "ref",
+                      "revision"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 180,
+                    "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+                  },
+                  "goal": {
+                    "type": "string",
+                    "minLength": 10,
+                    "maxLength": 12000,
+                    "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+                  },
+                  "acceptance": {
+                    "minItems": 1,
+                    "maxItems": 30,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 1500,
+                      "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+                    }
+                  },
+                  "role": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9-]{1,30}$"
+                  },
+                  "repositoryId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  },
+                  "relatedRepositories": {
+                    "default": [],
+                    "maxItems": 10,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                    }
+                  },
+                  "writeScope": {
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "."
+                        },
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500,
+                          "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                        }
+                      ]
+                    }
+                  },
+                  "dependsOn": {
+                    "default": [],
+                    "maxItems": 100,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                    }
+                  },
+                  "gates": {
+                    "maxItems": 100,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^@?[A-Za-z0-9_-]{1,80}$"
+                    }
+                  },
+                  "consumers": {
+                    "maxItems": 10,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "repositoryId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                        },
+                        "gates": {
+                          "minItems": 1,
+                          "maxItems": 100,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^@?[A-Za-z0-9_-]{1,80}$"
+                          }
+                        }
+                      },
+                      "required": [
+                        "repositoryId",
+                        "gates"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "properties": {
+                    "maxItems": 30,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_.:-]{1,200}$"
+                    }
+                  },
+                  "resources": {
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                    }
+                  },
+                  "requirements": {
+                    "default": [],
+                    "maxItems": 30,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "pattern": "^REQ-[A-Za-z0-9_-]{1,64}$"
+                        },
+                        "source": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500,
+                          "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                        },
+                        "digest": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "text": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 12000
+                        },
+                        "gate": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                        },
+                        "scenario": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 1500
+                        },
+                        "testId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 300
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "source",
+                        "digest",
+                        "text",
+                        "gate",
+                        "scenario"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "contracts": {
+                    "default": [],
+                    "maxItems": 30,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                        },
+                        "digest": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "digest"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "context": {
+                    "default": [],
+                    "maxItems": 30,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                    }
+                  }
+                },
+                "required": [
+                  "apiVersion",
+                  "id",
+                  "source",
+                  "title",
+                  "goal",
+                  "acceptance",
+                  "role",
+                  "repositoryId",
+                  "writeScope"
+                ],
+                "additionalProperties": false
+              },
+              "abandoned": {
+                "type": "object",
+                "properties": {
+                  "at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                  },
+                  "by": {
+                    "type": "string",
+                    "enum": [
+                      "operator",
+                      "host",
+                      "graph"
+                    ]
+                  },
+                  "orderDigest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "restored": {
+                    "type": "boolean"
+                  },
+                  "attempt": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "neutralFailures": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "at",
+                  "by",
+                  "orderDigest",
+                  "restored"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [
@@ -1501,6 +1800,223 @@
               "accepted",
               "reopenedAt",
               "spent"
+            ],
+            "additionalProperties": false
+          },
+          "leadRecovery": {
+            "type": "object",
+            "properties": {
+              "diagnoses": {
+                "maxItems": 20,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^D[1-9][0-9]{0,5}$"
+                    },
+                    "cause": {
+                      "type": "string",
+                      "enum": [
+                        "coverage",
+                        "approach",
+                        "split",
+                        "contradiction",
+                        "environment",
+                        "other"
+                      ]
+                    },
+                    "hypothesis": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "evidence": {
+                      "maxItems": 10,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1000
+                      }
+                    },
+                    "failures": {
+                      "minItems": 1,
+                      "maxItems": 20,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "by": {
+                      "type": "string",
+                      "const": "lead"
+                    },
+                    "at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "approvedDigest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "resolved": {
+                      "type": "object",
+                      "properties": {
+                        "by": {
+                          "type": "string",
+                          "const": "operator"
+                        },
+                        "at": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        }
+                      },
+                      "required": [
+                        "by",
+                        "at"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "cause",
+                    "evidence",
+                    "failures",
+                    "by",
+                    "at",
+                    "epoch"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "resets": {
+                "maxItems": 20,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "by": {
+                      "type": "string",
+                      "enum": [
+                        "lead",
+                        "operator"
+                      ]
+                    },
+                    "at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "diagnosis": {
+                      "type": "string"
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "spent": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "granted": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    "index": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    "cap": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "failures": {
+                      "maxItems": 20,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": [
+                    "by",
+                    "at",
+                    "epoch",
+                    "spent",
+                    "granted",
+                    "failures"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "seq": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "diagnoses",
+              "resets",
+              "seq"
+            ],
+            "additionalProperties": false
+          },
+          "environmentHold": {
+            "type": "object",
+            "properties": {
+              "repositoryId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+              },
+              "gate": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "runId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              },
+              "isolation": {
+                "type": "string",
+                "enum": [
+                  "os",
+                  "none"
+                ]
+              }
+            },
+            "required": [
+              "repositoryId",
+              "gate",
+              "digest",
+              "runId",
+              "at"
             ],
             "additionalProperties": false
           }
@@ -1676,6 +2192,12 @@
             "enum": [
               "prompt-too-long",
               "blocking-limit"
+            ]
+          },
+          "environmentCause": {
+            "type": "string",
+            "enum": [
+              "sandbox-process-list"
             ]
           },
           "failureFingerprint": {

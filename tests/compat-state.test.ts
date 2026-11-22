@@ -229,8 +229,11 @@ test(
           assert.equal(b.plainEn, 'already accepted', 'blocker ' + String(b.code));
           assert.equal(b.actor, null, 'blocker ' + String(b.code));
         }
+      // Настройки решений (alpha.66) — аддитивное поле статуса.
+      const { decisions: _d, ...nowRest } = nowStatus as Record<string, unknown>;
+      void _d;
       const stripped = {
-        ...nowStatus,
+        ...nowRest,
         works: works.map(
           ({ attemptSummary: _s, stage: _t, target: _a, verification: _v, blockers, ...w }) => (
             void _s,

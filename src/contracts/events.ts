@@ -12,6 +12,7 @@ import {
   activitySchema,
   failureKindSchema,
   jointResetActors,
+  leadDiagnosisCauses,
   livenessStateSchema,
   stallActionSchema,
   workStatusSchema,
@@ -36,6 +37,12 @@ export const environmentCauses = [
   'sandbox-network',
   'sandbox-filesystem',
   'sandbox-policy',
+  /**
+   * Gate запустил список процессов (`ps`, `pgrep`, `top`), а в песочнице ОС
+   * проверок он недоступен (`GATE_SANDBOX_PROCESS_LIST`): ядро macOS не
+   * запускает setuid-программы в песочнице. Правка кода этого не снимет.
+   */
+  'sandbox-process-list',
   'dependency-network',
   'provider-auth',
   'provider-limit',
@@ -65,7 +72,7 @@ export const environmentCauses = [
 export const environmentCauseSchema = z.enum(environmentCauses);
 export type EnvironmentCause = (typeof environmentCauses)[number];
 /** Кто повторил поручение (`work.retried`): `host` — хост не назвал актёра. */
-export const retryActors = ['operator', 'recovery', 'host'] as const;
+export const retryActors = ['operator', 'recovery', 'host', 'lead'] as const;
 export type RetryActor = (typeof retryActors)[number];
 /** Кто отменил поручение (`work.cancelled`): `graph` — новая редакция графа его убрала. */
 export const cancelActors = ['operator', 'host', 'graph'] as const;
@@ -250,6 +257,41 @@ export const eventPayloads = {
     reset: z.boolean(),
     spent: z.number().int().min(0).optional(),
     reasonLength: z.number().int().min(0).optional(),
+    /**
+     * Сброс ведущего (`by: lead`, `policy.recovery`): диагностика, по которой
+     * дан предел, его номер `index` из `cap` и сколько попыток дано.
+     */
+    diagnosis: z.string().optional(),
+    index: z.number().int().min(1).optional(),
+    cap: z.number().int().min(0).optional(),
+    granted: z.number().int().min(1).optional(),
+    /**
+     * Повтор ведущего снял удержание этого gate (`ENVIRONMENT_GATE_HELD`,
+     * 0.1.0-alpha.66): тест исправлен, новая попытка проверит gate снова.
+     */
+    gateHoldLifted: z.string().optional(),
+  }),
+  /**
+   * Повтор ведущего снял удержание gate (`ENVIRONMENT_GATE_HELD`), а сам
+   * повтор отклонён правилами (`refused` — код отказа, например
+   * `ATTEMPTS_EXHAUSTED` после исчерпанного предела незасчитанных отказов).
+   * Успешный повтор пишет снятие в `work.retried.gateHoldLifted`.
+   */
+  'work.gate-hold-lifted': z.strictObject({
+    gate: z.string().min(1).max(200),
+    by: z.literal('lead'),
+    refused: z.string().min(1).max(60),
+  }),
+  /**
+   * Ведущий записал диагностику повторных отказов (`harness diagnose`):
+   * причина, разобранные засчитанные отказы и длина гипотезы (текста нет).
+   */
+  'work.diagnosed': z.strictObject({
+    diagnosis: z.string(),
+    cause: z.enum(leadDiagnosisCauses),
+    failures: z.array(z.string()).max(20),
+    hypothesisLength: z.number().int().min(0),
+    evidence: z.number().int().min(0),
   }),
   /**
    * Принятое поручение получило изменённую постановку новой редакцией графа
@@ -263,6 +305,20 @@ export const eventPayloads = {
     budget: z.enum(['fresh', 'carried']),
     acceptedSha: sha,
     spent: z.number().int().min(0),
+  }),
+  /**
+   * Доработка после приёмки оставлена (0.1.0-alpha.66): `cancel` открытой
+   * доработки или новая редакция графа без поручения вернули работу к
+   * принятой редакции — `done` с результатом `acceptedSha`; прежняя приёмка
+   * и история попыток сохраняются. `restored` — поручению возвращена
+   * принятая постановка; `hadAttempt` — идущая попытка доработки отменена.
+   */
+  'work.rework-abandoned': z.strictObject({
+    by: z.enum(cancelActors),
+    revision: z.number().int().positive(),
+    acceptedSha: sha,
+    restored: z.boolean(),
+    hadAttempt: z.boolean(),
   }),
   /**
    * Находки ревью кода поручения приняты известным ограничением
@@ -639,5 +695,7 @@ export const transactionKinds = [
   'input.delivered',
   /** Запись о смене пакетов командой `harness update` (`harness.updated`). */
   'harness.updated',
+  /** Только локальная запись журнала ведущего (`lead`): заметки, команды, сессия, итог; событий журнала нет. */
+  'lead.recorded',
 ] as const;
 export type TransactionKind = (typeof transactionKinds)[number];

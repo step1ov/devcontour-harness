@@ -27,6 +27,7 @@ import {
   graphIdOf,
   mappingDigest,
   orderIdOf,
+  statementMappingDigest,
   taskIdentity,
   type ConnectorConfig,
   type TaskMapping,
@@ -92,6 +93,12 @@ export interface TaskManifest {
   identity: string;
   orderId: string;
   semanticDigest: string;
+  /**
+   * Semantic digest v1 той же постановки (до alpha.66): по нему сверяются
+   * результаты и операции доставки прежних версий. Нет поля — снимок
+   * записан до alpha.66 (тогда `semanticDigest` и есть v1).
+   */
+  legacyDigest?: string;
   /** CAS-ревизия backend на момент чтения (не Git SHA). */
   casRevision: number;
   column: string;
@@ -137,6 +144,12 @@ export interface SnapshotManifest {
   contextDigest: string;
   /** Semantic digest набора задач — `graph.source.revision`. */
   revision: string;
+  /**
+   * Ревизия того же набора по правилам до alpha.66 (semantic digest v1):
+   * закреплённый до обновления снимок остаётся согласованным, пока она
+   * совпадает. Нет поля — снимок записан до alpha.66.
+   */
+  legacyRevision?: string;
   readAt: string;
   rounds: number;
   limits: ConnectorConfig['limits'];
@@ -331,8 +344,140 @@ const documentMatches = (doc: DocumentRecord, needle: string) =>
 export const matchCriterion = (criteria: CriterionRecord[], m: TaskMapping['criteria'][number]) =>
   criteria.filter((c) => (m.id !== undefined ? c.id === m.id : c.title === m.title));
 
-/** Semantic digest задачи: смысл постановки без операционных полей. */
+const requiredDoc = (mapping: TaskMapping, d: DocumentRecord) =>
+  mapping.requiredDocuments.some((n) => documentMatches(d, n));
+
+const docDigests = (docs: DocumentRecord[]) =>
+  docs
+    .map((d) => ({ id: d.id, name: d.name, digest: sha256(d.body) }))
+    .sort((a, b) => (a.id < b.id ? -1 : 1));
+
+/**
+ * Semantic digest задачи (v2, alpha.66) — то, к чему привязан результат:
+ * заголовок, описание, определения критериев, зависимости, родитель,
+ * подзадачи, **обязательные** документы (`requiredDocuments`) и mapping
+ * поручения без привязок критериев (`statementMappingDigest`).
+ * Необязательные документы — контекст: их правка входит в ревизию набора
+ * (новое согласование для непринятых задач), но принятый результат не
+ * становится результатом «прежней постановки» — обновлённый документ-ответ
+ * владельца не даёт конфликта доставки. Привязки критериев — сведения
+ * доставки, не постановка.
+ */
 export function semanticDigest(config: ConnectorConfig, mapping: TaskMapping, read: TaskRead) {
+  return digestOf({
+    v: 2,
+    identity: taskIdentity(config.provider, config.projectId, read.task.id),
+    title: read.task.title,
+    description: read.task.description,
+    criteria: definitions(read.task.criteria),
+    dependencies: [...read.task.dependencies].sort(),
+    parent: read.task.parentId,
+    children: read.children.map((c) => c.id).sort(),
+    documents: docDigests(read.documents.filter((d) => requiredDoc(mapping, d))),
+    mapping: statementMappingDigest(config, mapping),
+  });
+}
+
+/** Текст постановки `task.md` снимка: заголовок, описание и критерии (без заметки о контексте). */
+export function taskStatementText(task: TaskRead['task']) {
+  const criteriaText = task.criteria
+    .map(
+      (c) =>
+        `- [${c.id}] ${c.title}` +
+        (c.summary ? `\n  ${c.summary}` : '') +
+        (c.description ? `\n\n  ${c.description.split('\n').join('\n  ')}` : ''),
+    )
+    .join('\n');
+  return (
+    `# ${task.key}: ${oneLine(task.title)}\n\n${task.description}\n\n## Критерии приёмки\n\n` +
+    (criteriaText || '(критериев нет)') +
+    '\n'
+  );
+}
+
+const documentPath = (id: string) => `documents/${id.replace(/[^A-Za-z0-9_-]/g, '_')}.md`;
+const pinnedText = (file: PinnedFile | undefined) =>
+  file?.content?.encoding === 'utf8' ? file.content.data : undefined;
+
+/**
+ * Та же ли постановка у результата прежней версии (`revision` — digest v1,
+ * посчитанный с прежними привязками критериев), что сейчас в backend. Digest
+ * v1 при изменённых привязках не пересчитать, поэтому сверяются закреплённые
+ * снимком байты, которые видел исполнитель: `task.md` (заголовок, описание,
+ * критерии), обязательные документы целиком, зависимости и подзадачи, а также
+ * поручение (роль, репозиторий, writeScope, gates). Любое расхождение или
+ * отсутствие снимка — не та же постановка.
+ */
+export function legacyStatementSame(
+  store: { snapshots(): { graph: unknown; context: unknown; manifest: unknown }[] },
+  op: { revision: string; workId: string },
+  read: TaskRead,
+  mapping: TaskMapping,
+  config: ConnectorConfig,
+): boolean {
+  for (const record of store.snapshots()) {
+    const manifest = record.manifest as SnapshotManifest;
+    const task = manifest.tasks.find(
+      (t) => t.id === read.task.id && t.semanticDigest === op.revision,
+    );
+    if (!task) continue;
+    const context = record.context as ContextSnapshot;
+    const graph = record.graph as WorkGraph;
+    const entry = context.sources.find((x) => x.id === contextIdOf(task.orderId));
+    const order = graph.orders.find((o) => o.id === task.orderId);
+    if (!entry || !order) return false;
+    const file = (path: string) => pinnedText(entry.files.find((f) => f.path === path));
+    const statement = file('task.md');
+    const text = taskStatementText(read.task);
+    if (
+      statement === undefined ||
+      (statement !== text && !statement.startsWith(text + '\n## Контекст из Relay'))
+    )
+      return false;
+    for (const doc of read.documents.filter((d) => requiredDoc(mapping, d)))
+      if (file(documentPath(doc.id)) !== doc.body) return false;
+    const sorted = (xs: string[]) => [...xs].sort().join('\n');
+    if (sorted(task.dependencies.map((d) => d.id)) !== sorted(read.task.dependencies)) return false;
+    if (sorted(task.children.map((c) => c.id)) !== sorted(read.children.map((c) => c.id)))
+      return false;
+    return (
+      order.role === mapping.role &&
+      order.repositoryId === (mapping.repositoryId ?? config.repository.id) &&
+      digestOf(order.writeScope) === digestOf(mapping.writeScope) &&
+      digestOf(order.gates ?? null) === digestOf(mapping.gates ?? null)
+    );
+  }
+  return false;
+}
+
+/** Digest необязательных документов задачи: входит в ревизию набора, не в постановку. */
+export const optionalDocumentsDigest = (mapping: TaskMapping, read: TaskRead) =>
+  digestOf(docDigests(read.documents.filter((d) => !requiredDoc(mapping, d))));
+
+/**
+ * Относится ли редакция `revision` (поручения, результата, операции доставки)
+ * к текущей постановке `read`: digest v2 или прежний v1 (до alpha.66) при
+ * той же конфигурации. Результаты прежних версий сверяются по v1, пока
+ * постановка и mapping не менялись.
+ */
+export function statementMatches(
+  revision: string,
+  config: ConnectorConfig,
+  mapping: TaskMapping,
+  read: TaskRead,
+) {
+  return (
+    revision === semanticDigest(config, mapping, read) ||
+    revision === legacySemanticDigest(config, mapping, read)
+  );
+}
+
+/** Semantic digest v1 (до alpha.66): с привязками критериев и всеми документами. */
+export function legacySemanticDigest(
+  config: ConnectorConfig,
+  mapping: TaskMapping,
+  read: TaskRead,
+) {
   return digestOf({
     v: 1,
     identity: taskIdentity(config.provider, config.projectId, read.task.id),
@@ -475,6 +620,8 @@ export function buildSnapshot(input: {
   let contextBytes = 0;
   /** Контекст задач по идентичности: часть ревизии набора (новое согласование при правке FI/SI). */
   const contextBy: [string, string][] = [];
+  /** Необязательные документы задач: ревизия набора (v2), не постановка задачи. */
+  const optionalDocs: [string, string][] = [];
   const limits = config.limits;
 
   reads.forEach((read, index) => {
@@ -485,6 +632,8 @@ export function buildSnapshot(input: {
     const orderId = orderIdOf(config.provider, config.projectId, task.id);
     const identityOf = taskIdentity(config.provider, config.projectId, task.id);
     const digest = semanticDigest(config, mapping, read);
+    const legacy = legacySemanticDigest(config, mapping, read);
+    optionalDocs.push([identityOf, optionalDocumentsDigest(mapping, read)]);
 
     // Eligibility — явная политика, отдельно от semantic digest.
     if (task.column === 'done') problem('TASK_DONE', 'Задача уже в done');
@@ -572,18 +721,7 @@ export function buildSnapshot(input: {
     }
 
     // Обязательное содержимое: текст постановки и критерии.
-    const criteriaText = task.criteria
-      .map(
-        (c) =>
-          `- [${c.id}] ${c.title}` +
-          (c.summary ? `\n  ${c.summary}` : '') +
-          (c.description ? `\n\n  ${c.description.split('\n').join('\n  ')}` : ''),
-      )
-      .join('\n');
-    const taskText =
-      `# ${task.key}: ${oneLine(task.title)}\n\n${task.description}\n\n## Критерии приёмки\n\n` +
-      (criteriaText || '(критериев нет)') +
-      '\n';
+    const taskText = taskStatementText(task);
     const files: PinnedFile[] = [];
     if (Buffer.byteLength(taskText) > limits.taskBytes)
       problem(
@@ -627,7 +765,7 @@ export function buildSnapshot(input: {
         bytes,
         required: isRequired,
       };
-      const path = `documents/${doc.id.replace(/[^A-Za-z0-9_-]/g, '_')}.md`;
+      const path = documentPath(doc.id);
       if (isRequired) {
         if (bytes > limits.documentBytes || totalBytes + bytes > limits.totalBytes) {
           problem(
@@ -807,6 +945,7 @@ export function buildSnapshot(input: {
       identity: identityOf,
       orderId,
       semanticDigest: digest,
+      legacyDigest: legacy,
       casRevision: task.revision,
       column: task.column,
       consistency: read.consistency,
@@ -832,28 +971,37 @@ export function buildSnapshot(input: {
   const taskIds = reads.map((r) => r.task.id);
   const graphId = graphIdOf(config.provider, config.projectId, taskIds);
   const prereqs = [...prerequisites.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
-  const revision = digestOf({
-    v: 1,
-    connector,
-    tasks: tasks.map((t) => [t.identity, t.semanticDigest]),
-    prerequisites: prereqs,
-    // Любая правка базовой линии — новое согласование; без неё ревизия прежняя.
-    ...(config.baseline ? { baseline: digestOf(config.baseline) } : {}),
-    // Без локальных пакетов ревизия та же, что до их появления. С ними —
-    // содержимое пакетов и их распределение по задачам: перенос пакета между
-    // задачами или смена порядка — тоже новое согласование.
-    ...(input.local?.length || packsByTask.some(([, ids]) => ids.length)
-      ? {
-          context: (input.local ?? []).map((s) => [s.id, s.digest]),
-          contextBy: [...packsByTask].sort(([a], [b]) => (a < b ? -1 : 1)),
-        }
-      : {}),
-    // Контекст задачи из backend: правка FI/SI, фичи, сценария, паспорта или
-    // документа цели — новое согласование. Без контекста ревизия прежняя.
-    ...(contextBy.length
-      ? { taskContext: [...contextBy].sort(([a], [b]) => (a < b ? -1 : 1)) }
-      : {}),
-  });
+  // Ревизия набора. v2 (alpha.66): постановки задач (semantic digest v2) и
+  // необязательные документы отдельно. legacyRevision — те же правила, что до
+  // alpha.66: снимок, закреплённый прежней версией, остаётся согласованным.
+  const setRevision = (v: 1 | 2) =>
+    digestOf({
+      v: 1,
+      connector,
+      tasks: tasks.map((t) => [t.identity, v === 2 ? t.semanticDigest : t.legacyDigest]),
+      ...(v === 2
+        ? { v: 2, documents: [...optionalDocs].sort(([a], [b]) => (a < b ? -1 : 1)) }
+        : {}),
+      prerequisites: prereqs,
+      // Любая правка базовой линии — новое согласование; без неё ревизия прежняя.
+      ...(config.baseline ? { baseline: digestOf(config.baseline) } : {}),
+      // Без локальных пакетов ревизия та же, что до их появления. С ними —
+      // содержимое пакетов и их распределение по задачам: перенос пакета между
+      // задачами или смена порядка — тоже новое согласование.
+      ...(input.local?.length || packsByTask.some(([, ids]) => ids.length)
+        ? {
+            context: (input.local ?? []).map((s) => [s.id, s.digest]),
+            contextBy: [...packsByTask].sort(([a], [b]) => (a < b ? -1 : 1)),
+          }
+        : {}),
+      // Контекст задачи из backend: правка FI/SI, фичи, сценария, паспорта или
+      // документа цели — новое согласование. Без контекста ревизия прежняя.
+      ...(contextBy.length
+        ? { taskContext: [...contextBy].sort(([a], [b]) => (a < b ? -1 : 1)) }
+        : {}),
+    });
+  const revision = setRevision(2);
+  const legacyRevision = setRevision(1);
   const joined = `${config.provider}:${config.projectId}:${taskIds.join('+')}`;
   const parsed = workGraphSchema.safeParse({
     apiVersion: API_VERSION,
@@ -899,6 +1047,7 @@ export function buildSnapshot(input: {
     graphDigest: workGraphDigest(graph),
     contextDigest: contextDigest(context),
     revision,
+    legacyRevision,
     readAt: new Date().toISOString(),
     rounds: input.rounds,
     limits,

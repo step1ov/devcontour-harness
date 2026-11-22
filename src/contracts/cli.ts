@@ -12,6 +12,7 @@ import { HarnessError, errorCodes, type ErrorCode } from './errors.ts';
 import {
   controlStateSchema,
   controllerLeaseSchema,
+  leadDiagnosisSchema,
   failureKindSchema,
   pauseReasons,
   workStatusSchema,
@@ -19,7 +20,7 @@ import {
   livenessStateSchema,
   stallActionSchema,
 } from './execution.ts';
-import { readRunEventSchema } from './events.ts';
+import { environmentCauseSchema, readRunEventSchema } from './events.ts';
 import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
 import {
   reviewAcceptDataSchema,
@@ -30,8 +31,10 @@ import { codeReviewRecordSchema } from './code-review.ts';
 import { acceptedTargetSchema } from './target.ts';
 import { workVerificationSchema } from './verification-view.ts';
 import { viewDataSchema } from './operator-view.ts';
+import { decisionSettingsSchema } from './decisions.ts';
 import { updateDataSchema, updateCheckStates } from './update.ts';
 import { sourceRefSchema } from './work.ts';
+import { leadDataSchema } from './lead.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
 import {
   filePlanEntrySchema,
@@ -48,6 +51,7 @@ import {
 import { planCheckDataSchema, planRequestDataSchema } from './planning.ts';
 import { toolchainFactsSchema, toolchainReportSchema } from './toolchain.ts';
 import { operationCatalogSchema } from './catalog.ts';
+import { previewListDataSchema, previewStartDataSchema, previewStopDataSchema } from './preview.ts';
 import { failureBuckets, reportDataSchema } from './report.ts';
 import { handoffPackSchema } from './handoff.ts';
 import {
@@ -79,7 +83,8 @@ import {
  */
 export interface CliArgument {
   name: string;
-  value: 'path' | 'dir' | 'id' | 'digest' | 'number' | 'text' | 'flag' | 'sink';
+  /** `duration` — целое число с единицей `s`, `m` или `h` (`90s`, `30m`, `2h`); голое число — отказ. */
+  value: 'path' | 'dir' | 'id' | 'digest' | 'number' | 'duration' | 'text' | 'flag' | 'sink';
   required: boolean;
   description: string;
   /** Аргумент можно повторить; значения — список. */
@@ -480,9 +485,10 @@ export const cliCommands = {
   },
   cancel: {
     description:
-      'Отменить поручение: активная попытка теряет владение, поручение становится cancelled; это не retry',
+      'Отменить поручение: активная попытка теряет владение, поручение становится cancelled; это не retry. Открытая доработка принятого поручения не отменяет задачу: работа возвращается к принятой редакции (done, прежняя приёмка, abandoned: true)',
     writes: true,
-    idempotency: 'Повтор для отменённого ничего не меняет',
+    idempotency:
+      'Повтор для отменённого ничего не меняет; доработка, отменённая прежней версией, при повторе возвращается к принятой редакции',
     args: [
       state,
       work,
@@ -505,6 +511,19 @@ export const cliCommands = {
         description: 'Сбросить счётчик попыток; требует --reason',
       },
       { name: '--reason', value: 'text', required: false, description: 'Причина сброса' },
+      {
+        name: '--by',
+        value: 'text',
+        required: false,
+        description:
+          'lead — сброс ведущего по свежему техническому разбору (policy.recovery.mode: lead, предел leadResets); operator или без флага — решение оператора (operator явно не пишется в журнал ведущего и при его активной сессии)',
+      },
+      {
+        name: '--diagnosis',
+        value: 'id',
+        required: false,
+        description: 'Разбор (D<n>), по которому ведущий даёт новый предел; по умолчанию — свежий',
+      },
     ],
     refusals: [
       'NOT_FOUND',
@@ -513,7 +532,39 @@ export const cliCommands = {
       'BUDGET_EXHAUSTED',
       'BUDGET_UNKNOWN',
       'INPUT_REQUIRED',
+      'DIAGNOSIS_REQUIRED',
     ],
+  },
+  diagnose: {
+    description:
+      'Записать разбор ведущего повторных засчитанных отказов работы: причина (coverage — добавить случаи, approach — новая гипотеза, split — разделить с ревью плана, contradiction — вопрос человеку, environment, other), гипотеза (обязательна для coverage и approach, не повторяет прежние) и доказательства. Следующая попытка получает гипотезу; при исчерпанных попытках техническая причина даёт ведущему право на сброс (retry --reset --by lead). Модель не вызывается',
+    writes: true,
+    idempotency: 'Каждый вызов — новый разбор D<n>; повтор той же гипотезы — отказ',
+    args: [
+      state,
+      work,
+      {
+        name: '--cause',
+        value: 'text',
+        required: true,
+        description: 'coverage | approach | split | contradiction | environment | other',
+      },
+      {
+        name: '--hypothesis',
+        value: 'text',
+        required: false,
+        description:
+          'Проверяемая гипотеза: что исполнитель сделает иначе и как это проверить (10–2000 знаков)',
+      },
+      {
+        name: '--evidence',
+        value: 'text',
+        required: false,
+        multiple: true,
+        description: 'Доказательство (ID попытки, evidence, строка лога), до 10',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'NOT_READY', 'INVALID_INPUT'],
   },
   result: {
     description: 'Машинный результат последней завершённой попытки поручения и состояние доставки',
@@ -666,6 +717,27 @@ export const cliCommands = {
         required: false,
         description:
           'Технические вопросы исполнителя (результат для пользователя не меняется) решает ведущий с записанной причиной: inputPolicy.leadAnswers.technical в новой политике; без флага на вопросы, останавливающие работу, отвечает человек. Сохранённая политика без этого правила — PATH_CONFLICT content-differs',
+      },
+      {
+        name: '--recovery',
+        value: 'text',
+        required: false,
+        description:
+          'Кто решает после повторных отказов (policy.recovery.mode): lead — ведущий разбирает и сам даёт ещё попытки в пределах бюджета; user — исчерпание решает человек. Без флага — lead при --lead-technical-answers, иначе user',
+      },
+      {
+        name: '--diagnose-after',
+        value: 'number',
+        required: false,
+        description:
+          'После скольких засчитанных отказов разбор ведущего до следующей попытки (recovery.diagnoseAfter, 1–10, по умолчанию 2)',
+      },
+      {
+        name: '--lead-resets',
+        value: 'number',
+        required: false,
+        description:
+          'Сколько раз ведущий сам даёт новый предел попыток (recovery.leadResets, 0–5, по умолчанию 2; 0 — только человек)',
       },
       {
         name: '--lean',
@@ -1024,6 +1096,13 @@ export const cliCommands = {
       source,
       state,
       { ...work, required: false, description: 'ID поручения; без него — все с результатом' },
+      {
+        name: '--reprove',
+        value: 'flag',
+        required: false,
+        description:
+          'Повторно доказать критерии уже принятого результата по текущим привязкам criteria[] (после их правки): новый ключ операции, тот же результат и evidence, без моделей, gates и Git; те же привязки — тот же ключ, повтор ничего не отправляет; изменённая постановка — conflict с причиной',
+      },
     ],
     refusals: ['NOT_FOUND', 'CONTROLLER_BUSY', 'REVISION_CONFLICT'],
   },
@@ -1532,6 +1611,179 @@ export const cliCommands = {
     ],
     refusals: ['CONTROLLER_BUSY', 'APPROVAL_REQUIRED', 'NOT_FOUND'],
   },
+  'lead-begin': {
+    description:
+      'Ведущий начинает (или продлевает) свою сессию: панель видит «ведущий работает» до конца аренды; каждая запись ведущего её продлевает (0.1.0-alpha.66). Синоним: harness lead begin',
+    writes: true,
+    idempotency: 'Повтор при активной сессии продлевает аренду; начало сессии прежнее',
+    args: [
+      state,
+      {
+        name: '--ttl',
+        value: 'duration',
+        required: false,
+        description:
+          'Аренда сессии — длительность с единицей s, m или h (90s, 30m, 2h): от 1m до 12h, по умолчанию 30m; голое число — отказ INVALID_INPUT',
+      },
+      {
+        name: '--text',
+        value: 'text',
+        required: false,
+        description: 'Чем ведущий начинает — короткая строка простыми словами (до 200 символов)',
+      },
+    ],
+    refusals: ['NOT_FOUND'],
+  },
+  'lead-note': {
+    description:
+      'Короткая строка простыми словами о том, что ведущий делает сейчас, в том числе вне harness (запись в источнике задач, проверка в браузере): журнал ведущего и строка панели; очищается от управляющих символов и секретов, до 200 символов (0.1.0-alpha.66). Синоним: harness lead note "<строка>"',
+    writes: true,
+    idempotency: 'Каждый вызов — новая запись журнала; старые вытесняются пределом 200 записей',
+    args: [
+      state,
+      {
+        name: '--text',
+        value: 'text',
+        required: true,
+        description: 'Строка ведущего простыми словами',
+      },
+      { ...work, required: false, description: 'ID поручения, о котором запись' },
+    ],
+    refusals: ['NOT_FOUND'],
+  },
+  'lead-end': {
+    description:
+      'Ведущий заканчивает сессию: панель больше не говорит «ведущий работает» (0.1.0-alpha.66). Синоним: harness lead end',
+    writes: true,
+    idempotency: 'Повтор закрывает уже закрытую сессию ещё одной записью журнала',
+    args: [
+      state,
+      {
+        name: '--text',
+        value: 'text',
+        required: false,
+        description: 'Чем ведущий закончил — короткая строка',
+      },
+    ],
+    refusals: ['NOT_FOUND'],
+  },
+  'release-done': {
+    description:
+      'Итоговый отчёт ведущего: выпуск готов — только когда весь код принят (ни одной открытой работы или доработки); до него представление говорит «код принят, ведущий ещё работает», готовность ниже 100 % (0.1.0-alpha.66). Синоним: harness release done --summary "<отчёт>"',
+    writes: true,
+    idempotency: 'Повтор заменяет итоговый отчёт новым с новым временем',
+    args: [
+      state,
+      {
+        name: '--summary',
+        value: 'text',
+        required: true,
+        description: 'Итоговый отчёт простыми словами (до 2000 символов)',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'NOT_READY'],
+  },
+  'preview-start': {
+    description:
+      'Превью результата (docs/previews.md): собрать и запустить приложение по previews[] репозитория на принятом коммите в своём рабочем дереве каталога состояния, на свободном loopback-порту за loopback-прокси, с lifecycle репозитория при services; ждёт health и возвращает адрес. Harness сам останавливает превью по сроку (--ttl) и простою без запросов (--idle). Запускает только оператор или ведущий по его просьбе: внутри попытки и gate — отказ NOT_READY; run превью не запускает',
+    writes: true,
+    idempotency:
+      'То же превью на том же коммите уже идёт — возвращается оно (changed: false); на другом коммите прежнее останавливается (replaced) и запускается новое',
+    args: [
+      {
+        ...state,
+        description:
+          'Каталог состояния: рабочее дерево, логи и receipt превью — в <state>/previews; политика — из него, если нет --policy',
+      },
+      { ...policy, required: false },
+      {
+        name: '--preview',
+        value: 'id',
+        required: false,
+        description: 'ID превью из previews[] репозитория; нужен, если их несколько',
+      },
+      {
+        name: '--ref',
+        value: 'text',
+        required: false,
+        description:
+          'accepted (по умолчанию) — принятый результат: с --work принятый SHA поручения, без него — вершина target ref репозитория; иначе SHA или ref checkout',
+      },
+      {
+        ...work,
+        required: false,
+        description: 'Поручение, чей принятый результат показать (только с --ref accepted)',
+      },
+      {
+        name: '--repository',
+        value: 'id',
+        required: false,
+        description: 'ID репозитория политики; нужен, если превью есть у нескольких',
+      },
+      {
+        name: '--ttl',
+        value: 'duration',
+        required: false,
+        description:
+          'Срок жизни превью — длительность с единицей s, m или h (90s, 30m, 2h): от 1s до 24h; голое число — отказ INVALID_INPUT; нет — ttlMs превью, иначе 2h',
+      },
+      {
+        name: '--idle',
+        value: 'duration',
+        required: false,
+        description:
+          'Остановить после такого простоя без запросов — длительность с единицей s, m или h (90s, 30m, 2h), до 24h; 0 — не останавливать по простою; другое голое число — отказ INVALID_INPUT; нет — idleMs превью, иначе 30m',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'NOT_READY'],
+  },
+  'preview-stop': {
+    description:
+      'Остановить превью: группа процессов приложения (TERM, затем KILL), lifecycle teardown при services, рабочее дерево превью убирается, receipt — stopped; без --preview — все живые превью',
+    writes: true,
+    idempotency: 'Повтор для остановленного превью ничего не меняет (changed: false)',
+    args: [
+      {
+        ...state,
+        description: 'Каталог состояния; политика — из него, если нет --policy',
+      },
+      { ...policy, required: false },
+      {
+        name: '--preview',
+        value: 'id',
+        required: false,
+        description: 'ID превью; нет — все живые',
+      },
+      {
+        name: '--repository',
+        value: 'id',
+        required: false,
+        description: 'Только превью этого репозитория',
+      },
+      {
+        name: '--all',
+        value: 'flag',
+        required: false,
+        description:
+          'С --preview без --repository: остановить превью с этим ID во всех репозиториях; без флага такой ID в нескольких репозиториях — отказ INVALID_INPUT с их списком',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'INVALID_INPUT'],
+  },
+  'preview-list': {
+    description:
+      'Превью каталога состояния с адресом, коммитом, сроком и состоянием; receipt сверяются с живыми процессами: превью, чей надзирающий процесс пропал, останавливается по receipt (приложение, teardown, рабочее дерево) и становится failed',
+    writes: true,
+    idempotency: 'Повтор без изменившихся процессов отвечает тем же списком',
+    args: [
+      {
+        ...state,
+        description: 'Каталог состояния; политика — из него, если нет --policy',
+      },
+      { ...policy, required: false },
+    ],
+    refusals: ['NOT_FOUND'],
+  },
 } as const satisfies Record<string, CliCommandContract>;
 export type CliCommand = keyof typeof cliCommands;
 
@@ -1874,6 +2126,14 @@ export const statusDataSchema = z.strictObject({
        * хост его не вычисляет.
        */
       target: acceptedTargetSchema.optional(),
+      /**
+       * Восстановление ведущим (`policy.recovery.mode: lead`): последний сброс
+       * ведущего простыми словами — «ведущий дал ещё N попыток (сброс K из M):
+       * причина …; гипотеза …». Нет поля — сброса ведущего в этом пределе нет.
+       */
+      recovery: z
+        .strictObject({ line: z.string().min(1).max(600), lineEn: z.string().min(1).max(600) })
+        .optional(),
     }),
   ),
   /**
@@ -1938,6 +2198,13 @@ export const statusDataSchema = z.strictObject({
   reviews: z.array(reviewSubjectSummarySchema).max(50).optional(),
   /** Предметов ревью сверх предела строк `reviews` (50); нет поля — все показаны. */
   reviewsTruncated: z.number().int().positive().optional(),
+  /**
+   * Кто решает после повторных отказов и на технические вопросы — те же
+   * тексты, что у панели и doctor (`decisionSettingsSchema`); `--human`
+   * печатает итог строкой «Решения: …». Нет поля — этап настройки или
+   * ответ до alpha.66.
+   */
+  decisions: decisionSettingsSchema.optional(),
   /**
    * 0.1.0-alpha.65: harness ещё настраивается — нет `.harness/project.json`
    * (`waitingFor: project`) или привязанного состояния (`state`). Вместо
@@ -2026,6 +2293,11 @@ export const workActionDataSchema = z.strictObject({
   attempt: z.number().int().min(0),
   changed: z.boolean(),
   /**
+   * `cancel` открытой доработки принятого поручения (0.1.0-alpha.66): работа
+   * вернулась к принятой редакции (`done`), а не отменена; нет — обычная отмена.
+   */
+  abandoned: z.literal(true).optional(),
+  /**
    * Итог `retry --reset`: сброс выполнен (сколько попыток было потрачено) или
    * не выполнен с объяснением; без `--reset` поля нет.
    */
@@ -2034,8 +2306,22 @@ export const workActionDataSchema = z.strictObject({
       performed: z.boolean(),
       spent: z.number().int().min(0).optional(),
       note: z.string().optional(),
+      /** Сброс ведущего (`--by lead`): разбор, номер сброса из предела и сколько попыток дано. */
+      by: z.literal('lead').optional(),
+      diagnosis: z.string().optional(),
+      index: z.number().int().min(1).optional(),
+      cap: z.number().int().min(0).optional(),
+      granted: z.number().int().min(1).optional(),
     })
     .optional(),
+});
+
+/** `harness diagnose`: записанный разбор, что дальше и действующее правило. */
+export const diagnoseDataSchema = z.strictObject({
+  workId: idSchema,
+  diagnosis: leadDiagnosisSchema,
+  next: z.enum(['attempt', 'diagnose', 'replan', 'user-decision', 'lead-reset', 'user-reset']),
+  mode: z.enum(['lead', 'user']),
 });
 
 export const approveDataSchema = z.strictObject({
@@ -2071,6 +2357,19 @@ export const relayCompatibilitySchema = z.strictObject({
   lineEn: z.string(),
 });
 
+/**
+ * Список процессов (`ps`) в песочнице ОС проверок (0.1.0-alpha.66): проба
+ * `ps -o pid= -p 1` в той же изоляции, что gates. `unavailable` — gate,
+ * вызывающий ps/pgrep/top, упадёт `GATE_SANDBOX_PROCESS_LIST`.
+ */
+const processListCapabilitySchema = z.strictObject({
+  status: z.enum(['available', 'unavailable', 'unknown', 'not-isolated']),
+  command: z.array(z.string()).optional(),
+  detail: z.string(),
+  /** Строка для человека с советом. */
+  line: z.string(),
+});
+
 export const doctorDataSchema = z.strictObject({
   harness: z.string(),
   apiVersion: z.literal(API_VERSION),
@@ -2086,7 +2385,12 @@ export const doctorDataSchema = z.strictObject({
       reason: z.string().optional(),
     }),
   ),
-  sandbox: z.strictObject({ os: z.boolean(), reason: z.string().optional() }),
+  sandbox: z.strictObject({
+    os: z.boolean(),
+    reason: z.string().optional(),
+    /** Список процессов в песочнице проверок (CLI `doctor`). */
+    processList: processListCapabilitySchema.optional(),
+  }),
   state: z
     .strictObject({
       stateVersion: z.number().int(),
@@ -2163,6 +2467,12 @@ export const doctorDataSchema = z.strictObject({
    * песочница исполнителя их не запускает.
    */
   notes: z.array(z.string()).optional(),
+  /**
+   * Настройки решений (есть, когда задана политика): кто решает после
+   * повторных отказов и на технические вопросы, с объяснением и итогом —
+   * те же тексты, что у панели (`view.settings.decisions`).
+   */
+  decisions: decisionSettingsSchema.optional(),
   /**
    * Действующее правило ответов на вопросы исполнителя (есть, когда задана
    * политика): технические решает ведущий (`inputPolicy.leadAnswers.technical`),
@@ -2251,6 +2561,12 @@ export const gatesDataSchema = z.strictObject({
        * основание сверки провала попытки под другим node.
        */
       toolchain: toolchainFactsSchema.optional(),
+      /**
+       * Причина отказа среды, названная gate (0.1.0-alpha.66), например
+       * `sandbox-process-list` — gate запускает ps, а в песочнице ОС список
+       * процессов недоступен. Правка кода её не снимет.
+       */
+      environment: environmentCauseSchema.optional(),
     }),
   ),
   /** Каталог логов и артефактов проверки. */
@@ -2345,6 +2661,13 @@ export const smokeDataSchema = z.strictObject({
     .optional(),
   logs: z.string(),
   warnings: z.array(z.string()).optional(),
+  /**
+   * Список процессов в песочнице проверок (`isolation.mode: os`) и файлы
+   * дерева, которые вызывают ps/pgrep/top (до 10).
+   */
+  processList: processListCapabilitySchema
+    .extend({ callers: z.array(z.string()).max(10).optional() })
+    .optional(),
   /** Проба исполнителя (`--writer-probe`): команды `writerProbe` в изоляции каждого исполнителя. */
   writerProbe: z
     .strictObject({
@@ -2576,12 +2899,27 @@ export const sourceStatusDataSchema = z.strictObject({
         }),
         z.strictObject({ reachable: z.literal(false), error: z.string() }),
       ]),
+      /**
+       * Принятое поручение, чья задача у получателя не закрыта: сколько
+       * критериев докажут текущие привязки (`reprovable`), что не доказано и
+       * почему, и следующий шаг (`source-deliver --reprove`, без нового
+       * плана). Нет поля — поручение не принято или задача закрыта.
+       */
+      proof: z
+        .strictObject({
+          reprovable: z.number().int().min(0),
+          unproven: z.array(z.strictObject({ title: z.string(), reason: z.string() })),
+          next: z.string().optional(),
+        })
+        .optional(),
     }),
   ),
 });
 
 export const sourceDeliverDataSchema = z.strictObject({
   connector: idSchema,
+  /** `source-deliver --reprove`: повторное доказательство критериев принятых результатов. */
+  reprove: z.literal(true).optional(),
   deliveries: z.array(
     z.strictObject({
       workId: idSchema,
@@ -2589,6 +2927,8 @@ export const sourceDeliverDataSchema = z.strictObject({
       delivery: z.array(deliveryStateSchema),
     }),
   ),
+  /** Только `--reprove` без `--work`: поручения без принятого результата. */
+  skipped: z.array(z.strictObject({ workId: idSchema, reason: z.string() })).optional(),
 });
 
 export const sourceReconcileDataSchema = z.strictObject({
@@ -2715,6 +3055,8 @@ export const initDataSchema = z.strictObject({
       lineEn: z.string(),
     })
     .optional(),
+  /** Настройки решений новой или сохранённой политики (`decisionSettingsSchema`). */
+  decisions: decisionSettingsSchema.optional(),
   /**
    * Закреплённый node новой политики (`policy.toolchain.node`,
    * 0.1.0-alpha.65): версия и откуда она — `.nvmrc`, `.node-version`,
@@ -2923,6 +3265,7 @@ export const cliDataSchemas = {
   resume: controlDataSchema,
   cancel: workActionDataSchema,
   retry: workActionDataSchema,
+  diagnose: diagnoseDataSchema,
   result: resultEnvelopeSchema,
   deliver: resultEnvelopeSchema,
   cleanup: cleanupDataSchema,
@@ -2957,6 +3300,13 @@ export const cliDataSchemas = {
   'review-code': codeReviewRecordSchema,
   smoke: smokeDataSchema,
   update: updateDataSchema,
+  'lead-begin': leadDataSchema,
+  'lead-note': leadDataSchema,
+  'lead-end': leadDataSchema,
+  'release-done': leadDataSchema,
+  'preview-start': previewStartDataSchema,
+  'preview-stop': previewStopDataSchema,
+  'preview-list': previewListDataSchema,
   version: versionDataSchema,
 } as const satisfies Record<CliCommand | 'version', z.ZodType>;
 

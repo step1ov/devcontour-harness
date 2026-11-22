@@ -1,10 +1,14 @@
 import { z } from 'zod';
-import { isoTimeSchema } from './primitives.ts';
+import { decisionSettingsSchema } from './decisions.ts';
+import { trackStepActors, trackStepKinds, trackStepStates } from './decision-rules.ts';
+import { gitShaSchema, isoTimeSchema } from './primitives.ts';
 import {
   OPERATOR_VIEW_LIMITS as L,
   OPERATOR_VIEW_TEXT as T,
   OPERATOR_VIEW_VERSION,
 } from './operator-view-limits.ts';
+
+import { resourcesViewSchema } from './view-resources.ts';
 
 export * from './operator-view-limits.ts';
 
@@ -91,6 +95,12 @@ export const viewSettingsSchema = z.strictObject({
   }),
   lean: z.strictObject({ state: z.enum(['on', 'off', 'unknown']) }),
   defaulted: z.array(token(100)).max(50),
+  /**
+   * Ревизия 6: настройки решений — кто решает после повторных отказов и на
+   * технические вопросы — с объяснением и итогом одной фразой; те же тексты
+   * у doctor и status (docs/principles.md «Кто принимает решения»).
+   */
+  decisions: decisionSettingsSchema.optional(),
 });
 
 const findingSchema = z.strictObject({
@@ -259,6 +269,16 @@ export const workViewSchema = z.strictObject({
   graphId: id,
   title: freeText(T.title).optional(),
   status: token(40),
+  /** Ревизия 6: план работы ещё не согласован, попыток не было — «ещё не утверждена». */
+  planned: z.literal(true).optional(),
+  /**
+   * Ревизия 6: доработка, отменённая прежней версией harness, показана
+   * принятой работой (`done`, `resultSha` — прежняя приёмка); состояние не
+   * переписано, его чинит `harness cancel`. `restoredLine` — «принято на
+   * <sha>; доработка отменена».
+   */
+  restoredFrom: z.literal('cancelled-rework').optional(),
+  restoredLine: z.string().min(1).max(T.line).optional(),
   stage: z.strictObject({
     name: token(40),
     step: freeText(T.step).optional(),
@@ -374,6 +394,38 @@ export const workViewSchema = z.strictObject({
     .optional(),
   spend: z.strictObject({ calls: count, usd: boundedSchema, durationMs: count }),
   resultSha: sha.optional(),
+  /**
+   * Ревизия 6: путь работы целиком — пройденные попытки по шагам (код →
+   * проверки → ревью → интеграция), разборы и сбросы между ними, текущая
+   * точка и плановый остаток: попытки, разбор ведущего по
+   * `recovery.diagnoseAfter`, запасные раунды сбросов ведущего
+   * (`recovery.leadResets`) и «принято». `rework` — шаг доработки после
+   * приёмки. Сверх предела отброшены самые ранние (`truncated`).
+   */
+  track: z
+    .strictObject({
+      steps: z
+        .array(
+          z.strictObject({
+            kind: z.enum(trackStepKinds),
+            attempt: z.number().int().positive().optional(),
+            state: z.enum(trackStepStates),
+            label: z.string().min(1).max(80),
+            at: isoTimeSchema.optional(),
+            reason: z.string().min(1).max(200).optional(),
+            rework: z.number().int().positive().optional(),
+            /**
+             * Кто решает на шаге решения (`diagnosis`, `reset`,
+             * `user-decision`) и на ожидании ведущего (удержанный gate):
+             * сброс человеком — `user`, сброс ведущего — `lead`.
+             */
+            actor: z.enum(trackStepActors).optional(),
+          }),
+        )
+        .max(L.trackSteps),
+      truncated: count.optional(),
+    })
+    .optional(),
 });
 
 const series = z.array(count).max(L.buckets);
@@ -562,6 +614,56 @@ const forecastSchema = z.strictObject({
       )
       .max(L.forecastWorks)
       .optional(),
+    /**
+     * Ревизия 6: планируемые задачи (вес 0) — ещё не утверждённые; `line` —
+     * «по утверждённому плану ~X %; с планируемыми (N задач, не утверждены: …) ~Y %».
+     */
+    planned: z
+      .strictObject({
+        count: z.number().int().positive(),
+        keys: z.array(token(200)).max(L.forecastPlanned),
+        line: z.string().min(1).max(T.line),
+      })
+      .optional(),
+    /** Ревизия 6: только утверждённый план (есть вместе с `planned`). */
+    approved: z
+      .strictObject({
+        percent: z.number().int().min(0).max(100),
+        total: count,
+        done: count,
+        left: count,
+        loMs: count.optional(),
+        hiMs: count.optional(),
+      })
+      .optional(),
+    /** Ревизия 6: шаги ведущего — 10 % выпуска поровну (`weight` — доля выпуска). */
+    lead: z
+      .strictObject({
+        steps: z
+          .array(
+            z.strictObject({
+              step: z.enum(['plan', 'questions', 'delivery', 'report']),
+              weight: z.number().min(0).max(1),
+              done: z.boolean(),
+            }),
+          )
+          .max(4),
+        weighted: z.number().min(0),
+        total: z.number().min(0),
+      })
+      .optional(),
+    /**
+     * Ревизия 6: состояние выпуска — `in-work`, `code-accepted` (код принят,
+     * итогового отчёта ведущего нет), `done` (`harness release done`).
+     */
+    release: z
+      .strictObject({
+        state: z.enum(['in-work', 'code-accepted', 'done']),
+        doneAt: isoTimeSchema.optional(),
+        summary: freeText(T.releaseSummary).optional(),
+        line: z.string().min(1).max(T.line),
+      })
+      .optional(),
   }),
   time: z.strictObject({
     startedAt: isoTimeSchema.optional(),
@@ -587,6 +689,16 @@ const forecastSchema = z.strictObject({
       .optional(),
     /** Ревизия 5: чем названо «осталось». */
     estimate: z.enum(['precise', 'rough', 'unknown', 'nothing']).optional(),
+    /** Ревизия 6: цепочка зависимостей незаконченных работ (доли задачи): нижняя граница не короче. */
+    chain: z.number().min(0).optional(),
+    /** Ревизия 6: работа ведущего — отдельной долей, по истории проекта. */
+    lead: z
+      .strictObject({
+        ms: count,
+        samples: z.number().int().positive(),
+        line: z.string().min(1).max(T.line),
+      })
+      .optional(),
     humanWait: z.strictObject({ works: count, ms: count, since: isoTimeSchema.optional() }),
     line: z.string().min(1).max(T.line),
   }),
@@ -714,9 +826,92 @@ export const operatorViewSchema = z.strictObject({
       command: freeText(T.updateLine).optional(),
     })
     .optional(),
+  /**
+   * Ревизия 6: планируемые задачи без работы harness — карточки «ещё не
+   * утверждена» (ни попыток, ни действий). `from`: `validated` — в
+   * проверенном несогласованном снимке связки, `read` — только в последнем
+   * чтении источника.
+   */
+  planned: z
+    .array(
+      z.strictObject({
+        id,
+        connector: id,
+        taskId: id,
+        key: token(200).optional(),
+        title: freeText(T.title).optional(),
+        status: z.literal('planned'),
+        from: z.enum(['validated', 'read']),
+        graphId: id.optional(),
+        dependsOn: z.array(id).max(L.dependsOn).optional(),
+        line: z.string().min(1).max(T.line),
+      }),
+    )
+    .max(L.planned)
+    .optional(),
+  /**
+   * Ревизия 6: ведущий — сессия `harness lead begin|end` (аренда до
+   * `until`), последняя заметка и журнал новыми сверху (заметки, команды
+   * harness ведущего, итог выпуска).
+   */
+  lead: z
+    .strictObject({
+      active: z.boolean(),
+      since: isoTimeSchema.optional(),
+      until: isoTimeSchema.optional(),
+      endedAt: isoTimeSchema.optional(),
+      lastNote: z
+        .strictObject({ at: isoTimeSchema, plain: z.string().min(1).max(T.activity) })
+        .optional(),
+      notes: z
+        .array(
+          z.strictObject({
+            at: isoTimeSchema,
+            kind: token(40),
+            action: token(80),
+            workId: id.optional(),
+            plain: z.string().min(1).max(T.activity),
+          }),
+        )
+        .max(L.leadNotes),
+      line: z.string().min(1).max(T.line),
+    })
+    .optional(),
+  /** Ревизия 6: что задействовано — модели и вендоры ролей, изоляция, toolchain, сервисы, проверки. */
+  resources: resourcesViewSchema.optional(),
+  /**
+   * 0.1.0-alpha.66: живые превью результата (`harness preview-start`,
+   * docs/previews.md) — адрес на loopback, что показано и срок. Панель
+   * показывает «Посмотреть результат» и «остановить» (`harness preview-stop
+   * --preview <id>`). Нет поля — ни одно превью не идёт.
+   */
+  previews: z
+    .array(
+      z.strictObject({
+        id,
+        repositoryId: id,
+        title: freeText(T.title).optional(),
+        url: z.string().regex(/^http:\/\/127\.0\.0\.1:\d{1,5}\/$/),
+        ref: freeText(T.line),
+        sha: gitShaSchema,
+        workId: id.optional(),
+        startedAt: isoTimeSchema,
+        expiresAt: isoTimeSchema,
+        state: z.enum(['running']),
+      }),
+    )
+    .min(1)
+    .max(L.previews)
+    .optional(),
   truncated: z
     .strictObject({
       scope: truncatedCount.optional(),
+      /** Ревизия 6: планируемые задачи сверх предела или опущенные по размеру. */
+      planned: truncatedCount.optional(),
+      /** Ревизия 6: записи журнала ведущего сверх `lead.notes`. */
+      leadNotes: truncatedCount.optional(),
+      /** Ревизия 6: раздел `resources` опущен по размеру (1). */
+      resources: truncatedCount.optional(),
       sourceQuestions: truncatedCount.optional(),
       /** Ревизия 5: задачи `sourceReviews[].tasks` сверх предела. */
       sourceReviews: truncatedCount.optional(),
@@ -745,6 +940,8 @@ export const operatorViewSchema = z.strictObject({
       workFields: truncatedCount.optional(),
       /** Пункты `updates.whatsNew` сверх предела (harness 0.1.0-alpha.61). */
       whatsNew: truncatedCount.optional(),
+      /** Живые превью сверх предела `previews` (harness 0.1.0-alpha.66). */
+      previews: truncatedCount.optional(),
     })
     .optional(),
 });

@@ -383,9 +383,16 @@ it returns `code`, `cause`, `phase`, `actor`, `action`, `retryPlanned`,
 | ------------ | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
 | `controller` | `wait`, `retry`                                                                                                    | you: wait, or run `$H run` again                                             |
 | `lead`       | `review-plan`, `diagnose-failure`, `replan-dependents`, `wait`                                                     | you: fix the graph, policy or code by the evidence, then run                 |
+| `lead`       | `diagnose`, `reset-attempts`                                                                                       | you: diagnose repeated failures, grant a new attempt limit yourself (below)  |
 | `user`       | `fix-access`, `fix-environment`, `raise-budget`, `reset-attempts`, `user-decision`, `resume-queue`, `answer-input` | hand it to the user with the message and evidence                            |
 | `lead`       | `apply-input`                                                                                                      | you: `input-resolve --request ID [--author A]` (or `input-carry`, see below) |
 | `null`       | `none`                                                                                                             | nothing to do                                                                |
+
+The `actor` field decides, not the action name: `reset-attempts` with
+`actor: lead` is yours, with `actor: user` it is the human's. The rule is in
+`docs/principles.md` («Кто принимает решения»): technical recovery is yours
+within the budget; the human gets product questions, contradictions, an
+exhausted budget and explicit escalation.
 
 After an answer: `$H input-resolve --state D --request ID --author <your runtime>`
 builds the answer snapshot (stored by digest, no files), reviews the plan with
@@ -403,8 +410,47 @@ on a ready work resets the counter (the reply says `reset.performed`); while
 an attempt runs it refuses. Every command has `$H <command> --help`.
 
 Only `user` actions go to the human: access, environment, budgets, attempt
-resets, goal decisions, resuming a paused queue and answers to executor
-questions are their decisions.
+resets beyond your budget, goal decisions, resuming a paused queue and answers
+to executor questions are their decisions.
+
+**Repeated failures (`DIAGNOSIS_REQUIRED`, `actor: lead`, `diagnose`).** With
+`recovery.mode: lead` (the default when `inputPolicy.leadAnswers.technical`
+is on; `doctor` and `status --human` print the effective rule in plain
+words), after `recovery.diagnoseAfter` counted failures (default 2) the next
+attempt is not issued until you diagnose them. Failures of the environment,
+the model provider, a controller stop and writer questions are not counted
+and need no diagnosis. Read the gate log, the review findings and the diff of
+the failed attempts, then pick one cause:
+
+- the checks let the defect through or miss a class of inputs → `coverage`
+  (add cases, strengthen the check);
+- the implementation idea is wrong → `approach`, with a new testable
+  hypothesis for the writer;
+- the work is too big for one attempt → `split` (re-plan the graph into
+  smaller orders and get the plan reviewed; attempts are not added);
+- two acceptance criteria or the order and its contract contradict each
+  other → `contradiction` (this goes to the human);
+- the environment, or none of these → `environment` / `other`.
+
+`$H diagnose --state D --work <id> --cause <cause> --hypothesis "<what the
+writer does differently and how it is checked>" [--evidence "<log line or
+id>"]`. The hypothesis is required for `coverage` and `approach` and must be
+new for the work. The next attempt gets the cause and the hypothesis in its
+prompt; then `$H retry --work <id>` or `$H run` continues.
+
+**Attempts exhausted (`ATTEMPTS_EXHAUSTED`).** If `explain` says `actor:
+lead`, it is yours: with `diagnose`, diagnose the last failure first; with
+`reset-attempts`, a fresh technical diagnosis exists (`coverage`, `approach`,
+or `other` with a hypothesis) and you grant a new attempt limit yourself:
+`$H retry --state D --work <id> --reset --by lead --diagnosis <D…>`. You may
+do this `recovery.leadResets` times per work budget (default 2), only after a
+new failure and a new hypothesis, and only while the work budget is not
+exhausted; status then reads «ведущий дал ещё N попыток (сброс K из M):
+причина …; гипотеза …». If `explain` says `actor: user` — the cap is spent,
+the cause is not technical, the diagnosis was already used, or the rule is
+`user` — hand it to the human with the message and your diagnosis as
+evidence. Never call `retry --reset` without `--by lead` yourself: that
+records a human decision.
 
 **Writer stopped on the environment (`APPROVAL_REQUIRED`, `cause:
 needs-lead`, `actor: lead`, `diagnose-failure`).** The writer reported that
@@ -417,6 +463,24 @@ context, a harness gate), then `$H retry --work <id>`. Never retry it
 unchanged. The same applies when `explain` says the same testcase failed
 twice in a row before the last attempt: read the gate log (expected and actual), fix the task or its
 context, then retry or split the task.
+
+**A gate needs `ps` (`GATE_SANDBOX_PROCESS_LIST`, cause
+`sandbox-process-list`).** The gate ran `ps`, `pgrep` or `top` inside the OS
+sandbox for gates, where macOS does not start them. Changing the task code
+does not help, and there is no per-gate policy switch for this. Rewrite the
+test to check its own child processes by pid (`process.kill(pid, 0)`) or by
+marker files, or take that test out of the gate command. `$H smoke` warns
+about it (`sandbox-process-list`, with the files that call `ps`) before any
+paid attempt; `$H doctor` shows `sandbox.processList`. The engine does not
+retry this failure on its own and does not pause the queue: a retry would
+fail the same way, and the attempt is not counted. It is your move (explain:
+`lead`, `fix-environment`). While you have not, the gate is held: other works
+of that repository that need it are not started (`ENVIRONMENT_GATE_HELD`,
+`lead`, `fix-environment`; `view.resources.gates.heldLine`). Changing the
+gate definition lifts the hold by itself; after fixing the test instead, run
+`$H retry --work <id> --by lead` on the stopped work. When the task change
+itself added the `ps` call (the base has none), it is a normal counted gate
+failure for the writer («тест вызывает ps … уберите вызов»), not this case.
 
 **Code review keeps raising new findings (`REVIEW_REJECTED`).** The reviewer
 must list all blocking findings in one round. A new blocking finding on a path
@@ -541,7 +605,12 @@ of editing the policy by hand:
 in the repository. Report what the harness recorded, not your own summary.
 Link only addresses the user runs and keeps (their own site or dashboard),
 never a temporary port of a server you started in this session and stop:
-such links are dead once you leave. A gate that fails only for you
+such links are dead once you leave. To let the user look at an accepted
+result, start a harness preview only when they ask
+(`$H preview-start --state <state> --ref accepted --work <id>`, policy
+`previews[]`): it returns a loopback `url`, and the harness stops it on TTL
+or idle; stop it yourself when they are done (`$H preview-stop --state <state>`).
+Never start a preview from a gate, a writer task or `run`. A gate that fails only for you
 while `doctor` warns that `PATH` Node differs from `toolchain.node` is an
 environment problem — fix the shell or the pin, not the code or the gate.
 A failed gate whose text says its node differs from the last passing run of
@@ -567,13 +636,53 @@ accepted work whose order changed opens a rework (`work.reopened`) with its
 own attempt budget; `status` and `view` say «принято ранее на <sha>;
 доработка 1: …» / "accepted earlier at <sha>; rework 1: …", and the forecast
 keeps the earlier acceptance. A work gets at most 3 reworks with their own
-budget; after that the counter carries over, and an exhausted rework is the
-user's `reset-attempts`. Re-planning a work that was **not** accepted keeps
+budget; after that the counter carries over, and an exhausted rework is a
+`reset-attempts` of whoever `explain` names (lead resets count per budget). Re-planning a work that was **not** accepted keeps
 its counter — never re-plan to dodge `ATTEMPTS_EXHAUSTED`. A new order id
 is a new task with its own counter; the plan review that approves the
 revision is the guard, so never rename an order to get attempts back. A source task
 already closed (`done`) refuses a run with a changed order (`TASK_DONE`): the
 operator moves it back out of `done` in the source first.
+
+**Changed your mind about a rework?** `$H cancel --state <state> --work <id>`
+on an open rework does not cancel the task: the work goes back to its
+accepted revision (`done`, the earlier acceptance and result, `abandoned:
+true` in the answer, `work.rework-abandoned` in the feed). Use it when the
+rework was a mistake. A delivery problem in the task source (a connector
+binding, a closed task) is never a reason to re-plan accepted work.
+**Delivery to the task source is not a reason to re-plan.** With a
+connector, `run --source` delivers each accepted result to its source task.
+When the task stays open after a confirmed delivery, read
+`$H source-status --source <connector.json> --state D`: `tasks[].proof` says
+which criteria are unproven and why («testcase orders.api.access отсутствует
+в evidence gate api-http (есть test.orders.api.access …)»). The fix is the
+binding, not the code: correct `criteria[].testId` (the JUnit id is
+`classname.name`; node:test writes `test.<test name>`) or `evidence` in
+`connector.json`, then `$H source-deliver --source <connector.json> --state D
+--reprove [--work ID]`. It re-sends the evidence of the same accepted result
+under a new operation key, with no models, gates or Git, and closes the task;
+repeating it sends nothing. A binding edit changes neither the order nor the
+snapshot revision: no new `source-snapshot`, no plan review, no rework. Never
+re-plan, rework or cancel accepted work to force a delivery, and never close
+criteria or move tasks in the source by hand while harness can still prove
+them. A `conflict` from `--reprove` means the task statement itself changed
+— then it is a follow-up change, handled as above.
+
+**Updating a source document that feeds accepted tasks.** Writing the
+owner's answer into a question document, or any other edit of a document
+linked to accepted tasks, is not a re-plan either. Optional documents are
+context: an accepted result still delivers. After the edit, check delivery
+with `$H source-status` and, for a `conflict` or `uncertain` operation,
+`$H source-reconcile --operation <key>` — not a new plan. Only a changed
+required document (`requiredDocuments`) or task text makes the accepted
+result belong to the old statement.
+
+**Confirming a provisional answer creates no work.** When the owner's answer
+matches the choice you (or the writer) already took provisionally and the
+accepted work already implements it, record the confirmation where the
+question lives (the question document or `input-answer`) and stop there: no
+follow-up task, no new order, no new plan approval. A follow-up task is right
+only when the answer differs from what was built.
 
 "Accepted" is local: the harness moved the target ref in this repository and
 never pushes. `data.target.remote` (also `status` `works[].target.remote`)
@@ -587,6 +696,30 @@ the destination the harness names — `git push <pushRemote>
 name) — and wait for their yes; never push on your own, and never report
 `unknown` as pushed or as not pushed. After that push, `status` shows
 `pushed` without a fetch (the push updates the tracking ref).
+
+### Lead log: tell the operator what you are doing
+
+The operator watches `$H view` while you work. Harness records your own
+harness commands there by itself (plan review, approve, retry, cancel,
+source-deliver, input answers, run start and end). Everything else you do —
+writing in the task source, checking the site in a browser, fixing the
+connector — is invisible unless you say it:
+
+- At the start of your session: `$H lead begin --state <state>` (a lease of
+  30 minutes; `--ttl` takes a unit — `90s`, `30m`, `2h`, a bare number is
+  refused; each of your records extends it). Your harness commands are
+  written to your log only while your session is active, or when they say
+  `--by lead` / `--actor lead` (`diagnose` is always yours); a command with `--actor operator` (or
+  `--by <human>`) is the operator's and does not extend your lease.
+- At each step outside harness, one short line in plain words, the way you
+  would tell a non-developer: `$H lead note "Обновляю документ DOC-2 в источнике задач"
+--state <state>` (up to 200 characters; no secrets, no paths, no logs).
+- When all code is accepted, delivered and checked, write the final report:
+  `$H release done --state <state> --summary "<what was done, what is left>"`.
+  Until then the view says «код принят, ведущий ещё работает: <your last
+  note>» and progress stays below 100 %; it refuses while a work or rework is
+  still open.
+- When you stop: `$H lead end --state <state>`.
 
 ### 10. New session
 
@@ -636,9 +769,11 @@ not copy acceptance logs or attempt state into notes.
   (`profiles/*.json`); `--profile ./file.json --repository <dir>` resolves a
   profile kept in the repository. Profile resolution only reads manifests and
   never runs project commands.
+- **Lead log**: `$H lead begin|note|end`, `$H release done --summary` (see «Lead log»).
 - **Queue control**: `$H status`, `pause`, `resume`, `cancel`, `retry`
   (bounded by the policy), `deliver` (repeats delivery without models or Git
-  integration).
+  integration); with a connector, `source-deliver --reprove` re-proves the
+  criteria of an accepted result after a binding fix.
 
 ## Don'ts
 

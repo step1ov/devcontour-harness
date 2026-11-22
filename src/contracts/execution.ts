@@ -11,6 +11,7 @@ import {
   gateScopeSchema,
 } from './primitives.ts';
 import { workGraphSchema, workOrderSchema } from './work.ts';
+import { leadLogSchema } from './lead.ts';
 import { contextPinSchema, contextSnapshotSchema } from './context.ts';
 import { toolchainFactsSchema } from './toolchain.ts';
 import {
@@ -121,6 +122,15 @@ export type FailureKind = (typeof failureKinds)[number];
 export const contextLimits = ['prompt-too-long', 'blocking-limit'] as const;
 export const contextLimitSchema = z.enum(contextLimits);
 export type ContextLimit = (typeof contextLimits)[number];
+
+/**
+ * Причины отказа окружения, при которых повтор даст тот же отказ
+ * (0.1.0-alpha.66): `sandbox-process-list` — gate запускает `ps`, а
+ * песочница ОС проверок его не даёт. Попытка их не засчитывает, автоматического
+ * повтора нет: ход ведущего — поменять gate или команду.
+ */
+export const noRetryEnvironmentCauses = ['sandbox-process-list'] as const;
+export type NoRetryEnvironmentCause = (typeof noRetryEnvironmentCauses)[number];
 
 /**
  * Живость исполняющейся попытки по периодическому обходу controller
@@ -589,6 +599,11 @@ export const attemptStateSchema = z.strictObject({
   failureKind: failureKindSchema.optional(),
   /** Предел окна контекста — только у отказа `context-exhausted`. */
   contextLimit: contextLimitSchema.optional(),
+  /**
+   * Причина отказа окружения без повтора (`noRetryEnvironmentCauses`,
+   * 0.1.0-alpha.66) — только у отказа `environment` с такой причиной.
+   */
+  environmentCause: z.enum(noRetryEnvironmentCauses).optional(),
   failureFingerprint: z.string().optional(),
   /** Gates, которые попытка обязана пройти в обеих фазах (раскрытая область). */
   requiredGates: z.array(idSchema).optional(),
@@ -780,6 +795,72 @@ export const propertyRecoverySchema = z.strictObject({
 });
 export type PropertyRecovery = z.infer<typeof propertyRecoverySchema>;
 
+/**
+ * Причина повторных отказов по диагностике ведущего (`harness diagnose`):
+ * слабое покрытие — добавить случаи или усилить проверку; неверный подход —
+ * новая проверяемая гипотеза исполнителю; задача велика — разделить её с
+ * ревью плана; противоречивое обещание — вопрос человеку; окружение;
+ * другое. Технические (`coverage`, `approach`, `other` с гипотезой) ведущий
+ * решает сам в пределах бюджета (docs/principles.md).
+ */
+export const leadDiagnosisCauses = [
+  'coverage',
+  'approach',
+  'split',
+  'contradiction',
+  'environment',
+  'other',
+] as const;
+export type LeadDiagnosisCause = (typeof leadDiagnosisCauses)[number];
+
+/** Пределы диагностик и сбросов поручения (`WorkState.leadRecovery`). */
+export const LEAD_RECOVERY_LIMIT = 20;
+
+export const leadDiagnosisSchema = z.strictObject({
+  /** `D<n>` — номер диагностики поручения (n растёт и после усечения списка). */
+  id: z.string().regex(/^D[1-9][0-9]{0,5}$/),
+  cause: z.enum(leadDiagnosisCauses),
+  hypothesis: z.string().min(1).max(2000).optional(),
+  evidence: z.array(z.string().min(1).max(1000)).max(10),
+  /** Засчитанные отказы (ID попыток), которые она разбирает. */
+  failures: z.array(z.string().min(1)).min(1).max(20),
+  by: z.literal('lead'),
+  at: isoTimeSchema,
+  /** Согласованная постановка на момент диагностики: `split` ждёт другую. */
+  approvedDigest: digestSchema.optional(),
+  /** Предел попыток (`rework.budgets`), к которому она относится. */
+  epoch: z.number().int().min(0),
+  /** Человек решил по ней (сброс оператора): удержание снято. */
+  resolved: z.strictObject({ by: z.literal('operator'), at: isoTimeSchema }).optional(),
+});
+export type LeadDiagnosis = z.infer<typeof leadDiagnosisSchema>;
+
+export const leadResetSchema = z.strictObject({
+  by: z.enum(['lead', 'operator']),
+  at: isoTimeSchema,
+  /** Диагностика, по которой ведущий дал предел; у сброса оператора — нет. */
+  diagnosis: z.string().optional(),
+  epoch: z.number().int().min(0),
+  /** Засчитанные попытки, потраченные до сброса. */
+  spent: z.number().int().min(0),
+  /** Сколько попыток дал сброс (`maxAttempts`). */
+  granted: z.number().int().min(1),
+  /** Номер сброса ведущего в пределе (`K из M`); у сброса оператора — нет. */
+  index: z.number().int().min(1).optional(),
+  cap: z.number().int().min(0).optional(),
+  /** Отказы, которые сброс покрыл (решение человека или ведущего по ним). */
+  failures: z.array(z.string().min(1)).max(20),
+});
+export type LeadReset = z.infer<typeof leadResetSchema>;
+
+export const leadRecoverySchema = z.strictObject({
+  diagnoses: z.array(leadDiagnosisSchema).max(LEAD_RECOVERY_LIMIT),
+  resets: z.array(leadResetSchema).max(LEAD_RECOVERY_LIMIT),
+  /** Номер последней диагностики (ID следующей — `D<seq+1>`). */
+  seq: z.number().int().min(0),
+});
+export type LeadRecovery = z.infer<typeof leadRecoverySchema>;
+
 export const workStateSchema = z.strictObject({
   id: idSchema,
   graphId: idSchema,
@@ -831,6 +912,12 @@ export const workStateSchema = z.strictObject({
       revision: z.number().int().positive(),
       budgets: z.number().int().min(0),
       fresh: z.boolean(),
+      /**
+       * Доработка продолжает оставленную (0.1.0-alpha.66): та же постановка
+       * после отказа — попытки, незасчитанные отказы и предел (эпоха
+       * сбросов ведущего) перенесены с неё, своего предела нет.
+       */
+      resumed: z.literal(true).optional(),
       accepted: z.strictObject({
         runId: z.string().min(1).optional(),
         resultSha: gitShaSchema,
@@ -838,6 +925,64 @@ export const workStateSchema = z.strictObject({
       }),
       reopenedAt: isoTimeSchema,
       spent: z.number().int().min(0),
+      /**
+       * Постановка принятой редакции (0.1.0-alpha.66): отказ от доработки
+       * возвращает её поручению. Нет — доработка открыта прежней версией.
+       */
+      acceptedOrder: workOrderSchema.optional(),
+      /**
+       * Доработка оставлена (0.1.0-alpha.66, `cancel` открытой доработки или
+       * новая редакция графа без поручения): работа вернулась к принятой
+       * редакции — `done`, результат `accepted.resultSha`. `orderDigest` —
+       * содержание оставленной (не принятой) постановки: та же постановка в
+       * новой редакции графа снова открывает доработку. `restored` —
+       * поручению возвращена принятая постановка (`acceptedOrder`).
+       */
+      abandoned: z
+        .strictObject({
+          at: isoTimeSchema,
+          by: z.enum(['operator', 'host', 'graph']),
+          orderDigest: digestSchema,
+          restored: z.boolean(),
+          /**
+           * Засчитанные попытки и незасчитанные отказы оставленной доработки:
+           * та же постановка в новой редакции графа продолжает их, а не
+           * открывает свой предел заново. Нет — запись прежней сборки.
+           */
+          attempt: z.number().int().min(0).optional(),
+          neutralFailures: z.number().int().min(0).optional(),
+        })
+        .optional(),
+    })
+    .optional(),
+  /**
+   * Восстановление ведущим (`policy.recovery`, docs/principles.md):
+   * диагностики повторных отказов и сбросы попыток — кто, по какой
+   * диагностике, какой по счёту. Пишется только `harness diagnose` и
+   * сбросом; нет поля — диагностик и учтённых сбросов не было.
+   */
+  leadRecovery: leadRecoverySchema.optional(),
+  /**
+   * Удержание gate по отказу окружения без повтора (0.1.0-alpha.66):
+   * попытка этой работы упала `sandbox-process-list` на вызове `ps`, который
+   * есть уже в базе. Пока определение gate (`gateDigest`) то же и ведущий не
+   * повторил эту работу (`retry --by lead`), работы репозитория, которым
+   * нужен этот gate, не выдаются (`ENVIRONMENT_GATE_HELD`): тот же gate в той
+   * же песочнице откажет снова. Держит, пока работа не принята и не отменена.
+   */
+  environmentHold: z
+    .strictObject({
+      repositoryId: idSchema,
+      gate: idSchema,
+      digest: digestSchema,
+      runId: z.string().min(1),
+      at: isoTimeSchema,
+      /**
+       * Режим изоляции проверок при отказе (`os`): отказ — свойство
+       * песочницы ОС; `isolation.mode: none` снимает удержание. Нет поля
+       * (состояние до этого поля) — `os`.
+       */
+      isolation: z.enum(['os', 'none']).optional(),
     })
     .optional(),
 });
@@ -1335,6 +1480,12 @@ export const localSchemas = {
    * у `@workspace`. Пишет только `engine.jointBudgetReset`.
    */
   'joint-budget-resets': jointBudgetResetSchema,
+  /**
+   * Журнал ведущего (0.1.0-alpha.66): одна запись `log` у `@workspace` —
+   * сессия, записи и итог выпуска (`leadLogSchema`). Пишут только операции
+   * журнала (`lead.recorded`).
+   */
+  lead: leadLogSchema,
 } as const;
 export type LocalNamespace = keyof typeof localSchemas;
 export type LocalValue<N extends LocalNamespace> = z.infer<(typeof localSchemas)[N]>;

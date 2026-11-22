@@ -1,4 +1,5 @@
 import type { PropertyRecovery } from '../contracts/execution.ts';
+import type { LeadRecoveryStep } from './lead-recovery.ts';
 import {
   activeStatuses,
   type Actor,
@@ -35,6 +36,13 @@ export interface NextInput {
   hold?: { operation: string };
   recovery?: Pick<PropertyRecovery, 'status' | 'property' | 'reason' | 'decision'>;
   waitingAdoption?: boolean;
+  /**
+   * Восстановление ведущим (`policy.recovery`, 0.1.0-alpha.66,
+   * `leadRecoveryStep`): разбор, сброс или перепланирование ведущего вместо
+   * сброса человеком, пока бюджет сбросов ведущего не потрачен. Нет поля —
+   * правило `user`, прежние шаги.
+   */
+  leadRecovery?: LeadRecoveryStep;
 }
 export interface NextView {
   actor: Actor;
@@ -56,6 +64,35 @@ const view = (
   ...(extra.property !== undefined ? { property: extra.property } : {}),
   ...(extra.detail !== undefined ? { detail: extra.detail } : {}),
 });
+
+/**
+ * Кто ходит по удержанию ведущим или по исчерпанным попыткам (docs/principles.md,
+ * «Кто принимает решения»): технический ход — ведущему, пока правило `lead`
+ * и бюджет сбросов позволяют; иначе — человек, сбросом попыток.
+ */
+export function leadRecoveryMove(
+  lr: LeadRecoveryStep | undefined,
+  exhausted: boolean,
+): { actor: Actor; action: NextAction } | undefined {
+  if (!lr) return undefined;
+  if (!exhausted && lr.hold)
+    return lr.hold === 'diagnosis-required'
+      ? { actor: 'lead', action: 'diagnose' }
+      : lr.hold === 'replan'
+        ? { actor: 'lead', action: 'review-plan' }
+        : { actor: 'user', action: 'user-decision' };
+  if (!exhausted || !lr.exhausted) return undefined;
+  if (lr.exhausted.actor === 'user') return { actor: 'user', action: 'reset-attempts' };
+  return {
+    actor: 'lead',
+    action:
+      lr.exhausted.step === 'diagnose'
+        ? 'diagnose'
+        : lr.exhausted.step === 'reset'
+          ? 'reset-attempts'
+          : 'review-plan',
+  };
+}
 
 /**
  * Следующий шаг по работе и кто его делает (OP-DIAG-03). Порядок веток —
@@ -98,9 +135,13 @@ export function nextAction(input: NextInput): NextView {
   // Упавшая отменой: движок не повторяет, решает человек (повтор или отмена).
   if (input.status === 'failed' && input.failureKind === 'cancelled')
     return view('user', 'user-decision', 'cancelled');
-  if (input.status === 'failed')
-    return input.maxAttempts - input.attempt > 0
-      ? view('controller', 'retry', 'retry-within-budget')
-      : view('user', 'reset-attempts', 'attempts-exhausted');
+  if (input.status === 'failed') {
+    const exhausted = input.maxAttempts - input.attempt <= 0;
+    const lead = leadRecoveryMove(input.leadRecovery, exhausted);
+    if (lead) return view(lead.actor, lead.action, exhausted ? 'attempts-exhausted' : 'held');
+    return exhausted
+      ? view('user', 'reset-attempts', 'attempts-exhausted')
+      : view('controller', 'retry', 'retry-within-budget');
+  }
   return view('controller', 'wait', 'awaiting-claim');
 }

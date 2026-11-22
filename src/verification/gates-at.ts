@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import {
   HarnessError,
   stallSweepOf,
+  type EnvironmentCause,
   type EvidenceRecord,
   type ExecutionPolicy,
   type RunEventPayload,
@@ -124,7 +125,12 @@ export interface GatesAtResult {
    * названные gates, кроме тех, чья предпосылка не прошла (они названы здесь
    * с этой причиной и evidence не получают).
    */
-  failures: { gate: string; message: string }[];
+  failures: {
+    gate: string;
+    message: string;
+    /** Причина отказа среды, названная gate (`TaskFailure.diagnosis`), например `sandbox-process-list`. */
+    environment?: EnvironmentCause;
+  }[];
   /**
    * Gates, не исполненные после первого провала (`failFast`): не провал,
    * исход неизвестен. Нет поля — исполнены все.
@@ -475,7 +481,14 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
                   continue;
                 }
                 failed.add(gate.id);
-                failures.push({ gate: gate.id, message: stalledBy(input.signal) ?? error.message });
+                const stalled = stalledBy(input.signal);
+                failures.push({
+                  gate: gate.id,
+                  message: stalled ?? error.message,
+                  ...(!stalled && error.kind === 'environment' && error.diagnosis
+                    ? { environment: error.diagnosis }
+                    : {}),
+                });
                 if (reapedFailure(error)) reapedBy = gate.id;
               }
             }

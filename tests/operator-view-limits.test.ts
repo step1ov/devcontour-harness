@@ -352,11 +352,15 @@ test('alpha.61: 500 работ со всеми полями ревизии 4 и 
   // Где ответ и шаги блокировок у 80 работ: их снятия достаточно, все 500 работ остаются.
   const some = {
     ...all,
+    // Место под настройки решений ревизии 6 (`settings.decisions`, ~2 КБ).
+    reviews: all.reviews.slice(0, -8),
     works: all.works.map((w, k) => ({
       ...work(w.id),
       status: 'done',
       stage: { ...work(w.id).stage, name: 'done', next: [] },
-      ...(k < L.drift ? { target: w.target } : {}),
+      // Ревизия 6: прогноз длиннее (шаги ведущего, состояние выпуска) —
+      // сверка принятого у 46 работ, а не у 50, чтобы снятие полей 80 работ хватало.
+      ...(k < 46 ? { target: w.target } : {}),
       ...(k < 80 ? { input: w.input, blockers: w.blockers } : {}),
     })),
   };
