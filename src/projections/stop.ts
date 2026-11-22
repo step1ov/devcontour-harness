@@ -1,6 +1,10 @@
 import { RU, ruCount } from '../contracts/plural.ts';
 import { errorCodes, type ErrorCode } from '../contracts/errors.ts';
-import { repairPolicy, repairRepeats } from '../contracts/repair-policy.ts';
+import {
+  NO_RETRY_ENVIRONMENT_EXPLAIN,
+  repairPolicy,
+  repairRepeats,
+} from '../contracts/repair-policy.ts';
 import { CLIP_DIAGNOSTIC, clipText } from './clip.ts';
 import type { Actor, FailureKind, NextAction, PauseReason, WorkStatus } from './enums.ts';
 import type { InputState } from './input.ts';
@@ -132,6 +136,11 @@ export type StopInput =
         failureKind?: FailureKind;
         /** Предел окна контекста последнего отказа `context-exhausted`. */
         contextLimit?: 'prompt-too-long' | 'blocking-limit';
+        /**
+         * Отказ окружения без повтора (`sandbox-process-list`, 0.1.0-alpha.66):
+         * повтора нет, ход ведущего — поменять gate или команду.
+         */
+        environmentCause?: 'sandbox-process-list';
         failure?: string;
         /**
          * Отказ до начала работы (причина `preflight`): последняя попытка не
@@ -392,7 +401,8 @@ function retryPlannedOf(input: Extract<StopInput, { kind: 'work' }>) {
   const rule = repairPolicy[work.failureKind ?? 'unknown'];
   return (
     rule.action === 'retry' &&
-    repair.sameFailureRepairs < repairRepeats(work.failureKind ?? 'unknown', work.contextLimit) &&
+    repair.sameFailureRepairs <
+      repairRepeats(work.failureKind ?? 'unknown', work.contextLimit, work.environmentCause) &&
     work.attempt < maxAttempts &&
     repair.groupRepairsUsed < repair.groupRepairBudget
   );
@@ -725,6 +735,14 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       case 'environment':
       case 'timeout':
       case 'stalled':
+        // Gate зовёт ps в песочнице ОС: повтор не поможет, правит ведущий.
+        if (kind === 'environment' && work.environmentCause)
+          return {
+            ...ruleOutcome('environment-gate-command'),
+            cause: kind,
+            phase,
+            note: NO_RETRY_ENVIRONMENT_EXPLAIN[work.environmentCause],
+          };
         return {
           code: 'RUNTIME_UNAVAILABLE',
           cause: kind,

@@ -124,6 +124,15 @@ export const contextLimitSchema = z.enum(contextLimits);
 export type ContextLimit = (typeof contextLimits)[number];
 
 /**
+ * Причины отказа окружения, при которых повтор даст тот же отказ
+ * (0.1.0-alpha.66): `sandbox-process-list` — gate запускает `ps`, а
+ * песочница ОС проверок его не даёт. Попытка их не засчитывает, автоматического
+ * повтора нет: ход ведущего — поменять gate или команду.
+ */
+export const noRetryEnvironmentCauses = ['sandbox-process-list'] as const;
+export type NoRetryEnvironmentCause = (typeof noRetryEnvironmentCauses)[number];
+
+/**
  * Живость исполняющейся попытки по периодическому обходу controller
  * (`stallSweep` политики): `active` — движение было недавно, `quiet` — нет
  * движения дольше `quietMs`, `stalled` — дольше `stalledMs`. Движение —
@@ -590,6 +599,11 @@ export const attemptStateSchema = z.strictObject({
   failureKind: failureKindSchema.optional(),
   /** Предел окна контекста — только у отказа `context-exhausted`. */
   contextLimit: contextLimitSchema.optional(),
+  /**
+   * Причина отказа окружения без повтора (`noRetryEnvironmentCauses`,
+   * 0.1.0-alpha.66) — только у отказа `environment` с такой причиной.
+   */
+  environmentCause: z.enum(noRetryEnvironmentCauses).optional(),
   failureFingerprint: z.string().optional(),
   /** Gates, которые попытка обязана пройти в обеих фазах (раскрытая область). */
   requiredGates: z.array(idSchema).optional(),

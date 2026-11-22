@@ -6,6 +6,7 @@ import {
   failedBeforeWork,
   writerBlockedStop,
   lastContextLimit,
+  lastNoRetryCause,
   repairPolicy,
   repairRepeats,
 } from '../contracts/repair-policy.ts';
@@ -480,6 +481,9 @@ export function stopInputsIn(
           ...(work.failureKind === 'context-exhausted' && lastContextLimit(attempts)
             ? { contextLimit: lastContextLimit(attempts) }
             : {}),
+          ...(work.status === 'failed' && lastNoRetryCause(attempts)
+            ? { environmentCause: lastNoRetryCause(attempts) }
+            : {}),
           ...((input) => (input ? { input } : {}))(inputOf(work, attempts)),
           ...(work.failure !== undefined ? { failure: work.failure } : {}),
           ...(work.status === 'failed' && failedBeforeWork(kind, attempts)
@@ -547,7 +551,7 @@ export function stopInputsIn(
         repair: {
           sameFailureRepairs: fingerprint
             ? identical - 1
-            : repairRepeats(kind, lastContextLimit(attempts)),
+            : repairRepeats(kind, lastContextLimit(attempts), lastNoRetryCause(attempts)),
           groupRepairsUsed: job?.repairs ?? 0,
           groupRepairBudget: job ? options.repairBudget : 0,
           ...(outlook ? { outlook } : {}),
@@ -741,7 +745,11 @@ function outlookOf(
   for (const [i, w] of plain.entries()) {
     const rule = repairPolicy[w.failureKind ?? 'unknown'];
     const attempts = ctx.attemptsOf(w.id);
-    const repeats = repairRepeats(w.failureKind ?? 'unknown', lastContextLimit(attempts));
+    const repeats = repairRepeats(
+      w.failureKind ?? 'unknown',
+      lastContextLimit(attempts),
+      lastNoRetryCause(attempts),
+    );
     const identical = w.failureFingerprint
       ? attempts.filter((a) => a.failureFingerprint === w.failureFingerprint).length
       : repeats + 1;

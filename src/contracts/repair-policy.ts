@@ -1,7 +1,12 @@
 // Таблица восстановления без node:* — её читают и движок, и чистые проекции
 // (`devcontour-harness/projections`, доступные браузеру).
 
-import type { AttemptState, ContextLimit, FailureKind } from './execution.ts';
+import type {
+  AttemptState,
+  ContextLimit,
+  FailureKind,
+  NoRetryEnvironmentCause,
+} from './execution.ts';
 
 export interface RepairRule {
   /** `retry` — новая попытка той же задачи; `stop` — звать человека. */
@@ -226,11 +231,34 @@ export function failedBeforeWork(
  * окна, повтор только удлинит подсказку отказом прошлой попытки, поэтому
  * повторов нет; `blocking-limit` — повтор по правилу класса.
  */
-export function repairRepeats(kind: FailureKind, contextLimit?: ContextLimit): number {
+export function repairRepeats(
+  kind: FailureKind,
+  contextLimit?: ContextLimit,
+  environmentCause?: NoRetryEnvironmentCause,
+): number {
+  if (kind === 'environment' && environmentCause) return 0;
   return kind === 'context-exhausted' && contextLimit === 'prompt-too-long'
     ? 0
     : repairPolicy[kind].repeats;
 }
+
+/**
+ * Отказ окружения без повтора у последней завершившейся отказом попытки
+ * (`AttemptState.environmentCause`): тот же gate в той же песочнице откажет
+ * снова, повтор — пустая трата вызова модели.
+ */
+export const lastNoRetryCause = (
+  attempts: readonly Pick<AttemptState, 'status' | 'failureKind' | 'environmentCause'>[],
+): NoRetryEnvironmentCause | undefined => {
+  const last = attempts.findLast((a) => a.status === 'failed');
+  return last?.failureKind === 'environment' ? last.environmentCause : undefined;
+};
+
+/** Что делать с отказом окружения без повтора: ход ведущего, попытка не засчитана. */
+export const NO_RETRY_ENVIRONMENT_EXPLAIN: Record<NoRetryEnvironmentCause, string> = {
+  'sandbox-process-list':
+    'Gate запускает список процессов (ps, pgrep, top), а в песочнице ОС проверок он недоступен (GATE_SANDBOX_PROCESS_LIST). Повтор даст тот же отказ, поэтому автоматического повтора нет. Ход ведущего: поменять gate или команду — не вызывать ps в проверке (например, читать процессы через свой список PID) или вынести такую проверку из gate. Попытка не засчитана.',
+};
 
 /** Предел окна контекста последнего завершившегося отказом попытки поручения. */
 export const lastContextLimit = (

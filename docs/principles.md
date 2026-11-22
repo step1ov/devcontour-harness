@@ -10,7 +10,10 @@
 разбору, какой это сброс по счёту.
 
 Отказ провайдера модели или окружения — не дефект решения: такие отказы
-попытку не засчитывают и разбора не требуют.
+попытку не засчитывают и разбора не требуют. Отказ окружения, который повтор
+не снимет (gate запускает `ps`, а песочница ОС проверок его не даёт —
+`sandbox-process-list`), не повторяется автоматически и выдачу не держит:
+это ход ведущего — поменять gate или команду.
 
 ### Восстановление после повторных отказов
 
@@ -51,6 +54,7 @@ lead --diagnosis <D…>`. Не больше `recovery.leadResets` раз на п
 | Повторные засчитанные отказы            | ведущий: разбор до следующей попытки           | `recovery.mode: lead`, `recovery.diagnoseAfter`                       |
 | Исчерпаны попытки, технический разбор   | ведущий: новый предел попыток                  | `recovery.leadResets`, `maxAttempts`                                  |
 | Исчерпаны попытки сверх предела сбросов | человек                                        | `recovery.leadResets`                                                 |
+| Gate зовёт `ps` в песочнице ОС          | ведущий: поменять gate или команду             | —                                                                     |
 | Противоречивое обещание                 | человек                                        | —                                                                     |
 | Бюджет расходов или времени исчерпан    | человек                                        | `budgets`                                                             |
 
@@ -73,16 +77,17 @@ lead --diagnosis <D…>`. Не больше `recovery.leadResets` раз на п
 
 <!-- decision-rules:start -->
 
-| Правило                   | Код                  | Кто    | Действие         | Вид             |
-| ------------------------- | -------------------- | ------ | ---------------- | --------------- |
-| `diagnosis-required`      | `DIAGNOSIS_REQUIRED` | `lead` | `diagnose`       | `technical`     |
-| `exhausted-diagnose`      | `ATTEMPTS_EXHAUSTED` | `lead` | `diagnose`       | `technical`     |
-| `exhausted-lead-reset`    | `ATTEMPTS_EXHAUSTED` | `lead` | `reset-attempts` | `technical`     |
-| `diagnosis-split`         | `NOT_READY`          | `lead` | `review-plan`    | `technical`     |
-| `input-technical`         | `INPUT_REQUIRED`     | `lead` | `answer-input`   | `technical`     |
-| `diagnosis-contradiction` | `NOT_READY`          | `user` | `user-decision`  | `contradiction` |
-| `input-user`              | `INPUT_REQUIRED`     | `user` | `answer-input`   | `product`       |
-| `exhausted-user`          | `ATTEMPTS_EXHAUSTED` | `user` | `reset-attempts` | `budget`        |
-| `budget-exhausted`        | `BUDGET_EXHAUSTED`   | `user` | `raise-budget`   | `budget`        |
+| Правило                    | Код                   | Кто    | Действие          | Вид             |
+| -------------------------- | --------------------- | ------ | ----------------- | --------------- |
+| `diagnosis-required`       | `DIAGNOSIS_REQUIRED`  | `lead` | `diagnose`        | `technical`     |
+| `exhausted-diagnose`       | `ATTEMPTS_EXHAUSTED`  | `lead` | `diagnose`        | `technical`     |
+| `exhausted-lead-reset`     | `ATTEMPTS_EXHAUSTED`  | `lead` | `reset-attempts`  | `technical`     |
+| `diagnosis-split`          | `NOT_READY`           | `lead` | `review-plan`     | `technical`     |
+| `environment-gate-command` | `RUNTIME_UNAVAILABLE` | `lead` | `fix-environment` | `technical`     |
+| `input-technical`          | `INPUT_REQUIRED`      | `lead` | `answer-input`    | `technical`     |
+| `diagnosis-contradiction`  | `NOT_READY`           | `user` | `user-decision`   | `contradiction` |
+| `input-user`               | `INPUT_REQUIRED`      | `user` | `answer-input`    | `product`       |
+| `exhausted-user`           | `ATTEMPTS_EXHAUSTED`  | `user` | `reset-attempts`  | `budget`        |
+| `budget-exhausted`         | `BUDGET_EXHAUSTED`    | `user` | `raise-budget`    | `budget`        |
 
 <!-- decision-rules:end -->

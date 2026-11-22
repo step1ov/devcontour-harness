@@ -2,6 +2,8 @@ import { RU, ruCount } from '../contracts/plural.ts';
 import { randomUUID } from 'node:crypto';
 import {
   STAGE_NAME_LIMIT,
+  noRetryEnvironmentCauses,
+  type NoRetryEnvironmentCause,
   codeReviewDecisionSchema,
   codeReviewHistory,
   codeReviewScope,
@@ -2882,6 +2884,13 @@ export class Engine {
     const kind = options.kind ?? 'unknown';
     // Исполнитель остановился из-за окружения: ход ведущего, попытка не засчитана.
     const writerBlocked = kind === 'needs-lead' && options.cause === 'writer-environment';
+    // Отказ окружения, который повтор не снимет (gate зовёт ps в песочнице):
+    // без автоматического повтора и без паузы выдачи — ход ведущего.
+    const noRetry =
+      kind === 'environment' &&
+      (noRetryEnvironmentCauses as readonly string[]).includes(options.cause ?? '')
+        ? (options.cause as NoRetryEnvironmentCause)
+        : undefined;
     return this.withAttempt(id, token, 'run.failed', (a, w, tx) => {
       const fingerprint = failureFingerprint(kind, error);
       const prefix = a.error?.startsWith(HEARTBEAT_FAILED)
@@ -2918,6 +2927,7 @@ export class Engine {
         ...(kind === 'context-exhausted' && options.contextLimit
           ? { contextLimit: options.contextLimit }
           : {}),
+        ...(noRetry ? { environmentCause: noRetry } : {}),
         failureFingerprint: fingerprint,
         finishedAt: iso(this.now()),
         ...(bound.length ? { properties: bound } : {}),
@@ -2999,8 +3009,10 @@ export class Engine {
       });
       if (options.input && !interrupted)
         this.writeInput(tx, failed, w, options.input, kind === 'needs-input');
-      // Остановка — не неисправность окружения: её пауза уже стоит.
-      if (repairPolicy[kind].blocksQueue && !interrupted) {
+      // Остановка — не неисправность окружения: её пауза уже стоит. Отказ
+      // без повтора выдачу не держит: другие работы с другими gates идут, а
+      // эта ждёт ведущего (повторять её движок не будет).
+      if (repairPolicy[kind].blocksQueue && !interrupted && !noRetry) {
         const control = tx.control();
         const failures = [...new Set([...(control.pauseFailures ?? []), kind])];
         tx.setControl({

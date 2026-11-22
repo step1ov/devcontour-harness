@@ -2139,6 +2139,12 @@
               "blocking-limit"
             ]
           },
+          "environmentCause": {
+            "type": "string",
+            "enum": [
+              "sandbox-process-list"
+            ]
+          },
           "failureFingerprint": {
             "type": "string"
           },

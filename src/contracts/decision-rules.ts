@@ -270,6 +270,16 @@ export const decisionRules = {
     action: 'review-plan',
     kind: 'technical',
   },
+  /**
+   * Отказ окружения, который повтор не снимет (gate зовёт ps в песочнице ОС,
+   * 0.1.0-alpha.66): ведущий меняет gate или команду; попытка не засчитана.
+   */
+  'environment-gate-command': {
+    code: 'RUNTIME_UNAVAILABLE',
+    actor: 'lead',
+    action: 'fix-environment',
+    kind: 'technical',
+  },
   /** Технический вопрос исполнителя, политика разрешает ведущему. */
   'input-technical': {
     code: 'INPUT_REQUIRED',

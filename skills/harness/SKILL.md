@@ -471,7 +471,11 @@ does not help, and there is no per-gate policy switch for this. Rewrite the
 test to check its own child processes by pid (`process.kill(pid, 0)`) or by
 marker files, or take that test out of the gate command. `$H smoke` warns
 about it (`sandbox-process-list`, with the files that call `ps`) before any
-paid attempt; `$H doctor` shows `sandbox.processList`.
+paid attempt; `$H doctor` shows `sandbox.processList`. The engine does not
+retry this failure on its own and does not pause the queue: a retry would
+fail the same way, and the attempt is not counted. It is your move (explain:
+`lead`, `fix-environment`). Fix the gate or the command, then
+`$H retry --work <id>`.
 
 **Code review keeps raising new findings (`REVIEW_REJECTED`).** The reviewer
 must list all blocking findings in one round. A new blocking finding on a path

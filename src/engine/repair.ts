@@ -2,8 +2,10 @@ import { RU, ruCount } from '../contracts/plural.ts';
 import type { AttemptState, ExecutionView, FailureKind, WorkState } from '../contracts/index.ts';
 import { MAX_NEUTRAL_FAILURES, repairPolicy } from './failure.ts';
 import {
+  NO_RETRY_ENVIRONMENT_EXPLAIN,
   failedBeforeWork,
   lastContextLimit,
+  lastNoRetryCause,
   repairExplain,
   repairRepeats,
   writerBlockedStop,
@@ -255,6 +257,16 @@ export function repairDecision(
           : hold.kind === 'replan'
             ? `${work.id}: разбор ${hold.diagnosis.id} — задача велика: перепланируйте и согласуйте разделение.${detail}`
             : `${work.id}: разбор ${hold.diagnosis.id} — противоречивое обещание: нужно решение человека.${detail}`,
+    };
+
+  // Отказ окружения, который повтор не снимет: сразу ведущему, без повтора.
+  const noRetry = kind === 'environment' ? lastNoRetryCause(view.attempts(work.id)) : undefined;
+  if (noRetry)
+    return {
+      action: 'stop',
+      workId: work.id,
+      kind,
+      reason: `${work.id}: ${NO_RETRY_ENVIRONMENT_EXPLAIN[noRetry]}${detail}`,
     };
 
   // Отказы окружения попытку не тратят, но их предел — свой.

@@ -388,3 +388,52 @@ test(
     assert.match(g.summary ?? '', new RegExp(GATE_SANDBOX_PROCESS_LIST));
   },
 );
+
+test('отказ sandbox-process-list: без автоматического повтора и без паузы выдачи — ход ведущего, попытка не засчитана', async () => {
+  const { engineOf, graphOf, policyOf, ready } = await import('./engine-fixture.ts');
+  const { repairDecision } = await import('../src/engine/repair.ts');
+  const { explainStop } = await import('../src/projections/stop.ts');
+  const { engine } = engineOf(policyOf((p) => ((p as { maxAttempts: number }).maxAttempts = 3)));
+  ready(engine, graphOf({ a: [] }));
+  const a = engine.claim('c1')!;
+  engine.phase(a.id, a.token, 'verifying', { candidateSha: 'c'.repeat(40) });
+  engine.fail(a.id, a.token, `candidate/root-tests: ${GATE_SANDBOX_PROCESS_LIST}: spawn EPERM`, {
+    kind: 'environment',
+    cause: 'sandbox-process-list',
+  });
+  const work = engine.read((v) => v.work('a')!);
+  const [attempt] = engine.read((v) => v.attempts('a'));
+  assert.equal(attempt!.environmentCause, 'sandbox-process-list');
+  assert.equal(work.attempt, 0, 'попытка не засчитана');
+  assert.equal(engine.read((v) => v.control()).paused, false, 'выдача не стоит');
+  const decision = engine.read((v) => repairDecision(v, [work], { budgetLeft: 6, maxAttempts: 3 }));
+  assert.equal(decision?.action, 'stop', 'повтор дал бы тот же отказ');
+  assert.match(decision?.reason ?? '', /поменять gate или команду/);
+  assert.match(decision?.reason ?? '', /не засчитана/);
+  // explain: ход ведущего по правилу environment-gate-command, повтора не будет.
+  const d = explainStop({
+    kind: 'work',
+    work: {
+      id: 'a',
+      status: 'failed',
+      attempt: 0,
+      failureKind: 'environment',
+      environmentCause: 'sandbox-process-list',
+    },
+    maxAttempts: 3,
+    repair: { sameFailureRepairs: 0, groupRepairsUsed: 0, groupRepairBudget: 6 },
+    control: { paused: false },
+  });
+  assert.deepEqual([d.code, d.actor, d.action], ['RUNTIME_UNAVAILABLE', 'lead', 'fix-environment']);
+  assert.equal(d.retryPlanned, false);
+  assert.match(d.message, /ps/);
+  // Обычный отказ окружения по-прежнему получает один повтор.
+  const { engine: other } = engineOf();
+  ready(other, graphOf({ b: [] }));
+  const b = other.claim('c1')!;
+  other.fail(b.id, b.token, 'connection reset by peer', { kind: 'environment' });
+  const plain = other.read((v) =>
+    repairDecision(v, [v.work('b')!], { budgetLeft: 6, maxAttempts: 3 }),
+  );
+  assert.equal(plain?.action, 'retry');
+});

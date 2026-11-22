@@ -58,6 +58,7 @@ test('principle: техническое восстановление — у ве
   assert.deepEqual(technical, [
     'diagnosis-required:diagnose',
     'diagnosis-split:review-plan',
+    'environment-gate-command:fix-environment',
     'exhausted-diagnose:diagnose',
     'exhausted-lead-reset:reset-attempts',
     'input-technical:answer-input',
@@ -100,6 +101,11 @@ const inputs: Record<DecisionRuleKey, StopInput> = {
       exhausted: { actor: 'lead', step: 'replan', diagnosis: 'D1' },
       leadResets: 2,
     },
+  }),
+  'environment-gate-command': workInput({
+    attempt: 1,
+    failureKind: 'environment',
+    environmentCause: 'sandbox-process-list',
   }),
   'input-technical': workInput({
     attempt: 1,
