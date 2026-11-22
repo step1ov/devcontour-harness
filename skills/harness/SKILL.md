@@ -597,7 +597,7 @@ name) — and wait for their yes; never push on your own, and never report
 
 ### Lead log: tell the operator what you are doing
 
-The operator watches the panel while you work. Harness records your own
+The operator watches `$H view` while you work. Harness records your own
 harness commands there by itself (plan review, approve, retry, cancel,
 source-deliver, input answers, run start and end). Everything else you do —
 writing in the task source, checking the site in a browser, fixing the
@@ -606,11 +606,11 @@ connector — is invisible unless you say it:
 - At the start of your session: `$H lead begin --state <state>` (a lease of
   30 minutes, `--ttl <minutes>`; each lead record extends it).
 - At each step outside harness, one short line in plain words, the way you
-  would tell a non-developer: `$H lead note "Обновляю документ DOC-2 в Relay"
+  would tell a non-developer: `$H lead note "Обновляю документ DOC-2 в источнике задач"
 --state <state>` (up to 200 characters; no secrets, no paths, no logs).
 - When all code is accepted, delivered and checked, write the final report:
   `$H release done --state <state> --summary "<what was done, what is left>"`.
-  Until then the panel says «код принят, ведущий ещё работает: <your last
+  Until then the view says «код принят, ведущий ещё работает: <your last
   note>» and progress stays below 100 %; it refuses while a work or rework is
   still open.
 - When you stop: `$H lead end --state <state>`.
