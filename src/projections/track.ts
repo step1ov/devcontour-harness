@@ -173,6 +173,9 @@ export function workTrack(
               (counted ? '' : t({ ru: ' (не засчитана)', en: ' (not counted)' })),
           }),
         );
+      // Идущая попытка до шага ещё не дошла — он впереди (`planned`);
+      // `skipped` — только шаг, пропущенный закончившейся попыткой.
+      else if (a.status === 'active') steps.push(mark({ ...base, state: 'planned' }));
       else if (a.status !== 'succeeded') steps.push(mark({ ...base, state: 'skipped' }));
     });
     if (a.status === 'succeeded')

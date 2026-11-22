@@ -554,7 +554,7 @@ test('P4-10: журнал ведущего — сессия, заметки, и�
   const view = viewOf(env);
   assert.equal(view.lead?.active, true);
   assert.equal(view.lead?.lastNote?.plain, 'Закрываю задачи в Relay и проверяю сайт в браузере');
-  assert.match(view.lead.line, /^ведущий работает с \d\d:\d\d UTC: Закрываю задачи/);
+  assert.match(view.lead.line, /^ведущий работает: Закрываю задачи/);
   const f = view.forecast!;
   assert.equal(f.progress.release?.state, 'code-accepted');
   assert.equal(

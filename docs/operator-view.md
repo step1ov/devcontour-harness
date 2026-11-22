@@ -80,7 +80,9 @@ harness view --state <state> --no-titles     # без заголовков и т
   сбросов ведущего (`recovery.leadResets`) и «принято». Шаг —
   `{kind, attempt?, state, label, at?, reason?, rework?}`, состояние —
   `planned`, `current`, `passed`, `failed`, `waiting`, `skipped` или
-  `decision`; `rework` — шаг доработки после приёмки. Не больше 120 шагов,
+  `decision`; `rework` — шаг доработки после приёмки. Шаги, до которых идущая
+  попытка ещё не дошла, — `planned`; `skipped` — только шаг, пропущенный
+  закончившейся попыткой. Не больше 120 шагов,
   сверх — отброшены самые ранние (`truncated`).
 - С `--work` — строки попыток (новые сверху), что и как проверено, ревью и
   вопросы этой работы.

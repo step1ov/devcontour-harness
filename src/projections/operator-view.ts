@@ -2044,8 +2044,10 @@ function leadOf(c: Ctx, truncated: Record<string, number>): LeadView | undefined
   const lastNote = note ? { at: note.at, plain: plainOf(note) } : undefined;
   const line = active
     ? en
-      ? `the lead is working since ${s.since.slice(11, 16)} UTC${lastNote ? `: ${lastNote.plain}` : ''}`
-      : `ведущий работает с ${s.since.slice(11, 16)} UTC${lastNote ? `: ${lastNote.plain}` : ''}`
+      ? // Время начала — в данных (`since`): панель показывает его в своём
+        // часовом поясе, текст строки его не несёт.
+        `the lead is working${lastNote ? `: ${lastNote.plain}` : ''}`
+      : `ведущий работает${lastNote ? `: ${lastNote.plain}` : ''}`
     : s?.endedAt
       ? en
         ? 'the lead ended the session'
