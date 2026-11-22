@@ -29,3 +29,4 @@ export * from './verification-view.ts';
 export * from './handoff.ts';
 export * from './operator-view.ts';
 export * from './update.ts';
+export * from './preview.ts';

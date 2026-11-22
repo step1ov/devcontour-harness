@@ -79,7 +79,8 @@ import { reviewRoundCap } from './review.ts';
 import { reviewSubjectSummary } from './review-summary.ts';
 import { stageOfStep } from './stage.ts';
 import { cachedUpdates, installedHarness, loadUpdatesConfig } from '../update/check.ts';
-import type { UpdatesView } from '../projections/operator-view.ts';
+import type { PreviewView, UpdatesView } from '../projections/operator-view.ts';
+import { livePreviews } from './preview.ts';
 
 type StatusData = z.output<typeof statusDataSchema>;
 /** Поручение `status`; поля alpha.55 (`verification`, `lastFailure`, `plain`) — по наличию. */
@@ -1547,10 +1548,15 @@ export function harnessView(
     ...(options.lang ? { lang: options.lang } : {}),
   };
   const updates = options.workId === undefined ? updatesInput(stateDir, policy.baseDir) : undefined;
+  // Живые превью результата — из их receipt, только чтение (docs/previews.md).
+  const previews = options.workId === undefined ? previewsInput(stateDir) : undefined;
   const project = (input: OperatorViewInput) =>
     options.workId !== undefined
       ? workDetailView(input, options.workId, projection)
-      : operatorView(updates ? { ...input, updates } : input, projection);
+      : operatorView(
+          { ...input, ...(updates ? { updates } : {}), ...(previews ? { previews } : {}) },
+          projection,
+        );
   if (!existsSync(join(stateDir, 'state.sqlite')))
     return project(emptyInput(policy, options.now ?? Date.now(), stateDir));
   // Однократное чтение без файлов в каталоге состояния (как `report`):
@@ -1626,6 +1632,29 @@ export function locateProject(options: {
  * Ни настройки, ни проверки — поля нет; настройка не по схеме — тоже нет
  * (представление не ломается, отказ видно в `harness update`).
  */
+/** Живые превью для представления: receipt `running` с живым supervisor; нет — undefined. */
+function previewsInput(stateDir: string): PreviewView[] | undefined {
+  const list = livePreviews(stateDir).flatMap((r) =>
+    r.url
+      ? [
+          {
+            id: r.id,
+            repositoryId: r.repositoryId,
+            ...(r.title ? { title: r.title } : {}),
+            url: r.url,
+            ref: r.ref,
+            sha: r.sha,
+            ...(r.workId ? { workId: r.workId } : {}),
+            startedAt: r.startedAt,
+            expiresAt: r.expiresAt,
+            state: 'running' as const,
+          },
+        ]
+      : [],
+  );
+  return list.length ? list : undefined;
+}
+
 function updatesInput(stateDir: string, baseDir: string): UpdatesView | undefined {
   try {
     const { config, exists } = loadUpdatesConfig(baseDir, { quiet: true });

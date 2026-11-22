@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isoTimeSchema } from './primitives.ts';
+import { gitShaSchema, isoTimeSchema } from './primitives.ts';
 import {
   OPERATOR_VIEW_LIMITS as L,
   OPERATOR_VIEW_TEXT as T,
@@ -714,6 +714,30 @@ export const operatorViewSchema = z.strictObject({
       command: freeText(T.updateLine).optional(),
     })
     .optional(),
+  /**
+   * 0.1.0-alpha.66: живые превью результата (`harness preview-start`,
+   * docs/previews.md) — адрес на loopback, что показано и срок. Панель
+   * показывает «Посмотреть результат» и «остановить» (`harness preview-stop
+   * --preview <id>`). Нет поля — ни одно превью не идёт.
+   */
+  previews: z
+    .array(
+      z.strictObject({
+        id,
+        repositoryId: id,
+        title: freeText(T.title).optional(),
+        url: z.string().regex(/^http:\/\/127\.0\.0\.1:\d{1,5}\/$/),
+        ref: freeText(T.line),
+        sha: gitShaSchema,
+        workId: id.optional(),
+        startedAt: isoTimeSchema,
+        expiresAt: isoTimeSchema,
+        state: z.enum(['running']),
+      }),
+    )
+    .min(1)
+    .max(L.previews)
+    .optional(),
   truncated: z
     .strictObject({
       scope: truncatedCount.optional(),
@@ -745,6 +769,8 @@ export const operatorViewSchema = z.strictObject({
       workFields: truncatedCount.optional(),
       /** Пункты `updates.whatsNew` сверх предела (harness 0.1.0-alpha.61). */
       whatsNew: truncatedCount.optional(),
+      /** Живые превью сверх предела `previews` (harness 0.1.0-alpha.66). */
+      previews: truncatedCount.optional(),
     })
     .optional(),
 });

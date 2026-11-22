@@ -194,6 +194,14 @@ export {
 } from './control/lifecycle-smoke.ts';
 export { lifecyclePreflight, preflightFile, type PreflightOutcome } from './control/preflight.ts';
 export {
+  listPreviews,
+  livePreviews,
+  startPreview,
+  stopPreviews,
+  type PreviewContext,
+  type StartPreviewInput,
+} from './control/preview.ts';
+export {
   dependencyStoreRoot,
   materializeStore,
   type StoreContext,

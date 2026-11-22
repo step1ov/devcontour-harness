@@ -48,6 +48,7 @@ import {
 import { planCheckDataSchema, planRequestDataSchema } from './planning.ts';
 import { toolchainFactsSchema, toolchainReportSchema } from './toolchain.ts';
 import { operationCatalogSchema } from './catalog.ts';
+import { previewListDataSchema, previewStartDataSchema, previewStopDataSchema } from './preview.ts';
 import { failureBuckets, reportDataSchema } from './report.ts';
 import { handoffPackSchema } from './handoff.ts';
 import {
@@ -1532,6 +1533,99 @@ export const cliCommands = {
     ],
     refusals: ['CONTROLLER_BUSY', 'APPROVAL_REQUIRED', 'NOT_FOUND'],
   },
+  'preview-start': {
+    description:
+      'Превью результата (docs/previews.md): собрать и запустить приложение по previews[] репозитория на принятом коммите в своём рабочем дереве каталога состояния, на свободном loopback-порту за loopback-прокси, с lifecycle репозитория при services; ждёт health и возвращает адрес. Harness сам останавливает превью по сроку (--ttl) и простою без запросов (--idle). Запускает только оператор или ведущий по его просьбе: внутри попытки и gate — отказ NOT_READY; run превью не запускает',
+    writes: true,
+    idempotency:
+      'То же превью на том же коммите уже идёт — возвращается оно (changed: false); на другом коммите прежнее останавливается (replaced) и запускается новое',
+    args: [
+      {
+        ...state,
+        description:
+          'Каталог состояния: рабочее дерево, логи и receipt превью — в <state>/previews; политика — из него, если нет --policy',
+      },
+      { ...policy, required: false },
+      {
+        name: '--preview',
+        value: 'id',
+        required: false,
+        description: 'ID превью из previews[] репозитория; нужен, если их несколько',
+      },
+      {
+        name: '--ref',
+        value: 'text',
+        required: false,
+        description:
+          'accepted (по умолчанию) — принятый результат: с --work принятый SHA поручения, без него — вершина target ref репозитория; иначе SHA или ref checkout',
+      },
+      {
+        ...work,
+        required: false,
+        description: 'Поручение, чей принятый результат показать (только с --ref accepted)',
+      },
+      {
+        name: '--repository',
+        value: 'id',
+        required: false,
+        description: 'ID репозитория политики; нужен, если превью есть у нескольких',
+      },
+      {
+        name: '--ttl',
+        value: 'number',
+        required: false,
+        description: 'Срок жизни превью в секундах (1–86400); нет — ttlMs превью, иначе 2 ч',
+      },
+      {
+        name: '--idle',
+        value: 'number',
+        required: false,
+        description:
+          'Остановить после стольких секунд без запросов (0 — не останавливать по простою, до 86400); нет — idleMs превью, иначе 30 мин',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'NOT_READY'],
+  },
+  'preview-stop': {
+    description:
+      'Остановить превью: группа процессов приложения (TERM, затем KILL), lifecycle teardown при services, рабочее дерево превью убирается, receipt — stopped; без --preview — все живые превью',
+    writes: true,
+    idempotency: 'Повтор для остановленного превью ничего не меняет (changed: false)',
+    args: [
+      {
+        ...state,
+        description: 'Каталог состояния; политика — из него, если нет --policy',
+      },
+      { ...policy, required: false },
+      {
+        name: '--preview',
+        value: 'id',
+        required: false,
+        description: 'ID превью; нет — все живые',
+      },
+      {
+        name: '--repository',
+        value: 'id',
+        required: false,
+        description: 'Только превью этого репозитория',
+      },
+    ],
+    refusals: ['NOT_FOUND'],
+  },
+  'preview-list': {
+    description:
+      'Превью каталога состояния с адресом, коммитом, сроком и состоянием; receipt сверяются с живыми процессами: превью, чей надзирающий процесс пропал, останавливается по receipt (приложение, teardown, рабочее дерево) и становится failed',
+    writes: true,
+    idempotency: 'Повтор без изменившихся процессов отвечает тем же списком',
+    args: [
+      {
+        ...state,
+        description: 'Каталог состояния; политика — из него, если нет --policy',
+      },
+      { ...policy, required: false },
+    ],
+    refusals: ['NOT_FOUND'],
+  },
 } as const satisfies Record<string, CliCommandContract>;
 export type CliCommand = keyof typeof cliCommands;
 
@@ -2957,6 +3051,9 @@ export const cliDataSchemas = {
   'review-code': codeReviewRecordSchema,
   smoke: smokeDataSchema,
   update: updateDataSchema,
+  'preview-start': previewStartDataSchema,
+  'preview-stop': previewStopDataSchema,
+  'preview-list': previewListDataSchema,
   version: versionDataSchema,
 } as const satisfies Record<CliCommand | 'version', z.ZodType>;
 
