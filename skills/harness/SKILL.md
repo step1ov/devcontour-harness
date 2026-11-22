@@ -560,6 +560,19 @@ checkout is on it; a check, not acceptance) and
 `review-code --base <acceptedSha> --head <targetRef>`. Never report the current ref
 as accepted because an earlier order on it was.
 
+**A defect found after acceptance** (your own check, the operator, the
+source) is a follow-up change, not a retry: edit the order and run again —
+the new graph revision needs a new plan review round and approval. An
+accepted work whose order changed opens a rework (`work.reopened`) with its
+own attempt budget; `status` and `view` say «принято ранее на <sha>;
+доработка 1: …» / "accepted earlier at <sha>; rework 1: …", and the forecast
+keeps the earlier acceptance. A work gets at most 3 reworks with their own
+budget; after that the counter carries over, and an exhausted rework is the
+user's `reset-attempts`. Re-planning a work that was **not** accepted keeps
+its counter — never re-plan to dodge `ATTEMPTS_EXHAUSTED`. A source task
+already closed (`done`) refuses a run with a changed order (`TASK_DONE`): the
+operator moves it back out of `done` in the source first.
+
 "Accepted" is local: the harness moved the target ref in this repository and
 never pushes. `data.target.remote` (also `status` `works[].target.remote`)
 says whether the accepted commit is already on the remote branch, from the
