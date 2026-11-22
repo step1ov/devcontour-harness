@@ -38,6 +38,7 @@ import { HARNESS_VERSION } from '../package.ts';
 import {
   attemptCounted,
   callCostKnown,
+  currentRevisionAttempts,
   failureBucketOf,
   interruptedByShutdown,
 } from '../report/compute.ts';
@@ -230,6 +231,15 @@ function attemptFacts(
     attempts: { used: s.attempts.used, max: s.attempts.max },
     ...(neutralOut ? { neutralOut: s.neutral } : {}),
     ...(s.repairs ? { repairs: { used: s.repairs.used, budget: s.repairs.budget } } : {}),
+    ...(s.rework
+      ? {
+          rework: {
+            revision: s.rework.revision,
+            acceptedSha: s.rework.acceptedSha,
+            fresh: s.rework.fresh,
+          },
+        }
+      : {}),
   };
 }
 
@@ -780,6 +790,15 @@ export function collectOperatorViewInput(
     const attemptsOf = new Map<string, typeof attempts>();
     for (const a of attempts) attemptsOf.set(a.workId, [...(attemptsOf.get(a.workId) ?? []), a]);
     const runWork = new Map(attempts.map((a) => [a.id, a.workId]));
+    // Попытки прежних редакций доработанных после приёмки работ: прогноз
+    // меряет доработку только её попытками.
+    const earlier = new Set<string>();
+    for (const w of v.works())
+      if (w.rework) {
+        const own = attemptsOf.get(w.id) ?? [];
+        const current = new Set(currentRevisionAttempts(w, own).map((a) => a.id));
+        for (const a of own) if (!current.has(a.id)) earlier.add(a.id);
+      }
     const known = new Set(v.works().map((w) => w.id));
     const records = callRecords(v);
     const complete = (r: (typeof records)[number]) =>
@@ -967,6 +986,7 @@ export function collectOperatorViewInput(
         workId: a.workId,
         runId: a.id,
         attempt: a.attempt,
+        ...(earlier.has(a.id) ? { earlier: true as const } : {}),
         status: a.status,
         startedAt: a.startedAt,
         ...(a.finishedAt ? { finishedAt: a.finishedAt } : {}),

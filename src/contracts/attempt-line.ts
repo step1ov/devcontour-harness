@@ -18,6 +18,11 @@ export interface AttemptLineFacts {
   /** Предел незасчитанных отказов исчерпан: вместо остатка попыток — повтор только со сбросом. */
   neutralOut?: { used: number; max: number };
   repairs?: { used: number; budget: number };
+  /**
+   * Доработка после приёмки (`WorkState.rework`): числа строки — только её
+   * попытки; строка начинается с прежней приёмки и номера доработки.
+   */
+  rework?: { revision: number; acceptedSha: string; fresh: boolean };
 }
 
 const words = {
@@ -36,6 +41,8 @@ const words = {
     lastRunning: (used: number, max: number) =>
       `идёт последняя засчитанная попытка (${used} из ${max})`,
     repairs: (left: number, budget: number) => `, восстановлений группы ${left} из ${budget}`,
+    rework: (sha: string, n: number, fresh: boolean) =>
+      `принято ранее на ${sha}; доработка ${n}${fresh ? '' : ' (попытки перенесены)'}: `,
   },
   en: {
     total: (n: number, active: number) => `attempts ${n}${active ? ` (${active} running)` : ''}`,
@@ -52,6 +59,8 @@ const words = {
     lastRunning: (used: number, max: number) =>
       `the last counted attempt is running (${used} of ${max})`,
     repairs: (left: number, budget: number) => `, group repairs left ${left} of ${budget}`,
+    rework: (sha: string, n: number, fresh: boolean) =>
+      `accepted earlier at ${sha}; rework ${n}${fresh ? '' : ' (attempts carried over)'}: `,
   },
 } as const;
 
@@ -104,7 +113,10 @@ export function attemptLine(
       f.total !== f.attempts.used
         ? w.runs(f.total, f.active, f.attempts.used)
         : w.total(f.total, f.active);
-    return [head, failed, ...rest].join('; ');
+    const before = f.rework
+      ? w.rework(f.rework.acceptedSha.slice(0, 7), f.rework.revision, f.rework.fresh)
+      : '';
+    return before + [head, failed, ...rest].join('; ');
   };
   // Предел — для строки после маски: маска удлиняет текст, и обрезка после
   // неё отрезала бы хвост.

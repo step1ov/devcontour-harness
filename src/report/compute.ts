@@ -425,6 +425,25 @@ export interface AttemptBudget {
   neutral?: { used: number; max: number };
   /** Восстановления задания графа (`repairs`) и `repairBudget`; нет — задания нет. */
   repairs?: { used: number; budget: number };
+  /** Доработка после приёмки (`WorkState.rework`): строка начинается с прежней приёмки. */
+  rework?: { revision: number; acceptedSha: string; fresh: boolean };
+}
+
+/**
+ * Попытки текущей редакции поручения: у доработки после приёмки
+ * (`WorkState.rework`) — после принявшей попытки, с которой она открыта
+ * (порядок хранилища; принятой попытки в списке нет — начатые не раньше
+ * открытия доработки), иначе все. Предел попыток и сводка доработки
+ * считаются по ним; история прежних редакций не переписывается.
+ */
+export function currentRevisionAttempts<A extends Pick<AttemptState, 'id' | 'startedAt'>>(
+  work: Pick<WorkState, 'rework'>,
+  attempts: readonly A[],
+): readonly A[] {
+  const r = work.rework;
+  if (!r) return attempts;
+  const k = r.accepted.runId ? attempts.findIndex((a) => a.id === r.accepted.runId) : -1;
+  return k >= 0 ? attempts.slice(k + 1) : attempts.filter((a) => a.startedAt >= r.reopenedAt);
 }
 
 /**
@@ -456,6 +475,7 @@ export function attemptLineFacts(s: AttemptSummary, budget: AttemptBudget): Atte
       ? { neutralOut: budget.neutral }
       : {}),
     ...(budget.repairs ? { repairs: budget.repairs } : {}),
+    ...(budget.rework ? { rework: budget.rework } : {}),
   };
 }
 

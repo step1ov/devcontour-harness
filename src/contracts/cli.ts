@@ -1715,6 +1715,23 @@ export const attemptSummarySchema = z.strictObject({
       plainEn: z.string().min(1).max(300),
     })
     .optional(),
+  /**
+   * Доработка после приёмки (`WorkState.rework`): новая редакция изменила
+   * постановку принятого поручения. Числа сводки и предел — только попытки
+   * доработки; `earlierRuns` — запусков прежних редакций (в сводку не входят),
+   * `acceptedSha`/`acceptedAt` — прежняя приёмка, `fresh` — у доработки свой
+   * предел попыток (иначе перенесён). `line` начинается с «принято ранее на
+   * <sha>; доработка N: ». Нет поля — доработок не было.
+   */
+  rework: z
+    .strictObject({
+      revision: z.number().int().positive(),
+      fresh: z.boolean(),
+      acceptedSha: gitShaSchema,
+      acceptedAt: isoTimeSchema.optional(),
+      earlierRuns: z.number().int().min(0),
+    })
+    .optional(),
   line: z.string().max(1000),
 });
 

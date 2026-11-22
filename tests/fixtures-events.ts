@@ -68,6 +68,7 @@ export const validPayloads: Record<EventType, Record<string, unknown>> = {
   'attempt.recovered': { integrationSha: sha, accepted: true },
   'work.accepted': { resultSha: sha, integrationSha: sha },
   'work.retried': { by: 'operator', reset: true, spent: 3, reasonLength: 12 },
+  'work.reopened': { revision: 1, budget: 'fresh', acceptedSha: sha, spent: 3 },
   'work.findings-accepted': { findings: ['a'.repeat(64)], by: 'lead', round: 2, reasonLength: 30 },
   'work.cancelled': { by: 'operator', hadAttempt: false },
   'work.blocked': { code: 'BUDGET_EXHAUSTED', message: 'budget' },

@@ -87,6 +87,7 @@ export function failureFingerprint(kind: FailureKind, message: string) {
 
 export {
   MAX_NEUTRAL_FAILURES,
+  MAX_REWORK_BUDGETS,
   lastContextLimit,
   repairPolicy,
   repairRepeats,

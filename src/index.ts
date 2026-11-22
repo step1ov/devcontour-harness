@@ -301,6 +301,7 @@ export {
   repairRepeats,
   lastContextLimit,
   MAX_NEUTRAL_FAILURES,
+  MAX_REWORK_BUDGETS,
   type RepairRule,
 } from './engine/failure.ts';
 export * from './projections/index.ts';

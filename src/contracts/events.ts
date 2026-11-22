@@ -252,6 +252,19 @@ export const eventPayloads = {
     reasonLength: z.number().int().min(0).optional(),
   }),
   /**
+   * Принятое поручение получило изменённую постановку новой редакцией графа
+   * (`WorkState.rework`): доработка `revision` после приёмки `acceptedSha`.
+   * `budget: fresh` — у неё свой предел попыток, `carried` — сверх
+   * `MAX_REWORK_BUDGETS`, счётчик прежней редакции перенесён. `spent` —
+   * засчитанные попытки принятой редакции.
+   */
+  'work.reopened': z.strictObject({
+    revision: z.number().int().positive(),
+    budget: z.enum(['fresh', 'carried']),
+    acceptedSha: sha,
+    spent: z.number().int().min(0),
+  }),
+  /**
    * Находки ревью кода поручения приняты известным ограничением
    * (`review-accept`, docs/review-protocol.md §10): ID, решающий, раунд
    * области на момент решения; основания нет — только его длина.

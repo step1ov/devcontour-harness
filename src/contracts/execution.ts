@@ -814,6 +814,32 @@ export const workStateSchema = z.strictObject({
    * (`review-accept`): применяются следующим раундом (docs/review-protocol.md §10).
    */
   codeReviewDecisions: z.array(codeReviewDecisionSchema).max(500).optional(),
+  /**
+   * Доработка после приёмки: новая редакция графа изменила постановку уже
+   * принятого поручения. Это не повтор проваленного договора, а следующее
+   * изменение: `fresh` — редакция начала свой предел попыток (`attempt` и
+   * незасчитанные отказы с нуля; таких — не больше `MAX_REWORK_BUDGETS`,
+   * счёт — `budgets`), иначе счётчик перенесён с прежней редакции.
+   * `revision` — номер доработки (1 — первая), `accepted` — приёмка, после
+   * которой она открыта, `spent` — засчитанные попытки принятой редакции.
+   * Изменённая постановка непринятого поручения счётчик не трогает и это
+   * поле не пишет: перепланированием предел не обойти. Нет поля — доработок
+   * не было.
+   */
+  rework: z
+    .strictObject({
+      revision: z.number().int().positive(),
+      budgets: z.number().int().min(0),
+      fresh: z.boolean(),
+      accepted: z.strictObject({
+        runId: z.string().min(1).optional(),
+        resultSha: gitShaSchema,
+        at: isoTimeSchema.optional(),
+      }),
+      reopenedAt: isoTimeSchema,
+      spent: z.number().int().min(0),
+    })
+    .optional(),
 });
 export type WorkState = z.infer<typeof workStateSchema>;
 

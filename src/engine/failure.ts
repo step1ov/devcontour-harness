@@ -8,6 +8,7 @@ export {
   repairRepeats,
   lastContextLimit,
   MAX_NEUTRAL_FAILURES,
+  MAX_REWORK_BUDGETS,
   type FailureKind,
   type RepairRule,
 } from '../contracts/index.ts';
