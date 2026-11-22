@@ -286,7 +286,12 @@ async function stopOne(
   reason: PreviewReason,
 ): Promise<PreviewReceipt> {
   if (!supervisorAlive(receipt))
-    return cleanupDead(ctx, receipt, reason === 'operator' ? 'stopped' : 'failed', reason);
+    return cleanupDead(
+      ctx,
+      receipt,
+      reason === 'operator' || reason === 'replaced' ? 'stopped' : 'failed',
+      reason,
+    );
   const marker = join(receipt.dir, 'stop-reason');
   writeFileSync(marker, reason);
   try {
