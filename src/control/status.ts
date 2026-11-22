@@ -30,6 +30,8 @@ import {
   type StopSource,
 } from '../explain/state.ts';
 import { explainStop } from '../projections/stop.ts';
+import { decisionSettingsView } from '../projections/decisions.ts';
+import { leadResetLine } from '../projections/lead-recovery.ts';
 import { workStageOf, type StageNeeds } from './stage.ts';
 import { blockerCodeText, plainBlocker, type BlockerCode } from './blocker-plain.ts';
 import { verificationOf } from '../report/verification.ts';
@@ -273,6 +275,9 @@ export function statusOf(
               now,
             }),
             ...(verification ? { verification } : {}),
+            ...((l) => (l ? { recovery: { line: l.ru, lineEn: l.en } } : {}))(
+              w.status !== 'done' && w.status !== 'cancelled' ? leadResetLine(w) : undefined,
+            ),
           };
         })(workInputOf(requestsOf(v, w), inputPolicyOf(source.policy)), engine.blockers(w, v)),
       })),
@@ -285,6 +290,7 @@ export function statusOf(
         ...(reviewsTruncated ? { reviewsTruncated } : {}),
       }))(reviewSummaryRows(v, source.policy, graphId === undefined ? {} : { graphId })),
       ...(options.detail ? { detail: statusDetail(source, v, graphId) } : {}),
+      decisions: decisionSettingsView(source.policy),
     };
   });
 }
@@ -585,12 +591,14 @@ export function statusText(data: z.output<typeof statusDataSchema>): string {
           .join('; ')} [коды: ${w.blockers.map((b) => b.code).join(', ')}]`,
       );
     }
+    if (w.recovery) out.push(`  восстановление: ${w.recovery.line}`);
     if (w.verification) out.push(`  проверки: ${w.verification.line}`);
     // Принятая версия против текущего target ref: непроверенное после приёмки.
     if (w.target) out.push(`  ${w.target.line} (${w.target.lineEn})`);
     // Удалённая ветка — по локальной remote-tracking ref, без fetch.
     if (w.target?.remote) out.push(`  удалённая ветка: ${w.target.remote.line}`);
   }
+  if (data.decisions) out.push(`Решения: ${data.decisions.summary.ru}.`);
   return out.join('\n') + '\n' + reviewsText(data.reviews, data.reviewsTruncated);
 }
 

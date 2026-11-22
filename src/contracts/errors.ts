@@ -43,6 +43,12 @@ export const errorCodes = {
   BUDGET_EXHAUSTED: 'refused',
   BUDGET_UNKNOWN: 'refused',
   ATTEMPTS_EXHAUSTED: 'refused',
+  /**
+   * Засчитанных отказов работы подряд столько, что следующая попытка не
+   * выдаётся без диагностики ведущего (`policy.recovery.requireDiagnosisAfter`,
+   * `harness diagnose`): третьей слепой попытки нет.
+   */
+  DIAGNOSIS_REQUIRED: 'refused',
   /** Задача или её контекст не помещаются в окно контекста модели (`context-exhausted`). */
   CONTEXT_EXHAUSTED: 'refused',
   /**

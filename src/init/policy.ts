@@ -6,6 +6,7 @@ import {
   HarnessError,
   POLICY_VERSION,
   executionPolicySchema,
+  DEFAULT_RECOVERY,
   runtimeAssignments,
   vendorOf,
   type ResolvedProfile,
@@ -158,6 +159,13 @@ export function generatePolicy(input: {
    * (`init --lead-technical-answers`): `inputPolicy.leadAnswers.technical`.
    */
   leadTechnicalAnswers?: boolean;
+  /**
+   * Восстановление после повторных отказов (`init --recovery`,
+   * `--diagnose-after`, `--lead-resets`): `policy.recovery` целиком, с
+   * умолчаниями незаданных чисел. Нет — поля нет (выводится из
+   * `leadTechnicalAnswers`).
+   */
+  recovery?: { mode: 'lead' | 'user'; diagnoseAfter?: number; leadResets?: number };
   /** Закреплённый node (`policy.toolchain`): предложение init. */
   toolchainPin?: { node: string };
 }): GeneratedPolicy {
@@ -236,6 +244,15 @@ export function generatePolicy(input: {
     ...profileExecution(profile),
     ...(input.leadTechnicalAnswers
       ? { inputPolicy: { threshold: 7, criticalPaths: [], leadAnswers: { technical: true } } }
+      : {}),
+    ...(input.recovery
+      ? {
+          recovery: {
+            mode: input.recovery.mode,
+            diagnoseAfter: input.recovery.diagnoseAfter ?? DEFAULT_RECOVERY.diagnoseAfter,
+            leadResets: input.recovery.leadResets ?? DEFAULT_RECOVERY.leadResets,
+          },
+        }
       : {}),
   };
   const { runTimeoutMs } = executionFieldsOf(policy, profile);

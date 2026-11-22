@@ -115,8 +115,8 @@ test('report events: история целиком под записью — р�
   assert.equal(rec.from, t(-20));
   assert.equal(rec.bound, 'exact');
   assert.equal(rec.gaps, 0);
-  assert.deepEqual(rec.retries, { operator: 1, recovery: 5, host: 0 });
-  assert.deepEqual(rec.resets, { operator: 1, recovery: 0, host: 0 });
+  assert.deepEqual(rec.retries, { operator: 1, recovery: 5, host: 0, lead: 0 });
+  assert.deepEqual(rec.resets, { operator: 1, recovery: 0, host: 0, lead: 0 });
   assert.deepEqual(rec.cancellations, { operator: 1, host: 0, graph: 1 });
   assert.equal(rec.cancelledWithoutAttempt, 1);
   assert.deepEqual(rec.baseMoves, { operator: 0, controller: 1, host: 0 });

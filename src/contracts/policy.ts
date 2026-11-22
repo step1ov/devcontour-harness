@@ -571,6 +571,31 @@ export const executionPolicySchema = z.strictObject({
    * `executionDigest` не входит: закрепляется в попытке при выдаче.
    */
   inputPolicy: inputPolicySchema.optional(),
+  /**
+   * Кто восстанавливает работу после повторных отказов (docs/principles.md
+   * «Кто принимает решения»). `mode: lead` — после `diagnoseAfter`
+   * засчитанных отказов работы следующая попытка не выдаётся без
+   * диагностики ведущего (`harness diagnose`), а при исчерпанных попытках
+   * ведущий сам даёт новый предел (`retry --reset --by lead --diagnosis`) по
+   * свежей технической диагностике — не больше `leadResets` раз на предел
+   * попыток работы (0 — сбрасывает только человек). `mode: user` — прежнее
+   * поведение: шлюза диагностики нет, исчерпание — решение человека.
+   * `diagnoseAfter` — от 1 до 10; полезные значения — от 1 до
+   * `maxAttempts - 1`: при `diagnoseAfter ≥ maxAttempts` шлюза до исчерпания
+   * нет, разбор ведущего — только при исчерпании (doctor говорит об этом).
+   * Нет поля — `mode: lead`, если технические вопросы исполнителя решает
+   * ведущий (`inputPolicy.leadAnswers.technical`), иначе `user`; явное поле
+   * всегда главнее (`recoveryPolicyOf`). В `executionDigest` не входит: это
+   * правило надзора (кто решает), а не условие исполнения кода, и его
+   * включение не требует нового согласования графа.
+   */
+  recovery: z
+    .strictObject({
+      mode: z.enum(['lead', 'user']),
+      diagnoseAfter: z.number().int().min(1).max(10).default(2),
+      leadResets: z.number().int().min(0).max(5).default(2),
+    })
+    .optional(),
   maxAttempts: z.number().int().min(1).max(10).default(3),
   repairBudget: z.number().int().min(0).max(50).default(6),
   reuseImplementation: z.boolean().default(true),
@@ -636,6 +661,7 @@ export const executionDigest = (policy: ExecutionPolicy) =>
     lifecyclePreflight: undefined,
     toolchain: undefined,
     repositories: policy.repositories.map((r) => ({ ...r, previews: undefined })),
+    recovery: undefined,
   });
 
 /** Пути `toolProfile` и `runtime` назначений в ролях и правилах ревью: какой профиль у кого. */
@@ -691,6 +717,8 @@ export const isolationDigest = (policy: ExecutionPolicy) =>
  */
 export const inputPolicyOf = (policy: Pick<ExecutionPolicy, 'inputPolicy'>): InputPolicy =>
   policy.inputPolicy ?? DEFAULT_INPUT_POLICY;
+
+export { DEFAULT_RECOVERY, recoveryPolicyOf, type RecoveryPolicy } from './decision-rules.ts';
 
 export type ReviewKind = 'code' | 'plan' | 'contract';
 

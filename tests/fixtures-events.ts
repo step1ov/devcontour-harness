@@ -76,6 +76,13 @@ export const validPayloads: Record<EventType, Record<string, unknown>> = {
     restored: true,
     hadAttempt: false,
   },
+  'work.diagnosed': {
+    diagnosis: 'D1',
+    cause: 'approach',
+    failures: ['run-1', 'run-2'],
+    hypothesisLength: 40,
+    evidence: 1,
+  },
   'work.findings-accepted': { findings: ['a'.repeat(64)], by: 'lead', round: 2, reasonLength: 30 },
   'work.cancelled': { by: 'operator', hadAttempt: false },
   'work.blocked': { code: 'BUDGET_EXHAUSTED', message: 'budget' },

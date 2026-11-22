@@ -352,6 +352,8 @@ test('alpha.61: 500 работ со всеми полями ревизии 4 и 
   // Где ответ и шаги блокировок у 80 работ: их снятия достаточно, все 500 работ остаются.
   const some = {
     ...all,
+    // Место под настройки решений ревизии 6 (`settings.decisions`, ~2 КБ).
+    reviews: all.reviews.slice(0, -8),
     works: all.works.map((w, k) => ({
       ...work(w.id),
       status: 'done',

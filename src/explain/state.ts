@@ -25,6 +25,13 @@ import { requestsIndex } from '../engine/input-requests.ts';
 import { activeOf } from '../engine/engine.ts';
 import { callRecords, liveCall } from '../engine/usage.ts';
 import { inputStateOf } from '../projections/input.ts';
+import { recoveryPolicyOf } from '../projections/decisions.ts';
+import {
+  exhaustedStep,
+  leadHold,
+  leadResetLine,
+  type LeadHold,
+} from '../projections/lead-recovery.ts';
 import type { EvidenceLink, StopInput, StopPhase } from '../projections/stop.ts';
 
 /**
@@ -254,12 +261,19 @@ export function stopInputsIn(
       if (list) list.push(w);
       else byGraph.set(w.graphId, [w]);
     }
+    const recovery = recoveryPolicyOf(h.policy);
+    const holdById = memo((id: string) =>
+      recovery.enabled
+        ? leadHold(byId.get(id)!, attemptsOf(id), recovery, options.maxAttempts)
+        : undefined,
+    );
     const ctx: OutlookContext = {
       v,
       byId,
       external,
       attemptsOf,
       requestsOf: requestsById,
+      leadHold: (w) => holdById(w.id),
     };
     const groupOf = memo((graphId: string): Map<string, Outlook> => {
       const job = jobOf(graphId, firstOf.get(graphId)!);
@@ -484,6 +498,9 @@ export function stopInputsIn(
             : {}),
           ...((reason) => (reason ? { budgetBlock: { reason } } : {}))(budgetReason(work)),
           ...(work.recovery ? { recovery: { status: work.recovery.status } } : {}),
+          ...((lead) => (lead ? { leadRecovery: lead } : {}))(
+            leadRecoveryInput(work, attempts, recovery, holdById(work.id), budgetHeld(work)),
+          ),
           ...(waitingOn.length ? { waitingOn } : {}),
           ...(approvalStale ? { approvalStale } : {}),
           ...((since) => (since ? { planReview: { since } } : {}))(planReviews.get(work.graphId)),
@@ -603,6 +620,8 @@ interface OutlookContext {
   /** Попытки работы — как `v.attempts(workId)`. */
   attemptsOf: (workId: string) => AttemptState[];
   requestsOf: (workId: string) => InputRequest[];
+  /** Удержание правилом восстановления ведущим (`Engine.leadHoldOf`). */
+  leadHold: (w: WorkState) => LeadHold | undefined;
 }
 
 /**
@@ -645,6 +664,7 @@ function outlookOf(
       Boolean(dep.hold) ||
       budgetHeld(dep) ||
       dep.attempt >= options.maxAttempts ||
+      Boolean(ctx.leadHold(dep)) ||
       (dep.recovery !== undefined && !['retry', 'closed'].includes(dep.recovery.status)) ||
       dep.order.dependsOn.some((d) => depStops(d, seen))
     );
@@ -656,6 +676,7 @@ function outlookOf(
     Boolean(w.hold) ||
     w.attempt >= options.maxAttempts ||
     budgetHeld(w) ||
+    Boolean(ctx.leadHold(w)) ||
     w.order.dependsOn.some((d) => depStops(d));
   const episodes = works.filter((w) => w.recovery && w.status !== 'cancelled');
   for (const w of episodes) {
@@ -711,6 +732,7 @@ function outlookOf(
       blocking: (w) => ctx.requestsOf(w.id).find(blocksWork),
       budgetLeft: options.repairBudget - used,
       maxAttempts: options.maxAttempts,
+      leadHold: ctx.leadHold,
     });
     if (!decision || decision.action === 'stop') return out;
   }
@@ -728,11 +750,59 @@ function outlookOf(
       identical - 1 < repeats &&
       !acceptanceGap(ctx.v, w) &&
       !repeatedTestcase(ctx.v, w, options.maxAttempts) &&
+      !ctx.leadHold(w) &&
       (w.neutralFailures ?? 0) < MAX_NEUTRAL_FAILURES &&
       w.attempt < options.maxAttempts &&
       used + i < options.repairBudget;
     if (!retry) break;
     out.set(w.id, ahead);
   }
+  return out;
+}
+
+/**
+ * Восстановление ведущим во входе explain: удержание выдачи, ход по
+ * исчерпанным попыткам и строка последнего сброса ведущего. Нет правила
+ * `lead` и истории — поля нет (explain прежний).
+ */
+function leadRecoveryInput(
+  work: WorkState,
+  attempts: readonly AttemptState[],
+  recovery: ReturnType<typeof recoveryPolicyOf>,
+  hold: LeadHold | undefined,
+  budgetHeld: boolean,
+): Extract<StopInput, { kind: 'work' }>['work']['leadRecovery'] {
+  if (!recovery.enabled) return undefined;
+  const line = leadResetLine(work)?.ru;
+  const step = exhaustedStep(work, attempts, recovery, budgetHeld);
+  const out: NonNullable<Extract<StopInput, { kind: 'work' }>['work']['leadRecovery']> = {
+    ...(hold
+      ? {
+          hold:
+            hold.kind === 'diagnosis-required'
+              ? { kind: hold.kind, failures: hold.failures }
+              : {
+                  kind: hold.kind,
+                  diagnosis: hold.diagnosis.id,
+                  ...(hold.diagnosis.hypothesis ? { hypothesis: hold.diagnosis.hypothesis } : {}),
+                },
+        }
+      : {}),
+    exhausted:
+      step.actor === 'lead'
+        ? {
+            actor: 'lead',
+            step: step.step,
+            ...(step.step === 'diagnose' ? {} : { diagnosis: step.diagnosis.id }),
+            ...(step.step === 'reset' ? { index: step.index, cap: step.cap } : {}),
+          }
+        : {
+            actor: 'user',
+            why: step.why,
+            ...(step.diagnosis ? { diagnosis: step.diagnosis.id } : {}),
+          },
+    leadResets: recovery.leadResets,
+    ...(line ? { line } : {}),
+  };
   return out;
 }

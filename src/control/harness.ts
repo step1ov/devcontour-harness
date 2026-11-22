@@ -1230,6 +1230,7 @@ export class Harness {
       const decided = repairDecision(tx, tx.works(graphId), {
         budgetLeft: this.policy.repairBudget - (job.repairs ?? 0),
         maxAttempts: this.policy.maxAttempts,
+        leadHold: (w) => this.engine.leadHoldOf(w, tx),
       });
       if (!decided || decided.action === 'stop') return decided;
       this.workflows.repair(job, `repair:${decided.kind}`, () => {

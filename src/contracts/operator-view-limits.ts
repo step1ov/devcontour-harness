@@ -63,6 +63,8 @@ export const OPERATOR_VIEW_LIMITS = {
   leadNotes: 20,
   /** Живые превью результата (`previews`, 0.1.0-alpha.66). */
   previews: 20,
+  /** Шаги пути работы (`works[].track.steps`, ревизия 6). */
+  trackSteps: 120,
 } as const;
 
 /** Пределы свободных строк (символов) после маскирования. */

@@ -383,9 +383,16 @@ it returns `code`, `cause`, `phase`, `actor`, `action`, `retryPlanned`,
 | ------------ | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
 | `controller` | `wait`, `retry`                                                                                                    | you: wait, or run `$H run` again                                             |
 | `lead`       | `review-plan`, `diagnose-failure`, `replan-dependents`, `wait`                                                     | you: fix the graph, policy or code by the evidence, then run                 |
+| `lead`       | `diagnose`, `reset-attempts`                                                                                       | you: diagnose repeated failures, grant a new attempt limit yourself (below)  |
 | `user`       | `fix-access`, `fix-environment`, `raise-budget`, `reset-attempts`, `user-decision`, `resume-queue`, `answer-input` | hand it to the user with the message and evidence                            |
 | `lead`       | `apply-input`                                                                                                      | you: `input-resolve --request ID [--author A]` (or `input-carry`, see below) |
 | `null`       | `none`                                                                                                             | nothing to do                                                                |
+
+The `actor` field decides, not the action name: `reset-attempts` with
+`actor: lead` is yours, with `actor: user` it is the human's. The rule is in
+`docs/principles.md` («Кто принимает решения»): technical recovery is yours
+within the budget; the human gets product questions, contradictions, an
+exhausted budget and explicit escalation.
 
 After an answer: `$H input-resolve --state D --request ID --author <your runtime>`
 builds the answer snapshot (stored by digest, no files), reviews the plan with
@@ -403,8 +410,47 @@ on a ready work resets the counter (the reply says `reset.performed`); while
 an attempt runs it refuses. Every command has `$H <command> --help`.
 
 Only `user` actions go to the human: access, environment, budgets, attempt
-resets, goal decisions, resuming a paused queue and answers to executor
-questions are their decisions.
+resets beyond your budget, goal decisions, resuming a paused queue and answers
+to executor questions are their decisions.
+
+**Repeated failures (`DIAGNOSIS_REQUIRED`, `actor: lead`, `diagnose`).** With
+`recovery.mode: lead` (the default when `inputPolicy.leadAnswers.technical`
+is on; `doctor` and `status --human` print the effective rule in plain
+words), after `recovery.diagnoseAfter` counted failures (default 2) the next
+attempt is not issued until you diagnose them. Failures of the environment,
+the model provider, a controller stop and writer questions are not counted
+and need no diagnosis. Read the gate log, the review findings and the diff of
+the failed attempts, then pick one cause:
+
+- the checks let the defect through or miss a class of inputs → `coverage`
+  (add cases, strengthen the check);
+- the implementation idea is wrong → `approach`, with a new testable
+  hypothesis for the writer;
+- the work is too big for one attempt → `split` (re-plan the graph into
+  smaller orders and get the plan reviewed; attempts are not added);
+- two acceptance criteria or the order and its contract contradict each
+  other → `contradiction` (this goes to the human);
+- the environment, or none of these → `environment` / `other`.
+
+`$H diagnose --state D --work <id> --cause <cause> --hypothesis "<what the
+writer does differently and how it is checked>" [--evidence "<log line or
+id>"]`. The hypothesis is required for `coverage` and `approach` and must be
+new for the work. The next attempt gets the cause and the hypothesis in its
+prompt; then `$H retry --work <id>` or `$H run` continues.
+
+**Attempts exhausted (`ATTEMPTS_EXHAUSTED`).** If `explain` says `actor:
+lead`, it is yours: with `diagnose`, diagnose the last failure first; with
+`reset-attempts`, a fresh technical diagnosis exists (`coverage`, `approach`,
+or `other` with a hypothesis) and you grant a new attempt limit yourself:
+`$H retry --state D --work <id> --reset --by lead --diagnosis <D…>`. You may
+do this `recovery.leadResets` times per work budget (default 2), only after a
+new failure and a new hypothesis, and only while the work budget is not
+exhausted; status then reads «ведущий дал ещё N попыток (сброс K из M):
+причина …; гипотеза …». If `explain` says `actor: user` — the cap is spent,
+the cause is not technical, the diagnosis was already used, or the rule is
+`user` — hand it to the human with the message and your diagnosis as
+evidence. Never call `retry --reset` without `--by lead` yourself: that
+records a human decision.
 
 **Writer stopped on the environment (`APPROVAL_REQUIRED`, `cause:
 needs-lead`, `actor: lead`, `diagnose-failure`).** The writer reported that
@@ -581,8 +627,8 @@ accepted work whose order changed opens a rework (`work.reopened`) with its
 own attempt budget; `status` and `view` say «принято ранее на <sha>;
 доработка 1: …» / "accepted earlier at <sha>; rework 1: …", and the forecast
 keeps the earlier acceptance. A work gets at most 3 reworks with their own
-budget; after that the counter carries over, and an exhausted rework is the
-user's `reset-attempts`. Re-planning a work that was **not** accepted keeps
+budget; after that the counter carries over, and an exhausted rework is a
+`reset-attempts` of whoever `explain` names (lead resets count per budget). Re-planning a work that was **not** accepted keeps
 its counter — never re-plan to dodge `ATTEMPTS_EXHAUSTED`. A new order id
 is a new task with its own counter; the plan review that approves the
 revision is the guard, so never rename an order to get attempts back. A source task

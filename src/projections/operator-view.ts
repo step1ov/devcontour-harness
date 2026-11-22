@@ -26,6 +26,8 @@ import { holdLineParts } from './blocker-line.ts';
 import { remoteLineParts } from './remote-line.ts';
 import { sha256Hex } from './sha256.ts';
 import { resourcesOf, type ResourcesInput, type ResourcesView } from './view-resources.ts';
+import { decisionSettingsView, type Bilingual, type DecisionSetting } from './decisions.ts';
+import type { TrackStep } from './track.ts';
 
 export {
   OPERATOR_VIEW_VERSION,
@@ -86,6 +88,8 @@ export interface ViewSettings {
   };
   lean: { state: 'on' | 'off' | 'unknown' };
   defaulted: string[];
+  /** Ревизия 6: настройки решений с объяснением и итог одной фразой. */
+  decisions?: { items: DecisionSetting[]; summary: Bilingual; warning?: Bilingual };
 }
 
 export interface FindingView {
@@ -401,6 +405,8 @@ export interface WorkView {
   question?: { requestId: string; state: string; severity: number; line?: string };
   spend: { calls: number; usd: Bounded; durationMs: number };
   resultSha?: string;
+  /** Ревизия 6: путь работы целиком (`workTrack`). */
+  track?: { steps: TrackStep[]; truncated?: number };
 }
 
 /** Наблюдаемая длительность этапа: p50 и p90 закончившихся образцов. */
@@ -731,6 +737,11 @@ export interface OperatorWorkInput {
       kind?: string;
       counted?: boolean;
     };
+  };
+  /** Путь работы (`workTrack`): шаги на языке представления; нет — поля нет. */
+  track?: {
+    ru: { steps: TrackStep[]; truncated: number };
+    en: { steps: TrackStep[]; truncated: number };
   };
   /** Записи доказательств с `recheck` по всем попыткам работы. */
   rechecks: number;
@@ -1488,6 +1499,16 @@ function settingsOf(i: OperatorViewInput, truncated: Record<string, number>): Vi
             : 'off',
     },
     defaulted: [...new Set(i.defaulted)].sort(),
+    decisions: decisionSettingsView(
+      p,
+      i.defaulted.flatMap((d) =>
+        d === 'thresholds.maxAttempts'
+          ? ['maxAttempts']
+          : d.startsWith('decisions.')
+            ? [d.slice('decisions.'.length)]
+            : [],
+      ),
+    ),
   };
 }
 
@@ -1728,6 +1749,17 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
       durationMs: s.spend.durationMs,
     },
     ...(w.resultSha ? { resultSha: w.resultSha } : {}),
+    ...((t) =>
+      t
+        ? {
+            track: {
+              steps: t.steps.slice(-L.trackSteps),
+              ...(t.truncated + Math.max(0, t.steps.length - L.trackSteps)
+                ? { truncated: t.truncated + Math.max(0, t.steps.length - L.trackSteps) }
+                : {}),
+            },
+          }
+        : {})(w.track?.[c.lang]),
   };
 }
 
@@ -3634,14 +3666,17 @@ export function operatorView(input: OperatorViewInput, o: OperatorViewOptions = 
   return fitSize(full, maxBytes, c.lang, truncated);
 }
 
-/** Поля ревизии 4 у работы, которые документ сверх предела теряет первыми после разделов связки. */
+/** Поля ревизий 4 и 6 у работы, которые документ сверх предела теряет первыми после разделов связки. */
 function withoutWorkFields(w: WorkView): WorkView | undefined {
   const last = w.attempts.lastFailure;
   const lastExtra = !!last && (last.kind !== undefined || last.counted !== undefined);
   const steps = w.blockers.some((b) => b.step !== undefined);
   const line = w.question?.line !== undefined;
-  if (!lastExtra && !steps && !line) return undefined;
+  const track = w.track !== undefined;
+  if (!lastExtra && !steps && !line && !track) return undefined;
   const out: WorkView = { ...w };
+  // Путь работы (ревизия 6) — самое объёмное необязательное поле работы.
+  if (track) delete out.track;
   if (lastExtra) {
     const rest = { ...last };
     delete rest.kind;
@@ -3673,8 +3708,9 @@ const share = <T>(list: T[], n: number, add: (k: number) => void): T[] => {
  * Документ сверх байтового предела не отказывает целиком, а теряет
  * необязательное в одном порядке (docs/contracts.md, «Размер»):
  * 1. разделы связки `scope` и `sourceQuestions` (`VIEW_SECTIONS_DROPPED`);
- * 2. поля ревизии 4 у работ — `attempts.lastFailure.kind`/`counted`,
- *    `blockers[].step`, `question.line` (число работ — `truncated.workFields`);
+ * 2. поля ревизий 4 и 6 у работ — `attempts.lastFailure.kind`/`counted`,
+ *    `blockers[].step`, `question.line`, `track` (число работ —
+ *    `truncated.workFields`);
  * 3. лента `activity`;
  * 4. хвосты списков `works`, `reviews` (и находок предметов), `questions`,
  *    `escalations`, `drift` — одной долей, наибольшей, при которой документ

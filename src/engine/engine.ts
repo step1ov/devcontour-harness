@@ -116,6 +116,22 @@ import {
   blocksClaim,
   closeIfBasisChanged,
 } from './property-recovery.ts';
+import { recoveryPolicyOf } from '../projections/decisions.ts';
+import {
+  LEAD_RECOVERY_LIMIT,
+  type LeadDiagnosis,
+  type LeadDiagnosisCause,
+  type LeadReset,
+} from '../contracts/execution.ts';
+import {
+  epochOf,
+  exhaustedStep,
+  freshDiagnosis,
+  leadHold,
+  normalizedHypothesis,
+  pendingFailures,
+  type LeadHold,
+} from '../projections/lead-recovery.ts';
 import { REQUIREMENT_GATE } from '../verification/requirements.ts';
 import {
   notApplicableProblem,
@@ -217,6 +233,42 @@ const contentDigest = (order: WorkState['order']) =>
  */
 const uncounted = (kind: FailureKind, blocked: boolean, writerBlocked = false) =>
   blocked || kind === 'environment' || kind === 'provider-auth' || writerBlocked;
+
+/** Сброс попыток: причина; у сброса ведущего — разбор, по которому он дан. */
+export interface RetryReset {
+  reason: string;
+  diagnosis?: string;
+}
+
+/** Что дальше после разбора (`harness diagnose`). */
+export type DiagnoseNext =
+  'attempt' | 'diagnose' | 'replan' | 'user-decision' | 'lead-reset' | 'user-reset';
+
+/** Удержание правилом восстановления — блокировкой выдачи (`Engine.blockers`). */
+function leadHoldBlocker(hold: LeadHold) {
+  switch (hold.kind) {
+    case 'diagnosis-required':
+      return {
+        code: 'DIAGNOSIS_REQUIRED' as const,
+        message: `Нужен разбор ведущего: ${hold.failures.length} засчитанных отказа без разбора (${hold.failures.join(', ')}) — harness diagnose`,
+      };
+    case 'replan':
+      return {
+        code: 'NOT_READY' as const,
+        message: `Разбор ${hold.diagnosis.id}: задача велика — ждёт перепланирования и согласования`,
+      };
+    case 'contradiction':
+      return {
+        code: 'NOT_READY' as const,
+        message: `Разбор ${hold.diagnosis.id}: противоречивое обещание — ждёт решения человека`,
+      };
+  }
+}
+
+const leadHoldError = (hold: LeadHold) => {
+  const b = leadHoldBlocker(hold);
+  return new HarnessError(b.code, b.message);
+};
 
 /**
  * Остановка вопросом (`needs-input`) — не неудача работы: попытка
@@ -533,6 +585,9 @@ export class Engine {
           ...(corpus ? { checkVersion: corpus } : {}),
           ...(prior?.recovery ? { recovery: prior.recovery } : {}),
           ...(prior?.recoveryHistory ? { recoveryHistory: prior.recoveryHistory } : {}),
+          // Разборы и сбросы ведущего — история работы: новой редакцией
+          // предел сбросов не обойти (счёт — по пределу попыток, `rework.budgets`).
+          ...(prior?.leadRecovery ? { leadRecovery: prior.leadRecovery } : {}),
           // Удержание операции принадлежит ей: новая редакция источника его не
           // снимает — только release или передача владельцем.
           ...(prior?.hold ? { hold: prior.hold } : {}),
@@ -1583,6 +1638,7 @@ export class Engine {
         | 'NOT_READY'
         | 'PAUSED'
         | 'ATTEMPTS_EXHAUSTED'
+        | 'DIAGNOSIS_REQUIRED'
         | 'APPROVAL_STALE'
         | 'APPROVAL_REQUIRED'
         | 'BUDGET_EXHAUSTED'
@@ -1657,6 +1713,8 @@ export class Engine {
         code: 'NOT_READY',
         message: `Разбор свойства ${work.recovery!.property}: ${work.recovery!.reason ?? work.recovery!.status}`,
       });
+    const hold = this.leadHoldOf(work, view);
+    if (hold) out.push(leadHoldBlocker(hold));
     if (this.awaitsOperator(work, view))
       out.push({
         code: 'APPROVAL_REQUIRED',
@@ -1740,6 +1798,9 @@ export class Engine {
         // после разбора. Принятие корпуса, ждущее оператора, удерживает выдачу.
         if (blocksClaim(w) || this.awaitsOperator(w, tx)) return false;
         if (w.attempt >= this.policy.maxAttempts) return false;
+        // После `recovery.diagnoseAfter` засчитанных отказов — только после
+        // разбора ведущего; `split` ждёт перепланирования, противоречие — человека.
+        if (this.leadHoldOf(w, tx)) return false;
         if (neutralExhausted(w)) return false;
         // Вопрос без применённого ответа: новая редакция графа и согласование
         // делают поручение готовым, но выдачи нет до applyInput.
@@ -5351,7 +5412,7 @@ export class Engine {
    * (`work.retried`): CLI — `operator`, восстановление очереди — `recovery`,
    * хост, не назвавший актёра, — `host`.
    */
-  retry(workId: string, reset?: { reason: string }, by: RetryActor = 'host') {
+  retry(workId: string, reset?: RetryReset, by: RetryActor = 'host') {
     return this.tx('task.retry', (tx) => {
       this.assertNoUpdate(tx);
       const w = tx.work(workId);
@@ -5360,17 +5421,25 @@ export class Engine {
     });
   }
 
+  /** Удержание выдачи правилом восстановления ведущим (`policy.recovery`). */
+  leadHoldOf(work: WorkState, view: ExecutionView): LeadHold | undefined {
+    const rp = recoveryPolicyOf(this.policy);
+    if (!rp.enabled) return undefined;
+    return leadHold(work, view.attempts(work.id), rp, this.policy.maxAttempts);
+  }
+
   /**
    * Повтор поручения внутри транзакции (`retry`): правила — те же, что у
    * `retry`, — пока попытки не исчерпаны, без сброса; исчерпаны — только
    * явный сброс с причиной. Общий для `retry` и `applyInput`.
+   *
+   * Правило восстановления ведущим (`policy.recovery.mode: lead`): повтор без
+   * сброса не обходит удержание (разбор после `diagnoseAfter` отказов,
+   * перепланирование `split`, решение человека по противоречию); сброс
+   * ведущего (`by: lead`) — только по свежему техническому разбору и в
+   * пределе `leadResets`; сброс человека покрывает отказы без разбора.
    */
-  retryIn(
-    tx: ExecutionTransaction,
-    w: WorkState,
-    reset: { reason: string } | undefined,
-    by: RetryActor,
-  ) {
+  retryIn(tx: ExecutionTransaction, w: WorkState, reset: RetryReset | undefined, by: RetryActor) {
     const workId = w.id;
     // Вопрос исполнителя без применённого ответа: ни обычный повтор, ни
     // сброс попыток его не обходят — продолжение только через applyInput
@@ -5389,7 +5458,7 @@ export class Engine {
     // Сброс назван явно (с причиной): он выполняется и тогда, когда попытки
     // ещё не исчерпаны, — ведущий возвращает полный лимит до выдачи. Молча
     // проигнорированного сброса нет: нечего сбросить — это сказано в ответе.
-    const resetAsked = !!reset?.reason.trim();
+    const resetAsked = !!reset?.reason.trim() || (by === 'lead' && !!reset);
     const spent = w.attempt > 0 || (w.neutralFailures ?? 0) > 0;
     if (w.status === 'ready' && !exhausted && !(resetAsked && spent))
       return {
@@ -5415,12 +5484,65 @@ export class Engine {
       !(w.status === 'ready' && resetAsked)
     )
       throw new HarnessError('NOT_READY', 'Повтор доступен после отказа или отмены');
+    const rp = recoveryPolicyOf(this.policy);
+    const attempts = tx.attempts(workId);
+    const hold = rp.enabled ? leadHold(w, attempts, rp, this.policy.maxAttempts) : undefined;
+    // Повтор без сброса и сброс ведущего удержание не снимают: третьей
+    // слепой попытки нет, перепланирование и противоречие сбросом не решаются.
+    if (hold && (!resetAsked || by === 'lead')) throw leadHoldError(hold);
     if (exhausted && !resetAsked)
       throw new HarnessError(
         'ATTEMPTS_EXHAUSTED',
-        'Исчерпан лимит попыток; повторите со сбросом и причиной',
+        rp.enabled
+          ? 'Исчерпан лимит попыток: ведущий разбирает причину (harness diagnose) и при технической причине сам даёт новый предел (retry --reset --by lead --diagnosis <id>); иначе — сброс человеком с причиной'
+          : 'Исчерпан лимит попыток; повторите со сбросом и причиной',
       );
     const doReset = exhausted || (resetAsked && spent);
+    const at = iso(this.now());
+    let record: LeadReset | undefined;
+    let leadRecovery = w.leadRecovery;
+    if (doReset && by === 'lead') {
+      const grant = this.leadGrant(tx, w, reset!, rp);
+      record = {
+        by: 'lead',
+        at,
+        diagnosis: grant.diagnosis.id,
+        epoch: epochOf(w),
+        spent: w.attempt,
+        granted: this.policy.maxAttempts,
+        index: grant.index,
+        cap: grant.cap,
+        failures: pendingFailures(w, attempts).slice(-20),
+      };
+    } else if (doReset && rp.enabled) {
+      // Сброс человеком — его решение по отказам без разбора и по удержанию
+      // разбора (`split`, противоречие): оно записано и выдачу не держит.
+      record = {
+        by: 'operator',
+        at,
+        epoch: epochOf(w),
+        spent: w.attempt,
+        granted: this.policy.maxAttempts,
+        failures: pendingFailures(w, attempts).slice(-20),
+      };
+      const fresh = freshDiagnosis(w, attempts);
+      if (fresh && !fresh.resolved && (fresh.cause === 'split' || fresh.cause === 'contradiction'))
+        leadRecovery = {
+          ...(leadRecovery ?? { diagnoses: [], resets: [], seq: 0 }),
+          diagnoses: (leadRecovery?.diagnoses ?? []).map((d) =>
+            d.id === fresh.id ? { ...d, resolved: { by: 'operator' as const, at } } : d,
+          ),
+        };
+    } else if (by === 'lead' && resetAsked)
+      throw new HarnessError(
+        'NOT_READY',
+        'Сбрасывать нечего: попытки этой работы ещё не тратились',
+      );
+    if (record)
+      leadRecovery = {
+        ...(leadRecovery ?? { diagnoses: [], resets: [], seq: 0 }),
+        resets: [...(leadRecovery?.resets ?? []), record].slice(-LEAD_RECOVERY_LIMIT),
+      };
     const next: WorkState = {
       ...w,
       status: w.approvedDigest ? 'ready' : 'draft',
@@ -5429,8 +5551,10 @@ export class Engine {
       failure: undefined,
       failureKind: undefined,
       failureFingerprint: undefined,
+      ...(leadRecovery ? { leadRecovery } : {}),
     };
     tx.putWork(next);
+    const reason = reset?.reason.trim() ?? '';
     tx.emit({
       type: 'work.retried',
       graphId: w.graphId,
@@ -5438,7 +5562,15 @@ export class Engine {
       payload: {
         by,
         reset: doReset,
-        ...(doReset ? { spent: w.attempt, reasonLength: reset!.reason.trim().length } : {}),
+        ...(doReset ? { spent: w.attempt, reasonLength: reason.length } : {}),
+        ...(record?.by === 'lead'
+          ? {
+              diagnosis: record.diagnosis!,
+              index: record.index!,
+              cap: record.cap!,
+              granted: record.granted,
+            }
+          : {}),
       },
     });
     return {
@@ -5447,7 +5579,19 @@ export class Engine {
       ...(resetAsked
         ? {
             reset: doReset
-              ? { performed: true as const, spent: w.attempt }
+              ? {
+                  performed: true as const,
+                  spent: w.attempt,
+                  ...(record?.by === 'lead'
+                    ? {
+                        by: 'lead' as const,
+                        diagnosis: record.diagnosis!,
+                        index: record.index!,
+                        cap: record.cap!,
+                        granted: record.granted,
+                      }
+                    : {}),
+                }
               : {
                   performed: false as const,
                   note: 'Сбрасывать нечего: попытки этой работы ещё не тратились',
@@ -5455,6 +5599,178 @@ export class Engine {
           }
         : {}),
     };
+  }
+
+  /**
+   * Право ведущего дать новый предел попыток (`retry --reset --by lead`):
+   * правило `lead`, бюджет расходов работы не исчерпан, сбросы ведущего
+   * остались, есть свежий (после последнего засчитанного отказа)
+   * технический разбор, по которому ещё не сбрасывали. Иначе — отказ с
+   * кодом, по которому ясно, кто дальше: человек (`ATTEMPTS_EXHAUSTED`,
+   * `BUDGET_EXHAUSTED`) или ведущий (`DIAGNOSIS_REQUIRED`, перепланирование).
+   */
+  private leadGrant(
+    tx: ExecutionView,
+    w: WorkState,
+    reset: RetryReset,
+    rp: ReturnType<typeof recoveryPolicyOf>,
+  ) {
+    const attempts = tx.attempts(w.id);
+    if (reset.diagnosis && !w.leadRecovery?.diagnoses.some((d) => d.id === reset.diagnosis))
+      throw new HarnessError('NOT_FOUND', `Разбора ${reset.diagnosis} у поручения ${w.id} нет`, [
+        { path: ['--diagnosis'], message: reset.diagnosis },
+      ]);
+    const budget = this.budgetBlockOf(w.id, tx);
+    const step = exhaustedStep(w, attempts, rp, Boolean(budget));
+    if (step.actor === 'user') {
+      if (step.why === 'budget')
+        throw new HarnessError(
+          'BUDGET_EXHAUSTED',
+          `Бюджет работы исчерпан (${budget}): новый предел попыток — решение человека`,
+        );
+      throw new HarnessError(
+        'ATTEMPTS_EXHAUSTED',
+        {
+          mode: 'Правило восстановления — user (policy.recovery): сброс попыток решает человек',
+          cap: `Сбросы ведущего этого предела потрачены (${rp.leadResets} из ${rp.leadResets}): дальше решает человек — сброс с причиной`,
+          cause: `Разбор ${step.diagnosis?.id} — не техническая причина (${step.diagnosis?.cause}): ведущий сам предел не даёт, решает человек`,
+          repeated: `По разбору ${step.diagnosis?.id} уже сбрасывали: тот же разбор второй раз предел не даёт — нужен новый разбор после нового отказа, иначе решает человек`,
+          nothing:
+            'Засчитанных отказов без разбора нет: ведущему разбирать нечего, сброс решает человек',
+        }[step.why],
+      );
+    }
+    if (step.step === 'diagnose')
+      throw new HarnessError(
+        'DIAGNOSIS_REQUIRED',
+        `Нужен свежий разбор последнего засчитанного отказа (${step.failures.at(-1)}): harness diagnose --work ${w.id} --cause … --hypothesis "…"`,
+      );
+    if (step.step === 'replan')
+      throw new HarnessError(
+        'NOT_READY',
+        `Разбор ${step.diagnosis.id}: задача велика — перепланируйте и согласуйте разделение; сбросом это не решается`,
+      );
+    if (reset.diagnosis && reset.diagnosis !== step.diagnosis.id)
+      throw new HarnessError(
+        'DIAGNOSIS_REQUIRED',
+        `Разбор ${reset.diagnosis} не свежий: последний засчитанный отказ разбирает ${step.diagnosis.id}`,
+        [{ path: ['--diagnosis'], message: reset.diagnosis }],
+      );
+    return step;
+  }
+
+  /**
+   * Диагностика ведущего (`harness diagnose`): причина последних засчитанных
+   * отказов без разбора, гипотеза (обязательна для `coverage` и `approach`,
+   * не повторяет прежние гипотезы работы) и ссылки на доказательства.
+   * Последствие — по причине: техническая открывает следующую попытку с
+   * гипотезой в контексте исполнителя (при исчерпании — право ведущего на
+   * сброс), `split` держит работу до перепланирования, `contradiction`
+   * передаёт решение человеку. Модель не вызывается.
+   */
+  diagnose(
+    workId: string,
+    input: { cause: LeadDiagnosisCause; hypothesis?: string; evidence?: readonly string[] },
+  ) {
+    // Разбор — решение о повторе: та же операция, что у retry.
+    return this.tx('task.retry', (tx) => {
+      this.assertNoUpdate(tx);
+      const w = tx.work(workId);
+      if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
+      if (w.status === 'done' || w.status === 'cancelled')
+        throw new HarnessError('NOT_READY', `Поручение ${workId} ${w.status}: разбирать нечего`);
+      if (w.activeRunId)
+        throw new HarnessError(
+          'NOT_READY',
+          `Идёт попытка ${w.activeRunId}: разбор — после её окончания`,
+        );
+      const attempts = tx.attempts(workId);
+      const failures = pendingFailures(w, attempts);
+      if (!failures.length)
+        throw new HarnessError(
+          'NOT_READY',
+          'Засчитанных отказов без разбора нет: отказы окружения, провайдера, вопросы и остановки разбора не требуют',
+        );
+      const hypothesis = input.hypothesis?.trim() || undefined;
+      if ((input.cause === 'coverage' || input.cause === 'approach') && !hypothesis)
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `--hypothesis обязательна для причины ${input.cause}: что исполнитель сделает иначе и как это проверить`,
+          [{ path: ['--hypothesis'], message: 'required' }],
+        );
+      if (hypothesis && (hypothesis.length < 10 || hypothesis.length > 2000))
+        throw new HarnessError('INVALID_INPUT', '--hypothesis: от 10 до 2000 знаков', [
+          { path: ['--hypothesis'], message: String(hypothesis.length) },
+        ]);
+      const earlier = (w.leadRecovery?.diagnoses ?? []).filter((d) => d.hypothesis);
+      const same = hypothesis
+        ? earlier.find(
+            (d) => normalizedHypothesis(d.hypothesis!) === normalizedHypothesis(hypothesis),
+          )
+        : undefined;
+      if (same)
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `Гипотеза повторяет разбор ${same.id}: третья попытка с той же гипотезой — та же слепая попытка; назовите новую или передайте решение человеку`,
+          [{ path: ['--hypothesis'], message: same.id }],
+        );
+      const evidence = (input.evidence ?? []).map((e) => e.trim()).filter(Boolean);
+      if (evidence.length > 10 || evidence.some((e) => e.length > 1000))
+        throw new HarnessError('INVALID_INPUT', '--evidence: не больше 10, каждая до 1000 знаков');
+      const seq = (w.leadRecovery?.seq ?? 0) + 1;
+      const diagnosis: LeadDiagnosis = {
+        id: `D${seq}`,
+        cause: input.cause,
+        ...(hypothesis ? { hypothesis } : {}),
+        evidence,
+        failures: failures.slice(-20),
+        by: 'lead',
+        at: iso(this.now()),
+        ...(w.approvedDigest ? { approvedDigest: w.approvedDigest } : {}),
+        epoch: epochOf(w),
+      };
+      const leadRecovery = {
+        diagnoses: [...(w.leadRecovery?.diagnoses ?? []), diagnosis].slice(-LEAD_RECOVERY_LIMIT),
+        resets: w.leadRecovery?.resets ?? [],
+        seq,
+      };
+      const next = { ...w, leadRecovery };
+      tx.putWork(next);
+      tx.emit({
+        type: 'work.diagnosed',
+        graphId: w.graphId,
+        workId,
+        payload: {
+          diagnosis: diagnosis.id,
+          cause: diagnosis.cause,
+          failures: diagnosis.failures,
+          hypothesisLength: hypothesis?.length ?? 0,
+          evidence: evidence.length,
+        },
+      });
+      const rp = recoveryPolicyOf(this.policy);
+      const exhausted = w.attempt >= this.policy.maxAttempts;
+      const hold = rp.enabled ? leadHold(next, attempts, rp, this.policy.maxAttempts) : undefined;
+      const step = exhausted
+        ? exhaustedStep(next, attempts, rp, Boolean(this.budgetBlockOf(w.id, tx)))
+        : undefined;
+      const nextStep: DiagnoseNext = hold
+        ? hold.kind === 'replan'
+          ? 'replan'
+          : hold.kind === 'contradiction'
+            ? 'user-decision'
+            : 'diagnose'
+        : step
+          ? step.actor === 'lead'
+            ? step.step === 'reset'
+              ? 'lead-reset'
+              : step.step === 'replan'
+                ? 'replan'
+                : 'diagnose'
+            : 'user-reset'
+          : 'attempt';
+      return { workId, diagnosis, next: nextStep, mode: rp.mode };
+    });
   }
 
   /**

@@ -83,6 +83,8 @@ const laterCommands: readonly string[] = [
   'preview-start',
   'preview-stop',
   'preview-list',
+  // Разбор ведущего повторных отказов (0.1.0-alpha.66).
+  'diagnose',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -173,6 +175,8 @@ const ADDITIVE_EVENT_TYPES = new Set([
   'harness.updated',
   // alpha.66: отказ от доработки — возврат к принятой редакции.
   'work.rework-abandoned',
+  // alpha.66: разбор ведущего повторных отказов (`harness diagnose`).
+  'work.diagnosed',
 ]);
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([
@@ -204,6 +208,12 @@ const ADDITIVE_ARGS = new Set([
   // Сверка версии Relay по связке задач (0.1.0-alpha.60).
   'doctor--source',
   'init--source',
+  // Восстановление ведущим после повторных отказов (0.1.0-alpha.66).
+  'retry--by',
+  'retry--diagnosis',
+  'init--recovery',
+  'init--diagnose-after',
+  'init--lead-resets',
 ]);
 /**
  * Текст `--writer` init в H2. 0.1.0-alpha.50 меняет умолчание: writer —
@@ -218,6 +228,8 @@ const eventTypeOf = (v: unknown) =>
 const ADDITIVE_REFUSALS = new Set([
   // retry: идущая попытка при --reset и повтор не после отказа (0.1.0-alpha.60).
   'retry:NOT_READY',
+  // retry: третья попытка — только после разбора ведущего (0.1.0-alpha.66).
+  'retry:DIAGNOSIS_REQUIRED',
 ]);
 /** Аддитивные значения перечней после H2. */
 const ADDITIVE_ENUM_VALUES = new Set([
@@ -336,7 +348,8 @@ test('H3-01: каждая общая операция читается из до
     // Вход строгий: лишний ключ отвергается.
     assert.equal(op.input.safeParse({ unknownArg: 'x' }).success, false, c);
   }
-  // multiple объявлен только у --requirements plan-request, --intent handoff и
+  // multiple объявлен только у --requirements plan-request, --intent handoff,
+  // --evidence diagnose и
   // решений по находкам review-plan / review-contract / review-accept.
   const multiple = Object.entries(cliCommands).flatMap(([c, contract]) =>
     (contract.args as readonly CliArgument[]).filter((a) => a.multiple).map((a) => c + a.name),
@@ -347,6 +360,7 @@ test('H3-01: каждая общая операция читается из до
     'review-contract--accept-limitation',
     'review-contract--continue-review',
     'review-accept--accept-limitation',
+    'diagnose--evidence',
     'handoff--intent',
     'plan-request--requirements',
   ]);
@@ -429,6 +443,35 @@ test('H3-01: прежние команды и схемы их данных не 
   // Порядок ключей cliDataSchemas H2 — без capabilities; аддитивные значения
   // перечней убираются, остальное — байты H2.
   const h2 = JSON.stringify(data, (k, v: unknown) => {
+    // Восстановление ведущим (0.1.0-alpha.66): настройки решений (`decisions`
+    // у status, doctor и init), разборы и сбросы работы (`leadRecovery`),
+    // правило политики (`recovery`) и строка сброса у работы status, поля
+    // сброса ведущего в `work.retried`, актёр повтора `lead`, действие
+    // `diagnose` и код `DIAGNOSIS_REQUIRED`.
+    if (k === 'properties' && v && typeof v === 'object') {
+      const o = v as Record<string, unknown>;
+      if (
+        'decisions' in o ||
+        'leadRecovery' in o ||
+        ('recovery' in o && ('policyVersion' in o || 'blockers' in o))
+      ) {
+        const rest = { ...o };
+        delete rest.decisions;
+        delete rest.leadRecovery;
+        if ('policyVersion' in o || 'blockers' in o) delete rest.recovery;
+        v = rest;
+      }
+      const r = v as Record<string, unknown>;
+      if ('reasonLength' in r && 'spent' in r && 'diagnosis' in r) {
+        const rest = { ...r };
+        for (const key of ['diagnosis', 'index', 'cap', 'granted']) delete rest[key];
+        v = rest;
+      }
+    }
+    if (k === 'enum' && Array.isArray(v) && v.includes('recovery') && v.includes('host'))
+      v = (v as unknown[]).filter((x) => x !== 'lead');
+    if (k === 'enum' && Array.isArray(v))
+      v = (v as unknown[]).filter((x) => x !== 'diagnose' && x !== 'DIAGNOSIS_REQUIRED');
     // Аддитивные поля ответа init (0.1.0-alpha.50): ведущий, решение о
     // ревью, наличие CLI и предупреждения — обязательные, поэтому и в `required`.
     if (v && typeof v === 'object' && !Array.isArray(v) && 'properties' in v) {

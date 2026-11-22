@@ -41,6 +41,11 @@ export const blockerCodeText: Record<BlockerCode, Text> = {
     en: 'attempts are used up — you need to reset them',
     actor: 'user',
   },
+  DIAGNOSIS_REQUIRED: {
+    ru: 'повторные отказы — ведущий разбирает причину до следующей попытки (harness diagnose)',
+    en: 'repeated failures — the lead diagnoses the cause before the next attempt (harness diagnose)',
+    actor: 'lead',
+  },
   APPROVAL_STALE: {
     ru: 'согласование устарело — нужно согласовать заново',
     en: 'the approval is stale — approve again',
@@ -274,6 +279,18 @@ function textOf(b: { code: BlockerCode; message: string }, ctx: BlockerContext):
           actor: 'controller',
         };
       }
+      if (/^Разбор D\d+: задача велика/.test(m))
+        return {
+          ru: 'ведущий решил разделить задачу — ждёт перепланирования и согласования',
+          en: 'the lead decided to split the task — waiting for a re-plan and its approval',
+          actor: 'lead',
+        };
+      if (/^Разбор D\d+: противоречивое обещание/.test(m))
+        return {
+          ru: 'ведущий нашёл противоречие в обещании — нужно ваше решение',
+          en: 'the lead found a contradictory promise — your decision is needed',
+          actor: 'user',
+        };
       if (m.startsWith('Разбор свойства'))
         return ctx.work?.recovery?.status === 'awaiting-user'
           ? {
@@ -359,6 +376,19 @@ function textOf(b: { code: BlockerCode; message: string }, ctx: BlockerContext):
           en: `the last attempt is running${n ? ` (${n[1]} of ${n[2]})` : ''} — a reset is needed only if it fails`,
           actor: 'controller',
         };
+      // Правило восстановления ведущим: ход ведущего — разбор или его сброс.
+      if (ctx.needs?.actor === 'lead')
+        return ctx.needs.action === 'reset-attempts'
+          ? {
+              ru: `попытки исчерпаны${n ? ` (${n[1]} из ${n[2]})` : ''} — ведущий даёт новый предел по своему разбору`,
+              en: `attempts are used up${n ? ` (${n[1]} of ${n[2]})` : ''} — the lead grants a new limit after its diagnosis`,
+              actor: 'lead',
+            }
+          : {
+              ru: `попытки исчерпаны${n ? ` (${n[1]} из ${n[2]})` : ''} — ведущий разбирает причину`,
+              en: `attempts are used up${n ? ` (${n[1]} of ${n[2]})` : ''} — the lead diagnoses the cause`,
+              actor: 'lead',
+            };
       return n
         ? {
             ...blockerCodeText.ATTEMPTS_EXHAUSTED,

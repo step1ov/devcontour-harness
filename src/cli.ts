@@ -27,6 +27,8 @@ import {
   executionPolicySchema,
   exitCodeOf,
   exitCodes,
+  leadDiagnosisCauses,
+  type LeadDiagnosisCause,
   projectManifestSchema,
   type CliArgument,
   type CliCommand,
@@ -503,6 +505,13 @@ const options = {
   ttl: { type: 'string' },
   idle: { type: 'string' },
   summary: { type: 'string' },
+  cause: { type: 'string' },
+  hypothesis: { type: 'string' },
+  evidence: { type: 'string', multiple: true },
+  diagnosis: { type: 'string' },
+  recovery: { type: 'string' },
+  'diagnose-after': { type: 'string' },
+  'lead-resets': { type: 'string' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -550,7 +559,14 @@ const flagOwners = {
   option: ['input-answer'],
   kind: ['input-answer'],
   actor: ['input-answer', 'input-carry', 'review-plan', 'review-contract', 'review-accept'],
-  by: ['reapprove'],
+  by: ['reapprove', 'retry'],
+  cause: ['diagnose'],
+  hypothesis: ['diagnose'],
+  evidence: ['diagnose'],
+  diagnosis: ['retry'],
+  recovery: ['init'],
+  'diagnose-after': ['init'],
+  'lead-resets': ['init'],
   'accept-limitation': ['review-plan', 'review-contract', 'review-accept'],
   'continue-review': ['review-plan', 'review-contract'],
   'request-version': ['input-answer', 'input-apply', 'input-cancel', 'input-supersede'],
@@ -1056,6 +1072,45 @@ async function runUpdate(
   return { data: r.data, code: r.code };
 }
 
+/** `init --recovery lead|user --diagnose-after N --lead-resets N` → `policy.recovery`. */
+function recoveryFlags(v: {
+  recovery?: string | undefined;
+  'diagnose-after'?: string | undefined;
+  'lead-resets'?: string | undefined;
+}) {
+  const int = (flag: 'diagnose-after' | 'lead-resets', min: number, max: number) => {
+    const raw = v[flag];
+    if (raw === undefined) return undefined;
+    const n = Number(raw);
+    if (!/^\d+$/.test(raw) || n < min || n > max)
+      throw new HarnessError('INVALID_INPUT', `--${flag}: целое от ${min} до ${max}`, [
+        { path: ['--' + flag], message: raw },
+      ]);
+    return n;
+  };
+  const diagnoseAfter = int('diagnose-after', 1, 10);
+  const leadResets = int('lead-resets', 0, 5);
+  if (v.recovery === undefined) {
+    if (diagnoseAfter !== undefined || leadResets !== undefined)
+      throw new HarnessError(
+        'INVALID_INPUT',
+        '--diagnose-after и --lead-resets — вместе с --recovery lead|user',
+      );
+    return undefined;
+  }
+  const mode: 'lead' | 'user' | undefined =
+    v.recovery === 'lead' ? 'lead' : v.recovery === 'user' ? 'user' : undefined;
+  if (!mode)
+    throw new HarnessError('INVALID_INPUT', '--recovery: ожидается lead или user', [
+      { path: ['--recovery'], message: v.recovery },
+    ]);
+  return {
+    mode,
+    ...(diagnoseAfter !== undefined ? { diagnoseAfter } : {}),
+    ...(leadResets !== undefined ? { leadResets } : {}),
+  };
+}
+
 async function run(
   argv: string[],
 ): Promise<{ command: CliCommand | 'version'; data: unknown; code?: number; text?: string }> {
@@ -1380,13 +1435,29 @@ async function run(
             command,
             data: await h.deliver(need('work'), sinkOf(need('sink'), h, b.baseDir)!),
           };
+        if (command === 'retry' && v.by !== undefined && v.by !== 'lead')
+          throw new HarnessError('INVALID_INPUT', '--by: только lead (без флага — оператор)', [
+            { path: ['--by'], message: v.by },
+          ]);
+        const lead = command === 'retry' && v.by === 'lead';
+        if (v.diagnosis !== undefined && !(lead && v.reset))
+          throw new HarnessError(
+            'INVALID_INPUT',
+            '--diagnosis — только со сбросом ведущего (--reset --by lead)',
+          );
         const result =
           command === 'cancel'
             ? h.engine.cancel(need('work'), v.reason, 'operator')
             : h.engine.retry(
                 need('work'),
-                v.reset ? { reason: need('reason') } : undefined,
-                'operator',
+                v.reset
+                  ? {
+                      // Сброс ведущего называет причину разбором; своя причина — по желанию.
+                      reason: lead ? (v.reason ?? '') : need('reason'),
+                      ...(v.diagnosis !== undefined ? { diagnosis: v.diagnosis } : {}),
+                    }
+                  : undefined,
+                lead ? 'lead' : 'operator',
               );
         return {
           command,
@@ -1428,6 +1499,26 @@ async function run(
                   )
                 : releaseDone(h.engine, { summary: need('summary') });
         return { command, data };
+      } finally {
+        h.close();
+      }
+    }
+    case 'diagnose': {
+      const cause = need('cause');
+      if (!(leadDiagnosisCauses as readonly string[]).includes(cause))
+        throw new HarnessError('INVALID_INPUT', `--cause: ${leadDiagnosisCauses.join(' | ')}`, [
+          { path: ['--cause'], message: cause },
+        ]);
+      const h = open(need('state'), binding(need('state')), true);
+      try {
+        return {
+          command,
+          data: h.engine.diagnose(need('work'), {
+            cause: cause as LeadDiagnosisCause,
+            ...(v.hypothesis !== undefined ? { hypothesis: v.hypothesis } : {}),
+            ...(v.evidence ? { evidence: v.evidence } : {}),
+          }),
+        };
       } finally {
         h.close();
       }
@@ -1549,6 +1640,7 @@ async function run(
         ...(v.plan ? { plan: true } : {}),
         ...(v.lean ? { lean: true } : {}),
         ...(v['lead-technical-answers'] ? { leadTechnicalAnswers: true } : {}),
+        ...((r) => (r ? { recovery: r } : {}))(recoveryFlags(v)),
       });
       // Ведущий внутри песочницы (Codex seatbelt): предупреждение с флагами запуска.
       const sandboxed = leadSandboxCheck({

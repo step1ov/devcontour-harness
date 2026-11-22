@@ -53,6 +53,9 @@ import { attemptLine, type AttemptLineFacts } from '../contracts/attempt-line.ts
 import { named, type LinePart } from '../projections/clip.ts';
 import { inputStateOf } from '../projections/input.ts';
 import { explainStop } from '../projections/stop.ts';
+import { workTrack } from '../projections/track.ts';
+import { recoveryPolicyOf } from '../projections/decisions.ts';
+import { blockingRequest } from '../engine/input-requests.ts';
 import { stopInputsIn } from '../explain/state.ts';
 import { policySecrets } from '../environment/redaction.ts';
 import {
@@ -193,6 +196,11 @@ export function defaultedPaths(policy: ExecutionPolicy, raw: unknown): string[] 
   const input = r.inputPolicy as Record<string, unknown> | undefined;
   if (input && typeof input === 'object' && !('threshold' in input))
     out.push('thresholds.inputSeverity');
+  // Числа восстановления, взятые из умолчаний (`settings.decisions[].source`).
+  const recovery = r.recovery as Record<string, unknown> | undefined;
+  if (recovery && typeof recovery === 'object')
+    for (const key of ['diagnoseAfter', 'leadResets'])
+      if (!(key in recovery)) out.push('decisions.recovery.' + key);
   const budgets = r.budgets as Record<string, unknown> | undefined;
   if (budgets && typeof budgets === 'object' && !('onUnknown' in budgets))
     out.push('budgetOnUnknown');
@@ -917,6 +925,15 @@ export function collectOperatorViewInput(
             attemptFacts(summary, sw.status === 'done' || sw.status === 'cancelled'),
           ),
         },
+        track: ((o) => ({
+          ru: workTrack(w, own, { ...o, lang: 'ru' }),
+          en: workTrack(w, own, { ...o, lang: 'en' }),
+        }))({
+          maxAttempts: policy.maxAttempts,
+          recovery: recoveryPolicyOf(policy),
+          question: !!blockingRequest(v, w),
+          budgetHeld: sw.blockers.some((b) => b.code === 'BUDGET_EXHAUSTED'),
+        }),
         rechecks: own.reduce((n, a) => n + a.evidence.filter((e) => e.recheck).length, 0),
         ...(sw.liveness ? { liveness: sw.liveness } : {}),
         ...(active?.status === 'active'
