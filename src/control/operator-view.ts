@@ -33,6 +33,7 @@ import {
   type ReviewRecord,
   type statusDataSchema,
   type AttemptState,
+  type WorkState,
 } from '../contracts/index.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import {
@@ -520,8 +521,20 @@ export function activityInputOf(
   planRows: readonly ReviewRecord[],
   codeRows: readonly CodeReviewRecord[],
   requests: readonly InputRequest[],
+  works: readonly Pick<WorkState, 'id' | 'rework'>[] = [],
 ): OperatorActivityInput[] {
   const out: OperatorActivityInput[] = [];
+  // Доработка после приёмки: последняя открытая новой редакцией (`WorkState.rework`).
+  for (const w of works)
+    if (w.rework)
+      out.push({
+        kind: 'work.reopened',
+        at: w.rework.reopenedAt,
+        workId: w.id,
+        revision: w.rework.revision,
+        sha: w.rework.accepted.resultSha,
+        fresh: w.rework.fresh,
+      });
   const blockingOf = (fs: readonly { severity: string; status?: string }[]) =>
     fs.filter((f) => f.severity === 'blocking' && (f.status === undefined || f.status === 'open'))
       .length;
@@ -964,6 +977,7 @@ export function collectOperatorViewInput(
       v.locals('reviews', WORKSPACE_OWNER).map((r) => r.value),
       v.locals('code-reviews', WORKSPACE_OWNER).map((r) => r.value),
       requestsOf(v),
+      v.works(),
     );
     const control = v.control();
     const controller = v.controller();

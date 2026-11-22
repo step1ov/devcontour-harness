@@ -16,6 +16,7 @@ import { MAX_REWORK_BUDGETS } from '../src/engine/failure.ts';
 import { statusOf } from '../src/control/status.ts';
 import { collectOperatorViewInput } from '../src/control/operator-view.ts';
 import { attemptLine, operatorView } from '../src/projections/index.ts';
+import { currentRevisionAttempts } from '../src/report/compute.ts';
 import { operatorViewSchema } from '../src/contracts/index.ts';
 import { stopInputsOf } from '../src/explain/state.ts';
 import { explainStop } from '../src/projections/stop.ts';
@@ -59,8 +60,12 @@ function accept(e: Engine, id: string, token: string, candidate: string, integra
 }
 
 /** Редакция графа `revision` с изменённой целью поручения `w`. */
-function revised(revision: string, goal: string): WorkGraph {
-  const g = graphOf({ w: [], x: ['w'] }, revision);
+function revised(
+  revision: string,
+  goal: string,
+  deps: Record<string, string[]> = { w: [], x: ['w'] },
+): WorkGraph {
+  const g = graphOf(deps, revision);
   g.orders[0] = { ...g.orders[0]!, goal };
   return g;
 }
@@ -84,11 +89,11 @@ const fail = (e: Engine) => {
  * Пилот: #1 и #2 — засчитанные отказы, #3 принята; ведущий нашёл ошибку
  * своей проверкой и перепланировал поручение с изменённой постановкой.
  */
-function pilot() {
+function pilot(deps: Record<string, string[]> = { w: [], x: ['w'] }) {
   const env = engineOf();
   const { engine } = env;
   assert.equal(engine.policy.maxAttempts, 3);
-  ready(engine, graphOf({ w: [], x: ['w'] }));
+  ready(engine, graphOf(deps));
   // `x` зависит от `w`: выдаётся только `w`.
   fail(engine);
   engine.retry('w');
@@ -100,7 +105,7 @@ function pilot() {
   const accepted = engine.read((v) => v.work('w')!);
   assert.equal(accepted.status, 'done');
   assert.equal(accepted.attempt, 3);
-  replan(engine, revised('2', 'Исправить ошибку JS, найденную после приёмки.'));
+  replan(engine, revised('2', 'Исправить ошибку JS, найденную после приёмки.', deps));
   return { ...env, third };
 }
 
@@ -196,38 +201,120 @@ test('P3-1: незасчитанные отказы непринятого по�
 
 test('P3-1: свой предел — не больше MAX_REWORK_BUDGETS доработок; дальше счётчик переносится', () => {
   const { engine, store } = pilot();
-  // Каждая доработка: две засчитанные неудачи и приёмка третьей.
   let n = 1;
-  const cycle = () => {
-    fail(engine);
-    engine.retry('w');
-    fail(engine);
-    engine.retry('w');
+  /**
+   * Закончить текущую редакцию: `fails` засчитанных отказов, по желанию отказ
+   * окружения (незасчитанный), затем приёмка; и открыть следующую доработку.
+   */
+  const cycle = (fails: number, neutral = false) => {
+    for (let k = 0; k < fails; k++) {
+      fail(engine);
+      engine.retry('w');
+    }
+    if (neutral) {
+      const env = engine.claim('c1')!;
+      engine.fail(env.id, env.token, 'sandbox died', { kind: 'environment' });
+      engine.resume();
+      engine.retry('w');
+    }
     const run = engine.claim('c1')!;
     assert.equal(run.workId, 'w');
     accept(engine, run.id, run.token, sha('e'), sha(String(n % 10)));
     n++;
     replan(engine, revised(String(n + 1), `Доработка ${n}.`));
+    return engine.read((v) => v.work('w')!);
   };
-  for (let k = 1; k < MAX_REWORK_BUDGETS; k++) cycle();
+  const reopened = () =>
+    store.events(0, 5000).flatMap((e) => (e.type === 'work.reopened' ? [e.payload] : []));
+  // Доработки 2 … MAX — со своим пределом; отказ окружения принятой редакции
+  // свежая доработка не наследует.
   let w = engine.read((v) => v.work('w')!);
+  for (let k = 1; k < MAX_REWORK_BUDGETS; k++) {
+    w = cycle(2, true);
+    assert.equal(w.rework?.fresh, true);
+    assert.equal(w.attempt, 0);
+    assert.equal(w.neutralFailures, undefined, 'свежая доработка — незасчитанные с нуля');
+  }
   assert.equal(w.rework?.budgets, MAX_REWORK_BUDGETS);
-  assert.equal(w.attempt, 0);
-  cycle();
-  w = engine.read((v) => v.work('w')!);
+  // Редакция MAX принята с первой попытки и с отказом окружения: доработка
+  // MAX + 1 переносит её счётчик (1, а не предел) и её незасчитанные отказы.
+  w = cycle(0, true);
   assert.equal(w.rework?.revision, MAX_REWORK_BUDGETS + 1);
   assert.equal(w.rework?.budgets, MAX_REWORK_BUDGETS);
   assert.equal(w.rework?.fresh, false);
+  assert.equal(w.attempt, 1, 'перенесён счётчик принятой редакции, а не исчерпание');
+  assert.equal(w.neutralFailures, 1, 'перенесены и незасчитанные отказы');
+  assert.equal(
+    engine.read((v) => engine.blockers(w, v)).find((b) => b.code === 'ATTEMPTS_EXHAUSTED'),
+    undefined,
+  );
+  assert.deepEqual(reopened().at(-1), {
+    revision: MAX_REWORK_BUDGETS + 1,
+    budget: 'carried',
+    acceptedSha: sha(String((n - 1) % 10)),
+    spent: 1,
+  });
+  // Перенесённая доработка: один отказ, приёмка третьей — следующая
+  // доработка получает 3 из 3 и ждёт решения человека.
+  w = cycle(1);
   assert.equal(w.attempt, 3, 'сверх предела доработок попытки переносятся');
   const exhausted = engine
     .read((v) => engine.blockers(w, v))
     .find((b) => b.code === 'ATTEMPTS_EXHAUSTED');
   assert.match(exhausted?.message ?? '', /доработ/);
-  const last = store
-    .events(0, 5000)
-    .filter((e) => e.type === 'work.reopened')
-    .at(-1);
-  assert.equal(last?.type === 'work.reopened' && last.payload.budget, 'carried');
+  assert.equal(reopened().at(-1)?.budget, 'carried');
+});
+
+test('P3-1: новая редакция открытой доработки — не новая доработка: счётчик и предел прежние', () => {
+  const { engine, store } = pilot();
+  fail(engine);
+  engine.retry('w');
+  const before = engine.read((v) => v.work('w')!);
+  assert.equal(before.attempt, 1);
+  replan(engine, revised('3', 'Доработка, уточнённая до приёмки.'));
+  const w = engine.read((v) => v.work('w')!);
+  assert.equal(w.status, 'ready');
+  assert.equal(w.attempt, 1, 'непринятая доработка сохраняет счётчик');
+  assert.deepEqual(w.rework, before.rework, 'та же доработка, тот же предел');
+  assert.equal(
+    store.events(0, 5000).filter((e) => e.type === 'work.reopened').length,
+    1,
+    'work.reopened — только при открытии доработки',
+  );
+});
+
+test('P3-1: currentRevisionAttempts — без runId принятой попытки граница по времени открытия', () => {
+  const at = (m: number) => `2026-01-01T00:0${m}:00.000Z`;
+  const attempts = [1, 2, 3, 4].map((m) => ({ id: 'r' + m, startedAt: at(m) }));
+  const rework = {
+    revision: 1,
+    budgets: 1,
+    fresh: true,
+    accepted: { resultSha: sha('a') },
+    reopenedAt: at(3),
+    spent: 2,
+  };
+  assert.deepEqual(
+    currentRevisionAttempts({ rework }, attempts).map((a) => a.id),
+    ['r3', 'r4'],
+  );
+  // runId есть, но записи нет (не найдена) — тоже по времени.
+  assert.deepEqual(
+    currentRevisionAttempts(
+      { rework: { ...rework, accepted: { runId: 'gone', resultSha: sha('a') } } },
+      attempts,
+    ).map((a) => a.id),
+    ['r3', 'r4'],
+  );
+  // С runId — после принявшей попытки.
+  assert.deepEqual(
+    currentRevisionAttempts(
+      { rework: { ...rework, accepted: { runId: 'r1', resultSha: sha('a') } } },
+      attempts,
+    ).map((a) => a.id),
+    ['r2', 'r3', 'r4'],
+  );
+  assert.equal(currentRevisionAttempts({}, attempts), attempts);
 });
 
 test('P3-1: status называет прежнюю приёмку и попытки доработки, а не «принято 0»', () => {
@@ -364,4 +451,100 @@ test('P3-1: строка попыток доработки — прежняя п
   );
   assert.ok(narrow.length <= 60);
   assert.match(narrow, /осталось попыток 2 из 3$/);
+});
+
+test('P3-1: status второй доработки — попытки после принявшей доработку 1', () => {
+  const { engine } = pilot();
+  const run = engine.claim('c1')!;
+  accept(engine, run.id, run.token, sha('c'), sha('d'));
+  replan(engine, revised('3', 'Вторая доработка.'));
+  const status = () =>
+    cliDataSchemas.status
+      .parse(statusOf({ engine, policy: engine.policy }))
+      .works.find((x) => x.id === 'w')!;
+  let sw = status();
+  assert.deepEqual(sw.attemptSummary!.rework, {
+    revision: 2,
+    fresh: true,
+    acceptedSha: sha('d'),
+    acceptedAt: sw.attemptSummary!.rework!.acceptedAt,
+    earlierRuns: 4,
+  });
+  assert.equal(sw.attemptSummary!.total, 0);
+  assert.match(sw.attemptSummary!.line, /^принято ранее на d{7}; доработка 2: попыток 0;/);
+  engine.claim('c1');
+  sw = status();
+  assert.equal(sw.attemptSummary!.total, 1);
+  assert.equal(sw.attemptSummary!.rework.earlierRuns, 4);
+  assert.match(
+    sw.attemptSummary!.line,
+    /^принято ранее на d{7}; доработка 2: попыток 1 \(идёт 1\)/,
+  );
+});
+
+/** Представление над состоянием `engineOf`. */
+function viewOf(env: ReturnType<typeof engineOf>, lang: 'ru' | 'en' = 'ru') {
+  const { engine, dir } = env;
+  const source = {
+    engine,
+    policy: engine.policy,
+    workflows: { list: () => [], continues: () => false } as never,
+    stateDir: dir,
+    baseDir: dir,
+  };
+  return operatorViewSchema.parse(
+    operatorView(
+      collectOperatorViewInput(
+        source,
+        { raw: engine.policy, warnings: [], baseDir: dir },
+        { now: engine.clock(), lang },
+      ),
+      { lang },
+    ),
+  );
+}
+
+test('P3-1: прогноз выпуска из одной доработанной работы — 99 %, не закончен, остаток не «ничего»', () => {
+  const env = pilot({ w: [] });
+  // Попытки прежней редакции закончились — есть образцы времени.
+  env.clock.now += 60_000;
+  env.engine.lead('c1');
+  const f = viewOf(env).forecast!;
+  assert.equal(f.progress.total, 1);
+  assert.equal(f.progress.left, 0);
+  assert.equal(f.progress.rework, 1);
+  assert.equal(f.progress.percent, 99, 'всё принято ранее, но доработка открыта');
+  assert.equal(f.time.finishedAt, undefined);
+  assert.notEqual(f.time.estimate, 'nothing');
+  assert.doesNotMatch(f.time.line, /осталось: ничего/);
+  // Лента: доработка открыта новой редакцией.
+  const activity = viewOf(env).activity ?? [];
+  const item = activity.find((a) => a.action === 'work.reopened');
+  assert.ok(item, JSON.stringify(activity.map((a) => a.action)));
+  assert.equal(item.workId, 'w');
+  assert.match(item.plain, /доработка 1, свой предел попыток/);
+  assert.match(
+    viewOf(env, 'en').activity!.find((a) => a.action === 'work.reopened')!.plain,
+    /rework 1, its own attempt budget/,
+  );
+  // Доработка принята: выпуск закончен, 100 %.
+  const run = env.engine.claim('c1')!;
+  accept(env.engine, run.id, run.token, sha('c'), sha('d'));
+  const done = viewOf(env).forecast!;
+  assert.equal(done.progress.percent, 100);
+  assert.equal(done.progress.rework, undefined);
+  assert.equal(done.time.estimate, 'nothing');
+  assert.ok(done.time.finishedAt);
+});
+
+test('P3-1: попыток на принятую задачу — по редакции, которая принята', () => {
+  const env = pilot();
+  // Доработка принята с первой попытки: у w 4 записи, у редакции — 1.
+  const run = env.engine.claim('c1')!;
+  accept(env.engine, run.id, run.token, sha('c'), sha('d'));
+  env.clock.now += 60_000;
+  const f = viewOf(env).forecast!;
+  const range = f.time.remaining ?? f.time.rough;
+  assert.ok(range, JSON.stringify(f.time));
+  assert.equal(range.attemptsPerTask, 1, 'попытки прежней редакции не входят');
 });

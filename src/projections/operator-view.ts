@@ -844,6 +844,17 @@ export type OperatorActivityInput =
       ref?: string;
     }
   | {
+      /** Новая редакция изменила постановку принятой работы: доработка `revision`. */
+      kind: 'work.reopened';
+      at: string;
+      workId: string;
+      revision: number;
+      /** Прежняя приёмка. */
+      sha: string;
+      /** У доработки свой предел попыток (иначе перенесён). */
+      fresh: boolean;
+    }
+  | {
       kind: 'gate';
       at: string;
       workId: string;
@@ -1757,6 +1768,9 @@ function sourceQuestionsOf(
   return take(all, L.sourceQuestions, truncated, 'sourceQuestions');
 }
 
+/** Наименьший остаток открытой доработки в прогнозе времени (доля задачи). */
+const REWORK_MIN_REST = 0.05;
+
 /** Этапы попытки по порядку: вес работы в прогнозе — доля пройденных до текущего. */
 const STAGE_ORDER = ['prepare', 'writer', 'gates', 'review', 'integration'] as const;
 
@@ -1895,14 +1909,19 @@ function forecastOf(
     .sort((a, b) => a - b);
   const acceptedIds = new Set(live.flatMap((u) => (u.work && accepted(u.work) ? [u.work.id] : [])));
   // Попытки, прерванные остановкой, не считаются ни образцами, ни попытками задачи.
+  // У принятой доработки — только попытки её редакции (как сводка попыток).
   const acceptedAttempts = own.filter(
-    (a) => a.status !== 'active' && !a.interrupted && acceptedIds.has(a.workId),
+    (a) => a.status !== 'active' && !a.interrupted && !a.earlier && acceptedIds.has(a.workId),
   ).length;
   const attemptsPerTask = acceptedIds.size
     ? Math.max(1, Math.round((acceptedAttempts / acceptedIds.size) * 10) / 10)
     : 1;
-  // Остаток объёма и остаток открытых доработок.
-  const rest = total - weighted + reworks.reduce((n, u) => n + (1 - progressOf(u.work!)), 0);
+  // Остаток объёма и остаток открытых доработок: открытая доработка не меньше
+  // малой доли — «осталось: ничего» при ней не говорится.
+  const rest =
+    total -
+    weighted +
+    reworks.reduce((n, u) => n + Math.max(REWORK_MIN_REST, 1 - progressOf(u.work!)), 0);
   const concurrency = Math.max(1, i.policy.concurrency);
   // Параллельно — не быстрее одной задачи: недоделанная задача не делится.
   const lowShare = Math.max(rest / concurrency, Math.min(rest, 1));
@@ -1920,7 +1939,7 @@ function forecastOf(
       ? range(samples[0]!, samples[samples.length - 1]!)
       : undefined;
   const estimate: NonNullable<ForecastView['time']['estimate']> =
-    rest <= 0 ? 'nothing' : remaining ? 'precise' : rough ? 'rough' : 'unknown';
+    rest <= 0 && !reworks.length ? 'nothing' : remaining ? 'precise' : rough ? 'rough' : 'unknown';
   const waits = i.stops.filter(
     (s) => (s.actor === 'user' || s.actor === 'lead') && s.workId && unitIds.has(s.workId),
   );
@@ -2684,6 +2703,24 @@ function activityLine(
         plain: ru
           ? parts`работа ${e.workId} принята (попытка ${e.attempt})${at}, локально`
           : parts`${e.workId} was accepted (attempt ${e.attempt})${at}, locally`,
+      };
+    }
+    case 'work.reopened': {
+      const sha = sha12(e.sha)!;
+      const budget = e.fresh
+        ? ru
+          ? 'свой предел попыток'
+          : 'its own attempt budget'
+        : ru
+          ? 'попытки перенесены'
+          : 'attempts carried over';
+      return {
+        actor: 'lead',
+        action: e.kind,
+        workId: e.workId,
+        plain: ru
+          ? parts`принятая на ${[sha]} работа ${e.workId} изменена новой редакцией: доработка ${e.revision}, ${[budget]}`
+          : parts`${e.workId}, accepted at ${[sha]}, was changed by a new revision: rework ${e.revision}, ${[budget]}`,
       };
     }
     case 'gate': {
