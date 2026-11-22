@@ -9,6 +9,7 @@
  * открытых заметок N» и расход ревью — в status, explain и отчёте. Reviewer —
  * управляемый адаптер по сценарию, не живая модель.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

@@ -6,6 +6,7 @@
  * реестра npm (локальный HTTP) и настоящего npm, который ставит поддельные
  * пакеты во временный проект. Живого реестра, публикации и моделей нет.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';

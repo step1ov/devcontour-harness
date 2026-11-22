@@ -5,6 +5,7 @@
  * «другого участника» идут независимым REST-клиентом с другим actor.
  * Нет сборки — тест падает с BLOCKED (подготовка: `node scripts/acceptance/relay-v1-server.mjs prepare`).
  */
+import '../temp-scope.ts';
 import { connectorSuite } from '../../src/integrations/connector/testing.ts';
 import { relayV1Backend } from './relay-v1-backend.ts';
 

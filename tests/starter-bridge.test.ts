@@ -10,6 +10,7 @@
  * run+project, отсутствие prune/context. Настоящий Docker —
  * tests/integration/starter-acceptance.test.ts.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

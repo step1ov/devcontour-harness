@@ -4,6 +4,7 @@
  * node и git containment команды работает; одноимённые файлы в PATH (или в
  * проекте) не запускаются.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

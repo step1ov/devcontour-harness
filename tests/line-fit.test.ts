@@ -4,6 +4,7 @@
  * сохраняются, строка не длиннее предела. Границы — имя 0, у предела и 500
  * символов, RU и EN.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { OPERATOR_VIEW_TEXT, operatorViewSchema } from '../src/contracts/index.ts';

@@ -4,6 +4,7 @@
  * `cliTransportLimits`) без второй копии текста; прежние команды, их данные и
  * конверт не меняются.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

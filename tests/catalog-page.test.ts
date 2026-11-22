@@ -3,6 +3,7 @@
 // (tests/fixtures/consumer-h3/src/devcontour-legacy.mjs, коммит 6a59728).
 // Успех сравнивается по `JSON.stringify`, отказ — по `{status, message}`
 // после host mapping §1.4 спецификации H3.
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { HarnessError } from '../src/contracts/errors.ts';

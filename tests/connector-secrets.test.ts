@@ -5,6 +5,7 @@
  * Canary — искусственные тестовые строки, не учётные данные. Каждый
  * отрицательный вывод сначала подтверждён контролем без маскирования.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';

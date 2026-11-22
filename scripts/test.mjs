@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { run } from 'node:test';
 import { spec } from 'node:test/reporters';
 import { createScratch, removeScratch } from './test-scratch.mjs';
+import { findLeftovers, leftoverReport } from './test-temp.mjs';
 
 // Три уровня проверки (README, «Разработка»):
 //   npm test                — весь suite; npm run check добавляет --release;
@@ -177,6 +178,10 @@ if (flags.list) {
   results.once('end', () => {
     process.removeListener('SIGINT', interrupt);
     process.removeListener('SIGTERM', terminate);
+    // Каждый тест-файл убирает свой каталог при выходе (tests/temp-scope.ts);
+    // оставшийся — файл убит сигналом или потомок писал после выхода. Только
+    // предупреждение: каталог прогона всё равно удаляется ниже.
+    for (const line of leftoverReport(scratch, findLeftovers(scratch))) console.error(line);
     const added = entries().filter((name) => !before.has(name));
     if (added.length) {
       console.error(`Tests wrote into the user cache ${cache}: ${added.join(', ')}`);

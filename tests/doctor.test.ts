@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- фикстура правит сырой JSON политики. */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';

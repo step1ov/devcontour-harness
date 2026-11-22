@@ -4,6 +4,7 @@
  * msgpackr с объявлениями записей). Проверяется сверка копии, перенос записи
  * индекса и разбор записей.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';

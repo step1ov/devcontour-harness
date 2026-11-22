@@ -5,6 +5,7 @@
 // DevContour 6a59728 в tests/fixtures/consumer-h3/src. Снимок снят командой
 // из tests/fixtures/catalog/README.md:
 //   node --import tsx -e "import('./src/application/agent.ts').then(m=>process.stdout.write(JSON.stringify(m.capabilities())))"
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';

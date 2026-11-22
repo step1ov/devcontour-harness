@@ -4,6 +4,7 @@
  * прочитан». Ответ, принятый инструментом `StructuredOutput`, есть в том же
  * потоке раньше — адаптер берёт его, когда итогового `structured_output` нет.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';

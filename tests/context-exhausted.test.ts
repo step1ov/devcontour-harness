@@ -7,6 +7,7 @@
  * (`blocking_limit`), успешное автоматическое сжатие (`compact_boundary`,
  * не отказ) и отказ провайдера по балансу (не нехватка окна).
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';

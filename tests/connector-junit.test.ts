@@ -3,6 +3,7 @@
  * названным testId — в разборе отчёта (общий для движка и коннектора),
  * в доказательстве требования движка и в сопоставлении критерия коннектора.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

@@ -5,6 +5,7 @@
  * изменённой политикой, устаревшее согласование оператора, два графа в одной
  * очереди. Модели не вызываются.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { executionPolicySchema, policyDigest, workGraphSchema } from '../src/contracts/index.ts';

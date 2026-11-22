@@ -3,6 +3,7 @@
  * строку; документ, версия данных и журнал не меняются. Каждый случай
  * называет поломку, которую ловит.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';

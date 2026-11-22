@@ -7,6 +7,7 @@
  * засчитана; итог исполнителя виден в lastFailure и explain; тот же упавший
  * testcase дважды — к ведущему; правило «сначала код» в запросе исполнителя.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AttemptState, ExecutionView, WorkState } from '../src/contracts/index.ts';

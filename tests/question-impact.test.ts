@@ -7,6 +7,7 @@
  * вопрос)» в status, explain, пакете передачи и отчёте; doctor называет
  * действующее правило словами.
  */
+import './temp-scope.ts';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

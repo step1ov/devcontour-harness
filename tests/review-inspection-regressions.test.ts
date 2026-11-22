@@ -4,6 +4,7 @@
  * исходом того же runId, короткий секрет в потоке событий runtime, total с
  * отброшенными командами runtime, маскирование inspection ревью плана.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';

@@ -4,6 +4,7 @@
  * переживает переоткрытие хранилища; задания без номера (прежние версии)
  * читаются и старше любого задания с номером.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';

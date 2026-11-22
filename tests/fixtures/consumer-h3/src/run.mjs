@@ -7,7 +7,7 @@
  * процессе.
  */
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
@@ -808,6 +808,7 @@ const host = hostCapabilities();
       badSchema: 'INVALID_INPUT',
     },
   );
+  rmSync(repo, { recursive: true, force: true });
 }
 
 /* ------------------------------------------------------------------ */

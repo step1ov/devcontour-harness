@@ -6,6 +6,7 @@
  * записан `answerInput`), итоги и длительности — на синтетическом входе с
  * числами, посчитанными здесь вручную.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {

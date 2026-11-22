@@ -9,6 +9,7 @@
  * и граница не `exact`, пока попытка идёт (F-N); класс отказа и засчитанность
  * попытки фактами (P13).
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';

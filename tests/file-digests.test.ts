@@ -3,6 +3,7 @@
  * по одному (SHA-256 байтов, права, размер), а файл, который между обходом и
  * чтением стал ссылкой, каталогом или каналом, — отказ без чтения и без ожидания.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

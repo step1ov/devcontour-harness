@@ -10,6 +10,7 @@
  * (если задан): журнал проверок, review.json, evidence, run result и
  * результаты сравнений — переживают удаление временных каталогов.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';

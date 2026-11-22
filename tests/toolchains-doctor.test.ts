@@ -3,6 +3,7 @@
    @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-return --
  * Тест читает JSON-ответ CLI как есть; его форму проверяет сам CLI схемой команды.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

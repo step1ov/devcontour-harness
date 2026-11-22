@@ -6,6 +6,7 @@
  * неудачная попытка — из записей хранилища, а не из пересказа). Удалённая
  * ветка на настоящем git — в accepted-target.test.ts.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { homedir } from 'node:os';

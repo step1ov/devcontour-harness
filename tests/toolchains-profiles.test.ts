@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any --
  * Тест читает JSON примеров как есть; форму проверяет схема политики.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {

@@ -8,6 +8,7 @@
  * runtime (exit 1 с EPROTO, «Not logged in», непригодный вывод) запрограммированы
  * сценарием, живых моделей нет. Gates, JUnit и Git — настоящие.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

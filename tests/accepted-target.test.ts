@@ -7,6 +7,7 @@
  * и `report` называют принятый SHA, число коммитов и файлов после него как
  * не проверенные. Writer и reviewer — fixture executables, не живые модели.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

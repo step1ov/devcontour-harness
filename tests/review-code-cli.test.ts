@@ -8,6 +8,7 @@
  * запись — не приёмка (target ref и поручения не меняются), повтор раунда с
  * прежними находками, тот же одобренный раунд без вызова, итог gates на head.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';

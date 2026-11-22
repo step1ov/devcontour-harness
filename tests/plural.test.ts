@@ -4,6 +4,7 @@
  * передачи, сверка принятого и прочие строки — в своих тестах (handoff,
  * accepted-target). Ожидания записаны словами, а не той же функцией.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { RU, ruCount, ruForm, type RuForms } from '../src/contracts/plural.ts';

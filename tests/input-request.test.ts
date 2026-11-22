@@ -6,6 +6,7 @@
  * (`assumptions`). Порог вопросов — `inputPolicy` политики, закреплённый в
  * попытке при выдаче. Живых моделей нет.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

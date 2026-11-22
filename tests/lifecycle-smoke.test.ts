@@ -7,6 +7,7 @@
  * кэш успеха по (дерево базы, digest политики); отказ preflight останавливает
  * `run` до ревью плана и первой попытки.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';

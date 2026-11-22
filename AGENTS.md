@@ -14,7 +14,7 @@ node --disable-warning=ExperimentalWarning --import tsx --test tests/<file>.test
 
 Во время работы прогонять `npm run test:affected` (выбор и причина печатаются;
 при сомнении он сам запускает весь suite); на конечном состоянии — один полный
-`npm run check`. Уровни описаны в README, раздел «Разработка». Новые тесты — в `tests/*.test.ts` (их запускает `scripts/test.mjs`).
+`npm run check`. Уровни описаны в README, раздел «Разработка». Новые тесты — в `tests/*.test.ts` (их запускает `scripts/test.mjs`); первый импорт файла — `import './temp-scope.ts';` (свой TMPDIR, удаляется при выходе; `HARNESS_KEEP_TEST_TMP=1` оставляет).
 `spawn EPERM` и отказ sandbox/сети — не PASS и не доказанный дефект: повторить
 штатным способом окружения или указать `blocked` с командой и сообщением.
 

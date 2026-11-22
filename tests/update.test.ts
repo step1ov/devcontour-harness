@@ -3,6 +3,7 @@
  * «что нового» из заметок, чтение tarball, форматы пакета, копия состояния
  * с контрольной суммой и её возврат, защита удаления, задание расписания.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

@@ -3,6 +3,7 @@
    @typescript-eslint/no-unsafe-return --
  * Политика фикстуры — сырой JSON примера; форму проверяет executionPolicySchema.
  */
+import '../temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

@@ -3,6 +3,7 @@
  * в отдельном процессе — исходы по gates, exit 0/3, `--fail-fast`, отказ на
  * неизвестном gate; ни базы состояния, ни попыток.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';

@@ -5,6 +5,7 @@
  * связка до появления задач. Backend — подделка коннектора с добавленными
  * capability и методами; настоящий Relay — tests/integration/relay-v1-context.test.ts.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';

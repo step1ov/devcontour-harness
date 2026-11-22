@@ -2,6 +2,7 @@
  * `harness lean`: включение и выключение слоя lean в подготовленном проекте —
  * точный возврат политики и manifest, план без записи, отказ при идущем run.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

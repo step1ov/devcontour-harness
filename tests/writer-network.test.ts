@@ -6,6 +6,7 @@
  * как прежде; режим входит в digest границы; codex без функции
  * `network_proxy` получает отказ, а не всю сеть.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';

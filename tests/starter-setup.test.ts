@@ -8,6 +8,7 @@
  * контекстом без противоречивых правил commit (S05). Сквозные прогоны на
  * настоящей копии — tests/integration/starter-acceptance.test.ts.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

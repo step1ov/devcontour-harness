@@ -84,6 +84,7 @@
  * (seed + компактное описание состояния) и печатает счётчики по категориям
  * и по шаблонам генератора.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';

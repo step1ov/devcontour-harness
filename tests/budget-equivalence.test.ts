@@ -8,6 +8,7 @@
  * onUnknown stop/continue/не задан. Время зафиксировано: ответ на один момент.
  * Там же — `stopInputsOf` против замороженного диагноза. Модели не вызываются.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';

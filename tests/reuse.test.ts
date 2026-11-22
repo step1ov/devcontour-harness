@@ -1,3 +1,4 @@
+import './temp-scope.ts';
 import { close, verdict } from './review-fixture.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

@@ -6,6 +6,7 @@
  * ответах моделей, инструментов и Relay. Лишнее — обычный отказ попытки с
  * понятной причиной; записанное прежними версиями читается как раньше.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

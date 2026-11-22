@@ -3,6 +3,7 @@
  * согласованность многостраничного чтения, доверие receipts, протокол
  * владения и итог для получателя.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';

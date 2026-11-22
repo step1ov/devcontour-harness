@@ -5,6 +5,7 @@
  * восстановлением доставки и конфликтом постановки — `scripts/acceptance/w01.mjs`.
  * Нет сборки Relay или источника Starter — отказ BLOCKED, не пропуск.
  */
+import '../temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

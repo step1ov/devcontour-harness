@@ -7,6 +7,7 @@
  * запуска; новый controller засчитывает незавершённый запуск целиком и
  * останавливает его пережившие процессы.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';

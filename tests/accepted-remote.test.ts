@@ -5,6 +5,7 @@
  * upstream берётся ровно у целевой ветки, испорченная ref — «неизвестно» с
  * причиной на обоих языках, без reflog — без времени.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

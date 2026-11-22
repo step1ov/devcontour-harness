@@ -45,12 +45,20 @@ import { tmpdir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual, parseArgs } from 'node:util';
+import { TEST_TEMP_PREFIX, keepTestTemp, removeTestTemp } from './test-temp.mjs';
 
 const { values: options } = parseArgs({
   options: { archive: { type: 'string' }, offline: { type: 'boolean', default: false } },
 });
 const root = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
-const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'harness-smoke-')));
+// Свой каталог с префиксом тестовых (scripts/test-temp.mjs): убирается при
+// выходе, в том числе после fail(); HARNESS_KEEP_TEST_TMP=1 оставляет его.
+const scratchParent = tmpdir();
+const scratch = realpathSync(mkdtempSync(join(scratchParent, TEST_TEMP_PREFIX + 'smoke-')));
+process.once('exit', () => {
+  if (keepTestTemp()) console.error(`HARNESS_KEEP_TEST_TMP=1: smoke-package kept ${scratch}`);
+  else removeTestTemp(scratch, console.error, scratchParent);
+});
 const fail = (message) => {
   console.error('smoke-package: ' + message);
   process.exit(1);

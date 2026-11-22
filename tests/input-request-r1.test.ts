@@ -4,6 +4,7 @@
  * выдаче, маскирование, перенос допущений, вопрос вне схемы, пределы.
  * Runtime — fixture, живых моделей нет.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';

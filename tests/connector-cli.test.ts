@@ -4,6 +4,7 @@
  * создают состояния. Транспорт — настоящий адаптер relay-v1-http против
  * закрытого порта loopback (без сети и без Relay).
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';

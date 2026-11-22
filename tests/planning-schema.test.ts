@@ -11,6 +11,7 @@
  * С тех пор в фикстурах изменён только предел области gates задачи
  * (`maxItems` 20 → `GATE_SCOPE_LIMIT`, предел gates профиля).
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

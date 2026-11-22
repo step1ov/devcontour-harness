@@ -6,6 +6,7 @@
  * настоящим subprocess CLI. Codex и claude — fixture executables
  * (`tests/fixtures/bin/fake-*`) со scripted-ответами; живых моделей нет.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

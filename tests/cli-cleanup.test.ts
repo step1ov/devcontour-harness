@@ -4,6 +4,7 @@
  * с подделкой backend), незавершённая очистка — сохранённая запись
  * `cleanup-pending.json`, как её оставляет прерванный teardown.
  */
+import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
