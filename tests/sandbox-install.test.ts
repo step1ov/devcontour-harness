@@ -583,7 +583,9 @@ test(
   { skip: noSandbox },
   async () => {
     const write = (paths: Record<string, string>, chmod: Record<string, number> = {}) =>
-      `const fs=require('fs'),path=require('path');try{for(const [p,t] of Object.entries(${JSON.stringify(paths)})){fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,t)}for(const [p,m] of Object.entries(${JSON.stringify(chmod)}))fs.chmodSync(p,m)}catch(e){console.error(e.message);process.exit(1)}`;
+      `const fs=require('fs'),path=require('path');try{for(const [p,t] of Object.entries(${JSON.stringify(paths)})){fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,t)}for(const [p,m] of Object.entries(${JSON.stringify(chmod)}))fs.chmodSync(p,m)}catch(e){console.error(e.message.split(process.cwd()+path.sep).join(''));process.exit(1)}`;
+    // Путь отказа — от корня дерева: длинный TMPDIR полного прогона не
+    // вытесняет имя каталога из обрезанной строки отказа (140 символов).
     const fresh = () => {
       const r = repo({ 'sub/index.ts': 'x\n' });
       return { r, at: (p: string) => join(realpathSync(r.dir), p) };
