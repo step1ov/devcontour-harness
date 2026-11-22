@@ -30,6 +30,11 @@ import {
   legacyStatementSame,
 } from '../src/integrations/connector/snapshot.ts';
 import type { TaskRead } from '../src/integrations/connector/transport.ts';
+import { relayCompatibilityCheck } from '../src/integrations/connector/commands.ts';
+import { suitePolicy } from '../src/integrations/connector/testing.ts';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const wrong = { title: 'Greets by name', gate: 'unit', testId: 'greets' };
 const fixBinding = (s: Scenario) => {
@@ -368,5 +373,38 @@ test('upgrade: снимок, закреплённый до alpha.66 (ревиз�
     await o.connector.prepareRun(o.h);
   } finally {
     await s.cleanup();
+  }
+});
+
+test('P4-6/doctor: сверка связки называет недоказуемую привязку и без связи с Relay (строки RELAY_CRITERIA_BINDING)', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'harness-bindings-doctor-')));
+  try {
+    const source = join(dir, 'connector.json');
+    writeFileSync(
+      source,
+      JSON.stringify({
+        version: 1,
+        provider: 'relay-v1-http',
+        projectId: 'p1',
+        actor: 'harness',
+        relay: { endpoint: 'http://127.0.0.1:9', timeoutMs: 500 },
+        repository: { id: 'app' },
+        tasks: [
+          {
+            ref: 'T-1',
+            writeScope: ['src'],
+            criteria: [{ title: 'a', gate: 'missing', testId: 'x.a' }],
+          },
+        ],
+      }),
+    );
+    const r = await relayCompatibilityCheck(source, { stateDir: dir, policy: suitePolicy(dir) });
+    assert.ok(r.warning, 'Relay недоступен');
+    assert.ok(
+      r.bindings?.some((b) => /gate missing не объявлен в политике/.test(b)),
+      JSON.stringify(r.bindings),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
