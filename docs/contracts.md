@@ -1356,6 +1356,26 @@ severity}` (`awaiting-answer | answered-not-applied | applied-awaiting-claim
 попыток защищает раунд ревью плана, который согласует новую редакцию. Пишется сразу за
 `graph.registered` той же транзакции.
 
+`work.rework-abandoned` (0.1.0-alpha.66) — доработка после приёмки
+оставлена: `{by: 'operator'|'host'|'graph', revision, acceptedSha, restored,
+hadAttempt}`. `cancel` открытой доработки (и повтор `cancel` для доработки,
+отменённой alpha.65 и старше, — состояние `cancelled` с `WorkState.rework`)
+или новая редакция графа, убравшая поручение с открытой доработкой, не
+отменяют задачу: работа возвращается к принятой редакции — `done`, результат
+`acceptedSha`, засчитанные попытки принятой редакции; идущая попытка
+доработки отменяется (`attempt.cancelled`, `hadAttempt: true`). `restored` —
+поручению возвращена принятая постановка (`WorkState.rework.acceptedOrder`,
+пишется с alpha.66 при открытии доработки); у доработки прежней версии
+постановки нет, остаётся текущая, а `WorkState.rework.abandoned.orderDigest`
+помнит её содержание: та же постановка в новой редакции графа снова
+открывает доработку, принятая — нет. Счёт доработок со своим пределом
+(`budgets`) сохраняется: отказом и новой доработкой предел не обойти.
+Решение — `cancel`, а не отдельная команда: принятый результат `cancel` и так
+не отменяет (`NOT_READY`), и у ведущего, который отменяет ненужную доработку,
+не остаётся способа потерять приёмку (пилот 4: отмена доработок выводила
+принятые работы из выпуска). Ответ `cancel` — `abandoned: true`, `status:
+done`.
+
 `work.cancelled` — поручение отменено: `{by: 'operator'|'host'|'graph',
 hadAttempt}`. `engine.cancel(workId, reason?, by?)` (CLI `cancel` — `operator`,
 по умолчанию `host`); `graph` — новая редакция графа убрала поручение.
@@ -1880,6 +1900,100 @@ lines, linesEn}`: `--repository` без manifest или с manifest, но без
   `--repository` у `view` и `status`, а `--state` там — необязательный (одно
   из двух нужно): поддержку видно по флагу, без разбора схемы ответа.
 
+**Ревизия 6 (0.1.0-alpha.66).** Добавления, все необязательные в схеме;
+читатель ревизии 5 их игнорирует. Смысл меняют два прежних поля:
+`forecast.progress.percent` (теперь с шагами ведущего, 100 % — только после
+`release done`) и объём прогноза (планируемые задачи и отменённые доработки,
+ниже).
+
+- **Отменённая доработка — принятая работа** (P4-7). Работа `cancelled` с
+  `attemptSummary.rework` (доработка, отменённая alpha.65 и старше) в прогнозе
+  — принятая: вес 1, `done`, а не «вне объёма»; `harness cancel` возвращает
+  её к принятой редакции и в состоянии (событие `work.rework-abandoned`).
+  Представление показывает такую работу принятой и до починки: `works[]` —
+  `status: done`, этап `done`, `resultSha` — прежняя приёмка, блокировок
+  нет, `restoredFrom: 'cancelled-rework'` и `restoredLine` («принято на
+  <sha7>; доработка отменена» / "accepted at <sha7>; rework cancelled");
+  `progress.done` и `byStage` считают её принятой. Состояние при этом не
+  переписывается.
+  Лента — `work.rework-abandoned` («доработка 1 работы W оставлена: работа
+  вернулась к принятой на <sha> редакции»). Длительность попытки в
+  `remaining`/`rough` — по закончившимся попыткам **всех** работ выпуска, в
+  том числе отменённых: «ни одна попытка не закончилась» не говорится при
+  закончившихся попытках.
+- **Планируемая работа** (P4-5). Выпуск — ещё и задачи последнего снимка
+  каждой выборки (графа снимка `graph_id`), даже если последнее чтение связки
+  уже (`run --source` по части задач): проверенный, но не согласованный план.
+  Задача выпуска без работы harness — планируемая: `planned[] {id, connector,
+taskId, key?, title?, status: 'planned', from, graphId?, dependsOn?, line}`
+  (`from`: `validated` — в снимке, `read` — только в последнем чтении; не
+  больше 200, `truncated.planned`); попыток и действий нет, карточка «ещё не
+  утверждена». Зарегистрированная работа, план которой не согласован и
+  попыток не было (не доработка), — `works[].planned: true`. Обе — вес 0.
+  `forecast.progress.planned {count, keys (≤20), line}` и
+  `forecast.progress.approved {percent, total, done, left, loMs?, hiMs?}` —
+  две цифры: «по утверждённому плану ~X %, осталось ~A; с планируемыми (N
+  задач, не утверждены: …) ~Y %, осталось ~B» (только когда планируемые
+  есть). `progress.line` добавляет «планируемых (не утверждены): N»;
+  `progress.works[].line` планируемой работы — «W: ещё не утверждена».
+  Ограничение: задача, удалённая с доски, остаётся планируемой, пока
+  последний снимок её выборки её содержит, — связка не отличает удаление от
+  более узкой выборки.
+- **Критический путь** (P4-5). Нижняя граница «осталось» — не короче самой
+  длинной цепочки остатков по зависимостям (`works[].dependsOn`, у задач без
+  работы — `dependsOn` поручения снимка) и не короче доли на `concurrency`;
+  `forecast.time.chain` — длина цепочки в долях задачи.
+- **Шаги ведущего** (P4-10 e). `forecast.progress.lead {steps[] {step,
+weight, done}, weighted, total}`: `plan` (нет планируемых и работ в `draft`),
+  `questions` (только если вопросы были: открытых вопросов исполнителя и
+  вопросов источника нет), `delivery` (только со связкой: каждая принятая
+  работа связки доставлена — последняя операция доставки `delivered` с
+  принятым исходом), `report` (`release done` не раньше конца последней
+  попытки). Вместе — 10 % выпуска поровну (`weight` — доля выпуска), код —
+  90 %: `percent = round(100 × (0,9 × weighted / total + lead.weighted))`, не
+  больше 99, пока выпуск не готов; после `release done` — 100.
+- **Состояние выпуска** (P4-10 d). `forecast.progress.release {state, doneAt?,
+summary?, line}`: `in-work`, `code-accepted` (весь код принят, отчёта нет:
+  `progress.line` — «готово ~N % · код принят, ведущий ещё работает:
+  <последняя заметка>»), `done` («выпуск готов: ведущий написал итоговый
+  отчёт»; `summary` — его отчёт, до 2000 символов, без `--no-titles`).
+- **Работа ведущего во времени** (P4-10 e). `forecast.time.lead {ms, samples,
+line}` — отдельная доля, не входит в `remaining`: медиана разрывов «приёмка
+  → следующая попытка» этого проекта × (незаконченные единицы + несделанные
+  шаги ведущего); строка времени — «… + работа ведущего ~N мин». Разрывов нет
+  или выпуск готов — поля нет.
+- **Ведущий** (P4-10 a–c). `lead {active, since?, until?, endedAt?,
+lastNote? {at, plain}, notes[] {at, kind, action, workId?, plain}, line}` —
+  журнал ведущего (локальная запись `lead` состояния): сессия `harness lead
+begin|end` (аренда `until`; `active` — не закончена и аренда не истекла;
+  каждая запись ведущего продлевает её), заметки `lead note`, команды harness
+  ведущего (`kind: command`, `action: lead.<команда>` — `run` в начале и в
+  конце, `review-plan`, `review-contract`, `review-accept`, `approve`,
+  `reapprove`, `retry`, `cancel`, `pause`, `resume`, `deliver`,
+  `source-snapshot`, `source-deliver`, `source-reconcile`, ответы `input-*`;
+  с `--actor operator` — не записываются), итог `release.done`. `notes` —
+  новые сверху, не больше 20 (`truncated.leadNotes`); записи журнала — и в
+  `activity` с `actor: lead`. `line` — «ведущий работает с HH:MM UTC: <заметка>»,
+  «ведущий давно не отмечался (срок сессии истёк)», «ведущий закончил
+  сессию», «ведущий сессию не начинал».
+- **Что задействовано** (P4-8). `resources {roles[], isolation, toolchain,
+dependencyStore, services[], gates, lines[], truncated?}` простыми словами
+  на языке `--lang`: модель и вендор каждой роли (ведущий из manifest,
+  исполнители ролей, reviewers плана, контракта и кода с запасными), изоляция
+  (`sandbox`, сеть исполнителей и проверок `closed`, `loopback`, `domains`,
+  `open`, `mixed`), закреплённый toolchain, хранилище зависимостей (`on`,
+  `partial`, `off`, готовые наборы), сервисы lifecycle сейчас — по квитанциям
+  окружения (`environment.json` попыток, `harness gates`/`smoke` и совместных
+  проверок): `running` (квитанция `active`, процесс-владелец жив, попытка
+  идёт), `stopped` (`cleaned`), `leftover` (`cleanup-failed` или `active` у
+  закончившейся попытки, `leftoverRuns` — до 5 ID для `harness cleanup
+--run`), число gates по репозиториям. Схема — `resourcesViewSchema`. Только
+  чтение файлов; единственная проверка вне них — жив ли процесс-владелец
+  квитанции `active`.
+- Порядок потерь документа сверх 256 КБ: на шаге 1 вместе с `scope` и
+  `sourceQuestions` опускаются `planned` и записи `lead.notes` (сводка
+  ведущего остаётся).
+
 **Числа не выводятся заново.** Этап, сводка попыток и расход работы — те же,
 что `status.works[]`; известные расходы и их граница — по правилам стоимости
 отчёта (`callCostKnown`, полнота usage, попытки без записей вызовов);
@@ -2322,7 +2436,7 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `events`           | `--state D [--after N] [--limit 1–500]`                                                                                     | нет   | события (неизвестный тип — `unknown`), `next`                                                                                                                                                                                                               | Только чтение                                                                                                                                                                                         |
 | `pause`            | `--state D`                                                                                                                 | да    | `ControlState`                                                                                                                                                                                                                                              | Без изменений                                                                                                                                                                                         |
 | `resume`           | `--state D`                                                                                                                 | да    | `ControlState`                                                                                                                                                                                                                                              | Решение человека: снимает паузу оператора, штатной остановки и отказа runtime вместе с её классами; паузу операции reconfigure — `PAUSED`                                                             |
-| `cancel`           | `--state D --work ID [--reason T]`                                                                                          | да    | статус поручения                                                                                                                                                                                                                                            | Отменённое — без изменений; это не retry                                                                                                                                                              |
+| `cancel`           | `--state D --work ID [--reason T]`                                                                                          | да    | статус поручения; `abandoned: true` — открытая доработка оставлена, работа снова `done`                                                                                                                                                                     | Отменённое — без изменений; это не retry; принятый результат не отменяется                                                                                                                            |
 | `retry`            | `--state D --work ID [--reset --reason T]`                                                                                  | да    | статус поручения                                                                                                                                                                                                                                            | В пределах `maxAttempts` и бюджета; `--reset` с причиной сбрасывает счётчик попыток (и у готовой работы; ответ `reset`: выполнен или почему нет; во время попытки — `NOT_READY`), но не учёт расходов |
 | `result`           | `--state D --work ID`                                                                                                       | нет   | `ResultEnvelope`                                                                                                                                                                                                                                            | Только чтение                                                                                                                                                                                         |
 | `deliver`          | `--state D --work ID --sink file:D`                                                                                         | да    | `ResultEnvelope`                                                                                                                                                                                                                                            | Доставленное не доставляется повторно; моделей и интеграции нет                                                                                                                                       |
@@ -2351,6 +2465,10 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `review-code`      | `--state D [--policy F] --base REF --head REF [--role R] [--author A] [--repository ID]`                                    | да    | `CodeReviewRecord` (`kind: code`, `acceptance: false`)                                                                                                                                                                                                      | Те же ref — следующий раунд; тот же одобренный `head` и reviewer — тот же раунд без вызова; не приёмка                                                                                                |
 | `smoke`            | `--state D [--policy F] --sha SHA\|HEAD [--repository ID] [--human]`                                                        | да    | шаги окружения с длительностью, `passed`, класс отказа и совет, каталог логов                                                                                                                                                                               | Каждый вызов — новая проверка; gates и модели не вызываются, база состояния не открывается                                                                                                            |
 | `view`             | `--state D [--policy F] [--work ID] [--no-titles] [--window 24h\|7d] [--bucket 15m\|1h] [--lang ru\|en] [--view-version 1]` | нет   | `OperatorView`; с `--work` — `WorkDetailView`                                                                                                                                                                                                               | Только чтение, без файлов в каталоге состояния; те же состояние, политика, часы и параметры — те же байты                                                                                             |
+| `lead-begin`       | `--state D [--ttl MIN] [--text T]` (синоним `lead begin`)                                                                   | да    | `lead {active, since, until}`, запись, `line`                                                                                                                                                                                                               | Сессия ведущего с арендой (30 мин по умолчанию, 1–720); повтор продлевает, начало прежнее                                                                                                             |
+| `lead-note`        | `--state D --text T [--work ID]` (синоним `lead note "T"`)                                                                  | да    | `lead {active, lastNote}`, запись, `line`                                                                                                                                                                                                                   | Каждый вызов — новая запись (до 200 символов, без управляющих символов и секретов); старые вытесняются пределом 200                                                                                   |
+| `lead-end`         | `--state D [--text T]` (синоним `lead end`)                                                                                 | да    | `lead {active: false, endedAt}`, запись, `line`                                                                                                                                                                                                             | Закрывает сессию                                                                                                                                                                                      |
+| `release-done`     | `--state D --summary T` (синоним `release done "T"`)                                                                        | да    | `release {doneAt, summary, works}`, `lead`, запись, `line`                                                                                                                                                                                                  | Только когда весь код принят (иначе `NOT_READY`); повтор заменяет отчёт                                                                                                                               |
 | `capabilities`     | —                                                                                                                           | нет   | каталог общих операций (`OperationCatalog`)                                                                                                                                                                                                                 | Чистая функция установленной версии пакета                                                                                                                                                            |
 | `--version`        | —                                                                                                                           | нет   | версия пакета и API                                                                                                                                                                                                                                         | —                                                                                                                                                                                                     |
 

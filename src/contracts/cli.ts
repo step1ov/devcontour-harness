@@ -32,6 +32,7 @@ import { workVerificationSchema } from './verification-view.ts';
 import { viewDataSchema } from './operator-view.ts';
 import { updateDataSchema, updateCheckStates } from './update.ts';
 import { sourceRefSchema } from './work.ts';
+import { leadDataSchema } from './lead.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
 import {
   filePlanEntrySchema,
@@ -480,9 +481,10 @@ export const cliCommands = {
   },
   cancel: {
     description:
-      'Отменить поручение: активная попытка теряет владение, поручение становится cancelled; это не retry',
+      'Отменить поручение: активная попытка теряет владение, поручение становится cancelled; это не retry. Открытая доработка принятого поручения не отменяет задачу: работа возвращается к принятой редакции (done, прежняя приёмка, abandoned: true)',
     writes: true,
-    idempotency: 'Повтор для отменённого ничего не меняет',
+    idempotency:
+      'Повтор для отменённого ничего не меняет; доработка, отменённая прежней версией, при повторе возвращается к принятой редакции',
     args: [
       state,
       work,
@@ -1532,6 +1534,77 @@ export const cliCommands = {
     ],
     refusals: ['CONTROLLER_BUSY', 'APPROVAL_REQUIRED', 'NOT_FOUND'],
   },
+  'lead-begin': {
+    description:
+      'Ведущий начинает (или продлевает) свою сессию: панель видит «ведущий работает» до конца аренды; каждая запись ведущего её продлевает (0.1.0-alpha.66). Синоним: harness lead begin',
+    writes: true,
+    idempotency: 'Повтор при активной сессии продлевает аренду; начало сессии прежнее',
+    args: [
+      state,
+      {
+        name: '--ttl',
+        value: 'number',
+        required: false,
+        description: 'Аренда сессии в минутах: по умолчанию 30, от 1 до 720',
+      },
+      {
+        name: '--text',
+        value: 'text',
+        required: false,
+        description: 'Чем ведущий начинает — короткая строка простыми словами (до 200 символов)',
+      },
+    ],
+    refusals: ['NOT_FOUND'],
+  },
+  'lead-note': {
+    description:
+      'Короткая строка простыми словами о том, что ведущий делает сейчас, в том числе вне harness (запись в источнике задач, проверка в браузере): журнал ведущего и строка панели; очищается от управляющих символов и секретов, до 200 символов (0.1.0-alpha.66). Синоним: harness lead note "<строка>"',
+    writes: true,
+    idempotency: 'Каждый вызов — новая запись журнала; старые вытесняются пределом 200 записей',
+    args: [
+      state,
+      {
+        name: '--text',
+        value: 'text',
+        required: true,
+        description: 'Строка ведущего простыми словами',
+      },
+      { ...work, required: false, description: 'ID поручения, о котором запись' },
+    ],
+    refusals: ['NOT_FOUND'],
+  },
+  'lead-end': {
+    description:
+      'Ведущий заканчивает сессию: панель больше не говорит «ведущий работает» (0.1.0-alpha.66). Синоним: harness lead end',
+    writes: true,
+    idempotency: 'Повтор закрывает уже закрытую сессию ещё одной записью журнала',
+    args: [
+      state,
+      {
+        name: '--text',
+        value: 'text',
+        required: false,
+        description: 'Чем ведущий закончил — короткая строка',
+      },
+    ],
+    refusals: ['NOT_FOUND'],
+  },
+  'release-done': {
+    description:
+      'Итоговый отчёт ведущего: выпуск готов — только когда весь код принят (ни одной открытой работы или доработки); до него представление говорит «код принят, ведущий ещё работает», готовность ниже 100 % (0.1.0-alpha.66). Синоним: harness release done --summary "<отчёт>"',
+    writes: true,
+    idempotency: 'Повтор заменяет итоговый отчёт новым с новым временем',
+    args: [
+      state,
+      {
+        name: '--summary',
+        value: 'text',
+        required: true,
+        description: 'Итоговый отчёт простыми словами (до 2000 символов)',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'NOT_READY'],
+  },
 } as const satisfies Record<string, CliCommandContract>;
 export type CliCommand = keyof typeof cliCommands;
 
@@ -2025,6 +2098,11 @@ export const workActionDataSchema = z.strictObject({
   status: workStatusSchema,
   attempt: z.number().int().min(0),
   changed: z.boolean(),
+  /**
+   * `cancel` открытой доработки принятого поручения (0.1.0-alpha.66): работа
+   * вернулась к принятой редакции (`done`), а не отменена; нет — обычная отмена.
+   */
+  abandoned: z.literal(true).optional(),
   /**
    * Итог `retry --reset`: сброс выполнен (сколько попыток было потрачено) или
    * не выполнен с объяснением; без `--reset` поля нет.
@@ -2957,6 +3035,10 @@ export const cliDataSchemas = {
   'review-code': codeReviewRecordSchema,
   smoke: smokeDataSchema,
   update: updateDataSchema,
+  'lead-begin': leadDataSchema,
+  'lead-note': leadDataSchema,
+  'lead-end': leadDataSchema,
+  'release-done': leadDataSchema,
   version: versionDataSchema,
 } as const satisfies Record<CliCommand | 'version', z.ZodType>;
 

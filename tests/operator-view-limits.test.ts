@@ -356,7 +356,9 @@ test('alpha.61: 500 работ со всеми полями ревизии 4 и 
       ...work(w.id),
       status: 'done',
       stage: { ...work(w.id).stage, name: 'done', next: [] },
-      ...(k < L.drift ? { target: w.target } : {}),
+      // Ревизия 6: прогноз длиннее (шаги ведущего, состояние выпуска) —
+      // сверка принятого у 46 работ, а не у 50, чтобы снятие полей 80 работ хватало.
+      ...(k < 46 ? { target: w.target } : {}),
       ...(k < 80 ? { input: w.input, blockers: w.blockers } : {}),
     })),
   };

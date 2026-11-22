@@ -265,6 +265,20 @@ export const eventPayloads = {
     spent: z.number().int().min(0),
   }),
   /**
+   * Доработка после приёмки оставлена (0.1.0-alpha.66): `cancel` открытой
+   * доработки или новая редакция графа без поручения вернули работу к
+   * принятой редакции — `done` с результатом `acceptedSha`; прежняя приёмка
+   * и история попыток сохраняются. `restored` — поручению возвращена
+   * принятая постановка; `hadAttempt` — идущая попытка доработки отменена.
+   */
+  'work.rework-abandoned': z.strictObject({
+    by: z.enum(cancelActors),
+    revision: z.number().int().positive(),
+    acceptedSha: sha,
+    restored: z.boolean(),
+    hadAttempt: z.boolean(),
+  }),
+  /**
    * Находки ревью кода поручения приняты известным ограничением
    * (`review-accept`, docs/review-protocol.md §10): ID, решающий, раунд
    * области на момент решения; основания нет — только его длина.
@@ -639,5 +653,7 @@ export const transactionKinds = [
   'input.delivered',
   /** Запись о смене пакетов командой `harness update` (`harness.updated`). */
   'harness.updated',
+  /** Только локальная запись журнала ведущего (`lead`): заметки, команды, сессия, итог; событий журнала нет. */
+  'lead.recorded',
 ] as const;
 export type TransactionKind = (typeof transactionKinds)[number];

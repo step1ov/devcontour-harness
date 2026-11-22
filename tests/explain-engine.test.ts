@@ -1721,7 +1721,19 @@ test('H1-03 (H1-F021): explain = движок — эпизод ready/retry за 
     );
     const job = h.workflows.start({ kind: 'graph', id: graph.id, authorRuntime: 'claude' });
     h.workflows.finish(h.workflows.claim(job.key)!);
-    h.engine.cancel('parent', 'revised prerequisite cancelled');
+    // С alpha.66 `cancel` открытой доработки принятой предпосылки возвращает
+    // её к принятой редакции (`done`): отменённая предпосылка — поручение,
+    // отменённое без доработки (так её записывали прежние версии).
+    h.store.transact('task.cancelled', (tx) => {
+      const prior = tx.work('parent')!;
+      const cancelled = {
+        ...prior,
+        status: 'cancelled' as const,
+        failureKind: 'cancelled' as const,
+      };
+      delete cancelled.rework;
+      tx.putWork(cancelled);
+    });
     episode('later');
     h.engine.release('controller');
     assert.equal(

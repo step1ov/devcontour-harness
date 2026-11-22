@@ -575,6 +575,13 @@ revision is the guard, so never rename an order to get attempts back. A source t
 already closed (`done`) refuses a run with a changed order (`TASK_DONE`): the
 operator moves it back out of `done` in the source first.
 
+**Changed your mind about a rework?** `$H cancel --state <state> --work <id>`
+on an open rework does not cancel the task: the work goes back to its
+accepted revision (`done`, the earlier acceptance and result, `abandoned:
+true` in the answer, `work.rework-abandoned` in the feed). Use it when the
+rework was a mistake. A delivery problem in the task source (a connector
+binding, a closed task) is never a reason to re-plan accepted work.
+
 "Accepted" is local: the harness moved the target ref in this repository and
 never pushes. `data.target.remote` (also `status` `works[].target.remote`)
 says whether the accepted commit is already on the remote branch, from the
@@ -587,6 +594,26 @@ the destination the harness names — `git push <pushRemote>
 name) — and wait for their yes; never push on your own, and never report
 `unknown` as pushed or as not pushed. After that push, `status` shows
 `pushed` without a fetch (the push updates the tracking ref).
+
+### Lead log: tell the operator what you are doing
+
+The operator watches `$H view` while you work. Harness records your own
+harness commands there by itself (plan review, approve, retry, cancel,
+source-deliver, input answers, run start and end). Everything else you do —
+writing in the task source, checking the site in a browser, fixing the
+connector — is invisible unless you say it:
+
+- At the start of your session: `$H lead begin --state <state>` (a lease of
+  30 minutes, `--ttl <minutes>`; each lead record extends it).
+- At each step outside harness, one short line in plain words, the way you
+  would tell a non-developer: `$H lead note "Обновляю документ DOC-2 в источнике задач"
+--state <state>` (up to 200 characters; no secrets, no paths, no logs).
+- When all code is accepted, delivered and checked, write the final report:
+  `$H release done --state <state> --summary "<what was done, what is left>"`.
+  Until then the view says «код принят, ведущий ещё работает: <your last
+  note>» and progress stays below 100 %; it refuses while a work or rework is
+  still open.
+- When you stop: `$H lead end --state <state>`.
 
 ### 10. New session
 
@@ -636,6 +663,7 @@ not copy acceptance logs or attempt state into notes.
   (`profiles/*.json`); `--profile ./file.json --repository <dir>` resolves a
   profile kept in the repository. Profile resolution only reads manifests and
   never runs project commands.
+- **Lead log**: `$H lead begin|note|end`, `$H release done --summary` (see «Lead log»).
 - **Queue control**: `$H status`, `pause`, `resume`, `cancel`, `retry`
   (bounded by the policy), `deliver` (repeats delivery without models or Git
   integration).

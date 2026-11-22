@@ -14,6 +14,7 @@ import { cliDataSchemas, digestOf, type WorkGraph } from '../src/contracts/index
 import type { Engine } from '../src/engine/engine.ts';
 import { MAX_REWORK_BUDGETS } from '../src/engine/failure.ts';
 import { statusOf } from '../src/control/status.ts';
+import { releaseDone } from '../src/control/lead.ts';
 import { collectOperatorViewInput } from '../src/control/operator-view.ts';
 import { attemptLine, operatorView } from '../src/projections/index.ts';
 import { currentRevisionAttempts } from '../src/report/compute.ts';
@@ -126,6 +127,8 @@ test('P3-1: изменённая постановка принятого пор�
     accepted: { runId: third.id, resultSha: sha('b'), at: w.rework!.accepted.at },
     reopenedAt: w.rework!.reopenedAt,
     spent: 3,
+    // 0.1.0-alpha.66: постановка принятой редакции — для отказа от доработки.
+    acceptedOrder: graphOf({ w: [], x: ['w'] }).orders[0],
   });
   const reopened = store.events(0, 1000).filter((e) => e.type === 'work.reopened');
   assert.deepEqual(
@@ -513,7 +516,9 @@ test('P3-1: прогноз выпуска из одной доработанно
   assert.equal(f.progress.total, 1);
   assert.equal(f.progress.left, 0);
   assert.equal(f.progress.rework, 1);
-  assert.equal(f.progress.percent, 99, 'всё принято ранее, но доработка открыта');
+  // Код весь принят ранее (90 % выпуска), шаги ведущего — план согласован,
+  // итогового отчёта нет (ревизия 6: 10 % выпуска).
+  assert.equal(f.progress.percent, 95, 'всё принято ранее, но доработка открыта');
   assert.equal(f.time.finishedAt, undefined);
   assert.notEqual(f.time.estimate, 'nothing');
   assert.doesNotMatch(f.time.line, /осталось: ничего/);
@@ -527,11 +532,19 @@ test('P3-1: прогноз выпуска из одной доработанно
     viewOf(env, 'en').activity!.find((a) => a.action === 'work.reopened')!.plain,
     /rework 1, its own attempt budget/,
   );
-  // Доработка принята: выпуск закончен, 100 %.
+  // Доработка принята: код принят — ниже 100 %, пока ведущий не написал
+  // итоговый отчёт (ревизия 6: шаг отчёта — половина доли ведущего); после
+  // `release done` — 100 %.
   const run = env.engine.claim('c1')!;
   accept(env.engine, run.id, run.token, sha('c'), sha('d'));
+  const accepted = viewOf(env).forecast!;
+  assert.equal(accepted.progress.percent, 95);
+  assert.equal(accepted.progress.release?.state, 'code-accepted');
+  env.clock.now += 1000;
+  releaseDone(env.engine, { summary: 'Доработка принята, выпуск готов.' });
   const done = viewOf(env).forecast!;
   assert.equal(done.progress.percent, 100);
+  assert.equal(done.progress.release?.state, 'done');
   assert.equal(done.progress.rework, undefined);
   assert.equal(done.time.estimate, 'nothing');
   assert.ok(done.time.finishedAt);

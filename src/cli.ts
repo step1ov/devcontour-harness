@@ -97,6 +97,16 @@ import {
 } from './update/schedule.ts';
 import { updateText } from './update/text.ts';
 import { updateModes, updatesConfigSchema } from './contracts/update.ts';
+import {
+  LEAD_LOGGED_COMMANDS,
+  leadBegin,
+  leadCommandEntry,
+  leadEnd,
+  leadNote,
+  leadTtlMs,
+  recordLeadCommand,
+  releaseDone,
+} from './control/lead.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -459,6 +469,8 @@ const options = {
   wait: { type: 'string' },
   scheduled: { type: 'boolean' },
   'confirm-formats': { type: 'string' },
+  ttl: { type: 'string' },
+  summary: { type: 'string' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -500,7 +512,9 @@ const flagOwners = {
     'input-cancel',
     'input-supersede',
   ],
-  text: ['input-answer'],
+  text: ['input-answer', 'lead-begin', 'lead-note', 'lead-end'],
+  ttl: ['lead-begin'],
+  summary: ['release-done'],
   option: ['input-answer'],
   kind: ['input-answer'],
   actor: ['input-answer', 'input-carry', 'review-plan', 'review-contract', 'review-accept'],
@@ -1345,9 +1359,39 @@ async function run(
             status: result.work.status,
             attempt: result.work.attempt,
             changed: result.changed,
+            ...('abandoned' in result && result.abandoned ? { abandoned: true as const } : {}),
             ...('reset' in result && result.reset ? { reset: result.reset } : {}),
           },
         };
+      } finally {
+        h.close();
+      }
+    }
+    case 'lead-begin':
+    case 'lead-note':
+    case 'lead-end':
+    case 'release-done': {
+      // Журнал ведущего (0.1.0-alpha.66): одна локальная запись состояния.
+      const h = open(need('state'), binding(need('state')), false);
+      try {
+        const data =
+          command === 'lead-begin'
+            ? leadBegin(h.engine, {
+                ttlMs: leadTtlMs(typeof v.ttl === 'string' ? v.ttl : undefined),
+                ...optional('text', typeof v.text === 'string' ? v.text : undefined),
+              })
+            : command === 'lead-note'
+              ? leadNote(h.engine, {
+                  text: need('text'),
+                  ...optional('workId', typeof v.work === 'string' ? v.work : undefined),
+                })
+              : command === 'lead-end'
+                ? leadEnd(
+                    h.engine,
+                    optional('text', typeof v.text === 'string' ? v.text : undefined),
+                  )
+                : releaseDone(h.engine, { summary: need('summary') });
+        return { command, data };
       } finally {
         h.close();
       }
@@ -2035,7 +2079,60 @@ async function run(
   }
 }
 
-const argv = process.argv.slice(2);
+/**
+ * Синонимы журнала ведущего (0.1.0-alpha.66): `harness lead begin|note|end` и
+ * `harness release done`; строка без флага после `lead note` — `--text`,
+ * после `release done` — `--summary`.
+ */
+function leadAlias(args: string[]): string[] {
+  const [a, b, ...rest] = args;
+  const lifted = (flag: string) =>
+    rest[0] !== undefined && !rest[0].startsWith('--') ? [flag, rest[0], ...rest.slice(1)] : rest;
+  if (a === 'lead' && (b === 'begin' || b === 'end')) return [`lead-${b}`, ...rest];
+  if (a === 'lead' && b === 'note') return ['lead-note', ...lifted('--text')];
+  if (a === 'release' && b === 'done') return ['release-done', ...lifted('--summary')];
+  return args;
+}
+
+/**
+ * Записать команду ведущего в его журнал (P4-10 a): после успешной команды
+ * (у `run` — и при старте), только для существующего состояния с привязкой;
+ * сбой журнала команду не меняет — строка в stderr.
+ */
+function journalLeadCommand(args: string[], phase: 'start' | 'end', data: unknown) {
+  const command = args[0];
+  if (!command || !(LEAD_LOGGED_COMMANDS as readonly string[]).includes(command)) return;
+  try {
+    const { values } = parseArgs({ args: args.slice(1), options, strict: false });
+    const state = typeof values.state === 'string' ? values.state : undefined;
+    if (!state || !existsSync(join(state, 'state.sqlite')) || !existsSync(bindingFile(state)))
+      return;
+    const entry = leadCommandEntry(
+      command,
+      {
+        ...optional('work', typeof values.work === 'string' ? values.work : undefined),
+        ...optional('request', typeof values.request === 'string' ? values.request : undefined),
+        ...optional('actor', typeof values.actor === 'string' ? values.actor : undefined),
+        ...(values.reset === true ? { reset: true } : {}),
+      },
+      data,
+      phase,
+    );
+    if (!entry) return;
+    const h = open(state, binding(state), false);
+    try {
+      recordLeadCommand(h.engine, entry);
+    } finally {
+      h.close();
+    }
+  } catch (error) {
+    process.stderr.write(
+      `harness: журнал ведущего не записан: ${(error as Error)?.message ?? String(error)}\n`,
+    );
+  }
+}
+
+const argv = leadAlias(process.argv.slice(2));
 // Справка команды: `harness <команда> --help|-h` или `harness help <команда>` —
 // текст на stdout, exit 0; неизвестная команда — обычный отказ ниже.
 // `-h`/`--help` — только на месте флага: значение строкового параметра
@@ -2065,7 +2162,16 @@ let envelope: CliEnvelope;
 let code: number = exitCodes.ok;
 let text: string | undefined;
 try {
-  const result = await run(argv);
+  if (argv[0] === 'run') journalLeadCommand(argv, 'start', undefined);
+  let result: Awaited<ReturnType<typeof run>>;
+  try {
+    result = await run(argv);
+  } catch (error) {
+    // Запуск ведущего закончился отказом — тоже конец его run.
+    if (argv[0] === 'run') journalLeadCommand(argv, 'end', undefined);
+    throw error;
+  }
+  journalLeadCommand(argv, 'end', result.data);
   // Ответ проверяется схемой своей команды: CLI не может выдать данные вне договора.
   envelope = {
     apiVersion: API_VERSION,

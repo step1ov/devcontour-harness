@@ -443,6 +443,10 @@ export function currentRevisionAttempts<A extends Pick<AttemptState, 'id' | 'sta
   const r = work.rework;
   if (!r) return attempts;
   const k = r.accepted.runId ? attempts.findIndex((a) => a.id === r.accepted.runId) : -1;
+  // Оставленная доработка (0.1.0-alpha.66): текущая редакция — снова
+  // принятая, её попытки — до принявшей включительно.
+  if (r.abandoned)
+    return k >= 0 ? attempts.slice(0, k + 1) : attempts.filter((a) => a.startedAt < r.reopenedAt);
   return k >= 0 ? attempts.slice(k + 1) : attempts.filter((a) => a.startedAt >= r.reopenedAt);
 }
 
