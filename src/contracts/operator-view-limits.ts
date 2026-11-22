@@ -55,6 +55,8 @@ export const OPERATOR_VIEW_LIMITS = {
   sourceReviewTasks: 50,
   /** Строки этапа настройки (`stage.lines`, ревизия 5). */
   stageLines: 5,
+  /** Живые превью результата (`previews`, 0.1.0-alpha.66). */
+  previews: 20,
 } as const;
 
 /** Пределы свободных строк (символов) после маскирования. */

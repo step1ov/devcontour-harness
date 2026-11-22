@@ -8,6 +8,7 @@ import {
   PROFILE_DEPTH_LIMIT,
   PROFILE_FILE_LIMIT,
   PROFILE_FILES_LIMIT,
+  PREVIEW_LIMIT,
   gateOrderIssues,
   gateSchema,
   repositoryPolicySchema,
@@ -76,12 +77,20 @@ export interface ProfileLayer {
   gateTimeoutFloorMs?: number;
   roles: Record<string, unknown>;
   contextPacks: { id: string }[];
+  previews?: { id: string }[];
 }
 
 /** Профиль, разрешённый по схеме файла хоста: поля слоёв — в форме хоста. */
 export type ResolvedProfileOf<L extends ProfileLayer> = Omit<
   ResolvedProfile,
-  'gates' | 'prepare' | 'environment' | 'lifecycle' | 'toolchain' | 'roles' | 'contextPacks'
+  | 'gates'
+  | 'prepare'
+  | 'environment'
+  | 'lifecycle'
+  | 'toolchain'
+  | 'roles'
+  | 'contextPacks'
+  | 'previews'
 > & {
   gates: L['gates'];
   prepare: L['prepare'];
@@ -90,6 +99,7 @@ export type ResolvedProfileOf<L extends ProfileLayer> = Omit<
   toolchain?: NonNullable<L['toolchain']>;
   roles: L['roles'];
   contextPacks: L['contextPacks'];
+  previews?: NonNullable<L['previews']>;
 };
 
 /**
@@ -140,6 +150,7 @@ const profileLayerShape = z.looseObject({
   gateTimeoutFloorMs: z.number().optional(),
   roles: z.record(z.string(), z.unknown()),
   contextPacks: z.array(z.looseObject({ id: layerId })),
+  previews: z.array(z.looseObject({ id: layerId })).optional(),
 });
 
 /** ID встроенных профилей пакета. */
@@ -344,6 +355,11 @@ export function resolveProfile(
   const toolchain = mergeToolchains(layers);
   for (const steps of lifecycle ? [lifecycle.setup, lifecycle.ready, lifecycle.teardown] : [])
     if (new Set(steps.map((s) => s.id)).size !== steps.length) refuse('Повтор lifecycle step ID');
+  // Превью слоёв объединяются; один ID в двух слоях — конфликт, а не победа последнего.
+  const previews = layers.flatMap((p) => p.previews ?? []);
+  if (new Set(previews.map((p) => p.id)).size !== previews.length)
+    refuse('Конфликт частей профиля: повтор ID превью');
+  if (previews.length > PREVIEW_LIMIT) refuse(`Не более ${PREVIEW_LIMIT} превью профиля`);
   const limits = layers.flatMap((p) => (p.concurrency ? [p.concurrency] : []));
   const timeouts = layers.flatMap((p) => (p.runTimeoutMs ? [p.runTimeoutMs] : []));
   const floors = layers.flatMap((p) => (p.gateTimeoutFloorMs ? [p.gateTimeoutFloorMs] : []));
@@ -369,6 +385,7 @@ export function resolveProfile(
     contextPacks: [
       ...new Map(layers.flatMap((p) => p.contextPacks).map((pack) => [pack.id, pack])).values(),
     ],
+    ...(previews.length ? { previews } : {}),
     ...(source ? { source } : {}),
     closure,
     ...(options.includeLeafContent ? { leafContent } : {}),
@@ -424,6 +441,7 @@ const profiledKeys = [
   'protectedPaths',
   'generatedPaths',
   'toolchain',
+  'previews',
 ] as const;
 type RepositoryInput = z.input<typeof repositoryPolicySchema>;
 
@@ -447,6 +465,7 @@ export function repositoryFromProfile(
     ...(profile.environment ? { environment: profile.environment } : {}),
     ...(profile.lifecycle ? { lifecycle: profile.lifecycle } : {}),
     ...(profile.toolchain ? { toolchain: profile.toolchain } : {}),
+    ...(profile.previews ? { previews: profile.previews } : {}),
     // Защищённые пути профиля дополняют умолчание политики, а не заменяют его.
     protectedPaths: [
       ...new Set([

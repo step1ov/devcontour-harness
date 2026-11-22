@@ -440,7 +440,8 @@ export type TruncatedKey =
   | 'alternates'
   | 'activity'
   | 'workFields'
-  | 'whatsNew';
+  | 'whatsNew'
+  | 'previews';
 
 export interface ViewSource {
   producer: string;
@@ -503,6 +504,8 @@ export interface OperatorView {
   stage?: { name: 'setup' | 'work'; lines: string[] };
   forecast?: ForecastView;
   updates?: UpdatesView;
+  /** Живые превью результата (0.1.0-alpha.66); нет — ни одно не идёт. */
+  previews?: PreviewView[];
   truncated?: Partial<Record<TruncatedKey, number>>;
 }
 
@@ -1016,6 +1019,8 @@ export interface OperatorViewInput {
   sourcesUnread?: number;
   /** Обновления по последней проверке `harness update --check` (ревизия 4); нет — поля нет. */
   updates?: UpdatesView;
+  /** Живые превью результата (receipt `harness preview-start`); нет — поля нет. */
+  previews?: readonly PreviewView[];
 }
 
 /** Связка с источником задач: срез последнего снимка, совместимость, вопросы владельцу. */
@@ -1092,6 +1097,26 @@ export interface UpdatesView {
   line: string;
   whatsNew?: string[];
   command?: string;
+}
+
+/**
+ * Живое превью результата (`harness preview-start`, docs/previews.md):
+ * панель показывает адрес «Посмотреть результат» и «остановить»
+ * (`harness preview-stop --preview <id>`).
+ */
+export interface PreviewView {
+  id: string;
+  repositoryId: string;
+  title?: string;
+  url: string;
+  /** Что просили: `accepted` или ref/SHA. */
+  ref: string;
+  sha: string;
+  /** Поручение, чей принятый результат показан. */
+  workId?: string;
+  startedAt: string;
+  expiresAt: string;
+  state: 'running';
 }
 
 export interface OperatorViewOptions {
@@ -2999,6 +3024,7 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
     stage: stageOf(i.works.length, c.lang),
     ...(forecast ? { forecast } : {}),
     ...(i.updates ? { updates: updatesOf(c, i.updates, truncated) } : {}),
+    ...(i.previews?.length ? { previews: previewsOf(c, i.previews, truncated) } : {}),
   };
   const fitted = draft;
   let warnings = [...fitted.health.warnings];
@@ -3232,6 +3258,27 @@ function updatesOf(c: Ctx, u: UpdatesView, truncated: Record<string, number>): U
       : {}),
     ...(u.command ? { command: text(c, u.command, T.updateLine) ?? '' } : {}),
   };
+}
+
+/** Живые превью: в пределе списка, заголовок — через маску. */
+function previewsOf(
+  c: Ctx,
+  list: readonly PreviewView[],
+  truncated: Record<string, number>,
+): PreviewView[] {
+  if (list.length > L.previews) truncated.previews = list.length - L.previews;
+  return list.slice(0, L.previews).map((p) => ({
+    id: p.id,
+    repositoryId: p.repositoryId,
+    ...(p.title ? { title: text(c, p.title, T.title) ?? p.id } : {}),
+    url: p.url,
+    ref: text(c, p.ref, T.line) ?? p.ref,
+    sha: p.sha,
+    ...(p.workId ? { workId: p.workId } : {}),
+    startedAt: p.startedAt,
+    expiresAt: p.expiresAt,
+    state: p.state,
+  }));
 }
 
 /** Строки проверки alpha.55 в словаре представления. */

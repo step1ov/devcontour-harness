@@ -70,6 +70,7 @@ import {
   stepStatusText,
 } from './control/lifecycle-smoke.ts';
 import { defaultResourceDatabase } from './environment/resources.ts';
+import { listPreviews, startPreview, stopPreviews } from './control/preview.ts';
 import {
   UPDATE_OPERATION,
   applyUpdate,
@@ -487,6 +488,10 @@ const options = {
   wait: { type: 'string' },
   scheduled: { type: 'boolean' },
   'confirm-formats': { type: 'string' },
+  preview: { type: 'string' },
+  ref: { type: 'string' },
+  ttl: { type: 'string' },
+  idle: { type: 'string' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -560,6 +565,10 @@ const flagOwners = {
   wait: ['update'],
   scheduled: ['update'],
   'confirm-formats': ['update'],
+  preview: ['preview-start', 'preview-stop'],
+  ref: ['preview-start'],
+  ttl: ['preview-start'],
+  idle: ['preview-start'],
 } as const;
 
 /** Явное человеческое представление успешного ответа (`--human`). */
@@ -1837,6 +1846,67 @@ async function run(
         process.off('SIGINT', stop);
         process.off('SIGTERM', stop);
       }
+    }
+    case 'preview-start':
+    case 'preview-stop':
+    case 'preview-list': {
+      const state = need('state');
+      const b = v.policy ? loadPolicy(v.policy) : binding(state);
+      const ctx = { policy: b.policy, baseDir: b.baseDir, stateDir: resolve(state) };
+      if (command === 'preview-list') return { command, data: await listPreviews(ctx) };
+      if (command === 'preview-stop')
+        return {
+          command,
+          data: await stopPreviews(ctx, {
+            ...optional('repositoryId', v.repository),
+            ...optional('previewId', v.preview),
+          }),
+        };
+      const seconds = (flag: 'ttl' | 'idle', min: number) => {
+        const raw = v[flag];
+        if (raw === undefined) return undefined;
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < min || n > 86_400)
+          throw new HarnessError(
+            'INVALID_INPUT',
+            `--${flag}: целое число секунд от ${min} до 86400`,
+            [{ path: [`--${flag}`], message: raw }],
+          );
+        return n * 1000;
+      };
+      const ttlMs = seconds('ttl', 1);
+      const idleMs = seconds('idle', 0);
+      // Принятый результат поручения — из базы состояния, только чтение.
+      const work = (id: string) => {
+        if (!existsSync(join(resolve(state), 'state.sqlite'))) return undefined;
+        const h = open(state, b, 'state');
+        try {
+          return h.engine.read((view) => {
+            const w = view.work(id);
+            return w
+              ? {
+                  status: w.status,
+                  repositoryId: w.order.repositoryId,
+                  ...(w.resultSha ? { resultSha: w.resultSha } : {}),
+                }
+              : undefined;
+          });
+        } finally {
+          h.close();
+        }
+      };
+      return {
+        command,
+        data: await startPreview(ctx, {
+          ...optional('repositoryId', v.repository),
+          ...optional('previewId', v.preview),
+          ...optional('ref', v.ref),
+          ...optional('workId', v.work),
+          ...optional('ttlMs', ttlMs),
+          ...optional('idleMs', idleMs),
+          work,
+        }),
+      };
     }
     case 'update': {
       const r = await runUpdate(v, resolve(need('state')));

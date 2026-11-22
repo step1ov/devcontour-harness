@@ -74,6 +74,10 @@ const laterCommands: readonly string[] = [
   'review-accept',
   // Обновления harness и панели (0.1.0-alpha.60).
   'update',
+  // Превью результата (0.1.0-alpha.66).
+  'preview-start',
+  'preview-stop',
+  'preview-list',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -585,6 +589,8 @@ test('H3-01: прежние команды и схемы их данных не 
     if (k === 'properties' && v && typeof v === 'object' && 'closure' in v && 'runTimeoutMs' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.gateTimeoutFloorMs;
+      // Превью результата разрешённого профиля (0.1.0-alpha.66).
+      delete rest.previews;
       return rest;
     }
     if (k === 'properties' && v && typeof v === 'object' && 'pin' in v && 'ref' in v) {

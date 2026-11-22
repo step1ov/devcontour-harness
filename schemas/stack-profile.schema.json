@@ -530,6 +530,111 @@
         ],
         "additionalProperties": false
       }
+    },
+    "previews": {
+      "minItems": 1,
+      "maxItems": 10,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+          },
+          "build": {
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                },
+                "command": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "timeoutMs": {
+                  "default": 120000,
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 3600000
+                }
+              },
+              "required": [
+                "id",
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "start": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "cwd": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+          },
+          "env": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "pattern": "^(?!HARNESS_|DEVCONTOUR_)[A-Za-z_][A-Za-z0-9_]*$"
+            },
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "services": {
+            "type": "boolean"
+          },
+          "health": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "^\\/\\S*$"
+          },
+          "readyTimeoutMs": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 600000
+          },
+          "ttlMs": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 86400000
+          },
+          "idleMs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400000
+          }
+        },
+        "required": [
+          "id",
+          "start"
+        ],
+        "additionalProperties": false
+      }
     }
   },
   "required": [

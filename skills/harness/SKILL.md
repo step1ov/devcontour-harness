@@ -550,7 +550,12 @@ of editing the policy by hand:
 in the repository. Report what the harness recorded, not your own summary.
 Link only addresses the user runs and keeps (their own site or dashboard),
 never a temporary port of a server you started in this session and stop:
-such links are dead once you leave. A gate that fails only for you
+such links are dead once you leave. To let the user look at an accepted
+result, start a harness preview only when they ask
+(`$H preview-start --state <state> --ref accepted --work <id>`, policy
+`previews[]`): it returns a loopback `url`, and the harness stops it on TTL
+or idle; stop it yourself when they are done (`$H preview-stop --state <state>`).
+Never start a preview from a gate, a writer task or `run`. A gate that fails only for you
 while `doctor` warns that `PATH` Node differs from `toolchain.node` is an
 environment problem — fix the shell or the pin, not the code or the gate.
 A failed gate whose text says its node differs from the last passing run of

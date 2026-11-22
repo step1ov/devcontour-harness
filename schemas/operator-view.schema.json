@@ -2798,6 +2798,74 @@
       ],
       "additionalProperties": false
     },
+    "previews": {
+      "minItems": 1,
+      "maxItems": 20,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "repositoryId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "url": {
+            "type": "string",
+            "pattern": "^http:\\/\\/127\\.0\\.0\\.1:\\d{1,5}\\/$"
+          },
+          "ref": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "sha": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{40}([a-f0-9]{24})?$"
+          },
+          "workId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "running"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "repositoryId",
+          "url",
+          "ref",
+          "sha",
+          "startedAt",
+          "expiresAt",
+          "state"
+        ],
+        "additionalProperties": false
+      }
+    },
     "truncated": {
       "type": "object",
       "properties": {
@@ -2902,6 +2970,11 @@
           "maximum": 9007199254740991
         },
         "whatsNew": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "previews": {
           "type": "integer",
           "exclusiveMinimum": 0,
           "maximum": 9007199254740991
