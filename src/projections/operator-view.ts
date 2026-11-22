@@ -19,6 +19,8 @@ import {
   OPERATOR_VIEW_VERSION,
 } from '../contracts/operator-view-limits.ts';
 import type { ExecutionPolicy, RuntimeBinding } from '../contracts/policy.ts';
+import type { SetupProgress } from '../contracts/setup-progress.ts';
+import { ruCount } from '../contracts/plural.ts';
 import { fitLine, named, type LinePart } from './clip.ts';
 import { maskSecrets, maskText, type MaskContext } from './mask.ts';
 import { attemptLine, type AttemptLineFacts } from '../contracts/attempt-line.ts';
@@ -342,6 +344,8 @@ export interface WorkView {
   status: string;
   /** Ревизия 6: план работы ещё не согласован, попыток не было — «ещё не утверждена». */
   planned?: true;
+  /** Ревизия 7: работа инфраструктуры harness (`kind: infra`). */
+  kind?: 'infra';
   /**
    * Ревизия 6: работа, отменённая прежней версией harness во время доработки
    * после приёмки (`cancelled` с доработкой), показана принятой (`done`,
@@ -561,8 +565,8 @@ export interface OperatorView {
   sourceQuestions?: SourceQuestionView[];
   /** Ревизия 5: принятые работы, ждущие проверки человека в источнике задач. */
   sourceReviews?: SourceReviewView[];
-  /** Ревизия 5: этап проекта — `setup` (настройка, задач нет) или `work`. */
-  stage?: { name: 'setup' | 'work'; lines: string[] };
+  /** Ревизия 5: этап проекта — `setup` (настройка, задач нет) или `work`; ревизия 7 — ход настройки. */
+  stage?: { name: 'setup' | 'work'; lines: string[]; progress?: SetupProgress };
   forecast?: ForecastView;
   updates?: UpdatesView;
   /**
@@ -690,6 +694,8 @@ export interface OperatorWorkInput {
   planned?: true;
   /** Ревизия 6: проекция показывает её принятой (`acceptedAsRestored`); загрузчик поле не ставит. */
   restoredFrom?: 'cancelled-rework';
+  /** Ревизия 7: работа инфраструктуры harness (`kind: infra`). */
+  kind?: 'infra';
   resultSha?: string;
   dependsOn?: readonly string[];
   stage: {
@@ -1053,6 +1059,8 @@ export interface OperatorBudgetInput {
 export interface OperatorViewInput {
   /** Внедрённые часы, epoch ms. */
   now: number;
+  /** Ревизия 7: ход настройки по записям на диске; показывается, пока работ нет. */
+  setup?: SetupProgress;
   producer?: string;
   harnessVersion: string;
   stateVersion: number;
@@ -1123,6 +1131,10 @@ export interface OperatorViewInput {
     /** Состояния ещё нет или в нём нет ни работ, ни попыток, ни controller; `line` — о первом запуске. */
     neverRun?: boolean;
     restartBy?: HarnessActor;
+    /** alpha.67: работы, которые сдвинет новый запуск (`status.runner.ready`). */
+    ready?: number;
+    /** alpha.67: работы, которые держит только вопрос исполнителя (`status.runner.heldByQuestion`). */
+    heldByQuestion?: readonly string[];
     line?: string;
     lineEn?: string;
   };
@@ -1378,9 +1390,24 @@ export function viewToken(view: OperatorView | WorkDetailView): string {
     time.humanWait = wait;
     rest.forecast = { ...view.forecast, time };
   }
+  if ('stage' in view && view.stage?.progress) rest.stage = stageTokenBody(view.stage);
   const src: Record<string, unknown> = { ...view.source };
   delete src.token;
   return sha256Hex(JSON.stringify(canonical({ ...rest, source: src })));
+}
+
+/**
+ * Этап для токена (ревизия 7): ход настройки зависит от часов — в токен
+ * входят начало (`since`), бюджет, превышение и шаги, а не прошедшее время и
+ * строка с ним.
+ */
+function stageTokenBody(stage: { progress?: SetupProgress }): Record<string, unknown> {
+  if (!stage.progress) return stage;
+  const progress: Record<string, unknown> = { ...stage.progress };
+  delete progress.elapsedMs;
+  delete progress.line;
+  delete progress.lineEn;
+  return { ...stage, progress };
 }
 
 const take = <X>(xs: readonly X[], n: number, truncated: Record<string, number>, key: string) => {
@@ -1634,6 +1661,7 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
     ...(c.titles && w.title ? { title: text(c, w.title, T.title) } : {}),
     status: w.status,
     ...(w.planned ? { planned: true as const } : {}),
+    ...(w.kind === 'infra' ? { kind: 'infra' as const } : {}),
     ...(w.restoredFrom
       ? {
           restoredFrom: w.restoredFrom,
@@ -3135,7 +3163,7 @@ export interface SetupView {
   viewRevision: number;
   generatedAt: string;
   source: ViewSource;
-  stage: { name: 'setup'; lines: string[] };
+  stage: { name: 'setup'; lines: string[]; progress?: SetupProgress };
   /** Чего ещё нет: `project` — `.harness/project.json`, `policy` — политики и привязки. */
   setup: { waitingFor: 'project' | 'policy' };
 }
@@ -3147,10 +3175,12 @@ export function setupView(
     stateVersion: number;
     waitingFor: 'project' | 'policy';
     producer?: string;
+    /** Ревизия 7: ход настройки по записям на диске. */
+    progress?: SetupProgress;
   },
   o: { lang?: 'ru' | 'en' } = {},
 ): SetupView {
-  const stage = stageOf(0, o.lang ?? 'ru') as SetupView['stage'];
+  const stage = stageOf(0, o.lang ?? 'ru', input.progress) as SetupView['stage'];
   const body = { stage, setup: { waitingFor: input.waitingFor } };
   return {
     viewVersion: OPERATOR_VIEW_VERSION,
@@ -3160,7 +3190,7 @@ export function setupView(
       producer: input.producer ?? 'devcontour-harness',
       producerVersion: input.harnessVersion,
       stateVersion: input.stateVersion,
-      token: sha256Hex(JSON.stringify(canonical(body))),
+      token: sha256Hex(JSON.stringify(canonical({ ...body, stage: stageTokenBody(stage) }))),
     },
     ...body,
   };
@@ -3170,7 +3200,9 @@ export function setupView(
 export function stageOf(
   works: number,
   lang: 'ru' | 'en',
-): { name: 'setup' | 'work'; lines: string[] } {
+  /** Ревизия 7: ход настройки (`setupProgress` загрузчика); показывается только без работ. */
+  progress?: SetupProgress,
+): { name: 'setup' | 'work'; lines: string[]; progress?: SetupProgress } {
   if (works > 0) return { name: 'work', lines: [] };
   return {
     name: 'setup',
@@ -3178,6 +3210,7 @@ export function stageOf(
       lang === 'en'
         ? ['Harness setup is in progress', 'No tasks yet']
         : ['Идёт настройка harness', 'Задач пока нет'],
+    ...(progress ? { progress } : {}),
   };
 }
 
@@ -3555,6 +3588,35 @@ function acceptedAsRestored(i: OperatorViewInput): OperatorViewInput {
   };
 }
 
+/**
+ * Вопрос владельцу в источнике задач (alpha.67, P5-4) держит только свои
+ * задачи: если никто не запущен, а готовые работы есть, строка очереди
+ * называет новый запуск ходом ведущего — «запустите harness run: готово N
+ * задач, вопрос блокирует только X». Строка статуса о вопросе исполнителя
+ * (`heldByQuestion`) — главнее.
+ */
+function runnerWithSourceQuestions(
+  q: OperatorViewInput['queue'],
+  sources: OperatorViewInput['sources'],
+): OperatorViewInput['queue'] {
+  if (q.runner !== 'not-running' || !q.ready || q.heldByQuestion?.length) return q;
+  const tasks = [
+    ...new Set((sources ?? []).flatMap((s) => (s.questions ?? []).flatMap((x) => x.targets))),
+  ];
+  if (!tasks.length) return q;
+  const ids =
+    tasks.slice(0, 10).join(', ') + (tasks.length > 10 ? ` и ещё ${tasks.length - 10}` : '');
+  const idsEn =
+    tasks.slice(0, 10).join(', ') + (tasks.length > 10 ? ` and ${tasks.length - 10} more` : '');
+  const n = q.ready;
+  return {
+    ...q,
+    restartBy: 'lead',
+    line: `Очередь стоит — никто не запущен: запустите harness run: готово ${ruCount(n, ['задача', 'задачи', 'задач'])}, вопрос владельцу блокирует только ${ids} (ведущий).`,
+    lineEn: `The queue is idle — nothing is running: start harness run: ${n} ${n === 1 ? 'task is' : 'tasks are'} ready, the owner's question blocks only ${idsEn} (the lead).`,
+  };
+}
+
 export function operatorView(input: OperatorViewInput, o: OperatorViewOptions = {}): OperatorView {
   const i = acceptedAsRestored(input);
   const c = context(i, o);
@@ -3571,7 +3633,7 @@ export function operatorView(input: OperatorViewInput, o: OperatorViewOptions = 
       ? w.stage.needs.actor === 'user' || w.stage.needs.actor === 'operator'
       : w.input?.state === 'awaiting-answer',
   ).length;
-  const q = i.queue;
+  const q = runnerWithSourceQuestions(i.queue, i.sources);
   const drift = i.works.map((w) => driftOf(c, w)).filter((d): d is DriftView => !!d);
   const activity = activityOf(c, o, truncated);
   const scope = scopeOf(c, truncated);
@@ -3634,7 +3696,7 @@ export function operatorView(input: OperatorViewInput, o: OperatorViewOptions = 
       : { scopeReason: i.sourcesUnread ? ('unreadable' as const) : ('no-snapshot' as const) }),
     ...(sourceQuestions ? { sourceQuestions } : {}),
     ...(sourceReviews ? { sourceReviews } : {}),
-    stage: stageOf(i.works.length, c.lang),
+    stage: stageOf(i.works.length, c.lang, i.setup),
     ...(forecast ? { forecast } : {}),
     ...(i.updates ? { updates: updatesOf(c, i.updates, truncated) } : {}),
     ...(planned?.length ? { planned } : {}),

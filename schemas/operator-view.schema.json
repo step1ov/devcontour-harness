@@ -580,6 +580,10 @@
             "minLength": 1,
             "maxLength": 200
           },
+          "kind": {
+            "type": "string",
+            "const": "infra"
+          },
           "stage": {
             "type": "object",
             "properties": {
@@ -2599,6 +2603,105 @@
             "minLength": 1,
             "maxLength": 200
           }
+        },
+        "progress": {
+          "type": "object",
+          "properties": {
+            "since": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "elapsedMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "budgetMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "overBudget": {
+              "type": "boolean"
+            },
+            "steps": {
+              "maxItems": 7,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "enum": [
+                      "profile",
+                      "init",
+                      "doctor",
+                      "smoke",
+                      "probe",
+                      "gates",
+                      "connector"
+                    ]
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "done",
+                      "failed",
+                      "pending",
+                      "skipped",
+                      "unknown"
+                    ]
+                  },
+                  "at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                  },
+                  "elapsedMs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "line": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  },
+                  "lineEn": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  }
+                },
+                "required": [
+                  "id",
+                  "state",
+                  "line",
+                  "lineEn"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "line": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "lineEn": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "required": [
+            "budgetMs",
+            "overBudget",
+            "steps",
+            "line",
+            "lineEn"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

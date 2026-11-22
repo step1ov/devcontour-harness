@@ -4639,6 +4639,16 @@ export class Engine {
     });
   }
 
+  /**
+   * Сверка записи окружения smoke (`harness cleanup LS-…`, alpha.67): событие
+   * `environment.reconciled` в журнале; состояние модели не меняется.
+   */
+  recordEnvironmentReconciled(runId: string, payload: RunEventPayload<'environment.reconciled'>) {
+    this.tx('environment.reconciled', (tx) => {
+      tx.emit({ type: 'environment.reconciled', runId, payload });
+    });
+  }
+
   /** Снять паузу операции — только свою; паузу человека она не трогает. */
   operationResume(operation: string) {
     return this.tx('scheduler.started', (tx) => {

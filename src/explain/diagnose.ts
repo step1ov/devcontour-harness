@@ -43,6 +43,7 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
   let verification: VerificationRow[];
   let reviews: ReviewSubjectSummary[];
   let reviewsTruncated: number;
+  let queue: ExplainData['queue'];
   try {
     stateInputs = stopInputsOf(h, {
       maxAttempts: policy.maxAttempts,
@@ -70,6 +71,20 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
     }));
     // Ревью плана и контрактов — та же сводка, что у `status`.
     ({ reviews, reviewsTruncated } = h.engine.read((v) => reviewSummaryRows(v, policy)));
+    // Никто не запущен, готовые работы есть (P5-4): новый запуск — ход
+    // ведущего, вопрос держит только свои работы. Та же строка, что `status`.
+    if (options.workId === undefined) {
+      const runner = h.status().runner;
+      if (runner?.state === 'not-running' && runner.ready)
+        queue = {
+          actor: 'lead',
+          action: 'start-run',
+          ready: runner.ready,
+          ...(runner.heldByQuestion ? { heldByQuestion: runner.heldByQuestion } : {}),
+          line: runner.line,
+          lineEn: runner.lineEn,
+        };
+    }
   } finally {
     h.close();
   }
@@ -87,6 +102,7 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
     .map((r) => ({ kind: 'runtime', runtime: { runtime: r.runtime, available: false } }));
   return {
     diagnoses: [...runtimes, ...stateInputs].map(explainStop),
+    ...(queue ? { queue } : {}),
     attempts,
     ...(attemptsTruncated ? { attemptsTruncated } : {}),
     ...(verification.length ? { verification } : {}),
@@ -104,6 +120,15 @@ export type AttemptSummaryRow = { workId: string } & ReturnType<typeof attemptSu
 /** Ответ `explain`: диагнозы и сводка попыток по поручениям. */
 export interface ExplainData {
   diagnoses: StopDiagnosis[];
+  /** alpha.67: новый запуск — ход ведущего (`explainDataSchema.queue`). */
+  queue?: {
+    actor: 'lead';
+    action: 'start-run';
+    ready: number;
+    heldByQuestion?: string[];
+    line: string;
+    lineEn: string;
+  };
   attempts?: AttemptSummaryRow[];
   attemptsTruncated?: number;
   verification?: VerificationRow[];
@@ -132,6 +157,7 @@ export function explainText(data: ExplainData): string {
         .concat('\n')
     : 'Остановок нет.\n';
   return (
+    (data.queue ? `→ lead: ${data.queue.line}\n` : '') +
     stops +
     verificationText(data.verification ?? []) +
     attemptsText(data.attempts ?? []) +

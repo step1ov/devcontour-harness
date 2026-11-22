@@ -522,6 +522,19 @@ export const eventPayloads = {
    * (0.1.0-alpha.60): поставлены (`applied`), возвращены после сбоя
    * проверки (`restored`) или откатом (`rolled-back`).
    */
+  /**
+   * Запись окружения smoke (`LS-*`) или проверки `gates-at`, оставшаяся
+   * `cleanup-failed` или `active` при умершем владельце, сверена командой
+   * `harness cleanup` (0.1.0-alpha.67): рабочего дерева нет, ресурсов Docker
+   * с меткой прогона нет (или lifecycle Docker не использует) — запись
+   * переведена в `cleaned`. `receipt` — путь записи от каталога состояния.
+   */
+  'environment.reconciled': z.strictObject({
+    receipt: z.string().min(1).max(500),
+    from: z.enum(['cleanup-failed', 'active']),
+    worktree: z.literal('absent'),
+    docker: z.enum(['absent', 'not-used']),
+  }),
   'harness.updated': z.strictObject({
     action: z.enum(updateRecordActions),
     from: updatePairSchema,
@@ -695,6 +708,8 @@ export const transactionKinds = [
   'input.delivered',
   /** Запись о смене пакетов командой `harness update` (`harness.updated`). */
   'harness.updated',
+  /** Сверка оставшейся записи окружения smoke командой `harness cleanup` (`environment.reconciled`). */
+  'environment.reconciled',
   /** Только локальная запись журнала ведущего (`lead`): заметки, команды, сессия, итог; событий журнала нет. */
   'lead.recorded',
 ] as const;

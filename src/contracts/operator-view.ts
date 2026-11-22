@@ -9,6 +9,7 @@ import {
 } from './operator-view-limits.ts';
 
 import { resourcesViewSchema } from './view-resources.ts';
+import { setupProgressSchema } from './setup-progress.ts';
 
 export * from './operator-view-limits.ts';
 
@@ -279,6 +280,12 @@ export const workViewSchema = z.strictObject({
    */
   restoredFrom: z.literal('cancelled-rework').optional(),
   restoredLine: z.string().min(1).max(T.line).optional(),
+  /**
+   * Ревизия 7 (alpha.67): работа инфраструктуры harness (`kind: infra`,
+   * docs/infra-works.md) — мосты, обёртки gates, приёмочные тесты. Нет поля —
+   * продуктовая работа.
+   */
+  kind: z.literal('infra').optional(),
   stage: z.strictObject({
     name: token(40),
     step: freeText(T.step).optional(),
@@ -806,6 +813,11 @@ export const operatorViewSchema = z.strictObject({
     .strictObject({
       name: z.enum(['setup', 'work']),
       lines: z.array(z.string().min(1).max(T.line)).max(L.stageLines),
+      /**
+       * Ревизия 7 (alpha.67): ход настройки на этапе `setup` — шаги с
+       * состоянием и временем и мягкий бюджет (`setupProgressSchema`).
+       */
+      progress: setupProgressSchema.optional(),
     })
     .optional(),
   forecast: forecastSchema.optional(),
@@ -1032,6 +1044,8 @@ export const setupViewSchema = z.strictObject({
   stage: z.strictObject({
     name: z.literal('setup'),
     lines: z.array(z.string().min(1).max(T.line)).min(1).max(L.stageLines),
+    /** Ревизия 7 (alpha.67): ход настройки, как у обзора. */
+    progress: setupProgressSchema.optional(),
   }),
   setup: z.strictObject({ waitingFor: z.enum(['project', 'policy']) }),
 });

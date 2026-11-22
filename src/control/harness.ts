@@ -38,6 +38,7 @@ import { standaloneHost } from '../engine/standalone.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { validateInputs } from '../validate.ts';
+import { cleanupSmoke, SMOKE_RUN_ID, smokeRoots } from './smoke-cleanup.ts';
 import { WorkflowQueue } from './workflow.ts';
 import { deadUpdateLock, updateInProgress } from '../update/busy.ts';
 import { statusOf } from './status.ts';
@@ -235,7 +236,17 @@ export class Harness {
    * Довести незавершённую очистку закончившейся попытки: повторить teardown по
    * сохранённым receipt окружений и убрать её рабочие деревья и снимки.
    */
-  cleanup(runId: string) {
+  async cleanup(runId: string) {
+    // Запись smoke (`LS-…`, alpha.67): повтор teardown или сверка оставшейся
+    // записи окружения, у которой дерева и ресурсов Docker уже нет.
+    if (SMOKE_RUN_ID.test(runId))
+      return cleanupSmoke({
+        stateDir: this.options.stateDir,
+        policy: this.policy,
+        id: runId,
+        roots: await smokeRoots(this.options.stateDir, this.runner.checkoutRoot().root),
+        record: (id, payload) => this.engine.recordEnvironmentReconciled(id, payload),
+      });
     return this.runner.finishCleanup(runId);
   }
 
