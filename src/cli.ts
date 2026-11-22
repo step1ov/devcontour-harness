@@ -437,6 +437,7 @@ const options = {
   limit: { type: 'string' },
   reset: { type: 'boolean' },
   once: { type: 'boolean' },
+  all: { type: 'boolean' },
   profile: { type: 'string' },
   repository: { type: 'string' },
   source: { type: 'string' },
@@ -1999,6 +2000,7 @@ async function run(
           data: await stopPreviews(ctx, {
             ...optional('repositoryId', v.repository),
             ...optional('previewId', v.preview),
+            ...(v.all ? { all: true } : {}),
           }),
         };
       // Длительности — с единицей (`90s`, `30m`, `2h`), как у `lead-begin --ttl`;

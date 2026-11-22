@@ -1,0 +1,32 @@
+▶ processes
+  ✖ async ps (2.381666ms)
+  ✔ passes (0.095834ms)
+✖ processes (3.024833ms)
+ℹ tests 2
+ℹ suites 1
+ℹ pass 1
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 49.426208
+
+✖ failing tests:
+
+test at ps-suite.test.mjs:5:3
+✖ async ps (2.381666ms)
+  Error: spawn EPERM
+      at ChildProcess.spawn (node:internal/child_process:421:11)
+      at spawn (node:child_process:763:9)
+      at execFile (node:child_process:347:17)
+      at execFile (node:child_process:243:21)
+      at TestContext.<anonymous> (file:///work/repo/ps-suite.test.mjs:5:59)
+      at Test.runInAsyncScope (node:async_hooks:214:14)
+      at Test.run (node:internal/test_runner/test:1062:25)
+      at Test.start (node:internal/test_runner/test:959:17)
+      at node:internal/test_runner/test:1464:71
+      at node:internal/per_context/primordials:483:82 {
+    errno: -1,
+    code: 'EPERM',
+    syscall: 'spawn'
+  }

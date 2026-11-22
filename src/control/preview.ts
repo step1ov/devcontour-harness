@@ -11,7 +11,6 @@ import {
   statSync,
   renameSync,
   rmSync,
-  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -223,12 +222,59 @@ const ownStart = (() => {
   return () => (cached === null ? (cached = processStart(process.pid)) : cached);
 })();
 
+/** Брошенный файл без разбираемого содержимого и зависший мьютекс снятия: старше паузы. */
+const ABANDONED_MS = 5000;
+const olderThan = (path: string, ms: number) => {
+  try {
+    return Date.now() - statSync(path).mtimeMs > ms;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Снятие брошенной `start.lock` под мьютексом `start.lock.takeover` (каталог:
+ * `mkdir` атомарен и отказывает при существующем). Почему так: прежнее снятие
+ * «переименовать в сторону, сверить nonce, вернуть чужую» имело окно между
+ * переименованием и возвратом — другой запуск успевал создать свою блокировку,
+ * возврат падал, и свежая блокировка пропадала (два владельца). Теперь чужую
+ * блокировку удаляет только держатель мьютекса и только после повторной сверки
+ * под ним: тот же nonce (или тот же неразбираемый файл) и владелец всё ещё не жив.
+ * Пока мьютекс держим мы, блокировку с этим nonce никто другой не удалит
+ * (её владелец мёртв, свою живой владелец не отдаёт), а новую `link` не создаст
+ * поверх существующей — между сверкой и удалением подмены нет.
+ * Мьютекс держится несколько системных вызовов; брошенный (держатель упал
+ * внутри) снимается по mtime старше паузы. Возвращает, снята ли блокировка.
+ */
+function takeOverStale(path: string, judged: StartLock | undefined) {
+  const mutex = `${path}.takeover`;
+  try {
+    mkdirSync(mutex);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    if (olderThan(mutex, ABANDONED_MS)) rmSync(mutex, { recursive: true, force: true });
+    return false;
+  }
+  try {
+    const now = readLock(path);
+    const stillStale = judged
+      ? now?.nonce === judged.nonce && staleLock(now)
+      : now === undefined && existsSync(path) && olderThan(path, ABANDONED_MS);
+    if (!stillStale) return false;
+    rmSync(path, { force: true });
+    return true;
+  } finally {
+    rmSync(mutex, { recursive: true, force: true });
+  }
+}
+
 /**
  * Захват блокировки превью: файл `start.lock` создаётся атомарно вместе с
  * содержимым (временный файл и `link`, отказ при существующем — как O_EXCL),
  * в нём PID и время старта владельца. Блокировка пропавшего владельца
- * (процесса нет или PID переиспользован) снимается. Живой владелец — ожидание
- * до `waitMs`, затем отказ NOT_READY. Возвращает освобождение.
+ * (процесса нет или PID переиспользован) и неразбираемый файл старше паузы
+ * снимаются через `takeOverStale`. Живой владелец — ожидание до `waitMs`,
+ * затем отказ NOT_READY. Возвращает освобождение (снимает только свою).
  */
 export async function acquireStartLock(dir: string, previewId: string, waitMs: number) {
   const path = lockFile(dir);
@@ -247,34 +293,9 @@ export async function acquireStartLock(dir: string, previewId: string, waitMs: n
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       }
       const held = readLock(path);
-      if (held && staleLock(held)) {
-        // Снять только ту блокировку, которую признали брошенной: переименовать
-        // в свой файл и сверить nonce; чужую свежую — вернуть на место.
-        const aside = `${path}.${mine.nonce}.stale`;
-        try {
-          renameSync(path, aside);
-          const moved = readLock(aside);
-          if (moved?.nonce !== held.nonce)
-            try {
-              linkSync(aside, path);
-            } catch {
-              /* на месте уже другая блокировка */
-            }
-          unlinkSync(aside);
-        } catch {
-          /* блокировку уже сняли или заменили */
-        }
-        continue;
-      }
-      if (!held) {
-        // Файл без разбираемого содержимого (не наш формат): брошенный, если старше паузы.
-        try {
-          const age = Date.now() - statSync(path).mtimeMs;
-          if (age > 5000) rmSync(path, { force: true });
-        } catch {
-          /* файл уже убран */
-        }
-      }
+      // Файл без разбираемого содержимого (не наш формат) — брошенный, если старше паузы.
+      const abandoned = held ? staleLock(held) : olderThan(path, ABANDONED_MS);
+      if (abandoned && takeOverStale(path, held)) continue;
       if (Date.now() >= end)
         throw new HarnessError(
           'NOT_READY',
@@ -470,7 +491,7 @@ export async function listPreviews(ctx: PreviewContext) {
 /** `preview-stop`: названное превью или все живые (с фильтром по репозиторию). */
 export async function stopPreviews(
   ctx: PreviewContext,
-  options: { repositoryId?: string; previewId?: string } = {},
+  options: { repositoryId?: string; previewId?: string; all?: boolean } = {},
 ) {
   const all = previewReceipts(ctx.stateDir).filter(
     (r) =>
@@ -481,6 +502,15 @@ export async function stopPreviews(
     throw new HarnessError('NOT_FOUND', 'Превью не запускалось: ' + options.previewId, [
       { path: ['--preview'], message: options.previewId },
     ]);
+  // Тот же ID превью в нескольких репозиториях: без --repository остановка
+  // одного не должна молча останавливать все — только с явным --all.
+  const repositories = [...new Set(all.map((r) => r.repositoryId))].sort();
+  if (options.previewId && !options.repositoryId && !options.all && repositories.length > 1)
+    throw new HarnessError(
+      'INVALID_INPUT',
+      `Превью ${options.previewId} есть в нескольких репозиториях (${repositories.join(', ')}): назовите --repository или подтвердите --all`,
+      [{ path: ['--repository'], message: repositories.join(', ') }],
+    );
   const out: PreviewReceipt[] = [];
   let changed = false;
   for (const r of all) {

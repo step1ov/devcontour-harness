@@ -834,6 +834,7 @@ export function collectOperatorViewInput(
         for (const a of own) if (!current.has(a.id)) earlier.add(a.id);
       }
     const known = new Set(v.works().map((w) => w.id));
+    const gateHolds = h.engine.environmentGateHolds(v);
     const records = callRecords(v);
     const complete = (r: (typeof records)[number]) =>
       r.outcome !== 'active' && r.outcome !== 'abandoned' && r.usage.complete && r.costUsd !== null;
@@ -933,6 +934,9 @@ export function collectOperatorViewInput(
           recovery: recoveryPolicyOf(policy),
           question: !!blockingRequest(v, w),
           budgetHeld: sw.blockers.some((b) => b.code === 'BUDGET_EXHAUSTED'),
+          ...((held) => (held ? { gateHold: held.gate } : {}))(
+            h.engine.gateHoldsOf(w, gateHolds)[0],
+          ),
         }),
         rechecks: own.reduce((n, a) => n + a.evidence.filter((e) => e.recheck).length, 0),
         ...(sw.liveness ? { liveness: sw.liveness } : {}),

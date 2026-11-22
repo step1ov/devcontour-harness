@@ -196,7 +196,7 @@ test('признак без JUnit: голый spawn EPERM рядом с пров
 });
 
 test(
-  'вызов ps добавлен кандидатом — засчитанный провал gate исполнителю; вызов уже в базе — отказ среды',
+  'вызов ps добавлен кандидатом — засчитанный провал gate исполнителю; изменение вызова не добавило — отказ среды',
   { skip: sandbox.ok ? false : 'песочница ОС недоступна: ' + sandbox.detail },
   async () => {
     const forged = [
@@ -233,8 +233,12 @@ test(
     writeFileSync(join(r.dir, 'more-ps.mjs'), "execFileSync('/bin/ps', ['-x'])\n");
     r.git('add', '-A');
     r.git('commit', '-q', '-m', 'more');
+    // Вызов есть и в базе, но изменение добавило свой — провал исполнителю
+    // с его файлом, без чужого файла базы.
     const both = await withProbe(unavailable, () => gate(forged, 'os', { r, trustedBase: base2 }));
-    assert.equal(both.failure?.diagnosis, 'sandbox-process-list', 'вызов есть в базе — среда');
+    assert.equal(both.failure?.kind, 'gate', both.evidence.summary);
+    assert.match(both.evidence.summary, /more-ps\.mjs/);
+    assert.doesNotMatch(both.evidence.summary, /base-ps\.mjs/);
   },
 );
 

@@ -57,6 +57,7 @@ import { analyzeRecovery, applyCases } from './recovery.ts';
 import { declarationProblems, referenceNote } from '../verification/checks.ts';
 import { spikeOf, spikesOf } from '../verification/spike.ts';
 import { staleArtifacts } from '../verification/confirm.ts';
+import { processListBackend } from '../verification/gates.ts';
 import { collectReportInput } from './report.ts';
 import { valueReport, type ValueReportOptions } from '../report/compute.ts';
 
@@ -886,6 +887,13 @@ export class Harness {
     // Пауза обновления, умершего до изменений (нет ни процесса, ни
     // незавершённого возврата), выдачу больше не держит: run её снимает.
     this.engine.clearStaleUpdatePause();
+    // Удержание gate отказом `ps` снимается, когда список процессов в
+    // песочнице стал доступен: проба (одна на процесс) — до выдачи.
+    if (
+      this.policy.isolation.mode === 'os' &&
+      this.engine.read((v) => this.engine.environmentGateHolds(v)).length
+    )
+      await processListBackend.probe().catch(() => undefined);
     // Обязательный контекст — одинаково для библиотеки и CLI: без снимка нужных источников граф не исполняется.
     const needed = [...new Set(input.graph.orders.flatMap((o) => o.context))];
     if (needed.length && !input.context)

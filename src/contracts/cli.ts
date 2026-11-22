@@ -1760,8 +1760,15 @@ export const cliCommands = {
         required: false,
         description: 'Только превью этого репозитория',
       },
+      {
+        name: '--all',
+        value: 'flag',
+        required: false,
+        description:
+          'С --preview без --repository: остановить превью с этим ID во всех репозиториях; без флага такой ID в нескольких репозиториях — отказ INVALID_INPUT с их списком',
+      },
     ],
-    refusals: ['NOT_FOUND'],
+    refusals: ['NOT_FOUND', 'INVALID_INPUT'],
   },
   'preview-list': {
     description:

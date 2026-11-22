@@ -9,7 +9,7 @@ import { CLIP_DIAGNOSTIC, clipText } from './clip.ts';
 import type { Actor, FailureKind, NextAction, PauseReason, WorkStatus } from './enums.ts';
 import type { InputState } from './input.ts';
 import { ruleOutcome } from './decisions.ts';
-import { gateHoldLine } from './gate-hold.ts';
+import { gateHoldLine, type RetryRoute } from './gate-hold.ts';
 
 /**
  * Код остановки по классу отказа. Это та же таблица, которой RunResult
@@ -146,7 +146,13 @@ export type StopInput =
          * Gate работы удержан отказом без повтора (`ENVIRONMENT_GATE_HELD`,
          * 0.1.0-alpha.66): `workId` — работа, чья попытка упала на ps из базы.
          */
-        gateHold?: { gate: string; workId: string; runId: string };
+        gateHold?: { gate: string; workId: string; runId: string; route?: RetryRoute };
+        /**
+         * Отказ без повтора исчерпал предел незасчитанных отказов работы
+         * (`MAX_NEUTRAL_FAILURES`): маршрут повтора (`retryRoute`) — ход по
+         * исчерпанию, а не простой повтор ведущего.
+         */
+        retryRoute?: RetryRoute;
         failure?: string;
         /**
          * Отказ до начала работы (причина `preflight`): последняя попытка не
@@ -701,7 +707,7 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       ...ruleOutcome('environment-gate-held'),
       cause: 'environment',
       phase: 'claim',
-      note: gateHoldLine({ ...gateHold, repositoryId: '', digest: '', at: '' }, work.id).ru + '.',
+      note: gateHoldLine(gateHold, work.id, gateHold.route).ru + '.',
     };
   // Восстановление ведущим держит выдачу: разбор, перепланирование или
   // решение человека по противоречию — раньше класса отказа и исчерпания.
@@ -752,13 +758,35 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       case 'timeout':
       case 'stalled':
         // Gate зовёт ps в песочнице ОС: повтор не поможет, правит ведущий.
-        if (kind === 'environment' && work.environmentCause)
+        if (kind === 'environment' && work.environmentCause) {
+          // Предел незасчитанных отказов исчерпан: простой повтор ведущего
+          // движок отклонит — ход по исчерпанию из того же правила.
+          const route = work.retryRoute;
+          if (route?.limit)
+            return {
+              ...ruleOutcome(
+                route.step === 'user-reset'
+                  ? 'exhausted-user'
+                  : route.step === 'reset'
+                    ? 'exhausted-lead-reset'
+                    : route.step === 'replan'
+                      ? 'diagnosis-split'
+                      : 'exhausted-diagnose',
+              ),
+              ...(route.step === 'replan' ? {} : { code: 'ATTEMPTS_EXHAUSTED' as const }),
+              cause: kind,
+              phase: 'claim',
+              note:
+                `${NO_RETRY_ENVIRONMENT_EXPLAIN[work.environmentCause]} У работы ${route.limit.ru}: ` +
+                `${route.actor === 'user' ? 'сброс — решение человека с причиной' : 'ход ведущего'} — ${route.command}.`,
+            };
           return {
             ...ruleOutcome('environment-gate-command'),
             cause: kind,
             phase,
             note: NO_RETRY_ENVIRONMENT_EXPLAIN[work.environmentCause],
           };
+        }
         return {
           code: 'RUNTIME_UNAVAILABLE',
           cause: kind,

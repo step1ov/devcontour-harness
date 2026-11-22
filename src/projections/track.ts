@@ -6,6 +6,7 @@
 
 import type { AttemptState, FailureKind, WorkState } from '../contracts/execution.ts';
 import {
+  trackStepActors,
   trackStepKinds,
   trackStepStates,
   type RecoveryPolicy,
@@ -18,7 +19,7 @@ import {
   pendingFailures,
 } from './lead-recovery.ts';
 
-export { trackStepKinds, trackStepStates };
+export { trackStepActors, trackStepKinds, trackStepStates };
 export type TrackStepKind = (typeof trackStepKinds)[number];
 export type TrackStepState = (typeof trackStepStates)[number];
 
@@ -33,7 +34,15 @@ export interface TrackStep {
   reason?: string;
   /** Шаг доработки после приёмки (номер доработки, P3-1). */
   rework?: number;
+  /**
+   * Кто решает на шаге решения (`diagnosis`, `reset`, `user-decision`) и на
+   * ожидании ведущего: ведущий, человек или harness (0.1.0-alpha.66).
+   */
+  actor?: TrackStepActor;
 }
+
+/** Кто решает на шаге пути. */
+export type TrackStepActor = (typeof trackStepActors)[number];
 
 /** Предел шагов пути: сверх него отбрасываются самые ранние. */
 export const TRACK_STEP_LIMIT = 120;
@@ -121,6 +130,11 @@ export interface TrackOptions {
   question?: boolean;
   /** Бюджет расходов держит работу. */
   budgetHeld?: boolean;
+  /**
+   * Gate работы удержан отказом без повтора (`ENVIRONMENT_GATE_HELD`): до
+   * плановых попыток — ожидание ведущего.
+   */
+  gateHold?: string;
 }
 
 /** Путь работы: история, текущая точка и плановый остаток. */
@@ -198,6 +212,7 @@ export function workTrack(
         {
           kind: 'diagnosis',
           state: 'decision',
+          actor: 'lead',
           label: t(d.cause === 'split' ? L.replan : L.diagnosis),
           at: d.at,
           reason: `${d.id}: ${t(causeShort[d.cause] ?? causeShort.other!)}`,
@@ -212,6 +227,7 @@ export function workTrack(
         {
           kind: 'reset',
           state: 'decision',
+          actor: r.by === 'lead' ? 'lead' : 'user',
           label: t(r.by === 'lead' ? L.reset : L.userReset),
           at: r.at,
           reason:
@@ -265,12 +281,12 @@ export function workTrack(
     if (!closed && o.question)
       planned.push({ kind: 'question', state: 'waiting', label: t(L.question) });
     if (hold?.kind === 'diagnosis-required') {
-      planned.push({ kind: 'diagnosis', state: 'waiting', label: t(L.diagnosis) });
+      planned.push({ kind: 'diagnosis', state: 'waiting', actor: 'lead', label: t(L.diagnosis) });
       pending = 0;
     } else if (hold?.kind === 'replan')
-      planned.push({ kind: 'diagnosis', state: 'waiting', label: t(L.replan) });
+      planned.push({ kind: 'diagnosis', state: 'waiting', actor: 'lead', label: t(L.replan) });
     else if (hold?.kind === 'contradiction')
-      planned.push({ kind: 'user-decision', state: 'waiting', label: t(L.user) });
+      planned.push({ kind: 'user-decision', state: 'waiting', actor: 'user', label: t(L.user) });
     else if (exhausted && !closed) {
       const step = exhaustedStep(work, own, r, o.budgetHeld);
       if (step.actor === 'user') spareFrom = Infinity;
@@ -281,6 +297,7 @@ export function workTrack(
             ? {
                 kind: 'reset',
                 state: 'waiting',
+                actor: 'lead',
                 label: t(L.reset),
                 reason: t({
                   ru: `сброс ${step.index} из ${step.cap}`,
@@ -290,11 +307,24 @@ export function workTrack(
             : {
                 kind: 'diagnosis',
                 state: 'waiting',
+                actor: 'lead',
                 label: t(step.step === 'replan' ? L.replan : L.diagnosis),
               }
-          : { kind: 'user-decision', state: 'waiting', label: t(L.user) },
+          : { kind: 'user-decision', state: 'waiting', actor: 'user', label: t(L.user) },
       );
     }
+    // Gate удержан отказом без повтора: выдачи нет, пока ведущий не поменяет
+    // gate или не повторит удержавшую работу — ожидание до плановых попыток.
+    if (!closed && o.gateHold)
+      planned.push({
+        kind: 'checks',
+        state: 'waiting',
+        actor: 'lead',
+        label: t({
+          ru: `ждёт ведущего: проверка ${o.gateHold} удержана`,
+          en: `waits for the lead: check ${o.gateHold} is held`,
+        }).slice(0, 80),
+      });
     // Плановые попытки: остаток предела; разбор — там, где отказов без
     // разбора станет `diagnoseAfter` (если каждая следующая не удастся).
     if (work.activeRunId) pending++;
@@ -312,7 +342,7 @@ export function workTrack(
     };
     for (let k = 0; k < left; k++) {
       if (r.enabled && pending >= r.diagnoseAfter && r.diagnoseAfter < o.maxAttempts) {
-        plan({ kind: 'diagnosis', label: t(L.diagnosis) });
+        plan({ kind: 'diagnosis', actor: 'lead', label: t(L.diagnosis) });
         pending = 0;
       }
       attemptRow();
@@ -322,9 +352,10 @@ export function workTrack(
     if (r.enabled) {
       for (let k = spareFrom; k <= r.leadResets; k++) {
         if (planned.at(-1)?.kind !== 'diagnosis')
-          plan({ kind: 'diagnosis', label: t(L.diagnosis) });
+          plan({ kind: 'diagnosis', actor: 'lead', label: t(L.diagnosis) });
         plan({
           kind: 'reset',
+          actor: 'lead',
           label: t(L.reset),
           reason: t({ ru: `сброс ${k} из ${r.leadResets}`, en: `reset ${k} of ${r.leadResets}` }),
         });

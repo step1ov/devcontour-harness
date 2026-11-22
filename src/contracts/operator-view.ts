@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { decisionSettingsSchema } from './decisions.ts';
-import { trackStepKinds, trackStepStates } from './decision-rules.ts';
+import { trackStepActors, trackStepKinds, trackStepStates } from './decision-rules.ts';
 import { gitShaSchema, isoTimeSchema } from './primitives.ts';
 import {
   OPERATOR_VIEW_LIMITS as L,
@@ -414,6 +414,12 @@ export const workViewSchema = z.strictObject({
             at: isoTimeSchema.optional(),
             reason: z.string().min(1).max(200).optional(),
             rework: z.number().int().positive().optional(),
+            /**
+             * Кто решает на шаге решения (`diagnosis`, `reset`,
+             * `user-decision`) и на ожидании ведущего (удержанный gate):
+             * сброс человеком — `user`, сброс ведущего — `lead`.
+             */
+            actor: z.enum(trackStepActors).optional(),
           }),
         )
         .max(L.trackSteps),

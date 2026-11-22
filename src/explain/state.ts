@@ -483,12 +483,23 @@ export function stopInputsIn(
             ? { contextLimit: lastContextLimit(attempts) }
             : {}),
           ...(work.status === 'failed' && lastNoRetryCause(attempts)
-            ? { environmentCause: lastNoRetryCause(attempts) }
+            ? {
+                environmentCause: lastNoRetryCause(attempts),
+                retryRoute: h.engine.retryRouteOf(work, v),
+              }
             : {}),
-          ...((held) =>
-            held ? { gateHold: { gate: held.gate, workId: held.workId, runId: held.runId } } : {})(
-            h.engine.gateHoldsOf(work, gateHolds)[0],
-          ),
+          ...((held) => {
+            if (!held) return {};
+            const holder = v.work(held.workId);
+            return {
+              gateHold: {
+                gate: held.gate,
+                workId: held.workId,
+                runId: held.runId,
+                ...(holder ? { route: h.engine.retryRouteOf(holder, v) } : {}),
+              },
+            };
+          })(h.engine.gateHoldsOf(work, gateHolds)[0]),
           ...((input) => (input ? { input } : {}))(inputOf(work, attempts)),
           ...(work.failure !== undefined ? { failure: work.failure } : {}),
           ...(work.status === 'failed' && failedBeforeWork(kind, attempts)

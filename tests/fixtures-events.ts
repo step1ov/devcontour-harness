@@ -68,6 +68,7 @@ export const validPayloads: Record<EventType, Record<string, unknown>> = {
   'attempt.recovered': { integrationSha: sha, accepted: true },
   'work.accepted': { resultSha: sha, integrationSha: sha },
   'work.retried': { by: 'operator', reset: true, spent: 3, reasonLength: 12 },
+  'work.gate-hold-lifted': { gate: 'unit', by: 'lead', refused: 'ATTEMPTS_EXHAUSTED' },
   'work.reopened': { revision: 1, budget: 'fresh', acceptedSha: sha, spent: 3 },
   'work.rework-abandoned': {
     by: 'operator',

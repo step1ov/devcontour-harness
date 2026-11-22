@@ -492,8 +492,15 @@ test('H3-01: прежние команды и схемы их данных не 
         delete o.held;
         delete o.heldLine;
       }
+      // Ревью раунда 2: актёр шага пути (`track.steps[].actor`).
+      if ('label' in o && 'state' in o && 'rework' in o) delete o.actor;
       if (Object.keys(o).length !== before) v = o;
     }
+    // Ревью раунда 2: событие снятия удержания при отклонённом повторе.
+    if (k === 'oneOf' && Array.isArray(v))
+      v = (v as { properties?: { type?: { const?: unknown } } }[]).filter(
+        (x) => x?.properties?.type?.const !== 'work.gate-hold-lifted',
+      );
     // Аддитивные поля ответа init (0.1.0-alpha.50): ведущий, решение о
     // ревью, наличие CLI и предупреждения — обязательные, поэтому и в `required`.
     if (v && typeof v === 'object' && !Array.isArray(v) && 'properties' in v) {

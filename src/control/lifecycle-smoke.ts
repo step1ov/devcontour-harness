@@ -16,10 +16,7 @@ import {
 import { applyWriterLoopback, loopbackChanges } from './writer-loopback.ts';
 import { writeFile } from 'node:fs/promises';
 import { processListBackend, processListCallers } from '../verification/gates.ts';
-import {
-  processListLine,
-  type ProcessListCapability,
-} from '../verification/process-list.ts';
+import { processListLine, type ProcessListCapability } from '../verification/process-list.ts';
 
 /**
  * Класс отказа окружения `harness smoke`:

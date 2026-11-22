@@ -126,7 +126,9 @@ import {
   environmentGateHolds,
   gateHoldLine,
   gateHoldsFor,
+  retryRoute,
   type EnvironmentGateHold,
+  type RetryRoute,
 } from '../projections/gate-hold.ts';
 import {
   LEAD_RECOVERY_LIMIT,
@@ -135,6 +137,7 @@ import {
   type LeadReset,
 } from '../contracts/execution.ts';
 import {
+  countedFailure,
   epochOf,
   exhaustedStep,
   freshDiagnosis,
@@ -144,6 +147,7 @@ import {
   type LeadHold,
 } from '../projections/lead-recovery.ts';
 import { REQUIREMENT_GATE } from '../verification/requirements.ts';
+import { processListSeen } from '../verification/process-list.ts';
 import {
   notApplicableProblem,
   proofGates,
@@ -597,7 +601,11 @@ export class Engine {
           graphId: graph.id,
           order,
           status: 'draft',
-          attempt: fresh ? 0 : (resumed?.attempt ?? prior?.attempt ?? 0),
+          attempt: fresh
+            ? 0
+            : resumed
+              ? (resumed.attempt ?? this.abandonedReworkSpent(tx, prior!))
+              : (prior?.attempt ?? 0),
           ...(neutral ? { neutralFailures: neutral } : {}),
           ...(rework ? { rework } : {}),
           ...(corpus ? { checkVersion: corpus } : {}),
@@ -609,6 +617,13 @@ export class Engine {
           // Удержание операции принадлежит ей: новая редакция источника его не
           // снимает — только release или передача владельцем.
           ...(prior?.hold ? { hold: prior.hold } : {}),
+          // Удержание gate отказом без повтора — свойство gate и среды, а не
+          // редакции графа: оно переносится и снимается, как прежде, сменой
+          // определения gate или среды, повтором ведущего, приёмкой или
+          // отменой работы.
+          ...(prior?.environmentHold && prior.status !== 'done' && prior.status !== 'cancelled'
+            ? { environmentHold: prior.environmentHold }
+            : {}),
         });
         if (reopen) reopened.push({ workId: order.id, rework: reopen });
       }
@@ -695,6 +710,26 @@ export class Engine {
       spent: prior.attempt,
       acceptedOrder: prior.order,
     };
+  }
+
+  /**
+   * Засчитанные попытки оставленной доработки для записи прежней сборки
+   * (`rework.abandoned` без `attempt`): `prior.attempt` там — счёт принятой
+   * редакции, и продолжение по нему дало бы предел заново. Счёт выводится,
+   * когда известна принятая попытка (`rework.accepted.runId`): перенесённый
+   * с прежней редакции счёт (`spent` у доработки без своего предела) плюс
+   * засчитанные отказы после принятой попытки. Сбросы внутри доработки
+   * здесь не вычитаются — ошибка только в строгую сторону. Не вывести —
+   * строгая сторона: предел исчерпан (`maxAttempts`), продолжение решает
+   * сброс.
+   */
+  private abandonedReworkSpent(tx: ExecutionView, prior: WorkState): number {
+    const r = prior.rework;
+    const own = tx.attempts(prior.id);
+    const from = r?.accepted.runId ? own.findIndex((a) => a.id === r.accepted.runId) : -1;
+    if (!r || from < 0) return this.policy.maxAttempts;
+    const counted = own.slice(from + 1).filter(countedFailure).length;
+    return Math.min(this.policy.maxAttempts, (r.fresh ? 0 : r.spent) + counted);
   }
 
   /**
@@ -1754,8 +1789,13 @@ export class Engine {
       });
     const hold = this.leadHoldOf(work, view);
     if (hold) out.push(leadHoldBlocker(hold));
-    for (const h of this.gateHoldsOf(work, this.environmentGateHolds(view)))
-      out.push({ code: 'ENVIRONMENT_GATE_HELD', message: gateHoldLine(h, work.id).ru });
+    for (const h of this.gateHoldsOf(work, this.environmentGateHolds(view))) {
+      const holder = view.work(h.workId);
+      out.push({
+        code: 'ENVIRONMENT_GATE_HELD',
+        message: gateHoldLine(h, work.id, holder ? this.retryRouteOf(holder, view) : undefined).ru,
+      });
+    }
     if (this.awaitsOperator(work, view))
       out.push({
         code: 'APPROVAL_REQUIRED',
@@ -5473,12 +5513,21 @@ export class Engine {
    * хост, не назвавший актёра, — `host`.
    */
   retry(workId: string, reset?: RetryReset, by: RetryActor = 'host') {
-    return this.tx('task.retry', (tx) => {
+    const result = this.tx('task.retry', (tx) => {
       this.assertNoUpdate(tx);
       const w = tx.work(workId);
       if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
       return this.retryIn(tx, w, reset, by);
     });
+    // Повтор ведущего снял удержание gate, а сам повтор отклонён (например,
+    // исчерпан предел): снятие записано, отказ сообщается с ним.
+    if (result.refused)
+      throw new HarnessError(
+        result.refused.code,
+        `${result.refused.message}. Удержание gate ${result.gateHoldLifted} снято: работы с этим gate снова выдаются`,
+        result.refused.issues,
+      );
+    return result;
   }
 
   /** Удержание выдачи правилом восстановления ведущим (`policy.recovery`). */
@@ -5502,17 +5551,25 @@ export class Engine {
       digest: gateDigest(gate),
       runId: a.id,
       at: iso(this.now()),
+      isolation: this.policy.isolation.mode,
     };
   }
 
   /** Действующие удержания gates (`WorkState.environmentHold`) по текущей политике. */
   environmentGateHolds(view: ExecutionView): EnvironmentGateHold[] {
-    return environmentGateHolds(view.works(), (repositoryId, id) => {
-      const gate = this.policy.repositories
-        .find((r) => r.id === repositoryId)
-        ?.gates.find((g) => g.id === id);
-      return gate ? gateDigest(gate) : undefined;
-    });
+    return environmentGateHolds(
+      view.works(),
+      (repositoryId, id) => {
+        const gate = this.policy.repositories
+          .find((r) => r.id === repositoryId)
+          ?.gates.find((g) => g.id === id);
+        return gate ? gateDigest(gate) : undefined;
+      },
+      {
+        isolation: this.policy.isolation.mode,
+        ...(processListSeen.status ? { processList: processListSeen.status } : {}),
+      },
+    );
   }
 
   /** Удержания gates, которые нужны работе (её обязательные gates репозитория). */
@@ -5527,6 +5584,30 @@ export class Engine {
       return [];
     }
     return gateHoldsFor(holds, repo.id, gates);
+  }
+
+  /**
+   * Маршрут повтора работы (`retryRoute`): тот же вывод, что у отказа
+   * `retry --by lead` в `retryRest`, — для строк удержания gate и explain.
+   */
+  retryRouteOf(work: WorkState, view: ExecutionView): RetryRoute {
+    const step = exhaustedStep(
+      work,
+      view.attempts(work.id),
+      recoveryPolicyOf(this.policy),
+      Boolean(this.budgetBlockOf(work.id, view)),
+    );
+    return retryRoute(
+      work,
+      { maxAttempts: this.policy.maxAttempts, maxNeutral: MAX_NEUTRAL_FAILURES },
+      step.actor === 'lead'
+        ? {
+            actor: 'lead',
+            step: step.step,
+            ...(step.step === 'diagnose' ? {} : { diagnosis: step.diagnosis.id }),
+          }
+        : { actor: 'user', why: step.why },
+    );
   }
 
   leadHoldOf(work: WorkState, view: ExecutionView): LeadHold | undefined {
@@ -5546,7 +5627,52 @@ export class Engine {
    * ведущего (`by: lead`) — только по свежему техническому разбору и в
    * пределе `leadResets`; сброс человека покрывает отказы без разбора.
    */
-  retryIn(tx: ExecutionTransaction, w: WorkState, reset: RetryReset | undefined, by: RetryActor) {
+  retryIn(
+    tx: ExecutionTransaction,
+    w: WorkState,
+    reset: RetryReset | undefined,
+    by: RetryActor,
+  ): ReturnType<Engine['retryRest']> & { gateHoldLifted?: string; refused?: HarnessError } {
+    // Повтор ведущего всегда снимает удержание gate своей работы — раньше
+    // проверок вопроса, исчерпания и удержания разбора: ведущий исправил
+    // тест (или gate). Сам повтор дальше идёт по обычным правилам; отказ
+    // возвращается вместе со снятием (`retry` сообщает оба), а не
+    // откатывает его. Повтор оператора или движка удержание не снимает.
+    if (by === 'lead' && w.environmentHold && w.status !== 'done' && w.status !== 'cancelled') {
+      const { environmentHold: held, ...rest } = w;
+      const lifted = rest as WorkState;
+      tx.putWork(lifted);
+      try {
+        const result = this.retryRest(tx, lifted, reset, by, held.gate);
+        if (!result.changed)
+          tx.emit({
+            type: 'work.retried',
+            graphId: w.graphId,
+            workId: w.id,
+            payload: { by, reset: false, gateHoldLifted: held.gate },
+          });
+        return { ...result, changed: true, gateHoldLifted: held.gate };
+      } catch (error) {
+        if (!(error instanceof HarnessError)) throw error;
+        tx.emit({
+          type: 'work.gate-hold-lifted',
+          graphId: w.graphId,
+          workId: w.id,
+          payload: { gate: held.gate, by: 'lead', refused: error.code },
+        });
+        return { work: lifted, changed: true, gateHoldLifted: held.gate, refused: error };
+      }
+    }
+    return this.retryRest(tx, w, reset, by);
+  }
+
+  private retryRest(
+    tx: ExecutionTransaction,
+    w: WorkState,
+    reset: RetryReset | undefined,
+    by: RetryActor,
+    liftedGate?: string,
+  ) {
     const workId = w.id;
     // Вопрос исполнителя без применённого ответа: ни обычный повтор, ни
     // сброс попыток его не обходят — продолжение только через applyInput
@@ -5567,25 +5693,6 @@ export class Engine {
     // проигнорированного сброса нет: нечего сбросить — это сказано в ответе.
     const resetAsked = !!reset?.reason.trim() || (by === 'lead' && !!reset);
     const spent = w.attempt > 0 || (w.neutralFailures ?? 0) > 0;
-    // Работа уже в очереди (повтор оператора), а gate удержан её отказом:
-    // повтор ведущего после исправления теста снимает удержание.
-    if (
-      w.status === 'ready' &&
-      !exhausted &&
-      !(resetAsked && spent) &&
-      by === 'lead' &&
-      w.environmentHold
-    ) {
-      const { environmentHold: held, ...rest } = w;
-      tx.putWork(rest);
-      tx.emit({
-        type: 'work.retried',
-        graphId: w.graphId,
-        workId,
-        payload: { by, reset: false, gateHoldLifted: held.gate },
-      });
-      return { work: rest as WorkState, changed: true };
-    }
     if (w.status === 'ready' && !exhausted && !(resetAsked && spent))
       return {
         work: w,
@@ -5616,13 +5723,18 @@ export class Engine {
     // Повтор без сброса и сброс ведущего удержание не снимают: третьей
     // слепой попытки нет, перепланирование и противоречие сбросом не решаются.
     if (hold && (!resetAsked || by === 'lead')) throw leadHoldError(hold);
-    if (exhausted && !resetAsked)
+    // Текст отказа — из того же правила, что ход в explain и строке
+    // удержания gate (`retryRoute`): кто дальше и какой командой.
+    if (exhausted && !resetAsked) {
+      const route = this.retryRouteOf(w, tx);
       throw new HarnessError(
         'ATTEMPTS_EXHAUSTED',
-        rp.enabled
-          ? 'Исчерпан лимит попыток: ведущий разбирает причину (harness diagnose) и при технической причине сам даёт новый предел (retry --reset --by lead --diagnosis <id>); иначе — сброс человеком с причиной'
-          : 'Исчерпан лимит попыток; повторите со сбросом и причиной',
+        (w.attempt >= this.policy.maxAttempts
+          ? `Исчерпан лимит попыток (${w.attempt} из ${this.policy.maxAttempts})`
+          : `Исчерпан предел незасчитанных отказов (${w.neutralFailures ?? 0} из ${MAX_NEUTRAL_FAILURES})`) +
+          `: повтор — только сбросом; ${route.actor === 'lead' ? 'ход ведущего' : 'сброс — решение человека с причиной'} — ${route.command}`,
       );
+    }
     const doReset = exhausted || (resetAsked && spent);
     const at = iso(this.now());
     let record: LeadReset | undefined;
@@ -5674,10 +5786,8 @@ export class Engine {
     // Ведущий повторяет работу, остановленную отказом без повтора, после
     // исправления теста: удержание gate снимается (новый отказ поставит его
     // снова). Повтор оператора или движка его не снимает.
-    const lifted = by === 'lead' && w.environmentHold ? w.environmentHold : undefined;
     const next: WorkState = {
       ...w,
-      environmentHold: lifted ? undefined : w.environmentHold,
       status: w.approvedDigest ? 'ready' : 'draft',
       attempt: doReset ? 0 : w.attempt,
       neutralFailures: doReset ? undefined : w.neutralFailures,
@@ -5704,7 +5814,7 @@ export class Engine {
               granted: record.granted,
             }
           : {}),
-        ...(lifted ? { gateHoldLifted: lifted.gate } : {}),
+        ...(liftedGate ? { gateHoldLifted: liftedGate } : {}),
       },
     });
     return {

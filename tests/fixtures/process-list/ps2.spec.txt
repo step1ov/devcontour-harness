@@ -1,0 +1,82 @@
+✖ lists processes (1.138416ms)
+✖ lists again (0.40375ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 0
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 45.98625
+
+✖ failing tests:
+
+test at ps2.test.mjs:3:1
+✖ lists processes (1.138416ms)
+  Error: spawnSync /bin/ps EPERM
+      at Object.spawnSync (node:internal/child_process:1120:20)
+      at spawnSync (node:child_process:878:24)
+      at execFileSync (node:child_process:921:15)
+      at TestContext.<anonymous> (file:///work/repo/ps2.test.mjs:3:33)
+      at Test.runInAsyncScope (node:async_hooks:214:14)
+      at Test.run (node:internal/test_runner/test:1062:25)
+      at Test.start (node:internal/test_runner/test:959:17)
+      at startSubtestAfterBootstrap (node:internal/test_runner/harness:332:17) {
+    errno: -1,
+    code: 'EPERM',
+    syscall: 'spawnSync /bin/ps',
+    path: '/bin/ps',
+    spawnargs: [ '-ax' ],
+    error: Error: spawnSync /bin/ps EPERM
+        at Object.spawnSync (node:internal/child_process:1120:20)
+        at spawnSync (node:child_process:878:24)
+        at execFileSync (node:child_process:921:15)
+        at TestContext.<anonymous> (file:///work/repo/ps2.test.mjs:3:33)
+        at Test.runInAsyncScope (node:async_hooks:214:14)
+        at Test.run (node:internal/test_runner/test:1062:25)
+        at Test.start (node:internal/test_runner/test:959:17)
+        at startSubtestAfterBootstrap (node:internal/test_runner/harness:332:17),
+    status: null,
+    signal: null,
+    output: null,
+    pid: 0,
+    stdout: undefined,
+    stderr: undefined
+  }
+
+test at ps2.test.mjs:4:1
+✖ lists again (0.40375ms)
+  Error: spawnSync /bin/ps EPERM
+      at Object.spawnSync (node:internal/child_process:1120:20)
+      at spawnSync (node:child_process:878:24)
+      at execFileSync (node:child_process:921:15)
+      at TestContext.<anonymous> (file:///work/repo/ps2.test.mjs:4:29)
+      at Test.runInAsyncScope (node:async_hooks:214:14)
+      at Test.run (node:internal/test_runner/test:1062:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:752:18)
+      at Test.postRun (node:internal/test_runner/test:1191:19)
+      at Test.run (node:internal/test_runner/test:1119:12)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:332:3) {
+    errno: -1,
+    code: 'EPERM',
+    syscall: 'spawnSync /bin/ps',
+    path: '/bin/ps',
+    spawnargs: [ '-o', 'pid' ],
+    error: Error: spawnSync /bin/ps EPERM
+        at Object.spawnSync (node:internal/child_process:1120:20)
+        at spawnSync (node:child_process:878:24)
+        at execFileSync (node:child_process:921:15)
+        at TestContext.<anonymous> (file:///work/repo/ps2.test.mjs:4:29)
+        at Test.runInAsyncScope (node:async_hooks:214:14)
+        at Test.run (node:internal/test_runner/test:1062:25)
+        at Test.processPendingSubtests (node:internal/test_runner/test:752:18)
+        at Test.postRun (node:internal/test_runner/test:1191:19)
+        at Test.run (node:internal/test_runner/test:1119:12)
+        at async startSubtestAfterBootstrap (node:internal/test_runner/harness:332:3),
+    status: null,
+    signal: null,
+    output: null,
+    pid: 0,
+    stdout: undefined,
+    stderr: undefined
+  }

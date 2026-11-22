@@ -44,6 +44,13 @@ export interface ProcessListCapability {
   detail: string;
 }
 
+/**
+ * Последний ответ пробы списка процессов в этом процессе harness (или его
+ * нет — проба не исполнялась). Удержание gate по отказу `ps` снимается,
+ * когда проба ответила `available`: отказ перестал быть свойством среды.
+ */
+export const processListSeen: { status?: ProcessListCapability['status'] } = {};
+
 /** Признак отказа списка процессов в выводе проверки. */
 export interface ProcessListSignature {
   /** Строка вывода с признаком (обрезана). */
@@ -97,14 +104,104 @@ export function processListFailure(
     if (found.some((s) => !s)) return undefined;
     return found.find((s) => s!.named) ?? found[0];
   }
-  // Без отчёта JUnit упавшие тесты не сопоставить с признаком: отказ среды —
-  // только признак, называющий программу (голый `spawn EPERM` бывает и в
-  // предупреждении рядом с настоящим провалом), и ни одного другого
-  // признака провала: упавших тестов не больше строк признака, нет
-  // проваленных утверждений. Иначе — обычный засчитанный провал gate.
+  // Без отчёта JUnit упавшие тесты читаются по блокам отчёта TAP или spec
+  // (`node --test`): заголовки, итоги и упавшие наборы (`subtestsFailed`) —
+  // не провалы. Отказ среды — только когда у каждого упавшего теста свой
+  // признак и ни у одного нет проваленного утверждения.
+  const blocks = failedBlocks(output);
+  if (blocks) return blocksFailure(blocks);
+  // Другие отчёты: отказ среды — только признак, называющий программу
+  // (голый `spawn EPERM` бывает и в предупреждении рядом с настоящим
+  // провалом), и ни одного другого признака провала: упавших тестов не
+  // больше строк признака, нет проваленных утверждений. Иначе — обычный
+  // засчитанный провал gate.
   const signature = processListSignature(output);
   if (!signature?.named) return undefined;
   return otherFailures(output) ? undefined : signature;
+}
+
+/** Упавшие тесты отчёта и итог прогона (`# fail N`, `ℹ fail N`). */
+interface FailedBlocks {
+  /** Тексты упавших тестов (без упавших наборов). */
+  tests: string[];
+  /** Упавших тестов вместе с наборами — сверка с итогом прогона. */
+  count: number;
+  /** Итог прогона, если напечатан. */
+  total?: number;
+}
+
+/** Упавший набор (его провал — упавшие тесты внутри), а не свой провал. */
+const suiteFailure = /failureType:\s*'subtestsFailed'|\b\d+ subtests? failed\b/;
+/** Строка TAP упавшего теста. */
+const tapFailed = /^\s*not ok\b/;
+/** Строка spec упавшего теста и заголовок списка упавших. */
+const specFailed = /^\s*✖\s/;
+const specHeader = /^\s*✖\s+failing tests:\s*$/;
+
+/**
+ * Блоки упавших тестов отчёта TAP или spec, или undefined, если отчёт не
+ * такой. В spec упавшие тесты повторяются: в ходе прогона без текста и в
+ * списке `✖ failing tests:` с текстом — читается список, если он есть.
+ */
+function failedBlocks(output: string): FailedBlocks | undefined {
+  const lines = output.split('\n');
+  let total: number | undefined;
+  for (const l of lines) {
+    const m = /^\s*(?:#|ℹ)\s*fail\s+(\d+)\s*$/.exec(l);
+    if (m) total = Math.max(total ?? 0, Number(m[1]));
+  }
+  let start: RegExp;
+  let from = 0;
+  if (lines.some((l) => tapFailed.test(l))) start = tapFailed;
+  else if (lines.some((l) => specFailed.test(l))) {
+    start = specFailed;
+    const header = lines.findIndex((l) => specHeader.test(l));
+    if (header >= 0) from = header + 1;
+  } else return undefined;
+  const texts: string[] = [];
+  let current: string[] | undefined;
+  for (const l of lines.slice(from)) {
+    if (start.test(l) && !specHeader.test(l)) {
+      if (current) texts.push(current.join('\n'));
+      current = [l];
+    } else current?.push(l);
+  }
+  if (current) texts.push(current.join('\n'));
+  return {
+    tests: texts.filter((t) => !suiteFailure.test(t)),
+    count: texts.length,
+    ...(total === undefined ? {} : { total }),
+  };
+}
+
+/** Строка признака — сама ошибка запуска, а не другая ошибка теста. */
+const otherError = /\b(?:[A-Z]\w*)?Error\b/;
+/** Блок называет программу списка процессов: путь, имя строкой, вызов. */
+const namesTool = new RegExp(String.raw`(?:^|[\s'"\`(=:])${tool}(?=['"\`\s,)]|$)`, 'm');
+
+/** Признак отказа списка процессов в тексте одного упавшего теста. */
+function blockSignature(text: string): ProcessListSignature | undefined {
+  const lines = text.split('\n');
+  if (lines.some((l) => assertionMarkers.some((r) => r.test(l)))) return undefined;
+  const signature = processListSignature(text);
+  if (!signature || signature.named) return signature;
+  // Асинхронный отказ (`execFile('ps')` → `spawn EPERM` без пути): признак,
+  // если текст называет программу или другой ошибки в нём нет.
+  if (namesTool.test(text)) return signature;
+  const other = lines.some(
+    (l) => otherError.test(l) && !bareSpawn.test(l) && !namedSignatures.some((r) => r.test(l)),
+  );
+  return other ? undefined : signature;
+}
+
+function blocksFailure(blocks: FailedBlocks): ProcessListSignature | undefined {
+  // Итог прогона называет больше упавших, чем прочитано блоков, — у
+  // непрочитанных признак не доказать.
+  if (!blocks.tests.length || (blocks.total !== undefined && blocks.total > blocks.count))
+    return undefined;
+  const found = blocks.tests.map(blockSignature);
+  if (found.some((s) => !s)) return undefined;
+  return found.find((s) => s!.named) ?? found[0];
 }
 
 /** Проваленное утверждение (node:assert, chai, jest/vitest), а не отказ запуска. */
@@ -158,7 +255,8 @@ export function processListMessage(signature: ProcessListSignature, tail: string
 
 /**
  * Текст провала gate, когда вызов списка процессов добавлен изменением
- * задачи (в базе попытки его нет): исправляет исполнитель.
+ * задачи (его вызывают добавленные строки `база..кандидат`): исправляет
+ * исполнитель.
  */
 export function processListCodeMessage(
   signature: ProcessListSignature,
@@ -167,7 +265,7 @@ export function processListCodeMessage(
 ) {
   return (
     `${GATE_SANDBOX_PROCESS_LIST}: тест вызывает ps, в песочнице проверок это запрещено; уберите вызов — ` +
-    `«${signature.line}»; вызов добавлен изменением задачи (${files.join(', ')}), в базе его нет. ` +
+    `«${signature.line}»; вызов добавлен изменением задачи (${files.join(', ')}). ` +
     `Что сделать: ${PROCESS_LIST_ADVICE}. ${tail}`
   );
 }
@@ -190,12 +288,34 @@ export function processListLine(capability: ProcessListCapability) {
   }
 }
 
+const ereTool = String.raw`(/(usr/)?s?bin/)?(ps|pgrep|pkill|top)`;
 /**
- * Шаблоны `git grep -E` вызовов списка процессов в файлах дерева: абсолютный
- * путь программы, её имя строкой (`execFile('ps', …)`) и вызов в shell.
+ * Шаблоны `git grep -E` (POSIX ERE) вызовов списка процессов в файлах
+ * дерева. Вызов — это запуск программы, а не любое слово `ps`: вызов
+ * `exec`/`execSync`/`execFile`/`spawn`/`execa` (и `child_process.…`) с
+ * командой `ps` или `/bin/ps`, строка с абсолютным путём программы,
+ * шаблон `` $`ps …` ``, команда в начале строки shell или скрипта
+ * `package.json` и после `$(`, `|`, `;`, `&&`. Строка `'ps'` в массиве или
+ * другом литерале вызовом не считается.
  */
 export const processListCallPatterns = [
-  String.raw`/(usr/)?s?bin/(ps|pgrep|pkill|top)([^a-zA-Z0-9_.-]|$)`,
-  String.raw`['"\`](ps|pgrep|pkill)['"\` ]`,
-  String.raw`(^|[;&|(]|[[:space:]])(ps|pgrep|pkill) -[a-zA-Z]`,
+  String.raw`(^|[^A-Za-z0-9_$])(exec|execSync|execFile|execFileSync|spawn|spawnSync|execa|execaSync|execaCommand|execaCommandSync)[[:space:]]*\([[:space:]]*['"` +
+    '`' +
+    String.raw`]${ereTool}(['"` +
+    '`' +
+    String.raw`]|[[:space:]])`,
+  String.raw`['"` + '`' + String.raw`]/(usr/)?s?bin/(ps|pgrep|pkill|top)['"` + '`' + String.raw`]`,
+  String.raw`\$` + '`' + String.raw`[[:space:]]*${ereTool}[[:space:]]`,
+  String.raw`^[[:space:]]*(sudo[[:space:]]+)?${ereTool}[[:space:]]+(-|aux)`,
+  String.raw`(\$\(|[|;&]|":[[:space:]]*")[[:space:]]*${ereTool}[[:space:]]+(-|aux)`,
 ];
+
+/** Те же шаблоны для строк в JavaScript (`[[:space:]]` — `\s`). */
+const processListCallRegexps = processListCallPatterns.map(
+  (p) => new RegExp(p.replaceAll('[[:space:]]', String.raw`\s`)),
+);
+
+/** Строка кода вызывает список процессов (`processListCallPatterns`). */
+export function processListCall(line: string) {
+  return processListCallRegexps.some((r) => r.test(line));
+}

@@ -356,6 +356,8 @@ export const trackStepKinds = [
   'user-decision',
   'accepted',
 ] as const;
+/** Кто решает на шаге пути (`track.steps[].actor`, 0.1.0-alpha.66). */
+export const trackStepActors = ['lead', 'user', 'harness'] as const;
 export const trackStepStates = [
   'planned',
   'current',

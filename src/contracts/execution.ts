@@ -977,6 +977,12 @@ export const workStateSchema = z.strictObject({
       digest: digestSchema,
       runId: z.string().min(1),
       at: isoTimeSchema,
+      /**
+       * Режим изоляции проверок при отказе (`os`): отказ — свойство
+       * песочницы ОС; `isolation.mode: none` снимает удержание. Нет поля
+       * (состояние до этого поля) — `os`.
+       */
+      isolation: z.enum(['os', 'none']).optional(),
     })
     .optional(),
 });

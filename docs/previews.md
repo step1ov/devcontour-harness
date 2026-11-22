@@ -74,7 +74,7 @@ loopback-прокси harness перед приложением.
 ```sh
 harness preview-start --state D [--policy F] [--preview ID] [--ref accepted|SHA|REF] [--work ID] [--repository ID] [--ttl 90s|30m|2h] [--idle 90s|30m|0]
 harness preview-list  --state D [--policy F]
-harness preview-stop  --state D [--policy F] [--preview ID] [--repository ID]
+harness preview-stop  --state D [--policy F] [--preview ID] [--repository ID] [--all]
 ```
 
 - `--ref accepted` (по умолчанию) — принятый результат: с `--work` —
@@ -88,7 +88,9 @@ harness preview-stop  --state D [--policy F] [--preview ID] [--repository ID]
   экземпляре.
 - Превью не поднялось (сборка, службы, запуск, готовность) — `LIFECYCLE_FAILED`
   (exit 4) с причиной и путём лога; рабочее дерево убрано, receipt — `failed`.
-- `preview-stop` без `--preview` останавливает все живые превью.
+- `preview-stop` без `--preview` останавливает все живые превью. Тот же ID
+  превью в нескольких репозиториях без `--repository` — отказ `INVALID_INPUT`
+  со списком репозиториев; `--all` останавливает его во всех.
 
 Ответы: `preview-start` — `{preview, changed}`, `preview-stop` —
 `{previews[], changed}`, `preview-list` — `{previews[]}`; элемент — receipt

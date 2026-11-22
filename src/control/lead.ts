@@ -416,11 +416,19 @@ export const LEAD_LOGGED_COMMANDS = [
 
 /** Команды, которые по договору подаёт только ведущий: `diagnose` — его разбор. */
 const LEAD_ONLY_COMMANDS: readonly string[] = ['diagnose'];
+/**
+ * Команды, которые движок без `--by lead` исполняет как действие оператора
+ * (`retry` — повтор оператора, удержание gate не снимает): они оператора и
+ * при активной сессии ведущего, иначе журнал ведущего записал бы чужое
+ * решение. `cancel` пути ведущего не имеет (`--by` нет) — решает сессия.
+ */
+const OPERATOR_UNLESS_LEAD: readonly string[] = ['retry'];
 
 /**
  * Кто подал команду: явный `--by`/`--actor` решает сам — `lead` это ведущий,
  * любое другое значение (`operator`, имя человека у `reapprove --by`) —
- * оператор; команда только ведущего (`diagnose`) — ведущий. Иначе
+ * оператор; команда только ведущего (`diagnose`) — ведущий; `retry` без
+ * `--by lead` — оператор, как его исполняет движок. Иначе
  * `undefined`: решает сессия ведущего (`recordLeadCommand`).
  */
 export function leadCommandActor(
@@ -429,6 +437,7 @@ export function leadCommandActor(
 ): 'lead' | 'operator' | undefined {
   const explicit = args.by ?? args.actor;
   if (explicit !== undefined) return explicit === 'lead' ? 'lead' : 'operator';
+  if (OPERATOR_UNLESS_LEAD.includes(command)) return 'operator';
   return LEAD_ONLY_COMMANDS.includes(command) ? 'lead' : undefined;
 }
 

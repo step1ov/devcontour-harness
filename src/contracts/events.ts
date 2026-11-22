@@ -272,6 +272,17 @@ export const eventPayloads = {
     gateHoldLifted: z.string().optional(),
   }),
   /**
+   * Повтор ведущего снял удержание gate (`ENVIRONMENT_GATE_HELD`), а сам
+   * повтор отклонён правилами (`refused` — код отказа, например
+   * `ATTEMPTS_EXHAUSTED` после исчерпанного предела незасчитанных отказов).
+   * Успешный повтор пишет снятие в `work.retried.gateHoldLifted`.
+   */
+  'work.gate-hold-lifted': z.strictObject({
+    gate: z.string().min(1).max(200),
+    by: z.literal('lead'),
+    refused: z.string().min(1).max(60),
+  }),
+  /**
    * Ведущий записал диагностику повторных отказов (`harness diagnose`):
    * причина, разобранные засчитанные отказы и длина гипотезы (текста нет).
    */
