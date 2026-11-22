@@ -18,7 +18,7 @@ import {
 } from '../report/compute.ts';
 import { budgetOverview, legacyGroupCall } from '../engine/budget.ts';
 import { callRecords } from '../engine/usage.ts';
-import type { Engine } from '../engine/engine.ts';
+import { infraPendingIndex, type Engine } from '../engine/engine.ts';
 import { requestsOf } from '../engine/input-requests.ts';
 import { reviewSummaryRows, reviewsText } from './review-summary.ts';
 import { ruCount } from '../contracts/plural.ts';
@@ -170,8 +170,6 @@ export function statusOf(
     const planReviews = livePlanReviews(v, source.policy, now);
     // Итоговое «что нужно» каждого поручения — для строки `runner`.
     const needsByWork = new Map<string, StageNeeds>();
-    // Блокировки выдачи каждого поручения — для `runner.ready`.
-    const blockersByWork = new Map<string, ReturnType<Engine['blockers']>>();
     // Собственные вызовы поручения (без вызовов о группе) — одним проходом;
     // прежняя запись без поручения — по индексам попыток и поручений (правило
     // `recordWorkOf`), а не поиском по хранилищу на каждую запись.
@@ -241,7 +239,6 @@ export function statusOf(
                 ? { actor: 'controller' as const, action: 'review-plan' as const }
                 : undefined);
           if (needs) needsByWork.set(w.id, needs);
-          blockersByWork.set(w.id, raw);
           const plainContext = {
             control: v.control(),
             approvalMode: source.policy.approvalMode,
@@ -288,9 +285,10 @@ export function statusOf(
       ...((r) => (r ? { runner: r } : {}))(
         runnerOf(v, selected, planReviews, now, (w) => needsByWork.get(w.id), {
           // Пауза, которую новый run не снимет (оператор, отказ провайдера,
-          // проверка базы, чужая операция), — запуск ничего не выдаст.
-          paused: nextRunControl(source, v).control.paused,
-          issuable: (w) => issuable(w, blockersByWork.get(w.id), needsByWork.get(w.id)),
+          // проверка базы, чужая операция), или другое общее препятствие
+          // выдачи — запуск ничего не выдаст.
+          paused: nextRunControl(source, v).control.paused || engine.claimBlockedGlobally(v),
+          issuable: issuableIn(engine, v, (w) => needsByWork.get(w.id)),
         }),
       ),
       ...((budgets) => (budgets ? { budgets } : {}))(budgetOverview(engine.budgetContext(), v)),
@@ -362,22 +360,31 @@ function withSteps<B extends { code: string; actor?: string | null }>(
  * открытых поручений — поля нет.
  */
 /**
- * Работу выдаст новый запуск (alpha.67, P5-4): готовая без блокировок выдачи
- * (кроме паузы, которую run снимает сам, — её решает `paused` строки
- * очереди), или упавшая, которую controller повторит в пределах бюджетов.
- * Удержанная операцией, gate или ведущим, ждущая зависимости или ответа — не
- * готова, даже если диагноз называет ход controller (`wait`).
+ * Работу выдаст новый запуск (alpha.67, P5-4) — та же проверка, что у
+ * `claim` (`Engine.claimableWork`, со всеми блокировками самой работы).
+ * Упавшая проверяется как готовая после повтора, и только если повтор —
+ * ход controller (`retry`): удержание, ожидание инфраструктуры и прочее
+ * держат и её.
  */
-function issuable(
-  w: WorkState,
-  blockers: ReturnType<Engine['blockers']> | undefined,
-  needs: StageNeeds | undefined,
+function issuableIn(
+  engine: Engine,
+  v: ExecutionView,
+  needsOf: (w: WorkState) => StageNeeds | undefined,
 ) {
-  if (w.status === 'failed') return needs?.actor === 'controller' && needs.action === 'retry';
-  if (w.status !== 'ready') return false;
-  return (blockers ?? []).every(
-    (b) => b.code === 'PAUSED' && b.message.startsWith('Очередь на паузе'),
-  );
+  const gateHolds = engine.environmentGateHolds(v);
+  const infraPending = infraPendingIndex(v);
+  return (w: WorkState) => {
+    if (w.status === 'failed') {
+      const needs = needsOf(w);
+      if (needs?.actor !== 'controller' || needs.action !== 'retry') return false;
+      return engine.claimableWork({ ...w, status: 'ready' }, v, {
+        gateHolds,
+        infraPending,
+        fresh: true,
+      });
+    }
+    return engine.claimableWork(w, v, { gateHolds, infraPending, fresh: true });
+  };
 }
 
 function runnerOf(
@@ -445,7 +452,7 @@ function runnerOf(
       state: 'not-running' as const,
       restartBy: 'lead' as const,
       ready: ready.length,
-      readyWorks: ready.slice(0, 50).map((w) => w.id),
+      readyWorks: ready.map((w) => w.id),
       heldByQuestion: asked.slice(0, 50),
       line: `Очередь стоит — никто не запущен: запустите harness run: готово ${ruCount(ready.length, ['задача', 'задачи', 'задач'])}, ${asked.length > 1 ? 'вопросы блокируют' : 'вопрос блокирует'} только ${ids} (ведущий).`,
       lineEn: `The queue is idle — nothing is running: start harness run: ${ready.length} ${ready.length === 1 ? 'task is' : 'tasks are'} ready, the ${asked.length > 1 ? 'questions block' : 'question blocks'} only ${idsEn} (the lead).`,
@@ -454,9 +461,7 @@ function runnerOf(
   return {
     state: 'not-running' as const,
     restartBy: 'lead' as const,
-    ...(ready.length
-      ? { ready: ready.length, readyWorks: ready.slice(0, 50).map((w) => w.id) }
-      : {}),
+    ...(ready.length ? { ready: ready.length, readyWorks: ready.map((w) => w.id) } : {}),
     line: waitsRun
       ? 'Очередь стоит — никто не запущен: работу сдвинет только новый запуск (ведущий: harness run).'
       : 'Очередь стоит — никто не запущен: после ответа или решения нужен новый запуск (ведущий: harness run).',

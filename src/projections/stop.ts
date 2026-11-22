@@ -196,6 +196,12 @@ export type StopInput =
         };
         /** Незавершённые предпосылки, на которых движок остановит задание. */
         waitingOn?: string[];
+        /**
+         * alpha.67: открытые работы инфраструктуры прежнего графа её
+         * репозиториев (draft, исчерпанные, упавшие — тоже): пока они не
+         * приняты или не отменены, работа не выдаётся.
+         */
+        infraWaitingOn?: string[];
         /** Согласование графа устарело для этой политики (режим operator). */
         approvalStale?: string;
         /**
@@ -856,6 +862,18 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
         };
     }
   }
+  if (work.status === 'ready' && work.infraWaitingOn?.length)
+    return {
+      code: 'NOT_READY',
+      cause: 'not-ready',
+      phase: 'claim',
+      // Как ожидание зависимости: по этой работе не действует никто; шаг —
+      // по диагнозу работы инфраструктуры (её разбор, согласование, сброс или
+      // отмена по плану). Движок её сам не отменяет.
+      actor: null,
+      action: 'wait',
+      note: `Ждёт работы инфраструктуры прежнего графа ${work.infraWaitingOn.join(', ')}: продуктовая работа её репозитория не выдаётся, пока та не принята или не отменена; следующий шаг — по диагнозу ${work.infraWaitingOn[0]} (harness explain --work ${work.infraWaitingOn[0]}).`,
+    };
   if (work.status === 'ready' && work.waitingOn?.length)
     return {
       code: 'NOT_READY',

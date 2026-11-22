@@ -1133,7 +1133,7 @@ export interface OperatorViewInput {
     restartBy?: HarnessActor;
     /** alpha.67: работы, которые сдвинет новый запуск (`status.runner.ready`). */
     ready?: number;
-    /** alpha.67: их ID (`status.runner.readyWorks`, первые 50). */
+    /** alpha.67: их ID (`status.runner.readyWorks`, все). */
     readyWorks?: readonly string[];
     /** alpha.67: работы, которые держит только вопрос исполнителя (`status.runner.heldByQuestion`). */
     heldByQuestion?: readonly string[];
@@ -3602,13 +3602,14 @@ function runnerWithSourceQuestions(
   sources: OperatorViewInput['sources'],
   works: OperatorViewInput['works'],
 ): OperatorViewInput['queue'] {
-  if (q.paused || q.runner !== 'not-running' || !q.ready || q.heldByQuestion?.length) return q;
+  if (q.paused || q.runner !== 'not-running' || !q.ready) return q;
   const tasks = [
     ...new Set((sources ?? []).flatMap((s) => (s.questions ?? []).flatMap((x) => x.targets))),
   ];
   if (!tasks.length) return q;
   // Задачи вопроса — ключи или ID источника; работы — по связке задач. Вопрос
-  // держит и свои работы, и зависящие от них: из готовых они вычитаются.
+  // держит и свои работы, и зависящие от них: из всех готовых (до обрезки
+  // списка) они вычитаются.
   const asked = new Set(tasks);
   const held = new Set(
     (sources ?? []).flatMap((s) =>
@@ -3625,17 +3626,28 @@ function runnerWithSourceQuestions(
         grew = true;
       }
   }
-  const n = q.readyWorks ? q.ready - q.readyWorks.filter((id) => held.has(id)).length : q.ready;
-  if (n <= 0) return q;
+  const n = q.readyWorks ? q.readyWorks.filter((id) => !held.has(id)).length : q.ready;
+  // Вопрос исполнителя (`heldByQuestion`) и вопрос владельцу — одним списком.
+  const blocking = [...new Set([...(q.heldByQuestion ?? []), ...tasks])];
+  const many = blocking.length > 1;
   const ids =
-    tasks.slice(0, 10).join(', ') + (tasks.length > 10 ? ` и ещё ${tasks.length - 10}` : '');
+    blocking.slice(0, 10).join(', ') +
+    (blocking.length > 10 ? ` и ещё ${blocking.length - 10}` : '');
   const idsEn =
-    tasks.slice(0, 10).join(', ') + (tasks.length > 10 ? ` and ${tasks.length - 10} more` : '');
+    blocking.slice(0, 10).join(', ') +
+    (blocking.length > 10 ? ` and ${blocking.length - 10} more` : '');
+  if (n <= 0)
+    return {
+      ...q,
+      restartBy: 'lead',
+      line: `Очередь стоит — никто не запущен: готовых задач нет — ${many ? 'вопросы держат' : 'вопрос держит'} ${ids}; после ответа нужен новый запуск (ведущий: harness run).`,
+      lineEn: `The queue is idle — nothing is running: no task is ready — the ${many ? 'questions hold' : 'question holds'} ${idsEn}; after the answer a new run is needed (the lead: harness run).`,
+    };
   return {
     ...q,
     restartBy: 'lead',
-    line: `Очередь стоит — никто не запущен: запустите harness run: готово ${ruCount(n, ['задача', 'задачи', 'задач'])}, вопрос владельцу блокирует только ${ids} (ведущий).`,
-    lineEn: `The queue is idle — nothing is running: start harness run: ${n} ${n === 1 ? 'task is' : 'tasks are'} ready, the owner's question blocks only ${idsEn} (the lead).`,
+    line: `Очередь стоит — никто не запущен: запустите harness run: готово ${ruCount(n, ['задача', 'задачи', 'задач'])}, ${q.heldByQuestion?.length ? (many ? 'вопросы блокируют' : 'вопрос блокирует') : many ? 'вопросы владельцу блокируют' : 'вопрос владельцу блокирует'} только ${ids} (ведущий).`,
+    lineEn: `The queue is idle — nothing is running: start harness run: ${n} ${n === 1 ? 'task is' : 'tasks are'} ready, the ${q.heldByQuestion?.length ? '' : "owner's "}${many ? 'questions block' : 'question blocks'} only ${idsEn} (the lead).`,
   };
 }
 

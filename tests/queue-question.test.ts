@@ -227,10 +227,52 @@ test('alpha.67 P5-4: вопрос владельцу держит и готов�
     operatorView(input).progress.queue.line,
     'Очередь стоит — никто не запущен: запустите harness run: готово 1 задача, вопрос владельцу блокирует только WEB-1 (ведущий).',
   );
-  // Вопрос держит все готовые — строка прежняя; пауза — тоже.
+  // Вопрос держит все готовые — запускать нечего, строка так и говорит; пауза — строка прежняя.
   const all = structuredClone(input);
   all.sources![0]!.questions![0]!.targets = ['WEB-1', 'API-1'];
-  assert.equal(operatorView(all).progress.queue.line, 'прежняя строка');
+  assert.equal(
+    operatorView(all).progress.queue.line,
+    'Очередь стоит — никто не запущен: готовых задач нет — вопросы держат WEB-1, API-1; после ответа нужен новый запуск (ведущий: harness run).',
+  );
   const paused = { ...input, queue: { ...input.queue, paused: true } };
   assert.equal(operatorView(paused).progress.queue.line, 'прежняя строка');
+});
+
+test('alpha.67 P5-4: больше 50 готовых — вопрос владельцу вычитается из всего набора, а не из первых 50', () => {
+  const ids = Array.from({ length: 51 }, (_, i) => `w-${i}`);
+  const view = operatorView(
+    baseInput({
+      queue: {
+        paused: false,
+        runner: 'not-running',
+        restartBy: 'lead',
+        ready: 51,
+        readyWorks: ids,
+        line: 'прежняя строка',
+      },
+      sources: [
+        {
+          connector: 'relay',
+          provider: 'relay-v2-cli',
+          tasks: ids.map((id) => ({
+            id,
+            key: id.toUpperCase(),
+            orderId: id,
+            workId: id,
+            problems: [],
+          })),
+          questions: [
+            {
+              id: 'q1',
+              key: 'DOC-2',
+              title: 'Всё',
+              options: [],
+              targets: ids.map((id) => id.toUpperCase()),
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.match(view.progress.queue.line!, /готовых задач нет/);
 });

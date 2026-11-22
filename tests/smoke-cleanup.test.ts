@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cleanupDataSchema, executionPolicySchema } from '../src/contracts/index.ts';
 import { cleanupSmoke } from '../src/control/smoke-cleanup.ts';
+import { replayContainerEnv } from '../src/environment/lifecycle.ts';
 import { approve, implement } from './runner-fixture.ts';
 import { hsetup } from './harness-fixture.ts';
 import { example } from './fixtures.ts';
@@ -27,7 +28,21 @@ const bridge = {
 };
 
 /** Запись окружения smoke, оставшаяся `cleanup-failed`: дерева уже нет. */
-function plant(state: string, options: { lifecycle?: unknown; id?: string } = {}) {
+const phaseEnv = {
+  DOCKER_HOST: null,
+  DOCKER_CONTEXT: null,
+  DOCKER_CONFIG: null,
+  DOCKER_CERT_PATH: null,
+  DOCKER_TLS_VERIFY: null,
+  CONTAINER_HOST: null,
+  CONTAINER_CONNECTION: null,
+  PATH: process.env.PATH ?? null,
+  HOME: process.env.HOME ?? null,
+};
+function plant(
+  state: string,
+  options: { lifecycle?: unknown; id?: string; containerEnv?: unknown } = {},
+) {
   const dir = join(state, 'gates-at', options.id ?? ID, 'artifacts', 'environment');
   mkdirSync(dir, { recursive: true });
   const file = join(dir, 'environment.json');
@@ -41,6 +56,7 @@ function plant(state: string, options: { lifecycle?: unknown; id?: string } = {}
       policyDigest: 'x',
       status: 'cleanup-failed',
       runId: options.id ?? ID,
+      ...(options.containerEnv === null ? {} : { containerEnv: options.containerEnv ?? phaseEnv }),
     }),
   );
   return file;
@@ -55,7 +71,10 @@ test('alpha.67 cleanup LS-*: дерева и ресурсов Docker с метк
   writeFileSync(fake, '#!/bin/sh\nexit 0\n');
   chmodSync(fake, 0o755);
   const before = process.env.HARNESS_DOCKER_BIN;
+  const beforePodman = process.env.HARNESS_PODMAN_BIN;
   process.env.HARNESS_DOCKER_BIN = fake;
+  // Podman на машине теста нет: сверка не зависит от того, установлен ли он.
+  process.env.HARNESS_PODMAN_BIN = fake + '-podman-missing';
   const h = ctx.open();
   try {
     const data = cleanupDataSchema.parse(await h.cleanup(ID));
@@ -86,6 +105,8 @@ test('alpha.67 cleanup LS-*: дерева и ресурсов Docker с метк
     h.close();
     if (before === undefined) delete process.env.HARNESS_DOCKER_BIN;
     else process.env.HARNESS_DOCKER_BIN = before;
+    if (beforePodman === undefined) delete process.env.HARNESS_PODMAN_BIN;
+    else process.env.HARNESS_PODMAN_BIN = beforePodman;
   }
 });
 
@@ -93,19 +114,17 @@ test('alpha.67 cleanup LS-*: остались ресурсы Docker или Docke
   const state = freshState();
   const file = plant(state);
   const record = () => assert.fail('событие без сверки');
-  const left = cleanupSmoke({
-    stateDir: state,
-    policy,
-    id: ID,
-    roots: [state],
-    record,
-    docker: () => ({ containers: 1, volumes: 1, networks: 0 }),
-  });
-  await assert.rejects(left, (e: { code?: string; message: string }) => {
-    assert.equal(e.code, 'NOT_READY');
-    assert.match(e.message, /остались ресурсы Docker с меткой devcontour\.harness\.run=LS-/);
-    return true;
-  });
+  await assert.rejects(
+    cleanupSmoke({
+      stateDir: state,
+      policy,
+      id: ID,
+      roots: [state],
+      record,
+      docker: () => ({ containers: 1, volumes: 1, networks: 0 }),
+    }),
+    /остались ресурсы Docker с меткой devcontour\.harness\.run=LS-/,
+  );
   await assert.rejects(
     cleanupSmoke({
       stateDir: state,
@@ -123,74 +142,58 @@ test('alpha.67 cleanup LS-*: остались ресурсы Docker или Docke
   );
 });
 
-test('alpha.67 cleanup LS-*: lifecycle не называет Docker, а CLI контейнеров на машине нет — сверка по отсутствию дерева (docker: not-used)', async () => {
+test('alpha.67 cleanup LS-*: шаги только из команд без контейнеров — сверка без запроса (docker: not-used)', async () => {
   const state = freshState();
   plant(state, {
     lifecycle: {
-      setup: [],
+      setup: [{ id: 'up', command: ['mkdir', '-p', 'x'], timeoutMs: 1000 }],
       ready: [],
       teardown: [{ id: 'down', command: ['true'], timeoutMs: 1000 }],
     },
   });
   const events: unknown[] = [];
-  const asked: string[] = [];
   const data = await cleanupSmoke({
     stateDir: state,
     policy,
     id: ID,
     roots: [state],
     record: (_id, payload) => events.push(payload),
-    docker: (_id, ctx) => (asked.push(ctx.bin), 'missing'),
+    docker: () => assert.fail('контейнеры не нужны'),
   });
   assert.equal(data.status, 'cleaned');
-  assert.deepEqual(asked, ['docker']);
-  assert.equal(events.length, 1);
   assert.deepEqual((events[0] as { docker: string }).docker, 'not-used');
 });
 
-test('alpha.67 cleanup LS-*: мост на node, который сам вызывает Docker, — ресурсы проверяются по метке; остались — NOT_READY', async () => {
-  const state = freshState();
-  const file = plant(state, {
-    lifecycle: {
-      setup: [{ id: 'up', command: ['node', '.harness/environment.mjs', 'up'], timeoutMs: 1000 }],
-      ready: [],
-      teardown: [
-        { id: 'down', command: ['node', '.harness/environment.mjs', 'down'], timeoutMs: 1000 },
-      ],
-    },
-  });
-  await assert.rejects(
-    cleanupSmoke({
-      stateDir: state,
-      policy,
-      id: ID,
-      roots: [state],
-      record: () => assert.fail('событие без сверки'),
-      docker: () => ({ containers: 2, volumes: 0, networks: 1 }),
-    }),
-    /остались ресурсы Docker с меткой devcontour\.harness\.run=LS-/,
-  );
-  // Docker не ответил — тоже не сверяется.
-  await assert.rejects(
-    cleanupSmoke({
-      stateDir: state,
-      policy,
-      id: ID,
-      roots: [state],
-      record: () => assert.fail('событие без сверки'),
-      docker: () => undefined,
-    }),
-    /Docker не ответил/,
-  );
-  assert.equal(
-    (JSON.parse(readFileSync(file, 'utf8')) as { status: string }).status,
-    'cleanup-failed',
-  );
-});
+const bridgeOnNode = {
+  setup: [{ id: 'up', command: ['node', '.harness/environment.mjs', 'up'], timeoutMs: 1000 }],
+  ready: [],
+  teardown: [
+    { id: 'down', command: ['node', '.harness/environment.mjs', 'down'], timeoutMs: 1000 },
+  ],
+};
 
-test('alpha.67 cleanup LS-*: явный Docker без CLI, запись без дерева — NOT_READY; демон и CLI — из записи окружения', async () => {
+test('alpha.67 cleanup LS-*: мост на node — спрашиваются docker и podman по метке; остались — NOT_READY; CLI нет — NOT_READY', async () => {
   const state = freshState();
-  plant(state);
+  const file = plant(state, { lifecycle: bridgeOnNode });
+  const asked: string[] = [];
+  await assert.rejects(
+    cleanupSmoke({
+      stateDir: state,
+      policy,
+      id: ID,
+      roots: [state],
+      record: () => assert.fail('событие без сверки'),
+      docker: (_id, ctx) => (
+        asked.push(ctx.bin),
+        ctx.bin === 'podman'
+          ? { containers: 1, volumes: 0, networks: 0 }
+          : { containers: 0, volumes: 0, networks: 0 }
+      ),
+    }),
+    /остались ресурсы Podman/,
+  );
+  assert.deepEqual(asked, ['docker', 'podman']);
+  // Ни одного CLI в PATH фазы, а мост может их вызывать — не сверяется.
   await assert.rejects(
     cleanupSmoke({
       stateDir: state,
@@ -200,44 +203,122 @@ test('alpha.67 cleanup LS-*: явный Docker без CLI, запись без �
       record: () => assert.fail('событие без сверки'),
       docker: () => 'missing',
     }),
-    /не найден — ресурсы с меткой devcontour\.harness\.run не проверить/,
+    /не найден в PATH фазы/,
   );
-  // Демон фазы (`containerEnv`) и podman по шагам lifecycle.
-  const other = freshState();
-  const file = plant(other, {
+  // Один CLI есть и пуст, второго нет — сверено.
+  const events: unknown[] = [];
+  await cleanupSmoke({
+    stateDir: state,
+    policy,
+    id: ID,
+    roots: [state],
+    record: (_id, payload) => events.push(payload),
+    docker: (_id, ctx) =>
+      ctx.bin === 'podman' ? 'missing' : { containers: 0, volumes: 0, networks: 0 },
+  });
+  assert.deepEqual((events[0] as { docker: string }).docker, 'absent');
+  assert.equal((JSON.parse(readFileSync(file, 'utf8')) as { status: string }).status, 'cleaned');
+});
+
+test('alpha.67 cleanup LS-*: демон выбран в argv, шаг завёрнут или запись без containerEnv — демон не известен, NOT_READY', async () => {
+  for (const [lifecycle, containerEnv, message] of [
+    [
+      {
+        setup: [],
+        ready: [],
+        teardown: [
+          {
+            id: 'd',
+            command: ['docker', '--context', 'remote', 'compose', 'down'],
+            timeoutMs: 1000,
+          },
+        ],
+      },
+      undefined,
+      /демон выбран в argv \(--context\)/,
+    ],
+    [
+      {
+        setup: [],
+        ready: [],
+        teardown: [
+          {
+            id: 'd',
+            command: ['env', 'DOCKER_HOST=tcp://x', 'docker', 'compose', 'down'],
+            timeoutMs: 1000,
+          },
+        ],
+      },
+      undefined,
+      /завёрнут в env/,
+    ],
+    [
+      {
+        setup: [],
+        ready: [],
+        teardown: [{ id: 'd', command: ['sh', '-c', 'podman compose down'], timeoutMs: 1000 }],
+      },
+      undefined,
+      /строка оболочки sh -c/,
+    ],
+    [bridgeOnNode, null, /без containerEnv/],
+  ] as const) {
+    const state = freshState();
+    plant(state, { lifecycle, containerEnv });
+    await assert.rejects(
+      cleanupSmoke({
+        stateDir: state,
+        policy,
+        id: ID,
+        roots: [state],
+        record: () => assert.fail('событие без сверки'),
+        docker: () => ({ containers: 0, volumes: 0, networks: 0 }),
+      }),
+      message,
+    );
+  }
+});
+
+test('alpha.67 cleanup LS-*: запрос идёт с окружением фазы — демон фазы задан, селекторы этого процесса сняты', async () => {
+  const state = freshState();
+  plant(state, {
     lifecycle: {
       setup: [{ id: 'up', command: ['podman', 'compose', 'up'], timeoutMs: 1000 }],
       ready: [],
       teardown: [{ id: 'down', command: ['podman', 'compose', 'down'], timeoutMs: 1000 }],
     },
+    containerEnv: { ...phaseEnv, CONTAINER_HOST: 'ssh://remote/run/podman.sock' },
   });
-  const receipt = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
-  writeFileSync(
-    file,
-    JSON.stringify({
-      ...receipt,
-      containerEnv: { CONTAINER_HOST: 'ssh://remote/run/podman.sock' },
-    }),
-  );
-  const seen: { bin: string; host?: string }[] = [];
-  const before = process.env.HARNESS_DOCKER_BIN;
-  delete process.env.HARNESS_DOCKER_BIN;
+  const before = { host: process.env.DOCKER_HOST, ctx: process.env.DOCKER_CONTEXT };
+  process.env.DOCKER_HOST = 'tcp://ambient:2375';
+  process.env.DOCKER_CONTEXT = 'ambient';
+  const seen: NodeJS.ProcessEnv[] = [];
   try {
     await cleanupSmoke({
-      stateDir: other,
+      stateDir: state,
       policy,
       id: ID,
-      roots: [other],
+      roots: [state],
       record: () => {},
-      docker: (_id, ctx) => (
-        seen.push({ bin: ctx.bin, host: ctx.env.CONTAINER_HOST }),
-        { containers: 0, volumes: 0, networks: 0 }
-      ),
+      docker: (_id, ctx) => (seen.push(ctx.env), { containers: 0, volumes: 0, networks: 0 }),
     });
   } finally {
-    if (before !== undefined) process.env.HARNESS_DOCKER_BIN = before;
+    for (const [k, v] of [
+      ['DOCKER_HOST', before.host],
+      ['DOCKER_CONTEXT', before.ctx],
+    ] as const)
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
   }
-  assert.deepEqual(seen, [{ bin: 'podman', host: 'ssh://remote/run/podman.sock' }]);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]!.CONTAINER_HOST, 'ssh://remote/run/podman.sock');
+  assert.equal(seen[0]!.DOCKER_HOST, undefined);
+  assert.equal(seen[0]!.DOCKER_CONTEXT, undefined);
+  assert.equal(seen[0]!.PATH, process.env.PATH);
+  // Повтор teardown по записи (дерево на месте) — те же правила.
+  const env: NodeJS.ProcessEnv = { DOCKER_HOST: 'tcp://ambient', PATH: '/x' };
+  replayContainerEnv(env, { DOCKER_HOST: null, DOCKER_CONTEXT: 'phase', PATH: '/bin' });
+  assert.deepEqual(env, { DOCKER_CONTEXT: 'phase', PATH: '/bin' });
 });
 
 test('alpha.67 cleanup LS-*: запись без рабочего дерева — NOT_READY, не сверка', async () => {
