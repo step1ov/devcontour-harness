@@ -107,3 +107,47 @@ test('alpha.67 setup: ход настройки в обзоре без рабо�
   const busy = operatorView(baseInput({ setup: at(NOW), works: [work('w')] }));
   assert.deepEqual(busy.stage, { name: 'work', lines: [] });
 });
+
+test('alpha.67 setup: испорченная длительность (отрицательная, бесконечная, огромная, дробная) — без длительности, ответ проходит схему', () => {
+  for (const [bad, expected] of [
+    [-1, undefined],
+    [1e308, undefined],
+    [Number.MAX_SAFE_INTEGER * 4, undefined],
+    ['90000', undefined],
+    [1500.6, 1501],
+  ] as const) {
+    const p = project();
+    const dir = join(p.state, 'gates-at', 'LS-' + uuid(1));
+    mkdirSync(dir, { recursive: true });
+    // JSON не несёт Infinity: 1e308 * 10 записывается как null — берём 1e308.
+    writeFileSync(
+      join(dir, 'result.json'),
+      `{"at":"${new Date(NOW - 60_000).toISOString()}","data":{"passed":true,"durationMs":${JSON.stringify(bad)}}}`,
+    );
+    const progress = setupProgressSchema.parse(
+      setupProgress({ harnessDir: p.harness, stateDir: p.state, now: NOW }),
+    );
+    const smoke = progress.steps.find((s) => s.id === 'smoke')!;
+    assert.equal(smoke.state, 'done');
+    assert.equal(smoke.elapsedMs, expected, String(bad));
+    assert.ok(progress.elapsedMs === undefined || progress.elapsedMs >= 0);
+  }
+});
+
+test('alpha.67 setup: из многих записей берутся последние по времени, а не по порядку каталога', () => {
+  const p = project();
+  const old = NOW - 40 * 60_000;
+  for (let n = 2; n <= 502; n++) {
+    const id = 'LS-' + uuid(n);
+    record(p.state, id, old, { passed: true });
+    utimesSync(join(p.state, 'gates-at', id), new Date(old), new Date(old));
+  }
+  // Самая новая запись — с наименьшим именем: порядок каталога её отрезал бы.
+  const newest = 'LS-' + uuid(1);
+  record(p.state, newest, NOW - 60_000, { passed: false });
+  utimesSync(join(p.state, 'gates-at', newest), new Date(NOW - 60_000), new Date(NOW - 60_000));
+  const progress = setupProgressSchema.parse(
+    setupProgress({ harnessDir: p.harness, stateDir: p.state, now: NOW }),
+  );
+  assert.equal(progress.steps.find((s) => s.id === 'smoke')!.state, 'failed');
+});

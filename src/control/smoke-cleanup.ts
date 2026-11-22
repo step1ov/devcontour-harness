@@ -2,7 +2,7 @@
 // (и проходов его пробы), оставшиеся `cleanup-failed` или `active` при
 // умершем владельце. Teardown повторяется по сохранённой записи, пока рабочее
 // дерево есть; если дерева уже нет, а ресурсов Docker с меткой прогона нет
-// (или lifecycle Docker не использует), запись сверяется в `cleaned` с
+// (или CLI контейнеров на машине нет и lifecycle его не называет), запись сверяется в `cleaned` с
 // событием `environment.reconciled`. Ничего не удаляется: ни дерево, ни
 // ресурсы Docker — команда только проверяет и пишет запись.
 
@@ -11,7 +11,11 @@ import { existsSync, readdirSync } from 'node:fs';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { HarnessError, type ExecutionPolicy, type RunEventPayload } from '../contracts/index.ts';
-import { cleanupEnvironment } from '../environment/lifecycle.ts';
+import {
+  CONTAINER_ENV_KEYS,
+  cleanupEnvironment,
+  executionEnvironment,
+} from '../environment/lifecycle.ts';
 
 /** ID записи smoke: `LS-<uuid>`. */
 export const SMOKE_RUN_ID = /^LS-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -19,48 +23,65 @@ export const SMOKE_RUN_ID = /^LS-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}
 /** Метка прогона на ресурсах Docker (мост compose примера и проектов по нему). */
 export const DOCKER_RUN_LABEL = 'devcontour.harness.run';
 
-/** Docker ли окружение: команда шага lifecycle — docker, compose или podman. */
-export function lifecycleUsesDocker(lifecycle: unknown): boolean {
+/**
+ * Каким CLI контейнеров спрашивать о ресурсах прогона: `podman`, если шаги
+ * lifecycle называют его, иначе `docker`. `explicit` — шаги прямо называют
+ * docker, compose или podman; иначе использование неизвестно (мост на node
+ * может вызывать Docker сам) — ресурсы всё равно проверяются по метке, если
+ * CLI есть.
+ */
+export function lifecycleContainers(lifecycle: unknown): {
+  cli: 'docker' | 'podman';
+  explicit: boolean;
+} {
   const l =
     lifecycle && typeof lifecycle === 'object' ? (lifecycle as Record<string, unknown>) : undefined;
-  if (!l) return false;
+  const words: string[] = [];
   for (const key of ['setup', 'ready', 'teardown']) {
-    const steps = l[key];
+    const steps = l?.[key];
     if (!Array.isArray(steps)) continue;
     for (const s of steps) {
       const cmd = (s as { command?: unknown } | null)?.command;
-      if (
-        Array.isArray(cmd) &&
-        cmd.some(
-          (c) =>
-            typeof c === 'string' &&
-            /(^|[/\\])(docker|docker-compose|podman)(\.exe)?$|(^|[/\\.-])compose([.-]|$)/i.test(c),
-        )
-      )
-        return true;
+      if (Array.isArray(cmd)) for (const c of cmd) if (typeof c === 'string') words.push(c);
     }
   }
-  return false;
+  const podman = words.some((c) => /(^|[/\\])podman(-compose)?(\.exe)?$/i.test(c));
+  const explicit = words.some((c) =>
+    /(^|[/\\])(docker|docker-compose|podman|podman-compose)(\.exe)?$|(^|[/\\.-])compose([.-]|$)/i.test(
+      c,
+    ),
+  );
+  return { cli: podman ? 'podman' : 'docker', explicit };
 }
 
+/** Итог проверки ресурсов: числа, `undefined` — демон не ответил, `missing` — CLI нет. */
+export type ContainerResources =
+  { containers: number; volumes: number; networks: number } | undefined | 'missing';
+
 /**
- * Ресурсы Docker с меткой прогона: контейнеры, тома, сети. `undefined` —
- * проверить нельзя (нет CLI, демон не отвечает): сверять запись по ней нельзя.
+ * Ресурсы с меткой прогона: контейнеры, тома, сети — тем CLI и тем демоном,
+ * что у окружения (`env`: `DOCKER_HOST`, `DOCKER_CONTEXT`, `CONTAINER_HOST`…,
+ * PATH). `undefined` — проверить нельзя (демон не отвечает); `missing` — CLI
+ * нет в PATH окружения.
  */
 export function dockerResources(
   runId: string,
-  docker = process.env.HARNESS_DOCKER_BIN || 'docker',
-): { containers: number; volumes: number; networks: number } | undefined {
+  ctx: { bin: string; env: NodeJS.ProcessEnv },
+): ContainerResources {
   const filter = `label=${DOCKER_RUN_LABEL}=${runId}`;
+  let missing = false;
   const count = (args: string[]) => {
-    const r = spawnSync(docker, [...args, '--filter', filter], {
+    const r = spawnSync(ctx.bin, [...args, '--filter', filter], {
       encoding: 'utf8',
       timeout: 30_000,
+      env: ctx.env,
     });
+    if (r.error && 'code' in r.error && r.error.code === 'ENOENT') missing = true;
     if (r.error || r.status !== 0) return undefined;
     return r.stdout.split('\n').filter((l) => l.trim()).length;
   };
   const containers = count(['ps', '-a', '-q']);
+  if (missing) return 'missing';
   const volumes = count(['volume', 'ls', '-q']);
   const networks = count(['network', 'ls', '-q']);
   if (containers === undefined || volumes === undefined || networks === undefined) return undefined;
@@ -75,6 +96,8 @@ interface Receipt {
   policyDigest?: string;
   lifecycle?: unknown;
   devcontourEnv?: Record<string, string>;
+  /** Демон контейнеров фазы (`CONTAINER_ENV_KEYS`), alpha.67. */
+  containerEnv?: Record<string, string>;
 }
 
 const processAlive = (pid: number) => {
@@ -109,8 +132,8 @@ export interface SmokeCleanupInput {
   roots: string[];
   /** Событие сверки в журнале состояния. */
   record(runId: string, payload: RunEventPayload<'environment.reconciled'>): void;
-  /** Подменённая проверка ресурсов Docker (тесты); по умолчанию — CLI docker. */
-  docker?: (runId: string) => ReturnType<typeof dockerResources>;
+  /** Подменённая проверка ресурсов (тесты); по умолчанию — CLI docker/podman окружения. */
+  docker?: (runId: string, ctx: { bin: string; env: NodeJS.ProcessEnv }) => ContainerResources;
 }
 
 /**
@@ -145,6 +168,12 @@ export async function cleanupSmoke(input: SmokeCleanupInput) {
       );
       continue;
     }
+    if (typeof receipt.cwd !== 'string' || !receipt.cwd) {
+      problems.push(
+        `${rel}: в записи нет рабочего дерева — сверять нечего, проверьте запись вручную`,
+      );
+      continue;
+    }
     if (existsSync(receipt.cwd)) {
       // Дерево на месте — обычный повтор teardown по записи.
       try {
@@ -156,22 +185,32 @@ export async function cleanupSmoke(input: SmokeCleanupInput) {
       continue;
     }
     // Дерева нет: teardown исполнить негде. Запись сверяется, только если
-    // ресурсов с меткой прогона подтверждённо нет.
+    // ресурсов с меткой прогона подтверждённо нет — у того же демона, что у
+    // окружения. Использует ли lifecycle контейнеры, по командам не узнать
+    // (мост на node вызывает Docker сам): метка проверяется всегда, когда
+    // CLI есть.
     const runId = receipt.runId ?? receipt.devcontourEnv?.DEVCONTOUR_RUN_ID;
-    const usesDocker = lifecycleUsesDocker(receipt.lifecycle);
+    const { cli, explicit } = lifecycleContainers(receipt.lifecycle);
+    const env = containerEnvOf(input.policy, receipt);
+    const bin = process.env.HARNESS_DOCKER_BIN || cli;
     let docker: 'absent' | 'not-used' = 'not-used';
-    if (usesDocker) {
-      if (!runId) {
-        problems.push(`${rel}: в записи нет ID прогона — ресурсы Docker по метке не проверить`);
-        continue;
-      }
-      const left = (input.docker ?? dockerResources)(runId);
-      if (!left) {
+    const left = runId ? (input.docker ?? dockerResources)(runId, { bin, env }) : undefined;
+    if (left === 'missing') {
+      if (explicit) {
         problems.push(
-          `${rel}: Docker не ответил — не проверить ресурсы с меткой ${DOCKER_RUN_LABEL}=${runId}`,
+          `${rel}: ${cli} не найден — ресурсы с меткой ${DOCKER_RUN_LABEL} не проверить`,
         );
         continue;
       }
+    } else if (!runId) {
+      problems.push(`${rel}: в записи нет ID прогона — ресурсы ${cli} по метке не проверить`);
+      continue;
+    } else if (!left) {
+      problems.push(
+        `${rel}: ${cli === 'podman' ? 'Podman' : 'Docker'} не ответил — не проверить ресурсы с меткой ${DOCKER_RUN_LABEL}=${runId}`,
+      );
+      continue;
+    } else {
       const total = left.containers + left.volumes + left.networks;
       if (total) {
         problems.push(
@@ -215,4 +254,25 @@ export async function smokeRoots(stateDir: string, outside?: string): Promise<st
   const roots = [await realpath(stateDir)];
   if (outside && existsSync(outside)) roots.push(await realpath(outside));
   return [...new Set(roots)];
+}
+
+/**
+ * Окружение CLI контейнеров для сверки: окружение процесса, поверх —
+ * окружение политики и репозитория записи (как у фаз), поверх — демон,
+ * записанный фазой (`containerEnv`).
+ */
+function containerEnvOf(policy: ExecutionPolicy, receipt: Receipt): NodeJS.ProcessEnv {
+  const repo = policy.repositories.find(
+    (r) => r.id === receipt.devcontourEnv?.DEVCONTOUR_REPOSITORY_ID,
+  );
+  let phase: NodeJS.ProcessEnv = {};
+  try {
+    phase = executionEnvironment([policy.environment, repo?.environment], {}, process.env).env;
+  } catch {
+    phase = {};
+  }
+  const out: NodeJS.ProcessEnv = { ...process.env };
+  for (const k of [...CONTAINER_ENV_KEYS, 'PATH'] as const)
+    if (phase[k] !== undefined) out[k] = phase[k];
+  return { ...out, ...(receipt.containerEnv ?? {}) };
 }

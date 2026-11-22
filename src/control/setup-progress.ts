@@ -49,6 +49,16 @@ function readJson(path: string): unknown {
     return undefined;
   }
 }
+/**
+ * Длительность из итога на диске: конечное неотрицательное число не больше
+ * суток × 366 (запись могла быть испорчена или написана чужим кодом) —
+ * целыми миллисекундами; иначе её нет.
+ */
+const MAX_DURATION_MS = 366 * 86_400_000;
+export const duration = (v: unknown) =>
+  typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= MAX_DURATION_MS
+    ? Math.round(v)
+    : undefined;
 const obj = (v: unknown) =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
 
@@ -76,8 +86,14 @@ function runRecords(stateDir: string, prefix: 'LS-' | 'GA-'): RunRecord[] {
   } catch {
     return [];
   }
+  // Последние 500 по времени каталога, а не по порядку readdir (имена — UUID).
+  const recent = names
+    .map((name) => ({ name, at: changedAt(join(root, name)) ?? 0 }))
+    .sort((a, b) => a.at - b.at)
+    .slice(-500)
+    .map((x) => x.name);
   const out: RunRecord[] = [];
-  for (const name of names.slice(-500)) {
+  for (const name of recent) {
     const file = join(root, name, prefix === 'LS-' ? SMOKE_RESULT_FILE : GATES_RESULT_FILE);
     const result = obj(readJson(file));
     const data = obj(result?.data) ?? result;
@@ -89,7 +105,7 @@ function runRecords(stateDir: string, prefix: 'LS-' | 'GA-'): RunRecord[] {
     out.push({
       at,
       ...(typeof data?.passed === 'boolean' ? { passed: data.passed } : {}),
-      ...(typeof data?.durationMs === 'number' ? { durationMs: data.durationMs } : {}),
+      ...((d) => (d !== undefined ? { durationMs: d } : {}))(duration(data?.durationMs)),
       ...(prefix === 'LS-'
         ? {
             probe:

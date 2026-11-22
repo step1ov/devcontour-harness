@@ -123,7 +123,7 @@ test('alpha.67 cleanup LS-*: остались ресурсы Docker или Docke
   );
 });
 
-test('alpha.67 cleanup LS-*: lifecycle без Docker — сверка по отсутствию дерева (docker: not-used)', async () => {
+test('alpha.67 cleanup LS-*: lifecycle не называет Docker, а CLI контейнеров на машине нет — сверка по отсутствию дерева (docker: not-used)', async () => {
   const state = freshState();
   plant(state, {
     lifecycle: {
@@ -133,15 +133,128 @@ test('alpha.67 cleanup LS-*: lifecycle без Docker — сверка по от�
     },
   });
   const events: unknown[] = [];
+  const asked: string[] = [];
   const data = await cleanupSmoke({
     stateDir: state,
     policy,
     id: ID,
     roots: [state],
     record: (_id, payload) => events.push(payload),
-    docker: () => assert.fail('Docker не нужен'),
+    docker: (_id, ctx) => (asked.push(ctx.bin), 'missing'),
   });
   assert.equal(data.status, 'cleaned');
+  assert.deepEqual(asked, ['docker']);
   assert.equal(events.length, 1);
   assert.deepEqual((events[0] as { docker: string }).docker, 'not-used');
+});
+
+test('alpha.67 cleanup LS-*: мост на node, который сам вызывает Docker, — ресурсы проверяются по метке; остались — NOT_READY', async () => {
+  const state = freshState();
+  const file = plant(state, {
+    lifecycle: {
+      setup: [{ id: 'up', command: ['node', '.harness/environment.mjs', 'up'], timeoutMs: 1000 }],
+      ready: [],
+      teardown: [
+        { id: 'down', command: ['node', '.harness/environment.mjs', 'down'], timeoutMs: 1000 },
+      ],
+    },
+  });
+  await assert.rejects(
+    cleanupSmoke({
+      stateDir: state,
+      policy,
+      id: ID,
+      roots: [state],
+      record: () => assert.fail('событие без сверки'),
+      docker: () => ({ containers: 2, volumes: 0, networks: 1 }),
+    }),
+    /остались ресурсы Docker с меткой devcontour\.harness\.run=LS-/,
+  );
+  // Docker не ответил — тоже не сверяется.
+  await assert.rejects(
+    cleanupSmoke({
+      stateDir: state,
+      policy,
+      id: ID,
+      roots: [state],
+      record: () => assert.fail('событие без сверки'),
+      docker: () => undefined,
+    }),
+    /Docker не ответил/,
+  );
+  assert.equal(
+    (JSON.parse(readFileSync(file, 'utf8')) as { status: string }).status,
+    'cleanup-failed',
+  );
+});
+
+test('alpha.67 cleanup LS-*: явный Docker без CLI, запись без дерева — NOT_READY; демон и CLI — из записи окружения', async () => {
+  const state = freshState();
+  plant(state);
+  await assert.rejects(
+    cleanupSmoke({
+      stateDir: state,
+      policy,
+      id: ID,
+      roots: [state],
+      record: () => assert.fail('событие без сверки'),
+      docker: () => 'missing',
+    }),
+    /не найден — ресурсы с меткой devcontour\.harness\.run не проверить/,
+  );
+  // Демон фазы (`containerEnv`) и podman по шагам lifecycle.
+  const other = freshState();
+  const file = plant(other, {
+    lifecycle: {
+      setup: [{ id: 'up', command: ['podman', 'compose', 'up'], timeoutMs: 1000 }],
+      ready: [],
+      teardown: [{ id: 'down', command: ['podman', 'compose', 'down'], timeoutMs: 1000 }],
+    },
+  });
+  const receipt = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+  writeFileSync(
+    file,
+    JSON.stringify({
+      ...receipt,
+      containerEnv: { CONTAINER_HOST: 'ssh://remote/run/podman.sock' },
+    }),
+  );
+  const seen: { bin: string; host?: string }[] = [];
+  const before = process.env.HARNESS_DOCKER_BIN;
+  delete process.env.HARNESS_DOCKER_BIN;
+  try {
+    await cleanupSmoke({
+      stateDir: other,
+      policy,
+      id: ID,
+      roots: [other],
+      record: () => {},
+      docker: (_id, ctx) => (
+        seen.push({ bin: ctx.bin, host: ctx.env.CONTAINER_HOST }),
+        { containers: 0, volumes: 0, networks: 0 }
+      ),
+    });
+  } finally {
+    if (before !== undefined) process.env.HARNESS_DOCKER_BIN = before;
+  }
+  assert.deepEqual(seen, [{ bin: 'podman', host: 'ssh://remote/run/podman.sock' }]);
+});
+
+test('alpha.67 cleanup LS-*: запись без рабочего дерева — NOT_READY, не сверка', async () => {
+  const state = freshState();
+  const file = plant(state);
+  const receipt = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+  delete receipt.cwd;
+  writeFileSync(file, JSON.stringify(receipt));
+  await assert.rejects(
+    cleanupSmoke({
+      stateDir: state,
+      policy,
+      id: ID,
+      roots: [state],
+      record: () => assert.fail('событие без сверки'),
+      docker: () => ({ containers: 0, volumes: 0, networks: 0 }),
+    }),
+    /нет рабочего дерева/,
+  );
 });
