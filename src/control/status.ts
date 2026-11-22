@@ -103,7 +103,8 @@ export function attemptSummaryView(
   // приёмка — началом строки и полем `rework`.
   const own = currentRevisionAttempts(work, attempts);
   const summary = attemptSummaryOf(work, own);
-  const r = work.rework;
+  // Оставленная доработка — снова принятая редакция: строка без «доработки».
+  const r = work.rework?.abandoned ? undefined : work.rework;
   const rework = r
     ? { revision: r.revision, acceptedSha: r.accepted.resultSha, fresh: r.fresh }
     : undefined;

@@ -11,6 +11,7 @@ import {
   gateScopeSchema,
 } from './primitives.ts';
 import { workGraphSchema, workOrderSchema } from './work.ts';
+import { leadLogSchema } from './lead.ts';
 import { contextPinSchema, contextSnapshotSchema } from './context.ts';
 import { toolchainFactsSchema } from './toolchain.ts';
 import {
@@ -838,6 +839,27 @@ export const workStateSchema = z.strictObject({
       }),
       reopenedAt: isoTimeSchema,
       spent: z.number().int().min(0),
+      /**
+       * Постановка принятой редакции (0.1.0-alpha.66): отказ от доработки
+       * возвращает её поручению. Нет — доработка открыта прежней версией.
+       */
+      acceptedOrder: workOrderSchema.optional(),
+      /**
+       * Доработка оставлена (0.1.0-alpha.66, `cancel` открытой доработки или
+       * новая редакция графа без поручения): работа вернулась к принятой
+       * редакции — `done`, результат `accepted.resultSha`. `orderDigest` —
+       * содержание оставленной (не принятой) постановки: та же постановка в
+       * новой редакции графа снова открывает доработку. `restored` —
+       * поручению возвращена принятая постановка (`acceptedOrder`).
+       */
+      abandoned: z
+        .strictObject({
+          at: isoTimeSchema,
+          by: z.enum(['operator', 'host', 'graph']),
+          orderDigest: digestSchema,
+          restored: z.boolean(),
+        })
+        .optional(),
     })
     .optional(),
 });
@@ -1335,6 +1357,12 @@ export const localSchemas = {
    * у `@workspace`. Пишет только `engine.jointBudgetReset`.
    */
   'joint-budget-resets': jointBudgetResetSchema,
+  /**
+   * Журнал ведущего (0.1.0-alpha.66): одна запись `log` у `@workspace` —
+   * сессия, записи и итог выпуска (`leadLogSchema`). Пишут только операции
+   * журнала (`lead.recorded`).
+   */
+  lead: leadLogSchema,
 } as const;
 export type LocalNamespace = keyof typeof localSchemas;
 export type LocalValue<N extends LocalNamespace> = z.infer<(typeof localSchemas)[N]>;

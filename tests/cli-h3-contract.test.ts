@@ -74,6 +74,11 @@ const laterCommands: readonly string[] = [
   'review-accept',
   // Обновления harness и панели (0.1.0-alpha.60).
   'update',
+  // Журнал ведущего и итог выпуска (0.1.0-alpha.66).
+  'lead-begin',
+  'lead-note',
+  'lead-end',
+  'release-done',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -162,6 +167,8 @@ const ADDITIVE_EVENT_TYPES = new Set([
   'work.reopened',
   // alpha.60: смена пакетов командой `harness update`.
   'harness.updated',
+  // alpha.66: отказ от доработки — возврат к принятой редакции.
+  'work.rework-abandoned',
 ]);
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([
@@ -240,6 +247,10 @@ const ADDITIVE_ENUM_VALUES = new Set([
   // Предупреждение init о реестре сборки seed хранилища (0.1.0-alpha.61).
   'dependency-store-registry',
 ]);
+/** Текст cancel в H2: alpha.66 добавила отказ от открытой доработки принятого поручения. */
+const H2_CANCEL_DESCRIPTION =
+  'Отменить поручение: активная попытка теряет владение, поручение становится cancelled; это не retry';
+const H2_CANCEL_IDEMPOTENCY = 'Повтор для отменённого ничего не меняет';
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
   'Подготовить существующий Git npm/pnpm-репозиторий: план или create-only запись .harness/ (политика из профиля и toolchain inspection, manifest последним); чужие файлы не меняются';
@@ -371,6 +382,10 @@ test('H3-01: прежние команды и схемы их данных не 
         {
           ...contract,
           ...(c === 'init' ? { description: H2_INIT_DESCRIPTION } : {}),
+          // alpha.66: отмена открытой доработки — возврат к принятой редакции.
+          ...(c === 'cancel'
+            ? { description: H2_CANCEL_DESCRIPTION, idempotency: H2_CANCEL_IDEMPOTENCY }
+            : {}),
           // Аддитивный код отказа (alpha.35: CONTEXT_EXHAUSTED у run).
           refusals: contract.refusals.filter(
             (code) => !ADDITIVE_ENUM_VALUES.has(code) && !ADDITIVE_REFUSALS.has(`${c}:${code}`),
@@ -486,6 +501,8 @@ test('H3-01: прежние команды и схемы их данных не 
     ) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.reset;
+      // alpha.66: cancel открытой доработки — `abandoned`.
+      delete rest.abandoned;
       v = rest;
     }
     if (k === 'properties' && v && typeof v === 'object' && 'outcome' in v && 'unused' in v) {

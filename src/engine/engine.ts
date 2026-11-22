@@ -41,6 +41,7 @@ import {
   type ExecutionStore,
   type ExecutionTransaction,
   type ExecutionView,
+  type LeadLog,
   type FailureKind,
   type GraphState,
   type InputActor,
@@ -192,6 +193,10 @@ const iso = (ms: number) => new Date(ms).toISOString();
 /** Хост ждёт подтверждения перенесённой базы: выдача закрыта при любом `paused`. */
 const awaitsBaseCheck = (control: Pick<ControlState, 'waits'>) =>
   (control.waits ?? []).some((w) => w.kind === 'base-check');
+
+/** Открытая доработка после приёмки: новая редакция принятой работы ещё не принята и не оставлена. */
+const openRework = (w: WorkState) =>
+  !!w.rework && !w.rework.abandoned && w.status !== 'done' && w.status !== 'cancelled';
 
 /** Содержание поручения без номера редакции источника: одинаковое содержание — та же работа. */
 const contentDigest = (order: WorkState['order']) =>
@@ -479,7 +484,19 @@ export class Engine {
             'REVISION_CONFLICT',
             `Поручение ${order.id} уже принадлежит другому графу`,
           );
-        if (prior?.status === 'done' && contentDigest(prior.order) === contentDigest(order))
+        // Принятая постановка не меняется — работа остаётся принятой. Кроме
+        // оставленной доработки без возвращённой постановки: у поручения
+        // записано содержание, которое не принималось, и та же постановка
+        // снова открывает доработку.
+        if (
+          prior?.status === 'done' &&
+          contentDigest(prior.order) === contentDigest(order) &&
+          !(
+            prior.rework?.abandoned &&
+            !prior.rework.abandoned.restored &&
+            prior.rework.abandoned.orderDigest === contentDigest(order)
+          )
+        )
           continue;
         // Принятая версия корпуса остаётся за поручением, пока среди его
         // договоров есть договор этого корпуса с тем же нормативным основанием; эпизод восстановления и его история — тоже: закрывает их
@@ -524,6 +541,12 @@ export class Engine {
       }
       for (const prior of existing ? tx.works(graph.id) : [])
         if (!graph.orders.some((o) => o.id === prior.id) && prior.status !== 'done') {
+          // Открытая доработка принятой работы, убранная из плана, — не отмена
+          // задачи: работа возвращается к принятой редакции.
+          if (openRework(prior)) {
+            this.abandonReworkIn(tx, prior, 'graph');
+            continue;
+          }
           tx.putWork({ ...prior, status: 'cancelled', activeRunId: undefined });
           this.closeRequestsOf(tx, prior, 'controller');
           if (prior.status !== 'cancelled')
@@ -587,7 +610,78 @@ export class Engine {
       },
       reopenedAt: at,
       spent: prior.attempt,
+      acceptedOrder: prior.order,
     };
+  }
+
+  /**
+   * Отказ от открытой доработки принятого поручения (0.1.0-alpha.66):
+   * идущая попытка доработки отменяется, работа возвращается к принятой
+   * редакции — `done`, результат прежней приёмки, постановка принятой
+   * редакции (`acceptedOrder`; у доработки прежней версии её нет — остаётся
+   * текущая с отметкой `abandoned.orderDigest`). Засчитанные попытки
+   * принятой редакции возвращаются (у доработки со своим пределом); счёт
+   * доработок со своим пределом (`budgets`) и история попыток сохраняются:
+   * отказом и новой доработкой предел не обойти.
+   */
+  private abandonReworkIn(tx: ExecutionTransaction, w: WorkState, by: CancelActor) {
+    const r = w.rework!;
+    const at = iso(this.now());
+    const a = w.activeRunId ? tx.attempt(w.activeRunId) : undefined;
+    if (a && a.status === 'active') {
+      tx.putAttempt({ ...a, status: 'cancelled', finishedAt: at, failureKind: 'cancelled' });
+      tx.emit({
+        type: 'attempt.cancelled',
+        workId: w.id,
+        runId: a.id,
+        attempt: a.attempt,
+        payload: { reason: 'доработка оставлена: работа вернулась к принятой редакции' },
+      });
+    }
+    const { acceptedOrder, ...kept } = r;
+    const next: WorkState = {
+      id: w.id,
+      graphId: w.graphId,
+      order: acceptedOrder ?? w.order,
+      status: 'done',
+      attempt: r.fresh ? r.spent : w.attempt,
+      resultSha: r.accepted.resultSha,
+      ...(w.approvedAt ? { approvedAt: w.approvedAt } : {}),
+      ...(w.approvedDigest ? { approvedDigest: w.approvedDigest } : {}),
+      ...(w.approvedScope ? { approvedScope: w.approvedScope } : {}),
+      ...(w.approval ? { approval: w.approval } : {}),
+      ...(w.hold ? { hold: w.hold } : {}),
+      ...(w.checkVersion ? { checkVersion: w.checkVersion } : {}),
+      ...(w.recovery ? { recovery: w.recovery } : {}),
+      ...(w.recoveryHistory ? { recoveryHistory: w.recoveryHistory } : {}),
+      ...(w.neutralFailures ? { neutralFailures: w.neutralFailures } : {}),
+      ...(w.codeReviewDecisions ? { codeReviewDecisions: w.codeReviewDecisions } : {}),
+      rework: {
+        ...kept,
+        abandoned: {
+          at,
+          by,
+          orderDigest: contentDigest(w.order),
+          restored: acceptedOrder !== undefined,
+        },
+      },
+    };
+    tx.putWork(next);
+    this.closeRequestsOf(tx, w, by === 'graph' ? 'controller' : by);
+    tx.emit({
+      type: 'work.rework-abandoned',
+      graphId: w.graphId,
+      workId: w.id,
+      ...(a ? { runId: a.id, attempt: a.attempt } : {}),
+      payload: {
+        by,
+        revision: r.revision,
+        acceptedSha: r.accepted.resultSha,
+        restored: acceptedOrder !== undefined,
+        hadAttempt: Boolean(a && a.status === 'active'),
+      },
+    });
+    return next;
   }
 
   /** Раунд технического ревью плана или контракта сохраняется в истории предмета. */
@@ -4308,6 +4402,23 @@ export class Engine {
    * или процесс вправе её сменить. Неприменённый запрос операции остаётся.
    * Хост с `recordPolicyOnLead: false` вызывает это сам при запуске controller.
    */
+  /**
+   * Журнал ведущего (0.1.0-alpha.66): прочитать и заменить запись `lead`
+   * одной транзакцией `lead.recorded`. `fn` получает прежнюю запись (нет —
+   * пустая), часы движка и вид той же транзакции; событий журнала нет.
+   */
+  recordLead<T>(
+    fn: (log: LeadLog, now: number, view: ExecutionView) => { log: LeadLog; result: NotPromise<T> },
+  ): T {
+    return this.tx('lead.recorded', (tx) => {
+      this.assertNoUpdate(tx);
+      const prev = tx.local('lead', WORKSPACE_OWNER, 'log') ?? { entries: [] };
+      const { log, result } = fn(prev, this.now(), tx);
+      tx.putLocal('lead', WORKSPACE_OWNER, 'log', log);
+      return result;
+    });
+  }
+
   recordPolicy(owner: string) {
     this.tx('config.started', (tx) => {
       const lease = tx.controller();
@@ -5179,13 +5290,23 @@ export class Engine {
    * не отменяется. `by` — кто отменил (`work.cancelled`): CLI — `operator`,
    * хост, не назвавший актёра, — `host`.
    */
-  cancel(workId: string, reason = 'отменено оператором', by: CancelActor = 'host') {
+  cancel(
+    workId: string,
+    reason = 'отменено оператором',
+    by: CancelActor = 'host',
+  ): { work: WorkState; changed: boolean; abandoned?: true } {
     return this.tx('task.cancelled', (tx) => {
       this.assertNoUpdate(tx);
       const w = tx.work(workId);
       if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
       if (w.status === 'done')
         throw new HarnessError('NOT_READY', 'Принятый результат не отменяется');
+      // Отмена открытой доработки принятой работы — «вернуться к принятому»,
+      // а не «задача отменена»: принятое не отменяется (0.1.0-alpha.66).
+      // Доработка, отменённая прежней версией (`cancelled` с открытой
+      // доработкой), так же возвращается к принятой редакции.
+      if (openRework(w) || (w.status === 'cancelled' && w.rework && !w.rework.abandoned))
+        return { work: this.abandonReworkIn(tx, w, by), changed: true, abandoned: true as const };
       if (w.status === 'cancelled') return { work: w, changed: false };
       const a = w.activeRunId ? tx.attempt(w.activeRunId) : undefined;
       if (a) {
