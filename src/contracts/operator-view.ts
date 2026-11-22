@@ -904,6 +904,8 @@ export const operatorViewSchema = z.strictObject({
       planned: truncatedCount.optional(),
       /** Ревизия 6: записи журнала ведущего сверх `lead.notes`. */
       leadNotes: truncatedCount.optional(),
+      /** Ревизия 6: раздел `resources` опущен по размеру (1). */
+      resources: truncatedCount.optional(),
       sourceQuestions: truncatedCount.optional(),
       /** Ревизия 5: задачи `sourceReviews[].tasks` сверх предела. */
       sourceReviews: truncatedCount.optional(),

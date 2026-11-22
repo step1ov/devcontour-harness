@@ -501,6 +501,7 @@ export type TruncatedKey =
   | 'whatsNew'
   | 'planned'
   | 'leadNotes'
+  | 'resources'
   | 'previews';
 
 export interface ViewSource {
@@ -3666,17 +3667,14 @@ export function operatorView(input: OperatorViewInput, o: OperatorViewOptions = 
   return fitSize(full, maxBytes, c.lang, truncated);
 }
 
-/** Поля ревизий 4 и 6 у работы, которые документ сверх предела теряет первыми после разделов связки. */
+/** Поля ревизии 4 у работы, которые документ сверх предела теряет после разделов связки (путь работы — раньше, шаг 0). */
 function withoutWorkFields(w: WorkView): WorkView | undefined {
   const last = w.attempts.lastFailure;
   const lastExtra = !!last && (last.kind !== undefined || last.counted !== undefined);
   const steps = w.blockers.some((b) => b.step !== undefined);
   const line = w.question?.line !== undefined;
-  const track = w.track !== undefined;
-  if (!lastExtra && !steps && !line && !track) return undefined;
+  if (!lastExtra && !steps && !line) return undefined;
   const out: WorkView = { ...w };
-  // Путь работы (ревизия 6) — самое объёмное необязательное поле работы.
-  if (track) delete out.track;
   if (lastExtra) {
     const rest = { ...last };
     delete rest.kind;
@@ -3707,15 +3705,20 @@ const share = <T>(list: T[], n: number, add: (k: number) => void): T[] => {
 /**
  * Документ сверх байтового предела не отказывает целиком, а теряет
  * необязательное в одном порядке (docs/contracts.md, «Размер»):
- * 1. разделы связки `scope` и `sourceQuestions` (`VIEW_SECTIONS_DROPPED`);
- * 2. поля ревизий 4 и 6 у работ — `attempts.lastFailure.kind`/`counted`,
- *    `blockers[].step`, `question.line`, `track` (число работ —
- *    `truncated.workFields`);
- * 3. лента `activity`;
+ * 0. путь работы `works[].track` у всех работ (число работ —
+ *    `truncated.workFields`; путь целиком — `view --work`);
+ * 1. разделы связки `scope` и `sourceQuestions` (`VIEW_SECTIONS_DROPPED`),
+ *    планируемые задачи `planned`, записи журнала ведущего `lead.notes` и
+ *    готовность по работам `forecast.progress.works`;
+ * 2. поля ревизии 4 у работ — `attempts.lastFailure.kind`/`counted`,
+ *    `blockers[].step`, `question.line` (число работ — `truncated.workFields`);
+ * 3. лента `activity`, затем раздел `resources` (`truncated.resources: 1`);
  * 4. хвосты списков `works`, `reviews` (и находок предметов), `questions`,
  *    `escalations`, `drift` — одной долей, наибольшей, при которой документ
  *    помещается (опущенное — в `truncated` по спискам).
- * С шага 2 — предупреждение `VIEW_SIZE_REDUCED`. Отказ `VIEW_TOO_LARGE`
+ * С шага 0 (с шага 2, если путей работ нет) — предупреждение
+ * `VIEW_SIZE_REDUCED`. Живые превью `previews`, сессия ведущего и его
+ * последняя запись (`lead` без `notes`) не опускаются. Отказ `VIEW_TOO_LARGE`
  * остаётся только для предела меньше документа без всех этих списков.
  */
 function fitSize(
@@ -3780,11 +3783,28 @@ function fitSize(
       truncated: truncation<TruncatedKey>(all)!,
     } as OperatorView;
   };
+  // 0. Путь работы (`works[].track`, ревизия 6) — самое объёмное и
+  // восстановимое (`view --work`) поле: первым, у всех работ.
+  let v: OperatorView = full;
+  if (full.works.some((w) => w.track)) {
+    v = {
+      ...v,
+      works: v.works.map((w) => {
+        if (!w.track) return w;
+        stripped.add(w.id);
+        const out = { ...w };
+        delete out.track;
+        return out;
+      }),
+    };
+    const done = tryFinish(assemble(v, {}, true));
+    if (done) return done;
+  }
   // 1. Разделы связки и готовность по работам в прогнозе (строки прогноза остаются).
   // Ревизия 6: планируемые задачи и журнал ведущего — вместе с разделами
   // связки (строки прогона и ведущего остаются).
-  const { scope, sourceQuestions, planned, ...rest } = full;
-  let v: OperatorView = rest;
+  const { scope, sourceQuestions, planned, ...rest } = v;
+  v = rest;
   if (scope) add('scope')(scope.tasks.length);
   if (sourceQuestions) add('sourceQuestions')(sourceQuestions.length);
   if (planned) add('planned')(planned.length);
@@ -3800,7 +3820,7 @@ function fitSize(
     v = { ...v, forecast: { ...v.forecast!, progress } };
   }
   if (scope || sourceQuestions || perWork || planned || full.lead?.notes.length) {
-    const done = tryFinish(assemble(v, {}, false));
+    const done = tryFinish(assemble(v, {}, stripped.size > 0));
     if (done) return done;
   }
   // 2. Поля ревизии 4 у работ.
@@ -3822,6 +3842,16 @@ function fitSize(
     const noFeed = { ...v };
     delete noFeed.activity;
     v = noFeed;
+    const done = tryFinish(assemble(v, {}, true));
+    if (done) return done;
+  }
+  // 3a. Раздел «Что задействовано» (ревизия 6) — справка, не ход: раньше
+  // хвостов работ. Живые превью и сессия ведущего остаются всегда.
+  if (v.resources) {
+    add('resources')(1);
+    const noResources = { ...v };
+    delete noResources.resources;
+    v = noResources;
     const done = tryFinish(assemble(v, {}, true));
     if (done) return done;
   }

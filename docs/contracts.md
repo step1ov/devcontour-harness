@@ -2038,20 +2038,28 @@ dependencyStore, services[], gates, lines[], truncated?}` простыми сл�
 `truncated`, плюс предупреждение `VIEW_TRUNCATED` (пункты `updates.whatsNew`
 сверх 10 — `truncated.whatsNew`). Документ больше 256 КБ UTF-8 не
 отказывает целиком, а теряет необязательное в одном порядке, пока не
-поместится (с 0.1.0-alpha.61):
+поместится (с 0.1.0-alpha.61; шаг 0 и состав шагов 1 и 3 — 0.1.0-alpha.66):
 
+0. путь работы `works[].track` у всех работ — самое объёмное поле работы,
+   целиком он есть в `view --work` (число оставшихся в документе работ без
+   опущенных полей — `truncated.workFields`);
 1. разделы связки `scope` и `sourceQuestions` (их число — в `truncated`,
-   предупреждение `VIEW_SECTIONS_DROPPED`);
-2. поля ревизий 4 и 6 у работ — `attempts.lastFailure.kind` и `counted`,
-   `blockers[].step`, `question.line`, путь работы `track` (число оставшихся в документе работ без
-   них — `truncated.workFields`);
-3. лента `activity` (`truncated.activity`);
+   предупреждение `VIEW_SECTIONS_DROPPED`), вместе с ними планируемые
+   задачи `planned` (`truncated.planned`), записи журнала ведущего
+   `lead.notes` (`truncated.leadNotes`) и готовность по работам
+   `forecast.progress.works` (`truncated.forecastWorks`);
+2. поля ревизии 4 у работ — `attempts.lastFailure.kind` и `counted`,
+   `blockers[].step`, `question.line` (`truncated.workFields`);
+3. лента `activity` (`truncated.activity`), затем раздел «Что задействовано»
+   `resources` (`truncated.resources: 1`);
 4. хвосты списков `works`, `reviews` (и находок предметов), `questions`,
    `escalations`, `drift` — одной долей `n/64`, наибольшей, при которой
    документ помещается (опущенное — в `truncated` по спискам).
 
-Начиная со второго шага — предупреждение `VIEW_SIZE_REDUCED`;
-`VIEW_TRUNCATED` остаётся всегда. Счётчики `progress`, `forecast`, `updates`,
+С шага 0 (если путей работ нет — со второго) — предупреждение
+`VIEW_SIZE_REDUCED`; `VIEW_TRUNCATED` остаётся всегда. Живые превью
+`previews` (не больше 20), сессия ведущего и его последняя запись (`lead`
+без `notes`), строки прогноза и состояние выпуска не опускаются. Счётчики `progress`, `forecast`, `updates`,
 `health`, `history` и `settings` не опускаются. Отказ `VIEW_TOO_LARGE`
 (exit 4) остаётся, когда предела (`maxBytes`, по умолчанию 256 КБ) не хватает
 и документу без всех этих списков — например, при сотне ролей с запасными
@@ -2119,7 +2127,9 @@ controller, живость, время идущей попытки (ряд `load
   причина провала, удержание, эпизод восстановления с предложением,
   блокировки (без общей паузы очереди; сверх предела — `blockersTruncated`) и
   `next` — кто и что делает (по диагнозу `explain`; стадия и свойство — по
-  `nextAction`);
+  `nextAction`, с 0.1.0-alpha.66 — с восстановлением ведущим
+  `leadRecoveryStep`: на исчерпании шаг `attempts-exhausted` ведущего —
+  `diagnose` или `reset-attempts`, пока бюджет его сбросов не потрачен);
 - `stops` — диагнозы `explain` без проб runtime, кроме `action: none`.
   Отменённая работа (и упавшая с классом `cancelled`) — остановка
   (`CANCELLED`, lead `replan-dependents`), только пока от неё прямо зависит
@@ -2563,7 +2573,13 @@ list»: песочница открывает сведения только о �
 1` тем же `runCheck`, что gates, одна на процесс): только при её ответе
   `unavailable` провал — `environment` с причиной `sandbox-process-list`, не
   засчитанный в `maxAttempts` (в пределах `MAX_NEUTRAL_FAILURES`, как прочие
-  отказы песочницы). Текст evidence начинается с кода
+  отказы песочницы). С 0.1.0-alpha.66 такой отказ не повторяется
+  автоматически и выдачу не ставит на паузу: повтор дал бы тот же отказ.
+  Попытка хранит `environmentCause: sandbox-process-list`, `repairDecision`
+  сразу останавливается с объяснением, а explain называет ход ведущего:
+  `RUNTIME_UNAVAILABLE`, `lead`, `fix-environment` (правило
+  `environment-gate-command`, docs/principles.md). Ведущий меняет gate или
+  команду. Текст evidence начинается с кода
   `GATE_SANDBOX_PROCESS_LIST` (метка текста отказа, а не код `HarnessError`:
   отказ попытки — `environment`, `harness gates` — `GATE_FAILED`) и называет строку признака и совет: тест не
   должен требовать список всех процессов хоста — свои дочерние процессы
