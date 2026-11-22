@@ -1767,6 +1767,12 @@ export class Engine {
       });
     if (work.hold)
       out.push({ code: 'NOT_READY', message: 'Удержано операцией ' + work.hold.operation });
+    const infra = infraPendingOf(work, view);
+    if (infra.length)
+      out.push({
+        code: 'NOT_READY',
+        message: `Ждёт работы инфраструктуры прежнего графа: ${infra.join(', ')}`,
+      });
     // Вопрос исполнителя без применённого ответа держит поручение сам по себе.
     const question = blockingRequest(view, work);
     if (question)
@@ -1897,6 +1903,9 @@ export class Engine {
         const external = new Set(graph.graph.prerequisites.map((p) => p.id));
         if (!w.order.dependsOn.every((d) => external.has(d) || tx.work(d)?.status === 'done'))
           return false;
+        // Инфраструктура раньше продукта и между графами: открытая работа
+        // инфраструктуры прежнего графа держит продуктовые работы своих репозиториев.
+        if (infraPendingOf(w, tx).length) return false;
         // Контракты поручения согласованы ревью своего digest при текущем назначении reviewer.
         if (this.contractBlocker(w, tx)) return false;
         // Недопустимое назначение reviewer держит только это поручение.
@@ -6141,4 +6150,31 @@ export class Engine {
       };
     });
   }
+}
+
+/**
+ * Открытые работы инфраструктуры прежних графов (alpha.67, docs/infra-works.md)
+ * по репозиториям продуктовой работы — своему и связанным. Внутри графа
+ * порядок задаёт `dependsOn` (`plan-check`/`validate`); между графами — эта
+ * проверка: продуктовая работа не выдаётся, пока инфраструктура, на которой
+ * её проверят, не принята или не отменена.
+ */
+export function infraPendingOf(work: WorkState, view: ExecutionView): string[] {
+  if (work.order.kind === 'infra') return [];
+  const graphs = view.graphs().map((g) => g.id);
+  const own = graphs.indexOf(work.graphId);
+  if (own <= 0) return [];
+  const earlier = new Set(graphs.slice(0, own));
+  const repos = new Set([work.order.repositoryId, ...work.order.relatedRepositories]);
+  return view
+    .works()
+    .filter(
+      (w) =>
+        w.order.kind === 'infra' &&
+        earlier.has(w.graphId) &&
+        repos.has(w.order.repositoryId) &&
+        w.status !== 'done' &&
+        w.status !== 'cancelled',
+    )
+    .map((w) => w.id);
 }

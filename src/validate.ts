@@ -89,7 +89,9 @@ export function crossIssues(graph: WorkGraph, policy: ExecutionPolicy): CodedIss
     if (!role) add('INVALID_INPUT', at('role'), 'Роль не объявлена политикой: ' + order.role);
     for (const r of order.resources ?? [])
       if (!resources.has(r)) add('INVALID_INPUT', at('resources'), 'Неизвестный ресурс: ' + r);
-    if (role?.writePaths?.length) {
+    // Работу инфраструктуры область роли не сужает (runner: `scopeViolations`):
+    // её область записи проверяет область инфраструктуры ниже.
+    if (role?.writePaths?.length && order.kind !== 'infra') {
       const reachable = order.writeScope.filter(
         (p) =>
           withinPaths(p, role.writePaths!) || role.writePaths!.some((r) => withinPaths(r, [p])),
@@ -259,8 +261,11 @@ function infraOrderIssues(graph: WorkGraph): CodedIssue[] {
   };
   graph.orders.forEach((order, i) => {
     if (order.kind === 'infra') return;
+    // Репозитории работы: свой и связанные (`relatedRepositories`) — gates и
+    // мосты каждого из них должны быть из принятой ревизии инфраструктуры.
+    const repos = new Set([order.repositoryId, ...order.relatedRepositories]);
     const missing = infra
-      .filter((x) => x.repositoryId === order.repositoryId && !reaches(order.id, x.id))
+      .filter((x) => repos.has(x.repositoryId) && !reaches(order.id, x.id))
       .map((x) => x.id);
     if (missing.length)
       issues.push({

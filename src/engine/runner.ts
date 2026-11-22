@@ -51,11 +51,10 @@ import {
   type ProbeServer,
   type RuntimeResponse,
   type WorkState,
-  gateDefinitionFiles,
   hostStepFiles,
   infraViolations,
-  withinInfra,
 } from '../contracts/index.ts';
+import { changedFacts, resolvedHostFiles } from './infra-guard.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
 import { codeReviewDiff } from './review-diff.ts';
 import { worktreeKey } from '../environment/git-trust.ts';
@@ -1092,30 +1091,29 @@ export class Runner {
     // планом (`gateChanges`): её gates исполняются по определению базы.
     if (kind === 'infra') {
       const base = range ? range[0] : 'HEAD';
-      const gateFiles = gateDefinitionFiles(repo);
-      const present = new Set<string>();
-      for (const path of changed)
-        if (withinInfra(path, gateFiles))
-          await git(cwd, 'cat-file', '-e', `${base}:${path}`)
-            .then(() => present.add(path))
-            .catch(() => undefined);
-      const { host, gate } = infraViolations(changed, {
+      const { present, links } = await changedFacts(cwd, base, range?.[1], changed);
+      const { host, gate, link } = infraViolations(changed, {
         kind,
         paths: infraPaths,
-        gateFiles,
-        hostFiles: hostStepFiles(repo, this.policy.lifecycle),
+        hostFiles: await resolvedHostFiles(cwd, base, hostStepFiles(repo, this.policy)),
         gateChanges: work.order.gateChanges ?? [],
         inBase: (p) => present.has(p),
+        isLink: (p) => links.has(p),
       });
       if (host.length)
         throw new TaskFailure(
           'scope-violation',
-          `Изменены файлы шагов на хосте (lifecycle/prepare исполняются вне песочницы до ревью): ${host.join(', ')}; новую версию пишите отдельным файлом, переключает её политика`,
+          `Изменены файлы шагов на хосте (lifecycle/prepare исполняются вне песочницы): ${host.join(', ')}; новую версию пишите отдельным файлом, переключает её политика`,
+        );
+      if (link.length)
+        throw new TaskFailure(
+          'scope-violation',
+          `Работа инфраструктуры добавила или изменила символические ссылки: ${link.join(', ')}; их цель не проверяется областью — пишите обычные файлы`,
         );
       if (gate.length)
         throw new TaskFailure(
           'scope-violation',
-          `Изменены файлы gates доверенной базы без согласования планом: ${gate.join(', ')}; назовите их в gateChanges поручения и проведите ревью плана`,
+          `Изменены файлы gates доверенной базы без согласования планом: ${gate.join(', ')}; существующие файлы области инфраструктуры (и новые файлы разрешения: package.json, node_modules, конфигурация) меняются только по gateChanges поручения с ревью плана`,
         );
     }
     // Ответы эталонных наборов лежат в рабочем дереве: изменённый код,
@@ -2002,6 +2000,13 @@ export class Runner {
                       evaluation.decision.kind === 'continue'
                         ? selectGenerators(repo.generators ?? [], changed)
                         : [];
+                    // Генератор исполняется на хосте до ревью: работа
+                    // инфраструктуры его входы и инструмент не меняет.
+                    if (generators.length && work.order.kind === 'infra')
+                      throw new TaskFailure(
+                        'scope-violation',
+                        `Работа инфраструктуры изменила входы генераторов ${generators.map((g) => g.id).join(', ')}: генераторы исполняются на хосте до ревью`,
+                      );
                     if (generators.length) {
                       // Генерация — не время исполнителя: у неё свой предел фазы.
                       rearm();
@@ -2127,6 +2132,11 @@ export class Runner {
             },
             (stage, action) => this.timed(attempt, 'candidate-environment:' + stage, action),
             (message) => this.portWarning(attempt.id, message),
+            // Работа инфраструктуры: teardown на хосте — по доверенной базе
+            // области, а не по коду кандидата (docs/infra-works.md).
+            work.order.kind === 'infra' && repo.infra?.paths.length
+              ? { base, paths: [...repo.infra.paths] }
+              : undefined,
           );
           await assertDependencies(attempt.dependencies ?? []);
           attempt = { ...attempt, candidateSha: candidate };

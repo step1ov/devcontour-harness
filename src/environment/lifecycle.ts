@@ -18,6 +18,13 @@ import {
 } from './dependency-network.ts';
 import { protectedChanges, protectedSnapshot, SandboxPolicyError } from './isolation.ts';
 import { command } from './process.ts';
+import {
+  putBack,
+  readUntrackedState,
+  setAside,
+  untrackedState,
+  type TrustedTree,
+} from './trusted-tree.ts';
 import { ensurePortsFree } from './port-probe.ts';
 import { leaseScope } from './survivors.ts';
 import { redactor, type Redactor } from './redaction.ts';
@@ -365,6 +372,12 @@ export async function withEnvironment<T>(
     action(),
   /** Предупреждения пробы портов (порт, занятый чужим процессом только на wildcard). */
   warn?: (message: string) => void,
+  /**
+   * Работа инфраструктуры (docs/infra-works.md): teardown исполняется по
+   * доверенной базе области — изменения кандидата откладываются на время
+   * очистки (`trusted-tree.ts`).
+   */
+  trusted?: TrustedTree,
 ): Promise<T> {
   // Порты аренды свободны до lifecycle, prepare и gates фазы; внутри фазы
   // их законно держат её службы, и вложенная фаза их не проверяет.
@@ -383,9 +396,40 @@ export async function withEnvironment<T>(
   const scope = leaseScope.getStore();
   if (scope && !scope.environment)
     return leaseScope.run({ ...scope, environment: true }, () =>
-      phaseEnvironment(lifecycle, cwd, dir, execution, signal, action, measure),
+      phaseEnvironment(lifecycle, cwd, dir, execution, signal, action, measure, trusted),
     );
-  return phaseEnvironment(lifecycle, cwd, dir, execution, signal, action, measure);
+  return phaseEnvironment(lifecycle, cwd, dir, execution, signal, action, measure, trusted);
+}
+
+/** Переменные, которые выбирают демон контейнеров: запись окружения хранит их для сверки. */
+export const CONTAINER_ENV_KEYS = [
+  'DOCKER_HOST',
+  'DOCKER_CONTEXT',
+  'DOCKER_CONFIG',
+  'DOCKER_CERT_PATH',
+  'DOCKER_TLS_VERIFY',
+  'CONTAINER_HOST',
+  'CONTAINER_CONNECTION',
+] as const;
+const containerEnv = (env: NodeJS.ProcessEnv) =>
+  Object.fromEntries(
+    CONTAINER_ENV_KEYS.flatMap((k) => (typeof env[k] === 'string' ? [[k, env[k]]] : [])),
+  ) as Record<string, string>;
+
+/** Teardown по доверенной базе области (`trusted`): отложить, очистить, вернуть при успехе. */
+async function trustedTeardown(
+  trusted: TrustedTree | undefined,
+  cwd: string,
+  dir: string,
+  run: () => Promise<void>,
+) {
+  // Снимка нет — фаза не дошла до исполнителя: кода кандидата в дереве нет.
+  const before = trusted && (await readUntrackedState(join(dir, 'trusted-untracked.json')));
+  if (!trusted || !before) return run();
+  const asideDir = join(dir, 'trusted-aside');
+  const moved = await setAside(cwd, trusted, before, asideDir);
+  await run();
+  await putBack(cwd, asideDir, moved);
 }
 async function phaseEnvironment<T>(
   lifecycle: Lifecycle | undefined,
@@ -395,6 +439,7 @@ async function phaseEnvironment<T>(
   signal: AbortSignal,
   action: () => Promise<T>,
   measure: <R>(stage: string, action: () => Promise<R>) => Promise<R>,
+  trusted?: TrustedTree,
 ): Promise<T> {
   if (!lifecycle) return action();
   await mkdir(dir, { recursive: true });
@@ -417,6 +462,11 @@ async function phaseEnvironment<T>(
     status: 'active',
     startedAt: new Date().toISOString(),
     runId: execution.env.DEVCONTOUR_RUN_ID,
+    // Демон контейнеров фазы: сверка очистки спрашивает тот же демон.
+    ...((env) => (Object.keys(env).length ? { containerEnv: env } : {}))(
+      containerEnv(execution.env),
+    ),
+    ...(trusted ? { trusted } : {}),
   };
   await writeFile(receiptPath, JSON.stringify(receipt, null, 2));
   let result: T | undefined, failure: Error | undefined;
@@ -427,6 +477,12 @@ async function phaseEnvironment<T>(
     await measure('ready', () =>
       runSteps(lifecycle.ready, cwd, join(dir, 'ready'), execution, signal),
     );
+    // Файлы области, которые создал setup до исполнителя, — не изменения кандидата.
+    if (trusted)
+      await writeFile(
+        join(dir, 'trusted-untracked.json'),
+        JSON.stringify(await untrackedState(cwd, trusted)),
+      );
     result = await action();
   } catch (error) {
     // A thrown undefined/false must still fail the attempt after cleanup.
@@ -436,7 +492,9 @@ async function phaseEnvironment<T>(
         : new Error('Операция окружения завершилась ошибкой', { cause: error });
   }
   try {
-    await measure('cleanup', () => teardown(lifecycle, cwd, dir, execution));
+    await measure('cleanup', () =>
+      trustedTeardown(trusted, cwd, dir, () => teardown(lifecycle, cwd, dir, execution)),
+    );
     receipt.status = 'cleaned';
   } catch (error) {
     receipt.status = 'cleanup-failed';
@@ -491,6 +549,7 @@ export async function cleanupEnvironment(
     ownerPid?: number;
     runId?: string;
     devcontourEnv?: Record<string, string>;
+    trusted?: TrustedTree;
   };
   const cwd = await realpath(receipt.cwd);
   if (!allowedRoots.some((root) => cwd.startsWith(root + sep)))
@@ -515,7 +574,8 @@ export async function cleanupEnvironment(
     process.env,
     policy.toolchain,
   );
-  await teardown(lifecycle, cwd, join(receiptPath, '..'), execution);
+  const dir = join(receiptPath, '..');
+  await trustedTeardown(receipt.trusted, cwd, dir, () => teardown(lifecycle, cwd, dir, execution));
   await writeFile(receiptPath, JSON.stringify({ ...receipt, status: 'cleaned' }, null, 2));
   return { status: 'cleaned' as const };
 }

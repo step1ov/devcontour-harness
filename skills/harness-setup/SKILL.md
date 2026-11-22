@@ -47,11 +47,12 @@ write new executable code during setup:
 
 **Setup budget: about 30 minutes.** Setup time counts from the first setup
 file or record to the first registered graph. Over the budget, `doctor`
-prints `SETUP_OVER_BUDGET: …` and `status`/the panel show the setup progress
-line with «бюджет 30 мин — превышен»: stop adding code, write down what is
-left as infra tasks and hand over to planning. The panel shows each setup
-step (profile, init, doctor, smoke, probe, gates, connector) with its state
-and time from the records harness keeps.
+prints `SETUP_OVER_BUDGET: …` and `status`/`harness view` show the setup
+progress line with «бюджет 30 мин — превышен»: stop adding code, write down
+what is left as infra tasks and hand over to planning. `harness view`
+(`stage.progress`) shows each setup step (profile, init, doctor, smoke,
+probe, gates, connector) with its state and time from the records harness
+keeps.
 
 ## Decide or ask
 

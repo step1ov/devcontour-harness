@@ -189,7 +189,7 @@ export function prompt(input: {
       ? review
         ? 'This is an infra work: harness-owned infrastructure code (bridges, gate wrappers, acceptance tests). Reject any change that weakens an existing gate or makes a check pass without proving behaviour. Gate files it may change by the approved plan: ' +
           JSON.stringify(order.gateChanges ?? [])
-        : 'This is an infra work: you write harness-owned infrastructure code (bridges, gate wrappers, acceptance tests) only inside the write scope. Never edit a file that lifecycle or prepare steps run on the host; add a new file next to it instead. Existing gate files may change only when listed here: ' +
+        : 'This is an infra work: you write harness-owned infrastructure code (bridges, gate wrappers, acceptance tests) only inside the write scope. Never edit a file that lifecycle or prepare steps run on the host; add a new file next to it instead. Do not create symlinks. Files of the infra scope that already exist (gate scripts and tests, their helpers, data) and new package.json, node_modules, dot-files or *.config.* files may change only when listed here; new tests and helpers are fine: ' +
           JSON.stringify(order.gateChanges ?? [])
       : '',
     attempt.dependencies?.length

@@ -716,8 +716,20 @@ export const isolationDigest = (policy: ExecutionPolicy) =>
       r.preflight,
       r.writerDependencies ?? null,
       // Область инфраструктуры — граница записи защищённых путей; без поля
-      // кортеж прежний, и digest прежних политик не меняется.
-      ...(r.infra ? [{ infra: r.infra }] : []),
+      // кортеж прежний, и digest прежних политик не меняется. С ней в
+      // границу входят и gates (по ним принимается работа инфраструктуры), и
+      // шаги на хосте вне прежнего кортежа (генераторы, превью): их смена —
+      // новое ревью плана, а не `reapprove`.
+      ...(r.infra
+        ? [
+            {
+              infra: r.infra,
+              gates: r.gates,
+              generators: r.generators ?? null,
+              previews: r.previews ?? null,
+            },
+          ]
+        : []),
     ]),
   });
 
@@ -1165,7 +1177,12 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
       if (new Set(steps.map((s) => s.id)).size !== steps.length)
         add('INVALID_INPUT', ['repositories', r, name], 'Step ids должны быть уникальны');
     issues.push(...generatorIssues(repo, ['repositories', r, 'generators']));
-    issues.push(...infraIssues(repo, ['repositories', r, 'infra'], policy.lifecycle));
+    issues.push(
+      ...infraIssues(repo, ['repositories', r, 'infra'], {
+        ...(policy.lifecycle ? { lifecycle: policy.lifecycle } : {}),
+        ...(policy.workspaceLifecycle ? { workspaceLifecycle: policy.workspaceLifecycle } : {}),
+      }),
+    );
   });
   policy.repositories.forEach((repo, r) =>
     repo.dependsOn.forEach((dep, d) => {

@@ -140,7 +140,8 @@ function factIssues(facts: PlanningFacts, task: Task, i: number): CodedIssue[] {
       );
   });
   const own = role?.writePaths;
-  if (own?.length && task.writePaths)
+  // Работу инфраструктуры область роли не сужает (как у runner и validate).
+  if (own?.length && task.writePaths && (task as { kind?: string }).kind !== 'infra')
     if (!task.writePaths.some((p) => withinPaths(p, own) || own.some((r) => withinPaths(r, [p]))))
       add(
         'INVALID_INPUT',

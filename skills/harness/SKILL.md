@@ -211,16 +211,22 @@ inherited setup debts; each becomes an infra task:
   `.harness/policy.json`, `profile.json`, `connector.json`, `project.json`,
   `.harness/work/` or a file that `lifecycle`/`prepare` steps run. Adding it
   changes the isolation digest: the plan needs `review-plan` again;
-- an infra task's `writePaths` lie inside that scope; a file that host steps
-  run is never edited — write the new version next to it and switch the
-  policy after acceptance;
-- an existing gate file (a script or test directory a gate command names)
-  changes only when the task lists it in `gateChanges` and its description
-  says what the new check proves and why it is not weaker; plan review
-  approves that change, and the infra work's own gates run the trusted base;
-- every product task of the same repository depends on the infra tasks
-  (`plan-check` refuses a graph where it does not): product works run the
-  gates and bridges of the accepted infra revision.
+- an infra task's `writePaths` lie inside that scope (the role's write
+  paths do not narrow it); a file that host steps name is never edited —
+  write the new version next to it and switch the policy after acceptance;
+- any file of the scope that already exists in the base — a gate script or
+  test, a helper it imports, data — and any new `package.json`,
+  `node_modules/`, dot-file or `*.config.*` changes only when the task lists
+  it in `gateChanges` and its description says what the new check proves
+  and why it is not weaker; plan review approves that change. New tests and
+  helpers can be added freely; symlinks cannot. Host steps after the writer
+  (lifecycle teardown) run the trusted base of the scope, never the
+  candidate's code;
+- every product task of the same repository (or naming it in
+  `relatedRepositories`) depends on the infra tasks (`plan-check` refuses a
+  graph where it does not): product works run the gates and bridges of the
+  accepted infra revision. An open infra work of an earlier graph holds the
+  product works of its repositories.
 
 Infra works run through the normal loop (attempts, review-code, forecast);
 treat their failures like any other work's.
@@ -545,9 +551,10 @@ the works it names and the works that depend on them; every other ready work
 keeps going. Before you end a session to wait for an owner's answer, start
 the run for the ready works: when `status` (`runner.ready`,
 `runner.heldByQuestion`), `explain` (`queue`, `actor: lead`,
-`action: start-run`) or the panel says «запустите harness run: готово N
-задач, вопрос блокирует только X», that is your move now, not after the
-answer. Stop the session only when nothing is ready.
+`action: start-run`) or `harness view` (`progress.queue.line`) says
+«запустите harness run: готово N задач, вопрос блокирует только X», that is
+your move now, not after the answer. Stop the session only when nothing is
+ready.
 
 **Technical question decided by you (`INPUT_REQUIRED`, `actor: lead`,
 `answer-input`).** Only when the human opted in with
