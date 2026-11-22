@@ -151,8 +151,7 @@ export function attemptSummaryView(
 export function statusOf(
   source: StatusSource,
   graphId?: string,
-  /** `decisions` — блок настроек решений (`status --human` печатает итог); с `detail` — всегда. */
-  options: { detail?: boolean; decisions?: boolean } = {},
+  options: { detail?: boolean } = {},
 ) {
   const { engine } = source;
   // Задания графов — из их адаптера до чтения (как у explain); диагноз,
@@ -290,9 +289,7 @@ export function statusOf(
         ...(reviewsTruncated ? { reviewsTruncated } : {}),
       }))(reviewSummaryRows(v, source.policy, graphId === undefined ? {} : { graphId })),
       ...(options.detail ? { detail: statusDetail(source, v, graphId) } : {}),
-      ...(options.detail || options.decisions
-        ? { decisions: decisionSettingsView(source.policy) }
-        : {}),
+      decisions: decisionSettingsView(source.policy),
     };
   });
 }

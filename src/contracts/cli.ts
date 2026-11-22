@@ -2016,9 +2016,9 @@ export const statusDataSchema = z.strictObject({
   reviewsTruncated: z.number().int().positive().optional(),
   /**
    * Кто решает после повторных отказов и на технические вопросы — те же
-   * тексты, что у панели и doctor (`decisionSettingsSchema`). Есть с
-   * `--detail` и `--human` (строка «Решения: …»); иначе поля нет — ответ
-   * прежний.
+   * тексты, что у панели и doctor (`decisionSettingsSchema`); `--human`
+   * печатает итог строкой «Решения: …». Нет поля — этап настройки или
+   * ответ до alpha.66.
    */
   decisions: decisionSettingsSchema.optional(),
   /**

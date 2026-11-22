@@ -1253,7 +1253,7 @@ export class Harness {
    * попытки (`attemptView`); без него ответ прежний. Та же функция над
    * движком и политикой хоста — `statusOf`.
    */
-  status(graphId?: string, options: { detail?: boolean; decisions?: boolean } = {}) {
+  status(graphId?: string, options: { detail?: boolean } = {}) {
     const data = statusOf(this, graphId, options);
     // Принятые работы против текущего target ref: что после приёмки не проверено.
     const accepted = this.engine.read((v) =>

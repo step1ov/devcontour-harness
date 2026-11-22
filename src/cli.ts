@@ -1349,7 +1349,7 @@ async function run(
         if (command === 'status') {
           const updates = statusUpdates(resolve(need('state')), binding(need('state')).baseDir);
           const data = {
-            ...h.status(v.graph, { detail: Boolean(v.detail), decisions: Boolean(v.human) }),
+            ...h.status(v.graph, { detail: Boolean(v.detail) }),
             ...optional('updates', updates),
           };
           if (!v.human) return { command, data };
