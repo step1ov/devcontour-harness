@@ -5,7 +5,7 @@
 /** Мажорная версия документа: меняется, только когда поле удалено, переименовано или меняет смысл. */
 export const OPERATOR_VIEW_VERSION = 1 as const;
 /** Ревизия внутри мажорной версии: растёт при добавлениях (необязательное поле, значение перечисления). */
-export const OPERATOR_VIEW_REVISION = 5;
+export const OPERATOR_VIEW_REVISION = 6;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -55,6 +55,8 @@ export const OPERATOR_VIEW_LIMITS = {
   sourceReviewTasks: 50,
   /** Строки этапа настройки (`stage.lines`, ревизия 5). */
   stageLines: 5,
+  /** Шаги пути работы (`works[].track.steps`, ревизия 6). */
+  trackSteps: 120,
 } as const;
 
 /** Пределы свободных строк (символов) после маскирования. */

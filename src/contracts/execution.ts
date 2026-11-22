@@ -780,6 +780,72 @@ export const propertyRecoverySchema = z.strictObject({
 });
 export type PropertyRecovery = z.infer<typeof propertyRecoverySchema>;
 
+/**
+ * Причина повторных отказов по диагностике ведущего (`harness diagnose`):
+ * слабое покрытие — добавить случаи или усилить проверку; неверный подход —
+ * новая проверяемая гипотеза исполнителю; задача велика — разделить её с
+ * ревью плана; противоречивое обещание — вопрос человеку; окружение;
+ * другое. Технические (`coverage`, `approach`, `other` с гипотезой) ведущий
+ * решает сам в пределах бюджета (docs/principles.md).
+ */
+export const leadDiagnosisCauses = [
+  'coverage',
+  'approach',
+  'split',
+  'contradiction',
+  'environment',
+  'other',
+] as const;
+export type LeadDiagnosisCause = (typeof leadDiagnosisCauses)[number];
+
+/** Пределы диагностик и сбросов поручения (`WorkState.leadRecovery`). */
+export const LEAD_RECOVERY_LIMIT = 20;
+
+export const leadDiagnosisSchema = z.strictObject({
+  /** `D<n>` — номер диагностики поручения (n растёт и после усечения списка). */
+  id: z.string().regex(/^D[1-9][0-9]{0,5}$/),
+  cause: z.enum(leadDiagnosisCauses),
+  hypothesis: z.string().min(1).max(2000).optional(),
+  evidence: z.array(z.string().min(1).max(1000)).max(10),
+  /** Засчитанные отказы (ID попыток), которые она разбирает. */
+  failures: z.array(z.string().min(1)).min(1).max(20),
+  by: z.literal('lead'),
+  at: isoTimeSchema,
+  /** Согласованная постановка на момент диагностики: `split` ждёт другую. */
+  approvedDigest: digestSchema.optional(),
+  /** Предел попыток (`rework.budgets`), к которому она относится. */
+  epoch: z.number().int().min(0),
+  /** Человек решил по ней (сброс оператора): удержание снято. */
+  resolved: z.strictObject({ by: z.literal('operator'), at: isoTimeSchema }).optional(),
+});
+export type LeadDiagnosis = z.infer<typeof leadDiagnosisSchema>;
+
+export const leadResetSchema = z.strictObject({
+  by: z.enum(['lead', 'operator']),
+  at: isoTimeSchema,
+  /** Диагностика, по которой ведущий дал предел; у сброса оператора — нет. */
+  diagnosis: z.string().optional(),
+  epoch: z.number().int().min(0),
+  /** Засчитанные попытки, потраченные до сброса. */
+  spent: z.number().int().min(0),
+  /** Сколько попыток дал сброс (`maxAttempts`). */
+  granted: z.number().int().min(1),
+  /** Номер сброса ведущего в пределе (`K из M`); у сброса оператора — нет. */
+  index: z.number().int().min(1).optional(),
+  cap: z.number().int().min(0).optional(),
+  /** Отказы, которые сброс покрыл (решение человека или ведущего по ним). */
+  failures: z.array(z.string().min(1)).max(20),
+});
+export type LeadReset = z.infer<typeof leadResetSchema>;
+
+export const leadRecoverySchema = z.strictObject({
+  diagnoses: z.array(leadDiagnosisSchema).max(LEAD_RECOVERY_LIMIT),
+  resets: z.array(leadResetSchema).max(LEAD_RECOVERY_LIMIT),
+  /** Номер последней диагностики (ID следующей — `D<seq+1>`). */
+  seq: z.number().int().min(0),
+});
+export type LeadRecovery = z.infer<typeof leadRecoverySchema>;
+
 export const workStateSchema = z.strictObject({
   id: idSchema,
   graphId: idSchema,
@@ -840,6 +906,13 @@ export const workStateSchema = z.strictObject({
       spent: z.number().int().min(0),
     })
     .optional(),
+  /**
+   * Восстановление ведущим (`policy.recovery`, docs/principles.md):
+   * диагностики повторных отказов и сбросы попыток — кто, по какой
+   * диагностике, какой по счёту. Пишется только `harness diagnose` и
+   * сбросом; нет поля — диагностик и учтённых сбросов не было.
+   */
+  leadRecovery: leadRecoverySchema.optional(),
 });
 export type WorkState = z.infer<typeof workStateSchema>;
 

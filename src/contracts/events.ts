@@ -12,6 +12,7 @@ import {
   activitySchema,
   failureKindSchema,
   jointResetActors,
+  leadDiagnosisCauses,
   livenessStateSchema,
   stallActionSchema,
   workStatusSchema,
@@ -65,7 +66,7 @@ export const environmentCauses = [
 export const environmentCauseSchema = z.enum(environmentCauses);
 export type EnvironmentCause = (typeof environmentCauses)[number];
 /** Кто повторил поручение (`work.retried`): `host` — хост не назвал актёра. */
-export const retryActors = ['operator', 'recovery', 'host'] as const;
+export const retryActors = ['operator', 'recovery', 'host', 'lead'] as const;
 export type RetryActor = (typeof retryActors)[number];
 /** Кто отменил поручение (`work.cancelled`): `graph` — новая редакция графа его убрала. */
 export const cancelActors = ['operator', 'host', 'graph'] as const;
@@ -250,6 +251,25 @@ export const eventPayloads = {
     reset: z.boolean(),
     spent: z.number().int().min(0).optional(),
     reasonLength: z.number().int().min(0).optional(),
+    /**
+     * Сброс ведущего (`by: lead`, `policy.recovery`): диагностика, по которой
+     * дан предел, его номер `index` из `cap` и сколько попыток дано.
+     */
+    diagnosis: z.string().optional(),
+    index: z.number().int().min(1).optional(),
+    cap: z.number().int().min(0).optional(),
+    granted: z.number().int().min(1).optional(),
+  }),
+  /**
+   * Ведущий записал диагностику повторных отказов (`harness diagnose`):
+   * причина, разобранные засчитанные отказы и длина гипотезы (текста нет).
+   */
+  'work.diagnosed': z.strictObject({
+    diagnosis: z.string(),
+    cause: z.enum(leadDiagnosisCauses),
+    failures: z.array(z.string()).max(20),
+    hypothesisLength: z.number().int().min(0),
+    evidence: z.number().int().min(0),
   }),
   /**
    * Принятое поручение получило изменённую постановку новой редакцией графа

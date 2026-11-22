@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { decisionSettingsSchema } from './decisions.ts';
+import { trackStepKinds, trackStepStates } from './decision-rules.ts';
 import { isoTimeSchema } from './primitives.ts';
 import {
   OPERATOR_VIEW_LIMITS as L,
@@ -91,6 +93,12 @@ export const viewSettingsSchema = z.strictObject({
   }),
   lean: z.strictObject({ state: z.enum(['on', 'off', 'unknown']) }),
   defaulted: z.array(token(100)).max(50),
+  /**
+   * Ревизия 6: настройки решений — кто решает после повторных отказов и на
+   * технические вопросы — с объяснением и итогом одной фразой; те же тексты
+   * у doctor и status (docs/principles.md «Кто принимает решения»).
+   */
+  decisions: decisionSettingsSchema.optional(),
 });
 
 const findingSchema = z.strictObject({
@@ -374,6 +382,32 @@ export const workViewSchema = z.strictObject({
     .optional(),
   spend: z.strictObject({ calls: count, usd: boundedSchema, durationMs: count }),
   resultSha: sha.optional(),
+  /**
+   * Ревизия 6: путь работы целиком — пройденные попытки по шагам (код →
+   * проверки → ревью → интеграция), разборы и сбросы между ними, текущая
+   * точка и плановый остаток: попытки, разбор ведущего по
+   * `recovery.diagnoseAfter`, запасные раунды сбросов ведущего
+   * (`recovery.leadResets`) и «принято». `rework` — шаг доработки после
+   * приёмки. Сверх предела отброшены самые ранние (`truncated`).
+   */
+  track: z
+    .strictObject({
+      steps: z
+        .array(
+          z.strictObject({
+            kind: z.enum(trackStepKinds),
+            attempt: z.number().int().positive().optional(),
+            state: z.enum(trackStepStates),
+            label: z.string().min(1).max(80),
+            at: isoTimeSchema.optional(),
+            reason: z.string().min(1).max(200).optional(),
+            rework: z.number().int().positive().optional(),
+          }),
+        )
+        .max(L.trackSteps),
+      truncated: count.optional(),
+    })
+    .optional(),
 });
 
 const series = z.array(count).max(L.buckets);

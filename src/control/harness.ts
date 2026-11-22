@@ -1230,6 +1230,7 @@ export class Harness {
       const decided = repairDecision(tx, tx.works(graphId), {
         budgetLeft: this.policy.repairBudget - (job.repairs ?? 0),
         maxAttempts: this.policy.maxAttempts,
+        leadHold: (w) => this.engine.leadHoldOf(w, tx),
       });
       if (!decided || decided.action === 'stop') return decided;
       this.workflows.repair(job, `repair:${decided.kind}`, () => {
@@ -1252,7 +1253,7 @@ export class Harness {
    * попытки (`attemptView`); без него ответ прежний. Та же функция над
    * движком и политикой хоста — `statusOf`.
    */
-  status(graphId?: string, options: { detail?: boolean } = {}) {
+  status(graphId?: string, options: { detail?: boolean; decisions?: boolean } = {}) {
     const data = statusOf(this, graphId, options);
     // Принятые работы против текущего target ref: что после приёмки не проверено.
     const accepted = this.engine.read((v) =>

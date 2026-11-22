@@ -257,6 +257,10 @@ export const actionText: Record<NextAction, { ru: string; en: string }> = {
   'review-plan': { ru: 'согласовать план', en: 'approve the plan' },
   retry: { ru: 'повтор', en: 'retry' },
   'diagnose-failure': { ru: 'разобрать отказ', en: 'diagnose the failure' },
+  diagnose: {
+    ru: 'диагностировать повторные отказы (harness diagnose)',
+    en: 'diagnose the repeated failures (harness diagnose)',
+  },
   'reset-attempts': { ru: 'сбросить попытки', en: 'reset the attempts' },
   'raise-budget': { ru: 'поднять бюджет', en: 'raise the budget' },
   'replan-dependents': { ru: 'перепланировать зависимые', en: 'replan the dependents' },

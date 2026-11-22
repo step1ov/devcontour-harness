@@ -12,6 +12,7 @@ import { HarnessError, errorCodes, type ErrorCode } from './errors.ts';
 import {
   controlStateSchema,
   controllerLeaseSchema,
+  leadDiagnosisSchema,
   failureKindSchema,
   pauseReasons,
   workStatusSchema,
@@ -30,6 +31,7 @@ import { codeReviewRecordSchema } from './code-review.ts';
 import { acceptedTargetSchema } from './target.ts';
 import { workVerificationSchema } from './verification-view.ts';
 import { viewDataSchema } from './operator-view.ts';
+import { decisionSettingsSchema } from './decisions.ts';
 import { updateDataSchema, updateCheckStates } from './update.ts';
 import { sourceRefSchema } from './work.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
@@ -505,6 +507,19 @@ export const cliCommands = {
         description: 'Сбросить счётчик попыток; требует --reason',
       },
       { name: '--reason', value: 'text', required: false, description: 'Причина сброса' },
+      {
+        name: '--by',
+        value: 'text',
+        required: false,
+        description:
+          'lead — сброс ведущего по свежему техническому разбору (policy.recovery.mode: lead, предел leadResets); без флага — решение оператора',
+      },
+      {
+        name: '--diagnosis',
+        value: 'id',
+        required: false,
+        description: 'Разбор (D<n>), по которому ведущий даёт новый предел; по умолчанию — свежий',
+      },
     ],
     refusals: [
       'NOT_FOUND',
@@ -513,7 +528,39 @@ export const cliCommands = {
       'BUDGET_EXHAUSTED',
       'BUDGET_UNKNOWN',
       'INPUT_REQUIRED',
+      'DIAGNOSIS_REQUIRED',
     ],
+  },
+  diagnose: {
+    description:
+      'Записать разбор ведущего повторных засчитанных отказов работы: причина (coverage — добавить случаи, approach — новая гипотеза, split — разделить с ревью плана, contradiction — вопрос человеку, environment, other), гипотеза (обязательна для coverage и approach, не повторяет прежние) и доказательства. Следующая попытка получает гипотезу; при исчерпанных попытках техническая причина даёт ведущему право на сброс (retry --reset --by lead). Модель не вызывается',
+    writes: true,
+    idempotency: 'Каждый вызов — новый разбор D<n>; повтор той же гипотезы — отказ',
+    args: [
+      state,
+      work,
+      {
+        name: '--cause',
+        value: 'text',
+        required: true,
+        description: 'coverage | approach | split | contradiction | environment | other',
+      },
+      {
+        name: '--hypothesis',
+        value: 'text',
+        required: false,
+        description:
+          'Проверяемая гипотеза: что исполнитель сделает иначе и как это проверить (10–2000 знаков)',
+      },
+      {
+        name: '--evidence',
+        value: 'text',
+        required: false,
+        multiple: true,
+        description: 'Доказательство (ID попытки, evidence, строка лога), до 10',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'NOT_READY', 'INVALID_INPUT'],
   },
   result: {
     description: 'Машинный результат последней завершённой попытки поручения и состояние доставки',
@@ -666,6 +713,27 @@ export const cliCommands = {
         required: false,
         description:
           'Технические вопросы исполнителя (результат для пользователя не меняется) решает ведущий с записанной причиной: inputPolicy.leadAnswers.technical в новой политике; без флага на вопросы, останавливающие работу, отвечает человек. Сохранённая политика без этого правила — PATH_CONFLICT content-differs',
+      },
+      {
+        name: '--recovery',
+        value: 'text',
+        required: false,
+        description:
+          'Кто решает после повторных отказов (policy.recovery.mode): lead — ведущий разбирает и сам даёт ещё попытки в пределах бюджета; user — исчерпание решает человек. Без флага — lead при --lead-technical-answers, иначе user',
+      },
+      {
+        name: '--diagnose-after',
+        value: 'number',
+        required: false,
+        description:
+          'После скольких засчитанных отказов разбор ведущего до следующей попытки (recovery.diagnoseAfter, 1–10, по умолчанию 2)',
+      },
+      {
+        name: '--lead-resets',
+        value: 'number',
+        required: false,
+        description:
+          'Сколько раз ведущий сам даёт новый предел попыток (recovery.leadResets, 0–5, по умолчанию 2; 0 — только человек)',
       },
       {
         name: '--lean',
@@ -1874,6 +1942,14 @@ export const statusDataSchema = z.strictObject({
        * хост его не вычисляет.
        */
       target: acceptedTargetSchema.optional(),
+      /**
+       * Восстановление ведущим (`policy.recovery.mode: lead`): последний сброс
+       * ведущего простыми словами — «ведущий дал ещё N попыток (сброс K из M):
+       * причина …; гипотеза …». Нет поля — сброса ведущего в этом пределе нет.
+       */
+      recovery: z
+        .strictObject({ line: z.string().min(1).max(600), lineEn: z.string().min(1).max(600) })
+        .optional(),
     }),
   ),
   /**
@@ -1938,6 +2014,13 @@ export const statusDataSchema = z.strictObject({
   reviews: z.array(reviewSubjectSummarySchema).max(50).optional(),
   /** Предметов ревью сверх предела строк `reviews` (50); нет поля — все показаны. */
   reviewsTruncated: z.number().int().positive().optional(),
+  /**
+   * Кто решает после повторных отказов и на технические вопросы — те же
+   * тексты, что у панели и doctor (`decisionSettingsSchema`). Есть с
+   * `--detail` и `--human` (строка «Решения: …»); иначе поля нет — ответ
+   * прежний.
+   */
+  decisions: decisionSettingsSchema.optional(),
   /**
    * 0.1.0-alpha.65: harness ещё настраивается — нет `.harness/project.json`
    * (`waitingFor: project`) или привязанного состояния (`state`). Вместо
@@ -2034,8 +2117,22 @@ export const workActionDataSchema = z.strictObject({
       performed: z.boolean(),
       spent: z.number().int().min(0).optional(),
       note: z.string().optional(),
+      /** Сброс ведущего (`--by lead`): разбор, номер сброса из предела и сколько попыток дано. */
+      by: z.literal('lead').optional(),
+      diagnosis: z.string().optional(),
+      index: z.number().int().min(1).optional(),
+      cap: z.number().int().min(0).optional(),
+      granted: z.number().int().min(1).optional(),
     })
     .optional(),
+});
+
+/** `harness diagnose`: записанный разбор, что дальше и действующее правило. */
+export const diagnoseDataSchema = z.strictObject({
+  workId: idSchema,
+  diagnosis: leadDiagnosisSchema,
+  next: z.enum(['attempt', 'diagnose', 'replan', 'user-decision', 'lead-reset', 'user-reset']),
+  mode: z.enum(['lead', 'user']),
 });
 
 export const approveDataSchema = z.strictObject({
@@ -2163,6 +2260,12 @@ export const doctorDataSchema = z.strictObject({
    * песочница исполнителя их не запускает.
    */
   notes: z.array(z.string()).optional(),
+  /**
+   * Настройки решений (есть, когда задана политика): кто решает после
+   * повторных отказов и на технические вопросы, с объяснением и итогом —
+   * те же тексты, что у панели (`view.settings.decisions`).
+   */
+  decisions: decisionSettingsSchema.optional(),
   /**
    * Действующее правило ответов на вопросы исполнителя (есть, когда задана
    * политика): технические решает ведущий (`inputPolicy.leadAnswers.technical`),
@@ -2715,6 +2818,8 @@ export const initDataSchema = z.strictObject({
       lineEn: z.string(),
     })
     .optional(),
+  /** Настройки решений новой или сохранённой политики (`decisionSettingsSchema`). */
+  decisions: decisionSettingsSchema.optional(),
   /**
    * Закреплённый node новой политики (`policy.toolchain.node`,
    * 0.1.0-alpha.65): версия и откуда она — `.nvmrc`, `.node-version`,
@@ -2923,6 +3028,7 @@ export const cliDataSchemas = {
   resume: controlDataSchema,
   cancel: workActionDataSchema,
   retry: workActionDataSchema,
+  diagnose: diagnoseDataSchema,
   result: resultEnvelopeSchema,
   deliver: resultEnvelopeSchema,
   cleanup: cleanupDataSchema,

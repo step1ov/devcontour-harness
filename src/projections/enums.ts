@@ -12,6 +12,8 @@ export const nextActions = [
   'review-plan',
   'retry',
   'diagnose-failure',
+  /** Записать диагностику повторных отказов (`harness diagnose`, ведущий). */
+  'diagnose',
   'reset-attempts',
   'raise-budget',
   'replan-dependents',

@@ -15,6 +15,7 @@ import {
   PROJECT_WORK_DIR,
   executionPolicySchema,
   inputPolicyOf,
+  recoveryPolicyOf,
   leadAnswersRule,
   projectManifestSchema,
   runtimeAssignments,
@@ -27,6 +28,7 @@ import {
   type ProfilePin,
   type ProjectManifest,
 } from '../contracts/index.ts';
+import { decisionSettingsView } from '../projections/decisions.ts';
 import { profilePin, resolveProfile } from '../profiles/resolve.ts';
 import { Manifests, packageManagerField } from '../toolchains/manifests.ts';
 import { inspectPolicy, problemLines, type ToolchainReport } from '../toolchains/inspect.ts';
@@ -162,6 +164,13 @@ export interface InitOptions {
    * в новой политике). Без флага — человек отвечает на все вопросы, останавливающие работу.
    */
   leadTechnicalAnswers?: boolean;
+  /**
+   * Кто решает после повторных отказов (`init --recovery`,
+   * `--diagnose-after`, `--lead-resets`): `policy.recovery` в новой политике.
+   * Сохранённая политика с другим действующим правилом — конфликт, как у
+   * `leadTechnicalAnswers`.
+   */
+  recovery?: { mode: 'lead' | 'user'; diagnoseAfter?: number; leadResets?: number };
   env?: NodeJS.ProcessEnv;
   probe?: ToolProbe;
 }
@@ -188,6 +197,7 @@ export interface InitPlanned {
   /** Почему сохранённая политика расходится с решениями (конфликт `policy.json`). */
   policyConflict?: string;
   questions: NonNullable<InitData['questions']>;
+  decisions: NonNullable<InitData['decisions']>;
 }
 
 const readme = `# .harness
@@ -363,6 +373,7 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
       ? { dependencyStore: true }
       : {}),
     ...(options.leadTechnicalAnswers ? { leadTechnicalAnswers: true } : {}),
+    ...(options.recovery ? { recovery: options.recovery } : {}),
   });
   const policyPath = join(root, PROJECT_POLICY_PATH);
   const policy = savedPolicy ?? executionPolicySchema.parse(generated.input);
@@ -431,7 +442,16 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
     options.leadTechnicalAnswers && savedPolicy
       ? inputPolicyOf(savedPolicy).leadAnswers?.technical !== true
       : false;
-  if (refusedReview || technicalConflict)
+  const effective = savedPolicy ? recoveryPolicyOf(savedPolicy) : undefined;
+  const recoveryConflict =
+    !!options.recovery &&
+    !!effective &&
+    (effective.mode !== options.recovery.mode ||
+      (options.recovery.diagnoseAfter !== undefined &&
+        effective.diagnoseAfter !== options.recovery.diagnoseAfter) ||
+      (options.recovery.leadResets !== undefined &&
+        effective.leadResets !== options.recovery.leadResets));
+  if (refusedReview || technicalConflict || recoveryConflict)
     workConflicts.push({ path: policyPath, action: 'conflict', conflict: 'content-differs' });
   const harnessDir = join(root, HARNESS_PROJECT_DIR);
   if (!plan.entries.some((e) => e.conflictPath === harnessDir))
@@ -488,7 +508,13 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
             policyConflict:
               '--lead-technical-answers: сохранённая политика не разрешает ведущему технические вопросы; добавьте inputPolicy.leadAnswers.technical: true в .harness/policy.json',
           }
-        : {}),
+        : recoveryConflict
+          ? {
+              policyConflict:
+                '--recovery/--diagnose-after/--lead-resets: у сохранённой политики другое правило восстановления; поправьте поле recovery в .harness/policy.json',
+            }
+          : {}),
+    decisions: decisionSettingsView(policy),
     questions: questionsOf(
       policy,
       savedPolicy ? 'policy' : options.leadTechnicalAnswers ? 'option' : 'default',
@@ -662,6 +688,7 @@ function dataOf(
     warnings: planned.warnings,
     ...(planned.toolchainPin ? { toolchainPin: planned.toolchainPin } : {}),
     questions: planned.questions,
+    decisions: planned.decisions,
     facts: {
       repositoryId: repository.id,
       targetRef: repository.targetRef,
@@ -778,6 +805,7 @@ export function initText(data: InitData): string {
           `toolchain.node: ${data.toolchainPin.node} (${data.toolchainPin.source}) — первым в PATH gates, writer и reviewers; другой node — поправьте policy.toolchain.node`,
         ]
       : []),
+    ...(data.decisions ? [`recovery: ${data.decisions.summary.ru}`] : []),
     ...(data.questions
       ? [
           `questions: ${data.questions.line}` +

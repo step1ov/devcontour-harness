@@ -1022,8 +1022,8 @@ export function valueReport(
           const r = {
             from: toIso(recordedFrom),
             bound: 'exact' as 'exact' | 'lower',
-            retries: zero(['operator', 'recovery', 'host'] as const),
-            resets: zero(['operator', 'recovery', 'host'] as const),
+            retries: zero(['operator', 'recovery', 'host', 'lead'] as const),
+            resets: zero(['operator', 'recovery', 'host', 'lead'] as const),
             cancellations: zero(['operator', 'host', 'graph'] as const),
             cancelledWithoutAttempt: 0,
             baseMoves: zero(['operator', 'controller', 'host'] as const),

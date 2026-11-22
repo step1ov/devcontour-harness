@@ -10,6 +10,7 @@ import {
 } from '../contracts/repair-policy.ts';
 import { RECOVERY_THRESHOLD, isNeutral } from './property-recovery.ts';
 import { blockingRequest } from './input-requests.ts';
+import type { LeadHold } from '../projections/lead-recovery.ts';
 
 export type RepairDecision =
   | {
@@ -175,6 +176,11 @@ export function repairDecision(
     maxAttempts: number;
     /** Вопрос, держащий работу, — как `blockingRequest`; диагноз многих работ читает запросы раз. */
     blocking?: (work: WorkState) => unknown;
+    /**
+     * Удержание правилом восстановления ведущим (`Engine.leadHoldOf`): разбор
+     * после `diagnoseAfter` отказов, перепланирование, решение человека.
+     */
+    leadHold?: (work: WorkState) => LeadHold | undefined;
   },
 ): RepairDecision | undefined {
   const blocking = options.blocking ?? ((w: WorkState) => blockingRequest(view, w));
@@ -233,6 +239,22 @@ export function repairDecision(
       workId: work.id,
       kind,
       reason: `${work.id}: исчерпан бюджет попыток поручения. Устраните причину и повторите со сбросом, указав его.${detail}`,
+    };
+
+  // Повторные засчитанные отказы: третьей слепой попытки нет — сначала
+  // разбор ведущего (`harness diagnose`), его решение и есть восстановление.
+  const hold = options.leadHold?.(work);
+  if (hold)
+    return {
+      action: 'stop',
+      workId: work.id,
+      kind,
+      reason:
+        hold.kind === 'diagnosis-required'
+          ? `${work.id}: ${ruCount(hold.failures.length, RU.failure)} подряд без разбора (попытки ${hold.failures.join(', ')}). Следующая попытка не выдаётся до разбора ведущего: harness diagnose --work ${work.id} --cause coverage|approach|split|contradiction|environment|other --hypothesis "…".${detail}`
+          : hold.kind === 'replan'
+            ? `${work.id}: разбор ${hold.diagnosis.id} — задача велика: перепланируйте и согласуйте разделение.${detail}`
+            : `${work.id}: разбор ${hold.diagnosis.id} — противоречивое обещание: нужно решение человека.${detail}`,
     };
 
   // Отказы окружения попытку не тратят, но их предел — свой.

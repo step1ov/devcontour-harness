@@ -2315,6 +2315,34 @@
       },
       "additionalProperties": false
     },
+    "recovery": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "lead",
+            "user"
+          ]
+        },
+        "diagnoseAfter": {
+          "default": 2,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "leadResets": {
+          "default": 2,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "additionalProperties": false
+    },
     "maxAttempts": {
       "default": 3,
       "type": "integer",

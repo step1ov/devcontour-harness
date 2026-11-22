@@ -386,6 +386,7 @@ test('H1-03: kind=error и kind=runtime — таблица §1.2; прочие �
     ['BUDGET_EXHAUSTED', ['budget', 'claim', 'user', 'raise-budget']],
     ['BUDGET_UNKNOWN', ['budget', 'claim', 'user', 'raise-budget']],
     ['ATTEMPTS_EXHAUSTED', ['unknown', 'claim', 'user', 'reset-attempts']],
+    ['DIAGNOSIS_REQUIRED', ['not-ready', 'claim', 'lead', 'diagnose']],
     ['CONTEXT_EXHAUSTED', ['context-exhausted', 'implementation', 'lead', 'diagnose-failure']],
     ['RUNTIME_UNAVAILABLE', ['environment', 'preflight', 'user', 'fix-environment']],
   ];
@@ -496,7 +497,9 @@ test('H1-03: статическая проверка — stop.ts и explain/* н
         rel === 'contracts/errors.ts' ||
         rel === 'contracts/repair-policy.ts' ||
         // Лист без импортов: русские формы при числе в тексте остановки.
-        rel === 'contracts/plural.ts',
+        rel === 'contracts/plural.ts' ||
+        // Лист правил «кто принимает решения» (только типы, 0.1.0-alpha.66).
+        rel === 'contracts/decision-rules.ts',
       `stop.ts достигает ${rel}`,
     );
   }

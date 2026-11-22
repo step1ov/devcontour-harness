@@ -1792,6 +1792,7 @@
                     "BUDGET_EXHAUSTED",
                     "BUDGET_UNKNOWN",
                     "ATTEMPTS_EXHAUSTED",
+                    "DIAGNOSIS_REQUIRED",
                     "CONTEXT_EXHAUSTED",
                     "INPUT_REQUIRED",
                     "OPERATOR_ANSWER_REQUIRED",
