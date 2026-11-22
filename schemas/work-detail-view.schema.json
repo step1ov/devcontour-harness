@@ -72,6 +72,10 @@
           "minLength": 1,
           "maxLength": 40
         },
+        "planned": {
+          "type": "boolean",
+          "const": true
+        },
         "stage": {
           "type": "object",
           "properties": {

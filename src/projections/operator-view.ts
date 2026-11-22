@@ -25,6 +25,7 @@ import { attemptLine, type AttemptLineFacts } from '../contracts/attempt-line.ts
 import { holdLineParts } from './blocker-line.ts';
 import { remoteLineParts } from './remote-line.ts';
 import { sha256Hex } from './sha256.ts';
+import { resourcesOf, type ResourcesInput, type ResourcesView } from './view-resources.ts';
 
 export {
   OPERATOR_VIEW_VERSION,
@@ -215,6 +216,43 @@ export interface ForecastView {
       rework?: true;
       line: string;
     }[];
+    /**
+     * Ревизия 6: планируемые задачи — ещё не утверждённые (задачи
+     * несогласованных снимков, задачи выпуска вне снимков, зарегистрированные
+     * несогласованные работы); вес 0. `line` — две цифры: «по утверждённому
+     * плану ~X %; с планируемыми (N задач, не утверждены: …) ~Y %».
+     */
+    planned?: { count: number; keys: string[]; line: string };
+    /** Ревизия 6: готовность и время только по утверждённому плану (есть при планируемых). */
+    approved?: {
+      percent: number;
+      total: number;
+      done: number;
+      left: number;
+      loMs?: number;
+      hiMs?: number;
+    };
+    /** Ревизия 6: шаги ведущего — 10 % выпуска поровну: план, вопросы, доставка, отчёт. */
+    lead?: {
+      steps: {
+        step: 'plan' | 'questions' | 'delivery' | 'report';
+        weight: number;
+        done: boolean;
+      }[];
+      weighted: number;
+      total: number;
+    };
+    /**
+     * Ревизия 6: состояние выпуска — `in-work`, `code-accepted` (весь код
+     * принят, итогового отчёта ведущего ещё нет) или `done` (после `harness
+     * release done`).
+     */
+    release?: {
+      state: 'in-work' | 'code-accepted' | 'done';
+      doneAt?: string;
+      summary?: string;
+      line: string;
+    };
   };
   time: {
     /** Начало выпуска (первый снимок связки или первая попытка объёма) и сколько прошло с него. */
@@ -232,6 +270,10 @@ export interface ForecastView {
     rough?: { loMs: number; hiMs: number; samples: number; attemptsPerTask: number };
     /** Ревизия 5: чем названо «осталось» — `precise`, `rough`, `unknown` (ни одной закончившейся попытки) или `nothing`. */
     estimate?: 'precise' | 'rough' | 'unknown' | 'nothing';
+    /** Ревизия 6: длина цепочки зависимостей незаконченных работ (в долях задачи) — нижняя граница не короче её. */
+    chain?: number;
+    /** Ревизия 6: работа ведущего отдельной долей (не входит в `remaining`). */
+    lead?: { ms: number; samples: number; line: string };
     /** Ожидание людей и ведущего сейчас (`ms` — самое долгое) — в прогноз не входит. */
     humanWait: { works: number; ms: number; since?: string };
     line: string;
@@ -294,6 +336,8 @@ export interface WorkView {
   graphId: string;
   title?: string;
   status: string;
+  /** Ревизия 6: план работы ещё не согласован, попыток не было — «ещё не утверждена». */
+  planned?: true;
   stage: {
     name: string;
     step?: string;
@@ -440,7 +484,9 @@ export type TruncatedKey =
   | 'alternates'
   | 'activity'
   | 'workFields'
-  | 'whatsNew';
+  | 'whatsNew'
+  | 'planned'
+  | 'leadNotes';
 
 export interface ViewSource {
   producer: string;
@@ -503,7 +549,42 @@ export interface OperatorView {
   stage?: { name: 'setup' | 'work'; lines: string[] };
   forecast?: ForecastView;
   updates?: UpdatesView;
+  /**
+   * Ревизия 6: планируемые задачи без работы harness — в несогласованном
+   * снимке связки (`validated`) или только в последнем чтении (`read`).
+   * Карточка «ещё не утверждена»: попыток и действий нет.
+   */
+  planned?: PlannedView[];
+  /** Ревизия 6: ведущий — сессия, последняя запись, журнал (новые сверху). */
+  lead?: LeadView;
+  /** Ревизия 6: что задействовано (модели, изоляция, toolchain, сервисы, проверки). */
+  resources?: ResourcesView;
   truncated?: Partial<Record<TruncatedKey, number>>;
+}
+
+/** Планируемая задача (ревизия 6). */
+export interface PlannedView {
+  id: string;
+  connector: string;
+  taskId: string;
+  key?: string;
+  title?: string;
+  status: 'planned';
+  from: 'validated' | 'read';
+  graphId?: string;
+  dependsOn?: string[];
+  line: string;
+}
+
+/** Ведущий (ревизия 6): сессия `lead begin|end`, заметки и команды. */
+export interface LeadView {
+  active: boolean;
+  since?: string;
+  until?: string;
+  endedAt?: string;
+  lastNote?: { at: string; plain: string };
+  notes: { at: string; kind: string; action: string; workId?: string; plain: string }[];
+  line: string;
 }
 
 /** Запись ленты «кто что делал» (ревизия 2). */
@@ -584,6 +665,11 @@ export interface OperatorWorkInput {
   status: string;
   /** Сырой заголовок узла графа: проекция маскирует и обрезает. */
   title?: string;
+  /**
+   * Ревизия 6: работа зарегистрирована, но её план не согласован и попыток
+   * не было (не доработка) — планируемая, «ещё не утверждена».
+   */
+  planned?: true;
   resultSha?: string;
   dependsOn?: readonly string[];
   stage: {
@@ -855,6 +941,25 @@ export type OperatorActivityInput =
       fresh: boolean;
     }
   | {
+      /** Ревизия 6: доработка оставлена — работа вернулась к принятой редакции. */
+      kind: 'work.rework-abandoned';
+      at: string;
+      workId: string;
+      revision: number;
+      /** Принятый результат, к которому вернулась работа. */
+      sha: string;
+      by: 'operator' | 'host' | 'graph';
+    }
+  | {
+      /** Ревизия 6: запись журнала ведущего (команда harness, заметка, начало и конец сессии, итог). */
+      kind: 'lead';
+      at: string;
+      action: string;
+      workId?: string;
+      plain: string;
+      plainEn?: string;
+    }
+  | {
       kind: 'gate';
       at: string;
       workId: string;
@@ -1016,6 +1121,24 @@ export interface OperatorViewInput {
   sourcesUnread?: number;
   /** Обновления по последней проверке `harness update --check` (ревизия 4); нет — поля нет. */
   updates?: UpdatesView;
+  /** Журнал ведущего (ревизия 6, `harness lead …`, `release done`); нет — ведущий не записывал. */
+  lead?: OperatorLeadInput;
+  /** Что задействовано (ревизия 6, P4-8); нет — поля нет. */
+  resources?: ResourcesInput;
+}
+
+/** Журнал ведущего из состояния (локальная запись `lead`): сессия, записи, итог выпуска. */
+export interface OperatorLeadInput {
+  session?: { since: string; until: string; endedAt?: string };
+  entries: readonly {
+    at: string;
+    kind: 'note' | 'command' | 'begin' | 'end' | 'release-done';
+    action: string;
+    workId?: string;
+    plain: string;
+    plainEn?: string;
+  }[];
+  release?: { doneAt: string; summary: string };
 }
 
 /** Связка с источником задач: срез последнего снимка, совместимость, вопросы владельцу. */
@@ -1034,8 +1157,19 @@ export interface OperatorSourceInput {
     orderId: string;
     column?: string;
     firstSeenAt?: string;
+    /** Граф снимка (выборка задач), в котором задача записана последней. */
+    graphId?: string;
+    /** Зависимости поручения задачи по снимку (orderId): для критического пути. */
+    dependsOn?: readonly string[];
+    /** Задача есть в записанном снимке (проверенный план); нет — только в последнем чтении. */
+    snapshot?: true;
     problems: readonly { code: string; message: string }[];
   }[];
+  /**
+   * Работы harness, доставленные в источник (последняя операция доставки —
+   * принятая и доставленная): шаг ведущего «доставка в источник».
+   */
+  delivered?: readonly string[];
   /** Время первого снимка связки: начало выпуска по источнику. */
   releaseStartedAt?: string;
   /** Принятые работы, оставленные в источнике на проверку человеку (`completion.mode: review-only`). */
@@ -1442,6 +1576,7 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
     graphId: w.graphId,
     ...(c.titles && w.title ? { title: text(c, w.title, T.title) } : {}),
     status: w.status,
+    ...(w.planned ? { planned: true as const } : {}),
     stage: {
       name: s.name,
       ...(s.step ? { step: text(c, s.step, T.step) } : {}),
@@ -1768,6 +1903,96 @@ function sourceQuestionsOf(
   return take(all, L.sourceQuestions, truncated, 'sourceQuestions');
 }
 
+/**
+ * Планируемые задачи (ревизия 6, P4-5): задачи выпуска без работы harness,
+ * не закрытые и не отменённые в источнике, — из несогласованного снимка
+ * связки (`validated`) или только из последнего чтения (`read`).
+ */
+function plannedOf(c: Ctx, truncated: Record<string, number>): PlannedView[] | undefined {
+  const sources = c.i.sources;
+  if (!sources?.length) return undefined;
+  const works = new Set(c.i.works.map((w) => w.id));
+  const seen = new Set<string>();
+  const all: PlannedView[] = [];
+  for (const src of sources)
+    for (const t of src.release ?? src.tasks) {
+      const id = t.workId ?? t.orderId;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (works.has(id)) continue;
+      const column = 'column' in t ? (t.column as string | undefined) : undefined;
+      if (column === 'done' || column === 'cancelled') continue;
+      if (t.problems.some((p) => p.code === 'TASK_DONE' || p.code === 'TASK_CANCELLED')) continue;
+      const from = 'snapshot' in t && t.snapshot === true ? 'validated' : 'read';
+      const key = t.key ? t.key.slice(0, 200) : undefined;
+      const deps = 'dependsOn' in t ? (t.dependsOn as readonly string[] | undefined) : undefined;
+      const graphId = 'graphId' in t ? (t.graphId as string | undefined) : undefined;
+      const name = key ?? t.id;
+      all.push({
+        id,
+        connector: src.connector,
+        taskId: t.id,
+        ...(key ? { key } : {}),
+        ...(c.titles && t.title ? { title: text(c, t.title, T.title) } : {}),
+        status: 'planned',
+        from,
+        ...(graphId ? { graphId } : {}),
+        ...(deps?.length ? { dependsOn: deps.slice(0, L.dependsOn) } : {}),
+        line: (c.lang === 'en'
+          ? `${name}: not approved yet (${from === 'validated' ? 'in a checked plan that is not approved' : 'read from the source, not in a plan yet'})`
+          : `${name}: ещё не утверждена (${from === 'validated' ? 'в проверенном, но не согласованном плане' : 'прочитана из источника, в план ещё не входит'})`
+        ).slice(0, T.line),
+      });
+    }
+  return take(all, L.planned, truncated, 'planned');
+}
+
+/** Ведущий (ревизия 6, P4-10): сессия с арендой, последняя заметка, журнал новыми сверху. */
+function leadOf(c: Ctx, truncated: Record<string, number>): LeadView | undefined {
+  const lead = c.i.lead;
+  if (!lead) return undefined;
+  const en = c.lang === 'en';
+  const s = lead.session;
+  const active = !!s && !s.endedAt && ms(s.until) > c.i.now;
+  const plainOf = (e: OperatorLeadInput['entries'][number]) =>
+    text(c, en ? (e.plainEn ?? e.plain) : e.plain, T.activity) || e.action;
+  const notes = [...lead.entries].reverse().map((e) => ({
+    at: e.at,
+    kind: e.kind,
+    action: e.action,
+    ...(e.workId ? { workId: e.workId } : {}),
+    plain: plainOf(e),
+  }));
+  const note = [...lead.entries].reverse().find((e) => e.kind === 'note');
+  const lastNote = note ? { at: note.at, plain: plainOf(note) } : undefined;
+  const line = active
+    ? en
+      ? `the lead is working since ${s.since.slice(11, 16)} UTC${lastNote ? `: ${lastNote.plain}` : ''}`
+      : `ведущий работает с ${s.since.slice(11, 16)} UTC${lastNote ? `: ${lastNote.plain}` : ''}`
+    : s?.endedAt
+      ? en
+        ? 'the lead ended the session'
+        : 'ведущий закончил сессию'
+      : s
+        ? en
+          ? 'the lead has not reported for a while (the session lease expired)'
+          : 'ведущий давно не отмечался (срок сессии истёк)'
+        : en
+          ? 'the lead has not started a session'
+          : 'ведущий сессию не начинал';
+  return {
+    active,
+    ...(s ? { since: s.since, until: s.until } : {}),
+    ...(s?.endedAt ? { endedAt: s.endedAt } : {}),
+    ...(lastNote ? { lastNote } : {}),
+    notes: take(notes, L.leadNotes, truncated, 'leadNotes'),
+    line: line.slice(0, T.line),
+  };
+}
+
+/** Доля шагов ведущего в готовности выпуска (ревизия 6): план, вопросы, доставка, отчёт. */
+const LEAD_SHARE = 0.1;
+
 /** Наименьший остаток открытой доработки в прогнозе времени (доля задачи). */
 const REWORK_MIN_REST = 0.05;
 
@@ -1794,16 +2019,23 @@ const byAttempts = (n: number, en: boolean) =>
     : `${n} ${n % 10 === 1 && n % 100 !== 11 ? 'попытке' : 'попыткам'}`;
 
 /**
- * Прогноз выпуска (P11, ревизия 5). Объём — весь выпуск: все задачи всех
- * снимков связки (доска, а не последний срез `run`; не переданные в harness —
- * с весом 0) и все работы состояния; отменённые не входят. Принятая работа —
- * 1, остальные — доля этапов до наибольшего, до которого дошла любая её
- * попытка (`prepare` … `integration`): повтор готовность не снижает.
- * Осталось: незавершённая доля объёма × длительность попытки × попыток на
- * принятую задачу — от 5 закончившихся попыток выпуска p50 / p90, меньше —
- * грубый разброс от самой короткой до самой долгой; ни одной — неизвестно.
- * Нижняя граница — параллельно на `concurrency`, верхняя — последовательно.
- * Ожидание людей и ведущего в прогноз не входит и называется отдельно.
+ * Прогноз выпуска (P11, ревизии 5–6). Объём — весь выпуск: все задачи всех
+ * снимков связки (доска, а не последний срез `run`) и все работы состояния;
+ * отменённые не входят, а отменённая прежней версией доработка принятой
+ * работы — принятая работа. Принятая работа — 1, остальные — доля этапов до
+ * наибольшего, до которого дошла любая её попытка (`prepare` … `integration`):
+ * повтор готовность не снижает. Планируемые (ревизия 6) — задачи
+ * несогласованных снимков и задачи выпуска вне снимков, а также
+ * зарегистрированные, но не согласованные работы: вес 0, отдельной цифрой
+ * «по утверждённому плану» и «с планируемыми». Шаги ведущего (план, вопросы,
+ * доставка в источник, итоговый отчёт) — 10 % выпуска поровну; 100 % — только после
+ * `release done`. Осталось: незавершённая доля × длительность попытки ×
+ * попыток на принятую задачу — от 5 закончившихся попыток выпуска (всех его
+ * работ, в том числе отменённых) p50 / p90, меньше — грубый разброс; ни
+ * одной — неизвестно. Нижняя граница — не меньше цепочки зависимостей
+ * (критический путь) и доли на `concurrency`, верхняя — последовательно.
+ * Работа ведущего — отдельной долей по разрывам «приёмка → следующий запуск»
+ * этого проекта. Ожидание людей в прогноз не входит и называется отдельно.
  */
 function forecastOf(
   c: Ctx,
@@ -1823,7 +2055,12 @@ function forecastOf(
   for (const a of i.attempts)
     if (!a.earlier)
       reached.set(a.workId, Math.max(reached.get(a.workId) ?? 0, stageWeight(a.reached)));
-  const accepted = (w: OperatorWorkInput) => w.status === 'done' || w.stage.name === 'done';
+  // Доработка принятой работы, отменённая прежней версией harness (P4-7):
+  // отмена доработки — «вернуться к принятому», работа остаётся принятой.
+  const abandonedEarlier = (w: OperatorWorkInput) =>
+    w.status === 'cancelled' && !!w.attemptSummary.rework;
+  const accepted = (w: OperatorWorkInput) =>
+    w.status === 'done' || w.stage.name === 'done' || abandonedEarlier(w);
   const progressOf = (w: OperatorWorkInput) =>
     Math.max(stageWeight(w.stage.name), reached.get(w.id) ?? 0);
   // Открытая доработка после приёмки: работа уже принималась, новая редакция — ещё нет.
@@ -1840,8 +2077,17 @@ function forecastOf(
   // все задачи всех снимков связки (доска), а не последний срез `run`, и все
   // работы состояния. Задача, закрытая в источнике без работы harness
   // (`TASK_DONE`, колонка done), — готова; отменённая и отменённая работа в
-  // объём не входят.
-  type Unit = { work?: OperatorWorkInput; closed?: true; key?: string; firstSeenAt?: string };
+  // объём не входят. Задача без работы — планируемая (ревизия 6).
+  type Unit = {
+    id: string;
+    work?: OperatorWorkInput;
+    closed?: true;
+    key?: string;
+    title?: string;
+    firstSeenAt?: string;
+    planned?: 'validated' | 'read' | 'registered';
+    deps: readonly string[];
+  };
   const seen = new Set<string>();
   const tasks = (i.sources ?? []).flatMap((src) => src.release ?? src.tasks);
   const fromTasks = tasks.flatMap((t): Unit[] => {
@@ -1849,23 +2095,49 @@ function forecastOf(
     if (seen.has(id)) return [];
     seen.add(id);
     const first = 'firstSeenAt' in t ? (t.firstSeenAt as string | undefined) : undefined;
-    const meta: Unit = { key: t.key, ...(first ? { firstSeenAt: first } : {}) };
+    const deps =
+      ('dependsOn' in t ? (t.dependsOn as readonly string[] | undefined) : undefined) ?? [];
+    const meta = {
+      id,
+      key: t.key,
+      ...(t.title ? { title: t.title } : {}),
+      ...(first ? { firstSeenAt: first } : {}),
+      deps,
+    };
     const w = work.get(id);
-    if (w) return [{ work: w, ...meta }];
+    if (w)
+      return [
+        {
+          ...meta,
+          work: w,
+          deps: w.dependsOn ?? deps,
+          ...(w.planned ? { planned: 'registered' as const } : {}),
+        },
+      ];
     const column = 'column' in t ? (t.column as string | undefined) : undefined;
     if (column === 'cancelled' || t.problems.some((p) => p.code === 'TASK_CANCELLED')) return [];
-    return column === 'done' || t.problems.some((p) => p.code === 'TASK_DONE')
-      ? [{ closed: true, ...meta }]
-      : [meta];
+    if (column === 'done' || t.problems.some((p) => p.code === 'TASK_DONE'))
+      return [{ ...meta, closed: true }];
+    const inSnapshot = 'snapshot' in t && t.snapshot === true;
+    return [{ ...meta, planned: inSnapshot ? 'validated' : 'read' }];
   });
   const units: Unit[] = [
     ...fromTasks,
-    ...i.works.filter((w) => !seen.has(w.id)).map((w) => ({ work: w })),
+    ...i.works
+      .filter((w) => !seen.has(w.id))
+      .map((w) => ({
+        id: w.id,
+        work: w,
+        deps: w.dependsOn ?? [],
+        ...(w.planned ? { planned: 'registered' as const } : {}),
+      })),
   ];
   const basis: ForecastView['progress']['basis'] = tasks.length ? 'scope' : 'works';
-  const live = units.filter((u) => u.work?.status !== 'cancelled');
+  const live = units.filter((u) => !u.work || u.work.status !== 'cancelled' || accepted(u.work));
   const unitWeight = (u: Unit) => (u.closed ? 1 : weightOf(u.work));
   if (!live.length) return undefined;
+  const plannedUnits = live.filter((u) => u.planned);
+  const approvedUnits = live.filter((u) => !u.planned);
   const total = live.length;
   const weighted = live.reduce((n, u) => n + unitWeight(u), 0);
   const done = live.filter((u) => unitWeight(u) === 1).length;
@@ -1877,12 +2149,79 @@ function forecastOf(
       runningStages.has(u.work.stage.name),
   ).length;
   const left = total - done;
-  // Пока задачи или доработки остаются, «100 %» не показывается.
-  const percent = Math.min(
-    left > 0 || reworks.length ? 99 : 100,
-    Math.round((100 * weighted) / total),
+  const codeAccepted = left === 0 && !reworks.length;
+  // Шаги ведущего (ревизия 6): план и согласование, вопросы, доставка в
+  // источник, итоговый отчёт — вместе доля выпуска `LEAD_SHARE`, поровну между
+  // шагами. Шаг без предмета (вопросов не было, связки нет) в объём не входит.
+  const LEAD_STEP = 0;
+  const openQuestionStates = new Set(['awaiting-answer', 'answered-not-applied', 'carry-stale']);
+  const sourceQuestions = (i.sources ?? []).reduce((n, s) => n + (s.questions?.length ?? 0), 0);
+  const delivered = new Set((i.sources ?? []).flatMap((s) => s.delivered ?? []));
+  const sourced = new Set(
+    tasks.flatMap((t) => t.workId ?? (work.has(t.orderId) ? t.orderId : undefined) ?? []),
   );
-  const unitIds = new Set(live.flatMap((u) => (u.work ? [u.work.id] : [])));
+  const toDeliver = live.filter(
+    (u) => u.work && sourced.has(u.work.id) && accepted(u.work) && !abandonedEarlier(u.work),
+  );
+  const release = i.lead?.release;
+  // Отчёт прежнего выпуска не закрывает новый: он не раньше последнего конца
+  // попытки работ выпуска.
+  const lastEnd = i.attempts
+    .map((a) => ms(a.finishedAt))
+    .filter(Number.isFinite)
+    .reduce((n, x) => Math.max(n, x), -Infinity);
+  const reportDone =
+    !!release && codeAccepted && (!Number.isFinite(lastEnd) || ms(release.doneAt) >= lastEnd);
+  const leadSteps: {
+    step: 'plan' | 'questions' | 'delivery' | 'report';
+    weight: number;
+    done: boolean;
+  }[] = [
+    {
+      step: 'plan',
+      weight: LEAD_STEP,
+      done: !plannedUnits.length && !live.some((u) => u.work?.status === 'draft'),
+    },
+    ...(i.questions.length || sourceQuestions
+      ? [
+          {
+            step: 'questions' as const,
+            weight: LEAD_STEP,
+            done:
+              !sourceQuestions &&
+              !i.questions.some((q) => !q.closed && openQuestionStates.has(q.state)),
+          },
+        ]
+      : []),
+    ...(sourced.size
+      ? [
+          {
+            step: 'delivery' as const,
+            weight: LEAD_STEP,
+            done: codeAccepted && toDeliver.every((u) => delivered.has(u.work!.id)),
+          },
+        ]
+      : []),
+    { step: 'report', weight: LEAD_STEP, done: reportDone },
+  ];
+  for (const s of leadSteps) s.weight = round4(LEAD_SHARE / leadSteps.length);
+  const leadTotal = LEAD_SHARE;
+  const leadWeighted = round4(
+    (LEAD_SHARE * leadSteps.filter((s) => s.done).length) / leadSteps.length,
+  );
+  const releaseDone = codeAccepted && reportDone;
+  // Код — (1 − LEAD_SHARE) выпуска, шаги ведущего — LEAD_SHARE. Пока задачи,
+  // доработки или шаги ведущего остаются, «100 %» не показывается.
+  // Итоговый отчёт ведущего закрывает выпуск: 100 %.
+  const percentOf = (w: number, t: number, finished: boolean) =>
+    finished
+      ? 100
+      : Math.min(99, Math.round(100 * ((t ? ((1 - LEAD_SHARE) * w) / t : 0) + leadWeighted)));
+  const percent = percentOf(weighted, total, releaseDone);
+  // Попытки всех работ выпуска, в том числе отменённых: длительность попытки
+  // — по ним (P4-7: «ни одна не закончилась» не говорится при закончившихся).
+  const unitIds = new Set(units.flatMap((u) => (u.work ? [u.work.id] : [])));
+  const liveIds = new Set(live.flatMap((u) => (u.work ? [u.work.id] : [])));
   const own = i.attempts.filter((a) => unitIds.has(a.workId));
   // Начало выпуска — первый снимок связки или первая попытка объёма, что раньше.
   const starts = [
@@ -1907,7 +2246,9 @@ function forecastOf(
     .map((a) => ms(a.finishedAt) - ms(a.startedAt))
     .filter((d) => Number.isFinite(d) && d >= 0)
     .sort((a, b) => a - b);
-  const acceptedIds = new Set(live.flatMap((u) => (u.work && accepted(u.work) ? [u.work.id] : [])));
+  const acceptedIds = new Set(
+    live.flatMap((u) => (u.work && accepted(u.work) && liveIds.has(u.work.id) ? [u.work.id] : [])),
+  );
   // Попытки, прерванные остановкой, не считаются ни образцами, ни попытками задачи.
   // У принятой доработки — только попытки её редакции (как сводка попыток).
   const acceptedAttempts = own.filter(
@@ -1916,32 +2257,79 @@ function forecastOf(
   const attemptsPerTask = acceptedIds.size
     ? Math.max(1, Math.round((acceptedAttempts / acceptedIds.size) * 10) / 10)
     : 1;
-  // Остаток объёма и остаток открытых доработок: открытая доработка не меньше
-  // малой доли — «осталось: ничего» при ней не говорится.
-  const rest =
-    total -
-    weighted +
-    reworks.reduce((n, u) => n + Math.max(REWORK_MIN_REST, 1 - progressOf(u.work!)), 0);
   const concurrency = Math.max(1, i.policy.concurrency);
-  // Параллельно — не быстрее одной задачи: недоделанная задача не делится.
-  const lowShare = Math.max(rest / concurrency, Math.min(rest, 1));
-  const range = (lo: number, hi: number) => ({
-    loMs: Math.round(lowShare * lo * attemptsPerTask),
-    hiMs: Math.round(rest * hi * attemptsPerTask),
-    samples: samples.length,
-    attemptsPerTask,
-  });
-  const precise = samples.length >= OPERATOR_VIEW_TYPICAL_MIN_SAMPLES;
-  const remaining = precise && rest > 0 ? range(rank(samples, 0.5), rank(samples, 0.9)) : undefined;
-  // Меньше образцов — грубый разброс от самой короткой до самой долгой попытки выпуска.
-  const rough =
-    !precise && samples.length > 0 && rest > 0
-      ? range(samples[0]!, samples[samples.length - 1]!)
-      : undefined;
+  // Остаток единицы: незавершённая доля; у открытой доработки — не меньше
+  // малой доли («осталось: ничего» при ней не говорится).
+  const restOf = (u: Unit) =>
+    reopened(u.work) ? Math.max(REWORK_MIN_REST, 1 - progressOf(u.work!)) : 1 - unitWeight(u);
+  // Критический путь (P4-5): самая длинная цепочка остатков по зависимостям
+  // внутри набора — параллельно её не сократить.
+  const chainOf = (set: readonly Unit[]) => {
+    const byId = new Map(set.map((u) => [u.id, u]));
+    const memo = new Map<string, number>();
+    const walk = (u: Unit, path: Set<string>): number => {
+      const hit = memo.get(u.id);
+      if (hit !== undefined) return hit;
+      if (path.has(u.id)) return 0;
+      path.add(u.id);
+      let longest = 0;
+      for (const d of u.deps) {
+        const dep = byId.get(d);
+        if (dep) longest = Math.max(longest, walk(dep, path));
+      }
+      path.delete(u.id);
+      const value = restOf(u) + longest;
+      memo.set(u.id, value);
+      return value;
+    };
+    return set.reduce((n, u) => Math.max(n, walk(u, new Set())), 0);
+  };
+  const estimateOf = (set: readonly Unit[]) => {
+    const rest = set.reduce((n, u) => n + restOf(u), 0);
+    const chain = chainOf(set);
+    // Параллельно — не быстрее одной задачи и не быстрее цепочки зависимостей.
+    const lowShare = Math.max(rest / concurrency, Math.min(rest, 1), chain);
+    const range = (lo: number, hi: number) => ({
+      loMs: Math.round(lowShare * lo * attemptsPerTask),
+      hiMs: Math.round(Math.max(rest, lowShare) * hi * attemptsPerTask),
+      samples: samples.length,
+      attemptsPerTask,
+    });
+    const precise = samples.length >= OPERATOR_VIEW_TYPICAL_MIN_SAMPLES;
+    const remaining =
+      precise && rest > 0 ? range(rank(samples, 0.5), rank(samples, 0.9)) : undefined;
+    // Меньше образцов — грубый разброс от самой короткой до самой долгой попытки выпуска.
+    const rough =
+      !precise && samples.length > 0 && rest > 0
+        ? range(samples[0]!, samples[samples.length - 1]!)
+        : undefined;
+    return { rest, chain, remaining, rough };
+  };
+  const whole = estimateOf(live);
+  const { rest, remaining, rough } = whole;
   const estimate: NonNullable<ForecastView['time']['estimate']> =
     rest <= 0 && !reworks.length ? 'nothing' : remaining ? 'precise' : rough ? 'rough' : 'unknown';
+  // Работа ведущего (P4-10): разрывы «приёмка → следующий запуск» этого
+  // проекта (p50) на каждую незаконченную задачу и несделанный шаг ведущего.
+  const sorted = [...i.attempts]
+    .map((a) => ({ start: ms(a.startedAt), end: ms(a.finishedAt), ok: a.status === 'succeeded' }))
+    .filter((a) => Number.isFinite(a.start))
+    .sort((a, b) => a.start - b.start);
+  const gaps = sorted
+    .filter((a) => a.ok && Number.isFinite(a.end))
+    .flatMap((a) => {
+      const next = sorted.find((b) => b.start >= a.end);
+      return next ? [next.start - a.end] : [];
+    })
+    .sort((a, b) => a - b);
+  const leadLeft =
+    leadSteps.filter((s) => !s.done).length + live.filter((u) => restOf(u) > 0).length;
+  const leadTime =
+    gaps.length && leadLeft > 0 && !releaseDone
+      ? { ms: Math.round(rank(gaps, 0.5) * leadLeft), samples: gaps.length }
+      : undefined;
   const waits = i.stops.filter(
-    (s) => (s.actor === 'user' || s.actor === 'lead') && s.workId && unitIds.has(s.workId),
+    (s) => (s.actor === 'user' || s.actor === 'lead') && s.workId && liveIds.has(s.workId),
   );
   // Самое долгое текущее ожидание (не сумма: работы ждут параллельно).
   const waitMs = waits.reduce(
@@ -2028,9 +2416,13 @@ function forecastOf(
             ? en
               ? `${percentText}, between attempts (used ${n} of ${max})`
               : `${percentText}, между попытками (использовано ${n} из ${max})`
-            : en
-              ? 'not started'
-              : 'ещё не начата';
+            : u.planned
+              ? en
+                ? 'not approved yet'
+                : 'ещё не утверждена'
+              : en
+                ? 'not started'
+                : 'ещё не начата';
     // Доработка принятой ранее работы: «принято ранее; доработка …».
     const line = !rework
       ? `${name}: ${status}`
@@ -2047,23 +2439,85 @@ function forecastOf(
       line: line.slice(0, T.line),
     };
   });
-  const progressLine = en
-    ? `done ~${percent} %, ${left} of ${total} task(s) left` +
-      (inWork ? `, ${inWork} in work` : '') +
-      (reworks.length ? `, reworks after acceptance: ${reworks.length}` : '')
-    : `готово ~${percent} %, осталось задач: ${left} из ${total}` +
-      (inWork ? `, в работе: ${inWork}` : '') +
-      (reworks.length ? `, доработок после приёмки: ${reworks.length}` : '');
+  const spanText = (r: { loMs: number; hiMs: number }) =>
+    durationText(r.loMs, c.lang) === durationText(r.hiMs, c.lang)
+      ? durationText(r.hiMs, c.lang)
+      : `${durationText(r.loMs, c.lang)} – ${durationText(r.hiMs, c.lang)}`;
+  // Планируемые (ревизия 6): две цифры — по утверждённому плану и с ними.
+  const plannedKeys = plannedUnits
+    .map((u) => text(c, u.key, 200) ?? u.id)
+    .slice(0, L.forecastPlanned);
+  const approvedProgress = (() => {
+    if (!plannedUnits.length) return undefined;
+    const t = approvedUnits.length;
+    const w = approvedUnits.reduce((n, u) => n + unitWeight(u), 0);
+    const d = approvedUnits.filter((u) => unitWeight(u) === 1).length;
+    const pct = percentOf(w, t, false);
+    const est = estimateOf(approvedUnits);
+    const r = est.remaining ?? est.rough;
+    return {
+      percent: pct,
+      total: t,
+      done: d,
+      left: t - d,
+      ...(r ? { loMs: r.loMs, hiMs: r.hiMs } : {}),
+    };
+  })();
+  const plannedLine = approvedProgress
+    ? (() => {
+        const n = plannedUnits.length;
+        const keys = plannedKeys.join(', ');
+        const approvedLeft =
+          approvedProgress.loMs !== undefined
+            ? (en ? ', left ~' : ', осталось ~') +
+              spanText({ loMs: approvedProgress.loMs, hiMs: approvedProgress.hiMs! })
+            : '';
+        const allLeft =
+          (remaining ?? rough)
+            ? (en ? ', left ~' : ', осталось ~') + spanText((remaining ?? rough)!)
+            : '';
+        return en
+          ? `approved plan ~${approvedProgress.percent} %${approvedLeft}; with planned (${n} task(s), not approved: ${keys}) ~${percent} %${allLeft}`
+          : `по утверждённому плану ~${approvedProgress.percent} %${approvedLeft}; с планируемыми (${n} ${n % 10 === 1 && n % 100 !== 11 ? 'задача' : 'задач'}, не утверждены: ${keys}) ~${percent} %${allLeft}`;
+      })()
+    : undefined;
+  // Состояние выпуска (ревизия 6): код принят — ещё не «выпуск готов».
+  const lastNote = i.lead?.entries.filter((e) => e.kind === 'note').at(-1);
+  const releaseState: 'in-work' | 'code-accepted' | 'done' = releaseDone
+    ? 'done'
+    : codeAccepted
+      ? 'code-accepted'
+      : 'in-work';
+  const releaseLine =
+    releaseState === 'done'
+      ? en
+        ? 'release done: the lead wrote the final report'
+        : 'выпуск готов: ведущий написал итоговый отчёт'
+      : releaseState === 'code-accepted'
+        ? en
+          ? `code accepted, the lead is still working${lastNote ? `: ${text(c, lastNote.plainEn ?? lastNote.plain, 120)}` : ''}`
+          : `код принят, ведущий ещё работает${lastNote ? `: ${text(c, lastNote.plain, 120)}` : ''}`
+        : en
+          ? 'code is in work'
+          : 'код в работе';
+  const progressLine =
+    releaseState === 'code-accepted'
+      ? `${en ? 'done' : 'готово'} ~${percent} % · ${releaseLine}`
+      : en
+        ? `done ~${percent} %, ${left} of ${total} task(s) left` +
+          (inWork ? `, ${inWork} in work` : '') +
+          (reworks.length ? `, reworks after acceptance: ${reworks.length}` : '') +
+          (plannedUnits.length ? `, planned (not approved): ${plannedUnits.length}` : '')
+        : `готово ~${percent} %, осталось задач: ${left} из ${total}` +
+          (inWork ? `, в работе: ${inWork}` : '') +
+          (reworks.length ? `, доработок после приёмки: ${reworks.length}` : '') +
+          (plannedUnits.length ? `, планируемых (не утверждены): ${plannedUnits.length}` : '');
   const elapsedText =
     elapsedMs === undefined
       ? en
         ? 'not started yet'
         : 'ещё не начиналось'
       : (en ? 'elapsed ' : 'прошло ') + durationText(elapsedMs, c.lang);
-  const spanText = (r: { loMs: number; hiMs: number }) =>
-    durationText(r.loMs, c.lang) === durationText(r.hiMs, c.lang)
-      ? durationText(r.hiMs, c.lang)
-      : `${durationText(r.loMs, c.lang)} – ${durationText(r.hiMs, c.lang)}`;
   const remainingText =
     estimate === 'nothing'
       ? en
@@ -2080,6 +2534,11 @@ function forecastOf(
           : en
             ? 'time left unknown (no attempt has finished yet)'
             : 'сколько осталось — неизвестно (ещё ни одна попытка не закончилась)';
+  const leadText = leadTime
+    ? en
+      ? ` + lead work ~${durationText(leadTime.ms, c.lang)}`
+      : ` + работа ведущего ~${durationText(leadTime.ms, c.lang)}`
+    : '';
   // «до 45 мин», но «меньше минуты» — без «до».
   const upTo =
     waitMs < 30_000
@@ -2090,23 +2549,23 @@ function forecastOf(
       ? `; waiting for people now: ${humanWait.works} work(s), ${upTo} — not in the estimate`
       : `; ждут людей сейчас: ${humanWait.works}, ${upTo} — в прогноз не входит`
     : '';
-  const timeLine = `${elapsedText} · ${remainingText}${waitText}`;
+  const timeLine = `${elapsedText} · ${remainingText}${leadText}${waitText}`;
   const assumptions = en
     ? [
         basis === 'scope'
-          ? 'scope: the whole release — tasks of all source snapshots and harness works; not handed over — 0; done in the source — 100 %; cancelled — out'
+          ? 'scope: the whole release — tasks of all source snapshots and harness works; not approved — 0; done in the source — 100 %; cancelled — out'
           : 'scope: all harness works (no task source)',
-        'accepted = 100 %; a work — the furthest stage any of its attempts reached (prepare, writer, gates, review, integration)',
-        `time left: unfinished share × attempt duration × attempts per task; from ${OPERATOR_VIEW_TYPICAL_MIN_SAMPLES} attempts p50–p90, fewer — rough; low end parallel, high end sequential`,
-        'elapsed — from the release start; waiting for people and the lead is not in the estimate',
+        'accepted = 100 %; a work — the furthest stage any of its attempts reached',
+        `time left: unfinished share × attempt duration × attempts per task; from ${OPERATOR_VIEW_TYPICAL_MIN_SAMPLES} attempts p50–p90, fewer — rough; low end parallel, not below the dependency chain`,
+        'lead: 10 % of the release, 100 % after release done; lead time — median gap acceptance → next attempt',
       ]
     : [
         basis === 'scope'
-          ? 'объём: весь выпуск — задачи всех снимков связки и работы harness; не переданные — 0; закрытая в источнике — 100 %; отменённая — вне'
+          ? 'объём: весь выпуск — задачи всех снимков связки и работы harness; не утверждённые — 0; закрытая в источнике — 100 %; отменённая — вне'
           : 'объём: все работы harness (связки нет)',
-        'принято — 100 %; работа — наибольший этап любой её попытки (подготовка, написание, проверки, ревью, интеграция)',
-        `осталось: незавершённая доля × длительность попытки × попыток на задачу; от ${OPERATOR_VIEW_TYPICAL_MIN_SAMPLES} попыток p50–p90, меньше — грубо; нижняя — параллельно, верхняя — последовательно`,
-        'прошло — от начала выпуска; ожидание людей и ведущего в прогноз не входит',
+        'принято — 100 %; работа — наибольший этап любой её попытки',
+        `осталось: незавершённая доля × длительность попытки × попыток на задачу; от ${OPERATOR_VIEW_TYPICAL_MIN_SAMPLES} попыток p50–p90, меньше — грубо; нижняя — параллельно, не короче цепочки зависимостей`,
+        'ведущий: 10 % выпуска, 100 % — после release done; его время — медиана «приёмка → следующая попытка»',
       ];
   void scope;
   return {
@@ -2122,6 +2581,29 @@ function forecastOf(
       ...(reworks.length ? { rework: reworks.length } : {}),
       ...(added.length ? { added } : {}),
       ...(works.length ? { works } : {}),
+      ...(approvedProgress && plannedLine
+        ? {
+            planned: {
+              count: plannedUnits.length,
+              keys: plannedKeys,
+              line: plannedLine.slice(0, T.line),
+            },
+            approved: approvedProgress,
+          }
+        : {}),
+      lead: {
+        steps: leadSteps,
+        weighted: leadWeighted,
+        total: leadTotal,
+      },
+      release: {
+        state: releaseState,
+        ...(release && releaseDone ? { doneAt: release.doneAt } : {}),
+        ...(release && releaseDone && c.titles
+          ? { summary: text(c, release.summary, T.releaseSummary)! }
+          : {}),
+        line: releaseLine.slice(0, T.line),
+      },
     },
     time: {
       ...(startedAt !== undefined && elapsedMs !== undefined
@@ -2131,6 +2613,18 @@ function forecastOf(
       ...(remaining ? { remaining } : {}),
       ...(rough ? { rough } : {}),
       estimate,
+      ...(whole.chain > 0 ? { chain: Math.round(whole.chain * 100) / 100 } : {}),
+      ...(leadTime
+        ? {
+            lead: {
+              ...leadTime,
+              line: (en
+                ? `lead work ~${durationText(leadTime.ms, c.lang)} (from ${leadTime.samples} gap(s) acceptance → next attempt)`
+                : `работа ведущего ~${durationText(leadTime.ms, c.lang)} (по ${leadTime.samples} разрывам «приёмка → следующая попытка»)`
+              ).slice(0, T.line),
+            },
+          }
+        : {}),
       humanWait,
       line: timeLine.slice(0, T.line),
     },
@@ -2723,6 +3217,24 @@ function activityLine(
           : parts`${e.workId}, accepted at ${[sha]}, was changed by a new revision: rework ${e.revision}, ${[budget]}`,
       };
     }
+    case 'work.rework-abandoned': {
+      const sha = sha12(e.sha)!;
+      return {
+        actor: e.by === 'graph' ? 'lead' : e.by,
+        action: e.kind,
+        workId: e.workId,
+        plain: ru
+          ? parts`доработка ${e.revision} работы ${e.workId} оставлена: работа вернулась к принятой на ${[sha]} редакции`
+          : parts`rework ${e.revision} of ${e.workId} abandoned: the work is back at the revision accepted at ${[sha]}`,
+      };
+    }
+    case 'lead':
+      return {
+        actor: 'lead',
+        action: e.action,
+        ...(e.workId ? { workId: e.workId } : {}),
+        plain: [ru ? e.plain : (e.plainEn ?? e.plain)],
+      };
     case 'gate': {
       const where = ru
         ? parts`работа ${e.workId}, попытка ${e.attempt}, ${[phaseWord.ru[e.phase]]}`
@@ -2837,8 +3349,17 @@ function activityOf(
   o: OperatorViewOptions,
   truncated: Record<string, number>,
 ): ActivityView[] | undefined {
-  const events = c.i.activity;
-  if (!events) return undefined;
+  // Журнал ведущего (ревизия 6) — в той же ленте, актёр `lead`.
+  const leadRows: OperatorActivityInput[] = (c.i.lead?.entries ?? []).map((e) => ({
+    kind: 'lead',
+    at: e.at,
+    action: e.action,
+    ...(e.workId ? { workId: e.workId } : {}),
+    plain: e.plain,
+    ...(e.plainEn ? { plainEn: e.plainEn } : {}),
+  }));
+  if (!c.i.activity && !leadRows.length) return undefined;
+  const events = [...(c.i.activity ?? []), ...leadRows];
   const { from, to } = windowOf(c.i.now, o);
   const rows = events
     .map((e) => ({ t: ms(e.at), e }))
@@ -2950,6 +3471,15 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
   // Прогноз — по всему срезу, даже если `scope` в документе усечён.
   const forecast = forecastOf(c, scope, truncated);
   const sourceReviews = sourceReviewsOf(c, truncated);
+  const planned = plannedOf(c, truncated);
+  const lead = leadOf(c, truncated);
+  const resources = i.resources
+    ? resourcesOf(i.resources, {
+        lang: c.lang,
+        now: i.now,
+        mask: (x, max) => text(c, x, max) ?? '',
+      })
+    : undefined;
   const draft: OperatorView = {
     viewVersion: OPERATOR_VIEW_VERSION,
     viewRevision: OPERATOR_VIEW_REVISION,
@@ -2999,6 +3529,9 @@ export function operatorView(i: OperatorViewInput, o: OperatorViewOptions = {}):
     stage: stageOf(i.works.length, c.lang),
     ...(forecast ? { forecast } : {}),
     ...(i.updates ? { updates: updatesOf(c, i.updates, truncated) } : {}),
+    ...(planned?.length ? { planned } : {}),
+    ...(lead ? { lead } : {}),
+    ...(resources ? { resources } : {}),
   };
   const fitted = draft;
   let warnings = [...fitted.health.warnings];
@@ -3138,10 +3671,17 @@ function fitSize(
     } as OperatorView;
   };
   // 1. Разделы связки и готовность по работам в прогнозе (строки прогноза остаются).
-  const { scope, sourceQuestions, ...rest } = full;
+  // Ревизия 6: планируемые задачи и журнал ведущего — вместе с разделами
+  // связки (строки прогона и ведущего остаются).
+  const { scope, sourceQuestions, planned, ...rest } = full;
   let v: OperatorView = rest;
   if (scope) add('scope')(scope.tasks.length);
   if (sourceQuestions) add('sourceQuestions')(sourceQuestions.length);
+  if (planned) add('planned')(planned.length);
+  if (v.lead?.notes.length) {
+    add('leadNotes')(v.lead.notes.length);
+    v = { ...v, lead: { ...v.lead, notes: [] } };
+  }
   const perWork = v.forecast?.progress.works;
   if (perWork) {
     add('forecastWorks')(perWork.length);
@@ -3149,7 +3689,7 @@ function fitSize(
     delete progress.works;
     v = { ...v, forecast: { ...v.forecast!, progress } };
   }
-  if (scope || sourceQuestions || perWork) {
+  if (scope || sourceQuestions || perWork || planned || full.lead?.notes.length) {
     const done = tryFinish(assemble(v, {}, false));
     if (done) return done;
   }

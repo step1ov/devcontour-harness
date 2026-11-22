@@ -6,6 +6,8 @@ import {
   OPERATOR_VIEW_VERSION,
 } from './operator-view-limits.ts';
 
+import { resourcesViewSchema } from './view-resources.ts';
+
 export * from './operator-view-limits.ts';
 
 /**
@@ -259,6 +261,8 @@ export const workViewSchema = z.strictObject({
   graphId: id,
   title: freeText(T.title).optional(),
   status: token(40),
+  /** Ревизия 6: план работы ещё не согласован, попыток не было — «ещё не утверждена». */
+  planned: z.literal(true).optional(),
   stage: z.strictObject({
     name: token(40),
     step: freeText(T.step).optional(),
@@ -562,6 +566,56 @@ const forecastSchema = z.strictObject({
       )
       .max(L.forecastWorks)
       .optional(),
+    /**
+     * Ревизия 6: планируемые задачи (вес 0) — ещё не утверждённые; `line` —
+     * «по утверждённому плану ~X %; с планируемыми (N задач, не утверждены: …) ~Y %».
+     */
+    planned: z
+      .strictObject({
+        count: z.number().int().positive(),
+        keys: z.array(token(200)).max(L.forecastPlanned),
+        line: z.string().min(1).max(T.line),
+      })
+      .optional(),
+    /** Ревизия 6: только утверждённый план (есть вместе с `planned`). */
+    approved: z
+      .strictObject({
+        percent: z.number().int().min(0).max(100),
+        total: count,
+        done: count,
+        left: count,
+        loMs: count.optional(),
+        hiMs: count.optional(),
+      })
+      .optional(),
+    /** Ревизия 6: шаги ведущего — 10 % выпуска поровну (`weight` — доля выпуска). */
+    lead: z
+      .strictObject({
+        steps: z
+          .array(
+            z.strictObject({
+              step: z.enum(['plan', 'questions', 'delivery', 'report']),
+              weight: z.number().min(0).max(1),
+              done: z.boolean(),
+            }),
+          )
+          .max(4),
+        weighted: z.number().min(0),
+        total: z.number().min(0),
+      })
+      .optional(),
+    /**
+     * Ревизия 6: состояние выпуска — `in-work`, `code-accepted` (код принят,
+     * итогового отчёта ведущего нет), `done` (`harness release done`).
+     */
+    release: z
+      .strictObject({
+        state: z.enum(['in-work', 'code-accepted', 'done']),
+        doneAt: isoTimeSchema.optional(),
+        summary: freeText(T.releaseSummary).optional(),
+        line: z.string().min(1).max(T.line),
+      })
+      .optional(),
   }),
   time: z.strictObject({
     startedAt: isoTimeSchema.optional(),
@@ -587,6 +641,16 @@ const forecastSchema = z.strictObject({
       .optional(),
     /** Ревизия 5: чем названо «осталось». */
     estimate: z.enum(['precise', 'rough', 'unknown', 'nothing']).optional(),
+    /** Ревизия 6: цепочка зависимостей незаконченных работ (доли задачи): нижняя граница не короче. */
+    chain: z.number().min(0).optional(),
+    /** Ревизия 6: работа ведущего — отдельной долей, по истории проекта. */
+    lead: z
+      .strictObject({
+        ms: count,
+        samples: z.number().int().positive(),
+        line: z.string().min(1).max(T.line),
+      })
+      .optional(),
     humanWait: z.strictObject({ works: count, ms: count, since: isoTimeSchema.optional() }),
     line: z.string().min(1).max(T.line),
   }),
@@ -714,9 +778,66 @@ export const operatorViewSchema = z.strictObject({
       command: freeText(T.updateLine).optional(),
     })
     .optional(),
+  /**
+   * Ревизия 6: планируемые задачи без работы harness — карточки «ещё не
+   * утверждена» (ни попыток, ни действий). `from`: `validated` — в
+   * проверенном несогласованном снимке связки, `read` — только в последнем
+   * чтении источника.
+   */
+  planned: z
+    .array(
+      z.strictObject({
+        id,
+        connector: id,
+        taskId: id,
+        key: token(200).optional(),
+        title: freeText(T.title).optional(),
+        status: z.literal('planned'),
+        from: z.enum(['validated', 'read']),
+        graphId: id.optional(),
+        dependsOn: z.array(id).max(L.dependsOn).optional(),
+        line: z.string().min(1).max(T.line),
+      }),
+    )
+    .max(L.planned)
+    .optional(),
+  /**
+   * Ревизия 6: ведущий — сессия `harness lead begin|end` (аренда до
+   * `until`), последняя заметка и журнал новыми сверху (заметки, команды
+   * harness ведущего, итог выпуска).
+   */
+  lead: z
+    .strictObject({
+      active: z.boolean(),
+      since: isoTimeSchema.optional(),
+      until: isoTimeSchema.optional(),
+      endedAt: isoTimeSchema.optional(),
+      lastNote: z
+        .strictObject({ at: isoTimeSchema, plain: z.string().min(1).max(T.activity) })
+        .optional(),
+      notes: z
+        .array(
+          z.strictObject({
+            at: isoTimeSchema,
+            kind: token(40),
+            action: token(80),
+            workId: id.optional(),
+            plain: z.string().min(1).max(T.activity),
+          }),
+        )
+        .max(L.leadNotes),
+      line: z.string().min(1).max(T.line),
+    })
+    .optional(),
+  /** Ревизия 6: что задействовано — модели и вендоры ролей, изоляция, toolchain, сервисы, проверки. */
+  resources: resourcesViewSchema.optional(),
   truncated: z
     .strictObject({
       scope: truncatedCount.optional(),
+      /** Ревизия 6: планируемые задачи сверх предела или опущенные по размеру. */
+      planned: truncatedCount.optional(),
+      /** Ревизия 6: записи журнала ведущего сверх `lead.notes`. */
+      leadNotes: truncatedCount.optional(),
       sourceQuestions: truncatedCount.optional(),
       /** Ревизия 5: задачи `sourceReviews[].tasks` сверх предела. */
       sourceReviews: truncatedCount.optional(),
