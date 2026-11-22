@@ -166,6 +166,8 @@ const ADDITIVE_EVENT_TYPES = new Set([
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([
   'status--detail',
+  // Повторное доказательство критериев принятого результата (0.1.0-alpha.66).
+  'source-deliver--reprove',
   // Корень проекта вместо --state (0.1.0-alpha.65).
   'status--repository',
   // Текст сводки попыток для человека (0.1.0-alpha.52).
@@ -472,6 +474,19 @@ test('H3-01: прежние команды и схемы их данных не 
     if (k === 'properties' && v && typeof v === 'object' && 'actor' in v && 'reapproval' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.reapproval;
+      v = rest;
+    }
+    // Повторное доказательство критериев (0.1.0-alpha.66): необязательные поля
+    // ответа source-deliver (`reprove`, `skipped`) и задачи source-status (`proof`).
+    if (k === 'properties' && v && typeof v === 'object' && 'deliveries' in v && 'reprove' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.reprove;
+      delete rest.skipped;
+      v = rest;
+    }
+    if (k === 'properties' && v && typeof v === 'object' && 'remote' in v && 'proof' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.proof;
       v = rest;
     }
     // Итог `retry --reset` (0.1.0-alpha.60): необязательное поле ответа retry и cancel.

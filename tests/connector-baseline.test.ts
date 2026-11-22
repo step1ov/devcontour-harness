@@ -810,14 +810,20 @@ test('B12: снимок без baseline не меняется: digest прежн
       operation: 'op',
     }),
   });
-  assert.equal(built.revision, 'dadbac60f4a31314307be8c5eb5ee207cee11bb000a27b022ea24aea6bb4cf24');
+  // Ревизия по правилам до alpha.66 — та же: снимок прежней версии остаётся согласованным.
+  assert.equal(
+    built.manifest.legacyRevision,
+    'dadbac60f4a31314307be8c5eb5ee207cee11bb000a27b022ea24aea6bb4cf24',
+  );
+  // alpha.66 (semantic digest v2): новые значения закреплены здесь.
+  assert.equal(built.revision, 'd4b0c24720326a444a31856d1e325643b33fcb5484e599e2871157b9564208cc');
   assert.equal(
     built.manifest.graphDigest,
-    '7b665762ba9a4e204590e296ac42f5a06b992d4a4bd1665377f8bd63ebc1aeb0',
+    'a2273e5a9da7b01db98e04e71fcf91a4ebc750700a69be72a54e8a3e3dc26b80',
   );
   assert.equal(
     built.manifest.contextDigest,
-    '10bbe41a72c38d5b0c668546107ba45663ac9b0e6f385063da4575fc4ad7fa1d',
+    'a0bb80d9542c0893599331e25820db50859d2f0bf54a1855a30a6c53b5de496f',
   );
 
   // Запись прежнего формата в состоянии коннектора: зависимость без `proof`.

@@ -10,6 +10,7 @@ import {
 } from '../../contracts/index.ts';
 import { redactor, type Redactor } from '../../environment/redaction.ts';
 import {
+  bindingsDigest,
   completionColumn,
   orderIdOf,
   parseIdentity,
@@ -18,7 +19,14 @@ import {
 } from './config.ts';
 import type { HistoryRecorder } from './history.ts';
 import { maskError, redactingTransport } from './redact.ts';
-import { matchCriterion, readFailure, semanticDigest, type SnapshotManifest } from './snapshot.ts';
+import {
+  legacyStatementSame,
+  matchCriterion,
+  readFailure,
+  semanticDigest,
+  statementMatches,
+  type SnapshotManifest,
+} from './snapshot.ts';
 import {
   StepConflict,
   StepRetry,
@@ -56,6 +64,21 @@ export const operationKey = (
   resultDigest: string,
 ) => sha256(JSON.stringify([provider, projectId, workId, runId, resultDigest]));
 
+/**
+ * Ключ повторного доказательства (`source-deliver --reprove`): тот же
+ * результат и привязки критериев задачи на момент вызова. Те же привязки —
+ * тот же ключ (повтор ничего не отправляет), исправленные — новый.
+ */
+export const reproveKey = (
+  provider: string,
+  projectId: string,
+  workId: string,
+  runId: string,
+  resultDigest: string,
+  bindings: string,
+) =>
+  sha256(JSON.stringify([provider, projectId, workId, runId, resultDigest, 'reprove', bindings]));
+
 export type CriterionPlan = CriterionOutcome;
 
 export interface SinkOptions {
@@ -88,6 +111,27 @@ const evidenceFor = (result: RunResult, m: TaskMapping['criteria'][number]) =>
       (m.evidence === 'gate' ||
         (e.tests ?? []).some((t) => t.id === m.testId && t.status === 'passed')),
   );
+
+/**
+ * Почему testcase критерия не найден в evidence gate: отсутствует (с
+ * подсказкой похожего ID — ID testcase это `classname.name`) или не прошёл.
+ */
+export const testcaseMiss = (result: RunResult, gate: string, testId: string) => {
+  const tests = result.evidence
+    .filter((e) => e.gate === gate && e.phase === 'integration' && !e.consumer)
+    .flatMap((e) => e.tests ?? []);
+  const same = tests.find((t) => t.id === testId);
+  if (same) return `testcase ${testId}: ${same.status}`;
+  const near = tests.find((t) => t.id.endsWith('.' + testId) || testId.endsWith('.' + t.id));
+  return (
+    `testcase ${testId} отсутствует в evidence gate ${gate}` +
+    (near
+      ? ` (есть ${near.id}: ID testcase — classname.name, исправьте testId в конфигурации коннектора и выполните source-deliver --reprove)`
+      : tests.length
+        ? ''
+        : ' (gate не сообщил testcases)')
+  );
+};
 
 export class RelaySink implements ResultSink {
   readonly id: string;
@@ -123,7 +167,11 @@ export class RelaySink implements ResultSink {
 
   private sameSnapshot(op: OperationRecord, read: TaskRead) {
     const mapping = this.mappingOf(read);
-    return mapping !== undefined && semanticDigest(this.config, mapping, read) === op.revision;
+    if (mapping === undefined) return false;
+    if (statementMatches(op.revision, this.config, mapping, read)) return true;
+    // Повторное доказательство результата до alpha.66: постановка сверена по
+    // закреплённому снимку при планировании (`legacyStatementSame`).
+    return op.reprove?.statement === semanticDigest(this.config, mapping, read);
   }
 
   private mappingOf(read: TaskRead): TaskMapping | undefined {
@@ -148,18 +196,66 @@ export class RelaySink implements ResultSink {
     return { status: 'conflict', currentRevision: op.currentRevision ?? 'unknown' };
   }
 
+  /**
+   * Mapping задачи результата без чтения backend: по ID задачи или по ключу
+   * из закреплённых снимков (ссылка конфигурации может быть ключом задачи).
+   */
+  private mappingOfTask(taskId: string): TaskMapping | undefined {
+    const direct = this.config.tasks.find((m) => m.ref === taskId);
+    if (direct) return direct;
+    const ref = (
+      this.options.store.latestSnapshotAny()?.manifest as SnapshotManifest | undefined
+    )?.tasks.find((t) => t.id === taskId)?.ref;
+    return ref ? this.config.tasks.find((m) => m.ref === ref) : undefined;
+  }
+
+  /** Ключ повторного доказательства результата при текущих привязках критериев. */
+  reproveKeyOf(result: RunResult) {
+    const mapping = this.mappingOfTask(this.taskOf(result));
+    return reproveKey(
+      this.config.provider,
+      this.config.projectId,
+      result.workOrderId,
+      result.runId,
+      digestOf(result),
+      mapping ? bindingsDigest(mapping) : 'unmapped',
+    );
+  }
+
   async deliver(input: { key: string; result: RunResult }): Promise<DeliveryOutcome> {
     try {
-      return await this.deliverOnce(input.result);
+      return await this.deliverOnce(input.result, false);
     } catch (error) {
       // Ошибка доставки сохраняется в lastError и выводится CLI: только в маскированном виде.
       throw maskError(error, this.redact);
     }
   }
 
-  private async deliverOnce(result: RunResult): Promise<DeliveryOutcome> {
+  /**
+   * Повторное доказательство критериев уже принятого результата
+   * (`source-deliver --reprove`): новый ключ операции (результат + текущие
+   * привязки критериев), тот же результат и evidence; моделей, gates и Git
+   * нет. Критерии сверяются с текущими привязками конфигурации; закрываются
+   * только доказанные, задача перемещается по тем же правилам completion.
+   * Постановка обязана быть той же, что у результата, иначе — conflict с
+   * причиной. Те же привязки — тот же ключ: повтор ничего не отправляет.
+   */
+  async reprove(input: { result: RunResult }): Promise<DeliveryOutcome> {
+    if (input.result.outcome !== 'accepted')
+      throw new HarnessError(
+        'INVALID_INPUT',
+        `Повторно доказывается только принятый результат; у попытки ${input.result.runId} исход ${input.result.outcome}`,
+      );
+    try {
+      return await this.deliverOnce(input.result, true);
+    } catch (error) {
+      throw maskError(error, this.redact);
+    }
+  }
+
+  private async deliverOnce(result: RunResult, reprove: boolean): Promise<DeliveryOutcome> {
     const taskId = this.taskOf(result);
-    const key = this.keyOf(result);
+    const key = reprove ? this.reproveKeyOf(result) : this.keyOf(result);
     const store = this.options.store;
     const settled = (op?: OperationRecord) =>
       op && (op.status === 'delivered' || op.status === 'uncertain' || op.status === 'conflict');
@@ -198,6 +294,7 @@ export class RelaySink implements ResultSink {
           resultDigest: digestOf(result),
           revision: result.source.revision,
           outcome: result.outcome,
+          ...(reprove ? { reprove: { of: this.keyOf(result) } } : {}),
         },
         lease.token,
       );
@@ -231,19 +328,40 @@ export class RelaySink implements ResultSink {
     }
     const mapping = this.mappingOf(read);
     const digest = mapping ? semanticDigest(this.config, mapping, read) : 'unmapped';
-    const problem =
-      digest !== op.revision
-        ? `постановка изменилась после снимка (${op.revision.slice(0, 12)} → ${digest.slice(0, 12)}): результат относится к прежней редакции`
-        : read.task.column === 'cancelled'
-          ? 'задача отменена'
-          : read.task.column === 'done'
-            ? 'задача уже завершена другим участником'
-            : undefined;
+    let same = mapping !== undefined && statementMatches(op.revision, this.config, mapping, read);
+    // Повторное доказательство результата прежней версии (digest v1 с
+    // прежними привязками): постановка сверяется с закреплённым снимком —
+    // текст задачи, обязательные документы, зависимости и поручение.
+    if (
+      !same &&
+      op.reprove &&
+      mapping &&
+      legacyStatementSame(store, op, read, mapping, this.config)
+    ) {
+      same = true;
+      op = store.updateOp(op.key, token, (o) => ({
+        ...o,
+        reprove: { ...o.reprove, statement: digest },
+      }));
+    }
+    const problem = !same
+      ? `постановка изменилась после снимка (${op.revision.slice(0, 12)} → ${digest.slice(0, 12)}): результат относится к прежней редакции`
+      : read.task.column === 'cancelled'
+        ? 'задача отменена'
+        : read.task.column === 'done' && !op.reprove
+          ? 'задача уже завершена другим участником'
+          : undefined;
     const identity = `${this.config.provider}:${this.config.projectId}:${read.task.id}`;
     // Принятое без доказательства остаётся видно в итоге: только этой постановки.
     const pinned = store.latestSnapshot(result.graphId)?.manifest as SnapshotManifest | undefined;
     const accepted = pinned?.tasks
-      .find((t) => t.id === read.task.id && t.semanticDigest === digest)
+      .find(
+        (t) =>
+          t.id === read.task.id &&
+          (t.semanticDigest === op.revision ||
+            t.legacyDigest === op.revision ||
+            t.semanticDigest === digest),
+      )
       ?.dependencies.filter((d) => d.proof === 'baseline')
       .map((d) => d.key);
     const base = {
@@ -271,6 +389,7 @@ export class RelaySink implements ResultSink {
       }));
     }
     const criteria = this.criteriaPlan(result, read, mapping!);
+    if (op.reprove) return this.reprovePlan(op, result, read, criteria, base, token);
     // Комментарий в задаче — только итог: по умолчанию его пишет доставка
     // принятого результата, а отклонённая или остановленная попытка видна в
     // harness и не шумит в обсуждении задачи (`comments.attempts: all` — как прежде).
@@ -295,6 +414,51 @@ export class RelaySink implements ResultSink {
         ...(comment ? {} : { comment: 'skipped: comments.attempts=final' }),
       },
     }));
+  }
+
+  /**
+   * План повторного доказательства: отметить доказанные теперь критерии и
+   * переместить задачу, если completion это разрешает. Нечего отмечать и
+   * перемещать (задача уже в done или ни один критерий не доказан) —
+   * операция без записей у получателя: ни комментария, ни шагов.
+   */
+  private reprovePlan(
+    op: OperationRecord,
+    result: RunResult,
+    read: TaskRead,
+    criteria: CriterionPlan[],
+    base: Record<string, unknown>,
+    token: string,
+  ) {
+    const closing = criteria.filter((x) => x.outcome === 'closed');
+    const move =
+      read.task.column === 'done'
+        ? { reason: 'задача уже в done' }
+        : this.movePlan(result, read, criteria);
+    const steps: StepRecord[] = [];
+    if (closing.length || move.column)
+      steps.push(newStep(1, 'comment', op.key, { ...base, criteria, reprove: true }));
+    for (const c of closing)
+      steps.push(newStep(steps.length + 1, 'criterion', op.key, { criterionId: c.criterionId }));
+    if (move.column) steps.push(newStep(steps.length + 1, 'move', op.key, { column: move.column }));
+    return this.options.store.updateOp(op.key, token, (o) => ({
+      ...o,
+      planned: true,
+      steps,
+      status: 'in-progress',
+      receipt: {
+        criteria,
+        completion: steps.length ? move.reason : `доказывать нечего: ${move.reason}`,
+        casRevision: read.task.revision,
+        reprove: true,
+      },
+    }));
+  }
+
+  /** План критериев результата по текущим привязкам (source-status): без записи и без lease. */
+  proofPlan(result: RunResult, read: TaskRead): CriterionPlan[] | undefined {
+    const mapping = this.mappingOf(read);
+    return mapping ? this.criteriaPlan(result, read, mapping) : undefined;
   }
 
   /** Критерий закрывается только явным mapping на прошедший gate/testcase принятого результата. */
@@ -327,7 +491,7 @@ export class RelaySink implements ResultSink {
           reason:
             rule.evidence === 'gate'
               ? 'gate не прошёл в integration'
-              : `testcase ${rule.testId} не прошёл`,
+              : testcaseMiss(result, rule.gate, rule.testId!),
         };
       return {
         criterionId: c.id,
@@ -431,7 +595,12 @@ export class RelaySink implements ResultSink {
       history: final.steps.find((s) => s.kind === 'history')?.result,
       deliveredAt: new Date().toISOString(),
     };
-    if (result.outcome === 'accepted')
+    // Повторное доказательство не выпускает второй receipt того же результата:
+    // receipt — основание зависимостей, и новый изменил бы ревизию их набора.
+    const known = store
+      .receipts(orderIdOf(this.config.provider, this.config.projectId, op.taskId))
+      .some((r) => r.runId === result.runId && r.workId === result.workOrderId);
+    if (result.outcome === 'accepted' && !(op.reprove && known))
       store.putReceipt(
         {
           issuer: this.id,
@@ -529,6 +698,7 @@ export class RelaySink implements ResultSink {
           criteria: (step.input.criteria as CriterionOutcome[] | undefined) ?? [],
           completion: (op.receipt?.completion as string | undefined) ?? op.reason ?? '',
           historical: step.kind === 'historical-comment',
+          ...(step.input.reprove ? { reprove: true } : {}),
           ...(step.input.baseline
             ? { baseline: step.input.baseline as { tasks: string[]; sha: string; reason: string } }
             : {}),
@@ -687,9 +857,7 @@ export class RelaySink implements ResultSink {
           };
         // Явная перепроверка: постановка та же и задача допускает доставку — шаг снова planned.
         const read = await this.t.readTask(op.taskId);
-        const mapping = this.mappingOf(read);
-        const digest = mapping ? semanticDigest(this.config, mapping, read) : 'unmapped';
-        if (digest !== op.revision || read.task.column === 'cancelled') {
+        if (!this.sameSnapshot(op, read) || read.task.column === 'cancelled') {
           facts.push('постановка изменилась или задача отменена: конфликт остаётся');
           return { operation: key, before: op.status, after: op.status, resolved: false, facts };
         }

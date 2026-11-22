@@ -3,6 +3,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   API_VERSION,
   HarnessError,
+  type RunResult,
   type Author,
   type ContextSnapshot,
   type ExecutionPolicy,
@@ -21,6 +22,12 @@ import {
   type LoadedConfig,
 } from './config.ts';
 import { RelaySink, type ReconcileDecision } from './delivery.ts';
+import {
+  bindingIssueText,
+  criteriaBindingIssues,
+  knownTestcases,
+  type KnownTestcases,
+} from './bindings.ts';
 import { HistoryRecorder } from './history.ts';
 import { createTransportFor } from './registry.ts';
 import {
@@ -31,6 +38,7 @@ import {
   matchCriterion,
   readStable,
   semanticDigest,
+  statementMatches,
   taskContextOptions,
   type BaselineManifest,
   type SnapshotManifest,
@@ -78,6 +86,8 @@ export interface RelayCompatibilityCheck {
   error?: string;
   /** Предупреждение одной строкой (нет — Relay рекомендуемой версии). */
   warning?: string;
+  /** Привязки критериев, которые коннектор не докажет или вероятно ошибочны (`bindingIssueText`). */
+  bindings?: string[];
 }
 
 /**
@@ -87,18 +97,28 @@ export interface RelayCompatibilityCheck {
  */
 export async function relayCompatibilityCheck(
   source: string,
-  options: { stateDir: string; transport?: RelayTransport } = { stateDir: '.' },
+  options: {
+    stateDir: string;
+    transport?: RelayTransport;
+    policy?: ExecutionPolicy;
+    known?: KnownTestcases;
+  } = { stateDir: '.' },
 ): Promise<RelayCompatibilityCheck> {
   let connector: Connector | undefined;
+  let bindings: string[] = [];
   try {
     connector = await openConnector(source, {
       stateDir: options.stateDir,
       ...(options.transport ? { transport: options.transport } : {}),
     });
+    bindings = criteriaBindingIssues(connector.config, options.policy, options.known).map(
+      bindingIssueText,
+    );
     const identity = await checkIdentity(connector.transport, connector.config);
     const compatibility = relayCompatibility(identity, connector.config);
     return {
       source,
+      ...(bindings.length ? { bindings } : {}),
       ...(compatibility ? { compatibility } : {}),
       // Выключенный в конфигурации контекст — выбор оператора, не предупреждение.
       ...(compatibility && !compatibility.taskContext ? { warning: compatibility.line } : {}),
@@ -112,7 +132,13 @@ export async function relayCompatibilityCheck(
         : code === 'INVALID_INPUT'
           ? `Конфигурация связки ${source} не прочитана: ${message}`
           : `Relay не проверен (нет связи или проект не тот): ${message}`;
-    return { source, ...(code ? { code } : {}), error: message, warning };
+    return {
+      source,
+      ...(bindings.length ? { bindings } : {}),
+      ...(code ? { code } : {}),
+      error: message,
+      warning,
+    };
   } finally {
     connector?.close();
   }
@@ -291,9 +317,13 @@ export class Connector {
    * только чтением: без мутаций backend, без записи истории и без создания
    * состояния коннектора.
    */
-  async check(policy?: ExecutionPolicy, baseDir?: string) {
+  async check(policy?: ExecutionPolicy, baseDir?: string, known?: KnownTestcases) {
     const config = this.config;
     const problems: string[] = [];
+    // Привязки критериев: доказуемость каждого критерия — до чтения backend.
+    const bindings = criteriaBindingIssues(config, policy, known);
+    problems.push(...bindings.filter((i) => i.level === 'error').map(bindingIssueText));
+    const bindingWarnings = bindings.filter((i) => i.level === 'warning').map(bindingIssueText);
     const unprotected = policy && baseDir && this.baselineIssue(policy, baseDir);
     if (unprotected) problems.push(unprotected);
     let identity;
@@ -303,7 +333,7 @@ export class Connector {
       // Несовпадение версии backend — именованный отказ (exit 4), не проблема сверки.
       if (error instanceof HarnessError && error.code === 'CONNECTOR_VERSION_MISMATCH') throw error;
       const message = this.redact(error instanceof Error ? error.message : String(error));
-      return this.checkReport(undefined, false, [message], []);
+      return this.checkReport(undefined, false, [...problems, message], [], bindingWarnings);
     }
     const mapping: {
       ref: string;
@@ -371,7 +401,7 @@ export class Connector {
     } catch (error) {
       problems.push(this.redact(error instanceof Error ? error.message : String(error)));
     }
-    return this.checkReport(identity, true, problems, mapping);
+    return this.checkReport(identity, true, problems, mapping, bindingWarnings);
   }
 
   private checkReport(
@@ -384,11 +414,13 @@ export class Connector {
       problems: string[];
       taskContext?: 'included' | 'too-large';
     }[],
+    extraWarnings: string[] = [],
   ) {
     const caps = identity?.capabilities ?? [];
     const compatibility = identity ? relayCompatibility(identity, this.config) : undefined;
     const warnings = [
       ...(compatibility && !compatibility.taskContext ? [compatibility.line] : []),
+      ...extraWarnings,
       ...(this.config.tasks.length
         ? []
         : [
@@ -425,14 +457,31 @@ export class Connector {
    * к прежней редакции снова закрепляет её запись (`created: false`).
    */
   async snapshot(outDir?: string) {
-    const snapshot = await this.source.snapshot();
-    const { created } = this.store.putSnapshot({
-      revision: snapshot.revision,
-      graphId: snapshot.graph.id,
-      graph: snapshot.graph,
-      context: snapshot.context,
-      manifest: snapshot.manifest,
-    });
+    const fresh = await this.source.snapshot();
+    // Снимок, закреплённый до alpha.66 по прежним правилам ревизии, остаётся
+    // закреплённым, пока постановка та же: обновление harness само по себе
+    // не требует нового плана. Eligibility — по свежему чтению.
+    const pinned = this.legacyPinned(fresh);
+    const snapshot = pinned
+      ? {
+          ...fresh,
+          graph: pinned.graph as WorkGraph,
+          context: pinned.context as ContextSnapshot,
+          manifest: { ...(pinned.manifest as SnapshotManifest), problems: fresh.problems },
+          revision: pinned.revision,
+        }
+      : fresh;
+    const { created } = this.store.putSnapshot(
+      pinned
+        ? pinned
+        : {
+            revision: snapshot.revision,
+            graphId: snapshot.graph.id,
+            graph: snapshot.graph,
+            context: snapshot.context,
+            manifest: snapshot.manifest,
+          },
+    );
     await this.observe(snapshot.manifest);
     const dir = resolve(
       outDir ?? join(this.stateDir, 'connectors', 'snapshots', snapshot.graph.id),
@@ -475,6 +524,19 @@ export class Connector {
     };
   }
 
+  /**
+   * Снимок, закреплённый до alpha.66, чья ревизия совпадает с ревизией
+   * свежего чтения по прежним правилам (`legacyRevision`). Снимки alpha.66
+   * так не подбираются: у них своя ревизия.
+   */
+  private legacyPinned(fresh: { revision: string; manifest: SnapshotManifest }) {
+    const legacy = fresh.manifest.legacyRevision;
+    if (!legacy || legacy === fresh.revision) return undefined;
+    const stored = this.store.snapshot(legacy);
+    if (!stored || (stored.manifest as SnapshotManifest).legacyRevision) return undefined;
+    return stored;
+  }
+
   /* ---------------------------------------------------------------- */
   /* run --source                                                      */
   /* ---------------------------------------------------------------- */
@@ -491,6 +553,19 @@ export class Connector {
     baseline?: BaselineManifest;
   }> {
     this.assertBaselineProtected(h.policy, h.options.baseDir);
+    // Критерий, который коннектор не докажет, — отказ до платных попыток:
+    // иначе принятый результат доставится, а задача останется открытой.
+    // Правка привязок не меняет постановку: нового плана не нужно.
+    const unprovable = criteriaBindingIssues(this.config, h.policy, Connector.known(h)).filter(
+      (i) => i.level === 'error',
+    );
+    if (unprovable.length)
+      throw new HarnessError(
+        'NOT_READY',
+        'Привязки критериев не доказываются (исправьте criteria[] в конфигурации коннектора; новый план не нужен): ' +
+          unprovable.map(bindingIssueText).join('; '),
+        unprovable.map((i) => ({ path: ['source', i.ref, 'criteria'], message: i.message })),
+      );
     const fresh = await this.source.snapshot();
     await this.observe(fresh.manifest);
     const stored = this.store.latestSnapshot(fresh.graph.id);
@@ -499,7 +574,10 @@ export class Connector {
         'APPROVAL_REQUIRED',
         'Снимок задач не закреплён: выполните source-snapshot, review-plan и approve',
       );
-    if (stored.revision !== fresh.revision)
+    if (
+      stored.revision !== fresh.revision &&
+      stored.revision !== this.legacyPinned(fresh)?.revision
+    )
       throw new HarnessError(
         'APPROVAL_STALE',
         `Постановка изменилась после закреплённого снимка (${stored.revision.slice(0, 12)} → ${fresh.revision.slice(0, 12)}): нужен новый source-snapshot, review-plan и approve`,
@@ -507,7 +585,7 @@ export class Connector {
     const registered = h.engine.read((v) => v.graph(fresh.graph.id));
     if (
       registered?.approval &&
-      registered.graph.source.revision !== fresh.revision &&
+      registered.graph.source.revision !== stored.revision &&
       h.policy.approvalMode === 'operator'
     )
       throw new HarnessError(
@@ -519,10 +597,15 @@ export class Connector {
     // продолжит прежнюю работу без нового run и записей).
     const own = (p: (typeof fresh.problems)[number]) => {
       if (p.code !== 'TASK_DONE' && p.code !== 'COLUMN_NOT_ELIGIBLE') return false;
-      const digest = fresh.manifest.tasks.find((t) => t.id === p.taskId)?.semanticDigest;
+      const task = fresh.manifest.tasks.find((t) => t.id === p.taskId);
       return this.store
         .operations({ taskId: p.taskId })
-        .some((o) => o.status === 'delivered' && o.revision === digest);
+        .some(
+          (o) =>
+            o.status === 'delivered' &&
+            task !== undefined &&
+            (o.revision === task.semanticDigest || o.revision === task.legacyDigest),
+        );
     };
     assertEligible({ ...fresh, problems: fresh.problems.filter((p) => !own(p)) });
     const { baseline } = stored.manifest as SnapshotManifest;
@@ -604,7 +687,7 @@ export class Connector {
             casRevision: read.task.revision,
             semanticDigest: semanticDigest(this.config, mapping, read),
             matchesSnapshot: fromManifest
-              ? semanticDigest(this.config, mapping, read) === fromManifest.semanticDigest
+              ? statementMatches(fromManifest.semanticDigest, this.config, mapping, read)
               : false,
             criteria: read.task.criteria.map((c) => ({
               id: c.id,
@@ -624,6 +707,44 @@ export class Connector {
             error: this.redact(error instanceof Error ? error.message : String(error)),
           };
         }
+        // Принятое поручение, чья задача не закрыта: что докажут текущие
+        // привязки (повторное доказательство без нового плана).
+        let proof:
+          | { reprovable: number; unproven: { title: string; reason: string }[]; next?: string }
+          | undefined;
+        if (h && work?.status === 'done' && remote.reachable === true)
+          try {
+            const sha = work.rework?.accepted.resultSha ?? work.resultSha;
+            const run = h.engine.read((v) =>
+              v
+                .attempts(workId)
+                .filter((a) => a.status === 'succeeded' && (!sha || a.integrationSha === sha))
+                .at(-1),
+            );
+            const read = await this.transport.readTask(taskId);
+            const plan = run
+              ? this.sink.proofPlan(h.result(workId, run.id).result, read)
+              : undefined;
+            if (plan && read.task.column !== 'done') {
+              const reprovable = plan.filter((c) => c.outcome === 'closed').length;
+              const unproven = plan
+                .filter((c) => c.outcome === 'unproven' || c.outcome === 'manual')
+                .map((c) => ({ title: c.title, reason: c.reason ?? c.outcome }));
+              proof = {
+                reprovable,
+                unproven,
+                ...(reprovable
+                  ? { next: `source-deliver --reprove --work ${workId}` }
+                  : unproven.length
+                    ? {
+                        next: 'исправьте criteria[] в конфигурации коннектора, затем source-deliver --reprove (новый план не нужен)',
+                      }
+                    : {}),
+              };
+            }
+          } catch {
+            proof = undefined;
+          }
         tasks.push({
           index,
           ref: mapping.ref,
@@ -639,6 +760,7 @@ export class Connector {
           deliveries,
           operations,
           remote,
+          ...(proof ? { proof } : {}),
         });
       }
       // Совместимость и открытые вопросы — живым чтением (status ничего не пишет).
@@ -692,6 +814,73 @@ export class Connector {
       out.push({ workId: id, delivery: envelope.delivery, outcome: envelope.result.outcome });
     }
     return { connector: this.id, deliveries: out };
+  }
+
+  /** testcases gates из evidence интеграции всех попыток каталога состояния. */
+  static known(h: Harness): KnownTestcases {
+    return knownTestcases(h.engine.read((v) => v.attempts().flatMap((a) => a.evidence)));
+  }
+
+  /**
+   * Повторно доказать критерии принятых результатов (`source-deliver
+   * --reprove`) после правки привязок критериев: тот же принятый результат
+   * (попытка, принявшая поручение), новый ключ операции, без моделей, gates
+   * и Git. Поручение без принятого результата пропускается с причиной.
+   */
+  async reprove(h: Harness, workId?: string) {
+    const ids = workId ? [workId] : this.configuredWorkIds();
+    const sink = this.sink;
+    const reproving = {
+      id: sink.id,
+      deliver: (input: { key: string; result: RunResult }) => sink.reprove(input),
+    };
+    const out = [];
+    const skipped: { workId: string; reason: string }[] = [];
+    for (const id of ids) {
+      const accepted = h.engine.read((v) => {
+        const work = v.work(id);
+        if (!work) return undefined;
+        const sha = work.rework?.accepted.resultSha ?? work.resultSha;
+        const run = v
+          .attempts(id)
+          .filter((a) => a.status === 'succeeded' && (!sha || a.integrationSha === sha))
+          .at(-1);
+        return run ? { runId: run.id } : undefined;
+      });
+      if (!accepted) {
+        if (workId)
+          throw new HarnessError('NOT_FOUND', 'У поручения нет принятого результата: ' + id);
+        skipped.push({ workId: id, reason: 'нет принятого результата' });
+        continue;
+      }
+      const bindings = sink.reproveKeyOf(h.result(id, accepted.runId).result).slice(0, 16);
+      const envelope = await h.deliver(id, reproving, {
+        runId: accepted.runId,
+        variant: 'reprove-' + bindings,
+      });
+      out.push({
+        workId: id,
+        delivery: envelope.delivery.filter((d) => d.key.includes(':reprove-')),
+        outcome: envelope.result.outcome,
+      });
+    }
+    return {
+      connector: this.id,
+      reprove: true,
+      deliveries: out,
+      ...(skipped.length ? { skipped } : {}),
+    };
+  }
+
+  private configuredWorkIds() {
+    const manifest = this.store.latestSnapshotAny()?.manifest as SnapshotManifest | undefined;
+    return this.config.tasks.map((t) =>
+      orderIdOf(
+        this.config.provider,
+        this.config.projectId,
+        manifest?.tasks.find((x) => x.ref === t.ref)?.id ?? t.ref,
+      ),
+    );
   }
 
   /** Разбор неизвестного исхода/конфликта и, если факты позволяют, продолжение доставки. */

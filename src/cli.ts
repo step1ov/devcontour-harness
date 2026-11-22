@@ -349,11 +349,38 @@ const relayCheck = async (
   explicit: string | undefined,
   candidate: string | undefined,
   state?: string,
+  policy?: ExecutionPolicy,
 ) => {
   const file = explicit ?? (candidate && existsSync(candidate) ? candidate : undefined);
   if (!file) return undefined;
   const { relayCompatibilityCheck } = await import('./integrations/connector/commands.ts');
-  return relayCompatibilityCheck(file, { stateDir: resolve(state ?? '.') });
+  const known = await knownTests(state);
+  return relayCompatibilityCheck(file, {
+    stateDir: resolve(state ?? '.'),
+    ...((policy ?? known?.policy) ? { policy: (policy ?? known?.policy)! } : {}),
+    ...(known ? { known: known.tests } : {}),
+  });
+};
+
+/**
+ * testcases gates из evidence попыток каталога состояния (только чтение) и
+ * его политика — для проверки привязок критериев коннектора. Нет каталога
+ * или он не инициализирован — undefined.
+ */
+const knownTests = async (state?: string) => {
+  if (!state || !existsSync(bindingFile(state))) return undefined;
+  try {
+    const b = binding(state);
+    const h = open(state, b, 'state');
+    try {
+      const { Connector } = await import('./integrations/connector/commands.ts');
+      return { tests: Connector.known(h), policy: b.policy, baseDir: b.baseDir };
+    } finally {
+      h.close();
+    }
+  } catch {
+    return undefined;
+  }
 };
 
 /**
@@ -436,6 +463,7 @@ const options = {
   sha: { type: 'string' },
   gate: { type: 'string' },
   'fail-fast': { type: 'boolean' },
+  reprove: { type: 'boolean' },
   'writer-probe': { type: 'boolean' },
   'apply-loopback': { type: 'boolean' },
   'accept-limitation': { type: 'string', multiple: true },
@@ -515,6 +543,7 @@ const flagOwners = {
   sha: ['gates', 'smoke'],
   gate: ['gates'],
   'fail-fast': ['gates'],
+  reprove: ['source-deliver'],
   'writer-probe': ['smoke'],
   'apply-loopback': ['smoke'],
   watch: ['status'],
@@ -1381,7 +1410,12 @@ async function run(
       const loaded = v.policy ? loadPolicy(v.policy) : undefined;
       const connector = await connectorOf(need('source'), v.state ?? '.', loaded?.policy);
       try {
-        const data = await connector.check(loaded?.policy, loaded?.baseDir);
+        const known = await knownTests(v.state);
+        const data = await connector.check(
+          loaded?.policy ?? known?.policy,
+          loaded?.baseDir ?? known?.baseDir,
+          known?.tests,
+        );
         const ok = data.connected && data.projectMatches && data.problems.length === 0;
         return { command, data, code: ok ? exitCodes.ok : exitCodes.refused };
       } finally {
@@ -1414,7 +1448,9 @@ async function run(
       try {
         if (command === 'source-status') return { command, data: await connector.status(h) };
         if (command === 'source-deliver') {
-          const data = await connector.deliver(h, v.work);
+          const data = v.reprove
+            ? await connector.reprove(h, v.work)
+            : await connector.deliver(h, v.work);
           const settled = data.deliveries.every((d) =>
             d.delivery.every((x) => x.status === 'delivered'),
           );
@@ -1836,10 +1872,17 @@ async function run(
         v.source,
         v.policy ? join(dirname(resolve(v.policy)), 'connector.json') : undefined,
         v.state,
+        b?.policy,
       );
       if (!relay) return { command, data: report };
       if (relay.warning)
         report.warnings = [...(report.warnings ?? []), `RELAY_COMPATIBILITY: ${relay.warning}`];
+      // Критерий, который коннектор не докажет, виден до запуска (P4-6).
+      if (relay.bindings?.length)
+        report.warnings = [
+          ...(report.warnings ?? []),
+          ...relay.bindings.map((b) => `RELAY_CRITERIA_BINDING: ${b}`),
+        ];
       return {
         command,
         data: {

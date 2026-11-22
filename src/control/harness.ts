@@ -1341,11 +1341,21 @@ export class Harness {
    * попытка: повтор не создаёт второй записи и не вызывает моделей или
    * интеграции. Конфликт редакции записывается, результат её не закрывает.
    */
-  async deliver(workId: string, sink: ResultSink) {
-    const envelope = this.result(workId);
-    const key = `${sink.id}:${workId}:${envelope.result.runId}`;
+  async deliver(
+    workId: string,
+    sink: ResultSink,
+    /**
+     * `runId` — результат этой попытки (по умолчанию последней завершённой);
+     * `variant` — отдельная доставка того же результата (например,
+     * повторное доказательство критериев `reprove-<digest>`): свой ключ, своя
+     * запись, прежняя подтверждённая доставка не меняется.
+     */
+    options: { runId?: string; variant?: string } = {},
+  ) {
+    const envelope = this.result(workId, options.runId);
+    const key = `${sink.id}:${options.variant ? options.variant + ':' : ''}${workId}:${envelope.result.runId}`;
     const prior = this.engine.read((v) => v.local('delivery', WORKSPACE_OWNER, key));
-    if (prior?.status === 'delivered') return this.result(workId);
+    if (prior?.status === 'delivered') return this.result(workId, options.runId);
     const base: DeliveryState = prior ?? {
       sink: sink.id,
       key,
@@ -1448,7 +1458,7 @@ export class Harness {
         'delivery.failed',
       );
     }
-    return this.result(workId);
+    return this.result(workId, options.runId);
   }
 
   private async deliverAll(graphId: string, sink: ResultSink) {

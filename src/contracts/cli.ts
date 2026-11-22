@@ -1024,6 +1024,13 @@ export const cliCommands = {
       source,
       state,
       { ...work, required: false, description: 'ID поручения; без него — все с результатом' },
+      {
+        name: '--reprove',
+        value: 'flag',
+        required: false,
+        description:
+          'Повторно доказать критерии уже принятого результата по текущим привязкам criteria[] (после их правки): новый ключ операции, тот же результат и evidence, без моделей, gates и Git; те же привязки — тот же ключ, повтор ничего не отправляет; изменённая постановка — conflict с причиной',
+      },
     ],
     refusals: ['NOT_FOUND', 'CONTROLLER_BUSY', 'REVISION_CONFLICT'],
   },
@@ -2576,12 +2583,27 @@ export const sourceStatusDataSchema = z.strictObject({
         }),
         z.strictObject({ reachable: z.literal(false), error: z.string() }),
       ]),
+      /**
+       * Принятое поручение, чья задача у получателя не закрыта: сколько
+       * критериев докажут текущие привязки (`reprovable`), что не доказано и
+       * почему, и следующий шаг (`source-deliver --reprove`, без нового
+       * плана). Нет поля — поручение не принято или задача закрыта.
+       */
+      proof: z
+        .strictObject({
+          reprovable: z.number().int().min(0),
+          unproven: z.array(z.strictObject({ title: z.string(), reason: z.string() })),
+          next: z.string().optional(),
+        })
+        .optional(),
     }),
   ),
 });
 
 export const sourceDeliverDataSchema = z.strictObject({
   connector: idSchema,
+  /** `source-deliver --reprove`: повторное доказательство критериев принятых результатов. */
+  reprove: z.literal(true).optional(),
   deliveries: z.array(
     z.strictObject({
       workId: idSchema,
@@ -2589,6 +2611,8 @@ export const sourceDeliverDataSchema = z.strictObject({
       delivery: z.array(deliveryStateSchema),
     }),
   ),
+  /** Только `--reprove` без `--work`: поручения без принятого результата. */
+  skipped: z.array(z.strictObject({ workId: idSchema, reason: z.string() })).optional(),
 });
 
 export const sourceReconcileDataSchema = z.strictObject({
