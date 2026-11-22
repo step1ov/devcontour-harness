@@ -2318,6 +2318,7 @@ function journalLeadCommand(args: string[], phase: 'start' | 'end', data: unknow
         ...optional('request', typeof values.request === 'string' ? values.request : undefined),
         ...optional('actor', typeof values.actor === 'string' ? values.actor : undefined),
         ...(values.reset === true ? { reset: true } : {}),
+        ...(typeof values.by === 'string' ? { by: values.by } : {}),
       },
       data,
       phase,

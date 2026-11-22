@@ -14,6 +14,7 @@ import {
   type LeadLog,
 } from '../contracts/index.ts';
 import type { Engine } from '../engine/engine.ts';
+import { ruCount } from '../contracts/plural.ts';
 import { maskSecrets } from '../projections/mask.ts';
 
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -221,10 +222,45 @@ export interface LeadCommandArgs {
   request?: string;
   actor?: string;
   reset?: boolean;
+  /** `retry --by lead`: сброс ведущего (0.1.0-alpha.66). */
+  by?: string;
 }
 
 /** Ответ команды, который уточняет строку журнала. */
-type CommandData = { abandoned?: boolean; changed?: boolean } | undefined;
+type CommandData =
+  | {
+      abandoned?: boolean;
+      changed?: boolean;
+      /** `retry --reset`: итог сброса (ведущего — с разбором и номером). */
+      reset?: {
+        performed: boolean;
+        by?: 'lead';
+        diagnosis?: string;
+        index?: number;
+        cap?: number;
+        granted?: number;
+      };
+      /** `diagnose`: записанный разбор и что дальше. */
+      diagnosis?: { id: string; cause: string };
+      next?: string;
+    }
+  | undefined;
+
+/** Что дальше после разбора — простыми словами. */
+const diagnoseNext: Record<string, { ru: string; en: string }> = {
+  attempt: { ru: 'следующая попытка получит гипотезу', en: 'the next attempt gets the hypothesis' },
+  diagnose: { ru: 'нужен ещё разбор', en: 'another diagnosis is needed' },
+  replan: { ru: 'перепланировать задачу', en: 're-plan the task' },
+  'user-decision': { ru: 'решает человек', en: 'a human decides' },
+  'lead-reset': {
+    ru: 'ведущий может дать новый предел попыток',
+    en: 'the lead may grant a new attempt limit',
+  },
+  'user-reset': {
+    ru: 'новый предел попыток даёт человек',
+    en: 'a human grants a new attempt limit',
+  },
+};
 
 /**
  * Команды harness ведущего, которые журнал записывает сам (P4-10 a): ru и en
@@ -274,11 +310,27 @@ export function leadCommandEntry(
         'ведущий пересогласовал план после правки политики',
         'the lead re-approved the plan after a policy change',
       );
-    case 'retry':
+    case 'retry': {
+      // Сброс ведущего (`--reset --by lead`) — запись восстановления: по какому
+      // разбору, какой сброс по счёту, сколько попыток дано.
+      const r = d?.reset;
+      if (args.by === 'lead' && args.reset && r?.performed && r.by === 'lead')
+        return one(
+          `ведущий сам дал ${w} ещё ${r.granted ? ruCount(r.granted, ['попытку', 'попытки', 'попыток']) : 'попытки'} по разбору ${r.diagnosis ?? '?'} (сброс ${r.index ?? '?'} из ${r.cap ?? '?'})`,
+          `the lead granted ${w} ${r.granted ?? '?'} more attempt${r.granted === 1 ? '' : 's'} after diagnosis ${r.diagnosis ?? '?'} (reset ${r.index ?? '?'} of ${r.cap ?? '?'})`,
+        );
       return one(
         `ведущий повторил работу ${w}${args.reset ? ' со сбросом попыток' : ''}`,
         `the lead retried ${w}${args.reset ? ' with an attempt reset' : ''}`,
       );
+    }
+    case 'diagnose': {
+      const next = d?.next ? diagnoseNext[d.next] : undefined;
+      return one(
+        `ведущий разобрал отказы ${w}: ${d?.diagnosis?.id ?? 'разбор'}, причина ${d?.diagnosis?.cause ?? '?'}${next ? `; дальше — ${next.ru}` : ''}`,
+        `the lead diagnosed the failures of ${w}: ${d?.diagnosis?.id ?? 'diagnosis'}, cause ${d?.diagnosis?.cause ?? '?'}${next ? `; next — ${next.en}` : ''}`,
+      );
+    }
     case 'cancel':
       return d?.abandoned
         ? one(
@@ -345,6 +397,7 @@ export const LEAD_LOGGED_COMMANDS = [
   'approve',
   'reapprove',
   'retry',
+  'diagnose',
   'cancel',
   'pause',
   'resume',

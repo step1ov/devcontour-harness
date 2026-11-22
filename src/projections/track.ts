@@ -107,6 +107,10 @@ const L = {
   question: { ru: 'вопрос исполнителя', en: 'writer question' },
   accepted: { ru: 'принято', en: 'accepted' },
   acceptedEarlier: { ru: 'принято (прежняя редакция)', en: 'accepted (earlier revision)' },
+  abandoned: {
+    ru: 'доработка оставлена — принятая редакция',
+    en: 'rework abandoned — the accepted revision',
+  },
 } satisfies Record<string, Bi>;
 
 export interface TrackOptions {
@@ -127,6 +131,10 @@ export function workTrack(
 ): { steps: TrackStep[]; truncated: number } {
   const t = (b: Bi) => b[o.lang];
   const own = attempts.filter((a) => a.workId === work.id);
+  // Доработку отменила alpha.65 вместе с работой: представление показывает
+  // работу принятой (`restoredFrom: cancelled-rework`), путь — так же.
+  const restored = work.status === 'cancelled' && !!work.rework && !work.rework.abandoned;
+  const settled = work.status === 'done' || restored;
   const reworkFrom = work.rework?.accepted.runId
     ? own.findIndex((a) => a.id === work.rework!.accepted.runId)
     : -1;
@@ -173,7 +181,7 @@ export function workTrack(
           kind: 'accepted',
           attempt: a.attempt,
           state: 'passed',
-          label: t(i === lastSucceeded && work.status === 'done' ? L.accepted : L.acceptedEarlier),
+          label: t(i === lastSucceeded && settled ? L.accepted : L.acceptedEarlier),
           ...(a.finishedAt ? { at: a.finishedAt } : {}),
         }),
       );
@@ -213,10 +221,31 @@ export function workTrack(
         },
       ],
     });
+  // Отказ от доработки (`work.rework-abandoned`) или доработка, отменённая
+  // alpha.65: работа снова на принятой редакции — последний шаг пути.
+  if (work.rework && (work.rework.abandoned || restored)) {
+    const at =
+      work.rework.abandoned?.at ??
+      own.findLast((a) => a.finishedAt)?.finishedAt ??
+      work.rework.reopenedAt;
+    items.push({
+      at,
+      order: 3,
+      steps: [
+        {
+          kind: 'accepted',
+          state: 'passed',
+          label: t(L.abandoned),
+          at,
+          rework: work.rework.revision,
+        },
+      ],
+    });
+  }
   items.sort((x, y) => (x.at < y.at ? -1 : x.at > y.at ? 1 : x.order - y.order));
   const steps = items.flatMap((x) => x.steps);
 
-  if (work.status !== 'done') {
+  if (!settled) {
     const closed = work.status === 'cancelled';
     const planned: TrackStep[] = [];
     const plan = (s: Omit<TrackStep, 'state'>) =>
