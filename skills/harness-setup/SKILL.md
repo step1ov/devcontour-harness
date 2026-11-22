@@ -398,6 +398,27 @@ areas, missing tools) give the user the advice and the choice: run it in
 product rule under the harness (controller-mode overlay). Do not open the
 writer's internet or switch OS isolation off to make the probe green.
 
+### Previews
+
+If the product is something a person looks at (a site, an admin, an API with
+pages), describe how to run it as `repositories[].previews` in
+`.harness/policy.json` (or `previews` of a local profile), from the
+project's own commands — never invent scripts. Read `package.json` scripts
+and the product README: `build` holds install and build steps
+(`{ "id", "command": [argv], "timeoutMs" }`, for example `npm ci` and
+`npm run build`), `start` the long-running command (`npm run start`,
+`npm run preview`), `health` a path that answers below 400 when the app is
+up (`/`, `/health`), `env` the values the app needs. The port is not fixed:
+the app gets it as `PORT` and `{port}`, the host as `HOST=127.0.0.1` and
+`{host}`; pass them on the command line if the script ignores `PORT`
+(`["npm", "run", "start", "--", "--port", "{port}", "--host", "{host}"]`).
+Set `"services": true` only when the app needs the repository lifecycle
+(the database that `lifecycle.setup` starts). Check it once on HEAD:
+`$H preview-start --state <manifest.paths.state> --policy .harness/policy.json --ref HEAD --ttl 300`
+must return a `url` that opens, then `$H preview-stop --state <manifest.paths.state>`.
+Previews do not change the execution digest and need no plan re-review. See
+`<pkg>/docs/previews.md`.
+
 ### 9. Controller mode
 
 When the product AGENTS.md tells an agent to create worktrees, commit, merge,

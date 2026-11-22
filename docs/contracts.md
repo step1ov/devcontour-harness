@@ -139,6 +139,13 @@ timeoutMs?}`: команды, которые правила проекта тр�
 `harness smoke --writer-probe` в изоляции исполнителя, без модели; попытки и gates на них не
 смотрят. Нет поля — digest политики прежний.
 
+`repositories[].previews` — необязательный список (до 10, ID без повторов) превью результата
+`{id, title?, build?[], start[], cwd?, env?, services?, health?, readyTimeoutMs?, ttlMs?,
+idleMs?}`: как собрать и запустить приложение на принятом коммите, чтобы человек посмотрел
+результат. Запускает только оператор (`harness preview-start`), никогда — `run`, попытка или
+gate. В `executionDigest` и `isolationDigest` не входит; нет поля — digest политики прежний.
+Подробно — [превью](previews.md).
+
 `toolProfiles.<id>.network` — необязательная сеть исполнителя профиля: `none`, `loopback` или
 `full`. Нет поля — прежнее: codex — по `codexNetwork` (`true` — вся сеть, иначе закрыта), claude —
 домены `isolation.domains` и локальные порты; умолчание не подставляется и digest политики не
@@ -1754,6 +1761,13 @@ line, whatsNew?, command?}` — обновления harness и панели п�
   нового · как обновить»; не больше 10 пунктов `whatsNew`. Нет ни
   `.harness/updates.json`, ни проверки — поля нет. То же поле — в `status` (строка «Обновления: …» в
   `status --human`).
+- `previews[] {id, repositoryId, title?, url, ref, sha, workId?, startedAt,
+expiresAt, state}` (0.1.0-alpha.66, ревизия прежняя) — живые превью
+  результата (`harness preview-start`): receipt `running` с живым
+  supervisor, адрес `http://127.0.0.1:<порт>/`; не больше 20 (сверх —
+  `truncated.previews`). Панель показывает «Посмотреть результат» и
+  «остановить». Нет живых превью — поля нет. Подробно —
+  [превью](previews.md).
 - `progress.queue.runner` (`running` | `not-running`), `restartBy` и `line`
   — кто двигает очередь (как `status.runner`): `running` — живой
   controller, идущая попытка или ревью плана в живом run; `not-running` —
@@ -2261,7 +2275,9 @@ Exit 1 не используется: им Node завершает процес�
 ### StackProfile
 
 Переносимый профиль стека (`schemas/stack-profile.schema.json`):
-`{id, version, extends[], capabilities[], gates[], prepare[], environment?, lifecycle?, protectedPaths[], generatedPaths[], concurrency?, runTimeoutMs?, gateTimeoutFloorMs?, roles{}, contextPacks[]}`.
+`{id, version, extends[], capabilities[], gates[], prepare[], environment?, lifecycle?, protectedPaths[], generatedPaths[], concurrency?, runTimeoutMs?, gateTimeoutFloorMs?, roles{}, contextPacks[], previews?[]}`.
+`previews` — превью результата ([превью](previews.md)): слои объединяются по ID, один ID в двух
+слоях — конфликт; `repositoryFromProfile` переносит их в репозиторий политики.
 `extends` — встроенный ID (`profiles/<id>.json` пакета, иначе слой
 `profiles/layers/<id>.json`) или относительный
 `./file.json` внутри репозитория; не глубже 16 слоёв и не больше 32 файлов,
@@ -2350,6 +2366,9 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `gates`            | `--state D [--policy F] --sha SHA\|HEAD [--gate a,b,@g] [--repository ID] [--fail-fast] [--human]`                          | да    | исход каждого gate (`passed`, `failed`, `not-run`, `skipped`), SHA, каталог логов                                                                                                                                                                           |
 | `review-code`      | `--state D [--policy F] --base REF --head REF [--role R] [--author A] [--repository ID]`                                    | да    | `CodeReviewRecord` (`kind: code`, `acceptance: false`)                                                                                                                                                                                                      | Те же ref — следующий раунд; тот же одобренный `head` и reviewer — тот же раунд без вызова; не приёмка                                                                                                |
 | `smoke`            | `--state D [--policy F] --sha SHA\|HEAD [--repository ID] [--human]`                                                        | да    | шаги окружения с длительностью, `passed`, класс отказа и совет, каталог логов                                                                                                                                                                               | Каждый вызов — новая проверка; gates и модели не вызываются, база состояния не открывается                                                                                                            |
+| `preview-start`    | `--state D [--policy F] [--preview ID] [--ref accepted\|SHA\|REF] [--work ID] [--repository ID] [--ttl S] [--idle S]`       | да    | `{preview, changed}`: receipt превью — адрес на loopback, коммит, срок, PID                                                                                                                                                                                 | То же превью на том же коммите — `changed: false`; другой коммит заменяет прежнее; внутри попытки и gate — `NOT_READY`                                                                                |
+| `preview-stop`     | `--state D [--policy F] [--preview ID] [--repository ID]`                                                                   | да    | `{previews[], changed}`: итоговые receipt                                                                                                                                                                                                                   | Остановленное — `changed: false`                                                                                                                                                                      |
+| `preview-list`     | `--state D [--policy F]`                                                                                                    | да    | `{previews[]}`: receipt после сверки с процессами                                                                                                                                                                                                           | Пропавший supervisor — очистка по receipt и `failed`                                                                                                                                                  |
 | `view`             | `--state D [--policy F] [--work ID] [--no-titles] [--window 24h\|7d] [--bucket 15m\|1h] [--lang ru\|en] [--view-version 1]` | нет   | `OperatorView`; с `--work` — `WorkDetailView`                                                                                                                                                                                                               | Только чтение, без файлов в каталоге состояния; те же состояние, политика, часы и параметры — те же байты                                                                                             |
 | `capabilities`     | —                                                                                                                           | нет   | каталог общих операций (`OperationCatalog`)                                                                                                                                                                                                                 | Чистая функция установленной версии пакета                                                                                                                                                            |
 | `--version`        | —                                                                                                                           | нет   | версия пакета и API                                                                                                                                                                                                                                         | —                                                                                                                                                                                                     |
@@ -2429,6 +2448,18 @@ lifecycle `setup` и `ready`, хранилище зависимостей (`depe
 teardown исполняется и после отказа. Прерывание сигналом — `CANCELLED`.
 Логи шагов — в `<state>/gates-at/<id>` (`data.logs`), ход — в stderr.
 Библиотека: `smokeLifecycle`, `classifyLifecycleFailure`.
+
+**`preview-start`, `preview-stop`, `preview-list`.** Превью результата по
+`previews[]` репозитория (0.1.0-alpha.66): своё рабочее дерево на принятом
+коммите в `<state>/previews`, свободный loopback-порт приложения (`PORT`,
+`{port}`) за loopback-прокси, lifecycle при `services`, готовность по
+`health`; надзирающий процесс сам останавливает превью по сроку (`--ttl`,
+`ttlMs`) и простою без запросов (`--idle`, `idleMs`). `--ref accepted` (по
+умолчанию) — с `--work` принятый SHA поручения, без него — вершина
+`targetRef`. Не поднялось — `LIFECYCLE_FAILED` (exit 4) с причиной и логом.
+Запускает только оператор: внутри попытки и gate — `NOT_READY`, `run` превью
+не запускает. Receipt, остановка и сверка — [превью](previews.md).
+Библиотека: `startPreview`, `stopPreviews`, `listPreviews`, `livePreviews`.
 
 **`report`.** Читает каталог состояния только для чтения и строит
 `ValueReport` (`valueReport`); `binding.json` не нужен (с ним — сверка принятых поручений с target ref, `targets`). Чтение однократное
