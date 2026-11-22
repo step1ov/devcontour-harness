@@ -239,6 +239,8 @@ const ADDITIVE_ENUM_VALUES = new Set([
   'relay-compatibility',
   // Предупреждение init о реестре сборки seed хранилища (0.1.0-alpha.61).
   'dependency-store-registry',
+  // Причина отказа среды: gate запускает ps в песочнице ОС (0.1.0-alpha.66).
+  'sandbox-process-list',
 ]);
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
@@ -524,6 +526,12 @@ test('H3-01: прежние команды и схемы их данных не 
     if (k === 'properties' && v && typeof v === 'object' && 'facts' in v && 'manifestPath' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.toolchainPin;
+      v = rest;
+    }
+    // Список процессов в песочнице проверок у doctor (0.1.0-alpha.66).
+    if (k === 'properties' && v && typeof v === 'object' && 'os' in v && 'reason' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.processList;
       v = rest;
     }
     if (k === 'enum' && Array.isArray(v) && v.includes('writer-environment'))
@@ -819,6 +827,8 @@ test('H3-01: прежние команды и схемы их данных не 
   );
   for (const value of ADDITIVE_ENUM_VALUES)
     assert.ok(JSON.stringify(data).includes(JSON.stringify(value)), value + ' объявлен');
+  // Хеш H2 вырезает список процессов песочницы у doctor: объявление держит эта проверка.
+  assert.ok(JSON.stringify(data.doctor).includes('"processList"'), 'doctor: sandbox.processList');
   // Хеш H2 вырезает поля слоя lean: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.profile).includes('"gateTimeoutFloorMs"'), 'profile: граница gate');
   assert.ok(JSON.stringify(data.init).includes('"layers"'), 'init: слои профиля в manifest');

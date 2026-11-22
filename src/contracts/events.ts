@@ -36,6 +36,12 @@ export const environmentCauses = [
   'sandbox-network',
   'sandbox-filesystem',
   'sandbox-policy',
+  /**
+   * Gate запустил список процессов (`ps`, `pgrep`, `top`), а в песочнице ОС
+   * проверок он недоступен (`GATE_SANDBOX_PROCESS_LIST`): ядро macOS не
+   * запускает setuid-программы в песочнице. Правка кода этого не снимет.
+   */
+  'sandbox-process-list',
   'dependency-network',
   'provider-auth',
   'provider-limit',

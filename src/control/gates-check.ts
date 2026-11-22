@@ -119,6 +119,9 @@ export async function checkGates(input: GateCheckInput) {
     },
   );
   const failures = new Map(result.failures.map((f) => [f.gate, f.message]));
+  const causes = new Map(
+    result.failures.flatMap((f) => (f.environment ? [[f.gate, f.environment] as const] : [])),
+  );
   const skipped = new Set(result.skipped ?? []);
   const interrupted = result.interrupted;
   const gates = result.gates.map((gate) => {
@@ -160,6 +163,9 @@ export async function checkGates(input: GateCheckInput) {
         : {}),
       ...(evidence?.toolchain ? { toolchain: evidence.toolchain } : {}),
       ...(message ? { message } : {}),
+      // Отказ среды, названный gate (`sandbox-process-list`, `sandbox-filesystem`…):
+      // правка кода его не снимет.
+      ...(status === 'failed' && causes.get(gate) ? { environment: causes.get(gate)! } : {}),
     };
   });
   const data = {
@@ -192,7 +198,7 @@ export function gatesText(data: Awaited<ReturnType<typeof checkGates>>) {
   const lines = data.gates.map(
     (g) =>
       `${g.gate.padEnd(width)}  ${g.status.padEnd(9)}  ${g.exitCode ?? '-'}`.padEnd(width + 18) +
-      `  ${g.message ?? g.summary ?? ''}`.trimEnd(),
+      `  ${g.environment ? `[среда: ${g.environment}] ` : ''}${g.message ?? g.summary ?? ''}`.trimEnd(),
   );
   return (
     [
