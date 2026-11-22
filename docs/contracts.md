@@ -956,6 +956,19 @@ delivered | failed | conflict, attempts, lastError?, currentRevision?,
 receipt?, updatedAt}`. `harness result` выдаёт `{apiVersion, result,
 delivery[]}`.
 
+Отдельная доставка того же результата (`Harness.deliver(workId, sink,
+{ runId, variant })`) пишет свою запись с ключом
+`<sink>:<variant>:<workId>:<runId>`; прежняя подтверждённая доставка не
+меняется. Коннектор задач так выполняет повторное доказательство критериев
+принятого результата (`source-deliver --reprove`, вариант `reprove-<digest
+привязок>`): ответ `source-deliver` получает `reprove: true` и
+`skipped[] {workId, reason}` (поручения без принятого результата),
+`source-status` — `tasks[].proof {reprovable, unproven[] {title, reason},
+next?}` для принятого поручения с незакрытой задачей. Ревизия поручения
+из коннектора (`source.revision`) — semantic digest v2: без привязок
+критериев и необязательных документов (см.
+[connectors.md](connectors.md), «Идентичность и снимок»).
+
 ### JointVerification
 
 Совместная проверка закреплённой комбинации SHA нескольких репозиториев:

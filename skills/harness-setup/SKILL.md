@@ -463,7 +463,13 @@ first graph.
   `writeScope` (required) = the role's `writePaths` from the facts, or, when
   the role has none, `["."]` (the whole repository) or the narrower paths the
   task names (with generated outputs when it changes them); `criteria` mapped
-  to a gate and a JUnit `testId`; `"context": ["controller-mode"]` with
+  to a gate and a JUnit `testId` spelled exactly as the report spells it —
+  `classname.name` (node:test writes `classname="test"`, so the test
+  `orders.api.access` is `test.orders.api.access`; open a JUnit file the gate
+  wrote to check), or `"evidence": "gate"` when the passed gate itself is the
+  proof; a document the task cannot be done without goes into
+  `requiredDocuments` (only those make the statement: an edit of any other
+  linked document does not reopen accepted work); `"context": ["controller-mode"]` with
   controller mode (step 9) — the pack is read from `contextDir`, by default
   `work/context` next to `connector.json`;
 - `completion: { "mode": "review-only" }` unless the user chose `complete`;
@@ -487,6 +493,12 @@ $H source-check --source <repo>/.harness/connector.json --policy <repo>/.harness
 $H source-snapshot --source <repo>/.harness/connector.json --policy <repo>/.harness/policy.json --state <state> --out <dir outside the repo>
 $H validate --graph <dir outside the repo>/graph.json --policy <repo>/.harness/policy.json --context <dir outside the repo>/context.json
 ```
+
+`source-check` also checks every criterion binding: a gate outside the
+policy or the task's gates, `evidence: test` on a gate without JUnit, and a
+`testId` missing from the gate's reports while `<classname>.<testId>` is
+there are problems (`run --source` refuses them before any attempt); a
+binding edit needs no new plan.
 
 `source-check` is read only. `source-snapshot` reads Relay but records the
 snapshot in the connector state under `--state` and writes `graph.json`,
