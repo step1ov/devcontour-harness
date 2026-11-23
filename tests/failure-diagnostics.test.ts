@@ -287,6 +287,9 @@ test('отчёт команды: родитель подменён ссылко�
     const restored = await read();
     assert.ok(!JSON.stringify(restored).includes('secret'), JSON.stringify(restored));
     if (process.platform !== 'linux') assert.deepEqual(restored, []);
+    // С `O_NOFOLLOW_ANY` (macOS) открытие отчёта отказало раньше шага `file`:
+    // подмена ещё держится — снимается здесь.
+    if (phase === 1) restore();
   } finally {
     reportReadHooks.step = undefined;
   }
