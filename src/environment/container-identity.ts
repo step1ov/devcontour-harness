@@ -62,6 +62,9 @@ export function containerUse(lifecycle: unknown): { clis: ContainerCli[] } | { u
   return { clis: [...clis] };
 }
 
+/** Предел запроса идентичности демона. */
+export const IDENTITY_TIMEOUT_MS = 5_000;
+
 /** Аргументы запроса идентичности демона. */
 const IDENTITY_ARGS: Record<ContainerCli, string[]> = {
   docker: ['info', '--format', '{{.ID}}'],
@@ -79,12 +82,13 @@ export function containerIdentity(
   cli: ContainerCli,
   env: NodeJS.ProcessEnv,
   bin: string = containerBin(cli),
+  signal?: AbortSignal,
 ): Promise<DaemonIdentity> {
   return new Promise((done) => {
     execFile(
       bin,
       IDENTITY_ARGS[cli],
-      { encoding: 'utf8', timeout: 15_000, env },
+      { encoding: 'utf8', timeout: IDENTITY_TIMEOUT_MS, env, ...(signal ? { signal } : {}) },
       (error, stdout) => {
         if (error && (error as NodeJS.ErrnoException).code === 'ENOENT')
           return done({ missing: true });

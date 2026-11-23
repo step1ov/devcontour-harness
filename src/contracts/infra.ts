@@ -140,6 +140,7 @@ interface LifecycleLike {
   teardown: readonly StepLike[];
 }
 interface RepoLike {
+  id?: string;
   protectedPaths: readonly string[];
   gates: readonly GateLike[];
   infra?: InfraScope;
@@ -237,6 +238,21 @@ export const resolutionFile = (path: string) => {
   );
 };
 
+/** Teardown, который годится для checkout базы: мост с каталогом окружения или compose с явным проектом. */
+const safeTeardown = (command: readonly string[]) => {
+  const head = (command[0] ?? '').split(/[/\\]/).at(-1)!.toLowerCase();
+  if (head === 'node' && command.slice(1).some((a) => /(^|\/)compose-bridge\.mjs$/.test(a)))
+    return true;
+  const compose =
+    head === 'docker-compose' ||
+    head === 'podman-compose' ||
+    ((head === 'docker' || head === 'podman') && command.includes('compose'));
+  return (
+    compose &&
+    command.some((a) => a === '-p' || a === '--project-name' || /^--project-name=/.test(a))
+  );
+};
+
 /**
  * Согласованность области инфраструктуры репозитория: пути не покрывают
  * корни доверия (`INFRA_TRUST_ROOTS`) и файлы шагов на хосте, лежат внутри
@@ -252,6 +268,19 @@ export function infraIssues(
   const add = (where: (string | number)[], message: string) =>
     issues.push({ code: 'INVALID_INPUT', path: [...path, ...where], message });
   const host = hostStepFiles(repo, policy);
+  // Teardown работы инфраструктуры идёт в чистом checkout базы — без
+  // зависимостей дерева и файлов setup (docs/infra-works.md): годится только
+  // мост с каталогом окружения и явным проектом или compose с явным проектом.
+  const lifecycle = repo.lifecycle ?? policy.lifecycle;
+  const lifecyclePath = repo.lifecycle ? ['lifecycle', 'teardown'] : null;
+  lifecycle?.teardown.forEach((step, i) => {
+    if (!safeTeardown(step.command))
+      issues.push({
+        code: 'INVALID_INPUT',
+        path: lifecyclePath ? [...path.slice(0, -1), ...lifecyclePath, i] : [...path],
+        message: `Teardown ${JSON.stringify(step.command.slice(0, 4))} репозитория с областью инфраструктуры исполняется в чистом checkout базы без зависимостей дерева и файлов setup: нужен мост с каталогом окружения и явным проектом (node …/compose-bridge.mjs, как в примере turbo-starter) или docker/podman compose с -p/--project-name`,
+      });
+  });
   const seen = new Set<string>();
   repo.infra.paths.forEach((p, i) => {
     const at = ['paths', i];
@@ -327,45 +356,4 @@ export function infraViolations(changed: readonly string[], input: InfraScopeInp
       !withinInfra(p, input.gateChanges),
   );
   return { host, gate, link };
-}
-
-/** Teardown, который годится для checkout базы: мост с каталогом окружения или compose с явным проектом. */
-const safeTeardown = (command: readonly string[]) => {
-  const head = (command[0] ?? '').split(/[/\\]/).at(-1)!.toLowerCase();
-  if (head === 'node' && command.slice(1).some((a) => /(^|\/)compose-bridge\.mjs$/.test(a)))
-    return true;
-  const compose =
-    head === 'docker-compose' ||
-    head === 'podman-compose' ||
-    ((head === 'docker' || head === 'podman') && command.includes('compose'));
-  return (
-    compose &&
-    command.some((a) => a === '-p' || a === '--project-name' || /^--project-name=/.test(a))
-  );
-};
-
-/**
- * Предупреждения doctor о teardown работы инфраструктуры (alpha.67,
- * docs/infra-works.md): teardown репозитория с областью инфраструктуры
- * исполняется в чистом checkout доверенной базы — без зависимостей дерева
- * (`node_modules`) и без файлов, которые setup создал в дереве. Шаг, который
- * не мост `compose-bridge.mjs` (состояние — в каталоге окружения, проект
- * явный) и не compose с `-p`/`--project-name`, может не найти своих
- * ресурсов. Предупреждение, не отказ.
- */
-export function infraTeardownWarnings(policy: {
-  lifecycle?: { teardown: readonly StepLike[] };
-  repositories: readonly (RepoLike & { id: string })[];
-}): string[] {
-  const out: string[] = [];
-  for (const repo of policy.repositories) {
-    if (!repo.infra) continue;
-    const lifecycle = repo.lifecycle ?? policy.lifecycle;
-    for (const step of lifecycle?.teardown ?? [])
-      if (!safeTeardown(step.command))
-        out.push(
-          `INFRA_TEARDOWN: репозиторий ${repo.id}: teardown ${JSON.stringify(step.command.slice(0, 4))} у работы инфраструктуры исполняется в чистом checkout базы без зависимостей дерева и файлов setup — нужен мост с каталогом окружения и явным проектом (как compose-bridge.mjs примера turbo-starter) или compose с -p/--project-name`,
-        );
-  }
-  return out;
 }

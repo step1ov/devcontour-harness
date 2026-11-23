@@ -13,7 +13,6 @@ import {
   infraViolations,
   isolationDigest,
   planDraftSchema,
-  infraTeardownWarnings,
   policyIssues,
   resolutionFile,
   workGraphDigest,
@@ -421,16 +420,17 @@ test('alpha.67 infra: правка существующего помощника
 
 // Teardown на хосте читает файл области сам (импорт, файл по умолчанию):
 // argv его не называет. Исполняется он по доверенной базе.
+// Teardown — мост с явным проектом (`compose-bridge.mjs`): правило infraIssues.
 const teardownScript = `
-const fs = require('fs');
+import fs from 'node:fs';
+import path from 'node:path';
 const mode = fs.readFileSync('.harness/infra/mode.txt', 'utf8').trim();
 const extra = fs.existsSync('.harness/infra/extra.js') ? 'present' : 'absent';
-const where = require('path').basename(process.cwd()).startsWith('trusted-base-') ? 'base-checkout' : 'tree';
+const where = path.basename(process.cwd()).startsWith('trusted-base-') ? 'base-checkout' : 'tree';
 const own = JSON.parse(process.env.DEVCONTOUR_COMPONENTS_JSON)[process.env.DEVCONTOUR_REPOSITORY_ID];
 const alias = JSON.parse(process.env.HARNESS_COMPONENTS_JSON)[process.env.DEVCONTOUR_REPOSITORY_ID];
 const components = own === process.cwd() && alias === own ? 'components-base' : 'components-candidate:' + own;
-const project = process.env.COMPOSE_PROJECT_NAME ? 'project' : 'no-project';
-fs.appendFileSync(process.env.MARKER, [mode, extra, where, components, project].join(':') + '\\n');
+fs.appendFileSync(process.env.MARKER, [mode, extra, where, components].join(':') + '\\n');
 `;
 const teardownRun = (
   marker: string,
@@ -441,7 +441,7 @@ const teardownRun = (
     scenario: { writer: implement(writer), reviewer: approve() },
     files: {
       '.harness/acceptance/run.js': passGate,
-      '.harness/teardown.js': teardownScript,
+      '.harness/compose-bridge.mjs': teardownScript,
       '.harness/infra/mode.txt': 'base\n',
     },
     policy: (p: any) => {
@@ -453,7 +453,7 @@ const teardownRun = (
       p.repositories[0].lifecycle = {
         setup: [],
         ready: [],
-        teardown: [{ id: 'down', command: [process.execPath, '.harness/teardown.js'] }],
+        teardown: [{ id: 'down', command: [process.execPath, '.harness/compose-bridge.mjs'] }],
       };
     },
     graph: (g: any) => Object.assign(g.orders[0], order),
@@ -476,7 +476,7 @@ test('alpha.67 infra: teardown на хосте исполняет доверен
   // Каждая фаза окружения (кандидат и интеграция) — по базе: файл кандидата
   // в кандидате не виден teardown; интеграция — уже после ревью кода.
   const lines = readFileSync(marker, 'utf8').trim().split('\n');
-  assert.equal(lines[0], 'base:absent:base-checkout:components-base:project');
+  assert.equal(lines[0], 'base:absent:base-checkout:components-base');
   // Отдельный checkout базы убран.
   assert.doesNotMatch(
     execFileSync('git', ['worktree', 'list'], { cwd: repoDir, encoding: 'utf8' }),
@@ -503,7 +503,7 @@ test('alpha.67 infra: отклонённый кандидат — teardown вс�
   assert.equal(work.status, 'failed');
   assert.equal(work.failureKind, 'scope-violation');
   assert.deepEqual(readFileSync(marker, 'utf8').trim().split('\n'), [
-    'base:absent:base-checkout:components-base:project',
+    'base:absent:base-checkout:components-base',
   ]);
 });
 
@@ -802,7 +802,7 @@ test('alpha.67 infra: checkout базы — запись пути до созд�
   const value = await withBaseCheckout(r.dir, base, env, (cwd) => Promise.resolve(cwd), {
     prior: [stale],
     record: (path) => (recorded.push(path), Promise.resolve()),
-    leftover: (note) => (notes.push(note), Promise.resolve()),
+    leftover: (_path, note) => (notes.push(note), Promise.resolve()),
   });
   assert.equal(existsSync(stale), false);
   assert.equal(recorded.length, 1);
@@ -822,7 +822,7 @@ test('alpha.67 infra: checkout базы — запись пути до созд�
       chmodSync(locked, 0o500);
       return Promise.resolve('teardown ok');
     },
-    { leftover: (note) => (notes.push(note), Promise.resolve()) },
+    { leftover: (_path, note) => (notes.push(note), Promise.resolve()) },
   );
   chmodSync(locked, 0o700);
   assert.equal(result, 'teardown ok');
@@ -839,7 +839,7 @@ test('alpha.67 infra: checkout базы — запись пути до созд�
   assert.match((await removeBaseCheckout(r.dir, env, join(env, 'other'))) ?? '', /не тронут/);
 });
 
-test('alpha.67 infra: окружение teardown в checkout базы — свой компонент на checkout, проект compose по имени дерева', () => {
+test('alpha.67 infra: окружение teardown в checkout базы — свой компонент на checkout, проект compose не подставляется', () => {
   const env = baseCheckoutEnv(
     {
       DEVCONTOUR_REPOSITORY_ID: 'app',
@@ -851,14 +851,11 @@ test('alpha.67 infra: окружение teardown в checkout базы — св�
   );
   for (const k of ['DEVCONTOUR_COMPONENTS_JSON', 'HARNESS_COMPONENTS_JSON'])
     assert.deepEqual(JSON.parse(env[k]!), { app: '/env/trusted-base-x', lib: '/deps/lib' });
-  assert.equal(env.COMPOSE_PROJECT_NAME, 'r-1_tree');
-  assert.equal(
-    baseCheckoutEnv({ COMPOSE_PROJECT_NAME: 'own' }, '/w/x', '/c').COMPOSE_PROJECT_NAME,
-    'own',
-  );
+  // Проект compose не подставляется: его называет сам teardown (`-p`, мост).
+  assert.equal(env.COMPOSE_PROJECT_NAME, undefined);
 });
 
-test('alpha.67 infra: затенение — без регистра, все расширения сняты; sitecustomize — любой сегмент; doctor предупреждает о teardown без явного проекта', async () => {
+test('alpha.67 infra: затенение — без регистра, все расширения сняты; sitecustomize — любой сегмент; teardown без явного проекта — ошибка политики', async () => {
   assert.ok(resolutionFile('.harness/acceptance/sitecustomize/__init__.py'));
   assert.ok(resolutionFile('.harness/acceptance/UserCustomize.py'));
   const r = repo({
@@ -882,8 +879,8 @@ test('alpha.67 infra: затенение — без регистра, все р�
     '.harness/infra/gate.test',
     '.harness/infra/x.d.ts',
   ]);
-  const warn = (teardown: string[][]) =>
-    infraTeardownWarnings(
+  const issues = (teardown: string[][]) =>
+    policyIssues(
       infraPolicy((p) => {
         p.repositories[0].lifecycle = {
           setup: [],
@@ -891,15 +888,17 @@ test('alpha.67 infra: затенение — без регистра, все р�
           teardown: teardown.map((command, i) => ({ id: 'd' + i, command })),
         };
       }),
-    );
-  assert.deepEqual(warn([['node', '.harness/compose-bridge.mjs', 'teardown']]), []);
-  assert.deepEqual(warn([['docker', 'compose', '-p', 'hx', 'down']]), []);
-  assert.deepEqual(warn([['podman-compose', '--project-name=hx', 'down']]), []);
-  assert.equal(warn([['docker', 'compose', 'down']]).length, 1);
-  assert.match(warn([['node', '.harness/infra/down.mjs']])[0]!, /^INFRA_TEARDOWN: репозиторий/);
-  // Без области инфраструктуры — без предупреждения.
+    ).filter((i) => /чистом checkout базы/.test(i.message));
+  assert.deepEqual(issues([['node', '.harness/compose-bridge.mjs', 'teardown']]), []);
+  assert.deepEqual(issues([['docker', 'compose', '-p', 'hx', 'down']]), []);
+  assert.deepEqual(issues([['podman-compose', '--project-name=hx', 'down']]), []);
+  assert.equal(issues([['docker', 'compose', 'down']]).length, 1);
+  const bad = issues([['node', '.harness/infra/down.mjs']]);
+  assert.equal(bad[0]!.code, 'INVALID_INPUT');
+  assert.deepEqual(bad[0]!.path, ['repositories', 0, 'lifecycle', 'teardown', 0]);
+  // Без области инфраструктуры — правила нет.
   assert.deepEqual(
-    infraTeardownWarnings(
+    policyIssues(
       policyWith((p) => {
         p.repositories[0].lifecycle = {
           setup: [],
@@ -907,7 +906,7 @@ test('alpha.67 infra: затенение — без регистра, все р�
           teardown: [{ id: 'd', command: ['true'] }],
         };
       }),
-    ),
+    ).filter((i) => /чистом checkout базы/.test(i.message)),
     [],
   );
 });
@@ -929,5 +928,59 @@ test('alpha.67 infra: упавшая работа, которую повтори
   } as any);
   assert.equal(d.action, 'wait');
   assert.equal(d.retryPlanned, false);
+  assert.match(d.message, /Ждёт работы инфраструктуры прежнего графа infra-a/);
+});
+
+test('alpha.67 infra: уборка checkout — только записанные и зарегистрированные worktree; каталог lifecycle с тем же префиксом остаётся; сбой записи не останавливает teardown; неубранный собирается следующей очисткой', async () => {
+  const r = repo({ '.harness/infra/a.mjs': 'a\n', 'README.md': 'x\n' });
+  const base = r.head();
+  const env = realpathSync(mkdtempSync(join(tmpdir(), 'harness-env-')));
+  // Состояние моста в каталоге окружения с тем же префиксом — не checkout.
+  const state = join(env, 'trusted-base-state');
+  mkdirSync(state);
+  writeFileSync(join(state, 'ports.json'), '{}');
+  // Зарегистрированный, но не записанный checkout (падение до записи).
+  const unrecorded = join(env, 'trusted-base-unrecorded');
+  r.git('worktree', 'add', '--detach', unrecorded, base);
+  let ran = false;
+  await withBaseCheckout(r.dir, base, env, () => ((ran = true), Promise.resolve()), {
+    record: () => Promise.reject(new Error('disk full')),
+    leftover: () => Promise.reject(new Error('disk full')),
+  });
+  assert.equal(ran, true, 'сбой записи в запись окружения не остановил teardown');
+  assert.equal(readFileSync(join(state, 'ports.json'), 'utf8'), '{}');
+  assert.equal(existsSync(unrecorded), false);
+  assert.match((await removeBaseCheckout(r.dir, env, state)) ?? '', /не checkout harness/);
+  // Неубранный checkout, записанный в trustedLeftovers, собирается при следующей уборке.
+  const left = join(env, 'trusted-base-left');
+  r.git('worktree', 'add', '--detach', left, base);
+  const collected: string[] = [];
+  await withBaseCheckout(r.dir, base, env, () => Promise.resolve(), {
+    prior: [left],
+    collected: (p) => (collected.push(p), Promise.resolve()),
+  });
+  assert.deepEqual(collected, [left]);
+  assert.equal(existsSync(left), false);
+  assert.equal(existsSync(state), true);
+});
+
+test('alpha.67 infra: повтор восстановления (recovery retry) при открытой инфраструктуре прежнего графа — ожидание, а не решение человека', () => {
+  const d = explainStop({
+    kind: 'work',
+    work: {
+      id: 'prod-a',
+      status: 'failed',
+      attempt: 1,
+      failureKind: 'gate',
+      recovery: { status: 'retry' },
+      infraWaitingOn: ['infra-a'],
+    },
+    repair: { outlook: 'retry', sameFailureRepairs: 0, groupRepairsUsed: 0, groupRepairBudget: 5 },
+    maxAttempts: 3,
+    records: [],
+    now: 0,
+  } as any);
+  assert.equal(d.actor, null);
+  assert.equal(d.action, 'wait');
   assert.match(d.message, /Ждёт работы инфраструктуры прежнего графа infra-a/);
 });

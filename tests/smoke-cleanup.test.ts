@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access --
+ * Тест правит сырой JSON политики до разбора схемой.
+ */
 import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,10 +14,11 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cleanupDataSchema, executionPolicySchema } from '../src/contracts/index.ts';
+import { cleanupDataSchema, digestOf, executionPolicySchema } from '../src/contracts/index.ts';
 import { cleanupSmoke } from '../src/control/smoke-cleanup.ts';
 import {
   CONTAINER_SELECTOR_KEYS,
+  cleanupEnvironment,
   executionEnvironment,
   replayContainerEnv,
   withEnvironment,
@@ -361,4 +365,70 @@ test('alpha.67 lifecycle: запись окружения хранит иден�
   assert.deepEqual(receipt.containerIdentity, { docker: 'daemon-xyz' });
   assert.equal(receipt.containerEnv.DOCKER_HOST, null);
   assert.ok('HOME' in receipt.containerEnv);
+});
+
+test('alpha.67 cleanup по записи: демон сейчас другой, чем у фазы, — teardown не исполняется; тот же — исполняется с конфигурацией docker фазы', async () => {
+  const dir = freshState();
+  const tree = join(dir, 'tree');
+  mkdirSync(tree);
+  const fake = join(dir, 'docker');
+  const log = join(dir, 'calls');
+  writeFileSync(
+    fake,
+    `#!/bin/sh\necho "$* DOCKER_CONFIG=$DOCKER_CONFIG" >> ${log}\n[ "$1" = info ] && echo "$DAEMON_NOW"\nexit 0\n`,
+  );
+  chmodSync(fake, 0o755);
+  const envDir = join(dir, 'env');
+  mkdirSync(envDir);
+  const lifecycle = {
+    setup: [],
+    ready: [],
+    teardown: [{ id: 'down', command: [fake, 'compose', '-p', 'x', 'down'], timeoutMs: 5000 }],
+  };
+  const raw = structuredClone(example('policy')) as Record<string, any>;
+  raw.repositories[0].lifecycle = lifecycle;
+  // Ответ fake docker о демоне — переменной процесса, которую наследует фаза.
+  raw.environment = { inherit: ['DAEMON_NOW'], values: {}, secrets: {} };
+  const p = executionPolicySchema.parse(raw);
+  const receiptPath = join(envDir, 'environment.json');
+  const write = () =>
+    writeFileSync(
+      receiptPath,
+      JSON.stringify({
+        version: 1,
+        ownerPid: 999_999_999,
+        cwd: tree,
+        lifecycle: p.repositories[0]!.lifecycle,
+        policyDigest: digestOf(p.repositories[0]!.lifecycle),
+        status: 'cleanup-failed',
+        runId: ID,
+        devcontourEnv: { DEVCONTOUR_REPOSITORY_ID: p.repositories[0]!.id },
+        containerEnv: { ...phaseEnv, HOME: '/phase-home' },
+        containerIdentity: { docker: 'daemon-1' },
+      }),
+    );
+  write();
+  const before = { bin: process.env.HARNESS_DOCKER_BIN, now: process.env.DAEMON_NOW };
+  process.env.HARNESS_DOCKER_BIN = fake;
+  try {
+    process.env.DAEMON_NOW = 'daemon-2';
+    await assert.rejects(
+      cleanupEnvironment(receiptPath, p, [dir]),
+      /Демон docker сейчас другой, чем у фазы \(daemon-2 ≠ daemon-1\) — teardown по записи не исполнен/,
+    );
+    assert.doesNotMatch(readFileSync(log, 'utf8'), /compose/);
+    process.env.DAEMON_NOW = 'daemon-1';
+    assert.deepEqual(await cleanupEnvironment(receiptPath, p, [dir]), { status: 'cleaned' });
+    assert.match(
+      readFileSync(log, 'utf8'),
+      /compose -p x down DOCKER_CONFIG=\/phase-home\/\.docker/,
+    );
+  } finally {
+    for (const [k, v] of [
+      ['HARNESS_DOCKER_BIN', before.bin],
+      ['DAEMON_NOW', before.now],
+    ] as const)
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+  }
 });

@@ -278,7 +278,6 @@ export function stopInputsIn(
       attemptsOf,
       requestsOf: requestsById,
       leadHold: (w) => holdById(w.id),
-      infraPending,
     };
     const groupOf = memo((graphId: string): Map<string, Outlook> => {
       const job = jobOf(graphId, firstOf.get(graphId)!);
@@ -649,8 +648,6 @@ interface OutlookContext {
   requestsOf: (workId: string) => InputRequest[];
   /** Удержание правилом восстановления ведущим (`Engine.leadHoldOf`). */
   leadHold: (w: WorkState) => LeadHold | undefined;
-  /** Открытые работы инфраструктуры прежнего графа (`infraPendingIndex`). */
-  infraPending: (w: WorkState) => string[];
 }
 
 /**
@@ -694,20 +691,20 @@ function outlookOf(
       budgetHeld(dep) ||
       dep.attempt >= options.maxAttempts ||
       Boolean(ctx.leadHold(dep)) ||
-      ctx.infraPending(dep).length > 0 ||
       (dep.recovery !== undefined && !['retry', 'closed'].includes(dep.recovery.status)) ||
       dep.order.dependsOn.some((d) => depStops(d, seen))
     );
   };
   // Повтор не будет выдан: пауза, hold, бюджет, исчерпанные попытки (claim их
   // проверяет и у готовой работы) или предпосылка, на которой claim встанет.
+  // Ожидание инфраструктуры прежнего графа сюда не входит: исход повтора
+  // считается без него, а ожидание показывает диагноз (`infraWaitingOn`).
   const unclaimable = (w: (typeof works)[number]) =>
     control.paused ||
     Boolean(w.hold) ||
     w.attempt >= options.maxAttempts ||
     budgetHeld(w) ||
     Boolean(ctx.leadHold(w)) ||
-    ctx.infraPending(w).length > 0 ||
     w.order.dependsOn.some((d) => depStops(d));
   const episodes = works.filter((w) => w.recovery && w.status !== 'cancelled');
   for (const w of episodes) {

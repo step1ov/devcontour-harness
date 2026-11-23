@@ -209,7 +209,9 @@ inherited setup debts; each becomes an infra task:
   `repositories[].infra.paths` (for example `.harness/acceptance/`,
   `.harness/infra/`), inside `protectedPaths`, never covering
   `.harness/policy.json`, `profile.json`, `connector.json`, `project.json`,
-  `.harness/work/` or a file that `lifecycle`/`prepare` steps run. Adding it
+  `.harness/work/` or a file that `lifecycle`/`prepare` steps run; its
+  teardown is `node …/compose-bridge.mjs` or `docker`/`podman compose` with
+  `-p`/`--project-name` (the policy refuses anything else). Adding it
   changes the isolation digest: the plan needs `review-plan` again;
 - an infra task's `writePaths` lie inside that scope (the role's write
   paths do not narrow it); a file that host steps name is never edited —
