@@ -12,7 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import { hostLoad, loadText, type HostLoad } from '../environment/host-load.ts';
 import { join, resolve, sep, delimiter, relative, dirname } from 'node:path';
-import { accessSync, constants, existsSync } from 'node:fs';
+import { accessSync, constants, existsSync, readdirSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import {
@@ -70,12 +70,15 @@ import {
   type ProcessListCapability,
 } from './process-list.ts';
 import {
+  browserSignature,
   sandboxSignatureCall,
   sandboxSignatureCodeMessage,
   sandboxSignatureFailure,
   sandboxSignatureMessage,
   sandboxSignaturePartial,
   sandboxSignaturePartialNote,
+  sandboxSignatureSuspectNote,
+  type SandboxLimitCapability,
   type SandboxSignatureCause,
 } from './sandbox-signatures.ts';
 import {
@@ -902,6 +905,191 @@ export const processListBackend = {
     return pending;
   },
 };
+
+/**
+ * Проба harness в песочнице ОС проверок (тот же `runCheck`, что у gates и у
+ * пробы `ps`): `interpret` читает исход. Песочница не исполнила пробу или
+ * проба не исполнилась — `unknown`.
+ */
+async function probeInGateSandbox(
+  argv: string[],
+  interpret: (result: { code: number | null; stdout: string; stderr: string }) => {
+    status: SandboxLimitCapability['status'];
+    detail: string;
+  },
+): Promise<SandboxLimitCapability> {
+  const support = isolationBackend.check();
+  if (!support.ok) return { status: 'unknown', detail: support.detail };
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'dc-limit-probe-')));
+  try {
+    const result = await runCheck(
+      { config: { isolation: { mode: 'os', domains: [] } } },
+      {
+        argv: argv.map((a) => a.replaceAll('{dir}', dir)),
+        cwd: dir,
+        env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: dir },
+        timeoutMs: 30_000,
+        signal: AbortSignal.timeout(60_000),
+        write: [dir],
+        readable: [],
+        controller: [],
+        settingsDir: join(dir, 'settings'),
+      },
+    );
+    if (result.notStarted || result.timedOut)
+      return {
+        status: 'unknown',
+        command: argv,
+        detail: `песочница не исполнила пробу: код ${result.code}`,
+      };
+    return { command: argv, ...interpret(result) };
+  } catch (error) {
+    return {
+      status: 'unknown',
+      command: argv,
+      detail: 'проба не исполнилась: ' + (error instanceof Error ? error.message : String(error)),
+    };
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * Проба сигнала: процесс в песочнице ОС проверок посылает сигнал 0 процессу
+ * harness (он вне песочницы). EPERM — песочница сигналы закрывает
+ * (`unavailable`); сигнал прошёл — `available`; иное — `unknown`.
+ */
+export async function probeSandboxSignal(
+  mode: ExecutionPolicy['isolation']['mode'] = 'os',
+): Promise<SandboxLimitCapability> {
+  if (mode !== 'os') return { status: 'not-isolated', detail: 'isolation.mode: none' };
+  const script =
+    `try { process.kill(${process.pid}, 0); console.log('DC_SIGNAL_OK'); }` +
+    ` catch (e) { console.log('DC_SIGNAL_' + (e && e.code)); }`;
+  return probeInGateSandbox([process.execPath, '-e', script], ({ code, stdout, stderr }) => {
+    if (code === 0 && /^DC_SIGNAL_EPERM$/m.test(stdout))
+      return { status: 'unavailable', detail: `kill(${process.pid}, 0): EPERM` };
+    if (code === 0 && /^DC_SIGNAL_OK$/m.test(stdout))
+      return { status: 'available', detail: 'сигнал процессу вне песочницы прошёл' };
+    return {
+      status: 'unknown',
+      detail: `код ${code}: ${diagnostic(stderr, stdout) || 'без вывода'}`,
+    };
+  });
+}
+
+/** Известные места браузера на машине: системный Chrome/Chromium и кеш Playwright. */
+export function knownBrowsers(env: NodeJS.ProcessEnv = process.env): string[] {
+  const home = env.HOME ?? '';
+  const fixed =
+    process.platform === 'darwin'
+      ? [
+          '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+          '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        ]
+      : [
+          '/usr/bin/chromium',
+          '/usr/bin/chromium-browser',
+          '/usr/bin/google-chrome',
+          '/usr/bin/google-chrome-stable',
+        ];
+  const caches = [
+    env.PLAYWRIGHT_BROWSERS_PATH,
+    home && join(home, 'Library', 'Caches', 'ms-playwright'),
+    home && join(home, '.cache', 'ms-playwright'),
+  ].filter((p): p is string => Boolean(p) && p !== '0');
+  const cached: string[] = [];
+  for (const cache of caches) {
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(cache)
+        .filter((e) => /^chromium(?:_headless_shell)?-\d+$/.test(e))
+        .sort()
+        .reverse();
+    } catch {
+      continue;
+    }
+    for (const e of entries)
+      for (const rel of [
+        'chrome-mac/Chromium.app/Contents/MacOS/Chromium',
+        'chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium',
+        'chrome-mac/headless_shell',
+        'chrome-mac-arm64/headless_shell',
+        'chrome-linux/chrome',
+        'chrome-linux/headless_shell',
+      ])
+        cached.push(join(cache, e, rel));
+  }
+  return [...fixed, ...cached].filter((p) => existsSync(p));
+}
+
+/**
+ * Проба браузера: известный браузер машины стартует без окна в песочнице ОС
+ * проверок и печатает пустую страницу. Отказ со следом песочницы
+ * (`bootstrap_check_in`, `mach_port_rendezvous`) — `unavailable`; браузер
+ * отработал — `available`; браузера нет или отказ без следа песочницы —
+ * `unknown`: проба ничего не доказала, и провал gate остаётся засчитанным.
+ */
+export async function probeSandboxBrowser(
+  mode: ExecutionPolicy['isolation']['mode'] = 'os',
+  browsers: () => string[] = knownBrowsers,
+): Promise<SandboxLimitCapability> {
+  if (mode !== 'os') return { status: 'not-isolated', detail: 'isolation.mode: none' };
+  const [browser] = browsers();
+  if (!browser) return { status: 'unknown', detail: 'браузер на машине не найден' };
+  const argv = [
+    browser,
+    '--headless=new',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-gpu',
+    '--user-data-dir={dir}/profile',
+    '--dump-dom',
+    'about:blank',
+  ];
+  return probeInGateSandbox(argv, ({ code, stdout, stderr }) => {
+    if (code === 0 && /<html/i.test(stdout))
+      return { status: 'available', detail: 'браузер стартовал в песочнице' };
+    const evidence = browserSignature(stderr + '\n' + stdout);
+    if (evidence) return { status: 'unavailable', detail: `код ${code}: ${evidence}` };
+    return {
+      status: 'unknown',
+      detail: `код ${code} без следа песочницы: ${diagnostic(stderr, stdout) || 'без вывода'}`,
+    };
+  });
+}
+
+const sandboxLimitCache = new Map<SandboxSignatureCause, Promise<SandboxLimitCapability>>();
+/**
+ * Пробы ограничений песочницы ОС проверок для `sandbox-signal` и
+ * `sandbox-browser`, одна на процесс harness и класс (как проба `ps`):
+ * отказ среды назначается, только когда проба ответила `unavailable`.
+ * `unknown` не кешируется. Тест подменяет `probe` или `probes` (и сбрасывает
+ * кеш `reset`).
+ */
+export const sandboxLimitBackend = {
+  probes: {
+    'sandbox-signal': () => probeSandboxSignal('os'),
+    'sandbox-browser': () => probeSandboxBrowser('os'),
+  } as Record<SandboxSignatureCause, () => Promise<SandboxLimitCapability>>,
+  reset: () => sandboxLimitCache.clear(),
+  probe: (cause: SandboxSignatureCause): Promise<SandboxLimitCapability> => {
+    const cached = sandboxLimitCache.get(cause);
+    if (cached) return cached;
+    const started = sandboxLimitBackend.probes[cause]().catch(
+      (error: unknown): SandboxLimitCapability => ({
+        status: 'unknown',
+        detail: 'проба не исполнилась: ' + (error instanceof Error ? error.message : String(error)),
+      }),
+    );
+    sandboxLimitCache.set(cause, started);
+    void started.then((c) => {
+      if (c.status === 'unknown' && sandboxLimitCache.get(cause) === started)
+        sandboxLimitCache.delete(cause);
+    });
+    return started;
+  },
+};
 /**
  * Хосты, в сети к которым проверке, по всей видимости, отказала песочница.
  *
@@ -1337,17 +1525,24 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         throw new Error(processListMessage({ ...listing, line: redact(listing.line) }, tail));
       }
       // Сигнал процессу вне песочницы (`kill EPERM`) и браузер, который в
-      // песочнице ОС не стартует (0.1.0-alpha.68): те же правила, что у
-      // списка процессов, — признак у каждого упавшего теста, вызов не из
-      // изменения задачи. Часть упавших с признаком — пометка к провалу.
+      // песочнице ОС не стартует (0.1.0-alpha.68): след песочницы у каждого
+      // упавшего теста, вызов не из изменения задачи и, как у `ps`,
+      // собственная проба harness в той же песочнице подтвердила
+      // ограничение. Проба не подтвердила — засчитанный провал с пометкой о
+      // предполагаемой причине. Часть упавших со следом — пометка к провалу.
       if (run.policy.isolation.mode === 'os') {
         const output = result.stdout + '\n' + result.stderr;
-        for (const sandboxCause of [
-          'sandbox-signal',
-          'sandbox-browser',
-        ] as SandboxSignatureCause[]) {
+        const causes = ['sandbox-signal', 'sandbox-browser'] as SandboxSignatureCause[];
+        const noted = new Set<SandboxSignatureCause>();
+        for (const sandboxCause of causes) {
           const line = sandboxSignatureFailure(sandboxCause, output, failureTexts);
           if (!line) continue;
+          const probe = await sandboxLimitBackend.probe(sandboxCause);
+          if (probe.status !== 'unavailable') {
+            partialNotes.push(sandboxSignatureSuspectNote(sandboxCause, redact(line), probe));
+            noted.add(sandboxCause);
+            continue;
+          }
           const tail = `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`;
           const base = run.trustedBase;
           const added =
@@ -1360,12 +1555,16 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
           cause = sandboxCause;
           throw new Error(sandboxSignatureMessage(sandboxCause, redact(line), tail));
         }
-        for (const sandboxCause of [
-          'sandbox-signal',
-          'sandbox-browser',
-        ] as SandboxSignatureCause[]) {
+        for (const sandboxCause of causes) {
+          if (noted.has(sandboxCause)) continue;
           const line = sandboxSignaturePartial(sandboxCause, output, failureTexts);
-          if (line) partialNotes.push(sandboxSignaturePartialNote(sandboxCause, redact(line)));
+          if (!line) continue;
+          const probe = await sandboxLimitBackend.probe(sandboxCause);
+          partialNotes.push(
+            probe.status === 'unavailable'
+              ? sandboxSignaturePartialNote(sandboxCause, redact(line))
+              : sandboxSignatureSuspectNote(sandboxCause, redact(line), probe),
+          );
         }
       }
       // Установка зависимостей, закреплённая политикой, упала на сети или

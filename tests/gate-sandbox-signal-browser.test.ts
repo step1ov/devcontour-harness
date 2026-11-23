@@ -17,9 +17,15 @@ import { digestOf, type EvidenceRecord } from '../src/contracts/index.ts';
 import { TaskFailure } from '../src/engine/failure.ts';
 import { isolationSupport } from '../src/environment/isolation.ts';
 import { redactor } from '../src/environment/redaction.ts';
-import { runGate } from '../src/verification/gates.ts';
+import {
+  probeSandboxBrowser,
+  probeSandboxSignal,
+  runGate,
+  sandboxLimitBackend,
+} from '../src/verification/gates.ts';
 import {
   browserSignature,
+  type SandboxLimitCapability,
   sandboxSignatureCall,
   sandboxSignatureFailure,
   sandboxSignaturePartial,
@@ -73,12 +79,16 @@ test('признаки: kill EPERM и отказ браузера узнаютс
     assert.equal(signalSignature(text), undefined, text);
   for (const text of [
     'Isolated agent-browser smoke failed: Foreground browser daemon unavailable',
-    'Error: Failed to launch the browser process!',
-    'browserType.launch: Target page, context or browser has been closed',
     'bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer.1: Permission denied (1100)',
+    '[1:2:FATAL:mach_port_rendezvous.cc(142)] Check failed: kr == KERN_SUCCESS',
   ])
     assert.ok(browserSignature(text), text);
+  // Общие строки запуска без следа песочницы: их даёт и сломанная настройка.
   for (const text of [
+    'Error: Failed to launch the browser process!',
+    'browserType.launch: Target page, context or browser has been closed',
+    'Browser process exited with code 1',
+    'Chrome crashed',
     'Photo API status',
     'browser-sync started on port 3000',
     'expected page title to equal "Home"',
@@ -131,6 +141,128 @@ test('классификация браузера: признак у каждо�
     /часть провала — причина окружения sandbox-browser, а не дефект решения .*попытка засчитана за остальные провалы .*вынесите проверку в браузере/,
   );
   assert.equal(sandboxSignaturePartial('sandbox-browser', 'Photo API status'), undefined);
+});
+
+const killCase = 'kill EPERM\nError: kill EPERM\n    at process.kill (node:internal)';
+const machDenied =
+  'bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer.1: Permission denied (1100)';
+
+test('смешанный провал: kill EPERM в выводе и «HTTP status 500» в JUnit — засчитан; лишний testcase прощается только в точной форме обёртки', () => {
+  // Регрессия: настоящий провал соседа рядом с одним kill EPERM.
+  assert.equal(
+    sandboxSignatureFailure('sandbox-signal', killSpec, {
+      total: 2,
+      texts: [killCase, 'HTTP status 500'],
+    }),
+    undefined,
+  );
+  for (const other of [
+    'Tests failed',
+    'Photo API status',
+    'Gate execution failed: 3 tests',
+    'Gate execution failed\nError: boom',
+    'gate execution failed',
+    '',
+  ])
+    assert.equal(
+      sandboxSignatureFailure('sandbox-signal', killSpec, { total: 2, texts: [killCase, other] }),
+      undefined,
+      JSON.stringify(other),
+    );
+  for (const wrapper of [
+    'Gate execution failed',
+    '\nGate execution failed',
+    'Gate execution failed\nGate execution failed',
+  ])
+    assert.match(
+      sandboxSignatureFailure('sandbox-signal', killSpec, {
+        total: 2,
+        texts: [killCase, wrapper],
+      }) ?? '',
+      /kill EPERM/,
+      JSON.stringify(wrapper),
+    );
+});
+
+test('иной провал у того же теста или в выводе (Error, статус HTTP, код ошибки) — засчитан; общий запуск браузера и сломанный путь — не след песочницы', () => {
+  for (const text of [
+    killCase + '\nError: connect ECONNREFUSED 127.0.0.1:3000',
+    killCase + '\nexpected HTTP 200, got 500',
+    killCase + '\nTypeError: cannot read properties of undefined',
+  ])
+    assert.equal(
+      sandboxSignatureFailure('sandbox-signal', '', { total: 1, texts: [text] }),
+      undefined,
+      text,
+    );
+  // Без JUnit и блоков: строка ошибки рядом с признаком в выводе.
+  assert.ok(sandboxSignatureFailure('sandbox-signal', 'Error: kill EPERM'));
+  assert.equal(
+    sandboxSignatureFailure('sandbox-signal', 'Error: kill EPERM\nError: HTTP status 500'),
+    undefined,
+  );
+  // Браузер: след песочницы с общей строкой запуска — да; одна общая строка или
+  // сломанный путь к браузеру рядом со следом — нет.
+  assert.ok(
+    sandboxSignatureFailure('sandbox-browser', '', {
+      total: 1,
+      texts: [`Error: Failed to launch the browser process!\n${machDenied}`],
+    }),
+  );
+  for (const text of [
+    'Error: Failed to launch the browser process!',
+    'Chrome crashed\nBrowser process exited with code 1',
+    `browserType.launch: Failed to launch chromium because executable doesn't exist at /nope\n${machDenied}`,
+    `browserType.launch: executablePath: /opt/broken/chrome\n${machDenied}`,
+    `Error: spawn /opt/broken/chrome ENOENT\n${machDenied}`,
+  ])
+    assert.equal(
+      sandboxSignatureFailure('sandbox-browser', '', { total: 1, texts: [text] }),
+      undefined,
+      text,
+    );
+});
+
+/** Подменить пробы ограничений песочницы на время `fn`. */
+async function withProbes<T>(
+  answer: (cause: string) => SandboxLimitCapability,
+  fn: (calls: string[]) => Promise<T>,
+) {
+  const original = { ...sandboxLimitBackend.probes };
+  const calls: string[] = [];
+  sandboxLimitBackend.reset();
+  for (const cause of ['sandbox-signal', 'sandbox-browser'] as const)
+    sandboxLimitBackend.probes[cause] = () => {
+      calls.push(cause);
+      return Promise.resolve(answer(cause));
+    };
+  try {
+    return await fn(calls);
+  } finally {
+    Object.assign(sandboxLimitBackend.probes, original);
+    sandboxLimitBackend.reset();
+  }
+}
+
+test('пробы: подтверждённое ограничение кешируется на процесс, неудачная проба — нет; браузера нет — проба ничего не доказала', async () => {
+  await withProbes(
+    (cause) =>
+      cause === 'sandbox-signal'
+        ? { status: 'unavailable', detail: 'EPERM' }
+        : { status: 'unknown', detail: 'браузер на машине не найден' },
+    async (calls) => {
+      for (let i = 0; i < 3; i++) {
+        assert.equal((await sandboxLimitBackend.probe('sandbox-signal')).status, 'unavailable');
+        assert.equal((await sandboxLimitBackend.probe('sandbox-browser')).status, 'unknown');
+        await new Promise((r) => setImmediate(r));
+      }
+      assert.equal(calls.filter((c) => c === 'sandbox-signal').length, 1);
+      assert.equal(calls.filter((c) => c === 'sandbox-browser').length, 3);
+    },
+  );
+  assert.equal((await probeSandboxBrowser('os', () => [])).status, 'unknown');
+  assert.equal((await probeSandboxSignal('none')).status, 'not-isolated');
+  assert.equal((await probeSandboxBrowser('none')).status, 'not-isolated');
 });
 
 test('вызов, добавленный изменением: process.kill, shell kill, запуск браузера', () => {
@@ -217,6 +349,54 @@ test(
     const host = await gate(killGate, 'none', { r, trustedBase: r.head() });
     assert.equal(host.failure?.kind, 'gate');
     assert.equal(host.failure?.diagnosis, undefined);
+  },
+);
+
+test(
+  'gate в песочнице ОС: проба не подтвердила ограничение — kill EPERM засчитан с пометкой; подтвердила — отказ среды',
+  { skip: sandbox.ok ? false : 'песочница ОС недоступна: ' + sandbox.detail },
+  async () => {
+    const r = repo({ 'README.md': 'app\n' });
+    for (const status of ['unknown', 'available'] as const) {
+      const counted = await withProbes(
+        () => ({ status, detail: 'проба теста' }),
+        () => gate(killGate, 'os', { r, trustedBase: r.head() }),
+      );
+      assert.equal(counted.failure?.kind, 'gate', counted.evidence.summary);
+      assert.equal(counted.failure?.diagnosis, undefined);
+      assert.match(
+        counted.evidence.summary,
+        /возможная причина окружения sandbox-signal .*не подтверждена пробой harness .*попытка засчитана/,
+      );
+    }
+    const env = await withProbes(
+      () => ({ status: 'unavailable', detail: 'EPERM' }),
+      () => gate(killGate, 'os', { r, trustedBase: r.head() }),
+    );
+    assert.equal(env.failure?.diagnosis, 'sandbox-signal', env.evidence.summary);
+  },
+);
+
+test(
+  'gate в песочнице ОС: вывод называет один kill EPERM, а JUnit ещё и «HTTP status 500» — засчитанный провал и при подтверждённой пробе',
+  { skip: sandbox.ok ? false : 'песочница ОС недоступна: ' + sandbox.detail },
+  async () => {
+    const r = repo({ 'README.md': 'app\n' });
+    const xml =
+      '<testsuite><testcase name="outer-kill"><failure message="kill EPERM">Error: kill EPERM</failure></testcase>' +
+      '<testcase name="photo-api"><failure>HTTP status 500</failure></testcase></testsuite>';
+    const mixed = [
+      process.execPath,
+      '-e',
+      `require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, ${JSON.stringify(xml)}); console.log(${JSON.stringify(killSpec)}); process.exit(1)`,
+    ];
+    const result = await withProbes(
+      () => ({ status: 'unavailable', detail: 'EPERM' }),
+      () => gate(mixed, 'os', { r, trustedBase: r.head() }),
+    );
+    assert.equal(result.failure?.kind, 'gate', result.evidence.summary);
+    assert.equal(result.failure?.diagnosis, undefined);
+    assert.match(result.evidence.summary, /часть провала — причина окружения sandbox-signal/);
   },
 );
 

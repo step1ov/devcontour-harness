@@ -260,7 +260,7 @@ export async function doctor(
     // такой провал — отказ среды `sandbox-browser`, ход ведущего.
     const gate =
       policy?.isolation.mode === 'os'
-        ? ` В gate под песочницей ОС браузер не стартует: такой провал — отказ среды sandbox-browser (${NO_RETRY_GATE_CODES['sandbox-browser']}), попытка не засчитана, gate удержан до хода ведущего.`
+        ? ` В gate под песочницей ОС браузер не стартует: когда след песочницы у каждого упавшего теста и проба harness это подтвердила, такой провал — отказ среды sandbox-browser (${NO_RETRY_GATE_CODES['sandbox-browser']}), попытка не засчитана, gate удержан до хода ведущего; без подтверждения пробы провал засчитан.`
         : '';
     return browser.length
       ? [`browser-checks ${r.id} (${browser.join(', ')}): ${BROWSER_ADVICE}${gate}`]

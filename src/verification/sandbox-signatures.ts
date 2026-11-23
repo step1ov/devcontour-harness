@@ -10,13 +10,19 @@
  *   permitted`).
  * - `sandbox-browser` — проверка запускает браузер или его демон
  *   (агент-браузер, Playwright, Puppeteer, Chrome), а в песочнице ОС проверок
- *   он не стартует (`Foreground browser daemon unavailable`, `Failed to
- *   launch the browser process`, отказ `bootstrap_check_in` Chromium).
+ *   он не стартует (`Foreground browser daemon unavailable`, отказ
+ *   `bootstrap_check_in` / `mach_port_rendezvous` Chromium). Общие строки
+ *   запуска («Failed to launch the browser process», «Chrome crashed») сами
+ *   следом песочницы не считаются: их даёт и сломанная настройка запуска.
  *
- * Правило то же, что у `sandbox-process-list`: признак есть у каждого
- * упавшего теста и ни у одного нет проваленного утверждения; провал теста без
- * признака остаётся провалом gate. Вызов, который добавили строки изменения
- * задачи, — обычный засчитанный провал исполнителю с советом.
+ * Правило строже, чем у `sandbox-process-list`, и закрыто по умолчанию:
+ * след песочницы есть у каждого упавшего теста, ни у одного нет иного провала
+ * (утверждение, строка `Error`, статус HTTP, иной код ошибки), лишний
+ * testcase отчёта прощается только в точной форме общего провала обёртки, и
+ * собственная проба harness в песочнице проверок подтвердила ограничение
+ * (`gates.ts`, `sandboxLimitBackend`). Иначе провал засчитан. Вызов, который
+ * добавили строки изменения задачи, — обычный засчитанный провал исполнителю
+ * с советом.
  */
 
 import { BROWSER_LAUNCH } from '../control/browser-checks.ts';
@@ -25,6 +31,18 @@ import { assertionMarkers, failedBlocks, otherFailures } from './process-list.ts
 
 /** Классы отказа песочницы этого модуля. */
 export type SandboxSignatureCause = 'sandbox-signal' | 'sandbox-browser';
+
+/**
+ * Ответ пробы harness в песочнице ОС проверок: `unavailable` — ограничение
+ * подтверждено (только тогда класс назначается); `available` — его нет;
+ * `unknown` — проба ничего не доказала (браузера нет, песочница не исполнила
+ * пробу); `not-isolated` — проверки без песочницы ОС.
+ */
+export interface SandboxLimitCapability {
+  status: 'available' | 'unavailable' | 'unknown' | 'not-isolated';
+  command?: string[];
+  detail: string;
+}
 
 /** Код отказа gate: сигнал процессу вне песочницы ОС проверок. */
 export const GATE_SANDBOX_SIGNAL = NO_RETRY_GATE_CODES['sandbox-signal'];
@@ -65,8 +83,54 @@ const browserLines = [
   // Chromium в песочнице ОС: служба Mach-портов закрыта (`Permission denied (1100)`).
   /\bbootstrap_check_in\b.*\bPermission denied \(1100\)/,
   /\bFATAL:mach_port_rendezvous/,
-  BROWSER_LAUNCH,
+  /\bmach_port_rendezvous\b.*\b(?:Permission denied|denied|failed)\b/i,
 ];
+
+/**
+ * Строки, которые сопровождают след класса и сами иным провалом не считаются:
+ * объект ошибки `kill` и стек — у сигнала; общие строки запуска браузера и
+ * его журнал о службах Mach — у браузера. Строка о пути к браузеру
+ * (`executablePath`, ENOENT) сопровождением не бывает: это настройка запуска.
+ */
+const companionLines: Record<SandboxSignatureCause, RegExp[]> = {
+  'sandbox-signal': [
+    ...signalLines,
+    signalSyscall,
+    /^\s*(?:code: ['"]EPERM['"]|errno: -?\d+),?\s*$/,
+    /^\s*at\s/,
+  ],
+  'sandbox-browser': [
+    ...browserLines,
+    BROWSER_LAUNCH,
+    /\bbootstrap_check_in\b|\bmach_port\w*/,
+    /^\s*at\s/,
+  ],
+};
+const launchConfig =
+  /\bexecutablePath\b|\bexecutable\b.*\b(?:doesn't|does not) exist\b|\bENOENT\b|no such file|not found/i;
+
+/** Признак провала, который след класса не объясняет. */
+const foreignMarkers = [
+  /\b(?:[A-Z]\w*)?(?:Error|Exception)\b/,
+  /\berror:/i,
+  /\btimed out\b|\btimeout\b/i,
+  /\bE[A-Z]{3,}\b/,
+  /\bHTTP\b.*\b[1-5]\d\d\b|\bstatus(?:Code| code)?:?\s*[45]\d\d\b/i,
+  /\b(?:panic|Segmentation fault|Abort trap|core dumped|uncaught)\b/i,
+];
+
+/**
+ * В тексте есть иной провал: проваленное утверждение или строка ошибки, кода
+ * ошибки, статуса HTTP, аварии, которая не сопровождает след класса `cause`.
+ */
+export function foreignFailure(cause: SandboxSignatureCause, text: string) {
+  return text.split('\n').some((l) => {
+    if (assertionMarkers.some((r) => r.test(l))) return true;
+    if (cause === 'sandbox-browser' && launchConfig.test(l)) return true;
+    if (!foreignMarkers.some((r) => r.test(l))) return false;
+    return !companionLines[cause].some((r) => r.test(l));
+  });
+}
 
 const clip = (line: string) => line.trim().slice(0, 200);
 
@@ -93,30 +157,19 @@ export const SANDBOX_SIGNATURES: Record<
   'sandbox-browser': browserSignature,
 };
 
-/** Признак проваленного утверждения или иной ошибки в тексте упавшего теста. */
-const failureMarkers = [
-  ...assertionMarkers,
-  /\b(?:[A-Z]\w*)?(?:Error|Exception)\b/,
-  /\berror:/i,
-  /\btimed out\b|\btimeout\b/i,
-  /\bE[A-Z]{3,}\b/,
-];
-
 /**
- * Упавший testcase отчёта JUnit без своей причины: обёртка gate добавляет
- * общий провал прогона («Gate execution failed») к тестам, которые упали на
- * самом деле. Короткий текст без утверждения, ошибки и кода системной ошибки.
+ * Общий провал прогона, который обёртка gate дописывает в отчёт JUnit к
+ * тестам, упавшим на самом деле: ровно строка «Gate execution failed» (в
+ * сообщении, теле или обоих). Только такой лишний testcase не отменяет
+ * отказ среды; любой другой текст — свой провал.
  */
-function opaqueCompanion(text: string) {
+export const GATE_WRAPPER_FAILURE = 'Gate execution failed';
+export function wrapperCompanion(text: string) {
   const lines = text
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean);
-  return (
-    lines.length <= 2 &&
-    lines.join(' ').length <= 200 &&
-    !lines.some((l) => failureMarkers.some((r) => r.test(l)))
-  );
+  return lines.length > 0 && lines.every((l) => l === GATE_WRAPPER_FAILURE);
 }
 
 /**
@@ -131,10 +184,7 @@ export function sandboxSignatureFailure(
   failures?: { total: number; texts: string[] },
 ): string | undefined {
   const signature = SANDBOX_SIGNATURES[cause];
-  const own = (text: string) =>
-    text.split('\n').some((l) => assertionMarkers.some((r) => r.test(l)))
-      ? undefined
-      : signature(text);
+  const own = (text: string) => (foreignFailure(cause, text) ? undefined : signature(text));
   const blocks = failedBlocks(output);
   /** Упавшие тесты вывода (TAP, spec): у каждого признак, итог прогона напечатан и сходится. */
   const fromBlocks = (exact: boolean) => {
@@ -151,20 +201,20 @@ export function sandboxSignatureFailure(
     // Обёртка gate дописала в отчёт общий провал прогона без своей причины
     // («Gate execution failed»): признак принимается, только когда вывод сам
     // называет упавшие тесты, у каждого из них признак, итог прогона
-    // сходится, а лишние testcases отчёта — ровно такие общие провалы.
+    // сходится, а лишние testcases отчёта — ровно эта строка обёртки.
     const signed = fromBlocks(true);
     const unsigned = failures.texts.filter((_, i) => !found[i]);
     if (
       signed &&
       unsigned.length === failures.total - blocks!.tests.length &&
-      unsigned.every(opaqueCompanion)
+      unsigned.every(wrapperCompanion)
     )
       return signed;
     return undefined;
   }
   if (blocks) return fromBlocks(false);
   const line = signature(output);
-  if (!line) return undefined;
+  if (!line || foreignFailure(cause, output)) return undefined;
   return otherFailures(output, (l) => Boolean(signature(l))) ? undefined : line;
 }
 
@@ -219,6 +269,22 @@ export function sandboxSignatureCodeMessage(
   return (
     `${SANDBOX_SIGNATURE_CODES[cause]}: ${w.does}; уберите вызов — «${line}»; вызов добавлен изменением ` +
     `задачи (${files.join(', ')}). Что сделать: ${w.advice}. ${tail}`
+  );
+}
+
+/**
+ * Пометка к засчитанному провалу: в выводе след причины окружения `cause`,
+ * но собственная проба harness ограничение песочницы не подтвердила.
+ */
+export function sandboxSignatureSuspectNote(
+  cause: SandboxSignatureCause,
+  line: string,
+  probe: Pick<SandboxLimitCapability, 'status' | 'detail'>,
+) {
+  return (
+    `возможная причина окружения ${cause} (${SANDBOX_SIGNATURE_CODES[cause]}: «${line}») не подтверждена пробой ` +
+    `harness в песочнице проверок (${probe.status}: ${probe.detail}); попытка засчитана; ` +
+    `если причина всё же в песочнице: ${WHAT[cause].advice}`
   );
 }
 
