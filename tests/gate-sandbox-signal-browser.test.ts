@@ -223,6 +223,44 @@ test('иной провал у того же теста или в выводе (
     );
 });
 
+test('след и иная ошибка в одной строке: вырезается только текст следа, остаток засчитывает попытку', () => {
+  for (const text of [
+    'Error: HTTP status 500; cleanup: kill EPERM',
+    'kill EPERM after TypeError: x is undefined',
+    "[Error: kill EPERM] { errno: -1, code: 'EPERM', syscall: 'kill', cause: 'ECONNRESET' }",
+    'bash: kill: (4242) - Operation not permitted; AssertionError: 1 !== 2',
+  ])
+    assert.equal(
+      sandboxSignatureFailure('sandbox-signal', '', { total: 1, texts: [text] }),
+      undefined,
+      text,
+    );
+  // Тот же след без иной ошибки — по-прежнему след песочницы.
+  for (const text of [
+    'Error: kill EPERM',
+    'Uncaught Error: kill EPERM',
+    "[Error: kill EPERM] { errno: -1, code: 'EPERM', syscall: 'kill' }",
+    'bash: kill: (4242) - Operation not permitted',
+  ])
+    assert.ok(sandboxSignatureFailure('sandbox-signal', '', { total: 1, texts: [text] }), text);
+  for (const text of [
+    `${machDenied}; Error: HTTP status 500`,
+    'Foreground browser daemon unavailable (statusCode: 503)',
+    'Error: Failed to launch the browser process! TimeoutError: page.goto',
+  ])
+    assert.equal(
+      sandboxSignatureFailure('sandbox-browser', '', { total: 1, texts: [text] }),
+      undefined,
+      text,
+    );
+  for (const text of [
+    `[1:2:0101/120000.000:ERROR:mach_port_rendezvous.cc(142)] ${machDenied}`,
+    'Error: Foreground browser daemon unavailable',
+    `Error: Failed to launch the browser process!\n${machDenied}`,
+  ])
+    assert.ok(sandboxSignatureFailure('sandbox-browser', '', { total: 1, texts: [text] }), text);
+});
+
 /** Подменить пробы ограничений песочницы на время `fn`. */
 async function withProbes<T>(
   answer: (cause: string) => SandboxLimitCapability,
@@ -397,6 +435,29 @@ test(
     assert.equal(result.failure?.kind, 'gate', result.evidence.summary);
     assert.equal(result.failure?.diagnosis, undefined);
     assert.match(result.evidence.summary, /часть провала — причина окружения sandbox-signal/);
+  },
+);
+
+test(
+  'gate в песочнице ОС: строка JUnit «Error: HTTP status 500; cleanup: kill EPERM» — засчитанный провал при подтверждённой пробе и вызове из базы',
+  { skip: sandbox.ok ? false : 'песочница ОС недоступна: ' + sandbox.detail },
+  async () => {
+    const r = repo({ 'README.md': 'app\n', 'kill.test.mjs': 'process.kill(outer, "SIGTERM")\n' });
+    const xml =
+      '<testsuite><testcase name="photo-api"><failure message="Error: HTTP status 500; cleanup: kill EPERM">' +
+      'Error: HTTP status 500; cleanup: kill EPERM</failure></testcase></testsuite>';
+    const sameLine = [
+      process.execPath,
+      '-e',
+      `require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, ${JSON.stringify(xml)}); console.error('Error: HTTP status 500; cleanup: kill EPERM'); process.exit(1)`,
+    ];
+    const result = await withProbes(
+      () => ({ status: 'unavailable', detail: 'EPERM' }),
+      () => gate(sameLine, 'os', { r, trustedBase: r.head() }),
+    );
+    assert.equal(result.failure?.kind, 'gate', result.evidence.summary);
+    assert.equal(result.failure?.diagnosis, undefined);
+    assert.doesNotMatch(result.evidence.summary, /^GATE_SANDBOX_SIGNAL/);
   },
 );
 
