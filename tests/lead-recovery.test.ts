@@ -435,6 +435,7 @@ test('track: путь работы — попытки по шагам, разб�
         'checks1:failed',
         'review1:skipped',
         'integration1:skipped',
+        'diagnosis:planned',
         'code2:planned',
         'checks2:planned',
         'review2:planned',
@@ -458,10 +459,12 @@ test('track: путь работы — попытки по шагам, разб�
         'checks1:failed',
         'review1:skipped',
         'integration1:skipped',
+        'diagnosis:planned',
         'code2:planned',
         'checks2:planned',
         'review2:planned',
         'integration2:planned',
+        'diagnosis:planned',
         'code3:planned',
         'checks3:planned',
         'review3:planned',
@@ -485,6 +488,19 @@ test('track: путь работы — попытки по шагам, разб�
     });
     assert.deepEqual(kinds(t.steps), expected, `diagnoseAfter ${diagnoseAfter}`);
     assert.equal(t.steps[1]!.reason, 'проверки не прошли');
+    // Ревизия 8: до `diagnoseAfter` отказов — разбор по желанию (повтор
+    // делает harness сам), с ним и на исчерпании — обязательный.
+    const diagnoses = t.steps.filter((s) => s.kind === 'diagnosis');
+    assert.ok(diagnoses.every((s) => typeof s.required === 'boolean'));
+    const optional = diagnoses.filter((s) => s.required === false);
+    assert.equal(optional.length, Math.max(0, Math.min(diagnoseAfter, 3) - 1));
+    assert.ok(optional.every((s) => s.label === 'повтор: harness сам, ведущий может разобрать'));
+    assert.ok(
+      diagnoses
+        .filter((s) => s.required && s.state === 'planned')
+        .every((s) => s.label === 'обязательный разбор ведущего'),
+    );
+    assert.equal(diagnoses.at(-1)!.required, true, 'разбор перед сбросом обязателен');
   }
   // mode user: ни разборов, ни сбросов ведущего; разбор и сброс ведущего — решениями в истории.
   const user = setup({ mode: 'user' });
@@ -526,6 +542,11 @@ test('track: путь работы — попытки по шагам, разб�
     'diagnosis:D2: слабое покрытие',
     'reset:+3 (сброс 1 из 1, D2)',
   ]);
+  // D1 разобрал два отказа (держало правило), D2 — один, но по нему дан сброс.
+  assert.deepEqual(
+    t.steps.filter((s) => s.kind === 'diagnosis' && s.state === 'decision').map((s) => s.required),
+    [true, true],
+  );
   assert.equal(
     t.steps.filter((s) => s.kind === 'reset' && s.state === 'planned').length,
     0,
