@@ -150,6 +150,15 @@ export interface SnapshotManifest {
    * совпадает. Нет поля — снимок записан до alpha.66.
    */
   legacyRevision?: string;
+  /**
+   * Ревизия постановок набора (0.1.0-alpha.68): та же ревизия без
+   * необязательных документов задач. Совпала у закреплённого и свежего
+   * чтения — постановки (текст, критерии, зависимости, обязательные
+   * документы, контекст задач, пакеты, предпосылки, базовая линия) те же, и
+   * правка одних необязательных документов (ответы и решения владельца)
+   * согласование не обесценивает. Нет поля — снимок записан до alpha.68.
+   */
+  ordersRevision?: string;
   readAt: string;
   rounds: number;
   limits: ConnectorConfig['limits'];
@@ -974,14 +983,17 @@ export function buildSnapshot(input: {
   // Ревизия набора. v2 (alpha.66): постановки задач (semantic digest v2) и
   // необязательные документы отдельно. legacyRevision — те же правила, что до
   // alpha.66: снимок, закреплённый прежней версией, остаётся согласованным.
-  const setRevision = (v: 1 | 2) =>
+  // `orders` — без необязательных документов (ревизия постановок, alpha.68).
+  const setRevision = (v: 1 | 2 | 'orders') =>
     digestOf({
       v: 1,
       connector,
-      tasks: tasks.map((t) => [t.identity, v === 2 ? t.semanticDigest : t.legacyDigest]),
+      tasks: tasks.map((t) => [t.identity, v === 1 ? t.legacyDigest : t.semanticDigest]),
       ...(v === 2
         ? { v: 2, documents: [...optionalDocs].sort(([a], [b]) => (a < b ? -1 : 1)) }
-        : {}),
+        : v === 'orders'
+          ? { v: 'orders' }
+          : {}),
       prerequisites: prereqs,
       // Любая правка базовой линии — новое согласование; без неё ревизия прежняя.
       ...(config.baseline ? { baseline: digestOf(config.baseline) } : {}),
@@ -1002,6 +1014,7 @@ export function buildSnapshot(input: {
     });
   const revision = setRevision(2);
   const legacyRevision = setRevision(1);
+  const ordersRevision = setRevision('orders');
   const joined = `${config.provider}:${config.projectId}:${taskIds.join('+')}`;
   const parsed = workGraphSchema.safeParse({
     apiVersion: API_VERSION,
@@ -1048,6 +1061,7 @@ export function buildSnapshot(input: {
     contextDigest: contextDigest(context),
     revision,
     legacyRevision,
+    ordersRevision,
     readAt: new Date().toISOString(),
     rounds: input.rounds,
     limits,

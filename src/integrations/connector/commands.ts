@@ -551,6 +551,7 @@ export class Connector {
     graph: WorkGraph;
     context: ContextSnapshot;
     baseline?: BaselineManifest;
+    documentsDrift?: DocumentsDrift;
   }> {
     this.assertBaselineProtected(h.policy, h.options.baseDir);
     // Критерий, который коннектор не докажет, — отказ до платных попыток:
@@ -574,14 +575,26 @@ export class Connector {
         'APPROVAL_REQUIRED',
         'Снимок задач не закреплён: выполните source-snapshot, review-plan и approve',
       );
+    // Согласование обесценивает только правка постановок (текст, критерии,
+    // зависимости, обязательные документы, контекст задач, пакеты,
+    // предпосылки, базовая линия). Правка одних необязательных документов —
+    // записанные ответы и решения владельца — согласования не меняет:
+    // исполняется закреплённый снимок, а изменённые документы называются
+    // (`documentsDrift`); в работу их вносит новый source-snapshot.
+    let drift: DocumentsDrift | undefined;
     if (
       stored.revision !== fresh.revision &&
       stored.revision !== this.legacyPinned(fresh)?.revision
-    )
-      throw new HarnessError(
-        'APPROVAL_STALE',
-        `Постановка изменилась после закреплённого снимка (${stored.revision.slice(0, 12)} → ${fresh.revision.slice(0, 12)}): нужен новый source-snapshot, review-plan и approve`,
-      );
+    ) {
+      const pinned = stored.manifest as SnapshotManifest;
+      const changed = changedStatements(pinned, fresh.manifest);
+      if (!pinned.ordersRevision || pinned.ordersRevision !== fresh.manifest.ordersRevision)
+        throw new HarnessError(
+          'APPROVAL_STALE',
+          `Постановка изменилась после закреплённого снимка (${stored.revision.slice(0, 12)} → ${fresh.revision.slice(0, 12)}${changed.length ? `; изменились: ${changed.slice(0, 10).join(', ')}` : ''}): нужен новый source-snapshot, review-plan и approve`,
+        );
+      drift = documentsDrift(pinned, fresh.manifest);
+    }
     const registered = h.engine.read((v) => v.graph(fresh.graph.id));
     if (
       registered?.approval &&
@@ -613,11 +626,12 @@ export class Connector {
       graph: stored.graph as WorkGraph,
       context: stored.context as ContextSnapshot,
       ...(baseline ? { baseline } : {}),
+      ...(drift ? { documentsDrift: drift } : {}),
     };
   }
 
   async run(h: Harness, options: { author?: Author; once?: boolean } = {}) {
-    const { graph, context, baseline } = await this.prepareRun(h);
+    const { graph, context, baseline, documentsDrift: drift } = await this.prepareRun(h);
     const data = await h.run({
       graph,
       context,
@@ -626,7 +640,11 @@ export class Connector {
       sink: this.sink,
       ...(options.once ? { once: true } : {}),
     });
-    return { ...data, ...(baseline ? { baseline } : {}) };
+    return {
+      ...data,
+      ...(baseline ? { baseline } : {}),
+      ...(drift ? { documentsDrift: drift } : {}),
+    };
   }
 
   /* ---------------------------------------------------------------- */
@@ -912,4 +930,59 @@ export class Connector {
     if (text.startsWith('adopt:') && text.length > 6) return { kind: 'adopt', id: text.slice(6) };
     throw new HarnessError('INVALID_INPUT', '--decision: ожидается resend, recheck или adopt:<id>');
   }
+}
+
+/**
+ * Необязательные документы, изменившиеся после закреплённого снимка
+ * (0.1.0-alpha.68): согласование они не обесценивают, исполняется
+ * закреплённый снимок; в работу их вносит новый source-snapshot.
+ */
+export interface DocumentsDrift {
+  pinnedRevision: string;
+  freshRevision: string;
+  documents: { taskKey: string; name: string; change: 'added' | 'removed' | 'changed' }[];
+  note: string;
+}
+
+/** Задачи, чья постановка (semantic digest) изменилась после закреплённого снимка. */
+function changedStatements(pinned: SnapshotManifest, fresh: SnapshotManifest) {
+  const before = new Map(pinned.tasks.map((t) => [t.id, t.semanticDigest] as const));
+  const after = new Map(fresh.tasks.map((t) => [t.id, t] as const));
+  const out: string[] = [];
+  for (const [id, t] of after) if (before.get(id) !== t.semanticDigest) out.push(t.key);
+  for (const t of pinned.tasks) if (!after.has(t.id)) out.push(t.key);
+  return out;
+}
+
+function documentsDrift(pinned: SnapshotManifest, fresh: SnapshotManifest): DocumentsDrift {
+  const documents: DocumentsDrift['documents'] = [];
+  for (const t of fresh.tasks) {
+    const was = new Map(
+      (pinned.tasks.find((p) => p.id === t.id)?.documents ?? []).map((d) => [d.id, d] as const),
+    );
+    for (const d of t.documents) {
+      const prior = was.get(d.id);
+      if (!prior) documents.push({ taskKey: t.key, name: d.name, change: 'added' });
+      else if (prior.revision !== d.revision)
+        documents.push({ taskKey: t.key, name: d.name, change: 'changed' });
+      was.delete(d.id);
+    }
+    for (const d of was.values())
+      documents.push({ taskKey: t.key, name: d.name, change: 'removed' });
+  }
+  const list = documents.slice(0, 20);
+  return {
+    pinnedRevision: pinned.revision,
+    freshRevision: fresh.revision,
+    documents: list,
+    note:
+      'Изменились только необязательные документы задач' +
+      (list.length
+        ? ` (${list
+            .slice(0, 5)
+            .map((d) => `${d.taskKey}: ${d.name}`)
+            .join(', ')}${documents.length > 5 ? ` и ещё ${documents.length - 5}` : ''})`
+        : '') +
+      ': согласование действует, исполняется закреплённый снимок; внести документы в работу — новый source-snapshot (ревью неизменённого плана не тратит предел раундов)',
+  };
 }

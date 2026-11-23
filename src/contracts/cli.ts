@@ -2277,6 +2277,27 @@ export const runDataSchema = z.strictObject({
   /** Граф уже был зарегистрирован этой редакцией: работа продолжена. */
   resumed: z.boolean(),
   baseline: baselineViewSchema.optional(),
+  /**
+   * `run --source` (0.1.0-alpha.68): после закреплённого снимка изменились
+   * только необязательные документы задач — согласование действует,
+   * исполняется закреплённый снимок; документы вносит новый source-snapshot.
+   */
+  documentsDrift: z
+    .strictObject({
+      pinnedRevision: z.string().min(1).max(100),
+      freshRevision: z.string().min(1).max(100),
+      documents: z
+        .array(
+          z.strictObject({
+            taskKey: z.string().max(200),
+            name: z.string().max(300),
+            change: z.enum(['added', 'removed', 'changed']),
+          }),
+        )
+        .max(20),
+      note: z.string().max(2000),
+    })
+    .optional(),
   works: z.array(
     z.strictObject({
       id: idSchema,

@@ -751,6 +751,9 @@ export function connectorSuite(backend: SuiteBackend, options: SuiteOptions = {}
         (s.config.tasks as { criteria: unknown[] }[])[0]!.criteria = [
           { id: s.task.criteria[0], gate: 'unit', testId: 'greet.greets' },
         ];
+        // Спецификация — обязательный документ постановки: её правка —
+        // новое согласование. Необязательные документы — нет (alpha.68).
+        (s.config.tasks as { requiredDocuments?: string[] }[])[0]!.requiredDocuments = ['Spec'];
         const doc = await s.project.admin.addDocument(s.task.id, {
           name: 'Spec',
           body: '# Spec\n\nGreeting format.\n',
@@ -788,6 +791,24 @@ export function connectorSuite(backend: SuiteBackend, options: SuiteOptions = {}
         current = await stale('документ', () =>
           s.project.admin.updateDocument(doc.id, '# Spec\n\nChanged format.\n'),
         );
+        // Необязательный документ (записанный ответ или решение владельца) не
+        // обесценивает согласование: закреплённый снимок исполняется, документ
+        // назван в documentsDrift (0.1.0-alpha.68).
+        await s.project.admin.addDocument(s.task.id, {
+          name: 'Notes',
+          body: '# Owner answer\n\nUse the short greeting.\n',
+        });
+        const drifted = await o.connector.prepareRun(o.h);
+        assert.ok(
+          drifted.documentsDrift?.documents.some((d) => d.name === 'Notes' && d.change === 'added'),
+          'необязательный документ назван, а не APPROVAL_STALE',
+        );
+        assert.equal(
+          drifted.graph.source.revision,
+          current.revision,
+          'исполняется закреплённый снимок',
+        );
+        current = await o.connector.snapshot(join(s.root, 'snapshot'));
         // Привязка критерия — сведения доставки: та же постановка, нового
         // согласования нет (alpha.66). Поручение (writeScope) — новый digest.
         const snapshotWith = async (patch: (t: Record<string, unknown>) => void) => {
