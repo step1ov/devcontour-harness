@@ -1,9 +1,9 @@
 /**
- * 0.1.0-alpha.68 (P6-17): команда с актёром без флага внутри открытой сессии
- * ведущего — ведущего. `retry` без `--by` исполняется как `--by lead` (те же
- * права и отказы: сброс ведущего — по разбору и в пределе), журнал пишет
- * ведущего; явный `--by operator` остаётся оператором; без сессии — прежнее
- * умолчание (оператор). Ответ команды называет, откуда актёр (`bySource`).
+ * 0.1.0-alpha.68 (P6-17): внутри открытой сессии ведущего `retry` без `--by`
+ * — отказ `INVALID_INPUT`: ведущий называет роль явно (`--by lead` или
+ * `--by operator`), молчаливого умолчания нет; явный `--by operator` —
+ * оператор; без сессии — прежнее умолчание (оператор). Ответ команды
+ * называет, откуда актёр (`bySource`).
  * P6-33: `lead end` при готовых работах и без запуска — предупреждение
  * `READY_WORKS_NOT_RUNNING` (`readyNotRunning`), не отказ.
  */
@@ -63,14 +63,18 @@ const notes = (dir: string) => {
   );
 };
 
-test('P6-17: retry без --by в открытой сессии ведущего — ведущего (bySource: lead-session), журнал пишет ведущего', () => {
+test('P6-17: retry без --by в открытой сессии ведущего — отказ с выбором роли; ничего не меняется и в журнал ведущего не пишется', () => {
   const dir = failedWork(3);
   assert.equal(harness('lead', 'begin', '--state', dir, '--ttl', '30m').status, 0);
   const r = harness('retry', '--state', dir, '--work', 'w');
-  assert.equal(r.status, 0, r.stderr);
-  const data = cliDataSchemas.retry.parse(r.json.data);
-  assert.equal(data.by, 'lead');
-  assert.equal(data.bySource, 'lead-session');
+  assert.equal(r.json.ok, false);
+  assert.equal(r.json.error!.code, 'INVALID_INPUT');
+  assert.match(r.json.error!.message, /--by lead .*--by operator/);
+  assert.deepEqual(notes(dir), ['lead.begin']);
+  const lead = harness('retry', '--state', dir, '--work', 'w', '--by', 'lead');
+  assert.equal(lead.status, 0, lead.stderr);
+  const data = cliDataSchemas.retry.parse(lead.json.data);
+  assert.deepEqual([data.by, data.bySource], ['lead', 'flag']);
   assert.deepEqual(notes(dir), ['lead.retry', 'lead.begin']);
 });
 
@@ -93,23 +97,7 @@ test('P6-17: явный --by operator в сессии — оператор; бе
   assert.equal(after.json.data!.bySource, 'default');
 });
 
-test('P6-17: сброс без --by в сессии — сброс ведущего: тот же отказ, что у --by lead, а не молчаливый сброс оператора', () => {
-  // Попытки исчерпаны (maxAttempts 1), разбора нет: ведущему сброс не дан.
-  const explicit = failedWork(1);
-  assert.equal(harness('lead', 'begin', '--state', explicit, '--ttl', '30m').status, 0);
-  const byLead = harness(
-    'retry',
-    '--state',
-    explicit,
-    '--work',
-    'w',
-    '--reset',
-    '--reason',
-    'ещё раз',
-    '--by',
-    'lead',
-  );
-  assert.equal(byLead.json.ok, false);
+test('P6-17: сброс без --by в сессии — отказ с выбором роли, а не молчаливый сброс; --by operator — сброс человека', () => {
   const dir = failedWork(1);
   assert.equal(harness('lead', 'begin', '--state', dir, '--ttl', '30m').status, 0);
   const implicit = harness(
@@ -123,13 +111,7 @@ test('P6-17: сброс без --by в сессии — сброс ведуще�
     'ещё раз',
   );
   assert.equal(implicit.json.ok, false);
-  assert.equal(implicit.status, byLead.status);
-  assert.equal(implicit.json.error!.code, byLead.json.error!.code);
-  assert.match(
-    implicit.json.error!.message,
-    /--by не задан: в открытой сессии ведущего команда исполняется как --by lead; решение человека — явно --by operator/,
-  );
-  // Решение человека явно — сброс оператора, как прежде.
+  assert.equal(implicit.json.error!.code, 'INVALID_INPUT');
   const human = harness(
     'retry',
     '--state',

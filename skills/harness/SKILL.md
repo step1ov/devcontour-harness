@@ -781,9 +781,9 @@ connector — is invisible unless you say it:
   written to your log only while your session is active, or when they say
   `--by lead` / `--actor lead` (`diagnose` is always yours); a command with `--actor operator` (or
   `--by <human>`) is the operator's and does not extend your lease. Inside
-  your open session, `retry` without `--by` runs as yours (`--by lead`, with
-  the same limits and refusals; the answer says `bySource: lead-session`); a
-  human's retry decision you pass on still needs `--by operator`.
+  your open session `retry` needs an explicit role: `--by lead` for your own
+  decision (with the recovery limits) or `--by operator` for a human's
+  decision you pass on; without `--by` it is refused (`INVALID_INPUT`).
   `input-answer` without `--actor` is always the operator's, also inside your
   session: an owner's answer you pass on stays the owner's. Your own
   technical answer needs `--actor lead --reason "…"`.

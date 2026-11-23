@@ -110,7 +110,6 @@ import {
   leadNote,
   leadCommandActor,
   leadSessionOpen,
-  leadSessionRefusal,
   leadTtlMs,
   recordLeadCommand,
   releaseDone,
@@ -1495,21 +1494,24 @@ async function run(
             '--by: lead или operator (без флага — оператор)',
             [{ path: ['--by'], message: v.by }],
           );
-        // Без `--by` внутри открытой сессии ведущего повтор — ведущего
-        // (alpha.68, P6-17): движок исполняет его как `--by lead`, с теми же
-        // правами и отказами (сброс — только по разбору и в пределе
-        // leadResets), а не молча как решение оператора.
+        // В открытой сессии ведущего повтор без `--by` — отказ (alpha.68,
+        // P6-17): ведущий называет свою роль явно — `--by lead` (решение
+        // ведущего, с его пределами) или `--by operator` (решение человека).
+        // Молчаливого умолчания нет ни в одну сторону.
+        if (command === 'retry' && v.by === undefined && leadSessionOpen(h.engine))
+          throw new HarnessError(
+            'INVALID_INPUT',
+            'Открыта сессия ведущего: повтор требует явного --by — --by lead (решение ведущего, с пределами recovery) или --by operator (решение человека, которое ведущий передаёт)',
+            [{ path: ['--by'], message: 'required in an open lead session' }],
+          );
         const bySource =
           command !== 'retry'
             ? undefined
             : v.by !== undefined
               ? ('flag' as const)
-              : leadSessionOpen(h.engine)
-                ? ('lead-session' as const)
-                : ('default' as const);
-        const lead = command === 'retry' && (v.by === 'lead' || bySource === 'lead-session');
-        const refused = (error: unknown) =>
-          bySource === 'lead-session' ? leadSessionRefusal(error, '--by') : error;
+              : ('default' as const);
+        const lead = command === 'retry' && v.by === 'lead';
+        const refused = (error: unknown) => error;
         if (v.diagnosis !== undefined && !(lead && v.reset))
           throw new HarnessError(
             'INVALID_INPUT',
@@ -2470,9 +2472,6 @@ function journalLeadCommand(
     };
     // Актёр, которого команда получила от сессии ведущего (alpha.68): журнал
     // пишет его, как если бы флаг был задан.
-    const d = data as { by?: unknown; bySource?: unknown } | undefined;
-    if (command === 'retry' && flags.by === undefined && d?.bySource === 'lead-session')
-      flags.by = 'lead';
     const entry = leadCommandEntry(command, flags, data, phase);
     if (!entry) return false;
     const h = open(state, binding(state), false);

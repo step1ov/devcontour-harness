@@ -519,7 +519,7 @@ export const cliCommands = {
         value: 'text',
         required: false,
         description:
-          'lead — сброс ведущего по свежему техническому разбору (policy.recovery.mode: lead, предел leadResets); operator — решение оператора (operator явно не пишется в журнал ведущего и при его активной сессии); без флага — lead в открытой сессии ведущего (те же права и отказы), иначе operator',
+          'lead — сброс ведущего по свежему техническому разбору (policy.recovery.mode: lead, предел leadResets); operator — решение оператора (operator явно не пишется в журнал ведущего и при его активной сессии); без флага — operator; в открытой сессии ведущего флаг обязателен (иначе INVALID_INPUT)',
       },
       {
         name: '--diagnosis',
@@ -1185,7 +1185,7 @@ export const cliCommands = {
         value: 'text',
         required: false,
         description:
-          'Кто отвечает: operator (словами человека) или lead — только на неблокирующие запросы или с разрешения inputPolicy.leadAnswers (technical: технические вопросы с --reason; maxSeverity: до порога серьёзности); без флага — lead в открытой сессии ведущего (те же права и отказы), иначе operator',
+          'Кто отвечает: operator (словами человека) или lead — только на неблокирующие запросы или с разрешения inputPolicy.leadAnswers (technical: технические вопросы с --reason; maxSeverity: до порога серьёзности); без флага — operator, и в открытой сессии ведущего: ответ ведущего — только явно --actor lead',
       },
       {
         name: '--reason',
@@ -2417,11 +2417,11 @@ export const workActionDataSchema = z.strictObject({
     .optional(),
   /**
    * `retry` (0.1.0-alpha.68): кем исполнен повтор и откуда актёр — `flag`
-   * (`--by`), `lead-session` (без `--by` в открытой сессии ведущего: как
-   * `--by lead`) или `default` (без флага и без сессии: оператор).
+   * (`--by`) или `default` (без флага и без сессии ведущего: оператор). В
+   * открытой сессии ведущего `--by` обязателен.
    */
   by: z.enum(['lead', 'operator']).optional(),
-  bySource: z.enum(['flag', 'lead-session', 'default']).optional(),
+  bySource: z.enum(['flag', 'default']).optional(),
 });
 
 /** `harness diagnose`: записанный разбор, что дальше и действующее правило. */
