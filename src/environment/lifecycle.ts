@@ -18,7 +18,8 @@ import {
 } from './dependency-network.ts';
 import { protectedChanges, protectedSnapshot, SandboxPolicyError } from './isolation.ts';
 import { command } from './process.ts';
-import { withBaseCheckout, type TrustedTree } from './trusted-tree.ts';
+import { baseCheckoutEnv, withBaseCheckout, type TrustedTree } from './trusted-tree.ts';
+import { containerIdentity, containerUse } from './container-identity.ts';
 import { ensurePortsFree } from './port-probe.ts';
 import { leaseScope } from './survivors.ts';
 import { redactor, type Redactor } from './redaction.ts';
@@ -395,8 +396,8 @@ export async function withEnvironment<T>(
   return phaseEnvironment(lifecycle, cwd, dir, execution, signal, action, measure, trusted);
 }
 
-/** Переменные, которые выбирают демон контейнеров: запись окружения хранит их для сверки. */
-export const CONTAINER_ENV_KEYS = [
+/** Переменные, которые выбирают демон контейнеров (селекторы). */
+export const CONTAINER_SELECTOR_KEYS = [
   'DOCKER_HOST',
   'DOCKER_CONTEXT',
   'DOCKER_CONFIG',
@@ -404,10 +405,13 @@ export const CONTAINER_ENV_KEYS = [
   'DOCKER_TLS_VERIFY',
   'CONTAINER_HOST',
   'CONTAINER_CONNECTION',
-  // Где искать CLI и его конфигурацию по умолчанию (`~/.docker`, текущий контекст).
-  'PATH',
-  'HOME',
 ] as const;
+/**
+ * Что запись окружения хранит для сверки очистки: селекторы и где искать CLI
+ * и его конфигурацию по умолчанию (`PATH`, `HOME`: `~/.docker`, текущий
+ * контекст). Повтор teardown по записи берёт только селекторы.
+ */
+export const CONTAINER_ENV_KEYS = [...CONTAINER_SELECTOR_KEYS, 'PATH', 'HOME'] as const;
 /** Окружение демона фазы: каждый ключ явно, отсутствующий — `null`. */
 export type ContainerEnv = Partial<Record<(typeof CONTAINER_ENV_KEYS)[number], string | null>>;
 const containerEnv = (env: NodeJS.ProcessEnv): ContainerEnv =>
@@ -418,8 +422,12 @@ const containerEnv = (env: NodeJS.ProcessEnv): ContainerEnv =>
  * Применить записанное окружение демона поверх окружения процесса: заданные
  * ключи — значением, `null` — снять (окружение фазы его не имело).
  */
-export function replayContainerEnv(env: NodeJS.ProcessEnv, recorded: ContainerEnv) {
-  for (const k of CONTAINER_ENV_KEYS) {
+export function replayContainerEnv(
+  env: NodeJS.ProcessEnv,
+  recorded: ContainerEnv,
+  keys: readonly (typeof CONTAINER_ENV_KEYS)[number][] = CONTAINER_ENV_KEYS,
+) {
+  for (const k of keys) {
     if (!(k in recorded)) continue;
     const v = recorded[k];
     if (v === null || v === undefined) delete env[k];
@@ -428,10 +436,21 @@ export function replayContainerEnv(env: NodeJS.ProcessEnv, recorded: ContainerEn
   return env;
 }
 
+/** Запись окружения фазы на диске: путь и изменяемый объект. */
+interface ReceiptFile {
+  path: string;
+  data: Record<string, unknown>;
+}
+const saveReceipt = (r: ReceiptFile) => writeFile(r.path, JSON.stringify(r.data, null, 2));
+
 /**
  * Teardown: в дереве фазы или — у работы инфраструктуры (`trusted`) — в
  * отдельном чистом checkout доверенной базы (`trusted-tree.ts`) с тем же
- * окружением процесса (ID прогона, репозиторий, порты, каталог окружения).
+ * окружением процесса (ID прогона, репозиторий, порты, каталог окружения);
+ * свой компонент в `*_COMPONENTS_JSON` указывает на checkout, проект compose
+ * без явного — имя дерева кандидата. Путь checkout записывается в запись
+ * окружения до его создания; оставшиеся от прежних попыток убираются;
+ * неубранный — заметка `trustedLeftover`, итог teardown прежний.
  */
 async function teardownIn(
   trusted: TrustedTree | undefined,
@@ -439,12 +458,52 @@ async function teardownIn(
   cwd: string,
   dir: string,
   execution: ReturnType<typeof executionEnvironment>,
+  receipt?: ReceiptFile,
 ) {
   if (!trusted) return teardown(lifecycle, cwd, dir, execution);
-  await withBaseCheckout(cwd, trusted.base, dir, (base) =>
-    teardown(lifecycle, base, dir, execution),
+  const prior = receipt?.data.trustedCheckout;
+  await withBaseCheckout(
+    cwd,
+    trusted.base,
+    dir,
+    (base) =>
+      teardown(lifecycle, base, dir, {
+        ...execution,
+        env: baseCheckoutEnv(execution.env, cwd, base),
+      }),
+    {
+      ...(typeof prior === 'string' ? { prior: [prior] } : {}),
+      record: async (path) => {
+        if (!receipt) return;
+        receipt.data.trustedCheckout = path;
+        await saveReceipt(receipt);
+      },
+      leftover: async (note) => {
+        if (!receipt) return;
+        receipt.data.trustedLeftover = note;
+        await saveReceipt(receipt);
+      },
+    },
   );
 }
+
+/**
+ * Идентичность демона каждого CLI, который шаги вызывают сами
+ * (`containerUse`), в окружении фазы: сверка очистки сравнит её с демоном,
+ * которого спросит. Не известно, какие CLI, — поля нет; CLI нет или демон не
+ * ответил — `null`.
+ */
+async function containerIdentities(lifecycle: Lifecycle, env: NodeJS.ProcessEnv) {
+  const use = containerUse(lifecycle);
+  if (!('clis' in use) || !use.clis.length) return undefined;
+  const out: Record<string, string | null> = {};
+  for (const cli of use.clis) {
+    const id = await containerIdentity(cli, env);
+    out[cli] = id && 'id' in id ? id.id : null;
+  }
+  return out;
+}
+
 async function phaseEnvironment<T>(
   lifecycle: Lifecycle | undefined,
   cwd: string,
@@ -479,7 +538,11 @@ async function phaseEnvironment<T>(
     // Демон контейнеров фазы: сверка очистки спрашивает тот же демон.
     containerEnv: containerEnv(execution.env),
     ...(trusted ? { trusted } : {}),
+    ...((ids) => (ids ? { containerIdentity: ids } : {}))(
+      await containerIdentities(lifecycle, execution.env),
+    ),
   };
+  const receiptFile: ReceiptFile = { path: receiptPath, data: receipt };
   await writeFile(receiptPath, JSON.stringify(receipt, null, 2));
   let result: T | undefined, failure: Error | undefined;
   try {
@@ -498,7 +561,9 @@ async function phaseEnvironment<T>(
         : new Error('Операция окружения завершилась ошибкой', { cause: error });
   }
   try {
-    await measure('cleanup', () => teardownIn(trusted, lifecycle, cwd, dir, execution));
+    await measure('cleanup', () =>
+      teardownIn(trusted, lifecycle, cwd, dir, execution, receiptFile),
+    );
     receipt.status = 'cleaned';
   } catch (error) {
     receipt.status = 'cleanup-failed';
@@ -579,11 +644,13 @@ export async function cleanupEnvironment(
     process.env,
     policy.toolchain,
   );
-  // Тот же демон контейнеров, что у фазы: ключи окружающего процесса, которых
-  // у фазы не было, снимаются.
-  if (receipt.containerEnv) replayContainerEnv(execution.env, receipt.containerEnv);
+  // Тот же демон контейнеров, что у фазы: селекторы окружающего процесса,
+  // которых у фазы не было, снимаются. PATH и HOME — нынешние (toolchain).
+  if (receipt.containerEnv)
+    replayContainerEnv(execution.env, receipt.containerEnv, CONTAINER_SELECTOR_KEYS);
   const dir = join(receiptPath, '..');
-  await teardownIn(receipt.trusted, lifecycle, cwd, dir, execution);
-  await writeFile(receiptPath, JSON.stringify({ ...receipt, status: 'cleaned' }, null, 2));
+  const file: ReceiptFile = { path: receiptPath, data: receipt };
+  await teardownIn(receipt.trusted, lifecycle, cwd, dir, execution, file);
+  await writeFile(receiptPath, JSON.stringify({ ...file.data, status: 'cleaned' }, null, 2));
   return { status: 'cleaned' as const };
 }

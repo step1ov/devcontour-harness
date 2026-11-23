@@ -26,6 +26,7 @@ import {
   digestSchema,
   errorCodes,
   executionPolicySchema,
+  infraTeardownWarnings,
   exitCodeOf,
   exitCodes,
   leadDiagnosisCauses,
@@ -2113,6 +2114,11 @@ async function run(
       // начинался, а настройка идёт дольше SETUP_BUDGET_MS, — одна строка.
       const over = v.policy ? setupOverBudget(resolve(v.policy)) : undefined;
       if (over) report.warnings = [...(report.warnings ?? []), `SETUP_OVER_BUDGET: ${over}`];
+      // Teardown репозитория с областью инфраструктуры — в чистом checkout базы (alpha.67).
+      if (v.policy) {
+        const teardown = infraTeardownAdvice(resolve(v.policy));
+        if (teardown.length) report.warnings = [...(report.warnings ?? []), ...teardown];
+      }
       // Связка с Relay: --source или connector.json рядом с политикой.
       const relay = await relayCheck(
         v.source,
@@ -2484,6 +2490,16 @@ if (envelope.command && isSharedOperation(envelope.command)) {
 }
 process.stdout.write(text ?? JSON.stringify(envelope) + '\n');
 process.exitCode = code;
+
+/** Предупреждения `INFRA_TEARDOWN` по политике; неразборчивая политика — без них (её назовёт doctor). */
+function infraTeardownAdvice(policyPath: string): string[] {
+  try {
+    const parsed = executionPolicySchema.safeParse(JSON.parse(readFileSync(policyPath, 'utf8')));
+    return parsed.success ? infraTeardownWarnings(parsed.data) : [];
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Строка doctor о бюджете настройки (alpha.67): политика — в `.harness/`

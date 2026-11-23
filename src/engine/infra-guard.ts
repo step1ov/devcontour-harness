@@ -123,8 +123,11 @@ export async function changedFacts(
     if (mode === LINK_MODE) links.add(path);
   }
   // Новый путь, чей первый новый сегмент совпадает основой имени с файлом
-  // или каталогом базы рядом (`lib.js` рядом с `lib/`, `util.ts` рядом с
-  // `util.mjs`): он меняет, что найдёт разрешение модулей.
+  // или каталогом базы рядом (`lib.js` рядом с `lib/`, `gate.test` рядом с
+  // `gate.test.js`, `x.d.ts` рядом с `x.ts`): он меняет, что найдёт
+  // разрешение модулей. Основа — имя до первой точки (все расширения сняты),
+  // без учёта регистра: лишние совпадения (`user.json` рядом с `user.mjs`)
+  // требуют `gateChanges` — отказ закрытым.
   const shadows = new Set<string>();
   const listed = new Map<string, Promise<string[]>>();
   const list = (dir: string) => {
@@ -132,7 +135,11 @@ export async function changedFacts(
     if (!p) listed.set(dir, (p = names(cwd, base, dir)));
     return p;
   };
-  const stem = (name: string) => name.replace(/\.[^.]*$/, '');
+  const stem = (name: string) => {
+    const lower = name.toLowerCase();
+    const dot = lower.indexOf('.', 1);
+    return dot < 0 ? lower : lower.slice(0, dot);
+  };
   for (const path of changed) {
     if (present.has(path)) continue;
     const segments = path.split('/');
