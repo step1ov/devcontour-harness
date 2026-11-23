@@ -1073,3 +1073,49 @@ test('alpha.60 (P11): прогноз — p50/p90 разных попыток, з
   assert.equal(m.progress.percent, 95);
   assert.equal(m.progress.left, 1);
 });
+
+test('alpha.68 (r1): документ требований, который контекст задачи заменил ссылкой на документ задачи, — постановка: правка его текста — APPROVAL_STALE, а не documentsDrift', async () => {
+  const s = await scenario(fakeSuiteBackend());
+  try {
+    const doc = await s.project.admin.addDocument(s.task.id, {
+      name: 'Goal spec',
+      body: '# Goal\n\nVersion 1.\n',
+    });
+    let body = '# Goal\n\nVersion 1.\n';
+    const transport = () =>
+      contextual(s.project.transport(), {
+        records: () => [
+          fi(),
+          {
+            section: 'document',
+            kind: 'document',
+            id: doc.id,
+            key: 'DOC-9',
+            title: 'Goal spec',
+            revision: 1,
+            summary: '',
+            body,
+            reasons: [{ code: 'target-document', from: 'PRODUCT-1' }],
+          },
+        ],
+      }).transport;
+    const opened = await s.open({ transport: transport() });
+    await opened.connector.snapshot(join(s.root, 'a'));
+    const built = await opened.connector.source.snapshot();
+    const text = built.context.sources
+      .flatMap((x) => x.files)
+      .find((f) => f.path === TASK_CONTEXT_FILE)!.content.data;
+    assert.match(text, /documents\//, 'контекст ссылается на закреплённый документ задачи');
+    opened.close();
+    body = '# Goal\n\nVersion 2: a different requirement.\n';
+    await s.project.admin.updateDocument(doc.id, body);
+    const again = await s.open({ transport: transport() });
+    await assert.rejects(
+      again.connector.prepareRun(again.h),
+      (e: unknown) => e instanceof HarnessError && e.code === 'APPROVAL_STALE',
+    );
+    again.close();
+  } finally {
+    await s.cleanup();
+  }
+});

@@ -870,7 +870,26 @@ export function buildSnapshot(input: {
             bytes,
             digest: file.digest,
           };
-          contextBy.push([identityOf, file.digest]);
+          // Документ требований, который контекст задачи заменил ссылкой на
+          // закреплённый документ задачи, — часть постановки: его содержание
+          // входит в ревизию набора и в ревизию постановок (alpha.68), иначе
+          // правка его текста прошла бы как правка необязательного документа.
+          const referenced = [...pinnedDocs]
+            .filter(([, path]) => text.includes(path))
+            .map(([id]) => id)
+            .sort();
+          contextBy.push([
+            identityOf,
+            referenced.length
+              ? digestOf({
+                  context: file.digest,
+                  documents: referenced.map((id) => [
+                    id,
+                    sha256(read.documents.find((d) => d.id === id)?.body ?? ''),
+                  ]),
+                })
+              : file.digest,
+          ]);
         }
       }
       // Исполнителю сказано, где постановка (или что её нет): строка в task.md.
