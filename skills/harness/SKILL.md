@@ -153,7 +153,7 @@ planning, and the draft approves nothing.
 whole release, not only the next graph: stages (infra per service, product,
 deploy, …) × components with a rough size and who does them (writers,
 environment, owner) — `$H lead outline` (see `$H lead outline --help`).
-Without it status and the panel say «плана выпуска нет — прогноз по одному
+Without it `status` and `harness view` say «плана выпуска нет — прогноз по одному
 графу» and the forecast reads one graph as the whole release. Update the
 outline with a reason when the plan grows.
 
