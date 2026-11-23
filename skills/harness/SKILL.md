@@ -149,6 +149,14 @@ prepare fits a reasonable time.
 You are the planner: write the draft yourself. No other model is called for
 planning, and the draft approves nothing.
 
+**Declare the release outline first.** Before the first graph, record the
+whole release, not only the next graph: stages (infra per service, product,
+deploy, …) × components with a rough size and who does them (writers,
+environment, owner) — `$H lead outline` (see `$H lead outline --help`).
+Without it status and the panel say «плана выпуска нет — прогноз по одному
+графу» and the forecast reads one graph as the whole release. Update the
+outline with a reason when the plan grows.
+
 1. Write the user's goal and constraints to `.harness/work/<graph-id>.brief.md`.
    Ask the user a short question for every real ambiguity instead of
    guessing; the answer goes into the brief. A changed brief makes an earlier
@@ -473,6 +481,21 @@ writer does differently and how it is checked>" [--evidence "<log line or
 id>"]`. The hypothesis is required for `coverage` and `approach` and must be
 new for the work. The next attempt gets the cause and the hypothesis in its
 prompt; then `$H retry --work <id>` or `$H run` continues.
+
+Found a second cause of the same failure after you diagnosed it (for example,
+a cleanup error in the test masks the original failure)? Add it to the fresh
+diagnosis instead of re-registering the graph or writing an instruction into
+the task source: `$H diagnose --state D --work <id> --addendum "<what else
+the writer must know>" [--evidence "…"]` (up to 5 per diagnosis). The next
+attempt gets the diagnosis with its addenda. An addendum is not a new
+diagnosis: it grants no new attempt limit and needs no plan review.
+
+**Infra work too big (`unfinished` twice).** Two `unfinished` attempts of an
+infra work (or one attempt that lists many independent deliverables: fault
+proxy, wrapper, fixtures, smoke, browser helper…) mean the order is too big
+for one attempt. Diagnose `split` and re-plan it into smaller infra works,
+each with one deliverable and its own check, instead of another `approach`
+on the same order.
 
 **Attempts exhausted (`ATTEMPTS_EXHAUSTED`).** If `explain` says `actor:
 lead`, it is yours: with `diagnose`, diagnose the last failure first; with
@@ -829,6 +852,18 @@ not copy acceptance logs or attempt state into notes.
   criteria of an accepted result after a binding fix.
 
 ## Don'ts
+
+- Do not hand-order or hand-compose context sources. Harness builds the
+  context snapshot (`input-context`, `source-snapshot`) and its digest does
+  not depend on source order; a hand-made copy only risks a different
+  content. When a digest differs, the review record names the changed
+  sources (`changes.context`).
+- Do not re-register a graph or a source snapshot just to pass a note to the
+  writer: use `diagnose --addendum`. A re-review of an unchanged plan does
+  not spend the plan-review round limit (`counted: false`), but a changed
+  plan does; `status` shows «раундов N/M, осталось K».
+- Before `lead end`, start `$H run` for every approved ready work; the
+  session end warns `READY_WORKS_NOT_RUNNING` when you forgot.
 
 - Use only the public CLI (`$H <command>`). Never import or call the
   package's library internals (`Engine`, `approve`, `carryInput`, isolation
