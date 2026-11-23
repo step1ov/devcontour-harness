@@ -34,6 +34,7 @@ import { viewDataSchema } from './operator-view.ts';
 import { decisionSettingsSchema } from './decisions.ts';
 import { updateDataSchema, updateCheckStates } from './update.ts';
 import { sourceRefSchema } from './work.ts';
+import { setupProgressSchema } from './setup-progress.ts';
 import { leadDataSchema } from './lead.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
 import {
@@ -609,12 +610,17 @@ export const cliCommands = {
   },
   cleanup: {
     description:
-      'Довести незавершённую очистку закончившейся попытки: повторить teardown по сохранённым receipt окружений и убрать её рабочие деревья; модели, gates и Git-приёмка не вызываются',
+      'Довести незавершённую очистку закончившейся попытки: повторить teardown по сохранённым receipt окружений и убрать её рабочие деревья; с ID smoke (LS-…) — повторить teardown его окружения или сверить запись cleanup-failed без рабочего дерева в cleaned (событие environment.reconciled), только когда шаги вызывают docker/podman сами, демон тот же, что у фазы, и ресурсов с меткой прогона нет; иначе NOT_READY; модели, gates и Git-приёмка не вызываются',
     writes: true,
     idempotency: 'Повтор после успешной очистки отвечает nothing-pending и ничего не меняет',
     args: [
       state,
-      { name: '--run', value: 'id', required: true, description: 'ID попытки (runId)' },
+      {
+        name: '--run',
+        value: 'id',
+        required: true,
+        description: 'ID попытки (runId) или запуска smoke (LS-…)',
+      },
     ],
     refusals: ['NOT_FOUND', 'NOT_READY'],
   },
@@ -2152,6 +2158,19 @@ export const statusDataSchema = z.strictObject({
         .max(50)
         .optional(),
       restartBy: z.enum(diagnosisActors).optional(),
+      /**
+       * alpha.67: сколько открытых работ сдвинет новый запуск (готовы к
+       * выдаче или к повтору в пределе попыток), и работы, которые держит
+       * только вопрос исполнителя. Оба есть — строка «запустите harness run:
+       * готово N задач, вопрос блокирует только X» (ход ведущего).
+       */
+      ready: z.number().int().min(1).optional(),
+      /**
+       * alpha.67: ID всех готовых работ (`ready` штук) — представление
+       * вычитает из них задачи вопроса владельцу до подсчёта.
+       */
+      readyWorks: z.array(idSchema).min(1).max(10_000).optional(),
+      heldByQuestion: z.array(idSchema).min(1).max(50).optional(),
       line: z.string().min(1).max(500),
       lineEn: z.string().min(1).max(500),
     })
@@ -2218,6 +2237,13 @@ export const statusDataSchema = z.strictObject({
       linesEn: z.array(z.string().min(1).max(200)).min(1).max(5),
     })
     .optional(),
+  /**
+   * 0.1.0-alpha.67: ход настройки, пока работ нет (и до состояния, и с
+   * состоянием без графов) — шаги, время и мягкий бюджет настройки
+   * (`setupProgressSchema`, docs/infra-works.md). Нет поля — работы есть или
+   * раскладка проекта harness (`.harness/`) неизвестна.
+   */
+  setupProgress: setupProgressSchema.optional(),
   /**
    * Только `status --detail`: время снимка, почему стоит выдача и активные
    * попытки (стадия, длительность, владение, gates). Без флага поля нет.
@@ -2944,7 +2970,25 @@ export const sourceReconcileDataSchema = z.strictObject({
 export const cleanupDataSchema = z.discriminatedUnion('status', [
   z.strictObject({ status: z.literal('nothing-pending') }),
   /** Очищено: receipts окружений, по которым повторён teardown. */
-  z.strictObject({ status: z.literal('cleaned'), receipts: z.array(z.string()) }),
+  z.strictObject({
+    status: z.literal('cleaned'),
+    receipts: z.array(z.string()),
+    /**
+     * 0.1.0-alpha.67, `cleanup LS-…`: записи smoke, сверенные без teardown —
+     * рабочего дерева и ресурсов Docker с меткой прогона уже нет (событие
+     * `environment.reconciled`).
+     */
+    reconciled: z
+      .array(
+        z.strictObject({
+          receipt: z.string(),
+          from: z.enum(['cleanup-failed', 'active']),
+          worktree: z.literal('absent'),
+          docker: z.enum(['absent', 'not-used']),
+        }),
+      )
+      .optional(),
+  }),
 ]);
 
 export const worktreeCleanupDataSchema = z.strictObject({
@@ -3148,6 +3192,21 @@ export const leanDataSchema = z.strictObject({
 /** `explain`: объяснения остановок. */
 export const explainDataSchema = z.strictObject({
   diagnoses: z.array(stopDiagnosisSchema),
+  /**
+   * alpha.67 (P5-4): следующий шаг очереди, когда никто не запущен, а
+   * готовые работы есть — новый `harness run` ведущего; `heldByQuestion` —
+   * работы, которые держит только вопрос. Та же строка, что `status.runner`.
+   */
+  queue: z
+    .strictObject({
+      actor: z.literal('lead'),
+      action: z.literal('start-run'),
+      ready: z.number().int().min(1),
+      heldByQuestion: z.array(idSchema).min(1).max(50).optional(),
+      line: z.string().min(1).max(500),
+      lineEn: z.string().min(1).max(500),
+    })
+    .optional(),
   /** Сводка попыток по каждому поручению выбора (`--work` — одно), в порядке состояния. */
   attempts: z
     .array(z.strictObject({ workId: idSchema, ...attemptSummarySchema.shape }))

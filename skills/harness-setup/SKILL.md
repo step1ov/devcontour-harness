@@ -26,6 +26,34 @@ Modes: **install** (first setup), **upgrade** (change the installed version),
 request; when the repository already has `.harness/` and a pinned or
 installed `$H`, it is upgrade or check, not install.
 
+## Setup is configuration
+
+Setup is configuration only: the stack profile, `harness init`, policy edits
+the decisions require, the task-source connector, `doctor`, `smoke` (and
+the writer probe), gates on `HEAD`. Copying the example bridge files and
+setting their parameters for the project is configuration too. You do not
+write new executable code during setup:
+
+- a bridge, gate wrapper, validator, crash-cleanup test or any other script
+  that does not exist yet becomes an **infra task** of the first plan
+  (`"kind": "infra"`, `<pkg>/docs/infra-works.md`): a writer builds it
+  through the normal loop with review-code, attempts and the forecast;
+- inherited setup debts (a known bridge defect, a missing acceptance test)
+  are listed as infra tasks too, not fixed silently by you;
+- declare where infra code lives: `repositories[0].infra.paths` (for
+  example `.harness/acceptance/`, `.harness/infra/`), inside
+  `protectedPaths`; files that `lifecycle` or `prepare` steps run stay
+  outside it.
+
+**Setup budget: about 30 minutes.** Setup time counts from the first setup
+file or record to the first registered graph. Over the budget, `doctor`
+prints `SETUP_OVER_BUDGET: …` and `status`/`harness view` show the setup
+progress line with «бюджет 30 мин — превышен»: stop adding code, write down
+what is left as infra tasks and hand over to planning. `harness view`
+(`stage.progress`) shows each setup step (profile, init, doctor, smoke,
+probe, gates, connector) with its state and time from the records harness
+keeps.
+
 ## Decide or ask
 
 Decide everything you can from the repository and the defaults below, and
@@ -318,7 +346,14 @@ using Docker. With a yes, copy `<pkg>/examples/turbo-starter/harness/`
 adapt the compose model to the project and add `repositories[0].lifecycle`
 (setup, ready, teardown) and the secret names as in
 `<pkg>/docs/turbo-starter.md`; gates that need the service run through
-`node .harness/compose-bridge.mjs exec -- <command>`.
+`node .harness/compose-bridge.mjs exec -- <command>`. Changes to the bridge
+beyond its parameters (a validator, a wrapper, a crash-cleanup test) are
+infra tasks of the plan, not setup work.
+
+Old smoke records that stay `cleanup-failed` although their worktree and
+Docker resources are gone are reconciled by
+`$H cleanup --state <state> --run <LS-…>` (it never deletes anything; with
+resources left it names them). Never edit their state by hand.
 
 ### Lead inside a Codex sandbox
 
@@ -571,7 +606,9 @@ the state or the controller-mode pack. Do not push or merge.
 Report: installed version (and the tarball sha256), `doctor`, every decision
 of the table with its reason, the gates with their commands, the policy
 edits, controller mode, the connector check and snapshot (`graphId`,
-`graphDigest`, eligibility per task), the commit SHA. Then continue with the
+`graphDigest`, eligibility per task), the commit SHA, the setup time against
+the budget, and the infra tasks for the first plan (new code and inherited
+debts, each with its paths and the gate files it would change). Then continue with the
 `harness` skill: brief → `plan-request` → draft → `plan-check` → `validate`
 → `run` (for Relay: `review-plan` and `run --source`). A live `run` or
 `review-plan` calls paid models: start it when the user asks.

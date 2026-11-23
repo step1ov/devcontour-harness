@@ -92,6 +92,14 @@ export function reusableImplementation(
   basis: string,
 ): ReuseDecision {
   if (!work.approvedDigest) return { reuse: false, reason: 'поручение не согласовано' };
+  // Работа инфраструктуры (docs/infra-works.md): дерево попытки начинается с
+  // доверенной базы — setup, ready и prepare на хосте не исполняют код
+  // кандидата, который ещё не прошёл ревью.
+  if (work.order.kind === 'infra')
+    return {
+      reuse: false,
+      reason: 'работа инфраструктуры: шаги на хосте не исполняются на непринятом кандидате',
+    };
   const previous = view
     .attempts(work.id)
     .filter((a) => a.id !== currentRunId)

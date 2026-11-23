@@ -14,6 +14,7 @@ import { z } from 'zod';
 import {
   API_VERSION,
   HarnessError,
+  HARNESS_PROJECT_DIR,
   authorSchema,
   reviewDispositionSchema,
   type ReviewDisposition,
@@ -48,6 +49,7 @@ import { leadSandboxCheck } from './environment/lead-sandbox.ts';
 import { leanMismatch, leanText, switchLean } from './init/lean.ts';
 import { diagnoseState, explainText } from './explain/diagnose.ts';
 import { statusFrame, statusSettled, statusSetup, statusText } from './control/status.ts';
+import { setupProgress } from './control/setup-progress.ts';
 import { planCheck, planRequestOf } from './planning/check.ts';
 import { checkJsonBytes } from './catalog/bytes.ts';
 import { isSharedOperation, sharedOperations } from './catalog/shared.ts';
@@ -1386,11 +1388,28 @@ async function run(
             ? !existsSync(join(located.stateDir, 'state.sqlite'))
             : !existsSync(located.stateDir))
         ) {
-          const data = statusSetup(located ? 'state' : 'project');
+          const harnessDir = join(resolve(v.repository ?? '.'), HARNESS_PROJECT_DIR);
+          const progress =
+            v.repository && existsSync(harnessDir)
+              ? setupProgress({
+                  harnessDir,
+                  ...(located ? { stateDir: located.stateDir } : {}),
+                  now: Date.now(),
+                })
+              : undefined;
+          const data = {
+            ...statusSetup(located ? 'state' : 'project'),
+            ...(progress ? { setupProgress: progress } : {}),
+          };
           return {
             command,
             data,
-            ...(v.human ? { text: data.setup!.lines.join('\n') + '\n' } : {}),
+            ...(v.human
+              ? {
+                  text:
+                    [...data.setup!.lines, ...(progress ? [progress.line] : [])].join('\n') + '\n',
+                }
+              : {}),
           };
         }
         v.state = located.stateDir;
@@ -1401,9 +1420,21 @@ async function run(
       try {
         if (command === 'status') {
           const updates = statusUpdates(resolve(need('state')), binding(need('state')).baseDir);
+          const status = h.status(v.graph, { detail: Boolean(v.detail) });
+          // Ход настройки, пока работ нет (alpha.67): политика — в `.harness/` проекта.
+          const baseDir = binding(need('state')).baseDir;
+          const progress =
+            !status.works.length && !v.graph && basename(baseDir) === HARNESS_PROJECT_DIR
+              ? setupProgress({
+                  harnessDir: baseDir,
+                  stateDir: resolve(need('state')),
+                  now: Date.now(),
+                })
+              : undefined;
           const data = {
-            ...h.status(v.graph, { detail: Boolean(v.detail) }),
+            ...status,
             ...optional('updates', updates),
+            ...optional('setupProgress', progress),
           };
           if (!v.human) return { command, data };
           // Прогноз выпуска — та же строка, что у панели (`view.forecast`), по
@@ -2078,6 +2109,10 @@ async function run(
       // Manifest проекта рядом с политикой расходится с ней по слою lean — предупреждение.
       const mismatch = v.policy ? leanMismatch(resolve(v.policy)) : [];
       if (mismatch.length) report.warnings = [...(report.warnings ?? []), ...mismatch];
+      // Настройка дольше мягкого бюджета (alpha.67): пока harness run ещё не
+      // начинался, а настройка идёт дольше SETUP_BUDGET_MS, — одна строка.
+      const over = v.policy ? setupOverBudget(resolve(v.policy)) : undefined;
+      if (over) report.warnings = [...(report.warnings ?? []), `SETUP_OVER_BUDGET: ${over}`];
       // Связка с Relay: --source или connector.json рядом с политикой.
       const relay = await relayCheck(
         v.source,
@@ -2449,3 +2484,22 @@ if (envelope.command && isSharedOperation(envelope.command)) {
 }
 process.stdout.write(text ?? JSON.stringify(envelope) + '\n');
 process.exitCode = code;
+
+/**
+ * Строка doctor о бюджете настройки (alpha.67): политика — в `.harness/`
+ * проекта с manifest, базы состояния ещё нет (run не начинался), а ход
+ * настройки дольше мягкого бюджета. Иначе — undefined.
+ */
+function setupOverBudget(policyPath: string): string | undefined {
+  const harnessDir = dirname(policyPath);
+  if (basename(harnessDir) !== HARNESS_PROJECT_DIR) return undefined;
+  let located;
+  try {
+    located = locateProject({ repository: dirname(harnessDir) });
+  } catch {
+    return undefined;
+  }
+  if (!located || existsSync(join(located.stateDir, 'state.sqlite'))) return undefined;
+  const progress = setupProgress({ harnessDir, stateDir: located.stateDir, now: Date.now() });
+  return progress.overBudget ? progress.line : undefined;
+}

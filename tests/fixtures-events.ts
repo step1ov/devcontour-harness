@@ -163,4 +163,11 @@ export const validPayloads: Record<EventType, Record<string, unknown>> = {
     to: { harness: '0.1.0-alpha.61', ui: '0.1.0-alpha.5' },
     by: 'operator',
   },
+  'environment.reconciled': {
+    receipt:
+      'gates-at/LS-00000000-0000-4000-8000-000000000000/artifacts/environment/environment.json',
+    from: 'cleanup-failed',
+    worktree: 'absent',
+    docker: 'absent',
+  },
 };

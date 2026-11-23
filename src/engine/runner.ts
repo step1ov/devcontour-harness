@@ -51,7 +51,10 @@ import {
   type ProbeServer,
   type RuntimeResponse,
   type WorkState,
+  hostStepFiles,
+  infraViolations,
 } from '../contracts/index.ts';
+import { changedFacts, resolvedHostFiles } from './infra-guard.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
 import { codeReviewDiff } from './review-diff.ts';
 import { worktreeKey } from '../environment/git-trust.ts';
@@ -1068,18 +1071,52 @@ export class Runner {
       .filter((c) => (c.repositoryId ?? work.order.repositoryId) === repo.id)
       .flatMap((c) => (c.artifacts ?? []).map((a) => a.path));
     const role = roleBinding(this.policy, work.order.role, work.order.repositoryId)?.writePaths;
+    const kind = work.order.kind ?? 'product';
+    const infraPaths = repo.infra?.paths ?? [];
     const { forbidden, outside } = scopeViolations(changed, {
       protected: [...repo.protectedPaths, ...repo.generatedPaths],
       pinned: [...pinnedContext, ...checkers],
       writeScope: work.order.writeScope,
       ...(role ? { role } : {}),
       allowed,
+      ...(infraPaths.length || kind === 'infra' ? { infra: { kind, paths: infraPaths } } : {}),
     });
     if (forbidden.length)
       throw new TaskFailure(
         'scope-violation',
         `Изменены защищённые файлы: ${forbidden.join(', ')}`,
       );
+    // Работа инфраструктуры (docs/infra-works.md): файлы шагов на хосте она не
+    // меняет вовсе, а файлы gates доверенной базы — только согласованные
+    // планом (`gateChanges`): её gates исполняются по определению базы.
+    if (kind === 'infra') {
+      const base = range ? range[0] : 'HEAD';
+      const { present, links, shadows } = await changedFacts(cwd, base, range?.[1], changed);
+      const { host, gate, link } = infraViolations(changed, {
+        kind,
+        paths: infraPaths,
+        hostFiles: await resolvedHostFiles(cwd, base, hostStepFiles(repo, this.policy)),
+        gateChanges: work.order.gateChanges ?? [],
+        inBase: (p) => present.has(p),
+        isLink: (p) => links.has(p),
+        isShadow: (p) => shadows.has(p),
+      });
+      if (host.length)
+        throw new TaskFailure(
+          'scope-violation',
+          `Изменены файлы шагов на хосте (lifecycle/prepare исполняются вне песочницы): ${host.join(', ')}; новую версию пишите отдельным файлом, переключает её политика`,
+        );
+      if (link.length)
+        throw new TaskFailure(
+          'scope-violation',
+          `Работа инфраструктуры добавила или изменила символические ссылки: ${link.join(', ')}; их цель не проверяется областью — пишите обычные файлы`,
+        );
+      if (gate.length)
+        throw new TaskFailure(
+          'scope-violation',
+          `Изменены файлы gates доверенной базы без согласования планом: ${gate.join(', ')}; существующие файлы области инфраструктуры, новые файлы разрешения (package.json, node_modules, конфигурация) и новые файлы с основой имени файла или каталога базы рядом меняются только по gateChanges поручения с ревью плана`,
+        );
+    }
     // Ответы эталонных наборов лежат в рабочем дереве: изменённый код,
     // который называет файл набора строковым литералом, читает эталон, а не
     // решает. Тесты исполнителя (не артефакты контракта) проверяются так же:
@@ -1964,6 +2001,13 @@ export class Runner {
                       evaluation.decision.kind === 'continue'
                         ? selectGenerators(repo.generators ?? [], changed)
                         : [];
+                    // Генератор исполняется на хосте до ревью: работа
+                    // инфраструктуры его входы и инструмент не меняет.
+                    if (generators.length && work.order.kind === 'infra')
+                      throw new TaskFailure(
+                        'scope-violation',
+                        `Работа инфраструктуры изменила входы генераторов ${generators.map((g) => g.id).join(', ')}: генераторы исполняются на хосте до ревью`,
+                      );
                     if (generators.length) {
                       // Генерация — не время исполнителя: у неё свой предел фазы.
                       rearm();
@@ -2089,6 +2133,11 @@ export class Runner {
             },
             (stage, action) => this.timed(attempt, 'candidate-environment:' + stage, action),
             (message) => this.portWarning(attempt.id, message),
+            // Работа инфраструктуры: teardown на хосте — по доверенной базе
+            // области, а не по коду кандидата (docs/infra-works.md).
+            work.order.kind === 'infra' && repo.infra?.paths.length
+              ? { base, paths: [...repo.infra.paths] }
+              : undefined,
           );
           await assertDependencies(attempt.dependencies ?? []);
           attempt = { ...attempt, candidateSha: candidate };

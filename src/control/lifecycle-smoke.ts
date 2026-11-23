@@ -5,6 +5,7 @@ import { CleanupFailure, type StepOutcome } from '../environment/lifecycle.ts';
 import { DEPENDENCY_NETWORK } from '../environment/dependency-network.ts';
 import { runGatesAt } from '../verification/gates-at.ts';
 import { commitOf, repositoryOf, repositoryPath } from './gates-check.ts';
+import { SMOKE_RESULT_FILE } from './setup-progress.ts';
 import {
   loopbackTrials,
   probeWriter,
@@ -138,6 +139,7 @@ export interface LifecycleSmokeInput {
 }
 
 export { processListCallers } from '../verification/gates.ts';
+export { SMOKE_RESULT_FILE };
 
 async function smokeProcessList(
   input: LifecycleSmokeInput,
@@ -517,12 +519,35 @@ export async function smokeLifecycle(input: LifecycleSmokeInput): Promise<Lifecy
       ...(warnings ?? []),
       `sandbox-process-list: ${processList.callers.join(', ')} вызывают ps/pgrep/top; ${processList.line}`,
     ];
+  const durationMs = Date.now() - started;
+  // Итог рядом с логами (alpha.67): ход настройки в представлении читает
+  // исход и длительность smoke и пробы. Неудачная запись итога не отменяет
+  // проверку.
+  await writeFile(
+    join(stateDir, 'gates-at', id, SMOKE_RESULT_FILE),
+    JSON.stringify(
+      {
+        at: new Date().toISOString(),
+        data: {
+          id,
+          repositoryId: repo.id,
+          sha,
+          passed: !failure,
+          durationMs,
+          ...(failure ? { failure: { class: failure.class } } : {}),
+          ...(probe ? { writerProbe: { ok: probe.ok } } : {}),
+        },
+      },
+      null,
+      2,
+    ),
+  ).catch(() => undefined);
   return {
     id,
     repositoryId: repo.id,
     sha,
     passed: !failure,
-    durationMs: Date.now() - started,
+    durationMs,
     steps,
     ...(failure ? { failure } : {}),
     logs: join(stateDir, 'gates-at', id),

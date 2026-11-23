@@ -17,6 +17,7 @@ import { DEFAULT_INPUT_POLICY, inputPolicySchema, type InputPolicy } from './inp
 import type { CodedIssue, ErrorCode } from './errors.ts';
 import { toolchainPinSchema, toolchainSchema } from './toolchain.ts';
 import { gateArtifactLimits } from './result.ts';
+import { infraIssues, infraScopeSchema } from './infra.ts';
 
 const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
 /** Переменные `HARNESS_*` и исторические `DEVCONTOUR_*` задаёт сам harness, не политика. */
@@ -347,6 +348,13 @@ export const repositoryPolicySchema = z.strictObject({
    * политика без него сохраняет digest.
    */
   previews: previewsSchema.optional(),
+  /**
+   * Область инфраструктуры harness (alpha.67, `infraScopeSchema`,
+   * docs/infra-works.md): пути, которые меняют только работы `kind: infra`.
+   * Входит в `isolationDigest`: смена области — новое ревью плана.
+   * Необязательное поле без умолчания: политика без него сохраняет digest.
+   */
+  infra: infraScopeSchema.optional(),
 });
 
 /** Предел расходов (USD) и/или времени вызовов; хотя бы одно поле — выражено вариантами. */
@@ -660,7 +668,14 @@ export const executionDigest = (policy: ExecutionPolicy) =>
     inputPolicy: undefined,
     lifecyclePreflight: undefined,
     toolchain: undefined,
-    repositories: policy.repositories.map((r) => ({ ...r, previews: undefined })),
+    // Превью не входят в digest исполнения — кроме репозитория с областью
+    // инфраструктуры (alpha.67): там их команды — шаги на хосте, и их смена
+    // делает согласование устаревшим (маршрут прежний — `reapprove`). Gates и
+    // генераторы входят всегда. Без области digest прежний.
+    repositories: policy.repositories.map((r) => ({
+      ...r,
+      previews: r.infra ? r.previews : undefined,
+    })),
     recovery: undefined,
   });
 
@@ -707,6 +722,9 @@ export const isolationDigest = (policy: ExecutionPolicy) =>
       r.dependencyBuild,
       r.preflight,
       r.writerDependencies ?? null,
+      // Область инфраструктуры — граница записи защищённых путей; без поля
+      // кортеж прежний, и digest прежних политик не меняется.
+      ...(r.infra ? [{ infra: r.infra }] : []),
     ]),
   });
 
@@ -1154,6 +1172,12 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
       if (new Set(steps.map((s) => s.id)).size !== steps.length)
         add('INVALID_INPUT', ['repositories', r, name], 'Step ids должны быть уникальны');
     issues.push(...generatorIssues(repo, ['repositories', r, 'generators']));
+    issues.push(
+      ...infraIssues(repo, ['repositories', r, 'infra'], {
+        ...(policy.lifecycle ? { lifecycle: policy.lifecycle } : {}),
+        ...(policy.workspaceLifecycle ? { workspaceLifecycle: policy.workspaceLifecycle } : {}),
+      }),
+    );
   });
   policy.repositories.forEach((repo, r) =>
     repo.dependsOn.forEach((dep, d) => {

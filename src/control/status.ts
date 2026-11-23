@@ -18,9 +18,10 @@ import {
 } from '../report/compute.ts';
 import { budgetOverview, legacyGroupCall } from '../engine/budget.ts';
 import { callRecords } from '../engine/usage.ts';
-import type { Engine } from '../engine/engine.ts';
+import { infraPendingIndex, type Engine } from '../engine/engine.ts';
 import { requestsOf } from '../engine/input-requests.ts';
 import { reviewSummaryRows, reviewsText } from './review-summary.ts';
+import { ruCount } from '../contracts/plural.ts';
 import { MAX_NEUTRAL_FAILURES } from '../contracts/repair-policy.ts';
 import {
   livePlanReviews,
@@ -282,7 +283,13 @@ export function statusOf(
         })(workInputOf(requestsOf(v, w), inputPolicyOf(source.policy)), engine.blockers(w, v)),
       })),
       ...((r) => (r ? { runner: r } : {}))(
-        runnerOf(v, selected, planReviews, now, (w) => needsByWork.get(w.id)),
+        runnerOf(v, selected, planReviews, now, (w) => needsByWork.get(w.id), {
+          // Пауза, которую новый run не снимет (оператор, отказ провайдера,
+          // проверка базы, чужая операция), или другое общее препятствие
+          // выдачи — запуск ничего не выдаст.
+          paused: nextRunControl(source, v).control.paused || engine.claimBlockedGlobally(v),
+          issuable: issuableIn(engine, v, (w) => needsByWork.get(w.id)),
+        }),
       ),
       ...((budgets) => (budgets ? { budgets } : {}))(budgetOverview(engine.budgetContext(), v)),
       ...(({ reviews, reviewsTruncated }) => ({
@@ -346,6 +353,40 @@ function withSteps<B extends { code: string; actor?: string | null }>(
   return blockers.map((b) => (person(b.actor) ? { ...b, step: order.indexOf(b) + 1 } : b));
 }
 
+/** Предел `runner.readyWorks` (`statusDataSchema`). */
+const READY_WORKS_MAX = 10_000;
+
+/**
+ * Работу выдаст новый запуск (alpha.67, P5-4) — та же проверка, что у
+ * `claim` (`Engine.claimableWork`, со всеми блокировками самой работы).
+ * Упавшая проверяется как готовая после повтора, и только если повтор —
+ * ход controller (`retry`): удержание, ожидание инфраструктуры и прочее
+ * держат и её.
+ */
+function issuableIn(
+  engine: Engine,
+  v: ExecutionView,
+  needsOf: (w: WorkState) => StageNeeds | undefined,
+) {
+  const gateHolds = engine.environmentGateHolds(v);
+  const infraPending = infraPendingIndex(v);
+  // Бюджеты — одним расчётом на все работы вида, а не записями вызовов на каждую.
+  const budgetBlock = engine.budgetBlockers(v);
+  return (w: WorkState) => {
+    if (w.status === 'failed') {
+      const needs = needsOf(w);
+      if (needs?.actor !== 'controller' || needs.action !== 'retry') return false;
+      return engine.claimableWork({ ...w, status: 'ready' }, v, {
+        gateHolds,
+        infraPending,
+        budgetBlock,
+        fresh: true,
+      });
+    }
+    return engine.claimableWork(w, v, { gateHolds, infraPending, budgetBlock, fresh: true });
+  };
+}
+
 /**
  * Кто двигает очередь (`runner`): живой controller, попытка с действующим
  * владением или ревью плана в живом run — `running`; иначе открытые
@@ -358,6 +399,7 @@ function runnerOf(
   planReviews: ReadonlyMap<string, string>,
   now: number,
   needsOf: (w: WorkState) => StageNeeds | undefined,
+  queue: { paused: boolean; issuable: (w: WorkState) => boolean },
 ) {
   const open = works.filter((w) => w.status !== 'done' && w.status !== 'cancelled');
   if (!open.length) return undefined;
@@ -403,9 +445,31 @@ function runnerOf(
     const needs = needsOf(w);
     return !needs || needs.actor === 'controller';
   });
+  // Вопрос держит только свою работу (alpha.67, P5-4): готовые независимые
+  // работы двигает новый запуск, а не ответ — ход ведущего сейчас.
+  const ready = queue.paused ? [] : open.filter(queue.issuable);
+  const asked = open.filter((w) => needsOf(w)?.action === 'answer-input').map((w) => w.id);
+  if (ready.length && asked.length) {
+    const ids =
+      asked.slice(0, 10).join(', ') + (asked.length > 10 ? ` и ещё ${asked.length - 10}` : '');
+    const idsEn =
+      asked.slice(0, 10).join(', ') + (asked.length > 10 ? ` and ${asked.length - 10} more` : '');
+    return {
+      state: 'not-running' as const,
+      restartBy: 'lead' as const,
+      ready: ready.length,
+      readyWorks: ready.slice(0, READY_WORKS_MAX).map((w) => w.id),
+      heldByQuestion: asked.slice(0, 50),
+      line: `Очередь стоит — никто не запущен: запустите harness run: готово ${ruCount(ready.length, ['задача', 'задачи', 'задач'])}, ${asked.length > 1 ? 'вопросы блокируют' : 'вопрос блокирует'} только ${ids} (ведущий).`,
+      lineEn: `The queue is idle — nothing is running: start harness run: ${ready.length} ${ready.length === 1 ? 'task is' : 'tasks are'} ready, the ${asked.length > 1 ? 'questions block' : 'question blocks'} only ${idsEn} (the lead).`,
+    };
+  }
   return {
     state: 'not-running' as const,
     restartBy: 'lead' as const,
+    ...(ready.length
+      ? { ready: ready.length, readyWorks: ready.slice(0, READY_WORKS_MAX).map((w) => w.id) }
+      : {}),
     line: waitsRun
       ? 'Очередь стоит — никто не запущен: работу сдвинет только новый запуск (ведущий: harness run).'
       : 'Очередь стоит — никто не запущен: после ответа или решения нужен новый запуск (ведущий: harness run).',
@@ -557,6 +621,7 @@ export function statusText(data: z.output<typeof statusDataSchema>): string {
   if (data.updates && data.updates.state !== 'up-to-date')
     out.push(`Обновления: ${data.updates.line}`);
   if (!data.works.length) out.push('Поручений нет.');
+  if (data.setupProgress) out.push(data.setupProgress.line);
   for (const w of data.works) {
     out.push(`${w.id} [${w.status}]${w.attemptSummary ? ': ' + w.attemptSummary.line : ''}`);
     if (w.stage) out.push(`  сейчас: ${w.stage.line.slice(w.id.length + 2)}`);

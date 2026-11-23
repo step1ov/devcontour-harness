@@ -299,6 +299,24 @@
                         "type": "string",
                         "pattern": "^[A-Za-z0-9_-]{1,80}$"
                       }
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "product",
+                        "infra"
+                      ]
+                    },
+                    "gateChanges": {
+                      "minItems": 1,
+                      "maxItems": 50,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500,
+                        "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                      }
                     }
                   },
                   "required": [
@@ -766,6 +784,24 @@
                 "items": {
                   "type": "string",
                   "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "product",
+                  "infra"
+                ]
+              },
+              "gateChanges": {
+                "minItems": 1,
+                "maxItems": 50,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
                 }
               }
             },
@@ -1734,6 +1770,24 @@
                     "items": {
                       "type": "string",
                       "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                    }
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "product",
+                      "infra"
+                    ]
+                  },
+                  "gateChanges": {
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500,
+                      "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
                     }
                   }
                 },

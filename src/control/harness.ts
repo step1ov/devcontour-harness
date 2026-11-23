@@ -38,6 +38,7 @@ import { standaloneHost } from '../engine/standalone.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { validateInputs } from '../validate.ts';
+import { cleanupSmoke, SMOKE_RUN_ID, smokeRoots } from './smoke-cleanup.ts';
 import { WorkflowQueue } from './workflow.ts';
 import { deadUpdateLock, updateInProgress } from '../update/busy.ts';
 import { statusOf } from './status.ts';
@@ -235,7 +236,17 @@ export class Harness {
    * Довести незавершённую очистку закончившейся попытки: повторить teardown по
    * сохранённым receipt окружений и убрать её рабочие деревья и снимки.
    */
-  cleanup(runId: string) {
+  async cleanup(runId: string) {
+    // Запись smoke (`LS-…`, alpha.67): повтор teardown или сверка оставшейся
+    // записи окружения, у которой дерева и ресурсов Docker уже нет.
+    if (SMOKE_RUN_ID.test(runId))
+      return cleanupSmoke({
+        stateDir: this.options.stateDir,
+        policy: this.policy,
+        id: runId,
+        roots: await smokeRoots(this.options.stateDir, this.runner.checkoutRoot().root),
+        record: (id, payload) => this.engine.recordEnvironmentReconciled(id, payload),
+      });
     return this.runner.finishCleanup(runId);
   }
 
@@ -321,6 +332,9 @@ export class Harness {
           ? 'You independently review a plan: a graph of executable work orders. Check that each order is complete, testable, scoped and that dependencies are right. Do not edit files.'
           : 'You independently review a contract document. Check that every obligation is feasible and measurable. Do not edit files.',
         JSON.stringify(input.kind === 'plan' ? input.graph : input.contract, null, 2),
+        input.kind === 'plan' && input.graph.orders.some((o) => o.kind === 'infra')
+          ? 'Orders with kind "infra" write harness-owned infrastructure (bridges, gate wrappers, acceptance tests). Product orders of the same repository must depend on them. An infra order that lists gateChanges replaces the definition of an existing gate: approve it only if the order states what the new check proves and that it is not weaker than the old one.'
+          : '',
         input.kind === 'contract' ? this.spikeNote(input.contract) : '',
         input.kind === 'contract' ? referenceNote(input.contract.checks) : '',
       ],

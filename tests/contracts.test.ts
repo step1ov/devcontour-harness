@@ -95,6 +95,9 @@ test('Изменение каждого поля поручения меняет
       ]),
     contracts: (o) => (o.contracts = [{ id: 'api', digest: sha256('api') }]),
     context: (o) => (o.context = ['rules']),
+    // alpha.67: вид работы и согласованные изменения gates (docs/infra-works.md).
+    kind: (o) => (o.kind = 'infra'),
+    gateChanges: (o) => (o.gateChanges = ['.harness/acceptance/a.test.mjs']),
   };
   const fields = Object.keys(workGraphSchema.shape.orders.element.shape).filter(
     (k) => k !== 'apiVersion',

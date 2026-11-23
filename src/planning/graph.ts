@@ -110,6 +110,8 @@ export function draftToGraph(
       requirements: task.requirements ?? [],
       contracts: refs,
       context: task.contextPacks ?? [],
+      ...(task.kind ? { kind: task.kind } : {}),
+      ...(task.gateChanges ? { gateChanges: task.gateChanges } : {}),
     };
   });
   const candidate: WorkGraphInput = {

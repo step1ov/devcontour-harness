@@ -12,6 +12,7 @@ import {
 } from './primitives.ts';
 import { digestOf } from './digest.ts';
 import type { CodedIssue } from './errors.ts';
+import { workKindSchema } from './infra.ts';
 
 /**
  * Откуда пришло поручение: коннектор, ключ записи в нём и её редакция.
@@ -91,6 +92,18 @@ export const workOrderSchema = z.strictObject({
   contracts: z.array(contractRefSchema).max(30).default([]),
   /** Обязательные источники контекста по ID ContextSnapshot. */
   context: z.array(idSchema).max(30).default([]),
+  /**
+   * Вид работы (alpha.67, docs/infra-works.md): `infra` — код инфраструктуры
+   * harness в области `repositories[].infra.paths`. Нет поля — продуктовая:
+   * необязательное поле без умолчания сохраняет digest прежних поручений.
+   */
+  kind: workKindSchema.optional(),
+  /**
+   * Только `infra`: файлы gates доверенной базы, которые работа меняет
+   * (новое определение gate). Список входит в digest графа: изменение
+   * определения gate согласует ревью плана, а не ревью кода.
+   */
+  gateChanges: z.array(relativePathSchema).min(1).max(50).optional(),
 });
 export type WorkOrder = z.infer<typeof workOrderSchema>;
 export type WorkOrderInput = z.input<typeof workOrderSchema>;

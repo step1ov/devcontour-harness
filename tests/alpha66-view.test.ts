@@ -652,3 +652,20 @@ test('P4-10: CLI lead begin|note|end и release done — синонимы, до�
   assert.equal(help.status, 0);
   assert.match(help.stdout, /^harness lead-note — /);
 });
+
+test('alpha.67 P5-5: заметка ведущего с числами сохраняет пробелы в строке прогноза (неразрывные — обычными)', () => {
+  assert.equal(cleanLeadText('Приняты 3 из 4 работ', 200, 'x'), 'Приняты 3 из 4 работ');
+  assert.equal(cleanLeadText('Приняты 3 из 4 работ', 200, 'x'), 'Приняты 3 из 4 работ');
+  const env = engineOf();
+  ready(env.engine, graphOf({ w: [], x: ['w'] }));
+  leadBegin(env.engine, { ttlMs: 30 * 60_000 });
+  acceptAll(env, 2, 'a');
+  env.clock.now += 60_000;
+  leadNote(env.engine, { text: 'Сайт принят. Приняты 3 из 4 работ, исполнитель на админке.' });
+  const view = viewOf(env);
+  assert.equal(
+    view.forecast!.progress.line,
+    'готово ~95 % · код принят, ведущий ещё работает: Сайт принят. Приняты 3 из 4 работ, исполнитель на админке.',
+  );
+  assert.match(view.lead!.line, /Приняты 3 из 4 работ/);
+});

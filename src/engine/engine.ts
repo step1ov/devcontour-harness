@@ -1702,6 +1702,86 @@ export class Engine {
     };
   }
 
+  /**
+   * Работу выдаст `claim` (условия самой работы, без глобальных: пауза,
+   * барьер хоста, проверка базы, применение политики, совместная проверка,
+   * предел параллельности — `claimBlockedGlobally`). Одна проверка для
+   * `claim` и для строки очереди `status` (`runner.ready`). `fresh` —
+   * чтение вне транзакции claim: записанный `budgetBlock` может отставать,
+   * бюджет считается заново (`budgetBlockOf`, или `budgetBlock` — общий
+   * расчёт для многих работ, `Engine.budgetBlockers`), записанный блок не
+   * читается, а устаревшая постановка или область — не готова (claim на ней
+   * откажет).
+   */
+  claimableWork(
+    w: WorkState,
+    view: ExecutionView,
+    options: {
+      gateHolds?: ReturnType<Engine['environmentGateHolds']>;
+      infraPending?: (w: WorkState) => string[];
+      fresh?: boolean;
+      budgetBlock?: (workId: string) => string | undefined;
+    } = {},
+  ): boolean {
+    if (w.status !== 'ready' || w.hold) return false;
+    if (
+      options.fresh
+        ? (options.budgetBlock ?? ((id: string) => this.budgetBlockOf(id, view)))(w.id)
+        : w.budgetBlock
+    )
+      return false;
+    // Gate удержан отказом без повтора (ps в песочнице): тот же gate
+    // откажет снова — ход ведущего, а не новая попытка.
+    if (this.gateHoldsOf(w, options.gateHolds ?? this.environmentGateHolds(view)).length)
+      return false;
+    // Два содержательных отказа по одному свойству: третья выдача — только
+    // после разбора. Принятие корпуса, ждущее оператора, удерживает выдачу.
+    if (blocksClaim(w) || this.awaitsOperator(w, view)) return false;
+    if (w.attempt >= this.policy.maxAttempts) return false;
+    // После `recovery.diagnoseAfter` засчитанных отказов — только после
+    // разбора ведущего; `split` ждёт перепланирования, противоречие — человека.
+    if (this.leadHoldOf(w, view)) return false;
+    if (neutralExhausted(w)) return false;
+    // Вопрос без применённого ответа: новая редакция графа и согласование
+    // делают поручение готовым, но выдачи нет до applyInput.
+    if (blockingRequest(view, w)) return false;
+    const graph = view.graph(w.graphId);
+    // Согласование привязано к graph digest и к политике, под которой оно дано.
+    if (!graph?.approval || graph.approval.digest !== graph.digest) return false;
+    if (graph.policyDigest !== executionDigest(this.policy)) return false;
+    const external = new Set(graph.graph.prerequisites.map((p) => p.id));
+    if (!w.order.dependsOn.every((d) => external.has(d) || view.work(d)?.status === 'done'))
+      return false;
+    // Инфраструктура раньше продукта и между графами: открытая работа
+    // инфраструктуры прежнего графа держит продуктовые работы своих репозиториев.
+    if ((options.infraPending ?? infraPendingIndex(view))(w).length) return false;
+    // Контракты поручения согласованы ревью своего digest при текущем назначении reviewer.
+    if (this.contractBlocker(w, view)) return false;
+    // Недопустимое назначение reviewer держит только это поручение.
+    if (this.reviewerBlocker(w)) return false;
+    if (options.fresh) {
+      if (w.approvedDigest !== this.host.basis.orderDigest(w, view)) return false;
+      if (w.approvedScope && w.approvedScope !== this.host.basis.scopeDigest(w, view)) return false;
+      if (this.host.guards.current(w, undefined, view)) return false;
+    }
+    return !this.host.guards.claimable(w, view);
+  }
+
+  /**
+   * Глобальные препятствия выдачи, кроме паузы (её снятие run решает
+   * `nextRunControl`): барьер хоста, неподтверждённая база, применение
+   * политики, идущая совместная проверка. Неприменённая политика процесса —
+   * свойство процесса claim, а не состояния: её здесь нет.
+   */
+  claimBlockedGlobally(view: ExecutionView): boolean {
+    return (
+      Boolean(this.host.guards.claimBarrier(view)) ||
+      awaitsBaseCheck(view.control()) ||
+      Boolean(this.reconfiguring(view)) ||
+      Boolean(this.liveJoint(view))
+    );
+  }
+
   /** Почему поручение сейчас не выдаётся; пусто — может быть выдано. */
   blockers(work: WorkState, view: ExecutionView) {
     const out: {
@@ -1767,6 +1847,12 @@ export class Engine {
       });
     if (work.hold)
       out.push({ code: 'NOT_READY', message: 'Удержано операцией ' + work.hold.operation });
+    const infra = infraPendingIndex(view)(work);
+    if (infra.length)
+      out.push({
+        code: 'NOT_READY',
+        message: `Ждёт работы инфраструктуры прежнего графа: ${infra.join(', ')}`,
+      });
     // Вопрос исполнителя без применённого ответа держит поручение сам по себе.
     const question = blockingRequest(view, work);
     if (question)
@@ -1874,35 +1960,10 @@ export class Engine {
         }
       }
       const gateHolds = this.environmentGateHolds(tx);
-      const eligible = tx.works().filter((w) => {
-        if (w.status !== 'ready' || w.hold || w.budgetBlock) return false;
-        // Gate удержан отказом без повтора (ps в песочнице): тот же gate
-        // откажет снова — ход ведущего, а не новая попытка.
-        if (this.gateHoldsOf(w, gateHolds).length) return false;
-        // Два содержательных отказа по одному свойству: третья выдача — только
-        // после разбора. Принятие корпуса, ждущее оператора, удерживает выдачу.
-        if (blocksClaim(w) || this.awaitsOperator(w, tx)) return false;
-        if (w.attempt >= this.policy.maxAttempts) return false;
-        // После `recovery.diagnoseAfter` засчитанных отказов — только после
-        // разбора ведущего; `split` ждёт перепланирования, противоречие — человека.
-        if (this.leadHoldOf(w, tx)) return false;
-        if (neutralExhausted(w)) return false;
-        // Вопрос без применённого ответа: новая редакция графа и согласование
-        // делают поручение готовым, но выдачи нет до applyInput.
-        if (blockingRequest(tx, w)) return false;
-        const graph = tx.graph(w.graphId);
-        // Согласование привязано к graph digest и к политике, под которой оно дано.
-        if (!graph?.approval || graph.approval.digest !== graph.digest) return false;
-        if (graph.policyDigest !== executionDigest(this.policy)) return false;
-        const external = new Set(graph.graph.prerequisites.map((p) => p.id));
-        if (!w.order.dependsOn.every((d) => external.has(d) || tx.work(d)?.status === 'done'))
-          return false;
-        // Контракты поручения согласованы ревью своего digest при текущем назначении reviewer.
-        if (this.contractBlocker(w, tx)) return false;
-        // Недопустимое назначение reviewer держит только это поручение.
-        if (this.reviewerBlocker(w)) return false;
-        return !this.host.guards.claimable(w, tx);
-      });
+      const infraPending = infraPendingIndex(tx);
+      const eligible = tx
+        .works()
+        .filter((w) => this.claimableWork(w, tx, { gateHolds, infraPending }));
       const work = eligible[0];
       if (!work) return undefined;
       if (work.approvedDigest !== this.host.basis.orderDigest(work, tx))
@@ -4639,6 +4700,16 @@ export class Engine {
     });
   }
 
+  /**
+   * Сверка записи окружения smoke (`harness cleanup LS-…`, alpha.67): событие
+   * `environment.reconciled` в журнале; состояние модели не меняется.
+   */
+  recordEnvironmentReconciled(runId: string, payload: RunEventPayload<'environment.reconciled'>) {
+    this.tx('environment.reconciled', (tx) => {
+      tx.emit({ type: 'environment.reconciled', runId, payload });
+    });
+  }
+
   /** Снять паузу операции — только свою; паузу человека она не трогает. */
   operationResume(operation: string) {
     return this.tx('scheduler.started', (tx) => {
@@ -6131,4 +6202,39 @@ export class Engine {
       };
     });
   }
+}
+
+/**
+ * Открытые работы инфраструктуры прежних графов (alpha.67, docs/infra-works.md)
+ * по репозиториям продуктовой работы — своему и связанным. Внутри графа
+ * порядок задаёт `dependsOn` (`plan-check`/`validate`); между графами — эта
+ * проверка: продуктовая работа не выдаётся, пока инфраструктура, на которой
+ * её проверят, не принята или не отменена (draft и исчерпанная — тоже держат;
+ * отменяет их ведущий или план, не движок). Индекс строится одним проходом
+ * по работам: на каждую работу — поиск по её репозиториям.
+ */
+export function infraPendingIndex(view: ExecutionView): (work: WorkState) => string[] {
+  const order = new Map(view.graphs().map((g, i) => [g.id, i]));
+  // Репозиторий → открытые работы инфраструктуры с индексом их графа.
+  const open = new Map<string, { id: string; graph: number }[]>();
+  for (const w of view.works())
+    if (w.order.kind === 'infra' && w.status !== 'done' && w.status !== 'cancelled') {
+      const list = open.get(w.order.repositoryId) ?? [];
+      list.push({ id: w.id, graph: order.get(w.graphId) ?? -1 });
+      open.set(w.order.repositoryId, list);
+    }
+  return (work) => {
+    if (work.order.kind === 'infra' || !open.size) return [];
+    const own = order.get(work.graphId);
+    if (own === undefined || own <= 0) return [];
+    const out = new Set<string>();
+    for (const repo of new Set([work.order.repositoryId, ...work.order.relatedRepositories]))
+      for (const x of open.get(repo) ?? []) if (x.graph >= 0 && x.graph < own) out.add(x.id);
+    return [...out];
+  };
+}
+
+/** Одна работа — `infraPendingIndex` без индекса. */
+export function infraPendingOf(work: WorkState, view: ExecutionView): string[] {
+  return infraPendingIndex(view)(work);
 }

@@ -23,7 +23,7 @@ import type {
 import type { Engine } from '../engine/engine.ts';
 import { acceptanceGap, repairDecision, repeatedTestcase } from '../engine/repair.ts';
 import { requestsIndex } from '../engine/input-requests.ts';
-import { activeOf } from '../engine/engine.ts';
+import { activeOf, infraPendingIndex } from '../engine/engine.ts';
 import { callRecords, liveCall } from '../engine/usage.ts';
 import { inputStateOf } from '../projections/input.ts';
 import { recoveryPolicyOf } from '../projections/decisions.ts';
@@ -186,6 +186,8 @@ export function stopInputsIn(
   const { jobs, now } = context;
   return ((v: ExecutionView) => {
     const works = v.works();
+    // Открытые работы инфраструктуры прежних графов держат продуктовые (alpha.67).
+    const infraPending = infraPendingIndex(v);
     // Первая работа с этим id — как `v.work(id)`; все зависимости графа — в нём.
     const byId = new Map<string, WorkState>();
     for (const w of works) if (!byId.has(w.id)) byId.set(w.id, w);
@@ -522,6 +524,10 @@ export function stopInputsIn(
             leadRecoveryInput(work, attempts, recovery, holdById(work.id), budgetHeld(work)),
           ),
           ...(waitingOn.length ? { waitingOn } : {}),
+          ...((ids) =>
+            ids.length && (work.status === 'ready' || work.status === 'failed')
+              ? { infraWaitingOn: ids }
+              : {})(infraPending(work)),
           ...(approvalStale ? { approvalStale } : {}),
           ...((since) => (since ? { planReview: { since } } : {}))(planReviews.get(work.graphId)),
           ...(openDependents ? { openDependents } : {}),
@@ -691,6 +697,8 @@ function outlookOf(
   };
   // Повтор не будет выдан: пауза, hold, бюджет, исчерпанные попытки (claim их
   // проверяет и у готовой работы) или предпосылка, на которой claim встанет.
+  // Ожидание инфраструктуры прежнего графа сюда не входит: исход повтора
+  // считается без него, а ожидание показывает диагноз (`infraWaitingOn`).
   const unclaimable = (w: (typeof works)[number]) =>
     control.paused ||
     Boolean(w.hold) ||

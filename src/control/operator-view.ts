@@ -10,7 +10,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import type { z } from 'zod';
 import {
   DEFAULT_INPUT_POLICY,
@@ -24,6 +24,8 @@ import {
   leadMayAnswer,
   policyDigest,
   PROJECT_MANIFEST_PATH,
+  HARNESS_PROJECT_DIR,
+  type SetupProgress,
   projectManifestSchema,
   reviewVerdictText,
   type ExecutionPolicy,
@@ -82,6 +84,7 @@ import { WorkflowQueue } from './workflow.ts';
 import { reviewRoundCap } from './review.ts';
 import { reviewSubjectSummary } from './review-summary.ts';
 import { stageOfStep } from './stage.ts';
+import { setupProgress } from './setup-progress.ts';
 import { cachedUpdates, installedHarness, loadUpdatesConfig } from '../update/check.ts';
 import type { PreviewView, UpdatesView } from '../projections/operator-view.ts';
 import { livePreviews } from './preview.ts';
@@ -894,6 +897,7 @@ export function collectOperatorViewInput(
         status: sw.status,
         title: w.order.title,
         ...(planned ? { planned: true as const } : {}),
+        ...(w.order.kind === 'infra' ? { kind: 'infra' as const } : {}),
         ...(sw.resultSha ? { resultSha: sw.resultSha } : {}),
         ...(w.order.dependsOn.length ? { dependsOn: w.order.dependsOn } : {}),
         stage: {
@@ -1094,6 +1098,11 @@ export function collectOperatorViewInput(
           ? {
               runner: status.runner.state,
               ...(status.runner.restartBy ? { restartBy: status.runner.restartBy } : {}),
+              ...(status.runner.ready ? { ready: status.runner.ready } : {}),
+              ...(status.runner.readyWorks ? { readyWorks: status.runner.readyWorks } : {}),
+              ...(status.runner.heldByQuestion
+                ? { heldByQuestion: status.runner.heldByQuestion }
+                : {}),
               line: status.runner.line,
               lineEn: status.runner.lineEn,
             }
@@ -1666,17 +1675,31 @@ export function harnessView(
   options: HarnessViewOptions,
 ): OperatorView | WorkDetailView | SetupView {
   const located = locateProject(options);
-  const setup = (waitingFor: 'project' | 'policy') =>
+  const now = options.now ?? Date.now();
+  // Ход настройки (ревизия 7): по `.harness/` проекта и записям smoke/gates
+  // каталога состояния — только в раскладке проекта harness.
+  const progressOf = (harnessDir: string | undefined, stateDir?: string) =>
+    harnessDir && basename(harnessDir) === HARNESS_PROJECT_DIR && existsSync(harnessDir)
+      ? setupProgress({ harnessDir, ...(stateDir ? { stateDir } : {}), now })
+      : undefined;
+  const setup = (waitingFor: 'project' | 'policy', progress?: SetupProgress) =>
     setupView(
       {
-        now: options.now ?? Date.now(),
+        now,
         harnessVersion: HARNESS_VERSION,
         stateVersion: STATE_VERSION,
         waitingFor,
+        ...(progress ? { progress } : {}),
       },
       options.lang ? { lang: options.lang } : {},
     );
-  if (!located) return setup('project');
+  if (!located)
+    return setup(
+      'project',
+      options.repository
+        ? progressOf(join(resolve(options.repository), HARNESS_PROJECT_DIR))
+        : undefined,
+    );
   const stateDir = located.stateDir;
   // Политика проекта из manifest, которой ещё нет, — не явный `--policy`:
   // без неё действует привязка состояния (или прежний отказ POLICY_REQUIRED).
@@ -1695,7 +1718,7 @@ export function harnessView(
     !existsSync(join(stateDir, 'state.sqlite')) &&
     (policyPath === undefined || !existsSync(policyPath))
   )
-    return setup('policy');
+    return setup('policy', progressOf(located.policyPath && dirname(located.policyPath), stateDir));
   const policy = viewPolicy(stateDir, policyPath);
   const projection: OperatorViewOptions = {
     ...(options.windowMs !== undefined ? { windowMs: options.windowMs } : {}),
@@ -1706,13 +1729,22 @@ export function harnessView(
   const updates = options.workId === undefined ? updatesInput(stateDir, policy.baseDir) : undefined;
   // Живые превью результата — из их receipt, только чтение (docs/previews.md).
   const previews = options.workId === undefined ? previewsInput(stateDir) : undefined;
-  const project = (input: OperatorViewInput) =>
-    options.workId !== undefined
-      ? workDetailView(input, options.workId, projection)
-      : operatorView(
-          { ...input, ...(updates ? { updates } : {}), ...(previews ? { previews } : {}) },
-          projection,
-        );
+  const project = (input: OperatorViewInput) => {
+    if (options.workId !== undefined) return workDetailView(input, options.workId, projection);
+    // Пока работ нет — ход настройки (ревизия 7).
+    const progress = input.works.length
+      ? undefined
+      : progressOf(policyPath ? dirname(policyPath) : policy.baseDir, stateDir);
+    return operatorView(
+      {
+        ...input,
+        ...(updates ? { updates } : {}),
+        ...(previews ? { previews } : {}),
+        ...(progress ? { setup: progress } : {}),
+      },
+      projection,
+    );
+  };
   if (!existsSync(join(stateDir, 'state.sqlite')))
     return project(emptyInput(policy, options.now ?? Date.now(), stateDir));
   // Однократное чтение без файлов в каталоге состояния (как `report`):

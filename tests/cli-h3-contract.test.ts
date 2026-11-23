@@ -177,6 +177,8 @@ const ADDITIVE_EVENT_TYPES = new Set([
   'work.rework-abandoned',
   // alpha.66: разбор ведущего повторных отказов (`harness diagnose`).
   'work.diagnosed',
+  // alpha.67: сверка записи окружения smoke (`harness cleanup LS-…`).
+  'environment.reconciled',
 ]);
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([
@@ -271,6 +273,10 @@ const ADDITIVE_ENUM_VALUES = new Set([
 const H2_CANCEL_DESCRIPTION =
   'Отменить поручение: активная попытка теряет владение, поручение становится cancelled; это не retry';
 const H2_CANCEL_IDEMPOTENCY = 'Повтор для отменённого ничего не меняет';
+/** alpha.67: cleanup принимает и ID запуска smoke (`LS-…`). */
+const H2_CLEANUP_DESCRIPTION =
+  'Довести незавершённую очистку закончившейся попытки: повторить teardown по сохранённым receipt окружений и убрать её рабочие деревья; модели, gates и Git-приёмка не вызываются';
+const H2_CLEANUP_RUN = 'ID попытки (runId)';
 /** Единственная намеренная правка текста прежней команды в L0: порядок записи init. */
 const H2_INIT_DESCRIPTION =
   'Подготовить существующий Git npm/pnpm-репозиторий: план или create-only запись .harness/ (политика из профиля и toolchain inspection, manifest последним); чужие файлы не меняются';
@@ -408,6 +414,7 @@ test('H3-01: прежние команды и схемы их данных не 
           ...(c === 'cancel'
             ? { description: H2_CANCEL_DESCRIPTION, idempotency: H2_CANCEL_IDEMPOTENCY }
             : {}),
+          ...(c === 'cleanup' ? { description: H2_CLEANUP_DESCRIPTION } : {}),
           // Аддитивный код отказа (alpha.35: CONTEXT_EXHAUSTED у run).
           refusals: contract.refusals.filter(
             (code) => !ADDITIVE_ENUM_VALUES.has(code) && !ADDITIVE_REFUSALS.has(`${c}:${code}`),
@@ -418,6 +425,7 @@ test('H3-01: прежние команды и схемы их данных не 
               const copy: CliArgument = { ...arg };
               delete copy.multiple;
               if (c === 'init' && arg.name === '--writer') copy.description = H2_INIT_WRITER;
+              if (c === 'cleanup' && arg.name === '--run') copy.description = H2_CLEANUP_RUN;
               // alpha.65: --state у status заменим --repository — прежний обязательный аргумент.
               if (c === 'status' && arg.name === '--state')
                 Object.assign(copy, {
@@ -467,6 +475,27 @@ test('H3-01: прежние команды и схемы их данных не 
         for (const key of ['diagnosis', 'index', 'cap', 'granted']) delete rest[key];
         v = rest;
       }
+    }
+    // alpha.67: ход настройки у status (`setupProgress`), готовые работы и
+    // работы под вопросом у строки очереди (`runner.ready`,
+    // `runner.heldByQuestion`), следующий шаг очереди у explain (`queue`),
+    // сверенные записи smoke у cleanup (`reconciled`), вид работы и
+    // изменения gates у поручения графа plan-check (`kind`, `gateChanges`).
+    if (k === 'properties' && v && typeof v === 'object') {
+      const o = { ...(v as Record<string, unknown>) };
+      const before = Object.keys(o).length;
+      if ('works' in o && 'control' in o) delete o.setupProgress;
+      if ('state' in o && 'restartBy' in o && 'planReviews' in o) {
+        delete o.ready;
+        delete o.heldByQuestion;
+      }
+      if ('diagnoses' in o) delete o.queue;
+      if ('status' in o && 'receipts' in o) delete o.reconciled;
+      if ('writeScope' in o && 'context' in o && 'contracts' in o) {
+        delete o.kind;
+        delete o.gateChanges;
+      }
+      if (Object.keys(o).length !== before) v = o;
     }
     if (k === 'enum' && Array.isArray(v) && v.includes('recovery') && v.includes('host'))
       v = (v as unknown[]).filter((x) => x !== 'lead');
