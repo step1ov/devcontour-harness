@@ -688,7 +688,7 @@ test('alpha.60 CLI: status --human — строки очереди, обновл
   assert.equal(view.questions[0].rationale, 'User-visible text');
 });
 
-test('alpha.68 CLI (P6-17): input-answer без --actor в открытой сессии ведущего — как --actor lead (тот же отказ на вопрос человека); --actor operator — ответ человека', () => {
+test('alpha.68 CLI: input-answer без --actor и в открытой сессии ведущего — ответ оператора; ведущий отвечает только явно --actor lead', () => {
   const p = project();
   const base = ['--graph', 'graph.json', '--policy', 'policy.json', '--state', p.state];
   assert.equal(p.harness('run', ...base).status, exitCodes.refused);
@@ -697,16 +697,9 @@ test('alpha.68 CLI (P6-17): input-answer без --actor в открытой се
   const args = ['--state', p.state, '--request', id, '--text', 'Hello', '--option', 'hello'];
   const explicit = p.harness('input-answer', ...args, '--actor', 'lead', '--request-version', '1');
   assert.equal(explicit.json.ok, false, 'вопрос человека ведущий сам не решает');
-  const implicit = p.harness('input-answer', ...args, '--request-version', '1');
-  assert.equal(implicit.json.ok, false);
-  assert.equal(implicit.status, explicit.status);
-  assert.equal(implicit.json.error?.code, explicit.json.error?.code);
-  assert.match(
-    implicit.stderr,
-    /--actor не задан: в открытой сессии ведущего команда исполняется как --actor lead; решение человека — явно --actor operator/,
-  );
-  const human = p.harness('input-answer', ...args, '--actor', 'operator', '--request-version', '1');
-  assert.equal(human.status, 0, human.stderr);
-  assert.equal(human.json.data.answer.actor.kind, 'operator');
-  assert.equal(human.json.data.actorSource, 'flag');
+  // Ответ владельца, который передаёт ведущий, не записывается решением ведущего.
+  const relayed = p.harness('input-answer', ...args, '--request-version', '1');
+  assert.equal(relayed.status, 0, relayed.stderr);
+  assert.equal(relayed.json.data.answer.actor.kind, 'operator');
+  assert.equal(relayed.json.data.actorSource, undefined);
 });

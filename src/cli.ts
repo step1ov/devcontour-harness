@@ -2340,24 +2340,13 @@ async function run(
             v.kind ?? 'clarification',
             'kind',
           );
-          // Без `--actor` внутри открытой сессии ведущего ответ — ведущего
-          // (alpha.68, P6-17): движок проверяет его как `--actor lead`
-          // (только технический вопрос, с --reason), а не записывает молча
-          // решением человека. Ответ человека — явно `--actor operator`.
-          const actorSource =
-            v.actor !== undefined
-              ? ('flag' as const)
-              : leadSessionOpen(h.engine)
-                ? ('lead-session' as const)
-                : ('default' as const);
-          const actor = parseWith(
-            z.enum(['operator', 'lead']),
-            v.actor ?? (actorSource === 'lead-session' ? 'lead' : 'operator'),
-            'actor',
-          );
-          let answered;
-          try {
-            answered = h.answerInput(
+          // Ответ без `--actor` — оператора, и в открытой сессии ведущего:
+          // ответ владельца, который передаёт ведущий, не записывается
+          // решением ведущего. Ответ ведущего — только явно `--actor lead`.
+          const actor = parseWith(z.enum(['operator', 'lead']), v.actor ?? 'operator', 'actor');
+          return {
+            command,
+            data: h.answerInput(
               id,
               {
                 text: need('text'),
@@ -2367,11 +2356,8 @@ async function run(
                 ...optional('reason', v.reason),
               },
               version(),
-            );
-          } catch (error) {
-            throw actorSource === 'lead-session' ? leadSessionRefusal(error, '--actor') : error;
-          }
-          return { command, data: { ...answered, actorSource } };
+            ),
+          };
         }
         if (command === 'input-context') {
           const out = resolve(need('out'));
@@ -2484,15 +2470,9 @@ function journalLeadCommand(
     };
     // Актёр, которого команда получила от сессии ведущего (alpha.68): журнал
     // пишет его, как если бы флаг был задан.
-    const d = data as { by?: unknown; bySource?: unknown; actorSource?: unknown } | undefined;
+    const d = data as { by?: unknown; bySource?: unknown } | undefined;
     if (command === 'retry' && flags.by === undefined && d?.bySource === 'lead-session')
       flags.by = 'lead';
-    if (
-      command === 'input-answer' &&
-      flags.actor === undefined &&
-      d?.actorSource === 'lead-session'
-    )
-      flags.actor = 'lead';
     const entry = leadCommandEntry(command, flags, data, phase);
     if (!entry) return false;
     const h = open(state, binding(state), false);

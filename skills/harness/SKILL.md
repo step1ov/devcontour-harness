@@ -781,10 +781,12 @@ connector — is invisible unless you say it:
   written to your log only while your session is active, or when they say
   `--by lead` / `--actor lead` (`diagnose` is always yours); a command with `--actor operator` (or
   `--by <human>`) is the operator's and does not extend your lease. Inside
-  your open session, `retry` without `--by` and `input-answer` without
-  `--actor` run as yours (`--by lead` / `--actor lead`, with the same limits
-  and refusals; the answer says `bySource`/`actorSource: lead-session`); a
-  human's decision you pass on still needs `--by operator` / `--actor operator`.
+  your open session, `retry` without `--by` runs as yours (`--by lead`, with
+  the same limits and refusals; the answer says `bySource: lead-session`); a
+  human's retry decision you pass on still needs `--by operator`.
+  `input-answer` without `--actor` is always the operator's, also inside your
+  session: an owner's answer you pass on stays the owner's. Your own
+  technical answer needs `--actor lead --reason "…"`.
 - **Declare the whole release first** — before the first graph, record the
   release outline: stages × components with a rough size and who does them,
   not only the next graph:

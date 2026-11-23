@@ -3348,12 +3348,6 @@ export const inputAnswerDataSchema = z.strictObject({
   request: inputRequestSchema,
   answer: inputAnswerSchema,
   changed: z.boolean(),
-  /**
-   * Откуда актёр ответа (0.1.0-alpha.68): `flag` (`--actor`), `lead-session`
-   * (без `--actor` в открытой сессии ведущего: как `--actor lead`) или
-   * `default` (без флага и без сессии: оператор).
-   */
-  actorSource: z.enum(['flag', 'lead-session', 'default']).optional(),
 });
 export const inputContextDataSchema = z.strictObject({
   requestId: requestIdSchema,

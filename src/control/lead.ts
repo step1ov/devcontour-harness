@@ -469,9 +469,10 @@ export function recordLeadCommand(
 
 /**
  * Открыта ли сейчас сессия ведущего (`lead begin` без `lead end`, аренда не
- * истекла; alpha.68, P6-17). Команда с актёром (`retry --by`, `input-answer
- * --actor`) без флага внутри открытой сессии — команда ведущего: движок
- * исполняет её как `--by lead`/`--actor lead`, с теми же правами и отказами.
+ * истекла; alpha.68, P6-17). `retry` без `--by` внутри открытой сессии —
+ * повтор ведущего: движок исполняет его как `--by lead`, с теми же правами и
+ * отказами. `input-answer` без `--actor` остаётся ответом оператора: ответ
+ * владельца, который передаёт ведущий, не записывается решением ведущего.
  */
 export function leadSessionOpen(engine: Engine): boolean {
   const log = engine.read((v) => v.local('lead', WORKSPACE_OWNER, 'log'));
@@ -485,7 +486,7 @@ export type LeadActorSource = 'flag' | 'lead-session' | 'default';
  * Отказ команды, которой актёра `lead` дала сессия ведущего: тот же код, к
  * сообщению — откуда актёр и как подать решение человека явно.
  */
-export function leadSessionRefusal(error: unknown, flag: '--by' | '--actor'): unknown {
+export function leadSessionRefusal(error: unknown, flag: '--by'): unknown {
   if (!(error instanceof HarnessError)) return error;
   return new HarnessError(
     error.code,
