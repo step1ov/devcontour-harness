@@ -14,7 +14,7 @@
  * должен печатать безопасную выжимку сам.
  */
 
-import { constants, existsSync } from 'node:fs';
+import { closeSync, constants, existsSync, openSync } from 'node:fs';
 import { lstat, open, realpath, type FileHandle } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 import type { GateFailureSummary } from '../contracts/index.ts';
@@ -233,6 +233,22 @@ export const reportReadHooks: { step?: (stage: 'directory' | 'file', path: strin
 /** Каталог дескрипторов процесса, через который путь открывается от дескриптора каталога. */
 const FD_DIR = '/proc/self/fd';
 const fdWalk = process.platform === 'linux' && existsSync(FD_DIR);
+/**
+ * `O_NOFOLLOW_ANY` macOS (11+): открытие отказывает (`ELOOP`), если ссылка —
+ * любой компонент пути, а не только последний. Есть — им открывается каждый
+ * компонент полным путём (окно подмены родителя между вызовами закрыто
+ * ядром); нет (`EINVAL`, прежняя система) — `O_NOFOLLOW` и сверка inode.
+ */
+const O_NOFOLLOW_ANY = 0x20000000;
+const nofollowAny = (() => {
+  if (process.platform !== 'darwin' || fdWalk) return 0;
+  try {
+    closeSync(openSync('/', constants.O_RDONLY | O_NOFOLLOW_ANY));
+    return O_NOFOLLOW_ANY;
+  } catch {
+    return 0;
+  }
+})();
 
 const same = (a: { dev: number; ino: number }, b: { dev: number; ino: number }) =>
   a.dev === b.dev && a.ino === b.ino;
@@ -249,7 +265,10 @@ const same = (a: { dev: number; ino: number }, b: { dev: number; ino: number }) 
  *   открыт, как у `openat`). Подмена родителя ссылкой после его открытия на
  *   обход не влияет: без гонки, каждое имя проверено `O_NOFOLLOW` в каталоге,
  *   который уже открыт внутри дерева.
- * - Иначе (macOS — `/dev/fd/<fd>/<имя>` там не обходится): компонент
+ * - macOS с `O_NOFOLLOW_ANY` (11+): компонент открывается полным путём от
+ *   настоящего корня с `O_NOFOLLOW_ANY` — ядро отказывает, если любой
+ *   компонент пути в момент открытия — ссылка; сверка inode ниже остаётся.
+ * - Иначе (`/dev/fd/<fd>/<имя>` на macOS не обходится): компонент
  *   открывается полным путём от настоящего корня с `O_NOFOLLOW`; после
  *   открытия отчёта сверка: каждый префикс по `lstat` — каталог, не ссылка, с
  *   тем же устройством и inode, что его открытый дескриптор, а путь отчёта по
@@ -257,7 +276,7 @@ const same = (a: { dev: number; ino: number }, b: { dev: number; ino: number }) 
  *   которая держится на любом из этих вызовов, отклоняется; подмена, снятая до
  *   сверки, — тоже: открытый чужой файл не совпадёт с файлом по пути, а
  *   внести его в дерево вторым именем нельзя (`nlink` 1), переносом — только
- *   с правом записи в его каталог вне дерева. Остаётся окно: процесс, который
+ *   с правом записи в его каталог вне дерева. Без `O_NOFOLLOW_ANY` остаётся окно: процесс, который
  *   переключает родителя между отдельными вызовами сверки с точностью до
  *   вызова. Отчёт читается после остановки процессов gate, так что такой
  *   процесс — только уцелевший потомок.
@@ -279,7 +298,9 @@ async function readReportFile(full: string, root: string, realRoot: string, sinc
         await open(
           target,
           constants.O_RDONLY |
-            constants.O_NOFOLLOW |
+            // `O_NOFOLLOW_ANY` с `O_NOFOLLOW` вместе ядро macOS не принимает
+            // (`EINVAL`); первый строже второго.
+            (nofollowAny || constants.O_NOFOLLOW) |
             (last ? constants.O_NONBLOCK : constants.O_DIRECTORY),
         ),
       );
@@ -335,3 +356,6 @@ export function failureSummaryLine(s: GateFailureSummary) {
     .filter(Boolean)
     .join('; ');
 }
+
+/** Открывает ли чтение отчётов компоненты с `O_NOFOLLOW_ANY` (macOS). */
+export const reportNoFollowAny = () => nofollowAny !== 0;

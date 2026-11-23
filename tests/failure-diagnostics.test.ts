@@ -40,6 +40,7 @@ import { runGate } from '../src/verification/gates.ts';
 import {
   commandReports,
   failureSummary,
+  reportNoFollowAny,
   reportReadHooks,
   WITHHELD_NOTE,
 } from '../src/verification/failure-summary.ts';
@@ -471,4 +472,9 @@ test('smoke: отказ ready несёт хвост шага, таблица --h
     text,
     /ready\/photo-ready\s+failed\s+1\s+1 с \(SIGTERM\)\n\s+\| stage=bindings\n\s+\| port 127/,
   );
+});
+
+test('A68-r3: macOS открывает компоненты отчёта с O_NOFOLLOW_ANY — ссылка в любом родителе отклоняется ядром', () => {
+  if (process.platform === 'darwin') assert.equal(reportNoFollowAny(), true);
+  else assert.equal(reportNoFollowAny(), false);
 });
