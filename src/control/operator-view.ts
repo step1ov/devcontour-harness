@@ -736,6 +736,7 @@ export const DECISION_EVENT_TYPES = [
   'graph.registered',
   'graph.approved',
   'budget.raised',
+  'policy.applied',
 ] as const;
 
 /** Сколько последних событий решений читает представление. */
@@ -923,20 +924,21 @@ export function decisionsInputOf(
         changes: e.payload.changes,
         // Причину и кто решил называет повторное согласование после правки
         // политики (`reapprove --by --reason`), если оно было.
-        // Только под той же политикой: повторное согласование после правки,
-        // поднявшей предел (тот же digest исполнения); иначе причины нет.
+        // Только в том же поколении политики: повторное согласование после
+        // этого подъёма и до следующего применения политики (ревью r2);
+        // иначе причины нет.
         ...((r) =>
           r && r.type === 'graph.approved' && r.payload.reapproval
             ? { by: r.payload.reapproval.by, reason: r.payload.reapproval.reason }
             : {})(
-          e.payload.policyDigest
-            ? events.find(
-                (x) =>
-                  x.seq > e.seq &&
-                  x.type === 'graph.approved' &&
-                  x.payload.reapproval?.policyDigest === e.payload.policyDigest,
-              )
-            : undefined,
+          ((next) =>
+            events.find(
+              (x) =>
+                x.seq > e.seq &&
+                (next === undefined || x.seq < next) &&
+                x.type === 'graph.approved' &&
+                !!x.payload.reapproval,
+            ))(events.find((x) => x.seq > e.seq && x.type === 'policy.applied')?.seq),
         ),
       });
     else if (e.type === 'graph.approved' && e.payload.reapproval && e.graphId)

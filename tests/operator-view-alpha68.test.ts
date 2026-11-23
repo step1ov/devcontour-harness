@@ -472,15 +472,17 @@ test('a68: решения — поднятый бюджет (человек, п�
         policyDigest: 'b'.repeat(64),
       },
     }),
-    // Подъём под другой политикой, после которого повторного согласования под
-    // ней не было: причины нет (не берётся чужая).
+    // Подъём поколения 6, после которого применена другая политика (7), и
+    // только под ней — повторное согласование: причины нет (не берётся чужая;
+    // digest исполнения у правки только пределов прежний).
     ev(3, 'budget.raised', {
       by: 'process',
       generation: 6,
-      policyDigest: 'c'.repeat(64),
+      policyDigest: 'b'.repeat(64),
       changes: [{ field: 'repairBudget', before: 6, after: 8 }],
     }),
-    ev(4, 'graph.approved', {
+    ev(4, 'policy.applied', { digest: 'f'.repeat(64), generation: 7, by: 'process' }),
+    ev(5, 'graph.approved', {
       digest: 'd'.repeat(64),
       actor: 'agent',
       reapproval: {
@@ -488,7 +490,7 @@ test('a68: решения — поднятый бюджет (человек, п�
         reason: 'другая правка политики',
         round: 8,
         previousPolicyDigest: 'c'.repeat(64),
-        policyDigest: 'e'.repeat(64),
+        policyDigest: 'b'.repeat(64),
       },
     }),
   ];
