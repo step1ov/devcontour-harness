@@ -938,7 +938,16 @@ export function decisionsInputOf(
                 (next === undefined || x.seq < next) &&
                 x.type === 'graph.approved' &&
                 !!x.payload.reapproval,
-            ))(events.find((x) => x.seq > e.seq && x.type === 'policy.applied')?.seq),
+            ))(
+            // Граница — применение следующего поколения: `policy.applied` того
+            // же поколения пишется рядом с подъёмом (ревью r3).
+            events.find(
+              (x) =>
+                x.seq > e.seq &&
+                x.type === 'policy.applied' &&
+                x.payload.generation > e.payload.generation,
+            )?.seq,
+          ),
         ),
       });
     else if (e.type === 'graph.approved' && e.payload.reapproval && e.graphId)

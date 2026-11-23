@@ -461,7 +461,9 @@ test('a68: решения — поднятый бюджет (человек, п�
         { field: 'reviewRounds', before: 6, after: 8 },
       ],
     }),
-    ev(2, 'graph.approved', {
+    // Порядок запуска: подъём и `policy.applied` того же поколения рядом.
+    ev(2, 'policy.applied', { digest: 'b'.repeat(64), generation: 4, by: 'process' }),
+    ev(3, 'graph.approved', {
       digest: 'd'.repeat(64),
       actor: 'agent',
       reapproval: {
@@ -475,14 +477,15 @@ test('a68: решения — поднятый бюджет (человек, п�
     // Подъём поколения 6, после которого применена другая политика (7), и
     // только под ней — повторное согласование: причины нет (не берётся чужая;
     // digest исполнения у правки только пределов прежний).
-    ev(3, 'budget.raised', {
+    ev(4, 'budget.raised', {
       by: 'process',
       generation: 6,
       policyDigest: 'b'.repeat(64),
       changes: [{ field: 'repairBudget', before: 6, after: 8 }],
     }),
-    ev(4, 'policy.applied', { digest: 'f'.repeat(64), generation: 7, by: 'process' }),
-    ev(5, 'graph.approved', {
+    ev(5, 'policy.applied', { digest: 'b'.repeat(64), generation: 6, by: 'process' }),
+    ev(6, 'policy.applied', { digest: 'f'.repeat(64), generation: 7, by: 'process' }),
+    ev(7, 'graph.approved', {
       digest: 'd'.repeat(64),
       actor: 'agent',
       reapproval: {
