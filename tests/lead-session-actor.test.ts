@@ -4,6 +4,8 @@
  * права и отказы: сброс ведущего — по разбору и в пределе), журнал пишет
  * ведущего; явный `--by operator` остаётся оператором; без сессии — прежнее
  * умолчание (оператор). Ответ команды называет, откуда актёр (`bySource`).
+ * P6-33: `lead end` при готовых работах и без запуска — предупреждение
+ * `READY_WORKS_NOT_RUNNING` (`readyNotRunning`), не отказ.
  */
 import './temp-scope.ts';
 import { test } from 'node:test';
@@ -142,4 +144,44 @@ test('P6-17: сброс без --by в сессии — сброс ведуще�
   );
   assert.equal(human.status, 0, human.stderr);
   assert.equal((human.json.data!.reset as { performed: boolean }).performed, true);
+});
+
+/** Каталог состояния с готовой согласованной работой `w`; никто не запущен. */
+function readyWork() {
+  const env = engineOf(policyOf());
+  ready(env.engine, graphOf({ w: [] }));
+  writeFileSync(
+    join(env.dir, 'binding.json'),
+    JSON.stringify({ policy: env.engine.policy, baseDir: env.dir }),
+  );
+  env.store.close();
+  return env.dir;
+}
+
+test('P6-33: lead end при готовых работах и без запуска — предупреждение READY_WORKS_NOT_RUNNING, выход 0, сессия закончена', () => {
+  const dir = readyWork();
+  assert.equal(harness('lead', 'begin', '--state', dir, '--ttl', '30m').status, 0);
+  const r = harness('lead', 'end', '--state', dir);
+  assert.equal(r.status, 0, r.stderr);
+  const data = cliDataSchemas['lead-end'].parse(r.json.data);
+  assert.equal(data.lead.active, false);
+  assert.deepEqual(
+    data.readyNotRunning && {
+      code: data.readyNotRunning.code,
+      ready: data.readyNotRunning.ready,
+      readyWorks: data.readyNotRunning.readyWorks,
+    },
+    { code: 'READY_WORKS_NOT_RUNNING', ready: 1, readyWorks: ['w'] },
+  );
+  assert.match(data.readyNotRunning!.line, /готово 1 задача и никто не запущен \(w\).*harness run/);
+  assert.match(r.stderr, /^harness: READY_WORKS_NOT_RUNNING: Сессия закончена/m);
+});
+
+test('P6-33: lead end без готовых работ (очередь на паузе) — без предупреждения', () => {
+  const dir = readyWork();
+  assert.equal(harness('pause', '--state', dir).status, 0);
+  const r = harness('lead', 'end', '--state', dir);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(cliDataSchemas['lead-end'].parse(r.json.data).readyNotRunning, undefined);
+  assert.doesNotMatch(r.stderr, /READY_WORKS_NOT_RUNNING/);
 });

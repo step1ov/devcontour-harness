@@ -770,7 +770,9 @@ connector — is invisible unless you say it:
   Until then the view says «код принят, ведущий ещё работает: <your last
   note>» and progress stays below 100 %; it refuses while a work or rework is
   still open.
-- When you stop: `$H lead end --state <state>`.
+- When you stop: `$H lead end --state <state>`. If approved works are ready
+  and nothing runs, it still ends the session but warns
+  `READY_WORKS_NOT_RUNNING` (`data.readyNotRunning`): start `$H run` first.
 
 ### 10. New session
 

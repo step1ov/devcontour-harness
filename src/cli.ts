@@ -117,6 +117,7 @@ import {
   type LeadCommandArgs,
 } from './control/lead.ts';
 import { parseDurationFlag } from './control/duration.ts';
+import { readyNotRunning } from './control/lead-end-warning.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -1558,6 +1559,21 @@ async function run(
                     optional('text', typeof v.text === 'string' ? v.text : undefined),
                   )
                 : releaseDone(h.engine, { summary: need('summary') });
+        if (command === 'lead-end') {
+          // Готовые работы, а никто не запущен (alpha.68, P6-33): сессия
+          // закончена, выход прежний — только предупреждение. Сбой проверки
+          // конец сессии не меняет.
+          let warning;
+          try {
+            warning = readyNotRunning(h);
+          } catch {
+            warning = undefined;
+          }
+          if (warning) {
+            process.stderr.write(`harness: ${warning.code}: ${warning.line}\n`);
+            return { command, data: { ...data, readyNotRunning: warning } };
+          }
+        }
         return { command, data };
       } finally {
         h.close();
