@@ -750,22 +750,26 @@ export function decisionEventsOf(
 
 /**
  * Кто согласовал ту редакцию плана, регистрация которой вызвала событие `e`
- * графа (0.1.0-alpha.68, ревью r1): регистрация — последнее
- * `graph.registered` того же графа до события; согласование — первое
- * `graph.approved` того же графа после события с тем же digest, и между ними
- * нет другой регистрации (замена редакции). Иначе актёр неизвестен.
+ * графа (0.1.0-alpha.68, ревью r1–r2). Движок пишет в одной транзакции
+ * регистрации отмены и отказы от доработок до `graph.registered`, а
+ * переоткрытия — после: регистрация — следующее `graph.registered` того же
+ * графа (отмена, отказ) или предыдущее (переоткрытие). Согласование — первое
+ * `graph.approved` того же графа после регистрации с тем же digest, и между
+ * ними нет другой регистрации (замена редакции). Иначе актёр неизвестен.
  */
 function approvalAfter(events: readonly RunEvent[], e: RunEvent): 'agent' | 'operator' | undefined {
-  let registered: string | undefined;
-  for (const x of events)
-    if (x.seq < e.seq && x.type === 'graph.registered' && x.graphId === e.graphId)
-      registered = x.payload.digest;
-  if (!registered) return undefined;
-  for (const x of events) {
-    if (x.seq <= e.seq || x.graphId !== e.graphId) continue;
-    if (x.type === 'graph.registered' && x.payload.digest !== registered) return undefined;
+  const same = events.filter((x) => x.graphId === e.graphId);
+  const registration =
+    e.type === 'work.reopened'
+      ? same.filter((x) => x.seq < e.seq && x.type === 'graph.registered').at(-1)
+      : same.find((x) => x.seq > e.seq && x.type === 'graph.registered');
+  if (!registration || registration.type !== 'graph.registered') return undefined;
+  const digest = registration.payload.digest;
+  for (const x of same) {
+    if (x.seq <= registration.seq) continue;
+    if (x.type === 'graph.registered' && x.payload.digest !== digest) return undefined;
     if (x.type === 'graph.approved')
-      return x.payload.digest === registered ? x.payload.actor : undefined;
+      return x.payload.digest === digest ? x.payload.actor : undefined;
   }
   return undefined;
 }

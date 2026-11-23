@@ -386,15 +386,17 @@ test('a68: журнал — согласование после переоткр
   const d1 = '1'.repeat(64);
   const d2 = '2'.repeat(64);
   const d3 = '3'.repeat(64);
+  // Порядок движка: в транзакции регистрации отмены и отказы — до
+  // `graph.registered`, переоткрытия — после.
   const events = [
-    reg(1, d1),
-    ev(2, 'work.reopened', { revision: 1, budget: 'fresh', acceptedSha: sha('a'), spent: 1 }, 'w'),
-    ev(3, 'work.cancelled', { by: 'graph', hadAttempt: false }, 'x'),
+    ev(1, 'work.cancelled', { by: 'graph', hadAttempt: false }, 'x'),
+    reg(2, d1),
+    ev(3, 'work.reopened', { revision: 1, budget: 'fresh', acceptedSha: sha('a'), spent: 1 }, 'w'),
     ev(4, 'graph.approved', { digest: d1, actor: 'agent' }),
     // Редакция d2 убрала y, но её заменила d3 до согласования: отмену y никто
-    // не согласовал — актёр неизвестен (ревью r1).
-    reg(5, d2),
-    ev(6, 'work.cancelled', { by: 'graph', hadAttempt: false }, 'y'),
+    // не согласовал — актёр неизвестен.
+    ev(5, 'work.cancelled', { by: 'graph', hadAttempt: false }, 'y'),
+    reg(6, d2),
     reg(7, d3),
     ev(8, 'graph.approved', { digest: d3, actor: 'agent' }),
     ev(9, 'graph.approved', {
@@ -422,8 +424,8 @@ test('a68: журнал — согласование после переоткр
     view.decisions!.map((d) => [d.kind, d.by, d.workId ?? d.subject]),
     [
       ['reapproval', 'lead', 'g'],
-      ['cancel', 'lead', 'x'],
       ['reopen', 'lead', 'w'],
+      ['cancel', 'lead', 'x'],
     ],
     'отмена `late` ещё не согласована, отмена y — в заменённой редакции: актёр неизвестен',
   );
@@ -527,4 +529,26 @@ test('a68: решения — поднятый бюджет (человек, п�
   const addendum = view.decisions!.find((d) => d.kind === 'diagnosis-addendum')!;
   assert.deepEqual([addendum.by, addendum.workId, addendum.subject], ['lead', 'w', 'D1']);
   assert.match(addendum.title!, /дополнение 1 к разбору D1/);
+});
+
+test('a68 r2: отмена работы новой редакцией, согласованной ведущим, — в решениях с актёром (порядок событий движка)', () => {
+  const env = engineOf(policyOf());
+  ready(env.engine, graphOf({ a: [], b: [] }));
+  const { graph } = env.engine.register(graphOf({ a: [] }, '2'), trustNone);
+  env.engine.recordReview(
+    planReview(env.engine, graph, env.engine.reviews('plan', graph.id).length + 1),
+  );
+  env.engine.approve(graph.id, 'agent');
+  const facts = decisionsInputOf(
+    [],
+    [],
+    [],
+    env.store.events(0, 1000),
+    recoveryPolicyOf({ recovery: { mode: 'lead', diagnoseAfter: 2, leadResets: 2 } }),
+  );
+  const view = operatorViewSchema.parse(operatorView(baseInput({ decisions: facts })));
+  assert.deepEqual(
+    view.decisions!.filter((d) => d.kind === 'cancel').map((d) => [d.by, d.workId]),
+    [['lead', 'b']],
+  );
 });
