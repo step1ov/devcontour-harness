@@ -1982,11 +1982,22 @@ view`) в пределе длины сохраняет хвост — остат
 - **Предел раундов.** Раунды прежних версий засчитаны; бесплатными могут
   быть только новые раунды. Эпоха доработки считается по
   `rework.reopenedAt` и для прежних записей.
-- **Откат на alpha.67 — только копией состояния до обновления**, если
-  alpha.68 успела записать дополнения разбора (`leadRecovery.diagnoses[].addenda`),
-  причину удержания gate (`environmentHold.cause`) или новые поля записи
-  окружения; события `work.diagnosis-amended` alpha.67 читает как
-  неизвестные. Перед обновлением — `harness pause` и копия базы.
+- **Откат на alpha.67 — только копией состояния, сделанной до обновления.**
+  Перед обновлением — `harness pause` и копия каталога состояния (базы).
+  Причина: alpha.67 читает состояние строгими схемами, а alpha.68 с первого
+  запуска пишет поля, которых alpha.67 не знает:
+  - `control.appliedPolicy.limits` — записывается при первом запуске
+    controller, поэтому затрагивает любое обновлённое состояние;
+  - `rework.roundEpochAt` у доработки, открытой после обновления;
+  - `leadRecovery.diagnoses[].addenda` (`diagnose --addendum`);
+  - `environmentHold.cause` и причины окружения `sandbox-signal`,
+    `sandbox-browser` у попыток;
+  - `failureSummary` в evidence gate, `failure` и `cleanupFailure` в записи
+    окружения;
+  - у записей ревью — `planDigest`, `counted`, `changes`;
+  - локальные записи `release-outline`, `work-seen`;
+  - события `budget.raised`, `work.diagnosis-amended`.
+    Без копии откат не поддерживается.
 - **Повтор в сессии ведущего.** Внутри `lead begin … end` `retry` без `--by`
   отказывает (`INVALID_INPUT`): скрипты указывают `--by lead` или
   `--by operator`. Без сессии — прежнее умолчание. `input-answer` без

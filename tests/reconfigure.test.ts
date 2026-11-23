@@ -436,3 +436,20 @@ test('A68: применение политики с поднятыми пред�
     { field: 'reviewRounds', before: 6, after: 10 },
   ]);
 });
+
+test('A68-r1: состояние прежней версии без пределов — первый запуск controller их записывает, первый подъём попадает в журнал', () => {
+  const { engine: old, dir, store } = engineOf(A);
+  ready(old, graphOf({ a: [] }));
+  // Запись прежней версии: применённая политика без `limits`.
+  store.transact('config.started', (tx) => {
+    const c = tx.control();
+    const { limits: _l, ...applied } = c.appliedPolicy!;
+    void _l;
+    tx.setControl({ ...c, appliedPolicy: applied });
+  });
+  old.recordPolicy('c1');
+  assert.ok(old.policyState().applied, 'применённая есть');
+  old.requestReconfigure('op-1', policyDigest(B));
+  assert.equal(processOf(dir, B).applyReconfigure('p2').status, 'applied');
+  assert.equal(store.events(0, 1000).filter((e) => e.type === 'budget.raised').length, 1);
+});

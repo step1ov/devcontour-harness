@@ -4724,8 +4724,19 @@ export class Engine {
     this.tx('config.started', (tx) => {
       const lease = tx.controller();
       if (!this.mine(lease, owner)) return;
-      const applied = tx.control().appliedPolicy;
-      if (applied?.digest === this.loadedPolicy) return;
+      const control = tx.control();
+      const applied = control.appliedPolicy;
+      if (applied?.digest === this.loadedPolicy) {
+        // Состояние прежней версии: пределы применённой политики ещё не
+        // записаны — записываются при первом запуске controller, чтобы
+        // первый подъём после обновления попал в журнал (`budget.raised`).
+        if (!applied.limits)
+          tx.setControl({
+            ...control,
+            appliedPolicy: { ...applied, limits: budgetLimitsOf(this.policy) },
+          });
+        return;
+      }
       if (applied && this.mayAdopt(tx)) return;
       this.adoptPolicy(tx, owner);
     });
