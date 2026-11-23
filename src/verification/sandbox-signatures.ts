@@ -337,3 +337,32 @@ const CALLS: Record<SandboxSignatureCause, RegExp[]> = {
 export function sandboxSignatureCall(cause: SandboxSignatureCause, line: string) {
   return CALLS[cause].some((r) => r.test(line));
 }
+
+const PROBE_WHAT: Record<SandboxSignatureCause, { what: string; gate: string }> = {
+  'sandbox-signal': {
+    what: 'сигнал процессу вне песочницы (kill) из песочницы проверок',
+    gate: 'gate, посылающий сигнал процессу, который запустил не он',
+  },
+  'sandbox-browser': {
+    what: 'браузер в песочнице проверок',
+    gate: 'gate, запускающий браузер',
+  },
+};
+
+/** Строка ответа пробы ограничения песочницы для человека (`doctor`, `harness gates`). */
+export function sandboxLimitLine(cause: SandboxSignatureCause, capability: SandboxLimitCapability) {
+  const { what, gate } = PROBE_WHAT[cause];
+  switch (capability.status) {
+    case 'available':
+      return `${what}: доступен`;
+    case 'not-isolated':
+      return `${what}: проверки идут без песочницы ОС (isolation.mode: none)`;
+    case 'unknown':
+      return `${what}: не выяснен — ${capability.detail}; провал gate с этим следом засчитывается`;
+    case 'unavailable':
+      return (
+        `${what}: недоступен (${capability.detail}); ${gate}, упадёт с ` +
+        `${SANDBOX_SIGNATURE_CODES[cause]}. Что сделать: ${WHAT[cause].advice}`
+      );
+  }
+}

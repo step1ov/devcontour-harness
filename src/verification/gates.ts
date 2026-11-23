@@ -1043,6 +1043,10 @@ export async function probeSandboxBrowser(
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-gpu',
+    // Без связки ключей и хранилища паролей ОС: их запрос в песочнице сам
+    // по себе не след ограничения браузера.
+    '--use-mock-keychain',
+    '--password-store=basic',
     '--user-data-dir={dir}/profile',
     '--dump-dom',
     'about:blank',
@@ -1060,33 +1064,40 @@ export async function probeSandboxBrowser(
 }
 
 const sandboxLimitCache = new Map<SandboxSignatureCause, Promise<SandboxLimitCapability>>();
+const sandboxLimitSeen = new Map<SandboxSignatureCause, SandboxLimitCapability>();
 /**
  * Пробы ограничений песочницы ОС проверок для `sandbox-signal` и
- * `sandbox-browser`, одна на процесс harness и класс (как проба `ps`):
- * отказ среды назначается, только когда проба ответила `unavailable`.
- * `unknown` не кешируется. Тест подменяет `probe` или `probes` (и сбрасывает
- * кеш `reset`).
+ * `sandbox-browser`, одна на процесс harness и класс: отказ среды
+ * назначается, только когда проба ответила `unavailable`. Кешируется любой
+ * исход, и `unknown` тоже: проба с браузером идёт до 30 с, а ответ машины в
+ * пределах процесса не меняется. `seen` — ответы, полученные этим процессом
+ * (их показывают `harness gates` и `doctor`). Тест подменяет `probe` или
+ * `probes` и сбрасывает кеш `reset`.
  */
 export const sandboxLimitBackend = {
   probes: {
     'sandbox-signal': () => probeSandboxSignal('os'),
     'sandbox-browser': () => probeSandboxBrowser('os'),
   } as Record<SandboxSignatureCause, () => Promise<SandboxLimitCapability>>,
-  reset: () => sandboxLimitCache.clear(),
+  reset: () => {
+    sandboxLimitCache.clear();
+    sandboxLimitSeen.clear();
+  },
+  seen: (): Partial<Record<SandboxSignatureCause, SandboxLimitCapability>> =>
+    Object.fromEntries(sandboxLimitSeen),
   probe: (cause: SandboxSignatureCause): Promise<SandboxLimitCapability> => {
     const cached = sandboxLimitCache.get(cause);
     if (cached) return cached;
-    const started = sandboxLimitBackend.probes[cause]().catch(
-      (error: unknown): SandboxLimitCapability => ({
+    const started = sandboxLimitBackend.probes[cause]()
+      .catch((error: unknown): SandboxLimitCapability => ({
         status: 'unknown',
         detail: 'проба не исполнилась: ' + (error instanceof Error ? error.message : String(error)),
-      }),
-    );
+      }))
+      .then((c) => {
+        if (sandboxLimitCache.get(cause) === started) sandboxLimitSeen.set(cause, c);
+        return c;
+      });
     sandboxLimitCache.set(cause, started);
-    void started.then((c) => {
-      if (c.status === 'unknown' && sandboxLimitCache.get(cause) === started)
-        sandboxLimitCache.delete(cause);
-    });
     return started;
   },
 };

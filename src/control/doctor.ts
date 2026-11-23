@@ -32,7 +32,12 @@ import { resourceWarnings } from './resource-advice.ts';
 import { BROWSER_ADVICE, isBrowserRunner } from './browser-checks.ts';
 import { decisionSettingsView, recoveryPolicyOf } from '../projections/decisions.ts';
 import { timeBudgetWarnings } from '../verification/time-budget.ts';
-import { processListBackend } from '../verification/gates.ts';
+import { processListBackend, sandboxLimitBackend } from '../verification/gates.ts';
+import {
+  sandboxLimitLine,
+  type SandboxLimitCapability,
+  type SandboxSignatureCause,
+} from '../verification/sandbox-signatures.ts';
 import { processListLine, type ProcessListCapability } from '../verification/process-list.ts';
 import { resolveNodePin, sameNode, toolchainFacts } from '../environment/toolchain-pin.ts';
 
@@ -95,6 +100,14 @@ export async function doctor(
      * передаёт `true`; функция — подменённая проба.
      */
     processList?: true | (() => Promise<ProcessListCapability>);
+    /**
+     * Пробы ограничений песочницы проверок (0.1.0-alpha.68): сигнал процессу
+     * вне песочницы и браузер — `sandbox.signal`, `sandbox.browser` и строка
+     * в `notes`, как у `processList`. CLI передаёт `true` (общие пробы
+     * процесса, `sandboxLimitBackend`); объект — подменённые пробы.
+     */
+    sandboxLimits?:
+      true | Partial<Record<SandboxSignatureCause, () => Promise<SandboxLimitCapability>>>;
   } = {},
 ) {
   const problems: string[] = [];
@@ -135,6 +148,34 @@ export async function doctor(
       : sandbox.ok
         ? await (options.processList === true ? processListBackend.probe : options.processList)()
         : undefined;
+  // Ограничения песочницы проверок (сигнал, браузер): как список процессов —
+  // строка с советом до первой попытки, не проблема среды.
+  const limitProbe = async (cause: SandboxSignatureCause) => {
+    const probes = options.sandboxLimits;
+    if (!probes) return undefined;
+    const probe =
+      policy?.isolation.mode === 'none'
+        ? () =>
+            Promise.resolve<SandboxLimitCapability>({
+              status: 'not-isolated',
+              detail: 'isolation.mode: none',
+            })
+        : !sandbox.ok
+          ? undefined
+          : probes === true
+            ? () => sandboxLimitBackend.probe(cause)
+            : probes[cause];
+    if (!probe) return undefined;
+    const c = await probe().catch((error: unknown): SandboxLimitCapability => ({
+      status: 'unknown',
+      detail: 'проба не исполнилась: ' + (error instanceof Error ? error.message : String(error)),
+    }));
+    return { ...c, line: sandboxLimitLine(cause, c) };
+  };
+  const [signalLimit, browserLimit] = await Promise.all([
+    limitProbe('sandbox-signal'),
+    limitProbe('sandbox-browser'),
+  ]);
   let state:
     | {
         stateVersion: number;
@@ -253,6 +294,8 @@ export async function doctor(
     ...(processList?.status === 'unavailable'
       ? ['sandbox-process-list: ' + processListLine(processList)]
       : []),
+    ...(signalLimit?.status === 'unavailable' ? ['sandbox-signal: ' + signalLimit.line] : []),
+    ...(browserLimit?.status === 'unavailable' ? ['sandbox-browser: ' + browserLimit.line] : []),
   ];
   for (const note of (policy?.repositories ?? []).flatMap((r) => {
     const browser = (r.writerProbe ?? []).filter(isBrowserRunner).map((s) => s.id);
@@ -308,6 +351,9 @@ export async function doctor(
       ...(processList
         ? { processList: { ...processList, line: processListLine(processList) } }
         : {}),
+      // Пробы ограничений песочницы проверок: сигнал вне песочницы и браузер.
+      ...(signalLimit ? { signal: signalLimit } : {}),
+      ...(browserLimit ? { browser: browserLimit } : {}),
     },
     ...(state ? { state } : {}),
     ...(checkoutRoot ? { checkouts: checkoutRoot } : {}),

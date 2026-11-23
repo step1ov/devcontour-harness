@@ -710,6 +710,9 @@ test('H3-01: прежние команды и схемы их данных не 
     if (k === 'properties' && v && typeof v === 'object' && 'os' in v && 'reason' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.processList;
+      // Пробы сигнала вне песочницы и браузера (0.1.0-alpha.68).
+      delete rest.signal;
+      delete rest.browser;
       v = rest;
     }
     if (k === 'enum' && Array.isArray(v) && v.includes('writer-environment'))
@@ -1011,6 +1014,9 @@ test('H3-01: прежние команды и схемы их данных не 
     assert.ok(JSON.stringify(data).includes(JSON.stringify(value)), value + ' объявлен');
   // Хеш H2 вырезает список процессов песочницы у doctor: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.doctor).includes('"processList"'), 'doctor: sandbox.processList');
+  // Хеш H2 вырезает пробы сигнала и браузера у doctor: объявление держит эта проверка.
+  for (const field of ['"signal"', '"browser"'])
+    assert.ok(JSON.stringify(data.doctor).includes(field), 'doctor: sandbox.' + field);
   // Хеш H2 вырезает поля слоя lean: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.profile).includes('"gateTimeoutFloorMs"'), 'profile: граница gate');
   assert.ok(JSON.stringify(data.init).includes('"layers"'), 'init: слои профиля в manifest');

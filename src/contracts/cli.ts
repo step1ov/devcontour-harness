@@ -2503,6 +2503,10 @@ export const doctorDataSchema = z.strictObject({
     reason: z.string().optional(),
     /** Список процессов в песочнице проверок (CLI `doctor`). */
     processList: processListCapabilitySchema.optional(),
+    /** Сигнал процессу вне песочницы проверок (`kill`), проба harness (0.1.0-alpha.68). */
+    signal: processListCapabilitySchema.optional(),
+    /** Браузер в песочнице проверок, проба harness (0.1.0-alpha.68). */
+    browser: processListCapabilitySchema.optional(),
   }),
   state: z
     .strictObject({
@@ -2694,6 +2698,17 @@ export const gatesDataSchema = z.strictObject({
    * процесс, loopback свободен (например, AirPlay Receiver на macOS).
    */
   warnings: z.array(z.string()).optional(),
+  /**
+   * Ответы проб ограничений песочницы ОС проверок, полученные этим процессом
+   * harness (0.1.0-alpha.68): сигнал вне песочницы и браузер. Проба идёт,
+   * когда провал gate несёт след класса; без неё поля нет.
+   */
+  sandbox: z
+    .strictObject({
+      signal: processListCapabilitySchema.optional(),
+      browser: processListCapabilitySchema.optional(),
+    })
+    .optional(),
 });
 
 /** Ответ `smoke`: шаги окружения на коммите без gates, их длительность и класс отказа. */

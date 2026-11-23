@@ -9,6 +9,8 @@ import {
 } from '../contracts/index.ts';
 import { git } from '../environment/process.ts';
 import { runGatesAt } from '../verification/gates-at.ts';
+import { sandboxLimitBackend } from '../verification/gates.ts';
+import { sandboxLimitLine } from '../verification/sandbox-signatures.ts';
 import { failureSummaryLine } from '../verification/failure-summary.ts';
 
 /** Исход одного gate проверки `harness gates`. */
@@ -183,6 +185,7 @@ export async function checkGates(input: GateCheckInput) {
     gates,
     logs: join(stateDir, 'gates-at', result.id),
     ...(result.warnings?.length ? { warnings: result.warnings } : {}),
+    ...sandboxProbes(),
   };
   // Итог рядом с логами: `review-code` прикладывает его к обзору того же SHA.
   // Неудачная запись итога не отменяет проверку.
@@ -191,6 +194,27 @@ export async function checkGates(input: GateCheckInput) {
     JSON.stringify({ at: new Date().toISOString(), data }, null, 2),
   ).catch(() => undefined);
   return data;
+}
+
+/**
+ * Ответы проб ограничений песочницы проверок этого процесса (сигнал,
+ * браузер) со строкой для человека: на них опирается класс отказа среды.
+ */
+function sandboxProbes() {
+  const seen = sandboxLimitBackend.seen();
+  const signal = seen['sandbox-signal'];
+  const browser = seen['sandbox-browser'];
+  if (!signal && !browser) return {};
+  return {
+    sandbox: {
+      ...(signal
+        ? { signal: { ...signal, line: sandboxLimitLine('sandbox-signal', signal) } }
+        : {}),
+      ...(browser
+        ? { browser: { ...browser, line: sandboxLimitLine('sandbox-browser', browser) } }
+        : {}),
+    },
+  };
 }
 
 /** Файл итога проверки `harness gates` в её каталоге `gates-at/<id>`. */
@@ -213,6 +237,9 @@ export function gatesText(data: Awaited<ReturnType<typeof checkGates>>) {
       `${'gate'.padEnd(width)}  ${'status'.padEnd(9)}  exit`,
       ...lines,
       `логи: ${data.logs}`,
+      ...[data.sandbox?.signal, data.sandbox?.browser].flatMap((c) =>
+        c ? [`возможность: ${c.line}`] : [],
+      ),
       ...(data.warnings ?? []).map((w) => `предупреждение: ${w}`),
     ].join('\n') + '\n'
   );

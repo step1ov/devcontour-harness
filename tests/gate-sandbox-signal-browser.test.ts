@@ -33,6 +33,10 @@ import {
   signalSignature,
 } from '../src/verification/sandbox-signatures.ts';
 import type { Engine } from '../src/engine/engine.ts';
+import { cliDataSchemas, executionPolicySchema } from '../src/contracts/index.ts';
+import { doctor } from '../src/control/doctor.ts';
+import { checkGates, gatesText } from '../src/control/gates-check.ts';
+import { example } from './fixtures.ts';
 import { stopInputsOf } from '../src/explain/state.ts';
 import { explainStop } from '../src/projections/stop.ts';
 import { environmentGateHolds, gateHoldLine } from '../src/projections/gate-hold.ts';
@@ -282,7 +286,7 @@ async function withProbes<T>(
   }
 }
 
-test('пробы: подтверждённое ограничение кешируется на процесс, неудачная проба — нет; браузера нет — проба ничего не доказала', async () => {
+test('пробы: любой исход кешируется на процесс (и unknown, и отказ пробы), reset сбрасывает; браузера нет — проба ничего не доказала', async () => {
   await withProbes(
     (cause) =>
       cause === 'sandbox-signal'
@@ -295,12 +299,130 @@ test('пробы: подтверждённое ограничение кешир
         await new Promise((r) => setImmediate(r));
       }
       assert.equal(calls.filter((c) => c === 'sandbox-signal').length, 1);
-      assert.equal(calls.filter((c) => c === 'sandbox-browser').length, 3);
+      assert.equal(calls.filter((c) => c === 'sandbox-browser').length, 1);
+      assert.deepEqual(
+        Object.fromEntries(
+          Object.entries(sandboxLimitBackend.seen()).map(([k, v]) => [k, v.status]),
+        ),
+        { 'sandbox-signal': 'unavailable', 'sandbox-browser': 'unknown' },
+      );
+      sandboxLimitBackend.reset();
+      assert.deepEqual(sandboxLimitBackend.seen(), {});
+      await sandboxLimitBackend.probe('sandbox-browser');
+      assert.equal(calls.filter((c) => c === 'sandbox-browser').length, 2);
     },
   );
+  // Отказ самой пробы — `unknown`, тоже один на процесс.
+  const original = sandboxLimitBackend.probes['sandbox-signal'];
+  let thrown = 0;
+  sandboxLimitBackend.reset();
+  sandboxLimitBackend.probes['sandbox-signal'] = () => {
+    thrown++;
+    return Promise.reject(new Error('boom'));
+  };
+  try {
+    for (let i = 0; i < 2; i++)
+      assert.equal((await sandboxLimitBackend.probe('sandbox-signal')).status, 'unknown');
+    assert.equal(thrown, 1);
+  } finally {
+    sandboxLimitBackend.probes['sandbox-signal'] = original;
+    sandboxLimitBackend.reset();
+  }
   assert.equal((await probeSandboxBrowser('os', () => [])).status, 'unknown');
   assert.equal((await probeSandboxSignal('none')).status, 'not-isolated');
   assert.equal((await probeSandboxBrowser('none')).status, 'not-isolated');
+});
+
+test(
+  'проба браузера: без связки ключей и хранилища паролей ОС (--use-mock-keychain, --password-store=basic)',
+  { skip: sandbox.ok ? false : 'песочница ОС недоступна: ' + sandbox.detail },
+  async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'harness-fake-browser-'));
+    const fake = join(dir, 'chrome');
+    writeFileSync(fake, '#!/bin/sh\necho "<html>$*</html>"\n', { mode: 0o755 });
+    const result = await probeSandboxBrowser('os', () => [fake]);
+    assert.equal(result.status, 'available', result.detail);
+    for (const flag of ['--use-mock-keychain', '--password-store=basic', '--headless=new'])
+      assert.ok(result.command?.includes(flag), flag);
+  },
+);
+
+test('doctor и harness gates показывают ответы проб сигнала и браузера, как пробу ps', async () => {
+  const policy = executionPolicySchema.parse({
+    ...structuredClone(example('policy')),
+    isolation: { mode: 'os', domains: [] },
+  });
+  const report = await doctor(policy, {}, undefined, undefined, undefined, {
+    resourceDatabase: false,
+    sandboxLimits: {
+      'sandbox-signal': () =>
+        Promise.resolve({ status: 'unavailable', detail: 'kill(1, 0): EPERM' }),
+      'sandbox-browser': () =>
+        Promise.resolve({ status: 'unknown', detail: 'браузер на машине не найден' }),
+    },
+  });
+  cliDataSchemas.doctor.parse(report);
+  if (sandbox.ok) {
+    assert.equal(report.sandbox.signal?.status, 'unavailable');
+    assert.match(report.sandbox.signal.line, /недоступен .*GATE_SANDBOX_SIGNAL/);
+    assert.equal(report.sandbox.browser?.status, 'unknown');
+    assert.match(report.sandbox.browser.line, /не выяснен — браузер на машине не найден/);
+    assert.ok(
+      report.notes?.some((n) => n.startsWith('sandbox-signal: ')),
+      JSON.stringify(report.notes),
+    );
+    assert.ok(!report.notes?.some((n) => n.startsWith('sandbox-browser: ')));
+    assert.ok(!report.problems.some((p) => /сигнал|браузер в песочнице/.test(p)));
+  } else assert.equal(report.sandbox.signal, undefined, 'без песочницы пробы нет');
+  const none = await doctor(
+    executionPolicySchema.parse({ ...policy, isolation: { mode: 'none', domains: [] } }),
+    {},
+    undefined,
+    undefined,
+    undefined,
+    { resourceDatabase: false, sandboxLimits: {} },
+  );
+  assert.equal(none.sandbox.signal?.status, 'not-isolated');
+  assert.equal(none.sandbox.browser?.status, 'not-isolated');
+  const quiet = await doctor(policy, {}, undefined, undefined, undefined, {
+    resourceDatabase: false,
+  });
+  assert.equal(quiet.sandbox.signal, undefined);
+
+  // harness gates: ответы проб этого процесса — в data.sandbox и строкой таблицы.
+  const r = repo({ 'README.md': 'app\n' });
+  const raw = structuredClone(example('policy')) as {
+    repositories: Record<string, unknown>[];
+    [key: string]: unknown;
+  };
+  raw.repositories[0]!.path = r.dir;
+  raw.repositories[0]!.gates = [
+    {
+      id: 'unit',
+      kind: 'test',
+      command: [process.execPath, '-e', 'process.exit(0)'],
+      report: { type: 'junit', path: 'reports/unit.xml' },
+      dependsOn: [],
+    },
+  ];
+  raw.isolation = { mode: 'none', domains: [] };
+  const gatesPolicy = executionPolicySchema.parse(raw);
+  const state = mkdtempSync(join(tmpdir(), 'harness-gates-probes-'));
+  const check = () =>
+    checkGates({ policy: gatesPolicy, baseDir: r.dir, stateDir: state, rev: 'HEAD' });
+  await withProbes(
+    () => ({ status: 'unavailable', detail: 'EPERM' }),
+    async () => {
+      const before = await check();
+      assert.equal(before.sandbox, undefined, 'проб не было — поля нет');
+      await sandboxLimitBackend.probe('sandbox-signal');
+      const data = await check();
+      cliDataSchemas.gates.parse(data);
+      assert.equal(data.sandbox?.signal?.status, 'unavailable');
+      assert.equal(data.sandbox?.browser, undefined);
+      assert.match(gatesText(data), /\nвозможность: сигнал процессу вне песочницы .*недоступен/);
+    },
+  );
 });
 
 test('вызов, добавленный изменением: process.kill, shell kill, запуск браузера', () => {
