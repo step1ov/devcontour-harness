@@ -657,3 +657,17 @@ for (const [cause, code, words] of [
     assert.equal(r.work.environmentHold, undefined);
     assert.ok(e.claim('c1'), 'после повтора ведущего попытка выдана');
   });
+
+test('A68-r3: строка журнала Chromium другого компонента рядом со следом песочницы — иной провал (засчитан)', () => {
+  const mach =
+    '[1:2:0101/120000.000:FATAL:mach_port_rendezvous.cc(142)] Check failed: kr == KERN_SUCCESS. bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer.1: Permission denied (1100)';
+  const ssl =
+    '[1:2:0101/120000.000:ERROR:ssl_client_socket_impl.cc(902)] handshake failed; returned -1, SSL error code 1, net_error -202';
+  // Один след песочницы — признак класса.
+  assert.ok(sandboxSignatureFailure('sandbox-browser', '', { total: 1, texts: [mach] }));
+  // След плюс ошибка другого компонента Chromium — не окружение.
+  assert.equal(
+    sandboxSignatureFailure('sandbox-browser', '', { total: 1, texts: [mach + '\n' + ssl] }),
+    undefined,
+  );
+});

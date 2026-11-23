@@ -112,8 +112,11 @@ const companionText: Record<SandboxSignatureCause, RegExp[]> = {
       'gi',
     ),
     /\bbootstrap_check_in [\w.-]+: Permission denied \(1100\)/g,
-    // Префикс журнала Chromium: `[pid:tid:время:FATAL:mach_port_rendezvous.cc(142)]`.
-    /^\[[\d:/.]*:?(?:FATAL|ERROR|WARNING|INFO|VERBOSE\d*):[\w.]+\(\d+\)\]/g,
+    // Префикс журнала Chromium — только у строк самого следа песочницы
+    // (`[pid:tid:время:FATAL:mach_port_rendezvous.cc(142)]`). Префикс иного
+    // компонента (`ERROR:ssl_client_socket_impl.cc`) не вырезается: такая
+    // строка — иной провал (ревью r3, закрыто по умолчанию).
+    /^\[[\d:/.]*:?(?:FATAL|ERROR|WARNING|INFO|VERBOSE\d*):(?:mach_port_rendezvous|bootstrap)[\w.]*\(\d+\)\]/g,
     new RegExp(errorPrefix + '(?:' + BROWSER_LAUNCH.source + ')', 'gi'),
     /\bbootstrap_check_in\b|\bmach_port\w*/g,
   ],
