@@ -412,3 +412,49 @@ test('путь работы: удержанный gate — ожидание ве
     },
   );
 });
+
+test('A68-r3: первая запись эпох раундов начинается с эпох прежней сборки — израсходованные остаются израсходованными', () => {
+  const env = engineOf(policyOf());
+  const e = env.engine;
+  ready(e, graphOf({ w: [], x: [] }));
+  for (const id of ['w', 'x']) {
+    e.lead('c1');
+    const a = e.claim('c1')!;
+    assert.ok(a, id);
+    accept(e, a.id, a.token, sha('a'), sha('b'));
+    env.clock.now += 1000;
+  }
+  const replan = (revision: string, change: (o: { id: string; goal: string }) => string) => {
+    const g = graphOf({ w: [], x: [] }, revision, 'g');
+    g.orders = g.orders.map((o) => ({ ...o, goal: change(o) }));
+    const { graph: state } = e.register(g, trustNone);
+    e.recordReview(planReview(e, state, e.reviews('plan', state.id).length + 1));
+    e.approve(state.id, 'agent');
+  };
+  // Состояние прежней сборки: принятая доработка w открыла эпоху, записи
+  // эпох нет.
+  const first = '2026-01-01T00:00:00.500Z';
+  env.store.transact('task.retry', (tx) => {
+    const w = tx.work('w')!;
+    tx.putWork({
+      ...w,
+      rework: {
+        revision: 1,
+        budgets: 1,
+        fresh: true,
+        accepted: { resultSha: w.resultSha! },
+        reopenedAt: first,
+        roundEpochAt: first,
+        spent: 1,
+      },
+    });
+  });
+  env.clock.now += 1000;
+  replan('3', (o) => (o.id === 'x' ? o.goal + ' Доработка.' : o.goal));
+  const epochs = e.read((v) => v.local('round-epochs', WORKSPACE_OWNER, 'g'))!.epochs;
+  assert.deepEqual(
+    epochs.map((x) => x.at),
+    [first, e.read((v) => v.work('x')!.rework!.roundEpochAt)!],
+    'эпоха прежней сборки — в записи',
+  );
+});

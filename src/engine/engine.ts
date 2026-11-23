@@ -548,6 +548,17 @@ export class Engine {
       };
       tx.putGraph(state);
       const reopened: { workId: string; rework: NonNullable<WorkState['rework']> }[] = [];
+      // Эпохи раундов, открытые до записи `round-epochs` (состояние прежней
+      // сборки): первая запись начинается с них, израсходованные остаются
+      // израсходованными (ревью r3).
+      const legacyEpochs = tx.local('round-epochs', WORKSPACE_OWNER, graph.id)
+        ? []
+        : tx.works(graph.id).flatMap((w) => {
+            const r = w.rework;
+            const start =
+              r && (r.roundEpochAt ?? (r.fresh && !r.resumed ? r.reopenedAt : undefined));
+            return start ? [{ at: start, workId: w.id }] : [];
+          });
       for (const order of graph.orders) {
         const prior = tx.work(order.id);
         if (prior && prior.graphId !== graph.id)
@@ -633,7 +644,7 @@ export class Engine {
         // Эпоха раундов ревью плана — запись графа, которая не стирается:
         // её не вернуть ни новой доработкой, ни отказом (ревью r2).
         if (reopen?.fresh && reopen.roundEpochAt === at) {
-          const prev = tx.local('round-epochs', WORKSPACE_OWNER, graph.id)?.epochs ?? [];
+          const prev = tx.local('round-epochs', WORKSPACE_OWNER, graph.id)?.epochs ?? legacyEpochs;
           tx.putLocal('round-epochs', WORKSPACE_OWNER, graph.id, {
             epochs: [...prev, { at, workId: order.id }].slice(-100),
           });
@@ -3788,7 +3799,8 @@ export class Engine {
    * исходная остановка снова держится (новая редакция вернула работу в
    * готовую с той же постановкой и попыткой вопроса). `applyInput` берёт
    * только `answered`, и без этого у такого вопроса не было бы публичного
-   * пути к работе. Правило неприменённых ответов (`unappliedInputs`) — прежнее.
+   * пути к работе. Перенесённый так ответ с записанным основанием —
+   * применённый и для `unappliedInputs` (`carried`).
    */
   private carryPermitted(view: ExecutionView, request: InputRequest) {
     if (this.carryAllowed(view, request)) return true;

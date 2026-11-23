@@ -292,6 +292,23 @@ test('A68-1e: доработка принятой работы начинает 
     ),
     t(14),
   );
+  // Одна регистрация переоткрыла две работы — одна эпоха (ревью r3).
+  assert.equal(
+    planRoundEpoch(
+      recordedOf(
+        [
+          { at: t(10), workId: 'A' },
+          { at: t(10), workId: 'B' },
+          { at: t(12), workId: 'A' },
+          { at: t(14), workId: 'A' },
+        ],
+        [{ id: 'A', rework: { fresh: true, reopenedAt: t(14), roundEpochAt: t(14) } }],
+        [round(11), round(13), round(15)],
+      ),
+      'g',
+    ),
+    t(14),
+  );
   // Отказ от доработки: эпоха израсходована и не действует; новая доработка
   // после трёх израсходованных её не получает.
   assert.equal(

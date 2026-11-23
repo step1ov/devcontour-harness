@@ -827,14 +827,16 @@ export function planRoundEpoch(
           .filter((r) => r.kind === 'plan' && r.subject === graphId)
           .sort((a, b) => a.at.localeCompare(b.at))
       : [];
-  const consumed = epochs
+  // Одна регистрация — одна эпоха, сколько бы работ она ни переоткрыла.
+  const unique = [...new Map(epochs.map((e) => [e.at, e] as const)).values()];
+  const consumed = unique
     .sort((a, b) => a.at.localeCompare(b.at))
     .filter((e) => rounds.find((r) => r.at > e.at)?.counted !== false)
     .slice(0, MAX_ROUND_EPOCHS);
   const open = (e: { at: string; workId?: string }) =>
     works.some(
       (w) =>
-        (e.workId === undefined || w.id === e.workId) &&
+        // Эпоха одной регистрации: открыта, пока не оставлена хоть одна её доработка.
         !!w.rework &&
         !w.rework.abandoned &&
         (w.rework.roundEpochAt ??
