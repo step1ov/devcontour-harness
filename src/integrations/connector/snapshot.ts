@@ -630,6 +630,8 @@ export function buildSnapshot(input: {
   let contextBytes = 0;
   /** Контекст задач по идентичности: часть ревизии набора (новое согласование при правке FI/SI). */
   const contextBy: [string, string][] = [];
+  /** Документы требований, на которые контекст задачи ссылается вместо текста (alpha.68). */
+  const requirementDocs: [string, string][] = [];
   /** Необязательные документы задач: ревизия набора (v2), не постановка задачи. */
   const optionalDocs: [string, string][] = [];
   const limits = config.limits;
@@ -870,26 +872,26 @@ export function buildSnapshot(input: {
             bytes,
             digest: file.digest,
           };
+          contextBy.push([identityOf, file.digest]);
           // Документ требований, который контекст задачи заменил ссылкой на
           // закреплённый документ задачи, — часть постановки: его содержание
-          // входит в ревизию набора и в ревизию постановок (alpha.68), иначе
-          // правка его текста прошла бы как правка необязательного документа.
+          // входит в ревизию постановок (alpha.68). Ревизии набора v1/v2 —
+          // прежние формулы: закреплённые прежними версиями снимки остаются
+          // согласованными.
           const referenced = [...pinnedDocs]
             .filter(([, path]) => text.includes(path))
             .map(([id]) => id)
             .sort();
-          contextBy.push([
-            identityOf,
-            referenced.length
-              ? digestOf({
-                  context: file.digest,
-                  documents: referenced.map((id) => [
-                    id,
-                    sha256(read.documents.find((d) => d.id === id)?.body ?? ''),
-                  ]),
-                })
-              : file.digest,
-          ]);
+          if (referenced.length)
+            requirementDocs.push([
+              identityOf,
+              digestOf(
+                referenced.map((id) => [
+                  id,
+                  sha256(read.documents.find((d) => d.id === id)?.body ?? ''),
+                ]),
+              ),
+            ]);
         }
       }
       // Исполнителю сказано, где постановка (или что её нет): строка в task.md.
@@ -1012,7 +1014,14 @@ export function buildSnapshot(input: {
       ...(v === 2
         ? { v: 2, documents: [...optionalDocs].sort(([a], [b]) => (a < b ? -1 : 1)) }
         : v === 'orders'
-          ? { v: 'orders' }
+          ? {
+              v: 'orders',
+              ...(requirementDocs.length
+                ? {
+                    requirementDocs: [...requirementDocs].sort(([a], [b]) => (a < b ? -1 : 1)),
+                  }
+                : {}),
+            }
           : {}),
       prerequisites: prereqs,
       // Любая правка базовой линии — новое согласование; без неё ревизия прежняя.

@@ -10,7 +10,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { HarnessError, cliDataSchemas, operatorViewSchema } from '../src/contracts/index.ts';
+import {
+  HarnessError,
+  cliDataSchemas,
+  digestOf,
+  operatorViewSchema,
+} from '../src/contracts/index.ts';
 import { openConnector, parseConfig } from '../src/integrations/connector/index.ts';
 import {
   RELAY_TASK_CONTEXT_CAPABILITY,
@@ -19,7 +24,10 @@ import {
 } from '../src/integrations/connector/compat.ts';
 import { relayCompatibilityCheck } from '../src/integrations/connector/commands.ts';
 import { parseQuestion } from '../src/integrations/connector/questions.ts';
-import { TASK_CONTEXT_FILE } from '../src/integrations/connector/snapshot.ts';
+import {
+  TASK_CONTEXT_FILE,
+  optionalDocumentsDigest,
+} from '../src/integrations/connector/snapshot.ts';
 import { fakeSuiteBackend, scenario } from '../src/integrations/connector/testing.ts';
 import {
   TransportError,
@@ -1102,6 +1110,27 @@ test('alpha.68 (r1): документ требований, который ко�
     const opened = await s.open({ transport: transport() });
     await opened.connector.snapshot(join(s.root, 'a'));
     const built = await opened.connector.source.snapshot();
+    // Ревизия набора — формула alpha.67 (тело документа требований в неё
+    // отдельно не входит): закреплённые прежней версией снимки остаются
+    // согласованными после обновления (ревью r2).
+    const m = built.manifest.tasks[0]!;
+    const read = await s.project.transport().readTask(m.id);
+    const mapping = s.loaded().config.tasks[0]!;
+    assert.equal(
+      built.manifest.revision,
+      digestOf({
+        v: 2,
+        connector: built.manifest.connector,
+        tasks: [[m.identity, m.semanticDigest]],
+        documents: [[m.identity, optionalDocumentsDigest(mapping, read)]],
+        prerequisites: built.graph.prerequisites,
+        taskContext: [
+          [m.identity, m.taskContext!.status === 'included' ? m.taskContext!.digest : ''],
+        ],
+      }),
+      'ревизия набора — прежняя формула',
+    );
+    assert.ok(built.manifest.ordersRevision);
     const text = built.context.sources
       .flatMap((x) => x.files)
       .find((f) => f.path === TASK_CONTEXT_FILE)!.content.data;
