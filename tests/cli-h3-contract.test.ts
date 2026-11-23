@@ -188,6 +188,8 @@ const ADDITIVE_EVENT_TYPES = new Set([
 ]);
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([
+  // Проба ограничений песочницы проверок по флагу (0.1.0-alpha.68).
+  'doctor--probe-sandbox',
   'status--detail',
   // Повторное доказательство критериев принятого результата (0.1.0-alpha.66).
   'source-deliver--reprove',

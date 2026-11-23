@@ -107,7 +107,9 @@ export async function doctor(
      * процесса, `sandboxLimitBackend`); объект — подменённые пробы.
      */
     sandboxLimits?:
-      true | Partial<Record<SandboxSignatureCause, () => Promise<SandboxLimitCapability>>>;
+      | true
+      | 'cached'
+      | Partial<Record<SandboxSignatureCause, () => Promise<SandboxLimitCapability>>>;
   } = {},
 ) {
   const problems: string[] = [];
@@ -164,7 +166,15 @@ export async function doctor(
           ? undefined
           : probes === true
             ? () => sandboxLimitBackend.probe(cause)
-            : probes[cause];
+            : probes === 'cached'
+              ? () =>
+                  Promise.resolve<SandboxLimitCapability>(
+                    sandboxLimitBackend.seen()[cause] ?? {
+                      status: 'unknown',
+                      detail: 'не проверялось (harness doctor --probe-sandbox)',
+                    },
+                  )
+              : probes[cause];
     if (!probe) return undefined;
     const c = await probe().catch((error: unknown): SandboxLimitCapability => ({
       status: 'unknown',

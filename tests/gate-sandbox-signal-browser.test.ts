@@ -671,3 +671,40 @@ test('A68-r3: строка журнала Chromium другого компоне
     undefined,
   );
 });
+
+test('A68-r3: unknown кешируется не дольше 5 минут; doctor без --probe-sandbox пробу не запускает — известный ответ или «не проверялось»', async () => {
+  const now = sandboxLimitBackend.now;
+  let clock = 1_000_000;
+  sandboxLimitBackend.now = () => clock;
+  try {
+    await withProbes(
+      () => ({ status: 'unknown', detail: 'браузер на машине не найден' }),
+      async (calls) => {
+        await sandboxLimitBackend.probe('sandbox-browser');
+        clock += 4 * 60_000;
+        await sandboxLimitBackend.probe('sandbox-browser');
+        assert.equal(calls.length, 1, 'в пределах 5 минут — тот же ответ');
+        clock += 2 * 60_000;
+        await sandboxLimitBackend.probe('sandbox-browser');
+        assert.equal(calls.length, 2, 'после 5 минут unknown перепроверяется');
+      },
+    );
+    await withProbes(
+      () => ({ status: 'unavailable', detail: 'EPERM' }),
+      async (calls) => {
+        const policy = executionPolicySchema.parse({
+          ...structuredClone(example('policy')),
+          isolation: { mode: 'os', domains: [] },
+        });
+        const report = await doctor(policy, {}, undefined, undefined, undefined, {
+          resourceDatabase: false,
+          sandboxLimits: 'cached',
+        });
+        assert.deepEqual(calls, [], 'проба не запускалась');
+        if (sandbox.ok) assert.match(report.sandbox.browser!.line, /не проверялось/);
+      },
+    );
+  } finally {
+    sandboxLimitBackend.now = now;
+  }
+});

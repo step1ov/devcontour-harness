@@ -475,6 +475,7 @@ const options = {
   contracts: { type: 'string' },
   requirements: { type: 'string', multiple: true },
   'dry-run': { type: 'boolean' },
+  'probe-sandbox': { type: 'boolean' },
   detail: { type: 'boolean' },
   since: { type: 'string' },
   until: { type: 'string' },
@@ -552,6 +553,7 @@ const flagOwners = {
   contracts: ['plan-request', 'plan-check'],
   requirements: ['plan-request'],
   'dry-run': ['worktree-cleanup'],
+  'probe-sandbox': ['doctor'],
   detail: ['status'],
   since: ['report'],
   until: ['report'],
@@ -2200,7 +2202,8 @@ async function run(
           ...optional('planAuthors', v.policy ? manifestLead(v.policy) : undefined),
           leadSandbox: true,
           processList: true,
-          sandboxLimits: true,
+          // Проба браузера (до 30 с) — только по флагу; иначе известный ответ.
+          sandboxLimits: v['probe-sandbox'] ? true : 'cached',
         },
       );
       // Manifest проекта рядом с политикой расходится с ней по слою lean — предупреждение.

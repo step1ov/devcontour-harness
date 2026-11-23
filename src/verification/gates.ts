@@ -1074,6 +1074,8 @@ const sandboxLimitSeen = new Map<SandboxSignatureCause, SandboxLimitCapability>(
  * (их показывают `harness gates` и `doctor`). Тест подменяет `probe` или
  * `probes` и сбрасывает кеш `reset`.
  */
+/** Когда получен ответ пробы (для срока `unknown`). */
+const sandboxLimitAt = new Map<SandboxSignatureCause, number>();
 export const sandboxLimitBackend = {
   probes: {
     'sandbox-signal': () => probeSandboxSignal('os'),
@@ -1082,19 +1084,31 @@ export const sandboxLimitBackend = {
   reset: () => {
     sandboxLimitCache.clear();
     sandboxLimitSeen.clear();
+    sandboxLimitAt.clear();
   },
   seen: (): Partial<Record<SandboxSignatureCause, SandboxLimitCapability>> =>
     Object.fromEntries(sandboxLimitSeen),
+  /** Срок ответа `unknown` в кэше: неясный исход перепроверяется (ревью r3). */
+  unknownTtlMs: 5 * 60_000,
+  now: () => Date.now(),
   probe: (cause: SandboxSignatureCause): Promise<SandboxLimitCapability> => {
     const cached = sandboxLimitCache.get(cause);
-    if (cached) return cached;
+    const seen = sandboxLimitSeen.get(cause);
+    const expired =
+      seen?.status === 'unknown' &&
+      sandboxLimitBackend.now() - (sandboxLimitAt.get(cause) ?? 0) >
+        sandboxLimitBackend.unknownTtlMs;
+    if (cached && !expired) return cached;
     const started = sandboxLimitBackend.probes[cause]()
       .catch((error: unknown): SandboxLimitCapability => ({
         status: 'unknown',
         detail: 'проба не исполнилась: ' + (error instanceof Error ? error.message : String(error)),
       }))
       .then((c) => {
-        if (sandboxLimitCache.get(cause) === started) sandboxLimitSeen.set(cause, c);
+        if (sandboxLimitCache.get(cause) === started) {
+          sandboxLimitSeen.set(cause, c);
+          sandboxLimitAt.set(cause, sandboxLimitBackend.now());
+        }
         return c;
       });
     sandboxLimitCache.set(cause, started);
