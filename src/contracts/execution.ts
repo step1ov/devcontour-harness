@@ -1099,6 +1099,12 @@ export const controlStateSchema = z.strictObject({
       generation: z.number().int().min(0).optional(),
       at: isoTimeSchema,
       by: z.string().min(1),
+      /**
+       * Пределы бюджета применённой политики (0.1.0-alpha.68): попытки,
+       * раунды ревью, повторы, сбросы ведущего, расходы и время. Сравнение с
+       * ними при следующем применении записывает `budget.raised`.
+       */
+      limits: z.record(z.string().max(60), z.number().nullable()).optional(),
     })
     .optional(),
   reconfigure: z

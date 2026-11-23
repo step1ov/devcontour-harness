@@ -5562,6 +5562,19 @@
             "by": {
               "type": "string",
               "minLength": 1
+            },
+            "limits": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "maxLength": 60
+              },
+              "additionalProperties": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
             }
           },
           "required": [

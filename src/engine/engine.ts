@@ -4609,10 +4609,19 @@ export class Engine {
   private adoptPolicy(tx: ExecutionTransaction, by: string, operation?: string) {
     const control = tx.control();
     const generation = (control.appliedPolicy?.generation ?? 0) + 1;
+    const limits = budgetLimitsOf(this.policy);
     tx.setControl({
       ...control,
-      appliedPolicy: { digest: this.loadedPolicy, generation, at: iso(this.now()), by },
+      appliedPolicy: { digest: this.loadedPolicy, generation, at: iso(this.now()), by, limits },
     });
+    // Поднятые пределы бюджета — решение о бюджете: запись в журнале с
+    // прежним и новым значением (0.1.0-alpha.68). Без записанных пределов
+    // прежнего применения (до alpha.68) сравнивать не с чем.
+    const before = control.appliedPolicy?.limits;
+    if (before) {
+      const changes = budgetRaises(before, limits);
+      if (changes.length) tx.emit({ type: 'budget.raised', payload: { by, generation, changes } });
+    }
     tx.emit({
       type: 'policy.applied',
       payload: {
@@ -4897,7 +4906,13 @@ export class Engine {
       tx.setControl({
         ...control,
         reconfigure: { ...request, appliedAt: at, appliedBy: by, error: undefined },
-        appliedPolicy: { digest: request.digest, generation, at, by },
+        appliedPolicy: {
+          digest: request.digest,
+          generation,
+          at,
+          by,
+          limits: budgetLimitsOf(this.policy),
+        },
         ...(resume
           ? {
               paused: false,
@@ -4911,6 +4926,11 @@ export class Engine {
         type: 'policy.applied',
         payload: { digest: request.digest, generation, by, operation: request.operation },
       });
+      // Поднятые пределы бюджета — запись решения о бюджете (как при запуске).
+      const before = control.appliedPolicy?.limits;
+      const raises = before ? budgetRaises(before, budgetLimitsOf(this.policy)) : [];
+      if (raises.length)
+        tx.emit({ type: 'budget.raised', payload: { by, generation, changes: raises } });
       if (resume) tx.emit({ type: 'control.resumed', payload: { reason: 'reconfigure' } });
       return { status: 'applied' as const, generation };
     });
@@ -6363,4 +6383,40 @@ export function infraPendingIndex(view: ExecutionView): (work: WorkState) => str
 /** Одна работа — `infraPendingIndex` без индекса. */
 export function infraPendingOf(work: WorkState, view: ExecutionView): string[] {
   return infraPendingIndex(view)(work);
+}
+
+/**
+ * Пределы бюджета политики (0.1.0-alpha.68) по именам: попытки, раунды ревью
+ * плана и контракта, повторы, сбросы ведущего, расходы и время поручения,
+ * группы и установки. `null` — без предела.
+ */
+export function budgetLimitsOf(policy: ExecutionPolicy): Record<string, number | null> {
+  const out: Record<string, number | null> = {
+    maxAttempts: policy.maxAttempts,
+    reviewRounds: policy.maxAttempts * 2,
+    repairBudget: policy.repairBudget,
+    leadResets: recoveryPolicyOf(policy).leadResets,
+  };
+  for (const scope of ['work', 'group', 'total'] as const) {
+    const b = policy.budgets?.[scope];
+    out[`budgets.${scope}.usd`] = b?.usd ?? null;
+    out[`budgets.${scope}.timeMs`] = b?.timeMs ?? null;
+  }
+  return out;
+}
+
+/** Поднятые пределы: больше прежнего или снят (`null` после числа). */
+export function budgetRaises(
+  before: Record<string, number | null>,
+  after: Record<string, number | null>,
+) {
+  return Object.keys(after)
+    .filter((field) => field in before)
+    .flatMap((field) => {
+      const a = before[field] ?? null;
+      const b = after[field] ?? null;
+      const raised = a !== null && (b === null || b > a);
+      return raised ? [{ field, before: a, after: b }] : [];
+    })
+    .slice(0, 20);
 }

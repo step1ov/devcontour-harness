@@ -441,6 +441,25 @@ export const eventPayloads = {
     settled: z.number().int().min(0),
     reasonLength: z.number().int().min(0),
   }),
+  /**
+   * Применённая политика подняла пределы бюджета (0.1.0-alpha.68): кто
+   * применил, поколение и каждое поднятое значение `before → after`
+   * (`null` — без предела). Причину называет `reapprove --reason`.
+   */
+  'budget.raised': z.strictObject({
+    by: z.string().min(1).max(300),
+    generation: z.number().int().min(0),
+    changes: z
+      .array(
+        z.strictObject({
+          field: z.string().min(1).max(60),
+          before: z.number().nullable(),
+          after: z.number().nullable(),
+        }),
+      )
+      .min(1)
+      .max(20),
+  }),
   /** Политика стала применённой: запуском процесса или операцией reconfigure. */
   'policy.applied': z.strictObject({
     digest: digestSchema,

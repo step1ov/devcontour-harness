@@ -423,3 +423,16 @@ test('recordPolicy: хост с recordPolicyOnLead: false записывает �
   assert.equal(engine.policyState().applied?.digest, policyDigest(A));
   assert.equal(engine.policyState().applied?.by, 'c1');
 });
+
+test('A68: применение политики с поднятыми пределами пишет budget.raised (было → стало)', () => {
+  const { engine: old, dir, store } = engineOf(A);
+  ready(old, graphOf({ a: [] }));
+  old.requestReconfigure('op-1', policyDigest(B));
+  assert.equal(processOf(dir, B).applyReconfigure('p2').status, 'applied');
+  const raised = store.events(0, 1000).filter((e) => e.type === 'budget.raised');
+  assert.equal(raised.length, 1);
+  assert.deepEqual((raised[0]!.payload as { changes: unknown }).changes, [
+    { field: 'maxAttempts', before: 3, after: 5 },
+    { field: 'reviewRounds', before: 6, after: 10 },
+  ]);
+});

@@ -734,6 +734,7 @@ export const DECISION_EVENT_TYPES = [
   'work.reopened',
   'work.rework-abandoned',
   'graph.approved',
+  'budget.raised',
 ] as const;
 
 /** Сколько последних событий решений читает представление. */
@@ -776,6 +777,17 @@ export function decisionsInputOf(
 ): OperatorDecisionInput[] {
   const out: OperatorDecisionInput[] = [];
   for (const w of works) {
+    for (const d of w.leadRecovery?.diagnoses ?? [])
+      (d.addenda ?? []).forEach((a, i) =>
+        out.push({
+          kind: 'diagnosis-addendum',
+          at: a.at,
+          workId: w.id,
+          diagnosis: d.id,
+          index: i + 1,
+          text: a.text,
+        }),
+      );
     for (const d of w.leadRecovery?.diagnoses ?? [])
       out.push({
         kind: 'diagnosis',
@@ -885,6 +897,24 @@ export function decisionsInputOf(
         by: e.payload.by,
         ...((a) => (a ? { approvedBy: a } : {}))(
           e.payload.by === 'graph' ? approvalAfter(events, e) : undefined,
+        ),
+      });
+    else if (e.type === 'budget.raised')
+      out.push({
+        kind: 'budget',
+        at: e.at,
+        seq: e.seq,
+        generation: e.payload.generation,
+        changes: e.payload.changes,
+        // Причину и кто решил называет повторное согласование после правки
+        // политики (`reapprove --by --reason`), если оно было.
+        ...((r) =>
+          r && r.type === 'graph.approved' && r.payload.reapproval
+            ? { by: r.payload.reapproval.by, reason: r.payload.reapproval.reason }
+            : {})(
+          events.find(
+            (x) => x.seq > e.seq && x.type === 'graph.approved' && !!x.payload.reapproval,
+          ),
         ),
       });
     else if (e.type === 'graph.approved' && e.payload.reapproval && e.graphId)

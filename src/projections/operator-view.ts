@@ -1239,6 +1239,28 @@ export type OperatorDecisionInput =
       hypothesis?: string;
     }
   | {
+      /** Дополнение ведущего к разбору (`diagnose --addendum`, 0.1.0-alpha.68). */
+      kind: 'diagnosis-addendum';
+      at: string;
+      workId: string;
+      diagnosis: string;
+      index: number;
+      text: string;
+    }
+  | {
+      /**
+       * Поднятые пределы бюджета применённой политики (`budget.raised`);
+       * `by`/`reason` — из повторного согласования после правки, если было.
+       */
+      kind: 'budget';
+      at: string;
+      seq: number;
+      generation: number;
+      changes: readonly { field: string; before: number | null; after: number | null }[];
+      by?: string;
+      reason?: string;
+    }
+  | {
       kind: 'reset';
       at: string;
       workId: string;
@@ -4163,6 +4185,35 @@ function decisionDraft(c: Ctx, d: OperatorDecisionInput): DecisionDraft | undefi
           ? `diagnosis ${d.diagnosis}: ${cause.en} (${tag})`
           : `разбор ${d.diagnosis}: ${cause.ru} (${tag})`,
         ...((h) => (h ? { reason: h } : {}))(free(d.hypothesis, 400)),
+      };
+    }
+    case 'diagnosis-addendum':
+      return {
+        ...base,
+        kind: 'diagnosis-addendum',
+        by: 'lead',
+        workId: d.workId,
+        subject: d.diagnosis,
+        title: en
+          ? `addendum ${d.index} to diagnosis ${d.diagnosis}`
+          : `дополнение ${d.index} к разбору ${d.diagnosis}`,
+        ...((r) => (r ? { reason: r } : {}))(free(d.text, 400)),
+      };
+    case 'budget': {
+      const value = (v: number | null) =>
+        v === null ? (en ? 'no limit' : 'без предела') : String(v);
+      const list = d.changes
+        .slice(0, 4)
+        .map((x) => `${x.field} ${value(x.before)} → ${value(x.after)}`)
+        .join(', ');
+      return {
+        ...base,
+        kind: 'budget',
+        // Поднять бюджет решает человек (принцип «Кто принимает решения»):
+        // кто повторно согласовал план после правки, решения не меняет.
+        by: 'operator',
+        title: (en ? `budget raised: ${list}` : `бюджет поднят: ${list}`).slice(0, 200),
+        ...((r) => (r ? { reason: r } : {}))(free(d.reason, 400)),
       };
     }
     case 'reset':

@@ -183,6 +183,8 @@ const ADDITIVE_EVENT_TYPES = new Set([
   'environment.reconciled',
   // alpha.68: дополнение разбора ведущего (`harness diagnose --addendum`).
   'work.diagnosis-amended',
+  // alpha.68: поднятые пределы бюджета применённой политики.
+  'budget.raised',
 ]);
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([
@@ -550,6 +552,7 @@ test('H3-01: прежние команды и схемы их данных не 
       const before = Object.keys(o).length;
       if ('resumed' in o && 'works' in o) delete o.documentsDrift;
       if ('failures' in o && 'epoch' in o) delete o.addenda;
+      if ('digest' in o && 'generation' in o && 'by' in o && 'at' in o) delete o.limits;
       if ('reviewerBinding' in o && 'findings' in o) {
         delete o.planDigest;
         delete o.counted;

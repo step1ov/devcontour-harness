@@ -423,3 +423,70 @@ test('a68: harnessView над каталогом состояния выдаёт
   assert.equal(view.viewRevision, 8);
   assert.ok(Array.isArray(view.decisions));
 });
+
+test('a68: решения — поднятый бюджет (человек, причина из повторного согласования) и дополнение разбора', () => {
+  const ev = (seq: number, type: string, payload: unknown): RunEvent =>
+    ({
+      apiVersion: 'devcontour-harness/v1alpha1',
+      seq,
+      at: new Date(NOW - (100 - seq) * 60_000).toISOString(),
+      ...(type === 'graph.approved' ? { graphId: 'g' } : {}),
+      type,
+      payload,
+    }) as RunEvent;
+  const events = [
+    ev(1, 'budget.raised', {
+      by: 'process',
+      generation: 4,
+      changes: [
+        { field: 'maxAttempts', before: 3, after: 4 },
+        { field: 'reviewRounds', before: 6, after: 8 },
+      ],
+    }),
+    ev(2, 'graph.approved', {
+      digest: 'd'.repeat(64),
+      actor: 'agent',
+      reapproval: {
+        by: 'codex',
+        reason: 'владелец дал ещё раунд ревью плана',
+        round: 7,
+        previousPolicyDigest: 'a'.repeat(64),
+        policyDigest: 'b'.repeat(64),
+      },
+    }),
+  ];
+  const work = {
+    id: 'w',
+    leadRecovery: {
+      seq: 1,
+      resets: [],
+      diagnoses: [
+        {
+          id: 'D1',
+          cause: 'environment',
+          evidence: [],
+          failures: ['r1'],
+          by: 'lead',
+          at: at(-50),
+          epoch: 0,
+          addenda: [{ at: at(-40), text: 'ошибка очистки маскирует исходный отказ', evidence: [] }],
+        },
+      ],
+    },
+  } as unknown as Parameters<typeof decisionsInputOf>[0][number];
+  const facts = decisionsInputOf(
+    [work],
+    [],
+    [],
+    events,
+    recoveryPolicyOf({ recovery: { mode: 'lead', diagnoseAfter: 2, leadResets: 2 } }),
+  );
+  const view = operatorViewSchema.parse(operatorView(baseInput({ decisions: facts })));
+  const budget = view.decisions!.find((d) => d.kind === 'budget')!;
+  assert.equal(budget.by, 'operator', 'бюджет поднимает человек');
+  assert.match(budget.title!, /бюджет поднят: maxAttempts 3 → 4, reviewRounds 6 → 8/);
+  assert.equal(budget.reason, 'владелец дал ещё раунд ревью плана');
+  const addendum = view.decisions!.find((d) => d.kind === 'diagnosis-addendum')!;
+  assert.deepEqual([addendum.by, addendum.workId, addendum.subject], ['lead', 'w', 'D1']);
+  assert.match(addendum.title!, /дополнение 1 к разбору D1/);
+});
