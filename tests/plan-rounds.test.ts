@@ -261,6 +261,61 @@ test('A68-1e: доработка принятой работы начинает 
     ),
     undefined,
   );
+  // Записанные эпохи графа (ревью r2): израсходованные не возвращаются.
+  const recordedOf = (
+    epochs: { at: string; workId: string }[],
+    works: { id: string; rework?: Record<string, unknown> }[],
+    rounds: ReturnType<typeof round>[],
+  ) => ({
+    works: () => works as never[],
+    locals: () => rounds,
+    local: () => ({ epochs }),
+  });
+  // Три доработки A и затем доработка B: четвёртой эпохи нет — B не получает
+  // свежий счёт, хотя у A осталась только одна текущая отметка.
+  assert.equal(
+    planRoundEpoch(
+      recordedOf(
+        [
+          { at: t(10), workId: 'A' },
+          { at: t(12), workId: 'A' },
+          { at: t(14), workId: 'A' },
+          { at: t(16), workId: 'B' },
+        ],
+        [
+          { id: 'A', rework: { fresh: true, reopenedAt: t(14), roundEpochAt: t(14) } },
+          { id: 'B', rework: { fresh: true, reopenedAt: t(16), roundEpochAt: t(16) } },
+        ],
+        [round(11), round(13), round(15), round(17)],
+      ),
+      'g',
+    ),
+    t(14),
+  );
+  // Отказ от доработки: эпоха израсходована и не действует; новая доработка
+  // после трёх израсходованных её не получает.
+  assert.equal(
+    planRoundEpoch(
+      recordedOf(
+        [
+          { at: t(10), workId: 'A' },
+          { at: t(12), workId: 'B' },
+          { at: t(14), workId: 'C' },
+          { at: t(16), workId: 'D' },
+        ],
+        [
+          {
+            id: 'C',
+            rework: { fresh: true, reopenedAt: t(14), roundEpochAt: t(14), abandoned: {} },
+          },
+          { id: 'D', rework: { fresh: true, reopenedAt: t(16), roundEpochAt: t(16) } },
+        ],
+        [round(11), round(13), round(15), round(17)],
+      ),
+      'g',
+    ),
+    undefined,
+  );
   // Не больше MAX_ROUND_EPOCHS эпох на граф: четвёртая доработка предел не обновляет.
   assert.equal(
     planRoundEpoch(

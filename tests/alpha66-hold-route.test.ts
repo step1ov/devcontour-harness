@@ -11,7 +11,7 @@ import './temp-scope.ts';
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { digestOf, HarnessError, type WorkGraph } from '../src/contracts/index.ts';
+import { digestOf, HarnessError, WORKSPACE_OWNER, type WorkGraph } from '../src/contracts/index.ts';
 import { MAX_NEUTRAL_FAILURES } from '../src/contracts/repair-policy.ts';
 import type { Engine } from '../src/engine/engine.ts';
 import { stopInputsOf } from '../src/explain/state.ts';
@@ -345,6 +345,12 @@ test('оставленная доработка без abandoned.attempt (пре
     current().rework?.roundEpochAt,
     epoch,
     'продолжение сохраняет эпоху раундов (alpha.68)',
+  );
+  const epochs = e.read((v) => v.local('round-epochs', WORKSPACE_OWNER, 'g'))?.epochs;
+  assert.deepEqual(
+    epochs?.map((x) => [x.at, x.workId]),
+    [[epoch, 'w']],
+    'эпоха записана один раз и не стёрта отказом',
   );
   assert.equal(current().attempt, 2, 'выведено: два засчитанных отказа после принятой попытки');
   // Принятой попытки не найти — строгая сторона: предел исчерпан.

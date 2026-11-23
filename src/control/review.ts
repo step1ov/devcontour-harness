@@ -769,15 +769,19 @@ export const MAX_ROUND_EPOCHS = 3;
 
 /**
  * Начало эпохи раундов графа (0.1.0-alpha.68): доработка принятой работы
- * графа со своим пределом попыток. Эпоху открывает только доработка, которая
- * не оставлена и первый раунд ревью плана после открытия которой засчитан
- * (план изменился); продолжение оставленной и перенесённый счётчик сохраняют
- * эпоху исходной доработки (`roundEpochAt`). Эпох на граф — не больше
- * `MAX_ROUND_EPOCHS`: следующие доработки предел раундов не обновляют.
+ * графа со своим пределом попыток. Эпохи графа записаны навсегда
+ * (`round-epochs`, в порядке открытия); израсходованная эпоха — та, первый
+ * раунд ревью плана после которой засчитан (план изменился) или ещё не
+ * проведён. Израсходованных эпох на граф — не больше `MAX_ROUND_EPOCHS`;
+ * отказ от доработки эпоху не возвращает. Действующая — последняя из них,
+ * чья доработка не оставлена (продолжение оставленной сохраняет её время,
+ * `rework.roundEpochAt`). Состояние без записи (до alpha.68) — по текущим
+ * доработкам работ.
  */
 export function planRoundEpoch(
   view: {
     works(graphId?: string): readonly {
+      id?: string;
       rework?:
         | {
             fresh: boolean;
@@ -792,19 +796,29 @@ export function planRoundEpoch(
       namespace: 'reviews',
       owner: string,
     ) => readonly { value: Pick<ReviewRecord, 'kind' | 'subject' | 'at' | 'counted'> }[];
+    local?: (
+      namespace: 'round-epochs',
+      owner: string,
+      key: string,
+    ) => { epochs: readonly { at: string; workId: string }[] } | undefined;
   },
   graphId: string,
 ) {
   // Представление без работ (сводка из записей ревью) — без эпохи.
   if (typeof view.works !== 'function') return undefined;
-  const starts = new Set<string>();
-  for (const w of view.works(graphId) ?? []) {
-    const r = w.rework;
-    if (!r || r.abandoned) continue;
-    const start = r.roundEpochAt ?? (r.fresh && !r.resumed ? r.reopenedAt : undefined);
-    if (start) starts.add(start);
-  }
-  if (!starts.size) return undefined;
+  const works = view.works(graphId) ?? [];
+  const recorded =
+    typeof view.local === 'function'
+      ? view.local('round-epochs', WORKSPACE_OWNER, graphId)?.epochs
+      : undefined;
+  const epochs: { at: string; workId?: string }[] = recorded
+    ? [...recorded]
+    : works.flatMap((w) => {
+        const r = w.rework;
+        const start = r && (r.roundEpochAt ?? (r.fresh && !r.resumed ? r.reopenedAt : undefined));
+        return start ? [{ at: start, ...(w.id ? { workId: w.id } : {}) }] : [];
+      });
+  if (!epochs.length) return undefined;
   const rounds =
     typeof view.locals === 'function'
       ? view
@@ -813,13 +827,20 @@ export function planRoundEpoch(
           .filter((r) => r.kind === 'plan' && r.subject === graphId)
           .sort((a, b) => a.at.localeCompare(b.at))
       : [];
-  // Эпоху открывает доработка с изменённым планом: её первый раунд засчитан.
-  // Пока раунда нет — эпоха открыта (первый раунд её и покажет).
-  const valid = [...starts]
-    .sort()
-    .filter((start) => rounds.find((r) => r.at > start)?.counted !== false)
+  const consumed = epochs
+    .sort((a, b) => a.at.localeCompare(b.at))
+    .filter((e) => rounds.find((r) => r.at > e.at)?.counted !== false)
     .slice(0, MAX_ROUND_EPOCHS);
-  return valid.at(-1);
+  const open = (e: { at: string; workId?: string }) =>
+    works.some(
+      (w) =>
+        (e.workId === undefined || w.id === e.workId) &&
+        !!w.rework &&
+        !w.rework.abandoned &&
+        (w.rework.roundEpochAt ??
+          (w.rework.fresh && !w.rework.resumed ? w.rework.reopenedAt : undefined)) === e.at,
+    );
+  return [...consumed].reverse().find(open)?.at;
 }
 
 /** Предел раундов ревью плана и контракта по политике (`Harness.review`). */

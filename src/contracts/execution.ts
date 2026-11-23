@@ -1568,6 +1568,16 @@ export const localSchemas = {
    * `@workspace` (`workSeenSchema`). Пишет регистрация графа для новой работы.
    */
   'work-seen': workSeenSchema,
+  /**
+   * Эпохи раундов ревью плана графа (0.1.0-alpha.68): запись по ID графа у
+   * `@workspace` — каждая доработка принятой работы со своим пределом
+   * попыток, в порядке открытия. Записи не удаляются: открытая эпоха
+   * остаётся израсходованной и после отказа от доработки. Пишет регистрация
+   * графа.
+   */
+  'round-epochs': z.strictObject({
+    epochs: z.array(z.strictObject({ at: isoTimeSchema, workId: idSchema })).max(100),
+  }),
 } as const;
 export type LocalNamespace = keyof typeof localSchemas;
 export type LocalValue<N extends LocalNamespace> = z.infer<(typeof localSchemas)[N]>;

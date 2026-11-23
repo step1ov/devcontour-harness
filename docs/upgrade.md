@@ -1995,7 +1995,7 @@ view`) в пределе длины сохраняет хвост — остат
   - `failureSummary` в evidence gate, `failure` и `cleanupFailure` в записи
     окружения;
   - у записей ревью — `planDigest`, `counted`, `changes`;
-  - локальные записи `release-outline`, `work-seen`;
+  - локальные записи `release-outline`, `work-seen`, `round-epochs`;
   - события `budget.raised`, `work.diagnosis-amended`.
     Без копии откат не поддерживается.
 - **Повтор в сессии ведущего.** Внутри `lead begin … end` `retry` без `--by`

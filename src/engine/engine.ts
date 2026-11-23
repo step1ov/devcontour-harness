@@ -630,6 +630,14 @@ export class Engine {
             : {}),
         });
         if (reopen) reopened.push({ workId: order.id, rework: reopen });
+        // Эпоха раундов ревью плана — запись графа, которая не стирается:
+        // её не вернуть ни новой доработкой, ни отказом (ревью r2).
+        if (reopen?.fresh && reopen.roundEpochAt === at) {
+          const prev = tx.local('round-epochs', WORKSPACE_OWNER, graph.id)?.epochs ?? [];
+          tx.putLocal('round-epochs', WORKSPACE_OWNER, graph.id, {
+            epochs: [...prev, { at, workId: order.id }].slice(-100),
+          });
+        }
         // Первое появление работы в выпуске (alpha.68): по нему прогноз
         // называет рост плана. Новая редакция прежнюю запись не трогает.
         if (!prior && !tx.local('work-seen', WORKSPACE_OWNER, order.id))
