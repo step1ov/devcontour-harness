@@ -97,7 +97,7 @@ test('alpha.67 setup: ход настройки в обзоре без рабо�
   touch(join(p.harness, 'policy.json'), NOW - 10 * 60_000);
   const at = (now: number) => setupProgress({ harnessDir: p.harness, now });
   const view = operatorViewSchema.parse(operatorView(baseInput({ setup: at(NOW) })));
-  assert.equal(view.viewRevision, 7);
+  assert.equal(view.viewRevision, 8);
   assert.equal(view.stage?.name, 'setup');
   assert.equal(view.stage?.progress?.steps.length, 7);
   assert.deepEqual(view.stage?.lines, ['Идёт настройка harness', 'Задач пока нет']);

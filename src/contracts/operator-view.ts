@@ -437,11 +437,61 @@ export const workViewSchema = z.strictObject({
              * сброс человеком — `user`, сброс ведущего — `lead`.
              */
             actor: z.enum(trackStepActors).optional(),
+            /**
+             * Ревизия 8: шаг разбора (`diagnosis`) обязателен — работу держит
+             * правило восстановления (`DIAGNOSIS_REQUIRED`, исчерпание) —
+             * или ведущий разбирает по желанию (`false`: повтор делает
+             * harness сам). Только показ.
+             */
+            required: z.boolean().optional(),
           }),
         )
         .max(L.trackSteps),
       truncated: count.optional(),
     })
+    .optional(),
+  /**
+   * Ревизия 8: работа переоткрыта новой редакцией плана после приёмки
+   * (`work.reopened`), доработка ещё не принята и не оставлена. `by` — кто
+   * согласовал редакцию, переоткрывшую работу (`agent` — ведущий,
+   * `operator` — человек); не согласована — поля нет. `budget` — свой
+   * предел попыток (`fresh`) или перенесённый (`carried`), `spent` —
+   * засчитанные попытки принятой редакции, `reason` — фраза для карточки.
+   */
+  reopened: z
+    .strictObject({
+      at: isoTimeSchema,
+      by: z.enum(['lead', 'operator']).optional(),
+      revision: z.number().int().positive(),
+      budget: z.enum(['fresh', 'carried']),
+      acceptedSha: sha,
+      spent: count,
+      reason: z.string().min(1).max(T.line),
+    })
+    .optional(),
+  /**
+   * Ревизия 8: итог независимого ревью кандидата по попыткам (и ревью
+   * интеграции, `phase`): последний применённый раунд попытки и фазы.
+   * `invalid` — у попытки и фазы были только ответы не по протоколу или
+   * небезопасные. `findings` — открытые blocking-находки раунда, `notes` —
+   * прочие открытые. `earlier` — попытка прежней (принятой) редакции работы
+   * до доработки. Сверх предела — самые ранние отброшены
+   * (`truncated.attemptReviews`). Ревью кода ведущего (`reviews[kind=code]`)
+   * сюда не входит.
+   */
+  attemptReviews: z
+    .array(
+      z.strictObject({
+        attempt: z.number().int().positive(),
+        phase: z.enum(['candidate', 'integration']),
+        verdict: z.enum(['approved', 'rejected', 'invalid']),
+        findings: count,
+        notes: count,
+        at: isoTimeSchema,
+        earlier: z.literal(true).optional(),
+      }),
+    )
+    .max(L.attemptReviews)
     .optional(),
 });
 
@@ -549,7 +599,11 @@ const activitySchema = z.strictObject({
   plain: z.string().min(1).max(T.activity),
 });
 
-/** P2: решения; обязательные сочетания — design §3.9. */
+/**
+ * Решения (ревизия 8 — harness выдаёт): кто, когда и что решил по записям
+ * хранилища и журнала событий, новые сверху; виды и соответствие актёров —
+ * docs/operator-view.md. Обязательные сочетания — design §3.9.
+ */
 const decisionSchema = z
   .strictObject({
     id,
@@ -954,6 +1008,8 @@ export const operatorViewSchema = z.strictObject({
       alternates: truncatedCount.optional(),
       activity: truncatedCount.optional(),
       decisions: truncatedCount.optional(),
+      /** Ревизия 8: записи `works[].attemptReviews` сверх предела, по всем работам. */
+      attemptReviews: truncatedCount.optional(),
       /**
        * Работы, у которых документ сверх предела размера опустил поля
        * ревизии 4 (`attempts.lastFailure.kind`/`counted`, `blockers[].step`,
@@ -1035,6 +1091,8 @@ export const workDetailViewSchema = z.strictObject({
       questions: truncatedCount.optional(),
       blockers: truncatedCount.optional(),
       dependsOn: truncatedCount.optional(),
+      /** Ревизия 8: записи `work.attemptReviews` сверх предела. */
+      attemptReviews: truncatedCount.optional(),
     })
     .optional(),
 });
