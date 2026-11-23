@@ -2141,6 +2141,91 @@ lineEn}`, шаг — `{id, state, at?, elapsedMs?, line, lineEn}`; `id`:
   никто не запущен: запустите harness run: готово N задач, вопрос блокирует
   только X (ведущий).»; `restartBy: lead`.
 
+**План выпуска и прогноз (0.1.0-alpha.68).** Добавления, все необязательные
+в схеме; читатель прежней ревизии их игнорирует. Смысл меняют
+`forecast.progress.percent` (объём — весь план выпуска, ниже) и строка
+времени при принятом коде.
+
+- **План выпуска ведущего** (`harness lead outline --state D --file F
+[--reason T]`, синоним `lead outline`): до первого графа ведущий записывает
+  этапы × компоненты — `{stages: [{id, title, kind: infra | product | deploy
+| other, components: [{id, title, size?: S | M | L, tasks?: 1–50, actor:
+writers | environment | owner, works?: [ID работы или ключ задачи]}]}],
+reason?}` (не больше 12 этапов, 20 компонентов в этапе, 60 всего; ID
+  уникальны). Объём компонента в задачах: `tasks`, иначе размер S = 1, M = 2,
+  L = 4 (`OUTLINE_SIZE_UNITS`). Локальная запись `release-outline`
+  (`releaseOutlineSchema`: `revision`, `recordedAt`, `firstRecordedAt`,
+  `stages`, `units`, `changes[]`); `stateVersion` прежний. Тот же план —
+  `changed: false`; другой — новая редакция и изменение `{at, revision,
+before, after, added[], removed[], reason}` (причина — `--reason`, `reason`
+  файла или «план вырос: +A (было ~N задач → стало ~M задач)»), строка
+  журнала ведущего `lead.outline`. Регистрация графа записывает первое
+  появление новой работы (`work-seen`, `{at, graphId}`).
+- **Нет плана** — подсказка, а не блокировка: `status.outline {state:
+missing, code: RELEASE_OUTLINE_MISSING, line, lineEn}`, пока работы есть и
+  выпуск не закрыт; `forecast.outline {state: missing, code, line}` —
+  «плана выпуска нет — прогноз по одному графу: …». `run` не блокируется.
+  Записан — `status.outline {state: recorded, revision, units, stages,
+line, lineEn}`.
+- **`forecast.outline`** при записанном плане: `{state: recorded, revision,
+recordedAt, units, registered, unregistered, beyond?, stages[] {id, title?,
+kind, state, units, registered, percent, components[] {id, title?, size?,
+tasks?, actor, state, units, registered, percent, works? (≤5 ID)}}, line}`;
+  `state` — `registered`, `partial`, `unregistered`. Работы подбираются к
+  компонентам: явной ссылкой (`works` компонента или его `id` = ID работы
+  или ключ задачи), остальные — по порядку появления заполняют свободный
+  объём компонентов без ссылок (инфраструктура — этапы `infra`, затем
+  `deploy`; продукт — `product`, `other`, `deploy`). Работа без места —
+  сверх плана (`beyond`). Заголовки — без `--no-titles`.
+- **Объём прогноза.** Свободный объём плана (`unregistered`) — единицы с
+  весом 0: `percent = round(100 × (0,9 × weighted / (total + unregistered) +
+lead.weighted))`. `progress.line` добавляет «по плану выпуска ещё не
+  зарегистрировано: ~N»; пока он есть, выпуск не `code-accepted`, шаг
+  ведущего `plan` не сделан, `finishedAt` нет.
+- **Только инфраструктура без плана**: все работы `kind: infra` — код весит
+  30 % выпуска (`INFRA_DEFAULT_SHARE`, оценка): `progress.infraShare {share:
+0.3, line}`, строка — «; инфраструктура — 30 % выпуска (оценка), продукт
+  ещё не спланирован», время — «· продукт ещё не спланирован — в оценку не
+  входит».
+- **Время незарегистрированного** (`forecast.time.outline {units,
+ownerUnits?, loMs?, hiMs?, basis, line}`): задачи исполнителей и окружения ×
+  длительность задачи (`basis: attempts` — p50/p90 от 5 закончившихся
+  попыток выпуска, меньше — разброс; `default` — без попыток, 15–40 мин,
+  `OUTLINE_DEFAULT_TASK_MS`) × попыток на задачу, нижняя — на
+  `concurrency`. Шаги владельца (`actor: owner`) — числом, во время не
+  входят. Строка — «по плану выпуска ещё ~N задач: ~X – Y (оценка по
+  размеру)»; она же в `time.line` после «осталось». `remaining`/`rough`
+  по-прежнему — только зарегистрированные работы.
+- **Рост плана** (`forecast.progress.growth {at, added[], before, after, by,
+reason?, line}`): последний рост — работы или задачи, появившиеся позже
+  начала выпуска и не вошедшие в план (`by: works`), или запись плана с
+  большим объёмом (`by: outline`, `reason` — причина записи), что позже.
+  `before` — готовность без добавленного (при той же готовности остального),
+  `after` — текущая; строка — «план вырос: +W (было 95 % → стало 86 %)».
+  Работа, заполнившая место плана, — не рост. После `release done` поля нет.
+- **«Если ведущий не добавит задач»** (`progress.conditional: true`): сессия
+  ведущего открыта, плана сверх зарегистрированного нет, и каждая работа
+  принята или идёт; строка — «готово ~95 % — если ведущий не добавит задач
+  · код принят, …» (или в конце строки в работе).
+- **Ведущий завершает** (`forecast.time.finishing {since?, elapsedMs?,
+exceeded?}`): весь код принят, отчёта нет — «код принят · осталось
+  немного: ведущий завершает (идёт N мин, обычно ~M мин)» вместо «осталось:
+  ничего + работа ведущего»; `since` — конец последней попытки. Ведущий
+  дольше своей обычной доли (`time.lead.ms`) — `exceeded: true`, и оценка
+  ведущего не показывается: «(идёт N мин)». Готовность до `release done` —
+  не больше 99 %.
+- **Этап идущей попытки** (`forecast.progress.works[].stageProgress {stage,
+from, to, since?, typicalMs?, samples?}`): `stage` — `code` (`prepare`,
+  `writer`), `checks` (`gates`), `review`, `integration`; `from`/`to` — доля
+  попытки к приёмке на начале и конце этапа (те же веса этапов 0, 0,2 … 0,8);
+  `typicalMs` — p50 закончившихся этапов проекта (`stageTypical`, от одного
+  образца). Полоса карточки: `from + (to − from) × min(0.95, (сейчас −
+since) / typicalMs)`; после отказа — снова с начала этапа новой попытки.
+- **Токен.** В `source.token` не входят `time.finishing.elapsedMs` и
+  `exceeded` (точка отсчёта `since` входит), как `elapsedMs` прогноза.
+  Раздел `forecast.outline` не опускается по размеру (не больше 60
+  компонентов).
+
 ### HandoffPack
 
 Пакет передачи контекста (`harness handoff`, `handoffPack(source, options)`
@@ -2550,6 +2635,7 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `lead-note`        | `--state D --text T [--work ID]` (синоним `lead note "T"`)                                                                  | да    | `lead {active, lastNote}`, запись, `line`                                                                                                                                                                                                                   | Каждый вызов — новая запись (до 200 символов, без управляющих символов и секретов); старые вытесняются пределом 200                                                                                   |
 | `lead-end`         | `--state D [--text T]` (синоним `lead end`)                                                                                 | да    | `lead {active: false, endedAt}`, запись, `line`                                                                                                                                                                                                             | Закрывает сессию                                                                                                                                                                                      |
 | `release-done`     | `--state D --summary T` (синоним `release done "T"`)                                                                        | да    | `release {doneAt, summary, works}`, `lead`, запись, `line`                                                                                                                                                                                                  | Только когда весь код принят (иначе `NOT_READY`); повтор заменяет отчёт                                                                                                                               |
+| `lead-outline`     | `--state D --file F [--reason T]` (синоним `lead outline`)                                                                  | да    | `outline` (редакция, этапы, `units`, `changes`), `changed`, `change?`, `line`                                                                                                                                                                               | Тот же план — `changed: false`; другой — новая редакция с причиной и строкой журнала ведущего                                                                                                         |
 | `capabilities`     | —                                                                                                                           | нет   | каталог общих операций (`OperationCatalog`)                                                                                                                                                                                                                 | Чистая функция установленной версии пакета                                                                                                                                                            |
 | `--version`        | —                                                                                                                           | нет   | версия пакета и API                                                                                                                                                                                                                                         | —                                                                                                                                                                                                     |
 
