@@ -8,6 +8,7 @@ import {
   STATE_VERSION,
   inputPolicyOf,
   leadAnswersRule,
+  NO_RETRY_GATE_CODES,
   reviewVendorConflictMessage,
   reviewVendorConflicts,
   runtimeAssignments,
@@ -255,8 +256,14 @@ export async function doctor(
   ];
   for (const note of (policy?.repositories ?? []).flatMap((r) => {
     const browser = (r.writerProbe ?? []).filter(isBrowserRunner).map((s) => s.id);
+    // Под песочницей ОС проверок браузер не стартует и в gate (0.1.0-alpha.68):
+    // такой провал — отказ среды `sandbox-browser`, ход ведущего.
+    const gate =
+      policy?.isolation.mode === 'os'
+        ? ` В gate под песочницей ОС браузер не стартует: такой провал — отказ среды sandbox-browser (${NO_RETRY_GATE_CODES['sandbox-browser']}), попытка не засчитана, gate удержан до хода ведущего.`
+        : '';
     return browser.length
-      ? [`browser-checks ${r.id} (${browser.join(', ')}): ${BROWSER_ADVICE}`]
+      ? [`browser-checks ${r.id} (${browser.join(', ')}): ${BROWSER_ADVICE}${gate}`]
       : [];
   }))
     notes.push(note);

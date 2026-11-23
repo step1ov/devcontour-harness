@@ -69,6 +69,20 @@ import {
   processListSeen,
   type ProcessListCapability,
 } from './process-list.ts';
+import {
+  sandboxSignatureCall,
+  sandboxSignatureCodeMessage,
+  sandboxSignatureFailure,
+  sandboxSignatureMessage,
+  sandboxSignaturePartial,
+  sandboxSignaturePartialNote,
+  type SandboxSignatureCause,
+} from './sandbox-signatures.ts';
+import {
+  WITHHELD_NOTE,
+  commandReports,
+  failureSummary as summarizeFailure,
+} from './failure-summary.ts';
 import { sameNode, toolchainFacts, toolchainText, usesPnpm } from '../environment/toolchain-pin.ts';
 
 /** Длинное имя testcase заменяется хешем, а не обрезается: обрезка дала бы ложные совпадения. */
@@ -829,6 +843,19 @@ export async function processListAdded(
   base: string,
   sha: string,
 ): Promise<string[]> {
+  return addedCallFiles(repoPath, base, sha, processListCall);
+}
+
+/**
+ * Файлы, в которые изменение `base..sha` добавило строку, распознанную
+ * `isCall` (до 10). Те же исключения, что у `processListAdded`.
+ */
+export async function addedCallFiles(
+  repoPath: string,
+  base: string,
+  sha: string,
+  isCall: (line: string) => boolean,
+): Promise<string[]> {
   let out: string;
   try {
     out = await gitRawOutput(
@@ -854,7 +881,7 @@ export async function processListAdded(
       file = line.startsWith('+++ b/') ? line.slice(6) : undefined;
       continue;
     }
-    if (file && line.startsWith('+') && processListCall(line.slice(1))) files.add(file);
+    if (file && line.startsWith('+') && isCall(line.slice(1))) files.add(file);
   }
   return [...files].slice(0, 10);
 }
@@ -1101,6 +1128,12 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   let reaped: ReapFailure | undefined;
   /** Провал назван только ненулевым кодом выхода, без иной причины. */
   let exitOnly = false;
+  /** Пометки к засчитанному провалу: часть упавших тестов закрыла песочница. */
+  const partialNotes: string[] = [];
+  /** Выжимка провала, названного командой (`EvidenceRecord.failureSummary`). */
+  let failureSummary: EvidenceRecord['failureSummary'];
+  /** Начало запуска: отчёты команды старше него — от прежнего запуска. */
+  let startedAt = Date.now();
   let passed = false,
     summary = '',
     log = `# harness gate ${gate.id}: cwd=${relative(root, gateCwd) || '.'} argv=${JSON.stringify(gate.command.map(redact))}${gate.kind === 'test' ? ` fresh=${redact(JSON.stringify(freshness))}` : ''}\n# toolchain: ${toolchainText(toolchain)}\n`,
@@ -1122,6 +1155,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     // Нагрузка до запуска: gate, который сам перегрузил процессор (пул
     // потоков без предела), не должен заработать повтор своей нагрузкой.
     loadBefore = hostLoad.read();
+    startedAt = Date.now();
     const result = await runCheck(
       { config: run.policy },
       {
@@ -1272,19 +1306,17 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       // (`process-list.ts`). Признак — в выводе, а при упавших testcases — в
       // тексте каждого из них; отказ подтверждает собственная проба harness
       // в той же песочнице, а не только напечатанное проверкой.
+      const failureTexts = counts?.failures
+        ? {
+            total: counts.failures,
+            texts: junitFailures(counts.xml, redact, Math.min(counts.failures, 200)).map(
+              (f) => `${f.message}\n${f.body}`,
+            ),
+          }
+        : undefined;
       const listing =
         run.policy.isolation.mode === 'os'
-          ? processListFailure(
-              result.stdout + '\n' + result.stderr,
-              counts?.failures
-                ? {
-                    total: counts.failures,
-                    texts: junitFailures(counts.xml, redact, Math.min(counts.failures, 200)).map(
-                      (f) => `${f.message}\n${f.body}`,
-                    ),
-                  }
-                : undefined,
-            )
+          ? processListFailure(result.stdout + '\n' + result.stderr, failureTexts)
           : undefined;
       if (listing && (await processListBackend.probe()).status === 'unavailable') {
         const tail = `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`;
@@ -1303,6 +1335,38 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         kind = 'environment';
         cause = 'sandbox-process-list';
         throw new Error(processListMessage({ ...listing, line: redact(listing.line) }, tail));
+      }
+      // Сигнал процессу вне песочницы (`kill EPERM`) и браузер, который в
+      // песочнице ОС не стартует (0.1.0-alpha.68): те же правила, что у
+      // списка процессов, — признак у каждого упавшего теста, вызов не из
+      // изменения задачи. Часть упавших с признаком — пометка к провалу.
+      if (run.policy.isolation.mode === 'os') {
+        const output = result.stdout + '\n' + result.stderr;
+        for (const sandboxCause of [
+          'sandbox-signal',
+          'sandbox-browser',
+        ] as SandboxSignatureCause[]) {
+          const line = sandboxSignatureFailure(sandboxCause, output, failureTexts);
+          if (!line) continue;
+          const tail = `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`;
+          const base = run.trustedBase;
+          const added =
+            base && base !== sha
+              ? await addedCallFiles(cwd, base, sha, (l) => sandboxSignatureCall(sandboxCause, l))
+              : [];
+          if (added.length)
+            throw new Error(sandboxSignatureCodeMessage(sandboxCause, redact(line), added, tail));
+          kind = 'environment';
+          cause = sandboxCause;
+          throw new Error(sandboxSignatureMessage(sandboxCause, redact(line), tail));
+        }
+        for (const sandboxCause of [
+          'sandbox-signal',
+          'sandbox-browser',
+        ] as SandboxSignatureCause[]) {
+          const line = sandboxSignaturePartial(sandboxCause, output, failureTexts);
+          if (line) partialNotes.push(sandboxSignaturePartialNote(sandboxCause, redact(line)));
+        }
       }
       // Установка зависимостей, закреплённая политикой, упала на сети или
       // реестре пакетов, а признаков ошибки проекта нет: правка кода её не
@@ -1326,14 +1390,48 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       }
       // Провал назван только кодом выхода (без упавших случаев отчёта).
       exitOnly = !counts?.failures;
+      // Выжимка провала: упавшие тесты отчёта, вывода или отчёта, который
+      // команда записала сама, строка ошибки и хвост вывода. Без отчёта gate
+      // имена из вывода дописываются к тексту; ничего не названо — пометка,
+      // что gate скрыл причину.
+      const reports = counts?.failures
+        ? []
+        : (await commandReports(gate.command, gateCwd, root, startedAt, reportPath)).flatMap(
+            (r) => {
+              try {
+                return junitFailures(r.xml, redact, 20);
+              } catch {
+                return [];
+              }
+            },
+          );
+      failureSummary = summarizeFailure({
+        ...(counts?.failures ? { junit: junitFailures(counts.xml, redact, 50) } : {}),
+        reports,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        redact,
+      });
+      // Имена не из отчёта gate (вывод, отчёт команды): отчёт gate мог
+      // назвать только общий провал обёртки.
+      const named =
+        failureSummary.source && failureSummary.source !== 'junit' && failureSummary.tests?.length
+          ? failureSummary.tests.join('; ').slice(0, 600)
+          : '';
       throw new Error(
         [
           `Код выхода ${result.code}`,
-          counts?.failures ? `упали ${failedCases(counts)}` : '',
+          counts?.failures
+            ? `упали ${failedCases(counts)}${named ? `; по выводу: ${named}` : ''}`
+            : named
+              ? `упали ${named}`
+              : '',
           diagnostic(result.stderr, result.stdout, redact),
         ]
           .filter(Boolean)
-          .join(': '),
+          .join(': ') +
+          partialNotes.map((n) => '; ' + n).join('') +
+          (failureSummary.withheld ? `; ${WITHHELD_NOTE}` : ''),
       );
     }
     if (reportPath) {
@@ -1342,6 +1440,13 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       // Отчёт сохраняется и при провале с нулевым кодом выхода: из него
       // следующая попытка получает текст провала (`gateFeedback`).
       await keepReport(counts.xml);
+      if (counts.failures)
+        failureSummary = summarizeFailure({
+          junit: junitFailures(counts.xml, redact, 50),
+          stdout: result.stdout,
+          stderr: result.stderr,
+          redact,
+        });
       if (counts.failures || counts.skipped)
         throw new Error(summary + (counts.failures ? `: ${failedCases(counts)}` : ''));
     } else summary = 'Команда завершилась успешно';
@@ -1531,6 +1636,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     ...(manifest ? { tests: manifest.cases } : {}),
     ...(manifest?.truncated ? { testsTruncated: true } : {}),
     ...(reportDigest ? { reportDigest } : {}),
+    ...(!passed && failureSummary ? { failureSummary } : {}),
     ...(run.consumer ? { consumer: run.consumer } : {}),
     ...(toolchain.node ? { toolchain } : {}),
     ...(propertyEvidence ? { property: propertyEvidence } : {}),

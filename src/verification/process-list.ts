@@ -121,7 +121,7 @@ export function processListFailure(
 }
 
 /** Упавшие тесты отчёта и итог прогона (`# fail N`, `ℹ fail N`). */
-interface FailedBlocks {
+export interface FailedBlocks {
   /** Тексты упавших тестов (без упавших наборов). */
   tests: string[];
   /** Упавших тестов вместе с наборами — сверка с итогом прогона. */
@@ -143,7 +143,7 @@ const specHeader = /^\s*✖\s+failing tests:\s*$/;
  * такой. В spec упавшие тесты повторяются: в ходе прогона без текста и в
  * списке `✖ failing tests:` с текстом — читается список, если он есть.
  */
-function failedBlocks(output: string): FailedBlocks | undefined {
+export function failedBlocks(output: string): FailedBlocks | undefined {
   const lines = output.split('\n');
   let total: number | undefined;
   for (const l of lines) {
@@ -205,7 +205,7 @@ function blocksFailure(blocks: FailedBlocks): ProcessListSignature | undefined {
 }
 
 /** Проваленное утверждение (node:assert, chai, jest/vitest), а не отказ запуска. */
-const assertionMarkers = [
+export const assertionMarkers = [
   /\bAssertionError\b/,
   /\bERR_ASSERTION\b/,
   /^\s*(?:Expected|Received)(?: value)?:/,
@@ -226,12 +226,13 @@ const failedTotals = [
  * Отчёты повторяют упавший тест (список и итог), поэтому строки упавших
  * считаются без повторов, и берётся большее из них и итога прогона.
  */
-function otherFailures(output: string): boolean {
+export function otherFailures(
+  output: string,
+  signed: (line: string) => boolean = (line) => Boolean(processListSignature(line)?.named),
+): boolean {
   const lines = output.split('\n');
   if (lines.some((l) => assertionMarkers.some((r) => r.test(l)))) return true;
-  const signatures = new Set(
-    lines.filter((l) => processListSignature(l)?.named).map((l) => l.trim()),
-  ).size;
+  const signatures = new Set(lines.filter(signed).map((l) => l.trim())).size;
   const failedLines = new Set(lines.filter((l) => failedTestLine.test(l)).map((l) => l.trim()))
     .size;
   let total = 0;

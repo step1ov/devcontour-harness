@@ -2097,6 +2097,14 @@
                   "os",
                   "none"
                 ]
+              },
+              "cause": {
+                "type": "string",
+                "enum": [
+                  "sandbox-process-list",
+                  "sandbox-signal",
+                  "sandbox-browser"
+                ]
               }
             },
             "required": [
@@ -2285,7 +2293,9 @@
           "environmentCause": {
             "type": "string",
             "enum": [
-              "sandbox-process-list"
+              "sandbox-process-list",
+              "sandbox-signal",
+              "sandbox-browser"
             ]
           },
           "failureFingerprint": {
@@ -4188,6 +4198,47 @@
                 "reportDigest": {
                   "type": "string",
                   "pattern": "^[a-f0-9]{64}$"
+                },
+                "failureSummary": {
+                  "type": "object",
+                  "properties": {
+                    "tests": {
+                      "maxItems": 20,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    },
+                    "testsTruncated": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "assertion": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    },
+                    "tail": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1200
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "junit",
+                        "output",
+                        "command-report"
+                      ]
+                    },
+                    "withheld": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "additionalProperties": false
                 },
                 "toolchain": {
                   "type": "object",

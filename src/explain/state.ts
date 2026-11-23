@@ -498,6 +498,7 @@ export function stopInputsIn(
                 gate: held.gate,
                 workId: held.workId,
                 runId: held.runId,
+                ...(held.cause ? { cause: held.cause } : {}),
                 ...(holder ? { route: h.engine.retryRouteOf(holder, v) } : {}),
               },
             };

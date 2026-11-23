@@ -43,6 +43,16 @@ export const environmentCauses = [
    * запускает setuid-программы в песочнице. Правка кода этого не снимет.
    */
   'sandbox-process-list',
+  /**
+   * Gate посылает сигнал (`kill`) процессу вне своей песочницы ОС, а она это
+   * запрещает (`GATE_SANDBOX_SIGNAL`, 0.1.0-alpha.68): `kill EPERM`.
+   */
+  'sandbox-signal',
+  /**
+   * Gate запускает браузер или его демон, а в песочнице ОС проверок он не
+   * стартует (`GATE_SANDBOX_BROWSER`, 0.1.0-alpha.68).
+   */
+  'sandbox-browser',
   'dependency-network',
   'provider-auth',
   'provider-limit',

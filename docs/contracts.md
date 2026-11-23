@@ -1447,9 +1447,10 @@ hadAttempt}`. `engine.cancel(workId, reason?, by?)` (CLI `cancel` — `operator`
 `attempt.failed` (и `attempt.expired`) в той же транзакции под fencing.
 `cause` (`environmentCauses`): `sandbox-launch`, `sandbox-network`,
 `sandbox-filesystem`, `sandbox-policy`, `sandbox-process-list`,
-`dependency-network` — ставит gate в точке обнаружения
-(`TaskFailure.diagnosis`; `sandbox-process-list` — см. «Список процессов в
-песочнице проверок» ниже); `transport`, `preflight`
+`sandbox-signal`, `sandbox-browser`, `dependency-network` — ставит gate в
+точке обнаружения (`TaskFailure.diagnosis`; `sandbox-process-list`,
+`sandbox-signal`, `sandbox-browser` — см. «Список процессов в песочнице
+проверок» ниже); `transport`, `preflight`
 (`BlockedError` до работы), `provider-auth`, `provider-limit`, `stalled`,
 `shutdown` (прерывание штатной остановкой), `lease-expired` — по классу отказа
 и его признакам; `process-reap` — потомков сдерживаемой команды (gate,
@@ -2772,6 +2773,26 @@ SHA.
 (причина из `environmentCauses`, например `sandbox-process-list`); `--human`
 печатает её перед сообщением: `[среда: sandbox-process-list]`.
 
+**Выжимка провала gate** (0.1.0-alpha.68). Непройденная запись `test`, чей
+провал назвала команда (ненулевой код выхода или упавшие testcases), несёт
+`failureSummary` (`gateFailureSummarySchema`); то же поле — у
+`gates[].failureSummary` итога `harness gates`. Поля: `tests` — до 20 имён
+упавших тестов (`testsTruncated` — есть ещё), `assertion` — первая строка
+утверждения или ошибки (до 300 знаков), `tail` — последние строки stdout и
+stderr (до 1200 знаков), `source` — откуда имена: `junit` (отчёт gate без
+общих провалов обёртки вроде «Gate execution failed»), `output` (упавшие
+тесты вывода `node --test` spec или TAP), `command-report` (JUnit, который
+команда записала сама по пути `*.xml` из argv — `--test-reporter-destination=…`
+и подобные — внутри дерева и этим запуском); `withheld` — gate не назвал ни
+теста, ни строки ошибки, а вывод говорит, что подробности скрыты (или в нём
+не больше двух строк). Всё — с той же маской секретов, что лог. Имена не из
+отчёта gate дописываются к тексту отказа (`упали …` или `; по выводу: …`), у
+`withheld` — пометка, что gate должен печатать безопасную выжимку (это правка
+команды gate, ход ведущего). Подсказка следующей попытки получает выжимку
+отдельным случаем `failure-summary`; `--human` печатает под gate строку
+`причина: …`. Выжимка — диагностика: класс отказа, отпечаток и приёмка от неё
+не зависят.
+
 **Список процессов в песочнице проверок.** При `isolation.mode: os` gate
 исполняется в песочнице ОС (sandbox-runtime). На macOS ядро не запускает
 setuid-программы из песочницы, даже при профиле `(allow default)`: `/bin/ps`
@@ -2824,6 +2845,32 @@ none` снимает песочницу со всех проверок и не �
   `sandbox-process-list: <файлы> вызывают ps/pgrep/top; …`; `--human`
   печатает строку возможности или это предупреждение.
 
+С 0.1.0-alpha.68 то же правило (признак у каждого упавшего теста, ни одного
+проваленного утверждения, только под `isolation.mode: os`, вызов не из
+добавленных строк изменения задачи) классифицирует ещё два отказа песочницы
+ОС проверок — без собственной пробы harness:
+
+- `sandbox-signal` (`GATE_SANDBOX_SIGNAL`) — проверка шлёт сигнал процессу
+  вне своей песочницы (обёртке gate, процессу хоста): `Error: kill EPERM`,
+  `kill: (…) - Operation not permitted`, объект ошибки с `syscall: 'kill'` и
+  `EPERM`. Вызов изменения — `process.kill(`, `os.kill(`, `kill` в shell.
+- `sandbox-browser` (`GATE_SANDBOX_BROWSER`) — проверка запускает браузер или
+  его демон, а он не стартует в песочнице: «browser daemon unavailable»,
+  отказ запуска Puppeteer/Playwright/Chrome (`BROWSER_LAUNCH`),
+  `bootstrap_check_in … Permission denied (1100)`. Вызов изменения —
+  `agent-browser`, `chromium.launch(`, импорт `playwright`/`puppeteer`.
+
+Общий провал обёртки gate без своей причины («Gate execution failed»),
+дописанный в JUnit к тестам с признаком, классификацию не отменяет, если
+вывод `node --test` (spec/TAP) сам называет упавшие тесты и итог прогона
+сходится. Признак лишь у части упавших тестов оставляет провал засчитанным, а
+текст называет эту часть пометкой «среди упавших есть признак отказа среды
+…». Семантика — та же, что у `sandbox-process-list`: попытка не засчитана
+(предел незасчитанных отказов работы), автоматического повтора нет, gate
+удержан (`ENVIRONMENT_GATE_HELD`, `WorkState.environmentHold.cause`) до смены
+определения gate или среды либо до `retry --by lead`; проба `ps` удержание по
+этим причинам не снимает.
+
 **`review-code`.** Технический обзор ветки, написанной вне harness: reviewer —
 по правилу ревью кода роли (`--role`; одна роль репозитория — по умолчанию) и
 правилу вендора относительно автора (`--author`, по умолчанию writer роли;
@@ -2860,9 +2907,11 @@ lifecycle `setup` и `ready`, хранилище зависимостей (`depe
 `prepare` и `teardown`. Ресурсы — те, что держат gates репозитория (порт
 службы lifecycle проверяется так же, как перед фазой). `data.steps[]` —
 каждый шаг по порядку: `stage`, `id`, `status` (`passed`/`failed`),
-`durationMs`, `exitCode`, `timedOut`, `log`. Отказ — данные и exit 4
-(`LIFECYCLE_FAILED`): `data.failure` с классом, стадией и шагом, сообщением и
-советом. Классы: `port-busy` (порт ресурса занят до окружения), `timeout`
+`durationMs`, `exitCode`, `timedOut`, `log`; у упавшего шага — `signal`
+(сигнал процесса) и `tail` (хвост вывода с маской секретов, до 600 знаков;
+0.1.0-alpha.68). Отказ — данные и exit 4
+(`LIFECYCLE_FAILED`): `data.failure` с классом, стадией и шагом, сообщением,
+хвостом упавшего шага (`tail`) и советом. Классы: `port-busy` (порт ресурса занят до окружения), `timeout`
 (шаг дольше своего `timeoutMs`, проверка дольше `runTimeoutMs` или замолкла
 дольше порога `stallSweep`), `crash` (ненулевой код шага; установка, упавшая
 на сети или реестре по правилу `dependency-network`, — `environment`), `missing-tool`
@@ -2872,6 +2921,17 @@ lifecycle `setup` и `ready`, хранилище зависимостей (`depe
 teardown исполняется и после отказа. Прерывание сигналом — `CANCELLED`.
 Логи шагов — в `<state>/gates-at/<id>` (`data.logs`), ход — в stderr.
 Библиотека: `smokeLifecycle`, `classifyLifecycleFailure`.
+
+Упавший шаг lifecycle (`setup`, `ready`, `teardown`) и `prepare` в попытке,
+`gates` и `smoke` называет причину сам (0.1.0-alpha.68): текст отказа —
+`Шаг <id>: exit=<код>; timeout=<true|false>[; signal=<сигнал>][; стадия
+<стадия>] ⟦вывод: <хвост>⟧`, где хвост — последние строки stdout и stderr с
+маской секретов (до 600 знаков). Класс отказа, его причина и отпечаток
+читают текст без `⟦вывод: …⟧`: вывод службы (например, слово «timeout» в её
+логе) не меняет, как судится попытка. Receipt окружения фазы
+(`environment.json`) записывает первый упавший шаг до `teardown` в `failure`
+и упавшие шаги `teardown` в `cleanupFailure[]`: `stage`, `step`, `exitCode`,
+`signal`, `timedOut`, `aborted`, `spawnError`, `tail`, `log`.
 
 **`preview-start`, `preview-stop`, `preview-list`.** Превью результата по
 `previews[]` репозитория (0.1.0-alpha.66): своё рабочее дерево на принятом

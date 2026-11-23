@@ -44,6 +44,10 @@ export interface LifecycleSmokeStep {
   durationMs: number;
   exitCode?: number;
   timedOut?: boolean;
+  /** Сигнал, которым завершился процесс упавшего шага (0.1.0-alpha.68). */
+  signal?: string;
+  /** Хвост вывода упавшего шага с маской секретов (0.1.0-alpha.68). */
+  tail?: string;
   log?: string;
   /** Пояснение стадии: исход хранилища зависимостей (`hit`, `partial`, `miss: причина`). */
   detail?: string;
@@ -60,6 +64,8 @@ export interface LifecycleSmokeFailure {
   stage?: string;
   step?: string;
   message: string;
+  /** Хвост вывода упавшего шага с маской секретов (0.1.0-alpha.68). */
+  tail?: string;
   /** Что сделать человеку или агенту: без попыток и без правки кода задачи. */
   advice: string;
 }
@@ -164,6 +170,8 @@ const stepOf = (s: StepOutcome): LifecycleSmokeStep => ({
   durationMs: s.durationMs,
   ...(s.exitCode !== undefined ? { exitCode: s.exitCode } : {}),
   ...(s.timedOut ? { timedOut: true } : {}),
+  ...(s.signal ? { signal: s.signal } : {}),
+  ...(s.tail ? { tail: s.tail } : {}),
   ...(s.log ? { log: s.log } : {}),
   ...(s.detail ? { detail: s.detail } : {}),
   ...(s.unused ? { unused: true } : {}),
@@ -190,7 +198,13 @@ export function classifyLifecycleFailure(
   context: { policy: ExecutionPolicy; timedOut: boolean },
 ): LifecycleSmokeFailure {
   const message = error instanceof Error ? error.message : String(error);
-  const where = failed ? { stage: failed.stage, step: failed.id } : {};
+  const where = failed
+    ? {
+        stage: failed.stage,
+        step: failed.id,
+        ...(!failed.ok && failed.tail ? { tail: failed.tail } : {}),
+      }
+    : {};
   const log = failed?.log ? ` Лог шага: ${failed.log}.` : '';
   // Исходный отказ классифицируется сам по себе: упавший после него teardown
   // его причиной не становится.
@@ -562,7 +576,12 @@ export function smokeText(data: LifecycleSmokeResult) {
   const width = Math.max(5, ...data.steps.map((s) => `${s.stage}/${s.id}`.length));
   const lines = data.steps.map((s) => {
     const detail = stepDetailText(s);
-    return `${`${s.stage}/${s.id}`.padEnd(width)}  ${stepStatusText(s).padEnd(6)}  ${String(s.exitCode ?? '-').padEnd(4)}  ${seconds(s.durationMs)}${s.timedOut ? ' (timeout)' : ''}${detail ? '  ' + detail : ''}`.trimEnd();
+    const row =
+      `${`${s.stage}/${s.id}`.padEnd(width)}  ${stepStatusText(s).padEnd(6)}  ${String(s.exitCode ?? '-').padEnd(4)}  ${seconds(s.durationMs)}${s.timedOut ? ' (timeout)' : ''}${s.signal ? ` (${s.signal})` : ''}${detail ? '  ' + detail : ''}`.trimEnd();
+    // Хвост вывода упавшего шага (с маской): причина видна без лога.
+    return s.status === 'failed' && s.tail
+      ? [row, ...s.tail.split('\n').map((l) => `${' '.repeat(width + 2)}| ${l}`)].join('\n')
+      : row;
   });
   return (
     [

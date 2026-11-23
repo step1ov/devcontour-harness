@@ -4,6 +4,7 @@ import {
   contextDigestMatches,
   STAGE_NAME_LIMIT,
   noRetryEnvironmentCauses,
+  NO_RETRY_GATE_CODES,
   type NoRetryEnvironmentCause,
   codeReviewDecisionSchema,
   codeReviewHistory,
@@ -5660,14 +5661,15 @@ export class Engine {
 
   /** Удержание выдачи правилом восстановления ведущим (`policy.recovery`). */
   /**
-   * Удержание gate по отказу `sandbox-process-list` попытки: упавший gate —
-   * последний непройденный evidence попытки с этим кодом (не проверка
+   * Удержание gate по отказу без повтора попытки (`sandbox-process-list`,
+   * `sandbox-signal`, `sandbox-browser`): упавший gate — последний
+   * непройденный evidence попытки с кодом этой причины (не проверка
    * потребителя), его определение — в политике репозитория попытки.
    */
   private environmentHoldOf(a: AttemptState): WorkState['environmentHold'] {
-    const e = a.evidence.findLast(
-      (x) => !x.passed && !x.consumer && x.summary.startsWith('GATE_SANDBOX_PROCESS_LIST'),
-    );
+    const cause = a.environmentCause ?? 'sandbox-process-list';
+    const code = NO_RETRY_GATE_CODES[cause];
+    const e = a.evidence.findLast((x) => !x.passed && !x.consumer && x.summary.startsWith(code));
     if (!e?.gate) return undefined;
     const gate = this.policy.repositories
       .find((r) => r.id === a.repositoryId)
@@ -5680,6 +5682,7 @@ export class Engine {
       runId: a.id,
       at: iso(this.now()),
       isolation: this.policy.isolation.mode,
+      ...(cause === 'sandbox-process-list' ? {} : { cause }),
     };
   }
 

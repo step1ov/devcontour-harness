@@ -272,6 +272,9 @@ const ADDITIVE_ENUM_VALUES = new Set([
   'dependency-store-registry',
   // Причина отказа среды: gate запускает ps в песочнице ОС (0.1.0-alpha.66).
   'sandbox-process-list',
+  // Причины отказа среды: сигнал процессу вне песочницы и браузер в ней (0.1.0-alpha.68).
+  'sandbox-signal',
+  'sandbox-browser',
 ]);
 /** Текст cancel в H2: alpha.66 добавила отказ от открытой доработки принятого поручения. */
 const H2_CANCEL_DESCRIPTION =
