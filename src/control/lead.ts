@@ -418,9 +418,11 @@ export const LEAD_LOGGED_COMMANDS = [
 const LEAD_ONLY_COMMANDS: readonly string[] = ['diagnose'];
 /**
  * Команды, которые движок без `--by lead` исполняет как действие оператора
- * (`retry` — повтор оператора, удержание gate не снимает): они оператора и
- * при активной сессии ведущего, иначе журнал ведущего записал бы чужое
- * решение. `cancel` пути ведущего не имеет (`--by` нет) — решает сессия.
+ * (`retry` — повтор оператора, удержание gate не снимает): без `--by` они
+ * оператора, иначе журнал ведущего записал бы чужое решение. В открытой
+ * сессии ведущего CLI сам подставляет `--by lead` (alpha.68, `bySource`), и
+ * журнал получает этот флаг. `cancel` пути ведущего не имеет (`--by` нет) —
+ * решает сессия.
  */
 const OPERATOR_UNLESS_LEAD: readonly string[] = ['retry'];
 
@@ -463,4 +465,31 @@ export function recordLeadCommand(
     result: undefined,
   }));
   return true;
+}
+
+/**
+ * Открыта ли сейчас сессия ведущего (`lead begin` без `lead end`, аренда не
+ * истекла; alpha.68, P6-17). Команда с актёром (`retry --by`, `input-answer
+ * --actor`) без флага внутри открытой сессии — команда ведущего: движок
+ * исполняет её как `--by lead`/`--actor lead`, с теми же правами и отказами.
+ */
+export function leadSessionOpen(engine: Engine): boolean {
+  const log = engine.read((v) => v.local('lead', WORKSPACE_OWNER, 'log'));
+  return !!log && activeAt(log, engine.clock());
+}
+
+/** Откуда актёр команды: флаг, открытая сессия ведущего или прежнее умолчание. */
+export type LeadActorSource = 'flag' | 'lead-session' | 'default';
+
+/**
+ * Отказ команды, которой актёра `lead` дала сессия ведущего: тот же код, к
+ * сообщению — откуда актёр и как подать решение человека явно.
+ */
+export function leadSessionRefusal(error: unknown, flag: '--by' | '--actor'): unknown {
+  if (!(error instanceof HarnessError)) return error;
+  return new HarnessError(
+    error.code,
+    `${error.message} (${flag} не задан: в открытой сессии ведущего команда исполняется как ${flag} lead; решение человека — явно ${flag} operator)`,
+    error.issues,
+  );
 }

@@ -76,5 +76,19 @@ export const leadDataSchema = z.strictObject({
     })
     .optional(),
   line: z.string().min(1).max(300),
+  /**
+   * `lead end` (0.1.0-alpha.68): готовые согласованные работы ждут, а никто
+   * не запущен — работу сдвинет только новый `harness run`. Предупреждение,
+   * не отказ: сессия закончена, выход 0.
+   */
+  readyNotRunning: z
+    .strictObject({
+      code: z.literal('READY_WORKS_NOT_RUNNING'),
+      ready: z.number().int().min(1),
+      readyWorks: z.array(idSchema).max(50),
+      line: z.string().min(1).max(1000),
+      lineEn: z.string().min(1).max(1000),
+    })
+    .optional(),
 });
 export type LeadData = z.infer<typeof leadDataSchema>;

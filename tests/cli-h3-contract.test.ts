@@ -499,6 +499,18 @@ test('H3-01: прежние команды и схемы их данных не 
       }
       if (Object.keys(o).length !== before) v = o;
     }
+    // alpha.68: кем исполнен повтор и откуда актёр (`retry`: `by`, `bySource`),
+    // откуда актёр ответа (`input-answer`: `actorSource`) — сессия ведущего.
+    if (k === 'properties' && v && typeof v === 'object') {
+      const o = { ...(v as Record<string, unknown>) };
+      const before = Object.keys(o).length;
+      if ('workId' in o && 'attempt' in o && 'changed' in o && 'bySource' in o) {
+        delete o.by;
+        delete o.bySource;
+      }
+      if ('request' in o && 'answer' in o && 'changed' in o) delete o.actorSource;
+      if (Object.keys(o).length !== before) v = o;
+    }
     if (k === 'enum' && Array.isArray(v) && v.includes('recovery') && v.includes('host'))
       v = (v as unknown[]).filter((x) => x !== 'lead');
     if (k === 'enum' && Array.isArray(v))

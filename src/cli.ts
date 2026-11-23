@@ -109,11 +109,15 @@ import {
   leadEnd,
   leadNote,
   leadCommandActor,
+  leadSessionOpen,
+  leadSessionRefusal,
   leadTtlMs,
   recordLeadCommand,
   releaseDone,
+  type LeadCommandArgs,
 } from './control/lead.ts';
 import { parseDurationFlag } from './control/duration.ts';
+import { readyNotRunning } from './control/lead-end-warning.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -1478,26 +1482,45 @@ async function run(
             '--by: lead или operator (без флага — оператор)',
             [{ path: ['--by'], message: v.by }],
           );
-        const lead = command === 'retry' && v.by === 'lead';
+        // Без `--by` внутри открытой сессии ведущего повтор — ведущего
+        // (alpha.68, P6-17): движок исполняет его как `--by lead`, с теми же
+        // правами и отказами (сброс — только по разбору и в пределе
+        // leadResets), а не молча как решение оператора.
+        const bySource =
+          command !== 'retry'
+            ? undefined
+            : v.by !== undefined
+              ? ('flag' as const)
+              : leadSessionOpen(h.engine)
+                ? ('lead-session' as const)
+                : ('default' as const);
+        const lead = command === 'retry' && (v.by === 'lead' || bySource === 'lead-session');
+        const refused = (error: unknown) =>
+          bySource === 'lead-session' ? leadSessionRefusal(error, '--by') : error;
         if (v.diagnosis !== undefined && !(lead && v.reset))
           throw new HarnessError(
             'INVALID_INPUT',
             '--diagnosis — только со сбросом ведущего (--reset --by lead)',
           );
-        const result =
-          command === 'cancel'
-            ? h.engine.cancel(need('work'), v.reason, 'operator')
-            : h.engine.retry(
-                need('work'),
-                v.reset
-                  ? {
-                      // Сброс ведущего называет причину разбором; своя причина — по желанию.
-                      reason: lead ? (v.reason ?? '') : need('reason'),
-                      ...(v.diagnosis !== undefined ? { diagnosis: v.diagnosis } : {}),
-                    }
-                  : undefined,
-                lead ? 'lead' : 'operator',
-              );
+        let result;
+        try {
+          result =
+            command === 'cancel'
+              ? h.engine.cancel(need('work'), v.reason, 'operator')
+              : h.engine.retry(
+                  need('work'),
+                  v.reset
+                    ? {
+                        // Сброс ведущего называет причину разбором; своя причина — по желанию.
+                        reason: lead ? (v.reason ?? '') : need('reason'),
+                        ...(v.diagnosis !== undefined ? { diagnosis: v.diagnosis } : {}),
+                      }
+                    : undefined,
+                  lead ? 'lead' : 'operator',
+                );
+        } catch (error) {
+          throw refused(error);
+        }
         return {
           command,
           data: {
@@ -1507,6 +1530,7 @@ async function run(
             changed: result.changed,
             ...('abandoned' in result && result.abandoned ? { abandoned: true as const } : {}),
             ...('reset' in result && result.reset ? { reset: result.reset } : {}),
+            ...(bySource ? { by: lead ? ('lead' as const) : ('operator' as const), bySource } : {}),
           },
         };
       } finally {
@@ -1537,6 +1561,21 @@ async function run(
                     optional('text', typeof v.text === 'string' ? v.text : undefined),
                   )
                 : releaseDone(h.engine, { summary: need('summary') });
+        if (command === 'lead-end') {
+          // Готовые работы, а никто не запущен (alpha.68, P6-33): сессия
+          // закончена, выход прежний — только предупреждение. Сбой проверки
+          // конец сессии не меняет.
+          let warning;
+          try {
+            warning = readyNotRunning(h);
+          } catch {
+            warning = undefined;
+          }
+          if (warning) {
+            process.stderr.write(`harness: ${warning.code}: ${warning.line}\n`);
+            return { command, data: { ...data, readyNotRunning: warning } };
+          }
+        }
         return { command, data };
       } finally {
         h.close();
@@ -2271,10 +2310,24 @@ async function run(
             v.kind ?? 'clarification',
             'kind',
           );
-          const actor = parseWith(z.enum(['operator', 'lead']), v.actor ?? 'operator', 'actor');
-          return {
-            command,
-            data: h.answerInput(
+          // Без `--actor` внутри открытой сессии ведущего ответ — ведущего
+          // (alpha.68, P6-17): движок проверяет его как `--actor lead`
+          // (только технический вопрос, с --reason), а не записывает молча
+          // решением человека. Ответ человека — явно `--actor operator`.
+          const actorSource =
+            v.actor !== undefined
+              ? ('flag' as const)
+              : leadSessionOpen(h.engine)
+                ? ('lead-session' as const)
+                : ('default' as const);
+          const actor = parseWith(
+            z.enum(['operator', 'lead']),
+            v.actor ?? (actorSource === 'lead-session' ? 'lead' : 'operator'),
+            'actor',
+          );
+          let answered;
+          try {
+            answered = h.answerInput(
               id,
               {
                 text: need('text'),
@@ -2284,8 +2337,11 @@ async function run(
                 ...optional('reason', v.reason),
               },
               version(),
-            ),
-          };
+            );
+          } catch (error) {
+            throw actorSource === 'lead-session' ? leadSessionRefusal(error, '--actor') : error;
+          }
+          return { command, data: { ...answered, actorSource } };
         }
         if (command === 'input-context') {
           const out = resolve(need('out'));
@@ -2388,13 +2444,24 @@ function journalLeadCommand(
     const state = typeof values.state === 'string' ? values.state : undefined;
     if (!state || !existsSync(join(state, 'state.sqlite')) || !existsSync(bindingFile(state)))
       return false;
-    const flags = {
+    const flags: LeadCommandArgs = {
       ...optional('work', typeof values.work === 'string' ? values.work : undefined),
       ...optional('request', typeof values.request === 'string' ? values.request : undefined),
       ...optional('actor', typeof values.actor === 'string' ? values.actor : undefined),
       ...(values.reset === true ? { reset: true } : {}),
       ...(typeof values.by === 'string' ? { by: values.by } : {}),
     };
+    // Актёр, которого команда получила от сессии ведущего (alpha.68): журнал
+    // пишет его, как если бы флаг был задан.
+    const d = data as { by?: unknown; bySource?: unknown; actorSource?: unknown } | undefined;
+    if (command === 'retry' && flags.by === undefined && d?.bySource === 'lead-session')
+      flags.by = 'lead';
+    if (
+      command === 'input-answer' &&
+      flags.actor === undefined &&
+      d?.actorSource === 'lead-session'
+    )
+      flags.actor = 'lead';
     const entry = leadCommandEntry(command, flags, data, phase);
     if (!entry) return false;
     const h = open(state, binding(state), false);

@@ -6,8 +6,8 @@
 // исполнения не открывается; doctor своего итога не записывает (он только
 // читает), поэтому его шаг — `unknown`.
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import {
   SETUP_BUDGET_MS,
   type SetupProgress,
@@ -61,6 +61,25 @@ export const duration = (v: unknown) =>
     : undefined;
 const obj = (v: unknown) =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+const real = (path: string) => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+};
+
+/**
+ * Manifest этой настройки (alpha.68, P6-2): `init` записывает в
+ * `.harness/project.json` корень проекта (`root`); manifest, скопированный
+ * вместе с `.harness/` из другого каталога, называет чужой корень. `own` —
+ * корень совпадает с каталогом над `.harness`; `foreign` — другой корень;
+ * нет manifest или поля `root` — `undefined`.
+ */
+function manifestOwner(harnessDir: string, manifest: Record<string, unknown> | undefined) {
+  if (typeof manifest?.root !== 'string') return undefined;
+  return real(manifest.root) === real(dirname(harnessDir)) ? 'own' : 'foreign';
+}
 
 interface RunRecord {
   at: number;
@@ -179,8 +198,9 @@ export interface SetupProgressInput {
 }
 
 /**
- * Ход настройки по записям на диске. Время настройки — от самой ранней
- * записи (файлы `.harness/`, первый smoke или gates) до `now`: настройка
+ * Ход настройки по записям на диске. Время настройки — от первой записи этой
+ * настройки (manifest `init` этого каталога, первый smoke или gates каталога
+ * состояния; не время унаследованных файлов `.harness/`) до `now`: настройка
  * кончается регистрацией первого графа (тогда этап — `work`, и вызывающий
  * ход настройки не показывает).
  */
@@ -218,6 +238,7 @@ export function setupProgress(input: SetupProgressInput): SetupProgress {
   };
   // Профиль: свой (`.harness/profile.json`) или встроенный, закреплённый manifest.
   const manifest = obj(readJson(projectFile));
+  const owner = manifestOwner(harnessDir, manifest);
   const pinned = obj(manifest?.profile)?.ref;
   if (existsSync(profileFile))
     step('profile', 'done', {
@@ -230,8 +251,15 @@ export function setupProgress(input: SetupProgressInput): SetupProgress {
       note: { ru: `встроенный ${pinned}`, en: `built-in ${pinned}` },
     });
   else step('profile', 'pending');
-  if (existsSync(projectFile) && existsSync(policyFile))
-    step('init', 'done', { at: bornAt(policyFile)! });
+  // Manifest другого каталога (`.harness/` скопирован с ним): init здесь не делали.
+  if (owner === 'foreign')
+    step('init', 'pending', {
+      note: { ru: 'manifest другого каталога', en: 'manifest of another directory' },
+    });
+  else if (existsSync(projectFile) && existsSync(policyFile))
+    step('init', 'done', {
+      at: (owner === 'own' ? bornAt(projectFile) : undefined) ?? bornAt(policyFile)!,
+    });
   else step('init', 'pending');
   step('doctor', 'unknown');
   const smoke = smokes.at(-1);
@@ -270,10 +298,12 @@ export function setupProgress(input: SetupProgressInput): SetupProgress {
     if (snapshot) step('connector', 'done', { at: snapshot });
     else step('connector', 'pending', { at: changedAt(connectorFile)! });
   }
+  // Начало — первая запись этой настройки (alpha.68, P6-2): manifest, который
+  // `init` записал для этого каталога, первый smoke или gates каталога
+  // состояния. Время файлов `.harness/` в счёт не идёт: профиль и политика
+  // могли прийти с клоном другого проекта и старше этой настройки на часы.
   const starts = [
-    bornAt(profileFile),
-    bornAt(projectFile),
-    bornAt(policyFile),
+    owner === 'own' ? bornAt(projectFile) : undefined,
     smokes[0]?.at !== undefined ? smokes[0].at - (smokes[0].durationMs ?? 0) : undefined,
     gates[0]?.at !== undefined ? gates[0].at - (gates[0].durationMs ?? 0) : undefined,
   ].filter((t): t is number => t !== undefined && t > 0 && t <= now);

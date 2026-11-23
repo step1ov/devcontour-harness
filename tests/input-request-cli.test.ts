@@ -681,3 +681,26 @@ test('alpha.60 CLI: status --human — строки очереди, обновл
   );
   assert.equal(view.questions[0].rationale, 'User-visible text');
 });
+
+test('alpha.68 CLI (P6-17): input-answer без --actor в открытой сессии ведущего — как --actor lead (тот же отказ на вопрос человека); --actor operator — ответ человека', () => {
+  const p = project();
+  const base = ['--graph', 'graph.json', '--policy', 'policy.json', '--state', p.state];
+  assert.equal(p.harness('run', ...base).status, exitCodes.refused);
+  const id: string = p.harness('input-list', '--state', p.state).json.data.requests[0].id;
+  assert.equal(p.harness('lead', 'begin', '--state', p.state, '--ttl', '30m').status, 0);
+  const args = ['--state', p.state, '--request', id, '--text', 'Hello', '--option', 'hello'];
+  const explicit = p.harness('input-answer', ...args, '--actor', 'lead', '--request-version', '1');
+  assert.equal(explicit.json.ok, false, 'вопрос человека ведущий сам не решает');
+  const implicit = p.harness('input-answer', ...args, '--request-version', '1');
+  assert.equal(implicit.json.ok, false);
+  assert.equal(implicit.status, explicit.status);
+  assert.equal(implicit.json.error?.code, explicit.json.error?.code);
+  assert.match(
+    implicit.stderr,
+    /--actor не задан: в открытой сессии ведущего команда исполняется как --actor lead; решение человека — явно --actor operator/,
+  );
+  const human = p.harness('input-answer', ...args, '--actor', 'operator', '--request-version', '1');
+  assert.equal(human.status, 0, human.stderr);
+  assert.equal(human.json.data.answer.actor.kind, 'operator');
+  assert.equal(human.json.data.actorSource, 'flag');
+});

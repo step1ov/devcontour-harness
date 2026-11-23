@@ -165,6 +165,17 @@ Gates, которым нужна база, запускаются через
   `devcontour.harness.repository` и `devcontour.harness.project`. Модель
   проверяется до создания: `container_name`, bind mount, внешние тома и
   сети, `network_mode: host` и `privileged` отклоняются.
+- **Внутренние сети.** Docker не публикует порты контейнера, подключённого
+  только к сетям `internal: true`: порт на `127.0.0.1` недоступен, и ready
+  падает без явной причины. `harness doctor --policy …` (с 0.1.0-alpha.68)
+  читает файлы compose, которые называют шаги lifecycle (`docker compose -f`,
+  `docker-compose -f`, мост `compose-bridge.mjs --compose`, его умолчание
+  `.harness/compose.acceptance.yml`), и называет такой сервис проблемой
+  `compose-internal-ports <файл>: Сервис <имя> публикует порты…`. Файл
+  разбирается без зависимости YAML, консервативно: отображения,
+  последовательности, простые потоки, якоря и слияние `<<`; теги, несколько
+  документов, табуляция — заметка `compose-check <файл>: …`, проверка
+  пропущена, а не ошибка. Модель, которую мост строит кодом при setup, doctor не видит.
 - **Порядок.** setup (намерение в receipt → порты → env → `compose create`)
   → ready (`up -d --wait --wait-timeout`) → `prepare` → gates → ревью →
   teardown. До ready gates не запускаются. При отказе ready сохраняются

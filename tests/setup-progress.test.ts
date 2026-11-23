@@ -56,8 +56,12 @@ test('alpha.67 setup: шаги по записям smoke, пробы и gates; �
   const p = project();
   const start = NOW - 50 * 60_000;
   touch(join(p.harness, 'profile.json'), start);
-  touch(join(p.harness, 'project.json'), start + 60_000, JSON.stringify({ profile: { ref: 'x' } }));
-  touch(join(p.harness, 'policy.json'), start + 60_000);
+  touch(join(p.harness, 'policy.json'), start);
+  touch(
+    join(p.harness, 'project.json'),
+    start,
+    JSON.stringify({ root: p.root, profile: { ref: 'x' } }),
+  );
   touch(join(p.harness, 'connector.json'), start + 2 * 60_000);
   record(p.state, 'LS-' + uuid(1), start + 10 * 60_000, { passed: true, durationMs: 90_000 });
   record(p.state, 'LS-' + uuid(2), start + 20 * 60_000, {
@@ -95,6 +99,7 @@ test('alpha.67 setup: шаги по записям smoke, пробы и gates; �
 test('alpha.67 setup: ход настройки в обзоре без работ (ревизия 7); с работами — нет; токен не зависит от часов', () => {
   const p = project();
   touch(join(p.harness, 'policy.json'), NOW - 10 * 60_000);
+  touch(join(p.harness, 'project.json'), NOW - 10 * 60_000, JSON.stringify({ root: p.root }));
   const at = (now: number) => setupProgress({ harnessDir: p.harness, now });
   const view = operatorViewSchema.parse(operatorView(baseInput({ setup: at(NOW) })));
   assert.equal(view.viewRevision, 8);
@@ -150,4 +155,53 @@ test('alpha.67 setup: из многих записей берутся после
     setupProgress({ harnessDir: p.harness, stateDir: p.state, now: NOW }),
   );
   assert.equal(progress.steps.find((s) => s.id === 'smoke')!.state, 'failed');
+});
+
+test('alpha.68 setup (P6-2): унаследованные файлы .harness/ не двигают начало — оно от manifest init этого каталога', () => {
+  const p = project();
+  const cloned = NOW - 5 * 60 * 60_000;
+  // Профиль, политика и прочее пришли с клоном другого проекта пять часов назад.
+  touch(join(p.harness, 'profile.json'), cloned);
+  touch(join(p.harness, 'policy.json'), cloned);
+  touch(join(p.harness, 'updates.json'), cloned);
+  const init = NOW - 12 * 60_000;
+  touch(join(p.harness, 'project.json'), init, JSON.stringify({ root: p.root }));
+  record(p.state, 'LS-' + uuid(1), NOW - 5 * 60_000, { passed: true, durationMs: 60_000 });
+  const progress = setupProgressSchema.parse(
+    setupProgress({ harnessDir: p.harness, stateDir: p.state, now: NOW }),
+  );
+  assert.equal(progress.since, new Date(init).toISOString());
+  assert.equal(progress.elapsedMs, 12 * 60_000);
+  assert.equal(progress.overBudget, false);
+  const init_ = progress.steps.find((s) => s.id === 'init')!;
+  assert.equal(init_.state, 'done');
+  assert.equal(init_.at, new Date(init).toISOString());
+  assert.match(progress.line, /идёт 12 мин \(бюджет 30 мин\)$/);
+});
+
+test('alpha.68 setup (P6-2): manifest другого каталога — init не сделан, начало от первого smoke; без записей настройки времени нет', () => {
+  const p = project();
+  const cloned = NOW - 5 * 60 * 60_000;
+  touch(join(p.harness, 'policy.json'), cloned);
+  touch(
+    join(p.harness, 'project.json'),
+    cloned,
+    JSON.stringify({ root: join(p.root, 'elsewhere') }),
+  );
+  const bare = setupProgressSchema.parse(
+    setupProgress({ harnessDir: p.harness, stateDir: p.state, now: NOW }),
+  );
+  assert.equal(bare.since, undefined);
+  assert.equal(bare.elapsedMs, undefined);
+  assert.equal(bare.overBudget, false);
+  const init = bare.steps.find((s) => s.id === 'init')!;
+  assert.equal(init.state, 'pending');
+  assert.match(init.line, /manifest другого каталога/);
+  // Первый smoke этого каталога состояния: 8 мин назад, шёл 2 мин.
+  record(p.state, 'LS-' + uuid(1), NOW - 8 * 60_000, { passed: true, durationMs: 120_000 });
+  const progress = setupProgressSchema.parse(
+    setupProgress({ harnessDir: p.harness, stateDir: p.state, now: NOW }),
+  );
+  assert.equal(progress.since, new Date(NOW - 10 * 60_000).toISOString());
+  assert.equal(progress.overBudget, false);
 });
