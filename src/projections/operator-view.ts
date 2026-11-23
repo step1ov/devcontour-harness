@@ -29,7 +29,7 @@ import { remoteLineParts } from './remote-line.ts';
 import { sha256Hex } from './sha256.ts';
 import { resourcesOf, type ResourcesInput, type ResourcesView } from './view-resources.ts';
 import { decisionSettingsView, type Bilingual, type DecisionSetting } from './decisions.ts';
-import type { TrackStep } from './track.ts';
+import { causeShort, type TrackStep } from './track.ts';
 
 export {
   OPERATOR_VIEW_VERSION,
@@ -411,6 +411,52 @@ export interface WorkView {
   resultSha?: string;
   /** Ревизия 6: путь работы целиком (`workTrack`). */
   track?: { steps: TrackStep[]; truncated?: number };
+  /** Ревизия 8: работа переоткрыта после приёмки, доработка открыта (`work.reopened`). */
+  reopened?: ReopenedView;
+  /** Ревизия 8: итог ревью кандидата по попыткам и фазам. */
+  attemptReviews?: AttemptReviewView[];
+}
+
+/** Переоткрытая после приёмки работа (ревизия 8). */
+export interface ReopenedView {
+  at: string;
+  /** Кто согласовал редакцию плана, переоткрывшую работу; не согласована — поля нет. */
+  by?: 'lead' | 'operator';
+  revision: number;
+  budget: 'fresh' | 'carried';
+  acceptedSha: string;
+  spent: number;
+  reason: string;
+}
+
+/** Итог ревью попытки (ревизия 8): последний применённый раунд попытки и фазы. */
+export interface AttemptReviewView {
+  attempt: number;
+  phase: 'candidate' | 'integration';
+  verdict: 'approved' | 'rejected' | 'invalid';
+  /** Открытые blocking-находки раунда. */
+  findings: number;
+  /** Прочие открытые находки. */
+  notes: number;
+  at: string;
+  /** Попытка прежней (принятой) редакции работы. */
+  earlier?: true;
+}
+
+/** Решение (ревизия 8, `decisions[]`): кто, когда, что и почему. */
+export interface DecisionView {
+  id: string;
+  kind: string;
+  by: 'lead' | 'operator';
+  at: string;
+  workId?: string;
+  subject?: string;
+  findingId?: string;
+  requestId?: string;
+  temporary: boolean;
+  revisit?: string;
+  title?: string;
+  reason?: string;
 }
 
 /** Наблюдаемая длительность этапа: p50 и p90 закончившихся образцов. */
@@ -506,7 +552,9 @@ export type TruncatedKey =
   | 'planned'
   | 'leadNotes'
   | 'resources'
-  | 'previews';
+  | 'previews'
+  | 'decisions'
+  | 'attemptReviews';
 
 export interface ViewSource {
   producer: string;
@@ -553,6 +601,8 @@ export interface OperatorView {
   history: ViewHistory;
   health: ViewHealth;
   activity?: ActivityView[];
+  /** Ревизия 8: решения ведущего и человека, новые сверху; нет — производитель их не сообщает. */
+  decisions?: DecisionView[];
   scope?: ScopeView;
   /**
    * Почему `scope` нет (0.1.0-alpha.62): `no-snapshot` — ни одна связка ещё не
@@ -662,7 +712,8 @@ export interface WorkDetailView {
       | 'reviews'
       | 'questions'
       | 'blockers'
-      | 'dependsOn',
+      | 'dependsOn'
+      | 'attemptReviews',
       number
     >
   >;
@@ -750,6 +801,21 @@ export interface OperatorWorkInput {
     ru: { steps: TrackStep[]; truncated: number };
     en: { steps: TrackStep[]; truncated: number };
   };
+  /**
+   * Ревизия 8: доработка после приёмки открыта (`WorkState.rework`, не
+   * оставлена и не принята). `by` — актёр согласования редакции плана,
+   * переоткрывшей работу (по журналу); нет — неизвестно.
+   */
+  reopened?: {
+    at: string;
+    by?: 'lead' | 'operator';
+    revision: number;
+    budget: 'fresh' | 'carried';
+    acceptedSha: string;
+    spent: number;
+  };
+  /** Ревизия 8: итоги ревью попыток по порядку попыток (загрузчик). */
+  attemptReviews?: readonly AttemptReviewView[];
   /** Записи доказательств с `recheck` по всем попыткам работы. */
   rechecks: number;
   liveness?: 'quiet' | 'stalled';
@@ -1044,6 +1110,100 @@ export type OperatorActivityInput =
       basis?: 'technical' | 'severity';
     };
 
+/**
+ * Решение из записей хранилища и журнала (ревизия 8): факты без фраз —
+ * проекция формулирует заголовок и причину на языке представления,
+ * маскирует и обрезает свободный текст, сопоставляет актёров с `by`
+ * (`lead` | `operator`). Свободный текст (гипотеза, причина ответа и
+ * согласования, основание решения по находке) — сырой; при `titles: false`
+ * его нет, обязательная причина — фиксированной фразой.
+ */
+export type OperatorDecisionInput =
+  | {
+      kind: 'diagnosis';
+      at: string;
+      workId: string;
+      diagnosis: string;
+      cause: string;
+      failures: number;
+      /** Разбор держало правило восстановления (как `track.steps[].required`). */
+      required: boolean;
+      hypothesis?: string;
+    }
+  | {
+      kind: 'reset';
+      at: string;
+      workId: string;
+      by: 'lead' | 'operator';
+      granted: number;
+      spent: number;
+      index?: number;
+      cap?: number;
+      diagnosis?: string;
+    }
+  | {
+      kind: 'answer';
+      at: string;
+      workId: string;
+      requestId: string;
+      revision: number;
+      by: 'operator' | 'lead' | 'host';
+      basis?: 'technical' | 'severity';
+      answerKind: 'clarification' | 'requirement-change';
+      reason?: string;
+    }
+  | {
+      /** `graph` — новая редакция плана убрала работу; `approvedBy` — кто её согласовал. */
+      kind: 'cancel';
+      at: string;
+      workId: string;
+      seq: number;
+      by: 'operator' | 'host' | 'graph';
+      approvedBy?: 'agent' | 'operator';
+    }
+  | {
+      kind: 'reopen';
+      at: string;
+      workId: string;
+      seq: number;
+      revision: number;
+      budget: 'fresh' | 'carried';
+      acceptedSha: string;
+      approvedBy?: 'agent' | 'operator';
+    }
+  | {
+      kind: 'rework-abandoned';
+      at: string;
+      workId: string;
+      seq: number;
+      revision: number;
+      acceptedSha: string;
+      by: 'operator' | 'host' | 'graph';
+      approvedBy?: 'agent' | 'operator';
+    }
+  | {
+      kind: 'reapproval';
+      at: string;
+      graphId: string;
+      seq: number;
+      /** Сырой `--by` команды `reapprove`. */
+      by: string;
+      round: number;
+      reason?: string;
+    }
+  | {
+      kind: 'finding';
+      at: string;
+      scope: 'plan' | 'contract' | 'code';
+      subject: string;
+      workId?: string;
+      findingId: string;
+      decision: 'accepted-limitation' | 'continue';
+      by: 'lead' | 'operator';
+      round: number;
+      reason?: string;
+    };
+
 /** Бюджет области (`budgetView`). */
 export interface OperatorBudgetInput {
   scope: { kind: 'work' | 'group' | 'total'; id?: string };
@@ -1148,6 +1308,8 @@ export interface OperatorViewInput {
   reviewsOmitted?: number;
   /** События ленты «кто что делал»; нет — производитель ленту не ведёт (поля нет в документе). */
   activity?: readonly OperatorActivityInput[];
+  /** Ревизия 8: решения по записям хранилища и журнала; нет — поля `decisions` нет. */
+  decisions?: readonly OperatorDecisionInput[];
   /** Что маскировать: домашний каталог, корни репозиториев, значения секретов. */
   mask?: MaskContext;
   /**
@@ -1791,6 +1953,48 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
             },
           }
         : {})(w.track?.[c.lang]),
+    ...(w.reopened ? { reopened: reopenedView(c.lang, w.reopened) } : {}),
+    ...((rows) => {
+      if (!rows?.length) return {};
+      const over = Math.max(0, rows.length - L.attemptReviews);
+      if (over) truncated.attemptReviews = (truncated.attemptReviews ?? 0) + over;
+      return { attemptReviews: rows.slice(over).map((r) => ({ ...r })) };
+    })(w.attemptReviews),
+  };
+}
+
+/**
+ * Переоткрытая работа (ревизия 8): кто согласовал редакцию плана,
+ * переоткрывшую принятую работу, и фраза для карточки.
+ */
+function reopenedView(
+  lang: 'ru' | 'en',
+  r: NonNullable<OperatorWorkInput['reopened']>,
+): ReopenedView {
+  const sha = r.acceptedSha.slice(0, 7);
+  const who =
+    lang === 'en'
+      ? r.by === 'lead'
+        ? ' by the lead'
+        : r.by === 'operator'
+          ? ' by a human'
+          : ''
+      : r.by === 'lead'
+        ? ' ведущим'
+        : r.by === 'operator'
+          ? ' человеком'
+          : '';
+  return {
+    at: r.at,
+    ...(r.by ? { by: r.by } : {}),
+    revision: r.revision,
+    budget: r.budget,
+    acceptedSha: r.acceptedSha,
+    spent: r.spent,
+    reason:
+      lang === 'en'
+        ? `reopened${who}: rework after acceptance (accepted result ${sha} not included)`
+        : `переоткрыта${who}: доработка после приёмки (принятый результат ${sha} не включён)`,
   };
 }
 
@@ -3507,6 +3711,216 @@ function activityOf(
 }
 
 /* ------------------------------------------------------------------ */
+/* Решения (ревизия 8)                                                 */
+/* ------------------------------------------------------------------ */
+
+/** Согласование редакции плана: `agent` — ведущий (план согласован ревью агента), `operator` — человек. */
+const approverOf = (a: 'agent' | 'operator' | undefined): 'lead' | 'operator' | undefined =>
+  a === 'agent' ? 'lead' : a === 'operator' ? 'operator' : undefined;
+
+/** `reapprove --by`: человеческие имена — `operator`, иначе (`lead`, имя агента) — ведущий. */
+const humanNames = /^(operator|user|owner|human|host|оператор|владелец|человек)$/i;
+
+const scopeText = {
+  plan: { ru: 'плана', en: 'plan' },
+  contract: { ru: 'контракта', en: 'contract' },
+  code: { ru: 'кода', en: 'code' },
+} as const;
+
+type DecisionDraft = Omit<DecisionView, 'id' | 'temporary'> & { key: unknown };
+
+/**
+ * Решение по факту: вид, кто (`by` — `lead` | `operator`), заголовок и
+ * причина. Факт без известного актёра (`graph` без согласования новой
+ * редакции) решением не показывается: актёра проекция не придумывает.
+ */
+function decisionDraft(c: Ctx, d: OperatorDecisionInput): DecisionDraft | undefined {
+  const en = c.lang === 'en';
+  const free = (x: string | undefined, max: number) =>
+    c.titles && x ? text(c, x, max) || undefined : undefined;
+  const sha = (x: string) => x.slice(0, 7);
+  const base = { at: d.at, key: d };
+  switch (d.kind) {
+    case 'diagnosis': {
+      const cause = causeShort[d.cause] ?? causeShort.other!;
+      const tag = d.required ? (en ? 'mandatory' : 'обязательный') : en ? 'optional' : 'по желанию';
+      return {
+        ...base,
+        kind: 'diagnosis',
+        by: 'lead',
+        workId: d.workId,
+        subject: d.diagnosis,
+        title: en
+          ? `diagnosis ${d.diagnosis}: ${cause.en} (${tag})`
+          : `разбор ${d.diagnosis}: ${cause.ru} (${tag})`,
+        ...((h) => (h ? { reason: h } : {}))(free(d.hypothesis, 400)),
+      };
+    }
+    case 'reset':
+      return {
+        ...base,
+        kind: 'reset',
+        by: d.by,
+        workId: d.workId,
+        ...(d.diagnosis ? { subject: d.diagnosis } : {}),
+        title:
+          d.by === 'lead'
+            ? en
+              ? `more attempts from the lead: +${d.granted} (reset ${d.index ?? '?'} of ${d.cap ?? '?'})`
+              : `ещё попытки от ведущего: +${d.granted} (сброс ${d.index ?? '?'} из ${d.cap ?? '?'})`
+            : en
+              ? `attempts reset by a human: +${d.granted}`
+              : `сброс попыток человеком: +${d.granted}`,
+        reason:
+          d.by === 'lead'
+            ? en
+              ? `after ${d.spent} counted attempts, by diagnosis ${d.diagnosis ?? '—'}`
+              : `после ${d.spent} засчитанных попыток, по разбору ${d.diagnosis ?? '—'}`
+            : en
+              ? `after ${d.spent} counted attempts`
+              : `после ${d.spent} засчитанных попыток`,
+      };
+    case 'answer': {
+      const lead = d.by === 'lead';
+      const technical = lead && d.basis === 'technical';
+      const change = d.answerKind === 'requirement-change';
+      const reason =
+        free(d.reason, 400) ??
+        (technical
+          ? en
+            ? 'technical question: the lead answered by the policy rule'
+            : 'технический вопрос: ответ ведущего по правилу политики'
+          : lead && d.basis === 'severity'
+            ? en
+              ? 'below the severity threshold: the lead answered'
+              : 'ниже порога серьёзности: ответил ведущий'
+            : undefined);
+      return {
+        ...base,
+        kind: technical ? 'technical-answer' : 'answer',
+        by: lead ? 'lead' : 'operator',
+        workId: d.workId,
+        requestId: d.requestId,
+        title: en
+          ? `${lead ? 'the lead' : 'a human'} answered the writer question${change ? ' (requirement change)' : ''}`
+          : `${lead ? 'ведущий' : 'человек'} ответил на вопрос исполнителя${change ? ' (изменение требований)' : ''}`,
+        ...(reason ? { reason } : {}),
+      };
+    }
+    case 'cancel': {
+      const by = d.by === 'graph' ? approverOf(d.approvedBy) : 'operator';
+      if (!by) return undefined;
+      return {
+        ...base,
+        kind: 'cancel',
+        by,
+        workId: d.workId,
+        title: en ? 'work cancelled' : 'работа отменена',
+        ...(d.by === 'graph'
+          ? {
+              reason: en
+                ? 'a new plan revision removed the work'
+                : 'новая редакция плана убрала работу',
+            }
+          : {}),
+      };
+    }
+    case 'reopen': {
+      const by = approverOf(d.approvedBy);
+      if (!by) return undefined;
+      return {
+        ...base,
+        kind: 'reopen',
+        by,
+        workId: d.workId,
+        title: en
+          ? `work reopened: rework ${d.revision} after acceptance`
+          : `работа переоткрыта: доработка ${d.revision} после приёмки`,
+        reason: en
+          ? `accepted result ${sha(d.acceptedSha)} not included; ${d.budget === 'fresh' ? 'own attempt limit' : 'attempt count carried over'}`
+          : `принятый результат ${sha(d.acceptedSha)} не включён; ${d.budget === 'fresh' ? 'свой предел попыток' : 'счёт попыток перенесён'}`,
+      };
+    }
+    case 'rework-abandoned': {
+      const by = d.by === 'graph' ? approverOf(d.approvedBy) : 'operator';
+      if (!by) return undefined;
+      return {
+        ...base,
+        kind: 'rework-abandoned',
+        by,
+        workId: d.workId,
+        title: en
+          ? `rework ${d.revision} abandoned — back to the accepted revision`
+          : `доработка ${d.revision} оставлена — работа на принятой редакции`,
+        reason: en
+          ? `accepted result ${sha(d.acceptedSha)}`
+          : `принятый результат ${sha(d.acceptedSha)}`,
+      };
+    }
+    case 'reapproval':
+      return {
+        ...base,
+        kind: 'reapproval',
+        by: humanNames.test(d.by.trim()) ? 'operator' : 'lead',
+        subject: d.graphId,
+        title: en
+          ? `plan re-approved after a policy change (review round ${d.round})`
+          : `план согласован повторно после правки политики (раунд ревью ${d.round})`,
+        ...((r) => (r ? { reason: r } : {}))(free(d.reason, 400)),
+      };
+    case 'finding': {
+      const scope = scopeText[d.scope];
+      const limitation = d.decision === 'accepted-limitation';
+      return {
+        ...base,
+        kind: limitation ? 'accepted-limitation' : 'review-continue',
+        by: d.by,
+        ...(d.workId ? { workId: d.workId } : {}),
+        subject: d.subject,
+        findingId: d.findingId,
+        title: limitation
+          ? en
+            ? `${scope.en} review finding accepted as a known limitation (round ${d.round})`
+            : `находка ревью ${scope.ru} принята известным ограничением (раунд ${d.round})`
+          : en
+            ? `more ${scope.en} review rounds after escalation (round ${d.round})`
+            : `ещё раунды ревью ${scope.ru} после эскалации (раунд ${d.round})`,
+        ...((r) => (r ? { reason: r } : {}))(free(d.reason, 400)),
+      };
+    }
+  }
+}
+
+/**
+ * Решения (ревизия 8): новые сверху, не больше `OPERATOR_VIEW_LIMITS.decisions`;
+ * опущенное — `truncated.decisions`. Нет входа — поля нет; вход есть, а
+ * решений нет — пустой список (производитель решения сообщает).
+ */
+function decisionsOf(c: Ctx, truncated: Record<string, number>): DecisionView[] | undefined {
+  if (!c.i.decisions) return undefined;
+  const rows = c.i.decisions
+    .map((d) => decisionDraft(c, d))
+    .filter((d): d is DecisionDraft => !!d && Number.isFinite(ms(d.at)))
+    .map(({ key, ...d }) => {
+      const raw = JSON.stringify(canonical(key));
+      return {
+        t: ms(d.at),
+        raw,
+        row: {
+          id: `${d.kind}:${sha256Hex(raw).slice(0, 16)}`,
+          ...d,
+          ...(d.subject ? { subject: text(c, d.subject, 200) || d.subject.slice(0, 200) } : {}),
+          ...(d.title ? { title: text(c, d.title, 200) } : {}),
+          temporary: false,
+        },
+      };
+    })
+    .sort((a, b) => b.t - a.t || (a.raw < b.raw ? -1 : a.raw > b.raw ? 1 : 0))
+    .map((x) => x.row);
+  return take(rows, L.decisions, truncated, 'decisions');
+}
+
+/* ------------------------------------------------------------------ */
 /* Размер                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -3670,6 +4084,7 @@ export function operatorView(input: OperatorViewInput, o: OperatorViewOptions = 
   const q = runnerWithSourceQuestions(i.queue, i.sources, i.works);
   const drift = i.works.map((w) => driftOf(c, w)).filter((d): d is DriftView => !!d);
   const activity = activityOf(c, o, truncated);
+  const decisions = decisionsOf(c, truncated);
   const scope = scopeOf(c, truncated);
   const sourceQuestions = sourceQuestionsOf(c, truncated);
   // Прогноз — по всему срезу, даже если `scope` в документе усечён.
@@ -3725,6 +4140,7 @@ export function operatorView(input: OperatorViewInput, o: OperatorViewOptions = 
     history,
     health,
     ...(activity ? { activity } : {}),
+    ...(decisions ? { decisions } : {}),
     ...(scope
       ? { scope }
       : { scopeReason: i.sourcesUnread ? ('unreadable' as const) : ('no-snapshot' as const) }),
@@ -3771,8 +4187,11 @@ function withoutWorkFields(w: WorkView): WorkView | undefined {
   const lastExtra = !!last && (last.kind !== undefined || last.counted !== undefined);
   const steps = w.blockers.some((b) => b.step !== undefined);
   const line = w.question?.line !== undefined;
-  if (!lastExtra && !steps && !line) return undefined;
+  const rev8 = w.reopened !== undefined || w.attemptReviews !== undefined;
+  if (!lastExtra && !steps && !line && !rev8) return undefined;
   const out: WorkView = { ...w };
+  delete out.reopened;
+  delete out.attemptReviews;
   if (lastExtra) {
     const rest = { ...last };
     delete rest.kind;
@@ -3809,8 +4228,10 @@ const share = <T>(list: T[], n: number, add: (k: number) => void): T[] => {
  *    планируемые задачи `planned`, записи журнала ведущего `lead.notes` и
  *    готовность по работам `forecast.progress.works`;
  * 2. поля ревизии 4 у работ — `attempts.lastFailure.kind`/`counted`,
- *    `blockers[].step`, `question.line` (число работ — `truncated.workFields`);
- * 3. лента `activity`, затем раздел `resources` (`truncated.resources: 1`);
+ *    `blockers[].step`, `question.line` — и ревизии 8 — `reopened`,
+ *    `attemptReviews` (число работ — `truncated.workFields`);
+ * 3. лента `activity`, решения `decisions` (ревизия 8), затем раздел
+ *    `resources` (`truncated.resources: 1`);
  * 4. хвосты списков `works`, `reviews` (и находок предметов), `questions`,
  *    `escalations`, `drift` — одной долей, наибольшей, при которой документ
  *    помещается (опущенное — в `truncated` по спискам).
@@ -3934,12 +4355,20 @@ function fitSize(
     const done = tryFinish(assemble(v, {}, true));
     if (done) return done;
   }
-  // 3. Лента.
+  // 3. Лента, затем решения (ревизия 8).
   if (v.activity) {
     add('activity')(v.activity.length);
     const noFeed = { ...v };
     delete noFeed.activity;
     v = noFeed;
+    const done = tryFinish(assemble(v, {}, true));
+    if (done) return done;
+  }
+  if (v.decisions?.length) {
+    add('decisions')(v.decisions.length);
+    const noDecisions = { ...v };
+    delete noDecisions.decisions;
+    v = noDecisions;
     const done = tryFinish(assemble(v, {}, true));
     if (done) return done;
   }
