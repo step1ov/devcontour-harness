@@ -764,23 +764,62 @@ export function roundReason(changes: NonNullable<ReviewRecord['changes']>) {
   return parts.join('; ') || 'прежний раунд не одобрил предмет';
 }
 
-/** Начало эпохи раундов графа: последняя доработка принятой работы со своим пределом попыток. */
+/** Сколько эпох раундов ревью плана может открыть доработка принятых работ графа. */
+export const MAX_ROUND_EPOCHS = 3;
+
+/**
+ * Начало эпохи раундов графа (0.1.0-alpha.68): доработка принятой работы
+ * графа со своим пределом попыток. Эпоху открывает только доработка, которая
+ * не оставлена и первый раунд ревью плана после открытия которой засчитан
+ * (план изменился); продолжение оставленной и перенесённый счётчик сохраняют
+ * эпоху исходной доработки (`roundEpochAt`). Эпох на граф — не больше
+ * `MAX_ROUND_EPOCHS`: следующие доработки предел раундов не обновляют.
+ */
 export function planRoundEpoch(
   view: {
-    works(
-      graphId?: string,
-    ): readonly { rework?: { fresh: boolean; resumed?: true; reopenedAt: string } | undefined }[];
+    works(graphId?: string): readonly {
+      rework?:
+        | {
+            fresh: boolean;
+            resumed?: true;
+            reopenedAt: string;
+            roundEpochAt?: string;
+            abandoned?: unknown;
+          }
+        | undefined;
+    }[];
+    locals?: (
+      namespace: 'reviews',
+      owner: string,
+    ) => readonly { value: Pick<ReviewRecord, 'kind' | 'subject' | 'at' | 'counted'> }[];
   },
   graphId: string,
 ) {
-  let since: string | undefined;
   // Представление без работ (сводка из записей ревью) — без эпохи.
-  if (typeof view.works !== 'function') return since;
+  if (typeof view.works !== 'function') return undefined;
+  const starts = new Set<string>();
   for (const w of view.works(graphId) ?? []) {
     const r = w.rework;
-    if (r?.fresh && !r.resumed && (!since || r.reopenedAt > since)) since = r.reopenedAt;
+    if (!r || r.abandoned) continue;
+    const start = r.roundEpochAt ?? (r.fresh && !r.resumed ? r.reopenedAt : undefined);
+    if (start) starts.add(start);
   }
-  return since;
+  if (!starts.size) return undefined;
+  const rounds =
+    typeof view.locals === 'function'
+      ? view
+          .locals('reviews', WORKSPACE_OWNER)
+          .map((x) => x.value)
+          .filter((r) => r.kind === 'plan' && r.subject === graphId)
+          .sort((a, b) => a.at.localeCompare(b.at))
+      : [];
+  // Эпоху открывает доработка с изменённым планом: её первый раунд засчитан.
+  // Пока раунда нет — эпоха открыта (первый раунд её и покажет).
+  const valid = [...starts]
+    .sort()
+    .filter((start) => rounds.find((r) => r.at > start)?.counted !== false)
+    .slice(0, MAX_ROUND_EPOCHS);
+  return valid.at(-1);
 }
 
 /** Предел раундов ревью плана и контракта по политике (`Harness.review`). */

@@ -209,13 +209,67 @@ test('A68-1e: доработка принятой работы начинает 
   });
   // Раунды хоста до harness засчитаны, пока эпохи нет.
   assert.equal(roundBudget([{ round: 5, at: rounds[0]!.at }], 6).used, 5);
-  const view = {
-    works: () => [
-      { rework: { fresh: true, reopenedAt: '2026-01-01T13:00:00.000Z' } },
-      { rework: { fresh: false, reopenedAt: '2026-01-01T15:00:00.000Z' } },
-      { rework: { fresh: true, resumed: true as const, reopenedAt: '2026-01-01T16:00:00.000Z' } },
-      {},
-    ],
-  };
-  assert.equal(planRoundEpoch(view, 'g'), '2026-01-01T13:00:00.000Z', 'только своя доработка');
+  const t = (h: number) => `2026-01-01T${String(h).padStart(2, '0')}:00:00.000Z`;
+  const round = (h: number, counted = true) => ({
+    value: { kind: 'plan' as const, subject: 'g', at: t(h), counted },
+  });
+  const viewOf = (
+    works: { rework?: Record<string, unknown> }[],
+    rounds: ReturnType<typeof round>[] = [],
+  ) => ({ works: () => works as never[], locals: () => rounds });
+  // Доработка со своим пределом, чей раунд засчитан, открывает эпоху.
+  assert.equal(
+    planRoundEpoch(viewOf([{ rework: { fresh: true, reopenedAt: t(13) } }], [round(14)]), 'g'),
+    t(13),
+  );
+  // Перенесённый счётчик и продолжение без своей эпохи — не открывают.
+  assert.equal(
+    planRoundEpoch(
+      viewOf([
+        { rework: { fresh: false, reopenedAt: t(15) } },
+        { rework: { fresh: true, resumed: true, reopenedAt: t(16) } },
+        {},
+      ]),
+      'g',
+    ),
+    undefined,
+  );
+  // Оставленная доработка эпохи не держит.
+  assert.equal(
+    planRoundEpoch(
+      viewOf([{ rework: { fresh: true, reopenedAt: t(13), abandoned: { at: t(14) } } }]),
+      'g',
+    ),
+    undefined,
+  );
+  // Продолжение оставленной сохраняет исходную эпоху.
+  assert.equal(
+    planRoundEpoch(
+      viewOf(
+        [{ rework: { fresh: false, resumed: true, reopenedAt: t(16), roundEpochAt: t(13) } }],
+        [round(14, true), round(17)],
+      ),
+      'g',
+    ),
+    t(13),
+  );
+  // Первый раунд после доработки не засчитан (план тот же) — эпохи нет.
+  assert.equal(
+    planRoundEpoch(
+      viewOf([{ rework: { fresh: true, reopenedAt: t(13) } }], [round(14, false)]),
+      'g',
+    ),
+    undefined,
+  );
+  // Не больше MAX_ROUND_EPOCHS эпох на граф: четвёртая доработка предел не обновляет.
+  assert.equal(
+    planRoundEpoch(
+      viewOf(
+        [10, 12, 14, 16].map((h) => ({ rework: { fresh: true, reopenedAt: t(h) } })),
+        [round(11), round(13), round(15), round(17)],
+      ),
+      'g',
+    ),
+    t(14),
+  );
 });

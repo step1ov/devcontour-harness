@@ -310,12 +310,15 @@ test('оставленная доработка без abandoned.attempt (пре
     g.orders = g.orders.map((o) => ({ ...o, goal: o.goal + ' Доработка X.' }));
     return g;
   };
+  const current0 = () => e.read((v) => v.work('w')!);
   const replan = (g: WorkGraph) => {
     const { graph: state } = e.register(g, trustNone);
     e.recordReview(planReview(e, state, e.reviews('plan', state.id).length + 1));
     e.approve(state.id, 'agent');
   };
   replan(revised('2'));
+  const epoch = current0().rework?.roundEpochAt;
+  assert.ok(epoch, 'доработка со своим пределом открыла эпоху раундов');
   for (let i = 0; i < 2; i++) {
     env.clock.now += 1000;
     e.lead('c1');
@@ -338,6 +341,11 @@ test('оставленная доработка без abandoned.attempt (пре
   assert.equal(current().attempt, 1);
   replan(revised('3'));
   assert.equal(current().rework?.resumed, true);
+  assert.equal(
+    current().rework?.roundEpochAt,
+    epoch,
+    'продолжение сохраняет эпоху раундов (alpha.68)',
+  );
   assert.equal(current().attempt, 2, 'выведено: два засчитанных отказа после принятой попытки');
   // Принятой попытки не найти — строгая сторона: предел исчерпан.
   e.cancel('w', 'abandon', 'operator');

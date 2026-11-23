@@ -714,6 +714,14 @@ export class Engine {
         ...(run?.finishedAt ? { at: run.finishedAt } : {}),
       },
       reopenedAt: at,
+      // Эпоха раундов ревью плана: своя у доработки со своим пределом,
+      // прежняя — у продолжения оставленной и у перенесённого счётчика.
+      ...((epoch) => (epoch ? { roundEpochAt: epoch } : {}))(
+        fresh
+          ? at
+          : (prior.rework?.roundEpochAt ??
+              (prior.rework?.fresh && !prior.rework.resumed ? prior.rework.reopenedAt : undefined)),
+      ),
       spent: prior.attempt,
       acceptedOrder: prior.order,
     };

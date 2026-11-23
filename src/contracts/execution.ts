@@ -978,6 +978,12 @@ export const workStateSchema = z.strictObject({
         at: isoTimeSchema.optional(),
       }),
       reopenedAt: isoTimeSchema,
+      /**
+       * Начало эпохи раундов ревью плана этой доработки (0.1.0-alpha.68):
+       * у доработки со своим пределом — время её открытия; продолжение
+       * оставленной и доработка с перенесённым счётчиком сохраняют прежнее.
+       */
+      roundEpochAt: isoTimeSchema.optional(),
       spent: z.number().int().min(0),
       /**
        * Постановка принятой редакции (0.1.0-alpha.66): отказ от доработки
