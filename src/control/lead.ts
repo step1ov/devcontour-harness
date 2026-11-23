@@ -420,19 +420,17 @@ const LEAD_ONLY_COMMANDS: readonly string[] = ['diagnose'];
  * Команды, которые без явного `--by lead` / `--actor lead` — действие
  * оператора: `retry` (повтор оператора; в открытой сессии ведущего CLI без
  * `--by` отказывает), `input-answer` (ответ без `--actor` — ответ человека,
- * который ведущий передаёт) и `input-resolve` (применяет записанный ответ, чьё
- * авторство уже определено). Иначе журнал ведущего записал бы чужое решение
+ * который ведущий передаёт). Иначе журнал ведущего записал бы чужое решение
  * (0.1.0-alpha.68). `cancel` пути ведущего не имеет (`--by` нет) — решает
  * сессия.
  */
-const OPERATOR_UNLESS_LEAD: readonly string[] = ['retry', 'input-answer', 'input-resolve'];
+const OPERATOR_UNLESS_LEAD: readonly string[] = ['retry', 'input-answer'];
 
 /**
  * Кто подал команду: явный `--by`/`--actor` решает сам — `lead` это ведущий,
  * любое другое значение (`operator`, имя человека у `reapprove --by`) —
- * оператор; команда только ведущего (`diagnose`) — ведущий; `retry`,
- * `input-answer` и `input-resolve` без явного `lead` — оператор, как их
- * исполняет движок. Иначе
+ * оператор; команда только ведущего (`diagnose`) — ведущий; `retry` и
+ * `input-answer` без явного `lead` — оператор, как их исполняет движок. Иначе
  * `undefined`: решает сессия ведущего (`recordLeadCommand`).
  */
 export function leadCommandActor(

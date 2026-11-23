@@ -151,7 +151,8 @@ test('L4: кто подал команду — явный флаг решает,
   // alpha.68 (ревью r2): ответ без --actor и его применение — оператора и в
   // сессии ведущего: переданный ответ владельца не пишется решением ведущего.
   assert.equal(leadCommandActor('input-answer', {}), 'operator');
-  assert.equal(leadCommandActor('input-resolve', {}), 'operator');
+  // input-resolve — как в alpha.67: решает сессия.
+  assert.equal(leadCommandActor('input-resolve', {}), undefined);
   assert.equal(
     leadCommandEntry('input-answer', { actor: 'operator', request: 'R1' }, {}),
     undefined,
