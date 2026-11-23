@@ -2342,3 +2342,31 @@ test('A68-r1: снимок с ответом, прошедший ревью в �
   assert.equal(result.applied, true);
   h.close();
 });
+
+test('A68-r2: заменённое уточнение в держащейся остановке — input-carry, затем run со снимком переноса: без INPUT_REQUIRED, ответ у исполнителя', async () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const h = ctx.open();
+  ready(h.engine, ctx.graph, 'controller');
+  const a = h.engine.claim('controller')!;
+  h.engine.fail(a.id, a.token, 'вопрос', { kind: 'needs-input', input: outcome() });
+  h.engine.release('controller');
+  const id = h.inputRequests({ workId: a.workId })[0]!.id;
+  h.answerInput(
+    id,
+    { text: 'Use the short greeting CARRIED-ANSWER', actor: { kind: 'operator' } },
+    1,
+  );
+  // Вопрос заменён, пока остановка держится (так его оставила новая редакция).
+  h.supersedeInput(id, { by: 'lead', reason: 'новая редакция графа', successor: a.workId }, 2);
+  const carried = await h.carryInputOf(id, { reason: 'перенос в ту же работу', author: 'claude' });
+  assert.equal(carried.carried, true);
+  const snapshot = h.engine.read((v) =>
+    v.local('context-snapshots', WORKSPACE_OWNER, carried.contextDigest)!,
+  );
+  await h.run({ graph: ctx.graph, author: 'claude', context: snapshot });
+  const work = h.engine.read((v) => v.work(a.workId)!);
+  assert.equal(work.status, 'done', work.failure);
+  const last = h.engine.read((v) => v.attempts(a.workId).at(-1)!);
+  assert.equal(last.input?.requestId, id, 'ответ связан с попыткой');
+  h.close();
+});
