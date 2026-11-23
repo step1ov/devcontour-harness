@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -13,6 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { repo as gitRepo } from './git-fixture.ts';
 import { join } from 'node:path';
 import { cleanupDataSchema, digestOf, executionPolicySchema } from '../src/contracts/index.ts';
 import { cleanupSmoke } from '../src/control/smoke-cleanup.ts';
@@ -431,4 +433,79 @@ test('alpha.67 cleanup по записи: демон сейчас другой, 
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
   }
+});
+
+test('alpha.67 cleanup: идентичность демона не дописана (фаза прервалась) — не прежняя запись: teardown по записи и сверка — NOT_READY', async () => {
+  const state = freshState();
+  plant(state, { containerIdentity: { pending: true } });
+  await assert.rejects(run(state), /идентичность демона фазы не дописана/);
+  // Teardown по записи: дерево на месте, но демон не известен.
+  const dir = freshState();
+  const tree = join(dir, 'tree');
+  mkdirSync(tree);
+  const raw = structuredClone(example('policy')) as Record<string, any>;
+  raw.repositories[0].lifecycle = {
+    setup: [],
+    ready: [],
+    teardown: [{ id: 'down', command: ['docker', 'compose', '-p', 'x', 'down'], timeoutMs: 5000 }],
+  };
+  const p = executionPolicySchema.parse(raw);
+  const envDir = join(dir, 'env');
+  mkdirSync(envDir);
+  const receiptPath = join(envDir, 'environment.json');
+  writeFileSync(
+    receiptPath,
+    JSON.stringify({
+      cwd: tree,
+      lifecycle: p.repositories[0]!.lifecycle,
+      policyDigest: digestOf(p.repositories[0]!.lifecycle),
+      status: 'active',
+      ownerPid: 999_999_999,
+      devcontourEnv: { DEVCONTOUR_REPOSITORY_ID: p.repositories[0]!.id },
+      containerEnv: phaseEnv,
+      containerIdentity: { pending: true },
+    }),
+  );
+  await assert.rejects(cleanupEnvironment(receiptPath, p, [dir]), /не дописана/);
+  assert.equal(
+    (JSON.parse(readFileSync(receiptPath, 'utf8')) as { status: string }).status,
+    'active',
+  );
+});
+
+test('alpha.67 cleanup: запись cleaned с неубранными checkout — повтор собирает записанные и очищает список', async () => {
+  const r = gitRepo({ 'README.md': 'x\n' });
+  const dir = freshState();
+  const envDir = join(dir, 'env');
+  mkdirSync(envDir);
+  const left = join(envDir, 'trusted-base-left');
+  r.git('worktree', 'add', '--detach', left, r.head());
+  const raw = structuredClone(example('policy')) as Record<string, any>;
+  raw.repositories[0].lifecycle = {
+    setup: [],
+    ready: [],
+    teardown: [{ id: 'down', command: ['docker', 'compose', '-p', 'x', 'down'], timeoutMs: 5000 }],
+  };
+  const p = executionPolicySchema.parse(raw);
+  const receiptPath = join(envDir, 'environment.json');
+  writeFileSync(
+    receiptPath,
+    JSON.stringify({
+      cwd: r.dir,
+      lifecycle: p.repositories[0]!.lifecycle,
+      policyDigest: digestOf(p.repositories[0]!.lifecycle),
+      status: 'cleaned',
+      devcontourEnv: { DEVCONTOUR_REPOSITORY_ID: p.repositories[0]!.id },
+      trusted: { base: r.head() },
+      trustedLeftovers: [left],
+      trustedLeftover: 'checkout базы не убран',
+    }),
+  );
+  assert.deepEqual(await cleanupEnvironment(receiptPath, p, [realpathSync(tmpdir())]), {
+    status: 'already-cleaned',
+  });
+  assert.equal(existsSync(left), false);
+  const after = JSON.parse(readFileSync(receiptPath, 'utf8')) as Record<string, unknown>;
+  assert.equal('trustedLeftovers' in after, false);
+  assert.equal('trustedLeftover' in after, false);
 });

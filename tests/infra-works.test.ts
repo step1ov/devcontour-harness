@@ -931,7 +931,7 @@ test('alpha.67 infra: упавшая работа, которую повтори
   assert.match(d.message, /Ждёт работы инфраструктуры прежнего графа infra-a/);
 });
 
-test('alpha.67 infra: уборка checkout — только записанные и зарегистрированные worktree; каталог lifecycle с тем же префиксом остаётся; сбой записи не останавливает teardown; неубранный собирается следующей очисткой', async () => {
+test('alpha.67 infra: уборка checkout — только записанные; каталог lifecycle и зарегистрированный, но не записанный worktree с тем же префиксом остаются; сбой записи не останавливает teardown; неубранный собирается следующей очисткой', async () => {
   const r = repo({ '.harness/infra/a.mjs': 'a\n', 'README.md': 'x\n' });
   const base = r.head();
   const env = realpathSync(mkdtempSync(join(tmpdir(), 'harness-env-')));
@@ -939,7 +939,7 @@ test('alpha.67 infra: уборка checkout — только записанны�
   const state = join(env, 'trusted-base-state');
   mkdirSync(state);
   writeFileSync(join(state, 'ports.json'), '{}');
-  // Зарегистрированный, но не записанный checkout (падение до записи).
+  // Зарегистрированный, но не записанный worktree: принадлежность не доказана.
   const unrecorded = join(env, 'trusted-base-unrecorded');
   r.git('worktree', 'add', '--detach', unrecorded, base);
   let ran = false;
@@ -949,8 +949,17 @@ test('alpha.67 infra: уборка checkout — только записанны�
   });
   assert.equal(ran, true, 'сбой записи в запись окружения не остановил teardown');
   assert.equal(readFileSync(join(state, 'ports.json'), 'utf8'), '{}');
-  assert.equal(existsSync(unrecorded), false);
-  assert.match((await removeBaseCheckout(r.dir, env, state)) ?? '', /не checkout harness/);
+  assert.equal(existsSync(join(unrecorded, '.harness/infra/a.mjs')), true);
+  assert.match(r.git('worktree', 'list'), /trusted-base-unrecorded/);
+  assert.match(
+    (await removeBaseCheckout(r.dir, env, state)) ?? '',
+    /не записан как checkout harness/,
+  );
+  assert.match(
+    (await removeBaseCheckout(r.dir, env, unrecorded)) ?? '',
+    /не записан как checkout harness/,
+  );
+  assert.equal(existsSync(unrecorded), true);
   // Неубранный checkout, записанный в trustedLeftovers, собирается при следующей уборке.
   const left = join(env, 'trusted-base-left');
   r.git('worktree', 'add', '--detach', left, base);

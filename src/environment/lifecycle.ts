@@ -18,7 +18,12 @@ import {
 } from './dependency-network.ts';
 import { protectedChanges, protectedSnapshot, SandboxPolicyError } from './isolation.ts';
 import { command } from './process.ts';
-import { baseCheckoutEnv, withBaseCheckout, type TrustedTree } from './trusted-tree.ts';
+import {
+  baseCheckoutEnv,
+  removeBaseCheckout,
+  withBaseCheckout,
+  type TrustedTree,
+} from './trusted-tree.ts';
 import { containerIdentity, containerUse } from './container-identity.ts';
 import { ensurePortsFree } from './port-probe.ts';
 import { leaseScope } from './survivors.ts';
@@ -436,6 +441,19 @@ export function replayContainerEnv(
   return env;
 }
 
+/**
+ * Идентичность демона в записи окружения: по CLI — ID (`null` — не получен);
+ * `{pending: true}` — запрос ещё не завершён (фаза прервалась раньше). Нет
+ * поля — запись до alpha.67 или шаги без docker/podman.
+ */
+export type ContainerIdentityRecord = Record<string, string | null> | { pending: true };
+const usesContainers = (lifecycle: Lifecycle) => {
+  const use = containerUse(lifecycle);
+  return 'clis' in use && use.clis.length > 0;
+};
+export const identityPending = (r: unknown) =>
+  !!r && typeof r === 'object' && (r as { pending?: unknown }).pending === true;
+
 /** Запись окружения фазы на диске: путь и изменяемый объект. */
 interface ReceiptFile {
   path: string;
@@ -564,7 +582,11 @@ async function phaseEnvironment<T>(
     // Демон контейнеров фазы: сверка очистки спрашивает тот же демон.
     containerEnv: containerEnv(execution.env),
     ...(trusted ? { trusted } : {}),
-    containerIdentity: undefined as Record<string, string | null> | undefined,
+    // Идентичность демона ещё не получена: запись, оставшаяся `pending`
+    // (фаза прервалась до запроса), — демон не известен, а не прежняя запись.
+    containerIdentity: usesContainers(lifecycle)
+      ? ({ pending: true } as ContainerIdentityRecord)
+      : undefined,
   };
   const receiptFile: ReceiptFile = { path: receiptPath, data: receipt };
   await writeFile(receiptPath, JSON.stringify(receipt, null, 2));
@@ -573,8 +595,14 @@ async function phaseEnvironment<T>(
     await measure('setup', async () => {
       // Демон шагов на момент фазы (для сверки очистки): в замере setup, с
       // сигналом фазы и коротким пределом.
-      receipt.containerIdentity = await containerIdentities(lifecycle, execution.env, signal);
-      if (receipt.containerIdentity) await saveReceipt(receiptFile);
+      if (receipt.containerIdentity) {
+        receipt.containerIdentity = (await containerIdentities(
+          lifecycle,
+          execution.env,
+          signal,
+        )) ?? { pending: true };
+        await saveReceipt(receiptFile);
+      }
       await runSteps(lifecycle.setup, cwd, join(dir, 'setup'), execution, signal);
     });
     await measure('ready', () =>
@@ -648,7 +676,8 @@ export async function cleanupEnvironment(
     devcontourEnv?: Record<string, string>;
     trusted?: TrustedTree;
     containerEnv?: ContainerEnv;
-    containerIdentity?: Record<string, string | null>;
+    containerIdentity?: ContainerIdentityRecord;
+    trustedLeftovers?: unknown;
   };
   const cwd = await realpath(receipt.cwd);
   if (!allowedRoots.some((root) => cwd.startsWith(root + sep)))
@@ -661,7 +690,28 @@ export async function cleanupEnvironment(
     .find((l) => digestOf(l) === receipt.policyDigest);
   if (!lifecycle)
     throw new Error('Политика очистки изменилась; сверьте сохранённое окружение вручную');
-  if (receipt.status === 'cleaned') return { status: 'already-cleaned' as const };
+  if (receipt.status === 'cleaned') {
+    // Очистка завершена, но checkout базы тогда убрать не удалось: собрать
+    // записанные (только их) и очистить список.
+    if (receipt.trusted && Array.isArray(receipt.trustedLeftovers)) {
+      const dir = join(receiptPath, '..');
+      const left: string[] = [];
+      for (const path of receipt.trustedLeftovers)
+        if (
+          typeof path === 'string' &&
+          (await removeBaseCheckout(cwd, dir, path, { recorded: true }))
+        )
+          left.push(path);
+      const next: Record<string, unknown> = { ...receipt };
+      if (left.length) next.trustedLeftovers = left;
+      else {
+        delete next.trustedLeftovers;
+        delete next.trustedLeftover;
+      }
+      await writeFile(receiptPath, JSON.stringify(next, null, 2));
+    }
+    return { status: 'already-cleaned' as const };
+  }
   if (receipt.ownerPid && receipt.ownerPid !== options.owner && processAlive(receipt.ownerPid))
     throw new Error('Процесс владельца окружения ещё существует; сначала остановите его');
   const execution = executionEnvironment(
@@ -686,6 +736,10 @@ export async function cleanupEnvironment(
   // Демон, записанный фазой, — тот же и сейчас: иначе teardown (например
   // `compose down --volumes`) ушёл бы к чужому демону. Нет записи
   // идентичности (до alpha.67) — прежнее поведение.
+  if (identityPending(receipt.containerIdentity))
+    throw new Error(
+      'Идентичность демона фазы не дописана (фаза прервалась до запроса) — демон не известен, teardown по записи не исполнен; проверьте ресурсы по метке вручную',
+    );
   if (receipt.containerIdentity)
     for (const [cli, recorded] of Object.entries(receipt.containerIdentity)) {
       if (cli !== 'docker' && cli !== 'podman') continue;

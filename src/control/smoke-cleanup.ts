@@ -15,6 +15,7 @@ import { join, relative, resolve } from 'node:path';
 import { HarnessError, type ExecutionPolicy, type RunEventPayload } from '../contracts/index.ts';
 import {
   cleanupEnvironment,
+  identityPending,
   replayContainerEnv,
   type ContainerEnv,
 } from '../environment/lifecycle.ts';
@@ -77,7 +78,7 @@ interface Receipt {
   /** Демон контейнеров фазы (`CONTAINER_ENV_KEYS`, отсутствующие — `null`), alpha.67. */
   containerEnv?: ContainerEnv;
   /** Идентичность демона каждого CLI шагов на момент фазы (`null` — не получена). */
-  containerIdentity?: Record<string, string | null>;
+  containerIdentity?: Record<string, string | null> | { pending: true };
 }
 
 const processAlive = (pid: number) => {
@@ -184,6 +185,12 @@ export async function cleanupSmoke(input: SmokeCleanupInput) {
       );
       continue;
     }
+    if (identityPending(receipt.containerIdentity)) {
+      fail(
+        'идентичность демона фазы не дописана (фаза прервалась до запроса) — демон не известен, проверьте ресурсы по метке вручную',
+      );
+      continue;
+    }
     if (!receipt.containerEnv || !receipt.containerIdentity) {
       fail(
         `запись окружения без идентичности демона (до alpha.67) — проверьте ресурсы по метке ${DOCKER_RUN_LABEL} вручную`,
@@ -198,7 +205,7 @@ export async function cleanupSmoke(input: SmokeCleanupInput) {
     let failed = false;
     for (const cli of use.clis) {
       const name = cli === 'podman' ? 'Podman' : 'Docker';
-      const recorded = receipt.containerIdentity[cli];
+      const recorded = (receipt.containerIdentity as Record<string, string | null>)[cli];
       if (!recorded) {
         fail(`идентичность демона ${name} на момент фазы не получена — демон не известен`);
         failed = true;

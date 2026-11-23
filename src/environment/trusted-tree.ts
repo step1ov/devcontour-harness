@@ -10,7 +10,8 @@
 // а очистку доведут `harness cleanup` и сверка по меткам (закрыто по
 // умолчанию).
 
-import { mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { basename, join, resolve, sep } from 'node:path';
 import { git } from './process.ts';
 
@@ -26,7 +27,7 @@ export const TRUSTED_CHECKOUT_PREFIX = 'trusted-base-';
 export interface BaseCheckoutHooks {
   /**
    * Checkout, записанные в запись окружения (прежний `trustedCheckout` и
-   * неубранные `trustedLeftovers`): их harness создавал сам.
+   * неубранные `trustedLeftovers`): только их harness считает своими.
    */
   prior?: readonly string[];
   /** Записать путь checkout до `git worktree add` (переживает падение процесса). */
@@ -71,37 +72,15 @@ async function worktreeEntries(repo: string, path: string, dir: string) {
 }
 
 /**
- * Каталог — зарегистрированный worktree этого репозитория: его `.git`
- * ведёт в запись `<common>/worktrees/<имя>`, а `gitdir` записи — обратно в
- * него. Только такие (и записанные в запись окружения) каталоги уборка
- * считает своими; префикс имени сам по себе ничего не доказывает.
- */
-export async function registeredCheckout(repo: string, dir: string, path: string) {
-  try {
-    const dotgit = (await readFile(join(path, '.git'), 'utf8')).trim();
-    const m = /^gitdir: (.+)$/.exec(dotgit);
-    if (!m) return false;
-    const { admin, entries } = await worktreeEntries(repo, path, dir);
-    const target = resolve(path, m[1]!);
-    const targets = new Set([target]);
-    await realpath(target)
-      .then((t) => targets.add(t))
-      .catch(() => undefined);
-    const real = await realpath(admin).catch(() => admin);
-    return entries.some((e) => targets.has(e) || targets.has(join(real, basename(e))));
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Исполнить `run` в отдельном чистом checkout базы рядом с записью окружения
- * (`dir`): сначала убрать свои оставшиеся от прежних попыток — записанные в
- * запись окружения и зарегистрированные worktree этого репозитория с
- * префиксом `trusted-base-` (чужие каталоги с тем же префиксом не трогаются),
- * записать путь нового до `git worktree add`, убрать его после — и при
- * отказе. Ошибка уборки и сбой записи в запись окружения итог `run` не
- * подменяют. `repo` — любое дерево репозитория (дерево кандидата).
+ * (`dir`): сначала убрать свои оставшиеся от прежних попыток — только
+ * записанные в запись окружения (`prior`); каталог, путь которого не
+ * записан, не трогается никогда (префикс имени и регистрация в git
+ * принадлежности не доказывают). Путь нового checkout выбирается и
+ * записывается до его создания (`git worktree add` создаёт каталог сам),
+ * после шага — и при отказе — он убирается. Ошибка уборки и сбой записи в
+ * запись окружения итог `run` не подменяют. `repo` — любое дерево
+ * репозитория (дерево кандидата).
  */
 export async function withBaseCheckout<T>(
   repo: string,
@@ -110,21 +89,13 @@ export async function withBaseCheckout<T>(
   run: (cwd: string) => Promise<T>,
   hooks: BaseCheckoutHooks = {},
 ): Promise<T> {
-  const recorded = new Set(
-    (hooks.prior ?? []).filter((p) => prefixed(dir, p)).map((p) => resolve(p)),
-  );
-  const stale = new Set(recorded);
-  for (const name of await readdir(dir).catch(() => [] as string[])) {
-    const path = resolve(join(dir, name));
-    if (name.startsWith(TRUSTED_CHECKOUT_PREFIX) && (await registeredCheckout(repo, dir, path)))
-      stale.add(path);
-  }
+  const stale = new Set((hooks.prior ?? []).filter((p) => prefixed(dir, p)).map((p) => resolve(p)));
   for (const path of stale) {
-    const note = await removeBaseCheckout(repo, dir, path, { recorded: recorded.has(path) });
+    const note = await removeBaseCheckout(repo, dir, path, { recorded: true });
     if (note) await quietly(() => hooks.leftover?.(path, note) ?? Promise.resolve());
-    else if (recorded.has(path)) await quietly(() => hooks.collected?.(path) ?? Promise.resolve());
+    else await quietly(() => hooks.collected?.(path) ?? Promise.resolve());
   }
-  const path = await mkdtemp(join(dir, TRUSTED_CHECKOUT_PREFIX));
+  const path = join(resolve(dir), TRUSTED_CHECKOUT_PREFIX + randomUUID());
   await quietly(() => hooks.record?.(path) ?? Promise.resolve());
   let result: { ok: true; value: T } | { ok: false; error: unknown };
   try {
@@ -142,10 +113,9 @@ export async function withBaseCheckout<T>(
 /**
  * Убрать один свой checkout базы: `git worktree remove --force`; не вышло —
  * его собственную запись в `<common>/worktrees/` (без общего `prune`) и
- * каталог. Свой — записанный в запись окружения (`recorded`) или
- * зарегистрированный worktree этого репозитория (`registeredCheckout`), с
- * префиксом внутри `dir`; чужой не трогается. Возвращает заметку о том, что
- * осталось; `undefined` — убрано (или убирать нечего).
+ * каталог. Свой — только записанный в запись окружения (`recorded`), с
+ * префиксом внутри `dir`; любой другой не трогается. Возвращает заметку о
+ * том, что осталось; `undefined` — убрано (или убирать нечего).
  */
 export async function removeBaseCheckout(
   repo: string,
@@ -154,13 +124,12 @@ export async function removeBaseCheckout(
   options: { recorded?: boolean } = {},
 ): Promise<string | undefined> {
   if (!prefixed(dir, path)) return `checkout ${path} вне каталога окружения — не тронут`;
-  if (!options.recorded && !(await registeredCheckout(repo, dir, path)))
-    return `каталог ${path} не checkout harness (не записан и не зарегистрирован) — не тронут`;
+  if (!options.recorded) return `каталог ${path} не записан как checkout harness — не тронут`;
   try {
     await git(repo, 'worktree', 'remove', '--force', path);
     return undefined;
   } catch {
-    // Каталог уже без `.git` или повреждён: убирается своя запись и каталог.
+    // Каталог уже без `.git`, повреждён или не создан: своя запись и каталог.
   }
   const problems: string[] = [];
   try {
